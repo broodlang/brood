@@ -38,10 +38,13 @@ worker's mailbox so it can't satisfy a later test's receive."
   (system-monitor nil)
   (receive ([:system _ _ _] (sysmon--done)) (after 0 nil)))
 
-(describe "system-monitor arming" :isolated
+(describe "system-monitor arming"
+  :isolated
   (test "read / arm / clear round-trip, previous config returned"
-    (assert= nil (system-monitor))               ; unarmed by default
-    (assert= nil (system-monitor (self)))        ; arm-all: previous was nil
+    ; unarmed by default
+    (assert= nil (system-monitor))
+    ; arm-all: previous was nil
+    (assert= nil (system-monitor (self)))
     (let (cfg (system-monitor))
       (assert= (self) (get cfg :pid))
       (assert= true (get cfg :gc))
@@ -49,7 +52,8 @@ worker's mailbox so it can't satisfy a later test's receive."
       (assert= true (get cfg :exit))
       (assert= true (get cfg :deopt))
       (assert= 0 (get cfg :gc-min-pause-us)))
-    (let (prev (system-monitor nil))             ; clear returns the old config
+    (let (prev (system-monitor nil))
+      ; clear returns the old config
       (assert= (self) (get prev :pid)))
     (assert= nil (system-monitor)))
 
@@ -63,12 +67,14 @@ worker's mailbox so it can't satisfy a later test's receive."
       (assert= 250 (get cfg :gc-min-pause-us)))
     (system-monitor nil)))
 
-(describe "system-monitor events" :isolated
+(describe "system-monitor events"
+  :isolated
   (test "spawn and exit events arrive with pid, parent, and reason"
     (system-monitor (self) {:spawn true :exit true})
-    (let (me    (self)
+    (let (me (self)
           child (spawn :done))
-      (assert= me (sysmon--drain-until :spawn child))  ; detail = parent pid
+      ; detail = parent pid
+      (assert= me (sysmon--drain-until :spawn child))
       (assert= :normal (sysmon--drain-until :exit child)))
     (sysmon--done))
 
@@ -96,7 +102,7 @@ worker's mailbox so it can't satisfy a later test's receive."
     ;; may arrive. Wait for the worker to finish, then prove silence.
     (system-monitor (self) {:gc true :gc-min-pause-us 600000000})
     (let (worker (spawn (do (sysmon--churn 50000 ()) (gc-collect) :ok))
-          wm     (monitor worker))
+          wm (monitor worker))
       (receive ([:down ~wm ~worker _] :ok) (after 5000 :timeout))
       (assert= :quiet (receive ([:system :gc _ _] :got-one) (after 200 :quiet))))
     (sysmon--done))
@@ -105,19 +111,23 @@ worker's mailbox so it can't satisfy a later test's receive."
     ;; a watcher process arms itself, then dies — the kernel must clear the
     ;; config rather than keep charging every event site
     (let (watcher (spawn (do (system-monitor (self)) (receive (:never nil)))))
-      (sleep 50)                                 ; let it arm
+      ; let it arm
+      (sleep 50)
       (assert= watcher (get (system-monitor) :pid))
       (exit watcher :kill)
       (assert= nil (sysmon--wait-disarm 100)))))
 
-(describe "telemetry watch-runtime" :isolated
+(describe "telemetry watch-runtime"
+  :isolated
   (test "kernel events flow through the telemetry seam as [:runtime …] events"
     (require 'telemetry)
     (telemetry/start-telemetry)
     (let (me (self))
-      (telemetry/attach :t-spawn [:runtime :spawn]
+      (telemetry/attach :t-spawn
+        [:runtime :spawn]
         (fn (_ _ md) (send me [:saw :spawn (get md :pid)])))
-      (telemetry/attach :t-exit [:runtime :exit]
+      (telemetry/attach :t-exit
+        [:runtime :exit]
         (fn (_ _ md) (send me [:saw :exit (get md :pid)])))
       (let (watcher (telemetry/watch-runtime {:spawn true :exit true}))
         (let (child (spawn :done))

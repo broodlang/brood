@@ -2521,7 +2521,6 @@ impl Heap {
 // children — a second hit on the same old handle returns the placeholder
 // instead of re-traversing.
 
-
 #[derive(Default)]
 struct FlushForward {
     /// The generation epoch to stamp into every survivor handle minted into the

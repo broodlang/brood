@@ -176,7 +176,6 @@ struct EnvFrame {
     parent: Option<EnvId>,
 }
 
-
 /// Parse a GC threshold override (an *object count*, with an optional `K`/`M`
 /// suffix — `64K` = 65536, `1M` = 1048576) from env var `key`. `None` if unset;
 /// a malformed value warns and is ignored (so the caller's default stands).
@@ -1825,7 +1824,6 @@ pub struct Heap {
     pub(crate) jit_i64_overflow: bool,
 }
 
-
 impl Default for Heap {
     fn default() -> Self {
         Self::new()
@@ -1942,15 +1940,14 @@ pub enum EnvRoot {
     Slot(usize),
 }
 
-
 // ===== Construction and shared-region management ================================
 
 mod equality;
 mod gc;
 mod map_ops;
 mod vm_cache;
-pub(crate) use self::vm_cache::{CallIcEntry, FastLink, GlobalIcEntry, VmCacheKey};
 pub(crate) use self::gc::{stall_guard, stall_guard_pid, stall_threshold_ms};
+pub(crate) use self::vm_cache::{CallIcEntry, FastLink, GlobalIcEntry, VmCacheKey};
 
 impl Heap {
     /// A bare heap with empty shared regions — used to *build* the prelude
@@ -2957,7 +2954,6 @@ impl Heap {
         runtime_id
     }
 
-
     // ----- access (dispatch on the handle's region) -----
 
     /// A heap epoch counter truncated to the handle GEN field's width. A
@@ -3832,7 +3828,6 @@ impl Heap {
             }
         }
     }
-
 }
 
 /// Forwarding table for [`Heap::promote`]: LOCAL slot index → the RUNTIME handle
@@ -3909,5 +3904,3 @@ mod vecstore_layout_tests {
         }
     }
 }
-
-

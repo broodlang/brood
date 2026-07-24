@@ -40,8 +40,8 @@ the length, is now implicit in `string-index-of`.)"
 
 ;; ---- scoring ----------------------------------------------------------------
 
-(def fuzzy--separators "-_/. ")  ; a match just after one of these is a word boundary
-
+; a match just after one of these is a word boundary
+(def fuzzy--separators "-_/. ")
 (defn fuzzy--upper? (ch)
   "True if 1-char string `ch` is an upper-case letter."
   (not (= (lower ch) ch)))

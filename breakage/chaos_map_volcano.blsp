@@ -46,9 +46,10 @@
 (def small-slice (build-map 100000))
 (def incremented (map-values small-slice inc))
 (println "incremented count:" (count incremented))
-(println "incremented[0]:" (get incremented 0))   ; was 0, now 1
-(println "incremented[99999]:" (get incremented 99999)) ; was 9999800001, now +1
-
+; was 0, now 1
+(println "incremented[0]:" (get incremented 0))
+; was 9999800001, now +1
+(println "incremented[99999]:" (get incremented 99999))
 (println "--- merge two large maps (union, right-wins) ---")
 ;; Build a second map with keys [500000, 1500000) and negative values
 (defn build-neg-map (n start)
@@ -69,7 +70,7 @@
 (def expected-sum (quot (* (* 999999 1000000) 1999999) 6))
 (def actual-sum (fold (fn (acc kv) (+ acc (first (rest kv)))) 0 big-map))
 (println "expected sum:" expected-sum)
-(println "actual sum:"   actual-sum)
+(println "actual sum:" actual-sum)
 (println "sums match?" (= expected-sum actual-sum))
 
 (println "--- frequencies: 1M items with 10 distinct values ---")

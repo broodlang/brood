@@ -10,8 +10,8 @@
 //! (Plain `cargo test` runs it too — it is a legitimate stress test either way.)
 
 use brood::core::heap::Heap;
-use brood::core::value::Value;
 use brood::core::table;
+use brood::core::value::Value;
 
 fn heap() -> Heap {
     // A standalone heap per thread — table values are scalars here, so no GC

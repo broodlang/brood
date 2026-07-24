@@ -7,6 +7,7 @@
 
 (defmodule timer-test (:use test))
 
+; twice — still fine
 (describe "send-after"
   (test "delivers the message after the delay"
     (let (me (self))
@@ -33,9 +34,9 @@
   (test "cancel-timer is idempotent and safe on a fired timer"
     (let (me (self) t (send-after 10 me :fired))
       (assert= :fired (receive (:fired :fired) (after 5000 :timeout)))
-      (cancel-timer t)     ; already dead — no-op
-      (cancel-timer t))))  ; twice — still fine
-
+      ; already dead — no-op
+      (cancel-timer t)
+      (cancel-timer t))))
 (describe "send-interval"
   (test "ticks repeatedly until cancelled"
     (let (me (self) t (send-interval 20 me :beat))

@@ -26,20 +26,22 @@
     (map (fn (e) (path-join dir e)) (list-dir dir))))
 
 (defn check-dir! (dir)
-  (do (fold (fn (_ p) (check-file! p)) nil (blsp-files dir))
+  (do
+    (fold (fn (_ p) (check-file! p)) nil (blsp-files dir))
     (count (blsp-files dir))))
 
 (describe "formatter: semantic preservation + idempotency over the repo"
-  (test "every std/*.blsp"          (is (> (check-dir! "std") 5)))
-  (test "every std/editor/*.blsp"   (is (> (check-dir! "std/editor") 3)))
-  (test "every std/tool/*.blsp"     (is (> (check-dir! "std/tool") 3)))
-  (test "every std/proc/*.blsp"     (is (> (check-dir! "std/proc") 0)))
-  (test "every std/net/*.blsp"      (is (> (check-dir! "std/net") 0)))
-  (test "every tests/*.blsp"        (is (> (check-dir! "tests") 30)))
-  (test "every stress/*.blsp"       (is (> (check-dir! "stress") 4))))
+  (test "every std/*.blsp" (is (> (check-dir! "std") 5)))
+  (test "every std/editor/*.blsp" (is (> (check-dir! "std/editor") 3)))
+  (test "every std/tool/*.blsp" (is (> (check-dir! "std/tool") 3)))
+  (test "every std/proc/*.blsp" (is (> (check-dir! "std/proc") 0)))
+  (test "every std/net/*.blsp" (is (> (check-dir! "std/net") 0)))
+  (test "every tests/*.blsp" (is (> (check-dir! "tests") 30)))
+  (test "every stress/*.blsp" (is (> (check-dir! "stress") 4))))
 
 (defn check-src! (src)
-  (do (assert= (pr-str (read-all (format-source src))) (pr-str (read-all src)))
+  (do
+    (assert= (pr-str (read-all (format-source src))) (pr-str (read-all src)))
     (assert= (format-source (format-source src)) (format-source src))
     true))
 

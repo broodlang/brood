@@ -123,9 +123,8 @@
 
   (test "a self-referential local closure send is rejected cleanly"
     (let (f (fn (x) (f x))
-           ; resolves to itself via the let's captured env
-           me
-           (self))
+          ; resolves to itself via the let's captured env
+          me (self))
       (assert-error (send me f))))
 
   (test "sending a raw builtin is rejected with a clear error"
@@ -134,9 +133,8 @@
 
   (test "send to a dead pid is silently dropped (Erlang semantics)"
     (let (dead (spawn (fn () nil))
-           ; worker exits immediately
-           _
-           (receive (after 50 nil)))
+          ; worker exits immediately
+          _ (receive (after 50 nil)))
       ;; A send to the now-dead pid should NOT raise.
       (send dead :hello)
       (is true)))
@@ -165,14 +163,11 @@
   (test "200-worker fan-out: every worker observes the same blob ptr"
     (when (bound? '%blob-ptr)
       (let (n 200
-             big
-             (string-repeat "F" 10240)  ; 10 KB Shared blob
-             parent-ptr
-             (%blob-ptr big)
-             me
-             (self)
-             ws
-             (adv-spawn-echoers me n nil))
+            ; 10 KB Shared blob
+            big (string-repeat "F" 10240)
+            parent-ptr (%blob-ptr big)
+            me (self)
+            ws (adv-spawn-echoers me n nil))
         (is (not (nil? parent-ptr)))
         (adv-send-all ws big)
         ;; Every worker must report the *same* SharedBlob ptr as the parent (the

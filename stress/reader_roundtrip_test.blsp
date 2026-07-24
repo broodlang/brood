@@ -13,9 +13,12 @@
     (cond
       (= c 0) (rem s 100000)
       (= c 1) (- 0 (rem s 1000000000000))
-      (= c 2) (* 9223372036854775807 (+ 1 (rem s 3)))     ; bigints
-      (= c 3) (/ (rem s 1000) 8)                          ; mixed int/float results
-      (= c 4) (str "s" (rem s 100) "\"q\\b\né€")          ; escapes + unicode
+      (= c 2) (* 9223372036854775807 (+ 1 (rem s 3)))
+      ; bigints
+      (= c 3) (/ (rem s 1000) 8)
+      ; mixed int/float results
+      (= c 4) (str "s" (rem s 100) "\"q\\b\né€")
+      ; escapes + unicode
       (= c 5) (keyword (str "k" (rem s 50)))
       (= c 6) (= (rem s 2) 0)
       (= c 7) nil
@@ -26,9 +29,11 @@
               (rem s2 64) (gen (lcg s2) (- depth 1))}))))
 
 (defn prop (s n)
-  (if (= n 0) true
+  (if (= n 0)
+    true
     (let (s2 (lcg s) v (gen s2 3))
-      (do (assert= (read-string (pr-str v)) v)
+      (do
+        (assert= (read-string (pr-str v)) v)
         (prop s2 (- n 1))))))
 
 (describe "read-string ∘ pr-str = identity"
@@ -40,12 +45,15 @@
       (assert= (read-string (pr-str 5e-324)) 5e-324)
       (assert= (read-string (pr-str -0.0)) -0.0)
       (assert= (read-string (pr-str 0.30000000000000004)) 0.30000000000000004)
-      (assert= (read-string (pr-str (* 1e300 1e300))) (* 1e300 1e300))   ; inf
+      ; inf
+      (assert= (read-string (pr-str (* 1e300 1e300))) (* 1e300 1e300))
       (assert= (read-string "-inf") (- 0 (* 1e300 1e300)))
+      ; nan
       (let (n (read-string (pr-str (- (* 1e300 1e300) (* 1e300 1e300)))))
-        (do (is (float? n)) (assert= (= n n) false)))                    ; nan
+        (do (is (float? n)) (assert= (= n n) false)))
       true))
   (test "string escapes round-trip"
-    (do (assert= (read-string (pr-str "a\"b\\c\nd\té€")) "a\"b\\c\nd\té€")
+    (do
+      (assert= (read-string (pr-str "a\"b\\c\nd\té€")) "a\"b\\c\nd\té€")
       (assert= (read-string (pr-str "")) "")
       true)))

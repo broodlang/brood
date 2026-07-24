@@ -10,23 +10,29 @@
 ;;;   - Near-zero BigInt rem (rem of huge number by 1 = 0)
 ;;;   - BigInt bitwise ops (if supported)
 
-(def i64-max  9223372036854775807)   ; 2^63 - 1
-(def i64-min -9223372036854775808)   ; -2^63 (still an i64 in Brood)
-(def bigint-min-plus1 -9223372036854775807)  ; i64, but -i64-min = BigInt
-
+; 2^63 - 1
+(def i64-max 9223372036854775807)
+; -2^63 (still an i64 in Brood)
+(def i64-min -9223372036854775808)
+; i64, but -i64-min = BigInt
+(def bigint-min-plus1 -9223372036854775807)
 ;;; ---- PROGRAM 8: i64::MIN / -1 must produce BigInt, not crash ----
 (println "=== P8: i64::MIN / -1 overflow → BigInt ===")
 ;; -(-2^63) = 2^63, which exceeds i64::MAX and must become a BigInt
-(def p8-result (try (/ i64-min -1)
-                 (catch e (str "error: " (error-message e)))))
+(def p8-result
+  (try
+    (/ i64-min -1)
+    (catch e (str "error: " (error-message e)))))
 (println "i64-min / -1 =" p8-result)
 (println "is-bigint?" (> p8-result i64-max))
 (println "correct value?" (= p8-result (+ i64-max 1)))
 
 ;;; ---- PROGRAM 9: i64::MIN rem -1 (same overflow path) ----
 (println "=== P9: i64::MIN rem -1 ===")
-(def p9-result (try (rem i64-min -1)
-                 (catch e (str "error: " (error-message e)))))
+(def p9-result
+  (try
+    (rem i64-min -1)
+    (catch e (str "error: " (error-message e)))))
 ;; Truncated remainder: i64::MIN / -1 = 2^63, remainder = 0
 (println "i64-min rem -1 =" p9-result)
 (println "expected 0:" (= 0 p9-result))
@@ -36,8 +42,8 @@
 (def big-pos (* 999999999999999999 7))
 (def big-neg (- 0 big-pos))
 ;; Brood uses truncated rem: sign follows dividend
-(def r1 (rem big-pos  3))
-(def r2 (rem big-neg  3))
+(def r1 (rem big-pos 3))
+(def r2 (rem big-neg 3))
 (def r3 (rem big-pos -3))
 (def r4 (rem big-neg -3))
 (println "rem(+big, +3) sign >= 0:" (>= r1 0))
@@ -49,8 +55,10 @@
 ;;; ---- PROGRAM 11: BigInt → float precision ----
 (println "=== P11: BigInt -> float conversion ===")
 ;; 2^53 = 9007199254740992 fits exactly in f64 (53-bit mantissa)
-(def exact-int 9007199254740992)   ; 2^53, an i64
-(def exact-bigint (* exact-int 1)) ; same value
+; 2^53, an i64
+(def exact-int 9007199254740992)
+; same value
+(def exact-bigint (* exact-int 1))
 ;; 2^53 as float must be exact
 (def exact-float (* 1.0 exact-int))
 (println "2^53 as float:" exact-float)
@@ -87,8 +95,10 @@
 (defn bigint-gcd (a b)
   (if (= b 0) a (bigint-gcd b (rem a b))))
 
-(def a14 (* 123456789 987654321 9999999937))  ; large product
-(def b14 (* 987654321 111111111 9999999937))  ; shares factor
+; large product
+(def a14 (* 123456789 987654321 9999999937))
+; shares factor
+(def b14 (* 987654321 111111111 9999999937))
 ;; GCD should be (* 987654321 9999999937) = 9876543197530864977
 (def p14-gcd (bigint-gcd a14 b14))
 (println "gcd result:" p14-gcd)

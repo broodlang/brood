@@ -14,7 +14,8 @@
   (test "roots first, each followed by its DFS descendants, depth-tagged"
     (let (ps [{:id 1 :parent nil} {:id 2 :parent 1} {:id 3 :parent 1} {:id 4 :parent 2}]
           o (tree-order ps))
-      (assert= (map (fn (p) (get p :id)) o) '(1 2 4 3))        ; 1 → (2 → 4) → 3
+      ; 1 → (2 → 4) → 3
+      (assert= (map (fn (p) (get p :id)) o) '(1 2 4 3))
       (assert= (map (fn (p) (get p :depth)) o) '(0 1 2 1))))
   (test "an orphan (parent not in the set) is treated as a root"
     (let (o (tree-order [{:id 5 :parent 99} {:id 6 :parent 5}]))

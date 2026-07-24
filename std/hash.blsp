@@ -36,7 +36,7 @@
 
 (defn hash--byte->hex (b)
   (str (char-at hash--hex-digits (quot b 16))
-       (char-at hash--hex-digits (rem b 16))))
+    (char-at hash--hex-digits (rem b 16))))
 
 (defn bytes->hex (bytes)
   "Lowercase hex string of a byte sequence (bytes value, vector, or list of byte
@@ -165,5 +165,5 @@ bytes value (raw MAC, not hex)."
   "A fast non-cryptographic integer hash of string `s` (djb2 variant).
 Suitable for hash tables and sharding; NOT cryptographically secure."
   (fold (fn (h c) (bit-xor (* h 31) (char->int c)))
-        5381
-        (string->list s)))
+    5381
+    (string->list s)))

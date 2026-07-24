@@ -688,7 +688,6 @@ impl Heap {
             _ => tag_rank(a).cmp(&tag_rank(b)),
         }
     }
-
 }
 
 #[cfg(test)]

@@ -24,8 +24,9 @@
 
 (describe "offload: errors and refusals are clean"
   (test "an error inside the offloaded native rethrows here, catchable"
-    (is (= (try (offload slurp "/definitely/not/a/file/brood-offload-test")
-            (catch e :caught))
+    (is (= (try
+             (offload slurp "/definitely/not/a/file/brood-offload-test")
+             (catch e :caught))
           :caught)))
   (test "a native outside the allow list is refused"
     (is (= (try (%offload bytes-concat [[]]) (catch e :refused)) :refused)))

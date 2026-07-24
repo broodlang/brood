@@ -29,9 +29,8 @@
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
-             ;; the accept notification carries the server-side socket
-             s
-             (receive ([:tcp-accept ~ls cs] cs) (after 5000 :timeout)))
+            ;; the accept notification carries the server-side socket
+            s (receive ([:tcp-accept ~ls cs] cs) (after 5000 :timeout)))
         (is (socket? s))
         ;; an accepted socket is passive — take ownership to start receiving
         (tcp-controlling-process s (self))
@@ -98,9 +97,12 @@
           port (tcp-local-port ls))
       (let (c (tcp-connect "127.0.0.1" port)
             s (receive ([:tcp-accept ~ls cs] cs) (after 5000 :timeout)))
-        (tcp-set-idle-timeout s 500)          ; arm while still unclaimed/passive
-        (sleep 1200)                          ; wait past the bound, passive
-        (tcp-controlling-process s (self))    ; establish now
+        ; arm while still unclaimed/passive
+        (tcp-set-idle-timeout s 500)
+        ; wait past the bound, passive
+        (sleep 1200)
+        ; establish now
+        (tcp-controlling-process s (self))
         (let (ev (receive ([:tcp-closed ~s] :reaped-BUG) (after 300 :alive)))
           (tcp-close c)
           (tcp-close s)
@@ -118,8 +120,10 @@
         (tcp-set-idle-timeout c 2000)
         (tcp-send c "a")
         (sleep 1200)
-        (tcp-send c "b")          ; resets the idle stamp at ~1200ms
-        (sleep 1200)              ; ~2400ms total, but only ~1200ms since activity
+        ; resets the idle stamp at ~1200ms
+        (tcp-send c "b")
+        ; ~2400ms total, but only ~1200ms since activity
+        (sleep 1200)
         (let (still (receive ([:tcp-closed ~c] :reaped-BUG) (after 100 :alive)))
           (tcp-close c)
           (tcp-close s)

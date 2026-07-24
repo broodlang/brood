@@ -1564,4 +1564,3 @@ pub(crate) fn jit_tier(
     }
     Some(outcome)
 }
-

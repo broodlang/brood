@@ -11,9 +11,10 @@
 (defmodule link-test (:use test))
 
 ;; file-local worker bodies (tail-recursive — a test runs in a small-stack proc)
-(defn lk-park () (receive (:never :x)))  ; parks forever
-(defn lk-crash-on (sig) (receive (~sig (error "boom"))))  ; crash when told
-
+; parks forever
+(defn lk-park () (receive (:never :x)))
+; crash when told
+(defn lk-crash-on (sig) (receive (~sig (error "boom"))))
 (describe "links: trap-exit delivers [:EXIT], no trap propagates"
 
   (test "a trapping process gets [:EXIT pid reason] when a linked peer crashes"
@@ -41,7 +42,8 @@
   (test "linking an already-dead pid notifies immediately with :noproc"
     (trap-exit true)
     (let (p (spawn :ok))
-      (sleep 30)  ; let it finish
+      ; let it finish
+      (sleep 30)
       (link p)
       (assert= :noproc
         (receive ([:EXIT ~p r] r))))
@@ -87,7 +89,8 @@
                        ; :normal exit reaches us as :normal (not a racy :noproc that would
                        ; wrongly take down this non-trapping peer).
                        (let (_c (spawn-link :ok))
-                         (sleep 80)  ; outlive the child's normal exit
+                         ; outlive the child's normal exit
+                         (sleep 80)
                          (send me [:alive (self)])
                          (receive (:stop :ok))))))
       (assert= true
@@ -114,7 +117,9 @@
           b (spawn (do (trap-exit false) (link c) (lk-park)))
           a (spawn (do (trap-exit false) (link b) (lk-park)))
           cm (monitor c))
-      (sleep 40)  ; let the chain wire up
-      (exit a :stop)  ; abnormal (≠ :normal) → propagates b→c
+      ; let the chain wire up
+      (sleep 40)
+      ; abnormal (≠ :normal) → propagates b→c
+      (exit a :stop)
       (assert= :chain-down
         (receive ([:down ~cm ~c _] :chain-down))))))

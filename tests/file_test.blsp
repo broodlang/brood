@@ -17,6 +17,7 @@
     (make-dir d)
     d))
 
+; all distinct — none clobbered
 (describe "file: whole-file read/write/append"
   (test "write-file then read-file round-trips"
     (let (p (path-join (ftmp) "a.txt"))
@@ -29,7 +30,8 @@
       (assert= (read-file p) "onetwo")))
   (test "spit-append is the atomic primitive append-file aliases"
     (let (p (path-join (ftmp) "c.txt"))
-      (spit-append p "x")            ; creates when absent
+      ; creates when absent
+      (spit-append p "x")
       (spit-append p "y")
       (assert= (slurp p) "xy")))
   (test "concurrent appends from many processes all land (atomic O_APPEND)"
@@ -43,11 +45,12 @@
         (spawn (fn ()
                  (spit-append p (str "worker-" i "\n"))
                  (send me :done))))
-      (fa-await n)                                    ; barrier: all workers finished
+      ; barrier: all workers finished
+      (fa-await n)
       (let (lines (filter (fn (l) (not (empty? l))) (string-split (slurp p) "\n")))
-        (assert= (count lines) n)                     ; none lost
-        (assert= (count (frequencies lines)) n)))))   ; all distinct — none clobbered
-
+        ; none lost
+        (assert= (count lines) n)
+        (assert= (count (frequencies lines)) n)))))
 ;; Collect `n` :done messages (order-independent) — a simple fan-in barrier.
 (defn fa-await (n) (when (> n 0) (receive (:done (fa-await (dec n))))))
 
@@ -57,6 +60,7 @@
       (write-file p "12345")
       (assert= (file-size p) 5)
       (assert= (file-size (path-join (ftmp) "nope.txt")) nil)))
+  ; missing → nil
   (test "file-stat reports size/dir?/symlink? in one map, nil when missing"
     (let (d (ftmp)
           f (path-join d "stat.txt")
@@ -66,21 +70,27 @@
       (assert= (get sf :size) 5)
       (refute (get sf :dir?))
       (refute (get sf :symlink?))
-      (is (get sd :dir?))                                  ; the dir itself
-      (is (number? (get sf :mtime)))                       ; epoch-ms last-modified
-      (is (number? (get sf :atime)))                       ; epoch-ms last-access
-      (is (>= (get sf :nlink) 1))                          ; hard-link count
+      ; the dir itself
+      (is (get sd :dir?))
+      ; epoch-ms last-modified
+      (is (number? (get sf :mtime)))
+      ; epoch-ms last-access
+      (is (number? (get sf :atime)))
+      ; hard-link count
+      (is (>= (get sf :nlink) 1))
       (is (number? (get sf :uid)))
-      (is (string? (get sf :owner)))                       ; resolved name (or numeric id)
+      ; resolved name (or numeric id)
+      (is (string? (get sf :owner)))
       (is (string? (get sf :group)))
-      (assert= (file-stat (path-join d "nope.txt")) nil))) ; missing → nil
+      (assert= (file-stat (path-join d "nope.txt")) nil)))
+  ; no-op when already gone
   (test "delete-file removes a file and is idempotent"
     (let (p (path-join (ftmp) "d.txt"))
       (write-file p "x")
       (is (file? p))
       (delete-file p)
       (refute (path-exists? p))
-      (assert= (delete-file p) nil)))  ; no-op when already gone
+      (assert= (delete-file p) nil)))
   (test "rename-file moves content to a new path"
     (let (d (ftmp) a (path-join d "a.txt") b (path-join d "b.txt"))
       (write-file a "moved")
@@ -91,7 +101,8 @@
     (let (d (ftmp) a (path-join d "src.txt") b (path-join d "dst.txt"))
       (write-file a "copied")
       (copy-file a b)
-      (assert= (read-file a) "copied")   ; original still there
+      ; original still there
+      (assert= (read-file a) "copied")
       (assert= (read-file b) "copied"))))
 
 (describe "file: line I/O"
@@ -143,9 +154,14 @@
     (assert= (path-stem "a/b.txt") "b")
     (assert= (path-stem "a/b") "b"))
   (test "path-absolute"
-    (assert= (path-absolute "/etc/hosts") "/etc/hosts")          ; already absolute → unchanged
-    (assert= (path-absolute "") "")                              ; empty → empty
-    (assert= (path-absolute "foo/bar" "/base") "/base/foo/bar")  ; relative → joined onto base
-    (assert= (path-absolute "rel") (path-join (cwd) "rel"))      ; default base is (cwd)
-    (assert= (path-absolute "~/x") (str (getenv "HOME") "/x"))   ; ~ expands against $HOME
+    ; already absolute → unchanged
+    (assert= (path-absolute "/etc/hosts") "/etc/hosts")
+    ; empty → empty
+    (assert= (path-absolute "") "")
+    ; relative → joined onto base
+    (assert= (path-absolute "foo/bar" "/base") "/base/foo/bar")
+    ; default base is (cwd)
+    (assert= (path-absolute "rel") (path-join (cwd) "rel"))
+    ; ~ expands against $HOME
+    (assert= (path-absolute "~/x") (str (getenv "HOME") "/x"))
     (assert= (path-absolute "~") (getenv "HOME"))))

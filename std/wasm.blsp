@@ -68,7 +68,9 @@ calls the export inline — wrap with `wasm-call-blocking` yourself for exports
 that run long."
   (map (fn (e)
          (let (name (first e))
-           (eval (list 'defn (string->symbol name) '(& args)
+           (eval (list 'defn
+                   (string->symbol name)
+                   '(& args)
                    (list '%wasm-call inst name '(into [] args))))
            (string->symbol name)))
     (wasm-exports inst)))

@@ -165,8 +165,10 @@ zone) and on click (to find the target)."
   (fold (fn (hit z)
           (let ([x y w h] (get z :rect))
             (if (and (>= col x) (< col (+ x w)) (>= row y) (< row (+ y h)))
-              z hit)))
-    nil zones))
+              z
+              hit)))
+    nil
+    zones))
 
 (defn zone-cursor-ops (zones)
   "`cursor-zone` render ops for every zone in `zones` that requests a `:cursor` shape — so
@@ -199,10 +201,9 @@ is drawn by the caller on top."
   (let (radius (get opts :radius 0.5)
         border (get opts :border))
     (if gui?
-      (concat
-        (if border
-          [(frect (- col 0.07) (- row 0.07) (+ w 0.14) (+ h 0.14) border 1.0 (+ radius 0.07))]
-          [])
+      (concat (if border
+                [(frect (- col 0.07) (- row 0.07) (+ w 0.14) (+ h 0.14) border 1.0 (+ radius 0.07))]
+                [])
         [(frect (* 1.0 col) (* 1.0 row) (* 1.0 w) (* 1.0 h) face 1.0 radius)])
       (list (rect row col w h face)))))
 
@@ -222,11 +223,11 @@ terminal draws a flat panel."
   (let (n (count lines)
         w (+ 2 (fold (fn (m s) (max m (string-length s))) 0 lines))
         [mr mc] (card-rect (- anchor-row n) anchor-col w n cols rows))
-    (concat
-      (card-surface mr mc w n face gui? opts)
+    (concat (card-surface mr mc w n face gui? opts)
       (map (fn (i)
              (let (s (nth lines i))
-               (text (+ mr i) mc
+               (text (+ mr i)
+                 mc
                  (str " " s (string-repeat " " (max 0 (- w 1 (string-length s)))))
                  fg)))
         (range n)))))

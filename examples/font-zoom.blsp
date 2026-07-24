@@ -35,6 +35,7 @@ grows/shrinks within [*min-px* *max-px*]; anything else leaves `px` unchanged."
       (= action :scroll-down) (max *min-px* (- px *step*))
       :else px)))
 
+; keys, resizes, etc. — just re-render
 (defn loop (win px)
   "Render at `px`, then wait for the next input and fold it in. Input arrives in
 this process's mailbox (ADR-058), so we park in `receive` holding no worker."
@@ -43,11 +44,11 @@ this process's mailbox (ADR-058), so we park in `receive` holding no worker."
     (cond
       (or (= ev :close) (= ev "q")) (gui-close win)
       (and (vector? ev) (= (first ev) :mouse)) (let (px* (ctrl-wheel-px ev px))
+                                                 ; retune just THIS window
                                                  (when (not (= px* px))
-                                                   (gui-font! win {:height px*}))  ; retune just THIS window
+                                                   (gui-font! win {:height px*}))
                                                  (loop win px*))
-      :else (loop win px))))  ; keys, resizes, etc. — just re-render
-
+      :else (loop win px))))
 (let (win (gui-open)
       px 15)
   (gui-font! win {:height px})

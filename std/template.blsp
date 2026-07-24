@@ -29,14 +29,14 @@ tried. Unknown keys render as empty string. Nested `{{` are not supported."
   (let (open (index-of s "{{"))
     (if (< open 0)
       (str acc s)
-      (let (tail     (substring s (+ open 2) (string-length s))
-            close    (index-of tail "}}"))
+      (let (tail (substring s (+ open 2) (string-length s))
+            close (index-of tail "}}"))
         (if (< close 0)
           (str acc s)
           (let (before (substring s 0 open)
-                key    (trim (substring tail 0 close))
-                after  (substring tail (+ close 2) (string-length tail))
-                val    (template--lookup data key))
+                key (trim (substring tail 0 close))
+                after (substring tail (+ close 2) (string-length tail))
+                val (template--lookup data key))
             (template--loop after data (str acc before val))))))))
 
 (defn template--lookup (data key)
@@ -44,9 +44,8 @@ tried. Unknown keys render as empty string. Nested `{{` are not supported."
   (let (v (get data key))
     (cond
       (not (nil? v)) (str v)
-      else
-      (let (kv (get data (keyword key)))
-        (if (nil? kv) "" (str kv))))))
+      else (let (kv (get data (keyword key)))
+             (if (nil? kv) "" (str kv))))))
 
 ;; ---- render-all -------------------------------------------------------------
 

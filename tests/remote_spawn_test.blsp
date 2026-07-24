@@ -25,7 +25,7 @@
   (test "remote-spawn-sync returns the child pid and runs a literal-lambda body"
     (start-remote-spawn)
     (let (parent (self)
-          child  (remote-spawn-sync (node-name)
-                   (fn () (send parent [:sync-ran 11]))))
+          child (remote-spawn-sync (node-name)
+                  (fn () (send parent [:sync-ran 11]))))
       (is (pid? child))
       (assert= 11 (receive ([:sync-ran v] v) (after 5000 :timeout))))))

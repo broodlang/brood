@@ -1,5 +1,6 @@
 (defmodule encoding
-  (:doc "Hex and Base64 encoding/decoding.
+  (:doc
+    "Hex and Base64 encoding/decoding.
 
 The string functions (`hex-encode`, `base64-encode`, and their `-decode`
 counterparts) treat each character as its UTF-8 bytes — convenient for text, but
@@ -28,8 +29,7 @@ For pure ASCII input the string and byte forms agree."))
     (let (b (first bs)
           hi (quot b 16)
           lo (rem b 16))
-      (encoding--hex-encode-loop
-        (rest bs)
+      (encoding--hex-encode-loop (rest bs)
         codes
         (cons (nth codes lo) (cons (nth codes hi) acc))))))
 
@@ -60,8 +60,8 @@ UTF-8-encodes a string."
   (let (lower (string->codepoints "0123456789abcdef")
         upper (string->codepoints "0123456789ABCDEF"))
     (fold (fn (m i) (assoc (assoc m (nth lower i) i) (nth upper i) i))
-          {}
-          (range 16))))
+      {}
+      (range 16))))
 
 ;; Decode hex `s` to a list of byte ints (reversed during accumulation, returned
 ;; in order), or the `:invalid` sentinel on a bad/odd input. `:invalid` rather
@@ -73,12 +73,16 @@ UTF-8-encodes a string."
     (let (hi (get encoding--hex-val (nth s i))
           lo (get encoding--hex-val (nth s (+ i 1))))
       (if (and hi lo)
-        (encoding--hex-decode-loop s (+ i 2) n
+        (encoding--hex-decode-loop s
+          (+ i 2)
+          n
           (cons (+ (* hi 16) lo) acc))
         :invalid))))
 
 (defn encoding--hex-decode-bytelist (s)
-  (let (s (string->codepoints s)            ; codepoint vector: O(1) nth, int lookups
+  (let (
+        ; codepoint vector: O(1) nth, int lookups
+        s (string->codepoints s)
         n (count s))
     (if (= (rem n 2) 0)
       (encoding--hex-decode-loop s 0 n nil)
@@ -98,8 +102,8 @@ binary payload (digests, salts, wire bytes)."
 
 ;; ---- base64 -----------------------------------------------------------------
 
-(def encoding--b64-std  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
-(def encoding--b64-url  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+(def encoding--b64-std "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+(def encoding--b64-url "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
 ;; Code-point vectors for the two alphabets (all ASCII), so the encoder conses
 ;; ASCII byte codes and builds the string ONCE with utf8-bytes->string — like
@@ -107,8 +111,8 @@ binary payload (digests, salts, wire bytes)."
 ;; the whole accumulator) and spiked peak RSS on large inputs.
 (def encoding--b64-std-codes (string->codepoints encoding--b64-std))
 (def encoding--b64-url-codes (string->codepoints encoding--b64-url))
-(def encoding--b64-pad 61)   ; the code point of "="
-
+; the code point of "="
+(def encoding--b64-pad 61)
 ;; Encode a byte sequence to base64 using the given 64-entry code-point vector.
 (defn encoding--b64-encode (bytes codes)
   (utf8-bytes->string (encoding--b64-enc-loop (seq bytes) codes nil)))
@@ -116,29 +120,30 @@ binary payload (digests, salts, wire bytes)."
 (defn encoding--b64-enc-loop (bytes codes acc)
   (if (empty? bytes)
     (reverse acc)
-    (let (b1   (first bytes)
+    (let (b1 (first bytes)
           rest1 (rest bytes))
       (if (empty? rest1)
         ;; 1-byte tail: 2 chars + "=="
         (reverse (cons encoding--b64-pad
-                 (cons encoding--b64-pad
-                 (cons (nth codes (* (rem b1 4) 16))
-                 (cons (nth codes (quot b1 4)) acc)))))
-        (let (b2    (first rest1)
-              rest2  (rest rest1))
+                   (cons encoding--b64-pad
+                     (cons (nth codes (* (rem b1 4) 16))
+                       (cons (nth codes (quot b1 4)) acc)))))
+        (let (b2 (first rest1)
+              rest2 (rest rest1))
           (if (empty? rest2)
             ;; 2-byte tail: 3 chars + "="
             (reverse (cons encoding--b64-pad
-                     (cons (nth codes (* (rem b2 16) 4))
-                     (cons (nth codes (+ (* (rem b1 4) 16) (quot b2 16)))
-                     (cons (nth codes (quot b1 4)) acc)))))
+                       (cons (nth codes (* (rem b2 16) 4))
+                         (cons (nth codes (+ (* (rem b1 4) 16) (quot b2 16)))
+                           (cons (nth codes (quot b1 4)) acc)))))
             ;; full 3-byte group → 4 chars
             (let (b3 (first rest2))
-              (encoding--b64-enc-loop (rest rest2) codes
+              (encoding--b64-enc-loop (rest rest2)
+                codes
                 (cons (nth codes (rem b3 64))
-                (cons (nth codes (+ (* (rem b2 16) 4) (quot b3 64)))
-                (cons (nth codes (+ (* (rem b1 4) 16) (quot b2 16)))
-                (cons (nth codes (quot b1 4)) acc))))))))))))
+                  (cons (nth codes (+ (* (rem b2 16) 4) (quot b3 64)))
+                    (cons (nth codes (+ (* (rem b1 4) 16) (quot b2 16)))
+                      (cons (nth codes (quot b1 4)) acc))))))))))))
 
 (defn base64-encode (s)
   "Encode string `s` as standard Base64 (RFC 4648, `+/` alphabet, `=` padding)."
@@ -165,8 +170,8 @@ UTF-8 form."
 (defn encoding--b64-val-map (alpha)
   (let (cs (string->codepoints alpha))
     (fold (fn (m i) (assoc m (nth cs i) i))
-          {}
-          (range 64))))
+      {}
+      (range 64))))
 
 (def encoding--b64-std-vals (encoding--b64-val-map encoding--b64-std))
 (def encoding--b64-url-vals (encoding--b64-val-map encoding--b64-url))
@@ -175,11 +180,14 @@ UTF-8 form."
 ;; input. As with hex, `:invalid` (not nil) keeps an empty valid input distinct
 ;; from a failure; the public wrappers map `:invalid` → nil.
 (defn encoding--b64-decode (s vals)
-  (let (s    (string->codepoints (replace s "=" ""))  ; codepoint vector: O(1) nth, int lookups
-        n    (count s)
+  (let (
+        ; codepoint vector: O(1) nth, int lookups
+        s (string->codepoints (replace s "=" ""))
+        n (count s)
         tail (rem n 4))
     (if (= tail 1)
-      :invalid                         ; 1 leftover char is always invalid
+      ; 1 leftover char is always invalid
+      :invalid
       (encoding--b64-dec-loop s 0 n vals nil))))
 
 (defn encoding--b64-dec-loop (s i n vals acc)

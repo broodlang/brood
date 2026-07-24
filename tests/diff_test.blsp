@@ -4,13 +4,13 @@
 (describe "diff-seq"
   (test "identical sequences"
     (assert= [[:keep 1] [:keep 2] [:keep 3]]
-             (into [] (diff/diff-seq [1 2 3] [1 2 3]))))
+      (into [] (diff/diff-seq [1 2 3] [1 2 3]))))
   (test "empty first"
     (assert= [[:insert :a] [:insert :b]]
-             (into [] (diff/diff-seq [] [:a :b]))))
+      (into [] (diff/diff-seq [] [:a :b]))))
   (test "empty second"
     (assert= [[:delete :a] [:delete :b]]
-             (into [] (diff/diff-seq [:a :b] []))))
+      (into [] (diff/diff-seq [:a :b] []))))
   (test "both empty"
     (is (nil? (diff/diff-seq [] []))))
   (test "single insertion"
@@ -50,7 +50,7 @@
 (describe "diff-summary"
   (test "counts all op types"
     (let (ops '([:keep "a"] [:delete "b"] [:insert "c"] [:keep "d"] [:insert "e"])
-          s   (diff/diff-summary ops))
+          s (diff/diff-summary ops))
       (assert= 2 (get s :keeps))
       (assert= 1 (get s :deletes))
       (assert= 2 (get s :inserts))))
@@ -62,13 +62,13 @@
 
 (describe "diff-patch"
   (test "applies ops to produce b"
-    (let (a   [1 2 3]
-          b   [1 99 3]
+    (let (a [1 2 3]
+          b [1 99 3]
           ops (diff/diff-seq a b)
           out (diff/diff-patch a ops))
       (assert= [1 99 3] (into [] out))))
   (test "apply to get same sequence"
-    (let (a   [10 20 30]
+    (let (a [10 20 30]
           ops (diff/diff-seq a a)
           out (diff/diff-patch a ops))
       (assert= [10 20 30] (into [] out)))))

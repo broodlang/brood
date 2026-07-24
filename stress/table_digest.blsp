@@ -15,7 +15,8 @@
 (run 20260716 200000)
 ;; digest: count + sum(k*v) + sum(k) over present keys
 (defn digest (k n cnt skv sk)
-  (if (>= k n) [cnt skv sk]
+  (if (>= k n)
+    [cnt skv sk]
     (let (v (table-get t k :absent))
       (if (= v :absent)
         (digest (+ k 1) n cnt skv sk)

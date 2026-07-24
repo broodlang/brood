@@ -14,8 +14,9 @@
 ;; are captured, so the worker sends back to THIS process.
 (defn roundtrip (v)
   (let (me (self) w (spawn (echo me)))
-    (do (send w v)
-        (receive ([:echoed back] back) (after 5000 :timeout)))))
+    (do
+      (send w v)
+      (receive ([:echoed back] back) (after 5000 :timeout)))))
 
 (defn lcg (s) (rem (+ (* s 1103515245) 12345) 2147483648))
 
@@ -26,36 +27,38 @@
   (defn rand-val (s depth)
     (let (c (rem s 7))
       (if (or (= depth 0) (< c 3))
-        (cond (= c 0) (- (rem s 1000000) 500000)
-              (= c 1) (* (- (rem s 2000) 1000) 1000000000000)
-              (= c 2) (/ (- (rem s 2000) 1000) 7.0)
-              else (str "s" (rem s 100000)))
+        (cond
+          (= c 0) (- (rem s 1000000) 500000)
+          (= c 1) (* (- (rem s 2000) 1000) 1000000000000)
+          (= c 2) (/ (- (rem s 2000) 1000) 7.0)
+          else (str "s" (rem s 100000)))
         (cond
           (= c 3) (if (= (rem s 2) 0) :kw-a :kw-b)
           (= c 4) (list (rand-val (lcg s) (- depth 1))
-                        (rand-val (lcg (lcg s)) (- depth 1)))
-          (= c 5) [(rand-val (lcg s) (- depth 1))
-                   (rand-val (lcg (lcg s)) (- depth 1))]
+                    (rand-val (lcg (lcg s)) (- depth 1)))
+          (= c 5) [(rand-val (lcg s) (- depth 1)) (rand-val (lcg (lcg s)) (- depth 1))]
           else {(rem s 10) (rand-val (lcg s) (- depth 1))
                 :k (rand-val (lcg (lcg s)) (- depth 1))})))))
 
 (defn check-rt (s n)
-  (if (= n 0) true
+  (if (= n 0)
+    true
     (let (v (rand-val s 4))
       (if (= (roundtrip v) v) (check-rt (lcg s) (- n 1)) false))))
 
 (describe "values survive a cross-process send round-trip unchanged"
-  (test "int"        (assert= (roundtrip 42) 42))
-  (test "bignum"     (assert= (roundtrip 123456789012345678901234567890)
-                              123456789012345678901234567890))
-  (test "float"      (assert= (roundtrip 3.141592653589793) 3.141592653589793))
-  (test "string"     (assert= (roundtrip "héllo wörld ☃") "héllo wörld ☃"))
-  (test "keyword"    (assert= (roundtrip :some-key) :some-key))
+  (test "int" (assert= (roundtrip 42) 42))
+  (test "bignum"
+    (assert= (roundtrip 123456789012345678901234567890)
+      123456789012345678901234567890))
+  (test "float" (assert= (roundtrip 3.141592653589793) 3.141592653589793))
+  (test "string" (assert= (roundtrip "héllo wörld ☃") "héllo wörld ☃"))
+  (test "keyword" (assert= (roundtrip :some-key) :some-key))
   (test "empty coll" (assert= (roundtrip [{} [] (list)]) [{} [] (list)]))
-  (test "nested list"   (assert= (roundtrip (list 1 (list 2 3) 4)) (list 1 (list 2 3) 4)))
+  (test "nested list" (assert= (roundtrip (list 1 (list 2 3) 4)) (list 1 (list 2 3) 4)))
   (test "vector of maps" (assert= (roundtrip [{:a 1} {:b [2 3]}]) [{:a 1} {:b [2 3]}]))
   (test "deep nested"
     (assert= (roundtrip {:xs [1 2 {:y (list :a :b)}] :n 999999999999})
-             {:xs [1 2 {:y (list :a :b)}] :n 999999999999}))
+      {:xs [1 2 {:y (list :a :b)}] :n 999999999999}))
   (test "300 random nested values round-trip identically"
     (is (check-rt 20260717 300))))

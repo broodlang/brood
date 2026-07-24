@@ -59,10 +59,11 @@
   (assoc (link-init :proc :me) :version 0 :pending (or pending ())))
 
 (describe "link-fold — stale, seed, echo"
+  ; link untouched
   (test "a stale/duplicate version is ignored outright"
     (let ([l a] (link-fold (fresh) 0 {:splice [0 0 "x"]} :other))
       (assert= a :stale)
-      (assert= (get l :version) 0)))          ; link untouched
+      (assert= (get l :version) 0)))
   (test "the seed (version -1 link) applies as a full-text view"
     (let ([l a] (link-fold (link-init :proc :me) 0 ["doc" {} {}] nil))
       (assert= a [:text "doc"])
@@ -77,21 +78,26 @@
       (assert= a :noop)
       (assert= (get l :pending) (list [3 3 1])))))
 
+; still in flight
 (describe "link-fold — foreign splices"
   (test "a foreign splice with nothing in flight applies as-is"
     (let ([l a] (link-fold (fresh) 1 {:splice [5 5 "Y"]} :other))
       (assert= a [:splice [5 5 "Y"]])
       (assert= (get l :version) 1)))
+  ; ours before theirs — unmoved
   (test "disjoint concurrent merge: theirs after ours shifts past our insert"
     ;; we inserted 1 char at 0 (in flight); they inserted at 5 (computed before ours)
     (let ([l a] (link-fold (fresh (list [0 0 1])) 1 {:splice [5 5 "Y"]} :other))
-      (assert= a [:splice [6 6 "Y"]])          ; transformed over our pending insert
-      (assert= (get l :pending) (list [0 0 1]))))  ; ours before theirs — unmoved
+      ; transformed over our pending insert
+      (assert= a [:splice [6 6 "Y"]])
+      (assert= (get l :pending) (list [0 0 1]))))
+  ; ours shifted by their insert
   (test "disjoint concurrent merge: theirs before ours remaps our pending forward"
     ;; we have an insert in flight at 8; they inserted 2 chars at 0
     (let ([l a] (link-fold (fresh (list [8 8 1])) 1 {:splice [0 0 "ab"]} :other))
-      (assert= a [:splice [0 0 "ab"]])         ; theirs lands where it meant to
-      (assert= (get l :pending) (list [10 10 1]))))  ; ours shifted by their insert
+      ; theirs lands where it meant to
+      (assert= a [:splice [0 0 "ab"]])
+      (assert= (get l :pending) (list [10 10 1]))))
   (test "an ambiguous same-span collision resets pending and asks for a resync"
     (let ([l a] (link-fold (fresh (list [3 5 1])) 1 {:splice [4 6 "zz"]} :other))
       (assert= a :resync)
@@ -100,8 +106,7 @@
     (let ([l a] (link-fold (fresh (list [3 3 1])) 1 {:markers {:p 4}} :other))
       (assert= a :noop)
       (assert= (get l :version) 1)
-      (assert= (get l :pending) (list [3 3 1])))))  ; still in flight
-
+      (assert= (get l :pending) (list [3 3 1])))))
 ;; ---- the round-trip against a real buffer process --------------------------------
 
 (describe "link round-trip over a spawned buffer"
@@ -111,19 +116,23 @@
     (let (bp (spawn-buffer (make-buffer "hello")))
       (subscribe-buffer bp buffer-text)
       ;; seed
-      (let ([l0 a0] (receive ([:buffer-updated _bp v w o] (link-fold (link-init bp (self)) v w o))
+      (let ([l0 a0] (receive
+                      ([:buffer-updated _bp v w o] (link-fold (link-init bp (self)) v w o))
                       (after 2000 [:none :none])))
         (assert= a0 [:text "hello"])
         ;; our own edit: propagate, then its echo comes back suppressed
         (let (l1 (link-propagate l0 "hello" "hello!"))
           (assert= (count (get l1 :pending)) 1)
-          (let ([l2 a2] (receive ([:buffer-updated _bp v w o] (link-fold l1 v w o))
+          (let ([l2 a2] (receive
+                          ([:buffer-updated _bp v w o] (link-fold l1 v w o))
                           (after 2000 [:none :none])))
-            (assert= a2 :noop)                          ; echo suppressed
+            ; echo suppressed
+            (assert= a2 :noop)
             (assert= (get l2 :pending) ())
             ;; a foreign edit (unknown origin): folds to an applicable splice
             (buffer-splice bp 0 0 ">" :someone-else)
-            (let ([l3 a3] (receive ([:buffer-updated _bp v w o] (link-fold l2 v w o))
+            (let ([l3 a3] (receive
+                            ([:buffer-updated _bp v w o] (link-fold l2 v w o))
                             (after 2000 [:none :none])))
               (assert= a3 [:splice [0 0 ">"]])
               (assert= (buffer-query bp buffer-text) ">hello!")))))

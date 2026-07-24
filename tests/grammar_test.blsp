@@ -48,7 +48,8 @@
       ;; escaping needed — #any-of? compares node text)
       (is (string-contains? q "#any-of? @keyword.control"))
       (is (string-contains? q "\"when\""))
-      (is (string-contains? q "\"match*\""))   ; the `*` is a plain literal here
+      ; the `*` is a plain literal here
+      (is (string-contains? q "\"match*\""))
       (is (string-contains? q "\"->>\""))
       ;; static node→capture rules + the separate def-head rule
       (is (string-contains? q "@punctuation.bracket"))

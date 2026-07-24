@@ -12,8 +12,8 @@
 (defn km-cmd-e (s k) (str s "E"))
 (defn km-cmd-x (s k) (str s "X"))
 (defn km-boom (s k) (throw "boom"))
-(defn km-fb (s k) (str s "?"))  ; fallback: marks an unhandled key
-
+; fallback: marks an unhandled key
+(defn km-fb (s k) (str s "?"))
 ;; Thread a whole key sequence through keymap-step (tail-recursive), returning the
 ;; final [state pending].
 (defn km-run* (km pending state keys)

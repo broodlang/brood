@@ -10,9 +10,10 @@
 
 (defmodule buffer-test (:use test) (:use editor/buffer))
 
-(require 'log)    ; the buffer-as-log-sink integration test drives a real logger
-(require 'proc/gen)  ; gen-call — to flush the logger's casts before asserting
-
+; the buffer-as-log-sink integration test drives a real logger
+(require 'log)
+; gen-call — to flush the logger's casts before asserting
+(require 'proc/gen)
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-buf-")
 
@@ -43,9 +44,11 @@
     (let (b (goto-char (make-buffer "abc") 1))
       (assert= (buffer-char-after b) "b")
       (assert= (buffer-char-before b) "a"))
-    (assert= (buffer-char-before (make-buffer "abc")) nil)  ; point 0
+    ; point 0
+    (assert= (buffer-char-before (make-buffer "abc")) nil)
     (assert= (buffer-char-after (end-of-buffer (make-buffer "abc"))) nil)))
 
+; ends "bar" before ')'
 (describe "buffer movement"
   (test "goto-char clamps to [0, length]"
     (let (b (make-buffer "abc"))
@@ -58,11 +61,12 @@
       (assert= (buffer-point (forward-char b 10)) 5)
       (assert= (buffer-point (backward-char b)) 1)
       (assert= (buffer-point (backward-char b 10)) 0)))
+  ; just before the newline
   (test "beginning/end-of-line"
     (let (b (goto-char (make-buffer "ab\ncde\nf") 4))
       ; on 'd' in line 1
       (assert= (buffer-point (beginning-of-line b)) 3)
-      (assert= (buffer-point (end-of-line b)) 6)))  ; just before the newline
+      (assert= (buffer-point (end-of-line b)) 6)))
   (test "beginning/end-of-buffer"
     (let (b (make-buffer "abcde"))
       (assert= (buffer-point (end-of-buffer b)) 5)
@@ -72,47 +76,59 @@
       ; line 2, col 2
       (assert= (buffer-current-line b) 2)
       (assert= (buffer-column b) 2)))
+  ; col 2 of "world" = 'r'
   (test "forward-line preserves the column when the line is long enough"
     (let (b (-> (make-buffer "hello\nworld\nhi") (goto-char 2) (forward-line 1)))
       (assert= (buffer-current-line b) 1)
-      (assert= (buffer-column b) 2)))  ; col 2 of "world" = 'r'
+      (assert= (buffer-column b) 2)))
+  ; "hi" is only 2 long → column 2 (end)
   (test "forward-line clamps the column to a short target line"
     (let (b (-> (make-buffer "hello\nhi") (goto-char 4) (forward-line 1)))
       (assert= (buffer-current-line b) 1)
-      (assert= (buffer-column b) 2)))  ; "hi" is only 2 long → column 2 (end)
+      (assert= (buffer-column b) 2)))
   (test "forward/backward-line clamp to the line range"
     (let (b (make-buffer "a\nb\nc"))
       (assert= (buffer-current-line (forward-line b 99)) 2)
       (assert= (buffer-current-line (backward-line (end-of-buffer b) 99)) 0)))
+  ; at end, stays
   (test "forward-word moves to the end of the next word"
     (let (b (make-buffer "foo bar  baz"))
-      (assert= (buffer-point (forward-word b)) 3)  ; end of "foo"
-      (assert= (buffer-point (forward-word (forward-word b))) 7)  ; end of "bar"
-      (assert= (buffer-point (forward-word (goto-char b 12))) 12)))  ; at end, stays
+      ; end of "foo"
+      (assert= (buffer-point (forward-word b)) 3)
+      ; end of "bar"
+      (assert= (buffer-point (forward-word (forward-word b))) 7)
+      (assert= (buffer-point (forward-word (goto-char b 12))) 12)))
+  ; at start, stays
   (test "backward-word moves to the start of the previous word"
     (let (b (goto-char (make-buffer "foo bar  baz") 12))
       ; end of "baz"
-      (assert= (buffer-point (backward-word b)) 9)  ; start of "baz"
-      (assert= (buffer-point (backward-word (backward-word b))) 4)  ; start of "bar"
-      (assert= (buffer-point (backward-word (goto-char b 0))) 0)))  ; at start, stays
+      ; start of "baz"
+      (assert= (buffer-point (backward-word b)) 9)
+      ; start of "bar"
+      (assert= (buffer-point (backward-word (backward-word b))) 4)
+      (assert= (buffer-point (backward-word (goto-char b 0))) 0)))
   (test "word motion crosses lines and delimiters"
     (let (b (make-buffer "(foo\n bar)"))
-      (assert= (buffer-point (forward-word b)) 4)  ; skips '(', ends "foo"
-      (assert= (buffer-point (forward-word (forward-word b))) 9))))  ; ends "bar" before ')'
-
+      ; skips '(', ends "foo"
+      (assert= (buffer-point (forward-word b)) 4)
+      (assert= (buffer-point (forward-word (forward-word b))) 9))))
 ;; paragraphs {a,b} {c,d} {e}, blank-line separated.
 ;;  offsets: a0 b2  blank4  c5 d7  blank9  e10  (len 11)
 (describe "buffer paragraph motion (M-{ / M-})"
+  ; from inside {c,d}
   (test "forward-paragraph stops at the start of the next blank line"
     (let (txt "a\nb\n\nc\nd\n\ne")
-      (assert= (buffer-point (forward-paragraph (make-buffer txt))) 4)               ; from line 0
-      (assert= (buffer-point (forward-paragraph (goto-char (make-buffer txt) 8))) 9)))  ; from inside {c,d}
+      ; from line 0
+      (assert= (buffer-point (forward-paragraph (make-buffer txt))) 4)
+      (assert= (buffer-point (forward-paragraph (goto-char (make-buffer txt) 8))) 9)))
   (test "forward-paragraph in the last paragraph lands at end of buffer"
     (assert= (buffer-point (forward-paragraph (goto-char (make-buffer "a\nb\n\nc\nd\n\ne") 10))) 11))
+  ; from {c,d} start → {a,b}
   (test "backward-paragraph goes to the current paragraph's start, then the previous"
     (let (txt "a\nb\n\nc\nd\n\ne")
-      (assert= (buffer-point (backward-paragraph (goto-char (make-buffer txt) 8))) 5)   ; from inside {c,d}
-      (assert= (buffer-point (backward-paragraph (goto-char (make-buffer txt) 5))) 0)))  ; from {c,d} start → {a,b}
+      ; from inside {c,d}
+      (assert= (buffer-point (backward-paragraph (goto-char (make-buffer txt) 8))) 5)
+      (assert= (buffer-point (backward-paragraph (goto-char (make-buffer txt) 5))) 0)))
   (test "backward-paragraph at buffer start stays at 0"
     (assert= (buffer-point (backward-paragraph (make-buffer "a\nb\n\nc"))) 0)))
 
@@ -193,10 +209,11 @@
       (assert= (substring (buffer-text b) lo hi) (buffer-region b)))))
 
 (describe "replace-region (the splice primitive)"
+  ; 6 + len("there")
   (test "replaces [start,end) with the string, point after the insert"
     (let (b (replace-region (make-buffer "hello world") 6 11 "there"))
       (assert= (buffer-text b) "hello there")
-      (assert= (buffer-point b) 11)))   ; 6 + len("there")
+      (assert= (buffer-point b) 11)))
   (test "an empty replacement deletes the range"
     (assert= (buffer-text (replace-region (make-buffer "abcdef") 1 4 "")) "aef"))
   (test "an empty range inserts at the point"
@@ -205,16 +222,19 @@
 (describe "line-wise region ops"
   (test "region-line-range is the current line when there's no mark"
     (assert= (region-line-range (-> (make-buffer "a\nb\nc") (goto-char 2))) [1 1]))
+  ; covers lines 0–1
   (test "region-line-range spans the region's lines"
     (assert= (region-line-range (-> (make-buffer "a\nb\nc\nd") (goto-char 0) set-mark (goto-char 4)))
-      [0 1]))   ; covers lines 0–1
+      [0 1]))
   (test "a region ending at a line start doesn't pull that trailing line in"
     ;; "a\nb\nc": mark 0, point 4 = start of line 2 → range is lines 0–1, not 0–2
     (assert= (region-line-range (-> (make-buffer "a\nb\nc") (goto-char 0) set-mark (goto-char 4)))
       [0 1]))
   (test "map-region-lines threads the buffer over each line in range"
     ;; prefix every line of the region with '> '
-    (let (b (-> (make-buffer "a\nb\nc") (goto-char 0) set-mark (goto-char 3))  ; lines 0–1
+    (let (
+          ; lines 0–1
+          b (-> (make-buffer "a\nb\nc") (goto-char 0) set-mark (goto-char 3))
           out (map-region-lines b
                 (fn (bb l) (insert (goto-char bb (rope-line->char (buffer-rope bb) l)) "> "))))
       (assert= (buffer-text out) "> a\n> b\nc"))))
@@ -224,12 +244,20 @@
     (let (b (-> (make-buffer "abcdef") (goto-char 3) push-mark))
       (assert= (buffer-mark b) 3)
       (assert= (get b :mark-ring) (list 3))))
+  ; ring cycles
   (test "pop-mark moves point to the newest ring entry, rotating it to the back"
-    (let (b (-> (make-buffer "abcdef") (goto-char 2) push-mark (goto-char 5) push-mark (goto-char 0))
+    (let (b (-> (make-buffer "abcdef")
+              (goto-char 2)
+              push-mark
+              (goto-char 5)
+              push-mark
+              (goto-char 0))
           p1 (pop-mark b))
-      (assert= (buffer-point p1) 5)                 ; newest mark first
-      (assert= (buffer-point (pop-mark p1)) 2)      ; then the older one
-      (assert= (buffer-point (pop-mark (pop-mark p1))) 5)))  ; ring cycles
+      ; newest mark first
+      (assert= (buffer-point p1) 5)
+      ; then the older one
+      (assert= (buffer-point (pop-mark p1)) 2)
+      (assert= (buffer-point (pop-mark (pop-mark p1))) 5)))
   (test "pop-mark is a no-op on an empty ring"
     (assert= (buffer-point (pop-mark (goto-char (make-buffer "abc") 1))) 1)))
 
@@ -246,6 +274,7 @@
       (assert= (buffer-search-backward b "abc" 0) nil)
       (assert= (buffer-search-backward b "zzz" 7) nil))))
 
+; amalgamated: one step
 (describe "buffer undo (tree)"
   (test "undo restores the text and point before the last edit"
     (let (b (-> (make-buffer "hello") (goto-char 5) (insert "!"))
@@ -253,33 +282,47 @@
       (assert= (buffer-text b) "hello!")
       (assert= (buffer-text u) "hello")
       (assert= (buffer-point u) 5)))
+  ; undo, then undo-the-undo = redo
   (test "undoing an undo redoes it (undo is itself recorded — the tree)"
     ;; `undo` always begins a fresh run, so a second standalone undo reverses direction.
     (let (b (-> (make-buffer "hi") end-of-buffer (insert "!")))
       (assert= (buffer-text (undo b)) "hi")
-      (assert= (buffer-text (-> b undo undo)) "hi!")))   ; undo, then undo-the-undo = redo
+      (assert= (buffer-text (-> b undo undo)) "hi!")))
+  ; fresh run now redoes
   (test "undo-start + undo-next walk groups; a fresh start reverses direction (redo)"
-    (let (b (-> (make-buffer "") (insert "a") (insert "b") (insert "c"))  ; 3 separate edits
-          back1 (undo-next (undo-start b))                ; -> "ab"
-          back2 (undo-next back1)                         ; continue -> "a"
-          back3 (undo-next back2))                        ; continue -> ""
+    (let (
+          ; 3 separate edits
+          b (-> (make-buffer "") (insert "a") (insert "b") (insert "c"))
+          ; -> "ab"
+          back1 (undo-next (undo-start b))
+          ; continue -> "a"
+          back2 (undo-next back1)
+          back3 (undo-next back2))
+      ; continue -> ""
       (assert= (buffer-text back1) "ab")
       (assert= (buffer-text back2) "a")
       (assert= (buffer-text back3) "")
-      (assert= (buffer-text (undo-next (undo-start back3))) "a")))  ; fresh run now redoes
+      (assert= (buffer-text (undo-next (undo-start back3))) "a")))
+  ; "ab" still in history
   (test "no state is lost: an edit after undo leaves the old branch reachable"
-    (let (b (-> (make-buffer "") (insert "a") (insert "b"))  ; "ab"
-          u (undo b)                                          ; "a" (undid "b")
-          branched (insert u "z"))                            ; "az" — a new branch
+    (let (
+          ; "ab"
+          b (-> (make-buffer "") (insert "a") (insert "b"))
+          ; "a" (undid "b")
+          u (undo b)
+          branched (insert u "z"))
+      ; "az" — a new branch
       (assert= (buffer-text branched) "az")
-      (is (includes? (map buffer-text (get branched :undo)) "ab"))))  ; "ab" still in history
+      (is (includes? (map buffer-text (get branched :undo)) "ab"))))
   (test "undo with no history is a no-op"
     (assert= (buffer-text (undo (make-buffer "abc"))) "abc"))
+  ; undo reaches the real edit
   (test "a no-op edit records nothing (undo skips past it)"
     (let (b (-> (make-buffer "ab") (insert "X"))
-          noop (delete-char (end-of-buffer b)))   ; delete at end → unchanged
+          noop (delete-char (end-of-buffer b)))
+      ; delete at end → unchanged
       (assert= (buffer-text noop) "Xab")
-      (assert= (buffer-text (undo noop)) "ab")))   ; undo reaches the real edit
+      (assert= (buffer-text (undo noop)) "ab")))
   (test "undoing a region delete restores the text and the mark"
     (let (b (-> (make-buffer "abcdef") (goto-char 1) set-mark (goto-char 4) delete-region)
           u (undo b))
@@ -287,24 +330,26 @@
       (assert= (buffer-text u) "abcdef")
       (assert= (buffer-mark u) 1)
       (assert= (buffer-point u) 4)))
+  ; undoing `a` left `c` untouched
   (test "two buffers keep independent histories"
     (let (a (-> (make-buffer "") (insert "a"))
           c (-> (make-buffer "") (insert "c")))
       (assert= (buffer-text (undo a)) "")
-      (assert= (buffer-text c) "c")))  ; undoing `a` left `c` untouched
+      (assert= (buffer-text c) "c")))
   (test "disable-undo stops recording (a log buffer), so undo is a no-op"
     (let (b (-> (disable-undo (make-buffer "")) (insert "a") (insert "b")))
       (assert= (buffer-text b) "ab")
-      (assert= (get b :undo) ())  ; nothing recorded
+      ; nothing recorded
+      (assert= (get b :undo) ())
       (assert= (buffer-text (undo b)) "ab")))
   (test "amalgamate-undo merges the next edit into the current group (one undo step)"
     ;; by default each insert is its own step (undo → \"a\"); amalgamate-undo before the
     ;; second insert coalesces the run so one undo reverses both.
     (let (per-op (-> (make-buffer "") (insert "a") (insert "b"))
           merged (-> (make-buffer "") (insert "a") amalgamate-undo (insert "b")))
-      (assert= (buffer-text (undo per-op)) "a")    ; default: per-op
-      (assert= (buffer-text (undo merged)) ""))))   ; amalgamated: one step
-
+      ; default: per-op
+      (assert= (buffer-text (undo per-op)) "a")
+      (assert= (buffer-text (undo merged)) ""))))
 (describe "buffer file round-trip"
   (test "buffer-from-file reads, save-buffer writes back"
     (let (path (str (temp-dir "brood-buf-") ".txt"))
@@ -327,11 +372,16 @@
         (assert= (buffer-text b) "hi\n")
         (assert= (buffer-file b) path))))
   (test "find-file-buffer on a missing path is an empty buffer backed by it"
-    (let (path (str (temp-dir "brood-buf-") "-new.txt")  ; temp-dir creates the file…
-          gone (str path ".absent"))                      ; …so use a path that doesn't exist
+    (let (
+          ; temp-dir creates the file…
+          path (str (temp-dir "brood-buf-") "-new.txt")
+          gone (str path ".absent"))
+      ; …so use a path that doesn't exist
       (let (b (find-file-buffer gone))
-        (assert= (buffer-text b) "")          ; empty — not an error
-        (assert= (buffer-file b) gone)        ; backed by the path, so save creates it
+        ; empty — not an error
+        (assert= (buffer-text b) "")
+        ; backed by the path, so save creates it
+        (assert= (buffer-file b) gone)
         (save-buffer (insert b "made"))
         (assert= (buffer-text (find-file-buffer gone)) "made")))))
 
@@ -384,22 +434,24 @@
   (test "buffer-edit-value: delete a span and get its text back in one round-trip"
     (let (bp (spawn-buffer (make-buffer "hello world")))
       (assert= (buffer-edit-value bp
-                 (fn (b) [(delete-char (goto-char b 0) 6)
-                          (substring (buffer-text b) 0 6)]))
+                 (fn (b)
+                   [(delete-char (goto-char b 0) 6) (substring (buffer-text b) 0 6)]))
         "hello ")
       (assert= (buffer-query bp buffer-text) "world")
       (stop-buffer bp)))
 
   (test "buffer-edit-reply is totally ordered with a splice sent just before it"
     (let (bp (spawn-buffer (make-buffer "ab")))
-      (buffer-splice bp 2 2 "cd" nil)                  ; async — but same-sender ordered
+      ; async — but same-sender ordered
+      (buffer-splice bp 2 2 "cd" nil)
       (assert= (buffer-edit-value bp (fn (b) [b (buffer-text b)])) "abcd")
       (stop-buffer bp)))
 
   (test "an edit-reply's push carries its origin (the echo-suppression tag)"
     (let (bp (spawn-buffer (make-buffer "x")))
       (subscribe-buffer bp buffer-text)
-      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))      ; drain the seed
+      ; drain the seed
+      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))
       (buffer-edit-value bp (fn (b) [(insert b "!") :done]) :me)
       (assert= (receive ([:buffer-updated _bp _ _ o] o) (after 2000 :none)) :me)
       (stop-buffer bp)))
@@ -411,11 +463,14 @@
   ;; column too far (server "axbycd" vs the typist's "axybcd" — the double-shift).
   (test "a based splice is not transformed over the sender's own earlier splices"
     (let (bp (spawn-buffer (make-buffer "abcd")))
-      (buffer-splice bp 1 1 "x" :me 0)              ; local: "axbcd"
-      (buffer-splice bp 2 2 "y" :me 0)              ; local: "axybcd", echo1 not yet folded
+      ; local: "axbcd"
+      (buffer-splice bp 1 1 "x" :me 0)
+      ; local: "axybcd", echo1 not yet folded
+      (buffer-splice bp 2 2 "y" :me 0)
       (assert= (buffer-query bp buffer-text) "axybcd")
       ;; …while a DIFFERENT origin's stale-based splice still transforms over :me's
-      (buffer-splice bp 1 1 "Z" :other 0)           ; computed against "abcd" → shifts past x,y
+      ; computed against "abcd" → shifts past x,y
+      (buffer-splice bp 1 1 "Z" :other 0)
       (assert= (buffer-query bp buffer-text) "axyZbcd")
       (stop-buffer bp)))
 
@@ -438,7 +493,8 @@
   (test "[:io-write] pushes an end-append splice delta to subscribers"
     (let (bp (spawn-buffer (make-buffer "ab")))
       (subscribe-buffer bp buffer-text)
-      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))      ; drain the seed
+      ; drain the seed
+      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))
       (send bp [:io-write "cd"])
       (let (view (receive ([:buffer-updated _bp _ v _] v) (after 2000 :none)))
         (assert= (get view :splice) [2 2 "cd"]))
@@ -449,9 +505,12 @@
   ;; a concurrent edit (an insert at the old end lands after the appended line).
   (test "a based splice computed before an [:io-write] transforms over the append"
     (let (bp (spawn-buffer (make-buffer "ab")))
-      (send bp [:io-write "cd"])                       ; v1: "abcd"
-      (buffer-splice bp 2 2 "X" nil 0)                 ; computed at v0 against "ab": insert at its end
-      (assert= (buffer-query bp buffer-text) "abcdX")  ; shifted past the append, not "abXcd"
+      ; v1: "abcd"
+      (send bp [:io-write "cd"])
+      ; computed at v0 against "ab": insert at its end
+      (buffer-splice bp 2 2 "X" nil 0)
+      ; shifted past the append, not "abXcd"
+      (assert= (buffer-query bp buffer-text) "abcdX")
       (stop-buffer bp)))
 
   ;; The point of it all: a std/log process-backend streams log lines into a buffer
@@ -462,7 +521,8 @@
           lg (log/start-logger {:level :info :backends [(log/process-backend bp)]}))
       (log/log-info "server up")
       (log/log-warn "disk low")
-      (proc/gen/gen-call lg :config)   ; the logger has now dispatched both casts → bp
+      ; the logger has now dispatched both casts → bp
+      (proc/gen/gen-call lg :config)
       (let (txt (buffer-query bp buffer-text))
         (is (string-contains? txt "server up"))
         (is (string-contains? txt "disk low")))
@@ -471,53 +531,68 @@
 
 ;; Markers — named positions the editing ops keep in sync as text shifts. Pure (no process).
 (describe "markers — positions that survive edits"
+  ; +2 (insert before it)
   (test "a marker after an insertion point shifts right with the text"
-    (let (b (buffer-marker-set (make-buffer "hello world") :m 6))       ; at "world"
+    (let (b (buffer-marker-set (make-buffer "hello world") :m 6))
+      ; at "world"
       (assert= (buffer-marker b :m) 6)
-      (assert= (buffer-marker (insert (goto-char b 0) "XY") :m) 8)))    ; +2 (insert before it)
+      (assert= (buffer-marker (insert (goto-char b 0) "XY") :m) 8)))
   (test "a marker before an insertion point is unchanged"
     (let (b (buffer-marker-set (make-buffer "hello world") :m 2))
       (assert= (buffer-marker (insert (goto-char b 6) "XY") :m) 2)))
   (test "left-gravity: an insert exactly at a marker leaves it put"
     (let (b (buffer-marker-set (make-buffer "abc") :m 1))
       (assert= (buffer-marker (insert (goto-char b 1) "Z") :m) 1)))
+  ; delete [0,3)
   (test "a delete before a marker shifts it left by the deleted width"
-    (let (b (buffer-marker-set (make-buffer "hello world") :m 8))       ; "r"
-      (assert= (buffer-marker (delete-char (goto-char b 0) 3) :m) 5)))  ; delete [0,3)
+    (let (b (buffer-marker-set (make-buffer "hello world") :m 8))
+      ; "r"
+      (assert= (buffer-marker (delete-char (goto-char b 0) 3) :m) 5)))
+  ; delete [6,10), 8 inside
   (test "a delete straddling a marker collapses it to the range start"
     (let (b (buffer-marker-set (make-buffer "hello world") :m 8))
-      (assert= (buffer-marker (delete-char (goto-char b 6) 4) :m) 6)))  ; delete [6,10), 8 inside
+      (assert= (buffer-marker (delete-char (goto-char b 6) 4) :m) 6)))
   (test "set / read / delete a marker; buffer-markers lists them"
     (let (b (buffer-marker-set (make-buffer "abcdef") :m 5))
       (assert= (buffer-markers b) {:m 5})
       (is (nil? (buffer-marker (buffer-marker-delete b :m) :m)))))
+  ; whole buffer gone
   (test "a marker read is clamped to the current length after a shrinking edit"
     (let (b (buffer-marker-set (make-buffer "abcdef") :m 5))
-      (assert= (buffer-marker (delete-char (goto-char b 0) 6) :m) 0)))  ; whole buffer gone
+      (assert= (buffer-marker (delete-char (goto-char b 0) 6) :m) 0)))
   (test "a marker-less buffer stays marker-less across edits (no :markers key added)"
     (assert= (buffer-markers (insert (make-buffer "abc") "x")) {}))
   (test "markers survive undo — reverting an insert returns the marker to its old spot"
-    (let (b (buffer-marker-set (make-buffer "hello") :m 3)   ; the 2nd 'l'
-          ins (insert (goto-char b 0) "XY"))                  ; "XYhello", :m -> 5
+    (let (
+          ; the 2nd 'l'
+          b (buffer-marker-set (make-buffer "hello") :m 3)
+          ins (insert (goto-char b 0) "XY"))
+      ; "XYhello", :m -> 5
       (assert= (buffer-marker ins :m) 5)
       (assert= (buffer-text (undo ins)) "hello")
       (assert= (buffer-marker (undo ins) :m) 3)))
   (test "markers survive redo — undo then redo restores the shifted position"
     (let (b (buffer-marker-set (make-buffer "hello") :m 3)
           ins (insert (goto-char b 0) "XY")
-          redone (undo (undo ins)))                           ; undo, then undo-the-undo = redo
+          redone (undo (undo ins)))
+      ; undo, then undo-the-undo = redo
       (assert= (buffer-text redone) "XYhello")
       (assert= (buffer-marker redone :m) 5)))
   (test "undo of a delete restores a marker the delete had collapsed"
-    (let (b (buffer-marker-set (make-buffer "hello world") :m 8)  ; "r"
-          del (delete-char (goto-char b 6) 4))                     ; delete [6,10) -> :m collapses to 6
+    (let (
+          ; "r"
+          b (buffer-marker-set (make-buffer "hello world") :m 8)
+          del (delete-char (goto-char b 6) 4))
+      ; delete [6,10) -> :m collapses to 6
       (assert= (buffer-marker del :m) 6)
       (assert= (buffer-marker (undo del) :m) 8))))
 
 ;; The push side of buffers-as-processes: subscribers get the new projection on every edit.
 (defn buf-relay-loop (bp tag report)
-  (receive ([:buffer-updated _bp v txt _] (do (send report [:relayed tag v txt])
-                                          (buf-relay-loop bp tag report)))))
+  (receive
+    ([:buffer-updated _bp v txt _] (do
+                                     (send report [:relayed tag v txt])
+                                     (buf-relay-loop bp tag report)))))
 (defn buf-relay (bp tag report)
   (do (subscribe-buffer bp buffer-text) (buf-relay-loop bp tag report)))
 (defn drain-relayed (acc)
@@ -537,9 +612,11 @@
   (test "unsubscribe-buffer stops the pushes"
     (let (bp (spawn-buffer (make-buffer "x")))
       (subscribe-buffer bp buffer-text)
-      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))      ; drain the seed
+      ; drain the seed
+      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))
       (unsubscribe-buffer bp)
-      (receive (after 200 nil))                                       ; let the unsubscribe land
+      ; let the unsubscribe land
+      (receive (after 200 nil))
       (buffer-edit bp (fn (b) (insert (end-of-buffer b) "y")))
       (assert= (receive ([:buffer-updated _bp _ _ _] :got) (after 400 :none)) :none)
       (stop-buffer bp)))
@@ -555,7 +632,8 @@
           bp (spawn-buffer (make-buffer "")))
       (spawn (buf-relay bp :a me))
       (spawn (buf-relay bp :b me))
-      (receive (after 300 nil))                                       ; let both subscribe + seed
+      ; let both subscribe + seed
+      (receive (after 300 nil))
       (buffer-edit bp (fn (b) (insert (end-of-buffer b) "Z")))
       (let (zs (filter (fn (m) (= (nth m 2) "Z")) (drain-relayed ())))
         (is (member? :a (map (fn (m) (nth m 0)) zs)))
@@ -565,7 +643,8 @@
   (test "an origin-tagged edit's push carries the origin (the echo-suppression seam)"
     (let (bp (spawn-buffer (make-buffer "hi")))
       (subscribe-buffer bp buffer-text)
-      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))    ; drain the seed
+      ; drain the seed
+      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))
       ;; untagged edit → nil origin; tagged edit → the tag comes back with the push
       (buffer-edit bp (fn (b) (insert (end-of-buffer b) "!")))
       (assert= (receive ([:buffer-updated _bp _ _ o] o) (after 2000 :none)) nil)
@@ -576,9 +655,12 @@
 
   (test "splice-transform: disjoint concurrent splices merge exactly (both orders)"
     ;; the pure transform: B computed before A landed shifts by A's length delta
-    (assert= (splice-transform [5 5 "Y"] [0 0 1]) [6 6 "Y"])   ; A inserted 1 char before B
-    (assert= (splice-transform [1 2 "z"] [5 7 0]) [1 2 "z"])   ; A strictly after B — untouched
-    (assert= (splice-transform [8 9 ""] [2 5 1]) [6 7 ""])     ; delete shifted by (1 - 3)
+    ; A inserted 1 char before B
+    (assert= (splice-transform [5 5 "Y"] [0 0 1]) [6 6 "Y"])
+    ; A strictly after B — untouched
+    (assert= (splice-transform [1 2 "z"] [5 7 0]) [1 2 "z"])
+    ; delete shifted by (1 - 3)
+    (assert= (splice-transform [8 9 ""] [2 5 1]) [6 7 ""])
     ;; overlap degrades to inserting after the applied replacement (authoritative)
     (assert= (splice-transform [3 6 "q"] [2 8 4]) [6 6 "q"])
     ;; strictness: touching spans are NOT disjoint (ambiguous → caller policy)
@@ -591,24 +673,28 @@
     ;; before X existed. With base-version transforms both land exactly.
     (let (bp (spawn-buffer (make-buffer "hello")))
       (buffer-splice bp 0 0 "X" :a 0)
-      (buffer-splice bp 5 5 "Y" :b 0)   ; stale offsets: would give \"XhellYo\" untransformed
+      ; stale offsets: would give \"XhellYo\" untransformed
+      (buffer-splice bp 5 5 "Y" :b 0)
       (assert= (buffer-query bp buffer-text) "XhelloY")
       (stop-buffer bp)))
 
   (test "buffer-splice / buffer-marker-move push DELTAS — the document never ships"
     (let (bp (spawn-buffer (make-buffer "hello")))
       (subscribe-buffer bp buffer-text)
-      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))    ; drain the seed
+      ; drain the seed
+      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))
       ;; a structured splice: the push carries [lo hi repl] + markers, not the text
       (buffer-splice bp 5 5 "!" :alice)
-      (let ([v view o] (receive ([:buffer-updated _bp v view o] [v view o])
+      (let ([v view o] (receive
+                         ([:buffer-updated _bp v view o] [v view o])
                          (after 2000 [:none :none :none])))
         (assert= (get view :splice) [5 5 "!"])
         (assert= o :alice))
       (assert= (buffer-query bp buffer-text) "hello!")
       ;; a marker move: no text, no splice — markers only
       (buffer-marker-move bp :alice 3 :alice)
-      (let ([_ view _] (receive ([:buffer-updated _bp v view o] [v view o])
+      (let ([_ view _] (receive
+                         ([:buffer-updated _bp v view o] [v view o])
                          (after 2000 [:none :none :none])))
         (is (nil? (get view :splice)))
         (assert= (get (get view :markers) :alice) 3))
@@ -621,12 +707,14 @@
     ;; so survivors see the cursor vanish rather than a ghost caret forever.
     (let (bp (spawn-buffer (make-buffer "hello")))
       (subscribe-buffer bp buffer-markers)
-      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))      ; drain our seed
+      ; drain our seed
+      (receive ([:buffer-updated _bp _ _ _] nil) (after 2000 nil))
       ;; a second participant: subscribes, plants its pid-keyed cursor, then dies
+      ; a beat, then a normal exit
       (spawn (let (me (self))
                (subscribe-buffer bp nil)
                (buffer-edit bp (fn (b) (buffer-marker-set b me 3)))
-               (receive (after 100 nil))))                            ; a beat, then a normal exit
+               (receive (after 100 nil))))
       ;; we see its cursor arrive …
       (let ([_ marks] (receive ([:buffer-updated _bp v mk _] [v mk]) (after 2000 [:none :none])))
         (assert= (count marks) 1))

@@ -7,7 +7,11 @@
 ;; isolate it from here without changing the working directory. The hand-run
 ;; equivalent — `nest new foo && cd foo && nest run` — is the integration check.
 
-(defmodule project-test (:use-internals project) (:use-internals scaffold) (:use test) (:use project))
+(defmodule project-test
+  (:use-internals project)
+  (:use-internals scaffold)
+  (:use test)
+  (:use project))
 
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-dup-")
@@ -74,11 +78,11 @@
   (test "a reserved opt is rejected so the manifest stays forward-compatible"
     (is (string-contains? (try
                             (project/project-parse-dep '[parser :git
-                                                           "https://x.git"
-                                                           :ref
-                                                           "v1"
-                                                           :branch
-                                                           "main"])
+                                                          "https://x.git"
+                                                          :ref
+                                                          "v1"
+                                                          :branch
+                                                          "main"])
                             (catch e e))
           "reserved for a future version")))
   (test "an entry that is too short is rejected"
@@ -90,12 +94,10 @@
 (describe "project: the (project ...) manifest macro treats its args as data"
   :isolated
   (test "bare dep-name symbols survive without quoting; :dependencies populates *project-dependencies*"
-    (project :name
-      "demo"
-      :version
-      "0.0.1"
-      :dependencies
-      [[parser :git "https://example.com/p.git" :ref "v1"] [shared :path "../shared"]])
+    (project
+      :name "demo"
+      :version "0.0.1"
+      :dependencies [[parser :git "https://example.com/p.git" :ref "v1"] [shared :path "../shared"]])
     (assert= *project-dependencies*
       (list {:name 'parser :kind :git :url "https://example.com/p.git" :ref "v1"}
         {:name 'shared :kind :path :path "../shared"}))))
@@ -189,13 +191,15 @@
     (let (dir (temp-dir "brood-dup-"))
       (make-dir dir)
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
-        (spit fa "(defmodule shared)\n(defn main () 1)\n(defn shared--helper () 1)\n(defn shared--dead () 1)\n(defn use-it () (shared--helper))\n")
+        (spit fa
+          "(defmodule shared)\n(defn main () 1)\n(defn shared--helper () 1)\n(defn shared--dead () 1)\n(defn use-it () (shared--helper))\n")
         (spit fb "(defmodule shared)\n(defn main () 2)\n")
         (let (files [fa fb]
               extracts (fold (fn (m p)
                                (let ([c pr dn] (project/project--scan-file-entry p))
                                  (map-assoc m p [0 c pr dn])))
-                         {} files)
+                         {}
+                         files)
               source-set (fold (fn (m p) (map-assoc m p true)) {} files))
           ;; duplicate-defs: extract path == sequential path
           (assert= (sort (project/project--duplicate-def-warnings extracts source-set))
@@ -260,10 +264,12 @@
     (let (dir (temp-dir "brood-feat-"))
       (make-dir dir)
       (let (f (path-join dir "m.blsp"))
-        (spit f "(defmodule oops \n")  ; unbalanced — won't parse
+        ; unbalanced — won't parse
+        (spit f "(defmodule oops \n")
         (is (nil? (project/project--file-feature f))))))
   ;; The fixtures below bump an *earmuffed* (root) counter on every evaluation, so
   ;; the counter is exactly how many times the file was actually loaded.
+  ; loaded once, not twice
   (test "a module another file already require'd is NOT reloaded when the walk reaches it"
     ;; aaa.blsp `:use`s zzz (loading zzz via require); the walk then reaches zzz.blsp.
     ;; The fix skips it — without it, zzz would load twice (re-defmacro, state wipe).
@@ -276,7 +282,7 @@
         (def *zzz-loads* 0)
         (project/project-setup root)
         (project/project-load-sources root)
-        (assert= *zzz-loads* 1))))            ; loaded once, not twice
+        (assert= *zzz-loads* 1))))
   (test ":skip-loaded skips an already-provided module; a later walk reloads it"
     (let (root (temp-dir "brood-skip-"))
       (make-dir root)
@@ -285,10 +291,13 @@
         (spit f "(defmodule skipfix)\n(def *skip-load-count* (inc *skip-load-count*))\n")
         (def *skip-load-count* 0)
         (project/project-setup root)
-        (project/project-load-sources root)              ; first walk: loads → 1
+        ; first walk: loads → 1
+        (project/project-load-sources root)
         (assert= *skip-load-count* 1)
         (is (member? "skipfix" *features*))
-        (project/project-load-sources root :skip-loaded) ; pre-flight: provided → skip → 1
+        ; pre-flight: provided → skip → 1
+        (project/project-load-sources root :skip-loaded)
         (assert= *skip-load-count* 1)
-        (project/project-load-sources root)              ; later walk: reloads edits → 2
+        ; later walk: reloads edits → 2
+        (project/project-load-sources root)
         (assert= *skip-load-count* 2)))))

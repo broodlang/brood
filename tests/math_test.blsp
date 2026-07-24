@@ -114,7 +114,7 @@
       (is (int? (- big big)))))
   (test "a 60-digit literal round-trips"
     (assert= 123456789012345678901234567890123456789012345678901234567890
-             (+ 123456789012345678901234567890123456789012345678901234567889 1)))
+      (+ 123456789012345678901234567890123456789012345678901234567889 1)))
   (test "bignums are transparently integers"
     (is (int? (bit-shift-left 1 200)))
     (is (number? (bit-shift-left 1 200)))

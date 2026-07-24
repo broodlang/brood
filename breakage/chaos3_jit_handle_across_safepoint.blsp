@@ -26,7 +26,8 @@
 
 ;; ---- handle-heavy helpers (the JIT targets). All tail-recursive: a `test` body
 ;;      runs in a green process whose coroutine stack is small. ----
-(defn mk (n) (str "handle-" n "-payload"))            ; fresh movable string per call
+; fresh movable string per call
+(defn mk (n) (str "handle-" n "-payload"))
 (defn combine6 (a b c d e f) (str a "|" b "|" c "|" d "|" e "|" f))
 
 ;; SIX movable handle results live simultaneously across the allocating sub-calls
@@ -35,15 +36,22 @@
 (defn pressure (n acc)
   (if (= n 0)
     acc
-    (let (r (combine6 (mk n) (mk (+ n 1)) (mk (+ n 2))
-                      (mk (+ n 3)) (mk (+ n 4)) (mk (+ n 5))))
+    (let (r (combine6 (mk n)
+              (mk (+ n 1))
+              (mk (+ n 2))
+              (mk (+ n 3))
+              (mk (+ n 4))
+              (mk (+ n 5))))
       (pressure (- n 1) (str acc (substring r 0 1))))))
 
 ;; diff--at shape: vector/map handle operands held across nth/assoc sub-calls.
 (defn vdiff (old new i n acc)
   (if (>= i n)
     acc
-    (vdiff old new (+ i 1) n
+    (vdiff old
+      new
+      (+ i 1)
+      n
       (if (= (nth old i) (nth new i))
         acc
         (assoc acc i (nth new i))))))

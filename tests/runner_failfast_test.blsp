@@ -19,6 +19,7 @@
     "crash-grp"
     (list (list "boom" (fn () (error "kaboom"))))))
 
+; and it carries a failure record
 (describe "runner reaps a dead worker"
   :isolated
   (test "a worker that dies before reporting becomes a failure, not a hang"
@@ -26,6 +27,8 @@
     ;; suite hangs (which `cargo test`/`nest test` would surface as a timeout).
     (let (results (collect-units (spawn-units (list %crashing-unit) (self)) nil)
           r (first results))
-      (assert= 1 (count results))  ; the dead unit's one test is accounted for
-      (assert= "boom" (second r))  ; its name is preserved
-      (is (not (empty? (third r)))))))  ; and it carries a failure record
+      ; the dead unit's one test is accounted for
+      (assert= 1 (count results))
+      ; its name is preserved
+      (assert= "boom" (second r))
+      (is (not (empty? (third r)))))))

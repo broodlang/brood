@@ -4,17 +4,22 @@
 (defmodule fuzzy-test (:use fuzzy) (:use test))
 
 (describe "fuzzy-match"
+  ; case-insensitive
   (test "matches a case-insensitive subsequence, reporting positions"
     (assert= (get (fuzzy-match "fb" "foo-bar") :positions) (list 0 4))
-    (assert= (get (fuzzy-match "FB" "foo-bar") :positions) (list 0 4)))  ; case-insensitive
+    (assert= (get (fuzzy-match "FB" "foo-bar") :positions) (list 0 4)))
+  ; order matters
   (test "is nil when the query is not a subsequence"
     (is (nil? (fuzzy-match "xz" "foo-bar")))
-    (is (nil? (fuzzy-match "rab" "foo-bar"))))                           ; order matters
+    (is (nil? (fuzzy-match "rab" "foo-bar"))))
   (test "the empty query matches anything, score 0"
     (assert= (fuzzy-match "" "abc") {:score 0 :positions ()}))
+  ; f@0, b@? scattered, no boundary on b
   (test "a boundary/contiguous match outscores a scattered one"
-    (is (> (get (fuzzy-match "fb" "foo-bar") :score)     ; f@0, b@4 — both word starts
-          (get (fuzzy-match "fb" "fluffball") :score))))  ; f@0, b@? scattered, no boundary on b
+    (is
+      (> (get (fuzzy-match "fb" "foo-bar") :score)
+        ; f@0, b@4 — both word starts
+        (get (fuzzy-match "fb" "fluffball") :score))))
   (test "an exact prefix scores well (contiguous + boundary + early)"
     (is (> (get (fuzzy-match "foo" "foobar") :score)
           (get (fuzzy-match "foo" "barfoo") :score)))))

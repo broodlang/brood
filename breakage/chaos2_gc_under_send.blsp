@@ -17,21 +17,20 @@
 ;;; ---- P56: BigInt round-trip via send ----
 (println "=== P56: BigInt round-trip across process boundary ===")
 (let (me (self)
-      bignum (* 999999999999999999 999999999999999999))  ; ~10^36, large BigInt
-  (spawn
-    (receive
-      ([:big n] (send me [:result (* n 2)]))
-      (after 5000 :timeout)))
+      bignum (* 999999999999999999 999999999999999999))
+  ; ~10^36, large BigInt
+  (spawn (receive
+           ([:big n] (send me [:result (* n 2)]))
+           (after 5000 :timeout)))
   ;; Capture the spawned pid — use a reference via the next spawn trick
-  )
+)
 
 ;; Cleaner: capture pid from spawn's return value
 (let (me (self)
       bignum (* 999999999999999999 999999999999999999))
-  (let (worker (spawn
-                 (receive
-                   ([:big n] (send me [:result (* n 2)]))
-                   (after 5000 :timeout))))
+  (let (worker (spawn (receive
+                        ([:big n] (send me [:result (* n 2)]))
+                        (after 5000 :timeout))))
     (send worker [:big bignum])
     (let (r (receive ([:result v] v) (after 5000 :timeout)))
       (println "P56: sent:" bignum)
@@ -42,18 +41,17 @@
 (println "=== P57: 10k-element list round-trip ===")
 (let (me (self)
       deep-list (range 1 10001))
-  (let (worker (spawn
-                 (receive
-                   ([:list xs]
-                     (let (s (fold (fn (a v) (+ a v)) 0 xs))
-                       (send me [:sum s (count xs)])))
-                   (after 10000 :timeout))))
+  (let (worker (spawn (receive
+                        ([:list xs] (let (s (fold (fn (a v) (+ a v)) 0 xs))
+                                      (send me [:sum s (count xs)])))
+                        (after 10000 :timeout))))
     (send worker [:list deep-list])
     (let (r (receive ([:sum s c] [s c]) (after 10000 :timeout)))
       (println "P57: sum=" (get r 0) "count=" (get r 1))
       (println "P57-correct:"
-               (and (= 50005000 (get r 0))  ; 1+2+...+10000 = 10000*10001/2
-                    (= 10000 (get r 1)))))))
+        (and (= 50005000 (get r 0))
+          ; 1+2+...+10000 = 10000*10001/2
+          (= 10000 (get r 1)))))))
 
 ;;; ---- P58: map of closures shipped cross-process ----
 (println "=== P58: map of 500 closures with captured BigInt ===")
@@ -76,9 +74,9 @@
       (println "P58: [250]=" (get r 1) "expected:" (+ big-base 250))
       (println "P58: [499]=" (get r 2) "expected:" (+ big-base 499))
       (println "P58-correct:"
-               (and (= (+ big-base 0)   (get r 0))
-                    (= (+ big-base 250) (get r 1))
-                    (= (+ big-base 499) (get r 2)))))))
+        (and (= (+ big-base 0) (get r 0))
+          (= (+ big-base 250) (get r 1))
+          (= (+ big-base 499) (get r 2)))))))
 
 ;;; ---- P59: allocation storm while sending ----
 (println "=== P59: alloc storm during concurrent sends ===")
@@ -92,7 +90,8 @@
                      (if (= n 0)
                        (send me [:p59 acc])
                        ;; Interleave allocation with receive
-                       (let (_ (range (rem n 100)))  ; allocate a small list
+                       (let (_ (range (rem n 100)))
+                         ; allocate a small list
                          (let (msg (receive
                                      ([:val v] v)
                                      (after 0 nil)))
@@ -112,12 +111,11 @@
 (let (me (self)
       n-senders 50
       msgs-each 100)
-  (let (receiver (spawn
-                   (defn drain-60 (expected acc)
-                     (if (= expected 0)
-                       (send me [:p60 acc])
-                       (let (v (receive (v v) (after 10000 :timeout)))
-                         (drain-60 (- expected 1) (+ acc (if (int? v) v 0))))))
+  (let (receiver (spawn (defn drain-60 (expected acc)
+                          (if (= expected 0)
+                            (send me [:p60 acc])
+                            (let (v (receive (v v) (after 10000 :timeout)))
+                              (drain-60 (- expected 1) (+ acc (if (int? v) v 0))))))
                    (drain-60 (* n-senders msgs-each) 0)))
     ;; Spawn senders
     (dotimes (i n-senders)

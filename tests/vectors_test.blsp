@@ -19,9 +19,10 @@
 (describe "assoc on a vector (by integer index)"
   (test "replaces a single element"
     (assert= (assoc [10 20 30] 1 99) [10 99 30]))
+  ; later pair to same index wins
   (test "replaces several indices left to right"
     (assert= (assoc [10 20 30] 0 :a 2 :c) [:a 20 :c])
-    (assert= (assoc [0 0 0] 0 1 1 2 2 3 0 9) [9 2 3]))   ; later pair to same index wins
+    (assert= (assoc [0 0 0] 0 1 1 2 2 3 0 9) [9 2 3]))
   (test "first and last index"
     (assert= (assoc [1 2 3] 0 :x) [:x 2 3])
     (assert= (assoc [1 2 3] 2 :z) [1 2 :z]))
@@ -89,7 +90,8 @@
     (send parent (fold (fn (v i) (assoc v i (* i i))) z (vt-range 0 5)))))
 
 (defn vt-collect (got total acc)
-  (if (= got total) acc
+  (if (= got total)
+    acc
     (vt-collect (+ got 1) total (receive (v (cons v acc))))))
 
 (defn vt-spawn-builders (parent n)
@@ -124,11 +126,13 @@
     (let (v [1 2] v2 (conj v 3 4))
       (do (assert= v2 [1 2 3 4]) (is (vector? v2)) (assert= v [1 2]) true)))
   (test "prepends to a list; nil is the empty list"
-    (do (assert= (conj (list 2 3) 1) (list 1 2 3))
+    (do
+      (assert= (conj (list 2 3) 1) (list 1 2 3))
       (assert= (conj nil 1) (list 1))
       true))
   (test "assocs a [k v] pair or merges a map into a map"
-    (do (assert= (conj {:a 1} [:b 2]) {:a 1 :b 2})
+    (do
+      (assert= (conj {:a 1} [:b 2]) {:a 1 :b 2})
       (assert= (conj {:a 1} {:b 2 :c 3}) {:a 1 :b 2 :c 3})
       (assert= (try (conj {:a 1} 5) (catch e :err)) :err)
       true))

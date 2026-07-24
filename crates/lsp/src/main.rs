@@ -754,7 +754,7 @@ fn params<P: serde::de::DeserializeOwned>(not: ServerNotification) -> Option<P> 
 }
 
 mod uri;
-pub(crate) use uri::{uri_to_path, path_to_uri};
+pub(crate) use uri::{path_to_uri, uri_to_path};
 
 #[cfg(test)]
 #[path = "uri_tests.rs"]
@@ -763,7 +763,6 @@ mod uri_tests;
 #[cfg(test)]
 #[path = "diagnostic_tests.rs"]
 mod diagnostic_tests;
-
 
 /// Walk up from `file_path` looking for a directory containing `project.blsp`,
 /// the project root marker. `None` if the file isn't inside a Brood project.

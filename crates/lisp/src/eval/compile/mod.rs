@@ -2148,7 +2148,6 @@ fn jit_ckpt_depth(_code: &[Inst], _self_name: Option<Symbol>) -> Option<usize> {
     None
 }
 
-
 #[test]
 fn test_inst_size() {
     // Not an assertion — just surfaces the IR `Inst` size in test output (a

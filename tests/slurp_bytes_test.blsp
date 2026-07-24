@@ -19,7 +19,8 @@
 (describe "slurp-bytes: text files"
   (test "returns a bytes value equal to the file's UTF-8 bytes"
     (let (p (path-join (sb-tmp) "t.txt"))
-      (spit p "héllo")                       ; 'é' is two UTF-8 bytes
+      ; 'é' is two UTF-8 bytes
+      (spit p "héllo")
       (let (bs (slurp-bytes p))
         (is (bytes? bs))
         (assert= bs (string->utf8-bytes "héllo")))))
@@ -30,7 +31,7 @@
     (let (p (path-join (sb-tmp) "src.blsp"))
       (spit p "(defn f (x) (* x x))\n")
       (assert= (hash/sha256-bytes (slurp-bytes p))
-               (hash/sha256 (slurp p))))))
+        (hash/sha256 (slurp p))))))
 
 (describe "slurp-bytes: binary files (what slurp can't read)"
   :isolated
@@ -52,10 +53,10 @@
     (let (path (path-join (sb-tmp) "blob2.bin"))
       (sb-write-binary path)
       (assert= "93a574562e1a3a9d1d3532381b3e3fab4679e0a1fd5de5794e91e8ddee34cca9"
-               (hash/sha256-bytes (slurp-bytes path)))
+        (hash/sha256-bytes (slurp-bytes path)))
       ;; and the raw-byte digest agrees (hex of it == the hex digest)
       (assert= "93a574562e1a3a9d1d3532381b3e3fab4679e0a1fd5de5794e91e8ddee34cca9"
-               (encoding/hex-encode-bytes (hash/sha256-raw (slurp-bytes path)))))))
+        (encoding/hex-encode-bytes (hash/sha256-raw (slurp-bytes path)))))))
 
 (describe "spit-bytes: byte-faithful file writes (the write side of slurp-bytes)"
   (test "round-trips a bytes value (spit accepts it too — ADR-139 iolists)"
@@ -70,20 +71,25 @@
 
   (test "writes non-UTF-8 bytes directly — no printf subprocess needed"
     (let (p (path-join (sb-tmp) "raw.bin"))
-      (spit-bytes p [255 128 65])                ; 0xFF 0x80 is not valid UTF-8
-      (assert-error (slurp p))                   ; so slurp can't read it back
+      ; 0xFF 0x80 is not valid UTF-8
+      (spit-bytes p [255 128 65])
+      ; so slurp can't read it back
+      (assert-error (slurp p))
       (assert= (into [] (slurp-bytes p)) [255 128 65])
       ;; byte-for-byte faithful: the digest matches the OS sha256 of those bytes
       (assert= "93a574562e1a3a9d1d3532381b3e3fab4679e0a1fd5de5794e91e8ddee34cca9"
-               (hash/sha256-bytes (slurp-bytes p)))))
+        (hash/sha256-bytes (slurp-bytes p)))))
 
   (test "accepts a bytes value, a vector, or a list of byte ints alike"
     (let (p (path-join (sb-tmp) "seq.bin"))
-      (spit-bytes p (list 104 105))              ; a list → "hi"
+      ; a list → "hi"
+      (spit-bytes p (list 104 105))
       (assert= (slurp p) "hi")
-      (spit-bytes p [104 105])                   ; a vector → "hi"
+      ; a vector → "hi"
+      (spit-bytes p [104 105])
       (assert= (slurp p) "hi")
-      (spit-bytes p (string->utf8-bytes "hi"))   ; a bytes value → "hi"
+      ; a bytes value → "hi"
+      (spit-bytes p (string->utf8-bytes "hi"))
       (assert= (slurp p) "hi")))
 
   (test "a byte int out of 0–255 range is rejected, not silently truncated"

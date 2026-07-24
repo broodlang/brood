@@ -615,4 +615,3 @@ pub(crate) fn vm_apply(
         }
     }
 }
-

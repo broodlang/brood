@@ -67,7 +67,7 @@
 (describe "quantile"
   (test "0.5 quantile = 50th percentile"
     (assert= (stats/quantile [1 2 3 4 5] 0.5)
-             (stats/percentile [1 2 3 4 5] 50))))
+      (stats/percentile [1 2 3 4 5] 50))))
 
 (describe "min, max, range-of"
   (test "stats-min / stats-max"

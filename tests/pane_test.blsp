@@ -21,27 +21,27 @@
   (pane-split (pane-split (pane-single {:buf 0}) :row {:buf 2}) :col {:buf 1}))
 
 (describe "construction & structure"
+  ; () prints as nil — the root path
   (test "a lone pane is one selected leaf"
     (let (t (pane-single {:buf 0}))
       (is (pane-leaf? t))
       (assert= (pane-count t) 1)
       (assert= (pane-selected-payload t) {:buf 0})
-      (assert= (pane-selected-path t) nil)))  ; () prints as nil — the root path
-
+      (assert= (pane-selected-path t) nil)))
+  ; point stays on the original
   (test "splitting the selected pane adds a leaf and keeps the original selected"
     (let (t (pane-split (pane-single {:buf 0}) :col {:buf 1}))
       (assert= (pane-count t) 2)
       (is (not (pane-leaf? t)))
-      (assert= (pane-selected-payload t) {:buf 0})))  ; point stays on the original
-
+      (assert= (pane-selected-payload t) {:buf 0})))
   (test "leaves are ordered a-before-b across nesting"
     (assert= (pane-leaf-paths (wt-tree3)) (list (list :a :a) (list :a :b) (list :b))))
 
+  ; the surviving sibling
   (test "delete removes the selected pane; sibling takes the space"
     (let (t (pane-delete (pane-split (pane-single {:buf 0}) :col {:buf 1})))
       (assert= (pane-count t) 1)
-      (assert= (pane-selected-payload t) {:buf 1})))  ; the surviving sibling
-
+      (assert= (pane-selected-payload t) {:buf 1})))
   (test "deleting the only pane is a no-op"
     (let (t (pane-single {:buf 0}))
       (assert= (pane-delete t) t)))
@@ -61,13 +61,15 @@
   (test ":col splits width and reserves one column for the divider"
     (let (l (pane-layout (pane-split (pane-single {:buf 0}) :col {:buf 1}) [0 0 80 24])
           rects (map (fn (p) (get p :rect)) (get l :panes)))
-      (assert= rects (list [0 0 40 24] [41 0 39 24]))  ; 40 + 1 divider + 39 = 80
+      ; 40 + 1 divider + 39 = 80
+      (assert= rects (list [0 0 40 24] [41 0 39 24]))
       (assert= (get (first (get l :dividers)) :rect) [40 0 1 24])))
 
   (test ":row splits height and reserves one row for the divider"
     (let (l (pane-layout (pane-split (pane-single {:buf 0}) :row {:buf 1}) [0 0 80 24])
           rects (map (fn (p) (get p :rect)) (get l :panes)))
-      (assert= rects (list [0 0 80 12] [0 13 80 11]))  ; 12 + 1 divider + 11 = 24
+      ; 12 + 1 divider + 11 = 24
+      (assert= rects (list [0 0 80 12] [0 13 80 11]))
       (assert= (get (first (get l :dividers)) :rect) [0 12 80 1])))
 
   (test "exactly one pane is flagged selected"
@@ -77,32 +79,31 @@
       (assert= (get (first sel) :payload) {:buf 0}))))
 
 (describe "selection"
+  ; (:a :a) again
   (test "pane-other cycles in traversal order and wraps"
     (let (t0 (wt-tree3)
-           ; selected buf 0 at (:a :a)
-           t1
-           (pane-other t0)
-           t2
-           (pane-other t1)
-           t3
-           (pane-other t2))
+          ; selected buf 0 at (:a :a)
+          t1 (pane-other t0)
+          t2 (pane-other t1)
+          t3 (pane-other t2))
       ; wraps back
-      (assert= (pane-selected-payload t1) {:buf 1})  ; (:a :b)
-      (assert= (pane-selected-payload t2) {:buf 2})  ; (:b)
-      (assert= (pane-selected-payload t3) {:buf 0})))  ; (:a :a) again
-
+      ; (:a :b)
+      (assert= (pane-selected-payload t1) {:buf 1})
+      ; (:b)
+      (assert= (pane-selected-payload t2) {:buf 2})
+      (assert= (pane-selected-payload t3) {:buf 0})))
   (test "pane-update-selected touches only the selected pane's payload"
     (let (t (pane-update-selected (wt-tree3) (fn (p) (assoc p :top 5))))
       (assert= (pane-selected-payload t) {:buf 0 :top 5})
       ;; the next pane is untouched
       (assert= (pane-selected-payload (pane-other t)) {:buf 1})))
 
+  ; selection (buf 0) unchanged
   (test "pane-update-path touches the pane at a path, leaving selection put"
     (let (t (pane-update-path (wt-tree3) (list :b) (fn (p) (assoc p :top 9))))
       ;; (:b) is buf 2 — reach it via pane-other×2; selection itself stays buf 0
       (assert= (pane-selected-payload (pane-other (pane-other t))) {:buf 2 :top 9})
-      (assert= (pane-selected-payload t) {:buf 0})))  ; selection (buf 0) unchanged
-
+      (assert= (pane-selected-payload t) {:buf 0})))
   (test "pane-payload-at reads the payload at a path (the getter half of update-path)"
     (let (t (wt-tree3))
       ;; each leaf by its path — the read sibling of pane-update-path / pane-selected-payload
@@ -122,35 +123,35 @@
       (assert= (list p0 p1 p2) (list {:buf 1} {:buf 2} {:buf 3}))
       (assert= (pane-selected-payload t) {:buf 1}))))
 
+; pane a still at least 1 col wide
 (describe "drag-to-resize (over :drag mouse points, [row col])"
+  ; inside pane a, not a divider
   (test "divider-at finds the divider under a point, nil off it"
     (let (l (pane-layout (pane-split (pane-single {:buf 0}) :col {:buf 1}) [0 0 80 24]))
-      (assert= (get (divider-at l [10 40]) :dir) :col)  ; on the divider column
-      (assert= (divider-at l [10 5]) nil)))  ; inside pane a, not a divider
-
+      ; on the divider column
+      (assert= (get (divider-at l [10 40]) :dir) :col)
+      (assert= (divider-at l [10 5]) nil)))
+  ; left pane
   (test "a click selects the pane under it"
     (let (tree (pane-split (pane-single {:buf 0}) :col {:buf 1})
           l (pane-layout tree [0 0 80 24]))
-      (assert= (pane-selected-payload (pane-select-at tree l [10 60])) {:buf 1})  ; right pane
-      (assert= (pane-selected-payload (pane-select-at tree l [10 5])) {:buf 0})))  ; left pane
-
+      ; right pane
+      (assert= (pane-selected-payload (pane-select-at tree l [10 60])) {:buf 1})
+      (assert= (pane-selected-payload (pane-select-at tree l [10 5])) {:buf 0})))
+  ; boundary dragged from 40 to 20
   (test "dragging a divider moves the boundary to the pointer"
     (let (tree (pane-split (pane-single {:buf 0}) :col {:buf 1})
           l (pane-layout tree [0 0 80 24])
           dv (divider-at l [10 40])
           tree2 (pane-set-ratio tree (get dv :path) (pane-ratio-for dv [10 20]))
           rects (map (fn (p) (get p :rect)) (get (pane-layout tree2 [0 0 80 24]) :panes)))
-      (assert= rects (list [0 0 20 24] [21 0 59 24]))))  ; boundary dragged from 40 to 20
-
+      (assert= rects (list [0 0 20 24] [21 0 59 24]))))
   (test "the ratio is clamped so neither pane vanishes"
     (let (tree (pane-split (pane-single {:buf 0}) :col {:buf 1})
-           ;; drag way past the left edge — ratio 0.0 would zero pane a
-           tiny
-           (pane-set-ratio tree nil 0.0)
-           aw
-           (get (first (get (pane-layout tiny [0 0 80 24]) :panes)) :rect))
-      (is (>= (nth aw 2) 1)))))  ; pane a still at least 1 col wide
-
+          ;; drag way past the left edge — ratio 0.0 would zero pane a
+          tiny (pane-set-ratio tree nil 0.0)
+          aw (get (first (get (pane-layout tiny [0 0 80 24]) :panes)) :rect))
+      (is (>= (nth aw 2) 1)))))
 (describe "pane layout across processes"
   :isolated
 
@@ -159,12 +160,13 @@
       (send w t)
       (assert= (receive) t)))
 
+  ; sender's tree still 3
   (test "a worker restructures its own copy; the sender's tree is unaffected"
     (let (me (self) w (spawn (wt-splitter me)) t (wt-tree3))
       (send w t)
-      (assert= (receive) 4)  ; worker split its copy: 3 -> 4 leaves
-      (assert= (pane-count t) 3)))  ; sender's tree still 3
-
+      ; worker split its copy: 3 -> 4 leaves
+      (assert= (receive) 4)
+      (assert= (pane-count t) 3)))
   (test "many workers each lay out a sent tree and report the same pane count"
     (let (me (self) t (wt-tree3))
       ;; spawn is a macro: pass the work expression directly (it captures me + t)

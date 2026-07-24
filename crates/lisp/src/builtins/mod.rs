@@ -21,8 +21,8 @@ mod selfhost_macros;
 mod sequences;
 mod syntax_scan;
 mod system;
-mod tooling;
 mod terminal;
+mod tooling;
 
 // The boot cache (`lib.rs`) keys its expanded-prelude file on the build id.
 pub(crate) use system::build_id_string;
@@ -36,12 +36,12 @@ use selfhost_macros::*;
 use sequences::*;
 use syntax_scan::*;
 use system::*;
-use tooling::*;
 use terminal::*;
+use tooling::*;
 
 pub use io::{arm_mcp_progress, begin_stdout_capture, disarm_mcp_progress, take_captured_stdout};
-pub use tooling::SPECIAL_FORMS;
 pub use terminal::{restore_raw, restore_terminal, restore_terminal_on_exit};
+pub use tooling::SPECIAL_FORMS;
 
 pub fn realize_seqview(heap: &mut Heap, env: EnvId, sv: Value) -> LispResult {
     let f = heap

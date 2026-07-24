@@ -54,7 +54,8 @@
                      (tcp-send c (pr-str (into [] (bytes->list got))))
                      (tcp-close c))))))
       (let (port-cert (receive ([:ready p ct] [p ct]) (after 10000 :timeout))
-            s (tls-request "localhost" (first port-cert)
+            s (tls-request "localhost"
+                (first port-cert)
                 ["HEAD " (bytes 1 254) " TAIL"]
                 (second port-cert)))
         (let (resp (utf8-bytes->string (tcp-drain s)))

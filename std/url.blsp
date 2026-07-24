@@ -29,12 +29,12 @@
 (defn url--unreserved? (cp)
   "True if codepoint `cp` is an RFC 3986 unreserved character."
   (or (and (>= cp 65) (<= cp 90))
-      (and (>= cp 97) (<= cp 122))
-      (and (>= cp 48) (<= cp 57))
-      (= cp 45)
-      (= cp 95)
-      (= cp 46)
-      (= cp 126)))
+    (and (>= cp 97) (<= cp 122))
+    (and (>= cp 48) (<= cp 57))
+    (= cp 45)
+    (= cp 95)
+    (= cp 46)
+    (= cp 126)))
 
 (defn url--byte->pct (b)
   "Encode a single byte `b` as a %XX string (uppercase hex)."
@@ -48,8 +48,7 @@ encoding everything else as %XX. Accumulates pieces into the reversed list `acc`
   (if (empty? bytes)
     acc
     (let (b (first bytes))
-      (url--encode-bytes
-        (rest bytes)
+      (url--encode-bytes (rest bytes)
         (cons (if (url--unreserved? b) (int->char b) (url--byte->pct b)) acc)))))
 
 (defn percent-encode (s)
@@ -61,10 +60,28 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
 ;; ---- percent-decoding -------------------------------------------------------
 
 (def url--hex-val
-  {"0" 0 "1" 1 "2" 2 "3" 3 "4" 4 "5" 5 "6" 6 "7" 7
-   "8" 8 "9" 9
-   "a" 10 "b" 11 "c" 12 "d" 13 "e" 14 "f" 15
-   "A" 10 "B" 11 "C" 12 "D" 13 "E" 14 "F" 15})
+  {"0" 0
+   "1" 1
+   "2" 2
+   "3" 3
+   "4" 4
+   "5" 5
+   "6" 6
+   "7" 7
+   "8" 8
+   "9" 9
+   "a" 10
+   "b" 11
+   "c" 12
+   "d" 13
+   "e" 14
+   "f" 15
+   "A" 10
+   "B" 11
+   "C" 12
+   "D" 13
+   "E" 14
+   "F" 15})
 
 ;; `s` is a CODE-POINT VECTOR (built once in `percent-decode`), so char access is
 ;; O(1) `nth` — `char-at` on the raw UTF-8 string is O(i), making the scan O(n^2).
@@ -84,7 +101,9 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
               ;; Not a valid %XX — emit the % literally and re-process
               (url--pct-decode-loop s (+ i 1) n (cons (char->int c) acc)))))
         ;; Normal char: encode its UTF-8 bytes into the accumulator
-        (url--pct-decode-loop s (+ i 1) n
+        (url--pct-decode-loop s
+          (+ i 1)
+          n
           (append (reverse (seq (string->utf8-bytes c))) acc))))))
 
 (defn percent-decode (s)
@@ -103,13 +122,11 @@ Invalid or incomplete %XX sequences are passed through as-is."
   (if (empty? bytes)
     acc
     (let (b (first bytes))
-      (url--qenc-bytes
-        (rest bytes)
-        (cons
-          (cond
-            (url--unreserved? b) (int->char b)
-            (= b 32)             "+"
-            else                 (url--byte->pct b))
+      (url--qenc-bytes (rest bytes)
+        (cons (cond
+                (url--unreserved? b) (int->char b)
+                (= b 32) "+"
+                else (url--byte->pct b))
           acc)))))
 
 (defn url--query-encode-str (s)
@@ -122,8 +139,8 @@ pass through, space becomes +, all other bytes become %XX."
   (if (empty? pairs)
     acc
     (let (kv (first pairs)
-          k  (url--query-encode-str (first kv))
-          v  (url--query-encode-str (second kv))
+          k (url--query-encode-str (first kv))
+          v (url--query-encode-str (second kv))
           sep (if first? "" "&"))
       (url--pairs->query (rest pairs) (cons (str sep k "=" v) acc) false))))
 
@@ -135,8 +152,8 @@ pass through, space becomes +, all other bytes become %XX."
                            (list (if (keyword? (first kv))
                                    (name (first kv))
                                    (str (first kv)))
-                                 (str (second kv))))
-                         (map-pairs params))))
+                             (str (second kv))))
+                      (map-pairs params))))
     (apply str (reverse (url--pairs->query pairs nil true)))))
 
 ;; ---- query string decoding --------------------------------------------------
@@ -150,15 +167,16 @@ pass through, space becomes +, all other bytes become %XX."
   (if (empty? parts)
     acc
     (let (part (first parts)
-          eq   (index-of part "="))
+          eq (index-of part "="))
       (if (< eq 0)
         ;; bare key with no value — store empty string
         (url--parse-query-pairs (rest parts)
           (assoc acc (url--qdecode-str part) ""))
         (url--parse-query-pairs (rest parts)
           (assoc acc
-            (url--qdecode-str (substring part 0 eq))
-            (url--qdecode-str (substring part (+ eq 1) (string-length part)))))))))
+            (url--qdecode-str (substring part 0 eq)) (url--qdecode-str (substring part
+                                                                         (+ eq 1)
+                                                                         (string-length part)))))))))
 
 (defn query-decode (s)
   "Parse a query string `key=value&key=value` into a string→string map,
@@ -186,7 +204,7 @@ decoding + as space and %XX sequences."
     (if (< colon 0)
       {:host auth :port nil}
       (let (port-str (substring auth (+ colon 1) (string-length auth))
-            port-n   (string->number port-str))
+            port-n (string->number port-str))
         {:host (substring auth 0 colon) :port port-n}))))
 
 (defn parse-url (s)
@@ -197,26 +215,26 @@ have nil `:scheme`, `:host`, and `:port`."
   ;; 1. strip fragment
   (let (frag-split (url--split-first s "#")
         before-frag (if frag-split (first frag-split) s)
-        fragment    (if frag-split (second frag-split) nil))
+        fragment (if frag-split (second frag-split) nil))
     ;; 2. strip query
-    (let (q-split  (url--split-first before-frag "?")
-          before-q  (if q-split (first q-split) before-frag)
-          query     (if q-split (second q-split) nil))
+    (let (q-split (url--split-first before-frag "?")
+          before-q (if q-split (first q-split) before-frag)
+          query (if q-split (second q-split) nil))
       ;; 3. strip scheme
       (let (scheme-split (url--split-first before-q "://")
-            scheme        (if scheme-split (first scheme-split) nil)
-            rest-url      (if scheme-split (second scheme-split) before-q))
+            scheme (if scheme-split (first scheme-split) nil)
+            rest-url (if scheme-split (second scheme-split) before-q))
         ;; 4. split authority from path
         (let (slash (index-of rest-url "/")
               authority (if (< slash 0)
                           (if (nil? scheme) "" rest-url)
                           (substring rest-url 0 slash))
-              path      (if (< slash 0)
-                          (if (nil? scheme) rest-url "/")
-                          (substring rest-url slash (string-length rest-url)))
-              auth-map  (if (= authority "")
-                          {:host nil :port nil}
-                          (url--parse-authority authority)))
+              path (if (< slash 0)
+                     (if (nil? scheme) rest-url "/")
+                     (substring rest-url slash (string-length rest-url)))
+              auth-map (if (= authority "")
+                         {:host nil :port nil}
+                         (url--parse-authority authority)))
           (merge auth-map {:scheme scheme :path path :query query :fragment fragment}))))))
 
 ;; ---- URL building -----------------------------------------------------------
@@ -225,20 +243,19 @@ have nil `:scheme`, `:host`, and `:port`."
   "Build a URL string from a map `{:scheme :host :port :path :query-params :query :fragment}`.
 `:query-params` is a map encoded via `query-encode`; `:query` is a raw query string
 (used only when `:query-params` is absent). Both `:port` and `:fragment` are optional."
-  (let (scheme       (get parts :scheme)
-        host         (get parts :host)
-        port         (get parts :port)
-        path         (or (get parts :path) "/")
+  (let (scheme (get parts :scheme)
+        host (get parts :host)
+        port (get parts :port)
+        path (or (get parts :path) "/")
         query-params (get parts :query-params)
-        query        (if (nil? query-params)
-                       (get parts :query)
-                       (query-encode query-params))
-        fragment     (get parts :fragment)
-        authority    (if (nil? host)
-                       ""
-                       (str host (if (nil? port) "" (str ":" port)))))
-    (str
-      (if (nil? scheme) "" (str scheme "://"))
+        query (if (nil? query-params)
+                (get parts :query)
+                (query-encode query-params))
+        fragment (get parts :fragment)
+        authority (if (nil? host)
+                    ""
+                    (str host (if (nil? port) "" (str ":" port)))))
+    (str (if (nil? scheme) "" (str scheme "://"))
       authority
       path
       (if (nil? query) "" (str "?" query))

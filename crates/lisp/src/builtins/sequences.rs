@@ -923,7 +923,6 @@ pub(super) fn scan_bar(chars: &[char], n: usize, from: usize) -> usize {
     j.min(n)
 }
 
-
 /// `(%str-index-of s needle)` — the 0-based **char** index of the first
 /// occurrence of `needle` in `s`, or -1 if absent. Linear: Rust's byte-level
 /// `str::find`, then a one-pass byte→char-index conversion of the prefix. The

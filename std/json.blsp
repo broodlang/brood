@@ -103,7 +103,8 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 ;;   frac = . digit+,  exp = [eE] [+-]? digit+
 ;; before handing it to `string->number`. The validators walk the same code vector
 ;; over the token's [i, end) range — no token string is built unless it parses.
-(defn json--digits-run (s i n)  ; consume zero or more digits
+(defn json--digits-run (s i n)
+  ; consume zero or more digits
   (if (and (< i n) (json--digit? (nth s i))) (json--digits-run s (+ i 1) n) i))
 
 (defn json--int-end (s i n)
@@ -111,7 +112,8 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 no leading zeros."
   (cond
     (>= i n) nil
-    (= (nth s i) 48) (+ i 1)                               ; lone 0 (leading-zero check below)
+    (= (nth s i) 48) (+ i 1)
+    ; lone 0 (leading-zero check below)
     (json--digit? (nth s i)) (json--digits-run s (+ i 1) n)
     :else nil))
 
@@ -136,6 +138,7 @@ nil if malformed."
         nil))
     i))
 
+; the grammar must consume the whole token
 (defn json--strict-number? (s i end)
   "True iff the codes [i, end) form a strict JSON number (rejects a leading `+` and
 leading zeros)."
@@ -145,8 +148,7 @@ leading zeros)."
       (let (j (json--frac-end s j end))
         (and j
           (let (j (json--exp-end s j end))
-            (and j (= j end))))))))   ; the grammar must consume the whole token
-
+            (and j (= j end))))))))
 (defn json--number (s i n)
   (let (end (json--num-end s i n))
     (if (json--strict-number? s i end)
@@ -193,14 +195,22 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
   "An escape body starting at `i` (after the backslash). Returns `[code next-index]`."
   (let (c (json--at s i n))
     (cond
-      (= c 34) [34 (+ i 1)]     ; \"
-      (= c 92) [92 (+ i 1)]     ; \\
-      (= c 47) [47 (+ i 1)]     ; \/
-      (= c 110) [10 (+ i 1)]    ; \n
-      (= c 116) [9 (+ i 1)]     ; \t
-      (= c 114) [13 (+ i 1)]    ; \r
-      (= c 98) [8 (+ i 1)]      ; \b
-      (= c 102) [12 (+ i 1)]    ; \f
+      (= c 34) [34 (+ i 1)]
+      ; \"
+      (= c 92) [92 (+ i 1)]
+      ; \\
+      (= c 47) [47 (+ i 1)]
+      ; \/
+      (= c 110) [10 (+ i 1)]
+      ; \n
+      (= c 116) [9 (+ i 1)]
+      ; \t
+      (= c 114) [13 (+ i 1)]
+      ; \r
+      (= c 98) [8 (+ i 1)]
+      ; \b
+      (= c 102) [12 (+ i 1)]
+      ; \f
       (= c 117) (json--unicode s (+ i 1) n)
       :else (error "json: invalid escape at index " i))))
 
@@ -240,8 +250,10 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
         acc2 (cons v acc)
         c (json--at s j n))
     (cond
-      (= c 44) (json--array--acc s (json--skip-ws s (+ j 1) n) n acc2)   ; ,
-      (= c 93) [(into [] (reverse acc2)) (+ j 1)]                        ; ]
+      (= c 44) (json--array--acc s (json--skip-ws s (+ j 1) n) n acc2)
+      ; ,
+      (= c 93) [(into [] (reverse acc2)) (+ j 1)]
+      ; ]
       :else (error "json: expected ',' or ']' in array at index " j))))
 
 (defn json--array (s i n)
@@ -261,12 +273,10 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
         (if (not (= (json--at s j1 n) 58))
           (error "json: expected ':' after key at index " j1)
           (let ([v j2] (json--value s (json--skip-ws s (+ j1 1) n) n)
-                 j3
-                 (json--skip-ws s j2 n)
-                 acc2
-                 (map-assoc acc (keyword k) v)  ; JSON keys → keywords (acc is always a map)
-                 c
-                 (json--at s j3 n))
+                j3 (json--skip-ws s j2 n)
+                ; JSON keys → keywords (acc is always a map)
+                acc2 (map-assoc acc (keyword k) v)
+                c (json--at s j3 n))
             (cond
               (= c 44) (json--object--acc s (+ j3 1) n acc2)
               (= c 125) [acc2 (+ j3 1)]
@@ -283,12 +293,18 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
   "One JSON value at index `i` (whitespace already skipped). Returns `[value end]`."
   (let (c (json--at s i n))
     (cond
-      (= c 123) (json--object s (+ i 1) n)   ; {
-      (= c 91) (json--array s (+ i 1) n)     ; [
-      (= c 34) (json--string s (+ i 1) n)    ; "
-      (= c 116) (json--lit s i n [116 114 117 101] true)        ; true
-      (= c 102) (json--lit s i n [102 97 108 115 101] false)    ; false
-      (= c 110) (json--lit s i n [110 117 108 108] nil)         ; null
+      (= c 123) (json--object s (+ i 1) n)
+      ; {
+      (= c 91) (json--array s (+ i 1) n)
+      ; [
+      (= c 34) (json--string s (+ i 1) n)
+      ; "
+      (= c 116) (json--lit s i n [116 114 117 101] true)
+      ; true
+      (= c 102) (json--lit s i n [102 97 108 115 101] false)
+      ; false
+      (= c 110) (json--lit s i n [110 117 108 108] nil)
+      ; null
       (= c -1) (error "json: unexpected end of input")
       :else (json--number s i n))))
 
@@ -296,8 +312,11 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
   "Parse JSON text `s` into Brood data: object → a map with **keyword** keys, array →
 a vector, string → string, number → int/float, true/false → bool, null → nil. Errors
 on malformed input or trailing content. Pure."
-  (let (s (string->codepoints s)   ; int code points: O(1) nth, one native pass
-        n (count s)           ; and pure-prim per-char tests
+  (let (
+        ; int code points: O(1) nth, one native pass
+        s (string->codepoints s)
+        ; and pure-prim per-char tests
+        n (count s)
         i (json--skip-ws s 0 n))
     (if (>= i n)
       (error "json: empty input")
@@ -329,7 +348,8 @@ the named escapes + every C0 control) that would each find nothing."
 (defn json--enc-escapes (s)
   "Escape the JSON-special characters in `s` (backslash first)."
   (if (not (json--needs-escape? s))
-    s                                    ; clean — emit as-is (the overwhelmingly common case)
+    ; clean — emit as-is (the overwhelmingly common case)
+    s
     (fold (fn (acc [raw esc]) (replace acc raw esc))
       (-> s
         (replace "\\" "\\\\")
@@ -363,7 +383,9 @@ the named escapes + every C0 control) that would each find nothing."
 (defn json--emit-items (xs i n acc)
   (if (>= i n)
     acc
-    (json--emit-items xs (+ i 1) n
+    (json--emit-items xs
+      (+ i 1)
+      n
       (json--emit (nth xs i) (if (= i 0) acc (cons "," acc))))))
 
 (defn json--emit-list (xs acc first?)

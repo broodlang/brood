@@ -65,31 +65,34 @@ part, from `special-keywords`). Returned as data so callers/tests can inspect it
 `(tmlanguage)` is the JSON serialisation."
   {:name "Brood"
    :scopeName "source.brood"
-   :patterns [{:include "#comment"}
-              {:include "#string"}
-              {:include "#definition"}
-              {:include "#special-form"}
-              {:include "#param-marker"}
-              {:include "#constant"}
-              {:include "#keyword"}
-              {:include "#number"}]
-   :repository
-   {:comment {:name "comment.line.semicolon.brood" :match ";.*$"}
-    :string {:name "string.quoted.double.brood"
-             :begin "\""
-             :end "\""
-             :patterns [{:name "constant.character.escape.brood" :match "\\\\."}]}
-    :definition {:match (str "(?<=\\()(def" grammar--sym "*)(\\s+(" grammar--sym "+))?")
-                 :captures {"1" {:name "keyword.declaration.brood"}
-                            "3" {:name "entity.name.function.brood"}}}
-    :special-form {:name "keyword.control.brood"
-                   :match (grammar--bounded (grammar--alternation (special-keywords)))}
-    :param-marker {:name "keyword.operator.brood"
-                   :match "(?<=[\\s(\\[])&(optional)?(?=[\\s)\\]])"}
-    :constant {:name "constant.language.brood" :match (grammar--bounded "nil|true|false")}
-    :keyword {:name "constant.keyword.brood" :match (str ":" grammar--sym "+")}
-    :number {:name "constant.numeric.brood"
-             :match (str "(?<!" grammar--sym ")-?[0-9]+(\\.[0-9]+)?(?!" grammar--sym ")")}}})
+   :patterns [{:include "#comment"} {:include "#string"}
+               {:include "#definition"}
+               {:include "#special-form"}
+               {:include "#param-marker"}
+               {:include "#constant"}
+               {:include "#keyword"}
+               {:include "#number"}]
+   :repository {:comment {:name "comment.line.semicolon.brood" :match ";.*$"}
+                :string {:name "string.quoted.double.brood"
+                         :begin "\""
+                         :end "\""
+                         :patterns [{:name "constant.character.escape.brood" :match "\\\\."}]}
+                :definition {:match (str "(?<=\\()(def" grammar--sym "*)(\\s+(" grammar--sym "+))?")
+                             :captures {"1" {:name "keyword.declaration.brood"}
+                                        "3" {:name "entity.name.function.brood"}}}
+                :special-form {:name "keyword.control.brood"
+                               :match (grammar--bounded (grammar--alternation (special-keywords)))}
+                :param-marker {:name "keyword.operator.brood"
+                               :match "(?<=[\\s(\\[])&(optional)?(?=[\\s)\\]])"}
+                :constant {:name "constant.language.brood"
+                           :match (grammar--bounded "nil|true|false")}
+                :keyword {:name "constant.keyword.brood" :match (str ":" grammar--sym "+")}
+                :number {:name "constant.numeric.brood"
+                         :match (str "(?<!"
+                                  grammar--sym
+                                  ")-?[0-9]+(\\.[0-9]+)?(?!"
+                                  grammar--sym
+                                  ")")}}})
 
 (defn tmlanguage ()
   "The VS Code TextMate grammar as JSON text (the `.tmLanguage.json` file body),
@@ -104,8 +107,7 @@ the Neovim/Helix/Zed/GitHub grammar) generated from `(special-forms)`. The stati
 node→capture rules (the grammar's node names are stable) plus the data-driven
 special-form rule, emitted with a `#any-of?` predicate over `special-keywords` (literal
 node-text, so no regex escaping)."
-  (str
-    ";; tree-sitter-brood highlight query.\n"
+  (str ";; tree-sitter-brood highlight query.\n"
     ";; GENERATED from (special-forms) by `nest grammar tree-sitter` — do not hand-edit.\n\n"
     "(comment) @comment\n"
     "(string) @string\n"
@@ -131,6 +133,8 @@ node-text, so no regex escaping)."
   "The Emacs `brood-special-forms` defconst (elisp text) built from the same
 `special-keywords`, so `brood-mode` can generate its highlight list too."
   (str "(defconst brood-special-forms\n"
-    "  '(" (join " " (map (fn (k) (str "\"" k "\"")) (special-keywords))) ")\n"
+    "  '("
+    (join " " (map (fn (k) (str "\"" k "\"")) (special-keywords)))
+    ")\n"
     "  \"Brood special forms and core macros to highlight.\n"
     "Generated from `(special-forms)` by `nest grammar emacs` — do not edit by hand.\")\n"))

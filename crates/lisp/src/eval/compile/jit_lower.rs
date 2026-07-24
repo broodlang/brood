@@ -4495,9 +4495,11 @@ fn jit_lower_arm_inner(
                             let sv = b
                                 .ins()
                                 .atomic_load(types::I64, MemFlagsData::trusted(), addr);
-                            let moved =
-                                b.ins()
-                                    .icmp_imm(IntCC::Equal, sv, crate::core::table::SLOT_MOVED as i64);
+                            let moved = b.ins().icmp_imm(
+                                IntCC::Equal,
+                                sv,
+                                crate::core::table::SLOT_MOVED as i64,
+                            );
                             b.ins().brif(moved, ffi, &[], g_flag, &[]);
                             b.switch_to_block(g_flag);
                             let f = b
@@ -4694,7 +4696,9 @@ fn jit_lower_arm_inner(
                         let enc_nil = b.create_block();
                         b.ins().brif(v_nil, enc_nil, &[], ffi, &[]);
                         b.switch_to_block(enc_nil);
-                        let wn = b.ins().iconst(types::I64, crate::core::table::SLOT_NIL as i64);
+                        let wn = b
+                            .ins()
+                            .iconst(types::I64, crate::core::table::SLOT_NIL as i64);
                         b.ins().jump(enc_done, &[BlockArg::Value(wn)]);
                         b.switch_to_block(enc_done);
                         let word = b.block_params(enc_done)[0];
@@ -4707,9 +4711,11 @@ fn jit_lower_arm_inner(
                             addr,
                             word,
                         );
-                        let moved =
-                            b.ins()
-                                .icmp_imm(IntCC::Equal, old, crate::core::table::SLOT_MOVED as i64);
+                        let moved = b.ins().icmp_imm(
+                            IntCC::Equal,
+                            old,
+                            crate::core::table::SLOT_MOVED as i64,
+                        );
                         let g_flag = b.create_block();
                         b.ins().brif(moved, ffi, &[], g_flag, &[]);
                         // Post-op dense-flag re-check (the migration protocol on

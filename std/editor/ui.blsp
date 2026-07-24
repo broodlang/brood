@@ -56,9 +56,9 @@ further drag already queued — a non-blocking selective `receive` that leaves k
 / async replies untouched — and return the last. The loop then renders once at the end
 instead of once per cell. `msg` unchanged when it isn't a drag (incl. nil on timeout)."
   (if (and (vector? msg) (>= (count msg) 2) (= (nth msg 0) :mouse) (= (nth msg 1) :drag))
-    (receive ([:mouse :drag button row col mods]
-                (ui--coalesce-drag [:mouse :drag button row col mods]))
-             (after 0 msg))
+    (receive
+      ([:mouse :drag button row col mods] (ui--coalesce-drag [:mouse :drag button row col mods]))
+      (after 0 msg))
     msg))
 
 (defn gui-display ()
@@ -81,25 +81,19 @@ carry no window id, one process should drive **one** window (which is why
 their input. Both are deferred trade-offs (ADR-059), fine for the observer."
   (let (id (gui-open))
     {:enter (fn () nil)
-      :leave
-      (fn () (gui-close id))
-      :size
-      (fn () (gui-size id))
-      :draw
-      (fn (f) (gui-draw id f))
-      ;; Input arrives as mailbox messages (gui-open delivers to this process), so
-      ;; `:poll` is a `receive` that parks the process — it holds no scheduler worker
-      ;; while waiting (ADR-058), unlike a blocking poll. Returns the next key/mouse
-      ;; message, or nil after `ms` (the live-refresh tick).
-      :poll
-      (fn (ms) (ui--coalesce-drag (receive (m m) (after ms nil))))
-      ;; Raise this window to the front + focus it (un-minimising) — `ui-run` calls
-      ;; this when a `:focus` control message lands in the mailbox, so another process
-      ;; can surface an already-open singleton window (e.g. a second `(observe)`).
-      :focus
-      (fn () (gui-focus id))
-      :window
-      id}))
+     :leave (fn () (gui-close id))
+     :size (fn () (gui-size id))
+     :draw (fn (f) (gui-draw id f))
+     ;; Input arrives as mailbox messages (gui-open delivers to this process), so
+     ;; `:poll` is a `receive` that parks the process — it holds no scheduler worker
+     ;; while waiting (ADR-058), unlike a blocking poll. Returns the next key/mouse
+     ;; message, or nil after `ms` (the live-refresh tick).
+     :poll (fn (ms) (ui--coalesce-drag (receive (m m) (after ms nil))))
+     ;; Raise this window to the front + focus it (un-minimising) — `ui-run` calls
+     ;; this when a `:focus` control message lands in the mailbox, so another process
+     ;; can surface an already-open singleton window (e.g. a second `(observe)`).
+     :focus (fn () (gui-focus id))
+     :window id}))
 
 (defn display--min-size (displays)
   "The smallest cols×rows across all frontends, so one broadcast frame fits every
@@ -144,10 +138,9 @@ an `[:sse ev]` in like any other input. The other display ops pass through uncha
 A flood of events can starve the keyboard poll; fine for occasional pushes (a daemon's
 event feed). Requires `(require 'sse)` on the producing side."
   (assoc display
-    :poll
-    (fn (ms)
-      (let (ev (receive ([:sse e] [:sse e]) ([:sse-closed r] [:sse-closed r]) (after 0 nil)))
-        (if (nil? ev) ((get display :poll) ms) ev)))))
+    :poll (fn (ms)
+            (let (ev (receive ([:sse e] [:sse e]) ([:sse-closed r] [:sse-closed r]) (after 0 nil)))
+              (if (nil? ev) ((get display :poll) ms) ev)))))
 
 ;; ---- the app loop (TEA: model + view + update) ------------------------------
 
@@ -227,13 +220,12 @@ a far-future timer can't oversleep a responsive app."
   (let (last-input (get clock :last-input)
         armed (get clock :armed)
         fired (get clock :fired)
-        best (reduce-kv
-               (fn (acc name spec)
-                 (let (d (ui--deadline spec (get armed name) (get fired name) last-input))
-                   (if (and (ui--timer-live? (get fired name) d)
-                         (or (nil? acc) (< d acc)))
-                     d
-                     acc)))
+        best (reduce-kv (fn (acc name spec)
+                          (let (d (ui--deadline spec (get armed name) (get fired name) last-input))
+                            (if (and (ui--timer-live? (get fired name) d)
+                                  (or (nil? acc) (< d acc)))
+                              d
+                              acc)))
                nil
                timers))
     (if (nil? best)
@@ -249,14 +241,13 @@ Only one timer fires per call; simultaneous timers serialize over successive ite
   (let (last-input (get clock :last-input)
         armed (get clock :armed)
         fired (get clock :fired)
-        due (reduce-kv
-              (fn (acc name spec)
-                (let (d (ui--deadline spec (get armed name) (get fired name) last-input))
-                  (if (and (>= now d)
-                        (ui--timer-live? (get fired name) d)
-                        (or (nil? acc) (< d (second acc))))
-                    [name d]
-                    acc)))
+        due (reduce-kv (fn (acc name spec)
+                         (let (d (ui--deadline spec (get armed name) (get fired name) last-input))
+                           (if (and (>= now d)
+                                 (ui--timer-live? (get fired name) d)
+                                 (or (nil? acc) (< d (second acc))))
+                             [name d]
+                             acc)))
               nil
               timers))
     (if (nil? due)
@@ -315,15 +306,15 @@ re-raises, surfacing a genuine startup bug instead of spinning."
   (if (get model :done)
     nil
     (let ([cols rows] ((get display :size))
-           ;; render this model; a `[:frame …]` result is the frame to draw, `:failed`
-           ;; means `view` threw (already logged) and we must fall back to `last-good`.
-           rendered
-           (try
-             [:frame (view model cols rows)]
-             (catch e
-               (if (nil? last-good)
-                 (throw e)  ; first render failed — a real startup bug, not a wedge
-                 (do (ui--log-error "view" e) :failed)))))
+          ;; render this model; a `[:frame …]` result is the frame to draw, `:failed`
+          ;; means `view` threw (already logged) and we must fall back to `last-good`.
+          rendered (try
+                     [:frame (view model cols rows)]
+                     (catch e
+                       (if (nil? last-good)
+                         ; first render failed — a real startup bug, not a wedge
+                         (throw e)
+                         (do (ui--log-error "view" e) :failed)))))
       (if (= rendered :failed)
         ;; couldn't render `model` — roll back to the last model that did, and re-render it
         ;; (the clock keeps advancing — it's wall-clock reality, not model state).
@@ -347,33 +338,34 @@ re-raises, surfacing a genuine startup bug instead of spinning."
               ;; do NOT advance `:last-input` (a focus message from another process is
               ;; not user input — it must not reset idle timers).
               (focus-request? raw) (let (f (get display :focus))
-                                     (do (when f (f))
+                                     (do
+                                       (when f (f))
                                        (ui--loop model model clock1 view update display)))
               ;; poll timed out (nil). Legacy: deliver the bare `:tick`. Timers: fire the
               ;; earliest due timer (if any), else re-park without folding.
-              (nil? raw)
-              (if (nil? timers)
-                (let (next (try
-                             (update model :tick cols rows)
-                             (catch e (do (ui--log-error "update" e) model))))
-                  (ui--loop next model clock1 view update display))
-                (let (fr (ui--fire timers clock1 (ui--now model))
-                      event (first fr)
-                      clock2 (second fr))
-                  (if (nil? event)
-                    (ui--loop model model clock2 view update display)
-                    (let (next (try
-                                 (update model event cols rows)
-                                 (catch e (do (ui--log-error "update" e) model))))
-                      (ui--loop next model clock2 view update display)))))
+              (nil? raw) (if (nil? timers)
+                           (let (next (try
+                                        (update model :tick cols rows)
+                                        (catch e (do (ui--log-error "update" e) model))))
+                             (ui--loop next model clock1 view update display))
+                           (let (fr (ui--fire timers clock1 (ui--now model))
+                                 event (first fr)
+                                 clock2 (second fr))
+                             (if (nil? event)
+                               (ui--loop model model clock2 view update display)
+                               (let (next (try
+                                            (update model event cols rows)
+                                            (catch e (do (ui--log-error "update" e) model))))
+                                 (ui--loop next model clock2 view update display)))))
               ;; a real key/mouse/system event: with timers, stamp `:last-input` (resets
               ;; idle timers); then fold it. A throwing `update` drops this input.
-              :else
-              (let (clock2 (if (nil? timers) clock1 (assoc clock1 :last-input (ui--now model)))
-                    next (try
-                           (update model raw cols rows)
-                           (catch e (do (ui--log-error "update" e) model))))
-                (ui--loop next model clock2 view update display)))))))))
+              :else (let (clock2 (if (nil? timers)
+                                   clock1
+                                   (assoc clock1 :last-input (ui--now model)))
+                          next (try
+                                 (update model raw cols rows)
+                                 (catch e (do (ui--log-error "update" e) model))))
+                      (ui--loop next model clock2 view update display)))))))))
 
 (defn ui-run (model view update display)
   "Run a UI app over `display` (a frontend map): enter it, then loop —
@@ -423,7 +415,8 @@ non-blocking window. The shared loop behind the observer (and the editor)."
         (ui--loop model nil {} view update display)
         ((get display :leave)))
       (catch e
-        ((get display :leave))  ; restore the terminal even on a frontend/startup error
+        ; restore the terminal even on a frontend/startup error
+        ((get display :leave))
         (throw e)))))
 
 ;; ---- modal input overlays (the dispatch-fallthrough policy) -----------------

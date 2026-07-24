@@ -23,6 +23,7 @@
 ;;    edits are invisible to the server's transform ring (see `buffer--serve`), so a
 ;;    transform-collaborated document must keep content changes structured.
 
+; buffer-splice, splice-disjoint?, splice-transform(-all)
 (defmodule editor/buffer-client
   "Track a buffer PROCESS (`editor/buffer` `spawn-buffer`) from the subscribing side:
 a *link* — `{:proc <pid> :me <own-id> :version <int> :pending (<[lo hi replen]>…)}`
@@ -46,8 +47,7 @@ origin]` push into the link and tells the caller what to do with its LOCAL copy:
 The fold is pure (no sends, no receives) — the merge matrix is testable with
 hand-fed pushes. Start a link with `link-init` (version -1, so the subscription
 seed always applies); compute minimal splices with `text-splice`."
-  (:use editor/buffer))  ; buffer-splice, splice-disjoint?, splice-transform(-all)
-
+  (:use editor/buffer))
 ;; ---- the single positional splice diff ---------------------------------------
 
 (defn text-splice (old new)
@@ -110,8 +110,8 @@ the link (unchanged when the texts are equal — pure movement sends nothing)."
       link
       (let ([lo hi repl] splice)
         (buffer-splice (get link :proc) lo hi repl (get link :me) (get link :version))
-        (assoc link :pending
-          (concat (or (get link :pending) ()) (list [lo hi (string-length repl)])))))))
+        (assoc link
+          :pending (concat (or (get link :pending) ()) (list [lo hi (string-length repl)])))))))
 
 (defn link-fold (link version view origin)
   "Fold one `[:buffer-updated proc version view origin]` push into `link`: returns
@@ -143,7 +143,8 @@ seed) is handed back as `[:text s]`; a cursor-only delta is `:noop`."
                        (or (empty? pending)
                          (every? (fn (p) (splice-disjoint? splice p)) pending)))
           npending (cond
-                     (and own? splice) (rest pending)   ; our echo — first in, first home
+                     (and own? splice) (rest pending)
+                     ; our echo — first in, first home
                      (and splice mergeable? (not own?))
                      ;; remap our in-flight splices over the foreign one, as the
                      ;; process will when they arrive after it
@@ -153,15 +154,18 @@ seed) is handed back as `[:text s]`; a cursor-only delta is `:noop`."
                                   [nlo nhi _] (splice-transform [plo phi ""]
                                                 [flo fhi (string-length frepl)]))
                               [nlo nhi plen]))
-                       pending)
-                     (and splice (not own?)) ()          ; ambiguous → resync resets
+                       pending) (and splice
+                                                                                                                                                                                                                                                                                                                                                                                              (not own?))
+                     ()
+                     ; ambiguous → resync resets
                      :else pending)
           nlink (assoc link :version version :pending npending))
       (cond
         own? [nlink :noop]
-        (and splice mergeable?)
-        [nlink [:splice (splice-transform-all splice
-                          (map (fn (p) (let ([plo phi plen] p) [plo phi plen])) pending))]]
+        (and splice mergeable?) [nlink [:splice (splice-transform-all splice
+                                                  (map (fn (p)
+                                                         (let ([plo phi plen] p) [plo phi plen]))
+                                                    pending))]]
         splice [nlink :resync]
         (nil? text) [nlink :noop]
         :else [nlink [:text text]]))))

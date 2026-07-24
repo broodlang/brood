@@ -16,11 +16,14 @@
 ;; mixed int+handle elements — the shape `ed-divider-ops` builds; len 6, last :z
 (def V [:cursor-zone 0 0 80 1 :z])
 
-(defn h-count (i bad) (if (= i 0) bad (h-count (- i 1) (if (= (count (reverse V)) 6) bad (+ bad 1)))))
-(defn h-first (i bad) (if (= i 0) bad (h-first (- i 1) (if (= (first (reverse V)) :z) bad (+ bad 1)))))
-(defn h-last  (i bad) (if (= i 0) bad (h-last  (- i 1) (if (= (last V) :z) bad (+ bad 1)))))
+(defn h-count (i bad)
+  (if (= i 0) bad (h-count (- i 1) (if (= (count (reverse V)) 6) bad (+ bad 1)))))
+(defn h-first (i bad)
+  (if (= i 0) bad (h-first (- i 1) (if (= (first (reverse V)) :z) bad (+ bad 1)))))
+(defn h-last (i bad) (if (= i 0) bad (h-last (- i 1) (if (= (last V) :z) bad (+ bad 1)))))
 
-(describe "JIT cons correctness (regression)" :serial
+(describe "JIT cons correctness (regression)"
+  :serial
   (test "reverse length stays correct after the arm tiers"
     (assert= (h-count 4000 0) 0))
   (test "first of a reversed list stays correct after tiering"

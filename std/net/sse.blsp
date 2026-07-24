@@ -46,8 +46,8 @@ frames: return `(http/stream-response 200 (sse-headers) (fn (sock) … (sse-send
 data) …))` from an `http` handler to push events to a browser `EventSource`."
   (:use net/http))
 
-(require 'net/http)  ; reuse http/parse-url + http/request-headers for the handshake
-
+; reuse http/parse-url + http/request-headers for the handshake
+(require 'net/http)
 ;; The reader consumes UNTRUSTED server output. A malicious endpoint that never
 ;; sends the head's blank line, or an event with no `\n\n` frame boundary, would
 ;; grow the reader's buffer without bound → OOM. Cap the buffered head/leftover at
@@ -87,8 +87,7 @@ are ignored. One optional space after the colon is stripped."
                 val (if (starts-with? raw " ") (substring raw 1 (string-length raw)) raw))
             (cond
               (= field "data") (assoc ev
-                                 :data
-                                 (if (nil? (get ev :data)) val (str (get ev :data) "\n" val)))
+                                 :data (if (nil? (get ev :data)) val (str (get ev :data) "\n" val)))
               (= field "event") (assoc ev :event val)
               (= field "id") (assoc ev :id val)
               (= field "retry") (assoc ev :retry val)
@@ -142,31 +141,32 @@ with `[:sse-closed reason]` when the socket closes or errors. Tail-recursive."
       (doseq (b blocks)
         (when (not (= b ""))
           (send subscriber [:sse (sse--parse-event b)])))
-      (receive ([:tcp ~sock d] (sse--stream sock subscriber (str rest (sse--normalize d))))
+      (receive
+        ([:tcp ~sock d] (sse--stream sock subscriber (str rest (sse--normalize d))))
         ([:tcp-closed ~sock] (send subscriber [:sse-closed :closed]))
         ([:tcp-error ~sock msg] (send subscriber [:sse-closed msg]))))))
 
 (defn sse--read-head (sock subscriber buf)
   "Read until the HTTP response head's blank line, check the status, then hand the
 leftover bytes to `sse--stream`. A non-200 status closes the connection."
-  (receive ([:tcp ~sock d] (let (buf2 (str buf (sse--normalize d))
-                                 i (index-of buf2 "\n\n"))
-                             (cond
-                               (> (string-length buf2) *sse-max-buffer-bytes*)
-                               (do (tcp-close sock)
-                                   (send subscriber [:sse-closed :buffer-overflow]))
-                               (< i 0)
-                               (sse--read-head sock subscriber buf2)
-                               else
-                               (let (status (sse--status (substring buf2 0 i))
-                                     body (substring buf2 (+ i 2) (string-length buf2)))
-                                 (if (= status 200)
-                                   (do
-                                     (send subscriber [:sse-open status])
-                                     (sse--stream sock subscriber body))
-                                   (do
-                                     (tcp-close sock)
-                                     (send subscriber [:sse-closed (str "http " status)])))))))
+  (receive
+    ([:tcp ~sock d] (let (buf2 (str buf (sse--normalize d))
+                          i (index-of buf2 "\n\n"))
+                      (cond
+                        (> (string-length buf2) *sse-max-buffer-bytes*) (do
+                                                                          (tcp-close sock)
+                                                                          (send subscriber
+                                                                            [:sse-closed :buffer-overflow]))
+                        (< i 0) (sse--read-head sock subscriber buf2)
+                        else (let (status (sse--status (substring buf2 0 i))
+                                   body (substring buf2 (+ i 2) (string-length buf2)))
+                               (if (= status 200)
+                                 (do
+                                   (send subscriber [:sse-open status])
+                                   (sse--stream sock subscriber body))
+                                 (do
+                                   (tcp-close sock)
+                                   (send subscriber [:sse-closed (str "http " status)])))))))
     ([:tcp-closed ~sock] (send subscriber [:sse-closed :closed]))
     ([:tcp-error ~sock msg] (send subscriber [:sse-closed msg]))))
 
@@ -182,8 +182,8 @@ that should receive the events (typically the UI process — see `with-events`).
               (get u :path)
               " HTTP/1.1\r\n"
               (net/http/render-headers (net/http/request-headers u
-                                           ""
-                                           {"Accept" "text/event-stream" "Connection" "keep-alive"}))
+                                         ""
+                                         {"Accept" "text/event-stream" "Connection" "keep-alive"}))
               "\r\n"))
     (spawn (let (sock (tcp-connect (get u :host) (get u :port)))
              (tcp-send sock req)

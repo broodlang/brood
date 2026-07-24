@@ -48,6 +48,7 @@ window) — same protocol, different frontend. Many clients may attach at once
 
 ;; ---- the seam: a display frontend that lives on the wire ---------------------
 
+; nil ⇒ ui-run treats it as :tick (re-render)
 (defn remote-display (client cols rows)
   "A `ui-run` display (`{:enter :leave :size :draw :poll}`) bound to a remote
 frontend `client` (its pid): `:draw` ships the frame to `client` as `[:frame f]`,
@@ -66,25 +67,23 @@ output — reaches its `update` exactly as it would locally. Without the pass-th
 those messages would strand in the session's mailbox (a selective receive never
 consumes them), leaving a served app deaf to everything but keys."
   {:enter (fn () nil)
-    ; the *client* owns the real terminal, not us
-    :leave
-    (fn () (send client [:bye]))
-    :size
-    (fn () [cols rows])
-    :draw
-    (fn (f) (send client [:frame f]))
-    :poll
-    (fn (ms)
-      (receive ([:key k] k)
-        ([:detach] :close)
-        ;; only THE CLIENT's death closes the session — the session process may
-        ;; monitor other things (a collab app monitors every hosted buffer process,
-        ;; whose [:down …] must reach its update as app input for rehost/reshare,
-        ;; not tear the session down)
-        ([:down _ ~client _] :close)  ; client process died / link net-split
-        (m m)  ; anything else is async app input — the event bus, as local displays deliver it
-        (after ms nil)))})  ; nil ⇒ ui-run treats it as :tick (re-render)
-
+   ; the *client* owns the real terminal, not us
+   :leave (fn () (send client [:bye]))
+   :size (fn () [cols rows])
+   :draw (fn (f) (send client [:frame f]))
+   :poll (fn (ms)
+           (receive
+             ([:key k] k)
+             ([:detach] :close)
+             ;; only THE CLIENT's death closes the session — the session process may
+             ;; monitor other things (a collab app monitors every hosted buffer process,
+             ;; whose [:down …] must reach its update as app input for rehost/reshare,
+             ;; not tear the session down)
+             ; client process died / link net-split
+             ([:down _ ~client _] :close)
+             ; anything else is async app input — the event bus, as local displays deliver it
+             (m m)
+             (after ms nil)))})
 ;; ---- daemon side -------------------------------------------------------------
 
 (defn serve--session (client cols rows opts make-model view update)
@@ -112,18 +111,28 @@ the `serve-stop` message — can end every one of them: each killed session's cl
 its monitor fire and closes cleanly. Tail-recursive."
   (let (ss (or sessions ()))
     (receive
-      ([:attach client cols rows]
-        (let (s (spawn (serve--session client cols rows {} make-model view update)))
-          (monitor s)
-          (serve--manager make-model view update (cons s ss))))
-      ([:attach client cols rows opts]
-        (let (s (spawn (serve--session client cols rows opts make-model view update)))
-          (monitor s)
-          (serve--manager make-model view update (cons s ss))))
+      ([:attach client cols rows] (let (s (spawn (serve--session client
+                                                   cols
+                                                   rows
+                                                   {}
+                                                   make-model
+                                                   view
+                                                   update)))
+                                    (monitor s)
+                                    (serve--manager make-model view update (cons s ss))))
+      ([:attach client cols rows opts] (let (s (spawn (serve--session client
+                                                        cols
+                                                        rows
+                                                        opts
+                                                        make-model
+                                                        view
+                                                        update)))
+                                         (monitor s)
+                                         (serve--manager make-model view update (cons s ss))))
       ([:down _ p _] (serve--manager make-model view update (remove (fn (x) (= x p)) ss)))
-      ([:shutdown from r]
-        (do (doseq (s ss) (exit s :kill))
-          (send from [:reply r (count ss)])))
+      ([:shutdown from r] (do
+                            (doseq (s ss) (exit s :kill))
+                            (send from [:reply r (count ss)])))
       (_ (serve--manager make-model view update ss)))))
 
 (defn serve-stop (&optional mgr)
@@ -160,7 +169,8 @@ Opt-in, like Erlang's `-name`: a runtime serves nothing unless it calls `serve`.
 the session process died (`[:down …]` from the monitor) — the last covers a session
 that died *without* a clean `[:bye]` (e.g. a throwing `make-model`, which runs before
 `ui-run` can install its `:leave`), so the client never hangs waiting on a dead session."
-  (receive ([:frame f] (do (term-draw f) (attach--drain peer)))
+  (receive
+    ([:frame f] (do (term-draw f) (attach--drain peer)))
     ([:bye] :closed)
     ([:nodedown ~peer] :closed)
     ([:down _ _ _] :closed)
@@ -286,8 +296,10 @@ on exit."
         (if (and (map? opts) (not (empty? opts)))
           (send (whereis serve-name) [:attach (self) cols rows opts])
           (send (whereis serve-name) [:attach (self) cols rows]))
-        (let (session (receive ([:attached s] s)
-                        (after 5000 (error "attach-display-local: the local serve manager did not answer"))))
+        (let (session (receive
+                        ([:attached s] s)
+                        (after 5000
+                          (error "attach-display-local: the local serve manager did not answer"))))
           (when session (do (monitor session) (attach--display-loop nil session display))))
         ((get display :leave)))
       (catch e (do ((get display :leave)) (throw e))))))
@@ -313,18 +325,22 @@ current frame, if any); `[:remove pid]` drops one; `[:frame f]` stores + broadca
 every client; `[:size reply]` replies `[:hub-size c r]`; `[:shutdown]` tells all clients to
 close (`[:bye]`). Tail-recursive; one hub per shared session."
   (receive
-    ([:add pid] (do (when frame (send pid [:frame frame]))
+    ([:add pid] (do
+                  (when frame (send pid [:frame frame]))
                   (shared--hub (cons pid clients) frame size)))
     ([:remove pid] (shared--hub (remove (fn (p) (= p pid)) clients) frame size))
     ([:frame f] (do (doseq (p clients) (send p [:frame f])) (shared--hub clients f size)))
-    ([:size reply] (do (send reply [:hub-size (first size) (second size)]) (shared--hub clients frame size)))
+    ([:size reply] (do
+                     (send reply [:hub-size (first size) (second size)])
+                     (shared--hub clients frame size)))
     ([:shutdown] (doseq (p clients) (send p [:bye])))))
 
 (defn shared--hub-size (hub)
   "Query `hub` for the shared session's `[cols rows]` (a local round-trip), falling back to
 `[80 24]` if it doesn't answer promptly. Selective on `[:hub-size …]`, so it never eats the
 `[:key …]` inputs also queued on the session's mailbox."
-  (do (send hub [:size (self)])
+  (do
+    (send hub [:size (self)])
     (receive ([:hub-size c r] [c r]) (after 200 [80 24]))))
 
 (defn shared--display (hub)
@@ -339,10 +355,14 @@ which is dropped (a nil ⇒ tick) rather than leaked to the app."
    :leave (fn () (send hub [:shutdown]))
    :size (fn () (shared--hub-size hub))
    :draw (fn (f) (send hub [:frame f]))
-   :poll (fn (ms) (receive ([:key k] k)
-                    ([:hub-size _ _] nil)  ; a :size reply past its 200ms window — drop, tick
-                    (m m)  ; anything else is async app input — the event bus
-                    (after ms nil)))})
+   :poll (fn (ms)
+           (receive
+             ([:key k] k)
+             ; a :size reply past its 200ms window — drop, tick
+             ([:hub-size _ _] nil)
+             ; anything else is async app input — the event bus
+             (m m)
+             (after ms nil)))})
 
 (defn serve-shared--manager (session hub)
   "The session manager for a SHARED session: every client attaches to the SAME running
@@ -351,22 +371,22 @@ has no per-participant state, so opts are accepted and ignored), add the client 
 and tell it the shared session pid (so it ships keys there); monitor it so its death drops
 it from the hub. Tail-recursive."
   (receive
-    ([:attach client cols rows]
-      (do (monitor client)
-        (send hub [:add client])
-        (send client [:attached session])
-        (serve-shared--manager session hub)))
-    ([:attach client cols rows _opts]
-      (do (monitor client)
-        (send hub [:add client])
-        (send client [:attached session])
-        (serve-shared--manager session hub)))
+    ([:attach client cols rows] (do
+                                  (monitor client)
+                                  (send hub [:add client])
+                                  (send client [:attached session])
+                                  (serve-shared--manager session hub)))
+    ([:attach client cols rows _opts] (do
+                                        (monitor client)
+                                        (send hub [:add client])
+                                        (send client [:attached session])
+                                        (serve-shared--manager session hub)))
     ([:down _ client _] (do (send hub [:remove client]) (serve-shared--manager session hub)))
     ;; serve-stop: tell every client goodbye (the hub fans [:bye]), end the session
-    ([:shutdown from r]
-      (do (send hub [:shutdown])
-        (exit session :kill)
-        (send from [:reply r 1])))
+    ([:shutdown from r] (do
+                          (send hub [:shutdown])
+                          (exit session :kill)
+                          (send from [:reply r 1])))
     (_ (serve-shared--manager session hub))))
 
 (defn serve-shared (model view update)

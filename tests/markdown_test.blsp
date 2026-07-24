@@ -22,7 +22,9 @@
       (list [0 3 md-face-code] [4 8 md-face-code] [9 12 md-face-code])))
   (test "text after a closed fence is back to inline rules"
     (assert= (markdown-spans "```\nx\n```\n# H")
-      (list [0 3 md-face-code] [4 5 md-face-code] [6 9 md-face-code]
+      (list [0 3 md-face-code]
+        [4 5 md-face-code]
+        [6 9 md-face-code]
         [10 13 md-face-heading])))
   (test "an unordered bullet marks just the bullet char"
     (assert= (markdown-spans "- item")

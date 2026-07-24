@@ -101,10 +101,9 @@
     (assert= nil (try (throw nil) (catch e e))))
 
   (test "rethrow inside nested try is caught by outer try"
-    (let (caught
-          (try
-            (try (/ 1 0) (catch e (throw e)))
-            (catch outer-e outer-e)))
+    (let (caught (try
+                   (try (/ 1 0) (catch e (throw e)))
+                   (catch outer-e outer-e)))
       (is (map? caught))
       (is (string-contains? (str (get caught :message)) "zero"))))
 
@@ -128,12 +127,12 @@
       (is (string-contains? msg "2"))))
 
   (test "variadic (& rest) accepts any number of args including zero"
-    (assert= '()      ((fn (& xs) xs)))
-    (assert= '(1)     ((fn (& xs) xs) 1))
+    (assert= '() ((fn (& xs) xs)))
+    (assert= '(1) ((fn (& xs) xs) 1))
     (assert= '(1 2 3) ((fn (& xs) xs) 1 2 3)))
 
   (test "required + rest accepts any count >= required"
-    (assert= '(1 ())     ((fn (a & rest) (list a rest)) 1))
+    (assert= '(1 ()) ((fn (a & rest) (list a rest)) 1))
     (assert= '(1 (2 3)) ((fn (a & rest) (list a rest)) 1 2 3))))
 
 ;; ── 5. Closures: gibberish and chaos ─────────────────────────────────────────
@@ -142,7 +141,7 @@
   (test "closure factory — fn returning fn"
     (let (adder (fn (n) (fn (x) (+ n x))))
       (assert= 15 ((adder 5) 10))
-      (assert= 0  ((adder -3) 3))))
+      (assert= 0 ((adder -3) 3))))
 
   (test "three closures sharing the same captured binding"
     (let (x 42
@@ -156,16 +155,14 @@
       (assert= 42 (((outer))))))
 
   (test "closure over a mutable-looking (but immutable) let binding"
-    (let (counter
-          (let (n 0)
-            (fn () n))
-          )
+    (let (counter (let (n 0)
+                    (fn () n)))
       (assert= 0 (counter))
       (assert= 0 (counter))))
 
   (test "closure passed as argument and called inside another fn"
     (let (apply-f (fn (f x) (f x))
-          double  (fn (n) (* n 2)))
+          double (fn (n) (* n 2)))
       (assert= 10 (apply-f double 5))))
 
   (test "doubly-wrapped closure application (wrap returns fn, calling it returns val)"
@@ -188,8 +185,8 @@
     (assert= :got-nil (match nil (nil :got-nil) (_ :other))))
 
   (test "match true and false literals"
-    (assert= :yes (match true  (true :yes) (false :no) (_ :other)))
-    (assert= :no  (match false (true :yes) (false :no) (_ :other))))
+    (assert= :yes (match true (true :yes) (false :no) (_ :other)))
+    (assert= :no (match false (true :yes) (false :no) (_ :other))))
 
   (test "match empty list"
     (assert= :empty (match '() (() :empty) (_ :other))))
@@ -221,16 +218,20 @@
 ;; ── 7. Concurrent chaos — 100 processes spawned and drained ──────────────────
 
 (defn chaos-fan-out (n me)
-  (if (= n 0) nil
-    (do (spawn (send me n))
-        (chaos-fan-out (- n 1) me))))
+  (if (= n 0)
+    nil
+    (do
+      (spawn (send me n))
+      (chaos-fan-out (- n 1) me))))
 
 (defn chaos-fan-in (got total acc)
-  (if (= got total) acc
+  (if (= got total)
+    acc
     (chaos-fan-in (+ got 1) total (receive (x (+ acc x))))))
 
 (defn chaos-drain (n)
-  (if (= n 0) :ok
+  (if (= n 0)
+    :ok
     (receive (:done (chaos-drain (- n 1))) (after 5000 :timeout))))
 
 (describe "concurrent spawn/send chaos"
@@ -283,9 +284,9 @@
 
 (describe "higher-order function chaos"
   (test "map/filter/fold on a vector return a list"
-    (assert= '(2 4 6)  (map (fn (x) (* x 2)) [1 2 3]))
-    (assert= '(1 3)    (filter odd? [1 2 3 4]))
-    (assert= 15        (fold + 0 [1 2 3 4 5])))
+    (assert= '(2 4 6) (map (fn (x) (* x 2)) [1 2 3]))
+    (assert= '(1 3) (filter odd? [1 2 3 4]))
+    (assert= 15 (fold + 0 [1 2 3 4 5])))
 
   (test "apply with leading args: (apply + 1 2 '(3 4)) = 10"
     (assert= 10 (apply + 1 2 '(3 4))))

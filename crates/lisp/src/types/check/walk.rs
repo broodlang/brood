@@ -20,8 +20,8 @@ use crate::types::{GradualTy, Ty};
 
 use super::ctx::{Ctx, PathKey};
 use super::guards::{
-    find_redundant_clause, guard_assertion, is_syntactic_keyword,
-    literal_eq_test_raw, match_exhaustiveness_gap, path_guard_assertion, render_literal_pattern,
+    find_redundant_clause, guard_assertion, is_syntactic_keyword, literal_eq_test_raw,
+    match_exhaustiveness_gap, path_guard_assertion, render_literal_pattern,
 };
 use super::infer::{expr_ty, global_value_ty};
 use super::sigs::{

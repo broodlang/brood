@@ -52,17 +52,17 @@ timeout). Pure Brood over spawn / receive / exit (ADR-006).")
 ;; looping worker never checks its own mailbox, so `:kill` (untrappable, fires at
 ;; the next reduction even when parked) is the only thing that stops it.
 (defn task--run (thunk reply-to timeout)
-  (let (coord  (self)
+  (let (coord (self)
         worker (spawn (task--worker thunk coord)))
     (if (nil? timeout)
       (receive
-        ([:task--result [:ok v]]  (send reply-to [:task-done coord v]))
+        ([:task--result [:ok v]] (send reply-to [:task-done coord v]))
         ([:task--result [:err m]] (send reply-to [:task-error coord m]))
-        (:task--cancel            (exit worker :kill)))
+        (:task--cancel (exit worker :kill)))
       (receive
-        ([:task--result [:ok v]]  (send reply-to [:task-done coord v]))
+        ([:task--result [:ok v]] (send reply-to [:task-done coord v]))
         ([:task--result [:err m]] (send reply-to [:task-error coord m]))
-        (:task--cancel            (exit worker :kill))
+        (:task--cancel (exit worker :kill))
         (after timeout (do (exit worker :kill) (send reply-to [:task-timeout coord])))))))
 
 (defn task (thunk & opts)
@@ -74,9 +74,9 @@ hard-killed after that long and `:reply-to` gets `[:task-timeout handle]`
 instead. Every reply is tagged with `handle`, so a reply from a finished or
 cancelled task is easy to ignore — match on the handle you last started. Cancel
 early with `cancel-task`."
-  (let (o        (if (empty? opts) {} (first opts))
+  (let (o (if (empty? opts) {} (first opts))
         reply-to (or (get o :reply-to) (self))
-        timeout  (get o :timeout))
+        timeout (get o :timeout))
     (spawn (task--run thunk reply-to timeout))))
 
 (defn cancel-task (handle)
@@ -102,8 +102,8 @@ finishes or `timeout-ms` elapses. Returns the thunk's value; throws if it threw
 (re-raising the message) or if it timed out. The synchronous counterpart of
 `task` — use it in a script or test; use `task` to keep an interactive loop live."
   (let (me (self)
-        w  (spawn (send me [:await--reply (try [:ok (thunk)] (catch e [:err (error-message e)]))])))
+        w (spawn (send me [:await--reply (try [:ok (thunk)] (catch e [:err (error-message e)]))])))
     (receive
-      ([:await--reply [:ok v]]  v)
+      ([:await--reply [:ok v]] v)
       ([:await--reply [:err m]] (error m))
       (after timeout-ms (do (exit w :kill) (error "await: timed out after " timeout-ms "ms"))))))

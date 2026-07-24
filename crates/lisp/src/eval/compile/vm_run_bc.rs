@@ -282,7 +282,6 @@ impl ProgramState {
     }
 }
 
-
 pub(crate) fn vm_run_bc(
     heap: &mut Heap,
     arm0: Arc<CompiledArm>,
@@ -913,4 +912,3 @@ pub(crate) fn vm_run_bc(
 }
 
 // ===================== entry =====================
-

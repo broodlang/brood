@@ -6,7 +6,7 @@
     (assert= 36 (string-length (uuid/uuid-v4))))
   (test "has dashes at positions 8 13 18 23"
     (let (u (uuid/uuid-v4))
-      (is (= (char-at u 8)  "-"))
+      (is (= (char-at u 8) "-"))
       (is (= (char-at u 13) "-"))
       (is (= (char-at u 18) "-"))
       (is (= (char-at u 23) "-"))))
@@ -32,7 +32,7 @@
     (assert= 36 (string-length (uuid/uuid-v7))))
   (test "has dashes at positions 8 13 18 23"
     (let (u (uuid/uuid-v7))
-      (is (= (char-at u 8)  "-"))
+      (is (= (char-at u 8) "-"))
       (is (= (char-at u 13) "-"))
       (is (= (char-at u 18) "-"))
       (is (= (char-at u 23) "-"))))
@@ -65,13 +65,13 @@
     (is (uuid/uuid? (uuid/uuid-v3 uuid/ns-dns "example.com"))))
   (test "deterministic — same input same output"
     (assert= (uuid/uuid-v3 uuid/ns-dns "python.org")
-             (uuid/uuid-v3 uuid/ns-dns "python.org")))
+      (uuid/uuid-v3 uuid/ns-dns "python.org")))
   (test "different names give different UUIDs"
     (is (not= (uuid/uuid-v3 uuid/ns-dns "a.com")
-              (uuid/uuid-v3 uuid/ns-dns "b.com"))))
+          (uuid/uuid-v3 uuid/ns-dns "b.com"))))
   (test "RFC 4122 test vector: uuid-v3(ns-dns, python.org)"
     (assert= "6fa459ea-ee8a-3ca4-894e-db77e160355e"
-             (uuid/uuid-v3 uuid/ns-dns "python.org"))))
+      (uuid/uuid-v3 uuid/ns-dns "python.org"))))
 
 (describe "uuid-v5"
   (test "produces a 36-character string"
@@ -85,16 +85,16 @@
     (is (uuid/uuid? (uuid/uuid-v5 uuid/ns-dns "example.com"))))
   (test "deterministic — same input same output"
     (assert= (uuid/uuid-v5 uuid/ns-dns "python.org")
-             (uuid/uuid-v5 uuid/ns-dns "python.org")))
+      (uuid/uuid-v5 uuid/ns-dns "python.org")))
   (test "different names give different UUIDs"
     (is (not= (uuid/uuid-v5 uuid/ns-dns "a.com")
-              (uuid/uuid-v5 uuid/ns-dns "b.com"))))
+          (uuid/uuid-v5 uuid/ns-dns "b.com"))))
   (test "v3 and v5 differ for same input"
     (is (not= (uuid/uuid-v3 uuid/ns-dns "python.org")
-              (uuid/uuid-v5 uuid/ns-dns "python.org"))))
+          (uuid/uuid-v5 uuid/ns-dns "python.org"))))
   (test "RFC 4122 test vector: uuid-v5(ns-dns, python.org)"
     (assert= "886313e1-3b8a-5372-9b90-0c9aee199e5d"
-             (uuid/uuid-v5 uuid/ns-dns "python.org"))))
+      (uuid/uuid-v5 uuid/ns-dns "python.org"))))
 
 (describe "uuid?"
   (test "valid lowercase UUID"

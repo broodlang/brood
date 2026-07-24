@@ -13,6 +13,7 @@
 ;; *Messages*) — the same share-nothing path `print` redirection uses, never a
 ;; mutated value. The logger reuses ports rather than inventing its own sink.
 
+; ports + io-write
 (defmodule log
   "An async, safe logger (`(require 'log)`). A `proc/gen` process holds a list of
 backends; each log call is a cast, so it never blocks the caller, and the single
@@ -29,9 +30,9 @@ registered as `:logger`; `(log …)` finds it via `whereis` and falls back to
 stderr if none is running, so a log is never silently lost. A *backend* is an
 `io` port + `:min-level` + `:format` — build one with `stdout-backend` /
 `stderr-backend` / `process-backend` / `file-backend` / `fn-backend`."
-  (:use proc/gen)  ; defprocess / spawn-server / ! / stop
-  (:use io))  ; ports + io-write
-
+  ; defprocess / spawn-server / ! / stop
+  (:use proc/gen)
+  (:use io))
 ;; ---- levels -----------------------------------------------------------------
 (def log--ranks {:debug 0 :info 1 :warn 2 :error 3})
 (def log--labels {:debug "DEBUG" :info "INFO" :warn "WARN" :error "ERROR"})
@@ -61,12 +62,10 @@ category/source (read off the record's `:meta`) to different sinks (e.g. an edit
 `*LSP*` vs `*Messages*` buffer), the OTP-handler-filter / Elixir-metadata-filter idea."
   (let (o (if (empty? opts) {} (first opts)))
     {:sink sink
-      :min-level
-      (or (get o :min-level) :debug)
-      :filter
-      (get o :filter)  ; nil = accept all
-      :format
-      (or (get o :format) log--default-format)}))
+     :min-level (or (get o :min-level) :debug)
+     ; nil = accept all
+     :filter (get o :filter)
+     :format (or (get o :format) log--default-format)}))
 
 (defn stdout-backend (& opts)
   "A backend writing to stdout (`opts` as for `backend`)."

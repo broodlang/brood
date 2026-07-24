@@ -237,7 +237,7 @@
           dep-dir (path-join parent "greeter")
           app-dir (path-join parent "app"))
       (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
-      (let (ts  (pkg-tar-init parent "greeter")
+      (let (ts (pkg-tar-init parent "greeter")
             url (first ts)
             sha (second ts))
         (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
@@ -262,11 +262,11 @@
       (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
       (let (ts (pkg-tar-init parent "greeter") url (first ts))
         (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
-        (is (string-contains?
-              (try (resolve-deps app-dir
-                     (list {:name 'greeter :kind :tarball :url url :sha256 "deadbeef"})
-                     nil)
-                (catch e (error-message e)))
+        (is (string-contains? (try
+                                (resolve-deps app-dir
+                                  (list {:name 'greeter :kind :tarball :url url :sha256 "deadbeef"})
+                                  nil)
+                                (catch e (error-message e)))
               "sha256 mismatch")))))
   (test "a second resolve is a cache hit (locked sha), no re-extract"
     (let (parent (pkg-fixture-root)
@@ -276,7 +276,7 @@
       (let (ts (pkg-tar-init parent "greeter") url (first ts) sha (second ts))
         (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
         (let (dep (list {:name 'greeter :kind :tarball :url url :sha256 sha})
-              e1  (first (resolve-deps app-dir dep nil)))
+              e1 (first (resolve-deps app-dir dep nil)))
           (write-lockfile app-dir (list e1))
           (let (e2 (first (resolve-deps app-dir dep (read-lockfile app-dir))))
             (assert= (get e2 :kind) :tarball)
@@ -284,9 +284,9 @@
   (test ":tarball deps parse; a missing :sha256 is rejected"
     (assert= (project/project-parse-deps [['foo :tarball "https://x/foo.tar.gz" :sha256 "abc"]])
       (list {:name 'foo :kind :tarball :url "https://x/foo.tar.gz" :sha256 "abc"}))
-    (is (string-contains?
-          (try (project/project-parse-deps [['foo :tarball "https://x/foo.tar.gz"]])
-            (catch e (error-message e)))
+    (is (string-contains? (try
+                            (project/project-parse-deps [['foo :tarball "https://x/foo.tar.gz"]])
+                            (catch e (error-message e)))
           "sha256"))))
 
 ;; --- the registry: publish / search / :version deps (ADR-147) ---------------
@@ -296,7 +296,11 @@
   (test "append-entry writes a version entry; a duplicate version is refused"
     (let (index (path-join (pkg-fixture-root) "index"))
       (make-dir index)
-      (package/registry--append-entry index "greeter" "0.1.0" "friendly greetings" "https://x/greeter")
+      (package/registry--append-entry index
+        "greeter"
+        "0.1.0"
+        "friendly greetings"
+        "https://x/greeter")
       (is (file-exists? (path-join index "packages/greeter.blsp")))
       (let (vs (package/registry--versions index 'greeter))
         (assert= (count vs) 1)
@@ -304,28 +308,44 @@
         (assert= (get (first vs) :git) "https://x/greeter")
         (assert= (get (first vs) :ref) "v0.1.0"))
       ;; a second version appends; the same version again is refused
-      (package/registry--append-entry index "greeter" "0.2.0" "friendly greetings" "https://x/greeter")
+      (package/registry--append-entry index
+        "greeter"
+        "0.2.0"
+        "friendly greetings"
+        "https://x/greeter")
       (assert= (count (package/registry--versions index 'greeter)) 2)
-      (is (string-contains?
-            (try (package/registry--append-entry index "greeter" "0.2.0" "d" "https://x/greeter")
-              (catch e (error-message e)))
+      (is (string-contains? (try
+                              (package/registry--append-entry index
+                                "greeter"
+                                "0.2.0"
+                                "d"
+                                "https://x/greeter")
+                              (catch e (error-message e)))
             "already published"))))
   (test "publish requires :repository and :description"
     (let (index (path-join (pkg-fixture-root) "index"))
       (make-dir index)
-      (is (string-contains?
-            (try (package/registry--append-entry index "x" "1.0.0" "desc" nil) (catch e (error-message e)))
+      (is (string-contains? (try
+                              (package/registry--append-entry index "x" "1.0.0" "desc" nil)
+                              (catch e (error-message e)))
             ":repository"))
-      (is (string-contains?
-            (try (package/registry--append-entry index "x" "1.0.0" nil "https://x") (catch e (error-message e)))
+      (is (string-contains? (try
+                              (package/registry--append-entry index "x" "1.0.0" nil "https://x")
+                              (catch e (error-message e)))
             ":description"))))
   (test "search matches on name and description; find-version is exact"
     (let (index (path-join (pkg-fixture-root) "index"))
       (make-dir index)
-      (package/registry--append-entry index "greeter" "0.1.0" "friendly greetings" "https://x/greeter")
+      (package/registry--append-entry index
+        "greeter"
+        "0.1.0"
+        "friendly greetings"
+        "https://x/greeter")
       (assert= (package/registry--list-packages index) (list 'greeter))
-      (is (package/registry--matches? index 'greeter "greet"))       ; by name
-      (is (package/registry--matches? index 'greeter "friendly"))    ; by description
+      ; by name
+      (is (package/registry--matches? index 'greeter "greet"))
+      ; by description
+      (is (package/registry--matches? index 'greeter "friendly"))
       (refute (package/registry--matches? index 'greeter "zzz"))
       (assert= (get (package/registry--find-version index 'greeter "0.1.0") :version) "0.1.0")
       (is (nil? (package/registry--find-version index 'greeter "9.9.9")))))
@@ -352,10 +372,12 @@
             (assert= (vector-ref row 1) :registry)
             (assert= (vector-ref row 2) "1.0.0"))
           ;; an unknown version errors, pointing at `nest search`
-          (is (string-contains?
-                (try (package/package--resolve-registry app-dir
-                       {:name 'greeter :kind :registry :version "9.9.9"} nil index)
-                  (catch er (error-message er)))
+          (is (string-contains? (try
+                                  (package/package--resolve-registry app-dir
+                                    {:name 'greeter :kind :registry :version "9.9.9"}
+                                    nil
+                                    index)
+                                  (catch er (error-message er)))
                 "no registry entry"))))))
   (test ":version deps parse into a registry dep map"
     (assert= (project/project-parse-deps [['foo :version "1.2.0"]])

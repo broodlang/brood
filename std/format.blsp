@@ -42,7 +42,8 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 (defn comment? (n) (= (node-kind n) :comment))
 (defn trivia? (n) (or (whitespace? n) (comment? n)))
 
-(defn container? (n) (let (k (node-kind n)) (or (= k :list) (= k :vector) (= k :map) (= k :set) (= k :root))))
+(defn container? (n)
+  (let (k (node-kind n)) (or (= k :list) (= k :vector) (= k :map) (= k :set) (= k :root))))
 
 (defn wrapper? (n)
   (let (k (node-kind n)) (or (= k :quote) (= k :quasi) (= k :unquote) (= k :splice))))
@@ -296,8 +297,9 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
 (defn had-author-newlines? (n)
   (let (k (node-kind n))
     (cond
-      (or (= k :list) (= k :vector) (= k :map) (= k :set))
-        (had-author-newlines--scan (node-children n) 0 (vector-length (node-children n)))
+      (or (= k :list) (= k :vector) (= k :map) (= k :set)) (had-author-newlines--scan (node-children n)
+                                                             0
+                                                             (vector-length (node-children n)))
       (wrapper? n) (had-author-newlines? (node-form n))
       else false)))
 
@@ -537,7 +539,11 @@ form (not the comment) is emitted last and the close must NOT break. Only an
                        pair-body (str arendr " " brendr)
                        tc (trailing-comment-at kids (inc j) n))
                    (if (nil? tc)
-                     (render--pair-walk kids (inc j) n pair-ind 0
+                     (render--pair-walk kids
+                       (inc j)
+                       n
+                       pair-ind
+                       0
                        (str acc (render--pair-sep acc nl pair-ind false) pair-body))
                      ;; Hoist a same-line trailing comment onto its own line ABOVE the
                      ;; pair (forced newline so it never lands right after `(`); the
@@ -665,9 +671,13 @@ form (not the comment) is emitted last and the close must NOT break. Only an
                    n
                    body-ind
                    0
-                   (str acc sep ind
+                   (str acc
+                     sep
+                     ind
                      (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx)))
-                     "\n" ind form-rendr))))))))
+                     "\n"
+                     ind
+                     form-rendr))))))))
 
 ;; ---- top-level walk ---------------------------------------------------------
 ;; `format-source src` parses src, renders the root, and ensures exactly one
@@ -742,18 +752,19 @@ form (not the comment) is emitted last and the close must NOT break. Only an
   ;; whatever `dir?` + `list-dir` see, which is sufficient for the typical
   ;; project layout.
   (if (dir? dir)
-    (fold (fn (acc entry)
-            (let (p (path-join dir entry))
-              (cond
-                ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
-                ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
-                (dir? p) (if (format--ignored-dir? entry) acc (append-two (format--collect-blsp p) acc))
-                ;; Skip generated lock files (`project.lock.blsp`): they're machine-
-                ;; written ("do not edit by hand") and re-serialized by `nest fetch` on
-                ;; every project-setup, so formatting them just fights the resolver.
-                (ends-with? entry ".lock.blsp") acc
-                (ends-with? entry ".blsp") (cons p acc)
-                else acc)))
+    (fold
+      (fn (acc entry)
+        (let (p (path-join dir entry))
+          (cond
+            ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
+            ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
+            (dir? p) (if (format--ignored-dir? entry) acc (append-two (format--collect-blsp p) acc))
+            ;; Skip generated lock files (`project.lock.blsp`): they're machine-
+            ;; written ("do not edit by hand") and re-serialized by `nest fetch` on
+            ;; every project-setup, so formatting them just fights the resolver.
+            (ends-with? entry ".lock.blsp") acc
+            (ends-with? entry ".blsp") (cons p acc)
+            else acc)))
       nil
       (list-dir dir))
     nil))
@@ -821,7 +832,8 @@ under the current project — the git-aware narrower scope of `nest format`
 number of files rewritten."
   (let (root (format--require-root) changed (format--changed-blsp root))
     (if (= changed :not-a-repo)
-      (do (println "format: not a git repository — formatting the whole project.")
+      (do
+        (println "format: not a git repository — formatting the whole project.")
         (format-project))
       (let (rewrote (format--apply changed 0))
         (println (str "format: "

@@ -11,15 +11,14 @@
 //!   "do I know what this expression returns?" probe the misuse-check
 //!   reads off.
 
-
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Symbol, Tag, Value};
 use crate::types::Ty;
 
 use super::ctx::{Ctx, PathKey};
-use super::walk::list_items;
 use super::infer::expr_ty;
+use super::walk::list_items;
 
 /// Names that have *syntactic* meaning but aren't bound values — never flag
 /// these as unbound. Mirrors `eval::SPECIAL_NAMES` plus the macros that the

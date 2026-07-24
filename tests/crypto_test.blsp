@@ -27,27 +27,32 @@
 
 (describe "crypto/encrypt + decrypt"
   (test "round-trip: encrypt then decrypt returns original"
-    (let (key    (crypto/random-key)
-          nonce  (crypto/random-nonce)
-          plain  (crypto/str->bytes "hello, brood!")
-          ct     (crypto/encrypt key nonce plain)
-          pt     (crypto/decrypt key nonce ct))
+    (let (key (crypto/random-key)
+          nonce (crypto/random-nonce)
+          plain (crypto/str->bytes "hello, brood!")
+          ct (crypto/encrypt key nonce plain)
+          pt (crypto/decrypt key nonce ct))
       (assert= (into [] plain) (into [] pt))))
   (test "ciphertext is longer than plaintext (auth tag)"
-    (let (key (crypto/random-key) nonce (crypto/random-nonce)
+    (let (key (crypto/random-key)
+          nonce (crypto/random-nonce)
           plain (crypto/str->bytes "test"))
       (is (> (count (crypto/encrypt key nonce plain)) (count plain)))))
   (test "wrong key returns :error"
-    (let (key1 (crypto/random-key) key2 (crypto/random-key)
+    (let (key1 (crypto/random-key)
+          key2 (crypto/random-key)
           nonce (crypto/random-nonce)
           ct (crypto/encrypt key1 nonce (crypto/str->bytes "data")))
       (assert= :error (crypto/decrypt key2 nonce ct))))
   (test "wrong nonce returns :error"
-    (let (key (crypto/random-key) n1 (crypto/random-nonce) n2 (crypto/random-nonce)
+    (let (key (crypto/random-key)
+          n1 (crypto/random-nonce)
+          n2 (crypto/random-nonce)
           ct (crypto/encrypt key n1 (crypto/str->bytes "data")))
       (assert= :error (crypto/decrypt key n2 ct))))
   (test "tampered ciphertext returns :error"
-    (let (key (crypto/random-key) nonce (crypto/random-nonce)
+    (let (key (crypto/random-key)
+          nonce (crypto/random-nonce)
           ct (into [] (crypto/encrypt key nonce (crypto/str->bytes "data")))
           ;; flip a byte in the ciphertext
           bad (assoc ct 0 (bit-xor (nth ct 0) 255)))
@@ -57,10 +62,13 @@
   (test "round-trip with strings"
     (let (key (crypto/random-key) nonce (crypto/random-nonce))
       (assert= "hello world"
-               (crypto/decrypt-str key nonce
-                 (crypto/encrypt-str key nonce "hello world")))))
+        (crypto/decrypt-str key
+          nonce
+          (crypto/encrypt-str key nonce "hello world")))))
   (test "wrong key returns :error"
-    (let (k1 (crypto/random-key) k2 (crypto/random-key) nonce (crypto/random-nonce)
+    (let (k1 (crypto/random-key)
+          k2 (crypto/random-key)
+          nonce (crypto/random-nonce)
           ct (crypto/encrypt-str k1 nonce "secret"))
       (assert= :error (crypto/decrypt-str k2 nonce ct)))))
 
@@ -74,37 +82,98 @@
       (is (every? (fn (b) (and (>= b 0) (<= b 255))) dk))))
   (test "deterministic — same inputs same output"
     (assert= (crypto/pbkdf2 "pass" "salt" 1000 32)
-             (crypto/pbkdf2 "pass" "salt" 1000 32)))
+      (crypto/pbkdf2 "pass" "salt" 1000 32)))
   (test "different passwords give different keys"
     (is (not= (crypto/pbkdf2 "pass1" "salt" 1000 32)
-              (crypto/pbkdf2 "pass2" "salt" 1000 32))))
+          (crypto/pbkdf2 "pass2" "salt" 1000 32))))
   (test "different salts give different keys"
     (is (not= (crypto/pbkdf2 "pass" "salt1" 1000 32)
-              (crypto/pbkdf2 "pass" "salt2" 1000 32))))
+          (crypto/pbkdf2 "pass" "salt2" 1000 32))))
   (test "known PBKDF2-SHA256 test vector"
     ;; python: hashlib.pbkdf2_hmac('sha256', b'password', b'salt', 1, 32).hex()
     ;; = 120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b
-    (assert= [18 15 182 207 252 248 179 44 67 231 34 82 86 196 248 55
-              168 101 72 201 44 204 53 72 8 5 152 124 183 11 225 123]
-             (into [] (crypto/pbkdf2 "password" "salt" 1 32))))
+    (assert= [18 15
+               182
+               207
+               252
+               248
+               179
+               44
+               67
+               231
+               34
+               82
+               86
+               196
+               248
+               55
+               168
+               101
+               72
+               201
+               44
+               204
+               53
+               72
+               8
+               5
+               152
+               124
+               183
+               11
+               225
+               123]
+      (into [] (crypto/pbkdf2 "password" "salt" 1 32))))
   (test "string and byte-vector salt agree for ASCII salt"
     ;; "salt" = [115 97 108 116]; both paths must produce the same key
     (assert= (crypto/pbkdf2 "password" "salt" 100 32)
-             (crypto/pbkdf2 "password" [115 97 108 116] 100 32)))
+      (crypto/pbkdf2 "password" [115 97 108 116] 100 32)))
   (test "byte-vector password agrees with string password (ASCII)"
     (assert= (crypto/pbkdf2 "pw" "salt" 50 16)
-             (crypto/pbkdf2 [112 119] "salt" 50 16)))
+      (crypto/pbkdf2 [112 119] "salt" 50 16)))
   (test "binary (non-UTF-8) salt does not throw and is correct"
     ;; A base64-decoded SCRAM salt is arbitrary bytes — 0xFF here is not valid
     ;; UTF-8, so the old string-salt path threw. Reference (python):
     ;; pbkdf2_hmac('sha256', b'pw', bytes([0,255,128,200,1..12]), 4096, 32).hex()
-    (assert= [29 113 78 123 166 58 193 91 2 80 201 143 25 55 110 45
-              106 8 22 220 83 111 142 93 223 101 223 253 60 105 66 93]
-             (into [] (crypto/pbkdf2 "pw" [0 255 128 200 1 2 3 4 5 6 7 8 9 10 11 12]
-                                     4096 32))))
+    (assert= [29 113
+               78
+               123
+               166
+               58
+               193
+               91
+               2
+               80
+               201
+               143
+               25
+               55
+               110
+               45
+               106
+               8
+               22
+               220
+               83
+               111
+               142
+               93
+               223
+               101
+               223
+               253
+               60
+               105
+               66
+               93]
+      (into []
+        (crypto/pbkdf2 "pw"
+          [0 255 128 200 1 2 3 4 5 6 7 8 9 10 11 12]
+          4096
+          32))))
   (test "different binary salts give different keys"
     (is (not= (crypto/pbkdf2 "pw" [0 255 0] 100 32)
-              (crypto/pbkdf2 "pw" [0 255 1] 100 32)))))
+          (crypto/pbkdf2 "pw" [0 255 1] 100 32)))))
 
 (describe "crypto/secure=?"
   (test "equal byte vectors"

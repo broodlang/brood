@@ -25,8 +25,8 @@
         ;; So fold from depth-1 down to 0, wrapping each time
         wrapped (fold (fn (acc i)
                         (str "(let (v" i " " (* i i) ") " acc ")"))
-                      inner-body
-                      (reverse (range depth))))
+                  inner-body
+                  (reverse (range depth))))
     wrapped))
 
 ;; CRASH FOUND: 1000-deep nested (let ...) string hits the reader's 256-level
@@ -72,8 +72,8 @@
 
 (println "closure-vec count:" (count closure-vec))
 ;; Call a few to verify they captured their respective `i`
-(println "closure[0]():"    ((get closure-vec 0)))
-(println "closure[1]():"    ((get closure-vec 1)))
+(println "closure[0]():" ((get closure-vec 0)))
+(println "closure[1]():" ((get closure-vec 1)))
 (println "closure[9999]():" ((get closure-vec 9999)))
 ;; Sum them all: Σ i^2 for i in [0, 10000)
 (def closure-sum (reduce (fn (acc f) (+ acc (f))) 0 closure-vec))
@@ -85,13 +85,13 @@
 (println "--- closure shipped across process heap ---")
 
 ;; Capture a BigInt inside the closure, send it to a worker, get it back
-(def big-captured (* 999999999999 999999999999))  ; ~10^24, BigInt territory
+; ~10^24, BigInt territory
+(def big-captured (* 999999999999 999999999999))
 (def big-fn (fn (x) (+ big-captured x)))
 
 (let (me (self))
-  (spawn
-    (let (result (big-fn 1))
-      (send me [:result result])))
+  (spawn (let (result (big-fn 1))
+           (send me [:result result])))
   (let (result (receive ([:result r] r)))
     (println "cross-process big-fn(1) result:" result)
     (println "expected:" (+ big-captured 1))
@@ -119,25 +119,29 @@
 (def closure-map
   (fold (fn (m i)
           (assoc m i (fn (x) (* i x))))
-        {}
-        (range 5000)))
+    {}
+    (range 5000)))
 
 (println "closure-map count:" (count closure-map))
-(println "closure-map[0](5):"    ((get closure-map 0) 5))    ; 0*5 = 0
-(println "closure-map[1](5):"    ((get closure-map 1) 5))    ; 1*5 = 5
-(println "closure-map[4999](5):" ((get closure-map 4999) 5)) ; 4999*5 = 24995
-
+; 0*5 = 0
+(println "closure-map[0](5):" ((get closure-map 0) 5))
+; 1*5 = 5
+(println "closure-map[1](5):" ((get closure-map 1) 5))
+; 4999*5 = 24995
+(println "closure-map[4999](5):" ((get closure-map 4999) 5))
 ;; Ship the whole map across a process heap via message
 (let (me (self))
+  ; 100*7 = 700
   (spawn
     (let (local-map closure-map)
-      (send me [:map-result
-                ((get local-map 42) 10)      ; 42*10 = 420
-                ((get local-map 100) 7)])))  ; 100*7 = 700
-  (receive ([:map-result a b]
-    (println "shipped map[42](10):"  a)
-    (println "shipped map[100](7):"  b)
-    (println "correct?" (and (= 420 a) (= 700 b))))))
+      (send me
+        [:map-result ((get local-map 42) 10)
+          ; 42*10 = 420
+          ((get local-map 100) 7)])))
+  (receive
+    ([:map-result a b] (println "shipped map[42](10):" a)
+      (println "shipped map[100](7):" b)
+      (println "correct?" (and (= 420 a) (= 700 b))))))
 
 (println "--- memoizing closure: captures a mutable cache-map via process ---")
 

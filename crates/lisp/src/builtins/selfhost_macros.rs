@@ -1,14 +1,14 @@
 // Extracted from system.rs (file-organization split).
 #![allow(unused_imports)]
-use super::*;
-use super::system::*;
 use super::numeric::{arg, expect_int, expect_string, expect_symbol};
+use super::system::*;
+use super::*;
 use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
-use crate::syntax::{cst, printer, reader};
 use crate::eval::compile::apply_engine;
+use crate::syntax::{cst, printer, reader};
 
 // ---------- macros ----------
 
@@ -178,4 +178,3 @@ pub(super) fn check_string_structured(args: &[Value], _env: EnvId, heap: &mut He
     }
     Ok(heap.list(out))
 }
-

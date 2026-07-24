@@ -56,8 +56,7 @@
   (if (queue-empty? q)
     :empty
     (let (front (get q :front))
-      [(first front)
-       (queue--balance (rest front) (get q :back) (- (get q :size) 1))])))
+      [(first front) (queue--balance (rest front) (get q :back) (- (get q :size) 1))])))
 
 (defn queue-peek (q)
   "Return the front value without removing it, or `:empty` if empty."
@@ -98,14 +97,11 @@ Stable: among equal priorities, earlier inserts pop first (FIFO)."
 
 (defn pq--sorted-insert (pq pri val)
   (cond
-    (nil? pq)
-    (list [pri val])
+    (nil? pq) (list [pri val])
     ;; strict `<` so a new item stops *after* existing equal-priority items —
     ;; keeping ties in insertion order (FIFO) rather than popping newest-first.
-    (< pri (first (first pq)))
-    (cons [pri val] pq)
-    else
-    (cons (first pq) (pq--sorted-insert (rest pq) pri val))))
+    (< pri (first (first pq))) (cons [pri val] pq)
+    else (cons (first pq) (pq--sorted-insert (rest pq) pri val))))
 
 (defn pq-pop (pq)
   "Return `[min-value new-pq]`, or `:empty` if the queue is empty."

@@ -29,7 +29,8 @@
 (println "--- arithmetic on the monster ---")
 ;; Add: result has same number of digits or one more
 (def monster+1 (+ monster 1))
-(println "monster+1 last digit:" (char-at (number->string monster+1) (- (string-length (number->string monster+1)) 1)))
+(println "monster+1 last digit:"
+  (char-at (number->string monster+1) (- (string-length (number->string monster+1)) 1)))
 
 ;; Multiply by a large prime: 2^(2^20) × 999_999_937
 (def mega-prime 999999937)

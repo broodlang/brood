@@ -58,7 +58,8 @@
   (if (= n 0)
     (send parent [:after (%blob-ptr big)])
     (do
-      (cons n nil)  ; per-iteration garbage
+      ; per-iteration garbage
+      (cons n nil)
       (bs-hib-spin big parent (- n 1)))))
 
 (defn bs-hib-worker (parent)
@@ -95,15 +96,11 @@
   (test "fan-out: 8 workers all observe the parent's SharedBlob identity"
     (when (bound? '%blob-ptr)
       (let (n 8
-             ;; ~1 KB string, well above threshold
-             big
-             (string-repeat "abcdefghij0123456789" 64)
-             parent-ptr
-             (%blob-ptr big)
-             me
-             (self)
-             workers
-             (bs-spawn-workers me n))
+            ;; ~1 KB string, well above threshold
+            big (string-repeat "abcdefghij0123456789" 64)
+            parent-ptr (%blob-ptr big)
+            me (self)
+            workers (bs-spawn-workers me n))
         (is (not (nil? parent-ptr)))
         (bs-send-all workers big)
         (bs-collect-ptrs--check 0 n parent-ptr))))

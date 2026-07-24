@@ -711,7 +711,10 @@ const CORE_MODULES: &[(&str, &str)] = &[
     ("project", include_str!("../../../../std/tool/project.blsp")),
     // `nest new` scaffolding (templates + new-project), split out of `project` so
     // the analysis half stays lean. `(:use project)` for *config-git-init*. Opt-in.
-    ("scaffold", include_str!("../../../../std/tool/scaffold.blsp")),
+    (
+        "scaffold",
+        include_str!("../../../../std/tool/scaffold.blsp"),
+    ),
     // The package manager (ADR-037): resolves the manifest's :dependencies into a
     // lock file + load-path entries. Required lazily by `project-setup` only when a
     // project actually declares deps. Opt-in, never in the prelude.
@@ -763,7 +766,10 @@ const CORE_MODULES: &[(&str, &str)] = &[
     ),
     // Process-backed state cell: start/get/update/get-and-update/cast/stop.
     // A thin Brood layer over spawn/send/receive for the common "stateful process" case.
-    ("proc/agent", include_str!("../../../../std/proc/agent.blsp")),
+    (
+        "proc/agent",
+        include_str!("../../../../std/proc/agent.blsp"),
+    ),
     // Order a flat process-info snapshot as a parent→child forest (depth-tagged, DFS
     // by id). A pure, dependency-free transform — CORE, not dev-tools: it's shared by
     // the dev observer's tree sort *and* a shipped app's process list (myedit's

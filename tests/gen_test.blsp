@@ -31,7 +31,11 @@
   ; and the new state took effect
 
   (test "casts are ordered, and a later call observes all of them"
-    (let (c (spawn-server counter 0)) (! c :inc) (! c :inc) (! c :inc) (assert= (gen-call c :value) 3))))
+    (let (c (spawn-server counter 0))
+      (! c :inc)
+      (! c :inc)
+      (! c :inc)
+      (assert= (gen-call c :value) 3))))
 
 (describe "gen: sleep"
   :isolated

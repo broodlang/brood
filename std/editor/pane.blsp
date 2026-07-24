@@ -185,26 +185,18 @@ returned unchanged — you can't delete the only one."
                    :rect rect})
      :dividers ()}
     (let ([x y w h] rect
-           col?
-           (= (get node :dir) :col)
-           ;; the extent split between the two children (less the 1-cell divider),
-           ;; and child a's share of it, clamped so neither pane vanishes
-           ext
-           (- (if col? w h) 1)
-           a-ext
-           (pane--clampi (round (* ext (get node :ratio))) 1 (max 1 (- ext 1)))
-           arect
-           (if col? [x y a-ext h] [x y w a-ext])
-           drect
-           (if col? [(+ x a-ext) y 1 h] [x (+ y a-ext) w 1])
-           brect
-           (if col?
-             [(+ x a-ext 1) y (- w a-ext 1) h]
-             [x (+ y a-ext 1) w (- h a-ext 1)])
-           la
-           (pane--layout (get node :a) (append path (list :a)) arect)
-           lb
-           (pane--layout (get node :b) (append path (list :b)) brect))
+          col? (= (get node :dir) :col)
+          ;; the extent split between the two children (less the 1-cell divider),
+          ;; and child a's share of it, clamped so neither pane vanishes
+          ext (- (if col? w h) 1)
+          a-ext (pane--clampi (round (* ext (get node :ratio))) 1 (max 1 (- ext 1)))
+          arect (if col? [x y a-ext h] [x y w a-ext])
+          drect (if col? [(+ x a-ext) y 1 h] [x (+ y a-ext) w 1])
+          brect (if col?
+                  [(+ x a-ext 1) y (- w a-ext 1) h]
+                  [x (+ y a-ext 1) w (- h a-ext 1)])
+          la (pane--layout (get node :a) (append path (list :a)) arect)
+          lb (pane--layout (get node :b) (append path (list :b)) brect))
       {:panes (append (get la :panes) (get lb :panes))
        :dividers (cons {:path path :dir (get node :dir) :rect drect :split-rect rect}
                    (append (get la :dividers) (get lb :dividers)))})))

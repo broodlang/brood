@@ -10,7 +10,7 @@
     (assert= "" (url/percent-encode "")))
   (test "unreserved chars pass through"
     (assert= "abcABC012" (url/percent-encode "abcABC012"))
-    (assert= "-_.~"      (url/percent-encode "-_.~")))
+    (assert= "-_.~" (url/percent-encode "-_.~")))
   (test "space is encoded"
     (assert= "hello%20world" (url/percent-encode "hello world")))
   (test "slash is encoded"
@@ -88,34 +88,34 @@
 (describe "parse-url"
   (test "full URL with port, query, fragment"
     (let (u (url/parse-url "https://example.com:8080/path?q=1#frag"))
-      (assert= "https"       (get u :scheme))
+      (assert= "https" (get u :scheme))
       (assert= "example.com" (get u :host))
-      (assert= 8080          (get u :port))
-      (assert= "/path"       (get u :path))
-      (assert= "q=1"         (get u :query))
-      (assert= "frag"        (get u :fragment))))
+      (assert= 8080 (get u :port))
+      (assert= "/path" (get u :path))
+      (assert= "q=1" (get u :query))
+      (assert= "frag" (get u :fragment))))
   (test "URL without port"
     (let (u (url/parse-url "http://example.com/hello"))
-      (assert= "http"        (get u :scheme))
+      (assert= "http" (get u :scheme))
       (assert= "example.com" (get u :host))
-      (assert= nil           (get u :port))
-      (assert= "/hello"      (get u :path))
-      (assert= nil           (get u :query))
-      (assert= nil           (get u :fragment))))
+      (assert= nil (get u :port))
+      (assert= "/hello" (get u :path))
+      (assert= nil (get u :query))
+      (assert= nil (get u :fragment))))
   (test "URL without path"
     (let (u (url/parse-url "https://example.com"))
-      (assert= "https"       (get u :scheme))
+      (assert= "https" (get u :scheme))
       (assert= "example.com" (get u :host))
-      (assert= "/"           (get u :path))))
+      (assert= "/" (get u :path))))
   (test "URL with query but no fragment"
     (let (u (url/parse-url "https://x.com/search?q=hello+world"))
-      (assert= "/search"     (get u :path))
+      (assert= "/search" (get u :path))
       (assert= "q=hello+world" (get u :query))
-      (assert= nil           (get u :fragment))))
+      (assert= nil (get u :fragment))))
   (test "relative path (no scheme)"
     (let (u (url/parse-url "/foo/bar"))
-      (assert= nil    (get u :scheme))
-      (assert= nil    (get u :host))
+      (assert= nil (get u :scheme))
+      (assert= nil (get u :host))
       (assert= "/foo/bar" (get u :path)))))
 
 ;; ---- build-url --------------------------------------------------------------
@@ -132,7 +132,9 @@
       (url/build-url {:scheme "https" :host "x.com" :path "/s" :query "q=1"})))
   (test "with query-params map"
     (assert= "https://x.com/s?q=hello+world"
-      (url/build-url {:scheme "https" :host "x.com" :path "/s"
+      (url/build-url {:scheme "https"
+                      :host "x.com"
+                      :path "/s"
                       :query-params {"q" "hello world"}})))
   (test "with fragment"
     (assert= "https://x.com/page#top"
@@ -142,7 +144,7 @@
       (let (parsed (url/parse-url original))
         (assert= original
           (url/build-url {:scheme (get parsed :scheme)
-                          :host   (get parsed :host)
-                          :port   (get parsed :port)
-                          :path   (get parsed :path)
-                          :query  (get parsed :query)}))))))
+                          :host (get parsed :host)
+                          :port (get parsed :port)
+                          :path (get parsed :path)
+                          :query (get parsed :query)}))))))

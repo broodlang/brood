@@ -53,12 +53,17 @@
   (test "a plain string"
     (assert= (json-parse "\"hello\"") "hello")
     (assert= (json-parse "\"\"") ""))
+  ; \t
   (test "the named escapes"
-    (assert= (json-parse "\"a\\\"b\"") "a\"b")  ; \"  -> "
-    (assert= (json-parse "\"a\\\\b\"") "a\\b")  ; \\  -> \
-    (assert= (json-parse "\"a\\/b\"") "a/b")  ; \/  -> /
-    (assert= (json-parse "\"a\\nb\"") "a\nb")  ; \n
-    (assert= (json-parse "\"a\\tb\"") "a\tb"))  ; \t
+    ; \"  -> "
+    (assert= (json-parse "\"a\\\"b\"") "a\"b")
+    ; \\  -> \
+    (assert= (json-parse "\"a\\\\b\"") "a\\b")
+    ; \/  -> /
+    (assert= (json-parse "\"a\\/b\"") "a/b")
+    ; \n
+    (assert= (json-parse "\"a\\nb\"") "a\nb")
+    (assert= (json-parse "\"a\\tb\"") "a\tb"))
   (test "\\b and \\f decode to single control chars (no codepoint primitive needed)"
     (assert= (string-length (json-parse "\"\\b\"")) 1)
     (assert= (string-length (json-parse "\"\\f\"")) 1))
@@ -83,18 +88,26 @@
   (test "whitespace between tokens is ignored"
     (assert= (json-parse "{ \"a\" : [ 1 , 2 ] }") {:a [1 2]})))
 
+; not a value
 (describe "json-parse — malformed input errors"
   (test "structural errors"
-    (is (json--errs? ""))  ; empty
-    (is (json--errs? "{"))  ; unterminated object
-    (is (json--errs? "[1,2"))  ; unterminated array
-    (is (json--errs? "{\"a\" 1}"))  ; missing colon
-    (is (json--errs? "[1 2]"))  ; missing comma
-    (is (json--errs? "tru"))  ; bad literal
-    (is (json--errs? "\"abc"))  ; unterminated string
-    (is (json--errs? "1 2"))  ; trailing content
-    (is (json--errs? "nope"))))  ; not a value
-
+    ; empty
+    (is (json--errs? ""))
+    ; unterminated object
+    (is (json--errs? "{"))
+    ; unterminated array
+    (is (json--errs? "[1,2"))
+    ; missing colon
+    (is (json--errs? "{\"a\" 1}"))
+    ; missing comma
+    (is (json--errs? "[1 2]"))
+    ; bad literal
+    (is (json--errs? "tru"))
+    ; unterminated string
+    (is (json--errs? "\"abc"))
+    ; trailing content
+    (is (json--errs? "1 2"))
+    (is (json--errs? "nope"))))
 (describe "json-encode"
   (test "scalars"
     (assert= (json-encode nil) "null")
@@ -123,9 +136,10 @@
     (assert= (json-encode [1 2 3]) "[1,2,3]")
     (assert= (json-encode '(1 2 3)) "[1,2,3]")
     (assert= (json-encode []) "[]"))
+  ; keyword key → string key
   (test "a single-key object (order is deterministic for one key)"
     (assert= (json-encode {"a" 1}) "{\"a\":1}")
-    (assert= (json-encode {:b [true nil]}) "{\"b\":[true,null]}"))  ; keyword key → string key
+    (assert= (json-encode {:b [true nil]}) "{\"b\":[true,null]}"))
   (test "cannot encode a non-JSON value"
     (is (try (do (json-encode (self)) false) (catch e true)))))
 

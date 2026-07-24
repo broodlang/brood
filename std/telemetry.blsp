@@ -43,16 +43,19 @@ process you own.")
   "`table` with any handler whose id is `id` removed from every event bucket."
   (fold (fn (acc ev)
           (assoc acc ev (filter (fn (h) (not (= (get h :id) id))) (get table ev))))
-        {} (keys table)))
+    {}
+    (keys table)))
 
 (defn telemetry--dispatch (bucket event measurements metadata)
   "Run every handler in `bucket` (the handlers for `event`), each guarded by
 try/catch. Returns the list of ids whose handler threw (to be detached). Runs in the
 LISTENER process."
   (fold (fn (failed h)
-          (try (do ((get h :fn) event measurements metadata) failed)
-               (catch _ (cons (get h :id) failed))))
-        nil bucket))
+          (try
+            (do ((get h :fn) event measurements metadata) failed)
+            (catch _ (cons (get h :id) failed))))
+    nil
+    bucket))
 
 (defn telemetry--run-handlers (event measurements metadata)
   "Dispatch `event` to its handlers and detach any that threw. Runs in the listener."
@@ -69,8 +72,9 @@ LISTENER process."
 (O(1) stack). A throwing handler is caught in `telemetry--dispatch`; an uncatchable
 handler fault kills only this process."
   (receive
-    ([:emit event measurements metadata]
-      (do (telemetry--run-handlers event measurements metadata) (telemetry--listen)))
+    ([:emit event measurements metadata] (do
+                                           (telemetry--run-handlers event measurements metadata)
+                                           (telemetry--listen)))
     ([:ping from r] (do (send from [:telemetry-pong r]) (telemetry--listen)))
     (:stop nil)))
 
@@ -127,7 +131,7 @@ Configuration-time: call at startup, not concurrently from many processes (the t
 is a `def`-rebound global). The handler runs in the listener process, so keep it
 fast — `forward` heavy work to a process you own."
   (let (cleaned (telemetry--without-id *telemetry-handlers* id)
-        bucket  (get cleaned event nil))
+        bucket (get cleaned event nil))
     (def *telemetry-handlers* (assoc cleaned event (cons {:id id :fn handler} bucket)))
     id))
 
@@ -162,17 +166,18 @@ handler logic in a process you own, off even the listener. Returns `id`."
   "Map one `[:system …]` kernel event onto a telemetry emit: event
 `[:runtime kind]`, measurements = the numeric payload, metadata = the ids."
   (match kind
-    (:gc    (emit [:runtime :gc] detail {:pid pid}))
+    (:gc (emit [:runtime :gc] detail {:pid pid}))
     (:spawn (emit [:runtime :spawn] {} {:pid pid :parent detail}))
-    (:exit  (emit [:runtime :exit] {} {:pid pid :reason detail}))
+    (:exit (emit [:runtime :exit] {} {:pid pid :reason detail}))
     (:deopt (emit [:runtime :deopt] {} {:pid pid :fn detail}))
-    (_      (emit [:runtime kind] {} {:pid pid :detail detail}))))
+    (_ (emit [:runtime kind] {} {:pid pid :detail detail}))))
 
 (defn telemetry--runtime-loop ()
   "The watcher loop: re-emit each kernel event; stop (and disarm) on `:stop`."
   (receive
-    ([:system kind pid detail]
-      (do (telemetry--runtime-event kind pid detail) (telemetry--runtime-loop)))
+    ([:system kind pid detail] (do
+                                 (telemetry--runtime-event kind pid detail)
+                                 (telemetry--runtime-loop)))
     (:stop (do (system-monitor nil) nil))))
 
 (defn watch-runtime (&optional opts)
@@ -205,9 +210,9 @@ stream. One system monitor exists at a time — a second call replaces the first
 (defn telemetry--member? (ys x)
   "Whether list `ys` contains `x` (by `=`)."
   (cond
-    (empty? ys)      false
+    (empty? ys) false
     (= (first ys) x) true
-    :else            (telemetry--member? (rest ys) x)))
+    :else (telemetry--member? (rest ys) x)))
 
 (defn telemetry--absent (xs ys)
   "The elements of list `xs` not present in list `ys`."
@@ -250,7 +255,7 @@ at start are the baseline (no spurious `:nodeup` for them)."
 
 (defn telemetry--span (event metadata thunk)
   (let (metadata (or metadata {})
-        t0       (now))
+        t0 (now))
     (emit (telemetry--sub event :start) {:system-time t0} metadata)
     (try
       (let (result (thunk))
@@ -258,8 +263,8 @@ at start are the baseline (no spurious `:nodeup` for them)."
         result)
       (catch e
         (emit (telemetry--sub event :exception)
-              {:duration (- (now) t0)}
-              (assoc metadata :error (error-message e)))
+          {:duration (- (now) t0)}
+          (assoc metadata :error (error-message e)))
         (throw e)))))
 
 (defmacro span (event metadata & body)
@@ -301,7 +306,8 @@ init is single-threaded)."
   "Count each emit of `event` under metric `id`. `(metric id)` → `{:kind :counter
 :count n}`. Returns `id`."
   (let (t (telemetry--metrics))
-    (attach id event
+    (attach id
+      event
       (fn (e m md)
         (let (cur (table-get t id {:kind :counter :count 0}))
           (table-put t id (assoc cur :count (+ (get cur :count) 1))))))))
@@ -310,7 +316,8 @@ init is single-threaded)."
   "Sum measurement `key` across each emit of `event` under metric `id`. Float-safe.
 `(metric id)` → `{:kind :sum :sum s}`. Returns `id`."
   (let (t (telemetry--metrics))
-    (attach id event
+    (attach id
+      event
       (fn (e m md)
         (let (v (get m key 0) cur (table-get t id {:kind :sum :sum 0}))
           (table-put t id (assoc cur :sum (+ (get cur :sum) v))))))))
@@ -319,7 +326,8 @@ init is single-threaded)."
   "Track the latest value of measurement `key` (a gauge) under metric `id`.
 `(metric id)` → `{:kind :gauge :value v}`. Returns `id`."
   (let (t (telemetry--metrics))
-    (attach id event
+    (attach id
+      event
       (fn (e m md)
         (table-put t id {:kind :gauge :value (get m key)})))))
 
@@ -329,18 +337,21 @@ init is single-threaded)."
 → `{:kind :summary :count :sum :min :max :mean :stddev}` (mean/stddev derived on
 read). Returns `id`."
   (let (t (telemetry--metrics))
-    (attach id event
+    (attach id
+      event
       (fn (e m md)
-        (let (v   (get m key)
+        (let (v (get m key)
               cur (table-get t id nil))
           (if (nil? cur)
             (table-put t id {:kind :summary :count 1 :sum v :sumsq (* v v) :min v :max v})
-            (table-put t id (assoc cur
-              :count (+ (get cur :count) 1)
-              :sum   (+ (get cur :sum) v)
-              :sumsq (+ (get cur :sumsq) (* v v))
-              :min   (min (get cur :min) v)
-              :max   (max (get cur :max) v)))))))))
+            (table-put t
+              id
+              (assoc cur
+                :count (+ (get cur :count) 1)
+                :sum (+ (get cur :sum) v)
+                :sumsq (+ (get cur :sumsq) (* v v))
+                :min (min (get cur :min) v)
+                :max (max (get cur :max) v)))))))))
 
 ;; ---- distribution / histogram (bucketed, bounded) ---------------------------
 ;; The percentile-capable aggregator ADR-106 anticipated. Like `summary` it keeps
@@ -365,31 +376,41 @@ first bound ≥ it, or an overflow bucket above the last. Bounded (per-bucket co
 no samples). `(metric id)` → `{:kind :distribution :count :sum :min :max :mean
 :buckets [{:le b :count c}… {:le :inf :count c}]}`; estimate quantiles with
 `metric-percentile`. Returns `id`."
-  (let (t      (telemetry--metrics)
+  (let (t (telemetry--metrics)
         bounds (into [] (sort buckets)))
-    (attach id event
+    (attach id
+      event
       (fn (e m md)
-        (let (v      (get m key)
-              cur    (table-get t id nil)
-              cur    (if (nil? cur)
-                       {:kind :distribution :bounds bounds :counts {}
-                        :count 0 :sum 0 :min v :max v}
-                       cur)
+        (let (v (get m key)
+              cur (table-get t id nil)
+              cur (if (nil? cur)
+                    {:kind :distribution
+                     :bounds bounds
+                     :counts {}
+                     :count 0
+                     :sum 0
+                     :min v
+                     :max v}
+                    cur)
               counts (get cur :counts)
-              idx    (telemetry--bucket-index (get cur :bounds) v 0))
-          (table-put t id (assoc cur
-            :counts (assoc counts idx (+ (get counts idx 0) 1))
-            :count  (+ (get cur :count) 1)
-            :sum    (+ (get cur :sum) v)
-            :min    (min (get cur :min) v)
-            :max    (max (get cur :max) v))))))))
+              idx (telemetry--bucket-index (get cur :bounds) v 0))
+          (table-put t
+            id
+            (assoc cur
+              :counts (assoc counts idx (+ (get counts idx 0) 1))
+              :count (+ (get cur :count) 1)
+              :sum (+ (get cur :sum) v)
+              :min (min (get cur :min) v)
+              :max (max (get cur :max) v))))))))
 
 (defn telemetry--dist-buckets (bounds counts i acc)
   "Build the presented `:buckets` vector: one `{:le bound :count n}` per bound, then
 a final `{:le :inf :count n}` for the overflow bucket."
   (if (>= i (count bounds))
     (into [] (reverse (cons {:le :inf :count (get counts i 0)} acc)))
-    (telemetry--dist-buckets bounds counts (+ i 1)
+    (telemetry--dist-buckets bounds
+      counts
+      (+ i 1)
       (cons {:le (nth bounds i) :count (get counts i 0)} acc))))
 
 (defn telemetry--present (state)
@@ -399,19 +420,28 @@ per-bucket `:buckets` and `:mean` presented (internal `:bounds`/`:counts` droppe
 others pass through."
   (let (kind (get state :kind))
     (cond
-      (= kind :summary)
-        (let (n    (get state :count)
-              s    (get state :sum)
-              mean (/ s n)
-              var  (- (/ (get state :sumsq) n) (* mean mean)))
-          {:kind :summary :count n :sum s :min (get state :min) :max (get state :max)
-           :mean mean :stddev (sqrt (if (< var 0) 0 var))})
-      (= kind :distribution)
-        (let (n (get state :count))
-          {:kind :distribution :count n :sum (get state :sum)
-           :min (get state :min) :max (get state :max)
-           :mean (if (> n 0) (/ (get state :sum) n) 0)
-           :buckets (telemetry--dist-buckets (get state :bounds) (get state :counts) 0 nil)})
+      (= kind :summary) (let (n (get state :count)
+                              s (get state :sum)
+                              mean (/ s n)
+                              var (- (/ (get state :sumsq) n) (* mean mean)))
+                          {:kind :summary
+                           :count n
+                           :sum s
+                           :min (get state :min)
+                           :max (get state :max)
+                           :mean mean
+                           :stddev (sqrt (if (< var 0) 0 var))})
+      (= kind :distribution) (let (n (get state :count))
+                               {:kind :distribution
+                                :count n
+                                :sum (get state :sum)
+                                :min (get state :min)
+                                :max (get state :max)
+                                :mean (if (> n 0) (/ (get state :sum) n) 0)
+                                :buckets (telemetry--dist-buckets (get state :bounds)
+                                           (get state :counts)
+                                           0
+                                           nil)})
       :else state)))
 
 (defn metric (id)
@@ -431,7 +461,7 @@ scraping N snapshot builtins). Empty map if no metrics recorded."
   "Walk the cumulative bucket counts for the bucket the `rank`-th observation falls
 in, then linearly interpolate within `[prev-bound, upper]`. The overflow bucket
 (`i = nb`) can't interpolate above its (unbounded) top, so it reports `maxv`."
-  (let (c   (get counts i 0)
+  (let (c (get counts i 0)
         cum (+ prev-cum c))
     (if (or (>= cum rank) (>= i nb))
       (if (>= i nb)
@@ -449,12 +479,18 @@ bucketed counts — linear interpolation within the containing bucket, the stand
 Returns nil unless `id` is a `distribution` with at least one observation."
   (let (state (table-get (telemetry--metrics) id nil))
     (when (and state
-               (= (get state :kind) :distribution)
-               (> (get state :count) 0))
+            (= (get state :kind) :distribution)
+            (> (get state :count) 0))
       (let (bounds (get state :bounds)
             counts (get state :counts))
-        (telemetry--quantile bounds counts (count bounds)
-                             (* p (get state :count)) 0 0 0 (get state :max))))))
+        (telemetry--quantile bounds
+          counts
+          (count bounds)
+          (* p (get state :count))
+          0
+          0
+          0
+          (get state :max))))))
 
 (defn sample-every (id n handler)
   "Wrap `handler` so it runs on every `n`th matching event (1-in-`n` sampling) —

@@ -74,10 +74,9 @@ the `nest new` scaffolder."
 ;;   "app/start"  => (app start)
 (defn project--parse-main-spec (spec)
   (let (parts (string-split spec "/")
-         ; reject blank module/fn halves so a typo like "" or "/start" errors
-         ; cleanly here, not as a malformed `(require '||)` downstream.
-         ok?
-         (fn (p) (not (blank? p))))
+        ; reject blank module/fn halves so a typo like "" or "/start" errors
+        ; cleanly here, not as a malformed `(require '||)` downstream.
+        ok? (fn (p) (not (blank? p))))
     (cond
       (and (= (count parts) 1) (ok? (first parts))) (list (symbol (first parts)) 'main)
       (and (= (count parts) 2) (ok? (first parts)) (ok? (second parts))) (list (symbol (first parts))
@@ -139,7 +138,7 @@ the `nest new` scaffolder."
 
 (defn project--parse-registry-dep (name entry)
   (let (version (vector-ref entry 2)
-        opts    (project--vec-drop entry 3))
+        opts (project--vec-drop entry 3))
     (when (not (string? version))
       (error "project: registry dependency " name " version must be a string, got " version))
     (project--reject-reserved-opts name opts)
@@ -154,7 +153,8 @@ the `nest new` scaffolder."
     ;; A tarball has no commit to trust, so a :sha256 is MANDATORY — it's the only
     ;; thing pinning the fetched bytes to reviewed content (ADR-037 supply-chain).
     (when (not (string? sha))
-      (error "project: :tarball dependency " name
+      (error "project: :tarball dependency "
+        name
         " needs a :sha256 \"<hex>\" (the archive's SHA-256 — the only integrity pin)"))
     (project--reject-reserved-opts name opts)
     {:name name :kind :tarball :url url :sha256 sha}))
@@ -172,8 +172,10 @@ the `nest new` scaffolder."
       (= kind :path) (project--parse-path-dep name entry)
       (= kind :tarball) (project--parse-tarball-dep name entry)
       (= kind :version) (project--parse-registry-dep name entry)
-      else (error "project: dependency " name
-             " must be :git, :path, :tarball, or :version, got " kind))))
+      else (error "project: dependency "
+             name
+             " must be :git, :path, :tarball, or :version, got "
+             kind))))
 
 ;; Parse the manifest's :dependencies value into a list of normalised dep maps.
 ;; Omitted/nil => empty list.
@@ -351,7 +353,8 @@ the file is missing or declares none."
   "The extra formatter-header table for this project: each `:format-plugins` dep's
 rules merged in declaration order, then this project's own `:format-headers` on top
 (so a project can retune a framework rule). {} when none are declared."
-  (let (from-plugins (fold (fn (acc plugin) (merge acc (project--plugin-format-headers root plugin)))
+  (let (from-plugins (fold (fn (acc plugin)
+                             (merge acc (project--plugin-format-headers root plugin)))
                        {}
                        (or *project-format-plugins* (list)))
         own (or *project-format-headers* {}))
@@ -462,9 +465,10 @@ resolve in the advisory checker. Returns the project root."
 ;; throws) is folded via `on-death` instead of hanging the collector (mirrors the
 ;; test runner's KI-2 `monitor` handling). A small file set runs in-process — no
 ;; spawn overhead, no pool warm-up, stable (filename-sorted) output order.
-(def *check-min-parallel* 2000)  ; below this many files, check in-process
-(def *check-oversample* 2)       ; chunks per core (load-balancing headroom)
-
+; below this many files, check in-process
+(def *check-min-parallel* 2000)
+; chunks per core (load-balancing headroom)
+(def *check-oversample* 2)
 ;; The scheduler's worker-pool size (≈ nproc), clamped ≥1. `worker-threads` is 0
 ;; until the first spawn, so warm the pool and poll briefly for the threads to spin.
 (defn project--await-pool (tries)
@@ -513,7 +517,8 @@ resolve in the advisory checker. Returns the project root."
           (let (pid (spawn (send me (list :chunk (self) (project--pfold-run op chunk)))))
             (monitor pid)
             (cons (list pid chunk) acc)))
-    nil chunks))
+    nil
+    chunks))
 
 ;; Collect one group: fold each chunk value into `acc` via `combine`; a worker
 ;; that DIES before reporting is folded via `(on-death acc chunk reason)`. A
@@ -524,18 +529,34 @@ resolve in the advisory checker. Returns the project root."
     acc
     (let (msg (receive (m m)))
       (cond
-        (= (first msg) :chunk)
-        (let (pid (second msg) entry (project--pfold-entry pid workers))
-          (if (or (member? pid reported) (nil? entry))
-            (project--pfold-collect pending workers reported acc combine on-death)
-            (project--pfold-collect (- pending 1) workers (cons pid reported)
-              (combine acc (third msg)) combine on-death)))
-        (= (first msg) :down)
-        (let (pid (third msg) entry (project--pfold-entry pid workers))
-          (if (or (member? pid reported) (nil? entry))
-            (project--pfold-collect pending workers reported acc combine on-death)
-            (project--pfold-collect (- pending 1) workers (cons pid reported)
-              (on-death acc (second entry) (nth msg 3)) combine on-death)))
+        (= (first msg) :chunk) (let (pid (second msg) entry (project--pfold-entry pid workers))
+                                 (if (or (member? pid reported) (nil? entry))
+                                   (project--pfold-collect pending
+                                     workers
+                                     reported
+                                     acc
+                                     combine
+                                     on-death)
+                                   (project--pfold-collect (- pending 1)
+                                     workers
+                                     (cons pid reported)
+                                     (combine acc (third msg))
+                                     combine
+                                     on-death)))
+        (= (first msg) :down) (let (pid (third msg) entry (project--pfold-entry pid workers))
+                                (if (or (member? pid reported) (nil? entry))
+                                  (project--pfold-collect pending
+                                    workers
+                                    reported
+                                    acc
+                                    combine
+                                    on-death)
+                                  (project--pfold-collect (- pending 1)
+                                    workers
+                                    (cons pid reported)
+                                    (on-death acc (second entry) (nth msg 3))
+                                    combine
+                                    on-death)))
         else (project--pfold-collect pending workers reported acc combine on-death)))))
 
 ;; Run every group, one `*check-batch*`-sized batch in flight at a time.
@@ -558,14 +579,18 @@ resolve in the advisory checker. Returns the project root."
       (combine init (project--pfold-run op files))
       (let (cores (project--pool-size)
             nchunks (min n (* cores *check-oversample*))
-            csize (quot (+ n nchunks -1) nchunks)          ; ceil(n / nchunks)
+            ; ceil(n / nchunks)
+            csize (quot (+ n nchunks -1) nchunks)
             chunks (project--chunk-list csize files nil))
         ;; Group size = `cores`: at most `cores` worker heaps live at once (bounds
         ;; peak memory), and with `*check-oversample*` chunks per core the groups
         ;; still keep every core fed. All cores busy, live set ≈ one core-wide wave.
-        (project--pfold-groups
-          (project--chunk-list cores chunks nil)
-          op combine on-death init (self))))))
+        (project--pfold-groups (project--chunk-list cores chunks nil)
+          op
+          combine
+          on-death
+          init
+          (self))))))
 
 ;; Internal: run `check-file` over every file, print each warning to stderr (GNU
 ;; FILE:LINE:COL format), return the total count. Fanned across the worker pool
@@ -610,25 +635,34 @@ resolve in the advisory checker. Returns the project root."
 ;; [mtime warnings dep-keys fp]}`, merged like the extract cache (anti-thrash).
 (defn project--check-files-cached (files root)
   (let (cache (project--read-cache root "checks")
-        parts (fold (fn (acc p)
-                      (let ([reuse recheck] acc
-                            c (map-get cache p nil))
-                        (if (and c
-                              (= (nth c 0) (file-mtime p))
-                              (= (check-deps-fp (nth c 2)) (nth c 3)))
-                          [(map-assoc reuse p c) recheck]      ; unchanged file + deps → reuse
-                          [reuse (cons p recheck)])))          ; else re-check
-                [{} nil] files)
+        parts (fold
+                ; else re-check
+                (fn (acc p)
+                  (let ([reuse recheck] acc
+                        c (map-get cache p nil))
+                    (if (and c
+                          (= (nth c 0) (file-mtime p))
+                          (= (check-deps-fp (nth c 2)) (nth c 3)))
+                      ; unchanged file + deps → reuse
+                      [(map-assoc reuse p c) recheck]
+                      [reuse (cons p recheck)])))
+                [{} nil]
+                files)
         [reuse recheck] parts
         ;; re-check the dirty set in PARALLEL across the worker pool — safe now that
         ;; the dependency recorder is per-process (Heap::check_dep_rec). Each entry is
         ;; [mtime warnings dep-keys fp].
-        fresh (fold (fn (m pair) (let ([p e] pair) (map-assoc m p e))) {} (project--pcheck-deps recheck))
+        fresh (fold (fn (m pair) (let ([p e] pair) (map-assoc m p e)))
+                {}
+                (project--pcheck-deps recheck))
         entries (fold (fn (m kv) (let ([p e] kv) (map-assoc m p e))) reuse fresh)
         ;; print every file's warnings (reused + fresh) and count them
-        n (fold (fn (n kv) (let ([_ e] kv) (fold (fn (k w) (eprintln w) (+ k 1)) n (nth e 1)))) 0 entries))
+        n (fold (fn (n kv) (let ([_ e] kv) (fold (fn (k w) (eprintln w) (+ k 1)) n (nth e 1))))
+            0
+            entries))
     (when (not (empty? recheck))
-      (project--write-cache root "checks"
+      (project--write-cache root
+        "checks"
         (fold (fn (m kv) (let ([p e] kv) (map-assoc m p e))) cache entries)))
     n))
 
@@ -637,8 +671,7 @@ resolve in the advisory checker. Returns the project root."
     (= (getenv "BROOD_NO_CHECK") "1") 0
     ;; No cache when it's disabled, there's no project root, or the project is over
     ;; the file cap (the manifest read would rival re-checking) — parallel fresh path.
-    (or (project--cache-off?) (nil? root) (>= (count files) (project--cache-max-files)))
-    (project--check-files-fresh files)
+    (or (project--cache-off?) (nil? root) (>= (count files) (project--cache-max-files))) (project--check-files-fresh files)
     else (project--check-files-cached files root)))
 
 ;; Make sure the project is set up and all its sources are loaded — the
@@ -847,13 +880,14 @@ resolve in the advisory checker. Returns the project root."
 ;; A node-vector's first element is itself a node (a vector); a single child
 ;; node's first element is its kind *keyword* — that's how the two are told apart,
 ;; so a dispatch `{:tag mod/handler}` map or a quoted `'sym` is counted correctly.
+; val is a node-vector
 (defn project--walk-val (val acc)
   (cond
     (not (vector? val)) acc
     (empty? val) acc
-    (keyword? (first val)) (project--node-syms--acc val acc)             ; val IS one node
-    :else (fold (fn (a c) (project--node-syms--acc c a)) acc val)))      ; val is a node-vector
-
+    (keyword? (first val)) (project--node-syms--acc val acc)
+    ; val IS one node
+    :else (fold (fn (a c) (project--node-syms--acc c a)) acc val)))
 (defn project--node-syms--acc (node acc)
   (if (= (project--node-kind node) :symbol)
     (let (nm (str (project--node-val node)))
@@ -886,13 +920,14 @@ resolve in the advisory checker. Returns the project root."
 ;; parse, so if a write races the read the stored mtime is the pre-write one and the
 ;; next run (seeing the newer mtime) re-scans rather than trusting a stale extract.
 (defn project--scan-entries-chunk (chunk)
-  (map (fn (path)
-         ;; a proper 4-VECTOR [mtime counts privs def-names] — NOT `(cons mtime …)`
-         ;; onto the vector (that would make an improper list).
-         (let (mt (file-mtime path)
-               [counts privs def-names] (project--scan-file-entry path))
-           [path [mt counts privs def-names]]))
-     chunk))
+  (map
+    (fn (path)
+      ;; a proper 4-VECTOR [mtime counts privs def-names] — NOT `(cons mtime …)`
+      ;; onto the vector (that would make an improper list).
+      (let (mt (file-mtime path)
+            [counts privs def-names] (project--scan-file-entry path))
+        [path [mt counts privs def-names]]))
+    chunk))
 
 ;; The `:check-deps` op (runs in a worker): for each file, run `check-file-deps` and
 ;; return `[path [mtime warnings dep-keys fp]]` — the Phase-2 check-result cache
@@ -904,7 +939,7 @@ resolve in the advisory checker. Returns the project root."
          (let (mt (file-mtime p)
                r (check-file-deps p))
            [p [mt (nth r 0) (nth r 1) (nth r 2)]]))
-     chunk))
+    chunk))
 
 ;; ── incremental check cache (Phase 1, ADR-119) ───────────────────────────────
 ;; The two whole-project CST passes below (unused-private, duplicate-defs) are pure
@@ -966,7 +1001,8 @@ resolve in the advisory checker. Returns the project root."
   (when (not (project--cache-off?))
     (let (f (project--cache-file root name))
       (when f
-        (try (spit f (pr-str {:stamp (project--cache-stamp) :entries entries}))
+        (try
+          (spit f (pr-str {:stamp (project--cache-stamp) :entries entries}))
           (catch e nil))))))
 
 ;; Parse `files` in parallel (`:scan-entries`), returning a list of
@@ -975,11 +1011,14 @@ resolve in the advisory checker. Returns the project root."
 (defn project--pscan (files)
   (if (empty? files)
     nil
-    (project--pfold-files files :scan-entries
+    (project--pfold-files files
+      :scan-entries
       (fn (acc chunk-results) (append-two chunk-results acc))
       (fn (acc chunk reason)
         (eprintln (str "warning: check scan worker died on "
-                    (count chunk) " file(s), re-scanning: " (pr-str reason)))
+                    (count chunk)
+                    " file(s), re-scanning: "
+                    (pr-str reason)))
         (append-two (project--scan-entries-chunk chunk) acc))
       nil)))
 
@@ -991,11 +1030,14 @@ resolve in the advisory checker. Returns the project root."
 (defn project--pcheck-deps (files)
   (if (empty? files)
     nil
-    (project--pfold-files files :check-deps
+    (project--pfold-files files
+      :check-deps
       (fn (acc chunk-results) (append-two chunk-results acc))
       (fn (acc chunk reason)
         (eprintln (str "warning: check worker died on "
-                    (count chunk) " file(s), re-checking: " (pr-str reason)))
+                    (count chunk)
+                    " file(s), re-checking: "
+                    (pr-str reason)))
         (append-two (project--check-deps-chunk chunk) acc))
       nil)))
 
@@ -1044,14 +1086,14 @@ resolve in the advisory checker. Returns the project root."
     ;; the accumulator tail → O(total); a plain `(append acc …)` would be O(files²).
     (fold (fn (acc kv)
             (let ([path entry] kv)
-              (append-two
-                (keep (fn (pd)
-                        (let ([bare qual] pd
-                              used (or (>= (map-get counts bare 0) 2)
-                                     (and (not (= qual bare)) (>= (map-get counts qual 0) 1))))
-                          (when (not used)
-                            (str path ": warning: unused private function: " bare))))
-                  (nth entry 2))
+              (append-two (keep (fn (pd)
+                                  (let ([bare qual] pd
+                                        used (or (>= (map-get counts bare 0) 2)
+                                               (and (not (= qual bare))
+                                                 (>= (map-get counts qual 0) 1))))
+                                    (when (not used)
+                                      (str path ": warning: unused private function: " bare))))
+                            (nth entry 2))
                 acc)))
       '()
       extracts)))
@@ -1062,7 +1104,6 @@ resolve in the advisory checker. Returns the project root."
   (if (= (getenv "BROOD_NO_CHECK") "1")
     0
     (fold (fn (n w) (eprintln w) (+ n 1)) 0 (project--unused-private-warnings extracts))))
-
 
 (defn check-project ()
   "Advisory type-check the whole project (every source + test file), printing GNU-style `FILE:LINE:COL:` warnings to stderr. Errors if not in a Brood project. Backs `nest check`."
@@ -1151,8 +1192,9 @@ resolve in the advisory checker. Returns the project root."
       ;; `BROOD_TEST_NO_SCOPE` reverts to the legacy load-all-then-run-all path (the
       ;; escape hatch, e.g. for a suite that relies on cross-file top-level defs).
       (if (getenv "BROOD_TEST_NO_SCOPE")
-        (do (fold (fn (_ f) (load f)) nil files)
-            (apply test/run-tests opts))
+        (do
+          (fold (fn (_ f) (load f)) nil files)
+          (apply test/run-tests opts))
         (apply test/run-tests-scoped (map (fn (f) (fn () (load f))) files) opts)))))
 
 ;; Structured analogue of `run-project-tests` — same bootstrap (discovery,
@@ -1179,8 +1221,9 @@ resolve in the advisory checker. Returns the project root."
       ;; is a long-lived hot-reload image, so a load-all-then-run would accumulate every
       ;; file's promoted code on EVERY run-tests call. `BROOD_TEST_NO_SCOPE` reverts.
       (if (getenv "BROOD_TEST_NO_SCOPE")
-        (do (fold (fn (_ f) (load f)) nil files)
-            (apply test/run-tests-structured opts))
+        (do
+          (fold (fn (_ f) (load f)) nil files)
+          (apply test/run-tests-structured opts))
         (apply test/run-tests-scoped-structured (map (fn (f) (fn () (load f))) files) opts)))))
 
 ;; (run-project args) — find the project from the cwd, set it up (which may
@@ -1198,7 +1241,8 @@ resolve in the advisory checker. Returns the project root."
     ;; A `--main` override (set via `set-project-main`) wins over the manifest's
     ;; `:main`, which `project-setup` just re-applied into `*project-main*`.
     (let (entry (or *project-main-override* *project-main*)
-          modname (first entry) fname (second entry))
+          modname (first entry)
+          fname (second entry))
       (require modname)
       ;; A `(defmodule …)` entry defines its fn as `modname/fname` (ADR-065); a
       ;; module file with no `defmodule` header defines it bare. Prefer the
@@ -1292,7 +1336,8 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
   ;; idempotent — so a `(:use foo)` in the first module pulls `foo` on demand.
   (map require-one (%bundle-module-names))
   (let (entry (or *project-main-override* *project-main*)
-        modname (first entry) fname (second entry))
+        modname (first entry)
+        fname (second entry))
     (require modname)
     (let (qual (symbol (str (name modname) "/" (name fname))))
       (let (target (cond (bound? qual) qual (bound? fname) fname else nil))
@@ -1355,4 +1400,3 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
       (when (and (pair? form) (= (first form) 'config))
         (apply config (rest form)))))
   nil)
-

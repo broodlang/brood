@@ -17,8 +17,9 @@
       (send done-pid :error-nil-token)
       (if (= rounds-left 0)
         (send done-pid [:done tok])
-        (do (send next-pid (+ tok 1))
-            (ring-node next-pid (- rounds-left 1) done-pid))))))
+        (do
+          (send next-pid (+ tok 1))
+          (ring-node next-pid (- rounds-left 1) done-pid))))))
 
 (let (me (self)
       n 500
@@ -31,12 +32,11 @@
   ;; waits for its next-pid in a setup message, then enters the ring loop.
 
   (defn spawn-node (me rounds)
-    (spawn
-      (let (setup (receive (setup setup) (after 5000 :timeout)))
-        (let (next-pid  (get setup :next)
-              done-pid  (get setup :done)
-              rounds-l  (get setup :rounds))
-          (ring-node next-pid rounds-l done-pid)))))
+    (spawn (let (setup (receive (setup setup) (after 5000 :timeout)))
+             (let (next-pid (get setup :next)
+                   done-pid (get setup :done)
+                   rounds-l (get setup :rounds))
+               (ring-node next-pid rounds-l done-pid)))))
 
   (def ring-pids
     (into [] (map (fn (_) (spawn-node me rounds)) (range n))))
@@ -45,9 +45,9 @@
   (doseq (i (range n))
     (let (next-i (rem (+ i 1) n))
       (send (get ring-pids i)
-            {:next   (get ring-pids next-i)
-             :done   me
-             :rounds (if (= i 0) rounds 0)})))
+        {:next (get ring-pids next-i)
+         :done me
+         :rounds (if (= i 0) rounds 0)})))
 
   ;; Start the token: send to node 0 (it has rounds set)
   ;; Actually node 0 starts the token itself since it has rounds-left > 0
@@ -103,30 +103,33 @@
             b2 (receive ([:b v] v) (after 2000 :timeout)))
         (println "P25: a=" a "c=" c "b1=" b1 "b2=" b2)
         (println "P25-correct:"
-                 (and (= 1 a) (= 3 c) (= 2 b1) (= 20 b2)))))))
+          (and (= 1 a) (= 3 c) (= 2 b1) (= 20 b2)))))))
 
 ;;; ---- P26: 1MB message round-trip ----
 (println "=== P26: 1MB string round-trip across process heaps ===")
 ;; spawn returns the pid; capture it and round-trip a 1 MB string through it.
 (let (me (self)
       big-string (string-repeat "A" 1048576))
-  (let (worker (spawn
-                 (receive
-                   ([:echo s] (send me [:reply (string-length s) (char-at s 0) (char-at s (- (string-length s) 1))]))
-                   (after 10000 :timeout))))
+  (let (worker (spawn (receive
+                        ([:echo s] (send me
+                                     [:reply (string-length s)
+                                       (char-at s 0)
+                                       (char-at s (- (string-length s) 1))]))
+                        (after 10000 :timeout))))
     (send worker [:echo big-string])
     (let (r (receive ([:reply len first-ch last-ch] [len first-ch last-ch]) (after 10000 :timeout)))
       (println "P26: length=" (get r 0) "first=" (get r 1) "last=" (get r 2))
       (println "P26-correct:"
-               (and (= 1048576 (get r 0))
-                    (= "A" (get r 1))
-                    (= "A" (get r 2)))))))
+        (and (= 1048576 (get r 0))
+          (= "A" (get r 1))
+          (= "A" (get r 2)))))))
 
 ;;; ---- P27: process spawning tree (depth 8 = 256 leaf processes) ----
 (println "=== P27: 256-leaf process tree ===")
 (defn spawn-tree (depth done-pid)
   (if (= depth 0)
-    (send done-pid 1)  ; leaf contributes 1
+    ; leaf contributes 1
+    (send done-pid 1)
     (let (me (self))
       (spawn (spawn-tree (- depth 1) me))
       (spawn (spawn-tree (- depth 1) me))
@@ -148,17 +151,17 @@
   ;; Spawn 200 watchers, each monitors victim and reports :down to us
   (def watcher-count 200)
   (dotimes (_ watcher-count)
-    (spawn
-      (let (ref (monitor victim))
-        (let (r (receive ([:down ~ref _ reason] reason) (after 10000 :timeout)))
-          (send me [:watcher-result r])))))
+    (spawn (let (ref (monitor victim))
+             (let (r (receive ([:down ~ref _ reason] reason) (after 10000 :timeout)))
+               (send me [:watcher-result r])))))
   ;; Give watchers time to set up monitors
   (receive (_ :ok) (after 100 :timeout))
   ;; Kill the victim
   (send victim :go)
   ;; Collect results from all watchers
   (defn collect-watchers (n acc)
-    (if (= n 0) acc
+    (if (= n 0)
+      acc
       (let (r (receive ([:watcher-result v] v) (after 10000 :timeout)))
         (collect-watchers (- n 1) (cons r acc)))))
   (def results (collect-watchers watcher-count nil))

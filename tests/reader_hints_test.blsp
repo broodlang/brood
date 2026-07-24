@@ -13,6 +13,7 @@
   "The :hint of the error raised reading+evaluating `src`, or nil."
   (try (eval (read-string src)) (catch e (get e :hint))))
 
+; a bare #-atom is a symbol
 (describe "reader: Clojure/Scheme syntax gets a teaching hint"
   (test "#{…} now reads as a first-class set literal (no longer an error)"
     (let (s (eval (read-string "#{1 2 3}")))
@@ -43,9 +44,9 @@
       (assert= (get e :kind) :parse)
       (is (string-contains? (get e :hint) "int->char"))))
   (test "the legitimate # forms still read (no false positive)"
-    (is (bytes? (read-string "#b\"hi\"")))       ; bytes literal
-    (is (= (read-string "#foo") '#foo))))         ; a bare #-atom is a symbol
-
+    ; bytes literal
+    (is (bytes? (read-string "#b\"hi\"")))
+    (is (= (read-string "#foo") '#foo))))
 (describe "let/letrec: Scheme/Clojure nested bindings get a hint"
   (test "(let ((a 1)) …) → hint to flatten the bindings"
     (let (h (hint-of "(let ((a 1)) a)"))

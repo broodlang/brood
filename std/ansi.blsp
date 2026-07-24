@@ -29,10 +29,13 @@ escape sequences and carriage returns."
     (let (c (char-at s i))
       (cond
         (= c "\e") (if (and (< (+ i 1) (string-length s)) (= (char-at s (+ i 1)) "["))
-                     (ansi--strip s (ansi--csi-end s (+ i 2)) out)  ; CSI: skip to final byte
-                     (ansi--strip s (+ i 2) out))                   ; other ESC X: drop both
-        (= c "\r") (ansi--strip s (+ i 1) out)                      ; bare CR: drop
-        :else      (ansi--strip s (+ i 1) (cons c out))))))
+                     ; CSI: skip to final byte
+                     (ansi--strip s (ansi--csi-end s (+ i 2)) out)
+                     (ansi--strip s (+ i 2) out))
+        ; other ESC X: drop both
+        (= c "\r") (ansi--strip s (+ i 1) out)
+        ; bare CR: drop
+        :else (ansi--strip s (+ i 1) (cons c out))))))
 
 (defn strip-ansi (s)
   "`s` with all ANSI escape sequences and bare carriage returns removed.

@@ -17,7 +17,8 @@
 ;; callee is a FRESH local closure each call (a relocatable LOCAL handle), the
 ;; tail arg is an unrealised lazy seq-view (`lmap` over a range).
 (defn count-via-apply (n)
-  (let (callee (fn (& xs) (count xs)))   ; fresh closure handle
+  (let (callee (fn (& xs) (count xs)))
+    ; fresh closure handle
     (apply callee (lmap inc (range n)))))
 
 ;; leading-arg variant: a fresh local list rides as a non-spliced leading arg, so
@@ -29,7 +30,8 @@
 (defn hammer (i acc f n)
   (if (= i 0) acc (hammer (- i 1) (+ acc (f n)) f n)))
 
-(describe "apply over a lazy seq-view keeps the callee/args live across the realise" :isolated
+(describe "apply over a lazy seq-view keeps the callee/args live across the realise"
+  :isolated
   (test "fresh-closure callee, seq-view tail — no stale handle"
     ;; each call returns n; Σ over 200 calls of n=50 = 10000
     (assert= (hammer 200 0 count-via-apply 50) 10000))

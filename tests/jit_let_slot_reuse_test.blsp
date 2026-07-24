@@ -24,7 +24,8 @@
 ;; A driver that consumes each result (so f5's arm is JIT'd in a consuming
 ;; context) and accumulates — the value diverged at odd iteration counts.
 (defn drive (f i n acc)
-  (if (>= i n) acc
+  (if (>= i n)
+    acc
     (drive f (+ i 1) n (bit-xor acc (bit-and (f i) 268435455)))))
 
 ;; Warm a 1-arg fn past the tier threshold, then return its value at `x`.

@@ -14,7 +14,8 @@
 
 (describe "chunk-by"
   (test "groups consecutive equal values"
-    (assert= [[1 1] [2] [1 1 1]] (into [] (map (fn (x) (into [] x)) (chunk-by identity [1 1 2 1 1 1])))))
+    (assert= [[1 1] [2] [1 1 1]]
+      (into [] (map (fn (x) (into [] x)) (chunk-by identity [1 1 2 1 1 1])))))
   (test "by key function"
     (let (r (chunk-by even? [2 4 1 3 6]))
       (assert= [[2 4] [1 3] [6]] (into [] (map (fn (x) (into [] x)) r)))))
@@ -40,7 +41,7 @@
     (assert= nil (flat-map (fn (x) (list x)) nil)))
   (test "same as mapcat"
     (assert= (mapcat (fn (x) (list x x)) '(1 2 3))
-             (flat-map (fn (x) (list x x)) '(1 2 3)))))
+      (flat-map (fn (x) (list x x)) '(1 2 3)))))
 
 (describe "zip-with"
   (test "addition of pairs"

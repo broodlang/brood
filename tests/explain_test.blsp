@@ -10,7 +10,8 @@
   (test "a known code returns summary/causes/fix/example + the code"
     (let (e (explain-error "E0040"))
       (assert= (get e :code) "E0040")
-      (is (string-contains? (get e :summary) "ision"))   ; div/Division
+      ; div/Division
+      (is (string-contains? (get e :summary) "ision"))
       (is (string-contains? (get e :fix) "zero?"))
       (is (string? (get e :example)))))
   (test "a caught error MAP is explained via its :code"

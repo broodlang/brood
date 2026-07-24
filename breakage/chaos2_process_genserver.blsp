@@ -17,11 +17,9 @@
 
 (defn counter-server (count)
   (receive
-    ([:incr n reply-to]
-      (send reply-to [:ok (+ count n)])
+    ([:incr n reply-to] (send reply-to [:ok (+ count n)])
       (counter-server (+ count n)))
-    ([:get reply-to]
-      (send reply-to [:count count])
+    ([:get reply-to] (send reply-to [:count count])
       (counter-server count))
     (:stop :done)))
 
@@ -30,21 +28,21 @@
       n-clients 100)
   ;; Each client sends 10 increments of 1, waits for each ack
   (dotimes (i n-clients)
-    (spawn
-      (defn do-increments (server me remaining)
-        (if (= remaining 0)
-          (send me [:client-done i])
-          (do
-            (send server [:incr 1 (self)])
-            (receive ([:ok _] :ok) (after 5000 :timeout))
-            (do-increments server me (- remaining 1)))))
+    (spawn (defn do-increments (server me remaining)
+             (if (= remaining 0)
+               (send me [:client-done i])
+               (do
+                 (send server [:incr 1 (self)])
+                 (receive ([:ok _] :ok) (after 5000 :timeout))
+                 (do-increments server me (- remaining 1)))))
       (do-increments server me 10)))
 
   ;; Wait for all clients to finish
   (defn wait-clients (n)
     (when (> n 0)
-      (receive ([:client-done _] (wait-clients (- n 1)))
-               (after 30000 (println "P43: client timeout!")))))
+      (receive
+        ([:client-done _] (wait-clients (- n 1)))
+        (after 30000 (println "P43: client timeout!")))))
   (wait-clients n-clients)
 
   ;; Check final count
@@ -98,8 +96,7 @@
 (defn crashable-worker (me)
   (receive
     (:crash (error "worker-crash"))
-    ([:echo v reply-to]
-      (send reply-to [:echo v])
+    ([:echo v reply-to] (send reply-to [:echo v])
       (crashable-worker me))
     (:stop :done)))
 
@@ -113,8 +110,9 @@
                     (after 10000 :timeout)))
         (when (and (vector? event) (= :crashed (get event 0)))
           (if (> restarts-left 0)
-            (do (send me [:restarted (get event 1)])
-                (supervisor worker-fn me (- restarts-left 1)))
+            (do
+              (send me [:restarted (get event 1)])
+              (supervisor worker-fn me (- restarts-left 1)))
             (send me [:max-restarts])))))))
 
 (let (me (self))
@@ -122,19 +120,24 @@
   (let (worker-pid (receive ([:worker-pid p] p) (after 5000 :timeout)))
     ;; Crash the worker 3 times
     (send worker-pid :crash)
-    (receive ([:restarted reason]
-      (println "P45: restart 1, reason:" reason))
+    (receive
+      ([:restarted reason] (println "P45: restart 1, reason:" reason))
       (after 3000 (println "P45: no restart 1")))
     (let (worker2 (receive ([:worker-pid p] p) (after 3000 :timeout)))
       (send worker2 :crash)
-      (receive ([:restarted _] (println "P45: restart 2")) (after 3000 (println "P45: no restart 2")))
+      (receive
+        ([:restarted _] (println "P45: restart 2"))
+        (after 3000 (println "P45: no restart 2")))
       (let (worker3 (receive ([:worker-pid p] p) (after 3000 :timeout)))
         (send worker3 :crash)
-        (receive ([:restarted _] (println "P45: restart 3")) (after 3000 (println "P45: no restart 3")))
+        (receive
+          ([:restarted _] (println "P45: restart 3"))
+          (after 3000 (println "P45: no restart 3")))
         ;; After max-restarts, supervisor should report max-restarts
-        (let (final (receive ([:max-restarts] :hit-max)
-                             ([:worker-pid _] :got-another-pid)
-                             (after 3000 :timeout)))
+        (let (final (receive
+                      ([:max-restarts] :hit-max)
+                      ([:worker-pid _] :got-another-pid)
+                      (after 3000 :timeout)))
           (println "P45: final:" final)
           (println "P45-correct (hit-max or restarted all):" (not (= :timeout final))))))))
 
@@ -143,7 +146,7 @@
 
 (let (me (self))
   (let (worker (spawn :p46-test-worker
-                  (do (receive (:die :ok) (after 10000 :ok)) (send me :dead))))
+                 (do (receive (:die :ok) (after 10000 :ok)) (send me :dead))))
     (let (found (whereis :p46-test-worker))
       (println "P46: found registered:" (pid? found))
       (println "P46: same pid:" (= worker found)))
@@ -160,13 +163,11 @@
 
 (defn map-server (m)
   (receive
-    ([:get k reply-to]
-      (send reply-to [:val (get m k)])
+    ([:get k reply-to] (send reply-to [:val (get m k)])
       (map-server m))
-    ([:put k v reply-to]
-      (let (m2 (assoc m k v))
-        (send reply-to :ok)
-        (map-server m2)))
+    ([:put k v reply-to] (let (m2 (assoc m k v))
+                           (send reply-to :ok)
+                           (map-server m2)))
     (:stop :done)))
 
 (let (me (self)
@@ -178,19 +179,19 @@
 
   ;; 50 concurrent readers
   (dotimes (i 50)
-    (spawn
-      (let (key (rem (* i 197) 10000))
-        (send server [:get key (self)])
-        (let (r (receive ([:val v] v) (after 5000 :timeout)))
-          (send me [:p47 i key r])))))
+    (spawn (let (key (rem (* i 197) 10000))
+             (send server [:get key (self)])
+             (let (r (receive ([:val v] v) (after 5000 :timeout)))
+               (send me [:p47 i key r])))))
 
   ;; Collect results
   (defn collect-p47 (n wrong)
-    (if (= n 0) wrong
+    (if (= n 0)
+      wrong
       (let (r (receive ([:p47 _ key val] [key val]) (after 10000 :timeout)))
         (let (expected (* (get r 0) (get r 0)))
           (collect-p47 (- n 1)
-                       (if (= expected (get r 1)) wrong (+ wrong 1)))))))
+            (if (= expected (get r 1)) wrong (+ wrong 1)))))))
   (def p47-wrong (collect-p47 50 0))
   (send server :stop)
   (println "P47: wrong reads:" p47-wrong)
@@ -208,10 +209,10 @@
     (println "P48: mailbox >= 10:" (>= (get info :mailbox) 10))
     (println "P48: memory > 0:" (> (get info :memory) 0))
     (println "P48-correct:"
-             (and info
-                  (or (= :running (get info :status))
-                      (= :waiting (get info :status)))
-                  (>= (get info :mailbox) 10))))
+      (and info
+        (or (= :running (get info :status))
+          (= :waiting (get info :status)))
+        (>= (get info :mailbox) 10))))
   ;; Drain dummies
   (dotimes (_ 10) (receive (:dummy :ok) (after 100 :ok))))
 

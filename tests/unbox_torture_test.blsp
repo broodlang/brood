@@ -18,33 +18,41 @@
 ;; Every worker below is deliberately *non-tail* recursive — the whole point is
 ;; to exercise the JIT's recursive-arm lowering and the depth cliff. `check-allow`
 ;; opts the group out of the (correct, but here intentional) non-tail lint.
+; ÷0 at n=0, via `/`
 (check-allow :non-tail-recursion
   (defn ut-fib (n) (if (< n 2) n (+ (ut-fib (- n 1)) (ut-fib (- n 2)))))
   (defn ut-deep (n) (if (< n 1) 0 (+ 1 (ut-deep (- n 1)))))
   (defn ut-fact (n) (if (< n 1) 1 (* n (ut-fact (- n 1)))))
   (defn ut-ack (m n)
-    (if (< m 1) (+ n 1)
+    (if (< m 1)
+      (+ n 1)
       (if (< n 1) (ut-ack (- m 1) 1) (ut-ack (- m 1) (ut-ack m (- n 1))))))
   (defn ut-digsum (n) (if (< n 1) 0 (+ (rem n 10) (ut-digsum (quot n 10)))))
   (defn ut-xor (n) (if (< n 1) 0 (bit-xor n (ut-xor (- n 1)))))
   (defn ut-let (n) (if (< n 2) n (let (h (quot n 2)) (+ (ut-let (- n 1)) (ut-let (- n 2)) h))))
-  (defn ut-div0 (n) (if (< n 0) 0 (+ (rem 10 n) (ut-div0 (- n 1)))))   ; ÷0 at n=0
-  (defn ut-div (n) (if (< n 1) 1 (/ (* 2 (ut-div (- n 1))) 1)))         ; exact `/` stays in the worker
-  (defn ut-div-inexact (n) (if (< n 2) n (+ (ut-div-inexact (- n 1)) (/ n 3)))) ; inexact `/` deopts to Float
-  (defn ut-div-slash0 (n) (if (< n 0) 0 (+ (/ 10 n) (ut-div-slash0 (- n 1)))))) ; ÷0 at n=0, via `/`
-
+  ; ÷0 at n=0
+  (defn ut-div0 (n) (if (< n 0) 0 (+ (rem 10 n) (ut-div0 (- n 1)))))
+  ; exact `/` stays in the worker
+  (defn ut-div (n) (if (< n 1) 1 (/ (* 2 (ut-div (- n 1))) 1)))
+  ; inexact `/` deopts to Float
+  (defn ut-div-inexact (n) (if (< n 2) n (+ (ut-div-inexact (- n 1)) (/ n 3))))
+  (defn ut-div-slash0 (n) (if (< n 0) 0 (+ (/ 10 n) (ut-div-slash0 (- n 1))))))
 (describe "unboxed-i64 register worker"
   (test "shallow-wide recursion (fib)"
     (assert= 832040 (ut-fib 30)))
 
+  ; deeper: boxed drains via jit_native_depth
   (test "depth cliff: just under (i64 worker), and over (→ boxed drain) — all correct"
-    (assert= 1399 (ut-deep 1399))     ; under the 1400 cap: stays in the i64 worker
-    (assert= 1401 (ut-deep 1401))     ; crosses the cap: depth-bail → boxed path
-    (assert= 2000 (ut-deep 2000)))    ; deeper: boxed drains via jit_native_depth
-
+    ; under the 1400 cap: stays in the i64 worker
+    (assert= 1399 (ut-deep 1399))
+    ; crosses the cap: depth-bail → boxed path
+    (assert= 1401 (ut-deep 1401))
+    (assert= 2000 (ut-deep 2000)))
   (test "overflow → deopt → VM BigInt (exact)"
-    (assert= 2432902008176640000 (ut-fact 20))          ; 20! still fits i64
-    (assert= 51090942171709440000 (ut-fact 21))          ; 21! first overflow → BigInt
+    ; 20! still fits i64
+    (assert= 2432902008176640000 (ut-fact 20))
+    ; 21! first overflow → BigInt
+    (assert= 51090942171709440000 (ut-fact 21))
     (assert= 15511210043330985984000000 (ut-fact 25)))
 
   ;; `:isolated` so this CPU-heavy compute runs ALONE on the runner instead of
@@ -56,14 +64,16 @@
   ;; deopt-drain (`ack(3,8)`). `ack(3,10)` was dropped: it adds ~16× wall-clock
   ;; (~45M calls, mostly on the slow drain path) for ZERO extra code-path
   ;; coverage, and pushed a slow shared CI runner past the 120s per-test cap.
-  (test "multi-arg non-tail recursion (Ackermann)" :isolated
-    (assert= 509 (ut-ack 3 6))     ; stays in the i64 register worker (depth < cliff)
-    (assert= 2045 (ut-ack 3 8)))   ; crosses the 1400 depth cliff → boxed drain
-
+  ; crosses the 1400 depth cliff → boxed drain
+  (test "multi-arg non-tail recursion (Ackermann)"
+    :isolated
+    ; stays in the i64 register worker (depth < cliff)
+    (assert= 509 (ut-ack 3 6))
+    (assert= 2045 (ut-ack 3 8)))
+  ; XOR 1..1000 (1000 ≡ 0 mod 4)
   (test "rem/quot + bitwise in the worker"
     (assert= 15 (ut-digsum 12345))
-    (assert= 1000 (ut-xor 1000)))                        ; XOR 1..1000 (1000 ≡ 0 mod 4)
-
+    (assert= 1000 (ut-xor 1000)))
   (test "let binders carried in SSA vars"
     (assert= 24465 (ut-let 20)))
 
@@ -80,7 +90,8 @@
   (defn ut-ffib (n) (if (< n 2.0) n (+ (ut-ffib (- n 1.0)) (ut-ffib (- n 2.0)))))
   (defn ut-fpow (b n) (if (< n 1.0) 1.0 (* b (ut-fpow b (- n 1.0)))))
   (defn ut-fdeep (n) (if (< n 1.0) 0.0 (+ 1.0 (ut-fdeep (- n 1.0)))))
-  (defn ut-flet (n) (if (< n 2.0) n (let (h (/ n 2.0)) (+ (ut-flet (- n 1.0)) (ut-flet (- n 2.0)) h)))))
+  (defn ut-flet (n)
+    (if (< n 2.0) n (let (h (/ n 2.0)) (+ (ut-flet (- n 1.0)) (ut-flet (- n 2.0)) h)))))
 
 (describe "unboxed-f64 register worker"
   (test "float shallow-wide recursion"

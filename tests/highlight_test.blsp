@@ -15,8 +15,10 @@
   ;; scan-tokens returns a VECTOR of [start end kind text] (like parse-source).
   (test "tokens carry [start end kind text], whitespace skipped"
     (assert= (scan-tokens "(map 42 :k)")
-      [[0 1 :open "("] [1 4 :symbol "map"] [5 7 :number "42"]
-       [8 10 :keyword ":k"] [10 11 :close ")"]]))
+      [[0 1 :open "("] [1 4 :symbol "map"]
+        [5 7 :number "42"]
+        [8 10 :keyword ":k"]
+        [10 11 :close ")"]]))
   (test "strings honour escapes; comments run to end of input"
     (assert= (scan-tokens "\"a\\\"b\" ; c")
       [[0 6 :string "\"a\\\"b\""] [7 10 :comment "; c"]]))
@@ -49,6 +51,7 @@
     (assert= (highlight-window "(+ 1)" 10)
       (list [11 12 hl-face-function] [13 14 hl-face-number]))))
 
+; point inside the string → the enclosing (a form
 (describe "safe-restart — a column-0 form start to lex from"
   (test "backs up to the start of the enclosing top-level form"
     ;; pos 18 sits inside the second form, whose `(` is at offset 11 (after the \n at 10)
@@ -64,10 +67,11 @@
     ;; value:  (a / "s / (x  <- col-0 ( but inside the string / ") / (b)
     ;; the ( at offset 6 opens no form — it's string content, so it must be skipped.
     (let (src "(a\n\"s\n(x\n\")\n(b)")
-      (assert= (safe-restart src 13) 12)   ; point in (b) → (b), not the in-string (
-      (assert= (safe-restart src 6) 0)     ; the in-string ( itself → the (a form at 0
-      (assert= (safe-restart src 7) 0))))  ; point inside the string → the enclosing (a form
-
+      ; point in (b) → (b), not the in-string (
+      (assert= (safe-restart src 13) 12)
+      ; the in-string ( itself → the (a form at 0
+      (assert= (safe-restart src 6) 0)
+      (assert= (safe-restart src 7) 0))))
 (describe "highlight-chunks — tiling a visible line"
   (test "chunks cover the whole line, coalescing default runs"
     (assert= (highlight-chunks "(+ 1)" 0 "(+ 1)" '())
@@ -132,7 +136,8 @@
     (assert-error (span-runs "a" 9223372036854775807 '()))
     (assert-error (span-runs "abc" 9223372036854775807 (list [0 1 {:fg :red}]))))
   (test "a large-but-non-overflowing base still tiles correctly"
-    (assert= (span-runs "abc" 9223372036854775800
+    (assert= (span-runs "abc"
+               9223372036854775800
                (list [9223372036854775801 9223372036854775806 {:fg :red}]))
       (list ["a" nil] ["bc" {:fg :red}]))))
 

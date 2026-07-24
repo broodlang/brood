@@ -59,12 +59,11 @@
   (binding (*p51-config* :parent-override)
     (println "P51: parent sees:" *p51-config*)
     ;; Spawn a child — it should see the declared DEFAULT, not parent's binding
-    (spawn
-      (send me [:p51 *p51-config*]))
+    (spawn (send me [:p51 *p51-config*]))
     (let (child-val (receive ([:p51 v] v) (after 3000 :timeout)))
       (println "P51: child sees:" child-val)
       (println "P51-correct (child gets default):"
-               (= :parent-default child-val)))))
+        (= :parent-default child-val)))))
 
 ;;; ---- P52: binding + nested errors restore correctly ----
 (println "=== P52: binding + nested errors (RAII restore) ===")
@@ -87,33 +86,94 @@
 ;;; ---- P53: many distinct dynvars, no cross-contamination ----
 (println "=== P53: 20 distinct dynamic vars, concurrent bindings ===")
 
-(defdyn *dv-0*  :d0)  (defdyn *dv-1*  :d1)  (defdyn *dv-2*  :d2)  (defdyn *dv-3*  :d3)
-(defdyn *dv-4*  :d4)  (defdyn *dv-5*  :d5)  (defdyn *dv-6*  :d6)  (defdyn *dv-7*  :d7)
-(defdyn *dv-8*  :d8)  (defdyn *dv-9*  :d9)  (defdyn *dv-10* :d10) (defdyn *dv-11* :d11)
-(defdyn *dv-12* :d12) (defdyn *dv-13* :d13) (defdyn *dv-14* :d14) (defdyn *dv-15* :d15)
-(defdyn *dv-16* :d16) (defdyn *dv-17* :d17) (defdyn *dv-18* :d18) (defdyn *dv-19* :d19)
+(defdyn *dv-0* :d0)
+(defdyn *dv-1* :d1)
+(defdyn *dv-2* :d2)
+(defdyn *dv-3* :d3)
+(defdyn *dv-4* :d4)
+(defdyn *dv-5* :d5)
+(defdyn *dv-6* :d6)
+(defdyn *dv-7* :d7)
+(defdyn *dv-8* :d8)
+(defdyn *dv-9* :d9)
+(defdyn *dv-10* :d10)
+(defdyn *dv-11* :d11)
+(defdyn *dv-12* :d12)
+(defdyn *dv-13* :d13)
+(defdyn *dv-14* :d14)
+(defdyn *dv-15* :d15)
+(defdyn *dv-16* :d16)
+(defdyn *dv-17* :d17)
+(defdyn *dv-18* :d18)
+(defdyn *dv-19* :d19)
 
 ;; Bind all 20 at once, verify each sees the right value and doesn't bleed into others
-(binding (*dv-0* :b0 *dv-1* :b1 *dv-2* :b2 *dv-3* :b3 *dv-4* :b4
-          *dv-5* :b5 *dv-6* :b6 *dv-7* :b7 *dv-8* :b8 *dv-9* :b9
-          *dv-10* :b10 *dv-11* :b11 *dv-12* :b12 *dv-13* :b13 *dv-14* :b14
-          *dv-15* :b15 *dv-16* :b16 *dv-17* :b17 *dv-18* :b18 *dv-19* :b19)
+(binding (*dv-0* :b0
+          *dv-1* :b1
+          *dv-2* :b2
+          *dv-3* :b3
+          *dv-4* :b4
+          *dv-5* :b5
+          *dv-6* :b6
+          *dv-7* :b7
+          *dv-8* :b8
+          *dv-9* :b9
+          *dv-10* :b10
+          *dv-11* :b11
+          *dv-12* :b12
+          *dv-13* :b13
+          *dv-14* :b14
+          *dv-15* :b15
+          *dv-16* :b16
+          *dv-17* :b17
+          *dv-18* :b18
+          *dv-19* :b19)
 
   (def p53-checks
-    (and (= :b0 *dv-0*)   (= :b1 *dv-1*)   (= :b2 *dv-2*)   (= :b3 *dv-3*)
-         (= :b4 *dv-4*)   (= :b5 *dv-5*)   (= :b6 *dv-6*)   (= :b7 *dv-7*)
-         (= :b8 *dv-8*)   (= :b9 *dv-9*)   (= :b10 *dv-10*) (= :b11 *dv-11*)
-         (= :b12 *dv-12*) (= :b13 *dv-13*) (= :b14 *dv-14*) (= :b15 *dv-15*)
-         (= :b16 *dv-16*) (= :b17 *dv-17*) (= :b18 *dv-18*) (= :b19 *dv-19*)))
+    (and (= :b0 *dv-0*)
+      (= :b1 *dv-1*)
+      (= :b2 *dv-2*)
+      (= :b3 *dv-3*)
+      (= :b4 *dv-4*)
+      (= :b5 *dv-5*)
+      (= :b6 *dv-6*)
+      (= :b7 *dv-7*)
+      (= :b8 *dv-8*)
+      (= :b9 *dv-9*)
+      (= :b10 *dv-10*)
+      (= :b11 *dv-11*)
+      (= :b12 *dv-12*)
+      (= :b13 *dv-13*)
+      (= :b14 *dv-14*)
+      (= :b15 *dv-15*)
+      (= :b16 *dv-16*)
+      (= :b17 *dv-17*)
+      (= :b18 *dv-18*)
+      (= :b19 *dv-19*)))
   (println "P53: all bound correctly:" p53-checks))
 
 ;; After binding exits, all should be restored to defaults
 (def p53-restored
-  (and (= :d0 *dv-0*)   (= :d1 *dv-1*)   (= :d2 *dv-2*)   (= :d3 *dv-3*)
-       (= :d4 *dv-4*)   (= :d5 *dv-5*)   (= :d6 *dv-6*)   (= :d7 *dv-7*)
-       (= :d8 *dv-8*)   (= :d9 *dv-9*)   (= :d10 *dv-10*) (= :d11 *dv-11*)
-       (= :d12 *dv-12*) (= :d13 *dv-13*) (= :d14 *dv-14*) (= :d15 *dv-15*)
-       (= :d16 *dv-16*) (= :d17 *dv-17*) (= :d18 *dv-18*) (= :d19 *dv-19*)))
+  (and (= :d0 *dv-0*)
+    (= :d1 *dv-1*)
+    (= :d2 *dv-2*)
+    (= :d3 *dv-3*)
+    (= :d4 *dv-4*)
+    (= :d5 *dv-5*)
+    (= :d6 *dv-6*)
+    (= :d7 *dv-7*)
+    (= :d8 *dv-8*)
+    (= :d9 *dv-9*)
+    (= :d10 *dv-10*)
+    (= :d11 *dv-11*)
+    (= :d12 *dv-12*)
+    (= :d13 *dv-13*)
+    (= :d14 *dv-14*)
+    (= :d15 *dv-15*)
+    (= :d16 *dv-16*)
+    (= :d17 *dv-17*)
+    (= :d18 *dv-18*)
+    (= :d19 *dv-19*)))
 (println "P53: all restored to defaults:" p53-restored)
 
 ;;; ---- P54: binding inside a spawned closure ----
@@ -127,8 +187,7 @@
 (let (me (self))
   (binding (*p54-mode* :overridden)
     ;; Closure captures nothing dynamic — child will see :default
-    (spawn
-      (send me [:p54 *p54-mode*])))
+    (spawn (send me [:p54 *p54-mode*])))
   (let (r (receive ([:p54 v] v) (after 3000 :timeout)))
     (println "P54: child saw:" r)
     (println "P54-correct (default, not overridden):" (= :default r))))
@@ -137,14 +196,14 @@
 (println "=== P55: dynamic? predicate ===")
 
 (defdyn *p55-declared* :yes)
-(def    p55-not-dynamic 42)
+(def p55-not-dynamic 42)
 
 (println "P55: dynamic? *p55-declared*:" (dynamic? '*p55-declared*))
 (println "P55: dynamic? p55-not-dynamic:" (dynamic? 'p55-not-dynamic))
 (println "P55: dynamic? unbound-sym:" (dynamic? 'totally-unbound-xyz))
 (println "P55-correct:"
-         (and (= true  (dynamic? '*p55-declared*))
-              (= false (dynamic? 'p55-not-dynamic))
-              (= false (dynamic? 'totally-unbound-xyz))))
+  (and (= true (dynamic? '*p55-declared*))
+    (= false (dynamic? 'p55-not-dynamic))
+    (= false (dynamic? 'totally-unbound-xyz))))
 
 (println "=== chaos2_dynamic_vars DONE ===")

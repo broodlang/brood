@@ -7,7 +7,11 @@
 ;; block sends an editor-state map through a process boundary and edits it on the
 ;; far side, proving the immutable state round-trips the copy-on-send heap copy.
 
-(defmodule lineedit-test (:use-internals editor/lineedit) (:use test) (:use editor/lineedit) (:use editor/highlight))
+(defmodule lineedit-test
+  (:use-internals editor/lineedit)
+  (:use test)
+  (:use editor/lineedit)
+  (:use editor/highlight))
 
 ;; Apply a sequence of keys to a state (fold the pure handler).
 (defn le--keys (state keys) (fold editor/lineedit/lineedit-handle state keys))
@@ -22,12 +26,16 @@
     (let (s (le--keys (le--fresh) (list "a" "b" "c")))
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-a) :point) 0)
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-e) :point) 3)
-      (assert= (get (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-handle s :ctrl-a) :left) :point)
+      (assert= (get (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-handle s :ctrl-a)
+                      :left)
+                 :point)
         0)
       (assert= (get (editor/lineedit/lineedit-handle s :right) :point) 3)))
   (test "M-f / M-b move by words"
     (let (s (le--keys (le--fresh) (list "f" "o" "o" " " "b" "a" "r")))
-      (assert= (get (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-handle s :ctrl-a) :alt-f) :point)
+      (assert= (get (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-handle s :ctrl-a)
+                      :alt-f)
+                 :point)
         3)
       (assert= (get (editor/lineedit/lineedit-handle s :alt-b) :point) 4))))
 
@@ -35,7 +43,9 @@
   (test "backspace and delete remove a char"
     (let (s (le--keys (le--fresh) (list "a" "b" "c")))
       (assert= (get (editor/lineedit/lineedit-handle s :backspace) :text) "ab")
-      (assert= (get (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-handle s :ctrl-a) :delete) :text)
+      (assert= (get (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-handle s :ctrl-a)
+                      :delete)
+                 :text)
         "bc")))
   (test "C-k kills to end, C-u to start, into :kill"
     (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "a" "b" "c" "d")) 2))
@@ -53,10 +63,9 @@
 (describe "lineedit/lineedit-handle — history recall"
   (test "up walks older, down walks newer, restoring the in-progress line"
     (let (h (editor/lineedit/lineedit-init "x> " "" (list "(newer)" "(older)"))
-           d
-           (le--keys h (list "w" "i" "p"))  ; in-progress text
-           u1
-           (editor/lineedit/lineedit-handle d :up))
+          ; in-progress text
+          d (le--keys h (list "w" "i" "p"))
+          u1 (editor/lineedit/lineedit-handle d :up))
       (assert= (get u1 :text) "(newer)")
       (assert= (get (editor/lineedit/lineedit-handle u1 :up) :text) "(older)")
       ;; back down past the newest restores the saved in-progress text
@@ -79,13 +88,17 @@
   (test "C-p / C-n walk history like ↑ / ↓"
     (let (h (editor/lineedit/lineedit-init "x> " "" (list "(b)" "(a)")))
       (assert= (get (editor/lineedit/lineedit-handle h :ctrl-p) :text) "(b)")
-      (assert= (get (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-handle h :ctrl-p) :ctrl-n) :text)
+      (assert= (get (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-handle h :ctrl-p)
+                      :ctrl-n)
+                 :text)
         "")))
   (test "C-h is backspace"
     (let (s (le--keys (le--fresh) (list "a" "b" "c")))
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-h) :text) "ab")))
   (test "M-d kills the word after point, leaving point put"
-    (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "f" "o" "o" " " "b" "a" "r")) 4)
+    (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh)
+                                              (list "f" "o" "o" " " "b" "a" "r"))
+              4)
           d (editor/lineedit/lineedit-handle s :alt-d))
       (assert= (get d :text) "foo ")
       (assert= (get d :kill) "bar")
@@ -174,7 +187,10 @@
         "reduce")))
   (test "an ambiguous set extends to the common prefix"
     (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "m" "a")) 2))
-      (assert= (get (editor/lineedit/lineedit--apply-completion s 0 "ma" (list "map" "max" "mapcat"))
+      (assert= (get (editor/lineedit/lineedit--apply-completion s
+                      0
+                      "ma"
+                      (list "map" "max" "mapcat"))
                  :text)
         "ma"))))
 
@@ -204,21 +220,30 @@
     (assert= (editor/lineedit/lineedit--fit (list ["abcd" nil] ["efgh" {:bold true}]) 6 '())
       (list ["abcd" nil] ["ef" {:bold true}]))
     (assert= (editor/lineedit/lineedit--fit (list ["abc" nil]) 0 '()) '()))
+  ; last line
   (test "multi-line geometry: line-start/end, cursor row/col, up/down point"
-    (let (t "(defn f\n  (g x))")  ; newline at index 7
+    (let (t "(defn f\n  (g x))")
+      ; newline at index 7
       (assert= (editor/lineedit/lineedit--line-start t 10) 8)
       (assert= (editor/lineedit/lineedit--line-end t 10) 16)
       (assert= (editor/lineedit/lineedit--cursor-rc t 10) [1 2])
       (assert= (editor/lineedit/lineedit--cursor-rc t 3) [0 3])
-      (assert= (editor/lineedit/lineedit--up-point t 10) 2)      ; col 2, line 0
-      (is (nil? (editor/lineedit/lineedit--up-point t 3)))       ; already on line 0
-      (assert= (editor/lineedit/lineedit--down-point t 3) 11)    ; col 3, line 1
-      (is (nil? (editor/lineedit/lineedit--down-point t 10)))))  ; last line
+      ; col 2, line 0
+      (assert= (editor/lineedit/lineedit--up-point t 10) 2)
+      ; already on line 0
+      (is (nil? (editor/lineedit/lineedit--up-point t 3)))
+      ; col 3, line 1
+      (assert= (editor/lineedit/lineedit--down-point t 3) 11)
+      (is (nil? (editor/lineedit/lineedit--down-point t 10)))))
   (test "Enter inserts a newline while the form is incomplete, submits when complete"
-    (let (incomplete? (fn (s) (= s "(defn f"))   ; complete unless exactly this
+    (let (
+          ; complete unless exactly this
+          incomplete? (fn (s) (= s "(defn f"))
           complete? (fn (s) (not (incomplete? s)))
-          mk (fn (text) (assoc (editor/lineedit/lineedit-init "x> " "" '() {:complete? complete?})
-                          :text text :point (string-length text))))
+          mk (fn (text)
+               (assoc (editor/lineedit/lineedit-init "x> " "" '() {:complete? complete?})
+                 :text text
+                 :point (string-length text))))
       ;; incomplete form: Enter adds "\n", does NOT submit
       (let (st (editor/lineedit/lineedit-submit (mk "(defn f") nil))
         (assert= (get st :text) "(defn f\n")
@@ -227,8 +252,11 @@
       (let (st (editor/lineedit/lineedit-submit (mk "(+ 1 2)") nil))
         (assert= (get st :done) :submit))))
   (test "multi-line render lights the matching bracket pair in place across lines"
-    (let (st (assoc (editor/lineedit/lineedit-init "p> " "" '() {:cont-prompt "c> "})
-               :text "(a\n b)" :point 6)   ; cursor after the final ) which closes (a
+    (let (
+          ; cursor after the final ) which closes (a
+          st (assoc (editor/lineedit/lineedit-init "p> " "" '() {:cont-prompt "c> "})
+               :text "(a\n b)"
+               :point 6)
           ops (editor/lineedit/lineedit--multi-ops st))
       ;; the opener "(" (line 0) and the closer ")" (line 1) both render reversed
       (is (some? (fn (op) (= op [:print "(" {:reverse true}])) ops))
@@ -245,19 +273,23 @@
 
   (test "a state map sent to a worker edits identically"
     (let (st (editor/lineedit/lineedit-init "x> " "" '())
-          w (spawn (receive ([:edit s from] (send from (get (le--keys s (list "a" "b" "c")) :text))))))
+          w (spawn (receive
+                     ([:edit s from] (send from (get (le--keys s (list "a" "b" "c")) :text))))))
       (send w [:edit st (self)])
       (assert= (receive (r r)) "abc"))))
 
+; jumps the whole path
 (describe "lineedit path mode (M-b/M-f by folder)"
   ;; "/home/wilhelm/src" — 17 chars; "/" is a word boundary only in :path mode.
   (def path "/home/wilhelm/src")
+  ; start of "src"
   (test "M-b moves back one path component"
     (let (st (assoc (editor/lineedit/lineedit-init "" "" '()) :word-mode :path :text path :point 17))
-      (assert= (get (lineedit-backward-word st nil) :point) 14)))   ; start of "src"
+      (assert= (get (lineedit-backward-word st nil) :point) 14)))
+  ; end of "/home"
   (test "M-f moves forward one path component"
     (let (st (assoc (editor/lineedit/lineedit-init "" "" '()) :word-mode :path :text path :point 0))
-      (assert= (get (lineedit-forward-word st nil) :point) 5)))      ; end of "/home"
+      (assert= (get (lineedit-forward-word st nil) :point) 5)))
   (test "default mode treats the whole path as one word"
     (let (st (assoc (editor/lineedit/lineedit-init "" "" '()) :text path :point 17))
-      (assert= (get (lineedit-backward-word st nil) :point) 0))))    ; jumps the whole path
+      (assert= (get (lineedit-backward-word st nil) :point) 0))))

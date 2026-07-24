@@ -109,13 +109,12 @@
     (is (= (iappC/run) :shown))
     ;; hard privacy: a module hand-writing another module's qualified private
     ;; fails to COMPILE at load (it used to be reachable — "soft privacy")
-    (is (= (try (%load-string
-                  "(defmodule iappC2 (:use ilibC)) (defn peek () (ilibC/hidden--impl))")
-            (catch e :blocked))
+    (is (= (try
+             (%load-string "(defmodule iappC2 (:use ilibC)) (defn peek () (ilibC/hidden--impl))")
+             (catch e :blocked))
           :blocked))
     ;; …unless it declares the grant — the explicit @testable seam
-    (%load-string
-      "(defmodule iappC3 (:use-internals ilibC)) (defn peek () (ilibC/hidden--impl))")
+    (%load-string "(defmodule iappC3 (:use-internals ilibC)) (defn peek () (ilibC/hidden--impl))")
     (is (= (iappC3/peek) :hidden)))
 
   (test "an own-namespace definition shadows an imported name"

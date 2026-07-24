@@ -40,8 +40,9 @@ Pure Brood policy over connect/monitor-node/nodes. Pair with
         ;; stale/duplicate down (e.g. arming while already down delivers one
         ;; immediately) — still linked, ignore
         (reconnect--up spec peer opts subs)
-        (do (reconnect--notify subs [:nodedown peer])
-            (reconnect--down spec peer opts subs (get opts :min-ms 500)))))
+        (do
+          (reconnect--notify subs [:nodedown peer])
+          (reconnect--down spec peer opts subs (get opts :min-ms 500)))))
     ([:reconnect-subscribe p] (reconnect--up spec peer opts (cons p subs)))
     ([:reconnect-stop] :stopped)
     ;; drop anything else — the watcher has a registered name, so arbitrary
@@ -53,9 +54,10 @@ Pure Brood policy over connect/monitor-node/nodes. Pair with
 still answering control messages between attempts."
   (let (up (try (connect spec) (catch _ nil)))
     (if up
-      (do (monitor-node up)
-          (reconnect--notify subs [:nodeup up])
-          (reconnect--up spec up opts subs))
+      (do
+        (monitor-node up)
+        (reconnect--notify subs [:nodeup up])
+        (reconnect--up spec up opts subs))
       (receive
         ([:reconnect-subscribe p] (reconnect--down spec peer opts (cons p subs) delay))
         ([:reconnect-stop] :stopped)
@@ -63,15 +65,19 @@ still answering control messages between attempts."
         ;; the backoff timer's growth
         (_ (reconnect--down spec peer opts subs delay))
         (after delay
-          (reconnect--down spec peer opts subs
+          (reconnect--down spec
+            peer
+            opts
+            subs
             (min (* delay 2) (get opts :max-ms 30000))))))))
 
 (defn reconnect--boot (spec opts)
   "Watcher body: connect (or start retrying immediately) and run the state loop."
   (let (up (try (connect spec) (catch _ nil)))
     (if up
-      (do (monitor-node up)
-          (reconnect--up spec up opts nil))
+      (do
+        (monitor-node up)
+        (reconnect--up spec up opts nil))
       (reconnect--down spec nil opts nil (get opts :min-ms 500)))))
 
 (defn watch (spec &optional opts)

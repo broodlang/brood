@@ -246,14 +246,11 @@ blankness differs from `want-blank?`; stops at the buffer edge."
   "Point moved to the start of the next blank line after the current paragraph (end of
 buffer if none) — Emacs `forward-paragraph` (M-})."
   (let (rope (get buf :rope)
-         n
-         (rope-line-count rope)
-         line
-         (rope-char->line rope (get buf :point))
-         afterblank
-         (buffer--scan-lines buf line n 1 true)  ; skip leading blank lines
-         boundary
-         (buffer--scan-lines buf afterblank n 1 false))
+        n (rope-line-count rope)
+        line (rope-char->line rope (get buf :point))
+        ; skip leading blank lines
+        afterblank (buffer--scan-lines buf line n 1 true)
+        boundary (buffer--scan-lines buf afterblank n 1 false))
     ; skip the paragraph
     (goto-char buf (if (>= boundary n) (buffer-length buf) (rope-line->char rope boundary)))))
 
@@ -261,15 +258,11 @@ buffer if none) — Emacs `forward-paragraph` (M-})."
   "Point moved to the start of the current/previous paragraph (start of buffer if none)
 — Emacs `backward-paragraph` (M-{)."
   (let (rope (get buf :rope)
-         n
-         (rope-line-count rope)
-         line
-         (rope-char->line rope (get buf :point))
-         ;; step back over blank lines directly above, then over the paragraph's lines.
-         afterblank
-         (buffer--scan-lines buf (dec line) n -1 true)
-         start
-         (buffer--scan-lines buf afterblank n -1 false))
+        n (rope-line-count rope)
+        line (rope-char->line rope (get buf :point))
+        ;; step back over blank lines directly above, then over the paragraph's lines.
+        afterblank (buffer--scan-lines buf (dec line) n -1 true)
+        start (buffer--scan-lines buf afterblank n -1 false))
     (goto-char buf (rope-line->char rope (max 0 (if (< start 0) 0 (inc start)))))))
 
 ;; ---- mark -------------------------------------------------------------------
@@ -281,18 +274,16 @@ buffer if none) — Emacs `forward-paragraph` (M-})."
 
 ;; ---- mark ring (a history of marks; the substrate for C-u C-SPC) ------------
 
-(def *mark-ring-max* 16)  ; like Emacs `mark-ring-max`
-
+; like Emacs `mark-ring-max`
+(def *mark-ring-max* 16)
 (defn push-mark (buf)
   "Set the mark at point **and** push point onto the buffer's `:mark-ring` (bounded
 by `*mark-ring-max*`, newest first). The ring records where the mark has been so
 `pop-mark` can revisit prior locations."
   (let (p (get buf :point))
     (assoc buf
-      :mark
-      p
-      :mark-ring
-      (take *mark-ring-max* (cons p (or (get buf :mark-ring) ()))))))
+      :mark p
+      :mark-ring (take *mark-ring-max* (cons p (or (get buf :mark-ring) ()))))))
 
 (defn pop-mark (buf)
   "Move point to the newest entry on the buffer's `:mark-ring`, rotating that entry
@@ -302,10 +293,8 @@ A no-op when the ring is empty."
     (if (empty? ring)
       buf
       (assoc buf
-        :point
-        (buffer--clamp 0 (buffer-length buf) (first ring))
-        :mark-ring
-        (append (rest ring) (list (first ring)))))))
+        :point (buffer--clamp 0 (buffer-length buf) (first ring))
+        :mark-ring (append (rest ring) (list (first ring)))))))
 
 ;; ---- search (pure position queries; the caller moves point) -----------------
 
@@ -368,8 +357,8 @@ into) it drops this op's snapshot so the run undoes as one. A no-op when undo is
 the editor restarts it whenever the previous command wasn't an undo.)"
   (cond
     (get buf :undo-disabled) buf
-    (and (get buf :undo-amalgamate) (not (empty? (get buf :undo))))
-      (assoc buf :undo-amalgamate false)
+    (and (get buf :undo-amalgamate) (not (empty? (get buf :undo)))) (assoc buf
+                                                                      :undo-amalgamate false)
     :else (assoc buf
             :undo (cons (buffer--snapshot buf) (or (get buf :undo) ()))
             :undo-amalgamate false)))
@@ -387,9 +376,10 @@ history. Markers are restored to the snapshot's recorded positions; a snapshot w
 markers drops the key so a marker-less state stays marker-less."
   (let (b (assoc buf :rope (get snap :rope) :point (get snap :point) :mark (get snap :mark))
         m (get snap :markers))
-    (cond m (assoc b :markers m)
-          (get b :markers) (dissoc b :markers)
-          :else b)))
+    (cond
+      m (assoc b :markers m)
+      (get b :markers) (dissoc b :markers)
+      :else b)))
 
 (defn undo-start (buf)
   "Begin a fresh undo run: point `:pending-undo` at the whole `:undo` history. Because
@@ -462,9 +452,10 @@ inside the range collapses to `lo`, one at/after `hi` moves left by the deleted 
   (let (m (get buf :markers))
     (if (nil? m)
       buf
-      (assoc buf :markers (if (= kind :insert)
-                            (buffer--markers-insert m a b)
-                            (buffer--markers-delete m a b))))))
+      (assoc buf
+        :markers (if (= kind :insert)
+                   (buffer--markers-insert m a b)
+                   (buffer--markers-delete m a b))))))
 
 (defn insert (buf s)
   "Insert string `s` at point; point advances past it. Recorded for undo. Markers after the
@@ -474,15 +465,13 @@ insertion point shift with the text. Throws if `buf` is read-only."
     buf
     (let (p (get buf :point)
           buf (buffer--push-undo buf))
-      (buffer--adjust-markers
-        (assoc buf
-          :rope
-          (rope-insert (get buf :rope) p s)
-          :point
-          (+ p (string-length s))
-          :mark
-          nil)
-        :insert p (string-length s)))))
+      (buffer--adjust-markers (assoc buf
+                                :rope (rope-insert (get buf :rope) p s)
+                                :point (+ p (string-length s))
+                                :mark nil)
+        :insert
+        p
+        (string-length s)))))
 
 (defn delete-char (buf &optional (n 1))
   "Delete `n` characters *after* point; point stays put. Recorded for undo (a
@@ -493,9 +482,10 @@ no-op at end-of-buffer is not recorded). Throws if `buf` is read-only."
     (if (= p end)
       buf
       (let (buf (buffer--push-undo buf))
-        (buffer--adjust-markers
-          (assoc buf :rope (rope-delete (get buf :rope) p end) :mark nil)
-          :delete p end)))))
+        (buffer--adjust-markers (assoc buf :rope (rope-delete (get buf :rope) p end) :mark nil)
+          :delete
+          p
+          end)))))
 
 (defn delete-backward-char (buf &optional (n 1))
   "Delete `n` characters *before* point (backspace); point moves back with it.
@@ -506,9 +496,13 @@ Recorded for undo (a no-op at point 0 is not recorded). Throws if `buf` is read-
     (if (= p start)
       buf
       (let (buf (buffer--push-undo buf))
-        (buffer--adjust-markers
-          (assoc buf :rope (rope-delete (get buf :rope) start p) :point start :mark nil)
-          :delete start p)))))
+        (buffer--adjust-markers (assoc buf
+                                  :rope (rope-delete (get buf :rope) start p)
+                                  :point start
+                                  :mark nil)
+          :delete
+          start
+          p)))))
 
 (defn delete-region (buf)
   "Delete the text between point and mark; point moves to the region start and
@@ -523,9 +517,13 @@ region is empty. Recorded for undo (restoring it brings back the mark too). Thro
         (if (= lo hi)
           (assoc buf :mark nil)
           (let (buf (buffer--push-undo buf))
-            (buffer--adjust-markers
-              (assoc buf :rope (rope-delete (get buf :rope) lo hi) :point lo :mark nil)
-              :delete lo hi)))))))
+            (buffer--adjust-markers (assoc buf
+                                      :rope (rope-delete (get buf :rope) lo hi)
+                                      :point lo
+                                      :mark nil)
+              :delete
+              lo
+              hi)))))))
 
 (defn replace-region (buf start end s)
   "Replace the characters in `[start, end)` with string `s`, leaving point just after
@@ -541,7 +539,8 @@ query-replace, re-indentation, and transpose are all this. Composes `delete-char
 (clamped into the buffer). The marker then survives edits: text inserted or deleted before
 it shifts it, so it tracks the same logical spot. The basis for overlays, diagnostics, and
 remote participants' cursors on a shared buffer."
-  (assoc buf :markers (assoc (or (get buf :markers) {}) id (buffer--clamp 0 (buffer-length buf) pos))))
+  (assoc buf
+    :markers (assoc (or (get buf :markers) {}) id (buffer--clamp 0 (buffer-length buf) pos))))
 
 (defn buffer-marker (buf id)
   "The char position of marker `id` (clamped to the current length), or nil if unset."
@@ -605,7 +604,8 @@ fast typing never flickers under its round-trip. Runs in the buffer process, so 
 is the buffer pid the subscriber keys on."
   (doseq (s subs)
     (send (get s :pid)
-      [:buffer-updated (self) version
+      [:buffer-updated (self)
+        version
         (let (proj (get s :proj)) (if (nil? proj) nil (proj buf)))
         origin])))
 
@@ -654,25 +654,29 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
       ;; race against a concurrent splice). The kill-region shape: delete the region and
       ;; get the deleted text back, atomically. Same closure-edit caveats as `:edit`
       ;; (invisible to the transform ring; `value` must be non-rope).
-      ([:edit-reply f origin from r]
-        (let ([nb value] (f buf) v (inc version))
-          (do (send from [:reply r value])
-            (buffer--push subs v nb origin)
-            (buffer--serve nb subs v rec))))
+      ([:edit-reply f origin from r] (let ([nb value] (f buf) v (inc version))
+                                       (do
+                                         (send from [:reply r value])
+                                         (buffer--push subs v nb origin)
+                                         (buffer--serve nb subs v rec))))
       ;; A structured edit: the change arrives as DATA (a positional splice), so the push
       ;; can carry the DELTA — {:splice [lo hi repl] :markers … :participants …} — instead
       ;; of each subscriber's full projection. O(change), not O(document): the seam that
       ;; makes collaborative typing on a large buffer cheap. Structured ops push this light
       ;; view to EVERY subscriber regardless of its projection (document accordingly);
       ;; closure edits (:edit) and the seed keep the full projection contract.
-      ([:splice lo hi repl origin]
-        (let (nb (replace-region buf lo hi repl) v (inc version))
-          (do (buffer--push-view subs v
-                {:splice [lo hi repl] :markers (buffer-markers nb)
-                 :participants (get nb :participants {})}
-                origin)
-            (buffer--serve nb subs v
-              (take 64 (cons [v lo hi (string-length repl) origin] rec))))))
+      ([:splice lo hi repl origin] (let (nb (replace-region buf lo hi repl) v (inc version))
+                                     (do
+                                       (buffer--push-view subs
+                                         v
+                                         {:splice [lo hi repl]
+                                          :markers (buffer-markers nb)
+                                          :participants (get nb :participants {})}
+                                         origin)
+                                       (buffer--serve nb
+                                         subs
+                                         v
+                                         (take 64 (cons [v lo hi (string-length repl) origin] rec))))))
       ;; A BASED splice: computed against `base`, so first TRANSFORM it over every
       ;; splice applied since (the `rec` ring, oldest-first over the window) — two
       ;; people typing in different places inside one round-trip window both land
@@ -680,54 +684,80 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
       ;; local copy already contained them when it computed these positions
       ;; (local-apply-first), so shifting over them again would land a pipelined
       ;; second keystroke one column too far. The push carries the splice AS APPLIED.
-      ([:splice lo hi repl origin base]
-        (let (since (reverse (take-while (fn (e) (> (first e) base)) rec))
-              foreign (filter (fn (e) (or (nil? origin) (not (= (nth e 4 nil) origin)))) since)
-              [tlo thi trepl] (splice-transform-all [lo hi repl]
-                                (map (fn (e) [(nth e 1) (nth e 2) (nth e 3)]) foreign))
-              nb (replace-region buf tlo thi trepl)
-              v (inc version))
-          (do (buffer--push-view subs v
-                {:splice [tlo thi trepl] :markers (buffer-markers nb)
-                 :participants (get nb :participants {})}
-                origin)
-            (buffer--serve nb subs v
-              (take 64 (cons [v tlo thi (string-length trepl) origin] rec))))))
+      ([:splice lo hi repl origin base] (let (since (reverse (take-while (fn (e) (> (first e) base))
+                                                               rec))
+                                              foreign (filter (fn (e)
+                                                                (or (nil? origin)
+                                                                  (not (= (nth e 4 nil) origin))))
+                                                        since)
+                                              [tlo thi trepl] (splice-transform-all [lo hi repl]
+                                                                (map (fn (e)
+                                                                       [(nth e 1) (nth e 2)
+                                                                         (nth e 3)])
+                                                                  foreign))
+                                              nb (replace-region buf tlo thi trepl)
+                                              v (inc version))
+                                          (do
+                                            (buffer--push-view subs
+                                              v
+                                              {:splice [tlo thi trepl]
+                                               :markers (buffer-markers nb)
+                                               :participants (get nb :participants {})}
+                                              origin)
+                                            (buffer--serve nb
+                                              subs
+                                              v
+                                              (take 64
+                                                (cons [v tlo thi (string-length trepl) origin] rec))))))
       ;; A cursor move as data: no text change at all — the push carries markers + names
       ;; only, so presence traffic on a large document never ships its text.
-      ([:marker-set id pos origin]
-        (let (nb (buffer-marker-set buf id pos) v (inc version))
-          (do (buffer--push-view subs v
-                {:markers (buffer-markers nb) :participants (get nb :participants {})}
-                origin)
-            (buffer--serve nb subs v rec))))
+      ([:marker-set id pos origin] (let (nb (buffer-marker-set buf id pos) v (inc version))
+                                     (do
+                                       (buffer--push-view subs
+                                         v
+                                         {:markers (buffer-markers nb)
+                                          :participants (get nb :participants {})}
+                                         origin)
+                                       (buffer--serve nb subs v rec))))
       ;; An appended line is a positional splice like any other: apply it at end-of-buffer,
       ;; RECORD it in the ring (a based splice computed before the append still transforms
       ;; correctly over it), and push the DELTA — so a log-backed buffer is as cheap to
       ;; subscribe to as a collaborative one (O(line), not O(document), per line).
-      ([:io-write s]
-        (let (n (buffer-length buf)
-              nb (replace-region buf n n s)
-              v (inc version))
-          (do (buffer--push-view subs v
-                {:splice [n n s] :markers (buffer-markers nb)
-                 :participants (get nb :participants {})}
-                nil)
-            (buffer--serve nb subs v (take 64 (cons [v n n (string-length s) nil] rec))))))
+      ([:io-write s] (let (n (buffer-length buf)
+                           nb (replace-region buf n n s)
+                           v (inc version))
+                       (do
+                         (buffer--push-view subs
+                           v
+                           {:splice [n n s]
+                            :markers (buffer-markers nb)
+                            :participants (get nb :participants {})}
+                           nil)
+                         (buffer--serve nb
+                           subs
+                           v
+                           (take 64 (cons [v n n (string-length s) nil] rec))))))
       ([:get f from r] (do (send from [:reply r (f buf)]) (buffer--serve buf subs version rec)))
       ;; An atomic [version view] snapshot — the RESYNC primitive: a client rebuilding
       ;; its copy after an ambiguous collision needs the text AND the version it
       ;; corresponds to in ONE reply, or edits applied between its query and the
       ;; answer replay onto the rebuilt copy (their queued pushes pass the version
       ;; check) and double themselves.
-      ([:sync proj from r]
-        (do (send from [:reply r [version (proj buf)]])
-          (buffer--serve buf subs version rec)))
-      ([:subscribe pid proj]
-        (do (monitor pid)
-          (send pid [:buffer-updated (self) version (if (nil? proj) nil (proj buf)) nil])
-          (buffer--serve buf (cons {:pid pid :proj proj} subs) version rec)))
-      ([:unsubscribe pid] (buffer--serve buf (remove (fn (s) (= (get s :pid) pid)) subs) version rec))
+      ([:sync proj from r] (do
+                             (send from [:reply r [version (proj buf)]])
+                             (buffer--serve buf subs version rec)))
+      ([:subscribe pid proj] (do
+                               (monitor pid)
+                               (send pid
+                                 [:buffer-updated (self)
+                                   version
+                                   (if (nil? proj) nil (proj buf))
+                                   nil])
+                               (buffer--serve buf (cons {:pid pid :proj proj} subs) version rec)))
+      ([:unsubscribe pid] (buffer--serve buf
+                            (remove (fn (s) (= (get s :pid) pid)) subs)
+                            version
+                            rec))
       ([:down _ pid _]
         (let (ns (remove (fn (s) (= (get s :pid) pid)) subs)
               ;; the dead subscriber's transient markers: keyed BY its pid (its cursor)
@@ -737,7 +767,8 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                    (filter (fn (k) (or (= k pid) (and (vector? k) (member? pid k))))
                      (keys (buffer-markers buf)))))
           (if (= nb buf)
-            (buffer--serve buf ns version rec)  ; no marker for it — just drop the subscriber
+            ; no marker for it — just drop the subscriber
+            (buffer--serve buf ns version rec)
             (let (v (inc version)) (do (buffer--push ns v nb) (buffer--serve nb ns v rec))))))
       ([:stop from r] (send from [:reply r :stopped])))))
 

@@ -4,6 +4,7 @@
 (defmodule regex-test (:use test) (:use regex))
 (require 'regex)
 
+; case-sensitive
 (describe "regex match? (search)"
   (test "literals search anywhere in the string"
     (is (match? "lo" "hello"))
@@ -19,9 +20,9 @@
   (test "suffix match — the .blsp file-type case"
     (is (match? "\\.blsp$" "foo.blsp"))
     (is (not (match? "\\.blsp$" "foo.blsp.txt")))
-    (is (not (match? "\\.blsp$" "fooXblsp")))  ; \\. is a literal dot, not any-char
-    (is (not (match? "\\.blsp$" "foo.BLSP")))))  ; case-sensitive
-
+    ; \\. is a literal dot, not any-char
+    (is (not (match? "\\.blsp$" "fooXblsp")))
+    (is (not (match? "\\.blsp$" "foo.BLSP")))))
 (describe "regex quantifiers"
   (test "* matches zero or more (greedy)"
     (is (matches? "ab*c" "ac"))
@@ -42,7 +43,8 @@
     (is (matches? "\\d+" "2026"))
     (is (not (matches? "\\d+" "20x6")))
     (is (matches? "\\w+" "foo_bar9"))
-    (is (not (matches? "\\w+" "foo-bar")))  ; '-' isn't a word char
+    ; '-' isn't a word char
+    (is (not (matches? "\\w+" "foo-bar")))
     (is (match? "\\s" "a b")))
   (test "[...] set and [^...] negated set (explicit chars, no ranges yet)"
     (is (matches? "[abc]+" "cabba"))

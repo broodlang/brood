@@ -138,7 +138,8 @@
   (test "byte-sum reads the octets — a bytes value or an int vector both lower"
     (let (inst (wasm-instantiate *memory-wat*))
       (assert= (wasm-call inst "byte-sum" #b"\x01\x02\x03") 6)
-      (assert= (wasm-call inst "byte-sum" [10 20 30]) 60)   ; an int vector still lowers
+      ; an int vector still lowers
+      (assert= (wasm-call inst "byte-sum" [10 20 30]) 60)
       (assert= (wasm-call inst "byte-sum" #b"") 0)
       (wasm-close inst)))
   (test "an empty list<u8> result is the documented edge — an empty vector, not bytes"
@@ -157,7 +158,8 @@
     (let (inst (wasm-instantiate *scalars-wat*))
       (is (= (try (wasm-call inst "nope" 1) (catch e :no-export)) :no-export))
       (wasm-close inst)
-      (wasm-close inst)   ; idempotent
+      ; idempotent
+      (wasm-close inst)
       (is (= (try (wasm-call inst "add" 1 2) (catch e :closed)) :closed))))
   (test "garbage source is a clean load error"
     (is (= (try (wasm-instantiate "(component (bogus") (catch e :bad)) :bad)))

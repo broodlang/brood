@@ -24,39 +24,42 @@
   (if (= depth 0)
     (tree-leaf parent start end)
     (let (mid (+ start (quot (- end start) 2))
-          me  (self)
-          c1  (spawn (tree-node me start mid (- depth 1)))
-          c2  (spawn (tree-node me mid   end (- depth 1)))
-          r1  (receive ([:leaf-result v] v))
-          r2  (receive ([:leaf-result v] v)))
+          me (self)
+          c1 (spawn (tree-node me start mid (- depth 1)))
+          c2 (spawn (tree-node me mid end (- depth 1)))
+          r1 (receive ([:leaf-result v] v))
+          r2 (receive ([:leaf-result v] v)))
       (send parent [:leaf-result (+ r1 r2)]))))
 
 ;; Root: spawn the tree and collect the final answer
-(let (me     (self)
-      n      8192          ; number of items total (evenly distributable)
-      depth  13)           ; 2^13 = 8192 leaves
+(let (me (self)
+      ; number of items total (evenly distributable)
+      n 8192
+      depth 13)
+  ; 2^13 = 8192 leaves
   (spawn (tree-node me 0 n depth))
   (let (result (receive ([:leaf-result v] v)))
     ;; sum of i^2 for i in [0, 8192) = (8191 * 8192 * 16383) / 6
     (def expected (quot (* (* 8191 8192) 16383) 6))
     (println "tree result:" result)
-    (println "expected:"    expected)
+    (println "expected:" expected)
     (println "tree correct?" (= result expected))))
 
 (println "--- 1000 worker fan-out with compound messages ---")
 
 ;; Each worker receives a config map, does work, sends back a map with results
 (defn heavy-worker (parent id config)
-  (let (n     (get config :n)
-        seed  (get config :seed)
+  (let (n (get config :n)
+        seed (get config :seed)
         ;; compute a pseudo-random sum (poor man's hash chain)
         total (fold (fn (acc i) (rem (+ (* acc 1103515245) i seed) 2147483647))
-                    1 (range n)))
+                1
+                (range n)))
     (send parent {:id id :result total :config config})))
 
-(let (me      (self)
-     n-workers 1000
-     config    {:n 200 :seed 42 :label "stress"})
+(let (me (self)
+      n-workers 1000
+      config {:n 200 :seed 42 :label "stress"})
   ;; Fan out
   (dotimes (i n-workers)
     (spawn (heavy-worker me i config)))
@@ -64,8 +67,7 @@
   (defn collect-workers (acc remaining)
     (if (= remaining 0)
       acc
-      (collect-workers
-        (receive (msg (assoc acc (get msg :id) (get msg :result))))
+      (collect-workers (receive (msg (assoc acc (get msg :id) (get msg :result))))
         (- remaining 1))))
   (let (results (collect-workers {} n-workers))
     (println "workers returned:" (count results))
@@ -77,21 +79,22 @@
 
 (println "--- monitor stress: 500 processes die, check all [:down ...] received ---")
 
-(let (me   (self)
-     n     500
-     refs  (map (fn (i)
+(let (me (self)
+      n 500
+      refs (map (fn (i)
                   (let (pid (spawn (if (= (rem i 3) 0)
-                                    (error "intentional crash")
-                                    :normal-exit)))
+                                     (error "intentional crash")
+                                     :normal-exit)))
                     (monitor pid)))
-                (range n)))
+             (range n)))
   ;; Collect all :down messages
   (defn collect-downs (remaining acc)
     (if (= remaining 0)
       acc
       (collect-downs (- remaining 1)
-        (receive ([:down _ _ reason] (cons reason acc))
-                 (after 3000 (cons :timeout acc))))))
+        (receive
+          ([:down _ _ reason] (cons reason acc))
+          (after 3000 (cons :timeout acc))))))
   (let (downs (collect-downs n nil))
     (println "down messages:" (count downs))
     (let (crashes (count (filter (fn (r) (string? (error-message r))) downs)))
@@ -104,34 +107,33 @@
 (defn shared-counter-proc (n)
   (receive
     ([:get caller] (do (send caller n) (shared-counter-proc n)))
-    ([:add x]      (shared-counter-proc (+ n x)))))
+    ([:add x] (shared-counter-proc (+ n x)))))
 
 (let (me (self)
-     n   50)
+      n 50)
   (dotimes (_ n)
-    (spawn
-      (let (pid (spawn :shared-counter (shared-counter-proc 0)))
-        (send me pid))))
+    (spawn (let (pid (spawn :shared-counter (shared-counter-proc 0)))
+             (send me pid))))
   ;; collect all returned pids
   (defn collect-pids (remaining acc)
     (if (= remaining 0)
       acc
       (collect-pids (- remaining 1) (receive (p (cons p acc))))))
-  (let (pids  (collect-pids n nil)
-        uniq  (into {} (map (fn (p) [p true]) pids)))
+  (let (pids (collect-pids n nil)
+        uniq (into {} (map (fn (p) [p true]) pids)))
     (println "unique pids registered for :shared-counter:" (count uniq))
     (println "all same pid?" (= (count uniq) 1))))
 
 (println "--- closure shipping: send a function across process heaps ---")
 
 ;; Parent sends a closure to a worker; worker calls it with its own argument
-(let (me  (self)
-     f    (fn (x) (* x x x))   ; cube — a real closure
-     n    200)
+(let (me (self)
+      ; cube — a real closure
+      f (fn (x) (* x x x))
+      n 200)
   (dotimes (i n)
-    (spawn
-      (let (result (f (+ i 1)))
-        (send me [:cube (+ i 1) result]))))
+    (spawn (let (result (f (+ i 1)))
+             (send me [:cube (+ i 1) result]))))
   (defn collect-cubes (remaining acc)
     (if (= remaining 0)
       acc
@@ -140,9 +142,12 @@
   (let (cubes (collect-cubes n {}))
     (println "cube results received:" (count cubes))
     ;; verify a few
-    (println "cube(1):"   (get cubes 1))
-    (println "cube(10):"  (get cubes 10))
+    (println "cube(1):" (get cubes 1))
+    (println "cube(10):" (get cubes 10))
     (println "cube(200):" (get cubes 200))
-    (println "all correct?" (= (count (filter (fn (kv) (= (first (rest kv)) (* (first kv) (* (first kv) (first kv))))) cubes)) n))))
+    (println "all correct?"
+      (= (count (filter (fn (kv) (= (first (rest kv)) (* (first kv) (* (first kv) (first kv)))))
+                  cubes))
+        n))))
 
 (println "--- DONE ---")

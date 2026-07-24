@@ -3,6 +3,7 @@
 ;; suite.rs). This file is a namespace so it can `(:use text)` and refer `fill` bare.
 (defmodule text-test (:use text) (:use test))
 
+; 5 > 4 — breaks
 (describe "text/fill — greedy word wrap"
   (test "wraps words to the column width, greedily"
     (assert= (fill "the quick brown fox jumps" 12) "the quick\nbrown fox\njumps"))
@@ -16,5 +17,6 @@
     (assert= (fill "" 10) "")
     (assert= (fill "   \n\t " 10) ""))
   (test "exact-fit boundary: a word that exactly reaches the width stays on the line"
-    (assert= (fill "ab cd" 5) "ab cd")      ; "ab cd" is 5 cols — fits
-    (assert= (fill "ab cd" 4) "ab\ncd")))   ; 5 > 4 — breaks
+    ; "ab cd" is 5 cols — fits
+    (assert= (fill "ab cd" 5) "ab cd")
+    (assert= (fill "ab cd" 4) "ab\ncd")))

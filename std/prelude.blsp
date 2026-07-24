@@ -21,16 +21,21 @@
 ;; `def`/`fn`, no backtick, no quasiquote dependency). The full seq-generic,
 ;; tail-recursive `list`/`append` further down simply `def`-rebind these.
 (def list (fn (& xs) "A list of the given arguments." xs))
-(def append--empty? (fn (x)
-  (if (%eq (type-of x) :nil) true
-    (if (%eq (type-of x) :vector) (%eq (vector-length x) 0) false))))
-(def append--2 (fn (a b)
-  ;; Cons every element of seq `a` (a list or vector) onto list `b`.
-  (if (append--empty? a) b (cons (first a) (append--2 (rest a) b)))))
-(def append (fn (& lists)
-  ;; Concatenate any number of sequences into one list, left to right.
-  (if (append--empty? lists) nil
-    (append--2 (first lists) (apply append (rest lists))))))
+(def append--empty?
+  (fn (x)
+    (if (%eq (type-of x) :nil)
+      true
+      (if (%eq (type-of x) :vector) (%eq (vector-length x) 0) false))))
+(def append--2
+  (fn (a b)
+    ;; Cons every element of seq `a` (a list or vector) onto list `b`.
+    (if (append--empty? a) b (cons (first a) (append--2 (rest a) b)))))
+(def append
+  (fn (& lists)
+    ;; Concatenate any number of sequences into one list, left to right.
+    (if (append--empty? lists)
+      nil
+      (append--2 (first lists) (apply append (rest lists))))))
 
 ;; `defmacro` itself — a macro, not a core special form. A macro is just a `fn`
 ;; the expander calls on the *unexpanded* argument forms; `%make-macro` (the one
@@ -38,10 +43,9 @@
 ;; `def`/`fn` because `defmacro` can't define itself; every later `(defmacro …)`
 ;; expands through this into `(def name (%make-macro (fn …)))`.
 (def defmacro
-  (%make-macro
-    (fn (name & body)
-      "Define `name` as a macro: a `fn` run at expansion time on the unevaluated argument forms, whose returned form replaces the call."
-      `(def ~name (%make-macro (fn ~@body))))))
+  (%make-macro (fn (name & body)
+                 "Define `name` as a macro: a `fn` run at expansion time on the unevaluated argument forms, whose returned form replaces the call."
+                 `(def ~name (%make-macro (fn ~@body))))))
 
 ;; `defn` itself: forwards everything after the name to `fn`, so it inherits
 ;; both single-clause — (defn f (x) ...) => (def f (fn (x) ...)) — and the
@@ -72,14 +76,17 @@
 ;; `cond` macro are available.
 (defn seq (coll)
   "A list view of `coll`. A map becomes its `[k v]` pairs; a lazy range or seq-view is realised to a list; a bytes value becomes its list of ints; lists, vectors, strings, and `nil` pass through. Used by `map`/`filter`/`fold` so they accept any collection."
-  (if (range? coll) (%range->list coll)
-    (if (seqview? coll) (%seqview-realize coll)
+  (if (range? coll)
+    (%range->list coll)
+    (if (seqview? coll)
+      (%seqview-realize coll)
       (let (t (type-of coll))
         ;; A `bytes` value is realised to a list ONCE here: without this, fold/map/
         ;; filter/reduce would walk it with `first`/`rest`, and `(rest bytes)` copies
         ;; all-but-the-first byte — O(n) per step, O(n^2) total (a 50k-byte reduce
         ;; spiked ~1.3 GB RSS). `bytes->list` is a single O(n) native pass.
-        (if (%eq t :map) (map-pairs coll)
+        (if (%eq t :map)
+          (map-pairs coll)
           (if (%eq t :bytes) (bytes->list coll) coll))))))
 (def entries map-pairs)
 
@@ -89,7 +96,8 @@
 ;; rather than O(n) per step.
 (defn fold (f acc coll)
   "Left-fold: combine the items of `coll` left-to-right with `(f acc item)`, starting from `acc`. Tail-recursive, so it is stack-safe. Maps fold as their `[k v]` pairs. A lazy range folds in a counted loop with no list materialised; a lazy seq-view fuses — its transducer wraps `f` and folds straight over the source, so `(reduce + 0 (map sq (filter p (range n))))` walks the range once with no intermediate lists."
-  (if (range? coll) (%range-reduce f acc coll)
+  (if (range? coll)
+    (%range-reduce f acc coll)
     (if (seqview? coll)
       ;; Fuse: `(xform f)` is the wrapped reducer; fold it over the source (a
       ;; range → counted loop, a list → fold--loop, a nested view → fuses again).
@@ -111,8 +119,11 @@
 ;; nearly every sequence builder (`map`/`filter`/`take`/`zip`/`range`/…), so
 ;; dropping the per-element `flip-cons` `apply` frame here pays off across the
 ;; whole library. Coerce a map to its pairs once via `seq`, as `fold` did.
-(defn reverse--acc (coll acc) (if (empty? coll) acc (reverse--acc (rest coll) (cons (first coll) acc))))
-(defn reverse (coll) "The items of `coll` in reverse order, as a list." (reverse--acc (seq coll) nil))
+(defn reverse--acc (coll acc)
+  (if (empty? coll) acc (reverse--acc (rest coll) (cons (first coll) acc))))
+(defn reverse (coll)
+  "The items of `coll` in reverse order, as a list."
+  (reverse--acc (seq coll) nil))
 
 ;; Realise a lazy seq-view to a concrete list by running its transducer. Folding
 ;; `flip-cons` over the view hits `fold`'s seq-view branch, which wraps the
@@ -290,62 +301,65 @@ no-op; the marker is read only by the type checker (`nest check`)."
 ;; mismatch throws — so a value the static checker trusted can never silently
 ;; slip through. All policy, no new primitive. See `docs/type-annotations.md`.
 
+; unknown base name → accept
 (defn type-matches? (t v)
   "True if value `v` inhabits the (sig …) type-expression `t`. Unknown type
 names accept anything, so a contract never throws on a type it can't interpret."
   (cond
-    (nil? t) (nil? v)                  ; the `nil` type reads as the nil literal
+    (nil? t) (nil? v)
+    ; the `nil` type reads as the nil literal
     (pair? t) (let (h (first t))
                 (cond
                   (%eq h 'or) (some? (fn (s) (type-matches? s v)) (rest t))
                   (%eq h 'and) (every? (fn (s) (type-matches? s v)) (rest t))
-                  (%eq h 'list)
-                    (and (list? v)
-                         (let (elem (first (rest t)))
-                           (or (nil? elem)
-                               (every? (fn (x) (type-matches? elem x)) v))))
-                  (%eq h 'vector)
-                    (and (vector? v)
-                         (let (elem (first (rest t)))
-                           (or (nil? elem)
-                               (every? (fn (x) (type-matches? elem x)) v))))
-                  (%eq h 'map)
-                    (and (map? v)
-                         (let (ktype (first (rest t))
-                               vtype (first (rest (rest t))))
-                           (or (and (nil? ktype) (nil? vtype))
-                               (every? (fn (kv)
-                                         (and (type-matches? ktype (first kv))
-                                              (type-matches? vtype (second kv))))
+                  (%eq h 'list) (and (list? v)
+                                  (let (elem (first (rest t)))
+                                    (or (nil? elem)
+                                      (every? (fn (x) (type-matches? elem x)) v))))
+                  (%eq h 'vector) (and (vector? v)
+                                    (let (elem (first (rest t)))
+                                      (or (nil? elem)
+                                        (every? (fn (x) (type-matches? elem x)) v))))
+                  (%eq h 'map) (and (map? v)
+                                 (let (ktype (first (rest t))
+                                       vtype (first (rest (rest t))))
+                                   (or (and (nil? ktype) (nil? vtype))
+                                     (every? (fn (kv)
+                                               (and (type-matches? ktype (first kv))
+                                                 (type-matches? vtype (second kv))))
                                        (entries v)))))
                   (%eq h 'record)
-                    ;; A field's type may be wrapped `(optional T)` — allowed to
-                    ;; be absent/nil. Every other field is required: `(get v k)`
-                    ;; on a missing key is nil, so `type-matches?` on the bare
-                    ;; field type naturally fails unless that type accepts nil —
-                    ;; no separate presence check needed. Extra keys are ignored
-                    ;; (open records).
-                    (and (map? v)
-                         (every? (fn (field)
-                                   (let (k (first field)
-                                         ftype (second field))
-                                     (if (and (pair? ftype) (%eq (first ftype) 'optional))
-                                       (or (nil? (get v k))
-                                           (type-matches? (second ftype) (get v k)))
-                                       (type-matches? ftype (get v k)))))
-                                 (partition 2 (rest t))))
-                  (%eq h 'tuple)
-                    ;; A fixed-arity positional vector shape (ADR-128): exact
-                    ;; arity, then each position checked against its own
-                    ;; declared type.
-                    (and (vector? v)
-                         (= (count v) (count (rest t)))
-                         (every? (fn (i) (type-matches? (nth (rest t) i) (nth v i)))
-                                 (range (count v))))
-                  else true))          ; arrow param / unknown compound → accept
-    (keyword? t) (= t v)               ; a keyword type-expr is a literal: match it exactly
-    (int? t) (= t v)                   ; an int type-expr is a literal too (ADR-117)
-    (bool? t) (= t v)                  ; likewise for bool and string (ADR-120)
+                  ;; A field's type may be wrapped `(optional T)` — allowed to
+                  ;; be absent/nil. Every other field is required: `(get v k)`
+                  ;; on a missing key is nil, so `type-matches?` on the bare
+                  ;; field type naturally fails unless that type accepts nil —
+                  ;; no separate presence check needed. Extra keys are ignored
+                  ;; (open records).
+                  (and (map? v)
+                    (every? (fn (field)
+                              (let (k (first field)
+                                    ftype (second field))
+                                (if (and (pair? ftype) (%eq (first ftype) 'optional))
+                                  (or (nil? (get v k))
+                                    (type-matches? (second ftype) (get v k)))
+                                  (type-matches? ftype (get v k)))))
+                      (partition 2 (rest t)))) (%eq h
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       'tuple)
+                  ;; A fixed-arity positional vector shape (ADR-128): exact
+                  ;; arity, then each position checked against its own
+                  ;; declared type.
+                  (and (vector? v)
+                    (= (count v) (count (rest t)))
+                    (every? (fn (i) (type-matches? (nth (rest t) i) (nth v i)))
+                      (range (count v)))) else
+                  true))
+    ; arrow param / unknown compound → accept
+    (keyword? t) (= t v)
+    ; a keyword type-expr is a literal: match it exactly
+    (int? t) (= t v)
+    ; an int type-expr is a literal too (ADR-117)
+    (bool? t) (= t v)
+    ; likewise for bool and string (ADR-120)
     (string? t) (= t v)
     (%eq t 'any) true
     (%eq t 'number) (number? v)
@@ -361,23 +375,36 @@ names accept anything, so a contract never throws on a type it can't interpret."
     (%eq t 'fn) (fn? v)
     (%eq t 'list) (list? v)
     (%eq t 'vector) (vector? v)
-    else true))                        ; unknown base name → accept
-
+    else true))
 (defn contract--check-args (name ptypes args i)
   "Throw if any argument fails its declared type. Pairwise over the overlap —
 arity itself is the static checker's job."
   (when (and (pair? ptypes) (pair? args))
     (unless (type-matches? (first ptypes) (first args))
-      (throw (str name ": argument " i " expected " (first ptypes)
-                  ", got " (type-of (first args)) " (" (pr-str (first args)) ")")))
+      (throw (str name
+               ": argument "
+               i
+               " expected "
+               (first ptypes)
+               ", got "
+               (type-of (first args))
+               " ("
+               (pr-str (first args))
+               ")")))
     (contract--check-args name (rest ptypes) (rest args) (inc i))))
 
 (defn contract--check-rest (name rtype args)
   "Throw if any rest argument fails its declared rest type."
   (when (pair? args)
     (unless (type-matches? rtype (first args))
-      (throw (str name ": rest argument expected " rtype
-                  ", got " (type-of (first args)) " (" (pr-str (first args)) ")")))
+      (throw (str name
+               ": rest argument expected "
+               rtype
+               ", got "
+               (type-of (first args))
+               " ("
+               (pr-str (first args))
+               ")")))
     (contract--check-rest name rtype (rest args))))
 
 (defmacro sig! (name type)
@@ -394,7 +421,8 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
      (%register-sig '~name '~type)
      ~(let (i (index-of type '->))
         (if (< i 0)
-          nil                          ; not a (… -> …) type — nothing to enforce
+          ; not a (… -> …) type — nothing to enforce
+          nil
           (let (ptypes (take i type)
                 rtype (nth type (inc i))
                 amp-pos (index-of ptypes '&))
@@ -409,8 +437,14 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
                        (contract--check-args '~name '~ptypes (list ~@params) 1)
                        (let (~r (~orig ~@params))
                          (unless (type-matches? '~rtype ~r)
-                           (throw (str '~name ": result expected " '~rtype
-                                       ", got " (type-of ~r) " (" (pr-str ~r) ")")))
+                           (throw (str '~name
+                                    ": result expected "
+                                    '~rtype
+                                    ", got "
+                                    (type-of ~r)
+                                    " ("
+                                    (pr-str ~r)
+                                    ")")))
                          ~r)))))
               ;; variadic: (fixed… & rest-type -> ret)
               (let (fixed-ptypes (take amp-pos ptypes)
@@ -426,8 +460,14 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
                        (contract--check-rest '~name '~rest-ptype ~rest-param)
                        (let (~r (apply ~orig (append (list ~@fixed-params) ~rest-param)))
                          (unless (type-matches? '~rtype ~r)
-                           (throw (str '~name ": result expected " '~rtype
-                                       ", got " (type-of ~r) " (" (pr-str ~r) ")")))
+                           (throw (str '~name
+                                    ": result expected "
+                                    '~rtype
+                                    ", got "
+                                    (type-of ~r)
+                                    " ("
+                                    (pr-str ~r)
+                                    ")")))
                          ~r)))))))))))
 
 ;; `and`/`or` short-circuit left-to-right and return the deciding value, with
@@ -454,8 +494,10 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 ;; `if`/`empty?`/`first`/`rest` — all kernel primitives — so it's safe to call
 ;; during prelude loading before `odd?`/`count`/`last` are defined.
 (defn cond--orphan (clauses)
-  (if (empty? clauses) nil
-    (if (empty? (rest clauses)) (first clauses)
+  (if (empty? clauses)
+    nil
+    (if (empty? (rest clauses))
+      (first clauses)
       (cond--orphan (rest (rest clauses))))))
 
 (defmacro cond (& clauses)
@@ -463,7 +505,9 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
   (let (orphan (cond--orphan clauses))
     (if (and (not (nil? orphan)) (not (%eq orphan 'else)) (not (%eq orphan :else)))
       (error "cond: odd number of clauses — expected test/expression pairs. "
-             "Did you forget an expression for '" (pr-str orphan) "'?")
+        "Did you forget an expression for '"
+        (pr-str orphan)
+        "'?")
       (if (empty? clauses)
         nil
         (let (test (first clauses) expr (first (rest clauses)) more (rest (rest clauses)))
@@ -486,7 +530,8 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 
 (defn macroexpand--loop (form n)
   (if (= n 0)
-    (error "macroexpand: no fixpoint after " macroexpand--max-rounds
+    (error "macroexpand: no fixpoint after "
+      macroexpand--max-rounds
       " rounds (a macro that expands to itself?)")
     (let (stepped (macroexpand-1 form))
       (if (= stepped form) form (macroexpand--loop stepped (- n 1))))))
@@ -506,7 +551,9 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 (defn bool? (x) "True if `x` is a boolean." (%eq (type-of x) :bool))
 (defn string? (x) "True if `x` is a string." (%eq (type-of x) :string))
 (defn bytes? (x) "True if `x` is a bytes value." (%eq (type-of x) :bytes))
-(defn decimal? (x) "True if `x` is an exact base-10 decimal (e.g. `1.50M`)." (%eq (type-of x) :decimal))
+(defn decimal? (x)
+  "True if `x` is an exact base-10 decimal (e.g. `1.50M`)."
+  (%eq (type-of x) :decimal))
 (defn symbol? (x) "True if `x` is a symbol." (%eq (type-of x) :symbol))
 (defn keyword? (x) "True if `x` is a keyword." (%eq (type-of x) :keyword))
 (defn vector? (x) "True if `x` is a vector." (%eq (type-of x) :vector))
@@ -531,7 +578,9 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
   (or (%eq (type-of x) :fn) (%eq (type-of x) :native)))
 
 ;; ---- derived predicates ----
-(defn number? (x) "True if `x` is an int, a float, or a decimal." (or (int? x) (float? x) (decimal? x)))
+(defn number? (x)
+  "True if `x` is an int, a float, or a decimal."
+  (or (int? x) (float? x) (decimal? x)))
 (defn list? (x) "True if `x` is a proper list (`nil` or a pair)." (or (nil? x) (pair? x)))
 
 ;; ---- list aliases & accessors ----
@@ -555,21 +604,24 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 current element and `acc` is the current accumulator."
   (if (not (string? docstring))
     (error "defseq: third argument must be a docstring string, got "
-           (pr-str docstring)
-           ". Syntax: (defseq name (params...) \"docstring\" step-expr)")
+      (pr-str docstring)
+      ". Syntax: (defseq name (params...) \"docstring\" step-expr)")
     `(defn ~sym (~@params coll)
        ~docstring
        (letrec (--loop (fn (coll acc)
-                         (if (empty? coll) acc
+                         (if (empty? coll)
+                           acc
                            (let (item (first coll))
                              (--loop (rest coll) ~step)))))
          (reverse (--loop (seq coll) nil))))))
 
-(defseq map (f)
+(defseq map
+  (f)
   "A list of `(f x)` for each `x` in `coll`."
   (cons (f item) acc))
 
-(defseq filter (pred)
+(defseq filter
+  (pred)
   "A list of the items of `coll` for which `(pred x)` is truthy."
   (if (pred item) (cons item acc) acc))
 
@@ -617,23 +669,24 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
 (defn nth-list (coll i d)
   (cond (empty? coll) d (= i 0) (first coll) else (nth-list (rest coll) (- i 1) d)))
 
-(defn nth
-  "The item at index `i` of `coll` (0-based), or `default` (else `nil`) if out of range."
+(defn nth "The item at index `i` of `coll` (0-based), or `default` (else `nil`) if out of range."
   ;; The fixed 2-arity arm is the hot path (`(nth v i)`): it is VM-eligible
   ;; (exact arity), so its body compiles to bytecode and the inner `vector-ref`
   ;; inlines to a slab read — whereas the variadic-only definition deferred the
   ;; whole thing to the tree-walker. The `& default` arm keeps the explicit-default
   ;; behaviour for the rarer 3-arg call.
-  ((coll i)
-    (cond
-      (vector? coll) (if (and (>= i 0) (< i (vector-length coll))) (vector-ref coll i) nil)
-      (bytes? coll) (if (and (>= i 0) (< i (byte-length coll))) (byte-at coll i) nil)
-      else (nth-list coll i nil)))
-  ((coll i & default)
-    (cond
-      (vector? coll) (if (and (>= i 0) (< i (vector-length coll))) (vector-ref coll i) (first default))
-      (bytes? coll) (if (and (>= i 0) (< i (byte-length coll))) (byte-at coll i) (first default))
-      else (nth-list coll i (first default)))))
+  ((coll i) (cond
+              (vector? coll) (if (and (>= i 0) (< i (vector-length coll))) (vector-ref coll i) nil)
+              (bytes? coll) (if (and (>= i 0) (< i (byte-length coll))) (byte-at coll i) nil)
+              else (nth-list coll i nil)))
+  ((coll i & default) (cond
+                        (vector? coll) (if (and (>= i 0) (< i (vector-length coll)))
+                                         (vector-ref coll i)
+                                         (first default))
+                        (bytes? coll) (if (and (>= i 0) (< i (byte-length coll)))
+                                        (byte-at coll i)
+                                        (first default))
+                        else (nth-list coll i (first default)))))
 
 ;; ---- numeric helpers ----
 ;; ---- map operations ----
@@ -647,25 +700,27 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
 ;; straight to the `map-get` kernel op — no variadic-rest dispatch, no `(first
 ;; default)`, and no extra call hop. The cond is repeated per arm (rather than
 ;; factored into a helper) precisely to avoid that extra call on the hot path.
-(defn get
-  "The value at key/index `k` in `coll`, or `default` (else `nil`) if absent.
+(defn get "The value at key/index `k` in `coll`, or `default` (else `nil`) if absent.
 Maps look up by key; vectors, lists, and strings index by integer position
 (out-of-range yields the default, never an error)."
-  ((coll k)
-    (cond
-      (map? coll) (map-get coll k nil)
-      (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll))) (char-at coll k) nil)
-      :else (nth coll k nil)))
-  ((coll k default)
-    (cond
-      (map? coll) (map-get coll k default)
-      (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll))) (char-at coll k) default)
-      :else (nth coll k default)))
-  ((coll k & default)
-    (cond
-      (map? coll) (map-get coll k (first default))
-      (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll))) (char-at coll k) (first default))
-      :else (nth coll k (first default)))))
+  ((coll k) (cond
+              (map? coll) (map-get coll k nil)
+              (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll)))
+                               (char-at coll k)
+                               nil)
+              :else (nth coll k nil)))
+  ((coll k default) (cond
+                      (map? coll) (map-get coll k default)
+                      (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll)))
+                                       (char-at coll k)
+                                       default)
+                      :else (nth coll k default)))
+  ((coll k & default) (cond
+                        (map? coll) (map-get coll k (first default))
+                        (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll)))
+                                         (char-at coll k)
+                                         (first default))
+                        :else (nth coll k (first default)))))
 
 ;; (assoc m k1 v1 k2 v2 …) -> a fresh map with each pair added/updated.
 ;; Multi-pair builders, split by collection kind so the kernel op (`map-assoc` /
@@ -677,8 +732,7 @@ Maps look up by key; vectors, lists, and strings index by integer position
   (if (empty? kvs) m (assoc--map-pairs (map-assoc m (first kvs) (second kvs)) (rest (rest kvs)))))
 (defn assoc--vec-pairs (v kvs)
   (if (empty? kvs) v (assoc--vec-pairs (vector-assoc v (first kvs) (second kvs)) (rest (rest kvs)))))
-(defn assoc
-  "A fresh collection like `coll` with each `key value` pair added or updated.
+(defn assoc "A fresh collection like `coll` with each `key value` pair added or updated.
 For a map, keys are added or replaced; for a vector, integer indices in
 `[0, count)` are replaced (an out-of-range index is an error — appending is via
 `conj`, not `assoc`)."
@@ -735,7 +789,8 @@ can.)"
 (defn merge-with (f & maps)
   "Like `merge`, but when two maps share a key the combined value is `(f value-so-far next-value)` rather than just the latter. `nil` maps are skipped."
   (fold (fn (acc m)
-          (if (nil? m) acc
+          (if (nil? m)
+            acc
             (reduce-kv (fn (a k v) (assoc a k (if (contains? a k) (f (get a k) v) v))) acc m)))
     {}
     maps))
@@ -862,7 +917,7 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
 
 ;; ---- math constants ---------------------------------------------------------
 (def pi 3.141592653589793)
-(def e  2.718281828459045)
+(def e 2.718281828459045)
 
 ;; ---- I/O --------------------------------------------------------------------
 ;; Output is redirectable. A *port* is just a 1-arg fn that consumes a ready
@@ -959,12 +1014,14 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
         ;; Common mistake: (try body (fn (e) handler)) instead of (try body (catch e handler)).
         ;; Fail loud at macro-expansion time so the bug is caught before it silently becomes
         ;; (do body (fn (e) ...)) — a handler that is never installed.
-        (error "try: last form is `" (pr-str clause) "` — did you mean `(catch "
-               (let (params (second clause))
-                 (if (and (pair? params) (not (nil? params)))
-                   (str (first params))
-                   "e"))
-               " ...)`? Syntax: (try body... (catch e handler...))")
+        (error "try: last form is `"
+          (pr-str clause)
+          "` — did you mean `(catch "
+          (let (params (second clause))
+            (if (and (pair? params) (not (nil? params)))
+              (str (first params))
+              "e"))
+          " ...)`? Syntax: (try body... (catch e handler...))")
         `(do ~@body)))))
 
 ;; A thrown value has no single shape: `(throw x)` hands `catch` the value `x`
@@ -1119,18 +1176,21 @@ its printed form."
 
 (defn bytes-int (bs off n)
   "Read `n` bytes (1–8) of `bs` at `off` as a big-endian signed (two's-complement) integer."
-  (do (bytes--width-check "bytes-int" n)
-      (let (b0 (byte-at bs off))
-        (bytes--acc-be bs (+ off 1) (+ off n) (if (>= b0 128) (- b0 256) b0)))))
+  (do
+    (bytes--width-check "bytes-int" n)
+    (let (b0 (byte-at bs off))
+      (bytes--acc-be bs (+ off 1) (+ off n) (if (>= b0 128) (- b0 256) b0)))))
 
 (defn bytes-int-le (bs off n)
   "Read `n` bytes (1–8) of `bs` at `off` as a little-endian signed (two's-complement) integer."
-  (do (bytes--width-check "bytes-int-le" n)
-      (let (bt (byte-at bs (+ off (- n 1))))
-        (bytes--acc-le bs off (+ off (- n 2)) (if (>= bt 128) (- bt 256) bt)))))
+  (do
+    (bytes--width-check "bytes-int-le" n)
+    (let (bt (byte-at bs (+ off (- n 1))))
+      (bytes--acc-le bs off (+ off (- n 2)) (if (>= bt 128) (- bt 256) bt)))))
 
 (defn int->bytes--be (v w acc)
-  (if (<= w 0) acc
+  (if (<= w 0)
+    acc
     (int->bytes--be (bit-shift-right v 8) (- w 1) (cons (bit-and v 255) acc))))
 
 (defn int->bytes (v n)
@@ -1160,27 +1220,41 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 (defn match-bytes-pattern? (pat)
   (and (pair? pat) (= (first pat) (quote bytes))))
 
+; literal → binds nothing
 (defn match-bytes-vars (segs)
   (cond
     (empty? segs) nil
     (= (first segs) '&) (match-bytes-vars (rest segs))
-    (pair? (first segs)) (let (s (first (first segs)))      ; (sym n) sized
+    (pair? (first segs)) (let (s (first (first segs)))
+                           ; (sym n) sized
                            (if (match-wildcard? s)
                              (match-bytes-vars (rest segs))
                              (cons s (match-bytes-vars (rest segs)))))
     (match-bind-sym? (first segs)) (cons (first segs) (match-bytes-vars (rest segs)))
-    else (match-bytes-vars (rest segs))))                   ; literal → binds nothing
-
+    else (match-bytes-vars (rest segs))))
 ;; typed integer segment spec: :u8/:i8/:u16[-be/-le]/…/:i64[-be/-le] → [width signed? little?]
 (defn match-bytes-int-spec (kw)
   (cond
-    (= kw :u8)     [1 false false]  (= kw :i8)     [1 true false]
-    (= kw :u16)    [2 false false]  (= kw :u16-be) [2 false false]  (= kw :u16-le) [2 false true]
-    (= kw :i16)    [2 true false]   (= kw :i16-be) [2 true false]   (= kw :i16-le) [2 true true]
-    (= kw :u32)    [4 false false]  (= kw :u32-be) [4 false false]  (= kw :u32-le) [4 false true]
-    (= kw :i32)    [4 true false]   (= kw :i32-be) [4 true false]   (= kw :i32-le) [4 true true]
-    (= kw :u64)    [8 false false]  (= kw :u64-be) [8 false false]  (= kw :u64-le) [8 false true]
-    (= kw :i64)    [8 true false]   (= kw :i64-be) [8 true false]   (= kw :i64-le) [8 true true]
+    (= kw :u8) [1 false false]
+    (= kw :i8) [1 true false]
+    (= kw :u16) [2 false false]
+    (= kw :u16-be) [2 false false]
+    (= kw :u16-le) [2 false true]
+    (= kw :i16) [2 true false]
+    (= kw :i16-be) [2 true false]
+    (= kw :i16-le) [2 true true]
+    (= kw :u32) [4 false false]
+    (= kw :u32-be) [4 false false]
+    (= kw :u32-le) [4 false true]
+    (= kw :i32) [4 true false]
+    (= kw :i32-be) [4 true false]
+    (= kw :i32-le) [4 true true]
+    (= kw :u64) [8 false false]
+    (= kw :u64-be) [8 false false]
+    (= kw :u64-le) [8 false true]
+    (= kw :i64) [8 true false]
+    (= kw :i64-be) [8 true false]
+    (= kw :i64-le) [8 true true]
     else nil))
 
 ;; (sym :u16) — a typed integer segment: fixed width, endianness + signedness
@@ -1189,7 +1263,8 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
   (let (s (first seg)
         spec (match-bytes-int-spec (second seg)))
     (if (nil? spec)
-      (error (str "match: unknown bytes segment spec " (pr-str (second seg))
+      (error (str "match: unknown bytes segment spec "
+               (pr-str (second seg))
                " (expected :u8/:i8/:u16[-be/-le]/…/:i64[-be/-le])"))
       (let (w (vector-ref spec 0)
             reader (cond
@@ -1200,23 +1275,20 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
             noff (gensym "off"))
         (cond
           ;; (_ :u32) — skip the segment's width
-          (match-wildcard? s)
-            `(if (<= (+ ~off ~w) (byte-length ~target))
-               (let (~noff (+ ~off ~w))
-                 ~(match-bytes-segs more target noff bound success fail))
-               ~fail)
+          (match-wildcard? s) `(if (<= (+ ~off ~w) (byte-length ~target))
+                                 (let (~noff (+ ~off ~w))
+                                   ~(match-bytes-segs more target noff bound success fail))
+                                 ~fail)
           ;; non-linear: an already-bound binder requires an equal value
-          (match-member? s bound)
-            `(if (and (<= (+ ~off ~w) (byte-length ~target))
-                   (%eq (~reader ~target ~off ~w) ~s))
-               (let (~noff (+ ~off ~w))
-                 ~(match-bytes-segs more target noff bound success fail))
-               ~fail)
-          else
-            `(if (<= (+ ~off ~w) (byte-length ~target))
-               (let (~s (~reader ~target ~off ~w) ~noff (+ ~off ~w))
-                 ~(match-bytes-segs more target noff (append bound (list s)) success fail))
-               ~fail))))))
+          (match-member? s bound) `(if (and (<= (+ ~off ~w) (byte-length ~target))
+                                         (%eq (~reader ~target ~off ~w) ~s))
+                                     (let (~noff (+ ~off ~w))
+                                       ~(match-bytes-segs more target noff bound success fail))
+                                     ~fail)
+          else `(if (<= (+ ~off ~w) (byte-length ~target))
+                  (let (~s (~reader ~target ~off ~w) ~noff (+ ~off ~w))
+                    ~(match-bytes-segs more target noff (append bound (list s)) success fail))
+                  ~fail))))))
 
 (defn match-compile-bytes (segs target bound success fail)
   `(if (bytes? ~target)
@@ -1228,56 +1300,70 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
     ;; exhausted: require the bytes were consumed exactly
     (empty? segs) `(if (%eq ~off (byte-length ~target)) ~success ~fail)
     ;; & rest — bind everything left (the tail must be exactly `& sym`)
-    (= (first segs) '&)
-      (if (= (count segs) 2)
-        `(let (~(second segs) (subbytes ~target ~off)) ~success)
-        (error "match: bytes pattern '&' must be followed by exactly one rest binding"))
+    (= (first segs) '&) (if (= (count segs) 2)
+                          `(let (~(second segs) (subbytes ~target ~off)) ~success)
+                          (error "match: bytes pattern '&' must be followed by exactly one rest binding"))
     else (match-bytes-seg (first segs) (rest segs) target off bound success fail)))
 
 (defn match-bytes-seg (seg more target off bound success fail)
   (let (noff (gensym "off"))
     (cond
       ;; (sym :u16) — a typed integer segment (spec keyword in size position)
-      (and (pair? seg) (keyword? (second seg)))
-        (match-bytes-typed-seg seg more target off bound success fail)
+      (and (pair? seg) (keyword? (second seg))) (match-bytes-typed-seg seg
+                                                  more
+                                                  target
+                                                  off
+                                                  bound
+                                                  success
+                                                  fail)
       ;; (sym n) — bind n bytes as a sub-bytes value; n is an int or an earlier binding
-      (pair? seg)
-        (let (s (first seg) szv (gensym "sz"))
-          `(let (~szv ~(second seg))
-             (if (and (>= ~szv 0) (<= (+ ~off ~szv) (byte-length ~target)))
-               (let (~@(if (match-wildcard? s) [] (list s `(subbytes ~target ~off (+ ~off ~szv))))
-                     ~noff (+ ~off ~szv))
-                 ~(match-bytes-segs more target noff
-                    (if (match-wildcard? s) bound (append bound (list s))) success fail))
-               ~fail)))
+      (pair? seg) (let (s (first seg) szv (gensym "sz"))
+                    `(let (~szv ~(second seg))
+                       (if (and (>= ~szv 0) (<= (+ ~off ~szv) (byte-length ~target)))
+                         (let (~@(if (match-wildcard? s)
+                                   []
+                                   (list s `(subbytes ~target ~off (+ ~off ~szv)))) ~noff
+                               (+ ~off ~szv))
+                           ~(match-bytes-segs more
+                              target
+                              noff
+                              (if (match-wildcard? s) bound (append bound (list s)))
+                              success
+                              fail))
+                         ~fail)))
       ;; _ — skip one byte
-      (match-wildcard? seg)
-        `(if (< ~off (byte-length ~target))
-           (let (~noff (+ ~off 1)) ~(match-bytes-segs more target noff bound success fail))
-           ~fail)
+      (match-wildcard? seg) `(if (< ~off (byte-length ~target))
+                               (let (~noff (+ ~off 1))
+                                 ~(match-bytes-segs more target noff bound success fail))
+                               ~fail)
       ;; symbol — bind one byte as an int (or, if already bound, require equality —
       ;; non-linear patterns, consistent with the vector/list matchers)
-      (match-bind-sym? seg)
-        (if (match-member? seg bound)
-          `(if (and (< ~off (byte-length ~target)) (%eq (byte-at ~target ~off) ~seg))
-             (let (~noff (+ ~off 1)) ~(match-bytes-segs more target noff bound success fail))
-             ~fail)
-          `(if (< ~off (byte-length ~target))
-             (let (~seg (byte-at ~target ~off) ~noff (+ ~off 1))
-               ~(match-bytes-segs more target noff (append bound (list seg)) success fail))
-             ~fail))
+      (match-bind-sym? seg) (if (match-member? seg bound)
+                              `(if (and (< ~off (byte-length ~target))
+                                     (%eq (byte-at ~target ~off) ~seg))
+                                 (let (~noff (+ ~off 1))
+                                   ~(match-bytes-segs more target noff bound success fail))
+                                 ~fail)
+                              `(if (< ~off (byte-length ~target))
+                                 (let (~seg (byte-at ~target ~off) ~noff (+ ~off 1))
+                                   ~(match-bytes-segs more
+                                      target
+                                      noff
+                                      (append bound (list seg))
+                                      success
+                                      fail))
+                                 ~fail))
       ;; #b"…" literal — match those exact bytes (length known at expand time)
-      (bytes? seg)
-        (let (n (byte-length seg))
-          `(if (and (<= (+ ~off ~n) (byte-length ~target))
-                 (%eq (subbytes ~target ~off (+ ~off ~n)) ~seg))
-             (let (~noff (+ ~off ~n)) ~(match-bytes-segs more target noff bound success fail))
-             ~fail))
+      (bytes? seg) (let (n (byte-length seg))
+                     `(if (and (<= (+ ~off ~n) (byte-length ~target))
+                            (%eq (subbytes ~target ~off (+ ~off ~n)) ~seg))
+                        (let (~noff (+ ~off ~n))
+                          ~(match-bytes-segs more target noff bound success fail))
+                        ~fail))
       ;; int literal — match one exact byte
-      (int? seg)
-        `(if (and (< ~off (byte-length ~target)) (%eq (byte-at ~target ~off) ~seg))
-           (let (~noff (+ ~off 1)) ~(match-bytes-segs more target noff bound success fail))
-           ~fail)
+      (int? seg) `(if (and (< ~off (byte-length ~target)) (%eq (byte-at ~target ~off) ~seg))
+                    (let (~noff (+ ~off 1)) ~(match-bytes-segs more target noff bound success fail))
+                    ~fail)
       else (error (str "match: invalid bytes-pattern segment " (pr-str seg))))))
 
 ;; list pattern: split off an optional `& rest` tail, then bind element-wise.
@@ -1520,7 +1606,9 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; a bare function *name* like `(spawn worker)`, which used to yield the closure and
 ;; exit — is handled by `spawn--body-thunk` below, which wraps a symbol as a *call*.)
 (defn spawn--thunk-form? (form)
-  (and (list? form) (not (empty? form)) (= (first form) 'fn)
+  (and (list? form)
+    (not (empty? form))
+    (= (first form) 'fn)
     (let (params (second form)) (and (list? params) (empty? params)))))
 
 ;; The process-body thunk a `spawn`-family macro wraps its body form in. Three cases,
@@ -1579,7 +1667,8 @@ passed through (not re-wrapped), like `spawn`."
 ;; loop so it stays a stable address; the closure crosses the wire as data
 ;; (ADR-033), so any peer node running the same prelude can run it.
 (defn remote--spawn-server ()
-  (receive ([:run thunk] (do (spawn (thunk)) (remote--spawn-server)))
+  (receive
+    ([:run thunk] (do (spawn (thunk)) (remote--spawn-server)))
     ;; Synchronous variant: spawn the thunk and reply with the child's pid (a
     ;; remote pid, carrying this node's `name@host`) to the requester, keyed by
     ;; the ref it supplied so its `receive` can pin the reply.
@@ -1596,7 +1685,7 @@ passed through (not re-wrapped), like `spawn`."
   "Run `expr` in a fresh process on `node` (a node-name keyword/symbol — `(node-name)` for the local node, or a connected peer's). Returns `nil`; the spawned process lives on the remote and runs detached (capture the parent's pid in a `let` and `(send parent (self))` from inside `expr` if you need its pid). `expr` ships as a closure (ADR-033) — free locals ride along, free globals re-resolve on the receiver. A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `spawn`. The **receiver** must have called `(start-remote-spawn)` (typically right after `node-start`); the macro itself does no setup on either side."
   `(do
      (send {:name :remote-spawn :node ~node}
-           [:run ~(spawn--body-thunk expr)])
+       [:run ~(spawn--body-thunk expr)])
      nil))
 
 (defmacro remote-spawn-sync (node expr)
@@ -1608,8 +1697,9 @@ through (not re-wrapped), like `spawn`. Use this when you need the child's pid �
 e.g. to `monitor`/`link` a remote child — rather than fire-and-forget."
   `(let (r# (ref))
      (send {:name :remote-spawn :node ~node}
-           [:run-sync ~(spawn--body-thunk expr) (self) r#])
-     (receive ([:spawned got# child#] :when (= got# r#) child#)
+       [:run-sync ~(spawn--body-thunk expr) (self) r#])
+     (receive
+       ([:spawned got# child#] :when (= got# r#) child#)
        (after 5000
          (throw "remote-spawn-sync: no reply (is start-remote-spawn running on the peer?)")))))
 
@@ -1789,7 +1879,8 @@ tick against a dead process forever."
       (monitor target)
       (letrec (tick (fn ()
                       (receive
-                        ([:down _ ~target _] nil)  ; target died — stop ticking
+                        ; target died — stop ticking
+                        ([:down _ ~target _] nil)
                         (after interval (do (send target payload) (tick))))))
         (tick)))))
 
@@ -1800,7 +1891,6 @@ Returns nil. Note: like Erlang, cancellation races an in-flight fire — a
 message already sent stays sent."
   (exit timer :kill)
   nil)
-
 
 ;; Node-link auto-reconnect moved to `std/net/reconnect` (2026-07-18):
 ;; `(require 'net/reconnect)` then `(net/reconnect/watch "name@host:port")` —
@@ -1840,7 +1930,8 @@ message already sent stays sent."
     nil
     (if (and (pair? (first clauses)) (%eq (first (first clauses)) 'after))
       (error "receive: (after ...) must be the last clause, but it appears before "
-             (count (rest clauses)) " more clause(s)")
+        (count (rest clauses))
+        " more clause(s)")
       (receive--check-after (rest clauses)))))
 
 ;; Split clauses into [real-clauses ms-or-nil timeout-thunk-or-nil], peeling an
@@ -2044,7 +2135,8 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
 ;; `mapcat` uses `append--onto` instead of `cons` to splice each sublist straight
 ;; onto the reversed accumulator, then reverse once — so we never materialise the
 ;; intermediate list-of-sublists nor spread it through `apply append`.
-(defseq mapcat (f)
+(defseq mapcat
+  (f)
   "Map `f` over `coll` and concatenate the resulting lists into one."
   (append--onto acc (f item)))
 
@@ -2075,11 +2167,10 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
   (cond
     (nil? coll) (list x)
     (vector? coll) (into coll [x])
-    (map? coll)
-      (cond
-        (map? x) (merge coll x)
-        (and (vector? x) (= (count x) 2)) (assoc coll (nth x 0) (nth x 1))
-        else (error "conj: adding to a map takes a [k v] pair or a map, got " (pr-str x)))
+    (map? coll) (cond
+                  (map? x) (merge coll x)
+                  (and (vector? x) (= (count x) 2)) (assoc coll (nth x 0) (nth x 1))
+                  else (error "conj: adding to a map takes a [k v] pair or a map, got " (pr-str x)))
     (pair? coll) (cons x coll)
     else (error "conj: not a collection: " (pr-str coll))))
 
@@ -2103,11 +2194,13 @@ a vector for a vector and a list for a list. `i` must be in `[0, count)`."
 ;; builders. All tail-recursive (reverse-accumulate, reverse once) so they stay
 ;; stack-safe on long inputs — see the sequence-library note above.
 
-(defseq remove (pred)
+(defseq remove
+  (pred)
   "A list of the items of `coll` for which `(pred x)` is *falsy* — the complement of `filter`."
   (if (pred item) acc (cons item acc)))
 
-(defseq keep (f)
+(defseq keep
+  (f)
   "A list of the non-nil results of `(f x)` over `coll` — map and filter fused (the eager counterpart of `xkeep`)."
   (let (y (f item)) (if (nil? y) acc (cons y acc))))
 
@@ -2181,7 +2274,8 @@ a vector for a vector and a list for a list. `i` must be in `[0, count)`."
 ;; ---- enum extras ------------------------------------------------------------
 ;; (chunk-every n coll) — like partition but keeps the trailing partial chunk.
 (defn chunk-every--acc (n coll acc)
-  (if (empty? coll) (reverse acc)
+  (if (empty? coll)
+    (reverse acc)
     (chunk-every--acc n (drop n coll) (cons (into [] (take n coll)) acc))))
 (defn chunk-every (n coll)
   "Split `coll` into consecutive `n`-item vectors; unlike `partition`, a
@@ -2200,13 +2294,15 @@ trailing partial chunk is kept. `n` must be positive."
   "Split `coll` into consecutive vectors where `(f x)` returns the same value.
 A new chunk starts each time the return value of `f` changes."
   (let (s (seq coll))
-    (if (empty? s) nil
+    (if (empty? s)
+      nil
       (chunk-by--acc f (rest s) (f (first s)) (list (first s)) nil))))
 
 ;; (scan f init coll) — running fold: returns a list of all intermediate values
 ;; including the seed. Also exported as `reductions`.
 (defn scan--acc (f acc coll result)
-  (if (empty? coll) (reverse result)
+  (if (empty? coll)
+    (reverse result)
     (let (next (f acc (first coll)))
       (scan--acc f next (rest coll) (cons next result)))))
 (defn scan (f init coll)
@@ -2220,7 +2316,8 @@ starting with `init`. `(scan + 0 '(1 2 3))` → `(0 1 3 6)`. Also `reductions`."
 
 ;; (zip-with f a b) — map `f` over pairs, stopping at the shorter sequence.
 (defn zip-with--acc (f a b acc)
-  (if (or (empty? a) (empty? b)) (reverse acc)
+  (if (or (empty? a) (empty? b))
+    (reverse acc)
     (zip-with--acc f (rest a) (rest b) (cons (f (first a) (first b)) acc))))
 (defn zip-with (f a b)
   "Map `f` over corresponding pairs from `a` and `b`, stopping at the shorter
@@ -2256,17 +2353,21 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
 ;; accessor arrow per field. Built as plain data — `sig` reads the un-expanded type.
 (defn defrecord--sigs (rec fields)
   (let (ftypes (map defrecord--ftype fields)
-        rec-ty (cons 'record (mapcat (fn (f) (list (keyword (name (defrecord--fname f)))
-                                                   (defrecord--ftype f)))
-                                     fields))
-        ctor   (list 'sig rec (append ftypes (list '-> rec-ty))))
+        rec-ty (cons 'record
+                 (mapcat (fn (f)
+                           (list (keyword (name (defrecord--fname f)))
+                             (defrecord--ftype f)))
+                   fields))
+        ctor (list 'sig rec (append ftypes (list '-> rec-ty))))
     (cons ctor
-          (map (fn (f)
-                 (let (fnm (defrecord--fname f))
-                   (list 'sig (defrecord--acc-sym rec fnm)
-                         (list (list 'record (keyword (name fnm)) (defrecord--ftype f))
-                               '-> (defrecord--ftype f)))))
-               fields))))
+      (map (fn (f)
+             (let (fnm (defrecord--fname f))
+               (list 'sig
+                 (defrecord--acc-sym rec fnm)
+                 (list (list 'record (keyword (name fnm)) (defrecord--ftype f))
+                   '->
+                   (defrecord--ftype f)))))
+        fields))))
 
 (defmacro defrecord (rec fields)
   "Define record `rec` with `fields` — a positional constructor `(rec …)` building
@@ -2275,13 +2376,13 @@ or `(field type)`; when every field is typed, type signatures are emitted for th
 constructor and accessors. Records are plain maps: build with the constructor,
 update with `assoc`/`merge`, compare structurally (there is no `rec?` predicate)."
   (let (fnames (map defrecord--fname fields)
-        fkws   (map (fn (n) (keyword (name n))) fnames)
-        ctor   `(defn ~rec (~@fnames) ~(zipmap fkws fnames))
-        accs   (map (fn (f)
-                      (let (fnm (defrecord--fname f))
-                        `(defn ~(defrecord--acc-sym rec fnm) (r) (get r ~(keyword (name fnm))))))
-                    fields)
-        sigs   (if (every? pair? fields) (defrecord--sigs rec fields) nil))
+        fkws (map (fn (n) (keyword (name n))) fnames)
+        ctor `(defn ~rec (~@fnames) ~(zipmap fkws fnames))
+        accs (map (fn (f)
+                    (let (fnm (defrecord--fname f))
+                      `(defn ~(defrecord--acc-sym rec fnm) (r) (get r ~(keyword (name fnm))))))
+               fields)
+        sigs (if (every? pair? fields) (defrecord--sigs rec fields) nil))
     `(do ~ctor ~@accs ~@sigs nil)))
 
 ;; (min-by f coll) / (max-by f coll) — find the element whose key is smallest/largest.
@@ -2437,13 +2538,12 @@ iterating for side effects."
 (defn for--check-binds (binds)
   (cond
     (empty? binds) nil
-    (%eq (first binds) :when)
-      (if (empty? (rest binds))
-        (error "for: :when at end of bindings has no guard expression")
-        (for--check-binds (rest (rest binds))))
-    (empty? (rest binds))
-      (error "for: binding '" (pr-str (first binds))
-             "' has no collection — bindings must be paired as (var coll ...)")
+    (%eq (first binds) :when) (if (empty? (rest binds))
+                                (error "for: :when at end of bindings has no guard expression")
+                                (for--check-binds (rest (rest binds))))
+    (empty? (rest binds)) (error "for: binding '"
+                            (pr-str (first binds))
+                            "' has no collection — bindings must be paired as (var coll ...)")
     else (for--check-binds (rest (rest binds)))))
 
 (defmacro for (binds body)
@@ -2467,8 +2567,9 @@ iterating for side effects."
 (defmacro dotimes (bind & body)
   "Run `body` with the bound name set to 0, 1, …, n-1 for side effect; returns `nil`. `bind` is `(var n)`."
   (if (not (and (pair? bind) (pair? (rest bind))))
-    (error "dotimes: bind must be (var n), got " (pr-str bind)
-           ". Syntax: (dotimes (i n) body...)")
+    (error "dotimes: bind must be (var n), got "
+      (pr-str bind)
+      ". Syntax: (dotimes (i n) body...)")
     `(do (dotimes--loop ~(second bind) (fn (~(first bind)) ~@body) 0) nil)))
 
 ;; (dolist (x xs) body...) — run `body` for each element of `xs`; returns nil.
@@ -2479,8 +2580,9 @@ iterating for side effects."
 (defmacro dolist (bind & body)
   "Run `body` with the bound name set to each element of the collection for side effect; returns `nil`. `bind` is `(var coll)`."
   (if (not (and (pair? bind) (pair? (rest bind))))
-    (error "dolist: bind must be (var coll), got " (pr-str bind)
-           ". Syntax: (dolist (x xs) body...)")
+    (error "dolist: bind must be (var coll), got "
+      (pr-str bind)
+      ". Syntax: (dolist (x xs) body...)")
     `(do (dolist--loop ~(second bind) (fn (~(first bind)) ~@body)) nil)))
 
 ;; (bench label expr) — wall-clock timing, in milliseconds (the resolution of
@@ -2635,9 +2737,11 @@ search rides on."
   ;; the `strings` benchmark's full fusion would need a string-builder reducer
   ;; (a follow-up); today join over a view matches the old eager-`map` behaviour.
   (let (coll (if (seqview? coll) (seq coll) coll))
-   (if (string? sep)
-    (%string-join sep coll)
-    (if (empty? coll) "" (apply str (cons (first coll) (reverse (join--parts sep (rest coll) nil))))))))
+    (if (string? sep)
+      (%string-join sep coll)
+      (if (empty? coll)
+        ""
+        (apply str (cons (first coll) (reverse (join--parts sep (rest coll) nil))))))))
 
 ;; `string-split` is now a native builtin (crates/lisp/src/builtins.rs) — one O(n)
 ;; pass via Rust's `str::split`. The former pure-Brood version re-`substring`ed the
@@ -2798,8 +2902,8 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
 ;; left shift can exceed 32 bits, so we mask back to 32 bits with `*rand-mask*`,
 ;; which also keeps every intermediate well within i64 (no overflow).
 
-(def *rand-mask* 4294967295)  ; 2^32 - 1
-
+; 2^32 - 1
+(def *rand-mask* 4294967295)
 (defn rand-seed (n)
   "Normalize integer `n` into a valid nonzero 32-bit PRNG seed (xorshift32 cannot start from 0)."
   (let (m (bit-and n *rand-mask*))
@@ -2946,12 +3050,12 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; spelling of `:only` — still accepted, but it warns once. Used at `defmodule`
 ;; expand time.
 (defn defmodule--use-clause (clause)
-  (let (mod    (second clause)
-        opts   (rest (rest clause))
+  (let (mod (second clause)
+        opts (rest (rest clause))
         marker (first opts)
         subset (if (or (= marker :only) (= marker :refer)) (second opts) nil)
-        forms  (list (list 'require (list 'quote mod))
-                 (list '%refer (list 'quote mod) (list 'quote subset))))
+        forms (list (list 'require (list 'quote mod))
+                (list '%refer (list 'quote mod) (list 'quote subset))))
     (if (= marker :refer)
       (cons (list 'deprecation-warning
               (list 'quote (list :refer mod))
@@ -2991,8 +3095,8 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; `mod/name` (Elixir-style `alias`). `short` defaults to `mod`'s last path segment;
 ;; `:as` overrides it (needed when two modules share a last segment).
 (defn defmodule--alias-clause (clause)
-  (let (mod   (second clause)
-        opts  (rest (rest clause))
+  (let (mod (second clause)
+        opts (rest (rest clause))
         short (if (= (first opts) :as) (second opts) (defmodule--last-segment mod)))
     (list (list 'require (list 'quote mod))
       (list '%alias (list 'quote mod) (list 'quote short)))))
@@ -3090,10 +3194,13 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       ;; found, or an error inside its source) must not leave `key` marked, or
       ;; every later require of it stalls the full `require--await` window
       ;; (~5s of 5ms ticks) before taking the load over.
-      (do (def *features-loading* (assoc *features-loading* key (self)))
-        (try (require--force key)
+      (do
+        (def *features-loading* (assoc *features-loading* key (self)))
+        (try
+          (require--force key)
           (catch e
-            (do (def *features-loading* (dissoc *features-loading* key))
+            (do
+              (def *features-loading* (dissoc *features-loading* key))
               (throw e))))
         (def *features-loading* (dissoc *features-loading* key))
         key))))

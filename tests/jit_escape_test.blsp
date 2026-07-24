@@ -16,10 +16,11 @@
 (describe "escape-analysis scalar replacement (lever 2)"
   ;; ELIMINATED: p never escapes -> scalar-replaced, must stay correct.
   (defn ea-sum (x) (let (p [x (+ x 1) (+ x 2)]) (+ (nth p 0) (+ (nth p 1) (nth p 2)))))
+  ;; sum_{i=1}^{1000}(3i+3) = 3*500500 + 3000
   (test "non-escaping vector is eliminated but computes the same value"
-    (assert= (ea-sum 10) 33)                  ;; 10 + 11 + 12
-    (assert= (loop-acc ea-sum 1000 0) 1504500)) ;; sum_{i=1}^{1000}(3i+3) = 3*500500 + 3000
-
+    ;; 10 + 11 + 12
+    (assert= (ea-sum 10) 33)
+    (assert= (loop-acc ea-sum 1000 0) 1504500))
   ;; ESCAPES (returned): the vector itself is the result -> must NOT be scalar-replaced.
   (defn ea-ret (x) (let (p [x (+ x 1)]) p))
   (test "a returned vector keeps its real allocation"
@@ -28,7 +29,8 @@
     (assert= (count (ea-ret 5)) 2))
 
   ;; ESCAPES (passed to a call): the callee could retain it.
-  (defn ea-pass (x) (let (p [x (* x 2)]) (count p)))   ;; count takes the whole vector
+  ;; count takes the whole vector
+  (defn ea-pass (x) (let (p [x (* x 2)]) (count p)))
   (test "a vector passed to a call keeps its allocation"
     (assert= (ea-pass 9) 2))
 

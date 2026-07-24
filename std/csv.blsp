@@ -50,86 +50,139 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
   (let (c (csv--at s i n))
     (cond
       ;; ── end of input ──────────────────────────────────────────────────────
-      (nil? c)
-      (let (row (into [] (reverse (cons (csv--field field-acc) row-acc))))
-        ;; If the last row is a single empty field (trailing newline), drop it.
-        (let (all-rows (cons row rows-acc))
-          (let (result (reverse all-rows))
-            ;; Drop trailing empty row produced by a trailing newline
-            (if (and (not (empty? result))
-                     (let (last-row (nth (into [] result) (dec (count result))))
-                       (and (= (count last-row) 1)
-                            (= (nth last-row 0 nil) "")))
-                     ;; Only drop if non-empty rows exist before it
-                     (> (count result) 1))
-              (reverse (rest (reverse result)))
-              result))))
+      (nil? c) (let (row (into [] (reverse (cons (csv--field field-acc) row-acc))))
+                 ;; If the last row is a single empty field (trailing newline), drop it.
+                 (let (all-rows (cons row rows-acc))
+                   (let (result (reverse all-rows))
+                     ;; Drop trailing empty row produced by a trailing newline
+                     (if (and (not (empty? result))
+                           (let (last-row (nth (into [] result) (dec (count result))))
+                             (and (= (count last-row) 1)
+                               (= (nth last-row 0 nil) "")))
+                           ;; Only drop if non-empty rows exist before it
+                           (> (count result) 1))
+                       (reverse (rest (reverse result)))
+                       result))))
 
       ;; ── :field-start ─────────────────────────────────────────────────────
-      (= state :field-start)
-      (cond
-        ;; opening quote → enter quoted state
-        (= c "\"")
-        (csv--parse s (+ i 1) n :quoted nil row-acc rows-acc)
-        ;; comma → empty field, move to next field
-        (= c ",")
-        (csv--parse s (+ i 1) n :field-start nil (cons (csv--field field-acc) row-acc) rows-acc)
-        ;; newline \n → empty field, end of row
-        (= c "\n")
-        (let (row (into [] (reverse (cons (csv--field field-acc) row-acc))))
-          (csv--parse s (+ i 1) n :field-start nil nil (cons row rows-acc)))
-        ;; \r\n — skip the \r, the \n will be processed on the next call
-        (= c "\r")
-        (csv--parse s (+ i 1) n :field-start field-acc row-acc rows-acc)
-        ;; any other char → start unquoted field
-        else
-        (csv--parse s (+ i 1) n :unquoted (cons c field-acc) row-acc rows-acc))
+      (= state :field-start) (cond
+                               ;; opening quote → enter quoted state
+                               (= c "\"") (csv--parse s (+ i 1) n :quoted nil row-acc rows-acc)
+                               ;; comma → empty field, move to next field
+                               (= c ",") (csv--parse s
+                                           (+ i 1)
+                                           n
+                                           :field-start
+                                           nil
+                                           (cons (csv--field field-acc) row-acc)
+                                           rows-acc)
+                               ;; newline \n → empty field, end of row
+                               (= c "\n") (let (row (into []
+                                                      (reverse (cons (csv--field field-acc) row-acc))))
+                                            (csv--parse s
+                                              (+ i 1)
+                                              n
+                                              :field-start
+                                              nil
+                                              nil
+                                              (cons row rows-acc)))
+                               ;; \r\n — skip the \r, the \n will be processed on the next call
+                               (= c "\r") (csv--parse s
+                                            (+ i 1)
+                                            n
+                                            :field-start
+                                            field-acc
+                                            row-acc
+                                            rows-acc)
+                               ;; any other char → start unquoted field
+                               else (csv--parse s
+                                      (+ i 1)
+                                      n
+                                      :unquoted
+                                      (cons c field-acc)
+                                      row-acc
+                                      rows-acc))
 
       ;; ── :unquoted ─────────────────────────────────────────────────────────
-      (= state :unquoted)
-      (cond
-        (= c ",")
-        (csv--parse s (+ i 1) n :field-start nil (cons (csv--field field-acc) row-acc) rows-acc)
-        (= c "\n")
-        (let (row (into [] (reverse (cons (csv--field field-acc) row-acc))))
-          (csv--parse s (+ i 1) n :field-start nil nil (cons row rows-acc)))
-        (= c "\r")
-        (csv--parse s (+ i 1) n :unquoted field-acc row-acc rows-acc)
-        else
-        (csv--parse s (+ i 1) n :unquoted (cons c field-acc) row-acc rows-acc))
+      (= state :unquoted) (cond
+                            (= c ",") (csv--parse s
+                                        (+ i 1)
+                                        n
+                                        :field-start
+                                        nil
+                                        (cons (csv--field field-acc) row-acc)
+                                        rows-acc)
+                            (= c "\n") (let (row (into []
+                                                   (reverse (cons (csv--field field-acc) row-acc))))
+                                         (csv--parse s
+                                           (+ i 1)
+                                           n
+                                           :field-start
+                                           nil
+                                           nil
+                                           (cons row rows-acc)))
+                            (= c "\r") (csv--parse s (+ i 1) n :unquoted field-acc row-acc rows-acc)
+                            else (csv--parse s
+                                   (+ i 1)
+                                   n
+                                   :unquoted
+                                   (cons c field-acc)
+                                   row-acc
+                                   rows-acc))
 
       ;; ── :quoted ───────────────────────────────────────────────────────────
-      (= state :quoted)
-      (cond
-        ;; quote in quoted field → could be "" (escaped) or closing quote
-        (= c "\"")
-        (csv--parse s (+ i 1) n :quote-seen field-acc row-acc rows-acc)
-        ;; \r inside a quoted field — swallow it (the \n follows)
-        (= c "\r")
-        (csv--parse s (+ i 1) n :quoted field-acc row-acc rows-acc)
-        ;; any other char (including \n, comma) → accumulate
-        else
-        (csv--parse s (+ i 1) n :quoted (cons c field-acc) row-acc rows-acc))
+      (= state :quoted) (cond
+                          ;; quote in quoted field → could be "" (escaped) or closing quote
+                          (= c "\"") (csv--parse s (+ i 1) n :quote-seen field-acc row-acc rows-acc)
+                          ;; \r inside a quoted field — swallow it (the \n follows)
+                          (= c "\r") (csv--parse s (+ i 1) n :quoted field-acc row-acc rows-acc)
+                          ;; any other char (including \n, comma) → accumulate
+                          else (csv--parse s (+ i 1) n :quoted (cons c field-acc) row-acc rows-acc))
 
       ;; ── :quote-seen ───────────────────────────────────────────────────────
-      (= state :quote-seen)
-      (cond
-        ;; "" → escaped quote, add one " and back to :quoted
-        (= c "\"")
-        (csv--parse s (+ i 1) n :quoted (cons "\"" field-acc) row-acc rows-acc)
-        ;; comma after closing quote → end of field
-        (= c ",")
-        (csv--parse s (+ i 1) n :field-start nil (cons (csv--field field-acc) row-acc) rows-acc)
-        ;; newline after closing quote → end of row
-        (= c "\n")
-        (let (row (into [] (reverse (cons (csv--field field-acc) row-acc))))
-          (csv--parse s (+ i 1) n :field-start nil nil (cons row rows-acc)))
-        ;; \r after closing quote → skip (wait for \n)
-        (= c "\r")
-        (csv--parse s (+ i 1) n :quote-seen field-acc row-acc rows-acc)
-        ;; anything else after closing quote → back to unquoted (lenient)
-        else
-        (csv--parse s (+ i 1) n :unquoted (cons c field-acc) row-acc rows-acc))
+      (= state :quote-seen) (cond
+                              ;; "" → escaped quote, add one " and back to :quoted
+                              (= c "\"") (csv--parse s
+                                           (+ i 1)
+                                           n
+                                           :quoted
+                                           (cons "\"" field-acc)
+                                           row-acc
+                                           rows-acc)
+                              ;; comma after closing quote → end of field
+                              (= c ",") (csv--parse s
+                                          (+ i 1)
+                                          n
+                                          :field-start
+                                          nil
+                                          (cons (csv--field field-acc) row-acc)
+                                          rows-acc)
+                              ;; newline after closing quote → end of row
+                              (= c "\n") (let (row (into []
+                                                     (reverse (cons (csv--field field-acc) row-acc))))
+                                           (csv--parse s
+                                             (+ i 1)
+                                             n
+                                             :field-start
+                                             nil
+                                             nil
+                                             (cons row rows-acc)))
+                              ;; \r after closing quote → skip (wait for \n)
+                              (= c "\r") (csv--parse s
+                                           (+ i 1)
+                                           n
+                                           :quote-seen
+                                           field-acc
+                                           row-acc
+                                           rows-acc)
+                              ;; anything else after closing quote → back to unquoted (lenient)
+                              else (csv--parse s
+                                     (+ i 1)
+                                     n
+                                     :unquoted
+                                     (cons c field-acc)
+                                     row-acc
+                                     rows-acc))
 
       else
       ;; Should never happen — fall back to unquoted
@@ -142,7 +195,8 @@ escaped quote inside a quoted field, and both `\\n` and `\\r\\n` line endings.
 An empty string returns an empty list."
   (if (= s "")
     nil
-    (let (v (into [] (string->list s)))   ; index a code-point vector: O(1) nth, O(n) scan
+    (let (v (into [] (string->list s)))
+      ; index a code-point vector: O(1) nth, O(n) scan
       (csv--parse v 0 (count v) :field-start nil nil nil))))
 
 ;; ---- csv-parse-maps ---------------------------------------------------------
@@ -152,10 +206,10 @@ An empty string returns an empty list."
   (if (empty? rows)
     (reverse acc)
     (let (row (first rows)
-          m   (fold (fn (acc i)
-                      (assoc acc (nth headers i "") (nth (into [] row) i "")))
-                    {}
-                    (range (count headers))))
+          m (fold (fn (acc i)
+                    (assoc acc (nth headers i "") (nth (into [] row) i "")))
+              {}
+              (range (count headers))))
       (csv--rows->maps headers (rest rows) (cons m acc)))))
 
 (defn csv-parse-maps (s)
@@ -165,7 +219,7 @@ maps from header→value strings. An empty or header-only CSV returns nil/empty.
     (if (or (nil? rows) (empty? rows))
       nil
       (let (headers (into [] (first rows))
-            data    (rest rows))
+            data (rest rows))
         (if (empty? data)
           nil
           (csv--rows->maps headers data nil))))))
@@ -175,9 +229,9 @@ maps from header→value strings. An empty or header-only CSV returns nil/empty.
 (defn csv--field-needs-quoting? (s)
   "True if field `s` must be quoted in CSV output: contains comma, quote, newline, or CR."
   (or (string-contains? s ",")
-      (string-contains? s "\"")
-      (string-contains? s "\n")
-      (string-contains? s "\r")))
+    (string-contains? s "\"")
+    (string-contains? s "\n")
+    (string-contains? s "\r")))
 
 (defn csv--emit-field (s)
   "Emit a single CSV field, quoting it if necessary. Interior quotes are doubled."
@@ -213,5 +267,5 @@ doubled. Rows are separated by `\\n`."
   "Serialize a list of maps to CSV, with the given `headers` list determining
 column order. The header row is written first. Missing keys produce empty fields."
   (let (header-row (into [] headers)
-        data-rows  (map (fn (m) (into [] (csv--map->row m headers))) maps))
+        data-rows (map (fn (m) (into [] (csv--map->row m headers))) maps))
     (csv-emit (cons header-row (into [] data-rows)))))

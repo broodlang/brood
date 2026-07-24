@@ -16,60 +16,73 @@
 (defn rand-vec (s n) (build-vec s n []))
 
 (defn build-map (s n acc)
-  (if (= n 0) acc
+  (if (= n 0)
+    acc
     (build-map (lcg s) (- n 1) (assoc acc (rem s 20) (- (rem (lcg s) 2000) 1000)))))
 (defn rand-map (s n) (build-map s n {}))
 
+; merge overrides
 (defn map-laws (m k v)
-  (and
-    (= (get (assoc m k v) k) v)                              ; assoc then get
-    (= (get (dissoc m k) k :missing) :missing)              ; dissoc removes
-    (= (assoc (assoc m k v) k (+ v 1)) (assoc m k (+ v 1)))  ; last write wins
-    (= (merge m {}) m)                                       ; right identity
-    (= (merge {} m) m)                                       ; left identity
-    (= (count (assoc (dissoc m k) k v))                      ; count after re-add
-       (count (assoc m k v)))
-    (= (get (merge m (assoc {} k v)) k) v)))                ; merge overrides
-
+  (and (= (get (assoc m k v) k) v)
+    ; assoc then get
+    ; dissoc removes
+    (= (get (dissoc m k) k :missing) :missing)
+    ; last write wins
+    (= (assoc (assoc m k v) k (+ v 1)) (assoc m k (+ v 1)))
+    ; right identity
+    (= (merge m {}) m)
+    ; left identity
+    (= (merge {} m) m)
+    (= (count (assoc (dissoc m k) k v))
+      ; count after re-add
+      (count (assoc m k v)))
+    (= (get (merge m (assoc {} k v)) k) v)))
+; into keeps prefix
 (defn vec-laws (v w x)
-  (and
-    (= (nth (conj v x) (count v)) x)                         ; conj appends at end
-    (= (count (into v w)) (+ (count v) (count w)))          ; into concatenates
+  (and (= (nth (conj v x) (count v)) x)
+    ; conj appends at end
+    ; into concatenates
+    (= (count (into v w)) (+ (count v) (count w)))
     (= (count (conj v x)) (+ 1 (count v)))
-    (if (> (count v) 0) (= (nth (into v w) 0) (nth v 0)) true))) ; into keeps prefix
-
+    (if (> (count v) 0) (= (nth (into v w) 0) (nth v 0)) true)))
 (defn hof-laws (v)
-  (and
-    (= (count (map (fn (x) (* x 2)) v)) (count v))          ; map preserves length
-    (<= (count (filter (fn (x) (> x 0)) v)) (count v))      ; filter never grows
-    (= (map (fn (x) (+ 1 (* 2 x))) v)                        ; map fusion
-       (map (fn (x) (+ 1 x)) (map (fn (x) (* 2 x)) v)))
-    (= (fold + 0 v) (fold + 0 (reverse v)))                 ; sum invariant to order
+  (and (= (count (map (fn (x) (* x 2)) v)) (count v))
+    ; map preserves length
+    ; filter never grows
+    (<= (count (filter (fn (x) (> x 0)) v)) (count v))
+    (= (map (fn (x) (+ 1 (* 2 x))) v)
+      ; map fusion
+      (map (fn (x) (+ 1 x)) (map (fn (x) (* 2 x)) v)))
+    ; sum invariant to order
+    (= (fold + 0 v) (fold + 0 (reverse v)))
     (= (count (reverse v)) (count v))))
 
 (defn str-laws (a b)
-  (and
-    (= (string-length (str a b)) (+ (string-length a) (string-length b)))
+  (and (= (string-length (str a b)) (+ (string-length a) (string-length b)))
     (= (str a "") a)
     (= (str "" a) a)))
 
 (defn check-maps (s n)
-  (if (= n 0) true
+  (if (= n 0)
+    true
     (let (m (rand-map (lcg s) (+ 1 (rem s 8)))
           k (rem (lcg (lcg s)) 20)
           v (- (rem (lcg (lcg (lcg s))) 2000) 1000))
       (if (map-laws m k v) (check-maps (lcg (lcg (lcg (lcg s)))) (- n 1)) false))))
 
 (defn check-vecs (s n)
-  (if (= n 0) true
+  (if (= n 0)
+    true
     (let (v (rand-vec (lcg s) (+ 1 (rem s 9)))
           w (rand-vec (lcg (lcg s)) (rem s 6))
           x (- (rem s 200) 100))
       (if (and (vec-laws v w x) (hof-laws v))
-        (check-vecs (lcg (lcg (lcg s))) (- n 1)) false))))
+        (check-vecs (lcg (lcg (lcg s))) (- n 1))
+        false))))
 
 (defn check-strs (s n)
-  (if (= n 0) true
+  (if (= n 0)
+    true
     (let (a (str (rem s 100000) "x")
           b (str "y" (rem (lcg s) 100000)))
       (if (str-laws a b) (check-strs (lcg (lcg s)) (- n 1)) false))))

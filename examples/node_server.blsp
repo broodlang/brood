@@ -14,10 +14,11 @@
 (println "[server] waiting for messages — start the client now, Ctrl-C to quit")
 
 (defn serve ()
-  (receive ([:hi from] (do
-                         (println "[server] :hi from " from " — replying")
-                         (send from [:pong (self)])
-                         (serve)))
+  (receive
+    ([:hi from] (do
+                  (println "[server] :hi from " from " — replying")
+                  (send from [:pong (self)])
+                  (serve)))
     ([:ping from] (do
                     (println "[server] :ping from " from " — replying")
                     (send from [:pong (self)])

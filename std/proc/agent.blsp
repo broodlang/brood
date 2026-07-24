@@ -22,18 +22,13 @@ read+write primitive for compare-and-swap-style patterns.")
 
 (defn agent--loop (state)
   (receive
-    ([:get from r f]
-       (do (send from [:reply r (f state)]) (agent--loop state)))
-    ([:update from r f]
-       (do (send from [:reply r :ok]) (agent--loop (f state))))
-    ([:get-and-update from r f]
-       (let (res (f state))
-         (send from [:reply r (first res)])
-         (agent--loop (second res))))
-    ([:cast f]
-       (agent--loop (f state)))
-    ([:stop from r]
-       (send from [:reply r :ok]))))
+    ([:get from r f] (do (send from [:reply r (f state)]) (agent--loop state)))
+    ([:update from r f] (do (send from [:reply r :ok]) (agent--loop (f state))))
+    ([:get-and-update from r f] (let (res (f state))
+                                  (send from [:reply r (first res)])
+                                  (agent--loop (second res))))
+    ([:cast f] (agent--loop (f state)))
+    ([:stop from r] (send from [:reply r :ok]))))
 
 ;; ---- public API -------------------------------------------------------------
 

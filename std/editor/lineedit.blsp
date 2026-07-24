@@ -141,7 +141,8 @@ when `p` is already on the first line."
     (if (= ls 0)
       nil
       (let (col (- p ls)
-            prev-start (lineedit--line-start text (dec ls)))  ; (dec ls) is the prior "\n"
+            prev-start (lineedit--line-start text (dec ls)))
+        ; (dec ls) is the prior "\n"
         (min (+ prev-start col) (dec ls))))))
 
 (defn lineedit--down-point (text p)
@@ -166,12 +167,9 @@ the last line."
   "State with string `s` inserted at point; point advances past it."
   (let (text (get state :text) p (get state :point))
     (assoc state
-      :text
-      (str (substring text 0 p) s (substring text p (string-length text)))
-      :point
-      (+ p (string-length s))
-      :hist-idx
-      -1)))
+      :text (str (substring text 0 p) s (substring text p (string-length text)))
+      :point (+ p (string-length s))
+      :hist-idx -1)))
 
 (defn lineedit--del-back (state)
   "State with the char before point deleted (backspace)."
@@ -179,12 +177,9 @@ the last line."
     (if (= p 0)
       state
       (assoc state
-        :text
-        (str (substring text 0 (dec p)) (substring text p (string-length text)))
-        :point
-        (dec p)
-        :hist-idx
-        -1))))
+        :text (str (substring text 0 (dec p)) (substring text p (string-length text)))
+        :point (dec p)
+        :hist-idx -1))))
 
 (defn lineedit--del-fwd (state)
   "State with the char at point deleted (delete / C-d mid-line)."
@@ -210,14 +205,10 @@ the last line."
         n (string-length text)
         s (lineedit--bwd-word text p (lineedit--word-pred state)))
     (assoc state
-      :text
-      (str (substring text 0 s) (substring text p n))
-      :kill
-      (substring text s p)
-      :point
-      s
-      :hist-idx
-      -1)))
+      :text (str (substring text 0 s) (substring text p n))
+      :kill (substring text s p)
+      :point s
+      :hist-idx -1)))
 
 (defn lineedit--kill-word-fwd (state)
   "State with the word *after* point killed into `:kill` (M-d), point unchanged."
@@ -226,12 +217,9 @@ the last line."
         n (string-length text)
         e (lineedit--fwd-word text p (lineedit--word-pred state)))
     (assoc state
-      :text
-      (str (substring text 0 p) (substring text e n))
-      :kill
-      (substring text p e)
-      :hist-idx
-      -1)))
+      :text (str (substring text 0 p) (substring text e n))
+      :kill (substring text p e)
+      :hist-idx -1)))
 
 (defn lineedit--transpose (state)
   "State with the two characters around point swapped, point advanced (C-t) — at
@@ -243,12 +231,9 @@ end of line, swaps the last two. No-op on a line shorter than 2 or at column 0."
             a (char-at text (dec q))
             b (char-at text q))
         (assoc state
-          :text
-          (str (substring text 0 (dec q)) b a (substring text (inc q) n))
-          :point
-          (min n (inc q))
-          :hist-idx
-          -1)))))
+          :text (str (substring text 0 (dec q)) b a (substring text (inc q) n))
+          :point (min n (inc q))
+          :hist-idx -1)))))
 
 (defn lineedit--yank (state)
   "State with the last-killed text inserted at point (C-y)."
@@ -312,12 +297,9 @@ as a substring, or -1. An empty query matches the newest entry."
       (assoc state :search (assoc s :query query))
       (let (entry (nth (get state :hist) found))
         (assoc state
-          :text
-          entry
-          :point
-          (string-length entry)
-          :search
-          (assoc s :query query :idx found))))))
+          :text entry
+          :point (string-length entry)
+          :search (assoc s :query query :idx found))))))
 
 (defn lineedit--search-cancel (state)
   "Leave search, restoring the line as it was before C-r."
@@ -349,11 +331,10 @@ as a substring, or -1. An empty query matches the newest entry."
   "Enter reverse incremental history search (C-r), saving the current line so C-g
 can restore it, and selecting the newest match (empty query → newest entry)."
   (lineedit--search-step (assoc state
-                           :search
-                           {:query ""
-                            :idx 0
-                            :orig-text (get state :text)
-                            :orig-point (get state :point)})
+                           :search {:query ""
+                                    :idx 0
+                                    :orig-text (get state :text)
+                                    :orig-point (get state :point)})
     ""
     0))
 
@@ -383,12 +364,9 @@ against `cands` — the candidate itself when unique, else the longest common pr
               (empty? (rest cands)) (first cands)
               :else (common-prefix cands)))
     (assoc state
-      :text
-      (str (substring text 0 sstart) ins (substring text p n))
-      :point
-      (+ sstart (string-length ins))
-      :hist-idx
-      -1)))
+      :text (str (substring text 0 sstart) ins (substring text p n))
+      :point (+ sstart (string-length ins))
+      :hist-idx -1)))
 
 (defn lineedit--complete (state)
   "Tab: complete the symbol under point against `*lineedit-candidates*` (the live
@@ -423,10 +401,12 @@ globals by default; a project can rebind it to complete its own vocabulary)."
   (lineedit--move state (dec (get state :point))))
 (defn lineedit-forward-word (state _)
   "Move point to the end of the next word (M-f) — by path component in `:path` mode."
-  (lineedit--move state (lineedit--fwd-word (get state :text) (get state :point) (lineedit--word-pred state))))
+  (lineedit--move state
+    (lineedit--fwd-word (get state :text) (get state :point) (lineedit--word-pred state))))
 (defn lineedit-backward-word (state _)
   "Move point to the start of the previous word (M-b) — by path component in `:path` mode."
-  (lineedit--move state (lineedit--bwd-word (get state :text) (get state :point) (lineedit--word-pred state))))
+  (lineedit--move state
+    (lineedit--bwd-word (get state :text) (get state :point) (lineedit--word-pred state))))
 (defn lineedit-delete-backward (state _)
   "Delete the character before point (Backspace / C-h)."
   (lineedit--del-back state))
@@ -645,30 +625,29 @@ by a previous multi-line render, carriage-return, clear below, reprint prompt + 
 highlighted (horizontally-scrolled) window, draw the signature hint on the line below
 (if any), then park the cursor. Returns `st` with `:last-row` 0 (cursor ends on row 0)."
   (let (text (get st :text)
-         point (get st :point)
-         prefix (get st :prefix)
-         hs (get st :hscroll)
-         avail (get st :avail)
-         promptw (get st :promptw)
-         prev-row (or (get st :last-row) 0)
-         base (string-length prefix)
-         full (str prefix text)
-         len (string-length text)
-         vis (substring text hs (min len (+ hs avail)))
-         cursorpos (+ base point)
-         overrides (lineedit-overrides full cursorpos)
-         chunks (highlight-chunks full (+ base hs) vis overrides)
-         raw-hint (if (get st :search) nil (lineedit--hint-pieces full cursorpos))
-         hint (if (nil? raw-hint) nil (lineedit--fit raw-hint (dec (get st :width)) '()))
-         cursor-col (+ promptw (- point hs))
-         head (append
-                (if (> prev-row 0) (list [:up prev-row]) '())
-                [[:cr] [:clear-below] [:print (lineedit--display-prompt st)]]
-                (lineedit--chunk-ops chunks))
-         tail (if (nil? hint)
-                (list [:col cursor-col])
-                (append (cons [:nl] (lineedit--chunk-ops hint))
-                  (list [:up 1] [:col cursor-col]))))
+        point (get st :point)
+        prefix (get st :prefix)
+        hs (get st :hscroll)
+        avail (get st :avail)
+        promptw (get st :promptw)
+        prev-row (or (get st :last-row) 0)
+        base (string-length prefix)
+        full (str prefix text)
+        len (string-length text)
+        vis (substring text hs (min len (+ hs avail)))
+        cursorpos (+ base point)
+        overrides (lineedit-overrides full cursorpos)
+        chunks (highlight-chunks full (+ base hs) vis overrides)
+        raw-hint (if (get st :search) nil (lineedit--hint-pieces full cursorpos))
+        hint (if (nil? raw-hint) nil (lineedit--fit raw-hint (dec (get st :width)) '()))
+        cursor-col (+ promptw (- point hs))
+        head (append (if (> prev-row 0) (list [:up prev-row]) '())
+               [[:cr] [:clear-below] [:print (lineedit--display-prompt st)]]
+               (lineedit--chunk-ops chunks))
+        tail (if (nil? hint)
+               (list [:col cursor-col])
+               (append (cons [:nl] (lineedit--chunk-ops hint))
+                 (list [:up 1] [:col cursor-col]))))
     (term-emit (into [] (append head tail)))
     (assoc st :last-row 0)))
 
@@ -685,8 +664,14 @@ line's start within the text (past `base`) so the lexer spans land on the right 
           line-ops (cons [:print pstr] (lineedit--chunk-ops chunks))
           here (if (= i 0) line-ops (cons [:nl] line-ops)))
       (append here
-        (lineedit--multi-line-ops (rest lines) (inc i)
-          (+ offset (string-length line) 1) base full overrides prompt cont)))))
+        (lineedit--multi-line-ops (rest lines)
+          (inc i)
+          (+ offset (string-length line) 1)
+          base
+          full
+          overrides
+          prompt
+          cont)))))
 
 (defn lineedit--multi-ops (st)
   "The full op vector to repaint a MULTI-line form in place: up over the previous
@@ -709,8 +694,7 @@ tested in isolation."
         promptw (string-length (if (= cur-row 0) prompt cont))
         col (+ promptw cur-col)
         up-to-cursor (- (dec nlines) cur-row))
-    (append
-      (if (> prev-row 0) (list [:up prev-row]) '())
+    (append (if (> prev-row 0) (list [:up prev-row]) '())
       (list [:cr] [:clear-below])
       (lineedit--multi-line-ops lines 0 0 base full overrides prompt cont)
       (if (> up-to-cursor 0) (list [:up up-to-cursor]) '())
@@ -746,8 +730,7 @@ lines; moves up over any leftover render block first."
         full (str prefix text)
         lines (string-split text "\n"))
     (term-emit (into []
-                 (append
-                   (if (> prev-row 0) (list [:up prev-row]) '())
+                 (append (if (> prev-row 0) (list [:up prev-row]) '())
                    (list [:cr] [:clear-below])
                    (lineedit--multi-line-ops lines 0 0 base full '() prompt cont)
                    (list [:nl]))))))

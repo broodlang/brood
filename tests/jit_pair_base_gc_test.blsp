@@ -40,9 +40,13 @@
   "Return true if (first xs) agrees before and after alloc-pressure, for iter rounds."
   (if (= iter 0)
     true
-    (let (h1 (first xs)           ; LOCAL pair read — stashed base valid here
-          _  (alloc-pressure 32)  ; non-tail call → GC safepoint → may flip local slab
-          h2 (first xs))          ; stashed base dangling if flip occurred → garbage
+    (let (
+          ; LOCAL pair read — stashed base valid here
+          h1 (first xs)
+          ; non-tail call → GC safepoint → may flip local slab
+          _ (alloc-pressure 32)
+          h2 (first xs))
+      ; stashed base dangling if flip occurred → garbage
       (if (= h1 h2)
         (check-first-stable xs (- iter 1))
         false))))
@@ -53,13 +57,14 @@
   (if (= iter 0)
     true
     (let (t1 (rest xs)
-          _  (alloc-pressure 32)
+          _ (alloc-pressure 32)
           t2 (rest xs))
       (if (= (nil? t1) (nil? t2))
         (check-rest-stable xs (- iter 1))
         false))))
 
-(describe "JIT inline car/cdr: pair-slab pointer valid across GC safepoints" :serial
+(describe "JIT inline car/cdr: pair-slab pointer valid across GC safepoints"
+  :serial
   ;; Create the list INSIDE the test body so its pairs are LOCAL, not RUNTIME-promoted.
   ;; Run 5000 iterations — past JIT tier threshold (8 × 256 = 2048) — so both
   ;; check-first-stable and check-rest-stable compile and the stale-pointer path fires.

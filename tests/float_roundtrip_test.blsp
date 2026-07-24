@@ -17,18 +17,28 @@
 (defn rt? (x) (= x (roundtrip x)))
 
 (defn rt-fuzz (i seed bad)
-  (if (= i 0) bad
-    (let (r  (rand-float seed) m (first r) s (second r)
-          r2 (rand-int s 40)   e (- (first r2) 20) s2 (second r2)
-          f  (* m (pow 10.0 e)))
+  (if (= i 0)
+    bad
+    (let (r (rand-float seed)
+          m (first r)
+          s (second r)
+          r2 (rand-int s 40)
+          e (- (first r2) 20)
+          s2 (second r2)
+          f (* m (pow 10.0 e)))
       (rt-fuzz (- i 1) s2 (if (rt? f) bad (+ bad 1))))))
 
 (describe "finite float read/write invariance"
   (test "curated hard values round-trip bit-exactly"
-    (is (rt? 0.1)) (is (rt? 0.2)) (is (rt? 0.3))
-    (is (rt? -0.0)) (is (rt? 1.0))
-    (is (rt? 1e308)) (is (rt? 1e-308))
-    (is (rt? 1.0000000000000002))     ; 1 ULP above 1.0
+    (is (rt? 0.1))
+    (is (rt? 0.2))
+    (is (rt? 0.3))
+    (is (rt? -0.0))
+    (is (rt? 1.0))
+    (is (rt? 1e308))
+    (is (rt? 1e-308))
+    ; 1 ULP above 1.0
+    (is (rt? 1.0000000000000002))
     (is (rt? 3.141592653589793))
     (is (rt? 123456789.123456789)))
   (test "2000 PRNG floats across magnitudes all round-trip"

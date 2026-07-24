@@ -1,5 +1,6 @@
 (defmodule stats
-  (:doc "Descriptive statistics over numeric sequences.
+  (:doc
+    "Descriptive statistics over numeric sequences.
 
 All functions accept any sequence (list or vector) of numbers.
 Empty sequences raise unless documented otherwise.
@@ -51,7 +52,7 @@ For an even-length sequence, returns the mean of the two middle values."
   (let (n (count xs))
     (when (= n 0) (error "stats/median: empty sequence"))
     (let (sorted (sort xs)
-          mid    (quot n 2))
+          mid (quot n 2))
       (if (= (rem n 2) 1)
         (nth sorted mid)
         (/ (+ (nth sorted (- mid 1)) (nth sorted mid)) 2)))))
@@ -64,8 +65,8 @@ For an even-length sequence, returns the mean of the two middle values."
     (when (or (< p 0) (> p 100))
       (error "stats/percentile: p must be in [0, 100], got " p))
     (let (sorted (sort xs)
-          rank   (max 1 (ceil (* (/ p 100.0) n)))
-          idx    (min (- n 1) (- rank 1)))
+          rank (max 1 (ceil (* (/ p 100.0) n)))
+          idx (min (- n 1) (- rank 1)))
       (nth sorted idx))))
 
 (defn quantile (xs q)
@@ -98,5 +99,5 @@ For an even-length sequence, returns the mean of the two middle values."
   (let (freq (frequencies xs))
     (fold (fn (best x)
             (if (> (get freq x) (get freq best)) x best))
-          (first xs)
-          (rest xs))))
+      (first xs)
+      (rest xs))))

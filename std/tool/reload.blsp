@@ -81,7 +81,8 @@ trigger, docs/type-soundness-reload.md).")
                  (reload-defs path)
                  (println "[reload]" path)
                  (when on-reload
-                   (try (on-reload path)
+                   (try
+                     (on-reload path)
                      (catch e (println "[reload] on-reload failed:" path "—" e)))))
                (catch e
                  (println "[reload] failed:" path "—" e)))
@@ -93,14 +94,15 @@ trigger, docs/type-soundness-reload.md).")
 ;; too so std/reload stays prelude-only and require-able without project.
 (defn reload--collect-blsp (dir)
   (if (dir? dir)
-    (fold (fn (acc entry)
-            (let (p (path-join dir entry))
-              (cond
-                ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
-                ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
-                (dir? p) (append-two (reload--collect-blsp p) acc)
-                (ends-with? entry ".blsp") (cons p acc)
-                else acc)))
+    (fold
+      (fn (acc entry)
+        (let (p (path-join dir entry))
+          (cond
+            ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
+            ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
+            (dir? p) (append-two (reload--collect-blsp p) acc)
+            (ends-with? entry ".blsp") (cons p acc)
+            else acc)))
       nil
       (list-dir dir))
     nil))
@@ -126,7 +128,8 @@ trigger, docs/type-soundness-reload.md).")
           (do
             (load p)
             (when on-reload
-              (try (on-reload p)
+              (try
+                (on-reload p)
                 (catch e (println "[reload] on-reload failed:" p "—" e)))))
           (catch e (println "[reload] +load failed:" p "—" e)))
         (spawn (reload--loop p (file-mtime p) on-reload))))

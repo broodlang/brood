@@ -92,7 +92,8 @@
 (describe "dotimes — wrong syntax"
   (test "correct dotimes works"
     (let (_acc (ref))
-      (dotimes (i 3) i)  ; side-effect-only, just check no error
+      ; side-effect-only, just check no error
+      (dotimes (i 3) i)
       :ok))
 
   (test "bare symbol bind raises a clear error"
@@ -118,7 +119,8 @@
 
 (describe "dolist — wrong syntax"
   (test "correct dolist works"
-    (dolist (x '(1 2 3)) x)  ; side-effect-only
+    ; side-effect-only
+    (dolist (x '(1 2 3)) x)
     :ok)
 
   (test "bare symbol bind raises a clear error"
@@ -177,7 +179,8 @@
 
 ;; ── 6. receive — (after …) in non-last position ───────────────────────────────
 
-(describe "receive — wrong syntax" :serial
+(describe "receive — wrong syntax"
+  :serial
   (test "correct receive with after works"
     ;; A process that sends itself a message, then receives with a short timeout.
     (let (me (self))
@@ -231,4 +234,4 @@
       (is (string-contains? msg "describe"))))
 
   (test "correct string name does NOT raise"
-    (is (nil? (error-of (eval '(test/describe "valid group" (test/test "t" :ok))))))  ))
+    (is (nil? (error-of (eval '(test/describe "valid group" (test/test "t" :ok))))))))

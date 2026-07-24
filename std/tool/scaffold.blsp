@@ -1,12 +1,12 @@
 ;; std/tool/scaffold.blsp — `nest new` project scaffolding.
 ;; Templates + new-project, split out of tool/project.blsp (which keeps project
 ;; analysis: manifest parsing, test discovery, lints, release, config).
+; for *config-git-init*
 (defmodule scaffold
   "`nest new` project scaffolding — templates and new-project creation, split
 out of the `project` module (which keeps project analysis: manifest parsing,
 test discovery, lints, release, config)."
-  (:use project))   ; for *config-git-init*
-
+  (:use project))
 ;; --- scaffolding a new project (`nest new <name>`) ---------------------------
 ;; True if the 1-char string `ch` occurs in `s` (a short scan — Brood has no char
 ;; index yet, and project names/paths are short).
@@ -521,19 +521,25 @@ test discovery, lints, release, config)."
 ;;   tests/web/views/messages_test.blsp
 
 (defn project--hatch-manifest-template (nm)
-  (str ";; " nm " — a Hatch web application.\n"
+  (str ";; "
+    nm
+    " — a Hatch web application.\n"
     ";;\n"
     ";; Serves a Postgres-backed message board at GET/POST /messages.\n"
     ";; Swap the :path deps for :git deps when targeting a published release.\n"
     "(project\n"
-    "  :name \"" nm "\"\n"
+    "  :name \""
+    nm
+    "\"\n"
     "  :version \"0.1.0\"\n"
     "  :dependencies [[hatch :path \"../hatch\"]\n"
     "                 [store-postgres :path \"../store-postgres\"]]\n"
     "  :format-plugins [hatch])\n"))
 
 (defn project--hatch-main-template (nm)
-  (str "(defmodule main \"Entry point for " nm ".\"\n"
+  (str "(defmodule main \"Entry point for "
+    nm
+    ".\"\n"
     "  (:use web/endpoint :only [serve])\n"
     "  (:use web/application :only [start default-logger-opts])\n"
     "  (:alias db)\n"
@@ -543,7 +549,9 @@ test discovery, lints, release, config)."
     "  \"Start logging, open the DB pool, boot the endpoint, and park.\"\n"
     "  (start\n"
     "    {:logger   (default-logger-opts)\n"
-    "     :children [(fn () (db/start (pg/opts-from-env \"" nm "\")))\n"
+    "     :children [(fn () (db/start (pg/opts-from-env \""
+    nm
+    "\")))\n"
     "                (fn () (serve))]}))\n"))
 
 (defn project--hatch-db-template (_nm)
@@ -585,7 +593,9 @@ test discovery, lints, release, config)."
     "  (:alias db))\n"
     "\n"
     "(defn main ()\n"
-    "  (let (o (pg/opts-from-env \"" nm "\"))\n"
+    "  (let (o (pg/opts-from-env \""
+    nm
+    "\"))\n"
     "    (pg/create-database o)\n"
     "    (db/start o)\n"
     "    (println \"Done. Run `nest run` to start the server.\")))\n"))
@@ -688,7 +698,9 @@ test discovery, lints, release, config)."
     "    [:body {:class \"min-h-screen bg-base-100 text-base-content\"}\n"
     "      [:div {:class \"navbar bg-base-300 shadow-sm sticky top-0 z-50\"}\n"
     "        [:div {:class \"navbar-start\"}\n"
-    "          [:a {:href \"/\" :class \"btn btn-ghost text-xl\"} \"" nm "\"]]\n"
+    "          [:a {:href \"/\" :class \"btn btn-ghost text-xl\"} \""
+    nm
+    "\"]]\n"
     "        [:div {:class \"navbar-end\"}\n"
     "          [:a {:href \"/messages\" :class \"btn btn-ghost btn-sm\"} \"Messages\"]]]\n"
     "      [:main {:class \"max-w-2xl mx-auto p-6\"} children]]])\n"))
@@ -717,8 +729,12 @@ test discovery, lints, release, config)."
     "(defn index (conn)\n"
     "  \"GET / — welcome page.\"\n"
     "  (page conn\n"
-    "    (layout \"" nm "\"\n"
-    "      [:h1 {:class \"text-3xl font-bold mb-4\"} \"Welcome to " nm "!\"]\n"
+    "    (layout \""
+    nm
+    "\"\n"
+    "      [:h1 {:class \"text-3xl font-bold mb-4\"} \"Welcome to "
+    nm
+    "!\"]\n"
     "      [:p {:class \"mb-4 opacity-70\"} \"A Hatch web app backed by PostgreSQL.\"]\n"
     "      [:a {:href \"/messages\" :class \"btn btn-primary\"} \"View messages\"])))\n"))
 
@@ -826,18 +842,24 @@ test discovery, lints, release, config)."
 ;;   tests/web/api_test.blsp
 
 (defn project--web-api-manifest-template (nm)
-  (str ";; " nm " — a Hatch JSON API.\n"
+  (str ";; "
+    nm
+    " — a Hatch JSON API.\n"
     ";;\n"
     ";; Serves JSON at GET /api/health and GET|POST /api/echo. No live layer, no database.\n"
     ";; Swap the :path dep for a :git dep when targeting a published release.\n"
     "(project\n"
-    "  :name \"" nm "\"\n"
+    "  :name \""
+    nm
+    "\"\n"
     "  :version \"0.1.0\"\n"
     "  :dependencies [[hatch :path \"../hatch\"]]\n"
     "  :format-plugins [hatch])\n"))
 
 (defn project--web-api-main-template (nm)
-  (str "(defmodule main \"Entry point for " nm ".\"\n"
+  (str "(defmodule main \"Entry point for "
+    nm
+    ".\"\n"
     "  (:use web/endpoint :only [serve])\n"
     "  (:use web/application :only [start default-logger-opts]))\n"
     "\n"
@@ -907,7 +929,9 @@ test discovery, lints, release, config)."
     "\n"
     "(defn index (conn)\n"
     "  \"GET / — a tiny service descriptor.\"\n"
-    "  (json conn {:name \"" nm "\" :endpoints [\"/api/health\" \"/api/echo\"]}))\n"
+    "  (json conn {:name \""
+    nm
+    "\" :endpoints [\"/api/health\" \"/api/echo\"]}))\n"
     "\n"
     "(defn health (conn)\n"
     "  \"GET /api/health — a liveness probe.\"\n"
@@ -983,42 +1007,62 @@ test discovery, lints, release, config)."
                        (make-dir views-dir)
                        (make-dir tests-web-dir)
                        (make-dir tests-views-dir)
-                       (spit (path-join nm "project.blsp") (project--hatch-manifest-template actual-name))
-                       (spit (path-join src-dir "main.blsp") (project--hatch-main-template actual-name))
+                       (spit (path-join nm "project.blsp")
+                         (project--hatch-manifest-template actual-name))
+                       (spit (path-join src-dir "main.blsp")
+                         (project--hatch-main-template actual-name))
                        (spit (path-join src-dir "db.blsp") (project--hatch-db-template actual-name))
-                       (spit (path-join src-dir "db-setup.blsp") (project--hatch-db-setup-template actual-name))
-                       (spit (path-join web-dir "endpoint.blsp") (project--hatch-endpoint-template actual-name))
-                       (spit (path-join web-dir "errors.blsp") (project--hatch-errors-template actual-name))
-                       (spit (path-join web-dir "layout.blsp") (project--hatch-layout-template actual-name))
-                       (spit (path-join web-dir "routes.blsp") (project--hatch-routes-template actual-name))
-                       (spit (path-join views-dir "home.blsp") (project--hatch-home-template actual-name))
-                       (spit (path-join views-dir "messages.blsp") (project--hatch-messages-view-template actual-name))
-                       (spit (path-join tests-dir "main_test.blsp") (project--hatch-main-test-template actual-name))
-                       (spit (path-join tests-views-dir "messages_test.blsp") (project--hatch-messages-test-template actual-name))
+                       (spit (path-join src-dir "db-setup.blsp")
+                         (project--hatch-db-setup-template actual-name))
+                       (spit (path-join web-dir "endpoint.blsp")
+                         (project--hatch-endpoint-template actual-name))
+                       (spit (path-join web-dir "errors.blsp")
+                         (project--hatch-errors-template actual-name))
+                       (spit (path-join web-dir "layout.blsp")
+                         (project--hatch-layout-template actual-name))
+                       (spit (path-join web-dir "routes.blsp")
+                         (project--hatch-routes-template actual-name))
+                       (spit (path-join views-dir "home.blsp")
+                         (project--hatch-home-template actual-name))
+                       (spit (path-join views-dir "messages.blsp")
+                         (project--hatch-messages-view-template actual-name))
+                       (spit (path-join tests-dir "main_test.blsp")
+                         (project--hatch-main-test-template actual-name))
+                       (spit (path-join tests-views-dir "messages_test.blsp")
+                         (project--hatch-messages-test-template actual-name))
                        [(str nm "/src/main.blsp") (str nm "/src/db.blsp")
                          (str nm "/src/db-setup.blsp")
-                         (str nm "/src/web/endpoint.blsp") (str nm "/src/web/errors.blsp")
+                         (str nm "/src/web/endpoint.blsp")
+                         (str nm "/src/web/errors.blsp")
                          (str nm "/src/web/layout.blsp")
                          (str nm "/src/web/routes.blsp")
-                         (str nm "/src/web/views/home.blsp") (str nm "/src/web/views/messages.blsp")
+                         (str nm "/src/web/views/home.blsp")
+                         (str nm "/src/web/views/messages.blsp")
                          (str nm "/tests/main_test.blsp")
                          (str nm "/tests/web/views/messages_test.blsp")])
     (= tmpl "web-api") (let (web-dir (path-join src-dir "web")
-                            tests-web-dir (path-join tests-dir "web"))
-                        (make-dir web-dir)
-                        (make-dir tests-web-dir)
-                        (spit (path-join nm "project.blsp") (project--web-api-manifest-template actual-name))
-                        (spit (path-join src-dir "main.blsp") (project--web-api-main-template actual-name))
-                        (spit (path-join web-dir "endpoint.blsp") (project--web-api-endpoint-template actual-name))
-                        (spit (path-join web-dir "routes.blsp") (project--web-api-routes-template actual-name))
-                        (spit (path-join web-dir "api.blsp") (project--web-api-handlers-template actual-name))
-                        (spit (path-join tests-dir "main_test.blsp") (project--hatch-main-test-template actual-name))
-                        (spit (path-join tests-web-dir "api_test.blsp") (project--web-api-test-template actual-name))
-                        [(str nm "/src/main.blsp")
-                          (str nm "/src/web/endpoint.blsp") (str nm "/src/web/routes.blsp")
-                          (str nm "/src/web/api.blsp")
-                          (str nm "/tests/main_test.blsp")
-                          (str nm "/tests/web/api_test.blsp")])
+                             tests-web-dir (path-join tests-dir "web"))
+                         (make-dir web-dir)
+                         (make-dir tests-web-dir)
+                         (spit (path-join nm "project.blsp")
+                           (project--web-api-manifest-template actual-name))
+                         (spit (path-join src-dir "main.blsp")
+                           (project--web-api-main-template actual-name))
+                         (spit (path-join web-dir "endpoint.blsp")
+                           (project--web-api-endpoint-template actual-name))
+                         (spit (path-join web-dir "routes.blsp")
+                           (project--web-api-routes-template actual-name))
+                         (spit (path-join web-dir "api.blsp")
+                           (project--web-api-handlers-template actual-name))
+                         (spit (path-join tests-dir "main_test.blsp")
+                           (project--hatch-main-test-template actual-name))
+                         (spit (path-join tests-web-dir "api_test.blsp")
+                           (project--web-api-test-template actual-name))
+                         [(str nm "/src/main.blsp") (str nm "/src/web/endpoint.blsp")
+                           (str nm "/src/web/routes.blsp")
+                           (str nm "/src/web/api.blsp")
+                           (str nm "/tests/main_test.blsp")
+                           (str nm "/tests/web/api_test.blsp")])
     else (do
            (spit (path-join src-dir "main.blsp") (project--main-template actual-name))
            (spit (path-join src-dir "hello.blsp") (project--hello-template actual-name))

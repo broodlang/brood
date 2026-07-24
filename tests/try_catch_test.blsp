@@ -215,8 +215,9 @@
   (test "try in tail position of a function"
     ;; try bodies compile non-tail (each level is a new frame); keep depth modest.
     (defn t-tail (n)
-      (try (if (= n 0) (throw :done) (t-tail (- n 1)))
-           (catch e e)))
+      (try
+        (if (= n 0) (throw :done) (t-tail (- n 1)))
+        (catch e e)))
     (assert= (t-tail 50) :done))
 
   (test "try wrapping a deep TAIL-recursive function does not overflow"
@@ -256,7 +257,8 @@
 ;; to CRASH (panicked at heap.rs) instead of raising a catchable Brood error.
 ;; Now they must raise a clean type error that try/catch intercepts.
 
-(describe "try / catch — JIT / VM deopt recovery" :serial
+(describe "try / catch — JIT / VM deopt recovery"
+  :serial
   ;; Helper: a function compiled by the VM/JIT for integer operands.
   ;; When called with a non-integer the JIT deopts — previously crashed.
   (defn deopt-adder (x)
@@ -291,7 +293,8 @@
 
   (test "error catchable even when GC ran before the deopt"
     (deopt-heat 5000)
-    (make-pairs 500 nil) ; stress the nursery
+    ; stress the nursery
+    (make-pairs 500 nil)
     (assert= (try (deopt-adder :keyword) (catch _ :ok)) :ok))
 
   ;; Multi-arg variant: more slots means more stale-handle exposure.
@@ -353,8 +356,9 @@
         (assert= 32 (count (try (deep 100) (catch e (get e :trace))))))))
 
   (test "a native-boundary callback frame appears by name"
-    (let (names (try (map trace-inner [1])
-                     (catch e (map (fn (f) (get f :fn)) (get e :trace)))))
+    (let (names (try
+                  (map trace-inner [1])
+                  (catch e (map (fn (f) (get f :fn)) (get e :trace)))))
       (assert= "try-catch-test/trace-inner" (first names))))
 
   (test "a user throw's error still traces when uncaught payload is rethrown"

@@ -10,19 +10,29 @@
 ;; (x) [8,11); inner (+ x 1) [14,21).
 (def src "(defn f (x)\n  (+ x 1))")
 
+; forward-sexp spans (def y 1)
 (describe "sexp navigation (pure, over the parse-source CST)"
+  ; from the space → end of 'f'
   (test "forward over the whole top form, and over inner atoms"
-    (assert= (point-forward src 0) 22)  ; before outer → end of the whole form
-    (assert= (point-forward src 1) 5)  ; → end of 'defn'
-    (assert= (point-forward src 5) 7))  ; from the space → end of 'f'
+    ; before outer → end of the whole form
+    (assert= (point-forward src 0) 22)
+    ; → end of 'defn'
+    (assert= (point-forward src 1) 5)
+    (assert= (point-forward src 5) 7))
+  ; end of 'defn' → its start
   (test "backward"
-    (assert= (point-backward src 22) 0)  ; before close → start of the top form
-    (assert= (point-backward src 5) 1))  ; end of 'defn' → its start
+    ; before close → start of the top form
+    (assert= (point-backward src 22) 0)
+    (assert= (point-backward src 5) 1))
+  ; at top level → unchanged
   (test "down-list enters, up-list leaves"
-    (assert= (point-down src 0) 1)  ; just inside the outer list
-    (assert= (point-up src 15) 14)  ; inside (+ x 1) → its open paren
-    (assert= (point-up src 1) 0)  ; inside outer → its open paren
-    (assert= (point-up src 0) 0))  ; at top level → unchanged
+    ; just inside the outer list
+    (assert= (point-down src 0) 1)
+    ; inside (+ x 1) → its open paren
+    (assert= (point-up src 15) 14)
+    ; inside outer → its open paren
+    (assert= (point-up src 1) 0)
+    (assert= (point-up src 0) 0))
   (test "beginning-of-defun finds the enclosing top-level form"
     (assert= (point-defun-start src 15) 0)
     (assert= (point-defun-start src 8) 0))
@@ -36,10 +46,10 @@
     ;; leaving forward-sexp stuck). Regression for the reported `(defmodule …"…(…"…)` bug.
     (let (src "(defmodule m\n\"doc\n(x)\nend\")\n(def y 1)"
           dp (string-index-of src "(def y"))
+      ; not the in-docstring (x)
       (let ([base sub] (narrow src dp))
-        (assert= base 0))                                    ; not the in-docstring (x)
-      (assert= (point-forward src dp) (string-length src)))))  ; forward-sexp spans (def y 1)
-
+        (assert= base 0))
+      (assert= (point-forward src dp) (string-length src)))))
 ;; Structural motion narrows to the forms around point (`sexp/narrow`) so it's
 ;; O(neighbouring forms), not O(buffer). These pin that the narrowed answer equals the
 ;; whole-buffer one, including deep in a file with many preceding top-level forms (where
@@ -53,8 +63,9 @@
   (defn bf-backward (text point)
     (let (prev (last (filter (fn (f) (<= (get f :end) point)) (forms-of (bf-enc text point)))))
       (if (nil? prev) point (get prev :start))))
-  (def many (str (join "" (map (fn (i) (str "(defn f" i " () " i ")\n")) (range 300)))
-                 "(map g (h x))"))
+  (def many
+    (str (join "" (map (fn (i) (str "(defn f" i " () " i ")\n")) (range 300)))
+      "(map g (h x))"))
   (def n (string-length many))
   (test "narrowed motion matches the whole-buffer walk at many points (incl. deep + boundaries)"
     (doseq (p [0 1 25 (- n 13) (- n 12) (- n 7) (- n 6) (- n 1)])
@@ -77,12 +88,13 @@
 ;; `tree` is the kernel's `parse-source-positioned` — the position-annotated CST the
 ;; navigation runs over. These pin the node shape the queries above depend on.
 (describe "parse-source-positioned (the kernel CST behind sexp/tree)"
+  ; one top-level form, no trivia
   (test "the root is a positioned container node spanning the whole text"
     (let (r (tree "(a b)"))
       (assert= (get r :kind) :root)
       (assert= (get r :start) 0)
       (assert= (get r :end) 5)
-      (assert= (count (get r :kids)) 1)))   ; one top-level form, no trivia
+      (assert= (count (get r :kids)) 1)))
   (test "a leaf carries its raw :text and half-open positions"
     (let (lst (first (forms-of (tree "(ab cd)")))
           ab (first (forms-of lst)))
@@ -92,15 +104,18 @@
       (assert= (get ab :end) 3)))
   (test "positions are CHARACTER offsets, not bytes (multibyte leading content)"
     ;; "é" is two UTF-8 bytes but one character; the symbol after it starts at char 2.
+    ; the "é" symbol at char 0
     (let (x (first (forms-of (tree "é x"))))
-      (assert= (get x :start) 0))           ; the "é" symbol at char 0
+      (assert= (get x :start) 0))
     (let (forms (forms-of (tree "é x"))
           x (first (rest forms)))
-      (assert= (get x :start) 2)             ; "x" at char 2 (byte 3) — char offset
+      ; "x" at char 2 (byte 3) — char offset
+      (assert= (get x :start) 2)
       (assert= (get x :end) 3))))
 
 ;; The paredit family: pure structural edits returning [new-text new-point], nil when
 ;; the op doesn't apply. Slurp/barf are inverses; raise/splice collapse a level.
+; multi-line → only to end of line
 (describe "sexp structural edits (paredit, pure over the CST)"
   (test "slurp-forward pulls the next sibling in; barf-forward expels the last"
     (assert= (point-slurp-forward "(foo) bar" 2) ["(foo bar)" 2])
@@ -108,15 +123,19 @@
   (test "slurp-backward pulls the previous sibling in; barf-backward expels the first"
     (assert= (point-slurp-backward "foo (bar)" 6) ["(foo bar)" 6])
     (assert= (point-barf-backward "(foo bar)" 6) ["foo (bar)" 6]))
+  ; point on c
   (test "raise replaces the enclosing list with the child at point"
-    (assert= (point-raise "(a (b c) d)" 6) ["(a c d)" 3]))   ; point on c
+    (assert= (point-raise "(a (b c) d)" 6) ["(a c d)" 3]))
   (test "splice drops the enclosing delimiters, keeping the contents"
     (assert= (point-splice "(a (b) c)" 4) ["(a b c)" 3]))
   (test "wrap-round wraps the form at point, point landing just inside"
     (assert= (point-wrap-round "foo bar" 0) ["(foo) bar" 1]))
+  ; not inside any list
   (test "ops return nil when inapplicable (no sibling, top level)"
-    (assert= (point-slurp-forward "(foo)" 2) nil)   ; nothing after to slurp
-    (assert= (point-splice "foo" 1) nil))           ; not inside any list
+    ; nothing after to slurp
+    (assert= (point-slurp-forward "(foo)" 2) nil)
+    (assert= (point-splice "foo" 1) nil))
   (test "point-kill-end caps at the enclosing close, never breaking parens"
-    (assert= (point-kill-end "(foo bar)" 1) 8)      ; kill foo bar, keep the )
-    (assert= (point-kill-end "(foo\n bar)" 1) 4)))  ; multi-line → only to end of line
+    ; kill foo bar, keep the )
+    (assert= (point-kill-end "(foo bar)" 1) 8)
+    (assert= (point-kill-end "(foo\n bar)" 1) 4)))

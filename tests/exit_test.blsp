@@ -12,9 +12,12 @@
 (defmodule exit-test (:use test))
 
 ;; file-local worker bodies (tail-recursive: a test runs in a small-stack green proc)
-(defn ex-spin () (ex-spin))  ; tight CPU loop — only a hard :kill (preempt) catches it
-(defn ex-park () (receive (x x)))  ; parks forever on an empty mailbox
-(defn ex-echo () (receive (m (ex-echo))))  ; a receive loop (one iteration per message)
+; tight CPU loop — only a hard :kill (preempt) catches it
+(defn ex-spin () (ex-spin))
+; parks forever on an empty mailbox
+(defn ex-park () (receive (x x)))
+; a receive loop (one iteration per message)
+(defn ex-echo () (receive (m (ex-echo))))
 ;; native-nested receives — a `receive` reached through a native frame (`try`/HOF), so
 ;; it BLOCKS the worker on the mailbox condvar instead of capturing (§7.4). An exit must
 ;; still reach it (unwind with `Control::Kill`); the `catch` must NOT swallow the signal.
@@ -36,15 +39,18 @@
 
   (test "exit kills a process parked in receive, with its reason"
     (let (p (spawn (ex-park)) m (monitor p))
-      (sleep 30)  ; let it park
+      ; let it park
+      (sleep 30)
       (exit p :stopped)
       (assert= (ex-down-reason p m) :stopped)))
 
   (test "soft exit stops a receive loop at its next iteration"
     (let (p (spawn (ex-echo)) m (monitor p))
       (sleep 30)
-      (send p :ping)  ; one iteration
-      (exit p :done)  ; soft — dies at the next receive
+      ; one iteration
+      (send p :ping)
+      ; soft — dies at the next receive
+      (exit p :done)
       (assert= (ex-down-reason p m) :done)))
 
   (test "exit of an already-dead pid is a harmless no-op"
@@ -52,7 +58,8 @@
       (sleep 30)
       (exit p :kill)
       (assert= (ex-down-reason p m) :kill)
-      (exit p :kill)  ; already dead — must not error or hang
+      ; already dead — must not error or hang
+      (exit p :kill)
       (is true))))
 
 (describe "exit reaches a native-nested receive (the worker-block path)"
@@ -89,6 +96,7 @@
   :isolated
   (test "mass kill: spawn 100 parked processes, exit all, collect every :down"
     (let (n 100 ps (ex-spawn-parked n nil))
-      (sleep 50)  ; let them all park
+      ; let them all park
+      (sleep 50)
       (ex-kill-all ps)
       (assert= (ex-collect-downs n) :all-down))))

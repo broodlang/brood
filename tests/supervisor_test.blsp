@@ -18,7 +18,8 @@
 (defn watched-spec (to restart)
   {:id :w
    :restart restart
-   :start (fn () (spawn-link (do (send to [:up (self)]) (receive (:die (error "boom")) (:done :ok)))))})
+   :start (fn ()
+            (spawn-link (do (send to [:up (self)]) (receive (:die (error "boom")) (:done :ok)))))})
 
 ;; Like `watched-spec` but tags its announcement `[:up tag (self)]`, so a test
 ;; supervising several children can tell their incarnations apart.
@@ -73,10 +74,12 @@
           sup (start-supervisor (list (tagged-spec me :perm-r :permanent))
                 {:max-restarts 5 :max-seconds 5})
           p1 (receive ([:up :perm-r p] p)))
-      (send p1 :die)  ; crash the first incarnation
+      ; crash the first incarnation
+      (send p1 :die)
       (let (p2 (receive ([:up :perm-r p] p)))
         ; the restart announces itself
-        (is (not (= p1 p2)))  ; genuinely a new process
+        ; genuinely a new process
+        (is (not (= p1 p2)))
         (stop-supervisor sup))))
 
   (test "a transient child IS restarted after an abnormal exit"
@@ -92,7 +95,8 @@
     (let (me (self)
           sup (start-supervisor (list (tagged-spec me :tr-norm :transient)))
           p1 (receive ([:up :tr-norm p] p)))
-      (send p1 :done)  ; returns normally
+      ; returns normally
+      (send p1 :done)
       (assert= :none (receive ([:up :tr-norm _] :restarted) (after 150 :none)))
       (stop-supervisor sup)))
 
@@ -113,11 +117,13 @@
                                   (tagged-spec me :b :permanent))
                 {:strategy :one-for-all :max-restarts 5 :max-seconds 5})
           gen1 (collect-ups 2 {}))
-      (send (get gen1 :a) :die)  ; crash a → kills + restarts both
+      ; crash a → kills + restarts both
+      (send (get gen1 :a) :die)
       (let (gen2 (collect-ups 2 {}))
         ; both announce fresh incarnations
         (is (not (= (get gen1 :a) (get gen2 :a))))
-        (is (not (= (get gen1 :b) (get gen2 :b))))  ; the healthy sibling restarted too
+        ; the healthy sibling restarted too
+        (is (not (= (get gen1 :b) (get gen2 :b))))
         (stop-supervisor sup))))
 
   (test "a :temporary sibling is terminated but not revived"
@@ -147,13 +153,16 @@
                                   (tagged-spec me :c :permanent))
                 {:strategy :rest-for-one})
           gen1 (collect-ups 3 {}))
-      (send (get gen1 :b) :die)  ; crash b → restart b and c, leave a
+      ; crash b → restart b and c, leave a
+      (send (get gen1 :b) :die)
       (let (gen2 (collect-ups 2 {}))
         ; exactly two restarts announce
         (is (not (= (get gen1 :b) (get gen2 :b))))
         (is (not (= (get gen1 :c) (get gen2 :c))))
-        (is (nil? (get gen2 :a)))  ; a was not restarted…
-        (assert= :none (receive ([:up _ _] :more) (after 150 :none)))  ; …and nothing else did
+        ; a was not restarted…
+        (is (nil? (get gen2 :a)))
+        ; …and nothing else did
+        (assert= :none (receive ([:up _ _] :more) (after 150 :none)))
         (stop-supervisor sup)))))
 
 (describe "supervisor: restart intensity"
@@ -170,8 +179,8 @@
                 {:max-restarts 2 :max-seconds 5})
           mref (monitor sup))
       (assert= :gaveup
-        (receive ([:down ~mref ~sup [:error _]] :gaveup)
-         )))))
+        (receive
+          ([:down ~mref ~sup [:error _]] :gaveup))))))
 
 (describe "supervisor: shutdown terminates children"
   :isolated
@@ -193,19 +202,16 @@
     ;; parent → (sub-supervisor child, :shutdown :infinity) → announcing worker.
     ;; Stopping the parent must tear the *grandchild* down too, not orphan it.
     (let (me (self)
-           subtree
-           {:id :sub
-            :restart :permanent
-            :shutdown :infinity
-            :start (fn ()
-                     (start-supervisor (list (watched-spec me :permanent))
-                       {:max-restarts 5 :max-seconds 5}))}
-           parent
-           (start-supervisor (list subtree) {:strategy :one-for-one})
-           gc
-           (receive ([:up p] p))  ; the grandchild announced itself
-           gm
-           (monitor gc))
+          subtree {:id :sub
+                   :restart :permanent
+                   :shutdown :infinity
+                   :start (fn ()
+                            (start-supervisor (list (watched-spec me :permanent))
+                              {:max-restarts 5 :max-seconds 5}))}
+          parent (start-supervisor (list subtree) {:strategy :one-for-one})
+          ; the grandchild announced itself
+          gc (receive ([:up p] p))
+          gm (monitor gc))
       (stop-supervisor parent)
       (assert= :torn-down
         (receive ([:down ~gm ~gc _] :torn-down)))))
@@ -249,12 +255,15 @@
                                                          (send me [:up (self)])
                                                          (receive (:die (error "boom"))))))}))
           p1 (receive ([:up p] p)))
-      (assert= p1 (wait-name :sup-test-svc p1 50))  ; reachable by its name
-      (send p1 :die)  ; crash it
+      ; reachable by its name
+      (assert= p1 (wait-name :sup-test-svc p1 50))
+      ; crash it
+      (send p1 :die)
       (let (p2 (receive ([:up p] p)))
         ; restarted with a fresh pid
         (is (not (= p1 p2)))
-        (assert= p2 (wait-name :sup-test-svc p2 50))  ; the name now points at the new pid
+        ; the name now points at the new pid
+        (assert= p2 (wait-name :sup-test-svc p2 50))
         (stop-supervisor sup)))))
 
 (describe "supervisor: crash teardown (link propagation, ADR-067)"
@@ -268,7 +277,8 @@
           sup (start-supervisor (list (watched-spec me :permanent)))
           w (receive ([:up p] p))
           wm (monitor w))
-      (exit sup :kill)  ; the supervisor dies abnormally
+      ; the supervisor dies abnormally
+      (exit sup :kill)
       (assert= :torn-down
         (receive ([:down ~wm ~w _] :torn-down)))))
 
@@ -286,7 +296,8 @@
           parent (start-supervisor (list subtree) {:strategy :one-for-one})
           gc (receive ([:up p] p))
           gm (monitor gc))
-      (exit parent :kill)  ; parent dies abnormally
+      ; parent dies abnormally
+      (exit parent :kill)
       (assert= :torn-down
         (receive ([:down ~gm ~gc _] :torn-down))))))
 
@@ -295,15 +306,13 @@
 
   (test "start-child adds and supervises a child at runtime"
     (let (me (self)
-           sup
-           (start-supervisor (list))  ; empty — a dynamic supervisor
-           _
-           (assert= 0 (count-children sup))
-           pid
-           (start-child sup (watched-spec me :permanent))
-           p1
-           (receive ([:up p] p)))
-      (is (= pid p1))  ; start-child returned the live pid
+          ; empty — a dynamic supervisor
+          sup (start-supervisor (list))
+          _ (assert= 0 (count-children sup))
+          pid (start-child sup (watched-spec me :permanent))
+          p1 (receive ([:up p] p)))
+      ; start-child returned the live pid
+      (is (= pid p1))
       (assert= 1 (count-children sup))
       ;; it's fully supervised: crash it, it restarts with a fresh pid
       (send p1 :die)
@@ -318,11 +327,14 @@
           pid (start-child sup (tagged-spec me :w :permanent))
           _ (receive ([:up :w _] :ok))
           wm (monitor pid))
-      (assert= :ok (terminate-child sup :w))  ; by :id
+      ; by :id
+      (assert= :ok (terminate-child sup :w))
       (assert= :down (receive ([:down ~wm ~pid _] :down)))
-      (assert= 0 (count-children sup))  ; dropped, not restarted
+      ; dropped, not restarted
+      (assert= 0 (count-children sup))
       (assert= :none (receive ([:up :w _] :restarted) (after 150 :none)))
-      (assert= :not-found (terminate-child sup :w))  ; already gone
+      ; already gone
+      (assert= :not-found (terminate-child sup :w))
       (stop-supervisor sup)))
 
   (test "restart-child replaces a child with a fresh incarnation"
@@ -332,7 +344,8 @@
           _ (receive ([:up :w _] :ok))
           p2 (restart-child sup :w))
       ; by :id
-      (receive ([:up :w _] :ok))  ; the fresh incarnation announces
+      ; the fresh incarnation announces
+      (receive ([:up :w _] :ok))
       (is (not (= p1 p2)))
       (assert= 1 (count-children sup))
       (assert= :not-found (restart-child sup :nope))
@@ -343,12 +356,10 @@
 
   (test "which-children reports a summary per live child"
     (let (me (self)
-           sup
-           (start-supervisor (list (watched-spec me :permanent)))
-           _
-           (receive ([:up _] :ok))  ; wait until the child is up
-           kids
-           (which-children sup))
+          sup (start-supervisor (list (watched-spec me :permanent)))
+          ; wait until the child is up
+          _ (receive ([:up _] :ok))
+          kids (which-children sup))
       (assert= 1 (count kids))
       (assert= :w (get (first kids) :id))
       (is (not (nil? (get (first kids) :pid))))

@@ -7,16 +7,16 @@
 
 (describe "char->int / int->char"
   (test "ASCII roundtrip"
-    (assert= 65  (char->int "A"))
-    (assert= 97  (char->int "a"))
-    (assert= 48  (char->int "0"))
+    (assert= 65 (char->int "A"))
+    (assert= 97 (char->int "a"))
+    (assert= 48 (char->int "0"))
     (assert= "A" (int->char 65))
     (assert= "a" (int->char 97)))
   (test "char->int uses first char only"
-    (assert= 72  (char->int "Hello")))
+    (assert= 72 (char->int "Hello")))
   (test "non-ASCII codepoint"
-    (assert= 233  (char->int "é"))
-    (assert= "é"  (int->char 233))))
+    (assert= 233 (char->int "é"))
+    (assert= "é" (int->char 233))))
 
 (describe "string->utf8-bytes / utf8-bytes->string"
   (test "ASCII roundtrip"
@@ -24,7 +24,8 @@
       (assert= [65 66 67] (into [] bytes))
       (assert= "ABC" (utf8-bytes->string bytes))))
   (test "multi-byte UTF-8 roundtrip"
-    (let (s "é")  ; U+00E9 = 0xC3 0xA9 in UTF-8
+    (let (s "é")
+      ; U+00E9 = 0xC3 0xA9 in UTF-8
       (assert= s (utf8-bytes->string (string->utf8-bytes s)))))
   (test "empty string"
     (assert= [] (into [] (string->utf8-bytes "")))
@@ -40,9 +41,13 @@
   (test "single null byte"
     (assert= "00" (encoding/hex-encode (int->char 0))))
   (test "all hex digits present"
-    (assert= "0a0b0c0d0e0f" (encoding/hex-encode
-      (str (int->char 10) (int->char 11) (int->char 12)
-           (int->char 13) (int->char 14) (int->char 15))))))
+    (assert= "0a0b0c0d0e0f"
+      (encoding/hex-encode (str (int->char 10)
+                             (int->char 11)
+                             (int->char 12)
+                             (int->char 13)
+                             (int->char 14)
+                             (int->char 15))))))
 
 (describe "hex-encode-upper"
   (test "uppercase output"
@@ -82,18 +87,19 @@
   (test "Hello"
     (assert= "SGVsbG8=" (encoding/base64-encode "Hello")))
   (test "uses + and / for standard alphabet"
-    (let (s (int->char 251))  ; byte 0xFB → encodes to chars needing +/
+    (let (s (int->char 251))
+      ; byte 0xFB → encodes to chars needing +/
       (is (string? (encoding/base64-encode s))))))
 
 ;; ---- base64 decode ----------------------------------------------------------
 
 (describe "base64-decode"
   (test "RFC 4648 test vectors"
-    (assert= "f"      (encoding/base64-decode "Zg=="))
-    (assert= "fo"     (encoding/base64-decode "Zm8="))
-    (assert= "foo"    (encoding/base64-decode "Zm9v"))
-    (assert= "foob"   (encoding/base64-decode "Zm9vYg=="))
-    (assert= "fooba"  (encoding/base64-decode "Zm9vYmE="))
+    (assert= "f" (encoding/base64-decode "Zg=="))
+    (assert= "fo" (encoding/base64-decode "Zm8="))
+    (assert= "foo" (encoding/base64-decode "Zm9v"))
+    (assert= "foob" (encoding/base64-decode "Zm9vYg=="))
+    (assert= "fooba" (encoding/base64-decode "Zm9vYmE="))
     (assert= "foobar" (encoding/base64-decode "Zm9vYmFy")))
   (test "empty string"
     (assert= "" (encoding/base64-decode "")))
@@ -146,9 +152,11 @@
     (assert= nil (encoding/hex-decode-bytes "zz"))))
 
 (describe "base64-encode-bytes / base64-decode-bytes"
+  ; "f"
   (test "RFC 4648 vectors over bytes"
-    (assert= "Zm9v" (encoding/base64-encode-bytes [102 111 111]))   ; "foo"
-    (assert= "Zg=="  (encoding/base64-encode-bytes [102])))          ; "f"
+    ; "foo"
+    (assert= "Zm9v" (encoding/base64-encode-bytes [102 111 111]))
+    (assert= "Zg==" (encoding/base64-encode-bytes [102])))
   (test "encodes a high byte the string path would mangle"
     ;; byte 0xFB → "+w==" using the '+' of the standard alphabet
     (assert= "+w==" (encoding/base64-encode-bytes [251])))
@@ -165,8 +173,9 @@
       (assert= all (into [] (encoding/base64-decode-bytes (encoding/base64-encode-bytes all))))))
   (test "url-safe byte round-trip"
     (let (bs [0 255 128 63 62])
-      (assert= bs (into [] (encoding/base64-url-decode-bytes
-                             (encoding/base64-url-encode-bytes bs))))))
+      (assert= bs
+        (into []
+          (encoding/base64-url-decode-bytes (encoding/base64-url-encode-bytes bs))))))
   (test "url-safe avoids + and /"
     (let (s (encoding/base64-url-encode-bytes [251 255]))
       (refute (string-contains? s "+"))

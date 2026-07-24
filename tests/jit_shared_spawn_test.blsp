@@ -20,28 +20,30 @@
 
 (defn ss-worker (me x) (send me [:r (calc x)]))
 (defn ss-fan (i k x) (if (>= i k) nil (do (spawn (ss-worker (self) x)) (ss-fan (+ i 1) k x))))
-(defn ss-collect (got k acc) (if (= got k) acc (ss-collect (+ got 1) k (receive ([:r v] (+ acc v))))))
+(defn ss-collect (got k acc)
+  (if (= got k) acc (ss-collect (+ got 1) k (receive ([:r v] (+ acc v))))))
 
 ;; v1: x^2 + 1.  500 workers > the tier threshold, so `calc` JITs and the native
 ;; code is shared across the spawned workers.
 (defn calc (x) (+ (* x x) 1))
 
-(describe "shared JIT code across spawned processes (regression)" :serial
+;; 500 * (10*10+2)
+(describe "shared JIT code across spawned processes (regression)"
+  :serial
+  ;; 500 * (10*10+1)
   (test "fan-out over a shared JIT'd fn returns the correct checksum"
     ;; NB: `(self)` is captured per worker via ss-fan's arg, so the parent collects.
     (let (me (self))
       (defn ss-fan2 (i k x) (if (>= i k) nil (do (spawn (ss-worker me x)) (ss-fan2 (+ i 1) k x))))
       (ss-fan2 0 500 10)
-      (assert= (ss-collect 0 500 0) 50500)))    ;; 500 * (10*10+1)
-
+      (assert= (ss-collect 0 500 0) 50500)))
   (test "redefining the shared fn invalidates the shared JIT code"
     ;; redefine calc -> x^2 + 2; the runtime epoch bump must drop the shared entry.
     (defn calc (x) (+ (* x x) 2))
     (let (me (self))
       (defn ss-fan3 (i k x) (if (>= i k) nil (do (spawn (ss-worker me x)) (ss-fan3 (+ i 1) k x))))
       (ss-fan3 0 500 10)
-      (assert= (ss-collect 0 500 0) 51000))))    ;; 500 * (10*10+2)
-
+      (assert= (ss-collect 0 500 0) 51000))))
 ;; The SHARED INLINED-native cache (RuntimeCode::jit_inline_cache): a *recursive*
 ;; top-level defn qualifies for the two-stage-tiering inlined upgrade, whose native
 ;; code is now shared across a runtime's processes the same way the small native is
@@ -51,13 +53,17 @@
 ;; `:isolated` — redefines a shared global.
 ;; `rr` is deliberately non-tail (it warms the JIT's inlined recursive arm, the
 ;; subject of this test) — opt out of the non-tail lint here and at the redef below.
+;; sum 1..n  -> rr(10) = 55
 (check-allow :non-tail-recursion
-  (defn rr (n) (if (< n 1) 0 (+ n (rr (- n 1))))))      ;; sum 1..n  -> rr(10) = 55
+  (defn rr (n) (if (< n 1) 0 (+ n (rr (- n 1))))))
 (defn rr-warm (i) (if (= i 0) :done (do (rr 12) (rr-warm (- i 1)))))
 (defn rr-worker (me x) (send me [:r (rr x)]))
 (defn rr-fan (me i k x) (if (>= i k) nil (do (spawn (rr-worker me x)) (rr-fan me (+ i 1) k x))))
 
-(describe "shared INLINED JIT code across spawned processes (regression)" :isolated
+;; 500 * 110
+(describe "shared INLINED JIT code across spawned processes (regression)"
+  :isolated
+  ;; 500 * 55
   (test "fan-out over a shared inlined recursive fn returns the correct checksum"
     ;; Warm rr past the tier threshold in the parent so it inlines and publishes the
     ;; inlined native to the shared cache; workers then install it (or the small native
@@ -65,8 +71,7 @@
     (rr-warm 5000)
     (let (me (self))
       (rr-fan me 0 500 10)
-      (assert= (ss-collect 0 500 0) 27500)))            ;; 500 * 55
-
+      (assert= (ss-collect 0 500 0) 27500)))
   (test "redefining the shared inlined fn invalidates the shared inline cache"
     ;; rr -> sum of 2n; the epoch bump must drop the shared INLINE entry, else the
     ;; second fan-out would still run the old inlined native and compute the old sum.
@@ -75,4 +80,4 @@
     (rr-warm 5000)
     (let (me (self))
       (rr-fan me 0 500 10)
-      (assert= (ss-collect 0 500 0) 55000))))           ;; 500 * 110
+      (assert= (ss-collect 0 500 0) 55000))))

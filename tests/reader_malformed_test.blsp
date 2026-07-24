@@ -16,13 +16,17 @@
     (assert-error (read-string "\"no end"))
     (assert-error (read-string "\"\\x\""))
     (assert-error (read-string "\"\\u{110000}\"")))
+  ; float-shaped, malformed
   (test "number-shaped tokens that don't parse are a parse error, not a silent symbol"
     ;; a token with genuine numeric intent — a digit present, every sign in a valid
     ;; position — but that doesn't parse must fail loudly; it is NOT a symbol.
-    (assert= (read-string "1e7") 10000000.0)   ; valid float still parses
-    (assert-error (read-string "1e"))          ; float-shaped, malformed
-    (assert-error (read-string "1.2.3"))       ; float-shaped, malformed
-    (assert-error (read-string "1e+")))        ; float-shaped, malformed
+    ; valid float still parses
+    (assert= (read-string "1e7") 10000000.0)
+    ; float-shaped, malformed
+    (assert-error (read-string "1e"))
+    ; float-shaped, malformed
+    (assert-error (read-string "1.2.3"))
+    (assert-error (read-string "1e+")))
   (test "dangling reader sugar"
     (assert-error (read-string "'"))
     (assert-error (read-string "`"))
@@ -53,7 +57,8 @@
     (is (symbol? (read-string "--")))
     (is (symbol? (read-string "..."))))
   (test "a misplaced sign (not leading, not after e) makes it a symbol"
-    (is (symbol? (read-string "1+")))    ; Emacs-Lisp-style name
+    ; Emacs-Lisp-style name
+    (is (symbol? (read-string "1+")))
     (is (symbol? (read-string "1-")))
     (is (symbol? (read-string "2+3")))
     (is (symbol? (read-string "--5")))
@@ -64,7 +69,8 @@
     (assert= (read-string "2+3") '2+3))
   (test "a valid number is still a number, not a symbol"
     (is (number? (read-string "-5")))
-    (is (number? (read-string "1e+5")))   ; sign after e is a real exponent
+    ; sign after e is a real exponent
+    (is (number? (read-string "1e+5")))
     (is (number? (read-string ".5")))
     (is (number? (read-string "-.5")))))
 
@@ -72,16 +78,25 @@
   ;; `(symbol s)` / `(keyword s)` can intern any spelling; `pr-str` bar-quotes the
   ;; ones that aren't a clean token so `(read-string (pr-str x))` recovers `x`.
   (defn rt (v) (assert= v (read-string (pr-str v))))
+  ; contains a backslash
   (test "symbols with awkward spellings round-trip"
-    (rt (symbol "a b"))         ; whitespace
-    (rt (symbol "a)b"))         ; a delimiter
-    (rt (symbol ""))            ; empty
-    (rt (symbol "123"))         ; would read as a number
-    (rt (symbol "nil"))         ; would read as nil
-    (rt (symbol ":foo"))        ; would read as a keyword
-    (rt (symbol "."))           ; the dotted-pair separator
-    (rt (symbol "a|b"))         ; contains the bar
-    (rt (symbol "a\\b")))       ; contains a backslash
+    ; whitespace
+    (rt (symbol "a b"))
+    ; a delimiter
+    (rt (symbol "a)b"))
+    ; empty
+    (rt (symbol ""))
+    ; would read as a number
+    (rt (symbol "123"))
+    ; would read as nil
+    (rt (symbol "nil"))
+    ; would read as a keyword
+    (rt (symbol ":foo"))
+    ; the dotted-pair separator
+    (rt (symbol "."))
+    ; contains the bar
+    (rt (symbol "a|b"))
+    (rt (symbol "a\\b")))
   (test "keywords with awkward spellings round-trip"
     (rt (keyword ""))
     (rt (keyword "a b"))
@@ -95,11 +110,13 @@
     (is (keyword? (read-string ":|a b|"))))
   (test "an unterminated bar is a clean parse error, not a crash"
     (assert-error (read-string "|no end")))
+  ; a numeric keyword name is fine bare
   (test "clean names still print WITHOUT bars (no needless escaping)"
     (assert= (pr-str 'hello) "hello")
     (assert= (pr-str :my-key) ":my-key")
-    (assert= (pr-str (symbol "1+")) "1+")   ; a valid symbol token
-    (assert= (pr-str (keyword "123")) ":123"))  ; a numeric keyword name is fine bare
+    ; a valid symbol token
+    (assert= (pr-str (symbol "1+")) "1+")
+    (assert= (pr-str (keyword "123")) ":123"))
   (test "display (non-readable) prints the raw name, no bars"
     (assert= (str (symbol "a b")) "a b")
     (assert= (str (keyword "a b")) ":a b")))

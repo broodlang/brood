@@ -166,8 +166,11 @@ docs/testing.md for the full guide.")
 (defmacro describe (group & forms)
   "Register a group of tests: `(describe \"name\" [:serial | :isolated] body...)`. Tests run in parallel by default; `:serial` runs them sequentially in one process, `:isolated` each against a private copy of the globals."
   (if (keyword? group)
-    (error "describe: group name must be a string, not keyword " (pr-str group)
-           " — did you mean (describe \"" (pr-str group) "\" ...) or did you accidentally omit the group name?")
+    (error "describe: group name must be a string, not keyword "
+      (pr-str group)
+      " — did you mean (describe \""
+      (pr-str group)
+      "\" ...) or did you accidentally omit the group name?")
     (let (mode (cond
                  (= (first forms) :isolated) :isolated
                  (= (first forms) :serial) :serial
@@ -273,7 +276,8 @@ docs/testing.md for the full guide.")
 ;; catches edge cases a single hand-written example misses.
 (defn check-property--loop (n gen pred loc seed i)
   (if (>= i n)
-    nil  ; all trials held
+    ; all trials held
+    nil
     (let ([val nxt] (gen seed))
       (if (pred val)
         (check-property--loop n gen pred loc nxt (inc i))
@@ -317,11 +321,9 @@ docs/testing.md for the full guide.")
 ;; A "N.N MB" formatter for the memory line (`quot` is the prelude's).
 (defn mb-str (bytes)
   (let (tenths (quot (+ (* bytes 10) 524288) 1048576)
-         ; round to nearest 0.1 MB
-         whole
-         (quot tenths 10)
-         frac
-         (rem tenths 10))
+        ; round to nearest 0.1 MB
+        whole (quot tenths 10)
+        frac (rem tenths 10))
     (str whole "." frac " MB")))
 
 ;; --- results -----------------------------------------------------------------
@@ -504,44 +506,46 @@ docs/testing.md for the full guide.")
     (let (msg (receive (m m) (after (max 0 (- deadline (now))) :%test-timeout)))
       (cond
         ;; budget spent — kill + fail the stragglers
-        (= msg :%test-timeout)
-        (collect-timeout workers reported acc)
+        (= msg :%test-timeout) (collect-timeout workers reported acc)
 
         ;; [:unit-result pid results]
-        (= (first msg) :unit-result)
-        (let (pid (second msg))
-          ;; Ignore a result from a pid that isn't one of THIS batch's workers, or
-          ;; one already counted — a late message from a timed-out/killed worker of a
-          ;; prior step must not corrupt this step's `pending` count.
-          (if (or (member? pid reported) (nil? (unit-of-pid pid workers)))
-            (collect-loop pending workers reported acc deadline)
-            (collect-loop (- pending 1)
-              workers
-              (cons pid reported)
-              (append (third msg) acc)
-              deadline)))
+        (= (first msg) :unit-result) (let (pid (second msg))
+                                       ;; Ignore a result from a pid that isn't one of THIS batch's workers, or
+                                       ;; one already counted — a late message from a timed-out/killed worker of a
+                                       ;; prior step must not corrupt this step's `pending` count.
+                                       (if (or (member? pid reported)
+                                             (nil? (unit-of-pid pid workers)))
+                                         (collect-loop pending workers reported acc deadline)
+                                         (collect-loop (- pending 1)
+                                           workers
+                                           (cons pid reported)
+                                           (append (third msg) acc)
+                                           deadline)))
 
         ;; [:down mref pid reason]
-        (= (first msg) :down)
-        (let (pid (third msg)
-              unit (unit-of-pid pid workers))
-          (cond
-            (member? pid reported) (collect-loop pending workers reported acc deadline)
-            (nil? unit) (collect-loop pending workers reported acc deadline)
-            else (collect-loop (- pending 1)
-                   workers
-                   reported
-                   (append (dead-unit-results unit (nth msg 3)) acc)
-                   deadline)))
+        (= (first msg) :down) (let (pid (third msg)
+                                    unit (unit-of-pid pid workers))
+                                (cond
+                                  (member? pid reported) (collect-loop pending
+                                                           workers
+                                                           reported
+                                                           acc
+                                                           deadline)
+                                  (nil? unit) (collect-loop pending workers reported acc deadline)
+                                  else (collect-loop (- pending 1)
+                                         workers
+                                         reported
+                                         (append (dead-unit-results unit (nth msg 3)) acc)
+                                         deadline)))
 
         ;; Anything else in the runner's mailbox isn't ours — skip it.
         else (collect-loop pending workers reported acc deadline)))))
 
 ;; Run a whole unit with each test under `%isolate` (global-def rollback). This
 ;; is what an isolated unit's *own* worker process evaluates.
+; -> results
 (defn run-unit-fresh (unit)
-  (let (group (second unit)) (map (fn (t) (run-test-fresh group t)) (third unit))))  ; -> results
-
+  (let (group (second unit)) (map (fn (t) (run-test-fresh group t)) (third unit))))
 ;; ─── The test runner ────────────────────────────────────────────────────────
 ;; The runner is one long-lived process gathering every step's results. Its
 ;; per-step transients — worker-result copies, the `append` spine, spawn/monitor
@@ -643,7 +647,8 @@ docs/testing.md for the full guide.")
   ;; 100K-file suite quadratic. `cons` + one flatten keeps it linear.)
   (let (chunks (fold (fn (acc loader)
                        (cons (%isolate (fn () (reset-units!) (loader) (drain-current))) acc))
-                 nil loaders))
+                 nil
+                 loaders))
     ;; `chunks` is reverse run order; fold back to run order with `append-two`, which copies
     ;; only its FIRST arg (the small per-file result list) and SHARES the accumulator tail —
     ;; O(total). NB: the variadic `append` copies BOTH args, so `(append c acc)` here would be
@@ -696,21 +701,20 @@ docs/testing.md for the full guide.")
         failed (count-failed results)
         fails (count-failures results))
     {:total total
-      :passed (- total failed)
-      :failed failed
-      :failed-assertions fails
-      :ms elapsed
-      :results
-      (or (map (fn (r)
-                 {:group (r-group r)
-                  :name (r-name r)
-                  :passed (not (r-failed? r))
-                  :ms (r-ms r)
-                  :failures (or (map (fn (f) {:loc (first f) :details (second f)})
-                                  (r-fails r))
-                              [])})
-            results)
-        [])}))
+     :passed (- total failed)
+     :failed failed
+     :failed-assertions fails
+     :ms elapsed
+     :results (or (map (fn (r)
+                         {:group (r-group r)
+                          :name (r-name r)
+                          :passed (not (r-failed? r))
+                          :ms (r-ms r)
+                          :failures (or (map (fn (f) {:loc (first f) :details (second f)})
+                                          (r-fails r))
+                                      [])})
+                    results)
+                [])}))
 ;; ────────────────────────────────────────────────────────────────────────────
 
 ;; --- reporting ---------------------------------------------------------------
@@ -790,13 +794,10 @@ docs/testing.md for the full guide.")
   (def *test-slow-ms* (opt-val :slow-over opts *test-slow-ms*))
   (def *test-trace* (opt? :trace opts))
   (let (units (reverse *units*)
-         par
-         (filter (fn (u) (not= (first u) :isolated)) units)
-         ; parallel + serial
-         iso
-         (filter (fn (u) (= (first u) :isolated)) units)
-         start
-         (now))
+        par (filter (fn (u) (not= (first u) :isolated)) units)
+        ; parallel + serial
+        iso (filter (fn (u) (= (first u) :isolated)) units)
+        start (now))
     ;; All result-gathering runs in the hibernating driver (isolated units first
     ;; and serially, then the parallel groups), so the runner's per-step transients
     ;; are reclaimed between steps. See the Stage-A block above.
@@ -839,26 +840,21 @@ docs/testing.md for the full guide.")
           failed (count-failed results)
           fails (count-failures results))
       {:total total
-        :passed
-        (- total failed)
-        :failed
-        failed
-        :failed-assertions
-        fails
-        :ms
-        elapsed
-        ;; `(or … [])` on every list field so empty results render as JSON
-        ;; `[]` rather than `null`. Matters when the suite has zero tests, or
-        ;; a passing test has zero failures — agents branch on `length`, not
-        ;; `(= null)`.
-        :results
-        (or (map (fn (r)
-                   {:group (r-group r)
-                    :name (r-name r)
-                    :passed (not (r-failed? r))
-                    :ms (r-ms r)
-                    :failures (or (map (fn (f) {:loc (first f) :details (second f)})
-                                    (r-fails r))
-                                [])})
-              results)
-          [])})))
+       :passed (- total failed)
+       :failed failed
+       :failed-assertions fails
+       :ms elapsed
+       ;; `(or … [])` on every list field so empty results render as JSON
+       ;; `[]` rather than `null`. Matters when the suite has zero tests, or
+       ;; a passing test has zero failures — agents branch on `length`, not
+       ;; `(= null)`.
+       :results (or (map (fn (r)
+                           {:group (r-group r)
+                            :name (r-name r)
+                            :passed (not (r-failed? r))
+                            :ms (r-ms r)
+                            :failures (or (map (fn (f) {:loc (first f) :details (second f)})
+                                            (r-fails r))
+                                        [])})
+                      results)
+                  [])})))

@@ -8,79 +8,109 @@
 
 (describe "numbers: i64 edges + bigint promotion"
   (test "overflow promotes to bigint, exactly"
-    (do (assert= (+ 9223372036854775807 1) 9223372036854775808)
+    (do
+      (assert= (+ 9223372036854775807 1) 9223372036854775808)
       (assert= (* 9223372036854775807 2) 18446744073709551614)
       (assert= (- (- 9223372036854775807) 2) -9223372036854775809)
       true))
   (test "bigint round-trips through arithmetic"
     (let (big (* 9223372036854775807 9223372036854775807))
-      (do (assert= (quot big 9223372036854775807) 9223372036854775807)
+      (do
+        (assert= (quot big 9223372036854775807) 9223372036854775807)
         (assert= (rem big 9223372036854775807) 0)
         (assert= (- big big) 0)
         true)))
   (test "quot/rem truncate toward zero (C semantics)"
-    (do (assert= (quot -7 2) -3) (assert= (quot 7 -2) -3)
-      (assert= (rem -7 2) -1) (assert= (rem 7 -2) 1)
-      (assert= (quot -9 3) -3) (assert= (rem -9 3) 0)
+    (do
+      (assert= (quot -7 2) -3)
+      (assert= (quot 7 -2) -3)
+      (assert= (rem -7 2) -1)
+      (assert= (rem 7 -2) 1)
+      (assert= (quot -9 3) -3)
+      (assert= (rem -9 3) 0)
       true))
   (test "/ is exact on exact division, float otherwise"
-    (do (assert= (/ 6 2) 3) (assert= (/ 7 2) 3.5) (assert= (/ -7 2) -3.5)
+    (do
+      (assert= (/ 6 2) 3)
+      (assert= (/ 7 2) 3.5)
+      (assert= (/ -7 2) -3.5)
       true))
   (test "division by zero errors, never wraps or NaNs (int)"
-    (do (assert= (try (/ 1 0) (catch e :err)) :err)
+    (do
+      (assert= (try (/ 1 0) (catch e :err)) :err)
       (assert= (try (quot 1 0) (catch e :err)) :err)
       (assert= (try (rem 1 0) (catch e :err)) :err)
       true))
   (test "no numeric coercion in = (ints and floats are distinct)"
-    (do (assert= (= 1 1.0) false) (assert= (= 0 0.0) false)
-      (assert= (< 1 1.5) true) (assert= (< 1.5 2) true)   ; ordering DOES compare across
+    (do
+      (assert= (= 1 1.0) false)
+      (assert= (= 0 0.0) false)
+      (assert= (< 1 1.5) true)
+      ; ordering DOES compare across
+      (assert= (< 1.5 2) true)
       true))
   (test "float identities"
-    (do (assert= (= 0.0 -0.0) true)
-      (assert= (+ 0.1 0.2) 0.30000000000000004)            ; IEEE, not decimal
+    (do
+      (assert= (= 0.0 -0.0) true)
+      ; IEEE, not decimal
+      (assert= (+ 0.1 0.2) 0.30000000000000004)
       (assert= (sqrt 2.0) 1.4142135623730951)
       (assert= (pow 2 62) 4611686018427387904)
       true))
   (test "min/max/abs/inc/dec edges"
-    (do (assert= (max 1 2) 2) (assert= (min -1 -2) -2)
+    (do
+      (assert= (max 1 2) 2)
+      (assert= (min -1 -2) -2)
       (assert= (abs -9223372036854775807) 9223372036854775807)
       (assert= (inc 9223372036854775807) 9223372036854775808)
       true)))
 
 (describe "equality: structural, deep, type-strict"
   (test "deep structural equality"
-    (do (assert= (= [1 [2 {:a (list 3)}]] [1 [2 {:a (list 3)}]]) true)
-      (assert= (= {:a 1 :b 2} {:b 2 :a 1}) true)           ; maps unordered
+    (do
+      (assert= (= [1 [2 {:a (list 3)}]] [1 [2 {:a (list 3)}]]) true)
+      ; maps unordered
+      (assert= (= {:a 1 :b 2} {:b 2 :a 1}) true)
       (assert= (= "abc" "abc") true)
       true))
   (test "lists and vectors are distinct types"
-    (do (assert= (= '(1 2) [1 2]) false)
-      (assert= (= () nil) true)                            ; empty list IS nil
+    (do
+      (assert= (= '(1 2) [1 2]) false)
+      ; empty list IS nil
+      (assert= (= () nil) true)
       true))
   (test "keywords/symbols never equal other types"
-    (do (assert= (= :a 'a) false) (assert= (= :a "a") false)
+    (do
+      (assert= (= :a 'a) false)
+      (assert= (= :a "a") false)
       (assert= (= :a :a) true)
       true)))
 
 (describe "strings: char-indexed, unicode-aware"
   (test "length and indexing count CHARS, not bytes"
-    (do (assert= (string-length "hé€") 3)
-      (assert= (char-at "hé€" 1) "é") (assert= (char-at "hé€" 2) "€")
+    (do
+      (assert= (string-length "hé€") 3)
+      (assert= (char-at "hé€" 1) "é")
+      (assert= (char-at "hé€" 2) "€")
       (assert= (substring "hé€xyz" 1 4) "é€x")
       true))
   (test "split/join round-trip"
-    (do (assert= (join "," (string-split "a,b,,c" ",")) "a,b,,c")
+    (do
+      (assert= (join "," (string-split "a,b,,c" ",")) "a,b,,c")
       (assert= (string-split "aXbXc" "X") (list "a" "b" "c"))
       true))
   (test "case, trim, predicates"
-    (do (assert= (upper "abÉ") "ABÉ") (assert= (lower "ABÉ") "abé")
+    (do
+      (assert= (upper "abÉ") "ABÉ")
+      (assert= (lower "ABÉ") "abé")
       (assert= (trim "  x  ") "x")
       (assert= (starts-with? "hé€" "hé") true)
       (assert= (ends-with? "hé€" "€") true)
       (assert= (string-contains? "hé€" "é") true)
       true))
   (test "number<->string round trips"
-    (do (assert= (string->number "9223372036854775807") 9223372036854775807)
+    (do
+      (assert= (string->number "9223372036854775807") 9223372036854775807)
       (assert= (string->number "-3.5") -3.5)
       (assert= (number->string 255) "255")
       (assert= (string->number (number->string 0.1)) 0.1)
@@ -98,8 +128,11 @@
 (describe "closures + scoping"
   (test "closures capture bindings, not values-by-copy of outer rebinding"
     (let (mk (fn (n) (fn (x) (+ x n)))
-          add5 (mk 5) add7 (mk 7))
-      (do (assert= (add5 10) 15) (assert= (add7 10) 17)
+          add5 (mk 5)
+          add7 (mk 7))
+      (do
+        (assert= (add5 10) 15)
+        (assert= (add7 10) 17)
         (assert= (add5 (add7 0)) 12)
         true)))
   (test "let bindings are sequential (let*)"

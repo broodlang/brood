@@ -8,7 +8,12 @@
 ;; `process-info` primitive + `observer/observe--snapshot` against a live runtime, proving
 ;; the kernel introspection works under the scheduler.
 
-(defmodule observer-test (:use-internals observer) (:use test) (:use observer) (:use editor/display) (:use editor/keymap))
+(defmodule observer-test
+  (:use-internals observer)
+  (:use test)
+  (:use observer)
+  (:use editor/display)
+  (:use editor/keymap))
 
 (describe "display render-op constructors"
   (test "clear / text / cursor build tagged op vectors"
@@ -47,10 +52,13 @@
       (is (string-contains? r "worker"))
       (is (string-contains? r "waiting"))
       (is (string-contains? r "8 KB"))
-      (is (string-contains? r "240000"))  ; the cumulative reductions column
-      (is (string-contains? r "1200"))  ; the reductions/second rate column
+      ; the cumulative reductions column
+      (is (string-contains? r "240000"))
+      ; the reductions/second rate column
+      (is (string-contains? r "1200"))
       ;; 5 + 12 + 8 + 6 + 8 + 9 + 8 + 4 columns + 7 single-space gaps
       (assert= (string-length r) 67)))
+  ; nil name / absent memory
   (test "observer/observe--proc-cells renders a process-info map (absent fields → dash)"
     (let (r (observer/observe--proc-cells {:id 2
                                            :name nil
@@ -58,45 +66,64 @@
                                            :mailbox 4
                                            :monitored-by 1}))
       (is (string-contains? r "waiting"))
-      (is (string-contains? r "-"))))  ; nil name / absent memory
+      (is (string-contains? r "-"))))
+  ; clamped to maxstart = 10-5
   (test "observer/observe--window-start keeps the selection on screen, clamped"
-    (assert= (observer/observe--window-start 0 5 10) 0)  ; top
-    (assert= (observer/observe--window-start 5 5 10) 3)  ; centred (5 - 5/2)
-    (assert= (observer/observe--window-start 9 5 10) 5))  ; clamped to maxstart = 10-5
+    ; top
+    (assert= (observer/observe--window-start 0 5 10) 0)
+    ; centred (5 - 5/2)
+    (assert= (observer/observe--window-start 5 5 10) 3)
+    (assert= (observer/observe--window-start 9 5 10) 5))
+  ; empty → 0
   (test "observer/observe--sel-index follows a pid id across the list, recovers if gone"
     (let (ps [{:id 1} {:id 2} {:id 3}])
       (assert= (observer/observe--sel-index ps 2) 1)
-      (assert= (observer/observe--sel-index ps 99) 0)  ; missing → 0
-      (assert= (observer/observe--sel-index [] 2) 0)))  ; empty → 0
+      ; missing → 0
+      (assert= (observer/observe--sel-index ps 99) 0)
+      (assert= (observer/observe--sel-index [] 2) 0)))
+  ; rate 99,50,0
   (test "observer/observe--sort orders by id (asc) / mailbox / memory / reds (desc)"
     ;; The four keys are deliberately *misaligned* (no two rankings coincide,
     ;; and none matches id order) so a bug that sorts on the wrong field can't
     ;; pass; the input is also pre-scrambled so the id sort genuinely reorders.
-    (let (ps [{:id 2 :mailbox 9 :memory 10 :reds-rate 50} {:id 3 :mailbox 1 :memory 30 :reds-rate 99}
+    (let (ps [{:id 2 :mailbox 9 :memory 10 :reds-rate 50} {:id 3
+                                                           :mailbox 1
+                                                           :memory 30
+                                                           :reds-rate 99}
                {:id 1 :mailbox 5 :memory 20 :reds-rate 0}])
       (assert= (map (fn (p) (get p :id)) (observer/observe--sort ps :id)) '(1 2 3))
-      (assert= (map (fn (p) (get p :id)) (observer/observe--sort ps :mailbox)) '(2 1 3))  ; mbox 9,5,1
-      (assert= (map (fn (p) (get p :id)) (observer/observe--sort ps :memory)) '(3 1 2))  ; mem 30,20,10
-      (assert= (map (fn (p) (get p :id)) (observer/observe--sort ps :reds)) '(3 2 1))))  ; rate 99,50,0
+      ; mbox 9,5,1
+      (assert= (map (fn (p) (get p :id)) (observer/observe--sort ps :mailbox)) '(2 1 3))
+      ; mem 30,20,10
+      (assert= (map (fn (p) (get p :id)) (observer/observe--sort ps :memory)) '(3 1 2))
+      (assert= (map (fn (p) (get p :id)) (observer/observe--sort ps :reds)) '(3 2 1))))
   (test "observer/observe--next-sort cycles id → mailbox → memory → reds → tree → id"
     (assert= (observer/observe--next-sort :id) :mailbox)
     (assert= (observer/observe--next-sort :mailbox) :memory)
     (assert= (observer/observe--next-sort :memory) :reds)
     (assert= (observer/observe--next-sort :reds) :tree)
     (assert= (observer/observe--next-sort :tree) :id))
+  ; recycled id (negative) clamps to 0
   (test "observer/observe--reds-rate is dreds/sec, nil without a prior sample or elapsed time"
-    (assert= (observer/observe--reds-rate 1000 0 3000 1000) 2000)  ; +2000 reds over 1s
-    (assert= (observer/observe--reds-rate 1000 0 1500 2000) 250)  ; +500 over 2s
-    (assert= (observer/observe--reds-rate nil 0 3000 1000) nil)  ; no prior sample
-    (assert= (observer/observe--reds-rate 1000 1000 3000 1000) nil)  ; no time elapsed
-    (assert= (observer/observe--reds-rate 5000 0 1000 1000) 0))  ; recycled id (negative) clamps to 0
+    ; +2000 reds over 1s
+    (assert= (observer/observe--reds-rate 1000 0 3000 1000) 2000)
+    ; +500 over 2s
+    (assert= (observer/observe--reds-rate 1000 0 1500 2000) 250)
+    ; no prior sample
+    (assert= (observer/observe--reds-rate nil 0 3000 1000) nil)
+    ; no time elapsed
+    (assert= (observer/observe--reds-rate 1000 1000 3000 1000) nil)
+    (assert= (observer/observe--reds-rate 5000 0 1000 1000) 0))
+  ; id 3: new this tick, no prior
   (test "observer/observe--rate-procs tags each proc with :reds-rate from the prior snapshot"
     (let (prev [{:id 1 :reductions 1000} {:id 2 :reductions 500}]
           cur [{:id 1 :reductions 3000} {:id 2 :reductions 500} {:id 3 :reductions 9}]
           rated (observer/observe--rate-procs prev 0 cur 1000))
-      (assert= (get (nth rated 0) :reds-rate) 2000)  ; id 1: +2000 over 1s
-      (assert= (get (nth rated 1) :reds-rate) 0)  ; id 2: idle
-      (assert= (get (nth rated 2) :reds-rate) nil)))  ; id 3: new this tick, no prior
+      ; id 1: +2000 over 1s
+      (assert= (get (nth rated 0) :reds-rate) 2000)
+      ; id 2: idle
+      (assert= (get (nth rated 1) :reds-rate) 0)
+      (assert= (get (nth rated 2) :reds-rate) nil)))
   (test "observer/observe--tree-order builds a parent→child forest with depths"
     (let (ps [{:id 1 :parent nil} {:id 4 :parent 2}
                {:id 2 :parent 1}
@@ -133,7 +160,8 @@
     (assert= (get (observer/observe--apply-result {:link :ok} {:node {} :procs [1]}) :last)
       {:node {} :procs [1]})
     (assert= (get (observer/observe--apply-result {:link :ok :last :L} :timeout) :link) :stale)
-    (assert= (get (observer/observe--apply-result {:link :ok :last :L} :timeout) :last) :L)  ; kept
+    ; kept
+    (assert= (get (observer/observe--apply-result {:link :ok :last :L} :timeout) :last) :L)
     (assert= (get (observer/observe--apply-result {:link :ok :last :L} :down) :link) :down)
     ;; :down is sticky — a later good snapshot does NOT revive it
     (assert= (get (observer/observe--apply-result {:link :down :last :L} {:node {} :procs []})
@@ -151,13 +179,18 @@
     (is (not (observer/observe--mouse? "a")))
     (is (not (observer/observe--mouse? :up)))
     (is (not (observer/observe--mouse? nil))))
+  ; off screen entirely
   (test "observer/observe--mouse-row->sel maps a body row to a process index, else nil"
     ;; body rows start at 3; cap=10, n=5, sel=2 → window starts at 0
-    (assert= (observer/observe--mouse-row->sel 3 2 10 5) 0)  ; first body row
-    (assert= (observer/observe--mouse-row->sel 7 2 10 5) 4)  ; fifth (last) process
-    (assert= (observer/observe--mouse-row->sel 2 2 10 5) nil)  ; the header row above the list
-    (assert= (observer/observe--mouse-row->sel 8 2 10 5) nil)  ; below the 5 processes
-    (assert= (observer/observe--mouse-row->sel 99 2 10 5) nil))  ; off screen entirely
+    ; first body row
+    (assert= (observer/observe--mouse-row->sel 3 2 10 5) 0)
+    ; fifth (last) process
+    (assert= (observer/observe--mouse-row->sel 7 2 10 5) 4)
+    ; the header row above the list
+    (assert= (observer/observe--mouse-row->sel 2 2 10 5) nil)
+    ; below the 5 processes
+    (assert= (observer/observe--mouse-row->sel 8 2 10 5) nil)
+    (assert= (observer/observe--mouse-row->sel 99 2 10 5) nil))
   (test "observer/observe--mouse-row->sel accounts for a scrolled window"
     ;; n=20, cap=5, sel=10 → window-start = 8, so the top body row is index 8
     (assert= (observer/observe--window-start 10 5 20) 8)
@@ -242,15 +275,15 @@
 
   (test "selected row is reverse-highlighted; others get a status face"
     (let (procs [(pinfo 1 :a :running 0 0) (pinfo 2 :b :waiting 0 0)]
-           f
-           (observe-frame sample-node procs 1 60 12 false :id :ok nil)
-           row0
-           (nth f 4)  ; index 0, not selected, :running
-           row1
-           (nth f 5))
+          f (observe-frame sample-node procs 1 60 12 false :id :ok nil)
+          ; index 0, not selected, :running
+          row0 (nth f 4)
+          row1 (nth f 5))
       ; index 1, selected
-      (assert= (nth row0 4) {:fg :green})  ; running → green
-      (assert= (nth row1 4) {:reverse true})  ; selected → reverse
+      ; running → green
+      (assert= (nth row0 4) {:fg :green})
+      ; selected → reverse
+      (assert= (nth row1 4) {:reverse true})
       (is (string-contains? (nth row1 3) "▸"))))
 
   (test "detail line names the selection; footer shows sort + paused state"
@@ -285,26 +318,24 @@
   (test "command-mode minibuffer syntax-highlights the input (shared with the REPL)"
     ;; the input is coloured by the same `highlight-chunks` the REPL line editor uses
     (let (edit (assoc (editor/lineedit/lineedit-init "λ " "" []) :text "(+ 1 2)" :point 7)
-           f
-           (observe-frame sample-node
-             [(pinfo 1 :a :running 0 0)]
-             0
-             60
-             12
-             false
-             :id
-             :ok
-             {:mode :command :edit edit :msg nil})
-           ;; text ops on the minibuffer row (rows-1 = 11) carrying an :fg face — the
-           ;; coloured tokens (e.g. the numbers / the operator)
-           coloured
-           (filter (fn (op)
-                     (and (= (first op) :text)
-                       (= (nth op 1) 11)
-                       (>= (count op) 5)
-                       (map? (nth op 4))
-                       (contains? (nth op 4) :fg)))
-             f))
+          f (observe-frame sample-node
+              [(pinfo 1 :a :running 0 0)]
+              0
+              60
+              12
+              false
+              :id
+              :ok
+              {:mode :command :edit edit :msg nil})
+          ;; text ops on the minibuffer row (rows-1 = 11) carrying an :fg face — the
+          ;; coloured tokens (e.g. the numbers / the operator)
+          coloured (filter (fn (op)
+                             (and (= (first op) :text)
+                               (= (nth op 1) 11)
+                               (>= (count op) 5)
+                               (map? (nth op 4))
+                               (contains? (nth op 4) :fg)))
+                     f))
       (is (> (count coloured) 0))))
   (test "a :msg replaces the detail line"
     (let (f (observe-frame sample-node
@@ -318,6 +349,7 @@
               {:msg "=> 42"}))
       (is (string-contains? (nth (nth f (- (count f) 2)) 3) "=> 42")))))
 
+; cancel too
 (describe "observer keymap + eval minibuffer (shared with the REPL)"
   (test "*observe-keymap* dispatches nav keys to commands"
     (let (s {:sel-id nil :sort :id :paused false :procs [] :sel 0 :n 0})
@@ -333,26 +365,29 @@
     (is (string-contains? (observer/observe--eval-string "(nope)") "error")))
   (test "observer/observe--command-key edits, then submit evals, cancel returns to nav"
     (let (s (observe-cmd-command {:sort :id} nil)
-           ; enter command mode
-           back
-           {:eval observer/observe--eval-string}
-           typed
-           (observer/observe--command-key s back "x")  ; insert a char → still editing
-           submitted
-           (observer/observe--command-key (assoc s :edit (editor/lineedit/lineedit-init "λ " "" []))
-             back
-             :enter))
+          ; enter command mode
+          back {:eval observer/observe--eval-string}
+          ; insert a char → still editing
+          typed (observer/observe--command-key s back "x")
+          submitted (observer/observe--command-key (assoc s
+                                                     :edit (editor/lineedit/lineedit-init "λ "
+                                                             ""
+                                                             []))
+                      back
+                      :enter))
       ; empty submit
       (assert= (get typed :mode) :command)
       (assert= (get (get typed :edit) :text) "x")
-      (assert= (get submitted :mode) :nav)  ; submit leaves command mode
-      (assert= (get (observer/observe--command-key s back :ctrl-c) :mode) :nav))))  ; cancel too
-
+      ; submit leaves command mode
+      (assert= (get submitted :mode) :nav)
+      (assert= (get (observer/observe--command-key s back :ctrl-c) :mode) :nav))))
+; :observer/confirm ← :ui/error
 (describe "observer kill / confirm / tree (pure)"
+  ; any non-tree → tree
   (test "observe-cmd-tree toggles the tree view on and off"
     (assert= (get (observe-cmd-tree {:sort :id} nil) :sort) :tree)
     (assert= (get (observe-cmd-tree {:sort :tree} nil) :sort) :id)
-    (assert= (get (observe-cmd-tree {:sort :mailbox} nil) :sort) :tree))  ; any non-tree → tree
+    (assert= (get (observe-cmd-tree {:sort :mailbox} nil) :sort) :tree))
   (test "observe-cmd-kill stashes a confirmation for the selected process"
     (let (st {:procs [{:id 10 :pid :p10 :name :a} {:id 11 :pid :p11 :name :b}] :sel 1}
           r (observe-cmd-kill st nil)
@@ -370,7 +405,8 @@
           cancelled (observer/observe--confirm-key model back "n"))
       (assert= (get killed :msg) "killed 7")
       (assert= (get killed :confirm) nil)
-      (assert= (get entered :msg) "killed 7")  ; Enter also confirms
+      ; Enter also confirms
+      (assert= (get entered :msg) "killed 7")
       (assert= (get cancelled :msg) "kill cancelled")
       (assert= (get cancelled :confirm) nil)))
   (test "observer/observe--kill-msg guards a nil pid"
@@ -397,8 +433,7 @@
               {:confirm {:id 1 :name :a}}))
       (is (string-contains? (nth (last f) 3) "kill pid 1"))
       (is (string-contains? (nth (last f) 3) "y/n"))
-      (assert= (nth (last f) 4) {:fg :red :bold true}))))  ; :observer/confirm ← :ui/error
-
+      (assert= (nth (last f) 4) {:fg :red :bold true}))))
 (describe "observer minibuffer history (shared with the REPL)"
   (test "command mode seeds the editor with session history; submit appends it"
     (let (s {:sort :id :history '("(+ 1 2)")}

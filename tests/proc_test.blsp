@@ -18,8 +18,9 @@
    (or a 3 s lull ends the stream — a corrupt reassembly then fails the ="
   (if (= acc want)
     acc
-    (receive ([:proc ~p d] (proc-test--drain p want (str acc d)))
-             (after 3000 acc))))
+    (receive
+      ([:proc ~p d] (proc-test--drain p want (str acc d)))
+      (after 3000 acc))))
 
 (describe "proc: handle + type-of"
   :isolated
@@ -65,7 +66,8 @@
   (test "a string leaf is its UTF-8 bytes even in binary mode (ADR-141)"
     (let (p (proc-spawn "cat" []))
       (proc-set-binary p true)
-      (proc-send p "π")   ; U+03C0 = 0xCF 0x80 in UTF-8
+      ; U+03C0 = 0xCF 0x80 in UTF-8
+      (proc-send p "π")
       (let (got (receive ([:proc ~p d] d) (after 5000 :timeout)))
         (assert= got (bytes 207 128))
         (proc-close p)))))
@@ -118,7 +120,8 @@
           p (proc-spawn "cat" []))
       (proc-send p payload)
       (let (got (proc-test--drain p payload ""))
-        (assert= got payload)               ; no U+FFFD anywhere
+        ; no U+FFFD anywhere
+        (assert= got payload)
         (proc-close p)))))
 
 (describe "proc: the handle crosses processes"

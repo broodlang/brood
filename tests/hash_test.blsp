@@ -6,10 +6,10 @@
 (describe "sha256"
   (test "known digest for empty string"
     (assert= "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-             (hash/sha256 "")))
+      (hash/sha256 "")))
   (test "known digest for hello"
     (assert= "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-             (hash/sha256 "hello")))
+      (hash/sha256 "hello")))
   (test "output length is 64 hex chars"
     (assert= 64 (string-length (hash/sha256 "any string"))))
   (test "deterministic"
@@ -36,15 +36,15 @@
     ;; echo -n "message" | openssl dgst -sha256 -hmac "secret"
     ;; = 8b5f48702995c1598c573db1e21866a9b825d4a794d169d7060a03605796360b
     (assert= "8b5f48702995c1598c573db1e21866a9b825d4a794d169d7060a03605796360b"
-             (hash/hmac-sha256 "secret" "message"))))
+      (hash/hmac-sha256 "secret" "message"))))
 
 (describe "md5"
   (test "known digest for empty string"
     (assert= "d41d8cd98f00b204e9800998ecf8427e"
-             (hash/md5 "")))
+      (hash/md5 "")))
   (test "known digest for hello"
     (assert= "5d41402abc4b2a76b9719d911017c592"
-             (hash/md5 "hello")))
+      (hash/md5 "hello")))
   (test "output length is 32 hex chars"
     (assert= 32 (string-length (hash/md5 "anything"))))
   (test "deterministic"
@@ -55,10 +55,10 @@
 (describe "sha1"
   (test "known digest for empty string"
     (assert= "da39a3ee5e6b4b0d3255bfef95601890afd80709"
-             (hash/sha1 "")))
+      (hash/sha1 "")))
   (test "known digest for hello"
     (assert= "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
-             (hash/sha1 "hello")))
+      (hash/sha1 "hello")))
   (test "output length is 40 hex chars"
     (assert= 40 (string-length (hash/sha1 "anything"))))
   (test "deterministic"
@@ -69,7 +69,7 @@
 (describe "sha384"
   (test "known digest for empty string"
     (assert= "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b"
-             (hash/sha384 "")))
+      (hash/sha384 "")))
   (test "output length is 96 hex chars"
     (assert= 96 (string-length (hash/sha384 "anything"))))
   (test "deterministic"
@@ -80,7 +80,7 @@
 (describe "sha512"
   (test "known digest for empty string"
     (assert= "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
-             (hash/sha512 "")))
+      (hash/sha512 "")))
   (test "output length is 128 hex chars"
     (assert= 128 (string-length (hash/sha512 "anything"))))
   (test "deterministic"
@@ -101,7 +101,7 @@
     ;; echo -n "message" | openssl dgst -sha1 -hmac "key"
     ;; = 2088df74d5f2146b48146caf4965377e9d0be3a4
     (assert= "2088df74d5f2146b48146caf4965377e9d0be3a4"
-             (hash/hmac-sha1 "key" "message"))))
+      (hash/hmac-sha1 "key" "message"))))
 
 (describe "hmac-sha512"
   (test "output is 128 hex chars"
@@ -116,7 +116,7 @@
     ;; echo -n "message" | openssl dgst -sha512 -hmac "secret"
     ;; = 1bba587c730eedba31f53abb0b6ca589e09de4e894ee455e6140807399759adaafa069eec7c01647bb173dcb17f55d22af49a18071b748c5c2edd7f7a829c632
     (assert= "1bba587c730eedba31f53abb0b6ca589e09de4e894ee455e6140807399759adaafa069eec7c01647bb173dcb17f55d22af49a18071b748c5c2edd7f7a829c632"
-             (hash/hmac-sha512 "secret" "message"))))
+      (hash/hmac-sha512 "secret" "message"))))
 
 ;; ---- raw-byte digests (bytes in, bytes out) ---------------------------------
 ;; "abc" = [97 98 99]. Known digests from FIPS 180-4 / RFC test vectors.
@@ -132,45 +132,46 @@
     (is (every? (fn (b) (and (>= b 0) (<= b 255))) (hash/sha256-raw hash-test--abc))))
   (test "known digest of \"abc\" (hex of raw == FIPS vector)"
     (assert= "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-             (encoding/hex-encode-bytes (hash/sha256-raw hash-test--abc))))
+      (encoding/hex-encode-bytes (hash/sha256-raw hash-test--abc))))
   (test "raw digest agrees with the hex digest (sha256-bytes)"
     (assert= (hash/sha256-bytes hash-test--abc)
-             (encoding/hex-encode-bytes (hash/sha256-raw hash-test--abc))))
+      (encoding/hex-encode-bytes (hash/sha256-raw hash-test--abc))))
   (test "empty input is the empty-string digest"
     (assert= "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-             (encoding/hex-encode-bytes (hash/sha256-raw []))))
+      (encoding/hex-encode-bytes (hash/sha256-raw []))))
   (test "deterministic"
     (assert= (hash/sha256-raw hash-test--abc) (hash/sha256-raw hash-test--abc)))
   (test "chains over bytes — SHA256(SHA256(abc))"
     ;; the whole point of raw bytes: feed one digest straight into the next
     (assert= (hash/sha256-raw (hash/sha256-raw hash-test--abc))
-             (hash/sha256-raw (into [] (hash/sha256-raw hash-test--abc))))))
+      (hash/sha256-raw (into [] (hash/sha256-raw hash-test--abc))))))
 
 (describe "sha1-raw / sha512-raw / sha384-raw / md5-raw"
   (test "sha1-raw: 20 bytes, known \"abc\" digest"
     (let (d (hash/sha1-raw hash-test--abc))
       (assert= 20 (count d))
       (assert= "a9993e364706816aba3e25717850c26c9cd0d89d"
-               (encoding/hex-encode-bytes d))))
+        (encoding/hex-encode-bytes d))))
   (test "sha512-raw: 64 bytes, known \"abc\" digest"
     (let (d (hash/sha512-raw hash-test--abc))
       (assert= 64 (count d))
       (assert= (str "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
-                    "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f")
-               (encoding/hex-encode-bytes d))))
+                 "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f")
+        (encoding/hex-encode-bytes d))))
   (test "sha384-raw: 48 bytes"
     (assert= 48 (count (hash/sha384-raw hash-test--abc))))
   (test "md5-raw: 16 bytes, known \"abc\" digest"
     (let (d (hash/md5-raw hash-test--abc))
       (assert= 16 (count d))
       (assert= "900150983cd24fb0d6963f7d28e17f72"
-               (encoding/hex-encode-bytes d)))))
+        (encoding/hex-encode-bytes d)))))
 
 ;; ---- raw-byte HMAC (RFC 4231 binary-key test vectors) -----------------------
 ;; Test Case 1: key = 0x0b × 20, data = "Hi There". A string can't carry the
 ;; 0x0b key, so this is exactly what the raw variants are for.
 
-(def hash-test--rfc4231-key (into [] (repeat 20 11)))   ; 0x0b × 20
+; 0x0b × 20
+(def hash-test--rfc4231-key (into [] (repeat 20 11)))
 (def hash-test--rfc4231-msg (crypto/str->bytes "Hi There"))
 
 (describe "hmac-sha256-raw"
@@ -180,32 +181,31 @@
       (assert= 32 (count m))))
   (test "RFC 4231 Test Case 1 (binary key)"
     (assert= "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
-             (encoding/hex-encode-bytes
-               (hash/hmac-sha256-raw hash-test--rfc4231-key hash-test--rfc4231-msg))))
+      (encoding/hex-encode-bytes (hash/hmac-sha256-raw hash-test--rfc4231-key
+                                   hash-test--rfc4231-msg))))
   (test "agrees with string hmac for ASCII key/msg"
     (assert= (hash/hmac-sha256 "secret" "message")
-             (encoding/hex-encode-bytes
-               (hash/hmac-sha256-raw (crypto/str->bytes "secret")
-                                     (crypto/str->bytes "message")))))
+      (encoding/hex-encode-bytes (hash/hmac-sha256-raw (crypto/str->bytes "secret")
+                                   (crypto/str->bytes "message")))))
   (test "different keys give different MACs"
     (is (not= (hash/hmac-sha256-raw [1 2 3] [9 9])
-              (hash/hmac-sha256-raw [4 5 6] [9 9]))))
+          (hash/hmac-sha256-raw [4 5 6] [9 9]))))
   (test "deterministic"
     (assert= (hash/hmac-sha256-raw [1 2 3] [4 5 6])
-             (hash/hmac-sha256-raw [1 2 3] [4 5 6]))))
+      (hash/hmac-sha256-raw [1 2 3] [4 5 6]))))
 
 (describe "hmac-sha1-raw / hmac-sha512-raw"
   (test "hmac-sha1-raw: 20 bytes, RFC 4231 TC1"
     (let (m (hash/hmac-sha1-raw hash-test--rfc4231-key hash-test--rfc4231-msg))
       (assert= 20 (count m))
       (assert= "b617318655057264e28bc0b6fb378c8ef146be00"
-               (encoding/hex-encode-bytes m))))
+        (encoding/hex-encode-bytes m))))
   (test "hmac-sha512-raw: 64 bytes, RFC 4231 TC1"
     (let (m (hash/hmac-sha512-raw hash-test--rfc4231-key hash-test--rfc4231-msg))
       (assert= 64 (count m))
       (assert= (str "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cde"
-                    "daa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854")
-               (encoding/hex-encode-bytes m)))))
+                 "daa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854")
+        (encoding/hex-encode-bytes m)))))
 
 (describe "hash-string"
   (test "returns an integer"

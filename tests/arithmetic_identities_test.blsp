@@ -19,17 +19,23 @@
 (defn rand-int (s)
   (let (x (- (rem s 2000001) 1000000))
     (cond
-      (= (rem s 11) 0) (* x x x)          ; bignum
-      (= (rem s 13) 0) (* x 4294967296)   ; push past 2^32
+      (= (rem s 11) 0) (* x x x)
+      ; bignum
+      (= (rem s 13) 0) (* x 4294967296)
+      ; push past 2^32
       else x)))
 
 (defn int-laws (a b c)
-  (and
-    (= (+ a b) (+ b a))                          ; + commutes
-    (= (* a b) (* b a))                          ; * commutes
-    (= (+ (+ a b) c) (+ a (+ b c)))              ; + associates (exact for ints)
-    (= (* (* a b) c) (* a (* b c)))              ; * associates
-    (= (* a (+ b c)) (+ (* a b) (* a c)))        ; * distributes over +
+  (and (= (+ a b) (+ b a))
+    ; + commutes
+    ; * commutes
+    (= (* a b) (* b a))
+    ; + associates (exact for ints)
+    (= (+ (+ a b) c) (+ a (+ b c)))
+    ; * associates
+    (= (* (* a b) c) (* a (* b c)))
+    ; * distributes over +
+    (= (* a (+ b c)) (+ (* a b) (* a c)))
     (= (- a a) 0)
     (= (+ a (- b)) (- a b))
     (= (* a 2) (+ a a))
@@ -39,7 +45,8 @@
     (= (bit-or a a) a)
     (= (bit-xor a 0) a)
     (= (bit-and a 0) 0)
-    (= (bit-xor (bit-xor a b) b) a)              ; xor is its own inverse
+    ; xor is its own inverse
+    (= (bit-xor (bit-xor a b) b) a)
     (= (max a b) (max b a))
     (= (min a b) (min b a))
     (= (+ (max a b) (min a b)) (+ a b))
@@ -47,15 +54,17 @@
     (if (= b 0) true (= (+ (* (quot a b) b) (rem a b)) a))))
 
 (defn float-laws (a b)
-  (and
-    (= (+ a b) (+ b a))                          ; float + commutes exactly
-    (= (* a b) (* b a))                          ; float * commutes exactly
+  (and (= (+ a b) (+ b a))
+    ; float + commutes exactly
+    ; float * commutes exactly
+    (= (* a b) (* b a))
     (= (- a a) 0.0)
     (= (+ a 0.0) a)
     (= (* a 1.0) a)))
 
 (defn check-ints (s n)
-  (if (= n 0) true
+  (if (= n 0)
+    true
     (let (a (rand-int (lcg s))
           b (rand-int (lcg (lcg s)))
           c (rand-int (lcg (lcg (lcg s)))))
@@ -64,7 +73,8 @@
         false))))
 
 (defn check-floats (s n)
-  (if (= n 0) true
+  (if (= n 0)
+    true
     (let (a (/ (rand-int (lcg s)) 7.0)
           b (/ (rand-int (lcg (lcg s))) 13.0))
       (if (float-laws a b)

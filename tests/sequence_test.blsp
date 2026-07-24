@@ -341,7 +341,11 @@
     (assert= (fold (fn (a x) (cons x a)) nil (lmap inc [1 2 3])) (list 4 3 2)))
 
   (test "chained l* stages compose into one fused view"
-    (assert= (reduce + 0 (lmap (fn (i) (* i i)) (lfilter (fn (i) (or (= 0 (rem i 3)) (= 0 (rem i 5)))) (range 20)))) 944)
+    (assert= (reduce +
+               0
+               (lmap (fn (i) (* i i))
+                 (lfilter (fn (i) (or (= 0 (rem i 3)) (= 0 (rem i 5)))) (range 20))))
+      944)
     (assert= (seq (lremove even? (lmap inc (range 6)))) (list 1 3 5)))
 
   (test "->> threads l* stages into one fused left-to-right pipeline"
@@ -379,9 +383,12 @@
     ;; The regression guard. Eager `map` must EXECUTE its fn (the loader and the
     ;; test-runner rely on `(map require-one …)` / `(map run-test …)` for effect).
     ;; A lazy view must NOT run its fn until something realises it.
-    (assert= (with-out-str (map print (range 5))) "01234")          ; eager → runs now
-    (assert= (with-out-str (lmap print (range 5))) "")              ; view built, not realised → nothing
-    (assert= (with-out-str (seq (lmap print (range 5)))) "01234")   ; seq realises → runs
+    ; eager → runs now
+    (assert= (with-out-str (map print (range 5))) "01234")
+    ; view built, not realised → nothing
+    (assert= (with-out-str (lmap print (range 5))) "")
+    ; seq realises → runs
+    (assert= (with-out-str (seq (lmap print (range 5)))) "01234")
     (assert= (with-out-str (reduce (fn (a _) a) nil (lmap print (range 5)))) "01234")))
 
 ;; ---- views across processes / network / hot-reload --------------------------
@@ -391,6 +398,7 @@
 ;; any Brood code, so redefining a global they call before the view is realised
 ;; is visible — the hot-reload invariant (ADR-013).
 
+; fold realises
 (describe "lazy seq-views across processes and reload"
   :isolated
 
@@ -401,7 +409,8 @@
     (let (me (self)
           _w (spawn (send me [:v (seq (->> (range 5) (lmap inc) (lfilter even?)))])))
       (let (got (receive ([:v xs] xs)))
-        (refute (seqview? got))            ; the receiver got a plain list, not a live view
+        ; the receiver got a plain list, not a live view
+        (refute (seqview? got))
         (assert= got (list 2 4)))))
 
   (test "many workers each fuse a view over the shared GLOBAL list concurrently"
@@ -412,10 +421,10 @@
     ;; The view's fn calls `view-scale` BY NAME; redefining that global before the
     ;; view is realised means the fold sees the NEW definition (late binding).
     (def view-scale (fn (x) (* x 1)))
-    (let (v (lmap (fn (x) (view-scale x)) (range 4)))   ; view built, NOT realised
+    (let (v (lmap (fn (x) (view-scale x)) (range 4)))
+      ; view built, NOT realised
       (def view-scale (fn (x) (* x 10)))
-      (assert= (seq v) (list 0 10 20 30)))))  ; fold realises
-
+      (assert= (seq v) (list 0 10 20 30)))))
 (describe "mapv / filterv"
   (test "mapv returns a VECTOR of mapped items"
     (assert= [2 4 6] (mapv (fn (x) (* x 2)) (list 1 2 3)))

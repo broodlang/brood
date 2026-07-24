@@ -128,7 +128,8 @@ alone misses this — a purely-relative, `..`-free path can still resolve out of
 the tree through a symlink)."
   (let (real (canonicalize abs)
         root (canonicalize *project-root*))
-    (and (string? real) (string? root)
+    (and (string? real)
+      (string? root)
       (or (= real root) (starts-with? real (str root "/"))))))
 
 (defn mcp--project-path (rel)
@@ -143,7 +144,8 @@ sandbox boundary the `write`/`edit` tools share."
   (let (abs (path-join *project-root* rel))
     (when (not (mcp--under-root? abs))
       (throw (str "path escapes the project sandbox — its real target (following symlinks) "
-               "is outside the project root: " (pr-str rel))))
+               "is outside the project root: "
+               (pr-str rel))))
     abs))
 
 (defn mcp--write-result (rel abs)
@@ -203,7 +205,11 @@ image stays in sync with disk."
             (cond
               (= hits 0) {:ok false :error (str "edit: :old not found in " rel)}
               (> hits 1) {:ok false
-                          :error (str "edit: :old occurs " hits " times in " rel " — make it unique")}
+                          :error (str "edit: :old occurs "
+                                   hits
+                                   " times in "
+                                   rel
+                                   " — make it unique")}
               :else (let (_w (spit abs (replace text old new)))
                       (mcp--write-result rel abs))))))
       (catch e
@@ -337,8 +343,7 @@ overview, complementing per-process `processes`."
 mailbox into a list of maps (chronological). Non-blocking: stops at the first empty
 receive."
   (receive
-    ([:system kind pid detail]
-      (mcp--collect-runtime (cons {:kind kind :pid pid :detail detail} acc)))
+    ([:system kind pid detail] (mcp--collect-runtime (cons {:kind kind :pid pid :detail detail} acc)))
     (after 0 (reverse acc))))
 
 (defn mcp-watch-runtime-tool (args)
@@ -350,15 +355,20 @@ handler process, sleeps `:ms`, disarms, and drains the collected
 reason), `:deopt` (detail = the JIT arm's fn name or nil). This is how an agent
 WATCHES the runtime (GC pauses, spawn/exit churn, JIT deopts) over an interval,
 complementing the point-in-time `processes`/`node` snapshots."
-  (let (ms  (min (or (get args :ms) 500) 5000)   ; self-cap the window at 5 s
-        opt (get args :filter))                   ; e.g. {:gc true :gc-min-pause-us 1000}
+  (let (
+        ; self-cap the window at 5 s
+        ms (min (or (get args :ms) 500) 5000)
+        opt (get args :filter))
+    ; e.g. {:gc true :gc-min-pause-us 1000}
     ;; One global monitor slot (last-wins); arm on ourselves, then clear on the way
     ;; out so we never leak it across calls. Events about the subscriber itself are
     ;; never sent, so we only ever collect OTHER processes' activity.
     (if opt (system-monitor (self) opt) (system-monitor (self)))
     (sleep ms)
-    (system-monitor nil)                          ; disarm before draining
-    (let (events (into [] (mcp--collect-runtime '())))   ; [] (not nil) when empty
+    ; disarm before draining
+    (system-monitor nil)
+    (let (events (into [] (mcp--collect-runtime '())))
+      ; [] (not nil) when empty
       {:events events :count (count events) :ms ms})))
 
 (defn mcp-callers-tool (args)
@@ -505,15 +515,18 @@ Brood pattern, `std/tool/explain.blsp`)."
     {:name "write"
      :description "Create or overwrite a project file (the way to write code through nest mcp, not the raw filesystem). :path is project-relative and sandboxed under the project root — absolute paths, '~', and '..' are rejected. A .blsp file is loaded into the session and checked, so the result carries :diagnostics + :shadows like `load`. Returns {:ok true :path :diagnostics :shadows} or {:ok false :error}."
      :schema {:type "object"
-              :properties {:path {:type "string" :description "Project-relative file path (no leading '/' or '~', no '..')"}
+              :properties {:path {:type "string"
+                                  :description "Project-relative file path (no leading '/' or '~', no '..')"}
                            :content {:type "string" :description "Full new file contents"}}
               :required ["path" "content"]}
      :handler mcp-write-tool}
     {:name "edit"
      :description "Exact-string replacement in a project file (sandboxed like `write`). :old must occur exactly once in the file and is replaced by :new. A .blsp file is reloaded and checked (result carries :diagnostics/:shadows). Returns {:ok true :path ...} or {:ok false :error}."
      :schema {:type "object"
-              :properties {:path {:type "string" :description "Project-relative file path (no leading '/' or '~', no '..')"}
-                           :old {:type "string" :description "Exact text to replace — must be unique in the file"}
+              :properties {:path {:type "string"
+                                  :description "Project-relative file path (no leading '/' or '~', no '..')"}
+                           :old {:type "string"
+                                 :description "Exact text to replace — must be unique in the file"}
                            :new {:type "string" :description "Replacement text"}}
               :required ["path" "old" "new"]}
      :handler mcp-edit-tool}
@@ -611,7 +624,8 @@ Brood pattern, `std/tool/explain.blsp`)."
     {:name "find-pattern"
      :description "The idiomatic Brood pattern for a task — a keyword search over the intent→idiom cookbook. Returns {:matches [{:intent :idiom :example :see} ...]}. Query with a task word like \"loop\", \"mutate\", \"build a string\", \"set\", \"spawn\", \"error\", \"parse binary\". Use it BEFORE writing non-obvious code to get the Brood way instead of a Clojure/Scheme reflex."
      :schema {:type "object"
-              :properties {:query {:type "string" :description "A task/intent word, e.g. \"loop\" or \"mutable state\""}}
+              :properties {:query {:type "string"
+                                   :description "A task/intent word, e.g. \"loop\" or \"mutable state\""}}
               :required ["query"]}
      :handler mcp-find-pattern-tool}))
 

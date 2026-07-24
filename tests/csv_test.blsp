@@ -60,7 +60,7 @@
     (let (result (csv/csv-parse-maps "name,age\nAlice,30"))
       (assert= 1 (count result))
       (assert= "Alice" (get (first result) "name"))
-      (assert= "30"    (get (first result) "age"))))
+      (assert= "30" (get (first result) "age"))))
   (test "multiple data rows"
     (let (result (csv/csv-parse-maps "x,y\n1,2\n3,4"))
       (assert= 2 (count result))

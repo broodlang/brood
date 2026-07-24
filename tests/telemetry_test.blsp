@@ -27,7 +27,8 @@
   :isolated
   (test "emit delivers event + measurements + metadata to a handler"
     (let (me (self))
-      (start-telemetry) (detach-all)
+      (start-telemetry)
+      (detach-all)
       (attach :h :evt (tel-fwd me))
       (emit :evt {:n 1} {:k "v"})
       (let (got (tel-recv))
@@ -36,7 +37,8 @@
 
   (test "emit defaults measurements and metadata to {}"
     (let (me (self))
-      (start-telemetry) (detach-all)
+      (start-telemetry)
+      (detach-all)
       (attach :h :evt (tel-fwd me))
       (emit :evt)
       (let (got (tel-recv))
@@ -45,14 +47,16 @@
 
   (test "emit always returns nil and never throws"
     (do
-      (start-telemetry) (detach-all)
+      (start-telemetry)
+      (detach-all)
       (assert= (emit :evt) nil)
       (assert= (emit :evt {:n 1}) nil)
       (stop-telemetry)))
 
   (test "a handler attached to another event does not fire"
     (let (me (self))
-      (start-telemetry) (detach-all)
+      (start-telemetry)
+      (detach-all)
       (attach :h :other (tel-fwd me))
       (emit :evt {:n 1})
       (telemetry-sync)
@@ -62,7 +66,8 @@
 
   (test "multiple handlers on one event all fire"
     (let (me (self))
-      (start-telemetry) (detach-all)
+      (start-telemetry)
+      (detach-all)
       (attach :a :evt (fn (e m md) (send me :done)))
       (attach :b :evt (fn (e m md) (send me :done)))
       (attach :c :evt (fn (e m md) (send me :done)))
@@ -73,7 +78,8 @@
 
   (test "detach stops a handler"
     (let (me (self))
-      (start-telemetry) (detach-all)
+      (start-telemetry)
+      (detach-all)
       (attach :h :evt (tel-fwd me))
       (detach :h)
       (emit :evt {:n 1})
@@ -84,7 +90,8 @@
 
   (test "re-attaching the same id replaces, not duplicates"
     (do
-      (start-telemetry) (detach-all)
+      (start-telemetry)
+      (detach-all)
       (attach :h :evt (fn (e m md) nil))
       (attach :h :evt (fn (e m md) nil))
       (let (n (count (tel-ids :evt)))
@@ -93,7 +100,8 @@
 
   (test "detach-all clears every handler"
     (do
-      (start-telemetry) (detach-all)
+      (start-telemetry)
+      (detach-all)
       (attach :a :evt (fn (e m md) nil))
       (attach :b :ev2 (fn (e m md) nil))
       (detach-all)
@@ -117,42 +125,48 @@
   (test "a throwing handler is caught: listener survives, others still run, it is detached"
     (let (lpid (start-telemetry) me (self))
       (detach-all)
-      (attach :bad  :evt (fn (e m md) (error "boom")))
+      (attach :bad :evt (fn (e m md) (error "boom")))
       (attach :good :evt (tel-fwd me))
       (emit :evt {:n 1})
       (let (got (tel-recv))
-        (telemetry-sync)                 ; ensure dispatch (incl. detach) completed
+        ; ensure dispatch (incl. detach) completed
+        (telemetry-sync)
         (let (alive (= (telemetry-pid) lpid)
-              ids   (tel-ids :evt))
+              ids (tel-ids :evt))
           (stop-telemetry)
           (assert= got [:evt {:n 1} {}])
-          (is alive)                     ; listener still the same, alive process
+          ; listener still the same, alive process
+          (is alive)
           (is (member? :good ids))
           (is (not (member? :bad ids)))))))
 
+  ; and WE (the emitter) are still running
   (test "a handler that HARD-KILLS the listener never crashes the emitter"
     (let (lpid (start-telemetry) _me (self))
       (detach-all)
       (monitor lpid)
       (attach :crash :boom (fn (e m md) (exit (self) :kill)))
-      (emit :boom)                       ; async — the kill happens in the listener
+      ; async — the kill happens in the listener
+      (emit :boom)
       (let (reason (receive ([:down _ ~lpid r] r) (after 5000 :timeout)))
-        (is (not (= reason :timeout)))   ; the listener really died
-        (assert= (+ 40 2) 42))))         ; and WE (the emitter) are still running
-
+        ; the listener really died
+        (is (not (= reason :timeout)))
+        (assert= (+ 40 2) 42))))
   (test "telemetry recovers after a listener crash — handlers survive in the global"
     (let (lpid (start-telemetry) me (self))
       (detach-all)
       (monitor lpid)
-      (attach :ok    :evt  (tel-fwd me))
+      (attach :ok :evt (tel-fwd me))
       (attach :crash :boom (fn (e m md) (exit (self) :kill)))
       (emit :boom)
       (receive ([:down _ ~lpid _] :ok) (after 5000 :timeout))
-      (let (l2 (start-telemetry))        ; restart the listener
+      (let (l2 (start-telemetry))
+        ; restart the listener
         (is (not (= l2 lpid)))
         (emit :evt {:n 1})
         (let (got (tel-recv))
-          (detach-all) (stop-telemetry)
+          (detach-all)
+          (stop-telemetry)
           (assert= got [:evt {:n 1} {}]))))))
 
 ;; ---- forward ----------------------------------------------------------------
@@ -160,7 +174,8 @@
   :isolated
   (test "forward delivers the event to a process you own"
     (let (me (self))
-      (start-telemetry) (detach-all)
+      (start-telemetry)
+      (detach-all)
       (forward :fwd :evt me)
       (emit :evt {:n 5} {:k :v})
       (let (got (receive ([:telemetry e m md] [e m md]) (after 5000 :timeout)))
@@ -168,16 +183,18 @@
         (assert= got [:evt {:n 5} {:k :v}])))))
 
 ;; ---- span -------------------------------------------------------------------
+; emitter alive after the span throw
 (describe "telemetry: span"
   :isolated
   (test "span emits :start then :stop with a duration, returns the body value"
     (let (me (self))
-      (start-telemetry) (detach-all)
+      (start-telemetry)
+      (detach-all)
       (attach :s [:job :start] (tel-fwd me))
-      (attach :e [:job :stop]  (tel-fwd me))
+      (attach :e [:job :stop] (tel-fwd me))
       (let (result (span [:job] {:tag 1} (+ 1 2))
-            start  (tel-recv)
-            stop   (tel-recv))
+            start (tel-recv)
+            stop (tel-recv))
         (stop-telemetry)
         (assert= result 3)
         (assert= (first start) [:job :start])
@@ -186,16 +203,16 @@
 
   (test "span emits :exception and re-raises; the emitter survives the throw"
     (let (me (self))
-      (start-telemetry) (detach-all)
+      (start-telemetry)
+      (detach-all)
       (attach :x [:job :exception] (tel-fwd me))
       (let (threw (try (span [:job] {} (error "boom")) :no-throw (catch e (error-message e)))
-            ex    (tel-recv))
+            ex (tel-recv))
         (stop-telemetry)
         (assert= threw "boom")
         (assert= (first ex) [:job :exception])
         (assert= (get (nth ex 2) :error) "boom")
-        (assert= (+ 1 1) 2)))))          ; emitter alive after the span throw
-
+        (assert= (+ 1 1) 2)))))
 ;; ---- not started / after stop ----------------------------------------------
 (describe "telemetry: not started / after stop"
   :isolated
@@ -204,12 +221,14 @@
       (stop-telemetry)
       (assert= (telemetry-pid) nil)
       (assert= (emit :x {:a 1}) nil)
-      (assert= (span :x {} 99) 99)       ; span still runs its body and returns it
+      ; span still runs its body and returns it
+      (assert= (span :x {} 99) 99)
       (assert= (telemetry-sync) :no-listener)))
 
   (test "emit after stop is a no-op (no crash)"
     (do
-      (start-telemetry) (detach-all)
+      (start-telemetry)
+      (detach-all)
       (stop-telemetry)
       (assert= (emit :x {:a 1}) nil))))
 
@@ -218,17 +237,20 @@
   :isolated
   (test "telemetry-sync flushes: after sync the handler effect is observable"
     (let (me (self))
-      (start-telemetry) (detach-all)
+      (start-telemetry)
+      (detach-all)
       (attach :h :evt (tel-fwd me))
       (emit :evt {:n 1})
-      (telemetry-sync)                   ; listener has now processed the emit
+      ; listener has now processed the emit
+      (telemetry-sync)
       (let (got (receive ([:ev e m md] [e m md]) (after 0 :none)))
         (stop-telemetry)
         (assert= got [:evt {:n 1} {}]))))
 
   (test "many processes emit once; every event reaches the handler, none lost"
     (let (me (self) n 200)
-      (start-telemetry) (detach-all)
+      (start-telemetry)
+      (detach-all)
       (attach :h :evt (fn (e m md) (send me :done)))
       (fold (fn (_ i) (spawn (emit :evt {:i i}))) nil (range n))
       (let (got (tel-await n))

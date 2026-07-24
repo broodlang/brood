@@ -8,7 +8,8 @@
 ;; daemon's node-start, so `[:buffer-updated pid …]` pushes matched no slot.
 (defmodule pid-identity-test (:use test))
 
-(describe "pid identity across node-start" :isolated
+(describe "pid identity across node-start"
+  :isolated
   (test "a pid captured before node-start equals (self) after — and still works as a map key"
     (let (before (self)
           keyed {before :cursor})

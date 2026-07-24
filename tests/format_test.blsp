@@ -117,10 +117,12 @@
   ;; child of a broken list is a comment, the close delimiter must drop to its
   ;; own line. Appended directly it lands inside the comment (`;; note)`), which
   ;; comments out the `)` and leaves the list unclosed — an unparseable file.
+  ; never swallowed
   (test "the closing paren drops below a trailing comment, not into it"
     (let (out (format-source "(describe \"x\"\n  (test \"a\" (is true))\n  ;; note\n  )"))
-      (is (string-contains? out ";; note\n)"))  ; `)` on its own line
-      (is (not (string-contains? out ";; note)")))))  ; never swallowed
+      ; `)` on its own line
+      (is (string-contains? out ";; note\n)"))
+      (is (not (string-contains? out ";; note)")))))
   (test "the result is re-readable (not just CST-parseable)"
     ;; parse-source is lenient on unclosed lists; the real reader is not — pin it.
     (let (out (format-source "(describe \"x\"\n  (test \"a\")\n  ;; note\n  )"))
@@ -142,18 +144,22 @@
   ;; splitting every `name value` onto two lines. The pair walker is comment-aware:
   ;; pairs stay together, a trailing comment is hoisted onto its own line above its
   ;; pair, an own-line comment sits on its own line at the pair indent.
+  ; name never split from its value
   (test "a trailing comment in let bindings is hoisted above its pair, kept intact"
     (let (out (format-source "(let (a 1\n      b 2  ; note\n      c 3)\n  body)"))
-      (is (string-contains? out "; note\n      b 2"))  ; hoisted above the pair
-      (is (not (string-contains? out "b 2  ; note")))  ; not inline anymore
-      (is (not (string-contains? out "b\n")))))  ; name never split from its value
+      ; hoisted above the pair
+      (is (string-contains? out "; note\n      b 2"))
+      ; not inline anymore
+      (is (not (string-contains? out "b 2  ; note")))
+      (is (not (string-contains? out "b\n")))))
   (test "an own-line comment in let bindings stays on its own line, pairs intact"
     (let (out (format-source "(let (a 1\n      ;; mid\n      b 2)\n  body)"))
       (is (string-contains? out "a 1\n      ;; mid\n      b 2"))))
   (test "a comment in a map pairs up like bindings (not one element per line)"
     (let (out (format-source "(def m {:a 1\n        :b 2  ; note\n        :c 3})"))
       (is (string-contains? out "; note"))
-      (is (not (string-contains? out ":b 2  ; note")))  ; hoisted above, not inline
+      ; hoisted above, not inline
+      (is (not (string-contains? out ":b 2  ; note")))
       (is (not (string-contains? out ":b\n")))))
   (test "comments in pair-lists are idempotent"
     (let (out (format-source "(let (a 1\n      b 2  ; note\n      ;; mid\n      c 3)\n  body)"))

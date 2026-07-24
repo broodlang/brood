@@ -10,7 +10,8 @@
 
 ;; build a map of n entries keyed by a PRNG walk (collision-ish key space)
 (defn build (m s n)
-  (if (= n 0) m
+  (if (= n 0)
+    m
     (let (s2 (lcg s)) (build (assoc m (rem s2 4096) s2) s2 (- n 1)))))
 
 (describe "maps: CHAMP algebra at scale"
@@ -18,9 +19,11 @@
     (let (m (build {} 7 20000)
           m2 (assoc m :extra 1))
       (do
-        (assert= (contains? m :extra) false)      ; immutability
+        ; immutability
+        (assert= (contains? m :extra) false)
         (assert= (get m2 :extra) 1)
-        (assert= (dissoc m2 :extra) m)            ; structural round-trip
+        ; structural round-trip
+        (assert= (dissoc m2 :extra) m)
         true)))
   (test "count is exact after heavy assoc/dissoc churn"
     (let (m (build {} 21 20000)
@@ -31,8 +34,10 @@
       (do (assert= (count m) 1) (assert= (get m :k) 2) true)))
   (test "merge: right side wins, both inputs untouched"
     (let (a {:x 1 :y 2} b {:y 9 :z 3} m (merge a b))
-      (do (assert= m {:x 1 :y 9 :z 3})
-        (assert= a {:x 1 :y 2}) (assert= b {:y 9 :z 3})
+      (do
+        (assert= m {:x 1 :y 9 :z 3})
+        (assert= a {:x 1 :y 2})
+        (assert= b {:y 9 :z 3})
         true)))
   (test "keys/vals agree with get over a 10k map"
     (let (m (build {} 63 10000))
@@ -43,8 +48,11 @@
         true)))
   (test "mixed-type keys coexist"
     (let (m {1 :int "1" :str :one :kw [1] :vec})
-      (do (assert= (get m 1) :int) (assert= (get m "1") :str)
-        (assert= (get m :one) :kw) (assert= (get m [1]) :vec)
+      (do
+        (assert= (get m 1) :int)
+        (assert= (get m "1") :str)
+        (assert= (get m :one) :kw)
+        (assert= (get m [1]) :vec)
         (assert= (count m) 4)
         true))))
 
@@ -54,18 +62,22 @@
       (do (assert= v [1 2 3]) (assert= v2 [1 :x 3]) true)))
   (test "conj appends per element; nth/get agree"
     (let (v (fold conj [] (range 1000)))
-      (do (assert= (count v) 1000)
-        (assert= (nth v 999) 999) (assert= (get v 500) 500)
+      (do
+        (assert= (count v) 1000)
+        (assert= (nth v 999) 999)
+        (assert= (get v 500) 500)
         true)))
   (test "out-of-range nth is nil; get takes its default"
-    (do (assert= (nth [1 2] 5) nil)
+    (do
+      (assert= (nth [1 2] 5) nil)
       (assert= (get [1 2] 5 :dflt) :dflt)
       true)))
 
 (describe "sequence laws"
   (test "map identity / composition"
     (let (xs (range 500))
-      (do (assert= (map (fn (x) x) xs) (seq xs))
+      (do
+        (assert= (map (fn (x) x) xs) (seq xs))
         (assert= (map (fn (x) (* 2 (+ x 1))) xs)
           (map (fn (x) (* 2 x)) (map inc xs)))
         true)))
@@ -73,7 +85,8 @@
     (let (xs (range 1000)
           evens (filter (fn (x) (= (rem x 2) 0)) xs)
           odds (remove (fn (x) (= (rem x 2) 0)) xs))
-      (do (assert= (+ (count evens) (count odds)) 1000)
+      (do
+        (assert= (+ (count evens) (count odds)) 1000)
         (assert= (fold + 0 evens) 249500)
         (assert= (fold + 0 odds) 250000)
         true)))
@@ -81,18 +94,21 @@
     (assert= (fold (fn (acc x) (cons x acc)) () (list 1 2 3)) (list 3 2 1)))
   (test "take/drop partition"
     (let (xs (range 100))
-      (do (assert= (concat (take 30 xs) (drop 30 xs)) (seq xs))
+      (do
+        (assert= (concat (take 30 xs) (drop 30 xs)) (seq xs))
         (assert= (take 0 xs) ())
         (assert= (count (drop 100 xs)) 0)
         true)))
   (test "reverse is an involution; count-preserving"
     (let (xs (map (fn (x) (* x 3)) (range 777)))
-      (do (assert= (reverse (reverse xs)) (seq xs))
+      (do
+        (assert= (reverse (reverse xs)) (seq xs))
         (assert= (count (reverse xs)) 777)
         true)))
   (test "sort is idempotent, stable-length, ordered"
     (let (s1 (sort [5 3 9 1 3 5 0]))
-      (do (assert= s1 (list 0 1 3 3 5 5 9))
+      (do
+        (assert= s1 (list 0 1 3 3 5 5 9))
         (assert= (sort s1) s1)
         true))))
 

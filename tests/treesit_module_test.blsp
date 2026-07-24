@@ -9,7 +9,8 @@
   (:use test)
   (:use editor/treesit))
 
-(require 'editor/highlight)   ; registers the :syntax/* faces fontify resolves
+; registers the :syntax/* faces fontify resolves
+(require 'editor/highlight)
 (require 'editor/treesit)
 
 ;; The ruby/elixir grammars are opt-in (--features treesit-grammars); the kernel
@@ -24,75 +25,84 @@
 ;;   def foo\n  x = 1\nend\n
 (def rb "def foo\n  x = 1\nend\n")
 
-(def rb-faces {:comment :syntax/comment :string :syntax/string :integer :syntax/number
-               :def :syntax/keyword :end :syntax/keyword :identifier :syntax/function})
+(def rb-faces
+  {:comment :syntax/comment
+   :string :syntax/string
+   :integer :syntax/number
+   :def :syntax/keyword
+   :end :syntax/keyword
+   :identifier :syntax/function})
 
+; end (when tsm-grammars? …) — grammar-dependent suites
 (when tsm-grammars?
 
-(describe "treesit fontify"
-  (test "produces ascending, non-overlapping [start end face] spans"
-    (let (spans (editor/treesit/fontify rb :ruby (editor/treesit/face-of-kinds rb-faces)))
-      (is (not (empty? spans)))
-      ;; every span is [start end face] with start < end, and starts ascend
-      (is (every? (fn (s) (< (first s) (second s))) spans))
-      (is (= spans (sort-by first spans)))))
+  ; named ⇒ not a keyword
+  (describe "treesit fontify"
+    (test "produces ascending, non-overlapping [start end face] spans"
+      (let (spans (editor/treesit/fontify rb :ruby (editor/treesit/face-of-kinds rb-faces)))
+        (is (not (empty? spans)))
+        ;; every span is [start end face] with start < end, and starts ascend
+        (is (every? (fn (s) (< (first s) (second s))) spans))
+        (is (= spans (sort-by first spans)))))
 
-  (test "colours a whole comment node (delimiter + content) as one span"
-    (let (src "x = 1 # note\n"
-          spans (editor/treesit/fontify src :ruby (editor/treesit/face-of-kinds rb-faces))
-          cspan (first (filter (fn (s) (= (nth s 2) (editor/face/face :syntax/comment))) spans)))
-      (refute (nil? cspan))
-      (assert= (first cspan) 6)        ; "# note" starts at col 6
-      (assert= (second cspan) 12)))
+    (test "colours a whole comment node (delimiter + content) as one span"
+      (let (src "x = 1 # note\n"
+            spans (editor/treesit/fontify src :ruby (editor/treesit/face-of-kinds rb-faces))
+            cspan (first (filter (fn (s) (= (nth s 2) (editor/face/face :syntax/comment))) spans)))
+        (refute (nil? cspan))
+        ; "# note" starts at col 6
+        (assert= (first cspan) 6)
+        (assert= (second cspan) 12)))
 
-  (test "an unmapped kind yields no span for that node (descends instead)"
-    ;; with an empty table nothing is coloured
-    (let (spans (editor/treesit/fontify rb :ruby (editor/treesit/face-of-kinds {})))
-      (is (empty? spans))))
+    (test "an unmapped kind yields no span for that node (descends instead)"
+      ;; with an empty table nothing is coloured
+      (let (spans (editor/treesit/fontify rb :ruby (editor/treesit/face-of-kinds {})))
+        (is (empty? spans))))
 
-  (test "face-of-syntax colours keywords via the anonymous-token heuristic"
-    ;; the table names NO keywords; `def`/`end` (anonymous alphabetic tokens) are
-    ;; coloured :syntax/keyword by `face-of-syntax` — the path the editor modes use.
-    (let (spans (editor/treesit/fontify rb :ruby (editor/treesit/face-of-syntax {}))
-          kw (editor/face/face :syntax/keyword)
-          kw-spans (filter (fn (s) (= (nth s 2) kw)) spans))
-      (is (>= (count kw-spans) 2))                ; def + end
-      (assert= (first (first kw-spans)) 0)        ; "def" at col 0
-      (assert= (second (first kw-spans)) 3)))
+    (test "face-of-syntax colours keywords via the anonymous-token heuristic"
+      ;; the table names NO keywords; `def`/`end` (anonymous alphabetic tokens) are
+      ;; coloured :syntax/keyword by `face-of-syntax` — the path the editor modes use.
+      (let (spans (editor/treesit/fontify rb :ruby (editor/treesit/face-of-syntax {}))
+            kw (editor/face/face :syntax/keyword)
+            kw-spans (filter (fn (s) (= (nth s 2) kw)) spans))
+        ; def + end
+        (is (>= (count kw-spans) 2))
+        ; "def" at col 0
+        (assert= (first (first kw-spans)) 0)
+        (assert= (second (first kw-spans)) 3)))
 
-  (test "anonymous-keyword? distinguishes alphabetic tokens from punctuation"
-    (is (editor/treesit/anonymous-keyword? {:named false :text "def"}))
-    (is (editor/treesit/anonymous-keyword? {:named false :text "end"}))
-    (refute (editor/treesit/anonymous-keyword? {:named false :text "("}))
-    (refute (editor/treesit/anonymous-keyword? {:named false :text "="}))
-    (refute (editor/treesit/anonymous-keyword? {:named true :text "foo"}))))   ; named ⇒ not a keyword
+    (test "anonymous-keyword? distinguishes alphabetic tokens from punctuation"
+      (is (editor/treesit/anonymous-keyword? {:named false :text "def"}))
+      (is (editor/treesit/anonymous-keyword? {:named false :text "end"}))
+      (refute (editor/treesit/anonymous-keyword? {:named false :text "("}))
+      (refute (editor/treesit/anonymous-keyword? {:named false :text "="}))
+      (refute (editor/treesit/anonymous-keyword? {:named true :text "foo"}))))
+  (describe "treesit structural navigation"
+    (test "point-forward lands at the end of the next named node"
+      ;; from col 0 the next top-level node is the whole `def…end` method
+      (let (end (editor/treesit/point-forward rb :ruby 0))
+        (is (> end 0))
+        (assert= (substring rb 0 3) "def")))
 
-(describe "treesit structural navigation"
-  (test "point-forward lands at the end of the next named node"
-    ;; from col 0 the next top-level node is the whole `def…end` method
-    (let (end (editor/treesit/point-forward rb :ruby 0))
-      (is (> end 0))
-      (assert= (substring rb 0 3) "def")))
+    (test "point-defun-start finds the enclosing top-level node"
+      ;; col 11 is inside the body; the method begins at 0
+      (assert= (editor/treesit/point-defun-start rb :ruby 11) 0))
 
-  (test "point-defun-start finds the enclosing top-level node"
-    ;; col 11 is inside the body; the method begins at 0
-    (assert= (editor/treesit/point-defun-start rb :ruby 11) 0))
+    ; module body, no def → the module
+    (test "point-defun-start finds the enclosing def, not the whole module (Elixir)"
+      ;; def is a `call` to a def-macro, nested in the module's do-block — C-M-a must land on
+      ;; the enclosing def, not the file top (the bug: it always jumped to the module start).
+      (let (ex "defmodule A do\n  def f, do: 1\n  def g, do: 2\nend\n")
+        ; inside def f → def f's start
+        (assert= (editor/treesit/point-defun-start ex :elixir 18) 17)
+        ; inside def g → def g's start
+        (assert= (editor/treesit/point-defun-start ex :elixir 36) 32)
+        (assert= (editor/treesit/point-defun-start ex :elixir 14) 0)))
+    (test "point-up rises to the enclosing node's start"
+      (let (up (editor/treesit/point-up rb :ruby 11))
+        (is (>= up 0))
+        (is (< up 11))))
 
-  (test "point-defun-start finds the enclosing def, not the whole module (Elixir)"
-    ;; def is a `call` to a def-macro, nested in the module's do-block — C-M-a must land on
-    ;; the enclosing def, not the file top (the bug: it always jumped to the module start).
-    (let (ex "defmodule A do\n  def f, do: 1\n  def g, do: 2\nend\n")
-      (assert= (editor/treesit/point-defun-start ex :elixir 18) 17)   ; inside def f → def f's start
-      (assert= (editor/treesit/point-defun-start ex :elixir 36) 32)   ; inside def g → def g's start
-      (assert= (editor/treesit/point-defun-start ex :elixir 14) 0)))  ; module body, no def → the module
-
-  (test "point-up rises to the enclosing node's start"
-    (let (up (editor/treesit/point-up rb :ruby 11))
-      (is (>= up 0))
-      (is (< up 11))))
-
-  (test "motions are no-ops with nothing to move to"
-    ;; past the end, forward stays put
-    (assert= (editor/treesit/point-forward rb :ruby (string-length rb)) (string-length rb))))
-
-)  ; end (when tsm-grammars? …) — grammar-dependent suites
+    (test "motions are no-ops with nothing to move to"
+      ;; past the end, forward stays put
+      (assert= (editor/treesit/point-forward rb :ruby (string-length rb)) (string-length rb)))))

@@ -1,9 +1,9 @@
 // Editor syntax-scanning / span / highlight / clipboard builtins — extracted from
 // sequences.rs (these are editor tooling, not string ops).
 #![allow(unused_imports)]
-use super::*;
-use super::sequences::*;
 use super::numeric::{arg, expect_int, expect_string};
+use super::sequences::*;
+use super::*;
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};

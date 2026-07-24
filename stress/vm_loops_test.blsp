@@ -26,12 +26,14 @@
 
 ;; ints for i<=199990, halves after: 199991 ints + 9 halves = 199991 + 4.5
 (defn float-cross (i n acc)
-  (if (>= i n) acc
+  (if (>= i n)
+    acc
     (float-cross (+ i 1) n (+ acc (if (> i 199990) 0.5 1)))))
 
 ;; Collatz checksum — the reduction-batched back-edge + preemption interplay.
 (defn collatz-len (n steps)
-  (if (= n 1) steps
+  (if (= n 1)
+    steps
     (collatz-len (if (= (rem n 2) 0) (quot n 2) (+ (* 3 n) 1)) (+ steps 1))))
 (defn collatz-sum (i n acc)
   (if (> i n) acc (collatz-sum (+ i 1) n (+ acc (collatz-len i 0)))))

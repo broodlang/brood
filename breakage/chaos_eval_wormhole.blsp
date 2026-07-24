@@ -19,10 +19,10 @@
   "(defn chaos-fib (n a b) (if (< n 1) a (chaos-fib (- n 1) b (+ a b))))")
 
 (eval-string fib-src)
-(println "chaos-fib(0):"  (chaos-fib 0 0 1))
+(println "chaos-fib(0):" (chaos-fib 0 0 1))
 (println "chaos-fib(10):" (chaos-fib 10 0 1))
-(println "chaos-fib(50):" (chaos-fib 50 0 1))  ; 12586269025
-
+; 12586269025
+(println "chaos-fib(50):" (chaos-fib 50 0 1))
 (println "--- quasiquote: build a fold-summing program for n terms ---")
 
 ;; Generate `(+ 1 (+ 2 (+ 3 ... (+ n 0) ...)))` as a data structure via quasiquote
@@ -61,8 +61,8 @@
   (fold (fn (acc i)
           (let (fn-name (symbol (str "chaos-fn-" i)))
             (+ acc ((eval fn-name) i))))
-        0
-        (range 1000)))
+    0
+    (range 1000)))
 
 (println "sum of chaos-fn-N(N):" fn-sum)
 (println "expected 999000:" (= 999000 fn-sum))
@@ -72,8 +72,8 @@
 ;; Build a source string for a long `do` block with 500 `def` forms
 (defn make-def-src (n)
   (str "(do "
-       (join " " (map (fn (i) (str "(def chaos-var-" i " " (* i i) ")")) (range n)))
-       ")"))
+    (join " " (map (fn (i) (str "(def chaos-var-" i " " (* i i) ")")) (range n)))
+    ")"))
 
 (def big-do-src (make-def-src 500))
 (println "big-do-src length:" (string-length big-do-src))
@@ -85,7 +85,7 @@
 
 ;; Eval the form — defines 500 globals
 (eval big-do-form)
-(println "chaos-var-0:"   chaos-var-0)
+(println "chaos-var-0:" chaos-var-0)
 (println "chaos-var-499:" chaos-var-499)
 
 (println "--- recursive eval: an eval'd program that itself calls eval ---")
@@ -94,13 +94,13 @@
 ;; the result — all inside an eval'd string.
 (def meta-src
   "(eval-string \"(+ 1 (eval-string \\\"(* 6 7)\\\"))\")")
-(println "meta-eval result:" (eval-string meta-src))  ; should be 43
-
+; should be 43
+(println "meta-eval result:" (eval-string meta-src))
 ;; Go three levels deep
 (def deep-meta-src
   "(eval-string \"(+ 1 (eval-string \\\"(+ 10 (eval-string \\\\\\\"(* 2 3)\\\\\\\"))\\\"))\")")
-(println "3-level meta-eval result:" (eval-string deep-meta-src))  ; 1 + (10 + 6) = 17
-
+; 1 + (10 + 6) = 17
+(println "3-level meta-eval result:" (eval-string deep-meta-src))
 (println "--- quasiquote: build a match expression with 500 clauses ---")
 
 ;; Generate: (match x (0 "zero") (1 "one") ... (_ "unknown"))
@@ -116,9 +116,9 @@
 
 ;; Safe with 100 clauses
 (def big-match-fn (eval (build-big-match 100)))
-(println "big-match(0):"   (big-match-fn 0))
-(println "big-match(50):"  (big-match-fn 50))
-(println "big-match(99):"  (big-match-fn 99))
+(println "big-match(0):" (big-match-fn 0))
+(println "big-match(50):" (big-match-fn 50))
+(println "big-match(99):" (big-match-fn 99))
 (println "big-match(100):" (big-match-fn 100))
 
 (println "--- apply with a huge argument list ---")

@@ -70,12 +70,11 @@ always dropped (and a late `[:down]` flushed) before returning."
   (let (r (ref) m (monitor pid))
     (send pid [:$call (self) r payload])
     (receive
-      ([:reply ~r v]
-        (demonitor m)
-        (receive ([:down ~m _ _] :ok) (after 0 :ok))  ; flush a late down, don't leak it
+      ([:reply ~r v] (demonitor m)
+        ; flush a late down, don't leak it
+        (receive ([:down ~m _ _] :ok) (after 0 :ok))
         v)
-      ([:down ~m _ reason]
-        (error "gen-call: server " (pr-str pid) " died: " (pr-str reason)))
+      ([:down ~m _ reason] (error "gen-call: server " (pr-str pid) " died: " (pr-str reason)))
       (after ms
         (demonitor m)
         (error "gen-call: timed out after " ms " ms")))))
@@ -166,7 +165,8 @@ loop, and a message matched by no clause is dropped (so the mailbox can't leak).
         info-receive (map compile info-clauses)
         ;; `[:$stop]` ends the loop; run `terminate` (reason :normal) first if present.
         stop-clause (if term-clause
-                      `([:$stop] (let (~(second term-clause) :normal) ~@(rest (rest term-clause))) nil)
+                      `([:$stop] (let (~(second term-clause) :normal) ~@(rest (rest term-clause)))
+                         nil)
                       `([:$stop] nil))
         ;; Default catch-all (last): drop an unrecognised message and keep state,
         ;; so it cannot pile up unmatched in the mailbox (OTP's default handle_info).

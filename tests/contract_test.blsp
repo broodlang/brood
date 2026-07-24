@@ -162,8 +162,8 @@
 (sig! c-head ((and pair (list int)) -> int))
 
 (defn c-never (x) x)
-(sig! c-never ((and int string) -> int))  ; NEVER — nothing satisfies both
-
+; NEVER — nothing satisfies both
+(sig! c-never ((and int string) -> int))
 (describe "intersection type checks (and)"
   (test "(and pair (list int)) accepts a non-empty list of ints"
     (assert= (c-head (list 1 2 3)) 1))

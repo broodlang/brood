@@ -1,1199 +1,1182 @@
-    use super::*;
-    // The submodules' items are still accessed by name in these tests —
-    // import them explicitly now that they're not all in this file.
-    use super::sigs::primitive_sig;
-    use crate::core::value::Tag;
-    use crate::syntax::reader;
-    use crate::types::Ty;
 
-    /// A full `Interp` — primitives + the loaded prelude. We need the prelude
-    /// in the global env so the new unbound-symbol diagnostic doesn't false-
-    /// flag every Brood-side stdlib name (`list`, `int?`, `zero?`, `inc`, …);
-    /// the previous primitives-only setup worked when the checker silently
-    /// skipped unknown callees, but Step 4's unbound check has to know what's
-    /// genuinely bound.
-    fn warnings(src: &str) -> Vec<String> {
-        let mut interp = crate::Interp::new();
-        let form = reader::read_one(&mut interp.heap, src).expect("parse");
-        check_form(&interp.heap, form)
+use super::*;
+// The submodules' items are still accessed by name in these tests —
+// import them explicitly now that they're not all in this file.
+use super::sigs::primitive_sig;
+use crate::core::value::Tag;
+use crate::syntax::reader;
+use crate::types::Ty;
+
+/// A full `Interp` — primitives + the loaded prelude. We need the prelude
+/// in the global env so the new unbound-symbol diagnostic doesn't false-
+/// flag every Brood-side stdlib name (`list`, `int?`, `zero?`, `inc`, …);
+/// the previous primitives-only setup worked when the checker silently
+/// skipped unknown callees, but Step 4's unbound check has to know what's
+/// genuinely bound.
+fn warnings(src: &str) -> Vec<String> {
+    let mut interp = crate::Interp::new();
+    let form = reader::read_one(&mut interp.heap, src).expect("parse");
+    check_form(&interp.heap, form)
+}
+
+#[test]
+fn checker_survives_pathologically_deep_forms() {
+    // Host-panic hardening (2026-07-23): a deeply-nested-but-legal form —
+    // the same class as the kernel's 60k-deep-value tests — must be
+    // *checked*, not blow the checker's native stack. check_into grows the
+    // stack in heap-backed segments (stacker), so this returns normally.
+    let mut interp = crate::Interp::new();
+    let identity = crate::core::value::intern("identity");
+    let mut form = Value::Int(1);
+    for _ in 0..30_000 {
+        let tail = interp.heap.alloc_pair(form, Value::Nil);
+        form = interp.heap.alloc_pair(Value::Sym(identity), tail);
     }
+    // No assertion on the warning list's content — the property under test
+    // is "returns instead of crashing the host".
+    let _ = check_file(&mut interp.heap, &[form]);
 
-    #[test]
-    fn checker_survives_pathologically_deep_forms() {
-        // Host-panic hardening (2026-07-23): a deeply-nested-but-legal form —
-        // the same class as the kernel's 60k-deep-value tests — must be
-        // *checked*, not blow the checker's native stack. check_into grows the
-        // stack in heap-backed segments (stacker), so this returns normally.
-        let mut interp = crate::Interp::new();
-        let identity = crate::core::value::intern("identity");
-        let mut form = Value::Int(1);
-        for _ in 0..30_000 {
-            let tail = interp.heap.alloc_pair(form, Value::Nil);
-            form = interp.heap.alloc_pair(Value::Sym(identity), tail);
-        }
-        // No assertion on the warning list's content — the property under test
-        // is "returns instead of crashing the host".
-        let _ = check_file(&mut interp.heap, &[form]);
-
-        // A deep `(do (do … (%register-sig …)))` chain exercises the OTHER
-        // recursive walker, `collect_register_sig_forms` (the one the initial
-        // hardening pass missed): it must grow the stack too, not SIGSEGV.
-        let do_sym = crate::core::value::intern("do");
-        let mut deep_do = Value::Nil; // an empty innermost `(do)`
-        for _ in 0..30_000 {
-            let inner = interp.heap.alloc_pair(Value::Sym(do_sym), deep_do);
-            let tail = interp.heap.alloc_pair(inner, Value::Nil);
-            deep_do = tail;
-        }
-        let top = interp.heap.alloc_pair(Value::Sym(do_sym), deep_do);
-        let _ = check_file(&mut interp.heap, &[top]);
+    // A deep `(do (do … (%register-sig …)))` chain exercises the OTHER
+    // recursive walker, `collect_register_sig_forms` (the one the initial
+    // hardening pass missed): it must grow the stack too, not SIGSEGV.
+    let do_sym = crate::core::value::intern("do");
+    let mut deep_do = Value::Nil; // an empty innermost `(do)`
+    for _ in 0..30_000 {
+        let inner = interp.heap.alloc_pair(Value::Sym(do_sym), deep_do);
+        let tail = interp.heap.alloc_pair(inner, Value::Nil);
+        deep_do = tail;
     }
+    let top = interp.heap.alloc_pair(Value::Sym(do_sym), deep_do);
+    let _ = check_file(&mut interp.heap, &[top]);
+}
 
-    /// `warnings` but with macroexpansion — what `(check 'form)` and
-    /// `check-file` actually do. Required to exercise post-expansion shapes
-    /// like `match` (a `defmacro` whose pattern compiler lowers to
-    /// `let`+`if`+`%eq`), threading macros, and the test-framework wrappers.
-    fn warnings_expanded(src: &str) -> Vec<String> {
-        let mut interp = crate::Interp::new();
-        let form = reader::read_one(&mut interp.heap, src).expect("parse");
-        let form =
-            crate::eval::macros::macroexpand_all(&mut interp.heap, form, interp.root).unwrap();
-        check_form(&interp.heap, form)
-    }
+/// `warnings` but with macroexpansion — what `(check 'form)` and
+/// `check-file` actually do. Required to exercise post-expansion shapes
+/// like `match` (a `defmacro` whose pattern compiler lowers to
+/// `let`+`if`+`%eq`), threading macros, and the test-framework wrappers.
+fn warnings_expanded(src: &str) -> Vec<String> {
+    let mut interp = crate::Interp::new();
+    let form = reader::read_one(&mut interp.heap, src).expect("parse");
+    let form = crate::eval::macros::macroexpand_all(&mut interp.heap, form, interp.root).unwrap();
+    check_form(&interp.heap, form)
+}
 
-    /// Whole-file checking — what `nest check` runs. Unlike [`warnings`] (a bare
-    /// fragment), this enables operand / value-slot unbound checking and threads
-    /// file-local def names, so it exercises the strict, file-mode behaviour.
-    fn file_warnings(src: &str) -> Vec<String> {
-        let interp = crate::Interp::new();
-        let mut heap = crate::core::heap::Heap::with_regions(
-            interp.heap.prelude_arc(),
-            interp.heap.runtime_arc(),
-        );
-        heap.set_global(crate::core::value::EnvId::GLOBAL);
-        let forms = crate::syntax::reader::read_all(&mut heap, src).expect("parse");
-        check_file(&mut heap, &forms)
-            .into_iter()
-            .map(|(_, m)| m)
-            .collect()
-    }
+/// Whole-file checking — what `nest check` runs. Unlike [`warnings`] (a bare
+/// fragment), this enables operand / value-slot unbound checking and threads
+/// file-local def names, so it exercises the strict, file-mode behaviour.
+fn file_warnings(src: &str) -> Vec<String> {
+    let interp = crate::Interp::new();
+    let mut heap =
+        crate::core::heap::Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());
+    heap.set_global(crate::core::value::EnvId::GLOBAL);
+    let forms = crate::syntax::reader::read_all(&mut heap, src).expect("parse");
+    check_file(&mut heap, &forms)
+        .into_iter()
+        .map(|(_, m)| m)
+        .collect()
+}
 
-    // ---- protocol conformance (Pass 2.6) ----
-    // `file_warnings` returns *all* diagnostics; these assert on the protocol ones
-    // with `.contains` (the un-defined `defprotocol`/`defimpl` macros also draw
-    // unbound-symbol noise in a bare test interp, which is irrelevant here).
+// ---- protocol conformance (Pass 2.6) ----
+// `file_warnings` returns *all* diagnostics; these assert on the protocol ones
+// with `.contains` (the un-defined `defprotocol`/`defimpl` macros also draw
+// unbound-symbol noise in a bare test interp, which is irrelevant here).
 
-    #[test]
-    fn protocol_flags_a_missing_op() {
-        let ws = file_warnings("(defprotocol P (a [x]) (b [x]))\n(defimpl P :int (a [x] x))");
-        assert!(ws.iter().any(|w| w.contains("missing op `b`")), "{ws:?}");
-    }
+#[test]
+fn protocol_flags_a_missing_op() {
+    let ws = file_warnings("(defprotocol P (a [x]) (b [x]))\n(defimpl P :int (a [x] x))");
+    assert!(ws.iter().any(|w| w.contains("missing op `b`")), "{ws:?}");
+}
 
-    #[test]
-    fn protocol_flags_an_arity_mismatch() {
-        let ws = file_warnings("(defprotocol P (a [x]))\n(defimpl P :int (a [x y] x))");
-        assert!(
-            ws.iter()
-                .any(|w| w.contains("`a` takes 1 arg(s), this impl has 2")),
-            "{ws:?}"
-        );
-    }
+#[test]
+fn protocol_flags_an_arity_mismatch() {
+    let ws = file_warnings("(defprotocol P (a [x]))\n(defimpl P :int (a [x y] x))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("`a` takes 1 arg(s), this impl has 2")),
+        "{ws:?}"
+    );
+}
 
-    #[test]
-    fn protocol_flags_an_undeclared_method() {
-        let ws = file_warnings("(defprotocol P (a [x]))\n(defimpl P :int (a [x] x) (z [x] x))");
-        assert!(ws.iter().any(|w| w.contains("has no op `z`")), "{ws:?}");
-    }
+#[test]
+fn protocol_flags_an_undeclared_method() {
+    let ws = file_warnings("(defprotocol P (a [x]))\n(defimpl P :int (a [x] x) (z [x] x))");
+    assert!(ws.iter().any(|w| w.contains("has no op `z`")), "{ws:?}");
+}
 
-    #[test]
-    fn protocol_complete_impl_is_clean() {
-        let ws =
-            file_warnings("(defprotocol P (a [x]) (b [x]))\n(defimpl P :int (a [x] x) (b [x] x))");
-        assert!(!ws.iter().any(|w| w.contains("missing op")), "{ws:?}");
-        assert!(!ws.iter().any(|w| w.contains("has no op")), "{ws:?}");
-        assert!(!ws.iter().any(|w| w.contains("takes")), "{ws:?}");
-    }
+#[test]
+fn protocol_complete_impl_is_clean() {
+    let ws = file_warnings("(defprotocol P (a [x]) (b [x]))\n(defimpl P :int (a [x] x) (b [x] x))");
+    assert!(!ws.iter().any(|w| w.contains("missing op")), "{ws:?}");
+    assert!(!ws.iter().any(|w| w.contains("has no op")), "{ws:?}");
+    assert!(!ws.iter().any(|w| w.contains("takes")), "{ws:?}");
+}
 
-    // ---- behaviour conformance: `(:implements …)` on a module ----
+// ---- behaviour conformance: `(:implements …)` on a module ----
 
-    #[test]
-    fn behaviour_flags_a_missing_callback() {
-        let ws = file_warnings(
+#[test]
+fn behaviour_flags_a_missing_callback() {
+    let ws = file_warnings(
             "(defbehaviour B (render [m]) (mount [p]))\n(defmodule foo (:implements B))\n(defn render (m) m)",
         );
-        assert!(
-            ws.iter()
-                .any(|w| w.contains("behaviour B: this module is missing `mount`")),
-            "{ws:?}"
-        );
-    }
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("behaviour B: this module is missing `mount`")),
+        "{ws:?}"
+    );
+}
 
-    #[test]
-    fn behaviour_flags_an_arity_mismatch() {
-        let ws = file_warnings(
-            "(defbehaviour B (render [m]))\n(defmodule foo (:implements B))\n(defn render (m extra) m)",
-        );
-        assert!(
-            ws.iter()
-                .any(|w| w.contains("`render` takes 2 arg(s), the behaviour needs 1")),
-            "{ws:?}"
-        );
-    }
+#[test]
+fn behaviour_flags_an_arity_mismatch() {
+    let ws = file_warnings(
+        "(defbehaviour B (render [m]))\n(defmodule foo (:implements B))\n(defn render (m extra) m)",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("`render` takes 2 arg(s), the behaviour needs 1")),
+        "{ws:?}"
+    );
+}
 
-    #[test]
-    fn behaviour_complete_module_is_clean() {
-        let ws = file_warnings(
-            "(defbehaviour B (render [m]))\n(defmodule foo (:implements B))\n(defn render (m) m)",
-        );
-        // No conformance diagnostic (the bare-interp "unbound symbol: defbehaviour"
-        // noise contains the substring "behaviour", so match the real messages).
-        assert!(
-            !ws.iter()
-                .any(|w| w.contains("module is missing") || w.contains("the behaviour needs")),
-            "{ws:?}"
-        );
-    }
+#[test]
+fn behaviour_complete_module_is_clean() {
+    let ws = file_warnings(
+        "(defbehaviour B (render [m]))\n(defmodule foo (:implements B))\n(defn render (m) m)",
+    );
+    // No conformance diagnostic (the bare-interp "unbound symbol: defbehaviour"
+    // noise contains the substring "behaviour", so match the real messages).
+    assert!(
+        !ws.iter()
+            .any(|w| w.contains("module is missing") || w.contains("the behaviour needs")),
+        "{ws:?}"
+    );
+}
 
-    /// The non-tail-recursion lint (`recursion::check_recursion`) over a
-    /// macroexpanded form — what `check-file`'s Pass 3.5 runs.
-    fn recursion_warnings(src: &str) -> Vec<String> {
-        let mut interp = crate::Interp::new();
-        let form = reader::read_one(&mut interp.heap, src).expect("parse");
-        let form =
-            crate::eval::macros::macroexpand_all(&mut interp.heap, form, interp.root).unwrap();
-        let mut out = Vec::new();
-        recursion::check_recursion(&interp.heap, form, &mut out);
-        out.into_iter().map(|(_, m)| m).collect()
-    }
+/// The non-tail-recursion lint (`recursion::check_recursion`) over a
+/// macroexpanded form — what `check-file`'s Pass 3.5 runs.
+fn recursion_warnings(src: &str) -> Vec<String> {
+    let mut interp = crate::Interp::new();
+    let form = reader::read_one(&mut interp.heap, src).expect("parse");
+    let form = crate::eval::macros::macroexpand_all(&mut interp.heap, form, interp.root).unwrap();
+    let mut out = Vec::new();
+    recursion::check_recursion(&interp.heap, form, &mut out);
+    out.into_iter().map(|(_, m)| m).collect()
+}
 
-    #[test]
-    fn flags_non_tail_self_recursion() {
-        // self-call as an argument to another call
-        assert!(
-            recursion_warnings("(defn fact (n) (if (= n 0) 1 (* n (fact (- n 1)))))")
-                .iter()
-                .any(|w| w.contains("fact") && w.contains("non-tail"))
-        );
-        assert!(recursion_warnings(
-            "(defn sum (xs) (if (empty? xs) 0 (+ (first xs) (sum (rest xs)))))"
-        )
+#[test]
+fn flags_non_tail_self_recursion() {
+    // self-call as an argument to another call
+    assert!(
+        recursion_warnings("(defn fact (n) (if (= n 0) 1 (* n (fact (- n 1)))))")
+            .iter()
+            .any(|w| w.contains("fact") && w.contains("non-tail"))
+    );
+    assert!(recursion_warnings(
+        "(defn sum (xs) (if (empty? xs) 0 (+ (first xs) (sum (rest xs)))))"
+    )
+    .iter()
+    .any(|w| w.contains("sum")));
+    // self-call as a let binding value
+    assert!(!recursion_warnings("(defn k (n) (let (m (k (- n 1))) m))").is_empty());
+    // first (tested) operand of `and`, and a `cond` test
+    assert!(!recursion_warnings("(defn p (n) (and (p n) (> n 0)))").is_empty());
+    assert!(!recursion_warnings("(defn g (n) (cond (g 0) :a :else :b))").is_empty());
+}
+
+#[test]
+fn no_warning_for_tail_recursion_or_higher_order() {
+    // proper tail calls in each tail-propagating special form
+    assert!(
+        recursion_warnings("(defn loop (n acc) (if (= n 0) acc (loop (- n 1) (* acc n))))")
+            .is_empty()
+    );
+    assert!(recursion_warnings("(defn down (n) (when (> n 0) (down (- n 1))))").is_empty());
+    assert!(recursion_warnings("(defn f (n) (cond (= n 0) :z :else (f (- n 1))))").is_empty());
+    assert!(recursion_warnings("(defn p (n) (and (> n 0) (p (- n 1))))").is_empty());
+    assert!(recursion_warnings("(defn k (n) (let (m (- n 1)) (k m)))").is_empty());
+    // a self-call inside a nested closure is a different frame — not flagged
+    assert!(recursion_warnings("(defn h (xs) (map (fn (x) (h x)) xs))").is_empty());
+    // non-recursive function
+    assert!(recursion_warnings("(defn g (x) (+ x 1))").is_empty());
+}
+
+#[test]
+fn flags_literal_misuse_of_primitives() {
+    // An int literal now infers as its singleton (B0), so the diagnostic
+    // names the exact value (`5`) rather than the coarse `int` tag.
+    assert!(warnings("(first 5)")
         .iter()
-        .any(|w| w.contains("sum")));
-        // self-call as a let binding value
-        assert!(!recursion_warnings("(defn k (n) (let (m (k (- n 1))) m))").is_empty());
-        // first (tested) operand of `and`, and a `cond` test
-        assert!(!recursion_warnings("(defn p (n) (and (p n) (> n 0)))").is_empty());
-        assert!(!recursion_warnings("(defn g (n) (cond (g 0) :a :else :b))").is_empty());
-    }
+        .any(|w| w.contains("first") && w.contains("got 5")));
+    // A keyword literal now infers as its singleton type, so the diagnostic
+    // names the exact value (`:k`) rather than the coarse `keyword` tag.
+    assert!(warnings("(string-length :k)")
+        .iter()
+        .any(|w| w.contains("string-length") && w.contains(":k")));
+    assert!(warnings("(%add 1 \"x\")")
+        .iter()
+        .any(|w| w.contains("%add")));
+    assert!(warnings("(vector-ref [1 2] :k)")
+        .iter()
+        .any(|w| w.contains("vector-ref")));
+}
 
-    #[test]
-    fn no_warning_for_tail_recursion_or_higher_order() {
-        // proper tail calls in each tail-propagating special form
-        assert!(recursion_warnings(
-            "(defn loop (n acc) (if (= n 0) acc (loop (- n 1) (* acc n))))"
-        )
-        .is_empty());
-        assert!(recursion_warnings("(defn down (n) (when (> n 0) (down (- n 1))))").is_empty());
-        assert!(recursion_warnings("(defn f (n) (cond (= n 0) :z :else (f (- n 1))))").is_empty());
-        assert!(recursion_warnings("(defn p (n) (and (> n 0) (p (- n 1))))").is_empty());
-        assert!(recursion_warnings("(defn k (n) (let (m (- n 1)) (k m)))").is_empty());
-        // a self-call inside a nested closure is a different frame — not flagged
-        assert!(recursion_warnings("(defn h (xs) (map (fn (x) (h x)) xs))").is_empty());
-        // non-recursive function
-        assert!(recursion_warnings("(defn g (x) (+ x 1))").is_empty());
-    }
+#[test]
+fn no_false_positives_when_type_is_unknown_or_right() {
+    assert!(warnings("(first (list 1 2))").is_empty()); // arg is a non-sig call → dynamic
+    assert!(warnings("(first xs)").is_empty()); // variable → dynamic
+    assert!(warnings("(first [1 2 3])").is_empty()); // vector is allowed
+    assert!(warnings("(%add 1 2)").is_empty());
+    assert!(warnings("(string-length \"hi\")").is_empty());
+}
 
-    #[test]
-    fn flags_literal_misuse_of_primitives() {
-        // An int literal now infers as its singleton (B0), so the diagnostic
-        // names the exact value (`5`) rather than the coarse `int` tag.
-        assert!(warnings("(first 5)")
-            .iter()
-            .any(|w| w.contains("first") && w.contains("got 5")));
-        // A keyword literal now infers as its singleton type, so the diagnostic
-        // names the exact value (`:k`) rather than the coarse `keyword` tag.
-        assert!(warnings("(string-length :k)")
-            .iter()
-            .any(|w| w.contains("string-length") && w.contains(":k")));
-        assert!(warnings("(%add 1 \"x\")")
-            .iter()
-            .any(|w| w.contains("%add")));
-        assert!(warnings("(vector-ref [1 2] :k)")
-            .iter()
-            .any(|w| w.contains("vector-ref")));
-    }
+#[test]
+fn propagates_primitive_result_types() {
+    // string-length returns int; first wants a list/vector → flag the int.
+    assert!(warnings("(first (string-length \"a\"))")
+        .iter()
+        .any(|w| w.contains("first") && w.contains("int")));
+}
 
-    #[test]
-    fn no_false_positives_when_type_is_unknown_or_right() {
-        assert!(warnings("(first (list 1 2))").is_empty()); // arg is a non-sig call → dynamic
-        assert!(warnings("(first xs)").is_empty()); // variable → dynamic
-        assert!(warnings("(first [1 2 3])").is_empty()); // vector is allowed
-        assert!(warnings("(%add 1 2)").is_empty());
-        assert!(warnings("(string-length \"hi\")").is_empty());
-    }
+#[test]
+fn an_any_result_is_not_a_false_positive() {
+    // vector-ref's result type is `any` (unknown), so feeding it to
+    // string-length (wants string) must NOT warn — `any` overlaps `string`.
+    assert!(warnings("(string-length (vector-ref [1] 0))").is_empty());
+}
 
-    #[test]
-    fn propagates_primitive_result_types() {
-        // string-length returns int; first wants a list/vector → flag the int.
-        assert!(warnings("(first (string-length \"a\"))")
-            .iter()
-            .any(|w| w.contains("first") && w.contains("int")));
-    }
+#[test]
+fn does_not_descend_into_quote() {
+    assert!(warnings("(quote (first 5))").is_empty());
+}
 
-    #[test]
-    fn an_any_result_is_not_a_false_positive() {
-        // vector-ref's result type is `any` (unknown), so feeding it to
-        // string-length (wants string) must NOT warn — `any` overlaps `string`.
-        assert!(warnings("(string-length (vector-ref [1] 0))").is_empty());
-    }
+#[test]
+fn curated_closures_are_checked() {
+    // `+`, `<`, `map` are Brood closures, but their curated sigs let us flag
+    // provable misuse — the headline cases.
+    assert!(warnings("(+ 1 \"x\")")
+        .iter()
+        .any(|w| w.contains('+') && w.contains("number")));
+    assert!(warnings("(< 1 :k)").iter().any(|w| w.contains('<')));
+    // map's first argument must be callable; an int is not.
+    assert!(warnings("(map 1 xs)")
+        .iter()
+        .any(|w| w.contains("map") && w.contains("argument 1")));
+    // Correct uses, and an unknown (variable) callable, stay silent.
+    assert!(warnings("(+ 1 2)").is_empty());
+    assert!(warnings("(map inc xs)").is_empty()); // inc is a variable → unknown
+}
 
-    #[test]
-    fn does_not_descend_into_quote() {
-        assert!(warnings("(quote (first 5))").is_empty());
-    }
+#[test]
+fn sig_declaration_is_read_by_the_checker() {
+    // A user (sig …) gives a branchy fn a signature the checker trusts:
+    // arguments checked against the declared params.
+    let w = file_warnings("(sig f (int -> int))\n(defn f (x) (if (> x 0) x (- x)))\n(f \"s\")");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("f:") && m.contains("argument 1") && m.contains("int")),
+        "declared param type should flag (f \"s\"): {w:?}"
+    );
+    // The declared *result* flows out: f : int, string-length wants string.
+    let w = file_warnings("(sig f (int -> int))\n(defn f (x) x)\n(string-length (f 3))");
+    assert!(
+        w.iter().any(|m| m.contains("string-length")),
+        "declared result type should flag string-length: {w:?}"
+    );
+    // Correct uses stay silent.
+    let w = file_warnings("(sig f (int -> int))\n(defn f (x) x)\n(f 3)\n(+ 1 (f 4))");
+    assert!(
+        w.iter().all(|m| !m.contains("expects")),
+        "correct uses of a declared fn must be silent: {w:?}"
+    );
+}
 
-    #[test]
-    fn curated_closures_are_checked() {
-        // `+`, `<`, `map` are Brood closures, but their curated sigs let us flag
-        // provable misuse — the headline cases.
-        assert!(warnings("(+ 1 \"x\")")
-            .iter()
-            .any(|w| w.contains('+') && w.contains("number")));
-        assert!(warnings("(< 1 :k)").iter().any(|w| w.contains('<')));
-        // map's first argument must be callable; an int is not.
-        assert!(warnings("(map 1 xs)")
-            .iter()
-            .any(|w| w.contains("map") && w.contains("argument 1")));
-        // Correct uses, and an unknown (variable) callable, stay silent.
-        assert!(warnings("(+ 1 2)").is_empty());
-        assert!(warnings("(map inc xs)").is_empty()); // inc is a variable → unknown
-    }
-
-    #[test]
-    fn sig_declaration_is_read_by_the_checker() {
-        // A user (sig …) gives a branchy fn a signature the checker trusts:
-        // arguments checked against the declared params.
-        let w = file_warnings("(sig f (int -> int))\n(defn f (x) (if (> x 0) x (- x)))\n(f \"s\")");
-        assert!(
-            w.iter()
-                .any(|m| m.contains("f:") && m.contains("argument 1") && m.contains("int")),
-            "declared param type should flag (f \"s\"): {w:?}"
-        );
-        // The declared *result* flows out: f : int, string-length wants string.
-        let w = file_warnings("(sig f (int -> int))\n(defn f (x) x)\n(string-length (f 3))");
-        assert!(
-            w.iter().any(|m| m.contains("string-length")),
-            "declared result type should flag string-length: {w:?}"
-        );
-        // Correct uses stay silent.
-        let w = file_warnings("(sig f (int -> int))\n(defn f (x) x)\n(f 3)\n(+ 1 (f 4))");
-        assert!(
-            w.iter().all(|m| !m.contains("expects")),
-            "correct uses of a declared fn must be silent: {w:?}"
-        );
-    }
-
-    #[test]
-    fn keyword_literal_types_in_a_sig_are_enforced() {
-        // A parameter typed as an enumerated keyword set flags a keyword outside it.
-        let w = file_warnings("(sig f ((or :a :b) -> int))\n(defn f (x) 1)\n(f :c)");
-        assert!(
-            w.iter()
-                .any(|m| m.contains("f:") && m.contains("argument 1") && m.contains(":a | :b")),
-            "a keyword outside the literal set should flag, naming it: {w:?}"
-        );
-        // A member of the set is fine.
-        let w = file_warnings("(sig f ((or :a :b) -> int))\n(defn f (x) 1)\n(f :a)");
-        assert!(
-            w.iter().all(|m| !m.contains("expects")),
-            "a keyword in the set must be silent: {w:?}"
-        );
-        // The declared literal *result* flows out and is checked too.
-        let w = file_warnings(
+#[test]
+fn keyword_literal_types_in_a_sig_are_enforced() {
+    // A parameter typed as an enumerated keyword set flags a keyword outside it.
+    let w = file_warnings("(sig f ((or :a :b) -> int))\n(defn f (x) 1)\n(f :c)");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("f:") && m.contains("argument 1") && m.contains(":a | :b")),
+        "a keyword outside the literal set should flag, naming it: {w:?}"
+    );
+    // A member of the set is fine.
+    let w = file_warnings("(sig f ((or :a :b) -> int))\n(defn f (x) 1)\n(f :a)");
+    assert!(
+        w.iter().all(|m| !m.contains("expects")),
+        "a keyword in the set must be silent: {w:?}"
+    );
+    // The declared literal *result* flows out and is checked too.
+    let w = file_warnings(
             "(sig mode (-> (or :maximized :fullscreen)))\n(defn mode () :maximized)\n(string-length (mode))",
         );
-        assert!(
-            w.iter().any(|m| m.contains("string-length")),
-            "a keyword-literal result feeding string-length should flag: {w:?}"
-        );
-    }
+    assert!(
+        w.iter().any(|m| m.contains("string-length")),
+        "a keyword-literal result feeding string-length should flag: {w:?}"
+    );
+}
 
-    #[test]
-    fn sig_declaration_handles_arity_unions_and_bad_exprs() {
-        // Arity comes from the declared param count for a file-local defn the
-        // read-only checker can't otherwise inspect.
-        let w = file_warnings("(sig g (int int -> int))\n(defn g (a b) (+ a b))\n(g 1)");
-        assert!(
-            w.iter().any(|m| m.contains("expected 2")),
-            "declared arity should flag (g 1): {w:?}"
-        );
-        // Union result type: (or int nil) — feeding it to a sink that wants a
-        // string is still a provable mismatch.
-        let w =
-            file_warnings("(sig h (int -> (or int nil)))\n(defn h (x) x)\n(string-length (h 1))");
-        assert!(
-            w.iter().any(|m| m.contains("string-length")),
-            "union result (int|nil) is disjoint from string: {w:?}"
-        );
-        // An unparseable type-expr is dropped — never a false signal.
-        let w = file_warnings("(sig k (bogus -> int))\n(defn k (x) x)\n(k \"s\")");
-        assert!(
-            w.iter()
-                .all(|m| !m.contains("k:") || !m.contains("argument")),
-            "an unrecognised type-expr must be ignored, not guessed: {w:?}"
-        );
-    }
+#[test]
+fn sig_declaration_handles_arity_unions_and_bad_exprs() {
+    // Arity comes from the declared param count for a file-local defn the
+    // read-only checker can't otherwise inspect.
+    let w = file_warnings("(sig g (int int -> int))\n(defn g (a b) (+ a b))\n(g 1)");
+    assert!(
+        w.iter().any(|m| m.contains("expected 2")),
+        "declared arity should flag (g 1): {w:?}"
+    );
+    // Union result type: (or int nil) — feeding it to a sink that wants a
+    // string is still a provable mismatch.
+    let w = file_warnings("(sig h (int -> (or int nil)))\n(defn h (x) x)\n(string-length (h 1))");
+    assert!(
+        w.iter().any(|m| m.contains("string-length")),
+        "union result (int|nil) is disjoint from string: {w:?}"
+    );
+    // An unparseable type-expr is dropped — never a false signal.
+    let w = file_warnings("(sig k (bogus -> int))\n(defn k (x) x)\n(k \"s\")");
+    assert!(
+        w.iter()
+            .all(|m| !m.contains("k:") || !m.contains("argument")),
+        "an unrecognised type-expr must be ignored, not guessed: {w:?}"
+    );
+}
 
-    #[test]
-    fn variadic_defn_with_sig_does_not_get_a_false_arity_warning() {
-        // Regression: the `(sig …)` parser only builds *fixed*-arity sigs, so a
-        // sig on a **variadic** defn would record an exact arity equal to the
-        // declared param count. A read-only whole-file check can't inspect the
-        // real (unevaluated) closure, so it falls back to that count — and a call
-        // with more args than the sig lists would falsely warn. The def site's
-        // own `& rest` must suppress the sig-derived exact arity.
-        let w = file_warnings("(sig f (int -> int))\n(defn f (x & rest) x)\n(f 1 2 3)");
-        assert!(
-            w.iter()
-                .all(|m| !(m.contains("f:") && m.contains("number of arguments"))),
-            "a variadic defn must not get a false arity warning: {w:?}"
-        );
-        // `&rest` spelling, and below the declared count is fine too.
-        let w = file_warnings("(sig g (int int -> int))\n(defn g (a &rest more) a)\n(g 1 2 3 4)");
-        assert!(
-            w.iter()
-                .all(|m| !(m.contains("g:") && m.contains("number of arguments"))),
-            "&rest variadic defn must not get a false arity warning: {w:?}"
-        );
-        // A multi-arity fn with a variadic arm is likewise variadic.
-        let w = file_warnings("(sig h (int -> int))\n(defn h ((x) x) ((x & ys) x))\n(h 1 2 3)");
-        assert!(
-            w.iter()
-                .all(|m| !(m.contains("h:") && m.contains("number of arguments"))),
-            "multi-arity variadic defn must not get a false arity warning: {w:?}"
-        );
-        // Control: a *fixed*-arity sig'd defn STILL gets its arity checked (the
-        // fix must not over-suppress) — mirrors the case above.
-        let w = file_warnings("(sig p (int int -> int))\n(defn p (a b) (+ a b))\n(p 1)");
-        assert!(
-            w.iter().any(|m| m.contains("expected 2")),
-            "fixed-arity sig'd defn must still be arity-checked: {w:?}"
-        );
-    }
+#[test]
+fn variadic_defn_with_sig_does_not_get_a_false_arity_warning() {
+    // Regression: the `(sig …)` parser only builds *fixed*-arity sigs, so a
+    // sig on a **variadic** defn would record an exact arity equal to the
+    // declared param count. A read-only whole-file check can't inspect the
+    // real (unevaluated) closure, so it falls back to that count — and a call
+    // with more args than the sig lists would falsely warn. The def site's
+    // own `& rest` must suppress the sig-derived exact arity.
+    let w = file_warnings("(sig f (int -> int))\n(defn f (x & rest) x)\n(f 1 2 3)");
+    assert!(
+        w.iter()
+            .all(|m| !(m.contains("f:") && m.contains("number of arguments"))),
+        "a variadic defn must not get a false arity warning: {w:?}"
+    );
+    // `&rest` spelling, and below the declared count is fine too.
+    let w = file_warnings("(sig g (int int -> int))\n(defn g (a &rest more) a)\n(g 1 2 3 4)");
+    assert!(
+        w.iter()
+            .all(|m| !(m.contains("g:") && m.contains("number of arguments"))),
+        "&rest variadic defn must not get a false arity warning: {w:?}"
+    );
+    // A multi-arity fn with a variadic arm is likewise variadic.
+    let w = file_warnings("(sig h (int -> int))\n(defn h ((x) x) ((x & ys) x))\n(h 1 2 3)");
+    assert!(
+        w.iter()
+            .all(|m| !(m.contains("h:") && m.contains("number of arguments"))),
+        "multi-arity variadic defn must not get a false arity warning: {w:?}"
+    );
+    // Control: a *fixed*-arity sig'd defn STILL gets its arity checked (the
+    // fix must not over-suppress) — mirrors the case above.
+    let w = file_warnings("(sig p (int int -> int))\n(defn p (a b) (+ a b))\n(p 1)");
+    assert!(
+        w.iter().any(|m| m.contains("expected 2")),
+        "fixed-arity sig'd defn must still be arity-checked: {w:?}"
+    );
+}
 
-    #[test]
-    fn optional_sig_params_parse_and_check() {
-        // `&optional` in `(sig …)` grammar — previously unsupported: the whole
-        // arrow silently failed to parse (no marker recognized `&optional`,
-        // so `parse_type` on that symbol returned `None`, propagating out
-        // through `parse_arrow`), meaning the sig vanished with zero warning
-        // at all, not just an unchecked optional slot.
+#[test]
+fn optional_sig_params_parse_and_check() {
+    // `&optional` in `(sig …)` grammar — previously unsupported: the whole
+    // arrow silently failed to parse (no marker recognized `&optional`,
+    // so `parse_type` on that symbol returned `None`, propagating out
+    // through `parse_arrow`), meaning the sig vanished with zero warning
+    // at all, not just an unchecked optional slot.
 
-        // Call-site: the optional argument's declared type is checked, same
-        // as a required one.
-        let w = file_warnings(
-            "(sig g (int &optional string -> int))\n(defn g (a &optional b) a)\n(g 1 2)",
-        );
-        assert!(
-            w.iter()
-                .any(|m| m.contains("g: argument 2 expects string") && m.contains("got 2")),
-            "an optional arg's declared type must be checked: {w:?}"
-        );
+    // Call-site: the optional argument's declared type is checked, same
+    // as a required one.
+    let w =
+        file_warnings("(sig g (int &optional string -> int))\n(defn g (a &optional b) a)\n(g 1 2)");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("g: argument 2 expects string") && m.contains("got 2")),
+        "an optional arg's declared type must be checked: {w:?}"
+    );
 
-        // Arity: calling with just the required arg, or with the optional
-        // one supplied, is fine; one too many is an arity error.
-        let w = file_warnings(
-            "(sig g (int &optional string -> int))\n(defn g (a &optional b) a)\n(g 1)",
-        );
-        assert!(
-            w.iter().all(|m| !m.contains("number of arguments")),
-            "omitting an optional arg must not warn: {w:?}"
-        );
-        let w = file_warnings(
-            r#"(sig g (int &optional string -> int))
+    // Arity: calling with just the required arg, or with the optional
+    // one supplied, is fine; one too many is an arity error.
+    let w =
+        file_warnings("(sig g (int &optional string -> int))\n(defn g (a &optional b) a)\n(g 1)");
+    assert!(
+        w.iter().all(|m| !m.contains("number of arguments")),
+        "omitting an optional arg must not warn: {w:?}"
+    );
+    let w = file_warnings(
+        r#"(sig g (int &optional string -> int))
 (defn g (a &optional b) a)
 (g 1 "x")"#,
-        );
-        assert!(
-            w.iter()
-                .all(|m| !m.contains("number of arguments") && !m.contains("expects string")),
-            "supplying the optional arg with the right type must not warn: {w:?}"
-        );
-        let w = file_warnings(
-            "(sig g (int &optional string -> int))\n(defn g (a &optional b) a)\n(g 1 \"x\" 2)",
-        );
-        assert!(
-            w.iter().any(|m| m.contains("number of arguments")),
-            "one arg beyond required+optional must still be an arity error: {w:?}"
-        );
+    );
+    assert!(
+        w.iter()
+            .all(|m| !m.contains("number of arguments") && !m.contains("expects string")),
+        "supplying the optional arg with the right type must not warn: {w:?}"
+    );
+    let w = file_warnings(
+        "(sig g (int &optional string -> int))\n(defn g (a &optional b) a)\n(g 1 \"x\" 2)",
+    );
+    assert!(
+        w.iter().any(|m| m.contains("number of arguments")),
+        "one arg beyond required+optional must still be an arity error: {w:?}"
+    );
 
-        // Body seeding: an optional param is widened with `nil` (it may
-        // genuinely be absent), so a defensive `(nil? b)` check is never
-        // mistaken for dead code the way an exact required-param contract
-        // would be — but real misuse (using it unconditionally as if it
-        // can't be nil) is still caught.
-        let w = file_warnings(
-            "(sig g (int &optional string -> int))\n\
+    // Body seeding: an optional param is widened with `nil` (it may
+    // genuinely be absent), so a defensive `(nil? b)` check is never
+    // mistaken for dead code the way an exact required-param contract
+    // would be — but real misuse (using it unconditionally as if it
+    // can't be nil) is still caught.
+    let w = file_warnings(
+        "(sig g (int &optional string -> int))\n\
              (defn g (a &optional b) (if (nil? b) a (+ a (string-length b))))",
-        );
-        assert!(
-            w.is_empty(),
-            "a defensive nil-check on an optional param must not warn: {w:?}"
-        );
-        let w = file_warnings(
-            "(sig g (int &optional string -> int))\n(defn g (a &optional b) (+ a b))",
-        );
-        assert!(
-            w.iter()
-                .any(|m| m.contains("+: argument 2 expects number") && m.contains("nil | string")),
-            "using an optional param unconditionally as non-nil must still warn: {w:?}"
-        );
+    );
+    assert!(
+        w.is_empty(),
+        "a defensive nil-check on an optional param must not warn: {w:?}"
+    );
+    let w =
+        file_warnings("(sig g (int &optional string -> int))\n(defn g (a &optional b) (+ a b))");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("+: argument 2 expects number") && m.contains("nil | string")),
+        "using an optional param unconditionally as non-nil must still warn: {w:?}"
+    );
 
-        // `&optional` combined with a trailing `&` rest, mirroring a
-        // closure's full `(req &optional opt & rest)` shape.
-        let w = file_warnings(
+    // `&optional` combined with a trailing `&` rest, mirroring a
+    // closure's full `(req &optional opt & rest)` shape.
+    let w = file_warnings(
             "(sig h (int &optional string & number -> int))\n(defn h (a &optional b & c) a)\n(h 1 \"x\" true)",
         );
-        assert!(
-            w.iter()
-                .any(|m| m.contains("h: argument 3 expects number") && m.contains("got true")),
-            "a rest arg after an optional one must still be checked: {w:?}"
-        );
+    assert!(
+        w.iter()
+            .any(|m| m.contains("h: argument 3 expects number") && m.contains("got true")),
+        "a rest arg after an optional one must still be checked: {w:?}"
+    );
 
-        // Malformed order (`&` before `&optional`) is rejected by the parser
-        // (dropped, not guessed) rather than misparsed into something
-        // incorrect — the sig is simply absent, so nothing about `k` is
-        // checked, but nothing crashes either.
-        let w = file_warnings("(sig k (int & number &optional string -> int))\n(defn k (a) a)");
-        assert!(
-            w.iter().all(|m| !m.contains("k:")),
-            "a malformed marker order must drop the sig silently, not misparse: {w:?}"
-        );
-    }
+    // Malformed order (`&` before `&optional`) is rejected by the parser
+    // (dropped, not guessed) rather than misparsed into something
+    // incorrect — the sig is simply absent, so nothing about `k` is
+    // checked, but nothing crashes either.
+    let w = file_warnings("(sig k (int & number &optional string -> int))\n(defn k (a) a)");
+    assert!(
+        w.iter().all(|m| !m.contains("k:")),
+        "a malformed marker order must drop the sig silently, not misparse: {w:?}"
+    );
+}
 
-    #[test]
-    fn tuple_sig_params_parse_and_check() {
-        // `(tuple T1 T2 …)` — a fixed-arity positional vector shape
-        // (ADR-128). A vector *literal* infers its exact per-position types
-        // (not a widened uniform element type), so a mismatched literal
-        // argument is caught by the ordinary disjointness check — no new
-        // machinery needed at the call site itself.
-        let w = file_warnings("(sig f ((tuple int string) -> any))\n(defn f (t) t)\n(f [\"x\" 1])");
-        assert!(
-            w.iter()
-                .any(|m| m.contains("f: argument 1 expects (tuple int, string)")
-                    && m.contains("got (tuple \"x\", 1)")),
-            "a mismatched tuple-shaped literal argument must warn: {w:?}"
-        );
-        let w = file_warnings("(sig f ((tuple int string) -> any))\n(defn f (t) t)\n(f [1 \"x\"])");
-        assert!(
-            w.is_empty(),
-            "a matching tuple-shaped literal must not warn: {w:?}"
-        );
+#[test]
+fn tuple_sig_params_parse_and_check() {
+    // `(tuple T1 T2 …)` — a fixed-arity positional vector shape
+    // (ADR-128). A vector *literal* infers its exact per-position types
+    // (not a widened uniform element type), so a mismatched literal
+    // argument is caught by the ordinary disjointness check — no new
+    // machinery needed at the call site itself.
+    let w = file_warnings("(sig f ((tuple int string) -> any))\n(defn f (t) t)\n(f [\"x\" 1])");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("f: argument 1 expects (tuple int, string)")
+                && m.contains("got (tuple \"x\", 1)")),
+        "a mismatched tuple-shaped literal argument must warn: {w:?}"
+    );
+    let w = file_warnings("(sig f ((tuple int string) -> any))\n(defn f (t) t)\n(f [1 \"x\"])");
+    assert!(
+        w.is_empty(),
+        "a matching tuple-shaped literal must not warn: {w:?}"
+    );
 
-        // Different arity is disjoint too (a vector has one definite length).
-        let w = file_warnings(
-            "(sig f ((tuple int string) -> any))\n(defn f (t) t)\n(f [1 \"x\" true])",
-        );
-        assert!(
-            w.iter().any(|m| m.contains("f: argument 1")),
-            "a wrong-arity tuple literal must warn: {w:?}"
-        );
+    // Different arity is disjoint too (a vector has one definite length).
+    let w =
+        file_warnings("(sig f ((tuple int string) -> any))\n(defn f (t) t)\n(f [1 \"x\" true])");
+    assert!(
+        w.iter().any(|m| m.contains("f: argument 1")),
+        "a wrong-arity tuple literal must warn: {w:?}"
+    );
 
-        // Position-aware `first`/`second`/`third`/`last`/`nth` on a
-        // tuple-typed param: each resolves to its *exact* position's type
-        // (not the coarse union every other element access falls back to),
-        // so a mismatch on the specific position used is caught.
-        let w = file_warnings(
-            "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (first t)))",
-        );
-        assert!(
-            w.iter().any(
-                |m| m.contains("string-length: argument 1 expects string") && m.contains("int")
-            ),
-            "first on a tuple must resolve to position 0's exact type: {w:?}"
-        );
-        let w = file_warnings(
-            "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (second t)))",
-        );
-        assert!(
-            w.is_empty(),
-            "second on this tuple is already a string — no warning: {w:?}"
-        );
-        let w = file_warnings(
-            "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (nth t 0)))",
-        );
-        assert!(
-            w.iter().any(
-                |m| m.contains("string-length: argument 1 expects string") && m.contains("int")
-            ),
-            "a literal-index nth on a tuple must resolve position-exactly: {w:?}"
-        );
-        let w = file_warnings(
-            "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (nth t 1)))",
-        );
-        assert!(
-            w.is_empty(),
-            "nth at the string position must not warn: {w:?}"
-        );
+    // Position-aware `first`/`second`/`third`/`last`/`nth` on a
+    // tuple-typed param: each resolves to its *exact* position's type
+    // (not the coarse union every other element access falls back to),
+    // so a mismatch on the specific position used is caught.
+    let w = file_warnings(
+        "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (first t)))",
+    );
+    assert!(
+        w.iter()
+            .any(|m| m.contains("string-length: argument 1 expects string") && m.contains("int")),
+        "first on a tuple must resolve to position 0's exact type: {w:?}"
+    );
+    let w = file_warnings(
+        "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (second t)))",
+    );
+    assert!(
+        w.is_empty(),
+        "second on this tuple is already a string — no warning: {w:?}"
+    );
+    let w = file_warnings(
+        "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (nth t 0)))",
+    );
+    assert!(
+        w.iter()
+            .any(|m| m.contains("string-length: argument 1 expects string") && m.contains("int")),
+        "a literal-index nth on a tuple must resolve position-exactly: {w:?}"
+    );
+    let w = file_warnings(
+        "(sig f ((tuple int string) -> any))\n(defn f (t) (string-length (nth t 1)))",
+    );
+    assert!(
+        w.is_empty(),
+        "nth at the string position must not warn: {w:?}"
+    );
 
-        // Return-type flow: a tuple-shaped return type is checked against
-        // the body's inferred literal shape, same as any other declared
-        // return type.
-        let w = file_warnings(
-            r#"(sig f (-> (tuple int string)))
+    // Return-type flow: a tuple-shaped return type is checked against
+    // the body's inferred literal shape, same as any other declared
+    // return type.
+    let w = file_warnings(
+        r#"(sig f (-> (tuple int string)))
 (defn f () ["x" 1])"#,
-        );
-        assert!(
-            w.iter()
-                .any(|m| m.contains("f: declared return type (tuple int, string)")),
-            "a mismatched declared tuple return type must warn: {w:?}"
-        );
+    );
+    assert!(
+        w.iter()
+            .any(|m| m.contains("f: declared return type (tuple int, string)")),
+        "a mismatched declared tuple return type must warn: {w:?}"
+    );
 
-        // A tuple is a subtype of the corresponding uniform vector type (every
-        // element of a `tuple<int,string>` is an `int | string`) — so passing
-        // a tuple-shaped literal where a plain `(vector …)` is expected must
-        // not warn just because the shapes differ.
-        let w = file_warnings("(sig g ((vector any) -> any))\n(defn g (v) v)\n(g [1 \"x\"])");
-        assert!(
-            w.is_empty(),
-            "a tuple literal must satisfy a uniform vector param: {w:?}"
-        );
-    }
+    // A tuple is a subtype of the corresponding uniform vector type (every
+    // element of a `tuple<int,string>` is an `int | string`) — so passing
+    // a tuple-shaped literal where a plain `(vector …)` is expected must
+    // not warn just because the shapes differ.
+    let w = file_warnings("(sig g ((vector any) -> any))\n(defn g (v) v)\n(g [1 \"x\"])");
+    assert!(
+        w.is_empty(),
+        "a tuple literal must satisfy a uniform vector param: {w:?}"
+    );
+}
 
-    #[test]
-    fn dead_clause_flagged_for_a_sig_typed_param() {
-        // A `match` literal pattern that can't match the parameter's declared type.
-        let w = file_warnings(
-            "(sig f (int -> keyword))\n(defn f (n) (match n (\"hi\" :s) (_ :other)))",
-        );
-        assert!(
-            w.iter()
-                .any(|m| m.contains("unreachable clause") && m.contains("int")),
-            "a string-literal clause when n : int should be dead: {w:?}"
-        );
-        // A `cond` predicate disjoint from the declared parameter type.
-        let w =
-            file_warnings("(sig g (int -> keyword))\n(defn g (n) (cond (string? n) :s :else :o))");
-        assert!(
-            w.iter().any(|m| m.contains("unreachable clause")),
-            "(string? n) when n : int should be dead: {w:?}"
-        );
-    }
+#[test]
+fn dead_clause_flagged_for_a_sig_typed_param() {
+    // A `match` literal pattern that can't match the parameter's declared type.
+    let w =
+        file_warnings("(sig f (int -> keyword))\n(defn f (n) (match n (\"hi\" :s) (_ :other)))");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("unreachable clause") && m.contains("int")),
+        "a string-literal clause when n : int should be dead: {w:?}"
+    );
+    // A `cond` predicate disjoint from the declared parameter type.
+    let w = file_warnings("(sig g (int -> keyword))\n(defn g (n) (cond (string? n) :s :else :o))");
+    assert!(
+        w.iter().any(|m| m.contains("unreachable clause")),
+        "(string? n) when n : int should be dead: {w:?}"
+    );
+}
 
-    #[test]
-    fn dead_clause_silent_without_sig_or_when_compatible_or_a_literal_scrutinee() {
-        // No `sig` → the parameter is untyped → never flagged (no false positive).
-        assert!(
-            file_warnings("(defn k (n) (match n (\"hi\" :s) (_ :o)))")
-                .iter()
-                .all(|m| !m.contains("unreachable")),
-            "no sig ⇒ no dead-clause"
-        );
-        // A recognised but *compatible* guard narrows, it isn't dead.
-        assert!(
-            file_warnings("(sig h (int -> keyword))\n(defn h (n) (cond (int? n) :i :else :o))")
-                .iter()
-                .all(|m| !m.contains("unreachable")),
-            "(int? n) when n : int must not flag"
-        );
-        // A literal scrutinee is not a sig-typed param — the gate excludes it (this
-        // is the intentional non-match test shape that the naive lint flagged).
-        assert!(
-            file_warnings("(defn m () (match [1 2] ((a) :one) (_ :o)))")
-                .iter()
-                .all(|m| !m.contains("unreachable")),
-            "a literal scrutinee must never be flagged dead"
-        );
-    }
-
-    #[test]
-    fn dead_clause_flagged_for_a_precise_let_local() {
-        // ADR-131: the dead-clause lint now covers a *precise, surface* `let`-local,
-        // not just a sig-typed param. `x` is statically `5` (a literal, precise), so
-        // a `string?` clause can never run.
-        let w = file_warnings("(defn f () (let (x 5) (cond (string? x) :a :else :b)))");
-        assert!(
-            w.iter()
-                .any(|m| m.contains("unreachable clause") && m.contains("string")),
-            "a string? clause on a let-local typed 5 should be dead: {w:?}"
-        );
-        // A `match` literal pattern disjoint from the local's type is dead too.
-        let w = file_warnings("(defn g () (let (x 5) (match x (\"hi\" :s) (_ :o))))");
-        assert!(
-            w.iter().any(|m| m.contains("unreachable clause")),
-            "a string-literal pattern on a let-local typed int should be dead: {w:?}"
-        );
-    }
-
-    #[test]
-    fn dead_clause_let_local_respects_precision_gensym_and_compatibility() {
-        // A *compatible* guard narrows without emptying — not dead.
-        assert!(
-            file_warnings("(defn a () (let (x 5) (cond (int? x) :a :else :b)))")
-                .iter()
-                .all(|m| !m.contains("unreachable")),
-            "(int? x) when x : int must not flag"
-        );
-        // A local bound to a **call result** is `dynamic` (redefinable → the type
-        // could change on reload), so it's excluded — no dead-clause warning even
-        // though the current-image type would narrow to `never`. Reload-safe.
-        assert!(
-            file_warnings(
-                "(defn h () 5)\n(defn b () (let (x (h)) (cond (string? x) :a :else :b)))"
-            )
+#[test]
+fn dead_clause_silent_without_sig_or_when_compatible_or_a_literal_scrutinee() {
+    // No `sig` → the parameter is untyped → never flagged (no false positive).
+    assert!(
+        file_warnings("(defn k (n) (match n (\"hi\" :s) (_ :o)))")
             .iter()
             .all(|m| !m.contains("unreachable")),
-            "a call-result local is dynamic and must not be flagged dead"
-        );
-        // A **gensym** temporary (macro-introduced) is exempt — warning on a name
-        // the user can't rename would be noise.
+        "no sig ⇒ no dead-clause"
+    );
+    // A recognised but *compatible* guard narrows, it isn't dead.
+    assert!(
+        file_warnings("(sig h (int -> keyword))\n(defn h (n) (cond (int? n) :i :else :o))")
+            .iter()
+            .all(|m| !m.contains("unreachable")),
+        "(int? n) when n : int must not flag"
+    );
+    // A literal scrutinee is not a sig-typed param — the gate excludes it (this
+    // is the intentional non-match test shape that the naive lint flagged).
+    assert!(
+        file_warnings("(defn m () (match [1 2] ((a) :one) (_ :o)))")
+            .iter()
+            .all(|m| !m.contains("unreachable")),
+        "a literal scrutinee must never be flagged dead"
+    );
+}
+
+#[test]
+fn dead_clause_flagged_for_a_precise_let_local() {
+    // ADR-131: the dead-clause lint now covers a *precise, surface* `let`-local,
+    // not just a sig-typed param. `x` is statically `5` (a literal, precise), so
+    // a `string?` clause can never run.
+    let w = file_warnings("(defn f () (let (x 5) (cond (string? x) :a :else :b)))");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("unreachable clause") && m.contains("string")),
+        "a string? clause on a let-local typed 5 should be dead: {w:?}"
+    );
+    // A `match` literal pattern disjoint from the local's type is dead too.
+    let w = file_warnings("(defn g () (let (x 5) (match x (\"hi\" :s) (_ :o))))");
+    assert!(
+        w.iter().any(|m| m.contains("unreachable clause")),
+        "a string-literal pattern on a let-local typed int should be dead: {w:?}"
+    );
+}
+
+#[test]
+fn dead_clause_let_local_respects_precision_gensym_and_compatibility() {
+    // A *compatible* guard narrows without emptying — not dead.
+    assert!(
+        file_warnings("(defn a () (let (x 5) (cond (int? x) :a :else :b)))")
+            .iter()
+            .all(|m| !m.contains("unreachable")),
+        "(int? x) when x : int must not flag"
+    );
+    // A local bound to a **call result** is `dynamic` (redefinable → the type
+    // could change on reload), so it's excluded — no dead-clause warning even
+    // though the current-image type would narrow to `never`. Reload-safe.
+    assert!(
+        file_warnings("(defn h () 5)\n(defn b () (let (x (h)) (cond (string? x) :a :else :b)))")
+            .iter()
+            .all(|m| !m.contains("unreachable")),
+        "a call-result local is dynamic and must not be flagged dead"
+    );
+    // A **gensym** temporary (macro-introduced) is exempt — warning on a name
+    // the user can't rename would be noise.
+    assert!(
+        file_warnings("(defn c () (let (x__1 5) (cond (string? x__1) :a :else :b)))")
+            .iter()
+            .all(|m| !m.contains("unreachable")),
+        "a gensym let-local must never be flagged dead"
+    );
+    // Shadowing a precise local with an unknown one drops eligibility.
+    assert!(
+        file_warnings("(defn d (y) (let (x 5) (let (x y) (cond (string? x) :a :else :b))))")
+            .iter()
+            .all(|m| !m.contains("unreachable")),
+        "a shadowing rebind of unknown type must not be flagged dead"
+    );
+}
+
+#[test]
+fn curated_helper_sigs_catch_misuse() {
+    // even?/odd?/abs require a number.
+    assert!(warnings("(even? \"x\")")
+        .iter()
+        .any(|w| w.contains("even?") && w.contains("number")));
+    assert!(warnings("(odd? :k)")
+        .iter()
+        .any(|w| w.contains("odd?") && w.contains("number")));
+    assert!(warnings("(abs :k)")
+        .iter()
+        .any(|w| w.contains("abs") && w.contains("number")));
+    // count/length want a string | map | sequence, not a number.
+    assert!(warnings("(count 5)").iter().any(|w| w.contains("count")));
+    assert!(warnings("(length :k)").iter().any(|w| w.contains("length")));
+    // not/zero? accept any arg but pin a bool *result*, so feeding it to a
+    // numeric sink is caught (the result-type payoff).
+    assert!(warnings("(+ 1 (not x))")
+        .iter()
+        .any(|w| w.contains('+') && w.contains("bool")));
+    assert!(warnings("(+ 1 (zero? x))")
+        .iter()
+        .any(|w| w.contains('+') && w.contains("bool")));
+    // Correct uses stay silent (no false positives).
+    for ok in [
+        "(even? 4)",
+        "(abs -3)",
+        "(count [1 2 3])",
+        "(count \"hi\")",
+        // `bytes` is seqable/countable: these iterate its octets at runtime.
+        "(count (bytes 1 2 3))",
+        "(first (bytes 1 2 3))",
+        "(rest (bytes 1 2 3))",
+        "(every? odd? (bytes 1 3 5))",
+        "(not x)",
+        "(zero? n)",
+    ] {
         assert!(
-            file_warnings("(defn c () (let (x__1 5) (cond (string? x__1) :a :else :b)))")
-                .iter()
-                .all(|m| !m.contains("unreachable")),
-            "a gensym let-local must never be flagged dead"
-        );
-        // Shadowing a precise local with an unknown one drops eligibility.
-        assert!(
-            file_warnings("(defn d (y) (let (x 5) (let (x y) (cond (string? x) :a :else :b))))")
-                .iter()
-                .all(|m| !m.contains("unreachable")),
-            "a shadowing rebind of unknown type must not be flagged dead"
+            warnings(ok).iter().all(|w| !w.contains("expects")),
+            "{ok} should be silent: {:?}",
+            warnings(ok)
         );
     }
+}
 
-    #[test]
-    fn curated_helper_sigs_catch_misuse() {
-        // even?/odd?/abs require a number.
-        assert!(warnings("(even? \"x\")")
-            .iter()
-            .any(|w| w.contains("even?") && w.contains("number")));
-        assert!(warnings("(odd? :k)")
-            .iter()
-            .any(|w| w.contains("odd?") && w.contains("number")));
-        assert!(warnings("(abs :k)")
-            .iter()
-            .any(|w| w.contains("abs") && w.contains("number")));
-        // count/length want a string | map | sequence, not a number.
-        assert!(warnings("(count 5)").iter().any(|w| w.contains("count")));
-        assert!(warnings("(length :k)").iter().any(|w| w.contains("length")));
-        // not/zero? accept any arg but pin a bool *result*, so feeding it to a
-        // numeric sink is caught (the result-type payoff).
-        assert!(warnings("(+ 1 (not x))")
-            .iter()
-            .any(|w| w.contains('+') && w.contains("bool")));
-        assert!(warnings("(+ 1 (zero? x))")
-            .iter()
-            .any(|w| w.contains('+') && w.contains("bool")));
-        // Correct uses stay silent (no false positives).
-        for ok in [
-            "(even? 4)",
-            "(abs -3)",
-            "(count [1 2 3])",
-            "(count \"hi\")",
-            // `bytes` is seqable/countable: these iterate its octets at runtime.
-            "(count (bytes 1 2 3))",
-            "(first (bytes 1 2 3))",
-            "(rest (bytes 1 2 3))",
-            "(every? odd? (bytes 1 3 5))",
-            "(not x)",
-            "(zero? n)",
-        ] {
-            assert!(
-                warnings(ok).iter().all(|w| !w.contains("expects")),
-                "{ok} should be silent: {:?}",
-                warnings(ok)
-            );
-        }
+#[test]
+fn curated_output_and_numeric_sigs() {
+    // println/eprintln/eprint return nil — feeding to a numeric sink is caught.
+    for f in ["println", "eprintln", "eprint"] {
+        let w = warnings(&format!("(+ 1 ({f} \"hi\"))"));
+        assert!(
+            w.iter().any(|s| s.contains('+') && s.contains("nil")),
+            "{f}: expected '+' nil-result warning, got {w:?}"
+        );
     }
-
-    #[test]
-    fn curated_output_and_numeric_sigs() {
-        // println/eprintln/eprint return nil — feeding to a numeric sink is caught.
-        for f in ["println", "eprintln", "eprint"] {
-            let w = warnings(&format!("(+ 1 ({f} \"hi\"))"));
-            assert!(
-                w.iter().any(|s| s.contains('+') && s.contains("nil")),
-                "{f}: expected '+' nil-result warning, got {w:?}"
-            );
-        }
-        // min/max require at least one number.
-        assert!(warnings("(min \"a\" 2)")
-            .iter()
-            .any(|w| w.contains("min") && w.contains("number")));
-        assert!(warnings("(max 1 :k)")
-            .iter()
-            .any(|w| w.contains("max") && w.contains("number")));
-        // min/max return a number — feeding to a string sink is caught.
-        assert!(warnings("(string-length (min 1 2))")
-            .iter()
-            .any(|w| w.contains("string-length")));
-        // Correct uses stay silent.
-        for ok in [
-            "(println \"hi\")",
-            "(min 1 2 3)",
-            "(max 0.5 1.5)",
-            "(+ 1 (min 2 3))",
-        ] {
-            assert!(
-                warnings(ok).iter().all(|w| !w.contains("expects")),
-                "{ok} should be silent: {:?}",
-                warnings(ok)
-            );
-        }
+    // min/max require at least one number.
+    assert!(warnings("(min \"a\" 2)")
+        .iter()
+        .any(|w| w.contains("min") && w.contains("number")));
+    assert!(warnings("(max 1 :k)")
+        .iter()
+        .any(|w| w.contains("max") && w.contains("number")));
+    // min/max return a number — feeding to a string sink is caught.
+    assert!(warnings("(string-length (min 1 2))")
+        .iter()
+        .any(|w| w.contains("string-length")));
+    // Correct uses stay silent.
+    for ok in [
+        "(println \"hi\")",
+        "(min 1 2 3)",
+        "(max 0.5 1.5)",
+        "(+ 1 (min 2 3))",
+    ] {
+        assert!(
+            warnings(ok).iter().all(|w| !w.contains("expects")),
+            "{ok} should be silent: {:?}",
+            warnings(ok)
+        );
     }
+}
 
-    #[test]
-    fn unused_let_binding_lint() {
-        // Basic unused binding — warned.
-        let w = file_warnings("(let (x 1) 2)");
-        assert!(
-            w.iter()
-                .any(|s| s.contains("unused let binding") && s.contains('x')),
-            "expected unused-binding warning for x, got {w:?}"
-        );
-        // Binding used in body — silent.
-        assert!(
-            file_warnings("(let (x 1) x)").is_empty(),
-            "used binding should be silent"
-        );
-        // Binding used in subsequent binding RHS — silent.
-        assert!(
-            file_warnings("(let (x 1 y (+ x 1)) y)").is_empty(),
-            "x used by y's RHS should be silent"
-        );
-        // Only one of two is unused.
-        let w = file_warnings("(let (x 1 y 2) x)");
-        assert!(
-            w.iter()
-                .any(|s| s.contains("unused let binding") && s.contains('y')),
-            "y should be flagged unused, got {w:?}"
-        );
-        assert!(
-            w.iter().all(|s| !s.contains('x') || !s.contains("unused")),
-            "x should not be flagged, got {w:?}"
-        );
-        // `_`-prefixed names are exempt.
-        assert!(
-            file_warnings("(let (_x 1) 2)").is_empty(),
-            "_x should be exempt from unused-binding lint"
-        );
-        // Gensym temporaries (`<prefix>__<n>`) are exempt: a macro expansion can
-        // attach its call-site position to the generated `let`, so the name — not
-        // the position — is the reliable "compiler-generated" signal.
-        assert!(
-            file_warnings("(let (m__1380 1) 2)").is_empty(),
-            "gensym-named binding should be exempt from unused-binding lint"
-        );
-        // …but a hand-written name that merely contains `__` (no trailing digits)
-        // is still linted.
-        assert!(
-            file_warnings("(let (my__thing 1) 2)")
-                .iter()
-                .any(|s| s.contains("unused let binding")),
-            "a non-gensym `__` name should still be flagged"
-        );
-        // match pattern variables (compiler-generated let, no source position)
-        // must be exempt — a common pattern: match on shape, ignore values.
-        assert!(
-            file_warnings("(match (list 1 2) ([a b] :vec) (_ :other))").is_empty(),
-            "match pattern variables should be exempt (no FP)"
-        );
-        // Nested let: inner binding used only in inner body.
-        assert!(
-            file_warnings("(let (x 1) (let (y x) y))").is_empty(),
-            "nested let: both x and y are used"
-        );
-        // letrec: mutual recursion keeps both used.
-        assert!(
-            file_warnings(
-                "(letrec (f (fn (n) (if (= n 0) 1 (g (- n 1)))) g (fn (n) (f n))) (f 5))"
-            )
+#[test]
+fn unused_let_binding_lint() {
+    // Basic unused binding — warned.
+    let w = file_warnings("(let (x 1) 2)");
+    assert!(
+        w.iter()
+            .any(|s| s.contains("unused let binding") && s.contains('x')),
+        "expected unused-binding warning for x, got {w:?}"
+    );
+    // Binding used in body — silent.
+    assert!(
+        file_warnings("(let (x 1) x)").is_empty(),
+        "used binding should be silent"
+    );
+    // Binding used in subsequent binding RHS — silent.
+    assert!(
+        file_warnings("(let (x 1 y (+ x 1)) y)").is_empty(),
+        "x used by y's RHS should be silent"
+    );
+    // Only one of two is unused.
+    let w = file_warnings("(let (x 1 y 2) x)");
+    assert!(
+        w.iter()
+            .any(|s| s.contains("unused let binding") && s.contains('y')),
+        "y should be flagged unused, got {w:?}"
+    );
+    assert!(
+        w.iter().all(|s| !s.contains('x') || !s.contains("unused")),
+        "x should not be flagged, got {w:?}"
+    );
+    // `_`-prefixed names are exempt.
+    assert!(
+        file_warnings("(let (_x 1) 2)").is_empty(),
+        "_x should be exempt from unused-binding lint"
+    );
+    // Gensym temporaries (`<prefix>__<n>`) are exempt: a macro expansion can
+    // attach its call-site position to the generated `let`, so the name — not
+    // the position — is the reliable "compiler-generated" signal.
+    assert!(
+        file_warnings("(let (m__1380 1) 2)").is_empty(),
+        "gensym-named binding should be exempt from unused-binding lint"
+    );
+    // …but a hand-written name that merely contains `__` (no trailing digits)
+    // is still linted.
+    assert!(
+        file_warnings("(let (my__thing 1) 2)")
+            .iter()
+            .any(|s| s.contains("unused let binding")),
+        "a non-gensym `__` name should still be flagged"
+    );
+    // match pattern variables (compiler-generated let, no source position)
+    // must be exempt — a common pattern: match on shape, ignore values.
+    assert!(
+        file_warnings("(match (list 1 2) ([a b] :vec) (_ :other))").is_empty(),
+        "match pattern variables should be exempt (no FP)"
+    );
+    // Nested let: inner binding used only in inner body.
+    assert!(
+        file_warnings("(let (x 1) (let (y x) y))").is_empty(),
+        "nested let: both x and y are used"
+    );
+    // letrec: mutual recursion keeps both used.
+    assert!(
+        file_warnings("(letrec (f (fn (n) (if (= n 0) 1 (g (- n 1)))) g (fn (n) (f n))) (f 5))")
             .is_empty(),
-            "letrec mutual recursion: both f and g are used"
-        );
-        // Binding used only inside a map literal — silent. Map literals are
-        // heap maps, not pairs, so the occurrence scan must descend into their
-        // keys and values too (regression: the editor's `{:start s :end e}`
-        // edit forms were all falsely flagged unused).
+        "letrec mutual recursion: both f and g are used"
+    );
+    // Binding used only inside a map literal — silent. Map literals are
+    // heap maps, not pairs, so the occurrence scan must descend into their
+    // keys and values too (regression: the editor's `{:start s :end e}`
+    // edit forms were all falsely flagged unused).
+    assert!(
+        file_warnings("(let (s 1) {:start s})").is_empty(),
+        "binding used as a map value should be silent"
+    );
+    assert!(
+        file_warnings("(let (k :a) {k 1})").is_empty(),
+        "binding used as a map key should be silent"
+    );
+    // …and a binding used only inside a closure that is itself a map value
+    // (the minibuffer `:on-complete (fn …)` pattern).
+    assert!(
+        file_warnings("(let (p 1) {:on-complete (fn (x) (+ x p))})").is_empty(),
+        "binding captured by a closure inside a map should be silent"
+    );
+    // The map descent must not mask genuine dead bindings.
+    let w = file_warnings("(let (s 1) {:start 2})");
+    assert!(
+        w.iter()
+            .any(|s| s.contains("unused let binding") && s.contains('s')),
+        "s unused even though a map literal is present, got {w:?}"
+    );
+}
+
+#[test]
+fn curated_equality_and_string_sigs() {
+    // = / not= are multi-arm closures; pin bool result so numeric sinks catch it.
+    assert!(warnings("(+ 1 (= x y))")
+        .iter()
+        .any(|w| w.contains('+') && w.contains("bool")));
+    assert!(warnings("(+ 1 (not= x y))")
+        .iter()
+        .any(|w| w.contains('+') && w.contains("bool")));
+    // number->string requires a number.
+    assert!(warnings("(number->string \"oops\")")
+        .iter()
+        .any(|w| w.contains("number->string") && w.contains("number")));
+    // number->string returns a string — feeding to string-length is fine (silent).
+    assert!(warnings("(string-length (number->string 42))").is_empty());
+    // string->symbol requires a string.
+    assert!(warnings("(string->symbol 99)")
+        .iter()
+        .any(|w| w.contains("string->symbol") && w.contains("string")));
+    // String predicates require string args.
+    for f in ["starts-with?", "ends-with?", "string-contains?"] {
         assert!(
-            file_warnings("(let (s 1) {:start s})").is_empty(),
-            "binding used as a map value should be silent"
-        );
-        assert!(
-            file_warnings("(let (k :a) {k 1})").is_empty(),
-            "binding used as a map key should be silent"
-        );
-        // …and a binding used only inside a closure that is itself a map value
-        // (the minibuffer `:on-complete (fn …)` pattern).
-        assert!(
-            file_warnings("(let (p 1) {:on-complete (fn (x) (+ x p))})").is_empty(),
-            "binding captured by a closure inside a map should be silent"
-        );
-        // The map descent must not mask genuine dead bindings.
-        let w = file_warnings("(let (s 1) {:start 2})");
-        assert!(
-            w.iter()
-                .any(|s| s.contains("unused let binding") && s.contains('s')),
-            "s unused even though a map literal is present, got {w:?}"
+            warnings(&format!("({f} 5 \"x\")"))
+                .iter()
+                .any(|w| w.contains(f) && w.contains("string")),
+            "{f}: expected string-domain warning"
         );
     }
-
-    #[test]
-    fn curated_equality_and_string_sigs() {
-        // = / not= are multi-arm closures; pin bool result so numeric sinks catch it.
-        assert!(warnings("(+ 1 (= x y))")
-            .iter()
-            .any(|w| w.contains('+') && w.contains("bool")));
-        assert!(warnings("(+ 1 (not= x y))")
-            .iter()
-            .any(|w| w.contains('+') && w.contains("bool")));
-        // number->string requires a number.
-        assert!(warnings("(number->string \"oops\")")
-            .iter()
-            .any(|w| w.contains("number->string") && w.contains("number")));
-        // number->string returns a string — feeding to string-length is fine (silent).
-        assert!(warnings("(string-length (number->string 42))").is_empty());
-        // string->symbol requires a string.
-        assert!(warnings("(string->symbol 99)")
-            .iter()
-            .any(|w| w.contains("string->symbol") && w.contains("string")));
-        // String predicates require string args.
-        for f in ["starts-with?", "ends-with?", "string-contains?"] {
-            assert!(
-                warnings(&format!("({f} 5 \"x\")"))
-                    .iter()
-                    .any(|w| w.contains(f) && w.contains("string")),
-                "{f}: expected string-domain warning"
-            );
-        }
-        assert!(warnings("(blank? 0)")
-            .iter()
-            .any(|w| w.contains("blank?") && w.contains("string")));
-        // String transforms require string args and return strings.
-        for f in ["trim", "triml", "trimr"] {
-            assert!(
-                warnings(&format!("({f} 5)"))
-                    .iter()
-                    .any(|w| w.contains(f) && w.contains("string")),
-                "{f}: expected string-domain warning"
-            );
-            // Result is string — safe to pass to string-length.
-            assert!(
-                warnings(&format!("(string-length ({f} s))")).is_empty(),
-                "{f}: result should type as string"
-            );
-        }
-        assert!(warnings("(replace 5 \"a\" \"b\")")
-            .iter()
-            .any(|w| w.contains("replace") && w.contains("string")));
-        assert!(warnings("(string-repeat 3 5)")
-            .iter()
-            .any(|w| w.contains("string-repeat") && w.contains("string")));
-        assert!(warnings("(format 5 \"extra\")")
-            .iter()
-            .any(|w| w.contains("format") && w.contains("string")));
-        // format returns a string.
-        assert!(warnings("(string-length (format \"hi %s\" x))").is_empty());
-        // index-of/index-where/string-index-of return int — safe to add.
-        assert!(warnings("(+ 1 (index-of coll x))").is_empty());
-        assert!(warnings("(+ 1 (string-index-of s needle))").is_empty());
-        // Correct uses stay silent.
-        for ok in [
-            "(= 1 2)",
-            "(not= x y)",
-            "(starts-with? s \"pre\")",
-            "(ends-with? s \".blsp\")",
-            "(trim s)",
-            "(replace s \"a\" \"b\")",
-        ] {
-            assert!(
-                warnings(ok).iter().all(|w| !w.contains("expects")),
-                "{ok} should be silent: {:?}",
-                warnings(ok)
-            );
-        }
+    assert!(warnings("(blank? 0)")
+        .iter()
+        .any(|w| w.contains("blank?") && w.contains("string")));
+    // String transforms require string args and return strings.
+    for f in ["trim", "triml", "trimr"] {
+        assert!(
+            warnings(&format!("({f} 5)"))
+                .iter()
+                .any(|w| w.contains(f) && w.contains("string")),
+            "{f}: expected string-domain warning"
+        );
+        // Result is string — safe to pass to string-length.
+        assert!(
+            warnings(&format!("(string-length ({f} s))")).is_empty(),
+            "{f}: result should type as string"
+        );
     }
-
-    #[test]
-    fn skips_error_testing_forms() {
-        // `try` and the error-asserting helpers deliberately exercise failures,
-        // so misuse inside them is not flagged.
-        assert!(warnings("(try (first 5) (catch e e))").is_empty());
-        assert!(warnings("(error-of (first 5))").is_empty());
-        assert!(warnings("(assert-error (first 5))").is_empty());
-        // ...but a sibling form outside the skipped one is still checked.
-        assert!(!warnings("(do (first 5) (try (first 6) (catch e e)))").is_empty());
+    assert!(warnings("(replace 5 \"a\" \"b\")")
+        .iter()
+        .any(|w| w.contains("replace") && w.contains("string")));
+    assert!(warnings("(string-repeat 3 5)")
+        .iter()
+        .any(|w| w.contains("string-repeat") && w.contains("string")));
+    assert!(warnings("(format 5 \"extra\")")
+        .iter()
+        .any(|w| w.contains("format") && w.contains("string")));
+    // format returns a string.
+    assert!(warnings("(string-length (format \"hi %s\" x))").is_empty());
+    // index-of/index-where/string-index-of return int — safe to add.
+    assert!(warnings("(+ 1 (index-of coll x))").is_empty());
+    assert!(warnings("(+ 1 (string-index-of s needle))").is_empty());
+    // Correct uses stay silent.
+    for ok in [
+        "(= 1 2)",
+        "(not= x y)",
+        "(starts-with? s \"pre\")",
+        "(ends-with? s \".blsp\")",
+        "(trim s)",
+        "(replace s \"a\" \"b\")",
+    ] {
+        assert!(
+            warnings(ok).iter().all(|w| !w.contains("expects")),
+            "{ok} should be silent: {:?}",
+            warnings(ok)
+        );
     }
+}
 
-    #[test]
-    fn map_kv_refinement_flows_through_checker() {
-        // (sig f ((map keyword int) -> int)): the get result is int | nil.
-        // Feeding that to string-length should warn. Without the sig the result
-        // type is unknown → no warning, so the sig must be declared — use
-        // file_warnings so the `sig` form is parsed.
-        let src = "
+#[test]
+fn skips_error_testing_forms() {
+    // `try` and the error-asserting helpers deliberately exercise failures,
+    // so misuse inside them is not flagged.
+    assert!(warnings("(try (first 5) (catch e e))").is_empty());
+    assert!(warnings("(error-of (first 5))").is_empty());
+    assert!(warnings("(assert-error (first 5))").is_empty());
+    // ...but a sibling form outside the skipped one is still checked.
+    assert!(!warnings("(do (first 5) (try (first 6) (catch e e)))").is_empty());
+}
+
+#[test]
+fn map_kv_refinement_flows_through_checker() {
+    // (sig f ((map keyword int) -> int)): the get result is int | nil.
+    // Feeding that to string-length should warn. Without the sig the result
+    // type is unknown → no warning, so the sig must be declared — use
+    // file_warnings so the `sig` form is parsed.
+    let src = "
 (defn f (m) (get m :k))
 (sig f ((map keyword int) -> int))
 (string-length (f {:a 1}))
 ";
-        let w = file_warnings(src);
-        assert!(
-            w.iter().any(|s| s.contains("string-length")),
-            "expected string-length warning for int|nil arg, got {w:?}"
-        );
+    let w = file_warnings(src);
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "expected string-length warning for int|nil arg, got {w:?}"
+    );
 
-        // `(keys m)` where m : map<keyword, int> → nil | list<keyword>.
-        // Feeding to string-length warns (list is not a string).
-        let src2 = "
+    // `(keys m)` where m : map<keyword, int> → nil | list<keyword>.
+    // Feeding to string-length warns (list is not a string).
+    let src2 = "
 (defn g (m) (keys m))
 (sig g ((map keyword int) -> (list keyword)))
 (string-length (g {:a 1}))
 ";
-        let w2 = file_warnings(src2);
+    let w2 = file_warnings(src2);
+    assert!(
+        w2.iter().any(|s| s.contains("string-length")),
+        "expected string-length warning for list<keyword> arg, got {w2:?}"
+    );
+
+    // Correct uses stay silent.
+    for ok in [
+        "(get {:a 1} :a)", // any map get — flat result, no warning
+        "(keys {:a 1})",
+        "(vals {:a 1})",
+    ] {
         assert!(
-            w2.iter().any(|s| s.contains("string-length")),
-            "expected string-length warning for list<keyword> arg, got {w2:?}"
+            warnings(ok).iter().all(|w| !w.contains("expects")),
+            "{ok} should be silent: {:?}",
+            warnings(ok)
         );
-
-        // Correct uses stay silent.
-        for ok in [
-            "(get {:a 1} :a)", // any map get — flat result, no warning
-            "(keys {:a 1})",
-            "(vals {:a 1})",
-        ] {
-            assert!(
-                warnings(ok).iter().all(|w| !w.contains("expects")),
-                "{ok} should be silent: {:?}",
-                warnings(ok)
-            );
-        }
     }
+}
 
-    #[test]
-    fn record_type_annotation_parses_and_accepts_valid_calls() {
-        // `(record …)` is accepted as a `(sig …)` annotation and carries a
-        // full field refinement (see docs/type-records.md), so a valid call
-        // produces no spurious warning.
-        let src = "
+#[test]
+fn record_type_annotation_parses_and_accepts_valid_calls() {
+    // `(record …)` is accepted as a `(sig …)` annotation and carries a
+    // full field refinement (see docs/type-records.md), so a valid call
+    // produces no spurious warning.
+    let src = "
 (defn f (m) m)
 (sig f ((record :a int :b (optional string)) -> any))
 (f {:a 1 :b \"x\"})
 ";
-        let w = file_warnings(src);
-        assert!(w.is_empty(), "expected no warnings, got {w:?}");
+    let w = file_warnings(src);
+    assert!(w.is_empty(), "expected no warnings, got {w:?}");
 
-        // A malformed record annotation (odd field-list length, or a
-        // non-keyword key) is dropped rather than guessed — the sig source
-        // still parses (it's just not read as an authoritative signature),
-        // so the checker doesn't crash and falls back to no declared sig.
-        for bad in [
-            "(defn f (m) m)\n(sig f ((record :a int :b) -> any))\n(f {:a 1})",
-            "(defn f (m) m)\n(sig f ((record a int) -> any))\n(f {:a 1})",
-        ] {
-            let _ = file_warnings(bad); // must not panic
-        }
+    // A malformed record annotation (odd field-list length, or a
+    // non-keyword key) is dropped rather than guessed — the sig source
+    // still parses (it's just not read as an authoritative signature),
+    // so the checker doesn't crash and falls back to no declared sig.
+    for bad in [
+        "(defn f (m) m)\n(sig f ((record :a int :b) -> any))\n(f {:a 1})",
+        "(defn f (m) m)\n(sig f ((record a int) -> any))\n(f {:a 1})",
+    ] {
+        let _ = file_warnings(bad); // must not panic
     }
+}
 
-    #[test]
-    fn record_field_refinement_flows_through_checker() {
-        // (sig f ((record :a int) -> int)): `(get m :a)` on a declared record
-        // resolves to the *exact field type* (int | nil), not a flat
-        // fallback — feeding that to string-length should warn.
-        let src = "
+#[test]
+fn record_field_refinement_flows_through_checker() {
+    // (sig f ((record :a int) -> int)): `(get m :a)` on a declared record
+    // resolves to the *exact field type* (int | nil), not a flat
+    // fallback — feeding that to string-length should warn.
+    let src = "
 (defn f (m) (get m :a))
 (sig f ((record :a int) -> int))
 (string-length (f {:a 1}))
 ";
-        let w = file_warnings(src);
-        assert!(
-            w.iter().any(|s| s.contains("string-length")),
-            "expected string-length warning for int|nil arg, got {w:?}"
-        );
+    let w = file_warnings(src);
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "expected string-length warning for int|nil arg, got {w:?}"
+    );
 
-        // Getting a field the record doesn't declare stays unknown — records
-        // are open, so this must NOT warn (no false positive on an
-        // undeclared/dynamic key).
-        assert!(
-            warnings("(let (m {:a 1}) (string-length (get m :other)))")
-                .iter()
-                .all(|w| !w.contains("expects")),
-            "undeclared record field should stay unresolved, not warn"
-        );
+    // Getting a field the record doesn't declare stays unknown — records
+    // are open, so this must NOT warn (no false positive on an
+    // undeclared/dynamic key).
+    assert!(
+        warnings("(let (m {:a 1}) (string-length (get m :other)))")
+            .iter()
+            .all(|w| !w.contains("expects")),
+        "undeclared record field should stay unresolved, not warn"
+    );
 
-        // Record-literal type inference: `{:a 1}` infers a record shape
-        // (`:a` required, type int) directly from the literal, no `sig`
-        // needed — feeding the field straight to a sink warns.
-        assert!(
-            warnings("(string-length (get {:a 1} :a))")
-                .iter()
-                .any(|w| w.contains("string-length")),
-            "expected a warning from the inferred record-literal shape"
-        );
+    // Record-literal type inference: `{:a 1}` infers a record shape
+    // (`:a` required, type int) directly from the literal, no `sig`
+    // needed — feeding the field straight to a sink warns.
+    assert!(
+        warnings("(string-length (get {:a 1} :a))")
+            .iter()
+            .any(|w| w.contains("string-length")),
+        "expected a warning from the inferred record-literal shape"
+    );
 
-        // Correct uses stay silent.
-        for ok in [
-            "(get {:a 1} :a)",
-            "(string-length (get {:a \"x\"} :a))",
-            "(get {:a 1} :b)", // undeclared key — unresolved, not a warning
-        ] {
-            assert!(
-                warnings(ok).iter().all(|w| !w.contains("expects")),
-                "{ok} should be silent: {:?}",
-                warnings(ok)
-            );
-        }
+    // Correct uses stay silent.
+    for ok in [
+        "(get {:a 1} :a)",
+        "(string-length (get {:a \"x\"} :a))",
+        "(get {:a 1} :b)", // undeclared key — unresolved, not a warning
+    ] {
+        assert!(
+            warnings(ok).iter().all(|w| !w.contains("expects")),
+            "{ok} should be silent: {:?}",
+            warnings(ok)
+        );
     }
+}
 
-    #[test]
-    fn overload_refinement_flows_through_checker() {
-        // (sig f (and (int -> int) (string -> string))): `f`'s return type
-        // depends on which arm matched the call's argument (ADR-116).
-        let src = "
+#[test]
+fn overload_refinement_flows_through_checker() {
+    // (sig f (and (int -> int) (string -> string))): `f`'s return type
+    // depends on which arm matched the call's argument (ADR-116).
+    let src = "
 (defn f (x) x)
 (sig f (and (int -> int) (string -> string)))
 (string-length (f 1))
 ";
-        let w = file_warnings(src);
-        assert!(
-            w.iter().any(|s| s.contains("string-length")),
-            "an int arg should resolve to the int arm's return type, got {w:?}"
-        );
+    let w = file_warnings(src);
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "an int arg should resolve to the int arm's return type, got {w:?}"
+    );
 
-        // The string arm's return type feeds `string-length` cleanly.
-        let src2 = "
+    // The string arm's return type feeds `string-length` cleanly.
+    let src2 = "
 (defn f (x) x)
 (sig f (and (int -> int) (string -> string)))
 (string-length (f \"hi\"))
 ";
-        assert!(
-            file_warnings(src2).is_empty(),
-            "a string arg should resolve to the string arm's return type, got {:?}",
-            file_warnings(src2)
-        );
+    assert!(
+        file_warnings(src2).is_empty(),
+        "a string arg should resolve to the string arm's return type, got {:?}",
+        file_warnings(src2)
+    );
 
-        // The string arm's return type is NOT a number — feeding it to `+` warns.
-        let src3 = "
+    // The string arm's return type is NOT a number — feeding it to `+` warns.
+    let src3 = "
 (defn f (x) x)
 (sig f (and (int -> int) (string -> string)))
 (+ 1 (f \"hi\"))
 ";
-        assert!(
-            file_warnings(src3).iter().any(|s| s.contains('+')),
-            "a string return type fed to + should warn, got {:?}",
-            file_warnings(src3)
-        );
+    assert!(
+        file_warnings(src3).iter().any(|s| s.contains('+')),
+        "a string return type fed to + should warn, got {:?}",
+        file_warnings(src3)
+    );
 
-        // An argument of unknown type widens to the union of every matching
-        // arm's return — `int | string` — which is NOT disjoint from
-        // `string`, so no false positive (sound, just less precise).
-        let src4 = "
+    // An argument of unknown type widens to the union of every matching
+    // arm's return — `int | string` — which is NOT disjoint from
+    // `string`, so no false positive (sound, just less precise).
+    let src4 = "
 (defn f (x) x)
 (sig f (and (int -> int) (string -> string)))
 (defn g (y) (string-length (f y)))
 ";
-        assert!(
-            file_warnings(src4).is_empty(),
-            "an unknown-typed arg should widen, not warn, got {:?}",
-            file_warnings(src4)
-        );
-    }
+    assert!(
+        file_warnings(src4).is_empty(),
+        "an unknown-typed arg should widen, not warn, got {:?}",
+        file_warnings(src4)
+    );
+}
 
-    #[test]
-    fn overload_resolves_cross_module_via_the_heap_store() {
-        // `file_warnings`/`warnings` never *evaluate* — `%register-sig` only
-        // runs at load time, so those helpers only ever exercise the
-        // per-file `Ctx` path (`ctx.declared_overload`), never the
-        // heap-level `runtime.declared_sigs` store that makes a plain
-        // single-arrow sig visible cross-module. Simulate "module A defines
-        // and declares f; module B (a fresh Ctx — no file-local knowledge of
-        // f at all) calls it" by actually *evaluating* the declaration first
-        // (`eval_str`, so `%register-sig` really populates the heap), then
-        // typing a call form against an empty `Ctx` — exactly module B's
-        // starting point.
-        use super::infer::expr_ty;
+#[test]
+fn overload_resolves_cross_module_via_the_heap_store() {
+    // `file_warnings`/`warnings` never *evaluate* — `%register-sig` only
+    // runs at load time, so those helpers only ever exercise the
+    // per-file `Ctx` path (`ctx.declared_overload`), never the
+    // heap-level `runtime.declared_sigs` store that makes a plain
+    // single-arrow sig visible cross-module. Simulate "module A defines
+    // and declares f; module B (a fresh Ctx — no file-local knowledge of
+    // f at all) calls it" by actually *evaluating* the declaration first
+    // (`eval_str`, so `%register-sig` really populates the heap), then
+    // typing a call form against an empty `Ctx` — exactly module B's
+    // starting point.
+    use super::infer::expr_ty;
 
-        let mut interp = crate::Interp::new();
-        interp
-            .eval_str(
-                "
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str(
+            "
 (defn f (x) x)
 (sig f (and (int -> int) (string -> string)))
 ",
-            )
-            .expect("module A loads cleanly");
+        )
+        .expect("module A loads cleanly");
 
-        // An int-typed argument resolves to the int arm's return type.
-        let call_int = reader::read_one(&mut interp.heap, "(f 1)").expect("parse");
-        let t = expr_ty(&interp.heap, call_int, &Ctx::default())
-            .expect("cross-module overload should resolve, not come back unknown");
-        assert!(
-            t.is_subtype(&Ty::of(Tag::Int)),
-            "expected int for an int arg, got {t}"
-        );
+    // An int-typed argument resolves to the int arm's return type.
+    let call_int = reader::read_one(&mut interp.heap, "(f 1)").expect("parse");
+    let t = expr_ty(&interp.heap, call_int, &Ctx::default())
+        .expect("cross-module overload should resolve, not come back unknown");
+    assert!(
+        t.is_subtype(&Ty::of(Tag::Int)),
+        "expected int for an int arg, got {t}"
+    );
 
-        // A string-typed argument resolves to the string arm's return type.
-        let call_str = reader::read_one(&mut interp.heap, "(f \"hi\")").expect("parse");
-        let t2 = expr_ty(&interp.heap, call_str, &Ctx::default())
-            .expect("cross-module overload should resolve, not come back unknown");
-        assert!(
-            t2.is_subtype(&Ty::of(Tag::Str)),
-            "expected string for a string arg, got {t2}"
-        );
-    }
+    // A string-typed argument resolves to the string arm's return type.
+    let call_str = reader::read_one(&mut interp.heap, "(f \"hi\")").expect("parse");
+    let t2 = expr_ty(&interp.heap, call_str, &Ctx::default())
+        .expect("cross-module overload should resolve, not come back unknown");
+    assert!(
+        t2.is_subtype(&Ty::of(Tag::Str)),
+        "expected string for a string arg, got {t2}"
+    );
+}
 
-    #[test]
-    fn int_literal_return_type_flows_through_checker() {
-        // (sig f ((or 200 404 500) -> …)): f's declared return type is an
-        // int-literal set (ADR-117), not flat `int` — feeding a call to
-        // `string-length` should warn (disjoint tags: string vs. int), the
-        // same as it would for a flat `int` return, proving the literal-set
-        // Ty flows through `sig_of`/`declared_sig` like any other arrow.
-        let src = "
+#[test]
+fn int_literal_return_type_flows_through_checker() {
+    // (sig f ((or 200 404 500) -> …)): f's declared return type is an
+    // int-literal set (ADR-117), not flat `int` — feeding a call to
+    // `string-length` should warn (disjoint tags: string vs. int), the
+    // same as it would for a flat `int` return, proving the literal-set
+    // Ty flows through `sig_of`/`declared_sig` like any other arrow.
+    let src = "
 (defn f (x) x)
 (sig f ((or 200 404 500) -> (or 200 404 500)))
 (string-length (f 200))
 ";
-        let w = file_warnings(src);
-        assert!(
-            w.iter().any(|s| s.contains("string-length")),
-            "expected string-length warning for an int-literal return, got {w:?}"
-        );
+    let w = file_warnings(src);
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "expected string-length warning for an int-literal return, got {w:?}"
+    );
 
-        // A correct use (an int sink) stays silent.
-        let src2 = "
+    // A correct use (an int sink) stays silent.
+    let src2 = "
 (defn f (x) x)
 (sig f ((or 200 404 500) -> (or 200 404 500)))
 (+ 1 (f 200))
 ";
-        assert!(
-            file_warnings(src2).is_empty(),
-            "an int-literal return fed to + should be silent, got {:?}",
-            file_warnings(src2)
-        );
-    }
+    assert!(
+        file_warnings(src2).is_empty(),
+        "an int-literal return fed to + should be silent, got {:?}",
+        file_warnings(src2)
+    );
+}
 
-    #[test]
-    fn match_exhaustiveness_flags_a_missing_keyword_arm() {
-        let src = "
+#[test]
+fn match_exhaustiveness_flags_a_missing_keyword_arm() {
+    let src = "
 (defn f (status)
   (match status
     (:ok \"good\")
     (:error \"bad\")))
 (sig f ((or :ok :error :pending) -> string))
 ";
-        let w = file_warnings(src);
-        assert!(
-            w.iter()
-                .any(|s| s.contains("not exhaustive") && s.contains(":pending")),
-            "expected a missing-:pending warning, got {w:?}"
-        );
-    }
+    let w = file_warnings(src);
+    assert!(
+        w.iter()
+            .any(|s| s.contains("not exhaustive") && s.contains(":pending")),
+        "expected a missing-:pending warning, got {w:?}"
+    );
+}
 
-    #[test]
-    fn match_exhaustiveness_is_silent_when_every_arm_is_covered() {
-        let src = "
+#[test]
+fn match_exhaustiveness_is_silent_when_every_arm_is_covered() {
+    let src = "
 (defn f (status)
   (match status
     (:ok \"good\")
@@ -1201,124 +1184,124 @@
     (:pending \"waiting\")))
 (sig f ((or :ok :error :pending) -> string))
 ";
-        assert!(
-            file_warnings(src)
-                .iter()
-                .all(|w| !w.contains("not exhaustive")),
-            "a fully-covered match should be silent, got {:?}",
-            file_warnings(src)
-        );
-    }
+    assert!(
+        file_warnings(src)
+            .iter()
+            .all(|w| !w.contains("not exhaustive")),
+        "a fully-covered match should be silent, got {:?}",
+        file_warnings(src)
+    );
+}
 
-    #[test]
-    fn match_exhaustiveness_is_silent_with_a_catch_all_clause() {
-        // A catch-all makes the throw disappear from the compiled tree
-        // entirely — trivially exhaustive regardless of how few literal arms
-        // are listed.
-        let src = "
+#[test]
+fn match_exhaustiveness_is_silent_with_a_catch_all_clause() {
+    // A catch-all makes the throw disappear from the compiled tree
+    // entirely — trivially exhaustive regardless of how few literal arms
+    // are listed.
+    let src = "
 (defn f (status)
   (match status
     (:ok \"good\")
     (_ \"anything else\")))
 (sig f ((or :ok :error :pending) -> string))
 ";
-        assert!(
-            file_warnings(src)
-                .iter()
-                .all(|w| !w.contains("not exhaustive")),
-            "a catch-all match should be silent, got {:?}",
-            file_warnings(src)
-        );
-    }
+    assert!(
+        file_warnings(src)
+            .iter()
+            .all(|w| !w.contains("not exhaustive")),
+        "a catch-all match should be silent, got {:?}",
+        file_warnings(src)
+    );
+}
 
-    #[test]
-    fn match_exhaustiveness_flags_a_missing_int_arm() {
-        let src = "
+#[test]
+fn match_exhaustiveness_flags_a_missing_int_arm() {
+    let src = "
 (defn f (code)
   (match code
     (200 \"ok\")
     (404 \"missing\")))
 (sig f ((or 200 404 500) -> string))
 ";
-        let w = file_warnings(src);
-        assert!(
-            w.iter()
-                .any(|s| s.contains("not exhaustive") && s.contains("500")),
-            "expected a missing-500 warning, got {w:?}"
-        );
-    }
+    let w = file_warnings(src);
+    assert!(
+        w.iter()
+            .any(|s| s.contains("not exhaustive") && s.contains("500")),
+        "expected a missing-500 warning, got {w:?}"
+    );
+}
 
-    #[test]
-    fn match_exhaustiveness_flags_a_missing_arm_in_a_mixed_kind_enum() {
-        // (or :ok 5) — a keyword literal and an int literal on the same
-        // declared type (ADR-121 generalizes the old pure-one-kind check).
-        let src = "
+#[test]
+fn match_exhaustiveness_flags_a_missing_arm_in_a_mixed_kind_enum() {
+    // (or :ok 5) — a keyword literal and an int literal on the same
+    // declared type (ADR-121 generalizes the old pure-one-kind check).
+    let src = "
 (defn f (x)
   (match x
     (:ok \"good\")))
 (sig f ((or :ok 5) -> string))
 ";
-        let w = file_warnings(src);
-        assert!(
-            w.iter()
-                .any(|s| s.contains("not exhaustive") && s.contains('5')),
-            "expected a missing-5 warning, got {w:?}"
-        );
-    }
+    let w = file_warnings(src);
+    assert!(
+        w.iter()
+            .any(|s| s.contains("not exhaustive") && s.contains('5')),
+        "expected a missing-5 warning, got {w:?}"
+    );
+}
 
-    #[test]
-    fn match_exhaustiveness_flags_a_missing_arm_with_a_trailing_nil() {
-        let src = "
+#[test]
+fn match_exhaustiveness_flags_a_missing_arm_with_a_trailing_nil() {
+    let src = "
 (defn f (x)
   (match x
     (:ok \"good\")
     (:error \"bad\")))
 (sig f ((or :ok :error nil) -> string))
 ";
-        let w = file_warnings(src);
-        assert!(
-            w.iter()
-                .any(|s| s.contains("not exhaustive") && s.contains("nil")),
-            "expected a missing-nil warning, got {w:?}"
-        );
-    }
+    let w = file_warnings(src);
+    assert!(
+        w.iter()
+            .any(|s| s.contains("not exhaustive") && s.contains("nil")),
+        "expected a missing-nil warning, got {w:?}"
+    );
+}
 
-    #[test]
-    fn match_exhaustiveness_flags_a_missing_bool_arm() {
-        // Note: bare `bool` in a sig is the *unrefined* flat tag (no
-        // `lit_bool` set) — `(or true false)` is what actually declares the
-        // enumerable 2-value literal type this check needs.
-        let src = "
+#[test]
+fn match_exhaustiveness_flags_a_missing_bool_arm() {
+    // Note: bare `bool` in a sig is the *unrefined* flat tag (no
+    // `lit_bool` set) — `(or true false)` is what actually declares the
+    // enumerable 2-value literal type this check needs.
+    let src = "
 (defn f (x) (match x (true \"yes\")))
 (sig f ((or true false) -> string))
 ";
-        let w = file_warnings(src);
-        assert!(
-            w.iter()
-                .any(|s| s.contains("not exhaustive") && s.contains("false")),
-            "expected a missing-false warning, got {w:?}"
-        );
-    }
+    let w = file_warnings(src);
+    assert!(
+        w.iter()
+            .any(|s| s.contains("not exhaustive") && s.contains("false")),
+        "expected a missing-false warning, got {w:?}"
+    );
+}
 
-    #[test]
-    fn match_exhaustiveness_flags_a_missing_string_arm() {
-        let src = "
+#[test]
+fn match_exhaustiveness_flags_a_missing_string_arm() {
+    let src = "
 (defn f (m)
   (match m
     (\"GET\" 1)))
 (sig f ((or \"GET\" \"POST\") -> int))
 ";
-        let w = file_warnings(src);
-        assert!(
-            w.iter()
-                .any(|s| s.contains("not exhaustive") && s.contains("POST")),
-            "expected a missing-POST warning, got {w:?}"
-        );
-    }
+    let w = file_warnings(src);
+    assert!(
+        w.iter()
+            .any(|s| s.contains("not exhaustive") && s.contains("POST")),
+        "expected a missing-POST warning, got {w:?}"
+    );
+}
 
-    #[test]
-    fn match_exhaustiveness_is_silent_when_a_mixed_kind_enum_is_fully_covered() {
-        let src = "
+#[test]
+fn match_exhaustiveness_is_silent_when_a_mixed_kind_enum_is_fully_covered() {
+    let src = "
 (defn f (x)
   (match x
     (:ok \"good\")
@@ -1326,112 +1309,112 @@
     (nil \"nothing\")))
 (sig f ((or :ok 5 nil) -> string))
 ";
-        assert!(
-            file_warnings(src)
-                .iter()
-                .all(|w| !w.contains("not exhaustive")),
-            "a fully-covered mixed-kind match should be silent, got {:?}",
-            file_warnings(src)
-        );
-    }
+    assert!(
+        file_warnings(src)
+            .iter()
+            .all(|w| !w.contains("not exhaustive")),
+        "a fully-covered mixed-kind match should be silent, got {:?}",
+        file_warnings(src)
+    );
+}
 
-    #[test]
-    fn match_exhaustiveness_declines_a_destructuring_clause_mixed_in() {
-        // A non-literal pattern among those tried (here, a vector destructure)
-        // means the check can't reason about coverage — bail rather than
-        // guess.
-        let src = "
+#[test]
+fn match_exhaustiveness_declines_a_destructuring_clause_mixed_in() {
+    // A non-literal pattern among those tried (here, a vector destructure)
+    // means the check can't reason about coverage — bail rather than
+    // guess.
+    let src = "
 (defn f (x)
   (match x
     (:ok \"good\")
     ([a b] \"pair\")))
 (sig f ((or :ok :error) -> string))
 ";
-        assert!(
-            file_warnings(src)
-                .iter()
-                .all(|w| !w.contains("not exhaustive")),
-            "a match mixing a literal with a destructuring pattern should stay silent, got {:?}",
-            file_warnings(src)
-        );
-    }
+    assert!(
+        file_warnings(src)
+            .iter()
+            .all(|w| !w.contains("not exhaustive")),
+        "a match mixing a literal with a destructuring pattern should stay silent, got {:?}",
+        file_warnings(src)
+    );
+}
 
-    #[test]
-    fn match_exhaustiveness_is_silent_for_a_non_literal_scrutinee_type() {
-        // status's declared type is bare `keyword` — not a bounded literal
-        // enum — so there's nothing to enumerate against.
-        let src = "
+#[test]
+fn match_exhaustiveness_is_silent_for_a_non_literal_scrutinee_type() {
+    // status's declared type is bare `keyword` — not a bounded literal
+    // enum — so there's nothing to enumerate against.
+    let src = "
 (defn f (status)
   (match status
     (:ok \"good\")
     (:error \"bad\")))
 (sig f (keyword -> string))
 ";
-        assert!(
-            file_warnings(src)
-                .iter()
-                .all(|w| !w.contains("not exhaustive")),
-            "a non-literal-enum scrutinee should stay silent, got {:?}",
-            file_warnings(src)
-        );
-    }
+    assert!(
+        file_warnings(src)
+            .iter()
+            .all(|w| !w.contains("not exhaustive")),
+        "a non-literal-enum scrutinee should stay silent, got {:?}",
+        file_warnings(src)
+    );
+}
 
-    #[test]
-    fn match_redundancy_flags_an_adjacent_duplicate_clause() {
-        let src = "
+#[test]
+fn match_redundancy_flags_an_adjacent_duplicate_clause() {
+    let src = "
 (defn f (x)
   (match x
     (:ok 1)
     (:ok 2)))
 ";
-        let w = file_warnings(src);
-        assert!(
-            w.iter()
-                .any(|s| s.contains("unreachable clause") && s.contains(":ok")),
-            "expected an unreachable-clause warning, got {w:?}"
-        );
-    }
+    let w = file_warnings(src);
+    assert!(
+        w.iter()
+            .any(|s| s.contains("unreachable clause") && s.contains(":ok")),
+        "expected an unreachable-clause warning, got {w:?}"
+    );
+}
 
-    #[test]
-    fn match_redundancy_flags_a_non_adjacent_duplicate_clause() {
-        let src = "
+#[test]
+fn match_redundancy_flags_a_non_adjacent_duplicate_clause() {
+    let src = "
 (defn f (x)
   (match x
     (:ok 1)
     (:error 2)
     (:ok 3)))
 ";
-        let w = file_warnings(src);
-        assert!(
-            w.iter()
-                .any(|s| s.contains("unreachable clause") && s.contains(":ok")),
-            "expected an unreachable-clause warning for the non-adjacent duplicate, got {w:?}"
-        );
-    }
+    let w = file_warnings(src);
+    assert!(
+        w.iter()
+            .any(|s| s.contains("unreachable clause") && s.contains(":ok")),
+        "expected an unreachable-clause warning for the non-adjacent duplicate, got {w:?}"
+    );
+}
 
-    #[test]
-    fn match_redundancy_is_silent_with_no_duplicates() {
-        let src = "
+#[test]
+fn match_redundancy_is_silent_with_no_duplicates() {
+    let src = "
 (defn f (x)
   (match x
     (:ok 1)
     (:error 2)
     (_ 3)))
 ";
-        assert!(
-            file_warnings(src)
-                .iter()
-                .all(|w| !w.contains("unreachable clause")),
-            "no duplicate clauses should be silent, got {:?}",
-            file_warnings(src)
-        );
-    }
+    assert!(
+        file_warnings(src)
+            .iter()
+            .all(|w| !w.contains("unreachable clause")),
+        "no duplicate clauses should be silent, got {:?}",
+        file_warnings(src)
+    );
+}
 
-    #[test]
-    fn match_redundancy_fires_on_a_hand_written_eq_chain_too() {
-        // Purely structural — not `match`-specific. A hand-written same-symbol
-        // `%eq`-if chain with a duplicate literal is unreachable the same way.
-        let src = "
+#[test]
+fn match_redundancy_fires_on_a_hand_written_eq_chain_too() {
+    // Purely structural — not `match`-specific. A hand-written same-symbol
+    // `%eq`-if chain with a duplicate literal is unreachable the same way.
+    let src = "
 (defn f (x)
   (if (%eq x 5)
     :a
@@ -1439,2122 +1422,2109 @@
       :b
       :c)))
 ";
+    let w = file_warnings(src);
+    assert!(
+        w.iter()
+            .any(|s| s.contains("unreachable clause") && s.contains('5')),
+        "expected an unreachable-clause warning for the hand-written chain, got {w:?}"
+    );
+}
+
+#[test]
+fn covers_the_other_signed_primitives() {
+    assert!(warnings("(mod 7 3)").is_empty());
+    assert!(warnings("(mod 7 \"x\")").iter().any(|w| w.contains("mod")));
+    assert!(warnings("(rem :a 3)").iter().any(|w| w.contains("rem")));
+    assert!(warnings("(vector-length 5)")
+        .iter()
+        .any(|w| w.contains("vector-length")));
+    assert!(warnings("(substring \"hi\" \"a\" 1)")
+        .iter()
+        .any(|w| w.contains("substring") && w.contains("argument 2")));
+    assert!(warnings("(%lt 1 :k)").iter().any(|w| w.contains("%lt")));
+}
+
+#[test]
+fn reports_each_bad_argument() {
+    // Both args provably wrong → two distinct warnings (one per position).
+    let w = warnings("(mod \"a\" :b)");
+    assert_eq!(w.len(), 2, "{:?}", w);
+    assert!(w.iter().any(|s| s.contains("argument 1")));
+    assert!(w.iter().any(|s| s.contains("argument 2")));
+}
+
+#[test]
+fn nested_misuse_is_found() {
+    // A wrong call buried inside an argument is still reported.
+    let w = warnings("(vector-length (cons (first 5) 2))");
+    assert!(w.iter().any(|s| s.contains("first")));
+}
+
+#[test]
+fn atoms_and_malformed_forms_do_not_panic() {
+    for src in ["5", "foo", "\"s\"", ":k", "()", "(5 6 7)", "(first)"] {
+        // No panic, and no spurious warning on a bare atom / non-symbol head /
+        // missing argument.
+        let _ = warnings(src);
+    }
+    assert!(warnings("(5 6 7)").is_empty()); // head isn't a symbol — no diagnostics
+                                             // `(first)` is now an arity diagnostic (0 args; first needs 1).
+    assert!(warnings("(first)")
+        .iter()
+        .any(|w| w.contains("first") && w.contains("expected 1")));
+}
+
+// ------------- Step 3: sigs sourced from NativeFn, closure inference --------------
+
+/// The eight test cases below need real user-defined closures, which means
+/// running a `defn` against the global table. The `Interp` builds the full
+/// prelude (curated stdlib closures and all) on top of the primitive kernel
+/// — exactly the surface a checker is supposed to see.
+fn check_with_defs(defs: &[&str], src: &str) -> Vec<String> {
+    let mut interp = crate::Interp::new();
+    for d in defs {
+        interp.eval_str(d).expect("def");
+    }
+    let form = crate::syntax::reader::read_one(&mut interp.heap, src).expect("parse expression");
+    // Macro-expand so any prelude wrappers (defn → fn, etc.) are gone, like
+    // `brood --check`/the `check` builtin do before calling check_form.
+    let form = crate::eval::macros::macroexpand_all(&mut interp.heap, form, interp.root).unwrap();
+    check_form(&interp.heap, form)
+}
+
+#[test]
+fn primitive_sigs_are_read_from_native_fn() {
+    // The point of Step 3: there is no parallel `primitive_sig` table.
+    // The sig the checker uses for `string-length` *is* the one declared
+    // next to its `Arity` in `builtins.rs`. If we ever drop the sig field
+    // (or set it wrong), this catches it.
+    let interp = crate::Interp::new();
+    let sig = primitive_sig(&interp.heap, crate::core::value::intern("string-length"))
+        .expect("string-length is a primitive");
+    assert_eq!(sig.params, vec![Ty::of(Tag::Str)]);
+    assert_eq!(sig.ret, Ty::of(Tag::Int));
+    // The "no useful info" lane: a variadic any-arg primitive (str) returns
+    // a Sig that param-overlaps every input, so it never warns.
+    let any_sig =
+        primitive_sig(&interp.heap, crate::core::value::intern("str")).expect("str is a primitive");
+    assert_eq!(any_sig.rest, Some(Ty::ANY));
+}
+
+#[test]
+fn file_defn_shadowing_a_builtin_wins_over_its_signature() {
+    // A file's own `defn check` supersedes the `check` builtin (ADR-123: a
+    // def always wins) — the checker must not type its calls with the
+    // builtin's list-returning signature. This exact shape (the bintree
+    // bench) produced "+: argument 2 expects number, got list" plus a
+    // phantom arity from the builtin's 1-arg Arity.
+    let w = file_warnings(
+        "(defn check (node) (if (nil? node) 1 (+ 1 (check (nth node 0)))))\n\
+             (println (check nil))",
+    );
+    assert!(
+        !w.iter().any(|s| s.contains("expects")),
+        "stale builtin signature leaked into a shadowed call: {:?}",
+        w
+    );
+    // Arity from the stale builtin must not leak either: the builtin `check`
+    // is 1-ary, the file's redefinition is 2-ary.
+    let w = file_warnings("(defn check (a b) (+ a b))\n(println (check 1 2))");
+    assert!(
+        !w.iter().any(|s| s.contains("argument")),
+        "stale builtin arity leaked into a shadowed call: {:?}",
+        w
+    );
+    // No over-suppression: the real builtin (not redefined) still warns.
+    let w = file_warnings("(println (+ 1 (check '(nil? nil))))");
+    assert!(
+        w.iter().any(|s| s.contains("expects number")),
+        "the un-shadowed builtin's signature should still warn: {:?}",
+        w
+    );
+}
+
+#[test]
+fn infers_a_straight_line_wrapper() {
+    // (defn inc (x) (+ x 1)) → x : number (from +'s rest type).
+    // So `(inc :k)` is a provable misuse.
+    let w = check_with_defs(&["(defn inc (x) (+ x 1))"], "(inc :k)");
+    assert!(
+        w.iter().any(|s| s.contains("inc") && s.contains("number")),
+        "expected an `inc :k` warning, got {:?}",
+        w
+    );
+}
+
+#[test]
+fn inferred_return_type_propagates() {
+    // (defn inc (x) (+ x 1)) returns the number `+` returns; feeding it into
+    // `string-length` (wants string) is a provable misuse.
+    let w = check_with_defs(&["(defn inc (x) (+ x 1))"], "(string-length (inc 1))");
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "expected a `string-length` warning, got {:?}",
+        w
+    );
+}
+
+#[test]
+fn inferred_params_intersect_across_positions() {
+    // (defn add (x y) (+ x y)) — both x and y at + positions → number.
+    let w = check_with_defs(&["(defn add (x y) (+ x y))"], "(add \"a\" 2)");
+    assert!(w.iter().any(|s| s.contains("add")), "got {:?}", w);
+}
+
+#[test]
+fn does_not_infer_through_branches_or_lets() {
+    // A body with `if`/complex `let` is *not* a single straight-line expression
+    // — inference must skip it, leaving the closure untyped (no warning).
+    // (A plain let-alias `(let (y x) call)` IS inferred — see below.)
+    let w = check_with_defs(&["(defn maybe (x) (if (int? x) (+ x 1) x))"], "(maybe :k)");
+    assert!(
+        w.is_empty(),
+        "if-branching bodies must not infer (so no warning): {:?}",
+        w
+    );
+}
+
+#[test]
+fn infers_through_let_alias() {
+    // `(let (y x) call)` where y is just a rename of closure param x:
+    // the body is still one straight-line call — inference should work.
+    let w = check_with_defs(
+        &["(defn double (x) (let (y x) (* y 2)))"],
+        "(string-length (double 3))",
+    );
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "let-alias wrapper should not block infer_sig: {:?}",
+        w
+    );
+    // The param type is also inferred: `y` at number position → x : number.
+    let w = check_with_defs(&["(defn double (x) (let (y x) (* y 2)))"], "(double :k)");
+    assert!(
+        w.iter()
+            .any(|s| s.contains("double") && s.contains("number")),
+        "let-alias: param type should propagate from callee: {:?}",
+        w
+    );
+    // A non-param let (binding a computed value) isn't peeled by the precise
+    // *parameter*-inferring tier — but the sound **return-only** tier still
+    // infers `wrap`'s result as `number` (`wrap 3` = 8), so a real misuse of
+    // that result is caught (`(string-length 8)` genuinely errors at runtime).
+    let w = check_with_defs(
+        &["(defn wrap (x) (let (y (+ x 1)) (* y 2)))"],
+        "(string-length (wrap 3))",
+    );
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "return-only inference should type wrap's result as number: {:?}",
+        w
+    );
+    // …but the *parameter* is NOT inferred from a branchy/multi-step body
+    // (that would be unsound), so a differently-typed argument never warns.
+    let w = check_with_defs(&["(defn wrap (x) (let (y (+ x 1)) (* y 2)))"], "(wrap :k)");
+    assert!(
+        w.is_empty(),
+        "return-only inference must leave the parameter unconstrained: {:?}",
+        w
+    );
+}
+
+#[test]
+fn return_only_inference_is_sound() {
+    // The return type of a branchy/multi-step body is inferred (sound: it's a
+    // union of the possible results), so misusing the *result* is caught…
+    let w = check_with_defs(
+        &["(defn pick (c) (if c 1 2))"],
+        "(string-length (pick true))",
+    );
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "a numeric-returning branchy body's result misuse must warn: {w:?}"
+    );
+    // …but a parameter used as a number only *inside a guard* must NOT be
+    // inferred as number — that's the guarded-use false positive full param
+    // inference would create. `(g "x")` is valid (returns 0), so no warning.
+    let w = check_with_defs(&["(defn g (x) (if (number? x) (+ x 1) 0))"], "(g \"x\")");
+    assert!(
+        w.is_empty(),
+        "a guarded numeric use must not infer the parameter as number: {w:?}"
+    );
+    // A union result that *overlaps* the sink must not warn (int | string fed
+    // to `+` — the int arm overlaps `number`).
+    let w = check_with_defs(&["(defn u (c) (if c 1 \"s\"))"], "(+ 1 (u true))");
+    assert!(
+        w.is_empty(),
+        "a result overlapping the expected type must not warn: {w:?}"
+    );
+    // Recursion terminates (the re-entry guard) and stays sound — no hang,
+    // no spurious warning on a valid use.
+    let w = check_with_defs(
+        &["(defn rfac (n) (if (< n 1) 1 (* n (rfac (- n 1)))))"],
+        "(+ 1 (rfac 5))",
+    );
+    assert!(
+        w.iter().all(|s| !s.contains("expects")),
+        "recursive-body return inference must stay sound: {w:?}"
+    );
+}
+
+#[test]
+fn does_not_infer_through_recursion() {
+    // A self-recursive call has no fixed sig to read from — must skip,
+    // even though the body is structurally a single call.
+    let w = check_with_defs(&["(defn loop (x) (loop x))"], "(loop :k)");
+    assert!(w.is_empty(), "recursive defns must not infer: {:?}", w);
+}
+
+#[test]
+fn skips_inference_for_variadic_or_optional_closures() {
+    // A variadic-tail closure isn't a "fixed-arity straight-line" — skip.
+    let w = check_with_defs(&["(defn vlist (& xs) (first xs))"], "(vlist 1 2 3)");
+    assert!(w.is_empty(), "variadic defns must not infer: {:?}", w);
+}
+
+// ------------- Step 4: scope tracking + guard narrowing --------------
+
+#[test]
+fn let_binding_propagates_its_rhs_type() {
+    // The RHS is a literal int — `(first x)` should flag, because x : int
+    // shadows "unknown" in the body. (This is the basic let-tracking.)
+    let w = warnings("(let (x 1) (first x))");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains("got 1")),
+        "expected a `first x` warning where x : 1 (int singleton), got {:?}",
+        w
+    );
+}
+
+#[test]
+fn let_binding_from_nested_call_propagates() {
+    // RHS is a known primitive whose return type is int. So `x : int`,
+    // and `(first x)` flags.
+    let w = warnings("(let (x (string-length \"hi\")) (first x))");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains("int")),
+        "expected a `first x` warning where x : int, got {:?}",
+        w
+    );
+}
+
+#[test]
+fn let_binding_of_unknown_rhs_stays_silent() {
+    // RHS is a variable (unknown), so x stays unknown — `(first x)` must
+    // not warn. (No false positives from let-tracking.)
+    let w = warnings("(let (x foo) (first x))");
+    assert!(w.is_empty(), "got {:?}", w);
+}
+
+#[test]
+fn inner_let_shadows_outer_binding() {
+    // The outer x : int; the inner x : string. `(first x)` in the body
+    // refers to the inner, which is a string — and `first` accepts list /
+    // vector, disjoint from string. So a warning is still expected, but
+    // the *narrowing message* must be "string", not "int". This is the
+    // shadowing-correctness check (outer narrowing must not leak in).
+    let w = warnings("(let (x 1) (let (x \"hi\") (first x)))");
+    assert!(
+        w.iter()
+            .any(|s| s.contains("first") && s.contains("got \"hi\"")),
+        "expected the inner string to be the source, got {:?}",
+        w
+    );
+    assert!(
+        // Outer `x` is the literal `1` → singleton `{1}`; if it leaked the
+        // message would say "got 1" (B0 — was "got int").
+        !w.iter().any(|s| s.contains("got 1")),
+        "outer int must not leak through shadowing: {:?}",
+        w
+    );
+}
+
+#[test]
+fn shadowing_with_unknown_rhs_clears_prior_narrowing() {
+    // Outer x : int; inner x : <unknown var>. Inside the inner let, x is
+    // unknown — `(first x)` must NOT warn (the outer narrowing must not
+    // leak through the shadow).
+    let w = warnings("(let (x 1) (let (x foo) (first x)))");
+    assert!(w.is_empty(), "shadow must clear the prior type: {:?}", w);
+}
+
+#[test]
+fn vector_let_bindings_are_recognised() {
+    // `(let [x 1] …)` (vector shape) must work the same as `(let (x 1) …)`.
+    let w = warnings("(let [x 1] (first x))");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains("got 1")),
+        "vector-form let bindings must populate the ctx: {:?}",
+        w
+    );
+}
+
+#[test]
+fn guard_narrowing_lets_a_then_branch_flag_a_misuse() {
+    // In the then-branch of `(if (int? x) …)`, x : int — `(first x)` flags.
+    let w = warnings("(if (int? x) (first x) nil)");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains("int")),
+        "expected guard narrowing to flag (first x) when x : int, got {:?}",
+        w
+    );
+}
+
+#[test]
+fn guard_narrowing_does_not_leak_into_the_else_branch() {
+    // The else-branch narrows x to `not int`, which overlaps list / vector;
+    // so `(first x)` must NOT warn there.
+    let w = warnings("(if (int? x) nil (first x))");
+    assert!(
+        !w.iter().any(|s| s.contains("first")),
+        "else branch must not have x narrowed to int: {:?}",
+        w
+    );
+}
+
+#[test]
+fn negated_guard_flips_the_narrowing() {
+    // (if (not (int? x)) …) — the then-branch narrows x to `not int`, the
+    // else-branch to int.
+    let w = warnings("(if (not (int? x)) nil (first x))");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains("int")),
+        "the else of a negated guard must narrow to the inner type: {:?}",
+        w
+    );
+}
+
+#[test]
+fn guards_for_number_and_list_unions_narrow_to_the_union() {
+    // (if (number? x) (first x) …) — x : number = int|float in the then,
+    // which is disjoint from list/vector, so `(first x)` flags.
+    let w = warnings("(if (number? x) (first x) nil)");
+    assert!(
+        w.iter()
+            .any(|s| s.contains("first") && s.contains("number")),
+        "number? must narrow to int|float: {:?}",
+        w
+    );
+    // The list? guard should *not* warn in the then (list overlaps first's
+    // expected type).
+    let w = warnings("(if (list? x) (first x) nil)");
+    assert!(
+        !w.iter().any(|s| s.contains("first")),
+        "list? must not produce a false positive on (first x): {:?}",
+        w
+    );
+}
+
+#[test]
+fn non_guard_tests_dont_narrow() {
+    // The test isn't a recognised type predicate, so x stays unknown in
+    // both branches — `(first x)` must not warn.
+    let w = warnings("(if (zero? x) (first x) (first x))");
+    assert!(w.is_empty(), "non-tag-guard test must not narrow: {:?}", w);
+}
+
+#[test]
+fn nested_guards_compose_their_narrowings() {
+    // (if (number? x) (if (int? x) … (first x)) …) — in the inner else,
+    // x is narrowed to `number ∩ ¬int` = float, which is still disjoint
+    // from list/vector, so `(first x)` flags.
+    let w = warnings("(if (number? x) (if (int? x) nil (first x)) nil)");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains("float")),
+        "nested guards must compose to float (= number ∩ ¬int): {:?}",
+        w
+    );
+}
+
+#[test]
+fn let_bound_guard_narrows_when_used_as_an_if_test() {
+    // The user-written shape `(let (cond (int? x)) (if cond …))` — Brood is
+    // immutable, so `cond` faithfully reflects `(int? x)` until the let
+    // ends. The guard-alias table maps `cond → (x, int)`, and the inner
+    // `if cond` narrows x to int in the then-branch.
+    let w = warnings("(let (cond (int? x)) (if cond (first x) nil))");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains("int")),
+        "expected let-bound guard to flag (first x) in the then: {:?}",
+        w
+    );
+}
+
+#[test]
+fn let_bound_guard_narrows_in_the_else_branch_too() {
+    // Else-branch sees x as `not int`, which overlaps list / vector, so
+    // no warning — same as the direct-test case.
+    let w = warnings("(let (cond (int? x)) (if cond nil (first x)))");
+    assert!(
+        !w.iter().any(|s| s.contains("first")),
+        "the else of a let-bound guard must narrow to ¬int, not int: {:?}",
+        w
+    );
+}
+
+#[test]
+fn let_bound_guard_can_be_negated_in_the_if() {
+    // `(if (not cond) …)` flips the narrowing — same as `(not (int? x))`.
+    let w = warnings("(let (cond (int? x)) (if (not cond) nil (first x)))");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains("int")),
+        "expected negation to flip the let-bound guard: {:?}",
+        w
+    );
+}
+
+#[test]
+fn rebinding_the_guard_name_clears_the_alias() {
+    // After `(let (cond <unknown>) …)` shadowing, `cond` no longer aliases
+    // the int-guard, so `(if cond …)` must not narrow x.
+    let w = warnings("(let (cond (int? x)) (let (cond foo) (if cond (first x) nil)))");
+    assert!(w.is_empty(), "shadowing must drop the guard alias: {:?}", w);
+}
+
+#[test]
+fn rebinding_to_a_non_guard_value_clears_the_alias() {
+    // Same as above but with an int literal rather than an unknown var.
+    let w = warnings("(let (cond (int? x)) (let (cond 1) (if cond (first x) nil)))");
+    assert!(
+        w.is_empty(),
+        "shadowing with a non-guard value must drop the alias: {:?}",
+        w
+    );
+}
+
+#[test]
+fn self_aliased_guard_is_not_recorded() {
+    // `(let (x (int? x)) …)` shadows the outer x with a bool; the inner
+    // body's `x` is the bool, not the original — narrowing the original
+    // would be unsound (it's no longer reachable), so we must not record
+    // the guard. (No assertion about a warning either way — the point is
+    // we don't crash and don't introduce a stale alias.)
+    let w = warnings("(let (x (int? x)) (if x x nil))");
+    assert!(
+        !w.iter().any(|s| s.contains("first")),
+        "self-aliased guards must not propagate to inner uses: {:?}",
+        w
+    );
+}
+
+#[test]
+fn let_inside_a_then_branch_can_shadow_a_narrowing() {
+    // Outer narrowing: x : int. Inner shadow: x : string. The body now
+    // sees x as string, so the narrowing message names string.
+    let w = warnings("(if (int? x) (let (x \"hi\") (first x)) nil)");
+    assert!(
+        w.iter()
+            .any(|s| s.contains("first") && s.contains("got \"hi\"")),
+        "shadow must override the guard narrowing: {:?}",
+        w
+    );
+    assert!(
+        !w.iter().any(|s| s.contains("got int")),
+        "the int narrowing must not leak through the shadow: {:?}",
+        w
+    );
+}
+
+// ---------------- Step 4: arity + unbound-symbol diagnostics ----------------
+
+#[test]
+fn flags_too_few_arguments() {
+    // `first` expects exactly 1; 0 is wrong.
+    assert!(warnings("(first)")
+        .iter()
+        .any(|w| w.contains("first") && w.contains("expected 1") && w.contains("got 0")));
+    // `string-length` expects exactly 1.
+    assert!(warnings("(string-length)")
+        .iter()
+        .any(|w| w.contains("string-length") && w.contains("expected 1")));
+}
+
+#[test]
+fn flags_too_many_arguments() {
+    // `rem` is `exact(2)`; calling with 3 is wrong.
+    assert!(warnings("(rem 1 2 3)")
+        .iter()
+        .any(|w| w.contains("rem") && w.contains("expected 2") && w.contains("got 3")));
+}
+
+#[test]
+fn arity_message_handles_range_and_variadic() {
+    // `map-get` is `range(2, 3)` → "expected 2 to 3".
+    assert!(warnings("(map-get {})")
+        .iter()
+        .any(|w| w.contains("map-get") && w.contains("2 to 3")));
+    // `apply` is `at_least(2)` → "expected 2 or more"; 1 is too few.
+    assert!(warnings("(apply f)")
+        .iter()
+        .any(|w| w.contains("apply") && w.contains("2 or more")));
+}
+
+#[test]
+fn arity_pass_is_silent_for_correct_calls() {
+    assert!(warnings("(first [1 2])")
+        .iter()
+        .all(|w| !w.contains("number of arguments")));
+    assert!(warnings("(rem 7 3)")
+        .iter()
+        .all(|w| !w.contains("number of arguments")));
+    // Variadic: any count is fine.
+    for n in 0..=5 {
+        let args = (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(" ");
+        let w = warnings(&format!("(+ {})", args));
+        assert!(
+            w.iter().all(|s| !s.contains("number of arguments")),
+            "(+ {}…) should not warn arity: {:?}",
+            n,
+            w
+        );
+    }
+}
+
+#[test]
+fn flags_unbound_call_heads() {
+    assert!(warnings("(frobnicate 1)")
+        .iter()
+        .any(|w| w.contains("unbound symbol: frobnicate")));
+    assert!(warnings("(typo-name :hi)")
+        .iter()
+        .any(|w| w.contains("unbound symbol: typo-name")));
+}
+
+// ---- Operand / value-slot unbound symbols (whole-file mode only) --------
+
+#[test]
+fn flags_unbound_operand_of_a_known_call() {
+    // `+` evaluates its args, so a bare unresolvable operand is unbound.
+    let w = file_warnings("(defn f (x) (+ x typo))");
+    assert!(
+        w.iter().any(|m| m.contains("unbound symbol: typo")),
+        "operand typo should be flagged: {:?}",
+        w
+    );
+    // Through a primitive too (cons), nested under a body.
+    let w = file_warnings("(defn g () (cons 1 nope))");
+    assert!(
+        w.iter().any(|m| m.contains("unbound symbol: nope")),
+        "{:?}",
+        w
+    );
+}
+
+#[test]
+fn flags_unbound_value_in_def_let_if_slots() {
+    assert!(file_warnings("(def y zilch)")
+        .iter()
+        .any(|m| m.contains("unbound symbol: zilch")));
+    assert!(file_warnings("(defn f () (let (a absent) a))")
+        .iter()
+        .any(|m| m.contains("unbound symbol: absent")));
+    assert!(file_warnings("(defn f () (if missing 1 2))")
+        .iter()
+        .any(|m| m.contains("unbound symbol: missing")));
+}
+
+#[test]
+fn operand_check_respects_scope_and_forward_refs() {
+    // A forward reference to a later top-level def — file-global, not unbound.
+    assert!(file_warnings("(defn a () (cons 1 (b)))\n(defn b () 2)")
+        .iter()
+        .all(|m| !m.contains("unbound")));
+    // A param / let-bound name used as an operand — in scope, not unbound.
+    assert!(file_warnings("(defn f (x) (+ x 1))")
+        .iter()
+        .all(|m| !m.contains("unbound")));
+    assert!(file_warnings("(defn f () (let (y 1) (+ y 2)))")
+        .iter()
+        .all(|m| !m.contains("unbound")));
+    // A prelude name as an operand resolves through the heap globals.
+    assert!(file_warnings("(defn f () (map inc (list 1 2)))")
+        .iter()
+        .all(|m| !m.contains("unbound")));
+}
+
+#[test]
+fn operand_check_is_off_for_bare_fragments() {
+    // The single-form path (REPL / `(check 'form)`) stays lenient: a free
+    // operand variable is ambiguous, not provably unbound — only call *heads*
+    // are flagged there. (Guards the no-false-positives rule for fragments.)
+    assert!(warnings("(first xs)")
+        .iter()
+        .all(|m| !m.contains("unbound")));
+    assert!(warnings("(+ 1 foo)").iter().all(|m| !m.contains("unbound")));
+    assert!(warnings("(let (x bar) (first x))")
+        .iter()
+        .all(|m| !m.contains("unbound")));
+}
+
+#[test]
+fn flags_zero_arg_fn_passed_bare_to_an_output_sink() {
+    // The `(print ansi-clear)`-for-`(print (ansi-clear))` slip: a bare
+    // zero-arity global handed to print/println/str/format stringifies the
+    // function (#<fn …>), never its result — silent today.
+    for sink in &["print", "println", "str", "format"] {
+        let w = check_with_defs(&["(defn home () \"\\e[H\")"], &format!("({} home)", sink));
+        assert!(
+            w.iter()
+                .any(|m| m.contains("home: function used as a value")
+                    && m.contains("did you mean (home)")),
+            "{} should flag a bare zero-arg fn: {:?}",
+            sink,
+            w
+        );
+    }
+}
+
+#[test]
+fn function_as_value_lint_is_quiet_on_the_correct_and_legitimate_shapes() {
+    // Called correctly — no warning.
+    assert!(
+        check_with_defs(&["(defn home () \"\\e[H\")"], "(print (home))")
+            .iter()
+            .all(|m| !m.contains("function used as a value"))
+    );
+    // A fn that *takes* arguments is a plausible intentional callback value.
+    assert!(check_with_defs(&["(defn f (x) x)"], "(print f)")
+        .iter()
+        .all(|m| !m.contains("function used as a value")));
+    // A same-named *local* (not the global zero-arg fn) is left alone.
+    assert!(
+        check_with_defs(&["(defn home () 1)"], "(let (home 42) (print home))")
+            .iter()
+            .all(|m| !m.contains("function used as a value"))
+    );
+    // A plain value is fine.
+    assert!(warnings("(print 42)")
+        .iter()
+        .all(|m| !m.contains("function used as a value")));
+    // The lint is sink-scoped: passing a bare zero-arg fn elsewhere (a real
+    // higher-order use) is not flagged.
+    assert!(check_with_defs(&["(defn home () 1)"], "(map home [1 2])")
+        .iter()
+        .all(|m| !m.contains("function used as a value")));
+}
+
+#[test]
+fn unbound_is_silent_for_in_scope_names() {
+    // fn/lambda params don't look unbound when used as call heads or
+    // referenced in the body.
+    assert!(warnings("(fn (f) (f 1 2))")
+        .iter()
+        .all(|w| !w.contains("unbound")));
+    // let bindings: same.
+    assert!(warnings("(let (g (fn (x) x)) (g 1))")
+        .iter()
+        .all(|w| !w.contains("unbound")));
+    // Syntactic keywords aren't bound but are never "unbound".
+    for src in &["(do 1 2 3)", "(when true 1)", "(cond)", "(and)", "(or)"] {
+        assert!(
+            warnings(src).iter().all(|w| !w.contains("unbound")),
+            "syntactic keyword must not be flagged unbound: {} → {:?}",
+            src,
+            warnings(src)
+        );
+    }
+}
+
+#[test]
+fn unbound_is_silent_for_prelude_names() {
+    // The prelude is loaded in our test heap (via Interp::new()), so
+    // stdlib names resolve. `inc`, `list`, `int?`, `even?`, … are all fine.
+    for src in &[
+        "(inc 1)",
+        "(list 1 2 3)",
+        "(int? 5)",
+        "(zero? 0)",
+        "(map (fn (x) x) [1 2 3])",
+    ] {
+        assert!(
+            warnings(src).iter().all(|w| !w.contains("unbound")),
+            "prelude name must not be flagged unbound: {} → {:?}",
+            src,
+            warnings(src)
+        );
+    }
+}
+
+#[test]
+fn file_globals_make_later_forms_see_earlier_defs() {
+    // `check_file` accumulates top-level def names. Without that,
+    // `(my-fn 1)` in form 2 would be flagged unbound — `my-fn` isn't in
+    // the heap (no eval), only in the file.
+    let interp = crate::Interp::new();
+    let src = "(defn my-fn (x) (+ x 1))\n(my-fn 1)";
+    let mut heap =
+        crate::core::heap::Heap::with_regions(interp.heap.prelude_arc(), interp.heap.runtime_arc());
+    heap.set_global(crate::core::value::EnvId::GLOBAL);
+    let forms = crate::syntax::reader::read_all(&mut heap, src).expect("parse");
+    let out = check_file(&mut heap, &forms);
+    let msgs: Vec<_> = out.into_iter().map(|(_, m)| m).collect();
+    assert!(
+        msgs.iter().all(|m| !m.contains("unbound symbol: my-fn")),
+        "file-local defns must shield later calls: {:?}",
+        msgs
+    );
+}
+
+#[test]
+fn fn_params_with_rest_and_optional_dont_leak() {
+    // The marker symbols `&`/`&optional` themselves are *not* binders;
+    // the names that follow them are.
+    assert!(warnings("(fn (x & ys) (cons x ys))")
+        .iter()
+        .all(|w| !w.contains("unbound")));
+    assert!(warnings("(fn (x &optional (y 0)) (+ x y))")
+        .iter()
+        .all(|w| !w.contains("unbound")));
+}
+
+#[test]
+fn defn_body_sees_its_params_in_scope() {
+    // A user defn whose body references its params must not flag them as
+    // unbound. (The `defn` macro hasn't been expanded — the CLI checks
+    // un-expanded forms — so this tests the un-expanded surface path.)
+    assert!(warnings("(defn my-fn (x y) (+ x y))")
+        .iter()
+        .all(|w| !w.contains("unbound")));
+}
+
+#[test]
+fn arity_check_works_for_user_defns_in_a_real_interp() {
+    // Once a defn is evaluated, its arity is derivable from its Closure.
+    // `inc` (prelude) is `(defn inc (n) …)` → exact(1).
+    let w = check_with_defs(&[], "(inc 1 2)");
+    assert!(
+        w.iter()
+            .any(|s| s.contains("inc") && s.contains("expected 1")),
+        "user defn arity should be enforced: {:?}",
+        w
+    );
+}
+
+// ---- Step 4 final pieces: %eq-as-guard + let-alias propagation --------
+//
+// `match` lowers `(match x (5 body) …)` to
+// `(let (m__N x) (if (%eq m__N 5) (do body) …))`. To flag a misuse on
+// `x` in `body` (where the literal pattern asserts x's type), the checker
+// needs two pieces: (1) recognise `(%eq sym lit)` as a guard asserting
+// `sym : type-of(lit)`; (2) when a `let` binds a name to another symbol,
+// propagate narrowings between the two via the alias chain.
+
+#[test]
+fn match_literal_pattern_narrows_the_scrutinee() {
+    // `(match x (5 (first x)))` — the literal-int pattern asserts x : int;
+    // `(first x)` in the body must then flag. Goes through macroexpansion
+    // because `match` is a `defmacro` whose pattern compiler lowers to
+    // `let`+`if`+`%eq`; the checker's narrowing rides the lowered shape.
+    let w = warnings_expanded("(match x (5 (first x)) (_ nil))");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains("got 5")),
+        "match int-literal pattern should narrow x: {:?}",
+        w
+    );
+}
+
+#[test]
+fn match_keyword_pattern_narrows_the_scrutinee() {
+    // Mirror of the int case for a keyword literal. The scrutinee narrows to
+    // the literal singleton `:foo`, so the diagnostic names that exact value.
+    let w = warnings_expanded("(match x (:foo (first x)) (_ nil))");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains(":foo")),
+        "match keyword-literal pattern should narrow x: {:?}",
+        w
+    );
+}
+
+#[test]
+fn eq_against_a_literal_is_a_guard() {
+    // The mechanism that powers match: `(%eq m 5)` in a test position
+    // narrows `m` to `:int` in the then-branch. (Symmetric — both
+    // `(%eq m 5)` and `(%eq 5 m)` should narrow.)
+    let w = warnings("(if (%eq m 5) (first m) nil)");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains("got 5")),
+        "%eq with sym + literal should narrow: {:?}",
+        w
+    );
+    let w = warnings("(if (%eq 5 m) (first m) nil)");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains("got 5")),
+        "%eq with literal + sym (reversed) should narrow: {:?}",
+        w
+    );
+}
+
+#[test]
+fn eq_between_two_variables_is_not_a_guard() {
+    // Equality between two unknowns asserts nothing about either's type.
+    // No false positive must fire on the body.
+    let w = warnings("(if (%eq a b) (first a) nil)");
+    assert!(
+        w.iter().all(|s| !s.contains("first")),
+        "%eq between two vars should not narrow: {:?}",
+        w
+    );
+}
+
+#[test]
+fn eq_guard_does_not_narrow_the_else_branch() {
+    // `(= m "x")` being *false* does NOT prove `m` isn't a string — it could
+    // be another string. So the else-branch must not narrow `m` to `¬string`
+    // and flag a valid `(string-length m)`. (Same then-only soundness as the
+    // `and` guard.)
+    let w = warnings(r#"(if (%eq m "x") :yes (string-length m))"#);
+    assert!(
+        w.iter().all(|s| !s.contains("string-length")),
+        "the else-branch of an `=`/`%eq` guard must not be narrowed: {w:?}"
+    );
+    // The then-branch must still narrow (sanity): `(= m 5)` true ⇒ m : int.
+    let w = warnings("(if (%eq m 5) (first m) nil)");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains("got 5")),
+        "the then-branch must still narrow m to int: {w:?}"
+    );
+}
+
+#[test]
+fn let_alias_propagates_narrowing_in_both_directions() {
+    // The match pattern compiler's exact shape: alias `m` to `x`, then
+    // narrow `m` via a guard. The narrowing must flow back onto `x` so a
+    // body that uses `x` (not `m`) still sees the asserted type.
+    let w = warnings("(let (m x) (if (int? m) (first x) nil))");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains("int")),
+        "let-alias should propagate narrowing from m to x: {:?}",
+        w
+    );
+    // And the symmetric direction: narrow x, alias-narrows m.
+    let w = warnings("(let (m x) (if (int? x) (first m) nil))");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains("int")),
+        "let-alias should propagate narrowing from x to m: {:?}",
+        w
+    );
+}
+
+#[test]
+fn shadowing_clears_an_alias() {
+    // An inner let that rebinds an aliased name to something else breaks
+    // the chain — the new binding is the new name's type, no alias.
+    // `(let (m x) (let (m 5) (first m)))` flags the inner `(first m)`
+    // because `m` is now int, but that's via the literal-type binding,
+    // not the broken alias.
+    let w = warnings("(let (m x) (let (m 5) (first m)))");
+    assert!(
+        w.iter().any(|s| s.contains("first") && s.contains("got 5")),
+        "shadowed let should still warn on the inner int: {:?}",
+        w
+    );
+    // The outer `x` must not be narrowed by the inner shadowing.
+    let w = warnings("(let (m x) (let (m 5) (println x)))");
+    assert!(
+        w.iter().all(|s| !s.contains("first")),
+        "shadowing must not leak narrowing back to the original: {:?}",
+        w
+    );
+}
+
+// ---- callback-arity check over higher-order combinators (ADR-078) ----
+
+#[test]
+fn flags_a_named_callback_of_the_wrong_arity() {
+    // `cons` is arity 2; `map` calls its callback with 1 arg → real bug.
+    let w = warnings("(map cons nil)");
+    assert!(
+        w.iter()
+            .any(|s| s.contains("map") && s.contains("callback") && s.contains("cons")),
+        "map should flag a 2-arg callback called with 1: {w:?}"
+    );
+}
+
+#[test]
+fn accepts_a_named_callback_of_the_right_arity() {
+    // `inc` is arity 1 — exactly what `map` supplies. No warning.
+    let w = warnings("(map inc nil)");
+    assert!(
+        w.iter().all(|s| !s.contains("callback")),
+        "a correct-arity callback must not warn: {w:?}"
+    );
+    // A variadic callback (`+` accepts 1) is fine too.
+    let w = warnings("(map + nil)");
+    assert!(
+        w.iter().all(|s| !s.contains("callback")),
+        "a variadic callback must not warn: {w:?}"
+    );
+}
+
+#[test]
+fn flags_a_lambda_callback_of_the_wrong_arity() {
+    // A 2-param lambda passed where `map` calls it with 1 arg.
+    let w = warnings("(map (fn (a b) a) nil)");
+    assert!(
+        w.iter()
+            .any(|s| s.contains("map") && s.contains("callback") && s.contains("the lambda")),
+        "map should flag a 2-arg lambda: {w:?}"
+    );
+    // Correct arity — no warning.
+    let w = warnings("(map (fn (a) a) nil)");
+    assert!(
+        w.iter().all(|s| !s.contains("callback")),
+        "a 1-arg lambda must not warn under map: {w:?}"
+    );
+}
+
+#[test]
+fn lambda_head_behaves_like_fn() {
+    // `lambda` is a synonym for `fn` (and survives macro expansion as itself),
+    // so the callback-arity check must see through it exactly like `fn`.
+    let w = warnings("(map (lambda (a b) a) nil)");
+    assert!(
+        w.iter()
+            .any(|s| s.contains("map") && s.contains("callback") && s.contains("the lambda")),
+        "map should flag a 2-arg `lambda` callback: {w:?}"
+    );
+    let w = warnings("(map (lambda (a) a) nil)");
+    assert!(
+        w.iter().all(|s| !s.contains("callback")),
+        "a 1-arg `lambda` must not warn under map: {w:?}"
+    );
+}
+
+#[test]
+fn lambda_form_is_not_unbound() {
+    // Regression: `lambda` was missing from SPECIAL_HEAD / is_syntactic_keyword,
+    // so whole-file mode flagged the head AND its params as unbound symbols — a
+    // false positive on perfectly valid code.
+    let w = file_warnings("(def f (map (lambda (x) (+ x 1)) (list 1 2 3)))");
+    assert!(
+        w.iter().all(|m| !m.contains("unbound symbol")),
+        "a `lambda` literal must not draw unbound-symbol warnings: {w:?}"
+    );
+}
+
+// ---- gradual-assignment check: `(def x …)` vs a non-arrow `(sig x T)` ----
+// (GradualTy's first consumer — ADR-024.)
+
+#[test]
+fn def_against_value_sig_flags_a_literal_mismatch() {
+    // `(sig n int)` then `(def n "hello")` — a precise literal disjoint from
+    // the declared type. stat(string) ⊄ int → flagged.
+    let w = file_warnings(r#"(sig n int) (def n "hello")"#);
+    assert!(
+        w.iter().any(|m| m.contains("n: value of type \"hello\"")
+            && m.contains("not assignable")
+            && m.contains("int")),
+        "a string literal assigned to an int-declared name must warn: {w:?}"
+    );
+}
+
+#[test]
+fn def_against_value_sig_catches_a_bounded_dynamic_global() {
+    // The genuine GradualTy value-add: `label` is a redefinable global with a
+    // declared type, so it's dynamic_within(string) — a bounded dynamic that
+    // Option<Ty> can't represent. Assigning it to an int-declared name is
+    // disjoint (string ∩ int = ⊥) → flagged.
+    let w =
+        file_warnings(r#"(sig count int) (sig label string) (def label "x") (def count label)"#);
+    assert!(
+        w.iter()
+            .any(|m| m.contains("count: value of type string") && m.contains("int")),
+        "a string-typed global assigned to an int-declared name must warn: {w:?}"
+    );
+}
+
+#[test]
+fn def_against_value_sig_defers_when_consistent_or_unknown() {
+    // Every one of these is consistent (or dynamic) → no assignment warning.
+    for src in [
+        "(sig n int) (def n 5)",                          // exact
+        "(sig m number) (def m 5)",                       // int <: number
+        "(sig n int) (def n (+ 1 2))",                    // call result widened → defer
+        "(sig n int) (def n some-unknown-global)",        // unknown → pure dynamic
+        "(sig a int) (sig b number) (def b 5) (def a b)", // int <- number: ∩≠⊥ → defer
+    ] {
         let w = file_warnings(src);
         assert!(
-            w.iter()
-                .any(|s| s.contains("unreachable clause") && s.contains('5')),
-            "expected an unreachable-clause warning for the hand-written chain, got {w:?}"
-        );
-    }
-
-    #[test]
-    fn covers_the_other_signed_primitives() {
-        assert!(warnings("(mod 7 3)").is_empty());
-        assert!(warnings("(mod 7 \"x\")").iter().any(|w| w.contains("mod")));
-        assert!(warnings("(rem :a 3)").iter().any(|w| w.contains("rem")));
-        assert!(warnings("(vector-length 5)")
-            .iter()
-            .any(|w| w.contains("vector-length")));
-        assert!(warnings("(substring \"hi\" \"a\" 1)")
-            .iter()
-            .any(|w| w.contains("substring") && w.contains("argument 2")));
-        assert!(warnings("(%lt 1 :k)").iter().any(|w| w.contains("%lt")));
-    }
-
-    #[test]
-    fn reports_each_bad_argument() {
-        // Both args provably wrong → two distinct warnings (one per position).
-        let w = warnings("(mod \"a\" :b)");
-        assert_eq!(w.len(), 2, "{:?}", w);
-        assert!(w.iter().any(|s| s.contains("argument 1")));
-        assert!(w.iter().any(|s| s.contains("argument 2")));
-    }
-
-    #[test]
-    fn nested_misuse_is_found() {
-        // A wrong call buried inside an argument is still reported.
-        let w = warnings("(vector-length (cons (first 5) 2))");
-        assert!(w.iter().any(|s| s.contains("first")));
-    }
-
-    #[test]
-    fn atoms_and_malformed_forms_do_not_panic() {
-        for src in ["5", "foo", "\"s\"", ":k", "()", "(5 6 7)", "(first)"] {
-            // No panic, and no spurious warning on a bare atom / non-symbol head /
-            // missing argument.
-            let _ = warnings(src);
-        }
-        assert!(warnings("(5 6 7)").is_empty()); // head isn't a symbol — no diagnostics
-                                                 // `(first)` is now an arity diagnostic (0 args; first needs 1).
-        assert!(warnings("(first)")
-            .iter()
-            .any(|w| w.contains("first") && w.contains("expected 1")));
-    }
-
-    // ------------- Step 3: sigs sourced from NativeFn, closure inference --------------
-
-    /// The eight test cases below need real user-defined closures, which means
-    /// running a `defn` against the global table. The `Interp` builds the full
-    /// prelude (curated stdlib closures and all) on top of the primitive kernel
-    /// — exactly the surface a checker is supposed to see.
-    fn check_with_defs(defs: &[&str], src: &str) -> Vec<String> {
-        let mut interp = crate::Interp::new();
-        for d in defs {
-            interp.eval_str(d).expect("def");
-        }
-        let form =
-            crate::syntax::reader::read_one(&mut interp.heap, src).expect("parse expression");
-        // Macro-expand so any prelude wrappers (defn → fn, etc.) are gone, like
-        // `brood --check`/the `check` builtin do before calling check_form.
-        let form =
-            crate::eval::macros::macroexpand_all(&mut interp.heap, form, interp.root).unwrap();
-        check_form(&interp.heap, form)
-    }
-
-    #[test]
-    fn primitive_sigs_are_read_from_native_fn() {
-        // The point of Step 3: there is no parallel `primitive_sig` table.
-        // The sig the checker uses for `string-length` *is* the one declared
-        // next to its `Arity` in `builtins.rs`. If we ever drop the sig field
-        // (or set it wrong), this catches it.
-        let interp = crate::Interp::new();
-        let sig = primitive_sig(&interp.heap, crate::core::value::intern("string-length"))
-            .expect("string-length is a primitive");
-        assert_eq!(sig.params, vec![Ty::of(Tag::Str)]);
-        assert_eq!(sig.ret, Ty::of(Tag::Int));
-        // The "no useful info" lane: a variadic any-arg primitive (str) returns
-        // a Sig that param-overlaps every input, so it never warns.
-        let any_sig = primitive_sig(&interp.heap, crate::core::value::intern("str"))
-            .expect("str is a primitive");
-        assert_eq!(any_sig.rest, Some(Ty::ANY));
-    }
-
-    #[test]
-    fn file_defn_shadowing_a_builtin_wins_over_its_signature() {
-        // A file's own `defn check` supersedes the `check` builtin (ADR-123: a
-        // def always wins) — the checker must not type its calls with the
-        // builtin's list-returning signature. This exact shape (the bintree
-        // bench) produced "+: argument 2 expects number, got list" plus a
-        // phantom arity from the builtin's 1-arg Arity.
-        let w = file_warnings(
-            "(defn check (node) (if (nil? node) 1 (+ 1 (check (nth node 0)))))\n\
-             (println (check nil))",
-        );
-        assert!(
-            !w.iter().any(|s| s.contains("expects")),
-            "stale builtin signature leaked into a shadowed call: {:?}",
-            w
-        );
-        // Arity from the stale builtin must not leak either: the builtin `check`
-        // is 1-ary, the file's redefinition is 2-ary.
-        let w = file_warnings("(defn check (a b) (+ a b))\n(println (check 1 2))");
-        assert!(
-            !w.iter().any(|s| s.contains("argument")),
-            "stale builtin arity leaked into a shadowed call: {:?}",
-            w
-        );
-        // No over-suppression: the real builtin (not redefined) still warns.
-        let w = file_warnings("(println (+ 1 (check '(nil? nil))))");
-        assert!(
-            w.iter().any(|s| s.contains("expects number")),
-            "the un-shadowed builtin's signature should still warn: {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn infers_a_straight_line_wrapper() {
-        // (defn inc (x) (+ x 1)) → x : number (from +'s rest type).
-        // So `(inc :k)` is a provable misuse.
-        let w = check_with_defs(&["(defn inc (x) (+ x 1))"], "(inc :k)");
-        assert!(
-            w.iter().any(|s| s.contains("inc") && s.contains("number")),
-            "expected an `inc :k` warning, got {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn inferred_return_type_propagates() {
-        // (defn inc (x) (+ x 1)) returns the number `+` returns; feeding it into
-        // `string-length` (wants string) is a provable misuse.
-        let w = check_with_defs(&["(defn inc (x) (+ x 1))"], "(string-length (inc 1))");
-        assert!(
-            w.iter().any(|s| s.contains("string-length")),
-            "expected a `string-length` warning, got {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn inferred_params_intersect_across_positions() {
-        // (defn add (x y) (+ x y)) — both x and y at + positions → number.
-        let w = check_with_defs(&["(defn add (x y) (+ x y))"], "(add \"a\" 2)");
-        assert!(w.iter().any(|s| s.contains("add")), "got {:?}", w);
-    }
-
-    #[test]
-    fn does_not_infer_through_branches_or_lets() {
-        // A body with `if`/complex `let` is *not* a single straight-line expression
-        // — inference must skip it, leaving the closure untyped (no warning).
-        // (A plain let-alias `(let (y x) call)` IS inferred — see below.)
-        let w = check_with_defs(&["(defn maybe (x) (if (int? x) (+ x 1) x))"], "(maybe :k)");
-        assert!(
-            w.is_empty(),
-            "if-branching bodies must not infer (so no warning): {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn infers_through_let_alias() {
-        // `(let (y x) call)` where y is just a rename of closure param x:
-        // the body is still one straight-line call — inference should work.
-        let w = check_with_defs(
-            &["(defn double (x) (let (y x) (* y 2)))"],
-            "(string-length (double 3))",
-        );
-        assert!(
-            w.iter().any(|s| s.contains("string-length")),
-            "let-alias wrapper should not block infer_sig: {:?}",
-            w
-        );
-        // The param type is also inferred: `y` at number position → x : number.
-        let w = check_with_defs(&["(defn double (x) (let (y x) (* y 2)))"], "(double :k)");
-        assert!(
-            w.iter()
-                .any(|s| s.contains("double") && s.contains("number")),
-            "let-alias: param type should propagate from callee: {:?}",
-            w
-        );
-        // A non-param let (binding a computed value) isn't peeled by the precise
-        // *parameter*-inferring tier — but the sound **return-only** tier still
-        // infers `wrap`'s result as `number` (`wrap 3` = 8), so a real misuse of
-        // that result is caught (`(string-length 8)` genuinely errors at runtime).
-        let w = check_with_defs(
-            &["(defn wrap (x) (let (y (+ x 1)) (* y 2)))"],
-            "(string-length (wrap 3))",
-        );
-        assert!(
-            w.iter().any(|s| s.contains("string-length")),
-            "return-only inference should type wrap's result as number: {:?}",
-            w
-        );
-        // …but the *parameter* is NOT inferred from a branchy/multi-step body
-        // (that would be unsound), so a differently-typed argument never warns.
-        let w = check_with_defs(&["(defn wrap (x) (let (y (+ x 1)) (* y 2)))"], "(wrap :k)");
-        assert!(
-            w.is_empty(),
-            "return-only inference must leave the parameter unconstrained: {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn return_only_inference_is_sound() {
-        // The return type of a branchy/multi-step body is inferred (sound: it's a
-        // union of the possible results), so misusing the *result* is caught…
-        let w = check_with_defs(
-            &["(defn pick (c) (if c 1 2))"],
-            "(string-length (pick true))",
-        );
-        assert!(
-            w.iter().any(|s| s.contains("string-length")),
-            "a numeric-returning branchy body's result misuse must warn: {w:?}"
-        );
-        // …but a parameter used as a number only *inside a guard* must NOT be
-        // inferred as number — that's the guarded-use false positive full param
-        // inference would create. `(g "x")` is valid (returns 0), so no warning.
-        let w = check_with_defs(&["(defn g (x) (if (number? x) (+ x 1) 0))"], "(g \"x\")");
-        assert!(
-            w.is_empty(),
-            "a guarded numeric use must not infer the parameter as number: {w:?}"
-        );
-        // A union result that *overlaps* the sink must not warn (int | string fed
-        // to `+` — the int arm overlaps `number`).
-        let w = check_with_defs(&["(defn u (c) (if c 1 \"s\"))"], "(+ 1 (u true))");
-        assert!(
-            w.is_empty(),
-            "a result overlapping the expected type must not warn: {w:?}"
-        );
-        // Recursion terminates (the re-entry guard) and stays sound — no hang,
-        // no spurious warning on a valid use.
-        let w = check_with_defs(
-            &["(defn rfac (n) (if (< n 1) 1 (* n (rfac (- n 1)))))"],
-            "(+ 1 (rfac 5))",
-        );
-        assert!(
-            w.iter().all(|s| !s.contains("expects")),
-            "recursive-body return inference must stay sound: {w:?}"
-        );
-    }
-
-    #[test]
-    fn does_not_infer_through_recursion() {
-        // A self-recursive call has no fixed sig to read from — must skip,
-        // even though the body is structurally a single call.
-        let w = check_with_defs(&["(defn loop (x) (loop x))"], "(loop :k)");
-        assert!(w.is_empty(), "recursive defns must not infer: {:?}", w);
-    }
-
-    #[test]
-    fn skips_inference_for_variadic_or_optional_closures() {
-        // A variadic-tail closure isn't a "fixed-arity straight-line" — skip.
-        let w = check_with_defs(&["(defn vlist (& xs) (first xs))"], "(vlist 1 2 3)");
-        assert!(w.is_empty(), "variadic defns must not infer: {:?}", w);
-    }
-
-    // ------------- Step 4: scope tracking + guard narrowing --------------
-
-    #[test]
-    fn let_binding_propagates_its_rhs_type() {
-        // The RHS is a literal int — `(first x)` should flag, because x : int
-        // shadows "unknown" in the body. (This is the basic let-tracking.)
-        let w = warnings("(let (x 1) (first x))");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("got 1")),
-            "expected a `first x` warning where x : 1 (int singleton), got {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn let_binding_from_nested_call_propagates() {
-        // RHS is a known primitive whose return type is int. So `x : int`,
-        // and `(first x)` flags.
-        let w = warnings("(let (x (string-length \"hi\")) (first x))");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("int")),
-            "expected a `first x` warning where x : int, got {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn let_binding_of_unknown_rhs_stays_silent() {
-        // RHS is a variable (unknown), so x stays unknown — `(first x)` must
-        // not warn. (No false positives from let-tracking.)
-        let w = warnings("(let (x foo) (first x))");
-        assert!(w.is_empty(), "got {:?}", w);
-    }
-
-    #[test]
-    fn inner_let_shadows_outer_binding() {
-        // The outer x : int; the inner x : string. `(first x)` in the body
-        // refers to the inner, which is a string — and `first` accepts list /
-        // vector, disjoint from string. So a warning is still expected, but
-        // the *narrowing message* must be "string", not "int". This is the
-        // shadowing-correctness check (outer narrowing must not leak in).
-        let w = warnings("(let (x 1) (let (x \"hi\") (first x)))");
-        assert!(
-            w.iter()
-                .any(|s| s.contains("first") && s.contains("got \"hi\"")),
-            "expected the inner string to be the source, got {:?}",
-            w
-        );
-        assert!(
-            // Outer `x` is the literal `1` → singleton `{1}`; if it leaked the
-            // message would say "got 1" (B0 — was "got int").
-            !w.iter().any(|s| s.contains("got 1")),
-            "outer int must not leak through shadowing: {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn shadowing_with_unknown_rhs_clears_prior_narrowing() {
-        // Outer x : int; inner x : <unknown var>. Inside the inner let, x is
-        // unknown — `(first x)` must NOT warn (the outer narrowing must not
-        // leak through the shadow).
-        let w = warnings("(let (x 1) (let (x foo) (first x)))");
-        assert!(w.is_empty(), "shadow must clear the prior type: {:?}", w);
-    }
-
-    #[test]
-    fn vector_let_bindings_are_recognised() {
-        // `(let [x 1] …)` (vector shape) must work the same as `(let (x 1) …)`.
-        let w = warnings("(let [x 1] (first x))");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("got 1")),
-            "vector-form let bindings must populate the ctx: {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn guard_narrowing_lets_a_then_branch_flag_a_misuse() {
-        // In the then-branch of `(if (int? x) …)`, x : int — `(first x)` flags.
-        let w = warnings("(if (int? x) (first x) nil)");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("int")),
-            "expected guard narrowing to flag (first x) when x : int, got {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn guard_narrowing_does_not_leak_into_the_else_branch() {
-        // The else-branch narrows x to `not int`, which overlaps list / vector;
-        // so `(first x)` must NOT warn there.
-        let w = warnings("(if (int? x) nil (first x))");
-        assert!(
-            !w.iter().any(|s| s.contains("first")),
-            "else branch must not have x narrowed to int: {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn negated_guard_flips_the_narrowing() {
-        // (if (not (int? x)) …) — the then-branch narrows x to `not int`, the
-        // else-branch to int.
-        let w = warnings("(if (not (int? x)) nil (first x))");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("int")),
-            "the else of a negated guard must narrow to the inner type: {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn guards_for_number_and_list_unions_narrow_to_the_union() {
-        // (if (number? x) (first x) …) — x : number = int|float in the then,
-        // which is disjoint from list/vector, so `(first x)` flags.
-        let w = warnings("(if (number? x) (first x) nil)");
-        assert!(
-            w.iter()
-                .any(|s| s.contains("first") && s.contains("number")),
-            "number? must narrow to int|float: {:?}",
-            w
-        );
-        // The list? guard should *not* warn in the then (list overlaps first's
-        // expected type).
-        let w = warnings("(if (list? x) (first x) nil)");
-        assert!(
-            !w.iter().any(|s| s.contains("first")),
-            "list? must not produce a false positive on (first x): {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn non_guard_tests_dont_narrow() {
-        // The test isn't a recognised type predicate, so x stays unknown in
-        // both branches — `(first x)` must not warn.
-        let w = warnings("(if (zero? x) (first x) (first x))");
-        assert!(w.is_empty(), "non-tag-guard test must not narrow: {:?}", w);
-    }
-
-    #[test]
-    fn nested_guards_compose_their_narrowings() {
-        // (if (number? x) (if (int? x) … (first x)) …) — in the inner else,
-        // x is narrowed to `number ∩ ¬int` = float, which is still disjoint
-        // from list/vector, so `(first x)` flags.
-        let w = warnings("(if (number? x) (if (int? x) nil (first x)) nil)");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("float")),
-            "nested guards must compose to float (= number ∩ ¬int): {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn let_bound_guard_narrows_when_used_as_an_if_test() {
-        // The user-written shape `(let (cond (int? x)) (if cond …))` — Brood is
-        // immutable, so `cond` faithfully reflects `(int? x)` until the let
-        // ends. The guard-alias table maps `cond → (x, int)`, and the inner
-        // `if cond` narrows x to int in the then-branch.
-        let w = warnings("(let (cond (int? x)) (if cond (first x) nil))");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("int")),
-            "expected let-bound guard to flag (first x) in the then: {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn let_bound_guard_narrows_in_the_else_branch_too() {
-        // Else-branch sees x as `not int`, which overlaps list / vector, so
-        // no warning — same as the direct-test case.
-        let w = warnings("(let (cond (int? x)) (if cond nil (first x)))");
-        assert!(
-            !w.iter().any(|s| s.contains("first")),
-            "the else of a let-bound guard must narrow to ¬int, not int: {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn let_bound_guard_can_be_negated_in_the_if() {
-        // `(if (not cond) …)` flips the narrowing — same as `(not (int? x))`.
-        let w = warnings("(let (cond (int? x)) (if (not cond) nil (first x)))");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("int")),
-            "expected negation to flip the let-bound guard: {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn rebinding_the_guard_name_clears_the_alias() {
-        // After `(let (cond <unknown>) …)` shadowing, `cond` no longer aliases
-        // the int-guard, so `(if cond …)` must not narrow x.
-        let w = warnings("(let (cond (int? x)) (let (cond foo) (if cond (first x) nil)))");
-        assert!(w.is_empty(), "shadowing must drop the guard alias: {:?}", w);
-    }
-
-    #[test]
-    fn rebinding_to_a_non_guard_value_clears_the_alias() {
-        // Same as above but with an int literal rather than an unknown var.
-        let w = warnings("(let (cond (int? x)) (let (cond 1) (if cond (first x) nil)))");
-        assert!(
-            w.is_empty(),
-            "shadowing with a non-guard value must drop the alias: {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn self_aliased_guard_is_not_recorded() {
-        // `(let (x (int? x)) …)` shadows the outer x with a bool; the inner
-        // body's `x` is the bool, not the original — narrowing the original
-        // would be unsound (it's no longer reachable), so we must not record
-        // the guard. (No assertion about a warning either way — the point is
-        // we don't crash and don't introduce a stale alias.)
-        let w = warnings("(let (x (int? x)) (if x x nil))");
-        assert!(
-            !w.iter().any(|s| s.contains("first")),
-            "self-aliased guards must not propagate to inner uses: {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn let_inside_a_then_branch_can_shadow_a_narrowing() {
-        // Outer narrowing: x : int. Inner shadow: x : string. The body now
-        // sees x as string, so the narrowing message names string.
-        let w = warnings("(if (int? x) (let (x \"hi\") (first x)) nil)");
-        assert!(
-            w.iter()
-                .any(|s| s.contains("first") && s.contains("got \"hi\"")),
-            "shadow must override the guard narrowing: {:?}",
-            w
-        );
-        assert!(
-            !w.iter().any(|s| s.contains("got int")),
-            "the int narrowing must not leak through the shadow: {:?}",
-            w
-        );
-    }
-
-    // ---------------- Step 4: arity + unbound-symbol diagnostics ----------------
-
-    #[test]
-    fn flags_too_few_arguments() {
-        // `first` expects exactly 1; 0 is wrong.
-        assert!(warnings("(first)")
-            .iter()
-            .any(|w| w.contains("first") && w.contains("expected 1") && w.contains("got 0")));
-        // `string-length` expects exactly 1.
-        assert!(warnings("(string-length)")
-            .iter()
-            .any(|w| w.contains("string-length") && w.contains("expected 1")));
-    }
-
-    #[test]
-    fn flags_too_many_arguments() {
-        // `rem` is `exact(2)`; calling with 3 is wrong.
-        assert!(warnings("(rem 1 2 3)")
-            .iter()
-            .any(|w| w.contains("rem") && w.contains("expected 2") && w.contains("got 3")));
-    }
-
-    #[test]
-    fn arity_message_handles_range_and_variadic() {
-        // `map-get` is `range(2, 3)` → "expected 2 to 3".
-        assert!(warnings("(map-get {})")
-            .iter()
-            .any(|w| w.contains("map-get") && w.contains("2 to 3")));
-        // `apply` is `at_least(2)` → "expected 2 or more"; 1 is too few.
-        assert!(warnings("(apply f)")
-            .iter()
-            .any(|w| w.contains("apply") && w.contains("2 or more")));
-    }
-
-    #[test]
-    fn arity_pass_is_silent_for_correct_calls() {
-        assert!(warnings("(first [1 2])")
-            .iter()
-            .all(|w| !w.contains("number of arguments")));
-        assert!(warnings("(rem 7 3)")
-            .iter()
-            .all(|w| !w.contains("number of arguments")));
-        // Variadic: any count is fine.
-        for n in 0..=5 {
-            let args = (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(" ");
-            let w = warnings(&format!("(+ {})", args));
-            assert!(
-                w.iter().all(|s| !s.contains("number of arguments")),
-                "(+ {}…) should not warn arity: {:?}",
-                n,
-                w
-            );
-        }
-    }
-
-    #[test]
-    fn flags_unbound_call_heads() {
-        assert!(warnings("(frobnicate 1)")
-            .iter()
-            .any(|w| w.contains("unbound symbol: frobnicate")));
-        assert!(warnings("(typo-name :hi)")
-            .iter()
-            .any(|w| w.contains("unbound symbol: typo-name")));
-    }
-
-    // ---- Operand / value-slot unbound symbols (whole-file mode only) --------
-
-    #[test]
-    fn flags_unbound_operand_of_a_known_call() {
-        // `+` evaluates its args, so a bare unresolvable operand is unbound.
-        let w = file_warnings("(defn f (x) (+ x typo))");
-        assert!(
-            w.iter().any(|m| m.contains("unbound symbol: typo")),
-            "operand typo should be flagged: {:?}",
-            w
-        );
-        // Through a primitive too (cons), nested under a body.
-        let w = file_warnings("(defn g () (cons 1 nope))");
-        assert!(
-            w.iter().any(|m| m.contains("unbound symbol: nope")),
-            "{:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn flags_unbound_value_in_def_let_if_slots() {
-        assert!(file_warnings("(def y zilch)")
-            .iter()
-            .any(|m| m.contains("unbound symbol: zilch")));
-        assert!(file_warnings("(defn f () (let (a absent) a))")
-            .iter()
-            .any(|m| m.contains("unbound symbol: absent")));
-        assert!(file_warnings("(defn f () (if missing 1 2))")
-            .iter()
-            .any(|m| m.contains("unbound symbol: missing")));
-    }
-
-    #[test]
-    fn operand_check_respects_scope_and_forward_refs() {
-        // A forward reference to a later top-level def — file-global, not unbound.
-        assert!(file_warnings("(defn a () (cons 1 (b)))\n(defn b () 2)")
-            .iter()
-            .all(|m| !m.contains("unbound")));
-        // A param / let-bound name used as an operand — in scope, not unbound.
-        assert!(file_warnings("(defn f (x) (+ x 1))")
-            .iter()
-            .all(|m| !m.contains("unbound")));
-        assert!(file_warnings("(defn f () (let (y 1) (+ y 2)))")
-            .iter()
-            .all(|m| !m.contains("unbound")));
-        // A prelude name as an operand resolves through the heap globals.
-        assert!(file_warnings("(defn f () (map inc (list 1 2)))")
-            .iter()
-            .all(|m| !m.contains("unbound")));
-    }
-
-    #[test]
-    fn operand_check_is_off_for_bare_fragments() {
-        // The single-form path (REPL / `(check 'form)`) stays lenient: a free
-        // operand variable is ambiguous, not provably unbound — only call *heads*
-        // are flagged there. (Guards the no-false-positives rule for fragments.)
-        assert!(warnings("(first xs)")
-            .iter()
-            .all(|m| !m.contains("unbound")));
-        assert!(warnings("(+ 1 foo)").iter().all(|m| !m.contains("unbound")));
-        assert!(warnings("(let (x bar) (first x))")
-            .iter()
-            .all(|m| !m.contains("unbound")));
-    }
-
-    #[test]
-    fn flags_zero_arg_fn_passed_bare_to_an_output_sink() {
-        // The `(print ansi-clear)`-for-`(print (ansi-clear))` slip: a bare
-        // zero-arity global handed to print/println/str/format stringifies the
-        // function (#<fn …>), never its result — silent today.
-        for sink in &["print", "println", "str", "format"] {
-            let w = check_with_defs(&["(defn home () \"\\e[H\")"], &format!("({} home)", sink));
-            assert!(
-                w.iter()
-                    .any(|m| m.contains("home: function used as a value")
-                        && m.contains("did you mean (home)")),
-                "{} should flag a bare zero-arg fn: {:?}",
-                sink,
-                w
-            );
-        }
-    }
-
-    #[test]
-    fn function_as_value_lint_is_quiet_on_the_correct_and_legitimate_shapes() {
-        // Called correctly — no warning.
-        assert!(
-            check_with_defs(&["(defn home () \"\\e[H\")"], "(print (home))")
-                .iter()
-                .all(|m| !m.contains("function used as a value"))
-        );
-        // A fn that *takes* arguments is a plausible intentional callback value.
-        assert!(check_with_defs(&["(defn f (x) x)"], "(print f)")
-            .iter()
-            .all(|m| !m.contains("function used as a value")));
-        // A same-named *local* (not the global zero-arg fn) is left alone.
-        assert!(
-            check_with_defs(&["(defn home () 1)"], "(let (home 42) (print home))")
-                .iter()
-                .all(|m| !m.contains("function used as a value"))
-        );
-        // A plain value is fine.
-        assert!(warnings("(print 42)")
-            .iter()
-            .all(|m| !m.contains("function used as a value")));
-        // The lint is sink-scoped: passing a bare zero-arg fn elsewhere (a real
-        // higher-order use) is not flagged.
-        assert!(check_with_defs(&["(defn home () 1)"], "(map home [1 2])")
-            .iter()
-            .all(|m| !m.contains("function used as a value")));
-    }
-
-    #[test]
-    fn unbound_is_silent_for_in_scope_names() {
-        // fn/lambda params don't look unbound when used as call heads or
-        // referenced in the body.
-        assert!(warnings("(fn (f) (f 1 2))")
-            .iter()
-            .all(|w| !w.contains("unbound")));
-        // let bindings: same.
-        assert!(warnings("(let (g (fn (x) x)) (g 1))")
-            .iter()
-            .all(|w| !w.contains("unbound")));
-        // Syntactic keywords aren't bound but are never "unbound".
-        for src in &["(do 1 2 3)", "(when true 1)", "(cond)", "(and)", "(or)"] {
-            assert!(
-                warnings(src).iter().all(|w| !w.contains("unbound")),
-                "syntactic keyword must not be flagged unbound: {} → {:?}",
-                src,
-                warnings(src)
-            );
-        }
-    }
-
-    #[test]
-    fn unbound_is_silent_for_prelude_names() {
-        // The prelude is loaded in our test heap (via Interp::new()), so
-        // stdlib names resolve. `inc`, `list`, `int?`, `even?`, … are all fine.
-        for src in &[
-            "(inc 1)",
-            "(list 1 2 3)",
-            "(int? 5)",
-            "(zero? 0)",
-            "(map (fn (x) x) [1 2 3])",
-        ] {
-            assert!(
-                warnings(src).iter().all(|w| !w.contains("unbound")),
-                "prelude name must not be flagged unbound: {} → {:?}",
-                src,
-                warnings(src)
-            );
-        }
-    }
-
-    #[test]
-    fn file_globals_make_later_forms_see_earlier_defs() {
-        // `check_file` accumulates top-level def names. Without that,
-        // `(my-fn 1)` in form 2 would be flagged unbound — `my-fn` isn't in
-        // the heap (no eval), only in the file.
-        let interp = crate::Interp::new();
-        let src = "(defn my-fn (x) (+ x 1))\n(my-fn 1)";
-        let mut heap = crate::core::heap::Heap::with_regions(
-            interp.heap.prelude_arc(),
-            interp.heap.runtime_arc(),
-        );
-        heap.set_global(crate::core::value::EnvId::GLOBAL);
-        let forms = crate::syntax::reader::read_all(&mut heap, src).expect("parse");
-        let out = check_file(&mut heap, &forms);
-        let msgs: Vec<_> = out.into_iter().map(|(_, m)| m).collect();
-        assert!(
-            msgs.iter().all(|m| !m.contains("unbound symbol: my-fn")),
-            "file-local defns must shield later calls: {:?}",
-            msgs
-        );
-    }
-
-    #[test]
-    fn fn_params_with_rest_and_optional_dont_leak() {
-        // The marker symbols `&`/`&optional` themselves are *not* binders;
-        // the names that follow them are.
-        assert!(warnings("(fn (x & ys) (cons x ys))")
-            .iter()
-            .all(|w| !w.contains("unbound")));
-        assert!(warnings("(fn (x &optional (y 0)) (+ x y))")
-            .iter()
-            .all(|w| !w.contains("unbound")));
-    }
-
-    #[test]
-    fn defn_body_sees_its_params_in_scope() {
-        // A user defn whose body references its params must not flag them as
-        // unbound. (The `defn` macro hasn't been expanded — the CLI checks
-        // un-expanded forms — so this tests the un-expanded surface path.)
-        assert!(warnings("(defn my-fn (x y) (+ x y))")
-            .iter()
-            .all(|w| !w.contains("unbound")));
-    }
-
-    #[test]
-    fn arity_check_works_for_user_defns_in_a_real_interp() {
-        // Once a defn is evaluated, its arity is derivable from its Closure.
-        // `inc` (prelude) is `(defn inc (n) …)` → exact(1).
-        let w = check_with_defs(&[], "(inc 1 2)");
-        assert!(
-            w.iter()
-                .any(|s| s.contains("inc") && s.contains("expected 1")),
-            "user defn arity should be enforced: {:?}",
-            w
-        );
-    }
-
-    // ---- Step 4 final pieces: %eq-as-guard + let-alias propagation --------
-    //
-    // `match` lowers `(match x (5 body) …)` to
-    // `(let (m__N x) (if (%eq m__N 5) (do body) …))`. To flag a misuse on
-    // `x` in `body` (where the literal pattern asserts x's type), the checker
-    // needs two pieces: (1) recognise `(%eq sym lit)` as a guard asserting
-    // `sym : type-of(lit)`; (2) when a `let` binds a name to another symbol,
-    // propagate narrowings between the two via the alias chain.
-
-    #[test]
-    fn match_literal_pattern_narrows_the_scrutinee() {
-        // `(match x (5 (first x)))` — the literal-int pattern asserts x : int;
-        // `(first x)` in the body must then flag. Goes through macroexpansion
-        // because `match` is a `defmacro` whose pattern compiler lowers to
-        // `let`+`if`+`%eq`; the checker's narrowing rides the lowered shape.
-        let w = warnings_expanded("(match x (5 (first x)) (_ nil))");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("got 5")),
-            "match int-literal pattern should narrow x: {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn match_keyword_pattern_narrows_the_scrutinee() {
-        // Mirror of the int case for a keyword literal. The scrutinee narrows to
-        // the literal singleton `:foo`, so the diagnostic names that exact value.
-        let w = warnings_expanded("(match x (:foo (first x)) (_ nil))");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains(":foo")),
-            "match keyword-literal pattern should narrow x: {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn eq_against_a_literal_is_a_guard() {
-        // The mechanism that powers match: `(%eq m 5)` in a test position
-        // narrows `m` to `:int` in the then-branch. (Symmetric — both
-        // `(%eq m 5)` and `(%eq 5 m)` should narrow.)
-        let w = warnings("(if (%eq m 5) (first m) nil)");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("got 5")),
-            "%eq with sym + literal should narrow: {:?}",
-            w
-        );
-        let w = warnings("(if (%eq 5 m) (first m) nil)");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("got 5")),
-            "%eq with literal + sym (reversed) should narrow: {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn eq_between_two_variables_is_not_a_guard() {
-        // Equality between two unknowns asserts nothing about either's type.
-        // No false positive must fire on the body.
-        let w = warnings("(if (%eq a b) (first a) nil)");
-        assert!(
-            w.iter().all(|s| !s.contains("first")),
-            "%eq between two vars should not narrow: {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn eq_guard_does_not_narrow_the_else_branch() {
-        // `(= m "x")` being *false* does NOT prove `m` isn't a string — it could
-        // be another string. So the else-branch must not narrow `m` to `¬string`
-        // and flag a valid `(string-length m)`. (Same then-only soundness as the
-        // `and` guard.)
-        let w = warnings(r#"(if (%eq m "x") :yes (string-length m))"#);
-        assert!(
-            w.iter().all(|s| !s.contains("string-length")),
-            "the else-branch of an `=`/`%eq` guard must not be narrowed: {w:?}"
-        );
-        // The then-branch must still narrow (sanity): `(= m 5)` true ⇒ m : int.
-        let w = warnings("(if (%eq m 5) (first m) nil)");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("got 5")),
-            "the then-branch must still narrow m to int: {w:?}"
-        );
-    }
-
-    #[test]
-    fn let_alias_propagates_narrowing_in_both_directions() {
-        // The match pattern compiler's exact shape: alias `m` to `x`, then
-        // narrow `m` via a guard. The narrowing must flow back onto `x` so a
-        // body that uses `x` (not `m`) still sees the asserted type.
-        let w = warnings("(let (m x) (if (int? m) (first x) nil))");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("int")),
-            "let-alias should propagate narrowing from m to x: {:?}",
-            w
-        );
-        // And the symmetric direction: narrow x, alias-narrows m.
-        let w = warnings("(let (m x) (if (int? x) (first m) nil))");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("int")),
-            "let-alias should propagate narrowing from x to m: {:?}",
-            w
-        );
-    }
-
-    #[test]
-    fn shadowing_clears_an_alias() {
-        // An inner let that rebinds an aliased name to something else breaks
-        // the chain — the new binding is the new name's type, no alias.
-        // `(let (m x) (let (m 5) (first m)))` flags the inner `(first m)`
-        // because `m` is now int, but that's via the literal-type binding,
-        // not the broken alias.
-        let w = warnings("(let (m x) (let (m 5) (first m)))");
-        assert!(
-            w.iter().any(|s| s.contains("first") && s.contains("got 5")),
-            "shadowed let should still warn on the inner int: {:?}",
-            w
-        );
-        // The outer `x` must not be narrowed by the inner shadowing.
-        let w = warnings("(let (m x) (let (m 5) (println x)))");
-        assert!(
-            w.iter().all(|s| !s.contains("first")),
-            "shadowing must not leak narrowing back to the original: {:?}",
-            w
-        );
-    }
-
-    // ---- callback-arity check over higher-order combinators (ADR-078) ----
-
-    #[test]
-    fn flags_a_named_callback_of_the_wrong_arity() {
-        // `cons` is arity 2; `map` calls its callback with 1 arg → real bug.
-        let w = warnings("(map cons nil)");
-        assert!(
-            w.iter()
-                .any(|s| s.contains("map") && s.contains("callback") && s.contains("cons")),
-            "map should flag a 2-arg callback called with 1: {w:?}"
-        );
-    }
-
-    #[test]
-    fn accepts_a_named_callback_of_the_right_arity() {
-        // `inc` is arity 1 — exactly what `map` supplies. No warning.
-        let w = warnings("(map inc nil)");
-        assert!(
-            w.iter().all(|s| !s.contains("callback")),
-            "a correct-arity callback must not warn: {w:?}"
-        );
-        // A variadic callback (`+` accepts 1) is fine too.
-        let w = warnings("(map + nil)");
-        assert!(
-            w.iter().all(|s| !s.contains("callback")),
-            "a variadic callback must not warn: {w:?}"
-        );
-    }
-
-    #[test]
-    fn flags_a_lambda_callback_of_the_wrong_arity() {
-        // A 2-param lambda passed where `map` calls it with 1 arg.
-        let w = warnings("(map (fn (a b) a) nil)");
-        assert!(
-            w.iter()
-                .any(|s| s.contains("map") && s.contains("callback") && s.contains("the lambda")),
-            "map should flag a 2-arg lambda: {w:?}"
-        );
-        // Correct arity — no warning.
-        let w = warnings("(map (fn (a) a) nil)");
-        assert!(
-            w.iter().all(|s| !s.contains("callback")),
-            "a 1-arg lambda must not warn under map: {w:?}"
-        );
-    }
-
-    #[test]
-    fn lambda_head_behaves_like_fn() {
-        // `lambda` is a synonym for `fn` (and survives macro expansion as itself),
-        // so the callback-arity check must see through it exactly like `fn`.
-        let w = warnings("(map (lambda (a b) a) nil)");
-        assert!(
-            w.iter()
-                .any(|s| s.contains("map") && s.contains("callback") && s.contains("the lambda")),
-            "map should flag a 2-arg `lambda` callback: {w:?}"
-        );
-        let w = warnings("(map (lambda (a) a) nil)");
-        assert!(
-            w.iter().all(|s| !s.contains("callback")),
-            "a 1-arg `lambda` must not warn under map: {w:?}"
-        );
-    }
-
-    #[test]
-    fn lambda_form_is_not_unbound() {
-        // Regression: `lambda` was missing from SPECIAL_HEAD / is_syntactic_keyword,
-        // so whole-file mode flagged the head AND its params as unbound symbols — a
-        // false positive on perfectly valid code.
-        let w = file_warnings("(def f (map (lambda (x) (+ x 1)) (list 1 2 3)))");
-        assert!(
-            w.iter().all(|m| !m.contains("unbound symbol")),
-            "a `lambda` literal must not draw unbound-symbol warnings: {w:?}"
-        );
-    }
-
-    // ---- gradual-assignment check: `(def x …)` vs a non-arrow `(sig x T)` ----
-    // (GradualTy's first consumer — ADR-024.)
-
-    #[test]
-    fn def_against_value_sig_flags_a_literal_mismatch() {
-        // `(sig n int)` then `(def n "hello")` — a precise literal disjoint from
-        // the declared type. stat(string) ⊄ int → flagged.
-        let w = file_warnings(r#"(sig n int) (def n "hello")"#);
-        assert!(
-            w.iter().any(|m| m.contains("n: value of type \"hello\"")
-                && m.contains("not assignable")
-                && m.contains("int")),
-            "a string literal assigned to an int-declared name must warn: {w:?}"
-        );
-    }
-
-    #[test]
-    fn def_against_value_sig_catches_a_bounded_dynamic_global() {
-        // The genuine GradualTy value-add: `label` is a redefinable global with a
-        // declared type, so it's dynamic_within(string) — a bounded dynamic that
-        // Option<Ty> can't represent. Assigning it to an int-declared name is
-        // disjoint (string ∩ int = ⊥) → flagged.
-        let w = file_warnings(
-            r#"(sig count int) (sig label string) (def label "x") (def count label)"#,
-        );
-        assert!(
-            w.iter()
-                .any(|m| m.contains("count: value of type string") && m.contains("int")),
-            "a string-typed global assigned to an int-declared name must warn: {w:?}"
-        );
-    }
-
-    #[test]
-    fn def_against_value_sig_defers_when_consistent_or_unknown() {
-        // Every one of these is consistent (or dynamic) → no assignment warning.
-        for src in [
-            "(sig n int) (def n 5)",                          // exact
-            "(sig m number) (def m 5)",                       // int <: number
-            "(sig n int) (def n (+ 1 2))",                    // call result widened → defer
-            "(sig n int) (def n some-unknown-global)",        // unknown → pure dynamic
-            "(sig a int) (sig b number) (def b 5) (def a b)", // int <- number: ∩≠⊥ → defer
-        ] {
-            let w = file_warnings(src);
-            assert!(
-                w.iter().all(|m| !m.contains("not assignable")),
-                "a consistent/dynamic assignment must not warn ({src}): {w:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn value_sig_resolves_cross_module_via_the_heap_store() {
-        // Same technique as `overload_resolves_cross_module_via_the_heap_store`,
-        // for the *value-type* `(sig name T)` declaration instead of an arrow:
-        // `file_warnings`/`warnings` never evaluate, so they only ever exercise
-        // the per-file `Ctx` path (`ctx.declared_value_ty`), never the heap-wide
-        // `declared_sigs` store that makes a plain value sig visible cross-module
-        // (`sigs::declared_heap_value_ty`). Simulate "module A declares `label`
-        // and `count`; module B (fresh `Ctx`, no file-local knowledge of either)
-        // assigns `count`'s value from `label`" by actually *evaluating* the
-        // declarations first, then checking the `(def …)` form against an empty
-        // `Ctx` — module B's starting point.
-        let mut interp = crate::Interp::new();
-        interp
-            .eval_str(r#"(sig label string) (def label "x") (sig count int)"#)
-            .expect("module A loads cleanly");
-
-        let form = reader::read_one(&mut interp.heap, "(def count label)").expect("parse");
-        let w = check_form(&interp.heap, form);
-        assert!(
-            w.iter()
-                .any(|m| m.contains("count: value of type string") && m.contains("int")),
-            "a string-typed global (declared cross-module) assigned to an \
+            w.iter().all(|m| !m.contains("not assignable")),
+            "a consistent/dynamic assignment must not warn ({src}): {w:?}"
+        );
+    }
+}
+
+#[test]
+fn value_sig_resolves_cross_module_via_the_heap_store() {
+    // Same technique as `overload_resolves_cross_module_via_the_heap_store`,
+    // for the *value-type* `(sig name T)` declaration instead of an arrow:
+    // `file_warnings`/`warnings` never evaluate, so they only ever exercise
+    // the per-file `Ctx` path (`ctx.declared_value_ty`), never the heap-wide
+    // `declared_sigs` store that makes a plain value sig visible cross-module
+    // (`sigs::declared_heap_value_ty`). Simulate "module A declares `label`
+    // and `count`; module B (fresh `Ctx`, no file-local knowledge of either)
+    // assigns `count`'s value from `label`" by actually *evaluating* the
+    // declarations first, then checking the `(def …)` form against an empty
+    // `Ctx` — module B's starting point.
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str(r#"(sig label string) (def label "x") (sig count int)"#)
+        .expect("module A loads cleanly");
+
+    let form = reader::read_one(&mut interp.heap, "(def count label)").expect("parse");
+    let w = check_form(&interp.heap, form);
+    assert!(
+        w.iter()
+            .any(|m| m.contains("count: value of type string") && m.contains("int")),
+        "a string-typed global (declared cross-module) assigned to an \
              int-declared name (declared cross-module) must warn: {w:?}"
-        );
+    );
 
-        // And the consistent case: assigning a `string`-declared name from
-        // `label` must stay silent, proving this isn't just an always-warn bug.
-        interp
-            .eval_str("(sig other string)")
-            .expect("module A extension loads cleanly");
-        let form2 = reader::read_one(&mut interp.heap, "(def other label)").expect("parse");
-        let w2 = check_form(&interp.heap, form2);
-        assert!(
-            w2.iter().all(|m| !m.contains("not assignable")),
-            "a string-typed global assigned to a string-declared name must not \
+    // And the consistent case: assigning a `string`-declared name from
+    // `label` must stay silent, proving this isn't just an always-warn bug.
+    interp
+        .eval_str("(sig other string)")
+        .expect("module A extension loads cleanly");
+    let form2 = reader::read_one(&mut interp.heap, "(def other label)").expect("parse");
+    let w2 = check_form(&interp.heap, form2);
+    assert!(
+        w2.iter().all(|m| !m.contains("not assignable")),
+        "a string-typed global assigned to a string-declared name must not \
              warn: {w2:?}"
-        );
-    }
+    );
+}
 
-    #[test]
-    fn defmodule_declared_arrow_sig_seeds_return_type_check() {
-        // Regression: `(sig f (-> B))` declared inside a `defmodule` block
-        // didn't seed `check_def`'s body-vs-declared-return-type check.
-        // Pass 2.5 (`annot::parse_sig_decl`) records a declared sig under the
-        // symbol exactly as written in the un-expanded `(sig …)` form — bare
-        // `f`. But `defn f` inside a `defmodule` expands to
-        // `(def mod/f (fn …))`, so `check_def`'s seeding lookup
-        // (`ctx.declared_sig(name)`) looks up the *qualified* `mod/f`, which
-        // never matches the bare-keyed entry — the sig silently never seeds.
-        // Needs `%register-sig` to have actually run (real `eval`, not just
-        // parse+check) for the heap-wide fallback to have anything to read,
-        // so this uses the same real-`Interp` + `eval_str` technique as the
-        // cross-module tests, then re-checks the same source as a whole file
-        // (mirrors what `nest check` does on an already-loaded project).
-        let src = r#"
+#[test]
+fn defmodule_declared_arrow_sig_seeds_return_type_check() {
+    // Regression: `(sig f (-> B))` declared inside a `defmodule` block
+    // didn't seed `check_def`'s body-vs-declared-return-type check.
+    // Pass 2.5 (`annot::parse_sig_decl`) records a declared sig under the
+    // symbol exactly as written in the un-expanded `(sig …)` form — bare
+    // `f`. But `defn f` inside a `defmodule` expands to
+    // `(def mod/f (fn …))`, so `check_def`'s seeding lookup
+    // (`ctx.declared_sig(name)`) looks up the *qualified* `mod/f`, which
+    // never matches the bare-keyed entry — the sig silently never seeds.
+    // Needs `%register-sig` to have actually run (real `eval`, not just
+    // parse+check) for the heap-wide fallback to have anything to read,
+    // so this uses the same real-`Interp` + `eval_str` technique as the
+    // cross-module tests, then re-checks the same source as a whole file
+    // (mirrors what `nest check` does on an already-loaded project).
+    let src = r#"
 (defmodule gap-check-test-mod "doc")
 (sig gap-check-test-f (-> string))
 (defn gap-check-test-f ()
   "doc"
   42)
 "#;
-        let mut interp = crate::Interp::new();
-        interp.eval_str(src).expect("module loads cleanly");
+    let mut interp = crate::Interp::new();
+    interp.eval_str(src).expect("module loads cleanly");
 
-        let forms = reader::read_all(&mut interp.heap, src).expect("parse");
-        let w = check_file(&mut interp.heap, &forms);
-        assert!(
-            w.iter()
-                .any(|(_, m)| m.contains("gap-check-test-mod/gap-check-test-f")
-                    && m.contains("declared return type string")
-                    && m.contains("yields 42")),
-            "a defmodule-qualified defn's body vs its declared return type \
+    let forms = reader::read_all(&mut interp.heap, src).expect("parse");
+    let w = check_file(&mut interp.heap, &forms);
+    assert!(
+        w.iter()
+            .any(|(_, m)| m.contains("gap-check-test-mod/gap-check-test-f")
+                && m.contains("declared return type string")
+                && m.contains("yields 42")),
+        "a defmodule-qualified defn's body vs its declared return type \
              must warn, same as at the root namespace: {w:?}"
-        );
-    }
+    );
+}
 
-    #[test]
-    fn cross_module_value_sig_dependency_is_captured_for_incremental_cache() {
-        // Regression for a gap the ADR-119 Phase 2 merge surfaced: `sigs::
-        // declared_heap_value_ty` (ADR-124) originally read `heap.
-        // declared_sig_value` directly instead of through `deps::
-        // obs_declared_sig_value` — the *only* sanctioned read of global state
-        // Phase 2's incremental-cache dependency capture relies on.
-        //
-        // Specifically isolates `check_def`'s own gate (the *name being
-        // defined*, not the value referenced): `other`'s sig lives only on
-        // the heap (module A), never in this file's own text, so
-        // `ctx.declared_value_ty("other")` is `None` and `check_def` must
-        // fall through to `declared_heap_value_ty` to know `other`'s type at
-        // all. `other` never appears as a *value reference* anywhere in this
-        // file (it's purely a def target), so — unlike a referenced global —
-        // nothing else (the unbound-symbol check, arity lookups, …) would
-        // incidentally record it via `deps::obs_global` either. If
-        // `declared_heap_value_ty` bypasses the recorder, `other` never
-        // enters this file's dep-keys at all, and a later edit to its sig is
-        // invisible to the fingerprint — exactly the bug this guards.
-        let mut interp = crate::Interp::new();
-        interp
-            .eval_str(r#"(sig label string) (def label "x") (sig other int)"#)
-            .expect("module A loads cleanly");
+#[test]
+fn cross_module_value_sig_dependency_is_captured_for_incremental_cache() {
+    // Regression for a gap the ADR-119 Phase 2 merge surfaced: `sigs::
+    // declared_heap_value_ty` (ADR-124) originally read `heap.
+    // declared_sig_value` directly instead of through `deps::
+    // obs_declared_sig_value` — the *only* sanctioned read of global state
+    // Phase 2's incremental-cache dependency capture relies on.
+    //
+    // Specifically isolates `check_def`'s own gate (the *name being
+    // defined*, not the value referenced): `other`'s sig lives only on
+    // the heap (module A), never in this file's own text, so
+    // `ctx.declared_value_ty("other")` is `None` and `check_def` must
+    // fall through to `declared_heap_value_ty` to know `other`'s type at
+    // all. `other` never appears as a *value reference* anywhere in this
+    // file (it's purely a def target), so — unlike a referenced global —
+    // nothing else (the unbound-symbol check, arity lookups, …) would
+    // incidentally record it via `deps::obs_global` either. If
+    // `declared_heap_value_ty` bypasses the recorder, `other` never
+    // enters this file's dep-keys at all, and a later edit to its sig is
+    // invisible to the fingerprint — exactly the bug this guards.
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str(r#"(sig label string) (def label "x") (sig other int)"#)
+        .expect("module A loads cleanly");
 
-        let forms = reader::read_all(&mut interp.heap, "(def other label)").expect("parse");
-        let (warnings, dep_keys) = check_file_with_deps(&mut interp.heap, &forms);
-        assert!(
-            warnings
-                .iter()
-                .any(|(_, m)| m.contains("other: value of type string") && m.contains("int")),
-            "int-declared `other` assigned a string must warn even with no \
+    let forms = reader::read_all(&mut interp.heap, "(def other label)").expect("parse");
+    let (warnings, dep_keys) = check_file_with_deps(&mut interp.heap, &forms);
+    assert!(
+        warnings
+            .iter()
+            .any(|(_, m)| m.contains("other: value of type string") && m.contains("int")),
+        "int-declared `other` assigned a string must warn even with no \
              local (sig other …): {warnings:?}"
-        );
-        let fp1 = deps_fingerprint(&interp.heap, dep_keys);
+    );
+    let fp1 = deps_fingerprint(&interp.heap, dep_keys);
 
-        // Module A is "edited": other's declared type widens to accept a
-        // string. This file's fingerprint must change — `other` is never
-        // referenced here, only defined, so this changed fact can only reach
-        // the fingerprint through check_def's own heap-wide lookup.
-        interp
-            .eval_str("(sig other string)")
-            .expect("module A edit loads cleanly");
-        let fp2 = deps_fingerprint(&interp.heap, dep_keys);
-        assert_ne!(
-            fp1, fp2,
-            "a cross-module value-sig change on a pure def-target global must \
+    // Module A is "edited": other's declared type widens to accept a
+    // string. This file's fingerprint must change — `other` is never
+    // referenced here, only defined, so this changed fact can only reach
+    // the fingerprint through check_def's own heap-wide lookup.
+    interp
+        .eval_str("(sig other string)")
+        .expect("module A edit loads cleanly");
+    let fp2 = deps_fingerprint(&interp.heap, dep_keys);
+    assert_ne!(
+        fp1, fp2,
+        "a cross-module value-sig change on a pure def-target global must \
              flip the dependent file's fingerprint, or the incremental cache \
              would go stale"
-        );
-    }
+    );
+}
 
-    #[test]
-    fn declared_return_type_mismatch_is_flagged() {
-        // Body yields an int (the integer-closed `+` rule: `int + int = int`),
-        // declared return is string → disjoint → flagged.
-        let w = file_warnings("(sig f (int -> string)) (defn f (x) (+ x 1))");
-        assert!(
-            w.iter()
-                .any(|m| m.contains("f: declared return type string") && m.contains("yields int")),
-            "an int body vs a string return must warn: {w:?}"
-        );
-        // A literal body mismatch too.
-        let w = file_warnings(r#"(sig g (int -> int)) (defn g (x) "hello")"#);
-        assert!(
-            w.iter()
-                .any(|m| m.contains("g: declared return type int") && m.contains("\"hello\"")),
-            "a string-literal body vs an int return must warn: {w:?}"
-        );
-    }
+#[test]
+fn declared_return_type_mismatch_is_flagged() {
+    // Body yields an int (the integer-closed `+` rule: `int + int = int`),
+    // declared return is string → disjoint → flagged.
+    let w = file_warnings("(sig f (int -> string)) (defn f (x) (+ x 1))");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("f: declared return type string") && m.contains("yields int")),
+        "an int body vs a string return must warn: {w:?}"
+    );
+    // A literal body mismatch too.
+    let w = file_warnings(r#"(sig g (int -> int)) (defn g (x) "hello")"#);
+    assert!(
+        w.iter()
+            .any(|m| m.contains("g: declared return type int") && m.contains("\"hello\"")),
+        "a string-literal body vs an int return must warn: {w:?}"
+    );
+}
 
-    #[test]
-    fn sig_call_site_wrong_literal_arg_is_flagged() {
-        // A literal argument whose type is disjoint from the parameter's
-        // declared `(sig …)` type is flagged at the call site (the precise `⊆`
-        // path — a string literal where an int is wanted).
-        let w = file_warnings(r#"(sig f (int -> int)) (defn f (x) x) (f "hello")"#);
-        assert!(
-            w.iter()
-                .any(|m| m.contains("f: argument 1 expects int") && m.contains("\"hello\"")),
-            "a string literal passed where int is declared must warn: {w:?}"
-        );
-        // A correct literal, and a dynamic (non-literal) argument, must not warn.
-        for src in [
-            "(sig g (int -> int)) (defn g (x) x) (g 1)",
-            "(sig h (int -> int)) (defn h (x) x) (defn use-h (y) (h y))",
-        ] {
-            let w = file_warnings(src);
-            assert!(
-                w.iter().all(|m| !m.contains("argument 1 expects")),
-                "a consistent/dynamic argument must not warn ({src}): {w:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn record_arg_missing_optional_field_does_not_warn() {
-        // A record value that omits an *optional* field is a valid argument — the
-        // arg-check relaxes the param to its required fields only, so the missing
-        // `:age` (declared `(optional int)`) never misfires.
-        let decl = "(sig f ((record :name string :age (optional int)) -> int)) (defn f (r) 0)";
-        for good in ["(f {:name \"Ada\"})", "(f {:name \"Ada\" :age 30})"] {
-            let w = file_warnings(&format!("{decl} {good}"));
-            assert!(
-                w.iter().all(|m| !m.contains("argument 1 expects")),
-                "a record arg omitting an optional field must not warn ({good}): {w:?}"
-            );
-        }
-        // But a wrong-typed *required* field is still caught (the sound part the
-        // optional-drop preserves).
-        let w = file_warnings(&format!("{decl} (f {{:name 42}})"));
-        assert!(
-            w.iter().any(|m| m.contains("f: argument 1 expects")),
-            "a record arg with a wrong-typed required field must warn: {w:?}"
-        );
-    }
-
-    #[test]
-    fn check_allow_type_mismatch_suppresses_call_and_return_lints() {
-        // `(check-allow :type-mismatch …)` opts a deliberately-wrong subtree out
-        // of BOTH the call-site argument lint and the declared-return lint —
-        // the negative-test escape hatch (a `sig!` runtime contract is what the
-        // wrapped code actually exercises).
-        let w = file_warnings(
-            r#"(sig f (int -> int)) (defn f (x) x) (check-allow :type-mismatch (f "hello"))"#,
-        );
+#[test]
+fn sig_call_site_wrong_literal_arg_is_flagged() {
+    // A literal argument whose type is disjoint from the parameter's
+    // declared `(sig …)` type is flagged at the call site (the precise `⊆`
+    // path — a string literal where an int is wanted).
+    let w = file_warnings(r#"(sig f (int -> int)) (defn f (x) x) (f "hello")"#);
+    assert!(
+        w.iter()
+            .any(|m| m.contains("f: argument 1 expects int") && m.contains("\"hello\"")),
+        "a string literal passed where int is declared must warn: {w:?}"
+    );
+    // A correct literal, and a dynamic (non-literal) argument, must not warn.
+    for src in [
+        "(sig g (int -> int)) (defn g (x) x) (g 1)",
+        "(sig h (int -> int)) (defn h (x) x) (defn use-h (y) (h y))",
+    ] {
+        let w = file_warnings(src);
         assert!(
             w.iter().all(|m| !m.contains("argument 1 expects")),
-            "check-allow :type-mismatch must suppress the call-site arg lint: {w:?}"
+            "a consistent/dynamic argument must not warn ({src}): {w:?}"
         );
-        // The sig stays at top level (pass 2.5 reads sigs from top-level forms);
-        // only the deliberately-wrong defn is wrapped — the contract_test shape.
-        let w = file_warnings(
-            r#"(sig g (int -> int)) (check-allow :type-mismatch (defn g (x) "nope"))"#,
+    }
+}
+
+#[test]
+fn record_arg_missing_optional_field_does_not_warn() {
+    // A record value that omits an *optional* field is a valid argument — the
+    // arg-check relaxes the param to its required fields only, so the missing
+    // `:age` (declared `(optional int)`) never misfires.
+    let decl = "(sig f ((record :name string :age (optional int)) -> int)) (defn f (r) 0)";
+    for good in ["(f {:name \"Ada\"})", "(f {:name \"Ada\" :age 30})"] {
+        let w = file_warnings(&format!("{decl} {good}"));
+        assert!(
+            w.iter().all(|m| !m.contains("argument 1 expects")),
+            "a record arg omitting an optional field must not warn ({good}): {w:?}"
         );
+    }
+    // But a wrong-typed *required* field is still caught (the sound part the
+    // optional-drop preserves).
+    let w = file_warnings(&format!("{decl} (f {{:name 42}})"));
+    assert!(
+        w.iter().any(|m| m.contains("f: argument 1 expects")),
+        "a record arg with a wrong-typed required field must warn: {w:?}"
+    );
+}
+
+#[test]
+fn check_allow_type_mismatch_suppresses_call_and_return_lints() {
+    // `(check-allow :type-mismatch …)` opts a deliberately-wrong subtree out
+    // of BOTH the call-site argument lint and the declared-return lint —
+    // the negative-test escape hatch (a `sig!` runtime contract is what the
+    // wrapped code actually exercises).
+    let w = file_warnings(
+        r#"(sig f (int -> int)) (defn f (x) x) (check-allow :type-mismatch (f "hello"))"#,
+    );
+    assert!(
+        w.iter().all(|m| !m.contains("argument 1 expects")),
+        "check-allow :type-mismatch must suppress the call-site arg lint: {w:?}"
+    );
+    // The sig stays at top level (pass 2.5 reads sigs from top-level forms);
+    // only the deliberately-wrong defn is wrapped — the contract_test shape.
+    let w =
+        file_warnings(r#"(sig g (int -> int)) (check-allow :type-mismatch (defn g (x) "nope"))"#);
+    assert!(
+        w.iter().all(|m| !m.contains("return type")),
+        "check-allow :type-mismatch must suppress the return-type lint: {w:?}"
+    );
+}
+
+#[test]
+fn wider_sig_param_returned_as_narrower_is_flagged() {
+    // A sig-typed param carries its exact contract type, so returning a
+    // `number` param where the declared return is `int` is caught via the
+    // precise `⊆` path — the first non-disjoint ("merely wider") mismatch the
+    // disjointness checker structurally can't produce.
+    let w = file_warnings("(sig f (number -> int)) (defn f (x) x)");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("f: declared return type int") && m.contains("number")),
+        "a number param returned as int must warn: {w:?}"
+    );
+    // Same or narrower param, and a param narrowed by a guard, must not warn.
+    for src in [
+        "(sig g (int -> int)) (defn g (x) x)",
+        "(sig h (int -> number)) (defn h (x) x)",
+        "(sig k (number -> int)) (defn k (x) (if (int? x) x 0))",
+    ] {
+        let w = file_warnings(src);
         assert!(
             w.iter().all(|m| !m.contains("return type")),
-            "check-allow :type-mismatch must suppress the return-type lint: {w:?}"
+            "a consistent/narrowed param return must not warn ({src}): {w:?}"
         );
     }
+}
 
-    #[test]
-    fn wider_sig_param_returned_as_narrower_is_flagged() {
-        // A sig-typed param carries its exact contract type, so returning a
-        // `number` param where the declared return is `int` is caught via the
-        // precise `⊆` path — the first non-disjoint ("merely wider") mismatch the
-        // disjointness checker structurally can't produce.
-        let w = file_warnings("(sig f (number -> int)) (defn f (x) x)");
-        assert!(
-            w.iter()
-                .any(|m| m.contains("f: declared return type int") && m.contains("number")),
-            "a number param returned as int must warn: {w:?}"
-        );
-        // Same or narrower param, and a param narrowed by a guard, must not warn.
-        for src in [
-            "(sig g (int -> int)) (defn g (x) x)",
-            "(sig h (int -> number)) (defn h (x) x)",
-            "(sig k (number -> int)) (defn k (x) (if (int? x) x 0))",
-        ] {
-            let w = file_warnings(src);
-            assert!(
-                w.iter().all(|m| !m.contains("return type")),
-                "a consistent/narrowed param return must not warn ({src}): {w:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn declared_return_type_defers_when_consistent() {
-        // (+ x 1) : number — int <: number and number ∩ int ≠ ⊥, so neither of
-        // these declared returns warns (a widened body never over-warns).
-        for src in [
-            "(sig inc (int -> int)) (defn inc (x) (+ x 1))",
-            "(sig h (int -> number)) (defn h (x) (+ x 1))",
-            "(sig id (int -> int)) (defn id (x) x)",
-        ] {
-            let w = file_warnings(src);
-            assert!(
-                w.iter().all(|m| !m.contains("return type")),
-                "a consistent return must not warn ({src}): {w:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn precise_body_inference_int_closed_ops() {
-        // The "int int thing": `(* x x)` with `x : int` is precisely `int`, so a
-        // body declared `(int -> int)` must NOT warn (the false-positive flood the
-        // curated `number` result would otherwise produce).
-        let w = file_warnings("(sig f (int -> int)) (defn f (x) (* x x))");
+#[test]
+fn declared_return_type_defers_when_consistent() {
+    // (+ x 1) : number — int <: number and number ∩ int ≠ ⊥, so neither of
+    // these declared returns warns (a widened body never over-warns).
+    for src in [
+        "(sig inc (int -> int)) (defn inc (x) (+ x 1))",
+        "(sig h (int -> number)) (defn h (x) (+ x 1))",
+        "(sig id (int -> int)) (defn id (x) x)",
+    ] {
+        let w = file_warnings(src);
         assert!(
             w.iter().all(|m| !m.contains("return type")),
-            "`(* int int)` declared int must not warn: {w:?}"
-        );
-        // A real lie still warns: an int body declared `string`.
-        let w = file_warnings("(sig f (int -> string)) (defn f (x) (* x 2))");
-        assert!(
-            w.iter()
-                .any(|m| m.contains("f: declared return type string") && m.contains("yields int")),
-            "an int body declared string must warn: {w:?}"
+            "a consistent return must not warn ({src}): {w:?}"
         );
     }
+}
 
-    #[test]
-    fn precise_body_inference_float_contagion() {
-        // Float-contagion: `+ - * /` with a provably-float operand is precisely
-        // `float` (int⊕float → float in the tower), and the always-float unary math
-        // `sqrt`/`sin`/`cos`/`tan` is `float` even for a whole-number argument. Since
-        // `float` is disjoint from `int`, a body declared `(int -> int)` doing float
-        // arithmetic warns — the merely-wider mismatch the flat `number` sig missed.
-        for src in [
-            "(sig f (int -> int)) (defn f (x) (+ x 1.5))",
-            "(sig f (int -> int)) (defn f (x) (* x 2.0))",
-            "(sig f (int -> int)) (defn f (x) (sqrt x))",
-            "(sig f (int -> int)) (defn f (x) (/ x 2.0))",
-        ] {
-            let w = file_warnings(src);
-            assert!(
-                w.iter().any(
-                    |m| m.contains("f: declared return type int") && m.contains("yields float")
-                ),
-                "a float body declared int must warn ({src}): {w:?}"
-            );
-        }
-        // Sound-defer cases that must NOT warn: a float body declared `float` or
-        // `number`, an all-int body (int-closed rule), and `/` on two ints — which
-        // is genuinely `number` (`(/ 6 2)` → 3, `(/ 5 2)` → 2.5), so it can't be
-        // pinned to `float` and defers rather than false-positive.
-        for src in [
-            "(sig f (int -> float)) (defn f (x) (+ x 1.5))",
-            "(sig f (int -> number)) (defn f (x) (* x 2.0))",
-            "(sig f (int -> int)) (defn f (x) (* x x))",
-            "(sig f (int -> int)) (defn f (x) (/ x 2))",
-        ] {
-            let w = file_warnings(src);
-            assert!(
-                w.iter().all(|m| !m.contains("return type")),
-                "a consistent/deferred float-arithmetic body must not warn ({src}): {w:?}"
-            );
-        }
-    }
+#[test]
+fn precise_body_inference_int_closed_ops() {
+    // The "int int thing": `(* x x)` with `x : int` is precisely `int`, so a
+    // body declared `(int -> int)` must NOT warn (the false-positive flood the
+    // curated `number` result would otherwise produce).
+    let w = file_warnings("(sig f (int -> int)) (defn f (x) (* x x))");
+    assert!(
+        w.iter().all(|m| !m.contains("return type")),
+        "`(* int int)` declared int must not warn: {w:?}"
+    );
+    // A real lie still warns: an int body declared `string`.
+    let w = file_warnings("(sig f (int -> string)) (defn f (x) (* x 2))");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("f: declared return type string") && m.contains("yields int")),
+        "an int body declared string must warn: {w:?}"
+    );
+}
 
-    #[test]
-    fn path_narrowing_through_a_record_field_guard() {
-        // `(if (int? (get r :age)) …)` narrows the *path* `(get r :age)` to `int`
-        // in the then-branch — so feeding it to `string-length` (wants string) is
-        // caught, the miss occurrence typing on bare symbols couldn't reach.
-        let w =
-            file_warnings("(defn f (r) (if (int? (get r :age)) (string-length (get r :age)) 0))");
+#[test]
+fn precise_body_inference_float_contagion() {
+    // Float-contagion: `+ - * /` with a provably-float operand is precisely
+    // `float` (int⊕float → float in the tower), and the always-float unary math
+    // `sqrt`/`sin`/`cos`/`tan` is `float` even for a whole-number argument. Since
+    // `float` is disjoint from `int`, a body declared `(int -> int)` doing float
+    // arithmetic warns — the merely-wider mismatch the flat `number` sig missed.
+    for src in [
+        "(sig f (int -> int)) (defn f (x) (+ x 1.5))",
+        "(sig f (int -> int)) (defn f (x) (* x 2.0))",
+        "(sig f (int -> int)) (defn f (x) (sqrt x))",
+        "(sig f (int -> int)) (defn f (x) (/ x 2.0))",
+    ] {
+        let w = file_warnings(src);
         assert!(
             w.iter()
-                .any(|m| m.contains("string-length") && m.contains("got int")),
-            "an int-narrowed path fed to string-length must warn: {w:?}"
+                .any(|m| m.contains("f: declared return type int") && m.contains("yields float")),
+            "a float body declared int must warn ({src}): {w:?}"
         );
-        // A **nested** path narrows too: `(get (get cfg :db) :port)`.
-        let nested = file_warnings(
-            "(defn n (cfg) (if (int? (get (get cfg :db) :port)) \
+    }
+    // Sound-defer cases that must NOT warn: a float body declared `float` or
+    // `number`, an all-int body (int-closed rule), and `/` on two ints — which
+    // is genuinely `number` (`(/ 6 2)` → 3, `(/ 5 2)` → 2.5), so it can't be
+    // pinned to `float` and defers rather than false-positive.
+    for src in [
+        "(sig f (int -> float)) (defn f (x) (+ x 1.5))",
+        "(sig f (int -> number)) (defn f (x) (* x 2.0))",
+        "(sig f (int -> int)) (defn f (x) (* x x))",
+        "(sig f (int -> int)) (defn f (x) (/ x 2))",
+    ] {
+        let w = file_warnings(src);
+        assert!(
+            w.iter().all(|m| !m.contains("return type")),
+            "a consistent/deferred float-arithmetic body must not warn ({src}): {w:?}"
+        );
+    }
+}
+
+#[test]
+fn path_narrowing_through_a_record_field_guard() {
+    // `(if (int? (get r :age)) …)` narrows the *path* `(get r :age)` to `int`
+    // in the then-branch — so feeding it to `string-length` (wants string) is
+    // caught, the miss occurrence typing on bare symbols couldn't reach.
+    let w = file_warnings("(defn f (r) (if (int? (get r :age)) (string-length (get r :age)) 0))");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("string-length") && m.contains("got int")),
+        "an int-narrowed path fed to string-length must warn: {w:?}"
+    );
+    // A **nested** path narrows too: `(get (get cfg :db) :port)`.
+    let nested = file_warnings(
+        "(defn n (cfg) (if (int? (get (get cfg :db) :port)) \
              (string-length (get (get cfg :db) :port)) 0))",
-        );
+    );
+    assert!(
+        nested
+            .iter()
+            .any(|m| m.contains("string-length") && m.contains("got int")),
+        "an int-narrowed nested path must warn: {nested:?}"
+    );
+    // Uses consistent with the narrowed type — and an unguarded access (wide
+    // type) — must NOT warn.
+    for src in [
+        "(defn g (r) (if (int? (get r :age)) (+ 1 (get r :age)) 0))",
+        "(defn h (r) (if (string? (get r :n)) (string-length (get r :n)) 0))",
+        "(defn m (r) (string-length (get r :age)))",
+        // else-branch use of a `¬string`-narrowed path must not misfire.
+        "(defn k (r) (if (string? (get r :x)) :s (get r :x)))",
+        // a *different* nested path than the one narrowed must not warn.
+        "(defn p (c) (if (int? (get (get c :db) :port)) (string-length (get (get c :web) :h)) 0))",
+    ] {
+        let w = file_warnings(src);
         assert!(
-            nested
-                .iter()
-                .any(|m| m.contains("string-length") && m.contains("got int")),
-            "an int-narrowed nested path must warn: {nested:?}"
-        );
-        // Uses consistent with the narrowed type — and an unguarded access (wide
-        // type) — must NOT warn.
-        for src in [
-            "(defn g (r) (if (int? (get r :age)) (+ 1 (get r :age)) 0))",
-            "(defn h (r) (if (string? (get r :n)) (string-length (get r :n)) 0))",
-            "(defn m (r) (string-length (get r :age)))",
-            // else-branch use of a `¬string`-narrowed path must not misfire.
-            "(defn k (r) (if (string? (get r :x)) :s (get r :x)))",
-            // a *different* nested path than the one narrowed must not warn.
-            "(defn p (c) (if (int? (get (get c :db) :port)) (string-length (get (get c :web) :h)) 0))",
-        ] {
-            let w = file_warnings(src);
-            assert!(
-                w.iter().all(|m| !m.contains("expects")),
-                "a consistent/unguarded path use must not warn ({src}): {w:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn path_narrowing_through_index_paths() {
-        // `(nth t 0)` / `(first t)` / `(second …)` / `(third …)` narrow like a
-        // field path: an int-narrowed index fed to `string-length` is caught.
-        for src in [
-            "(defn f (t) (if (int? (nth t 0)) (string-length (nth t 0)) 0))",
-            "(defn f (t) (if (int? (first t)) (string-length (first t)) 0))",
-            // mixed field + index path.
-            "(defn f (r) (if (int? (nth (get r :xs) 0)) (string-length (nth (get r :xs) 0)) 0))",
-        ] {
-            let w = file_warnings(src);
-            assert!(
-                w.iter()
-                    .any(|m| m.contains("string-length") && m.contains("got int")),
-                "an int-narrowed index path must warn ({src}): {w:?}"
-            );
-        }
-        // A *different* index than the one narrowed must not warn (index-specific),
-        // and a consistent use must not warn.
-        for src in [
-            "(defn f (t) (if (int? (nth t 0)) (string-length (nth t 1)) 0))",
-            "(defn f (t) (if (int? (nth t 0)) (+ 1 (nth t 0)) 0))",
-        ] {
-            let w = file_warnings(src);
-            assert!(
-                w.iter().all(|m| !m.contains("expects")),
-                "a different/consistent index use must not warn ({src}): {w:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn path_narrowing_refines_base_record_type_into_calls() {
-        // A path guard refines `base`'s *record type* in the then-branch, so it
-        // flows into a call: `r` proven `{age: int}` passed where `{age: string}`
-        // is wanted is caught (record disjointness on a conflicting required field).
-        let decl = "(sig f ((record :age string) -> int)) (defn f (r) 0)";
-        let bad = file_warnings(&format!(
-            "{decl} (defn g (r) (if (int? (get r :age)) (f r) 0))"
-        ));
-        assert!(
-            bad.iter()
-                .any(|m| m.contains("f: argument 1 expects") && m.contains("got")),
-            "a base refined to a conflicting record must warn at the call: {bad:?}"
-        );
-        // Matching field type, and an unguarded pass, must NOT warn.
-        let okdecl = "(sig h ((record :age int) -> int)) (defn h (r) 0)";
-        for src in [
-            format!("{okdecl} (defn g (r) (if (int? (get r :age)) (h r) 0))"),
-            format!("{okdecl} (defn g (r) (h r))"),
-        ] {
-            let w = file_warnings(&src);
-            assert!(
-                w.iter().all(|m| !m.contains("argument 1 expects")),
-                "a matching/unguarded record arg must not warn ({src}): {w:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn overload_call_matching_no_arm_is_flagged() {
-        // (sig f (and (int -> int) (bool -> bool))): a call whose argument is
-        // disjoint from *every* arm's domain is flagged (ADR-116 completion).
-        let decl = "(sig f (and (int -> int) (bool -> bool))) \
-                    (defn f (x) (if (int? x) (+ x 1) (not x)))";
-        let bad = file_warnings(&format!(r#"{decl} (def c (f "hello"))"#));
-        assert!(
-            bad.iter()
-                .any(|m| m.contains("f: no overload clause accepts")),
-            "an arg matching no arm must warn: {bad:?}"
-        );
-        // An arg that matches *some* arm, and an unknown arg, must NOT warn.
-        for src in [
-            "(def a (f 5))",      // int → arm 1
-            "(def b (f true))",   // bool → arm 2
-            "(defn g (y) (f y))", // unknown arg → defer
-        ] {
-            let w = file_warnings(&format!("{decl} {src}"));
-            assert!(
-                w.iter().all(|m| !m.contains("no overload clause")),
-                "a matching/unknown arg must not warn ({src}): {w:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn check_allow_suppresses_targeted_lints() {
-        // A `(check-allow :non-tail-recursion …)` wrapper silences the non-tail
-        // lint for the wrapped defn — but only that category, and only inside it.
-        let non_tail = "(defn f (n) (if (< n 1) 0 (+ 1 (f (- n 1)))))";
-        let w = file_warnings(non_tail);
-        assert!(
-            w.iter().any(|m| m.contains("non-tail position")),
-            "unwrapped non-tail recursion must warn: {w:?}"
-        );
-        let w = file_warnings(&format!("(check-allow :non-tail-recursion {non_tail})"));
-        assert!(
-            w.iter().all(|m| !m.contains("non-tail position")),
-            "check-allow :non-tail-recursion must suppress: {w:?}"
-        );
-        // A mismatched category does NOT suppress (no silent blanket opt-out).
-        let w = file_warnings(&format!("(check-allow :unreachable-clause {non_tail})"));
-        assert!(
-            w.iter().any(|m| m.contains("non-tail position")),
-            "a mismatched category must not suppress the non-tail lint: {w:?}"
-        );
-        // Same for the redundant-`match`-clause lint.
-        let dup = "(defn g (x) (match x (1 :a) (1 :b) (_ :z)))";
-        assert!(
-            file_warnings(dup)
-                .iter()
-                .any(|m| m.contains("unreachable clause")),
-            "unwrapped duplicate clause must warn"
-        );
-        let wrapped =
-            "(defn g (x) (check-allow :unreachable-clause (match x (1 :a) (1 :b) (_ :z))))";
-        assert!(
-            file_warnings(wrapped)
-                .iter()
-                .all(|m| !m.contains("unreachable clause")),
-            "check-allow :unreachable-clause must suppress the redundancy lint"
+            w.iter().all(|m| !m.contains("expects")),
+            "a consistent/unguarded path use must not warn ({src}): {w:?}"
         );
     }
+}
 
-    #[test]
-    fn precise_body_inference_control_flow() {
-        // `(if (> x 0) x "neg")` yields `int | string`, which ⊄ int → must warn
-        // (precise control-flow inference: both branches pin a type).
-        let w = file_warnings(r#"(sig f (int -> int)) (defn f (x) (if (> x 0) x "neg"))"#);
+#[test]
+fn path_narrowing_through_index_paths() {
+    // `(nth t 0)` / `(first t)` / `(second …)` / `(third …)` narrow like a
+    // field path: an int-narrowed index fed to `string-length` is caught.
+    for src in [
+        "(defn f (t) (if (int? (nth t 0)) (string-length (nth t 0)) 0))",
+        "(defn f (t) (if (int? (first t)) (string-length (first t)) 0))",
+        // mixed field + index path.
+        "(defn f (r) (if (int? (nth (get r :xs) 0)) (string-length (nth (get r :xs) 0)) 0))",
+    ] {
+        let w = file_warnings(src);
         assert!(
             w.iter()
-                .any(|m| m.contains("f: declared return type int") && m.contains("\"neg\"")),
-            "an `int | string` body declared int must warn: {w:?}"
+                .any(|m| m.contains("string-length") && m.contains("got int")),
+            "an int-narrowed index path must warn ({src}): {w:?}"
         );
-        // A branchy body that stays within the declared type must NOT warn.
-        let w = file_warnings("(sig f (int -> int)) (defn f (x) (if (> x 0) x 0))");
+    }
+    // A *different* index than the one narrowed must not warn (index-specific),
+    // and a consistent use must not warn.
+    for src in [
+        "(defn f (t) (if (int? (nth t 0)) (string-length (nth t 1)) 0))",
+        "(defn f (t) (if (int? (nth t 0)) (+ 1 (nth t 0)) 0))",
+    ] {
+        let w = file_warnings(src);
+        assert!(
+            w.iter().all(|m| !m.contains("expects")),
+            "a different/consistent index use must not warn ({src}): {w:?}"
+        );
+    }
+}
+
+#[test]
+fn path_narrowing_refines_base_record_type_into_calls() {
+    // A path guard refines `base`'s *record type* in the then-branch, so it
+    // flows into a call: `r` proven `{age: int}` passed where `{age: string}`
+    // is wanted is caught (record disjointness on a conflicting required field).
+    let decl = "(sig f ((record :age string) -> int)) (defn f (r) 0)";
+    let bad = file_warnings(&format!(
+        "{decl} (defn g (r) (if (int? (get r :age)) (f r) 0))"
+    ));
+    assert!(
+        bad.iter()
+            .any(|m| m.contains("f: argument 1 expects") && m.contains("got")),
+        "a base refined to a conflicting record must warn at the call: {bad:?}"
+    );
+    // Matching field type, and an unguarded pass, must NOT warn.
+    let okdecl = "(sig h ((record :age int) -> int)) (defn h (r) 0)";
+    for src in [
+        format!("{okdecl} (defn g (r) (if (int? (get r :age)) (h r) 0))"),
+        format!("{okdecl} (defn g (r) (h r))"),
+    ] {
+        let w = file_warnings(&src);
+        assert!(
+            w.iter().all(|m| !m.contains("argument 1 expects")),
+            "a matching/unguarded record arg must not warn ({src}): {w:?}"
+        );
+    }
+}
+
+#[test]
+fn overload_call_matching_no_arm_is_flagged() {
+    // (sig f (and (int -> int) (bool -> bool))): a call whose argument is
+    // disjoint from *every* arm's domain is flagged (ADR-116 completion).
+    let decl = "(sig f (and (int -> int) (bool -> bool))) \
+                    (defn f (x) (if (int? x) (+ x 1) (not x)))";
+    let bad = file_warnings(&format!(r#"{decl} (def c (f "hello"))"#));
+    assert!(
+        bad.iter()
+            .any(|m| m.contains("f: no overload clause accepts")),
+        "an arg matching no arm must warn: {bad:?}"
+    );
+    // An arg that matches *some* arm, and an unknown arg, must NOT warn.
+    for src in [
+        "(def a (f 5))",      // int → arm 1
+        "(def b (f true))",   // bool → arm 2
+        "(defn g (y) (f y))", // unknown arg → defer
+    ] {
+        let w = file_warnings(&format!("{decl} {src}"));
+        assert!(
+            w.iter().all(|m| !m.contains("no overload clause")),
+            "a matching/unknown arg must not warn ({src}): {w:?}"
+        );
+    }
+}
+
+#[test]
+fn check_allow_suppresses_targeted_lints() {
+    // A `(check-allow :non-tail-recursion …)` wrapper silences the non-tail
+    // lint for the wrapped defn — but only that category, and only inside it.
+    let non_tail = "(defn f (n) (if (< n 1) 0 (+ 1 (f (- n 1)))))";
+    let w = file_warnings(non_tail);
+    assert!(
+        w.iter().any(|m| m.contains("non-tail position")),
+        "unwrapped non-tail recursion must warn: {w:?}"
+    );
+    let w = file_warnings(&format!("(check-allow :non-tail-recursion {non_tail})"));
+    assert!(
+        w.iter().all(|m| !m.contains("non-tail position")),
+        "check-allow :non-tail-recursion must suppress: {w:?}"
+    );
+    // A mismatched category does NOT suppress (no silent blanket opt-out).
+    let w = file_warnings(&format!("(check-allow :unreachable-clause {non_tail})"));
+    assert!(
+        w.iter().any(|m| m.contains("non-tail position")),
+        "a mismatched category must not suppress the non-tail lint: {w:?}"
+    );
+    // Same for the redundant-`match`-clause lint.
+    let dup = "(defn g (x) (match x (1 :a) (1 :b) (_ :z)))";
+    assert!(
+        file_warnings(dup)
+            .iter()
+            .any(|m| m.contains("unreachable clause")),
+        "unwrapped duplicate clause must warn"
+    );
+    let wrapped = "(defn g (x) (check-allow :unreachable-clause (match x (1 :a) (1 :b) (_ :z))))";
+    assert!(
+        file_warnings(wrapped)
+            .iter()
+            .all(|m| !m.contains("unreachable clause")),
+        "check-allow :unreachable-clause must suppress the redundancy lint"
+    );
+}
+
+#[test]
+fn precise_body_inference_control_flow() {
+    // `(if (> x 0) x "neg")` yields `int | string`, which ⊄ int → must warn
+    // (precise control-flow inference: both branches pin a type).
+    let w = file_warnings(r#"(sig f (int -> int)) (defn f (x) (if (> x 0) x "neg"))"#);
+    assert!(
+        w.iter()
+            .any(|m| m.contains("f: declared return type int") && m.contains("\"neg\"")),
+        "an `int | string` body declared int must warn: {w:?}"
+    );
+    // A branchy body that stays within the declared type must NOT warn.
+    let w = file_warnings("(sig f (int -> int)) (defn f (x) (if (> x 0) x 0))");
+    assert!(
+        w.iter().all(|m| !m.contains("return type")),
+        "an all-int branchy body declared int must not warn: {w:?}"
+    );
+}
+
+#[test]
+fn precise_body_inference_defers_on_uncertainty() {
+    // A body ending in a call to an un-sig'd local/global is unknown → defer,
+    // never warn (graceful degradation keeps the check false-positive-clean).
+    for src in [
+        // an un-sig'd file-global call
+        "(defn helper (x) x) (sig f (int -> int)) (defn f (x) (helper x))",
+        // an un-sig'd let-bound local call
+        "(sig f (int -> int)) (defn f (x) (let (g (fn (y) y)) (g x)))",
+    ] {
+        let w = file_warnings(src);
         assert!(
             w.iter().all(|m| !m.contains("return type")),
-            "an all-int branchy body declared int must not warn: {w:?}"
+            "an unknown-result body must defer ({src}): {w:?}"
         );
     }
+}
 
-    #[test]
-    fn precise_body_inference_defers_on_uncertainty() {
-        // A body ending in a call to an un-sig'd local/global is unknown → defer,
-        // never warn (graceful degradation keeps the check false-positive-clean).
-        for src in [
-            // an un-sig'd file-global call
-            "(defn helper (x) x) (sig f (int -> int)) (defn f (x) (helper x))",
-            // an un-sig'd let-bound local call
-            "(sig f (int -> int)) (defn f (x) (let (g (fn (y) y)) (g x)))",
-        ] {
-            let w = file_warnings(src);
-            assert!(
-                w.iter().all(|m| !m.contains("return type")),
-                "an unknown-result body must defer ({src}): {w:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn argument_check_uses_the_full_gradual_relation() {
-        // Gating B1 (docs/type-gating.md): the arg check now runs the gradual
-        // relation, so a *merely-wider precise* argument is caught (a `number`
-        // sig-param passed where `int` is wanted) — closing the return/arg
-        // asymmetry.
-        let w = file_warnings(
-            "(sig wants-int (int -> int)) (defn wants-int (n) n) \
+#[test]
+fn argument_check_uses_the_full_gradual_relation() {
+    // Gating B1 (docs/type-gating.md): the arg check now runs the gradual
+    // relation, so a *merely-wider precise* argument is caught (a `number`
+    // sig-param passed where `int` is wanted) — closing the return/arg
+    // asymmetry.
+    let w = file_warnings(
+        "(sig wants-int (int -> int)) (defn wants-int (n) n) \
              (sig f (number -> int)) (defn f (x) (wants-int x))",
-        );
-        assert!(
-            w.iter().any(
-                |m| m.contains("wants-int: argument 1 expects int") && m.contains("got number")
-            ),
-            "a merely-wider precise argument must warn: {w:?}"
-        );
-        // But B0 keeps it sound: a literal argument is a faithful singleton, so
-        // `200` passed where `(or 200 404 500)` is wanted does NOT false-positive.
-        let w =
-            file_warnings("(sig g ((or 200 404 500) -> int)) (defn g (c) c) (defn u () (g 200))");
-        assert!(
-            w.iter().all(|m| !m.contains("expects")),
-            "a literal in the accepted set must not warn: {w:?}"
-        );
-        // And a *dynamic* argument (a call result) still defers on `∩` — only a
-        // provably-disjoint one warns, never a merely-wider one.
-        let w = file_warnings(
-            "(sig produce (int -> number)) (defn produce (n) n) \
+    );
+    assert!(
+        w.iter()
+            .any(|m| m.contains("wants-int: argument 1 expects int") && m.contains("got number")),
+        "a merely-wider precise argument must warn: {w:?}"
+    );
+    // But B0 keeps it sound: a literal argument is a faithful singleton, so
+    // `200` passed where `(or 200 404 500)` is wanted does NOT false-positive.
+    let w = file_warnings("(sig g ((or 200 404 500) -> int)) (defn g (c) c) (defn u () (g 200))");
+    assert!(
+        w.iter().all(|m| !m.contains("expects")),
+        "a literal in the accepted set must not warn: {w:?}"
+    );
+    // And a *dynamic* argument (a call result) still defers on `∩` — only a
+    // provably-disjoint one warns, never a merely-wider one.
+    let w = file_warnings(
+        "(sig produce (int -> number)) (defn produce (n) n) \
              (sig h (int -> int)) (defn h (n) n) (defn top () (h (produce 3)))",
-        );
+    );
+    assert!(
+        w.iter().all(|m| !m.contains("expects")),
+        "a dynamic (call-result) argument must defer, not over-warn: {w:?}"
+    );
+}
+
+#[test]
+fn undeclared_global_current_type_gates_its_use() {
+    // Gap A (docs/type-gating.md): an *undeclared* global defined exactly once
+    // by `(def g 5)` gets its inferred current-image type (`int`), so misusing
+    // it is caught — via `dynamic_within` (the `∩` relation), reload-safe.
+    let w = file_warnings("(def g 5) (defn f () (string-length g))");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("string-length") && m.contains("got 5")),
+        "an undeclared int global misused must warn: {w:?}"
+    );
+    // Consistent use, a redefined (ambiguous) global, and a function global
+    // must NOT warn.
+    for src in [
+        "(def g 5) (defn f () (+ 1 g))", // int used as int
+        "(def g 5) (def g \"s\") (defn f () (string-length g))", // redefined → dynamic
+        "(defn g (x) x) (defn f () (+ 1 (g 2)))", // function global, not a value
+    ] {
+        let w = file_warnings(src);
         assert!(
             w.iter().all(|m| !m.contains("expects")),
-            "a dynamic (call-result) argument must defer, not over-warn: {w:?}"
+            "a consistent/ambiguous/function global must not warn ({src}): {w:?}"
         );
     }
+}
 
-    #[test]
-    fn undeclared_global_current_type_gates_its_use() {
-        // Gap A (docs/type-gating.md): an *undeclared* global defined exactly once
-        // by `(def g 5)` gets its inferred current-image type (`int`), so misusing
-        // it is caught — via `dynamic_within` (the `∩` relation), reload-safe.
-        let w = file_warnings("(def g 5) (defn f () (string-length g))");
+#[test]
+fn cross_file_undeclared_global_gates_via_loaded_image() {
+    // Cross-file Gap A: an undeclared global defined in one place (loaded into
+    // the image) is typed from its heap value where it's used elsewhere — the
+    // same mechanism `infer_sig` uses for functions. `check_with_defs` evals
+    // the def, then checks a separate form (the cross-context path).
+    let w = check_with_defs(&["(def gg 5)"], "(string-length gg)");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("string-length") && m.contains("got 5")),
+        "a cross-file undeclared int global misused must warn: {w:?}"
+    );
+    // A **dynamic variable** must be excluded — its heap value is only the
+    // default; `binding` rebinds it to any type, so typing a use against the
+    // default would false-positive. `(binding (*dv* "s") (string-length *dv*))`
+    // is valid and must NOT warn.
+    let w = check_with_defs(
+        &["(defdyn *dv* 0)"],
+        "(binding (*dv* \"s\") (string-length *dv*))",
+    );
+    assert!(
+        w.iter().all(|m| !m.contains("expects")),
+        "a dynamic variable must stay unknown, not be typed from its default: {w:?}"
+    );
+    // A function global isn't gated as a value (its arrow is handled by sig_of).
+    let w = check_with_defs(&["(defn ff (x) x)"], "(+ 1 ff)");
+    assert!(
+        w.iter().all(|m| !m.contains("expects")),
+        "a function global must not be gated as a plain value: {w:?}"
+    );
+}
+
+#[test]
+fn declared_global_type_flows_into_value_position() {
+    // `(sig g int)` makes `g`'s declared type visible where it's used, so a
+    // disjoint use is caught — even though `g` is a redefinable global.
+    let w = file_warnings("(sig g int) (def g 5) (def r (string-length g))");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("string-length") && m.contains("int")),
+        "a declared int global used where a string is wanted must warn: {w:?}"
+    );
+    // A compatible use defers (int ⊆ number).
+    let w = file_warnings("(sig g int) (def g 5) (def r (+ 1 g))");
+    assert!(
+        w.iter().all(|m| !m.contains("expects number")),
+        "a declared int global is fine for +: {w:?}"
+    );
+}
+
+#[test]
+fn unknown_module_qualified_name_is_not_unbound() {
+    // A qualified reference whose module isn't loaded — defined dynamically
+    // (`%load-string`, a required temp module) or in a file a single-file check
+    // didn't load — can't be proven unbound, so it's left alone.
+    for src in [
+        "(some-unloaded-mod/thing 1)",
+        "(a/b/c/deep-thing 1)",
+        "(+ 1 other-mod/value)",
+    ] {
+        let w = file_warnings(src);
         assert!(
-            w.iter()
-                .any(|m| m.contains("string-length") && m.contains("got 5")),
-            "an undeclared int global misused must warn: {w:?}"
+            w.iter().all(|m| !m.contains("unbound symbol")),
+            "an unknown-module qualified name must not be flagged ({src}): {w:?}"
         );
-        // Consistent use, a redefined (ambiguous) global, and a function global
-        // must NOT warn.
-        for src in [
-            "(def g 5) (defn f () (+ 1 g))", // int used as int
-            "(def g 5) (def g \"s\") (defn f () (string-length g))", // redefined → dynamic
-            "(defn g (x) x) (defn f () (+ 1 (g 2)))", // function global, not a value
-        ] {
-            let w = file_warnings(src);
-            assert!(
-                w.iter().all(|m| !m.contains("expects")),
-                "a consistent/ambiguous/function global must not warn ({src}): {w:?}"
-            );
-        }
     }
+    // But a typo in a *known* module (some `mod/*` is loaded) is still flagged:
+    // requiring `test` makes `test/` a known prefix.
+    let w = file_warnings("(require 'test) (test/no-such-fn 1)");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("unbound symbol: test/no-such-fn")),
+        "a typo in a known module must still be flagged: {w:?}"
+    );
+}
 
-    #[test]
-    fn cross_file_undeclared_global_gates_via_loaded_image() {
-        // Cross-file Gap A: an undeclared global defined in one place (loaded into
-        // the image) is typed from its heap value where it's used elsewhere — the
-        // same mechanism `infer_sig` uses for functions. `check_with_defs` evals
-        // the def, then checks a separate form (the cross-context path).
-        let w = check_with_defs(&["(def gg 5)"], "(string-length gg)");
-        assert!(
-            w.iter()
-                .any(|m| m.contains("string-length") && m.contains("got 5")),
-            "a cross-file undeclared int global misused must warn: {w:?}"
-        );
-        // A **dynamic variable** must be excluded — its heap value is only the
-        // default; `binding` rebinds it to any type, so typing a use against the
-        // default would false-positive. `(binding (*dv* "s") (string-length *dv*))`
-        // is valid and must NOT warn.
-        let w = check_with_defs(
-            &["(defdyn *dv* 0)"],
-            "(binding (*dv* \"s\") (string-length *dv*))",
-        );
+#[test]
+fn unexpandable_macro_calls_dont_false_flag() {
+    // A file-local macro the checker can't expand: its arguments are opaque
+    // syntax. (a) A macro that `def`s its symbol arg — the name must not look
+    // unbound later. (b) A macro that splices an arg into a binder — the
+    // spliced names must not look unbound.
+    let a = file_warnings("(defmacro mk (n) `(def ~n (fn (x) x))) (mk qf) (qf 5)");
+    assert!(
+        a.iter().all(|m| !m.contains("unbound symbol")),
+        "a macro-defined name must not look unbound: {a:?}"
+    );
+    let b = file_warnings("(defmacro wp (v & body) `(let ((a b) ~v) ~@body)) (wp [1 2] (+ a b))");
+    assert!(
+        b.iter().all(|m| !m.contains("unbound symbol")),
+        "names a macro splices into a binder must not look unbound: {b:?}"
+    );
+    // A genuine typo under a *known* (arg-evaluating) callee is still flagged.
+    let c = file_warnings("(println (genuine-typo 5))");
+    assert!(
+        c.iter().any(|m| m.contains("unbound symbol: genuine-typo")),
+        "a real unbound call head must still be flagged: {c:?}"
+    );
+}
+
+#[test]
+fn transient_is_a_valid_count_and_contains_arg() {
+    // count/length/contains? dispatch to transient-* kernel hooks at runtime, so
+    // a live transient is a valid argument — the sigs must admit Tag::Transient.
+    for src in [
+        "(count (transient {}))",
+        "(length (transient {}))",
+        "(contains? (transient {}) :k)",
+    ] {
+        let w = warnings(src);
         assert!(
             w.iter().all(|m| !m.contains("expects")),
-            "a dynamic variable must stay unknown, not be typed from its default: {w:?}"
-        );
-        // A function global isn't gated as a value (its arrow is handled by sig_of).
-        let w = check_with_defs(&["(defn ff (x) x)"], "(+ 1 ff)");
-        assert!(
-            w.iter().all(|m| !m.contains("expects")),
-            "a function global must not be gated as a plain value: {w:?}"
+            "transient must be accepted by {src}: {w:?}"
         );
     }
+    // A genuinely wrong arg (a number) is still flagged — the domain stays tight.
+    assert!(warnings("(count 5)").iter().any(|m| m.contains("count")));
+}
 
-    #[test]
-    fn declared_global_type_flows_into_value_position() {
-        // `(sig g int)` makes `g`'s declared type visible where it's used, so a
-        // disjoint use is caught — even though `g` is a redefinable global.
-        let w = file_warnings("(sig g int) (def g 5) (def r (string-length g))");
-        assert!(
-            w.iter()
-                .any(|m| m.contains("string-length") && m.contains("int")),
-            "a declared int global used where a string is wanted must warn: {w:?}"
-        );
-        // A compatible use defers (int ⊆ number).
-        let w = file_warnings("(sig g int) (def g 5) (def r (+ 1 g))");
-        assert!(
-            w.iter().all(|m| !m.contains("expects number")),
-            "a declared int global is fine for +: {w:?}"
-        );
-    }
+#[test]
+fn multi_arity_fn_clause_params_are_bound() {
+    // Regression: `check_fn` read a multi-arity fn's first clause as a param
+    // list, so a param used only in a *later* clause looked unbound — a false
+    // positive (it fired identically for `fn` and `lambda`).
+    let w = file_warnings("(def g (fn ((a) (* a 2)) ((a b) (+ a b))))");
+    assert!(
+        w.iter().all(|m| !m.contains("unbound symbol")),
+        "multi-arity fn clause params must not look unbound: {w:?}"
+    );
+    // `defn` (which expands to `(def name (fn …))`) and `lambda` too.
+    let w = file_warnings("(defn h ((a) a) ((a b) (+ a b)))");
+    assert!(
+        w.iter().all(|m| !m.contains("unbound symbol")),
+        "defn: {w:?}"
+    );
+    let w = file_warnings("(def k (lambda ((a) a) ((a b) (+ a b))))");
+    assert!(
+        w.iter().all(|m| !m.contains("unbound symbol")),
+        "lambda: {w:?}"
+    );
+}
 
-    #[test]
-    fn unknown_module_qualified_name_is_not_unbound() {
-        // A qualified reference whose module isn't loaded — defined dynamically
-        // (`%load-string`, a required temp module) or in a file a single-file check
-        // didn't load — can't be proven unbound, so it's left alone.
-        for src in [
-            "(some-unloaded-mod/thing 1)",
-            "(a/b/c/deep-thing 1)",
-            "(+ 1 other-mod/value)",
-        ] {
-            let w = file_warnings(src);
-            assert!(
-                w.iter().all(|m| !m.contains("unbound symbol")),
-                "an unknown-module qualified name must not be flagged ({src}): {w:?}"
-            );
-        }
-        // But a typo in a *known* module (some `mod/*` is loaded) is still flagged:
-        // requiring `test` makes `test/` a known prefix.
-        let w = file_warnings("(require 'test) (test/no-such-fn 1)");
-        assert!(
-            w.iter()
-                .any(|m| m.contains("unbound symbol: test/no-such-fn")),
-            "a typo in a known module must still be flagged: {w:?}"
-        );
-    }
+#[test]
+fn self_recursive_let_bound_closure_is_bound() {
+    // Regression: a `let`-bound `fn`/`lambda` that calls its own binding name
+    // resolves at runtime (the closure captures the frame, late-binds on call),
+    // but the checker flagged the self-reference unbound. Pre-binding fn-valued
+    // let names fixes it — for `let` and `let*`, `fn` and `lambda`.
+    let w = file_warnings("(defn t () (let (fac (fn (n) (if (= n 0) 1 (fac n)))) (fac 5)))");
+    assert!(
+        w.iter().all(|m| !m.contains("unbound symbol: fac")),
+        "self-recursive let closure must not look unbound: {w:?}"
+    );
+    // But an *eager* forward reference in a non-closure RHS still surfaces.
+    let w = file_warnings("(defn t () (let (a undefined-thing b 1) a))");
+    assert!(
+        w.iter()
+            .any(|m| m.contains("unbound symbol: undefined-thing")),
+        "an eager forward/undefined reference must still be flagged: {w:?}"
+    );
+}
 
-    #[test]
-    fn unexpandable_macro_calls_dont_false_flag() {
-        // A file-local macro the checker can't expand: its arguments are opaque
-        // syntax. (a) A macro that `def`s its symbol arg — the name must not look
-        // unbound later. (b) A macro that splices an arg into a binder — the
-        // spliced names must not look unbound.
-        let a = file_warnings("(defmacro mk (n) `(def ~n (fn (x) x))) (mk qf) (qf 5)");
-        assert!(
-            a.iter().all(|m| !m.contains("unbound symbol")),
-            "a macro-defined name must not look unbound: {a:?}"
-        );
-        let b =
-            file_warnings("(defmacro wp (v & body) `(let ((a b) ~v) ~@body)) (wp [1 2] (+ a b))");
-        assert!(
-            b.iter().all(|m| !m.contains("unbound symbol")),
-            "names a macro splices into a binder must not look unbound: {b:?}"
-        );
-        // A genuine typo under a *known* (arg-evaluating) callee is still flagged.
-        let c = file_warnings("(println (genuine-typo 5))");
-        assert!(
-            c.iter().any(|m| m.contains("unbound symbol: genuine-typo")),
-            "a real unbound call head must still be flagged: {c:?}"
-        );
-    }
+#[test]
+fn reduce_and_fold_expect_a_two_arg_callback() {
+    // reduce/fold call `(f acc x)` — 2 args. A 1-arg callback is wrong.
+    let w = warnings("(reduce (fn (a) a) 0 nil)");
+    assert!(
+        w.iter()
+            .any(|s| s.contains("reduce") && s.contains("callback")),
+        "reduce should flag a 1-arg callback: {w:?}"
+    );
+    let w = warnings("(fold inc 0 nil)");
+    assert!(
+        w.iter()
+            .any(|s| s.contains("fold") && s.contains("callback")),
+        "fold should flag a 1-arg callback (inc): {w:?}"
+    );
+    // A correct 2-arg callback is silent.
+    let w = warnings("(reduce (fn (a b) a) 0 nil)");
+    assert!(
+        w.iter().all(|s| !s.contains("callback")),
+        "a 2-arg callback must not warn under reduce: {w:?}"
+    );
+}
 
-    #[test]
-    fn transient_is_a_valid_count_and_contains_arg() {
-        // count/length/contains? dispatch to transient-* kernel hooks at runtime, so
-        // a live transient is a valid argument — the sigs must admit Tag::Transient.
-        for src in [
-            "(count (transient {}))",
-            "(length (transient {}))",
-            "(contains? (transient {}) :k)",
-        ] {
-            let w = warnings(src);
-            assert!(
-                w.iter().all(|m| !m.contains("expects")),
-                "transient must be accepted by {src}: {w:?}"
-            );
-        }
-        // A genuinely wrong arg (a number) is still flagged — the domain stays tight.
-        assert!(warnings("(count 5)").iter().any(|m| m.contains("count")));
-    }
+#[test]
+fn callback_arity_is_skipped_when_unknown() {
+    // A multi-arity lambda accepts 1 *and* 2 — must not warn (we bail rather
+    // than risk a false positive).
+    let w = warnings("(map (fn ((a) a) ((a b) a)) nil)");
+    assert!(
+        w.iter().all(|s| !s.contains("callback")),
+        "multi-arity lambda must be skipped: {w:?}"
+    );
+    // A locally-bound callback has unknown arity here — skip.
+    let w = warnings("(fn (f) (map f nil))");
+    assert!(
+        w.iter().all(|s| !s.contains("callback")),
+        "a local callback must be skipped: {w:?}"
+    );
+}
 
-    #[test]
-    fn multi_arity_fn_clause_params_are_bound() {
-        // Regression: `check_fn` read a multi-arity fn's first clause as a param
-        // list, so a param used only in a *later* clause looked unbound — a false
-        // positive (it fired identically for `fn` and `lambda`).
-        let w = file_warnings("(def g (fn ((a) (* a 2)) ((a b) (+ a b))))");
-        assert!(
-            w.iter().all(|m| !m.contains("unbound symbol")),
-            "multi-arity fn clause params must not look unbound: {w:?}"
-        );
-        // `defn` (which expands to `(def name (fn …))`) and `lambda` too.
-        let w = file_warnings("(defn h ((a) a) ((a b) (+ a b)))");
-        assert!(
-            w.iter().all(|m| !m.contains("unbound symbol")),
-            "defn: {w:?}"
-        );
-        let w = file_warnings("(def k (lambda ((a) a) ((a b) (+ a b))))");
-        assert!(
-            w.iter().all(|m| !m.contains("unbound symbol")),
-            "lambda: {w:?}"
-        );
-    }
+// ---- element types flow through first/last/nth (ADR-078 slice 2) ----
 
-    #[test]
-    fn self_recursive_let_bound_closure_is_bound() {
-        // Regression: a `let`-bound `fn`/`lambda` that calls its own binding name
-        // resolves at runtime (the closure captures the frame, late-binds on call),
-        // but the checker flagged the self-reference unbound. Pre-binding fn-valued
-        // let names fixes it — for `let` and `let*`, `fn` and `lambda`.
-        let w = file_warnings("(defn t () (let (fac (fn (n) (if (= n 0) 1 (fac n)))) (fac 5)))");
-        assert!(
-            w.iter().all(|m| !m.contains("unbound symbol: fac")),
-            "self-recursive let closure must not look unbound: {w:?}"
-        );
-        // But an *eager* forward reference in a non-closure RHS still surfaces.
-        let w = file_warnings("(defn t () (let (a undefined-thing b 1) a))");
-        assert!(
-            w.iter()
-                .any(|m| m.contains("unbound symbol: undefined-thing")),
-            "an eager forward/undefined reference must still be flagged: {w:?}"
-        );
-    }
+#[test]
+fn first_of_a_string_vector_is_not_a_number() {
+    // `(first ["a" "b"])` : string | nil — disjoint from number → flagged.
+    let w = warnings(r#"(+ 1 (first ["a" "b"]))"#);
+    assert!(
+        w.iter().any(|s| s.contains("+") && s.contains("\"a\"")),
+        "expected a number/string mismatch from the element type: {w:?}"
+    );
+}
 
-    #[test]
-    fn reduce_and_fold_expect_a_two_arg_callback() {
-        // reduce/fold call `(f acc x)` — 2 args. A 1-arg callback is wrong.
-        let w = warnings("(reduce (fn (a) a) 0 nil)");
-        assert!(
-            w.iter()
-                .any(|s| s.contains("reduce") && s.contains("callback")),
-            "reduce should flag a 1-arg callback: {w:?}"
-        );
-        let w = warnings("(fold inc 0 nil)");
-        assert!(
-            w.iter()
-                .any(|s| s.contains("fold") && s.contains("callback")),
-            "fold should flag a 1-arg callback (inc): {w:?}"
-        );
-        // A correct 2-arg callback is silent.
-        let w = warnings("(reduce (fn (a b) a) 0 nil)");
-        assert!(
-            w.iter().all(|s| !s.contains("callback")),
-            "a 2-arg callback must not warn under reduce: {w:?}"
-        );
-    }
+#[test]
+fn first_of_an_int_vector_is_a_number() {
+    // `(first [10 20])` : int | nil — overlaps number → no warning.
+    let w = warnings("(+ 1 (first [10 20]))");
+    assert!(
+        w.iter().all(|s| !s.contains("expects number")),
+        "an int element must not warn against +: {w:?}"
+    );
+}
 
-    #[test]
-    fn callback_arity_is_skipped_when_unknown() {
-        // A multi-arity lambda accepts 1 *and* 2 — must not warn (we bail rather
-        // than risk a false positive).
-        let w = warnings("(map (fn ((a) a) ((a b) a)) nil)");
-        assert!(
-            w.iter().all(|s| !s.contains("callback")),
-            "multi-arity lambda must be skipped: {w:?}"
-        );
-        // A locally-bound callback has unknown arity here — skip.
-        let w = warnings("(fn (f) (map f nil))");
-        assert!(
-            w.iter().all(|s| !s.contains("callback")),
-            "a local callback must be skipped: {w:?}"
-        );
-    }
+#[test]
+fn list_constructor_carries_its_element_type() {
+    // `(list "a" "b")` : list<string>, so `(first …)` is string|nil.
+    let w = warnings(r#"(+ 1 (first (list "a" "b")))"#);
+    assert!(
+        w.iter().any(|s| s.contains("+") && s.contains("\"a\"")),
+        "(list …) element type should flow to first: {w:?}"
+    );
+}
 
-    // ---- element types flow through first/last/nth (ADR-078 slice 2) ----
+#[test]
+fn heterogeneous_or_unknown_elements_do_not_warn() {
+    // Mixed elements → int|string element; first → int|string|nil, which
+    // overlaps number → no false positive.
+    let w = warnings(r#"(+ 1 (first [1 "a"]))"#);
+    assert!(
+        w.iter().all(|s| !s.contains("expects number")),
+        "a heterogeneous element type must not warn: {w:?}"
+    );
+    // first of an unknown (variable) sequence → unknown → no warning.
+    let w = warnings("(fn (xs) (+ 1 (first xs)))");
+    assert!(
+        w.iter().all(|s| !s.contains("expects number")),
+        "an unknown sequence must not warn: {w:?}"
+    );
+}
 
-    #[test]
-    fn first_of_a_string_vector_is_not_a_number() {
-        // `(first ["a" "b"])` : string | nil — disjoint from number → flagged.
-        let w = warnings(r#"(+ 1 (first ["a" "b"]))"#);
-        assert!(
-            w.iter().any(|s| s.contains("+") && s.contains("\"a\"")),
-            "expected a number/string mismatch from the element type: {w:?}"
-        );
-    }
+// ---- `and`-guard narrowing in an `if` test (the match-lowering fix) ----
 
-    #[test]
-    fn first_of_an_int_vector_is_a_number() {
-        // `(first [10 20])` : int | nil — overlaps number → no warning.
-        let w = warnings("(+ 1 (first [10 20]))");
-        assert!(
-            w.iter().all(|s| !s.contains("expects number")),
-            "an int element must not warn against +: {w:?}"
-        );
-    }
+#[test]
+fn and_guard_narrows_in_the_then_branch() {
+    // `(and (int? x) …)` as an `if` test must narrow `x` to int in the then
+    // branch — so a use that would mismatch the *original* type is suppressed
+    // (here `x` is a string, narrowed to never → the `+` use is unreachable).
+    let w = warnings_expanded(r#"(let (x "s") (if (and (int? x) true) (+ x 1) 0))"#);
+    assert!(
+        w.iter().all(|s| !s.contains("expects number")),
+        "an `and` guard should narrow x in the then branch: {w:?}"
+    );
+}
 
-    #[test]
-    fn list_constructor_carries_its_element_type() {
-        // `(list "a" "b")` : list<string>, so `(first …)` is string|nil.
-        let w = warnings(r#"(+ 1 (first (list "a" "b")))"#);
-        assert!(
-            w.iter().any(|s| s.contains("+") && s.contains("\"a\"")),
-            "(list …) element type should flow to first: {w:?}"
-        );
-    }
+#[test]
+fn matching_a_list_against_a_vector_pattern_is_not_flagged() {
+    // The match compiler lowers a vector pattern to
+    // `(if (and (vector? m) (= (vector-length m) 2)) (… (vector-ref m i) …) …)`.
+    // With `(list 1 2)` now typed `list<int>`, the guarded `vector-ref` must
+    // not be flagged — the `and` guard narrows `m` to a vector (→ never here).
+    let w = warnings_expanded("(match (list 1 2) ([a b] :vec) (_ :not-vec))");
+    assert!(
+        w.iter()
+            .all(|s| !s.contains("vector-ref") && !s.contains("vector-length")),
+        "a list matched against a vector pattern must not warn: {w:?}"
+    );
+}
 
-    #[test]
-    fn heterogeneous_or_unknown_elements_do_not_warn() {
-        // Mixed elements → int|string element; first → int|string|nil, which
-        // overlaps number → no false positive.
-        let w = warnings(r#"(+ 1 (first [1 "a"]))"#);
-        assert!(
-            w.iter().all(|s| !s.contains("expects number")),
-            "a heterogeneous element type must not warn: {w:?}"
-        );
-        // first of an unknown (variable) sequence → unknown → no warning.
-        let w = warnings("(fn (xs) (+ 1 (first xs)))");
-        assert!(
-            w.iter().all(|s| !s.contains("expects number")),
-            "an unknown sequence must not warn: {w:?}"
-        );
-    }
-
-    // ---- `and`-guard narrowing in an `if` test (the match-lowering fix) ----
-
-    #[test]
-    fn and_guard_narrows_in_the_then_branch() {
-        // `(and (int? x) …)` as an `if` test must narrow `x` to int in the then
-        // branch — so a use that would mismatch the *original* type is suppressed
-        // (here `x` is a string, narrowed to never → the `+` use is unreachable).
-        let w = warnings_expanded(r#"(let (x "s") (if (and (int? x) true) (+ x 1) 0))"#);
-        assert!(
-            w.iter().all(|s| !s.contains("expects number")),
-            "an `and` guard should narrow x in the then branch: {w:?}"
-        );
-    }
-
-    #[test]
-    fn matching_a_list_against_a_vector_pattern_is_not_flagged() {
-        // The match compiler lowers a vector pattern to
-        // `(if (and (vector? m) (= (vector-length m) 2)) (… (vector-ref m i) …) …)`.
-        // With `(list 1 2)` now typed `list<int>`, the guarded `vector-ref` must
-        // not be flagged — the `and` guard narrows `m` to a vector (→ never here).
-        let w = warnings_expanded("(match (list 1 2) ([a b] :vec) (_ :not-vec))");
-        assert!(
-            w.iter()
-                .all(|s| !s.contains("vector-ref") && !s.contains("vector-length")),
-            "a list matched against a vector pattern must not warn: {w:?}"
-        );
-    }
-
-    #[test]
-    fn and_guard_does_not_narrow_the_else_branch() {
-        // A falsy `(and (vector? m) …)` does NOT imply `m` isn't a vector — a
-        // *later* conjunct may have failed. So the else-branch must keep `m`'s
-        // full type; flagging a vector op there would be a false positive.
-        let w = warnings_expanded(
-            "(fn (m) (if (and (vector? m) (%eq (vector-length m) 2)) \
+#[test]
+fn and_guard_does_not_narrow_the_else_branch() {
+    // A falsy `(and (vector? m) …)` does NOT imply `m` isn't a vector — a
+    // *later* conjunct may have failed. So the else-branch must keep `m`'s
+    // full type; flagging a vector op there would be a false positive.
+    let w = warnings_expanded(
+        "(fn (m) (if (and (vector? m) (%eq (vector-length m) 2)) \
                          (vector-ref m 0) (vector-ref m 0)))",
-        );
+    );
+    assert!(
+        w.iter().all(|s| !s.contains("vector-ref")),
+        "the else-branch of an `and` guard must not be narrowed: {w:?}"
+    );
+    // The then-branch still narrows (sanity: the guard didn't go silent).
+    let w = warnings_expanded(r#"(fn (m) (if (and (int? m) true) (string-length m) 0))"#);
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "the then-branch should still narrow m to int: {w:?}"
+    );
+}
+
+#[test]
+fn or_guard_does_not_falsely_narrow() {
+    // `or` must NOT narrow from its first operand (a truthy `or` implies
+    // nothing about it). `(or (int? x) true)` is always true, so the then
+    // branch keeps `x`'s full (string) type — and a genuine misuse there is
+    // still seen. (Guards against the `and`-fix over-reaching into `or`.)
+    let w = warnings_expanded(r#"(let (x "s") (if (or (int? x) true) (string-length x) 0))"#);
+    assert!(
+        w.iter().all(|s| !s.contains("expects")),
+        "a correct use under an `or` guard must not warn: {w:?}"
+    );
+}
+
+// ---- parametric HOF result types — map / filter (ADR-078, Option B) ----
+
+#[test]
+fn map_result_flows_the_callback_return() {
+    // `(map inc (list 1 2 3))` : list<number>, so `(first …)` is number|nil —
+    // disjoint from string → string-length flags it.
+    let w = warnings("(string-length (first (map inc (list 1 2 3))))");
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "map's element type (number) should flow to first: {w:?}"
+    );
+    // ...and a numeric sink is fine (number overlaps).
+    let w = warnings("(+ 1 (first (map inc (list 1 2 3))))");
+    assert!(
+        w.iter().all(|s| !s.contains("expects")),
+        "a number element must not warn against +: {w:?}"
+    );
+}
+
+#[test]
+fn filter_preserves_the_element_type() {
+    // `(filter even? (list 1 2 3))` : list<int> — element type unchanged.
+    let w = warnings("(string-length (first (filter even? (list 1 2 3))))");
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "filter should preserve the int element type: {w:?}"
+    );
+}
+
+#[test]
+fn element_type_flows_through_more_combinators() {
+    // Structured-types extension: second/third/rest/but-last/distinct/dedupe/
+    // take-last/drop-last/remove/keep/interpose/range all flow the element type,
+    // so a downstream string-vs-number mismatch is caught. Each must warn here.
+    for src in [
+        r#"(+ 1 (second ["a" "b"]))"#,
+        r#"(+ 1 (first (rest ["a" "b"])))"#,
+        r#"(+ 1 (first (but-last ["a" "b"])))"#,
+        r#"(+ 1 (first (distinct ["a" "b"])))"#,
+        r#"(+ 1 (first (dedupe ["a" "b"])))"#,
+        r#"(+ 1 (first (remove (fn (x) false) ["a" "b"])))"#,
+        r#"(+ 1 (first (take-last 1 ["a" "b"])))"#,
+        r#"(+ 1 (first (keep (fn (x) x) ["a" "b"])))"#,
+        "(string-length (first (range 5)))",
+    ] {
+        let w = warnings(src);
         assert!(
-            w.iter().all(|s| !s.contains("vector-ref")),
-            "the else-branch of an `and` guard must not be narrowed: {w:?}"
-        );
-        // The then-branch still narrows (sanity: the guard didn't go silent).
-        let w = warnings_expanded(r#"(fn (m) (if (and (int? m) true) (string-length m) 0))"#);
-        assert!(
-            w.iter().any(|s| s.contains("string-length")),
-            "the then-branch should still narrow m to int: {w:?}"
+            w.iter()
+                .any(|s| s.contains("number") || s.contains("string")),
+            "expected an element-type mismatch for {src}: {w:?}"
         );
     }
-
-    #[test]
-    fn or_guard_does_not_falsely_narrow() {
-        // `or` must NOT narrow from its first operand (a truthy `or` implies
-        // nothing about it). `(or (int? x) true)` is always true, so the then
-        // branch keeps `x`'s full (string) type — and a genuine misuse there is
-        // still seen. (Guards against the `and`-fix over-reaching into `or`.)
-        let w = warnings_expanded(r#"(let (x "s") (if (or (int? x) true) (string-length x) 0))"#);
+    // Negative controls — a valid element type must NOT warn.
+    for src in [
+        "(+ 1 (second [10 20]))",
+        "(+ 1 (first (rest [10 20])))",
+        // interpose unions the separator: int|string includes int → valid for +.
+        r#"(+ 1 (first (interpose "z" [1 2])))"#,
+    ] {
+        let w = warnings(src);
         assert!(
-            w.iter().all(|s| !s.contains("expects")),
-            "a correct use under an `or` guard must not warn: {w:?}"
+            w.iter().all(|s| !s.contains("expects number")),
+            "a valid element type must not warn for {src}: {w:?}"
         );
     }
+}
 
-    // ---- parametric HOF result types — map / filter (ADR-078, Option B) ----
+#[test]
+fn identity_lambda_preserves_element_type() {
+    // `(map (fn (x) x) (list 1 2 3))` : list<int> — the lambda returns its
+    // argument, so B = the element type A.
+    let w = warnings("(string-length (first (map (fn (x) x) (list 1 2 3))))");
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "an identity callback should preserve the element type: {w:?}"
+    );
+}
 
-    #[test]
-    fn map_result_flows_the_callback_return() {
-        // `(map inc (list 1 2 3))` : list<number>, so `(first …)` is number|nil —
-        // disjoint from string → string-length flags it.
-        let w = warnings("(string-length (first (map inc (list 1 2 3))))");
-        assert!(
-            w.iter().any(|s| s.contains("string-length")),
-            "map's element type (number) should flow to first: {w:?}"
-        );
-        // ...and a numeric sink is fine (number overlaps).
-        let w = warnings("(+ 1 (first (map inc (list 1 2 3))))");
-        assert!(
-            w.iter().all(|s| !s.contains("expects")),
-            "a number element must not warn against +: {w:?}"
-        );
-    }
+#[test]
+fn map_filter_do_not_refine_when_uncertain() {
+    // Unknown callback (a local) → no refinement → no warning.
+    let w = warnings("(fn (g) (string-length (first (map g (list 1 2 3)))))");
+    assert!(
+        w.iter().all(|s| !s.contains("string-length")),
+        "an unknown callback must not refine the result: {w:?}"
+    );
+    // Identity callback + unknown collection → B depends on the (unknown)
+    // element type → no refinement.
+    let w = warnings("(fn (xs) (string-length (first (map (fn (x) x) xs))))");
+    assert!(
+        w.iter().all(|s| !s.contains("string-length")),
+        "an identity callback over an unknown collection must not refine: {w:?}"
+    );
+    // Branchy lambda body → can't type it → bail to flat (no false positive).
+    let w = warnings(r#"(string-length (first (map (fn (x) (if x 1 "a")) (list 1 2 3))))"#);
+    assert!(
+        w.iter().all(|s| !s.contains("string-length")),
+        "a branchy lambda body must bail to a flat result: {w:?}"
+    );
+}
 
-    #[test]
-    fn filter_preserves_the_element_type() {
-        // `(filter even? (list 1 2 3))` : list<int> — element type unchanged.
-        let w = warnings("(string-length (first (filter even? (list 1 2 3))))");
-        assert!(
-            w.iter().any(|s| s.contains("string-length")),
-            "filter should preserve the int element type: {w:?}"
-        );
-    }
+// ---- reduce / fold result types (slice 2) ----
 
-    #[test]
-    fn element_type_flows_through_more_combinators() {
-        // Structured-types extension: second/third/rest/but-last/distinct/dedupe/
-        // take-last/drop-last/remove/keep/interpose/range all flow the element type,
-        // so a downstream string-vs-number mismatch is caught. Each must warn here.
-        for src in [
-            r#"(+ 1 (second ["a" "b"]))"#,
-            r#"(+ 1 (first (rest ["a" "b"])))"#,
-            r#"(+ 1 (first (but-last ["a" "b"])))"#,
-            r#"(+ 1 (first (distinct ["a" "b"])))"#,
-            r#"(+ 1 (first (dedupe ["a" "b"])))"#,
-            r#"(+ 1 (first (remove (fn (x) false) ["a" "b"])))"#,
-            r#"(+ 1 (first (take-last 1 ["a" "b"])))"#,
-            r#"(+ 1 (first (keep (fn (x) x) ["a" "b"])))"#,
-            "(string-length (first (range 5)))",
-        ] {
-            let w = warnings(src);
-            assert!(
-                w.iter()
-                    .any(|s| s.contains("number") || s.contains("string")),
-                "expected an element-type mismatch for {src}: {w:?}"
-            );
-        }
-        // Negative controls — a valid element type must NOT warn.
-        for src in [
-            "(+ 1 (second [10 20]))",
-            "(+ 1 (first (rest [10 20])))",
-            // interpose unions the separator: int|string includes int → valid for +.
-            r#"(+ 1 (first (interpose "z" [1 2])))"#,
-        ] {
-            let w = warnings(src);
-            assert!(
-                w.iter().all(|s| !s.contains("expects number")),
-                "a valid element type must not warn for {src}: {w:?}"
-            );
-        }
-    }
+#[test]
+fn reduce_result_is_the_accumulator_type() {
+    // `(reduce + 0 (list 1 2 3))` : number (init int ∪ +'s number return) —
+    // disjoint from string → flagged.
+    let w = warnings("(string-length (reduce + 0 (list 1 2 3)))");
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "reduce's accumulator type should flow out: {w:?}"
+    );
+    // ...and a numeric sink is fine.
+    let w = warnings("(+ 1 (reduce + 0 (list 1 2 3)))");
+    assert!(
+        w.iter().all(|s| !s.contains("expects")),
+        "a numeric reduce result must not warn against +: {w:?}"
+    );
+}
 
-    #[test]
-    fn identity_lambda_preserves_element_type() {
-        // `(map (fn (x) x) (list 1 2 3))` : list<int> — the lambda returns its
-        // argument, so B = the element type A.
-        let w = warnings("(string-length (first (map (fn (x) x) (list 1 2 3))))");
-        assert!(
-            w.iter().any(|s| s.contains("string-length")),
-            "an identity callback should preserve the element type: {w:?}"
-        );
-    }
+#[test]
+fn fold_with_a_lambda_callback_types_the_result() {
+    // `(fold (fn (acc x) (+ acc x)) 0 …)` : number — the 2-arg callback's
+    // return (number) joined with the init (int).
+    let w = warnings("(string-length (fold (fn (acc x) (+ acc x)) 0 (list 1 2 3)))");
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "fold should type the accumulator from a lambda callback: {w:?}"
+    );
+}
 
-    #[test]
-    fn map_filter_do_not_refine_when_uncertain() {
-        // Unknown callback (a local) → no refinement → no warning.
-        let w = warnings("(fn (g) (string-length (first (map g (list 1 2 3)))))");
-        assert!(
-            w.iter().all(|s| !s.contains("string-length")),
-            "an unknown callback must not refine the result: {w:?}"
-        );
-        // Identity callback + unknown collection → B depends on the (unknown)
-        // element type → no refinement.
-        let w = warnings("(fn (xs) (string-length (first (map (fn (x) x) xs))))");
-        assert!(
-            w.iter().all(|s| !s.contains("string-length")),
-            "an identity callback over an unknown collection must not refine: {w:?}"
-        );
-        // Branchy lambda body → can't type it → bail to flat (no false positive).
-        let w = warnings(r#"(string-length (first (map (fn (x) (if x 1 "a")) (list 1 2 3))))"#);
-        assert!(
-            w.iter().all(|s| !s.contains("string-length")),
-            "a branchy lambda body must bail to a flat result: {w:?}"
-        );
-    }
+#[test]
+fn reduce_fold_bail_when_init_or_callback_unknown() {
+    // Unknown callback (local) → flat, no warning.
+    let w = warnings("(fn (g) (string-length (reduce g 0 (list 1 2 3))))");
+    assert!(
+        w.iter().all(|s| !s.contains("string-length")),
+        "an unknown reduce callback must not refine: {w:?}"
+    );
+    // Unknown init type (a fn param) → flat, no warning.
+    let w = warnings("(fn (init) (string-length (reduce + init (list 1 2 3))))");
+    assert!(
+        w.iter().all(|s| !s.contains("string-length")),
+        "an unknown init must not refine the reduce result: {w:?}"
+    );
+}
 
-    // ---- reduce / fold result types (slice 2) ----
+// ---- unused :use import lint (Pass 4.5) ----
 
-    #[test]
-    fn reduce_result_is_the_accumulator_type() {
-        // `(reduce + 0 (list 1 2 3))` : number (init int ∪ +'s number return) —
-        // disjoint from string → flagged.
-        let w = warnings("(string-length (reduce + 0 (list 1 2 3)))");
-        assert!(
-            w.iter().any(|s| s.contains("string-length")),
-            "reduce's accumulator type should flow out: {w:?}"
-        );
-        // ...and a numeric sink is fine.
-        let w = warnings("(+ 1 (reduce + 0 (list 1 2 3)))");
-        assert!(
-            w.iter().all(|s| !s.contains("expects")),
-            "a numeric reduce result must not warn against +: {w:?}"
-        );
-    }
+#[test]
+fn unused_use_import_is_flagged() {
+    // `io` is an embedded module; not using any of its names should warn.
+    let ws = file_warnings("(defmodule test/mod (:use io))\n(defn foo (x) (+ x 1))");
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("unused :use import") && w.contains("io")),
+        "expected unused :use import warning for io, got {ws:?}"
+    );
+}
 
-    #[test]
-    fn fold_with_a_lambda_callback_types_the_result() {
-        // `(fold (fn (acc x) (+ acc x)) 0 …)` : number — the 2-arg callback's
-        // return (number) joined with the init (int).
-        let w = warnings("(string-length (fold (fn (acc x) (+ acc x)) 0 (list 1 2 3)))");
-        assert!(
-            w.iter().any(|s| s.contains("string-length")),
-            "fold should type the accumulator from a lambda callback: {w:?}"
-        );
-    }
+#[test]
+fn used_use_import_is_silent() {
+    // `io-write` is one of io's public exports; using it makes the :use needed.
+    let ws = file_warnings("(defmodule test/mod (:use io))\n(defn foo (port s) (io-write port s))");
+    assert!(
+        !ws.iter().any(|w| w.contains("unused :use import")),
+        "used :use import should be silent, got {ws:?}"
+    );
+}
 
-    #[test]
-    fn reduce_fold_bail_when_init_or_callback_unknown() {
-        // Unknown callback (local) → flat, no warning.
-        let w = warnings("(fn (g) (string-length (reduce g 0 (list 1 2 3))))");
-        assert!(
-            w.iter().all(|s| !s.contains("string-length")),
-            "an unknown reduce callback must not refine: {w:?}"
-        );
-        // Unknown init type (a fn param) → flat, no warning.
-        let w = warnings("(fn (init) (string-length (reduce + init (list 1 2 3))))");
-        assert!(
-            w.iter().all(|s| !s.contains("string-length")),
-            "an unknown init must not refine the reduce result: {w:?}"
-        );
-    }
+#[test]
+fn module_with_no_use_clauses_is_silent() {
+    // A defmodule with no :use clauses should never trigger the import lint.
+    let ws = file_warnings("(defmodule test/mod)\n(defn foo (x) x)");
+    assert!(
+        !ws.iter().any(|w| w.contains("unused :use import")),
+        "no :use clause → no import warning, got {ws:?}"
+    );
+}
 
-    // ---- unused :use import lint (Pass 4.5) ----
-
-    #[test]
-    fn unused_use_import_is_flagged() {
-        // `io` is an embedded module; not using any of its names should warn.
-        let ws = file_warnings("(defmodule test/mod (:use io))\n(defn foo (x) (+ x 1))");
-        assert!(
-            ws.iter()
-                .any(|w| w.contains("unused :use import") && w.contains("io")),
-            "expected unused :use import warning for io, got {ws:?}"
-        );
-    }
-
-    #[test]
-    fn used_use_import_is_silent() {
-        // `io-write` is one of io's public exports; using it makes the :use needed.
-        let ws =
-            file_warnings("(defmodule test/mod (:use io))\n(defn foo (port s) (io-write port s))");
-        assert!(
-            !ws.iter().any(|w| w.contains("unused :use import")),
-            "used :use import should be silent, got {ws:?}"
-        );
-    }
-
-    #[test]
-    fn module_with_no_use_clauses_is_silent() {
-        // A defmodule with no :use clauses should never trigger the import lint.
-        let ws = file_warnings("(defmodule test/mod)\n(defn foo (x) x)");
-        assert!(
-            !ws.iter().any(|w| w.contains("unused :use import")),
-            "no :use clause → no import warning, got {ws:?}"
-        );
-    }
-
-    // (The unused-module-private-`defn` lint moved to a whole-project Brood pass —
-    // `std/tool/project.blsp` `project--unused-private-warnings` — because a `--`
-    // name is referenced cross-module/by tests, which a single-file check can't see.
-    // Its coverage lives with the project tooling tests.)
+// (The unused-module-private-`defn` lint moved to a whole-project Brood pass —
+// `std/tool/project.blsp` `project--unused-private-warnings` — because a `--`
+// name is referenced cross-module/by tests, which a single-file check can't see.
+// Its coverage lives with the project tooling tests.)

@@ -261,4 +261,3 @@ pub(crate) fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
     }
     Some(())
 }
-

@@ -14,7 +14,8 @@
 
 (defn build-capped (bytes)
   "Set a heap cap, then allocate unboundedly; returns the caught [kind code]."
-  (try (do (process-flag :max-heap bytes) (build ()))
+  (try
+    (do (process-flag :max-heap bytes) (build ()))
     (catch e (do (process-flag :max-heap nil) [(get e :kind) (get e :code)]))))
 
 (describe "process-flag :max-heap"
@@ -54,9 +55,11 @@
 
   (test "the limit is per-process: an uncapped sibling is unaffected"
     (let (me (self))
-      (spawn (fn () (do (process-flag :max-heap 2000000)
-                        (try (build ()) (catch _ nil))
-                        (send me [:capped-done]))))
+      (spawn (fn ()
+               (do
+                 (process-flag :max-heap 2000000)
+                 (try (build ()) (catch _ nil))
+                 (send me [:capped-done]))))
       (spawn (fn () (send me [:sibling (count (into () (range 5000)))])))
       (assert= 5000 (receive ([:sibling n] n) (after 30000 :timeout)))
       (assert= :ok (receive ([:capped-done] :ok) (after 30000 :timeout))))))

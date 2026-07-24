@@ -281,7 +281,6 @@ pub(crate) fn prim2_dispatch_rooted(
     result.map_err(|e| tag_pos(e, pos))
 }
 
-
 /// [`prim2_dispatch_rooted`]'s 3-ary sibling: operands already rooted at
 /// `[save..save+3)`; look up `head`, dispatch, truncate, return.
 #[inline(never)]
@@ -316,7 +315,12 @@ pub(crate) fn prim3_dispatch_rooted(
 /// the value directly — no [`Step`] is built and no [`force`] unwrap runs. A
 /// `Call` reached here was compiled `tail = false`, so [`exec_call`]'s step is
 /// always `Done` (and a stray `Tail` is still resolved safely by [`force`]).
-pub(crate) fn exec_value(heap: &mut Heap, node: &Node, frame_base: usize, genv: EnvRoot) -> LispResult {
+pub(crate) fn exec_value(
+    heap: &mut Heap,
+    node: &Node,
+    frame_base: usize,
+    genv: EnvRoot,
+) -> LispResult {
     match node {
         Node::Const(cv) => Ok(cv.load()),
         // Slot read — depth 0: the callee's own frame. (Deeper depths arrive with
@@ -739,4 +743,3 @@ pub(crate) fn exec_value(heap: &mut Heap, node: &Node, frame_base: usize, genv: 
         },
     }
 }
-

@@ -20,34 +20,55 @@
 (def pid-example (spawn :chaos-pid-holder (receive (_ :done))))
 
 (def soup
-  (list
-    42                                ; int
-    -9223372036854775807              ; near i64::MIN (triggers BigInt check)
-    3.14                              ; float
-    1.7976931348623157e308            ; f64::MAX
+  (list 42
+    ; int
+    ; near i64::MIN (triggers BigInt check)
+    -9223372036854775807
+    ; float
+    3.14
+    ; f64::MAX
+    1.7976931348623157e308
     ;; NaN/inf: Brood raises on float /0, produce via overflow instead
-    (* 1.7976931348623157e308 2.0)   ; +inf (via overflow)
-    (* 1.7976931348623157e308 -2.0)  ; -inf
-    "hello world"                    ; string
-    ""                               ; empty string
-    :keyword                         ; keyword
-    'symbol                          ; symbol
-    true                             ; bool
+    ; +inf (via overflow)
+    (* 1.7976931348623157e308 2.0)
+    ; -inf
+    (* 1.7976931348623157e308 -2.0)
+    ; string
+    "hello world"
+    ; empty string
+    ""
+    ; keyword
+    :keyword
+    ; symbol
+    'symbol
+    ; bool
+    true
     false
-    nil                              ; nil
-    (list 1 2 3)                     ; pair list
-    nil                              ; nil (the empty list)
-    [1 2 3]                          ; vector
-    []                               ; empty vector
-    {:a 1 :b 2}                      ; map
-    {}                               ; empty map
-    (fn (x) (* x x))                 ; closure (function value)
-    pid-example                      ; pid
+    ; nil
+    nil
+    ; pair list
+    (list 1 2 3)
+    ; nil (the empty list)
+    nil
+    ; vector
+    [1 2 3]
+    ; empty vector
+    []
+    ; map
+    {:a 1 :b 2}
+    ; empty map
+    {}
+    ; closure (function value)
+    (fn (x) (* x x))
+    ; pid
+    pid-example
     ;; BigInts
-    9223372036854775808              ; i64::MAX + 1 → BigInt
-    -9223372036854775809             ; i64::MIN - 1 → BigInt
-    (* 99999999999 99999999999)      ; large BigInt
-  ))
+    ; i64::MAX + 1 → BigInt
+    9223372036854775808
+    ; i64::MIN - 1 → BigInt
+    -9223372036854775809
+    ; large BigInt
+    (* 99999999999 99999999999)))
 
 (println "soup count:" (count soup))
 
@@ -56,13 +77,16 @@
   (println "  type:" (type-of v) " pr-str:" (pr-str v)))
 
 (println "--- structural equality: every element equals itself ---")
-(let (all-self-equal (= (count (filter (fn (v)
-                                         (if (= (type-of v) :float)
-                                           ;; NaN != NaN — expected; count float as "special"
-                                           (or (= v v) (string-contains? (pr-str v) "NaN"))
-                                           (= v v)))
-                                       soup))
-                        (count soup)))
+(let (all-self-equal (=
+                       (count
+                         (filter
+                           (fn (v)
+                             (if (= (type-of v) :float)
+                               ;; NaN != NaN — expected; count float as "special"
+                               (or (= v v) (string-contains? (pr-str v) "NaN"))
+                               (= v v)))
+                           soup))
+                       (count soup)))
   (println "all self-equal (NaN excepted):" all-self-equal))
 
 (println "--- filter: keep only truthy values ---")
@@ -84,29 +108,30 @@
 (let (sorted (try (sort soup) (catch e (str "sort-error: " (error-message e)))))
   (if (string? sorted)
     (println "sort raised:" sorted)
-    (do (println "sort succeeded, count:" (count sorted))
-        (println "sorted first:" (pr-str (first sorted)))
-        (println "sorted last:"  (pr-str (first (reverse sorted)))))))
+    (do
+      (println "sort succeeded, count:" (count sorted))
+      (println "sorted first:" (pr-str (first sorted)))
+      (println "sorted last:" (pr-str (first (reverse sorted)))))))
 
 (println "--- pattern match on each soup element ---")
 (defn classify-value (v)
   (match v
-    (0              "zero-int")
-    (0.0            "zero-float")
-    (true           "true")
-    (false          "false")
-    (nil            "nil")
-    (""             "empty-string")
-    ([]             "empty-vector")
-    ({}             "empty-map")
-    (:keyword       "keyword-kw")
-    ('symbol        "symbol-sym")
-    ((x & _)        (str "pair-head=" (pr-str x)))
+    (0 "zero-int")
+    (0.0 "zero-float")
+    (true "true")
+    (false "false")
+    (nil "nil")
+    ("" "empty-string")
+    ([] "empty-vector")
+    ({} "empty-map")
+    (:keyword "keyword-kw")
+    ('symbol "symbol-sym")
+    ((x & _) (str "pair-head=" (pr-str x)))
     ;; [x & _] is NOT valid — vectors are fixed-length in patterns
-    ([x]            (str "vector-len1=" (pr-str x)))
-    ([x y]          (str "vector-len2=" (pr-str x) "+" (pr-str y)))
-    ([x y z]        (str "vector-len3=" (pr-str x) "+" (pr-str y) "+" (pr-str z)))
-    (x              (str "other:" (type-of x) "=" (pr-str x)))))
+    ([x] (str "vector-len1=" (pr-str x)))
+    ([x y] (str "vector-len2=" (pr-str x) "+" (pr-str y)))
+    ([x y z] (str "vector-len3=" (pr-str x) "+" (pr-str y) "+" (pr-str z)))
+    (x (str "other:" (type-of x) "=" (pr-str x)))))
 
 (doseq (v soup)
   (println "  classify:" (classify-value v)))
@@ -118,37 +143,42 @@
 (println "big-repr first 80:" (substring big-repr 0 (min 80 (string-length big-repr))))
 
 (println "--- apply with wrong type args (should raise cleanly) ---")
-(let (result (try (apply + (list "not" "a" "number"))
+(let (result (try
+               (apply + (list "not" "a" "number"))
                (catch e (str "error: " (error-message e)))))
   (println "apply + on strings:" result))
 
-(let (result (try (+ "a" 1)
+(let (result (try
+               (+ "a" 1)
                (catch e (str "error: " (error-message e)))))
   (println "+ string int:" result))
 
-(let (result (try (first 42)
+(let (result (try
+               (first 42)
                (catch e (str "error: " (error-message e)))))
   (println "first of int:" result))
 
-(let (result (try (get 42 :k)
+(let (result (try
+               (get 42 :k)
                (catch e (str "error: " (error-message e)))))
   (println "get of int:" result))
 
-(let (result (try (count (fn (x) x))
+(let (result (try
+               (count (fn (x) x))
                (catch e (str "error: " (error-message e)))))
   (println "count of fn:" result))
 
 (println "--- deeply nested heterogeneous structure (GC traversal) ---")
 ;; Build a structure: map of vectors of lists of maps of lists …, 6 levels deep
 (defn nest-value (v depth)
-  (if (= depth 0) v
-    (nest-value
-      {:kind :level
-       :depth depth
-       :data [v (str "level-" depth) depth]
-       :children (list (nest-value 42 (- depth 1))
-                       (nest-value "leaf" (- depth 1))
-                       (nest-value [1 2 3] (- depth 1)))}
+  (if (= depth 0)
+    v
+    (nest-value {:kind :level
+                 :depth depth
+                 :data [v (str "level-" depth) depth]
+                 :children (list (nest-value 42 (- depth 1))
+                             (nest-value "leaf" (- depth 1))
+                             (nest-value [1 2 3] (- depth 1)))}
       (- depth 1))))
 
 ;; This will loop! `nest-value` passes v through unchanged when depth > 0,
@@ -159,11 +189,11 @@
     {:leaf true :v 42}
     {:kind :node
      :depth depth
-     :children [(make-nested (- depth 1))
-                (make-nested (- depth 1))]
+     :children [(make-nested (- depth 1)) (make-nested (- depth 1))]
      :payload (string-repeat "x" (* depth 100))}))
 
-(def deep-tree (make-nested 12))  ; 2^12 = 4096 leaves, payload strings up to 1200 chars
+; 2^12 = 4096 leaves, payload strings up to 1200 chars
+(def deep-tree (make-nested 12))
 (println "deep-tree built, kind:" (get deep-tree :kind))
 (println "deep-tree depth:" (get deep-tree :depth))
 

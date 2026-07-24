@@ -45,9 +45,9 @@
       (let (a (receive ([:task-done t v] [t v]))
             b (receive ([:task-done t v] [t v])))
         (is (or (and (= (first a) h1) (= (second a) :one))
-                (and (= (first a) h2) (= (second a) :two))))
+              (and (= (first a) h2) (= (second a) :two))))
         (is (or (and (= (first b) h1) (= (second b) :one))
-                (and (= (first b) h2) (= (second b) :two)))))))
+              (and (= (first b) h2) (= (second b) :two)))))))
   (test "cancel-task stops a long task and sends no reply"
     (let (h (task (fn () (receive (:never x))) {:timeout 5000}))
       (cancel-task h)

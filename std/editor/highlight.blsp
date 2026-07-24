@@ -15,6 +15,7 @@
 ;;    live per span, so an app restyles the whole highlighter by redefining one face
 ;;    — see the faces section below.
 
+; syntax faces live in the :syntax/* face registry, resolved live
 (defmodule editor/highlight
   "Lexical syntax highlighting and bracket / call-site analysis for Brood source,
 as pure functions over a source string (ADR-052):
@@ -35,8 +36,7 @@ as pure functions over a source string (ADR-052):
   - `(symbol-prefix-at full pos)` / `(common-prefix strs)` — completion helpers.
 
 Used by `std/lineedit.blsp` (the REPL editor); pure, so independently testable."
-  (:use editor/face))  ; syntax faces live in the :syntax/* face registry, resolved live
-
+  (:use editor/face))
 ;; ---- faces: the :syntax/* theme seam ----------------------------------------
 ;; Syntax faces live in the shared face registry (`std/editor/face.blsp`) under
 ;; `:syntax/*` names, resolved live (`(face …)`) where each span is built — so an
@@ -51,11 +51,14 @@ Used by `std/lineedit.blsp` (the REPL editor); pure, so independently testable."
 (def-face :syntax/string {:fg :green})
 (def-face :syntax/number {:fg :yellow})
 (def-face :syntax/keyword {:fg :magenta})
-(def-face :syntax/special {:fg :blue :bold true})  ; special forms / core macros
-(def-face :syntax/function {:fg :cyan})            ; a call head
-(def-face :syntax/match {:reverse true})           ; the matched bracket pair (REPL)
-(def-face :syntax/error {:fg :red :bold true})     ; a lone unmatched bracket (REPL)
-
+; special forms / core macros
+(def-face :syntax/special {:fg :blue :bold true})
+; a call head
+(def-face :syntax/function {:fg :cyan})
+; the matched bracket pair (REPL)
+(def-face :syntax/match {:reverse true})
+; a lone unmatched bracket (REPL)
+(def-face :syntax/error {:fg :red :bold true})
 ;; Resolved snapshots of the defaults, kept under the original `hl-face-*` names for
 ;; consumers that read a face directly rather than re-resolving each frame: the REPL
 ;; line editor's bracket match/error (`std/lineedit.blsp`) and the highlighter's own
@@ -112,15 +115,16 @@ that can't begin a number — since this runs on every atom on the fontify hot p
   "Index of the newline ending the line containing `i` (or `n` at end of input)."
   (min n (string-span-until src i "\n")))
 
+; backslash: skip it and the escaped char
 (defn hl--string-end (src i n)
   "Index just past the closing quote of a string whose body starts at `i` (one past
 the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
-  (let (j (string-span-until src i "\\\""))  ; first backslash or quote (or end)
+  (let (j (string-span-until src i "\\\""))
+    ; first backslash or quote (or end)
     (cond
       (>= j n) n
       (= (char-at src j) "\"") (inc j)
-      :else (hl--string-end src (+ j 2) n))))  ; backslash: skip it and the escaped char
-
+      :else (hl--string-end src (+ j 2) n))))
 (defn hl--atom-end (src i n)
   "Index of the first delimiter at or after `i` — the end of an atom token."
   (min n (string-span-until src i hl--delim-chars)))
@@ -137,7 +141,9 @@ the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
 ;; colour. The name is resolved to a face via `(face …)` at span time, so a live
 ;; restyle of `:syntax/*` takes effect on the next frame.
 (def hl--kind->face-name
-  {:comment :syntax/comment :string :syntax/string :number :syntax/number
+  {:comment :syntax/comment
+   :string :syntax/string
+   :number :syntax/number
    :keyword :syntax/keyword})
 
 (defn hl--spans (toks after acc)
@@ -150,15 +156,18 @@ else uncoloured. Accumulates in reverse."
     (let ([s e kind text] (first toks)
           rest (rest toks))
       (cond
-        (= kind :open) (hl--spans rest (= text "(") acc)   ; only `(` opens head position
+        (= kind :open) (hl--spans rest (= text "(") acc)
+        ; only `(` opens head position
         (= kind :close) (hl--spans rest false acc)
-        (= kind :comment) (hl--spans rest after (cons [s e (face :syntax/comment)] acc))  ; keeps `after`
-        (= kind :symbol)
-          (let (f (cond (and after (special-form? text)) (face :syntax/special)
-                        after (face :syntax/function)
-                        :else nil))
-            (hl--spans rest false (if (nil? f) acc (cons [s e f] acc))))
-        :else (let (f (face (get hl--kind->face-name kind)))  ; :string / :number / :keyword
+        (= kind :comment) (hl--spans rest after (cons [s e (face :syntax/comment)] acc))
+        ; keeps `after`
+        (= kind :symbol) (let (f (cond
+                                   (and after (special-form? text)) (face :syntax/special)
+                                   after (face :syntax/function)
+                                   :else nil))
+                           (hl--spans rest false (if (nil? f) acc (cons [s e f] acc))))
+        :else (let (f (face (get hl--kind->face-name kind)))
+                ; :string / :number / :keyword
                 (hl--spans rest false (if (nil? f) acc (cons [s e f] acc))))))))
 
 (defn highlight-spans (src)

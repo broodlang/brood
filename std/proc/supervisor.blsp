@@ -110,7 +110,8 @@ address the child by a stable name even though its pid changes across restarts."
       (error "supervisor: a child :start thunk must return a pid (got "
         pid
         ") — it should end in (spawn …) / (remote-spawn …) / (start-supervisor …)"))
-    (link pid)  ; local or remote (ADR-067) — `link` routes by node
+    ; local or remote (ADR-067) — `link` routes by node
+    (link pid)
     (when (get spec :name) (register (get spec :name) pid))
     (assoc spec :pid pid)))
 
@@ -225,6 +226,7 @@ terminates only the *other* children."
             children (supervisor--replace (get state :children) (get child :pid) fresh))
         (supervisor--loop (assoc state :children children :restarts recent))))))
 
+; :one-for-all (and the never-here :one-for-one)
 (defn supervisor--split-affected (children pid strategy)
   "The `[unaffected affected]` split of `children` for a group restart triggered by
 the child with `:pid` `pid`. `:one-for-all` → everything is affected;
@@ -235,8 +237,7 @@ the earlier-started prefix left untouched. (`children` is in start order.)"
                                                                              (not (= (get c :pid)
                                                                                     pid)))
                                                                  children)]
-    [() children]))  ; :one-for-all (and the never-here :one-for-one)
-
+    [() children]))
 (defn supervisor--maybe-restart (child reason)
   "After a group termination, restart `child` if its `:restart` type permits given
 exit `reason`; return the fresh child record, or `nil` to drop it (e.g. a
@@ -283,10 +284,9 @@ abnormal (`:killed`) — leaving unaffected children running. Bounded by intensi
            (cond
              (nil? child) (supervisor--loop state)
              (not (supervisor--restartable? (get child :restart :permanent) reason)) (supervisor--loop (assoc state
-                                                                                                         :children
-                                                                                                         (supervisor--drop (get state
-                                                                                                                             :children)
-                                                                                                           pid)))
+                                                                                                         :children (supervisor--drop (get state
+                                                                                                                                       :children)
+                                                                                                                     pid)))
              (= (get state :strategy) :one-for-one) (supervisor--restart state child)
              else (supervisor--group-restart state child reason)))))
 
@@ -314,8 +314,7 @@ its `:shutdown` and drop it from supervision (no restart). Reply `:ok`, or
         (supervisor--terminate-child child)
         (send from [:reply r :ok])
         (supervisor--loop (assoc state
-                            :children
-                            (supervisor--drop (get state :children) (get child :pid))))))))
+                            :children (supervisor--drop (get state :children) (get child :pid))))))))
 
 (defn supervisor--do-restart-child (state key from r)
   "Handle `[:restart-child key]`: terminate the child and start a fresh incarnation
@@ -329,12 +328,14 @@ request, like OTP's `restart_child`). Reply the new pid, or `:not-found`."
         (let (fresh (supervisor--start-child child))
           (send from [:reply r (get fresh :pid)])
           (supervisor--loop (assoc state
-                              :children
-                              (supervisor--replace (get state :children) (get child :pid) fresh))))))))
+                              :children (supervisor--replace (get state :children)
+                                          (get child :pid)
+                                          fresh))))))))
 
 (defn supervisor--loop (state)
   "The supervisor's receive loop over its immutable `state` map."
-  (receive ([:EXIT pid reason] (supervisor--handle-exit state pid reason))
+  (receive
+    ([:EXIT pid reason] (supervisor--handle-exit state pid reason))
     ([:which-children from r] (do
                                 (send from [:reply r (supervisor--summarize (get state :children))])
                                 (supervisor--loop state)))

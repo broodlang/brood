@@ -70,16 +70,20 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 
 ;; The "Definitions" section: every public function/macro the module added.
 (defn docs--section-defs (syms)
-  (let (defs (filter (fn (s) (and (docs--documentable? (eval s))
-                                  (not (docs--private? s)))) syms))
+  (let (defs (filter (fn (s)
+                       (and (docs--documentable? (eval s))
+                         (not (docs--private? s))))
+               syms))
     (if (empty? defs)
       ""
       (str "## Definitions\n\n" (fold (fn (acc s) (str acc (docs--entry s (eval s)) "\n")) "" defs)))))
 
 ;; The "Variables" section: public names the module bound to non-function values.
 (defn docs--section-vars (syms)
-  (let (vars (filter (fn (s) (and (not (docs--documentable? (eval s)))
-                                  (not (docs--private? s)))) syms))
+  (let (vars (filter (fn (s)
+                       (and (not (docs--documentable? (eval s)))
+                         (not (docs--private? s))))
+               syms))
     (if (empty? vars)
       ""
       (str "## Variables\n\n" (fold (fn (acc s) (str acc "- `" (name s) "`\n")) "" vars)))))

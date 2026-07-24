@@ -31,8 +31,9 @@
       (assert= 9 (f 4 5))))
 
   (test "a let-bound recursive lambda"
-    (assert= 120 (let (fact (lambda (n) (if (= n 0) 1 (* n (fact (- n 1))))))
-                   (fact 5))))
+    (assert= 120
+      (let (fact (lambda (n) (if (= n 0) 1 (* n (fact (- n 1))))))
+        (fact 5))))
 
   (test "quoted (lambda ...) keeps its spelling — it is data, not expanded"
     (assert= 'lambda (first '(lambda (x) x)))))
@@ -46,7 +47,8 @@
   (receive ([f x] (send parent (f x)))))
 
 (defn lls-build-worker (parent n x)
-  (let (f (lambda (k) (+ k n)))   ; capture n via a let-bound lambda
+  (let (f (lambda (k) (+ k n)))
+    ; capture n via a let-bound lambda
     (send parent (f x))))
 
 (defn lls-spawn-builders (parent ks base)

@@ -8,7 +8,8 @@
 ;; ---- fixtures: commands, hooks, and layers (def'd globals, by qualified symbol) ----
 ;; A test context is a map {:log <string> :layers <list>}; commands/hooks append to
 ;; :log so the path through dispatch/hooks is visible.
-(defn cmd-x (s k) (assoc s :log (str (get s :log) "X")))  ; layers-test/cmd-x
+; layers-test/cmd-x
+(defn cmd-x (s k) (assoc s :log (str (get s :log) "X")))
 (defn cmd-y (s k) (assoc s :log (str (get s :log) "Y")))
 
 (defn hk-a-on (s) (assoc s :log (str (get s :log) "[a-on]")))
@@ -27,12 +28,13 @@
   {:name 'b
    :keymap (keymap-bind {} ["y"] 'layers-test/cmd-y)
    :hooks {:activate '(layers-test/hk-b-on) :on-focus '(layers-test/hk-focus)}})
-(def layer-hi {:name 'hi :keymap (keymap-bind {} ["x"] 'layers-test/cmd-y)})  ; binds x→Y
+; binds x→Y
+(def layer-hi {:name 'hi :keymap (keymap-bind {} ["x"] 'layers-test/cmd-y)})
 (def layer-boom {:name 'boom :hooks {:activate '(layers-test/hk-boom)}})
 (def layer-chord {:name 'chord :keymap (keymap-bind {} [:ctrl-x :ctrl-e] 'layers-test/cmd-x)})
 
-(defn no-fb (s k) s)  ; a no-op fallback
-
+; a no-op fallback
+(defn no-fb (s k) s)
 ;; ---- collection & precedence ------------------------------------------------
 (describe "layer-collect & precedence"
   (test "collects a facet from active layers, highest-precedence (head) first"
@@ -96,10 +98,10 @@
 
 ;; ---- keymap composition + dispatch ------------------------------------------
 (describe "active-keymap & layer-dispatch"
+  ; hi (head) wins
   (test "active-keymap merges layers with the head winning"
     (let (ctx (push-layer (push-layer {:log ""} 'layers-test/layer-a) 'layers-test/layer-hi))
-      (assert= (get (active-keymap ctx) "x") 'layers-test/cmd-y)))  ; hi (head) wins
-
+      (assert= (get (active-keymap ctx) "x") 'layers-test/cmd-y)))
   (test "layer-dispatch resolves through the layers and runs the command"
     (let (ctx (activate-layer {:log ""} 'layers-test/layer-a)
           r (layer-dispatch ctx nil "x" no-fb))
@@ -114,7 +116,8 @@
   (test "a chord living in a layer dispatches across two keystrokes"
     (let (ctx (push-layer {:log ""} 'layers-test/layer-chord)
           r1 (layer-dispatch ctx nil :ctrl-x no-fb))
-      (assert= (second r1) {:ctrl-e 'layers-test/cmd-x})  ; pending sub-keymap
+      ; pending sub-keymap
+      (assert= (second r1) {:ctrl-e 'layers-test/cmd-x})
       (let (r2 (layer-dispatch (first r1) (second r1) :ctrl-e no-fb))
         (assert= (get (first r2) :log) "X")
         (assert= (second r2) nil)))))
@@ -199,31 +202,29 @@
 (describe "scopes & focus lifecycle"
   (test "scope-keymap composes scopes, the earlier (higher-precedence) scope winning"
     (let (buffer (push-layer {} 'layers-test/layer-hi)
-           ; binds x→cmd-y
-           window
-           (push-layer {} 'layers-test/layer-a))
+          ; binds x→cmd-y
+          window (push-layer {} 'layers-test/layer-a))
       ; binds x→cmd-x
       ;; buffer scope listed first → shadows the window
       (assert= (get (scope-keymap (list buffer window)) "x") 'layers-test/cmd-y)))
 
   (test "scope-dispatch resolves through the scopes but runs the command on the state"
     (let (buffer (push-layer {} 'layers-test/layer-a)
-           ; binds x→cmd-x
-           model
-           {:log "M"}
-           r
-           (scope-dispatch (list buffer) model nil "x" no-fb))
+          ; binds x→cmd-x
+          model {:log "M"}
+          r (scope-dispatch (list buffer) model nil "x" no-fb))
       ;; cmd-x runs on the model (not the buffer the keymap came from)
       (assert= (get (first r) :log) "MX")
       (assert= (second r) nil)))
 
+  ; to focused
   (test "switch-focus fires :on-blur on the old context and :on-focus on the new"
     (let (from (activate-layer {:log ""} 'layers-test/layer-fb)
           to (activate-layer {:log ""} 'layers-test/layer-fb)
           r (switch-focus from to))
-      (assert= (get (first r) :log) "B!")  ; from blurred
-      (assert= (get (second r) :log) "F")))  ; to focused
-
+      ; from blurred
+      (assert= (get (first r) :log) "B!")
+      (assert= (get (second r) :log) "F")))
   (test "switch-focus tolerates a nil side"
     (assert= (switch-focus nil (activate-layer {:log ""} 'layers-test/layer-fb))
       [nil {:log "F" :layers (list 'layers-test/layer-fb)}]))
@@ -231,7 +232,8 @@
   (test "close-context fans :on-close then deactivates every layer"
     (let (ctx (activate-layer {:log ""} 'layers-test/layer-close)
           closed (close-context ctx))
-      (assert= (get closed :log) "CD")  ; :on-close (C) then :deactivate (D)
+      ; :on-close (C) then :deactivate (D)
+      (assert= (get closed :log) "CD")
       (is (not (layer-active? closed 'cl))))))
 
 ;; ---- Phase 3: async cleanup (the reason :on-close exists) -------------------
@@ -247,12 +249,10 @@
   :isolated
   (test "an :on-focus-spawned worker is torn down by :on-close"
     (let (me (self)
-           ctx
-           (activate-layer {:parent me} 'layers-test/layer-async)
-           focused
-           (run-event ctx :on-focus)  ; spawns the worker, pid in :worker
-           _
-           (close-context focused))
+          ctx (activate-layer {:parent me} 'layers-test/layer-async)
+          ; spawns the worker, pid in :worker
+          focused (run-event ctx :on-focus)
+          _ (close-context focused))
       ; :on-close sends it :stop
       ;; the worker acks its stop — proving :on-focus spawned and :on-close cleaned up
       (assert= (receive) :stopped))))

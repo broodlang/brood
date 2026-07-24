@@ -37,8 +37,9 @@
 
 (defn via-oracle (v)
   (cond
-    (and (vector? v) (= (count v) 2) (= (nth v 0) :a))
-      (if (> (nth v 1) 50) [:guarded (nth v 1)] [:plain (nth v 1)])
+    (and (vector? v) (= (count v) 2) (= (nth v 0) :a)) (if (> (nth v 1) 50)
+                                                         [:guarded (nth v 1)]
+                                                         [:plain (nth v 1)])
     (and (vector? v) (= (count v) 3) (= (nth v 0) :a)) [:pair (nth v 1) (nth v 2)]
     (and (vector? v) (= (count v) 3) (= (nth v 0) :b)) (+ (nth v 1) (nth v 2))
     (and (pair? v) (= (first v) :c)) [(first (rest v)) (rest (rest v))]
@@ -49,9 +50,11 @@
     else :other))
 
 (defn prop-run (s n)
-  (if (= n 0) true
+  (if (= n 0)
+    true
     (let (s2 (lcg s) v (gen s2))
-      (do (assert= (via-match v) (via-oracle v))
+      (do
+        (assert= (via-match v) (via-oracle v))
         (prop-run s2 (- n 1))))))
 
 (describe "match stress: matcher agrees with a cond oracle"
@@ -63,9 +66,17 @@
 ;; every earlier arm's fail thunk fires — 300k deep, O(1) stack.
 (defn spin (n)
   (match [:go n]
-    ([:stop] :done) ([:a x y z] :no) ([:b x y z] :no) ([:c x y z] :no)
-    ([:d x y z] :no) ([:e x y z] :no) ([:f x y z] :no) ([:g x y z] :no)
-    ([:h x y z] :no) ([:i x y z] :no) ([:j x y z] :no)
+    ([:stop] :done)
+    ([:a x y z] :no)
+    ([:b x y z] :no)
+    ([:c x y z] :no)
+    ([:d x y z] :no)
+    ([:e x y z] :no)
+    ([:f x y z] :no)
+    ([:g x y z] :no)
+    ([:h x y z] :no)
+    ([:i x y z] :no)
+    ([:j x y z] :no)
     ([:go k] (if (= k 0) :done (spin (- k 1))))))
 
 (describe "match stress: TCO through fail thunks"

@@ -762,7 +762,6 @@ pub(crate) fn exec_chunk(
     Ok(ChunkExit::Done(heap.root_at(n - 1)))
 }
 
-
 /// The bytecode driver (ADR-100 Stage 4): run a chunked arm and the **entire chain of
 /// chunked calls it makes** on one explicit frame stack, with no native recursion per
 /// Brood call. A non-tail call to a chunked arm pushes a frame; a tail call reuses the
@@ -832,4 +831,3 @@ pub(crate) fn attach_vm_trace(e: &mut LispError, cur_arm: &CompiledArm, frames: 
         });
     }
 }
-

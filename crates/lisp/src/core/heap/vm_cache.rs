@@ -467,5 +467,4 @@ impl Heap {
     pub fn live_arm_len(&self) -> usize {
         self.live_vm_arms.len()
     }
-
 }

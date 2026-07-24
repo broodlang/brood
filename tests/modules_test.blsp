@@ -1,8 +1,8 @@
 ;; Module system + path/string helpers (ADR-019). Register-only — discovered and
 ;; run by `brood test` (and cargo test, via crates/lisp/tests/suite.rs).
 
-(defmodule modules-test (:use test) (:use file))  ; file: the require-race fixtures
-
+; file: the require-race fixtures
+(defmodule modules-test (:use test) (:use file))
 (describe "strings: substring & affixes"
   (test "substring is char-indexed"
     (assert= (substring "hello" 1 4) "ell")
@@ -55,9 +55,10 @@
       (write-file path src)
       (def *load-path* (cons "/tmp" *load-path*))
       (doseq (k (range 8))
-        (spawn (send me [:req-race
-                          (try (do (require 'reqrace-mod) (reqrace-mod/ready))
-                            (catch e [:err (error-message e)]))])))
+        (spawn (send me
+                 [:req-race (try
+                              (do (require 'reqrace-mod) (reqrace-mod/ready))
+                              (catch e [:err (error-message e)]))])))
       (let (results (map (fn (_) (receive ([:req-race r] r) (after 10000 :timeout)))
                       (range 8)))
         (def *load-path* saved-path)

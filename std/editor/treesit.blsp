@@ -140,9 +140,10 @@ if none."
 (defn ts--chain-rest (node point)
   "The containers strictly enclosing `point` below `node`, outermost first — each a
 container that contains the next. `()` at the leaf."
-  (let (hit (find (fn (k) (and (ts--container? k)
-                            (< (get k :start) point)
-                            (< point (get k :end))))
+  (let (hit (find (fn (k)
+                    (and (ts--container? k)
+                      (< (get k :start) point)
+                      (< point (get k :end))))
               (or (get node :kids) [])))
     (if (nil? hit) () (cons hit (ts--chain-rest hit point)))))
 

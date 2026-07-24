@@ -32,20 +32,20 @@
 (println "=== P62: B traps, C doesn't — C dies, B gets [:EXIT] message ===")
 (let (me (self))
   (let (c-pid (spawn (do (receive (:crash :ok) (after 5000 :ok)) (error "partial-cascade")))
-        b-pid (spawn
-                (do (trap-exit true)
-                    (link c-pid)
-                    (send me :b-ready)
-                    (let (msg (receive
-                                ([:EXIT from reason] [:got-exit from reason])
-                                (after 5000 :timeout)))
-                      (send me [:b-saw msg])))))
+        b-pid (spawn (do
+                       (trap-exit true)
+                       (link c-pid)
+                       (send me :b-ready)
+                       (let (msg (receive
+                                   ([:EXIT from reason] [:got-exit from reason])
+                                   (after 5000 :timeout)))
+                         (send me [:b-saw msg])))))
     (receive (:b-ready :ok) (after 3000 :timeout))
     (send c-pid :crash)
     (let (r (receive ([:b-saw v] v) (after 5000 :timeout)))
       (println "P62: B saw:" (pr-str r))
       (println "P62-correct (B got [:EXIT C reason]):"
-               (and (vector? r) (= :got-exit (get r 0)))))))
+        (and (vector? r) (= :got-exit (get r 0)))))))
 
 ;;; ---- P63: exit :normal to linked process does not kill it ----
 (println "=== P63: exit :normal to linked process ===")
@@ -89,14 +89,15 @@
 ;; We verify by letting B live and checking it doesn't receive unexpected messages.
 (let (me (self))
   (let (b-pid (spawn
-                (do (send me :b-ready)
-                    ;; Wait for signal to check mailbox
-                    (receive (:check :ok) (after 10000 :timeout))
-                    ;; Check if we got any unexpected [:down ...] messages
-                    (let (unexpected (receive
-                                       ([:down _ _ _] :got-stale-down)
-                                       (after 100 :timeout)))
-                      (send me [:b-check unexpected])))))
+                (do
+                  (send me :b-ready)
+                  ;; Wait for signal to check mailbox
+                  (receive (:check :ok) (after 10000 :timeout))
+                  ;; Check if we got any unexpected [:down ...] messages
+                  (let (unexpected (receive
+                                     ([:down _ _ _] :got-stale-down)
+                                     (after 100 :timeout)))
+                    (send me [:b-check unexpected])))))
     (receive (:b-ready :ok) (after 3000 :timeout))
     ;; A: monitor B, then immediately exit
     (spawn
@@ -120,9 +121,10 @@
   (defn build-chain (n parent-pid me)
     (if (= n 0)
       ;; End of chain: this is the tail, send its pid up and wait for :crash
-      (do (send me [:tail (self)])
-          (receive (:crash :ok) (after 10000 :timeout))
-          (error "chain-end-crash"))
+      (do
+        (send me [:tail (self)])
+        (receive (:crash :ok) (after 10000 :timeout))
+        (error "chain-end-crash"))
       ;; Intermediate: spawn next, link to it, wait
       (let (child (spawn (build-chain (- n 1) (self) me)))
         (link child)
@@ -150,7 +152,8 @@
 (let (me (self))
   ;; Without trap-exit, a crash in a linked child kills us too.
   ;; But if we don't link, the child's crash is fully contained.
-  (def p67-outer-survived true)  ; we'll overwrite if we crash
+  ; we'll overwrite if we crash
+  (def p67-outer-survived true)
   (try
     (let (child (spawn (error "inner-crash")))
       ;; Monitor to detect the crash without linking

@@ -457,7 +457,11 @@ pub(super) fn table_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 pub(super) fn table_has(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_table(heap, "table-has?", arg(args, 0))?;
     crate::core::table::check_key("table-has?", arg(args, 1))?;
-    Ok(Value::boolean(crate::core::table::has(heap, id, arg(args, 1))?))
+    Ok(Value::boolean(crate::core::table::has(
+        heap,
+        id,
+        arg(args, 1),
+    )?))
 }
 
 pub(super) fn table_delete(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -749,7 +753,8 @@ pub(super) fn proc_spawn(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 pub(super) fn proc_send(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_subprocess(heap, "proc-send", arg(args, 0))?;
     let out = send_payload(heap, "proc-send", arg(args, 1))?;
-    crate::subprocess::send(id, &out).map_err(|e| LispError::runtime(format!("proc-send: {}", e)))?;
+    crate::subprocess::send(id, &out)
+        .map_err(|e| LispError::runtime(format!("proc-send: {}", e)))?;
     Ok(Value::nil())
 }
 

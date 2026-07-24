@@ -27,7 +27,8 @@
 (defn eqff (x) (= x 2.0))
 (defn h-eqff (i good) (if (= i 0) good (h-eqff (- i 1) (if (eqff 2.0) (+ good 1) good))))
 
-(describe "JIT float = stays structural after the arm tiers (regression)" :serial
+(describe "JIT float = stays structural after the arm tiers (regression)"
+  :serial
   (test "(= floatslot int-literal) is never true once hot"
     (assert= (h-eq 4000 0) 0))
   (test "(= int-literal floatslot) is never true once hot"

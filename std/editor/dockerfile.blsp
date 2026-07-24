@@ -26,9 +26,24 @@ case-insensitively), and quoted-string arguments. Pure, so independently testabl
 ;; The Dockerfile instruction set (uppercased; the leading word is matched against
 ;; this after `upper`-casing, so lowercase / mixed case still highlights).
 (def dk--instructions
-  (list "FROM" "RUN" "CMD" "LABEL" "MAINTAINER" "EXPOSE" "ENV" "ADD" "COPY"
-    "ENTRYPOINT" "VOLUME" "USER" "WORKDIR" "ARG" "ONBUILD" "STOPSIGNAL"
-    "HEALTHCHECK" "SHELL"))
+  (list "FROM"
+    "RUN"
+    "CMD"
+    "LABEL"
+    "MAINTAINER"
+    "EXPOSE"
+    "ENV"
+    "ADD"
+    "COPY"
+    "ENTRYPOINT"
+    "VOLUME"
+    "USER"
+    "WORKDIR"
+    "ARG"
+    "ONBUILD"
+    "STOPSIGNAL"
+    "HEALTHCHECK"
+    "SHELL"))
 
 ;; ---- scanning helpers -------------------------------------------------------
 
@@ -51,9 +66,16 @@ case-insensitively), and quoted-string arguments. Pure, so independently testabl
 each consumed whole so spans stay non-overlapping; returns them ascending."
   (cond
     (>= i n) (reverse acc)
-    (or (= (char-at line i) "\"") (= (char-at line i) "'"))
-      (let (q (char-at line i) close (dk--find line (inc i) n q) e (if (< close 0) n (inc close)))
-        (dk--strings line base e n (cons [(+ base i) (+ base e) dk-face-string] acc)))
+    (or (= (char-at line i) "\"") (= (char-at line i) "'")) (let (q (char-at line i)
+                                                                  close (dk--find line (inc i) n q)
+                                                                  e (if (< close 0) n (inc close)))
+                                                              (dk--strings line
+                                                                base
+                                                                e
+                                                                n
+                                                                (cons [(+ base i) (+ base e)
+                                                                        dk-face-string]
+                                                                  acc)))
     :else (dk--strings line base (inc i) n acc)))
 
 ;; ---- per-line spans + the document walker -----------------------------------

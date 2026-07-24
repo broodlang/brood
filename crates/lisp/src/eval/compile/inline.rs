@@ -641,7 +641,14 @@ pub(crate) fn jit_describe_value(v: Value) -> &'static str {
 /// `BROOD_JIT_VERIFY_FN` names this call's callee, log every staged arg's type. `head`/`site`/
 /// `argc` describe the call being staged.
 #[cfg(feature = "jit")]
-pub(crate) fn jit_verify_staged(heap: &Heap, lo: usize, hi: usize, head: Symbol, site: u32, argc: usize) {
+pub(crate) fn jit_verify_staged(
+    heap: &Heap,
+    lo: usize,
+    hi: usize,
+    head: Symbol,
+    site: u32,
+    argc: usize,
+) {
     // Non-panicking: a computed-head call passes a `head` that isn't a real interned
     // symbol, so never `expect` it (that aborts the whole run from inside a diagnostic).
     let head_name = crate::core::value::symbol_name_opt(head).unwrap_or("<computed>");
@@ -743,7 +750,12 @@ pub(crate) fn node_touches_heap(node: &Node) -> bool {
 }
 
 #[cfg(feature = "jit")]
-pub(crate) fn self_inline_probe(body: &Node, defn_name: Symbol, nrequired: usize, m: usize) -> Option<usize> {
+pub(crate) fn self_inline_probe(
+    body: &Node,
+    defn_name: Symbol,
+    nrequired: usize,
+    m: usize,
+) -> Option<usize> {
     if !self_inline_enabled() {
         return None;
     }
@@ -884,7 +896,11 @@ thread_local! {
 /// plain fixed-arity, non-capturing closure whose selected arm's body
 /// [qualifies](leaf_body_qualifies). `None` = leave the call alone.
 #[cfg(feature = "jit")]
-pub(crate) fn leaf_resolve_callee(heap: &Heap, sym: Symbol, argc: usize) -> Option<Arc<CompiledArm>> {
+pub(crate) fn leaf_resolve_callee(
+    heap: &Heap,
+    sym: Symbol,
+    argc: usize,
+) -> Option<Arc<CompiledArm>> {
     let v = heap.env_get(heap.global(), sym)?;
     let id = match v.unpack() {
         ValueRef::Fn(id) => id,
@@ -1086,4 +1102,3 @@ pub(crate) fn leaf_inline_probe(
     }
     Some((spliced, nslots))
 }
-

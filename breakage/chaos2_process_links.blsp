@@ -15,8 +15,9 @@
 (let (me (self))
   (let (d (spawn
             ;; D does its work and exits normally
-            (do (send me [:d-done (self)])
-                :normal)))
+            (do
+              (send me [:d-done (self)])
+              :normal)))
     ;; A links to D
     (link d)
     ;; Wait for D to announce itself then finish
@@ -38,7 +39,7 @@
                 (after 3000 :timeout)))
       (println "P16: got exit reason:" msg)
       (println "P16-correct:" (= :badness msg)))
-  (trap-exit false)))
+    (trap-exit false)))
 
 ;;; ---- P17: trap-exit converts link-death to message ----
 (println "=== P17: trap-exit shields from link cascade ===")
@@ -69,7 +70,7 @@
                 (after 2000 :timeout)))
       (println "P18: down reason:" msg)
       (println "P18-correct (noproc or normal):"
-               (or (= :noproc msg) (= :normal msg))))))
+        (or (= :noproc msg) (= :normal msg))))))
 
 ;;; ---- P19: demonitor before death → no :down message ----
 (println "=== P19: demonitor before death = no :down ===")
@@ -93,13 +94,15 @@
   (trap-exit true)
   (let (child (spawn (do (receive (:go :ok)) (send me :bye))))
     (link child)
-    (link child)  ; linking twice
-    (unlink child) ; one unlink should remove the link entirely
+    ; linking twice
+    (link child)
+    ; one unlink should remove the link entirely
+    (unlink child)
     (send child :go)
     ;; Should get :bye message (process exits normally after :go), NOT [:EXIT ...]
     (let (msg (receive
                 ([:EXIT _ _] :got-exit)
-                (:bye       :got-bye)
+                (:bye :got-bye)
                 (after 2000 :timeout)))
       (println "P20: got:" msg)
       (println "P20-correct (bye):" (= :got-bye msg))))
@@ -110,11 +113,12 @@
 (let (me (self))
   (trap-exit true)
   (let (victim (spawn
-                 (do (trap-exit true)
-                     (send me :ready)
-                     ;; Victim has trap-exit on but :kill still kills it
-                     (receive (_ :got-something) (after 5000 :timeout))
-                     (send me :survived-wrongly))))
+                 (do
+                   (trap-exit true)
+                   (send me :ready)
+                   ;; Victim has trap-exit on but :kill still kills it
+                   (receive (_ :got-something) (after 5000 :timeout))
+                   (send me :survived-wrongly))))
     (receive (:ready :ok) (after 2000 :timeout))
     (let (ref (monitor victim))
       (exit victim :kill)
@@ -144,10 +148,11 @@
                  (after 3000 :timeout)))
         (println "P22: r1=" (pr-str r1) "r2=" (pr-str r2))
         (println "P22-correct (both fired):"
-                 (and r1 r2
-                      (not (= r1 r2))
-                      (or (= (first r1) :link) (= (first r1) :monitor))
-                      (or (= (first r2) :link) (= (first r2) :monitor)))))))
+          (and r1
+            r2
+            (not (= r1 r2))
+            (or (= (first r1) :link) (= (first r1) :monitor))
+            (or (= (first r2) :link) (= (first r2) :monitor)))))))
   (trap-exit false))
 
 (println "=== chaos2_process_links DONE ===")

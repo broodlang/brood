@@ -29,13 +29,13 @@
     (let ([v1 s1] (rng 99) [v2 _] (rng s1))
       (refute (= v1 v2)))))
 
+; 2^32 -> 0 -> default seed
 (describe "rand-seed — seed normalization"
   (test "a zero seed maps to a nonzero state (xorshift32 cannot start at 0)"
     (refute (= (rand-seed 0) 0)))
   (test "normalization keeps the low 32 bits"
     (assert= (rand-seed 5) 5)
-    (assert= (rand-seed 4294967296) 2463534242)))  ; 2^32 -> 0 -> default seed
-
+    (assert= (rand-seed 4294967296) 2463534242)))
 (describe "rand-int / rand-float — ranged draws"
   (test "rand-int stays in [0, n) across many draws"
     (defn ri-loop (seed n ok)
@@ -112,7 +112,8 @@
   :isolated
 
   (test "a worker's stream for seed K matches the parent's stream for seed K"
-    (prng-spawn (self) (range 1 11))  ; 10 workers, seeds 1..10
+    ; 10 workers, seeds 1..10
+    (prng-spawn (self) (range 1 11))
     (let (m (prng-collect 0 10 {}))
       (assert= (count m) 10)
       (assert= (get m 1) (prng-draws 1 5 nil))

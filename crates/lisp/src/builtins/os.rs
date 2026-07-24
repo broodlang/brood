@@ -1,12 +1,11 @@
 // OS / environment / subprocess builtins — extracted from io.rs (file-organization split).
 #![allow(unused_imports)]
-use super::*;
 use super::io::*;
 use super::numeric::{arg, expect_int, expect_string};
+use super::*;
 use crate::core::heap::Heap;
 use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
-
 
 /// `(getenv name)` — the value of environment variable `name` as a string, or nil
 /// if it is unset. Lets Brood locate things like the user config directory.

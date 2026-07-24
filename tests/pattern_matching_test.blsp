@@ -140,7 +140,7 @@
   (test "absent key binds nil"
     (assert= (match {:a 1} ({:keys [a b]} (list a b))) (list 1 nil)))
   (test ":or supplies a default for an absent key"
-    (assert= (match {:a 1} ({:keys [a b] :or {b 9}} (list a b)) ) (list 1 9)))
+    (assert= (match {:a 1} ({:keys [a b] :or {b 9}} (list a b))) (list 1 9)))
   (test ":or is ignored when the key is present"
     (assert= (match {:a 1 :b 2} ({:keys [a b] :or {b 9}} b)) 2))
   (test "a non-map falls through"

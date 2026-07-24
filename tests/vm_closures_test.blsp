@@ -47,16 +47,21 @@
 ;; iterations to churn GC and (via `(fn (x) (+ x i))` each lap) exercise the cache
 ;; hot path a million-plus times across the suite.
 (defn sum-fresh (i n acc)
-  (if (= i n) acc
-    (let (f (fn (x) (+ x i)))           ; SAME literal each lap; capture differs
+  (if (= i n)
+    acc
+    (let (f (fn (x) (+ x i)))
+      ; SAME literal each lap; capture differs
       (sum-fresh (+ i 1) n (+ acc (f 0))))))
 
 ;; same, but the fresh per-lap closure is *multi-arity* — proves both arms are
 ;; cached and dispatched correctly while only the env is rebuilt each lap.
 (defn sum-fresh-multi (i n acc)
-  (if (= i n) acc
-    (let (g (fn ((a) (+ a i))           ; arity-1 arm
-               ((a b) (+ a b i))))      ; arity-2 arm, both capture `i`
+  (if (= i n)
+    acc
+    (let (g (fn ((a) (+ a i))
+              ; arity-1 arm
+              ((a b) (+ a b i))))
+      ; arity-2 arm, both capture `i`
       (sum-fresh-multi (+ i 1) n (+ acc (g 1) (g 1 1))))))
 
 (describe "local-capturing closures"
@@ -144,7 +149,8 @@
 
   (test "a nested captured closure survives the round-trip"
     (let (me (self) w (spawn (cc-apply-worker me)))
-      (send w [((adder3 7) 8) 5])  ; closure capturing s = 15
+      ; closure capturing s = 15
+      (send w [((adder3 7) 8) 5])
       (assert= (receive) 20)))
 
   (test "fan-out: many workers each build and apply their own capture"

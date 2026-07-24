@@ -1,14 +1,14 @@
 //! Type inference over expressions — expr_ty + result-typing helpers
 //! (extracted from guards.rs, file-organization split).
+use super::ctx::{resolve_overload_ret, Ctx};
+use super::guards::path_of;
+use super::sigs::{declared_heap_overload, sig_of};
+use super::walk::{is_fn_head, list_items};
 use crate::core::heap::Heap;
-use std::cell::Cell;
 use crate::core::keywords as kw;
 use crate::core::value::{self, Symbol, Tag, Value};
 use crate::types::Ty;
-use super::ctx::{resolve_overload_ret, Ctx};
-use super::walk::{is_fn_head, list_items};
-use super::sigs::{declared_heap_overload, sig_of};
-use super::guards::path_of;
+use std::cell::Cell;
 
 /// The type of an *undeclared* global's current heap value — the cross-file half
 /// of Gap A (`docs/type-gating.md`). Same current-image observation same-file
