@@ -11,6 +11,7 @@
 
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-dup-")
+(purge-stale-temp "brood-fmt-plugin-")
 
 (describe "project: :main parsing"
   (test "a bare symbol defaults the fn name to `main`"
@@ -99,6 +100,52 @@
     (assert= *project-dependencies*
       (list {:name 'parser :kind :git :url "https://example.com/p.git" :ref "v1"}
         {:name 'shared :kind :path :path "../shared"}))))
+
+;; `:format-plugins` rules must resolve for EVERY dep kind: a `:path` dep's manifest
+;; is read in place, a fetched dep's (:git/:tarball/:registry) from its `_deps/<name>/`
+;; checkout. Regression: a project that swapped a framework from a `:path` to a `:git`
+;; dep silently lost the framework's formatter rules.
+(describe "project: :format-plugins manifest resolution"
+  :isolated
+  (test "a :path dep's manifest is read in place, relative to the root"
+    (project :name "demo" :dependencies [[shared :path "../shared"]])
+    (assert= (project/project--dep-manifest-path 'shared "/proj")
+      "/proj/../shared/project.blsp"))
+  (test "a :git dep's manifest is read from its _deps checkout"
+    (project
+      :name "demo"
+      :dependencies [[hatch :git "https://example.com/hatch.git" :ref "v1"]])
+    (assert= (project/project--dep-manifest-path 'hatch "/proj")
+      "/proj/_deps/hatch/project.blsp"))
+  (test "a :tarball dep's manifest is read from its _deps checkout too"
+    (project
+      :name "demo"
+      :dependencies [[grid :tarball "https://example.com/grid.tar.gz" :sha256 "abc"]])
+    (assert= (project/project--dep-manifest-path 'grid "/proj")
+      "/proj/_deps/grid/project.blsp"))
+  (test "an undeclared dep has no manifest"
+    (project :name "demo" :dependencies [[shared :path "../shared"]])
+    (assert= (project/project--dep-manifest-path 'nope "/proj") nil))
+  (test "a :git plugin's :format-headers reach the effective header table"
+    (let (root (temp-dir "brood-fmt-plugin-")
+          hatch (path-join (path-join root "_deps") "hatch"))
+      (make-dir hatch)
+      (spit (path-join hatch "project.blsp")
+        "(project :name \"hatch\" :format-headers {deflive 0 on 2 tick 2})\n")
+      (project
+        :name "demo"
+        :dependencies [[hatch :git "https://example.com/hatch.git" :ref "v1"]]
+        :format-plugins [hatch]
+        :format-headers {on 1})
+      ;; the plugin's rules land, and the project's own :format-headers win on a clash
+      (assert= (project/project--effective-format-headers root)
+        {'deflive 0 'on 1 'tick 2})))
+  (test "an unfetched plugin degrades to no extra rules rather than erroring"
+    (project
+      :name "demo"
+      :dependencies [[hatch :git "https://example.com/hatch.git" :ref "v1"]]
+      :format-plugins [hatch])
+    (assert= (project/project--effective-format-headers "/nonexistent-project-root") {})))
 
 (describe "project: scaffold templates (ADR-037)"
   (test "the .gitignore template ignores the package cache"

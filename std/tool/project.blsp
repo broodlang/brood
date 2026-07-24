@@ -317,15 +317,20 @@ the `nest new` scaffolder."
 ;; a project pulls a dep's rules in with `:format-plugins [dep …]`, and may add its
 ;; own `:format-headers`. The effective EXTRA table (layered over format's built-ins)
 ;; is plugin deps' rules in declaration order, then this project's own on top.
+;; Every dep KIND can be a plugin: a `:path` dep's manifest is read in place, and a
+;; fetched dep's (`:git`/`:tarball`/`:registry`) from its `_deps/<name>/` checkout.
 
-(defn project--path-dep-dir (dep-name)
-  "The local directory of `:path` dependency `dep-name` (relative to the project
-root), or nil if there's no such :path dep. (Only :path deps can supply formatter
-rules today; a :git plugin is a no-op.)"
+(defn project--dep-manifest-path (dep-name root)
+  "Path to dependency `dep-name`'s own manifest, for a `:format-plugins` lookup.
+A `:path` dep loads in place, so its manifest sits at its `:path`; a `:git` /
+`:tarball` / `:registry` dep is fetched into `_deps/<name>/`. Both carry a
+`project.blsp`. nil if the project declares no such dep."
   (fold (fn (acc d)
-          (if (and (nil? acc) (= (get d :name) dep-name) (= (get d :kind) :path))
-            (get d :path)
-            acc))
+          (cond
+            (not (nil? acc)) acc
+            (not (= (get d :name) dep-name)) acc
+            (= (get d :kind) :path) (path-join (path-join root (get d :path)) "project.blsp")
+            else (path-join (path-join (path-join root "_deps") (name dep-name)) "project.blsp")))
     nil
     *project-dependencies*))
 
@@ -341,11 +346,12 @@ the file is missing or declares none."
 
 (defn project--plugin-format-headers (root plugin-name)
   "The `:format-headers` a `:format-plugins` entry contributes — read from that
-:path dep's own project.blsp. {} for a non-:path dep."
-  (let (dir (project--path-dep-dir plugin-name))
-    (if (nil? dir)
+dep's own project.blsp, whatever kind of dep it is. {} when the project declares
+no such dep, or when it isn't fetched yet (so an offline image still formats)."
+  (let (manifest (project--dep-manifest-path plugin-name root))
+    (if (nil? manifest)
       {}
-      (project--manifest-format-headers (path-join (path-join root dir) "project.blsp")))))
+      (project--manifest-format-headers manifest))))
 
 (defn project--effective-format-headers (root)
   "The extra formatter-header table for this project: each `:format-plugins` dep's
