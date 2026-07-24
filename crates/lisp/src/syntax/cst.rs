@@ -30,6 +30,7 @@ pub enum NodeKind {
     List,   // ( … )
     Vector, // [ … ]
     Map,    // { … } — a map literal (alternating key/value forms)
+    Set,    // #{ … } — a set literal (a flat sequence of member forms)
     // Reader macros, kept *as written* (not lowered to `(quote x)` …) so the
     // tree mirrors the source. Each wraps its target form as a child.
     Quote,   // 'x
@@ -344,13 +345,21 @@ impl<'a> Cst<'a> {
     ///
     /// A `#`-dispatched form. `#b"…"` is a bytes literal — scanned like a string
     /// so the leaf span covers the whole `#b"…"` (the formatter preserves it
-    /// verbatim; it highlights as a string token). Any other `#x` is a tolerant
-    /// error token, like every CST error.
+    /// verbatim; it highlights as a string token). `#{ … }` is a set literal:
+    /// the `#` is consumed here and [`seq`] parses the members through the `}`,
+    /// so the CST holds a single `Set` node — mirroring the reader, which reads
+    /// `#{…}` as a set. (Without this the `#` scanned as a lone atom and the
+    /// `{…}` as a separate map, so the formatter re-emitted the glued `#{` as
+    /// `# {}` — two tokens — which no longer reads back as a set.) Any other
+    /// `#x` is an ordinary atom character (e.g. the symbol `#q`).
     fn hash(&mut self, start: usize) -> Node {
         if self.s.starts_with("#b\"") {
             self.s.bump(); // '#'
             self.s.bump(); // 'b'
             self.string(start)
+        } else if self.s.starts_with("#{") {
+            self.s.bump(); // '#' — `seq` consumes the opening `{`
+            self.seq(NodeKind::Set, '}', start)
         } else {
             // `#` is an ordinary atom character (e.g. the symbol `#q`).
             self.atom(start)
@@ -537,6 +546,25 @@ mod tests {
         // mid-edit still navigates (and to anticipate the planned map literals).
         let root = parse("{:a 1 :b 2}");
         assert_eq!(root.forms().next().unwrap().kind, NodeKind::Map);
+    }
+
+    #[test]
+    fn set_literals_parse_as_one_set_node() {
+        // `#{…}` is a single Set container, not a `#` atom followed by a `{…}`
+        // map — the split that made the formatter re-emit `#{}` as `# {}`.
+        let root = parse("#{1 2 3}");
+        let set = root.forms().next().unwrap();
+        assert_eq!(set.kind, NodeKind::Set);
+        assert_eq!(set.text("#{1 2 3}"), "#{1 2 3}");
+        let members: Vec<NodeKind> = set.forms().map(|n| n.kind).collect();
+        assert_eq!(members, vec![NodeKind::Int, NodeKind::Int, NodeKind::Int]);
+
+        // The empty set is still one Set node (the case the demo hit).
+        assert_eq!(parse("#{}").forms().next().unwrap().kind, NodeKind::Set);
+
+        // A `#`-prefixed symbol like `#q` stays an ordinary atom — only `#{`
+        // opens a set.
+        assert_eq!(parse("#q").forms().next().unwrap().kind, NodeKind::Symbol);
     }
 
     #[test]

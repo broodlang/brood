@@ -932,6 +932,29 @@ mod tests {
     }
 
     #[test]
+    fn format_source_keeps_set_literals_glued() {
+        // Regression: the CST once scanned `#{…}` as a lone `#` atom plus a
+        // separate `{…}` map, so the formatter re-emitted it as `# {}` — two
+        // tokens that no longer read back as a set (`#` becomes an unbound
+        // symbol at runtime). `#{` must stay glued, and formatting must be
+        // idempotent.
+        let mut interp = Interp::new();
+        for src in ["#{}", "#{1 2 3}", "(get m k #{})"] {
+            let formatted = format_source(&mut interp, src).unwrap();
+            assert!(
+                !formatted.contains("# {"),
+                "set literal split by the formatter: {src:?} -> {formatted:?}"
+            );
+            assert!(
+                formatted.contains("#{"),
+                "set literal lost its `#{{`: {src:?} -> {formatted:?}"
+            );
+            let again = format_source(&mut interp, &formatted).unwrap();
+            assert_eq!(formatted, again, "not idempotent for {src:?}");
+        }
+    }
+
+    #[test]
     fn format_source_passes_through_escapes_and_newlines() {
         // `src` is interpolated into a Brood string literal — only `\` and `"`
         // get escaped, so embedded newlines and tabs must round-trip without

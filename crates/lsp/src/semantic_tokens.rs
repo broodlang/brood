@@ -123,6 +123,7 @@ fn walk(
         NodeKind::Root
         | NodeKind::Vector
         | NodeKind::Map
+        | NodeKind::Set
         | NodeKind::Quote
         | NodeKind::Quasi
         | NodeKind::Unquote
