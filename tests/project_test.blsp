@@ -147,7 +147,25 @@
       :name "demo"
       :dependencies [[hatch :git "https://example.com/hatch.git" :ref "v1"]]
       :format-plugins [hatch])
-    (assert= (project/project--effective-format-headers "/nonexistent-project-root") {})))
+    (assert= (project/project--effective-format-headers "/nonexistent-project-root") {}))
+  ;; A plugin naming a dep the manifest never declared is a typo. It warns to stderr
+  ;; (not assertable here — `with-out-str` captures stdout only), but it must still
+  ;; contribute nothing and, crucially, not cost a correctly-declared sibling its
+  ;; rules.
+  (test "a plugin that is not in :dependencies contributes nothing"
+    (project :name "demo" :dependencies [[shared :path "../shared"]] :format-plugins [typo])
+    (assert= (project/project--effective-format-headers "/proj") {}))
+  (test "a bogus plugin entry does not suppress a valid sibling's rules"
+    (let (root (temp-dir "brood-fmt-plugin-")
+          hatch (path-join (path-join root "_deps") "hatch"))
+      (make-dir hatch)
+      (spit (path-join hatch "project.blsp")
+        "(project :name \"hatch\" :format-headers {deflive 0 tick 2})\n")
+      (project
+        :name "demo"
+        :dependencies [[hatch :git "https://example.com/hatch.git" :ref "v1"]]
+        :format-plugins [typo hatch])
+      (assert= (project/project--effective-format-headers root) {'deflive 0 'tick 2}))))
 
 (describe "project: scaffold templates (ADR-037)"
   (test "the .gitignore template ignores the package cache"
