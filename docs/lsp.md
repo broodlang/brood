@@ -114,9 +114,14 @@ one server that owns the language knowledge.
 > module resolves on the load-path (inserted under any `defmodule` header), and
 > **"Create function `foo`"** when `foo` is a call head — a stub `(defn foo (a b
 > …) nil)` at EOF, arity matched to the call site.
-> **Still next:** incremental document sync; range / delta semantic-token
-> requests; finer spans for arity/type findings (wants spans threaded through the
-> checker, not just the call operator).
+> **Incremental document sync shipped** (2026-07-24): the server advertises
+> `TextDocumentSyncKind::INCREMENTAL` and splices each `didChange` range into the
+> stored buffer via the UTF-16 `LineIndex` (`apply_content_change`); the *parse*
+> stays whole-document (cheap). **Still next:** range / delta semantic-token
+> requests (deferred — the token walk is already off a cached CST, so the payoff
+> is marginal until profiling shows recompute/bandwidth hurts); finer spans for
+> arity/type findings (wants spans threaded through the checker, not just the call
+> operator).
 
 ## Why a server, and why not brute-force it
 
@@ -151,8 +156,11 @@ well-trodden plumbing handled by off-the-shelf crates.
 ```
 
 The server holds, per open document, the source text, its parsed CST, and a
-`LineIndex`. It re-parses on each change (full-document sync to start with — the
-reader is fast enough that incremental sync is premature). It owns one `Interp`
+`LineIndex`. It uses **incremental sync** — each `didChange` carries only the
+changed range(s), which `apply_content_change` splices into the stored buffer
+(range→byte offset through the `LineIndex`); the *parse* stays whole-document (the
+reader is fast enough that incremental *parse* is premature — only the transport
+saves re-sending a large file on every keystroke). It owns one `Interp`
 for introspection queries (`arglist`, global names); it does **not** evaluate
 document text.
 

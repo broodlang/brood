@@ -2,7 +2,7 @@
 //! over stdio so any editor gets Brood's language knowledge without
 //! re-implementing it. See `docs/lsp.md` for the design and ADR-025.
 //!
-//! Tier 0: lifecycle, full-document sync, and **syntactic diagnostics** read off
+//! Tier 0: lifecycle, incremental document sync, and **syntactic diagnostics** read off
 //! the tooling CST ([`brood::syntax::cst`]). Tier 1 (the [`completion`],
 //! [`hover`], [`symbols`], and [`definition`] modules): name completion, hover
 //! docs, the document outline, and goto-definition. The server never evaluates
@@ -88,10 +88,18 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     let (connection, io_threads) = Connection::stdio();
 
     let capabilities = ServerCapabilities {
-        // Full-document sync: re-parse the whole buffer on each change. The
-        // reader/CST is fast enough that incremental sync is premature (ADR-011
-        // — ship the simple shape until a need justifies the complex one).
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        // Incremental sync: the client sends only the changed range(s) on each
+        // keystroke, which we splice into the stored buffer (byte offsets via the
+        // UTF-16 `LineIndex`). The *parse* stays whole-document (the reader/CST is
+        // cheap) — incremental sync only spares the transport re-sending the whole
+        // file on every edit, which matters on a large buffer.
+        text_document_sync: Some(TextDocumentSyncCapability::Options(
+            lsp_types::TextDocumentSyncOptions {
+                open_close: Some(true),
+                change: Some(TextDocumentSyncKind::INCREMENTAL),
+                ..Default::default()
+            },
+        )),
         // We do UTF-16 column arithmetic in `LineIndex`; advertise it explicitly
         // rather than relying on the protocol default.
         position_encoding: Some(PositionEncodingKind::UTF16),
@@ -241,6 +249,30 @@ fn analyze(text: &str) -> Analysis {
         cst,
         scope,
         line_index,
+    }
+}
+
+/// Apply one incremental `didChange` content-change to `text`, in place.
+///
+/// A change with a `range` splices `change.text` over that span; a change with no
+/// `range` replaces the whole document (a client may send that even under
+/// incremental sync). The range is UTF-16 line/col, so it is resolved to byte
+/// offsets through a fresh [`LineIndex`] over the *current* `text` — edits within
+/// one batch compound, so each must see the text the prior edit produced (rebuild
+/// is a single byte scan, cheap). `LineIndex::offset` already clamps a past-EOF
+/// position; the extra `min(len)` + `start <= end` guard keeps the splice
+/// panic-free on any degenerate range a client might send.
+fn apply_content_change(text: &mut String, change: &lsp_types::TextDocumentContentChangeEvent) {
+    match change.range {
+        Some(range) => {
+            let idx = LineIndex::new(text);
+            let start = (idx.offset(text, range.start) as usize).min(text.len());
+            let end = (idx.offset(text, range.end) as usize).min(text.len());
+            if start <= end {
+                text.replace_range(start..end, &change.text);
+            }
+        }
+        None => text.clone_from(&change.text),
     }
 }
 
@@ -642,22 +674,33 @@ fn handle_notification(
             let Some(p) = params::<lsp_types::DidChangeTextDocumentParams>(not) else {
                 return Ok(());
             };
-            // Full sync: the last change event carries the entire new document.
-            if let Some(change) = p.content_changes.into_iter().last() {
-                let uri = p.text_document.uri;
-                let text = change.text;
-                let version = p.text_document.version;
-                let analysis = analyze(&text);
-                docs.insert(
-                    uri.clone(),
-                    Document {
-                        text,
-                        analysis,
-                        version,
-                    },
-                );
-                publish(connection, docs, interp, bootstrapped, &uri)?;
+            // Incremental sync: start from the current buffer and apply each
+            // content-change event in order (a ranged change splices its span; a
+            // change with no range is a whole-document replace the client may still
+            // send). Edits within one batch compound, so each resolves its range
+            // against the text the prior edit produced. Re-parse ONCE after all
+            // edits — incremental *sync* does not require incremental *parse*.
+            let uri = p.text_document.uri;
+            let version = p.text_document.version;
+            let Some(doc) = docs.get(&uri) else {
+                // A change for a document we never saw a didOpen for — ignore
+                // (the protocol guarantees open before change).
+                return Ok(());
+            };
+            let mut text = doc.text.clone();
+            for change in &p.content_changes {
+                apply_content_change(&mut text, change);
             }
+            let analysis = analyze(&text);
+            docs.insert(
+                uri.clone(),
+                Document {
+                    text,
+                    analysis,
+                    version,
+                },
+            );
+            publish(connection, docs, interp, bootstrapped, &uri)?;
         }
         DidCloseTextDocument::METHOD => {
             let Some(p) = params::<lsp_types::DidCloseTextDocumentParams>(not) else {
@@ -1159,6 +1202,107 @@ mod server_tests {
                 },
             ))
             .unwrap();
+        assert!(next_diagnostics(&client).is_empty());
+
+        shutdown(&client);
+        handle.join().unwrap().unwrap();
+    }
+
+    /// A ranged `didChange` (`range: Some(..)`, incremental sync) splices ONLY the
+    /// given span. Proves the range→byte-offset math lands on the right line: a
+    /// wrong offset would corrupt a different line and not yield exactly this error.
+    #[test]
+    fn incremental_ranged_change_splices_at_the_right_offset() {
+        let (server, client) = Connection::memory();
+        let handle = thread::spawn(move || main_loop(&server));
+
+        // Three clean literal lines → no diagnostics.
+        client.sender.send(did_open("nil\nnil\nnil")).unwrap();
+        assert!(next_diagnostics(&client).is_empty());
+
+        let ranged = |version, sl, sc, el, ec, text: &str| {
+            note(
+                DidChangeTextDocument::METHOD,
+                DidChangeTextDocumentParams {
+                    text_document: VersionedTextDocumentIdentifier {
+                        uri: uri(),
+                        version,
+                    },
+                    content_changes: vec![TextDocumentContentChangeEvent {
+                        range: Some(lsp_types::Range {
+                            start: lsp_types::Position {
+                                line: sl,
+                                character: sc,
+                            },
+                            end: lsp_types::Position {
+                                line: el,
+                                character: ec,
+                            },
+                        }),
+                        range_length: None,
+                        text: text.into(),
+                    }],
+                },
+            )
+        };
+
+        // Replace ONLY the middle line's `nil` (line 1, chars 0..3) with `(` — an
+        // unclosed delimiter. Text becomes "nil\n(\nnil".
+        client.sender.send(ranged(2, 1, 0, 1, 3, "(")).unwrap();
+        let diags = next_diagnostics(&client);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(diags[0].contains("unclosed delimiter"), "{diags:?}");
+
+        // Ranged edit back to well-formed: replace line 1 char 0..1 (the `(`) with
+        // `nil`. The offset must resolve against the *prior edit's* text.
+        client.sender.send(ranged(3, 1, 0, 1, 1, "nil")).unwrap();
+        assert!(next_diagnostics(&client).is_empty());
+
+        shutdown(&client);
+        handle.join().unwrap().unwrap();
+    }
+
+    /// Two edits in ONE `didChange` batch compound: the second resolves its range
+    /// against the text the first produced. `[` at (0,0) then ` nil]` at (0,4) —
+    /// the second offset (4) only exists once the first grew the line to `[nil`,
+    /// so a correct result `[nil nil]` (clean) proves the per-edit index rebuild.
+    #[test]
+    fn incremental_multi_edit_batch_compounds() {
+        let (server, client) = Connection::memory();
+        let handle = thread::spawn(move || main_loop(&server));
+
+        client.sender.send(did_open("nil")).unwrap();
+        assert!(next_diagnostics(&client).is_empty());
+
+        let edit = |sl, sc, text: &str| TextDocumentContentChangeEvent {
+            range: Some(lsp_types::Range {
+                start: lsp_types::Position {
+                    line: sl,
+                    character: sc,
+                },
+                end: lsp_types::Position {
+                    line: sl,
+                    character: sc,
+                },
+            }),
+            range_length: None,
+            text: text.into(),
+        };
+        client
+            .sender
+            .send(note(
+                DidChangeTextDocument::METHOD,
+                DidChangeTextDocumentParams {
+                    text_document: VersionedTextDocumentIdentifier {
+                        uri: uri(),
+                        version: 2,
+                    },
+                    content_changes: vec![edit(0, 0, "["), edit(0, 4, " nil]")],
+                },
+            ))
+            .unwrap();
+        // "[nil nil]" is a clean vector literal — no diagnostics. A stale index on
+        // the second edit would misplace `]` and produce a parse error instead.
         assert!(next_diagnostics(&client).is_empty());
 
         shutdown(&client);

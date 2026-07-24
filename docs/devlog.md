@@ -6230,3 +6230,28 @@ round-trip through high bytes (`\x00\xff\x80` — proves it isn't UTF-8-routed),
 bytes-or-int-vector lower, and the empty-list edge. 15/15 wasm tests green, GC-stress
 + verify clean. Recommended next WASM slice: the package-manager `:native`
 manifest/lock/fetch integration (the delivery vehicle) — see docs/interop.md.
+
+## 2026-07-24 — LSP tier-3: incremental document sync
+
+The server was full-document sync — every keystroke re-sent the whole buffer. Now
+it advertises `TextDocumentSyncKind::INCREMENTAL` (via `TextDocumentSyncOptions`,
+`crates/lsp/src/main.rs`) and applies each `didChange` range in place: a new
+`apply_content_change` splices `change.text` over the range's byte span, resolved
+through the already-cached UTF-16 `LineIndex::offset` (the shared prerequisite that
+already existed and was round-trip-tested). Edits within one batch compound, so the
+`LineIndex` is rebuilt per edit (a single byte scan); a change with no range is a
+whole-document replace. The **parse stays whole-document** — incremental *sync* only
+spares the transport re-sending a large file on every edit; incremental *parse* is
+still premature (the reader is cheap), so there's no new cache-invalidation logic.
+
+No new per-document state. 2 tests added to `mod server_tests` (over the
+`Connection::memory()` harness): a single ranged splice lands on the exact line
+(break the middle of three clean lines, then fix it — a wrong offset would corrupt
+a different line), and a two-edit batch compounds (`[` then ` nil]` → the clean
+`[nil nil]`, which only results if the second edit's offset resolves against the
+first's output). 116 LSP tests green.
+
+Deferred (noted): range / delta semantic-token requests. Delta needs new stateful
+machinery (resultId issuance + a previous-`data` cache on `Document` + a diff), and
+the token walk already runs off a cached CST — so the payoff is marginal until
+profiling shows token recompute/bandwidth actually hurts (ADR-011).

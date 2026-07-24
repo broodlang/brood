@@ -691,8 +691,14 @@ Runtime housekeeping (both items landed):
   already carries its position. ✅ The **create-missing-`defn`** code action
   already ships (verified 2026-07-23 — `create_defn_action` in
   `crates/lsp/src/code_actions.rs`, a stub `(defn foo (a b …) nil)` with arity
-  matched to the call site, tested; the roadmap line was stale). ⬜ Still
-  next: incremental sync; range/delta semantic tokens.
+  matched to the call site, tested; the roadmap line was stale). ✅
+  **incremental document sync** shipped 2026-07-24: the server advertises
+  `TextDocumentSyncKind::INCREMENTAL` and splices each `didChange` range into the
+  stored buffer via the UTF-16 `LineIndex` (`apply_content_change`, per-edit index
+  rebuild so a batch compounds correctly); the parse stays whole-document (cheap).
+  2 new tests (ranged-splice offset precision; multi-edit batch compounding); 116
+  LSP tests green. ⬜ Still next: range/delta semantic tokens (deferred — the token
+  walk is already off a cached CST, marginal payoff until profiling shows it hurts).
 - 🟡 **Errors that teach (LLM-native)** ([`docs/llm-native.md`](docs/llm-native.md))
   — first instances landed. ✅ **reader-level hints** for the Clojure/Scheme
   syntax the reader mis-parses shipped 2026-07-23: `#{…}` (set literal),
