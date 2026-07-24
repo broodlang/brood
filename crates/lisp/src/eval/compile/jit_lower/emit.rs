@@ -21,6 +21,42 @@ pub(super) struct Frame<'a> {
     pub nslots: usize,
     pub deopt: cranelift_codegen::ir::Block,
     pub carry_vars: &'a [Option<(Variable, bool)>],
+    /// Per-slot "holds a `Value::Float`" / "holds a `Value::Bool`" flags, tracked
+    /// across the single lowering pass so a later slot read picks the right arith /
+    /// block-arg representation. Shared (`RefCell`) — set by stores, read by loads.
+    pub slot_float: &'a std::cell::RefCell<Vec<bool>>,
+    pub slot_bool: &'a std::cell::RefCell<Vec<bool>>,
+}
+
+/// Does `op` carry a `Value::Float`? (An `Op::Float`, or a `Slot` flagged float.)
+pub(super) fn op_is_float(op: Op, f: Frame) -> bool {
+    match op {
+        Op::Float(_) => true,
+        Op::Slot(k) => f.slot_float.borrow().get(k).copied().unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Mark frame slot `dst` as holding (or not) a `Value::Float`.
+pub(super) fn set_slot_float(dst: i64, v: bool, f: Frame) {
+    if let Some(s) = f.slot_float.borrow_mut().get_mut(dst as usize) {
+        *s = v;
+    }
+}
+
+/// Mark frame slot `dst` as holding (or not) a `Value::Bool`.
+pub(super) fn set_slot_bool(dst: i64, v: bool, f: Frame) {
+    if let Some(s) = f.slot_bool.borrow_mut().get_mut(dst as usize) {
+        *s = v;
+    }
+}
+
+/// Does `op` carry a `Value::Bool`? (An `Op::Bool`, an `i8` comparison `Op::Int`,
+/// or a `Slot` flagged bool.) Used to type block-param edges at a join.
+pub(super) fn is_bool_op(b: &FunctionBuilder, op: Op, f: Frame) -> bool {
+    matches!(op, Op::Bool(_))
+        || matches!(op, Op::Int(v) if b.func.dfg.value_type(v) == types::I8)
+        || matches!(op, Op::Slot(k) if f.slot_bool.borrow().get(k).copied().unwrap_or(false))
 }
 
 /// Integer arithmetic/comparison lowering (overflow-checked → deopt to BigInt).

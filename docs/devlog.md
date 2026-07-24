@@ -6992,3 +6992,12 @@ those to positional `{}` + args.
 
 `jit_lower.rs` 4389 → 4325; `emit.rs` 132 → 237. Verified: compiles default +
 no-default-features; differential 2/2, jit 34/34 (JIT_VERIFY); full suite 3108/3108.
+
+## 2026-07-24 — Tier 1 item 1 cont.: extract slot-kind tracking helpers
+
+Continued the emit-loop decomposition: extracted the per-slot type-tracking helpers
+— `op_is_float`, `set_slot_float`, `set_slot_bool`, `is_bool_op` — into
+`jit_lower/emit.rs`, extending the `Frame` context with the two `RefCell<Vec<bool>>`
+slot-flag tables (`slot_float`/`slot_bool`). `op_is_float`'s call sites had nested
+parens (`Op::Slot(*slot_a)`), rewritten precisely. jit_lower.rs 4325 → ~4300.
+Verified: differential 2/2, jit 34/34 (JIT_VERIFY); full suite 3108/3108.

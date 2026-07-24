@@ -22,7 +22,10 @@ mod prepass;
 #[cfg(feature = "jit")]
 mod emit;
 #[cfg(feature = "jit")]
-use emit::{box_scalar, copy_value, emit_arith, emit_float_arith, load_slot_int, store_int};
+use emit::{
+    box_scalar, copy_value, emit_arith, emit_float_arith, is_bool_op, load_slot_int, op_is_float,
+    set_slot_bool, set_slot_float, store_int,
+};
 
 /// The virtualized operand-stack element for `jit_lower_arm_inner`'s emit loop —
 /// module scope (not a fn-local enum) so the extracted emit helpers can name it. A
@@ -1370,6 +1373,8 @@ fn jit_lower_arm_inner(
         nslots,
         deopt,
         carry_vars: &carry_vars,
+        slot_float: &slot_float,
+        slot_bool: &slot_bool,
     };
     // A scratch `Value`-sized stack slot the handle / call / global ops write their result
     // into (the out-pointer ABI). One per arm, reused: each result is read straight back
@@ -1971,13 +1976,6 @@ fn jit_lower_arm_inner(
     // Integer-vs-float dispatch for a binary op: an operand is float if it's an
     // `Op::Float`, or a `Slot` the profile/tracking marks float. (`Op::Int`/`Handle` are
     // integer/non-number.)
-    let op_is_float = |op: Op| -> bool {
-        match op {
-            Op::Float(_) => true,
-            Op::Slot(k) => slot_float.borrow().get(k).copied().unwrap_or(false),
-            _ => false,
-        }
-    };
     // Float arith / comparison. Arith → `Op::Float`; a comparison → an `i8` boxed as a
     // Bool (`Op::Int`, exactly like the integer compares). The integer-only ops
     // (`rem`/`quot`) and `=` aren't lowered for floats → `None` bails the arm to the VM.
@@ -1988,26 +1986,16 @@ fn jit_lower_arm_inner(
     // float store marks it float, an int/handle store clears it, a slot-copy inherits the
     // source's flag. (Lets let-binders — nil at the entry snapshot — get their type from
     // the body's writes, which precede their reads in the single lowering pass.)
-    let set_slot_float = |dst: i64, v: bool| {
-        if let Some(s) = slot_float.borrow_mut().get_mut(dst as usize) {
-            *s = v;
-        }
-    };
     // Mirror of `set_slot_float` for the bool flag. A store of any kind updates *both*
     // (a slot holds one type), so a later read picks the right block-arg representation.
-    let set_slot_bool = |dst: i64, v: bool| {
-        if let Some(s) = slot_bool.borrow_mut().get_mut(dst as usize) {
-            *s = v;
-        }
-    };
     let store_op = |b: &mut FunctionBuilder, dst: i64, op: Op| match op {
         Op::Int(v) => {
             // A comparison `i8` (`store_int`/`box_scalar` boxes it as `Value::Bool`) marks
             // the slot bool; a real `i64` int does not.
             let is_b = b.func.dfg.value_type(v) == types::I8;
             store_int(b, dst, v, frame);
-            set_slot_float(dst, false);
-            set_slot_bool(dst, is_b);
+            set_slot_float(dst, false, frame);
+            set_slot_bool(dst, is_b, frame);
             if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
                 *s = None;
             }
@@ -2017,8 +2005,8 @@ fn jit_lower_arm_inner(
             let tag = b.ins().iconst(types::I64, TAG_FLOAT as i64);
             let zero = b.ins().iconst(types::I64, 0);
             store_words(b, dst, [tag, bits, zero]);
-            set_slot_float(dst, true);
-            set_slot_bool(dst, false);
+            set_slot_float(dst, true, frame);
+            set_slot_bool(dst, false, frame);
             if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
                 *s = Some(v);
             }
@@ -2027,8 +2015,8 @@ fn jit_lower_arm_inner(
             let tag = b.ins().iconst(types::I64, TAG_BOOL as i64);
             let zero = b.ins().iconst(types::I64, 0);
             store_words(b, dst, [tag, v, zero]);
-            set_slot_float(dst, false);
-            set_slot_bool(dst, true);
+            set_slot_float(dst, false, frame);
+            set_slot_bool(dst, true, frame);
             if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
                 *s = None;
             }
@@ -2040,16 +2028,16 @@ fn jit_lower_arm_inner(
             let f = slot_float.borrow().get(k).copied().unwrap_or(false);
             let bl = slot_bool.borrow().get(k).copied().unwrap_or(false);
             let fv = slot_f64_cache.borrow().get(k).copied().flatten();
-            set_slot_float(dst, f);
-            set_slot_bool(dst, bl);
+            set_slot_float(dst, f, frame);
+            set_slot_bool(dst, bl, frame);
             if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
                 *s = fv;
             }
         }
         Op::Handle(w0, w1, w2) => {
             store_words(b, dst, [w0, w1, w2]);
-            set_slot_float(dst, false);
-            set_slot_bool(dst, false);
+            set_slot_float(dst, false, frame);
+            set_slot_bool(dst, false, frame);
             if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
                 *s = None;
             }
@@ -2057,8 +2045,8 @@ fn jit_lower_arm_inner(
         Op::HoistedVec { w0, w1, w2, .. } | Op::HoistedTable { w0, w1, w2, .. } => {
             // Stored as a whole `Value` (its entry-resolved words), like a `Handle`.
             store_words(b, dst, [w0, w1, w2]);
-            set_slot_float(dst, false);
-            set_slot_bool(dst, false);
+            set_slot_float(dst, false, frame);
+            set_slot_bool(dst, false, frame);
             if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
                 *s = None;
             }
@@ -2560,11 +2548,6 @@ fn jit_lower_arm_inner(
     let mut bool_param: Vec<Option<Vec<bool>>> = vec![None; len + 1];
     // True if `op` is a boolean value: a comparison result (`Op::Int` with `i8` type) or a
     // boolean that already crossed a block boundary (`Op::Bool`).
-    let is_bool_op = |b: &FunctionBuilder, op: Op| {
-        matches!(op, Op::Bool(_))
-            || matches!(op, Op::Int(v) if b.func.dfg.value_type(v) == types::I8)
-            || matches!(op, Op::Slot(k) if slot_bool.borrow().get(k).copied().unwrap_or(false))
-    };
     // Record an edge's per-entry bool-ness flags for its target block, returning whether
     // this edge AGREES with the typing the block already has. The first edge to reach a
     // join fixes the typing; a later edge whose flags differ must NOT jump there — a
@@ -3463,8 +3446,8 @@ fn jit_lower_arm_inner(
                             stack.push(h);
                         }
                     } else if matches!(op, PrimOp::Eq)
-                        && !op_is_float(aa_op)
-                        && !op_is_float(bb_op)
+                        && !op_is_float(aa_op, frame)
+                        && !op_is_float(bb_op, frame)
                         && (matches!(aa_op, Op::Handle(..) | Op::Slot(_))
                             || matches!(bb_op, Op::Handle(..) | Op::Slot(_)))
                     {
@@ -3473,8 +3456,8 @@ fn jit_lower_arm_inner(
                         let wa = read_words(&mut b, aa_op);
                         let wb = read_words(&mut b, bb_op);
                         stack.push(Op::Int(eq_dispatch(&mut b, wa, wb)));
-                    } else if op_is_float(aa_op)
-                        || op_is_float(bb_op)
+                    } else if op_is_float(aa_op, frame)
+                        || op_is_float(bb_op, frame)
                         || (has_float_slot
                             && matches!(op, PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div)
                             && (matches!(aa_op, Op::Handle(..)) || matches!(bb_op, Op::Handle(..))))
@@ -3728,8 +3711,8 @@ fn jit_lower_arm_inner(
                             stack.push(h);
                         }
                     } else if matches!(op, PrimOp::Eq)
-                        && !op_is_float(Op::Slot(*slot_a))
-                        && !op_is_float(Op::Slot(*slot_b))
+                        && !op_is_float(Op::Slot(*slot_a), frame)
+                        && !op_is_float(Op::Slot(*slot_b), frame)
                     {
                         // `(= slot slot)` — runtime-dispatched equality (see eq_dispatch):
                         // int×int costs the same two tag-checks as the old int-only path,
@@ -3738,7 +3721,7 @@ fn jit_lower_arm_inner(
                         let wa = read_words(&mut b, Op::Slot(*slot_a));
                         let wb = read_words(&mut b, Op::Slot(*slot_b));
                         stack.push(Op::Int(eq_dispatch(&mut b, wa, wb)));
-                    } else if op_is_float(Op::Slot(*slot_a)) || op_is_float(Op::Slot(*slot_b)) {
+                    } else if op_is_float(Op::Slot(*slot_a), frame) || op_is_float(Op::Slot(*slot_b), frame) {
                         // Float arith/compare on two slots (e.g. `(+ xx yy)`, `(* x y)`).
                         let sa = as_f64(&mut b, Op::Slot(*slot_a));
                         let sb = as_f64(&mut b, Op::Slot(*slot_b));
@@ -3815,7 +3798,7 @@ fn jit_lower_arm_inner(
                             &[car[0], car[1], car[2], cdr[0], cdr[1], cdr[2]],
                         );
                         stack.push(h);
-                    } else if op_is_float(Op::Slot(*slot_a)) {
+                    } else if op_is_float(Op::Slot(*slot_a), frame) {
                         // `(op floatslot int-literal)` — Brood coerces the int to f64
                         // (`(+ 1.5 1)` = 2.5). Promote the literal and do float arith.
                         let sa = as_f64(&mut b, Op::Slot(*slot_a));
@@ -3850,7 +3833,7 @@ fn jit_lower_arm_inner(
                             b.ins().jump(deopt, &[]);
                         }
                     } else {
-                        let flags: Vec<bool> = stack.iter().map(|&op| is_bool_op(&b, op)).collect();
+                        let flags: Vec<bool> = stack.iter().map(|&op| is_bool_op(&b, op, frame)).collect();
                         if record_block_flags(&mut bool_param[*t], flags) {
                             let args: Vec<BlockArg> = stack
                                 .iter()
@@ -4065,7 +4048,7 @@ fn jit_lower_arm_inner(
                 }
                 Inst::JumpIfFalse(t) => {
                     let cond = stack.pop()?;
-                    let flags: Vec<bool> = stack.iter().map(|&op| is_bool_op(&b, op)).collect();
+                    let flags: Vec<bool> = stack.iter().map(|&op| is_bool_op(&b, op, frame)).collect();
                     // A side whose typing disagrees with its join's recorded flags routes
                     // to `deopt` (no args) instead — see `record_block_flags`.
                     let t_ok = record_block_flags(&mut bool_param[*t], flags.clone());
@@ -4182,7 +4165,7 @@ fn jit_lower_arm_inner(
                 break;
             }
             if is_leader[j] {
-                let flags: Vec<bool> = stack.iter().map(|&op| is_bool_op(&b, op)).collect();
+                let flags: Vec<bool> = stack.iter().map(|&op| is_bool_op(&b, op, frame)).collect();
                 if record_block_flags(&mut bool_param[j], flags) {
                     let args: Vec<BlockArg> = stack
                         .iter()
