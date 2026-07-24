@@ -6846,3 +6846,29 @@ The worker-pool machinery (queue/stealing/worker loop) stays in the root — car
 it needs the accessor layer for the shared reduction budget, deferred.
 
 Verified: compiles default + no-default-features; full suite 3071/3071.
+
+## 2026-07-24 — Tier 1 item 2 complete: extract scheduler/pool.rs
+
+Finished the scheduler carve. The unlock was recognising the statics-in-root
+approach needs **no accessor layer** (the earlier worry): keep every shared static
+in the root and relocate only functions — children reach the state via
+`use super::*`, and since statics don't move the split is behaviour-identical.
+
+Extracted the worker pool + run-queue execution loop — `enqueue`/`wake_enqueue`,
+`try_steal`/`try_steal_any`, `spawn_overflow_drainer`/`overflow_drain`,
+`ensure_workers`/`worker_loop`/`run_one`/`finish_quantum`/`handle_capture_outcome`/
+`park_on_receive`, `set_test_no_workers`/`test_drive_quanta` — into
+`process/scheduler/pool.rs` (two cuts around the `TEST_NO_WORKERS` static, which
+stays in root with its root callers). `assign_worker`/`pick_spawn_worker`/
+`worker_count` + all module statics stay in the root. Root 1545 → 1088; pool.rs 479.
+
+Visibility: `enqueue`/`wake_enqueue`/`ensure_workers`/`spawn_overflow_drainer`
+bumped to `pub(crate)` (called from lifecycle, `process::mailbox`, and the root's
+`DirtyBlockGuard`), re-exported so `scheduler::…`/`process::…` paths are unchanged.
+No `super::`-path fixes were needed (pool used bare module aliases via `use super::*`).
+
+Net: `scheduler.rs` 2080 → 1088, carved into `guards.rs` (269) + `lifecycle.rs`
+(299) + `pool.rs` (479); the root keeps the reduction/preempt core, capture-driver
+glue, `Process`/`Ctx`, and the shared statics.
+
+Verified: compiles default + no-default-features; full suite 3071/3071.

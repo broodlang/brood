@@ -46,23 +46,20 @@ none urgent. Ranked by payoff. All **[kernel]** unless marked.
    verification, not a mechanical extraction. Verified: differential 2/2, jit
    34/34, compaction 3/3 (all under `JIT_VERIFY`); suite 3057/3057; both feature
    configs compile.
-2. 🟡 **Split `process/scheduler.rs` (2080 → 1824)** — partial, done 2026-07-24.
-   Investigation found the roadmap's clean preempt/pool/lifecycle carve isn't
-   achievable cheaply: the **reduction budget** (`REDUCTIONS`/`reduction_budget`)
-   is shared across the preemption core, the capture-driver glue, *and* the worker
-   loop, so a full carve needs accessor-fn refactors through the KI-1 concurrency
-   code. Took the low-risk win instead: extracted the self-contained execution
-   guards — GC-block/macro-block depth + RAII guards and the stack-overflow byte
-   guard — into `process/scheduler/guards.rs`, re-exported so `scheduler::…`/
-   `process::…` paths are unchanged. Then (2026-07-24) extended it: the shared
-   scheduling state (run queue, worker pool, pid/parent tables, counters) stays in
-   the root, but the **process lifecycle** — `spawn`/`spawn_linked`/`spawn_impl`/
-   `spawn_root_program`, `exit`/`exit_propagate`/`exit_with`, `deregister`,
-   `proc_descr` — moved to `process/scheduler/lifecycle.rs` (statics-in-root, so a
-   pure relocation reached via `use super::*`; public surface re-exported). Root
-   2080 → ~1400. ⬜ The remaining **worker-pool** machinery (queue/stealing/worker
-   loop) stays in the root; carving it would need the accessor layer for the shared
-   reduction budget and is deferred (not worth the concurrency risk yet).
+2. ✅ **Split `process/scheduler.rs` (2080 → 1088)** — done 2026-07-24. The key
+   insight that unlocked it: **keep every shared static in the root** and relocate
+   only *functions* — then each child reaches the state via `use super::*`, so no
+   accessor layer is needed and the move is behaviour-identical (statics don't
+   move; the reduction budget, run queue, pid tables all stay put). Three child
+   modules under `process/scheduler/`: **`guards.rs`** (GC-block/macro-block depth
+   + RAII guards + the stack-overflow byte guard), **`lifecycle.rs`** (spawn /
+   exit / deregister — process birth & death), **`pool.rs`** (run queue +
+   stealing + the `worker_loop`/`run_one`/`finish_quantum`/`handle_capture_outcome`
+   execution loop). The public/`process`-facing surface is re-exported from
+   `scheduler.rs`, so every `crate::process::…` call site is unchanged. The root
+   keeps the reduction/preemption core + capture-driver glue + `Process`/`Ctx` +
+   the shared statics (the coherent "scheduling state" nucleus). Verified: compiles
+   default + no-default-features; full suite 3071/3071.
 3. ✅ **Split `core/heap/gc.rs` (4520 → 2689)** — done 2026-07-24. Extracted the
    RUNTIME shared-region collector (ADR-091 — two-generation aging, single-process
    compaction, node-liveness drain, live-globals migration + the `RuntimeForward`/
