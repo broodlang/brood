@@ -283,6 +283,21 @@ fn lower(heap: &mut Heap, who: &str, v: Value, ty: &Type) -> Result<Val, LispErr
         },
         Type::List(l) => {
             let elem = l.ty();
+            // Fast path: a `list<u8>` parameter accepts a Brood `bytes` value directly
+            // (the byte-oriented calls — hashing, compression, codecs, binary parsing —
+            // pass bytes, not an int vector). Lower each octet to `u8` in one pass; a
+            // vector/list of ints still lowers via the generic path below.
+            if matches!(elem, Type::U8) {
+                if let Value::Bytes(id) = v {
+                    let out = heap
+                        .bytes(id)
+                        .as_bytes()
+                        .iter()
+                        .map(|&b| Val::U8(b))
+                        .collect();
+                    return Ok(Val::List(out));
+                }
+            }
             let items = seq_items(heap, who, v)?;
             let mut out = Vec::with_capacity(items.len());
             for item in items {
@@ -362,6 +377,21 @@ fn lift(heap: &mut Heap, who: &str, v: &Val) -> LispResult {
         Val::Float64(f) => Value::Float(*f),
         Val::Char(c) => heap.alloc_string(&c.to_string()),
         Val::String(s) => heap.alloc_string(s),
+        // A `list<u8>` result lifts to a Brood `bytes` value — the byte-oriented
+        // return (a hash, compressed output, an encoded frame). Detected from the
+        // element vals (all `u8`), so no result-type threading is needed. An EMPTY
+        // list is ambiguous (`list<u8>` vs `list<s32>` both lower to `[]`), so it
+        // stays an empty vector; a caller needing empty bytes builds one explicitly.
+        Val::List(items) if !items.is_empty() && items.iter().all(|i| matches!(i, Val::U8(_))) => {
+            let bytes: Vec<u8> = items
+                .iter()
+                .map(|i| match i {
+                    Val::U8(b) => *b,
+                    _ => unreachable!("guarded all-u8 above"),
+                })
+                .collect();
+            heap.alloc_bytes(crate::core::blob::SharedBlob::new(&bytes))
+        }
         Val::List(items) | Val::Tuple(items) => {
             let vals: Result<Vec<Value>, LispError> =
                 items.iter().map(|i| lift(heap, who, i)).collect();

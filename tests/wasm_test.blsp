@@ -55,6 +55,17 @@
                              (i32.mul (local.get $i) (i32.const 4))))))
              (local.set $i (i32.add (local.get $i) (i32.const 1)))
              (br $loop)))
+         (local.get $acc))
+       (func (export \"byte-sum\") (param i32 i32) (result i32)
+         (local $acc i32) (local $i i32)
+         (block $done
+           (loop $loop
+             (br_if $done (i32.ge_u (local.get $i) (local.get 1)))
+             (local.set $acc
+               (i32.add (local.get $acc)
+                 (i32.load8_u (i32.add (local.get 0) (local.get $i)))))
+             (local.set $i (i32.add (local.get $i) (i32.const 1)))
+             (br $loop)))
          (local.get $acc)))
      (core instance $i (instantiate $m))
      (func $echo (param \"s\" string) (result string)
@@ -63,8 +74,18 @@
      (func $sum (param \"xs\" (list s32)) (result s32)
        (canon lift (core func $i \"sum\") (memory $i \"mem\")
          (realloc (func $i \"realloc\"))))
+     ;; `blob-echo` reuses the same core `echo` (a string and a list<u8> share the
+     ;; (ptr,len) canonical layout) — proves bytes lower in and lift back out.
+     (func $blob-echo (param \"b\" (list u8)) (result (list u8))
+       (canon lift (core func $i \"echo\") (memory $i \"mem\")
+         (realloc (func $i \"realloc\"))))
+     (func $byte-sum (param \"b\" (list u8)) (result u32)
+       (canon lift (core func $i \"byte-sum\") (memory $i \"mem\")
+         (realloc (func $i \"realloc\"))))
      (export \"echo\" (func $echo))
-     (export \"sum\" (func $sum)))")
+     (export \"sum\" (func $sum))
+     (export \"blob-echo\" (func $blob-echo))
+     (export \"byte-sum\" (func $byte-sum)))")
 
 ;; A component whose export loops forever — the fuel meter must trap it.
 (def *spin-wat*
@@ -103,6 +124,26 @@
       (assert= (wasm-call inst "sum" [1 2 3 4 5]) 15)
       (assert= (wasm-call inst "sum" (list 10 20 30)) 60)
       (assert= (wasm-call inst "sum" []) 0)
+      (wasm-close inst))))
+
+(describe "wasm: bytes marshal in and out (list<u8>)"
+  (test "a bytes value lowers into a list<u8> param and lifts back to bytes"
+    (let (inst (wasm-instantiate *memory-wat*))
+      ;; high bytes (\x00, \xff) prove the round-trip is byte-faithful — not
+      ;; routed through UTF-8 like `echo`/string would mangle.
+      (let (out (wasm-call inst "blob-echo" #b"hi\x00\xff\x80"))
+        (is (bytes? out))
+        (assert= out #b"hi\x00\xff\x80"))
+      (wasm-close inst)))
+  (test "byte-sum reads the octets — a bytes value or an int vector both lower"
+    (let (inst (wasm-instantiate *memory-wat*))
+      (assert= (wasm-call inst "byte-sum" #b"\x01\x02\x03") 6)
+      (assert= (wasm-call inst "byte-sum" [10 20 30]) 60)   ; an int vector still lowers
+      (assert= (wasm-call inst "byte-sum" #b"") 0)
+      (wasm-close inst)))
+  (test "an empty list<u8> result is the documented edge — an empty vector, not bytes"
+    (let (inst (wasm-instantiate *memory-wat*))
+      (assert= (wasm-call inst "blob-echo" #b"") [])
       (wasm-close inst))))
 
 (describe "wasm: the sandbox holds"

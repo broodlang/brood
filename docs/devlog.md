@@ -6203,3 +6203,30 @@ VM-eligibility optimization is a follow-up, and quasiquoting into a set literal
 cross-process fan-in); `reader_hints_test` updated (`#{…}` now reads instead of
 raising the old teaching hint). Suite **2921/2921**, `nest check` zero warnings,
 differential + GC + runtime-collector/multigen green.
+
+## 2026-07-24 — WASM interop slice 2: bytes marshalling (`list<u8>` ↔ `bytes`)
+
+The next WASM slice after the ADR-145 host — a capability, not the delivery
+vehicle. Before this, `list<u8>` crossed the boundary only as a vector of ints:
+a `bytes` value couldn't be passed to a `list<u8>` parameter, and a byte-returning
+export came back as an int vector. That blocks the canonical wasm extension shapes
+(hash, compress, codec, binary parse), which are all byte-oriented.
+
+`crates/lisp/src/wasm.rs`: `lower` grows a fast path — a `Type::List` whose element
+is `u8` accepts a `Value::Bytes` and lowers each octet in one pass (a vector/list of
+ints still lowers via the generic path). `lift` splits the merged `List|Tuple` arm:
+a **non-empty** `Val::List` whose elements are all `Val::U8` lifts to a `Value::Bytes`
+(via the blob heap) — detected from the self-describing `Val`s, so no result-type
+threading. The one edge: an **empty** `list<u8>` result is indistinguishable from an
+empty `list<s32>` (both `Val::List([])`), so it stays an empty vector — documented,
+and a caller needing empty bytes builds one explicitly.
+
+Copy-based (the deferred slice is zero-copy read-mapping into linear memory).
+Testable toolchain-free: `tests/wasm_test.blsp`'s `*memory-wat*` gained a `byte-sum`
+core func and two component exports — `blob-echo (list<u8>) -> (list<u8>)` (reuses
+the string `echo` core, since a string and a `list<u8>` share the `(ptr,len)`
+canonical layout) and `byte-sum (list<u8>) -> u32`. Three new tests: a byte-faithful
+round-trip through high bytes (`\x00\xff\x80` — proves it isn't UTF-8-routed), the
+bytes-or-int-vector lower, and the empty-list edge. 15/15 wasm tests green, GC-stress
++ verify clean. Recommended next WASM slice: the package-manager `:native`
+manifest/lock/fetch integration (the delivery vehicle) — see docs/interop.md.

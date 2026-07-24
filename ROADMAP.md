@@ -562,10 +562,19 @@ Runtime housekeeping (both items landed):
   WIT-typed marshalling + fuel metering, `std/wasm.blsp` (`wasm-load`,
   `wasm-call`, `wasm-call-blocking` on the ADR-144 pool, `use-native` binding
   every export as a Brood fn), the `:unbound` checker category, and
-  toolchain-free WAT-component tests. ⬜ Remaining slices: the
-  package-manager `:native` manifest/lock/build-on-fetch integration
-  (`%wasm-build`), WASI capability grants, guest `resource` handles, epoch
-  preemption, blob zero-copy.
+  toolchain-free WAT-component tests. ✅ **Slice 2 (bytes marshalling) shipped
+  2026-07-24:** a `list<u8>` parameter accepts a Brood `bytes` value directly
+  (one-pass octet lower — the byte-oriented calls: hashing, compression, codecs,
+  binary parsing), and a non-empty `list<u8>` result lifts back to `bytes` (an
+  int vector still lowers; an empty `list<u8>` result stays an empty vector — the
+  documented ambiguity edge). Copy-based (zero-copy read-mapping is still
+  deferred); `crates/lisp/src/wasm.rs` `lower`/`lift` + `tests/wasm_test.blsp`
+  (`blob-echo`/`byte-sum` over a `list<u8>` WAT component). ⬜ Remaining slices:
+  the package-manager `:native` manifest/lock/build-on-fetch integration
+  (`%wasm-build`) — the delivery vehicle, recommended next; WASI capability grants
+  (gated on that manifest); guest `resource` handles; epoch preemption (low value
+  — fuel already bounds runaways); and the blob **zero-copy** read-mapping
+  optimization (over today's copy).
 
 ### VM & JIT
 

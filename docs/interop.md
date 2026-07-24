@@ -6,9 +6,14 @@
 > WIT-typed marshalling and fuel metering, `std/wasm.blsp` (`wasm-load`,
 > `wasm-call`, `wasm-call-blocking` via the ADR-144 offload pool,
 > `use-native`), and the `:unbound` checker category for runtime-defined
-> bindings. Still ahead (the rest of this note): the package-manager
-> `:native` manifest/lock/build-on-fetch integration, WASI capability
-> grants, guest `resource` handles, and blob zero-copy. This is the
+> bindings. **Slice 2 (bytes marshalling) landed 2026-07-24:** a `list<u8>`
+> parameter accepts a Brood `bytes` value directly and a non-empty `list<u8>`
+> result lifts back to `bytes` (copy-based; `wasm.rs` `lower`/`lift`) — so the
+> byte-oriented extensions (hash/compress/codec/parse) round-trip binary data.
+> Still ahead (the rest of this note): the package-manager `:native`
+> manifest/lock/build-on-fetch integration (the delivery vehicle — recommended
+> next), WASI capability grants, guest `resource` handles, and the blob
+> **zero-copy** read-mapping optimization (over slice 2's copy). This is the
 > long-term answer to "how does a Brood package use code from another
 > ecosystem (or ship a perf-critical native kernel) without forking the Rust
 > kernel?" The short answer: **a package may ship a WebAssembly component;
