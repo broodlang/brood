@@ -427,11 +427,22 @@ docs/testing.md for the full guide.")
 (defn test--has-tag? (tags key-string)
   (fold (fn (found tag) (or found (= (name tag) key-string))) false (into [] tags)))
 
+;; Is `needle` a trailing suffix of `path` on a PATH-COMPONENT boundary? The
+;; boundary check is what stops `a_test.blsp` from matching `extra_test.blsp` —
+;; a plain `ends-with?` says yes to that, so `nest test a_test.blsp:5` could
+;; select a test in a completely different file.
+(defn test--path-suffix? (path needle)
+  (and (ends-with? path needle)
+    (let (cut (- (string-length path) (string-length needle)))
+      (or (= cut 0) (= (substring path (- cut 1) cut) "/")))))
+
 ;; Two paths may name the same file (the CLI gets what the user typed; the meta
 ;; carries what `current-file` recorded), so match on a path-suffix relationship
 ;; rather than demanding string equality.
 (defn test--same-file? (a b)
-  (and (not (nil? a)) (not (nil? b)) (or (= a b) (ends-with? a b) (ends-with? b a))))
+  (and (not (nil? a))
+    (not (nil? b))
+    (or (= a b) (test--path-suffix? a b) (test--path-suffix? b a))))
 
 (defn test--match-selector? (selector group-label test-name tags)
   (let (key (first selector)

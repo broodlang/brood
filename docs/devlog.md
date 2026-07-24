@@ -6621,3 +6621,35 @@ dropped): `--cover` (no coverage mechanism exists — the IR already carries
 positions and `Value::Table` can aggregate across processes, but it wants a Rust
 recording seam + a Brood reporting module + an ADR), `--stale` (needs a per-test
 dependency graph), `--formatter`, `--breakpoints`.
+
+## 2026-07-24 — review pass on `nest test` selection: four defects fixed
+
+A deliberate review of the code from the previous entry, probing edge cases rather
+than re-reading. Four real defects, all now covered by tests:
+
+1. **Path matching crossed filename boundaries.** `test--same-file?` compared paths
+   with a bare `ends-with?` in both directions — and `"extra_test.blsp"` genuinely
+   *does* end with `"a_test.blsp"` (the last 11 characters are exactly that), so a
+   `FILE:LINE` selector could pick a test out of an unrelated file. Now the suffix
+   must land on a path-component boundary (`test--path-suffix?`: the character
+   before the match has to be `/`). Narrow in practice — it needs both files named
+   in one run with bare-filename paths — but silent and wrong when hit.
+2. **`--shard K` out of range silently ran nothing.** `--partitions 2 --shard 5`
+   matched no test and exited 0. A CI job reads that as green. Now exits 2 with the
+   valid range.
+3. **`--shard` without `--partitions` was silently ignored** — it ran the whole
+   suite while looking like a shard. Also exits 2 now.
+4. **`--seed 0` contradicted its own help**, which claimed 0 meant declaration
+   order; the runner only skips shuffling when the seed is *absent*. Help corrected
+   — any value shuffles, omitting the flag keeps declaration order.
+
+Also documented that positive selectors **union**: `--failed --only slow` is
+(failures ∪ slow), not the intersection. Narrowing wants `--failed --exclude slow`.
+
+Two sharp edges noted and deliberately left:
+- `test--resolve-lines` warns per *drain*, and the scoped runner drains per file, so
+  a `:lines` spec reaching the scoped path would warn once per file. Unreachable
+  from the CLI (a positional `FILE:LINE` forces the single-file path, one drain), so
+  it stays a latent note rather than a fix in search of a caller.
+- Group→test tag merging can duplicate a tag present at both levels. Matching is
+  by presence, so it is harmless.

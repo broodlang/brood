@@ -225,8 +225,17 @@ nothing.
 A `FILE:LINE` that addresses no test **runs zero tests and warns** — it does not
 fall back to the whole suite, which in CI would be indistinguishable from success.
 
+**Positive selectors union, they don't intersect.** `--only`, `FILE:LINE`,
+`--failed` and `--names` all *add* candidates, so `--failed --only slow` runs
+(last run's failures) ∪ (`:slow` tests), not their intersection. To narrow rather
+than widen, pair one positive selector with `--exclude`:
+`nest test --failed --exclude slow`.
+
 `--partitions` assigns each test by a stable hash of its full label, so shards
-never overlap or drop a test regardless of machine or run order.
+never overlap or drop a test regardless of machine or run order. `--shard` is
+0-based and **required** to be in range: `--shard` without `--partitions`, or a
+shard index ≥ the partition count, exits 2 rather than silently running zero
+tests (which a CI job would read as green).
 
 ## Running
 

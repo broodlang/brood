@@ -176,8 +176,9 @@ enum Cmd {
         #[arg(long, value_name = "N")]
         repeat_until_failure: Option<u64>,
 
-        /// Randomise test order using this seed (0 keeps declaration order). The
-        /// seed is echoed in the summary so a failure can be replayed.
+        /// Randomise test order using this seed. Any value shuffles (including 0);
+        /// omit the flag for declaration order. The seed is echoed in the summary
+        /// so a failure can be replayed exactly.
         #[arg(long, value_name = "N")]
         seed: Option<u64>,
 
@@ -647,7 +648,30 @@ fn split_file_line(arg: &str) -> (String, Option<u64>) {
     (arg.to_string(), None)
 }
 
+/// Reject a shard selection that would silently run nothing. `--partitions 2
+/// --shard 5` matches no test, and `--shard` without `--partitions` is ignored
+/// outright — both exit 0 having run zero tests, which in CI is indistinguishable
+/// from a green build. Fail loudly instead.
+fn validate_shard(opts: &TestOpts) {
+    match (opts.partitions, opts.shard) {
+        (None, shard) if shard != 0 => {
+            eprintln!("nest test: --shard {shard} needs --partitions N (it is ignored without it)");
+            std::process::exit(2);
+        }
+        (Some(total), shard) if shard >= total => {
+            eprintln!(
+                "nest test: --shard {shard} is out of range for --partitions {total} \
+                 (shards are 0-based, so use 0..{})",
+                total - 1
+            );
+            std::process::exit(2);
+        }
+        _ => {}
+    }
+}
+
 fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
+    validate_shard(opts);
     // Default a memory ceiling on for test runs (ADR-043); an explicit
     // BROOD_MEM_LIMIT still wins (init ran first in main()).
     brood::core::alloc::init_limits_with_default(

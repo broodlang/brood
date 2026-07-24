@@ -104,6 +104,20 @@
     (assert= (selection--select {:lines (list ["demo_test.blsp" 4])}) (list "math › adds")))
   (test "an unknown file selects nothing"
     (assert= (selection--select {:lines (list ["tests/other_test.blsp" 4])}) nil))
+  ;; Regression: matching paths with a bare `ends-with?` made "a_test.blsp" a
+  ;; suffix of "extra_test.blsp" (the last 11 chars are literally "a_test.blsp"),
+  ;; so a line selector could pick a test out of an unrelated file. The match must
+  ;; land on a path-component boundary.
+  (test "a suffix that isn't on a path boundary does NOT match"
+    (refute (test/test--same-file? "tests/extra_test.blsp" "a_test.blsp")))
+  (test "a suffix on a path boundary does match"
+    (is (test/test--same-file? "tests/a_test.blsp" "a_test.blsp")))
+  (test "a whole-path match still works"
+    (is (test/test--same-file? "tests/a_test.blsp" "tests/a_test.blsp")))
+  (test "a multi-component suffix matches on its boundary"
+    (is (test/test--same-file? "/abs/proj/tests/a_test.blsp" "tests/a_test.blsp")))
+  (test "a near-miss directory does not match"
+    (refute (test/test--same-file? "/abs/proj/mytests/a_test.blsp" "tests/a_test.blsp")))
   (test "a line selector combines with --only as a union"
     (assert= (selection--select {:only (list ["describe" "string"])
                                  :lines (list ["tests/demo_test.blsp" 4])})
