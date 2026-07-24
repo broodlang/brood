@@ -6128,3 +6128,41 @@ Windows-only backslash path nit in the MCP sandbox (Brood targets Linux). The MC
 write/edit sandbox and the HTTP/SSE parsers were re-audited adversarially and held.
 
 Suite 803/803; `nest check` zero warnings.
+
+## 2026-07-24 — Reactor reap hardening: TLS handshake timeout + opt-in idle timeout
+
+The deferred defence-in-depth item from validation round 3 (the mio reactor's gap:
+a stalled or forgotten socket with a live owner is never reaped). Two additions to
+`crates/lisp/src/net.rs`, split by what is safe to make a default:
+
+- **TLS handshake-completion timeout (default-on, 30 s).** A peer that opens a TLS
+  connection — server-accepted (`tls-listen`) or the client half of `tls-request`
+  — then stalls mid-handshake holds an fd the app *cannot* reclaim: it never sees
+  the socket until the handshake finishes, so no app-level read timeout can
+  intervene. The genuinely reactor-only gap. `TlsConn` carries a
+  `handshake_deadline`, set at both creation sites, cleared in `drive_tls` once
+  `!is_handshaking()`; `housekeep` reaps a still-handshaking conn past the deadline
+  via `tls_finish` (→ `[:tcp-error]` for a client, `[:tcp-closed]` for a server).
+  Verified firing at ~2 s with the bound temporarily lowered.
+
+- **Opt-in idle timeout (default-off, `tcp-set-idle-timeout sock ms`).** A blanket
+  idle default is impossible: SSE, long-poll, and the editor daemon all hold
+  *legitimately* idle connections, and the reactor can't tell "forgotten" from
+  "intentionally idle." So it is per-socket opt-in: a server arms it on a
+  connection accepting untrusted input (slow-loris protection the reactor applies
+  even if the app forgets to close), and everything else is untouched — the
+  default-off path never reaps, so a long-idle stream is safe. `PlainConn`/`TlsConn`
+  carry `idle` + a `last_activity` stamp; a new `Cmd::SetIdle` arms/disarms;
+  `housekeep` reaps an established, armed, idle conn with a terminal message.
+  Detection rides the ~1 s housekeep tick (idle bounds are coarse — fine for
+  slow-loris). An adversarial review of the reap paths caught two `last_activity`
+  gaps, both fixed before landing: the clock must start at **establishment**
+  (`Cmd::Claim` / handshake completion), not at accept/arm — else a bound armed
+  before the claim, or a slow handshake, reaped a healthy connection the instant it
+  came up; and **outbound flush progress** counts as activity too (a large response
+  draining to a slow reader was otherwise idle-reaped mid-send). `tests/tcp_test.blsp`
+  +3 (armed silent conn reaped; establishment-relative clock; activity resets the
+  timer so an active conn is NOT reaped).
+
+The app-side per-read timeout (`*http-read-timeout-ms*`) that already protects the
+HTTP server is unchanged. Suite 803/803; `nest check` zero warnings.

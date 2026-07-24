@@ -64,6 +64,15 @@ use crate::process::{chunk_flush, chunk_payload, sink_pair, MailboxSink, Message
 /// forever — a DoS surface for any server built on this mechanism.
 const ACCEPT_REAP_AFTER: Duration = Duration::from_secs(30);
 
+/// How long a TLS connection may take to complete its handshake before the
+/// reactor drops it. A peer that opens a TLS connection — server-accepted
+/// (`tls-listen`) or the client half of `tls-request` — then stalls mid-handshake
+/// holds an fd the application **cannot** reclaim: it never sees the socket until
+/// the handshake finishes, so no app-level read timeout can intervene. This is the
+/// reactor's own bound on that window (handshakes complete in milliseconds; 30 s is
+/// generous), the slow-loris / broken-peer guard the app can't provide itself.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Per-socket outbound queue cap. `tcp-send` is asynchronous (the reactor
 /// flushes as the peer accepts bytes), so a stuck reader would otherwise grow
 /// the queue without bound; past this the connection is dropped and the owner
@@ -162,6 +171,8 @@ enum Cmd {
     Claim { id: u64 },
     /// Queue outbound bytes.
     Send { id: u64, bytes: Vec<u8> },
+    /// Arm/disarm an established stream's idle timeout (`ms` = 0 disarms).
+    SetIdle { id: u64, ms: u64 },
     /// Flush queued outbound (bounded by [`LINGER`]) and close.
     Close { id: u64 },
 }
@@ -289,6 +300,14 @@ struct PlainConn {
     /// `Some(deadline)` once `Close` arrived: flush until then, then drop.
     closing: Option<Instant>,
     registered: bool,
+    /// Opt-in idle bound (`tcp-set-idle-timeout`, default off). When `Some`, the
+    /// reactor drops the connection if no bytes move in either direction for this
+    /// long — slow-loris protection a raw-TCP server can arm on a connection it
+    /// accepts. Off by default so a legitimately long-idle stream (SSE, long-poll,
+    /// the editor daemon) is never reaped.
+    idle: Option<Duration>,
+    /// Last time bytes moved (inbound read or outbound `Send`) — the idle stamp.
+    last_activity: Instant,
 }
 
 /// One TLS stream's reactor state — the same machine drives a server
@@ -314,6 +333,16 @@ struct TlsConn {
     /// `tls-request` semantics: errors emit `[:tcp-error]` instead of
     /// `[:tcp-closed]`, and a missing close_notify at EOF is tolerated.
     one_shot: bool,
+    /// `Some(deadline)` while the handshake is still in progress; cleared to
+    /// `None` the first tick after `is_handshaking()` goes false. The reactor
+    /// drops the connection if the handshake hasn't completed by then
+    /// ([`HANDSHAKE_TIMEOUT`]).
+    handshake_deadline: Option<Instant>,
+    /// Opt-in idle bound (`tcp-set-idle-timeout`, default off) — see
+    /// [`PlainConn::idle`]. Applies once the handshake is complete.
+    idle: Option<Duration>,
+    /// Last time bytes moved (inbound plaintext or outbound `Send`).
+    last_activity: Instant,
 }
 
 /// A passive accepted TLS connection: raw materials until claimed.
@@ -499,6 +528,8 @@ fn accept_ready(
                         accepted_at: Some(Instant::now()),
                         closing: None,
                         registered: false,
+                        idle: None,
+                        last_activity: Instant::now(),
                     }),
                 };
                 out.push((cid, entry, tcp_accept_msg(lid, cid), sink.clone()));
@@ -552,6 +583,7 @@ fn drive_plain(
     registry: &mio::Registry,
 ) -> bool {
     if writable || !c.out.is_empty() {
+        let before = c.out.total;
         match c.out.flush_into(&mut c.stream) {
             Ok(_) => {}
             Err(_) => {
@@ -561,6 +593,11 @@ fn drive_plain(
                 }
                 return true;
             }
+        }
+        // Outbound bytes actually left the queue — count it as activity so a large
+        // response draining to a slow reader isn't idle-reaped mid-send.
+        if c.out.total < before {
+            c.last_activity = Instant::now();
         }
         if c.out.is_empty() && c.closing.is_some() {
             if c.reading && !c.read_done {
@@ -583,6 +620,7 @@ fn drive_plain(
                     break;
                 }
                 Ok(n) => {
+                    c.last_activity = Instant::now();
                     let bin = c.binary.load(Ordering::Acquire);
                     if let Some(p) = chunk_payload(&mut c.carry, &buf[..n], bin) {
                         c.sink.emit(tcp_data_msg(id, p));
@@ -680,7 +718,9 @@ fn drive_tls(
         while c.conn.wants_write() {
             match c.conn.write_tls(&mut c.stream) {
                 Ok(0) => return tls_finish(id, c, Some("tls: connection closed".into())),
-                Ok(_) => {}
+                // Bytes left for the peer — outbound progress counts as activity so
+                // a large response draining to a slow reader isn't idle-reaped.
+                Ok(_) => c.last_activity = Instant::now(),
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => return tls_finish(id, c, Some(format!("tls: {e}"))),
@@ -717,6 +757,7 @@ fn drive_tls(
                                 }
                             }
                             if got > 0 {
+                                c.last_activity = Instant::now();
                                 let bin = c.binary.load(Ordering::Acquire);
                                 if let Some(p) = chunk_payload(&mut c.carry, &buf[..got], bin) {
                                     c.sink.emit(tcp_data_msg(id, p));
@@ -737,6 +778,15 @@ fn drive_tls(
                 Err(e) => return tls_finish(id, c, Some(format!("tls: {e}"))),
             }
         }
+    }
+    // Handshake done → retire its deadline so the reactor stops watching it. (An
+    // established connection may legitimately idle for a long time — the idle
+    // bound below is opt-in, never this.) Start the idle clock from *here*, not
+    // from creation: the handshake window must not count against an idle bound
+    // armed at claim time.
+    if c.handshake_deadline.is_some() && !c.conn.is_handshaking() {
+        c.handshake_deadline = None;
+        c.last_activity = Instant::now();
     }
     sync_tls_registration(id, c, registry);
     false
@@ -761,6 +811,8 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
                 accepted_at: None,
                 closing: None,
                 registered: false,
+                idle: None,
+                last_activity: Instant::now(),
             };
             sync_plain_registration(id, &mut c, registry);
             conns.insert(id, Rx::Plain(c));
@@ -830,6 +882,9 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
                         registered: false,
                         pending_out: 0,
                         one_shot: true,
+                        handshake_deadline: Some(Instant::now() + HANDSHAKE_TIMEOUT),
+                        idle: None,
+                        last_activity: Instant::now(),
                     };
                     sync_tls_registration(id, &mut c, registry);
                     conns.insert(id, Rx::Tls(c));
@@ -845,6 +900,10 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
                 Some(Rx::Plain(mut c)) => {
                     c.reading = true;
                     c.accepted_at = None;
+                    // Start the idle clock from establishment, not from accept/arm:
+                    // any wait while passive & unclaimed must not count against an
+                    // idle bound armed before the claim.
+                    c.last_activity = Instant::now();
                     sync_plain_registration(id, &mut c, registry);
                     conns.insert(id, Rx::Plain(c));
                 }
@@ -861,6 +920,9 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
                             registered: false,
                             pending_out: 0,
                             one_shot: false,
+                            handshake_deadline: Some(Instant::now() + HANDSHAKE_TIMEOUT),
+                            idle: None,
+                            last_activity: Instant::now(),
                         };
                         sync_tls_registration(id, &mut c, registry);
                         conns.insert(id, Rx::Tls(c));
@@ -892,6 +954,7 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
                         true
                     } else {
                         c.out.push(bytes);
+                        c.last_activity = Instant::now();
                         // Try at once — the common case is a writable socket,
                         // and edge-triggered polls only fire on transitions.
                         drive_plain(id, c, false, true, registry)
@@ -914,6 +977,7 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
                         true
                     } else {
                         c.pending_out += bytes.len();
+                        c.last_activity = Instant::now();
                         let _ = c.conn.writer().write_all(&bytes);
                         drive_tls(id, c, false, true, registry)
                     }
@@ -922,6 +986,26 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
             };
             if remove {
                 teardown(id, conns, registry);
+            }
+        }
+        Cmd::SetIdle { id, ms } => {
+            let idle = if ms == 0 {
+                None
+            } else {
+                Some(Duration::from_millis(ms))
+            };
+            match conns.get_mut(&id) {
+                Some(Rx::Plain(c)) => {
+                    c.idle = idle;
+                    c.last_activity = Instant::now();
+                }
+                Some(Rx::Tls(c)) => {
+                    c.idle = idle;
+                    c.last_activity = Instant::now();
+                }
+                // A listener or a not-yet-claimed accept: nothing to arm (an
+                // unclaimed accept is already bounded by ACCEPT_REAP_AFTER).
+                _ => {}
             }
         }
         Cmd::Close { id } => {
@@ -992,7 +1076,15 @@ fn teardown(id: u64, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) {
 
 fn housekeep(conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) {
     let now = Instant::now();
+    // Silent drops (unclaimed accepts, expired lingers — no owner is waiting on a
+    // terminal message, or already got one from the `Close` path).
     let mut doomed: Vec<u64> = Vec::new();
+    // A stalled TLS handshake: the owner (if any) IS waiting, so emit the terminal
+    // message via `tls_finish` before teardown.
+    let mut handshake_timeouts: Vec<u64> = Vec::new();
+    // Opt-in idle-timeout reaps: the owner armed this and IS waiting, so it gets a
+    // terminal message too (plaintext `[:tcp-closed]`, TLS via `tls_finish`).
+    let mut idle_reaps: Vec<u64> = Vec::new();
     for (&id, rx) in conns.iter() {
         match rx {
             Rx::Plain(c) => {
@@ -1004,6 +1096,12 @@ fn housekeep(conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) {
                 if let Some(deadline) = c.closing {
                     if now >= deadline {
                         doomed.push(id);
+                    }
+                } else if let Some(idle) = c.idle {
+                    // Established (claimed, still reading) and gone quiet in both
+                    // directions past its armed bound.
+                    if c.reading && !c.read_done && now.duration_since(c.last_activity) >= idle {
+                        idle_reaps.push(id);
                     }
                 }
             }
@@ -1017,10 +1115,40 @@ fn housekeep(conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) {
                     if now >= deadline {
                         doomed.push(id);
                     }
+                } else if let Some(hd) = c.handshake_deadline {
+                    if now >= hd {
+                        handshake_timeouts.push(id);
+                    }
+                } else if let Some(idle) = c.idle {
+                    // Handshake already done (deadline cleared) and idle past bound.
+                    if !c.read_done && now.duration_since(c.last_activity) >= idle {
+                        idle_reaps.push(id);
+                    }
                 }
             }
             _ => {}
         }
+    }
+    for id in handshake_timeouts {
+        if let Some(Rx::Tls(c)) = conns.get_mut(&id) {
+            tls_finish(id, c, Some("tls: handshake timed out".into()));
+        }
+        teardown(id, conns, registry);
+    }
+    for id in idle_reaps {
+        match conns.get_mut(&id) {
+            Some(Rx::Plain(c)) => {
+                if !c.read_done {
+                    c.sink.emit(tcp_closed_msg(id));
+                    c.read_done = true;
+                }
+            }
+            Some(Rx::Tls(c)) => {
+                tls_finish(id, c, None);
+            }
+            _ => {}
+        }
+        teardown(id, conns, registry);
     }
     for id in doomed {
         teardown(id, conns, registry);
@@ -1132,6 +1260,31 @@ pub fn set_binary(id: u64, on: bool) -> std::io::Result<()> {
         )),
         None => Err(bad_socket()),
     }
+}
+
+/// `(tcp-set-idle-timeout sock ms)` — arm (or, with `ms` 0, disarm) an idle
+/// timeout on an established stream. The reactor drops the connection if no bytes
+/// move in **either** direction for `ms` milliseconds, delivering `[:tcp-closed]`
+/// (or `[:tcp-error]` for a one-shot TLS client). **Off by default** — arm it on a
+/// connection accepting untrusted input (slow-loris protection the reactor applies
+/// even if the app forgets to close); leave it off for a legitimately long-idle
+/// stream (SSE, long-poll, the editor daemon). No-op if the socket is already
+/// gone by the time the reactor applies it; errors now if it's a listener.
+pub fn set_idle_timeout(id: u64, ms: u64) -> std::io::Result<()> {
+    {
+        let reg = reg();
+        match reg.get(&id) {
+            Some(ctl) if matches!(ctl.kind, Kind::Stream | Kind::TlsStream) => {}
+            Some(_) => {
+                return Err(invalid(
+                    "tcp-set-idle-timeout: socket is a listener, not a stream",
+                ))
+            }
+            None => return Err(bad_socket()),
+        }
+    }
+    reactor().cmd(Cmd::SetIdle { id, ms });
+    Ok(())
 }
 
 /// `(tcp-send sock data)` — queue `data` for the reactor to write (ADR-143:

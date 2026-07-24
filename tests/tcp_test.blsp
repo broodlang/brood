@@ -76,6 +76,56 @@
           (is (bytes? reply))
           (assert= (utf8-bytes->string reply) "hello, world"))))))
 
+(describe "tcp: opt-in idle timeout (tcp-set-idle-timeout)"
+  :isolated
+  (test "an armed, silent connection is reaped with [:tcp-closed]"
+    ;; Neither side speaks; the client's armed idle bound reaps it. (The reap is
+    ;; detected on the reactor's ~1s housekeep tick, so allow slack.)
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ~ls cs] cs) (after 5000 :timeout)))
+        (tcp-set-idle-timeout c 500)
+        (let (ev (receive ([:tcp-closed ~c] :idle-closed) (after 5000 :not-reaped)))
+          (tcp-close s)
+          (tcp-close ls)
+          (assert= ev :idle-closed)))))
+  (test "the idle clock starts at establishment, not at arm-time"
+    ;; Regression: arming idle on a still-passive accepted socket, then claiming it
+    ;; after longer than the bound, wrongly counted the pre-claim wait and reaped
+    ;; the connection the instant it was established. It must start alive.
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ~ls cs] cs) (after 5000 :timeout)))
+        (tcp-set-idle-timeout s 500)          ; arm while still unclaimed/passive
+        (sleep 1200)                          ; wait past the bound, passive
+        (tcp-controlling-process s (self))    ; establish now
+        (let (ev (receive ([:tcp-closed ~s] :reaped-BUG) (after 300 :alive)))
+          (tcp-close c)
+          (tcp-close s)
+          (tcp-close ls)
+          (assert= ev :alive)))))
+  (test "activity resets the timer — an active connection is NOT reaped"
+    ;; idle bound 2000ms, but send every ~1200ms: the second send (at 1200ms)
+    ;; resets the timer, so at 2400ms — past a single idle window — the connection
+    ;; is still open. Without a reset it would have been reaped at ~2000ms.
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ~ls cs] cs) (after 5000 :timeout)))
+        (tcp-controlling-process s (self))
+        (tcp-set-idle-timeout c 2000)
+        (tcp-send c "a")
+        (sleep 1200)
+        (tcp-send c "b")          ; resets the idle stamp at ~1200ms
+        (sleep 1200)              ; ~2400ms total, but only ~1200ms since activity
+        (let (still (receive ([:tcp-closed ~c] :reaped-BUG) (after 100 :alive)))
+          (tcp-close c)
+          (tcp-close s)
+          (tcp-close ls)
+          (assert= still :alive))))))
+
 (describe "tcp: binary mode is inbound-only (ADR-141)"
   :isolated
   (test "binary inbound is bytes; string leaves always go out as UTF-8"

@@ -676,6 +676,14 @@ Runtime housekeeping (both items landed):
   (ADR-143, the parity program's item 3 above): one reactor thread for every
   socket, full-duplex TLS driven sans-io (the read/write-split constraint
   dissolved), `serve-loop` serves https unchanged. M4 is complete.
+  - ✅ **Reactor reap hardening** (2026-07-24): a **TLS handshake-completion
+    timeout** (default-on, 30 s — a peer that stalls mid-handshake holds an fd the
+    app can't reclaim, since it never sees the socket until the handshake
+    finishes), and an **opt-in per-socket idle timeout** (`tcp-set-idle-timeout`,
+    default off — slow-loris protection a server arms on untrusted connections;
+    off by default so a legitimately long-idle stream — SSE, long-poll, the editor
+    daemon — is never reaped). The defence-in-depth complement to the client-side
+    `tcp-close` fixes (2026-07-24 validation round 3).
 - ✅ **OTP near-term** — all three closed as of 2026-07-18:
   **`send-after`/`send-interval`/`cancel-timer`** shipped (pure Brood in the
   prelude — a timer is a green process on the scheduler's timer wheel; the

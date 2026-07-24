@@ -949,6 +949,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "tcp-set-idle-timeout",
+        Arity::exact(2),
+        Sig::new(vec![socket_ty, int], nil_ty),
+        tcp_set_idle_timeout,
+    );
+    def(
+        heap,
         "tcp-controlling-process",
         Arity::exact(2),
         Sig::new(vec![socket_ty, pid_ty], nil_ty),
@@ -2682,6 +2689,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("tls-self-signed", &["host"], "Generate a self-signed TLS certificate + private key for host (a DNS name like \"localhost\"), for zero-config dev TLS. Returns [cert-pem key-pem] — pass them to tls-listen. Not for production (clients reject a self-signed cert unless told to trust it)."),
     ("tcp-send", &["sock", "data"], "Write data to sock (blocking). data is any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139). A string leaf is always sent as its UTF-8 bytes, whatever the socket's mode (ADR-141); raw bytes go out as bytes values. Returns nil; throws on error."),
     ("tcp-set-binary", &["sock", "on"], "Switch sock's INBOUND decode between text mode (default) and binary mode; outbound tcp-send is unaffected (ADR-141). In binary mode inbound [:tcp sock data] delivers data as a byte-faithful `bytes` value (not a string) — for length-prefixed / control-byte protocols like WebSocket framing or a database wire protocol. Text mode delivers a UTF-8 string. Returns nil; throws if sock is gone or a listener."),
+    ("tcp-set-idle-timeout", &["sock", "ms"], "Arm (or, with ms 0, disarm) an idle timeout on an established stream: the reactor drops the connection if no bytes move in EITHER direction for ms milliseconds, delivering [:tcp-closed] (or [:tcp-error] for a one-shot TLS client). Off by default — arm it on a connection accepting untrusted input as slow-loris protection the reactor applies even if the app forgets to close; leave it off for a legitimately long-idle stream (SSE, long-poll). Returns nil; throws if sock is gone or a listener."),
     ("tcp-controlling-process", &["sock", "pid"], "Make pid the owner of sock's inbound data: starts reading a just-accepted (passive) socket, or retargets an active one. Returns nil."),
     ("tcp-close", &["sock"], "Close sock (a stream or listener), releasing its fd / stopping its accept loop. Idempotent; returns nil."),
     ("tcp-local-port", &["sock"], "The local port sock is bound to, or nil."),
