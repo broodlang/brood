@@ -565,9 +565,18 @@ Runtime housekeeping (both items landed):
   executed from inside a VM arm, and via `spawn` (identical die-uncaught behavior).
   Presumably fixed en route by the capture/closure-template unification work; if a
   diverging shape resurfaces, it belongs in the differential fuzzer corpus.
-- ⬜ **Route remaining native higher-order callbacks** (`try`/`binding`/`apply`/
-  `isolate`) through the VM like `%range-reduce` — previously blocked on the
-  divergence above, now unblocked.
+- ✅ **Native higher-order callbacks route through the VM** (`try`/`binding`/
+  `apply`/`isolate`) — done. Each dispatches its Brood callback through the shared
+  `apply_engine` selector (`crates/lisp/src/eval/compile/mod.rs`), which runs the
+  callback compiled on the VM when it's the active engine and on the tree-walker
+  only under `BROOD_VM=0` — the once-per-call analog of the `use_vm`/`apply_value`
+  branch `%range-reduce` uses per element. Call sites: `%try`/handler
+  (`builtins/system.rs` `try_catch`), `%binding` thunk (`binding`), `%isolate`
+  thunk (`isolate`), and the `apply` builtin's target (`apply_builtin`). The
+  cached-arm hot path (`hof_resolve`/`hof_apply_step`) `%range-reduce` also uses is
+  deliberately absent here: it amortizes cost across a tight loop and buys nothing
+  for a thunk invoked once. The divergence above (since verified fixed) confirms
+  the VM-routed path is behaviour-identical to the tree-walker.
 - ⬜ **JIT Stage 4 — RUNTIME compaction survival** (ADR-091) — a constant-pool
   indirection table (ADR-096 §4.C) lets `runtime_collect` rewrite handles without
   invalidating machine code.
