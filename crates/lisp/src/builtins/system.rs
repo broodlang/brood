@@ -709,6 +709,7 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // wrapping help text or terminal output. No dependencies. Opt-in.
     ("text", include_str!("../../../../std/text.blsp")),
     ("project", include_str!("../../../../std/tool/project.blsp")),
+    ("coverage", include_str!("../../../../std/tool/coverage.blsp")),
     // `nest new` scaffolding (templates + new-project), split out of `project` so
     // the analysis half stays lean. `(:use project)` for *config-git-init*. Opt-in.
     (

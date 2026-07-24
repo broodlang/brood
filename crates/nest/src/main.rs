@@ -204,6 +204,18 @@ enum Cmd {
         /// Don't print each test as it starts (the default prints them).
         #[arg(long)]
         no_trace: bool,
+
+        /// Report FUNCTION-level coverage after the run: which of the project's
+        /// functions the suite never called. Instrumenting rebinds every project
+        /// function through a counting shim, so a `--cover` run is not a timing
+        /// run. Not line coverage — see docs/coverage.md.
+        #[arg(long)]
+        cover: bool,
+
+        /// Fail the run (exit non-zero) if coverage is below this percentage.
+        /// Implies `--cover`.
+        #[arg(long, value_name = "PCT")]
+        cover_min: Option<u64>,
     },
 
     /// Advisory type-check the project, or specific files.
@@ -439,6 +451,8 @@ fn run_main(cli: Cli) {
             partitions,
             shard,
             no_trace,
+            cover,
+            cover_min,
         } => {
             // A positional may be `FILE` or `FILE:LINE`; the line suffix becomes a
             // selector while the bare path is what actually gets loaded.
@@ -466,6 +480,8 @@ fn run_main(cli: Cli) {
                 partitions,
                 shard,
                 no_trace,
+                cover,
+                cover_min,
                 lines,
             };
             cmd_test(&mut interp, &paths, &opts);
@@ -541,6 +557,8 @@ struct TestOpts {
     partitions: Option<u64>,
     shard: u64,
     no_trace: bool,
+    cover: bool,
+    cover_min: Option<u64>,
     /// `FILE:LINE` selectors peeled off the positional FILE list.
     lines: Vec<(String, u64)>,
 }
@@ -614,6 +632,14 @@ impl TestOpts {
         if self.failed {
             parts.push(":failed".to_string());
         }
+        // `--cover-min` implies `--cover`: asking for a floor without asking for
+        // measurement is never what someone means.
+        if self.cover || self.cover_min.is_some() {
+            parts.push(":cover".to_string());
+        }
+        if let Some(n) = self.cover_min {
+            parts.push(format!(":cover-min {n}"));
+        }
         if let Some(n) = self.max_failures {
             parts.push(format!(":max-failures {n}"));
         }
@@ -672,6 +698,14 @@ fn validate_shard(opts: &TestOpts) {
 
 fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
     validate_shard(opts);
+    // Coverage instrumentation rebinds every project function to a variadic shim,
+    // which legitimately changes every arity — so silence the hot-reload arity
+    // diagnostic that would otherwise print once per function. Set before any eval
+    // so the kernel's cached read sees it.
+    if opts.cover || opts.cover_min.is_some() {
+        // SAFETY: single-threaded startup, before any interpreter thread exists.
+        unsafe { std::env::set_var("BROOD_NO_RELOAD_DIAG", "1") };
+    }
     // Default a memory ceiling on for test runs (ADR-043); an explicit
     // BROOD_MEM_LIMIT still wins (init ran first in main()).
     brood::core::alloc::init_limits_with_default(

@@ -1,0 +1,155 @@
+;; Function-level test coverage (std/tool/coverage.blsp).
+;;
+;; The pure reporting helpers are tested directly. The INSTRUMENTATION is tested
+;; against synthetic globals defined in this file rather than against a real
+;; project: `coverage--instrument!` rebinds a global, so those tests live in
+;; `:isolated` blocks whose `def`s roll back — otherwise a shim would leak into the
+;; rest of the suite and stay wrapped for every later test.
+;;
+;; EXPECTED NOISE: each instrumenting test prints a `[reload] arity changed …` line
+;; to stderr. That diagnostic is correct — wrapping really does change the arity to
+;; variadic — and `nest test --cover` silences it with `BROOD_NO_RELOAD_DIAG=1`. A
+;; test can't: there is no `setenv` primitive, and the kernel caches the flag on
+;; first read. Leave the lines; they are the diagnostic working.
+
+(defmodule coverage-test (:use-internals coverage) (:use test) (:use coverage))
+
+(describe "coverage: percentage"
+  (test "an empty denominator is 100%, not 0%"
+    ;; Nothing to cover isn't a failure — and 0% here would fail a --cover-min gate
+    ;; on a project that legitimately has no functions yet.
+    (assert= (coverage/coverage--percent 0 0) 100))
+  (test "none covered is 0%" (assert= (coverage/coverage--percent 0 7) 0))
+  (test "all covered is 100%" (assert= (coverage/coverage--percent 7 7) 100))
+  (test "a half is 50%" (assert= (coverage/coverage--percent 2 4) 50))
+  (test "rounds to nearest rather than truncating"
+    ;; 4/7 = 57.14 → 57; 3/7 = 42.86 → 43 (truncation would give 42)
+    (and (assert= (coverage/coverage--percent 4 7) 57)
+      (assert= (coverage/coverage--percent 3 7) 43)))
+  (test "a single covered function of one is 100%" (assert= (coverage/coverage--percent 1 1) 100)))
+
+(describe "coverage: source-path matching"
+  (test "a file directly inside a source dir matches"
+    (is (coverage/coverage--under? "/p/src/a.blsp" (list "/p/src"))))
+  (test "a file nested deeper matches"
+    (is (coverage/coverage--under? "/p/src/sub/a.blsp" (list "/p/src"))))
+  ;; Regression guard: a plain prefix test would let "src" claim "src-extra".
+  (test "a sibling dir with the source dir as a name prefix does NOT match"
+    (refute (coverage/coverage--under? "/p/src-extra/a.blsp" (list "/p/src"))))
+  (test "an unrelated path does not match"
+    (refute (coverage/coverage--under? "/p/lib/a.blsp" (list "/p/src"))))
+  (test "several source dirs are all considered"
+    (is (coverage/coverage--under? "/p/lib/a.blsp" (list "/p/src" "/p/lib"))))
+  (test "no source dirs matches nothing"
+    (refute (coverage/coverage--under? "/p/src/a.blsp" nil)))
+  (test "a nil path is not under anything"
+    (refute (coverage/coverage--under? nil (list "/p/src")))))
+
+(describe "coverage: path display"
+  (test "a project-relative path drops the root"
+    (assert= (coverage/coverage--relative "/p/src/a.blsp" "/p") "src/a.blsp"))
+  (test "a path outside the root is left alone"
+    (assert= (coverage/coverage--relative "/other/a.blsp" "/p") "/other/a.blsp"))
+  (test "a nil root leaves the path alone"
+    (assert= (coverage/coverage--relative "/p/src/a.blsp" nil) "/p/src/a.blsp")))
+
+;; A result record as `coverage-results` produces it.
+(defn coverage-test--result (name file line hits)
+  {:name name :file file :line line :hits hits})
+
+(def coverage-test--results
+  (list (coverage-test--result 'c "b.blsp" 3 0)
+    (coverage-test--result 'a "a.blsp" 10 2)
+    (coverage-test--result 'b "a.blsp" 4 0)))
+
+(describe "coverage: partitioning results"
+  (test "covered picks out the entered functions"
+    (assert= (map (fn (r) (get r :name)) (coverage/coverage--covered coverage-test--results))
+      (list 'a)))
+  (test "uncovered picks out the never-entered functions"
+    (assert= (count (coverage/coverage--uncovered coverage-test--results)) 2))
+  ;; Regression: the target list comes from `global-names` (alphabetical), so
+  ;; without an explicit sort the report listed lines out of order (7, 15, 9).
+  (test "uncovered is sorted by line, so the report walks the file downwards"
+    (assert= (map (fn (r) (get r :line)) (coverage/coverage--uncovered coverage-test--results))
+      (list 3 4)))
+  (test "by-file groups results and orders files alphabetically"
+    (assert= (map (fn (entry) (first entry)) (coverage/coverage--by-file coverage-test--results))
+      (list "a.blsp" "b.blsp")))
+  (test "by-file keeps every result"
+    (assert= (fold (fn (n entry) (+ n (count (second entry))))
+               0
+               (coverage/coverage--by-file coverage-test--results))
+      3)))
+
+;; --- instrumentation ----------------------------------------------------------
+;; Synthetic targets. Each is rebound by an `:isolated` test, so the shim rolls
+;; back and the rest of the suite sees the originals.
+(defn coverage-test--fixed (x y) (+ x y))
+(defn coverage-test--variadic (a & rest) (list a rest))
+(defn coverage-test--optional (a &optional b) (list a b))
+(defn coverage-test--multi ((x) (list :one x)) ((x y) (list :two x y)))
+(defn coverage-test--recursive (n acc)
+  (if (= n 0) acc (coverage-test--recursive (- n 1) (+ acc n))))
+
+(describe "coverage: instrumentation records hits"
+  :isolated
+  (test "a wrapped function records a hit and still returns correctly"
+    (let (hits (table))
+      (coverage/coverage--instrument! 'coverage-test/coverage-test--fixed hits)
+      (assert= (coverage-test--fixed 2 3) 5)
+      (assert= (table-get hits "coverage-test/coverage-test--fixed") 1)))
+  (test "an uncalled function records nothing"
+    (let (hits (table))
+      (coverage/coverage--instrument! 'coverage-test/coverage-test--fixed hits)
+      (assert= (table-get hits "coverage-test/coverage-test--fixed" 0) 0)))
+  (test "repeated calls accumulate"
+    (let (hits (table))
+      (coverage/coverage--instrument! 'coverage-test/coverage-test--fixed hits)
+      (coverage-test--fixed 1 1)
+      (coverage-test--fixed 1 1)
+      (coverage-test--fixed 1 1)
+      (assert= (table-get hits "coverage-test/coverage-test--fixed") 3))))
+
+;; The shim is variadic BECAUSE `arglist` reports only one arm of a multi-arm
+;; function — an arity-preserving shim built from it would silently break the
+;; arities it never saw. These pin that every calling shape still works wrapped.
+(describe "coverage: instrumentation preserves calling shapes"
+  :isolated
+  (test "a variadic function still receives its rest args"
+    (let (hits (table))
+      (coverage/coverage--instrument! 'coverage-test/coverage-test--variadic hits)
+      (assert= (coverage-test--variadic 1 2 3) (list 1 (list 2 3)))))
+  (test "a variadic function called with no rest args still works"
+    (let (hits (table))
+      (coverage/coverage--instrument! 'coverage-test/coverage-test--variadic hits)
+      (assert= (coverage-test--variadic 1) (list 1 nil))))
+  (test "an &optional function works with the optional supplied"
+    (let (hits (table))
+      (coverage/coverage--instrument! 'coverage-test/coverage-test--optional hits)
+      (assert= (coverage-test--optional 1 2) (list 1 2))))
+  (test "an &optional function works with the optional omitted"
+    (let (hits (table))
+      (coverage/coverage--instrument! 'coverage-test/coverage-test--optional hits)
+      (assert= (coverage-test--optional 1) (list 1 nil))))
+  (test "a MULTI-ARM function still dispatches on 1 arg when wrapped"
+    (let (hits (table))
+      (coverage/coverage--instrument! 'coverage-test/coverage-test--multi hits)
+      (assert= (coverage-test--multi 7) (list :one 7))))
+  (test "a MULTI-ARM function still dispatches on 2 args when wrapped"
+    (let (hits (table))
+      (coverage/coverage--instrument! 'coverage-test/coverage-test--multi hits)
+      (assert= (coverage-test--multi 7 8) (list :two 7 8))))
+  (test "a self-recursive function still computes correctly when wrapped"
+    (let (hits (table))
+      (coverage/coverage--instrument! 'coverage-test/coverage-test--recursive hits)
+      (assert= (coverage-test--recursive 4 0) 10))))
+
+(describe "coverage: begin! with nothing to instrument"
+  :isolated
+  (test "a source dir with no project functions yields no targets"
+    (coverage/coverage-begin! (list "/nonexistent-coverage-dir"))
+    (assert= (coverage/coverage-results) nil))
+  (test "reporting an empty run is 100%, not a failure"
+    (coverage/coverage-begin! (list "/nonexistent-coverage-dir"))
+    (assert= (coverage/coverage-report "/nonexistent-coverage-dir") 100)))

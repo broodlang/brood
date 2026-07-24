@@ -9118,3 +9118,65 @@ bootstrap (a gzip+tar decoder); download, verify, index format, resolution, publ
 and search are all Brood policy (ADR-006). Deferred still (ADR-011): semver ranges,
 tarball sources inside registry entries (entries point to git today), signed
 packages, and auto-refresh/TTL for the cloned index.
+
+## ADR-148 — Test coverage is function-level, instrumented by hot reload
+
+**Context.** `nest test` reached `mix test` parity on selection (ADR-none; devlog
+2026-07-24) except for `--cover`. No coverage mechanism existed. The obvious
+implementation — line coverage — needs a seam in the VM: compiled IR nodes carry
+`pos: Option<Pos>` and `CompiledArm` records its file, so the position data is
+there, but recording it per executed instruction means either a runtime branch on
+the hot path or a compile-time instrumentation mode, plus disabling the JIT (native
+code bypasses any hook), plus aggregating hits across the many green processes a
+suite runs in.
+
+**Decision.** Ship **function-level** coverage first, implemented as **pure Brood
+policy with zero kernel support**, and record line coverage as a separate future
+tier rather than a half-built version of the same thing.
+
+A function counts as covered when it is **entered once**. The implementation
+(`std/tool/coverage.blsp`) composes three things the language already has:
+
+- `global-names` + `source-location` enumerate the denominator — every global that
+  is a function defined under the project's `:source-paths`. Macros, natives, and
+  data are excluded; std and the prelude can't inflate the count.
+- `def` rebinding + late binding (ADR-013) *are* the instrumentation: each target
+  is rebound to a shim that records a hit and forwards. Late binding means every
+  already-loaded caller, in any process, picks up the shim with no reload.
+- `Value::Table` (ADR-107) collects hits. Tests run across processes with separate
+  heaps; a table is shared by identity and `table-incr` is atomic, so parallel
+  tests can't lose an update. The sanctioned mutable structure, used for exactly
+  what it exists for.
+
+**Why this split.** It is the ADR-006 principle applied honestly: Rust provides
+mechanism, Brood provides policy — and here Brood needed *no* new mechanism, so
+adding a VM coverage mode would have been building machinery to avoid using the
+language. It also satisfies the ADR-011 bar: the cheap tier answers the question
+that changes behaviour ("what does my suite never touch?"), and the expensive tier
+stays deferred until something concrete needs it.
+
+**Consequences, accepted deliberately:**
+
+- **The shim is variadic, not arity-preserving.** It has to be — `arglist` reports
+  only ONE arm of a multi-arm function, so a shim built from it would silently
+  break the arities it never saw. Variadic forwarding is correct for fixed,
+  `&optional`, `& rest`, and multi-arm alike. Costs: an arity error surfaces from
+  inside the shim rather than at the call, and every rebind changes the arity.
+- **A new off-switch, `BROOD_NO_RELOAD_DIAG=1`**, silences the hot-reload
+  arity/macro diagnostics, which coverage would otherwise trip once per function.
+  Off-switch only; the default stays on so accidental mismatches still surface.
+  `nest test --cover` sets it for its own process.
+- **Hit counts are a lower bound, not a profile.** A self-recursive tail call is
+  counted once: the VM's `SelfCall` deliberately bypasses global lookup, and so the
+  shim. "Was it entered" stays correct; frequency does not.
+- **A `--cover` run is not a timing run** — instrumentation adds a frame and
+  defeats JIT inlining of the wrapped call.
+- Coverage is reported even when the suite fails (that's when it's most useful),
+  and `--cover-min` is gated after the suite result so a red suite reports itself
+  first.
+
+**Line coverage, if wanted later** (`docs/coverage.md` has the detail): keep this
+mechanism/policy split, add **compile-time** instrumentation rather than a
+per-instruction runtime check so an ordinary run stays byte-for-byte unchanged,
+disable the JIT in that mode, and extend `std/tool/coverage.blsp` for reporting.
+The two tiers answer different questions and can coexist.
