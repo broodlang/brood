@@ -6073,3 +6073,58 @@ them. `tests/private_test.blsp` pins the whole contract (block, grant,
 alias-resolved block, :only refusal, same-module, top-level hatch);
 `namespace_test`'s old "soft privacy" case now pins the hard behavior.
 Suite 795/795; `nest check` zero warnings.
+
+## 2026-07-24 — Validation pass, round 3: nested-let hint gap + client-side net leaks
+
+A third adversarial pass, widening from the server to the **client** side of
+`std/net` (which the prior two passes under-examined) plus the freshest tooling.
+Five real fixes; the reactor kernel bookkeeping itself came back clean.
+
+- **The Clojure/Scheme nested-`let` teaching hint missed its own advertised
+  example.** ADR-146's sibling feature (commit 4168ec1) turns `(let ((a 1) (b 2))
+  …)` into a "flatten your bindings" hint — but only on the *odd*-length binding
+  path. The docstring's own 2-binding example is even-length, so it slipped into
+  the compile pass's pattern-lowering (`lower_let`), evaluated `(b 2)` as a call,
+  and died with a confusing "unbound symbol: b" — exactly the error the feature
+  replaces. Fixed in the compile pass (`macroexpand_all_depth`, so both engines
+  report it) and the tree-walker `let`/`letrec` arms. The even-length guard
+  (`even_bindings_look_scheme`) requires every value slot to be a *literal atom*,
+  so a genuine bare-list destructure (`(let ((a b) '(1 2)) …)`, `((a 1) '(9 1))`)
+  is never mis-flagged; letrec (no destructuring) flags the nested shape directly.
+  `reader_hints_test` grows 8 → 11.
+
+- **HTTP client fd leak on a stalled peer (fd-exhaustion DoS).** `http-request`
+  collected the response then returned — but on the `after`/error branch never
+  closed the socket, and the reactor reaps only *unclaimed accepts*, not an active
+  claimed stream. A server that accepts then stalls leaked one fd + reactor/registry
+  entry per request for the caller's whole life (a long-lived crawler/webhook
+  fetcher exhausts its fds). Fixed: `http-request` now `tcp-close`s unconditionally
+  after collect (idempotent — the success path's peer-close already reclaimed). The
+  client sibling of the 2026-07-23 server head-truncation leak.
+
+- **Unbounded HTTP client response buffer (OOM).** `http--collect` consed chunks
+  with no cap; a server streaming an endless body (the silence timeout never fires
+  while bytes trickle) grew the accumulator until OOM. The server bounds head+body,
+  the client bounded nothing — and it reads *untrusted* output. New
+  `*http-max-response-bytes*` (64 MiB); a type-aware `http--chunk-size` measures
+  `bytes` (plaintext) and string (TLS) chunks.
+
+- **Unbounded SSE reader buffer (OOM).** `sse--read-head`/`sse--stream` accumulated
+  a head with no blank line, or a frame with no `\n\n` boundary, without bound. New
+  `*sse-max-buffer-bytes*` (16 MiB) closes the socket and reports
+  `[:sse-closed :buffer-overflow]` past it.
+
+- **Fractional/negative `Content-Length` → 0.** `http--declared-length` accepted a
+  non-integer length (`3.9`); a fractional target could never be reached exactly,
+  parking the reader on the socket until the read timeout. Now only a non-negative
+  *integer* is honoured (the timeout already bounds an honestly-shaped lie).
+
+Deferred (noted, not fixed): a reactor idle/handshake timeout so a forgotten
+active/`TlsConn` socket is reaped even when the app never closes it — the
+defence-in-depth generalisation of the client-close fix, a riskier kernel change
+gated on a concrete raw-`tcp`/`tls` consumer (ADR-011). Also left: last-wins
+duplicate `Content-Length` (not smuggling-exploitable under HTTP/1.0 `close`) and a
+Windows-only backslash path nit in the MCP sandbox (Brood targets Linux). The MCP
+write/edit sandbox and the HTTP/SSE parsers were re-audited adversarially and held.
+
+Suite 803/803; `nest check` zero warnings.

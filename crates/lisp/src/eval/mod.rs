@@ -540,6 +540,16 @@ fn eval_tail_loop(
                     if binds.len() % 2 != 0 {
                         return Err(scheme_binding_error(heap, "let", &binds));
                     }
+                    // An *even*-length nested-Scheme form — `(let ((a 1) (b 2)) …)`
+                    // — otherwise slips past the odd-length guard above into the
+                    // pattern-lowering fallback and dies with a confusing
+                    // "unbound symbol" (it evaluates `(b 2)` as a call). Catch the
+                    // literal-valued shape here so the flatten hint fires. Guarded
+                    // by `is_literal_atom` on every value slot so it can't regress a
+                    // genuine bare-list destructure like `(let ((a b) '(1 2)) …)`.
+                    if even_bindings_look_scheme(heap, &binds) {
+                        return Err(scheme_binding_error(heap, "let", &binds));
+                    }
                     // Fallback: a pattern (non-symbol) binding target reached eval
                     // unlowered — same paths as `fn` above. Lower via the compile
                     // pass and re-enter; the common all-symbol `let` skips this.
@@ -592,6 +602,17 @@ fn eval_tail_loop(
                         .step_by(2)
                         .any(|&b| !matches!(b.unpack(), ValueRef::Sym(_)))
                     {
+                        // A non-symbol target is always an error here (letrec has no
+                        // destructuring), so flagging the nested-Scheme shape is
+                        // zero-regression: `(letrec ((f …) (g …)) …)` — even and
+                        // function-valued, which the literal guard misses — gets the
+                        // flatten hint via scheme_binding_error's own `looks_nested`.
+                        if binds.iter().all(|&b| {
+                            matches!(b.unpack(), ValueRef::Pair(_))
+                                && heap.seq_items(b).map(|it| it.len() == 2).unwrap_or(false)
+                        }) {
+                            return Err(scheme_binding_error(heap, "letrec", &binds));
+                        }
                         return Err(LispError::runtime(
                             "letrec: binding targets must be plain symbols",
                         ));
@@ -1738,12 +1759,54 @@ fn as_binding_vec(heap: &Heap, v: Value) -> Result<Vec<Value>, LispError> {
     })
 }
 
-/// The odd-length `let`/`letrec` bindings error, with a teaching hint when the
-/// bindings look like Scheme/Clojure's **nested-pair** form — `(let ((a 1) (b
-/// 2)) …)` instead of Brood's flat `(let (a 1 b 2) …)`. Detected when every
-/// binding element is itself a `(name value)` 2-list (LLM-native errors,
-/// `docs/llm-native.md`).
-fn scheme_binding_error(heap: &Heap, who: &str, binds: &[Value]) -> LispError {
+/// Whether `v` is a literal-atom value — a leaf that can only be a *value*, never
+/// a binding pattern or a call. Used to tell Scheme/Clojure's nested binding form
+/// `(let ((a 1) (b 2)) …)` (literal value slots) apart from a genuine bare-list
+/// destructure `(let ((a b) '(1 2)) …)` (symbol / compound value slots), so the
+/// even-length nested-hint can't fire on valid code.
+fn is_literal_atom(v: Value) -> bool {
+    matches!(
+        v.unpack(),
+        ValueRef::Int(_)
+            | ValueRef::Float(_)
+            | ValueRef::Str(_)
+            | ValueRef::Keyword(_)
+            | ValueRef::Bool(_)
+            | ValueRef::Nil
+            | ValueRef::Bytes(_)
+            | ValueRef::Decimal(_)
+    )
+}
+
+/// Whether an *even*-length flat binding vec is really Scheme/Clojure's nested
+/// form with literal values — every element a `(sym <literal-atom>)` 2-list, e.g.
+/// `((a 1) (b 2))`. The literal-atom guard is what makes this safe on the even
+/// path (unlike odd-length, which errors regardless): a real bare-list destructure
+/// (`((a b) '(1 2))`) has a symbol or compound in every value slot, so it is never
+/// flagged.
+pub(crate) fn even_bindings_look_scheme(heap: &Heap, binds: &[Value]) -> bool {
+    !binds.is_empty()
+        && binds.iter().all(|&b| {
+            matches!(b.unpack(), ValueRef::Pair(_))
+                && heap
+                    .seq_items(b)
+                    .map(|it| {
+                        it.len() == 2
+                            && matches!(it[0].unpack(), ValueRef::Sym(_))
+                            && is_literal_atom(it[1])
+                    })
+                    .unwrap_or(false)
+        })
+}
+
+/// The `let`/`letrec` bindings error, with a teaching hint when the bindings look
+/// like Scheme/Clojure's **nested-pair** form — `(let ((a 1) (b 2)) …)` instead of
+/// Brood's flat `(let (a 1 b 2) …)`. The hint fires when every binding element is a
+/// `(name value)` 2-list. Reached two ways: the odd-length guard (which errors
+/// regardless) calls this directly, and the compile pass / tree-walker route the
+/// *even*-length literal-valued shape here via [`even_bindings_look_scheme`]
+/// (LLM-native errors, `docs/llm-native.md`).
+pub(crate) fn scheme_binding_error(heap: &Heap, who: &str, binds: &[Value]) -> LispError {
     let looks_nested = !binds.is_empty()
         && binds.iter().all(|&b| {
             matches!(b.unpack(), ValueRef::Pair(_))

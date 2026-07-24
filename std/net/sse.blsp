@@ -48,6 +48,13 @@ data) …))` from an `http` handler to push events to a browser `EventSource`."
 
 (require 'net/http)  ; reuse http/parse-url + http/request-headers for the handshake
 
+;; The reader consumes UNTRUSTED server output. A malicious endpoint that never
+;; sends the head's blank line, or an event with no `\n\n` frame boundary, would
+;; grow the reader's buffer without bound → OOM. Cap the buffered head/leftover at
+;; 16 MiB (SSE frames are tiny; this is purely a runaway guard); past it the
+;; reader closes the socket and reports `[:sse-closed :buffer-overflow]`.
+(def *sse-max-buffer-bytes* (* 16 1024 1024))
+
 ;; ---- pure frame parsing -----------------------------------------------------
 
 (defn sse--normalize (s)
@@ -129,21 +136,28 @@ socket a `stream-response` handler was handed. Just `(tcp-send sock (sse-frame �
   "Process the buffered stream text `buf` — deliver every complete event to
 `subscriber` — then wait for the next chunk and recurse. Notifies the subscriber
 with `[:sse-closed reason]` when the socket closes or errors. Tail-recursive."
-  (let ([blocks rest] (sse--frames buf))
-    (doseq (b blocks)
-      (when (not (= b ""))
-        (send subscriber [:sse (sse--parse-event b)])))
-    (receive ([:tcp ~sock d] (sse--stream sock subscriber (str rest (sse--normalize d))))
-      ([:tcp-closed ~sock] (send subscriber [:sse-closed :closed]))
-      ([:tcp-error ~sock msg] (send subscriber [:sse-closed msg])))))
+  (if (> (string-length buf) *sse-max-buffer-bytes*)
+    (do (tcp-close sock) (send subscriber [:sse-closed :buffer-overflow]))
+    (let ([blocks rest] (sse--frames buf))
+      (doseq (b blocks)
+        (when (not (= b ""))
+          (send subscriber [:sse (sse--parse-event b)])))
+      (receive ([:tcp ~sock d] (sse--stream sock subscriber (str rest (sse--normalize d))))
+        ([:tcp-closed ~sock] (send subscriber [:sse-closed :closed]))
+        ([:tcp-error ~sock msg] (send subscriber [:sse-closed msg]))))))
 
 (defn sse--read-head (sock subscriber buf)
   "Read until the HTTP response head's blank line, check the status, then hand the
 leftover bytes to `sse--stream`. A non-200 status closes the connection."
   (receive ([:tcp ~sock d] (let (buf2 (str buf (sse--normalize d))
                                  i (index-of buf2 "\n\n"))
-                             (if (< i 0)
+                             (cond
+                               (> (string-length buf2) *sse-max-buffer-bytes*)
+                               (do (tcp-close sock)
+                                   (send subscriber [:sse-closed :buffer-overflow]))
+                               (< i 0)
                                (sse--read-head sock subscriber buf2)
+                               else
                                (let (status (sse--status (substring buf2 0 i))
                                      body (substring buf2 (+ i 2) (string-length buf2)))
                                  (if (= status 200)

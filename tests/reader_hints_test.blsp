@@ -38,9 +38,26 @@
   (test "(letrec ((f ...)) …) → the letrec-flavoured hint"
     (let (h (hint-of "(letrec ((f (fn () 1))) (f))"))
       (is (string-contains? h "(letrec (a 1 b 2)"))))
+  (test "(let ((a 1) (b 2)) …) — the even-length nested form — also hints"
+    ;; The common case: an EVEN number of nested pairs. Without the compile-pass
+    ;; guard this lowered to a refutable match on `(b 2)` and died with a
+    ;; confusing "unbound symbol: b" instead of the flatten hint.
+    (let (h (hint-of "(let ((a 1) (b 2)) (+ a b))"))
+      (is (string-contains? h "FLAT")))
+    ;; more than two pairs, and non-numeric literal values, hint too
+    (is (string-contains? (hint-of "(let ((a 1) (b 2) (c 3) (d 4)) a)") "FLAT"))
+    (is (string-contains? (hint-of "(let ((name \"bob\") (k :x)) name)") "FLAT")))
+  (test "(letrec ((f …) (g …)) …) — even, function-valued — hints"
+    (is (string-contains? (hint-of "(letrec ((f (fn () 1)) (g (fn () 2))) (f))") "FLAT")))
   (test "a genuinely-flat let with an odd count has no false Scheme hint"
     ;; (let (a) …) is odd but NOT the nested-pair shape, so no misleading hint.
     (is (nil? (hint-of "(let (a) a)"))))
+  (test "bare-list / vector destructuring is NOT mistaken for a nested let"
+    ;; The literal-value guard: these have symbols or compounds in the value
+    ;; slot, so the even-length nested-hint must NOT fire — they are valid binds.
+    (is (= (eval (read-string "(let ((a b) '(1 2)) (list a b))")) '(1 2)))
+    (is (= (eval (read-string "(let ((h & t) '(1 2 3)) (list h t))")) '(1 (2 3))))
+    (is (= (eval (read-string "(let ((a 1) '(9 1)) a)")) 9)))
   (test "flat bindings — list and vector — still work"
     (is (= (eval (read-string "(let (a 1 b 2) (+ a b))")) 3))
     (is (= (eval (read-string "(let [a 1 b 2] (+ a b))")) 3))))

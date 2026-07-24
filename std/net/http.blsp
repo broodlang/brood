@@ -38,6 +38,13 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
 ;; How long a connection may stall mid-request before we give up.
 (def *http-read-timeout-ms* 15000)
 
+;; The client reads UNTRUSTED server output: a malicious/endless response body
+;; (no Content-Length, just steady bytes) would otherwise grow the accumulator
+;; until OOM — the silence timeout never fires while data trickles. Cap the total
+;; collected response at 64 MiB, mirroring the server's head/body bounds. Past it
+;; the socket is closed and the request errors.
+(def *http-max-response-bytes* (* 64 1024 1024))
+
 ;; ---- reading one request off the wire --------------------------------------
 ;; Bytes arrive as [:tcp sock data] messages (the socket is owned by *this*
 ;; process — the per-connection handler). Accumulate until the head terminator,
@@ -133,9 +140,17 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
     lines))
 
 (defn http--declared-length (head)
+  ;; A well-formed Content-Length is a non-negative *integer* byte count. A
+  ;; missing, non-numeric, negative, or fractional value → 0 (no declared body):
+  ;; a fractional length (`3.9`) could never be reached exactly, parking the
+  ;; worker until the read timeout, and a negative one is meaningless. (The read
+  ;; timeout already bounds an honestly-shaped but lying huge length.)
   (let (lines (string-split head "\r\n")
         v (get (http--parse-headers (rest lines)) "content-length"))
-    (if (nil? v) 0 (let (n (string->number v)) (if (nil? n) 0 n)))))
+    (if (nil? v)
+      0
+      (let (n (string->number v))
+        (if (and (int? n) (>= n 0)) n 0)))))
 
 (defn parse-request (raw)
   "Parse a raw HTTP request (`bytes`, from `http-read-request`) into
@@ -383,12 +398,27 @@ knows the body is text — the map itself always carries byte-faithful `bytes`."
       (string? b) b
       else (utf8-bytes->string b))))
 
+;; The size of one response chunk in bytes — plaintext chunks are `bytes`, TLS
+;; chunks are strings (both land byte-faithfully through the iolist `bytes-concat`
+;; below), so measure by type. `string-length` (codepoints) slightly under-counts
+;; a multibyte string, which only loosens the cap — fine for a DoS bound.
+(defn http--chunk-size (d)
+  (if (string? d) (string-length d) (byte-length d)))
+
 ;; Collect the response delivered as messages until close; [:ok bytes] or
-;; [:error msg]. `acc` is the chunks in reverse; ONE `bytes-concat` at close (the
-;; reversed chunk list is an iolist, so plaintext `bytes` chunks and TLS string
-;; chunks both land byte-faithfully). Per-chunk concatenation was O(body²).
-(defn http--collect (sock acc)
-  (receive ([:tcp ~sock d] (http--collect sock (cons d acc)))
+;; [:error msg]. `acc` is the chunks in reverse, `have` their running byte total;
+;; ONE `bytes-concat` at close (the reversed chunk list is an iolist, so plaintext
+;; `bytes` chunks and TLS string chunks both land byte-faithfully). Per-chunk
+;; concatenation was O(body²). Bounded by `*http-max-response-bytes*` so an endless
+;; server body can't OOM the client.
+(defn http--collect (sock acc have)
+  (receive
+    ([:tcp ~sock d]
+      (let (have2 (+ have (http--chunk-size d)))
+        (if (> have2 *http-max-response-bytes*)
+          (do (tcp-close sock)
+              [:error "http: response exceeded *http-max-response-bytes*"])
+          (http--collect sock (cons d acc) have2))))
     ([:tcp-closed ~sock] [:ok (bytes-concat (reverse acc))])
     ([:tcp-error ~sock msg] [:error msg])
     (after 30000 [:error "http: timed out waiting for a response"])))
@@ -437,7 +467,13 @@ response); the root process counts."
                  (tcp-set-binary s true)
                  (tcp-send s [head body-bytes])
                  s)))
-    (let (result (http--collect sock nil))
+    (let (result (http--collect sock nil 0))
+      ;; Always close our side. The success path's peer-close already reclaimed
+      ;; the fd (`close` is idempotent → a harmless no-op), but the timeout/error
+      ;; path did NOT: without this, a server that accepts then stalls leaks one
+      ;; fd + reactor/registry entry per request for the caller's whole life — an
+      ;; fd-exhaustion DoS for any process that fetches untrusted URLs in a loop.
+      (tcp-close sock)
       (if (= (first result) :error)
         {:status 0 :error (second result) :headers {} :body #b""}
         (parse-response (second result))))))

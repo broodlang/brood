@@ -3,7 +3,8 @@
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test).
 
-(defmodule http-test (:use test) (:use net/http) (:use net/tcp))
+(defmodule http-test (:use test) (:use net/http) (:use net/tcp)
+  (:use-internals net/http))
 
 (describe "http: request parsing"
   (test "method, path, version, and lower-cased headers"
@@ -41,6 +42,31 @@
   (test "not-found renders a 404"
     (is (string-contains? (utf8-bytes->string (bytes-concat (render-response (not-found))))
           "404 Not Found"))))
+
+(describe "http: content-length parsing is integer-safe"
+  ;; A well-formed Content-Length is a non-negative integer; a fractional value
+  ;; (`3.9`) could never be reached exactly and would park the reader on the
+  ;; socket until the read timeout, and a negative one is meaningless — both → 0.
+  (test "integer content-length is honoured"
+    (assert= (net/http/http--declared-length "POST / HTTP/1.0\r\nContent-Length: 42\r\n") 42))
+  (test "fractional content-length → 0 (no declared body)"
+    (assert= (net/http/http--declared-length "POST / HTTP/1.0\r\nContent-Length: 3.9\r\n") 0))
+  (test "negative content-length → 0"
+    (assert= (net/http/http--declared-length "POST / HTTP/1.0\r\nContent-Length: -5\r\n") 0))
+  (test "non-numeric / missing content-length → 0"
+    (assert= (net/http/http--declared-length "POST / HTTP/1.0\r\nContent-Length: abc\r\n") 0)
+    (assert= (net/http/http--declared-length "GET / HTTP/1.0\r\nHost: x\r\n") 0)))
+
+(describe "http: client response size accounting"
+  ;; The client-collect byte cap measures chunks by type — plaintext chunks are
+  ;; `bytes`, TLS chunks are strings — so an endless server body can't OOM the
+  ;; client (it is bounded by *http-max-response-bytes*).
+  (test "chunk-size measures bytes and strings"
+    (assert= (net/http/http--chunk-size #b"\x01\x02\x03") 3)
+    (assert= (net/http/http--chunk-size "hello") 5))
+  (test "the response cap is a positive integer"
+    (is (int? *http-max-response-bytes*))
+    (is (> *http-max-response-bytes* 0))))
 
 (describe "http: routing + mime"
   (test "router dispatches by path and falls back to 404"

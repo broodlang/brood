@@ -1104,6 +1104,18 @@ fn macroexpand_all_depth_inner(heap: &mut Heap, form: Value, env: EnvId, depth: 
                 // expand once here (fast) rather than per call. eval's `let`/`fn`
                 // then only ever see plain symbol binds.
                 if value::symbol_is(s, kw::LET) {
+                    // A nested-Scheme binding form with literal values —
+                    // `(let ((a 1) (b 2)) …)` — would otherwise lower into a
+                    // refutable pattern match on `(b 2)` and die with a confusing
+                    // "unbound symbol". Catch it here (the compile pass every engine
+                    // shares, so both the VM and tree-walker report it) with the
+                    // flatten hint. The literal-value guard keeps a genuine bare-list
+                    // destructure like `(let ((a b) '(1 2)) …)` untouched.
+                    if let Some(binds) = items.get(1).and_then(|&b| form_items(heap, b)) {
+                        if crate::eval::even_bindings_look_scheme(heap, &binds) {
+                            return Err(crate::eval::scheme_binding_error(heap, "let", &binds));
+                        }
+                    }
                     if let Some(lowered) = lower_let(heap, &items) {
                         return macroexpand_all_depth(heap, lowered, env, depth + 1);
                     }
