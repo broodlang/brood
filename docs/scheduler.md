@@ -3,7 +3,7 @@
 > Status: **implemented — and since superseded in substrate.** This doc is the
 > 4b build plan as it landed on the **`corosensei` coroutine** substrate
 > (ADR-018, ADR-027). On **2026-06-08 the stepping-VM endgame shipped**
-> (ADR-100, [`concurrency-v2.md`](concurrency-v2.md) §8): corosensei is
+> (ADR-100, [`decisions.md`](decisions.md)): corosensei is
 > **deleted**, a paused process is captured as relocatable heap data
 > (`Suspended` — bytecode frames + operand stack), work-stealing is **general**
 > (any queued process, not fresh-only), and **live cross-worker migration
@@ -189,8 +189,8 @@ race, then reintroduced in its **fresh-only** safe form (steal only
 never-resumed processes). The stepping-VM cutover (ADR-100, 2026-06-08) removed
 the constraint entirely: with no native stack to pin, `try_steal` takes **any**
 queued process from a backed-up peer, and the `fresh` flag is gone. Root-cause
-analysis, invariants, and the full design are in
-[`concurrency-v2.md`](concurrency-v2.md) §3 and §8.
+analysis, invariants, and the full design are in ADR-100
+([`decisions.md`](decisions.md)).
 
 **Placement + stealing (the load-balancing levers today):** spawn placement is
 scan-free — a process spawned from a worker lands on that worker's queue, else

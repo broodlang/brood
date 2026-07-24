@@ -7,7 +7,7 @@
 > original coroutine substrate is gone), and full distribution (closure
 > shipping, distributed links/monitors, node-down detection). This doc is the
 > original design rationale; the current engine is described in
-> [`concurrency-v2.md`](concurrency-v2.md) §8 and [`scheduler.md`](scheduler.md).
+> [`scheduler.md`](scheduler.md) (and ADR-100 in [`decisions.md`](decisions.md)).
 
 ## Goal
 
@@ -194,8 +194,8 @@ OS threads), they share the runtime's live code (ADR-013, no per-spawn prelude
 reload), scheduling is preemptively fair with general work-stealing, `receive`
 is selective with timeouts, closures `send` across processes and nodes
 (ADR-033), and links + userland supervision ship (`std/proc/supervisor.blsp`;
-the kernel-level supervisor, ADR-039, was tried and **reverted** — see
-[`supervision.md`](supervision.md)). What's genuinely still open:
+the kernel-level supervisor, ADR-039, was tried and **reverted**). What's
+genuinely still open:
 
 - **A long-running native builtin can't be preempted mid-call** — reductions
   tick only at evaluator/VM safepoints, so a huge regex/map-build holds its

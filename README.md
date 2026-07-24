@@ -105,7 +105,7 @@ autotools-style `./configure` records build options.
 
 ```bash
 # the usual ./configure && make install — installs `brood`, `nest`, and the
-# `brood-lsp` language server into ~/.local/bin (lean, stripped release build)
+# `brood-lsp` language server into ~/.local/bin (a stripped release build)
 ./configure
 make install
 
@@ -230,11 +230,15 @@ Lexically-scoped closures, proper tail calls, `def`/`defn`/`let`/`fn`,
 Clojure-style `` ` ``/`~`/`~@` quasiquote, `macroexpand`, `gensym`), integers &
 floats with overflow-checked arithmetic, strings, symbols, keywords, cons-cell
 lists, `[ ]` vectors, immutable `{ }` maps (`get`/`assoc`/`dissoc`/`keys`/`vals`/
-`contains?`), **pattern matching** (`match` + destructuring in
-`let`/`fn`), higher-order functions (`map`/`filter`/`reduce`/`apply`),
-and the self-hosting trio `eval`/`read-string`/`load`. Parameter lists are
-written as lists (`(x y)` — code is lists; vectors are data) and support
-`&optional` (with defaults) and `& rest`. **Dynamic variables** (`defdyn`/
+`contains?`), `#b"…"` **byte strings**, **pattern matching** (`match` +
+destructuring in `let`/`fn`, including Erlang-style **bit syntax** — `(bytes
+(len :u16) (body len) & rest)`), higher-order functions
+(`map`/`filter`/`reduce`/`apply`), and the self-hosting trio
+`eval`/`read-string`/`load`. Parameter lists are written as lists (`(x y)` —
+code is lists; vectors are data) and support `&optional` (with defaults) and
+`& rest`. Code is organised into **modules** (`defmodule`/`:use`/`:as`) with
+enforced privacy — a `foo--internal` name is module-private. **Dynamic
+variables** (`defdyn`/
 `binding`) give per-process special vars; an advisory, set-theoretic **type
 checker** flags type/arity/unbound-symbol mistakes without ever rejecting a
 runnable program; and a per-process tracing **GC** keeps long-running loops flat.
@@ -269,31 +273,38 @@ diverge, and the differences are deliberate:
 - **Pattern matching and selective `receive` are first-class**, and it runs on
   its own small Rust runtime, not the JVM.
 
+## Concurrency & distribution
+
+**Processes** (`spawn`/`send`/`receive`/`self`) run share-nothing as lightweight
+**green threads** on an M:N worker pool (≈`nproc`), with reduction-counted
+preemption, selective `receive` + timeouts, links/monitors and `trap-exit`, and
+registered names (see [`examples/processes.blsp`](examples/processes.blsp)).
+Supervision is a **userland** `std/proc/supervisor.blsp` over `spawn`/`monitor`
+(a kernel-supervisor was tried and reverted). **Distributed nodes** connect over
+TCP — two runtimes message each other with location-transparent `send`, remote
+monitors, closure-shipping, and an encrypted-by-default HMAC/TLS handshake. On
+top of the socket kernel, the in-tree `std/net/*` library gives a bytes-native
+TCP/HTTP/SSE stack with TLS (client and server).
+
 ## What's next
 
-Concurrency is well underway: **processes** (`spawn`/`send`/`receive`/`self`)
-run share-nothing as lightweight **green threads** on an M:N worker pool (≈`nproc`),
-with reduction-counted preemption, selective `receive` + timeouts, and process
-monitors (see [`examples/processes.blsp`](examples/processes.blsp)). **Distributed
-nodes** are in too — two runtimes connect over TCP and message each other with
-location-transparent `send`, remote monitors, closure-shipping, and an HMAC
-handshake. Supervision is **userland** for now (the `brood-supervisor` package
-over `spawn`/`monitor`); a kernel-supervisor was tried and reverted.
+The **language core** and the **M1–M4 foundation** are complete: everything in
+"What works today", plus the concurrency and distribution runtime above, the
+**package manager** (`nest add`/`fetch`/`tree`), the **self-hosted REPL**, **LSP
+Tier 2** (refs/rename, semantic tokens, cross-file nav), and the
+interactive-application stack — a `ropey`-backed **rope kernel** + immutable
+**buffer framework** (`std/editor/buffer.blsp`) and a serialisable **display
+protocol** (`std/editor/display.blsp`) with terminal and optional GUI frontends,
+demoed end-to-end by `nest observe` (a live process viewer) and `nest attach` (a
+thin client for a daemon).
 
-The language core is complete — immutable maps, in-language error
-handling, pattern matching, modules, the string/math/sequence libraries,
-**dynamic variables**, an advisory set-theoretic **type checker**, a per-process
-tracing **GC**, the **package manager** (`nest add`/`fetch`/`tree`), the
-**self-hosted REPL** (written in Brood), and **LSP Tier 2** (refs/rename,
-semantic tokens, cross-file nav) are all done — as is the bytecode VM and the
-tier-1 JIT mentioned above.
-
-The interactive-application stack is in as well: a `ropey`-backed **rope
-kernel** + an immutable **buffer framework** (`std/editor/buffer.blsp`), and a
-serialisable **display protocol** (`std/editor/display.blsp`) with a terminal
-frontend (and an optional native GUI window), demoed end-to-end by `nest
-observe` (a live process viewer) and `nest attach` (a thin client frontend for
-a daemon). Still ahead here: full server/daemon serving.
+What remains is incremental, each item gated on a concrete need (ADR-011): the
+Tier-2 runtime-parity gaps (a cluster **registry**, mailbox **backpressure**,
+the **observability** stream, `gen_statem`/`Application` behaviours), Tier-3
+ergonomics (grapheme-correct strings, protocols/multimethods, string
+interpolation, `&key` args), full **server/daemon** socket serving, and the
+sandboxed **WASM component** extension host (ADR-145). The editor application
+itself is a separate downstream project, out of scope for this repo.
 
 The full plan is in [`ROADMAP.md`](ROADMAP.md).
 
@@ -304,7 +315,8 @@ crates/lisp    the language: reader, evaluator, builtins, value model, scheduler
 crates/cli     the `brood` binary: the language — REPL, file runner, `--test`
 crates/nest    the `nest` binary: project tooling — `new`, `test`, `run`, `doc`, `format`, …
 crates/lsp     the `brood-lsp` binary: the language server
-std/           the prelude + opt-in modules (repl, test, project, buffer, display, …), in Brood
+std/           the prelude + modules: tooling (repl, test, project), net (http/sse/tcp),
+               proc (gen/supervisor), editor (buffer/display/ui), … — all in Brood
 docs/          architecture, language reference, roadmap, decisions, dev log
 ```
 

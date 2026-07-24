@@ -59,8 +59,7 @@
 > met by the runtime not the user, is that a program runs at the depth-1 safepoint:
 > top-level forms (`brood`/`nest run` via `eval_source`), the bodies of spawned
 > processes, and files loaded via `load` (which drops to a depth-1 form loop when
-> it is the outermost eval). See [`memory-review.md`](memory-review.md) for the
-> staged path (Stage A→B) and the entry-depth analysis. The banners below are the
+> it is the outermost eval). The banners below are the
 > earlier (pre-ADR-055) designs, kept for the rationale trail.
 >
 > ---
@@ -258,7 +257,7 @@ Three things are entangled, and the heap choice constrains the other two:
 > paused process is exactly `(frames, operands, ip)` — plain `Send` data. Both
 > payoffs this section wanted are in: **live-process migration** (any worker
 > resumes any process) and **fully precise mid-eval GC** (the safepoint fires at
-> any depth, ADR-061). Full history in [`concurrency-v2.md`](concurrency-v2.md) §8.
+> any depth, ADR-061). Full history: ADR-100 in [`decisions.md`](decisions.md).
 
 ## Options
 

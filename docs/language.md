@@ -1056,7 +1056,7 @@ hanging); `(gen-call-timeout pid payload ms)` sets a custom deadline; `(stop pid
 ends the loop. Spawn with `spawn-server`, `spawn-server-link` (Erlang
 `start_link` — links the server to the caller), or `spawn-server-named` (registers
 it for `whereis`). A `defprocess` server composes directly under
-`proc/supervisor` (see [supervision.md](supervision.md)).
+`proc/supervisor` (see `std/proc/supervisor.blsp`).
 
 ### Monitors
 

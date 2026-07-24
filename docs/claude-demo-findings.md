@@ -668,7 +668,7 @@ Re-verified against HEAD post the kernel-supervisor strip (`e3d3a0d`,
   as the explicit `(hibernate fn & args)` primitive (devlog 2026-05-29
   evening). The `gc.rs` long-loop bound is covered by the hibernate tests.
 - ADR-039 (kernel supervisor) is **reverted, not paused**. The userland
-  pattern in [`supervision.md`](supervision.md) is the supported path;
+  pattern in `std/proc/supervisor.blsp` is the supported path;
   the kernel feature *can* come back later but only over a substrate
   that doesn't reintroduce the race. **Note:** work-stealing and kernel
   supervision are exactly the two pieces whose removal fixed this race —

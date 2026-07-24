@@ -395,7 +395,7 @@ clause for timeouts.
 **`spawn` is let-it-crash.** Plain `(spawn expr)` is Erlang's `spawn/1`:
 if `expr` throws, the process exits and its monitors fire
 `[:down ref pid [:error msg]]`. There is no kernel-level supervisor — a
-hand-written one is ~10 lines of Brood (see [`supervision.md`](supervision.md)).
+hand-written one is ~10 lines of Brood (see `std/proc/supervisor.blsp`).
 Named-spawn `(spawn :name expr)` is idempotent on the name: if `:name` is
 already registered to a live pid, returns that pid; otherwise spawns fresh
 and registers the new pid. The name is auto-reaped on death.
@@ -588,7 +588,7 @@ arity), the process **dies** — there is no kernel supervisor (ADR-039
 reverted, 2026-05-29). `--watch` re-spawns from scratch when you save
 again; state in the watched process is not preserved across a crash. For
 state-preserving recovery, write a userland supervisor (`spawn` +
-`monitor`; pattern in [`supervision.md`](supervision.md)) — but be aware
+`monitor`; pattern in `std/proc/supervisor.blsp`) — but be aware
 that re-spawning means losing the closure's local state and restarting
 the function call from its initial args.
 

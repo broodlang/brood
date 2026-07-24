@@ -163,7 +163,7 @@ surprise: almost none of the mechanism needs to be *built* — it needs to be
 
 ## Relation to sibling designs
 
-[`incremental-check.md`](incremental-check.md) (ADR-119) isn't just a sibling
+The incremental check (ADR-119) isn't just a sibling
 design that happens to share a fingerprint mechanism — it **is** the
 mechanism this design needs. ADR-123's originally-planned "reverse-dependency
 index" (Step 2, above) is fully superseded by Phase 2's `check-file-deps`/

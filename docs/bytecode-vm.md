@@ -36,8 +36,8 @@
 > wrap + `force` unwrap; calls go through the factored `exec_call`). Another
 > **~1.2–1.7× on top of the Stage-3 VM** (fib −22%, sum_tail −26%, cons_build
 > −42%, sort −13…−24%, spawn_fanout −25%); details, per-item attribution, and
-> the JIT-alignment rationale in
-> [`vm-perf-and-jit-runway.md`](vm-perf-and-jit-runway.md).
+> the JIT-alignment rationale in [`compute-frontier.md`](compute-frontier.md)
+> and the dated devlog entries.
 
 This is the project's "big lever" for performance: closing the tree-walker's
 structural ~50–220× tax (ADR-069's measurement) over the Node/Elixir range. It is

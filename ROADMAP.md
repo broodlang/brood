@@ -362,7 +362,7 @@ track); `base64` is the residual coin-flip last place.
   arms through the call-profitability gate + deopt feedback (2026-07-16);
   re-measure the ratio.** Residual: list/closure allocation per branch; overlaps
   the HOF-fold and allocation paths (see
-  [`docs/allocation-elimination.md`](docs/allocation-elimination.md)). **[kernel]**
+  [`docs/compute-frontier.md`](docs/compute-frontier.md)). **[kernel]**
 - ✅ **`ackermann` — was 14× (non-tail double recursion), FIXED (`f90910c`, 2026-07-13):
   4.02 → 0.36s, 7/7 → 3/7.** The i64 unboxed worker's subset checker only matched *non-tail*
   self-calls (fib's arg-position recursion); `ack`'s recursion is in *tail* position
@@ -522,7 +522,7 @@ Runtime housekeeping (both items landed):
 - ✅ **Work-stealing scheduler.** Landed 2026-06-08 via the state-capture
   rewrite (ADR-100): corosensei deleted, a paused process is relocatable heap
   data, stealing is general (any queued process) and live cross-worker migration
-  works. History + invariants in [`docs/concurrency-v2.md`](docs/concurrency-v2.md) §8.
+  works. History + invariants: ADR-100 in [`docs/decisions.md`](docs/decisions.md).
 
 ---
 
@@ -602,7 +602,7 @@ Runtime housekeeping (both items landed):
   pure-Rust fallback) — only if profiling still shows dispatch overhead. Additive.
 - ⬜ **Heap-walking benchmark gap** — `bintree`/`nqueens` run interpreted (~39×/187×
   behind Elixir); structure-walking bodies bail the JIT subset. Gated on the
-  allocation-elimination work ([`docs/allocation-elimination.md`](docs/allocation-elimination.md));
+  allocation-elimination work ([`docs/compute-frontier.md`](docs/compute-frontier.md));
   higher ceiling than the call-dispatch levers — profile before the next JIT push.
 
 ### Tooling & errors
