@@ -349,10 +349,18 @@ the file is missing or declares none."
 (defn project--plugin-format-headers (root plugin-name)
   "The `:format-headers` a `:format-plugins` entry contributes — read from that
 dep's own project.blsp, whatever kind of dep it is. {} when the project declares
-no such dep, or when it isn't fetched yet (so an offline image still formats)."
+no such dep, or when it isn't fetched yet (so an offline image still formats).
+
+An entry naming a dep the manifest doesn't declare is a typo that would otherwise
+reformat the project against rules it thinks it pulled in, so it WARNS to stderr.
+A declared-but-unfetched dep stays silent — that's the ordinary offline case."
   (let (manifest (project--dep-manifest-path plugin-name root))
     (if (nil? manifest)
-      {}
+      (do
+        (eprintln (str "warning: :format-plugins names "
+                    plugin-name
+                    ", which is not in :dependencies — its formatter rules are not applied"))
+        {})
       (project--manifest-format-headers manifest))))
 
 (defn project--effective-format-headers (root)

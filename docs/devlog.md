@@ -6485,11 +6485,21 @@ resolution"): path/git/tarball/absent resolution, a `:git` plugin's headers
 reaching `project--effective-format-headers` with the project's own
 `:format-headers` winning a clash, and the unfetched-plugin degradation.
 
-**Note for a future session:** the tree is *not* in the current formatter's
-canonical form — a whole-tree `nest format` rewrites ~202 of 262 files (trailing
-comments migrate off their form, continuation lines re-indent). Don't run it
-casually as part of an unrelated change; a deliberate one-shot reflow commit is the
-way to close that gap.
+**Formatter-canonical tree:** this surfaced that the tree had drifted out of the
+current formatter's canonical form — a whole-tree `nest format` rewrote ~202 of 262
+files (trailing comments migrating off their form, continuation lines re-indenting).
+Closed in `96f9bfd` as a deliberate one-shot reflow (`nest format` + `cargo fmt`),
+so `nest format` is a no-op again and the checklist's whole-tree run is safe.
+
+**Follow-up in the same area:** `:format-plugins` naming a dep that isn't in
+`:dependencies` now **warns** to stderr instead of silently contributing `{}` — the
+same silent-failure class as the bug above (a typo'd or dropped plugin name would
+otherwise reformat the project against rules it only thinks it pulled in). A
+declared-but-*unfetched* dep stays quiet: that's the ordinary offline case, and
+warning on it would be noise. The warning can't be asserted in-language
+(`with-out-str` captures stdout, `eprintln` writes stderr), so the tests pin the
+behaviour instead: a bogus entry contributes nothing *and* doesn't cost a
+correctly-declared sibling its rules.
 
 ## 2026-07-24 — Structural cleanup Tier 2 (dedup)
 
