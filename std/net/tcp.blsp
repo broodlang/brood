@@ -31,8 +31,10 @@
   "TCP sockets over the kernel's non-blocking primitives (ADR-059/060). Inbound
 data arrives as `[:tcp sock data]` / `[:tcp-closed sock]` / `[:tcp-accept lsock
 client]` messages in the owning process's mailbox — consume them with `receive`.
-This module adds the `socket?` predicate and `tcp-drain`, a request/response
-helper. Policy is Brood; only the syscalls are Rust.")
+This module adds the `socket?` predicate, `tcp-drain` (read to EOF), and the
+framed-read combinators `tcp-read-until` (read to a delimiter — an HTTP head, a
+line) and `tcp-read-n` (read a length-prefixed body/frame), which return the frame
+plus any surplus already read past it. Policy is Brood; only the syscalls are Rust.")
 
 (defn socket? (x) "True if `x` is a TCP socket." (%eq (type-of x) :socket))
 
@@ -57,3 +59,43 @@ helper. Policy is Brood; only the syscalls are Rust.")
     ([:tcp ~sock d] (tcp--drain-to sock (cons d acc) ms))
     ([:tcp-closed ~sock] [:closed (bytes-concat (reverse acc))])
     (after ms [:timeout (bytes-concat (reverse acc))])))
+
+;; ---- framed reads: the input-side twin of iolists (ADR-139) ----------------
+;; The recurring stream-parsing shapes — read a delimited frame (an HTTP request
+;; head, a line), read a length-prefixed body (Content-Length, a chunk, a WS
+;; payload) — as reusable combinators, so a protocol needn't re-implement the
+;; receive+accumulate+split loop each time (the manual `cons`/`reverse`/`join`
+;; idiom, written five ways across an HTTP/WS stack). Both accumulate chunks in a
+;; reversed list and `bytes-concat` **once**, never per-chunk (no O(total²) rebuild),
+;; and return the frame plus any surplus already read past it, so the caller keeps
+;; the leftover for the next frame. Pure Brood over `receive` — no mutable buffer
+;; (ADR-026); the accumulator is an ordinary immutable list. Binary mode
+;; (`tcp-set-binary`) is recommended so byte lengths and delimiters are exact.
+;; Must be called by the socket's owning process (they `receive` its messages).
+
+(defn tcp-read-until (sock sep)
+  "Receive `[:tcp sock data]` chunks until the byte sequence `sep` (a string or `bytes`) first appears in the stream. Return `[head rest]`: `head` is the bytes up to AND INCLUDING `sep`, `rest` is any bytes already received past it (both `bytes`). Return `[:closed acc]` if the socket closes before `sep` appears (`acc` = all bytes received). For a delimited frame — an HTTP request head (`sep` = \"\\r\\n\\r\\n\"), a line (\"\\n\"), a protocol record — which is bounded; a length-prefixed *body* uses `tcp-read-n` (which never scans). Must be called by the socket's owning process."
+  (tcp--read-until sock (bytes-concat sep) nil))
+
+(defn tcp--read-until (sock sep acc)
+  (receive
+    ([:tcp ~sock d]
+      (let (buf (bytes-concat (reverse (cons d acc)))
+            i (bytes-index-of buf sep))
+        (if (>= i 0)
+          (let (cut (+ i (count sep)))
+            [(subbytes buf 0 cut) (subbytes buf cut (count buf))])
+          (tcp--read-until sock sep (cons d acc)))))
+    ([:tcp-closed ~sock] [:closed (bytes-concat (reverse acc))])))
+
+(defn tcp-read-n (sock n)
+  "Receive `[:tcp sock data]` chunks until at least `n` bytes have arrived; return `[data rest]` where `data` is exactly the first `n` bytes and `rest` any surplus already received (both `bytes`). Return `[:closed acc]` if the socket closes with fewer than `n` bytes (`acc` = what arrived). For a length-prefixed body — a Content-Length payload, one chunk of a chunked transfer, a WebSocket frame payload. O(total): the running byte count means no rescanning and a single `bytes-concat` at the end. Assumes binary mode (chunk byte lengths). Must be called by the socket's owning process."
+  (tcp--read-n sock n 0 nil))
+
+(defn tcp--read-n (sock n have acc)
+  (if (>= have n)
+    (let (buf (bytes-concat (reverse acc)))
+      [(subbytes buf 0 n) (subbytes buf n (count buf))])
+    (receive
+      ([:tcp ~sock d] (tcp--read-n sock n (+ have (count d)) (cons d acc)))
+      ([:tcp-closed ~sock] [:closed (bytes-concat (reverse acc))]))))

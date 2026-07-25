@@ -7506,3 +7506,38 @@ positive). `nest check` clean on `tests/`. A whole-`std/` before/after `--check`
 (baseline built from `main` in a throwaway worktree): argument-type warnings went 6 → 5
 — the param tier **added zero** and the earmuff fix **removed one** pre-existing false
 positive. Full `make test` green.
+
+## 2026-07-25 — framed reads: the input-side twin of iolists (tcp-read-until / -n)
+
+ROADMAP's "growable read buffer." The original framing — "a transient/builder value
++ freeze" — was rejected on contact with ADR-026: a user-facing mutable/transient
+buffer is exactly the thing immutability forbids. And the O(n²) it was meant to cure
+is already gone — iolists (ADR-139) plus the cons-accumulate `tcp-drain` idiom make a
+drain O(n). What the five sites (body drain, head reader, chunked de-chunk, WS
+reassembly, live-view render) actually repeated was the *receive → accumulate → split*
+loop, not a buffer type.
+
+So the fix is **combinators**, in Brood (`std/net/tcp.blsp`):
+
+- `(tcp-read-until sock sep)` → `[head rest]` — read `[:tcp sock data]` chunks until
+  the byte sequence `sep` (string or `bytes`) first appears; `head` is everything up
+  to AND INCLUDING it, `rest` the surplus already read past it. `[:closed acc]` if the
+  socket closes first. For a delimited frame (HTTP head `\r\n\r\n`, a line).
+- `(tcp-read-n sock n)` → `[data rest]` — read until at least `n` bytes have arrived;
+  `data` is exactly the first `n`, `rest` the surplus. `[:closed acc]` on early EOF.
+  For a length-prefixed body (Content-Length, a chunk, a WS payload). Tracks a running
+  byte count, so it never rescans — O(total).
+
+Both are pure `receive` loops over an immutable reversed-chunk accumulator with a
+single `bytes-concat` at the end (no per-chunk rebuild) — no mutable value anywhere
+(ADR-026). They return the leftover so a protocol reads frame after frame off one
+stream. Built on `bytes-index-of`/`subbytes`/`count`. Binary mode recommended
+(`tcp-set-binary`) so lengths/delimiters are byte-exact.
+
+A caller-managed *exposed* accumulator value (for the interleaved WS-gather case, where
+the receive loop isn't a simple drain) is deferred (ADR-011) — no in-repo consumer, and
+the combinators cover the socket cases.
+
+Tests: `tests/tcp_test.blsp` — 6 real-loopback cases (delimiter frame, delimiter split
+across sends, delimiter-never-arrives `[:closed]`, exact-n + surplus, multi-chunk n,
+short-EOF `[:closed]`). `nest check` clean; the tcp suite is 15/15.

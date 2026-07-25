@@ -454,11 +454,23 @@ would retire the bug class at the language level. See hatch's
   the kernel, and the text/binary mode-flip races are structurally gone. The
   WebSocket half lives downstream in hatch (no WS in this repo) — its port
   onto `bytes` + bit syntax is hatch work, now unblocked. **[done]**
-- ⬜ **A growable read buffer (or `bytes` transient).** The input-side twin of
-  iolists: an append buffer that freezes to immutable `bytes` on read would make the
-  request head reader, chunked drain, and WS frame gather trivially O(n) — no manual
-  list+`join`, no length-drain gymnastics. **[kernel]** a transient/builder value +
-  freeze.
+- ✅ **Framed reads — the input-side twin of iolists** (shipped 2026-07-25). The
+  original framing ("a transient/builder value + freeze") was **rejected** — a
+  user-facing mutable/transient buffer violates immutability (ADR-026), and the O(n²)
+  it was meant to cure is already gone (iolists + the cons-accumulate `tcp-drain`
+  idiom). What the sites actually repeated was the *receive → accumulate → split*
+  loop, so the fix is **combinators**, in Brood (`std/net/tcp.blsp`): `tcp-read-until`
+  (read to a delimiter — the HTTP request head `\r\n\r\n`, a line, a protocol record)
+  and `tcp-read-n` (read a length-prefixed body/frame — Content-Length, a chunk, a WS
+  payload). Both return `[frame rest]` — the surplus already read past the frame, so
+  the caller keeps it for the next one — or `[:closed acc]` on early EOF. Pure
+  `receive` loops over an immutable reversed-chunk accumulator, one `bytes-concat` at
+  the end (no per-chunk rebuild); `tcp-read-n` tracks a running byte count so it never
+  rescans. Retires the length-drain gymnastics for the socket cases. Tests:
+  `tests/tcp_test.blsp` (6 loopback cases — delimiter, cross-chunk delimiter, early
+  EOF, exact-n, multi-chunk-n, short-EOF). A caller-managed exposed accumulator value
+  (for the interleaved WS-gather case) stays deferred (ADR-011 — no in-repo consumer
+  yet). **[Brood]**
 - ✅ Smaller ergonomic wins — all closed: **`mapv`/`filterv`** shipped
   2026-07-18 (prelude one-liners over `into`; `tests/sequence_test.blsp`);
   **`let` vector-destructure of a list value** verified 2026-07-18 to raise a
