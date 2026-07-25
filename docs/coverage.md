@@ -180,10 +180,17 @@ loaded when the `require` ran. Observed: a 21-line `src/main.blsp` credited with
 also names the file in `:trace` frames, so the misattribution was not confined to
 coverage.
 
-`%load-string` now takes an optional name and `require--force` passes
-`<std>/log.blsp`: honest that there is no openable path, and no longer someone else's
-name. (`source-location` was never affected — definition sites are recorded
-separately.)
+`%load-string` now takes an optional name, and the embedded-module table carries the
+**repo-relative path each module was baked in from** — derived from the same literal as
+its `include_str!`, so the two cannot drift. `require--force` passes it, so `std/log`'s
+forms are recorded as `std/log.blsp`: a real path a tool can open, not a marker and not
+someone else's name.
+
+Pinned by `crates/cli/tests/std_attribution.rs`, on a property that needs no knowledge
+of what the lines contain: **every recorded line must exist inside the file it is
+attributed to.** A line borrowed from another file almost always lands past the end of
+the file it was credited to. (`source-location` was never affected — definition sites
+are recorded separately.)
 
 ## The two tiers together
 

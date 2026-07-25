@@ -944,7 +944,9 @@ Runtime housekeeping (both items landed):
   the suite, so a never-called function lands in the denominator and nowhere else.
   Fixed on the way: a baked-in std module's forms were attributed to whichever file was
   mid-`require`, so `std/log`'s lines were credited to the app's `src/main.blsp` —
-  `%load-string` now takes a name and gets `<std>/<key>.blsp`.
+  `%load-string` now takes a name, and the embedded-module table carries each module's
+  repo-relative path (same literal as its `include_str!`, so they can't drift), so
+  `std/log`'s forms record as `std/log.blsp` — openable, not a marker.
   ⬜ Still: **branch** coverage (`if`/`cond`/`match` arms taken), which needs a
   per-branch id rather than a line, and no concrete need for it yet.
 - ✅ **`nest` correctness + UX hardening pass** — 2026-07-24/25, driven by an

@@ -1689,6 +1689,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "%builtin-module-file",
+        Arity::exact(1),
+        Sig::new(vec![sym.union(kw).union(string)], string.union(nil_ty)),
+        builtin_module_file,
+    );
+    def(
+        heap,
         "%builtin-doc",
         Arity::exact(1),
         Sig::new(vec![sym.union(kw).union(string)], string.union(nil_ty)),

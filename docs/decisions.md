@@ -9202,8 +9202,13 @@ unchanged; the JIT off; `std/tool/coverage.blsp` extended rather than replaced.
   whichever file was mid-load when the `require` ran (`%load-string` set no file), so a
   21-line `src/main.blsp` was credited with `std/log`'s lines 127-131/150-152/175. The
   same field feeds `:trace` frames, so this was never coverage-only. `%load-string` now
-  takes an optional name and `require--force` passes `<std>/<key>.blsp`.
-  (`source-location` was unaffected — definition sites are recorded separately.)
+  takes an optional name, and the embedded-module table carries each module's
+  **repo-relative path**, derived from the same literal as its `include_str!` so the two
+  cannot drift; `require--force` passes it, so `std/log`'s forms are recorded as
+  `std/log.blsp` — a path a tool can actually open. Pinned by
+  `crates/cli/tests/std_attribution.rs`: every recorded line must exist inside the file
+  it is attributed to. (`source-location` was unaffected — definition sites are recorded
+  separately.)
 - With both tiers on, `--cover-min` gates on the LINE percentage, being the stricter
   number. A shortfall now prints `FAILED: coverage N% is below …` and raises a bare
   signal `nest` recognises, instead of surfacing as an error with a trace and a version

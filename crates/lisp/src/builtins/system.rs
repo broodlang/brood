@@ -631,8 +631,9 @@ pub(super) fn eval_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispRe
 /// happened to be loading when the `require` ran — so `std/log`'s lines were reported as
 /// the requiring file's, which line coverage caught by crediting a 21-line `main.blsp`
 /// with std's line 175. The attribution feeds `CompiledArm::src_file`, hence `:trace`
-/// frames too. Callers pass a `<std>/…` marker: honest that there is no openable path,
-/// and no longer someone else's name.
+/// frames too. `require--force` passes the module's real repo-relative path, from
+/// `%builtin-module-file` — see [`EmbeddedModule`], which keeps that path in step with
+/// the `include_str!` it was baked in from.
 pub(super) fn load_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let src = expect_string(heap, "%load-string", arg(args, 0))?;
     let name = match arg(args, 1) {
@@ -705,6 +706,36 @@ pub(super) fn eval_string_inner(
     result
 }
 
+/// One baked-in std module: the `require` key, the source, and the **repo-relative
+/// path the source came from**.
+///
+/// The path exists so a baked module's forms can be attributed to the file they were
+/// actually written in. Without it they inherited whatever file happened to be loading
+/// when the `require` ran (`%load-string` set none), so a 21-line `src/main.blsp` was
+/// credited with `std/log`'s line 175 — in line coverage, and in `:trace` frames, which
+/// take their file from the same `CompiledArm::src_file`.
+///
+/// [`embedded_module!`] derives `path` from the same literal as the `include_str!`, so
+/// the two cannot drift: change the file a module loads from and its recorded path
+/// follows.
+pub(super) struct EmbeddedModule {
+    pub key: &'static str,
+    pub source: &'static str,
+    pub path: &'static str,
+}
+
+/// `embedded_module!("log", "std/log.blsp")` — one [`EmbeddedModule`], with the source
+/// baked in from `path` and `path` kept as the recorded origin.
+macro_rules! embedded_module {
+    ($key:expr, $path:literal) => {
+        EmbeddedModule {
+            key: $key,
+            source: include_str!(concat!("../../../../", $path)),
+            path: $path,
+        }
+    };
+}
+
 /// Standard-library modules baked into the binary (like the prelude), so they load
 /// from any directory with no file paths. The require / provide / load-path
 /// *policy* is written in Brood (`std/prelude.blsp`, ADR-019); Rust only exposes
@@ -714,106 +745,85 @@ pub(super) fn eval_string_inner(
 /// the `dev-tools` feature), so a `nest release` lean runtime
 /// (`--no-default-features`) carries no test/observer/tooling/REPL source
 /// (ADR-038, docs/release.md). `builtin_module` consults both.
-const CORE_MODULES: &[(&str, &str)] = &[
+const CORE_MODULES: &[EmbeddedModule] = &[
     // Output ports: the redirectable sink behind print/println — a port is a 1-arg
     // string sink, with `process-port`/`fn-port` + `with-out`/`with-err`. Pairs
     // with the prelude's `*out*`/`*err*` dynamic vars. Opt-in, no dependencies.
-    ("io", include_str!("../../../../std/io.blsp")),
+    embedded_module!("io", "std/io.blsp"),
     // Fuzzy (subsequence) string matching + ranking: `fuzzy-match` / `fuzzy-filter`,
     // the matcher completion UIs ride on. Pure Brood, no dependencies. Opt-in.
-    ("fuzzy", include_str!("../../../../std/fuzzy.blsp")),
+    embedded_module!("fuzzy", "std/fuzzy.blsp"),
     // Plain-text utilities (pure string->string): `fill` greedy word-wraps to a column
     // width — the engine behind an editor's fill-paragraph / M-q, and reusable for
     // wrapping help text or terminal output. No dependencies. Opt-in.
-    ("text", include_str!("../../../../std/text.blsp")),
-    ("project", include_str!("../../../../std/tool/project.blsp")),
-    (
-        "coverage",
-        include_str!("../../../../std/tool/coverage.blsp"),
-    ),
-    (
-        "complete",
-        include_str!("../../../../std/tool/complete.blsp"),
-    ),
+    embedded_module!("text", "std/text.blsp"),
+    embedded_module!("project", "std/tool/project.blsp"),
+    embedded_module!("coverage", "std/tool/coverage.blsp"),
+    embedded_module!("complete", "std/tool/complete.blsp"),
     // `nest new` scaffolding (templates + new-project), split out of `project` so
     // the analysis half stays lean. `(:use project)` for *config-git-init*. Opt-in.
-    (
-        "scaffold",
-        include_str!("../../../../std/tool/scaffold.blsp"),
-    ),
+    embedded_module!("scaffold", "std/tool/scaffold.blsp"),
     // The package manager (ADR-037): resolves the manifest's :dependencies into a
     // lock file + load-path entries. Required lazily by `project-setup` only when a
     // project actually declares deps. Opt-in, never in the prelude.
-    ("package", include_str!("../../../../std/tool/package.blsp")),
+    embedded_module!("package", "std/tool/package.blsp"),
     // TCP sockets (ADR-062): active-socket helpers + a spawn-per-connection
     // server over the non-blocking tcp-* primitives. Opt-in, never in the prelude.
-    ("net/tcp", include_str!("../../../../std/net/tcp.blsp")),
+    embedded_module!("net/tcp", "std/net/tcp.blsp"),
     // The file & filesystem library: whole-file/line I/O, directory walking, path
     // helpers — Brood over the fs primitives. Opt-in, never in the prelude.
-    ("file", include_str!("../../../../std/file.blsp")),
+    embedded_module!("file", "std/file.blsp"),
     // A minimal HTTP/1.0 server (ADR-062) over the tcp + file libraries — request
     // parsing, response rendering, a router, static files. Opt-in.
-    ("net/http", include_str!("../../../../std/net/http.blsp")),
+    embedded_module!("net/http", "std/net/http.blsp"),
     // JSON ↔ Brood data, written entirely in Brood (a recursive-descent parser +
     // encoder over the string primitives; the reader's `\u{}` escape is the
     // codepoint→char mechanism). Opt-in, never in the prelude.
-    ("json", include_str!("../../../../std/json.blsp")),
+    embedded_module!("json", "std/json.blsp"),
     // WASM component interop (ADR-071/145): load sandboxed native components,
     // call exports (marshalled by WIT types), `use-native` binding. Policy over
     // the `%wasm-*` primitives (feature `wasm`; without it the primitives are
     // unbound and requiring this module errors clearly). Opt-in.
-    ("wasm", include_str!("../../../../std/wasm.blsp")),
+    embedded_module!("wasm", "std/wasm.blsp"),
     // Teach-the-error + intent→idiom lookup (LLM-native errors): explain-error
     // (a stable E-code → summary/causes/fix/example) and find-pattern (an
     // intent → the idiomatic Brood pattern). Curated Brood data; backs the
     // `nest mcp` tools of the same names. Opt-in.
-    ("explain", include_str!("../../../../std/tool/explain.blsp")),
+    embedded_module!("explain", "std/tool/explain.blsp"),
     // Supervised node auto-reconnect (dist self-healing): `watch` keeps a peer
     // link alive with exponential-backoff `(connect …)` retries; subscribers get
     // [:nodeup]/[:nodedown]. Pure Brood over connect/monitor-node/nodes. Opt-in.
-    (
-        "net/reconnect",
-        include_str!("../../../../std/net/reconnect.blsp"),
-    ),
+    embedded_module!("net/reconnect", "std/net/reconnect.blsp"),
     // Server-Sent Events (text/event-stream): a client reader process that streams
     // events to a subscriber's mailbox (pairs with ui's `with-events`) + server-side
     // framing. Pure frame parsing + a thin IO loop over tcp; reuses http's URL/header
     // helpers. Opt-in.
-    ("net/sse", include_str!("../../../../std/net/sse.blsp")),
+    embedded_module!("net/sse", "std/net/sse.blsp"),
     // The process framework, bundled in the default install (ADR-085 amended —
     // batteries-included, not externalized). `proc/gen` is the gen_server-style
     // server loop (`defprocess` / `spawn-server` / `!` / `gen-call` / `stop`); the
     // core `log` module is a `proc/gen` process. `proc/supervisor` is OTP-style
     // supervision — independent of `proc/gen`, both over the same kernel primitives.
-    ("proc/gen", include_str!("../../../../std/proc/gen.blsp")),
-    (
-        "proc/supervisor",
-        include_str!("../../../../std/proc/supervisor.blsp"),
-    ),
+    embedded_module!("proc/gen", "std/proc/gen.blsp"),
+    embedded_module!("proc/supervisor", "std/proc/supervisor.blsp"),
     // Process-backed state cell: start/get/update/get-and-update/cast/stop.
     // A thin Brood layer over spawn/send/receive for the common "stateful process" case.
-    (
-        "proc/agent",
-        include_str!("../../../../std/proc/agent.blsp"),
-    ),
+    embedded_module!("proc/agent", "std/proc/agent.blsp"),
     // Order a flat process-info snapshot as a parent→child forest (depth-tagged, DFS
     // by id). A pure, dependency-free transform — CORE, not dev-tools: it's shared by
     // the dev observer's tree sort *and* a shipped app's process list (myedit's
     // *Process List*), so a `nest release` binary needs it baked in.
-    (
-        "proctree",
-        include_str!("../../../../std/tool/proctree.blsp"),
-    ),
+    embedded_module!("proctree", "std/tool/proctree.blsp"),
     // Run a thunk off the current process with an optional timeout + cancel
     // (ADR-006): `task` (async, tagged-reply handle), `cancel-task`, and the
     // synchronous `await`. Pure Brood over spawn / receive / exit — the generic
     // version of the editor's hand-rolled async-eval watchdog. Opt-in.
-    ("task", include_str!("../../../../std/task.blsp")),
+    embedded_module!("task", "std/task.blsp"),
     // An async, safe logger (ADR-006): a `proc/gen` process holding a list of
     // backends, each an `io` port + a min level + a formatter. Log calls are casts
     // (fire-and-forget = async); the one process serialises writes (no interleaving)
     // and isolates a backend crash. Opt-in, never in the prelude.
-    ("log", include_str!("../../../../std/log.blsp")),
+    embedded_module!("log", "std/log.blsp"),
     // Erlang :telemetry-style instrumentation (ADR-106). Handlers run in a dedicated
     // LISTENER process (emit is a fire-and-forget send), so a buggy handler can never
     // crash/hang the emitting process — only the listener, which a throwing handler
@@ -821,68 +831,62 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // that survives a listener restart (ADR-013). `span` brackets a body with
     // :start/:stop/:exception events; `forward` runs handler work in your own process.
     // Opt-in, never in the prelude.
-    ("telemetry", include_str!("../../../../std/telemetry.blsp")),
+    embedded_module!("telemetry", "std/telemetry.blsp"),
     // Date and time utilities (UTC): epoch↔datetime conversion, ISO 8601
     // format/parse, arithmetic, calendar predicates. Pure Brood over `now`.
-    ("datetime", include_str!("../../../../std/datetime.blsp")),
+    embedded_module!("datetime", "std/datetime.blsp"),
     // Hex and Base64 encoding/decoding. Pure Brood over `char->int` /
     // `string->utf8-bytes` / `utf8-bytes->string`. Opt-in, never in the prelude.
-    ("encoding", include_str!("../../../../std/encoding.blsp")),
+    embedded_module!("encoding", "std/encoding.blsp"),
     // Descriptive statistics over numeric sequences: mean, median, stddev,
     // variance, percentile, mode, frequencies. Pure Brood over sort/fold/sqrt.
-    ("stats", include_str!("../../../../std/stats.blsp")),
+    embedded_module!("stats", "std/stats.blsp"),
     // Pull-stream protocol + combinators over green processes. Sources: list,
     // fn-generator, range, TCP socket. Transformers: map/filter/take/drop/
     // take-while/chunk/concat/lines. Terminals: fold/to-list/to-vector/
     // for-each/pipe/to-socket. Foundation for the HTTP streaming layer.
-    ("stream", include_str!("../../../../std/stream.blsp")),
+    embedded_module!("stream", "std/stream.blsp"),
     // URL encoding/decoding and parsing: percent-encode/decode, query-string
     // encode/decode, parse-url, build-url. Pure Brood over string primitives.
-    ("url", include_str!("../../../../std/url.blsp")),
+    embedded_module!("url", "std/url.blsp"),
     // CSV parsing and emitting: csv-parse, csv-parse-maps, csv-emit,
     // csv-emit-maps. Handles quoted fields, escaped quotes, \r\n endings.
-    ("csv", include_str!("../../../../std/csv.blsp")),
+    embedded_module!("csv", "std/csv.blsp"),
     // RFC 4122 version-4 UUID generation via the OS CSPRNG (random-token).
     // uuid-v4, uuid-nil, uuid?.
-    ("uuid", include_str!("../../../../std/uuid.blsp")),
+    embedded_module!("uuid", "std/uuid.blsp"),
     // {{var}} string templating: render a template string against a data map.
     // render, render-all.
-    ("template", include_str!("../../../../std/template.blsp")),
+    embedded_module!("template", "std/template.blsp"),
     // Purely functional FIFO queue (two-list, amortised O(1)) and min-priority
     // queue (sorted-list, O(n) insert / O(1) pop).
-    ("queue", include_str!("../../../../std/queue.blsp")),
+    embedded_module!("queue", "std/queue.blsp"),
     // Multi-valued map: one key may hold multiple values (a map of lists).
     // multimap-assoc, multimap-get, multimap-get-all, multimap-dissoc, …
-    ("multimap", include_str!("../../../../std/multimap.blsp")),
+    embedded_module!("multimap", "std/multimap.blsp"),
     // MD5/SHA-1/SHA-256/SHA-384/SHA-512 + HMAC, all Brood over the two `%digest`
     // / `%hmac` prims (raw bytes); hex/string shaping via bytes->hex; hash-string is djb2.
-    ("hash", include_str!("../../../../std/hash.blsp")),
+    embedded_module!("hash", "std/hash.blsp"),
     // LCS-based sequence diff: diff-seq, diff-lines, diff-summary, diff-patch,
     // diff-unified. O(m*n) time/space; suitable for small-to-medium sequences.
-    ("diff", include_str!("../../../../std/diff.blsp")),
+    embedded_module!("diff", "std/diff.blsp"),
     // Path string manipulation: join, split, basename, dirname, extension, stem,
     // normalize, relative-to. Consolidates the prelude's path-* globals under
     // a single path/ namespace with additional operations.
-    ("path", include_str!("../../../../std/path.blsp")),
+    embedded_module!("path", "std/path.blsp"),
     // OS/process interface: env vars, argv, subprocess execution, OS type, halt.
     // Wraps the %env-all/%argv/%os-cmd/%os-type/%halt primitives with a clean API.
-    ("system", include_str!("../../../../std/system.blsp")),
+    embedded_module!("system", "std/system.blsp"),
     // Authenticated encryption (ChaCha20-Poly1305), PBKDF2 key derivation, secure
     // random bytes. Wraps the %chacha20-* and %pbkdf2-sha256-bytes primitives.
-    ("crypto", include_str!("../../../../std/crypto.blsp")),
+    embedded_module!("crypto", "std/crypto.blsp"),
     // The editor framework's buffer model (M2 Phase 1, ADR-045): an immutable
     // buffer over the rope primitives, opt-in, never in the prelude.
-    (
-        "editor/buffer",
-        include_str!("../../../../std/editor/buffer.blsp"),
-    ),
+    embedded_module!("editor/buffer", "std/editor/buffer.blsp"),
     // The CLIENT half of the buffer-process protocol (ADR-134): the link record
     // + the pure push fold (echo suppression, splice transform over in-flight
     // edits, resync fallback) a subscriber uses to track a hosted document.
-    (
-        "editor/buffer-client",
-        include_str!("../../../../std/editor/buffer-client.blsp"),
-    ),
+    embedded_module!("editor/buffer-client", "std/editor/buffer-client.blsp"),
     // The display/input seam (M3, ADR-046): `display` is the render-op protocol
     // (pure data constructors); `keymap` is the rebindable key→command dispatcher
     // shared by the line editor and the observer; `observer` is a process-viewer
@@ -890,64 +894,43 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // The shared named-face / theme registry (the counterpart to `keymap`): style
     // named once, referenced everywhere, restyled in one place. Required by `ui`
     // (so every ui-run app gets it) and the observer.
-    (
-        "editor/face",
-        include_str!("../../../../std/editor/face.blsp"),
-    ),
-    (
-        "editor/display",
-        include_str!("../../../../std/editor/display.blsp"),
-    ),
-    (
-        "editor/keymap",
-        include_str!("../../../../std/editor/keymap.blsp"),
-    ),
+    embedded_module!("editor/face", "std/editor/face.blsp"),
+    embedded_module!("editor/display", "std/editor/display.blsp"),
+    embedded_module!("editor/keymap", "std/editor/keymap.blsp"),
     // Composable, runtime-reconfigurable behaviour layers over `keymap` (the
     // generic mechanism the editor's "modes" are built from; buffer-agnostic).
     // Opt-in, never in the prelude. See docs/layers.md.
-    (
-        "editor/layers",
-        include_str!("../../../../std/editor/layers.blsp"),
-    ),
+    embedded_module!("editor/layers", "std/editor/layers.blsp"),
     // Structural (s-expression) navigation over the parse-source CST — reusable
     // Brood-code tooling (same tier as the formatter / LSP), not editor-specific.
     // (The text-mode/brood-mode *layers* built on it are editor policy and live in
     // the editor app — examples/editor/src/ — not here.) Opt-in. (docs/layers.md)
-    ("sexp", include_str!("../../../../std/tool/sexp.blsp")),
+    embedded_module!("sexp", "std/tool/sexp.blsp"),
     // A small backtracking regular-expression engine, pure Brood (literals, ., * + ?,
     // ^ $, [...] sets, \d \w \s, |, groups; no ranges/captures yet). Opt-in.
-    ("regex", include_str!("../../../../std/regex.blsp")),
+    embedded_module!("regex", "std/regex.blsp"),
     // ANSI / VT100 escape-sequence stripping for pipe output (CSI sequences + CR).
     // Used by bshell and compile to clean subprocess output before display.
-    ("ansi", include_str!("../../../../std/ansi.blsp")),
-    ("editor/ui", include_str!("../../../../std/editor/ui.blsp")),
+    embedded_module!("ansi", "std/ansi.blsp"),
+    embedded_module!("editor/ui", "std/editor/ui.blsp"),
     // Serve a `ui-run` app to remote frontends — the Emacs `--daemon`/`emacsclient`
     // model (ADR-090): the app runs on the daemon, a thin `attach` client paints
     // pushed frames + ships back keys. Pure Brood over `ui-run` + the node link.
-    (
-        "editor/serve",
-        include_str!("../../../../std/editor/serve.blsp"),
-    ),
+    embedded_module!("editor/serve", "std/editor/serve.blsp"),
     // Emacs-style tiled window splits: an immutable binary layout tree + pure
     // pane/divider geometry + drag-to-resize over `:drag` mouse events (ADR-077).
     // Reusable editor toolkit (content-agnostic); the keybindings + payload are
     // editor policy. Opt-in, never in the prelude.
-    (
-        "editor/pane",
-        include_str!("../../../../std/editor/pane.blsp"),
-    ),
+    embedded_module!("editor/pane", "std/editor/pane.blsp"),
     // Bare ANSI escape *strings* for simple terminal scripts (`print` them
     // directly) — the lightweight counterpart to the `display` render-op
     // protocol. Opt-in, never in the prelude.
-    (
-        "editor/ansi",
-        include_str!("../../../../std/editor/ansi.blsp"),
-    ),
+    embedded_module!("editor/ansi", "std/editor/ansi.blsp"),
     // Sets as a library over maps (ADR-062): a set is a map of `element → true`,
     // so membership/elements/size reuse `contains?`/`keys`/`count`; the module
     // adds `set`/`conj`/`disj`/`union`/`intersection`/`difference`/`subset?`.
     // Opt-in, never in the prelude (no `#{…}` literal / distinct type yet).
-    ("set", include_str!("../../../../std/set.blsp")),
+    embedded_module!("set", "std/set.blsp"),
     // The interactive REPL line editor (ADR-052): `highlight` is the pure lexical
     // syntax-highlighter / bracket-matcher / signature + completion scanners;
     // `lineedit` is the raw-mode, emacs-style editor built on it + the inline
@@ -955,42 +938,24 @@ const CORE_MODULES: &[(&str, &str)] = &[
     // `highlight`/`lineedit` stay in CORE: they are reusable UI a shipped app may
     // `require` (the editor's minibuffer reuses `std/lineedit`'s core), not just
     // REPL plumbing — so a lean release keeps them.
-    (
-        "editor/highlight",
-        include_str!("../../../../std/editor/highlight.blsp"),
-    ),
+    embedded_module!("editor/highlight", "std/editor/highlight.blsp"),
     // Generic tree-sitter language services (`fontify` + structural motions) over
     // the `tree-sitter-parse` builtin's positioned CST — the foreign-language
     // analogue of `sexp`+`highlight`. Pure UI a shipped editor `require`s for its
     // ruby/elixir/… modes (ROADMAP §C), so it stays in CORE; opt-in, never prelude.
-    (
-        "editor/treesit",
-        include_str!("../../../../std/editor/treesit.blsp"),
-    ),
+    embedded_module!("editor/treesit", "std/editor/treesit.blsp"),
     // Lexical Markdown highlighter — the `highlight` analogue for `.md` buffers
     // (`markdown-spans` → `[start end face]` spans, ADR-092). Pure UI a shipped app
     // may `require` (myedit's markdown-mode), so it stays in CORE alongside
     // `highlight`/`lineedit`; opt-in, never in the prelude.
-    (
-        "editor/markdown",
-        include_str!("../../../../std/editor/markdown.blsp"),
-    ),
+    embedded_module!("editor/markdown", "std/editor/markdown.blsp"),
     // Lexical `.env` and Dockerfile highlighters, the dotenv/Dockerfile analogues of
     // `markdown` (`env-spans` / `dockerfile-spans` → `[start end face]` spans). Pure
     // UI a shipped app may `require` (myedit's env-/docker-mode); CORE, like markdown.
-    (
-        "editor/dotenv",
-        include_str!("../../../../std/editor/dotenv.blsp"),
-    ),
-    (
-        "editor/dockerfile",
-        include_str!("../../../../std/editor/dockerfile.blsp"),
-    ),
-    (
-        "editor/lineedit",
-        include_str!("../../../../std/editor/lineedit.blsp"),
-    ),
-    ("format", include_str!("../../../../std/format.blsp")),
+    embedded_module!("editor/dotenv", "std/editor/dotenv.blsp"),
+    embedded_module!("editor/dockerfile", "std/editor/dockerfile.blsp"),
+    embedded_module!("editor/lineedit", "std/editor/lineedit.blsp"),
+    embedded_module!("format", "std/format.blsp"),
 ];
 
 /// Dev/tooling modules — baked in only under the `dev-tools` feature (the dev
@@ -1000,35 +965,32 @@ const CORE_MODULES: &[(&str, &str)] = &[
 /// (ADR-038, docs/release.md). `project` stays in CORE — it boots the bundle;
 /// `lineedit`/`highlight` stay too (reusable UI, e.g. the editor's minibuffer).
 #[cfg(feature = "dev-tools")]
-const DEV_MODULES: &[(&str, &str)] = &[
+const DEV_MODULES: &[EmbeddedModule] = &[
     // The test framework — `deftest`/`describe`/`assert=`/`is`. Never shipped.
-    ("test", include_str!("../../../../std/tool/test.blsp")),
+    embedded_module!("test", "std/tool/test.blsp"),
     // Doc generation (`nest doc`) — tooling, not runtime.
-    ("docs", include_str!("../../../../std/tool/docs.blsp")),
+    embedded_module!("docs", "std/tool/docs.blsp"),
     // Generate editor syntax grammars (VS Code TextMate, Emacs font-lock) from the
     // language's own `(special-forms)` — one source of truth, no drift (ADR-092).
-    ("grammar", include_str!("../../../../std/tool/grammar.blsp")),
+    embedded_module!("grammar", "std/tool/grammar.blsp"),
     // The process viewer / debug tooling (`nest observe`, `(observe)`).
-    (
-        "observer",
-        include_str!("../../../../std/tool/observer.blsp"),
-    ),
+    embedded_module!("observer", "std/tool/observer.blsp"),
     // The hot-reload file watcher — a dev-loop convenience.
-    ("reload", include_str!("../../../../std/tool/reload.blsp")),
+    embedded_module!("reload", "std/tool/reload.blsp"),
     // The Model Context Protocol tool surface — `(mcp-tools)` returns the
     // catalogue the `nest mcp` dispatcher reads (ADR-036, docs/mcp.md, step 3).
-    ("mcp", include_str!("../../../../std/tool/mcp.blsp")),
+    embedded_module!("mcp", "std/tool/mcp.blsp"),
     // The read-eval-print loop itself, written in Brood (`(require 'repl)`):
     // policy over the `read-line`/`eval-string`/`pr-str` primitives. The Rust
     // binaries (`brood`, `nest repl`) just bootstrap into `(repl-run)`. A shipped
     // app runs its own `:main`, never the REPL.
-    ("repl", include_str!("../../../../std/tool/repl.blsp")),
+    embedded_module!("repl", "std/tool/repl.blsp"),
 ];
 
 /// Empty in a lean (`--no-default-features`) release runtime — the dev modules
 /// above are not compiled in at all (their `include_str!` never runs).
 #[cfg(not(feature = "dev-tools"))]
-const DEV_MODULES: &[(&str, &str)] = &[];
+const DEV_MODULES: &[EmbeddedModule] = &[];
 
 /// Baked-in reference *documents* (markdown), the counterpart to
 /// [`EMBEDDED_MODULES`] for non-module text. `(%builtin-doc 'brood-for-claude)`
@@ -1086,27 +1048,34 @@ pub(super) fn lookup_embedded(
     }
 }
 
+/// The baked-in module registered under `key`, core table first then dev/tooling
+/// (absent in a lean release runtime).
+fn embedded_module(key: &str) -> Option<&'static EmbeddedModule> {
+    CORE_MODULES
+        .iter()
+        .chain(DEV_MODULES.iter())
+        .find(|m| m.key == key)
+}
+
 /// `(%builtin-module name)` — the source of a baked-in std module as a string,
 /// or nil if there is none. Mechanism only: `require` (Brood) consults this
 /// before searching the load-path.
 pub(super) fn builtin_module(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    // Core modules first, then dev/tooling modules (absent in a lean release
-    // runtime). Both go through `lookup_embedded`, which also validates the arg.
-    let found = lookup_embedded(args, heap, CORE_MODULES, "%builtin-module", "module name")?;
-    if !matches!(found, Value::Nil) {
-        return Ok(found);
-    }
-    let found = lookup_embedded(args, heap, DEV_MODULES, "%builtin-module", "module name")?;
-    if !matches!(found, Value::Nil) {
-        return Ok(found);
+    let v = arg(args, 0);
+    let Some(name) = embedded_name(heap, v) else {
+        return Err(LispError::wrong_type(
+            heap,
+            "%builtin-module",
+            "module name",
+            v,
+        ));
+    };
+    if let Some(module) = embedded_module(&name) {
+        return Ok(heap.alloc_string(module.source));
     }
     // Not a baked-in std module — consult a mounted release bundle (the app's
     // own modules + bundled deps), so `require` resolves them with no change to
-    // its load-path logic (ADR-038). The arg type was already validated above.
-    let name = match embedded_name(heap, arg(args, 0)) {
-        Some(name) => name,
-        None => return Ok(Value::nil()),
-    };
+    // its load-path logic (ADR-038).
     match crate::bundle::mounted() {
         Some(b) => match b.module_src(&name) {
             Some(src) => Ok(heap.alloc_string(src)),
@@ -1114,6 +1083,39 @@ pub(super) fn builtin_module(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
         },
         None => Ok(Value::nil()),
     }
+}
+
+/// `(%builtin-module-file name)` — where a baked-in module's source was written: its
+/// repo-relative path (`"std/tool/test.blsp"`), or `"<bundle>/<name>.blsp"` for a module
+/// served out of a mounted release bundle, which genuinely has no path. Nil if `name`
+/// isn't an embedded module at all (a load-path file has its own real path).
+///
+/// `require--force` hands this to `%load-string` so the module's forms are attributed to
+/// the file they were written in. Without it they took the requiring file's name — see
+/// [`EmbeddedModule`].
+pub(super) fn builtin_module_file(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let v = arg(args, 0);
+    let Some(name) = embedded_name(heap, v) else {
+        return Err(LispError::wrong_type(
+            heap,
+            "%builtin-module-file",
+            "module name",
+            v,
+        ));
+    };
+    if let Some(module) = embedded_module(&name) {
+        return Ok(heap.alloc_string(module.path));
+    }
+    // A bundled module has a name but no path. Say so rather than inventing one that
+    // looks openable, and rather than falling back to the requiring file.
+    let bundled = crate::bundle::mounted()
+        .as_ref()
+        .is_some_and(|b| b.module_src(&name).is_some());
+    if bundled {
+        let marker = format!("<bundle>/{name}.blsp");
+        return Ok(heap.alloc_string(&marker));
+    }
+    Ok(Value::nil())
 }
 
 /// `(%bundled?)` — true when this executable is a release bundle (an app built
@@ -1159,7 +1161,7 @@ pub(super) fn builtin_modules(_: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     let mut names: Vec<&str> = CORE_MODULES
         .iter()
         .chain(DEV_MODULES.iter())
-        .map(|(name, _)| *name)
+        .map(|module| module.key)
         .collect();
     names.sort_unstable();
     names.dedup();

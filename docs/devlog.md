@@ -7821,3 +7821,28 @@ release-fast binary (`--no-default-features`) has no `test` module, and hot-load
 modified `std/` copy over the baked-in one is *not* the same configuration as baking it
 (different region, different freeze path). Both A/Bs happened to agree here, but the
 baked build is the one that answers the question.
+
+### Follow-up: the std attribution fix, done properly
+
+The first cut named a baked-in module `<std>/log.blsp` — honest, but not openable, which
+makes it useless to any tool handed the path. The real defect was that the embedded
+module table (`CORE_MODULES` / `DEV_MODULES`) threw away the one thing that answers the
+question: each entry is an `include_str!` of a path it then forgot.
+
+Entries are now built by an `embedded_module!("log", "std/log.blsp")` macro producing an
+`EmbeddedModule { key, source, path }`, where `source` is `include_str!` of `path` — so
+the recorded path cannot drift from the file the source came from. A new
+`%builtin-module-file` reads it back, and `require--force` hands it to `%load-string`.
+`std/log`'s forms now record as `std/log.blsp`, and a bundled module (ADR-038, genuinely
+pathless) gets `<bundle>/<name>.blsp` rather than a fabricated one.
+
+The regression test is `crates/cli/tests/std_attribution.rs`, and the property it uses is
+worth stealing: **every recorded line must exist inside the file it is attributed to.**
+No knowledge of what the lines contain, no brittle expected-value list — a line borrowed
+from another file almost always lands past the end of the file it was credited to, which
+is exactly how the bug showed itself (a 21-line `main.blsp` credited with line 175).
+Verified to fail with the fix reverted and pass with it restored, which is the only way
+to know a regression test tests anything. It also probes bodies via
+`%coverage-precompile` rather than by calling them: arms register their lines when they
+compile, and precompiling is both cheaper than arranging real calls into `log` and the
+exact path the bug was found on.
