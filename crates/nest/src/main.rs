@@ -239,9 +239,11 @@ enum Cmd {
         #[arg(long, value_name = "K", default_value_t = 0)]
         shard: u64,
 
-        /// Don't print each test as it starts (the default prints them).
+        /// Print `▶ group › name` as each test starts, instead of the default
+        /// one-character-per-test progress. Useful for spotting which test is slow
+        /// or hung; noisier for everything else.
         #[arg(long)]
-        no_trace: bool,
+        trace: bool,
 
         /// Report FUNCTION-level coverage after the run: which of the project's
         /// functions the suite never called. Instrumenting rebinds every project
@@ -488,7 +490,7 @@ fn run_main(cli: Cli) {
             slowest,
             partitions,
             shard,
-            no_trace,
+            trace,
             cover,
             cover_min,
         } => {
@@ -525,7 +527,7 @@ fn run_main(cli: Cli) {
                 slowest,
                 partitions,
                 shard,
-                no_trace,
+                trace,
                 cover,
                 cover_min,
                 lines,
@@ -664,7 +666,7 @@ struct TestOpts {
     slowest: Option<u64>,
     partitions: Option<u64>,
     shard: u64,
-    no_trace: bool,
+    trace: bool,
     cover: bool,
     cover_min: Option<u64>,
     /// `FILE:LINE` selectors peeled off the positional FILE list.
@@ -731,10 +733,11 @@ impl TestOpts {
     /// The Brood option plist — spliced straight into the `run-*` call.
     fn to_plist(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
-        // `:trace` (live per-test progress) is the interactive default; `--no-trace`
-        // is the opt-out. The `brood --test` path never sets it, keeping machine-
-        // parsed output clean.
-        if !self.no_trace {
+        // Tracing is OPT-IN. The default is the runner's one-character-per-test
+        // progress (a green dot per pass, a red `F` per failure), which is what you
+        // want for a normal run; `▶ group › name` per test is for finding a slow or
+        // hung case, and it suppresses the dots because the two together are noise.
+        if self.trace {
             parts.push(":trace".to_string());
         }
         if self.failed {

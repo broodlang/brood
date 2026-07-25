@@ -43,8 +43,9 @@ and calls `(run-tests)` for you. The language binary `brood` only ever runs a
 - **`(describe "group" body…)`** — names a group of related cases.
 - **`(test "name" body…)`** — one case. The body is any Brood code plus
   assertions.
-- Both accept `:serial` / `:isolated` (execution mode) and `:tags [kw …]`
-  (selection) before the body, in any order — see [Tags](#tags).
+- Both accept `:serial` / `:isolated` (execution mode), `:tags [kw …]`
+  (selection) and `:skip` before the body, in any order — see [Tags](#tags) and
+  [Skipping a test](#skipping-a-test).
 - **`(deftest name body…)`** — a single case named by a symbol, no group. Kept
   for convenience; expands to `test`.
 
@@ -72,6 +73,48 @@ assertion signals failure by **throwing** a tagged record; the `test` macro runs
 each top-level body form in its own `try` (`test--run`), so a throw ends only that
 form and the next form still runs. The exception: multiple assertions nested inside
 **one** form stop at the first (the throw unwinds the whole form).
+
+### Progress output
+
+By default a run prints **one character per finished test**, as results arrive, so a
+long suite shows movement and a failure is visible immediately rather than only in
+the summary:
+
+| mark | outcome |
+| --- | --- |
+| green `.` | passed |
+| red `F` | failed |
+| orange `○` | skipped (`:skip`) |
+
+**`--trace`** swaps that for one line per test, coloured by outcome and carrying what
+a trace is for — the duration and where the test is declared:
+
+```
+✓ math › adds                     2ms  tests/math_test.blsp:12
+✗ math › divides                  0ms  tests/math_test.blsp:18  (1 failure)
+○ db › needs postgres         skipped  tests/db_test.blsp:5
+```
+
+It is **opt-in**, and replaces the dots rather than adding to them. The line is
+printed when the test *finishes*, which is what makes the outcome colour possible; a
+hung test still surfaces, because the runner hard-kills it at `*test-timeout-ms*` and
+reports it as a timed-out failure. Lines from parallel workers interleave, in waves
+of `*parallel-batch*`.
+
+### Skipping a test
+
+`:skip` on a `test` or a `describe` registers the case but never runs its body:
+
+```lisp
+(test "needs a live database" :skip (assert= (db-ping) :pong))
+(describe "postgres integration" :skip ...)          ; skips every test in the group
+```
+
+A skipped test is **still counted and still reported** — that is the difference
+between skipping it and deleting or commenting it out — but it counts as neither a
+pass nor a failure, and the summary names them separately
+(`8 tests, 5 passed, 0 failed, 3 skipped`). `:skip` composes with the other
+modifiers (`:serial`, `:isolated`, `:tags`) in any order.
 
 Output is **plain text when captured** (a pipe, `cargo test`, CI, or an LLM
 reading the run) and **coloured only when stdout is an interactive terminal**
@@ -273,7 +316,7 @@ below — forwarded by the runner, and usable directly if you call it yourself:
 
 ```lisp
 (run-tests)            ; run all, print failures + a summary
-(run-tests :trace)     ; print `▶ group › name` as each test STARTS — live progress
+(run-tests :trace)     ; print `▶ group › name` as each test STARTS (else: progress dots)
 (run-tests :slow)      ; after the summary, list the slowest 5 tests
 (run-tests :slowest 10)     ; ...or the slowest N
 (run-tests :timeout 5000)   ; per-test HARD ceiling in ms — killed+failed (default 120000)
@@ -286,7 +329,7 @@ below — forwarded by the runner, and usable directly if you call it yourself:
 
 The `nest test` flags map onto these one-for-one: `--max-failures` → `:max-failures`,
 `--repeat-until-failure` → `:repeat`, `--slowest` → `:slowest`, `--timeout` →
-`:timeout`, `--no-trace` suppresses `:trace`, and the selection flags are lowered
+`:timeout`, `--trace` sets `:trace` (opt-in — see below), and the selection flags are lowered
 into one `:filter` spec built by `test--make-filter` (selector *parsing* lives in
 Brood, so the grammar has a single definition).
 
@@ -294,10 +337,9 @@ Brood, so the grammar has a single definition).
 and between files, not mid-test, so a run can overshoot the cap slightly — the
 batch already in flight still reports. It bounds the run; it isn't an exact stop.
 
-`nest test` passes `:trace`, so it shows each test's name as it starts (handy for
-spotting a slow or hung one) — the `brood --test` path and `run-tests-structured`
-stay quiet, for clean machine-parseable output. Trace lines from parallel workers
-interleave, in waves of `*parallel-batch*`.
+`nest test` shows progress dots by default and `▶ group › name` under `--trace`; the
+`brood --test` path and `run-tests-structured` stay quiet either way, for clean
+machine-parseable output.
 
 **Two thresholds, distinct on purpose** (both per-test wall-clock ms; module vars,
 overridable as above):

@@ -100,12 +100,23 @@ suggestions\", never to an error on the user's command line."
     (if (< i 0)
       acc
       (let (open (index-of--from text "[" i)
-            close (if (< open 0) -1 (index-of--from text "]" open)))
-        (if (or (< open 0) (< close 0))
-          acc
-          (complete--tags-in text
-            (append acc (complete--keywords (substring text (+ open 1) close)))
-            (+ close 1)))))))
+            close (if (< open 0) -1 (index-of--from text "]" open))
+            newline (index-of--from text "\n" i))
+        (cond
+          ;; No bracket at all, or no closing bracket anywhere after it: nothing
+          ;; addressable here, and nothing further to find.
+          (or (< open 0) (< close 0)) acc
+          ;; The `]` is on a LATER line, so this `[` never closes on this line —
+          ;; almost certainly not a tag vector (an unclosed bracket, or a `:tags`
+          ;; mentioned in prose). Capturing to the far-away `]` used to swallow the
+          ;; rest of the file and offer every keyword in it as a "tag". Skip past
+          ;; this occurrence and keep looking.
+          (and (>= newline 0) (< newline close)) (complete--tags-in text acc (+ i 5))
+          ;; Inside a string literal — prose or a test fixture, not a declaration.
+          (complete--in-string? text i) (complete--tags-in text acc (+ i 5))
+          else (complete--tags-in text
+                 (append acc (complete--keywords (substring text (+ open 1) close)))
+                 (+ close 1)))))))
 
 ;; `index-of` has no start offset, so scan a suffix and re-base the result.
 (defn index-of--from (text needle from)
@@ -114,14 +125,47 @@ suggestions\", never to an error on the user's command line."
     (let (i (index-of (substring text from (string-length text)) needle))
       (if (< i 0) -1 (+ from i)))))
 
+;; Is index `i` inside a string literal? Checked within `i`'s own LINE, using native
+;; string ops only (this runs per `:tags` occurrence, on a keypress budget).
+;;
+;; Why it matters: the scan is textual, so a `:tags [...]` written *inside a string* —
+;; which is exactly what this module's own tests are full of — was being harvested as
+;; real tags, offering names like `a` and `unit` that no test actually carries. A
+;; multi-line string could fool the line-local check; that costs one wrong hint.
+(defn complete--line-start (text i) (complete--line-start--walk text i 0))
+
+(defn complete--line-start--walk (text i at)
+  (let (nl (index-of--from text "\n" at))
+    (if (or (< nl 0) (>= nl i)) at (complete--line-start--walk text i (+ nl 1)))))
+
+(defn complete--in-string? (text i)
+  (let (prefix (substring text (complete--line-start text i) i)
+        ;; An escaped \" neither opens nor closes, so drop those pairs first.
+        cleaned (replace prefix "\\\"" ""))
+    ;; Odd number of quotes before the position ⇒ still inside one.
+    (= 1 (rem (- (count (string-split cleaned "\"")) 1) 2))))
+
 ;; The bare names of the `:keyword`s in a whitespace-separated fragment.
 (defn complete--keywords (fragment)
   (fold (fn (acc token)
           (if (and (starts-with? token ":") (> (string-length token) 1))
-            (append acc (list (substring token 1 (string-length token))))
+            (let (name (substring token 1 (string-length token)))
+              (if (complete--tag-name? name) (append acc (list name)) acc))
             acc))
     nil
     (filter (fn (s) (not (= s ""))) (string-split (trim fragment) " "))))
+
+;; Could `name` be a keyword's name? A tag is written `:name`, so anything holding a
+;; quote, bracket, paren or backslash came from surrounding syntax rather than from a
+;; tag — the scan is textual, so it can pick up a `:tags` inside a string literal and
+;; produce a candidate like `fast"`. Offering that is worse than offering nothing.
+(def *complete--tag-reject* "\"'()[]{}\\;`,")
+
+(defn complete--tag-name? (name)
+  (and (not (= name ""))
+    (fold (fn (ok ch) (and ok (not (includes? *complete--tag-reject* ch))))
+      true
+      (string-split name ""))))
 
 (defn complete-tags ()
   "Every tag name declared with `:tags [...]` anywhere in the project's test files, de-duplicated and sorted. Textual scan — see the file header on why."

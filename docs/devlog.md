@@ -7432,3 +7432,52 @@ One incidental fix: `package` needed `(:use-internals project)` for
 `project--cache-dir` (ADR-146). The privacy error fires at *require* time, so the
 whole module silently failed to load until it was granted — the same trap
 `std/tool/complete.blsp` hit yesterday.
+
+## 2026-07-25 — `nest test` output: dots by default, an informative coloured trace, and `:skip`
+
+Three connected changes to what a run looks like.
+
+**Tracing is now opt-in.** `nest test` used to pass `:trace` always, so every run
+printed `▶ group › name` per test — fine for finding a hung case, noise for everything
+else. The default is now **one character per finished test** (green `.`, red `F`,
+orange `○`), printed as results arrive from the driver, so a long suite shows movement
+and a failure is visible immediately. `--no-trace` is gone; `--trace` opts in.
+
+**The trace reports outcomes, not starts.** Colouring by outcome is impossible from a
+start-of-test line — the result isn't known yet — so `trace-result` replaces
+`trace-start` and prints when the test finishes, with the duration and the declaration
+site (`file:line`, cwd-relative; the loader records absolute paths and a full
+`/home/…` on every line buries the part that matters):
+
+```
+✓ math › adds                     2ms  tests/math_test.blsp:12
+✗ math › divides                  0ms  tests/math_test.blsp:18  (1 failure)
+○ db › needs postgres         skipped  tests/db_test.blsp:5
+```
+
+Losing the start-of-test line costs nothing for hang-hunting: the runner already
+hard-kills at `*test-timeout-ms*` and reports a timed-out failure, so a hung test
+shows up as a red line rather than as a start with no end.
+
+**`:skip` is new** — "orange for skip" needed something to colour. `:skip` on a `test`
+or a `describe` registers the case but never calls its body, so it is still counted
+and still reported: that is the whole difference between skipping a test and deleting
+or commenting it out. It composes with `:serial`/`:isolated`/`:tags` in any order, and
+counts as neither pass nor failure (`8 tests, 5 passed, 0 failed, 3 skipped`).
+
+Implementation notes worth keeping:
+
+- The result tuple grew a 5th (skipped) and 6th (declaration site) element. `r-skipped?`
+  and `r-where` read them **defensively**, because results synthesised elsewhere — a
+  dead worker, a timed-out unit — are still 4-element tuples and must not index past
+  the end. A test pins that.
+- **Colour is real now.** `docs/testing.md` had claimed for a while that output is
+  "coloured only when stdout is an interactive terminal (via the `stdout-tty?`
+  primitive)" — but `test.blsp` contained no colour code at all. It does now, behind
+  exactly that gate, so a piped run, a CI log, or an LLM reading the output still gets
+  plain text. The claim and the code finally agree.
+- The summary line is built with one `str` rather than `println`'s space-joined
+  arguments, so the comma before the optional `N skipped` clause lands correctly.
+
+`tests/runner_progress_test.blsp` (20 cases) covers the marks, the three trace
+outcomes, the counting, and the defensive accessors.
