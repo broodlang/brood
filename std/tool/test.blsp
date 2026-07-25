@@ -27,6 +27,8 @@
 ;;                                          ;   runs at the same time, and its
 ;;                                          ;   defs roll back when it finishes
 ;;   (test "touches global state" :isolated ...)   ; a lone isolated test
+;;   (test "needs a live database" :skip ...)      ; registered, never run
+;;   (describe "postgres" :skip ...)               ; skips every test in the group
 ;;
 ;; Why this matters here: a runtime's processes SHARE one global table (see
 ;; docs/shared-code.md), so two parallel tests that both redefine the same global
@@ -161,28 +163,44 @@ docs/testing.md for the full guide.")
 ;; attaches tags, which `nest test --only/--exclude/--include` select on (the
 ;; ExUnit `@tag` analogue). Returns `(mode tags body)`.
 (defn test--split-mods (forms mode tags)
+  (test--split-mods--acc forms mode tags false))
+
+;; `:skip` rides along as a fourth piece of state: a skipped test still REGISTERS
+;; (so it is counted and reported, rather than vanishing) but its body is never
+;; called. That is the point of a skip over deleting or commenting out the test —
+;; it stays visible in the run.
+(defn test--split-mods--acc (forms mode tags skip)
   (cond
-    (empty? forms) (list mode tags forms)
-    (= (first forms) :isolated) (test--split-mods (rest forms) :isolated tags)
-    (= (first forms) :serial) (test--split-mods (rest forms) :serial tags)
-    (= (first forms) :tags) (test--split-mods (rest (rest forms)) mode (second forms))
-    else (list mode tags forms)))
+    (empty? forms) (list mode tags forms skip)
+    (= (first forms) :isolated) (test--split-mods--acc (rest forms) :isolated tags skip)
+    (= (first forms) :serial) (test--split-mods--acc (rest forms) :serial tags skip)
+    (= (first forms) :skip) (test--split-mods--acc (rest forms) mode tags true)
+    (= (first forms) :tags) (test--split-mods--acc (rest (rest forms)) mode (second forms) skip)
+    else (list mode tags forms skip)))
 
 ;; Per-test metadata: its tags plus where it was declared. The location comes
 ;; from the first body form's read position (captured at macro-expansion time,
 ;; like `fail-loc`), which is what makes `nest test FILE:LINE` able to pick out
 ;; one test — so a test whose body is a bare literal (no recorded position) is
 ;; still runnable, just not addressable by line.
-(defn test--meta (tags loc)
-  {:tags (or tags []) :file (if loc (first loc) nil) :line (if loc (second loc) nil)})
+(defn test--meta (tags loc skip)
+  {:tags (or tags [])
+   :file (if loc (first loc) nil)
+   :line (if loc (second loc) nil)
+   :skip (or skip false)})
 
 (defn test--tags (t) (let (m (third t)) (if (nil? m) [] (or (get m :tags) []))))
 (defn test--file (t) (let (m (third t)) (if (nil? m) nil (get m :file))))
 (defn test--line (t) (let (m (third t)) (if (nil? m) nil (get m :line))))
+(defn test--skip? (t) (let (m (third t)) (and (not (nil? m)) (= (get m :skip) true))))
 
 ;; Merge a `describe`'s group-level tags into one collected test's own tags. A
 ;; test carries the union, so `--only db` picks up a test tagged only at the
 ;; group level (ExUnit's `@moduletag`/`describe` tag inheritance).
+;; A group-level `:skip` marks every test in it; a test-level one already set its own.
+(defn test--mark-skip (t group-skip)
+  (if (not group-skip) t (list (first t) (second t) (assoc (or (third t) {}) :skip true))))
+
 (defn test--add-tags (t group-tags)
   (if (empty? (or group-tags []))
     t
@@ -200,8 +218,8 @@ docs/testing.md for the full guide.")
 ;; Turn a finished describe's collected tests into units according to its mode:
 ;; default spreads them across one :parallel unit each; :serial/:isolated keep
 ;; them together in a single unit.
-(defn emit-describe! (mode group tests group-tags)
-  (let (tagged (map (fn (t) (test--add-tags t group-tags)) tests))
+(defn emit-describe! (mode group tests group-tags group-skip)
+  (let (tagged (map (fn (t) (test--mark-skip (test--add-tags t group-tags) group-skip)) tests))
     (if (= mode :parallel)
       (fold (fn (_ t) (add-unit! :parallel group (list t))) nil tagged)
       (add-unit! mode group tagged))))
@@ -217,14 +235,15 @@ docs/testing.md for the full guide.")
     (let (parts (test--split-mods forms :parallel nil)
           mode (first parts)
           tags (second parts)
-          body (third parts))
+          body (third parts)
+          skip (nth parts 3))
       `(do
          (def *collecting* true)
          (def *collected* nil)
          (do ~@body)
          ; the (test ...) forms collect themselves
          (def *collecting* false)
-         (emit-describe! ~mode ~group (reverse *collected*) ~tags)
+         (emit-describe! ~mode ~group (reverse *collected*) ~tags ~skip)
          nil))))
 
 ;; (test "name" [:isolated] body...) — register one test. Each top-level body form
@@ -239,13 +258,14 @@ docs/testing.md for the full guide.")
         iso (= (first parts) :isolated)
         tags (second parts)
         body (third parts)
+        skip (nth parts 3)
         loc (fail-loc (first body))
         thunks (map (fn (f) (list 'fn nil f)) body))
     ; each form -> (fn () form)
     `(register-test! ~name
        (fn () (test--run (list ~@thunks) nil))
        ~iso
-       (test--meta ~tags (quote ~loc)))))
+       (test--meta ~tags (quote ~loc) ~skip))))
 
 (defmacro deftest (name & body)
   "Register a single test named by the (symbol) `name`, outside any `describe` group."
@@ -383,6 +403,12 @@ docs/testing.md for the full guide.")
 (defn r-fails (r) (third r))
 (defn r-ms (r) (nth r 3))
 (defn r-failed? (r) (not (empty? (r-fails r))))
+;; Read defensively: results synthesised elsewhere (a dead or timed-out worker) are
+;; 4-element tuples, and those are never skips.
+(defn r-skipped? (r) (and (> (count r) 4) (= (nth r 4) true)))
+;; Where the test was declared, as `file:line`, or "" when the position wasn't
+;; recorded (a body whose first form is a bare literal carries no position).
+(defn r-where (r) (if (> (count r) 5) (or (nth r 5) "") ""))
 (defn label (group name)
   ; "group › name", or just name if ungrouped
   (if (= group "") (str name) (str group " › " name)))
@@ -622,24 +648,123 @@ docs/testing.md for the full guide.")
                          (get spec :shards))
       (get spec :seed))))
 
-;; Live progress: announce a test as it starts, when `*test-trace*` is on. Runs in
-;; the worker process (so it prints before the thunk runs); a no-op otherwise.
-(defn trace-start (group name)
-  (when *test-trace* (println (str "▶ " (label group name)))))
+;; --- trace ---------------------------------------------------------------------
+;; `--trace` reports each test as it FINISHES, coloured by outcome and carrying what
+;; a trace is for: the duration and where the test is declared.
+;;
+;;   ✓ math › adds                        2ms  tests/math_test.blsp:12
+;;   ✗ math › divides                     1ms  tests/math_test.blsp:18  (2 failures)
+;;   ○ db › needs postgres             skipped  tests/db_test.blsp:5
+;;
+;; Reporting on completion rather than on start is what makes the colour possible —
+;; the outcome isn't known before the body runs. A hung test still surfaces: the
+;; runner hard-kills it at `*test-timeout-ms*` and reports it as a timed-out failure,
+;; so it shows up as a red line rather than as a start with no end.
+;;
+;; Runs in the worker process, so lines from parallel workers interleave (each is one
+;; flushed `println`), in waves of `*parallel-batch*`.
+(defn trace-result (r)
+  (when *test-trace*
+    (println (str (trace--glyph r)
+               " "
+               (trace--label r)
+               "  "
+               (test--dim (trace--timing r))
+               (if (= (r-where r) "") "" (str "  " (test--dim (r-where r))))
+               (trace--failure-count r))))
+  r)
+
+(defn trace--glyph (r)
+  (cond
+    (r-skipped? r) (test--orange "○")
+    (r-failed? r) (test--red "✗")
+    else (test--green "✓")))
+
+;; The group is dimmed so the test's own name is what stands out in a long run.
+(defn trace--label (r)
+  (str (if (= (r-group r) "") "" (test--dim (str (r-group r) " › "))) (r-name r)))
+
+(defn trace--timing (r) (if (r-skipped? r) "skipped" (str (r-ms r) "ms")))
+
+(defn trace--failure-count (r)
+  (let (n (count (r-fails r)))
+    (cond
+      (= n 0) ""
+      (= n 1) (test--red "  (1 failure)")
+      else (test--red (str "  (" n " failures)")))))
+
+;; A skipped test produces a result without ever calling its body — it still counts
+;; and still reports, which is the difference between skipping a test and deleting it.
+(defn test--skipped-result (group t)
+  (list group (first t) nil 0 true (test--where t)))
+
+;; "file:line" for a test, or "" when no position was recorded. The path is shown
+;; relative to the working directory: the loader records absolute paths, and a full
+;; `/home/…/project/tests/x_test.blsp` on every trace line buries the part that
+;; matters. Falls back to the absolute path when it isn't under the cwd.
+(defn test--where (t)
+  (let (f (test--file t)
+        l (test--line t))
+    (if (or (nil? f) (nil? l)) "" (str (test--relative-path f) ":" l))))
+
+(defn test--relative-path (path)
+  (let (here (str (cwd) "/"))
+    (if (starts-with? path here)
+      (substring path (string-length here) (string-length path))
+      path)))
+
+;; --- colour --------------------------------------------------------------------
+;; ANSI only when stdout is an interactive terminal, so a piped run, a CI log, or an
+;; LLM reading the output gets clean text (`stdout-tty?` is the same gate the REPL
+;; uses). Wrapped in one place so every bit of the report agrees.
+(defn test--colour (code s) (if (stdout-tty?) (str "\e[" code "m" s "\e[0m") s))
+(defn test--green (s) (test--colour "32" s))
+(defn test--red (s) (test--colour "31" s))
+(defn test--dim (s) (test--colour "90" s))
+(defn test--orange (s) (test--colour "33" s))
+;; Bold (not a colour) for a failure's file:line — it has to be findable in a wall of
+;; output, and bold survives a terminal whose palette makes cyan or blue unreadable.
+(defn test--bold (s) (test--colour "1" s))
+
+;; --- live progress -------------------------------------------------------------
+;; One character per finished test — a green dot for a pass, a red `F` for a failure —
+;; printed as results arrive, so a long suite shows movement and a failure is visible
+;; immediately rather than only in the summary. `print` flushes every call, so the
+;; dots appear as they happen.
+;;
+;; Suppressed under `:trace`, which already prints a line per test: the two together
+;; would just be noise.
+(defn progress-mark (results)
+  (unless *test-trace*
+    (fold (fn (_ r)
+            (print (cond
+                     (r-skipped? r) (test--orange "○")
+                     (r-failed? r) (test--red "F")
+                     else (test--green "."))))
+      nil
+      results)))
 
 ;; Run one (name thunk) and produce its result (group name fails ms). The thunk
 ;; returns its own failure list (it catches its first failing assertion), sharing
 ;; no mutable state — so running these concurrently is safe.
 (defn run-test (group t)
-  (trace-start group (first t))
-  (let (start (now) fails ((second t)) ms (- (now) start)) (list group (first t) fails ms)))
+  (if (test--skip? t)
+    (trace-result (test--skipped-result group t))
+    (let (start (now)
+          fails ((second t))
+          ms (- (now) start))
+      (trace-result (list group (first t) fails ms false (test--where t))))))
 
 ;; Like run-test, but evaluate the body with a private copy of the global
 ;; bindings (`%isolate`): an :isolated test's `def`s are rolled back when it
 ;; finishes, so they can't leak to any other test. Used only in the isolated phase.
 (defn run-test-fresh (group t)
-  (trace-start group (first t))
-  (let (start (now) fails (%isolate (second t)) ms (- (now) start)) (list group (first t) fails ms)))
+  (if (test--skip? t)
+    (trace-result (test--skipped-result group t))
+    (let (start (now)
+          fails (%isolate (second t))
+          ms (- (now) start))
+      (trace-result (list group (first t) fails ms false (test--where t))))))
 
 ;; Run every test in a unit, in order, returning the list of results. This is
 ;; what a worker does (for a :parallel/:serial unit) and what the runner does
@@ -707,6 +832,22 @@ docs/testing.md for the full guide.")
 ;; ONE case, so its per-case cap in `.config/nextest.toml` is set *above* this (300s)
 ;; — otherwise nextest would kill the wrapper before this inner timeout could fire.
 (def *test-timeout-ms* 120000)
+
+;; The deadline for an ANTI-HANG GUARD — a `(receive … (after *test-wait-ms* :timeout))`
+;; where the message is expected and the timeout means "something is wrong". Distinct
+;; from `*test-timeout-ms*` (the runner's hard per-test ceiling) and from the short
+;; deadlines a test uses to assert that *nothing* arrives, which must stay short.
+;;
+;; Why it is a named knob rather than a literal at each site: those guards were
+;; written with 5s deadlines, and 5s is not a lot when the suite saturates every core —
+;; one of them (`remote_spawn_test`) intermittently reddened the whole run on timing
+;; alone. They are correctness tests ("did the message arrive at all"), never latency
+;; tests, so the deadline exists only to stop a hang and should be generous.
+;;
+;; 20s: 4× the old headroom, while several compounding guards still fit inside the
+;; 120s per-test ceiling, so a genuinely stuck test is still reported with its own
+;; message rather than by the hard kill.
+(def *test-wait-ms* 20000)
 
 ;; When set, print `▶ group › name` as each test STARTS — live progress so you can
 ;; see which test is running (and spot the slow/hung one) before it finishes. Off by
@@ -906,9 +1047,9 @@ docs/testing.md for the full guide.")
 (defn run-driver (steps parent acc)
   (if (or (empty? steps) (test--max-failures-hit? acc))
     (send parent [:all-results acc])
-    (run-driver (rest steps)
-      parent
-      (append (run--step (first steps)) acc))))
+    (let (results (run--step (first steps)))
+      (progress-mark results)
+      (run-driver (rest steps) parent (append results acc)))))
 
 ;; Spawn the driver and block until it reports every unit's results. Monitors it
 ;; so a driver crash surfaces as an error instead of hanging the suite.
@@ -947,6 +1088,45 @@ docs/testing.md for the full guide.")
 ;; `rt_collect_block` fix). Files run sequentially (each `%isolate` blocks to
 ;; completion); tests WITHIN a file still parallelise. The shared drain behind both
 ;; `run-tests-scoped` (prints) and `run-tests-scoped-structured` (returns data).
+;; Load one file and run what it registered — reporting a file that FAILS TO LOAD as
+;; a failure of its own rather than letting it abort the run.
+;;
+;; A test file that doesn't compile is an everyday situation (you are editing it), and
+;; it used to take the whole suite down with a raw error structure:
+;;
+;;   1337:13: error: {:trace ({:col 58, :line 1093} …), :message unbound symbol: …,
+;;                    :file /home/…/tests/oops_test.blsp, :kind :unbound, …}
+;;
+;; — three thousand passing tests thrown away, and the one fact that mattered (which
+;; file, which line, what was wrong) buried inside a printed map. Now the file becomes
+;; one clearly-located failure, the other files still run, and the run still exits
+;; non-zero.
+(defn drain-one-file (loader)
+  (reset-units!)
+  (let (outcome (try (do (loader) :%loaded) (catch e (list :%load-failed e))))
+    (if (= outcome :%loaded)
+      (drain-current)
+      (list (test--load-failure-result (second outcome))))))
+
+;; A field of a raised error, which may be a structured map or a plain string.
+(defn test--error-field (e key) (if (map? e) (get e key) nil))
+
+;; Turn a load failure into an ordinary failing result, so it flows through the same
+;; reporting (and counting) as any other failure.
+(defn test--load-failure-result (e)
+  (let (file (test--error-field e :file)
+        line (test--error-field e :line)
+        col (test--error-field e :col)
+        message (or (test--error-field e :message) (pr-str e))
+        shown (if (nil? file) "" (test--relative-path file)))
+    (list (if (= shown "") "a test file" shown)
+      "failed to load"
+      (list (list (if (and file line col) (list file line col) nil)
+              (list (str "cannot load: " message))))
+      0
+      false
+      (if (and (not (= shown "")) (not (nil? line))) (str shown ":" line) ""))))
+
 (defn drain-files-scoped (loaders)
   ;; Accumulate each file's result LIST with `cons` (O(1)) into a reverse-order list of
   ;; lists, then flatten once — O(total results). (A naive `(append acc file-results)`
@@ -963,10 +1143,7 @@ docs/testing.md for the full guide.")
                             failed (second state))
                         (if (and (> *test-max-failures* 0) (>= failed *test-max-failures*))
                           state
-                          (let (file-results (%isolate (fn ()
-                                                         (reset-units!)
-                                                         (loader)
-                                                         (drain-current))))
+                          (let (file-results (%isolate (fn () (drain-one-file loader))))
                             (list (cons file-results chunks)
                               (+ failed (count-failed file-results)))))))
                 (list nil 0)
@@ -1040,24 +1217,54 @@ docs/testing.md for the full guide.")
 ;; clickable; without one, just the message. The labeled fields print indented
 ;; under it. See docs/tooling.md.
 (defn fail-anchor (r rec)
-  (let (loc (fail-loc-of rec))
-    (if loc
-      (str (first loc) ":" (second loc) ":" (third loc) ": test failed: " (full-name r))
-      (str "test failed: " (full-name r)))))
+  (let (where (fail-where r rec))
+    (str (if (= where "") "" (str (test--bold where) ": "))
+      (test--red "test failed: ")
+      (full-name r))))
 
-;; Print every failure of a result as: an anchor line, then its fields indented.
+;; WHERE to look, as `file:line:col` — the part of a failure report you actually act
+;; on, so it must always be present and short enough to read.
+;;
+;; Two things were wrong before. The path was ABSOLUTE, so every anchor line opened
+;; with `/home/you/projects/thing/tests/…` and the location was buried in it; it is now
+;; relative to the working directory (still clickable — `nest test` runs from the
+;; project root, which is what compilation-mode resolves against). And when an
+;; assertion carried no recorded position the location was omitted ENTIRELY, leaving
+;; only `test failed: group › name` with nothing to jump to; it now falls back to the
+;; test's own declaration site, which the result carries.
+(defn fail-where (r rec)
+  (let (loc (fail-loc-of rec))
+    (cond
+      loc (str (test--relative-path (first loc)) ":" (second loc) ":" (third loc))
+      ;; No per-assertion position (a body form the reader recorded no position for) —
+      ;; point at the test instead of nowhere.
+      (not (= (r-where r) "")) (r-where r)
+      else "")))
+
+;; Print every failure of a result: a blank line, the anchor, then its fields
+;; indented. The leading blank separates consecutive failures, which otherwise run
+;; together into a wall that is hard to scan.
 (defn print-failure (indent r)
   (fold (fn (_ rec)
+          (println "")
           (println (fail-anchor r rec))
-          (fold (fn (_ line) (println (str indent line))) nil (fail-lines-of rec)))
+          (fold (fn (_ line) (println (str indent (test--dim-label line)))) nil (fail-lines-of rec)))
     nil
     (r-fails r)))
+
+;; Dim the `label:` prefix of a detail line so the VALUE is what stands out —
+;; `actual:`/`expect:`/`assert:` are scaffolding, the values are the information.
+(defn test--dim-label (line)
+  (let (i (index-of line ": "))
+    (if (< i 0)
+      line
+      (str (test--dim (substring line 0 (+ i 1))) (substring line (+ i 1) (string-length line))))))
 
 ;; Emit one editor-parseable block per failed assertion. There is a single
 ;; output format — structured — for humans, LLMs and Emacs alike (docs/tooling.md).
 (defn report-failures (results)
   (let (failed (filter r-failed? results))
-    (unless (empty? failed) (println "") (fold (fn (_ r) (print-failure "    " r)) nil failed))))
+    (unless (empty? failed) (fold (fn (_ r) (print-failure "    " r)) nil failed))))
 
 (defn report-slow (results n)
   (println "")
@@ -1094,6 +1301,9 @@ docs/testing.md for the full guide.")
 (defn count-failed (results)
   ; tests with at least one failed assertion
   (fold (fn (acc r) (if (r-failed? r) (+ acc 1) acc)) 0 results))
+(defn count-skipped (results)
+  ; tests that registered but were never run (`:skip`)
+  (fold (fn (acc r) (if (r-skipped? r) (+ acc 1) acc)) 0 results))
 (defn count-failures (results)
   ; total failed assertions across tests
   (fold (fn (acc r) (+ acc (count (r-fails r)))) 0 results))
@@ -1143,6 +1353,7 @@ docs/testing.md for the full guide.")
 (defn test--report-pass (results elapsed opts extra)
   (let (total (count results)
         failed (count-failed results)
+        skipped (count-skipped results)
         fails (count-failures results)
         slowest (test--slowest-n opts)
         seed (if (nil? *test-filter*) nil (get *test-filter* :seed)))
@@ -1155,13 +1366,20 @@ docs/testing.md for the full guide.")
     (report-slow-over results *test-slow-ms*)
     (when slowest (report-slow results slowest))
     (println "")
-    (println total
-      "tests,"
-      (- total failed)
-      "passed,"
-      failed
-      "failed"
-      (str "(" fails " failed assertions" extra ")"))
+    ;; Built as one string rather than `println`'s space-joined arguments, so the
+    ;; commas land correctly whether or not the optional skipped clause is present.
+    (println (str total
+               " tests, "
+               (- total failed skipped)
+               " passed, "
+               failed
+               " failed"
+               (if (> skipped 0) (str ", " skipped " skipped") "")
+               " ("
+               fails
+               " failed assertions"
+               extra
+               ")"))
     (println (str "  (" elapsed " ms wall, peak " (mb-str (mem-peak)) ")"))
     ;; Echo the seed whenever the order was randomised, so the run can be
     ;; reproduced. Deliberately says "same order", not "replay exactly": the seed

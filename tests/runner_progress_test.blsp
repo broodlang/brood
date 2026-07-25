@@ -1,0 +1,164 @@
+;; Runner PROGRESS output — the one-character-per-test marks (`.` / `F`) a default
+;; `nest test` run prints, and the colour gate around them.
+;;
+;; `--trace` (a line per test as it starts) is the opt-in alternative, and it
+;; suppresses the dots: both at once is noise. Colour is gated on `stdout-tty?`, so a
+;; captured run stays plain text — these tests run captured, which is exactly why
+;; they assert the UNcoloured forms.
+;;
+;; A result is `(group name fails ms)`; a non-empty `fails` marks a failed test.
+
+(defmodule runner-progress-test (:use-internals test) (:use test))
+
+(defn progress-test--pass (name) (list "g" name nil 1))
+(defn progress-test--fail (name) (list "g" name (list (list nil (list "boom"))) 1))
+(defn progress-test--skip (name) (list "g" name nil 0 true))
+;; A result carrying a declaration site, as the runner now builds them.
+(defn progress-test--at (name where) (list "g" name nil 1 false where))
+
+(describe "test runner: progress marks"
+  (test "a passing result marks a dot"
+    (assert= (with-out-str (test/progress-mark (list (progress-test--pass "t")))) "."))
+  (test "a failing result marks an F"
+    (assert= (with-out-str (test/progress-mark (list (progress-test--fail "t")))) "F"))
+  (test "several results mark in order"
+    (assert= (with-out-str (test/progress-mark (list (progress-test--pass "a")
+                                                 (progress-test--fail "b")
+                                                 (progress-test--pass "c"))))
+      ".F."))
+  (test "a skipped result marks an orange circle, not a dot"
+    (assert= (with-out-str (test/progress-mark (list (progress-test--skip "t")))) "○"))
+  (test "the three outcomes mark distinctly, in order"
+    (assert= (with-out-str (test/progress-mark (list (progress-test--pass "a")
+                                                 (progress-test--skip "b")
+                                                 (progress-test--fail "c"))))
+      ".○F"))
+  (test "no results marks nothing" (assert= (with-out-str (test/progress-mark nil)) ""))
+  (test "colour is off when stdout is captured, so output stays parseable"
+    ;; The gate is what keeps a piped run, a CI log, or an LLM reading the output
+    ;; free of escape codes.
+    (and (assert= (test/test--green ".") ".")
+      (assert= (test/test--red "F") "F")
+      (assert= (test/test--orange "○") "○")
+      (assert= (test/test--dim "x") "x"))))
+
+;; A skipped test still counts and still reports — that is the difference between
+;; skipping it and deleting it — but it is not a pass.
+(describe "test runner: skipped tests are counted separately"
+  (test "a skip is not counted as a failure"
+    (assert= (test/count-failed (list (progress-test--skip "t"))) 0))
+  (test "skips are counted"
+    (assert= (test/count-skipped (list (progress-test--pass "a")
+                                   (progress-test--skip "b")
+                                   (progress-test--skip "c")))
+      2))
+  (test "a 4-element result (a dead or timed-out worker) is never a skip"
+    ;; Those are synthesised elsewhere without the flag, so the accessor must not
+    ;; index past the end.
+    (refute (test/r-skipped? (list "g" "t" nil 0))))
+  (test "a failure is not a skip"
+    (refute (test/r-skipped? (progress-test--fail "t")))))
+
+(describe "test runner: --trace replaces the dots"
+  :isolated
+  (test "tracing suppresses the progress marks"
+    (def *test-trace* true)
+    (assert= (with-out-str (test/progress-mark (list (progress-test--pass "t")))) ""))
+  (test "an ungrouped test traces just its name, with no group prefix"
+    (def *test-trace* true)
+    (let (line (with-out-str (test/trace-result (list "" "lonely" nil 1))))
+      (and (is (string-contains? line "lonely")) (refute (string-contains? line "›")))))
+  (test "trace prints nothing when off"
+    (def *test-trace* false)
+    (assert= (with-out-str (test/trace-result (progress-test--pass "t"))) ""))
+  (test "the dots come back once tracing is off"
+    (def *test-trace* false)
+    (assert= (with-out-str (test/progress-mark (list (progress-test--pass "t")))) "."))
+  ;; A trace exists to tell you more than a dot: the outcome, how long it took, and
+  ;; where the test lives.
+  (test "a traced pass shows a tick, the label and the duration"
+    (def *test-trace* true)
+    (let (line (with-out-str (test/trace-result (progress-test--pass "adds"))))
+      (and (is (string-contains? line "✓"))
+        (is (string-contains? line "adds"))
+        (is (string-contains? line "1ms")))))
+  (test "a traced failure shows a cross and how many assertions failed"
+    (def *test-trace* true)
+    (let (line (with-out-str (test/trace-result (progress-test--fail "divides"))))
+      (and (is (string-contains? line "✗")) (is (string-contains? line "1 failure")))))
+  (test "a traced skip shows a circle and says skipped, with no duration"
+    (def *test-trace* true)
+    (let (line (with-out-str (test/trace-result (progress-test--skip "needs db"))))
+      (and (is (string-contains? line "○"))
+        (is (string-contains? line "skipped"))
+        (refute (string-contains? line "0ms")))))
+  (test "a traced test shows where it is declared"
+    (def *test-trace* true)
+    (let (line (with-out-str (test/trace-result (progress-test--at "x" "tests/a_test.blsp:12"))))
+      (is (string-contains? line "tests/a_test.blsp:12"))))
+  (test "trace-result returns its result, so it can wrap the call site"
+    (def *test-trace* false)
+    (let (r (progress-test--pass "t")) (assert= (test/trace-result r) r))))
+
+;; A test FILE that fails to load is reported as one clearly-located failure rather
+;; than aborting the run with a printed error map. The everyday case: you are editing
+;; a test file and it doesn't compile — losing the other three thousand results (and
+;; being handed a `{:trace (…) :kind :unbound …}` dump) is the wrong answer.
+(describe "test runner: a test file that fails to load"
+  (test "a structured load error becomes a located failure"
+    (let (r (test/test--load-failure-result {:file "/nope/tests/x_test.blsp"
+                                             :line 7
+                                             :col 3
+                                             :message "unbound symbol: nope"}))
+      (and (is (string-contains? (test/r-group r) "x_test.blsp"))
+        (assert= (test/r-name r) "failed to load")
+        (is (test/r-failed? r)))))
+  (test "the message says what went wrong"
+    (let (r (test/test--load-failure-result {:file "/nope/x.blsp"
+                                             :line 1
+                                             :col 1
+                                             :message "unbound symbol: nope"}))
+      (is (string-contains? (first (second (first (test/r-fails r)))) "unbound symbol: nope"))))
+  (test "it carries the file and line for the anchor"
+    (let (r (test/test--load-failure-result {:file "/nope/x.blsp" :line 9 :col 1 :message "boom"}))
+      (is (string-contains? (test/r-where r) ":9"))))
+  (test "a plain-string error still produces a usable failure"
+    ;; Not every raise is a structured map.
+    (let (r (test/test--load-failure-result "just a string"))
+      (and (assert= (test/r-group r) "a test file")
+        (is (test/r-failed? r))
+        (is (string-contains? (first (second (first (test/r-fails r)))) "just a string")))))
+  (test "a load failure counts as a failure, not a skip"
+    (let (r (test/test--load-failure-result "boom"))
+      (and (is (test/r-failed? r)) (refute (test/r-skipped? r))))))
+
+;; The anchor line is the part of a failure you act on, so it must always be present
+;; and short. It used to open with an absolute path — burying the location — and to
+;; vanish entirely when an assertion carried no recorded position.
+(describe "test runner: failure anchors"
+  (test "a per-assertion position is used, shown relative to the cwd"
+    (let (r (list "g" "t" (list (list (list (str (cwd) "/tests/a_test.blsp") 4 2) (list "x"))) 1)
+          rec (first (test/r-fails r)))
+      (assert= (test/fail-where r rec) "tests/a_test.blsp:4:2")))
+  (test "an absolute path outside the cwd is left alone rather than mangled"
+    (let (r (list "g" "t" (list (list (list "/elsewhere/a.blsp" 4 2) (list "x"))) 1)
+          rec (first (test/r-fails r)))
+      (assert= (test/fail-where r rec) "/elsewhere/a.blsp:4:2")))
+  (test "with NO assertion position it falls back to the test's declaration site"
+    ;; Previously this produced no location at all — nothing to jump to.
+    (let (r (list "g" "t" (list (list nil (list "x"))) 1 false "tests/b_test.blsp:11")
+          rec (first (test/r-fails r)))
+      (assert= (test/fail-where r rec) "tests/b_test.blsp:11")))
+  (test "with neither, it degrades to empty rather than printing nil"
+    (let (r (list "g" "t" (list (list nil (list "x"))) 1)
+          rec (first (test/r-fails r)))
+      (assert= (test/fail-where r rec) "")))
+  (test "the anchor names the failing test"
+    (let (r (list "grp" "case" (list (list nil (list "x"))) 1)
+          rec (first (test/r-fails r)))
+      (is (string-contains? (test/fail-anchor r rec) "grp › case"))))
+  (test "a detail line's label is dimmed but its value is untouched"
+    ;; Captured output has no colour, so the line must come back unchanged.
+    (assert= (test/test--dim-label "actual: 3") "actual: 3"))
+  (test "a detail line with no label is left alone"
+    (assert= (test/test--dim-label "no colon here") "no colon here")))

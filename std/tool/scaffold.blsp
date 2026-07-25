@@ -21,6 +21,43 @@ test discovery, lints, release, config)."
 ;; one of the path-traversal / hidden / flag-shaped names (`.`, `..`, leading
 ;; `.`/`-`/`~`/`\`). This blocks `nest new ..` and friends from scaffolding
 ;; into a parent or hidden directory — see CLAUDE.md / docs/devlog.md.
+;; The module name the scaffolded LIBRARY module gets: the project's own name, made
+;; safe to write as a bare symbol and as a filename.
+;;
+;; It used to be the fixed name `hello`, which meant no two scaffolded projects could
+;; ever depend on each other — both provided `hello`, and `nest add` refused with a
+;; module-name collision (namespaces aren't package-rooted yet, ADR-070). Naming the
+;; library module after the package is both collision-free and the more idiomatic
+;; shape: a dependency called `greeter` provides `greeter`.
+;;
+;; `project--valid-name?` only rejects path separators, whitespace and a leading dot,
+;; so a legal project name can still hold punctuation a symbol shouldn't; anything
+;; outside [a-z A-Z 0-9 - _] becomes `-`. A leading digit gets a `p-` prefix (a symbol
+;; must not read as a number), and the reserved `main` becomes `main-lib` so the
+;; library module can't collide with the project's own entry module.
+(defn project--module-name (nm)
+  (let (cleaned (join "" (map project--name-char (string-split nm "")))
+        prefixed (if (and (> (string-length cleaned) 0)
+                       (includes? "0123456789"
+                         (substring cleaned 0 1)))
+                   (str "p-" cleaned)
+                   cleaned))
+    (cond
+      ;; No letters or digits survived (a name of pure punctuation): `---` is a legal
+      ;; symbol but a meaningless module name and an odd filename, so fall back.
+      (not (project--has-alnum? prefixed)) "lib"
+      (= prefixed "main") "main-lib"
+      else prefixed)))
+
+(defn project--has-alnum? (s)
+  (fold (fn (found ch)
+          (or found (includes? "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ch)))
+    false
+    (string-split s "")))
+
+(defn project--name-char (ch)
+  (if (includes? "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" ch) ch "-"))
+
 (defn project--valid-name? (nm)
   (and (> (string-length nm) 0)
     (not (= nm "."))
@@ -60,7 +97,9 @@ test discovery, lints, release, config)."
     nm
     " project's entry-point module — wired up as\n"
     "the `nest run` entry by default (module `main`, fn `main`).\"\n"
-    "  (:use hello)\n"
+    "  (:use "
+    (project--module-name nm)
+    ")\n"
     ;; NB: comment goes ABOVE the form, not trailing the `(:use log)` clause — a
     ;; comment inside a list is re-emitted on its own line by the formatter, which
     ;; would hoist it above the whole `defmodule` and leave `nest new` output
@@ -86,18 +125,31 @@ test discovery, lints, release, config)."
     "  (println (greeting)))\n"))
 
 (defn project--hello-template (nm)
-  (str "(defmodule hello \"A second module in the "
-    nm
-    " project — `main` does\n"
-    "`(:use hello)` to call `greeting`. Showcases the module/namespace system\n"
-    "(ADR-065): `hello` defines `greeting` as `hello/greeting`; `(:use hello)`\n"
-    "imports it so `main` can call it bare.\")\n"
-    "\n"
-    "(defn greeting ()\n"
-    "  \"Return the project's greeting string.\"\n"
-    "  \"hello "
-    nm
-    "\")\n"))
+  (let (mod (project--module-name nm))
+    (str "(defmodule "
+      mod
+      " \"The "
+      nm
+      " project's library module — `main` does\n"
+      "`(:use "
+      mod
+      ")` to call `greeting`. Showcases the module/namespace system\n"
+      "(ADR-065): this defines `greeting` as `"
+      mod
+      "/greeting`; `(:use "
+      mod
+      ")`\n"
+      "imports it so `main` can call it bare.\n"
+      "\n"
+      "Named after the package on purpose: a dependency should provide a module named\n"
+      "for itself, so two projects can depend on each other without a name clash\n"
+      "(namespaces aren't package-rooted yet — ADR-070).\")\n"
+      "\n"
+      "(defn greeting ()\n"
+      "  \"Return the project's greeting string.\"\n"
+      "  \"hello "
+      nm
+      "\")\n")))
 
 (defn project--main-test-template (nm)
   (str ";; Tests for the main module. `(:use main)` brings `main` into scope;\n"
@@ -108,14 +160,25 @@ test discovery, lints, release, config)."
     "  (test \"main is callable\" (is (fn? main))))\n"))
 
 (defn project--hello-test-template (nm)
-  (str ";; Tests for the hello module. `(:use hello)` brings `greeting` into scope;\n"
-    ";; `(:use test)` the describe/test/assert= macros.\n"
-    "(defmodule hello-test (:use hello) (:use test))\n"
-    "\n"
-    "(describe \"hello\"\n"
-    "  (test \"greeting\" (assert= (greeting) \"hello "
-    nm
-    "\")))\n"))
+  (let (mod (project--module-name nm))
+    (str ";; Tests for the "
+      mod
+      " module. `(:use "
+      mod
+      ")` brings `greeting` into\n"
+      ";; scope; `(:use test)` the describe/test/assert= macros.\n"
+      "(defmodule "
+      mod
+      "-test (:use "
+      mod
+      ") (:use test))\n"
+      "\n"
+      "(describe \""
+      mod
+      "\"\n"
+      "  (test \"greeting\" (assert= (greeting) \"hello "
+      nm
+      "\")))\n")))
 
 ;; --- alternate starter templates (`nest new --template …`) ------------------
 
@@ -975,7 +1038,7 @@ test discovery, lints, release, config)."
     "    (is (= (status (request web/routes/app-router \"GET\" \"/nope\")) 404))))\n"))
 
 ;; (new-project "foobar") — scaffold ./foobar with a runnable two-module
-;; skeleton: project.blsp + src/main.blsp + src/hello.blsp (where main `require`s
+;; skeleton: project.blsp + src/main.blsp + src/<project>.blsp (where main `require`s
 ;; hello and calls into it) + a paired test file for each, so `cd foobar && nest
 ;; test` *and* `nest run` both pass immediately. Also drops CLAUDE.md +
 ;; docs/brood-for-claude.md (the baked-in language guide) + a
@@ -1078,12 +1141,14 @@ test discovery, lints, release, config)."
                            (str nm "/tests/web/api_test.blsp")])
     else (do
            (spit (path-join src-dir "main.blsp") (project--main-template actual-name))
-           (spit (path-join src-dir "hello.blsp") (project--hello-template actual-name))
+           (spit (path-join src-dir (str (project--module-name actual-name) ".blsp"))
+             (project--hello-template actual-name))
            (spit (path-join tests-dir "main_test.blsp") (project--main-test-template actual-name))
-           (spit (path-join tests-dir "hello_test.blsp") (project--hello-test-template actual-name))
-           [(str nm "/src/main.blsp") (str nm "/src/hello.blsp")
+           (spit (path-join tests-dir (str (project--module-name actual-name) "_test.blsp"))
+             (project--hello-test-template actual-name))
+           [(str nm "/src/main.blsp") (str nm "/src/" (project--module-name actual-name) ".blsp")
              (str nm "/tests/main_test.blsp")
-             (str nm "/tests/hello_test.blsp")])))
+             (str nm "/tests/" (project--module-name actual-name) "_test.blsp")])))
 
 ;; Run every generated `.blsp` through the formatter.
 ;;

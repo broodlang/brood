@@ -6,4 +6,4 @@
   (test "spawn a process that sends me one message, then receive it"
     (let (me (self))
       (spawn (send me :hi))
-      (assert= (receive (:hi :ok) (after 1000 :timeout)) :ok))))
+      (assert= (receive (:hi :ok) (after *test-wait-ms* :timeout)) :ok))))

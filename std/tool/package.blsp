@@ -509,6 +509,13 @@ package is unknown to this index."
     (map (fn (e) (list (str "dependency '" (name (get e :name)) "'") (package--dep-src-dir e)))
       entries)))
 
+;; `main` is a project's ENTRY POINT, not part of its library surface: `nest run` only
+;; ever uses the ROOT project's `:main`, and nothing `require`s a dependency's. So two
+;; projects each having one is not a conflict — yet it used to be reported as one, which
+;; meant any project scaffolded by `nest new` could never be used as a dependency
+;; (it provides `main`, and so does its consumer).
+(defn package--entry-module? (mod) (= (str mod) "main"))
+
 ;; Walk the providers, accumulating module-name -> first provider; error on the
 ;; first name a second provider also declares.
 (defn package--check-namespace-collisions (sources)
@@ -520,7 +527,7 @@ package is unknown to this index."
           dir (second (first sources)))
       (package--collision-loop (rest sources)
         (fold (fn (m mod)
-                (if (contains? m mod)
+                (if (and (contains? m mod) (not (package--entry-module? mod)))
                   (error "package: module name collision — '"
                     mod
                     "' is provided by both "

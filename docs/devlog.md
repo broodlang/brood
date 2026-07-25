@@ -7541,3 +7541,189 @@ the combinators cover the socket cases.
 Tests: `tests/tcp_test.blsp` — 6 real-loopback cases (delimiter frame, delimiter split
 across sends, delimiter-never-arrives `[:closed]`, exact-n + surplus, multi-chunk n,
 short-EOF `[:closed]`). `nest check` clean; the tcp suite is 15/15.
+
+## 2026-07-25 — `nest test` output: dots by default, an informative coloured trace, and `:skip`
+
+Three connected changes to what a run looks like.
+
+**Tracing is now opt-in.** `nest test` used to pass `:trace` always, so every run
+printed `▶ group › name` per test — fine for finding a hung case, noise for everything
+else. The default is now **one character per finished test** (green `.`, red `F`,
+orange `○`), printed as results arrive from the driver, so a long suite shows movement
+and a failure is visible immediately. `--no-trace` is gone; `--trace` opts in.
+
+**The trace reports outcomes, not starts.** Colouring by outcome is impossible from a
+start-of-test line — the result isn't known yet — so `trace-result` replaces
+`trace-start` and prints when the test finishes, with the duration and the declaration
+site (`file:line`, cwd-relative; the loader records absolute paths and a full
+`/home/…` on every line buries the part that matters):
+
+```
+✓ math › adds                     2ms  tests/math_test.blsp:12
+✗ math › divides                  0ms  tests/math_test.blsp:18  (1 failure)
+○ db › needs postgres         skipped  tests/db_test.blsp:5
+```
+
+Losing the start-of-test line costs nothing for hang-hunting: the runner already
+hard-kills at `*test-timeout-ms*` and reports a timed-out failure, so a hung test
+shows up as a red line rather than as a start with no end.
+
+**`:skip` is new** — "orange for skip" needed something to colour. `:skip` on a `test`
+or a `describe` registers the case but never calls its body, so it is still counted
+and still reported: that is the whole difference between skipping a test and deleting
+or commenting it out. It composes with `:serial`/`:isolated`/`:tags` in any order, and
+counts as neither pass nor failure (`8 tests, 5 passed, 0 failed, 3 skipped`).
+
+Implementation notes worth keeping:
+
+- The result tuple grew a 5th (skipped) and 6th (declaration site) element. `r-skipped?`
+  and `r-where` read them **defensively**, because results synthesised elsewhere — a
+  dead worker, a timed-out unit — are still 4-element tuples and must not index past
+  the end. A test pins that.
+- **Colour is real now.** `docs/testing.md` had claimed for a while that output is
+  "coloured only when stdout is an interactive terminal (via the `stdout-tty?`
+  primitive)" — but `test.blsp` contained no colour code at all. It does now, behind
+  exactly that gate, so a piped run, a CI log, or an LLM reading the output still gets
+  plain text. The claim and the code finally agree.
+- The summary line is built with one `str` rather than `println`'s space-joined
+  arguments, so the comma before the optional `N skipped` clause lands correctly.
+
+`tests/runner_progress_test.blsp` (20 cases) covers the marks, the three trace
+outcomes, the counting, and the defensive accessors.
+
+## 2026-07-25 — making a `nest test` failure readable
+
+Asked whether the output makes sense, and it didn't — the part you act on was the
+hardest part to find. Four fixes.
+
+**The anchor was buried in an absolute path.** Every failure opened with
+`/home/you/projects/thing/tests/x_test.blsp:5:28:` — the location is the whole point of
+the line, and it was 60 characters of prefix. Now relative to the working directory,
+which keeps it short *and* still clickable (compilation-mode resolves against cwd, and
+`nest test` runs from the project root). Bold, so it is findable in a wall of output;
+`test failed:` in red; the labels of the detail lines dimmed so the values read as the
+content. Blank line between blocks, which previously ran together.
+
+**Some failures had no location at all.** `fail-loc` is per-assertion, and an assertion
+whose form carried no recorded position produced just `test failed: group › name` —
+nothing to jump to. It now falls back to the **test's own declaration site**, which the
+result already carries (added for `FILE:LINE` selection).
+
+**A test file that fails to load took the whole run down**, and printed the reason as a
+structured map:
+
+```
+1337:13: error: {:trace ({:col 58, :line 1093} …), :message unbound symbol: …,
+                 :file /home/…/tests/oops_test.blsp, :kind :unbound, …}
+```
+
+Three thousand passing tests discarded, and the three facts that mattered (file, line,
+what was wrong) buried in a printed map — for the everyday case of editing a test file
+that doesn't compile yet. It is now one ordinary located failure, the other files still
+run, and the run still exits non-zero:
+
+```
+tests/oops_test.blsp:2:1: test failed: tests/oops_test.blsp › failed to load
+    cannot load: unbound symbol: this-is-not-defined
+```
+
+**A failing suite appended a Brood stack trace to its own report.**
+`run-project-tests` raises `N test(s) failed` so `cargo test` sees a non-zero exit —
+correct, but `nest test` then reported that raise as an error, tacking
+`1337:13: error: 2 test(s) failed`, `at project/run-project-tests` and a version banner
+onto the end of a clean report. A failing suite is an expected outcome, not an internal
+error: `run_expecting_failure_signal` exits non-zero silently for that specific signal
+and still reports anything else (a broken manifest, an unloadable file — both verified).
+
+Also worth recording, since it cost real confusion: **`nest test` in this repo showed
+12 failures from the installed binary while a freshly built one showed none.** Not a
+regression — `std/` is baked into the binary at compile time, so an installed `nest`
+one commit behind was running the *old* test framework against the *new* test files,
+and every case exercising `:skip`/`progress-mark` failed. `make install` after changing
+`std/` is not optional.
+
+`tests/runner_progress_test.blsp` grew to 32 cases, covering the load-failure result,
+the anchor fallbacks, and the relative-path rendering.
+
+## 2026-07-25 — clearing the known-issues list: three fixed, one reframed, one honestly deferred
+
+### `nest add`/`fetch`/`tree`/`remove`/`update` ignored the configured registry
+
+Not just untested — **broken**. Only `publish` and `search` bootstrapped with
+`(project/load-config)`; the other five didn't, so `*config-registry*` stayed at the
+hardcoded default and `nest add pkg :version 1.0.0` failed against a perfectly good
+registry. They now share one `PACKAGE_BOOTSTRAP` constant so they cannot drift apart
+again.
+
+This also retires "`nest publish` is untestable". It is fully testable: the index can
+be a **local directory**, the package source a **local git repo**, and `:registry` is a
+user-config key that honours `XDG_CONFIG_HOME` — so `crates/nest/tests/registry.rs`
+(6 cases) drives publish → search → `add :version` → *calling the dependency* without
+touching the developer's real config. Writing the test is what found the bug.
+
+### 253 `(after …)` deadlines, audited
+
+Classified rather than blanket-raised: a short deadline is *correct* when a test
+asserts that nothing arrives, and only the surrounding assertion distinguishes that
+from an anti-hang guard. The discriminator turned out to be whether the sentinel is
+*compared against* — `(assert= :none (receive … (after 2000 :none)))` asserts a
+timeout, while `(assert= 7 (receive … (after 5000 :timeout)))` guards against a hang.
+114 guards vs 125 timeout-assertions.
+
+The 100 guards whose sentinel names a *failure* (`:timeout`, `:NEVER-RAN`, `:lost`, …)
+in the 1000–10000ms band now use a named `*test-wait-ms*` (20s) instead of a literal.
+Naming it is the point: the intent ("this is an anti-hang guard, not a latency
+budget") is now in the source, so the next reader doesn't have to re-derive the
+classification I just did. Deadlines ≤ 500ms were left alone — those are polls and
+drains, and stretching them would change what they test. `process_limit_test`'s 30s
+guards are deliberately *above* the knob (they build large structures under a memory
+cap) with a comment saying so.
+
+### Two scaffolded projects can now depend on each other
+
+`nest new` gave every project a module called `hello` *and* a `main`, so adding one as
+a dependency of another failed on a module-name collision — the command that creates
+every project produced projects unusable as dependencies. Two fixes:
+
+- The library module is named **after the package** (`nest new greeter` →
+  `src/greeter.blsp` providing `greeter`), which is collision-free and the more
+  idiomatic shape anyway. The name is sanitised to a safe symbol, since
+  `project--valid-name?` permits punctuation a symbol shouldn't carry (`my.app` →
+  `my-app`, a leading digit gets `p-`, pure punctuation degrades to `lib`, and the
+  reserved `main` becomes `main-lib`).
+- A dependency's **`main` is exempt** from the collision check. It is an entry point,
+  not library surface: `nest run` only ever uses the root project's `:main`, and
+  nothing requires a dep's.
+
+### The unidentified suite flake: evidence, not a fix
+
+Hunted it with repeated suite runs under 6-core saturating load. **Two of my three
+attempts were invalidated by my own contamination** — round 1 rebuilt the binary
+mid-experiment, round 2 froze the binary but not the test corpus I was still editing
+(the "13 failures" were exactly my 13 new tests against a binary predating them).
+Round 3 used a fully isolated snapshot: its own binary *and* its own `tests/`.
+
+Result: **zero intermittent failures across 6 runs**, plus one deterministic failure
+that was itself a snapshot artefact (`format: the prelude is idempotent` slurps
+`std/prelude.blsp` relative to cwd, and the snapshot had no `std/`).
+
+Round 1's one failing run is the useful datum: every failure in it was a monitor
+`[:down …]` receive or a cross-process face lookup — all 5s-deadline guards, i.e.
+exactly the class the `*test-wait-ms*` work above addresses. So the evidence says the
+flake was that class and is now fixed. I can't prove identity, and won't claim it.
+
+### Line coverage: attempted, reverted, and now better understood
+
+ADR-148 predicted the cost as "a compile-time instrumentation seam". I tried to dodge
+that with a cheaper one — record `(file, line)` from the tree-walking evaluator, where
+`Heap::form_pos` already carries both, and have `--cover-lines` select `BROOD_VM=0`.
+It recorded top-level forms correctly and **nothing inside a function body**, because
+a compiled closure's body executes in `exec_value`/`exec_chunk`, not in `eval` — and
+`exec_value` has no arm in scope, so no `src_file` to attribute a line to. Threading
+it through a hot recursive function and every call site is precisely the high-risk
+change the cheap seam was meant to avoid.
+
+So the whole attempt is reverted (the function tier is untouched and verified). The
+finding is worth more than the code was: **the tree-walker is not a viable seam for
+line coverage**, which rules out the cheap option ADR-148 didn't consider and leaves
+compile-time instrumentation of the bytecode as the real path.

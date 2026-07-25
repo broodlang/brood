@@ -94,7 +94,7 @@
 ;; Receive `[:drew t]` frames until one equals `want` (skipping tick re-renders of an
 ;; unchanged frame), or time out — the deduped wait the local-window test drives.
 (defn wait-drew (want)
-  (receive ([:drew t] (if (= t want) :ok (wait-drew want))) (after 3000 :timeout)))
+  (receive ([:drew t] (if (= t want) :ok (wait-drew want))) (after *test-wait-ms* :timeout)))
 
 (describe "editor/serve — attach-display-local (the host's own window)"
   :isolated

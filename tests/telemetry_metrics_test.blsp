@@ -221,7 +221,7 @@
     (spawn (do (tmm-emit-n [:tick] {} per) (send parent :done)))
     (tmm-spawn-emitters parent (- workers 1) per)))
 (defn tmm-await (n)
-  (if (= n 0) :ok (receive (:done (tmm-await (- n 1))) (after 5000 :timeout))))
+  (if (= n 0) :ok (receive (:done (tmm-await (- n 1))) (after *test-wait-ms* :timeout))))
 
 ;; Node up/down through the telemetry stream (`watch-nodes`). A live two-node
 ;; cluster is exercised by the dist suite; here we test the deterministic core —

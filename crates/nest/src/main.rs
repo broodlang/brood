@@ -239,9 +239,11 @@ enum Cmd {
         #[arg(long, value_name = "K", default_value_t = 0)]
         shard: u64,
 
-        /// Don't print each test as it starts (the default prints them).
+        /// Print `▶ group › name` as each test starts, instead of the default
+        /// one-character-per-test progress. Useful for spotting which test is slow
+        /// or hung; noisier for everything else.
         #[arg(long)]
-        no_trace: bool,
+        trace: bool,
 
         /// Report FUNCTION-level coverage after the run: which of the project's
         /// functions the suite never called. Instrumenting rebinds every project
@@ -454,10 +456,34 @@ fn main() {
     // Capture any panic (use-after-GC tripwire, heap index, …) to .brood_crash_dump.
     brood::cli_support::install_crash_dump();
     let cli = Cli::parse();
+    // Arm the coverage flags BEFORE anything constructs an `Interp` — the kernel
+    // caches them on first read, which happens during the prelude build.
+    arm_coverage_env(&cli);
     // Run on an explicitly-sized large stack so the stack-budget guard (ADR-043)
     // is uniform across the root thread and spawned coroutines (see
     // `cli_support::run_on_main_stack`).
     run_on_main_stack("nest-main", move || run_main(cli));
+}
+
+/// Silence the hot-reload diagnostics for a `nest test --cover` run, before any
+/// interpreter exists.
+///
+/// Coverage instrumentation rebinds every project function to a variadic shim, which
+/// legitimately changes every arity — hundreds of expected `[reload] arity changed`
+/// lines otherwise. The kernel caches this flag on first read, and that read happens
+/// while `Interp::new()` builds the prelude, so setting it from the subcommand would
+/// be too late.
+fn arm_coverage_env(cli: &Cli) {
+    let Cmd::Test {
+        cover, cover_min, ..
+    } = &cli.cmd
+    else {
+        return;
+    };
+    if *cover || cover_min.is_some() {
+        // SAFETY: called from `main` before any thread or interpreter is created.
+        unsafe { std::env::set_var("BROOD_NO_RELOAD_DIAG", "1") };
+    }
 }
 
 fn run_main(cli: Cli) {
@@ -488,7 +514,7 @@ fn run_main(cli: Cli) {
             slowest,
             partitions,
             shard,
-            no_trace,
+            trace,
             cover,
             cover_min,
         } => {
@@ -525,7 +551,7 @@ fn run_main(cli: Cli) {
                 slowest,
                 partitions,
                 shard,
-                no_trace,
+                trace,
                 cover,
                 cover_min,
                 lines,
@@ -586,7 +612,7 @@ fn run_main(cli: Cli) {
         Cmd::Grammar { target } => cmd_grammar(&mut interp, target),
         Cmd::Fetch => {
             require_project("fetch", None);
-            run(&mut interp, "(require 'package) (package/fetch)")
+            run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/fetch)"))
         }
         Cmd::Update { names } => {
             require_project("update", None);
@@ -594,7 +620,7 @@ fn run_main(cli: Cli) {
         }
         Cmd::Tree => {
             require_project("tree", None);
-            run(&mut interp, "(require 'package) (package/tree)")
+            run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/tree)"))
         }
         Cmd::Add { name, spec } => {
             require_project("add", None);
@@ -603,7 +629,7 @@ fn run_main(cli: Cli) {
         Cmd::Remove { name } => {
             require_project("remove", None);
             let call = brood::introspect::call_form("package/remove-dep", &[&name]);
-            run(&mut interp, &format!("(require 'package) {call}"));
+            run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
         }
         Cmd::Publish { index } => {
             require_project("publish", None);
@@ -664,7 +690,7 @@ struct TestOpts {
     slowest: Option<u64>,
     partitions: Option<u64>,
     shard: u64,
-    no_trace: bool,
+    trace: bool,
     cover: bool,
     cover_min: Option<u64>,
     /// `FILE:LINE` selectors peeled off the positional FILE list.
@@ -731,10 +757,11 @@ impl TestOpts {
     /// The Brood option plist — spliced straight into the `run-*` call.
     fn to_plist(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
-        // `:trace` (live per-test progress) is the interactive default; `--no-trace`
-        // is the opt-out. The `brood --test` path never sets it, keeping machine-
-        // parsed output clean.
-        if !self.no_trace {
+        // Tracing is OPT-IN. The default is the runner's one-character-per-test
+        // progress (a green dot per pass, a red `F` per failure), which is what you
+        // want for a normal run; `▶ group › name` per test is for finding a slow or
+        // hung case, and it suppresses the dots because the two together are noise.
+        if self.trace {
             parts.push(":trace".to_string());
         }
         if self.failed {
@@ -813,14 +840,6 @@ fn validate_shard(opts: &TestOpts) {
 
 fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
     validate_shard(opts);
-    // Coverage instrumentation rebinds every project function to a variadic shim,
-    // which legitimately changes every arity — so silence the hot-reload arity
-    // diagnostic that would otherwise print once per function. Set before any eval
-    // so the kernel's cached read sees it.
-    if opts.cover || opts.cover_min.is_some() {
-        // SAFETY: single-threaded startup, before any interpreter thread exists.
-        unsafe { std::env::set_var("BROOD_NO_RELOAD_DIAG", "1") };
-    }
     // Default a memory ceiling on for test runs (ADR-043); an explicit
     // BROOD_MEM_LIMIT still wins (init ran first in main()).
     brood::core::alloc::init_limits_with_default(
@@ -834,12 +853,13 @@ fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
         // `test` is required up front, not left to `run-project-tests`: the option
         // plist can contain a `(test/test--make-filter …)` call, and arguments are
         // evaluated before the callee runs its own `require`.
-        run(
+        run_expecting_failure_signal(
             interp,
             &format!(
                 "(require 'project) (require 'test) (project/load-config) \
                  (project/run-project-tests {plist})"
             ),
+            "test(s) failed",
         );
         return;
     }
@@ -865,9 +885,17 @@ fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
     // against (and updates) the project's record exactly as on a whole-project
     // run; outside one there is no record to keep, so run the registry directly.
     if inside_project {
-        run(interp, &format!("(project/run-loaded-tests {plist})"));
+        run_expecting_failure_signal(
+            interp,
+            &format!("(project/run-loaded-tests {plist})"),
+            "test(s) failed",
+        );
     } else {
-        run(interp, &format!("(test/run-tests {plist})"));
+        run_expecting_failure_signal(
+            interp,
+            &format!("(test/run-tests {plist})"),
+            "test(s) failed",
+        );
     }
 }
 
@@ -1188,7 +1216,7 @@ fn cmd_run(
 fn cmd_update(interp: &mut Interp, names: &[String]) {
     let args: Vec<&str> = names.iter().map(String::as_str).collect();
     let call = format!(
-        "(require 'package) {}",
+        "{PACKAGE_BOOTSTRAP} {}",
         brood::introspect::call_form("package/update", &args)
     );
     run(interp, &call);
@@ -1200,11 +1228,18 @@ fn cmd_add(interp: &mut Interp, name: &str, spec: &[String]) {
     let mut args: Vec<&str> = vec![name];
     args.extend(spec.iter().map(String::as_str));
     let call = format!(
-        "(require 'package) {}",
+        "{PACKAGE_BOOTSTRAP} {}",
         brood::introspect::call_form("package/add", &args)
     );
     run(interp, &call);
 }
+
+/// The bootstrap every package command shares. `load-config` is the load-bearing
+/// part: the user config supplies `:registry`, and a `:version` dependency cannot be
+/// resolved without it. `fetch`/`tree`/`add`/`remove`/`update` were skipping it, so
+/// they used the hardcoded default index no matter what the user had configured —
+/// `nest add pkg :version 1.0.0` failed against a perfectly good local registry.
+const PACKAGE_BOOTSTRAP: &str = "(require 'project) (project/load-config) (require 'package)";
 
 /// `nest publish [INDEX]` — publish this project's version to the registry index
 /// (ADR-147). Loads the user config first so a `:registry` override applies.
@@ -1213,10 +1248,7 @@ fn cmd_publish(interp: &mut Interp, index: Option<&str>) {
         Some(i) => brood::introspect::call_form("package/publish", &[i]),
         None => "(package/publish)".to_string(),
     };
-    run(
-        interp,
-        &format!("(require 'project) (project/load-config) (require 'package) {call}"),
-    );
+    run(interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
 }
 
 /// `nest search QUERY [INDEX]` — search the registry index (ADR-147).
@@ -1226,10 +1258,7 @@ fn cmd_search(interp: &mut Interp, query: &str, index: Option<&str>) {
         None => vec![query],
     };
     let call = brood::introspect::call_form("package/search", &args);
-    run(
-        interp,
-        &format!("(require 'project) (project/load-config) (require 'package) {call}"),
-    );
+    run(interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
 }
 
 /// `nest doc [module] [--all]` — Markdown docs to stdout. `--all` documents
@@ -1519,6 +1548,29 @@ fn cmd_release(
 
 /// Evaluate a bootstrap snippet, reporting any error in GNU form and exiting
 /// non-zero on failure.
+/// Like `run`, but for a command whose Brood side signals "the work failed" by
+/// RAISING — `run-project-tests` raises `N test(s) failed` so that `cargo test` and
+/// `brood --test` see a non-zero exit.
+///
+/// For `nest test` that raise is not an error to report: the failures have already
+/// been printed, in detail, by the runner. Reporting it again appended
+/// `1337:13: error: 2 test(s) failed` plus `at project/run-project-tests` and a
+/// version banner to the end of an otherwise clean report — three lines of internals
+/// after the part the user actually reads. Exit non-zero silently instead, and only
+/// fall back to the normal error report for a genuine failure (a broken manifest, an
+/// unloadable test file).
+fn run_expecting_failure_signal(interp: &mut Interp, code: &str, signal: &str) {
+    let result = interp.eval_str(code);
+    brood::builtins::restore_terminal_on_exit();
+    if let Err(e) = result {
+        if e.to_string().contains(signal) {
+            std::process::exit(1);
+        }
+        report_error(&e);
+        std::process::exit(1);
+    }
+}
+
 fn run(interp: &mut Interp, code: &str) {
     let result = interp.eval_str(code);
     // Restore the terminal on the way out — whether the program returned

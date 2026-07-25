@@ -614,3 +614,20 @@
     (assert= (package/package--error-reason 42) "42"))
   (test "nil degrades rather than raising"
     (is (string? (package/package--error-reason nil)))))
+
+;; A dependency's `main` is its ENTRY POINT, not part of its library surface: `nest
+;; run` only ever uses the ROOT project's `:main`, and nothing requires a dep's. Two
+;; projects each having one is therefore not a conflict — but it used to be reported
+;; as one, which meant any `nest new` project could never be used as a dependency
+;; (it provides `main`, and so does whoever depends on it).
+(describe "package: `main` is exempt from module-collision checking"
+  (test "main is recognised as an entry module"
+    (is (package/package--entry-module? 'main)))
+  (test "a string spelling is recognised too"
+    ;; The provider walk yields whatever `defmodule` recorded.
+    (is (package/package--entry-module? "main")))
+  (test "an ordinary module is not exempt"
+    (refute (package/package--entry-module? 'greeter)))
+  (test "a name merely containing main is not exempt"
+    (and (refute (package/package--entry-module? 'main-lib))
+      (refute (package/package--entry-module? 'domain)))))

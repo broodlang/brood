@@ -1332,10 +1332,13 @@ resolve in the advisory checker. Returns the project root."
         (project--write-failed! root *test-last-ran* *test-last-failed*)
         ;; Report coverage before propagating a suite failure — a red run is
         ;; exactly when you still want to see what went unexercised.
-        (let (percent (if (test/opt? :cover opts) (project--coverage-finish! root) nil))
+        (let (percent (project--coverage-report! root opts))
           (if (and (pair? outcome) (= (first outcome) :%suite-raised))
             (throw (second outcome))
             (project--coverage-gate percent opts)))))))
+
+(defn project--coverage-report! (root opts)
+  (if (test/opt? :cover opts) (project--coverage-finish! root) nil))
 
 ;; --- coverage wiring (nest test --cover) --------------------------------------
 ;; `coverage` is required lazily, like `package`: a run without `--cover` never
@@ -1381,7 +1384,7 @@ resolve in the advisory checker. Returns the project root."
             resolved (project--resolve-test-opts root opts)
             outcome (try (apply test/run-tests resolved) (catch e (list :%suite-raised e))))
         (project--write-failed! root *test-last-ran* *test-last-failed*)
-        (let (percent (if (test/opt? :cover opts) (project--coverage-finish! root) nil))
+        (let (percent (project--coverage-report! root opts))
           (if (and (pair? outcome) (= (first outcome) :%suite-raised))
             (throw (second outcome))
             (project--coverage-gate percent opts)))))))

@@ -36,12 +36,12 @@
   (test "proc-send to `cat` comes back as [:proc handle data]"
     (let (p (proc-spawn "cat" []))
       (proc-send p "ping over proc")
-      (let (got (receive ([:proc ~p d] d) (after 5000 :timeout)))
+      (let (got (receive ([:proc ~p d] d) (after *test-wait-ms* :timeout)))
         (assert= got "ping over proc")
         ;; proc-close SIGKILLs the child: it exits via a signal, so the final
         ;; [:proc-closed …] carries a nil code (no exit status).
         (proc-close p)
-        (let (code (receive ([:proc-closed ~p c] c) (after 5000 :timeout)))
+        (let (code (receive ([:proc-closed ~p c] c) (after *test-wait-ms* :timeout)))
           (is (nil? code)))))))
 
 (describe "proc: binary mode is byte-faithful"
@@ -58,7 +58,7 @@
       ;; delivers a `bytes` value and proc-send accepts one, so they round-trip.
       (let (sent (bytes 0 255 128 65))
         (proc-send p sent)
-        (let (got (receive ([:proc ~p d] d) (after 5000 :timeout)))
+        (let (got (receive ([:proc ~p d] d) (after *test-wait-ms* :timeout)))
           (assert= got sent)
           (assert= (into [] (bytes->list got)) [0 255 128 65])
           (proc-close p)))))
@@ -68,7 +68,7 @@
       (proc-set-binary p true)
       ; U+03C0 = 0xCF 0x80 in UTF-8
       (proc-send p "π")
-      (let (got (receive ([:proc ~p d] d) (after 5000 :timeout)))
+      (let (got (receive ([:proc ~p d] d) (after *test-wait-ms* :timeout)))
         (assert= got (bytes 207 128))
         (proc-close p)))))
 
@@ -76,16 +76,16 @@
   :isolated
   (test "a child's stdout then [:proc-closed handle code] with its exit status"
     (let (p (proc-spawn "sh" ["-c" "printf hello; exit 3"]))
-      (let (out (receive ([:proc ~p d] d) (after 5000 :timeout)))
+      (let (out (receive ([:proc ~p d] d) (after *test-wait-ms* :timeout)))
         (assert= out "hello")
-        (let (code (receive ([:proc-closed ~p c] c) (after 5000 :timeout)))
+        (let (code (receive ([:proc-closed ~p c] c) (after *test-wait-ms* :timeout)))
           (assert= code 3))))))
 
 (describe "proc: stderr is a separate channel"
   :isolated
   (test "stderr arrives as [:proc-err …], never mixed into [:proc …]"
     (let (p (proc-spawn "sh" ["-c" "printf oops 1>&2"]))
-      (let (err (receive ([:proc-err ~p d] d) (after 5000 :timeout)))
+      (let (err (receive ([:proc-err ~p d] d) (after *test-wait-ms* :timeout)))
         (assert= err "oops")
         (proc-close p)))))
 
@@ -94,16 +94,16 @@
   ;; Without :cwd the child inherits ours; with it, `pwd` reports the given dir.
   (test "proc-spawn opts :cwd sets the working directory"
     (let (p (proc-spawn "sh" ["-c" "pwd"] {:cwd "/"}))
-      (let (out (receive ([:proc ~p d] d) (after 5000 :timeout)))
+      (let (out (receive ([:proc ~p d] d) (after *test-wait-ms* :timeout)))
         (assert= out "/\n")
-        (let (code (receive ([:proc-closed ~p c] c) (after 5000 :timeout)))
+        (let (code (receive ([:proc-closed ~p c] c) (after *test-wait-ms* :timeout)))
           (assert= code 0))))))
 
 (describe "proc: :env adds environment variables"
   :isolated
   (test "proc-spawn opts :env is visible to the child"
     (let (p (proc-spawn "sh" ["-c" "printf %s \"$MYVAR\""] {:env {"MYVAR" "hello"}}))
-      (let (out (receive ([:proc ~p d] d) (after 5000 :timeout)))
+      (let (out (receive ([:proc ~p d] d) (after *test-wait-ms* :timeout)))
         (assert= out "hello")
         (proc-close p)))))
 
@@ -133,6 +133,6 @@
     (let (_me (self)
           p (proc-spawn "cat" []))
       (spawn (proc-send p "from a worker"))
-      (let (got (receive ([:proc ~p d] d) (after 5000 :timeout)))
+      (let (got (receive ([:proc ~p d] d) (after *test-wait-ms* :timeout)))
         (proc-close p)
         (assert= got "from a worker")))))

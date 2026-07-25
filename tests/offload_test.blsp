@@ -39,7 +39,7 @@
     (let (r (offload %digest :sha256 (string->utf8-bytes "x")))
       (is (bytes? r))
       ;; the decoy was not consumed by the offload wait
-      (assert= (receive ([:decoy v] v) (after 1000 :lost)) :untouched)))
+      (assert= (receive ([:decoy v] v) (after *test-wait-ms* :lost)) :untouched)))
   (test "many processes offload at once; every result is correct"
     (let (parent (self)
           n 8)

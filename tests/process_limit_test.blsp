@@ -8,6 +8,11 @@
 ;;   - a capped spawned process dies ALONE; siblings/parent unaffected
 ;;   - unknown flags and bad values error cleanly
 
+;; The `(after 30000 …)` guards here are deliberately ABOVE the shared
+;; `*test-wait-ms*` (20s): these cases build large structures while a memory cap is
+;; armed, so they are legitimately slow rather than merely load-sensitive. Don't
+;; "normalise" them down to the knob.
+
 (defmodule process-limit-test (:use test))
 
 (defn build (acc) (build (cons 1 acc)))

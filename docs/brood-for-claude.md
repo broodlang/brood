@@ -772,7 +772,11 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 
 ## Module skeleton (what `nest new` scaffolds)
 
-`nest new <name>` scaffolds this default `main`+`hello` pair. Other `--template`
+`nest new <name>` scaffolds a `main` module plus a library module **named after the
+project** (`nest new greeter` → `src/greeter.blsp` providing `greeter`). Naming it for
+the package is what lets two scaffolded projects depend on each other: a fixed name
+like `hello` collides the moment one is added as a dependency of another, because
+namespaces aren't package-rooted yet (ADR-070). Other `--template`
 options scaffold starter shapes you'd otherwise hand-write: `tui-loop` (a
 tail-recursive animation loop, pairs with `nest run --for`), `gen` (a stateful
 gen_server-style process), `hatch` (a full Postgres-backed Hatch web app),
@@ -781,19 +785,19 @@ text editor on `ui-run`), and `gui` (a windowed `ui-run` app — see *Interactiv
 apps* above; needs a `--features gui` build).
 
 ```lisp
-;; src/hello.blsp
-(defmodule hello "A second module — main requires it and calls greeting.")
+;; src/greeter.blsp  — for a project named `greeter`
+(defmodule greeter "The project's library module — main uses it and calls greeting.")
 
-(defn greeting () "hello world")
+(defn greeting () "hello greeter")
 ```
 
 ```lisp
 ;; src/main.blsp
-;; `(:use hello)` brings `hello`'s public names (here `greeting`) into scope
-;; bare; without it you'd call `(hello/greeting)`. A plain `(require 'hello)`
+;; `(:use greeter)` brings `greeter`'s public names (here `greeting`) into scope
+;; bare; without it you'd call `(greeter/greeting)`. A plain `(require 'greeter)`
 ;; only loads the file — it does not refer the names.
 (defmodule main "The project's entry-point module (nest run -> main/main)."
-  (:use hello))
+  (:use greeter))
 
 (defn main ()
   "Entry point: print the project's greeting."
@@ -801,12 +805,12 @@ apps* above; needs a `--features gui` build).
 ```
 
 ```lisp
-;; tests/hello_test.blsp
-;; `(:use hello)` brings `greeting` into scope; `(:use test)` the test macros.
-(defmodule hello-test (:use hello) (:use test))
+;; tests/greeter_test.blsp
+;; `(:use greeter)` brings `greeting` into scope; `(:use test)` the test macros.
+(defmodule greeter-test (:use greeter) (:use test))
 
-(describe "hello"
-  (test "greeting works"   (assert= (greeting) "hello world"))
+(describe "greeter"
+  (test "greeting works"   (assert= (greeting) "hello greeter"))
   (test "greeting is text" (is (string? (greeting)))))
 ```
 

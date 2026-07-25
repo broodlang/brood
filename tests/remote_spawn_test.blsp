@@ -5,15 +5,14 @@
 ;; `(fn () (fn () body))`, so the receiver ran nothing — the same silent no-op
 ;; that `1a63eb7` fixed for `spawn`/`spawn-link`, now fixed here too.
 
-;; The `(after …)` deadlines below are deliberately GENEROUS (30s, not the 5s they
-;; started at). These are correctness tests — "did the body run at all" — so the
-;; deadline exists only to stop a hang, never to measure latency. At 5s one of them
-;; intermittently reddened the whole in-language suite under a full `make test`,
-;; where a local-node round trip competes with ~840 parallel cases for cores; that is
-;; the same load sensitivity `.config/nextest.toml` describes for the real-TCP
-;; binaries, but this file runs INSIDE the `brood_suite_passes` wrapper, which gets no
-;; retry — so a blown deadline here fails the entire suite. The suite's own per-test
-;; ceiling (`*test-timeout-ms*`, 120s) still bounds a genuine hang.
+;; The `(after …)` deadlines below use `*test-wait-ms*` — the shared anti-hang guard,
+;; not a latency budget. These are correctness tests ("did the body run at all"), so
+;; the deadline exists only to stop a hang. At the 5s they started with, one of them
+;; intermittently reddened the whole in-language suite under a full `make test`, where
+;; a local-node round trip competes with ~840 parallel cases for cores — the same load
+;; sensitivity `.config/nextest.toml` describes for the real-TCP binaries, except this
+;; file runs INSIDE the `brood_suite_passes` wrapper. The runner's own per-test ceiling
+;; (`*test-timeout-ms*`, 120s) still bounds a genuine hang.
 
 (defmodule remote-spawn-test (:use test))
 
@@ -24,13 +23,13 @@
     (start-remote-spawn)
     (let (parent (self))
       (remote-spawn (node-name) (send parent [:expr-ran 7]))
-      (assert= 7 (receive ([:expr-ran v] v) (after 30000 :timeout)))))
+      (assert= 7 (receive ([:expr-ran v] v) (after *test-wait-ms* :timeout)))))
 
   (test "a literal (fn () …) body runs — no longer the double-wrap no-op"
     (start-remote-spawn)
     (let (parent (self))
       (remote-spawn (node-name) (fn () (send parent [:lambda-ran 9])))
-      (assert= 9 (receive ([:lambda-ran v] v) (after 30000 :timeout)))))
+      (assert= 9 (receive ([:lambda-ran v] v) (after *test-wait-ms* :timeout)))))
 
   (test "remote-spawn-sync returns the child pid and runs a literal-lambda body"
     (start-remote-spawn)
@@ -38,4 +37,4 @@
           child (remote-spawn-sync (node-name)
                   (fn () (send parent [:sync-ran 11]))))
       (is (pid? child))
-      (assert= 11 (receive ([:sync-ran v] v) (after 30000 :timeout))))))
+      (assert= 11 (receive ([:sync-ran v] v) (after *test-wait-ms* :timeout))))))

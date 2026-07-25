@@ -15,11 +15,11 @@
 ;; ---- helpers ----------------------------------------------------------------
 ;; A handler that forwards (event measurements metadata) to `pid`.
 (defn tel-fwd (pid) (fn (e m md) (send pid [:ev e m md])))
-(defn tel-recv () (receive ([:ev e m md] [e m md]) (after 5000 :timeout)))
+(defn tel-recv () (receive ([:ev e m md] [e m md]) (after *test-wait-ms* :timeout)))
 (defn tel-none () (receive ([:ev e m md] :got) (after 120 :none)))
 (defn tel-ids (event) (map (fn (h) (get h :id)) (get (handlers) event nil)))
 (defn tel-await (n)
-  (if (= n 0) :ok (receive (:done (tel-await (- n 1))) (after 5000 :timeout))))
+  (if (= n 0) :ok (receive (:done (tel-await (- n 1))) (after *test-wait-ms* :timeout))))
 (defn threw? (thunk) (try (do (thunk) false) (catch e true)))
 
 ;; ---- emit + handlers --------------------------------------------------------
@@ -117,7 +117,7 @@
       (detach-all)
       (attach :w :evt (fn (e m md) (send me [:where (self)])))
       (emit :evt)
-      (let (where (receive ([:where p] p) (after 5000 :timeout)))
+      (let (where (receive ([:where p] p) (after *test-wait-ms* :timeout)))
         (stop-telemetry)
         (is (= where lpid))
         (is (not (= where me))))))
@@ -148,7 +148,7 @@
       (attach :crash :boom (fn (e m md) (exit (self) :kill)))
       ; async — the kill happens in the listener
       (emit :boom)
-      (let (reason (receive ([:down _ ~lpid r] r) (after 5000 :timeout)))
+      (let (reason (receive ([:down _ ~lpid r] r) (after *test-wait-ms* :timeout)))
         ; the listener really died
         (is (not (= reason :timeout)))
         (assert= (+ 40 2) 42))))
@@ -159,7 +159,7 @@
       (attach :ok :evt (tel-fwd me))
       (attach :crash :boom (fn (e m md) (exit (self) :kill)))
       (emit :boom)
-      (receive ([:down _ ~lpid _] :ok) (after 5000 :timeout))
+      (receive ([:down _ ~lpid _] :ok) (after *test-wait-ms* :timeout))
       (let (l2 (start-telemetry))
         ; restart the listener
         (is (not (= l2 lpid)))
@@ -178,7 +178,7 @@
       (detach-all)
       (forward :fwd :evt me)
       (emit :evt {:n 5} {:k :v})
-      (let (got (receive ([:telemetry e m md] [e m md]) (after 5000 :timeout)))
+      (let (got (receive ([:telemetry e m md] [e m md]) (after *test-wait-ms* :timeout)))
         (stop-telemetry)
         (assert= got [:evt {:n 5} {:k :v}])))))
 
