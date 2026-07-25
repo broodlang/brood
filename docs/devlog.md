@@ -7348,3 +7348,38 @@ edits are a scripting scenario rather than something done by hand, so that primi
 stays deferred (ADR-011) instead of being invented for this. Recorded as an explicit
 one-at-a-time constraint in `docs/packages.md`, with the measurement, why it is
 undetectable from inside the command, and what a fix would require.
+
+## 2026-07-25 — Tier 4 io.rs split + jit_lower Batch 5 / Funcs / big helpers
+
+Two tranches of the structural-cleanup + jit_lower decomposition work.
+
+**Tier 4 `builtins/io.rs` split (structural cleanup):** carved the 13-concern
+grab-bag down. Crypto+hashing (`HashAlgo`/`hash_algo`/`%digest`/`%hmac`/
+`%random-bytes`/`%chacha20-encrypt`/`%chacha20-decrypt`/`%pbkdf2-sha256-bytes`) →
+new `builtins/crypto.rs`; the package-manager git/tar mechanism (`run_git`/
+`git_or_err`/`%git-resolve-ref`/`%git-changed-files`/`%git-clone`/`%untar-gz`/
+`%rm-rf`) → new `builtins/pkg.rs`; and the misfiled transcendental math
+(`sin`/`cos`/`tan`/`atan`/`exp`/`asin`/`acos`/`ln`/`log2`/`log10` + `%f64-sqrt`/
+`atan2` + the `math1_*` macros) `sequences.rs` → `numeric.rs`. The general byte
+helpers `collect_bytes`/`bytes_to_value` stay in `io.rs` (used broadly). Glob
+re-export keeps `register()` untouched. io.rs 1932 → 1436; crypto.rs 258, pkg.rs
+263. Green: `builtins` unit tests incl. the PRIMITIVE_DOCS drift-guard, and the
+crypto/hash/package/format blsp suites.
+
+**jit_lower Batch 5 + `Funcs` + big helpers:** extended `Frame` with
+`slot_f64_cache`; moved the operand-materialization family (`read_words`/
+`store_words`/`as_int`/`as_block_arg`/`as_f64`) and `store_op` to `emit.rs` as
+free fns over `Frame`; added the `Funcs` runtime-call context (heap/out_slot/
+ptr_ty/error + vector-slab FuncRefs) threaded alongside `Frame`; and moved the
+big helpers `call_handle`/`vector_ref`/`table_prim`/`eq_dispatch` to `emit.rs`
+over `(…, Frame, Funcs)`. Every helper keeps a one-line delegating closure at the
+original site, so the emit-loop call sites are byte-identical — zero codegen
+change. jit_lower.rs 4308 → 3785; emit.rs 273 → 923. Verified per step and at the
+end: differential 2/2, jit 34/34 (incl. `GC_STRESS`+`GC_VERIFY`+`JIT_VERIFY`),
+full `make test` 811/811 + doctest, and JIT vs `BROOD_VM=0` output bit-identical
+across arith/float/vector-ref/keyword-eq. Remaining: the per-`Inst` arm bodies
+(the all-or-nothing step) left for a focused, benchmark-gated pass.
+
+The two Tier 4 policy-in-Rust items (`gui.rs` color/UI policy, `nest cmd_run`)
+were deferred with rationale — both are outward-facing behavioral changes that
+can't be verified without a live display / interactive watch session.

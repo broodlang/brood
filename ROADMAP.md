@@ -32,19 +32,31 @@ closure→free-fn relocation into `jit_lower/emit.rs` (or a new sibling), verifi
 **differential 2/2 + jit 34/34 (JIT_VERIFY) + full suite** per step. Ordered by
 dependency:
 
-- ⬜ **Batch 5 — operand-materialization family:** `read_words` (**~35 call sites**),
-  `store_words`, `as_int`, `as_block_arg`, `exit_done` → `emit.rs` (extend `Frame`
-  as needed). High call-site churn but mechanical.
-- ⬜ **`Funcs` struct** — bundle the ~25 runtime-callback `FuncRef`s (cons/car/
-  make_vector/global/call_slow/vref/table/… ) into one `Copy` struct built after the
-  imports, threaded like `Frame`. The enabler for the big helpers + arm bodies.
-- ⬜ **Big helpers:** `store_op`, `call_handle`, `vector_ref` (~177 lines),
-  `table_prim`, `eq_dispatch` (~239) → `emit.rs`, gated on the `Funcs` struct + the
-  batch-5 deps.
+- ✅ **Batch 5 — operand-materialization family** (done 2026-07-25): `read_words`,
+  `store_words`, `as_int`, `as_block_arg`, `as_f64`, and `store_op` moved to `emit.rs`
+  as free fns taking the `Frame` context (extended with `slot_f64_cache`). Kept thin
+  one-line delegating closures at the original site so the ~35 call sites in the emit
+  loop stay byte-identical — zero call-site churn, zero codegen change. `exit_done`
+  stays a 2-line local closure (it needs the arm-local `done_block`) and now delegates
+  to `emit::store_op`.
+- ✅ **`Funcs` struct** (done 2026-07-25) — a `Copy` runtime-call context bundling the
+  heap ptr, out-slot, target pointer type, the arm's `error` block, and the
+  vector-slab `FuncRef`s (`vnbase`/`vobase`/`vref`), threaded alongside `Frame`. Grows
+  with more `FuncRef`s as the arm-body extraction proceeds.
+- ✅ **Big helpers** (done 2026-07-25): `store_op`, `call_handle`, `vector_ref`
+  (~177 lines), `table_prim`, `eq_dispatch` (~239) all moved to `emit.rs`, taking
+  `(&mut FunctionBuilder, …, Frame, Funcs)`; delegating wrappers keep the call sites
+  unchanged. `jit_lower.rs` 4308 → 3785; `emit.rs` 273 → 923. Verified: differential
+  2/2, jit 34/34 (incl. `GC_STRESS`+`GC_VERIFY`+`JIT_VERIFY`), full `make test`
+  811/811, and JIT vs `BROOD_VM=0` output bit-identical across arith/float/vector-ref/
+  keyword-eq.
 - ⬜ **Per-`Inst` arm bodies:** Call (~300) / Prim1/2/3 + fused (~700) / SelfCall
   (~200) / control (~130) → `jit_lower/{call,prim,control}.rs` — the largest and
   last, gated on everything above. Each arm becomes `emit_<inst>(&mut b, &mut stack,
-  frame, funcs, …)`.
+  frame, funcs, …)`. **This is the all-or-nothing step** (the whole loop shares `b`,
+  the operand `stack`, the hoist maps, and ~27 `FuncRef`s, so `Funcs` must first grow
+  to carry the full set + the stack must thread), and per the bar below it wants
+  per-family `BROOD_JIT_DUMP_IR` + benchmark verification — left for a focused pass.
 
 **Testing bar for this work (raise it):** beyond the per-step differential/jit/suite,
 run the split under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1 BROOD_JIT_VERIFY=1` and the
@@ -178,12 +190,23 @@ was); added it to the `pub(crate) use self::gc::{…}` list.
 
 - ⬜ `gui.rs` hardcodes UI policy — Catppuccin colors duplicated with `theme.blsp`
   (drift-prone), a named-color palette `face.blsp` could own, a kinetic-scroll
-  physics model.
-- ⬜ `builtins/io.rs` (1929) is a 13-concern grab-bag — split crypto+hashing and
-  the package-manager git/tar mechanism; transcendental math is misfiled in
-  `sequences.rs` (belongs in `numeric.rs`).
+  physics model. **Deferred:** moving colors into Brood means `gui.rs` reading them
+  from the language at render time (an architectural change, not a mechanical move),
+  and it can't be verified without a live display — out of scope for a blind cleanup.
+- ✅ `builtins/io.rs` split (done 2026-07-25): **crypto+hashing** (HashAlgo/`%digest`/
+  `%hmac`/`%random-bytes`/`%chacha20-*`/`%pbkdf2-sha256-bytes`) → `builtins/crypto.rs`;
+  the **package-manager git/tar mechanism** (`run_git`/`git_or_err`/`%git-resolve-ref`/
+  `%git-changed-files`/`%git-clone`/`%untar-gz`/`%rm-rf`) → `builtins/pkg.rs`; and the
+  misfiled **transcendental math** (`sin`/`cos`/…/`%f64-sqrt`/`atan2` + their `math1_*`
+  macros) `sequences.rs` → `numeric.rs`. The byte helpers `collect_bytes`/`bytes_to_value`
+  stay in `io.rs` (general, used broadly). `io.rs` 1932 → 1436; new `crypto.rs` (258),
+  `pkg.rs` (263). Glob re-export means `register()` is untouched; drift-guard +
+  crypto/hash/package/format suites green.
 - ⬜ `nest`'s `cmd_run` (217 lines) carries more policy in Rust than the other thin
   subcommand handlers — candidate to push into a Brood `project/run` entry.
+  **Deferred:** it's dense watch/reload/supervision/`--for`-timing policy that builds
+  and evals Brood source; a rewrite into Brood changes outward run/watch behavior that
+  needs a live interactive session to verify — not a safe blind mechanical move.
 
 ### Runtime-feature parity program — BEAM / .NET / Node (2026-07-22)
 
