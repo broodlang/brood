@@ -26,6 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use crate::core::heap::{Heap, SymbolMap};
+use crate::core::keywords as kw;
 use crate::core::value::{self, Arity, Symbol, Tag, Value};
 use crate::types::{Sig, Ty};
 
@@ -388,15 +389,164 @@ fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
         }
     }
 
+    // Tier 1.5: parameters from **unconditional** type-demands across the whole
+    // body — the sound generalisation of Tier 1 beyond a single top-level call
+    // (a `do`, a nested call argument, a `let`-RHS). A param used only inside a
+    // branch/guard is left `ANY` (see `collect_param_demands`), so this cannot
+    // produce the guarded-use false positive. Params with no demand stay `ANY`,
+    // recovering the old return-only behaviour exactly.
+    let param_tys = collect_param_demands(heap, &arm.body, &params);
+
     // Tier 2: sound return-only inference. Bind parameters to `ANY` (in scope, no
     // constraint) and read the body tail's type — the return, unconditionally.
+    // (Kept independent of the param demands above so the return type — and every
+    // test pinned to it — is byte-identical to before.)
     let tail = *arm.body.last()?;
     let mut ctx = Ctx::default();
     for &p in &params {
         ctx = ctx.bind(p, Some(Ty::ANY));
     }
     let ret = expr_ty(heap, tail, &ctx)?;
-    Some(Sig::new(vec![Ty::ANY; params.len()], ret))
+    Some(Sig::new(param_tys, ret))
+}
+
+/// Collect each parameter's **unconditional** type demand across the whole body:
+/// the type a known-sig callee requires of a parameter passed *directly* in a
+/// position guaranteed to execute on every call — a call argument, a `do` form, a
+/// `let`-binding RHS or body, an `if`/`when`/`cond`/`case`/`match` *test*, an
+/// `and`/`or` *first* operand. Positions gated by a branch or guard (branch arms,
+/// `and`/`or` tails, `try` bodies, nested `fn` bodies, quoted forms) are skipped —
+/// so a guarded use like `(if (string? x) (str x) (+ x 1))` never constrains `x`
+/// (sound: no false positive). Multiple demands on one param intersect; a param
+/// shadowed by an inner `let`/`fn` binder is excluded within that scope; params
+/// with no unconditional demand stay `ANY`.
+fn collect_param_demands(heap: &Heap, body: &[Value], params: &[Symbol]) -> Vec<Ty> {
+    let mut tys = vec![Ty::ANY; params.len()];
+    let shadowed: HashSet<Symbol> = HashSet::new();
+    // Every top-level body form runs unconditionally (sequenced, like a `do`).
+    for &form in body {
+        collect_demands(heap, form, params, &shadowed, &mut tys);
+    }
+    // A conflicting set of unconditional demands intersects to NEVER (the function
+    // could never be called successfully). Rather than flag every caller, drop such
+    // a param back to `ANY` — conservative, and avoids a surprising all-callers warning.
+    for t in tys.iter_mut() {
+        if t.is_never() {
+            *t = Ty::ANY;
+        }
+    }
+    tys
+}
+
+/// Walk one **unconditionally-executed** `form`, recording param demands into `tys`.
+/// `shadowed` names enclosing `let` binders that hide a same-named parameter.
+fn collect_demands(
+    heap: &Heap,
+    form: Value,
+    params: &[Symbol],
+    shadowed: &HashSet<Symbol>,
+    tys: &mut [Ty],
+) {
+    let Some(items) = list_items(heap, form) else {
+        return; // an atom (a bare param reference demands nothing on its own)
+    };
+    let Some(&head) = items.first() else {
+        return; // the empty list
+    };
+    let Value::Sym(h) = head else {
+        // A computed callee `((f) x …)` — the args still evaluate unconditionally.
+        for &arg in &items[1..] {
+            collect_demands(heap, arg, params, shadowed, tys);
+        }
+        return;
+    };
+    // Non-executed / definer forms: nothing here runs against the parameters now.
+    if value::symbol_is(h, kw::QUOTE)
+        || value::symbol_is(h, kw::QUASIQUOTE)
+        || value::symbol_is(h, kw::FN)
+        || value::symbol_is(h, kw::LAMBDA)
+        || value::symbol_is(h, kw::TRY)
+        || value::symbol_is(h, kw::DEF)
+        || value::symbol_is(h, kw::DEFN)
+        || value::symbol_is(h, kw::DEFMACRO)
+        || value::symbol_is(h, kw::DEFDYN)
+    {
+        return;
+    }
+    // Branch/guard forms: only the TEST (or scrutinee / first cond-test / case key)
+    // runs unconditionally; the arms don't.
+    if value::symbol_is(h, kw::IF)
+        || value::symbol_is(h, kw::WHEN)
+        || value::symbol_is(h, kw::UNLESS)
+        || value::symbol_is(h, kw::COND)
+        || value::symbol_is(h, kw::CASE)
+        || value::symbol_is(h, kw::MATCH)
+    {
+        if let Some(&test) = items.get(1) {
+            collect_demands(heap, test, params, shadowed, tys);
+        }
+        return;
+    }
+    // `and`/`or`: only the FIRST operand is unconditional (the rest short-circuit).
+    if value::symbol_is(h, kw::AND) || value::symbol_is(h, kw::OR) {
+        if let Some(&first) = items.get(1) {
+            collect_demands(heap, first, params, shadowed, tys);
+        }
+        return;
+    }
+    // `let`/`letrec`: each binding RHS runs (sequentially), then the body. A binder
+    // shadows a same-named parameter for the remainder of the form.
+    if value::symbol_is(h, kw::LET) || value::symbol_is(h, kw::LETREC) {
+        let Some(&binds_form) = items.get(1) else {
+            return;
+        };
+        let Some(binds) = list_items(heap, binds_form) else {
+            return;
+        };
+        if binds.len() % 2 != 0 {
+            return;
+        }
+        let mut scope = shadowed.clone();
+        let mut i = 0;
+        while i < binds.len() {
+            // A non-Sym binder is a destructuring pattern — we can't track exactly
+            // which names it shadows, so bail on the whole form (sound: collect
+            // nothing rather than risk a shadowed param leaking a demand).
+            let Value::Sym(name) = binds[i] else {
+                return;
+            };
+            collect_demands(heap, binds[i + 1], params, &scope, tys);
+            scope.insert(name); // shadows a same-named param from here on
+            i += 2;
+        }
+        for &b in &items[2..] {
+            collect_demands(heap, b, params, &scope, tys);
+        }
+        return;
+    }
+    // `do`: every form runs unconditionally.
+    if value::symbol_is(h, kw::DO) {
+        for &f in &items[1..] {
+            collect_demands(heap, f, params, shadowed, tys);
+        }
+        return;
+    }
+    // Otherwise: a normal call. All arguments evaluate unconditionally before it.
+    // A parameter passed *directly* to a known-sig callee takes the demanded type;
+    // every argument is itself an unconditional position (nested calls contribute).
+    let callee_sig = primitive_sig(heap, h).or_else(|| curated_sig(h));
+    for (i, &arg) in items[1..].iter().enumerate() {
+        if let Value::Sym(a) = arg {
+            if !shadowed.contains(&a) {
+                if let Some(pos) = params.iter().position(|&p| p == a) {
+                    if let Some(expected) = callee_sig.as_ref().and_then(|s| s.param(i)) {
+                        tys[pos] = tys[pos].clone().intersect(expected);
+                    }
+                }
+            }
+        }
+        collect_demands(heap, arg, params, shadowed, tys);
+    }
 }
 
 /// Tier 1 of [`infer_sig`]: the precise, parameter-inferring case — a body that is

@@ -1620,12 +1620,114 @@ fn infers_through_let_alias() {
         "return-only inference should type wrap's result as number: {:?}",
         w
     );
-    // …but the *parameter* is NOT inferred from a branchy/multi-step body
-    // (that would be unsound), so a differently-typed argument never warns.
+    // …and the *parameter* IS inferred here too: `(+ x 1)` is a `let`-binding RHS,
+    // which always executes when `wrap` is called (it dominates the body), so `x`
+    // genuinely must be a number — `(wrap :k)` errors at runtime. The unconditional-
+    // demand tier (`collect_param_demands`) catches it. (A *guarded* use — `(+ x 1)`
+    // inside an `if`/`cond`/`and`-tail — would stay unconstrained; see
+    // `param_inference_skips_guarded_uses`.)
     let w = check_with_defs(&["(defn wrap (x) (let (y (+ x 1)) (* y 2)))"], "(wrap :k)");
     assert!(
+        w.iter().any(|s| s.contains("wrap") && s.contains("number")),
+        "let-RHS is an unconditional demand: param should be inferred number: {:?}",
+        w
+    );
+}
+
+#[test]
+fn param_inference_from_unconditional_positions() {
+    // A parameter passed *directly* to a known-sig callee in a position that always
+    // runs is inferred, even when the top-level body isn't a single call.
+
+    // (a) Nested call argument: `(+ x 1)` is an argument to `f` (both always run),
+    // so `x : number` — a keyword arg genuinely errors.
+    let w = check_with_defs(&["(defn g (x) (list (+ x 1)))"], "(g :k)");
+    assert!(
+        w.iter().any(|s| s.contains("g") && s.contains("number")),
+        "nested-call arg is an unconditional demand: {:?}",
+        w
+    );
+
+    // (b) `do` form: every form runs; the last demands `x : number`.
+    let w = check_with_defs(&["(defn h (x) (do 1 (+ x 1)))"], "(h :k)");
+    assert!(
+        w.iter().any(|s| s.contains("h") && s.contains("number")),
+        "a do-form body is unconditional: {:?}",
+        w
+    );
+
+    // (c) A demand through an unknown/user callee's argument still fires (the demand
+    // comes from the inner *known* callee, not the outer unknown one).
+    let w = check_with_defs(
+        &["(defn user-sink (v) v)", "(defn k (x) (user-sink (* x 2)))"],
+        "(k :k)",
+    );
+    assert!(
+        w.iter().any(|s| s.contains("k") && s.contains("number")),
+        "demand flows from the inner known callee: {:?}",
+        w
+    );
+}
+
+#[test]
+fn param_inference_skips_guarded_uses() {
+    // The soundness guard: a param used only inside a branch / guard / short-circuit
+    // tail is NOT constrained — those positions don't always execute, so a
+    // differently-typed argument must never warn.
+
+    // (a) `if` branch (classic type-test guard): `x` is number only in the then-arm.
+    let w = check_with_defs(&["(defn f (x) (if (number? x) (+ x 1) x))"], "(f :k)");
+    assert!(
         w.is_empty(),
-        "return-only inference must leave the parameter unconstrained: {:?}",
+        "guarded (if-branch) use must not constrain: {:?}",
+        w
+    );
+
+    // (b) `and`/`or` tail: only the first operand is unconditional.
+    let w = check_with_defs(&["(defn f (x) (or (cached? x) (+ x 1)))"], "(f :k)");
+    assert!(w.is_empty(), "or-tail use must not constrain: {:?}", w);
+
+    // (c) `when` body is conditional on its test.
+    let w = check_with_defs(&["(defn f (x) (when (ready?) (+ x 1)))"], "(f :k)");
+    assert!(w.is_empty(), "when-body use must not constrain: {:?}", w);
+
+    // (d) `try` body deliberately exercises failures — never constrain from it.
+    let w = check_with_defs(&["(defn f (x) (try (+ x 1) (catch _ 0)))"], "(f :k)");
+    assert!(w.is_empty(), "try-body use must not constrain: {:?}", w);
+}
+
+#[test]
+fn param_inference_respects_shadowing() {
+    // An inner `let` that rebinds the parameter's name hides it: the `(+ x 1)` here
+    // refers to the let's `x` (a fresh unknown value), NOT the parameter, so the
+    // parameter stays unconstrained and `(f :k)` must not warn.
+    let w = check_with_defs(&["(defn f (x) (let (x (something)) (+ x 1)))"], "(f :k)");
+    assert!(
+        w.is_empty(),
+        "a shadowing let binder must exclude the param from demand collection: {:?}",
+        w
+    );
+}
+
+#[test]
+fn earmuffed_global_types_as_unknown_not_its_default() {
+    // A `*earmuffed*` global is dynamic by convention — declared with a `nil` default
+    // but reassigned at runtime (e.g. `*project-root*`) — so the checker must NOT pin
+    // it to `nil` and flag a string-demanding use. (Regression guard for the false
+    // positive the sound param-inference tier would otherwise surface at, e.g.,
+    // `(path-join *project-root* rel)` after its `nil?` guard.)
+    let w = check_with_defs(&["(def *root* nil)"], "(string-length *root*)");
+    assert!(
+        w.is_empty(),
+        "earmuffed global must type as unknown, not its default nil: {:?}",
+        w
+    );
+    // A non-earmuffed global is still pinned to its value (unchanged behaviour): a
+    // real disjoint use is still caught.
+    let w = check_with_defs(&["(def plain-root nil)"], "(string-length plain-root)");
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "a plain (non-earmuffed) global is still typed by its value: {:?}",
         w
     );
 }

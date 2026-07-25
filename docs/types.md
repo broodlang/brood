@@ -165,7 +165,20 @@ simplest-first — deliberately **no inference engine** (see the rationale in
   `defn a (x) (b x)` / `defn b (x) (a x)` can't loop). Catches one-liner
   wrappers (`inc`, `twice`, simple user `defn`s); skips everything subtle.
 
-**Deferred (⬜):** inference through branches / guards / recursion / higher-order.
+**Parameter inference — unconditional-demand tier (✅ 2026-07-25).** Beyond the
+single-call precise tier, `infer_sig` (`collect_param_demands` in `sigs.rs`) now
+pins a parameter from *any* position guaranteed to execute on a call — a call
+argument (incl. nested), a `do` form, a `let`-RHS/body, an `if`/`when`/`cond`/`match`
+*test*, an `and`/`or` *first* operand — intersecting multiple demands. Positions
+gated by a branch/guard (arms, short-circuit tails, `try` bodies, nested `fn`s) are
+skipped, and an inner binder shadowing a param excludes it — so a guarded use like
+`(if (string? x) (str x) (+ x 1))` never constrains `x` (sound: no false positive).
+Companion fix: a `*earmuffed*` global types as unknown (dynamic-by-convention), not
+its default value.
+
+**Deferred (⬜):** parameter demands from *conditional* positions (needs full
+occurrence typing to stay false-positive-clean); inference through recursion /
+higher-order.
 
 ### Step 4 — the advisory checker 🟡 (v0 shipped; plan below)
 `crates/lisp/src/types/check.rs`: walk a macro-expanded form and **warn when a
