@@ -16,7 +16,7 @@
   (let (me (self) w (spawn (echo me)))
     (do
       (send w v)
-      (receive ([:echoed back] back) (after 5000 :timeout)))))
+      (receive ([:echoed back] back) (after *test-wait-ms* :timeout)))))
 
 (defn lcg (s) (rem (+ (* s 1103515245) 12345) 2147483648))
 

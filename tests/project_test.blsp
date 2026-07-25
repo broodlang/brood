@@ -441,3 +441,30 @@
       (spit manifest "(project :name \"applied\" :version \"9.9.9\")\n")
       (project/project--apply-manifest manifest)
       (assert= *project-name* "applied"))))
+
+;; The scaffolded library module is named after the PROJECT, not a fixed `hello`.
+;; With a fixed name, no two scaffolded projects could ever depend on each other —
+;; both provided `hello`, and `nest add` refused with a module-name collision
+;; (namespaces aren't package-rooted yet, ADR-070). The name must also be safe to
+;; write as a bare symbol and as a filename, and `project--valid-name?` permits
+;; punctuation that a symbol shouldn't carry.
+(describe "project: the scaffolded library module's name"
+  (test "an ordinary name is used as-is"
+    (assert= (scaffold/project--module-name "greeter") "greeter"))
+  (test "hyphens and underscores are kept"
+    (assert= (scaffold/project--module-name "my-cool_lib") "my-cool_lib"))
+  (test "a dot becomes a hyphen, so the name reads as one symbol"
+    (assert= (scaffold/project--module-name "my.app") "my-app"))
+  (test "other punctuation is replaced too"
+    (assert= (scaffold/project--module-name "a+b!c") "a-b-c"))
+  (test "a leading digit is prefixed, since a symbol must not read as a number"
+    (assert= (scaffold/project--module-name "2fast") "p-2fast"))
+  (test "a name of only punctuation degrades to something usable"
+    (assert= (scaffold/project--module-name "+++") "lib"))
+  (test "the reserved `main` is renamed, so the library can't collide with the entry module"
+    (assert= (scaffold/project--module-name "main") "main-lib"))
+  (test "a non-ASCII name is not silently mangled into nothing"
+    ;; Every character is replaced, but the result is still a usable symbol.
+    (is (> (string-length (scaffold/project--module-name "日本")) 0)))
+  (test "the derived name is stable"
+    (assert= (scaffold/project--module-name "x") (scaffold/project--module-name "x"))))

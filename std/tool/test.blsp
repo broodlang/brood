@@ -833,6 +833,22 @@ docs/testing.md for the full guide.")
 ;; — otherwise nextest would kill the wrapper before this inner timeout could fire.
 (def *test-timeout-ms* 120000)
 
+;; The deadline for an ANTI-HANG GUARD — a `(receive … (after *test-wait-ms* :timeout))`
+;; where the message is expected and the timeout means "something is wrong". Distinct
+;; from `*test-timeout-ms*` (the runner's hard per-test ceiling) and from the short
+;; deadlines a test uses to assert that *nothing* arrives, which must stay short.
+;;
+;; Why it is a named knob rather than a literal at each site: those guards were
+;; written with 5s deadlines, and 5s is not a lot when the suite saturates every core —
+;; one of them (`remote_spawn_test`) intermittently reddened the whole run on timing
+;; alone. They are correctness tests ("did the message arrive at all"), never latency
+;; tests, so the deadline exists only to stop a hang and should be generous.
+;;
+;; 20s: 4× the old headroom, while several compounding guards still fit inside the
+;; 120s per-test ceiling, so a genuinely stuck test is still reported with its own
+;; message rather than by the hard kill.
+(def *test-wait-ms* 20000)
+
 ;; When set, print `▶ group › name` as each test STARTS — live progress so you can
 ;; see which test is running (and spot the slow/hung one) before it finishes. Off by
 ;; default, and never set by `run-tests-structured` / the `--test` path, so machine-

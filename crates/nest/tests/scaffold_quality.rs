@@ -208,3 +208,69 @@ fn the_sibling_dep_message_agrees_in_number() {
         made.out
     );
 }
+
+/// Two scaffolded projects must be able to depend on each other.
+///
+/// They could not: the default template gave every project a module called `hello`,
+/// and every project a `main`, so `nest add` refused with
+/// `module name collision — 'hello' is provided by both your project and dependency`.
+/// Any `nest new` project was therefore unusable as a dependency — a poor property for
+/// the command that creates every project. Two fixes: the library module is now named
+/// after the package, and a dependency's `main` is exempt from the collision check
+/// (it is an entry point, not library surface — `nest run` only ever uses the root
+/// project's).
+#[test]
+fn two_scaffolded_projects_can_depend_on_each_other() {
+    let tmp = tempdir("compose");
+    for name in ["alpha", "beta"] {
+        let made = nest(&tmp.path, &["new", name]);
+        assert!(made.ok, "scaffolding {name} failed:\n{}", made.out);
+    }
+    let beta = tmp.path.join("beta");
+
+    let added = nest(&beta, &["add", "alpha", ":path", "../alpha"]);
+    assert!(
+        added.ok,
+        "one scaffolded project must be addable as a dependency of another:\n{}",
+        added.out
+    );
+
+    // And the dependency's module must actually be callable — the library module is
+    // named for the package, so `(:use alpha)` provides `greeting`.
+    std::fs::write(
+        beta.join("tests/compose_test.blsp"),
+        "(defmodule compose-test (:use test) (:use alpha))\n\n         (describe \"compose\"\n  (test \"calls the dep\" (assert= (greeting) \"hello alpha\")))\n",
+    )
+    .unwrap();
+    let tested = nest(&beta, &["test"]);
+    assert!(
+        tested.ok,
+        "the consumer should be able to call into the dependency:\n{}",
+        tested.out
+    );
+}
+
+/// The library module is named for the project, so the filename follows it.
+#[test]
+fn the_scaffolded_library_module_is_named_after_the_project() {
+    let tmp = tempdir("named");
+    assert!(nest(&tmp.path, &["new", "greeter"]).ok);
+    let root = tmp.path.join("greeter");
+    assert!(
+        root.join("src/greeter.blsp").exists(),
+        "expected src/greeter.blsp; got {:?}",
+        std::fs::read_dir(root.join("src"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !root.join("src/hello.blsp").exists(),
+        "the fixed `hello` name is what made two projects collide"
+    );
+    let module = std::fs::read_to_string(root.join("src/greeter.blsp")).unwrap();
+    assert!(
+        module.contains("(defmodule greeter"),
+        "the module should declare its own name:\n{module}"
+    );
+}

@@ -12,14 +12,14 @@
   (test "delivers the message after the delay"
     (let (me (self))
       (send-after 30 me [:tick :a])
-      (assert= [:tick :a] (receive ([:tick x] [:tick x]) (after 5000 :timeout)))))
+      (assert= [:tick :a] (receive ([:tick x] [:tick x]) (after *test-wait-ms* :timeout)))))
 
   (test "does not deliver early"
     (let (me (self))
       (send-after 200 me :late)
       ;; nothing should arrive in the first ~40ms
       (assert= :quiet (receive (:late :EARLY) (after 40 :quiet)))
-      (assert= :late (receive (:late :late) (after 5000 :timeout)))))
+      (assert= :late (receive (:late :late) (after *test-wait-ms* :timeout)))))
 
   (test "the handle is a pid"
     (let (t (send-after 1000 (self) :x))
@@ -33,7 +33,7 @@
 
   (test "cancel-timer is idempotent and safe on a fired timer"
     (let (me (self) t (send-after 10 me :fired))
-      (assert= :fired (receive (:fired :fired) (after 5000 :timeout)))
+      (assert= :fired (receive (:fired :fired) (after *test-wait-ms* :timeout)))
       ; already dead — no-op
       (cancel-timer t)
       (cancel-timer t))))
@@ -41,9 +41,9 @@
   (test "ticks repeatedly until cancelled"
     (let (me (self) t (send-interval 20 me :beat))
       ;; collect three beats, then cancel
-      (assert= :beat (receive (:beat :beat) (after 5000 :timeout)))
-      (assert= :beat (receive (:beat :beat) (after 5000 :timeout)))
-      (assert= :beat (receive (:beat :beat) (after 5000 :timeout)))
+      (assert= :beat (receive (:beat :beat) (after *test-wait-ms* :timeout)))
+      (assert= :beat (receive (:beat :beat) (after *test-wait-ms* :timeout)))
+      (assert= :beat (receive (:beat :beat) (after *test-wait-ms* :timeout)))
       (cancel-timer t)
       ;; drain any in-flight beat, then confirm silence
       (sleep 60)
@@ -57,4 +57,4 @@
       (let (t (send-interval 20 victim :beat)
             m (monitor t))
         (assert= :timer-exited
-          (receive ([:down ~m ~t _] :timer-exited) (after 5000 :timeout)))))))
+          (receive ([:down ~m ~t _] :timer-exited) (after *test-wait-ms* :timeout)))))))

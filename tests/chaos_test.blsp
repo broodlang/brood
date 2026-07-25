@@ -36,11 +36,11 @@
 
   (test "a spawned-nil process exits with :normal"
     (let (w (spawn nil) _ref (monitor w))
-      (assert= :normal (receive ([:down _ _ reason] reason) (after 5000 :timeout)))))
+      (assert= :normal (receive ([:down _ _ reason] reason) (after *test-wait-ms* :timeout)))))
 
   (test "a spawned-integer process exits with :normal"
     (let (w (spawn 42) _ref (monitor w))
-      (assert= :normal (receive ([:down _ _ reason] reason) (after 5000 :timeout)))))
+      (assert= :normal (receive ([:down _ _ reason] reason) (after *test-wait-ms* :timeout)))))
 
   (test "a crashing spawned process propagates its error as the monitor down reason"
     ;; Post-1a63eb7 `(spawn (fn () body))` runs `body` (no longer the silent
@@ -49,7 +49,7 @@
     (let (w (spawn (fn () (/ 1 0))) _ref (monitor w))
       ;; the reason carries the structured error map (BEAM {Reason, Stacktrace}
       ;; parity): [:error {:kind :message :code …}], not a flattened string
-      (let (reason (receive ([:down _ _ r] r) (after 5000 :timeout)))
+      (let (reason (receive ([:down _ _ r] r) (after *test-wait-ms* :timeout)))
         (assert= :error (first reason))
         (assert= :runtime (get (first (rest reason)) :kind))
         (assert= "division by zero" (get (first (rest reason)) :message)))))
@@ -59,7 +59,7 @@
     ;; monitor learns not just WHAT killed the child but WHERE — the frame
     ;; names survive into the receiver's heap
     (let (w (spawn (fn () (chaos-crash-helper 5))) _ref (monitor w))
-      (let (reason (receive ([:down _ _ r] r) (after 5000 :timeout)))
+      (let (reason (receive ([:down _ _ r] r) (after *test-wait-ms* :timeout)))
         (assert= "chaos-test/chaos-crash-helper"
           (get (first (get (first (rest reason)) :trace)) :fn)))))
 
@@ -232,7 +232,7 @@
 (defn chaos-drain (n)
   (if (= n 0)
     :ok
-    (receive (:done (chaos-drain (- n 1))) (after 5000 :timeout))))
+    (receive (:done (chaos-drain (- n 1))) (after *test-wait-ms* :timeout))))
 
 (describe "concurrent spawn/send chaos"
   :isolated

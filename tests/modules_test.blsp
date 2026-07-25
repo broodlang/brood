@@ -59,7 +59,7 @@
                  [:req-race (try
                               (do (require 'reqrace-mod) (reqrace-mod/ready))
                               (catch e [:err (error-message e)]))])))
-      (let (results (map (fn (_) (receive ([:req-race r] r) (after 10000 :timeout)))
+      (let (results (map (fn (_) (receive ([:req-race r] r) (after *test-wait-ms* :timeout)))
                       (range 8)))
         (def *load-path* saved-path)
         (delete-file path)

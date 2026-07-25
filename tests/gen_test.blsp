@@ -157,7 +157,7 @@
     (let (s (spawn-server closer (self)))
       (assert= (gen-call s :ping) :pong)
       (stop s)
-      (assert= (receive ([:closed r] r) (after 5000 :no-terminate)) :normal))))
+      (assert= (receive ([:closed r] r) (after *test-wait-ms* :no-terminate)) :normal))))
 
 (describe "gen: gen-call timeout and death"
   :isolated

@@ -521,7 +521,7 @@
     (let (a (spawn (observer/observe--agent-loop)))
       (register :observe a)
       (send {:name :observe :node (node-name)} [:snapshot (self) (ref)])
-      (let (reply (receive ([:observe-reply snap] snap) (after 5000 :timeout)))
+      (let (reply (receive ([:observe-reply snap] snap) (after *test-wait-ms* :timeout)))
         (is (map? reply))
         (is (contains? reply :node))
         (is (contains? reply :procs))))))

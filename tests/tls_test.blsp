@@ -18,12 +18,12 @@
                    key (second ck)
                    ls (tls-listen "127.0.0.1" 0 cert key))
                (send me [:ready (tcp-local-port ls) cert])
-               (let (c (receive ([:tcp-accept ~ls cs] cs) (after 10000 :timeout)))
+               (let (c (receive ([:tcp-accept ~ls cs] cs) (after *test-wait-ms* :timeout)))
                  (tcp-controlling-process c (self))
                  (receive ([:tcp ~c _] nil) (after 10000 nil))
                  (tcp-send c reply)
                  (tcp-close c)))))
-    (receive ([:ready port cert] [port cert]) (after 10000 :timeout))))
+    (receive ([:ready port cert] [port cert]) (after *test-wait-ms* :timeout))))
 
 (describe "tls: loopback round trip (self-signed + ca-pem trust)"
   :isolated
@@ -47,13 +47,13 @@
                (let (ck (tls-self-signed "localhost")
                      ls (tls-listen "127.0.0.1" 0 (first ck) (second ck)))
                  (send me [:ready (tcp-local-port ls) (first ck)])
-                 (let (c (receive ([:tcp-accept ~ls cs] cs) (after 10000 :timeout)))
+                 (let (c (receive ([:tcp-accept ~ls cs] cs) (after *test-wait-ms* :timeout)))
                    (tcp-controlling-process c (self))
                    (tcp-set-binary c true)
-                   (let (got (receive ([:tcp ~c d] d) (after 10000 :timeout)))
+                   (let (got (receive ([:tcp ~c d] d) (after *test-wait-ms* :timeout)))
                      (tcp-send c (pr-str (into [] (bytes->list got))))
                      (tcp-close c))))))
-      (let (port-cert (receive ([:ready p ct] [p ct]) (after 10000 :timeout))
+      (let (port-cert (receive ([:ready p ct] [p ct]) (after *test-wait-ms* :timeout))
             s (tls-request "localhost"
                 (first port-cert)
                 ["HEAD " (bytes 1 254) " TAIL"]
@@ -69,5 +69,5 @@
         (let (out (receive
                     ([:tcp-error ~s msg] [:error msg])
                     ([:tcp-closed ~s] :closed)
-                    (after 10000 :timeout)))
+                    (after *test-wait-ms* :timeout)))
           (assert= (first out) :error))))))

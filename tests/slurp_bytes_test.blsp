@@ -40,7 +40,7 @@
   ;; it faithfully.
   (defn sb-write-binary (path)
     (let (p (proc-spawn "sh" ["-c" (str "printf '\\377\\200\\101' > " path)]))
-      (receive ([:proc-closed ~p _] :done) (after 5000 :timeout))))
+      (receive ([:proc-closed ~p _] :done) (after *test-wait-ms* :timeout))))
 
   (test "slurp throws on a non-UTF-8 file but slurp-bytes reads its bytes"
     (let (path (path-join (sb-tmp) "blob.bin"))

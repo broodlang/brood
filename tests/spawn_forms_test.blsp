@@ -19,22 +19,22 @@
   (test "(spawn fn-name) — a bare function name is CALLED, not yielded-and-discarded"
     (register :spawn-forms-bare-parent (self))
     (spawn spawn-forms--report-bare)
-    (assert= (receive (m m) (after 5000 :NEVER-RAN)) :ran-bare))
+    (assert= (receive (m m) (after *test-wait-ms* :NEVER-RAN)) :ran-bare))
 
   (test "(spawn (expr)) — a call expression runs"
     (let (me (self))
       (spawn (send me :ran-call)))
-    (assert= (receive (m m) (after 5000 :NEVER-RAN)) :ran-call))
+    (assert= (receive (m m) (after *test-wait-ms* :NEVER-RAN)) :ran-call))
 
   (test "(spawn (fn () body)) — an explicit zero-arg thunk runs"
     (let (me (self))
       (spawn (fn () (send me :ran-thunk))))
-    (assert= (receive (m m) (after 5000 :NEVER-RAN)) :ran-thunk))
+    (assert= (receive (m m) (after *test-wait-ms* :NEVER-RAN)) :ran-thunk))
 
   (test "(spawn name fn-name) — the named form also calls a bare function name"
     (register :spawn-forms-named-parent (self))
     (spawn :spawn-forms-worker spawn-forms--report-named)
-    (assert= (receive (m m) (after 5000 :NEVER-RAN)) :ran-named)))
+    (assert= (receive (m m) (after *test-wait-ms* :NEVER-RAN)) :ran-named)))
 
 ;; Worker for the named-form test (defined after its first textual use is fine — a
 ;; global resolves at call time).

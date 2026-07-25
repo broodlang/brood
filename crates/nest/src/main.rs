@@ -456,10 +456,34 @@ fn main() {
     // Capture any panic (use-after-GC tripwire, heap index, …) to .brood_crash_dump.
     brood::cli_support::install_crash_dump();
     let cli = Cli::parse();
+    // Arm the coverage flags BEFORE anything constructs an `Interp` — the kernel
+    // caches them on first read, which happens during the prelude build.
+    arm_coverage_env(&cli);
     // Run on an explicitly-sized large stack so the stack-budget guard (ADR-043)
     // is uniform across the root thread and spawned coroutines (see
     // `cli_support::run_on_main_stack`).
     run_on_main_stack("nest-main", move || run_main(cli));
+}
+
+/// Silence the hot-reload diagnostics for a `nest test --cover` run, before any
+/// interpreter exists.
+///
+/// Coverage instrumentation rebinds every project function to a variadic shim, which
+/// legitimately changes every arity — hundreds of expected `[reload] arity changed`
+/// lines otherwise. The kernel caches this flag on first read, and that read happens
+/// while `Interp::new()` builds the prelude, so setting it from the subcommand would
+/// be too late.
+fn arm_coverage_env(cli: &Cli) {
+    let Cmd::Test {
+        cover, cover_min, ..
+    } = &cli.cmd
+    else {
+        return;
+    };
+    if *cover || cover_min.is_some() {
+        // SAFETY: called from `main` before any thread or interpreter is created.
+        unsafe { std::env::set_var("BROOD_NO_RELOAD_DIAG", "1") };
+    }
 }
 
 fn run_main(cli: Cli) {
@@ -588,7 +612,7 @@ fn run_main(cli: Cli) {
         Cmd::Grammar { target } => cmd_grammar(&mut interp, target),
         Cmd::Fetch => {
             require_project("fetch", None);
-            run(&mut interp, "(require 'package) (package/fetch)")
+            run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/fetch)"))
         }
         Cmd::Update { names } => {
             require_project("update", None);
@@ -596,7 +620,7 @@ fn run_main(cli: Cli) {
         }
         Cmd::Tree => {
             require_project("tree", None);
-            run(&mut interp, "(require 'package) (package/tree)")
+            run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} (package/tree)"))
         }
         Cmd::Add { name, spec } => {
             require_project("add", None);
@@ -605,7 +629,7 @@ fn run_main(cli: Cli) {
         Cmd::Remove { name } => {
             require_project("remove", None);
             let call = brood::introspect::call_form("package/remove-dep", &[&name]);
-            run(&mut interp, &format!("(require 'package) {call}"));
+            run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
         }
         Cmd::Publish { index } => {
             require_project("publish", None);
@@ -816,14 +840,6 @@ fn validate_shard(opts: &TestOpts) {
 
 fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
     validate_shard(opts);
-    // Coverage instrumentation rebinds every project function to a variadic shim,
-    // which legitimately changes every arity — so silence the hot-reload arity
-    // diagnostic that would otherwise print once per function. Set before any eval
-    // so the kernel's cached read sees it.
-    if opts.cover || opts.cover_min.is_some() {
-        // SAFETY: single-threaded startup, before any interpreter thread exists.
-        unsafe { std::env::set_var("BROOD_NO_RELOAD_DIAG", "1") };
-    }
     // Default a memory ceiling on for test runs (ADR-043); an explicit
     // BROOD_MEM_LIMIT still wins (init ran first in main()).
     brood::core::alloc::init_limits_with_default(
@@ -1200,7 +1216,7 @@ fn cmd_run(
 fn cmd_update(interp: &mut Interp, names: &[String]) {
     let args: Vec<&str> = names.iter().map(String::as_str).collect();
     let call = format!(
-        "(require 'package) {}",
+        "{PACKAGE_BOOTSTRAP} {}",
         brood::introspect::call_form("package/update", &args)
     );
     run(interp, &call);
@@ -1212,11 +1228,18 @@ fn cmd_add(interp: &mut Interp, name: &str, spec: &[String]) {
     let mut args: Vec<&str> = vec![name];
     args.extend(spec.iter().map(String::as_str));
     let call = format!(
-        "(require 'package) {}",
+        "{PACKAGE_BOOTSTRAP} {}",
         brood::introspect::call_form("package/add", &args)
     );
     run(interp, &call);
 }
+
+/// The bootstrap every package command shares. `load-config` is the load-bearing
+/// part: the user config supplies `:registry`, and a `:version` dependency cannot be
+/// resolved without it. `fetch`/`tree`/`add`/`remove`/`update` were skipping it, so
+/// they used the hardcoded default index no matter what the user had configured —
+/// `nest add pkg :version 1.0.0` failed against a perfectly good local registry.
+const PACKAGE_BOOTSTRAP: &str = "(require 'project) (project/load-config) (require 'package)";
 
 /// `nest publish [INDEX]` — publish this project's version to the registry index
 /// (ADR-147). Loads the user config first so a `:registry` override applies.
@@ -1225,10 +1248,7 @@ fn cmd_publish(interp: &mut Interp, index: Option<&str>) {
         Some(i) => brood::introspect::call_form("package/publish", &[i]),
         None => "(package/publish)".to_string(),
     };
-    run(
-        interp,
-        &format!("(require 'project) (project/load-config) (require 'package) {call}"),
-    );
+    run(interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
 }
 
 /// `nest search QUERY [INDEX]` — search the registry index (ADR-147).
@@ -1238,10 +1258,7 @@ fn cmd_search(interp: &mut Interp, query: &str, index: Option<&str>) {
         None => vec![query],
     };
     let call = brood::introspect::call_form("package/search", &args);
-    run(
-        interp,
-        &format!("(require 'project) (project/load-config) (require 'package) {call}"),
-    );
+    run(interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
 }
 
 /// `nest doc [module] [--all]` — Markdown docs to stdout. `--all` documents

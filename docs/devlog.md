@@ -7535,3 +7535,86 @@ and every case exercising `:skip`/`progress-mark` failed. `make install` after c
 
 `tests/runner_progress_test.blsp` grew to 32 cases, covering the load-failure result,
 the anchor fallbacks, and the relative-path rendering.
+
+## 2026-07-25 — clearing the known-issues list: three fixed, one reframed, one honestly deferred
+
+### `nest add`/`fetch`/`tree`/`remove`/`update` ignored the configured registry
+
+Not just untested — **broken**. Only `publish` and `search` bootstrapped with
+`(project/load-config)`; the other five didn't, so `*config-registry*` stayed at the
+hardcoded default and `nest add pkg :version 1.0.0` failed against a perfectly good
+registry. They now share one `PACKAGE_BOOTSTRAP` constant so they cannot drift apart
+again.
+
+This also retires "`nest publish` is untestable". It is fully testable: the index can
+be a **local directory**, the package source a **local git repo**, and `:registry` is a
+user-config key that honours `XDG_CONFIG_HOME` — so `crates/nest/tests/registry.rs`
+(6 cases) drives publish → search → `add :version` → *calling the dependency* without
+touching the developer's real config. Writing the test is what found the bug.
+
+### 253 `(after …)` deadlines, audited
+
+Classified rather than blanket-raised: a short deadline is *correct* when a test
+asserts that nothing arrives, and only the surrounding assertion distinguishes that
+from an anti-hang guard. The discriminator turned out to be whether the sentinel is
+*compared against* — `(assert= :none (receive … (after 2000 :none)))` asserts a
+timeout, while `(assert= 7 (receive … (after 5000 :timeout)))` guards against a hang.
+114 guards vs 125 timeout-assertions.
+
+The 100 guards whose sentinel names a *failure* (`:timeout`, `:NEVER-RAN`, `:lost`, …)
+in the 1000–10000ms band now use a named `*test-wait-ms*` (20s) instead of a literal.
+Naming it is the point: the intent ("this is an anti-hang guard, not a latency
+budget") is now in the source, so the next reader doesn't have to re-derive the
+classification I just did. Deadlines ≤ 500ms were left alone — those are polls and
+drains, and stretching them would change what they test. `process_limit_test`'s 30s
+guards are deliberately *above* the knob (they build large structures under a memory
+cap) with a comment saying so.
+
+### Two scaffolded projects can now depend on each other
+
+`nest new` gave every project a module called `hello` *and* a `main`, so adding one as
+a dependency of another failed on a module-name collision — the command that creates
+every project produced projects unusable as dependencies. Two fixes:
+
+- The library module is named **after the package** (`nest new greeter` →
+  `src/greeter.blsp` providing `greeter`), which is collision-free and the more
+  idiomatic shape anyway. The name is sanitised to a safe symbol, since
+  `project--valid-name?` permits punctuation a symbol shouldn't carry (`my.app` →
+  `my-app`, a leading digit gets `p-`, pure punctuation degrades to `lib`, and the
+  reserved `main` becomes `main-lib`).
+- A dependency's **`main` is exempt** from the collision check. It is an entry point,
+  not library surface: `nest run` only ever uses the root project's `:main`, and
+  nothing requires a dep's.
+
+### The unidentified suite flake: evidence, not a fix
+
+Hunted it with repeated suite runs under 6-core saturating load. **Two of my three
+attempts were invalidated by my own contamination** — round 1 rebuilt the binary
+mid-experiment, round 2 froze the binary but not the test corpus I was still editing
+(the "13 failures" were exactly my 13 new tests against a binary predating them).
+Round 3 used a fully isolated snapshot: its own binary *and* its own `tests/`.
+
+Result: **zero intermittent failures across 6 runs**, plus one deterministic failure
+that was itself a snapshot artefact (`format: the prelude is idempotent` slurps
+`std/prelude.blsp` relative to cwd, and the snapshot had no `std/`).
+
+Round 1's one failing run is the useful datum: every failure in it was a monitor
+`[:down …]` receive or a cross-process face lookup — all 5s-deadline guards, i.e.
+exactly the class the `*test-wait-ms*` work above addresses. So the evidence says the
+flake was that class and is now fixed. I can't prove identity, and won't claim it.
+
+### Line coverage: attempted, reverted, and now better understood
+
+ADR-148 predicted the cost as "a compile-time instrumentation seam". I tried to dodge
+that with a cheaper one — record `(file, line)` from the tree-walking evaluator, where
+`Heap::form_pos` already carries both, and have `--cover-lines` select `BROOD_VM=0`.
+It recorded top-level forms correctly and **nothing inside a function body**, because
+a compiled closure's body executes in `exec_value`/`exec_chunk`, not in `eval` — and
+`exec_value` has no arm in scope, so no `src_file` to attribute a line to. Threading
+it through a hot recursive function and every call site is precisely the high-risk
+change the cheap seam was meant to avoid.
+
+So the whole attempt is reverted (the function tier is untouched and verified). The
+finding is worth more than the code was: **the tree-walker is not a viable seam for
+line coverage**, which rules out the cheap option ADR-148 didn't consider and leaves
+compile-time instrumentation of the bytecode as the real path.

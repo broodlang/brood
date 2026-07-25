@@ -106,7 +106,7 @@
                          (tcp-send sock "data: one\n\n")
                          (tcp-send sock "data: two\n\n")
                          (tcp-close sock))))))))
-      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+      (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (c (tcp-connect "127.0.0.1" port))
           (tcp-send c "GET /events HTTP/1.0\r\nHost: localhost\r\n\r\n")
           (let (resp (utf8-bytes->string (tcp-drain c)))
@@ -150,7 +150,7 @@
                (let (ls (http-listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls (router {"/" (fn (req) (ok "<h1>brood</h1>"))})))))
-      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+      (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (c (tcp-connect "127.0.0.1" port))
           (tcp-send c "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
           (let (resp (utf8-bytes->string (tcp-drain c)))
@@ -167,7 +167,7 @@
                (let (ls (http-listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls (fn (req) (ok "ok"))))))
-      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+      (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         ;; a partial head, then close — the worker must not crash
         (let (bad (tcp-connect "127.0.0.1" port))
           (tcp-send bad "GET / HTTP/1.0\r\nHost: x")
@@ -194,7 +194,7 @@
             (serve-loop ls
               (fn (req)
                 (text-response (pr-str (into [] (bytes->list (get req :body))))))))))
-      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+      (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (c (tcp-connect "127.0.0.1" port))
           ;; raw body bytes 0xFF 0x80 0x41 ride as a `bytes` leaf in the request
           ;; iolist — no mode games; sends are mode-independent (ADR-141)
@@ -216,7 +216,7 @@
                (let (ls (http-listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls (fn (req) (text-response (get req :path)))))))
-      (let (port (receive ([:port p] p) (after 5000 :timeout))
+      (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout))
             n 4)
         ;; Fire N clients at once, each in its own process; the server must serve
         ;; them in N separate handler processes (the connections overlap in time).
@@ -261,7 +261,7 @@
                            (utf8-bytes->string (get req :body))
                            "|"
                            (get (get req :headers) "x-token"))))))))
-      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+      (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (resp (http-post (str "http://127.0.0.1:" port "/act")
                      "{\"a\":1}"
                      {:headers {"X-Token" "secret" "Content-Type" "application/json"}}))
@@ -274,7 +274,7 @@
                (let (ls (http-listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls (fn (req) (text-response (str "got " (get req :path))))))))
-      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+      (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (resp (http-get (str "http://127.0.0.1:" port "/zen")))
           (assert= (get resp :status) 200)
           (assert= (body-text resp) "got /zen"))))))
@@ -290,7 +290,7 @@
                      ls (tls-listen "127.0.0.1" 0 (first ck) (second ck)))
                  (send me [:ready (tcp-local-port ls) (first ck)])
                  (serve-loop ls (router {"/" (fn (req) (ok "<h1>secure brood</h1>"))})))))
-      (let (pc (receive ([:ready p ct] [p ct]) (after 10000 :timeout)))
+      (let (pc (receive ([:ready p ct] [p ct]) (after *test-wait-ms* :timeout)))
         (let (resp (http-get (str "https://localhost:" (first pc) "/")
                      {:ca (second pc)}))
           (assert= (get resp :status) 200)
@@ -306,7 +306,7 @@
                      (response 200
                        {"Content-Type" "application/octet-stream"}
                        (bytes 255 128 0 7)))))))
-      (let (pc (receive ([:ready p ct] [p ct]) (after 10000 :timeout)))
+      (let (pc (receive ([:ready p ct] [p ct]) (after *test-wait-ms* :timeout)))
         (let (resp (http-get (str "https://localhost:" (first pc) "/blob")
                      {:ca (second pc)}))
           (assert= (get resp :status) 200)
@@ -319,7 +319,7 @@
                (let (ls (http-listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls (fn (req) (text-response (get req :path)))))))
-      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+      (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (c (tcp-connect "127.0.0.1" port))
           ;; three sends; the blank-line terminator straddles the 2nd/3rd chunk,
           ;; exercising the scan-from backup of (marker-length - 1) bytes
@@ -336,7 +336,7 @@
                (let (ls (http-listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls (fn (req) (text-response "never"))))))
-      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+      (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (c (tcp-connect "127.0.0.1" port)
               ;; 70 KiB of header-ish bytes, never a blank line
               junk (bytes-concat (map (fn (_) "X-Junk: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n")
@@ -361,7 +361,7 @@
                      (response 200
                        {"Content-Type" "application/octet-stream"}
                        (bytes 255 128 65 0 7)))))))
-      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+      (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (resp (http-get (str "http://127.0.0.1:" port "/blob")))
           (assert= (get resp :status) 200)
           (assert= (get (get resp :headers) "content-length") "5")
@@ -372,7 +372,7 @@
                (let (ls (http-listen 0))
                  (send me [:port (tcp-local-port ls)])
                  (serve-loop ls (fn (req) (text-response "héllo ☃"))))))
-      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+      (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (resp (http-get (str "http://127.0.0.1:" port "/")))
           (assert= (get resp :status) 200)
           ;; 7 codepoints, 10 UTF-8 bytes — the :body carries the bytes,
@@ -387,7 +387,7 @@
                  (serve-loop ls
                    (fn (req)
                      (text-response (pr-str (into [] (bytes->list (get req :body))))))))))
-      (let (port (receive ([:port p] p) (after 5000 :timeout)))
+      (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (resp (http-post (str "http://127.0.0.1:" port "/up") (bytes 0 255 7)))
           (assert= (get resp :status) 200)
           (assert= (body-text resp) "[0 255 7]"))))))
