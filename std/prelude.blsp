@@ -3180,7 +3180,10 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
 (defn require--force (key)
   (let (src (%builtin-module key))
     (if src
-      (do (%load-string src) (provide key))
+      ;; Name the baked-in source so its forms are attributed to it and not to
+      ;; whichever file happened to be mid-load when the `require` ran. There is no
+      ;; path to give — std is compiled into the binary — hence the `<std>/` marker.
+      (do (%load-string src (str "<std>/" key ".blsp")) (provide key))
       (let (path (require--find (str key ".blsp") *load-path*))
         (if path
           (do (load path) (provide key))

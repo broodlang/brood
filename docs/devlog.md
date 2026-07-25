@@ -7727,3 +7727,65 @@ So the whole attempt is reverted (the function tier is untouched and verified). 
 finding is worth more than the code was: **the tree-walker is not a viable seam for
 line coverage**, which rules out the cheap option ADR-148 didn't consider and leaves
 compile-time instrumentation of the bytecode as the real path.
+
+## 2026-07-25 — line coverage, third attempt: the denominator was the whole problem
+
+`nest test --cover-lines` now works (ADR-148 tier 2, [`coverage.md`](coverage.md)).
+The recording side was straightforward once the previous entry's finding was accepted:
+`Inst::RecordLine(u32)`, emitted by `emit_node` only when `BROOD_COVERAGE` is armed,
+executed by `exec_chunk` — which already holds the arm's `src_file`, so no new state
+threads through the hot executor. An unarmed run's bytecode is byte-for-byte unchanged.
+Verified in one line: with the flag set, calling `(lcov/covered 1)` recorded
+`["lcov.blsp" (6)]` — the *body's* line, which the reverted `eval` hook could never see.
+
+Then three attempts at the number, two of which produced a confidently wrong one:
+
+1. **Denominator = "lines that hold a form"** (re-read the source, walk the read forms).
+   A fixture whose every function ran reported **14%**. A `defmodule` header, a
+   docstring and a `defn`'s own line all hold forms and none is an instrumented node —
+   the two halves of the ratio described different populations.
+2. **Denominator = lines actually instrumented**, registered by `note_instrumented` as
+   `emit_node` emits them. Same fixture: **100%**, with a deliberately-uncalled
+   `never-run` in it. Arms compile on first **call** (`compiled_arm_for`), so a dead
+   function was absent from both halves and the ratio was a tautology.
+3. **Force the compile.** `%coverage-precompile` compiles a function's body without
+   calling it; `coverage-line-begin!` runs it over every project function before the
+   suite. The fixture now reports 17%, rises to 50% when a test calls the dead
+   function, and 100% when everything is called.
+
+The general lesson is worth more than the mechanism: **a wrong percentage is worse than
+no percentage** — it is exactly the number people put in a CI gate, and both wrong
+versions looked plausible in the report. `crates/nest/tests/coverage_lines.rs` pins
+against both failure modes by construction (a fixture with one live and one dead
+function must report strictly between 0 and 100, and must *move* when a test is added).
+
+### A real bug found on the way: std modules were attributed to the requiring file
+
+The tier-2 report initially credited `std/log`'s lines (127–131, 150–152, 175 …) to a
+21-line `src/main.blsp` — which is how the bug was noticed at all. Cause:
+`%load-string` — how baked-in std modules load — set no current file, so their forms
+inherited whatever file was mid-load when the `require` ran. Not a coverage-only
+artefact: the field is `CompiledArm::src_file`, which also names the file in `:trace`
+frames. (I could not construct a std-module trace frame on demand to show the wrong
+name directly, so that half is inference from the shared field, not an observation.)
+`%load-string` now takes an optional name and `require--force` passes
+`<std>/<key>.blsp` — honest that there is no openable path, and no longer someone
+else's name. `source-location` was never affected; definition sites are recorded
+separately.
+
+### Smaller things
+
+- A `--cover-min` shortfall now prints `FAILED: coverage N% is below the required
+  minimum M%` and raises a bare signal `nest` recognises, instead of appending
+  `1:58: error: …`, `at error` and a version banner to a report already read. Same
+  treatment a failing suite has had; `run_expecting_failure_signal` takes a signal
+  *list* now.
+- A file with nothing instrumented (every function literal-bodied) is omitted rather
+  than reported as 0% — a 0% there would fail a `--cover-min` gate for having nothing
+  measurable.
+- Known under-count, documented rather than hidden: a nested `(fn …)` inside a body
+  compiles when the enclosing body runs, so an unexecuted body's inner closure stays
+  unmeasured. It errs toward reporting *less* coverage.
+- The previous entry's flake hunt closed out: 7/7 isolated runs, the single failure
+  identical in all 7 (so deterministic, not a flake) and confirmed a snapshot artefact —
+  `format: the prelude is idempotent` passes against the live tree.

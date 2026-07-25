@@ -9175,8 +9175,36 @@ stays deferred until something concrete needs it.
   and `--cover-min` is gated after the suite result so a red suite reports itself
   first.
 
-**Line coverage, if wanted later** (`docs/coverage.md` has the detail): keep this
-mechanism/policy split, add **compile-time** instrumentation rather than a
-per-instruction runtime check so an ordinary run stays byte-for-byte unchanged,
-disable the JIT in that mode, and extend `std/tool/coverage.blsp` for reporting.
-The two tiers answer different questions and can coexist.
+**Line coverage — built, as a second opt-in tier** (2026-07-25; `docs/coverage.md`
+has the detail). It followed the shape sketched here: a **compile-time** seam rather
+than a per-instruction runtime check, so an ordinary run's bytecode is byte-for-byte
+unchanged; the JIT off; `std/tool/coverage.blsp` extended rather than replaced.
+
+- The seam is `Inst::RecordLine(u32)`, emitted by `emit_node` only when
+  `BROOD_COVERAGE` is armed, and executed by `exec_chunk` — which already holds the
+  arm's `src_file`, so no new state threads through the hot executor. Hooking the
+  tree-walking evaluator instead (where `form_pos` carries file AND line) was tried
+  first and does not work: a compiled body never goes through `eval`, so it records
+  top-level forms and nothing inside a function.
+- The flag is read once and cached, so it must be set **before any `Interp` exists**
+  (the prelude compiles during construction). Set too late, it produces no
+  instrumentation and no error.
+- **The denominator is the compiler's, not the source text's.** This is the part that
+  took three attempts and the reason it deserves recording. Counting "lines that hold
+  a form" compares different populations and reported 14% for a fully-exercised
+  fixture; counting instrumented lines without forcing compilation reported 100% for a
+  fixture containing a dead function, because arms compile on first *call*. The
+  resolution is `%coverage-precompile`, forcing every project function to compile
+  before the suite so a never-called function is in the denominator and nowhere else.
+  A wrong percentage is worse than no percentage — it is exactly the number people put
+  in a CI gate.
+- **A found bug, fixed on the way:** a baked-in std module's forms were attributed to
+  whichever file was mid-load when the `require` ran (`%load-string` set no file), so a
+  21-line `src/main.blsp` was credited with `std/log`'s lines 127-131/150-152/175. The
+  same field feeds `:trace` frames, so this was never coverage-only. `%load-string` now
+  takes an optional name and `require--force` passes `<std>/<key>.blsp`.
+  (`source-location` was unaffected — definition sites are recorded separately.)
+- With both tiers on, `--cover-min` gates on the LINE percentage, being the stricter
+  number. A shortfall now prints `FAILED: coverage N% is below …` and raises a bare
+  signal `nest` recognises, instead of surfacing as an error with a trace and a version
+  banner after a report the user had already read.

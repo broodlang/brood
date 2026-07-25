@@ -31,11 +31,11 @@ A function counts as covered the moment it is **entered once**, however little o
 its body ran. This is *not* line or branch coverage: a 40-line function with a
 dozen untaken branches counts fully covered after one call.
 
-That is a deliberate choice, not a stepping stone we forgot to finish. The
-question "which functions does my suite never touch at all?" is the one that
-changes what you write next, and it is answerable with **no kernel support at
-all** — see below. Line coverage costs a compiler seam and a slower VM in coverage
-mode; it is recorded as future work at the end of this document.
+That is a deliberate choice, not an unfinished stepping stone. The question "which
+functions does my suite never touch at all?" is the one that changes what you write
+next, and it is answerable with **no kernel support at all** — see below. Line
+coverage is the stricter second tier, `--cover-lines`, documented at the end of this
+document: it costs a compiler seam and a JIT-free run, so it stays opt-in.
 
 Two more limits worth internalising:
 
@@ -96,22 +96,98 @@ sets **`BROOD_NO_RELOAD_DIAG=1`**, which silences the `[reload] arity changed �
 and `[reload] macro … redefined` lines for that process. It is an off-switch only:
 the default stays on, so an *accidental* reload mismatch is still reported.
 
-## Future work: line coverage
+## The second tier: line coverage (`--cover-lines`)
 
-Line coverage is a separate tier, deliberately not built. If it is wanted, the raw
-material already exists:
+Function coverage answers "was this ever entered". Line coverage answers "did this
+line run", and it shipped as a separate, opt-in tier — a stricter number, at the cost
+of a compiler seam and a diagnostic-only run.
 
-- Compiled IR nodes carry `pos: Option<Pos>` and `CompiledArm` records its source
-  file (`crates/lisp/src/eval/compile/ir.rs`), so the VM already knows where it is.
-- `Value::Table` already solves cross-process aggregation.
+```
+nest test --cover-lines               # which executable lines ran
+nest test --cover --cover-lines       # both tiers; they measure different things
+nest test --cover-lines --cover-min 80
+```
 
-The shape would keep the same mechanism/policy split: **compile-time**
-instrumentation (when coverage mode is on, the compiler emits an extra
-record-position instruction) rather than a runtime branch per instruction, so a
-normal run is byte-for-byte unchanged instead of paying a check everywhere. The
-JIT must be disabled in that mode — native code bypasses the hook — which
-`--cover` can do via `BROOD_NO_JIT=1`. Reporting would extend
-`std/tool/coverage.blsp` rather than replace it.
+Output is a per-file percentage, then the lines that never ran:
 
-The two tiers answer different questions and can coexist: function coverage needs
-no kernel support and no special build, which is why it ships first.
+```
+Line coverage (executable lines that ran):
+  src/cov.blsp                                  33%  (1/3)
+
+Never ran in src/cov.blsp (2 lines):
+  6, 7
+
+coverage: 33% of 3 executable lines (1 ran)
+```
+
+### How it records
+
+Recording is a **bytecode instruction**, `Inst::RecordLine`, emitted at COMPILE time
+and only when `BROOD_COVERAGE` is set. An ordinary run's bytecode is byte-for-byte
+what it always was — the interpreter never sees the opcode, and there is no
+per-instruction runtime check to pay for. The instruction carries the line only; the
+file comes from the executing arm's `CompiledArm::src_file`, which `exec_chunk`
+already holds, so nothing new is threaded through the hot executor. Hits land in one
+process-wide set (`crates/lisp/src/coverage.rs`) because green processes are
+multiplexed across OS threads: a line executed by any process counts.
+
+The flag has to be set **before anything builds an `Interp`** — the prelude is
+compiled during construction, and a chunk compiled without the flag has no
+`RecordLine` in it. `nest` sets it in `main`, before subcommand dispatch. Getting this
+wrong fails silently, with no instrumentation and no error.
+
+`--cover-lines` also sets `BROOD_NO_JIT=1`. An instrumented arm bails JIT lowering
+anyway (`Inst::RecordLine` is not lowerable), but turning the JIT off outright keeps
+the measurement from depending on which arms happened to tier up. **A `--cover-lines`
+run is a diagnostic run, never a timing one.**
+
+### What "executable line" means, and why the denominator is not counted from source
+
+Only **positioned nodes** are instrumented — calls and inlined prims, the same set
+that tags a runtime error with a line. So "line 12 never ran" means "no call on line
+12 ran", and a function whose body is a bare literal (`(defn greeting () "hi")`)
+contributes no measurable lines at all. A file of nothing but literal-bodied functions
+is omitted from the report rather than shown as 0%.
+
+The denominator therefore comes from the compiler, via `%coverage-instrumented`, not
+from reading the source. Two earlier attempts got this wrong in opposite directions,
+and both looked plausible:
+
+1. **Counting lines that hold a form.** A fully exercised fixture reported **14%**: a
+   `defmodule` header, a docstring and a `defn`'s own line all hold forms and none is
+   an instrumented node, so the two halves of the ratio described different
+   populations.
+2. **Counting what had been instrumented, without forcing compilation.** Arms compile
+   on first **call**, so a function nothing calls was missing from the denominator as
+   well as the numerator, and the same fixture reported **100%** with a dead function
+   in it.
+
+Hence `coverage-line-begin!`, which runs before the suite and forces every project
+function to compile (`%coverage-precompile`) without calling it. A never-called
+function then has its lines in the denominator and in nothing else — which is the
+whole point of the measurement.
+
+**Known under-count:** a nested `(fn …)` inside a body compiles when the enclosing
+body runs, so an unexecuted body's inner closure stays unmeasured. Strictly smaller
+than not forcing at all, and it errs toward reporting less coverage, not more.
+
+### A side-effect worth knowing: std module attribution
+
+Building this surfaced a pre-existing misattribution. Baked-in std modules are loaded
+from an embedded string with no path, and their forms inherited whatever file was being
+loaded when the `require` ran. Observed: a 21-line `src/main.blsp` credited with
+`std/log`'s lines 127-131, 150-152 and 175. The same field (`CompiledArm::src_file`)
+also names the file in `:trace` frames, so the misattribution was not confined to
+coverage.
+
+`%load-string` now takes an optional name and `require--force` passes
+`<std>/log.blsp`: honest that there is no openable path, and no longer someone else's
+name. (`source-location` was never affected — definition sites are recorded
+separately.)
+
+## The two tiers together
+
+They answer different questions and can be used together. Function coverage needs no
+kernel support and no special build, which is why it ships as the default tier;
+`--cover-lines` is stricter and more expensive. With both on, `--cover-min` gates on
+the **line** percentage, that being the stricter number.

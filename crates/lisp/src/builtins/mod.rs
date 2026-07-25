@@ -1557,8 +1557,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(
         heap,
         "%load-string",
-        Arity::exact(1),
-        Sig::new(vec![string], any),
+        Arity::range(1, 2),
+        Sig::new(vec![string, string], any),
         load_string,
     );
     // Output-capture surface for the `with-out-str` prelude macro: push/pop a
@@ -1693,6 +1693,35 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![sym.union(kw).union(string)], string.union(nil_ty)),
         builtin_doc,
+    );
+    // Line-coverage readout (ADR-148 tier 2). Empty unless BROOD_COVERAGE is set.
+    def(
+        heap,
+        "%coverage-lines",
+        Arity::exact(0),
+        Sig::new(vec![], list_ty),
+        coverage_lines,
+    );
+    def(
+        heap,
+        "%coverage-instrumented",
+        Arity::exact(0),
+        Sig::new(vec![], list_ty),
+        coverage_instrumented,
+    );
+    def(
+        heap,
+        "%coverage-precompile",
+        Arity::exact(1),
+        Sig::new(vec![any], bool_ty),
+        coverage_precompile,
+    );
+    def(
+        heap,
+        "%coverage-reset",
+        Arity::exact(0),
+        Sig::new(vec![], nil_ty),
+        coverage_reset,
     );
     def(
         heap,
@@ -2893,6 +2922,10 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("doc", &["f"], "The docstring of a function, macro, or primitive, or nil."),
     ("arglist", &["f"], "The parameter list of a function, macro, or primitive, or nil."),
     ("global-names", &[], "Every globally bound symbol, sorted by spelling."),
+    ("%coverage-lines", &[], "Every source line recorded as EXECUTED, as a list of [file (line …)]. Empty unless the run was started with BROOD_COVERAGE=1 (`nest test --cover-lines`)."),
+    ("%coverage-precompile", &["f"], "Compile f's body now, without calling it, so its lines count toward %coverage-instrumented. Returns true if a body was compiled."),
+    ("%coverage-instrumented", &[], "Every source line the compiler INSTRUMENTED, as a list of [file (line …)] — the denominator %coverage-lines is a subset of. Arms compile when defined, so a never-called function appears here and not there."),
+    ("%coverage-reset", &[], "Forget every line recorded by %coverage-lines, so a long-lived image can measure more than once without runs bleeding together."),
     ("builtin-modules", &[], "The names of every module baked into this binary, as a sorted list of strings — what `(require 'name)` resolves without a load-path. Backs `nest` shell completion and lets a name be validated before requiring it."),
     ("special-forms", &[], "The special-form / core-macro names (strings) that read as keywords — the canonical list shared by the syntax highlighter and the LSP."),
     ("bound?", &["sym"], "Whether sym is bound in scope. Quote it: (bound? 'foo)."),

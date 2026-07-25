@@ -199,3 +199,137 @@ suite, then reports which functions were never entered. Backs `nest test --cover
         (println "")
         (println (str "coverage: " percent "% of " total " functions (" covered " covered)"))
         percent))))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; LINE COVERAGE (ADR-148 tier 2) — which source LINES executed
+;; ─────────────────────────────────────────────────────────────────────────────
+;; The function tier above answers "was this ever entered". This answers "did this
+;; line run", and needs two halves that come from opposite directions:
+;;
+;;   * The NUMERATOR is recorded by the kernel. `%coverage-lines` reads what the
+;;     bytecode's `RecordLine` instructions logged — emitted at COMPILE time and only
+;;     when coverage is armed, so an ordinary run's bytecode is unchanged. See
+;;     `crates/lisp/src/coverage.rs`, including why the tree-walking evaluator is NOT
+;;     a viable seam (a compiled body never goes through it).
+;;   * The DENOMINATOR comes from the SAME place, not from the source text. Every
+;;     `RecordLine` the compiler emits is registered as it is emitted, and
+;;     `%coverage-instrumented` reads that back. Arms compile on first CALL, though, so
+;;     `coverage-line-begin!` must force every project function to compile before the
+;;     suite runs — otherwise a function nothing calls is missing from the denominator
+;;     as well as the numerator, and the ratio flatters itself.
+;;
+;; Counting "lines that hold a form" instead — the obvious static approach — was tried
+;; and is wrong: a `defmodule` header, a docstring and a `defn`'s own line all hold
+;; forms and none is an instrumented node, so the two halves of the ratio describe
+;; different populations and a fully-exercised file reported 14% of itself. Only
+;; positioned nodes are instrumented (calls and inlined prims — the same set that tags a
+;; runtime error with a line), so "line 12 never ran" means "no call on line 12 ran",
+;; and a file of nothing but literal-bodied functions has no measurable lines at all
+;; (it is omitted rather than reported as 0%).
+
+;; Local safety net: a missing readout costs a measurement, not the report.
+(defn coverage--safely (thunk) (try (thunk) (catch _ nil)))
+
+;; A `[file (line …)]` readout as `file -> {line -> true}`, for O(1) membership.
+(defn coverage--line-index (entries)
+  (fold (fn (index entry)
+          (assoc index
+            (vector-ref entry 0) (fold (fn (lines l) (assoc lines l true)) {} (vector-ref entry 1))))
+    {}
+    (or entries nil)))
+
+;; Which lines RAN.
+(defn coverage--hit-index ()
+  (coverage--line-index (coverage--safely (fn () (%coverage-lines)))))
+
+;; Which lines COULD run, keyed by file — the kernel's own record of what it
+;; instrumented. Values stay lists: they arrive sorted and are only iterated.
+(defn coverage--instrumented-index ()
+  (fold (fn (index entry) (assoc index (vector-ref entry 0) (vector-ref entry 1)))
+    {}
+    (or (coverage--safely (fn () (%coverage-instrumented))) nil)))
+
+(defn coverage-line-begin! (source-dirs)
+  "Force every project function under `source-dirs` to compile, so the lines of a function the suite never calls still count as measurable. Call once, after the sources are loaded and BEFORE the suite runs. Returns how many bodies compiled."
+  ;; Arms compile on first CALL, so without this pass an uncalled function is missing
+  ;; from the denominator as well as the numerator and the ratio flatters itself: the
+  ;; fixture with one deliberately-dead function reported 100%.
+  (fold (fn (compiled target)
+          (if (coverage--safely (fn () (%coverage-precompile (eval (get target :name)))))
+            (+ compiled 1)
+            compiled))
+    0
+    (or (coverage--targets source-dirs) nil)))
+
+(defn coverage-line-results (source-dirs)
+  "Per-file line coverage as a list of `{:file :total :covered :missing}`, `missing` being the instrumented lines that never ran. Only files under `source-dirs` are measured, so std and the prelude — which the recorder also sees — can't dilute the number; files with nothing instrumented are omitted rather than counted as 0%."
+  (let (hits (coverage--hit-index)
+        instrumented (coverage--instrumented-index)
+        files (or (coverage--safely (fn ()
+                                      (fold (fn (acc dir)
+                                              (append acc (project/project-collect-sources dir)))
+                                        nil
+                                        source-dirs)))
+                nil))
+    (filter (fn (result) (> (get result :total) 0))
+      (map (fn (path)
+             (let (executable (or (get instrumented path) nil)
+                   ran (or (get hits path) {})
+                   missing (filter (fn (line) (not (contains? ran line))) executable))
+               {:file path
+                :total (count executable)
+                :covered (- (count executable) (count missing))
+                :missing missing}))
+        files))))
+
+(defn coverage-line-report (root source-dirs)
+  "Print the line-coverage report — a per-file percentage, then each file's uncovered lines — and return the total percentage (an int 0-100)."
+  (let (results (coverage-line-results source-dirs)
+        total (fold (fn (n r) (+ n (get r :total))) 0 results)
+        covered (fold (fn (n r) (+ n (get r :covered))) 0 results))
+    (if (empty? results)
+      (do
+        (println "")
+        (println "coverage: no instrumented lines to measure")
+        100)
+      (do
+        (println "")
+        (println "Line coverage (executable lines that ran):")
+        (fold (fn (_ r)
+                (println (str "  "
+                           (pad-right (coverage--relative (get r :file) root) 44)
+                           (pad-left (str (coverage--percent (get r :covered) (get r :total))) 4)
+                           "%  ("
+                           (get r :covered)
+                           "/"
+                           (get r :total)
+                           ")")))
+          nil
+          results)
+        (fold
+          (fn (_ r)
+            (unless (empty? (get r :missing))
+              (println "")
+              (println (str "Never ran in "
+                         (coverage--relative (get r :file) root)
+                         " ("
+                         (count (get r :missing))
+                         " line"
+                         (if (= (count (get r :missing)) 1) "" "s")
+                         "):"))
+              ;; Capped: a barely-exercised file would print hundreds of numbers and
+              ;; bury the summary. The count above is the truth.
+              (println (str "  "
+                         (join ", " (map (fn (l) (str l)) (take 24 (get r :missing))))
+                         (if (> (count (get r :missing)) 24) ", …" "")))))
+          nil
+          results)
+        (println "")
+        (println (str "coverage: "
+                   (coverage--percent covered total)
+                   "% of "
+                   total
+                   " executable lines ("
+                   covered
+                   " ran)"))
+        (coverage--percent covered total)))))

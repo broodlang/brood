@@ -301,11 +301,22 @@ tests (which a CI job would read as green).
 
 ## Coverage
 
-`nest test --cover` reports **function-level** coverage — which of the project's
-functions the suite never called — and `--cover-min PCT` fails the run below a
-floor. It is not line coverage, and a `--cover` run is not a timing run. See
-[`coverage.md`](coverage.md) for what it measures, how hot reload is used as the
-instrumentation seam, and why the shim is variadic.
+Two tiers, both opt-in, and `--cover-min PCT` fails the run below a floor:
+
+| Flag | Measures | Cost |
+| --- | --- | --- |
+| `--cover` | **function**-level — which of the project's functions the suite never *entered* | no kernel support; hot reload is the seam |
+| `--cover-lines` | **line**-level — which executable lines actually ran | instruments the bytecode and turns the JIT off |
+
+Both may be on at once; they answer different questions. With both, `--cover-min`
+gates on the LINE percentage, being the stricter number. Neither is a timing run.
+
+An "executable line" is one carrying an instrumented node (a call or an inlined prim),
+so a literal-bodied function has no measurable lines and is left out of the report
+rather than counted as 0%. See [`coverage.md`](coverage.md) for what each tier
+measures, why the line denominator comes from the compiler rather than from reading the
+source (two earlier versions produced confidently wrong percentages), and why the
+function shim is variadic.
 
 ## Running
 

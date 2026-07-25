@@ -13,6 +13,14 @@ pub(crate) fn compile_chunk(body: &Node) -> Option<Chunk> {
 /// Recursively emit `node` into `code`, leaving its value on the operand stack.
 /// Returns `None` (aborting the whole chunk) on any unsupported node.
 pub(crate) fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
+    // Line coverage (ADR-148 tier 2): when armed, prefix each positioned node with a
+    // `RecordLine`. Compile-time rather than a runtime check per instruction, so a
+    // normal run's bytecode is unchanged — nothing to pay for when coverage is off.
+    if crate::coverage::enabled() {
+        if let Some(pos) = node_pos(node) {
+            code.push(Inst::RecordLine(pos.line));
+        }
+    }
     match node {
         // A fresh `ConstVal` cloned from the node's (atoms inline; a movable RUNTIME
         // handle is re-encoded). Chunk handles are rewritten in place under a RUNTIME
@@ -260,4 +268,18 @@ pub(crate) fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
         }
     }
     Some(())
+}
+
+/// The source position a node carries, if any — the anchor a coverage `RecordLine`
+/// attributes to. Only the node kinds that record one (the same set that tags a
+/// runtime error with a line) can be attributed.
+fn node_pos(node: &Node) -> Option<crate::error::Pos> {
+    match node {
+        Node::Prim1 { pos, .. }
+        | Node::Prim2 { pos, .. }
+        | Node::Prim3 { pos, .. }
+        | Node::Call { pos, .. }
+        | Node::SelfCall { pos, .. } => *pos,
+        _ => None,
+    }
 }

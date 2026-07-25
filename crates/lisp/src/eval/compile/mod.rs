@@ -1397,6 +1397,25 @@ fn compile_arm(
     // subset for now — `compile_chunk` returns `None` otherwise, and the arm runs
     // via `exec_node` exactly as before).
     let chunk = compile_chunk(&body);
+    // Line coverage (ADR-148 tier 2): register this arm's instrumented lines as they
+    // are compiled. This is the report's DENOMINATOR — see `coverage.rs` for why it
+    // cannot be inferred from the source text instead.
+    if crate::coverage::enabled() {
+        if let (Some(chunk), Some(file)) = (
+            chunk.as_ref(),
+            body_first_form
+                .and_then(|f| heap.form_pos(f))
+                .and_then(|(_, file)| file),
+        ) {
+            crate::coverage::note_instrumented(
+                &file,
+                chunk.code.iter().filter_map(|inst| match inst {
+                    Inst::RecordLine(line) => Some(*line),
+                    _ => None,
+                }),
+            );
+        }
+    }
     // Reserve a few extra frame slots (above the compiler's `scope.max`) when the arm
     // has ≥2 non-tail calls, so a JIT-lowered version can spill call-result handles
     // that must survive a later call's safepoint (two-call recursion: `fib`, bintree
@@ -1618,6 +1637,33 @@ fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<Compi
     let compiled = compile_closure(heap, id).map(Arc::new);
     heap.vm_cache_put(key, compiled.clone());
     compiled.and_then(|cc| cc.arm_for(argc).cloned())
+}
+
+/// Compile `f`'s body NOW, without calling it, and cache the result. Returns whether
+/// anything was compiled.
+///
+/// Exists for line coverage's denominator (ADR-148 tier 2). Arms compile LAZILY — on
+/// first call, via [`compiled_arm_for`] — so the set of instrumented lines otherwise
+/// contains only lines that already ran, making the ratio a tautology: a fixture whose
+/// every function had run reported 100% while a deliberately-uncalled function's lines
+/// were absent from BOTH halves. Forcing the compile registers those lines, so a
+/// never-called function correctly reports 0%.
+///
+/// Only the closure's own arms are reached. A nested `(fn …)` inside a body compiles
+/// when the enclosing body runs, so an unexecuted body's inner closure stays
+/// unmeasured — a known under-count, and a strictly smaller one than not forcing at all.
+pub fn precompile(heap: &mut Heap, f: Value) -> bool {
+    let ValueRef::Fn(id) = f.unpack() else {
+        return false;
+    };
+    let compiled = compile_closure(heap, id).map(Arc::new);
+    let did = compiled.is_some();
+    // Cache it if the closure is keyable, so the forced compile isn't wasted work the
+    // first real call redoes. An unkeyable closure just recompiles later, as always.
+    if let Some(key) = cache_key(heap, id) {
+        heap.vm_cache_put(key, compiled);
+    }
+    did
 }
 
 /// The higher-order-fn closure-call fast path (gated). A `reduce`/`fold`/… driver calls

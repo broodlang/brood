@@ -1324,6 +1324,9 @@ resolve in the advisory checker. Returns the project root."
       ;; (and after `check-project`, whose `%isolate` would roll the rebindings
       ;; back). Opt-in: `:cover` in the option plist, from `nest test --cover`.
       (when (test/opt? :cover opts) (project--coverage-begin! root))
+      ;; The line tier's pre-pass, same timing and for the same reason: it must see the
+      ;; project's functions loaded, and it must not be rolled back.
+      (when (test/opt? :cover-lines opts) (project--coverage-lines-begin! root))
       ;; Persist the `--failed` set whichever way the run goes: the interesting
       ;; case is precisely the failing one, and `run-tests-scoped` RAISES on
       ;; failure, so catch, record, then re-raise to keep the non-zero exit.
@@ -1337,8 +1340,23 @@ resolve in the advisory checker. Returns the project root."
             (throw (second outcome))
             (project--coverage-gate percent opts)))))))
 
+;; Whichever coverage tier was asked for. Both may be on at once — they measure
+;; different things (was a function entered vs did a line run) — in which case the
+;; LINE percentage is what `--cover-min` gates on, being the stricter number.
 (defn project--coverage-report! (root opts)
-  (if (test/opt? :cover opts) (project--coverage-finish! root) nil))
+  (let (fn-percent (if (test/opt? :cover opts) (project--coverage-finish! root) nil)
+        line-percent (if (test/opt? :cover-lines opts)
+                       (project--coverage-lines-finish! root)
+                       nil))
+    (or line-percent fn-percent)))
+
+(defn project--coverage-lines-begin! (root)
+  (require 'coverage)
+  (coverage/coverage-line-begin! (project-abs-paths root *project-source-paths*)))
+
+(defn project--coverage-lines-finish! (root)
+  (require 'coverage)
+  (coverage/coverage-line-report root (project-abs-paths root *project-source-paths*)))
 
 ;; --- coverage wiring (nest test --cover) --------------------------------------
 ;; `coverage` is required lazily, like `package`: a run without `--cover` never
@@ -1359,7 +1377,14 @@ resolve in the advisory checker. Returns the project root."
 (defn project--coverage-gate (percent opts)
   (let (minimum (test/opt-val :cover-min opts nil))
     (if (and (not (nil? percent)) (not (nil? minimum)) (< percent minimum))
-      (error "coverage " percent "% is below the required minimum " minimum "%")
+      ;; Print the verdict, THEN raise the bare signal `nest` recognises. Falling short
+      ;; of a floor is an expected outcome, not a crash: raising the sentence itself
+      ;; appended `1:58: error: …`, `at error` and a version banner to a report the user
+      ;; had already read. Same treatment as a failing suite (`run_expecting_failure_signal`).
+      (do
+        (println "")
+        (println (str "FAILED: coverage " percent "% is below the required minimum " minimum "%"))
+        (error "coverage below minimum"))
       :ok)))
 
 ;; Expand `:failed` in a `nest test` option plist into the `:filter` spec's

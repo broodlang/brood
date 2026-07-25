@@ -919,6 +919,12 @@ pub enum Inst {
     Global(Symbol),
     /// Push a free reference in value position, with the global-read inline cache.
     GlobalIc { sym: Symbol, site: u32 },
+    /// Record that this source line executed, for `nest test --cover-lines`
+    /// (ADR-148 tier 2). Emitted ONLY when coverage is armed at compile time
+    /// (`coverage::enabled()`), so an ordinary chunk is byte-for-byte what it always
+    /// was and the interpreter never sees this opcode. Carries the line alone; the
+    /// FILE comes from the executing arm's `src_file`, which `exec_chunk` already has.
+    RecordLine(u32),
     /// Discard the top operand (a non-final `do` form's value).
     Pop,
     /// Pop the top operand into frame slot `base + i` (a `let`/`letrec` binder).
@@ -1055,6 +1061,7 @@ impl Inst {
     #[cfg(debug_assertions)]
     pub(crate) fn trace_name(&self) -> String {
         match self {
+            Inst::RecordLine(line) => format!("RecordLine({line})"),
             Inst::Const(cv) => format!(
                 "Const({})",
                 match cv.load().unpack() {

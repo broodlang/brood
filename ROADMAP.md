@@ -918,10 +918,9 @@ Runtime housekeeping (both items landed):
   group→test. Selector parsing + all selection logic live in Brood
   (`std/tool/test.blsp`, `test--make-filter`); `nest` only forwards argv.
   `tests/test_selection_test.blsp` (54 cases, incl. cross-process spec round-trip).
-  ⬜ Still unmapped from `mix test`: `--cover` (needs a coverage mechanism — see
-  "Test coverage" below), `--stale` (needs a per-test dependency graph),
-  `--formatter`, `--breakpoints`.
-- 🟡 **Test coverage** — ✅ **function-level `nest test --cover` shipped 2026-07-24**
+  ⬜ Still unmapped from `mix test`: `--stale` (needs a per-test dependency graph),
+  `--formatter`, `--breakpoints`. (`--cover` shipped — see "Test coverage" below.)
+- ✅ **Test coverage — both tiers** — function-level `nest test --cover` (2026-07-24)
   (ADR-148, [`docs/coverage.md`](docs/coverage.md)): which project functions the
   suite never entered, plus `--cover-min PCT` to fail the run under a floor.
   Implemented as **pure Brood policy with zero kernel support** — `global-names` +
@@ -930,13 +929,24 @@ Runtime housekeeping (both items landed):
   aggregation. The shim is variadic *because* `arglist` reports only one arm of a
   multi-arm function; one new off-switch (`BROOD_NO_RELOAD_DIAG=1`) silences the
   arity diagnostic the rebinding legitimately trips.
-  ⬜ Still: **line/branch coverage**, a separate tier. The raw material exists —
-  IR nodes carry `pos: Option<Pos>` and `CompiledArm` records its file
-  (`eval/compile/ir.rs`) — and the shape is settled (compile-time instrumentation
-  rather than a per-instruction runtime check, so an ordinary run stays unchanged;
-  JIT off in that mode; reporting extends `std/tool/coverage.blsp`). Deferred until
-  something concrete needs per-line detail: function coverage answers "what does my
-  suite never touch", which is the question that changes what you write next.
+  ✅ **line-level `nest test --cover-lines` shipped 2026-07-25** as the stricter
+  second tier, in the shape this entry predicted: the seam is `Inst::RecordLine`,
+  emitted by `emit_node` only when `BROOD_COVERAGE` is armed and executed by
+  `exec_chunk` (which already holds the arm's `src_file`), so an ordinary run's
+  bytecode is byte-for-byte unchanged; the JIT is off for the run; reporting extends
+  `std/tool/coverage.blsp`. Hooking the tree-walker instead was tried and cannot work —
+  a compiled body never goes through `eval`.
+  The hard part was the **denominator**, and it took three attempts: counting lines
+  that hold a form reported 14% for a fully-exercised fixture (different populations
+  on the two sides of the ratio), and counting instrumented lines without forcing
+  compilation reported 100% for a fixture with a dead function in it (arms compile on
+  first *call*). `%coverage-precompile` forces every project function to compile before
+  the suite, so a never-called function lands in the denominator and nowhere else.
+  Fixed on the way: a baked-in std module's forms were attributed to whichever file was
+  mid-`require`, so `std/log`'s lines were credited to the app's `src/main.blsp` —
+  `%load-string` now takes a name and gets `<std>/<key>.blsp`.
+  ⬜ Still: **branch** coverage (`if`/`cond`/`match` arms taken), which needs a
+  per-branch id rather than a line, and no concrete need for it yet.
 - ✅ **`nest` correctness + UX hardening pass** — 2026-07-24/25, driven by an
   adversarial harness (~50 hostile values × every flag and positional, malformed
   manifests, malformed sources, bare directories, concurrent invocations) plus

@@ -101,6 +101,15 @@ pub(crate) fn exec_chunk(
                 };
                 heap.push_root(v);
             }
+            // Line coverage (ADR-148 tier 2). Only present when coverage was armed at
+            // COMPILE time, so an ordinary chunk never reaches this arm. The line comes
+            // from the instruction and the file from the arm being executed, which is
+            // why nothing had to be threaded through the executor.
+            Inst::RecordLine(line) => {
+                if let Some(file) = arm_arc.src_file.as_deref() {
+                    crate::coverage::record(file, *line);
+                }
+            }
             Inst::Pop => {
                 let n = heap.roots_len();
                 heap.truncate_roots(n - 1);

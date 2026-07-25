@@ -620,13 +620,31 @@ pub(super) fn eval_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispRe
     eval_string_inner(heap, env, &src, false)
 }
 
-/// `(%load-string "src")` — the string analogue of `load`: read+eval every form,
-/// but bracket the current namespace (reset to root, restore the caller's after),
-/// so an embedded module's own `(ns …)` governs it and ns state doesn't leak to the
-/// caller. Used by `require-one` for baked-in std modules (ADR-065).
+/// `(%load-string "src")` / `(%load-string "src" "name")` — the string analogue of
+/// `load`: read+eval every form, but bracket the current namespace (reset to root,
+/// restore the caller's after), so an embedded module's own `(ns …)` governs it and ns
+/// state doesn't leak to the caller. Used by `require-one` for baked-in std modules
+/// (ADR-065).
+///
+/// The optional `name` is what the forms are attributed to for the duration. A baked-in
+/// module has no path on disk, and without a name its forms inherit whatever file
+/// happened to be loading when the `require` ran — so `std/log`'s lines were reported as
+/// the requiring file's, which line coverage caught by crediting a 21-line `main.blsp`
+/// with std's line 175. The attribution feeds `CompiledArm::src_file`, hence `:trace`
+/// frames too. Callers pass a `<std>/…` marker: honest that there is no openable path,
+/// and no longer someone else's name.
 pub(super) fn load_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let src = expect_string(heap, "%load-string", arg(args, 0))?;
-    eval_string_inner(heap, env, &src, true)
+    let name = match arg(args, 1) {
+        Value::Nil => None,
+        v => Some(expect_string(heap, "%load-string", v)?),
+    };
+    let previous_file = name.map(|n| heap.set_current_file(Some(n)));
+    let result = eval_string_inner(heap, env, &src, true);
+    if let Some(previous) = previous_file {
+        heap.set_current_file(previous);
+    }
+    result
 }
 
 /// Shared body of `eval-string` / `%load-string`. When `reset_ns`, the current
@@ -2442,5 +2460,49 @@ pub(super) fn wasm_exports(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 pub(super) fn wasm_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = expect_int(heap, "%wasm-close", arg(args, 0))? as u64;
     crate::wasm::close(id);
+    Ok(Value::nil())
+}
+
+/// `[file (line …)]` pairs, the shape both coverage readouts return.
+fn coverage_pairs(entries: Vec<(String, Vec<u32>)>, heap: &mut Heap) -> LispResult {
+    let mut out = Vec::new();
+    for (file, lines) in entries {
+        let file_val = heap.alloc_string(&file);
+        let line_vals: Vec<Value> = lines.iter().map(|l| Value::int(i64::from(*l))).collect();
+        let lines_val = heap.list(line_vals);
+        out.push(heap.alloc_vector2(file_val, lines_val));
+    }
+    Ok(heap.list(out))
+}
+
+/// `(%coverage-lines)` — every line recorded as EXECUTED, as a list of
+/// `[file (line …)]`. Empty unless the run was started with `BROOD_COVERAGE=1`
+/// (which `nest test --cover-lines` sets before building the prelude).
+pub(super) fn coverage_lines(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    coverage_pairs(crate::coverage::snapshot(), heap)
+}
+
+/// `(%coverage-instrumented)` — every line the compiler INSTRUMENTED, same shape. The
+/// denominator for a percentage: without it the two halves of the ratio would come
+/// from different populations (see `coverage.rs`). A never-called function is present
+/// here and absent from `%coverage-lines` — provided it was forced through
+/// `%coverage-precompile` first, since arms otherwise compile on first call.
+pub(super) fn coverage_instrumented(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    coverage_pairs(crate::coverage::instrumented(), heap)
+}
+
+/// `(%coverage-precompile f)` — compile `f`'s body now, without calling it, so its
+/// lines land in `%coverage-instrumented`. Returns true if a body was compiled.
+/// See `eval::compile::precompile` for why the denominator needs this.
+pub(super) fn coverage_precompile(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(Value::boolean(crate::eval::compile::precompile(
+        heap, args[0],
+    )))
+}
+
+/// `(%coverage-reset)` — forget every recorded line, so a long-lived image can
+/// measure more than once without runs bleeding together.
+pub(super) fn coverage_reset(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
+    crate::coverage::reset();
     Ok(Value::nil())
 }

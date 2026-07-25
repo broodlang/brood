@@ -164,3 +164,68 @@
   (test "reporting an empty run is 100%, not a failure"
     (coverage/coverage-begin! (list "/nonexistent-coverage-dir"))
     (assert= (coverage/coverage-report "/nonexistent-coverage-dir") 100)))
+
+;; ── the LINE tier (ADR-148 tier 2) ───────────────────────────────────────────
+;;
+;; The suite itself runs UNARMED (`BROOD_COVERAGE` is only set by `nest test
+;; --cover-lines`, before the prelude is even built), so the kernel readouts are
+;; legitimately empty here. That is exactly what these assert: the helpers must
+;; degrade to "nothing measured" rather than raise or invent a number. The armed
+;; end-to-end behaviour — a dead function reported as dead — is an integration test,
+;; `crates/nest/tests/coverage_lines.rs`, because arming it requires a fresh process.
+
+(defn coverage-test--dead-line-fn (x)
+  "Never called. Its lines exist so precompile has something real to compile."
+  (let (doubled (* x 2))
+    (+ doubled 1)))
+
+(describe "coverage: line readouts are well-formed when unarmed"
+  (test "the executed-line readout is a list, not an error"
+    (is (list? (%coverage-lines))))
+  (test "the instrumented-line readout is a list, not an error"
+    (is (list? (%coverage-instrumented))))
+  (test "an unarmed run measures nothing rather than claiming full coverage"
+    ;; The distinction that matters: 0 files measured, NOT 0% of some invented total.
+    (assert= (coverage/coverage-line-results (list "/nonexistent-coverage-dir")) nil))
+  (test "reporting an unmeasured run is 100%, so it can't fail a --cover-min gate"
+    (assert= (coverage/coverage-line-report "/nonexistent-coverage-dir"
+               (list "/nonexistent-coverage-dir"))
+      100)))
+
+(describe "coverage: the line index"
+  (test "a readout becomes file -> line -> true"
+    (let (index (coverage/coverage--line-index (list (vector "a.blsp" (list 1 4))
+                                                 (vector "b.blsp" (list 9)))))
+      (and (is (contains? (get index "a.blsp") 4))
+        (is (contains? (get index "b.blsp") 9))
+        (refute (contains? (get index "a.blsp") 9)))))
+  (test "an empty readout is an empty index, not nil"
+    (assert= (coverage/coverage--line-index nil) {}))
+  (test "a file appearing twice merges rather than replacing"
+    ;; One file's lines arrive from many arms, so the index must accumulate.
+    (let (index (coverage/coverage--line-index (list (vector "a.blsp" (list 1))
+                                                 (vector "a.blsp" (list 2)))))
+      (is (contains? (get index "a.blsp") 2)))))
+
+(describe "coverage: forcing a compile"
+  (test "precompiling a real function reports that a body compiled"
+    ;; The denominator depends on this: arms compile on first CALL, so without a
+    ;; forced compile an uncalled function is missing from BOTH halves of the ratio
+    ;; and a dead function reads as 100% covered.
+    (is (%coverage-precompile coverage-test--dead-line-fn)))
+  (test "precompiling the same function twice is harmless"
+    (and (is (%coverage-precompile coverage-test--dead-line-fn))
+      (is (%coverage-precompile coverage-test--dead-line-fn))))
+  (test "a precompiled function still computes correctly"
+    (and (is (%coverage-precompile coverage-test--dead-line-fn))
+      (assert= (coverage-test--dead-line-fn 5) 11)))
+  (test "a non-function is refused rather than raising"
+    (and (refute (%coverage-precompile 42))
+      (refute (%coverage-precompile nil))
+      (refute (%coverage-precompile "not a fn"))
+      (refute (%coverage-precompile [1 2]))))
+  (test "a native primitive is not a compilable body"
+    ;; `+` has no Brood body to compile — false, not a crash.
+    (refute (%coverage-precompile %add)))
+  (test "the begin! pass over a dir with no project functions compiles nothing"
+    (assert= (coverage/coverage-line-begin! (list "/nonexistent-coverage-dir")) 0)))

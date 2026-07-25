@@ -252,8 +252,16 @@ enum Cmd {
         #[arg(long)]
         cover: bool,
 
+        /// Report LINE coverage: which executable source lines actually ran.
+        /// Stricter than `--cover`, which only asks whether a function was entered.
+        /// Instruments the bytecode and disables the JIT, so a `--cover-lines` run is
+        /// a diagnostic run and never a timing one.
+        #[arg(long)]
+        cover_lines: bool,
+
         /// Fail the run (exit non-zero) if coverage is below this percentage.
-        /// Implies `--cover`.
+        /// Implies `--cover`; gates on the LINE percentage under `--cover-lines`,
+        /// that being the stricter number.
         #[arg(long, value_name = "PCT", value_parser = clap::value_parser!(u64).range(0..=100))]
         cover_min: Option<u64>,
     },
@@ -465,23 +473,40 @@ fn main() {
     run_on_main_stack("nest-main", move || run_main(cli));
 }
 
-/// Silence the hot-reload diagnostics for a `nest test --cover` run, before any
-/// interpreter exists.
+/// Arm the coverage env flags before any interpreter exists.
 ///
-/// Coverage instrumentation rebinds every project function to a variadic shim, which
-/// legitimately changes every arity — hundreds of expected `[reload] arity changed`
-/// lines otherwise. The kernel caches this flag on first read, and that read happens
-/// while `Interp::new()` builds the prelude, so setting it from the subcommand would
-/// be too late.
+/// The timing is load-bearing for BOTH flags, and getting it wrong fails silently:
+///
+///   * `BROOD_COVERAGE` decides whether the compiler emits `RecordLine`. Chunks are
+///     compiled while `Interp::new()` builds the prelude, and the kernel caches the
+///     flag on first read — set it from the subcommand and the instrumentation is
+///     simply absent, with no error to notice.
+///   * `BROOD_NO_RELOAD_DIAG` silences the hot-reload chatter that function-tier
+///     instrumentation legitimately provokes (it rebinds every project function to a
+///     variadic shim, changing every arity).
+///
+/// `--cover-lines` also disables the JIT: an instrumented arm bails lowering anyway,
+/// but turning it off outright keeps the measurement honest rather than
+/// shape-dependent.
 fn arm_coverage_env(cli: &Cli) {
     let Cmd::Test {
-        cover, cover_min, ..
+        cover,
+        cover_lines,
+        cover_min,
+        ..
     } = &cli.cmd
     else {
         return;
     };
-    if *cover || cover_min.is_some() {
+    if *cover_lines {
         // SAFETY: called from `main` before any thread or interpreter is created.
+        unsafe {
+            std::env::set_var("BROOD_COVERAGE", "1");
+            std::env::set_var("BROOD_NO_JIT", "1");
+        }
+    }
+    if *cover || *cover_lines || cover_min.is_some() {
+        // SAFETY: as above.
         unsafe { std::env::set_var("BROOD_NO_RELOAD_DIAG", "1") };
     }
 }
@@ -516,6 +541,7 @@ fn run_main(cli: Cli) {
             shard,
             trace,
             cover,
+            cover_lines,
             cover_min,
         } => {
             // Named FILES run standalone outside a project; project-wide
@@ -553,6 +579,7 @@ fn run_main(cli: Cli) {
                 shard,
                 trace,
                 cover,
+                cover_lines,
                 cover_min,
                 lines,
             };
@@ -692,6 +719,7 @@ struct TestOpts {
     shard: u64,
     trace: bool,
     cover: bool,
+    cover_lines: bool,
     cover_min: Option<u64>,
     /// `FILE:LINE` selectors peeled off the positional FILE list.
     lines: Vec<(String, u64)>,
@@ -769,8 +797,11 @@ impl TestOpts {
         }
         // `--cover-min` implies `--cover`: asking for a floor without asking for
         // measurement is never what someone means.
-        if self.cover || self.cover_min.is_some() {
+        if self.cover || (self.cover_min.is_some() && !self.cover_lines) {
             parts.push(":cover".to_string());
+        }
+        if self.cover_lines {
+            parts.push(":cover-lines".to_string());
         }
         if let Some(n) = self.cover_min {
             parts.push(format!(":cover-min {n}"));
@@ -859,7 +890,7 @@ fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
                 "(require 'project) (require 'test) (project/load-config) \
                  (project/run-project-tests {plist})"
             ),
-            "test(s) failed",
+            TEST_FAILURE_SIGNALS,
         );
         return;
     }
@@ -888,13 +919,13 @@ fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
         run_expecting_failure_signal(
             interp,
             &format!("(project/run-loaded-tests {plist})"),
-            "test(s) failed",
+            TEST_FAILURE_SIGNALS,
         );
     } else {
         run_expecting_failure_signal(
             interp,
             &format!("(test/run-tests {plist})"),
-            "test(s) failed",
+            TEST_FAILURE_SIGNALS,
         );
     }
 }
@@ -1548,6 +1579,11 @@ fn cmd_release(
 
 /// Evaluate a bootstrap snippet, reporting any error in GNU form and exiting
 /// non-zero on failure.
+/// The raises `nest test` treats as an already-reported verdict rather than an error:
+/// the suite's own failure count, and a `--cover-min` shortfall (both print their
+/// detail first, then raise only so the exit code is non-zero).
+const TEST_FAILURE_SIGNALS: &[&str] = &["test(s) failed", "coverage below minimum"];
+
 /// Like `run`, but for a command whose Brood side signals "the work failed" by
 /// RAISING — `run-project-tests` raises `N test(s) failed` so that `cargo test` and
 /// `brood --test` see a non-zero exit.
@@ -1559,11 +1595,12 @@ fn cmd_release(
 /// after the part the user actually reads. Exit non-zero silently instead, and only
 /// fall back to the normal error report for a genuine failure (a broken manifest, an
 /// unloadable test file).
-fn run_expecting_failure_signal(interp: &mut Interp, code: &str, signal: &str) {
+fn run_expecting_failure_signal(interp: &mut Interp, code: &str, signals: &[&str]) {
     let result = interp.eval_str(code);
     brood::builtins::restore_terminal_on_exit();
     if let Err(e) = result {
-        if e.to_string().contains(signal) {
+        let text = e.to_string();
+        if signals.iter().any(|signal| text.contains(signal)) {
             std::process::exit(1);
         }
         report_error(&e);

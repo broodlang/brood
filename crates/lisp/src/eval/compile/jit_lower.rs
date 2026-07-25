@@ -258,6 +258,11 @@ pub(super) fn jit_ckpt_depth(code: &[Inst], self_name: Option<Symbol>) -> Option
             | Inst::Prim2SlotSlot { .. }
             | Inst::Prim2SlotInt { .. }
             | Inst::TryCatch { .. } => merge(&mut depth, &mut work, ip + 1, d + 1),
+            // A coverage-instrumented arm must not be JIT'd: native code would run
+            // without the recording, silently under-reporting exactly the hot arms.
+            // Returning false here bails the whole lowering for this arm, which is the
+            // conservative answer (`--cover-lines` also disables the JIT outright).
+            Inst::RecordLine(_) => false,
             Inst::Pop | Inst::SetLocal(_) => d >= 1 && merge(&mut depth, &mut work, ip + 1, d - 1),
             Inst::Prim1 { .. } => d >= 1 && merge(&mut depth, &mut work, ip + 1, d),
             Inst::Prim2 { .. } => d >= 2 && merge(&mut depth, &mut work, ip + 1, d - 1),
@@ -382,6 +387,7 @@ fn chunk_in_jit_subset(code: &[Inst]) -> bool {
 fn inst_opcode_name(inst: &Inst) -> &'static str {
     match inst {
         Inst::Const(_) => "Const",
+        Inst::RecordLine(_) => "RecordLine",
         Inst::Local(_) => "Local",
         Inst::Prim3 { .. } => "Prim3",
         Inst::Global(_) => "Global",
