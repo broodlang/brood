@@ -448,7 +448,12 @@ pub(crate) mod backend {
     // editor, not a console. Drives `cell_h` (and so the row count) in `recompute`.
     const LINE_HEIGHT: f32 = 1.4;
 
-    // Catppuccin Mocha *base* — matches theme.blsp so Op::Clear fills with the right colour.
+    // The rendering *mechanism's* fallback colours — used ONLY when Brood supplies
+    // none: `Op::Clear` / the inset-margin fill when no `gui-bg!` is set, and a face
+    // with no `:bg`/`:fg`. Brood owns the actual palette as *policy* — every render op
+    // carries its own `[r g b]`/hex colour resolved through `std/editor/face.blsp`, so
+    // these are defaults, not a duplicated palette (there is no `theme.blsp`). Catppuccin
+    // Mocha base/text tones, chosen so an un-styled window still reads as an editor.
     const DEFAULT_BG: [u8; 3] = [0x1e, 0x1e, 0x2e];
     const DEFAULT_FG: [u8; 3] = [0xcd, 0xd6, 0xf4];
     // The solid colour of a thin (bar / underline) cursor caret — crisp near-white,

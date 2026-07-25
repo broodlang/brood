@@ -159,12 +159,12 @@ rationale (below).**
    boot, and the two have different contracts — `path/basename` strips a trailing
    slash, `path-basename` doesn't; `path/join` is variadic with absolute-reset,
    `path-join` is 2-arg). Documented as such in both files.
-8. ⬜ **`gui.rs` ↔ `gui_gpu.rs`** — **deferred:** `gui_gpu.rs` is a declared
-   *prototype* (solid quads; "Cursor / zones: not drawn in the GPU prototype"), so
-   the missing `Cursor`/`ScrollRegion`/underline are *unimplemented GPU features*,
-   not diverged geometry. Making the GPU path draw them (ScrollRegion op-reprocess,
-   GPU text underline) is feature work needing a live display to verify — out of
-   scope for a mechanical cleanup pass.
+8. ❌ **`gui.rs` ↔ `gui_gpu.rs`** — **descoped (not a cleanup).** `gui_gpu.rs` is a
+   declared *prototype* that doesn't even draw text yet ("Text is not yet drawn");
+   the missing `Cursor`/`ScrollRegion`/underline are *unimplemented GPU features*, not
+   diverged geometry. Adding them is display-gated **feature work** blocked on GPU text
+   rendering — it belongs to the GPU-window frontend milestone (Editor M3), not this
+   structural-cleanup list. Removed as a cleanup item.
 9. ✅ **`eval/compile/inline.rs` `node_*` predicate family** — collapsed
    `node_has_selfcall`/`node_has_self_call`/`node_has_make_closure` into one
    generic `node_any(node, &pred)` combinator.
@@ -192,11 +192,16 @@ was); added it to the `pub(crate) use self::gc::{…}` list.
 
 **Tier 4 — policy-in-Rust notes (judgment calls, "Rust=mechanism, Brood=policy"):**
 
-- ⬜ `gui.rs` hardcodes UI policy — Catppuccin colors duplicated with `theme.blsp`
-  (drift-prone), a named-color palette `face.blsp` could own, a kinetic-scroll
-  physics model. **Deferred:** moving colors into Brood means `gui.rs` reading them
-  from the language at render time (an architectural change, not a mechanical move),
-  and it can't be verified without a live display — out of scope for a blind cleanup.
+- ✅ `gui.rs` colors — **resolved as *not* duplication** (2026-07-25, like the `path`
+  case in Tier 2 #7). The premise was stale: there is **no `theme.blsp`**, and none of
+  the three constants (`1e1e2e`/`cdd6f4`/`f5f5f5`) appear in `std/`. Colours are already
+  *policy in Brood* — every render op carries its own `[r g b]`/hex resolved through
+  `std/editor/face.blsp`; the three `gui.rs` constants are the rendering *mechanism's*
+  fallback defaults (used only when Brood supplies none: `Op::Clear` with no `gui-bg!`,
+  a face with no `:bg`/`:fg`). A "move to Brood" would add render-time coupling for zero
+  dedup benefit. Fixed the stale `matches theme.blsp` comment to say so. (The
+  kinetic-scroll physics model remains a legitimate future policy-in-Brood candidate, but
+  is behaviour needing a live display to tune — genuinely deferred.)
 - ✅ `builtins/io.rs` split (done 2026-07-25): **crypto+hashing** (HashAlgo/`%digest`/
   `%hmac`/`%random-bytes`/`%chacha20-*`/`%pbkdf2-sha256-bytes`) → `builtins/crypto.rs`;
   the **package-manager git/tar mechanism** (`run_git`/`git_or_err`/`%git-resolve-ref`/
@@ -206,11 +211,16 @@ was); added it to the `pub(crate) use self::gc::{…}` list.
   stay in `io.rs` (general, used broadly). `io.rs` 1932 → 1436; new `crypto.rs` (258),
   `pkg.rs` (263). Glob re-export means `register()` is untouched; drift-guard +
   crypto/hash/package/format suites green.
-- ⬜ `nest`'s `cmd_run` (217 lines) carries more policy in Rust than the other thin
-  subcommand handlers — candidate to push into a Brood `project/run` entry.
-  **Deferred:** it's dense watch/reload/supervision/`--for`-timing policy that builds
-  and evals Brood source; a rewrite into Brood changes outward run/watch behavior that
-  needs a live interactive session to verify — not a safe blind mechanical move.
+- ❌ `nest`'s `cmd_run` — **descoped (correctly-placed CLI glue).** On a read of all
+  227 lines: it's the `nest` binary's arg-orchestration *mechanism* — it interprets
+  flags and assembles a Brood program, already delegating *every* behavior to Brood
+  modules (`project/run-project`, `reload/reload-on-change`, `%run-program-file`,
+  `%spawn`/`monitor`/`receive`, `check-file`). The "policy in Rust" is thinner than it
+  looked. A rewrite would relocate ~8 subtle behaviors (doc-vs-script routing, watch
+  promotion, the multi-file warning, `--main` override, recheck-on-reload, supervised
+  wrapping, `--for` timing, `BROOD_NO_CHECK`) whose highest-value path (`--watch`
+  hot-reload) is only verifiable interactively — modest value, real regression risk.
+  Removed as a cleanup item; revisit only if `nest` grows a broader Brood-driven CLI.
 
 ### Runtime-feature parity program — BEAM / .NET / Node (2026-07-22)
 
