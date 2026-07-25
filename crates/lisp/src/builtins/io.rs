@@ -1434,3 +1434,118 @@ pub(super) fn uid_name(_uid: u32) -> Option<String> {
 pub(super) fn gid_name(_gid: u32) -> Option<String> {
     None
 }
+
+/// `(%file-swap lock-path data-path expected new)` — replace the ENTIRE contents of
+/// `data-path` with `new`, but only if they currently equal `expected`. Returns
+/// true when the swap happened, false when the contents differed (the caller should
+/// re-read, recompute, and try again).
+///
+/// This is the mechanism behind a safe read-modify-write of a file whose "modify"
+/// step is Brood code — `nest add` editing `project.blsp`, say. Without it, two
+/// concurrent editors both read the original, both append, and the second write
+/// erases the first while both report success (measured: three concurrent
+/// `nest add`s landed between one and three of them).
+///
+/// Two properties make it work, and both are load-bearing:
+///
+///   * **Serialised** by a blocking exclusive `flock` on `lock-path` — a separate
+///     file, never the data file, because the data file is replaced by `rename`
+///     below and a lock on a since-unlinked inode excludes nobody. The lock is held
+///     only for the duration of this call, so it cannot leak, and the OS drops it if
+///     the process dies.
+///   * **Crash-atomic** in its write: the new contents go to a temp file in the same
+///     directory and are `rename`d over `data-path`, so a crash mid-call leaves the
+///     old file intact rather than a truncated one. (A half-written manifest is
+///     exactly the "project no longer parses" failure this is meant to prevent.)
+///
+/// A missing `data-path` reads as `""`, so the same call creates it when `expected`
+/// is `""`.
+pub(super) fn file_swap(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let lock_path = expect_string(heap, "%file-swap", arg(args, 0))?;
+    let data_path = expect_string(heap, "%file-swap", arg(args, 1))?;
+    let expected = expect_string(heap, "%file-swap", arg(args, 2))?;
+    let new = expect_string(heap, "%file-swap", arg(args, 3))?;
+
+    let io_err = |what: &str, path: &str, e: &std::io::Error| {
+        LispError::runtime(format!("%file-swap: {what} {path}: {e}"))
+            .with_code(crate::error::error_codes::FILE_IO)
+    };
+
+    // The lock file's own directory must exist; the caller picks a durable
+    // location (the project's cache dir), so a missing parent is a real error.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| io_err("cannot open lock file", &lock_path, &e))?;
+    let _guard = FileLock::acquire(&lock).map_err(|e| io_err("cannot lock", &lock_path, &e))?;
+
+    // Read under the lock: this is the re-validation that makes the caller's
+    // earlier (unlocked) read safe to act on.
+    let current = match std::fs::read_to_string(&data_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(io_err("cannot read", &data_path, &e)),
+    };
+    if current != expected {
+        return Ok(Value::boolean(false));
+    }
+
+    let temp_path = format!("{data_path}.swap.{}", std::process::id());
+    std::fs::write(&temp_path, new.as_bytes())
+        .map_err(|e| io_err("cannot write", &temp_path, &e))?;
+    if let Err(e) = std::fs::rename(&temp_path, &data_path) {
+        // Don't leave the temp file behind on a failed rename.
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(io_err("cannot replace", &data_path, &e));
+    }
+    Ok(Value::boolean(true))
+}
+
+/// An exclusive advisory lock held for a scope, released on drop (and by the OS if
+/// the process dies, which is what keeps a crash from leaving a stale lock).
+struct FileLock<'a> {
+    #[cfg(unix)]
+    file: &'a std::fs::File,
+    #[cfg(not(unix))]
+    _file: &'a std::fs::File,
+}
+
+impl<'a> FileLock<'a> {
+    #[cfg(unix)]
+    fn acquire(file: &'a std::fs::File) -> std::io::Result<Self> {
+        use std::os::unix::io::AsRawFd;
+        let fd = file.as_raw_fd();
+        loop {
+            // SAFETY: `fd` is a live descriptor owned by `file` for this scope.
+            let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
+            if rc == 0 {
+                return Ok(FileLock { file });
+            }
+            let err = std::io::Error::last_os_error();
+            // A signal can interrupt the blocking wait; that is not a failure.
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                return Err(err);
+            }
+        }
+    }
+
+    // Non-unix has no `flock`. The compare-and-swap still runs (so behaviour is
+    // unchanged for a single process) but is NOT serialised across processes; the
+    // platforms this project builds for are unix.
+    #[cfg(not(unix))]
+    fn acquire(file: &'a std::fs::File) -> std::io::Result<Self> {
+        Ok(FileLock { _file: file })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FileLock<'_> {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: same live descriptor; failure to unlock is not actionable here,
+        // and closing the fd would release it regardless.
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}

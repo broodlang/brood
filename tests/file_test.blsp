@@ -7,6 +7,7 @@
 
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-file-")
+(purge-stale-temp "brood-file-swap-")
 
 ;; A fresh, created /tmp dir per call. `temp-dir` names it with `random-token`
 ;; (unique across processes *and* runs) — a bare gensym name recurs across runs,
@@ -165,3 +166,88 @@
     ; ~ expands against $HOME
     (assert= (path-absolute "~/x") (str (getenv "HOME") "/x"))
     (assert= (path-absolute "~") (getenv "HOME"))))
+
+;; `%file-swap` — atomic compare-and-swap of a file's whole contents, serialised
+;; across processes by an exclusive lock. The mechanism behind a safe
+;; read-modify-write whose "modify" step is Brood code: `nest add` splicing an entry
+;; into project.blsp used to lose an update under concurrency (both editors read the
+;; original, both wrote, the second erased the first — and both reported success).
+;;
+;; Cross-process serialisation can't be shown from one test process; it is covered
+;; end-to-end by `crates/nest/tests/manifest_race.rs`, which runs real concurrent
+;; `nest add`s. What's pinned here is the CAS contract those retries depend on.
+(describe "%file-swap: compare-and-swap"
+  (test "creates the file when the expected content is empty"
+    (let (dir (temp-dir "brood-file-swap-")
+          lock (path-join dir "l")
+          data (path-join dir "d"))
+      (make-dir dir)
+      (is (%file-swap lock data "" "first"))
+      (assert= (slurp data) "first")))
+  (test "swaps when the current content matches"
+    (let (dir (temp-dir "brood-file-swap-")
+          lock (path-join dir "l")
+          data (path-join dir "d"))
+      (make-dir dir)
+      (spit data "old")
+      (is (%file-swap lock data "old" "new"))
+      (assert= (slurp data) "new")))
+  (test "REFUSES the swap when the content has changed, and leaves it alone"
+    ;; This is the property the retry loop rests on: a stale `expected` must not
+    ;; overwrite whatever landed in between.
+    (let (dir (temp-dir "brood-file-swap-")
+          lock (path-join dir "l")
+          data (path-join dir "d"))
+      (make-dir dir)
+      (spit data "changed-by-someone-else")
+      (refute (%file-swap lock data "what-i-read-earlier" "mine"))
+      (assert= (slurp data) "changed-by-someone-else")))
+  (test "a second swap with the now-stale expected also fails"
+    (let (dir (temp-dir "brood-file-swap-")
+          lock (path-join dir "l")
+          data (path-join dir "d"))
+      (make-dir dir)
+      (spit data "v1")
+      (is (%file-swap lock data "v1" "v2"))
+      (refute (%file-swap lock data "v1" "v3"))
+      (assert= (slurp data) "v2")))
+  (test "an empty new value is a legitimate swap, not a no-op"
+    (let (dir (temp-dir "brood-file-swap-")
+          lock (path-join dir "l")
+          data (path-join dir "d"))
+      (make-dir dir)
+      (spit data "content")
+      (is (%file-swap lock data "content" ""))
+      (assert= (slurp data) "")))
+  (test "a missing file reads as empty, so expecting content fails"
+    (let (dir (temp-dir "brood-file-swap-")
+          lock (path-join dir "l")
+          data (path-join dir "absent"))
+      (make-dir dir)
+      (refute (%file-swap lock data "something" "new"))
+      (refute (file-exists? data))))
+  (test "the lock file is created on demand"
+    (let (dir (temp-dir "brood-file-swap-")
+          lock (path-join dir "made-on-demand.lock")
+          data (path-join dir "d"))
+      (make-dir dir)
+      (is (%file-swap lock data "" "x"))
+      (is (file-exists? lock))))
+  (test "no temp file is left behind"
+    ;; The write goes via a temp file + rename (so a crash can't leave a truncated
+    ;; manifest); nothing should survive a successful swap.
+    (let (dir (temp-dir "brood-file-swap-")
+          lock (path-join dir "l")
+          data (path-join dir "d"))
+      (make-dir dir)
+      (is (%file-swap lock data "" "x"))
+      (assert= (sort (filter (fn (f) (includes? f ".swap.")) (list-dir dir))) nil)))
+  (test "repeated swaps thread through, each seeing the last"
+    (let (dir (temp-dir "brood-file-swap-")
+          lock (path-join dir "l")
+          data (path-join dir "d"))
+      (make-dir dir)
+      (is (%file-swap lock data "" "a"))
+      (is (%file-swap lock data "a" "ab"))
+      (is (%file-swap lock data "ab" "abc"))
+      (assert= (slurp data) "abc"))))

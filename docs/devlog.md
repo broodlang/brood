@@ -7383,3 +7383,52 @@ across arith/float/vector-ref/keyword-eq. Remaining: the per-`Inst` arm bodies
 The two Tier 4 policy-in-Rust items (`gui.rs` color/UI policy, `nest cmd_run`)
 were deferred with rationale — both are outward-facing behavioral changes that
 can't be verified without a live display / interactive watch session.
+
+## 2026-07-25 — fixed the manifest race (`%file-swap`)
+
+Yesterday I documented concurrent `nest add`/`remove` losing an update as a known
+limitation, on the grounds that preventing it needed mutual exclusion the language
+had no primitive for. Asked to fix it, so: added the primitive.
+
+**The shape matters.** The obvious move — a `with-file-lock` builtin wrapping a Brood
+thunk — is possible (`apply_value` lets a builtin call back into Brood) but buys two
+hazards: a blocking lock around arbitrary Brood code can self-deadlock on re-entry,
+and re-entering `eval` from a builtin is a GC-safepoint concern. So instead:
+**compare-and-swap**, which needs no callback at all.
+
+`(%file-swap lock-path data-path expected new)` replaces the file's whole contents
+only if they still equal `expected`, returning false otherwise. Brood
+(`package--edit-manifest!`) reads, computes the edit, and swaps; on a false it
+**recomputes the edit against the new content** and retries (bounded at 8, then a
+clear "nothing was written, re-run it"). That retry is the whole reason CAS fits: the
+modify step is Brood splicing source text, so it cannot run inside a locked
+primitive.
+
+Two properties in the primitive, both load-bearing:
+
+- **Serialised** by a blocking exclusive `flock`, held only for the call — it cannot
+  leak, and the OS releases it if the process dies, so there is no stale-lock
+  recovery to get wrong. The lock is a *separate* file, never the manifest: the
+  manifest is replaced by `rename`, and a lock on a since-unlinked inode excludes
+  nobody. (I worked that through before writing it — locking the data file plus
+  rename is a plausible-looking design that silently doesn't serialise.)
+- **Crash-atomic** — temp file + `rename`, so a crash mid-edit leaves the old file
+  intact rather than truncated. A half-written manifest is exactly the "project no
+  longer parses" failure the day's earlier work was about.
+
+The lock lives in the project's cache dir (keyed by root; `/tmp` without `HOME`), not
+the project tree — nothing stray appears beside the user's source, and the inode stays
+stable across rewrites. A test asserts that. The failed-add rollback is now a CAS too,
+so it can't stomp a concurrent editor; if it can't revert cleanly it says so.
+
+**Measured:** 3 concurrent adds went from 1–3 landing to 3/3 across 8 trials; 6
+concurrent adds land 6/6 across 5 trials; mixed concurrent add+remove converges to
+exactly the right dependency set every time. `crates/nest/tests/manifest_race.rs` (4
+cases, asserting that anything *reporting* success actually landed — a false success
+is the bug, a legitimate failure is fine) plus 9 cases pinning the CAS contract in
+`tests/file_test.blsp`.
+
+One incidental fix: `package` needed `(:use-internals project)` for
+`project--cache-dir` (ADR-146). The privacy error fires at *require* time, so the
+whole module silently failed to load until it was granted — the same trap
+`std/tool/complete.blsp` hit yesterday.

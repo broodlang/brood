@@ -19,7 +19,10 @@
 source on *load-path*. Slice 1 handles `:path` (local/sibling) deps; `:git` deps
 land in a later slice."
   (:use format)
-  (:use project))
+  (:use project)
+  ;; `project--cache-dir` is module-private (ADR-146); the manifest lock lives there
+  ;; (beside the project's other derived state) rather than in the project tree.
+  (:use-internals project))
 
 ; tree hashing over hash/sha256 + hash/sha256-bytes
 (require 'hash)
@@ -861,6 +864,61 @@ package is unknown to this index."
     (not (= nm ""))
     (= (try (read-first nm) (catch _ nil)) (symbol nm))))
 
+;; --- editing project.blsp safely --------------------------------------------
+;; The manifest edit is a read-modify-write: read the source, splice an entry in or
+;; out (Brood code), write it back. Done with a plain `slurp`/`spit` that LOSES an
+;; update under concurrency — two `nest add`s both read the original, both append,
+;; the second write erases the first, and both report success. Measured before the
+;; fix: three concurrent adds landed between one and three of them.
+;;
+;; `%file-swap` closes it: the write only lands if the file still holds exactly what
+;; we read, serialised across processes by an exclusive lock, and crash-atomic. When
+;; the compare fails, someone edited in between — so re-read and recompute the edit
+;; against the new content rather than clobbering it. That retry is the whole reason
+;; a CAS is the right shape here: the "modify" step is Brood, so it cannot run inside
+;; the locked primitive.
+
+;; The lock lives beside the project's other derived state (the check caches), NOT in
+;; the project directory — no stray file appears next to the user's source, and the
+;; inode is stable across manifest rewrites. `/tmp` is the fallback when there is no
+;; cache dir (no HOME), so an edit is always serialised.
+(defn package--manifest-lock (root)
+  (require 'hash)
+  (let (dir (or (project/project--cache-dir root) "/tmp"))
+    (path-join dir (str "manifest-" (hash/sha256 root) ".lock"))))
+
+;; Attempts are bounded so a pathological writer can't spin here forever; each retry
+;; re-reads, so progress is real and 8 is far beyond any plausible contention.
+(def *package--manifest-edit-attempts* 8)
+
+(defn package--edit-manifest! (root transform)
+  "Apply `transform` (old manifest source -> new source) to project.blsp atomically, retrying if a concurrent edit lands in between. Returns `[old new]` so the caller can roll its own edit back. Raises if it cannot win within `*package--manifest-edit-attempts*` tries."
+  (package--edit-manifest--try (path-join root "project.blsp")
+    (package--manifest-lock root)
+    transform
+    *package--manifest-edit-attempts*))
+
+(defn package--edit-manifest--try (manifest lock transform attempts)
+  (if (<= attempts 0)
+    (error "package: project.blsp kept changing while this command tried to edit it — "
+      "is another `nest add`/`nest remove` running? Nothing was written; re-run it.")
+    (let (old (slurp manifest)
+          new (transform old))
+      (if (%file-swap lock manifest old new)
+        [old new]
+        (package--edit-manifest--try manifest lock transform (- attempts 1))))))
+
+;; Undo an edit this command made, without stomping a concurrent one: the swap only
+;; lands if the manifest still holds exactly what we wrote. If it doesn't, someone
+;; else has edited since and their content wins — say so rather than overwrite it.
+(defn package--revert-manifest! (root written original)
+  (let (manifest (path-join root "project.blsp"))
+    (if (%file-swap (package--manifest-lock root) manifest written original)
+      true
+      (do
+        (eprintln "warning: could not undo the project.blsp edit — it changed again in the meantime; check :dependencies by hand")
+        false))))
+
 (defn add (nm & spec)
   "Add a dependency to project.blsp and re-lock. `nm` is the require-name; `spec` is `:path PATH`, `:git URL :ref REF`, or `:tarball URL :sha256 HEX` (strings). A :git/:tarball dep is fetched into _deps/ as part of the re-lock. Backs `nest add`."
   ;; Checked BEFORE anything is written, so a bad name can't leave a half-edited
@@ -882,25 +940,16 @@ package is unknown to this index."
         ;; add foo :path ../nonexistent` left an unresolvable dep
         ;; in project.blsp and EVERY later command failed on it —
         ;; the project needed hand-repair after one typo.
+        ;; The edit is a locked compare-and-swap (see package--edit-manifest!), so a
+        ;; concurrent `nest add` can no longer erase this one.
         (let (manifest (path-join root "project.blsp")
-              original (slurp manifest))
-          (spit manifest
-            (package--manifest-add original (package--dep->entry-node dep)))
+              edit (package--edit-manifest! root
+                     (fn (src) (package--manifest-add src (package--dep->entry-node dep))))
+              original (vector-ref edit 0)
+              written (vector-ref edit 1))
           (let (outcome (try
                           (do
                             (package--load-manifest manifest)
-                            ;; NB this edit is a read-modify-write with NO locking, so
-                            ;; two concurrent `nest add`s lose one of them (both read
-                            ;; the original, both append, the second write wins) and
-                            ;; both still report success. Measured: 3 concurrent adds
-                            ;; land 1–3 of them. It cannot be *detected* here either —
-                            ;; the loser is whichever wrote FIRST, and it has already
-                            ;; re-read and verified its own entry by the time the
-                            ;; other write lands. Preventing it needs real mutual
-                            ;; exclusion (an atomic exclusive-create, which the
-                            ;; language has no primitive for). Documented as a
-                            ;; one-at-a-time constraint in docs/packages.md rather
-                            ;; than papered over with a check that doesn't work.
                             (let (entries (resolve-deps root
                                             *project-dependencies*
                                             (read-lockfile root)))
@@ -910,7 +959,7 @@ package is unknown to this index."
                           (catch e (list :%add-failed e))))
             (if (and (pair? outcome) (= (first outcome) :%add-failed))
               (do
-                (spit manifest original)
+                (package--revert-manifest! root written original)
                 (package--load-manifest manifest)
                 (throw (second outcome)))
               (println (str "package: added " nm)))))))))
@@ -924,7 +973,9 @@ package is unknown to this index."
           (error "package: " nm " is not a dependency"))
         (let (manifest (path-join root "project.blsp")
               target (package--git-target root name-sym))
-          (spit manifest (package--manifest-remove (slurp manifest) name-sym))
+          ;; Same locked compare-and-swap as `add`: a concurrent edit must not be
+          ;; erased by this removal (or vice versa).
+          (package--edit-manifest! root (fn (src) (package--manifest-remove src name-sym)))
           (package--load-manifest manifest)
           ; drop its _deps/ cache, if any
           (when (dir? target) (%rm-rf target))

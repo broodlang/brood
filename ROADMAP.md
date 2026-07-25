@@ -914,9 +914,9 @@ Runtime housekeeping (both items landed):
   stack trace. `nest new` also produced projects that failed their own `nest format
   --check`; the scaffolder now formats its own output, so no future template can
   drift. Test count 810 → 842 nextest cases / 3161 in-language, with the suite's
-  warning channel now empty. Known limitation, measured and documented rather than
-  papered over: concurrent `nest add`/`remove` lose an update (no locking primitive —
-  `docs/packages.md`).
+  warning channel now empty. Concurrent `nest add`/`remove` also lost an
+  update (measured: 1–3 of 3 landing); fixed with a locked compare-and-swap over one
+  new primitive, `%file-swap` (`docs/packages.md`).
 - ✅ **Shell completion (`nest completions`)** — shipped 2026-07-24
   ([`docs/tooling.md`](docs/tooling.md) §Shell completion). TAB completion for
   bash/zsh/fish covering subcommands, flags, **and project-aware values**: test

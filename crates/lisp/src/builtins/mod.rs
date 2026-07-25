@@ -1816,6 +1816,16 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string, iolist], nil_ty),
         spit_append,
     );
+    // Atomic compare-and-swap of a file's whole contents, serialised across
+    // processes. The mechanism a safe read-modify-write needs when the "modify" is
+    // Brood code (`nest add` editing project.blsp) — see `io::file_swap`.
+    def(
+        heap,
+        "%file-swap",
+        Arity::exact(4),
+        Sig::new(vec![string, string, string, string], bool_ty),
+        file_swap,
+    );
     def(
         heap,
         "slurp",
@@ -2837,6 +2847,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("make-dir", &["path"], "Create a directory and any missing parents (like mkdir -p)."),
     ("spit", &["path", "s"], "Write s (any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139)) to the file at path, replacing any existing file."),
     ("spit-append", &["path", "s"], "Append s (any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139)) to the file at path, creating it if absent (unlike spit, which truncates). Returns nil. Opens in append mode so each write lands at end-of-file — the OS-atomic append that makes a log safe to write from several processes at once. The string sibling of append-bytes."),
+    ("%file-swap", &["lock-path", "data-path", "expected", "new"], "Replace the entire contents of data-path with new, but ONLY if they currently equal expected; returns true when swapped, false when they differ (re-read, recompute, retry). Serialised across processes by a blocking exclusive lock on lock-path (a separate file — the data file is replaced by rename, so a lock on it would exclude nobody), and crash-atomic (temp file + rename, so a crash leaves the old contents intact). A missing data-path reads as \"\", so the same call creates it. The mechanism behind a safe read-modify-write whose modify step is Brood code."),
     ("spit-private", &["path", "s"], "Write string s to path with owner-only (0600) permissions, creating the parent dir if needed. The private-by-default write for a secret (spit leaves a world-readable file)."),
     ("slurp", &["path"], "Read the whole file at path into a string (does not evaluate it). UTF-8; throws on a non-text file — use slurp-bytes for binary."),
     ("slurp-bytes", &["path"], "Read the whole file at path as a bytes value. The byte-faithful read slurp can't be (slurp is UTF-8 and throws on a non-text file). Pairs with hash/sha256-bytes / hash/sha256-raw and the encoding byte variants — e.g. hashing a binary asset."),

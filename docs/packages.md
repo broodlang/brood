@@ -389,30 +389,44 @@ written) in place — the dev / self-hosted / offline path.
 To publish, a package sets two manifest fields: `:repository` (its git URL) and
 `:description`. The published `:ref` is `v<version>` by convention.
 
-## One at a time: the manifest edits are not concurrency-safe
+## Concurrent manifest edits are safe
 
-`nest add` / `nest remove` edit `project.blsp` as a **read-modify-write with no
-locking**. Run two at once and one is silently lost: both read the original file,
-both append their entry, and the second write wins — while *both* report success.
-Measured with three concurrent `nest add`s, between one and three of them actually
-landed.
+`nest add` / `nest remove` edit `project.blsp` as a read-modify-write: read the
+source, splice an entry in or out, write it back. Done naively that **loses an
+update** — two processes both read the original, both splice, and the second write
+erases the first, while *both* report success. Measured before the fix: three
+concurrent `nest add`s landed between one and three of them.
 
-The manifest is never left corrupt (a failed `add` also rolls its own edit back), so
-the consequence is a missing dependency, not a broken project — and re-running the
-lost command fixes it.
+The edit now goes through `package--edit-manifest!`, a **compare-and-swap**: the
+write only lands if the file still holds exactly what was read, and when it doesn't,
+the edit is *recomputed against the new content* and retried (bounded, 8 attempts,
+then a clear error saying nothing was written). Concurrent adds and removes all land,
+in some order, and the manifest is always valid.
 
-This is not detectable from inside the command, which is why there is no warning: the
-loser is whichever process wrote *first*, and it has already re-read the file and
-seen its own entry by the time the other write lands. Preventing it needs real mutual
-exclusion — an atomic exclusive-create or an advisory file lock — which the language
-has no primitive for today. Given that concurrent manifest edits are a scripting
-scenario rather than something a person does by hand, that primitive is deferred
-(ADR-011) rather than added speculatively.
+The CAS is the right shape here specifically because the "modify" step is Brood code
+— splicing an entry into source text — and so cannot run inside a locked primitive.
+The primitive is `%file-swap`, which supplies the two properties the retry rests on:
 
-**So: run manifest-mutating commands one at a time.** Read-only commands are
-unaffected — concurrent `nest test` / `nest check` runs are safe, including their
-shared on-disk check cache and `--failed` record (verified with four simultaneous
-runs).
+- **Serialisation** — a blocking exclusive `flock`, held only for the duration of the
+  call, so it cannot leak and the OS releases it if the process dies (no stale-lock
+  recovery to get wrong). The lock is a *separate* file, never the manifest: the
+  manifest is replaced by `rename`, and a lock on a since-unlinked inode would
+  exclude nobody.
+- **Crash-atomicity** — the new contents are written to a temp file and `rename`d
+  over the manifest, so a crash mid-edit leaves the old file intact. A half-written
+  manifest is exactly the "project no longer parses" failure worth avoiding.
+
+The lock file lives with the project's other derived state (its cache dir, keyed by
+project root — `/tmp` when there is no `HOME`), **not** in the project tree: nothing
+stray appears next to your source, and the lock's inode stays stable across manifest
+rewrites.
+
+A failed `add` still rolls its own edit back, and that rollback is a CAS too — it
+only reverts if the manifest still holds what the failed command wrote, so it cannot
+stomp a concurrent editor. If it can't, it says so rather than overwriting.
+
+Read-only commands were never affected: concurrent `nest test` / `nest check` runs are
+safe, including their shared on-disk check cache and `--failed` record.
 
 ## Cache layout & gitignore
 
