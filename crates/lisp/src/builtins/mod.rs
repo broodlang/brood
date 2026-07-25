@@ -13,10 +13,12 @@ use crate::eval::apply;
 use crate::types::{Sig, Ty};
 
 mod bytes;
+mod crypto;
 mod errors;
 mod io;
 mod numeric;
 mod os;
+mod pkg;
 mod selfhost_macros;
 mod sequences;
 mod syntax_scan;
@@ -28,10 +30,12 @@ mod tooling;
 pub(crate) use system::build_id_string;
 
 use bytes::*;
+use crypto::*;
 use errors::*;
 use io::*;
 use numeric::*;
 use os::*;
+use pkg::*;
 use selfhost_macros::*;
 use sequences::*;
 use syntax_scan::*;

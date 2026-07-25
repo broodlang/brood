@@ -696,3 +696,72 @@ pub(super) fn prim_decimal_to_float(args: &[Value], _: EnvId, heap: &mut Heap) -
         )),
     }
 }
+
+// ---------- transcendental math ----------
+
+macro_rules! math1_unrestricted {
+    ($name:ident, $brood:literal, $method:ident) => {
+        pub(super) fn $name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+            let x = expect_number(heap, $brood, arg(args, 0))?;
+            Ok(Value::float(x.$method()))
+        }
+    };
+}
+
+macro_rules! math1_bounded {
+    ($name:ident, $brood:literal, $method:ident) => {
+        pub(super) fn $name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+            let x = expect_number(heap, $brood, arg(args, 0))?;
+            if x < -1.0 || x > 1.0 {
+                return Err(LispError::runtime(format!(
+                    "{}: argument {} is out of domain [-1, 1]",
+                    $brood, x
+                )));
+            }
+            Ok(Value::float(x.$method()))
+        }
+    };
+}
+
+macro_rules! math1_positive {
+    ($name:ident, $brood:literal, $method:ident) => {
+        pub(super) fn $name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+            let x = expect_number(heap, $brood, arg(args, 0))?;
+            if x <= 0.0 {
+                return Err(LispError::runtime(format!(
+                    "{}: argument {} must be positive",
+                    $brood, x
+                )));
+            }
+            Ok(Value::float(x.$method()))
+        }
+    };
+}
+
+math1_unrestricted!(math_sin, "sin", sin);
+math1_unrestricted!(math_cos, "cos", cos);
+math1_unrestricted!(math_tan, "tan", tan);
+math1_unrestricted!(math_atan, "atan", atan);
+math1_unrestricted!(math_exp, "exp", exp);
+math1_bounded!(math_asin, "asin", asin);
+math1_bounded!(math_acos, "acos", acos);
+math1_positive!(math_ln, "ln", ln);
+math1_positive!(math_log2, "log2", log2);
+math1_positive!(math_log10, "log10", log10);
+
+pub(super) fn math_f64_sqrt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let x = expect_number(heap, "%f64-sqrt", arg(args, 0))?;
+    if x < 0.0 {
+        return Err(LispError::runtime(format!(
+            "%f64-sqrt: argument {} must be non-negative",
+            x
+        )));
+    }
+    Ok(Value::float(x.sqrt()))
+}
+
+pub(super) fn math_atan2(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let y = expect_number(heap, "atan2", arg(args, 0))?;
+    let x = expect_number(heap, "atan2", arg(args, 1))?;
+    Ok(Value::float(y.atan2(x)))
+}
