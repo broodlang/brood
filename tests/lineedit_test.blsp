@@ -84,6 +84,32 @@
     ;; …but a non-consecutive repeat is kept (it becomes the newest)
     (assert= (editor/lineedit/lineedit-remember '("(b)" "(a)") "(a)") '("(a)" "(b)" "(a)"))))
 
+(describe "lineedit/lineedit-display-prompt — which prompt a state calls for"
+  ;; Public (not `--`) because a consumer that draws its own input line — brood-chat and
+  ;; brood-terminal both do — cannot otherwise know whether to show the configured prompt
+  ;; or the reverse-i-search one. Both were calling it as a private name until it was
+  ;; promoted; these cases pin the contract they depend on.
+  (test "an ordinary state shows its configured prompt"
+    (assert= (editor/lineedit/lineedit-display-prompt
+               (editor/lineedit/lineedit-init "x> " "" (list)))
+      "x> "))
+  (test "a searching state shows the reverse-i-search prompt with the query in it"
+    (let (searching (editor/lineedit/lineedit-handle
+                      (editor/lineedit/lineedit-init "x> " "" (list "(abc)"))
+                      :ctrl-r))
+      (is (string-contains? (editor/lineedit/lineedit-display-prompt searching)
+            "reverse-i-search"))))
+  (test "the query typed so far appears in the search prompt"
+    (let (typed (fold (fn (st key) (editor/lineedit/lineedit-handle st key))
+                  (editor/lineedit/lineedit-init "x> " "" (list "(abc)"))
+                  (list :ctrl-r "a" "b")))
+      (is (string-contains? (editor/lineedit/lineedit-display-prompt typed) "ab"))))
+  (test "leaving the search restores the configured prompt"
+    (let (state (fold (fn (st key) (editor/lineedit/lineedit-handle st key))
+                  (editor/lineedit/lineedit-init "x> " "" (list "(abc)"))
+                  (list :ctrl-r :ctrl-g)))
+      (assert= (editor/lineedit/lineedit-display-prompt state) "x> "))))
+
 (describe "lineedit/lineedit-handle — extra emacs/readline keys"
   (test "C-p / C-n walk history like ↑ / ↓"
     (let (h (editor/lineedit/lineedit-init "x> " "" (list "(b)" "(a)")))

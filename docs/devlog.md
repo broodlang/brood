@@ -7846,3 +7846,43 @@ to know a regression test tests anything. It also probes bodies via
 `%coverage-precompile` rather than by calling them: arms register their lines when they
 compile, and precompiling is both cheaper than arranging real calls into `log` and the
 exact path the bug was found on.
+
+## 2026-07-25 — the sibling projects: two fully broken, both fixed; one left to decide
+
+Swept `nest test` across the 14 sibling projects in `~/src/broodlang`. Eleven were green
+(brood-edit 829, hatch 750, pong 103, todo 37, willem 21, store-postgres 44, hatch-demo 89,
+pong-sound 92, mylife 13, mitch 2, brood-benchmark 2). Three were not.
+
+**brood-chat and brood-terminal didn't run at all** — both died at load on
+`lineedit--init` being module-private (ADR-146). The privacy error was a red herring: that
+name doesn't exist any more. ADR-146's own commit (`4d9056b`) *promoted* it to the public
+`lineedit-init`, and neither downstream project was updated. Same for `lineedit--handle` →
+`lineedit-handle` and `lineedit--remember` → `lineedit-remember`.
+
+`lineedit--display-prompt` was the interesting one: still private, and needed by **both**
+projects for the same reason — each draws its own input line, so neither can otherwise know
+whether to show the configured prompt or the reverse-i-search one. Two independent
+consumers needing a `--` helper is the signal that it belongs in the public API (exactly
+the argument that made `lineedit-init` public), so it is now `lineedit-display-prompt`,
+with four cases in `tests/lineedit_test.blsp` pinning the contract they rely on.
+
+Downstream, after those renames: brood-chat 102/102, brood-terminal 51/51, both
+`nest check`-clean. brood-chat also still called the prelude's `ensure-link`, superseded by
+`net/reconnect/watch` on 2026-07-18 — updated (a runtime dial path its tests don't reach,
+so the evidence there is the checker warning clearing, not a passing test).
+
+**brood-life's 5 failures need a decision, not a fix.** Its `bitboard-bs` board — the
+refc-shared bitset twin of the bignum `bitboard`, opt-in behind `LIFE_BITSET=1` — is built
+on `bitset`/`bitset-set`/`bitset-count`/`bitset-positions`/`bitset-and`/`bitset-xor`/
+`bitset-life-step`, and that whole kernel API (plus `Value::Bitset`) was deleted on
+2026-06-28. Notably the deletion arrived swept into a *REPL* commit (`0b3c392`, "Also
+in-tree (parallel kernel work, green)") with no ADR and no devlog line, so whether it was
+a deliberate POC cleanup or collateral is not recorded anywhere. Already logged as
+pre-existing on 2026-07-03. Either the dead variant goes, or the kernel API comes back —
+the latter being a `Value` kind plus a fused CA primitive, i.e. its own ADR. Not decided
+unilaterally.
+
+Method note: my first sweep for stale private names deduped with `sort -u -t: -k3`, which
+keys on the *name* — so brood-terminal's three call sites vanished behind brood-chat's
+identical ones and I "fixed" one file thinking it was the only one. Dedupe by file+name or
+not at all.

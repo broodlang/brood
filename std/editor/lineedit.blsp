@@ -593,9 +593,14 @@ matched pair reversed, or a lone unmatched bracket in the error face."
 size (e.g. a pty with no winsize), so layout never collapses to a 1-column window."
   (let ([c r] (term-size)) (if (< c 1) 80 c)))
 
-(defn lineedit--display-prompt (state)
-  "The prompt to show: the `(reverse-i-search)\`query':` prompt while searching, else
-the configured prompt."
+(defn lineedit-display-prompt (state)
+  "The prompt to show for `state`: the `(reverse-i-search)\`query':` prompt while
+searching, else the configured prompt.
+
+Public because a consumer that renders the editor itself — a custom TUI drawing its own
+input line rather than calling `lineedit-render` — has no other way to know which prompt
+the current state calls for. Two independent consumers needed it (a chat client and a
+terminal multiplexer), which is the same reason `lineedit-init` is public."
   (let (s (get state :search))
     (if (nil? s)
       (get state :prompt)
@@ -605,7 +610,7 @@ the configured prompt."
   "Recompute the horizontal-scroll window so point is visible, and cache the width,
 available text columns, and prompt width for rendering."
   (let (width (lineedit--cols)
-        promptw (string-length (lineedit--display-prompt state))
+        promptw (string-length (lineedit-display-prompt state))
         avail (max 1 (- width promptw))
         point (get state :point)
         hs (get state :hscroll)
@@ -642,7 +647,7 @@ highlighted (horizontally-scrolled) window, draw the signature hint on the line 
         hint (if (nil? raw-hint) nil (lineedit--fit raw-hint (dec (get st :width)) '()))
         cursor-col (+ promptw (- point hs))
         head (append (if (> prev-row 0) (list [:up prev-row]) '())
-               [[:cr] [:clear-below] [:print (lineedit--display-prompt st)]]
+               [[:cr] [:clear-below] [:print (lineedit-display-prompt st)]]
                (lineedit--chunk-ops chunks))
         tail (if (nil? hint)
                (list [:col cursor-col])
@@ -681,7 +686,7 @@ tested in isolation."
   (let (text (get st :text)
         point (get st :point)
         prefix (get st :prefix)
-        prompt (lineedit--display-prompt st)
+        prompt (lineedit-display-prompt st)
         cont (or (get st :cont-prompt) prompt)
         prev-row (or (get st :last-row) 0)
         base (string-length prefix)
@@ -721,7 +726,7 @@ partner highlights in place. `st` must already be reflowed by `lineedit--loop`."
   "Repaint the finished form once more (all lines, no scroll/cursor games) and drop to a
 fresh line, so the submitted form stays in scrollback as typed. Works for one or many
 lines; moves up over any leftover render block first."
-  (let (prompt (lineedit--display-prompt state)
+  (let (prompt (lineedit-display-prompt state)
         cont (or (get state :cont-prompt) prompt)
         text (get state :text)
         prefix (get state :prefix)
