@@ -19,11 +19,27 @@ use std::cell::Cell;
 /// global's arrow is handled by `sig_of`; a bare function name used as a value is
 /// a separate concern). Callers expose the result as `dynamic_within` (the `∩`
 /// relation) — never a precise `stat` — since a global is redefinable.
+/// Whether `s` is named with the dynamic-variable *earmuff* convention (`*name*`,
+/// at least one char between the stars). Such a global is dynamic by convention —
+/// rebound over its lifetime — so the checker types a use of it as unknown rather
+/// than pinning it to its current (usually default) heap value.
+fn is_earmuffed(s: Symbol) -> bool {
+    let name = value::symbol_name_ref(s);
+    name.len() > 2 && name.starts_with('*') && name.ends_with('*')
+}
+
 pub(super) fn global_value_ty(heap: &Heap, s: Symbol) -> Option<Ty> {
     // A **dynamic variable** (`defdyn`) must stay unknown: its heap value is only
     // the *default*, but `binding` rebinds it to any type within a dynamic extent,
-    // so typing a use against the default would be unsound.
-    if value::is_dynamic(s) {
+    // so typing a use against the default would be unsound. The same holds for any
+    // **earmuffed** global (`*name*`, the dynamic-variable naming convention) even
+    // when declared with a plain `def` and rebound via `def` — e.g. `*project-root*`
+    // (`(def *project-root* nil)` at load, reassigned to the real path at runtime).
+    // The type philosophy makes a redefinable global `dynamic()`, so pinning it to
+    // its load-time default would false-positive on every use once it is reassigned
+    // (`(path-join *project-root* …)` after a `(when (nil? *project-root*) (throw))`
+    // guard reads the default `nil`, not the string it actually holds).
+    if value::is_dynamic(s) || is_earmuffed(s) {
         return None;
     }
     let v = super::deps::obs_global(heap, s)?;

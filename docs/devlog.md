@@ -7468,3 +7468,41 @@ No codegen change: each closure call (`read_words(&mut b, op)`) became the direc
 846/846 + doctest, and a three-engine A/B (JIT vs `BROOD_NO_JIT=1` vs `BROOD_VM=0`) on a
 program exercising every arm family — output bit-identical, with `BROOD_JIT_DUMP_IR`
 confirming `sum-to`/`fold--loop`/`reverse--acc`/… actually tier through the new code.
+
+## 2026-07-25 — types: sound parameter inference from unconditional demands
+
+The false-positive-clean slice of ROADMAP's "parameter-type inference from body
+usage" (deferred under ADR-011 because a naive version guards-false-positives).
+
+`infer_sig` had two tiers: a *precise* one for a body that is a single direct call
+(pins each param to the callee's expected type — sound because a straight-line use
+is unconditional), and a *return-only* one for everything else (params left `ANY`).
+The new middle tier (`collect_param_demands` in `types/check/sigs.rs`) generalises
+the precise idea to the **whole body**: it collects a param's type-demand from every
+position *guaranteed to execute* on a call — a call argument (including nested), a
+`do` form, a `let`-binding RHS/body, an `if`/`when`/`cond`/`case`/`match` **test**,
+an `and`/`or` **first** operand — intersecting multiple demands. It descends only
+into those positions; a branch/guard arm, an `and`/`or` tail, a `try` body, a nested
+`fn`/`quote` are **skipped**, and an inner `let` binder that shadows a param excludes
+it within that scope. So `(defn wrap (x) (let (y (+ x 1)) (* y 2)))` now infers
+`x : number` (the `let`-RHS always runs), while `(defn f (x) (if (number? x) (+ x 1)
+x))` leaves `x` unconstrained (guarded) — the guarded-use false positive can't arise.
+Return inference is untouched (params still `ANY` there), so every return-pinned test
+is byte-identical.
+
+**Companion fix (`global_value_ty`):** a `*earmuffed*` global now types as *unknown*,
+not by its load-time default. `*project-root*` is `(def *project-root* nil)` reassigned
+to the real path at runtime — a redefinable/dynamic-by-convention global, which the
+type philosophy makes `dynamic()`. Pinning it to `nil` was a pre-existing imprecision
+(it produced a baseline `(canonicalize *project-root*)` warning); typing it unknown
+clears that, and prevents the new param tier from surfacing the same class at
+`(path-join *project-root* rel)` (which is even guarded by a preceding `nil?` throw).
+
+**Verified.** 413 checker tests (added guards for nested-call / `do` / unknown-callee
+demands, and for guarded-`if` / `or`-tail / `when` / `try` / shadowing *not* warning,
+plus earmuffed-vs-plain global typing); the one outdated test that asserted a `let`-RHS
+demand was "unsound" was corrected (a `let`-RHS is unconditional — the warning is a true
+positive). `nest check` clean on `tests/`. A whole-`std/` before/after `--check` sweep
+(baseline built from `main` in a throwaway worktree): argument-type warnings went 6 → 5
+— the param tier **added zero** and the earmuff fix **removed one** pre-existing false
+positive. Full `make test` green.

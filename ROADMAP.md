@@ -736,9 +736,25 @@ Runtime housekeeping (both items landed):
 - ⬜ **Merely-wider inference case** — a body typed exactly `number` (int ∪ float)
   declared `int`, e.g. `(/ x 2)`; can't be pinned without occurrence/range analysis
   and flagging it would false-positive on int-valued runs (ADR-011).
-- ⬜ **Parameter-type inference from arbitrary body usage** across branches — needs
-  guard-aware dominance analysis; stays out until false-positive-clean (ADR-011).
-  (The sound tiers of `infer_sig` already ship.)
+- 🟡 **Parameter-type inference from body usage** — the **sound (unconditional-demand)
+  slice shipped 2026-07-25.** `infer_sig` now infers a parameter's type from every
+  position that is *guaranteed to execute* on a call — a call argument (including
+  nested), a `do` form, a `let`-binding RHS/body, an `if`/`when`/`cond`/`match` *test*,
+  an `and`/`or` *first* operand — intersecting multiple demands
+  (`collect_param_demands`, `sigs.rs`). Positions gated by a branch/guard (arms,
+  short-circuit tails, `try` bodies, nested `fn`s) are skipped, and an inner binder
+  shadowing a param excludes it — so the guarded-use false positive can't arise. This
+  is the guard-aware dominance analysis the item wanted, in its provably-sound form.
+  Verified: 413 checker tests (incl. new guarded/shadowing/nested false-positive
+  guards), `nest check` clean on `tests/`, and a whole-`std/` before/after sweep that
+  **added zero** argument-type warnings (and net-removed one — see below). ⬜ Remaining
+  (deferred, ADR-011): demands from *conditional* positions (needs full occurrence
+  typing to stay clean) and the merely-wider return case above.
+- ✅ **Earmuffed-global typing** (2026-07-25, companion to the above): the checker now
+  types a `*earmuffed*` global as unknown (like a `defdyn`), not by its load-time
+  default value — a redefinable/dynamic-by-convention global (`*project-root*`, a plain
+  `def` reassigned at runtime) is `dynamic()` per the type philosophy. Clears the
+  pre-existing `(canonicalize *project-root*)` false positive (`global_value_ty`).
 - ✅ **First-class set kernel** — shipped 2026-07-24. A distinct `Value::Set`/
   `Tag::Set` backed by the CHAMP trie (`element → true`): the `#{…}` reader literal
   (evaluates + dedups its elements), `#{…}` printing, `set?`, `type-of` → `:set`,
