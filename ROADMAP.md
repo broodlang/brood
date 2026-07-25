@@ -188,11 +188,16 @@ was); added it to the `pub(crate) use self::gc::{…}` list.
 
 **Tier 4 — policy-in-Rust notes (judgment calls, "Rust=mechanism, Brood=policy"):**
 
-- ⬜ `gui.rs` hardcodes UI policy — Catppuccin colors duplicated with `theme.blsp`
-  (drift-prone), a named-color palette `face.blsp` could own, a kinetic-scroll
-  physics model. **Deferred:** moving colors into Brood means `gui.rs` reading them
-  from the language at render time (an architectural change, not a mechanical move),
-  and it can't be verified without a live display — out of scope for a blind cleanup.
+- ✅ `gui.rs` colors — **resolved as *not* duplication** (2026-07-25, like the `path`
+  case in Tier 2 #7). The premise was stale: there is **no `theme.blsp`**, and none of
+  the three constants (`1e1e2e`/`cdd6f4`/`f5f5f5`) appear in `std/`. Colours are already
+  *policy in Brood* — every render op carries its own `[r g b]`/hex resolved through
+  `std/editor/face.blsp`; the three `gui.rs` constants are the rendering *mechanism's*
+  fallback defaults (used only when Brood supplies none: `Op::Clear` with no `gui-bg!`,
+  a face with no `:bg`/`:fg`). A "move to Brood" would add render-time coupling for zero
+  dedup benefit. Fixed the stale `matches theme.blsp` comment to say so. (The
+  kinetic-scroll physics model remains a legitimate future policy-in-Brood candidate, but
+  is behaviour needing a live display to tune — genuinely deferred.)
 - ✅ `builtins/io.rs` split (done 2026-07-25): **crypto+hashing** (HashAlgo/`%digest`/
   `%hmac`/`%random-bytes`/`%chacha20-*`/`%pbkdf2-sha256-bytes`) → `builtins/crypto.rs`;
   the **package-manager git/tar mechanism** (`run_git`/`git_or_err`/`%git-resolve-ref`/
