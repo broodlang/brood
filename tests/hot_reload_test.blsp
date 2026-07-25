@@ -28,6 +28,10 @@
 
   ; the new fn works
   (test "arity change on redefinition: an old-arity call errors cleanly (no corruption)"
+    ;; This test changes an arity ON PURPOSE, so the kernel's reload diagnostic is
+    ;; expected rather than informative — silence it for this test's scope so it
+    ;; doesn't look like a problem in the suite's output.
+    (def *reload-diagnostics* false)
     (def hr-c (fn (x) x))
     (def hr-c (fn (x y) (+ x y)))
     ; 1-arg call against the new 2-arg fn

@@ -41,7 +41,7 @@ test discovery, lints, release, config)."
     nm
     " — a Brood project.\n"
     "(project\n"
-    "  :name    \""
+    "  :name \""
     nm
     "\"\n"
     "  :version \"0.1.0\")\n"
@@ -61,7 +61,12 @@ test discovery, lints, release, config)."
     " project's entry-point module — wired up as\n"
     "the `nest run` entry by default (module `main`, fn `main`).\"\n"
     "  (:use hello)\n"
-    "  (:use log))  ; the async, safe logger (std/log)\n"
+    ;; NB: comment goes ABOVE the form, not trailing the `(:use log)` clause — a
+    ;; comment inside a list is re-emitted on its own line by the formatter, which
+    ;; would hoist it above the whole `defmodule` and leave `nest new` output
+    ;; failing `nest format --check` on the very first run.
+    "  ;; `log` is the async, safe logger (std/log)\n"
+    "  (:use log))\n"
     "\n"
     "(defn main ()\n"
     "  \"Entry point: start the logger and print the project's greeting.\"\n"
@@ -172,9 +177,12 @@ test discovery, lints, release, config)."
     ";; A counter server. State `n` is the process's; messages drive it.\n"
     "(defprocess counter\n"
     "  (n)\n"
-    "  (cast :inc (+ n 1))      ; async: bump the count\n"
-    "  (cast [:add m] (+ n m))  ; async: add m\n"
-    "  (call :value [n n]))     ; sync: reply n, state unchanged\n"
+    "  ;; async: bump the count\n"
+    "  (cast :inc (+ n 1))\n"
+    "  ;; async: add m\n"
+    "  (cast [:add m] (+ n m))\n"
+    "  ;; sync: reply n, state unchanged\n"
+    "  (call :value [n n]))\n"
     "\n"
     "(defn main ()\n"
     "  \"Entry point: start a counter, drive it, read the result.\"\n"
@@ -211,8 +219,10 @@ test discovery, lints, release, config)."
     "cursor; every edit is a pure (model -> model) function and `ui-run` drives the\n"
     "loop — render `view`, poll a key, fold it with `update`, repeat. Swap\n"
     "`*term-display*` for `(gui-display)` (a --features gui build) to run in a window.\"\n"
-    "  (:use editor/ui)        ; the app framework: display frontends + the `ui-run` loop\n"
-    "  (:use editor/display))  ; the render-op constructors (clear / text / cursor / frame)\n"
+    "  ;; the app framework: display frontends + the `ui-run` loop\n"
+    "  (:use editor/ui)\n"
+    "  ;; the render-op constructors (clear / text / cursor / frame)\n"
+    "  (:use editor/display))\n"
     "\n"
     "(def *welcome*\n"
     "  (list \"hello, world\"\n"
@@ -340,9 +350,12 @@ test discovery, lints, release, config)."
     "window's close button quits. The model is a plain map; `ui-run` drives the loop\n"
     "— render `view`, poll a key, fold it with `update`, repeat — over a window from\n"
     "`(gui-display)`. Swap that for `*term-display*` to run in the terminal instead.\"\n"
-    "  (:use editor/ui)        ; the app framework: display frontends + the `ui-run` loop\n"
-    "  (:use editor/display)   ; the render-op constructors (clear / text / cursor / frame)\n"
-    "  (:use editor/face))     ; named text faces — style the sections in one place\n"
+    "  ;; the app framework: display frontends + the `ui-run` loop\n"
+    "  (:use editor/ui)\n"
+    "  ;; the render-op constructors (clear / text / cursor / frame)\n"
+    "  (:use editor/display)\n"
+    "  ;; named text faces — style the sections in one place\n"
+    "  (:use editor/face))\n"
     "\n"
     ";; Faces: define the look once. Restyle by editing these (or, live, e.g.\n"
     ";; `(face-set :app/count {:fg :magenta})`). On the GUI a face may also carry a\n"
@@ -1072,6 +1085,24 @@ test discovery, lints, release, config)."
              (str nm "/tests/main_test.blsp")
              (str nm "/tests/hello_test.blsp")])))
 
+;; Run every generated `.blsp` through the formatter.
+;;
+;; Templates are built by string concatenation, so their layout is whatever the
+;; author typed — and it drifted: every template shipped code that `nest format
+;; --check` immediately rejected, which meant a brand-new project failed its own
+;; CI format gate on the first run and the starter code modelled non-canonical
+;; style. Formatting here rather than hand-tuning each template means a NEW
+;; template cannot reintroduce the drift, and a change to the formatter's style is
+;; picked up for free.
+;;
+;; `format-file` leaves a file it cannot parse untouched, so a malformed template
+;; degrades to "written as-is" rather than mangled; failures are swallowed because a
+;; cosmetic pass must never break scaffolding.
+(defn scaffold--format-generated! (paths)
+  (require 'format)
+  (dolist (p paths)
+    (when (ends-with? p ".blsp") (try (format/format-file p) (catch _ nil)))))
+
 (defn new-project (nm &optional template)
   "Scaffold a new project named `nm` (or `\".\"` for the current directory, taking the project name from the cwd's basename): a `project.blsp` manifest, the baked-in language guide, and starter code chosen by `template` — `\"default\"` (a `main`+`hello` module pair, the default), `\"tui-loop\"` (a tail-recursive animation loop), `\"gen\"` (a stateful gen_server process), `\"editor\"` (a tiny text editor on the `ui` framework), `\"gui\"` (a windowed app on the `ui` framework, opened with `(gui-display)` — needs a `--features gui` runtime), `\"hatch\"` (a Hatch web app with a Postgres-backed message board — requires hatch + store-postgres as sibling path deps; run `nest run --main db-setup` once to create the database, then `nest run` to start), or `\"web-api\"` (a minimal Hatch JSON API — no live layer, no database; requires hatch as a sibling path dep; `nest run` to start). Existing scaffold files are overwritten, not rejected. Backs `nest new [--template …]`."
   ;; `nest new .` scaffolds into the current directory (cargo init's shape);
@@ -1104,7 +1135,8 @@ test discovery, lints, release, config)."
       (spit (path-join nm ".mcp.json") (project--mcp-json-template actual-name))
       (spit (path-join docs-dir "brood-for-claude.md") (%builtin-doc 'brood-for-claude))
       (spit (path-join skill-dir "SKILL.md") (%builtin-doc 'writing-brood-skill))
-      (let (code-files (project--write-template tmpl nm src-dir tests-dir actual-name))
+      (let (code-files (project--write-template tmpl nm src-dir tests-dir actual-name)
+            _ (scaffold--format-generated! (cons (path-join nm "project.blsp") code-files)))
         (println (str "Created Brood project '"
                    actual-name
                    "'"
@@ -1125,7 +1157,30 @@ test discovery, lints, release, config)."
         (if (= 0 (run-process "git" (list "init" "-q" nm)))
           (println "  initialized a git repository")
           (println "  (git init failed)")))
-      (println (if in-place
-                 "Next:  nest test && nest run"
-                 (str "Next:  cd " nm " && nest test && nest run")))
+      (scaffold--print-next-steps tmpl nm in-place)
       nm)))
+
+;; Templates whose manifest declares `:path` dependencies on SIBLING checkouts,
+;; mapped to what has to be present for the project to resolve.
+(def *scaffold--sibling-deps* {"hatch" ["hatch" "store-postgres"] "web-api" ["hatch"]})
+
+;; What to do next — and for the hatch templates, what to do FIRST.
+;;
+;; These scaffold `:path` deps on sibling checkouts, so without them every command
+;; fails on an unresolved dependency. The generic "Next: nest test && nest run" was
+;; therefore a promise the project could not keep: it was the first thing a user saw
+;; after `nest new`, and it did not work. Say what is required instead.
+(defn scaffold--print-next-steps (tmpl nm in-place)
+  (let (siblings (get *scaffold--sibling-deps* tmpl)
+        enter (if in-place "" (str "cd " nm " && ")))
+    (if (nil? siblings)
+      (println (str "Next:  " enter "nest test && nest run"))
+      (do
+        (println (str "This template depends on "
+                   (join " and " (map (fn (d) (str "../" d)) siblings))
+                   (if (= (count siblings) 1) " as a sibling path dep," " as sibling path deps,")))
+        (println (str "so `nest` commands will fail until "
+                   (if (= (count siblings) 1) "it is" "they are")
+                   " checked out beside this project"))
+        (println "(or the manifest's :dependencies are repointed at :git sources).")
+        (println (str "Next:  " enter "nest fetch   # once the dependencies are in place"))))))

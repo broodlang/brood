@@ -230,6 +230,7 @@ pub const SPECIAL_FORMS: &[&str] = &[
     kw::REMOTE_SPAWN_SYNC,
     kw::ERROR,
     kw::WITH_OUT_STR,
+    kw::WITH_ERR_STR,
     kw::BENCH,
 ];
 

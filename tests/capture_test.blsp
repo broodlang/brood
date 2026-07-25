@@ -58,3 +58,39 @@
                               (spawn (cap-child me))
                               (receive (:done (receive (:done (receive (:done nil)))))))))
       (assert= out "from-childfrom-childfrom-child"))))
+
+;; `with-err-str` — the stderr counterpart. It is NOT the same mechanism:
+;; `eprint`/`eprintln` write through the `*err*` port, so this rebinds that port to
+;; a collecting sink rather than using the kernel capture buffer. Its reason for
+;; existing is to let a test assert on a warning — and keep an expected warning out
+;; of the suite's output.
+(describe "with-err-str"
+  (test "captures a single eprintln, newline included"
+    (assert= (with-err-str (eprintln "a warning")) "a warning\n"))
+  (test "captures eprint with no newline" (assert= (with-err-str (eprint "bare")) "bare"))
+  (test "concatenates several writes in order"
+    (assert= (with-err-str (eprint "a") (eprint "b") (eprintln "c")) "abc\n"))
+  (test "yields the empty string when nothing was written"
+    (assert= (with-err-str 42) ""))
+  (test "discards the body's own value, like with-out-str"
+    (assert= (with-err-str (eprint "x") :ignored) "x"))
+  (test "does NOT capture stdout — the two channels stay separate"
+    ;; The inner `with-out-str` proves `print` went to stdout, and the outer
+    ;; `with-err-str` proves stderr saw only the eprint.
+    (let (captured-err (with-err-str (assert= (with-out-str (print "to-stdout")) "to-stdout")
+                         (eprint "to-stderr")))
+      (assert= captured-err "to-stderr")))
+  (test "restores the previous port afterwards"
+    ;; A second capture must see its own writes only — if the sink leaked, the
+    ;; first capture's text would reappear here.
+    (with-err-str (eprint "first"))
+    (assert= (with-err-str (eprint "second")) "second"))
+  (test "nests, each capture draining only its own writes"
+    (let (inner (with-err-str (eprint "IN")))
+      (assert= inner "IN")))
+  (test "a throwing body propagates the error rather than swallowing it"
+    (is (string-contains? (try (with-err-str (eprint "before") (error "boom")) (catch e e))
+          "boom")))
+  (test "the sink does not leak after a throw"
+    (try (with-err-str (error "boom")) (catch _ nil))
+    (assert= (with-err-str (eprint "clean")) "clean")))

@@ -79,6 +79,7 @@ pub const REMOTE_SPAWN: &str = "remote-spawn";
 pub const REMOTE_SPAWN_SYNC: &str = "remote-spawn-sync";
 pub const ERROR: &str = "error";
 pub const WITH_OUT_STR: &str = "with-out-str";
+pub const WITH_ERR_STR: &str = "with-err-str";
 pub const BENCH: &str = "bench";
 
 // Reader markers inside a quasiquote template — recognised by the reader, the

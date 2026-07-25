@@ -6,11 +6,12 @@
 ;; `:isolated` blocks whose `def`s roll back — otherwise a shim would leak into the
 ;; rest of the suite and stay wrapped for every later test.
 ;;
-;; EXPECTED NOISE: each instrumenting test prints a `[reload] arity changed …` line
-;; to stderr. That diagnostic is correct — wrapping really does change the arity to
-;; variadic — and `nest test --cover` silences it with `BROOD_NO_RELOAD_DIAG=1`. A
-;; test can't: there is no `setenv` primitive, and the kernel caches the flag on
-;; first read. Leave the lines; they are the diagnostic working.
+;; Each instrumenting test would print a `[reload] arity changed …` line, because
+;; wrapping really does change a function's arity to variadic. The diagnostic is
+;; correct but it is expected here, so these blocks turn it off with the
+;; in-language switch `*reload-diagnostics*` (the kernel consults it in `def`, and
+;; `:isolated` rolls the binding back afterwards) — keeping the suite's output
+;; clean without weakening the diagnostic anywhere else.
 
 (defmodule coverage-test (:use-internals coverage) (:use test) (:use coverage))
 
@@ -95,15 +96,18 @@
 (describe "coverage: instrumentation records hits"
   :isolated
   (test "a wrapped function records a hit and still returns correctly"
+    (def *reload-diagnostics* false)
     (let (hits (table))
       (coverage/coverage--instrument! 'coverage-test/coverage-test--fixed hits)
       (assert= (coverage-test--fixed 2 3) 5)
       (assert= (table-get hits "coverage-test/coverage-test--fixed") 1)))
   (test "an uncalled function records nothing"
+    (def *reload-diagnostics* false)
     (let (hits (table))
       (coverage/coverage--instrument! 'coverage-test/coverage-test--fixed hits)
       (assert= (table-get hits "coverage-test/coverage-test--fixed" 0) 0)))
   (test "repeated calls accumulate"
+    (def *reload-diagnostics* false)
     (let (hits (table))
       (coverage/coverage--instrument! 'coverage-test/coverage-test--fixed hits)
       (coverage-test--fixed 1 1)
@@ -117,30 +121,37 @@
 (describe "coverage: instrumentation preserves calling shapes"
   :isolated
   (test "a variadic function still receives its rest args"
+    (def *reload-diagnostics* false)
     (let (hits (table))
       (coverage/coverage--instrument! 'coverage-test/coverage-test--variadic hits)
       (assert= (coverage-test--variadic 1 2 3) (list 1 (list 2 3)))))
   (test "a variadic function called with no rest args still works"
+    (def *reload-diagnostics* false)
     (let (hits (table))
       (coverage/coverage--instrument! 'coverage-test/coverage-test--variadic hits)
       (assert= (coverage-test--variadic 1) (list 1 nil))))
   (test "an &optional function works with the optional supplied"
+    (def *reload-diagnostics* false)
     (let (hits (table))
       (coverage/coverage--instrument! 'coverage-test/coverage-test--optional hits)
       (assert= (coverage-test--optional 1 2) (list 1 2))))
   (test "an &optional function works with the optional omitted"
+    (def *reload-diagnostics* false)
     (let (hits (table))
       (coverage/coverage--instrument! 'coverage-test/coverage-test--optional hits)
       (assert= (coverage-test--optional 1) (list 1 nil))))
   (test "a MULTI-ARM function still dispatches on 1 arg when wrapped"
+    (def *reload-diagnostics* false)
     (let (hits (table))
       (coverage/coverage--instrument! 'coverage-test/coverage-test--multi hits)
       (assert= (coverage-test--multi 7) (list :one 7))))
   (test "a MULTI-ARM function still dispatches on 2 args when wrapped"
+    (def *reload-diagnostics* false)
     (let (hits (table))
       (coverage/coverage--instrument! 'coverage-test/coverage-test--multi hits)
       (assert= (coverage-test--multi 7 8) (list :two 7 8))))
   (test "a self-recursive function still computes correctly when wrapped"
+    (def *reload-diagnostics* false)
     (let (hits (table))
       (coverage/coverage--instrument! 'coverage-test/coverage-test--recursive hits)
       (assert= (coverage-test--recursive 4 0) 10))))

@@ -534,7 +534,10 @@ fn run_main(cli: Cli) {
         }
         Cmd::Check { files } => {
             if files.is_empty() {
-                require_project("check", Some("To check one file outside a project: nest check <file>.blsp"));
+                require_project(
+                    "check",
+                    Some("To check one file outside a project: nest check <file>.blsp"),
+                );
             }
             cmd_check(&mut interp, &files)
         }
@@ -556,7 +559,10 @@ fn run_main(cli: Cli) {
             // A FILE runs standalone outside a project (documented); the bare
             // form needs `:main` from a manifest.
             if file.is_none() {
-                require_project("run", Some("To run one file outside a project: nest run <file>.blsp"));
+                require_project(
+                    "run",
+                    Some("To run one file outside a project: nest run <file>.blsp"),
+                );
             }
             cmd_run(
                 &mut interp,
@@ -615,8 +621,14 @@ fn run_main(cli: Cli) {
             require_project("mcp", None);
             cmd_mcp(&mut interp)
         }
-        Cmd::Observe { connect, cookie } => cmd_observe(&mut interp, connect, cookie),
-        Cmd::Attach { spec, cookie } => cmd_attach(&mut interp, spec, cookie),
+        Cmd::Observe { connect, cookie } => {
+            require_terminal("observe");
+            cmd_observe(&mut interp, connect, cookie)
+        }
+        Cmd::Attach { spec, cookie } => {
+            require_terminal("attach");
+            cmd_attach(&mut interp, spec, cookie)
+        }
         Cmd::Release {
             output,
             runtime,
@@ -861,6 +873,7 @@ fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
 
 /// `nest check [FILES...]` — project-wide if no files, otherwise file-by-file.
 fn cmd_check(interp: &mut Interp, files: &[String]) {
+    require_readable_files("check", files);
     // One checker, one path. Whole-project and file-list checks both go through
     // `std/project.blsp`, which loads the project image *first* so cross-module /
     // namespace imports resolve through the heap's globals. The single-file path
@@ -963,6 +976,13 @@ fn cmd_run(
         _ => None,
     };
     let file: Option<&str> = if doc_arg.is_some() { None } else { file };
+
+    // Only the path that will be RUN as Brood source is required to exist. A
+    // `doc_arg` deliberately need not: `nest run notes.txt` hands the path to the
+    // entry point, and opening a not-yet-created file is the normal editor case.
+    if let Some(path) = file {
+        require_readable_files("run", &[path.to_string()]);
+    }
 
     let promoted: Option<String> = if file.is_none() && doc_arg.is_none() && watch.len() == 1 {
         let p = &watch[0];
@@ -1528,9 +1548,6 @@ fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
     }
 }
 
-/// Walk up from cwd looking for a `project.blsp` marker. Used by the
-/// single-file `nest run/test/check` paths to decide whether to bootstrap
-/// the project image.
 // ── shell completion ────────────────────────────────────────────────────────
 //
 // Two halves, split by what owns the truth:
@@ -1549,13 +1566,21 @@ fn run_for_value(interp: &mut Interp, code: &str) -> brood::core::value::Value {
 /// What kind of value an argument takes, i.e. what to suggest after it. `None`
 /// means "no idea" — the shell falls back to filename completion, which is a
 /// better answer than a wrong list.
+/// Every arm matches on the argument's NAME as well as the subcommand. An earlier
+/// version had a subcommand-wide arm (`("check" | "run" | "format", _)`), which also
+/// caught `nest run --main` and offered it file paths — but `--main` takes
+/// `MODULE[/FN]`, so every suggestion was wrong. Name each argument.
 fn value_kind(subcommand: &str, arg_name: &str) -> Option<&'static str> {
     match (subcommand, arg_name) {
         (_, "only" | "exclude" | "include") => Some("selector"),
         ("test", "files") => Some("test-file"),
-        ("check" | "run" | "format", _) => Some("blsp-file"),
+        ("check", "files") | ("run", "file") => Some("blsp-file"),
         ("doc", "module") => Some("module"),
-        ("remove" | "update", _) => Some("dep"),
+        // `--main` names a module (optionally `module/fn`), so offer this project's
+        // own modules — not std's, which can't be an entry point.
+        ("run", "main") => Some("project-module"),
+        ("new", "template") => Some("template"),
+        ("remove" | "update", "names" | "name") => Some("dep"),
         _ => None,
     }
 }
@@ -1771,6 +1796,41 @@ fn positional_possible_values(subcommand: &str) -> Option<Vec<String>> {
     (!values.is_empty()).then_some(values)
 }
 
+/// Reject a named file that isn't readable, at the `nest` boundary.
+///
+/// `nest test FILE` already did this (`read_source_or_exit`) and reported
+/// `nest test: cannot read x.blsp: No such file or directory`. `check` and `run`
+/// did not — they handed the path to Brood, which surfaced the failure from
+/// whichever internal function happened to read it first
+/// (`check-file-deps: cannot read …`, plus a trace through `project--pfold-files`).
+/// Same mistake, same message, wherever it is made.
+fn require_readable_files(command: &str, files: &[String]) {
+    for path in files {
+        if let Err(e) = std::fs::metadata(path) {
+            eprintln!("nest {command}: cannot read {path}: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Reject a full-screen TUI subcommand when stdout isn't a terminal.
+///
+/// `nest observe` / `nest attach` drive an alternate-screen TUI. Piped or
+/// redirected, the terminal primitives fail deep inside the render loop and the
+/// user got `runtime error: terminal: No such device or address (os error 6)` with
+/// an `at editor/ui/ui-run` frame — technically true, and useless. Say the actual
+/// problem before anything is started.
+fn require_terminal(command: &str) {
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        return;
+    }
+    eprintln!("nest {command}: needs an interactive terminal — stdout is not a tty.");
+    eprintln!("  It draws a full-screen view, so it can't be piped or redirected.");
+    eprintln!("  To capture output for a test, run it under a pty: script -qec 'nest {command}' /dev/null");
+    std::process::exit(2);
+}
+
 /// Guard a project-scoped subcommand at the `nest` boundary.
 ///
 /// Without this, running one outside a project surfaced a raw Brood `error`: a
@@ -1792,6 +1852,10 @@ fn require_project(command: &str, hint: Option<&str>) {
     std::process::exit(2);
 }
 
+/// Walk up from cwd looking for a `project.blsp` marker. Used by the
+/// single-file `nest run/test/check` paths to decide whether to bootstrap
+/// the project image, and by `require_project` to reject a project-scoped
+/// command run outside one.
 fn in_project() -> bool {
     let mut here = std::env::current_dir().ok();
     while let Some(dir) = here {

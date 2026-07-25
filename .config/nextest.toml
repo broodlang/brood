@@ -57,3 +57,14 @@ retries = 1
 [[profile.default.overrides]]
 filter = 'binary(suite)'
 slow-timeout = { period = "60s", terminate-after = 5 }
+# One retry, for the same reason `distribution`/`serve_attach` get one — and with a
+# sharper edge here. The in-language suite CONTAINS timing-sensitive cases that talk
+# to a local node (`tests/remote_spawn_test.blsp` does a `remote-spawn` round trip),
+# and because they run inside this single wrapper case they were the only such tests
+# in the workspace with no second chance: one blown deadline under a loaded runner
+# reddened all ~3160 of them (observed 2026-07-25 — the same case passed 3/3
+# standalone and 2/2 in full re-runs immediately after). The retry costs nothing on a
+# green run (nextest only re-runs a FAILED case), a deterministic regression still
+# fails both attempts and stays red, and a pass-on-retry is reported as FLAKY so it
+# cannot be silently absorbed.
+retries = 1

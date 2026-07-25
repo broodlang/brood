@@ -500,7 +500,7 @@ fn eval_tail_loop(
                             (value_arity(heap, old), value_arity(heap, val))
                         {
                             if (old_a.min != new_a.min || old_a.max != new_a.max)
-                                && reload_diagnostics_enabled()
+                                && reload_diagnostics_enabled(heap, root)
                             {
                                 eprintln!(
                                     "[reload] arity changed for {}: {} -> {}",
@@ -518,7 +518,7 @@ fn eval_tail_loop(
                         // `defmacro` special form.
                         if matches!(old.unpack(), ValueRef::Macro(_))
                             && matches!(val.unpack(), ValueRef::Macro(_))
-                            && reload_diagnostics_enabled()
+                            && reload_diagnostics_enabled(heap, root)
                         {
                             eprintln!(
                                 "[reload] macro {} redefined; callers expanded before now keep the old expansion — re-eval them",
@@ -1971,11 +1971,25 @@ fn value_arity(heap: &Heap, v: Value) -> Option<value::Arity> {
 /// in a variadic counting shim, which legitimately changes every arity, so the
 /// diagnostic would be hundreds of lines of expected noise. Off-switch only: the
 /// default stays on, so an accidental reload mismatch is still surfaced.
-fn reload_diagnostics_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
+fn reload_diagnostics_enabled(heap: &Heap, root: EnvId) -> bool {
+    static ENV_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let env_on = *ENV_ON.get_or_init(|| {
         !std::env::var("BROOD_NO_RELOAD_DIAG").is_ok_and(|v| v != "0" && !v.is_empty())
-    })
+    });
+    if !env_on {
+        return false;
+    }
+    // The in-language switch. `def` is not a hot path, so one global lookup here is
+    // free, and it lets Brood code that rebinds globals *deliberately and en masse*
+    // — coverage instrumentation, a reload tool, a test exercising the diagnostic —
+    // turn the chatter off for its own scope without an env var (there is no
+    // `setenv` primitive, and the env read above is cached process-wide anyway).
+    // Unbound means on, so the default is unchanged.
+    let name = value::intern("*reload-diagnostics*");
+    match heap.env_get(root, name) {
+        Some(v) => truthy(v),
+        None => true,
+    }
 }
 
 /// Render an `Arity` as a compact "N", "N-M", or "N+" string for the

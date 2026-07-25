@@ -1473,7 +1473,7 @@ unavoidably O(n²)) are Rust primitives; the rest of the library is Brood over
 language" principle.
 
 ### I/O
-`print`  `println`  `with-out-str`
+`print`  `println`  `eprint`  `eprintln`  `with-out-str`  `with-err-str`
 
 - `print` writes the display forms of its arguments to stdout (space-separated);
   `println` adds a trailing newline. Both **flush stdout on every call**, so an
@@ -1487,6 +1487,15 @@ language" principle.
   mcp` tool handler, whose output is diverted off the JSON-RPC channel — drains
   only its own output. The buffer is released even if `body` throws (the error
   re-raises). Built on the `%capture-begin`/`%capture-take` kernel primitives.
+- `(with-err-str body...)` is the stderr counterpart, and works differently
+  because stderr does: `eprint`/`eprintln` write through the **`*err*` port**, so
+  this rebinds that port to a collecting sink rather than using the kernel capture
+  buffer. Two consequences follow — it captures only what goes through `*err*` (a
+  diagnostic the *kernel* writes, e.g. `[reload] arity changed`, is not
+  interceptable this way; that one has its own switch, `*reload-diagnostics*`), and
+  it does not follow into spawned processes the way `with-out-str` does. Use it to
+  **assert on a warning**, and to keep an expected warning out of a test run's
+  output.
 - For simple raw-terminal control, `(:use editor/ansi)` provides escape *strings*
   to `print`: `ansi-clear` (erase + home — the per-frame reset), `ansi-cursor`,
   `ansi-home`, `ansi-hide-cursor`/`ansi-show-cursor`. The ESC byte is the `\e`

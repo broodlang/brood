@@ -872,6 +872,28 @@ Runtime housekeeping (both items landed):
   JIT off in that mode; reporting extends `std/tool/coverage.blsp`). Deferred until
   something concrete needs per-line detail: function coverage answers "what does my
   suite never touch", which is the question that changes what you write next.
+- ✅ **`nest` correctness + UX hardening pass** — 2026-07-24/25, driven by an
+  adversarial harness (~50 hostile values × every flag and positional, malformed
+  manifests, malformed sources, bare directories, concurrent invocations) plus
+  end-to-end scaffold runs. Zero panics and zero injections survive
+  (verified with a *computing* oracle, so an echoed payload can't be mistaken for an
+  evaluated one). Fixed, worst first: **`nest format` silently restructured code that
+  didn't parse** (the tolerant CST's recovery moved a top-level `defn` inside another
+  and appended the missing paren — being mid-edit with an unclosed paren is routine,
+  and format-on-save makes it automatic; `format-file` now gates on the strict reader
+  and leaves the file byte-identical); **`nest add` could brick a project** two ways
+  (a name that isn't a plain symbol was written verbatim into the manifest, and a
+  failed resolve left an unresolvable dep behind — now round-trip-validated and
+  atomic); **a misspelled manifest head was silently ignored**, dropping every
+  setting; a `--partitions 0` **panic**; and a whole class of *leaked internals* —
+  twelve project-scoped commands, a missing FILE, the TUI commands without a tty, and
+  `nest search`'s raw error map now all report one actionable line instead of a Brood
+  stack trace. `nest new` also produced projects that failed their own `nest format
+  --check`; the scaffolder now formats its own output, so no future template can
+  drift. Test count 810 → 842 nextest cases / 3161 in-language, with the suite's
+  warning channel now empty. Known limitation, measured and documented rather than
+  papered over: concurrent `nest add`/`remove` lose an update (no locking primitive —
+  `docs/packages.md`).
 - ✅ **Shell completion (`nest completions`)** — shipped 2026-07-24
   ([`docs/tooling.md`](docs/tooling.md) §Shell completion). TAB completion for
   bash/zsh/fish covering subcommands, flags, **and project-aware values**: test

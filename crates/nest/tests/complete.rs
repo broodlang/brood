@@ -120,46 +120,34 @@ fn completion_never_fails_however_it_is_called() {
     let broken = tempdir("broken");
     std::fs::write(broken.path.join("project.blsp"), "(project :name \n").unwrap();
 
-    // Argument text designed to break interpolation, paths, and the reader.
+    // Deliberately small. Each case is a process spawn, and the value-position
+    // ones boot an interpreter — an exhaustive matrix here once made this test run
+    // 40s and destabilise `brood_suite_passes` (which runs the whole in-language
+    // suite in one case) by competing with it for cores and memory. So: cover
+    // input KINDS, not permutations. These six are the distinct shapes that reach
+    // different code — empty, flag-like, path-traversing, quote/paren (reader
+    // escapes), shell metacharacters, and an interpolation-escape attempt.
     let hostile = [
         "",
-        " ",
-        "-",
         "--",
-        "..",
-        "/etc/passwd",
+        "../..",
         "\"",
-        "\\",
-        "(",
-        ")",
-        "#{",
         "$(id)",
-        ";id",
         "x\") (print \"PWNED\") (\"",
-        "日本語",
-        "🔥",
     ];
-    // The full matrix runs against the healthy project (where dynamic lookups
-    // actually execute); the degraded contexts get a smaller sweep. Every
-    // invocation is a process spawn, so the shape is chosen to keep this well
-    // inside the per-test time cap while still covering each context.
-    for sub in ["test", "check", "doc", "remove", "grammar", "nope", ""] {
-        complete_in(&proj.path, &[sub]).assert_never_fails(sub);
-        complete_in(&proj.path, &[sub, ""]).assert_never_fails(sub);
+
+    for dir in [&proj.path, &bare.path, &broken.path] {
+        // No words at all, and a bare subcommand.
+        complete_in(dir, &[]).assert_never_fails("no words");
+        complete_in(dir, &["nope"]).assert_never_fails("unknown subcommand");
         for value in hostile {
-            complete_in(&proj.path, &[sub, value]).assert_never_fails(value);
-            complete_in(&proj.path, &[sub, "--only", value]).assert_never_fails(value);
+            // A static position (subcommand name) and each dynamic kind.
+            complete_in(dir, &[value]).assert_never_fails(value);
+            complete_in(dir, &["test", "--only", value]).assert_never_fails(value);
+            complete_in(dir, &["test", value]).assert_never_fails(value);
+            complete_in(dir, &["remove", value]).assert_never_fails(value);
+            complete_in(dir, &["doc", value]).assert_never_fails(value);
         }
-    }
-    for dir in [&bare, &broken] {
-        for sub in ["test", "remove", "doc", ""] {
-            complete_in(&dir.path, &[sub, ""]).assert_never_fails(sub);
-            for value in ["", "\"", "(", "$(id)", "x\") (print \"PWNED\") (\""] {
-                complete_in(&dir.path, &[sub, value]).assert_never_fails(value);
-                complete_in(&dir.path, &[sub, "--only", value]).assert_never_fails(value);
-            }
-        }
-        complete_in(&dir.path, &[]).assert_never_fails("no words");
     }
 }
 
@@ -377,7 +365,10 @@ fn the_zsh_script_does_not_shadow_the_words_array() {
         !script.contains("local -a words"),
         "zsh script must not declare a local named `words`"
     );
-    assert!(script.contains("$CURRENT"), "zsh script should use $CURRENT");
+    assert!(
+        script.contains("$CURRENT"),
+        "zsh script should use $CURRENT"
+    );
 }
 
 #[test]
@@ -386,5 +377,56 @@ fn the_bash_script_keeps_filename_fallback() {
     assert!(
         script.contains("-o default"),
         "bash script should fall back to filename completion"
+    );
+}
+
+#[test]
+fn template_names_come_from_the_scaffolders_own_list() {
+    let proj = project();
+    let got = complete_in(&proj.path, &["new", "--template", ""]);
+    got.assert_never_fails("templates");
+    let lines = got.lines();
+    for t in [
+        "default", "tui-loop", "gen", "editor", "gui", "hatch", "web-api",
+    ] {
+        assert!(lines.contains(&t), "missing template {t} in {lines:?}");
+    }
+    // Prefix filtering applies here too.
+    let filtered = complete_in(&proj.path, &["new", "--template", "g"]);
+    let names = filtered.lines();
+    assert!(
+        names.contains(&"gen") && names.contains(&"gui"),
+        "{names:?}"
+    );
+    assert!(!names.contains(&"default"), "{names:?}");
+}
+
+/// Regression: a subcommand-wide arm in `value_kind` (`("check"|"run"|"format", _)`)
+/// also caught `nest run --main`, so it offered FILE PATHS for an argument that
+/// takes `MODULE[/FN]` — every suggestion was wrong. `--main` must offer this
+/// project's own modules, while the positional still offers paths.
+#[test]
+fn run_main_offers_modules_not_file_paths() {
+    let proj = project();
+    let got = complete_in(&proj.path, &["run", "--main", ""]);
+    got.assert_never_fails("--main");
+    let lines = got.lines();
+    assert!(
+        lines.contains(&"main"),
+        "should offer the module name: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.ends_with(".blsp")),
+        "--main must not offer file paths: {lines:?}"
+    );
+    // A std module is never a valid entry point, so it must not be offered either.
+    assert!(!lines.contains(&"json"), "{lines:?}");
+
+    // The positional, by contrast, IS a path.
+    let positional = complete_in(&proj.path, &["run", ""]);
+    assert!(
+        positional.lines().iter().any(|l| l.ends_with(".blsp")),
+        "the run positional should offer paths: {:?}",
+        positional.lines()
     );
 }

@@ -389,6 +389,31 @@ written) in place — the dev / self-hosted / offline path.
 To publish, a package sets two manifest fields: `:repository` (its git URL) and
 `:description`. The published `:ref` is `v<version>` by convention.
 
+## One at a time: the manifest edits are not concurrency-safe
+
+`nest add` / `nest remove` edit `project.blsp` as a **read-modify-write with no
+locking**. Run two at once and one is silently lost: both read the original file,
+both append their entry, and the second write wins — while *both* report success.
+Measured with three concurrent `nest add`s, between one and three of them actually
+landed.
+
+The manifest is never left corrupt (a failed `add` also rolls its own edit back), so
+the consequence is a missing dependency, not a broken project — and re-running the
+lost command fixes it.
+
+This is not detectable from inside the command, which is why there is no warning: the
+loser is whichever process wrote *first*, and it has already re-read the file and
+seen its own entry by the time the other write lands. Preventing it needs real mutual
+exclusion — an atomic exclusive-create or an advisory file lock — which the language
+has no primitive for today. Given that concurrent manifest edits are a scripting
+scenario rather than something a person does by hand, that primitive is deferred
+(ADR-011) rather than added speculatively.
+
+**So: run manifest-mutating commands one at a time.** Read-only commands are
+unaffected — concurrent `nest test` / `nest check` runs are safe, including their
+shared on-disk check cache and `--failed` record (verified with four simultaneous
+runs).
+
 ## Cache layout & gitignore
 
 The cache is **per project** at `_deps/`. It is **not** shared across

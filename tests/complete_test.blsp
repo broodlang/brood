@@ -105,3 +105,25 @@
     ;; tagged tests still gets the useful `test:` / `describe:` hints.
     (let (selectors (complete/complete-selectors))
       (and (is (includes? selectors "test:")) (is (includes? selectors "describe:"))))))
+
+(describe "complete: template + project-module kinds"
+  (test "the template list is non-empty and comes from the scaffolder"
+    (is (includes? (complete/complete-templates) "default")))
+  (test "every scaffolder template is offered"
+    ;; Compared against the scaffolder's own list rather than a restated one, so a
+    ;; new template is completable with no change here. Reached via `eval` because
+    ;; `*project-templates*` is an ambient (earmuffed) global in another module —
+    ;; it is only bound once `scaffold` is required, which the static checker
+    ;; cannot see.
+    (require 'scaffold)
+    (assert= (count (complete/complete-templates)) (count (eval '*project-templates*))))
+  (test "the template kind dispatches"
+    (is (includes? (complete/complete-for "template") "gen")))
+  (test "the project-module kind dispatches without raising"
+    ;; This repo declares no :source-paths, so there is nothing to offer — the
+    ;; contract is that it returns a list (possibly empty), never an error.
+    (let (got (complete/complete-for "project-module")) (is (or (nil? got) (pair? got)))))
+  (test "project modules exclude std modules"
+    ;; `complete-modules` includes baked-in std; `complete-project-modules` must not,
+    ;; since a std module can never be a `--main` entry point.
+    (refute (includes? (or (complete/complete-project-modules) (list)) "json"))))

@@ -128,8 +128,9 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
                All submodules use glob re-export (`use X::*`) so register() is untouched
   introspect.rs  doc/arglist/global-names/bound? and friends (ADR-025)
   cli_support.rs file-runner / --test plumbing shared by the binaries
-  process.rs + process/   green-process scheduler (mailbox, message, monitor,
-               scheduler, timer): spawn/send/receive/monitor
+  process.rs + process/   green-process scheduler (mailbox, message, monitor, links,
+               timer, sysmon, io_source) with the scheduler itself split under
+               process/scheduler/ (pool, lifecycle, guards): spawn/send/receive/monitor
   subprocess.rs   persistent child-OS-process mechanism (ADR-104) — distinct from
                process.rs (green processes); renamed from proc.rs to end the name clash
   dist.rs + dist/   distributed nodes (handshake, heartbeat, wire) — ADR-033/034
@@ -149,8 +150,8 @@ std/                     standard library written in Brood, grouped (ADR-085):
                          framework `std/proc/*` (`gen`, `supervisor`); the net *library*
                          `std/net/*` (`http`, `sse`, `tcp`); the toolchain `std/tool/*`
                          — grouped on disk but BARE module names (test, project, package,
-                         complete, coverage, docs, grammar, mcp, observer, proctree,
-                         repl, sexp, reload). The
+                         complete, coverage, docs, explain, grammar, mcp, observer,
+                         proctree, repl, scaffold, sexp, reload). The
                          net library and `proc/supervisor` were briefly externalized (Move 2)
                          then re-bundled in-tree (ADR-097, batteries-included default);
                          the Rust socket *mechanism* stays in-tree too
@@ -169,7 +170,8 @@ today: `new`, `test`, `check`, `run` (with `--watch`), `doc`, `format`, `repl`,
 app — ADR-090), `completions` (emit a shell TAB-completion script; `complete` is the hidden
 candidate engine behind it), `grammar` (emit an editor syntax grammar — VS Code TextMate or
 Emacs — generated from `(special-forms)`, ADR-092), the package-manager commands
-`fetch`/`update`/`tree`/`add`/`remove` (ADR-037), and `release` (single-binary
+`fetch`/`update`/`tree`/`add`/`remove` (ADR-037) plus `publish`/`search` against a
+git-backed registry index (ADR-147), and `release` (single-binary
 bundling, ADR-038).
 
 ## Commands
@@ -237,6 +239,7 @@ contention races).
 | `BROOD_EVAL_TRACE=1` | Trace each form entering the tree-walking evaluator to stderr (`[eval-trace] <form>`). Debug builds only. Use to see which forms the VM defers to the tree-walker. |
 | `BROOD_BOOT_TRACE=1` | Print the cold-start phase breakdown of the shared prelude build to stderr (`[boot] builtins=… read=… expand=… eval=… freeze=…`), plus a `[boot-form]` line for any single form whose expansion takes >300µs. Works in release. The startup-snapshot roadmap item's measurement tool (2026-07-19: expansion is ~27ms of the ~31ms boot). |
 | `BROOD_JIT_CB_TRACE=1` | Trace JIT runtime-callback invocations to stderr (`[jit-cb] brood_rt_<name>(...)`). Debug builds only. Useful for diagnosing JIT-compiled code calling back into Rust (global lookup, slow calls, GC). |
+| `BROOD_NO_RELOAD_DIAG=1` | Silence the hot-reload `def` diagnostics (`[reload] arity changed …`, `[reload] macro … redefined`). For a tool that rebinds globals *deliberately and en masse* — `nest test --cover` wraps every project function in a variadic shim, so it sets this itself. Off-switch only; the default stays on so an accidental reload mismatch is still surfaced. In-language equivalent: bind the global `*reload-diagnostics*` to false (the kernel checks both), which is what a test exercising a deliberate arity change does. |
 | `RUST_BACKTRACE` | `brood`/`nest` **default it to `1`** (set in each `main`); `RUST_BACKTRACE=0` opts out, `full` for verbose. |
 
 **Two layers of use-after-GC detection** (a moving collector relocates LOCAL

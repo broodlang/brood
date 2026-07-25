@@ -347,10 +347,35 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
 (defn package--registry-index (index) (or index *config-registry*))
 (defn registry--url? (loc) (string-contains? loc "://"))
 
+;; The human-readable reason out of a caught error, whatever shape it arrived in: a
+;; plain string, an error map, or the `[:error <map>]` pair an `offload`ed primitive
+;; propagates. Without this the raw structure reached the user's terminal.
+(defn package--error-reason (e)
+  (cond
+    (string? e) e
+    (map? e) (or (get e :message) (pr-str e))
+    (and (vector? e) (= (count e) 2) (map? (vector-ref e 1))) (or (get (vector-ref e 1) :message)
+                                                                (pr-str e))
+    else (pr-str e)))
+
+;; `%git-resolve-ref` THROWS on an unreachable or nonexistent remote — it does not
+;; return nil — so the `(or … (error …))` this replaces could never fire, and
+;; `nest search` greeted the user with the raw `[:error {:kind :runtime, :message
+;; …}]` structure plus a Brood trace. Catch it and say the one thing that helps.
+(defn registry--resolve-index-head (url)
+  (let (outcome (try (list :%ok (offload %git-resolve-ref url "main")) (catch e (list :%err e))))
+    (if (and (= (first outcome) :%ok) (not (nil? (second outcome))))
+      (second outcome)
+      (error "package: cannot reach the registry index at "
+        url
+        " — check the :registry setting in your project or user config, and that the URL exists and is reachable"
+        (if (= (first outcome) :%err)
+          (str " (" (package--error-reason (second outcome)) ")")
+          "")))))
+
 (defn registry--clone-index (root url)
   (let (target (path-join (package--deps-dir root) (str ".registry-" (hash/sha256 url)))
-        commit (or (offload %git-resolve-ref url "main")
-                 (error "package: cannot reach the registry index at " url)))
+        commit (registry--resolve-index-head url))
     (unless (package--cache-current? target commit)
       (when (dir? target) (%rm-rf target))
       (offload %git-clone url target "main" commit)
@@ -864,6 +889,18 @@ package is unknown to this index."
           (let (outcome (try
                           (do
                             (package--load-manifest manifest)
+                            ;; NB this edit is a read-modify-write with NO locking, so
+                            ;; two concurrent `nest add`s lose one of them (both read
+                            ;; the original, both append, the second write wins) and
+                            ;; both still report success. Measured: 3 concurrent adds
+                            ;; land 1–3 of them. It cannot be *detected* here either —
+                            ;; the loser is whichever wrote FIRST, and it has already
+                            ;; re-read and verified its own entry by the time the
+                            ;; other write lands. Preventing it needs real mutual
+                            ;; exclusion (an atomic exclusive-create, which the
+                            ;; language has no primitive for). Documented as a
+                            ;; one-at-a-time constraint in docs/packages.md rather
+                            ;; than papered over with a check that doesn't work.
                             (let (entries (resolve-deps root
                                             *project-dependencies*
                                             (read-lockfile root)))

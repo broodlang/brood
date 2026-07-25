@@ -7073,3 +7073,278 @@ before `require`ing it.
 `crates/nest/tests/complete.rs` (18 cases, incl. the never-fail matrix and the
 zsh-shadowing regression) + `tests/complete_test.blsp` (38 cases over the pure
 scanning/keyword/safety-net logic).
+
+## 2026-07-25 — a warning-free test run, and the flaky test I introduced
+
+Two follow-ups to the completion work, both about the suite rather than the feature.
+
+**A test I added was destabilising the suite.** `completion_never_fails_however_it_is_called`
+spawned ~300 `nest` subprocesses (each booting an interpreter) and ran 41s — and
+under a full `make test` it competed with `brood_suite_passes`, which runs the whole
+in-language suite inside one nextest case, for cores and memory. That produced one
+intermittent failure of the *wrapper*, not of my test: the suite passed standalone
+(3146 cases) and on the next run. Cut the matrix to cover input KINDS rather than
+permutations — six distinct shapes (empty, flag-like, path-traversing,
+quote/paren, shell metacharacters, interpolation-escape) × three contexts × five
+positions — which is 12.8s and no measurable interference. Two consecutive clean
+`make test` runs confirmed it.
+
+**The suite now prints no warnings at all.** It had accumulated diagnostics that
+were *correct* but expected, which is the worst kind of output: it trains you to
+ignore the channel. Fixed at the mechanism level rather than by muting:
+
+- **`*reload-diagnostics*`**, a Brood-visible switch the kernel now consults in
+  `def` alongside `BROOD_NO_RELOAD_DIAG`. Coverage instrumentation changes every
+  arity by design (10 `[reload] arity changed` lines), and `hot_reload_test` changes
+  an arity on purpose. The env var couldn't help — there is no `setenv` primitive and
+  the read is cached process-wide — so tests can now scope the diagnostic off. Off by
+  default nowhere: unbound means on.
+- **`with-err-str`**, the missing counterpart to `with-out-str`, added to the
+  prelude. `eprint`/`eprintln` write through the `*err*` port, so this rebinds it to
+  a collecting sink (accumulating in a `Table`, the sanctioned mutable structure).
+  This is the third time this session I wanted it — the `--failed` warnings, the
+  selection warnings, and the `:format-plugins` warning were all previously
+  untestable and I said so twice. Now those tests **assert the message** instead of
+  merely tolerating it, which is strictly better coverage. It cannot intercept a
+  Rust-side `eprintln!`, which is documented on the macro.
+- `reload_watch_test`'s watcher announcements (including a deliberately throwing
+  callback's `… — boom`) go through `println`, so `with-out-str` captures them —
+  and it captures spawned processes, which is where the watcher prints from.
+  Assertions throw rather than print, so wrapping a body can't hide a failure.
+
+Also cleared the one clippy warning: the completion section banner had been inserted
+between `in_project`'s doc comment and `in_project` itself, orphaning the comment
+onto the next function. The doc comment is back where it belongs.
+
+Now: `cargo build --tests` 0 warnings, `cargo clippy --tests` 0 warnings, `nest
+check` 0 warnings, and a `nest test` run with an empty warning channel.
+
+## 2026-07-25 — `nest new` produced projects that failed their own toolchain
+
+Nobody had ever scaffolded a project and then run the toolchain over it — the unit
+tests cover the template *strings*, not their output. Doing that found two bugs
+affecting every user's first five minutes.
+
+**1. Every template shipped code `nest format --check` rejected.** A brand-new
+project failed its own CI format gate on the first run, and the starter code
+modelled non-canonical style. Three distinct causes: column-aligned manifest keys
+(`:name    "x"` — the formatter collapses runs of spaces), comments trailing a form
+*inside* a list (re-emitted on their own line, per docs/tooling.md), and
+multi-line `defmodule` docstrings sharing the head line.
+
+Fixed systemically rather than by hand-tuning seven templates:
+`new-project` now runs every generated `.blsp` through `format-file`. So a NEW
+template cannot reintroduce the drift, and a change to the formatter's style is
+picked up for free. (`format-file` leaves an unparseable file untouched — the gate
+added earlier today — so a malformed template degrades to "written as-is" rather
+than mangled.)
+
+That alone made the output *clean* but not *good*: formatting hoisted
+`; the app framework …` notes out of their `defmodule` and stranded them above the
+whole form, describing the wrong thing. So the templates' trailing clause comments
+were moved above their clauses too — the placement CLAUDE.md already recommends.
+
+**2. `nest new --template hatch` promised a next step that cannot work.** Those
+templates scaffold `:path` deps on sibling checkouts (`../hatch`,
+`../store-postgres`) which are not present — there is no `hatch/` in this workspace,
+only `hatch-demo/` — so every command fails on an unresolved dependency. The
+scaffolder nonetheless printed `Next: cd x && nest test && nest run`, i.e. the first
+thing a user does after `nest new` was guaranteed to fail. It now names the
+prerequisite and suggests `nest fetch` once it is in place, with the message
+agreeing in number for the single-dep case.
+
+New `crates/nest/tests/scaffold_quality.rs` (7 cases) closes the gap that let this
+ship: for each self-contained template it scaffolds and asserts format-clean,
+check-clean, passing tests, and no hoisted comment; plus the next-steps accuracy and
+that the hatch failure names its missing dep. 3.2s, so it is cheap to keep.
+
+## 2026-07-25 — sweep of the remaining `nest` commands
+
+Worked through the commands the earlier passes hadn't exercised. Most were already
+sound; recording what was checked so the next sweep starts further along.
+
+**Verified working end to end** (no changes needed): the whole dependency lifecycle
+— `add` → `tree` → lockfile → `fetch` → *using the dep from a test* → `remove`,
+with duplicate `add` correctly rejected; `nest run` with `--main`, `--for`, and
+trailing args (`--for bogus` gives a clean CLI-level error, `--main main/nosuchfn`
+names the fn and module); `nest new .` in-place and `nest new` over an existing
+project (both stay format-clean); `nest doc`, `nest tree`; and all three `nest
+grammar` targets (the tmlanguage output parses as JSON).
+
+**Fixed: `with-err-str` was missing from the highlight keyword list.** The list
+behind `nest grammar` (and the LSP, and the REPL highlighter — `SPECIAL_FORMS` in
+`builtins/tooling.rs`) includes `with-out-str` as a highlight-only core macro, so
+its brand-new sibling belonged there too; without it editors would colour one and
+not the other. Added to `keywords.rs` + the list, and documented in
+`docs/language.md` §I/O beside `with-out-str`, with the mechanism difference spelled
+out (port-based, so it cannot intercept a kernel-side `eprintln!` — that has its own
+switch, `*reload-diagnostics*`). `tests/capture_test.blsp` gained 10 cases for it,
+including error propagation and that the sink doesn't leak after a throw.
+
+**Found, not fixed — a design call.** Two projects scaffolded with the default
+template cannot depend on each other: both define a `hello` module, so
+`nest add` fails with `module name collision — 'hello' is provided by both your
+project and dependency 'x'`. The error is clear and names the fix, and the root
+cause is that namespaces aren't package-rooted yet (ADR-070). Avoiding it would mean
+renaming the demo module after the project, which reshapes the first thing every new
+user reads — worth deciding deliberately rather than as a drive-by. (The rollback
+added earlier means the failed `add` leaves the manifest untouched, so it is only a
+friction, not damage.)
+
+## 2026-07-25 — completion follow-ups: two wrong-value bugs, and real latency numbers
+
+**`nest run --main <TAB>` offered file paths.** `value_kind` had a subcommand-wide
+arm — `("check" | "run" | "format", _)` — which also matched `--main`, so every
+suggestion for an argument that takes `MODULE[/FN]` was a `.blsp` path. Every arm now
+matches the argument NAME as well as the subcommand, and `--main` offers this
+project's own source modules (a std module can never be an entry point, so
+`complete-project-modules` deliberately excludes them, unlike `complete-modules`
+behind `nest doc`).
+
+**`nest new --template <TAB>` completed nothing**, despite the values being a fixed
+list. It now reads `*project-templates*` from the scaffolder, so a new template is
+completable without touching the completion module.
+
+**Latency, measured in a release build** (the debug figures quoted in the previous
+entry were the pessimistic case): **13–15 ms** for a static completion
+(subcommands, flags) and **~30 ms** for one that boots the interpreter to read the
+project (tags, test files). Both are inside a keypress budget, and the static/dynamic
+split is doing its job — the common case is 2× cheaper.
+
+**Also validated on real data:** `--partitions 3` over this repo's own suite splits
+1072 / 1047 / 1037, summing to exactly the unsharded 3156. Shards genuinely
+partition — nothing dropped, nothing run twice — which is the property a sharded CI
+depends on and which the earlier 5-test fixture couldn't really prove.
+
+Two more checks passed with no changes needed: `nest release` bundles and its
+standalone binary runs from an unrelated directory, **including dependency sources**
+(a project using `(liby-greet)` from a `:path` dep bundles 3 modules and prints
+correctly with no project dir present); and the `nest grammar` tmlanguage output is
+valid JSON.
+
+Also closed real CLAUDE.md drift: `BROOD_NO_RELOAD_DIAG` was missing from the debug
+flag table, along with its in-language equivalent `*reload-diagnostics*`.
+
+## 2026-07-25 — a missing-file inconsistency, and the suite's one un-retried flake
+
+**Fixed: only `nest test` reported a mistyped filename properly.** It said
+`nest test: cannot read x.blsp: No such file or directory`; `check` and `run` handed
+the path to Brood and surfaced the failure from whichever internal function read it
+first — `check-file-deps: cannot read …` plus a trace through
+`project--pfold-files` — for what is simply a typo. All three now check at the
+`nest` boundary and print the same line. One path deliberately still does NOT get
+checked: `nest run <doc>` hands a non-`.blsp` path to the entry point, and opening a
+file that doesn't exist yet is the ordinary editor case.
+`crates/nest/tests/missing_file.rs` (3 cases) pins both halves.
+
+**Diagnosed a suite flake that was not mine.** `make test` went red on
+`brood_suite_passes`; the culprit was `remote-spawn against the local node › a
+literal (fn () …) body runs`, which passed 3/3 standalone and 2/2 on immediate full
+re-runs. Its `(after 5000 :timeout)` deadline was competing with ~840 parallel
+nextest cases for cores. These are *correctness* tests — "did the body run at all" —
+so the deadline only exists to stop a hang, never to measure latency; raised to 30s,
+with the suite's own 120s per-test ceiling still bounding a genuine hang.
+
+That exposed a **structural gap**: `.config/nextest.toml` already gives
+`distribution` and `serve_attach` a retry precisely because real-network timing under
+load can fail with no code at fault — but the in-language suite *also* contains
+node-talking tests, and because they run inside one wrapper case they were the only
+such tests in the workspace with no second chance. One blown deadline reddened all
+~3160. `binary(suite)` now gets `retries = 1` too: free on a green run (nextest only
+re-runs a failed case), a deterministic regression still fails both attempts, and a
+pass-on-retry is reported as FLAKY so it can't be absorbed silently.
+
+Deliberately NOT done: there are 148 `(after …)` deadlines across the suite, and
+raising them wholesale would be a large unreviewed change — a small deadline is
+correct when the test *asserts* that a receive times out, and only reading each one
+distinguishes that from an anti-hang guard. Fixed the observed case; recorded the
+pattern so the next one is diagnosed in minutes.
+
+**Fuzz regression check** after the day's changes: the full harness (~50 hostile
+values × every flag and positional, malformed manifests, malformed sources, bare
+directories) reports 0 panics and 0 hangs, and the computing injection oracle finds 0
+evaluations across 5 payloads × 12 argument positions. The 24 "INJECT" flags the
+harness prints are its own false positives — a Brood error message echoing the
+payload — which the oracle exists to rule out.
+
+## 2026-07-25 — two more leaked-internals fixes, and the last untested commands
+
+**`nest search` printed a raw error structure.** The registry index resolver read
+`(or (offload %git-resolve-ref url "main") (error "cannot reach the registry …"))` —
+but `%git-resolve-ref` **throws** on an unreachable remote rather than returning nil,
+so that fallback could never fire. What reached the terminal was the propagated
+`[:error {:kind :runtime, :message …}]` value plus a Brood trace. Now caught, with a
+new `package--error-reason` that unwraps whichever shape an error arrived in (string,
+error map, or the `[:error <map>]` pair an `offload`ed primitive propagates) into one
+sentence naming the URL, the `:registry` setting to check, and the underlying reason
+in parentheses. 6 tests.
+
+**`nest observe` / `nest attach` piped gave `os error 6`.** They draw an
+alternate-screen TUI, so redirected output failed deep in the render loop —
+`runtime error: terminal: No such device or address (os error 6)` with an
+`at editor/ui/ui-run` frame. They now check `stdout().is_terminal()` at the boundary
+and say so, including the pty recipe (`script -qec … /dev/null`) that CLAUDE.md
+already documents for testing TUIs. Verified the pty path still renders and quits on
+`q`.
+
+**Smoke-tested the last two untested commands, no changes needed.** `nest mcp` still
+completes a real JSON-RPC `initialize` + `tools/list` handshake (20 tools) — worth
+confirming after adding two subcommands to the same enum. `nest observe` renders and
+exits cleanly under a pty.
+
+That leaves `nest publish` as the only subcommand not exercised end-to-end here: it
+writes to a registry index, and the configured one
+(`https://github.com/broodlang/registry`) does not exist yet, so there is nothing to
+publish against. Its failure path is now legible, which is the part that was broken.
+
+## 2026-07-25 — CLAUDE.md drift audit
+
+Ran the `claudemd-drift` checks, since this session touched several of the surfaces
+that file enumerates. Three real deltas, all pre-existing rather than mine:
+
+- **`nest` subcommands** omitted `publish` and `search` — the git-backed registry
+  commands from ADR-147 (package manager v2), which landed without the summary
+  catching up. Added with their ADR citation. (`completions`/`complete` were added
+  earlier today when they shipped.)
+- **The `std/tool/*` list** omitted `explain` (the `explain-error`/`find-pattern`
+  cookbook, shipped 2026-07-23) and `scaffold` (split out of `project.blsp` in the
+  file-organization pass). Added.
+- **`process/`** is now described as containing the scheduler, but today's upstream
+  refactor moved it into `process/scheduler/` (pool, lifecycle, guards), and the
+  one-line summary also predated `links`/`sysmon`/`io_source`. Reworded.
+
+Two sections came back accurate: the **env-flag table** has no dangerous drift —
+every flag it documents still exists in the code (the historical failure mode was
+`BROOD_TRACE_SAFEPOINT`, documented but never implemented). 31 flags the code reads
+are undocumented, which is by design: they are internal JIT/GC tuning knobs, and the
+table is explicitly a curated user-facing subset. The **milestone prose** and the
+`eval/compile/` file list also matched reality.
+
+## 2026-07-25 — concurrency probe: manifest edits are not safe, and saying so honestly
+
+Ran the `nest` commands concurrently, since an editor plus a terminal is a normal
+setup.
+
+**Safe:** four simultaneous `nest test` runs in one project all pass, sharing the
+on-disk check cache and the `--failed` record without corruption. Read-only commands
+are fine.
+
+**Not safe — a real lost update:** three concurrent `nest add`s all report `added`,
+but only some land. Measured across five trials: 2, 2, 3, 1, 2 of three. Each command
+reads `project.blsp`, appends its entry and writes back, so the last writer erases the
+others' entries. The manifest is never left corrupt (and a *failed* add still rolls
+its own edit back), so the damage is a missing dependency, fixed by re-running.
+
+I tried to at least make it loud, by re-reading the manifest after writing and
+erroring if our own dep wasn't there. **It doesn't work, and I verified that rather
+than assuming it did**: across five trials it never fired once. The loser is whichever
+process wrote *first*, and it has already re-read and seen its own entry by the time
+the other write lands. So the check was removed — shipping code whose comment claims a
+guarantee it doesn't provide is worse than the documented limitation.
+
+Preventing it needs real mutual exclusion: an atomic exclusive-create or an advisory
+file lock, neither of which the language has a primitive for. Concurrent manifest
+edits are a scripting scenario rather than something done by hand, so that primitive
+stays deferred (ADR-011) instead of being invented for this. Recorded as an explicit
+one-at-a-time constraint in `docs/packages.md`, with the measurement, why it is
+undetectable from inside the command, and what a fix would require.

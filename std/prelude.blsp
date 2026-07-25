@@ -970,6 +970,27 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
        (do ~@body (%capture-take))
        (catch e (do (%capture-take) (throw e))))))
 
+;; The stderr counterpart of `with-out-str`. It works differently, and has to:
+;; stdout capture is a kernel buffer (`%capture-begin`), while `eprint`/`eprintln`
+;; write through the `*err*` PORT — so this rebinds that port to a collecting sink
+;; instead. Consequences worth knowing: it captures only what goes through `*err*`
+;; (a Rust-side `eprintln!`, e.g. a kernel reload diagnostic, is NOT interceptable
+;; this way), and it does not follow into spawned processes the way `with-out-str`
+;; does. Accumulation uses a `Table` because data is immutable — the one sanctioned
+;; mutable structure, and a local one that never escapes.
+(defmacro with-err-str (& body)
+  "Evaluate `body` with the `*err*` port captured, returning everything written to it as a string (`\"\"` if nothing was), discarding `body`'s own value. For asserting on a warning — and for keeping an expected warning out of a test run's output. Only intercepts writes through `*err*` (`eprint`/`eprintln`), not stderr written by the kernel itself."
+  (let (sink (gensym "err-sink"))
+    `(let (~sink (table))
+       (try
+         (do
+           (binding (*err* (fn (s)
+                             (table-put ~sink :text (str (table-get ~sink :text "") s))
+                             nil))
+             ~@body)
+           (table-get ~sink :text ""))
+         (catch e (do (table-drop ~sink) (throw e)))))))
+
 ;; ---- threading macros (demonstrate that macros compute at expansion time) ----
 ;; (-> x (f a) (g b))  =>  (g (f x a) b)   ; thread as FIRST argument
 ;; (->> x (f a) (g b)) =>  (g b (f a x))   ; thread as LAST argument

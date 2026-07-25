@@ -594,3 +594,23 @@
   (test "add refuses a corrupting name before touching the manifest"
     (is (string-contains? (try (package/add "" ":path" "../x") (catch e e))
           "not a usable dependency name"))))
+
+;; A caught error arrives in one of several shapes, and `nest search` used to print
+;; whichever one it was verbatim: the raw `[:error {:kind :runtime, :message …}]`
+;; structure an `offload`ed primitive propagates, plus a Brood trace, for what is
+;; simply "the registry URL isn't reachable".
+(describe "package: extracting a readable reason from a caught error"
+  (test "a plain string passes through"
+    (assert= (package/package--error-reason "boom") "boom"))
+  (test "an error map yields its :message"
+    (assert= (package/package--error-reason {:kind :runtime :message "no such host"})
+      "no such host"))
+  (test "the [:error <map>] pair an offloaded primitive propagates yields the message"
+    (assert= (package/package--error-reason [:error {:kind :runtime :message "ls-remote failed"}])
+      "ls-remote failed"))
+  (test "a map with no :message degrades to its printed form rather than nil"
+    (is (string-contains? (package/package--error-reason {:kind :runtime}) "runtime")))
+  (test "an unexpected shape degrades to its printed form"
+    (assert= (package/package--error-reason 42) "42"))
+  (test "nil degrades rather than raising"
+    (is (string? (package/package--error-reason nil)))))

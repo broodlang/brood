@@ -98,12 +98,17 @@
     ;; 7 is past "multiplies" (line 5) and before "joins" (line 9)
     (assert= (selection--select {:lines (list ["tests/demo_test.blsp" 7])})
       (list "math › multiplies")))
-  (test "a line before the first test selects nothing"
-    (assert= (selection--select {:lines (list ["tests/demo_test.blsp" 1])}) nil))
+  (test "a line before the first test selects nothing, and WARNS"
+    ;; Captured so the expected warning stays out of the suite output — and so the
+    ;; message itself is pinned, since a silent zero-test run is the bug this
+    ;; warning exists to prevent.
+    (let (warning (with-err-str (assert= (selection--select {:lines (list ["tests/demo_test.blsp" 1])})
+                                  nil)))
+      (is (string-contains? warning "no test found at"))))
   (test "a path suffix matches, so a relative path finds an absolute record"
     (assert= (selection--select {:lines (list ["demo_test.blsp" 4])}) (list "math › adds")))
   (test "an unknown file selects nothing"
-    (assert= (selection--select {:lines (list ["tests/other_test.blsp" 4])}) nil))
+    (with-err-str (assert= (selection--select {:lines (list ["tests/other_test.blsp" 4])}) nil)))
   ;; Regression: matching paths with a bare `ends-with?` made "a_test.blsp" a
   ;; suffix of "extra_test.blsp" (the last 11 chars are literally "a_test.blsp"),
   ;; so a line selector could pick a test out of an unrelated file. The match must

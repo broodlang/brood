@@ -183,6 +183,26 @@ suggestions\", never to an error on the user's command line."
                                                     (or *project-source-paths* ["src"]))))))
                         nil))))))))
 
+(defn complete-project-modules ()
+  "Just THIS project's own source modules (by file basename, which is how `require` names them) — the candidates for `nest run --main`, where a std module would never be a valid entry point."
+  (let (root (complete--root))
+    (if (nil? root)
+      nil
+      (sort (or (complete--safely (fn ()
+                                    (map (fn (p) (complete--strip-extension (path-basename p)))
+                                      (fold (fn (acc dir)
+                                              (append acc (project/project-collect-sources dir)))
+                                        nil
+                                        (project/project-abs-paths root
+                                          (or *project-source-paths* ["src"]))))))
+              nil)))))
+
+;; The scaffolder owns the template list, so read it from there rather than
+;; restating it — a new template becomes completable with no change here.
+(defn complete-templates ()
+  "The `nest new --template` names, from the scaffolder's own list."
+  (or (complete--safely (fn () (require 'scaffold) (into [] *project-templates*))) nil))
+
 (defn complete--strip-extension (filename)
   (if (ends-with? filename ".blsp")
     (substring filename 0 (- (string-length filename) 5))
@@ -200,6 +220,8 @@ suggestions\", never to an error on the user's command line."
     (= kind "blsp-file") (complete-blsp-files)
     (= kind "dep") (complete-dep-names)
     (= kind "module") (complete-modules)
+    (= kind "project-module") (complete-project-modules)
+    (= kind "template") (complete-templates)
     else nil))
 
 (defn complete-print (kind prefix)
