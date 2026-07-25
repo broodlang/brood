@@ -57,17 +57,17 @@ use guards::{gc_block_set, macro_block_set, stack_base_set};
 // scheduling state stays in the root, reached from there via `use super::*`.
 // Re-export the public surface so `scheduler::…`/`process::…` paths are unchanged.
 mod lifecycle;
-pub use lifecycle::{exit, spawn, spawn_linked, spawn_root_program};
 pub(crate) use lifecycle::exit_propagate;
 use lifecycle::{deregister, proc_descr};
+pub use lifecycle::{exit, spawn, spawn_linked, spawn_root_program};
 
 // The worker pool + run-queue execution loop lives in a child module; shared
 // scheduling state stays in the root (reached via `use super::*`). Re-export the
 // public/`process`-facing surface so `scheduler::…`/`process::…` paths are unchanged.
 mod pool;
-pub use pool::{set_test_no_workers, test_drive_quanta};
-pub(crate) use pool::{ensure_workers, enqueue, wake_enqueue};
 use pool::spawn_overflow_drainer;
+pub(crate) use pool::{enqueue, ensure_workers, wake_enqueue};
+pub use pool::{set_test_no_workers, test_drive_quanta};
 
 /// A green process (ADR-100 §8.4 — state capture, corosensei removed): its own `Heap`,
 /// the 0-arg body thunk, and its parked/preempted continuation. The worker drives the
@@ -148,7 +148,6 @@ thread_local! {
 
 }
 
-
 /// How many `eval` loop iterations a process runs before it must yield its worker
 /// (cooperative fairness — the BEAM's mechanism). ~2000 ≈ the BEAM default; tunable.
 /// DEBUG (bug #2): `BROOD_REDUCTIONS=<n>` overrides it — a huge value effectively disables
@@ -163,7 +162,6 @@ fn reduction_budget() -> u32 {
             .unwrap_or(2000)
     })
 }
-
 
 /// Called once per `eval` `'tail:` iteration. Cheap: a thread-local decrement; only
 /// when the budget is exhausted does it touch `CURRENT`. The top-level VM driver does
@@ -729,8 +727,6 @@ fn worker_count() -> usize {
     requested.max(floor)
 }
 
-
-
 /// Test-only: when set, [`ensure_workers`] starts **no** OS worker threads, so a test
 /// can drive scheduling quanta synchronously and deterministically via
 /// [`test_drive_quanta`] (bounded by work units, not wall-clock). Inert (`false`) in
@@ -739,7 +735,6 @@ fn worker_count() -> usize {
 /// a separate crate that doesn't see the lib's `test` cfg; the one-time branch in
 /// `ensure_workers` is free in production (the flag is never set).
 static TEST_NO_WORKERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 
 impl Process {
     /// Drive the body one quantum: run fresh, or resume the parked continuation
@@ -786,7 +781,6 @@ impl Process {
         CURRENT.with(|c| *c.borrow_mut() = None);
     }
 }
-
 
 /// `(self)` — this process's pid.
 pub fn self_pid() -> u64 {

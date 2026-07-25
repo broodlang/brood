@@ -1277,7 +1277,6 @@ impl Heap {
         }
         self.end_aging();
     }
-
 }
 
 // ===================== RUNTIME-region compaction (ADR-076 follow-up) =====================

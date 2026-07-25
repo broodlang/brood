@@ -7,9 +7,9 @@ use super::*;
 #[cfg(feature = "jit")]
 mod i64;
 #[cfg(feature = "jit")]
-pub(crate) use i64::{arm_i64_eligible, arm_i64_too_deep, i64_mark_too_deep};
-#[cfg(feature = "jit")]
 use i64::jit_lower_i64_arm;
+#[cfg(feature = "jit")]
+pub(crate) use i64::{arm_i64_eligible, arm_i64_too_deep, i64_mark_too_deep};
 
 // Pure pre-lowering analysis (block leaders / operand depth / …) for
 // `jit_lower_arm_inner` — the first extracted step of decomposing that function.
@@ -636,7 +636,6 @@ fn jit_i64_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("BROOD_NO_I64").is_none())
 }
-
 
 /// Keeps the **inlined** body's `Node` + `Chunk` alive for the process lifetime. The
 /// inlined native code bakes the raw addresses of the spliced chunk's `ConstVal`s into
@@ -1756,22 +1755,18 @@ fn jit_lower_arm_inner(
     // Operand-materialization family — thin wrappers over the free fns in `emit.rs`
     // (extracted for the emit-loop decomposition). Each captures `frame`, so the
     // ~35 call sites below stay unchanged; the bulky bodies live in `emit.rs`.
-    let read_words =
-        |b: &mut FunctionBuilder, op: Op| -> [cranelift_codegen::ir::Value; 3] {
-            emit::read_words(b, op, frame)
-        };
-    let as_int =
-        |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
-            emit::as_int(b, op, frame)
-        };
-    let as_block_arg =
-        |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
-            emit::as_block_arg(b, op, frame)
-        };
-    let as_f64 =
-        |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
-            emit::as_f64(b, op, frame)
-        };
+    let read_words = |b: &mut FunctionBuilder, op: Op| -> [cranelift_codegen::ir::Value; 3] {
+        emit::read_words(b, op, frame)
+    };
+    let as_int = |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
+        emit::as_int(b, op, frame)
+    };
+    let as_block_arg = |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
+        emit::as_block_arg(b, op, frame)
+    };
+    let as_f64 = |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
+        emit::as_f64(b, op, frame)
+    };
     // Integer-vs-float dispatch for a binary op: an operand is float if it's an
     // `Op::Float`, or a `Slot` the profile/tracking marks float. (`Op::Int`/`Handle` are
     // integer/non-number.)
@@ -1787,8 +1782,7 @@ fn jit_lower_arm_inner(
     // the body's writes, which precede their reads in the single lowering pass.)
     // Mirror of `set_slot_float` for the bool flag. A store of any kind updates *both*
     // (a slot holds one type), so a later read picks the right block-arg representation.
-    let store_op =
-        |b: &mut FunctionBuilder, dst: i64, op: Op| emit::store_op(b, dst, op, frame);
+    let store_op = |b: &mut FunctionBuilder, dst: i64, op: Op| emit::store_op(b, dst, op, frame);
     // Return-via-roots: place the single result in `roots[base]` and jump to the
     // param-less Done block. The result is a whole `Value`, so it can be a handle.
     let exit_done = |b: &mut FunctionBuilder, op: Op| {
@@ -3198,7 +3192,9 @@ fn jit_lower_arm_inner(
                         let wa = read_words(&mut b, Op::Slot(*slot_a));
                         let wb = read_words(&mut b, Op::Slot(*slot_b));
                         stack.push(Op::Int(eq_dispatch(&mut b, wa, wb)));
-                    } else if op_is_float(Op::Slot(*slot_a), frame) || op_is_float(Op::Slot(*slot_b), frame) {
+                    } else if op_is_float(Op::Slot(*slot_a), frame)
+                        || op_is_float(Op::Slot(*slot_b), frame)
+                    {
                         // Float arith/compare on two slots (e.g. `(+ xx yy)`, `(* x y)`).
                         let sa = as_f64(&mut b, Op::Slot(*slot_a));
                         let sb = as_f64(&mut b, Op::Slot(*slot_b));
@@ -3310,7 +3306,8 @@ fn jit_lower_arm_inner(
                             b.ins().jump(deopt, &[]);
                         }
                     } else {
-                        let flags: Vec<bool> = stack.iter().map(|&op| is_bool_op(&b, op, frame)).collect();
+                        let flags: Vec<bool> =
+                            stack.iter().map(|&op| is_bool_op(&b, op, frame)).collect();
                         if record_block_flags(&mut bool_param[*t], flags) {
                             let args: Vec<BlockArg> = stack
                                 .iter()
@@ -3525,7 +3522,8 @@ fn jit_lower_arm_inner(
                 }
                 Inst::JumpIfFalse(t) => {
                     let cond = stack.pop()?;
-                    let flags: Vec<bool> = stack.iter().map(|&op| is_bool_op(&b, op, frame)).collect();
+                    let flags: Vec<bool> =
+                        stack.iter().map(|&op| is_bool_op(&b, op, frame)).collect();
                     // A side whose typing disagrees with its join's recorded flags routes
                     // to `deopt` (no args) instead — see `record_block_flags`.
                     let t_ok = record_block_flags(&mut bool_param[*t], flags.clone());

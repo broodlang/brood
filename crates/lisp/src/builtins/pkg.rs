@@ -257,7 +257,9 @@ pub(super) fn rm_rf(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match std::fs::remove_dir_all(&path) {
         Ok(()) => Ok(crate::core::value::kw("ok")),
         Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(crate::core::value::kw("ok")),
-        Err(e) => Err(LispError::runtime(format!("%rm-rf: {}: {}", path, e))
-            .with_code(error_codes::FILE_IO)),
+        Err(e) => {
+            Err(LispError::runtime(format!("%rm-rf: {}: {}", path, e))
+                .with_code(error_codes::FILE_IO))
+        }
     }
 }
