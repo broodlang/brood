@@ -7789,3 +7789,35 @@ separately.
 - The previous entry's flake hunt closed out: 7/7 isolated runs, the single failure
   identical in all 7 (so deterministic, not a flake) and confirmed a snapshot artefact —
   `format: the prelude is idempotent` passes against the live tree.
+
+## 2026-07-25 — KI-10 (the `receive` 13-arm cliff) no longer reproduces
+
+The last open entry in [known-issues.md](known-issues.md). Bisected 2026-07-11: a
+single trivial 13th arm on `buffer--serve` took the buffer suite from 4.9 s / 139 MB
+to 8.0 s / 248 MB, worked around by merging two `[:edit …]` arms to stay at 12.
+
+Re-measured on `b0b4fd1` in the configuration it was seen in — the module **baked into**
+a `cargo build --release` binary, not hot-loaded:
+
+| serve arms | buffer suite | full suite |
+| --- | --- | --- |
+| 12 (committed) | 3.33 s / 55 MB | 22.49 s / 610 MB |
+| 13 | 3.35 s / 54 MB | — |
+| 20 | 3.36 s / 55 MB | 22.79 s / 636 MB |
+
++1.3% wall / +4% peak for **eight** extra arms, against +65% / +80% for one. Gone.
+
+Two things worth keeping from the hunt. First, **arm count alone was never the
+trigger**: a 13-arm receive of uniform trivial arms (200k messages through a spawned
+loop) showed no cliff then and shows none now, which is why the original report is
+specifically about `buffer--serve`'s heterogeneous arms. Second, **I never identified
+the mechanism**, so this is an incidental fix from the VM/JIT/pattern work of the last
+fortnight, not a targeted one — recorded that way rather than claimed as a fix. The
+arm-count budget in `buffer--serve` is lifted; the merged `[:edit …]` arm stays because
+one arm for both shapes is simpler, not because it has to.
+
+A methodological note, since two hot-load A/Bs nearly sent me the wrong way: the
+release-fast binary (`--no-default-features`) has no `test` module, and hot-loading a
+modified `std/` copy over the baked-in one is *not* the same configuration as baking it
+(different region, different freeze path). Both A/Bs happened to agree here, but the
+baked build is the one that answers the question.

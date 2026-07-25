@@ -643,9 +643,11 @@ shared buffer: key your marker by your pid and it is cleaned up with you) — an
 changed the buffer, survivors get a push (they see the cursor vanish)."
   (let (rec (or recent ()))
     (receive
-      ;; one arm for both tagged and untagged closure edits (origin nil when untagged)
-      ;; — buffer--serve must stay at ≤12 receive arms: the 13th falls off a compile
-      ;; cliff (+75% wall, +85% peak across the buffer suite; kernel issue, reported)
+      ;; one arm for both tagged and untagged closure edits (origin nil when untagged).
+      ;; This merge used to be forced by a 12-arm budget — a 13th receive arm fell off a
+      ;; compile cliff (KI-10). That cliff no longer reproduces (re-measured 2026-07-25:
+      ;; +1 arm and +8 arms are both flat, buffer suite and full suite), so the budget is
+      ;; gone; the single arm stays because one arm for both shapes is simply simpler.
       ([:edit f origin] (let (nb (f buf) v (inc version))
                           (do (buffer--push subs v nb origin) (buffer--serve nb subs v rec))))
       ;; A read-then-decide edit in ONE round-trip: `f` returns `[new-buf value]` — the

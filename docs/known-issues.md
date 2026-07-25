@@ -1,8 +1,8 @@
 # Known issues
 
-All historical interpreter defects are **resolved** (KI-9 below is a one-off arity
-sighting judged a transient inconsistent-build artifact, not present in committed
-code — kept as a record, not an open bug). This file is the condensed record — what
+All historical interpreter defects are **resolved** (KI-9 is a one-off arity sighting
+judged a transient inconsistent-build artifact, not present in committed code; KI-10 no
+longer reproduces, incidentally fixed — both kept as records, not open bugs). This file is the condensed record — what
 each was, how it was fixed, and the regression test that guards it — so a recurrence
 is recognizable. For the narrative discovery writeup of the scheduler race, see
 [claude-demo-findings.md](claude-demo-findings.md); deeper rationale is in the cited
@@ -10,7 +10,7 @@ ADRs / topic docs.
 
 ---
 
-## KI-10 — `receive` compile cliff at the 13th arm · **open (worked around)**
+## KI-10 — `receive` compile cliff at the 13th arm · **no longer reproduces 2026-07-25**
 
 Adding a 13th arm to a hot `receive` loop degrades it badly: on `buffer--serve`
 (std/editor/buffer.blsp), a single TRIVIAL extra arm (`([:sync-probe] (recur …))`)
@@ -18,11 +18,32 @@ took the buffer suite from 4.9 s / 139 MB peak to 8.0 s / 248 MB — +65% wall,
 +80% peak — and pushed the full parallel suite over the 1 GB test soft limit.
 Bisected 2026-07-11 while adding a `[:sync …]` arm for the resync primitive;
 12 arms are fine, 13 fall off the cliff, so the dispatch likely drops from an
-indexed strategy to an allocating linear one at that width. Worked around by
+indexed strategy to an allocating linear one at that width. Worked around at the time by
 merging `buffer--serve`'s two `[:edit …]` arms (buffer-edit always sends the
-3-element form now) to stay at 12; the arm-budget constraint is noted in the
-serve loop. Real fix: find the clause-count threshold in the receive/pattern
-compiler and either raise it or make the wide path allocation-free.
+3-element form) to stay at 12.
+
+**Re-measured 2026-07-25 on `b0b4fd1`: gone.** Adding the same trivial
+`([:sync-probe] …)` arm to `buffer--serve` and rebuilding costs nothing, and neither
+does adding eight:
+
+| serve arms | buffer suite (`brood --test tests/buffer_test.blsp`) | full suite (`nest test`) |
+| --- | --- | --- |
+| 12 (committed) | 3.33 s / 55 MB | 22.49 s / 610 MB |
+| 13 | 3.35 s / 54 MB | — |
+| 20 | 3.36 s / 55 MB | 22.79 s / 636 MB |
+
+Measured on a `cargo build --release` binary with the module **baked in** (the
+configuration the cliff was originally seen in — a hot-loaded copy was checked too and
+is equally flat). Against the original +65% wall / +80% peak for a single arm, +1.3%
+wall / +4% peak for *eight* is flat.
+
+**The mechanism was never identified, so this is an incidental fix**, from some part of
+the VM/JIT/pattern work between 2026-07-11 and now — not a change aimed at it. The
+arm-count budget is therefore lifted (the note in `buffer--serve` is updated), but if a
+width-dependent cliff ever reappears it needs bisecting from scratch: the width alone
+was never the trigger. A 13-arm receive of *uniform* trivial arms never showed it
+either, which is why the original report is specifically about `buffer--serve`'s arm
+shapes.
 
 ## KI-9 — arity error from a closure shipped in a `spawn` body · **likely transient; not present in committed code**
 
