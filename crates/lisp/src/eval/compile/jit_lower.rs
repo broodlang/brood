@@ -23,8 +23,7 @@ mod prepass;
 mod emit;
 #[cfg(feature = "jit")]
 use emit::{
-    box_scalar, copy_value, emit_arith, emit_float_arith, is_bool_op, load_slot_int, op_is_float,
-    set_slot_bool, set_slot_float, store_int,
+    box_scalar, emit_arith, emit_float_arith, is_bool_op, load_slot_int, op_is_float, store_int,
 };
 
 /// The virtualized operand-stack element for `jit_lower_arm_inner`'s emit loop —
@@ -716,7 +715,7 @@ fn jit_lower_arm_inner(
 ) -> Option<*const u8> {
     use crate::core::heap::VecStore as VS;
     use crate::core::value::jit_layout::{
-        PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_KEYWORD, TAG_PAIR, TAG_SYM, TAG_VECTOR,
+        PAYLOAD_OFFSET, TAG_BOOL, TAG_FLOAT, TAG_INT, TAG_KEYWORD, TAG_PAIR, TAG_VECTOR,
     };
     use cranelift_codegen::ir::{
         condcodes::{FloatCC, IntCC},
@@ -1375,6 +1374,7 @@ fn jit_lower_arm_inner(
         carry_vars: &carry_vars,
         slot_float: &slot_float,
         slot_bool: &slot_bool,
+        slot_f64_cache: &slot_f64_cache,
     };
     // A scratch `Value`-sized stack slot the handle / call / global ops write their result
     // into (the out-pointer ABI). One per arm, reused: each result is read straight back
@@ -1753,226 +1753,25 @@ fn jit_lower_arm_inner(
     // binder, a return, or a `cons`/`car`/`cdr` operand. An `Int` boxes to `[Int-tag, v, 0]`
     // (the third word is irrelevant to an Int); a `Slot` loads all three; a `Handle` is
     // already those registers. No tag-check — this moves a whole `Value` verbatim.
-    let read_words = |b: &mut FunctionBuilder, op: Op| -> [cranelift_codegen::ir::Value; 3] {
-        match op {
-            Op::Int(v) => {
-                // Box as `Int` or (a comparison `i8`) `Bool`; both payloads are `i64`, so
-                // the triple is a valid `[i64; 3]` whole `Value`.
-                let (tag_byte, payload) = box_scalar(b, v);
-                let tag = b.ins().iconst(types::I64, tag_byte as i64);
-                let zero = b.ins().iconst(types::I64, 0);
-                [tag, payload, zero]
-            }
-            Op::Slot(k) => {
-                // DEBUG: a real/spill slot must be inside the frame [0, nslots). A k >= nslots
-                // reads past the frame into staging/stale memory — the bug #2 slot-count gap.
-                debug_assert!(
-                    k < nslots,
-                    "[jit-slot] read_words Op::Slot({k}) >= nslots {nslots} (spill_base {spill_base}, reserve {reserve}) — slot count undercounted",
-                );
-                let roots_base = b.use_var(rb_var);
-                let i = b.ins().iadd_imm(base, k as i64);
-                let o = b.ins().imul_imm(i, STRIDE);
-                let addr = b.ins().iadd(roots_base, o);
-                let w0 = b.ins().load(types::I64, MemFlagsData::trusted(), addr, 0);
-                let w1 = b.ins().load(
-                    types::I64,
-                    MemFlagsData::trusted(),
-                    addr,
-                    PAYLOAD_OFFSET as i32,
-                );
-                let w2 = b.ins().load(
-                    types::I64,
-                    MemFlagsData::trusted(),
-                    addr,
-                    PAYLOAD_OFFSET as i32 + 8,
-                );
-                // NOTE: an in-IR validation call here (dbg_check_slot_ref) PERTURBS codegen —
-                // it forces register spills around the call that mask the very register-liveness
-                // bug we're hunting (#2). Validation lives in the Rust-side `brood_rt_push`.
-                [w0, w1, w2]
-            }
-            Op::Float(v) => {
-                // Box an unboxed `f64` as a whole `Value::Float`: [TAG_FLOAT, bits, 0].
-                let bits = b.ins().bitcast(types::I64, MemFlagsData::new(), v);
-                let tag = b.ins().iconst(types::I64, TAG_FLOAT as i64);
-                let zero = b.ins().iconst(types::I64, 0);
-                [tag, bits, zero]
-            }
-            Op::Bool(v) => {
-                // A crossed-boundary boolean (already `i64` 0/1) → `Value::Bool`.
-                let tag = b.ins().iconst(types::I64, TAG_BOOL as i64);
-                let zero = b.ins().iconst(types::I64, 0);
-                [tag, v, zero]
-            }
-            Op::Handle(w0, w1, w2) => {
-                // NOTE: no in-IR validation call here — it would perturb codegen and mask the
-                // bug (see Op::Slot above). Register handles flow to brood_rt_push for checking.
-                [w0, w1, w2]
-            }
-            // A hoisted global vector used as a whole `Value` (any non-`VectorRef`
-            // consumer): its entry-resolved words move verbatim, exactly like a `Handle`.
-            Op::HoistedVec { w0, w1, w2, .. } => [w0, w1, w2],
-            // Same for a hoisted global table used as a whole `Value`.
-            Op::HoistedTable { w0, w1, w2, .. } => [w0, w1, w2],
-        }
-    };
-    // Store the three words of a `Value` into frame slot `dst`.
-    let store_words = |b: &mut FunctionBuilder, dst: i64, w: [cranelift_codegen::ir::Value; 3]| {
-        debug_assert!(
-            (dst as usize) < nslots,
-            "[jit-slot] store_words slot {dst} >= nslots {nslots}"
-        );
-        let roots_base = b.use_var(rb_var);
-        let i = b.ins().iadd_imm(base, dst);
-        let o = b.ins().imul_imm(i, STRIDE);
-        let addr = b.ins().iadd(roots_base, o);
-        b.ins().store(MemFlagsData::trusted(), w[0], addr, 0);
-        b.ins()
-            .store(MemFlagsData::trusted(), w[1], addr, PAYLOAD_OFFSET as i32);
-        b.ins().store(
-            MemFlagsData::trusted(),
-            w[2],
-            addr,
-            PAYLOAD_OFFSET as i32 + 8,
-        );
-    };
-    // Materialise an operand to an unboxed `i64`: a register value as-is, a tag-checked
-    // load of a frame slot, or a tag-checked extract of a `Handle`'s payload (a `Handle`
-    // used as a number — e.g. `(+ (first xs) 1)` — must be an `Int` at runtime or deopt).
-    let as_int = |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
-        match op {
-            Op::Int(v) => v,
-            Op::Bool(v) => v,
-            Op::Slot(k) => load_slot_int(b, k as i64, frame),
-            Op::Handle(w0, w1, _) => {
-                let tagb = b.ins().band_imm(w0, 0xff);
-                let is_int = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_INT as i64);
-                let cont = b.create_block();
-                b.ins().brif(is_int, cont, &[], deopt, &[]);
-                b.switch_to_block(cont);
-                w1
-            }
-            // A hoisted global vector/table used as an int (neither is one) — tag-check
-            // its word like a `Handle` and deopt; sound, never expected to fire.
-            Op::HoistedVec { w0, w1, .. } | Op::HoistedTable { w0, w1, .. } => {
-                let tagb = b.ins().band_imm(w0, 0xff);
-                let is_int = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_INT as i64);
-                let cont = b.create_block();
-                b.ins().brif(is_int, cont, &[], deopt, &[]);
-                b.switch_to_block(cont);
-                w1
-            }
-            // A float where an int is required (a mixed-type op the lowering didn't
-            // specialize) — deopt to the VM. Shouldn't arise once arith dispatches by
-            // operand type, but kept sound. (Dead block after the unconditional jump.)
-            Op::Float(_) => {
-                b.ins().jump(deopt, &[]);
-                let dead = b.create_block();
-                b.switch_to_block(dead);
-                b.ins().iconst(types::I64, 0)
-            }
-        }
-    };
-    // Materialise an operand as a block argument. Block params are declared `I64`
-    // (see `leader_block`), but a comparison result is an `i8`; passing it raw would
-    // be an `I8`-into-`I64`-param type mismatch the Cranelift verifier rejects, which
-    // bailed *every* arm that carried a comparison across a block boundary — i.e. every
-    // `(and …)`/`(or …)` (they short-circuit a bool through a merge). Zero-extend the
-    // `i8` (0/1 → bool); the target reconstructs it as `Op::Bool` via the `bool_param`
-    // flag recorded at this jump, so it branches with correct Brood truthiness. Every
-    // other `as_int` result is already `i64`.
-    let as_block_arg = |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
-        // A slot proven to hold a `Value::Bool` (`slot_bool`): load its payload byte (0/1)
-        // as the i64 arg — the target reconstructs `Op::Bool` via the `bool_param` flag
-        // (`is_bool_op` is true for it too, so every predecessor agrees). `as_int` would
-        // instead tag-check `Int` and deopt on the `Bool`.
-        if let Op::Slot(k) = op {
-            if slot_bool.borrow().get(k).copied().unwrap_or(false) {
-                let roots_base = b.use_var(rb_var);
-                let i = b.ins().iadd_imm(base, k as i64);
-                let o = b.ins().imul_imm(i, STRIDE);
-                let addr = b.ins().iadd(roots_base, o);
-                let pl = b.ins().load(
-                    types::I64,
-                    MemFlagsData::trusted(),
-                    addr,
-                    PAYLOAD_OFFSET as i32,
-                );
-                return b.ins().band_imm(pl, 0xff);
-            }
-        }
-        let v = as_int(b, op);
-        if b.func.dfg.value_type(v) == types::I8 {
-            b.ins().uextend(types::I64, v)
-        } else {
-            v
-        }
-    };
-    // Materialise an operand to an unboxed `f64`. A `Slot` is normally tag-checked `==
-    // Float` and its payload bit-cast to `f64`. Two fast paths, applied in order:
-    //
-    // 1. Float-carry slots (0..carry_argc, profiled Int/Float): `use_var` — no tag-check,
-    //    no memory access, just the phi-propagated SSA value.
-    // 2. F64 SSA cache: `store_op(Float(v))` stashes `v` in `slot_f64_cache`; subsequent
-    //    reads in the same block return it directly. Eliminates the store→load→bitcast
-    //    round-trip for let-bound floats (e.g. `nx`/`ny` in mandelbrot's `esc` inner loop,
-    //    where `(* nx nx)` would otherwise reload and tag-check the just-written slot).
-    //    The cache is valid only for slots written via `store_op` (never via SelfCall/entry),
-    //    and parameter slots are always None — safe against cross-branch pollution.
-    // 3. Unknown: full tag-check + brif to deopt + load + bitcast. NOTE: we do NOT skip the
-    //    tag-check based on `slot_float[k]` alone: that flag is a single-pass approximation
-    //    that can be contaminated by stores in other branches (e.g. a then-branch `store_op`
-    //    setting slot_float[k]=true before an else-branch `as_f64` read — the slot is really
-    //    Int at that point). Skipping the brif deopt there produces wrong results.
-    let as_f64 = |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
-        match op {
-            Op::Float(v) => v,
-            Op::Slot(k) => {
-                if let Some((var, true)) = carry_vars.get(k).copied().flatten() {
-                    return b.use_var(var);
-                }
-                if let Some(v) = slot_f64_cache.borrow().get(k).copied().flatten() {
-                    return v;
-                }
-                let roots_base = b.use_var(rb_var);
-                let i = b.ins().iadd_imm(base, k as i64);
-                let o = b.ins().imul_imm(i, STRIDE);
-                let addr = b.ins().iadd(roots_base, o);
-                let tag = b.ins().load(types::I8, MemFlagsData::trusted(), addr, 0);
-                let is_f = b.ins().icmp_imm(IntCC::Equal, tag, TAG_FLOAT as i64);
-                let cont = b.create_block();
-                b.ins().brif(is_f, cont, &[], deopt, &[]);
-                b.switch_to_block(cont);
-                let bits = b.ins().load(
-                    types::I64,
-                    MemFlagsData::trusted(),
-                    addr,
-                    PAYLOAD_OFFSET as i32,
-                );
-                b.ins().bitcast(types::F64, MemFlagsData::new(), bits)
-            }
-            Op::Handle(w0, w1, _) => {
-                // A type-erased boxed `Value` (a `nth`/vector read, a call result) used as a
-                // float: tag-check `Float` and extract its payload bits, else deopt (the VM
-                // then runs the arm with the real type). Mirrors the `Op::Slot` path but on
-                // words already in registers. This is what lets `(nth v k)`-fed float
-                // arithmetic stay native instead of deopting on the int-path `as_int`.
-                let tagb = b.ins().band_imm(w0, 0xff);
-                let is_f = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_FLOAT as i64);
-                let cont = b.create_block();
-                b.ins().brif(is_f, cont, &[], deopt, &[]);
-                b.switch_to_block(cont);
-                b.ins().bitcast(types::F64, MemFlagsData::new(), w1)
-            }
-            Op::Int(_) | Op::Bool(_) | Op::HoistedVec { .. } | Op::HoistedTable { .. } => {
-                b.ins().jump(deopt, &[]);
-                let dead = b.create_block();
-                b.switch_to_block(dead);
-                b.ins().f64const(0.0)
-            }
-        }
-    };
+    // Operand-materialization family — thin wrappers over the free fns in `emit.rs`
+    // (extracted for the emit-loop decomposition). Each captures `frame`, so the
+    // ~35 call sites below stay unchanged; the bulky bodies live in `emit.rs`.
+    let read_words =
+        |b: &mut FunctionBuilder, op: Op| -> [cranelift_codegen::ir::Value; 3] {
+            emit::read_words(b, op, frame)
+        };
+    let as_int =
+        |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
+            emit::as_int(b, op, frame)
+        };
+    let as_block_arg =
+        |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
+            emit::as_block_arg(b, op, frame)
+        };
+    let as_f64 =
+        |b: &mut FunctionBuilder, op: Op| -> cranelift_codegen::ir::Value {
+            emit::as_f64(b, op, frame)
+        };
     // Integer-vs-float dispatch for a binary op: an operand is float if it's an
     // `Op::Float`, or a `Slot` the profile/tracking marks float. (`Op::Int`/`Handle` are
     // integer/non-number.)
@@ -1988,70 +1787,8 @@ fn jit_lower_arm_inner(
     // the body's writes, which precede their reads in the single lowering pass.)
     // Mirror of `set_slot_float` for the bool flag. A store of any kind updates *both*
     // (a slot holds one type), so a later read picks the right block-arg representation.
-    let store_op = |b: &mut FunctionBuilder, dst: i64, op: Op| match op {
-        Op::Int(v) => {
-            // A comparison `i8` (`store_int`/`box_scalar` boxes it as `Value::Bool`) marks
-            // the slot bool; a real `i64` int does not.
-            let is_b = b.func.dfg.value_type(v) == types::I8;
-            store_int(b, dst, v, frame);
-            set_slot_float(dst, false, frame);
-            set_slot_bool(dst, is_b, frame);
-            if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
-                *s = None;
-            }
-        }
-        Op::Float(v) => {
-            let bits = b.ins().bitcast(types::I64, MemFlagsData::new(), v);
-            let tag = b.ins().iconst(types::I64, TAG_FLOAT as i64);
-            let zero = b.ins().iconst(types::I64, 0);
-            store_words(b, dst, [tag, bits, zero]);
-            set_slot_float(dst, true, frame);
-            set_slot_bool(dst, false, frame);
-            if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
-                *s = Some(v);
-            }
-        }
-        Op::Bool(v) => {
-            let tag = b.ins().iconst(types::I64, TAG_BOOL as i64);
-            let zero = b.ins().iconst(types::I64, 0);
-            store_words(b, dst, [tag, v, zero]);
-            set_slot_float(dst, false, frame);
-            set_slot_bool(dst, true, frame);
-            if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
-                *s = None;
-            }
-        }
-        Op::Slot(k) => {
-            copy_value(b, k as i64, dst, frame);
-            // Read both source flags and f64 cache into locals *before* mutating (a held
-            // `borrow()` would double-borrow with `set_slot_*`'s `borrow_mut()`).
-            let f = slot_float.borrow().get(k).copied().unwrap_or(false);
-            let bl = slot_bool.borrow().get(k).copied().unwrap_or(false);
-            let fv = slot_f64_cache.borrow().get(k).copied().flatten();
-            set_slot_float(dst, f, frame);
-            set_slot_bool(dst, bl, frame);
-            if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
-                *s = fv;
-            }
-        }
-        Op::Handle(w0, w1, w2) => {
-            store_words(b, dst, [w0, w1, w2]);
-            set_slot_float(dst, false, frame);
-            set_slot_bool(dst, false, frame);
-            if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
-                *s = None;
-            }
-        }
-        Op::HoistedVec { w0, w1, w2, .. } | Op::HoistedTable { w0, w1, w2, .. } => {
-            // Stored as a whole `Value` (its entry-resolved words), like a `Handle`.
-            store_words(b, dst, [w0, w1, w2]);
-            set_slot_float(dst, false, frame);
-            set_slot_bool(dst, false, frame);
-            if let Some(s) = slot_f64_cache.borrow_mut().get_mut(dst as usize) {
-                *s = None;
-            }
-        }
-    };
+    let store_op =
+        |b: &mut FunctionBuilder, dst: i64, op: Op| emit::store_op(b, dst, op, frame);
     // Return-via-roots: place the single result in `roots[base]` and jump to the
     // param-less Done block. The result is a whole `Value`, so it can be a handle.
     let exit_done = |b: &mut FunctionBuilder, op: Op| {
@@ -2062,295 +1799,35 @@ fn jit_lower_arm_inner(
     // scratch slot's address + the operand words, then read the result `Value`'s three
     // words back into a `Handle`. The result rides in registers only until it's consumed
     // (a store / return) — no safepoint in between — so the GC never sees it.
+    // Runtime-call context bundle for the extracted call/read helpers (`emit.rs`).
+    let funcs = emit::Funcs {
+        ptr_ty,
+        heap,
+        out_slot,
+        error,
+        vnbase: vnbase_ref,
+        vobase: vobase_ref,
+        vref: vref_ref,
+    };
+    // Big call/read helpers — thin wrappers over the free fns in `emit.rs` (each
+    // captures `frame`/`funcs`, so the call sites below stay unchanged).
     let call_handle = |b: &mut FunctionBuilder,
                        fref: cranelift_codegen::ir::FuncRef,
                        operands: &[cranelift_codegen::ir::Value]|
-     -> Op {
-        let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
-        let mut args = Vec::with_capacity(operands.len() + 2);
-        args.push(heap);
-        args.push(out_addr);
-        args.extend_from_slice(operands);
-        b.ins().call(fref, &args);
-        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
-        let w1 = b
-            .ins()
-            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
-        let w2 = b
-            .ins()
-            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
-        Op::Handle(w0, w1, w2)
-    };
-    // `vector-ref` / inlined `nth`: a bounds-checked slab read via the runtime helper.
-    // On status≠0 (non-vector / non-int / out-of-range) it branches to `deopt`, so the
-    // VM owns the exact result (`vector-ref`'s error, `nth`'s default); otherwise the
-    // element rides back as a `Handle`. The helper never allocates, so the handle is
-    // safe to hold until its immediate consumer.
-    // Dynamic-index vector read, fully inline for a LOCAL vector (either storage):
-    // tag/region/int-index checks → slab slot → inline or spill element read — no
-    // FFI on the hot path (this was ~20 ns/element on the json/regex code-vector
-    // scans). Anything else — non-vector, non-LOCAL region (RUNTIME/PRELUDE, e.g.
-    // matmul's def'd rows), non-int index, out-of-range — falls back to the
-    // `brood_rt_vector_ref` FFI, whose nonzero status deopts (the VM owns `nth`'s
-    // exact result and errors).
+     -> Op { emit::call_handle(b, fref, operands, funcs) };
     let vector_ref = |b: &mut FunctionBuilder,
                       vec: [cranelift_codegen::ir::Value; 3],
                       idx: [cranelift_codegen::ir::Value; 3]|
-     -> Op {
-        let vr_done = b.create_block();
-        b.append_block_param(vr_done, types::I64);
-        b.append_block_param(vr_done, types::I64);
-        b.append_block_param(vr_done, types::I64);
-        let ffi_blk = b.create_block();
-        // tag byte must be Vector.
-        let tagb = b.ins().band_imm(vec[0], 0xff);
-        let is_vec = b.ins().icmp_imm(IntCC::Equal, tagb, TAG_VECTOR as i64);
-        let c1 = b.create_block();
-        b.ins().brif(is_vec, c1, &[], ffi_blk, &[]);
-        b.switch_to_block(c1);
-        // region: high 2 bits of the handle == 0 (LOCAL); RUNTIME/PRELUDE → FFI.
-        let high2 = b.ins().ushr_imm(vec[1], 62);
-        let is_local = b.ins().icmp_imm(IntCC::Equal, high2, 0);
-        let c2 = b.create_block();
-        b.ins().brif(is_local, c2, &[], ffi_blk, &[]);
-        b.switch_to_block(c2);
-        // index must be an Int.
-        let itag = b.ins().band_imm(idx[0], 0xff);
-        let is_int = b.ins().icmp_imm(IntCC::Equal, itag, TAG_INT as i64);
-        let c3 = b.create_block();
-        b.ins().brif(is_int, c3, &[], ffi_blk, &[]);
-        b.switch_to_block(c3);
-        let idxv = idx[1];
-        // age bit 61 selects the slab base (fetched per read, like the const-index
-        // inline — safe across any prior safepoint).
-        let age = b.ins().ushr_imm(vec[1], 61);
-        let is_old = b.ins().icmp_imm(IntCC::NotEqual, age, 0);
-        let nb2 = b.create_block();
-        let ob2 = b.create_block();
-        let based = b.create_block();
-        b.append_block_param(based, ptr_ty);
-        b.ins().brif(is_old, ob2, &[], nb2, &[]);
-        b.switch_to_block(nb2);
-        let cn2 = b.ins().call(vnbase_ref, &[heap]);
-        let bn2 = b.inst_results(cn2)[0];
-        b.ins().jump(based, &[BlockArg::Value(bn2)]);
-        b.switch_to_block(ob2);
-        let co2 = b.ins().call(vobase_ref, &[heap]);
-        let bo2 = b.inst_results(co2)[0];
-        b.ins().jump(based, &[BlockArg::Value(bo2)]);
-        b.switch_to_block(based);
-        let sbase = b.block_params(based)[0];
-        let vidx = b.ins().band_imm(vec[1], 0xFFFF_FFFFi64);
-        let soff = b.ins().imul_imm(vidx, VS::JIT_STRIDE);
-        let slotp = b.ins().iadd(sbase, soff);
-        let disc = b
-            .ins()
-            .load(types::I8, MemFlagsData::trusted(), slotp, VS::JIT_TAG_OFF);
-        let is_inline = b.ins().icmp_imm(IntCC::Equal, disc, VS::JIT_INLINE_TAG);
-        let inl = b.create_block();
-        let not_inl = b.create_block();
-        b.ins().brif(is_inline, inl, &[], not_inl, &[]);
-        // Inline storage: bounds vs the u8 len, elements at JIT_ITEMS_OFF.
-        b.switch_to_block(inl);
-        let lenb = b
-            .ins()
-            .load(types::I8, MemFlagsData::trusted(), slotp, VS::JIT_LEN_OFF);
-        let lenw = b.ins().uextend(types::I64, lenb);
-        let ib = b.ins().icmp(IntCC::UnsignedLessThan, idxv, lenw);
-        let iok = b.create_block();
-        b.ins().brif(ib, iok, &[], ffi_blk, &[]);
-        b.switch_to_block(iok);
-        let eo = b.ins().imul_imm(idxv, STRIDE);
-        let ebase = b.ins().iadd_imm(slotp, VS::JIT_ITEMS_OFF as i64);
-        let ep = b.ins().iadd(ebase, eo);
-        let i0 = b.ins().load(types::I64, MemFlagsData::trusted(), ep, 0);
-        let i1 = b.ins().load(
-            types::I64,
-            MemFlagsData::trusted(),
-            ep,
-            PAYLOAD_OFFSET as i32,
-        );
-        let i2 = b.ins().load(
-            types::I64,
-            MemFlagsData::trusted(),
-            ep,
-            PAYLOAD_OFFSET as i32 + 8,
-        );
-        b.ins().jump(
-            vr_done,
-            &[
-                BlockArg::Value(i0),
-                BlockArg::Value(i1),
-                BlockArg::Value(i2),
-            ],
-        );
-        // Spill storage: bounds vs the cached len, elements via the cached ptr.
-        b.switch_to_block(not_inl);
-        let is_spill = b.ins().icmp_imm(IntCC::Equal, disc, VS::JIT_SPILL_TAG);
-        let spl = b.create_block();
-        b.ins().brif(is_spill, spl, &[], ffi_blk, &[]);
-        b.switch_to_block(spl);
-        let sptr = b.ins().load(
-            types::I64,
-            MemFlagsData::trusted(),
-            slotp,
-            VS::JIT_SPILL_PTR_OFF,
-        );
-        let slen = b.ins().load(
-            types::I64,
-            MemFlagsData::trusted(),
-            slotp,
-            VS::JIT_SPILL_LEN_OFF,
-        );
-        let sb2 = b.ins().icmp(IntCC::UnsignedLessThan, idxv, slen);
-        let sok2 = b.create_block();
-        b.ins().brif(sb2, sok2, &[], ffi_blk, &[]);
-        b.switch_to_block(sok2);
-        let seo = b.ins().imul_imm(idxv, STRIDE);
-        let sep = b.ins().iadd(sptr, seo);
-        let s0 = b.ins().load(types::I64, MemFlagsData::trusted(), sep, 0);
-        let s1 = b.ins().load(
-            types::I64,
-            MemFlagsData::trusted(),
-            sep,
-            PAYLOAD_OFFSET as i32,
-        );
-        let s2 = b.ins().load(
-            types::I64,
-            MemFlagsData::trusted(),
-            sep,
-            PAYLOAD_OFFSET as i32 + 8,
-        );
-        b.ins().jump(
-            vr_done,
-            &[
-                BlockArg::Value(s0),
-                BlockArg::Value(s1),
-                BlockArg::Value(s2),
-            ],
-        );
-        // FFI fallback: exact semantics for every non-inlined shape; status → deopt.
-        b.switch_to_block(ffi_blk);
-        let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
-        let c = b.ins().call(
-            vref_ref,
-            &[
-                heap, out_addr, vec[0], vec[1], vec[2], idx[0], idx[1], idx[2],
-            ],
-        );
-        let status = b.inst_results(c)[0];
-        let cont = b.create_block();
-        b.ins().brif(status, deopt, &[], cont, &[]);
-        b.switch_to_block(cont);
-        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
-        let w1 = b
-            .ins()
-            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
-        let w2 = b
-            .ins()
-            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
-        b.ins().jump(
-            vr_done,
-            &[
-                BlockArg::Value(w0),
-                BlockArg::Value(w1),
-                BlockArg::Value(w2),
-            ],
-        );
-        b.switch_to_block(vr_done);
-        let r0 = b.block_params(vr_done)[0];
-        let r1 = b.block_params(vr_done)[1];
-        let r2 = b.block_params(vr_done)[2];
-        Op::Handle(r0, r1, r2)
-    };
-
-    // `table-has?` / 2-arg `table-get` via their runtime callbacks. Status protocol:
-    // 0 = done (`out` holds the result), 1 = deopt (non-Table operand — the VM owns the
-    // exact type error), 2 = a real error is parked in `jit_pending_error` (dropped
-    // table / bad key) → exit via the arm's error block (outcome 3). The callbacks may
-    // allocate (a compound stored value reconstructs) but never collect, so live
-    // register handles stay valid across the call.
+     -> Op { emit::vector_ref(b, vec, idx, frame, funcs) };
     let table_prim = |b: &mut FunctionBuilder,
                       fref: cranelift_codegen::ir::FuncRef,
                       tbl: [cranelift_codegen::ir::Value; 3],
                       key: [cranelift_codegen::ir::Value; 3]|
-     -> Op {
-        let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
-        let c = b.ins().call(
-            fref,
-            &[
-                heap, out_addr, tbl[0], tbl[1], tbl[2], key[0], key[1], key[2],
-            ],
-        );
-        let status = b.inst_results(c)[0];
-        let cont = b.create_block();
-        let slow = b.create_block();
-        b.ins().brif(status, slow, &[], cont, &[]);
-        b.switch_to_block(slow);
-        let is_err = b.ins().icmp_imm(IntCC::Equal, status, 2);
-        b.ins().brif(is_err, error, &[], deopt, &[]);
-        b.switch_to_block(cont);
-        let w0 = b.ins().stack_load(types::I64, out_slot, 0);
-        let w1 = b
-            .ins()
-            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32);
-        let w2 = b
-            .ins()
-            .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
-        Op::Handle(w0, w1, w2)
-    };
-    // Runtime-dispatched `=` on materialised operands — the codegen twin of the VM's
-    // keyword/symbol fast path in `prim2_inline_exec`. Cases, by runtime tags:
-    //   * Int × Int → payload compare (the same two tag-checks the old int path paid);
-    //   * either side Sym/Keyword → interned identity: equal iff tags equal AND ids
-    //     equal (a keyword/symbol equals nothing but its same-tag same-id self — never
-    //     numerically coerced, so `(= :a 1)`/`(= :a 'a)` are correctly false);
-    //   * anything else (floats, bignums, structural values) → deopt: the VM owns
-    //     numeric coercion and deep equality.
-    // This is what keeps keyword-dispatching arms (`(= (get st :t) :split)` — the regex
-    // NFA walkers, any tagged-map code) running native instead of deopting per compare.
+     -> Op { emit::table_prim(b, fref, tbl, key, frame, funcs) };
     let eq_dispatch = |b: &mut FunctionBuilder,
                        wa: [cranelift_codegen::ir::Value; 3],
                        wb: [cranelift_codegen::ir::Value; 3]|
-     -> cranelift_codegen::ir::Value {
-        let ta = b.ins().band_imm(wa[0], 0xff);
-        let tb = b.ins().band_imm(wb[0], 0xff);
-        let done = b.create_block();
-        b.append_block_param(done, types::I8);
-        // Int × Int?
-        let a_int = b.ins().icmp_imm(IntCC::Equal, ta, TAG_INT as i64);
-        let b_int = b.ins().icmp_imm(IntCC::Equal, tb, TAG_INT as i64);
-        let both_int = b.ins().band(a_int, b_int);
-        let intb = b.create_block();
-        let not_int = b.create_block();
-        b.ins().brif(both_int, intb, &[], not_int, &[]);
-        b.switch_to_block(intb);
-        let ieq = b.ins().icmp(IntCC::Equal, wa[1], wb[1]);
-        b.ins().jump(done, &[BlockArg::Value(ieq)]);
-        // Either side an interned immediate (Sym=5 / Keyword=6)?
-        b.switch_to_block(not_int);
-        let a_sym = b.ins().icmp_imm(IntCC::Equal, ta, TAG_SYM as i64);
-        let a_kw = b.ins().icmp_imm(IntCC::Equal, ta, TAG_KEYWORD as i64);
-        let b_sym = b.ins().icmp_imm(IntCC::Equal, tb, TAG_SYM as i64);
-        let b_kw = b.ins().icmp_imm(IntCC::Equal, tb, TAG_KEYWORD as i64);
-        let a_in = b.ins().bor(a_sym, a_kw);
-        let b_in = b.ins().bor(b_sym, b_kw);
-        let either = b.ins().bor(a_in, b_in);
-        let kwb = b.create_block();
-        b.ins().brif(either, kwb, &[], deopt, &[]);
-        b.switch_to_block(kwb);
-        let tags_eq = b.ins().icmp(IntCC::Equal, ta, tb);
-        // A Sym/Keyword payload is a u32 — the HIGH half of the payload word is
-        // undefined padding (Rust doesn't zero it, and word-copies carry it along),
-        // so compare only the low 32 bits or equal interned ids can compare unequal.
-        let ida = b.ins().band_imm(wa[1], 0xFFFF_FFFFi64);
-        let idb = b.ins().band_imm(wb[1], 0xFFFF_FFFFi64);
-        let ids_eq = b.ins().icmp(IntCC::Equal, ida, idb);
-        let keq = b.ins().band(tags_eq, ids_eq);
-        b.ins().jump(done, &[BlockArg::Value(keq)]);
-        b.switch_to_block(done);
-        b.block_params(done)[0]
-    };
+     -> cranelift_codegen::ir::Value { emit::eq_dispatch(b, wa, wb, frame) };
     // Inline read of `(nth v <const idx>)` for a LOCAL small (inline) vector, the
     // analog of the pair `first`/`rest` inline. Fetches the vector-slab base
     // *per read* (a trivial FFI, not the hoist used for pairs) so it is safe even
