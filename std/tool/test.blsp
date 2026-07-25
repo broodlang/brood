@@ -722,6 +722,9 @@ docs/testing.md for the full guide.")
 (defn test--red (s) (test--colour "31" s))
 (defn test--dim (s) (test--colour "90" s))
 (defn test--orange (s) (test--colour "33" s))
+;; Bold (not a colour) for a failure's file:line — it has to be findable in a wall of
+;; output, and bold survives a terminal whose palette makes cyan or blue unreadable.
+(defn test--bold (s) (test--colour "1" s))
 
 ;; --- live progress -------------------------------------------------------------
 ;; One character per finished test — a green dot for a pass, a red `F` for a failure —
@@ -1069,6 +1072,45 @@ docs/testing.md for the full guide.")
 ;; `rt_collect_block` fix). Files run sequentially (each `%isolate` blocks to
 ;; completion); tests WITHIN a file still parallelise. The shared drain behind both
 ;; `run-tests-scoped` (prints) and `run-tests-scoped-structured` (returns data).
+;; Load one file and run what it registered — reporting a file that FAILS TO LOAD as
+;; a failure of its own rather than letting it abort the run.
+;;
+;; A test file that doesn't compile is an everyday situation (you are editing it), and
+;; it used to take the whole suite down with a raw error structure:
+;;
+;;   1337:13: error: {:trace ({:col 58, :line 1093} …), :message unbound symbol: …,
+;;                    :file /home/…/tests/oops_test.blsp, :kind :unbound, …}
+;;
+;; — three thousand passing tests thrown away, and the one fact that mattered (which
+;; file, which line, what was wrong) buried inside a printed map. Now the file becomes
+;; one clearly-located failure, the other files still run, and the run still exits
+;; non-zero.
+(defn drain-one-file (loader)
+  (reset-units!)
+  (let (outcome (try (do (loader) :%loaded) (catch e (list :%load-failed e))))
+    (if (= outcome :%loaded)
+      (drain-current)
+      (list (test--load-failure-result (second outcome))))))
+
+;; A field of a raised error, which may be a structured map or a plain string.
+(defn test--error-field (e key) (if (map? e) (get e key) nil))
+
+;; Turn a load failure into an ordinary failing result, so it flows through the same
+;; reporting (and counting) as any other failure.
+(defn test--load-failure-result (e)
+  (let (file (test--error-field e :file)
+        line (test--error-field e :line)
+        col (test--error-field e :col)
+        message (or (test--error-field e :message) (pr-str e))
+        shown (if (nil? file) "" (test--relative-path file)))
+    (list (if (= shown "") "a test file" shown)
+      "failed to load"
+      (list (list (if (and file line col) (list file line col) nil)
+              (list (str "cannot load: " message))))
+      0
+      false
+      (if (and (not (= shown "")) (not (nil? line))) (str shown ":" line) ""))))
+
 (defn drain-files-scoped (loaders)
   ;; Accumulate each file's result LIST with `cons` (O(1)) into a reverse-order list of
   ;; lists, then flatten once — O(total results). (A naive `(append acc file-results)`
@@ -1085,10 +1127,7 @@ docs/testing.md for the full guide.")
                             failed (second state))
                         (if (and (> *test-max-failures* 0) (>= failed *test-max-failures*))
                           state
-                          (let (file-results (%isolate (fn ()
-                                                         (reset-units!)
-                                                         (loader)
-                                                         (drain-current))))
+                          (let (file-results (%isolate (fn () (drain-one-file loader))))
                             (list (cons file-results chunks)
                               (+ failed (count-failed file-results)))))))
                 (list nil 0)
@@ -1162,24 +1201,54 @@ docs/testing.md for the full guide.")
 ;; clickable; without one, just the message. The labeled fields print indented
 ;; under it. See docs/tooling.md.
 (defn fail-anchor (r rec)
-  (let (loc (fail-loc-of rec))
-    (if loc
-      (str (first loc) ":" (second loc) ":" (third loc) ": test failed: " (full-name r))
-      (str "test failed: " (full-name r)))))
+  (let (where (fail-where r rec))
+    (str (if (= where "") "" (str (test--bold where) ": "))
+      (test--red "test failed: ")
+      (full-name r))))
 
-;; Print every failure of a result as: an anchor line, then its fields indented.
+;; WHERE to look, as `file:line:col` — the part of a failure report you actually act
+;; on, so it must always be present and short enough to read.
+;;
+;; Two things were wrong before. The path was ABSOLUTE, so every anchor line opened
+;; with `/home/you/projects/thing/tests/…` and the location was buried in it; it is now
+;; relative to the working directory (still clickable — `nest test` runs from the
+;; project root, which is what compilation-mode resolves against). And when an
+;; assertion carried no recorded position the location was omitted ENTIRELY, leaving
+;; only `test failed: group › name` with nothing to jump to; it now falls back to the
+;; test's own declaration site, which the result carries.
+(defn fail-where (r rec)
+  (let (loc (fail-loc-of rec))
+    (cond
+      loc (str (test--relative-path (first loc)) ":" (second loc) ":" (third loc))
+      ;; No per-assertion position (a body form the reader recorded no position for) —
+      ;; point at the test instead of nowhere.
+      (not (= (r-where r) "")) (r-where r)
+      else "")))
+
+;; Print every failure of a result: a blank line, the anchor, then its fields
+;; indented. The leading blank separates consecutive failures, which otherwise run
+;; together into a wall that is hard to scan.
 (defn print-failure (indent r)
   (fold (fn (_ rec)
+          (println "")
           (println (fail-anchor r rec))
-          (fold (fn (_ line) (println (str indent line))) nil (fail-lines-of rec)))
+          (fold (fn (_ line) (println (str indent (test--dim-label line)))) nil (fail-lines-of rec)))
     nil
     (r-fails r)))
+
+;; Dim the `label:` prefix of a detail line so the VALUE is what stands out —
+;; `actual:`/`expect:`/`assert:` are scaffolding, the values are the information.
+(defn test--dim-label (line)
+  (let (i (index-of line ": "))
+    (if (< i 0)
+      line
+      (str (test--dim (substring line 0 (+ i 1))) (substring line (+ i 1) (string-length line))))))
 
 ;; Emit one editor-parseable block per failed assertion. There is a single
 ;; output format — structured — for humans, LLMs and Emacs alike (docs/tooling.md).
 (defn report-failures (results)
   (let (failed (filter r-failed? results))
-    (unless (empty? failed) (println "") (fold (fn (_ r) (print-failure "    " r)) nil failed))))
+    (unless (empty? failed) (fold (fn (_ r) (print-failure "    " r)) nil failed))))
 
 (defn report-slow (results n)
   (println "")

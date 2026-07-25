@@ -359,7 +359,38 @@ Override per run with `:timeout MS`, or globally by rebinding `*test-timeout-ms*
 Tests in a batch start together, so the budget is effectively per-test. Any test
 over **1 s** (passing or not) is also listed automatically under the summary.
 
-`run-tests` prints progress, then any failures (one line per failed assertion,
+### Reading a failure
+
+Each failed assertion gets a block: a **`file:line:col:` anchor** (bold, and relative
+to the working directory so it stays short and stays clickable in
+compilation-mode/flymake), then its fields indented with the labels dimmed so the
+*values* are what you read. Blocks are separated by a blank line.
+
+```
+tests/mix_test.blsp:5:28: test failed: arithmetic › divides
+    assert: (assert= (/ 7 2) 3.6)
+    actual: 3.5
+    expect: 3.6
+```
+
+When an assertion carries no recorded position — a body form the reader recorded no
+position for — the anchor falls back to **the test's own declaration site**, so there
+is always somewhere to jump to.
+
+A test **file that fails to load** (you're mid-edit and it doesn't compile) is
+reported as one located failure of its own rather than aborting the run, so the rest
+of the suite still reports and you still see exactly what broke:
+
+```
+tests/oops_test.blsp:2:1: test failed: tests/oops_test.blsp › failed to load
+    cannot load: unbound symbol: this-is-not-defined
+```
+
+`nest test` exits non-zero on any failure, with the summary as the last thing printed
+— a failing suite is an expected outcome, not an internal error, so it does not append
+a Brood stack trace to the report.
+
+`run-tests` prints progress, then any failures (one block per failed assertion,
 attributed to its test), then a summary:
 
 ```

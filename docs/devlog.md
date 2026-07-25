@@ -7481,3 +7481,57 @@ Implementation notes worth keeping:
 
 `tests/runner_progress_test.blsp` (20 cases) covers the marks, the three trace
 outcomes, the counting, and the defensive accessors.
+
+## 2026-07-25 — making a `nest test` failure readable
+
+Asked whether the output makes sense, and it didn't — the part you act on was the
+hardest part to find. Four fixes.
+
+**The anchor was buried in an absolute path.** Every failure opened with
+`/home/you/projects/thing/tests/x_test.blsp:5:28:` — the location is the whole point of
+the line, and it was 60 characters of prefix. Now relative to the working directory,
+which keeps it short *and* still clickable (compilation-mode resolves against cwd, and
+`nest test` runs from the project root). Bold, so it is findable in a wall of output;
+`test failed:` in red; the labels of the detail lines dimmed so the values read as the
+content. Blank line between blocks, which previously ran together.
+
+**Some failures had no location at all.** `fail-loc` is per-assertion, and an assertion
+whose form carried no recorded position produced just `test failed: group › name` —
+nothing to jump to. It now falls back to the **test's own declaration site**, which the
+result already carries (added for `FILE:LINE` selection).
+
+**A test file that fails to load took the whole run down**, and printed the reason as a
+structured map:
+
+```
+1337:13: error: {:trace ({:col 58, :line 1093} …), :message unbound symbol: …,
+                 :file /home/…/tests/oops_test.blsp, :kind :unbound, …}
+```
+
+Three thousand passing tests discarded, and the three facts that mattered (file, line,
+what was wrong) buried in a printed map — for the everyday case of editing a test file
+that doesn't compile yet. It is now one ordinary located failure, the other files still
+run, and the run still exits non-zero:
+
+```
+tests/oops_test.blsp:2:1: test failed: tests/oops_test.blsp › failed to load
+    cannot load: unbound symbol: this-is-not-defined
+```
+
+**A failing suite appended a Brood stack trace to its own report.**
+`run-project-tests` raises `N test(s) failed` so `cargo test` sees a non-zero exit —
+correct, but `nest test` then reported that raise as an error, tacking
+`1337:13: error: 2 test(s) failed`, `at project/run-project-tests` and a version banner
+onto the end of a clean report. A failing suite is an expected outcome, not an internal
+error: `run_expecting_failure_signal` exits non-zero silently for that specific signal
+and still reports anything else (a broken manifest, an unloadable file — both verified).
+
+Also worth recording, since it cost real confusion: **`nest test` in this repo showed
+12 failures from the installed binary while a freshly built one showed none.** Not a
+regression — `std/` is baked into the binary at compile time, so an installed `nest`
+one commit behind was running the *old* test framework against the *new* test files,
+and every case exercising `:skip`/`progress-mark` failed. `make install` after changing
+`std/` is not optional.
+
+`tests/runner_progress_test.blsp` grew to 32 cases, covering the load-failure result,
+the anchor fallbacks, and the relative-path rendering.

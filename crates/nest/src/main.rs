@@ -837,12 +837,13 @@ fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
         // `test` is required up front, not left to `run-project-tests`: the option
         // plist can contain a `(test/test--make-filter …)` call, and arguments are
         // evaluated before the callee runs its own `require`.
-        run(
+        run_expecting_failure_signal(
             interp,
             &format!(
                 "(require 'project) (require 'test) (project/load-config) \
                  (project/run-project-tests {plist})"
             ),
+            "test(s) failed",
         );
         return;
     }
@@ -868,9 +869,17 @@ fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
     // against (and updates) the project's record exactly as on a whole-project
     // run; outside one there is no record to keep, so run the registry directly.
     if inside_project {
-        run(interp, &format!("(project/run-loaded-tests {plist})"));
+        run_expecting_failure_signal(
+            interp,
+            &format!("(project/run-loaded-tests {plist})"),
+            "test(s) failed",
+        );
     } else {
-        run(interp, &format!("(test/run-tests {plist})"));
+        run_expecting_failure_signal(
+            interp,
+            &format!("(test/run-tests {plist})"),
+            "test(s) failed",
+        );
     }
 }
 
@@ -1522,6 +1531,29 @@ fn cmd_release(
 
 /// Evaluate a bootstrap snippet, reporting any error in GNU form and exiting
 /// non-zero on failure.
+/// Like `run`, but for a command whose Brood side signals "the work failed" by
+/// RAISING — `run-project-tests` raises `N test(s) failed` so that `cargo test` and
+/// `brood --test` see a non-zero exit.
+///
+/// For `nest test` that raise is not an error to report: the failures have already
+/// been printed, in detail, by the runner. Reporting it again appended
+/// `1337:13: error: 2 test(s) failed` plus `at project/run-project-tests` and a
+/// version banner to the end of an otherwise clean report — three lines of internals
+/// after the part the user actually reads. Exit non-zero silently instead, and only
+/// fall back to the normal error report for a genuine failure (a broken manifest, an
+/// unloadable test file).
+fn run_expecting_failure_signal(interp: &mut Interp, code: &str, signal: &str) {
+    let result = interp.eval_str(code);
+    brood::builtins::restore_terminal_on_exit();
+    if let Err(e) = result {
+        if e.to_string().contains(signal) {
+            std::process::exit(1);
+        }
+        report_error(&e);
+        std::process::exit(1);
+    }
+}
+
 fn run(interp: &mut Interp, code: &str) {
     let result = interp.eval_str(code);
     // Restore the terminal on the way out — whether the program returned
