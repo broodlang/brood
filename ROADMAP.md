@@ -22,15 +22,16 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ tried and reverte
 
 ## Active work — dated findings & backlogs
 
-### `jit_lower_arm_inner` emit-loop decomposition — remaining steps (2026-07-25)
+### `jit_lower_arm_inner` emit-loop decomposition — ✅ COMPLETE (2026-07-25)
 
 The dependency-ordered continuation of the Tier-1 item-1 split (see "Structural /
 code-organization cleanup" below for what's landed: `i64.rs`/`prepass.rs`/`emit.rs`,
 `Op` at module scope, the `Frame` context, and the arith/scalar/slot-kind helpers —
 `jit_lower.rs` 5437 → 4308). The pattern is proven; each step is a behaviour-identical
 closure→free-fn relocation into `jit_lower/emit.rs` (or a new sibling), verified with
-**differential 2/2 + jit 34/34 (JIT_VERIFY) + full suite** per step. Ordered by
-dependency:
+**differential 2/2 + jit 34/34 (JIT_VERIFY) + full suite** per step. **All steps below
+are now done — `jit_lower.rs` is 5437 → 2271, with the per-`Inst` arm bodies in
+`call.rs`/`prim.rs`/`control.rs`.** Ordered by dependency:
 
 - ✅ **Batch 5 — operand-materialization family** (done 2026-07-25): `read_words`,
   `store_words`, `as_int`, `as_block_arg`, `as_f64`, and `store_op` moved to `emit.rs`
@@ -50,19 +51,22 @@ dependency:
   2/2, jit 34/34 (incl. `GC_STRESS`+`GC_VERIFY`+`JIT_VERIFY`), full `make test`
   811/811, and JIT vs `BROOD_VM=0` output bit-identical across arith/float/vector-ref/
   keyword-eq.
-- ⬜ **Per-`Inst` arm bodies:** Call (~300) / Prim1/2/3 + fused (~700) / SelfCall
-  (~200) / control (~130) → `jit_lower/{call,prim,control}.rs` — the largest and
-  last, gated on everything above. Each arm becomes `emit_<inst>(&mut b, &mut stack,
-  frame, funcs, …)`. **This is the all-or-nothing step** (the whole loop shares `b`,
-  the operand `stack`, the hoist maps, and ~27 `FuncRef`s, so `Funcs` must first grow
-  to carry the full set + the stack must thread), and per the bar below it wants
-  per-family `BROOD_JIT_DUMP_IR` + benchmark verification — left for a focused pass.
-
-**Testing bar for this work (raise it):** beyond the per-step differential/jit/suite,
-run the split under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1 BROOD_JIT_VERIFY=1` and the
-full `make test` (nextest) before calling the whole decomposition done; spot-check the
-numeric benchmark rows are bit-identical to `BROOD_VM=0` (extraction must not perturb
-codegen). **[kernel/JIT]**
+- ✅ **Per-`Inst` arm bodies** (done 2026-07-25): Call + SelfCall →
+  `jit_lower/call.rs`; Prim1/MakeVector/Prim3 + fused Prim2/Prim2SlotSlot/Prim2SlotInt
+  → `jit_lower/prim.rs`; Jump/JumpIfFalse + `record_block_flags` →
+  `jit_lower/control.rs`. `Funcs` grew to carry every runtime-call `FuncRef` (+ shared
+  `TICK_BATCH`); `inline_vec_ref` moved to `emit.rs`; the operand `stack`, `spill_next`,
+  and `bool_param` thread through as explicit params. Each `Inst` arm became
+  `emit_<inst>(&mut b, &mut stack, …, frame, funcs)` (`Call` returns a `Flow` so the
+  caller keeps the tail `break`; the rest return `Option<()>`). The trivial leader arms
+  (`Const`/`Local`/`Global`/`Pop`/`SetLocal`) stay inline as scoped. Every move was
+  behaviour-identical (closure calls → direct `emit::` calls). `jit_lower.rs` 3785 →
+  2271. Verified per family (differential 2/2 + jit 34/34), then the whole split under
+  `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1 BROOD_JIT_VERIFY=1` (36/36), full `make test`
+  846/846 + doctest, and JIT vs `BROOD_VM=0` vs `BROOD_NO_JIT=1` output bit-identical on
+  an arm-exercising program (`BROOD_JIT_DUMP_IR` confirmed `sum-to`/`fold--loop`/… tier
+  through the new code). **The `jit_lower_arm_inner` emit-loop decomposition is
+  complete.** **[kernel/JIT]**
 
 ### Structural / code-organization cleanup (2026-07-24)
 

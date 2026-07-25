@@ -7432,3 +7432,39 @@ One incidental fix: `package` needed `(:use-internals project)` for
 `project--cache-dir` (ADR-146). The privacy error fires at *require* time, so the
 whole module silently failed to load until it was granted — the same trap
 `std/tool/complete.blsp` hit yesterday.
+
+## 2026-07-25 — jit_lower emit-loop decomposition: the per-`Inst` arm bodies (COMPLETE)
+
+The last, largest step of the `jit_lower_arm_inner` decomposition (ROADMAP "Active
+work"). The ~1,600-line emit loop — one big `match &code[j]` over ~15 `Inst` variants,
+all sharing `b`, the virtual operand `stack`, the hoist maps, and ~27 `FuncRef`s — is
+now split into per-family sibling files, each a behaviour-identical relocation:
+
+- **`jit_lower/control.rs`** — `Jump` / `JumpIfFalse` + the block-param edge-typing
+  helper `record_block_flags`. The two terminators emit their branch and return
+  `Some(())` (or `None` to bail); the caller keeps the `break`.
+- **`jit_lower/prim.rs`** — `Prim1`, `MakeVector`, `Prim3` (table-put), and the fused
+  `Prim2` / `Prim2SlotSlot` / `Prim2SlotInt`. `pick` is a free fn here; the big shared
+  helpers (`call_handle`/`vector_ref`/`table_prim`/`eq_dispatch`) were already in
+  `emit.rs`, and `inline_vec_ref` moved there too so `Prim2SlotInt` can call it.
+- **`jit_lower/call.rs`** — the general `Call` (tail/non-tail, the in-IR epoch-guarded
+  fast link, handle-spill discipline) and `SelfCall` (the self-tail back-edge with
+  carry-var sync, cons-only GC safepoint, checkpoint reset, and BEAM-batched reduction
+  poll). `Call` returns a `Flow { Fall, Break }` so tail-vs-non-tail control stays in
+  the caller loop; `SelfCall` is always a terminator.
+
+**The enabling refactor** was growing `emit::Funcs` to carry *every* runtime-call
+`FuncRef` (car/cdr/cons/makevec*/table*/rb/globic/pushn/callslow/natfl/flbase/fastframe/
+sp/tickn, + a `#[cfg(debug_assertions)]` `dbg_staging`) and a shared
+`emit::TICK_BATCH`, so the arm fns take just `(&mut b, &mut stack, …, frame, funcs)`.
+The operand `stack`, `spill_next`, and `bool_param` thread as explicit `&mut` params.
+No codegen change: each closure call (`read_words(&mut b, op)`) became the direct
+`emit::read_words(b, op, frame)` it already delegated to. `jit_lower.rs` 3785 → 2271
+(5437 → 2271 across the whole decomposition); the trivial leader arms
+(`Const`/`Local`/`Global`/`Pop`/`SetLocal`) stay inline, as the roadmap scoped.
+
+**Verified** per family (differential 2/2 + jit 34/34), then the whole split under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1 BROOD_JIT_VERIFY=1` (36/36), full `make test`
+846/846 + doctest, and a three-engine A/B (JIT vs `BROOD_NO_JIT=1` vs `BROOD_VM=0`) on a
+program exercising every arm family — output bit-identical, with `BROOD_JIT_DUMP_IR`
+confirming `sum-to`/`fold--loop`/`reverse--acc`/… actually tier through the new code.
