@@ -177,6 +177,27 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                 }
             }
             match items.first().copied() {
+                // **Keyword accessor** `(:key coll [default])` (ADR-165) — the same
+                // record-field rule the `(get m :k)` case below applies, so the two
+                // spellings type identically. Without this, `(:x p)` on a typed record
+                // had NO result type, and `(string-length (:x p))` went uncaught while
+                // the `get` spelling was flagged. `V | nil` for a `map<K,V>`, since a
+                // key may be absent; an unknown key on a record falls through (records
+                // are open, so the type is genuinely unknown, not an error).
+                Some(Value::Keyword(key)) if items.len() == 2 || items.len() == 3 => {
+                    let recv = expr_ty(heap, items[1], ctx);
+                    if let Some((fty, _required)) = recv
+                        .as_ref()
+                        .and_then(Ty::record_fields)
+                        .and_then(|f| f.get(&key))
+                    {
+                        return Some(fty.clone().union(Ty::of(Tag::Nil)));
+                    }
+                    if let Some((_, v)) = recv.as_ref().and_then(Ty::map_kv) {
+                        return Some(v.clone().union(Ty::of(Tag::Nil)));
+                    }
+                    return None;
+                }
                 Some(Value::Sym(s)) => {
                     if value::symbol_is(s, kw::QUOTE) {
                         return items.get(1).map(|&d| Ty::of_value(d));

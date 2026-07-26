@@ -3632,3 +3632,53 @@ fn module_with_no_use_clauses_is_silent() {
 // `std/tool/project.blsp` `project--unused-private-warnings` — because a `--`
 // name is referenced cross-module/by tests, which a single-file check can't see.
 // Its coverage lives with the project tooling tests.)
+
+/// **Keyword accessors are typed** (ADR-165 + ADR-167). A keyword head is not a
+/// `Sym`, so it bypassed every sig/arity path in the checker: `(:name 5)` drew no
+/// warning at all, and `(:x p)` on a typed record had no result type while the
+/// identical `(get p :x)` was flagged. Both halves are pinned here.
+#[test]
+fn keyword_accessor_receiver_is_checked() {
+    // provably-unkeyable receiver → warns, naming the keyword
+    let w = warnings("(:name 5)");
+    assert!(
+        w.iter().any(|s| s.contains(":name") && s.contains("map, set or nil")),
+        "{w:?}"
+    );
+    assert!(!warnings("(:name \"str\")").is_empty());
+    // a keyable receiver is silent, and so is an unknown one (no false positives)
+    assert!(warnings("(:name {:name 1})").is_empty());
+    assert!(warnings("(:name #{:name})").is_empty());
+    assert!(warnings("(:name nil)").is_empty());
+    assert!(warnings("(defn f (m) (:name m))").is_empty());
+}
+
+#[test]
+fn keyword_accessor_arity_is_checked() {
+    assert!(warnings("(:name)")
+        .iter()
+        .any(|s| s.contains("1 or 2 arguments")));
+    assert!(warnings("(:name {} 1 2)")
+        .iter()
+        .any(|s| s.contains("1 or 2 arguments")));
+    // the two valid arities stay silent
+    assert!(warnings("(:name {})").is_empty());
+    assert!(warnings("(:name {} :dflt)").is_empty());
+}
+
+#[test]
+fn keyword_accessor_result_type_matches_get() {
+    // A record field's declared type flows through the keyword spelling exactly as
+    // it does through `get`, so a misuse of the RESULT is caught either way.
+    let src = "(defrecord pt ((x int) (y int)))\n(defn a () (string-length (:x (pt 1 2))))";
+    let w = file_warnings(src);
+    assert!(
+        w.iter().any(|m| m.contains("string-length") && m.contains("int")),
+        "the keyword spelling must flow the field type: {w:?}"
+    );
+    // and the two spellings agree
+    let via_get = file_warnings(
+        "(defrecord pt ((x int) (y int)))\n(defn a () (string-length (get (pt 1 2) :x)))",
+    );
+    assert_eq!(w.len(), via_get.len(), "get: {via_get:?} vs kw: {w:?}");
+}
