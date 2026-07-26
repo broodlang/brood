@@ -10056,3 +10056,81 @@ and the fix (`(defn f ((x int) -> int) …)`) is a change to `defn`, the checker
 `sig_of`, `defrecord`'s emitted sigs, `sig!`'s wrapping, and every `sig` in `std/`.
 That is an ADR-082 revision, not a tweak. Deferred with the reasoning recorded, not
 dismissed.
+
+## ADR-164 — `get`/`nth` diagnostics: an error must name the operation the caller wrote
+
+**Context.** `docs/language.md` promises that type errors are self-identifying —
+*"they name the operation, the type it wanted, and the tag + printed form of what
+actually arrived"*. `get` is the most-called accessor in the language (~4,800 sites
+across the workspace) and broke that promise in **four** of its five failure modes,
+because its non-map path fell through to `nth`, whose integer arithmetic raised first:
+
+| Expression | Before |
+|---|---|
+| `(get deps :name)` — list | `-: expected number, got keyword (:name)` |
+| `(get [1 2] :name)` — vector | `<=: expected number, got keyword (:name)` |
+| `(get 5 :name)` — non-collection | `empty?: expected collection, got int (5)` |
+| `(get "str" :name)` — string | **`nil`**, silently |
+| `(get nil :name)` | `nil` (correct) |
+
+Three of those name `-`, `<=`, `empty?` — internals of `nth`/`nth-list` that the
+caller never wrote, and that give no clue what the actual mistake was. The fourth is
+worse than any error: `(:name s)` on a string that should have been a map produced a
+plausible-looking absent value, so the mistake surfaced arbitrarily far away.
+
+This surfaced while designing callable keywords (`(:k m)`), which would inherit the
+behaviour wholesale — the most common misuse of that feature, `(:name deps)` where
+`deps` is a *list* of maps, is exactly the first row of the table. So it is a
+prerequisite for that feature, and a defect on its own.
+
+**Decision.** `get` and `nth` check the shapes they cannot answer and raise errors
+that name themselves:
+
+- **A non-integer key on an integer-indexed collection** (vector, list, string,
+  bytes) → `get: expected an integer index, got keyword (:name) — a vector, list,
+  string or bytes is indexed by position, not by key. Did you mean one element of it,
+  or `get-in` for a nested key?` The hint matters: the two real intentions behind
+  that mistake are "one element" and "a nested key".
+- **A non-collection** → `get: expected a collection (map, set, vector, list, string
+  or bytes), got int (5)`.
+- **`nth` with a non-integer index** → names `nth` instead of leaking `>=`/`-`.
+- **`nth` on a non-collection** → names `nth` instead of leaking `empty?`.
+
+**The `default` argument does not suppress these.** A default means "the key is
+absent", not "the key is the wrong type" — so `(get [1 2] :name :dflt)` raises. This
+is the distinction that makes a default safe to use: it can't quietly absorb a bug.
+
+**One semantic change, deliberate:** `(get "str" :k)` was `nil` and is now an error.
+A test asserted the old behaviour, on the reasoning that "strings are traversable but
+not key-value maps" — true, and precisely why a keyword key is a *mistake* there
+rather than a miss. The test now pins the error, with the old expectation and the
+reason for the flip recorded in place.
+
+**Measured cost, and a rejected implementation.** Diagnostics on the hottest accessor
+in the language deserve a number, so (2M calls, release + JIT):
+
+| | Before | After |
+|---|---|---|
+| `(get m :k)` — map, keyword key | 735 ms | 739 ms (noise) |
+| `(get v i)` — vector, integer key | 1130 ms | 1432 ms (~27%) |
+| `nth` standalone | 11 ms | 11 ms (unchanged) |
+
+A first implementation factored the kind test into a `get--indexed?` helper — four
+type checks behind a call — and measured **1130 → 2050 ms (~1.8×)**. It was rewritten
+to keep the original branch order: map, set, then the cheap `nil?`/`string?` prim
+checks, then **one** fallthrough to `nth` for every integer-indexed kind. The comment
+in `std/prelude.blsp` records this so the ordering isn't "tidied" back.
+
+The residual 27% was accepted on evidence, not vibes: the keyword-key form is **4,796
+call sites** in the workspace and is unaffected; the integer-key form is **124**, and
+positional access in hot code goes through `nth`/`vector-ref` (720 sites), whose wall
+time is unchanged. About 115 ms of the delta is `nth`'s own entry check appearing
+through this call path — an inlining-boundary effect, since `nth` measured standalone
+is identical either way.
+
+**One wart, kept knowingly.** `(get 5 0)` — a non-collection with an *integer* key —
+reports as `nth: expected a collection to index, got int (5)`. Catching it in `get`
+would require the collection test on the fast path, which is the 1.8× regression
+above. The message is accurate (positional indexing does delegate to `nth`), names a
+real op, and states the actual problem; it just names the callee rather than the
+caller. Recorded rather than hidden.
