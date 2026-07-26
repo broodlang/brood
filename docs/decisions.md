@@ -9680,3 +9680,53 @@ form-level "don't run this" — Brood has no `#_` discard, and the checker skips
   rejections, in every binding position), `tests/ergonomics_test.blsp`
   (combinators, `case`, `comment`, `vec`/`nan?`/`infinite?`),
   `tests/sequence_test.blsp` (the range-in-tail print round-trip).
+
+## ADR-157 — A literal `if` test picks its branch at compile time
+
+**Context.** ADR-154 removed `cond`'s special case for `:else`, on the reasoning that
+`(cond … :else x)` still catches "for the same reason `(cond … 42 x)` does". That is
+true of the *semantics* and false of the cost. `cond` expands to nested `if`s, so the
+catch-all became `(if :else x nil)` — a real keyword `Const` plus a branch. A keyword
+constant is not an integer, so the arm fell out of the unboxed-i64 register worker's
+subset (`jit_lower_i64_arm`) and dropped to the general JIT path.
+
+Measured 2026-07-26, same checksums, benchmark ports untouched:
+
+| row | `:else` | `else` |
+|---|---|---|
+| `ackermann` | 4285 ms | **360 ms** (11.9×) |
+| `collatz` | 162 ms | 97 ms (1.7×) |
+| `primes` | 96 ms | 58 ms (1.7×) |
+| `nbody` | 330 ms | 329 ms (float path — unaffected) |
+
+Silent, because `:else` still selected the right branch throughout. Blast radius at the
+time: `brood-edit` 94 uses, `pong` 40, and four benchmark ports.
+
+**Decision.** Fold the branch at compile time whenever the test is a literal.
+`compile_node`'s `if` arm compiles both branches (so every compile-time effect — slot
+allocation, `note_definition` for LSP nav — still happens) and then, if the condition
+node is a `Const`, returns the taken branch and discards the other. Truthiness is the
+language's own: only `nil` and `false` are falsy, and both are `ConstVal::Atom`s, so
+every `ConstVal::Handle` (string, bignum, pair, vector, map, …) is truthy.
+
+**Why this rather than the alternatives.** Rejecting `:else` with a hint (the ADR-152
+"reject the shape" reflex) would contradict ADR-154's explicit decision that it still
+catches, and would break 134 downstream call sites for a performance reason. A checker
+warning would leave the cliff in place and make every author memorise a rule. Folding
+fixes it in the compiler, where the problem is: **no spelling is privileged** — `else`,
+`:else`, `true`, `42` and a string now cost exactly the same nothing — and no caller
+has to know the rule exists. It is also a plain win on its own terms, since a constant
+test is dead weight in any program.
+
+**Consequences.** No semantic change: the losing branch was already unreachable, and it
+is compiled before being discarded, so nothing about diagnostics or LSP nav moves.
+Pinned by `tests/const_test_fold_test.blsp` (which branch runs, the losing branch is not
+evaluated, and both spellings agree past the tier threshold, `:serial` so folded arms
+really do tier). Gates: 3360 in-language + 68 corpus tests, 864 Rust tests, the fold
+tests under `GC_STRESS`+`GC_VERIFY`+`JIT_VERIFY` and on `BROOD_VM=0` / `BROOD_NO_JIT=1`,
+`nest check` zero warnings.
+
+The general lesson is the one ADR-155 also produced: on this runtime a *constant in the
+wrong position* can cost an order of magnitude by silently disqualifying an arm from a
+JIT subset. Neither the checker nor the benchmark suite catches that class — only an
+A/B against the previous shape does.
