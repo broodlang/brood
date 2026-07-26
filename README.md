@@ -246,6 +246,22 @@ runnable program; and a per-process tracing **GC** keeps long-running loops flat
 threading macros are all defined in Brood itself (`std/prelude.blsp`) on top of a
 small Rust kernel.
 
+Beyond that: first-class **sets** (`#{…}`), exact **decimals** (`1.50M`) for money,
+**`bytes`** with Erlang-style bit syntax, `defrecord` for named map shapes, and
+**protocols** (`(require 'protocol)`) for open generic functions when a `cond` on
+`type-of` can't be extended from outside. Collection ops are one protocol over every
+kind — `count`/`first`/`conj`/`into`/`get` accept a list, vector, map, set or `bytes`
+— and a **keyword is callable** as an accessor, so `(map :name people)` needs no
+throwaway lambda. Patterns support alternatives and conjunctions (`(or 1 2)`,
+`(and whole {:keys [a]})`); text has grapheme-cluster-indexed accessors, because a
+cursor steps by cluster, not code point; and `transduce` exposes the fusing pipeline
+stages so you can write your own.
+
+The names the language ships are **reserved** — `(def get …)` is an error. Your own
+code and your packages stay fully redefinable, which is what live redefinition was
+always about; this is the Erlang model, where OTP's modules are sticky and you cannot
+patch `Enum.map/2` either.
+
 Code runs on a closure-compiling **bytecode VM** (the default engine), and a
 tier-1 **JIT** compiles hot compute loops to native code via Cranelift. The one
 mutable structure in the whole language is `Table` — a shared, identity-mutable
@@ -253,6 +269,29 @@ key→value store for when you genuinely need mutable state; every other value i
 immutable, and per-process state lives in a process loop's arguments instead.
 
 See [`docs/language.md`](docs/language.md) for the full reference.
+
+### Performance & benchmarks
+
+Brood runs on a closure-compiling bytecode VM with a Cranelift **tier-1 JIT** for hot
+loops, a **generational** per-process GC, and fusing lazy pipelines. Speed is treated
+as a measured property, not a claim:
+
+- [**docs/benchmarking.md**](docs/benchmarking.md) — how to run and read the
+  benches. `make benchmark` runs the [`divan`](https://github.com/nvzqz/divan) suite in
+  `crates/lisp/benches/` and **archives each run with full environment metadata** to
+  `docs/benchmarks/<UTC-timestamp>.md`, so results are comparable over time rather
+  than anecdotal.
+- [**docs/benchmarks/**](docs/benchmarks/) — the archive of past runs.
+- [**docs/compute-frontier.md**](docs/compute-frontier.md) — where the remaining
+  time actually goes, and which levers are open.
+- [**docs/elixir-parity.md**](docs/elixir-parity.md) — the concurrency rows measured
+  against the BEAM, which is the yardstick that matters for a process-based runtime.
+
+Engine selection is explicit, which makes A/B honest: `BROOD_VM=0` is the legacy
+tree-walker, unset is the bytecode VM, and `BROOD_NO_JIT=1` disables the JIT within
+the VM path. **Build perf binaries with `cargo build --release --bin brood`** — never
+`-p brood`, which builds only the library and leaves a stale binary in place (that
+mistake once produced a phantom "JIT regression"; see the devlog).
 
 ### Relationship to other Lisps — it is *not* a Clojure clone
 
@@ -271,6 +310,13 @@ diverge, and the differences are deliberate:
   `[x y]` — the opposite emphasis from Clojure.
 - **`def` is late-binding global rebinding** — that *is* live hot reload
   (a running process picks up a redefinition on its next call), not a Clojure var.
+  But the language's **own** functions are reserved: no monkey-patching `get` or
+  `map`, unlike Clojure's `with-redefs`/`alter-var-root`. Extend with a protocol,
+  shadow with `let`, or namespace it in a module.
+- **A keyword is callable, and nothing else data-like is.** `(:name p)` works;
+  `({:a 1} :a)`, `([10 20] 1)` and `(#{1} 1)` are errors with hints — a callable map
+  would be a second spelling of `get`, and a callable vector/set answers by
+  index-or-membership, an ambiguity Brood refuses.
 - **Pattern matching and selective `receive` are first-class**, and it runs on
   its own small Rust runtime, not the JVM.
 
@@ -326,9 +372,15 @@ docs/          architecture, language reference, roadmap, decisions, dev log
 - [docs/architecture.md](docs/architecture.md) — the design and the "one runtime
   that can also be a server" approach
 - [docs/language.md](docs/language.md) — the language reference
+- [docs/roadmap-for-v1.md](docs/roadmap-for-v1.md) — what must change before the 1.0
+  language freeze, and the list of what Brood permanently *is not*
 - [ROADMAP.md](ROADMAP.md) — milestones and status
-- [docs/decisions.md](docs/decisions.md) — why the key choices were made
+- [docs/benchmarking.md](docs/benchmarking.md) — how performance is measured;
+  archived runs in [docs/benchmarks/](docs/benchmarks/)
+- [docs/decisions.md](docs/decisions.md) — why the key choices were made (ADRs)
 - [docs/devlog.md](docs/devlog.md) — chronological work log
+- [docs/brood-for-claude.md](docs/brood-for-claude.md) — the pocket reference for AI
+  assistants writing Brood (also embedded in the binary via `%builtin-doc`)
 
 ## License
 

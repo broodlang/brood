@@ -1420,11 +1420,23 @@ impl RuntimeCode {
         self.globals.write().unwrap_or_else(|e| e.into_inner())
     }
     /// Is `sym` a reserved (language-shipped) name? See [`RuntimeCode::sealed`].
+    ///
+    /// A **dynamic variable is never reserved**, whatever it holds. `defdyn` (or
+    /// `%declare-dynamic`) *declares a name rebindable* — that is the entire meaning
+    /// of the declaration — so reserving one would contradict it. This matters
+    /// concretely for `*out*`/`*err*`: an output port IS a function
+    /// (`(fn (s) …)`), so the function-valued test would otherwise reserve them and
+    /// make a permanent output redirect impossible, leaving only the scoped
+    /// `binding` form. The check lives here rather than in the seed filter so it also
+    /// covers a `defdyn` inside an embedded module, and so a name declared dynamic
+    /// *after* the seed is exempt too.
     fn is_sealed(&self, sym: Symbol) -> bool {
-        self.sealed
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(&sym)
+        !crate::core::value::is_dynamic(sym)
+            && self
+                .sealed
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&sym)
     }
     /// Reserve `sym` — called for each name an embedded std module defines as it
     /// loads, so the module's own surface becomes reserved once it exists.

@@ -192,8 +192,9 @@ the prelude, the builtins and the embedded std modules are reserved. Your own gl
 and your packages stay fully redefinable, which is what hot reload is for. If a name
 you want is taken: pick another, shadow it locally (`(let (get …) …)` is fine), or
 define it in a `(defmodule your/mod …)` — that makes `your/mod/get`, which is yours.
-The prelude's data registries (`*load-path*`, `*features*`) are still rebindable; the
-rule reserves shipped **functions**.
+The prelude's data registries (`*load-path*`, `*features*`) are still rebindable — the
+rule reserves shipped **functions** — and a `defdyn` name is never reserved whatever it
+holds, so `(def *out* my-port)` still redirects output permanently.
 
 ## Naming & docstrings
 
