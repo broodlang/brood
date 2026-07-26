@@ -156,6 +156,13 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
         Sig::new(vec![Ty::of_tags(&[Tag::Map, Tag::Set]), any], bool_ty),
     );
     put("member?", Sig::new(vec![any, seq], bool_ty));
+    //   get — the polymorphic accessor, and it had NO signature at all: it is
+    //   multi-arity (3 arms) and `infer_sig` bails on multi-arm closures, so its
+    //   domain was unconstrained and `(get 5 :k)` went unwarned while `(count 5)` and
+    //   `(first 5)` were caught. Same `countable` domain as `count` — every kind `get`
+    //   can index or key — with the result left `any` (the value at a key is anything)
+    //   and the optional `default` slot variadic. ADR-167.
+    put("get", Sig::with_rest(vec![countable, any], any, any));
     // any?/every?: both take a 1-ary callback and a sequence, return bool.
     // Curated because the body is a cond-recursive closure; infer_sig bails.
     for n in ["any?", "every?"] {

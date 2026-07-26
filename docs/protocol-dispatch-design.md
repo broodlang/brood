@@ -1,10 +1,47 @@
 # Protocol dispatch & abilities — the polymorphism seam
 
-> Status: **exploration.** The dispatch *runtime* is shipped (ADR-158 + the
-> registry/inlining work below); what's open is whether — and how — Brood grows a
-> **dispatch identity for user-defined types** so protocols become useful to
-> application code, not just the stdlib. This note captures the problem, what was
-> measured, the language survey, and the design space. No decision yet.
+> Status: **Slices 1–2 shipped.** `std/ability.blsp` (`defability`/`impl`/`defrecord*`,
+> value-first nominal dispatch) + a checker arm + `tests/ability_test.blsp`. It unifies
+> value polymorphism and drivers-as-values, detects cross-module impl conflicts, and
+> dispatches records on a baked `module/name` identity.
+>
+> **Slice 2 (identity leak) — resolved pragmatically, no kernel change.** Verifying the
+> constraints changed the plan: the `Value` layout is JIT-pinned and map ops match
+> `Value::Map` with catch-alls, so a `Record` variant is a pervasive, risky change; and
+> — the key realization — a record being **`≠` to a bare map is correct** (Elixir-struct
+> semantics), so we do *not* want to hide the id from `=`, and a record *printing* with
+> its id is informative, not a leak. The one genuinely harmful leak — an internal key
+> reaching external JSON — is fixed in std (`json-encode` omits `:__id__`), and a clean
+> `record?`/`record-id`/`fields` API means nothing outside `ability` touches `:__id__`.
+> The only residual is cosmetic (`keys`/`count` include the id; use `fields`), deferred
+> as optional polish behind a future hidden slot.
+>
+> **Slice 3 (checker nominal-awareness) — shipped, incl. the missing-impl warning.** A
+> record's identity is now a `module/name` **keyword** (a keyword literal is exactly what
+> the checker tracks via `Ty::keyword_lit`). On top of that, `check_ability_calls`
+> (`types/check/protocol.rs`) warns at `nest check` time when an ability op is applied to
+> an argument of **statically-known identity** — a literal (`type-of` kind) or a direct
+> `defrecord*` constructor call — for which no impl and no `:default` is registered. It is
+> **sound**: an op fn is recognised only by its exact def symbol (fingerprinted by a
+> qualified `ability/impl-for` in its body, so a `protocol` op — which also dispatches
+> through an `impl-for` — is never mistaken); an id is taken only when certain; and the
+> impl set unions this file's `register-impl` forms with the runtime `ability/*impls*`
+> registry (cross-file reachable impls). Stack-guarded for deep forms. Rust tests +
+> manual `nest check` verify true-positives and zero false-positives across protocols.
+>
+> The warning is now **inference-driven**, not just syntactic: `check_into` (which threads
+> the local + global type context) hooks `expr_ty` on a symbol argument, so a record-typed
+> *variable* is caught too — `(let (c (circle 2)) (size c))` warns when `Size` has no impl
+> for circle. Two enablers made this work: `defrecord*` now emits a **map-literal** body
+> (so the constructor infers as a record *shape*, not a generic map) plus a **`sig`**
+> declaring that record return (so the shape flows through a `let` binding), and the
+> record's `:__id__` is a keyword literal the checker reads. `Ctx` carries the file's
+> ability facts (`AbilityInfo`) so the hook stays sound and cheap.
+>
+> **Still open:** **monomorphization** (compile-time impl resolution + inlining; codegen —
+> the *runtime* win, distinct from the compile-time warning), sealed abilities, return-type
+> dispatch, migrating/retiring `protocol`. The rest of this note captures the problem,
+> measurements, the language survey, and the design space.
 
 ## The goal
 
@@ -249,8 +286,15 @@ We are not obliged to pick an existing point. Seeds for a Brood-native synthesis
 
 ## Already shipped vs. open
 
-- **Shipped:** ADR-158 protocol facility; the dispatch-runtime work (nested
-  registry, inlined calls, `satisfies?`, richer missing-impl error).
-- **Open (this note):** dispatch identity for user types — structural vs registry
-  vs a synthesis; and whether the identity needs a kernel carve-out to avoid
-  leaking.
+- **Shipped:** ADR-158 protocol facility; the protocol dispatch-runtime work (nested
+  registry, inlined calls, `satisfies?`, richer missing-impl error). **Slice 1 of the
+  unified facility:** `std/ability.blsp` — `defability`/`impl`/`defrecord*`, value-first
+  nominal dispatch (record identity or `type-of`), drivers-as-values, provenance-tagged
+  cross-module conflict detection, `satisfies?`, `:default`; the `defability`/`impl`
+  checker arm (arity/missing/undeclared-op diagnostics under the noun "ability"); and
+  `tests/ability_test.blsp`. `defbehaviour`/`defprotocol` are untouched and coexist.
+- **Open (Slice 2+):** the kernel carve-out to stop `:__id__` leaking into
+  `keys`/`=`/`json-encode`; checker nominal-awareness + monomorphization; sealed
+  abilities (exhaustiveness + full static dispatch); return-type dispatch; and
+  migrating/retiring `protocol` once `ability` proves out. `defbehaviour` stays — the
+  module-as-implementor contract (Q3) is genuinely different from value dispatch.

@@ -972,6 +972,14 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // part is the checker/LSP conformance pass (`types/check/protocol.rs`), which
     // predates the module by months. Opt-in, never in the prelude.
     embedded_module!("protocol", "std/protocol.blsp"),
+    // Unified generic functions with NOMINAL dispatch (successor to `protocol`):
+    // `defability` declares ops, `impl` registers per-identity impls from anywhere, and
+    // dispatch is on the first argument's identity — its `type-of` kind, or a record's
+    // baked `module/name` id (`defrecord*`). Subsumes value polymorphism and
+    // drivers-as-values; a driver is just a value you dispatch on. Impls are provenance-
+    // tagged so a cross-module double-define is a loud conflict. Same checker pass as
+    // `protocol` (`types/check/protocol.rs`). Opt-in, never in the prelude.
+    embedded_module!("ability", "std/ability.blsp"),
     // The interactive REPL line editor (ADR-052): `highlight` is the pure lexical
     // syntax-highlighter / bracket-matcher / signature + completion scanners;
     // `lineedit` is the raw-mode, emacs-style editor built on it + the inline
