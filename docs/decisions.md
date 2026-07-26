@@ -10242,13 +10242,23 @@ different name, a local `let` shadow (still legal: that binds a local, it is not
 redefinition), or a `(defmodule …)`, where `(defn get …)` defines `your/mod/get` and
 is yours.
 
-**Only functions, not names.** The prelude's *data* globals — `*features*`,
-`*load-path*`, `*module-docs*`, `*reload-diagnostics*` — stay rebindable, because
-prelude functions rebind them with `def` at runtime; that is Brood's one mutation, and
-reserving them breaks `require`/`provide`/`defmodule` outright (found immediately: the
-first implementation sealed them and `(require 'set)` died on `*features-loading*`).
-The rule is "a shipped **function** can't be redefined", which is also exactly what
-was asked for.
+**Two exemptions, and both are part of the rule rather than caveats on it.**
+
+1. **Only functions, not names.** The prelude's *data* globals — `*features*`,
+   `*load-path*`, `*module-docs*` — stay rebindable, because prelude functions rebind
+   them with `def` at runtime; that is Brood's one mutation, and reserving them breaks
+   `require`/`provide`/`defmodule` outright (found immediately: the first
+   implementation sealed them and `(require 'set)` died on `*features-loading*`). The
+   rule is "a shipped **function** can't be redefined", which is exactly what was
+   asked for.
+2. **A dynamic variable is never reserved, whatever it holds.** `defdyn` (and
+   `%declare-dynamic`) *declares a name rebindable* — that is the entire meaning of
+   the declaration — so reserving one would contradict it. This is not a technicality:
+   an output **port is a function** (`(fn (s) …)`), so `*out*`/`*err*` fell under the
+   function-valued test, which would have left only the scoped `binding` form and made
+   a *permanent* output redirect impossible. The check sits next to the reserved-set
+   probe rather than in the seed filter, so it also covers a `defdyn` inside an
+   embedded module and a name declared dynamic after seed time.
 
 **Why Erlang's `unstick` isn't copied.** The BEAM marks OTP's modules *sticky* and
 keeps `code:unstick_mod/1`, and the precedent was examined rather than assumed. Its
@@ -10311,10 +10321,13 @@ happens.
 - The checker can likewise stop treating reserved globals as `dynamic()` and give them
   precise types — a sharpening of every warning that flows through a prelude call.
   Also filed, not done.
-- Coverage in `tests/reserved_names_test.blsp` (12 cases): prelude functions,
+- Coverage in `tests/reserved_names_test.blsp` (15 cases): prelude functions,
   builtins, macros and embedded-module functions all refused; the error naming the
   symbol *and* all three escapes; user globals and `defn`s still redefinable including
   an arity change; the prelude's data registries still rebindable (with `require`
   exercised to prove it); `let` shadowing and module-scoped definition both still
-  legal; and the reserved set shared across processes (a spawned process refuses too,
-  yet can still redefine its own names).
+  legal; the reserved set shared across processes (a spawned process refuses too, yet
+  can still redefine its own names); and an `:isolated` block for the dynamic-var
+  exemption — `*out*` permanently redirected, `print` following it, and the scoped
+  `with-out-str` form unaffected (isolated because rebinding a global port would
+  otherwise swallow every concurrent test's output).

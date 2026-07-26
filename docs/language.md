@@ -103,7 +103,10 @@ a binding is made, it never changes. Concretely:
   legal: a local `let` shadow (that binds a local, it isn't a redefinition), a
   module-scoped `(defn get …)` (which defines `your/mod/get`), and rebinding the
   prelude's *data* registries such as `*load-path*` (prelude functions do that
-  themselves — the rule reserves shipped **functions**, not every shipped name).
+  themselves — the rule reserves shipped **functions**, not every shipped name). A
+  **dynamic variable is never reserved**, whatever it holds: `defdyn` declares a name
+  rebindable, so `(def *out* my-port)` — a permanent output redirect — still works
+  alongside the scoped `binding` form.
 - **No imperative loop.** There is no `while` (and nothing to make it progress
   without mutation). Iteration is **recursion** — proper tail calls give O(1)
   stack — or, for state that must evolve over time, a **process** (`spawn` /

@@ -67,6 +67,31 @@
     (assert= :allowed (rn-try "(add-load-path! \".\")"))
     (assert= :allowed (rn-try "(require 'set)"))))
 
+(describe "a dynamic var is never reserved"
+  ;; :isolated — this rebinds the global `*out*` port, which would otherwise swallow
+  ;; the output of every test running concurrently with it.
+  :isolated
+  (test "declared dynamic wins over function-valued"
+    ;; `defdyn`/`%declare-dynamic` *declares a name rebindable* — the whole meaning of
+    ;; the declaration — so reserving one would contradict it. The case that forced
+    ;; this: an output port IS a function, so `*out*`/`*err*` would otherwise have been
+    ;; reserved by the function-valued test, leaving only the scoped `binding` form and
+    ;; no way to redirect output permanently.
+    (is (dynamic? '*out*))
+    (is (fn? *out*))
+    (assert= :allowed (rn-try "(def *err* %write-err)"))
+    (assert= :allowed (rn-try "(def *reload-diagnostics* true)")))
+  (test "a permanent redirect of *out* works, and print follows it"
+    ;; `(def *out* …)` rebinds the ROOT binding even from inside a module, because a
+    ;; dynamic name is ambient by declaration (ADR-151).
+    (let (sink (table))
+      (def *out* (fn (s) (table-put sink :last s)))
+      (print "redirected")
+      (def *out* %write-out)                    ; restore BEFORE asserting
+      (assert= "redirected" (table-get sink :last))))
+  (test "the scoped form is unaffected"
+    (assert= "scoped" (with-out-str (print "scoped")))))
+
 (describe "the escapes the error names"
   (test "a local `let` may still shadow a reserved name"
     ;; lexical shadowing is not a redefinition — it binds a local
