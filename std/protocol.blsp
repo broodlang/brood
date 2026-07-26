@@ -10,7 +10,10 @@
     *protocols* — name → its declared op specs, as DATA. This is the introspection
       hook the advisory type-checker and the LSP read to verify conformance and to
       offer autocomplete (`(protocol-ops 'Encode)` → the op specs).
-    *impls*     — [protocol op type-key] → fn. The runtime dispatch table.
+    *impls*     — [protocol op] → {type-key → fn}. The runtime dispatch table,
+      nested so an op's whole method set is one map: dispatch fetches it with a
+      *constant* `[protocol op]` key (the macro emits it as a quoted literal, so it
+      is not rebuilt per call) and then indexes by the argument's kind.
 
   Dispatch is on `type-of`, so the keys are runtime *kinds* — `:int`, `:string`,
   `:map`, `:vector`, … plus `:default`. Records are structural maps (ADR-130), so
@@ -34,7 +37,7 @@
 
 ; protocol-name → op specs (introspection / tooling)
 (def *protocols* {})
-; [protocol op type-key] → impl fn (runtime dispatch)
+; [protocol op] → {type-key → impl fn} (runtime dispatch)
 (def *impls* {})
 (defn register-protocol (pname specs)
   "Record protocol `pname`'s declared op specs (raw forms) for tooling."
@@ -47,23 +50,43 @@
   (get *protocols* pname))
 
 (defn register-impl (pname op key f)
-  "Register impl `f` of `pname`'s `op` for dispatch key `key` (a type-of keyword)."
-  (def *impls* (assoc *impls* [pname op key] f))
-  nil)
+  "Register impl `f` of `pname`'s `op` for dispatch key `key` (a type-of keyword).
+  Read-modify-write of the `*impls*` global — register at load time (see the module
+  docstring's concurrency note), as top-level `defimpl` does."
+  (let (op-key [pname op]
+        methods (or (get *impls* op-key) {}))
+    (def *impls* (assoc *impls* op-key (assoc methods key f)))
+    nil))
 
-(defn impl-for (pname op key)
-  "The impl of `pname`'s `op` for `key`, falling back to a `:default` impl, or nil."
-  (or (get *impls* [pname op key])
-    (get *impls* [pname op :default])))
+(defn impl-for (op-key key)
+  "The impl of op `op-key` (a `[protocol op]` pair) for kind `key`, falling back to a
+  `:default` impl, or nil. One map fetch for the op's method set, then one by kind —
+  `get` tolerates a nil method set (an op with no impls yet)."
+  (let (methods (get *impls* op-key))
+    (or (get methods key)
+      (get methods :default))))
 
-(defn dispatch (pname op args)
-  "Dispatch `pname`'s `op` on `(type-of (first args))`, calling the impl with all
-  args. A missing impl is a loud, located error."
-  (let (key (type-of (first args))
-        f (impl-for pname op key))
-    (if f
-      (apply f args)
-      (error "protocol " pname ": no implementation of " op " for " key))))
+(defn no-impl (op-key key)
+  "The loud, located error an op raises when no impl (and no `:default`) covers kind
+  `key`. Names the protocol, the op, and the kind, and lists the kinds that *are*
+  implemented so a missing/misspelled `defimpl` is obvious."
+  (let (pname (first op-key)
+        op (second op-key)
+        known (keys (or (get *impls* op-key) {})))
+    (if (empty? known)
+      (error "protocol " pname ": no implementation of " op " for " key)
+      (error "protocol " pname ": no implementation of " op " for " key
+        " — have " known))))
+
+(defn satisfies? (pname x)
+  "True if protocol `pname` is implemented for `x`'s kind — every declared op has an
+  impl for `(type-of x)` (or a `:default`). Lets a caller branch instead of letting
+  the op raise the missing-impl error. False for an unknown protocol."
+  (let (key (type-of x)
+        ops (protocol-ops pname))
+    (if ops
+      (every? (fn (spec) (impl-for [pname (first spec)] key)) ops)
+      false)))
 
 ; ---- macros -----------------------------------------------------------------
 
@@ -82,15 +105,24 @@
         (map
           (fn (op)
             (let (op-name (first op)
-                  arg-syms (map (fn (s) s) (second op)))
-              ; arg vector → list
+                  ; arg vector → list; dispatch reads the FIRST arg's kind
+                  arg-syms (map (fn (s) s) (second op))
+                  first-arg (first arg-syms)
+                  ; a *constant* [protocol op] key — a quoted literal, built once at
+                  ; read time, not rebuilt on every call
+                  op-key (list 'quote [pname op-name])
+                  ; gensym'd temporaries so an op arg named `f`/`k` can't be captured
+                  kind-sym (gensym)
+                  impl-sym (gensym))
               (list 'defn
                 op-name
                 arg-syms
-                (list 'protocol/dispatch
-                  (list 'quote pname)
-                  (list 'quote op-name)
-                  (cons 'list arg-syms)))))
+                (list 'let (list kind-sym (list 'type-of first-arg)
+                                 impl-sym (list 'protocol/impl-for op-key kind-sym))
+                  (list 'if impl-sym
+                    ; direct, arity-correct call — no arg-list alloc, no `apply`
+                    (cons impl-sym arg-syms)
+                    (list 'protocol/no-impl op-key kind-sym))))))
           ops)))))
 
 (defmacro defimpl (pname key & methods)

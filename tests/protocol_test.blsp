@@ -57,7 +57,15 @@
     (let (msg (try (missing-op 1) (catch e (error-message e))))
       (is (includes? msg "Unimplemented"))
       (is (includes? msg "missing-op"))
-      (is (includes? msg ":int")))))
+      (is (includes? msg ":int"))))
+  (test "the missing-impl error lists the kinds that ARE implemented"
+    ;; `combine` has :int/:string impls but none for :keyword and no :default, so the
+    ;; error hint names the kinds that would have worked — a misspelled/absent
+    ;; `defimpl` shows up as a gap in that list rather than a bare failure.
+    (let (msg (try (combine :kw 1) (catch e (error-message e))))
+      (is (includes? msg "Combine"))
+      (is (includes? msg ":int"))
+      (is (includes? msg ":string")))))
 
 ;; :serial — these REGISTER impls from inside a test body. `register-impl` is a
 ;; read-modify-write of the `*impls*` global (`(def *impls* (assoc *impls* …))`), so
@@ -86,6 +94,32 @@
     (assert= (protocol-ops 'Combine) (list '(combine [a b] :-> any))))
   (test "an unknown protocol has no ops"
     (assert= (protocol-ops 'NoSuchProtocol) nil)))
+
+;; `satisfies?` answers "is this protocol implemented for this value?" without
+;; triggering the missing-impl error — the branch-instead-of-catch companion to
+;; open dispatch. True iff every declared op resolves (a direct impl or `:default`).
+(describe "satisfies?"
+  (test "true when the value's kind has an impl for every declared op"
+    (is (satisfies? 'Label 7))
+    (is (satisfies? 'Label "x")))
+  (test "true when covered only by a :default impl"
+    ;; Label has a :default, so an otherwise-unregistered kind still satisfies it.
+    (is (satisfies? 'Label :kw)))
+  (test "false when no impl and no :default covers the kind"
+    ;; Combine has :int/:string but no :keyword and no :default.
+    (refute (satisfies? 'Combine :kw)))
+  (test "false for an unknown protocol"
+    (refute (satisfies? 'NoSuchProtocol 1))))
+
+;; The generic fn the macro emits binds gensym'd temporaries for the resolved impl
+;; and the dispatch kind, so an op argument that happens to share a temp's name
+;; can't be captured — the impl still receives the real argument.
+(defprotocol CallWith (call-with [f x] :-> any))
+(defimpl CallWith :fn (call-with [f x] (f x)))
+
+(describe "dispatch temporaries can't capture op arguments"
+  (test "an op arg named `f` is passed through, not shadowed by the dispatch temp"
+    (assert= (call-with inc 41) 42)))
 
 ;; Records are structural maps (ADR-130), so every defrecord value dispatches as
 ;; `:map`. This is a documented limitation, not an oversight — pin it so a future
