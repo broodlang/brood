@@ -655,6 +655,33 @@ pub(super) fn load_string(args: &[Value], env: EnvId, heap: &mut Heap) -> LispRe
     result
 }
 
+/// `(%load-module-source src file)` — load an **embedded std module**'s source with
+/// the reserved-name exemption held (ADR-166).
+///
+/// Identical to `%load-string` except that the module's own `def`s are permitted to
+/// (re)bind reserved names *and* become reserved themselves. Two reasons it has to be
+/// a primitive rather than a flag `require` sets and clears in Brood: the exemption
+/// must be released even when the load **throws** (a leaked one would silently
+/// un-reserve the language for the rest of the process's life), and it must not be
+/// reachable as an on/off pair that user code could straddle. `require` uses it for
+/// baked-in source only — a project file loaded off `*load-path*` goes through the
+/// ordinary `load`, so a package's names are never reserved.
+pub(super) fn load_module_source(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let src = expect_string(heap, "%load-module-source", arg(args, 0))?;
+    let name = match arg(args, 1) {
+        Value::Nil => None,
+        v => Some(expect_string(heap, "%load-module-source", v)?),
+    };
+    let previous_file = name.map(|n| heap.set_current_file(Some(n)));
+    heap.enter_module_load();
+    let result = eval_string_inner(heap, env, &src, true);
+    heap.leave_module_load();
+    if let Some(previous) = previous_file {
+        heap.set_current_file(previous);
+    }
+    result
+}
+
 /// Shared body of `eval-string` / `%load-string`. When `reset_ns`, the current
 /// namespace is reset to root for the duration and the caller's restored after.
 pub(super) fn eval_string_inner(

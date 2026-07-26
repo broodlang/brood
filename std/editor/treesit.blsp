@@ -93,7 +93,7 @@ function (build one with `face-of-kinds`). A mode wraps this in its own 1-arg
 
 (defn ts--named-kids (node)
   "The named children of `node` (grammar nodes, not anonymous tokens)."
-  (filter (fn (k) (get k :named)) (or (get node :kids) [])))
+  (filter :named (or (get node :kids) [])))
 
 (defn ts--enclosing (node point)
   "The deepest container node strictly containing `point`; `node` if none."

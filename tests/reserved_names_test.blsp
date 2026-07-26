@@ -1,0 +1,95 @@
+;; Reserved names (ADR-166): a global `def` may not rebind anything the language
+;; ships. The boundary is the BINARY boundary — if it came inside `brood` (the
+;; prelude, a Rust builtin, or an embedded std module) it is reserved; if you or a
+;; package author wrote it, it is yours and hot reload is untouched.
+;;
+;; Why this is a language rule and not a lint: it is the Elixir/Erlang model. There,
+;; the unit of reload is the module and OTP's stdlib is *sticky* — you cannot patch
+;; `Enum.map/2` at runtime. Brood is more dynamic (a `def` rebinds one global and
+;; every lookup is late-bound), which is exactly why the shipped surface needed a
+;; rule rather than a convention.
+;;
+;; Register-only — discovered and run by `nest test`.
+(defmodule reserved-names-test (:use test))
+
+;; `eval-string` so the rejected forms are compiled at RUNTIME (a literal `(def get
+;; …)` in this file would refuse at load and take the whole suite with it).
+;; The fix-it guidance rides the error's `:hint`, which `error-message` strips — so
+;; join both, or an assertion about the hint silently can't match.
+(defn rn-detail (e)
+  (if (map? e) (str (error-message e) " | " (get e :hint)) (str e)))
+(defn rn-try (src) (try (do (eval-string src) :allowed) (catch e (rn-detail e))))
+(defn rn-refused? (src) (includes? (str (rn-try src)) "reserved name"))
+
+(describe "reserved: what the language ships"
+  (test "a prelude function cannot be redefined"
+    (is (rn-refused? "(def get (fn (a b) :hacked))"))
+    (is (rn-refused? "(defn map (f c) :hacked)"))
+    (is (rn-refused? "(def + (fn (a b) 0))"))
+    (is (rn-refused? "(defn count (c) 0)")))
+  (test "a Rust builtin cannot be redefined"
+    (is (rn-refused? "(def cons (fn (a b) nil))"))
+    (is (rn-refused? "(def type-of (fn (x) :shadowed))"))
+    (is (rn-refused? "(def map-get (fn (m k d) nil))")))
+  (test "a prelude MACRO cannot be redefined"
+    (is (rn-refused? "(defmacro when (c & b) nil)"))
+    (is (rn-refused? "(defmacro -> (x & f) x)")))
+  (test "an embedded std module's functions are reserved once it has loaded"
+    (require 'set)
+    (is (bound? 'set/union))
+    (is (rn-refused? "(def set/union (fn (a b) :hacked))"))
+    (require 'path)
+    (is (rn-refused? "(def path/join (fn (& p) :hacked))")))
+  (test "the error names the offending symbol and how to proceed"
+    (let (msg (str (rn-try "(def first (fn (x) nil))")))
+      (is (includes? msg "first"))
+      (is (includes? msg "reserved"))
+      ;; the three real ways forward, all in the hint
+      (is (includes? msg "another name"))
+      (is (includes? msg "shadow it locally"))
+      (is (includes? msg "defmodule")))))
+
+(describe "yours: everything else stays redefinable"
+  (test "a plain global redefines freely — this IS hot reload"
+    (assert= :allowed (rn-try "(def rn-mine (fn () 1))"))
+    (assert= :allowed (rn-try "(def rn-mine (fn () 2))"))
+    (assert= 2 (eval-string "(rn-mine)")))
+  (test "a defn redefines freely, arity change included"
+    (assert= :allowed (rn-try "(defn rn-f (x) x)"))
+    (assert= :allowed (rn-try "(defn rn-f (x y) (+ x y))"))
+    (assert= 7 (eval-string "(rn-f 3 4)")))
+  (test "the prelude's own DATA globals stay rebindable — they must"
+    ;; `*features*` / `*load-path*` / `*module-docs*` are registries that prelude
+    ;; functions rebind with `def` (Brood's one mutation). Reserving them would break
+    ;; `require`, `provide` and `defmodule`. The rule is "a shipped FUNCTION is
+    ;; reserved", not "a shipped NAME is".
+    (is (bound? '*load-path*))
+    (assert= :allowed (rn-try "(add-load-path! \".\")"))
+    (assert= :allowed (rn-try "(require 'set)"))))
+
+(describe "the escapes the error names"
+  (test "a local `let` may still shadow a reserved name"
+    ;; lexical shadowing is not a redefinition — it binds a local
+    (assert= :local (let (get (fn (a b) :local)) (get {} :k)))
+    (assert= 99 (let (count (fn (c) 99)) (count [1 2 3]))))
+  (test "a module-scoped defn is a DIFFERENT name, so it is allowed"
+    ;; `(defn get …)` inside module `m` defines `m/get` — this is why the blast
+    ;; radius of the rule is tiny: the namespace system already did the work.
+    (assert= :allowed (rn-try "(defmodule rn-mod) (defn get (m k) :mine)"))
+    (assert= :mine (eval-string "(rn-mod/get {} :k)"))
+    ;; and the root `get` is untouched by that
+    (assert= 1 (get {:a 1} :a))))
+
+(describe "reserved names across processes"
+  :isolated
+  (test "the reserved set is shared — a spawned process refuses too"
+    ;; the set lives in the runtime's shared code region, like the globals table
+    (let (me (self))
+      (spawn (send me [:result (try (do (eval-string "(def get (fn (a b) :x))") :allowed)
+                                    (catch e :refused))]))
+      (assert= :refused (receive ([:result r] r)))))
+  (test "and a spawned process can still redefine its own names"
+    (let (me (self))
+      (spawn (send me [:result (try (do (eval-string "(def rn-child (fn () 1))") :allowed)
+                                    (catch e :refused))]))
+      (assert= :allowed (receive ([:result r] r))))))

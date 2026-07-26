@@ -3833,7 +3833,11 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
       ;; Attribute the baked-in source to the file it was WRITTEN in, not to whichever
       ;; file happened to be mid-load when the `require` ran. The path comes from the
       ;; same literal the source was baked in from, so it can't drift.
-      (do (%load-string src (%builtin-module-file key)) (provide key))
+      ;; `%load-module-source`, not `%load-string`: a baked-in std module's own defs
+      ;; are allowed to bind reserved names and BECOME reserved (ADR-166). A project
+      ;; file (the branch below) goes through the ordinary `load`, so a package's
+      ;; names are never reserved.
+      (do (%load-module-source src (%builtin-module-file key)) (provide key))
       (let (path (require--find (str key ".blsp") *load-path*))
         (if path
           (do (load path) (provide key))

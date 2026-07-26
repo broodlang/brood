@@ -1085,6 +1085,18 @@ pub struct RuntimeCode {
     /// The global bindings (prelude + user `def`s). Read on every global lookup,
     /// written on `def` (the only mutation). The values point into PRELUDE or RUNTIME.
     globals: RwLock<SymbolMap<Value>>,
+    /// **Reserved** names — everything the language itself ships, which a user `def`
+    /// may not rebind (ADR-166). Seeded with every symbol bound at runtime-seed time
+    /// (the prelude's 443 definitions plus every Rust builtin), and extended with each
+    /// name an *embedded* std module defines as it loads. The rule the boundary
+    /// encodes: **if it shipped inside the `brood` binary it is reserved; if you or a
+    /// package author wrote it, it is yours** — so hot-reloading your own code, and a
+    /// dependency's, is untouched, which is all the live-editing story ever needed.
+    ///
+    /// Read only when a global `def` runs (rare), so a `HashSet` probe costs nothing
+    /// on any hot path. Shared through the runtime `Arc`, so every inner process sees
+    /// one reserved set.
+    sealed: RwLock<std::collections::HashSet<Symbol>>,
     /// Monotonic version of `globals`, bumped on every binding change (`def`
     /// rebind, `restore_globals`). Per-process global **inline caches**
     /// (`Heap::global_ic`) stamp the version they resolved at and re-resolve only
@@ -1271,6 +1283,8 @@ impl Default for RuntimeCode {
             runtime_tag: next_runtime_tag(),
             gen_version: AtomicU64::new(0),
             globals: RwLock::new(SymbolMap::default()),
+            // A default (un-seeded) runtime reserves nothing — the prelude hasn't run.
+            sealed: RwLock::new(std::collections::HashSet::new()),
             version: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),
             positions: RwLock::new(HashMap::new()),
@@ -1355,6 +1369,25 @@ impl RuntimeCode {
             current_gen: AtomicUsize::new(0),
             runtime_tag: next_runtime_tag(),
             gen_version: AtomicU64::new(0),
+            // Reserved at seed time: every shipped **function**, macro and builtin.
+            // Deliberately NOT the prelude's data globals — `*features*`,
+            // `*load-path*`, `*module-docs*`, `*reload-diagnostics*` are registries
+            // that prelude functions rebind with `def` at runtime (Brood's one
+            // mutation), so `require`/`defmodule`/`provide` would break if they were
+            // reserved. The rule is exactly "a shipped FUNCTION can't be redefined";
+            // shipped mutable state stays rebindable, which is how it works at all.
+            sealed: RwLock::new(
+                bindings
+                    .iter()
+                    .filter(|(_, v)| {
+                        matches!(
+                            v.unpack(),
+                            ValueRef::Fn(_) | ValueRef::Macro(_) | ValueRef::Native(_)
+                        )
+                    })
+                    .map(|&(s, _)| s)
+                    .collect(),
+            ),
             globals: RwLock::new(globals),
             version: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),
@@ -1385,6 +1418,21 @@ impl RuntimeCode {
     }
     fn globals_write(&self) -> RwLockWriteGuard<'_, SymbolMap<Value>> {
         self.globals.write().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Is `sym` a reserved (language-shipped) name? See [`RuntimeCode::sealed`].
+    fn is_sealed(&self, sym: Symbol) -> bool {
+        self.sealed
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&sym)
+    }
+    /// Reserve `sym` — called for each name an embedded std module defines as it
+    /// loads, so the module's own surface becomes reserved once it exists.
+    fn seal(&self, sym: Symbol) {
+        self.sealed
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(sym);
     }
 
     /// As `globals_read`/`globals_write`, for the def-site table (same
@@ -1454,6 +1502,15 @@ pub struct Heap {
     old: Slabs,
     prelude: Arc<SharedCode>,
     runtime: Arc<RuntimeCode>,
+    /// Nesting depth of an **embedded-module load** in this process (ADR-166). While
+    /// non-zero, a global `def` of a reserved name is permitted *and* reserves the
+    /// name — that is how a std module's own surface (`set/union`, `path/join`)
+    /// becomes reserved once it exists, and how re-loading one stays idempotent
+    /// (`require--await` deliberately re-evaluates a module whose loader died).
+    /// Per-process, so two processes loading different modules never see each
+    /// other's exemption; incremented and decremented by `%load-module-source`,
+    /// which restores it even when the load throws.
+    module_load_depth: u32,
     /// **Per-process pinned-read cache for the RUNTIME generations.** A RUNTIME handle
     /// deref must pin `gens[g]`'s `Arc<CodeSlabs>` (so a concurrent Stage-4 free can't drop
     /// it mid-read), but taking a fresh `ArcSwap::load` guard per deref dominated
@@ -2011,6 +2068,7 @@ impl Heap {
     /// holes mid-build).
     pub fn new() -> Self {
         Heap {
+            module_load_depth: 0,
             local: Slabs::default(),
             old: Slabs::default(),
             gen_cache: [RefCell::new(None), RefCell::new(None)],
@@ -2089,6 +2147,7 @@ impl Heap {
             closure_const_ver: Cell::new(u64::MAX),
             prelude,
             runtime,
+            module_load_depth: 0,
             global: EnvId::local(0),
             form_pos: HashMap::new(),
             current_file: None,
@@ -3775,6 +3834,36 @@ impl Heap {
     /// scheduler-race hint only fires for the former.
     pub fn global_defined(&self, sym: Symbol) -> bool {
         self.runtime.globals_read().get(&sym).is_some()
+    }
+
+    /// Is `sym` **reserved** — a name the language itself ships (prelude, builtin, or
+    /// embedded std module)? A global `def` of one is refused (ADR-166); the caller
+    /// raises, because that is where a user-facing error belongs. Always false while
+    /// this process is loading an embedded module, which is the one context allowed to
+    /// (re)define its own surface.
+    pub fn is_reserved_global(&self, sym: Symbol) -> bool {
+        self.module_load_depth == 0 && self.runtime.is_sealed(sym)
+    }
+
+    /// Reserve `sym`, so a later user `def` of it is refused. Called for every global
+    /// an embedded module defines while loading.
+    pub fn reserve_global(&self, sym: Symbol) {
+        self.runtime.seal(sym);
+    }
+
+    /// True while this process is loading an embedded std module.
+    pub fn in_module_load(&self) -> bool {
+        self.module_load_depth > 0
+    }
+
+    /// Enter/leave an embedded-module load. Paired by `%load-module-source`, which
+    /// decrements even when the load throws — a leaked exemption would silently
+    /// un-reserve the language.
+    pub fn enter_module_load(&mut self) {
+        self.module_load_depth += 1;
+    }
+    pub fn leave_module_load(&mut self) {
+        self.module_load_depth = self.module_load_depth.saturating_sub(1);
     }
 
     pub fn env_define(&mut self, env: EnvId, sym: Symbol, val: Value) {

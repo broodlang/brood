@@ -83,6 +83,12 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
    `cdr`→`rest`, `concat`→`append`, `length`→`count`, `some?`→`any?`,
    `entries`→`map-pairs`, `flat-map`→`mapcat`.
 
+12. **Never `def` a name Brood ships** — the prelude, builtins and embedded std
+   modules are RESERVED (ADR-166), so `(defn map …)` / `(def get …)` are errors. Check
+   with `(bound? 'name)` if unsure. Your own globals redefine freely (hot reload). A
+   taken name is available three ways: a different name, a local `let` shadow, or a
+   `(defmodule your/mod …)` where it becomes `your/mod/name`.
+
 ## Naming & shape (match std/)
 
 - `foo?` predicate · `*foo*` dynamic/module var · `foo--bar` **private** helper

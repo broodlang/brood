@@ -81,15 +81,16 @@ fn native_arm_re_reads_handle_after_repeated_compactions() {
 fn compaction_amid_churn_keeps_native_handle_reads_correct() {
     // Churn the RUNTIME region (redefine a throwaway global many times) so the collect has
     // real garbage to compact around, not just a live-only relocation. The warmed
-    // handle-bearing `keep` must still read its literal correctly afterward.
+    // handle-bearing `hold` must still read its literal correctly afterward.
     is(
-        "(defn keep (x) (cons x '(100 200)))
+        // `hold`, not `keep`: `keep` is a prelude function and reserved (ADR-166).
+        "(defn hold (x) (cons x '(100 200)))
          (defn churn (k) (if (< k 1) nil (do (def junk k) (churn (- k 1)))))
-         (defn drive (k acc) (if (< k 1) acc (drive (- k 1) (keep k))))
+         (defn drive (k acc) (if (< k 1) acc (drive (- k 1) (hold k))))
          (let (warm (drive 50000 nil))
            (do (churn 5000)
                (runtime-collect)
-               (keep 1)))",
+               (hold 1)))",
         "(1 100 200)",
     );
 }

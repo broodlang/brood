@@ -95,7 +95,7 @@ land in a later slice."
     {}
     nil
     (package--lock-index lock)
-    (map (fn (d) (get d :name)) deps)))
+    (map :name deps)))
 
 (defn package--resolve-loop (root queue resolved order lock-index direct)
   (cond
@@ -548,7 +548,7 @@ package is unknown to this index."
 ;; reviewable. Each entry is a vector `[name :path PATH :sha256 HASH :deps [names…]]`;
 ;; :deps records the dep's own direct deps (by name) for traceability / `nest tree`.
 
-(defn package--dep-names-vec (deps) (apply vector (map (fn (d) (get d :name)) deps)))
+(defn package--dep-names-vec (deps) (apply vector (map :name deps)))
 
 (defn package--entry->lock-vec (e)
   (apply vector

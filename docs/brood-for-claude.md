@@ -186,6 +186,15 @@ name is the thing readers look up later. Confining the rule there preserves
 the ergonomic `(map (fn ([k v]) …) …)` idiom, which reads locally and never
 gets looked up by name.
 
+**Reserved names: you cannot redefine what Brood ships.** `(def get …)`,
+`(defn map …)`, `(defmacro when …)`, `(def set/union …)` are all errors (ADR-166) —
+the prelude, the builtins and the embedded std modules are reserved. Your own globals
+and your packages stay fully redefinable, which is what hot reload is for. If a name
+you want is taken: pick another, shadow it locally (`(let (get …) …)` is fine), or
+define it in a `(defmodule your/mod …)` — that makes `your/mod/get`, which is yours.
+The prelude's data registries (`*load-path*`, `*features*`) are still rebindable; the
+rule reserves shipped **functions**.
+
 ## Naming & docstrings
 
 These conventions are followed without exception across `std/` — match them and

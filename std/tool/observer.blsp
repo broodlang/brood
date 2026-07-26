@@ -368,7 +368,7 @@ the live reductions/second rate, so the *currently* busiest process floats up)."
     (= key :mailbox) (sort-by (fn (p) (- (get p :mailbox))) procs)
     (= key :memory) (sort-by (fn (p) (- (or (get p :memory) 0))) procs)
     (= key :reds) (sort-by (fn (p) (- (or (get p :reds-rate) 0))) procs)
-    else (sort-by (fn (p) (get p :id)) procs)))
+    else (sort-by :id procs)))
 
 (defn observe--tree-order (procs)
   "Order `procs` as a parent→child forest (roots first, each followed by its DFS
@@ -464,7 +464,7 @@ last snapshot) until the user quits. Pure."
   "The row index of the process whose `:id` is `sel-id`, or 0 if it is gone (so
 selection follows the same process across re-sorts, and recovers if it dies).
 Clamped to a valid row."
-  (let (idx (index-of (map (fn (p) (get p :id)) procs) sel-id))
+  (let (idx (index-of (map :id procs) sel-id))
     (max 0 (min (max 0 (dec (count procs))) (if (< idx 0) 0 idx)))))
 
 (defn observe--select (state procs idx)

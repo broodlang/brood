@@ -1632,6 +1632,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string, string], any),
         load_string,
     );
+    // The embedded-std-module loader: `%load-string` plus the reserved-name
+    // exemption, held across the load and released even on a throw (ADR-166).
+    def(
+        heap,
+        "%load-module-source",
+        Arity::range(1, 2),
+        Sig::new(vec![string, string], any),
+        load_module_source,
+    );
     // Output-capture surface for the `with-out-str` prelude macro: push/pop a
     // process-scoped capture buffer (the same mechanism the `nest mcp` dispatcher
     // uses; captures nest). Rust = mechanism, the macro = policy.
