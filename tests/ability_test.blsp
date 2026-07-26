@@ -1,0 +1,126 @@
+;; Unified generic functions with nominal dispatch — `std/ability.blsp`. ONE concept,
+;; value dispatch on the first argument's identity: a built-in dispatches on its
+;; `type-of` kind, an identity-carrying record (`defrecord*`) on its baked `module/name`
+;; id. Subsumes value polymorphism (the `protocol` job) and drivers-as-values (part of
+;; the `behaviour` job). Register-only — discovered and run by `nest test`.
+(defmodule ability-test (:use test) (:use ability) (:use json))
+
+;; Records carry a nominal identity captured from THIS module (`ability-test`).
+(defrecord* circle (r))
+(defrecord* rect (w h))
+
+;; ---- value polymorphism: dispatch across built-in kinds AND record identities ----
+(defability Size (size [self] :-> int))
+(impl Size :int             (size [n] n))
+(impl Size :string          (size [s] (count s)))
+(impl Size :map             (size [m] (count m)))
+(impl Size ability-test/circle (size [c] (get c :r)))
+(impl Size ability-test/rect   (size [r] (* (get r :w) (get r :h))))
+(impl Size :default         (size [_] -1))
+
+(describe "value dispatch"
+  (test "dispatches on a built-in's type-of kind"
+    (assert= (size 7) 7)
+    (assert= (size "hello") 5)
+    (assert= (size {:a 1 :b 2}) 2))
+  (test "a record dispatches on its NOMINAL id, not as :map"
+    ;; both records are :map structurally, but land on their own impls
+    (assert= (size (circle 4)) 4)
+    (assert= (size (rect 3 5)) 15))
+  (test "two record shapes in one module dispatch apart"
+    (assert= (size (circle 6)) 6)
+    (assert= (size (rect 2 4)) 8))
+  (test ":default catches an unregistered kind"
+    (assert= (size :kw) -1)))
+
+;; ---- ADR-011: a plain map (even with a :type field) is NEVER rerouted ----
+(describe "nominal identity is opt-in"
+  (test "a plain map dispatches as :map, not as any record"
+    (assert= (size {:type :circle :r 9}) 2))   ; :map impl (count), NOT the circle impl
+  (test "the identity is a module/name keyword captured at definition"
+    (assert= (get (circle 1) :__id__) :ability-test/circle))
+  (test "a record is still a structural map for get/assoc"
+    (assert= (get (circle 2) :r) 2)
+    (assert= (get (assoc (circle 2) :r 9) :r) 9)))
+
+;; ---- drivers are values: the "behaviour" job in the SAME mechanism ----
+(defability Store (fetch [self k]))
+(defrecord* pg  (pool))
+(defrecord* mem (data))
+(impl Store ability-test/pg  (fetch [db k] (str "pg:" (get db :pool) "/" k)))
+(impl Store ability-test/mem (fetch [db k] (get (get db :data) k)))
+
+(describe "drivers as values"
+  (test "dispatch is on the driver value, not on any argument's type"
+    (assert= (fetch (pg "P1") "k1") "pg:P1/k1")
+    (assert= (fetch (mem {"k1" 42}) "k1") 42))
+  (test "swapping the driver value swaps the impl — no config, no module atoms"
+    (let (drivers [(pg "P1") (mem {"k" 99})])
+      (assert= (fetch (nth drivers 0) "k") "pg:P1/k")
+      (assert= (fetch (nth drivers 1) "k") 99))))
+
+;; ---- satisfies? / missing impl ----
+(defability Only-Int (only [self] :-> any))
+(impl Only-Int :int (only [n] n))
+
+(describe "satisfies? and missing impls"
+  (test "true when every declared op resolves for the value's identity"
+    (is (satisfies? 'Size 7))
+    (is (satisfies? 'Size (circle 1))))
+  (test "true via :default"
+    (is (satisfies? 'Size :kw)))
+  (test "false when no impl and no :default covers the identity"
+    (refute (satisfies? 'Only-Int "s")))
+  (test "false for an unknown ability"
+    (refute (satisfies? 'No-Such 1)))
+  (test "a missing impl is a loud, named error naming the ability, op, and id"
+    ;; `arg` is a var, so the *static* missing-impl check can't judge it — this test
+    ;; exercises the RUNTIME error path, which the checker's call-site pass complements.
+    (let (arg "s"
+          msg (try (only arg) (catch e (error-message e))))
+      (is (includes? msg "Only-Int"))
+      (is (includes? msg "only"))
+      (is (includes? msg ":string")))))
+
+;; ---- conflict detection: provenance distinguishes hot-reload from a real clash ----
+(describe "impl conflict detection"
+  :serial
+  (test "a cross-module re-register overrides — last wins"
+    (defability Ping (ping [self] :-> any))
+    (ability/register-impl 'Ping 'ping :int (fn (n) :a) 'lib-a)
+    (assert= (ping 1) :a)
+    ;; a DIFFERENT module claims the same [ability op id] — warns, last wins
+    (ability/register-impl 'Ping 'ping :int (fn (n) :b) 'lib-b)
+    (assert= (ping 1) :b))
+  (test "a same-module re-register (hot reload) overrides silently"
+    ;; the `impl` macro tags both with THIS module — same provenance → no warning
+    (defability Pong (pong [self] :-> any))
+    (impl Pong :int (pong [n] :first))
+    (assert= (pong 1) :first)
+    (impl Pong :int (pong [n] :second))
+    (assert= (pong 1) :second)))
+
+;; ---- slice 2: the identity does not leak into serialization; clean field API ----
+(describe "record identity does not leak"
+  (test "json-encode omits the internal identity key, keeps the fields"
+    (let (s (json-encode (circle 7)))
+      (refute (includes? s "__id__"))
+      (is (includes? s "\"r\":7"))))
+  (test "record? / record-id / fields are the clean, id-free API"
+    (is (record? (circle 3)))
+    (refute (record? {:r 3}))
+    (assert= (record-id (circle 3)) :ability-test/circle)
+    (assert= (record-id {:r 3}) nil)
+    (assert= (fields (circle 3)) {:r 3}))
+  (test "a record is NOT = to a bare map with the same fields (Elixir-struct semantics)"
+    ;; the identity intentionally distinguishes it — this is correct, not a leak
+    (refute (= (circle 3) {:r 3})))
+  (test "two records of different shape are never ="
+    (refute (= (circle 3) (rect 3 3)))))
+
+;; ---- late / open extension: an impl added after the fact, for a built-in ----
+(describe "open extension"
+  :serial
+  (test "a new impl can be added for any kind after the ability is declared"
+    (impl Size :vector (size [v] (* 10 (count v))))
+    (assert= (size [1 2 3]) 30)))

@@ -412,7 +412,12 @@ the named escapes + every C0 control) that would each find nothing."
     (string? v) (cons (json--enc-string v) acc)
     (keyword? v) (cons (json--enc-string (name v)) acc)
     (symbol? v) (cons (json--enc-string (name v)) acc)
-    (map? v) (cons "}" (json--emit-pairs (map-pairs v) (cons "{" acc) true))
+    ; a record (`ability/defrecord*`) is a map carrying a reserved `:__id__` identity
+    ; key — encode it as its FIELDS, omitting the internal id (it must never reach the
+    ; wire). Plain maps have no such key, so they are unaffected.
+    (map? v) (cons "}" (json--emit-pairs
+                         (remove (fn (p) (= (first p) :__id__)) (map-pairs v))
+                         (cons "{" acc) true))
     (vector? v) (cons "]" (json--emit-items v 0 (count v) (cons "[" acc)))
     (list? v) (cons "]" (json--emit-list v (cons "[" acc) true))
     else (error "json: cannot encode " v)))

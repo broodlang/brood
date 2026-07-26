@@ -672,6 +672,12 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         let protocols = protocol::collect(heap, &forms);
         protocol::check_impls(heap, &forms, &protocols, &mut out);
         protocol::check_behaviours(heap, &forms, &expanded, &protocols, &mut out);
+        // Ability call-site checks: the syntactic pass (literals / direct ctor args) runs
+        // now; the same facts go into `ctx` so `check_into`'s inference hook can also flag
+        // a record-typed *variable* passed to an op with no impl.
+        let ability_info = std::sync::Arc::new(protocol::build_ability_info(heap, &expanded));
+        protocol::check_ability_calls(heap, &expanded, &ability_info, &mut out);
+        ctx.set_ability(ability_info);
         // Pass 3: check each expanded form with the accumulated file-globals.
         for &form in &expanded {
             check_into(heap, form, &ctx, &mut out);

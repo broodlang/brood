@@ -1,0 +1,214 @@
+(defmodule ability
+  "Open generic functions with nominal dispatch — Brood's unified polymorphism seam.
+
+  ONE concept, value dispatch on the FIRST argument's *identity*:
+    - a built-in value dispatches on its `type-of` kind (`:int`, `:string`, `:map`, …);
+    - an identity-carrying record (`defrecord*`) dispatches on its NOMINAL id — a
+      `module/name` keyword baked in at definition — so two record shapes in one module
+      dispatch apart, and a plain map (even one carrying a `:type` field) never does.
+
+  This subsumes both jobs the old `protocol`/`behaviour` split handled separately:
+    - value polymorphism (the `protocol` job): `(size x)` picks the impl by x's kind/id;
+    - drivers (part of the `behaviour` job): a driver is a VALUE, so `(fetch db k)` picks
+      by `db`'s id — no config magic, no module-atom dispatch. Ambient selection is a
+      one-line wrapper over this, not a second mechanism. (Module-as-implementor
+      contracts — `(:implements …)`, where the unit is a namespace with no dispatch
+      value — remain `defbehaviour`'s job; see `std/protocol.blsp`.)
+
+  Registration is OPEN and LATE: `impl` for any id, from any module, at any time. Each
+  impl is tagged with its registering namespace (`current-ns`), so a *cross-module*
+  redefinition — a library and you both claiming the same `[ability op id]` — is a loud
+  conflict (last wins), while a *same-module* redefinition is hot-reload and stays
+  silent. The advisory checker (`types/check/protocol.rs`) verifies each `impl` provides
+  the ability's declared ops at the right arity, at `nest check` time.
+
+  Two registries, mirroring `protocol`:
+    *abilities* — name → declared op specs, as DATA (introspection / checker hook).
+    *impls*     — [ability op] → {id → {:fn f :from ns}}. Nested so the constant
+      `[ability op]` key is built once (the macro emits it as a quoted literal) and
+      each call only indexes by the argument's runtime id.
+
+  Identity representation: a record's id is a reserved `:__id__` map field holding a
+  `module/name` KEYWORD (Slice 3 — a keyword literal is what the type-checker tracks via
+  `Ty::keyword_lit`, so a record's identity flows through inference; the seam that makes
+  the checker nominal-aware). `json-encode` omits `:__id__` (Slice 2 — it must never reach
+  the wire); a record printing with its id, and being `≠` a bare map, are *correct*
+  (Elixir-struct semantics), not leaks. The only residual is cosmetic — `keys`/`count`
+  include the id; use `record?`/`record-id`/`fields` for the clean, id-free view, which
+  is also the stable seam a future hidden slot swaps behind (nothing else reads `:__id__`).")
+
+; ---- registries -------------------------------------------------------------
+
+; ability-name → op specs (introspection / checker / LSP)
+(def *abilities* {})
+; [ability op] → {id → {:fn f :from ns}} (runtime dispatch, provenance-tagged)
+(def *impls* {})
+
+(defn register-ability (aname specs)
+  "Record ability `aname`'s declared op specs (raw forms) for the checker / LSP."
+  (def *abilities* (assoc *abilities* aname specs))
+  nil)
+
+(defn ability-ops (aname)
+  "The op specs declared for ability `aname` (or nil) — which ops an `impl` must
+  provide, with what arities."
+  (get *abilities* aname))
+
+; ---- dispatch identity ------------------------------------------------------
+
+(defn identity-of (x)
+  "The dispatch identity of `x`: its nominal record id (a `module/name` keyword) if it
+  is an identity-carrying record, else its `type-of` kind. This — with `record?` /
+  `record-id` / `fields` — is the one seam a later kernel slot swaps behind; nothing
+  outside this module reads `:__id__` directly."
+  (if (and (map? x) (contains? x :__id__)) (get x :__id__) (type-of x)))
+
+(defn record? (x)
+  "True if `x` is an identity-carrying record (a `defrecord*` value)."
+  (and (map? x) (contains? x :__id__)))
+
+(defn record-id (x)
+  "The nominal id (`module/name` keyword) of record `x`, or nil if `x` is not a record.
+  Unlike `identity-of`, never falls back to `type-of`."
+  (if (record? x) (get x :__id__) nil))
+
+(defn fields (x)
+  "The FIELDS of record `x` as a plain map — its identity omitted. The clean view for
+  code that wants a record's data without the internal id (`keys`/`count`/serialization
+  over this see only fields). A plain map is returned unchanged."
+  (if (record? x) (dissoc x :__id__) x))
+
+; ---- registration -----------------------------------------------------------
+
+(defn register-impl (aname op key f from)
+  "Register impl `f` of `aname`'s `op` for dispatch id `key`, tagged with the
+  registering namespace `from`. A re-register from a DIFFERENT `from` is a cross-module
+  conflict (warned; last wins); from the SAME `from` it is hot-reload (silent). Read-
+  modify-write of `*impls*` — register at load time, as top-level `impl` does."
+  (let (op-key [aname op]
+        methods (or (get *impls* op-key) {})
+        prev (get methods key))
+    (if (and prev (not (= (get prev :from) from)))
+      (println "warning: ability " aname "/" op " for " key
+        " — impl from " (get prev :from) " overridden by " from " (last wins)")
+      nil)
+    (def *impls* (assoc *impls* op-key (assoc methods key {:fn f :from from})))
+    nil))
+
+(defn impl-for (op-key key)
+  "The impl fn of op `op-key` (a `[ability op]` pair) for id `key`, falling back to a
+  `:default` impl, or nil. One map fetch for the op's method set, then one by id."
+  (let (methods (get *impls* op-key)
+        rec (or (get methods key) (get methods :default)))
+    (if rec (get rec :fn) nil)))
+
+(defn no-impl (op-key key)
+  "The loud, located error an op raises when no impl (and no `:default`) covers id
+  `key`. Names the ability, the op, the id, and lists the ids that ARE implemented."
+  (let (aname (first op-key)
+        op (second op-key)
+        known (keys (or (get *impls* op-key) {})))
+    (if (empty? known)
+      (error "ability " aname "/" op ": no impl for " key)
+      (error "ability " aname "/" op ": no impl for " key " — have " known))))
+
+(defn satisfies? (aname x)
+  "True if ability `aname` is implemented for `x`'s identity — every declared op
+  resolves (directly or via `:default`). Lets a caller branch instead of letting the op
+  raise the missing-impl error. False for an unknown ability."
+  (let (key (identity-of x)
+        ops (ability-ops aname))
+    (if ops
+      (every? (fn (spec) (impl-for [aname (first spec)] key)) ops)
+      false)))
+
+; ---- macros -----------------------------------------------------------------
+
+(defmacro defability (aname & specs)
+  "Declare ability `aname`. Each op spec `(op [args…] :-> ret?)` becomes a generic
+  function dispatching on its first argument's identity. An optional leading docstring
+  is allowed. Records the specs in *abilities* for the checker / LSP.
+
+    (defability Size  (size [self] :-> int))
+    (defability Store (fetch [self k]) (put [self k v]))"
+  (let (ops (filter (fn (s) (pair? s)) specs))
+    (cons 'do
+      (cons (list 'ability/register-ability (list 'quote aname) (list 'quote ops))
+        (map
+          (fn (op)
+            (let (op-name (first op)
+                  ; arg vector → list; dispatch reads the FIRST arg's identity
+                  arg-syms (map (fn (s) s) (second op))
+                  first-arg (first arg-syms)
+                  ; a *constant* [ability op] key — a quoted literal, built once
+                  op-key (list 'quote [aname op-name])
+                  ; gensym'd temporaries so an op arg named `k`/`f` can't be captured
+                  id-sym (gensym)
+                  impl-sym (gensym))
+              (list 'defn
+                op-name
+                arg-syms
+                (list 'let (list id-sym (list 'ability/identity-of first-arg)
+                                 impl-sym (list 'ability/impl-for op-key id-sym))
+                  (list 'if impl-sym
+                    ; direct, arity-correct call — no arg-list alloc, no `apply`
+                    (cons impl-sym arg-syms)
+                    (list 'ability/no-impl op-key id-sym))))))
+          ops)))))
+
+(defmacro impl (aname key & methods)
+  "Register implementations of ability `aname` for dispatch id `key` — a `type-of`
+  keyword (`:int`, `:map`, …), a record's nominal id (`geometry/circle`), or `:default`.
+  Open and late: from any module, any time. Each method is `(op [args…] body…)`; the
+  registration is tagged with the current namespace for conflict detection.
+
+    (impl Size :int             (size [n] n))
+    (impl Size geometry/circle  (size [c] (get c :r)))"
+  ; the dispatch id is a KEYWORD: a record id written as a symbol (`geometry/circle`) is
+  ; keyworded to match what `identity-of` produces; a built-in id (`:int`) is already one.
+  (let (id-kw (if (symbol? key) (keyword (name key)) key))
+    (cons 'do
+      (map
+        (fn (m)
+          (let (op-name (first m)
+                ; arg vector → list
+                arg-syms (map (fn (s) s) (second m))
+                body (rest (rest m)))
+            (list 'ability/register-impl
+              (list 'quote aname)
+              (list 'quote op-name)
+              id-kw
+              (cons 'fn (cons arg-syms body))
+              (list 'quote (current-ns)))))
+        methods))))
+
+(defmacro defrecord* (rec fields)
+  "Like `defrecord`, but constructed values carry a NOMINAL identity — a `module/name`
+  symbol captured at definition — so `ability` dispatch tells them apart from other maps
+  and other records. Otherwise a plain structural map: `get`/`assoc`/`=` treat it as its
+  fields (plus the reserved `:__id__` — slice 1; a hidden slot removes that leak later).
+
+    (defmodule geometry)
+    (defrecord* circle (r))          ; (circle 2) → {:__id__ geometry/circle :r 2}"
+  ;; The id is a KEYWORD (`:module/name`), not a symbol: a keyword literal is what the
+  ;; type-checker tracks (`Ty::keyword_lit`), so a record's identity flows through
+  ;; inference as a literal — the seam that makes the checker nominal-aware (Slice 3).
+  (let (id (keyword (str (name (current-ns)) "/" (name rec)))
+        ;; Build a MAP LITERAL body (a real map value whose field values are the field
+        ;; symbols), NOT a `(hash-map …)` call — so the checker infers the constructor's
+        ;; result as a record SHAPE carrying the `:__id__` keyword literal. That is what
+        ;; makes a record's identity flow through inference to call sites (the Slice-3
+        ;; inference hook). At runtime it evaluates identically to `(hash-map …)`.
+        body (apply hash-map (cons :__id__ (cons id
+               (mapcat (fn (f) (list (keyword (name f)) f)) fields))))
+        ;; Emit a `sig` for the constructor so its record-shaped return type — carrying
+        ;; the `:__id__` keyword literal — flows through inference to call sites: this is
+        ;; what lets `(let (c (circle 2)) (size c))` be checked. Fields are `any` (records
+        ;; are structural — the identity is the point).
+        arg-tys (map (fn (_) 'any) fields)
+        rec-ty (cons 'record (cons :__id__ (cons id
+                 (mapcat (fn (f) (list (keyword (name f)) 'any)) fields))))
+        the-sig (list 'sig rec (append arg-tys (list '-> rec-ty))))
+    (list 'do
+      the-sig
+      (list 'defn rec fields body))))

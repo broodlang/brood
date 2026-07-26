@@ -708,6 +708,27 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         }
     }
 
+    // **Ability op on a record-typed variable with no impl** (Slice 3, inference hook).
+    // The syntactic pass in `protocol` already covers literal / direct-ctor args; this
+    // uses the inferred type of a *symbol* argument (a `let`-bound record, a sig-typed
+    // param) — so `(let (c (circle 2)) (size c))` is flagged when `Size` has no impl for
+    // circle. Gated: file has abilities, head is a known op fn, arg is a symbol.
+    if let (Some(info), Value::Sym(h)) = (ctx.ability(), head) {
+        if info.op_of(h).is_some() {
+            if let Some(&Value::Sym(_)) = items.get(1) {
+                if let Some(ty) = super::infer::expr_ty(heap, items[1], ctx) {
+                    super::protocol::check_ability_call_inferred(
+                        info,
+                        h,
+                        &ty,
+                        heap.form_pos_only(form),
+                        out,
+                    );
+                }
+            }
+        }
+    }
+
     // **Keyword accessor** `(:key coll [default])` (ADR-165). A keyword head is not a
     // `Sym`, so none of the sig/arity machinery below sees it — the form was entirely
     // unchecked, including the misuse ADR-165 itself calls the most likely: `(:name
@@ -749,6 +770,40 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
             check_into(heap, arg, ctx, out);
         }
         return;
+    }
+
+    // **`(get recv :literal-keyword …)` on an integer-indexed receiver** — the `get`
+    // spelling of the check above, and the write-time half of ADR-164's runtime error.
+    // A keyword key can only address something keyed, so a vector/list/string/bytes
+    // receiver is a provable mistake (`(get deps :name)` where `deps` is a *list* of
+    // maps). The curated signature can't express this: it constrains each argument
+    // independently, and `countable` legitimately includes both keyed and indexed
+    // kinds — the conflict is in the *relationship* between the two arguments.
+    // Literal-keyword keys only, so a computed key is never guessed at.
+    if let Value::Sym(s) = head {
+        if value::symbol_is(s, "get") && items.len() >= 3 {
+            if let Value::Keyword(_) = items[2] {
+                use crate::types::Tag;
+                let keyed = Ty::of(Tag::Map)
+                    .union(Ty::of(Tag::Set))
+                    .union(Ty::of(Tag::Nil));
+                let g = gradual_of(heap, items[1], ctx);
+                if !g.bound.is_never()
+                    && g.bound.is_disjoint(&keyed)
+                    && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+                {
+                    out.push((
+                        arg_pos(heap, items[1], form),
+                        format!(
+                            "get: a keyword key needs a map, set or nil, got {} ({}) — \
+                             an integer-indexed collection is indexed by position",
+                            g.bound,
+                            crate::syntax::printer::print(heap, items[1]),
+                        ),
+                    ));
+                }
+            }
+        }
     }
 
     // Special-cased forms that introduce scope or refine types. Each handles

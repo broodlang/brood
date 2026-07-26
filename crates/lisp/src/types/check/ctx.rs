@@ -211,6 +211,11 @@ pub(super) struct Ctx {
     /// Lint categories suppressed in the current subtree (a `(check-allow …)`
     /// scope, ORed as we descend). `0` = nothing suppressed (the common case).
     suppressed: u8,
+    /// Ability facts for the file (op-fn symbols → `(ability, op)`, and the covered
+    /// impls) — set once at the file level so `check_into` can flag an ability op applied
+    /// to a record-typed value with no impl. `None` in a file with no `defability`.
+    /// Shared (`Arc`) so cloning `Ctx` as the walk descends stays cheap.
+    ability: Option<std::sync::Arc<super::protocol::AbilityInfo>>,
     types: HashMap<Symbol, Ty>,
     /// **Path narrowings** — the type of a *compound path* asserted by an
     /// enclosing guard, keyed by a base symbol plus a chain of [`PathKey`]s
@@ -363,6 +368,16 @@ impl Ctx {
     }
     /// A copy of this ctx with the given lint categories additionally suppressed
     /// (a `(check-allow …)` scope entered). ORs into any already-suppressed set.
+    /// The file's ability facts, if any (`None` unless `set_ability` ran at file level).
+    pub(super) fn ability(&self) -> Option<&super::protocol::AbilityInfo> {
+        self.ability.as_deref()
+    }
+
+    /// Install the file's ability facts (once, at the top of file checking).
+    pub(super) fn set_ability(&mut self, info: std::sync::Arc<super::protocol::AbilityInfo>) {
+        self.ability = Some(info);
+    }
+
     pub(super) fn with_suppressed(&self, mask: u8) -> Ctx {
         let mut c = self.clone();
         c.suppressed |= mask;
