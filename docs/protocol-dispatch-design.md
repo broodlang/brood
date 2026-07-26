@@ -1,15 +1,24 @@
 # Protocol dispatch & abilities — the polymorphism seam
 
-> Status: **Slice 1 shipped.** `std/ability.blsp` (a `defability`/`impl` facility with
-> nominal, value-first dispatch) landed, plus a checker arm in `types/check/protocol.rs`
-> and `tests/ability_test.blsp`. It unifies value polymorphism and drivers-as-values,
-> detects cross-module impl conflicts, and dispatches records on a baked `module/name`
-> identity. **Known Slice-1 limitation:** the identity lives in a visible `:__id__`
-> field, so it leaks into `keys`/`=`/`json-encode` — the kernel carve-out (a hidden slot)
-> is **Slice 2**. Also open: checker nominal-awareness + monomorphization, sealed
-> abilities, return-type dispatch, and migrating/retiring `protocol`. The rest of this
-> note captures the problem, measurements, the language survey, and the design space
-> that led here.
+> Status: **Slices 1–2 shipped.** `std/ability.blsp` (`defability`/`impl`/`defrecord*`,
+> value-first nominal dispatch) + a checker arm + `tests/ability_test.blsp`. It unifies
+> value polymorphism and drivers-as-values, detects cross-module impl conflicts, and
+> dispatches records on a baked `module/name` identity.
+>
+> **Slice 2 (identity leak) — resolved pragmatically, no kernel change.** Verifying the
+> constraints changed the plan: the `Value` layout is JIT-pinned and map ops match
+> `Value::Map` with catch-alls, so a `Record` variant is a pervasive, risky change; and
+> — the key realization — a record being **`≠` to a bare map is correct** (Elixir-struct
+> semantics), so we do *not* want to hide the id from `=`, and a record *printing* with
+> its id is informative, not a leak. The one genuinely harmful leak — an internal key
+> reaching external JSON — is fixed in std (`json-encode` omits `:__id__`), and a clean
+> `record?`/`record-id`/`fields` API means nothing outside `ability` touches `:__id__`.
+> The only residual is cosmetic (`keys`/`count` include the id; use `fields`), deferred
+> as optional polish behind a future hidden slot.
+>
+> **Still open:** checker nominal-awareness + monomorphization, sealed abilities,
+> return-type dispatch, migrating/retiring `protocol`. The rest of this note captures the
+> problem, measurements, the language survey, and the design space that led here.
 
 ## The goal
 
