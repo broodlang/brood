@@ -38,11 +38,19 @@ test-group = 'real-tcp'
 # as FLAKY in the summary so it stays visible rather than silently absorbed.
 retries = 1
 
-# `serve_attach` (ADR-090) likewise spins two real `brood` child processes over
-# loopback (a daemon + an attaching client); same reasoning as `distribution` — pin
-# it to the single-threaded group so it doesn't race for ports under full load.
+# `serve_attach` (ADR-090) and `observe_attach` likewise spin two real `brood` child
+# processes over loopback (a daemon + an attaching client); same reasoning as
+# `distribution` — pin them to the single-threaded group so they don't race for ports
+# under full load.
+#
+# `observe_attach` was missing from this list until 2026-07-26 even though it carries
+# its own `port_lock()`/`free_port()` — i.e. exactly the pattern the `distribution`
+# comment above explains serialises NOTHING once nextest gives each case its own
+# process. It was the last real-TCP binary left unpinned and unretried, so it was the
+# one that flaked: `remote_attach_reads_snapshot_then_sees_disconnect` failed under a
+# full `make test` and passed in 7.2s standalone.
 [[profile.default.overrides]]
-filter = 'binary(serve_attach)'
+filter = 'binary(serve_attach) | binary(observe_attach)'
 test-group = 'real-tcp'
 # Same real-network timing exposure as `distribution` above — same one-retry policy.
 retries = 1
