@@ -77,8 +77,15 @@ pub(super) fn first(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         // A set is a sequence of its elements (CHAMP order): its head, or nil if
         // empty — so `first`/`map`/`fold`/… treat a set as a seq (Clojure-like).
         Value::Set(id) => Ok(heap.set_elems(id).first().copied().unwrap_or(Value::nil())),
+        // A map seqs as its `[k v]` pairs — the same view `seq`/`map`/`fold`/`last`
+        // already take, so `first`/`rest` no longer erred on the one collection
+        // every other seq op accepted.
+        Value::Map(id) => match heap.map_first_entry(id) {
+            Some((k, val)) => Ok(heap.alloc_vector(vec![k, val])),
+            None => Ok(Value::nil()),
+        },
         Value::Nil => Ok(Value::nil()),
-        _ => Err(LispError::wrong_type(heap, "first", "list or vector", v)),
+        _ => Err(LispError::wrong_type(heap, "first", "list, vector, set, map or bytes", v)),
     }
 }
 
@@ -113,8 +120,18 @@ pub(super) fn rest(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
             let items: Vec<Value> = heap.set_elems(id).into_iter().skip(1).collect();
             Ok(heap.list(items))
         }
+        // The tail of a map is a plain list of its remaining `[k v]` pairs — the
+        // set arm's reasoning, over the map's entry view (see `first`).
+        Value::Map(id) => {
+            let entries: Vec<(Value, Value)> = heap.map_entries(id).into_iter().skip(1).collect();
+            let pairs: Vec<Value> = entries
+                .into_iter()
+                .map(|(k, val)| heap.alloc_vector(vec![k, val]))
+                .collect();
+            Ok(heap.list(pairs))
+        }
         Value::Nil => Ok(Value::nil()),
-        _ => Err(LispError::wrong_type(heap, "rest", "list or vector", v)),
+        _ => Err(LispError::wrong_type(heap, "rest", "list, vector, set, map or bytes", v)),
     }
 }
 

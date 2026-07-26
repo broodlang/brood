@@ -206,10 +206,14 @@ Maps are immutable — every operation returns a **fresh** map:
 (-> person (assoc :born 1816) (get :born))   ; => 1816
 ```
 
+A map is **seqable as its `[k v]` pairs**: `seq`, `first`, `rest`, `last`, `map`,
+`filter`, `fold`/`reduce`, `into`, and `vec` all read it that way, so
+`(map first m)` is its keys and `(first m)` is a `[k v]` vector (`nil` for an empty
+map). Use `reduce-kv` when you want the key and value as separate arguments.
+
 These are thin Brood wrappers (`std/prelude.blsp`) over a small kernel of `map-*`
-primitives; the internal representation is an insertion-ordered association
-vector, which can be swapped for a hash-array-mapped trie later without any
-surface change.
+primitives; the representation is a **CHAMP hash-array-mapped trie** (ADR-040),
+which is why `count` is O(1) and structural key equality is O(log n).
 
 ### Records
 
@@ -251,13 +255,26 @@ model for a grid) and O(log n) membership, and it is **seqable**: `count`,
 Equality is order-independent (`(= #{1 2 3} #{3 2 1})`), and a `#{…}` literal
 evaluates its elements then dedups (`#{(+ 1 1) 2}` ⇒ `#{2}`).
 
-Membership is `(contains? s x)`; the kernel supplies the literal, `set?`, and the
-O(log n) element ops (`%set`/`%set-add`/`%set-remove`/`%set-has?`/`%set-count`).
-The **`set` library** (`(require 'set)` / `(:use set)`, `std/set.blsp`) adds the
-constructor from a collection (`(set coll)`, which dedups), single-element
-`conj`/`disj`, and the algebra `union`/`intersection`/`difference`/`subset?`.
-Sets deep-copy across processes like any value (`send`/`spawn` round-trip them as
-sets, not maps).
+A set is a full member of the **collection protocol**, so the ordinary prelude ops
+work on one with no import: `(conj s x)` adds, `(disj s x)` removes,
+`(contains? s x)` tests membership, `(get s x)` returns the *element* when present
+(never a positional index) and `nil`/`default` when not, `(into #{} coll)` pours
+and dedups, and `count`/`empty?`/`first`/`rest`/`vec`/`seq` treat it as its
+elements. The kernel supplies the literal, `set?`, and the O(log n) element ops
+(`%set`/`%set-add`/`%set-remove`/`%set-has?`/`%set-count`).
+
+The **`set` library** (`(require 'set)` / `(:use set)`, `std/set.blsp`) adds only
+what's specific to sets: the constructor from a collection (`(set coll)`, which
+dedups) and the algebra `union`/`intersection`/`difference`/`subset?`. Sets
+deep-copy across processes like any value (`send`/`spawn` round-trip them as sets,
+not maps).
+
+> Until 2026-07-26 `conj`/`disj` lived in `std/set` instead, and the prelude's own
+> `conj`/`into`/`get` didn't know about sets — so `(conj #{1} 2)` raised "not a
+> collection", `(into #{} [1 1 2])` returned the *list* `(1 1 2)`, `(get #{10 20}
+> 10)` was `nil` while `(get #{10 20} 0)` was `20`, and a `(:use set)` header
+> shadowed the polymorphic `conj` so that `(conj [1 2] 3)` broke in that file. They
+> are prelude functions now (ADR-156).
 
 ## Syntax
 
@@ -284,16 +301,19 @@ eagerly). They are reserved names.
 | `(if test then else?)` | Evaluate `then` if `test` is truthy, else `else` (or `nil`). |
 | `(do body...)` | Evaluate forms in order; result is the last. |
 | `(def name value)` | Define/redefine `name` in the **global** environment — redefinable, the language's only mutation. |
-| `(fn (params) body...)` | A lexical closure. (The `lambda` synonym was removed — one spelling each.) |
+| `(fn (params) body...)` | A lexical closure. (`lambda` is still accepted as an exact synonym — ADR-108 — though `fn` is the only spelling used anywhere in the tree; retiring the alias is a pending cleanup, see ROADMAP.) |
 | `(let (a 1 b 2) body...)` | Sequential local bindings (each sees the previous). Brood's `let` is already sequential, so there is no separate `let*`. |
 | `(letrec (f (fn ...) g (fn ...)) body...)` | Local **mutually recursive** bindings — every name is visible in every RHS (and to itself). Plain-symbol targets only; meant for fn definitions. |
 | `` (quasiquote tmpl) `` / `` `tmpl `` | Template: literal except `~x` inserts a value and `~@xs` splices a sequence. |
 | `(defmacro name (params) body...)` | Define a macro (see below). |
 
-`when`, `unless`, `cond`, `and`, and `or` read like special forms but are
-**prelude macros** over `if`/`do`/`let` (`std/prelude.blsp`), expanded once by the
-compile pass (ADR-022) — so the evaluator's core stays minimal and they cost
-nothing extra at runtime. `cond` is still flat test/expr pairs with **`else`** as
+`when`, `unless`, `cond`, `and`, `or`, `case`, `match`, and `comment` read like
+special forms but are **prelude macros** over `if`/`do`/`let`
+(`std/prelude.blsp`), expanded once by the compile pass (ADR-022) — so the
+evaluator's core stays minimal and they cost nothing extra at runtime.
+(`(comment body…)` ignores its body and yields `nil` — the form-level "don't run
+this", since Brood has no `#_` discard reader macro. The body is still *read*, so
+it must be balanced sexps; the checker skips it, so names inside need not resolve.) `cond` is still flat test/expr pairs with **`else`** as
 the catch-all (ADR-004; `:else` was a second blessed spelling and is no longer
 special — it still catches, but only because a keyword is truthy, exactly as
 `true` or `42` would); `and`/`or` short-circuit left-to-right and return the
@@ -516,12 +536,28 @@ design and rationale see [pattern-matching.md](pattern-matching.md).
 | `(p1 p2 …)` | a list of that exact length, element-wise |
 | `(p1 & rest)` | head(s) + the tail bound to `rest` |
 | `[p1 p2 …]` | a vector of that exact length — the **tagged-data / tuple idiom** |
-| `{:keys [a b] :or {a 0}}` | a **map** — binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default); fails if the value isn't a map |
+| `{:keys [a b] :or {a 0}}` | a **map** — binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default); fails if the value isn't a map. `{}` matches any map. |
 | `(bytes seg…)` | a **`bytes` value**, destructured segment-by-segment — Erlang/Elixir bit syntax (see below) |
 
 Patterns nest to any depth. **The one trap:** a bare symbol *binds* (and
 shadows) — it does **not** test against a same-named value. Match a known value
 with a keyword (`:ok`), a quoted symbol (`'none`), or a pin (`^x`).
+
+**Two shapes are rejected rather than reinterpreted** (ADR-152/156) — both used to
+be read as something else with no diagnostic at the mistake:
+
+- **No alternative/boolean patterns.** `(or p q)`, `(and …)`, `(not …)` in pattern
+  position are a **clean error**. Read as an ordinary list pattern, `(or 1 2)` is a
+  3-element list whose head *binds a variable named `or`* — so
+  `(match 2 ((or 1 2) :hit) (_ :miss))` silently answered `:miss`. Write one clause
+  per alternative, or move the test into a guard:
+  `(match 2 (x :when (or (= x 1) (= x 2)) :hit) (_ :miss))`.
+- **A map pattern understands only `:keys` and `:or`.** Any other key — general
+  `{:key subpattern}` nesting or `:as`, both still deferred (ADR-011) — is a clean
+  error. An unknown key used to be *ignored*, which degenerated `{:a v}` to "is the
+  target a map?": it matched anything, bound nothing, and the body then failed on
+  an unbound `v`, pointing nowhere near the cause. To reach a nested value, bind the
+  map and use `get`/`get-in`.
 
 ### Bytes patterns (bit syntax)
 
@@ -562,7 +598,7 @@ parsing: `(bytes-uint bs off n)` / `bytes-uint-le` / `bytes-int` /
 ### `match`
 
 Clauses are **wrapped** `(pattern [:when guard] body…)`; the first whose pattern
-(and guard) matches runs its body. `case` is just `match` with literal patterns.
+(and guard) matches runs its body.
 
 ```clojure
 (match msg
@@ -585,6 +621,30 @@ match total:
       ([:match-error ctx val pats] (recover val))
       (_                           (throw e)))))
 ```
+
+### `case` — literal dispatch
+
+`case` dispatches on a **value** against literal tests, written as flat
+`test result` pairs (`cond`'s shape) with a lone trailing form as the default:
+
+```clojure
+(case status
+  :ok      (render body)
+  :missing (render-404)
+  :error   (render-500)
+  (render-unknown status))          ; lone trailing form = default
+```
+
+It is sugar over `match`, but not a synonym for it — the difference is what it
+*refuses*. A `case` test must be a literal (keyword, int, float, decimal, string,
+bool, `nil`, or a quoted symbol); a **bare symbol is an error**, because in `match`
+it would silently *bind* instead of comparing. So `case` is the spelling to reach
+for whenever every arm is a constant, and `match` the one for shapes, guards, and
+binding. Anything richer than a literal — destructuring, a guard, alternatives — is
+rejected with a hint naming `match`. With no default, no match raises
+`[:match-error :case value patterns]`, exactly as `match` does, and the
+[exhaustiveness lint](#type-annotations) covers a `case` over a declared literal
+type just as it covers a `match`.
 
 ### Refutable / destructuring `let`
 
@@ -743,7 +803,7 @@ uses it directly instead of branching on `string?`/`map?`:
 
 Type errors are **self-identifying**: they name the operation, the type it
 wanted, and the tag + printed form of what actually arrived — e.g.
-`type error: first: expected list or vector, got int (5)`. The tag word is the
+`type error: +: expected number, got string ("x")`. The tag word is the
 [`type-of`](#predicates) name, so an error and `type-of` always agree.
 
 ## Dynamic variables
@@ -1410,7 +1470,8 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 
 ### Lists & sequences
 `cons`  `first`  `rest`  `second`  `third`  `last`  `but-last`
-`list`  `vector`  `conj`  `append`  `reverse`  `nth`  `count`  `empty?`
+`list`  `vector`  `vec`  `conj`  `disj`  `into`  `seq`  `enumerate`
+`append`  `reverse`  `nth`  `count`  `empty?`
 `range`  `take`  `drop`  `split-at`  `take-last`  `drop-last`  `take-while`  `drop-while`
 `member?`  `any?`  `every?`  `find`  `index-of`  `index-where`  `zip`
 `partition`  `sort`  `sort-by`  `subvec`  `remove`  `remove-nth`  `keep`
@@ -1419,6 +1480,15 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 
 - `first`/`rest` of `nil` are `nil`. `nth` takes an optional default:
   `(nth coll i default)`.
+- **One sequence view, every collection.** `first`/`rest`/`last`/`count`/`empty?`/
+  `map`/`filter`/`fold`/`reduce`/`into`/`vec`/`seq` accept a list, vector, `bytes`,
+  **set** (as its elements) or **map** (as its `[k v]` pairs) — so
+  `(first {:a 1})` is `[:a 1]`, not an error, as it was before 2026-07-26.
+  `(seq coll)` is the explicit coercion to that list view, and `(vec coll)` /
+  `(into [] coll)` the vector form. `conj`/`into` insert at each kind's natural
+  point and **preserve the kind** (vector→vector, set→set, map→map, list→list).
+- `enumerate` pairs each item with its index as `[i x]` vectors — the
+  `map-indexed`/`keep-indexed` idiom is `(map (fn ([i x]) …) (enumerate xs))`.
 - `append` concatenates any number of sequences — lists *and* vectors, read as
   sequences — left to right, returning a **list**; wrap in `(into [] …)` for a
   vector. (The `concat` alias was removed — one spelling each.)
@@ -1459,7 +1529,7 @@ to your mailbox — resend the queue on `[:nodeup …]`.
   chunk; `chunk-every` keeps the remainder. `chunk-by` partitions consecutive equal-key runs.
 - `scan` is a running fold — returns a list of all intermediate accumulator
   values starting with the initial value (like Haskell's `scanl`).
-- `mapcat`/`mapcat` maps a list-valued function and concatenates the results. `min-by`/`max-by`
+- `mapcat` maps a list-valued function and concatenates the results. `min-by`/`max-by`
   select the extremum of a collection by a key function. `(clamp x lo hi)` constrains a
   number to the closed range `[lo, hi]`.
 - `repeat` builds a list of `n` copies of a value; `repeatedly` calls a
@@ -1496,7 +1566,8 @@ in **O(1)** — the CHAMP root node tracks its size (exposed by the `map-count`
 kernel primitive), so neither walks nor materialises the entries.
 
 ### Higher-order
-`map`  `filter`  `mapv`  `filterv`  `reduce`  `apply`
+`map`  `filter`  `mapv`  `filterv`  `reduce`  `fold`  `apply`
+`comp`  `partial`  `complement`  `constantly`  `identity`
 
 ```clojure
 (map inc (list 1 2 3))        ;=> (2 3 4)
@@ -1511,10 +1582,29 @@ kernel primitive), so neither walks nor materialises the entries.
 for when the caller needs indexed access — the named form of
 `(into [] (map …))`.
 
+`reduce` takes `(reduce f init coll)` or `(reduce f coll)` (first item as the
+seed); `fold` is the strict 3-argument form it wraps (`(fold f init coll)`) and is
+what the prelude itself folds with.
+
+The function combinators build the callbacks those ops take:
+
+```clojure
+(map (partial + 10) (list 1 2 3))     ;=> (11 12 13)  ; fix the leading args
+(filter (complement odd?) (range 5))  ;=> (0 2 4)     ; negate a predicate
+(map (constantly :x) (list 1 2))      ;=> (:x :x)     ; ignore the argument
+((comp inc (partial * 2)) 5)          ;=> 11          ; right-to-left composition
+```
+
 ### Predicates
 `nil?`  `pair?`  `list?`  `symbol?`  `keyword?`  `string?`  `number?`  `int?`
-`float?`  `decimal?`  `bool?`  `fn?`  `vector?`  `map?`  `ref?`  `range?`
-`pid?`  `table?`  `bytes?`  `rope?`
+`float?`  `decimal?`  `bool?`  `fn?`  `vector?`  `map?`  `set?`  `ref?`  `range?`
+`pid?`  `table?`  `bytes?`  `rope?`  `nan?`  `infinite?`
+
+- `nan?` / `infinite?` classify the non-finite floats. They earn their place
+  because `nan` and `inf` are *reader literals* (a bare `nan`/`inf`/`-inf` token is
+  a float), so the language could produce them long before it could test for one:
+  `=` reports NaN as equal to nothing, which is both the IEEE rule and the only
+  way to detect it. `(nan? x)` says so by name.
 
 - `(type-of x)` returns the runtime type tag as a keyword — `:int` `:float`
   `:decimal` `:string` `:symbol` `:keyword` `:bool` `:nil` `:pair` `:vector`
@@ -1933,7 +2023,8 @@ The following modules are also opt-in and live under `std/net/` and `std/tool/`:
 (require 'format)     ; printf-style string formatting
 (require 'json)       ; json-encode / json-decode
 (require 'regex)      ; re-match / re-find / re-replace (thin wrapper over the regex engine)
-(require 'set)        ; set operations over maps: set-new / set-add / set-member? / set-union …
+(require 'set)        ; set-specific algebra: set / union / intersection / difference / subset?
+                      ;   (conj/disj/get/into/contains? on a set are prelude — no import needed)
 (require 'fuzzy)      ; fuzzy string matching
 (require 'log)        ; structured logging
 (require 'task)       ; promise-style async tasks over processes

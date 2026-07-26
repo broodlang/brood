@@ -59,6 +59,76 @@
       (assert= nil (run! (fn (x) (table-put t x true)) [:a :b :c]))
       (assert= true (table-get t :b)))))
 
+;; ---- the combinator family (2026-07-26 review: `comp` had shipped alone) ----
+(describe "partial / complement / constantly"
+  (test "partial fixes the leading arguments"
+    (assert= 6 ((partial + 1 2) 3))
+    (assert= (list 1 2) ((partial list 1) 2))
+    (assert= "ab" ((partial str "a") "b")))
+  (test "partial with no bound arguments is the function itself"
+    (assert= 3 ((partial +) 1 2)))
+  (test "partial composes with a higher-order op (the reason it exists)"
+    (assert= (list 11 12 13) (map (partial + 10) (list 1 2 3))))
+  (test "complement negates a predicate"
+    (is ((complement odd?) 2))
+    (refute ((complement odd?) 3))
+    (assert= (list 2 4) (filter (complement odd?) (list 1 2 3 4))))
+  (test "constantly ignores its arguments"
+    (assert= :x ((constantly :x)))
+    (assert= :x ((constantly :x) 1 2 3))
+    (assert= (list :x :x) (map (constantly :x) (list 1 2)))))
+
+(describe "case — literal dispatch"
+  (test "dispatches on the value, flat test/result pairs"
+    (assert= 2 (case :b :a 1 :b 2 :none))
+    (assert= 1 (case :a :a 1 :b 2 :none)))
+  (test "a lone trailing form is the default"
+    (assert= :none (case :zz :a 1 :b 2 :none)))
+  (test "with no default, no match raises like match"
+    (assert-error (case :zz :a 1)))
+  (test "tests may be any literal kind"
+    (assert= :one (case 1 1 :one 2 :two :other))
+    (assert= :s (case "hi" "hi" :s :other))
+    (assert= :t (case true true :t false :f))
+    (assert= :n (case nil nil :n :other))
+    (assert= :sym (case 'foo 'foo :sym :other)))
+  ;; The reason `case` earns a name next to `match`: it CANNOT silently bind.
+  (test "a bare symbol test is rejected (it would bind, not compare)"
+    (assert-error (macroexpand '(case :a foo 1))))
+  (test "a destructuring test is rejected — that is what match is for"
+    (assert-error (macroexpand '(case [1 2] [a b] 1)))
+    (assert-error (macroexpand '(case {:a 1} {:keys [a]} 1)))))
+
+(describe "comment"
+  (test "ignores its body entirely and returns nil"
+    (assert= nil (comment (this body is never evaluated)))
+    (assert= nil (comment)))
+  (test "does not evaluate — an unbound name inside is harmless"
+    (assert= nil (comment (no-such-function-anywhere 1 2 3))))
+  (test "a comment between forms doesn't disturb them"
+    (let (a 1)
+      (comment (a is 1 here))
+      (assert= 1 a))))
+
+(describe "vec / nan? / infinite?"
+  (test "vec is the named (into [] …)"
+    (assert= [1 2 3] (vec (list 1 2 3)))
+    (assert= [1 2 3] (vec [1 2 3]))
+    (assert= [] (vec nil)))
+  (test "nan? identifies the float that isn't equal to itself"
+    (is (nan? nan))
+    (is (nan? (- nan)))
+    (refute (nan? 1.0))
+    (refute (nan? 0))
+    (refute (nan? inf))
+    (refute (nan? "nan")))
+  (test "infinite? covers both infinities only"
+    (is (infinite? inf))
+    (is (infinite? -inf))
+    (refute (infinite? 1.0))
+    (refute (infinite? 1))
+    (refute (infinite? nan))))
+
 ;; ---- cross-process: the new forms survive send/spawn like any Brood code ----
 (describe "ergonomics across processes" :isolated
   (test "a closure using fmt + a letrec loop deep-copies across a send and runs on the receiver"

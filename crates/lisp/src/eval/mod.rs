@@ -1350,7 +1350,9 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
             "Brood sequences are eager — use `map`/`filter`/`fold`; for streaming, a \
              process that `send`s values."
         }
-        "case" | "condp" => "Brood has no `case`/`condp` — use `match` (patterns) or `cond`.",
+        // `case` now exists (literal dispatch, flat `test result` pairs); only
+        // `condp` is still absent.
+        "condp" => "Brood has no `condp` — use `cond`, or `match` with `:when` guards.",
         "progn" | "begin" => "Brood spells `progn`/`begin` as `do`.",
         "mapcar" => "Brood spells `mapcar` as `map`.",
         "null?" => "Brood tests nil with `nil?` (and `empty?` for an empty collection).",

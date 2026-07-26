@@ -201,7 +201,11 @@ foo--bar      ; PRIVATE helper — the double-dash infix marks "implementation
 foo->bar      ; conversion (number->string, vec->list)
 ```
 
-There is **no `!` convention** — nothing mutates, so no name needs to warn of it.
+A trailing `!` is **rare and not a mutation warning** — nothing mutates. It shows
+up in three unrelated senses (a wart, on the ROADMAP): `sig!` = a signature that is
+*enforced* at runtime, `set-load-path!` / `clipboard-set!` = the few root/OS-state
+setters, and `(! pid payload)` = the Erlang-style cast in `proc/gen`. Don't add a
+`!` to a name of your own.
 Symbols are kebab-case (`out-of-range?`, not `outOfRange`/`out_of_range`).
 
 **Tail-recursive helpers get a suffix naming what they accumulate or do** —
@@ -253,9 +257,14 @@ x                bind x; a repeated x is an equality constraint (non-linear)
 (p1 & rest)      head(s) + tail
 [p1 p2 ...]      vector of exact length (the tuple / tagged-data idiom)
 {:keys [a b]}    map — bind a,b to (:a m),(:b m); {:keys [a] :or {a 0}} defaults absent keys
+                 ONLY :keys/:or — any other key ({:a v}, :as) is an ERROR, not
+                 ignored; {} matches any map. Reach nested values with get/get-in.
 (bytes seg ...)  bytes value, bit-syntax style: byte/#b"…" literals; x = one byte;
                  (x n) = n bytes as sub-bytes (n may be an earlier binding);
                  (x :u16) (x :i32-le) ... = typed int, big-endian default; & rest
+
+(or p q)         NOT a pattern — an ERROR. Brood has no alternative/boolean
+(and …) (not …)  patterns: write one clause per alternative, or use a :when guard.
 ```
 
 ```lisp
@@ -297,6 +306,25 @@ Prefer the higher-order combinators:
 (map sq xs)
 (filter even? xs)
 (fold (fn (m k) (assoc m k (* k k))) {} (range 10))
+(map (partial + 10) xs)            ; partial / complement / constantly / comp all exist
+(filter (complement odd?) xs)
+```
+
+**One sequence view over every collection.** `count` `empty?` `first` `rest` `last`
+`map` `filter` `fold` `reduce` `into` `vec` `seq` take a list, vector, `bytes`, a
+**set** (as its elements) or a **map** (as its `[k v]` pairs) — `(first {:a 1})` is
+`[:a 1]`. `conj`/`into` insert at each kind's natural point and *preserve the kind*;
+`(conj #{1} 2)` and `(disj s x)` are prelude, no `(:use set)` needed. Two ops stay
+deliberately strict: `contains?` is map/set only (a vector would have to answer by
+*index*), and a **string** is not seqable — bridge with `string->list` or
+`string->graphemes`.
+
+**`case` for constant dispatch, `match` for shapes.** `case` is flat `test result`
+pairs with a lone trailing default, and its tests must be *literals* — a bare symbol
+is an error, because in `match` a bare symbol silently *binds* instead of comparing:
+
+```lisp
+(case status :ok :fine :missing :gone (handle-other status))
 ```
 
 **`assoc` / `update` / `get` work on a vector by integer index, not just maps.**

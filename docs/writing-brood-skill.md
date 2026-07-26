@@ -34,7 +34,9 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
 
 4. **Bare symbols in patterns BIND, they don't match.** In `match` / `fn` /
    `receive` / destructuring `let`, `x` binds; to match a known value pin it
-   with `~x`, a literal symbol with `'sym`, a constant with `42`/`:k`/`"s"`.
+   with **`^x`** (ADR-150 — *not* `~x`, which is quasiquote's unquote and is
+   rejected in a pattern), a literal symbol with `'sym`, a constant with
+   `42`/`:k`/`"s"`.
 
 5. **Truthiness:** only `nil` and `false` are falsy. `0`, `""`, `()` are
    **truthy**. `cond`'s catch-all is `:else` (or `else`) — never `t`/`true`.
@@ -48,17 +50,39 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
    not the raw 2-arg `%add`/`%lt` primitives (those are for the prelude's own
    bootstrap). Maps have **no commas**: `{:a 1 :b 2}`.
 
-8. **Maps are seqable; `sort`/`index-of` are polymorphic.** `map`/`filter`/`fold`/
-   `reduce`/`count`/`into` all walk a map as its `[k v]` pairs (no
-   `(zip (keys m) (vals m))`); order is hash-driven, so compare with
-   `frequencies`. `(sort coll)` uses structural lexicographic order for
-   vectors/lists — `(sort [[1 0] [2 1]])` needs no comparator. `index-of` /
-   `includes?` work on lists, vectors, and strings (substring).
+8. **One sequence view over every collection; `sort`/`index-of` are polymorphic.**
+   `count`/`empty?`/`first`/`rest`/`last`/`map`/`filter`/`fold`/`reduce`/`into`/
+   `vec`/`seq` walk a list, vector, `bytes`, a **set** (its elements) or a **map**
+   (its `[k v]` pairs) — so no `(zip (keys m) (vals m))`, and `(first {:a 1})` is
+   `[:a 1]`. Map order is hash-driven, so compare with `frequencies`.
+   `conj`/`into` insert at each kind's natural point and **preserve the kind**;
+   `conj`/`disj`/`get`/`contains?` on a set are prelude (no `(:use set)` — that
+   module is only `set`/`union`/`intersection`/`difference`/`subset?`). Two
+   deliberate exceptions: `contains?` is map/set only, and a **string is not
+   seqable** — bridge with `string->list`/`string->graphemes`. `(sort coll)` uses
+   structural lexicographic order for vectors/lists — `(sort [[1 0] [2 1]])` needs
+   no comparator. `index-of` / `includes?` work on lists, vectors, and strings
+   (substring).
+
+9. **`case` for constants, `match` for shapes.** `(case k :a 1 :b 2 default)` —
+   flat `test result` pairs, lone trailing form is the default, tests must be
+   **literals** (a bare symbol is an error: in `match` it would silently *bind*).
+   `(comment …)` ignores its body and yields `nil` (there is no `#_`). The
+   combinators `comp`/`partial`/`complement`/`constantly` all exist — reach for
+   `(map (partial + 10) xs)` over a hand-written `fn`.
+
+10. **Patterns: two shapes are errors, not readings.** `(or p q)`/`(and …)`/
+   `(not …)` in pattern position is rejected (Brood has no alternative patterns —
+   use one clause each, or a `:when` guard), and a map pattern accepts only
+   `:keys`/`:or` (no general `{:key subpattern}`, no `:as`).
 
 ## Naming & shape (match std/)
 
 - `foo?` predicate · `*foo*` dynamic/module var · `foo--bar` **private** helper
-  · `foo->bar` conversion. Kebab-case. No `!` convention (nothing mutates).
+  · `foo->bar` conversion. Kebab-case. **Don't add a trailing `!`** — nothing
+  mutates, so it warns of nothing (the few in-tree `!` names mean unrelated
+  things: `sig!` = enforced, `set-load-path!` = a root setter, `(! pid msg)` = a
+  `proc/gen` cast).
 - Tail-recursive helpers: public shell delegates to a private `name--acc`/
   `--loop` worker that carries the accumulator.
 - Docstring (one-sentence summary, first line) on every public `defn`/`defmacro`;

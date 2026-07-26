@@ -444,7 +444,7 @@ impl LispError {
     }
     /// A self-identifying type error: which operation (`who`), what it `expected`,
     /// and the actual tag + printed form of what arrived. Threads the heap to
-    /// render the offending value, e.g. `first: expected list or vector, got int (5)`.
+    /// render the offending value, e.g. `first: expected number, got string ("x")`.
     pub fn wrong_type(
         heap: &crate::core::heap::Heap,
         who: &str,

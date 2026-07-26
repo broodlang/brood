@@ -62,13 +62,14 @@ pub const THREAD_LAST: &str = "->>";
 // chiefly the advisory checker's `is_syntactic_keyword` list, so they read
 // uniformly alongside the special forms above. `not` is a boolean fn (also a
 // guard head, like `%eq`); `spawn` is a primitive; `module-doc` is the
-// module-docstring marker form; `case` is a construct Brood deliberately *lacks*
-// — kept here so the checker routes it to the foreign-construct hint instead of
-// flagging it as unbound (the runtime hint lives in `eval/mod.rs`).
+// module-docstring marker form; `case` is the literal-dispatch macro (it was long
+// a deliberately-absent construct routed to a foreign-construct hint — it landed
+// 2026-07-26, and the checker already modelled its flat `test result` shape).
 pub const NOT: &str = "not";
 pub const SPAWN: &str = "spawn";
 pub const CASE: &str = "case";
 pub const MODULE_DOC: &str = "module-doc";
+pub const COMMENT: &str = "comment";
 
 // Core macros (defined in std/prelude.blsp, *not* evaluator special forms) that
 // nonetheless read as keywords, so they're highlighted as such everywhere from one

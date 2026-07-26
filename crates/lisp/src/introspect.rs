@@ -685,7 +685,10 @@ mod tests {
         // prelude/root name → left bare
         assert_eq!(resolve_in_source(&mut interp, src, "map"), "map");
         // already qualified → unchanged
-        assert_eq!(resolve_in_source(&mut interp, src, "set/conj"), "set/conj");
+        assert_eq!(
+            resolve_in_source(&mut interp, src, "set/difference"),
+            "set/difference"
+        );
         // a root (unnamespaced) file qualifies nothing
         assert_eq!(
             resolve_in_source(&mut interp, "(defn baz (x) x)", "baz"),

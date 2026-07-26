@@ -497,6 +497,11 @@ static SPECIAL_HEAD: LazyLock<SymbolMap<SpecialHead>> = LazyLock::new(|| {
         (kw::ERROR_OF, SkipBody),
         (kw::ASSERT_ERROR, SkipBody),
         (kw::TRY_PRIM, SkipBody),
+        // `(comment …)` expands to `nil` — its body is never evaluated, so
+        // checking it would flag names that intentionally don't resolve (a
+        // sketched call, a snippet from another project). The whole point of the
+        // form is to hold code that doesn't run.
+        (kw::COMMENT, SkipBody),
         (kw::IF, If),
         (kw::LET, Let),
         (kw::LETREC, Letrec),

@@ -447,7 +447,7 @@ fn type_errors_are_self_identifying() {
     );
     assert_eq!(
         err("(first 5)"),
-        "type error: first: expected list or vector, got int (5)"
+        "type error: first: expected list, vector, set, map or bytes, got int (5)"
     );
     assert_eq!(
         err("(string-length :k)"),

@@ -19,7 +19,18 @@
   (test "(range lo hi step) steps by step, ascending or descending"
     (assert= (range 0 10 2) (list 0 2 4 6 8))
     (assert= (range 10 0 -2) (list 10 8 6 4 2))
-    (assert= (range 1 10 3) (list 1 4 7))))
+    (assert= (range 1 10 3) (list 1 4 7)))
+  ;; A lazy range in a cons TAIL is still a proper list — `=`/`count` always said
+  ;; so, but the printer used to render it as the dotted `(9 . (0 1))`, a form that
+  ;; doesn't read back as the value it came from.
+  (test "a range spliced into a cons tail prints (and re-reads) as a proper list"
+    (assert= (pr-str (cons 9 (range 2))) "(9 0 1)")
+    (assert= (read-string (pr-str (cons 9 (range 2)))) (list 9 0 1))
+    (assert= (count (cons 9 (range 2))) 3)
+    (assert= (pr-str (cons 9 (range 0))) "(9)")
+    (assert= (pr-str (cons :a (cons :b (range 5 8)))) "(:a :b 5 6 7)")
+    ;; a genuinely improper tail still prints dotted
+    (assert= (pr-str (cons 1 2)) "(1 . 2)")))
 
 (describe "take / drop"
   (test "take returns the first n (or all, if shorter)"
