@@ -38,10 +38,15 @@
 > record's `:__id__` is a keyword literal the checker reads. `Ctx` carries the file's
 > ability facts (`AbilityInfo`) so the hook stays sound and cheap.
 >
-> **Still open:** **monomorphization** (compile-time impl resolution + inlining; codegen —
-> the *runtime* win, distinct from the compile-time warning), sealed abilities, return-type
-> dispatch, migrating/retiring `protocol`. The rest of this note captures the problem,
-> measurements, the language survey, and the design space.
+> **Slice 4 (sealed abilities) — shipped.** `(defability Shape :sealed [circle rect] …)`
+> records a CLOSED member set (`*sealed*`); the checker then flags any member missing a
+> direct impl of any declared op (exhaustiveness — a `:default` doesn't count). Bare member
+> names are qualified to the current ns. Runtime dispatch is unchanged.
+>
+> **Still open:** **return-type dispatch** (needs bidirectional inference), **retire/migrate
+> `protocol`**, and **monomorphization** (codegen — the *runtime* win, deferred to last).
+> The rest of this note captures the problem, measurements, the language survey, and the
+> design space.
 
 ## The goal
 

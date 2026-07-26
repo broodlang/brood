@@ -677,6 +677,7 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         // a record-typed *variable* passed to an op with no impl.
         let ability_info = std::sync::Arc::new(protocol::build_ability_info(heap, &expanded));
         protocol::check_ability_calls(heap, &expanded, &ability_info, &mut out);
+        protocol::check_sealed(&ability_info, &mut out);
         ctx.set_ability(ability_info);
         // Pass 3: check each expanded form with the accumulated file-globals.
         for &form in &expanded {

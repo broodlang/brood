@@ -54,6 +54,20 @@
   provide, with what arities."
   (get *abilities* aname))
 
+; ability-name → its SEALED member ids (a closed set), or absent if open
+(def *sealed* {})
+
+(defn register-sealed (aname members)
+  "Record ability `aname`'s SEALED member ids — the closed set of identities it is meant
+  to be implemented for. The checker uses this for exhaustiveness: every member must have
+  an impl of every declared op. Runtime dispatch is unaffected (sealing is a contract)."
+  (def *sealed* (assoc *sealed* aname members))
+  nil)
+
+(defn sealed-members (aname)
+  "The sealed member ids of ability `aname` (a list of keyword ids), or nil if open."
+  (get *sealed* aname))
+
 ; ---- dispatch identity ------------------------------------------------------
 
 (defn identity-of (x)
@@ -124,17 +138,41 @@
 
 ; ---- macros -----------------------------------------------------------------
 
+(defn defability--sealed-vec (specs)
+  "The vector following `:sealed` in a `defability`'s specs (its closed member set), or nil."
+  (cond (empty? specs) nil
+        (= (first specs) :sealed) (second specs)
+        else (defability--sealed-vec (rest specs))))
+
 (defmacro defability (aname & specs)
   "Declare ability `aname`. Each op spec `(op [args…] :-> ret?)` becomes a generic
   function dispatching on its first argument's identity. An optional leading docstring
   is allowed. Records the specs in *abilities* for the checker / LSP.
 
+  An optional `:sealed [id …]` clause names the CLOSED set of member ids the ability is
+  meant to cover; the checker then flags any member missing an impl of any op
+  (exhaustiveness). A bare record symbol is qualified with the current ns.
+
     (defability Size  (size [self] :-> int))
-    (defability Store (fetch [self k]) (put [self k v]))"
-  (let (ops (filter (fn (s) (pair? s)) specs))
-    (cons 'do
-      (cons (list 'ability/register-ability (list 'quote aname) (list 'quote ops))
-        (map
+    (defability Store (fetch [self k]) (put [self k v]))
+    (defability Shape :sealed [circle rect] (area [self] :-> float))"
+  (let (ops (filter (fn (s) (pair? s)) specs)
+        sealed-vec (defability--sealed-vec specs)
+        sealed-ids (if sealed-vec
+                     (map (fn (m)
+                            (if (symbol? m)
+                              (if (includes? (name m) "/")
+                                (keyword (name m))
+                                (keyword (str (name (current-ns)) "/" (name m))))
+                              m))
+                       sealed-vec)
+                     nil)
+        reg (cons (list 'ability/register-ability (list 'quote aname) (list 'quote ops))
+              (if sealed-ids
+                (list (list 'ability/register-sealed (list 'quote aname)
+                        (cons 'list sealed-ids)))
+                nil))
+        op-defs (map
           (fn (op)
             (let (op-name (first op)
                   ; arg vector → list; dispatch reads the FIRST arg's identity
@@ -154,7 +192,8 @@
                     ; direct, arity-correct call — no arg-list alloc, no `apply`
                     (cons impl-sym arg-syms)
                     (list 'ability/no-impl op-key id-sym))))))
-          ops)))))
+          ops))
+    (cons 'do (append reg op-defs))))
 
 (defmacro impl (aname key & methods)
   "Register implementations of ability `aname` for dispatch id `key` — a `type-of`
