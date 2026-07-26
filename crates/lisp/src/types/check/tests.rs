@@ -3642,7 +3642,8 @@ fn keyword_accessor_receiver_is_checked() {
     // provably-unkeyable receiver → warns, naming the keyword
     let w = warnings("(:name 5)");
     assert!(
-        w.iter().any(|s| s.contains(":name") && s.contains("map, set or nil")),
+        w.iter()
+            .any(|s| s.contains(":name") && s.contains("map, set or nil")),
         "{w:?}"
     );
     assert!(!warnings("(:name \"str\")").is_empty());
@@ -3673,7 +3674,8 @@ fn keyword_accessor_result_type_matches_get() {
     let src = "(defrecord pt ((x int) (y int)))\n(defn a () (string-length (:x (pt 1 2))))";
     let w = file_warnings(src);
     assert!(
-        w.iter().any(|m| m.contains("string-length") && m.contains("int")),
+        w.iter()
+            .any(|m| m.contains("string-length") && m.contains("int")),
         "the keyword spelling must flow the field type: {w:?}"
     );
     // and the two spellings agree
