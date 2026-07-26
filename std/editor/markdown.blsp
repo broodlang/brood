@@ -69,14 +69,14 @@ incomplete input; feeds the editor's `:fontify` mode service and the shared
   (cond
     (>= i n) -1
     (= (char-at line i) ch) i
-    :else (md--find-char line (inc i) n ch)))
+    else (md--find-char line (inc i) n ch)))
 
 (defn md--find-2 (line i n a b)
   "The offset of the next two-char run `a b` at or after `i` in `line`, or -1."
   (cond
     (>= i n) -1
     (and (= (char-at line i) a) (< (inc i) n) (= (char-at line (inc i)) b)) i
-    :else (md--find-2 line (inc i) n a b)))
+    else (md--find-2 line (inc i) n a b)))
 
 (defn md--space-after? (line i n)
   "True if offset `i` is end-of-line or a space — the separator a list marker needs."
@@ -142,7 +142,7 @@ and `col` the column where inline content begins (past the marker, or `lead`)."
                          (if (< oe 0)
                            [() lead]
                            [(list [(+ base lead) (+ base oe) md-face-list]) oe]))
-        :else [() lead]))))
+        else [() lead]))))
 
 ;; ---- the inline scanner: code / bold / italic / links -----------------------
 
@@ -210,7 +210,7 @@ reverse. Each matched region is consumed whole, so spans stay non-overlapping."
                     (if (nil? span)
                       (md--inline line base (inc i) n acc)
                       (md--inline line base (- (second span) base) n (cons span acc))))
-        :else (md--inline line base (inc i) n acc)))))
+        else (md--inline line base (inc i) n acc)))))
 
 ;; ---- a line's spans + the document walker -----------------------------------
 
@@ -224,9 +224,9 @@ otherwise a leading block marker plus an inline scan of the rest."
       fence [(not (md--fence? line)) (list [base (+ base n) md-face-code])]
       (md--fence? line) [true (list [base (+ base n) md-face-code])]
       (md--heading-level line) [false (list [base (+ base n) md-face-heading])]
-      :else (let (lead (md--lead-ws line)
+      else (let (lead (md--lead-ws line)
                   [marker mstart] (md--block line base lead n))
-              [false (concat marker (md--inline line base mstart n '()))]))))
+              [false (append marker (md--inline line base mstart n '()))]))))
 
 (defn md--lex (src i n fence acc)
   "Tail-recursive line walker: classify each line (`md--line-spans`), threading the

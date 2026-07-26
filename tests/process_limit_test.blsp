@@ -52,7 +52,7 @@
       (let (m (monitor pid))
         (assert= :worker-died
           (receive
-            ([:down ~m ~pid _] :worker-died)
+            ([:down ^m ^pid _] :worker-died)
             (after 30000 :timeout)))))
     ;; the parent's own limit is untouched and it can still allocate
     (assert= nil (process-flag :max-heap))

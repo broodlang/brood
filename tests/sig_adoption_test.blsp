@@ -1,0 +1,93 @@
+;; The `sig` adoption pilot (ADR-153): std modules now carry real signatures, so
+;; these assert the two things that make them worth writing — the checker enforces
+;; them ACROSS module boundaries, and both the argument and the result type flow.
+;;
+;; They also pin the two gaps the adoption exposed: `bytes`/`decimal` are spellable
+;; type names, and a `sig` must sit BELOW its definition (because
+;; `BROOD_CONTRACTS=1` turns it into a rebinding).
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test, via
+;; crates/lisp/tests/suite.rs).
+
+(defmodule sig-adoption-test (:use test) (:use path))
+
+;; `check-source` returns the advisory warnings for a source string, which is how
+;; we assert on a *static* diagnostic without failing this file's own compile pass.
+(defn warns-of (src)
+  "The advisory warning messages for `src`, as a list of strings."
+  (map (fn (w) (get w :message)) (check-string-structured src)))
+
+(defn warns-about? (src needle)
+  "Does checking `src` produce a warning containing `needle`?"
+  (some? (fn (w) (string-contains? w needle)) (warns-of src)))
+
+(describe "sig: std modules carry signatures the checker enforces"
+  (test "a declared std signature is enforced at a call site in another module"
+    (is (warns-about? "(defmodule t1 (:use path)) (defn f () (basename 42))"
+          "argument 1 expects string"))
+    ;; …and the qualified spelling resolves to the same declaration
+    (is (warns-about? "(defmodule t2) (defn f () (path/basename 42))"
+          "argument 1 expects string")))
+
+  (test "the RESULT type flows too — a bool result into a string position"
+    (is (warns-about? "(defmodule t3 (:use path)) (defn f () (string-length (is-dir? \"/tmp\")))"
+          "expects string")))
+
+  (test "correct calls stay silent (no false positives)"
+    (assert= (warns-of "(defmodule t4 (:use path)) (defn f () (basename \"/usr/bin/env\"))") nil)
+    (assert= (warns-of "(defmodule t5 (:use path)) (defn f (p) (basename p))") nil))
+
+  (test "the annotated functions still behave"
+    (assert= (basename "/usr/bin/env") "env")
+    (assert= (dirname "/usr/bin/env") "/usr/bin")
+    (assert= (extension "a/b.tar.gz") ".gz")
+    (is (absolute? "/x"))
+    (refute (absolute? "x"))
+    (assert= (split "/a/b") '("/" "a" "b"))))
+
+(describe "sig: the type grammar can name every runtime kind it narrows"
+  ;; `bytes` and `decimal` are what `type-of` returns and what `bytes?`/`decimal?`
+  ;; narrow to, but neither had a *spelling* in an annotation — so no signature
+  ;; could describe std/encoding, std/hash, or std/net/tcp, which are all bytes.
+  (test "bytes is a usable type name"
+    (is (warns-about? "(sig wb (bytes -> int)) (defn wb (b) (byte-length b)) (defn p () (wb \"str\"))"
+          "expects bytes")))
+
+  (test "decimal is a usable type name"
+    (is (warns-about? "(sig wd (decimal -> decimal)) (defn wd (d) d) (defn p () (wd 1))"
+          "expects decimal")))
+
+  (test "an unrecognised type name is still dropped, never guessed"
+    ;; The zero-false-positive contract: a typo in an annotation must not invent a
+    ;; constraint (and must not warn on its own).
+    (assert= (warns-of "(sig q (strng -> int)) (defn q (x) 1) (defn p () (q 42))") nil)))
+
+(describe "sig: placement is load-bearing under BROOD_CONTRACTS=1"
+  ;; `sig` is a pure declaration by default, so placement is free. With contracts
+  ;; on it expands to `sig!`, which REBINDS the name — so the definition has to
+  ;; exist first. A misplaced sig used to die with a bare `unbound symbol: mod/name`
+  ;; that took the whole module load with it; now it names the fix.
+  (test "the declaration itself is placement-independent (default mode)"
+    (assert= (warns-of "(sig ab (string -> string)) (defn ab (s) s)") nil)
+    (assert= (warns-of "(defn ba (s) s) (sig ba (string -> string))") nil))
+
+  (test "no std sig sits directly above a definition of the same name"
+    ;; The invariant, checked structurally against the baked-in sources: a `sig`
+    ;; written above its `defn` breaks `BROOD_CONTRACTS=1` for that whole module,
+    ;; and nothing in the default-mode suite would notice.
+    (dolist (m (list "path" "json" "set"))
+      (let (lines (string-split (or (%builtin-module m) "") "\n"))
+        (assert= (sig--misplaced lines) nil)))))
+
+
+;; Does line `b` define the name `(sig NAME …)` line `a` declares? That adjacency is
+;; the placement that breaks under contracts mode.
+(defn sig--above-def? (a b)
+  (and (starts-with? a "(sig ")
+    (let (nm (second (string-split a " ")))
+      (or (starts-with? b (str "(defn " nm " ")) (starts-with? b (str "(def " nm " "))))))
+
+;; Every misplaced `(sig …)` line in `lines` (empty when the invariant holds).
+(defn sig--misplaced (lines)
+  (keep (fn (pair) (let ([a b] pair) (when (sig--above-def? a b) a)))
+    (zip lines (rest lines))))

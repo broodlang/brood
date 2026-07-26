@@ -999,8 +999,19 @@ impl Closure {
         self.arms
             .iter()
             .filter(|a| a.accepts(argc))
-            // exact fixed match beats variadic; then most-specific (most params).
-            .max_by_key(|a| (a.rest.is_none(), a.params.len()))
+            // Exact fixed match beats variadic; then most-specific (most required
+            // params); then *fewest optional slots*. Without the last term, an arm
+            // pair like `((x) …) ((x &optional y) …)` tied on the first two keys and
+            // `max_by_key`'s last-wins tie-break silently picked the `&optional` arm
+            // for `(f 1)` — so the answer depended on clause ORDER and contradicted
+            // the documented "an exact fixed arity beats a variadic one".
+            .max_by_key(|a| {
+                (
+                    a.rest.is_none(),
+                    a.params.len(),
+                    std::cmp::Reverse(a.optionals.len()),
+                )
+            })
     }
 }
 

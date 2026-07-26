@@ -148,7 +148,7 @@
       (attach :crash :boom (fn (e m md) (exit (self) :kill)))
       ; async — the kill happens in the listener
       (emit :boom)
-      (let (reason (receive ([:down _ ~lpid r] r) (after *test-wait-ms* :timeout)))
+      (let (reason (receive ([:down _ ^lpid r] r) (after *test-wait-ms* :timeout)))
         ; the listener really died
         (is (not (= reason :timeout)))
         (assert= (+ 40 2) 42))))
@@ -159,7 +159,7 @@
       (attach :ok :evt (tel-fwd me))
       (attach :crash :boom (fn (e m md) (exit (self) :kill)))
       (emit :boom)
-      (receive ([:down _ ~lpid _] :ok) (after *test-wait-ms* :timeout))
+      (receive ([:down _ ^lpid _] :ok) (after *test-wait-ms* :timeout))
       (let (l2 (start-telemetry))
         ; restart the listener
         (is (not (= l2 lpid)))

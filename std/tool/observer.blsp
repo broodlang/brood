@@ -107,7 +107,7 @@ attach). Drive the standalone app from the shell with `nest observe`."
   (cond
     (< n 1024) (str n " B")
     (< n 1048576) (str (quot n 1024) " KB")
-    :else (str (quot n 1048576) " MB")))
+    else (str (quot n 1048576) " MB")))
 
 (defn observe--opt (v f)
   "Render optional field `v` with `f`, or `\"-\"` when it's absent (nil)."
@@ -160,7 +160,7 @@ the colours live in one place (`:observer/*`)."
       (= (get p :status) :running) (face :observer/row-running)
       (= (get p :status) :runnable) (face :observer/row-runnable)
       (= (get p :status) :waiting) (face :observer/row-waiting)
-      :else nil)))
+      else nil)))
 
 (defn observe--detail (p nprocs cap sel)
   "The detail line for the selected process-info map `p`. Absent fields
@@ -193,7 +193,7 @@ the colours live in one place (`:observer/*`)."
      (cond
        (= link :down) "  ••• DISCONNECTED"
        (= link :stale) "  ••• stale"
-       :else "")) (str " workers "
+       else "")) (str " workers "
                                                                                                                                                                                                                        (get node
                                                                                                                                                                                                                          :workers)
                                                                                                                                                                                                                        " (peak "
@@ -305,7 +305,7 @@ the observer's testable core; `observe--loop` feeds it live data."
         detail (cond
                  (get ui :msg) (str "  " (get ui :msg))
                  (empty? procs) "  (no live processes)"
-                 :else (observe--detail (nth procs (min (max 0 (dec nprocs)) sel)) nprocs cap sel))
+                 else (observe--detail (nth procs (min (max 0 (dec nprocs)) sel)) nprocs cap sel))
         footer (str (if paused "  PAUSED · space resume" "  space pause")
                  " · ↑/↓ select · t tree · s sort("
                  (name sort)
@@ -318,7 +318,7 @@ the observer's testable core; `observe--loop` feeds it live data."
                               0
                               (observe--fit (pad-right (observe--confirm-line confirm) cols) cols)
                               (face :observer/confirm))]
-                   :else [(text (dec rows)
+                   else [(text (dec rows)
                             0
                             (observe--fit (pad-right footer cols) cols)
                             (face :observer/footer))]))
@@ -368,7 +368,7 @@ the live reductions/second rate, so the *currently* busiest process floats up)."
     (= key :mailbox) (sort-by (fn (p) (- (get p :mailbox))) procs)
     (= key :memory) (sort-by (fn (p) (- (or (get p :memory) 0))) procs)
     (= key :reds) (sort-by (fn (p) (- (or (get p :reds-rate) 0))) procs)
-    :else (sort-by (fn (p) (get p :id)) procs)))
+    else (sort-by (fn (p) (get p :id)) procs)))
 
 (defn observe--tree-order (procs)
   "Order `procs` as a parent→child forest (roots first, each followed by its DFS
@@ -390,7 +390,7 @@ anything else is `observe--sort` (id / mailbox / memory)."
     (= key :mailbox) :memory
     (= key :memory) :reds
     (= key :reds) :tree
-    :else :id))
+    else :id))
 
 (defn observe--reds-rate (prev-reds prev-at reds at)
   "Reductions/second between two `process-info` samples, or nil when it can't be
@@ -456,7 +456,7 @@ last snapshot) until the user quits. Pure."
     (= (get state :link) :down) state
     (map? result) (assoc state :prev (get state :last) :last result :link :ok)
     (= result :down) (assoc state :link :down)
-    :else (assoc state :link :stale)))
+    else (assoc state :link :stale)))
 
 ;; ---- the IO loop (interactive; runs in the root process) --------------------
 
@@ -521,7 +521,7 @@ process is selected."
           :confirm {:pid (get p :pid) :id (get p :id) :name (get p :name)}
           :msg nil)))))
 
-(def *observe-keymap*
+(defdyn *observe-keymap*
   {:up 'observer/observe-cmd-up
    :ctrl-p 'observer/observe-cmd-up
    "k" 'observer/observe-cmd-up
@@ -589,7 +589,7 @@ body height (`(max 1 (- rows 5))`, as in `observe-frame`)."
                                                  (if (nil? idx)
                                                    state
                                                    (observe--select st procs idx)))
-      :else state)))
+      else state)))
 
 ;; ---- display frontends + app loop now live in `ui` (std/ui.blsp) ------------
 ;; `*term-display*`, `(gui-display)`, `display-broadcast`, and the `ui-run` loop
@@ -620,7 +620,7 @@ EOF, return to navigation; otherwise keep editing."
                                     (get edit :text))
                          :msg ((get backend :eval) (get edit :text)))
       (nil? done) (assoc state :edit edit)
-      :else (assoc state :mode :nav :edit nil))))
+      else (assoc state :mode :nav :edit nil))))
 
 (defn observe--kill-msg (pid id)
   "Kill local process `pid` (`exit … :kill`) and return a one-line result for the
@@ -719,7 +719,7 @@ honours). The backend rides in the model under `:backend`."
                         model)
       (get model :confirm) (observe--confirm-key model backend input)
       (observe--mouse? input) (observe--apply-mouse (observe--derived model cols rows) input cap)
-      :else (overlay-route observe--key-overlays
+      else (overlay-route observe--key-overlays
               model
               input
               (fn (m k)
@@ -884,7 +884,7 @@ link can't pile them up in the observer's mailbox."
   (send {:name :observe :node peer} [:snapshot (self) (ref)])
   (receive
     ([:observe-reply snap] snap)
-    ([:nodedown ~peer] :down)
+    ([:nodedown ^peer] :down)
     (after *observe-timeout* :timeout)))
 
 (defn observe--remote-eval (peer src)
@@ -894,7 +894,7 @@ string on a dropped/stalled link rather than throwing (the minibuffer shows it).
   (send {:name :observe :node peer} [:eval src (self) (ref)])
   (receive
     ([:eval-reply r] r)
-    ([:nodedown ~peer] "error: link down")
+    ([:nodedown ^peer] "error: link down")
     (after *observe-timeout* "error: eval timed out")))
 
 (defn observe--remote-kill (peer c)
@@ -905,7 +905,7 @@ link rather than throwing."
   (send {:name :observe :node peer} [:kill (get c :pid) (get c :id) (self) (ref)])
   (receive
     ([:kill-reply r] r)
-    ([:nodedown ~peer] "error: link down")
+    ([:nodedown ^peer] "error: link down")
     (after *observe-timeout* "error: kill timed out")))
 
 (defn observe-connect (spec &optional cookie)

@@ -1,0 +1,209 @@
+;; The syntax-finalisation rules (ADR-149/150/151/152): each of these spellings was
+;; once accepted and *reinterpreted* into a different working program. They must now
+;; be rejected, with a hint naming the fix — and the idiomatic spelling must still
+;; work. Every "must fail" case goes through `(eval (read-string …))` so the bad form
+;; doesn't fail this file's own compile pass.
+;;
+;; Register-only — discovered and run by `nest test` (and cargo test, via
+;; crates/lisp/tests/suite.rs).
+
+(defmodule syntax-finalization-test (:use test))
+
+(defn err-of (src)
+  "The message of the error raised by reading+evaluating `src`, or nil if it ran."
+  (try (do (eval (read-string src)) nil) (catch e (error-message e))))
+
+(defn hint-of (src)
+  "The :hint of the error raised by reading+evaluating `src`, or nil."
+  (try (do (eval (read-string src)) nil) (catch e (get e :hint))))
+
+;; ---- ADR-149: a binding container is a list ---------------------------------
+
+(describe "ADR-149: a binding container is a list, not a vector"
+  (test "a vector parameter list is rejected"
+    (is (string-contains? (err-of "(defn f [x y] (+ x y))") "must be a list, not a vector"))
+    (is (string-contains? (hint-of "(defn f [x y] (+ x y))") "lists-for-code")))
+
+  (test "Clojure's vector-headed multi-arity is rejected, not read as one 2-param fn"
+    ;; Was: params `[x]` and `:one`, empty body — a different function, diagnosed
+    ;; only later as `expected 2 arguments, got 1` at the call site.
+    (is (string-contains? (err-of "(defn g ([x] :one) ([x y] :two))")
+          "must be a list, not a vector"))
+    ;; the same mistake with a single clause
+    (is (string-contains? (err-of "(defn f ([x] x))") "must be a list, not a vector")))
+
+  (test "vector bindings are rejected for let / letrec / binding / for"
+    (is (string-contains? (err-of "(let [a 1] a)") "must be a list, not a vector"))
+    (is (string-contains? (err-of "(let [[a 1] [b 2]] (+ a b))") "must be a list, not a vector"))
+    (is (string-contains? (err-of "(letrec [f (fn () 1)] (f))") "must be a list, not a vector"))
+    (is (string-contains? (err-of "(for [x [1 2]] x)") "must be a list, not a vector")))
+
+  (test "a vector INSIDE a binding position still destructures"
+    (assert= (let ([a b] [1 2]) (+ a b)) 3)
+    (assert= ((fn ([x y]) (* x y)) [3 4]) 12)
+    (assert= (map (fn ([k v]) v) [[:a 1] [:b 2]]) '(1 2)))
+
+  (test "the list spellings all work"
+    (assert= (let (a 1 b 2) (+ a b)) 3)
+    (assert= ((fn (a b) (+ a b)) 2 3) 5)
+    (assert= (for (x [1 2 3]) (* x 2)) '(2 4 6))))
+
+;; ---- ADR-150: the pin is ^expr ----------------------------------------------
+
+(describe "ADR-150: the pattern pin is ^expr"
+  (test "^ pins against the current value"
+    (let (k :ok)
+      (assert= (match [:ok 9] ([^k v] v) (_ :other)) 9)
+      (assert= (match [:err 9] ([^k v] v) (_ :other)) :other)))
+
+  (test "^ pins an arbitrary expression, not just a symbol"
+    (let (m {:k 5})
+      (assert= (match 5 (^(get m :k) :hit) (_ :miss)) :hit)
+      (assert= (match 6 (^(get m :k) :hit) (_ :miss)) :miss)))
+
+  (test "a bare symbol still BINDS (the trap the pin exists for)"
+    (let (k :ok)
+      ;; `k` here shadows and binds — it does not compare against :ok
+      (assert= (match [:nope 1] ([k v] k) (_ :other)) :nope)))
+
+  (test "~expr in pattern position is an error naming ^"
+    (is (string-contains? (err-of "(let (k 1) (match 1 (~k :hit) (_ :miss)))")
+          "a pin is written `^k`")))
+
+  (test "a macro can emit a pin — the reason for the change"
+    ;; A pin used to BE `(unquote expr)`, so the quasiquote walker consumed it and
+    ;; this template was impossible to write.
+    (defmacro sf--await (tag) `(receive ([:reply ^~tag v] v) (after 1000 :timeout)))
+    (let (me (self) t (ref))
+      (send me [:reply t 99])
+      (assert= (sf--await t) 99)))
+
+  (test "~ still means unquote inside a quasiquote template"
+    (defmacro sf--inc (x) `(+ ~x 1))
+    (assert= (sf--inc 41) 42)))
+
+;; ---- ADR-151: ambient is declared, not spelled ------------------------------
+
+(describe "ADR-151: ambient names are declared with defdyn, not spelled *earmuffed*"
+  :isolated
+
+  (test "an undeclared earmuffed def inside a module is namespaced, not root"
+    ;; Two modules writing `(def *width* …)` used to share — and clobber — one root
+    ;; binding; the second load silently changed the first module's reads.
+    (let (dir (temp-dir "brood-ambient-"))
+      (make-dir dir)
+      (let (fa (path-join dir "sfa.blsp") fb (path-join dir "sfb.blsp"))
+        (spit fa "(defmodule sfa)\n(def *sf-width* 10)\n(defn w () *sf-width*)\n")
+        (spit fb "(defmodule sfb)\n(def *sf-width* 999)\n(defn w () *sf-width*)\n")
+        (load fa)
+        (load fb)
+        (assert= (sfa/w) 10)
+        (assert= (sfb/w) 999)
+        ;; …and neither leaked to root
+        (refute (bound? '*sf-width*))
+        (is (bound? 'sfa/*sf-width*)))))
+
+  (test "a defdyn name IS ambient: one root binding any module can set"
+    (let (dir (temp-dir "brood-ambient2-"))
+      (make-dir dir)
+      (let (f (path-join dir "sfc.blsp"))
+        (defdyn *sf-knob* 1)
+        (spit f "(defmodule sfc)\n(defn read-knob () *sf-knob*)\n(defn bump () (def *sf-knob* 42))\n")
+        (load f)
+        (assert= (sfc/read-knob) 1)
+        (sfc/bump)
+        (assert= *sf-knob* 42)
+        (assert= (binding (*sf-knob* 7) (sfc/read-knob)) 7))))
+
+  (test "dynamic? reports the declaration, and binding still requires one"
+    (defdyn *sf-declared* 0)
+    (is (dynamic? '*sf-declared*))
+    (refute (dynamic? '*sf-never-declared*))
+    (assert-error (eval (read-string "(binding (*sf-never-declared* 1) nil)")))))
+
+;; ---- ADR-152: reject the shape, never reinterpret it ------------------------
+
+(describe "ADR-152: catch takes one bare binder"
+  (test "Clojure's typed catch is rejected, not silently misread"
+    ;; Was: bound `Exception` to the raised value and evaluated the prelude's `e`
+    ;; (2.718…) as a statement — a wrong program with no diagnostic.
+    (is (string-contains?
+          (err-of "(try (throw :x) (catch Exception e (str \"caught \" e)))")
+          "Clojure's typed catch")))
+
+  (test "the one-binder forms still work"
+    (assert= (try (throw :x) (catch e e)) :x)
+    (assert= (try (throw :x) (catch e (str "got") :recovered)) :recovered)))
+
+(describe "ADR-152: &optional does not mix with pattern dispatch"
+  (test "an &optional marker in a pattern-dispatched fn is rejected"
+    ;; Was: matched as a literal symbol, so the clause silently stopped being
+    ;; variadic and `(f 1 2)` died with a [:match-error …].
+    (is (string-contains?
+          (err-of "(defn bad ((x) [:one x]) ((x &optional (y 5)) [:two x y]))")
+          "pattern-dispatched fn")))
+
+  (test "arity clauses with &optional / & rest still work"
+    (defn sf--g ((x) :one) ((x &optional y) [:two x y]))
+    (assert= (sf--g 1) :one)
+    ; exact fixed arity wins
+    (assert= (sf--g 1 2) [:two 1 2])
+    (defn sf--cnt (() 0) ((a) 1) ((a & more) (+ 1 (count more))))
+    (assert= (sf--cnt) 0)
+    (assert= (sf--cnt 1) 1)
+    (assert= (sf--cnt 1 2 3) 3))
+
+  (test "arity precedence is order-independent (exact beats optional beats rest)"
+    ;; Before the fewest-optionals tie-break, the winner depended on which clause
+    ;; was written last.
+    (defn sf--a ((x) :exact) ((x &optional y) :opt))
+    (defn sf--b ((x &optional y) :opt) ((x) :exact))
+    (assert= (sf--a 1) :exact)
+    (assert= (sf--b 1) :exact)
+    (defn sf--c ((x) :exact) ((x & r) :rest))
+    (assert= (sf--c 1) :exact)
+    (assert= (sf--c 1 2) :rest))
+
+  (test "single-clause &optional with defaults is unaffected"
+    (defn sf--h (x &optional (y 5)) [x y])
+    (assert= (sf--h 1) [1 5])
+    (assert= (sf--h 1 2) [1 2])))
+
+(describe "ADR-152: a defmodule header rejects an unknown clause"
+  (test "a misspelled or Clojure-style clause is an error, not silence"
+    (is (string-contains? (err-of "(defmodule sf-m1 (:use-internal json))")
+          "unrecognised header form"))
+    (is (string-contains? (err-of "(defmodule sf-m2 (:requires json))")
+          "unrecognised header form"))
+    ;; …including the `(:doc "…")` shape that silently dropped four std modules'
+    ;; docstrings until this check existed.
+    (is (string-contains? (err-of "(defmodule sf-m3 (:doc \"hi\"))")
+          "unrecognised header form")))
+
+  (test "a module docstring is the second form, and it registers"
+    (require 'encoding)
+    (is (string? (module-doc 'encoding)))
+    (is (> (string-length (module-doc 'encoding)) 100))))
+
+(describe "ADR-152: a nested quasiquote is rejected"
+  (test "a ` inside a ` template is an error, not an outer-level expansion"
+    ;; Was: `(a `(b ~(+ 1 2))) => (a (quasiquote (b 3))) — the inner unquote fired
+    ;; at the outer level.
+    (is (string-contains? (err-of "`(a `(b ~(+ 1 2)))") "nested quasiquote"))
+    (is (string-contains? (hint-of "`(a `(b ~(+ 1 2)))") "not tracked")))
+
+  (test "a ` inside an ~unquote is ordinary code and stays legal"
+    (defn sf--inner (x) `(b ~x))
+    (assert= `(a ~(sf--inner 3)) '(a (b 3)))))
+
+(describe "ADR-152: calling data names the accessor"
+  (test "a keyword / map / set / vector in head position gets a hint"
+    (is (string-contains? (hint-of "(:a {:a 1})") "(get m :a)"))
+    (is (string-contains? (hint-of "({:a 1} :a)") "(get m k)"))
+    (is (string-contains? (hint-of "(#{1 2} 1)") "(contains? s x)"))
+    (is (string-contains? (hint-of "([10 20] 1)") "(nth v i)")))
+
+  (test "the accessors themselves work"
+    (assert= (get {:a 1} :a) 1)
+    (is (contains? #{1 2} 1))
+    (assert= (nth [10 20] 1) 20)))

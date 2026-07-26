@@ -106,7 +106,7 @@
     (assert= (apropos "zzz-no-such-thing-zzz") nil))
   ; it's an alias
   (test "all-globals lists every global and includes the prelude"
-    (let (g (all-globals))
+    (let (g (global-names))
       (is (> (count g) 100))
       (is (includes? g 'map))
       (is (includes? g 'rand-int))

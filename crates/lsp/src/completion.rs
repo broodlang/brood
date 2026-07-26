@@ -294,6 +294,12 @@ mod tests {
         assert!(!chk("(+ 1 2)", "+")); // ordinary call
     }
 
+    // KNOWN FAILING — KI-12 (docs/known-issues.md). This test is the only thing in
+    // the tree that reads the *default* `*load-path*`, and a frozen-prelude handle
+    // bug leaves that path holding a wrong object (a docstring, a symbol — it
+    // varies with heap layout), so no module is ever found on it. The test is
+    // correct; the kernel is not. Left failing on purpose: it is the canary, and
+    // `#[ignore]`ing it would hide a genuine corruption.
     #[test]
     fn completes_module_names_in_require_and_use() {
         // A module on the load-path is offered inside `(require '…)` and `(:use …)`,

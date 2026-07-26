@@ -29,12 +29,13 @@ these are the ones to unlearn:
 
 | Clojure habit | Brood reality | What you get if you guess wrong |
 |---|---|---|
-| `(try … (catch Type e body))` | `catch` takes a **bare binding**: `(catch e body)`. There is no exception class. | The class name gets bound *as* the variable and `e` is treated as body → cryptic `unbound symbol: e`. |
-| Multi-arity `(fn ((x) …) ((x y) …))` | **Supported** (ADR-047) — dispatch by argument count, like Clojure. But param lists are **lists** `(x)`, not vectors `[x]`, and a clause head may *also* be a same-arity **pattern** (Erlang-style; see [Pattern matching](#pattern-matching)). The two don't mix in one `defn`. | Vector heads `([x] …)` read as a one-tuple-param pattern clause, not an arity clause. |
+| `(try … (catch Type e body))` | `catch` takes a **bare binding**: `(catch e body)`. There is no exception class. | A clean error naming the fix. (It used to bind the *class name* as the variable and evaluate `e` as a statement — and since the prelude defines `e`, `(catch Exception e (println "caught" e))` silently printed 2.718…, a wrong program with no diagnostic.) |
+| Multi-arity `(fn ((x) …) ((x y) …))` | **Supported** (ADR-047) — dispatch by argument count, like Clojure. But param lists are **lists** `(x)`, not vectors `[x]`, and a clause head may *also* be a same-arity **pattern** (Erlang-style; see [Pattern matching](#pattern-matching)). | A **clean error** with a hint: vector-headed clauses `([x] …) ([x y] …)` are rejected. (They used to read as one 2-parameter pattern clause with an empty body — a completely different function, diagnosed only later as a misleading arity error at the call site.) |
 | `{:a 1}` map literal | **Supported.** Immutable, insertion-ordered; `get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?` (see [Maps](#maps)). | Works as you'd expect. |
 | `{:keys [a b]}` / `:or` map destructuring | **Supported** — a map literal in pattern position binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default): `(let ({:keys [a b] :or {b 0}} m) …)`, works in `let`/`fn`/`match`. General `{:key subpattern}` nesting and `:as` are deferred (ADR-011). | Works as in Clojure for the `:keys`/`:or` subset. |
-| `(defn f [x y] …)`, `(let [a 1 b 2] …)` | Param lists and `let` bindings are **lists** — `(x y)` / `(a 1 b 2)`. | Works (vectors are accepted in binding position), but it's non-idiomatic — prefer lists. |
+| `(defn f [x y] …)`, `(let [a 1 b 2] …)` | Param lists and `let` bindings are **lists** — `(x y)` / `(a 1 b 2)`. A vector *inside* one is still destructuring: `(let ([x y] p) …)`. | A clean error with a hint (ADR-149). The vector spelling was once accepted as an alias; that is what turned every Clojure binding shape into a silent misread — `(let [[a 1] [b 2]] …)` destructured `[a 1]` against `[b 2]` and reported `unbound symbol: b`. |
 | `(let [[a 1] [b 2]] …)` / Scheme's `(let ((a 1)) …)` | Bindings are **flat**: `(let (a 1 b 2) …)`. | A clean error **with a hint** to flatten (was accepted-then-confusing). |
+| `^:kw` / `^{:doc "…"}` metadata | Brood has **no metadata**. `^` is the pattern **pin**: `^expr` matches the current value of `expr` (ADR-150). | `^:kw` reads as a pin of the keyword — a pattern where you meant an annotation. Docstrings go in the body (see [Docstrings](#docstrings)). |
 | `#{1 2 3}` set literal | A first-class set (`Value::Set`, ADR-060): `set?` true, prints `#{…}`, never `=` to a map. Evaluates its elements and dedups. | Reads as a kernel set; the `set` library (`(require 'set)`) adds `union`/`intersection`/… |
 | `#(+ 1 %)` anonymous-fn reader macro | Write it out: `(fn (x) (+ 1 x))`. | A parse error **with a hint** naming `(fn …)` (was "unbound symbol: #"). |
 | `#'foo` var-quote | Symbols are values — plain `'foo`. | A parse error **with a hint** naming `'foo`. |
@@ -57,8 +58,9 @@ is the one piece that can't be guessed from Clojure; it has to be read.
 |---|---|---|
 | Nil | `nil` | The empty value; also the empty list. |
 | Boolean | `true`, `false` | |
-| Integer | `0`, `42`, `-7` | 64-bit; arithmetic is overflow-checked. |
+| Integer | `0`, `42`, `-7` | 64-bit; arithmetic is overflow-checked. A result out of `i64` range promotes to an arbitrary-precision **bignum** rather than wrapping, and demotes back when it fits again — so the integer type is unbounded in practice. |
 | Float | `3.14`, `-0.5`, `1e3` | 64-bit. |
+| Decimal | `1.50M`, `0M`, `-3.14M` | Exact arbitrary-precision base-10, for money and Postgres `numeric` — values a float can't hold (`(+ 0.1M 0.2M)` *is* `0.3M`). The literal is a trailing `M`; `(decimal x)` builds one from a string, int, bignum or float. Scale is significant in arithmetic (see [Arithmetic](#arithmetic)) but **not** in `=`, which compares values (`1.5M` = `1.50M`). |
 | String | `"hello\n"` | Escapes: `\n \t \r \e \0 \\ \"` (`\e` is ESC, for ANSI terminal control), `\xHH` (two-hex-digit byte), `\u{H..H}` (1–6-hex-digit Unicode codepoint). A malformed `\x`/`\u{}` is a read error, and so is an unknown **alphabetic** escape (`\d`, `\w`, `\s`, …) — that's almost always a regex class written in a plain string, where dropping the backslash would silently break the pattern, so write `\\d`. A `\X` escape of punctuation or a digit (`\.`, `\/`, `\1`) is literal `X` (how you write a literal metacharacter in a regex string). Readable printing is the inverse: it re-escapes `\n \t \r \e \0 \\ \"` by name and any other control char as `\u{H..H}`, so a printed string always re-reads to the same value. |
 | Symbol | `foo`, `+`, `my-fn`, `empty?`, `1+`, `++`, `...` | Names; interned. A bare token is a symbol unless it has genuine numeric intent — a digit present *and* every `+`/`-` in a valid sign position (leading, or right after an `e`/`E`); so `1+`, `2+3`, `++`, `--`, `...` are symbols, while `1e`/`1.2.3` are malformed-number read errors. A symbol whose name isn't a clean token — one built via `(symbol "a b")` with whitespace, delimiters, an empty name, or a spelling that would read as a number/keyword — prints (readably) and reads back as a `\|…\|` **bar-quoted** symbol (`\|a b\|`, `\|\|` for empty; `\|`/`\\` escape a literal bar/backslash), so every symbol round-trips through `pr-str`/`read`. |
 | Keyword | `:ok`, `:else`, `:\|a b\|` | Self-evaluating named constants. Like symbols, a keyword whose name isn't a clean token (e.g. `(keyword "a b")`, `(keyword "")`) prints and reads as `:\|…\|`. |
@@ -261,6 +263,10 @@ sets, not maps).
 
 - `;` starts a line comment.
 - `'expr` is shorthand for `(quote expr)`.
+- `` `expr ``, `~expr`, `~@expr` are the quasiquote template markers (see
+  [Macros](#macros)); `~` belongs to quasiquote **only**.
+- `^expr` is a **pin** in pattern position — match the current value of `expr`
+  (see [Pattern matching](#pattern-matching)). It is not metadata.
 - Whitespace separates tokens; `[` `]` and `(` `)` delimit.
 - A lone `.` inside a list builds a dotted (improper) tail: `(1 2 . 3)`. A `.`
   that begins an atom (`.5`, `.foo`) is not a separator.
@@ -287,8 +293,10 @@ eagerly). They are reserved names.
 `when`, `unless`, `cond`, `and`, and `or` read like special forms but are
 **prelude macros** over `if`/`do`/`let` (`std/prelude.blsp`), expanded once by the
 compile pass (ADR-022) — so the evaluator's core stays minimal and they cost
-nothing extra at runtime. `cond` is still flat test/expr pairs with `else`/`:else`
-as the catch-all (ADR-004); `and`/`or` short-circuit left-to-right and return the
+nothing extra at runtime. `cond` is still flat test/expr pairs with **`else`** as
+the catch-all (ADR-004; `:else` was a second blessed spelling and is no longer
+special — it still catches, but only because a keyword is truthy, exactly as
+`true` or `42` would); `and`/`or` short-circuit left-to-right and return the
 deciding value, each subexpression evaluated once. There is **no iteration special
 form**: data is immutable and there is no local mutation (ADR-026), so loops are
 expressed as recursion (proper tail calls make this O(1) stack) — or, for evolving
@@ -440,7 +448,13 @@ The `->`, `->>`, and `as->` threading macros are also defined in the prelude:
 (as-> 5 $ (+ $ 1) (* $ 2))    ;=> 12    ; bind $, thread into ANY position
 ```
 
-> Note: nested quasiquote is not level-tracked yet. Auto-gensym (`x#`) / `gensym`
+> Note: a **nested quasiquote** (a `` ` `` inside a `` ` `` template) is
+> **rejected**, with a hint. Levels are not tracked, so an inner `~x` would be
+> expanded at the outer level — `` `(a `(b ~(+ 1 2))) `` used to yield
+> `(a (quasiquote (b 3)))` where the standard reading leaves `(+ 1 2)`
+> unevaluated. A `` ` `` inside an `~unquote` is ordinary code and stays legal, so
+> the macro-writing-a-macro spelling is `` `(a ~(inner-template x)) ``. Level
+> tracking can land later without breaking anything accepted today (ADR-011). Auto-gensym (`x#`) / `gensym`
 > handle *binding* capture; *free* references in a macro template **auto-qualify**
 > to the macro's defining namespace (ADR-066 α), so a macro expands correctly when
 > used in another namespace without hand-qualifying. The advisory hygiene lint
@@ -461,7 +475,7 @@ design and rationale see [pattern-matching.md](pattern-matching.md).
 | `x` | anything; **binds** `x` (a repeated `x` is an equality constraint) |
 | `42` `"s"` `:k` `true` `nil` | a literal, compared with `=` |
 | `'sym` | the literal symbol `sym` |
-| `~expr` | the current value of `expr` (a *pin*) |
+| `^expr` | the current value of `expr` (a *pin*) |
 | `(p1 p2 …)` | a list of that exact length, element-wise |
 | `(p1 & rest)` | head(s) + the tail bound to `rest` |
 | `[p1 p2 …]` | a vector of that exact length — the **tagged-data / tuple idiom** |
@@ -470,7 +484,7 @@ design and rationale see [pattern-matching.md](pattern-matching.md).
 
 Patterns nest to any depth. **The one trap:** a bare symbol *binds* (and
 shadows) — it does **not** test against a same-named value. Match a known value
-with a keyword (`:ok`), a quoted symbol (`'none`), or a pin (`~x`).
+with a keyword (`:ok`), a quoted symbol (`'none`), or a pin (`^x`).
 
 ### Bytes patterns (bit syntax)
 
@@ -602,14 +616,19 @@ into the optional slot:
 - An `&optional` slot **must be a plain symbol** (with an optional default); it
   **cannot be a pattern**. `(defn k (x &optional ([a b] …)) …)` is a *type
   error* ("expected a symbol").
-- **Don't mix `&optional` defaults / patterns with arity overloading.** A
-  multi-clause `defn` is *either* arity-dispatched (every head is plain symbols,
-  optionally with `&`/bare-`&optional`) *or* pattern-dispatched (some head carries
-  a literal/destructuring/`(default …)` form, matched as a same-arity pattern). A
-  head with a `(default …)` optional form is read as a *pattern* clause, so its
-  `&optional` is matched literally and won't act as an arity marker. Overlapping
-  arity arms that also use `&optional` are ambiguous — keep one mechanism per
-  `defn`.
+- **`&optional`/`&` in a pattern-dispatched `defn` is an error.** A multi-clause
+  `defn` is *either* arity-dispatched (every head is plain symbols, optionally
+  with `&`/`&optional`) *or* pattern-dispatched (some head carries a
+  literal/destructuring form). If any head is a pattern, an `&optional`/`&`
+  marker in *any* head is rejected with a hint — it used to be matched as a
+  literal symbol, so the clause silently stopped being variadic and a call like
+  `(f 1 2)` failed with a `[:match-error …]` listing `(x &optional (y 5))` as a
+  *pattern*. Use one mechanism per `defn`.
+- **Overlapping arity arms resolve most-specific-first**, in this order: an exact
+  fixed arity beats a variadic (`&` rest) one; then the most required params;
+  then the *fewest* `&optional` slots. So with `((x) :one)` and
+  `((x &optional y) …)`, `(f 1)` picks `:one` regardless of clause order. (Before
+  the last tie-break the answer depended on the order the clauses were written.)
 - Required parameters *can* still be patterns alongside `&optional` / `& rest`
   (only the optional/rest slots are restricted): `(defn move (p [dx dy]
   &optional (n 1)) …)` is fine.
@@ -652,7 +671,10 @@ Raise with `throw` (any value) or `error` (a formatted message), and handle with
 (error "bad index: " i)             ; raise a message string
 ```
 
-`catch` binds `e` to the thrown value: a `throw` hands back its argument verbatim
+`catch` takes **exactly one bare binder** and no exception class — Clojure's
+`(catch Type e body…)` is rejected with a hint, since reading it Brood's way would
+bind the *class name* and evaluate the intended binder as a statement (a wrong
+program, not an error). `catch` binds `e` to the thrown value: a `throw` hands back its argument verbatim
 (a bare string from `error`, a keyword, a `[:tag …]` vector, …), while a built-in
 error (like division by zero) binds the kernel's canonical **error map** —
 `{:kind :message [:code :file :line :col :hint :trace]}` — so a handler can
@@ -707,7 +729,10 @@ through every intermediate call.
 
 - **`(defdyn *name* default)`** declares `*name*` dynamic and gives it a default.
   The earmuffs (`*…*`) are convention, not syntax. Reading the var anywhere
-  yields the default until a `binding` overrides it.
+  yields the default until a `binding` overrides it. The declaration also makes the
+  name **ambient** — never namespaced, so a `def` of it from *any* module rebinds
+  this one root binding (see [Namespaces](#namespaces)). Declare it before the
+  first use in a file.
 - **`(binding (*a* va *b* vb …) body…)`** evaluates the value expressions, binds
   each dynamic var for the duration of `body`, and **restores the previous values
   on exit — even if the body throws**. Bindings nest; the innermost wins. A
@@ -829,8 +854,11 @@ provably wrong call against it (both the argument and the result type flow):
 (string-length (area 2))  ; warning: string-length: argument 1 expects string, got number
 ```
 
-The type grammar: base names (`int float number string symbol keyword bool nil
-pair vector list map fn any`), function arrows `(p… -> r)`, element-typed
+The type grammar: base names — `int float number decimal string symbol keyword
+bool nil pair vector list map set bytes fn rope pid ref table socket subprocess`,
+plus `any` (everything) and `never` (nothing); the spellings match what `type-of`
+returns, with `number` = int∪float, `list` = nil∪pair, and `fn` = closure∪native.
+Then function arrows `(p… -> r)`, element-typed
 sequences `(list E)` / `(vector E)`, unions `(or A B …)` and intersections
 `(and A B …)`, literal (singleton) types — a bare keyword/int/bool/string
 (`:foo`/`5`/`true`/`"GET"`) — any combination composing freely in one `(or …)`
@@ -865,7 +893,20 @@ definition — it rebinds the name, preserving arity.
 ```
 
 `sig` is checker-only (zero runtime cost); `sig!` adds the runtime guarantee
-exactly where you want soundness. The checker treats both identically. Writing a
+exactly where you want soundness.
+
+**Placement: put a `sig` *below* its definition.** As a declaration it works
+anywhere, but `BROOD_CONTRACTS=1` makes every `sig` behave like `sig!` — which
+*rebinds* the name — so a `sig` above its `defn` fails under that flag (it now says
+so, naming the fix, instead of dying with `unbound symbol`). `std/` follows the
+below-the-definition rule, and `tests/sig_adoption_test.blsp` checks it
+structurally. A corollary: **prelude functions can't carry a `sig`** — a runtime
+contract wraps the function in a closure that captures a local frame, and the
+prelude freeze requires shared closures to capture only the global environment.
+
+Adoption started in `std/path`, `std/json`, and `std/set` (ADR-153); the checker
+enforces those declarations at every call site, in any module, and result types
+flow (a `bool` result handed to `string-length` is caught). The checker treats both identically. Writing a
 *type* never changes behaviour; opting into *enforcement* (`sig!`) does. Full
 design: [type-annotations.md](type-annotations.md) (ADR-082).
 
@@ -1000,14 +1041,14 @@ Erlang's `gen_server` distinction: a *cast* is a bare `send`; a *call* is a
 request whose reply you `receive`. The catch with concurrent calls is telling
 replies apart, which is what **`(ref)`** is for: a fresh, opaque, unforgeable
 token you put in the request and the server echoes in the reply, so a pinned
-`~ref` in your `receive` matches only *your* answer (other replies stay queued).
+`^ref` in your `receive` matches only *your* answer (other replies stay queued).
 
 ```clojure
 (defn reply (to tag v) (send to [:reply tag v]))
 (defn call (pid req)
   (let (tag (ref))                       ; a unique token for this call
     (send pid [:call (self) tag req])
-    (receive ([:reply ~tag v] v))))      ; block for exactly this reply
+    (receive ([:reply ^tag v] v))))      ; block for exactly this reply
 ```
 
 A script exits when its *main* process returns, so ending on a `call` (which
@@ -1092,8 +1133,8 @@ specific process's death and ignore unrelated messages:
 (def w (spawn worker))
 (def m (monitor w))
 (receive
-  ([:down ~m _ :normal] :finished)
-  ([:down ~m _ reason]   (restart reason)))   ; supervision, in-language
+  ([:down ^m _ :normal] :finished)
+  ([:down ^m _ reason]   (restart reason)))   ; supervision, in-language
 ```
 
 Monitors are the one kernel mechanism a **supervisor** is built from: watch your
@@ -1241,6 +1282,15 @@ to your mailbox — resend the queue on `[:nodeup …]`.
   divides evenly; otherwise it returns a float). Any float argument makes the
   result a float.
 - `(- x)` negates; `(/ x)` is the reciprocal.
+- **Decimal arithmetic preserves scale** — `+`, `-` and `*` on exact operands
+  (decimal/int/bignum) give the result the standard's *ideal exponent*: the finer
+  of the two scales for `+`/`-`, the sum of them for `*`. So `1.50M * 2.25M` is
+  `3.3750M`, not `3.375M`, and `(- 1M 0.0M)` is `1.0M`, not `1M` — significance
+  survives the operation, which is the point of using a decimal for money. Only a
+  zero *result* prints scale-less (`(- 1.50M 1.50M)` renders `0`). A float operand
+  anywhere makes the result an inexact float (contagion), and `/` is inexact by
+  nature, so neither carries an ideal exponent. Pinned by the dectest conformance
+  corpus (`tests/conformance_dectest_test.blsp`).
 - Integer arithmetic is overflow-checked: an operation that would overflow
   (including `i64::MIN` cases like `(mod min -1)`) raises an error rather than
   wrapping or panicking. `(/ min -1)` falls through to a float.
@@ -1273,6 +1323,27 @@ to your mailbox — resend the queue on `[:nodeup …]`.
   — outside that range is a clean error, not a crash.
 - These are Rust primitives (they can't be bootstrapped from the numeric ops).
 
+### Float bit patterns
+`float->bits`  `bits->float`
+
+- `(float->bits x)` is the IEEE 754 binary64 bit pattern of `x` as a non-negative
+  integer — a bignum whenever the sign bit is set, since the pattern is a *u64*.
+  `(bits->float n)` is the inverse, for `n` in `[0, 2^64)`.
+- This is **reinterpretation, not conversion**, and it is the only *exact* float
+  comparison the language has. `=` on floats is value equality, which deliberately
+  collapses `-0.0` and `0.0` and reports every NaN as equal to nothing:
+
+  ```lisp
+  (= -0.0 0.0)                                  ; => true
+  (= (float->bits -0.0) (float->bits 0.0))      ; => false
+  ```
+
+- An `int` argument is taken as its float value, so `(float->bits 1)` and
+  `(float->bits 1.0)` agree.
+- Rust primitives: no bitcast or `frexp` exists to bootstrap them from. They are
+  what the `parse-number-fxx` conformance corpus asserts against
+  (`tests/conformance_parse_number_test.blsp`).
+
 ### Randomness
 `rng`  `rand-seed`  `rand-int`  `rand-float`  `shuffle`  `sample`
 
@@ -1298,7 +1369,7 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 
 ### Lists & sequences
 `cons`  `first`  `rest`  `car`  `cdr`  `second`  `third`  `last`  `but-last`
-`list`  `vector`  `conj`  `append`  `concat`  `reverse`  `nth`  `count`  `length`  `empty?`
+`list`  `vector`  `conj`  `append`  `reverse`  `nth`  `count`  `length`  `empty?`
 `range`  `take`  `drop`  `split-at`  `take-last`  `drop-last`  `take-while`  `drop-while`
 `member?`  `some?`  `every?`  `find`  `index-of`  `index-where`  `zip`
 `partition`  `sort`  `sort-by`  `subvec`  `remove`  `remove-nth`  `keep`
@@ -1307,9 +1378,9 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 
 - `first`/`rest` of `nil` are `nil`. `nth` takes an optional default:
   `(nth coll i default)`.
-- `append` / `concat` (`concat` is an alias) concatenate any number of
-  sequences — lists *and* vectors, read as sequences — left to right, returning
-  a **list**; wrap in `(into [] …)` for a vector.
+- `append` concatenates any number of sequences — lists *and* vectors, read as
+  sequences — left to right, returning a **list**; wrap in `(into [] …)` for a
+  vector. (The `concat` alias was removed — one spelling each.)
 - `range`: `(range hi)` → `0..hi-1`; `(range lo hi)` → `lo..hi-1`;
   `(range lo hi step)` steps (ascending or descending). The result is a **lazy
   range** — an O(1) value that stands in for the list it denotes: it prints,
@@ -1340,12 +1411,12 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 - `group-by` buckets items into a map from `(f x)` to the list of items that
   produced it. `flatten` splices nested lists into one flat list (vectors/maps
   are leaves).
-- `interpose`/`intersperse` inserts a separator between adjacent items; `interleave` alternates
+- `interpose` inserts a separator between adjacent items; `interleave` alternates
   two sequences, stopping at the shorter. `zip` pairs two sequences into `[x y]`
   vectors, stopping at the shorter. `zip-with` combines two sequences element-wise via a
   binary function. `partition` chunks into `n`-sized groups, dropping a trailing partial
   chunk; `chunk-every` keeps the remainder. `chunk-by` partitions consecutive equal-key runs.
-- `scan`/`reductions` is a running fold — returns a list of all intermediate accumulator
+- `scan` is a running fold — returns a list of all intermediate accumulator
   values starting with the initial value (like Haskell's `scanl`).
 - `flat-map`/`mapcat` maps a list-valued function and concatenates the results. `min-by`/`max-by`
   select the extremum of a collection by a key function. `(clamp x lo hi)` constrains a
@@ -1419,6 +1490,7 @@ for when the caller needs indexed access — the named form of
 `string->number`  `number->string`  `index-of`  `string-contains?`  `join`
 `string-split`  `replace`  `trim`  `triml`  `trimr`  `blank?`  `starts-with?`
 `ends-with?`  `string-repeat`  `pad-left`  `pad-right`  `to-fixed`  `format`
+`string->graphemes`  `string-normalize`  `display-width`
 
 - `str` concatenates the *display* form of its args; `pr-str` returns the
   *readable* form of one value.
@@ -1432,6 +1504,20 @@ for when the caller needs indexed access — the named form of
   one O(n) native pass — the random-access form text parsers index with `nth`
   and compare as ints (`std/regex`/`std/json`/`std/encoding` all scan it);
   `codepoints->string` is its inverse.
+- **A code point is not a character — a grapheme cluster is.**
+  `string->graphemes` gives the extended grapheme clusters (UAX #29) as a vector of
+  strings: `"e"` + U+0301 is *two* code points but *one* cluster, and a flag emoji is
+  four code points and one cluster. This is the unit to step a cursor by; stepping by
+  code point splits a cluster and corrupts the text. `(apply str (string->graphemes
+  s))` is `s`. `display-width` counts terminal cells over the same clusters (a CJK
+  char or emoji is 2, a combining mark 0).
+- **`=` is byte-structural, so text that reads identically can compare unequal**:
+  `"é"` is U+00E9 *or* U+0065 U+0301. `(string-normalize s form)` normalises, with
+  `form` one of `:nfc` `:nfd` `:nfkc` `:nfkd`. Canonical (`:nfc`/`:nfd`) preserves
+  meaning; compatibility (`:nfkc`/`:nfkd`) also folds presentation — `"ﬁ"` → `"fi"`,
+  `"²"` → `"2"` — which is what you want for search and identifier matching and not
+  what you want for round-tripping text. Both are pinned by the UCD conformance
+  corpora (`tests/conformance_ucd_test.blsp`).
 - `upper` / `lower` case-fold (Unicode-aware: `(upper "ß")` → `"SS"`).
 - `string->number` is a **strict** parse — int if it is one, else float, else
   `nil`; it rejects partial input (`(string->number "3abc")` → `nil`) and
@@ -1649,8 +1735,13 @@ those. A bare reference resolves **current namespace → imports → root**, so 
 own-namespace definition shadows an import. `:use` auto-loads the module (it never
 *fetches* a package — declared deps only). A bare top-level `(require 'mod)` only
 *loads* `mod` — its names stay qualified (`mod/foo`); use a `(:use mod)` clause to
-refer them bare. `:use` is the **only** import clause: `(:require …)` is not a
-`defmodule` clause and any non-`:use` form in the header is silently ignored.
+refer them bare. The header understands exactly three clauses — `(:use …)`,
+`(:use-internals …)`, and `(:alias …)`; **anything else is a hard error**. (It used
+to be silently ignored, so a misspelled `(:use-internal m)` or a Clojure-style
+`(:require m)` looked like it imported names or granted access and did nothing at
+all — the worst failure mode for a header that governs imports *and* privacy. That
+silence also hid four std modules whose `(:doc "…")` header dropped their module
+docstring on the floor.)
 
 ```clojure
 (defmodule editor "the editor core"
@@ -1659,10 +1750,29 @@ refer them bare. `:use` is the **only** import clause: `(:require …)` is not a
 (defn open (path) (insert (new-buffer) 0 (slurp path)))   ; insert → text/insert
 ```
 
-**Earmuffed `*foo*` names are ambient** — by convention dynamic/config vars
-(`*load-path*`, `defdyn` vars). They are **never** namespaced: a `(def *width* …)`
-in any module defines root `*width*`, reachable bare everywhere (and so must be
-project-unique). Every non-earmuff name is namespaced.
+**Ambient names are ambient by declaration, not by spelling** (ADR-151). A name
+declared with **`defdyn`** is never namespaced: a `(def *load-path* …)` in any
+module rebinds that one root binding, reachable bare everywhere (and so it must be
+project-unique). **Every other name is namespaced, earmuffs included** — a plain
+`(def *width* 10)` inside module `a` defines `a/*width*`, private to `a`'s
+namespace like any other definition.
+
+The earmuff spelling used to grant ambient status on its own, which made an
+ordinary module-local constant silently global: module `a` and module `b` could
+each write `(def *width* …)`, share one root binding, and the second load would
+clobber the first with no diagnostic — `(a/a-width)` then returned *b*'s value.
+Earmuffs remain the convention for a knob (and the checker still reads them as
+one); they just no longer change scoping.
+
+Two consequences worth knowing:
+
+- To let other modules read or set your knob, declare it: `(defdyn *my-knob* v)`.
+  A knob only its own module touches needs nothing.
+- A **root** registry can only be rebound by root code, so the prelude exposes
+  setters for the ones tooling extends — `(set-load-path! dirs)` /
+  `(add-load-path! dir…)` for `*load-path*`, `(record-module-doc! key doc)` for
+  `*module-docs*`. Writing `(def *load-path* …)` inside a module would define
+  `mod/*load-path*` and the loader would never see it.
 
 **Privacy is enforced** (ADR-146): a `foo--internal` name (any bare segment
 containing `--`) is module-private. From inside *another* module, a

@@ -1,0 +1,199 @@
+;; tests/conformance_dectest_test.blsp — Cowlishaw's decimal arithmetic testcases.
+;;
+;; The corpus (IBM/Mike Cowlishaw, "General Decimal Arithmetic Testcases", ICU
+;; licence; see tests/corpus/dectest/README.md) is the reference suite for decimal
+;; arithmetic — the one Python's `decimal` is validated against. Its value here is
+;; the operand pairs: decades of exponent-alignment edge cases nobody writes by hand.
+;;
+;; SCOPE — read this before adding a file to the corpus. dectest specifies IEEE 754
+;; *decimal*: a context with a precision, a rounding mode and an exponent range.
+;; Brood's `Decimal` is a different animal — arbitrary-precision and exact, with no
+;; context at all (ADR-030's numeric tower). So most of dectest does not apply, and
+;; pretending otherwise would just produce noise. The runner keeps exactly the cases
+;; where the two models must agree, and skips the rest explicitly:
+;;
+;;   kept     add / subtract / multiply / minus / plus / abs / compare, on finite
+;;            operands, where the reference result carries NO condition flags — i.e.
+;;            the context did not round, clamp, overflow or underflow, so dectest's
+;;            answer IS the exact answer and Brood must produce it.
+;;   skipped  anything Inexact / Rounded / Clamped / Overflow / Underflow /
+;;            Subnormal (a precision-9 artefact Brood has no notion of); NaN, sNaN
+;;            and Infinity (no such Decimal); divide (Brood's inexact division has
+;;            its own default precision, which is not dectest's).
+;;
+;; The comparison is canonical on BOTH sides — the expected string is put through
+;; `decimal` and back, exactly like the computed result. So `1E+3` and `1000` compare
+;; equal, because Brood's decimal normalises integer-side scale. What survives that
+;; normalisation, and is therefore genuinely under test, is the value and the
+;; *fractional* scale: dectest's ideal-exponent rules say `1.50 * 2.25` is `3.3750`,
+;; not `3.375`, and Brood is held to that.
+
+(defmodule conformance-dectest-test (:use test) (:use corpus))
+
+(def dt--ops-binary {"add" true "subtract" true "multiply" true "compare" true})
+(def dt--ops-unary {"minus" true "plus" true "abs" true})
+
+;; A decimal literal dectest can hand us and Brood can hold: digits, sign, point,
+;; exponent. Excludes NaN / sNaN / Infinity / the `#` null operand by construction.
+(defn dt--numeric? (s)
+  (and (> (string-length s) 0)
+       (let (cs (string->list s))
+         (and (nil? (first (remove (fn (c) (includes? "0123456789+-.eE" c)) cs)))
+              ;; at least one digit — rules out a bare sign and dectest's `#` null
+              (not (nil? (first (filter (fn (c) (includes? "0123456789" c)) cs))))))))
+
+;; dectest's absurd-exponent cases (1E+999999999) all carry Overflow/Underflow and
+;; are dropped by the conditions filter — but `decimal->string` expands integer-side
+;; exponents into plain digits, so guard the expansion regardless of how we got here.
+(defn dt--in-range? (s)
+  (let (i (index-of (lower s) "e"))
+    (or (< i 0)
+        (< (abs (or (string->number (substring s (inc i))) 0)) 400))))
+
+(defn dt--unquote (w)
+  (if (and (> (string-length w) 1)
+           (or (starts-with? w "'") (starts-with? w "\"")))
+    (substring w 1 (dec (string-length w)))
+    w))
+
+;; Split on runs of whitespace, dropping the trailing `-- comment` if any.
+(defn dt--words (line)
+  (let (s (replace line "\t" " ")
+        i (index-of s "--"))
+    (remove blank? (string-split (if (< i 0) s (substring s 0 i)) " "))))
+
+;; The computed result as a canonical decimal string, or nil when the case does not
+;; apply to Brood's decimal. `compare` answers -1/0/1, so it renders as an int.
+;; `plus` is identity and `minus` is multiplication by -1 rather than `(+ 0 a)` /
+;; `(- 0 a)`: adding a zero re-scales the result to the zero's exponent, which is an
+;; artefact of how the case is expressed, not of the operation dectest is naming.
+(defn dt--apply (op a b)
+  (cond
+    (= op "add") (decimal->string (+ a b))
+    (= op "subtract") (decimal->string (- a b))
+    (= op "multiply") (decimal->string (* a b))
+    (= op "compare") (number->string (cond (< a b) -1 (= a b) 0 else 1))
+    (= op "minus") (decimal->string (* (decimal "-1") a))
+    (= op "plus") (decimal->string a)
+    (= op "abs") (decimal->string (abs a))
+    else nil))
+
+
+;; The expected side, canonicalised the same way the computed side is.
+(defn dt--expected (op want)
+  (if (= op "compare") want (decimal->string (decimal want))))
+
+;; nil to skip, [:ok] to count a pass, [id op operands want got] on a mismatch.
+(defn dt--case (words)
+  (let (n (count words)
+        arrow (index-of words "->"))
+    (if (or (< n 4) (< arrow 2))
+      nil
+      (let (id (nth words 0)
+            op (lower (nth words 1))
+            args (map dt--unquote (subvec (into [] words) 2 arrow))
+            want (dt--unquote (nth words (inc arrow)))
+            conditions (- n (+ arrow 2))
+            unary (get dt--ops-unary op)
+            binary (get dt--ops-binary op))
+        (if (or (> conditions 0)                       ; the context altered the result
+                (not (or unary binary))
+                (and unary (not (= (count args) 1)))
+                (and binary (not (= (count args) 2)))
+                (not (dt--numeric? want))
+                (not (dt--in-range? want))
+                (first (remove dt--numeric? args))
+                (first (remove dt--in-range? args)))
+          nil
+          (let (a (decimal (first args))
+                b (if binary (decimal (nth args 1)) nil)
+                got (dt--apply op a b)
+                expect (dt--expected op want))
+            (if (= got expect) [:ok] [id op args expect got])))))))
+
+(defn dt--scan-lines (lines ran bad)
+  (if (nil? lines)
+    [ran bad]
+    (let (c (dt--case (dt--words (first lines))))
+      (dt--scan-lines (rest lines)
+                      (if c (inc ran) ran)
+                      (if (and c (not (= c [:ok]))) (cons c bad) bad)))))
+
+(defn dt--scan-files (files ran bad)
+  (if (nil? files)
+    [ran (reverse bad)]
+    (let ([r b] (dt--scan-lines (corpus-lines (first files)) ran bad))
+      (dt--scan-files (rest files) r b))))
+
+(defn dt--scan () (dt--scan-files (corpus-files "dectest") 0 nil))
+
+(describe "dectest: exact decimal arithmetic" :tags [:conformance]
+
+  (test "the corpus is present"
+    (is (corpus-present? "dectest"))
+    (is (= (count (corpus-files "dectest")) 7)))
+
+  (test "every applicable case matches"
+    (let ([ran bad] (dt--scan))
+      ;; Guards against the filter quietly widening until nothing is left: a change
+      ;; that drops the applicable set below this has broken the runner, not the
+      ;; corpus. (~1,900 of the ~5,600 vendored lines apply.)
+      (is (> ran 1500))
+      (assert= (take 5 bad) ())
+      (assert= (count bad) 0))))
+
+;; The ideal-exponent rules are the substance of what dectest pins down for an exact
+;; decimal, and they are the part a naive implementation gets wrong — so they are
+;; spelled out here rather than left implicit in the sweep.
+(describe "dectest: ideal exponents (trailing zeros are significant)" :tags [:conformance]
+
+  (test "multiply adds the operand exponents"
+    (assert= (decimal->string (* 1.50M 2.25M)) "3.3750")
+    (assert= (decimal->string (* 1.20M 2M)) "2.40")
+    (assert= (decimal->string (* 0.10M 0.10M)) "0.0100"))
+
+  (test "add and subtract take the smaller operand exponent"
+    (assert= (decimal->string (+ 1.25M 1.25M)) "2.50")
+    (assert= (decimal->string (+ 0.7M 0.3M)) "1.0")
+    (assert= (decimal->string (+ 1.00M 2M)) "3.00"))
+
+  ;; Regression cases for the two `bigdecimal` short-circuits the corpus caught
+  ;; (2026-07-25): its `Sub` returns the other side untouched when one operand is
+  ;; zero, and its `Mul` when one operand is one-valued — each discarding the
+  ;; short-circuited side's scale. `num_bin` now pins every exact decimal result to
+  ;; the standard's ideal exponent, so these hold. Significance is the whole point
+  ;; of a decimal: money scaled by `1.00M` has to stay in cents.
+  (test "a zero operand still aligns exponents (subtract)"
+    (assert= (decimal->string (- 1M (decimal "0.0"))) "1.0")
+    (assert= (decimal->string (- 1M (decimal "0.00"))) "1.00")
+    (assert= (decimal->string (- (decimal "0.0") 1M)) "-1.0")
+    (assert= (decimal->string (+ 1M (decimal "0.0"))) "1.0"))
+
+  (test "a one-valued operand still contributes its scale (multiply)"
+    (assert= (decimal->string (* (decimal "-1") 1.00M)) "-1.00")
+    (assert= (decimal->string (* 1.00M (decimal "-1"))) "-1.00")
+    (assert= (decimal->string (* (decimal "-2") 1.00M)) "-2.00")
+    (assert= (decimal->string (* 1M 1.00M)) "1.00"))
+
+  ;; The remaining departure from dectest, on the record rather than left as a
+  ;; silent gap: a zero VALUE renders scale-less, so `1.50 - 1.50` prints `0` where
+  ;; dectest says `0.00`. That is `bigdecimal`'s Display, not the arithmetic (the
+  ;; scale is now correct underneath), and it is consistent with Brood's `=`, which
+  ;; already ignores scale (`1.5M = 1.50M`). The sweep cannot see it — it
+  ;; canonicalises both sides, so dectest's `0.00` normalises to `0` too. Revisit if
+  ;; decimals ever grow scale-significant equality.
+  (test "a zero result prints scale-less (deviation from dectest)"
+    (assert= (decimal->string (- 1.50M 1.50M)) "0")
+    (assert= (decimal->string (* 0M 1.50M)) "0")
+    (assert= (decimal->string (decimal "0.00")) "0")
+    ;; non-zero results keep their scale, which is the property that matters
+    (assert= (decimal->string (- 1.50M 1.25M)) "0.25"))
+
+  (test "exponent alignment across a wide gap is exact"
+    (assert= (decimal->string (+ (decimal "1E+3") (decimal "1E-3"))) "1000.001")
+    (assert= (decimal->string (- (decimal "1") (decimal "1E-20")))
+             "0.99999999999999999999"))
+
+  (test "a decimal is exact where a float is not"
+    (assert= (+ 0.1M 0.2M) 0.3M)
+    (refute (= (+ 0.1 0.2) 0.3))))

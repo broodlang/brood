@@ -134,9 +134,15 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
       (= state :quoted) (cond
                           ;; quote in quoted field → could be "" (escaped) or closing quote
                           (= c "\"") (csv--parse s (+ i 1) n :quote-seen field-acc row-acc rows-acc)
-                          ;; \r inside a quoted field — swallow it (the \n follows)
-                          (= c "\r") (csv--parse s (+ i 1) n :quoted field-acc row-acc rows-acc)
-                          ;; any other char (including \n, comma) → accumulate
+                          ;; \r inside a quoted field is DATA, not a line ending —
+                          ;; RFC 4180 §2.6: a field enclosed in quotes may contain
+                          ;; CRLF, and it is content. Swallowing the \r here silently
+                          ;; rewrote every embedded CRLF to LF, so a CSV with a
+                          ;; multi-line quoted cell did not round-trip (csv-spectrum
+                          ;; newlines_crlf). Line-ending normalisation belongs in the
+                          ;; :unquoted / :quote-seen states, which is where it is.
+                          ;; Falls through to the accumulate branch below.
+                          ;; any other char (including \r, \n, comma) → accumulate
                           else (csv--parse s (+ i 1) n :quoted (cons c field-acc) row-acc rows-acc))
 
       ;; ── :quote-seen ───────────────────────────────────────────────────────

@@ -1,13 +1,12 @@
 (defmodule datetime
-  (:doc
-    "Date and time utilities (UTC). No timezone support.
+  "Date and time utilities (UTC). No timezone support.
 
 Datetimes, dates, and times are plain maps:
   datetime  {:year Y :month M :day D :hour H :minute Min :second S :ms Ms}
   date      {:year Y :month M :day D}
   time-of-day  {:hour H :minute Min :second S :ms Ms}
 
-All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z)."))
+All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
 
 ;; ---- internal helpers -------------------------------------------------------
 

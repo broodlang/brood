@@ -270,7 +270,7 @@
   (cond
     (>= i n) true
     (= (format-source src) want) (format--stable? src want (+ i 1) n)
-    :else false))
+    else false))
 
 (describe "format: stays correct once the formatter tiers (regression)"
   ;; Regression for the bool-subset JIT miscompile (brood 613c484, reverted

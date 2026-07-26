@@ -97,11 +97,11 @@ window hangs off (the native `scan-form-start`, string/comment-aware)."
     (>= i n) n
     (= (char-at text i) "\\") (sexp--str-end text (+ i 2) n)
     (= (char-at text i) "\"") (inc i)
-    :else (sexp--str-end text (inc i) n)))
+    else (sexp--str-end text (inc i) n)))
 
 (defn sexp--eol (text i n)
   "Index just past the next newline at or after `i`, or `n` — skips a `;` comment tail."
-  (cond (>= i n) n (= (char-at text i) "\n") (inc i) :else (sexp--eol text (inc i) n)))
+  (cond (>= i n) n (= (char-at text i) "\n") (inc i) else (sexp--eol text (inc i) n)))
 
 (defn sexp--scan (text i n depth left)
   "Forward from `i`, skipping strings/comments and tracking bracket `depth`; returns the
@@ -116,7 +116,7 @@ offset once `left` top-level forms have completed (depth returns to 0 after an o
         (sexp--open? c) (sexp--scan text (inc i) n (inc depth) left)
         (sexp--close? c) (let (d (max 0 (dec depth)))
                            (sexp--scan text (inc i) n d (if (= d 0) (dec left) left)))
-        :else (sexp--scan text (inc i) n depth left)))))
+        else (sexp--scan text (inc i) n depth left)))))
 
 (defn narrow (text point)
   "`[base sub]` — `text` sliced to the top-level forms around `point` (the previous,
@@ -319,7 +319,7 @@ new open (paredit `wrap-round`)."
 
 (defn sexp--line-end (text i n)
   "Offset of the next newline at or after `i`, or `n` (end of text)."
-  (cond (>= i n) n (= (char-at text i) "\n") i :else (sexp--line-end text (inc i) n)))
+  (cond (>= i n) n (= (char-at text i) "\n") i else (sexp--line-end text (inc i) n)))
 
 ; list spans lines → kill to end of line
 (defn point-kill-end (text point)
@@ -337,7 +337,7 @@ parens. At end of line, kills the newline. At least `point` (a no-op at the clos
           ; close on this line → kill up to (not incl) it
           (= point le) (min n (inc point))
           ; empty rest of line → kill the newline
-          :else le)))))
+          else le)))))
 ;; ---- buffer commands: (buf key) -> buf (bind these in a keymap) -------------
 
 (defn sexp--apply-edit (buf result)

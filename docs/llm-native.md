@@ -119,6 +119,34 @@ This is also how you make the language self-documenting: an error
 *links to* the relevant docs, so an LLM that hits an error already
 knows where to read more.
 
+### 4a. Reject the shape; never reinterpret it (shipped 2026-07-25)
+
+The strongest version of "LLM-native errors" isn't a better message — it's
+refusing to accept a wrong spelling that *runs*. A surface can accept a spelling,
+reject it, or **reinterpret** it; only the third costs a debugging session, and it
+is exactly what a model carrying Clojure habits triggers. ADR-149/150/151/152
+closed every case the review found:
+
+| the habit | used to produce | now |
+|---|---|---|
+| `(defn g ([x] :one) ([x y] :two))` | one 2-param fn with an empty body | error + hint |
+| `(let [[a 1] [b 2]] …)` | destructured `[a 1]` against `[b 2]` → `unbound symbol: b` | error + hint |
+| `(catch Exception e …)` | bound the *class name*; printed the prelude's `e` (2.718…) | error + hint |
+| `(defmodule m (:require x))` | silently no import | error |
+| `` `(a `(b ~(+ 1 2))) `` | inner unquote expanded at the outer level | error + hint |
+| `(:a m)` | `cannot call non-function: :a`, no hint | hint: `(get m :a)` |
+
+Two lessons worth keeping for future surface decisions:
+
+1. **An alias is only free if the two spellings can't both mean something.** The
+   vector binding container was accepted as a convenience — but a vector *inside* a
+   binding position already meant destructuring, so the "convenience" silently
+   produced a different program.
+2. **A convention that carries semantics will drift.** `*earmuffs*` meant
+   "dynamic var" *and* "config constant" *and* "exempt from namespacing", so an
+   ordinary module-local constant was silently global. Ambient status is now a
+   `defdyn` declaration; the spelling is back to being a hint to the reader.
+
 ---
 
 ## 5. Macroexpand visible everywhere

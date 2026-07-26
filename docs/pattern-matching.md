@@ -95,7 +95,7 @@ Match a *known* value one of three ways, idiomatic first:
 - **a keyword tag** — `:none`, `[:ok v]`. Keywords are self-evaluating literals, so
   they match by value; this is what makes the tagged-vector idiom safe by default.
 - **a quoted symbol** — `'none` matches the symbol `none`.
-- **a pin** — `~expr` matches the current value of `expr` (see Pin).
+- **a pin** — `^expr` matches the current value of `expr` (see Pin).
 
 To stop a silent bind-where-you-meant-match, the compiler **rejects unreachable
 clauses**: an irrefutable clause (its pattern a bare symbol or `_`, with no guard)
@@ -247,22 +247,28 @@ These are layers on the same compiler.
   re-occurrence.)
 
 - **Pin** — match against the *current value* of a name already bound outside the
-  pattern (Elixir's `^x`). Brood has no `^` reader syntax, but `~` already reads
-  as `(unquote …)`, and "drop to evaluation" is the same intuition it has in
-  quasiquote. So inside a pattern, `~x` (or `~(expr)`) means "match the value of
-  `x`":
+  pattern. Spelled `^x` (or `^(expr)`), as in Elixir:
 
   ```clojure
   (let (expected :ok)
     (match resp
-      ([~expected v] v)        ; matches only when the tag equals `expected`
+      ([^expected v] v)        ; matches only when the tag equals `expected`
       (_             :other)))
   ```
 
+  It was originally `~x` — reusing `(unquote …)` for the same "drop to
+  evaluation" intuition it has in quasiquote — but that made a pin *literally* an
+  unquote, so inside a macro's `` ` `` template the quasiquote walker consumed it
+  and a macro could not emit a pinned pattern at all. Since wrapping the
+  request/reply idiom (`(receive ([:reply ^tag v] …))`) is exactly what you want a
+  macro for, `^` got its own reader macro and `~` went back to belonging to
+  quasiquote alone (ADR-150). `~x` in pattern position is now an error naming the
+  fix.
+
   Non-linear vs pin are complementary: non-linear constrains two positions
   *within* one pattern to be equal; pin constrains a position to a value from
-  *outside* the pattern. **Decided:** `~x` (no reader change; the "drop to
-  evaluation" intuition is the same one `~` has in quasiquote).
+  *outside* the pattern. **Decided:** `^x` — its own reader macro, so a pin can
+  appear inside a macro template (ADR-150; `~x` was the original spelling).
 
 - **Associative (map) patterns** — a map literal in pattern position
   destructures a map, Clojure-style:
@@ -408,8 +414,9 @@ runtime side (the green-process suspend + the receive timer) and ADR-027.
    symmetry — the same literal builds *and* matches (a list `(:ok v)` can't:
    unquoted it's a call). Lists remain the sequence pattern. Both still work as
    patterns; vectors are the documented idiom.
-2. **Pin → `~x`** (no reader change; same "drop to evaluation" intuition as
-   quasiquote).
+2. **Pin → `^x`** (its own reader macro — Elixir's spelling. Originally `~x`,
+   changed because a pin that *is* an `(unquote …)` cannot survive a macro
+   template; ADR-150).
 3. **Failure → crash, with a structured value.** A non-matching `match`,
    refutable `let`, or `fn` call raises (catchable via `try`/`catch`); add a `_`
    clause to make it total. The value is structured (e.g. `[:no-match v]`) so a
@@ -429,7 +436,7 @@ runtime side (the green-process suspend + the receive timer) and ADR-027.
    tagged value carrying value + tried patterns + context; the macro also raises
    compile-time errors for malformed patterns and unreachable clauses. A bare
    symbol binds (the one trap) — match a known value with a keyword, `'sym`, or
-   `~pin`; an unreachable clause after an irrefutable one is rejected.
+   `^pin`; an unreachable clause after an irrefutable one is rejected.
 
 ### Parameter grammar (resolved)
 

@@ -53,7 +53,7 @@
           saved-path *load-path*
           me (self))
       (write-file path src)
-      (def *load-path* (cons "/tmp" *load-path*))
+      (set-load-path! (cons "/tmp" *load-path*))
       (doseq (k (range 8))
         (spawn (send me
                  [:req-race (try
@@ -61,7 +61,7 @@
                               (catch e [:err (error-message e)]))])))
       (let (results (map (fn (_) (receive ([:req-race r] r) (after *test-wait-ms* :timeout)))
                       (range 8)))
-        (def *load-path* saved-path)
+        (set-load-path! saved-path)
         (delete-file path)
         (is (every? (fn (r) (= r :ok)) results)))))
 
@@ -84,8 +84,8 @@
           src "(defmodule reqcirc-mod)\n(require 'reqcirc-mod)\n(defn ok () :yes)\n"
           saved-path *load-path*)
       (write-file path src)
-      (def *load-path* (cons "/tmp" *load-path*))
+      (set-load-path! (cons "/tmp" *load-path*))
       (require 'reqcirc-mod)
-      (def *load-path* saved-path)
+      (set-load-path! saved-path)
       (delete-file path)
       (assert= (reqcirc-mod/ok) :yes))))

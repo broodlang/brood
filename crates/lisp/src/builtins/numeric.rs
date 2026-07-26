@@ -160,6 +160,7 @@ pub(super) fn num_bin(
     int_op: fn(i64, i64) -> Option<i64>,
     big_op: fn(num_bigint::BigInt, num_bigint::BigInt) -> num_bigint::BigInt,
     dec_op: fn(bigdecimal::BigDecimal, bigdecimal::BigDecimal) -> bigdecimal::BigDecimal,
+    dec_scale: fn(i64, i64) -> i64,
     float_op: fn(f64, f64) -> f64,
 ) -> LispResult {
     let (a, b) = two(args, who)?;
@@ -189,7 +190,18 @@ pub(super) fn num_bin(
         {
             let x = heap.as_bigdecimal(a).expect("exact number");
             let y = heap.as_bigdecimal(b).expect("exact number");
-            Ok(heap.alloc_decimal(dec_op(x, y)))
+            // Pin the result to the standard's **ideal exponent** (`dec_scale`):
+            // max(sx, sy) for +/-, sx+sy for *. `bigdecimal` computes the right
+            // VALUE but not always the right scale — its `Sub` short-circuits on a
+            // zero operand and its `Mul` on a one-valued operand, each returning
+            // the other operand verbatim and so discarding the short-circuited
+            // side's scale (`1 - 0.0` -> `1`, `1.00 * -1` -> `-1`). Significance is
+            // the whole point of a decimal: money scaled by `1.00M` must stay in
+            // cents. The exact result never needs MORE than the ideal scale, so
+            // `with_scale` only ever pads with zeros — it cannot round here.
+            // (Found by the dectest corpus; see tests/conformance_dectest_test.blsp.)
+            let scale = dec_scale(x.fractional_digit_count(), y.fractional_digit_count());
+            Ok(heap.alloc_decimal(dec_op(x, y).with_scale(scale)))
         }
         // A float operand anywhere: the float path (a BigInt/Decimal coerces via
         // `f64` — float contagion, like Clojure's double contagion).
@@ -208,6 +220,8 @@ pub(super) fn prim_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         i64::checked_add,
         |a, b| a + b,
         |a, b| a + b,
+        // ideal exponent of a sum: the finer of the two scales
+        |sa, sb| sa.max(sb),
         |a, b| a + b,
     )
 }
@@ -219,6 +233,7 @@ pub(super) fn prim_sub(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         i64::checked_sub,
         |a, b| a - b,
         |a, b| a - b,
+        |sa, sb| sa.max(sb),
         |a, b| a - b,
     )
 }
@@ -230,6 +245,8 @@ pub(super) fn prim_mul(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         i64::checked_mul,
         |a, b| a * b,
         |a, b| a * b,
+        // ideal exponent of a product: the scales add
+        |sa, sb| sa + sb,
         |a, b| a * b,
     )
 }
@@ -551,6 +568,34 @@ pub(super) fn bit_positions(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
         v => return Err(LispError::wrong_type(heap, "bit-positions", "int", v)),
     }
     Ok(heap.alloc_vector(out))
+}
+
+/// `(float->bits x)` — the IEEE 754 binary64 bit pattern of `x` as a non-negative
+/// integer (a bignum whenever the sign bit is set, since the pattern is a *u64*).
+/// Reinterpretation, not conversion: the only way to compare two floats *exactly*,
+/// including distinguishing `-0.0` from `0.0` and the individual NaN payloads that
+/// `=` collapses. Its inverse is `bits->float`.
+pub(super) fn float_to_bits(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let f = num_to_f64(heap, "float->bits", arg(args, 0))?;
+    Ok(heap.int_from_bigint(num_bigint::BigInt::from(f.to_bits())))
+}
+
+/// `(bits->float n)` — the binary64 float with bit pattern `n`. The inverse of
+/// `float->bits`; `n` must be in `[0, 2^64)`.
+pub(super) fn bits_to_float(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use num_traits::ToPrimitive;
+    let bits = match arg(args, 0) {
+        Value::Int(n) => n.to_u64(),
+        Value::BigInt(id) => heap.bigint(id).to_u64(),
+        v => return Err(LispError::wrong_type(heap, "bits->float", "int", v)),
+    };
+    match bits {
+        Some(b) => Ok(Value::float(f64::from_bits(b))),
+        // Out of u64 range in either direction — negative, or wider than 64 bits.
+        None => Err(LispError::runtime(
+            "bits->float: bit pattern out of range (must be 0 <= n < 2^64)".to_string(),
+        )),
+    }
 }
 
 /// Validate a shift amount: non-negative (a negative shift is an error) and not

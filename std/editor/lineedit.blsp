@@ -270,7 +270,7 @@ observer's eval minibuffer (the `:hist` list `lineedit-init` is seeded with)."
       (< idx 0) state
       (= idx 0) (let (s (get state :saved))
                   (assoc state :hist-idx -1 :text s :point (string-length s)))
-      :else (let (ni (dec idx) entry (nth (get state :hist) ni))
+      else (let (ni (dec idx) entry (nth (get state :hist) ni))
               (assoc state :hist-idx ni :text entry :point (string-length entry))))))
 
 ;; ---- reverse incremental history search (C-r) -------------------------------
@@ -286,7 +286,7 @@ as a substring, or -1. An empty query matches the newest entry."
   (cond
     (>= i (count history)) -1
     (string-contains? (nth history i) query) i
-    :else (lineedit--search-find history query (inc i))))
+    else (lineedit--search-find history query (inc i))))
 
 (defn lineedit--search-step (state query from)
   "Set the search query to `query` and select the nearest match at or after index
@@ -325,7 +325,7 @@ as a substring, or -1. An empty query matches the newest entry."
                                                 0)
       (and (string? key) (= (string-length key) 1)) (lineedit--search-step state (str q key) idx)
       ; extend; keep current match if it still matches
-      :else (lineedit-handle (lineedit--search-accept state) key))))
+      else (lineedit-handle (lineedit--search-accept state) key))))
 
 (defn lineedit-reverse-search (state _)
   "Enter reverse incremental history search (C-r), saving the current line so C-g
@@ -362,7 +362,7 @@ against `cands` — the candidate itself when unique, else the longest common pr
         ins (cond
               (empty? cands) pfx
               (empty? (rest cands)) (first cands)
-              :else (common-prefix cands)))
+              else (common-prefix cands)))
     (assoc state
       :text (str (substring text 0 sstart) ins (substring text p n))
       :point (+ sstart (string-length ins))
@@ -467,7 +467,7 @@ keeps growing — so a `(defn …` opens a fresh continuation line rather than s
 ;; the next keystroke (late binding). A command is a global `(fn (state key) -> state)`.
 ;; A key not bound here self-inserts (a 1-char string) or is ignored. (Plain `def`
 ;; takes no docstring — keep this as a comment, not a string before the map.)
-(def *lineedit-keymap*
+(defdyn *lineedit-keymap*
   {:enter 'editor/lineedit/lineedit-submit
    ;; C-j (line feed, 0x0A) also accepts the line — readline's accept-line. In raw
    ;; mode crossterm reports a bare \n as Ctrl-J, not Enter (its issue #371): when a
@@ -617,7 +617,7 @@ available text columns, and prompt width for rendering."
         hs2 (cond
               (< point hs) point
               (>= point (+ hs avail)) (inc (- point avail))
-              :else hs))
+              else hs))
     (assoc state :hscroll hs2 :width width :avail avail :promptw promptw)))
 
 (defn lineedit--chunk-ops (chunks)
@@ -759,7 +759,7 @@ map for `repl--read-eval` — `{:line <str|nil> :eof :cancel}`."
       (cond
         (= done :submit) {:line (get state :text) :eof false :cancel false}
         (= done :cancel) {:line nil :eof false :cancel true}
-        :else {:line nil :eof true :cancel false}))))
+        else {:line nil :eof true :cancel false}))))
 
 (defn lineedit--await (state)
   "Block for the next key (re-polling on idle without redrawing), then handle +

@@ -21,7 +21,7 @@ the `nest mcp` tools of the same names.")
 
 ;; ---- error explanations (keyed by the stable E-codes in crates/lisp/error.rs)
 
-(def *error-explanations*
+(defdyn *error-explanations*
   {"E0001" {:summary "A parse/reader error — the source isn't well-formed Brood."
             :causes "Unbalanced delimiters; a stray Clojure/Scheme reader macro (`#{…}` set, `#(…)` fn, `#'` var-quote); a malformed number or string."
             :fix "Read the caret position; balance `()`/`[]`/`{}`. Brood has no `#{…}`/`#(…)`/`#'` — use `(set/set …)`, `(fn (x) …)`, `'foo`."

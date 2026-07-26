@@ -18,7 +18,7 @@
 (defmacro ag-or (a b) `(let (r# ~a) (if r# r# ~b)))
 ;; Escape hatch: `~'x#` unquotes a quoted symbol, so it emits a *literal* `x#`,
 ;; NOT an auto-gensym — distinct from the auto-gensym `x#` beside it.
-(defmacro ag-escape () `'(~'x# x#))
+(defmacro ag-escape () `'(^'x# x#))
 
 (describe "auto-gensym (x#)"
   :isolated

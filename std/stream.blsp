@@ -16,8 +16,7 @@
 ;; over lists is faster and simpler.
 
 (defmodule stream
-  (:doc
-    "Process-based pull streams.
+  "Process-based pull streams.
 
 A stream is a PID: send `[:next (self)]`, receive `[:stream-val v]`,
 `:stream-done`, or `[:stream-err msg]`. Build pipelines from sources,
@@ -30,7 +29,7 @@ transformers, and terminals — each transformer adds one green process.
   ;; Lazy integer processing:
   (stream-to-list
     (stream-take 5 (stream-map (fn (n) (* n n)) (stream-range 1 100))))
-  ;; => [1 4 9 16 25]"))
+  ;; => [1 4 9 16 25]")
 
 ;; ---- protocol helpers -------------------------------------------------------
 
@@ -117,7 +116,7 @@ Call immediately after accept or connect, before any data has been read."
   (let (me (self)
         s (spawn (stream--sock-init sock me)))
     (receive
-      ([:stream-socket-ready ~s] s)
+      ([:stream-socket-ready ^s] s)
       ([:stream-err msg] (error "stream-from-socket: " msg)))))
 
 (defn stream--sock-init (sock parent)
@@ -130,13 +129,13 @@ Call immediately after accept or connect, before any data has been read."
   ;; buf: data that arrived before a requester; "" when empty.
   (receive
     ;; TCP data arrived
-    ([:tcp ~sock data] (if pending
+    ([:tcp ^sock data] (if pending
                          (do
                            (send pending [:stream-val data])
                            (stream--sock-loop sock nil ""))
                          (stream--sock-loop sock nil (str buf data))))
     ;; Socket closed / EOF
-    ([:tcp-closed ~sock]
+    ([:tcp-closed ^sock]
       (cond
         pending (send pending (if (= buf "") :stream-done [:stream-val buf]))
         ;; No requester yet (buffered data or not): stay alive in the EOF loop so the
@@ -146,7 +145,7 @@ Call immediately after accept or connect, before any data has been read."
         ;; `[:next]` blocked forever (the stream hung).
         else (stream--sock-eof-loop buf)))
     ;; Socket error
-    ([:tcp-error ~sock msg] (when pending (send pending [:stream-err msg])))
+    ([:tcp-error ^sock msg] (when pending (send pending [:stream-err msg])))
     ;; Consumer requests next chunk
     ([:next r] (cond
                  (not= buf "") (do

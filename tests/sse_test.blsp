@@ -78,10 +78,10 @@
                (let (ls (tcp-listen "127.0.0.1" 0))
                  (send me [:port (tcp-local-port ls)])
                  (receive
-                   ([:tcp-accept ~ls c] (do
+                   ([:tcp-accept ^ls c] (do
                                           (tcp-controlling-process c (self))
                                           (receive
-                                            ([:tcp ~c _] (do
+                                            ([:tcp ^c _] (do
                                                            (tcp-send c
                                                              "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
                                                            (tcp-send c

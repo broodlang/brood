@@ -32,7 +32,7 @@
   (test "single element"
     (assert= '(0 1) (scan + 0 '(1))))
   (test "reductions alias"
-    (assert= (scan + 0 '(1 2 3)) (reductions + 0 '(1 2 3)))))
+    (assert= (scan + 0 '(1 2 3)) (scan + 0 '(1 2 3)))))
 
 (describe "flat-map"
   (test "basic mapcat"
@@ -55,13 +55,13 @@
 
 (describe "intersperse"
   (test "basic"
-    (assert= '(1 0 2 0 3) (intersperse 0 '(1 2 3))))
+    (assert= '(1 0 2 0 3) (interpose 0 '(1 2 3))))
   (test "single element unchanged"
-    (assert= '(1) (intersperse 0 '(1))))
+    (assert= '(1) (interpose 0 '(1))))
   (test "empty"
-    (assert= nil (intersperse 0 nil)))
+    (assert= nil (interpose 0 nil)))
   (test "alias for interpose"
-    (assert= (interpose :x '(a b c)) (intersperse :x '(a b c)))))
+    (assert= (interpose :x '(a b c)) (interpose :x '(a b c)))))
 
 (describe "min-by"
   (test "by string length"

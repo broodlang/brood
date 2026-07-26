@@ -194,7 +194,7 @@ fresh prompt without echoing `nil`."
         in-com (repl--content? s j n (not (= c "\n")))
         (= c ";") (repl--content? s j n true)
         (blank? c) (repl--content? s j n false)
-        :else true))))
+        else true))))
 
 ;; ---- evaluation -------------------------------------------------------------
 
@@ -219,7 +219,7 @@ innermost frame first (each location is the call site that entered the frame)."
                                      (get f :col)
                                      ")")
                (contains? f :file) (str " (" (get f :file) ")")
-               :else "")))
+               else "")))
       tr)))
 
 (defn repl--error-message (e)
@@ -317,7 +317,7 @@ Returns `{:eof false :history h}`."
     (cond
       (repl--meta? form) (do (repl--run-meta form) (remember))
       (not (repl--content? form 0 (string-length form) false)) {:eof false :history history}
-      :else (do (repl--eval-print form) (remember)))))
+      else (do (repl--eval-print form) (remember)))))
 
 (defn repl--read-eval-interactive (history)
   "Interactive read: the multi-line line editor reads a whole form in one session
@@ -331,7 +331,7 @@ ends input; Ctrl-C drops the form and re-prompts."
     (cond
       (get r :eof) {:eof true :history history}
       (get r :cancel) {:eof false :history history}
-      :else (repl--submit true (get r :line) history))))
+      else (repl--submit true (get r :line) history))))
 
 (defn repl--read-eval-piped (acc history)
   "Piped/redirected read: accumulate physical lines (no editor) until the form is
@@ -347,7 +347,7 @@ complete, echoing the prompt only when stdout is a TTY. Recurses on an incomplet
         (and (= acc "") (repl--meta? line)) (do (repl--run-meta line) {:eof false :history history})
         (and (= acc "") (not (repl--content? line 0 (string-length line) false))) {:eof false
                                                                                    :history history}
-        :else (let (src (str acc line "\n"))
+        else (let (src (str acc line "\n"))
                 (if (= (repl--eval-print src) :more)
                   (repl--read-eval-piped src history)
                   {:eof false :history history}))))))
@@ -373,7 +373,7 @@ Returns (and the process exits) at end of input."
 (defn repl--await (p)
   "Block the current process until process `p` exits."
   (let (r (monitor p))
-    (receive ([:down ~r ~p _] nil))))
+    (receive ([:down ^r ^p _] nil))))
 
 (defn repl-run ()
   "Run the read-eval-print loop on stdin until end of input (Ctrl-D). When stdin and

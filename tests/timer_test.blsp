@@ -57,4 +57,4 @@
       (let (t (send-interval 20 victim :beat)
             m (monitor t))
         (assert= :timer-exited
-          (receive ([:down ~m ~t _] :timer-exited) (after *test-wait-ms* :timeout)))))))
+          (receive ([:down ^m ^t _] :timer-exited) (after *test-wait-ms* :timeout)))))))

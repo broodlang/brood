@@ -50,7 +50,7 @@ backreferences yet.")
       (= c "s") [{:t :class :k :space} (inc i)]
       (nil? c) [{:t :lit :c "\\"} i]
       ; trailing backslash → literal
-      :else [{:t :lit :c c} (inc i)])))
+      else [{:t :lit :c c} (inc i)])))
 (defn regex--set-chars (pcs i acc)
   "Collect set members until the closing `]`; returns [chars next]."
   (let (c (regex--peek pcs i))
@@ -59,7 +59,7 @@ backreferences yet.")
       ; unterminated set → take what we have
       (= c "]") [acc (inc i)]
       ; consume the ]
-      :else (regex--set-chars pcs (inc i) (cons c acc)))))
+      else (regex--set-chars pcs (inc i) (cons c acc)))))
 
 (defn regex--set (pcs i)
   "Parse a `[...]` set whose body starts at `i` (just past `[`); returns [atom next]."
@@ -82,7 +82,7 @@ backreferences yet.")
       (= c "^") [{:t :bol} (inc i)]
       (= c "$") [{:t :eol} (inc i)]
       (= c "\\") (regex--escape pcs (inc i))
-      :else [{:t :lit :c c} (inc i)])))
+      else [{:t :lit :c c} (inc i)])))
 
 (defn regex--piece (pcs i)
   "Parse an atom plus an optional quantifier; returns [piece next]."
@@ -92,7 +92,7 @@ backreferences yet.")
       (= q "*") [{:q :star :a atom} (inc i2)]
       (= q "+") [{:q :plus :a atom} (inc i2)]
       (= q "?") [{:q :opt :a atom} (inc i2)]
-      :else [atom i2])))
+      else [atom i2])))
 
 (defn regex--seq (pcs i)
   "Parse a branch — pieces until `|`, `)`, or end; returns [pieces next]."
@@ -144,7 +144,7 @@ backreferences yet.")
       (= t :any) {:kind :any}
       (= t :set) {:kind :set :neg (get a :neg) :chars (get a :chars)}
       (= t :class) {:kind :class :k (get a :k)}
-      :else {:kind :any})))
+      else {:kind :any})))
 
 (defn regex--nfa-atom (a nx states)
   "Compile one atom into states leading to `nx`; returns [start states']."
@@ -153,7 +153,7 @@ backreferences yet.")
       (= t :group) (regex--nfa-alt (get a :alt) nx states)
       (= t :bol) (regex--push states {:t :bol :next nx})
       (= t :eol) (regex--push states {:t :eol :next nx})
-      :else (regex--push states {:t :char :test (regex--atom->test a) :next nx}))))
+      else (regex--push states {:t :char :test (regex--atom->test a) :next nx}))))
 
 (defn regex--nfa-piece (p nx states)
   "Compile a piece (atom + optional quantifier) leading to `nx`; [start states']."
@@ -174,7 +174,7 @@ backreferences yet.")
                         [as st1] (regex--nfa-atom (get p :a) li st0)
                         st2 (assoc st1 li {:t :split :a as :b nx}))
                     [as st2])
-      :else (regex--nfa-atom p nx states))))
+      else (regex--nfa-atom p nx states))))
 
 (defn regex--nfa-seq (pieces nx states)
   "Chain a branch's pieces; each piece's exit is the next piece's start. [start states']."
@@ -188,7 +188,7 @@ backreferences yet.")
   (cond
     (empty? branches) [nx states]
     (empty? (rest branches)) (regex--nfa-seq (first branches) nx states)
-    :else (let ([b-start st1] (regex--nfa-seq (first branches) nx states)
+    else (let ([b-start st1] (regex--nfa-seq (first branches) nx states)
                 [rest-start st2] (regex--nfa-alt (rest branches) nx st1))
             (regex--push st2 {:t :split :a b-start :b rest-start}))))
 
@@ -263,7 +263,7 @@ object's per-call clone-out stays a few words — see the cache note above."
     (= k :digit) (string-contains? "0123456789" c)
     (= k :space) (string-contains? " \t\n\r" c)
     (= k :word) (or (regex--letter? c) (string-contains? "0123456789" c) (= c "_"))
-    :else false))
+    else false))
 
 (defn regex--char-test? (test c)
   "Does the single char `c` satisfy a compiled `:char` state's `test`?"
@@ -274,7 +274,7 @@ object's per-call clone-out stays a few words — see the cache note above."
       (= k :set) (let (m (string-contains? (get test :chars) c))
                    (if (get test :neg) (not m) m))
       (= k :class) (regex--class-match? (get test :k) c)
-      :else false)))
+      else false)))
 
 (defn regex--bit? (s i) (not (= 0 (bit-and s (bit-shift-left 1 i)))))
 
@@ -285,7 +285,7 @@ object's per-call clone-out stays a few words — see the cache note above."
       (= t :split) (bit-or (bit-shift-left 1 (get st :a)) (bit-shift-left 1 (get st :b)))
       (= t :bol) (if (= i 0) (bit-shift-left 1 (get st :next)) 0)
       (= t :eol) (if (= i n) (bit-shift-left 1 (get st :next)) 0)
-      :else 0)))
+      else 0)))
 
 ;; The inner loops walk state indices 0..m with top-level recursive helpers — NOT
 ;; `reduce` over `(bit-positions set)`, which would allocate a fresh lambda AND a

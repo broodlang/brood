@@ -74,16 +74,21 @@ pub(super) fn read_all(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 
 const SCAN_DEF_HEADS: &[&str] = &["def", "defn", "defmacro", "defdyn", "defonce"];
 
-/// An `*earmuff*` name — ambient/root regardless of the enclosing namespace.
-fn scan_is_ambient(name: &str) -> bool {
-    name.len() > 2 && name.starts_with('*') && name.ends_with('*')
+/// An **ambient** name — root regardless of the enclosing namespace. Ambient status
+/// is a *declaration*, not a spelling: the `defdyn` head declares it (the earmuff
+/// convention no longer grants it — see `eval::macros::is_ambient`). This scan runs
+/// over unevaluated source, so the head is the evidence; a name declared `defdyn`
+/// elsewhere is caught by `is_dynamic`.
+fn scan_is_ambient(head: &str, name: &str) -> bool {
+    head == crate::core::keywords::DEFDYN
+        || crate::core::value::is_dynamic(crate::core::value::intern(name))
 }
 
 /// Mirror `project--qualify`: `ns/name`, unless the name is ambient, already
 /// qualified, or there's no module namespace.
-fn scan_qualify(ns: Option<&str>, name: &str) -> String {
+fn scan_qualify(ns: Option<&str>, head: &str, name: &str) -> String {
     match ns {
-        Some(n) if !scan_is_ambient(name) && !name.contains('/') => format!("{n}/{name}"),
+        Some(n) if !scan_is_ambient(head, name) && !name.contains('/') => format!("{n}/{name}"),
         _ => name.to_string(),
     }
 }
@@ -157,7 +162,7 @@ pub(super) fn scan_source_extract(args: &[Value], _: EnvId, heap: &mut Heap) -> 
         if let Some((h, n)) = scan_head2(heap, f) {
             if let (Some(head), Some(name)) = (scan_sym_name(h), scan_sym_name(n)) {
                 if SCAN_DEF_HEADS.contains(&head) {
-                    let qual = scan_qualify(ns.as_deref(), name);
+                    let qual = scan_qualify(ns.as_deref(), head, name);
                     let qv = heap.alloc_string(&qual);
                     def_names.push(qv);
                     if name.contains("--") {
@@ -211,12 +216,13 @@ pub(super) fn cst_to_value(heap: &mut Heap, node: &cst::Node, src: &str) -> Valu
         // Reader-macro wrappers: [kind child]. The single structural child is
         // the wrapped form; any leading whitespace child is dropped (the wrapper
         // owns its position via its parent's children list).
-        Quote | Quasi | Unquote | Splice => {
+        Quote | Quasi | Unquote | Splice | Pin => {
             let k = match node.kind {
                 Quote => "quote",
                 Quasi => "quasi",
                 Unquote => "unquote",
                 Splice => "splice",
+                Pin => "pin",
                 _ => unreachable!(),
             };
             // A reader-macro node's children are the wrapped form's parse
@@ -309,6 +315,7 @@ pub(super) fn cst_node_kind_name(kind: cst::NodeKind) -> &'static str {
         Quasi => "quasi",
         Unquote => "unquote",
         Splice => "splice",
+        Pin => "pin",
         Root => "root",
         List => "list",
         Vector => "vector",
@@ -341,7 +348,7 @@ pub(super) fn cst_to_positioned(
         }
         // Containers + wrappers carry their (position-annotated) children — trivia
         // included, exactly as `parse-source`, so callers filter what they want.
-        Quote | Quasi | Unquote | Splice | Root | List | Vector | Map | Set => {
+        Quote | Quasi | Unquote | Splice | Pin | Root | List | Vector | Map | Set => {
             let kids: Vec<Value> = node
                 .children
                 .iter()

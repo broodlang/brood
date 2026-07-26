@@ -27,6 +27,16 @@ fn fresh_interp() -> Interp {
     Interp::new()
 }
 
+/// The error message from evaluating `src` in a fresh interpreter (panics if it
+/// *succeeds*) — for asserting that a rejected spelling is rejected.
+fn err(src: &str) -> String {
+    let mut interp = fresh_interp();
+    match interp.eval_str(src) {
+        Ok(v) => panic!("expected an error, got {}", interp.print(v)),
+        Err(e) => e.to_string(),
+    }
+}
+
 /// Evaluate `src` in a fresh interpreter and return the printed result.
 fn run(src: &str) -> String {
     let mut interp = fresh_interp();
@@ -66,14 +76,15 @@ fn def_and_reference() {
 #[test]
 fn closures_capture_lexically() {
     assert_eq!(
-        run("(def adder (fn [a] (fn [b] (+ a b)))) ((adder 3) 4)"),
+        run("(def adder (fn (a) (fn (b) (+ a b)))) ((adder 3) 4)"),
         "7"
     );
 }
 
 #[test]
 fn let_is_sequential() {
-    assert_eq!(run("(let [a 1 b (+ a 1)] (+ a b))"), "3"); // vector bindings
+    // A vector bindings container is rejected — lists for code (ADR-010).
+    assert!(err("(let [a 1 b (+ a 1)] (+ a b))").contains("must be a list, not a vector"));
     assert_eq!(run("(let (a 1 b (+ a 1)) (+ a b))"), "3"); // list bindings (idiomatic)
 }
 
@@ -224,7 +235,7 @@ fn string_kernel() {
 fn tail_calls_do_not_overflow() {
     let src = "
         (def sum-to
-          (fn [n acc]
+          (fn (n acc)
             (if (= n 0) acc (sum-to (- n 1) (+ acc n)))))
         (sum-to 100000 0)
     ";
@@ -490,20 +501,26 @@ fn check_builtin_flags_provable_misuse() {
 
 #[test]
 fn defn_defines_functions() {
-    assert_eq!(run("(defn sq [x] (* x x)) (sq 6)"), "36");
-    assert_eq!(run("(defn add3 [a b c] (+ a b c)) (add3 1 2 3)"), "6");
+    assert_eq!(run("(defn sq (x) (* x x)) (sq 6)"), "36");
+    assert_eq!(run("(defn add3 (a b c) (+ a b c)) (add3 1 2 3)"), "6");
     // defn is itself written in Brood; it expands to (def name (fn ...)).
     assert_eq!(
-        run("(macroexpand-1 '(defn f [x] (+ x 1)))"),
-        "(def f (fn [x] (+ x 1)))"
+        run("(macroexpand-1 '(defn f (x) (+ x 1)))"),
+        "(def f (fn (x) (+ x 1)))"
     );
 }
 
 #[test]
-fn params_may_be_a_list_or_vector() {
+fn params_must_be_a_list_not_a_vector() {
     assert_eq!(run("(defn sq (x) (* x x)) (sq 7)"), "49"); // list params
-    assert_eq!(run("(defn sq2 [x] (* x x)) (sq2 8)"), "64"); // vector params
     assert_eq!(run("((fn (a b) (+ a b)) 2 3)"), "5");
+    // A vector parameter list is an error, not a second spelling (ADR-010). Accepting
+    // it is what made Clojure's multi-arity `(defn g ([x] …) ([x y] …))` read as one
+    // 2-parameter fn with an empty body instead of failing.
+    assert!(err("(defn sq2 [x] (* x x)) (sq2 8)").contains("must be a list, not a vector"));
+    assert!(err("(defn g ([x] :one) ([x y] :two)) (g 1)").contains("must be a list, not a vector"));
+    // …while a vector INSIDE a parameter list is still destructuring.
+    assert_eq!(run("(defn area ([x y]) (* x y)) (area [3 4])"), "12");
     assert_eq!(
         run("(defn rest-args (& xs) xs) (rest-args 1 2 3)"),
         "(1 2 3)"
@@ -556,7 +573,7 @@ fn optional_params_arity() {
 
 #[test]
 fn user_macros_and_quasiquote() {
-    let when_macro = "(defmacro my-when [c & body] `(if ~c (do ~@body) nil))";
+    let when_macro = "(defmacro my-when (c & body) `(if ~c (do ~@body) nil))";
     assert_eq!(run(&format!("{} (my-when true 1 2 3)", when_macro)), "3");
     assert_eq!(run(&format!("{} (my-when false 1 2 3)", when_macro)), "nil");
     // quasiquote with unquote and unquote-splicing
@@ -662,7 +679,7 @@ fn match_dispatches_on_patterns() {
     assert_eq!(run("(match [3 4] ([x x] :eq) (_ :ne))"), ":ne");
     // match a known value: keyword tag, quoted symbol, and a pin
     assert_eq!(run("(match 'foo ('foo :y) (_ :n))"), ":y");
-    assert_eq!(run("(let (k :ok) (match [:ok 9] ([~k v] v) (_ :n)))"), "9");
+    assert_eq!(run("(let (k :ok) (match [:ok 9] ([^k v] v) (_ :n)))"), "9");
 }
 
 #[test]
@@ -1342,7 +1359,7 @@ fn reader_promotes_out_of_range_integer_literal_to_bignum() {
 fn apply_tail_recursion_does_not_overflow() {
     let src = "
         (def loop-apply
-          (fn [n acc]
+          (fn (n acc)
             (if (= n 0) acc (apply loop-apply (list (- n 1) (+ acc n))))))
         (loop-apply 100000 0)
     ";
@@ -1658,7 +1675,7 @@ fn call_site_ic_sees_redefinition_within_a_form() {
     let v = interp
         .eval_str(
             "(def loop-f
-               (fn [n]
+               (fn (n)
                  (if (= n 0)
                    (do (eval '(def f (fn () :new))) (f))
                    (do (f) (loop-f (- n 1))))))
@@ -1676,14 +1693,14 @@ fn ics_never_bypass_a_dynamic_binding() {
     let mut interp = fresh_interp();
     interp.eval_str("(defdyn dynf (fn () :default))").unwrap();
     interp
-        .eval_str("(def call-dynf (fn [n acc] (if (= n 0) acc (call-dynf (- n 1) (dynf)))))")
+        .eval_str("(def call-dynf (fn (n acc) (if (= n 0) acc (call-dynf (- n 1) (dynf)))))")
         .unwrap();
     // Hammer the site outside any binding (IC would love to cache it)...
     let v = interp.eval_str("(call-dynf 50 nil)").unwrap();
     assert_eq!(interp.print(v), ":default");
     // ...then the same hot site under a `binding` must see the shadow value.
     let v = interp
-        .eval_str("(binding [dynf (fn () :shadowed)] (call-dynf 50 nil))")
+        .eval_str("(binding (dynf (fn () :shadowed)) (call-dynf 50 nil))")
         .unwrap();
     assert_eq!(interp.print(v), ":shadowed");
     // And back outside, the default again (no stale shadow cached).
@@ -1697,11 +1714,11 @@ fn ics_never_bypass_a_dynamic_binding() {
 fn prim1_guard_sees_redefinition() {
     let mut interp = fresh_interp();
     interp
-        .eval_str("(def use-first (fn [xs] (first xs)))")
+        .eval_str("(def use-first (fn (xs) (first xs)))")
         .unwrap();
     let v = interp.eval_str("(use-first (list 1 2))").unwrap();
     assert_eq!(interp.print(v), "1");
-    interp.eval_str("(def first (fn [x] :redefined))").unwrap();
+    interp.eval_str("(def first (fn (x) :redefined))").unwrap();
     let v = interp.eval_str("(use-first (list 1 2))").unwrap();
     assert_eq!(interp.print(v), ":redefined");
 }

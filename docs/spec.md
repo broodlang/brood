@@ -71,6 +71,7 @@ vector  = "[" { form } "]" ;
 map     = "{" { form form } "}" ;   (* alternating key/value forms *)
 
 reader-macro = "'"  form        (* (quote form)            *)
+             | "^"  form        (* (%pin form) — a pattern PIN, §7.4.1 *)
              | "`"  form        (* (quasiquote form)       *)
              | "~"  form        (* (unquote form)          *)
              | "~@" form ;      (* (unquote-splicing form) *)
@@ -156,6 +157,13 @@ language** — rebinding a global, which is what enables live redefinition / hot
 reload (ADR-026). There is no local mutation: a `let`/`fn` binding, once made,
 never changes, and data is immutable. `let` introduces a child frame.
 
+A file may open a **namespace** with `(defmodule ns …)`; each `def` in it binds
+`ns/name`, and a bare reference resolves *current namespace → `(:use …)` imports →
+root*. The exception is an **ambient** name — one declared with `defdyn` — which is
+never namespaced, so a `def` of it from any namespace rebinds the single root
+binding. Ambient status is a declaration, not a spelling: an `*earmuffed*` name
+that was never declared is namespaced like any other (ADR-151).
+
 ## 7. Special forms
 
 Special forms are reserved symbols recognised in operator position. `body...`
@@ -191,8 +199,14 @@ the expander calls, and `%make-macro` is the one primitive that tags it as such.
 `` `tmpl `` returns `tmpl` as a literal, except that `~x` (`(unquote x)`) is
 replaced by the value of `x`, and `~@xs` (`(unquote-splicing xs)`) splices the
 elements of the sequence `xs` into the surrounding list/vector. Unquoting works
-inside both lists and vectors. Nested quasiquote is not level-tracked in v0.1:
-unquotes resolve at the first enclosing quasiquote.
+inside both lists and vectors.
+
+A **nested quasiquote** — a `` ` `` template inside another `` ` `` template — is a
+**runtime error**. Levels are not tracked, so an inner `~x` would be expanded at
+the outer level (`` `(a `(b ~(+ 1 2))) `` evaluated `(+ 1 2)` where the standard
+reading leaves it alone), and computing the wrong thing quietly is worse than
+refusing. A `` ` `` inside an `~unquote` is ordinary code at level 0 and stays
+legal. Level tracking may be added later; it can only widen what is accepted.
 
 ### 7.3 Macros
 
@@ -207,13 +221,16 @@ special-form name cannot be shadowed by a macro.
 
 ### 7.4 Parameter lists
 
-A parameter list is written as a **list** `(a b)` (idiomatic — code is lists,
-ADR-010) or a vector `[a b]` (accepted). It has three sections; each is optional,
+A parameter list is written as a **list** `(a b)` — code is lists (ADR-010). A
+**vector** `[a b]` in this position is an error, not an accepted alias (ADR-149):
+tolerating it made Clojure's `(defn f [x y] …)` and multi-arity
+`(defn g ([x] …) ([x y] …))` reinterpret rather than fail. A vector *inside* the
+list is a destructuring pattern (§7.5). It has three sections; each is optional,
 and they appear in this order. The grammar is kept deliberately small —
 simplicity for the user is the priority (ADR-011).
 
 ```ebnf
-param-list = "(" spec ")" | "[" spec "]" ;
+param-list = "(" spec ")" ;   (* a vector here is an error, ADR-149 *)
 
 spec       = { required } [ "&optional" optional { optional } ] [ "&" symbol ] ;
 
@@ -255,6 +272,21 @@ simplicity*: they make the user learn keyword pairs, order-independence, and
 mixing rules. They are purely additive — adding them later needs no migration of
 existing code. Supplied-p flags and required-keyword markers are likewise
 out of scope. See `docs/devlog.md` for the design discussion.
+
+### 7.4.1 Patterns and the pin `^`
+
+One pattern grammar serves `match`, a refutable `let` binding, `fn`/`defn` clause
+heads, and `receive` clauses (full grammar: `docs/pattern-matching.md`). A bare
+symbol **binds**; to match against an existing value, **pin** it with `^`:
+`^expr` (read as `(%pin expr)`) matches the current value of `expr`.
+
+The pin is `^`, not `~`. A pin used to be spelled `~expr` — literally
+`(unquote expr)` — so inside a macro's `` ` `` template the quasiquote walker
+consumed it first and a pinned pattern could not be emitted by a macro at all,
+which is precisely what wrapping the request/reply idiom
+(`(receive ([:reply ^tag v] …))`) requires. `^` (Elixir's spelling) leaves `~` to
+quasiquote alone (ADR-150). `~expr` in pattern position is now an error naming the
+fix; Brood has no metadata, so `^` is unambiguous.
 
 ## 8. Truthiness and equality
 

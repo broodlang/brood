@@ -1354,8 +1354,8 @@ fn remote_link_death_delivers_exit_to_a_trapping_peer() {
 (unless (pid? w) (throw "whoami reply was not a pid"))
 (link w)                                  ; cross-node link (Frame::Link → A records its half)
 (send w [:die-now])                       ; ordered after the link on this connection
-(receive ([:EXIT ~w [:error _]] (println "REMOTE-LINK-EXIT-OK"))
-         ([:EXIT ~w r] (throw (str "unexpected EXIT reason " r)))
+(receive ([:EXIT ^w [:error _]] (println "REMOTE-LINK-EXIT-OK"))
+         ([:EXIT ^w r] (throw (str "unexpected EXIT reason " r)))
          (after 30000 (throw "no remote [:EXIT]")))
 "#
     );
@@ -1406,7 +1406,7 @@ fn remote_exit_kills_a_worker() {
 (def w (receive ([:iam p] p) (after 30000 (throw "no whoami"))))
 (def m (monitor w))
 (exit w :kill)                            ; remote kill (non-link Frame::Exit)
-(receive ([:down ~m ~w _] (println "REMOTE-EXIT-KILL-OK"))
+(receive ([:down ^m ^w _] (println "REMOTE-EXIT-KILL-OK"))
          (after 30000 (throw "remote worker did not die")))
 "#
     );

@@ -1,0 +1,111 @@
+;; tests/conformance_csv_test.blsp — csv-spectrum against std/csv.
+;;
+;; The corpus (maxogden/csv-spectrum, BSD-2-Clause; see tests/corpus/csv/README.md)
+;; is small on purpose: twelve documents covering the places RFC 4180 parsers
+;; actually break — a comma inside quotes, a doubled `""` escape, a bare newline
+;; inside a quoted field, CRLF line endings, empty trailing fields, UTF-8 payloads,
+;; and JSON embedded in a cell. Each `csvs/X.csv` pairs with `json/X.json` holding
+;; the rows it must parse to.
+;;
+;; This is the one corpus so far whose subject is **pure Brood** — `std/csv` is a
+;; hand-written recursive-descent parser, not a wrapper over a Rust crate — so it is
+;; the one with the most room to be wrong.
+;;
+;; The two sides disagree only on key spelling: `json-parse` maps a JSON object to a
+;; Brood map with *keyword* keys (idiomatic Brood), while `csv-parse-maps` keys rows
+;; by their header *strings*. `csv--stringify-keys` reconciles that, and nothing else
+;; is normalised — the field values are compared exactly.
+
+(defmodule conformance-csv-test (:use test) (:use corpus))
+(require 'csv)
+(require 'json)
+
+;; EXCLUDED — `location_coordinates` is broken upstream, two ways. Its expectation
+;; file is a bare JSON *object* where every other one is an array of row objects, and
+;; the phone number in it ("1234567890") is not the one in its own CSV
+;; ("2095257564"). Nothing to test against; not a std/csv problem.
+(def csv--broken-upstream "location_coordinates")
+
+(defn csv--dir (sub) (corpus-files "csv" (path-join "data" sub)))
+
+(defn csv--stem (path)
+  (let (b (path-basename path) i (index-of b "."))
+    (if (< i 0) b (substring b 0 i))))
+
+;; A row map keyed by keyword -> the same map keyed by the header string.
+(defn csv--stringify-keys (m)
+  (fold (fn (acc pair) (let ([k v] pair) (assoc acc (name k) v))) {} m))
+
+(defn csv--expected (stem)
+  (let (p (first (filter (fn (f) (= (csv--stem f) stem)) (csv--dir "json"))))
+    (if (nil? p)
+      (error "conformance-csv: no json expectation for " stem)
+      (into [] (map csv--stringify-keys (json/json-parse (slurp p)))))))
+
+(defn csv--actual (path) (into [] (csv/csv-parse-maps (slurp path))))
+
+;; [checked mismatches], mismatches as [stem expected actual].
+(defn csv--scan (files checked bad)
+  (cond
+    (nil? files) [checked (reverse bad)]
+    (= (csv--stem (first files)) csv--broken-upstream) (csv--scan (rest files) checked bad)
+    else
+    (let (stem (csv--stem (first files))
+          want (csv--expected stem)
+          got (csv--actual (first files)))
+      (csv--scan (rest files) (inc checked)
+                 (if (= got want) bad (cons [stem want got] bad))))))
+
+(describe "csv-spectrum: RFC 4180 edge cases" :tags [:conformance]
+
+  (test "the corpus is present, csv and json sides paired"
+    (is (corpus-present? "csv"))
+    (is (> (count (csv--dir "csvs")) 10))
+    (assert= (count (csv--dir "csvs")) (count (csv--dir "json"))))
+
+  (test "every document parses to its expected rows"
+    (let ([checked bad] (csv--scan (csv--dir "csvs") 0 nil))
+      (is (> checked 10))
+      (assert= (take 3 bad) ())
+      (assert= (count bad) 0))))
+
+;; The rules the corpus exists to pin, spelled out inline — a reader can check these
+;; by eye, and they say what "RFC 4180 compliant" actually buys you.
+(describe "csv: the quoting rules" :tags [:conformance]
+
+  ;; `csv-parse` yields a LIST of row vectors (rows stream, fields are indexed), so
+  ;; the expectations are lists of vectors, not vectors of vectors.
+  (test "a quoted field may contain the delimiter"
+    (assert= (csv/csv-parse "a,b\n1,\"x,y\"\n") (list ["a" "b"] ["1" "x,y"])))
+
+  (test "a doubled quote inside a quoted field is one literal quote"
+    (assert= (csv/csv-parse "a\n\"he said \"\"hi\"\"\"\n") (list ["a"] ["he said \"hi\""])))
+
+  (test "a quoted field may contain a raw newline"
+    (assert= (csv/csv-parse "a,b\n1,\"line1\nline2\"\n")
+             (list ["a" "b"] ["1" "line1\nline2"])))
+
+  (test "CRLF line endings are handled, and CR is not left in the field"
+    (assert= (csv/csv-parse "a,b\r\n1,2\r\n") (list ["a" "b"] ["1" "2"])))
+
+  ;; Regression for the bug csv-spectrum's `newlines_crlf` caught (2026-07-25): a
+  ;; CRLF *inside quotes* is content, not a line ending (RFC 4180 §2.6). The parser
+  ;; swallowed the CR in the :quoted state, so every embedded CRLF silently became an
+  ;; LF and a multi-line quoted cell did not round-trip.
+  (test "a CRLF inside a quoted field is data, not a line ending"
+    (assert= (csv/csv-parse "a,b\r\n1,\"Once upon \r\na time\"\r\n")
+             (list ["a" "b"] ["1" "Once upon \r\na time"]))
+    ;; and it survives emit -> parse
+    (let (rows (list ["a"] ["x\r\ny"]))
+      (assert= (csv/csv-parse (csv/csv-emit rows)) rows)))
+
+  (test "empty fields are preserved, including trailing ones"
+    (assert= (csv/csv-parse "a,b,c\n1,,\n") (list ["a" "b" "c"] ["1" "" ""])))
+
+  (test "round-trip: emit then parse is identity on the rows"
+    (dolist (rows [(list ["a" "b"] ["1" "2"])
+                   (list ["a"] ["x,y"])
+                   (list ["a"] ["he said \"hi\""])
+                   (list ["a"] ["line1\nline2"])
+                   (list ["a" "b"] ["" ""])])
+      (assert= (csv/csv-parse (csv/csv-emit rows)) rows))))

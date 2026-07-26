@@ -75,6 +75,13 @@
     (is (= (eval (read-string "(let ((a b) '(1 2)) (list a b))")) '(1 2)))
     (is (= (eval (read-string "(let ((h & t) '(1 2 3)) (list h t))")) '(1 (2 3))))
     (is (= (eval (read-string "(let ((a 1) '(9 1)) a)")) 9)))
-  (test "flat bindings — list and vector — still work"
+  (test "flat list bindings work; a vector container is rejected with a hint"
     (is (= (eval (read-string "(let (a 1 b 2) (+ a b))")) 3))
-    (is (= (eval (read-string "(let [a 1 b 2] (+ a b))")) 3))))
+    ;; ADR-010: the container is a list. Accepting a vector too is what made the
+    ;; Clojure spellings *reinterpret* rather than fail — `(let [[a 1] [b 2]] …)`
+    ;; destructured `[a 1]` against `[b 2]` and reported `unbound symbol: b`.
+    (assert-error (eval (read-string "(let [a 1 b 2] (+ a b))")))
+    (is (string-contains? (hint-of "(let [a 1 b 2] (+ a b))") "lists-for-code"))
+    (is (string-contains? (hint-of "(let [[a 1] [b 2]] (+ a b))") "lists-for-code"))
+    ;; a vector *inside* a binding position is still destructuring
+    (is (= (eval (read-string "(let ([a b] [1 2]) (+ a b))")) 3))))

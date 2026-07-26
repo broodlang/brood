@@ -41,7 +41,7 @@ beat. The observer and the editor are both `ui-run` clients — see
 ;; keys, render at the smallest common grid — is all Brood, so it stays live-
 ;; editable and grows to remote frontends.
 
-(def *term-display*
+(defdyn *term-display*
   ;; the terminal (crossterm) frontend — always available, and single (one
   ;; terminal), so it's a fixed display map of the 0-arg `term-*` primitives.
   {:enter term-enter :leave term-leave :size term-size :draw term-draw :poll term-poll})
@@ -359,7 +359,7 @@ re-raises, surfacing a genuine startup bug instead of spinning."
                                  (ui--loop next model clock2 view update display)))))
               ;; a real key/mouse/system event: with timers, stamp `:last-input` (resets
               ;; idle timers); then fold it. A throwing `update` drops this input.
-              :else (let (clock2 (if (nil? timers)
+              else (let (clock2 (if (nil? timers)
                                    clock1
                                    (assoc clock1 :last-input (ui--now model)))
                           next (try
@@ -445,5 +445,5 @@ observer's minibuffer."
     (cond
       (nil? o) (fallback model input)
       (let (owns (get o :owns?)) (or (nil? owns) (owns model input))) ((get o :handle) model input)
-      :else (let (exit (get o :exit))
+      else (let (exit (get o :exit))
               (fallback (if (nil? exit) model (exit model)) input)))))

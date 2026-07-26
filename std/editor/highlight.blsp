@@ -124,7 +124,7 @@ the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
     (cond
       (>= j n) n
       (= (char-at src j) "\"") (inc j)
-      :else (hl--string-end src (+ j 2) n))))
+      else (hl--string-end src (+ j 2) n))))
 (defn hl--atom-end (src i n)
   "Index of the first delimiter at or after `i` — the end of an atom token."
   (min n (string-span-until src i hl--delim-chars)))
@@ -164,9 +164,9 @@ else uncoloured. Accumulates in reverse."
         (= kind :symbol) (let (f (cond
                                    (and after (special-form? text)) (face :syntax/special)
                                    after (face :syntax/function)
-                                   :else nil))
+                                   else nil))
                            (hl--spans rest false (if (nil? f) acc (cons [s e f] acc))))
-        :else (let (f (face (get hl--kind->face-name kind)))
+        else (let (f (face (get hl--kind->face-name kind)))
                 ; :string / :number / :keyword
                 (hl--spans rest false (if (nil? f) acc (cons [s e f] acc))))))))
 
@@ -221,7 +221,7 @@ fontify-restart multi-second on every idle beat in a large file."
 scan; spans need not be sorted."
   (cond
     (empty? spans) nil
-    :else (let ([s e f] (first spans))
+    else (let ([s e f] (first spans))
             (if (and (>= pos s) (< pos e)) f (face-at (rest spans) pos)))))
 
 (defn ranges-face (ranges pos)
@@ -232,7 +232,7 @@ highlight, isearch overlays, and bracket-match are all such ranges."
           (cond
             (not (and (>= pos lo) (< pos hi))) acc
             (nil? acc) f
-            :else (into acc f)))
+            else (into acc f)))
     nil
     ranges))
 
@@ -272,7 +272,7 @@ one-char range `[pos (inc pos) face]`."
         (= c ";") (hl--fwd-match full (hl--to-eol full (inc i) n) n depth)
         (hl--open? c) (hl--fwd-match full (inc i) n (inc depth))
         (hl--close? c) (if (= depth 0) i (hl--fwd-match full (inc i) n (dec depth)))
-        :else (hl--fwd-match full (inc i) n depth)))))
+        else (hl--fwd-match full (inc i) n depth)))))
 
 (defn hl--opener-scan (full i n cp stack)
   "Forward scan maintaining a `stack` of opener offsets; on reaching closer `cp`,
@@ -287,7 +287,7 @@ return the matching opener (top of stack) or -1. Skips strings/comments."
         (hl--close? c) (if (= i cp)
                          (if (empty? stack) -1 (first stack))
                          (hl--opener-scan full (inc i) n cp (rest stack)))
-        :else (hl--opener-scan full (inc i) n cp stack)))))
+        else (hl--opener-scan full (inc i) n cp stack)))))
 
 (defn bracket-match (full pos)
   "Given source `full` and cursor offset `pos`, return `[a b]` (the offsets of the
@@ -299,7 +299,7 @@ and comments are ignored."
         bi (cond
              (and (> pos 0) (hl--bracket? (char-at full (dec pos)))) (dec pos)
              (and (< pos n) (hl--bracket? (char-at full pos))) pos
-             :else -1))
+             else -1))
     (if (< bi 0)
       nil
       (let (c (char-at full bi))
@@ -323,7 +323,7 @@ innermost open bracket enclosing `pos`, or -1. Skips strings/comments (clamped a
         (= c ";") (hl--enc-scan full (min pos (hl--to-eol full (inc i) n)) pos n stack)
         (hl--open? c) (hl--enc-scan full (inc i) pos n (cons i stack))
         (hl--close? c) (hl--enc-scan full (inc i) pos n (rest stack))
-        :else (hl--enc-scan full (inc i) pos n stack)))))
+        else (hl--enc-scan full (inc i) pos n stack)))))
 
 (defn hl--datum-starts (full i end n acc)
   "Start offsets (reverse order) of the complete datums in `[i, end)` at one nesting
@@ -338,7 +338,7 @@ level — atoms, strings, and whole bracketed forms each count once."
         (hl--open? c) (let (m (hl--fwd-match full (inc i) n 0))
                         (hl--datum-starts full (if (< m 0) end (inc m)) end n (cons i acc)))
         (hl--close? c) (hl--datum-starts full (inc i) end n acc)
-        :else (hl--datum-starts full (hl--atom-end full (inc i) n) end n (cons i acc))))))
+        else (hl--datum-starts full (hl--atom-end full (inc i) n) end n (cons i acc))))))
 
 (defn enclosing-call (full pos)
   "Return `[callee arg-index]` for the innermost call `(…` enclosing cursor offset

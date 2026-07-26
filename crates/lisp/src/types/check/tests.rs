@@ -1854,8 +1854,9 @@ fn shadowing_with_unknown_rhs_clears_prior_narrowing() {
 
 #[test]
 fn vector_let_bindings_are_recognised() {
-    // `(let [x 1] …)` (vector shape) must work the same as `(let (x 1) …)`.
-    let w = warnings("(let [x 1] (first x))");
+    // The bindings container is a LIST (ADR-010) — the vector shape is a compile
+    // error now, so the checker only ever sees this spelling.
+    let w = warnings("(let (x 1) (first x))");
     assert!(
         w.iter().any(|s| s.contains("first") && s.contains("got 1")),
         "vector-form let bindings must populate the ctx: {:?}",

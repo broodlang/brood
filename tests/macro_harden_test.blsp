@@ -53,12 +53,18 @@
     (assert= (cond false :a false :b else :c) :c))
 
   (test "else as sole clause does not raise (returns nil)"
-    ;; (cond else) is degenerate but tolerated — else/true has no expression
-    ;; and expands to nil. Not worth erroring; the oddness guard exempts else.
+    ;; (cond else) is degenerate but tolerated — else has no expression and
+    ;; expands to nil. Not worth erroring; the oddness guard exempts else.
     (assert= (eval '(cond else)) nil))
 
-  (test ":else as sole clause does not raise"
-    (assert= (eval '(cond :else)) nil)))
+  (test ":else is no longer a blessed spelling — only `else` is"
+    ;; A keyword is self-evaluating and truthy, so `:else` never needed a special
+    ;; case: as an ordinary test it still catches (like `true` or `42` would).
+    (assert= (eval '(cond false 1 :else :caught)) :caught)
+    (assert= (eval '(cond false 1 42 :caught)) :caught)
+    ;; …but the oddness guard exempts only `else`, so a lone `:else` is now the
+    ;; missing-expression error it always was for any other test.
+    (assert-error (eval '(cond :else)))))
 
 ;; ── 2. defseq — non-string docstring ─────────────────────────────────────────
 

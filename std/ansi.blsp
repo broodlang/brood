@@ -19,7 +19,7 @@ the public entry point; the helpers are private (`--`).")
   (cond
     (>= i (string-length s)) i
     (ansi--csi-final? (char-at s i)) (+ i 1)
-    :else (ansi--csi-end s (+ i 1))))
+    else (ansi--csi-end s (+ i 1))))
 
 (defn ansi--strip (s i out)
   "Tail-recursive scan: copy `s[i..]` to the reversed char list `out`, dropping ANSI
@@ -35,7 +35,7 @@ escape sequences and carriage returns."
         ; other ESC X: drop both
         (= c "\r") (ansi--strip s (+ i 1) out)
         ; bare CR: drop
-        :else (ansi--strip s (+ i 1) (cons c out))))))
+        else (ansi--strip s (+ i 1) (cons c out))))))
 
 (defn strip-ansi (s)
   "`s` with all ANSI escape sequences and bare carriage returns removed.

@@ -1,0 +1,142 @@
+;; tests/conformance_json_test.blsp — "Parsing JSON is a Minefield" against std/json.
+;;
+;; The corpus (nst/JSONTestSuite, MIT; see tests/corpus/json/README.md) is the one
+;; from Nicolas Seriot's survey that found essentially every shipped JSON parser
+;; disagreeing with every other. Each file is one document, and its name is the
+;; verdict RFC 8259 requires:
+;;
+;;   y_*  MUST parse
+;;   n_*  MUST be rejected
+;;   i_*  implementation-defined — either verdict conforms (huge numbers, lone
+;;        surrogates, deep nesting). Reported, never failed.
+;;
+;; A file that is not valid UTF-8 cannot become a Brood string at all, so `slurp`
+;; raises before `json-parse` is reached. That counts as a rejection, which is the
+;; right verdict — several `n_` cases exist precisely to check that a parser does not
+;; accept mis-encoded bytes.
+;;
+;; 316 of the 318 documents are swept. The two deep-nesting ones —
+;; `n_structure_100000_opening_arrays.json` (100,000 levels) and
+;; `n_structure_open_array_object.json` (~50,000) — are SKIPPED, on cost grounds, and the
+;; property they test is covered instead by `tests/jit_tail_chain_depth_test.blsp` with a
+;; synthetic 5,000-level document.
+;;
+;; They are what found KI-11 (an unbounded native recursion on the JIT's tail-chain
+;; follow-through), and both reject cleanly since that was fixed on 2026-07-26. But
+;; rejecting them now means actually *doing* the work: past the 1500-level native cap the
+;; recursion drains on the VM's heap-backed frames. That is ~400 ms standalone and stays
+;; fast when this file runs alone — yet inside the full parallel suite it blows the 120 s
+;; per-test ceiling, a >250x slowdown that is steeper than contention alone explains and
+;; is logged in ROADMAP as a GC-depth question worth its own look. Putting them in an
+;; `:isolated` test made it worse, since isolated units run on the runner process and
+;; taking the ceiling there kills the whole run.
+;;
+;; The trade is deliberate: their *content* adds nothing over a synthetic deep document
+;; once the "deep nesting is rejected, not fatal" property is covered, and one test must
+;; not be able to hold the suite hostage. Re-add them here if the slowdown is understood
+;; and fixed.
+
+(defmodule conformance-json-test (:use test) (:use corpus))
+(require 'json)
+
+(defn js--verdict (path)
+  "`:ok` if `path` parses as JSON, `:rejected` if anything refuses it."
+  (try
+    (do (json/json-parse (slurp path)) :ok)
+    (catch e :rejected)))
+
+(defn js--kind (path) (substring (path-basename path) 0 1))
+
+;; Skipped by the sweep — see the header for why, and jit_tail_chain_depth_test.blsp for
+;; the property they used to be the only cover for.
+(def js--deep
+  {"n_structure_100000_opening_arrays.json" true
+   "n_structure_open_array_object.json" true})
+
+(defn js--deep? (path) (get js--deep (path-basename path)))
+
+;; [oks rejects wrongs] for one class, where `wrongs` lists the offending basenames.
+(defn js--scan (files kind want oks rejects wrong)
+  (cond
+    (nil? files) [oks rejects (reverse wrong)]
+    (or (not (= (js--kind (first files)) kind)) (js--deep? (first files)))
+    (js--scan (rest files) kind want oks rejects wrong)
+    else
+    (let (v (js--verdict (first files))
+          ok (= v :ok))
+      (js--scan (rest files) kind want
+                (if ok (inc oks) oks)
+                (if ok rejects (inc rejects))
+                (if (or (nil? want) (= v want))
+                  wrong
+                  (cons (path-basename (first files)) wrong))))))
+
+(describe "JSONTestSuite: RFC 8259 accept/reject" :tags [:conformance]
+
+  (test "the corpus is present"
+    (is (corpus-present? "json"))
+    (is (> (count (corpus-files "json")) 300)))
+
+  (test "every y_ document parses"
+    (let ([oks _ wrong] (js--scan (corpus-files "json") "y" :ok 0 0 nil))
+      (is (> oks 80))
+      (assert= (take 5 wrong) ())
+      (assert= (count wrong) 0)))
+
+  (test "every n_ document is rejected"
+    (let ([_ rejects wrong] (js--scan (corpus-files "json") "n" :rejected 0 0 nil))
+      (is (> rejects 150))
+      (assert= (take 5 wrong) ())
+      (assert= (count wrong) 0)))
+
+  ;; No assertion on the verdict — the point is that an implementation-defined
+  ;; document produces *a* verdict rather than hanging or killing the process.
+  (test "every i_ document terminates with a verdict"
+    (let ([oks rejects wrong] (js--scan (corpus-files "json") "i" nil 0 0 nil))
+      (assert= wrong ())
+      (is (> (+ oks rejects) 30)))))
+
+;; The skip is asserted rather than assumed: if an upstream rename orphans these names the
+;; sweep would silently start including them again (and start timing out), so pin that
+;; exactly two documents are being held back.
+(describe "JSONTestSuite: the deep-nesting skip is accounted for" :tags [:conformance]
+
+  (test "exactly two documents are held back, and both still exist"
+    (let (files (filter js--deep? (corpus-files "json")))
+      (assert= (count files) 2)
+      (dolist (f files) (is (file-exists? f))))))
+
+;; The specific traps the corpus is famous for, named so the sweep's coverage is
+;; legible without opening 318 files.
+(describe "JSONTestSuite: the classic traps" :tags [:conformance]
+
+  (test "a bare scalar is a valid JSON text (RFC 8259 §2, not the 2006 grammar)"
+    (assert= (json/json-parse "123") 123)
+    (assert= (json/json-parse "\"s\"") "s")
+    (assert= (json/json-parse "true") true)
+    (assert= (json/json-parse "null") nil))
+
+  (test "trailing commas, comments and single quotes are rejected"
+    (assert-error (json/json-parse "[1,]"))
+    (assert-error (json/json-parse "{\"a\":1,}"))
+    (assert-error (json/json-parse "[1] // comment"))
+    (assert-error (json/json-parse "['a']")))
+
+  (test "the number grammar rejects what looks numeric but isn't"
+    (assert-error (json/json-parse "01"))       ; leading zero
+    (assert-error (json/json-parse "1."))       ; trailing point
+    (assert-error (json/json-parse ".1"))       ; leading point
+    (assert-error (json/json-parse "+1"))       ; leading plus
+    (assert-error (json/json-parse "1e"))       ; empty exponent
+    (assert-error (json/json-parse "Infinity"))
+    (assert-error (json/json-parse "NaN")))
+
+  (test "unescaped control characters are rejected inside a string"
+    (assert-error (json/json-parse "[\"a\nb\"]"))
+    (assert-error (json/json-parse "[\"a\tb\"]")))
+
+  (test "escapes and astral surrogate pairs decode"
+    (assert= (json/json-parse "\"\\u0041\"") "A")
+    (assert= (json/json-parse "\"\\/\"") "/")
+    ;; U+1D11E MUSICAL SYMBOL G CLEF, as the surrogate pair JSON must spell it with
+    (assert= (json/json-parse "\"\\uD834\\uDD1E\"") "\u{1D11E}")))

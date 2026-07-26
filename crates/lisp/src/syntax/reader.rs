@@ -185,6 +185,15 @@ impl<'a> Parser<'a> {
                 self.exit();
                 v
             }
+            // `^expr` — a **pin** in pattern position: match against the current
+            // value of `expr` instead of binding a name. Its own reader macro (not
+            // `~`, which belongs to quasiquote) so a macro template can emit one.
+            '^' => {
+                self.enter()?;
+                let v = self.read_wrapped(kw::PIN);
+                self.exit();
+                v
+            }
             '~' => {
                 self.enter()?;
                 self.s.bump(); // '~'

@@ -61,7 +61,7 @@ theme change is visible to a running UI on its next frame (late binding).")
 
 ;; ---- the registry -----------------------------------------------------------
 
-(def *faces* {})
+(defdyn *faces* {})
 ; the theme: face-name (keyword) -> attribute map
 
 (defn def-face (name attrs)
@@ -91,7 +91,7 @@ cycle terminates instead of overflowing the stack (cf. `observe--tree-walk`)."
     (cond
       (nil? attrs) nil
       (>= depth 16) (dissoc attrs :inherit)
-      :else (let (parent (get attrs :inherit)
+      else (let (parent (get attrs :inherit)
                   self (dissoc attrs :inherit))
               (if (nil? parent)
                 self

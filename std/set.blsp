@@ -21,27 +21,35 @@ algebra (`union` / `intersection` / `difference` / `subset?`).")
   "The set of the distinct elements of `coll` (any seqable — list, vector, another
 set). Duplicates collapse: `(set [1 1 2]) ⇒ #{1 2}`."
   (fold (fn (s x) (%set-add s x)) #{} coll))
+(sig set (any -> set))
 
 (defn conj (s x)
   "`s` with `x` added (a no-op if `x` is already present). Returns a fresh set."
   (%set-add s x))
+(sig conj (set any -> set))
 
 (defn disj (s x)
   "`s` with `x` removed (a no-op if `x` is absent). Returns a fresh set."
   (%set-remove s x))
+(sig disj (set any -> set))
 
 (defn union (a b)
   "Every element in either `a` or `b`."
   (fold (fn (s x) (%set-add s x)) a b))
+(sig union (set set -> set))
 
 (defn intersection (a b)
   "Every element in both `a` and `b`."
   (fold (fn (s x) (if (contains? b x) (%set-add s x) s)) #{} a))
+(sig intersection (set set -> set))
 
 (defn difference (a b)
   "Every element of `a` that is not in `b`."
   (fold (fn (s x) (%set-remove s x)) a b))
+(sig difference (set set -> set))
 
 (defn subset? (a b)
   "True when every element of `a` is also in `b`."
   (fold (fn (ok x) (if ok (contains? b x) false)) true a))
+(sig subset? (set set -> bool))
+

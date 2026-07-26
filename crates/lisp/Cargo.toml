@@ -270,6 +270,11 @@ cosmic-text = { version = "0.19", optional = true }
 # tables — so the width primitive is available in the lean runtime too.
 unicode-width = "0.2"
 unicode-segmentation = "1"
+# Unicode normalisation (the `string-normalize` builtin): NFC/NFD/NFKC/NFKD. Text
+# that compares equal to a human must compare equal to `=`, and only normalisation
+# makes that true — "é" as U+00E9 and as U+0065 U+0301 are different strings until
+# one of them is normalised. Same tier as the two above: tiny tables, always linked.
+unicode-normalization = "0.1"
 cranelift-jit = { version = "0.133", optional = true }
 cranelift-module = { version = "0.133", optional = true }
 cranelift-codegen = { version = "0.133", optional = true }

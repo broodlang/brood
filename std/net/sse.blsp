@@ -81,7 +81,7 @@ are ignored. One optional space after the colon is stripped."
   (cond
     (= line "") ev
     (starts-with? line ":") ev
-    :else (let (i (index-of line ":")
+    else (let (i (index-of line ":")
                 field (if (< i 0) line (substring line 0 i))
                 raw (if (< i 0) "" (substring line (+ i 1) (string-length line)))
                 val (if (starts-with? raw " ") (substring raw 1 (string-length raw)) raw))
@@ -91,7 +91,7 @@ are ignored. One optional space after the colon is stripped."
               (= field "event") (assoc ev :event val)
               (= field "id") (assoc ev :id val)
               (= field "retry") (assoc ev :retry val)
-              :else ev))))
+              else ev))))
 
 (defn sse--parse-event (block)
   "Parse one event `block` (its field lines) into `{:event :data :id …}`, defaulting
@@ -142,15 +142,15 @@ with `[:sse-closed reason]` when the socket closes or errors. Tail-recursive."
         (when (not (= b ""))
           (send subscriber [:sse (sse--parse-event b)])))
       (receive
-        ([:tcp ~sock d] (sse--stream sock subscriber (str rest (sse--normalize d))))
-        ([:tcp-closed ~sock] (send subscriber [:sse-closed :closed]))
-        ([:tcp-error ~sock msg] (send subscriber [:sse-closed msg]))))))
+        ([:tcp ^sock d] (sse--stream sock subscriber (str rest (sse--normalize d))))
+        ([:tcp-closed ^sock] (send subscriber [:sse-closed :closed]))
+        ([:tcp-error ^sock msg] (send subscriber [:sse-closed msg]))))))
 
 (defn sse--read-head (sock subscriber buf)
   "Read until the HTTP response head's blank line, check the status, then hand the
 leftover bytes to `sse--stream`. A non-200 status closes the connection."
   (receive
-    ([:tcp ~sock d] (let (buf2 (str buf (sse--normalize d))
+    ([:tcp ^sock d] (let (buf2 (str buf (sse--normalize d))
                           i (index-of buf2 "\n\n"))
                       (cond
                         (> (string-length buf2) *sse-max-buffer-bytes*) (do
@@ -167,8 +167,8 @@ leftover bytes to `sse--stream`. A non-200 status closes the connection."
                                  (do
                                    (tcp-close sock)
                                    (send subscriber [:sse-closed (str "http " status)])))))))
-    ([:tcp-closed ~sock] (send subscriber [:sse-closed :closed]))
-    ([:tcp-error ~sock msg] (send subscriber [:sse-closed msg]))))
+    ([:tcp-closed ^sock] (send subscriber [:sse-closed :closed]))
+    ([:tcp-error ^sock msg] (send subscriber [:sse-closed msg]))))
 
 (defn sse-connect (url subscriber)
   "Open an SSE stream to `url` (http) and deliver its events to `subscriber`'s mailbox

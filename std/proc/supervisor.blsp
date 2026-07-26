@@ -140,8 +140,8 @@ address the child by a stable name even though its pid changes across restarts."
 `nil` `timeout-ms` waits forever and returns `:ok`; an integer returns `:timeout`
 if the `[:EXIT]` doesn't arrive in the window."
   (if (nil? timeout-ms)
-    (receive ([:EXIT ~pid _] :ok))
-    (receive ([:EXIT ~pid _] :ok) (after timeout-ms :timeout))))
+    (receive ([:EXIT ^pid _] :ok))
+    (receive ([:EXIT ^pid _] :ok) (after timeout-ms :timeout))))
 
 (defn supervisor--terminate-child (child)
   "Terminate `child` per its `:shutdown` policy and drain the `[:EXIT]` its link
@@ -413,13 +413,13 @@ another, the parent links it, so the parent's death tears this sub-tree down too
 summaries. Synchronous (blocks for the reply)."
   (let (r (ref))
     (send sup [:which-children (self) r])
-    (receive ([:reply ~r v] v))))
+    (receive ([:reply ^r v] v))))
 
 (defn count-children (sup)
   "How many children supervisor `sup` currently has. Synchronous."
   (let (r (ref))
     (send sup [:count-children (self) r])
-    (receive ([:reply ~r v] v))))
+    (receive ([:reply ^r v] v))))
 
 (defn start-child (sup spec)
   "Start a new child under a running supervisor `sup` from child `spec` (the same
@@ -427,14 +427,14 @@ map shape `start-supervisor` takes) — the dynamic-supervisor entry point. The
 child is linked and supervised like any static child. Returns its pid. Synchronous."
   (let (r (ref))
     (send sup [:start-child spec (self) r])
-    (receive ([:reply ~r v] v))))
+    (receive ([:reply ^r v] v))))
 
 (defn terminate-child (sup key)
   "Terminate a child of `sup` identified by `key` (its `:id` or pid) and drop it
 from supervision — it is *not* restarted. Returns `:ok`, or `:not-found`. Synchronous."
   (let (r (ref))
     (send sup [:terminate-child key (self) r])
-    (receive ([:reply ~r v] v))))
+    (receive ([:reply ^r v] v))))
 
 (defn restart-child (sup key)
   "Terminate the child of `sup` identified by `key` (`:id` or pid) and start a fresh
@@ -442,7 +442,7 @@ incarnation from the same spec (not counted against the restart-intensity window
 Returns the new pid, or `:not-found`. Synchronous."
   (let (r (ref))
     (send sup [:restart-child key (self) r])
-    (receive ([:reply ~r v] v))))
+    (receive ([:reply ^r v] v))))
 
 (defn stop-supervisor (sup)
   "Stop the supervisor `sup`: it leaves its receive loop and terminates each of its

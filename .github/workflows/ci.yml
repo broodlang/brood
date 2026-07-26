@@ -10,6 +10,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # So the expensive tree-walker differential job (below, main-push only) can be
+  # run on demand against a branch before merging.
+  workflow_dispatch:
 
 # One in-flight run per ref; a new push cancels the previous run for that ref.
 concurrency:
@@ -83,3 +86,51 @@ jobs:
       # nextest doesn't run doctests; run them separately so future ones are covered.
       - name: Doctests
         run: cargo test --doc
+
+      # The advisory type checker's ONE hard reject, which is batch/CI-only by
+      # design (ADR-123/124/125/126): the checker never gates the live image, so
+      # nothing but a run like this one can hold `std/` + `tests/` at zero
+      # warnings. `nest check` exits 1 on any warning. The repo root is not a
+      # `nest` project (no Brood.toml), so the file-list form is the right one —
+      # it loads the project image first, so cross-module and qualified names
+      # still resolve. Deliberate lints opt out in-source with `check-allow`.
+      #
+      # NOTE (2026-07-25): this path currently reports 81 warnings (61 in std/,
+      # 20 in tests/) — mostly `recursive call in non-tail position`, plus
+      # `unbound symbol` and `unused :use import`. So this step FAILS until those
+      # are fixed or opted out with `(check-allow …)`. It is deliberately a hard
+      # gate, not `continue-on-error`: a soft gate that is permanently red is
+      # noise, and the point is to drive the count to zero.
+      - name: Type-checker gate (nest check — zero warnings)
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          cargo run -q -p nest --features brood/treesit-grammars -- \
+            check std/**/*.blsp tests/**/*.blsp
+
+  # The ADR-076 differential gate — the whole suite through the tree-walker
+  # escape hatch (`BROOD_VM=0`), the second half of `make test-both`. The VM is
+  # the default engine and `differential.rs` already checks per-expression
+  # agreement inside the normal run, so this is the belt-and-braces pass that
+  # catches a divergence only a full tree-walked suite would show.
+  #
+  # The tree-walker is ~10x slower than the VM (CLAUDE.md), so this would roughly
+  # triple PR latency for a rarely-firing gate. It runs on main pushes and on
+  # manual dispatch instead — the same trade-off that keeps `test-both` out of
+  # the local `make check`.
+  tree-walker:
+    name: differential (tree-walker)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+
+      # No --all-features here: this job only needs the default surface (the
+      # engine under test), so it skips the gui/audio system-dep install above.
+      - name: Test (nextest, BROOD_VM=0)
+        env:
+          BROOD_VM: 0
+        run: cargo nextest run --no-fail-fast

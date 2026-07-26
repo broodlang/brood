@@ -115,7 +115,7 @@ no leading zeros."
     (= (nth s i) 48) (+ i 1)
     ; lone 0 (leading-zero check below)
     (json--digit? (nth s i)) (json--digits-run s (+ i 1) n)
-    :else nil))
+    else nil))
 
 (defn json--frac-end (s i n)
   "Index after an optional `.digit+` fraction at `i`; `i` unchanged if none; nil if a
@@ -162,7 +162,7 @@ leading zeros)."
     (and (>= c 48) (<= c 57)) (- c 48)
     (and (>= c 97) (<= c 102)) (- c 87)
     (and (>= c 65) (<= c 70)) (- c 55)
-    :else nil))
+    else nil))
 
 (defn json--hex1 (s i)
   (let (v (json--hex-val (nth s i)))
@@ -212,7 +212,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
       (= c 102) [12 (+ i 1)]
       ; \f
       (= c 117) (json--unicode s (+ i 1) n)
-      :else (error "json: invalid escape at index " i))))
+      else (error "json: invalid escape at index " i))))
 
 ;; `acc` is the content CODES collected in reverse; the string is assembled once at
 ;; the close quote. (The old per-char `(str acc c)` rebuilt the whole accumulator
@@ -223,7 +223,13 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
       (= c -1) (error "json: unterminated string")
       (= c 34) [(apply str (map int->char (reverse acc))) (+ i 1)]
       (= c 92) (let ([cp j] (json--escape s (+ i 1) n)) (json--string--acc s j n (cons cp acc)))
-      :else (json--string--acc s (+ i 1) n (cons c acc)))))
+      ;; RFC 8259 §7: U+0000–U+001F MUST be escaped inside a string. A raw newline
+      ;; or tab in a string body is malformed JSON, not content — accepting it made
+      ;; `{"a": "x<TAB>y"}` parse where every conforming parser rejects it.
+      ;; (JSONTestSuite n_string_unescaped_{ctrl_char,newline,tab}.)
+      (< c 32) (error "json: unescaped control character in string: U+"
+                      (pad-left (upper (json--int->hex c)) 4 "0"))
+      else (json--string--acc s (+ i 1) n (cons c acc)))))
 
 (defn json--string (s i n)
   "A string body starting at `i` (just after the opening quote). Returns `[str end]`."
@@ -254,7 +260,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
       ; ,
       (= c 93) [(into [] (reverse acc2)) (+ j 1)]
       ; ]
-      :else (error "json: expected ',' or ']' in array at index " j))))
+      else (error "json: expected ',' or ']' in array at index " j))))
 
 (defn json--array (s i n)
   "An array body starting at `i` (just after `[`). Returns `[vector end]`."
@@ -280,7 +286,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
             (cond
               (= c 44) (json--object--acc s (+ j3 1) n acc2)
               (= c 125) [acc2 (+ j3 1)]
-              :else (error "json: expected ',' or '}' in object at index " j3))))))))
+              else (error "json: expected ',' or '}' in object at index " j3))))))))
 
 (defn json--object (s i n)
   "An object body starting at `i` (just after `{`). Returns `[map end]`."
@@ -306,7 +312,7 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
       (= c 110) (json--lit s i n [110 117 108 108] nil)
       ; null
       (= c -1) (error "json: unexpected end of input")
-      :else (json--number s i n))))
+      else (json--number s i n))))
 
 (defn json-parse (s)
   "Parse JSON text `s` into Brood data: object → a map with **keyword** keys, array →
@@ -325,6 +331,7 @@ on malformed input or trailing content. Pure."
         (if (< k n)
           (error "json: trailing content at index " k)
           v)))))
+(sig json-parse (string -> (or map vector string number bool nil)))
 
 ;; ---- encode -----------------------------------------------------------------
 
@@ -365,7 +372,7 @@ the named escapes + every C0 control) that would each find nothing."
 
 (defn json--enc-key (k)
   "A JSON object key: a string as-is, a keyword/symbol by name, else its `str`."
-  (json--enc-string (cond (keyword? k) (name k) (symbol? k) (name k) (string? k) k :else (str k))))
+  (json--enc-string (cond (keyword? k) (name k) (symbol? k) (name k) (string? k) k else (str k))))
 
 ;; The encoder EMITS into a reversed fragment list threaded through the recursion
 ;; (a string builder), assembled with one `(apply str (reverse …))` at the top. The
@@ -408,7 +415,7 @@ the named escapes + every C0 control) that would each find nothing."
     (map? v) (cons "}" (json--emit-pairs (map-pairs v) (cons "{" acc) true))
     (vector? v) (cons "]" (json--emit-items v 0 (count v) (cons "[" acc)))
     (list? v) (cons "]" (json--emit-list v (cons "[" acc) true))
-    :else (error "json: cannot encode " v)))
+    else (error "json: cannot encode " v)))
 
 (defn json-encode (v)
   "Encode Brood value `v` as JSON text: nil → null, true/false → bool, a number → a
@@ -416,3 +423,5 @@ number, a string → a quoted string, a keyword/symbol → a string of its name,
 an object (keyword keys become string keys), a vector or list → an array. Errors on
 anything else (a pid, fn, …). Pure."
   (apply str (reverse (json--emit v nil))))
+(sig json-encode (any -> string))
+

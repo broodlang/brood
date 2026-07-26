@@ -65,6 +65,6 @@
   (cond
     (empty? spans) true
     (empty? (rest spans)) true
-    :else (let ([s1 e1 f1] (first spans)
+    else (let ([s1 e1 f1] (first spans)
                 [s2 e2 f2] (second spans))
             (and (<= e1 s2) (md-test--non-overlapping? (rest spans))))))

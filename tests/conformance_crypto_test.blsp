@@ -1,0 +1,178 @@
+;; tests/conformance_crypto_test.blsp — NIST CAVP vectors against std/hash.
+;;
+;; The corpus (NIST Cryptographic Algorithm Validation Program, public domain; see
+;; tests/corpus/crypto/README.md) is the set an implementation has to pass to be
+;; FIPS-validated. Two families, both machine-readable `.rsp` records:
+;;
+;;   SHA*ShortMsg.rsp   `Len` / `Msg` / `MD` — message bit lengths 0..255, i.e. every
+;;                      block and padding boundary. This is where hash bugs live.
+;;   SHA256LongMsg      the multi-block cases, record-sampled.
+;;   HMAC.rsp           `Klen` / `Tlen` / `Key` / `Msg` / `Mac`, in `[L=n]` sections by
+;;                      digest size. `Tlen` **truncates** the MAC, which is the part a
+;;                      wrapper gets wrong.
+;;
+;; This is the one corpus here whose failures would be *security* bugs rather than
+;; correctness bugs. The digests themselves come from Rust crates, so the exposure is not
+;; the compression function — it is the wiring: the algorithm keyword reaching `%hmac`,
+;; the hex output, the UTF-8/bytes boundary, and MAC truncation.
+;;
+;; SHA-224 and the SHA-512/t truncations are skipped throughout: `%hmac` and std/hash
+;; expose SHA-1/256/384/512 and MD5, not those, so their vectors have no target.
+
+(defmodule conformance-crypto-test (:use test) (:use corpus))
+(require 'hash)
+(require 'encoding)
+
+(defn cy--file (name)
+  (first (filter (fn (p) (= (path-basename p) name)) (corpus-files "crypto"))))
+
+;; A `.rsp` field line: "Msg = d3" -> "d3". nil for a non-field line.
+(defn cy--field (line key)
+  (if (starts-with? line (str key " = "))
+    (trim (substring line (+ (string-length key) 3)))
+    nil))
+
+;; `Len = 0` is spelled with a placeholder `Msg = 00`, which is NOT the byte 0x00 — the
+;; message is empty. Getting this wrong makes every empty-message vector fail.
+(defn cy--msg-bytes (len hex)
+  (encoding/hex-decode-bytes (if (= len 0) "" hex)))
+
+;; ---- SHA ---------------------------------------------------------------------
+
+(defn cy--sha-digest (algo bytes)
+  (cond
+    (= algo :sha1) (hash/sha1-bytes bytes)
+    (= algo :sha256) (hash/sha256-bytes bytes)
+    (= algo :sha384) (hash/sha384-bytes bytes)
+    (= algo :sha512) (hash/sha512-bytes bytes)
+    else (error "conformance-crypto: unsupported algo " algo)))
+
+;; Walk the record stream, carrying the pending Len/Msg until MD closes the case.
+(defn cy--sha-scan (algo lines len msg ran bad)
+  (if (nil? lines)
+    [ran (reverse bad)]
+    (let (line (first lines)
+          l (cy--field line "Len")
+          m (cy--field line "Msg")
+          d (cy--field line "MD"))
+      (cond
+        l (cy--sha-scan algo (rest lines) (string->number l) msg ran bad)
+        m (cy--sha-scan algo (rest lines) len m ran bad)
+        d (let (got (cy--sha-digest algo (cy--msg-bytes len msg)))
+            (cy--sha-scan algo (rest lines) len msg (inc ran)
+                          (if (= got (lower d)) bad (cons [algo len (lower d) got] bad))))
+        else (cy--sha-scan algo (rest lines) len msg ran bad)))))
+
+(defn cy--sha-file (algo name)
+  (cy--sha-scan algo (corpus-lines (cy--file name)) 0 "" 0 nil))
+
+;; ---- HMAC --------------------------------------------------------------------
+
+;; HMAC.rsp groups cases under `[L=20]`-style headers giving the digest size in bytes.
+(defn cy--l->algo (l)
+  (cond (= l 20) :sha1 (= l 32) :sha256 (= l 48) :sha384 (= l 64) :sha512 else nil))
+
+;; "[L=20]" -> 20, else nil.
+(defn cy--section-l (line)
+  (if (and (starts-with? line "[L=") (ends-with? line "]"))
+    (string->number (substring line 3 (dec (string-length line))))
+    nil))
+
+;; `Tlen` is in BYTES and truncates the MAC; the hex is 2 chars per byte.
+(defn cy--hmac-mac (algo key msg tlen)
+  (substring (encoding/hex-encode-bytes (%hmac algo key msg)) 0 (* 2 tlen)))
+
+(defn cy--hmac-scan (lines algo tlen key msg ran skipped bad)
+  (if (nil? lines)
+    [ran skipped (reverse bad)]
+    (let (line (first lines)
+          sect (cy--section-l line)
+          t (cy--field line "Tlen")
+          k (cy--field line "Key")
+          m (cy--field line "Msg")
+          mac (cy--field line "Mac"))
+      (cond
+        sect (cy--hmac-scan (rest lines) (cy--l->algo sect) tlen key msg ran skipped bad)
+        t (cy--hmac-scan (rest lines) algo (string->number t) key msg ran skipped bad)
+        k (cy--hmac-scan (rest lines) algo tlen k msg ran skipped bad)
+        m (cy--hmac-scan (rest lines) algo tlen key m ran skipped bad)
+        mac
+        (if (nil? algo)
+          ;; an [L=28] (SHA-224) section — no target in Brood
+          (cy--hmac-scan (rest lines) algo tlen key msg ran (inc skipped) bad)
+          (let (got (cy--hmac-mac algo
+                                  (encoding/hex-decode-bytes key)
+                                  (encoding/hex-decode-bytes msg)
+                                  tlen))
+            (cy--hmac-scan (rest lines) algo tlen key msg (inc ran) skipped
+                           (if (= got (lower mac)) bad (cons [algo tlen (lower mac) got] bad)))))
+        else (cy--hmac-scan (rest lines) algo tlen key msg ran skipped bad)))))
+
+(describe "NIST CAVP: SHA byte vectors" :tags [:conformance]
+
+  (test "the corpus is present"
+    (is (corpus-present? "crypto"))
+    (is (> (count (corpus-files "crypto")) 4)))
+
+  (test "SHA-1 ShortMsg: every bit length 0..255"
+    (let ([ran bad] (cy--sha-file :sha1 "SHA1ShortMsg.rsp"))
+      (is (> ran 60))
+      (assert= (take 3 bad) ())))
+
+  (test "SHA-256 ShortMsg: every bit length 0..255"
+    (let ([ran bad] (cy--sha-file :sha256 "SHA256ShortMsg.rsp"))
+      (is (> ran 60))
+      (assert= (take 3 bad) ())))
+
+  (test "SHA-384 ShortMsg: every bit length 0..1023"
+    (let ([ran bad] (cy--sha-file :sha384 "SHA384ShortMsg.rsp"))
+      (is (> ran 120))
+      (assert= (take 3 bad) ())))
+
+  (test "SHA-512 ShortMsg: every bit length 0..1023"
+    (let ([ran bad] (cy--sha-file :sha512 "SHA512ShortMsg.rsp"))
+      (is (> ran 120))
+      (assert= (take 3 bad) ())))
+
+  (test "SHA-256 LongMsg: the multi-block cases"
+    (let ([ran bad] (cy--sha-file :sha256 "SHA256LongMsg-sampled.rsp"))
+      (is (> ran 5))
+      (assert= (take 3 bad) ()))))
+
+(describe "NIST CAVP: HMAC vectors" :tags [:conformance :slow]
+
+  (test "every HMAC case for a digest Brood exposes"
+    (let ([ran skipped bad]
+          (cy--hmac-scan (corpus-lines (cy--file "HMAC.rsp")) nil 0 "" "" 0 0 nil))
+      ;; ~1,575 cases across five digest sizes; the SHA-224 fifth has no target here, so
+      ;; roughly four fifths run. Both counts asserted so a parser change that silently
+      ;; stops running cases is caught rather than reading as a pass.
+      (is (> ran 1000))
+      (is (> skipped 0))
+      (assert= (take 3 bad) ()))))
+
+;; The published vectors everyone knows, spelled out — a failure here is legible without
+;; opening a 839 KB .rsp, and they pin the string-input wrappers the .rsp files never
+;; touch (the .rsp path is all bytes).
+(describe "the canonical published digests" :tags [:conformance]
+
+  (test "the empty-input digests"
+    (assert= (hash/sha1 "") "da39a3ee5e6b4b0d3255bfef95601890afd80709")
+    (assert= (hash/sha256 "")
+             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    (assert= (hash/md5 "") "d41d8cd98f00b204e9800998ecf8427e"))
+
+  (test "\"abc\" — the FIPS 180-4 worked example"
+    (assert= (hash/sha1 "abc") "a9993e364706816aba3e25717850c26c9cd0d89d")
+    (assert= (hash/sha256 "abc")
+             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"))
+
+  (test "RFC 4231 §4.2 — HMAC-SHA-256 test case 1"
+    ;; key = 20 bytes of 0x0b, data = "Hi There"
+    (assert= (hash/hmac-sha256 (utf8-bytes->string (encoding/hex-decode-bytes "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"))
+                               "Hi There")
+             "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"))
+
+  (test "RFC 4231 §4.3 — HMAC-SHA-256 test case 2 (\"Jefe\")"
+    (assert= (hash/hmac-sha256 "Jefe" "what do ya want for nothing?")
+             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")))

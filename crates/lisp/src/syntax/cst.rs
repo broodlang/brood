@@ -37,6 +37,10 @@ pub enum NodeKind {
     Quasi,   // `x
     Unquote, // ~x
     Splice,  // ~@x
+    Pin,     // ^x — a pattern pin (ADR-150). Its own kind, not a symbol named
+    // `^x`, so the tree matches what the reader builds: `^` is special
+    // only at form start, exactly like `'`/`` ` ``/`~` (a `^` *inside* a
+    // token, `foo^bar`, stays one symbol in both).
     // Atom tokens.
     Symbol,
     Keyword,
@@ -181,6 +185,10 @@ impl<'a> Cst<'a> {
             Some('`') => {
                 self.s.bump();
                 self.wrap(NodeKind::Quasi, start)
+            }
+            Some('^') => {
+                self.s.bump();
+                self.wrap(NodeKind::Pin, start)
             }
             Some('~') => {
                 self.s.bump();
@@ -492,7 +500,7 @@ mod tests {
 
     #[test]
     fn keeps_quote_sugar_as_written() {
-        let root = parse("'(a b) `c ~d ~@e");
+        let root = parse("'(a b) `c ~d ~@e ^f");
         let kinds: Vec<NodeKind> = root.forms().map(|n| n.kind).collect();
         assert_eq!(
             kinds,
@@ -500,7 +508,8 @@ mod tests {
                 NodeKind::Quote,
                 NodeKind::Quasi,
                 NodeKind::Unquote,
-                NodeKind::Splice
+                NodeKind::Splice,
+                NodeKind::Pin
             ]
         );
         // The quote wraps the list as its (only) structural child.

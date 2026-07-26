@@ -46,7 +46,8 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
   (let (k (node-kind n)) (or (= k :list) (= k :vector) (= k :map) (= k :set) (= k :root))))
 
 (defn wrapper? (n)
-  (let (k (node-kind n)) (or (= k :quote) (= k :quasi) (= k :unquote) (= k :splice))))
+  (let (k (node-kind n))
+    (or (= k :quote) (= k :quasi) (= k :unquote) (= k :splice) (= k :pin))))
 
 ;; ---- small utilities --------------------------------------------------------
 (defn vec->list (v)
@@ -140,7 +141,7 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 ;; `:format-plugins` deps, so `nest format`, the LSP, and `nest mcp` all honour a
 ;; framework's macro shapes (e.g. Hatch's `deflive`/`on`/`tick`). Empty when not in a
 ;; project or when no rules are declared. Entries here win over the built-ins.
-(def *format-headers-extra* {})
+(defdyn *format-headers-extra* {})
 
 (defn head-header-count (head-node)
   "How many args after this head stay on the first line of a broken list. -1 means
@@ -161,7 +162,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
 ;; one pair per line. Comments between clauses are kept on their own lines.
 ;; `assoc`/`assoc!` ride one header arg (the collection) and then pair their
 ;; trailing key/value arguments, the same shape as `cond`'s test+result.
-(def *format-pair-body* {'cond true 'case true 'assoc true 'assoc! true 'project true})
+(defdyn *format-pair-body* {'cond true 'case true 'assoc true 'assoc! true 'project true})
 
 (defn pair-bindings? (head-node)
   "True if `head-node` names a form whose first header arg is a pair-list."
@@ -190,6 +191,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
       (= k :quasi) (single-line--wrap "`" (node-form n))
       (= k :unquote) (single-line--wrap "~" (node-form n))
       (= k :splice) (single-line--wrap "~@" (node-form n))
+      (= k :pin) (single-line--wrap "^" (node-form n))
       (= k :list) (single-line--seq (node-children n) "(" ")")
       (= k :vector) (single-line--seq (node-children n) "[" "]")
       (= k :map) (single-line--seq (node-children n) "{" "}")
@@ -243,6 +245,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
       (= k :quasi) (render--wrap "`" (node-form n) indent)
       (= k :unquote) (render--wrap "~" (node-form n) indent)
       (= k :splice) (render--wrap "~@" (node-form n) indent)
+      (= k :pin) (render--wrap "^" (node-form n) indent)
       (= k :list) (render--seq n indent "(" ")")
       (= k :vector) (render--seq n indent "[" "]")
       (= k :map) (render--seq n indent "{" "}")

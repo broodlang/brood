@@ -176,6 +176,12 @@ skipped, and an inner binder shadowing a param excludes it — so a guarded use 
 Companion fix: a `*earmuffed*` global types as unknown (dynamic-by-convention), not
 its default value.
 
+> Note (ADR-151): the earmuff spelling no longer affects *scoping* — an ambient
+> (never-namespaced) name is one declared with `defdyn`. It is still read here as
+> a *typing* signal: an earmuffed global is a knob its author may rebind to another
+> type, so pinning it to its current value's type would false-positive. The
+> convention informs the checker; it does not decide where the name lives.
+
 **Deferred (⬜):** parameter demands from *conditional* positions (needs full
 occurrence typing to stay false-positive-clean); inference through recursion /
 higher-order.

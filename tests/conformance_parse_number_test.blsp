@@ -1,0 +1,133 @@
+;; tests/conformance_parse_number_test.blsp — decimal text -> binary64, bit-exact.
+;;
+;; The external corpus (nigeltao/parse-number-fxx-test-data, Apache-2.0; see
+;; tests/corpus/parse-number/README.md) collects the numeral strings that have
+;; historically broken real strtod implementations: exponents at the i64 and i32
+;; boundaries, 700-digit mantissas, the exact half-way ties between two adjacent
+;; doubles, and the `2.2250738585072011e-308` family that once hung PHP and Java.
+;;
+;; The assertion is on BITS, not on `=`. Two floats can compare equal and still be
+;; different values (`-0.0` = `0.0`), and a NaN is equal to nothing at all — so
+;; `float->bits` is the only comparison that actually pins the parse down.
+;;
+;; What is under test is `string->number`, i.e. Brood's whole numeral-text path, not
+;; just its strtod: an input with no `.`/`e` parses as an Int (or a BigInt when it
+;; is wide enough), and `float->bits` then routes it through integer->f64. That is
+;; deliberate — the user-visible property is "this text becomes exactly this float",
+;; and covering the bignum->f64 rounding path with it is a bonus, not a confound.
+
+(defmodule conformance-parse-number-test (:use test) (:use corpus))
+
+;; The f64 bit pattern the corpus expects for a line, and the input it expects it
+;; from. Columns are fixed-width — see the corpus README.
+(defn pn--expected (line) (hex->int (substring line 14 30)))
+(defn pn--input (line) (substring line 31))
+
+;; nil when the line round-trips, else [input expected-hex actual-hex] for the report.
+(defn pn--mismatch (line)
+  (if (< (string-length line) 32)
+    nil
+    (let (input (pn--input line)
+          want (pn--expected line)
+          n (string->number input))
+      (cond
+        (nil? n) [input (substring line 14 30) "unparseable"]
+        (= (float->bits n) want) nil
+        else [input (substring line 14 30) (float->bits n)]))))
+
+;; Fold one file into [checked mismatches]; mismatches accumulate in reverse.
+(defn pn--scan-lines (lines checked bad)
+  (if (nil? lines)
+    [checked bad]
+    (let (m (pn--mismatch (first lines)))
+      (pn--scan-lines (rest lines)
+                      (if (< (string-length (first lines)) 32) checked (inc checked))
+                      (if m (cons m bad) bad)))))
+
+(defn pn--scan-files (files checked bad)
+  (if (nil? files)
+    [checked (reverse bad)]
+    (let ([c b] (pn--scan-lines (corpus-lines (first files)) checked bad))
+      (pn--scan-files (rest files) c b))))
+
+(defn pn--scan ()
+  "Every vendored case as [cases-checked mismatches]."
+  (pn--scan-files (corpus-files "parse-number") 0 nil))
+
+(describe "parse-number-fxx: decimal text -> binary64 is bit-exact"
+  :tags [:conformance :slow]
+
+  (test "the corpus is present"
+    (is (corpus-present? "parse-number"))
+    ;; A silently-empty corpus would make the sweep below vacuously pass.
+    (is (> (count (corpus-files "parse-number")) 0)))
+
+  (test "every vendored case parses to the exact expected bits"
+    (let ([checked bad] (pn--scan))
+      ;; The committed subset is 33,552 cases; `fetch-corpus.sh --full` raises it
+      ;; into the millions. Either way, a truncated corpus should fail loudly.
+      (is (> checked 30000))
+      ;; Show the first few offenders rather than just a count.
+      (assert= (take 5 bad) ())
+      (assert= (count bad) 0))))
+
+;; The cases worth naming: each of these broke a shipped implementation. They are
+;; in the corpus too, but spelled out here they document what the sweep protects.
+(describe "parse-number-fxx: the historically fatal inputs" :tags [:conformance]
+
+  (test "the denormal that hung PHP's and Java's strtod"
+    (assert= (float->bits (string->number "2.2250738585072011e-308"))
+             (hex->int "000FFFFFFFFFFFFF"))
+    (assert= (float->bits (string->number "2.2250738585072012e-308"))
+             (hex->int "0010000000000000")))
+
+  (test "exponents past every integer width clamp to zero or infinity"
+    (assert= (float->bits (string->number "1e-9223372036854775809")) (hex->int "0000000000000000"))
+    (assert= (float->bits (string->number "1e-2147483648")) (hex->int "0000000000000000"))
+    (assert= (float->bits (string->number "1e9223372036854775808")) (hex->int "7FF0000000000000"))
+    (assert= (float->bits (string->number "1e2147483647")) (hex->int "7FF0000000000000")))
+
+  (test "half-way ties round to even"
+    ;; 1 + 2^-53 sits exactly between 1.0 and the next double: ties-to-even -> 1.0.
+    (assert= (float->bits (string->number "1.00000000000000011102230246251565404236316680908203125"))
+             (hex->int "3FF0000000000000"))
+    ;; A hair above the tie must step up.
+    (assert= (float->bits (string->number "1.00000000000000011102230246251565404236316680908203126"))
+             (hex->int "3FF0000000000001")))
+
+  (test "the subnormal boundary"
+    (assert= (float->bits (string->number "5e-324")) (hex->int "0000000000000001"))
+    (assert= (float->bits (string->number "2.4703282292062327e-324")) (hex->int "0000000000000000"))
+    (assert= (float->bits (string->number "2.4703282292062328e-324")) (hex->int "0000000000000001")))
+
+  (test "the largest finite double and the step past it"
+    (assert= (float->bits (string->number "1.7976931348623157e308")) (hex->int "7FEFFFFFFFFFFFFF"))
+    (assert= (float->bits (string->number "1.7976931348623159e308")) (hex->int "7FF0000000000000"))))
+
+;; float->bits is new kernel surface (it is what makes the sweep above possible), so
+;; it gets its own coverage rather than being trusted implicitly.
+(describe "float->bits / bits->float" :tags [:conformance]
+
+  (test "round-trips every kind of double"
+    (dolist (b ["0000000000000000"   ; +0.0
+                "8000000000000000"   ; -0.0
+                "3FF0000000000000"   ; 1.0
+                "7FF0000000000000"   ; +inf
+                "FFF0000000000000"   ; -inf
+                "7FF8000000000000"   ; a quiet NaN
+                "0000000000000001"   ; the smallest subnormal
+                "7FEFFFFFFFFFFFFF"]) ; the largest finite
+      (assert= (float->bits (bits->float (hex->int b))) (hex->int b))))
+
+  (test "separates -0.0 from 0.0, which = collapses"
+    (assert= (- 0.0 0.0) 0.0)
+    (assert= (float->bits 0.0) 0)
+    (assert= (float->bits (* -1.0 0.0)) (hex->int "8000000000000000")))
+
+  (test "an int argument is taken as its float value"
+    (assert= (float->bits 1) (float->bits 1.0))
+    (assert= (float->bits 0) 0))
+
+  (test "a bit pattern outside [0, 2^64) is rejected"
+    (assert-error (bits->float -1))
+    (assert-error (bits->float (* (hex->int "FFFFFFFFFFFFFFFF") 2)))))

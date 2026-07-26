@@ -89,7 +89,7 @@ bare text string (plain projections, tests)."
                  :cursors (or (get view :markers) {})
                  :names (or (get view :participants) {})}
     (vector? view) {:text (nth view 0) :splice nil :cursors (nth view 1) :names (nth view 2)}
-    :else {:text view :splice nil :cursors {} :names {}}))
+    else {:text view :splice nil :cursors {} :names {}}))
 
 ;; ---- the link -----------------------------------------------------------------
 
@@ -111,7 +111,7 @@ the link (unchanged when the texts are equal — pure movement sends nothing)."
       (let ([lo hi repl] splice)
         (buffer-splice (get link :proc) lo hi repl (get link :me) (get link :version))
         (assoc link
-          :pending (concat (or (get link :pending) ()) (list [lo hi (string-length repl)])))))))
+          :pending (append (or (get link :pending) ()) (list [lo hi (string-length repl)])))))))
 
 (defn link-fold (link version view origin)
   "Fold one `[:buffer-updated proc version view origin]` push into `link`: returns
@@ -158,7 +158,7 @@ seed) is handed back as `[:text s]`; a cursor-only delta is `:noop`."
                                                                                                                                                                                                                                                                                                                                                                                               (not own?))
                      ()
                      ; ambiguous → resync resets
-                     :else pending)
+                     else pending)
           nlink (assoc link :version version :pending npending))
       (cond
         own? [nlink :noop]
@@ -168,4 +168,4 @@ seed) is handed back as `[:text s]`; a cursor-only delta is `:noop`."
                                                     pending))]]
         splice [nlink :resync]
         (nil? text) [nlink :noop]
-        :else [nlink [:text text]]))))
+        else [nlink [:text text]]))))

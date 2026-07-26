@@ -34,7 +34,7 @@ classifies a `#` comment, an optional leading `export` keyword, the `KEY` of a
 
 (defn env--find (line i n ch)
   "The offset of the next single-char `ch` at or after `i` in `line`, or -1."
-  (cond (>= i n) -1 (= (char-at line i) ch) i :else (env--find line (inc i) n ch)))
+  (cond (>= i n) -1 (= (char-at line i) ch) i else (env--find line (inc i) n ch)))
 
 (defn env--key-char? (c)
   "True if `c` may appear in a dotenv key (letters, digits, `_`, `.`)."
@@ -62,7 +62,7 @@ present, the key, and a quoted value. `()` when the line isn't an assignment."
         ks (if exp? (+ lead 7) lead)
         ke (env--key-end line ks n))
     (if (and (> ke ks) (< ke n) (= (char-at line ke) "="))
-      (concat (if exp? (list [(+ base lead) (+ base (+ lead 6)) env-face-export]) '())
+      (append (if exp? (list [(+ base lead) (+ base (+ lead 6)) env-face-export]) '())
         (cons [(+ base ks) (+ base ke) env-face-key]
           (env--value-spans line base (inc ke) n)))
       '())))
@@ -74,7 +74,7 @@ assignment spans (key / export / quoted value), else none."
     (cond
       (>= lead n) '()
       (= (char-at line lead) "#") (list [(+ base lead) (+ base n) env-face-comment])
-      :else (env--assign-spans line base lead n))))
+      else (env--assign-spans line base lead n))))
 
 (defn env--lex (src i n acc)
   "Tail-recursive line walker: classify each line (`env--line-spans`), accumulating

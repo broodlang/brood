@@ -18,7 +18,7 @@ Prepending to `done` is O(1) (the caller reverses once), so a whole fill is O(wo
     (cond
       (= cur "") [word done]
       (<= (+ (string-length cur) 1 (string-length word)) width) [(str cur " " word) done]
-      :else [word (cons cur done)])))
+      else [word (cons cur done)])))
 
 (defn fill (s width)
   "Greedily wrap `s` to `width` columns: collapse every run of whitespace (newlines, tabs,

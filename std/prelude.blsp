@@ -266,9 +266,25 @@ for variadic tails."
   ;; in a bare file's per-file ctx. Then keep the existing semantics: a runtime
   ;; no-op, or a `sig!` runtime contract under BROOD_CONTRACTS=1.
   `(do
-     (%register-sig '~name '~type)
+     ~(if (= (getenv "BROOD_CONTRACTS") "1") nil `(%register-sig '~name '~type))
      ~(if (= (getenv "BROOD_CONTRACTS") "1")
-        `(sig! ~name ~type)
+        ;; Contracts mode turns this *declaration* into an *action*: `sig!` rebinds
+        ;; `name` to a checking wrapper, so the definition must already exist. A
+        ;; `sig` written above its `defn` — the natural place, since a signature is
+        ;; documentation — then failed with a bare `unbound symbol: mod/name` and
+        ;; took the whole module load down with it (found by annotating `std/` for
+        ;; real, 2026-07-26). Name the fix instead of dying sideways.
+        ;; `bound?` on a QUOTED symbol is not namespace-resolved — inside
+        ;; `(defmodule path)` it would ask about bare `basename` while the
+        ;; definition is `path/basename`, and report "not defined yet" for a
+        ;; perfectly-placed sig. `%register-sig` already returns the qualified
+        ;; symbol it keyed the declaration under, so ask about *that*.
+        `(if (bound? (%register-sig '~name '~type))
+           (sig! ~name ~type)
+           (error "sig: " '~name " is not defined yet, and BROOD_CONTRACTS=1 makes "
+             "`sig` install a runtime contract (which rebinds the name). Move this "
+             "`(sig " '~name " …)` BELOW the definition, or unset BROOD_CONTRACTS "
+             "to use it as a pure declaration."))
         nil)))
 
 ;; ---- checker suppression: `(check-allow :category form…)` -------------------
@@ -407,6 +423,14 @@ arity itself is the static checker's job."
                ")")))
     (contract--check-rest name rtype (rest args))))
 
+(defn sig--pos (xs x n)
+  "Position of `x` in the list `xs` (from index `n`), or -1. Expansion-time helper
+for `sig!` that predates `index-of` in the prelude's own load order."
+  (cond
+    (nil? xs) -1
+    (%eq (first xs) x) n
+    else (sig--pos (rest xs) x (%add n 1))))
+
 (defmacro sig! (name type)
   "Like `(sig …)` but also installs a *runtime* contract: each argument and the
 result are checked at every call and a mismatch throws (an opt-in 'strong
@@ -419,13 +443,13 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
   ;; contract. The `(do …)` keeps both effects at top level.
   `(do
      (%register-sig '~name '~type)
-     ~(let (i (index-of type '->))
+     ~(let (i (sig--pos type '-> 0))
         (if (< i 0)
           ; not a (… -> …) type — nothing to enforce
           nil
           (let (ptypes (take i type)
                 rtype (nth type (inc i))
-                amp-pos (index-of ptypes '&))
+                amp-pos (sig--pos ptypes '& 0))
             (if (< amp-pos 0)
               ;; fixed arity
               (let (params (map (fn (_) (gensym "arg")) (range (count ptypes)))
@@ -488,7 +512,14 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
       (first xs)
       (let (g (gensym "or")) `(let (~g ~(first xs)) (if ~g ~g (or ~@(rest xs))))))))
 
-;; cond: flat test/expr pairs (ADR-004); `else` or `:else` is the catch-all.
+;; cond: flat test/expr pairs (ADR-004); a final `else` is the catch-all.
+;;
+;; `else` needs the special case below: a bare symbol would otherwise be an unbound
+;; reference. `:else` never did — a keyword is self-evaluating and truthy, so it
+;; already worked the way `true` or any other truthy test does. Special-casing it
+;; too made the language carry a second blessed spelling for no gain, so that case
+;; is gone (2026-07-26). `(cond … :else x)` still returns `x` — as an ordinary
+;; truthy test, via `if` — but `else` is the spelling the language knows.
 ;; Bootstrap helper for cond's guard: walks clauses two at a time, returning
 ;; the orphan last element when count is odd, nil when even. Uses only
 ;; `if`/`empty?`/`first`/`rest` — all kernel primitives — so it's safe to call
@@ -501,9 +532,9 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
       (cond--orphan (rest (rest clauses))))))
 
 (defmacro cond (& clauses)
-  "Multi-way branch over `test expr` pairs: return the `expr` of the first truthy `test`. A final `else` (or `:else`) test always matches; `nil` if none do."
+  "Multi-way branch over `test expr` pairs: return the `expr` of the first truthy `test`. A final `else` test always matches; `nil` if none do."
   (let (orphan (cond--orphan clauses))
-    (if (and (not (nil? orphan)) (not (%eq orphan 'else)) (not (%eq orphan :else)))
+    (if (and (not (nil? orphan)) (not (%eq orphan 'else)))
       (error "cond: odd number of clauses — expected test/expression pairs. "
         "Did you forget an expression for '"
         (pr-str orphan)
@@ -514,7 +545,7 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
           ;; compare with the `%eq` primitive, not the variadic `=` — `=` builds a
           ;; lambda, and doing that *at expansion time* during the prelude's own
           ;; compile pass would strand a local-env closure (breaks the freeze).
-          (if (or (%eq test 'else) (%eq test :else)) expr `(if ~test ~expr (cond ~@more))))))))
+          (if (%eq test 'else) expr `(if ~test ~expr (cond ~@more))))))))
 
 ;; ---- macro expansion --------------------------------------------------------
 ;; Fully expand `form`'s head macro by iterating the single-step `macroexpand-1`
@@ -708,19 +739,19 @@ Maps look up by key; vectors, lists, and strings index by integer position
               (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll)))
                                (char-at coll k)
                                nil)
-              :else (nth coll k nil)))
+              else (nth coll k nil)))
   ((coll k default) (cond
                       (map? coll) (map-get coll k default)
                       (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll)))
                                        (char-at coll k)
                                        default)
-                      :else (nth coll k default)))
+                      else (nth coll k default)))
   ((coll k & default) (cond
                         (map? coll) (map-get coll k (first default))
                         (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll)))
                                          (char-at coll k)
                                          (first default))
-                        :else (nth coll k (first default)))))
+                        else (nth coll k (first default)))))
 
 ;; (assoc m k1 v1 k2 v2 …) -> a fresh map with each pair added/updated.
 ;; Multi-pair builders, split by collection kind so the kernel op (`map-assoc` /
@@ -890,12 +921,37 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
 ;; (pow base exp) — `exp` must be an integer (use `sqrt` for roots). Int base +
 ;; non-negative exp stays an int (overflow raises, like `*`); a negative exp gives
 ;; the reciprocal (a float). Tail-recursive, so a large exponent is O(1) stack.
+;; True for an infinite float: doubling leaves it unchanged and it isn't zero. Used to
+;; detect that the positive power overflowed, without naming a magic constant.
+(defn pow--inf? (x) (and (float? x) (not (= x 0.0)) (= x (* x 2.0))))
+
 (defn pow (base exp)
   "`base` raised to integer `exp`. A negative exponent gives the (float) reciprocal."
   (cond
     (not (int? exp)) (error "pow: exponent must be an integer (use sqrt for roots), got " exp)
-    (< exp 0) (/ 1 (pow base (- exp)))
+    (< exp 0) (pow--reciprocal base exp)
     else (pow--acc base exp 1)))
+
+;; A negative exponent used to be `(/ 1 (pow base (- exp)))`, which loses the whole
+;; subnormal range: when the *positive* power overflows, `1/inf` is 0.0, so
+;; `(pow 2.0 -1074)` gave 0.0 where 2^-1074 is perfectly representable (5e-324), and
+;; every exponent past -1023 was wrong the same way. An int base fails for the sibling
+;; reason — `base^|exp|` becomes a bignum rather than inf, and *its* reciprocal
+;; underflows. So the test is on the reciprocal, not on the power: a 0.0 result may have
+;; lost a representable answer either way. Recompute by splitting the exponent in half,
+;; which keeps every intermediate in range and is exact for a radix-2 base. Terminates
+;; because `(quot exp 2)` is strictly closer to zero than `exp` once `exp <= -2`, and the
+;; halves only recurse while they too come back 0.0. A genuinely-zero answer (10.0^-400,
+;; below the subnormal floor) costs one extra recompute and still yields 0.0.
+;; (Found by the Paranoia port, 2026-07-26.)
+(defn pow--reciprocal (base exp)
+  (let (p (pow--acc base (- exp) 1)
+        r (if (pow--inf? p) 0.0 (/ 1 p)))
+    (if (and (= r 0.0) (<= exp -2))
+      (let (h (quot exp 2))
+        (* (pow base h) (pow base (- exp h))))
+      r)))
+
 (defn pow--acc (base exp acc) (if (= exp 0) acc (pow--acc base (- exp 1) (* acc base))))
 
 ;; (sqrt n) — Newton's method (Babylonian): guess' = (guess + n/guess)/2, iterated
@@ -1023,6 +1079,21 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
   "Raise an error whose message is the concatenated display forms of `parts`."
   (throw (apply str parts)))
 
+;; `(catch Type e body…)` — Clojure/Java's *typed* catch. Brood's `catch` binds
+;; ONE bare symbol and has no exception class, so this shape is not an error the
+;; reader can see: the class name silently becomes the binding and the intended
+;; binder is evaluated as a statement. It produces a WRONG PROGRAM, not a
+;; diagnostic — `(catch Exception e (println "caught" e))` binds the value to
+;; `Exception` and prints the prelude's `e` (2.718…). Detected by shape: a symbol
+;; binder whose handler *starts* with a bare symbol and has more forms after it.
+;; There is no legitimate reading to protect — a leading bare symbol followed by
+;; more body is dead code in every case — so this is a zero-false-positive guard.
+(defn try--class-catch? (clause)
+  (let (handler (rest (rest clause)))
+    (and (symbol? (second clause))
+      (> (count handler) 1)
+      (symbol? (first handler)))))
+
 ;; (try body... (catch e handler...)) => (%try (fn () body...) (fn (e) handler...))
 ;; With no catch clause, it's just (do body...).
 (defmacro try (& body)
@@ -1030,7 +1101,15 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
   (let (clause (last body))
     (if (and (pair? clause) (= (first clause) 'catch))
       (let (init (but-last body) evar (second clause) handler (rest (rest clause)))
-        `(%try (fn () ~@init) (fn (~evar) ~@handler)))
+        (if (try--class-catch? clause)
+          (error "try: `(catch " (str evar) " " (str (first handler))
+            " …)` looks like Clojure's typed catch, which Brood does not have. "
+            "`catch` takes ONE bare binding and no exception class: write `(catch "
+            (str (first handler)) " …)` and branch on the caught value's shape in the body "
+            "(`(get e :kind)`, `match`, `error-message`). As written, `" (str evar)
+            "` would be bound to the raised value and `" (str (first handler))
+            "` evaluated as a statement.")
+          `(%try (fn () ~@init) (fn (~evar) ~@handler))))
       (if (and (pair? clause) (= (first clause) 'fn))
         ;; Common mistake: (try body (fn (e) handler)) instead of (try body (catch e handler)).
         ;; Fail loud at macro-expansion time so the bug is caught before it silently becomes
@@ -1071,8 +1150,16 @@ its printed form."
 
 ;; (defdyn *x* 10) => declare *x* dynamic, then def its default.
 (defmacro defdyn (name default)
-  "Declare `name` a dynamic (process-scoped special) variable with the given default, rebindable via `binding`."
-  `(do (%declare-dynamic '~name) (def ~name ~default)))
+  "Declare `name` a dynamic (process-scoped special) variable with the given default, rebindable via `binding`. Also marks the name **ambient** — never namespaced, so a `def` of it from any module rebinds this one root binding."
+  (do
+    ;; Declare at EXPANSION time as well as at run time. `defdyn` is the *only* door
+    ;; to an ambient (never-namespaced) name, and the compile pass resolves
+    ;; namespaces AFTER macroexpansion — so the mark has to exist before the `def`
+    ;; head below is qualified, or `(defdyn *x* 0)` inside a module would define
+    ;; `mod/*x*` while `binding` and every reader looked for bare `*x*`. The runtime
+    ;; `%declare-dynamic` stays for a `defdyn` form built and `eval`'d dynamically.
+    (%declare-dynamic name)
+    `(do (%declare-dynamic '~name) (def ~name ~default))))
 
 ;; Split a flat binding list (*a* va *b* vb) into its names and value forms, at
 ;; expansion time (like the threading-macro helpers above).
@@ -1085,9 +1172,12 @@ its printed form."
 ;; or `map` can't break the expansion (`fn`/`quote` are special forms).
 (defmacro binding (bindings & body)
   "Rebind the dynamic variables in `bindings` (a flat `name value ...` list) for the dynamic extent of `body`, restoring them on exit (even on error)."
-  (if (odd? (count bindings))
-    (error "binding: bindings must be name/value pairs, got " bindings)
-    `(%binding (quote ~(binding--names bindings)) [~@(binding--vals bindings)] (fn () ~@body))))
+  (if (vector? bindings)
+    (error "binding: bindings must be a list, not a vector: write (binding (*a* 1 *b* 2) …)."
+      " Brood is lists-for-code, vectors-for-data (unlike Clojure).")
+    (if (odd? (count bindings))
+      (error "binding: bindings must be name/value pairs, got " bindings)
+      `(%binding (quote ~(binding--names bindings)) [~@(binding--vals bindings)] (fn () ~@body)))))
 
 ;; ---- pattern matching -------------------------------------------------------
 ;; The matcher is written in Brood, not Rust: a pattern->code compiler (a macro
@@ -1118,7 +1208,15 @@ its printed form."
 (defn match-wildcard? (p) (= p '_))
 (defn match-bind-sym? (p) (and (symbol? p) (not (= p '_)) (not (= p '&))))
 (defn match-quoted? (p) (and (pair? p) (= (first p) 'quote)))
-(defn match-pin? (p) (and (pair? p) (= (first p) 'unquote)))
+;; A **pin** — `^expr`, read as `(%pin expr)`: match the current *value* of `expr`
+;; rather than binding a name.
+(defn match-pin? (p) (and (pair? p) (= (first p) '%pin)))
+;; `~expr` in pattern position — the pre-`^` pin spelling. `~` now belongs to
+;; quasiquote alone (a pin written `~expr` IS `(unquote expr)`, so a macro template
+;; consumed it before the pattern compiler ever saw it, making pinned patterns
+;; unemittable from a macro). Left as a list pattern it would silently try to match
+;; a 2-element list headed by the symbol `unquote`, so name it instead.
+(defn match-stale-pin? (p) (and (pair? p) (= (first p) 'unquote)))
 
 ;; -- expand-time helpers --
 (defn match-member? (x xs)
@@ -1136,6 +1234,7 @@ its printed form."
     (match-bind-sym? pat) (list pat)
     (match-quoted? pat) nil
     (match-pin? pat) nil
+    (match-stale-pin? pat) nil
     (match-bytes-pattern? pat) (match-bytes-vars (rest pat))
     (pair? pat) (match-seq-vars pat)
     (vector? pat) (match-seq-vars (match-vec->list pat))
@@ -1160,7 +1259,11 @@ its printed form."
     (match-quoted? pat) `(if (%eq ~target ~pat) ~success ~fail)
     ; 'sym self-evaluates to the symbol
     (match-pin? pat) `(if (%eq ~target ~(second pat)) ~success ~fail)
-    ; ~expr: match the value of expr
+    ; ^expr: match the value of expr
+    (match-stale-pin? pat) (error "match: `~" (pr-str (second pat))
+                             "` is not a pattern — a pin is written `^" (pr-str (second pat))
+                             "` (`~` belongs to quasiquote alone). To match the literal"
+                             " 2-element list (unquote x), quote the head: ('unquote x).")
     (match-bytes-pattern? pat) (match-compile-bytes (rest pat) target bound success fail)
     ; (bytes seg…): destructure a bytes value, Elixir-style binary matching
     (pair? pat) (match-compile-list pat target bound success fail)
@@ -1646,7 +1749,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
   (cond
     (spawn--thunk-form? form) form
     (symbol? form) `(fn () (~form))
-    :else `(fn () ~form)))
+    else `(fn () ~form)))
 
 (defmacro spawn (head & more)
   "Run an expression in a new green process; returns its pid. Shapes:
@@ -1874,7 +1977,7 @@ runtime isn't a node yet."
 ;; rather than a Rust primitive.
 (defn sleep (ms)
   "Park the current process for `ms` milliseconds without touching its mailbox — every queued message stays queued. Parks on the scheduler timer; it does not block a worker thread."
-  (let (never (ref)) (receive (~never nil) (after ms nil))))
+  (let (never (ref)) (receive (^never nil) (after ms nil))))
 
 ;; ---- timers: send-after / send-interval / cancel-timer (Erlang parity) -----
 ;; Pure Brood policy: a timer is a tiny green process parked on the scheduler's
@@ -1901,7 +2004,7 @@ tick against a dead process forever."
       (letrec (tick (fn ()
                       (receive
                         ; target died — stop ticking
-                        ([:down _ ~target _] nil)
+                        ([:down _ ^target _] nil)
                         (after interval (do (send target payload) (tick))))))
         (tick)))))
 
@@ -2004,8 +2107,8 @@ data-in/data-out natives are allowed (`%offload` refuses the rest); other
 mailbox messages stay queued while waiting (selective receive)."
   (let (tok (%offload f (into [] args)))
     (receive
-      ([:offload ~tok result] result)
-      ([:offload-error ~tok e] (throw e)))))
+      ([:offload ^tok result] result)
+      ([:offload-error ^tok e] (throw e)))))
 
 ;; ---- a general membership test ----------------------------------------------
 (defn member? (x xs)
@@ -2149,10 +2252,6 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
     (less? (first b) (first a)) (merge--acc less? a (rest b) (cons (first b) acc))
     else (merge--acc less? (rest a) b (cons (first a) acc))))
 
-(defn concat (& seqs)
-  "Concatenate any number of sequences (lists, vectors, or maps read as `[k v]` pairs) into one list, left to right — the variadic sequence join. Alias of `append` (the name reflexively reached for). Returns a list; wrap in `(into [] …)` for a vector."
-  (apply append seqs))
-
 ;; `mapcat` uses `append--onto` instead of `cons` to splice each sublist straight
 ;; onto the reversed accumulator, then reverse once — so we never materialise the
 ;; intermediate list-of-sublists nor spread it through `apply append`.
@@ -2208,7 +2307,7 @@ collection; `coll` is untouched. e.g. (conj [1 2] 3) → [1 2 3];
 a vector for a vector and a list for a list. `i` must be in `[0, count)`."
   (if (vector? coll)
     (into (subvec coll 0 i) (subvec coll (inc i) (count coll)))
-    (concat (take i coll) (drop (inc i) coll))))
+    (append (take i coll) (drop (inc i) coll))))
 
 ;; ---- more sequence operations -----------------------------------------------
 ;; The eager counterparts of the `x*` transducers, plus the common Clojure-ish
@@ -2320,7 +2419,7 @@ A new chunk starts each time the return value of `f` changes."
       (chunk-by--acc f (rest s) (f (first s)) (list (first s)) nil))))
 
 ;; (scan f init coll) — running fold: returns a list of all intermediate values
-;; including the seed. Also exported as `reductions`.
+;; including the seed.
 (defn scan--acc (f acc coll result)
   (if (empty? coll)
     (reverse result)
@@ -2328,9 +2427,8 @@ A new chunk starts each time the return value of `f` changes."
       (scan--acc f next (rest coll) (cons next result)))))
 (defn scan (f init coll)
   "Return a list of successively accumulated values of `(fold f init coll)`,
-starting with `init`. `(scan + 0 '(1 2 3))` → `(0 1 3 6)`. Also `reductions`."
+starting with `init`. `(scan + 0 '(1 2 3))` → `(0 1 3 6)`."
   (scan--acc f init (seq coll) (list init)))
-(def reductions scan)
 
 ;; (flat-map f coll) — alias for the existing `mapcat`.
 (def flat-map mapcat)
@@ -2345,8 +2443,6 @@ starting with `init`. `(scan + 0 '(1 2 3))` → `(0 1 3 6)`. Also `reductions`."
 input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
   (zip-with--acc f (seq a) (seq b) nil))
 
-;; (intersperse x coll) — alias for the existing `interpose`.
-(def intersperse interpose)
 
 ;; ---- records: named, optionally-typed maps (defrecord — ADR-130) ------------
 ;; A record is a plain immutable map with a positional constructor and one
@@ -2570,6 +2666,10 @@ iterating for side effects."
 (defmacro for (binds body)
   "List comprehension: `(for (x xs) expr)` yields `expr` for each `x`; supports `:when guard` filters and multiple bindings (last varies fastest). Bindings may destructure."
   (do
+    (when (vector? binds)
+      (error "for: bindings must be a list, not a vector: write (for (x xs) expr)."
+        " Brood is lists-for-code, vectors-for-data (unlike Clojure) — a vector"
+        " *inside* a binding position is still destructuring: (for ([k v] pairs) k)."))
     (for--check-binds binds)
     (let (acc (gensym "acc"))
       `(reverse (let (~acc nil) ~(for--fold acc (map identity binds) body))))))
@@ -2986,10 +3086,6 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
 ;; global table, on top of the `global-names`/`doc` primitives. The first thing
 ;; to reach for when exploring rather than guessing names one at a time.
 
-(defn all-globals ()
-  "Every globally bound name, as a sorted list of symbols. Alias of `global-names`."
-  (global-names))
-
 (defn apropos (pattern)
   "Every global whose name contains `pattern` (a string, symbol, or keyword), as a sorted list of symbols — e.g. `(apropos \"rand\")`."
   ;; `name` (not `str`) so a keyword pattern drops its leading colon, matching
@@ -3034,6 +3130,19 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 ; names (strings) of features already loaded
 (def *load-path* (list "."))
 ; directories searched for <name>.blsp
+
+;; `*load-path*` lives in the ROOT namespace, so only root code can rebind it: a
+;; `(def *load-path* …)` written inside a module defines `mod/*load-path*` (ambient
+;; is a declaration now, not an earmuff spelling — see `defdyn`). These two setters
+;; are that root code, so project tooling and tests can extend the path from any
+;; namespace without the loader losing track of it.
+(defn set-load-path! (dirs)
+  "Replace the module search path with `dirs` (a list of directory strings); returns it."
+  (def *load-path* dirs)
+  *load-path*)
+(defn add-load-path! (& dirs)
+  "Prepend `dirs` to the module search path (skipping any already present); returns the new path."
+  (set-load-path! (append (remove (fn (d) (member? d *load-path*)) dirs) *load-path*)))
 (def *features-loading* {})
 ; feature key → loader pid for loads IN FLIGHT. Set before a load begins so (a) a
 ; CIRCULAR require inside that same load returns immediately (the contract
@@ -3055,6 +3164,22 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 ;; the old bare-leading-string docstring *and* a trailing `(provide 'name)`.
 (def *module-docs* {})
 ; module name (string) -> its docstring (or nil)
+
+;; Called from `defmodule`'s expansion, which runs inside the *consumer's* module —
+;; where a bare `(def *module-docs* …)` would define `mod/*module-docs*`. Defined
+;; here at root, so the `def` below targets the one real registry.
+(defn record-module-doc! (key doc)
+  "Record `doc` as module `key`'s docstring (the registry `module-doc` reads); returns doc."
+  (def *module-docs* (assoc *module-docs* key doc))
+  doc)
+
+;; The hot-reload `def` diagnostics switch. The kernel reads it by BARE name from
+;; root (`eval::reload_diagnostics_on`), so it has to be ambient by declaration —
+;; a plain `(def *reload-diagnostics* false)` inside a module would define
+;; `mod/*reload-diagnostics*` and silence nothing. Declared here (default `true`,
+;; matching the kernel's unbound-means-on) so any module or test can turn it off
+;; for its own scope with an ordinary `def`.
+(defdyn *reload-diagnostics* true)
 
 ;; ---- deprecation ------------------------------------------------------------
 ;; A deprecated construct keeps working but says so. `deprecation-warning` is the
@@ -3092,7 +3217,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; All require/refer forms for the `(:use …)` clauses in a `defmodule` header
 ;; (skipping the optional docstring / any non-`:use` form), flattened for splicing.
 (defn defmodule--use-forms (clauses)
-  (apply concat
+  (apply append
     (map defmodule--use-clause
       (filter (fn (c) (and (pair? c) (= (first c) :use))) clauses))))
 
@@ -3108,7 +3233,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
       (list '%grant-internals (list 'quote mod)))))
 
 (defn defmodule--internals-forms (clauses)
-  (apply concat
+  (apply append
     (map defmodule--internals-clause
       (filter (fn (c) (and (pair? c) (= (first c) :use-internals))) clauses))))
 
@@ -3128,7 +3253,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
       (list '%alias (list 'quote mod) (list 'quote short)))))
 
 (defn defmodule--alias-forms (clauses)
-  (apply concat
+  (apply append
     (map defmodule--alias-clause
       (filter (fn (c) (and (pair? c) (= (first c) :alias))) clauses))))
 
@@ -3147,6 +3272,23 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 (defn defmodule--provide (key)
   (if (contains? *features-loading* key) key (provide key)))
 
+;; The only clauses the header understands. Anything else in a `defmodule` header
+;; used to be silently IGNORED — so a misspelled `(:use-internal m)` or a
+;; Clojure-style `(:require m)` looked like it imported names / granted access and
+;; did nothing at all. That is the worst failure mode for a header that governs
+;; imports *and* privacy, so an unrecognised form is now a hard error.
+(def defmodule--clause-heads [:use :use-internals :alias])
+
+(defn defmodule--check-clause (clause)
+  (if (and (pair? clause)
+        (keyword? (first clause))
+        (includes? defmodule--clause-heads (first clause)))
+    clause
+    (error "defmodule: unrecognised header form " (pr-str clause)
+      " — a `defmodule` header takes only (:use mod [:refer [names]] | [:only [names]]),"
+      " (:use-internals mod), and (:alias mod [:as short]). Check the spelling;"
+      " Clojure's `(:require …)` is not a Brood clause (`:use` both loads and refers).")))
+
 (defmacro defmodule (mod & more)
   "Declare module/namespace `mod` and compile the rest of the file into it —
 definitions become `mod/name`; bare references resolve there, then through
@@ -3154,9 +3296,10 @@ definitions become `mod/name`; bare references resolve there, then through
 feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
   (let (key (name mod)
         doc (if (string? (first more)) (first more) nil)
-        clauses (if (string? (first more)) (rest more) more))
+        clauses (if (string? (first more)) (rest more) more)
+        _checked (map defmodule--check-clause clauses))
     `(do
-       (def *module-docs* (assoc *module-docs* ~key ~doc))
+       (record-module-doc! ~key ~doc)
        (defmodule--provide ~key)
        (%in-ns '~mod)
        ~@(defmodule--use-forms clauses)
@@ -3199,7 +3342,7 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
   (cond
     (member? key *features*) key
     (> n 0) (do (sleep 5) (require--await key (dec n)))
-    :else (require--force key)))
+    else (require--force key)))
 
 ;; Load one feature once. CONCURRENT-SAFE: `require` returning means the module's
 ;; defs exist — a require that races another process's load of the same feature
@@ -3218,7 +3361,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       (= (get *features-loading* key) (self)) key
       ;; someone else is mid-load: wait for their provide (never see a partial module)
       (contains? *features-loading* key) (require--await key 1000)
-      :else
+      else
       ;; Clear the in-flight marker on BOTH exits: a load that throws (module not
       ;; found, or an error inside its source) must not leave `key` marked, or
       ;; every later require of it stalls the full `require--await` window

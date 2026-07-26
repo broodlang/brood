@@ -29,7 +29,7 @@
     (and (vector? input) (= (first input) :note)) (assoc m :n (nth input 1))
     ;; the identity event a named attach delivers before any key (serve--session)
     (and (vector? input) (= (first input) :client-opts)) (assoc m :who (get (nth input 1) :name))
-    :else m))
+    else m))
 
 ;; The text string of a frame's first `[:text row col s]` op — what the app rendered.
 (defn frame-text (f) (nth (first f) 3))

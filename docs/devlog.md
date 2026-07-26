@@ -7886,3 +7886,440 @@ Method note: my first sweep for stale private names deduped with `sort -u -t: -k
 keys on the *name* — so brood-terminal's three call sites vanished behind brood-chat's
 identical ones and I "fixed" one file thinking it was the only one. Dedupe by file+name or
 not at all.
+
+## 2026-07-25 — external conformance corpora, suite 1: `parse-number-fxx`
+
+Every test in this repo was hand-written, with one partial exception
+(`numeric_conformance_test.blsp`, whose cases were adapted *by hand* from chibi's
+r7rs-tests and the Gabriel suites). So the correctness bar was "cases we thought
+of". Started closing that with the corpora other implementers already paid for in
+production bugs. The inventory of 16 suites plus the EMI technique is now a table
+in ROADMAP ("External conformance corpora"); this entry is suite 1.
+
+**Infrastructure.** `scripts/fetch-corpus.sh` fetches into `tests/corpus/<suite>/`,
+`tests/support/corpus.blsp` locates and reads them (on `:source-paths` so runners
+can `(:use corpus)`), runners are `tests/conformance_<suite>_test.blsp` tagged
+`:conformance`. Subsampling is "every Nth line", never random, so re-running
+reproduces the committed bytes. `data/` is the committed subset; `--full` pulls the
+real upstream into a gitignored `full/`, which `corpus-files` prefers when present —
+so the same test is a CI gate and an exhaustive local sweep with no code change.
+Each suite's README pins upstream URL, commit and licence (no GPL data: `ansi-test`
+gets mined for ideas, not vendored). Documented in `docs/testing.md`.
+
+**parse-number-fxx** (nigeltao, Apache-2.0): 33,552 cases vendored out of ~270 MB
+upstream — the curated small extractions whole, every 16th line of the two mid-size
+ones. All pass, 604 ms in release. Zero findings, which is the expected result for
+a parser that delegates to Rust's `f64::from_str`; the value is the *regression
+gate*, and it covers the int/bigint→f64 path too, since `string->number` reads a
+digits-only input as an Int.
+
+**Needed one new kernel primitive, `float->bits` / `bits->float`** — bit
+reinterpretation of a binary64. Not expressible over the existing primitives (no
+bitcast, no `frexp`), and it is the only *exact* float comparison there is: `=`
+collapses `-0.0` with `0.0` and calls every NaN unequal, so asserting a parse
+against `=` would silently accept a wrong sign of zero. General capability, not a
+test hook — serialization and float hashing want it too.
+
+**Fell out: a real bug in `project-setup`.** It applies the manifest only
+`(when (file-exists? mf))`, and `project-apply` assigns `*project-source-paths*`
+only `(when src)` — so a root with no manifest, or one that omits `:source-paths`,
+silently inherited the *previous* project's paths. Latent until adding
+`:source-paths ["tests/support"]` to this repo's manifest made two
+`project_test.blsp` cases fail. Now reset to the `src`/`tests` conventions at the
+top of `project-setup`, the same "always reset stale state" discipline the
+`*format-headers-extra*` line below it already had. Matters for the long-lived
+tooling images (the LSP and `nest mcp` set up a second project in the same image).
+
+Suite green: 3266 in-language tests, `nest check` clean.
+
+## 2026-07-25 — conformance corpora, suite 2: `dectest` finds two real decimal bugs
+
+Wired Cowlishaw/IBM's General Decimal Arithmetic Testcases (ICU licence, fetched from
+CPython's verbatim copy). Unlike `parse-number`, this one found bugs.
+
+**Scope had to be drawn honestly first.** dectest specifies IEEE 754 *decimal* — a
+context with precision, rounding mode and exponent range. Brood's `Decimal` is
+arbitrary-precision and exact, with no context. So the runner keeps only cases where
+the two models must agree: finite operands, and a reference result with **no
+condition flags**, meaning the context didn't round/clamp/overflow and dectest's
+answer *is* the exact answer. `Inexact`/`Rounded`/`Subnormal`, NaN/sNaN/Infinity and
+all of `divide` are skipped, each exclusion named in the runner header. ~1,900 of the
+5,616 vendored lines apply. What survives is the valuable part: the **ideal-exponent**
+rules.
+
+**Two bugs, both `bigdecimal` identity short-circuits Brood inherited.** Its `Sub`
+returns the other operand untouched when one side is zero, so `1 - 0.0` gave `1`
+instead of `1.0`; its `Mul` does the same when one side is *one-valued*, so
+`1.00 * -1` gave `-1` instead of `-1.00`. Each discards the short-circuited side's
+scale. `Add` short-circuits neither — so `+` and `-` disagreed with each other, which
+is what made it obvious this was arithmetic and not just scale-insensitive printing.
+Significance surviving arithmetic is the entire reason to use a decimal for money:
+`(* price 1.00M)` silently dropping to whole units is a live-fire bug.
+
+Fixed in `num_bin`: the exact-decimal path now takes a `dec_scale` rule alongside
+`dec_op` (`max(sa,sb)` for `+`/`-`, `sa+sb` for `*`) and pins the result with
+`with_scale`. The exact result never needs *more* than the ideal scale, so this only
+ever pads with zeros — it cannot round. Threaded as an explicit fn parameter rather
+than branching on the op name string.
+
+One deviation remains and is pinned as such: a zero *result* prints scale-less
+(`1.50M - 1.50M` renders `0`, dectest says `0.00`). That is `bigdecimal`'s Display,
+not the arithmetic — the scale underneath is now right — and it is consistent with
+Brood's `=`, which already ignores scale (`1.5M = 1.50M`). The sweep can't see it
+(both sides canonicalise), so it gets its own test.
+
+Suite green: 3275 in-language tests, Rust nextest clean, `nest check` clean.
+
+## 2026-07-25 — conformance corpora, suite 3: JSONTestSuite finds an RFC bug and KI-11
+
+Wired nst/JSONTestSuite (MIT) — 318 documents whose *filenames* are the RFC 8259
+verdict: `y_` must parse, `n_` must be rejected, `i_` is implementation-defined.
+Vendored `test_parsing/` only (1.6 MB of a ~60 MB repo that is mostly parser
+binaries). A file that isn't valid UTF-8 raises in `slurp` before `json-parse` sees
+it, which is the correct verdict, so the runner counts unreadable as rejected.
+
+**`std/json` violated RFC 8259 §7**: it accepted unescaped control characters inside
+strings, so a raw tab or newline in a string body parsed as content where every
+conforming parser rejects it. Three `n_` cases caught it; one clause in
+`json--string--acc` fixes it.
+
+**KI-11 — the real find, and the first open bug in the tree since 2026-07-19.** Two
+documents didn't fail a test, they *aborted the OS process*:
+`n_structure_100000_opening_arrays.json` and `n_structure_open_array_object.json`.
+`thread '<unknown>' has overflowed its stack / fatal runtime error`. An abort, not a
+panic — so `install_crash_dump` never fires and there's no artifact to read.
+
+The three-engine oracle made the diagnosis immediate:
+
+| engine | 20,000-deep nested JSON |
+|--------|-------------------------|
+| default (JIT) | aborts |
+| `BROOD_NO_JIT=1` | parses fine |
+| `BROOD_VM=0` | clean catchable `recursion too deep … over the 12582912-byte budget` |
+
+`gdb --batch -ex run -ex bt` puts it in `jit_runtime::jit_run_fast_link` ←
+`brood_rt_fast_frame`: the JIT's fast-link Brood→Brood call path takes a native frame
+per call with **no depth guard**, so it never reaches the VM's `MAX_BC_FRAMES` cap or
+the tree-walker's byte budget. Threshold is between 10k and 20k levels. Note a plain
+`(defn deep (n) (+ 1 (deep (- n 1))))` runs to 200,000 fine — the repro needs a real
+workload hot enough to tier the recursive arms, which is presumably why the existing
+recursion-depth tests never saw it.
+
+Impact: any service parsing untrusted nested input is killable with a few kilobytes,
+`try`/`catch` can't see it, and a supervisor can't restart from it because the OS
+process dies rather than the green process. Filed as KI-11 with a repro and a fix
+direction (a remaining-native-stack probe that bails to the VM, or a counter raising
+the same catchable error — `stacker` is already a dep and does exactly this for the
+checker's deep-CODE walkers). **Not fixed** — JIT call-path surgery is its own change,
+not something to fold into wiring up a corpus. The two documents are excluded by name
+in the runner, citing KI-11, and the exclusion goes when the bug does.
+
+Suite green: 3284 in-language tests, `nest check` clean. (One run showed two tcp
+idle-timeout failures at 53 s wall vs the usual 24 s — load-induced timing flake in
+those tests; clean on re-run.)
+
+## 2026-07-25 — syntax finalisation: seven places the surface reinterpreted instead of rejecting
+
+A review of the *language surface* (asked for as "review the language itself", then
+narrowed to "we need to finalize the syntax") found one recurring failure mode
+rather than seven unrelated warts: **the grammar accepted two spellings for the
+same slot, so a wrong guess produced a different working program instead of an
+error.** Every item below is that shape. Recorded as ADR-149/150/151/152.
+
+Confirmed by probing the release binary, not by reading — each one reproduced:
+
+| written | was | now |
+|---|---|---|
+| `(defn g ([x] :one) ([x y] :two))` (Clojure multi-arity) | one 2-param fn, patterns `[x]`/`:one`, empty body → misleading arity error at the call site | error + hint (ADR-149) |
+| `(let [[a 1] [b 2]] …)` | destructured `[a 1]` against `[b 2]` → `unbound symbol: b`, no hint | error + hint |
+| `(try … (catch Exception e (println "caught" e)))` | bound `Exception`, evaluated the prelude's `e` → printed **2.718…** | error + hint (ADR-152) |
+| `(defn f ((x) …) ((x &optional (y 5)) …))` | `&optional` matched as a literal symbol → `[:match-error …]` | error naming the two axes |
+| `(defmodule m (:use-internal json))` (typo) | silently ignored — no import, no privacy grant | error |
+| `` `(a `(b ~(+ 1 2))) `` | `(a (quasiquote (b 3)))` — inner unquote expanded at the outer level | error + hint |
+| module `a` and `b` both `(def *width* …)` | one shared root binding; `b`'s load clobbered `a`'s, `(a/a-width)` → 999 | `a/*width*` and `b/*width*` (ADR-151) |
+
+Two more came out of the same pass:
+
+- **Pins moved from `~x` to `^x`** (ADR-150). A pin *was* `(unquote x)`, so a macro
+  template consumed it and could not emit a pinned pattern at all — exactly what
+  wrapping `(receive ([:reply ^tag v] …))` needs. 167 pins migrated mechanically
+  with a scanner that tracks quasiquote context, so only real pins were rewritten;
+  `~` now belongs to quasiquote alone.
+- **Arity precedence** was order-dependent: `((x) :one)` vs `((x &optional y) …)`
+  tied on `(no-rest, nrequired)` and `max_by_key`'s last-wins picked the
+  `&optional` arm for `(f 1)`, contradicting the documented "exact fixed arity
+  beats a variadic one". Added a fewest-optionals tie-break to **both** engines'
+  selectors (`Closure::select_arm`, `CompiledClosure::arm_for`).
+
+What the new checks found on their own, which is the argument for having them:
+`(:doc "…")` in a `defmodule` header — used by `encoding`, `datetime`, `stats`,
+`stream` — is not a clause and never was, so all four modules had been **dropping
+their module docstring** silently since it was written. `(module-doc 'encoding)`
+returned nil; now it returns 713 characters.
+
+Migration notes worth keeping:
+
+- `defdyn` must declare at **expansion** time as well as run time — the compile
+  pass resolves namespaces *after* macroexpansion, so the ambient mark has to
+  exist before the `def` head it emits is qualified. And `scan_def_names` has to
+  drop names the file declares `defdyn` even when the same file also `def`s them
+  (`std/tool/test.blsp` reads `*test-filter*` at the top, declares it in the
+  middle, `def`s it near the bottom) — otherwise the pre-scan qualifies the early
+  reads to `test/*test-filter*`.
+- Making the prelude's *own* registries dynamic was tried and **reverted**:
+  `*load-path*` as a `defdyn` changed how `:isolated` tests see it and brought the
+  project_test load-path race back. They stay plain root globals with root setters
+  (`set-load-path!`, `add-load-path!`, `record-module-doc!`) — only root code can
+  rebind a root name now, which is the honest consequence of ADR-151.
+- Cross-module knobs `def`'d *inside a function body* (`*project-description*`,
+  `*project-repository*`, set only in `project-setup`) were missed by a top-level
+  scan and surfaced as a `nest publish` failure. The error message
+  ("`*project-description*` is defined as `project/*project-description*` — add
+  `(:use project)` …") pointed straight at it, which is the hint machinery paying
+  for itself.
+
+Green: 3266 in-language tests, `nest check` clean, 866 Rust tests (the two
+`cli::distribution` "flakes" in the first run were two more `~w` pins my grep
+missed — the pattern compiler's new error named them exactly).
+
+Left open deliberately: `sig`/`defrecord` adoption (zero `(sig …)` declarations
+across 46k lines of `std/`, `defrecord` used 5 times, all in the prelude and the
+docs tool) — either commit and annotate `std/`, or replace the out-of-band
+declaration with an inline annotation in the param list. That is a design call,
+not a cleanup, so it stays for its own session. Also left: the `car`/`cdr`,
+`lambda`, `concat`, `reductions`, `intersperse`, `all-globals` aliases and `cond`'s
+`else`/`:else` dual spelling — one spelling each is the smaller language, but
+these are taste, not safety, and breaking them buys nothing a hint doesn't.
+
+## 2026-07-25 — conformance corpora, suite 4: UCD, and two new Unicode primitives
+
+Wired the Unicode Character Database conformance files (Unicode 16.0.0, pinned to the
+version `unicode-segmentation` / `unicode-normalization` were generated from — testing
+against a newer UCD than the crates implement produces failures that are skew, not
+bugs, so `data/VERSION` and the runner's first test pin it).
+
+**Needed new language surface, agreed with the user first.** Brood exposed neither
+grapheme segmentation nor normalisation — only `display-width`, which segments
+internally but doesn't expose the clusters. Added:
+
+- `(string->graphemes s)` → vector of extended grapheme clusters. The sibling of
+  `string->codepoints`, and the unit a human means by "a character": `"e"` + U+0301 is
+  two code points and one cluster; a flag emoji is four and one. This is what editor
+  cursor motion must step by — stepping by code point splits a cluster and corrupts
+  the buffer, which is the bug every editor writes once.
+- `(string-normalize s form)` with `form` ∈ `:nfc :nfd :nfkc :nfkd`. One primitive
+  with a form keyword rather than four functions (ADR-011). Brood's `=` is
+  byte-structural, so `"é"` as U+00E9 and as U+0065 U+0301 compare unequal until
+  normalised. New dep: `unicode-normalization` (tiny tables, same tier as the two
+  Unicode crates already linked).
+
+**NormalizationTest: ~19,000 cases, all pass** — and the runner checks UAX #15's full
+conformance *closure*, not just `NFC(source)`: every one of the five columns normalised
+into every form must yield that form's column. That's where idempotence gets tested,
+and idempotence is where normalisers actually break.
+
+**GraphemeBreakTest: 602 cases, one failure, and it's upstream.**
+`÷ 2701 × 200D × 2701 ÷` — UAX #29 rule GB11 joins a ZWJ sequence when both sides are
+Extended_Pictographic, and Unicode 16 gives U+2701 UPPER BLADE SCISSORS that property,
+so it is one cluster; `unicode-segmentation` 1.13.3 (current release) omits U+2701 from
+its table and returns two. The rule is correct for every other pictographic tested
+(U+270A, U+2764, U+1F468, U+1F3F3 all join), so it's a table gap around the U+2700
+dingbats — worth an upstream report, not a workaround. Excluded from the sweep and
+pinned by a test asserting the *current* behaviour, so the exclusion fails loudly the
+day the crate fixes it.
+
+Method note worth keeping: my first hand-written property test asserted
+`(string->graphemes "e\u{301}f")` equals `["é" "f"]` — with a literal `é` in the source,
+which is precomposed U+00E9 and therefore a different string. The test failed with
+"actual" and "expect" printing identically. Spell both sides with escapes in any test
+that touches normalisation; the corpus is the only honest source of truth here.
+
+Suite green: 3294 in-language tests, `nest check` clean.
+
+## 2026-07-25 — conformance corpora, suite 5: csv-spectrum, and three suites ruled out
+
+**csv-spectrum** (BSD-2-Clause, 12 documents) — the first corpus pointed at a
+**pure-Brood** subject rather than a Rust crate behind a thin wrapper, and it found a
+bug on the first run.
+
+**A CRLF inside a quoted field was being rewritten to LF.** RFC 4180 §2.6: a field
+enclosed in quotes may contain CRLF, and it is *content*. `csv--parse` swallowed the
+`\r` in its `:quoted` state along with the ones that genuinely are line endings, so
+any CSV with a multi-line quoted cell — the corpus's `newlines_crlf`, and anything
+exported from Excel on Windows — silently lost its carriage returns and did not
+round-trip through `csv-parse` → `csv-emit`. Line-ending normalisation now happens
+only in the `:unquoted` and `:quote-seen` states. Regression case added to the runner,
+including the emit→parse round trip.
+
+`location_coordinates` is excluded: broken upstream two ways — its expectation is a
+bare JSON object where every other one is an array of row objects, and its phone
+number doesn't match its own CSV.
+
+**Three suites ruled out, recorded as blocked rather than quietly dropped.** Each
+targets a specification Brood isn't implementing, so wiring them would produce a wall
+of skips that reads like coverage:
+
+- **regex** (Fowler / rust-lang testdata) — `std/regex` is a deliberate subset: no
+  ranges `[a-z]`, no captures, no `{m,n}`, no backreferences. ~95% skips.
+- **CommonMark** — there is no `std/markdown` at all.
+- **WHATWG URL** (WPT `urltestdata.json`) — `std/url` is RFC 3986 parsing with no
+  base-URL resolution, IDNA, or per-component percent-encode sets. Different spec.
+
+Method note that generalises: the scoring so far tracks *what the code is*, not what
+the corpus is. The two suites over Rust crates behind thin wrappers (parse-number →
+`f64::from_str`; UCD normalisation → `unicode-normalization`) found nothing in Brood
+and one upstream gap. The three over Brood-side logic (dectest's scale handling,
+`std/json`'s string states, `std/csv`'s quote states) found a bug each. Prioritise the
+remaining pure-Brood targets accordingly.
+
+Suite green: 3328 in-language tests, `nest check` clean.
+
+## 2026-07-26 — KI-11 fixed, and three more corpora (one found a `pow` bug)
+
+**KI-11 fixed — and it was not a missing guard, it was a guard that stopped applying.**
+`JIT_NATIVE_DEPTH_LIMIT` (1500) and `Heap::jit_native_depth` already existed and *were*
+checked by both dispatch entry points. But `jit_run_fast_link` restored the counter to
+the caller's level as soon as the native callee returned and *then* handled the outcome —
+and three outcome arms re-enter the evaluator while that frame is still on the native
+stack: the outcome-4 tail-chain follow-through (`apply_value`) and the deopt/preempt
+re-runs (`vm_resume_deopt` / `vm_apply`). So a chain of tail-calling delegators oscillated
+between `depth` and `depth+1` forever while the native stack grew. The cap never tripped
+because the depth never climbed. Fix: `jit_native_reenter` re-raises the depth for the
+duration of each re-entrant call. Also renamed the local to `native_depth`, because the
+deopt arm binds a `depth` of its own (the checkpoint's VM stack depth) that shadowed it —
+exactly the confusion that hid this.
+
+Why no existing depth test caught it: the trigger needs a **cycle** where at least one
+link is a plain tail-call delegator (so its native returns outcome 4) *and* the cycle is
+entered from a non-tail position. Plain deep self-recursion — 20-local frame, mutual,
+building a 20k-deep nested value — all stay under the cap and run to 200,000 fine. The
+minimal repro is six lines; `std/json`'s
+`json--value` → `json--array` → `json--array--acc` → `json--value` is the shape in the
+wild, with `json--array` as the delegator. A/B against a pre-fix binary: aborts at 20,000
+pre-fix, runs to 50,000 post-fix. Regression test in
+`tests/jit_tail_chain_depth_test.blsp`; the hot outcome-0 path is untouched so there is no
+perf exposure.
+
+**A follow-on the fix exposed.** With the abort gone, the two 100k-deep JSONTestSuite
+documents now do real work — ~400 ms standalone, but >120 s inside the full parallel
+suite, a >250× slowdown steeper than contention explains and suggestive of a GC cost
+superlinear in graph *depth*. Putting them in an `:isolated` test made it worse (isolated
+units run on the runner process, so taking the ceiling there killed the whole run). They
+are skipped in the sweep with the property covered by a synthetic 5,000-level case, and
+the slowdown is logged in ROADMAP as its own question. Worth a `BROOD_GC_TRACE` session:
+if it is real it affects any workload holding a deep structure.
+
+**Three more corpora wired.**
+
+- **Kuhn's UTF-8 stress test** (CC BY 4.0). No findings — Brood delegates to
+  `String::from_utf8` and `slurp` correctly *raises* on a malformed file rather than
+  substituting U+FFFD. The value is the gate plus an explicit record of which classes are
+  accept-vs-reject, since that is the part a future hand-rolled decoder or a `slurp`
+  "convenience" would get backwards: overlongs rejected (an overlong `/` = `C0 AF` is a
+  path-traversal vector), noncharacters *accepted* (U+FFFF is a legal code point).
+- **NIST CAVP** (public domain): SHA-1/256/384/512 ShortMsg + LongMsg + ~1,250 HMAC
+  cases. No findings; the digests come from CAVP-validated crates, so the exposure was
+  the wiring, not the compression function. Two format traps worth knowing: `Len = 0` is
+  spelled with a placeholder `Msg = 00` (the message is *empty*, not the byte `0x00`), and
+  `Tlen` **truncates** the MAC. Wycheproof deliberately not wired — its value is
+  ECDSA/AES-GCM/RSA, none of which Brood implements.
+- **Paranoia** (Kahan), ported to Brood — and it found a bug.
+
+**`pow` lost the entire subnormal range.** A negative exponent computed
+`(/ 1 (pow base (- exp)))`, so when the *positive* power overflowed to `inf`, `1/inf` was
+0.0: `(pow 2.0 -1074)` returned `0.0` where 2⁻¹⁰⁷⁴ is perfectly representable (`5e-324`),
+and every exponent past −1023 was wrong the same way. An int base failed for the sibling
+reason — `base^|exp|` becomes a bignum rather than `inf`, and *its* reciprocal underflows —
+so the test has to be on the reciprocal, not on the power. Fixed in the prelude (Brood, not
+Rust) by splitting the exponent in half, which keeps every intermediate in range and is
+exact for a radix-2 base.
+
+Paranoia also pinned Brood's one deliberate IEEE 754 departure: **division by zero raises**
+(E0040, with a hint) rather than yielding infinity. Overflow still produces infinity, so
+infinities exist — they just are not reachable by dividing, which is why the port
+constructs `inf`/NaN with `bits->float` instead. That is now asserted rather than assumed.
+
+Method note: the Paranoia port's own first draft failed for four *different* reasons that
+were all mine, not Brood's — a mis-transcribed radix derivation, a precision loop testing
+the wrong direction, `(/ 1.0 0.0)` used as an infinity constructor, and subnormals built
+with the very `pow` that turned out to be broken. A derivation-based test is worth more
+than a table precisely because it fails loudly when your model of the machine is wrong.
+
+Suite green: 3385 in-language tests, `nest check` clean.
+
+### Follow-ups from the same day (2026-07-26)
+
+**KI-11 needed a second half.** With the counter fixed, release was clean but the *debug*
+build still aborted: `JIT_NATIVE_DEPTH_LIMIT` is a frame **count**, and a count is only
+right for one frame size — 1500 levels is a few MB of the 16 MB worker stack in release and
+several times that in debug. The same root flaw as the bug, one level up. Added
+`jit_native_headroom_ok`, which probes `stacker::remaining_stack()` and refuses a new native
+link below a 512 KB margin, with the count cap kept as the cheap first test and the probe
+skipped below 64 levels so the hot shallow path pays nothing. Measured flat (primes-to-200k
+57→58 ms, fib-30 5→6 ms). This also covers a case the original cap never anticipated: a host
+embedding Brood on a smaller thread stack.
+
+**Suite scheduling, twice.** The 100k-deep JSON documents are ~400 ms standalone but >120 s
+inside the parallel suite; an `:isolated` test made it *worse*, since isolated units run on
+the runner process and taking the ceiling there kills the whole run. They are skipped with
+the property covered by a synthetic 5,000-level case, and the >250× gap is logged in ROADMAP
+as a possible GC-depth pathology. Separately, the UCD normalisation sweep (19,000 cases × 6
+normalisations) was one test at 44 s in debug — split along the corpus's own `@PartN`
+sections, which keeps every case, parallelises them, and drops the slowest test to 2.1 s;
+the two corpus files are now read once at load rather than once per part (peak 67→32 MB).
+
+**`.config/nextest.toml`: `binary(suite)` 300s → 600s.** The corpora add ~67 s of debug-build
+work to the single wrapper case. Noted in the config that the next person should check for a
+slow *case* before bumping the budget again.
+
+## 2026-07-26 — `sig` adoption (the pilot that broke four things), and the alias trims
+
+Finishing the surface review's last open item. Two decisions taken by the author:
+adopt `(sig …)` in `std/` rather than redesign or delete it, and trim the redundant
+aliases — keeping `car`/`cdr` and `lambda`.
+
+**The `sig` pilot did its job by failing.** 23 signatures across `std/path` (14),
+`std/set` (7), and `std/json` (2), and the *attempt* surfaced four defects that
+zero adoption had hidden (ADR-153): `bytes`/`decimal` were unspellable as types
+(so no bytes module could ever be annotated); `sig!` couldn't expand early in the
+prelude because it called `index-of`, which the prelude defines at line ~2770;
+`BROOD_CONTRACTS=1` turns a declaration into a rebinding, so a `sig` above its
+`defn` killed the module load; and that guard's `bound?` check asked about the
+unqualified name, reporting "not defined yet" for a correctly-placed sig. The
+fourth finding is the one to keep in mind: **a prelude function cannot carry a
+`sig`** — the contract wrapper captures a local frame and the prelude freeze
+forbids that for a shared closure. The 14 prelude annotations came back out.
+
+Payoff, verified: a wrong call in another module warns (`path/basename: argument 1
+expects string, got 42`), the result type flows (`(string-length (is-dir? "/tmp"))`
+→ "expects string"), correct calls stay silent, and `BROOD_CONTRACTS=1` now throws
+at runtime for the same mistake.
+
+**Trims.** `concat`/`intersperse`/`reductions`/`all-globals` removed (~26 call
+sites migrated; `concat` and `all-globals` turned out to be one-line pass-through
+wrappers, not `def` aliases). `cond` stopped special-casing `:else` — 96 sites
+migrated to bare `else`. Worth writing down *why* that isn't a removal of
+behaviour: `:else` still catches, because a keyword is self-evaluating and truthy,
+exactly as `(cond … 42 x)` catches. Only bare `else` ever needed a case in the
+macro. Making `:else` an *error* would have meant **adding** machinery that also
+rejects `true`, so it wasn't done.
+
+Two mechanical notes for next time: a regex sweep over `(name ` call syntax misses
+**value-position references** — `(apply concat …)` in `defmodule--use-forms` took
+the prelude down on the first run — and it happily rewrites your own prose, which
+mangled the comment explaining the `:else` decision.
+
+Green: `nest check` clean; 3390+ in-language tests pass. The UCD normalisation
+conformance cases (untracked, being split into chunks upstream of this work) time
+out against the 120 s per-test watchdog in a debug build — that file is the
+author's in-flight work, not this change; it references none of the trimmed names.
+
+**Left red, deliberately, rather than guessed at.** `cargo nextest run` fails on
+`brood_suite_passes`: the UCD normalisation sweep times out on the framework's 120 s
+per-test ceiling inside that debug-build wrapper under full-workspace load. It is 1.1 s
+standalone in release and 31 s for the whole file in debug — and sampling it from ~16,000
+cases to ~1,000 did not move the wrapper result, which is what rules out test size. Same
+signature as the 100k-deep JSON documents (>250×). Four shrink-the-test cycles bought
+nothing, so I stopped: it is a contention/GC question, logged in ROADMAP with the evidence
+and the next diagnostic step, not a sizing question. `nest test` (release, 3400 tests) is
+green, as are `nest check` and `cargo fmt --all --check`.

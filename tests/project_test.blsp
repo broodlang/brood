@@ -312,8 +312,8 @@
 ;; `:use`s to register every command into a registry; the walker force-reloading
 ;; interactive.blsp after commands.blsp ran wiped that registry (and warned).
 ;; `:isolated` — these tests mutate process-global project state (the module
-;; load-path via `project-setup`, `*features*`, and earmuffed root counters like
-;; `*zzz-loads*`). Run concurrently they race other tests' `project-setup` (a peer
+;; load-path via `project-setup`, `*features*`, and the fixture load counters like
+;; `zzz/*zzz-loads*`). Run concurrently they race other tests' `project-setup` (a peer
 ;; clobbers the load-path between this unit's setup and its walk → "cannot find
 ;; module 'zzz'"). Isolation runs them alone against a rolled-back private copy of
 ;; the globals, so the walk sees its own freshly-`spit` project. (KI-2 class.)
@@ -338,8 +338,11 @@
         ; unbalanced — won't parse
         (spit f "(defmodule oops \n")
         (is (nil? (project/project--file-feature f))))))
-  ;; The fixtures below bump an *earmuffed* (root) counter on every evaluation, so
-  ;; the counter is exactly how many times the file was actually loaded.
+  ;; The fixtures below bump a counter on every evaluation, so the counter is exactly
+  ;; how many times the file was actually loaded. The counter lives in the *fixture
+  ;; module's* namespace and is read back qualified (`zzz/*zzz-loads*`): an earmuff
+  ;; is no longer ambient by spelling, so the module's own `(def *zzz-loads* …)`
+  ;; defines `zzz/*zzz-loads*` — which is exactly the name to seed and to assert on.
   ; loaded once, not twice
   (test "a module another file already require'd is NOT reloaded when the walk reaches it"
     ;; aaa.blsp `:use`s zzz (loading zzz via require); the walk then reaches zzz.blsp.
@@ -350,28 +353,28 @@
       (let (src (path-join root "src"))
         (spit (path-join src "aaa.blsp") "(defmodule aaa (:use zzz))\n")
         (spit (path-join src "zzz.blsp") "(defmodule zzz)\n(def *zzz-loads* (inc *zzz-loads*))\n")
-        (def *zzz-loads* 0)
+        (def zzz/*zzz-loads* 0)
         (project/project-setup root)
         (project/project-load-sources root)
-        (assert= *zzz-loads* 1))))
+        (assert= zzz/*zzz-loads* 1))))
   (test ":skip-loaded skips an already-provided module; a later walk reloads it"
     (let (root (temp-dir "brood-skip-"))
       (make-dir root)
       (make-dir (path-join root "src"))
       (let (f (path-join (path-join root "src") "skipfix.blsp"))
         (spit f "(defmodule skipfix)\n(def *skip-load-count* (inc *skip-load-count*))\n")
-        (def *skip-load-count* 0)
+        (def skipfix/*skip-load-count* 0)
         (project/project-setup root)
         ; first walk: loads → 1
         (project/project-load-sources root)
-        (assert= *skip-load-count* 1)
+        (assert= skipfix/*skip-load-count* 1)
         (is (member? "skipfix" *features*))
         ; pre-flight: provided → skip → 1
         (project/project-load-sources root :skip-loaded)
-        (assert= *skip-load-count* 1)
+        (assert= skipfix/*skip-load-count* 1)
         ; later walk: reloads edits → 2
         (project/project-load-sources root)
-        (assert= *skip-load-count* 2)))))
+        (assert= skipfix/*skip-load-count* 2)))))
 
 ;; A malformed manifest used to be either cryptic or SILENT. `:source-paths "src"`
 ;; (an easy mistake, since one path is the common case) surfaced as

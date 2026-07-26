@@ -1010,6 +1010,61 @@ pub(super) fn string_to_codepoints(args: &[Value], _: EnvId, heap: &mut Heap) ->
     Ok(heap.alloc_vector(codes))
 }
 
+/// `(string->graphemes s)` — the **extended grapheme clusters** of `s` as a vector
+/// of strings, one O(n) pass. The sibling of `string->codepoints`, and the unit a
+/// human means by "character": `"é"` written as `e` + U+0301 is two code points but
+/// one grapheme, and a flag emoji is four code points and one grapheme. Cursor
+/// motion, column arithmetic and truncation in `std/editor/*` all want this unit —
+/// stepping a cursor by code point splits a cluster and corrupts the text. Not
+/// bootstrappable: the boundary rules are UAX #29 tables, not a rule Brood can
+/// express. `display-width` already segments the same way internally.
+pub(super) fn string_to_graphemes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use unicode_segmentation::UnicodeSegmentation;
+    let s = expect_string(heap, "string->graphemes", arg(args, 0))?;
+    // `true` = *extended* grapheme clusters (UAX #29's recommended default, and
+    // what the renderer and `display-width` use).
+    let parts: Vec<String> = s.graphemes(true).map(|g| g.to_string()).collect();
+    let vals: Vec<Value> = parts.iter().map(|g| heap.alloc_string(g)).collect();
+    Ok(heap.alloc_vector(vals))
+}
+
+/// `(string-normalize s form)` — `s` in Unicode normalisation `form`, one of the
+/// keywords `:nfc` `:nfd` `:nfkc` `:nfkd`. Text that a human reads as identical can
+/// be several different strings — "é" is U+00E9 *or* U+0065 U+0301 — and Brood's `=`
+/// is byte-structural, so only normalisation makes those compare equal. Canonical
+/// (`nfc`/`nfd`) preserves meaning; compatibility (`nfkc`/`nfkd`) also folds
+/// presentation differences (the ligature "ﬁ" → "fi", superscript "²" → "2"), which
+/// is right for search and identifier matching and wrong for round-tripping text.
+/// One primitive with a form keyword rather than four functions (ADR-011).
+pub(super) fn string_normalize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use unicode_normalization::UnicodeNormalization;
+    let s = expect_string(heap, "string-normalize", arg(args, 0))?;
+    let form = arg(args, 1);
+    let name = match form {
+        Value::Keyword(k) => crate::core::value::symbol_name(k),
+        _ => {
+            return Err(LispError::wrong_type(
+                heap,
+                "string-normalize",
+                "keyword",
+                form,
+            ))
+        }
+    };
+    let out: String = match name.as_str() {
+        "nfc" => s.nfc().collect(),
+        "nfd" => s.nfd().collect(),
+        "nfkc" => s.nfkc().collect(),
+        "nfkd" => s.nfkd().collect(),
+        other => {
+            return Err(LispError::runtime(format!(
+                "string-normalize: unknown form :{other} (expected :nfc, :nfd, :nfkc or :nfkd)"
+            )))
+        }
+    };
+    Ok(heap.alloc_string(&out))
+}
+
 /// `(to-fixed x n)` — x rendered with exactly `n` digits after the decimal point
 /// (rounded). The one float→text op the language can't bootstrap: `str`/`pr-str`
 /// print the shortest round-tripping form (full f64 precision, e.g.

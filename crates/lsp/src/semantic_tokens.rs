@@ -127,7 +127,8 @@ fn walk(
         | NodeKind::Quote
         | NodeKind::Quasi
         | NodeKind::Unquote
-        | NodeKind::Splice => {
+        | NodeKind::Splice
+        | NodeKind::Pin => {
             for child in &node.children {
                 walk(child, src, tree, Role::Normal, index, out);
             }

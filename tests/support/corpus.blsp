@@ -1,0 +1,75 @@
+;; tests/support/corpus.blsp — locating and reading the vendored external
+;; conformance corpora (ROADMAP "External conformance corpora").
+;;
+;; Every corpus lives at tests/corpus/<suite>/, fetched by scripts/fetch-corpus.sh:
+;;
+;;   tests/corpus/<suite>/data/   the committed subset — small enough to read
+;;   tests/corpus/<suite>/full/   the complete upstream, gitignored, `--full` only
+;;   tests/corpus/<suite>/README.md, LICENSE
+;;
+;; A runner asks for `(corpus-files "<suite>")` and gets `full/` when it has been
+;; fetched, `data/` otherwise — so the same test is a quick gate by default and an
+;; exhaustive one on a machine that ran `fetch-corpus.sh --full`.
+;;
+;; Paths resolve against THIS file, not the cwd, so a runner works from anywhere.
+
+(defmodule corpus
+  "Locating and reading the vendored external conformance corpora under
+`tests/corpus/`. Runners call `corpus-files` / `corpus-lines`; `hex->int` is here
+because half the corpora encode their expectations as hex.")
+
+;; tests/support/corpus.blsp -> tests/corpus
+(def corpus--root
+  (path-join (parent-dir (parent-dir (path-absolute (current-file)))) "corpus"))
+
+(defn corpus-dir (suite)
+  "The directory holding the vendored corpus `suite`."
+  (path-join corpus--root suite))
+
+(defn corpus-present? (suite)
+  "Whether `suite` has been fetched (`scripts/fetch-corpus.sh <suite>`)."
+  (dir? (corpus-dir suite)))
+
+;; Absolute paths of every entry directly under `dir`, sorted — nil if absent.
+(defn corpus--entries (dir)
+  (if (dir? dir) (map (fn (e) (path-join dir e)) (sort (list-dir dir))) nil))
+
+(defn corpus-files (suite &optional subdir)
+  "The corpus files of `suite`, sorted: the complete upstream under `full/` when it
+has been fetched, else the committed subset under `data/`. Pass `subdir` to pin one
+of the two explicitly."
+  (if subdir
+    (corpus--entries (path-join (corpus-dir suite) subdir))
+    (or (corpus--entries (path-join (corpus-dir suite) "full"))
+        (corpus--entries (path-join (corpus-dir suite) "data")))))
+
+(defn corpus-lines (path)
+  "The lines of corpus file `path`. Only the file's own trailing newline is dropped
+— interior blank lines survive, since some corpora (CommonMark) are whitespace-
+significant and the rest ignore them anyway."
+  (let (s (slurp path))
+    (string-split (if (ends-with? s "\n") (substring s 0 (dec (string-length s))) s)
+                  "\n")))
+
+;; ---- hex ---------------------------------------------------------------------
+;; Several corpora (parse-number's bit patterns, the UCD code points, the crypto
+;; vectors) state their expectations in hex. `number->string` has no radix, so the
+;; decode lives here rather than being re-written in each runner.
+
+(def corpus--hex-digits
+  {"0" 0 "1" 1 "2" 2 "3" 3 "4" 4 "5" 5 "6" 6 "7" 7 "8" 8 "9" 9
+   "a" 10 "b" 11 "c" 12 "d" 13 "e" 14 "f" 15
+   "A" 10 "B" 11 "C" 12 "D" 13 "E" 14 "F" 15})
+
+(defn corpus--hex-at (s i n acc)
+  (if (= i n)
+    acc
+    (let (d (get corpus--hex-digits (char-at s i)))
+      (if (nil? d)
+        (error "hex->int: not a hex digit: " (char-at s i))
+        (corpus--hex-at s (inc i) n (+ (* acc 16) d))))))
+
+(defn hex->int (s)
+  "The non-negative integer with hexadecimal spelling `s` (either case), promoting
+past i64 as needed. Throws on a non-hex character."
+  (corpus--hex-at s 0 (string-length s) 0))

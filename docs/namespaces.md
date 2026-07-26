@@ -21,9 +21,11 @@
 > namespace-sound** (only occurrences resolving to the *same* qualified global are
 > touched). **Package ns-collision policy decided** in [ADR-070](decisions.md):
 > flat names + detect-and-reject at dependency-resolution time (enforcement lands
-> with the package manager, ADR-037). The earmuff rule (`*foo*` names are
-> ambient/root, never namespaced) keeps `*load-path*`/`*features*`/`defdyn` vars
-> reachable unqualified from any ns.
+> with the package manager, ADR-037). **Ambient names** — the ones that stay bare/root,
+> never namespaced — are those *declared* with `defdyn` (ADR-151, superseding the
+> original earmuff-spelling rule), which keeps `defdyn` knobs reachable unqualified
+> from any ns. Prelude registries (`*load-path*`, `*features*`, `*module-docs*`) are
+> plain root globals with root setters (`set-load-path!`, `record-module-doc!`).
 >
 > **Fully complete.** The former cosmetic remainders all landed:
 > namespace-qualified workspace symbols (ns as container), semantic-token ns
@@ -260,7 +262,7 @@ now descends quasiquote templates (`resolve_list` skips only `quote`, not
 as `` `(a/helper ~x) ``; the expansion is already correct and the use-site pass only
 handles names the author wrote bare. The escape is `` `(quote foo) `` / a plain
 `'foo` for a bare data symbol; `~expr` (unquote) is ordinary code and resolves
-normally; the **earmuff rule** keeps `*ambient*` names bare. Root/prelude names
+normally; a **declared-ambient** (`defdyn`) name stays bare. Root/prelude names
 referenced from a template stay reachable unqualified (resolution falls through to
 root). This was implemented in the same big-bang pass as the migration — without it,
 namespaced macros like `test/describe` emitting bare helper calls broke in consumer
@@ -362,7 +364,7 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
      macro call); circular `:use` (project↔package) broken via lazy `package/…`.
 4. ✅ **Hygiene — α (§7)** — auto-qualifying quasiquote shipped in the big-bang
    (resolver descends quasiquote, qualifies free template refs to the defining ns,
-   earmuff names stay bare). Coordinates cleanly with the ADR-064 quasiquote-to-Brood
+   declared-ambient names stay bare). Coordinates cleanly with the ADR-064 quasiquote-to-Brood
    refactor (resolution is a separate pass over the expanded tree).
 5. ✅ **LSP ns-awareness (§6, 2026-05-30)** — the shared resolution seam
    (`macros::resolve_reference` + `introspect::resolve_in_source`/`file_imports`,

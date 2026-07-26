@@ -70,11 +70,11 @@ always dropped (and a late `[:down]` flushed) before returning."
   (let (r (ref) m (monitor pid))
     (send pid [:$call (self) r payload])
     (receive
-      ([:reply ~r v] (demonitor m)
+      ([:reply ^r v] (demonitor m)
         ; flush a late down, don't leak it
-        (receive ([:down ~m _ _] :ok) (after 0 :ok))
+        (receive ([:down ^m _ _] :ok) (after 0 :ok))
         v)
-      ([:down ~m _ reason] (error "gen-call: server " (pr-str pid) " died: " (pr-str reason)))
+      ([:down ^m _ reason] (error "gen-call: server " (pr-str pid) " died: " (pr-str reason)))
       (after ms
         (demonitor m)
         (error "gen-call: timed out after " ms " ms")))))

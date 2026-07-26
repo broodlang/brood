@@ -80,7 +80,7 @@ consumes them), leaving a served app deaf to everything but keys."
              ;; whose [:down …] must reach its update as app input for rehost/reshare,
              ;; not tear the session down)
              ; client process died / link net-split
-             ([:down _ ~client _] :close)
+             ([:down _ ^client _] :close)
              ; anything else is async app input — the event bus, as local displays deliver it
              (m m)
              (after ms nil)))})
@@ -145,7 +145,7 @@ wedged manager. The counterpart of `serve`."
       nil
       (let (r (ref))
         (send pid [:shutdown (self) r])
-        (receive ([:reply ~r v] v) (after 2000 :no-reply))))))
+        (receive ([:reply ^r v] v) (after 2000 :no-reply))))))
 
 (defn serve (make-model view update)
   "Serve a `ui-run` app from THIS runtime to attaching frontends (ADR-090). `make-model`
@@ -172,7 +172,7 @@ that died *without* a clean `[:bye]` (e.g. a throwing `make-model`, which runs b
   (receive
     ([:frame f] (do (term-draw f) (attach--drain peer)))
     ([:bye] :closed)
-    ([:nodedown ~peer] :closed)
+    ([:nodedown ^peer] :closed)
     ([:down _ _ _] :closed)
     (after 0 :open)))
 
@@ -201,7 +201,7 @@ speaks to an old daemon."
       (send {:name serve-name :node peer} [:attach (self) cols rows]))
     (receive
       ([:attached session] session)
-      ([:nodedown ~peer] nil)
+      ([:nodedown ^peer] nil)
       (after 5000 (error "attach: no response from the server (is it serving?)")))))
 
 (defn attach--session (peer &optional opts)
@@ -250,7 +250,7 @@ else is a key/mouse input shipped to the daemon `session` as `[:key …]`. Tail-
   (receive
     ([:frame f] (do ((get display :draw) f) (attach--display-loop peer session display)))
     ([:bye] nil)
-    ([:nodedown ~peer] nil)
+    ([:nodedown ^peer] nil)
     ([:down _ _ _] nil)
     (:close (send session [:detach]))
     (m (do (send session [:key m]) (attach--display-loop peer session display)))))

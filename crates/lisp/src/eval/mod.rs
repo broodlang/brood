@@ -560,7 +560,7 @@ fn eval_tail_loop(
                     if !matches!(rest.unpack(), ValueRef::Pair(_)) {
                         return Err(LispError::runtime("let: missing bindings"));
                     }
-                    let binds = as_binding_vec(heap, binds_form)?;
+                    let binds = as_binding_vec(heap, "let", binds_form)?;
                     if binds.len() % 2 != 0 {
                         return Err(scheme_binding_error(heap, "let", &binds));
                     }
@@ -614,7 +614,7 @@ fn eval_tail_loop(
                     if !matches!(rest.unpack(), ValueRef::Pair(_)) {
                         return Err(LispError::runtime("letrec: missing bindings"));
                     }
-                    let binds = as_binding_vec(heap, binds_form)?;
+                    let binds = as_binding_vec(heap, "letrec", binds_form)?;
                     if binds.len() % 2 != 0 {
                         return Err(scheme_binding_error(heap, "letrec", &binds));
                     }
@@ -884,28 +884,7 @@ fn eval_tail_loop(
                     continue 'tail;
                 }
                 other => {
-                    let shown = crate::syntax::printer::print(heap, other);
-                    let mut err =
-                        LispError::type_err(format!("cannot call non-function: {}", shown));
-                    // A literal (string / number / keyword / bool) in head position almost
-                    // always means C-style call syntax: `f(x)` reads in Brood as two forms
-                    // — `f` then `(x)` — so the inner `(x)` tries to call the *value* of
-                    // `x`. Nudge toward the Lisp form instead of a bare type error.
-                    if matches!(
-                        other.unpack(),
-                        ValueRef::Str(_)
-                            | ValueRef::Int(_)
-                            | ValueRef::Float(_)
-                            | ValueRef::Bool(_)
-                            | ValueRef::Keyword(_)
-                    ) {
-                        err = err.with_hint(
-                            "a value can't be called — in Brood the function goes inside the \
-                         parens: write (f x), not f(x). (`name(args)` reads as two separate \
-                         forms, so the `(args)` tries to call a value.)",
-                        );
-                    }
-                    return Err(err.or_form_pos(heap, call_form));
+                    return Err(not_a_function_error(heap, other).or_form_pos(heap, call_form));
                 }
             }
         }
@@ -966,6 +945,46 @@ fn eval_arguments(
     })
 }
 
+/// The `cannot call non-function` error for a value in head position, with a hint
+/// chosen by what the value *is*. Brood deliberately has no callable data (a
+/// keyword/map/vector is not a function — no magic), so the reflexes that expect
+/// one need naming, exactly as the reader's `#(…)`/`#"…"` hints do. One helper,
+/// used by both engines, so the message and hint can't drift apart.
+pub(crate) fn not_a_function_error(heap: &Heap, v: Value) -> LispError {
+    let shown = crate::syntax::printer::print(heap, v);
+    let err = LispError::type_err(format!("cannot call non-function: {}", shown));
+    match v.unpack() {
+        // `(:key m)` — Clojure's keyword-as-accessor. Reads fine, so only the
+        // runtime can name it.
+        ValueRef::Keyword(_) => err.with_hint(format!(
+            "a keyword isn't a function in Brood: write `(get m {shown})`, not `({shown} m)`. \
+             (If you meant C-style call syntax, the function goes inside the parens: `(f x)`.)"
+        )),
+        // `({:a 1} :a)` — Clojure's map-as-function.
+        ValueRef::Map(_) => err.with_hint(
+            "a map isn't a function in Brood: look a key up with `(get m k)` \
+             (or `(get-in m path)` for a nested one).",
+        ),
+        ValueRef::Set(_) => err
+            .with_hint("a set isn't a function in Brood: test membership with `(contains? s x)`."),
+        // `([10 20] 1)` — Clojure's vector-as-function.
+        ValueRef::Vector(_) => err.with_hint(
+            "a vector isn't a function in Brood: index it with `(nth v i)` \
+             (or `(get v i)` / `(subvec v a b)`).",
+        ),
+        // A literal (string / number / bool) in head position almost always means
+        // C-style call syntax: `f(x)` reads in Brood as two forms — `f` then `(x)`
+        // — so the inner `(x)` tries to call the *value* of `x`.
+        ValueRef::Str(_) | ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => err
+            .with_hint(
+                "a value can't be called — in Brood the function goes inside the \
+                 parens: write (f x), not f(x). (`name(args)` reads as two separate \
+                 forms, so the `(args)` tries to call a value.)",
+            ),
+        _ => err,
+    }
+}
+
 pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> LispResult {
     // No TreeWalkGuard here: `apply` is also the VM dispatch fallback, and its
     // Native branch is a thin shim — `(%receive …)` reached through it is still
@@ -977,14 +996,9 @@ pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> Lisp
         ValueRef::Native(id) => call_native(heap, id, argv, env),
         ValueRef::Fn(id) => apply_closure(heap, id, argv),
         other => {
-            // Same wording as the evaluator's direct-combination path (the
-            // `cannot call non-function` message asserted by suite_test) so the two
-            // engines — and direct vs `apply`-routed calls — never diverge.
-            let shown = crate::syntax::printer::print(heap, other);
-            Err(LispError::type_err(format!(
-                "cannot call non-function: {}",
-                shown
-            )))
+            // Shared with the evaluator's direct-combination path, so the two engines
+            // — and direct vs `apply`-routed calls — never diverge in message or hint.
+            Err(not_a_function_error(heap, other))
         }
     }
 }
@@ -1675,9 +1689,12 @@ fn parse_closure_template(heap: &Heap, rest: Value) -> Result<ClosureTemplate, L
 type ParamSpec = (Vec<Symbol>, Vec<(Symbol, Value)>, Option<Symbol>);
 
 fn parse_params(heap: &Heap, form: Value) -> Result<ParamSpec, LispError> {
+    if let ValueRef::Vector(_) = form.unpack() {
+        return Err(vector_binding_container_error("fn"));
+    }
     let items = heap
         .seq_items(form)
-        .map_err(|_| LispError::type_err("parameter list must be a list (x y) or vector [x y]"))?;
+        .map_err(|_| LispError::type_err("parameter list must be a list: (fn (x y) …)"))?;
 
     let mut required = Vec::new();
     let mut optionals = Vec::new();
@@ -1777,10 +1794,36 @@ fn as_symbol(v: Value) -> Result<Symbol, LispError> {
     }
 }
 
-fn as_binding_vec(heap: &Heap, v: Value) -> Result<Vec<Value>, LispError> {
+fn as_binding_vec(heap: &Heap, who: &str, v: Value) -> Result<Vec<Value>, LispError> {
+    if let ValueRef::Vector(_) = v.unpack() {
+        return Err(vector_binding_container_error(who));
+    }
     heap.seq_items(v).map_err(|_| {
-        LispError::type_err("let bindings must be a list (a 1 b 2) or vector [a 1 b 2]")
+        LispError::type_err(format!(
+            "{who}: bindings must be a list: ({who} (a 1 b 2) …)"
+        ))
     })
+}
+
+/// A **vector** where a binding container belongs — `(let [a 1] …)`,
+/// `(fn [x y] …)`. Brood's rule is *lists for code, vectors for data* (ADR-010),
+/// and accepting a vector here is what turned the Clojure spellings into silent
+/// misreads rather than errors: `(let [[a 1] [b 2]] …)` destructured `[a 1]`
+/// against the value `[b 2]` and reported `unbound symbol: b`, and
+/// `(defn f ([x] :one) ([x y] :two))` became one 2-parameter function with an
+/// empty body. Rejecting the container makes both a diagnostic at the mistake.
+pub(crate) fn vector_binding_container_error(who: &str) -> LispError {
+    let (what, fixed) = match who {
+        "let" => ("bindings", "(let (a 1 b 2) …)"),
+        "letrec" => ("bindings", "(letrec (f (fn …) g (fn …)) …)"),
+        "binding" => ("bindings", "(binding (*a* 1 *b* 2) …)"),
+        _ => ("parameter list", "(fn (x y) …)"),
+    };
+    LispError::type_err(format!("{who}: {what} must be a list, not a vector")).with_hint(format!(
+        "Brood is lists-for-code, vectors-for-data (unlike Clojure): write `{fixed}`. \
+         A vector *inside* a binding position is still destructuring — \
+         `(let ([x y] p) …)` unpacks a 2-vector."
+    ))
 }
 
 /// Whether `v` is a literal-atom value — a leaf that can only be a *value*, never

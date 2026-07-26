@@ -25,4 +25,4 @@
         ;; a selective receive pinned on the OLD stamp still matches a message
         ;; carrying the NEW one (receive patterns compare with =)
         (send (self) [:from after])
-        (assert= (receive ([:from ~before] :matched) (after *test-wait-ms* :no-match)) :matched)))))
+        (assert= (receive ([:from ^before] :matched) (after *test-wait-ms* :no-match)) :matched)))))

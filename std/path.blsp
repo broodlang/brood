@@ -58,6 +58,7 @@ ignored so `(basename \"/usr/bin/\")` returns `\"bin\"`. `(basename \"/\")` retu
       (= e 1) "/"
       ;; path is exactly "/"
       else (substring p (+ i 1) e))))
+(sig basename (string -> string))
 
 (defn dirname (p)
   "The directory part of `p` — everything up to but not including the final /.
@@ -69,6 +70,7 @@ Returns `\".\"` for a bare name, `\"/\"` for the root."
       (< i 0) "."
       (= i 0) "/"
       else (substring p 0 i))))
+(sig dirname (string -> string))
 
 (defn extension (p)
   "The extension of `p`'s basename including the dot (e.g. `\".txt\"`), or `\"\"`."
@@ -76,6 +78,7 @@ Returns `\".\"` for a bare name, `\"/\"` for the root."
         n (string-length b)
         i (path--last-dot b (- n 1)))
     (if (<= i 0) "" (substring b i n))))
+(sig extension (string -> string))
 
 (defn stem (p)
   "The basename of `p` without its extension (`\"foo.tar.gz\"` → `\"foo.tar\"`)."
@@ -83,12 +86,14 @@ Returns `\".\"` for a bare name, `\"/\"` for the root."
         n (string-length b)
         i (path--last-dot b (- n 1)))
     (if (<= i 0) b (substring b 0 i))))
+(sig stem (string -> string))
 
 (defn with-extension (p ext)
   "Return `p` with its extension replaced by `ext` (which should include the dot,
 or be `\"\"` to remove the extension entirely)."
   (let (d (dirname p) base (str (stem p) ext))
     (if (= d ".") base (str d "/" base))))
+(sig with-extension (string string -> string))
 
 ;; ---- join -------------------------------------------------------------------
 
@@ -97,6 +102,7 @@ or be `\"\"` to remove the extension entirely)."
 resets the path from that point, discarding everything before it. Returns `\".\"` for
 an empty argument list."
   (join--loop (seq parts) nil))
+(sig join (& string -> string))
 
 ;; acc is built in reverse (cons prepends); reverse before gluing.
 (defn join--loop (parts acc)
@@ -118,6 +124,7 @@ an empty argument list."
 redundant slashes. An absolute path starts with the `\"/\"` component."
   (let (parts (filter (fn (s) (not (= s ""))) (string-split p "/")))
     (if (starts-with? p "/") (cons "/" parts) parts)))
+(sig split (string -> (list string)))
 
 ;; ---- normalize --------------------------------------------------------------
 
@@ -131,6 +138,7 @@ redundant slashes. An absolute path starts with the `\"/\"` component."
       (nil? resolved) (if absolute "/" ".")
       absolute (str "/" (path--glue (first resolved) (rest resolved)))
       else (path--glue (first resolved) (rest resolved)))))
+(sig normalize (string -> string))
 
 (defn normalize--reduce (parts stack absolute)
   (if (nil? parts)
@@ -155,6 +163,7 @@ divergent pair still yields a valid relative path (`/x/y` from `/a/b` → `../..
   (let (p-parts (filter (fn (s) (not (= s ""))) (string-split p "/"))
         base-parts (filter (fn (s) (not (= s ""))) (string-split base "/")))
     (relative--strip p-parts base-parts)))
+(sig relative-to (string string -> string))
 
 (defn relative--strip (p-parts base-parts)
   (cond
@@ -175,19 +184,25 @@ divergent pair still yields a valid relative path (`/x/y` from `/a/b` → `../..
 (defn absolute? (p)
   "True if `p` is an absolute path (starts with `/`)."
   (starts-with? p "/"))
+(sig absolute? (string -> bool))
 
 (defn relative? (p)
   "True if `p` is a relative path (does not start with `/`)."
   (not (starts-with? p "/")))
+(sig relative? (string -> bool))
 
 (defn exists? (p)
   "True if `p` exists (file or directory)."
   (file-exists? p))
+(sig exists? (string -> bool))
 
 (defn is-file? (p)
   "True if `p` exists and is a regular file (not a directory)."
   (and (file-exists? p) (not (dir? p))))
+(sig is-file? (string -> bool))
 
 (defn is-dir? (p)
   "True if `p` exists and is a directory."
   (dir? p))
+(sig is-dir? (string -> bool))
+

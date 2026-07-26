@@ -33,7 +33,7 @@ grows/shrinks within [*min-px* *max-px*]; anything else leaves `px` unchanged."
       (not (includes? mods :ctrl)) px
       (= action :scroll-up) (min *max-px* (+ px *step*))
       (= action :scroll-down) (max *min-px* (- px *step*))
-      :else px)))
+      else px)))
 
 ; keys, resizes, etc. — just re-render
 (defn loop (win px)
@@ -48,7 +48,7 @@ this process's mailbox (ADR-058), so we park in `receive` holding no worker."
                                                  (when (not (= px* px))
                                                    (gui-font! win {:height px*}))
                                                  (loop win px*))
-      :else (loop win px))))
+      else (loop win px))))
 (let (win (gui-open)
       px 15)
   (gui-font! win {:height px})

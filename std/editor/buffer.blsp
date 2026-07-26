@@ -359,7 +359,7 @@ the editor restarts it whenever the previous command wasn't an undo.)"
     (get buf :undo-disabled) buf
     (and (get buf :undo-amalgamate) (not (empty? (get buf :undo)))) (assoc buf
                                                                       :undo-amalgamate false)
-    :else (assoc buf
+    else (assoc buf
             :undo (cons (buffer--snapshot buf) (or (get buf :undo) ()))
             :undo-amalgamate false)))
 
@@ -379,7 +379,7 @@ markers drops the key so a marker-less state stays marker-less."
     (cond
       m (assoc b :markers m)
       (get b :markers) (dissoc b :markers)
-      :else b)))
+      else b)))
 
 (defn undo-start (buf)
   "Begin a fresh undo run: point `:pending-undo` at the whole `:undo` history. Because
@@ -444,7 +444,7 @@ right by `n` (left-gravity — a marker exactly at `p` stays put)."
   "Shift `markers` for a delete of `[lo, hi)`: a marker at/before `lo` is unchanged, one
 inside the range collapses to `lo`, one at/after `hi` moves left by the deleted width."
   (let (d (- hi lo))
-    (update-vals markers (fn (pos) (cond (<= pos lo) pos (< pos hi) lo :else (- pos d))))))
+    (update-vals markers (fn (pos) (cond (<= pos lo) pos (< pos hi) lo else (- pos d))))))
 
 (defn buffer--adjust-markers (buf kind a b)
   "Return `buf` with its markers shifted for an edit — `:insert` (a=pos, b=len) or `:delete`
@@ -812,7 +812,7 @@ ms (default 5000) — the bounded-sync form for callers that need the answer to
 proceed (an interactive command deciding on what it read)."
   (let (r (buffer-edit-reply bp f origin))
     (receive
-      ([:reply ~r v] v)
+      ([:reply ^r v] v)
       (after timeout (error "buffer-edit-value: no reply after " timeout "ms")))))
 
 ;; ---- splice transforms: concurrent edits without a CRDT ----------------------
@@ -841,7 +841,7 @@ to delete no longer exists as written)."
     (cond
       (<= ahi lo) [(+ lo delta) (+ hi delta) repl]
       (>= alo hi) splice
-      :else (let (p (+ alo alen)) [p p repl]))))
+      else (let (p (+ alo alen)) [p p repl]))))
 
 (defn splice-transform-all (splice applieds)
   "`splice` transformed over each of `applieds` in order (oldest first)."
@@ -873,7 +873,7 @@ Asynchronous — returns nil."
 `buffer-point`, `(fn (b) (buffer-line-at b 0))`. Blocks for the reply."
   (let (r (ref))
     (send bp [:get f (self) r])
-    (receive ([:reply ~r v] v))))
+    (receive ([:reply ^r v] v))))
 
 (defn subscribe-buffer (bp proj)
   "Subscribe the calling process to buffer process `bp`. It immediately receives — and then
@@ -897,7 +897,7 @@ stale-dropped, > → applied once). `:no-reply` after `timeout` ms (a dead proce
 the caller's monitor will deal with it)."
   (let (r (ref))
     (send bp [:sync proj (self) r])
-    (receive ([:reply ~r v] v) (after timeout :no-reply))))
+    (receive ([:reply ^r v] v) (after timeout :no-reply))))
 
 (defn stop-buffer (bp)
   "Stop buffer process `bp` (it leaves its loop). Synchronous; returns :stopped —
@@ -906,7 +906,7 @@ otherwise park the caller forever, e.g. killing a buffer whose process just
 crashed, before the [:down] has been folded)."
   (let (r (ref))
     (send bp [:stop (self) r])
-    (receive ([:reply ~r v] v) (after 2000 :no-reply))))
+    (receive ([:reply ^r v] v) (after 2000 :no-reply))))
 
 ;; ---- create / delete (the buffer-process lifecycle) -------------------------
 

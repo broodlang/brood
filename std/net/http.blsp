@@ -44,7 +44,7 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
 ;; until OOM — the silence timeout never fires while data trickles. Cap the total
 ;; collected response at 64 MiB, mirroring the server's head/body bounds. Past it
 ;; the socket is closed and the request errors.
-(def *http-max-response-bytes* (* 64 1024 1024))
+(defdyn *http-max-response-bytes* (* 64 1024 1024))
 
 ;; ---- reading one request off the wire --------------------------------------
 ;; Bytes arrive as [:tcp sock data] messages (the socket is owned by *this*
@@ -53,7 +53,7 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
 
 ;; A request head larger than this without its terminator is a bad/hostile
 ;; request (slow-loris memory guard) — give up rather than buffer forever.
-(def *http-max-head-bytes* 65536)
+(defdyn *http-max-head-bytes* 65536)
 
 ;; The socket is in binary mode, so `[:tcp …]` chunks are `bytes` values: accumulate
 ;; with `bytes-concat`, scan with `bytes-index-of`. The head is ASCII (decoded for
@@ -68,11 +68,11 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
     (if (> (byte-length acc) *http-max-head-bytes*)
       nil
       (receive
-        ([:tcp ~sock d] (http--read-until sock
+        ([:tcp ^sock d] (http--read-until sock
                           (bytes-concat acc d)
                           (max 0 (- (byte-length acc) (- (byte-length marker) 1)))
                           marker))
-        ([:tcp-closed ~sock] (if (= (byte-length acc) 0) nil acc))
+        ([:tcp-closed ^sock] (if (= (byte-length acc) 0) nil acc))
         (after *http-read-timeout-ms* (if (= (byte-length acc) 0) nil acc))))))
 
 ;; Body read, O(n): collect chunks in a list (O(1) per chunk) and join **once** at
@@ -84,8 +84,8 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
   (if (>= have target)
     (apply bytes-concat (reverse chunks))
     (receive
-      ([:tcp ~sock d] (http--read-to-length sock (cons d chunks) (+ have (byte-length d)) target))
-      ([:tcp-closed ~sock] (apply bytes-concat (reverse chunks)))
+      ([:tcp ^sock d] (http--read-to-length sock (cons d chunks) (+ have (byte-length d)) target))
+      ([:tcp-closed ^sock] (apply bytes-concat (reverse chunks)))
       (after *http-read-timeout-ms* (apply bytes-concat (reverse chunks))))))
 
 (defn http--read-raw (sock)
@@ -308,7 +308,7 @@ loop or other connections. Shipping the `handler` closure to the worker is sound
 socket is registered *passive* (no reader until the worker calls
 `tcp-controlling-process`), so no inbound bytes are lost in the handoff."
   (receive
-    ([:tcp-accept ~ls c] (spawn (http--serve-conn c handler))
+    ([:tcp-accept ^ls c] (spawn (http--serve-conn c handler))
       (serve-loop ls handler))))
 
 (defn http--serve-conn (c handler)
@@ -405,14 +405,14 @@ knows the body is text — the map itself always carries byte-faithful `bytes`."
 ;; server body can't OOM the client.
 (defn http--collect (sock acc have)
   (receive
-    ([:tcp ~sock d] (let (have2 (+ have (http--chunk-size d)))
+    ([:tcp ^sock d] (let (have2 (+ have (http--chunk-size d)))
                       (if (> have2 *http-max-response-bytes*)
                         (do
                           (tcp-close sock)
                           [:error "http: response exceeded *http-max-response-bytes*"])
                         (http--collect sock (cons d acc) have2))))
-    ([:tcp-closed ~sock] [:ok (bytes-concat (reverse acc))])
-    ([:tcp-error ~sock msg] [:error msg])
+    ([:tcp-closed ^sock] [:ok (bytes-concat (reverse acc))])
+    ([:tcp-error ^sock msg] [:error msg])
     (after 30000 [:error "http: timed out waiting for a response"])))
 
 (defn request-headers (u body-bytes extra)

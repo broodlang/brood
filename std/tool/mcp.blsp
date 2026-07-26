@@ -210,7 +210,7 @@ image stays in sync with disk."
                                    " times in "
                                    rel
                                    " — make it unique")}
-              :else (let (_w (spit abs (replace text old new)))
+              else (let (_w (spit abs (replace text old new)))
                       (mcp--write-result rel abs))))))
       (catch e
         {:ok false :error (mcp--error-shape e)}))))
@@ -401,7 +401,7 @@ exist?\" without guessing names one at a time."
 (defn mcp-all-globals-tool (args)
   "`all-globals` — every globally bound name in the image. Returns
 `{:globals [name ...]}` (sorted strings)."
-  {:globals (map name (all-globals))})
+  {:globals (map name (global-names))})
 
 (defn mcp-doc-search-tool (args)
   "`doc-search` — find globals whose docstring contains a query string. Returns

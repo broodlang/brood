@@ -96,7 +96,13 @@
     (assert-error (binding (dt-read 1) (dt-read)))
     (assert-error (binding (never-declared 1) nil)))
 
-  (test "binding accepts a vector binding form, like let" (assert= (binding [*dt* 8] *dt*) 8))
+  ;; Lists for code, vectors for data (ADR-010): a vector bindings *container* is
+  ;; rejected everywhere — `let`/`letrec`/`binding`/`for`/`fn` — so the Clojure
+  ;; spellings fail loudly instead of being reinterpreted. (A vector *inside* a
+  ;; binding position is still destructuring.)
+  (test "a vector binding container is rejected, like let's"
+    (assert-error (eval (read-string "(binding [*dt* 8] *dt*)")))
+    (assert= (binding (*dt* 8) *dt*) 8))
 
   (test "an odd-length binding list is rejected"
     ;; (read at runtime so the bad form doesn't fail the file's own compile pass)
@@ -140,7 +146,7 @@
     (let (c (spawn (dt-crasher)))
       (let (mr (monitor c))
         (send c :go)
-        (assert= (receive ([:down ~mr _ [:error _]] :crashed)) :crashed)))
+        (assert= (receive ([:down ^mr _ [:error _]] :crashed)) :crashed)))
     ;; …then fresh workers still compute correctly (Σ 1..10 = 55)…
     (dt-spawn-workers (self) (dt-range 1 11))
     (assert= (dt-collect 0 10 0) 55)

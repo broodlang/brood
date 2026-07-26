@@ -190,7 +190,7 @@ primitive — `activate-layer` is the hook-firing version."
 
 (defn layers--replace-base-list (lst layer)
   "Replace the base (last) element of `lst` with `layer`, or add it if `lst` empty."
-  (if (empty? lst) (list layer) (concat (but-last lst) (list layer))))
+  (if (empty? lst) (list layer) (append (but-last lst) (list layer))))
 
 ;; ---- hooks ------------------------------------------------------------------
 
@@ -282,7 +282,7 @@ every buffer). **Idempotent** — registering the same ref again is a no-op, so 
 module that registers at load is safe to (re)load."
   (if (some? (fn (r) (= r ref)) *system-layers*)
     *system-layers*
-    (def *system-layers* (concat *system-layers* (list ref)))))
+    (def *system-layers* (append *system-layers* (list ref)))))
 
 (defn register-type-layers (type refs)
   "Bind buffer `type` to `refs` (a list of layer references, head = highest
@@ -337,7 +337,7 @@ layer's `:activate` (base-first). Replaces any existing `:layers` — call on bu
 creation, or after `set-buffer-type`. The type list's order is preserved (head =
 highest precedence); system layers come last."
   (let (type (buffer-type-for buf)
-        refs (concat (layers-for-type type) *system-layers*)
+        refs (append (layers-for-type type) *system-layers*)
         seeded (assoc buf :type type :layers ()))
     ;; activate base-first (reverse: each push goes to the head), so the resulting
     ;; :layers order equals `refs` order and a minor's :activate sees the base.

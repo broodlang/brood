@@ -73,7 +73,7 @@ fn parse_prelude(bencher: divan::Bencher) {
 #[divan::bench(args = engine_grid![1_000, 10_000, 100_000])]
 fn sum_tail(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
     let src = format!(
-        "(def sum-to (fn [n acc] (if (= n 0) acc (sum-to (- n 1) (+ acc n))))) (sum-to {n} 0)"
+        "(def sum-to (fn (n acc) (if (= n 0) acc (sum-to (- n 1) (+ acc n))))) (sum-to {n} 0)"
     );
     bencher
         .with_inputs(|| interp_on(eng))
@@ -148,7 +148,7 @@ fn apply_driven(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
 #[divan::bench(args = engine_grid![15, 20, 25])]
 fn fib(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
     let src =
-        format!("(def fib (fn [n] (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))) (fib {n})");
+        format!("(def fib (fn (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))) (fib {n})");
     bencher
         .with_inputs(|| interp_on(eng))
         .bench_refs(|interp| interp.eval_str(&src).unwrap());
@@ -162,7 +162,7 @@ fn fib(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
 #[divan::bench(args = engine_grid![10_000, 100_000])]
 fn cons_build(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
     let src = format!(
-        "(def build (fn [n acc] (if (= n 0) acc (build (- n 1) (cons n acc))))) \
+        "(def build (fn (n acc) (if (= n 0) acc (build (- n 1) (cons n acc))))) \
          (count (build {n} nil))"
     );
     bencher
@@ -177,7 +177,7 @@ fn cons_build(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
 #[divan::bench(args = engine_grid![1_000, 5_000])]
 fn sort_brood(bencher: divan::Bencher, (eng, n): (Eng, u64)) {
     let src = format!(
-        "(def gen (fn [n seed acc] \
+        "(def gen (fn (n seed acc) \
            (if (= n 0) acc \
              (let (x (bit-xor seed (bit-shift-left seed 13)) \
                    y (bit-xor x (bit-shift-right x 7)) \

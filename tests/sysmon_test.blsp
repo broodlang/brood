@@ -21,7 +21,7 @@
   "Receive [:system …] messages until one matches `kind` about `subject` (or a
 5s timeout → :timeout). Other system events are consumed and dropped."
   (receive
-    ([:system ~kind ~subject detail] detail)
+    ([:system ^kind ^subject detail] detail)
     ([:system _ _ _] (sysmon--drain-until kind subject))
     (after *test-wait-ms* :timeout)))
 
@@ -103,7 +103,7 @@ worker's mailbox so it can't satisfy a later test's receive."
     (system-monitor (self) {:gc true :gc-min-pause-us 600000000})
     (let (worker (spawn (do (sysmon--churn 50000 ()) (gc-collect) :ok))
           wm (monitor worker))
-      (receive ([:down ~wm ~worker _] :ok) (after *test-wait-ms* :timeout))
+      (receive ([:down ^wm ^worker _] :ok) (after *test-wait-ms* :timeout))
       (assert= :quiet (receive ([:system :gc _ _] :got-one) (after 200 :quiet))))
     (sysmon--done))
 

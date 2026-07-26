@@ -1,0 +1,141 @@
+;; tests/conformance_utf8_test.blsp — Kuhn's UTF-8 decoder capability and stress test.
+;;
+;; The corpus (Markus Kuhn, CC BY 4.0; see tests/corpus/utf8/README.md) is one document
+;; that is deliberately **not** valid UTF-8: it embeds every classic malformed sequence
+;; in its own prose. Vendored whole, it gives one high-value assertion — a decoder must
+;; refuse the file rather than substitute replacement characters — and its catalogue
+;; gives the table below.
+;;
+;; The sequences are spelled as hex and decoded with `encoding/hex-decode-bytes`, so each
+;; case reads as the bytes it is rather than as a decimal vector. Kuhn's section numbers
+;; are kept so a case can be looked up against the document.
+;;
+;; Why this matters beyond decoding: `slurp` promises a Brood string, and Brood strings
+;; are UTF-8, so the *only* correct answer for a malformed file is to raise. A decoder
+;; that silently inserts U+FFFD turns corrupt input into plausible-looking text, which is
+;; how mis-encoded data gets committed to a database. `slurp-bytes` is the escape hatch
+;; for genuinely binary input, and it must return the bytes untouched.
+
+(defmodule conformance-utf8-test (:use test) (:use corpus))
+(require 'encoding)
+
+(defn u8--bytes (hex) (encoding/hex-decode-bytes hex))
+
+(defn u8--decodes? (hex)
+  "true if `hex` decodes as UTF-8, false if it is rejected."
+  (try (do (utf8-bytes->string (u8--bytes hex)) true) (catch e false)))
+
+;; Every sequence in `hexes` must be rejected; returns the offenders.
+(defn u8--accepted (hexes) (filter u8--decodes? hexes))
+
+;; Every sequence in `hexes` must decode; returns the offenders.
+(defn u8--rejected (hexes) (remove u8--decodes? hexes))
+
+(defn u8--file () (first (corpus-files "utf8")))
+
+(describe "UTF-8 stress: the corpus file itself" :tags [:conformance]
+
+  (test "the corpus is present"
+    (is (corpus-present? "utf8"))
+    (is (not (nil? (u8--file)))))
+
+  ;; The single most valuable assertion in this file. The document is not valid UTF-8,
+  ;; so `slurp` — which promises a Brood string — must refuse it outright rather than
+  ;; lossily substituting U+FFFD.
+  (test "slurp refuses a malformed file instead of substituting U+FFFD"
+    (assert-error (slurp (u8--file))))
+
+  (test "slurp-bytes reads it byte-for-byte"
+    (let (bs (slurp-bytes (u8--file)))
+      (is (bytes? bs))
+      ;; Kuhn's 2015-08-28 revision, as pinned in the corpus README.
+      (assert= (count bs) 22781))))
+
+(describe "UTF-8 stress: Kuhn's catalogue" :tags [:conformance]
+
+  ;; §2 — boundary conditions. The first and last code point of each encoded length,
+  ;; which is where an off-by-one in a hand-written decoder shows up.
+  (test "2.1/2.2 first and last of each sequence length decode"
+    (assert= (u8--rejected (list "00"          ; U+0000, 1 byte
+                                 "C280"        ; U+0080, 2 bytes
+                                 "E0A080"      ; U+0800, 3 bytes
+                                 "F0908080"    ; U+10000, 4 bytes
+                                 "7F"          ; U+007F
+                                 "DFBF"        ; U+07FF
+                                 "EFBFBF"      ; U+FFFF
+                                 "F48FBFBF"))  ; U+10FFFF, the last code point
+             ()))
+
+  ;; The two code points that bracket the surrogate block, plus U+FFFD itself — an
+  ;; off-by-one in the surrogate check rejects one of the neighbours.
+  (test "2.3 the code points bracketing the surrogate block decode"
+    (assert= (u8--rejected (list "ED9FBF"     ; U+D7FF, last before the block
+                                 "EE8080"     ; U+E000, first after it
+                                 "EFBFBD"))   ; U+FFFD REPLACEMENT CHARACTER
+             ()))
+
+  ;; §3.1 — a continuation byte with no lead byte.
+  (test "3.1 unexpected continuation bytes are rejected"
+    (assert= (u8--accepted (list "80" "BF" "80BF" "80BF80" "80BF80BF")) ()))
+
+  ;; §3.2 — a lead byte followed by a space instead of a continuation.
+  (test "3.2 lonely start characters are rejected"
+    (assert= (u8--accepted (list "C020" "DF20" "E020" "EF20" "F020" "F720"
+                                 "F820" "FB20" "FC20" "FD20")) ()))
+
+  ;; §3.3/3.4 — truncation, the bug a streaming decoder writes.
+  (test "3.3 sequences with the last byte missing are rejected"
+    (assert= (u8--accepted (list "C2" "E0A0" "F09080" "DF" "EFBF" "F48FBF")) ()))
+
+  (test "3.4 a concatenation of incomplete sequences is rejected"
+    (assert= (u8--accepted (list "C2E0A0F09080")) ()))
+
+  ;; §3.5 — bytes that cannot appear in UTF-8 at all.
+  (test "3.5 impossible bytes are rejected"
+    (assert= (u8--accepted (list "FE" "FF" "FEFEFFFF")) ()))
+
+  ;; §4 — overlong forms. The security-critical class: an overlong "/" (C0 AF) slips a
+  ;; path separator past a naive filter that only looks for the one-byte 2F.
+  (test "4.1 overlong ASCII is rejected"
+    (assert= (u8--accepted (list "C0AF" "E080AF" "F08080AF" "F8808080AF"
+                                 "FC80808080AF")) ()))
+
+  (test "4.2 maximum overlong forms are rejected"
+    (assert= (u8--accepted (list "C1BF" "E09FBF" "F08FBFBF" "F887BFBFBF"
+                                 "FC83BFBFBFBF")) ()))
+
+  (test "4.3 overlong NUL is rejected (the C0 80 trick)"
+    (assert= (u8--accepted (list "C080" "E08080" "F0808080" "F880808080"
+                                 "FC8080808080")) ()))
+
+  ;; §5.1/5.2 — UTF-16 surrogates have no UTF-8 encoding. CESU-8 / "modified UTF-8"
+  ;; emits them, so a decoder that accepts them accepts non-UTF-8 data.
+  (test "5.1 single surrogates are rejected"
+    (assert= (u8--accepted (list "EDA080"   ; U+D800
+                                 "EDADBF"   ; U+DB7F
+                                 "EDAE80"   ; U+DB80
+                                 "EDAFBF"   ; U+DBFF
+                                 "EDB080"   ; U+DC00
+                                 "EDBE80"   ; U+DF80
+                                 "EDBFBF")) ; U+DFFF
+             ()))
+
+  (test "5.2 paired surrogates are rejected"
+    (assert= (u8--accepted (list "EDA080EDB080" "EDA080EDBFBF"
+                                 "EDAFBFEDB080" "EDAFBFEDBFBF")) ()))
+
+  ;; §5.3 — noncharacters ARE valid UTF-8. Rejecting them is as wrong as accepting a
+  ;; surrogate: they are legal code points that merely must not be interchanged as text.
+  (test "5.3 noncharacters are valid UTF-8 and must decode"
+    (assert= (u8--rejected (list "EFBFBE"     ; U+FFFE
+                                 "EFBFBF"     ; U+FFFF
+                                 "F09FBFBE"   ; U+1FFFE
+                                 "F48FBFBE")) ; U+10FFFE
+             ()))
+
+  ;; Beyond Kuhn: every sequence that decodes must re-encode to the same bytes.
+  (test "round-trip: decode then encode is identity on the bytes"
+    (dolist (hex (list "00" "7F" "C280" "DFBF" "E0A080" "EFBFBF"
+                       "F0908080" "F48FBFBF" "EFBFBE"))
+      (assert= (string->utf8-bytes (utf8-bytes->string (u8--bytes hex)))
+               (u8--bytes hex)))))

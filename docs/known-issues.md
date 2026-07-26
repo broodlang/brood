@@ -1,12 +1,155 @@
 # Known issues
 
-All historical interpreter defects are **resolved** (KI-9 is a one-off arity sighting
-judged a transient inconsistent-build artifact, not present in committed code; KI-10 no
-longer reproduces, incidentally fixed — both kept as records, not open bugs). This file is the condensed record — what
-each was, how it was fixed, and the regression test that guards it — so a recurrence
-is recognizable. For the narrative discovery writeup of the scheduler race, see
+All interpreter defects are **resolved** (KI-9 is a one-off arity sighting judged a
+transient inconsistent-build artifact, not present in committed code; KI-10 no longer
+reproduces, incidentally fixed — both kept as records, not open bugs).
+This file is the condensed record — what each was, how it was fixed, and the regression
+test that guards it — so a recurrence is recognizable. For the narrative discovery
+writeup of the scheduler race, see
 [claude-demo-findings.md](claude-demo-findings.md); deeper rationale is in the cited
 ADRs / topic docs.
+
+---
+
+## KI-12 — a frozen prelude global's inner handle resolves to the wrong object · **found 2026-07-26, open**
+
+**Symptom.** The prelude's only non-trivial global value is corrupt in every build:
+
+```lisp
+(println (pr-str *load-path*))
+;; expected: (".")
+;; actual:   ("A list of the given arguments.")   ← `list`'s DOCSTRING
+```
+
+The *list* is right (one element, `rest` is nil) — its **car** is a different object
+entirely. Which object depends on heap layout, which is what makes it a handle bug
+rather than a logic bug:
+
+| build / flag | `*load-path*` |
+|---|---|
+| debug, default | `("A list of the given arguments.")` (a docstring) |
+| debug, `BROOD_GC_VERIFY=1` | `("ret")` |
+| prelude written `'(".")` instead of `(list ".")` | `(xs)` — a **symbol** |
+| **`BROOD_VM=0`** (tree-walker) | `(".")` — **correct** |
+
+So the car slot holds whatever value happens to live where the handle points, and
+the kind bits change with it — i.e. the stored `Value` is wrong, not merely
+mis-read. Correct under the tree-walker, wrong under the VM.
+
+**Not a regression.** A `brood` binary from 2026-07-25 18:49 (predating that day's
+syntax work — it still rejects `^x` pins) shows the same class of failure, with
+`cond`'s docstring in the slot instead. The 2026-07-26 prelude edits (alias trims,
+`sig` adoption) only changed the *layout*, hence which wrong object appears.
+
+**Why it hid for so long.** The prelude has essentially one global holding a heap
+value, and nothing reads it on the happy path: `require` finds every std module via
+`%builtin-module`, and a project run replaces the path wholesale
+(`project-setup` → `set-load-path!`). So filesystem module lookup from the
+*default* path has been broken without a single test noticing — except
+`brood-lsp`'s `completion::tests::completes_module_names_in_require_and_use`,
+which puts a temp dir on the default path and asks for completions. That test is
+the canary and is **currently failing**.
+
+**Where to look.** `Heap::freeze_as_shared_code` (`crates/lisp/src/core/heap.rs`)
+re-tags globals with `to_prelude` and then walks the slabs flipping every handle
+stored *inside* pairs / vectors / map nodes / closure arms. `to_prelude` covers
+every `ValueRef` kind except **`Bytes`** (which falls through `other => other` and
+would keep a LOCAL tag — worth fixing regardless, though the prelude has no bytes
+literal today). The re-tag walk looks complete for pairs, so the fault is more
+likely an index/aliasing fault in how the builder slabs are moved into the PRELUDE
+region than a missing flip. Repro is instant (`(println (pr-str *load-path*))` on a
+fresh interp), which makes this very tractable with the GC tooling — it just needs
+its own session rather than a rushed patch at the end of an unrelated change.
+
+## KI-11 — JIT tail-chain recursion escaped the native-depth cap · **found 2026-07-25, fixed 2026-07-26**
+
+**Symptom (before the fix).** Deep non-tail recursion on the **JIT** path overflowed the
+*native* stack and killed the process — `thread '<unknown>' has overflowed its stack /
+fatal runtime error: stack overflow, aborting`. An abort, not a panic, so the crash-dump
+hook (`install_crash_dump`) never fired and there was no `.brood_crash_dump` to read.
+
+The other two engines were correct on the identical input, which is what identified it as
+a JIT bug rather than a missing guard in general:
+
+| engine | 20,000-deep nested JSON |
+|---|---|
+| default (JIT) | **process aborted** — native stack overflow |
+| `BROOD_NO_JIT=1` (bytecode VM) | parsed fine — frames are heap-backed |
+| `BROOD_VM=0` (tree-walker) | clean, catchable `recursion too deep: used 12585200 bytes of stack, over the 12582912-byte budget` |
+
+Threshold was between 10,000 and 20,000 nesting levels. `gdb --batch -ex run -ex bt` put
+the recursion in `jit_runtime::jit_run_fast_link` ← `brood_rt_fast_frame`.
+
+**Impact (before the fix).** Any Brood service parsing untrusted nested input was
+killable with a few kilobytes — `std/json` the obvious one, but this was a property of
+the JIT call path, not of the parser. Unrecoverable: `try`/`catch` could not see it, and
+a supervisor could not restart from it because the whole OS process died, not the green
+process.
+
+**Repro** (the minimal shape — a three-function cycle with a tail-call delegator,
+entered from a non-tail position; see the root cause for why a plain `(defn deep (n) (+ 1
+(deep (- n 1))))` runs to 200,000 without tripping it):
+
+```lisp
+(defn tv (n) (if (= n 0) [0 n] (ta (- n 1))))   ; enters the cycle
+(defn ta (n) (tacc n))                           ; the tail-call delegator
+(defn tacc (n) (let ([v j] (tv n)) [(+ v 1) j])) ; non-tail: result destructured
+(tv 20000)                                       ; aborted pre-fix; fine now
+```
+
+**Found by** the JSONTestSuite corpus (`n_structure_100000_opening_arrays.json`,
+`n_structure_open_array_object.json`) — see ROADMAP "External conformance corpora".
+
+**Root cause.** Not a missing guard — a guard that stopped applying. The cap
+(`JIT_NATIVE_DEPTH_LIMIT`, 1500) and its counter (`Heap::jit_native_depth`) already
+existed and *were* checked by both dispatch entry points. But `jit_run_fast_link`
+restored the counter to the caller's level as soon as the native callee returned, and
+*then* handled the outcome — and three outcome arms re-enter the evaluator while that
+frame is still on the native stack: the outcome-4 tail-chain follow-through
+(`apply_value`) and the two deopt/preempt re-runs (`vm_resume_deopt` / `vm_apply`). So a
+chain of tail-calling delegators oscillated between `depth` and `depth+1` forever while
+the native stack grew without bound. The cap never tripped because the depth never
+climbed.
+
+That is why no existing depth test caught it: the trigger needs a **cycle** of functions
+in which at least one link is a plain tail-call delegator (so its native returns outcome
+4) and the cycle is entered from a non-tail position. Plain deep self-recursion — even
+with a 20-local frame, even mutual, even building a 20,000-deep nested value — all stay
+under the cap and run to 200,000 fine. `std/json`'s
+`json--value` → `json--array` → `json--array--acc` → `json--value` is exactly the shape,
+with `json--array` as the delegator.
+
+**Fix, part 1 — make the counter count.** `jit_native_reenter` re-raises the depth for the
+duration of each re-entrant call, so the cap sees the true native nesting and chains past
+1500 levels drain on the VM's heap-backed frames as intended. The hot outcome-0 return path
+is untouched, and the cap is only reached by depths that previously crashed.
+
+**Fix, part 2 — make the cap a measurement.** With part 1 in place the release build was
+fine but the *debug* build still aborted, because `JIT_NATIVE_DEPTH_LIMIT` is a frame
+**count**, and a count is only ever right for one frame size: 1500 levels is a few MB of
+the 16 MB worker stack in release and several times that in debug. Same root flaw as the
+bug itself, one level up. `jit_native_headroom_ok` now probes
+`stacker::remaining_stack()` and refuses a new native link below a 512 KB margin; the
+count cap stays as the cheap first test, and the probe is skipped below 64 levels so the
+hot shallow path (`fib`, `primes`) pays nothing beyond the existing integer compare.
+Measured flat: primes-to-200k 57→58 ms, fib-30 5→6 ms (3-sample, within noise).
+
+This also covers a case neither the count nor this bug report anticipated: a host embedding
+Brood on a smaller thread stack. Returning `false` is never a correctness problem — the
+caller falls through to the VM, which is where deep recursion belongs.
+
+**Regression test.** `tests/jit_tail_chain_depth_test.blsp` — the minimal three-function
+cycle at 30,000 levels, the deeply-nested-JSON rejection, and the plain-self-recursion
+shapes that always worked (so a future depth change has to keep them working). Verified by
+A/B against a pre-fix binary: pre-fix aborts at 20,000, post-fix runs to 50,000 — in
+**both** profiles, debug included, which is what part 2 bought.
+
+The two JSONTestSuite documents that found this are still skipped in the sweep, but on
+cost grounds rather than correctness: rejecting a 100,000-level document now means actually
+draining it on the VM, which is ~400 ms standalone and >120 s inside the full parallel
+suite. That >250× gap is steeper than contention explains and is logged in ROADMAP as a
+possible GC-depth pathology worth its own investigation; the property is covered by a
+synthetic 5,000-level case.
 
 ---
 

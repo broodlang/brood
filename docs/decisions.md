@@ -9213,3 +9213,218 @@ unchanged; the JIT off; `std/tool/coverage.blsp` extended rather than replaced.
   number. A shortfall now prints `FAILED: coverage N% is below …` and raises a bare
   signal `nest` recognises, instead of surfacing as an error with a trace and a version
   banner after a report the user had already read.
+
+## ADR-149 — A binding container is a **list**; a vector there is an error
+
+**Context.** Param lists and `let` bindings were documented as lists ("code is
+lists, data is vectors", ADR-010) but vectors were *also* accepted, as a
+convenience for Clojure muscle memory. That made every Clojure binding shape
+**reinterpret** instead of fail, because a vector in a binding *position* is
+already meaningful — it destructures:
+
+| written (Clojure habit) | what Brood made of it |
+|---|---|
+| `(defn g ([x] :one) ([x y] :two))` | one **2-parameter** fn, patterns `[x]` and `:one`, **empty body** — surfacing later as a misleading `expected 2 arguments, got 1` at the call site |
+| `(defn f ([x] x))` | 2 params, empty body → returns `nil` |
+| `(let [[a 1] [b 2]] …)` | destructures `[a 1]` against the *value* `[b 2]` → `unbound symbol: b`, **no hint** — while the Scheme-shaped `(let ((a 1) (b 2)) …)` mistake *did* get a flatten hint |
+
+**Decision.** The container is a list, full stop. A **vector** where a binding
+container belongs — `fn`/`defn` param list, `let`/`letrec`/`binding` bindings,
+`for`/`doseq` bindings — is a clean error with a hint. A vector *inside* one still
+destructures (`(let ([x y] p) …)`), which is now its only meaning there. A
+`fn`/`defn` whose clause heads are vectors (`([x] …) ([x y] …)`) is rejected as
+the same mistake.
+
+**Why not keep both spellings.** The cost was not verbosity, it was that the
+*wrong* reading was a valid program. Rejecting the container turns three silent
+misreads into three hints, and it cost nothing to adopt: `grep` found **zero**
+vector param lists and zero vector binding containers across 46k lines of `std/`
++ `tests/` — only Rust test fixtures and one `dynamic_test` case that existed to
+assert the alias.
+
+**Consequences.** `(defn f [x y] …)` and `(let [a 1] …)` stop working (they never
+appeared in first-party Brood). The formatter, checker, and LSP are unaffected —
+they read the same lists they always did.
+
+## ADR-150 — The pattern pin is `^expr`, not `~expr`
+
+**Context.** A pin — "match the current value of `expr`" — was spelled `~expr`,
+reusing the reader's `(unquote …)` for the same "drop to evaluation" intuition it
+has in quasiquote (ADR-none; `docs/pattern-matching.md`). But a pin *was*
+literally `(unquote expr)`, and quasiquote consumes `(unquote …)` first. So inside
+a macro template a pin could not be expressed at all:
+
+```clojure
+(defmacro await-tag (tag) `(receive ([:reply ~tag v] v)))   ; ~tag = template unquote
+```
+
+The workaround was `` ~(list 'unquote tag) ``. This bit precisely where it hurts:
+the request/reply idiom (`(receive ([:reply ^ref v] …))`) is the thing most worth
+wrapping in a macro, and `std/proc/gen.blsp` only escaped it by hand-writing
+`gen-call` rather than generating it.
+
+**Decision.** `^` becomes its own reader macro: `^form` reads as `(%pin form)`
+(Elixir's spelling; Brood has no metadata, so `^` was free). `~` belongs to
+quasiquote alone. `~expr` in pattern position is an error naming the fix. The
+marker is `%`-prefixed so a user's own `pin` function cannot collide with it.
+
+**Consequences.** 167 pins across `std/` + `tests/` were migrated mechanically
+(a scanner that tracks quasiquote context, so only real pins were rewritten). A
+`^:kw` / `^{…}` Clojure metadata annotation now reads as a pin of a keyword/map —
+called out in the language reference's Clojure crib table.
+
+## ADR-151 — Ambient names are **declared** (`defdyn`), not spelled (`*earmuffs*`)
+
+**Context.** Under ADR-065 any `*earmuffed*` name was *ambient*: never
+namespaced, so a `def` of it in any module rebound one root binding. That is
+right for `*load-path*` and `defdyn` knobs, and wrong for everything else — it
+made an ordinary module-local constant silently global:
+
+```clojure
+;; module a                      ;; module b
+(def *width* 10)                 (def *width* 999)
+(defn a-width () *width*)   ;=> 999   — b clobbered a's binding, no diagnostic
+```
+
+Three overlapping meanings had accumulated on one spelling: "dynamic variable",
+"config constant" (`std/net/http.blsp`'s `*http-max-head-bytes*` is a plain
+`def`), and "exempt from namespacing".
+
+**Decision.** Ambient status comes from a **declaration**: a name declared with
+`defdyn` is never namespaced; every other name is, earmuffs included. So a plain
+`(def *width* 10)` in module `a` defines `a/*width*` — isolated, like any other
+definition — and a knob other modules must reach is declared `(defdyn *knob* v)`.
+Earmuffs remain the *convention* for a knob, and the checker still reads them as
+a typing signal (`docs/types.md`); they no longer decide scoping.
+
+`defdyn` declares at **expansion** time as well as run time, because the compile
+pass resolves namespaces *after* macroexpansion — the mark has to exist before
+the `def` head it emits is qualified. The namespace pre-scan (`scan_def_names`)
+drops any name the file declares `defdyn`, so declaration order inside a file
+doesn't matter.
+
+**Consequences.**
+
+- 29 cross-module knobs in `std/` became `defdyn` (a one-word change each);
+  52 module-local ones gained proper isolation with no edit at all.
+- The prelude's own registries (`*load-path*`, `*features*`, `*module-docs*`, …)
+  stay **plain root globals** and got root **setters** — `set-load-path!` /
+  `add-load-path!` / `record-module-doc!` — because only root code can rebind a
+  root name now. Declaring them dynamic instead was tried and rejected: it
+  changed how `:isolated` tests snapshot them and made a load-path race in the
+  suite reappear.
+- A name the *kernel* reads bare (`*reload-diagnostics*`, `*features*`) must be
+  declared; `*reload-diagnostics*` is now `defdyn`'d in the prelude.
+
+## ADR-152 — Reject the shape; never reinterpret it
+
+**Context.** ADRs 149–151 each removed a case where a plausible-but-wrong
+spelling produced a *different working program* instead of an error. A review of
+the surface (2026-07-25) found the same failure mode in four more places, all
+cheap to close:
+
+**Decision.** Each of these is now a diagnostic, not a reinterpretation:
+
+1. **`(catch Type e body…)`** — Clojure's typed catch. Brood's `catch` takes one
+   bare binder, so the class name became the binding and the intended binder was
+   evaluated as a statement. Because the prelude defines `e`,
+   `(catch Exception e (println "caught" e))` printed **2.718…** — a wrong
+   answer with no diagnostic. Detected by shape (a symbol binder whose handler
+   starts with a bare symbol and has more forms after it: always dead code, so
+   zero false positives).
+2. **`&optional`/`&` in a pattern-dispatched `fn`** — matched as a literal symbol,
+   so the clause silently stopped being variadic and `(f 1 2)` failed with a
+   `[:match-error …]` listing `(x &optional (y 5))` as a *pattern*. Now an error
+   naming the two mechanisms.
+3. **An unrecognised `defmodule` header clause** — silently ignored, so a
+   misspelled `(:use-internal m)` or a Clojure `(:require m)` looked like it
+   imported names / granted privacy access and did nothing. Now an error. This
+   immediately found four std modules (`encoding`, `datetime`, `stats`, `stream`)
+   whose `(:doc "…")` header had been dropping their module docstring on the
+   floor since it was written.
+4. **A nested quasiquote** — levels are not tracked, so an inner `~x` was expanded
+   at the outer level (`` `(a `(b ~(+ 1 2))) `` → `(a (quasiquote (b 3)))`, where
+   the standard reading leaves `(+ 1 2)` alone). Now an error with a hint; a
+   `` ` `` inside an `~unquote` is ordinary code and stays legal. Level tracking
+   can land later and can only widen what is accepted (ADR-011).
+
+Two related fixes came out of the same pass:
+
+- **Arity precedence** now matches its documentation: among arms accepting a call,
+  an exact fixed arity beats a variadic one, then the most required params, then
+  the **fewest `&optional` slots**. Without that last tie-break, `((x) :one)` vs
+  `((x &optional y) …)` resolved by *clause order* — `(f 1)` picked the
+  `&optional` arm. Both engines' selectors (`Closure::select_arm` and the VM's
+  `CompiledClosure::arm_for`) carry the identical key.
+- **Calling data** gets a hint per kind: `(:a m)` → "write `(get m :a)`",
+  and likewise for a map, set, or vector in head position. Brood deliberately has
+  no callable data; that is a design choice worth *naming* at the point the
+  reflex fires, as the reader's `#(…)` / `#"…"` hints already do.
+
+**Why this is a principle and not four bug fixes.** A language surface can accept
+a wrong spelling, reject it, or reinterpret it. The first two are fine — the third
+is the only one that costs a debugging session, and it is the one an LLM (and a
+newcomer carrying Clojure habits) hits most. When a spelling is ambiguous, the
+default is to reject it and name the fix (`docs/llm-native.md`).
+
+## ADR-153 — `sig` adoption: annotate `std/`, and what that exposed
+
+**Context.** ADR-082 shipped `(sig …)`/`(sig! …)` as the type-annotation surface.
+A surface review (2026-07-25) found **zero `(sig …)` declarations across 46k lines
+of `std/`** — the feature was designed, documented, and never used, so nothing was
+learned from it. The options were: adopt it, replace it with an inline annotation
+in the parameter list, or delete it. **Decision: adopt it**, on the reasoning that
+an out-of-band declaration is not disqualifying (Erlang's `@spec` is out-of-band
+and widely used), so the honest test is to write some and see what breaks.
+
+**Decision.** Annotate the public API of `std/path` (14), `std/set` (7), and
+`std/json` (2) as a pilot, and fix whatever the attempt reveals rather than
+working around it. What it revealed, in order:
+
+1. **`bytes` and `decimal` had no spelling in the type grammar.** Both are real
+   runtime tags — `type-of` returns them, `bytes?`/`decimal?` narrow to them — but
+   `base_ty` had no name for either, so *no signature could describe a bytes value*.
+   That rules out `std/encoding`, `std/hash`, and `std/net/tcp`, which are all
+   bytes. Added. The compatibility contract in `docs/types.md` says a `Value` kind
+   needs a `Tag` and a bit; it also needs a **name**, or it can't be annotated.
+2. **`sig!` could not expand early in the prelude.** Its expansion called
+   `index-of`, which the prelude defines at ~2770 — so a signature on anything
+   defined earlier failed with `unbound symbol: index-of` *while building the
+   prelude*. Replaced with a bootstrap-safe `sig--pos`, so a signature now expands
+   anywhere in the file.
+3. **`BROOD_CONTRACTS=1` turns a declaration into a rebinding.** With that flag
+   every `sig` behaves like `sig!`, which rebinds the name — so a `sig` written
+   *above* its `defn` (the natural place: a signature is documentation) died with a
+   bare `unbound symbol: mod/name` and took the whole module load with it. Two
+   fixes: the guard now names the correct placement, and it asks about the
+   **namespace-qualified** name (`bound?` on a quoted symbol is not resolved, so it
+   was asking about bare `basename` while the definition was `path/basename` —
+   reporting "not defined yet" for a correctly-placed sig).
+4. **The prelude cannot carry signatures at all.** A runtime contract wraps the
+   function in a closure that captures a local frame, and the prelude freeze
+   requires a shared closure to capture only the global environment — so
+   `BROOD_CONTRACTS=1` + a prelude `sig` is a hard panic. The 14 prelude
+   annotations were withdrawn; `std/` modules (loaded after the freeze) are fine.
+
+**Consequences.**
+
+- 23 signatures in `std/`, enforced across module boundaries in both directions
+  (argument *and* result type), with `nest check` still at zero warnings.
+- The placement rule (`sig` below its definition) is now documented and checked
+  structurally by `tests/sig_adoption_test.blsp`.
+- **Open design question, deliberately not decided here:** `BROOD_CONTRACTS=1`
+  making a *declaration* into an *action* is the same reinterpretation antipattern
+  ADR-152 removed elsewhere, and it is why three of the four problems above exist.
+  The candidates are (a) `sig` becomes a pure declaration always, with enforcement
+  only via explicit `sig!`, or (b) a kernel hook applies registered signatures as
+  contracts at `def` time, which is placement-independent and would also reach the
+  prelude. That is a call about a shipped feature, so it stays for its own session.
+
+**Also in this pass (the alias trims).** `concat`→`append`, `intersperse`→
+`interpose`, `reductions`→`scan`, `all-globals`→`global-names` were pure aliases
+(two of them trivial pass-through wrappers) and are gone — one spelling each, ~26
+call sites migrated. `cond` no longer special-cases `:else`: bare `else` needs the
+case (a symbol would otherwise be an unbound reference), a keyword never did, and
+`(cond … :else x)` still catches for the same reason `(cond … 42 x)` does. Kept
+deliberately, on the author's call: **`car`/`cdr`** (Lisp lineage a reader expects)
+and **`lambda`** (a second spelling of the `fn` special form).

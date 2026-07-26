@@ -47,8 +47,8 @@ plus any surplus already read past it. Policy is Brood; only the syscalls are Ru
 ;; each message — O(total²) over a large response.
 (defn tcp--drain-acc (sock acc)
   (receive
-    ([:tcp ~sock d] (tcp--drain-acc sock (cons d acc)))
-    ([:tcp-closed ~sock] (bytes-concat (reverse acc)))))
+    ([:tcp ^sock d] (tcp--drain-acc sock (cons d acc)))
+    ([:tcp-closed ^sock] (bytes-concat (reverse acc)))))
 
 (defn tcp-drain-timeout (sock ms)
   "Like `tcp-drain`, but give up after `ms` milliseconds of silence and return whatever was collected (tagged `[:timeout acc]` vs `[:closed acc]` so the caller can tell; `acc` is a `bytes` value)."
@@ -56,8 +56,8 @@ plus any surplus already read past it. Policy is Brood; only the syscalls are Ru
 
 (defn tcp--drain-to (sock acc ms)
   (receive
-    ([:tcp ~sock d] (tcp--drain-to sock (cons d acc) ms))
-    ([:tcp-closed ~sock] [:closed (bytes-concat (reverse acc))])
+    ([:tcp ^sock d] (tcp--drain-to sock (cons d acc) ms))
+    ([:tcp-closed ^sock] [:closed (bytes-concat (reverse acc))])
     (after ms [:timeout (bytes-concat (reverse acc))])))
 
 ;; ---- framed reads: the input-side twin of iolists (ADR-139) ----------------
@@ -79,14 +79,14 @@ plus any surplus already read past it. Policy is Brood; only the syscalls are Ru
 
 (defn tcp--read-until (sock sep acc)
   (receive
-    ([:tcp ~sock d]
+    ([:tcp ^sock d]
       (let (buf (bytes-concat (reverse (cons d acc)))
             i (bytes-index-of buf sep))
         (if (>= i 0)
           (let (cut (+ i (count sep)))
             [(subbytes buf 0 cut) (subbytes buf cut (count buf))])
           (tcp--read-until sock sep (cons d acc)))))
-    ([:tcp-closed ~sock] [:closed (bytes-concat (reverse acc))])))
+    ([:tcp-closed ^sock] [:closed (bytes-concat (reverse acc))])))
 
 (defn tcp-read-n (sock n)
   "Receive `[:tcp sock data]` chunks until at least `n` bytes have arrived; return `[data rest]` where `data` is exactly the first `n` bytes and `rest` any surplus already received (both `bytes`). Return `[:closed acc]` if the socket closes with fewer than `n` bytes (`acc` = what arrived). For a length-prefixed body — a Content-Length payload, one chunk of a chunked transfer, a WebSocket frame payload. O(total): the running byte count means no rescanning and a single `bytes-concat` at the end. Assumes binary mode (chunk byte lengths). Must be called by the socket's owning process."
@@ -97,5 +97,5 @@ plus any surplus already read past it. Policy is Brood; only the syscalls are Ru
     (let (buf (bytes-concat (reverse acc)))
       [(subbytes buf 0 n) (subbytes buf n (count buf))])
     (receive
-      ([:tcp ~sock d] (tcp--read-n sock n (+ have (count d)) (cons d acc)))
-      ([:tcp-closed ~sock] [:closed (bytes-concat (reverse acc))]))))
+      ([:tcp ^sock d] (tcp--read-n sock n (+ have (count d)) (cons d acc)))
+      ([:tcp-closed ^sock] [:closed (bytes-concat (reverse acc))]))))

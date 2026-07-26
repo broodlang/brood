@@ -1786,6 +1786,7 @@ fn hof_apply_native(
     // drain the recursion. (`hof_resolve` guaranteed nslots>0 / noptional==0 / rest none / the
     // `argc` arm; re-check the epoch here since a `def` can recompile mid-fold.)
     if heap.jit_native_depth >= JIT_NATIVE_DEPTH_LIMIT
+        || !crate::eval::compile::jit_runtime::jit_native_headroom_ok(heap.jit_native_depth)
         || arm.compile_epoch.load(Acquire) != heap.global_epoch()
     {
         return None;

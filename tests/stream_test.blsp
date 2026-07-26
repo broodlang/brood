@@ -224,7 +224,7 @@
                (tcp-send c "world")
                (tcp-close c)))
       ;; Accept the connection; extract the client socket from the message.
-      (let (client (receive ([:tcp-accept ~ls c] c)))
+      (let (client (receive ([:tcp-accept ^ls c] c)))
         ;; Wrap the accepted socket in a stream and collect it.
         (let (s (stream/stream-from-socket client)
               data (stream/stream-fold str "" s))

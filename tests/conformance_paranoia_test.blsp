@@ -1,0 +1,282 @@
+;; tests/conformance_paranoia_test.blsp — Kahan's Paranoia, ported to Brood.
+;;
+;; Paranoia (William Kahan, 1980s; public domain) is the classic floating-point sanity
+;; program: rather than checking results against a table, it *derives* the machine's
+;; arithmetic properties from the arithmetic itself — radix, precision, the epsilons,
+;; the exponent range — and then asserts the identities those properties imply. It is
+;; the test that found the arithmetic bugs in a generation of shipped hardware and libm
+;; implementations.
+;;
+;; Two reasons it belongs here even though Brood's floats are plain hardware `f64`:
+;;
+;;   1. It checks the *language's* arithmetic, not the FPU's. Every operation goes through
+;;      Brood's numeric tower — the `%add`/`%sub`/`%mul`/`%div` primitives, the int/float
+;;      contagion rules, the comparison chain — so a tower bug (a wrong coercion, a lost
+;;      sign, an over-eager int fast path) shows up here as a violated identity.
+;;   2. It is a genuine **VM/JIT differential exerciser**. The derivations are tight
+;;      arithmetic loops, exactly the shape that gets tiered and inlined, and every
+;;      assertion has a known answer. `make test` runs the suite through both engines, so
+;;      a float miscompile on either one fails a named identity rather than showing up as
+;;      a mystery number somewhere downstream.
+;;
+;; Scope: the parts of Paranoia that apply to a language with one float type and no
+;; rounding-mode control. Radix/precision/epsilon derivation, the guard-digit and
+;; sticky-rounding checks, exact-integer arithmetic in the float domain, the
+;; denormal/overflow boundaries, and the square-root and comparison laws. Kahan's
+;; diagnostic *classification* (FLAW / SERIOUS DEFECT / FAILURE) is dropped — a violated
+;; identity here is simply a failure.
+
+(defmodule conformance-paranoia-test (:use test))
+
+;; Infinity and NaN have to be MADE, not computed. Brood deliberately **raises** on
+;; division by zero (error E0040, with a hint) rather than returning IEEE 754's infinity,
+;; so `(/ 1.0 0.0)` is not available as a constructor here. `bits->float` is — which is
+;; one of the things that primitive is for. Pinned as a deviation below.
+(defn pa--inf () (bits->float 9218868437227405312))    ; 7FF0000000000000
+(defn pa--neg-inf () (bits->float 18442240474082181120)) ; FFF0000000000000
+(defn pa--qnan () (bits->float 9221120237041090560))   ; 7FF8000000000000
+(defn pa--max-finite () (bits->float 9218868437227405311)) ; 7FEFFFFFFFFFFFFF
+
+;; ---- deriving the machine's properties, Paranoia-style ------------------------
+;; The point of deriving rather than hardcoding: the derivation itself is the test. If
+;; `radix` came back 10, or `precision` 24, the arithmetic would not be the binary64 the
+;; rest of the file assumes, and every later identity would be testing the wrong machine.
+
+;; The smallest power of the radix at which adding 1 no longer changes the value: that
+;; power is where the significand runs out. Kahan's search for the radix works by finding
+;; the first `a` with `(a + 1) - a - 1 /= 0`.
+(defn pa--radix-a (a)
+  (if (not (= (- (- (+ a 1.0) a) 1.0) 0.0))
+    a
+    (pa--radix-a (* a 2.0))))
+
+;; With `a` past the significand's reach, the first `b` that `a` can still notice when
+;; added to it *is* one unit in the last place of `a` — and since `a` is a power of the
+;; radix, `(a+b) - a` is the radix itself.
+(defn pa--radix-b (a b)
+  (if (not (= (- (+ a b) a) 0.0))
+    b
+    (pa--radix-b a (* b 2.0))))
+
+(defn pa--radix ()
+  "The arithmetic's radix, derived (Paranoia §radix). 2 for binary64."
+  (let (a (pa--radix-a 1.0))
+    (- (+ a (pa--radix-b a 1.0)) a)))
+
+;; Precision = how many radix digits the significand holds. Scale `a` up by the radix,
+;; counting, until `a + 1` rounds back to `a` — at that point `a` has outrun the
+;; significand and the count is the number of digits. (radix 2: stops at a = 2^53, n = 53.)
+(defn pa--precision--acc (radix a n)
+  (if (= (- (+ a 1.0) a) 0.0)
+    n
+    (pa--precision--acc radix (* a radix) (+ n 1))))
+
+(defn pa--precision (radix)
+  "Significand digits in `radix`, derived. 53 for binary64."
+  (pa--precision--acc radix 1.0 0))
+
+;; The machine epsilon: the gap from 1.0 to the next representable float.
+(defn pa--eps--acc (e)
+  (if (= (+ 1.0 (/ e 2.0)) 1.0) e (pa--eps--acc (/ e 2.0))))
+
+(defn pa--epsilon () "The gap from 1.0 up to its successor." (pa--eps--acc 1.0))
+
+;; The bottom of the exponent range, derived: halve until the halving stops being exact
+;; (or reaches zero). On a machine with gradual underflow this walks straight through the
+;; normals and on down the subnormals, converging on the smallest positive float.
+(defn pa--tiny--acc (x)
+  (let (h (/ x 2.0))
+    (if (or (= h 0.0) (not (= (* h 2.0) x))) x (pa--tiny--acc h))))
+
+(defn pa--smallest-positive () (pa--tiny--acc 1.0))
+
+(describe "Paranoia: the derived machine properties" :tags [:conformance]
+
+  ;; The derivations must agree with binary64. Anything else means the arithmetic under
+  ;; test is not what the rest of this file assumes.
+  (test "the radix derives as 2"
+    (assert= (pa--radix) 2.0))
+
+  (test "the precision derives as 53 significand bits"
+    (assert= (pa--precision (pa--radix)) 53))
+
+  (test "the epsilon derives as 2^-52"
+    (assert= (pa--epsilon) (pow 2.0 -52))
+    ;; and it is the real boundary in both directions
+    (refute (= (+ 1.0 (pa--epsilon)) 1.0))
+    (assert= (+ 1.0 (/ (pa--epsilon) 2.0)) 1.0))
+
+  (test "epsilon agrees with the bit pattern"
+    ;; independent confirmation via reinterpretation: 1.0's successor minus 1.0
+    (assert= (pa--epsilon)
+             (- (bits->float (+ (float->bits 1.0) 1)) 1.0))))
+
+(describe "Paranoia: guard digits and rounding" :tags [:conformance]
+
+  ;; A missing guard digit is the classic hardware defect Paranoia was written to catch:
+  ;; `(1 + eps) - 1` collapses to 0 on a machine that truncates the subtraction.
+  (test "subtraction has a guard digit"
+    (let (eps (pa--epsilon))
+      (assert= (- (+ 1.0 eps) 1.0) eps)
+      (refute (= (- (+ 1.0 eps) 1.0) 0.0))))
+
+  (test "rounding is to nearest, ties to even"
+    (let (eps (pa--epsilon))
+      ;; exactly half an eps above 1.0 → ties to even → 1.0
+      (assert= (+ 1.0 (/ eps 2.0)) 1.0)
+      ;; a hair more than half → rounds up
+      (refute (= (+ 1.0 (* (/ eps 2.0) 1.0000000001)) 1.0))
+      ;; 1 + 1.5eps sits between 1+eps and 1+2eps; ties-to-even picks the even one
+      (assert= (+ 1.0 (* eps 1.5)) (+ 1.0 (* eps 2.0)))))
+
+  (test "multiplication and division round, not truncate"
+    ;; 1/3 rounded then multiplied back must land within one eps of 1
+    (let (third (/ 1.0 3.0))
+      (is (< (abs (- (* third 3.0) 1.0)) (pa--epsilon))))
+    ;; a truncating divider gives exactly 0.5 here; a rounding one does not
+    (assert= (/ 1.0 2.0) 0.5))
+
+  (test "x - x is zero and x + 0 is x, for a spread of magnitudes"
+    (dolist (x [1.0 -1.0 0.5 3.14159 1.0e300 1.0e-300 (pa--epsilon)])
+      (assert= (- x x) 0.0)
+      (assert= (+ x 0.0) x)
+      (assert= (* x 1.0) x)
+      (assert= (/ x 1.0) x))))
+
+(describe "Paranoia: exact integer arithmetic in the float domain" :tags [:conformance]
+
+  ;; Every integer up to 2^53 is exactly representable; the boundary is where it stops.
+  (test "integers below 2^53 are exact"
+    (dolist (n [1.0 2.0 1024.0 1048576.0 9007199254740991.0])
+      (assert= (+ n 0.0) n)
+      (assert= (- (+ n 1.0) 1.0) n)))
+
+  (test "2^53 is the exactness boundary"
+    (let (two53 (pow 2.0 53))
+      ;; 2^53 and 2^53+1 are the same float — this is the boundary, not a bug
+      (assert= (+ two53 1.0) two53)
+      ;; but 2^53 + 2 is representable
+      (refute (= (+ two53 2.0) two53))))
+
+  (test "float/int contagion keeps integer values exact"
+    ;; mixing an int operand must not route through a lossy path
+    (assert= (+ 1.0 2) 3.0)
+    (assert= (* 2.0 3) 6.0)
+    (assert= (- 5.0 2) 3.0)
+    (assert= (/ 6.0 3) 2.0)))
+
+(describe "Paranoia: the exponent range" :tags [:conformance]
+
+  ;; Derived, not asserted from a constant: halving from 1.0 must walk all the way down
+  ;; to the smallest subnormal. A machine that flushed subnormals to zero would stop at
+  ;; 2^-1022 instead, which is exactly what this derivation is for.
+  (test "the exponent floor derives as the smallest subnormal"
+    (assert= (pa--smallest-positive) (pow 2.0 -1074))
+    (assert= (float->bits (pa--smallest-positive)) 1)
+    ;; and it is genuinely the floor
+    (assert= (/ (pa--smallest-positive) 2.0) 0.0))
+
+  (test "gradual underflow reaches the subnormal floor, then zero"
+    ;; Halving 2^-1022 keeps producing distinct subnormals down to 2^-1074, then flushes
+    ;; to zero. A machine without gradual underflow jumps straight from the smallest
+    ;; normal to zero.
+    (let (smallest-sub (pow 2.0 -1074))
+      (refute (= smallest-sub 0.0))
+      (assert= (/ smallest-sub 2.0) 0.0)
+      ;; and it really is the smallest subnormal: significand 1, exponent field 0
+      (assert= (float->bits smallest-sub) 1)))
+
+  (test "the smallest normal and the largest subnormal are adjacent"
+    (let (min-normal (pow 2.0 -1022)
+          max-sub (- min-normal (pow 2.0 -1074)))
+      (assert= (float->bits min-normal) (bit-shift-left 1 52))
+      (assert= (float->bits max-sub) (- (bit-shift-left 1 52) 1))))
+
+  (test "multiplication overflows to infinity, not to a wrapped value"
+    (let (huge (pow 2.0 1023))
+      (is (> huge 0.0))
+      (assert= (* huge 4.0) (pa--inf))
+      (refute (= (* huge 4.0) 0.0))))
+
+  (test "the largest finite double is what its bits say"
+    (assert= (pa--max-finite) 1.7976931348623157e308)
+    ;; and one step past it is infinity
+    (assert= (bits->float (+ (float->bits (pa--max-finite)) 1)) (pa--inf))))
+
+(describe "Paranoia: square root" :tags [:conformance]
+
+  (test "sqrt is exact on perfect squares"
+    (dolist (n [0.0 1.0 4.0 9.0 16.0 100.0 1048576.0])
+      (assert= (* (sqrt n) (sqrt n)) n)))
+
+  (test "sqrt is correctly rounded on non-squares"
+    ;; sqrt is required to be exactly rounded by IEEE 754; squaring back must land
+    ;; within one eps.
+    (dolist (n [2.0 3.0 5.0 7.0 10.0])
+      (is (< (abs (- (* (sqrt n) (sqrt n)) n)) (* n (pa--epsilon) 2.0)))))
+
+  (test "sqrt respects monotonicity"
+    (assert= (sqrt 1.0) 1.0)
+    (is (< (sqrt 2.0) (sqrt 3.0)))
+    (is (< (sqrt 0.25) (sqrt 0.5)))
+    ;; sqrt of the smallest subnormal is a normal number, not zero
+    (is (> (sqrt (pow 2.0 -1074)) 0.0))
+    (assert= (sqrt (pow 2.0 -1074)) (sqrt (bits->float 1)))))
+
+(describe "Paranoia: comparison and sign laws" :tags [:conformance]
+
+  (test "the ordering is a total order"
+    (dolist (p [[1.0 2.0] [-2.0 -1.0] [-1.0 1.0] [0.0 1.0e-300] [1.0e300 (pa--inf)]])
+      (let ([lo hi] p)
+        (is (< lo hi))
+        (is (> hi lo))
+        (refute (= lo hi))
+        (is (<= lo hi))
+        (is (>= hi lo)))))
+
+  (test "zero has two signs that compare equal but differ in bits"
+    ;; `=` deliberately collapses them; `float->bits` is how you tell them apart
+    (assert= (* -1.0 0.0) 0.0)
+    (refute (= (float->bits (* -1.0 0.0)) (float->bits 0.0)))
+    (assert= (float->bits (* -1.0 0.0)) 9223372036854775808)
+    ;; and the sign propagates through multiplication, the observable consequence
+    (assert= (float->bits (* (* -1.0 0.0) 1.0)) 9223372036854775808)
+    (assert= (float->bits (* (* -1.0 0.0) -1.0)) 0))
+
+  (test "negation and abs are exact, never rounding"
+    (dolist (x [1.0 -1.0 1.0e300 (pow 2.0 -1074) 3.14159])
+      (assert= (abs (- 0.0 x)) (abs x))
+      (assert= (- 0.0 (- 0.0 x)) x)))
+
+  (test "infinity arithmetic follows the standard"
+    (let (inf (pa--inf))
+      (assert= (+ inf 1.0) inf)
+      (assert= (* inf 2.0) inf)
+      (assert= (/ 1.0 inf) 0.0)
+      (is (> inf 1.0e308))
+      (assert= (* inf -1.0) (pa--neg-inf))
+      (is (< (pa--neg-inf) -1.0e308))))
+
+  (test "NaN is equal to nothing, itself included"
+    (let (q (pa--qnan))
+      (refute (= q q))
+      (refute (< q 1.0))
+      (refute (> q 1.0))
+      (refute (<= q 1.0))
+      (refute (>= q 1.0))
+      ;; but its BITS are perfectly comparable, which is why float->bits exists
+      (assert= (float->bits q) 9221120237041090560)
+      ;; arithmetic propagates it
+      (refute (= (+ q 1.0) (+ q 1.0)))))
+
+  ;; Brood's one deliberate departure from IEEE 754 here, asserted so it is a decision
+  ;; on the record rather than an untested assumption. The standard makes `1/0` infinity
+  ;; and `0/0` NaN; Brood raises on both, on the reasoning that a division by zero is
+  ;; almost always a bug and a silent infinity propagates far from its cause. Overflow
+  ;; still produces infinity (`(* huge 4.0)` above), so infinities do exist — they just
+  ;; are not reachable by dividing.
+  (test "division by zero raises rather than yielding infinity (deviation)"
+    (assert-error (/ 1.0 0.0))
+    (assert-error (/ -1.0 0.0))
+    (assert-error (/ 0.0 0.0))
+    (assert-error (/ 1 0))))

@@ -38,6 +38,15 @@ fn base_ty(name: &str) -> Option<Ty> {
         "list" => Ty::LIST,
         "map" => Ty::of(Tag::Map),
         "set" => Ty::of(Tag::Set),
+        // `bytes` and `decimal` are runtime tags (`type-of` returns them, and
+        // `bytes?`/`decimal?` narrow to them) that had no *spelling* here — so no
+        // signature could mention a bytes value, which is most of what
+        // `std/encoding`, `std/hash`, and `std/net/tcp` take and return. Found by
+        // annotating std for real (the `sig` adoption pilot, 2026-07-26): the
+        // compatibility contract in `docs/types.md` says a Value kind needs a Tag
+        // *and* a way to name it, and these had only the Tag.
+        "bytes" => Ty::of(Tag::Bytes),
+        "decimal" => Ty::of(Tag::Decimal),
         "fn" => Ty::of(Tag::Fn).union(Ty::of(Tag::Native)),
         "rope" => Ty::of(Tag::Rope),
         "pid" => Ty::of(Tag::Pid),

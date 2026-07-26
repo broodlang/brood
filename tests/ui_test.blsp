@@ -146,7 +146,7 @@
               (= input :go-boom) {:tag :bad :boom true}
               (= input :go-c) {:tag :c}
               (= input :quit) (assoc m :done true)
-              :else m))
+              else m))
           (r--display me))
         :left)
       ;; a, b, (bad throws — no render), b again (rolled back + re-rendered), c.
@@ -169,7 +169,7 @@
             (= input :inc) (assoc m :n (+ (get m :n) 1))
             (= input :boom) (throw "update boom")
             (= input :quit) (assoc m :done true)
-            :else m))
+            else m))
         (r--display me))
       ;; rendered n: 0, 1, 1 (boom dropped — model held at 1), 2.
       (assert= (drain-saw []) (list 0 1 1 2))))
@@ -204,7 +204,7 @@
                          (cond
                            (= input :boom) (throw "kaboom!")
                            (= input :quit) (assoc m :done true)
-                           :else m))
+                           else m))
                        (r--display me))
                      (receive ([:err s] s) (after 0 ""))))
         (is (string-contains? logged "update error"))

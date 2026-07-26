@@ -1,6 +1,7 @@
 # Rust build output
 /target
 /target-perfstats
+/target-dbgasrt/
 **/*.rs.bk
 
 # Editor / OS cruft
@@ -12,6 +13,10 @@
 
 # Brood package cache — regenerable from project.lock.blsp (committed) (ADR-037)
 _deps/
+
+# Full external conformance corpora — hundreds of MB, fetched on demand with
+# `scripts/fetch-corpus.sh --full`. The committed subset lives in <suite>/data/.
+tests/corpus/*/full/
 
 # Local debug artifacts (never commit)
 .brood_crash_dump

@@ -271,6 +271,23 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![int], vec_ty),
         bit_positions,
     );
+    // Bit-level reinterpretation of a binary64 — not expressible over the other
+    // primitives (no bitcast, no frexp), and the only way to compare two floats
+    // *exactly* (`-0.0` vs `0.0`, NaN payloads). Used by the conformance corpora.
+    def(
+        heap,
+        "float->bits",
+        Arity::exact(1),
+        Sig::new(vec![num], int),
+        float_to_bits,
+    );
+    def(
+        heap,
+        "bits->float",
+        Arity::exact(1),
+        Sig::new(vec![int], float),
+        bits_to_float,
+    );
     // pair / sequence — `empty?` is Brood (type dispatch over string-length /
     // vector-length / map-keys; std/prelude.blsp). `first`/`rest` ARE the pair
     // accessors (car/cdr), so they stay. `rest` always yields a list (a vector's
@@ -626,6 +643,24 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(1),
         Sig::new(vec![string], Ty::vector_of(int)),
         string_to_codepoints,
+    );
+    // Grapheme clusters + normalisation: UAX #29 / UAX #15 table lookups, not rules
+    // Brood can express. The cluster is the unit a human calls "a character", so it
+    // is what editor cursor motion steps by; normalisation is what makes text that
+    // reads the same compare the same under Brood's byte-structural `=`.
+    def(
+        heap,
+        "string->graphemes",
+        Arity::exact(1),
+        Sig::new(vec![string], Ty::vector_of(string)),
+        string_to_graphemes,
+    );
+    def(
+        heap,
+        "string-normalize",
+        Arity::exact(2),
+        Sig::new(vec![string, kw], string),
+        string_normalize,
     );
     // The minimal-splice diff of two strings — one O(n) byte pass, char-indexed
     // result. Needs Rust like the search/split above (no O(1) char access), and it
@@ -2736,6 +2771,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("bit-shift-right", &["a", "n"], "Arithmetic (sign-preserving) right shift of integer a by n bits (0 <= n < 64)."),
     ("bit-count", &["a"], "Population count: the number of 1 bits in integer a's two's-complement representation (a negative a counts its sign bits, so (bit-count -1) = 64). For a bignum it is the popcount of the magnitude."),
     ("bit-positions", &["a"], "A vector of the 0-based bit indices set in non-negative integer a, ascending (e.g. (bit-positions 6) = [1 2]). O(number of set bits) — for a bignum it scans the magnitude. The inverse of summing (bit-shift-left 1 i); handy for enumerating the set bits of an integer."),
+    ("float->bits", &["x"], "The IEEE 754 binary64 bit pattern of x, as a non-negative integer (a bignum when the sign bit is set). Reinterpretation, not conversion — the only exact float comparison there is: it separates -0.0 from 0.0 and distinguishes NaN payloads, both of which = collapses. The inverse of bits->float."),
+    ("bits->float", &["n"], "The binary64 float whose bit pattern is n (0 <= n < 2^64). The inverse of float->bits."),
     ("cons", &["x", "xs"], "A new pair with head x and tail xs."),
     ("first", &["coll"], "The head of a list or vector, or nil if empty."),
     ("rest", &["coll"], "All but the head of a list or vector."),
@@ -2766,6 +2803,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string-length s), so (substring s start) is \"from start to the end\"."),
     ("string-split", &["s", "sep"], "Split s into a list of substrings on each occurrence of sep, in one O(n) pass. An empty separator splits s into its individual characters."),
     ("string->codepoints", &["s"], "The characters of s as a vector of integer Unicode codepoints, in one O(n) pass — the random-access form text parsers index with nth and compare as ints. The inverse of (apply str (map int->char codes))."),
+    ("string->graphemes", &["s"], "The extended grapheme clusters of s as a vector of strings — the unit a human means by \"character\". \"é\" spelled e + U+0301 is two codepoints but one grapheme; a flag emoji is four codepoints and one grapheme. Step a cursor by this, not by codepoint (which splits clusters and corrupts text). The sibling of string->codepoints; (apply str (string->graphemes s)) is s."),
+    ("string-normalize", &["s", "form"], "s in Unicode normalization form, one of :nfc :nfd :nfkc :nfkd. Brood's = is byte-structural, so text that reads identically ('é' as U+00E9 vs U+0065 U+0301) compares unequal until normalized. Canonical (:nfc/:nfd) preserves meaning; compatibility (:nfkc/:nfkd) also folds presentation ('ﬁ' -> 'fi', '²' -> '2') — right for search and identifier matching, wrong for round-tripping text."),
     ("string-span", &["s", "start", "chars"], "The char index just past the maximal run of chars (a set, given as a string) starting at char `start` in s — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native. See also string-span-until."),
     ("string-span-until", &["s", "start", "chars"], "The char index of the first char of s in the set `chars` (a string) at or after char `start`, or (string-length s) if none — the maximal run of chars NOT in the set. For scanning up to a delimiter (comment-to-newline, atom-to-delimiter). The complement of string-span."),
     ("upper", &["s"], "s upper-cased (Unicode-aware)."),

@@ -693,8 +693,9 @@ pub struct CompiledClosure {
 impl CompiledClosure {
     /// The compiled arm to run for `argc`, or `None` to defer to the tree-walker.
     /// Mirrors `Closure::select_arm`: among accepting arms, prefer a fixed (no-rest)
-    /// arm, then the most required params; ties resolve to the later arm (Rust's
-    /// `max_by_key`, same as eval). Returns the winner's compiled body iff it was
+    /// arm, then the most required params, then the FEWEST optional slots; ties
+    /// resolve to the later arm (Rust's `max_by_key`, same as eval). Returns the
+    /// winner's compiled body iff it was
     /// VM-eligible — otherwise `None`, so the tree-walker runs the *same* arm.
     pub(crate) fn arm_for(&self, argc: usize) -> Option<&Arc<CompiledArm>> {
         // Fast path: a single-arity closure (the common case) — skip the filter +
@@ -710,7 +711,7 @@ impl CompiledClosure {
             .arms
             .iter()
             .filter(|a| a.accepts(argc))
-            .max_by_key(|a| (!a.has_rest, a.nrequired))?;
+            .max_by_key(|a| (!a.has_rest, a.nrequired, std::cmp::Reverse(a.noptional)))?;
         winner.compiled.as_ref()
     }
 }

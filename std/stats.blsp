@@ -1,6 +1,5 @@
 (defmodule stats
-  (:doc
-    "Descriptive statistics over numeric sequences.
+  "Descriptive statistics over numeric sequences.
 
 All functions accept any sequence (list or vector) of numbers.
 Empty sequences raise unless documented otherwise.
@@ -8,7 +7,7 @@ Empty sequences raise unless documented otherwise.
   (stats/mean [1 2 3 4 5])      ;; => 3.0
   (stats/median [3 1 2])        ;; => 2
   (stats/stddev [2 4 4 4 5 5 7 9]) ;; => 2.0
-  (stats/percentile [1 2 3 4 5] 50) ;; => 3"))
+  (stats/percentile [1 2 3 4 5] 50) ;; => 3")
 
 ;; ---- basic moments -----------------------------------------------------------
 

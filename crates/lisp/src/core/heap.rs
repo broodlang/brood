@@ -412,6 +412,14 @@ fn to_prelude(v: Value) -> Value {
         ValueRef::Str(id) => Value::str_(StrId::prelude(id.index())),
         ValueRef::BigInt(id) => Value::bigint(BigIntId::prelude(id.index())),
         ValueRef::Decimal(id) => Value::decimal(DecimalId::prelude(id.index())),
+        // A `bytes` handle used to fall through the `other` arm below, keeping its
+        // LOCAL tag — so a `#b"…"` literal reaching a prelude global would resolve
+        // in the wiped builder heap after the freeze. No prelude form produces one
+        // today (the bit-syntax matcher only mentions them in comments), so this is
+        // latent, but silence was the wrong default for a region re-tag: every kind
+        // is either flipped or explicitly guarded (see `Rope`). Noticed while
+        // investigating KI-12.
+        ValueRef::Bytes(id) => Value::bytes(BytesId::prelude(id.index())),
         ValueRef::Fn(id) => Value::func(ClosureId::prelude(id.index())),
         ValueRef::Macro(id) => Value::macro_(ClosureId::prelude(id.index())),
         ValueRef::Native(id) => Value::native(NativeId::prelude(id.index())),

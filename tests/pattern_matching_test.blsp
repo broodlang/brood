@@ -75,18 +75,18 @@
 ;; ─────────────────────────────────────────────────────────────────────────────
 (describe "pin patterns"
   (test "pin a let-bound variable"
-    (assert= (let (k :ok) (match :ok (~k :match) (_ :no))) :match)
-    (assert= (let (k :ok) (match :err (~k :match) (_ :no))) :no))
+    (assert= (let (k :ok) (match :ok (^k :match) (_ :no))) :match)
+    (assert= (let (k :ok) (match :err (^k :match) (_ :no))) :no))
   (test "pin inside a vector (tagged) pattern"
-    (assert= (let (expected :ok) (match [:ok 9] ([~expected v] v) (_ :no))) 9)
-    (assert= (let (expected :ok) (match [:err 9] ([~expected v] v) (_ :no))) :no))
+    (assert= (let (expected :ok) (match [:ok 9] ([^expected v] v) (_ :no))) 9)
+    (assert= (let (expected :ok) (match [:err 9] ([^expected v] v) (_ :no))) :no))
   (test "pin inside a list pattern"
-    (assert= (let (h 1) (match (list 1 2 3) ((~h & t) t) (_ :no))) (list 2 3)))
+    (assert= (let (h 1) (match (list 1 2 3) ((^h & t) t) (_ :no))) (list 2 3)))
   (test "pin an arbitrary expression"
-    (assert= (match 4 (~(+ 2 2) :four) (_ :no)) :four)
-    (assert= (match 5 (~(+ 2 2) :four) (_ :no)) :no))
+    (assert= (match 4 (^(+ 2 2) :four) (_ :no)) :four)
+    (assert= (match 5 (^(+ 2 2) :four) (_ :no)) :no))
   (test "pin nested deeply"
-    (assert= (let (target 7) (match [:a [:b 7]] ([:a [:b ~target]] :hit) (_ :no))) :hit)))
+    (assert= (let (target 7) (match [:a [:b 7]] ([:a [:b ^target]] :hit) (_ :no))) :hit)))
 
 ;; ─────────────────────────────────────────────────────────────────────────────
 ;; LIST PATTERNS
@@ -300,7 +300,7 @@
   (test "non-linear inside a let pattern"
     (assert= (let ([x x] [4 4]) x) 4)
     (assert-error (let ([x x] [4 5]) x)))
-  (test "pin inside a let pattern" (assert= (let (tag :ok) (let ([~tag v] [:ok 9]) v)) 9))
+  (test "pin inside a let pattern" (assert= (let (tag :ok) (let ([^tag v] [:ok 9]) v)) 9))
   (test "map bind" (assert= (let ({:keys [a b]} {:a 1 :b 2}) (+ a b)) 3))
   (test "map bind with :or default"
     (assert= (let ({:keys [a b] :or {b 40}} {:a 2}) (+ a b)) 42))

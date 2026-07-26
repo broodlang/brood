@@ -423,6 +423,48 @@ See `tests/suite_test.blsp` (and the other `tests/*_test.blsp` files) for the re
 suite, and `tests/suite-failures.blsp` for a deliberately-failing file you can run
 by hand (`brood tests/suite-failures.blsp`) to see the failure report.
 
+## External conformance corpora
+
+Everything above tests Brood against cases *we thought of*. The corpora under
+`tests/corpus/` test it against cases other language implementers already paid for
+in production bugs — the numeral strings that broke shipped `strtod`s, the Unicode
+break tables, the regex semantics files. They are ordinary Brood tests; the only
+difference is that the expectations are vendored rather than written.
+
+```
+tests/corpus/<suite>/data/     the committed subset — small enough to read
+tests/corpus/<suite>/full/     the complete upstream, gitignored, --full only
+tests/corpus/<suite>/README.md the upstream URL, pinned commit, licence
+tests/conformance_<suite>_test.blsp   the runner
+tests/support/corpus.blsp             the shared locate/read helper
+```
+
+```bash
+scripts/fetch-corpus.sh                  # refresh every vendored suite
+scripts/fetch-corpus.sh parse-number     # refresh one
+scripts/fetch-corpus.sh --full parse-number   # also pull the full upstream
+nest test --only conformance             # run just the conformance runners
+```
+
+A runner calls `(corpus-files "<suite>")`, which returns `full/` when it has been
+fetched and `data/` otherwise — so the same test is a fast gate in CI and an
+exhaustive sweep on a machine that ran `--full`, with no code change. Runners carry
+`:tags [:conformance]` (plus `:slow` when they take more than a second), so
+`--exclude slow` still gives a quick suite.
+
+Three rules for adding one:
+
+- **Pin the upstream.** The suite README records the URL, the commit, and the
+  licence. Never vendor GPL data (`ansi-test`, for one) — mine it for ideas instead.
+- **Subsample deterministically.** `fetch-corpus.sh` takes every Nth line, never a
+  random draw, so re-running reproduces the committed bytes exactly.
+- **Assert the corpus is non-empty.** A sweep over a corpus that failed to fetch
+  passes vacuously; every runner has a "the corpus is present" test guarding a case
+  count, so a truncated fetch fails loudly instead of going quiet.
+
+The full inventory — which suites are wired and which are still ahead — is the
+"External conformance corpora" section of [`ROADMAP.md`](../ROADMAP.md).
+
 ## Relationship to Rust tests
 
 - `crates/lisp/tests/basic.rs` — Rust end-to-end checks of the language

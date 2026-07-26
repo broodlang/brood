@@ -136,7 +136,7 @@ shape `std/observer` draws by hand. Returns one `text` op.
       (>= n cells) (substring s 0 cells)
       (= align :right) (pad-left s cells)
       (= align :center) (pad-right (str (string-repeat " " (quot (- cells n) 2)) s) cells)
-      :else (pad-right s cells))))
+      else (pad-right s cells))))
 
 (defn frame (& ops)
   "Collect render ops into a frame (a vector), dropping any `nil` ops so callers
@@ -201,7 +201,7 @@ is drawn by the caller on top."
   (let (radius (get opts :radius 0.5)
         border (get opts :border))
     (if gui?
-      (concat (if border
+      (append (if border
                 [(frect (- col 0.07) (- row 0.07) (+ w 0.14) (+ h 0.14) border 1.0 (+ radius 0.07))]
                 [])
         [(frect (* 1.0 col) (* 1.0 row) (* 1.0 w) (* 1.0 h) face 1.0 radius)])
@@ -223,7 +223,7 @@ terminal draws a flat panel."
   (let (n (count lines)
         w (+ 2 (fold (fn (m s) (max m (string-length s))) 0 lines))
         [mr mc] (card-rect (- anchor-row n) anchor-col w n cols rows))
-    (concat (card-surface mr mc w n face gui? opts)
+    (append (card-surface mr mc w n face gui? opts)
       (map (fn (i)
              (let (s (nth lines i))
                (text (+ mr i)

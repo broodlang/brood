@@ -113,6 +113,29 @@ fn qq_elem(heap: &mut Heap, v: Value, depth: u32, autogen: &mut AutoGen) -> Lisp
             "unquote-splicing (~@) outside a list/vector context",
         ));
     }
+    // A **nested** quasiquote in template position. Levels are not tracked, so an
+    // `~unquote` inside the inner template would be expanded at the OUTER level —
+    // `` `(a `(b ~(+ 1 2))) `` silently produced `(a (quasiquote (b 3)))` where the
+    // standard reading leaves `(+ 1 2)` unevaluated at level 2. Reject it rather
+    // than quietly compute the wrong thing; level tracking can land later without
+    // breaking anything this accepts (ADR-011: defer the power feature).
+    //
+    // Only *template* position: a `` ` `` inside an `~unquote` is ordinary code
+    // (the unquote returns above, before this walk descends), so the common
+    // macro-writing-a-macro spelling — unquoting a helper that builds the inner
+    // template — keeps working.
+    if tagged(heap, v, kw::QUASIQUOTE).is_some() {
+        return Err(LispError::runtime(
+            "nested quasiquote (a ` inside a ` template) is not supported",
+        )
+        .with_hint(
+            "quasiquote levels are not tracked, so an inner `~x` would be expanded at \
+             the outer level. Build the inner template from the outside instead — put \
+             the ` in an unquoted position, e.g. `` `(a ~(inner-template x)) ``, where \
+             `inner-template` is a fn/macro that returns the inner form — or assemble \
+             it with `list`/`quote`.",
+        ));
+    }
     match v.unpack() {
         ValueRef::Pair(_) => {
             let items = heap.list_to_vec(v)?;
@@ -461,13 +484,28 @@ pub fn file_ns(heap: &Heap, forms: &[Value]) -> Option<Symbol> {
 /// file. Skips `quote`/`quasiquote` data.
 pub fn scan_def_names(heap: &Heap, forms: &[Value]) -> HashSet<Symbol> {
     let mut names = HashSet::new();
+    let mut ambient = HashSet::new();
     for &form in forms {
-        scan_def_form(heap, form, &mut names);
+        scan_def_form(heap, form, &mut names, &mut ambient);
+    }
+    // A name the file declares ambient with `defdyn` is never namespaced, so it must
+    // not be a known ns-local name — even if the file ALSO `def`s it somewhere
+    // (setting the knob, often inside a function body, which the recursive scan
+    // sees). Dropped after the walk so declaration order in the file is irrelevant:
+    // `std/tool/test.blsp` reads `*test-filter*` at the top, declares it in the
+    // middle, and `def`s it near the bottom.
+    for a in &ambient {
+        names.remove(a);
     }
     names
 }
 
-fn scan_def_form(heap: &Heap, form: Value, names: &mut HashSet<Symbol>) {
+fn scan_def_form(
+    heap: &Heap,
+    form: Value,
+    names: &mut HashSet<Symbol>,
+    ambient: &mut HashSet<Symbol>,
+) {
     let items = match heap.list_to_vec(form) {
         Ok(i) => i,
         Err(_) => return,
@@ -481,16 +519,25 @@ fn scan_def_form(heap: &Heap, form: Value, names: &mut HashSet<Symbol>) {
     let hn = value::symbol_name_ref(h);
     if matches!(hn, kw::DEF | kw::DEFN | kw::DEFMACRO | kw::DEFDYN) {
         if let Some(ValueRef::Sym(name)) = items.get(1).map(|v| v.unpack()) {
-            // Only bare names get pre-recorded; an already-qualified def head needs
-            // no forward-ref help.
-            if !value::symbol_name_ref(name).contains('/') {
+            // An AMBIENT name is never namespaced, so it must not be pre-recorded as
+            // a namespace-local name — that would qualify every reference in the file
+            // to `ns/*name*` and lose the single root binding. Two ways to be
+            // ambient: this form is the `defdyn` that declares it (the scan runs
+            // before evaluation, so the runtime mark isn't set yet), or the name was
+            // already declared dynamic elsewhere — e.g. `(def *load-path* …)` in a
+            // module, rebinding the prelude's knob.
+            if hn == kw::DEFDYN || value::is_dynamic(name) {
+                ambient.insert(name);
+            } else if !value::symbol_name_ref(name).contains('/') {
+                // Only bare names get pre-recorded; an already-qualified def head
+                // needs no forward-ref help.
                 names.insert(name);
             }
         }
     }
     // Recurse so a def nested in a top-level `(do …)`/`(when …)` is still found.
     for &it in &items[1..] {
-        scan_def_form(heap, it, names);
+        scan_def_form(heap, it, names, ambient);
     }
 }
 
@@ -523,20 +570,28 @@ pub fn resolve_reference(heap: &Heap, s: value::Symbol) -> value::Symbol {
     }
 }
 
-/// An "earmuffed" `*foo*` name — by Lisp convention a special/dynamic/ambient
-/// global. These are never namespaced (ADR-065): a `(def *load-path* …)` in any
-/// namespace rebinds the *root* `*load-path*` the loader reads, rather than a
-/// namespace-local shadow — likewise `*features*`, `*project-*`, `defdyn` vars.
-fn is_ambient(name: &str) -> bool {
-    name.len() > 2 && name.starts_with('*') && name.ends_with('*')
+/// An **ambient** name — one that is never namespaced, so a `def` of it in any
+/// module rebinds the single *root* binding (what makes `(def *load-path* …)` from
+/// anywhere change the path the loader reads).
+///
+/// Ambient status comes from a **declaration**, not a spelling: the name must have
+/// been declared with `defdyn`. It used to be any `*earmuffed*` name (ADR-065),
+/// which made an ordinary module-local constant silently global — two modules that
+/// each wrote `(def *width* …)` shared one binding, and the second load clobbered
+/// the first with no diagnostic. Earmuffs remain the *convention* for a knob (and
+/// the checker still reads them as one), but they no longer change scoping: an
+/// undeclared `(def *width* 10)` inside a module is `mod/*width*`, like every other
+/// definition.
+fn is_ambient(sym: value::Symbol) -> bool {
+    value::is_dynamic(sym)
 }
 
 /// Qualify a definition head: `bar` -> `ns/bar`; an already-`/`-qualified name, or
-/// an ambient `*earmuffed*` name, is taken as-is. Shared with `Heap::def_form_name`
-/// so def-site keys match.
+/// an ambient (`defdyn`-declared) name, is taken as-is. Shared with
+/// `Heap::def_form_name` so def-site keys match.
 pub fn qualify_name(ns_name: &str, name: value::Symbol) -> value::Symbol {
     let spelling = value::symbol_name_ref(name);
-    if spelling.contains('/') || is_ambient(spelling) {
+    if spelling.contains('/') || is_ambient(name) {
         name
     } else {
         value::intern(&format!("{}/{}", ns_name, spelling))
@@ -571,8 +626,8 @@ fn resolve_sym(
         }
         return s; // already qualified, no alias
     }
-    if is_ambient(name) {
-        return s; // earmuffed `*foo*` — ambient/root by convention (ADR-065)
+    if is_ambient(s) {
+        return s; // declared with `defdyn` — ambient/root, never namespaced
     }
     // Own namespace first (a same-named local def shadows an import), then a
     // `(:use …)` import, then root/prelude fall-through (left bare).
@@ -698,7 +753,10 @@ fn resolve_def(
             // unexpanded form), so without this a `(defn counter … (counter …))`
             // that came from a macro would bind `ns/counter` but recurse on bare
             // `counter` → unbound. Harmless for an already-qualified name.
-            if !value::symbol_name_ref(name).contains('/') {
+            // …but never for an ambient (`defdyn`-declared) name: it stays bare, so
+            // registering it would qualify the rest of the file's references to a
+            // namespace-local name that is never defined.
+            if !value::symbol_name_ref(name).contains('/') && !is_ambient(name) {
                 heap.add_ns_known_name(name);
             }
             out.push(Value::symbol(qualify_name(ns_name, name)));
@@ -1116,6 +1174,21 @@ fn macroexpand_all_depth_inner(heap: &mut Heap, form: Value, env: EnvId, depth: 
                 // Desugar pattern binders into the Brood `match*` engine so they
                 // expand once here (fast) rather than per call. eval's `let`/`fn`
                 // then only ever see plain symbol binds.
+                if value::symbol_is(s, kw::LET) || value::symbol_is(s, kw::LETREC) {
+                    // A **vector** bindings container — `(let [a 1] …)`, and with it
+                    // the Clojure `(let [[a 1] [b 2]] …)` shape that used to
+                    // destructure `[a 1]` against `[b 2]` and report a bewildering
+                    // `unbound symbol: b`. Lists for code (ADR-010): reject it here,
+                    // in the pass both engines share.
+                    if matches!(items.get(1).map(|v| v.unpack()), Some(ValueRef::Vector(_))) {
+                        let who = if value::symbol_is(s, kw::LET) {
+                            "let"
+                        } else {
+                            "letrec"
+                        };
+                        return Err(crate::eval::vector_binding_container_error(who));
+                    }
+                }
                 if value::symbol_is(s, kw::LET) {
                     // A nested-Scheme binding form with literal values —
                     // `(let ((a 1) (b 2)) …)` — would otherwise lower into a
@@ -1141,7 +1214,7 @@ fn macroexpand_all_depth_inner(heap: &mut Heap, form: Value, env: EnvId, depth: 
                     // pattern targets in eval, so there's no `lower_let` branch.
                     return expand_let(heap, original, &items, env, depth + 1);
                 } else if value::symbol_is(s, kw::FN) {
-                    if let Some(lowered) = lower_fn(heap, &items) {
+                    if let Some(lowered) = lower_fn(heap, &items)? {
                         return macroexpand_all_depth(heap, lowered, env, depth + 1);
                     }
                     // `lower_fn` declined: this is either a single-clause fn (its
@@ -1547,6 +1620,48 @@ fn is_clause(heap: &Heap, f: Value) -> bool {
     }
 }
 
+/// Like [`is_clause`], but *also* true for a **vector**-headed form. Recognised
+/// only so it can be rejected: `(defn f ([x] :one) ([x y] :two))` is Clojure's
+/// multi-arity spelling, and reading it as Brood would silently produce one
+/// 2-parameter function with an empty body (`[x]` and `:one` as two patterns) —
+/// a different program, diagnosed only later as a misleading arity error at the
+/// call site. See [`crate::eval::vector_binding_container_error`].
+fn is_clause_shaped(heap: &Heap, f: Value) -> bool {
+    match f.unpack() {
+        ValueRef::Pair(p) => matches!(
+            heap.car(p).unpack(),
+            ValueRef::Pair(_) | ValueRef::Nil | ValueRef::Vector(_)
+        ),
+        _ => false,
+    }
+}
+
+/// Does this clause head carry an `&optional` / `&` **arity** marker? A head that
+/// is dispatched as a *pattern* matches those markers as ordinary literal symbols,
+/// so a clause like `((x &optional (y 5)) …)` silently stops being variadic and
+/// only ever matches a literal `&optional` argument. The two mechanisms don't
+/// combine (`&optional` controls arity, patterns control shape), so mixing them in
+/// one `fn` is rejected rather than reinterpreted.
+fn head_has_amp_marker(heap: &Heap, head: Value) -> bool {
+    form_items(heap, head).is_some_and(|items| {
+        items.iter().any(|&p| {
+            matches!(p.unpack(), ValueRef::Sym(s)
+                if value::symbol_is(s, kw::AMP_OPTIONAL) || value::symbol_is(s, kw::AMP))
+        })
+    })
+}
+
+/// Does any clause head of an all-clause-shaped `fn` body use the vector
+/// spelling? (`clauses` is every form after `fn` and an optional docstring.)
+fn has_vector_clause_head(heap: &Heap, clauses: &[Value]) -> bool {
+    !clauses.is_empty()
+        && clauses.iter().all(|&f| is_clause_shaped(heap, f))
+        && clauses.iter().any(|&f| match f.unpack() {
+            ValueRef::Pair(p) => matches!(heap.car(p).unpack(), ValueRef::Vector(_)),
+            _ => false,
+        })
+}
+
 /// Is `param_form` an *arity* parameter list — only plain symbols (params) and
 /// the `&optional`/`&` markers, with no literal or destructuring *patterns*?
 /// Arity clauses dispatch by argument count via native multi-arity arms
@@ -1612,8 +1727,10 @@ pub(crate) fn fn_needs_lowering(heap: &Heap, fn_form: Value) -> bool {
 
 /// Lower a `fn` that is multi-clause, or single-clause with pattern(s) in its
 /// required parameters, into a plain `fn` plus the Brood `match*` engine.
-/// Returns `None` for an ordinary single-clause `fn` (left as-is).
-fn lower_fn(heap: &mut Heap, items: &[Value]) -> Option<Value> {
+/// `Ok(None)` for an ordinary single-clause `fn` (left as-is); an error for a
+/// **vector** where a parameter list belongs (ADR-010, item 1 of the syntax
+/// finalisation) — the one shape that used to be misread instead of rejected.
+fn lower_fn(heap: &mut Heap, items: &[Value]) -> Result<Option<Value>, LispError> {
     let forms = &items[1..];
 
     // Multi-clause: an optional leading docstring, then every form a clause. The
@@ -1625,6 +1742,12 @@ fn lower_fn(heap: &mut Heap, items: &[Value]) -> Option<Value> {
             Some(ValueRef::Str(_)) if forms.len() > 1 => (Some(forms[0]), &forms[1..]),
             _ => (None, forms),
         };
+        // Clojure's vector-headed clauses — `([x] :one) ([x y] :two)`. Caught
+        // *before* the list-headed check so it can't fall through to the
+        // single-clause path and be read as one long pattern parameter list.
+        if has_vector_clause_head(heap, clauses) {
+            return Err(crate::eval::vector_binding_container_error("fn"));
+        }
         if !clauses.is_empty() && clauses.iter().all(|&f| is_clause(heap, f)) {
             // This IS a multi-clause fn — never fall through to the single-clause
             // path below (which would misread the first clause as a param list).
@@ -1632,10 +1755,34 @@ fn lower_fn(heap: &mut Heap, items: &[Value]) -> Option<Value> {
                 // Arity-only: dispatches natively (the evaluator's `make_closure`
                 // builds one `ClosureArm` per clause, bound by argument count — no
                 // rest-list, no `match*`). Leave it un-lowered.
-                return None;
+                return Ok(None);
             }
             // At least one literal/destructuring *pattern* clause → lower the whole
-            // dispatch to the `match*` engine.
+            // dispatch to the `match*` engine. An `&optional`/`&` marker in ANY head
+            // is now an error rather than a literal-symbol pattern: the clause would
+            // silently stop being variadic, and `(f 1 2)` would fail with a
+            // match-error listing `(x &optional (y 5))` as a *pattern*.
+            for &clause in clauses {
+                let head = match clause.unpack() {
+                    ValueRef::Pair(p) => heap.car(p),
+                    _ => continue,
+                };
+                if head_has_amp_marker(heap, head) {
+                    let shown = crate::syntax::printer::print(heap, head);
+                    return Err(LispError::runtime(format!(
+                        "fn: `&optional`/`&` in the clause {shown} of a \
+                         pattern-dispatched fn"
+                    ))
+                    .with_hint(
+                        "the two multi-clause axes don't combine: `&optional`/`&` control \
+                         ARITY, patterns control SHAPE. Because another clause here \
+                         dispatches on a pattern, this head is matched as a pattern and the \
+                         marker would be a literal symbol. Use one mechanism per fn — arity \
+                         clauses `((x) …) ((x y) …)`, or pattern clauses plus a `match` on \
+                         the optional argument in the body.",
+                    ));
+                }
+            }
             let g = value::gensym("args");
             let params = heap.list(vec![value::sym(kw::AMP), g]);
             let mut mexpr = vec![value::sym(kw::MATCH_STAR), value::kw("fn"), g];
@@ -1646,14 +1793,27 @@ fn lower_fn(heap: &mut Heap, items: &[Value]) -> Option<Value> {
                 lowered.push(d);
             }
             lowered.push(body);
-            return Some(heap.list(lowered));
+            return Ok(Some(heap.list(lowered)));
         }
     }
 
     // Single-clause: forms[0] is the parameter list, forms[1..] the body.
-    let param_form = *forms.first()?;
+    let param_form = match forms.first() {
+        Some(&f) => f,
+        None => return Ok(None),
+    };
+    // `(fn [x y] …)` — a vector parameter list. Rejected here rather than accepted
+    // as a second spelling: lists-for-code is the rule, and tolerating the vector
+    // is what let `(let [[a 1] [b 2]] …)`-shaped mistakes destructure instead of
+    // erroring (ADR-010).
+    if matches!(param_form.unpack(), ValueRef::Vector(_)) {
+        return Err(crate::eval::vector_binding_container_error("fn"));
+    }
     let body = &forms[1..];
-    let params = form_items(heap, param_form)?;
+    let params = match form_items(heap, param_form) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
 
     // Peel a leading docstring (a string literal with more body after it) so it
     // stays the *first* form of the lowered `fn` — otherwise `make_closure`'s
@@ -1670,7 +1830,7 @@ fn lower_fn(heap: &mut Heap, items: &[Value]) -> Option<Value> {
         .position(|&p| matches!(p.unpack(), ValueRef::Sym(s) if value::symbol_is(s, kw::AMP_OPTIONAL) || value::symbol_is(s, kw::AMP)))
         .unwrap_or(params.len());
     if !params[..required_end].iter().any(|&p| !is_sym(p)) {
-        return None; // no pattern in the required params — ordinary fn
+        return Ok(None); // no pattern in the required params — ordinary fn
     }
 
     // Replace each required pattern slot with a fresh symbol; bind it refutably.
@@ -1687,16 +1847,13 @@ fn lower_fn(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     for &(g, pat) in binds.iter().rev() {
         acc = refutable_bind(heap, kw::FN, g, pat, acc);
     }
-    let new_param_form = match param_form.unpack() {
-        ValueRef::Vector(_) => heap.alloc_vector(new_params),
-        _ => heap.list(new_params),
-    };
+    let new_param_form = heap.list(new_params);
     let mut lowered = vec![value::sym(kw::FN), new_param_form];
     if let Some(doc) = doc {
         lowered.push(doc); // keep the docstring as the leading body form
     }
     lowered.push(acc);
-    Some(heap.list(lowered))
+    Ok(Some(heap.list(lowered)))
 }
 
 #[cfg(test)]

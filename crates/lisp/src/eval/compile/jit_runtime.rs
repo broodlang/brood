@@ -426,9 +426,74 @@ pub(crate) fn jit_resolve_global_ic(heap: &mut Heap, sym: Symbol, site: u32) -> 
 /// Cap on native-to-native recursion (see [`Heap::jit_native_depth`]). Past this many
 /// native levels, drain the rest of the subtree on the VM (heap frames, bounded by
 /// [`MAX_BC_FRAMES`]) so deep non-tail recursion keeps working instead of overflowing the
-/// native stack. 1 500 levels (~a few MB of the 16 MB worker stack) dwarfs any real depth.
+/// native stack.
+///
+/// This is a **frame count, not a stack measurement**, so on its own it is only ever
+/// right for one frame size: 1500 levels is a few MB of the 16 MB worker stack in a
+/// release build, and several times that in a debug build, where it overflowed. Hence
+/// [`jit_native_headroom_ok`] — the count stays as the cheap first test, and the actual
+/// remaining stack is what decides near the limit.
 #[cfg(feature = "jit")]
 pub(crate) const JIT_NATIVE_DEPTH_LIMIT: u32 = 1500;
+
+/// Below this native depth, no plausible frame size can exhaust the stack, so the
+/// headroom probe is skipped entirely and the hot shallow path (`fib`, `primes`) pays
+/// nothing beyond the existing integer compare.
+#[cfg(feature = "jit")]
+const JIT_HEADROOM_PROBE_FROM: u32 = 64;
+
+/// Stack that must remain before another native link is allowed. Generous: it has to
+/// cover the callee's native frame plus whatever Rust the callee re-enters (`apply_value`
+/// on an outcome-4 tail chain, the deopt re-runs), and the cost of being wrong is an
+/// unrecoverable abort while the cost of being early is a VM-drained subtree.
+#[cfg(feature = "jit")]
+const JIT_STACK_MARGIN_BYTES: usize = 512 * 1024;
+
+/// Whether there is room on the native stack for another Brood→Brood native link.
+///
+/// The frame-count cap alone cannot answer this: the same 1500 frames fit comfortably in
+/// release and overflow in debug, and a host embedding Brood on a smaller thread stack
+/// shifts the answer again. `stacker::remaining_stack` measures the thing that actually
+/// matters. Returning `false` is never a correctness problem — the caller falls through to
+/// the VM's heap-backed frames, which is where deep recursion belongs anyway.
+///
+/// `remaining_stack()` is `None` when the platform can't report it; treat that as "fine"
+/// and fall back to the count cap, which is the pre-existing behaviour.
+#[cfg(feature = "jit")]
+#[inline]
+pub(crate) fn jit_native_headroom_ok(depth: u32) -> bool {
+    if depth < JIT_HEADROOM_PROBE_FROM {
+        return true;
+    }
+    match stacker::remaining_stack() {
+        Some(left) => left > JIT_STACK_MARGIN_BYTES,
+        None => true,
+    }
+}
+
+/// Run `body` with [`Heap::jit_native_depth`] raised back to `native_depth + 1` — the level
+/// of the [`jit_run_fast_link`] frame that is *still on the native stack* while the outcome
+/// is being handled.
+///
+/// Every re-entrant call in that outcome handler must go through this. The natural-looking
+/// alternative — restore the depth as soon as the native callee returns, then handle the
+/// outcome — makes [`JIT_NATIVE_DEPTH_LIMIT`] stop bounding anything: the outcome-4
+/// tail-chain follow-through calls back into the evaluator on this same frame, so a chain of
+/// tail-calling delegators oscillates between `native_depth` and `native_depth + 1`
+/// indefinitely while the native stack grows, and the process dies of a stack overflow that
+/// `try`/`catch` cannot observe and no supervisor can restart (the OS process goes, not the
+/// green process). That was KI-11.
+#[cfg(feature = "jit")]
+fn jit_native_reenter<T>(
+    heap: &mut Heap,
+    native_depth: u32,
+    body: impl FnOnce(&mut Heap) -> T,
+) -> T {
+    heap.jit_native_depth = native_depth + 1;
+    let out = body(heap);
+    heap.jit_native_depth = native_depth;
+    out
+}
 
 /// The result of running a validated native fast-link ([`jit_run_fast_link`]): the call
 /// completed (`Done`), raised an error parked for the arm to propagate (`Error`), or could
@@ -488,18 +553,31 @@ pub(crate) fn jit_run_fast_link(
     // kept for the process in `GLOBAL_JIT`; the frame is at `roots[base..]`. Validated
     // current by the caller's epoch check (the IC fast-link, or the IR's flat-table guard).
     let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(code as *mut u8) };
-    let depth = heap.jit_native_depth;
+    // Named `native_depth`, not `depth`: the deopt arm below binds a `depth` of its own
+    // (the checkpoint's VM stack depth) that would otherwise shadow this one.
+    let native_depth = heap.jit_native_depth;
     // Root callee_env via env_roots so GC tenure inside the callee forwards it.
     let env_base = heap.env_roots_len();
     let env_root = heap.root_env(callee_env);
     let saved = std::mem::replace(&mut heap.jit_call_env, env_root);
     let saved_fn = std::mem::replace(&mut heap.jit_dbg_fn, head);
-    heap.jit_native_depth = depth + 1;
+    heap.jit_native_depth = native_depth + 1;
     let outcome = f(heap as *mut Heap, base as i64);
-    heap.jit_native_depth = depth;
+    heap.jit_native_depth = native_depth;
     heap.jit_call_env = saved;
     heap.jit_dbg_fn = saved_fn;
     heap.truncate_env_roots(env_base);
+    // KI-11. Three of the outcome arms below re-enter the evaluator — the outcome-4
+    // tail-chain follow-through (`apply_value`), and the deopt/preempt re-runs
+    // (`vm_resume_deopt` / `vm_apply`). All of them run on THIS native frame, which is
+    // still on the stack, so `jit_native_depth` must stay raised across them or the cap
+    // stops bounding the native recursion: with it rolled back to `depth`, a chain of
+    // tail-calling delegators oscillates between `depth` and `depth+1` forever while the
+    // native stack grows without bound, and the process dies of a stack overflow that
+    // `try`/`catch` cannot see (the VM and tree-walker both handle the same input). Each
+    // re-entrant call below therefore re-raises the depth for its duration; see
+    // `jit_native_reenter`. Found via JSONTestSuite's 20k-deep documents; the minimal
+    // repro is a three-function cycle returning a destructured tuple.
     match outcome {
         0 => {
             crate::perf_bump!(jit_link_done);
@@ -527,7 +605,10 @@ pub(crate) fn jit_run_fast_link(
                     .map(|k| heap.root_at(staged_start + k))
                     .collect();
                 heap.truncate_roots(stage_base);
-                return match apply_value(heap, staged_callee, &staged_args, heap.global()) {
+                let g = heap.global();
+                return match jit_native_reenter(heap, native_depth, |h| {
+                    apply_value(h, staged_callee, &staged_args, g)
+                }) {
                     Ok(v) => FastLinkOutcome::Done(v),
                     Err(e) => {
                         heap.jit_pending_error = Some(e);
@@ -564,7 +645,9 @@ pub(crate) fn jit_run_fast_link(
                 // be resumed and takes the legacy re-run instead.
                 if outcome == 1 && arm.active_nslots() == nslots {
                     if let Some((rip, depth)) = jit_ckpt_read(heap, &arm, base) {
-                        return match vm_resume_deopt(heap, arm, base, cenv, rip, depth) {
+                        return match jit_native_reenter(heap, native_depth, |h| {
+                            vm_resume_deopt(h, arm, base, cenv, rip, depth)
+                        }) {
                             Ok(v) => FastLinkOutcome::Done(v),
                             Err(e) => {
                                 heap.jit_pending_error = Some(e);
@@ -574,7 +657,9 @@ pub(crate) fn jit_run_fast_link(
                     }
                 }
                 heap.truncate_roots(stage_base);
-                return match vm_apply(heap, arm, &argv2, cenv) {
+                return match jit_native_reenter(heap, native_depth, |h| {
+                    vm_apply(h, arm, &argv2, cenv)
+                }) {
                     Ok(v) => FastLinkOutcome::Done(v),
                     Err(e) => {
                         heap.jit_pending_error = Some(e);
@@ -620,7 +705,9 @@ pub(crate) fn jit_dispatch_fast_frame(
     let stage_base = n - argc;
     // Over the native-recursion cap → don't link (would overflow the native stack); the args
     // stay staged at `[stage_base, n)` so the slow path drains the recursion on the VM.
-    if heap.jit_native_depth >= JIT_NATIVE_DEPTH_LIMIT {
+    if heap.jit_native_depth >= JIT_NATIVE_DEPTH_LIMIT
+        || !jit_native_headroom_ok(heap.jit_native_depth)
+    {
         return FastLinkOutcome::Fallthrough;
     }
     let callee_env = EnvId(env);
@@ -659,7 +746,8 @@ pub(crate) fn jit_dispatch_call(
 ) -> Option<Value> {
     use std::sync::atomic::Ordering::Acquire;
     let n = heap.roots_len();
-    let over_cap = heap.jit_native_depth >= JIT_NATIVE_DEPTH_LIMIT;
+    let over_cap = heap.jit_native_depth >= JIT_NATIVE_DEPTH_LIMIT
+        || !jit_native_headroom_ok(heap.jit_native_depth);
     let epoch = heap.global_epoch();
     // A free-global head isn't staged (`elided`): the callee is resolved via the call IC.
     // `stage_base` is where the callee frame starts — directly at the args for an elided

@@ -87,6 +87,16 @@ pub const BENCH: &str = "bench";
 pub const UNQUOTE: &str = "unquote";
 pub const UNQUOTE_SPLICING: &str = "unquote-splicing";
 
+// The **pin** marker: `^expr` in a *pattern* means "the current value of `expr`",
+// as opposed to a bare symbol, which binds. Written `~expr` until the syntax was
+// finalised — but a pin *is* `(unquote expr)`, so inside a macro's `` ` `` template
+// the quasiquote walker consumed it first and a pinned pattern could not be
+// emitted by a macro at all (the request/reply `receive ([:reply ^tag v] …)` idiom
+// is exactly what you want to wrap). `^` (Elixir's spelling) frees `~` for
+// quasiquote alone. `%`-prefixed so a user's own `pin` function can't collide with
+// the marker the pattern compiler looks for.
+pub const PIN: &str = "%pin";
+
 // Parameter-list markers — the `&optional`/`&rest` (and bare `&`) separators a
 // `fn`/`defn` param list uses, recognised by the macro lowering, the scope
 // walker, introspection, and the checker.

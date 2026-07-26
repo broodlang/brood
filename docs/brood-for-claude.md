@@ -122,23 +122,31 @@ Local bindings — `let` takes a **flat** name/value list (not Scheme's double-p
 
 ## Style — lists for code, vectors for data
 
-Two rules that keep Brood code uniform and unambiguous. Both are about *idiom*;
-both forms parse either way, but write the idiomatic one.
+Two rules that keep Brood code uniform and unambiguous. The first is
+**enforced** — a vector where a binding container belongs is an error, not an
+alternative spelling (ADR-149); the second is idiom.
 
 **1. Code uses `( )`; vectors `[ ]` are for data.** Param lists and the binding
-forms of `let` / `for` / `doseq` / `when-let` / `if-let` are *lists*, not
-Clojure-style vectors. Vectors are reserved for tuple values (`[x y]`),
+forms of `let` / `letrec` / `binding` / `for` / `doseq` / `when-let` / `if-let`
+are *lists*, not Clojure-style vectors — writing the vector is a clean error with
+a hint. Vectors are reserved for tuple values (`[x y]`),
 sequence literals (`[1 2 3]`), and tuple **patterns** that match against tuple
 values inside `match` / `let` / `receive` heads. Code is cons-lists so the
 editor and macros manipulate one structure uniformly (ADR-010).
 
 ```lisp
-;; good                          ;; not idiomatic
+;; good                          ;; ERROR: "bindings must be a list, not a vector"
 (let (a 1 b 2) …)                (let [a 1 b 2] …)
 (for (x xs :when p) …)           (for [x xs :when p] …)
 (doseq (x xs) …)                 (doseq [x xs] …)
-(when-let (v (try-it)) …)        (when-let [v (try-it)] …)
+(defn f (x y) …)                 (defn f [x y] …)
+(defn g ((x) …) ((x y) …))       (defn g ([x] …) ([x y] …))   ; Clojure multi-arity
 ```
+
+A vector *inside* a binding position is still destructuring — `(let ([x y] p) …)`
+unpacks a 2-vector, and that is the only meaning `[ ]` has there. The vector
+container used to be accepted as an alias, which is exactly what turned every
+Clojure binding shape into a silent misread rather than an error.
 
 **2. Don't tuple-destructure in a single-clause top-level `defn` param list.**
 Name the param and unpack inside the body. Multi-clause `defn` (pattern
@@ -237,7 +245,8 @@ _                wildcard — matches anything, binds nothing
 x                bind x; a repeated x is an equality constraint (non-linear)
 42 "s" :k nil    literal match
 'sym             match the symbol `sym`
-~expr            pin — match the *current value* of `expr`
+^expr            pin — match the *current value* of `expr` (NOT `~expr`: `~`
+                 belongs to quasiquote, and `^` is not metadata — Brood has none)
 (p1 p2 ...)      list of exact length
 (p1 & rest)      head(s) + tail
 [p1 p2 ...]      vector of exact length (the tuple / tagged-data idiom)
@@ -282,6 +291,11 @@ it never appends; `conj` does that); `(update v i f)` and `(get v i)` likewise.
 lists); `(remove-nth coll i)` drops one element, keeping the type. So an
 immutable single-element vector edit is just `(assoc buf i x)`, never a manual
 rebuild.
+
+**`catch` takes ONE bare binder** — `(catch e body…)`, never Clojure's
+`(catch Type e body…)`, which is rejected with a hint. (Reading it Brood's way
+would bind the *class name* to the raised value and evaluate `e` as a statement;
+because the prelude defines `e`, that silently printed 2.718… instead of failing.)
 
 **In a `catch`, use `(error-message e)`.** A caught value has no single shape:
 `throw` hands back its argument verbatim (often a bare string from `error`),
@@ -650,6 +664,11 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `string-contains?` `string-split` `join` `replace` `trim` `triml` `trimr`
   `blank?` `upper` `lower` `number->string` `string->number`
   `string->list` `list->string` `starts-with?` `ends-with?`
+- **unicode**: `string->graphemes` (extended grapheme clusters as a vector of
+  strings — the unit a human calls "a character", and what a cursor must step by;
+  `"e\u{301}"` is 2 codepoints but 1 cluster) · `string-normalize` (`(string-normalize
+  s :nfc)`, also `:nfd` `:nfkc` `:nfkd` — `=` is byte-structural, so `"é"` written
+  two ways compares unequal until you normalise) · `display-width` (terminal cells)
 - **string formatting**: `string-repeat` `pad-left` `pad-right`
   `to-fixed` (number → string with fixed decimals, e.g. `(to-fixed 3.14159 2)`
   → `"3.14"` — `str` prints full f64 precision, so reach for this for output) ·
@@ -747,14 +766,19 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   and `b/parse` are distinct globals, and `nest run`/`nest test` no longer
   false-flag them. From *outside* a module (e.g. the REPL or `nest mcp` eval),
   reach a `defn` by its qualified name: `(life/step …)`, found via `apropos`.
-  **The one exception is earmuffed `*foo*` names** — by convention they're
-  *ambient* (dynamic/config vars) and stay bare/root, never namespaced, so a
-  `(def *width* …)` is reachable as `*width*` everywhere and must be unique.
+  **The one exception is a name declared with `defdyn`** — it is *ambient*
+  (root, never namespaced), so `(def *load-path* …)` from any module rebinds the
+  one root binding. An earmuffed name that is *not* declared is namespaced like
+  everything else: a plain `(def *width* 10)` in module `a` is `a/*width*`. So
+  earmuffs are a naming convention, not a scoping rule (ADR-151) — declare the
+  knob with `defdyn` if other modules must reach it.
 - **Importing a module**: inside `defmodule`, add a `(:use mod)` clause to refer
   `mod`'s public names **bare** (`(:use mod :refer [a b])` for a subset). A
   plain top-level `(require 'mod)` only *loads* `mod` — its names stay
-  qualified (`mod/foo`). `(:require …)` is **not** a `defmodule` clause; only
-  `:use` is (anything else in the header is silently ignored).
+  qualified (`mod/foo`). The header understands exactly `(:use …)`,
+  `(:use-internals …)` and `(:alias …)`; **anything else is an error** —
+  `(:require …)` and a misspelled `(:use-internal …)` are rejected rather than
+  silently ignored.
 - **Not Clojure**: no `defprotocol`, no transients, no `loop` / `recur`
   (just plain recursion). Namespaces *do* exist now (ADR-065) but are
   `mod/name`-flat, not Clojure's `require :as` aliasing.

@@ -77,7 +77,7 @@ cases and `test` names one; cases run concurrently by default, with `:serial` /
 `:isolated` opt-outs. `run-tests` runs the registered suite once. See
 docs/testing.md for the full guide.")
 
-(def *units* nil)
+(defdyn *units* nil)
 ; all registered units, newest first
 (def *collecting* false)
 ; true while a describe body is being registered
@@ -206,7 +206,7 @@ docs/testing.md for the full guide.")
     t
     (list (first t)
       (second t)
-      (assoc (or (third t) {}) :tags (concat (into [] group-tags) (into [] (test--tags t)))))))
+      (assoc (or (third t) {}) :tags (append (into [] group-tags) (into [] (test--tags t)))))))
 
 ;; A test registers itself: collected into the enclosing describe if there is
 ;; one, otherwise emitted as its own standalone unit (:isolated if flagged).
@@ -806,7 +806,7 @@ docs/testing.md for the full guide.")
 ;; less parallelism; raise once the GC reclaims so a unit's transients don't pile
 ;; up. Within a group, a unit that itself spawns many workers still runs them
 ;; freely — this only bounds how many *units* are in flight at once.
-(def *parallel-batch* 4)
+(defdyn *parallel-batch* 4)
 
 ;; Two per-test wall-clock thresholds, in milliseconds — distinct on purpose:
 ;;
@@ -831,7 +831,7 @@ docs/testing.md for the full guide.")
 ;; nextest wrapper (`brood_suite_passes`, tests/suite.rs) runs this entire suite as
 ;; ONE case, so its per-case cap in `.config/nextest.toml` is set *above* this (300s)
 ;; — otherwise nextest would kill the wrapper before this inner timeout could fire.
-(def *test-timeout-ms* 120000)
+(defdyn *test-timeout-ms* 120000)
 
 ;; The deadline for an ANTI-HANG GUARD — a `(receive … (after *test-wait-ms* :timeout))`
 ;; where the message is expected and the timeout means "something is wrong". Distinct
@@ -847,7 +847,7 @@ docs/testing.md for the full guide.")
 ;; 20s: 4× the old headroom, while several compounding guards still fit inside the
 ;; 120s per-test ceiling, so a genuinely stuck test is still reported with its own
 ;; message rather than by the hard kill.
-(def *test-wait-ms* 20000)
+(defdyn *test-wait-ms* 20000)
 
 ;; When set, print `▶ group › name` as each test STARTS — live progress so you can
 ;; see which test is running (and spot the slow/hung one) before it finishes. Off by
@@ -855,27 +855,27 @@ docs/testing.md for the full guide.")
 ;; parsed and structured output stays clean. `(run-tests :trace)` turns it on, and
 ;; `nest test` passes `:trace`. Lines from parallel workers interleave (each is one
 ;; flushed `println`); they come in waves of `*parallel-batch*`.
-(def *test-trace* false)
+(defdyn *test-trace* false)
 
 ;; The active filter spec (see "test selection" above) — nil runs everything.
 ;; A global rather than a threaded argument because `drain-current` is reached
 ;; through `drain-files-scoped`, several frames below the entry point, exactly
 ;; like `*test-trace*` / `*test-timeout-ms*`.
-(def *test-filter* nil)
+(defdyn *test-filter* nil)
 
 ;; Outcome of the most recent reported pass, as full `"group › name"` labels:
 ;; every test that RAN, and the subset that FAILED. The project layer reads these
 ;; to maintain the on-disk `--failed` set (it needs both: a test that ran and
 ;; passed must be dropped from the set, while one that never ran keeps its prior
 ;; state). Set outside any `%isolate`, so the values survive a scoped run.
-(def *test-last-ran* nil)
-(def *test-last-failed* nil)
+(defdyn *test-last-ran* nil)
+(defdyn *test-last-failed* nil)
 
 ;; Stop the run once this many tests have failed (0 = unlimited, the default).
 ;; Checked by `run-driver` between steps, so it stops at the next step boundary
 ;; rather than mid-flight — a batch already in progress still reports, so the
 ;; count can overshoot slightly. `mix test --max-failures`.
-(def *test-max-failures* 0)
+(defdyn *test-max-failures* 0)
 
 ;; The parallel/serial units run in bounded groups (see `*parallel-batch*`) — the
 ;; loop that does so is the `run-driver` below, which also folds in the isolated
@@ -1066,9 +1066,9 @@ docs/testing.md for the full guide.")
         ;; leaked `:down` per file made every later `receive` scan past them all — O(n²)
         ;; over a large suite (100K files went from hours to seconds with this fix).
         (demonitor mref)
-        (receive ([:down ~mref ~d _] :ok) (after 0 :ok))
+        (receive ([:down ^mref ^d _] :ok) (after 0 :ok))
         rs)
-      ([:down ~mref ~d reason] (error (str "test runner crashed: " reason))))))
+      ([:down ^mref ^d reason] (error (str "test runner crashed: " reason))))))
 
 ;; Split the currently-registered units into (iso par) and drain them — the shared
 ;; body of `run-tests` and `run-tests-scoped`.
