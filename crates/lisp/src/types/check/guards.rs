@@ -53,6 +53,7 @@ pub(super) fn is_syntactic_keyword(name: &str) -> bool {
             | kw::THREAD_LAST
             | kw::MATCH
             | kw::CASE
+            | kw::COMMENT
             | kw::TRY
             | kw::CATCH
             | kw::THROW
@@ -359,6 +360,20 @@ pub(super) fn match_exhaustiveness_gap(heap: &Heap, throw_arg: Value, ctx: &Ctx)
         return None;
     };
     let target_ty = expr_ty(heap, Value::Sym(target), ctx)?;
+    // Name the *surface* form in the diagnostic. `match`/`case`/refutable `let`
+    // all lower to the same `match*` failure, so the embedded context keyword is
+    // the only thing that distinguishes them — without it a `case` was reported
+    // as "match: not exhaustive", naming a form the author never wrote.
+    // (The context arrives as the *unevaluated* `(quote :match)` / `(quote :case)`
+    // form, like the pattern list below — unwrap it, and fall back to "match" for
+    // a non-keyword context, e.g. a `fn` clause's fn-name context.)
+    let surface = list_items(heap, elems[1])
+        .filter(|q| q.len() == 2 && matches!(q[0], Value::Sym(s) if value::symbol_is(s, "quote")))
+        .and_then(|q| match q[1] {
+            Value::Keyword(k) => Some(value::symbol_name_ref(k).to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "match".to_string());
 
     // Unwrap `(quote patterns-list)` to the raw pattern list.
     let quote_items = list_items(heap, elems[3])?;
@@ -437,7 +452,7 @@ pub(super) fn match_exhaustiveness_gap(heap: &Heap, throw_arg: Value, ctx: &Ctx)
         .map(|s| s.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    Some(format!("match: not exhaustive — missing {joined}"))
+    Some(format!("{surface}: not exhaustive — missing {joined}"))
 }
 
 /// Render a raw literal pattern `Value` to the same canonical label

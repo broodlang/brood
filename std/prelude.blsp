@@ -245,6 +245,17 @@ hot-reload (cf. Emacs `defvar`). Once bound, re-evaluating is a no-op; restart
 or re-`def` to force re-init."
   `(unless (bound? '~name) (def ~name ~val)))
 
+;; `(comment …)` — the dev-scratch block every Lisp has. Its body is read (so it
+;; must still be balanced sexps) but never evaluated, which is the point: a
+;; worked example, a REPL snippet, or a disabled call can sit next to the code it
+;; documents without being commented out line by line. Brood has no `#_`
+;; form-discard reader macro, so this is the only form-level "don't run this".
+(defmacro comment (& _body)
+  "Ignore the body entirely and return nil — a scratch block for examples and
+disabled snippets. The body is still *read*, so it must be balanced sexps; use
+`;` for prose or anything that wouldn't parse."
+  nil)
+
 ;; `(sig name (params… -> ret))` — a type-signature declaration the advisory
 ;; checker reads (it parses the type-expression and treats it as `name`'s
 ;; authoritative signature, ahead of inferred/curated ones). Normally a runtime
@@ -663,6 +674,11 @@ indexed access or a vector literal shape (`(into [] (map f coll))`, named)."
 when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
   (into [] (filter pred coll)))
 
+(defn vec (coll)
+  "`coll` as a VECTOR (`(into [] coll)`, named). A map becomes its `[k v]` pairs
+and a set its elements, as everywhere else `seq` applies."
+  (into [] coll))
+
 (defn append-two (a b) "Concatenate two lists (`a` before `b`)." (fold flip-cons b (reverse a)))
 
 ;; Prepend every element of `lst` onto `acc` (so `acc` collects all elements in
@@ -728,22 +744,27 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
 ;; default)`, and no extra call hop. The cond is repeated per arm (rather than
 ;; factored into a helper) precisely to avoid that extra call on the hot path.
 (defn get "The value at key/index `k` in `coll`, or `default` (else `nil`) if absent.
-Maps look up by key; vectors, lists, and strings index by integer position
+Maps look up by key; **a set looks up by membership** — it yields the element
+itself when present (so `(get s x)` agrees with `(contains? s x)`), never a
+positional index; vectors, lists, and strings index by integer position
 (out-of-range yields the default, never an error)."
   ((coll k) (cond
               (map? coll) (map-get coll k nil)
+              (set? coll) (if (%set-has? coll k) k nil)
               (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll)))
                                (char-at coll k)
                                nil)
               else (nth coll k nil)))
   ((coll k default) (cond
                       (map? coll) (map-get coll k default)
+                      (set? coll) (if (%set-has? coll k) k default)
                       (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll)))
                                        (char-at coll k)
                                        default)
                       else (nth coll k default)))
   ((coll k & default) (cond
                         (map? coll) (map-get coll k (first default))
+                        (set? coll) (if (%set-has? coll k) k (first default))
                         (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll)))
                                          (char-at coll k)
                                          (first default))
@@ -889,6 +910,16 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
 (defn product (xs) "The product of the numbers in `xs`." (fold %mul 1 xs))
 (defn even? (n) "True if integer `n` is even." (= (rem n 2) 0))
 (defn odd? (n) "True if integer `n` is odd." (not (even? n)))
+;; `nan` is a reader-level float literal, so the language could *produce* a NaN
+;; long before it could TEST for one: `=` reports NaN as equal to nothing (the
+;; IEEE rule), which is simultaneously the only way to detect it. Naming that
+;; removes the puzzle.
+(defn nan? (x)
+  "True if `x` is the float NaN — the value that is not equal to itself."
+  (and (float? x) (not (= x x))))
+(defn infinite? (x)
+  "True if `x` is float `inf` or `-inf` (a finite float, and any int, is false)."
+  (and (float? x) (or (= x inf) (= x -inf))))
 
 ;; Rounding & roots, all Brood over the one Float->Int primitive `floor` (toward
 ;; -inf) plus `rem`/`/`/`*`. `floor` of an int is itself, so these pass ints
@@ -1281,6 +1312,18 @@ its printed form."
 ;; unemittable from a macro). Left as a list pattern it would silently try to match
 ;; a 2-element list headed by the symbol `unquote`, so name it instead.
 (defn match-stale-pin? (p) (and (pair? p) (= (first p) 'unquote)))
+;; `(or p q)` / `(and …)` / `(not …)` in pattern position — an attempted
+;; alternative/boolean pattern, which Brood does not have. Read as an ordinary
+;; list pattern it was SILENTLY a 3-element list whose head *binds a variable
+;; named `or`*, so `(match 2 ((or 1 2) :hit) (_ :miss))` quietly took the wrong
+;; branch, with no error anywhere. Name it instead (ADR-152).
+(defn match-logical-pattern? (p)
+  (and (pair? p) (symbol? (first p)) (match-member? (first p) '(or and not))))
+(defn match-logical-pattern-error (p)
+  (error (str "match: `(" (first p) " …)` is not a pattern — Brood has no"
+              " alternative/boolean patterns (a bare `" (first p) "` here would BIND"
+              " a variable of that name). Write one clause per alternative, or move"
+              " the test into a `:when` guard: (x :when (" (first p) " …) body…).")))
 
 ;; -- expand-time helpers --
 (defn match-member? (x xs)
@@ -1330,6 +1373,8 @@ its printed form."
                              " 2-element list (unquote x), quote the head: ('unquote x).")
     (match-bytes-pattern? pat) (match-compile-bytes (rest pat) target bound success fail)
     ; (bytes seg…): destructure a bytes value, Elixir-style binary matching
+    (match-logical-pattern? pat) (match-logical-pattern-error pat)
+    ; (or p q) / (and …) / (not …): rejected, never read as a list pattern
     (pair? pat) (match-compile-list pat target bound success fail)
     (vector? pat) (match-compile-vector pat target bound success fail)
     (match-map-pattern? pat) (match-compile-map pat target bound success fail)
@@ -1619,17 +1664,34 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; (ADR-011: ship the simple shape, add the rest on a concrete need).
 (defn match-map-pattern? (p) (map? p))
 
+;; A map pattern understands exactly two keys: `:keys` and `:or`. Any other key
+;; is REJECTED rather than ignored (ADR-152). Ignoring it was the worst kind of
+;; wrong: `{:a v}` degenerated to "is the target a map?", so the clause matched
+;; anything, bound nothing, and the body then died on an unbound `v` — a
+;; diagnostic pointing at the body, nowhere near the cause. (`{}` stays legal: no
+;; keys to misread, so it is the honest "any map" pattern.)
+(defn match-map-check (pat)
+  (let (bad (filter (fn (k) (not (or (= k :keys) (= k :or)))) (keys pat)))
+    (when (not (empty? bad))
+      (error (str "match: a map pattern understands only :keys and :or, got "
+                  (pr-str bad)
+                  " — general {:key subpattern} nesting and :as are not implemented."
+                  " Use {:keys [a b]} to bind by name, or bind the whole map and"
+                  " reach in with `get`.")))))
+
 ;; :keys value is a vector [a b] (or a list); return it as a list of symbols.
 (defn match-map-keys (pat)
   (let (kv (get pat :keys))
     (cond (nil? kv) nil (vector? kv) (match-vec->list kv) else kv)))
 
-(defn match-map-vars (pat) (match-map-keys pat))
+(defn match-map-vars (pat) (do (match-map-check pat) (match-map-keys pat)))
 
 (defn match-compile-map (pat target bound success fail)
-  `(if (map? ~target)
-     ~(match-map-binds (match-map-keys pat) (get pat :or) target success)
-     ~fail))
+  (do
+    (match-map-check pat)
+    `(if (map? ~target)
+       ~(match-map-binds (match-map-keys pat) (get pat :or) target success)
+       ~fail)))
 
 ;; Bind each key symbol to (get target :key); when the key is absent, fall back to
 ;; its :or default (evaluated only then) if one is given, else nil.
@@ -1753,6 +1815,40 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 (defmacro match (expr & clauses)
   "Match `expr` against each `(pattern [:when guard] body...)` clause, running the first that fits (binding the pattern's variables). Errors if none match."
   `(match* :match ~expr ~@clauses))
+
+;; ---- case: literal dispatch, flat pairs -------------------------------------
+;; Sugar over `match*`, but NOT a synonym for it (which is why it earns a name
+;; under "one spelling each"): `case` accepts only *literal* tests, so it cannot
+;; silently bind where you meant to compare — the one trap `match` has. A bare
+;; symbol test is therefore rejected rather than read as a binder.
+(defn case--check-test (t)
+  (cond
+    (or (keyword? t) (int? t) (float? t) (decimal? t) (string? t) (bool? t) (nil? t)) t
+    (and (pair? t) (= (first t) 'quote)) t
+    (symbol? t) (throw (str "case: the bare symbol test `" t "` would BIND, not compare"
+                            " — write `'" t "` for the literal symbol, or use `match`"
+                            " if you meant to bind it"))
+    else (throw (str "case: each test must be a literal (keyword/int/float/decimal/"
+                     "string/bool/nil, or 'symbol), got " (pr-str t)
+                     " — use `match` for destructuring, guards, or alternatives"))))
+
+;; Flat `test result …` pairs → wrapped match clauses; a lone trailing form is the
+;; default (an `_` clause). Flat pairs match `cond`'s shape, which is where a
+;; reader's eye already is for value dispatch.
+(defn case--clauses (forms acc)
+  (cond
+    (empty? forms) (reverse acc)
+    (empty? (rest forms)) (reverse (cons (list '_ (first forms)) acc))
+    else (case--clauses (rest (rest forms))
+           (cons (list (case--check-test (first forms)) (second forms)) acc))))
+
+(defmacro case (expr & clauses)
+  "Dispatch on the VALUE of `expr` against literal tests, as flat `test result`
+pairs; a lone trailing form is the default. `(case k :a 1 :b 2 :other)`. Tests
+are literals only — a bare symbol is an error (it would bind, not compare), and
+destructuring, guards, or alternatives mean you want `match`. With no default, no
+match raises `[:match-error :case value patterns]`, exactly as `match` does."
+  `(match* :case ~expr ~@(case--clauses clauses nil)))
 
 ;; ---- spawn: run an expression as a new green process ------------------------
 ;; (spawn expr) runs `expr` in a fresh process and returns its pid. The expression
@@ -2411,7 +2507,7 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
   (fold (fn (m x) (map-assoc m x (%add (map-get m x 0) 1))) {} coll))
 
 (defn into (to from)
-  "Pour each item of `from` into `to`. For a map, items are `[k v]` pairs (assoc'd, map result); for a vector, items are appended (vector result); otherwise items are appended (list result). Maps in `from` are read as their entries, so `(into [] some-map)` and `(into {} other-map)` both work."
+  "Pour each item of `from` into `to`. For a map, items are `[k v]` pairs (assoc'd, map result); for a **set**, items are added and duplicates collapse (set result); for a vector, items are appended (vector result); otherwise items are appended (list result). Maps in `from` are read as their entries, so `(into [] some-map)` and `(into {} other-map)` both work."
   (cond
     ;; Map target: build via the kernel's GC-quiet CHAMP builder (`%map-into`) —
     ;; an implementation detail of *constructing* a fresh immutable map (it writes
@@ -2419,6 +2515,9 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
     ;; mutable), so O(result-nodes) allocation, not O(n) fresh path-copies. A map
     ;; `from` is read as its entries first (`%map-into` takes a list/vector of `[k v]`).
     (map? to) (%map-into to (if (map? from) (map-pairs from) from))
+    ;; Set target: add each item (duplicates collapse). Without this branch the
+    ;; `else` poured a set into a LIST — `(into #{} [1 1 2])` was `(1 1 2)`.
+    (set? to) (fold %set-add to from)
     ;; `append to from` is always a list (fold-of-flip-cons), so we re-vectorise.
     ;; That's an extra O(n) pass — acceptable; the previous code silently
     ;; returned a list even when `to` was a vector.
@@ -2430,6 +2529,7 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
   (cond
     (nil? coll) (list x)
     (vector? coll) (into coll [x])
+    (set? coll) (%set-add coll x)
     (map? coll) (cond
                   (map? x) (merge coll x)
                   (and (vector? x) (= (count x) 2)) (assoc coll (nth x 0) (nth x 1))
@@ -2439,11 +2539,19 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
 
 (defn conj (coll & xs)
   "Add element(s) to `coll` at its natural insertion point (Clojure-style):
-APPEND to a vector, PREPEND to a list (`nil` counts as an empty list), and
-`assoc` a `[k v]` pair — or merge a map — into a map. Returns a fresh
-collection; `coll` is untouched. e.g. (conj [1 2] 3) → [1 2 3];
-(conj '(2 3) 1) → (1 2 3); (conj {:a 1} [:b 2]) → {:a 1 :b 2}."
+APPEND to a vector, PREPEND to a list (`nil` counts as an empty list), ADD to a
+set (a duplicate is a no-op), and `assoc` a `[k v]` pair — or merge a map — into
+a map. Returns a fresh collection; `coll` is untouched. e.g. (conj [1 2] 3) →
+[1 2 3]; (conj '(2 3) 1) → (1 2 3); (conj #{1} 2) → #{1 2};
+(conj {:a 1} [:b 2]) → {:a 1 :b 2}."
   (fold conj--one coll xs))
+
+(defn disj (s & xs)
+  "A fresh set like `s` with each of `xs` removed (removing an absent element is a
+no-op). The set counterpart of `dissoc`, and `conj`'s inverse — both live here
+rather than in `std/set` so a set works with the collection protocol without an
+import (and so `(:use set)` can't shadow them)."
+  (fold %set-remove s xs))
 
 (defn remove-nth (coll i)
   "A fresh collection like `coll` with the element at index `i` removed. Returns
@@ -2695,6 +2803,24 @@ arguments, `identity`."
     (empty? fns) identity
     (empty? (rest fns)) (first fns)
     else (fold comp--compose (first fns) (rest fns))))
+
+;; The rest of the combinator family. `comp` shipped alone for a long time, which
+;; left `(map (fn (x) (f a x)) xs)` as the only spelling of a partially-applied
+;; call — the gap a review found on 2026-07-26.
+(defn partial (f & bound)
+  "`f` with its leading arguments fixed: `((partial f a b) c)` is `(f a b c)`.
+The workhorse for handing a configured function to a higher-order op."
+  (fn (& later) (apply f (append bound later))))
+
+(defn complement (pred)
+  "A predicate that returns the logical negation of `pred`: `((complement odd?) 2)`
+is `true`. The named form of `(fn (& args) (not (apply pred args)))`."
+  (fn (& args) (not (apply pred args))))
+
+(defn constantly (x)
+  "A function of any arguments that always returns `x` — the placeholder callback
+for a higher-order op that wants a fixed answer."
+  (fn (& _ignored) x))
 
 ;; Internal stateless transducer constructors — the fused stages behind the
 ;; `l*` combinators. A transducer is `(xf rf) -> rf'`; composing them (`comp`)

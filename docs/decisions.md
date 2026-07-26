@@ -9575,3 +9575,108 @@ The residual gap to BEAM on these rows is now the mailbox/copy/scan machinery
 compiling the pattern *test* into the calling arm's bytecode so the scan makes no
 closure call at all — is still open; `BROOD_NO_HOF=1` (197 → 509 ms on `pingpong`)
 shows how much that per-candidate `vm_apply` still costs.
+## ADR-156 — The collection protocol covers every collection; a misread shape is an error, not a reading
+
+**Context.** A 2026-07-26 review of the surface (the sibling of ADR-154's
+conciseness pass — this one asked whether the primitives are *orthogonal*) probed
+the ops × collection-kinds matrix against the running binary instead of the docs.
+The core came out clean: 8 special forms, one pattern grammar at every binding
+site, `count`/`empty?` universal. The failures clustered in two places.
+
+**One: a set was not a member of the collection protocol.** `(conj #{1} 2)` raised
+"conj: not a collection", `(into #{} [1 1 2])` returned the *list* `(1 1 2)` (kind
+and dedup both lost), and `(get #{10 20} 10)` was `nil` while `(get #{10 20} 0)`
+was `20` — `get` fell through to `nth` and indexed positionally, so a membership
+read returned an answer that is wrong under every reading. `disj` didn't exist at
+all in the prelude, and `first`/`rest` erred on a **map** even though `seq`, `last`,
+`map`, `filter`, `fold`, `reduce` and `into` all read a map as its `[k v]` pairs.
+Separately, `(cons 9 (range 2))` *printed* as the dotted `(9 . (0 1))` while `=`
+and `count` both treated it as the proper list it is — a printed form that doesn't
+read back as its own value.
+
+ADR-154 had considered `set/conj` and **kept** it, on the stated premise that this
+mirrors `clojure.set`. That premise is false: Clojure's `conj` and `disj` are both
+`clojure.core` and both polymorphic; `clojure.set` defines neither. The cost of the
+mistake was worse than stutter — a module-local `conj` *shadows* the polymorphic one
+under `(:use set)`, so `(conj [1 2] 3)` raised "%set-add: expected set, got vector"
+in any file that imported the module.
+
+**Two: two deferred pattern features failed by silent reinterpretation** — the
+exact thing ADR-152 ("reject the shape; never reinterpret it") exists to prevent.
+`(match 2 ((or 1 2) :hit) (_ :miss))` answered `:miss`: `(or 1 2)` is a 3-element
+list pattern whose head *binds a variable named `or`*, so a plausible-looking
+program took the wrong branch with no diagnostic anywhere. And a map pattern's
+unknown keys were *ignored*, so `{:a v}` degenerated to "is the target a map?" — it
+matched anything, bound nothing, and the body then died on an unbound `v`, a
+diagnostic pointing at the body rather than the pattern.
+
+**Decision — complete the protocol.**
+- `conj` / `disj` / `get` / `into` dispatch on a **set** in `std/prelude.blsp`;
+  `set/conj` and `set/disj` are removed (`std/set` keeps only what is genuinely
+  set-specific: the `set` constructor and `union`/`intersection`/`difference`/
+  `subset?`). `conj`/`disj` are variadic there like everywhere else, and `(get s x)`
+  is **membership**, yielding the element or the default — so `get` and `contains?`
+  finally agree on a set.
+- `first` / `rest` accept a **map**, yielding its `[k v]` pairs, matching every other
+  seq op. Both are kernel builtins, so the arm went in `builtins/sequences.rs` and a
+  dedicated `seqable` domain (`seq` + `Set` + `Map`) went in the primitive signature
+  table — kept separate from the shared `seq` const so widening the head/tail pair
+  didn't silently widen seven other primitives' domains.
+- A lazy **range in a cons tail splices** in the printer, so
+  `(cons 9 (range 2))` prints `(9 0 1)` and re-reads as itself. A genuinely improper
+  tail still prints dotted.
+- **Not changed:** `contains?` still *errors* on a vector or list. Clojure accepts a
+  vector there and answers by **index**, which makes `(contains? [1 2] 1)` true for
+  the wrong reason; a loud error beats inheriting that trap. `first`/`map`/`into` on
+  a **string** also still error — strings bridge through `string->list`/
+  `string->graphemes`, and codepoint-vs-grapheme is a decision the caller must make.
+  Both are recorded in ROADMAP rather than settled here.
+
+**Decision — reject the two misread shapes.**
+- `(or …)` / `(and …)` / `(not …)` in **pattern** position is a clean error naming
+  the two spellings that work (one clause per alternative, or a `:when` guard).
+  Brood has no alternative/boolean patterns and this ADR does not add them; it makes
+  their absence *audible*.
+- A **map pattern** accepts only `:keys` and `:or`; any other key (general
+  `{:key subpattern}` nesting, `:as` — both still deferred per ADR-011) is a clean
+  error. `{}` stays legal as the honest "any map" pattern. The check runs in
+  `match-map-vars`/`match-compile-map`, so it covers `match`, refutable `let`,
+  `fn`/`defn` clauses and `receive` at once — one grammar, one rejection.
+
+**Decision — `case` exists, and earns its name by what it refuses.** The review
+found `case` documented-as-if-existing ("`case` is just `match` with literal
+patterns") but unbound, with a foreign-construct hint saying Brood *has* no `case`;
+meanwhile the checker already modelled `(case key v1 r1 … default)` in two places.
+`case` is now a prelude macro over `match*` taking flat `test result` pairs with a
+lone trailing default. Under "one spelling each" a pure alias would not qualify —
+what qualifies it is the **restriction**: a `case` test must be a literal, and a
+**bare symbol is rejected**, because in `match` a bare symbol silently *binds*.
+So `case` is the form that cannot make the one mistake `match` invites, and
+anything richer than a constant is rejected with a hint naming `match`. The
+exhaustiveness lint now names the surface form (`case: not exhaustive`) instead of
+always saying `match`.
+
+**Decision — the combinators and predicates the review found missing.** `partial`,
+`complement`, `constantly` (`comp` had shipped alone, leaving a hand-written `fn`
+as the only way to partially apply); `vec` (documented in two places, unbound);
+`disj`; `nan?` / `infinite?` (`nan`/`inf` are *reader literals*, so the language
+could produce a NaN long before it could test for one); and `comment`, the
+form-level "don't run this" — Brood has no `#_` discard, and the checker skips a
+`comment` body so names inside need not resolve.
+
+**Consequences.**
+- No new special form, no `Value` kind, no evaluator semantics change; the 8
+  special forms are untouched and immutability is unaffected.
+- **Downstream break:** a *qualified* `set/conj` / `set/disj` call is now unbound
+  (`hatch/src/web/pubsub.blsp` has four). A bare `conj`/`disj` under `(:use set)`
+  keeps working and now means the polymorphic prelude one — the semantics for a set
+  argument are identical.
+- Two previously-silent misreads now fail at macroexpansion. Any code relying on
+  the old readings was already wrong (a variable named `or`; a map pattern that
+  matched every map).
+- `nest check` stays at zero warnings across `std/` + `tests/`. New coverage:
+  `tests/set_test.blsp` (the protocol block, plus proof that `(:use set)` no longer
+  shadows `conj` for other kinds), `tests/pattern_matching_test.blsp` (both
+  rejections, in every binding position), `tests/ergonomics_test.blsp`
+  (combinators, `case`, `comment`, `vec`/`nan?`/`infinite?`),
+  `tests/sequence_test.blsp` (the range-in-tail print round-trip).

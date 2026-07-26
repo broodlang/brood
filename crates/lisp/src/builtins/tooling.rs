@@ -209,6 +209,8 @@ pub const SPECIAL_FORMS: &[&str] = &[
     kw::OR,
     kw::MATCH,
     kw::MATCH_STAR,
+    kw::CASE,
+    kw::COMMENT,
     kw::TRY,
     kw::CATCH,
     kw::THROW,

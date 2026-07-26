@@ -241,6 +241,24 @@ fn write_list(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u3
                 cur = tail;
             }
             ValueRef::Nil => break,
+            // A lazy range in the TAIL stands for the list it denotes, so it
+            // splices into the spine — `(cons 9 (range 2))` is `(9 0 1)`, not the
+            // dotted `(9 . (0 1))` that the catch-all below used to print (a value
+            // that didn't read back as itself, and `=`/`count` already treated the
+            // spine as proper).
+            ValueRef::Range(id) => {
+                let (lo, hi, step) = heap.range_parts(id);
+                let mut i = lo;
+                while if step > 0 { i < hi } else { i > hi } {
+                    if !first {
+                        out.push(' ');
+                    }
+                    first = false;
+                    write_value(out, heap, Value::int(i), readable, depth + 1);
+                    i += step;
+                }
+                break;
+            }
             other => {
                 out.push_str(" . ");
                 write_value(out, heap, other, readable, depth + 1);

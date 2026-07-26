@@ -8794,3 +8794,75 @@ what `match-compile` actually binds across **all 17 pattern forms** — vector, 
 nested, list-rest `&`, `{:keys …}`, `:or`, quoted, literals, pin, non-linear, guard,
 three `(bytes …)` segment shapes, and a 10-binder clause — since a disagreement there
 would silently hand a body the wrong variable.
+## 2026-07-26 — syntax review, part 2: the collection protocol, and two patterns that lied (ADR-156)
+
+The orthogonality sibling of ADR-154's conciseness pass. Method mattered here: the
+matrix of collection ops × collection kinds was probed **against the running
+binary**, not read out of `language.md` — which is the only reason the findings are
+what they are, because the docs described a coherent protocol and the binary didn't
+implement one.
+
+**The set was never wired into the protocol.** `(conj #{1} 2)` raised "not a
+collection"; `(into #{} [1 1 2])` returned the list `(1 1 2)`, losing both the kind
+and the dedup; `disj` didn't exist in the prelude; and `get` fell through to `nth`,
+so `(get #{10 20} 0)` was `20` and `(get #{10 20} 10)` was `nil` — a membership read
+answering by position, wrong under any reading, and silent. `first`/`rest` erred on
+a **map** while `seq`/`last`/`map`/`filter`/`fold`/`into` all read one as its
+`[k v]` pairs.
+
+**ADR-154 had looked straight at `set/conj` and kept it**, on the premise that this
+mirrors `clojure.set`. The premise was simply false — Clojure's `conj`/`disj` are
+`clojure.core` and polymorphic; `clojure.set` defines neither. Worth noting as a
+failure mode: the ADR reasoned from a remembered API rather than checking, and the
+"deliberately not changed" framing then protected the mistake. The cost was bigger
+than stutter, because a module-local `conj` *shadows* the polymorphic one: any file
+with `(:use set)` got "%set-add: expected set, got vector" from `(conj [1 2] 3)`.
+
+**Two patterns lied.** `(match 2 ((or 1 2) :hit) (_ :miss))` answered `:miss` —
+`(or 1 2)` is a 3-element list pattern whose head binds a *variable named `or`*. And
+a map pattern's unknown keys were ignored, so `{:a v}` degenerated to "is it a
+map?": matched anything, bound nothing, then died on an unbound `v` in the body,
+pointing nowhere near the pattern. Both are exactly what ADR-152 exists to prevent;
+both are now clean errors naming the spelling that works. The rejection lives in
+`match-map-vars`/`match-compile-map`, so one edit covers `match`, refutable `let`,
+`fn`/`defn` clauses and `receive` — the payoff of one shared pattern grammar.
+
+**`case` existed in the docs, the checker, and nowhere else.** `language.md` said
+"`case` is just `match` with literal patterns" (reads as an existence claim), the
+runtime carried a foreign-construct hint saying Brood *has* no `case`, and
+`check/infer.rs` + `check/walk.rs` both already modelled `(case key v1 r1 … default)`.
+It's now a prelude macro over `match*`. Under "one spelling each" an alias wouldn't
+qualify; what qualifies it is the **restriction** — a `case` test must be a literal,
+and a bare symbol is rejected, because that is precisely where `match` silently
+binds instead of comparing. The exhaustiveness lint now reads the embedded context
+keyword and names the surface form, so a `case` no longer reports as `match:`.
+
+**Also shipped:** `partial`/`complement`/`constantly` (`comp` had shipped alone,
+which left a hand-written `fn` as the only partial application); `vec` (documented
+in two places, unbound); `nan?`/`infinite?` — `nan`/`inf` are *reader literals*, so
+the language could produce a NaN long before it could test for one; `comment`, with
+a `SkipBody` entry so the checker doesn't walk its body; and a printer fix so a
+range spliced into a cons tail prints `(9 0 1)` rather than the dotted
+`(9 . (0 1))`, a form that didn't read back as its own value.
+
+**Two things the review deliberately did *not* change**, both recorded in ROADMAP
+with the reasoning: `contains?` still errors on a vector (Clojure answers by
+*index*, making `(contains? [1 2] 1)` true for the wrong reason — a loud error beats
+inheriting the trap), and a string is still not seqable (codepoint vs grapheme is
+the caller's decision). The remaining six review findings are queued at the top of
+ROADMAP, led by the one that needs an ADR before any code: **callable data**
+(`(:key m)`), the biggest ergonomic gap left against the Clojure surface.
+
+**Test-writing note worth keeping:** the first version of the map-pattern
+regression test used `(macroexpand '(let ({:a v} …) …))` and reported "no error was
+raised" — because `let`/`fn` are *special forms* whose pattern lowering runs in the
+compile pass, not macroexpansion. Only `match` (a macro) is reachable by
+`macroexpand`. For the other three binding positions the probe has to be
+`eval-string`. The implementation was right; the test was measuring the wrong thing.
+
+**Suite status.** `nest test --exclude conformance` is 3352 tests / 3350 passing in
+30 s, with the 2 failures being one pinned `first` error-text assertion (updated —
+the domain now names set and map). The full `nest test` still hits the documented
+900 s conformance grind (the 100k-deep JSONTestSuite documents, ROADMAP's one red
+item) — unchanged by this work and confirmed pre-existing by running with the tag
+excluded.

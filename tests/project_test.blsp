@@ -378,7 +378,7 @@
 
 ;; A malformed manifest used to be either cryptic or SILENT. `:source-paths "src"`
 ;; (an easy mistake, since one path is the common case) surfaced as
-;; `type error: first: expected list or vector` raised from inside `map`, with
+;; a bare `type error: first: …` raised from inside `map`, with
 ;; nothing pointing at the manifest; and a first form that wasn't `(project …)` —
 ;; a typo like `(porject …)` — was skipped entirely, so every setting in it was
 ;; quietly ignored and the project silently ran on defaults.

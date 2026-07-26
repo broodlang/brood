@@ -271,7 +271,33 @@
     (assert-error (macroexpand '(match [1 2] ([a & b] :x)))))
   (test "a clause that isn't a (pattern body...) list" (assert-error (macroexpand '(match 1 5))))
   (test "& rest still works (sanity: a valid & does not error)"
-    (assert= (match (list 1 2 3) ((a & b) (list a b))) (list 1 (list 2 3)))))
+    (assert= (match (list 1 2 3) ((a & b) (list a b))) (list 1 (list 2 3))))
+  ;; ADR-152: reject the shape, never reinterpret it. Both of these USED to be
+  ;; read as something else entirely, with no diagnostic at the mistake.
+  (test "an (or …) / (and …) / (not …) pattern is rejected, not read as a list pattern"
+    ;; Was: a 3-element list pattern binding a variable named `or` — so
+    ;; (match 2 ((or 1 2) :hit) (_ :miss)) silently answered :miss.
+    (assert-error (macroexpand '(match 2 ((or 1 2) :hit) (_ :miss))))
+    (assert-error (macroexpand '(match 2 ((and 1 2) :hit) (_ :miss))))
+    (assert-error (macroexpand '(match 2 ((not 1) :hit) (_ :miss))))
+    ;; The suggested spelling stays legal and answers correctly.
+    (assert= (match 2 (x :when (or (= x 1) (= x 2)) :hit) (_ :miss)) :hit))
+  (test "a map pattern key other than :keys/:or is rejected, not ignored"
+    ;; Was: an unknown key was dropped, so `{:a v}` degenerated to "is it a map?"
+    ;; — it matched anything, bound nothing, and the body died on unbound `v`.
+    (assert-error (macroexpand '(match {:a 1} ({:a v} v))))
+    (assert-error (macroexpand '(match {:a 1} ({:keys [a] :as m} a))))
+    ;; …in every binding position that shares the grammar. `let`/`fn` are special
+    ;; forms — their pattern lowering runs in the compile pass, not macroexpansion —
+    ;; so these go through `eval-string` rather than `macroexpand`.
+    (assert-error (eval-string "(let ({:a v} {:a 1}) v)"))
+    (assert-error (eval-string "((fn ({:a v}) v) {:a 1})"))
+    (assert-error (eval-string "(do (defn pm-bad-map ({:a v}) v) (pm-bad-map {:a 1}))"))
+    (assert-error (eval-string "(do (send (self) {:a 1}) (receive ({:a v} v)))"))
+    ;; The supported subset is untouched, and `{}` stays the honest "any map".
+    (assert= (match {:a 1 :b 2} ({:keys [a b]} (+ a b))) 3)
+    (assert= (match {} ({:keys [a] :or {a 7}} a)) 7)
+    (assert= (match {:z 1} ({} :any-map) (_ :no)) :any-map)))
 
 ;; ─────────────────────────────────────────────────────────────────────────────
 ;; TAIL POSITION — a match-driven loop must not overflow

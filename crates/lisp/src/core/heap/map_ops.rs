@@ -714,6 +714,26 @@ impl Heap {
         }
     }
 
+    /// The map's **first** entry in the same traversal order `map_entries` uses,
+    /// or `None` when empty. O(depth), allocating nothing — `(first m)` must not
+    /// copy every entry out just to take the head (which is what calling
+    /// `map_entries().next()` would do, making a hand-written `first`/`rest` walk
+    /// over a map O(n²)).
+    pub fn map_first_entry(&self, id: MapId) -> Option<(Value, Value)> {
+        let node = self.map_node(id);
+        if let Some(&kv) = node.data.first() {
+            return Some(kv);
+        }
+        if !node.is_collision {
+            for &child in &node.children {
+                if let Some(kv) = self.map_first_entry(child) {
+                    return Some(kv);
+                }
+            }
+        }
+        None
+    }
+
     /// Number of entries in the map. O(1) — every node tracks the size
     /// of its own subtree, so the root's `size` is the answer.
     pub fn map_size(&self, id: MapId) -> usize {

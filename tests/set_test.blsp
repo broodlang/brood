@@ -59,18 +59,60 @@
       (refute (contains? live [9 9]))
       (assert= (count live) 2))))
 
+;; `conj`/`disj` are PRELUDE functions that dispatch on the collection kind — not
+;; `set/…` names. They were module-local (and so shadowed the polymorphic prelude
+;; `conj` under `(:use set)`, breaking `(conj [1 2] 3)` in any file that imported
+;; this module) until 2026-07-26. These cases run in a `(:use set)` file, so they
+;; also pin that the import no longer shadows them.
 (describe "conj & disj"
   (test "conj adds; re-adding is a no-op"
     (assert= (conj (set [1 2]) 3) #{1 2 3})
     (assert= (conj (set [1 2]) 2) #{1 2}))
+  (test "conj is variadic on a set, like every other collection"
+    (assert= (conj #{1} 2 3) #{1 2 3}))
   (test "disj removes; removing an absent element is a no-op"
     (assert= (disj (set [1 2 3]) 2) #{1 3})
     (assert= (disj (set [1 2]) 9) #{1 2}))
+  (test "disj is variadic"
+    (assert= (disj #{1 2 3} 1 3) #{2}))
   (test "conj/disj return fresh sets (no mutation)"
     (let (s (set [1 2]))
       (conj s 3)
       (disj s 1)
-      (assert= s #{1 2}))))
+      (assert= s #{1 2})))
+  (test "the same conj still works on every other kind inside a (:use set) file"
+    (assert= (conj [1 2] 3) [1 2 3])
+    (assert= (conj (list 2 3) 1) (list 1 2 3))
+    (assert= (conj {:a 1} [:b 2]) {:a 1 :b 2})
+    (assert= (conj nil 1) (list 1))))
+
+;; A set is a first-class member of the collection protocol: the prelude ops
+;; dispatch to it with no `(:use set)` needed. Before 2026-07-26 `conj` errored
+;; ("not a collection"), `into` poured into a LIST and lost the dedup, and `get`
+;; indexed positionally — so `(get #{10 20} 10)` was nil while `(get #{10 20} 0)`
+;; was 20, an answer wrong under any reading.
+(describe "a set in the collection protocol"
+  (test "get looks up by MEMBERSHIP, yielding the element (never an index)"
+    (assert= (get #{10 20} 10) 10)
+    (assert= (get #{10 20} 20) 20)
+    (assert= (get #{10 20} 0) nil)
+    (assert= (get #{10 20} 0 :absent) :absent)
+    ;; get and contains? now agree on a set (they disagreed before)
+    (is (contains? #{10 20} 10))
+    (refute (contains? #{10 20} 0)))
+  (test "into a set adds and dedups, keeping the set kind"
+    (assert= (into #{} [1 1 2]) #{1 2})
+    (is (set? (into #{} [1 1 2])))
+    (assert= (into #{1} #{2 3}) #{1 2 3})
+    (assert= (into #{1} nil) #{1}))
+  (test "first/rest/count/empty? treat a set as its elements"
+    (assert= (count #{1 2 3}) 3)
+    (is (empty? #{}))
+    (is (contains? #{1 2 3} (first #{1 2 3})))
+    (assert= (count (rest #{1 2 3})) 2))
+  (test "vec / seq realise a set to its elements"
+    (assert= (count (vec #{1 2 3})) 3)
+    (assert= (sort (vec #{3 1 2})) (list 1 2 3))))
 
 (describe "set algebra"
   (test "union"

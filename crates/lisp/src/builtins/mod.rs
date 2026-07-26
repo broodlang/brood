@@ -103,6 +103,18 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     const list_ty: Ty = Ty::LIST;
     // `bytes` is seqable too: `first`/`rest`/`nth` iterate its octets at runtime.
     const seq: Ty = Ty::of_tags(&[Tag::Nil, Tag::Pair, Tag::Vector, Tag::Bytes]);
+    // `first`/`rest` additionally walk a **set** (as its elements) and a **map** (as
+    // its `[k v]` pairs), matching `seq`/`map`/`fold`/`last`. Kept separate from
+    // `seq` so widening the head/tail pair doesn't silently widen every other
+    // sequence primitive's domain.
+    const seqable: Ty = Ty::of_tags(&[
+        Tag::Nil,
+        Tag::Pair,
+        Tag::Vector,
+        Tag::Bytes,
+        Tag::Set,
+        Tag::Map,
+    ]);
     const callable: Ty = Ty::of_tags(&[Tag::Fn, Tag::Native]);
     // An **iolist** (ADR-139): a string, a `bytes`, a byte int 0–255, or an
     // arbitrarily nested list/vector of iolists (nil = empty). The lattice can't
@@ -303,14 +315,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "first",
         Arity::exact(1),
-        Sig::new(vec![seq], any),
+        Sig::new(vec![seqable], any),
         first,
     );
     def(
         heap,
         "rest",
         Arity::exact(1),
-        Sig::new(vec![seq], list_ty),
+        Sig::new(vec![seqable], list_ty),
         rest,
     );
     def(
@@ -2770,8 +2782,16 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("float->bits", &["x"], "The IEEE 754 binary64 bit pattern of x, as a non-negative integer (a bignum when the sign bit is set). Reinterpretation, not conversion — the only exact float comparison there is: it separates -0.0 from 0.0 and distinguishes NaN payloads, both of which = collapses. The inverse of bits->float."),
     ("bits->float", &["n"], "The binary64 float whose bit pattern is n (0 <= n < 2^64). The inverse of float->bits."),
     ("cons", &["x", "xs"], "A new pair with head x and tail xs."),
-    ("first", &["coll"], "The head of a list or vector, or nil if empty."),
-    ("rest", &["coll"], "All but the head of a list or vector."),
+    (
+        "first",
+        &["coll"],
+        "The head of any sequence — a list, vector, bytes, set (an element) or map (a [k v] pair) — or nil if empty.",
+    ),
+    (
+        "rest",
+        &["coll"],
+        "All but the head of any sequence, as a list (a set yields its remaining elements, a map its remaining [k v] pairs).",
+    ),
     ("nil?", &["x"], "True if x is nil."),
     ("pair?", &["x"], "True if x is a cons pair."),
     ("empty?", &["coll"], "True if coll is empty (nil, an empty string/vector/map, or a seq-view that realises to nothing)."),

@@ -207,7 +207,7 @@ the `nest new` scaffolder."
 ;; `:source-paths` / `:test-paths` must be a vector (or list) of strings — they are
 ;; handed straight to `map`/`path-join`. A bare string (`:source-paths "src"`, an
 ;; easy mistake since one path is the common case) used to surface as
-;; `type error: first: expected list or vector, got string ("src")` raised from
+;; a bare `type error: first: … got string ("src")` raised from
 ;; inside `map`, with nothing pointing at the manifest. Name the key and show what
 ;; was written instead.
 (defn project--check-paths (key value)
