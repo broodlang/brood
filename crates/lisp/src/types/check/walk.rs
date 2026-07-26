@@ -751,6 +751,40 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         return;
     }
 
+    // **`(get recv :literal-keyword …)` on an integer-indexed receiver** — the `get`
+    // spelling of the check above, and the write-time half of ADR-164's runtime error.
+    // A keyword key can only address something keyed, so a vector/list/string/bytes
+    // receiver is a provable mistake (`(get deps :name)` where `deps` is a *list* of
+    // maps). The curated signature can't express this: it constrains each argument
+    // independently, and `countable` legitimately includes both keyed and indexed
+    // kinds — the conflict is in the *relationship* between the two arguments.
+    // Literal-keyword keys only, so a computed key is never guessed at.
+    if let Value::Sym(s) = head {
+        if value::symbol_is(s, "get") && items.len() >= 3 {
+            if let Value::Keyword(_) = items[2] {
+                use crate::types::Tag;
+                let keyed = Ty::of(Tag::Map)
+                    .union(Ty::of(Tag::Set))
+                    .union(Ty::of(Tag::Nil));
+                let g = gradual_of(heap, items[1], ctx);
+                if !g.bound.is_never()
+                    && g.bound.is_disjoint(&keyed)
+                    && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+                {
+                    out.push((
+                        arg_pos(heap, items[1], form),
+                        format!(
+                            "get: a keyword key needs a map, set or nil, got {} ({}) — \
+                             an integer-indexed collection is indexed by position",
+                            g.bound,
+                            crate::syntax::printer::print(heap, items[1]),
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
     // Special-cased forms that introduce scope or refine types. Each handles
     // its own argument-walking and returns; the generic path below doesn't run.
     if let Value::Sym(s) = head {
