@@ -297,8 +297,9 @@ impl<'a> Parser<'a> {
             )
             .with_pos(pos)
             .with_hint(
-                "Brood has no form-level discard — comment the form out with `;` \
-                 (a line comment runs to end of line).",
+                "Wrap the form in `(comment …)` — its body is read but never \
+                 evaluated — or comment it out with `;` (a line comment runs to end \
+                 of line).",
             )),
             // `#"…"` — Clojure regex literal. (`#b"…"` was handled above, so a `#"`
             // here is unambiguously the regex form.)

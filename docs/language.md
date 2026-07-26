@@ -39,7 +39,7 @@ these are the ones to unlearn:
 | `#{1 2 3}` set literal | A first-class set (`Value::Set`, ADR-060): `set?` true, prints `#{…}`, never `=` to a map. Evaluates its elements and dedups. | Reads as a kernel set; the `set` library (`(require 'set)`) adds `union`/`intersection`/… |
 | `#(+ 1 %)` anonymous-fn reader macro | Write it out: `(fn (x) (+ 1 x))`. | A parse error **with a hint** naming `(fn …)` (was "unbound symbol: #"). |
 | `#'foo` var-quote | Symbols are values — plain `'foo`. | A parse error **with a hint** naming `'foo`. |
-| `#_form` discard reader macro | No form-level discard — comment it out with `;` (line comment). | A parse error **with a hint** naming `;` (was a stray `#_` symbol). |
+| `#_form` discard reader macro | No form-level discard — wrap the form in `(comment …)`, whose body is read but never evaluated, or comment it out with `;`. | A parse error **with a hint** naming `(comment …)` and `;` (was a stray `#_` symbol). |
 | `#"[0-9]+"` regex literal | Regexes are library values: `(require 'regex)` then `(regex/match? "pat" s)`. | A parse error **with a hint** naming `(require 'regex)` (was a stray `#`-symbol). |
 | `\c` / `\newline` character literal | No character type — a character is a 1-char string `"c"` (or `(int->char 99)`). | A parse error **with a hint** naming the 1-char string (was `unbound symbol: \c`). |
 | `(/ 7 2)` → ratio `7/2` | No ratios. Integer args give an integer **only when they divide evenly**; otherwise a float. `(/ 12 3)` → `4`, `(/ 7 2)` → `3.5`. | A float where you expected an exact ratio. |

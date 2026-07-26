@@ -8901,3 +8901,41 @@ the registry lock.** Every `send` resolves pid → mailbox through a single glob
 **nothing**: pingpong 199 → 200 ms, ring 721 → 734, the send microbenchmark identical.
 The registry is uncontended; the cost is elsewhere in the deliver path. Prototype
 reverted.
+## 2026-07-26 — the hint table was lying in five places
+
+A follow-on audit of every "the Brood way" hint (`eval::foreign_construct_hint`,
+shared by the runtime and `nest check`) against what the tree actually contains.
+Five were wrong, and the wrong ones are worse than none: they send the reader
+after a feature that isn't there, or deny one that is.
+
+- **`deftype`/`reify` pointed at `defprotocol`/`defimpl` "(the `protocol`
+  module)".** There is no such module in std. The macros live in the **hatch
+  package** (`hatch/src/protocol.blsp`, whose own docstring calls itself a
+  "prototype for std/protocol"), dispatching on the first argument's `type-of`.
+  What confused this is that the *kernel* does carry `types/check/protocol.rs` —
+  a full conformance pass for `defprotocol`/`defbehaviour`/`defimpl` — plus LSP
+  goto/hover, all of it dormant until a project loads a module the tree doesn't
+  ship. `docs/types.md` had the same gap and now says so.
+- **`letfn` pointed at `let` + `fn`**, which cannot express a recursive local —
+  the entire reason `letfn` exists. Now points at `letrec`.
+- **`lazy-seq` said "Brood sequences are eager"** with no mention of the
+  `lmap`/`lfilter`/`lkeep`/`lremove` fusing seq-views (ADR-111) or the lazy
+  `range`. Both have existed for months.
+- **The `#` arm claimed `#{…}` was unavailable** ("Brood has no `#` reader
+  macros… `#{…}` set literal → `(set […])`") — four ADRs after sets became a
+  first-class literal (ADR-060), and with `#b"…"` bytes literals also real.
+- **`#_`'s reader hint offered only `;`** — it predated `comment`, which landed
+  the same day and is the exact replacement for a form discard.
+
+**And 15 names had no hint at all**: every ADR-154 rename (`car`, `cdr`,
+`concat`, `length`, `entries`, `flat-map`, `string-contains?`, `read-file`, …)
+gave a bare "unbound symbol" for a name with a one-word replacement. `some?` is
+the one that matters most — ADR-154 freed it *because* "any element matches" and
+Clojure's non-nil test get confused, so the hint now names both readings.
+
+**Kept as the lesson:** a hint is a claim about the language, and nothing was
+verifying those claims. `hints_name_only_features_that_exist` (crates/lisp/tests/
+basic.rs) now pins them, including negative assertions — the `deftype` hint must
+say "NOT in std" and name `hatch`. Worth extending whenever a hint is added: the
+`case` hint (removed earlier today, when `case` stopped being absent) was the
+same failure a few hours earlier.
