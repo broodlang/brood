@@ -5,47 +5,34 @@
 > change dramatically (and break) without notice or migration path. Explore and
 > experiment freely, but don't build anything you depend on against it yet.
 
-**Brood** is a dynamic **Lisp implemented in Rust** with a deliberately small
-core — a handful of special forms under a standard library, REPL, and toolchain
-written in Brood itself. It began as the language a modern, Emacs-like,
-self-editing text editor would be written in, and grew past that intent into a
-general-purpose language and runtime: share-nothing concurrency across all
-cores, distributed nodes, a bytecode VM with a tier-1 native JIT, an advisory
-set-theoretic type checker, and batteries included. Live redefinition — a
-running program rewriting its own behaviour — remains the design center.
+**Brood** is a dynamic **Lisp implemented in Rust** with a deliberately small core:
+a handful of special forms, with the standard library, REPL and toolchain written in
+Brood itself. It runs share-nothing concurrency across every core, connects
+distributed nodes, compiles to a bytecode VM with a tier-1 native JIT, and ships an
+advisory set-theoretic type checker.
 
-It is an **immutable** language: data never changes once made and there is no
-local mutation (no `set!`, no `while`), so loops are recursion. The single
-exception is `def`, which rebinds a global — that *is* live redefinition, the
-whole point of a program that can rewrite itself while running.
+**Live redefinition is the design center.** A running program can rewrite its own
+behaviour — redefine a function and every process picks it up on its next call, no
+restart.
 
-Under the Lisp sits share-nothing, message-passing concurrency: a *brood* of
-cheap, supervised processes that share nothing and talk by messages. That swarm is where
-the name comes from. Immutability is what makes that share-nothing model safe:
-no aliasing across processes, messages copied cleanly, no shared mutable state to
-race on.
+It is an **immutable** language: data never changes once made and there is no local
+mutation (no `set!`, no `while`), so loops are recursion. The one exception is `def`,
+which rebinds a global — that *is* live redefinition. Immutability is also what makes
+the concurrency safe: a *brood* of cheap processes that share nothing and talk by
+messages, with no aliasing across them and nothing to race on.
 
-> **Name & tooling.** This project was formerly `mylisp`; it is now **Brood**.
-> The command line splits the way `rustc`/`cargo` do
-> (ADR-028): **`brood`** runs the *language* — a file, the REPL, or a single
-> test file (`brood --test`) — and **`nest`** is the *project tool* —
-> `nest new`, `nest test`, `nest run`, `nest doc`, and dependency management
-> (`nest add`/`fetch`/`tree`). Both binaries exist today — `make install` puts
-> them, plus the `brood-lsp` language server, on your `PATH`. The colony imagery
-> is deliberate — a *brood* of processes lives in a *nest*.
->
-> Brood source files carry the **`.blsp`** extension — a contraction of *Brood
-> Lisp* (`.lisp` collides with Emacs' `lisp-mode`). Any `.blsp` file, or a
-> reference to "blsp", means **Brood-language source**, as distinct from the Rust
-> kernel.
+The command line splits the way `rustc`/`cargo` do (ADR-028): **`brood`** runs the
+*language* — a file, the REPL, or a single test file (`brood --test`) — and **`nest`**
+runs the *project* — `nest new`, `nest test`, `nest run`, `nest doc`, and dependency
+management (`nest add`/`fetch`/`tree`). `make install` puts both, plus the
+**`brood-lsp`** language server, on your `PATH`. A brood of processes lives in a nest.
 
-This repository is **Brood** — the language and its runtime: a reader, a
-closure-compiling **bytecode VM** with proper tail calls and lexical closures
-(with a tier-1 **JIT** that compiles hot loops to native code), a Brood-written
-standard library and self-hosted REPL, the **concurrency** and
-**distributed-node** runtime, and the `std/editor/*` framework (a rope/buffer
-data model and a serialisable display protocol) for building interactive,
-self-editing applications on top.
+Source files use the **`.blsp`** extension — *Brood Lisp*. Any `.blsp` file means
+Brood-language source, as distinct from the Rust kernel under `crates/`.
+
+Also in this repository: the `std/editor/*` framework — an immutable rope/buffer data
+model and a serialisable display protocol — for building interactive, self-editing
+applications on top.
 
 ```lisp
 (+ 1 2)                          ;=> 3
