@@ -234,10 +234,10 @@ maps from header→value strings. An empty or header-only CSV returns nil/empty.
 
 (defn csv--field-needs-quoting? (s)
   "True if field `s` must be quoted in CSV output: contains comma, quote, newline, or CR."
-  (or (string-contains? s ",")
-    (string-contains? s "\"")
-    (string-contains? s "\n")
-    (string-contains? s "\r")))
+  (or (includes? s ",")
+    (includes? s "\"")
+    (includes? s "\n")
+    (includes? s "\r")))
 
 (defn csv--emit-field (s)
   "Emit a single CSV field, quoting it if necessary. Interior quotes are doubled."

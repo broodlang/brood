@@ -803,7 +803,7 @@ resolve in the advisory checker. Returns the project root."
       ;; cheap thread-local check — otherwise), so a large project's `check`
       ;; reports live instead of one silent wait.
       (let (files (project--all-files root)
-            total (length files))
+            total (count files))
         (project--check-fold files total 0 nil)))))
 
 (defn project--check-fold (files total done acc)
@@ -871,7 +871,7 @@ resolve in the advisory checker. Returns the project root."
 ;; check namespace-sound — two files' same short name in different namespaces no
 ;; longer collide.
 (defn project--qualify (ns head name)
-  (if (or (nil? ns) (project--ambient? head name) (string-contains? name "/"))
+  (if (or (nil? ns) (project--ambient? head name) (includes? name "/"))
     name
     (str ns "/" name)))
 
@@ -992,7 +992,7 @@ resolve in the advisory checker. Returns the project root."
 (defn project--node-syms--acc (node acc)
   (if (= (project--node-kind node) :symbol)
     (let (nm (str (project--node-val node)))
-      (if (string-contains? nm "--") (map-assoc acc nm (inc (map-get acc nm 0))) acc))
+      (if (includes? nm "--") (map-assoc acc nm (inc (map-get acc nm 0))) acc))
     (project--walk-val (project--node-val node) acc)))
 
 ;; Merge symbol-count map `b` into `a` (name→count), summing counts. The reduce

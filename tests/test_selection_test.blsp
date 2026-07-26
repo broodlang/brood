@@ -104,7 +104,7 @@
     ;; warning exists to prevent.
     (let (warning (with-err-str (assert= (selection--select {:lines (list ["tests/demo_test.blsp" 1])})
                                   nil)))
-      (is (string-contains? warning "no test found at"))))
+      (is (includes? warning "no test found at"))))
   (test "a path suffix matches, so a relative path finds an absolute record"
     (assert= (selection--select {:lines (list ["demo_test.blsp" 4])}) (list "math › adds")))
   (test "an unknown file selects nothing"

@@ -24,13 +24,13 @@
   (test "explain-error returns the structured explanation for a code"
     (let (r (mcp/mcp-explain-error-tool {:code "E0044"}))
       (assert= (get r :code) "E0044")
-      (is (string-contains? (get r :fix) "tail-recursive"))))
+      (is (includes? (get r :fix) "tail-recursive"))))
   (test "explain-error rejects a non-string :code"
     (assert-error (mcp/mcp-explain-error-tool {:code 44})))
   (test "find-pattern returns idiom matches for an intent"
     (let (r (mcp/mcp-find-pattern-tool {:query "build a string"}))
       (is (> (count (get r :matches)) 0))
-      (is (some? (fn (e) (string-contains? (get e :idiom) "iolist")) (get r :matches)))))
+      (is (any? (fn (e) (includes? (get e :idiom) "iolist")) (get r :matches)))))
   (test "find-pattern rejects a non-string :query"
     (assert-error (mcp/mcp-find-pattern-tool {:query 1})))
   (test "both tools are in the catalogue"

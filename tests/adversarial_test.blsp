@@ -45,8 +45,8 @@
   ;; (a non-tail recursion overflows in the low hundreds) without the runner
   ;; holding ~0.5 GiB per test. basic.rs covers the full 100k tail loop directly.
   (test "30 000-deep tail recursion (TCO via let-bound recursive lambda)"
-    (let (loop (fn (n acc) (if (= n 0) acc (loop (- n 1) (+ acc n)))))
-      (assert= 450015000 (loop 30000 0))))
+    (let (go (fn (n acc) (if (= n 0) acc (go (- n 1) (+ acc n)))))
+      (assert= 450015000 (go 30000 0))))
 
   (test "30 000-deep tail recursion via defn"
     ;; `adv-tail-loop` lives at top level to confirm TCO works through the
@@ -65,14 +65,14 @@
   (test "spawning from inside a let-bound recursive closure no longer segfaults"
     ;; The body captures a local (`n`) from the same frame that holds `loop`;
     ;; under the old whole-frame promotion this overflowed the host stack.
-    (let (loop (fn (n) (if (= n 0) :done (do (spawn (+ n 1)) (loop (- n 1))))))
-      (assert= :done (loop 8))))
+    (let (go (fn (n) (if (= n 0) :done (do (spawn (+ n 1)) (go (- n 1))))))
+      (assert= :done (go 8))))
 
   (test "sending a self-referential local closure errors cleanly (was a segfault)"
     ;; `send` serialises the closure; a local closure that refers to itself is
     ;; rejected with a structured error rather than recursing into a crash.
-    (let (loop (fn (n) (if (= n 0) :done (loop (- n 1)))))
-      (assert-error (send (self) loop)))))
+    (let (go (fn (n) (if (= n 0) :done (go (- n 1)))))
+      (assert-error (send (self) go)))))
 
 ;;
 ;; --- Heap allocation --------------------------------------------------------

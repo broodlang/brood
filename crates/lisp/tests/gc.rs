@@ -102,16 +102,16 @@ fn server_style_receive_loop_stays_bounded() {
         (def server
           (spawn
             (do
-              (defn loop (state)
+              (defn go (state)
                 (receive
                   ([:cast x]
                     ;; Build some garbage from `x` each iteration; Stage B's
                     ;; automatic GC reclaims it so it doesn't accumulate.
                     (cons x (cons state (cons :tick nil)))
-                    (loop (+ state 1)))
+                    (go (+ state 1)))
                   ([:stop reply-to]
                     (send reply-to [:final state]))))
-              (loop 0))))
+              (go 0))))
         ;; Cast a bunch of messages, then ask for the final state.
         (defn pump (n)
           (if (= n 0) :pumped

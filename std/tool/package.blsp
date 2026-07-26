@@ -348,7 +348,7 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
 ;; (dev, self-hosted, and the offline test path).
 
 (defn package--registry-index (index) (or index *config-registry*))
-(defn registry--url? (loc) (string-contains? loc "://"))
+(defn registry--url? (loc) (includes? loc "://"))
 
 ;; The human-readable reason out of a caught error, whatever shape it arrived in: a
 ;; plain string, an error map, or the `[:error <map>]` pair an `offload`ed primitive
@@ -854,7 +854,7 @@ package is unknown to this index."
 (defn package--spec-token (tok)
   (if (starts-with? tok ":") (keyword (substring tok 1 (string-length tok))) tok))
 
-(defn package--has-dep? (deps nm) (some? (fn (d) (= (get d :name) nm)) deps))
+(defn package--has-dep? (deps nm) (any? (fn (d) (= (get d :name) nm)) deps))
 
 ;; A dependency name is written VERBATIM into project.blsp (unquoted, as a
 ;; symbol), so it has to be one that reads back as itself. Without this check
@@ -1002,10 +1002,10 @@ package is unknown to this index."
 
 (defn registry--matches? (index-dir nm term)
   (let (latest (last (registry--versions index-dir nm)))
-    (or (string-contains? (name nm) term)
+    (or (includes? (name nm) term)
       (and latest
         (get latest :description)
-        (string-contains? (get latest :description) term)))))
+        (includes? (get latest :description) term)))))
 
 (defn registry--search-line (index-dir nm)
   (let (latest (last (registry--versions index-dir nm)))

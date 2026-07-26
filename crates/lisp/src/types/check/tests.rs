@@ -185,7 +185,7 @@ fn flags_non_tail_self_recursion() {
 fn no_warning_for_tail_recursion_or_higher_order() {
     // proper tail calls in each tail-propagating special form
     assert!(
-        recursion_warnings("(defn loop (n acc) (if (= n 0) acc (loop (- n 1) (* acc n))))")
+        recursion_warnings("(defn go (n acc) (if (= n 0) acc (go (- n 1) (* acc n))))")
             .is_empty()
     );
     assert!(recursion_warnings("(defn down (n) (when (> n 0) (down (- n 1))))").is_empty());
@@ -842,7 +842,7 @@ fn curated_equality_and_string_sigs() {
         .iter()
         .any(|w| w.contains("string->symbol") && w.contains("string")));
     // String predicates require string args.
-    for f in ["starts-with?", "ends-with?", "string-contains?"] {
+    for f in ["starts-with?", "ends-with?"] {
         assert!(
             warnings(&format!("({f} 5 \"x\")"))
                 .iter()
@@ -878,9 +878,9 @@ fn curated_equality_and_string_sigs() {
         .any(|w| w.contains("format") && w.contains("string")));
     // format returns a string.
     assert!(warnings("(string-length (format \"hi %s\" x))").is_empty());
-    // index-of/index-where/string-index-of return int — safe to add.
+    // index-of/index-where/last-index-of return int — safe to add.
     assert!(warnings("(+ 1 (index-of coll x))").is_empty());
-    assert!(warnings("(+ 1 (string-index-of s needle))").is_empty());
+    assert!(warnings("(+ 1 (last-index-of s needle))").is_empty());
     // Correct uses stay silent.
     for ok in [
         "(= 1 2)",
@@ -1775,7 +1775,7 @@ fn return_only_inference_is_sound() {
 fn does_not_infer_through_recursion() {
     // A self-recursive call has no fixed sig to read from — must skip,
     // even though the body is structurally a single call.
-    let w = check_with_defs(&["(defn loop (x) (loop x))"], "(loop :k)");
+    let w = check_with_defs(&["(defn go (x) (go x))"], "(go :k)");
     assert!(w.is_empty(), "recursive defns must not infer: {:?}", w);
 }
 

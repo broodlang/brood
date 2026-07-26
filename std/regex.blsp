@@ -66,8 +66,8 @@ backreferences yet.")
   (let (neg (= (regex--peek pcs i) "^")
         start (if neg (inc i) i)
         [chars nxt] (regex--set-chars pcs start (list)))
-    ;; Store members as a STRING so membership is a native `string-contains?` (one
-    ;; Rust scan) instead of `some?` walking a list of 1-char strings per input char.
+    ;; Store members as a STRING so membership is a native `includes?` (one
+    ;; Rust scan) instead of `any?` walking a list of 1-char strings per input char.
     [{:t :set :neg neg :chars (apply str chars)} nxt]))
 
 (defn regex--atom (pcs i)
@@ -260,9 +260,9 @@ object's per-call clone-out stays a few words — see the cache note above."
 
 (defn regex--class-match? (k c)
   (cond
-    (= k :digit) (string-contains? "0123456789" c)
-    (= k :space) (string-contains? " \t\n\r" c)
-    (= k :word) (or (regex--letter? c) (string-contains? "0123456789" c) (= c "_"))
+    (= k :digit) (includes? "0123456789" c)
+    (= k :space) (includes? " \t\n\r" c)
+    (= k :word) (or (regex--letter? c) (includes? "0123456789" c) (= c "_"))
     else false))
 
 (defn regex--char-test? (test c)
@@ -271,7 +271,7 @@ object's per-call clone-out stays a few words — see the cache note above."
     (cond
       (= k :any) true
       (= k :lit) (= c (get test :c))
-      (= k :set) (let (m (string-contains? (get test :chars) c))
+      (= k :set) (let (m (includes? (get test :chars) c))
                    (if (get test :neg) (not m) m))
       (= k :class) (regex--class-match? (get test :k) c)
       else false)))

@@ -872,9 +872,10 @@ fn unbound_in_root_thread_has_no_scheduler_hint() {
 /// checker), both via the shared `eval::foreign_construct_hint`.
 #[test]
 fn foreign_constructs_hint_at_the_brood_way() {
-    // Runtime: hint rides the caught error. `(loop 1)` has a literal arg, so the
-    // head `loop` is the only unbound name and its hint wins regardless of engine.
-    assert!(run("(try (loop 1) (catch e (get e :hint)))").contains("tail-recursive"));
+    // Runtime: hint rides the caught error. `(recur 1)` has a literal arg, so the
+    // head `recur` is the only unbound name (it's valid only inside a `loop`) and
+    // its hint wins regardless of engine.
+    assert!(run("(try (recur 1) (catch e (get e :hint)))").contains("tail-recursive"));
     // Write-time: `check` appends the same guidance to the unbound warning — the
     // robust, engine-independent guidance surface (it fires as you type). `set!` is
     // asserted here rather than at runtime: in `(set! x 1)` both the head (`set!`)
@@ -883,9 +884,8 @@ fn foreign_constructs_hint_at_the_brood_way() {
     // checker reports the head, matching `swap!` below.
     assert!(run("(check '(set! x 1))").contains("immutable"));
     assert!(run("(check '(swap! a 1))").contains("atoms"));
-    // A name Brood *does* provide (it aliases `car` → `first`) gets no foreign
-    // hint — it simply runs.
-    assert_eq!(run("(try (car (list 1)) (catch e e))"), "1");
+    // A name Brood *does* provide (`first`) gets no foreign hint — it simply runs.
+    assert_eq!(run("(try (first (list 1)) (catch e e))"), "1");
 }
 
 /// A bare name that exists only as `mod/name` — because `(require 'mod)` loaded

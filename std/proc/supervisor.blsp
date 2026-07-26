@@ -31,7 +31,7 @@ exit — bounded by a restart-intensity limit so a crash loop eventually gives u
 A *child spec* is a map:
 
     {:id     :worker                       ; any value, for diagnostics (optional)
-     :start  (fn () (spawn-link (loop 0)))  ; 0-arg fn; use spawn-link (see note below)
+     :start  (fn () (spawn-link (worker 0))) ; 0-arg fn; use spawn-link (see note below)
      :restart :permanent                    ; :permanent | :transient | :temporary (default :permanent)
      :shutdown :brutal-kill           ; how to terminate it: :brutal-kill (default) | :infinity | <ms>
      :name    :worker}                ; optional keyword: register the pid under this name (re-registered on restart)

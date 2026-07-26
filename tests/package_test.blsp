@@ -123,7 +123,7 @@
   (test "a missing path dep is a clear error"
     (let (app (pkg-fixture-root))
       (pkg-write-project app "app" "main" "(defn main () 1)" "")
-      (is (string-contains? (try
+      (is (includes? (try
                               (resolve-deps app
                                 (list {:name 'gone :kind :path :path "../gone"})
                                 nil)
@@ -220,7 +220,7 @@
         (let (greeter-url (pkg-git-init greeter)
               pretty-url (pkg-git-init pretty))
           (pkg-write-project app "app" "main" "(defn main () 1)" "")
-          (is (string-contains? (try
+          (is (includes? (try
                                   (resolve-deps app
                                     (list {:name 'greeter :kind :git :url greeter-url :ref "main"}
                                       {:name 'pretty :kind :git :url pretty-url :ref "main"})
@@ -262,7 +262,7 @@
       (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
       (let (ts (pkg-tar-init parent "greeter") url (first ts))
         (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
-        (is (string-contains? (try
+        (is (includes? (try
                                 (resolve-deps app-dir
                                   (list {:name 'greeter :kind :tarball :url url :sha256 "deadbeef"})
                                   nil)
@@ -284,7 +284,7 @@
   (test ":tarball deps parse; a missing :sha256 is rejected"
     (assert= (project/project-parse-deps [['foo :tarball "https://x/foo.tar.gz" :sha256 "abc"]])
       (list {:name 'foo :kind :tarball :url "https://x/foo.tar.gz" :sha256 "abc"}))
-    (is (string-contains? (try
+    (is (includes? (try
                             (project/project-parse-deps [['foo :tarball "https://x/foo.tar.gz"]])
                             (catch e (error-message e)))
           "sha256"))))
@@ -314,7 +314,7 @@
         "friendly greetings"
         "https://x/greeter")
       (assert= (count (package/registry--versions index 'greeter)) 2)
-      (is (string-contains? (try
+      (is (includes? (try
                               (package/registry--append-entry index
                                 "greeter"
                                 "0.2.0"
@@ -325,11 +325,11 @@
   (test "publish requires :repository and :description"
     (let (index (path-join (pkg-fixture-root) "index"))
       (make-dir index)
-      (is (string-contains? (try
+      (is (includes? (try
                               (package/registry--append-entry index "x" "1.0.0" "desc" nil)
                               (catch e (error-message e)))
             ":repository"))
-      (is (string-contains? (try
+      (is (includes? (try
                               (package/registry--append-entry index "x" "1.0.0" nil "https://x")
                               (catch e (error-message e)))
             ":description"))))
@@ -372,7 +372,7 @@
             (assert= (vector-ref row 1) :registry)
             (assert= (vector-ref row 2) "1.0.0"))
           ;; an unknown version errors, pointing at `nest search`
-          (is (string-contains? (try
+          (is (includes? (try
                                   (package/package--resolve-registry app-dir
                                     {:name 'greeter :kind :registry :version "9.9.9"}
                                     nil
@@ -405,7 +405,7 @@
           b (path-join parent "b"))
       (pkg-write-project a "a" "util" "(defn f () 1)" "")
       (pkg-write-project b "b" "util" "(defn g () 2)" "")
-      (is (string-contains? (try
+      (is (includes? (try
                               (package/package--check-namespace-collisions (list (list "dependency 'a'"
                                                                                    (path-join a
                                                                                      "src"))
@@ -466,7 +466,7 @@
         (assert= (count dirs) 1)
         ;; the dir is the dep's src/ (relative ".." is left unnormalised — the OS
         ;; resolves it; normalisation is a deferred nicety)
-        (is (string-contains? (first dirs) "greeter/src"))
+        (is (includes? (first dirs) "greeter/src"))
         (is (file-exists? (path-join app-dir "project.lock.blsp"))))))
   (test "no deps means no load-path entries and no lock file"
     (let (app (pkg-fixture-root))
@@ -482,7 +482,7 @@
     (let (src "(project :name \"app\" :version \"0.1.0\")\n\n;; a keeper comment\n"
           out (package/package--manifest-add src
                 (package/package--dep->entry-node {:name 'greeter :kind :path :path "../greeter"})))
-      (is (string-contains? out "a keeper comment"))
+      (is (includes? out "a keeper comment"))
       (let (form (read-string out))
         (assert= (project/project-parse-deps (plist-get (rest form) :dependencies))
           (list {:name 'greeter :kind :path :path "../greeter"})))))
@@ -497,7 +497,7 @@
   (test "remove drops the named dep, keeps the rest and comments"
     (let (src "(project :name \"app\"\n  :dependencies [[a :path \"../a\"] [b :path \"../b\"]])\n;; keep me\n"
           out (package/package--manifest-remove src 'a))
-      (is (string-contains? out "keep me"))
+      (is (includes? out "keep me"))
       (let (form (read-string out))
         (assert= (map (fn (d) (get d :name))
                    (project/project-parse-deps (plist-get (rest form) :dependencies)))
@@ -592,7 +592,7 @@
   (test "a trailing-newline name is rejected"
     (refute (package/package--valid-dep-name? "a\n")))
   (test "add refuses a corrupting name before touching the manifest"
-    (is (string-contains? (try (package/add "" ":path" "../x") (catch e e))
+    (is (includes? (try (package/add "" ":path" "../x") (catch e e))
           "not a usable dependency name"))))
 
 ;; A caught error arrives in one of several shapes, and `nest search` used to print
@@ -609,7 +609,7 @@
     (assert= (package/package--error-reason [:error {:kind :runtime :message "ls-remote failed"}])
       "ls-remote failed"))
   (test "a map with no :message degrades to its printed form rather than nil"
-    (is (string-contains? (package/package--error-reason {:kind :runtime}) "runtime")))
+    (is (includes? (package/package--error-reason {:kind :runtime}) "runtime")))
   (test "an unexpected shape degrades to its printed form"
     (assert= (package/package--error-reason 42) "42"))
   (test "nil degrades rather than raising"

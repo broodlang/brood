@@ -266,7 +266,7 @@
         ;; the first frame already reflects the identity (folded before the initial render's
         ;; first poll returns a key) — or at latest the next one; accept either
         (let (t (frame-text (receive ([:frame f] f) (after 2000 :none))))
-          (if (string-contains? t "who=alice")
+          (if (includes? t "who=alice")
             (is true)
             (assert= (frame-text (receive ([:frame f] f) (after 2000 :none))) "n=0 who=alice"))))))
 

@@ -84,11 +84,11 @@ If no values remain under `k`, the key is dropped."
                 vs (second pair))
             (assoc m k (f k vs))))
     {}
-    (entries mm)))
+    (map-pairs mm)))
 
 (defn multimap->map (mm)
   "Flatten the multimap to a plain map from key → list-of-values (insertion order)."
   (fold (fn (m pair)
           (assoc m (first pair) (reverse (second pair))))
     {}
-    (entries mm)))
+    (map-pairs mm)))

@@ -201,7 +201,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
 
 (defn single-line--str (text)
   ;; A literal multi-line string can't be re-emitted on one line.
-  (if (string-contains? text "\n") nil text))
+  (if (includes? text "\n") nil text))
 
 (defn single-line--wrap (prefix child)
   (let (s (single-line child)) (if (nil? s) nil (str prefix s))))
@@ -310,7 +310,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
   (cond
     (= i n) false
     (let (c (vector-ref kids i))
-      (or (and (whitespace? c) (string-contains? (node-text c) "\n"))
+      (or (and (whitespace? c) (includes? (node-text c) "\n"))
         (and (not (trivia? c)) (had-author-newlines? c)))) true
     else (had-author-newlines--scan kids (inc i) n)))
 
@@ -345,7 +345,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
                  ;; counts (>= 0) override the default; for generic calls
                  ;; (-1) we ride exactly one arg when it's single-line.
                  eff-hdr (cond
-                           (>= hdr-count 0) (min hdr-count (length args))
+                           (>= hdr-count 0) (min hdr-count (count args))
                            (nil? args) 0
                            (nil? (single-line (first args))) 0
                            ;; A comment sitting between the head and its first
@@ -397,7 +397,7 @@ form (not the comment) is emitted last and the close must NOT break. Only an
 (defn comment-on-own-line? (kids i)
   (cond
     (< i 0) true
-    (and (whitespace? (vector-ref kids i)) (string-contains? (node-text (vector-ref kids i)) "\n")) true
+    (and (whitespace? (vector-ref kids i)) (includes? (node-text (vector-ref kids i)) "\n")) true
     ;; skip one newline-free whitespace gap, then look at what precedes it
     (whitespace? (vector-ref kids i)) (comment-on-own-line?--prev kids (dec i))
     else (comment-on-own-line?--prev kids i)))
@@ -815,9 +815,9 @@ that does not parse is reported and skipped, never rewritten."
           rewrote (first counts)
           skipped (second counts))
       (println (str "format: "
-                 (length files)
+                 (count files)
                  " file"
-                 (if (= (length files) 1) "" "s")
+                 (if (= (count files) 1) "" "s")
                  " considered, "
                  rewrote
                  " rewritten"
@@ -870,9 +870,9 @@ number of files rewritten."
             rewrote (first counts)
             skipped (second counts))
         (println (str "format: "
-                   (length changed)
+                   (count changed)
                    " changed file"
-                   (if (= (length changed) 1) "" "s")
+                   (if (= (count changed) 1) "" "s")
                    " considered, "
                    rewrote
                    " rewritten"
@@ -888,9 +888,9 @@ number of files rewritten."
       (cond
         (nil? changed) (do
                          (println (str "format: "
-                                    (length files)
+                                    (count files)
                                     " file"
-                                    (if (= (length files) 1) "" "s")
+                                    (if (= (count files) 1) "" "s")
                                     " checked, all clean."))
                          0)
         else (do
@@ -900,9 +900,9 @@ number of files rewritten."
                                   (str "  needs formatting: " (vector-ref entry 0)))))
                  nil
                  changed)
-               (let (unparseable (length (filter (fn (e) (= (vector-ref e 1) :unparseable))
+               (let (unparseable (count (filter (fn (e) (= (vector-ref e 1) :unparseable))
                                            changed))
-                     dirty (- (length changed) unparseable))
+                     dirty (- (count changed) unparseable))
                  (error "format: "
                    dirty
                    (if (= dirty 1) " file needs" " files need")

@@ -70,7 +70,7 @@
          :draw (fn (f) (send me [:frame f]))
          :poll (fn (ms) nil)})
       (let (f (receive ([:frame fr] fr) (after 200 :none)))
-        (is (string-contains? (nth (first f) 3) "hi 40x10")))))
+        (is (includes? (nth (first f) 3) "hi 40x10")))))
 
   (test "tick-ms comes from the model (default 1000)"
     (assert= (editor/ui/ui--tick-ms {}) 1000)
@@ -207,8 +207,8 @@
                            else m))
                        (r--display me))
                      (receive ([:err s] s) (after 0 ""))))
-        (is (string-contains? logged "update error"))
-        (is (string-contains? logged "kaboom!"))))))
+        (is (includes? logged "update error"))
+        (is (includes? logged "kaboom!"))))))
 
 ;; overlay-route — the modal-overlay dispatch fallthrough shared by the editor's
 ;; transient overlays and the observer's minibuffer.
