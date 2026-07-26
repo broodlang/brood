@@ -18,14 +18,13 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
    changes lives in a **process** (`spawn`/`send`/`receive`) or behind a
    Rust-backed handle — never a mutable value.
 
-2. **No `while`/`for`-loop and no mutable loop counter — but Brood *does* have
-   `loop`/`recur`.** `(loop (a init …) body… (recur next-a …))` is a local,
-   stack-safe tail loop (it expands to a self-tail-calling `letrec`, so a tail
-   `recur` is O(1) stack). Prefer it over a top-level `--acc` helper for a
-   self-contained loop. Otherwise iterate with **tail recursion + an accumulator**
-   or the combinators `fold` / `reduce` / `map` / `filter`. Deep *non*-tail
-   recursion overflows the green-process stack. (`loop`/`recur` are now reserved —
-   don't use them as ordinary variable names.)
+2. **No loops — no `while`, no `for`, no `loop`/`recur`.** Iterate with
+   **tail recursion + an accumulator** (proper tail calls give O(1) stack, including
+   calls to *other* functions) or the combinators `fold` / `reduce` / `map` /
+   `filter`. A *local*, self-contained loop is a `letrec`-bound closure called by
+   name — `(letrec (go (fn (i acc) … (go …))) (go 0 0))` — which closes over the
+   enclosing scope (thread only the changing state). Deep *non*-tail recursion
+   overflows the green-process stack.
 
 3. **Lists for code, vectors for data.** Binding forms are **lists**, not
    Clojure vectors: `(let (a 1 b 2) …)`, `(for (x xs :when p) …)`,
@@ -117,12 +116,12 @@ round-trips. Two faster moves:
   | You reach for | Brood has |
   | --- | --- |
   | `concat` | `concat` (alias of `append`) — variadic over lists *and* vectors, returns a list |
-  | `loop`/`recur` | **available** — `(loop (a init …) … (recur …))`, a local stack-safe tail loop; or a `--acc` helper / `fold`/`map`/`filter`/`reduce` |
+  | `loop`/`recur` | **neither exists** — a local loop is `(letrec (go (fn (i acc) … (go …))) (go 0 0))` (tail calls → O(1)); or a top-level `--acc` helper / `fold`/`map`/`filter`/`reduce` |
   | string building / `str(...)` interpolation | `(str a b)`, or `(fmt "a={a} b={b}")` — interpolation lowered to a plain `str`; `{{`/`}}` are literal braces. Printf-style: `(format "…%s…" x)` |
   | `some?` (Clojure non-nil) | Brood's `some?` was **renamed `any?`** ("any element matches a pred"); for non-nil use `(not (nil? x))` |
   | `conj` onto a vector | `cons` (lists); `into` / `(apply vector …)` (vectors) |
   | `set!` / `swap!` / atoms | nothing — state is a process or a Rust handle (trap #1) |
-  | `while`, `for`-loop | `loop`/`recur`, tail recursion, or `fold`/`map`/`filter`/`reduce` (trap #2) |
+  | `while`, `for`-loop | tail recursion (or a local `letrec`), or `fold`/`map`/`filter`/`reduce` (trap #2) |
   | a `flush` after `print` | nothing — `print` flushes stdout every call |
   | raw ANSI (`clear`/`home`/cursor) | `(:use editor/ansi)` (bare `(require 'editor/ansi)` leaves names qualified) → `(ansi-clear)`/`(ansi-home)`/`(ansi-cursor r c)` are **zero-arg fns returning an escape string** — call them: `(print (ansi-clear))`, never `(print ansi-clear)` (prints `#<fn …>`). A render loop wants `std/display`. |
   | a built-in RNG (`rand`) | `rng`/`rand-int`/`rand-float`/`shuffle`/`sample` — pure & seedable, return `[value next-seed]`; thread the seed through your state |

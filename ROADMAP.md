@@ -290,7 +290,7 @@ the remote tier, `nest observe`/`nest mcp` consuming the stream — "Telemetry" 
 **protocols/multimethods** (replace hand-written `type-of` cascades);
 **`&key` args** (designed — ADR-011); ⬜ **lexically-shadowable operators**
 ("Option C" — resolve operator position against local scope first, so a macro
-name like `loop`/`for` stops being a reserved word; decision **deferred**, kept as
+name like `for`/`when` stops being a reserved word; decision **deferred**, kept as
 reserved words for now, full spec + gotchas + hygiene notes in
 [deferred.md #7](docs/deferred.md)); the dist
 **`terminate/2` hook** + **FQDN long names** (dist refinements below). (The

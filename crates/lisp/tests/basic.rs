@@ -873,9 +873,9 @@ fn unbound_in_root_thread_has_no_scheduler_hint() {
 #[test]
 fn foreign_constructs_hint_at_the_brood_way() {
     // Runtime: hint rides the caught error. `(recur 1)` has a literal arg, so the
-    // head `recur` is the only unbound name (it's valid only inside a `loop`) and
-    // its hint wins regardless of engine.
-    assert!(run("(try (recur 1) (catch e (get e :hint)))").contains("tail-recursive"));
+    // head `recur` is the only unbound name (Brood has no `loop`/`recur`) and its
+    // hint — pointing at `letrec` + tail calls — wins regardless of engine.
+    assert!(run("(try (recur 1) (catch e (get e :hint)))").contains("letrec"));
     // Write-time: `check` appends the same guidance to the unbound warning — the
     // robust, engine-independent guidance surface (it fires as you type). `set!` is
     // asserted here rather than at runtime: in `(set! x 1)` both the head (`set!`)

@@ -8476,14 +8476,21 @@ helpers** (~4% of `std/`) that exist only to be a hand-written tail loop.
 - **`fmt`** — `(fmt "x={x} sum={(+ a b)}")`, parsed at expand time into a plain
   `(str …)`. `{{`/`}}` literal braces; braces nest in a hole. Not a reader sigil
   (`#"…"`/`#b`/`#{` are taken and a macro is the ADR-006 way).
-- **`loop`/`recur`** — the local tail loop ADR-026 reserved "for if ergonomics demand
-  it"; the 83 helpers are that demand. Expands to a `letrec` closure (tail self-call ⇒
-  O(1) stack), `recur` rewritten by a macro-time code-walk that skips nested `loop`/
-  `quote`. Cost: `loop`/`recur` are no longer usable as identifiers — ~7 internal sites
-  renamed to `go` or converted to the macro (scaffold `tui-loop` template + font-zoom
-  example now showcase it).
 - **`if-let`/`when-let`** (test the source value via a temp, so destructuring targets
   work), **`some->`/`some->>`/`cond->`/`cond->>`/`doto`**, **`run!`**.
+
+**Local loops — no `loop`/`recur` (prototyped, then dropped).** The 83 helpers
+motivated a `loop`/`recur` macro; built it, reshaped to a Scheme named-let, then
+**removed both.** Reasoning: (1) a `loop` macro is a Lisp-1 reserved word (Lisp-2
+would free it but taxes every higher-order call with `funcall`/`#'` — rejected);
+(2) `recur` exists in Clojure mainly to work around the JVM's lack of TCO — **Brood
+has proper tail calls**, so `(defn f (x) (f (dec x)))` is already O(1) and recur's
+reason evaporates; (3) with recur gone, `loop` is just `letrec` sugar, not worth a
+reserved word. So a local loop is a `letrec`-bound closure called by name
+(`(letrec (go (fn (i acc) … (go …))) (go 0 0))`), closing over the enclosing scope;
+`defn` covers loops needing no locals. The `loop`/`recur` hint points to `letrec`.
+(The general reserved-word cost of other macros + the shadowable-operators idea are
+in deferred.md #7; ADR-154.)
 
 **Cut (one spelling each, no users so free):** `string-contains?`→`includes?` (306
 sites; superset merge), `string-index-of`→`index-of &optional from`,

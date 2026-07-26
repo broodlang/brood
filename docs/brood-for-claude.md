@@ -13,10 +13,10 @@ A small, dynamic Lisp implemented in Rust.
   — every operation returns a fresh value. The only mutation is `def`, which
   *re-binds* a global (hot reload). State that genuinely changes lives in a
   **process** (`spawn` / `send` / `receive`) or behind a Rust-backed handle.
-- **No `while`/`for`-loop** — but there *is* `loop`/`recur` (a local, stack-safe
-  tail loop). Otherwise use recursion (proper tail calls are guaranteed, including
-  tail calls to *other* functions) or the combinators `fold` / `reduce` / `map` /
-  `filter`.
+- **No loops** (`while`, `for`, `loop`/`recur`). Iterate with recursion — proper
+  tail calls are guaranteed (including calls to *other* functions), so it's O(1)
+  stack — or the combinators `fold` / `reduce` / `map` / `filter`. A *local*,
+  self-contained loop is a `letrec`-bound closure called by name.
 - **Truthy / falsy**: only `nil` and `false` are falsy. `0`, `""`, `()` are
   *truthy*.
 - **Late binding**: globals can be re-defined; a redefinition is visible to
@@ -54,7 +54,7 @@ Common macros (expanded once at the compile pass — runtime-free): `defmacro`
 (lowers to `(def name (%make-macro (fn …)))`), `defn`, `defdyn`, `binding`,
 `cond`, `when`, `unless`, `and`, `or`, `match`, `try` / `catch`, `->` / `->>` /
 `as->`, `some->` / `some->>` / `cond->` / `cond->>` / `doto`, `if-let` / `when-let`,
-`loop` / `recur` (local tail loop), `fmt` (string interpolation), `receive`, `spawn`.
+`fmt` (string interpolation), `receive`, `spawn`.
 
 ## Defining things
 
@@ -277,17 +277,18 @@ x                bind x; a repeated x is an equality constraint (non-linear)
     (sum-to (- n 1) (+ acc n))))         ; tail-recursive: O(1) stack
 ```
 
-For a *self-contained* loop, `loop`/`recur` keeps it inline instead of adding a
-top-level helper — `(loop (name init …) body…)` binds a local recursion point and
-`(recur next-name …)` re-enters it. A tail `recur` is O(1) stack (it expands to a
-self-tail-calling `letrec`):
+For a *self-contained* loop, use a `letrec`-bound closure called by name — it stays
+inline instead of forcing a top-level helper, and threads only the *changing* state
+(it closes over the rest):
 
 ```lisp
-(loop (n 100000 acc 0)
-  (if (= n 0) acc (recur (- n 1) (+ acc n))))     ; => 5000050000, O(1) stack
+(letrec (go (fn (n acc)
+              (if (= n 0) acc (go (- n 1) (+ acc n)))))
+  (go 100000 0))                                   ; => 5000050000, O(1) stack
 ```
 
-`loop`/`recur` are reserved now — don't use them as ordinary variable names.
+There is **no `loop`/`recur`** — Brood has proper tail calls, so recursion is just
+calling a name (`go` here), and the tail call keeps it O(1).
 
 Prefer the higher-order combinators:
 
@@ -803,10 +804,10 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `(:use-internals …)` and `(:alias …)`; **anything else is an error** —
   `(:require …)` and a misspelled `(:use-internal …)` are rejected rather than
   silently ignored.
-- **Not Clojure**: no transients. `loop` / `recur` *do* exist (a local tail loop —
-  see *Looping is recursion*), but as a `letrec`-backed macro, not a special form.
-  Namespaces *do* exist now (ADR-065) but are `mod/name`-flat, not Clojure's
-  `require :as` aliasing.
+- **Not Clojure**: no transients, and **no `loop`/`recur`** — Brood has proper tail
+  calls, so recursion is just calling a name (a `defn`, or a local `letrec`); see
+  *Looping is recursion*. Namespaces *do* exist now (ADR-065) but are `mod/name`-flat,
+  not Clojure's `require :as` aliasing.
 - **Not Scheme / CL**: no `setq`, no `cond`-with-`t`-catch-all (use `else`
   or `:else`).
 - **`sort` on heterogeneous / non-numeric items uses *structural* order.**

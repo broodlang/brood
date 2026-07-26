@@ -1,5 +1,5 @@
 ;; Tests for the ergonomic prelude additions: string interpolation (`fmt`),
-;; local `loop`/`recur`, binding-conditionals (`if-let`/`when-let`), conditional
+;; binding-conditionals (`if-let`/`when-let`), conditional
 ;; and short-circuit threading (`cond->`/`some->`), `doto`, and `run!`.
 (defmodule ergonomics-test (:use test))
 
@@ -17,21 +17,6 @@
     (let (x 1 y 2) (assert= "12" (fmt "{x}{y}"))))
   (test "composes with error"
     (assert-error (throw (fmt "bad value: {(+ 1 2)}")))))
-
-(describe "loop / recur — local tail loop"
-  (test "sums with an accumulator in O(1) stack"
-    (assert= 500500 (loop (i 1 acc 0) (if (> i 1000) acc (recur (inc i) (+ acc i))))))
-  (test "builds a list and returns it"
-    (assert= [0 1 4 9] (into [] (loop (i 0 acc nil)
-                                  (if (= i 4) (reverse acc) (recur (inc i) (cons (* i i) acc)))))))
-  (test "deep tail loop does not overflow the stack"
-    (assert= 200000 (loop (n 200000 acc 0) (if (= n 0) acc (recur (dec n) (inc acc))))))
-  (test "nested loop keeps its own recur"
-    (assert= 9 (loop (i 0 total 0)
-                 (if (= i 3)
-                   total
-                   (recur (inc i)
-                     (loop (j 0 sub total) (if (= j 3) sub (recur (inc j) (inc sub))))))))))
 
 (describe "if-let / when-let"
   (test "if-let binds and takes the then branch on a truthy value"
@@ -76,7 +61,7 @@
 
 ;; ---- cross-process: the new forms survive send/spawn like any Brood code ----
 (describe "ergonomics across processes" :isolated
-  (test "a closure using fmt/loop deep-copies across a send and runs on the receiver"
+  (test "a closure using fmt + a letrec loop deep-copies across a send and runs on the receiver"
     (let (me (self))
-      (spawn (send me [:result (loop (i 0 acc "") (if (= i 3) acc (recur (inc i) (fmt "{acc}{i}"))))]))
+      (spawn (send me [:result (letrec (go (fn (i acc) (if (= i 3) acc (go (inc i) (fmt "{acc}{i}"))))) (go 0 ""))]))
       (assert= "012" (receive ([:result r] r))))))

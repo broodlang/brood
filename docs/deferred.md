@@ -270,19 +270,20 @@ the *static* checker's precision for this one case shape.
 
 **Context.** Brood is a Lisp-1 (ADR-007), so every macro/special form occupies the
 single namespace and becomes a **reserved operator word** — you can't bind a local
-named `loop`, `for`, `when`, etc. and call it in head position, because the
-expander resolves the operator to the macro before lexical scope exists.
-Shipping the `loop`/`recur` macro (ADR-154) spent two common words this way and is
-what surfaced the question. **Decision taken (2026-07-26): keep reserved words
-(Option A)** — the limitation is minor, universal to Lisps, and buys dead-simple
-certainty (`(loop …)` is *always* the macro, no scope-tracing). This item records
-the more ambitious alternative for when a concrete need appears.
+named `when`, `for`, `cond`, `doseq`, etc. and call it in head position, because the
+expander resolves the operator to the macro before lexical scope exists. (This first
+surfaced with a prototyped `loop`/`recur` macro, which was then **dropped** — see
+ADR-154 — so `loop` is *not* reserved today; but the ~40 other macros/special forms
+still are.) **Decision taken (2026-07-26): keep reserved words (Option A)** — the
+limitation is minor, universal to Lisps, and buys dead-simple certainty (`(when …)`
+is *always* the macro, no scope-tracing). This item records the more ambitious
+alternative for when a concrete need appears.
 
 **The idea (C).** Make the expander resolve operator position against **lexical
-scope first**: a *free* `loop` expands the macro; a `loop` that is `let`/`letrec`/
+scope first**: a *free* `for` expands the macro; a `for` that is `let`/`letrec`/
 `fn`-param-bound calls the local. This removes the reserved-word cost entirely
 while keeping Lisp-1's `(f x)` ergonomics — strictly less limiting than Clojure
-(where `loop` genuinely can't be shadowed). It makes macros consistent with the
+(where a macro name genuinely can't be shadowed). It makes macros consistent with the
 *function* shadowing Brood already allows (`(let (map …) (map x))` already calls
 the local).
 
@@ -296,31 +297,30 @@ style that is Brood's whole idiom. Rejected.
   it does **not** leak into other functions you call (their bodies were resolved in
   their own scope) — identical to how function shadowing already behaves.
 - **Composes with hygiene.** Free references in a macro template auto-qualify to
-  the macro's namespace (ADR-066 α), so a macro that expands to `(loop …)` emits a
-  *qualified* `loop` a caller's local can't capture. C relies on this, and it is
+  the macro's namespace (ADR-066 α), so a macro that expands to `(for …)` emits a
+  *qualified* `for` a caller's local can't capture. C relies on this, and it is
   already automatic.
 
 **Gotchas to design around (the reason it's deferred, not done).**
 1. **Scope-aware expander is a chicken-and-egg.** Binding forms like `when-let`/
-   `for`/`loop` are macros that expand *into* the core scope-introducers
+   `for`/`doseq` are macros that expand *into* the core scope-introducers
    (`let`/`letrec`/`fn`), so the expander must track scope while expanding
    outside-in — turning a flat pass into a scope-tracking one and enlarging the
    compile-correctness surface.
 2. **Control-flow macros are the scary shadows.** `and`/`or`/`when`/`cond` are
    macros; silently shadowing them changes control flow invisibly. C should either
-   free only *library* operators (`loop`, `for`, threading) and keep control macros
+   free only *library* operators (`for`, `doseq`, threading) and keep control macros
    reserved, or make the shadow-lint a **hard error** for control-flow macros.
 3. **Static editor grammars can't reflect scope.** `nest grammar` emits a static
    keyword list (ADR-092); only the LSP's semantic tokens can color a shadowed
-   `loop` correctly. So "highlighting tells you which one" holds only in
+   `for` correctly. So "highlighting tells you which one" holds only in
    LSP-backed editors.
 4. **Knowability must be engineered, not assumed.** Ship C *with* a shadow lint
-   ("local `loop` shadows the `loop` macro", loud by default) + semantic
+   ("local `for` shadows the `for` macro", loud by default) + semantic
    highlighting. C without the lint is a readability hazard — the whole reason A is
    the safer default.
-5. Minor: `recur` under a *shadowed* `loop` is meaningless (must error cleanly);
-   scope-tracking expansion adds cold-start cost (expansion is already the bulk of
-   the ~31ms boot).
+5. Minor: scope-tracking expansion adds cold-start cost (expansion is already the
+   bulk of the ~31ms boot).
 
 **Relation to full hygiene.** Brood is only *partially* hygienic vs Elixir
 (free-reference auto-qualification is automatic — the part C needs — but
