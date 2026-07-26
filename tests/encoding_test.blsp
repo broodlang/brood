@@ -114,8 +114,8 @@
 (describe "base64-url-encode / base64-url-decode"
   (test "uses - and _ instead of + and /"
     (let (s (encoding/base64-url-encode "Hello"))
-      (refute (string-contains? s "+"))
-      (refute (string-contains? s "/"))))
+      (refute (includes? s "+"))
+      (refute (includes? s "/"))))
   (test "roundtrip"
     (let (s "Hello, World! 🎉")
       (assert= s (encoding/base64-url-decode (encoding/base64-url-encode s)))))
@@ -178,5 +178,5 @@
           (encoding/base64-url-decode-bytes (encoding/base64-url-encode-bytes bs))))))
   (test "url-safe avoids + and /"
     (let (s (encoding/base64-url-encode-bytes [251 255]))
-      (refute (string-contains? s "+"))
-      (refute (string-contains? s "/")))))
+      (refute (includes? s "+"))
+      (refute (includes? s "/")))))

@@ -88,7 +88,6 @@
         (if (%eq t :map)
           (map-pairs coll)
           (if (%eq t :bytes) (bytes->list coll) coll))))))
-(def entries map-pairs)
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
 ;; The public entry coerces once via `seq`; the inner `fold--loop` then stays in
@@ -326,7 +325,7 @@ names accept anything, so a contract never throws on a type it can't interpret."
     ; the `nil` type reads as the nil literal
     (pair? t) (let (h (first t))
                 (cond
-                  (%eq h 'or) (some? (fn (s) (type-matches? s v)) (rest t))
+                  (%eq h 'or) (any? (fn (s) (type-matches? s v)) (rest t))
                   (%eq h 'and) (every? (fn (s) (type-matches? s v)) (rest t))
                   (%eq h 'list) (and (list? v)
                                   (let (elem (first (rest t)))
@@ -343,7 +342,7 @@ names accept anything, so a contract never throws on a type it can't interpret."
                                      (every? (fn (kv)
                                                (and (type-matches? ktype (first kv))
                                                  (type-matches? vtype (second kv))))
-                                       (entries v)))))
+                                       (map-pairs v)))))
                   (%eq h 'record)
                   ;; A field's type may be wrapped `(optional T)` — allowed to
                   ;; be absent/nil. Every other field is required: `(get v k)`
@@ -614,9 +613,7 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
   (or (int? x) (float? x) (decimal? x)))
 (defn list? (x) "True if `x` is a proper list (`nil` or a pair)." (or (nil? x) (pair? x)))
 
-;; ---- list aliases & accessors ----
-(def car first)
-(def cdr rest)
+;; ---- list accessors ----
 (defn list (& xs) "A list of the given arguments." xs)
 (defn second (coll) "The second item of `coll`." (first (rest coll)))
 (defn third (coll) "The third item of `coll`." (first (rest (rest coll))))
@@ -695,7 +692,6 @@ when the caller needs indexed access (`(into [] (filter pred coll))`, named)."
     (map? coll) (map-count coll)
     (set? coll) (%set-count coll)
     else (count--acc coll 0)))
-(def length count)
 
 (defn nth-list (coll i d)
   (cond (empty? coll) d (= i 0) (first coll) else (nth-list (rest coll) (- i 1) d)))
@@ -1069,6 +1065,90 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
   (let (steps (reduce (fn (acc form) (append acc (list name form))) (list name expr) forms))
     `(let ~steps ~name)))
 
+;; ---- conditional threading & short-circuit threading ------------------------
+;; `some->`/`some->>` thread like `->`/`->>` but stop and yield `nil` the moment a
+;; step produces `nil`; `cond->`/`cond->>` thread `x` only through the forms whose
+;; guard is truthy. Both build on the `thread-first-step`/`thread-last-step`
+;; placement helpers above, so "where does the value go" is defined once.
+(defn some-thread--build (place forms step)
+  (if (empty? forms)
+    place
+    `(if (nil? ~place) nil
+       (let (~place ~(step place (first forms)))
+         ~(some-thread--build place (rest forms) step)))))
+(defmacro some-> (x & forms)
+  "Thread `x` through `forms` as each one's *first* argument (like `->`), but short-circuit to `nil` as soon as any step yields `nil`."
+  (let (v (gensym "v")) `(let (~v ~x) ~(some-thread--build v forms thread-first-step))))
+(defmacro some->> (x & forms)
+  "Thread `x` through `forms` as each one's *last* argument (like `->>`), but short-circuit to `nil` as soon as any step yields `nil`."
+  (let (v (gensym "v")) `(let (~v ~x) ~(some-thread--build v forms thread-last-step))))
+
+(defn cond-thread--build (place clauses step)
+  (if (empty? clauses)
+    place
+    `(let (~place (if ~(first clauses) ~(step place (second clauses)) ~place))
+       ~(cond-thread--build place (rest (rest clauses)) step))))
+(defmacro cond-> (x & clauses)
+  "Thread `x` through the `test form` clause pairs, applying each `form` (as its *first* argument, like `->`) only when its `test` is truthy: `(cond-> {} add-a? (assoc :a 1))`."
+  (let (v (gensym "v")) `(let (~v ~x) ~(cond-thread--build v clauses thread-first-step))))
+(defmacro cond->> (x & clauses)
+  "Thread `x` through the `test form` clause pairs, applying each `form` (as its *last* argument, like `->>`) only when its `test` is truthy."
+  (let (v (gensym "v")) `(let (~v ~x) ~(cond-thread--build v clauses thread-last-step))))
+
+(defmacro doto (x & forms)
+  "Evaluate `x` once, run each `form` with it spliced in as the *first* argument (for side effects), then return `x`: `(doto (table) (table-put :a 1) (table-put :b 2))`."
+  (let (v (gensym "v"))
+    `(let (~v ~x)
+       ~@(map (fn (form) (thread-first-step v form)) forms)
+       ~v)))
+
+;; ---- binding-conditionals: bind, test the *source* value, branch -------------
+;; `if-let`/`when-let` evaluate the binding expression once, branch on its
+;; truthiness, and bind the target (a symbol or destructuring pattern) to it in
+;; the truthy branch. Testing a fresh temp (not the pattern) is what makes
+;; destructuring targets — `(when-let ([k v] (first-entry m)) …)` — behave.
+(defmacro if-let (binding then & else)
+  "Bind `(name expr)`; if `expr` is truthy, evaluate `then` with `name` bound to it, else evaluate `else` (or `nil`). `name` may be a destructuring pattern."
+  (let (name (first binding) expr (second binding) v (gensym "v"))
+    `(let (~v ~expr) (if ~v (let (~name ~v) ~then) ~@else))))
+(defmacro when-let (binding & body)
+  "Bind `(name expr)`; when `expr` is truthy, evaluate `body` (returning the last) with `name` bound to it, else `nil`. `name` may be a destructuring pattern."
+  (let (name (first binding) expr (second binding) v (gensym "v"))
+    `(let (~v ~expr) (when ~v (let (~name ~v) ~@body)))))
+
+;; ---- named loop with `recur` ------------------------------------------------
+;; The local-iteration form the library otherwise fakes with a top-level
+;; `name--acc`/`name--loop` helper. `(loop (a init …) body…)` binds a *local*
+;; recursion point; `(recur next-a …)` re-enters it with new values. It expands to
+;; a `letrec`-bound closure whose self-call — being a proper tail call — keeps the
+;; stack O(1) exactly like the hand-written accumulator loop, but stays inline
+;; instead of leaking a helper into the namespace. `recur` inside a nested `loop`
+;; or a `quote` is left alone (it belongs to the inner form / is literal data).
+(defn loop--names (binds) (if (empty? binds) nil (cons (first binds) (loop--names (rest (rest binds))))))
+(defn loop--vals (binds) (if (empty? binds) nil (cons (second binds) (loop--vals (rest (rest binds))))))
+(defn loop--rw-args (forms target)
+  (if (empty? forms) nil (cons (loop--rw (first forms) target) (loop--rw-args (rest forms) target))))
+(defn loop--rw (form target)
+  ;; rewrite each `(recur …)` into a self-call to `target`, without descending
+  ;; into a nested `loop` (its recurs are its own) or a `quote` (literal data).
+  (cond
+    (not (pair? form)) form
+    (= (first form) 'recur) (cons target (loop--rw-args (rest form) target))
+    (= (first form) 'loop) form
+    (= (first form) 'quote) form
+    else (loop--rw-args form target)))
+(defmacro loop (binds & body)
+  "Loop with a local recursion point: `(loop (a init …) body…)` binds each `a` and re-enters via `(recur next-a …)`. A tail `recur` runs in O(1) stack (it is a proper tail call). Prefer this over a top-level `--acc`/`--loop` helper for a self-contained loop."
+  (let (self (gensym "loop"))
+    `(letrec (~self (fn ~(loop--names binds) ~@(loop--rw-args body self)))
+       (~self ~@(loop--vals binds)))))
+
+;; ---- side-effecting iteration (function form of `doseq`) --------------------
+(defn run! (f coll)
+  "Apply `f` to each item of `coll` for its side effects, returning `nil`. The function-valued counterpart of `doseq`: `(run! println xs)`."
+  (fold (fn (acc x) (f x) acc) nil coll)
+  nil)
+
 ;; ---- error handling ----
 ;; The kernel gives us `throw` (raise) and `%try` (low-level catch). Everything
 ;; user-facing — `error`, `try`/`catch` — is written here in Brood.
@@ -1339,7 +1419,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;;                         default, with explicit :uN-be/:uN-le (:iN-…) variants;
 ;;                         `(_ :u32)` skips the segment's width
 ;;   & rest                bind the remaining bytes (must be the last segment)
-;; Without a trailing `& rest`, the bytes must be consumed exactly (length match).
+;; Without a trailing `& rest`, the bytes must be consumed exactly (count match).
 
 (defn match-bytes-pattern? (pat)
   (and (pair? pat) (= (first pat) (quote bytes))))
@@ -1477,7 +1557,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
                                       success
                                       fail))
                                  ~fail))
-      ;; #b"…" literal — match those exact bytes (length known at expand time)
+      ;; #b"…" literal — match those exact bytes (count known at expand time)
       (bytes? seg) (let (n (byte-length seg))
                      `(if (and (<= (+ ~off ~n) (byte-length ~target))
                             (%eq (subbytes ~target ~off (+ ~off ~n)) ~seg))
@@ -2156,12 +2236,12 @@ mailbox messages stay queued while waiting (selective receive)."
   "`coll` with its leading items for which `(pred x)` holds removed."
   (if (and (pair? coll) (pred (first coll))) (drop-while pred (rest coll)) coll))
 
-;; (some? pred coll) -> true if pred holds for any element; (every? pred coll) ->
+;; (any? pred coll) -> true if pred holds for any element; (every? pred coll) ->
 ;; true if it holds for all (vacuously true on the empty list). Booleans, by the
 ;; `?` convention — use `find` to recover the matching element itself.
-(defn some? (pred coll)
+(defn any? (pred coll)
   "True if `(pred x)` holds for at least one item of `coll`."
-  (cond (empty? coll) false (pred (first coll)) true else (some? pred (rest coll))))
+  (cond (empty? coll) false (pred (first coll)) true else (any? pred (rest coll))))
 (defn every? (pred coll)
   "True if `(pred x)` holds for every item of `coll` (vacuously true if empty)."
   (cond (empty? coll) true (pred (first coll)) (every? pred (rest coll)) else false))
@@ -2430,8 +2510,6 @@ A new chunk starts each time the return value of `f` changes."
 starting with `init`. `(scan + 0 '(1 2 3))` → `(0 1 3 6)`."
   (scan--acc f init (seq coll) (list init)))
 
-;; (flat-map f coll) — alias for the existing `mapcat`.
-(def flat-map mapcat)
 
 ;; (zip-with f a b) — map `f` over pairs, stopping at the shorter sequence.
 (defn zip-with--acc (f a b acc)
@@ -2738,11 +2816,8 @@ iterating for side effects."
 ;; O(n²) — fine for the short strings this targets (the rope/buffer engine in M2
 ;; is the home for large-text performance).
 
-;; Standard-name aliases for the Unicode case primitives.
-(def string-upcase upper)
-(def string-downcase lower)
 
-(defn string-capitalize (s)
+(defn capitalize (s)
   "Return `s` with the first character upper-cased and the rest lower-cased."
   (if (= (string-length s) 0)
     s
@@ -2773,22 +2848,31 @@ inverse of the `string->codepoints` primitive."
   "Concatenate a list of strings (e.g. from `string->list`) into one string."
   (apply str cs))
 
-(defn index-of--seq-from (coll x i)
+(defn index-of--seq-from (coll x i from)
+  ;; scan from the head; only start matching once the running index reaches `from`
   (cond
     (empty? coll) -1
-    (= (first coll) x) i
-    else (index-of--seq-from (rest coll) x (inc i))))
-(defn index-of (coll x)
-  "The 0-based index of `x` in `coll`, or -1 if absent.
-For a string, `x` is a substring (multi-char ok; the empty string matches at 0).
-For a list or vector, `x` is an element compared structurally."
-  (cond
-    ;; Strings ride on the `%str-index-of` kernel primitive — linear; a pure-Brood
-    ;; scan would be O(n²) (char indexing is O(index)), which is too slow for
-    ;; whole-namespace `doc-search`/`apropos` use.
-    (string? coll) (%str-index-of coll x)
-    (vector? coll) (index-of--seq-from coll x 0)
-    else (index-of--seq-from coll x 0)))
+    (and (>= i from) (= (first coll) x)) i
+    else (index-of--seq-from (rest coll) x (inc i) from)))
+(defn index-of (coll x &optional from)
+  "The 0-based index of `x` in `coll` at or after `from` (default 0), or -1 if absent.
+For a string, `x` is a substring (multi-char ok; the empty string matches at `from`);
+for a list or vector, `x` is an element compared structurally. The `from` offset is
+what incremental search rides on (formerly the separate `index-of`)."
+  (let (start (or from 0))
+    (cond
+      ;; Strings ride on the `%str-index-of` kernel primitive — linear; a pure-Brood
+      ;; scan would be O(n²) (char indexing is O(index)), which is too slow for
+      ;; whole-namespace `doc-search`/`apropos` use. With a `from`, search the suffix
+      ;; and re-offset, clamping `from` to `[0, length]`; the empty needle matches at `from`.
+      (string? coll)
+      (if (= start 0)
+        (%str-index-of coll x)
+        (let (n (string-length coll)
+              s0 (max 0 (min n start))
+              rel (%str-index-of (substring coll s0 n) x))
+          (if (< rel 0) -1 (+ s0 rel))))
+      else (index-of--seq-from coll x 0 start))))
 
 (defn index-where--from (pred coll i)
   (cond
@@ -2801,45 +2885,30 @@ For a list or vector, `x` is an element compared structurally."
 equality); recover the item itself with `find`."
   (index-where--from pred coll 0))
 
-(defn string-contains? (s needle)
-  "Does `s` contain `needle` as a substring?"
-  (>= (index-of s needle) 0))
-
-(defn string-index-of (s needle &optional from)
-  "The 0-based char index of the first occurrence of `needle` in `s` **at or after**
-`from` (default 0), or -1 if there is none. Like `index-of` but with a start offset
-— the substring-search primitive incremental search rides on. `from` is clamped to
-`[0, (string-length s)]`; the empty needle matches at `from`."
-  (let (n (string-length s)
-        start (max 0 (min n (or from 0)))
-        rel (%str-index-of (substring s start n) needle))
-    (if (< rel 0) -1 (+ start rel))))
-
-(defn string-last-index-of--scan (s needle before i best)
+(defn last-index-of--scan (s needle before i best)
   ;; walk forward collecting match starts < `before`, keeping the greatest seen
-  (let (j (string-index-of s needle i))
+  (let (j (index-of s needle i))
     (cond
       (< j 0) best
       (>= j before) best
-      else (string-last-index-of--scan s needle before (inc j) j))))
-(defn string-last-index-of (s needle &optional before)
-  "The 0-based char index of the **last** occurrence of `needle` in `s` whose start
-is strictly **before** `before` (default `(string-length s)`), or -1 if there is
-none. The backward counterpart of `string-index-of` — what reverse incremental
-search rides on."
+      else (last-index-of--scan s needle before (inc j) j))))
+(defn last-index-of (s needle &optional before)
+  "The 0-based char index of the **last** occurrence of `needle` in string `s` whose
+start is strictly **before** `before` (default `(string-length s)`), or -1 if there is
+none. The backward counterpart of `(index-of s needle from)` — what reverse
+incremental search rides on."
   (let (b (or before (string-length s)))
     (cond
       ;; the empty needle matches at every position 0..length; the last one strictly
       ;; before `b` is `b-1` (clamped). Handled directly — the scan would loop forever
       ;; when `b` exceeds the length (every probe returns the same index).
       (= needle "") (cond (<= b 0) -1 (> b (string-length s)) (string-length s) else (dec b))
-      else (string-last-index-of--scan s needle b 0 -1))))
+      else (last-index-of--scan s needle b 0 -1))))
 
 (defn includes? (coll x)
   "True if `coll` contains `x`. Works on lists, vectors, strings (substring), and maps (membership among values — use `contains?` for keys)."
   (cond
     (map? coll) (member? x (vals coll))
-    (string? coll) (string-contains? coll x)
     else (>= (index-of coll x) 0)))
 
 ;; Collect `coll`'s elements interleaved with `sep` into a parts list (tail-
@@ -2907,6 +2976,40 @@ leaves `s` unchanged."
 (defn pad-right (s w)
   "Left-justify `s` in a field of width `w`, padding with spaces on the right; `s` is returned unchanged if it is already at least `w` wide."
   (let (n (string-length s)) (if (>= n w) s (str s (string-repeat " " (- w n))))))
+
+;; ---- string interpolation ---------------------------------------------------
+;; `(fmt "…{expr}…")` builds a string from a template, splicing the value of each
+;; `{expr}` hole — any Brood expression, read at macro-expansion time — between the
+;; literal chunks. `{{` / `}}` are literal braces; braces *inside* a hole nest, so
+;; `{ {:a 1} }` reads a map. It expands to a plain `(str chunk expr …)`, so there is
+;; zero runtime machinery — it is exactly the hand-written `str` call, minus the
+;; quote-chopping. Reach for it wherever a message interleaves text and values:
+;; `(error (fmt "json: bad number '{tok}' at index {i}"))`.
+(defn fmt--flush (buf parts)
+  ;; push the accumulated literal chunk (reversed chars) onto `parts`, if non-empty
+  (if (empty? buf) parts (cons (apply str (reverse buf)) parts)))
+(defn fmt--hole (chars expr depth parts)
+  ;; inside a {…} hole: accumulate the expression text until the matching `}`, then
+  ;; `read-string` it into a form. Braces nest by `depth` (a map/set literal inside).
+  (cond
+    (empty? chars) (error "fmt: unterminated '{' in template")
+    (and (= (first chars) "}") (= depth 0)) (fmt--lit (rest chars) nil (cons (read-string expr) parts))
+    (= (first chars) "{") (fmt--hole (rest chars) (str expr "{") (inc depth) parts)
+    (= (first chars) "}") (fmt--hole (rest chars) (str expr "}") (dec depth) parts)
+    else (fmt--hole (rest chars) (str expr (first chars)) depth parts)))
+(defn fmt--lit (chars buf parts)
+  ;; scanning literal text: `buf` = reversed literal chars, `parts` = reversed forms
+  (cond
+    (empty? chars) (reverse (fmt--flush buf parts))
+    (and (= (first chars) "{") (= (second chars) "{")) (fmt--lit (rest (rest chars)) (cons "{" buf) parts)
+    (and (= (first chars) "}") (= (second chars) "}")) (fmt--lit (rest (rest chars)) (cons "}" buf) parts)
+    (= (first chars) "{") (fmt--hole (rest chars) "" 0 (fmt--flush buf parts))
+    else (fmt--lit (rest chars) (cons (first chars) buf) parts)))
+(defmacro fmt (template)
+  "Build a string from a template, splicing each `{expr}` hole's value between the literal text: `(fmt \"x={x} sum={(+ a b)}\")`. `{{`/`}}` are literal braces; braces nest inside a hole. Expands to a plain `(str …)`."
+  (if (string? template)
+    (cons 'str (fmt--lit (string->list template) nil nil))
+    (error "fmt: template must be a string literal, got " (pr-str template))))
 
 ;; ---- string formatting ------------------------------------------------------
 ;; A small `printf`-style helper for inline rendering. The supported specifiers
@@ -3091,7 +3194,7 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
   ;; `name` (not `str`) so a keyword pattern drops its leading colon, matching
   ;; the bare global names; a string passes through unchanged.
   (let (needle (if (string? pattern) pattern (name pattern)))
-    (filter (fn (s) (string-contains? (name s) needle)) (global-names))))
+    (filter (fn (s) (includes? (name s) needle)) (global-names))))
 
 ;; Whitespace-split a query into lowercased terms (blanks dropped) — the unit
 ;; doc-search ranks by. A single-word query yields one term, so it degrades to
@@ -3116,7 +3219,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
                   (let (d (try (doc (eval s)) (catch _ nil)))
                     (when (string? d)
                       (let (hay (lower (str s " " d))
-                            hits (count (filter (fn (t) (string-contains? hay t)) terms)))
+                            hits (count (filter (fn (t) (includes? hay t)) terms)))
                         (when (> hits 0) [hits s d])))))
             (global-names)))))))
 
@@ -3185,7 +3288,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 ;; A deprecated construct keeps working but says so. `deprecation-warning` is the
 ;; primitive: print a message to stderr ONCE per key (so a re-required module or a
 ;; hot loop doesn't spam), then stay silent. A macro calls it from its expansion
-;; when it lowers a deprecated form — see `(:use … :refer …)` below.
+;; when it lowers a deprecated form.
 (def *deprecation-seen* nil)
 (defn deprecation-warning (key message)
   "Print `message` to stderr once per `key` (deduplicated); returns nil. The
@@ -3197,22 +3300,19 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 
 ;; The `(require …)`+`(%refer …)` forms for one `(:use mod [:only [a b]])` clause:
 ;; load the module, then import its names. `:only [a b]` imports just those; with no
-;; marker, all of `mod`'s public (non-`--`) names. `:refer` is the deprecated
-;; spelling of `:only` — still accepted, but it warns once. Used at `defmodule`
-;; expand time.
+;; marker, all of `mod`'s public (non-`--`) names. `:only` is the *sole* import
+;; filter — any other marker is a clean error (ADR-152: name the fix, don't
+;; silently import everything). Used at `defmodule` expand time.
 (defn defmodule--use-clause (clause)
   (let (mod (second clause)
         opts (rest (rest clause))
-        marker (first opts)
-        subset (if (or (= marker :only) (= marker :refer)) (second opts) nil)
-        forms (list (list 'require (list 'quote mod))
-                (list '%refer (list 'quote mod) (list 'quote subset))))
-    (if (= marker :refer)
-      (cons (list 'deprecation-warning
-              (list 'quote (list :refer mod))
-              (str "(:use " mod " :refer ...) is deprecated — use :only"))
-        forms)
-      forms)))
+        marker (first opts))
+    (when (and marker (not (= marker :only)))
+      (error "defmodule: unknown (:use " mod " " marker " …) marker — the only import "
+        "filter is :only, as `(:use " mod " :only [a b])`"))
+    (let (subset (if (= marker :only) (second opts) nil))
+      (list (list 'require (list 'quote mod))
+        (list '%refer (list 'quote mod) (list 'quote subset))))))
 
 ;; All require/refer forms for the `(:use …)` clauses in a `defmodule` header
 ;; (skipping the optional docstring / any non-`:use` form), flattened for splicing.
@@ -3262,7 +3362,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; resolves to `mod/name` if this namespace defines it, then through a `(:use …)`
 ;; import, then falls back to root (the prelude). It also records an optional
 ;; docstring and `provide`s the feature (the load-once key). A `(:use bar)` clause
-;; refers `bar`'s public names bare; `(:use baz :refer [a b])` refers just `a`/`b`.
+;; refers `bar`'s public names bare; `(:use baz :only [a b])` refers just `a`/`b`.
 ;; Put it first; one per file. e.g. (defmodule observer "process viewer" (:use display)).
 ;; defmodule's top-of-file provide — but ONLY when no `require` is driving the load.
 ;; Under require, the feature is provided when the WHOLE file has evaluated
@@ -3277,7 +3377,13 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; Clojure-style `(:require m)` looked like it imported names / granted access and
 ;; did nothing at all. That is the worst failure mode for a header that governs
 ;; imports *and* privacy, so an unrecognised form is now a hard error.
-(def defmodule--clause-heads [:use :use-internals :alias])
+;; `:implements` is a CHECKER annotation, not a loader one: a module claiming a protocol
+;; is verified by `crates/lisp/src/types/check/protocol.rs`, which reads the clause
+;; straight out of the header source. The loader's job is only to tolerate it. It was
+;; missing from this list, so tightening the header (above) turned every
+;; protocol-implementing module into a load error — found by a downstream app whose
+;; whole test suite stopped loading.
+(def defmodule--clause-heads [:use :use-internals :alias :implements])
 
 (defn defmodule--check-clause (clause)
   (if (and (pair? clause)
@@ -3285,8 +3391,9 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
         (includes? defmodule--clause-heads (first clause)))
     clause
     (error "defmodule: unrecognised header form " (pr-str clause)
-      " — a `defmodule` header takes only (:use mod [:refer [names]] | [:only [names]]),"
-      " (:use-internals mod), and (:alias mod [:as short]). Check the spelling;"
+      " — a `defmodule` header takes only (:use mod [:only [names]]),"
+      " (:use-internals mod), (:alias mod [:as short]), and (:implements Protocol)."
+      " Check the spelling;"
       " Clojure's `(:require …)` is not a Brood clause (`:use` both loads and refers).")))
 
 (defmacro defmodule (mod & more)

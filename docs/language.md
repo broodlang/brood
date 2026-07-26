@@ -448,6 +448,43 @@ The `->`, `->>`, and `as->` threading macros are also defined in the prelude:
 (as-> 5 $ (+ $ 1) (* $ 2))    ;=> 12    ; bind $, thread into ANY position
 ```
 
+The **conditional / short-circuit threading** macros build on those, plus `doto`:
+
+```clojure
+(some-> {:a {:b 5}} (get :a) (get :b) inc)        ;=> 6      ; stop at the first nil step
+(cond-> {} true (assoc :a 1) false (assoc :b 2))  ;=> {:a 1} ; apply a step only when its guard holds
+(doto (table) (table-put :a 1) (table-put :b 2))  ; run forms for effect, return the value
+```
+
+`some->>`/`cond->>` are the thread-*last* variants; `run!` applies a function to
+each item for effect (`(run! println xs)`, the function form of `doseq`).
+
+**Binding-conditionals** bind, test the *source* value, then branch (the target may
+destructure):
+
+```clojure
+(if-let (v (get m :k)) (use v) :absent)   ; bind v; take `then` when truthy, else `else`
+(when-let (v (get m :k)) (use v))         ; body only when truthy
+```
+
+**`loop`/`recur`** — a local, stack-safe tail loop; reach for it instead of a
+top-level `--acc` helper for a self-contained loop. It expands to a
+self-tail-calling `letrec`, so a tail `recur` is O(1) stack (and `loop`/`recur` are
+reserved — not usable as ordinary variable names):
+
+```clojure
+(loop (n 100000 acc 0)
+  (if (= n 0) acc (recur (- n 1) (+ acc n))))   ;=> 5000050000
+```
+
+**`fmt`** — string interpolation. `(fmt "…{expr}…")` splices each `{expr}` hole's
+value between the literal text and lowers to a plain `(str …)` (no runtime cost);
+`{{`/`}}` are literal braces and braces nest inside a hole:
+
+```clojure
+(fmt "sum={(+ a b)} for {name}")   ;=> "sum=7 for ada"
+```
+
 > Note: a **nested quasiquote** (a `` ` `` inside a `` ` `` template) is
 > **rejected**, with a hint. Levels are not tracked, so an inner `~x` would be
 > expanded at the outer level — `` `(a `(b ~(+ 1 2))) `` used to yield
@@ -589,7 +626,7 @@ pattern. `defn` inherits all of this (it forwards to `fn`).
 (defn count-args                        ; an arity arm may take & rest
   (()        0)
   ((a)       1)
-  ((a & more) (+ 1 (length more))))
+  ((a & more) (+ 1 (count more))))
 
 (defn fac                               ; multi-PATTERN: same arity, dispatch by shape
   ((0)  1)
@@ -1368,10 +1405,10 @@ to your mailbox — resend the queue on `[:nodeup …]`.
   IEEE value — so `(= 0.0 -0.0)` is `true` and `(= nan nan)` is `false`.
 
 ### Lists & sequences
-`cons`  `first`  `rest`  `car`  `cdr`  `second`  `third`  `last`  `but-last`
-`list`  `vector`  `conj`  `append`  `reverse`  `nth`  `count`  `length`  `empty?`
+`cons`  `first`  `rest`  `second`  `third`  `last`  `but-last`
+`list`  `vector`  `conj`  `append`  `reverse`  `nth`  `count`  `empty?`
 `range`  `take`  `drop`  `split-at`  `take-last`  `drop-last`  `take-while`  `drop-while`
-`member?`  `some?`  `every?`  `find`  `index-of`  `index-where`  `zip`
+`member?`  `any?`  `every?`  `find`  `index-of`  `index-where`  `zip`
 `partition`  `sort`  `sort-by`  `subvec`  `remove`  `remove-nth`  `keep`
 `distinct`  `dedupe`  `group-by`  `flatten`  `interpose`  `interleave`
 `repeat`  `repeatedly`
@@ -1393,7 +1430,7 @@ to your mailbox — resend the queue on `[:nodeup …]`.
   from the end. `take-while`/`drop-while` split on the first element that fails
   the predicate. `split-at` returns `[front back]` — the first `n` items and the
   rest — in a single pass (the fused `take`+`drop`).
-- `some?`/`every?` return booleans (`every?` is vacuously true on the empty
+- `any?`/`every?` return booleans (`every?` is vacuously true on the empty
   list); `find` returns the first matching element, or `nil`.
 - `index-of` returns the 0-based index of an element (by structural `=`), or -1;
   `index-where` is its predicate counterpart — the index of the first item for
@@ -1418,7 +1455,7 @@ to your mailbox — resend the queue on `[:nodeup …]`.
   chunk; `chunk-every` keeps the remainder. `chunk-by` partitions consecutive equal-key runs.
 - `scan` is a running fold — returns a list of all intermediate accumulator
   values starting with the initial value (like Haskell's `scanl`).
-- `flat-map`/`mapcat` maps a list-valued function and concatenates the results. `min-by`/`max-by`
+- `mapcat`/`mapcat` maps a list-valued function and concatenates the results. `min-by`/`max-by`
   select the extremum of a collection by a key function. `(clamp x lo hi)` constrains a
   number to the closed range `[lo, hi]`.
 - `repeat` builds a list of `n` copies of a value; `repeatedly` calls a
@@ -1487,7 +1524,7 @@ for when the caller needs indexed access — the named form of
 ### Strings
 `str`  `pr-str`  `string-length`  `substring`  `char-at`  `string->list`
 `list->string`  `string->codepoints`  `codepoints->string`  `upper`  `lower`
-`string->number`  `number->string`  `index-of`  `string-contains?`  `join`
+`string->number`  `number->string`  `index-of`  `includes?`  `join`
 `string-split`  `replace`  `trim`  `triml`  `trimr`  `blank?`  `starts-with?`
 `ends-with?`  `string-repeat`  `pad-left`  `pad-right`  `to-fixed`  `format`
 `string->graphemes`  `string-normalize`  `display-width`
@@ -1524,7 +1561,7 @@ for when the caller needs indexed access — the named form of
   surrounding whitespace (`trim` first if needed). `number->string` is its inverse
   (just `str` on a number).
 - `index-of` returns the first char index of a substring or `-1`;
-  `string-contains?` is the boolean form. `join` puts a separator between strings;
+  `includes?` is the boolean form. `join` puts a separator between strings;
   `string-split` is its inverse (an empty separator splits into characters).
   `replace` swaps every occurrence of one substring for another.
 - `trim` / `triml` / `trimr` strip whitespace (both ends / left / right);
@@ -1539,6 +1576,12 @@ for when the caller needs indexed access — the named form of
   → `"x = 42, y = 3.14"`. Specifiers: `%s` (any, via `str`), `%d` (number),
   `%f` (float, 6 decimals), `%.Nf` (float, N decimals — uses `to-fixed`), `%%` (literal
   `%`). Width/justification isn't built in (compose with `pad-left`/`pad-right`).
+- `fmt` is **string interpolation** (a macro): `(fmt "x = {x}, y = {(to-fixed y 2)}")`
+  splices each `{expr}` hole's value between the literal text, lowering to a plain
+  `(str …)` — zero runtime cost, so it is just a terser `str`. `{{`/`}}` are literal
+  braces; braces nest inside a hole (`(fmt "m={ {:a 1} }")`). Prefer it over
+  quote-chopped `str` wherever text interleaves values, including `error` messages:
+  `(error (fmt "index out of range: {i}"))`.
   An unknown specifier or a truncated one errors; a missing arg renders as
   `nil`, extra args are ignored.
 
@@ -1730,7 +1773,7 @@ unchanged.
 ```
 
 Import other namespaces' names with `(:use …)` clauses in the header. `(:use mod)`
-refers all of `mod`'s public names bare; `(:use mod :refer [a b])` refers just
+refers all of `mod`'s public names bare; `(:use mod :only [a b])` refers just
 those. A bare reference resolves **current namespace → imports → root**, so an
 own-namespace definition shadows an import. `:use` auto-loads the module (it never
 *fetches* a package — declared deps only). A bare top-level `(require 'mod)` only
@@ -1746,7 +1789,7 @@ docstring on the floor.)
 ```clojure
 (defmodule editor "the editor core"
   (:use editor/buffer)                 ; refer buffer's public names bare
-  (:use text :refer [insert]))  ; refer just text/insert as `insert`
+  (:use text :only [insert]))  ; refer just text/insert as `insert`
 (defn open (path) (insert (new-buffer) 0 (slurp path)))   ; insert → text/insert
 ```
 
@@ -1871,7 +1914,7 @@ Run `nest doc <module>` for the full API of any module.
 | `std/hash.blsp` | `'hash` | `sha256`/`sha1`/`sha384`/`sha512`/`md5` (hex over strings or byte vectors), raw-byte digests (`sha256-raw` … → byte vectors, for chaining over bytes), `bytes->hex` (byte seq → lowercase hex), `hmac-sha256` (RFC 2104) and raw-byte `hmac-sha256-raw`/`-sha1-raw`/`-sha512-raw` (byte-vector key+msg → byte vector, for binary-protocol auth), `hash-string` (djb2). All Brood over two Rust prims (`%digest`/`%hmac`). |
 | `std/diff.blsp` | `'diff` | LCS-based sequence diff: `diff-seq`, `diff-lines`, `diff-summary`, `diff-patch`, `diff-unified` |
 | `std/path.blsp` | `'path` | Path string manipulation: `join`, `split`, `basename`, `dirname`, `extension`, `stem`, `normalize`, `relative-to`, `absolute?`, `with-extension` |
-| `std/system.blsp` | `'system` | OS interaction: `env`, `env-all`, `argv`, `os-type`, `cmd`, `cmd-ok?`, `cmd-out`, `working-dir`, `host`, `halt` |
+| `std/system.blsp` | `'system` | OS interaction: `env`, `env-all`, `argv`, `os-type`, `cmd`, `cmd-ok?`, `cmd-out`, `halt` (whole-machine `cwd`/`hostname` are root builtins) |
 | `std/crypto.blsp` | `'crypto` | Cryptography: ChaCha20-Poly1305 AEAD (`encrypt`/`decrypt`/`encrypt-str`/`decrypt-str`), `pbkdf2` (accepts a string or byte-vector password/salt — a binary salt is used as raw bytes), `random-bytes`, `random-key`, `random-nonce`, `secure=?` |
 | `std/agent.blsp` | `'agent` | Process-backed state cell (Elixir-style Agent): `start`, `get`, `update`, `get-and-update`, `cast`, `stop` |
 | `std/telemetry.blsp` | `'telemetry` | Erlang-`:telemetry`-style instrumentation; handlers run in an isolated listener process: `start-telemetry`, `stop-telemetry`, `emit`, `attach`, `detach`, `detach-all`, `forward`, `handlers`, `telemetry-sync`, the `span` macro |

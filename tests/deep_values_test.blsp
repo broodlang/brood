@@ -1,6 +1,6 @@
 ;; Deep-but-legal values (a 60k-deep nested list is just immutable data) must
 ;; survive every kernel walker. The walkers recurse per *car*-nesting level
-;; (cdr spines are iterative); since 2026-07-20 each recursion entry grows the
+;; (rest spines are iterative); since 2026-07-20 each recursion entry grows the
 ;; native stack in heap-backed segments (`stacker::maybe_grow`) instead of
 ;; overflowing — this file pins that for promote (`def`), GC flush, structural
 ;; equality, and hashing (map keys). Each test body runs in its own green

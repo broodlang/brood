@@ -19,7 +19,7 @@
 
 (defn warns-about? (src needle)
   "Does checking `src` produce a warning containing `needle`?"
-  (some? (fn (w) (string-contains? w needle)) (warns-of src)))
+  (any? (fn (w) (includes? w needle)) (warns-of src)))
 
 (describe "sig: std modules carry signatures the checker enforces"
   (test "a declared std signature is enforced at a call site in another module"

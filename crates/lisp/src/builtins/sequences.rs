@@ -927,7 +927,7 @@ pub(super) fn scan_bar(chars: &[char], n: usize, from: usize) -> usize {
 /// occurrence of `needle` in `s`, or -1 if absent. Linear: Rust's byte-level
 /// `str::find`, then a one-pass byte→char-index conversion of the prefix. The
 /// empty needle matches at 0 (matching `index-of`'s contract). The search
-/// primitive the Brood `index-of`/`string-contains?` ride on; see the
+/// primitive the Brood `index-of`/`includes?` ride on; see the
 
 pub(super) fn str_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "%str-index-of", arg(args, 0))?;

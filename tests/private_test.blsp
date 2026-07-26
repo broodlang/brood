@@ -16,7 +16,7 @@
     (is (= (try
              (%load-string "(defmodule priv-thief) (defn steal () (priv-vault/vault--secret))")
              (catch e
-               (if (string-contains? (str (get e :message)) "module-private")
+               (if (includes? (str (get e :message)) "module-private")
                  :blocked
                  [:other e])))
           :blocked)))
@@ -29,23 +29,23 @@
     (let (message (try
                     (%load-string "(defmodule priv-caller) (defn c () (priv-moved/moved--helper))")
                     (catch e (str (get e :message)))))
-      (and (is (string-contains? message "does not exist"))
-        (is (string-contains? message "priv-moved/moved-helper"))
+      (and (is (includes? message "does not exist"))
+        (is (includes? message "priv-moved/moved-helper"))
         ;; and it must NOT send the reader after a privacy grant they don't need
-        (refute (string-contains? message ":use-internals")))))
+        (refute (includes? message ":use-internals")))))
   (test "a private that really DOES exist still reports privacy, not a rename"
     (%load-string "(defmodule priv-real) (defn real--secret () 9)")
     (let (message (try
                     (%load-string "(defmodule priv-caller2) (defn c () (priv-real/real--secret))")
                     (catch e (str (get e :message)))))
-      (and (is (string-contains? message "module-private"))
-        (is (string-contains? message ":use-internals")))))
+      (and (is (includes? message "module-private"))
+        (is (includes? message ":use-internals")))))
   (test "with no public counterpart either, the plain privacy message stands"
     ;; An unloaded module has neither name, so the diagnosis must not be guessed.
     (let (message (try
                     (%load-string "(defmodule priv-caller3) (defn c () (never-loaded/nope--thing))")
                     (catch e (str (get e :message)))))
-      (is (string-contains? message "module-private"))))
+      (is (includes? message "module-private"))))
 
   (test "(:use-internals mod) grants access — loud, explicit, greppable"
     (%load-string "(defmodule priv-vault2) (defn vault2--secret () 42)")

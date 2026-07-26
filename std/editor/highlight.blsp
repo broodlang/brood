@@ -101,7 +101,7 @@ as a keyword. Mirrors the LSP's SPECIAL_FORMS list."
   "True if `tok` reads as a number (so it colours as one rather than a symbol). A cheap
 first-char gate skips the `string->number` parse for the common case — an identifier
 that can't begin a number — since this runs on every atom on the fontify hot path."
-  (and (string-contains? "+-.0123456789" (char-at tok 0))
+  (and (includes? "+-.0123456789" (char-at tok 0))
     (not (nil? (string->number tok)))))
 
 ;; ---- scanning primitives (shared by lexer + matchers) -----------------------

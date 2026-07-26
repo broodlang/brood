@@ -6,13 +6,13 @@
 ;; here is policy (ADR-006): whole-file and line I/O, directory walking, and the
 ;; path helpers the prelude doesn't already provide. No new Rust.
 ;;
-;; (Deletion / rename / file-size are kernel primitives; `append-file` is the
+;; (Deletion / rename / file-size are kernel primitives; `spit-append` is the
 ;; atomic `spit-append` primitive — each write lands at end-of-file.)
 
 (defmodule file
   "The file & filesystem library (`(require 'file)`): whole-file and line read/write
-(`read-file`/`write-file`/`read-lines`/`write-lines`/`append-file`), predicates
-(`file?`/`dir?`/`path-exists?`), directory listing (`list-files`/`list-dirs`/
+(`slurp`/`spit`/`read-lines`/`write-lines`/`spit-append`), predicates
+(`file?`/`dir?`/`file-exists?`), directory listing (`list-files`/`list-dirs`/
 `walk-files`), and path helpers (`path-extension`/`path-stem`, complementing the
 prelude's `path-join`/`path-basename`/`parent-dir`). Pure Brood over the fs
 primitives. The kernel also provides the always-available file primitives
@@ -20,15 +20,9 @@ primitives. The kernel also provides the always-available file primitives
 `delete-file`/`delete-dir`/`rename-file`/`copy-file`/`cwd`.")
 
 ;; --- whole-file read / write ------------------------------------------------
-(def read-file slurp)
-; friendly alias — read a whole file into a string
-(def write-file spit)
-; friendly alias — write a string to a file (overwriting)
-
-(def append-file spit-append)
-; friendly alias — append a string to a file (creating it if absent). Atomic:
-; each write lands at end-of-file, so it's safe from concurrent processes (was a
-; non-atomic read-modify-write before `spit-append` landed).
+;; Whole-file I/O is the kernel's `slurp` / `spit` / `spit-append` (Clojure
+;; heritage); `spit-append` lands each write at end-of-file, so it is safe from
+;; concurrent processes. This module adds the line-oriented helpers on top.
 
 (defn read-lines (path)
   "The lines of the file at `path` as a list of strings, without their newlines. A trailing newline does not yield an empty final line; an empty file yields nil."
@@ -43,8 +37,6 @@ primitives. The kernel also provides the always-available file primitives
   (spit path (fold (fn (acc l) (str acc l "\n")) "" lines)))
 
 ;; --- predicates -------------------------------------------------------------
-(def path-exists? file-exists?)
-; alias — true if a file *or* directory exists at the path
 
 (defn file? (path)
   "True if `path` exists and is a regular file (not a directory)."

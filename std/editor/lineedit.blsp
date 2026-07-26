@@ -118,11 +118,11 @@ is the word-constituent predicate (`lineedit--word-pred` picks it per mode)."
 (defn lineedit--line-start (text p)
   "Offset of the first char of the line containing point `p` (just after the previous
 newline, or 0)."
-  (inc (string-last-index-of text "\n" p)))
+  (inc (last-index-of text "\n" p)))
 
 (defn lineedit--line-end (text p)
   "Offset of the end of the line containing point `p` (the next newline, or the end)."
-  (let (j (string-index-of text "\n" p))
+  (let (j (index-of text "\n" p))
     (if (< j 0) (string-length text) j)))
 
 (defn lineedit--count-nl (s)
@@ -285,7 +285,7 @@ observer's eval minibuffer (the `:hist` list `lineedit-init` is seeded with)."
 as a substring, or -1. An empty query matches the newest entry."
   (cond
     (>= i (count history)) -1
-    (string-contains? (nth history i) query) i
+    (includes? (nth history i) query) i
     else (lineedit--search-find history query (inc i))))
 
 (defn lineedit--search-step (state query from)
@@ -718,7 +718,7 @@ tested in isolation."
 the single-line path (with horizontal scroll + signature hint, the common case) unless
 the text spans multiple lines, in which case every line is repainted so a bracket's
 partner highlights in place. `st` must already be reflowed by `lineedit--loop`."
-  (if (string-contains? (get st :text) "\n")
+  (if (includes? (get st :text) "\n")
     (lineedit--render-multi st)
     (lineedit--render-single st)))
 

@@ -71,7 +71,7 @@ error inside the user expression surfaces here as the `:error` branch."
               srcs (project--source-files root)
               extracts (project--gather-extracts srcs)
               source-set (fold (fn (m p) (map-assoc m p true)) {} srcs))
-          (filter (fn (w) (some? (fn (nm) (string-contains? w (str "'" nm "'"))) defined))
+          (filter (fn (w) (any? (fn (nm) (includes? w (str "'" nm "'"))) defined))
             (project--duplicate-def-warnings extracts source-set)))))
     (catch _ nil)))
 

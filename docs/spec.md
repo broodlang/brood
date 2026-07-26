@@ -331,9 +331,9 @@ the macros `defn`, `when`/`unless`/`cond`/`and`/`or`, `->`/`->>`, `match`/`match
 ops `ceil round quot pow sqrt`); the type-tag predicates (`nil? pair? int? float?
 bool? string? symbol? keyword? vector? map? fn?`, over `type-of`); the map surface
 (`get assoc dissoc keys vals contains?`); the sequence library (`range take drop
-take-while drop-while some? every? find zip partition sort sort-by` …) and the
-list/string helpers (`car cdr list second third fold reduce map filter reverse
-append count length nth last but-last` …); plus the pattern-match compiler itself.
+take-while drop-while any? every? find zip partition sort sort-by` …) and the
+list/string helpers (`list second third fold reduce map filter reverse
+append count nth last but-last` …); plus the pattern-match compiler itself.
 
 ## 10. Errors
 

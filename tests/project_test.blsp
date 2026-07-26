@@ -39,10 +39,10 @@
   ;; which would silently misparse to module `quote` — guard it with a fix-it.
   (test "a quoted symbol is rejected with a drop-the-quote fix-it"
     (let (msg (try (project/project--parse-main '(quote app)) (catch e e)))
-      (and (is (string-contains? msg "drop the leading quote"))
-        (is (string-contains? msg "`:main app`")))))
+      (and (is (includes? msg "drop the leading quote"))
+        (is (includes? msg "`:main app`")))))
   (test "a quoted list is rejected with a drop-the-quote fix-it"
-    (is (string-contains? (try (project/project--parse-main '(quote (app start))) (catch e e))
+    (is (includes? (try (project/project--parse-main '(quote (app start))) (catch e e))
           "drop the leading quote"))))
 
 (describe "project: default entry"
@@ -65,20 +65,20 @@
   (test "nil dependencies parse to nil"
     (assert= (project/project-parse-deps nil) nil))
   (test "a non-vector :dependencies value is rejected"
-    (is (string-contains? (try (project/project-parse-deps '(a b)) (catch e e)) "must be a vector")))
+    (is (includes? (try (project/project-parse-deps '(a b)) (catch e e)) "must be a vector")))
   (test "a non-symbol dep name is rejected"
-    (is (string-contains? (try (project/project-parse-dep '["parser" :path "../p"]) (catch e e))
+    (is (includes? (try (project/project-parse-dep '["parser" :path "../p"]) (catch e e))
           "must be a symbol")))
   (test "an unknown source kind is rejected"
-    (is (string-contains? (try (project/project-parse-dep '[parser :svn "../p"]) (catch e e))
+    (is (includes? (try (project/project-parse-dep '[parser :svn "../p"]) (catch e e))
           "must be :git, :path, :tarball, or :version")))
   (test "a :git dep without a :ref is rejected"
-    (is (string-contains? (try
+    (is (includes? (try
                             (project/project-parse-dep '[parser :git "https://x.git"])
                             (catch e e))
           "needs a :ref")))
   (test "a reserved opt is rejected so the manifest stays forward-compatible"
-    (is (string-contains? (try
+    (is (includes? (try
                             (project/project-parse-dep '[parser :git
                                                           "https://x.git"
                                                           :ref
@@ -88,7 +88,7 @@
                             (catch e e))
           "reserved for a future version")))
   (test "an entry that is too short is rejected"
-    (is (string-contains? (try (project/project-parse-dep '[parser :path]) (catch e e))
+    (is (includes? (try (project/project-parse-dep '[parser :path]) (catch e e))
           "too short"))))
 
 ;; `:isolated` runs against a rolled-back private copy of the globals (ADR-017),
@@ -158,8 +158,8 @@
     ;; `with-err-str` both asserts the warning and keeps it out of the suite's
     ;; output — the warning firing here is the correct behaviour, not noise to fix.
     (let (warning (with-err-str (assert= (project/project--effective-format-headers "/proj") {})))
-      (and (is (string-contains? warning "typo"))
-        (is (string-contains? warning "not in :dependencies")))))
+      (and (is (includes? warning "typo"))
+        (is (includes? warning "not in :dependencies")))))
   (test "a bogus plugin entry does not suppress a valid sibling's rules"
     (let (root (temp-dir "brood-fmt-plugin-")
           hatch (path-join (path-join root "_deps") "hatch"))
@@ -175,15 +175,15 @@
 
 (describe "project: scaffold templates (ADR-037)"
   (test "the .gitignore template ignores the package cache"
-    (is (string-contains? (scaffold/project--gitignore-template) "_deps/")))
+    (is (includes? (scaffold/project--gitignore-template) "_deps/")))
   (test "the .gitattributes template maps .blsp to Clojure but keeps it out of the language stats"
     (let (a (scaffold/project--gitattributes-template))
-      (is (string-contains? a "*.blsp"))
-      (is (string-contains? a "linguist-language=Clojure"))
-      (is (string-contains? a "linguist-detectable=false"))))
+      (is (includes? a "*.blsp"))
+      (is (includes? a "linguist-language=Clojure"))
+      (is (includes? a "linguist-detectable=false"))))
   (test "the manifest template documents how to add :dependencies"
     (let (m (scaffold/project--manifest-template "demo"))
-      (is (string-contains? m ":dependencies"))
+      (is (includes? m ":dependencies"))
       ;; still a valid manifest: the first form is the (project …) call
       (let (form (read-string m))
         (assert= (first form) 'project)
@@ -227,8 +227,8 @@
         (spit fb "(defmodule shared)\n(defn main () 2)\n(defn only-b () 2)\n")
         (let (warns (project/project--duplicate-def-warnings-seq [fa fb]))
           (assert= (count warns) 1)
-          (is (string-contains? (first warns) "shared/main"))
-          (refute (string-contains? (first warns) "only-a"))))))
+          (is (includes? (first warns) "shared/main"))
+          (refute (includes? (first warns) "only-a"))))))
   (test "an ambient *earmuff* name collides across namespaces (it stays root)"
     (let (dir (temp-dir "brood-dup-"))
       (make-dir dir)
@@ -237,7 +237,7 @@
         (spit fb "(defmodule beta)\n(defdyn *cfg* 2)\n")
         (let (warns (project/project--duplicate-def-warnings-seq [fa fb]))
           (assert= (count warns) 1)
-          (is (string-contains? (first warns) "*cfg*"))))))
+          (is (includes? (first warns) "*cfg*"))))))
   (test "files with no defmodule share the root namespace — same name still collides"
     (let (dir (temp-dir "brood-dup-"))
       (make-dir dir)
@@ -246,8 +246,8 @@
         (spit fb "(defn main () 2)\n(defn only-b () 2)\n")
         (let (warns (project/project--duplicate-def-warnings-seq [fa fb]))
           (assert= (count warns) 1)
-          (is (string-contains? (first warns) "main"))
-          (refute (string-contains? (first warns) "only-a"))))))
+          (is (includes? (first warns) "main"))
+          (refute (includes? (first warns) "only-a"))))))
   (test "no duplicates yields no warnings"
     (let (dir (temp-dir "brood-dup-"))
       (make-dir dir)
@@ -278,8 +278,8 @@
           ;; unused-private: shared--dead is unreferenced (warn), shared--helper is used
           (let (warns (project/project--unused-private-warnings extracts))
             (assert= (count warns) 1)
-            (is (string-contains? (first warns) "shared--dead"))
-            (refute (some? (fn (w) (string-contains? w "shared--helper")) warns))))))))
+            (is (includes? (first warns) "shared--dead"))
+            (refute (any? (fn (w) (includes? w "shared--helper")) warns))))))))
 
 ;; The Phase-2 check-result cache primitives (ADR-119): `check-file-deps` returns
 ;; `[warnings dep-keys fingerprint]`, and `check-deps-fp` recomputed on those
@@ -389,18 +389,18 @@
     (assert= (project/project--check-paths :source-paths (list "src")) (list "src")))
   (test "a bare string is rejected, naming the key and the fix"
     (let (msg (try (project/project--check-paths :source-paths "src") (catch e e)))
-      (and (is (string-contains? msg ":source-paths"))
-        (is (string-contains? msg "not a bare string"))
-        (is (string-contains? msg "[\"src\"]")))))
+      (and (is (includes? msg ":source-paths"))
+        (is (includes? msg "not a bare string"))
+        (is (includes? msg "[\"src\"]")))))
   (test "a vector of non-strings is rejected"
-    (is (string-contains? (try (project/project--check-paths :source-paths [5]) (catch e e))
+    (is (includes? (try (project/project--check-paths :source-paths [5]) (catch e e))
           "must contain only strings")))
   (test "a number is rejected"
-    (is (string-contains? (try (project/project--check-paths :test-paths 5) (catch e e))
+    (is (includes? (try (project/project--check-paths :test-paths 5) (catch e e))
           "must be a vector of path strings")))
   (test "the fix-it example matches the key it is about"
     ;; suggesting ["src"] for :test-paths would be actively misleading
-    (is (string-contains? (try (project/project--check-paths :test-paths 5) (catch e e))
+    (is (includes? (try (project/project--check-paths :test-paths 5) (catch e e))
           "[\"tests\"]"))))
 
 (describe "project: manifest loading errors point at the file"
@@ -411,15 +411,15 @@
       (make-dir dir)
       (spit manifest "(project :name \"x\"\n")
       (let (msg (try (project/project--apply-manifest manifest) (catch e e)))
-        (and (is (string-contains? msg "cannot parse"))
-          (is (string-contains? msg manifest))
-          (is (string-contains? msg "line"))))))
+        (and (is (includes? msg "cannot parse"))
+          (is (includes? msg manifest))
+          (is (includes? msg "line"))))))
   (test "an empty manifest says so rather than failing obscurely"
     (let (dir (temp-dir "brood-manifest-")
           manifest (path-join dir "project.blsp"))
       (make-dir dir)
       (spit manifest "")
-      (is (string-contains? (try (project/project--apply-manifest manifest) (catch e e))
+      (is (includes? (try (project/project--apply-manifest manifest) (catch e e))
             "cannot parse"))))
   (test "a first form that is not (project …) is REJECTED, not silently ignored"
     (let (dir (temp-dir "brood-manifest-")
@@ -427,15 +427,15 @@
       (make-dir dir)
       (spit manifest "(porject :name \"x\")\n")
       (let (msg (try (project/project--apply-manifest manifest) (catch e e)))
-        (and (is (string-contains? msg "must begin with a (project"))
-          (is (string-contains? msg "porject"))
-          (is (string-contains? msg "being ignored"))))))
+        (and (is (includes? msg "must begin with a (project"))
+          (is (includes? msg "porject"))
+          (is (includes? msg "being ignored"))))))
   (test "a non-list manifest is rejected"
     (let (dir (temp-dir "brood-manifest-")
           manifest (path-join dir "project.blsp"))
       (make-dir dir)
       (spit manifest "42\n")
-      (is (string-contains? (try (project/project--apply-manifest manifest) (catch e e))
+      (is (includes? (try (project/project--apply-manifest manifest) (catch e e))
             "must begin with a (project"))))
   (test "a well-formed manifest still applies"
     (let (dir (temp-dir "brood-manifest-")

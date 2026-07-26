@@ -524,8 +524,8 @@
       ; the logger has now dispatched both casts → bp
       (proc/gen/gen-call lg :config)
       (let (txt (buffer-query bp buffer-text))
-        (is (string-contains? txt "server up"))
-        (is (string-contains? txt "disk low")))
+        (is (includes? txt "server up"))
+        (is (includes? txt "disk low")))
       (log/stop-logger)
       (delete-buffer bp))))
 

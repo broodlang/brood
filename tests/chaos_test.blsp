@@ -105,7 +105,7 @@
                    (try (/ 1 0) (catch e (throw e)))
                    (catch outer-e outer-e)))
       (is (map? caught))
-      (is (string-contains? (str (get caught :message)) "zero"))))
+      (is (includes? (str (get caught :message)) "zero"))))
 
   (test "try with no error returns its body value"
     (assert= :ok (try :ok (catch e :error))))
@@ -119,12 +119,12 @@
   (test "too few arguments raises arity error"
     (let (msg (error-of ((fn (a b c) a) 1 2)))
       (is (string? msg))
-      (is (string-contains? msg "3"))))
+      (is (includes? msg "3"))))
 
   (test "too many arguments raises arity error"
     (let (msg (error-of ((fn (a b) a) 1 2 3)))
       (is (string? msg))
-      (is (string-contains? msg "2"))))
+      (is (includes? msg "2"))))
 
   (test "variadic (& rest) accepts any number of args including zero"
     (assert= '() ((fn (& xs) xs)))
@@ -271,8 +271,8 @@
   (test "(string-length nil) raises type error"
     (assert-error (string-length nil)))
 
-  (test "(string-contains? nil ...) returns false — nil is treated as empty string"
-    (assert= false (string-contains? nil "x")))
+  (test "(includes? nil ...) returns false — nil is treated as empty string"
+    (assert= false (includes? nil "x")))
 
   (test "(append nil list) returns list"
     (assert= '(1 2 3) (append nil '(1 2 3))))

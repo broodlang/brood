@@ -58,7 +58,7 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 ;; Private by convention: names containing "--" (double-dash prefix).
 ;; These are skipped by (:use) refer-all and omitted from generated docs.
 (defn docs--private? (sym)
-  (string-contains? (name sym) "--"))
+  (includes? (name sym) "--"))
 
 ;; One definition's Markdown: a `### (name args…)` heading (with a *(macro)* tag
 ;; for macros) followed by its docstring, or a placeholder when undocumented.
@@ -139,7 +139,7 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 ;; what a user/agent actually calls.
 (defn docs--public? (sym)
   (let (nm (name sym))
-    (and (not (string-contains? nm "--")) (not (starts-with? nm "%")))))
+    (and (not (includes? nm "--")) (not (starts-with? nm "%")))))
 
 (defn document-all ()
   "The Markdown reference for every *public* global currently bound in the image — each builtin and prelude function/macro with its signature and one-line summary. The complete primitive reference (`nest doc --all`); read this once instead of probing names one at a time. Opt-in std modules (`display`, `buffer`, `ansi`, …) aren't loaded here — `nest doc <module>` documents those."

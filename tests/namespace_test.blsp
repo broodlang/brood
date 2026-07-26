@@ -95,9 +95,9 @@
     (%load-string "(defmodule iappA (:use ilibA)) (defn run () (list (pub-x) (pub-y)))")
     (is (= (iappA/run) (list :x :y))))
 
-  (test "(:use mod :refer [..]) refers only the named symbols"
+  (test "(:use mod :only [..]) refers only the named symbols"
     (%load-string "(defmodule ilibB) (defn keep-me () :kept) (defn skip-me () :skipped)")
-    (%load-string "(defmodule iappB (:use ilibB :refer [keep-me])) (defn run () (keep-me))")
+    (%load-string "(defmodule iappB (:use ilibB :only [keep-me])) (defn run () (keep-me))")
     (is (= (iappB/run) :kept))
     ;; skip-me wasn't referred, so a bare reference would resolve to root (unbound),
     ;; not to ilibB/skip-me — confirm only the qualified one exists.
@@ -174,3 +174,40 @@
     (let (me (self) w (spawn (ns-echo me)))
       (send w (gui/build/make))
       (is (= (receive) {:tag 'gui/build/make :data (list 1 2 3)})))))
+
+;; An `&optional` default is code in the module that wrote it, so it must resolve in
+;; that module's namespace — like the body does. It didn't: param lists were passed
+;; through the resolver verbatim (correct for the BINDERS, which are not references),
+;; and the default expression rode along unresolved. It then resolved at call time in
+;; whatever namespace the caller happened to be in, so a module reading its own global
+;; from a default raised `unbound symbol`.
+;;
+;; Earmuffs hid this until ADR-151: `*knob*` was ambient, so the common
+;; `(&optional (n *knob*))` happened to work while a plain `(&optional (n limit))` was
+;; already broken. Found by a downstream project (brood-edit) failing 25 tests on it.
+(describe "namespaces: &optional defaults resolve in the DEFINING module"
+  (test "a default reading the module's own plain global"
+    (%load-string "(defmodule nsopt1) (def lim 7) (defn f (x &optional (n lim)) (list x n))")
+    (assert= (nsopt1/f 1) (list 1 7)))
+  (test "a default reading the module's own earmuffed global"
+    (%load-string "(defmodule nsopt2) (def *lim* 5) (defn f (x &optional (n *lim*)) (list x n))")
+    (assert= (nsopt2/f 1) (list 1 5)))
+  (test "resolution follows the DEFINING module, not the calling one"
+    ;; The caller has a global of the same name; the default must not pick it up.
+    (%load-string "(defmodule nsopt3) (def lim 7) (defn f (&optional (n lim)) n)")
+    (%load-string "(defmodule nsopt4) (def lim 999) (defn call-it () (nsopt3/f))")
+    (assert= (nsopt4/call-it) 7))
+  (test "an explicit argument still wins over the default"
+    (%load-string "(defmodule nsopt5) (def lim 7) (defn f (x &optional (n lim)) (list x n))")
+    (assert= (nsopt5/f 1 42) (list 1 42)))
+  (test "a default referencing an EARLIER PARAM stays a local reference"
+    ;; docs/language.md: "a default may reference an earlier parameter (left-to-right)".
+    ;; The binder must not be qualified into the namespace by the same pass.
+    (%load-string "(defmodule nsopt6) (defn rect (w &optional (h w)) (* w h))")
+    (and (assert= (nsopt6/rect 3) 9) (assert= (nsopt6/rect 3 4) 12)))
+  (test "a default mixing an earlier param and a module global"
+    (%load-string "(defmodule nsopt7) (def lim 5) (defn f (w &optional (h lim) (area (* w h))) area)")
+    (assert= (nsopt7/f 2) 10))
+  (test "a defdyn knob keeps working from a default (it is ambient, never namespaced)"
+    (%load-string "(defmodule nsopt8) (defdyn *dlim* 9) (defn f (&optional (n *dlim*)) n)")
+    (assert= (nsopt8/f) 9)))

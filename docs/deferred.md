@@ -265,3 +265,70 @@ that it's there.
 **Workaround today.** `sig!` still catches the mismatch at runtime (the
 enforcement path doesn't depend on `of_value` at all); the gap is purely in
 the *static* checker's precision for this one case shape.
+
+## 7. Lexically-shadowable operators ("Option C") — Lisp-1 without reserved-word cost
+
+**Context.** Brood is a Lisp-1 (ADR-007), so every macro/special form occupies the
+single namespace and becomes a **reserved operator word** — you can't bind a local
+named `loop`, `for`, `when`, etc. and call it in head position, because the
+expander resolves the operator to the macro before lexical scope exists.
+Shipping the `loop`/`recur` macro (ADR-154) spent two common words this way and is
+what surfaced the question. **Decision taken (2026-07-26): keep reserved words
+(Option A)** — the limitation is minor, universal to Lisps, and buys dead-simple
+certainty (`(loop …)` is *always* the macro, no scope-tracing). This item records
+the more ambitious alternative for when a concrete need appears.
+
+**The idea (C).** Make the expander resolve operator position against **lexical
+scope first**: a *free* `loop` expands the macro; a `loop` that is `let`/`letrec`/
+`fn`-param-bound calls the local. This removes the reserved-word cost entirely
+while keeping Lisp-1's `(f x)` ergonomics — strictly less limiting than Clojure
+(where `loop` genuinely can't be shadowed). It makes macros consistent with the
+*function* shadowing Brood already allows (`(let (map …) (map x))` already calls
+the local).
+
+**Why not Lisp-2 instead.** Lisp-2 would also free the name (a *variable* `loop`
+lives in a different namespace than the operator), but it taxes **every**
+higher-order call with `funcall`/`#'` — which guts the fold/map/closure-passing
+style that is Brood's whole idiom. Rejected.
+
+**Properties that make C tractable.**
+- **Lexical containment.** A shadow applies only within the text where it's bound;
+  it does **not** leak into other functions you call (their bodies were resolved in
+  their own scope) — identical to how function shadowing already behaves.
+- **Composes with hygiene.** Free references in a macro template auto-qualify to
+  the macro's namespace (ADR-066 α), so a macro that expands to `(loop …)` emits a
+  *qualified* `loop` a caller's local can't capture. C relies on this, and it is
+  already automatic.
+
+**Gotchas to design around (the reason it's deferred, not done).**
+1. **Scope-aware expander is a chicken-and-egg.** Binding forms like `when-let`/
+   `for`/`loop` are macros that expand *into* the core scope-introducers
+   (`let`/`letrec`/`fn`), so the expander must track scope while expanding
+   outside-in — turning a flat pass into a scope-tracking one and enlarging the
+   compile-correctness surface.
+2. **Control-flow macros are the scary shadows.** `and`/`or`/`when`/`cond` are
+   macros; silently shadowing them changes control flow invisibly. C should either
+   free only *library* operators (`loop`, `for`, threading) and keep control macros
+   reserved, or make the shadow-lint a **hard error** for control-flow macros.
+3. **Static editor grammars can't reflect scope.** `nest grammar` emits a static
+   keyword list (ADR-092); only the LSP's semantic tokens can color a shadowed
+   `loop` correctly. So "highlighting tells you which one" holds only in
+   LSP-backed editors.
+4. **Knowability must be engineered, not assumed.** Ship C *with* a shadow lint
+   ("local `loop` shadows the `loop` macro", loud by default) + semantic
+   highlighting. C without the lint is a readability hazard — the whole reason A is
+   the safer default.
+5. Minor: `recur` under a *shadowed* `loop` is meaningless (must error cleanly);
+   scope-tracking expansion adds cold-start cost (expansion is already the bulk of
+   the ~31ms boot).
+
+**Relation to full hygiene.** Brood is only *partially* hygienic vs Elixir
+(free-reference auto-qualification is automatic — the part C needs — but
+introduced-binding capture protection is opt-in `x#` + an advisory lint, where
+Elixir is automatic-with-`var!`-opt-out). C's scope-aware expander is a step
+*toward* the deferred full-hygiene work (ADR-066), so the two are complementary.
+
+**Trigger to pick this up.** Real evidence that reserved operator words cost
+something — a user (or downstream project) that genuinely wants a local named for a
+reserved operator and finds `go`/rename unacceptable — plus appetite for the
+scope-aware expander. Until then, A stands.

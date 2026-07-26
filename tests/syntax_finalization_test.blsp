@@ -21,22 +21,22 @@
 
 (describe "ADR-149: a binding container is a list, not a vector"
   (test "a vector parameter list is rejected"
-    (is (string-contains? (err-of "(defn f [x y] (+ x y))") "must be a list, not a vector"))
-    (is (string-contains? (hint-of "(defn f [x y] (+ x y))") "lists-for-code")))
+    (is (includes? (err-of "(defn f [x y] (+ x y))") "must be a list, not a vector"))
+    (is (includes? (hint-of "(defn f [x y] (+ x y))") "lists-for-code")))
 
   (test "Clojure's vector-headed multi-arity is rejected, not read as one 2-param fn"
     ;; Was: params `[x]` and `:one`, empty body — a different function, diagnosed
     ;; only later as `expected 2 arguments, got 1` at the call site.
-    (is (string-contains? (err-of "(defn g ([x] :one) ([x y] :two))")
+    (is (includes? (err-of "(defn g ([x] :one) ([x y] :two))")
           "must be a list, not a vector"))
     ;; the same mistake with a single clause
-    (is (string-contains? (err-of "(defn f ([x] x))") "must be a list, not a vector")))
+    (is (includes? (err-of "(defn f ([x] x))") "must be a list, not a vector")))
 
   (test "vector bindings are rejected for let / letrec / binding / for"
-    (is (string-contains? (err-of "(let [a 1] a)") "must be a list, not a vector"))
-    (is (string-contains? (err-of "(let [[a 1] [b 2]] (+ a b))") "must be a list, not a vector"))
-    (is (string-contains? (err-of "(letrec [f (fn () 1)] (f))") "must be a list, not a vector"))
-    (is (string-contains? (err-of "(for [x [1 2]] x)") "must be a list, not a vector")))
+    (is (includes? (err-of "(let [a 1] a)") "must be a list, not a vector"))
+    (is (includes? (err-of "(let [[a 1] [b 2]] (+ a b))") "must be a list, not a vector"))
+    (is (includes? (err-of "(letrec [f (fn () 1)] (f))") "must be a list, not a vector"))
+    (is (includes? (err-of "(for [x [1 2]] x)") "must be a list, not a vector")))
 
   (test "a vector INSIDE a binding position still destructures"
     (assert= (let ([a b] [1 2]) (+ a b)) 3)
@@ -67,7 +67,7 @@
       (assert= (match [:nope 1] ([k v] k) (_ :other)) :nope)))
 
   (test "~expr in pattern position is an error naming ^"
-    (is (string-contains? (err-of "(let (k 1) (match 1 (~k :hit) (_ :miss)))")
+    (is (includes? (err-of "(let (k 1) (match 1 (~k :hit) (_ :miss)))")
           "a pin is written `^k`")))
 
   (test "a macro can emit a pin — the reason for the change"
@@ -127,7 +127,7 @@
   (test "Clojure's typed catch is rejected, not silently misread"
     ;; Was: bound `Exception` to the raised value and evaluated the prelude's `e`
     ;; (2.718…) as a statement — a wrong program with no diagnostic.
-    (is (string-contains?
+    (is (includes?
           (err-of "(try (throw :x) (catch Exception e (str \"caught \" e)))")
           "Clojure's typed catch")))
 
@@ -139,7 +139,7 @@
   (test "an &optional marker in a pattern-dispatched fn is rejected"
     ;; Was: matched as a literal symbol, so the clause silently stopped being
     ;; variadic and `(f 1 2)` died with a [:match-error …].
-    (is (string-contains?
+    (is (includes?
           (err-of "(defn bad ((x) [:one x]) ((x &optional (y 5)) [:two x y]))")
           "pattern-dispatched fn")))
 
@@ -171,13 +171,13 @@
 
 (describe "ADR-152: a defmodule header rejects an unknown clause"
   (test "a misspelled or Clojure-style clause is an error, not silence"
-    (is (string-contains? (err-of "(defmodule sf-m1 (:use-internal json))")
+    (is (includes? (err-of "(defmodule sf-m1 (:use-internal json))")
           "unrecognised header form"))
-    (is (string-contains? (err-of "(defmodule sf-m2 (:requires json))")
+    (is (includes? (err-of "(defmodule sf-m2 (:requires json))")
           "unrecognised header form"))
     ;; …including the `(:doc "…")` shape that silently dropped four std modules'
     ;; docstrings until this check existed.
-    (is (string-contains? (err-of "(defmodule sf-m3 (:doc \"hi\"))")
+    (is (includes? (err-of "(defmodule sf-m3 (:doc \"hi\"))")
           "unrecognised header form")))
 
   (test "a module docstring is the second form, and it registers"
@@ -189,8 +189,8 @@
   (test "a ` inside a ` template is an error, not an outer-level expansion"
     ;; Was: `(a `(b ~(+ 1 2))) => (a (quasiquote (b 3))) — the inner unquote fired
     ;; at the outer level.
-    (is (string-contains? (err-of "`(a `(b ~(+ 1 2)))") "nested quasiquote"))
-    (is (string-contains? (hint-of "`(a `(b ~(+ 1 2)))") "not tracked")))
+    (is (includes? (err-of "`(a `(b ~(+ 1 2)))") "nested quasiquote"))
+    (is (includes? (hint-of "`(a `(b ~(+ 1 2)))") "not tracked")))
 
   (test "a ` inside an ~unquote is ordinary code and stays legal"
     (defn sf--inner (x) `(b ~x))
@@ -198,10 +198,10 @@
 
 (describe "ADR-152: calling data names the accessor"
   (test "a keyword / map / set / vector in head position gets a hint"
-    (is (string-contains? (hint-of "(:a {:a 1})") "(get m :a)"))
-    (is (string-contains? (hint-of "({:a 1} :a)") "(get m k)"))
-    (is (string-contains? (hint-of "(#{1 2} 1)") "(contains? s x)"))
-    (is (string-contains? (hint-of "([10 20] 1)") "(nth v i)")))
+    (is (includes? (hint-of "(:a {:a 1})") "(get m :a)"))
+    (is (includes? (hint-of "({:a 1} :a)") "(get m k)"))
+    (is (includes? (hint-of "(#{1 2} 1)") "(contains? s x)"))
+    (is (includes? (hint-of "([10 20] 1)") "(nth v i)")))
 
   (test "the accessors themselves work"
     (assert= (get {:a 1} :a) 1)

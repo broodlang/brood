@@ -1330,9 +1330,10 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
             "Brood has no `while` — loop with tail recursion (TCO guaranteed, O(1) \
              stack) or, for evolving state, a process (spawn/receive)."
         }
-        "loop" | "recur" => {
-            "Brood has no `loop`/`recur` — write a tail-recursive helper that carries \
-             an accumulator; a self-call in tail position is O(1) stack."
+        "recur" => {
+            "`recur` is only valid inside a `loop` — it re-enters the enclosing \
+             `(loop (name init …) …)`. Outside one, write a tail-recursive helper \
+             (or a `loop`) that carries an accumulator; a tail self-call is O(1) stack."
         }
         "transient" | "persistent!" | "conj!" | "assoc!" | "disj!" | "pop!" => {
             "Brood collections are persistent and immutable — there are no \

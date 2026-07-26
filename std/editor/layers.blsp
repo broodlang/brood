@@ -186,7 +186,7 @@ primitive — `activate-layer` is the hook-firing version."
 
 (defn layer-active? (ctx name)
   "True if an active layer is named `name`."
-  (some? (fn (l) (= name (layers--name-of l))) (layers--list ctx)))
+  (any? (fn (l) (= name (layers--name-of l))) (layers--list ctx)))
 
 (defn layers--replace-base-list (lst layer)
   "Replace the base (last) element of `lst` with `layer`, or add it if `lst` empty."
@@ -280,7 +280,7 @@ returns `[ctx' pending']`. The bridge from layers to keymap — compose, then st
   "Register `ref` as an always-on system layer (appended at lowest precedence to
 every buffer). **Idempotent** — registering the same ref again is a no-op, so a
 module that registers at load is safe to (re)load."
-  (if (some? (fn (r) (= r ref)) *system-layers*)
+  (if (any? (fn (r) (= r ref)) *system-layers*)
     *system-layers*
     (def *system-layers* (append *system-layers* (list ref)))))
 

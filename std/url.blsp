@@ -86,7 +86,7 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
 ;; `s` is a CODE-POINT VECTOR (built once in `percent-decode`), so char access is
 ;; O(1) `nth` — `char-at` on the raw UTF-8 string is O(i), making the scan O(n^2).
 (defn url--pct-decode-loop (s i n acc)
-  "Decode percent-encoded code-point vector `s` (length `n`), accumulating decoded bytes into `acc`."
+  "Decode percent-encoded code-point vector `s` (count `n`), accumulating decoded bytes into `acc`."
   (if (>= i n)
     (utf8-bytes->string (reverse acc))
     (let (c (nth s i))

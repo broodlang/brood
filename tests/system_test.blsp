@@ -60,14 +60,14 @@
   (test "trims trailing newline"
     (assert= "hello" (system/cmd-out (system/cmd "echo" ["hello"])))))
 
-(describe "system/working-dir"
+(describe "cwd"
   (test "returns a string"
-    (is (string? (system/working-dir))))
+    (is (string? (cwd))))
   (test "is an absolute path"
-    (is (starts-with? (system/working-dir) "/"))))
+    (is (starts-with? (cwd) "/"))))
 
-(describe "system/host"
+(describe "hostname"
   (test "returns a string"
-    (is (string? (system/host))))
+    (is (string? (hostname))))
   (test "is non-empty"
-    (is (> (string-length (system/host)) 0))))
+    (is (> (string-length (hostname)) 0))))

@@ -23,10 +23,10 @@ candidate, then lexicographic); an empty query returns the candidates unchanged.
 
 (defn fuzzy--next (cand c i n)
   "The index ≥ `i` of the next `c` (a 1-char string) in `cand`, or -1. Uses the native
-`string-index-of` rather than a per-char Brood recursion — this scan is the dominant cost
+`index-of` rather than a per-char Brood recursion — this scan is the dominant cost
 of ranking, so the native search is a large speedup over thousands of candidates. (`n`,
-the length, is now implicit in `string-index-of`.)"
-  (if (>= i n) -1 (string-index-of cand c i)))
+the length, is now implicit in `index-of`.)"
+  (if (>= i n) -1 (index-of cand c i)))
 
 (defn fuzzy--positions (qlow clow qi qn ci cn acc)
   "The matched char indices (greedy, in order) of `qlow` within `clow`, or nil when

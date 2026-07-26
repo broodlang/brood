@@ -89,7 +89,7 @@
     (let (inner (with-err-str (eprint "IN")))
       (assert= inner "IN")))
   (test "a throwing body propagates the error rather than swallowing it"
-    (is (string-contains? (try (with-err-str (eprint "before") (error "boom")) (catch e e))
+    (is (includes? (try (with-err-str (eprint "before") (error "boom")) (catch e e))
           "boom")))
   (test "the sink does not leak after a throw"
     (try (with-err-str (error "boom")) (catch _ nil))

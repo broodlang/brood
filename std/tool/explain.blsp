@@ -211,7 +211,7 @@ the `nest mcp` tools of the same names.")
 (defn explain--matches? (q entry)
   (let (ql (lower q))
     (or (includes? (lower (get entry :intent)) ql)
-      (some? (fn (k) (includes? (lower k) ql)) (get entry :keywords)))))
+      (any? (fn (k) (includes? (lower k) ql)) (get entry :keywords)))))
 
 (defn find-pattern (query)
   "Find the idiomatic Brood pattern(s) for a task. `query` is matched (case-

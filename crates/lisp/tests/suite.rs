@@ -52,9 +52,16 @@ fn run_suite() {
     // Raise it for this context only, the same "the harness needs different limits"
     // reasoning as the memory ceiling above. The release path keeps the 120 s default, so
     // a genuinely hung test is still caught quickly where it matters.
+    // Sample the UCD Part1 sweep here, and only here. Its ~16,000 cases x 6 normalisations
+    // are ~670 s of DEBUG work — more than nextest's whole-binary cap for this suite (600 s),
+    // so the full sweep cannot fit in this wrapper however the inner budget is set. A
+    // 1-in-16 slice is ~42 s and still ~1,000 cases, and the release path (`nest test`,
+    // `make suite`) keeps sweeping all of Part1 in ~5 s. See the knob's comment in
+    // tests/conformance_ucd_test.blsp for why sampling only started working once the
+    // per-test 20,000-line walk was collected once instead.
     if let Err(e) = interp.eval_str(
         "(require 'test) (def *test-timeout-ms* 600000) \
-         (require 'project) (project/run-project-tests)",
+         (require 'project) (def *ucd-part1-of* 16) (project/run-project-tests)",
     ) {
         panic!("Brood test suite failed: {}", e);
     }
