@@ -85,7 +85,12 @@ pub(super) fn first(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
             None => Ok(Value::nil()),
         },
         Value::Nil => Ok(Value::nil()),
-        _ => Err(LispError::wrong_type(heap, "first", "list, vector, set, map or bytes", v)),
+        _ => Err(LispError::wrong_type(
+            heap,
+            "first",
+            "list, vector, set, map or bytes",
+            v,
+        )),
     }
 }
 
@@ -131,7 +136,12 @@ pub(super) fn rest(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
             Ok(heap.list(pairs))
         }
         Value::Nil => Ok(Value::nil()),
-        _ => Err(LispError::wrong_type(heap, "rest", "list, vector, set, map or bytes", v)),
+        _ => Err(LispError::wrong_type(
+            heap,
+            "rest",
+            "list, vector, set, map or bytes",
+            v,
+        )),
     }
 }
 
