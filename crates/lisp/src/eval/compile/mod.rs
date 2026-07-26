@@ -359,6 +359,18 @@ fn fn_rest_is_stable(v: Value) -> bool {
 /// the `Value::Str` arm originally introduced the bug); the sibling `MakeClosure`
 /// path guards the same hazard via [`fn_rest_is_stable`] (deferring instead of
 /// freezing).
+/// The truthiness of a node whose value is known at compile time, or `None` when it
+/// isn't a constant. Only `nil` and `false` are falsy (`eval::truthy`), and both are
+/// [`ConstVal::Atom`]s — every `ConstVal::Handle` is an allocated heap object (string,
+/// bignum, pair, vector, map, …), so a handle constant is unconditionally truthy.
+fn const_truthiness(n: &Node) -> Option<bool> {
+    match n {
+        Node::Const(ConstVal::Atom(v)) => Some(crate::eval::truthy(*v)),
+        Node::Const(ConstVal::Handle { .. }) => Some(true),
+        _ => None,
+    }
+}
+
 fn const_node(heap: &Heap, v: Value) -> Node {
     let frozen = heap.promote(v);
     debug_assert!(
@@ -761,6 +773,23 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                         Some(&e) => compile_node(heap, e, scope, tail)?,
                         None => const_node(heap, Value::nil()),
                     };
+                    // A literal test picks its branch at compile time. Both branches are
+                    // already compiled above, so this only discards the losing *Node* —
+                    // every compile-time effect (slot allocation, `note_definition` for
+                    // LSP nav) has already happened, and nothing about evaluation order
+                    // changes because a constant test evaluates to itself.
+                    //
+                    // This is what makes a constant catch-all free. `cond` expands to
+                    // nested `if`s, so `(cond … :else x)` ends in `(if :else x nil)`;
+                    // without this fold that emits a keyword constant + a branch, which
+                    // drops the whole arm out of the unboxed-i64 register worker's
+                    // subset — measured at **12×** on `ackermann` and ~1.7× on
+                    // `collatz`/`primes` once ADR-154 stopped special-casing `:else`.
+                    // The fold is general (`(if true a b)`, `(cond … 42 x)` alike), so
+                    // no spelling is privileged and no caller has to know the rule.
+                    if let Some(t) = const_truthiness(&cond) {
+                        return Some(if t { then } else { els });
+                    }
                     return Some(Node::If(Box::new(cond), Box::new(then), Box::new(els)));
                 }
                 if value::symbol_is(h, kw::DO) {

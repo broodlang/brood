@@ -8866,3 +8866,38 @@ the domain now names set and map). The full `nest test` still hits the documente
 900 s conformance grind (the 100k-deep JSONTestSuite documents, ROADMAP's one red
 item) — unchanged by this work and confirmed pre-existing by running with the tag
 excluded.
+
+## 2026-07-26 — `:else` cost 12×, and the fix is a constant-test fold (ADR-157)
+
+Found while sweeping every benchmark row for further headroom after ADR-155.
+`ackermann` measured **4286 ms** against the 342 ms in `FRONTIER.md` — a 12× gap that
+no commit claimed. It was not a regression in the runtime: the port's `cond` catch-all
+is spelled `:else`, and ADR-154 (landed the same day) had stopped special-casing it.
+
+`cond` expands to nested `if`s, so the catch-all became `(if :else x nil)` — an emitted
+keyword `Const` plus a branch. That constant is not an integer, so the arm no longer
+matched the unboxed-i64 register worker's subset and fell to the general JIT path.
+Confirmed with `BROOD_JIT_DUMP_IR`: the `else` spelling produces **no** general-path arm
+for `ack` (it is on the register worker); the `:else` spelling produces one.
+
+A/B with the port otherwise untouched, identical checksums: `ackermann` 4285 → 360 ms,
+`collatz` 162 → 97, `primes` 96 → 58, `nbody` 330 → 329 (float, never on that path).
+ADR-154 had explicitly noted `:else` "still catches" — true, and the reason this hid:
+it was never wrong, only slow. Blast radius at the time: `brood-edit` 94 uses, `pong`
+40, four benchmark ports.
+
+Fixed in the compiler rather than the callers (ADR-157): `compile_node`'s `if` arm now
+folds a literal test to its taken branch. Both branches are compiled first, so slot
+allocation and `note_definition` still run and only the losing *Node* is discarded.
+General by construction — `else`, `:else`, `true`, `42`, `""` all cost the same nothing
+— so no spelling is privileged and nobody has to know the rule. New regression file
+`tests/const_test_fold_test.blsp` (6 tests, `:serial` so the folded arms actually tier,
+green on VM / tree-walker / no-JIT / GC-stress).
+
+Also refuted the same day, so it is not re-tried: **`send`'s 225 ns fixed cost is not
+the registry lock.** Every `send` resolves pid → mailbox through a single global
+`Mutex<HashMap>`, which looked like both a per-send cost and a contention point for
+`ring`'s 200 processes. Swapping it for an `RwLock` (sends only read) measured
+**nothing**: pingpong 199 → 200 ms, ring 721 → 734, the send microbenchmark identical.
+The registry is uncontended; the cost is elsewhere in the deliver path. Prototype
+reverted.

@@ -1,0 +1,85 @@
+;; Regression test for the constant-test fold in `compile_node`'s `if` arm.
+;;
+;; `cond` expands to nested `if`s, so a constant catch-all ends the chain with
+;; `(if <literal> x nil)`. Before the fold, that literal was emitted as a real
+;; `Const` + branch — and a *keyword* constant (`:else`) dropped the whole arm out
+;; of the unboxed-i64 register worker's subset, so an int-recursive function paid
+;; the general JIT path instead. Measured when ADR-154 stopped special-casing
+;; `:else`: **ackermann 4285 → 360 ms (11.9×)**, `collatz`/`primes` ~1.7× — silently,
+;; since `:else` still *selected* the right branch the whole time.
+;;
+;; The fold picks the branch at compile time for ANY literal test, so no spelling is
+;; privileged: `else`, `:else`, `true`, `42` and a string all cost the same nothing.
+;; These tests pin the semantics (which branch runs, and that the losing branch is
+;; not evaluated) rather than the timing; the perf claim is guarded by the benchmark
+;; suite. Run `:serial` and past the tier threshold so the folded arms actually
+;; tier — a fold that broke codegen would diverge here.
+
+(defmodule const-test-fold-test (:use test))
+
+;; Ackermann is non-tail by construction (the inner call's result is the outer call's
+;; argument), so the checker's warning is expected and correct. It is also the exact
+;; shape that made the cliff visible, so the two spellings are kept side by side.
+(check-allow :non-tail-recursion
+  (defn ack (m k)
+    (cond
+      (= m 0) (+ k 1)
+      (= k 0) (ack (- m 1) 1)
+      :else (ack (- m 1) (ack m (- k 1)))))
+
+  (defn ack-else (m k)
+    (cond
+      (= m 0) (+ k 1)
+      (= k 0) (ack-else (- m 1) 1)
+      else (ack-else (- m 1) (ack-else m (- k 1))))))
+
+(defn classify (x)
+  (cond (= x 1) :one (= x 2) :two :else :other))
+
+(defn count-up (i n acc)
+  (cond (>= i n) acc :else (count-up (+ i 1) n (+ acc i))))
+
+(describe "constant-test fold: which branch runs"
+  :serial
+
+  (test "a keyword catch-all selects the same branch as a bare `else`"
+    (assert= (classify 1) :one)
+    (assert= (classify 2) :two)
+    (assert= (classify 99) :other))
+
+  (test "every literal test is truthy except nil and false"
+    (assert= (if true :a :b) :a)
+    (assert= (if false :a :b) :b)
+    (assert= (if nil :a :b) :b)
+    (assert= (if 0 :a :b) :a)
+    ; 0 is truthy in Brood
+    (assert= (if "" :a :b) :a)
+    ; a handle constant is truthy
+    (assert= (if [] :a :b) :a)
+    (assert= (if :kw :a :b) :a))
+
+  (test "a two-armed `if` with a constant test still defaults to nil"
+    (assert= (if true :a) :a)
+    (assert= (if false :a) nil))
+
+  (test "the losing branch is not evaluated"
+    ;; If the fold kept both arms live this would throw.
+    (assert= (if true :ok (throw [:should-not-run])) :ok)
+    (assert= (if false (throw [:should-not-run]) :ok) :ok)
+    (assert= (cond false (throw [:should-not-run]) :else :ok) :ok)))
+
+(describe "constant-test fold: folded arms still tier correctly"
+  :serial
+
+  (test "`:else` and `else` spellings agree past the tier threshold"
+    ;; ack(3,5) = 253, deep double recursion — well past the tier threshold, and
+    ;; exactly the shape the register worker claims.
+    (assert= (ack 3 5) 253)
+    (assert= (ack-else 3 5) 253)
+    (assert= (ack 3 5) (ack-else 3 5)))
+
+  (test "a constant-catch-all tail loop stays correct once native"
+    (assert= (count-up 0 10000 0) 49995000)
+    ; sum 0..9999
+    (assert= (count-up 0 1 0) 0)
+    (assert= (count-up 5 5 0) 0)))
