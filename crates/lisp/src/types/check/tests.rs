@@ -3684,3 +3684,48 @@ fn keyword_accessor_result_type_matches_get() {
     );
     assert_eq!(w.len(), via_get.len(), "get: {via_get:?} vs kw: {w:?}");
 }
+
+/// `get` had **no curated signature at all** — it is multi-arity, and `infer_sig`
+/// bails on multi-arm closures, so its domain was unconstrained while `count`/`first`
+/// (which have domains) caught the same mistake. Plus the relationship a flat
+/// signature can't express: a *literal keyword* key can only address a keyed
+/// receiver, which is the write-time half of ADR-164's runtime error.
+#[test]
+fn get_receiver_is_checked() {
+    for src in ["(get 5 :k)", "(get :kw :k)", "(get 5 0)", "(get true :k)"] {
+        let w = warnings(src);
+        assert!(
+            w.iter().any(|m| m.contains("get") && m.contains("argument 1")),
+            "{src}: {w:?}"
+        );
+    }
+}
+
+#[test]
+fn get_with_a_keyword_key_needs_a_keyed_receiver() {
+    // the mistake: a collection OF maps where one map was meant
+    for src in [
+        "(get [1 2] :name)",
+        "(get (list 1) :name)",
+        "(get \"str\" :name)",
+    ] {
+        let w = warnings(src);
+        assert!(
+            w.iter().any(|m| m.contains("keyword key needs a map")),
+            "{src}: {w:?}"
+        );
+    }
+    // every legitimate shape stays silent — including a computed key and an
+    // unknown receiver, so the rule can't misfire
+    for src in [
+        "(get {} :name)",
+        "(get #{:a} :a)",
+        "(get nil :name)",
+        "(get [1 2] 0)",
+        "(get \"str\" 0)",
+        "(defn f (c) (get c :name))",
+        "(defn f (c k) (get c k))",
+    ] {
+        assert!(warnings(src).is_empty(), "{src} must be silent");
+    }
+}

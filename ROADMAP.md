@@ -65,12 +65,6 @@ What that review consciously left OPEN, with the reasoning:
 - ✅ **Callable keywords — `(:key m)`** (ADR-165, 2026-07-26). Keyword-only, in the
   shared `eval::apply`, so a keyword is a first-class value the HOFs can take
   (`(map :name people)`). Map/vector/set stay non-callable by decision.
-- ⬜ **`get`'s own receiver check.** `(get 5 :name)` draws no *checker* warning — the
-  runtime catches it precisely (ADR-164) but the curated signature takes the widest
-  domain, since one sig covers every collection kind. The keyword spelling IS checked
-  (ADR-167), so the two now disagree in the other direction. Tightening it means
-  splitting the sig per receiver kind or teaching the checker the key/receiver
-  relationship. **[Brood]**
 - ⬜ **Early-bind reserved names now that they can't be rebound (ADR-166).** The
   reserved set makes a shipped binding *immutable*, so the compiler can resolve
   `get`/`+`/`first` at compile time and the JIT can inline them **without a staleness

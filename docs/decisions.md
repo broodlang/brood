@@ -10376,7 +10376,19 @@ justification was that it reads better.
 - Three tests in `types/check/tests.rs` pin the receiver check (including the four
   silent cases — map, set, nil, and an unknown parameter), the arity check, and the
   result-type equivalence with `get`.
-- Still open, and deliberately so: `get`'s *own* receiver check. `(get 5 :name)` draws
-  no warning, because its curated signature takes the widest domain — the runtime
-  catches it precisely (ADR-164) but the checker doesn't. Tightening it is a separate,
-  wider change (the sig is shared by every collection kind); filed rather than bundled.
+- **`get`'s own receiver check, done in the same ADR** after the "wider change"
+  excuse turned out to be wrong. The claim was that one shared signature covers every
+  collection kind so tightening it is entangled. In fact `get` had **no signature at
+  all**: it is multi-arity and `infer_sig` bails on multi-arm closures, so its domain
+  was simply unconstrained — which is why `(count 5)` and `(first 5)` were caught and
+  `(get 5 :k)` was not. Two changes, both small:
+  1. A curated sig with the same `countable` domain `count` uses (every kind `get` can
+     key or index), result `any`, variadic `default` tail.
+  2. The **relationship** a flat signature genuinely can't express: a *literal
+     keyword* key can only address a keyed receiver, so `(get deps :name)` on a list
+     of maps is a provable mistake — the write-time half of ADR-164's runtime error,
+     and now symmetric with the keyword spelling.
+
+  Verified false-positive-free the only way that counts: `nest check` stays at zero
+  warnings across `std/` + `tests/`, and across all 11 sibling projects — roughly
+  5,000 `get` call sites. A computed key and an unknown receiver both stay silent.
