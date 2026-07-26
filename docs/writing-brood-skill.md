@@ -115,7 +115,7 @@ round-trips. Two faster moves:
 
   | You reach for | Brood has |
   | --- | --- |
-  | `concat` | `concat` (alias of `append`) — variadic over lists *and* vectors, returns a list |
+  | `concat` | `append` — variadic over lists *and* vectors, returns a list (the `concat` alias was removed) |
   | `loop`/`recur` | **neither exists** — a local loop is `(letrec (go (fn (i acc) … (go …))) (go 0 0))` (tail calls → O(1)); or a top-level `--acc` helper / `fold`/`map`/`filter`/`reduce` |
   | string building / `str(...)` interpolation | `(str a b)`, or `(fmt "a={a} b={b}")` — interpolation lowered to a plain `str`; `{{`/`}}` are literal braces. Printf-style: `(format "…%s…" x)` |
   | `some?` (Clojure non-nil) | Brood's `some?` was **renamed `any?`** ("any element matches a pred"); for non-nil use `(not (nil? x))` |
