@@ -1,10 +1,15 @@
 # Protocol dispatch & abilities — the polymorphism seam
 
-> Status: **exploration.** The dispatch *runtime* is shipped (ADR-158 + the
-> registry/inlining work below); what's open is whether — and how — Brood grows a
-> **dispatch identity for user-defined types** so protocols become useful to
-> application code, not just the stdlib. This note captures the problem, what was
-> measured, the language survey, and the design space. No decision yet.
+> Status: **Slice 1 shipped.** `std/ability.blsp` (a `defability`/`impl` facility with
+> nominal, value-first dispatch) landed, plus a checker arm in `types/check/protocol.rs`
+> and `tests/ability_test.blsp`. It unifies value polymorphism and drivers-as-values,
+> detects cross-module impl conflicts, and dispatches records on a baked `module/name`
+> identity. **Known Slice-1 limitation:** the identity lives in a visible `:__id__`
+> field, so it leaks into `keys`/`=`/`json-encode` — the kernel carve-out (a hidden slot)
+> is **Slice 2**. Also open: checker nominal-awareness + monomorphization, sealed
+> abilities, return-type dispatch, and migrating/retiring `protocol`. The rest of this
+> note captures the problem, measurements, the language survey, and the design space
+> that led here.
 
 ## The goal
 
@@ -249,8 +254,15 @@ We are not obliged to pick an existing point. Seeds for a Brood-native synthesis
 
 ## Already shipped vs. open
 
-- **Shipped:** ADR-158 protocol facility; the dispatch-runtime work (nested
-  registry, inlined calls, `satisfies?`, richer missing-impl error).
-- **Open (this note):** dispatch identity for user types — structural vs registry
-  vs a synthesis; and whether the identity needs a kernel carve-out to avoid
-  leaking.
+- **Shipped:** ADR-158 protocol facility; the protocol dispatch-runtime work (nested
+  registry, inlined calls, `satisfies?`, richer missing-impl error). **Slice 1 of the
+  unified facility:** `std/ability.blsp` — `defability`/`impl`/`defrecord*`, value-first
+  nominal dispatch (record identity or `type-of`), drivers-as-values, provenance-tagged
+  cross-module conflict detection, `satisfies?`, `:default`; the `defability`/`impl`
+  checker arm (arity/missing/undeclared-op diagnostics under the noun "ability"); and
+  `tests/ability_test.blsp`. `defbehaviour`/`defprotocol` are untouched and coexist.
+- **Open (Slice 2+):** the kernel carve-out to stop `:__id__` leaking into
+  `keys`/`=`/`json-encode`; checker nominal-awareness + monomorphization; sealed
+  abilities (exhaustiveness + full static dispatch); return-type dispatch; and
+  migrating/retiring `protocol` once `ability` proves out. `defbehaviour` stays — the
+  module-as-implementor contract (Q3) is genuinely different from value dispatch.
