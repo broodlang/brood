@@ -9518,3 +9518,60 @@ any other marker is a clean error (ADR-152).
   suite and the Rust checker tests are green. New coverage in
   `tests/ergonomics_test.blsp` (fmt, if-let/when-let, some->/cond->, doto, run!,
   incl. a cross-process send of a closure that uses fmt + a `letrec` loop).
+
+## ADR-155 — `receive` clause bodies compile into the *calling* function, not into a per-message thunk
+
+**Context.** `receive` expanded to `((%receive matcher ms on-timeout))`. The matcher
+was a `(fn (msg) …)` built by the `match` compiler whose every clause body had been
+wrapped in a `(fn () body…)` **thunk**; `%receive` scanned the mailbox, and returned
+the thunk of whichever clause matched for the macro to apply in tail position. The
+thunk existed for two good reasons: a body must run only *after* the primitive
+commits to (and removes) the message, never during the scan; and returning it for
+the caller to apply in tail position is what keeps a receive loop O(1) stack.
+
+Measured on 2026-07-26, it was also the dominant cost of message passing. Isolating
+a self-send + `receive` (no cross-process scheduling at all) put a receive at
+**820 ns**, against 310 ns for the matching `send` — i.e. `pingpong`'s cost was
+essentially all receive machinery, the scheduler handoff having already been
+flattened by wake elision and ADR-135. Two compounding defects:
+
+1. Building and calling the thunk cost **~235 ns per received message** (a closure
+   plus its captured-env frame, then a second closure activation), against ~50 ns
+   for an equivalent small-vector protocol.
+2. `Inst::MakeClosure` is not in the JIT subset, so *building* that thunk made the
+   **whole matcher arm ineligible for the JIT**. The hot message path ran with no
+   native code at all — confirmed by `BROOD_NO_JIT=1` and `BROOD_NO_HOF_JIT=1` both
+   changing the number by zero.
+
+**Decision.** Split selection from execution. `%receive` (now arity 2) only answers
+**which clause matched and what its pattern bound**, as a `[idx var…]` vector — or
+`nil` for no match, and `nil` on timeout (unambiguous: a match always answers with a
+vector). Every clause **body is emitted at the call site** by the macro, which
+rebinds the pattern variables out of that vector and dispatches on `idx`:
+
+```clojure
+(let (r (%receive (fn (msg) …[idx var…]… ) ms))
+  (if (= (nth r 0) 0) (let (from (nth r 1)) body0)
+                      body1))
+```
+
+This is Erlang's "receive clauses compile into the enclosing function", reached from
+the Brood side rather than by teaching the kernel to run bytecode mid-scan. Bodies
+land in the owning arm's own chunk, so a receive loop's self-call is an ordinary tail
+call in that arm; every body sits in tail position, so O(1) stack still holds. The
+matcher allocates one small vector (`Inst::MakeVector` — *in* the JIT subset) instead
+of a closure, so matcher arms now lower and tier.
+
+**Consequences.** Semantics are unchanged — clause order, selective-receive message
+order, `:when` guards (still run exactly once, during the scan), `after`, and
+`(receive)` with no clauses all behave as before. Measured: **`ring` 1376 → 720 ms
+(−48%)**, **`pingpong` 249 → 194 ms (−22%)**, isolated receive 820 → 615 ns; `loop`,
+`bintree`, `nqueens`, `spawn`, `fib`, `sieve` unchanged. Gates: 3417 in-language
+tests, 864 Rust tests, the process/message files under
+`GC_STRESS`+`GC_VERIFY`+`JIT_VERIFY`, and `nest check` at zero warnings.
+
+The residual gap to BEAM on these rows is now the mailbox/copy/scan machinery
+(`send` 310 ns, receive 615 ns), not the clause protocol. Note the deeper lever —
+compiling the pattern *test* into the calling arm's bytecode so the scan makes no
+closure call at all — is still open; `BROOD_NO_HOF=1` (197 → 509 ms on `pingpong`)
+shows how much that per-candidate `vm_apply` still costs.

@@ -8679,3 +8679,118 @@ name is prose and correct.
   `brood-for-claude.md` and the writing-brood skill. Left `devlog.md`/`decisions.md`
   alone — there the old names are the record of what was true, and editing them would
   falsify it.
+
+## 2026-07-26 — the message rows: `receive` clause bodies move into the calling function (ADR-155)
+
+Picked up the four open Elixir-parity performance rows (`nqueens`, `ring`/`pingpong`,
+`bintree`, `loop`). Baseline on a fresh `--bin brood` build, `make`-installed:
+`loop` 50 ms · `bintree` 119 ms · `nqueens` 94 ms · `pingpong` 249 ms · `ring` 1376 ms.
+
+### Where the message time actually was
+
+The useful move was to **take the scheduler out of the picture** — a single process
+sending to itself and receiving, 200k times, which exercises the whole message path
+with zero cross-process handoff. Bisected against progressively smaller programs:
+
+| step | 200k iters | delta |
+|---|---|---|
+| bare tail loop | 14 ms | — |
+| + build `[:ping k]` | 25 ms | 55 ns/iter |
+| + `send` to self | 87 ms | **310 ns/iter** |
+| + `receive` | 251 ms | **820 ns/iter** |
+
+At 1.2 µs per receive this matched `pingpong`'s per-receive cost almost exactly — so
+**`pingpong` was not paying for scheduling at all**; wake elision and ADR-135 had
+already flattened that. It was paying for `receive` itself. Two knobs then said
+something surprising: `BROOD_NO_JIT=1` (255 ms) and `BROOD_NO_HOF_JIT=1` (259 ms)
+were **indistinguishable from the default** — the hot message path was running with
+no native code whatsoever — while `BROOD_NO_HOF=1` was 804 ms, so the cached-arm HOF
+path was the only thing keeping it afloat.
+
+The cause was one design decision doing double damage. `receive` wrapped every clause
+body in a `(fn () body…)` thunk so the body could run after `%receive` committed to
+the message. Measured directly: building + calling such a thunk costs **235 ns**
+against **50 ns** for a small-vector protocol. And because `Inst::MakeClosure` is not
+in `chunk_in_jit_subset`, building it made the **entire matcher arm** ineligible to
+lower — which is why the JIT knobs did nothing.
+
+### The fix
+
+Split selection from execution (ADR-155): `%receive` drops to arity 2 and only
+answers `[idx var…]` — which clause matched, and what it bound — with `nil` for no
+match and `nil` on timeout. The macro emits every **body at the call site** and
+dispatches on `idx`. Bodies now compile into the owning arm, so a receive loop's
+self-call is an ordinary tail call there; the matcher allocates a vector
+(`Inst::MakeVector`, in the subset) instead of a closure, so matcher arms lower.
+
+The `tail_call` counter for `pingpong` tells the story: **400,309 → 473**. Both
+matcher arms show up in `BROOD_JIT_DUMP_IR` as tiering `<closure>` arms now.
+
+| | before | after | |
+|---|---|---|---|
+| `ring` N=200 | 1376 ms | **720 ms** | **−48%** |
+| `pingpong` N=100k | 249 ms | **194 ms** | **−22%** |
+| isolated receive | 820 ns | **615 ns** | −25% |
+
+`loop`/`bintree`/`nqueens`/`spawn`/`fib`/`sieve` all unchanged (controls). Gates:
+3417 in-language tests (154 files + the 68 corpus cases via `nest test`), 864 Rust
+tests, the process/message files under `GC_STRESS`+`GC_VERIFY`+`JIT_VERIFY`,
+`nest check` zero warnings, `cargo fmt` clean.
+
+### Two negative results — don't re-chase these
+
+**`nqueens` is not closure-dispatch bound, and JIT-lowering `MakeClosure` would not
+help it.** `BROOD_JIT_DUMP_IR` shows `safe?` and the `reduce` step lambda tiering but
+**`solve` never lowering** — its `(fn (acc c) …)` is a `MakeClosure`, the exact bail
+that was crippling `receive`. That reads like the same bug, and it is not. Rewriting
+the port with the `reduce` replaced by an explicit tail loop — no closure anywhere, so
+every arm can tier — measured **95 ms, identical to the 95 ms original** (checksum 724
+both ways). So the enclosing arm's failure to tier costs nothing here; the 2026-07-24
+spike's verdict stands, and admitting `MakeClosure` to the JIT subset should be judged
+on its own workload, not on nqueens.
+
+**`loop` is at its floor.** ~40 ms of compute for 30M iterations is ~1.33 ns/iter,
+about four cycles for an overflow-checked add, a compare, a branch and the safepoint
+tick. Threading the bound as a parameter instead of reading the global (which is how
+the Elixir and Node ports are written, so it is *more* faithful, not less) measured
+**70 ms vs 50 ms — slower**: the global read is already hoisted, and the third
+argument costs more than it saves.
+
+**`bintree` unchanged** and still the one open watch-item — 100% native, `jit_deopt=0`,
+its `[left right]` cells escape into `check`, so it remains the boxed-24-byte-`Value`
+allocation floor described on 2026-07-24.
+
+### Review addendum, same day — two things the self-review caught
+
+Neither was a correctness break, but both were real and both are now handled.
+
+**1. Expansion got slower, because the macro walked each pattern twice.** The first
+cut called `pattern-vars` once to build the matcher's `[idx var…]` and again to build
+the call site's rebinding `let`. Measured against a clean pre-change binary built from
+`HEAD` in a worktree (a 32-arm `receive`): **2.9 ms → 4.6 ms, +56%**. Fixed by
+`receive--prep`, which pairs each clause with its binders and index once and hands the
+same prep to both halves: **4.6 → 3.6 ms**, leaving ~+6% over baseline at 32 arms
+(~+12% at 16) — the honest cost of the extra expand-time work, paid once per receive
+site at load. Growth stays **linear** and there is no cliff at the 13th arm, which is
+where KI-10 used to bite (12 arms 1.64 ms, 13 arms 1.86 ms, 16 arms 2.08 ms).
+
+**2. A boot-time regression test quietly stopped firing.** `BROOD_BOOT_TRACE=1` on the
+baseline reports `freeze scrubbed 1 dead boot-intermediate closure env(s)`; on the new
+build it reports **0**. That scrub was the `offload` wrapper's `receive` — the old
+expansion nested a body-thunk `(fn () …)` inside the matcher, so expanding it at boot
+left a dead captured-frame closure for `Heap::to_prelude` to scrub, and the prelude
+comment called that out as deliberate coverage of the reachability-aware dangling-env
+check. ADR-155 removed the thunk, so no prelude form produces one any more and the
+**scrub branch is no longer reached at boot**. The invariant is unchanged — the *hard
+assert* for reachable env-capturing closures still runs on every closure — but the
+incidental exerciser is gone and the prelude comment has been corrected to say so.
+Worth a deliberate test if that branch is to stay covered.
+
+**Verified against the pre-change binary side by side** (same machine, same moment;
+binaries confirmed distinct): `ring` 1387 → 719 ms, `pingpong` 251 → 195 ms,
+`bintree` 118 → 120, `nqueens` 95 → 96, `loop` 51 → 51. Boot unregressed (cold source
+boot 47.3 → 45.4 ms; cache hit ~8 ms). `pattern-vars` was also checked to agree with
+what `match-compile` actually binds across **all 17 pattern forms** — vector, wildcard,
+nested, list-rest `&`, `{:keys …}`, `:or`, quoted, literals, pin, non-linear, guard,
+three `(bytes …)` segment shapes, and a 10-binder clause — since a disagreement there
+would silently hand a body the wrong variable.

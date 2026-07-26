@@ -2101,14 +2101,80 @@ message already sent stays sent."
 ;; (receive) with no clauses blocks for the next message and returns it.
 ;; (after 0 ...) is a non-blocking poll; (after ms>0 ...) waits up to ms.
 
-;; Wrap a clause's body in a (fn () body...) thunk, so a matched body runs only after
-;; %receive commits to (and removes) the message — not during the scan. Preserves the
-;; :when guard so the match compiler still gates on it.
-(defn receive--thunk-clause (clause)
-  (let (pat (first clause) more (rest clause))
+;; The bodies do NOT live in the matcher. The matcher's job is only to pick a clause
+;; and hand back what that clause's pattern bound; the body itself is emitted at the
+;; *call site* (see `receive` below). Two reasons, both measured:
+;;
+;;   * A `(fn () body…)` thunk cost a closure + captured-env allocation and a second
+;;     closure activation on every received message (~235 ns/message against ~50 ns
+;;     for the small-vector protocol used instead).
+;;   * `Inst::MakeClosure` is not in the JIT subset, so building that thunk made the
+;;     WHOLE matcher arm ineligible for the JIT — the hot message path ran with no
+;;     native code at all. A vector literal (`Inst::MakeVector`) is in the subset.
+;;
+;; Emitting the body at the call site also puts it in the owning arm's bytecode, so a
+;; receive loop's `(recur …)`/self-call is an ordinary tail call in that arm rather
+;; than a call through a thunk — Erlang's "receive clauses compile into the enclosing
+;; function", reached from the Brood side.
+
+;; The variables a clause's pattern binds, de-duplicated: a non-linear pattern (`[a a]`)
+;; lists `a` twice, but binds it once (the repeat compiles to an equality check).
+(defn receive--dedupe (vars seen)
+  (cond
+    (empty? vars) nil
+    (match-member? (first vars) seen) (receive--dedupe (rest vars) seen)
+    else (cons (first vars) (receive--dedupe (rest vars) (cons (first vars) seen)))))
+(defn receive--clause-vars (pat) (receive--dedupe (pattern-vars pat) nil))
+
+;; Pair each clause with the variables its pattern binds and its index, ONCE. Both
+;; halves below (the matcher's result vector and the call site's rebinding) need that
+;; same list in that same order, and `pattern-vars` walks the whole pattern — so
+;; deriving them from a shared prep keeps expansion to one walk per clause instead of
+;; two. Shape: `[clause vars idx]`.
+(defn receive--prep (clauses idx)
+  (if (empty? clauses)
+    nil
+    (cons [(first clauses) (receive--clause-vars (first (first clauses))) idx]
+      (receive--prep (rest clauses) (+ idx 1)))))
+
+;; Replace a clause's body with `[idx var…]` — the clause's index plus the values its
+;; pattern bound. Keeps the :when guard in place, so the match compiler still gates on
+;; it and the guard still runs exactly once, during the scan.
+(defn receive--result-clause (prep)
+  (let (clause (nth prep 0) vars (nth prep 1) idx (nth prep 2)
+        pat (first clause) more (rest clause))
     (if (= (first more) :when)
-      `(~pat :when ~(second more) (fn () ~@(rest (rest more))))
-      `(~pat (fn () ~@more)))))
+      `(~pat :when ~(second more) [~idx ~@vars])
+      `(~pat [~idx ~@vars]))))
+
+;; `(v0 (nth r 1) v1 (nth r 2) …)` — the flat `let` binding list that unpacks the
+;; matcher's result vector back into the clause's pattern variables.
+(defn receive--binds (vars r i)
+  (if (empty? vars)
+    nil
+    (cons (first vars)
+      (cons `(nth ~r ~i) (receive--binds (rest vars) r (+ i 1))))))
+
+;; One clause's call-site code: rebind its pattern variables from the result vector,
+;; then run its body.
+(defn receive--body-code (prep r)
+  (let (clause (nth prep 0)
+        more (rest clause)
+        body (if (= (first more) :when) (rest (rest more)) more)
+        binds (receive--binds (nth prep 1) r 1))
+    (if (empty? binds) `(do ~@body) `(let ~binds ~@body))))
+
+;; The call-site dispatch: `(if (= (nth r 0) 0) body0 (if (= (nth r 0) 1) body1 …))`.
+;; The last clause is reached by elimination (%receive only ever returns a result a
+;; clause matched), so it needs no test — and a single-clause receive, the common
+;; shape, collapses to its body with no dispatch at all. Every body sits in tail
+;; position, so a receive loop stays O(1) stack.
+(defn receive--dispatch (preps r)
+  (if (empty? (rest preps))
+    (receive--body-code (first preps) r)
+    `(if (= (nth ~r 0) ~(nth (first preps) 2))
+       ~(receive--body-code (first preps) r)
+       ~(receive--dispatch (rest preps) r))))
 
 ;; Walk the clause list and error if an `(after ...)` clause appears before the last
 ;; position — a non-last `after` would silently become a pattern clause matching the
@@ -2122,16 +2188,14 @@ message already sent stays sent."
         " more clause(s)")
       (receive--check-after (rest clauses)))))
 
-;; Split clauses into [real-clauses ms-or-nil timeout-thunk-or-nil], peeling an
+;; Split clauses into [real-clauses ms-or-nil timeout-body-or-nil], peeling an
 ;; optional trailing (after ms body...). `after` as a final clause head is reserved.
 (defn receive--split (clauses)
   (let (lst (last clauses))
     (if (and (pair? lst) (= (first lst) 'after))
-      [(but-last clauses) (second lst) `(fn () ~@(rest (rest lst)))]
-      ;; no `after`: ms nil (wait forever) and NO timeout thunk. `%receive` only ever
-      ;; returns the on-timeout value when a deadline fires (`ms` non-nil), so with
-      ;; `ms` nil it's provably dead — passing `nil` skips allocating a throwaway
-      ;; `(fn () nil)` on every timeout-less receive (the common case).
+      [(but-last clauses) (second lst) `(do ~@(rest (rest lst)))]
+      ;; no `after`: ms nil (wait forever), so `%receive` can never return its
+      ;; timeout answer and the timeout branch is provably dead — the macro omits it.
       [clauses nil nil])))
 
 (defmacro receive (& clauses)
@@ -2143,13 +2207,23 @@ message already sent stays sent."
           ms (nth parts 1)
           on-time (nth parts 2)
           msg (gensym "msg")
+          r (gensym "rcv")
+          ;; Walk each pattern once; both halves below read the same prep.
+          preps (receive--prep real 0)
+          ;; The matcher answers "which clause, and what did it bind?" as `[idx var…]`,
+          ;; or nil for no match. No clauses: take the next message as-is.
           matcher (if (empty? real)
-                    `(fn (~msg) (fn () ~msg))
-                    ; no clauses: take the next message as-is
-                    `(fn (~msg) ~(match-build-from (map receive--thunk-clause real) msg nil))))
-      ;; `%receive` returns the matched (or timeout) body *thunk*; applying it here —
-      ;; in tail position — is what keeps a receive loop O(1) stack (eval TCO).
-      `((%receive ~matcher ~ms ~on-time)))))
+                    `(fn (~msg) [0 ~msg])
+                    `(fn (~msg)
+                       ~(match-build-from (map receive--result-clause preps) msg nil)))
+          dispatch (if (empty? real) `(nth ~r 1) (receive--dispatch preps r)))
+      ;; `%receive` returns the matcher's result vector, or nil on timeout (only
+      ;; reachable with an `after` clause — nil is unambiguous because a match always
+      ;; answers with a vector). The bodies run HERE, in the caller's tail position.
+      (if (nil? ms)
+        `(let (~r (%receive ~matcher nil)) ~dispatch)
+        `(let (~r (%receive ~matcher ~ms))
+           (if (nil? ~r) ~on-time ~dispatch))))))
 
 ;; ---- dirty-native offload (ADR-144) -----------------------------------------
 ;; The BEAM dirty-scheduler shape: a long/blocking native runs on a small OS
@@ -2157,11 +2231,16 @@ message already sent stays sent."
 ;; processes. Mechanism is `%offload` (kernel: copy args out, run on the pool,
 ;; deliver the result as a message); this wrapper is the policy — park in a
 ;; selective receive on the job's token, rethrow errors as ordinary throws.
-;; Sits AFTER the `receive` macro on purpose: its body macroexpands at boot,
-;; which makes every boot a regression test for the freeze's
-;; reachability-aware dangling-env check (a boot-expanded receive matcher
-;; leaves a dead captured-frame closure in the builder heap — devlog
-;; 2026-07-22).
+;; Sits AFTER the `receive` macro because it uses it. It USED to double as a
+;; boot-time exerciser of the freeze's reachability-aware dangling-env check:
+;; the old expansion nested a body-thunk `(fn () …)` inside the matcher, so
+;; expanding it left a dead captured-frame closure in the builder heap for the
+;; freeze to scrub. ADR-155 removed that thunk, so no prelude form produces one
+;; any more (`BROOD_BOOT_TRACE=1` now reports 0 scrubbed, was 1) and that
+;; incidental coverage is GONE — the scrub branch in `Heap::to_prelude` is no
+;; longer reached at boot. The hard assert for *reachable* env-capturing
+;; closures still runs on every closure, so the invariant itself is unchanged.
+;; (The original observation is devlog 2026-07-22.)
 (defn offload (f & args)
   "Run the blocking native `f` (e.g. `slurp-bytes`, `%git-clone`,
 `%pbkdf2-sha256-bytes`) with `args` on the dirty-offload OS pool and wait for

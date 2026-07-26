@@ -1067,8 +1067,12 @@ the same definitions). This is what makes `(spawn expr)` shippable to another no
 A *builtin* can't be sent (it's a Rust function with no portable form) — reference
 it by the symbol naming it instead, since code is shared. `receive` is a macro
 over the `%receive` primitive, built on the `match` compiler — no new special
-form. See [concurrency.md](concurrency.md) and [scheduler.md](scheduler.md) for
-the model, and [pattern-matching.md](pattern-matching.md) for the clause grammar.
+form. The primitive only *selects* a clause (answering which one matched and what
+its pattern bound); every clause **body is emitted at the call site**, so bodies
+compile into the enclosing function's own code and a receive loop's tail call is
+an ordinary tail call in that function (ADR-155). See
+[concurrency.md](concurrency.md) and [scheduler.md](scheduler.md) for the model,
+and [pattern-matching.md](pattern-matching.md) for the clause grammar.
 
 ### Synchronous calls (and why there's no `await`)
 

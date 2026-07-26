@@ -394,24 +394,21 @@ pub(crate) fn read_name_address(heap: &Heap, mid: MapId) -> Result<(Symbol, Symb
     Ok((field("name")?, field("node")?))
 }
 
-/// `(%receive matcher timeout on-timeout)` — selective receive. `matcher` is a unary
-/// function: given a message value it returns a 0-arg thunk (the clause body, closing
-/// over its bindings) on a match, or `nil` on no match. Scan the mailbox in order;
-/// the first message a clause matches is removed and its body thunk **returned** —
-/// not run here. The `receive` macro applies it in tail position (`((%receive …))`),
-/// so a loop that tail-calls back into `receive` trampolines through eval's TCO and
-/// stays O(1) native stack (running it here would nest a `receive_match` per message
-/// and overflow the worker stack). Non-matching messages stay queued
-/// (Erlang selective receive). `timeout` is `nil` (wait forever) or an integer of
-/// milliseconds; on expiry the `on-timeout` thunk is returned the same way (a `throw`
-/// inside it still propagates through `try`/`catch`). A green process suspends while
-/// waiting; the root thread blocks.
-pub fn receive_match(
-    heap: &mut Heap,
-    matcher: Value,
-    timeout: Value,
-    on_timeout: Value,
-) -> LispResult {
+/// `(%receive matcher timeout)` — selective receive. `matcher` is a unary function:
+/// given a message value it answers **which clause matched and what that clause's
+/// pattern bound**, as a `[idx var…]` vector, or `nil` on no match. Scan the mailbox in
+/// order; the first message a clause matches is removed and the matcher's answer
+/// returned. The clause **body does not run here** — the `receive` macro emits every
+/// body at the call site and dispatches on `idx` there (`std/prelude.blsp`), so bodies
+/// compile into the owning arm and a loop that tail-calls back into `receive` stays
+/// O(1) native stack. Non-matching messages stay queued (Erlang selective receive).
+///
+/// `timeout` is `nil` (wait forever) or an integer of milliseconds; on expiry this
+/// returns **`nil`**, which the macro's `after` branch tests for. That is unambiguous:
+/// a match always answers with a vector, and with a `nil` timeout expiry is unreachable.
+///
+/// A green process suspends while waiting; the root thread blocks.
+pub fn receive_match(heap: &mut Heap, matcher: Value, timeout: Value) -> LispResult {
     let ctx = ensure_ctx();
     // Whether this `receive` runs under state capture (a capture-mode green process):
     // the receive is re-entered from scratch on every wake, so its deadline must be
@@ -450,16 +447,14 @@ pub fn receive_match(
     // throughput (~25% of a ping-pong loop). A running process is inspected as
     // `:running`; the figure only needs to be current while it's parked.
     set_self_status(&ctx, ST_RUNNING);
-    // `matcher` and `on_timeout` are needed across every loop iteration, but
-    // `eval::apply` (the matcher) can now collect at ANY eval depth (ADR-061),
-    // which relocates these LOCAL closure handles. Root them on the operand stack
-    // and re-read the relocated handles each use; tear the region down on every
-    // return path. (The mailbox lock is dropped before `apply` — the matcher
-    // calls eval; only this process removes from its own mailbox, so the scanned
-    // prefix is stable and `send` only appends.)
+    // `matcher` is needed across every loop iteration, but `eval::apply` (the matcher)
+    // can now collect at ANY eval depth (ADR-061), which relocates its LOCAL closure
+    // handle. Root it on the operand stack and re-read the relocated handle each use;
+    // tear the region down on every return path. (The mailbox lock is dropped before
+    // `apply` — the matcher calls eval; only this process removes from its own
+    // mailbox, so the scanned prefix is stable and `send` only appends.)
     let rbase = heap.roots_len();
     heap.push_root(matcher); // rbase + 0
-    heap.push_root(on_timeout); // rbase + 1
     let mut i = 0usize;
     loop {
         // Scan the queued messages for a ready clause (advancing `i` past
@@ -467,7 +462,7 @@ pub fn receive_match(
         // the seam the coming state-capture path uses: there, a `None` becomes a
         // *suspend signal* returned to the scheduler instead of a `wait_for_message`.
         match scan_mailbox(heap, &ctx, rbase, &mut i) {
-            Ok(Some(thunk)) => {
+            Ok(Some(matched)) => {
                 // The receive completed (a clause matched) — clear any persisted
                 // capture-mode deadline so the next receive starts fresh. A nil-timeout
                 // receive (`deadline` None) never persisted one, so it skips the lock —
@@ -476,21 +471,20 @@ pub fn receive_match(
                     crate::core::sync::lock(&ctx.mailbox.state).recv_deadline = None;
                 }
                 heap.truncate_roots(rbase);
-                return Ok(thunk);
+                return Ok(matched);
             }
             Ok(None) => {
                 // Scanned every queued message with no match.
                 if let Some(d) = deadline {
                     if Instant::now() >= d {
-                        // The receive completed via timeout — return the `on-timeout`
-                        // thunk (applied in tail position; the `receive` macro always
-                        // supplies a fn) and clear the persisted capture-mode deadline.
+                        // The receive completed via timeout — answer `nil` (the macro's
+                        // `after` branch tests for it) and clear the persisted
+                        // capture-mode deadline.
                         if capture {
                             crate::core::sync::lock(&ctx.mailbox.state).recv_deadline = None;
                         }
-                        let on_timeout = heap.root_at(rbase + 1);
                         heap.truncate_roots(rbase);
-                        return Ok(on_timeout);
+                        return Ok(Value::Nil);
                     }
                 }
                 // About to park (no clause matched, and no timeout has fired): republish
@@ -573,8 +567,8 @@ pub fn receive_match(
 
 /// Scan the mailbox from index `*i` for the first message a clause matches, advancing
 /// `*i` past non-matching messages (Erlang selective receive — non-matches stay
-/// queued). Returns `Ok(Some(thunk))` — the matched clause body, with that message
-/// removed, to be applied in tail position by the caller — or `Ok(None)` when every
+/// queued). Returns `Ok(Some(answer))` — the matcher's `[idx var…]` result for the
+/// matched clause, with that message removed — or `Ok(None)` when every
 /// currently-queued message was scanned with no match (the caller then either captures
 /// a suspend signal or blocks and re-scans — see `receive_match`).
 ///
@@ -645,7 +639,7 @@ fn scan_mailbox(
             },
             None => eval::apply(heap, matcher, &[v], EnvId::GLOBAL),
         };
-        let thunk = match applied {
+        let answer = match applied {
             Ok(t) => t,
             Err(e) => {
                 // An erroring matcher must not lose the candidate: put an
@@ -656,18 +650,18 @@ fn scan_mailbox(
                 return Err(e);
             }
         };
-        if matches!(thunk, Value::Fn(_)) {
-            // Matched — remove exactly this message and hand the body thunk
-            // *back* (don't run it here). The `receive` macro applies it in
-            // TAIL position — `((%receive …))` — so a loop that tail-calls back
-            // into `receive` trampolines through eval's TCO and stays O(1)
-            // native stack (running it here instead nests a `receive_match` per
-            // message → worker-stack overflow). An optimistically-popped match
-            // is already out of the queue — nothing left to do.
+        if !matches!(answer, Value::Nil) {
+            // Matched — remove exactly this message and hand the matcher's
+            // `[idx var…]` answer back. The clause BODY is not run here: the
+            // `receive` macro emits it at the call site and dispatches on `idx`
+            // there, so a loop that tail-calls back into `receive` stays O(1)
+            // native stack (running a body here would nest a `receive_match` per
+            // message → worker-stack overflow). An optimistically-popped match is
+            // already out of the queue — nothing left to do.
             if popped.is_none() {
                 crate::core::sync::lock(&ctx.mailbox.state).queue.remove(*i);
             }
-            return Ok(Some(thunk));
+            return Ok(Some(answer));
         }
         if let Some(m) = popped {
             reinsert_candidate(ctx, *i, m);
@@ -942,9 +936,9 @@ mod tests {
 
         let mut heap = Heap::new();
         // Empty mailbox, no timeout: the scan finds nothing and the capture branch
-        // returns the suspend signal. `matcher`/`on_timeout` are never applied (the
-        // queue is empty), so plain `nil`s suffice.
-        let r = receive_match(&mut heap, Value::nil(), Value::nil(), Value::nil());
+        // returns the suspend signal. `matcher` is never applied (the queue is empty),
+        // so a plain `nil` suffices.
+        let r = receive_match(&mut heap, Value::nil(), Value::nil());
         crate::process::scheduler::set_capture_top_level(prev_top);
         crate::process::scheduler::set_capture_run(false);
         crate::process::scheduler::CURRENT.with(|c| *c.borrow_mut() = None); // don't leak the dummy ctx
