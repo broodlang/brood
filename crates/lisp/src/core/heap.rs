@@ -2229,7 +2229,10 @@ impl Heap {
                 let (a, b) = self.pair(id);
                 let a2 = self.localize_for_freeze(a, fwd);
                 let b2 = self.localize_for_freeze(b, fwd);
-                if id.region() == LOCAL && handle_key(a2) == handle_key(a) && handle_key(b2) == handle_key(b) {
+                if id.region() == LOCAL
+                    && handle_key(a2) == handle_key(a)
+                    && handle_key(b2) == handle_key(b)
+                {
                     return v;
                 }
                 self.alloc_pair(a2, b2)
