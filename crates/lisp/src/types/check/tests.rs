@@ -3794,7 +3794,8 @@ fn get_receiver_is_checked() {
     for src in ["(get 5 :k)", "(get :kw :k)", "(get 5 0)", "(get true :k)"] {
         let w = warnings(src);
         assert!(
-            w.iter().any(|m| m.contains("get") && m.contains("argument 1")),
+            w.iter()
+                .any(|m| m.contains("get") && m.contains("argument 1")),
             "{src}: {w:?}"
         );
     }

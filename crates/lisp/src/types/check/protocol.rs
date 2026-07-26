@@ -397,7 +397,7 @@ fn find_op_key(heap: &Heap, form: Value) -> Option<(String, String)> {
             }
         }
         items.iter().find_map(|&item| find_op_key(heap, item))
-})
+    })
 }
 
 /// The record id (`:__id__` keyword's name) a `defrecord*` constructor body carries —
@@ -459,7 +459,7 @@ fn collect_ability_defs(
         for &item in items.get(1..).unwrap_or(&[]) {
             collect_ability_defs(heap, item, op_fns, ctors);
         }
-})
+    })
 }
 
 /// Collect `(…/register-impl (quote A) (quote op) :ID …)` forms from this file.
@@ -475,8 +475,14 @@ fn collect_register_impls(
         };
         if let Some(&Value::Sym(h)) = items.first() {
             if sym_name(Value::Sym(h)).as_deref() == Some("ability/register-impl") {
-                let a = items.get(1).and_then(|&v| unquote(heap, v)).and_then(sym_name);
-                let op = items.get(2).and_then(|&v| unquote(heap, v)).and_then(sym_name);
+                let a = items
+                    .get(1)
+                    .and_then(|&v| unquote(heap, v))
+                    .and_then(sym_name);
+                let op = items
+                    .get(2)
+                    .and_then(|&v| unquote(heap, v))
+                    .and_then(sym_name);
                 let id = items.get(3).copied().and_then(sym_name);
                 if let (Some(a), Some(op), Some(id)) = (a, op, id) {
                     if id == "default" {
@@ -490,7 +496,7 @@ fn collect_register_impls(
         for &item in items.get(1..).unwrap_or(&[]) {
             collect_register_impls(heap, item, impls, defaults);
         }
-})
+    })
 }
 
 /// Union in the runtime `ability/*impls*` registry — `[A op] → {id → …}` — so an impl
@@ -513,7 +519,9 @@ fn read_impls_registry(
         let (Some(a), Some(o)) = (sym_name(a), sym_name(o)) else {
             continue;
         };
-        let Value::Map(inner_id) = inner else { continue };
+        let Value::Map(inner_id) = inner else {
+            continue;
+        };
         for (idk, _) in heap.map_entries(inner_id) {
             if let Some(id) = sym_name(idk) {
                 if id == "default" {
@@ -527,11 +535,7 @@ fn read_impls_registry(
 }
 
 /// The statically-known identity name of a call argument, or `None` if not certain.
-fn arg_identity(
-    heap: &Heap,
-    arg: Value,
-    ctors: &HashMap<value::Symbol, String>,
-) -> Option<String> {
+fn arg_identity(heap: &Heap, arg: Value, ctors: &HashMap<value::Symbol, String>) -> Option<String> {
     match arg {
         Value::Int(_) | Value::BigInt(_) => Some("int".into()),
         Value::Float(_) => Some("float".into()),
@@ -577,7 +581,9 @@ impl AbilityInfo {
     }
     /// True when neither an impl nor a `:default` covers `(ability, op, id)`.
     pub(super) fn missing(&self, ability: &str, op: &str, id: &str) -> bool {
-        !self.defaults.contains(&(ability.to_string(), op.to_string()))
+        !self
+            .defaults
+            .contains(&(ability.to_string(), op.to_string()))
             && !self
                 .impls
                 .contains(&(ability.to_string(), op.to_string(), id.to_string()))
