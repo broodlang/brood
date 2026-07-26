@@ -74,7 +74,10 @@
   (test "false for an unknown ability"
     (refute (satisfies? 'No-Such 1)))
   (test "a missing impl is a loud, named error naming the ability, op, and id"
-    (let (msg (try (only "s") (catch e (error-message e))))
+    ;; `arg` is a var, so the *static* missing-impl check can't judge it — this test
+    ;; exercises the RUNTIME error path, which the checker's call-site pass complements.
+    (let (arg "s"
+          msg (try (only arg) (catch e (error-message e))))
       (is (includes? msg "Only-Int"))
       (is (includes? msg "only"))
       (is (includes? msg ":string")))))

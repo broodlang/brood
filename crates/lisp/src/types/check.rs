@@ -672,6 +672,7 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         let protocols = protocol::collect(heap, &forms);
         protocol::check_impls(heap, &forms, &protocols, &mut out);
         protocol::check_behaviours(heap, &forms, &expanded, &protocols, &mut out);
+        protocol::check_ability_calls(heap, &expanded, &mut out);
         // Pass 3: check each expanded form with the accumulated file-globals.
         for &form in &expanded {
             check_into(heap, form, &ctx, &mut out);

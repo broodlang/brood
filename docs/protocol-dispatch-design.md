@@ -16,17 +16,21 @@
 > The only residual is cosmetic (`keys`/`count` include the id; use `fields`), deferred
 > as optional polish behind a future hidden slot.
 >
-> **Slice 3 (checker nominal-awareness) — foundation shipped.** A record's identity is
-> now a `module/name` **keyword** (not a symbol), because a keyword literal is exactly
-> what the type-checker tracks (`Ty::keyword_lit`) and map-literal inference already
-> folds each field's value type into a `fields` record shape — so a record's identity now
-> flows through inference as a literal, through variables, with **no new `Ty` machinery**.
-> That's the enabler for the two consumers, which remain open: a **missing-impl warning**
-> at call sites (must read the cross-file `*impls*` registry to stay sound — the checker's
-> cardinal no-false-positives rule), and **monomorphization** (compile-time impl
-> resolution + inlining; codegen).
+> **Slice 3 (checker nominal-awareness) — shipped, incl. the missing-impl warning.** A
+> record's identity is now a `module/name` **keyword** (a keyword literal is exactly what
+> the checker tracks via `Ty::keyword_lit`). On top of that, `check_ability_calls`
+> (`types/check/protocol.rs`) warns at `nest check` time when an ability op is applied to
+> an argument of **statically-known identity** — a literal (`type-of` kind) or a direct
+> `defrecord*` constructor call — for which no impl and no `:default` is registered. It is
+> **sound**: an op fn is recognised only by its exact def symbol (fingerprinted by a
+> qualified `ability/impl-for` in its body, so a `protocol` op — which also dispatches
+> through an `impl-for` — is never mistaken); an id is taken only when certain; and the
+> impl set unions this file's `register-impl` forms with the runtime `ability/*impls*`
+> registry (cross-file reachable impls). Stack-guarded for deep forms. Rust tests +
+> manual `nest check` verify true-positives and zero false-positives across protocols.
 >
-> **Still open:** the missing-impl pass + monomorphization (Slice 3 consumers), sealed
+> **Still open:** **monomorphization** (compile-time impl resolution + inlining; codegen —
+> the *runtime* win, distinct from the compile-time warning just shipped), sealed
 > abilities, return-type dispatch, migrating/retiring `protocol`. The rest of this note
 > captures the problem, measurements, the language survey, and the design space.
 
