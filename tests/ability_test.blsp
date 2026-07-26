@@ -3,7 +3,7 @@
 ;; `type-of` kind, an identity-carrying record (`defrecord*`) on its baked `module/name`
 ;; id. Subsumes value polymorphism (the `protocol` job) and drivers-as-values (part of
 ;; the `behaviour` job). Register-only — discovered and run by `nest test`.
-(defmodule ability-test (:use test) (:use ability))
+(defmodule ability-test (:use test) (:use ability) (:use json))
 
 ;; Records carry a nominal identity captured from THIS module (`ability-test`).
 (defrecord* circle (r))
@@ -96,6 +96,24 @@
     (assert= (pong 1) :first)
     (impl Pong :int (pong [n] :second))
     (assert= (pong 1) :second)))
+
+;; ---- slice 2: the identity does not leak into serialization; clean field API ----
+(describe "record identity does not leak"
+  (test "json-encode omits the internal identity key, keeps the fields"
+    (let (s (json-encode (circle 7)))
+      (refute (includes? s "__id__"))
+      (is (includes? s "\"r\":7"))))
+  (test "record? / record-id / fields are the clean, id-free API"
+    (is (record? (circle 3)))
+    (refute (record? {:r 3}))
+    (assert= (record-id (circle 3)) 'ability-test/circle)
+    (assert= (record-id {:r 3}) nil)
+    (assert= (fields (circle 3)) {:r 3}))
+  (test "a record is NOT = to a bare map with the same fields (Elixir-struct semantics)"
+    ;; the identity intentionally distinguishes it — this is correct, not a leak
+    (refute (= (circle 3) {:r 3})))
+  (test "two records of different shape are never ="
+    (refute (= (circle 3) (rect 3 3)))))
 
 ;; ---- late / open extension: an impl added after the fact, for a built-in ----
 (describe "open extension"

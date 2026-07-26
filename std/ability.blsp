@@ -54,9 +54,25 @@
 
 (defn identity-of (x)
   "The dispatch identity of `x`: its nominal record id (a `module/name` symbol) if it
-  is an identity-carrying record, else its `type-of` kind. This is the one seam slice 2
-  swaps to a hidden slot — nothing else reads `:__id__` directly."
+  is an identity-carrying record, else its `type-of` kind. This — with `record?` /
+  `record-id` / `fields` — is the one seam a later kernel slot swaps behind; nothing
+  outside this module reads `:__id__` directly."
   (if (and (map? x) (contains? x :__id__)) (get x :__id__) (type-of x)))
+
+(defn record? (x)
+  "True if `x` is an identity-carrying record (a `defrecord*` value)."
+  (and (map? x) (contains? x :__id__)))
+
+(defn record-id (x)
+  "The nominal id (`module/name` symbol) of record `x`, or nil if `x` is not a record.
+  Unlike `identity-of`, never falls back to `type-of`."
+  (if (record? x) (get x :__id__) nil))
+
+(defn fields (x)
+  "The FIELDS of record `x` as a plain map — its identity omitted. The clean view for
+  code that wants a record's data without the internal id (`keys`/`count`/serialization
+  over this see only fields). A plain map is returned unchanged."
+  (if (record? x) (dissoc x :__id__) x))
 
 ; ---- registration -----------------------------------------------------------
 
