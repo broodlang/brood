@@ -2494,7 +2494,8 @@ fn lambda_is_retired_and_hints_at_fn() {
     // The `fn` spelling still gets the callback-arity check it always did.
     let w = warnings("(map (fn (a b) a) nil)");
     assert!(
-        w.iter().any(|s| s.contains("map") && s.contains("callback")),
+        w.iter()
+            .any(|s| s.contains("map") && s.contains("callback")),
         "map should flag a 2-arg `fn` callback: {w:?}"
     );
 }

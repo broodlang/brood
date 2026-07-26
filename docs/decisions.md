@@ -9726,6 +9726,18 @@ really do tier). Gates: 3360 in-language + 68 corpus tests, 864 Rust tests, the 
 tests under `GC_STRESS`+`GC_VERIFY`+`JIT_VERIFY` and on `BROOD_VM=0` / `BROOD_NO_JIT=1`,
 `nest check` zero warnings.
 
+**One thing does move: line-coverage denominators** (`nest test --cover-lines`, ADR-148
+tier 2). Coverage emits a `RecordLine` per positioned node in `emit.rs`, so a folded-away
+branch never gets one and leaves the denominator. Measured on a fixture with
+`(if false (+ y 999) (- y 1))`: **33% of 3 executable lines → 50% of 2**. This is
+deliberate and, we think, the better metric — that branch is *unreachable*, not merely
+unexecuted, so no test could ever cover it and counting it puts 100% permanently out of
+reach for no actionable reason. It does NOT weaken the ADR-148 guarantee it might look
+like it contradicts: that guarantee is about a never-*called* function reporting 0%
+rather than vanishing (which is why `precompile` forces compilation), and a function's
+own lines are unaffected here. Flagging it because a project's reported percentage can
+move without any test changing.
+
 The general lesson is the one ADR-155 also produced: on this runtime a *constant in the
 wrong position* can cost an order of magnitude by silently disqualifying an arm from a
 JIT subset. Neither the checker nor the benchmark suite catches that class — only an
