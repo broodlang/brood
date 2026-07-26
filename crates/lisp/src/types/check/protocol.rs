@@ -85,9 +85,16 @@ pub(super) fn check_impls(
         let Some(items) = list_items(heap, form) else {
             continue;
         };
-        if !head_is(&items, "defimpl") {
+        // `defimpl` (a `protocol`) and `impl` (an `ability`) share the same shape —
+        // `(head Iface key method…)` — and the same conformance check.
+        if !head_is(&items, "defimpl") && !head_is(&items, "impl") {
             continue;
         }
+        let noun = if head_is(&items, "impl") {
+            "ability"
+        } else {
+            "protocol"
+        };
         let Some(pname) = items.get(1).and_then(|&v| sym_name(v)) else {
             continue;
         };
@@ -107,22 +114,22 @@ pub(super) fn check_impls(
             match provided.get(&op.name) {
                 None => out.push((
                     pos,
-                    format!("protocol {}: impl is missing op `{}`", pname, op.name),
+                    format!("{} {}: impl is missing op `{}`", noun, pname, op.name),
                 )),
                 Some(&arity) if arity != op.arity => out.push((
                     pos,
                     format!(
-                        "protocol {}: op `{}` takes {} arg(s), this impl has {}",
-                        pname, op.name, op.arity, arity
+                        "{} {}: op `{}` takes {} arg(s), this impl has {}",
+                        noun, pname, op.name, op.arity, arity
                     ),
                 )),
                 Some(_) => {}
             }
         }
-        // A method the protocol never declared is almost always a typo.
+        // A method the interface never declared is almost always a typo.
         for name in provided.keys() {
             if !proto.ops.iter().any(|o| &o.name == name) {
-                out.push((pos, format!("protocol {}: has no op `{}`", pname, name)));
+                out.push((pos, format!("{} {}: has no op `{}`", noun, pname, name)));
             }
         }
     }
@@ -133,7 +140,10 @@ pub(super) fn check_impls(
 /// differ only in *who* implements them (a `defimpl` vs a module's own functions).
 fn parse_protocol(heap: &Heap, form: Value) -> Option<(String, Protocol)> {
     let items = list_items(heap, form)?;
-    if !head_is(&items, "defprotocol") && !head_is(&items, "defbehaviour") {
+    if !head_is(&items, "defprotocol")
+        && !head_is(&items, "defbehaviour")
+        && !head_is(&items, "defability")
+    {
         return None;
     }
     let pname = sym_name(*items.get(1)?)?;
