@@ -400,8 +400,17 @@ fn find_op_key(heap: &Heap, form: Value) -> Option<(String, String)> {
 })
 }
 
-/// If `form` is `(hash-map :__id__ :ID …)`, the id keyword's name.
+/// The record id (`:__id__` keyword's name) a `defrecord*` constructor body carries —
+/// a map literal `{:__id__ :ID …}` (the current form) or a legacy `(hash-map :__id__ …)`.
 fn record_ctor_id(heap: &Heap, form: Value) -> Option<String> {
+    // map literal body — `{:__id__ :ID …}`
+    if let Value::Map(mid) = form {
+        return heap.map_entries(mid).into_iter().find_map(|(k, v)| {
+            matches!(k, Value::Keyword(kk) if value::symbol_is(kk, "__id__"))
+                .then(|| sym_name(v))
+                .flatten()
+        });
+    }
     let items = list_items(heap, form)?;
     if !matches!(items.first(), Some(&Value::Sym(h)) if bare_name(h) == "hash-map") {
         return None;
@@ -547,13 +556,77 @@ fn arg_identity(
 /// Walk every call site; warn when an ability op is applied to a known-identity arg
 /// with no impl and no `:default`.
 #[allow(clippy::too_many_arguments)]
+/// Precomputed ability facts for a file: which globals are op fns, which record
+/// constructors exist, and which `[ability op id]` are covered (this file's forms +
+/// the runtime registry). Shared by the syntactic post-pass and the inference hook in
+/// `check_into` (via `Ctx::ability`).
+pub(super) struct AbilityInfo {
+    op_fns: HashMap<value::Symbol, (String, String)>,
+    ctors: HashMap<value::Symbol, String>,
+    impls: HashSet<(String, String, String)>,
+    defaults: HashSet<(String, String)>,
+}
+
+impl AbilityInfo {
+    pub(super) fn is_empty(&self) -> bool {
+        self.op_fns.is_empty()
+    }
+    /// The `(ability, op)` an op-fn global symbol denotes, if any.
+    pub(super) fn op_of(&self, sym: value::Symbol) -> Option<&(String, String)> {
+        self.op_fns.get(&sym)
+    }
+    /// True when neither an impl nor a `:default` covers `(ability, op, id)`.
+    pub(super) fn missing(&self, ability: &str, op: &str, id: &str) -> bool {
+        !self.defaults.contains(&(ability.to_string(), op.to_string()))
+            && !self
+                .impls
+                .contains(&(ability.to_string(), op.to_string(), id.to_string()))
+    }
+}
+
+/// Gather the ability facts for a file from its expanded tree + the runtime registry.
+pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo {
+    let mut op_fns = HashMap::new();
+    let mut ctors = HashMap::new();
+    for &form in expanded {
+        collect_ability_defs(heap, form, &mut op_fns, &mut ctors);
+    }
+    let mut impls = HashSet::new();
+    let mut defaults = HashSet::new();
+    for &form in expanded {
+        collect_register_impls(heap, form, &mut impls, &mut defaults);
+    }
+    read_impls_registry(heap, &mut impls, &mut defaults);
+    AbilityInfo {
+        op_fns,
+        ctors,
+        impls,
+        defaults,
+    }
+}
+
+/// The nominal id name of a record `Ty` — its `:__id__` field's `keyword_lit` singleton
+/// — or `None` if `ty` isn't a record shape with a single known identity.
+pub(super) fn ty_record_id(ty: &crate::types::Ty) -> Option<String> {
+    let fields = ty.record_fields()?;
+    let (id_ty, _) = fields.get(&value::intern("__id__"))?;
+    let lits = id_ty.as_lit()?;
+    let mut it = lits.iter();
+    let only = it.next()?;
+    if it.next().is_none() {
+        Some(value::symbol_name(*only))
+    } else {
+        None
+    }
+}
+
+/// Syntactic pass: warn on an ability op call whose FIRST argument has a statically
+/// known identity from *syntax alone* — a literal or a direct `defrecord*` constructor
+/// call. The inference hook in `check_into` complements it for record-typed *variables*.
 fn walk_ability_calls(
     heap: &Heap,
     form: Value,
-    op_fns: &HashMap<value::Symbol, (String, String)>,
-    ctors: &HashMap<value::Symbol, String>,
-    impls: &HashSet<(String, String, String)>,
-    defaults: &HashSet<(String, String)>,
+    info: &AbilityInfo,
     out: &mut Vec<(Option<Pos>, String)>,
 ) {
     stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
@@ -566,15 +639,12 @@ fn walk_ability_calls(
         if value::symbol_is(head, "quote") || value::symbol_is(head, "quasiquote") {
             return;
         }
-        if let Some((a, op)) = op_fns.get(&head) {
+        if let Some((a, op)) = info.op_of(head) {
             if let Some(&arg) = items.get(1) {
-                if let Some(id) = arg_identity(heap, arg, ctors) {
-                    let covered = defaults.contains(&(a.clone(), op.clone()))
-                        || impls.contains(&(a.clone(), op.clone(), id.clone()));
-                    if !covered {
-                        let pos = heap.form_pos_only(form);
+                if let Some(id) = arg_identity(heap, arg, &info.ctors) {
+                    if info.missing(a, op, &id) {
                         out.push((
-                            pos,
+                            heap.form_pos_only(form),
                             format!("ability {}: no impl of `{}` for :{}", a, op, id),
                         ));
                     }
@@ -582,32 +652,44 @@ fn walk_ability_calls(
             }
         }
         for &item in &items {
-            walk_ability_calls(heap, item, op_fns, ctors, impls, defaults, out);
+            walk_ability_calls(heap, item, info, out);
         }
-})
+    })
 }
 
-/// Check ability op calls against registered impls (see the section comment above).
 pub(super) fn check_ability_calls(
     heap: &Heap,
     expanded: &[Value],
+    info: &AbilityInfo,
     out: &mut Vec<(Option<Pos>, String)>,
 ) {
-    let mut op_fns: HashMap<value::Symbol, (String, String)> = HashMap::new();
-    let mut ctors: HashMap<value::Symbol, String> = HashMap::new();
-    for &form in expanded {
-        collect_ability_defs(heap, form, &mut op_fns, &mut ctors);
-    }
-    if op_fns.is_empty() {
+    if info.is_empty() {
         return;
     }
-    let mut impls: HashSet<(String, String, String)> = HashSet::new();
-    let mut defaults: HashSet<(String, String)> = HashSet::new();
     for &form in expanded {
-        collect_register_impls(heap, form, &mut impls, &mut defaults);
+        walk_ability_calls(heap, form, info, out);
     }
-    read_impls_registry(heap, &mut impls, &mut defaults);
-    for &form in expanded {
-        walk_ability_calls(heap, form, &op_fns, &ctors, &impls, &defaults, out);
+}
+
+/// The inference hook: at an ability op call on a *variable* whose inferred type is a
+/// record, warn when no impl covers that record's identity. Called from `check_into`
+/// (which has the local + global type context), complementing the syntactic pass.
+pub(super) fn check_ability_call_inferred(
+    info: &AbilityInfo,
+    head: value::Symbol,
+    arg_ty: &crate::types::Ty,
+    pos: Option<Pos>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    let Some((a, op)) = info.op_of(head) else {
+        return;
+    };
+    if let Some(id) = ty_record_id(arg_ty) {
+        if info.missing(a, op, &id) {
+            out.push((
+                pos,
+                format!("ability {}: no impl of `{}` for :{}", a, op, id),
+            ));
+        }
     }
 }
