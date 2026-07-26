@@ -1432,18 +1432,18 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
             "Brood collections are persistent and immutable — there are no \
              transients; `conj`/`disj`/`assoc`/`dissoc`/`into` return fresh values."
         }
-        // NB: this arm used to name `defprotocol`/`defimpl` and "the `protocol`
-        // module" — none of which exist (open dispatch is a ROADMAP item). A hint
-        // that sends the reader after a feature the tree doesn't have is worse than
-        // no hint; say only what works today.
+        // Polymorphism/type constructs from other languages → point at `ability`
+        // (`defprotocol`/`defimpl` were retired in its favour).
         "deftype" | "definterface" | "reify" | "defprotocol" | "defimpl" | "defmulti"
         | "defmethod" => {
             "Brood has no nominal types — for a named, optionally-typed record use \
              `defrecord` (sugar over a plain map, so records stay structural). For \
-             polymorphism, `(require 'protocol)` gives `defprotocol`/`defimpl` — open \
-             generic functions dispatching on the first argument's `type-of`, \
-             extensible for any type from any module. Or dispatch with `match`/`cond`; \
-             multi-clause `defn` dispatches on arity or pattern."
+             polymorphism, `(require 'ability)` gives `defability`/`impl` — open generic \
+             functions dispatching on the first argument's identity (its `type-of` kind, \
+             or a `defrecord*` record's nominal id), extensible from any module; a driver \
+             is just a value you dispatch on. Or dispatch with `match`/`cond`; \
+             multi-clause `defn` dispatches on arity or pattern. (`defprotocol`/`defimpl` \
+             were retired in favour of `ability`.)"
         }
         "lazy-seq" | "lazy-cat" => {
             "Brood has no `lazy-seq` thunk. `map`/`filter` are EAGER; for a fusing, \

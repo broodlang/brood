@@ -85,16 +85,11 @@ pub(super) fn check_impls(
         let Some(items) = list_items(heap, form) else {
             continue;
         };
-        // `defimpl` (a `protocol`) and `impl` (an `ability`) share the same shape —
-        // `(head Iface key method…)` — and the same conformance check.
-        if !head_is(&items, "defimpl") && !head_is(&items, "impl") {
+        // `(impl Ability key method…)` — an ability impl (`defprotocol`/`defimpl` retired).
+        if !head_is(&items, "impl") {
             continue;
         }
-        let noun = if head_is(&items, "impl") {
-            "ability"
-        } else {
-            "protocol"
-        };
+        let noun = "ability";
         let Some(pname) = items.get(1).and_then(|&v| sym_name(v)) else {
             continue;
         };
@@ -140,10 +135,7 @@ pub(super) fn check_impls(
 /// differ only in *who* implements them (a `defimpl` vs a module's own functions).
 fn parse_protocol(heap: &Heap, form: Value) -> Option<(String, Protocol)> {
     let items = list_items(heap, form)?;
-    if !head_is(&items, "defprotocol")
-        && !head_is(&items, "defbehaviour")
-        && !head_is(&items, "defability")
-    {
+    if !head_is(&items, "defbehaviour") && !head_is(&items, "defability") {
         return None;
     }
     let pname = sym_name(*items.get(1)?)?;
