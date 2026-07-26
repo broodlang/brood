@@ -706,7 +706,7 @@ corpus is a script run away for an exhaustive local pass.
 | 10 | **SMHasher3**-style statistics | avalanche / bit-bias / collision quality of the CHAMP hash | ⬜ |
 | 11 | **Paranoia** (Kahan, public domain) | FP arithmetic sanity as a *runnable program* — doubles as an end-to-end VM/JIT float exerciser. **Found a `pow` underflow bug** (below) | ✅ 2026-07-26 |
 | 12 | **chibi `r7rs-tests.scm`** + SRFI-1/13/133/125 reference tests | portable s-expression suites, beyond what `numeric_conformance_test` already adapts | ⬜ |
-| 13 | **Gabriel / Larceny R7RS benchmarks** | `boyer`, `earley`, `conform`, `peval`, `nucleic2`, `gcbench` — real Lisp programs with checkable outputs; VM/JIT shakedown *with* an oracle | ⬜ |
+| 13 | **Gabriel / Larceny R7RS benchmarks** | real Lisp programs with checkable outputs; VM/JIT shakedown *with* an oracle. 8 ported (`nboyer`, `chudnovsky`, `mazefun`, `deriv`, `takl`, `cpstak`, `nqueens`, `primes`); `gcbench`/`destruc` **descoped** (no oracle / mutation IS the program), `peval`/`earley`/`conform`/`nucleic` deferred with reasons. **Found KI-13** (a checker hang) **and a gap in the engine-differential gate** (below) | ✅ 2026-07-26 |
 | 14 | **csv-spectrum** (BSD-2) | tricky-CSV corpus for `std/csv` — **found a CRLF-in-quotes bug** (below). **toml-test dropped**: nothing in the tree parses TOML (manifests are `.blsp` data), so there is no target | ✅ 2026-07-25 |
 | 15 | **MPFR-generated ULP tables** | ELEFUNT-style accuracy bounds for `sin`/`cos`/`exp`/`log`/`pow`, references from `mpmath`/`rug` | ⬜ |
 | 16 | **Chez Scheme `s/mats`** (Apache-2.0) | the largest Lisp *compiler* test corpus in existence — closures, arity, tail calls; translate the applicable portions | ⬜ |
@@ -740,6 +740,9 @@ U+1F468, U+1F3F3), so it is a table gap around the U+2700 dingbats — worth an 
 report. Excluded and pinned by a test asserting the *current* behaviour, so the
 exclusion fails loudly the day the crate is fixed.
 
+The Gabriel row is also the first corpus to find a defect *outside* the code under test —
+its two findings are in the checker and in the test harness, not in a library.
+
 *csv-spectrum*: **a CRLF-in-quotes bug**. RFC 4180 §2.6 makes a CRLF inside a quoted
 field *content*, but `std/csv` swallowed the `\r` in its `:quoted` state along with
 the ones that really are line endings — so any multi-line quoted cell (anything
@@ -764,14 +767,59 @@ in half so no intermediate leaves range. Paranoia also pinned Brood's one delibe
 IEEE 754 departure: **division by zero raises** rather than yielding infinity (overflow
 still produces infinity, so infinities exist — they just aren't reachable by dividing).
 
+*Gabriel benchmarks*: no wrong answers — all 8 ports match upstream on the tree-walker
+*and* the VM+JIT, including `nboyer`'s three rewrite counts (95024/591777/1813975, exact)
+and `chudnovsky`'s ten 50-to-500-digit integers. Two findings, one a real defect:
+
+⬜ **KI-13 (OPEN) — `nest check` hangs on the `deriv` port.** Cross-module return-type
+inference for an undeclared recursive callee blows up **exponentially in branch count**:
+2/3/4/5 recursive `cond` branches building nested list structure cost 105 ms / 105 ms /
+**8.7 s** / did-not-finish-in-900 s. The same call *inside* the defining module is
+instant — it is the cross-module `sig_of` → `infer_sig` → `expr_ty` path, where nothing
+bounds the *size* of the inferred `Ty` (`InferGuard` correctly breaks recursion *cycles*;
+that is a different thing). This is a CI gate and the LSP's own code path, so a hang is
+worse than a wrong warning, and the trigger is ordinary code. Workaround in the port: a
+**declared** sig is consulted before body inference, so `(sig deriv (any -> any))` takes it
+back to 105 ms. Likely fix: cap inferred-type size and widen past the cap (widening an
+over-approximation is sound by construction — it can only lose precision). Repro + table
+in [`docs/known-issues.md`](docs/known-issues.md).
+
+⬜ **`BROOD_VM=0` does not give the in-language suite tree-walker coverage.**
+A test body run by `nest test` (or `brood --test`) under `BROOD_VM=0` shows no slowdown at
+all, and `BROOD_JIT_DUMP_IR=1` lists its arms reaching the JIT — the env var gates how a
+*top-level form* is run, while the framework invokes each test as an already-compiled
+closure (the same function at top level via `brood file.blsp` interprets correctly, 0 JIT
+arms, ~10× slower). So `make test-both`'s tree-walker leg does **not** exercise the ~3400
+in-language cases the way its comment implies; real per-expression engine agreement comes
+from `differential.rs`, which pins the engine with `set_forced_engine` rather than the env
+var. Hence this corpus ships a Rust runner too (`crates/lisp/tests/gabriel_engines.rs`) on
+that same mechanism. Worth deciding whether the framework should honour a forced engine for
+test bodies — it would widen the gate considerably, at a real wall-clock cost (measured
+debug tree-walker: `nboyer` n=0 38 s vs 0.25 s on the VM). Also measured: the debug
+tree-walker spends ~12.6 kB of native stack per frame, so `primes<=1000` (999-deep non-tail)
+trips the 12 MB budget there with a clean `recursion too deep` — correct, and release
+handles it fine. See `tests/corpus/gabriel/README.md`.
+
 ### OPEN — a >100× slowdown for a test inside the debug `brood_suite_passes` wrapper
 
 Two independent observations of the same thing, both found while wiring the corpora, and
 both larger than contention alone should explain. **This is the one item left red.**
 
 1. The two 100k-deep JSONTestSuite documents: ~400 ms standalone, >120 s inside the full
-   parallel suite (>250×). Skipped in the sweep; the property is covered by a synthetic
-   5,000-level case in `tests/jit_tail_chain_depth_test.blsp`.
+   parallel suite (>250×).
+   **Reconfirmed 2026-07-26, and the "misdiagnosis" verdict was itself wrong.** They were
+   un-skipped on the reasoning that `*test-timeout-ms*` is a batch deadline that blamed
+   whichever worker reported last, so "nothing here is slow" (see the header of
+   `tests/conformance_json_test.blsp`). Measured on a binary built from current source:
+   `nest test` — the **release** path, not the debug wrapper — now runs for **~15 minutes**
+   and ends with `every n_ document is rejected` **hard-killed at 900 s**, while the same
+   file standalone passes in seconds. The batch-deadline story explains a *mislabelled*
+   failure; it does not explain 900 s of one thread at 90% CPU. Two things compounded:
+   the documents came back into the sweep, and `:conformance` now buys the 900 s
+   `*test-slow-timeout-ms*` budget, so what used to fail fast at the 120 s cap now grinds
+   for 900 s. So the slowdown is real, is not confined to the debug wrapper, and `nest test`
+   on main is currently red and slow because of it. Left as found — per the note below,
+   the fix is not to shrink the tests again.
 2. The UCD normalisation sweep: **1.1 s standalone in release**, still >120 s inside the
    *debug*-build `brood_suite_passes` wrapper under full-workspace load (>100×). Sampling
    it from ~16,000 cases down to ~1,000 did not help, which is what rules out test size as
@@ -788,8 +836,12 @@ step. If the sweeps need to come out of the debug wrapper in the meantime, the h
 is tag-filtering `:slow` out of `run-project-tests` for that path only, keeping full
 coverage on `nest test` — not deleting cases.
 
-Five of the first seven suites finding real defects — one of them the only open bug in
-the tree — is the argument for the rest.
+Six of the nine wired suites finding real defects — including the tree's one open bug
+(KI-13) — is the argument for the rest. Note the shift as the subjects got harder: the
+suites aimed at Rust crates behind thin wrappers found nothing, the ones aimed at
+pure-Brood libraries found a bug each, and the one that runs whole *programs* through the
+real toolchain (Gabriel) found its bugs in the **checker and the test harness** rather
+than in any library.
 
 **Not a corpus — the technique that actually finds JIT bugs.** ⬜ **EMI /
 equivalence-modulo-inputs** (Le & Su, PLDI'14 — Orion/Athena): mutate provably-dead

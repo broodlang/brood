@@ -1,13 +1,82 @@
 # Known issues
 
-All interpreter defects are **resolved** (KI-9 is a one-off arity sighting judged a
+Every *interpreter* defect is **resolved** (KI-9 is a one-off arity sighting judged a
 transient inconsistent-build artifact, not present in committed code; KI-10 no longer
-reproduces, incidentally fixed — both kept as records, not open bugs).
+reproduces, incidentally fixed — both kept as records, not open bugs). **KI-13, in the
+type checker, is open.**
 This file is the condensed record — what each was, how it was fixed, and the regression
 test that guards it — so a recurrence is recognizable. For the narrative discovery
 writeup of the scheduler race, see
 [claude-demo-findings.md](claude-demo-findings.md); deeper rationale is in the cited
 ADRs / topic docs.
+
+---
+
+## KI-13 — cross-module return-type inference blows up exponentially in branch count · **OPEN, found 2026-07-26**
+
+**Symptom.** `nest check` never finishes. No diagnostic, no progress output, one core
+pegged. The LSP is the same code path, so an editor hovering the call site hangs with it.
+
+**Trigger.** A recursive function with several `cond`/`if` branches that build *nested
+list structure*, **called from another module**. The same call inside the defining file
+checks instantly — this is specifically the cross-module path, where the checker infers an
+undeclared callee's signature (`sig_of` → `infer_sig` → `expr_ty` over the whole body).
+
+Minimal reproduction — this is the `deriv` benchmark from the Gabriel corpus
+(`tests/support/gabriel/deriv.blsp`), which is how it was found:
+
+```lisp
+;; a.blsp
+(defmodule zzm)
+(defn d (a)
+  (cond
+    (not (pair? a)) (if (= a 'x) 1 0)
+    (= (first a) '+) (cons '+ (map d (rest a)))
+    (= (first a) '-) (cons '- (map d (rest a)))
+    (= (first a) '*) (list '* a (cons '+ (map (fn (b) (list '/ (d b) b)) (rest a))))
+    (= (first a) '/) (list '- (list '/ (d (second a)) (third a))
+                             (list '/ (second a) (list '* (third a) (third a) (d (third a)))))
+    else (error "no")))
+
+;; b.blsp — checking THIS file is what hangs
+(defmodule zz-probe (:use zzm))
+(def r (d '(+ x 1)))
+```
+
+**Measured scaling** (release `nest check`, one recursive branch added at a time):
+
+| recursive branches | `nest check` |
+|---|---|
+| 2 | instant (105 ms, the floor) |
+| 3 | 105 ms |
+| 4 | **8.7 s** |
+| 5 | did not finish (killed at 900 s) |
+
+So each additional branch multiplies the work by roughly an order of magnitude —
+consistent with the inferred `Ty` growing multiplicatively as `expr_ty` unions branch
+results whose element types are themselves nested unions, with the lattice operations
+(`union`/`is_subtype`) then superlinear in that size. Not diagnosed further than the
+scaling; nobody has profiled it yet.
+
+**Not a hang in the sense of a loop.** `InferGuard` (`types/check/sigs.rs`) already breaks
+recursion *cycles* correctly, and `expr_ty` has a depth cap. What is missing is a bound on
+the *size* of an inferred type.
+
+**Workaround, and why the corpus port uses it.** A **declared** signature is consulted
+before body inference (`declared_heap_sig`), so it short-circuits the blowup entirely:
+adding `(sig deriv (any -> any))` takes the case above from >900 s to 105 ms. That is what
+`tests/support/gabriel/deriv.blsp` does, with a comment saying so — the sig is honest and
+declaring a public API's type is right anyway (ADR-153), but it is load-bearing there and
+must not be removed as decoration.
+
+**Likely fix.** Cap the size of an inferred type and widen past the cap. Widening an
+over-approximation is always sound, so this cannot introduce a false positive; it can only
+lose precision on exactly the pathological shapes. The existing `MAX_INFER_DEPTH` is the
+precedent for the shape of the fix.
+
+**Severity.** `nest check` is a CI gate and the checker also backs the LSP, so a hang is
+worse than a wrong warning — and the trigger is ordinary code, not something exotic. No
+regression test yet; the reproduction above should become one with the fix.
 
 ---
 

@@ -8404,3 +8404,115 @@ removed in the alias trims — and its error was swallowed by `if let Ok(v)`, so
 completion silently returned nothing. The alias sweep had covered `.blsp` files and
 Rust *test* snippets but not Brood embedded in Rust *library* code; the checker's
 `(concat …)` element-type rule and a now-duplicate catalog row went too.
+
+## 2026-07-26 — conformance corpora, suite 13: the Gabriel benchmarks, and a hole in the engine gate
+
+Every corpus so far feeds hostile **data** to one parser. This one runs whole
+**programs** with known answers, which is the only way to get an oracle for the
+evaluator itself. Eight of the Gabriel/Larceny benchmarks are ported to Brood
+(`tests/support/gabriel/*.blsp`) and checked against upstream's own expected outputs:
+`nboyer`, `chudnovsky`, `mazefun`, `deriv`, `takl`, `cpstak`, `nqueens`, `primes`.
+
+**No wrong answers — on either engine.** `nboyer` reproduces upstream's published
+rewrite counts exactly (95,024 / 591,777 / 1,813,975) and `chudnovsky` its ten exact
+50-to-500-digit integers. That matters more than a boolean: upstream reports rewrites
+deliberately, "because it is too easy for a buggy version to return the correct boolean
+result," so matching a six-figure count pins rule *order*, the unifier and the tautology
+walk together.
+
+**It found a checker bug — KI-13, and the first defect these corpora have turned up
+*outside* the code under test.** `nest check` **hangs** on the `deriv` port: not a loop, an
+exponential. Cross-module return-type inference for an undeclared recursive callee grows
+with the number of `cond` branches that build nested list structure — 2/3/4/5 branches cost
+105 ms / 105 ms / **8.7 s** / did not finish in 900 s. The same call *inside* the defining
+module is instant, so it is specifically `sig_of` → `infer_sig` → `expr_ty` across a module
+boundary, where nothing bounds the *size* of the inferred `Ty` (`InferGuard` breaks
+recursion *cycles* correctly — a different thing, and `expr_ty` already has a depth cap).
+That matters more than a warning would: `nest check` is a CI gate and the same code backs
+the LSP, so an editor hovering the call site hangs too, and the trigger is ordinary code.
+
+Worked around rather than fixed, deliberately — a declared signature is consulted *before*
+body inference (`declared_heap_sig`), so `(sig deriv (any -> any))` takes the case from
+>900 s to 105 ms. That is what the port carries, with a comment saying the sig is
+load-bearing so nobody deletes it as decoration; declaring a public API's type is right
+anyway (ADR-153). The real fix is to cap inferred-type size and widen past the cap —
+widening an over-approximation is sound by construction, so it cannot introduce a false
+positive, only lose precision on the pathological shape. `MAX_INFER_DEPTH` is the
+precedent. Repro + table in `docs/known-issues.md`.
+
+**The second find was in the harness, not the language.** `BROOD_VM=0` does **not**
+give the in-language suite tree-walker coverage. A test body run by `nest test` (or
+`brood --test`) with it set shows no slowdown at all, and `BROOD_JIT_DUMP_IR=1` lists its
+arms reaching the JIT; the same function at top level via `brood file.blsp` interprets
+correctly, emits zero JIT arms and runs ~10× slower. The env var gates how a *top-level
+form* is run, and the framework invokes each test as an already-compiled closure. So
+`make test-both`'s tree-walker leg does not exercise the ~3400 in-language cases the way
+its comment implies — real per-expression agreement comes from `differential.rs`, which
+pins the engine with `set_forced_engine` rather than the env var.
+
+Hence two runners for this corpus: `tests/conformance_gabriel_test.blsp` (upstream's
+oracles, on whatever engine the suite uses — always the VM) and
+`crates/lisp/tests/gabriel_engines.rs` (the same oracles under `set_forced_engine`, so
+both engines really run). Whether the framework should honour a forced engine for test
+bodies is now a decision on the ROADMAP; it would widen the gate a lot, and cost a lot
+(debug tree-walker: `nboyer` n=0 is 38 s against 0.25 s on the VM).
+
+**Two engine limits measured on the way.** The debug tree-walker spends ~12.6 kB of
+native stack per frame, so `primes<=1000` — 999 levels of non-tail `interval-list` —
+trips the 12 MB budget there with a clean `recursion too deep`. Correct behaviour, and
+release handles the same call fine, but it is why the Rust runner sieves to 100 (the
+first 25 entries of the *same* vendored list, so the oracle is unchanged). And upstream's
+current input sizes are calibrated to *time* a native-compiling Scheme, not to be
+checked: Chez needs 3.97 s for one iteration of `takl:40:20:12`. Where that was true the
+runner uses an older stanza upstream still keeps in the same `.input` file, or a
+published table (`nboyer`'s header, OEIS A000170 for `nqueens`) — recorded per test,
+because the provenance of each expected value is the whole basis of the suite.
+
+**What was not ported, with reasons, rather than left as a todo.** `gcbench` is descoped
+twice over: its correctness predicate is literally `(lambda (result) #t)`, and its
+subject — `Populate` building a tree top-down "assigning to older objects" — is the
+write-barrier case Brood cannot have by construction, since immutability is what
+guarantees old never points to young. `destruc` is the "destructive operation benchmark"
+where the aliasing *is* the program. `peval` (twelve `set-car!` sites rewriting an AST in
+place) and `earley` (25 `vector-set!` sites) are real rewrites with a single-output
+oracle that would not localise a mistake. `nucleic` is the best next candidate: mostly
+functional already, and a 3,485-line float oracle.
+
+Also here: `corpus-forms` joins `corpus-lines` in `tests/support/corpus.blsp`, for the
+corpora whose data *is* Lisp — it reads the `.input` files so expectations are upstream's
+bytes rather than retyped.
+
+### Addendum, same day — what the corpus run turned up about `nest test` itself
+
+Wiring the corpus meant running the whole suite a lot, which surfaced two things that have
+nothing to do with the Gabriel programs and are recorded here so the next person does not
+re-derive them.
+
+**`target/release` was stale, and it lies quietly.** The binaries in `target/release` dated
+from 09:07, predating that day's three commits, so the first suite runs reported five
+failures (`sig_adoption` ×2, `private_test`, `macro_harden`, JSON `n_`) that were simply
+features present in the source and absent from the binary. This is the `-p brood` trap from
+`CLAUDE.md` wearing a different hat: there, an A/B compares stale binaries; here, a *test
+run* does. Rebuilt with `cargo build --release --bin brood --bin nest`, four of the five
+went away. Worth checking binary mtime against `git log -1` before believing a suite result.
+
+**The deep-JSON slowdown is real, is not confined to the debug wrapper, and the
+"misdiagnosis" verdict on it was itself wrong.** The two 100k-deep JSONTestSuite documents
+were un-skipped on the reasoning that `*test-timeout-ms*` is a *batch* deadline which blamed
+whichever worker reported last — so "nothing here is slow". Measured on a current-source
+build: `nest test` (the **release** path) runs ~15 minutes and ends with `every n_ document
+is rejected` **hard-killed at 900 s**, one thread pinned at ~90% CPU, while the same file
+standalone passes in seconds. Reproduced with the corpus file removed from `tests/`
+entirely, so it is not the new work. The batch-deadline story explains a *mislabelled*
+failure; it does not explain 900 s of real CPU. Two changes compounded: the documents came
+back into the sweep, and `:conformance` now raises the batch to the 900 s
+`*test-slow-timeout-ms*`, so what previously failed fast at the 120 s cap now grinds for
+900 s — which is why the old binary finished the same tree in 318 s and the new one does
+not finish at all.
+
+So `nest test` on main is currently red *and* slow, for the reason already open in ROADMAP
+(a superlinear cost in graph depth, suspected GC). Left exactly as found: the roadmap entry
+says not to "fix" this by shrinking the tests again, and re-skipping the documents would
+hide the one case that reproduces it. `ptrace_scope` blocks `gdb -p` without root, so a
+stack sample needs `sudo sysctl -w kernel.yama.ptrace_scope=0` or running the case under
+gdb from the start.

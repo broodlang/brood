@@ -1,0 +1,37 @@
+;; tests/support/gabriel/takl.blsp — the Gabriel TAKL benchmark, ported to Brood.
+;;
+;; The Takeuchi function with *lists* standing in for the integer counters, so the
+;; work is `rest`/`nil?` traversal rather than arithmetic. That makes it a call-and-
+;; cdr benchmark: triple non-tail recursion per step, over lists that are walked but
+;; never rebuilt. The oracle is the length of the result list.
+;;
+;; A direct transcription of upstream `takl.scm`: `null?` -> `nil?`, `cdr` -> `rest`,
+;; and `shorterp`'s `and`/`or` chain unchanged (Brood's are the same short-circuiting
+;; macros). `nil?` is the faithful test because Brood's empty list *is* `nil`, which is
+;; what upstream's `'()` means here.
+;;
+;; Upstream also defines `listn` and the globals `l18`/`l12`/`l6`; they are dead in the
+;; R7RS harness, which reads its three counter lists from `takl.input` instead. They
+;; are not ported — an unused constructor is a place for a port bug to hide.
+
+(defmodule gabriel/takl
+  "The Gabriel TAKL benchmark (Takeuchi over lists as counters) — a conformance port.
+The oracle is upstream's own expected output in `tests/corpus/gabriel/data/takl.input`.")
+
+;; `shorterp` recurses in tail position; `mas` is triple non-tail recursion — the
+;; point of the benchmark. The lint is correct and unwanted.
+(check-allow :non-tail-recursion
+  (defn shorterp (x y)
+    "Whether list `x` is shorter than list `y`."
+    (and (not (nil? y))
+         (or (nil? x)
+             (shorterp (rest x) (rest y))))))
+
+(check-allow :non-tail-recursion
+  (defn mas (x y z)
+    "The Takeuchi function over lists as counters."
+    (if (not (shorterp y x))
+      z
+      (mas (mas (rest x) y z)
+           (mas (rest y) z x)
+           (mas (rest z) x y)))))
