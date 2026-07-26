@@ -3277,7 +3277,13 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; Clojure-style `(:require m)` looked like it imported names / granted access and
 ;; did nothing at all. That is the worst failure mode for a header that governs
 ;; imports *and* privacy, so an unrecognised form is now a hard error.
-(def defmodule--clause-heads [:use :use-internals :alias])
+;; `:implements` is a CHECKER annotation, not a loader one: a module claiming a protocol
+;; is verified by `crates/lisp/src/types/check/protocol.rs`, which reads the clause
+;; straight out of the header source. The loader's job is only to tolerate it. It was
+;; missing from this list, so tightening the header (above) turned every
+;; protocol-implementing module into a load error — found by a downstream app whose
+;; whole test suite stopped loading.
+(def defmodule--clause-heads [:use :use-internals :alias :implements])
 
 (defn defmodule--check-clause (clause)
   (if (and (pair? clause)
@@ -3286,7 +3292,8 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
     clause
     (error "defmodule: unrecognised header form " (pr-str clause)
       " — a `defmodule` header takes only (:use mod [:refer [names]] | [:only [names]]),"
-      " (:use-internals mod), and (:alias mod [:as short]). Check the spelling;"
+      " (:use-internals mod), (:alias mod [:as short]), and (:implements Protocol)."
+      " Check the spelling;"
       " Clojure's `(:require …)` is not a Brood clause (`:use` both loads and refers).")))
 
 (defmacro defmodule (mod & more)

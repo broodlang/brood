@@ -8404,3 +8404,61 @@ removed in the alias trims — and its error was swallowed by `if let Ok(v)`, so
 completion silently returned nothing. The alias sweep had covered `.blsp` files and
 Rust *test* snippets but not Brood embedded in Rust *library* code; the checker's
 `(concat …)` element-type rule and a now-duplicate catalog row went too.
+## 2026-07-26 — the syntax finalization, from downstream: three brood defects it exposed
+
+Pulled `d471359` (the syntax finalization) and swept the 13 sibling projects. Eight were
+broken; the two mechanical migrations fixed five, and the other three were **brood bugs
+the projects found**, not project bugs.
+
+### The mechanical part
+
+`~x` → `^x` (ADR-150) and `concat` → `append`. The pin rewrite needs quasiquote context,
+so it was a scanner, and ADR-150's "167 pins migrated" made a free oracle: run the
+scanner over `std/` + `tests/` at the *previous* commit and diff its output against what
+landed. It reproduced **167** — and 207 of 209 files matched pin-for-pin, with the six
+differences all *new* text in that commit (the pin docs, scaffold templates). Zero cases
+where it rewrote a `~` the real migration had left alone, which is the direction that
+breaks quasiquote. Worth the ten minutes before touching six repos.
+
+### Defect 1 — `&optional` defaults were never namespace-qualified
+
+`(defn project-root (dir &optional (limit *project-search-depth*)) …)` raised
+`unbound symbol` — 25 failures in brood-edit alone. Param lists were passed through the
+resolver verbatim, which is right for the *binders* (they are not references) and wrong
+for a default *expression*, which is ordinary code in the defining module. It resolved at
+call time in whatever namespace the caller happened to be in.
+
+Reduced to: a default reading a plain `def` fails, an earmuffed `def` fails, a `defdyn`
+works, the same read in the body works. So this predates the finalization — it dates to
+ADR-065 (2026-05-30, `out.push(params); // verbatim`) and earmuffs *masked* it, since an
+ambient `*knob*` resolved from anywhere. ADR-151 removed the mask and the two-month-old
+hole surfaced. `resolve_param_defaults` resolves defaults while accumulating earlier
+binders as locals, so `(defn rect (w &optional (h w)) …)` — a documented shape — keeps
+working. Seven cases in `tests/namespace_test.blsp`.
+
+### Defect 2 — the tightened `defmodule` header rejected `(:implements …)`
+
+`defmodule--clause-heads` listed `:use`, `:use-internals`, `:alias`. But `:implements` is
+a **checker** annotation that brood's own `types/check/protocol.rs` reads straight out of
+the header; the loader's only job is to tolerate it. Making unrecognised clauses a hard
+error therefore turned every protocol-implementing module into a load error — willem's
+whole suite. The clause is now accepted and named in the error text.
+
+### Not a third defect — a misread, fixed properly upstream
+
+`brood_suite_passes` was also red on the UCD "Part1" conformance test, and I read the
+120 s ceiling as a *per-test* limit: one test measured 225 s, so I made the walk cheap
+(the `nt--test-line?` scan over 20,000 lines costs >120 s in a debug build on its own —
+provable by running a slice with the modulus set so high that no case is tested at all,
+which is still killed). It passed, but the diagnosis was wrong: `*test-timeout-ms*` is a
+deadline for a whole *batch* of parallel workers, not for one test. A single test is its
+own batch, which is why my measurement fit both readings and never discriminated between
+them. The real fix — `*test-slow-timeout-ms*`, a raised budget for a `:slow`/`:conformance`
+batch — landed upstream in 5a76f90 while I was working, so I dropped my change and took
+theirs, and Part1 runs in full again rather than sampled.
+
+### Left alone
+
+Thirty-two `.blsp` files arrived unformatted; formatting `conformance_ucd_test.blsp`
+reflowed 97 lines around my 45, so I reverted that and kept the edit alone — the
+unformatted files are the author's to sweep.

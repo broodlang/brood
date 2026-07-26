@@ -89,3 +89,27 @@
       (set-load-path! saved-path)
       (delete-file path)
       (assert= (reqcirc-mod/ok) :yes))))
+
+;; `:implements` is read by the type checker (types/check/protocol.rs), which pulls the
+;; clause out of the header source; the loader only has to tolerate it. It was left out
+;; of `defmodule--clause-heads` when unrecognised clauses became a hard error, so every
+;; module claiming a protocol failed to load — caught by a downstream app (willem) whose
+;; suite stopped loading entirely.
+(describe "defmodule: the (:implements …) checker annotation"
+  (test "a header claiming a protocol loads"
+    (%load-string "(defmodule impl-a (:implements LiveModule)) (defn mount (p) p)")
+    (assert= (impl-a/mount 7) 7))
+  (test "it composes with the loader's own clauses"
+    (%load-string "(defmodule impl-b) (defn helper () :ok)")
+    (%load-string "(defmodule impl-c (:use impl-b) (:implements LiveModule)) (defn go () (helper))")
+    (assert= (impl-c/go) :ok))
+  (test "a genuinely unrecognised clause is still a hard error"
+    ;; The tightening this restores an exception to must keep working — a misspelled
+    ;; clause that silently does nothing is the failure mode it exists to prevent.
+    (is (= (try (%load-string "(defmodule impl-d (:require foo))") (catch e :rejected))
+          :rejected)))
+  (test "the error names :implements among the accepted clauses"
+    ;; `error` raises a plain string here, not a structured map — hence `str`, not
+    ;; `(get e :message)`.
+    (let (message (try (%load-string "(defmodule impl-e (:nonsense x))") (catch e (str e))))
+      (is (string-contains? message ":implements")))))
