@@ -888,6 +888,49 @@ fn foreign_constructs_hint_at_the_brood_way() {
     assert_eq!(run("(try (first (list 1)) (catch e e))"), "1");
 }
 
+/// A hint must never name a feature the tree doesn't have, and must never deny one
+/// it does. Four in this table did (fixed 2026-07-26): `deftype` pointed at a
+/// `defprotocol`/`defimpl` "protocol module" that was never built, `letfn` at
+/// `let` + `fn` (which cannot recurse — the whole point of `letfn`), `lazy-seq` at
+/// "sequences are eager" with no mention of the `lmap`/`lfilter` seq-views that
+/// landed in ADR-111, and the `#` arm claimed `#{…}` was unavailable four ADRs
+/// after sets became a real literal. Also pins that ADR-154's removed names carry
+/// their replacement rather than a bare "unbound symbol".
+#[test]
+fn hints_name_only_features_that_exist() {
+    let hint = |src: &str| run(&format!("(try {src} (catch e (get e :hint)))"));
+    // The hint may *name* defprotocol/defimpl — it must not imply std ships them.
+    // (They live in the `hatch` package's `protocol` module, a prototype; the kernel
+    // carries only the checker/LSP conformance pass, which is what made the old
+    // wording — "use `defprotocol`/`defimpl` (the `protocol` module)" — read as if a
+    // `(require 'protocol)` away.)
+    let d = hint("(deftype foo)");
+    assert!(d.contains("NOT in std"), "{d}");
+    assert!(d.contains("hatch"), "{d}");
+    assert!(d.contains("defrecord"), "{d}");
+    // `letfn` → letrec (a let-bound fn cannot call itself).
+    assert!(hint("(letfn ((f (x) x)) 1)").contains("letrec"));
+    // `lazy-seq` names the seq-views that do exist.
+    let l = hint("(lazy-seq 1)");
+    assert!(l.contains("lmap") && l.contains("lfilter"), "{l}");
+    // The reader owns every `#X` spelling (so the `#` arm above is a backstop). Its
+    // `#_` hint predated `comment` and offered only `;`.
+    let d = run(
+        "(try (read-string \"(x #_1)\") (catch e (get e :hint)))",
+    );
+    assert!(d.contains("comment"), "{d}");
+    // ADR-154 removals carry their replacement.
+    assert!(hint("(car (list 1))").contains("first"));
+    assert!(hint("(cdr (list 1))").contains("rest"));
+    assert!(hint("(concat (list 1))").contains("append"));
+    assert!(hint("(length \"ab\")").contains("count"));
+    assert!(hint("(flat-map f (list 1))").contains("mapcat"));
+    assert!(hint("(read-file \"x\")").contains("slurp"));
+    // `some?` must name BOTH readings — it was freed because they get confused.
+    let s = hint("(some? 1)");
+    assert!(s.contains("any?") && s.contains("nil?"), "{s}");
+}
+
 /// A bare name that exists only as `mod/name` — because `(require 'mod)` loaded
 /// the module but didn't refer it — gets a `(:use mod)` fix-it hint. This is the
 /// most common post-ADR-065 mistake for code (and LLMs) written against the old

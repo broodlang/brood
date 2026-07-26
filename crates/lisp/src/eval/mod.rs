@@ -1338,17 +1338,29 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
         }
         "transient" | "persistent!" | "conj!" | "assoc!" | "disj!" | "pop!" => {
             "Brood collections are persistent and immutable — there are no \
-             transients; `conj`/`assoc`/`dissoc`/`into` return fresh values."
+             transients; `conj`/`disj`/`assoc`/`dissoc`/`into` return fresh values."
         }
-        "deftype" | "definterface" | "reify" => {
-            "Brood has no `deftype`/`definterface`/`reify` — for a named, \
-             optionally-typed record use `defrecord` (sugar over a plain map); for \
-             polymorphism, use `defprotocol`/`defimpl` (the `protocol` module), or \
-             dispatch with `match`/`cond`."
+        // NB: this arm used to name `defprotocol`/`defimpl` and "the `protocol`
+        // module" — none of which exist (open dispatch is a ROADMAP item). A hint
+        // that sends the reader after a feature the tree doesn't have is worse than
+        // no hint; say only what works today.
+        "deftype" | "definterface" | "reify" | "defprotocol" | "defimpl" | "defmulti"
+        | "defmethod" => {
+            "Brood has no nominal types — for a named, optionally-typed record use \
+             `defrecord` (sugar over a plain map, so records stay structural). For \
+             polymorphism, dispatch with `match`/`cond` on `type-of` or on a `:type` \
+             key; multi-clause `defn` dispatches on arity or pattern. \
+             `defprotocol`/`defimpl` (dispatch on the first argument's `type-of`) \
+             are NOT in std — they live in the `hatch` package's `protocol` module, \
+             a prototype awaiting promotion; the kernel only supplies the checker/LSP \
+             conformance pass for them."
         }
         "lazy-seq" | "lazy-cat" => {
-            "Brood sequences are eager — use `map`/`filter`/`fold`; for streaming, a \
-             process that `send`s values."
+            "Brood has no `lazy-seq` thunk. `map`/`filter` are EAGER; for a fusing, \
+             single-pass pipeline use the lazy seq-view combinators `lmap`/`lfilter`/\
+             `lkeep`/`lremove` with `->>` (ADR-111), and `(range n)` is already a \
+             lazy O(1) value. For an unbounded/streaming source, a process that \
+             `send`s values."
         }
         // `case` now exists (literal dispatch, flat `test result` pairs); only
         // `condp` is still absent.
@@ -1362,14 +1374,48 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
             "Use `def` for a global, or `defdyn` for a dynamic var (rebindable with \
              `binding`)."
         }
+        // `let` is sequential, so a `let`-bound `fn` can't call itself — which is the
+        // whole reason `letfn` exists. Point at `letrec`, which can.
         "letfn" => {
-            "Brood has no `letfn` — bind local functions with `let` + `fn`, or define \
-             them top-level with `defn`."
+            "Brood has no `letfn` — bind local functions with `letrec`, whose names \
+             are all visible in every right-hand side (so they may recurse and call \
+             each other): `(letrec (go (fn (n) … (go …))) (go 0))`. A plain `let` is \
+             sequential, so a `let`-bound `fn` cannot call itself."
         }
         "with-meta" | "vary-meta" => "Brood values carry no metadata.",
+        // ADR-154 renames + removals. Without these a downstream caller (or an LLM
+        // writing from Clojure habit) gets a bare "unbound symbol" for a name that
+        // has a direct replacement. `some?` matters most: it was *freed* precisely
+        // because it used to mean "any element matches", which reads as Clojure's
+        // non-nil test — so the error must say which one you want.
+        "car" => "Brood spells `car` as `first` (ADR-154 removed the Lisp lineage names).",
+        "cdr" => "Brood spells `cdr` as `rest` (ADR-154 removed the Lisp lineage names).",
+        "concat" => "Brood spells `concat` as `append` (any number of lists/vectors → a list).",
+        "some?" => {
+            "Brood has no `some?`. For \"does any element match\" use `(any? pred \
+             coll)`; for Clojure's non-nil test write `(not (nil? x))`. (`some?` was \
+             freed deliberately — it used to mean the former and reads as the latter.)"
+        }
+        "length" => "Brood spells `length` as `count` (works on any collection, plus strings).",
+        "entries" => "Brood spells `entries` as `map-pairs` (a map's [k v] pairs as a list).",
+        "flat-map" => "Brood spells `flat-map` as `mapcat`.",
+        "string-contains?" => "Brood spells `string-contains?` as `includes?` (strings and sequences).",
+        "string-index-of" => "Brood spells `string-index-of` as `index-of` (with an `&optional from`).",
+        "string-upcase" => "Brood spells `string-upcase` as `upper`.",
+        "string-downcase" => "Brood spells `string-downcase` as `lower`.",
+        "string-capitalize" => "Brood spells `string-capitalize` as `capitalize`.",
+        "read-file" => "Brood spells `read-file` as `slurp` (`slurp-bytes` for bytes).",
+        "write-file" => "Brood spells `write-file` as `spit` (`spit-append` to append).",
+        "path-exists?" => "Brood spells `path-exists?` as `file-exists?`.",
+        "working-dir" => "Brood spells `working-dir` as `cwd`.",
+        // The `#` arm fires when `#` itself is read as a bare symbol — i.e. for a
+        // reader macro Brood lacks. It used to claim `#{…}` was one of them; sets
+        // have been a real literal since ADR-060, and `#b"…"` bytes since ADR-139.
         "#" => {
-            "Brood has no `#` reader macros: `#(…)` lambda shorthand → `(fn (x) …)`; \
-             `#{…}` set literal → `(set […])` after `(:use set)`."
+            "Brood has only two `#` literals — `#{…}` (a set) and `#b\"…\"` (bytes). \
+             It has no `#(…)` lambda shorthand (write `(fn (x) …)`), no `#_` form \
+             discard (use `(comment …)` or `;`), no `#\"…\"` regex literal (`(require \
+             'regex)`), and no `#'` var quote (a plain `'foo` is a symbol)."
         }
         _ => return None,
     })
