@@ -1,0 +1,20 @@
+;; Behaviour contracts — `std/protocol.blsp`. `defbehaviour` declares the ops a MODULE
+;; must define to satisfy a named contract (there is no value dispatch — a module calls
+;; its own functions directly). The checker verifies a module whose header says
+;; `(:implements B)` defines each op. Value polymorphism is `ability` (see
+;; ability_test.blsp); `defprotocol`/`defimpl` were retired in favour of it.
+(defmodule behaviour-test (:use test) (:use protocol))
+
+(defbehaviour Renderable
+  (render-it [model])
+  (mount-it [params]))
+
+(describe "behaviours record their ops for the checker"
+  (test "a behaviour registers ops without defining dispatching fns"
+    (assert= (protocol-ops 'Renderable)
+      (list '(render-it [model]) '(mount-it [params]))))
+  (test "declaring a behaviour defines no function of its own"
+    ;; unlike an ability op, which defines a generic fn
+    (refute (bound? 'render-it)))
+  (test "an unknown behaviour has no ops"
+    (assert= (protocol-ops 'No-Such) nil)))

@@ -75,20 +75,21 @@ fn file_warnings(src: &str) -> Vec<String> {
         .collect()
 }
 
-// ---- protocol conformance (Pass 2.6) ----
-// `file_warnings` returns *all* diagnostics; these assert on the protocol ones
-// with `.contains` (the un-defined `defprotocol`/`defimpl` macros also draw
-// unbound-symbol noise in a bare test interp, which is irrelevant here).
+// ---- ability impl conformance (Pass 2.6) ----
+// The conformance check (missing op / arity / undeclared) reads the *un-expanded*
+// `defability`/`impl` surface forms, so these need no `(require 'ability)`. `.contains`
+// ignores unbound-symbol noise from the un-loaded macros, irrelevant here.
+// (`defprotocol`/`defimpl` were retired in favour of `ability`.)
 
 #[test]
-fn protocol_flags_a_missing_op() {
-    let ws = file_warnings("(defprotocol P (a [x]) (b [x]))\n(defimpl P :int (a [x] x))");
+fn ability_impl_flags_a_missing_op() {
+    let ws = file_warnings("(defability P (a [x]) (b [x]))\n(impl P :int (a [x] x))");
     assert!(ws.iter().any(|w| w.contains("missing op `b`")), "{ws:?}");
 }
 
 #[test]
-fn protocol_flags_an_arity_mismatch() {
-    let ws = file_warnings("(defprotocol P (a [x]))\n(defimpl P :int (a [x y] x))");
+fn ability_impl_flags_an_arity_mismatch() {
+    let ws = file_warnings("(defability P (a [x]))\n(impl P :int (a [x y] x))");
     assert!(
         ws.iter()
             .any(|w| w.contains("`a` takes 1 arg(s), this impl has 2")),
@@ -97,14 +98,14 @@ fn protocol_flags_an_arity_mismatch() {
 }
 
 #[test]
-fn protocol_flags_an_undeclared_method() {
-    let ws = file_warnings("(defprotocol P (a [x]))\n(defimpl P :int (a [x] x) (z [x] x))");
+fn ability_impl_flags_an_undeclared_method() {
+    let ws = file_warnings("(defability P (a [x]))\n(impl P :int (a [x] x) (z [x] x))");
     assert!(ws.iter().any(|w| w.contains("has no op `z`")), "{ws:?}");
 }
 
 #[test]
-fn protocol_complete_impl_is_clean() {
-    let ws = file_warnings("(defprotocol P (a [x]) (b [x]))\n(defimpl P :int (a [x] x) (b [x] x))");
+fn ability_impl_complete_is_clean() {
+    let ws = file_warnings("(defability P (a [x]) (b [x]))\n(impl P :int (a [x] x) (b [x] x))");
     assert!(!ws.iter().any(|w| w.contains("missing op")), "{ws:?}");
     assert!(!ws.iter().any(|w| w.contains("has no op")), "{ws:?}");
     assert!(!ws.iter().any(|w| w.contains("takes")), "{ws:?}");
@@ -226,18 +227,6 @@ fn sealed_ability_complete_is_silent() {
          (ability/impl Shape t/rect (area [r] (get r :w)))",
     );
     assert!(!ws.iter().any(|w| w.contains("sealed ability")), "{ws:?}");
-}
-
-#[test]
-fn ability_pass_never_flags_a_protocol_op() {
-    // protocol op fns also dispatch through an `impl-for`; the ability pass must key
-    // on the *qualified* `ability/impl-for`, so a protocol call is never mistaken.
-    let ws = file_warnings(
-        "(require 'protocol)\n\
-         (protocol/defprotocol P (op [self] :-> any))\n\
-         (defn c () (op 5))",
-    );
-    assert!(!ws.iter().any(|w| w.contains("ability P")), "{ws:?}");
 }
 
 // ---- behaviour conformance: `(:implements …)` on a module ----

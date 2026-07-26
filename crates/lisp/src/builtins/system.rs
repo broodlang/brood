@@ -965,14 +965,13 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // adds `set`/`conj`/`disj`/`union`/`intersection`/`difference`/`subset?`.
     // Opt-in, never in the prelude (no `#{…}` literal / distinct type yet).
     embedded_module!("set", "std/set.blsp"),
-    // Open generic functions — `defprotocol` declares typed ops, `defimpl` registers
-    // a per-`type-of` implementation (ADR-158). The polymorphism answer for the cases
-    // `match`/`cond` can't cover, because an impl can be added from anywhere without
-    // editing the dispatcher. Pure Brood over two registry globals; the kernel's only
-    // part is the checker/LSP conformance pass (`types/check/protocol.rs`), which
-    // predates the module by months. Opt-in, never in the prelude.
+    // Behaviour contracts — `defbehaviour` declares the ops a MODULE must define to
+    // satisfy a named contract (`(:implements B)`), verified by the checker/LSP pass
+    // (`types/check/protocol.rs`). Value dispatch (`defprotocol`/`defimpl`) was RETIRED
+    // in favour of `ability`; behaviours stay here (a module-as-implementor contract is
+    // not value dispatch). Opt-in, never in the prelude.
     embedded_module!("protocol", "std/protocol.blsp"),
-    // Unified generic functions with NOMINAL dispatch (successor to `protocol`):
+    // Unified generic functions with NOMINAL dispatch (the value-polymorphism successor):
     // `defability` declares ops, `impl` registers per-identity impls from anywhere, and
     // dispatch is on the first argument's identity — its `type-of` kind, or a record's
     // baked `module/name` id (`defrecord*`). Subsumes value polymorphism and
