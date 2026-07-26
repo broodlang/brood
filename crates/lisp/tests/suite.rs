@@ -59,9 +59,14 @@ fn run_suite() {
     // `make suite`) keeps sweeping all of Part1 in ~5 s. See the knob's comment in
     // tests/conformance_ucd_test.blsp for why sampling only started working once the
     // per-test 20,000-line walk was collected once instead.
+    // Set it in the ENVIRONMENT, not as a global in the program below: the test file reads
+    // this when it LOADS, which is after that `eval_str` would have `def`'d it, so the
+    // file's own default won and the sweep stayed full (which is how this was missed).
+    // SAFETY: single-threaded, before the interpreter loads any test file.
+    unsafe { std::env::set_var("BROOD_UCD_PART1_OF", "16") };
     if let Err(e) = interp.eval_str(
         "(require 'test) (def *test-timeout-ms* 600000) \
-         (require 'project) (def *ucd-part1-of* 16) (project/run-project-tests)",
+         (require 'project) (project/run-project-tests)",
     ) {
         panic!("Brood test suite failed: {}", e);
     }
