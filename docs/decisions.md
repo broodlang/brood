@@ -10134,3 +10134,83 @@ would require the collection test on the fast path, which is the 1.8× regressio
 above. The message is accurate (positional indexing does delegate to `nth`), names a
 real op, and states the actual problem; it just names the callee rather than the
 caller. Recorded rather than hidden.
+
+## ADR-165 — A keyword is callable as an accessor; nothing else data-like is
+
+**Context.** `(map :name people)` — an accessor passed to a higher-order op — had no
+spelling. Every such call had to invent a throwaway binder purely to discard it:
+`(map (fn (p) (get p :name)) people)`. Counted across the workspace: **67 sites**
+(59 `map`, 4 `filter`, 3 `sort-by`, 1 `keep`).
+
+That number is the whole case, and it is worth stating what the case is *not*. An
+earlier draft justified this with the 4,796 `(get x :keyword)` sites in the workspace;
+checking them showed almost none would be converted — `(get m :name)` puts the
+subject first and reads better than `(:name m)`. The 81 nested `(get (get x :a) :b)`
+sites want `get-in` (already used 166×), not keywords. And the threading-chain
+argument — `(-> m (get :a) (get :b))` — had **zero** sites. So: 67, of one shape.
+
+**Why now rather than after 1.0.** It is additive in the strict sense (today `(:k m)`
+raises `cannot call non-function`, so no valid program changes meaning) but it is
+*idiom-shaping*: ship 1.0 without it and `std/`, every sibling project and every doc
+example is written the older way, so adoption becomes a churn wave at the moment
+stability was promised. That is the test `docs/roadmap-for-v1.md` applies, and this is
+the only item that failed it for that reason.
+
+**Decision.** A keyword applied to 1 or 2 arguments is an accessor:
+`(:name p)` ≡ `(get p :name)`, `(:name p "unknown")` ≡ the 3-argument `get`.
+Receivers mirror `get` exactly — a **map** by key, a **set** by membership (yielding
+the element, the ADR-156 rule), `nil` as empty — and anything else is a type error
+**naming the keyword**, which is strictly more specific than `get`'s message since the
+key is already in it. An integer-indexed collection is deliberately in that last
+group: `(:name deps)` where `deps` is a *list* of maps is the single most likely
+misuse, and ADR-164 had just made the same shape loud for `get`.
+
+Implemented in **`eval::apply`**, the one function both engines funnel non-closure
+callees through — *not* as a compile-time rewrite of `(:k m)`. That is what makes a
+keyword a first-class value the higher-order ops can take (`(map :name xs)`,
+`(apply :name (list p))`, `(let (f :name) (f p))`); a syntactic rewrite would have
+covered only the head position and missed the entire point.
+
+**Scope: keywords only.** Maps, vectors and sets stay non-callable, and keep their
+existing hints. A callable map is a second spelling of `get` (against ADR-154's "one
+spelling each"); a callable vector or set answers by index-or-membership, the
+ambiguity ADR-156 refused for `contains?`. One blessed exception to "the head of a
+form is a function" is a rule you can state in a sentence; four is a different
+language.
+
+**The performance finding is NOT part of the justification.** `(:name p)` measures
+130 ms/1M against `get`'s 393 ms, but that is not a property of the syntax — it is the
+Brood/Rust boundary, and the breakdown says so:
+
+| | with JIT | no JIT |
+|---|---|---|
+| `map-get` kernel op, called directly | 107 ms | 209 ms |
+| + a single-arity Brood wrapper | 231 ms | 274 ms |
+| + the four-branch `cond` type dispatch | 369 ms | 366 ms |
+| the real multi-arity `get` | 393 ms | 374 ms |
+| `(:name p)` | 130 ms | 197 ms |
+
+The accessor is fast because it reaches `map_get` through one Rust arm, skipping a
+Brood closure call (+124 ms) and a `cond` chain (+138 ms). Implemented *in Brood* it
+would measure like `get`. Claiming the speed as a benefit would be the exact move
+`CLAUDE.md` warns against — using Rust to make a slow Brood function fast **hides**
+the gap instead of fixing it. The feature stands on the 67 sites.
+
+What the measurement *did* surface belongs in ROADMAP: `get` pays ~2.7× the kernel
+op's cost for one closure call plus a four-branch `cond`, and **the JIT closes none of
+it** (393 with, 374 without). That is the same shape as the variadic-`+` finding that
+motivated multi-arity dispatch — a language-level call/type-dispatch gap, not a `get`
+defect.
+
+**Consequences.**
+- The checker's `relax_param_for_arg` now admits a keyword wherever a callable is
+  expected (an arrow parameter, or `apply`'s `fn | native`). The lattice cannot say
+  "keyword, which behaves as `(map -> any)`" — the tags are disjoint bits — so
+  without this the most-motivating call would draw a false warning.
+- The keyword arm of `not_a_function_error` is gone (it used to advise `(get m :k)`);
+  map/set/vector keep theirs. `tests/syntax_finalization_test.blsp` flipped from
+  asserting the hint to asserting the accessor, with the reason recorded in place.
+- `(:k)` and `(:k a b c)` get a keyword-specific arity message naming both valid
+  forms — they are the two ways this gets typo'd.
+- No change to `get`, `get-in`, or any existing call: purely additive at the call
+  protocol, and the only value kind whose callability changes is `Keyword`.

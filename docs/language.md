@@ -207,6 +207,41 @@ Maps are immutable — every operation returns a **fresh** map:
 (-> person (assoc :born 1816) (get :born))   ; => 1816
 ```
 
+### Keyword accessors
+
+A **keyword is callable** — the one exception to "the head of a form is a function":
+
+```clojure
+(:name person)              ; ≡ (get person :name)
+(:name person "unknown")    ; ≡ (get person :name "unknown")
+(map :name people)          ; the reason for the exception
+(sort-by :id procs)
+(filter :cursor zones)
+```
+
+The point is the last three: a keyword is a first-class *value*, so any higher-order
+op can take it, and an accessor no longer needs a throwaway binder
+(`(fn (p) (get p :name))`). It works anywhere a function goes — `apply`, `comp`, a
+`let`-bound name.
+
+Receivers mirror `get`: a **map** looks up by key, a **set** by membership (yielding
+the element), and `nil` is empty. Anything else is a type error **naming the
+keyword** — including an integer-indexed collection, because `(:name deps)` where
+`deps` is a *list* of maps is the most likely way to get this wrong:
+
+```clojure
+(:name {:name "ada"})    ;=> "ada"
+(:name #{:name})         ;=> :name        (membership, like get)
+(:name nil)              ;=> nil
+(:name deps)             ; type error: :name: expected a map, set or nil …
+```
+
+**Only keywords.** A map, vector or set in head position is still an error with a
+hint — `({:a 1} :a)` would be a second spelling of `get`, and a callable vector or set
+answers by index-or-membership, the ambiguity `contains?` deliberately refuses
+(ADR-156/165). Use `(get m k)` when the key is *computed*; `(:k m)` can only ever
+mean the literal keyword `:k`.
+
 A map is **seqable as its `[k v]` pairs**: `seq`, `first`, `rest`, `last`, `map`,
 `filter`, `fold`/`reduce`, `into`, and `vec` all read it that way, so
 `(map first m)` is its keys and `(first m)` is a `[k v]` vector (`nil` for an empty

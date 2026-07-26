@@ -348,6 +348,14 @@ is an error, because in `match` a bare symbol silently *binds* instead of compar
 (case status :ok :fine :missing :gone (handle-other status))
 ```
 
+**A keyword is callable — `(:name p)` ≡ `(get p :name)`** (ADR-165), and it is a
+first-class value, so `(map :name people)` / `(sort-by :id rows)` / `(filter :cursor
+zones)` all work. That is the point: no throwaway `(fn (p) (get p :name))`. Receivers
+mirror `get` (map by key, set by membership, `nil` empty); anything else — notably a
+*list of maps* — is a type error naming the keyword. Use `(get m k)` when the key is
+computed; `(:k m)` can only mean the literal `:k`. **Nothing else data-like is
+callable**: `({:a 1} :a)`, `([10 20] 1)`, `(#{1} 1)` are all errors with hints.
+
 **`assoc` / `update` / `get` work on a vector by integer index, not just maps.**
 `(assoc v i x)` returns a fresh vector with index `i` replaced (in range only —
 it never appends; `conj` does that); `(update v i f)` and `(get v i)` likewise.
