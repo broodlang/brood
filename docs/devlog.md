@@ -8018,6 +8018,28 @@ Suite green: 3284 in-language tests, `nest check` clean. (One run showed two tcp
 idle-timeout failures at 53 s wall vs the usual 24 s — load-induced timing flake in
 those tests; clean on re-run.)
 
+### The error message that made the sweep hard
+
+Both broken projects died on `lineedit--init` being "module-private" — and that was not
+what was wrong: the name had been *promoted* to `lineedit-init` and no longer existed at
+all. The message sent the reader looking for a `(:use-internals …)` grant that would not
+have helped.
+
+`enforce_private_refs` now checks the global table before wording the error. When the
+`--` name is absent from the module AND the single-dash spelling is present, it says so
+and names the replacement:
+
+```
+`editor/lineedit/lineedit--init` does not exist in `editor/lineedit` — it looks like
+a `--` helper that was promoted to the public `editor/lineedit/lineedit-init`. Use
+that name.
+```
+
+Both halves must be confirmed before it claims a rename: a module that hasn't been
+loaded has neither name, so it falls through to the plain privacy message rather than
+guessing. `tests/private_test.blsp` covers all three paths — promoted, genuinely private,
+and neither.
+
 ## 2026-07-25 — syntax finalisation: seven places the surface reinterpreted instead of rejecting
 
 A review of the *language surface* (asked for as "review the language itself", then

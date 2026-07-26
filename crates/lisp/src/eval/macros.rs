@@ -294,6 +294,22 @@ pub(crate) fn internals_grant_key(mod_name: &str) -> value::Symbol {
 /// to level 0 (that IS an evaluated reference, so `` `(~other/priv--x) `` is
 /// still caught). `quote` is always data. A macro template referencing its OWN
 /// module's private is fine (`m == cur_ns`), so this doesn't false-flag them.
+/// The public name a stale `m/x--y` reference was probably renamed to, or `None`.
+///
+/// Only answers `Some` when BOTH halves are confirmed against the global table: the
+/// private name is absent AND the single-dash spelling is present. A module that has not
+/// been loaded yet has neither, so it falls through to the plain privacy message rather
+/// than asserting something unverified.
+fn promoted_public_name(heap: &Heap, module: &str, bare: &str) -> Option<String> {
+    let global = heap.global();
+    let private = value::intern(&format!("{module}/{bare}"));
+    if heap.env_get(global, private).is_some() {
+        return None;
+    }
+    let public = format!("{module}/{}", bare.replace("--", "-"));
+    heap.env_get(global, value::intern(&public)).map(|_| public)
+}
+
 fn enforce_private_refs(
     heap: &Heap,
     form: Value,
@@ -323,12 +339,24 @@ fn enforce_private_refs(
                 let m = real_m.as_str();
                 if !m.is_empty() && m != cur_ns && heap.import_of(internals_grant_key(m)).is_none()
                 {
-                    let mut e = LispError::runtime(format!(
-                        "`{name}` is module-private to `{m}` (a `--` name; ADR-146). \
-                         Call it from `{m}`, promote it to a public name, or — for a \
-                         test/tool module that genuinely needs the internals — grant \
-                         access with (:use-internals {m}) in this module's header."
-                    ));
+                    let mut e = LispError::runtime(match promoted_public_name(heap, m, bare) {
+                        // A `--` name that `m` does not define at all is nearly always a
+                        // STALE reference to a helper since promoted to a public name, not
+                        // an attempt to reach into another module — so say that instead.
+                        // Two downstream projects lost their entire suite to this: the
+                        // message named privacy when the name was simply gone
+                        // (`lineedit--init` had become `lineedit-init`).
+                        Some(public) => format!(
+                            "`{name}` does not exist in `{m}` — it looks like a `--` helper \
+                             that was promoted to the public `{public}`. Use that name."
+                        ),
+                        None => format!(
+                            "`{name}` is module-private to `{m}` (a `--` name; ADR-146). \
+                             Call it from `{m}`, promote it to a public name, or — for a \
+                             test/tool module that genuinely needs the internals — grant \
+                             access with (:use-internals {m}) in this module's header."
+                        ),
+                    });
                     if let Some(p) = pos {
                         e = e.with_pos(p);
                     }

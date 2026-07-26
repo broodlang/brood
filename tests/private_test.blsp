@@ -20,6 +20,33 @@
                  :blocked
                  [:other e])))
           :blocked)))
+  ;; The common real-world case is NOT someone reaching into another module: it is a
+  ;; caller left behind when a `--` helper was promoted to a public name. Reporting that
+  ;; as a privacy violation sends you looking for a grant you don't need. Two downstream
+  ;; projects lost their whole suite to exactly this (`lineedit--init` → `lineedit-init`).
+  (test "a stale reference to a PROMOTED helper says so, and names the public name"
+    (%load-string "(defmodule priv-moved) (defn moved-helper () 7)")
+    (let (message (try
+                    (%load-string "(defmodule priv-caller) (defn c () (priv-moved/moved--helper))")
+                    (catch e (str (get e :message)))))
+      (and (is (string-contains? message "does not exist"))
+        (is (string-contains? message "priv-moved/moved-helper"))
+        ;; and it must NOT send the reader after a privacy grant they don't need
+        (refute (string-contains? message ":use-internals")))))
+  (test "a private that really DOES exist still reports privacy, not a rename"
+    (%load-string "(defmodule priv-real) (defn real--secret () 9)")
+    (let (message (try
+                    (%load-string "(defmodule priv-caller2) (defn c () (priv-real/real--secret))")
+                    (catch e (str (get e :message)))))
+      (and (is (string-contains? message "module-private"))
+        (is (string-contains? message ":use-internals")))))
+  (test "with no public counterpart either, the plain privacy message stands"
+    ;; An unloaded module has neither name, so the diagnosis must not be guessed.
+    (let (message (try
+                    (%load-string "(defmodule priv-caller3) (defn c () (never-loaded/nope--thing))")
+                    (catch e (str (get e :message)))))
+      (is (string-contains? message "module-private"))))
+
   (test "(:use-internals mod) grants access — loud, explicit, greppable"
     (%load-string "(defmodule priv-vault2) (defn vault2--secret () 42)")
     (%load-string "(defmodule priv-friend (:use-internals priv-vault2)) (defn borrow () (priv-vault2/vault2--secret))")
