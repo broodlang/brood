@@ -1,9 +1,9 @@
 # Known issues
 
-Every *interpreter* defect is **resolved** (KI-9 is a one-off arity sighting judged a
-transient inconsistent-build artifact, not present in committed code; KI-10 no longer
-reproduces, incidentally fixed — both kept as records, not open bugs). **KI-13, in the
-type checker, is open.**
+KI-9 is a one-off arity sighting judged a transient inconsistent-build artifact, not
+present in committed code; KI-10 no longer reproduces, incidentally fixed — both kept as
+records, not open bugs. **Open: KI-14 (a test hangs only under the test framework, so
+`make test` cannot go green) and KI-13 (type checker).**
 This file is the condensed record — what each was, how it was fixed, and the regression
 test that guards it — so a recurrence is recognizable. For the narrative discovery
 writeup of the scheduler race, see
@@ -11,6 +11,60 @@ writeup of the scheduler race, see
 ADRs / topic docs.
 
 ---
+
+## KI-14 — one conformance test hangs forever, but only under the test framework · **OPEN, found 2026-07-27**
+
+`make test` cannot go green: `brood::suite brood_suite_passes` is SIGKILLed at its 600 s
+nextest cap on **both** tries. Deterministic, not a flaky deadline — and *not* a budget
+problem, so raising the cap is the wrong fix (`.config/nextest.toml` says as much).
+
+**Minimal repro** (hangs indefinitely; observed >10 min, never completes):
+
+```sh
+nest test --only 'test:every n_ document'
+```
+
+That is `JSONTestSuite: RFC 8259 accept/reject › every n_ document is rejected`
+(`tests/conformance_json_test.blsp:71`). Identified by bisecting `--partitions`, then
+confirming against the shard hash: it is the only conformance test satisfying all three
+hanging shards (42 mod 128, 10 mod 32, 2 mod 8 — `test--label-hash` in
+`std/tool/test.blsp:588`).
+
+**What makes it strange: the same work outside the framework is fine and fast.** Every
+one of these completes correctly in seconds:
+
+- `js--scan` copied verbatim into a plain script over the identical 318 corpus files →
+  `[0 188 nil]`, the expected answer.
+- All 188 `n_` documents parsed sequentially in one process → `DONE 188`.
+- All 188 parsed one-process-per-file → 176 verdicts, 0 hangs, 12 unreadable (those 12
+  are the invalid-UTF-8 files `slurp` legitimately refuses, as the test file's own header
+  comment at line 13 explains).
+- The two deep-nesting documents (100 000 and ~50 000 levels, the KI-11 pair) parsed
+  *inside a spawned green process* → both `:rejected`, cleanly.
+- An invalid-UTF-8 document parsed inside a spawned green process → `:rejected`.
+
+So it is neither the parser, nor a single document, nor deep recursion, nor the UTF-8
+refusal path. It needs the framework context — green process on the worker pool.
+
+**Process state while hung:** the `nest` process sits at ~110 % CPU with 15 threads —
+one thread spinning, all others in `futex_do_wait`, and the reported-test count frozen
+(71 of the conformance set, unchanged over 7+ minutes). So one worker is in an infinite
+loop rather than everything being blocked.
+
+**Not yet root-caused.** `gdb` cannot attach on this machine (yama `ptrace_scope`), and
+the `release-fast` binaries are stripped, so no native backtrace was obtained. Next
+steps: build unstripped with `debug-assertions=on` and either loosen `ptrace_scope` or
+attach a self-profiler; `BROOD_VM_TRACE=1` / `BROOD_NO_JIT=1` on the minimal repro to
+rule the JIT in or out (the JIT tiers up here, where the one-file-per-process scans
+never do — the most obvious asymmetry between the hanging and passing cases).
+
+**Adjacent finding:** `nest observe`/attach tests leak a `brood` child — one was found
+still alive 2h22m after its run (`/tmp/brood-observe-<pid>/target.blsp`, ~2.7 % CPU).
+Independent of this hang, but it means a long session accumulates stray processes.
+
+**Not caused by** the sort/CI work in `1749307`: the hang reproduces with that commit
+reverted in effect (the test touches no sort path), and `observe_attach` — the other
+failure in that run — is fixed and passing at 5.9 s.
 
 ## KI-13 — cross-module return-type inference blows up exponentially in branch count · **OPEN, found 2026-07-26**
 
