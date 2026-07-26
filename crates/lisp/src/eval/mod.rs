@@ -484,6 +484,26 @@ fn eval_tail_loop(
                     };
                     let val = name_value(heap, val, name);
                     let root = heap.env_root(env);
+                    // **Reserved names** (ADR-166): a global `def` may not rebind
+                    // anything the language ships — the prelude, the builtins, or an
+                    // embedded std module. Checked here because every `def` routes
+                    // through this arm (the VM defers `def` forms to the evaluator),
+                    // so one gate covers both engines, `load`, `eval` and the REPL.
+                    if heap.is_reserved_global(name) {
+                        let shown = value::symbol_name(name);
+                        return Err(LispError::type_err(format!(
+                            "def: `{shown}` is a reserved name — it ships with Brood and cannot be redefined"
+                        ))
+                        .with_hint(format!(
+                            "Reserved names are everything inside the `brood` binary: the prelude, the \
+                             builtins, and the embedded std modules. Your own code and your packages stay \
+                             fully redefinable (that is what hot reload is for). Either pick another name, \
+                             shadow it locally — `(let ({shown} …) …)` is still fine — or define it inside a \
+                             `(defmodule your/mod …)`, where `(defn {shown} …)` defines `your/mod/{shown}` \
+                             and is yours."
+                        ))
+                        .or_form_pos(heap, expr));
+                    }
                     // Arity-change diagnostic: if `def` is *rebinding* a callable
                     // to one of a different arity, callers expecting the old shape
                     // will hit a runtime arity error on the next call. Surface it
@@ -523,6 +543,21 @@ fn eval_tail_loop(
                         }
                     }
                     heap.env_define(root, name, val);
+                    // While an embedded std module is loading, its own definitions
+                    // become reserved as they appear — that is how `set/union` and
+                    // friends join the reserved set without a static name list.
+                    // Same rule as the seed filter: an embedded module's FUNCTIONS
+                    // become reserved, its data globals (its own registries, e.g.
+                    // `protocol`'s `*protocols*`/`*impls*`) stay rebindable — they
+                    // are rebound by the module's own functions at runtime.
+                    if heap.in_module_load()
+                        && matches!(
+                            val.unpack(),
+                            ValueRef::Fn(_) | ValueRef::Macro(_) | ValueRef::Native(_)
+                        )
+                    {
+                        heap.reserve_global(name);
+                    }
                     return Ok(Value::symbol(name));
                 }
                 Some(SpecialForm::Fn) => {

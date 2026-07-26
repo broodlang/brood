@@ -65,6 +65,14 @@ What that review consciously left OPEN, with the reasoning:
 - ✅ **Callable keywords — `(:key m)`** (ADR-165, 2026-07-26). Keyword-only, in the
   shared `eval::apply`, so a keyword is a first-class value the HOFs can take
   (`(map :name people)`). Map/vector/set stay non-callable by decision.
+- ⬜ **Early-bind reserved names now that they can't be rebound (ADR-166).** The
+  reserved set makes a shipped binding *immutable*, so the compiler can resolve
+  `get`/`+`/`first` at compile time and the JIT can inline them **without a staleness
+  guard** — the `PrimOp1` epoch guard is already unreachable for its original purpose
+  (every prim it covers is reserved). This is Erlang's local-vs-remote-call
+  optimisation arriving by the same insight, and it is the mechanism behind the item
+  below rather than a separate idea. The checker can likewise stop typing reserved
+  globals as `dynamic()` and give them precise types. **[kernel/JIT]**
 - ⬜ **`get`'s call + type-dispatch overhead, which the JIT cannot see through.**
   Found while measuring ADR-165: against the `map-get` kernel op at 107 ms/1M, a
   single-arity Brood wrapper costs **+124 ms**, its four-branch `cond` a further

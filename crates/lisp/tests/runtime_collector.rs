@@ -928,7 +928,8 @@ fn migration_preserves_a_post_aging_redefinition() {
 
     interp.eval_str("(defn g (x) (* x 10))").expect("g gen 0");
     interp
-        .eval_str("(defn keep (x) (- x 1))")
+        // `keeper`, not `keep`: `keep` is a prelude function and reserved (ADR-166).
+        .eval_str("(defn keeper (x) (- x 1))")
         .expect("keep gen 0");
     assert!(interp.heap.age_runtime(), "age to gen 1");
 
@@ -951,7 +952,7 @@ fn migration_preserves_a_post_aging_redefinition() {
         );
     }
     {
-        let r = interp.eval_str("(keep 5)").unwrap();
+        let r = interp.eval_str("(keeper 5)").unwrap();
         assert_eq!(interp.print(r), "4", "keep was migrated intact");
     }
 }

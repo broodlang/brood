@@ -67,8 +67,9 @@ fn overflow_promotes_to_bignum_under_jit() {
     );
     // Subtraction underflow → BigInt too (i64::MIN - 1).
     is(
-        "(defn dec (i acc) (if (< i 1) acc (dec (- i 1) (- acc 1))))
-         (defn run (k last) (if (< k 1) last (run (- k 1) (dec 1 -9223372036854775808))))
+        // `countdown`, not `dec`: `dec` is a prelude function and reserved (ADR-166).
+        "(defn countdown (i acc) (if (< i 1) acc (countdown (- i 1) (- acc 1))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (countdown 1 -9223372036854775808))))
          (run 50000 0)",
         "-9223372036854775809",
     );
@@ -138,16 +139,37 @@ fn deopt_on_non_int_operand_matches_vm() {
 }
 
 #[test]
-fn redefining_an_operator_after_tiering_is_honored() {
-    // THE epoch-guard regression: warm `f` so it tiers (inlining `+` as a raw machine
-    // add), then redefine `+`. A tiered arm that ignored the redefinition would still
-    // add; the guard must invalidate it so `f` dispatches to the new `+` (here, `*`).
+fn redefining_a_sealed_operator_is_refused_after_tiering() {
+    // Was `redefining_an_operator_after_tiering_is_honored`: it warmed `f` until the
+    // JIT inlined `+` as a raw machine add, then redefined `+` to prove the epoch
+    // guard invalidated the tiered arm. ADR-166 reserves every shipped function, so
+    // that rebinding is now refused — which makes baking the add in sound *by
+    // construction* rather than by guard. (Follow-up recorded in ADR-166: the guard
+    // becomes removable for reserved names, which is the early-binding headroom
+    // sealing was meant to buy.)
     is(
         "(defn f (x) (+ x 1))
          (defn warm (k last) (if (< k 1) last (warm (- k 1) (f 100))))
          (warm 50000 0)
-         (def + (fn (a b) (* a b)))
-         (f 5)", // new +: 5 * 1 = 5
+         (try (do (def + (fn (a b) (* a b))) :rebound) (catch e :refused))",
+        ":refused",
+    );
+}
+
+#[test]
+fn redefining_a_user_fn_after_tiering_is_honored() {
+    // The property the sealed tests really guarded, retargeted at a name that is still
+    // rebindable — and *this* is the case that matters for live editing: your own
+    // function, redefined while a JIT'd caller is hot. It has to exist explicitly now,
+    // because every name the previous epoch-guard tests used (`+`, `type-of`) is
+    // reserved, which would otherwise have left the guard with no coverage at all.
+    is(
+        "(defn g (a b) (+ a b))
+         (defn f (x) (g x 1))
+         (defn warm (k last) (if (< k 1) last (warm (- k 1) (f 100))))
+         (warm 50000 0)
+         (def g (fn (a b) (* a b)))
+         (f 5)", // new g: 5 * 1 = 5
         "5",
     );
 }
@@ -629,16 +651,17 @@ fn type_of_prim_covers_every_shape_hot() {
 }
 
 #[test]
-fn type_of_prim_redef_falls_back() {
-    // Late binding: warm the arm (the TypeOf prim is epoch-guarded like every
-    // PrimOp1), then shadow `type-of` with a user defn — the guard must miss and
-    // dispatch the NEW binding, not the baked-in prim.
+fn type_of_prim_redef_is_refused() {
+    // Was `type_of_prim_redef_falls_back`: it warmed the arm (TypeOf is epoch-guarded
+    // like every PrimOp1) and then shadowed `type-of` with a user `defn`, asserting the
+    // guard dispatched the new binding. A shipped prim is reserved (ADR-166), so the
+    // shadowing is refused and the baked-in prim stays correct — the inlining is sound
+    // because the binding is immutable, not because a guard catches it.
     is(
         "(defn probe (i acc) (if (>= i 50000) acc (probe (+ i 1) (+ acc (if (%eq (type-of i) :int) 1 0)))))
          (probe 0 0)
-         (def type-of (fn (x) :shadowed))
-         (probe 49998 0)",
-        "0", // the NEW type-of yields :shadowed, never :int
+         (try (do (def type-of (fn (x) :shadowed)) :rebound) (catch e :refused))",
+        ":refused",
     );
 }
 

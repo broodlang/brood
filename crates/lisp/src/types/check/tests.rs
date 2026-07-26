@@ -1543,21 +1543,23 @@ fn file_defn_shadowing_a_builtin_wins_over_its_signature() {
 
 #[test]
 fn infers_a_straight_line_wrapper() {
-    // (defn inc (x) (+ x 1)) → x : number (from +'s rest type).
-    // So `(inc :k)` is a provable misuse.
-    let w = check_with_defs(&["(defn inc (x) (+ x 1))"], "(inc :k)");
+    // (defn bump (x) (+ x 1)) → x : number (from +'s rest type). Not named `inc`:
+    // this fixture is *evaluated*, and a shipped name is reserved (ADR-166).
+    // So `(bump :k)` is a provable misuse.
+    let w = check_with_defs(&["(defn bump (x) (+ x 1))"], "(bump :k)");
     assert!(
-        w.iter().any(|s| s.contains("inc") && s.contains("number")),
-        "expected an `inc :k` warning, got {:?}",
+        w.iter().any(|s| s.contains("bump") && s.contains("number")),
+        "expected a `bump :k` warning, got {:?}",
         w
     );
 }
 
 #[test]
 fn inferred_return_type_propagates() {
-    // (defn inc (x) (+ x 1)) returns the number `+` returns; feeding it into
-    // `string-length` (wants string) is a provable misuse.
-    let w = check_with_defs(&["(defn inc (x) (+ x 1))"], "(string-length (inc 1))");
+    // (defn bump (x) (+ x 1)) returns the number `+` returns; feeding it into
+    // `string-length` (wants string) is a provable misuse. (Not `inc` — the fixture
+    // is evaluated, and shipped names are reserved, ADR-166.)
+    let w = check_with_defs(&["(defn bump (x) (+ x 1))"], "(string-length (bump 1))");
     assert!(
         w.iter().any(|s| s.contains("string-length")),
         "expected a `string-length` warning, got {:?}",

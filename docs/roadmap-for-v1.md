@@ -9,9 +9,12 @@ Written 2026-07-26, at the end of the syntax review that produced ADR-155…163.
 
 ---
 
-> **Status, 2026-07-26:** item 1 is **done** (ADR-165). Items 2 and 3 — the two
-> genuinely irreversible decisions — are still open, and are all that stands between
-> here and a language freeze.
+> **Status, 2026-07-26:** item 1 is **done** (ADR-165), and a fourth item was added
+> and done the same day — **reserved names** (ADR-166), which belongs in this file
+> precisely because of the test below: *relaxing* a restriction later is
+> backward-compatible, *adding* one is not, so a language freeze has to decide it
+> first. Items 2 and 3 — the two remaining irreversible decisions — are all that
+> stands between here and the freeze.
 
 ## The test
 
@@ -153,6 +156,24 @@ Leaving it as "maybe" is the only option that isn't available.
 
 ---
 
+## 4. Reserved names — ✅ done (ADR-166)
+
+Everything the language ships is **reserved**: the prelude's functions and macros,
+every Rust builtin, every function an embedded std module defines. A `(def get …)` is
+an error. Your own globals and your packages stay fully redefinable, so ADR-013 hot
+reload — the editor updating itself as you use it — is untouched.
+
+It belongs on the *pre-freeze* list by the asymmetry: relaxing this later breaks
+nothing, adding it later breaks whoever monkey-patched. Erlang is the precedent (OTP's
+modules are sticky; you cannot patch `Enum.map/2`), and it landed *after* protocols
+(ADR-158) gave the sanctioned extension point that replaces patching — the same order
+Elixir did it in.
+
+Measured blast radius: **two lines** of user code across brood + 12 siblings, both
+accidental collisions the rule catches (`(def comp (table))` in a sieve bench,
+`(def dec …)` for decoded bytes). The namespace system had already done the work — a
+module-scoped `(defn get …)` defines `your/mod/get` and was never a redefinition.
+
 ## The freeze list — what Brood permanently is not
 
 This is the deliverable that makes a freeze credible, and it is writing, not code:
@@ -178,6 +199,7 @@ Draft, to be ratified as its own ADR before release:
 | Multiple dispatch | Single dispatch on the first argument; `match` covers the rest | ADR-158 |
 | Nominal types | `defrecord` is structural sugar over a map | ADR-130 |
 | More than one spelling per thing | `lambda`, `let*`, `car`/`cdr`, `concat`, `some?`, `length` all removed | ADR-098, ADR-154, ADR-162 |
+| Monkey-patching the language | shipped functions are reserved; extend with protocols, shadow with `let`, or namespace it | ADR-166 |
 
 ---
 

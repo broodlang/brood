@@ -93,6 +93,17 @@ a binding is made, it never changes. Concretely:
   not data mutation, and it exists for one reason: **live redefinition / hot
   reload** — the project's north star (ADR-013). A running process sees a `def`'d
   change on its next global lookup.
+- **…but not of the language's own functions.** A name that shipped inside the
+  `brood` binary — a prelude function or macro, a Rust builtin, or a function from an
+  embedded std module — is **reserved**, and `(def get …)` is an error (ADR-166). The
+  boundary is the binary: *if it came with Brood it is reserved; if you or a package
+  author wrote it, it is yours*. Hot reload is untouched, because it was always about
+  your code. This is the Erlang model — you cannot patch `Enum.map/2` on the BEAM
+  either — and it is what lets the compiler bind those names early. Three things stay
+  legal: a local `let` shadow (that binds a local, it isn't a redefinition), a
+  module-scoped `(defn get …)` (which defines `your/mod/get`), and rebinding the
+  prelude's *data* registries such as `*load-path*` (prelude functions do that
+  themselves — the rule reserves shipped **functions**, not every shipped name).
 - **No imperative loop.** There is no `while` (and nothing to make it progress
   without mutation). Iteration is **recursion** — proper tail calls give O(1)
   stack — or, for state that must evolve over time, a **process** (`spawn` /
@@ -2149,14 +2160,18 @@ agent can explore the live image — see `docs/mcp.md`.
 
 ## Prelude
 
+> **Reserved.** Every function and macro here is a *reserved name* — `(def map …)`
+> is an error (ADR-166). Shadow one locally with `let`, or define your own inside a
+> `(defmodule …)`; your own globals and your packages stay fully redefinable.
+
 `std/prelude.blsp` is loaded at startup and is where most of the language
 actually lives — the `defn` macro, the arithmetic operators, comparisons,
 equality, the sequence library, and the `->`/`->>` threading macros, all defined
 in Brood on top of the Rust primitive kernel. It also adds `inc` `dec`
 `identity` `second` `third` `zero?` `positive?` `negative?` `abs` `max` `min`
-`even?` `odd?` `sum` `product`. Because it's ordinary Brood, any of it can be redefined at
-runtime — and every function in it is defined with `defn`, exactly as you'd
-define your own.
+`even?` `odd?` `sum` `product`. It's ordinary Brood — every function in it is defined with `defn`, exactly as you'd
+define your own — but the *names* are reserved: it can be read, studied and copied,
+not rebound (ADR-166).
 
 ## Standard library (opt-in modules)
 

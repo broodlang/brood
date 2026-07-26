@@ -10214,3 +10214,107 @@ defect.
   forms — they are the two ways this gets typo'd.
 - No change to `get`, `get-in`, or any existing call: purely additive at the call
   protocol, and the only value kind whose callability changes is `Keyword`.
+
+## ADR-166 — Reserved names: the language's own functions cannot be redefined
+
+**Context.** Every global was rebindable, including `get`, `+`, `first` and `when`.
+`docs/language.md` advertised it — *"Because it's ordinary Brood, any of it can be
+redefined at runtime"* — and the prelude's own docs treated it as a feature. But the
+feature it was justified by, ADR-013 Erlang-style hot reload, is about **your** code:
+you redefine your editor's commands while the editor runs. Nothing in that story
+requires patching `get`.
+
+Meanwhile the cost was real: a monkey-patchable standard library is the Ruby/JS
+footgun (a library can't rely on `map` meaning `map`), and — larger — it blocks
+optimisation. Every prelude call has to be late-bound because any global *might* be
+rebound, which is precisely the overhead measured in ADR-165: against `map-get`'s
+107 ms/1M, a single-arity Brood wrapper costs +124 ms and `get`'s type-dispatch a
+further +138 ms, with the JIT closing none of it.
+
+**Decision — the seal boundary is the binary boundary.** If it shipped inside the
+`brood` binary it is **reserved**: the prelude's functions and macros, every Rust
+builtin, and every function an embedded std module defines. If you or a package
+author wrote it, it is **yours** — fully redefinable, so hot reload is untouched.
+That line is one sentence, and it is discoverable: reserved ⇔ it came with Brood.
+
+A `def` of a reserved name raises, naming the symbol and the three ways forward — a
+different name, a local `let` shadow (still legal: that binds a local, it is not a
+redefinition), or a `(defmodule …)`, where `(defn get …)` defines `your/mod/get` and
+is yours.
+
+**Only functions, not names.** The prelude's *data* globals — `*features*`,
+`*load-path*`, `*module-docs*`, `*reload-diagnostics*` — stay rebindable, because
+prelude functions rebind them with `def` at runtime; that is Brood's one mutation, and
+reserving them breaks `require`/`provide`/`defmodule` outright (found immediately: the
+first implementation sealed them and `(require 'set)` died on `*features-loading*`).
+The rule is "a shipped **function** can't be redefined", which is also exactly what
+was asked for.
+
+**Why Erlang's `unstick` isn't copied.** The BEAM marks OTP's modules *sticky* and
+keeps `code:unstick_mod/1`, and the precedent was examined rather than assumed. Its
+three reasons don't transfer: sticky is anti-*accident* (it stops a stray `lists.erl`
+clobbering OTP) rather than a rule; the hatch exists for operational hot-patching of a
+system that can't be restarted, whereas Brood's std ships *inside the binary* so
+changing it means rebuilding anyway; and instrumentation on the BEAM is a **VM
+facility** (`erlang:trace/3`, `dbg`), not code replacement — Brood likewise has
+`profile-start`, `system-monitor`, telemetry and the `BROOD_*` trace flags. The
+"wrap `get` to trace map access" argument was reaching for the wrong tool.
+
+**Why now, before the freeze.** The decision is asymmetric: **relaxing** a restriction
+later is backward-compatible — every program that worked still works — while
+**adding** one breaks whoever monkey-patched. Of the two possible mistakes, sealing is
+the recoverable one, so it is the right way to enter a language freeze. It also lands
+*after* ADR-158 gave protocols, which is the sanctioned extension point that replaces
+patching (Elixir's order too).
+
+**Implementation.** The reserved set lives in `RuntimeCode` beside the globals table,
+so every inner process shares one set, and it is probed only when a global `def` runs.
+Seeded at runtime-seed time with every shipped binding whose value is a function,
+macro or builtin. Embedded std modules extend it *as they load*: `require` routes
+baked-in source through a new `%load-module-source` primitive that holds a
+per-process exemption — so the module's own `def`s are allowed and become reserved —
+and releases it **even when the load throws**, since a leaked exemption would silently
+un-reserve the language. A project file off `*load-path*` goes through the ordinary
+`load`, so a package's names are never reserved. One gate, in the evaluator's `def`
+arm, because the VM defers `def` forms to the evaluator — it therefore covers both
+engines, `load`, `eval` and the REPL. It sits *above* the arity-change diagnostic so a
+refused `def` doesn't first print a `[reload]` warning about a rebinding that never
+happens.
+
+**Consequences.**
+- **Blast radius in user code: two lines.** Across brood + 12 sibling projects the
+  only genuine root-level clobbers were bench fixtures — `(def comp (table))` in a
+  sieve (the prelude's function composition) and `(def dec …)` for decoded bytes (the
+  prelude's decrement). Both were *accidental collisions the rule now catches*, which
+  is the argument for it in miniature. Everything else that looked like a
+  redefinition — `path/join`, `http/response/capitalize`, `proc/agent/get`,
+  `mitch/update` — is module-scoped and never touched the root binding. The namespace
+  system (ADR-065) had already done the work.
+- **Blast radius in the kernel's own test suite: six tests**, and they were the
+  interesting part. Three were fixture collisions (`inc`, `keep`, `dec`). Three
+  existed *to prove redefinition of a shipped function works* across the VM/JIT —
+  `prim1_guard_sees_redefinition`, `redefining_an_operator_after_tiering_is_honored`,
+  `type_of_prim_redef_falls_back`. Those properties are now unreachable, so each was
+  retargeted: two assert the refusal, and a **new** test
+  (`redefining_a_user_fn_after_tiering_is_honored`) pins the property that still
+  matters — a JIT'd caller honouring the redefinition of *your* function. Without it
+  the epoch guard would have been left with no coverage at all, since every name the
+  old tests used is now reserved. That is the live-editing case, and it deserved a
+  test of its own regardless.
+- **The optimisation this unlocks** is the point, and is deliberately *not* bundled
+  here: with a reserved binding immutable, the compiler can bind it **early** and the
+  JIT can inline it without a staleness guard. The `PrimOp1` epoch guard is already
+  unreachable for its original purpose (every prim it covers is reserved). That is
+  Erlang's local-vs-remote-call optimisation arriving by the same insight, and it is
+  the highest-leverage perf item in the library (`get` alone is ~4,800 call sites).
+  Filed in ROADMAP.
+- The checker can likewise stop treating reserved globals as `dynamic()` and give them
+  precise types — a sharpening of every warning that flows through a prelude call.
+  Also filed, not done.
+- Coverage in `tests/reserved_names_test.blsp` (12 cases): prelude functions,
+  builtins, macros and embedded-module functions all refused; the error naming the
+  symbol *and* all three escapes; user globals and `defn`s still redefinable including
+  an arity change; the prelude's data registries still rebindable (with `require`
+  exercised to prove it); `let` shadowing and module-scoped definition both still
+  legal; and the reserved set shared across processes (a spawned process refuses too,
+  yet can still redefine its own names).

@@ -175,7 +175,7 @@ zone) and on click (to find the target)."
 the one zone list the model hit-tests also drives the frontend's pointer shape. Zones with
 no `:cursor` contribute nothing."
   (map (fn (z) (let ([x y w h] (get z :rect)) (cursor-zone x y w h (get z :cursor))))
-    (filter (fn (z) (get z :cursor)) zones)))
+    (filter :cursor zones)))
 
 ;; ---- floating cards (popups, menus, tooltips) -------------------------------
 ;; The shared shape behind every floating overlay — completion popup, context menu,

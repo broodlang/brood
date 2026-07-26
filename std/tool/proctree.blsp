@@ -23,7 +23,7 @@ view). Pure — no IO, no UI deps — so a TUI (std/observer) and a buffer edito
 
 (defn by-id (procs)
   "Sort `procs` ascending by `:id` (stable spawn order) — the flat view."
-  (sort-by (fn (p) (get p :id)) procs))
+  (sort-by :id procs))
 
 (defn tree-walk (p procs depth limit)
   "DFS: emit `p` (tagged `:depth`) then its children's subtrees, each child sorted by
@@ -42,7 +42,7 @@ bounded rather than overflowing the stack."
 or not in the set — an orphan whose spawner already died is a root), each followed by
 its descendants (DFS by id), every map `:depth`-tagged. Children appear under their
 parent."
-  (let (ids (map (fn (p) (get p :id)) procs)
+  (let (ids (map :id procs)
         limit (count procs)
         root? (fn (p) (let (pa (get p :parent)) (or (nil? pa) (< (index-of ids pa) 0))))
         roots (by-id (filter root? procs)))

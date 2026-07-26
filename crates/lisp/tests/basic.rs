@@ -1752,15 +1752,31 @@ fn ics_never_bypass_a_dynamic_binding() {
 /// seen by an already-compiled body on its next call.
 #[test]
 fn prim1_guard_sees_redefinition() {
+    // ADR-166 turned this property inside out. It used to assert that redefining a
+    // kernel prim (`first`) was *seen* by already-compiled code — the VM inlines
+    // `first` as a `PrimOp1`, and a guard existed so an inlined call still noticed a
+    // rebinding. A shipped function is now RESERVED, so the rebinding can't happen at
+    // all, and the test pins the refusal instead: the strongest possible version of
+    // "an inlined prim can't go stale" is that its binding is immutable.
+    //
+    // Consequence worth following up (recorded in ADR-166): the `PrimOp1` staleness
+    // guard is now unreachable for its original purpose, since every prim it covers is
+    // reserved — which is the early-binding/inlining headroom sealing was meant to buy.
     let mut interp = fresh_interp();
     interp
         .eval_str("(def use-first (fn (xs) (first xs)))")
         .unwrap();
     let v = interp.eval_str("(use-first (list 1 2))").unwrap();
     assert_eq!(interp.print(v), "1");
-    interp.eval_str("(def first (fn (x) :redefined))").unwrap();
+    let err = interp
+        .eval_str("(def first (fn (x) :redefined))")
+        .expect_err("redefining a reserved prim must be refused");
+    let msg = err.to_string();
+    assert!(msg.contains("reserved name"), "{msg}");
+    assert!(msg.contains("first"), "{msg}");
+    // …and the inlined call still answers correctly afterwards.
     let v = interp.eval_str("(use-first (list 1 2))").unwrap();
-    assert_eq!(interp.print(v), ":redefined");
+    assert_eq!(interp.print(v), "1");
 }
 
 // ----- ADR-096 round 2: direct letrec self-recursion runs on the VM -----
