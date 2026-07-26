@@ -29,10 +29,19 @@
 > registry (cross-file reachable impls). Stack-guarded for deep forms. Rust tests +
 > manual `nest check` verify true-positives and zero false-positives across protocols.
 >
+> The warning is now **inference-driven**, not just syntactic: `check_into` (which threads
+> the local + global type context) hooks `expr_ty` on a symbol argument, so a record-typed
+> *variable* is caught too — `(let (c (circle 2)) (size c))` warns when `Size` has no impl
+> for circle. Two enablers made this work: `defrecord*` now emits a **map-literal** body
+> (so the constructor infers as a record *shape*, not a generic map) plus a **`sig`**
+> declaring that record return (so the shape flows through a `let` binding), and the
+> record's `:__id__` is a keyword literal the checker reads. `Ctx` carries the file's
+> ability facts (`AbilityInfo`) so the hook stays sound and cheap.
+>
 > **Still open:** **monomorphization** (compile-time impl resolution + inlining; codegen —
-> the *runtime* win, distinct from the compile-time warning just shipped), sealed
-> abilities, return-type dispatch, migrating/retiring `protocol`. The rest of this note
-> captures the problem, measurements, the language survey, and the design space.
+> the *runtime* win, distinct from the compile-time warning), sealed abilities, return-type
+> dispatch, migrating/retiring `protocol`. The rest of this note captures the problem,
+> measurements, the language survey, and the design space.
 
 ## The goal
 

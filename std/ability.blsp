@@ -193,8 +193,22 @@
   ;; The id is a KEYWORD (`:module/name`), not a symbol: a keyword literal is what the
   ;; type-checker tracks (`Ty::keyword_lit`), so a record's identity flows through
   ;; inference as a literal — the seam that makes the checker nominal-aware (Slice 3).
-  (let (id (keyword (str (name (current-ns)) "/" (name rec))))
-    (list 'defn rec fields
-      (cons 'hash-map
-        (cons :__id__ (cons id
-          (mapcat (fn (f) (list (keyword (name f)) f)) fields)))))))
+  (let (id (keyword (str (name (current-ns)) "/" (name rec)))
+        ;; Build a MAP LITERAL body (a real map value whose field values are the field
+        ;; symbols), NOT a `(hash-map …)` call — so the checker infers the constructor's
+        ;; result as a record SHAPE carrying the `:__id__` keyword literal. That is what
+        ;; makes a record's identity flow through inference to call sites (the Slice-3
+        ;; inference hook). At runtime it evaluates identically to `(hash-map …)`.
+        body (apply hash-map (cons :__id__ (cons id
+               (mapcat (fn (f) (list (keyword (name f)) f)) fields))))
+        ;; Emit a `sig` for the constructor so its record-shaped return type — carrying
+        ;; the `:__id__` keyword literal — flows through inference to call sites: this is
+        ;; what lets `(let (c (circle 2)) (size c))` be checked. Fields are `any` (records
+        ;; are structural — the identity is the point).
+        arg-tys (map (fn (_) 'any) fields)
+        rec-ty (cons 'record (cons :__id__ (cons id
+                 (mapcat (fn (f) (list (keyword (name f)) 'any)) fields))))
+        the-sig (list 'sig rec (append arg-tys (list '-> rec-ty))))
+    (list 'do
+      the-sig
+      (list 'defn rec fields body))))

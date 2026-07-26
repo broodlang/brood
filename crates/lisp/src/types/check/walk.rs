@@ -708,6 +708,27 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         }
     }
 
+    // **Ability op on a record-typed variable with no impl** (Slice 3, inference hook).
+    // The syntactic pass in `protocol` already covers literal / direct-ctor args; this
+    // uses the inferred type of a *symbol* argument (a `let`-bound record, a sig-typed
+    // param) — so `(let (c (circle 2)) (size c))` is flagged when `Size` has no impl for
+    // circle. Gated: file has abilities, head is a known op fn, arg is a symbol.
+    if let (Some(info), Value::Sym(h)) = (ctx.ability(), head) {
+        if info.op_of(h).is_some() {
+            if let Some(&Value::Sym(_)) = items.get(1) {
+                if let Some(ty) = super::infer::expr_ty(heap, items[1], ctx) {
+                    super::protocol::check_ability_call_inferred(
+                        info,
+                        h,
+                        &ty,
+                        heap.form_pos_only(form),
+                        out,
+                    );
+                }
+            }
+        }
+    }
+
     // **Keyword accessor** `(:key coll [default])` (ADR-165). A keyword head is not a
     // `Sym`, so none of the sig/arity machinery below sees it — the form was entirely
     // unchecked, including the misuse ADR-165 itself calls the most likely: `(:name

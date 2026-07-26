@@ -164,6 +164,40 @@ fn ability_is_silent_when_the_call_is_covered() {
 }
 
 #[test]
+fn ability_flags_a_record_typed_variable_via_inference() {
+    // `(let (r (rect 1 2)) (size r))` — the identity of a VARIABLE, caught by the
+    // `check_into` inference hook: `defrecord*` emits a `sig` so the constructor's
+    // record-shaped return type flows to the binding, and the hook reads its `:__id__`.
+    let ws = file_warnings(
+        "(require 'ability)\n\
+         (defmodule t)\n\
+         (ability/defability Size (size [self] :-> int))\n\
+         (ability/defrecord* rect (w h))\n\
+         (defn bad () (let (r (rect 1 2)) (size r)))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("no impl of `size` for :")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn ability_inference_is_silent_when_the_variable_is_covered() {
+    let ws = file_warnings(
+        "(require 'ability)\n\
+         (defmodule t)\n\
+         (ability/defability Size (size [self] :-> int))\n\
+         (ability/defrecord* circle (r))\n\
+         (ability/impl Size t/circle (size [c] (get c :r)))\n\
+         (defn ok () (let (c (circle 2)) (size c)))",
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("no impl of `size`")),
+        "{ws:?}"
+    );
+}
+
+#[test]
 fn ability_pass_never_flags_a_protocol_op() {
     // protocol op fns also dispatch through an `impl-for`; the ability pass must key
     // on the *qualified* `ability/impl-for`, so a protocol call is never mistaken.
