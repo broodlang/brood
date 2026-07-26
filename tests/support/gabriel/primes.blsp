@@ -1,0 +1,47 @@
+;; tests/support/gabriel/primes.blsp — the Gabriel PRIMES benchmark, ported to Brood.
+;;
+;; The list-based sieve: build `(2 … n)`, then repeatedly filter out multiples of the
+;; head. Every `remove-multiples` pass rebuilds the tail, so the program is a cascade of
+;; freshly-consed lists of decreasing length — allocation churn with a completely
+;; determined answer. The oracle is the whole prime list, which is why this is a better
+;; correctness test than a count: a sieve that drops or duplicates one element fails
+;; loudly at the exact position.
+;;
+;; A direct transcription of upstream `primes.scm`; the `letrec`-bound
+;; `remove-multiples` becomes a module-level private (Brood has `letrec`, but a named
+;; top-level fn is what the surrounding style calls for).
+;;
+;; Note this is the *list* sieve, unrelated to the `sieve` row in our own benchmark
+;; suite, which is the dense-`Table` bitset version (ROADMAP, Elixir-parity gaps).
+
+(defmodule gabriel/primes
+  "The Gabriel PRIMES benchmark (list-based sieve) — a conformance port. The oracle is
+upstream's own expected output in `tests/corpus/gabriel/data/primes.input`.")
+
+;; Non-tail: the `cons` wraps the recursive call, so the list is built on the way out.
+;; That is the shape upstream measures.
+(check-allow :non-tail-recursion
+  (defn interval-list (m n)
+    "The list of integers from `m` up to `n` inclusive, or nil when `m` > `n`."
+    (if (> m n)
+      nil
+      (cons m (interval-list (+ 1 m) n)))))
+
+(check-allow :non-tail-recursion
+  (defn primes--remove-multiples (n l)
+    (cond
+      (nil? l) nil
+      (= (rem (first l) n) 0) (primes--remove-multiples n (rest l))
+      else (cons (first l) (primes--remove-multiples n (rest l))))))
+
+(check-allow :non-tail-recursion
+  (defn sieve (l)
+    "The sieve of Eratosthenes over the ascending list `l`."
+    (if (nil? l)
+      nil
+      (cons (first l)
+            (sieve (primes--remove-multiples (first l) (rest l)))))))
+
+(defn primes<= (n)
+  "The list of primes up to and including `n`."
+  (sieve (interval-list 2 n)))

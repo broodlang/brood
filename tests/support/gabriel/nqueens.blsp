@@ -1,0 +1,45 @@
+;; tests/support/gabriel/nqueens.blsp — the Gabriel NQUEENS benchmark, ported to Brood.
+;;
+;; Backtracking search: `my-try` rebuilds its candidate list with `append`/`cons` at
+;; every branch, so the run is dominated by short-lived list allocation and minor GC —
+;; the row `docs/compute-frontier.md` calls representation-capped. Here it is not a
+;; timing row but a correctness one: the search visits a fixed number of solutions, and
+;; the count is upstream's oracle, so an allocation or GC bug that loses a branch shows
+;; up as a wrong integer rather than as a plausible-looking slowdown.
+;;
+;; A direct transcription of upstream `nqueens.scm` (the `trace?` debug output and its
+;; `when` are dropped — the R7RS harness always runs with it off). Brood has no internal
+;; `define`, so `iota1`/`my-try`/`ok?` become module-level privates.
+
+(defmodule gabriel/nqueens
+  "The Gabriel NQUEENS benchmark (backtracking N-queens count) — a conformance port. The
+oracle is upstream's own expected output in `tests/corpus/gabriel/data/nqueens.input`.")
+
+;; `(1 2 … n)` — upstream's `iota1`, which counts UP, unlike takl's `listn`.
+(defn nqueens--iota1 (n)
+  (nqueens--iota1--acc n nil))
+
+(defn nqueens--iota1--acc (i acc)
+  (if (= i 0) acc (nqueens--iota1--acc (- i 1) (cons i acc))))
+
+;; Tail-recursive over `placed`, so no opt-out needed.
+(defn nqueens--ok? (row dist placed)
+  (if (nil? placed)
+    true
+    (and (not (= (first placed) (+ row dist)))
+         (not (= (first placed) (- row dist)))
+         (nqueens--ok? row (+ dist 1) (rest placed)))))
+
+;; The search itself is non-tail (two recursive calls summed) — that IS the benchmark.
+(check-allow :non-tail-recursion
+  (defn nqueens--try (x y z)
+    (if (nil? x)
+      (if (nil? y) 1 0)
+      (+ (if (nqueens--ok? (first x) 1 z)
+           (nqueens--try (append (rest x) y) nil (cons (first x) z))
+           0)
+         (nqueens--try (rest x) (cons (first x) y) z)))))
+
+(defn nqueens (n)
+  "The number of solutions to the `n`-queens problem."
+  (nqueens--try (nqueens--iota1 n) nil nil))

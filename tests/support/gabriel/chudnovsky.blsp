@@ -1,0 +1,80 @@
+;; tests/support/gabriel/chudnovsky.blsp — the CHUDNOVSKY benchmark, ported to Brood.
+;;
+;; π to n digits by the Chudnovsky brothers' series, evaluated with binary splitting. It
+;; earns its place in this corpus for one reason: it is the only program here whose
+;; arithmetic leaves i64 immediately and stays out. Computing 500 digits means exact
+;; integers of ~1000 digits multiplied, divided and compared thousands of times, so the
+;; run is a sustained exercise of the automatic int -> big-integer widening — and the
+;; oracle is ten exact 50-to-500-digit integers, where a single wrong limb fails.
+;;
+;; That matters because the corpora have already found two arithmetic bugs Brood
+;; *inherited* from a numeric dependency rather than wrote (the `bigdecimal` scale
+;; short-circuits, ROADMAP dectest row). This is the same class of exposure on the
+;; big-integer side, with an independent reference.
+;;
+;; Transcription notes. Upstream's `exact-integer-sqrt` has no Brood equivalent — `sqrt`
+;; is f64, which would be catastrophically wrong here — so `chudnovsky--isqrt` is a
+;; Newton iteration on exact integers, which is what a Scheme's `exact-integer-sqrt`
+;; is anyway. It is the only code in this file that is not upstream's. `expt` -> `pow`
+;; (exact for integer arguments, including the alternating `(pow -1 b)`), `quotient` ->
+;; `quot`, and the `(g p q)` triple becomes a `[g p q]` vector rather than a 3-list: it is
+;; internal to the split and never reaches the result, and a vector is the Brood tuple.
+;;
+;; `pi` is a prelude name, so upstream's `pi` is `pi-digits` here — and it is not the same
+;; thing in any case: it returns the first `digits` digits of π as an INTEGER, not a float.
+
+(defmodule gabriel/chudnovsky
+  "The CHUDNOVSKY benchmark (π to n digits by binary splitting over big integers) — a
+conformance port. The oracle is upstream's own expected output in
+`tests/corpus/gabriel/data/chudnovsky.input`.")
+
+(def chudnovsky--a 13591409)
+(def chudnovsky--b 545140134)
+(def chudnovsky--c 640320)
+(def chudnovsky--c^3 (pow 640320 3))
+(def chudnovsky--d 12)
+
+;; floor(sqrt(n)) for an exact non-negative integer `n`, by Newton's method. The loop
+;; descends (each `y` is below the previous `x`) and stops on the first non-decrease,
+;; which is the standard integer-sqrt fixpoint: `x` is then floor(sqrt(n)) exactly, with
+;; no float anywhere in the derivation.
+(defn chudnovsky--isqrt--descend (n x y)
+  (if (< y x)
+    (chudnovsky--isqrt--descend n y (quot (+ y (quot n y)) 2))
+    x))
+
+(defn chudnovsky--isqrt (n)
+  (if (< n 2)
+    n
+    (chudnovsky--isqrt--descend n n (quot (+ n 1) 2))))
+
+;; Binary splitting over the series terms [a, b): returns `[g p q]`. Doubly recursive and
+;; non-tail — the divide-and-conquer shape is the point.
+(check-allow :non-tail-recursion
+  (defn chudnovsky--split (a b)
+    (if (= 1 (- b a))
+      (let (g (* (- (* 6 b) 5) (- (* 2 b) 1) (- (* 6 b) 1)))
+        [g
+         (quot (* chudnovsky--c^3 (pow b 3)) 24)
+         (* (pow -1 b) g (+ (* b chudnovsky--b) chudnovsky--a))])
+      (let (mid (quot (+ a b) 2)
+            [g1 p1 q1] (chudnovsky--split a mid)
+            [g2 p2 q2] (chudnovsky--split mid b))
+        [(* g1 g2)
+         (* p1 p2)
+         (+ (* q1 p2) (* q2 g1))]))))
+
+(defn pi-digits (digits)
+  "The first `digits` digits of π, as an exact integer (upstream's `pi`)."
+  (let (num-terms (floor (+ 2 (/ digits 14.181647462)))
+        sqrt-c (chudnovsky--isqrt (* chudnovsky--c (pow 100 digits)))
+        [_ p q] (chudnovsky--split 0 num-terms))
+    (quot (* p chudnovsky--c sqrt-c)
+          (* chudnovsky--d (+ q (* p chudnovsky--a))))))
+
+(check-allow :non-tail-recursion
+  (defn pies (n m s)
+    "π to `n`, `n+s`, … digits, up to and including `m` — upstream's driver."
+    (if (< m n)
+      nil
+      (cons (pi-digits n) (pies (+ n s) m s)))))

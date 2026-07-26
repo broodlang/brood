@@ -1,0 +1,39 @@
+;; tests/support/gabriel/cpstak.blsp — the Gabriel CPSTAK benchmark, ported to Brood.
+;;
+;; Upstream calls it "a good test of first class procedures and tail recursion", and
+;; that is exactly why it earns its place here: every recursive step allocates a fresh
+;; closure that captures three locals, and every call is in tail position. So it
+;; exercises the closure-capture path and the tail-call protocol together, at depth,
+;; with an exact integer oracle at the end — the shape most likely to catch a JIT that
+;; mis-stages captured slots or drops a frame.
+;;
+;; A direct transcription of upstream `cpstak.scm`. Brood has no internal `define`, so
+;; the inner `tak` becomes a module-level private `cpstak--tak`; nothing else changes
+;; (the continuations stay `fn`s, the arithmetic stays integer).
+
+(defmodule gabriel/cpstak
+  "The Gabriel CPSTAK benchmark (continuation-passing TAK) — a conformance port. The
+oracle is upstream's own expected output in `tests/corpus/gabriel/data/cpstak.input`.")
+
+;; Every call here is a tail call, so this needs no `check-allow` — proper tail calls
+;; make the whole cascade O(1) stack, which is the property under test.
+(defn cpstak--tak (x y z k)
+  (if (not (< y x))
+    (k z)
+    (cpstak--tak (- x 1)
+                 y
+                 z
+                 (fn (v1)
+                   (cpstak--tak (- y 1)
+                                z
+                                x
+                                (fn (v2)
+                                  (cpstak--tak (- z 1)
+                                               x
+                                               y
+                                               (fn (v3)
+                                                 (cpstak--tak v1 v2 v3 k)))))))))
+
+(defn cpstak (x y z)
+  "The Takeuchi function computed in continuation-passing style."
+  (cpstak--tak x y z (fn (a) a)))

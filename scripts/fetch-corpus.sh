@@ -211,8 +211,59 @@ suite_crypto() {
   rm -rf "$tmp"
 }
 
+# ---------------------------------------------------------------------- gabriel
+# The Gabriel / Larceny Scheme benchmarks, via ecraven/r7rs-benchmarks (which took
+# them "with kind permission from the Larceny project, based on the Gabriel and
+# Gambit benchmarks"). Unlike every other suite here, the subject is not a parser
+# fed hostile bytes — it is whole *programs* with known answers, run as a VM/JIT
+# shakedown with an oracle. See tests/corpus/gabriel/README.md.
+#
+# What gets committed and what does not, and why:
+#
+#   data/*.input   COMMITTED. Each is the benchmark's own driver data — an
+#                  iteration count, the arguments, and the EXPECTED RESULT, in
+#                  that order (upstream's `(read)` sequence). This is the oracle,
+#                  it is tiny, and it is plain fact.
+#   reference/*.scm  NOT committed (gitignored). The Scheme sources our ports were
+#                  written from. Only nboyer/sboyer carry an explicit "Status:
+#                  Public Domain"; for the rest the chain Gabriel book -> Gambit
+#                  (LGPL/Apache) -> Larceny (notice-only permissive) -> ecraven (no
+#                  LICENSE file) is not cleanly attributable per file, so this repo
+#                  does not redistribute them. Run this script to fetch them when
+#                  you want to diff a port against its original.
+GABRIEL_COMMIT=85f6acdc4cc4e2b857f307ba56bd0ba931dcccd1
+GABRIEL_BASE="https://raw.githubusercontent.com/ecraven/r7rs-benchmarks/$GABRIEL_COMMIT"
+
+# The benchmarks we have ported (tests/support/gabriel/<name>.blsp). Keep in sync
+# with GABRIEL_PORTED in tests/conformance_gabriel_test.blsp.
+GABRIEL_PORTS=(deriv takl cpstak mazefun nqueens primes nboyer chudnovsky)
+
+suite_gabriel() {
+  local d="$CORPUS/gabriel"
+  mkdir -p "$d/data" "$d/reference"
+  for f in "${GABRIEL_PORTS[@]}"; do
+    fetch "$GABRIEL_BASE/inputs/$f.input" "$d/data/$f.input"
+    fetch "$GABRIEL_BASE/src/$f.scm" "$d/reference/$f.scm"
+  done
+  # The harness the .input files are read by — records the read order our runner
+  # reproduces, and is the reason `count` is the first datum in every file.
+  fetch "$GABRIEL_BASE/src/common.scm" "$d/reference/common.scm"
+
+  if [ "$FULL" = 1 ]; then
+    # The benchmarks named in ROADMAP but NOT ported (see the README for why each
+    # is excluded) plus the rest of the suite — a porter's shopping list.
+    for f in sboyer peval earley conform nucleic gcbench destruc browse \
+             ack tak ntakl fib fibfp sum sumfp diviter divrec pi \
+             lattice graphs matrix paraffins puzzle triangl; do
+      fetch "$GABRIEL_BASE/src/$f.scm" "$d/reference/$f.scm"
+      curl -fsSL --retry 3 "$GABRIEL_BASE/inputs/$f.input" \
+        -o "$d/reference/$f.input" 2>/dev/null || true
+    done
+  fi
+}
+
 # ----------------------------------------------------------------------- driver
-SUITES=(parse-number dectest json ucd csv utf8 crypto)
+SUITES=(parse-number dectest json ucd csv utf8 crypto gabriel)
 
 main() {
   local want=()

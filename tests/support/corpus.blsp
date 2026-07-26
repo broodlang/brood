@@ -51,6 +51,14 @@ significant and the rest ignore them anyway."
     (string-split (if (ends-with? s "\n") (substring s 0 (dec (string-length s))) s)
                   "\n")))
 
+(defn corpus-forms (path)
+  "Every s-expression in corpus file `path`, as a list. For the corpora whose data
+*is* Lisp — the Gabriel benchmarks' `.input` files, whose forms are an iteration
+count, the arguments and the expected result — so a runner compares against
+upstream's own bytes instead of a retyped expectation. Comments are dropped by the
+reader, exactly as the Scheme harness's repeated `(read)` drops them."
+  (read-all (slurp path)))
+
 ;; ---- hex ---------------------------------------------------------------------
 ;; Several corpora (parse-number's bit patterns, the UCD code points, the crypto
 ;; vectors) state their expectations in hex. `number->string` has no radix, so the

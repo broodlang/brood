@@ -1,0 +1,47 @@
+;; tests/support/gabriel/deriv.blsp — the Gabriel DERIV benchmark, ported to Brood.
+;;
+;; Symbolic differentiation over an expression tree: allocation-heavy, `cons`-per-node,
+;; and every result is a structure rather than a number — so the oracle
+;; (tests/corpus/gabriel/data/deriv.input) checks the whole returned tree, not one
+;; value that a broken engine could stumble onto.
+;;
+;; The port is a direct transcription of upstream `deriv.scm`. Only the spellings
+;; change: `eq?` -> `=` (symbols are interned, so structural `=` IS identity),
+;; `car`/`cdr` -> `first`/`rest`, `cadr`/`caddr` -> `second`/`third`, `cond`'s
+;; double-parens flatten. Upstream notes it returns the wrong answer for quotients;
+;; that is preserved deliberately — the benchmark's input never takes the `/` branch,
+;; and "fix the maths" would break the vendored oracle.
+
+(defmodule gabriel/deriv
+  "The Gabriel DERIV benchmark (symbolic differentiation) — a conformance port. The
+oracle is upstream's own expected output in `tests/corpus/gabriel/data/deriv.input`.")
+
+;; `(any -> any)` is the honest signature — the argument is a term (a symbol, an integer
+;; or a list) and the result is an integer or a list — but it is also **load-bearing**:
+;; without it, `nest check` hangs on any *cross-module* call to `deriv` (KI-13). The
+;; checker infers an undeclared callee's return type across the module boundary, and that
+;; inference blows up exponentially in the number of `cond` branches building nested list
+;; structure: measured at 2, 3, 4, 5 recursive branches -> 105 ms, 105 ms, 8.7 s, >900 s.
+;; A declared sig is consulted before body inference (`sig_of` -> `declared_heap_sig`), so
+;; it short-circuits the blowup: 105 ms. Declaring the type of a public API is right
+;; anyway (ADR-153), but do not delete this one thinking it is decoration.
+(sig deriv (any -> any))
+
+;; Non-tail by nature: the recursive call sits under a `cons`/`list`, which is what
+;; makes this an allocation benchmark. The lint is correct and unwanted.
+(check-allow :non-tail-recursion
+  (defn deriv (a)
+    "The symbolic derivative of expression `a` with respect to `x`."
+    (cond
+      (not (pair? a)) (if (= a 'x) 1 0)
+      (= (first a) '+) (cons '+ (map deriv (rest a)))
+      (= (first a) '-) (cons '- (map deriv (rest a)))
+      (= (first a) '*) (list '*
+                             a
+                             (cons '+ (map (fn (b) (list '/ (deriv b) b)) (rest a))))
+      (= (first a) '/) (list '-
+                             (list '/ (deriv (second a)) (third a))
+                             (list '/
+                                   (second a)
+                                   (list '* (third a) (third a) (deriv (third a)))))
+      else (error "deriv: no derivation method available: " (pr-str a)))))

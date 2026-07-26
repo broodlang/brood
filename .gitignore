@@ -18,6 +18,13 @@ _deps/
 # `scripts/fetch-corpus.sh --full`. The committed subset lives in <suite>/data/.
 tests/corpus/*/full/
 
+# The Gabriel/Larceny benchmarks' Scheme sources. Deliberately NOT committed: the
+# licence chain (Gabriel book -> Gambit -> Larceny -> ecraven) is not cleanly
+# attributable per file, so we vendor only the .input oracle data and fetch the
+# sources on demand with `scripts/fetch-corpus.sh gabriel` when diffing a port
+# against its original. See tests/corpus/gabriel/README.md.
+tests/corpus/gabriel/reference/
+
 # Local debug artifacts (never commit)
 .brood_crash_dump
 .brood-skip-blsp-check
