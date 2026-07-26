@@ -250,6 +250,11 @@ keyword** — including an integer-indexed collection, because `(:name deps)` wh
 (:name deps)             ; type error: :name: expected a map, set or nil …
 ```
 
+The advisory checker knows the form (ADR-167): it flags a receiver that provably
+can't be keyed, a wrong arity, and flows a **typed record field** through the result —
+so `(string-length (:x p))` is caught for a `(defrecord pt ((x int) …))` exactly as
+`(string-length (get p :x))` is.
+
 **Only keywords.** A map, vector or set in head position is still an error with a
 hint — `({:a 1} :a)` would be a second spelling of `get`, and a callable vector or set
 answers by index-or-membership, the ambiguity `contains?` deliberately refuses

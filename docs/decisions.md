@@ -10331,3 +10331,52 @@ happens.
   exemption — `*out*` permanently redirected, `print` following it, and the scoped
   `with-out-str` form unaffected (isolated because rebinding a global port would
   otherwise swallow every concurrent test's output).
+
+## ADR-167 — Keyword accessors are typed, not just callable
+
+**Context.** ADR-165 made a keyword callable. It taught the checker one thing — that a
+keyword is acceptable where a *callable* is expected, so `(map :name people)` doesn't
+warn — and stopped there. That left a hole, found by asking the obvious follow-up
+question rather than assuming: **what does the checker know about `(:name x)` itself?**
+Nothing. A keyword head is not a `Value::Sym`, so the form bypassed every sig, arity
+and result-type path in `check_into_inner`:
+
+| Form | `get` spelling | keyword spelling (before) |
+|---|---|---|
+| receiver can't be keyed | *(also unchecked)* | **no warning** |
+| wrong arity | arity error | **no warning** |
+| result type from a typed record field | `nil \| int` — flagged | **no type at all** |
+
+The middle column matters: `(string-length (get (pt 1 2) :x))` was already caught,
+while the identical `(string-length (:x (pt 1 2)))` was not. Two spellings of one
+operation typed differently, which is the worst outcome for a feature whose whole
+justification was that it reads better.
+
+**Decision — check the form, and infer through it.**
+
+1. **Receiver kind.** A keyword accessor's argument must be keyable — a map (by key),
+   a set (by membership) or `nil` (empty), exactly the receivers `apply_keyword`
+   accepts. Warn only when the argument's type is *provably* none of those
+   (`is_disjoint` under the gradual reading), so an inferred or redefinable value never
+   misfires. This is the check that catches ADR-165's own stated worst case: `(:name
+   deps)` where `deps` is a *list* of maps.
+2. **Arity.** `(:k)` and `(:k a b c)` are flagged with the same wording the runtime
+   uses, so write-time and run-time agree.
+3. **Result type.** A keyword head now runs the *same* record-field / `map<K,V>` rule
+   that `(get m :k)` has had since ADR-115: a declared field's type wins, `V | nil`
+   for a known map, and an unknown key on a record falls through — records are open,
+   so an undeclared key's type is genuinely unknown rather than an error. The two
+   spellings are now pinned to produce the same warning count on the same program.
+
+**Consequences.**
+- `(:x p)` participates in the advisory checker exactly as `get` does, including
+  flowing a record field's declared type into a downstream misuse.
+- No new false-positive surface: both new warnings fire only on a *provable* mismatch,
+  and the arity check is structural.
+- Three tests in `types/check/tests.rs` pin the receiver check (including the four
+  silent cases — map, set, nil, and an unknown parameter), the arity check, and the
+  result-type equivalence with `get`.
+- Still open, and deliberately so: `get`'s *own* receiver check. `(get 5 :name)` draws
+  no warning, because its curated signature takes the widest domain — the runtime
+  catches it precisely (ADR-164) but the checker doesn't. Tightening it is a separate,
+  wider change (the sig is shared by every collection kind); filed rather than bundled.

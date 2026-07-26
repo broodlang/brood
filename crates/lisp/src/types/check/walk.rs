@@ -708,6 +708,51 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         }
     }
 
+    // **Keyword accessor** `(:key coll [default])` (ADR-165). A keyword head is not a
+    // `Sym`, so none of the sig/arity machinery below sees it — the form was entirely
+    // unchecked, including the misuse ADR-165 itself calls the most likely: `(:name
+    // deps)` where `deps` is a *list* of maps. Two checks, both false-positive-free:
+    // the arity, and whether the receiver's type can possibly be keyed.
+    if let Value::Keyword(k) = head {
+        let shown = format!(":{}", value::symbol_name_ref(k));
+        let argc = items.len() - 1;
+        if argc == 0 || argc > 2 {
+            out.push((
+                heap.form_pos_only(form),
+                format!(
+                    "{shown}: a keyword accessor takes 1 or 2 arguments, got {argc}"
+                ),
+            ));
+        } else {
+            // The receivers `apply_keyword` accepts: a map (by key), a set (by
+            // membership), or nil (empty). Warn only when the argument's type is
+            // *provably* none of those — `is_disjoint` against the dynamic reading, so
+            // an inferred/redefinable value never misfires.
+            use crate::types::Tag;
+            let keyed = Ty::of(Tag::Map)
+                .union(Ty::of(Tag::Set))
+                .union(Ty::of(Tag::Nil));
+            let g = gradual_of(heap, items[1], ctx);
+            if !g.bound.is_never()
+                && g.bound.is_disjoint(&keyed)
+                && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+            {
+                out.push((
+                    arg_pos(heap, items[1], form),
+                    format!(
+                        "{shown}: expected a map, set or nil to look up in, got {} ({})",
+                        g.bound,
+                        crate::syntax::printer::print(heap, items[1]),
+                    ),
+                ));
+            }
+        }
+        for &arg in &items[1..] {
+            check_into(heap, arg, ctx, out);
+        }
+        return;
+    }
+
     // Special-cased forms that introduce scope or refine types. Each handles
     // its own argument-walking and returns; the generic path below doesn't run.
     if let Value::Sym(s) = head {
