@@ -417,7 +417,7 @@ pub fn loadable_modules(interp: &mut Interp) -> Vec<String> {
         }
     }
     // 2. Top-level `<name>.blsp` basenames across the load-path dirs.
-    let scan = "(apply concat (map (fn (d) (if (file-exists? d) (list-dir d) nil)) *load-path*))";
+    let scan = "(apply append (map (fn (d) (if (file-exists? d) (list-dir d) nil)) *load-path*))";
     if let Ok(v) = interp.eval_str(scan) {
         if let Ok(items) = interp.heap.list_to_vec(v) {
             for it in items {

@@ -833,6 +833,16 @@ docs/testing.md for the full guide.")
 ;; — otherwise nextest would kill the wrapper before this inner timeout could fire.
 (defdyn *test-timeout-ms* 120000)
 
+;; The batch budget for a unit tagged `:slow` or `:conformance`. Before this, `:tags [… :slow]` was
+;; documentation the runner ignored: the external conformance corpora (~19,000 UCD
+;; normalisation cases x 6 forms) take ~44 s in a *release* build and comfortably
+;; exceed the 120 s batch deadline in a debug one, so `nest test` hard-killed them
+;; while a genuinely hung test is what that ceiling is for. A `:slow` unit now buys
+;; the batch this budget instead — still a hard ceiling, just one sized for work
+;; that is legitimately long rather than stuck. Untagged batches are unchanged, so a
+;; runaway test is still caught in 120 s.
+(defdyn *test-slow-timeout-ms* 900000)
+
 ;; The deadline for an ANTI-HANG GUARD — a `(receive … (after *test-wait-ms* :timeout))`
 ;; where the message is expected and the timeout means "something is wrong". Distinct
 ;; from `*test-timeout-ms*` (the runner's hard per-test ceiling) and from the short
@@ -937,10 +947,30 @@ docs/testing.md for the full guide.")
            *test-timeout-ms*))
     (third unit)))
 
+;; Tags that buy a batch the raised budget. `:slow` says it directly; `:conformance`
+;; implies it — an external-corpus sweep is thousands of cases by construction (the
+;; UCD normalisation file alone is ~19,000 x 6 forms), and tagging each new corpus
+;; `:slow` as well is a step the next author will forget. Everything untagged keeps
+;; the 120 s ceiling, which is what catches a genuinely hung test.
+(def *test-long-tags* [:slow :conformance])
+
+;; Is any unit in this batch tagged for the raised budget? (`workers` is a list of
+;; `(pid unit)`, a unit is `(mode group tests)`, and a test's meta carries its tags.)
+(defn collect--slow-batch? (workers)
+  (some? (fn (w)
+           (some? (fn (t) (some? (fn (tag) (includes? *test-long-tags* tag)) (test--tags t)))
+             (third (second w))))
+    workers))
+
 (defn collect-units (workers acc)
   ;; Fixed wall deadline for this batch — recomputed per collect, so each isolated
-  ;; unit / parallel chunk gets its own full budget.
-  (collect-loop (count workers) workers nil acc (+ (now) *test-timeout-ms*)))
+  ;; unit / parallel chunk gets its own full budget. A `:slow`-tagged unit raises the
+  ;; budget for its batch (see `*test-slow-timeout-ms*`); rebinding the var rather
+  ;; than threading a number keeps the timeout *message* accurate too.
+  (if (collect--slow-batch? workers)
+    (binding (*test-timeout-ms* (max *test-timeout-ms* *test-slow-timeout-ms*))
+      (collect-loop (count workers) workers nil acc (+ (now) *test-timeout-ms*)))
+    (collect-loop (count workers) workers nil acc (+ (now) *test-timeout-ms*))))
 
 (defn collect-loop (pending workers reported acc deadline)
   (if (= pending 0)

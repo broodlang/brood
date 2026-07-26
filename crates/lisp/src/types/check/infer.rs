@@ -629,10 +629,11 @@ fn seq_aware_call_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> O
             _ => Some(Ty::of(Tag::Pair)), // one side unknown → unrefined pair
         };
     }
-    // `(append xs ys …)` / `(concat xs ys …)` — variadic list concatenation.
+    // `(append xs ys …)` — variadic list concatenation. (`concat` was an alias and
+    // was removed; one spelling each.)
     // Result element type is the union of every argument's element type; any
     // argument with an unknown element type → fall through to the flat result.
-    if value::symbol_is(head, "append") || value::symbol_is(head, "concat") {
+    if value::symbol_is(head, "append") {
         if items.len() == 1 {
             return Some(Ty::of(Tag::Nil)); // (append) = nil
         }

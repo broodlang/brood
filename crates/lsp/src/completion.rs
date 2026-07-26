@@ -294,12 +294,10 @@ mod tests {
         assert!(!chk("(+ 1 2)", "+")); // ordinary call
     }
 
-    // KNOWN FAILING — KI-12 (docs/known-issues.md). This test is the only thing in
-    // the tree that reads the *default* `*load-path*`, and a frozen-prelude handle
-    // bug leaves that path holding a wrong object (a docstring, a symbol — it
-    // varies with heap layout), so no module is ever found on it. The test is
-    // correct; the kernel is not. Left failing on purpose: it is the canary, and
-    // `#[ignore]`ing it would hide a genuine corruption.
+    // This is the only test that reads the *default* `*load-path*`, which made it the
+    // canary for KI-12: a frozen-prelude handle bug left that path holding an
+    // unrelated object, so no module was ever found on it. Fixed 2026-07-26
+    // (`Heap::localize_for_freeze`); keep this test as the regression guard.
     #[test]
     fn completes_module_names_in_require_and_use() {
         // A module on the load-path is offered inside `(require '…)` and `(:use …)`,

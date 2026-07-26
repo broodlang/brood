@@ -62,7 +62,6 @@ const SHOULD_WARN: &[(&str, &str)] = &[
     ("(string-length (first (drop 1 [1 2 3])))", "string-length"),       // drop preserves int
     ("(string-length (first (cons 1 (list 2 3))))", "string-length"),    // cons: int | int = int
     ("(string-length (first (append [1 2] [3 4])))", "string-length"),   // append: int ∪ int = int
-    ("(string-length (first (concat [1 2] [3 4])))", "string-length"),   // concat: same
     // ---- type-variable sigs: return type resolved from argument types ----
     (
         "(sig identity (?A -> ?A)) (defn identity (x) x) (string-length (identity 42))",

@@ -175,18 +175,14 @@
           (nt--scan-chunk want k n (rest lines) here (inc idx) (inc ran)
                           (if w (cons w bad) bad)))))))
 
-;; How much of Part1 the default run covers: one slice in `NT--PART1-OF`. Sampled, not
-;; chunked-and-all-run, and the reason is the DEBUG build: `brood_suite_passes` runs the
-;; whole in-language suite in one debug process, where a normalisation is ~30x its release
-;; cost, and even a quarter of Part1 (~4,000 cases x 6 normalisations) blows the
-;; framework's 120 s per-test ceiling under full-workspace load. Splitting further just
-;; moves the number around — the honest fix is to cover a representative slice by default.
-;;
-;; `index mod n` sampling, so the slice is spread across the whole section rather than a
-;; prefix, and it is deterministic. To sweep ALL of Part1, set NT--PART1-OF to 1 — worth
-;; doing after any change to `string-normalize` or a UCD version bump, on a release build
-;; (`./target/release/nest test tests/conformance_ucd_test.blsp`), where it is ~5 s.
-(def nt--part1-of 16)
+;; Part1 runs in FULL (`nt--part1-of` = 1). It was briefly sampled while chasing a
+;; timeout that turned out to be a misread of the framework: `*test-timeout-ms*` is a wall
+;; deadline for an entire *batch* of parallel workers, not a per-test ceiling, so shrinking
+;; one test never addressed it (and 16x sampling measurably didn't). The real fix is in
+;; `crates/lisp/tests/suite.rs`, which raises the batch budget for the debug-build wrapper.
+;; The slicing machinery is kept because it is the right tool if a future case genuinely
+;; needs splitting — set this to 4 and add the other three slices as their own tests.
+(def nt--part1-of 1)
 
 (defn nt--part1-slice () (nt--scan-chunk "Part1" 0 nt--part1-of nt--lines nil 0 0 nil))
 
@@ -220,13 +216,11 @@
       (is (> ran 15))
       (assert= (take 3 bad) ())))
 
-  ;; Part1 is the bulk (~16,000 cases) and is SAMPLED by default — see `nt--part1-of` for
-  ;; why, and for how to sweep all of it.
-  (test "Part1 — character by character (sampled slice)"
+  (test "Part1 — character by character (the bulk)"
     (let ([ran bad] (nt--part1-slice))
-      ;; ~1,000 cases at the default 1-in-16; asserted so a sampling change that guts the
-      ;; coverage fails instead of reading as a pass.
-      (is (> ran 900))
+      ;; ~16,000 cases; asserted so a change that guts the coverage fails rather than
+      ;; reading as a pass.
+      (is (> ran 16000))
       (assert= (take 3 bad) ())))
 
   (test "Part2 — canonical order"

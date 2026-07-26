@@ -8345,3 +8345,62 @@ signature as the 100k-deep JSON documents (>250×). Four shrink-the-test cycles 
 nothing, so I stopped: it is a contention/GC question, logged in ROADMAP with the evidence
 and the next diagnostic step, not a sizing question. `nest test` (release, 3400 tests) is
 green, as are `nest check` and `cargo fmt --all --check`.
+
+## 2026-07-26 — KI-12: the prelude froze a RUNTIME handle as PRELUDE (and `:conformance` now buys budget)
+
+Two failures were left after the syntax work; both are closed.
+
+**KI-12 — a wrong string in every build.** `(println (pr-str *load-path*))` returned
+`("A list of the given arguments.")` — `list`'s docstring — instead of `(".")`. The
+list was right; its **car** was a different object, and *which* object moved with
+heap layout (`("ret")` under `BROOD_GC_VERIFY=1`, the symbol `xs` if the prelude
+wrote `'(".")`). Correct under `BROOD_VM=0`. A binary predating the day's work failed
+the same way with `cond`'s docstring, so it was latent, not a regression.
+
+Reading the freeze twice found nothing, so I instrumented it, which answered it in
+one line:
+
+```
+[freeze] *load-path*: Pair region=0 idx=55990 car=Str region=2 idx=60
+```
+
+A LOCAL pair holding a **RUNTIME** string. `to_prelude` re-tags a handle by keeping
+its slab index and changing its region — sound only for LOCAL handles, since the
+builder's slabs *become* the prelude region — and it was applied unconditionally. The
+VM interns constant-pool literals into RUNTIME so compiled code is shareable, so a
+prelude global built by compiled code held one, and the re-tag pointed it at an
+unrelated prelude string. The tree-walker passes the LOCAL read-form string, hence
+its correctness — the one clue that mattered.
+
+Fix: `localize_for_freeze` deep-copies any non-LOCAL part of a global's reachable
+graph into the builder's slabs *before* the sweep, and `to_prelude` now re-tags LOCAL
+only (unreachable boot garbage legitimately holds RUNTIME handles; flipping those was
+the damage). A `debug_assert` on the root bindings turns a future gap into a freeze-time
+failure. Costs one walk per *source* boot — freeze 5.0 → 8.7 ms, source-boot peak 3.7 →
+10.6 MB, cached boot unchanged.
+
+What it had been costing: filesystem module lookup from the default load path never
+worked. Nothing noticed because `require` finds std modules via `%builtin-module` and
+a project run replaces the path. `brood-lsp`'s
+`completes_module_names_in_require_and_use` was the only reader, and is green again.
+
+Two smaller things fell out of the same investigation: `to_prelude` had no `Bytes`
+arm (a `#b"…"` literal in a prelude global would have kept a LOCAL tag — latent, no
+prelude form produces one today), and `eval_forms`' per-form arena reset (ADR-016)
+was dead code resting on a false premise ("globals live in PRELUDE/RUNTIME"), so it
+is gone with the reasoning recorded where it was.
+
+**`:conformance` now buys batch budget.** `*test-timeout-ms*` is a *batch* wall
+deadline, and the external corpora exceed 120 s in a debug build — so `nest test`
+hard-killed UCD normalisation, then JSONTestSuite, as legitimately-long work. `:slow`
+was already in the tags but the runner ignored it entirely. Now a unit tagged `:slow`
+**or** `:conformance` raises its batch to `*test-slow-timeout-ms*` (900 s);
+`:conformance` counts because a corpus sweep is thousands of cases by construction and
+tagging each new one `:slow` as well is a step the next author will forget. Untagged
+batches keep the 120 s ceiling, which is what catches a hang.
+
+Also fixed here: `introspect::loadable_modules` ran a Brood snippet using `concat`,
+removed in the alias trims — and its error was swallowed by `if let Ok(v)`, so module
+completion silently returned nothing. The alias sweep had covered `.blsp` files and
+Rust *test* snippets but not Brood embedded in Rust *library* code; the checker's
+`(concat …)` element-type rule and a now-duplicate catalog row went too.

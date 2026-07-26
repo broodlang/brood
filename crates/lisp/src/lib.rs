@@ -488,11 +488,26 @@ impl Interp {
                     break;
                 }
             }
-            // Per-form arena reset is the no-GC reclamation path (ADR-016); with
-            // the collector on, GC reclaims and a move would invalidate `cp`.
-            if !gc && i + 1 < n {
-                self.heap.reset_local_to(cp);
-            }
+            // NO per-form arena reset (KI-12). ADR-016's reset was the no-GC
+            // reclamation path, on the premise quoted above — "globals live in
+            // PRELUDE/RUNTIME, so the only live thing between forms is the
+            // discarded result". That premise is false in the one heap where the
+            // reset actually ran: a **builder** heap (`Heap::new` sets
+            // `gc_enabled = false`), where a prelude `def` binds a value that is
+            // still LOCAL — it only becomes PRELUDE at `freeze_as_shared_code`.
+            // So `(def *load-path* (list "."))` stored a LOCAL pair, the next
+            // form's reset truncated the slabs back below it, and a later
+            // allocation reused those indices: the global's car then aliased
+            // whatever came next — a docstring, a symbol, layout-dependent. It
+            // silently corrupted the default `*load-path*` in every build.
+            //
+            // Dropping the reset costs the *builder* heap its boot garbage until
+            // freeze (which already tolerates and skips it — see `reachable_clo`),
+            // and costs every other path nothing: with the collector on, this
+            // branch never ran. `_cp`/`_gc` are kept as the record of what was
+            // tried; re-introducing a reset needs reachability from the root env,
+            // not a bare high-water mark.
+            let _ = (&cp, gc);
         }
         self.heap.truncate_roots(roots_base);
         self.heap.set_compile_ns(prev_ns);

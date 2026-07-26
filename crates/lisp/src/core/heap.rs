@@ -401,7 +401,50 @@ fn gc_trace_default() -> bool {
 
 /// Re-tag a value's handle from the local region to the immutable **prelude**
 /// region (same slab index, region bits set). Atoms are unchanged.
+/// A movable handle's identity — `(kind, index, region)`. `None` for an atom, which
+/// has no heap identity and never needs copying. Used by
+/// [`Heap::localize_for_freeze`] to collapse shared structure and to tell "already
+/// LOCAL, unchanged" from "copied".
+fn handle_key(v: Value) -> Option<(u8, u32, u8)> {
+    let (kind, idx, reg) = match v.unpack() {
+        ValueRef::Pair(id) => (0u8, id.index() as u32, id.region()),
+        ValueRef::Vector(id) => (1, id.index() as u32, id.region()),
+        ValueRef::Range(id) => (2, id.index() as u32, id.region()),
+        ValueRef::SeqView(id) => (3, id.index() as u32, id.region()),
+        ValueRef::Map(id) => (4, id.index() as u32, id.region()),
+        ValueRef::Set(id) => (5, id.index() as u32, id.region()),
+        ValueRef::Str(id) => (6, id.index() as u32, id.region()),
+        ValueRef::BigInt(id) => (7, id.index() as u32, id.region()),
+        ValueRef::Decimal(id) => (8, id.index() as u32, id.region()),
+        ValueRef::Bytes(id) => (9, id.index() as u32, id.region()),
+        ValueRef::Fn(id) => (10, id.index() as u32, id.region()),
+        ValueRef::Macro(id) => (11, id.index() as u32, id.region()),
+        ValueRef::Rope(id) => (12, id.index() as u32, id.region()),
+        _ => return None,
+    };
+    Some((kind, idx, reg))
+}
+
+/// Re-tag a **LOCAL** handle as PRELUDE, preserving its slab index.
+///
+/// Only LOCAL: a re-tag is an index-preserving bit flip, which is valid exactly
+/// because the builder's slabs *become* the prelude region. Applying it to a
+/// RUNTIME (or already-PRELUDE) handle would keep the index and change the region,
+/// pointing at an unrelated object in a different slab — that was KI-12. The VM
+/// promotes its constant-pool literals into RUNTIME, so a prelude global built by
+/// compiled code (`(def *load-path* (list "."))`) held a LOCAL pair whose car was a
+/// RUNTIME string; re-tagging it yielded PRELUDE `Str@60`, some unrelated
+/// docstring. Non-LOCAL values are copied into the builder's slabs *before* this
+/// runs — see [`Heap::localize_for_freeze`].
 fn to_prelude(v: Value) -> Value {
+    // **LOCAL only.** Reachable structure is copied LOCAL beforehand
+    // ([`Heap::localize_for_freeze`]), so a non-LOCAL handle reaching here belongs to
+    // unreachable boot garbage — the slab sweep visits every cell, dead ones
+    // included. Leave those alone: nothing can read them, and flipping them is
+    // precisely what corrupted a live global (KI-12).
+    if !matches!(handle_key(v), None | Some((_, _, LOCAL))) {
+        return v;
+    }
     match v.unpack() {
         ValueRef::Pair(id) => Value::pair(PairId::prelude(id.index())),
         ValueRef::Vector(id) => Value::vector(VecId::prelude(id.index())),
@@ -2126,11 +2169,174 @@ impl Heap {
     /// GC is disabled in a builder heap (`Heap::new` sets `gc_enabled = false`),
     /// so the slabs have no holes here — indices are dense and stable across
     /// the local→prelude re-tag.
-    pub fn freeze_as_shared_code(self, root: EnvId) -> (SharedCode, Vec<(Symbol, Value)>) {
+    /// Deep-copy `v` into the builder's **LOCAL** slabs if any part of it lives in
+    /// another region, returning an all-LOCAL value; already-LOCAL values (and
+    /// atoms, symbols, natives) are returned unchanged.
+    ///
+    /// The freeze turns the builder's slabs into the prelude region by re-tagging
+    /// handles in place, which is only valid for LOCAL ones. A prelude global can
+    /// nonetheless reach a **RUNTIME** object: the VM interns its constant-pool
+    /// literals there so compiled code is shareable, so `(def *load-path* (list "."))`
+    /// bound a LOCAL pair whose car was a RUNTIME string. Re-tagging that car kept
+    /// its index and changed its region — silently aliasing an unrelated prelude
+    /// string (KI-12). Copying first makes the re-tag total.
+    ///
+    /// `fwd` collapses shared structure to one copy and terminates cycles: a
+    /// closure/env reserves nothing here, but a DAG (the same string reached twice)
+    /// must not be duplicated per edge. Keyed on the raw handle bits.
+    fn localize_for_freeze(&mut self, v: Value, fwd: &mut HashMap<(u8, u32, u8), Value>) -> Value {
+        // Bail out fast on the overwhelmingly common case: an atom or an
+        // already-LOCAL handle whose children are LOCAL too. Checking "children
+        // are LOCAL too" needs the walk, so only the region test is cheap here;
+        // the walk below is O(reachable) once per freeze, on the prelude only.
+        let key = match handle_key(v) {
+            Some(k) => k,
+            None => return v, // an atom: nothing to copy
+        };
+        if let Some(&done) = fwd.get(&key) {
+            return done;
+        }
+        let out = match v.unpack() {
+            ValueRef::Str(id) => {
+                if id.region() == LOCAL {
+                    return v;
+                }
+                let s = self.string(id).to_string();
+                self.alloc_string(&s)
+            }
+            ValueRef::BigInt(id) => {
+                if id.region() == LOCAL {
+                    return v;
+                }
+                let n = self.bigint(id).clone();
+                self.alloc_bigint(n)
+            }
+            ValueRef::Decimal(id) => {
+                if id.region() == LOCAL {
+                    return v;
+                }
+                let n = self.decimal(id).clone();
+                self.alloc_decimal(n)
+            }
+            ValueRef::Bytes(id) => {
+                if id.region() == LOCAL {
+                    return v;
+                }
+                let blob = self.bytes(id).clone();
+                self.alloc_bytes(blob)
+            }
+            ValueRef::Pair(id) => {
+                let (a, b) = self.pair(id);
+                let a2 = self.localize_for_freeze(a, fwd);
+                let b2 = self.localize_for_freeze(b, fwd);
+                if id.region() == LOCAL && handle_key(a2) == handle_key(a) && handle_key(b2) == handle_key(b) {
+                    return v;
+                }
+                self.alloc_pair(a2, b2)
+            }
+            ValueRef::Vector(id) => {
+                let items = self.vector(id).to_vec();
+                let mut out = Vec::with_capacity(items.len());
+                let mut same = id.region() == LOCAL;
+                for it in items {
+                    let c = self.localize_for_freeze(it, fwd);
+                    same &= handle_key(c) == handle_key(it);
+                    out.push(c);
+                }
+                if same {
+                    return v;
+                }
+                self.alloc_vector(out)
+            }
+            ValueRef::Map(id) => {
+                let entries = self.map_entries(id);
+                let mut out = Vec::with_capacity(entries.len());
+                let mut same = id.region() == LOCAL;
+                for (k, val) in entries {
+                    let k2 = self.localize_for_freeze(k, fwd);
+                    let v2 = self.localize_for_freeze(val, fwd);
+                    same &= handle_key(k2) == handle_key(k) && handle_key(v2) == handle_key(val);
+                    out.push((k2, v2));
+                }
+                if same {
+                    return v;
+                }
+                self.map_from_pairs(out)
+            }
+            ValueRef::Set(id) => {
+                let elems = self.set_elems(id);
+                let mut out = Vec::with_capacity(elems.len());
+                let mut same = id.region() == LOCAL;
+                for e in elems {
+                    let c = self.localize_for_freeze(e, fwd);
+                    same &= handle_key(c) == handle_key(e);
+                    out.push(c);
+                }
+                if same {
+                    return v;
+                }
+                self.set_from_elems(out)
+            }
+            // A closure reached from a global is the normal case (`defn`), and its
+            // arms' body forms can hold VM constants. Copy only when something
+            // inside is non-LOCAL, so the usual all-LOCAL closure is untouched.
+            ValueRef::Fn(id) | ValueRef::Macro(id) => {
+                let mut c = self.closure(id).clone();
+                let mut same = id.region() == LOCAL;
+                for arm in std::sync::Arc::make_mut(&mut c.arms).iter_mut() {
+                    for f in arm.body.iter_mut() {
+                        let c2 = self.localize_for_freeze(*f, fwd);
+                        same &= handle_key(c2) == handle_key(*f);
+                        *f = c2;
+                    }
+                    for (_, d) in arm.optionals.iter_mut() {
+                        let c2 = self.localize_for_freeze(*d, fwd);
+                        same &= handle_key(c2) == handle_key(*d);
+                        *d = c2;
+                    }
+                }
+                if same {
+                    return v;
+                }
+                let new_id = self.alloc_closure(c);
+                if matches!(v.unpack(), ValueRef::Macro(_)) {
+                    Value::macro_(new_id)
+                } else {
+                    Value::func(new_id)
+                }
+            }
+            // Atoms, symbols, natives, and the opaque handles a prelude cannot hold.
+            _ => return v,
+        };
+        fwd.insert(key, out);
+        out
+    }
+
+    pub fn freeze_as_shared_code(mut self, root: EnvId) -> (SharedCode, Vec<(Symbol, Value)>) {
+        // Pull anything a global reaches into the LOCAL slabs first, so the
+        // re-tag below is valid for every handle it touches (KI-12).
+        {
+            let mut fwd: HashMap<(u8, u32, u8), Value> = HashMap::new();
+            let vars: Vec<(Symbol, Value)> = self.local.envs[root.index()].vars.to_vec();
+            for (i, (_, v)) in vars.iter().enumerate() {
+                let lv = self.localize_for_freeze(*v, &mut fwd);
+                if handle_key(lv) != handle_key(*v) {
+                    self.local.envs[root.index()].vars[i].1 = lv;
+                }
+            }
+        }
         let bindings: Vec<(Symbol, Value)> = self.local.envs[root.index()]
             .vars
             .iter()
-            .map(|&(s, v)| (s, to_prelude(v)))
+            .map(|&(s, v)| {
+                debug_assert!(
+                    matches!(handle_key(v), None | Some((_, _, LOCAL))),
+                    "prelude global {} still points outside LOCAL at freeze — \
+                     `localize_for_freeze` missed a case (KI-12)",
+                    crate::core::value::symbol_name(s),
+                );
+                (s, to_prelude(v))
+            })
             .collect();
 
         // Mark which closures are REACHABLE from the global bindings. The

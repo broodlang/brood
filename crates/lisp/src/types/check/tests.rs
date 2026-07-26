@@ -178,7 +178,7 @@ fn flags_non_tail_self_recursion() {
     assert!(!recursion_warnings("(defn k (n) (let (m (k (- n 1))) m))").is_empty());
     // first (tested) operand of `and`, and a `cond` test
     assert!(!recursion_warnings("(defn p (n) (and (p n) (> n 0)))").is_empty());
-    assert!(!recursion_warnings("(defn g (n) (cond (g 0) :a :else :b))").is_empty());
+    assert!(!recursion_warnings("(defn g (n) (cond (g 0) :a else :b))").is_empty());
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn no_warning_for_tail_recursion_or_higher_order() {
             .is_empty()
     );
     assert!(recursion_warnings("(defn down (n) (when (> n 0) (down (- n 1))))").is_empty());
-    assert!(recursion_warnings("(defn f (n) (cond (= n 0) :z :else (f (- n 1))))").is_empty());
+    assert!(recursion_warnings("(defn f (n) (cond (= n 0) :z else (f (- n 1))))").is_empty());
     assert!(recursion_warnings("(defn p (n) (and (> n 0) (p (- n 1))))").is_empty());
     assert!(recursion_warnings("(defn k (n) (let (m (- n 1)) (k m)))").is_empty());
     // a self-call inside a nested closure is a different frame — not flagged
@@ -560,7 +560,7 @@ fn dead_clause_flagged_for_a_sig_typed_param() {
         "a string-literal clause when n : int should be dead: {w:?}"
     );
     // A `cond` predicate disjoint from the declared parameter type.
-    let w = file_warnings("(sig g (int -> keyword))\n(defn g (n) (cond (string? n) :s :else :o))");
+    let w = file_warnings("(sig g (int -> keyword))\n(defn g (n) (cond (string? n) :s else :o))");
     assert!(
         w.iter().any(|m| m.contains("unreachable clause")),
         "(string? n) when n : int should be dead: {w:?}"
@@ -578,7 +578,7 @@ fn dead_clause_silent_without_sig_or_when_compatible_or_a_literal_scrutinee() {
     );
     // A recognised but *compatible* guard narrows, it isn't dead.
     assert!(
-        file_warnings("(sig h (int -> keyword))\n(defn h (n) (cond (int? n) :i :else :o))")
+        file_warnings("(sig h (int -> keyword))\n(defn h (n) (cond (int? n) :i else :o))")
             .iter()
             .all(|m| !m.contains("unreachable")),
         "(int? n) when n : int must not flag"
@@ -598,7 +598,7 @@ fn dead_clause_flagged_for_a_precise_let_local() {
     // ADR-131: the dead-clause lint now covers a *precise, surface* `let`-local,
     // not just a sig-typed param. `x` is statically `5` (a literal, precise), so
     // a `string?` clause can never run.
-    let w = file_warnings("(defn f () (let (x 5) (cond (string? x) :a :else :b)))");
+    let w = file_warnings("(defn f () (let (x 5) (cond (string? x) :a else :b)))");
     assert!(
         w.iter()
             .any(|m| m.contains("unreachable clause") && m.contains("string")),
@@ -616,7 +616,7 @@ fn dead_clause_flagged_for_a_precise_let_local() {
 fn dead_clause_let_local_respects_precision_gensym_and_compatibility() {
     // A *compatible* guard narrows without emptying — not dead.
     assert!(
-        file_warnings("(defn a () (let (x 5) (cond (int? x) :a :else :b)))")
+        file_warnings("(defn a () (let (x 5) (cond (int? x) :a else :b)))")
             .iter()
             .all(|m| !m.contains("unreachable")),
         "(int? x) when x : int must not flag"
@@ -625,7 +625,7 @@ fn dead_clause_let_local_respects_precision_gensym_and_compatibility() {
     // could change on reload), so it's excluded — no dead-clause warning even
     // though the current-image type would narrow to `never`. Reload-safe.
     assert!(
-        file_warnings("(defn h () 5)\n(defn b () (let (x (h)) (cond (string? x) :a :else :b)))")
+        file_warnings("(defn h () 5)\n(defn b () (let (x (h)) (cond (string? x) :a else :b)))")
             .iter()
             .all(|m| !m.contains("unreachable")),
         "a call-result local is dynamic and must not be flagged dead"
@@ -633,14 +633,14 @@ fn dead_clause_let_local_respects_precision_gensym_and_compatibility() {
     // A **gensym** temporary (macro-introduced) is exempt — warning on a name
     // the user can't rename would be noise.
     assert!(
-        file_warnings("(defn c () (let (x__1 5) (cond (string? x__1) :a :else :b)))")
+        file_warnings("(defn c () (let (x__1 5) (cond (string? x__1) :a else :b)))")
             .iter()
             .all(|m| !m.contains("unreachable")),
         "a gensym let-local must never be flagged dead"
     );
     // Shadowing a precise local with an unknown one drops eligibility.
     assert!(
-        file_warnings("(defn d (y) (let (x 5) (let (x y) (cond (string? x) :a :else :b))))")
+        file_warnings("(defn d (y) (let (x 5) (let (x y) (cond (string? x) :a else :b))))")
             .iter()
             .all(|m| !m.contains("unreachable")),
         "a shadowing rebind of unknown type must not be flagged dead"

@@ -39,7 +39,23 @@ fn run_suite() {
         brood::core::alloc::TEST_DEFAULT_SOFT,
     );
     let mut interp = Interp::new();
-    if let Err(e) = interp.eval_str("(require 'project) (project/run-project-tests)") {
+    // `*test-timeout-ms*` is a wall deadline for an ENTIRE BATCH of parallel workers
+    // (`collect-units` computes `(+ (now) *test-timeout-ms*)` once per chunk), not a
+    // per-test hang guard: any worker that hasn't reported by then is presumed hung, and
+    // every test it holds is reported as timed out. So the budget has to cover the
+    // slowest *chunk*, and this wrapper is the one place the suite runs in a **debug**
+    // build, where every case is roughly an order of magnitude slower than the release
+    // path `nest test` uses. The default 120 s is sized for release and is simply too
+    // tight here — it blamed whichever conformance worker happened to report last
+    // (2026-07-26), which is a measurement artifact, not a hung test.
+    //
+    // Raise it for this context only, the same "the harness needs different limits"
+    // reasoning as the memory ceiling above. The release path keeps the 120 s default, so
+    // a genuinely hung test is still caught quickly where it matters.
+    if let Err(e) = interp.eval_str(
+        "(require 'test) (def *test-timeout-ms* 600000) \
+         (require 'project) (project/run-project-tests)",
+    ) {
         panic!("Brood test suite failed: {}", e);
     }
 }

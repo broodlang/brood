@@ -11,7 +11,7 @@ ADRs / topic docs.
 
 ---
 
-## KI-12 — a frozen prelude global's inner handle resolves to the wrong object · **found 2026-07-26, open**
+## KI-12 — a frozen prelude global's inner handle resolved to the wrong object · **found + fixed 2026-07-26**
 
 **Symptom.** The prelude's only non-trivial global value is corrupt in every build:
 
@@ -50,16 +50,44 @@ value, and nothing reads it on the happy path: `require` finds every std module 
 which puts a temp dir on the default path and asks for completions. That test is
 the canary and is **currently failing**.
 
-**Where to look.** `Heap::freeze_as_shared_code` (`crates/lisp/src/core/heap.rs`)
-re-tags globals with `to_prelude` and then walks the slabs flipping every handle
-stored *inside* pairs / vectors / map nodes / closure arms. `to_prelude` covers
-every `ValueRef` kind except **`Bytes`** (which falls through `other => other` and
-would keep a LOCAL tag — worth fixing regardless, though the prelude has no bytes
-literal today). The re-tag walk looks complete for pairs, so the fault is more
-likely an index/aliasing fault in how the builder slabs are moved into the PRELUDE
-region than a missing flip. Repro is instant (`(println (pr-str *load-path*))` on a
-fresh interp), which makes this very tractable with the GC tooling — it just needs
-its own session rather than a rushed patch at the end of an unrelated change.
+**Root cause.** `to_prelude` (`crates/lisp/src/core/heap.rs`) re-tagged a handle by
+keeping its slab **index** and changing its **region** bits. That is valid only for a
+LOCAL handle, because the builder's slabs *become* the prelude region — and it was
+applied unconditionally. Instrumenting the freeze showed the offending global was:
+
+```
+[freeze] *load-path*: Pair region=0 idx=55990 car=Str region=2 idx=60
+```
+
+a LOCAL pair (region 0) whose car was a **RUNTIME** string (region 2). The VM interns
+its constant-pool literals into the shared RUNTIME region so compiled code can be
+shared between processes, so `(def *load-path* (list "."))` — evaluated by the VM
+during the prelude build — bound a pair holding a RUNTIME `"."`. Re-tagging turned
+that into PRELUDE `Str@60`: a different slab, an unrelated string. The tree-walker
+was correct because it passes the LOCAL string straight from the read form.
+
+**Fix.** Two halves, both in `heap.rs`:
+
+1. `Heap::localize_for_freeze` — before anything is re-tagged, deep-copy any part of
+   a global's reachable graph that lives outside LOCAL into the builder's own slabs
+   (a forwarding table collapses shared structure and terminates cycles). Reachable
+   prelude state is then all-LOCAL by construction, which is what the re-tag assumes.
+2. `to_prelude` re-tags **LOCAL only** and returns anything else untouched. The slab
+   sweep visits every cell including unreachable boot garbage, which may legitimately
+   hold RUNTIME handles; flipping those is what did the damage. A `debug_assert` on
+   the root bindings catches a future `localize` gap at freeze time instead of
+   silently corrupting a global.
+
+Cost: one walk of the reachable global graph per *source* boot (freeze 5.0 → 8.7 ms,
+source-boot peak 3.7 → 10.6 MB, both once per build — the cached boot is unchanged at
+~49 ms). All three boot paths now agree: `*load-path*` is `(".")` under the source
+boot, the cached boot, and `BROOD_VM=0`.
+
+**What it had been costing.** Filesystem module lookup from the *default* load path
+never worked — `require` found std modules via `%builtin-module` and a project run
+replaced the path wholesale, so nothing noticed. `brood-lsp`'s
+`completion::tests::completes_module_names_in_require_and_use` was the only test that
+read the default path; it passes again.
 
 ## KI-11 — JIT tail-chain recursion escaped the native-depth cap · **found 2026-07-25, fixed 2026-07-26**
 

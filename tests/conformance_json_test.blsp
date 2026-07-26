@@ -15,26 +15,18 @@
 ;; right verdict — several `n_` cases exist precisely to check that a parser does not
 ;; accept mis-encoded bytes.
 ;;
-;; 316 of the 318 documents are swept. The two deep-nesting ones —
+;; All 318 documents are swept, deep-nesting ones included. Two of them —
 ;; `n_structure_100000_opening_arrays.json` (100,000 levels) and
-;; `n_structure_open_array_object.json` (~50,000) — are SKIPPED, on cost grounds, and the
-;; property they test is covered instead by `tests/jit_tail_chain_depth_test.blsp` with a
-;; synthetic 5,000-level document.
+;; `n_structure_open_array_object.json` (~50,000) — are what found KI-11, an unbounded
+;; native recursion on the JIT's tail-chain follow-through, and both reject cleanly since
+;; that was fixed on 2026-07-26. Past the 1500-level native cap the recursion drains on the
+;; VM's heap-backed frames; the two together cost ~600 ms.
 ;;
-;; They are what found KI-11 (an unbounded native recursion on the JIT's tail-chain
-;; follow-through), and both reject cleanly since that was fixed on 2026-07-26. But
-;; rejecting them now means actually *doing* the work: past the 1500-level native cap the
-;; recursion drains on the VM's heap-backed frames. That is ~400 ms standalone and stays
-;; fast when this file runs alone — yet inside the full parallel suite it blows the 120 s
-;; per-test ceiling, a >250x slowdown that is steeper than contention alone explains and
-;; is logged in ROADMAP as a GC-depth question worth its own look. Putting them in an
-;; `:isolated` test made it worse, since isolated units run on the runner process and
-;; taking the ceiling there kills the whole run.
-;;
-;; The trade is deliberate: their *content* adds nothing over a synthetic deep document
-;; once the "deep nesting is rejected, not fatal" property is covered, and one test must
-;; not be able to hold the suite hostage. Re-add them here if the slowdown is understood
-;; and fixed.
+;; They were briefly skipped on the belief that they cost >120 s under parallel load. That
+;; was a misdiagnosis: `*test-timeout-ms*` is a wall deadline for an entire *batch* of
+;; parallel workers, not a per-test ceiling, so a batch that overran blamed whichever
+;; worker reported last. Nothing here is slow. See `crates/lisp/tests/suite.rs` for the
+;; actual fix.
 
 (defmodule conformance-json-test (:use test) (:use corpus))
 (require 'json)
@@ -47,19 +39,11 @@
 
 (defn js--kind (path) (substring (path-basename path) 0 1))
 
-;; Skipped by the sweep — see the header for why, and jit_tail_chain_depth_test.blsp for
-;; the property they used to be the only cover for.
-(def js--deep
-  {"n_structure_100000_opening_arrays.json" true
-   "n_structure_open_array_object.json" true})
-
-(defn js--deep? (path) (get js--deep (path-basename path)))
-
 ;; [oks rejects wrongs] for one class, where `wrongs` lists the offending basenames.
 (defn js--scan (files kind want oks rejects wrong)
   (cond
     (nil? files) [oks rejects (reverse wrong)]
-    (or (not (= (js--kind (first files)) kind)) (js--deep? (first files)))
+    (not (= (js--kind (first files)) kind))
     (js--scan (rest files) kind want oks rejects wrong)
     else
     (let (v (js--verdict (first files))
@@ -96,15 +80,6 @@
       (assert= wrong ())
       (is (> (+ oks rejects) 30)))))
 
-;; The skip is asserted rather than assumed: if an upstream rename orphans these names the
-;; sweep would silently start including them again (and start timing out), so pin that
-;; exactly two documents are being held back.
-(describe "JSONTestSuite: the deep-nesting skip is accounted for" :tags [:conformance]
-
-  (test "exactly two documents are held back, and both still exist"
-    (let (files (filter js--deep? (corpus-files "json")))
-      (assert= (count files) 2)
-      (dolist (f files) (is (file-exists? f))))))
 
 ;; The specific traps the corpus is famous for, named so the sweep's coverage is
 ;; legible without opening 318 files.

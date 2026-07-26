@@ -896,6 +896,12 @@ Runtime housekeeping (both items landed):
   `BROOD_CONTRACTS=1` should stop rewriting `sig` into `sig!` (it is why three of
   those four defects existed, and it blocks annotating the prelude at all), and
   `defrecord`'s 5-uses-all-in-the-prelude adoption question.
+- ✅ **KI-12 fixed (2026-07-26)** — the prelude freeze re-tagged a RUNTIME handle as
+  PRELUDE, so the default `*load-path*` held an unrelated object in every build and
+  filesystem module lookup from it never worked. `localize_for_freeze` copies
+  non-LOCAL reachable state into the builder's slabs first; `to_prelude` re-tags
+  LOCAL only. Also: a unit tagged `:slow`/`:conformance` now raises its batch
+  timeout, so the external corpora stop being hard-killed as if hung.
 - ⬜ **Merely-wider inference case** — a body typed exactly `number` (int ∪ float)
   declared `int`, e.g. `(/ x 2)`; can't be pinned without occurrence/range analysis
   and flagging it would false-positive on int-valued runs (ADR-011).
