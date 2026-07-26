@@ -835,7 +835,8 @@ fn resolve_fn(
         }
     } else {
         let params = parts.first().copied().unwrap_or(Value::nil());
-        out.push(params); // verbatim
+        // Binders verbatim, `&optional` defaults resolved.
+        out.push(resolve_param_defaults(heap, params, ns_name, locals));
         let mut inner = locals.to_vec();
         collect_param_syms(heap, params, &mut inner);
         for &b in parts.get(1..).unwrap_or(&[]) {
@@ -859,7 +860,7 @@ fn resolve_arity_clause(
     let mut inner = locals.to_vec();
     collect_param_syms(heap, cparts[0], &mut inner);
     let mut out = Vec::with_capacity(cparts.len());
-    out.push(cparts[0]); // params verbatim
+    out.push(resolve_param_defaults(heap, cparts[0], ns_name, locals));
     for &b in &cparts[1..] {
         out.push(resolve_walk(heap, b, ns_name, &inner));
     }
@@ -965,6 +966,65 @@ fn generic_resolve(
         out.push(resolve_walk(heap, it, ns_name, locals));
     }
     rebuild_list(heap, form, out)
+}
+
+/// Resolve the **default expressions** inside a param list, leaving every binder name
+/// alone. `(x &optional (n *lim*))` keeps `x` and `n` verbatim but resolves `*lim*` to
+/// `ns/*lim*`.
+///
+/// Param lists used to be passed through verbatim, which left a default expression as
+/// the only place in a module where a reference to the module's own global was never
+/// qualified — so it resolved at call time in whatever namespace the CALLER was in and
+/// raised `unbound symbol`. Earmuffs masked it (they were ambient pre-ADR-151, so the
+/// usual `(&optional (n *knob*))` happened to work); a plain `(&optional (n limit))`
+/// was already broken.
+///
+/// Earlier binders are in scope for a later default, so they accumulate as locals as the
+/// list is walked. A destructuring `[a b]` param is a pattern, not a reference, and stays
+/// verbatim.
+fn resolve_param_defaults(
+    heap: &mut Heap,
+    params: Value,
+    ns_name: &str,
+    locals: &[value::Symbol],
+) -> Value {
+    let items = match form_items(heap, params) {
+        Some(i) => i,
+        None => return params,
+    };
+    let mut inner = locals.to_vec();
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match item.unpack() {
+            // `(name default…)` — the binder stays, the defaults resolve.
+            ValueRef::Pair(_) => {
+                let parts = form_items(heap, item).unwrap_or_default();
+                match parts.first().map(|v| v.unpack()) {
+                    Some(ValueRef::Sym(binder)) => {
+                        let mut rebuilt = Vec::with_capacity(parts.len());
+                        rebuilt.push(parts[0]);
+                        for &d in &parts[1..] {
+                            rebuilt.push(resolve_walk(heap, d, ns_name, &inner));
+                        }
+                        inner.push(binder);
+                        out.push(rebuild_list(heap, item, rebuilt));
+                    }
+                    _ => out.push(item),
+                }
+            }
+            ValueRef::Sym(s) => {
+                if !value::symbol_is(s, kw::AMP)
+                    && !value::symbol_is(s, kw::AMP_OPTIONAL)
+                    && !value::symbol_is(s, kw::AMP_REST)
+                {
+                    inner.push(s);
+                }
+                out.push(item);
+            }
+            _ => out.push(item),
+        }
+    }
+    rebuild_list(heap, params, out)
 }
 
 /// Collect parameter-binder symbols from a param list (mirrors `fn_params` /
