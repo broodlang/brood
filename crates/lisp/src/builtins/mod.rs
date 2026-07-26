@@ -667,6 +667,30 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![string], Ty::vector_of(string)),
         string_to_graphemes,
     );
+    // The indexed grapheme accessors (ADR-159). `string->graphemes` alone made the
+    // *documented-correct* cursor step — read the cluster at an index — cost a vector
+    // of every cluster in the string, per keystroke. These walk to the index instead.
+    def(
+        heap,
+        "grapheme-count",
+        Arity::exact(1),
+        Sig::new(vec![string], int),
+        grapheme_count,
+    );
+    def(
+        heap,
+        "grapheme-at",
+        Arity::range(2, 3),
+        Sig::new(vec![string, int], any),
+        grapheme_at,
+    );
+    def(
+        heap,
+        "substring-graphemes",
+        Arity::range(2, 3),
+        Sig::new(vec![string, int], string),
+        substring_graphemes,
+    );
     def(
         heap,
         "string-normalize",
@@ -2819,6 +2843,21 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("substring", &["s", "start", "end"], "The characters of s in the range [start, end), char-indexed. end is optional and defaults to (string-length s), so (substring s start) is \"from start to the end\"."),
     ("string-split", &["s", "sep"], "Split s into a list of substrings on each occurrence of sep, in one O(n) pass. An empty separator splits s into its individual characters."),
     ("string->codepoints", &["s"], "The characters of s as a vector of integer Unicode codepoints, in one O(n) pass — the random-access form text parsers index with nth and compare as ints. The inverse of (apply str (map int->char codes))."),
+    (
+        "grapheme-count",
+        &["s"],
+        "How many extended grapheme clusters s has — the length a human means, and the exclusive upper bound for grapheme-at. One O(n) pass, no allocation.",
+    ),
+    (
+        "grapheme-at",
+        &["s", "i", "default"],
+        "The i-th grapheme cluster of s as a string, or default (else nil) when i is out of range. The grapheme-indexed char-at: walks to i instead of materialising every cluster, so a cursor step is not O(line length).",
+    ),
+    (
+        "substring-graphemes",
+        &["s", "start", "end"],
+        "The half-open grapheme-cluster range [start, end) of s (end optional = to the end), clamped to the ends. The grapheme-indexed substring — plain substring is codepoint-indexed and can slice a cluster in half.",
+    ),
     ("string->graphemes", &["s"], "The extended grapheme clusters of s as a vector of strings — the unit a human means by \"character\". \"é\" spelled e + U+0301 is two codepoints but one grapheme; a flag emoji is four codepoints and one grapheme. Step a cursor by this, not by codepoint (which splits clusters and corrupts text). The sibling of string->codepoints; (apply str (string->graphemes s)) is s."),
     ("string-normalize", &["s", "form"], "s in Unicode normalization form, one of :nfc :nfd :nfkc :nfkd. Brood's = is byte-structural, so text that reads identically ('é' as U+00E9 vs U+0065 U+0301) compares unequal until normalized. Canonical (:nfc/:nfd) preserves meaning; compatibility (:nfkc/:nfkd) also folds presentation ('ﬁ' -> 'fi', '²' -> '2') — right for search and identifier matching, wrong for round-tripping text."),
     ("string-span", &["s", "start", "chars"], "The char index just past the maximal run of chars (a set, given as a string) starting at char `start` in s — `start` itself if the char there isn't in the set. The forward char-class scan a tokenizer skips a whitespace/digit run with; O(run) native. See also string-span-until."),

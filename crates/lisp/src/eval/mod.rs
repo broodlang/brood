@@ -59,10 +59,6 @@ const SPECIAL_SPELLINGS: &[(&str, SpecialForm)] = &[
     (kw::DO, SpecialForm::Do),
     (kw::DEF, SpecialForm::Def),
     (kw::FN, SpecialForm::Fn),
-    // `lambda` is an exact synonym for `fn` (the macroexpand pass canonicalises it, so it
-    // reaches here only on a raw/un-expanded eval path — e.g. a quasiquote-built or
-    // `(eval '(lambda …))` form).
-    (kw::LAMBDA, SpecialForm::Fn),
     (kw::QUASIQUOTE, SpecialForm::Quasiquote),
     (kw::LET, SpecialForm::Let),
     (kw::LETREC, SpecialForm::Letrec),
@@ -1348,12 +1344,10 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
         | "defmethod" => {
             "Brood has no nominal types — for a named, optionally-typed record use \
              `defrecord` (sugar over a plain map, so records stay structural). For \
-             polymorphism, dispatch with `match`/`cond` on `type-of` or on a `:type` \
-             key; multi-clause `defn` dispatches on arity or pattern. \
-             `defprotocol`/`defimpl` (dispatch on the first argument's `type-of`) \
-             are NOT in std — they live in the `hatch` package's `protocol` module, \
-             a prototype awaiting promotion; the kernel only supplies the checker/LSP \
-             conformance pass for them."
+             polymorphism, `(require 'protocol)` gives `defprotocol`/`defimpl` — open \
+             generic functions dispatching on the first argument's `type-of`, \
+             extensible for any type from any module. Or dispatch with `match`/`cond`; \
+             multi-clause `defn` dispatches on arity or pattern."
         }
         "lazy-seq" | "lazy-cat" => {
             "Brood has no `lazy-seq` thunk. `map`/`filter` are EAGER; for a fusing, \
@@ -1376,6 +1370,9 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
         }
         // `let` is sequential, so a `let`-bound `fn` can't call itself — which is the
         // whole reason `letfn` exists. Point at `letrec`, which can.
+        // Retired in ADR-162: `fn` is the only spelling (the alias had zero non-test
+        // uses in the tree, and `docs/language.md` had claimed it was gone for months).
+        "lambda" => "Brood spells `lambda` as `fn`: `(fn (x) …)`.",
         "letfn" => {
             "Brood has no `letfn` — bind local functions with `letrec`, whose names \
              are all visible in every right-hand side (so they may recurse and call \

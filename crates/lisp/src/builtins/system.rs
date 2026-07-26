@@ -938,6 +938,13 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // adds `set`/`conj`/`disj`/`union`/`intersection`/`difference`/`subset?`.
     // Opt-in, never in the prelude (no `#{…}` literal / distinct type yet).
     embedded_module!("set", "std/set.blsp"),
+    // Open generic functions — `defprotocol` declares typed ops, `defimpl` registers
+    // a per-`type-of` implementation (ADR-158). The polymorphism answer for the cases
+    // `match`/`cond` can't cover, because an impl can be added from anywhere without
+    // editing the dispatcher. Pure Brood over two registry globals; the kernel's only
+    // part is the checker/LSP conformance pass (`types/check/protocol.rs`), which
+    // predates the module by months. Opt-in, never in the prelude.
+    embedded_module!("protocol", "std/protocol.blsp"),
     // The interactive REPL line editor (ADR-052): `highlight` is the pure lexical
     // syntax-highlighter / bracket-matcher / signature + completion scanners;
     // `lineedit` is the raw-mode, emacs-style editor built on it + the inline

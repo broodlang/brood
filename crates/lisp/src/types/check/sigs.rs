@@ -460,7 +460,6 @@ fn collect_demands(
     if value::symbol_is(h, kw::QUOTE)
         || value::symbol_is(h, kw::QUASIQUOTE)
         || value::symbol_is(h, kw::FN)
-        || value::symbol_is(h, kw::LAMBDA)
         || value::symbol_is(h, kw::TRY)
         || value::symbol_is(h, kw::DEF)
         || value::symbol_is(h, kw::DEFN)

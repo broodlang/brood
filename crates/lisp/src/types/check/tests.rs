@@ -2209,7 +2209,7 @@ fn function_as_value_lint_is_quiet_on_the_correct_and_legitimate_shapes() {
 
 #[test]
 fn unbound_is_silent_for_in_scope_names() {
-    // fn/lambda params don't look unbound when used as call heads or
+    // fn params don't look unbound when used as call heads or
     // referenced in the body.
     assert!(warnings("(fn (f) (f 1 2))")
         .iter()
@@ -2461,48 +2461,53 @@ fn accepts_a_named_callback_of_the_right_arity() {
 }
 
 #[test]
-fn flags_a_lambda_callback_of_the_wrong_arity() {
-    // A 2-param lambda passed where `map` calls it with 1 arg.
+fn flags_an_inline_fn_callback_of_the_wrong_arity() {
+    // A 2-param inline fn passed where `map` calls it with 1 arg.
     let w = warnings("(map (fn (a b) a) nil)");
     assert!(
         w.iter()
-            .any(|s| s.contains("map") && s.contains("callback") && s.contains("the lambda")),
-        "map should flag a 2-arg lambda: {w:?}"
+            .any(|s| s.contains("map") && s.contains("callback") && s.contains("the fn")),
+        "map should flag a 2-arg fn: {w:?}"
     );
     // Correct arity — no warning.
     let w = warnings("(map (fn (a) a) nil)");
     assert!(
         w.iter().all(|s| !s.contains("callback")),
-        "a 1-arg lambda must not warn under map: {w:?}"
+        "a 1-arg fn must not warn under map: {w:?}"
     );
 }
 
 #[test]
-fn lambda_head_behaves_like_fn() {
-    // `lambda` is a synonym for `fn` (and survives macro expansion as itself),
-    // so the callback-arity check must see through it exactly like `fn`.
+fn lambda_is_retired_and_hints_at_fn() {
+    // ADR-162 retired the alias: `fn` is the only spelling. `lambda` is now an
+    // ordinary unbound name — with a hint naming `fn`, so the mistake is one line to
+    // fix. (It was a synonym for years, claimed removed by the docs for months.)
     let w = warnings("(map (lambda (a b) a) nil)");
     assert!(
-        w.iter()
-            .any(|s| s.contains("map") && s.contains("callback") && s.contains("the lambda")),
-        "map should flag a 2-arg `lambda` callback: {w:?}"
+        w.iter().any(|s| s.contains("lambda")),
+        "a `lambda` head must be reported now: {w:?}"
     );
-    let w = warnings("(map (lambda (a) a) nil)");
+    assert_eq!(
+        crate::eval::foreign_construct_hint("lambda"),
+        Some("Brood spells `lambda` as `fn`: `(fn (x) …)`.")
+    );
+    // The `fn` spelling still gets the callback-arity check it always did.
+    let w = warnings("(map (fn (a b) a) nil)");
     assert!(
-        w.iter().all(|s| !s.contains("callback")),
-        "a 1-arg `lambda` must not warn under map: {w:?}"
+        w.iter().any(|s| s.contains("map") && s.contains("callback")),
+        "map should flag a 2-arg `fn` callback: {w:?}"
     );
 }
 
 #[test]
-fn lambda_form_is_not_unbound() {
-    // Regression: `lambda` was missing from SPECIAL_HEAD / is_syntactic_keyword,
-    // so whole-file mode flagged the head AND its params as unbound symbols — a
-    // false positive on perfectly valid code.
-    let w = file_warnings("(def f (map (lambda (x) (+ x 1)) (list 1 2 3)))");
+fn fn_form_is_not_unbound() {
+    // Regression (originally found via the `lambda` alias, retired in ADR-162): a fn
+    // head missing from SPECIAL_HEAD / is_syntactic_keyword made whole-file mode flag
+    // the head AND its params as unbound — a false positive on valid code.
+    let w = file_warnings("(def f (map (fn (x) (+ x 1)) (list 1 2 3)))");
     assert!(
         w.iter().all(|m| !m.contains("unbound symbol")),
-        "a `lambda` literal must not draw unbound-symbol warnings: {w:?}"
+        "an `fn` literal must not draw unbound-symbol warnings: {w:?}"
     );
 }
 
@@ -3255,22 +3260,17 @@ fn transient_is_a_valid_count_and_contains_arg() {
 fn multi_arity_fn_clause_params_are_bound() {
     // Regression: `check_fn` read a multi-arity fn's first clause as a param
     // list, so a param used only in a *later* clause looked unbound — a false
-    // positive (it fired identically for `fn` and `lambda`).
+    // positive.
     let w = file_warnings("(def g (fn ((a) (* a 2)) ((a b) (+ a b))))");
     assert!(
         w.iter().all(|m| !m.contains("unbound symbol")),
         "multi-arity fn clause params must not look unbound: {w:?}"
     );
-    // `defn` (which expands to `(def name (fn …))`) and `lambda` too.
+    // `defn` (which expands to `(def name (fn …))`) too.
     let w = file_warnings("(defn h ((a) a) ((a b) (+ a b)))");
     assert!(
         w.iter().all(|m| !m.contains("unbound symbol")),
         "defn: {w:?}"
-    );
-    let w = file_warnings("(def k (lambda ((a) a) ((a b) (+ a b))))");
-    assert!(
-        w.iter().all(|m| !m.contains("unbound symbol")),
-        "lambda: {w:?}"
     );
 }
 

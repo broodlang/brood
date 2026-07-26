@@ -201,11 +201,26 @@ foo--bar      ; PRIVATE helper — the double-dash infix marks "implementation
 foo->bar      ; conversion (number->string, vec->list)
 ```
 
-A trailing `!` is **rare and not a mutation warning** — nothing mutates. It shows
-up in three unrelated senses (a wart, on the ROADMAP): `sig!` = a signature that is
-*enforced* at runtime, `set-load-path!` / `clipboard-set!` = the few root/OS-state
-setters, and `(! pid payload)` = the Erlang-style cast in `proc/gen`. Don't add a
-`!` to a name of your own.
+A trailing `!` is **rare and not a mutation warning** — nothing mutates, so the
+Scheme/Clojure reading is vacuous here and `!` is per-context by decision (ADR-163):
+`sig!` = a signature *enforced* at runtime, `set-load-path!` / `clipboard-set!` = the
+few root/OS-state setters, `(! pid payload)` = the Erlang-style cast in `proc/gen`.
+**Don't add a `!` to a name of your own.**
+
+**Names come from whichever language named the thing best** — `partition` (Clojure)
+next to `chunk-every` (Elixir), `enumerate` (Python), `scan` (Haskell), `&optional`
+(CL), `letrec` (Scheme). So a name can't always be guessed: reach for `(apropos
+"part")` or `(doc-search "chunk")` instead of assuming (ADR-163).
+
+**Three or more optional parameters → take an options map**, not a pile of
+`&optional`s: `(defn make-window (title opts) (let ({:keys [width height] :or {width
+80}} opts) …))`. Brood has no `&key` and won't (ADR-163) — the map plus `:keys`
+destructuring is the convention, and it composes with `merge` for defaults.
+
+**Failure: `throw` for bugs, a tagged vector for expected alternatives** (ADR-163).
+Throw when the caller almost certainly cannot continue (type error, missing file,
+protocol violation); return `[:ok v]` / `[:error e]` when failing is an ordinary
+outcome to branch on (parsing user input, a lookup that may miss, a timeout).
 Symbols are kebab-case (`out-of-range?`, not `outOfRange`/`out_of_range`).
 
 **Tail-recursive helpers get a suffix naming what they accumulate or do** —
@@ -256,15 +271,21 @@ x                bind x; a repeated x is an equality constraint (non-linear)
 (p1 p2 ...)      list of exact length
 (p1 & rest)      head(s) + tail
 [p1 p2 ...]      vector of exact length (the tuple / tagged-data idiom)
-{:keys [a b]}    map — bind a,b to (:a m),(:b m); {:keys [a] :or {a 0}} defaults absent keys
-                 ONLY :keys/:or — any other key ({:a v}, :as) is an ERROR, not
-                 ignored; {} matches any map. Reach nested values with get/get-in.
+{:keys [a b]}    map DESTRUCTURING — bind a,b to (:a m),(:b m); absent key binds nil
+                 (or its :or default) and never fails. {} matches any map.
+{:k pat}         map PATTERN — key must be PRESENT and its value match pat; nests
+                 ({:user {:id id}}). Mixes with :keys in one pattern. `:as` is an
+                 ERROR here (it would test for an :as KEY) — use (and m {…}).
 (bytes seg ...)  bytes value, bit-syntax style: byte/#b"…" literals; x = one byte;
                  (x n) = n bytes as sub-bytes (n may be an earlier binding);
                  (x :u16) (x :i32-le) ... = typed int, big-endian default; & rest
 
-(or p q)         NOT a pattern — an ERROR. Brood has no alternative/boolean
-(and …) (not …)  patterns: write one clause per alternative, or use a :when guard.
+(or p q …)       any alternative — first match wins. Every alternative must bind
+                 the SAME names (else a compile error).
+(and p q …)      every pattern, same value, left to right — this is Brood's `:as`:
+                 (and whole {:keys [a]}) captures the map AND destructures it.
+(not …)          NOT a pattern — an ERROR (it binds nothing, so it's a guard):
+                 write (x :when (not …) body…).
 ```
 
 ```lisp

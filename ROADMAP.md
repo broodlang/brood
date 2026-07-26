@@ -22,89 +22,79 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ tried and reverte
 
 ## Active work — dated findings & backlogs
 
-### Syntax review — the remainder (2026-07-26)
+### Syntax review — ✅ COMPLETE (2026-07-26)
 
-A review of the *surface* for orthogonality, convention, and "the Lisp features
-people expect", probed against the running binary rather than the docs. The verdict
-on the core was that it holds up: 8 special forms, one pattern grammar at every
-binding site, `count`/`empty?` universal. **Three of the six findings shipped as
-[ADR-156](docs/decisions.md)** — the set/map collection-protocol holes, the
-range-in-cons-tail printer bug, the two silently-misread pattern shapes, and the
-missing `partial`/`complement`/`constantly`/`case`/`comment`/`vec`/`disj`/`nan?`.
-What's left is below, highest-value first. All of it is surface-level: no item here
-needs a new `Value` kind or a change to evaluation semantics.
+A review of the *surface* for orthogonality, convention, and "the Lisp features people
+expect", probed against the running binary rather than the docs. The verdict on the
+core held up: 8 special forms, one pattern grammar at every binding site,
+`count`/`empty?` universal. **Every filed item is now either shipped or decided:**
 
-- ⬜ **Callable data — `(:key m)`, `(m :key)`, `([v] i)`, `(#{…} x)`** — the one item
-  that touches the evaluator's call path, and the biggest ergonomic gap against the
-  Clojure surface Brood otherwise mirrors. Today all four raise "cannot call
-  non-function", so the keyword-as-accessor idiom `(map :name people)` has no
-  spelling; with `partial` now present the workaround is `(map (partial get-key
-  :name) people)`-ish or an explicit `fn`. **The question is scope**: keyword-only
-  (smallest, covers the common case, keeps "a call head is a function" nearly
-  intact) vs. the full Clojure set (maps/vectors/sets callable too, which makes
-  `(m k)` and `(get m k)` two spellings of one thing — against "one spelling
-  each"). Argues *for*: it is the single most-missed idiom, and it composes with
-  every HOF. Argues *against*: it weakens the invariant that the head of a form is
-  a function, costs a check on the call path, and `get` already covers it. Needs an
-  ADR either way — **decide before adding anything**. **[kernel]**
-- ⬜ **`fold` vs `reduce` — two public names for one operation.** `reduce` (2-or-3
-  arg) is a thin wrapper over `fold` (strict 3-arg), and both are documented public
-  surface; ADR-154's "one spelling each" should have caught it. Options: make `fold`
-  internal (`%fold`) and keep `reduce` — but `fold` is what all of `std/` folds
-  with, so that's a wide mechanical rename with the ambiguous-name hazard the
-  ADR-154 downstream sweep documented (a `fold` parameter and a `fold` call are the
-  same shape) — or keep both and document `fold` explicitly as the strict-arity
-  primitive `reduce` dispatches to. Leaning the latter; cheap either way. **[Brood]**
-- ⬜ **Retire the `lambda` alias for `fn`.** ADR-098 decided to drop the
-  `lambda`/`let*` aliases and `let*` is gone, but `lambda` is still live in the
-  evaluator (`SPECIAL_SPELLINGS`), still in the tooling `SPECIAL_FORMS` list (so
-  editors highlight it), and `((lambda (x) x) 1)` still evaluates — while
-  `docs/language.md` claimed for months that it "was removed", and the 2026-07-26
-  downstream doc sweep removed mentions of it on that basis. ADR-108 says the
-  opposite of ADR-098. **Resolve the contradiction, then make the code and the docs
-  agree** (removing it is ~4 lines + an unbound-symbol hint). **[kernel]**
-- ⬜ **`!` means three different things.** `sig!` = *enforced* signature,
-  `set-load-path!` / `clipboard-set!` = mutation (the Scheme/Clojure reading), and
-  `(! pid payload)` = Erlang send in `proc/gen`. Since Brood has no data mutation,
-  the mutation reading is the one that's free to reuse — but pick one. `(! pid msg)`
-  is the odd one out on two counts: it's invisible to grep and unreadable aloud
-  (`cast` would say what it does). **[Brood]**
-- ⬜ **`cond`'s blessed bare `else`.** `:else`, `true`, and `42` all catch by plain
-  truthiness; blessing the bare symbol `else` (ADR-004) adds a magic name to the
-  language for no capability. Dropping it is one prelude line + a sweep of `std/`
-  (which uses `else` throughout, so it is a wide but purely mechanical edit).
-  Weigh: `else` reads well and is entrenched in-tree; the cost is one more reserved
-  word to explain. **[Brood]**
-- ⬜ **`for` takes exactly one body form** while `doseq`/`dotimes`/`let`/`when` all
-  take `body…` — `(for (x xs) (print x) x)` errors with "expected 2 arguments, got
-  3". Gratuitous asymmetry; the fix is `(for (binds & body) …)`. **[Brood]**
-- ⬜ **Mixed lineage in one namespace.** `partition` (Clojure) sits beside
-  `chunk-every`/`chunk-by` (Elixir), `enumerate` (Python), `scan` (Haskell),
-  `&optional` (CL), `!`/`spawn` (Erlang), `letrec` (Scheme). Each choice is
-  defensible alone; together they mean a name can't be guessed. The cheapest
-  alignment, given the rest of the surface is Clojure-shaped, is
-  `partition`/`partition-all`/`partition-by` — decide whether consistency is worth
-  the rename, or write the house rule down and stop. **[Brood]**
+Shipped as ADRs:
+- ✅ **[ADR-156](docs/decisions.md)** — the set/map collection-protocol holes, the
+  range-in-cons-tail printer bug, the two silently-misread pattern shapes, and
+  `partial`/`complement`/`constantly`/`case`/`comment`/`vec`/`disj`/`nan?`.
+- ✅ **ADR-158** — protocols promoted from the `hatch` package into `std/protocol.blsp`
+  (`defprotocol`/`defimpl`/`defbehaviour`), the open-dispatch answer. The kernel had
+  carried the checker/LSP conformance pass for months while the macros lived
+  downstream.
+- ✅ **ADR-159** — grapheme-*indexed* accessors (`grapheme-count`, `grapheme-at`,
+  `substring-graphemes`), so the documented-correct cursor step stops costing a vector
+  of every cluster in the string per keystroke.
+- ✅ **ADR-160** — `(or …)` / `(and …)` patterns and general `{key subpattern}` map
+  patterns; `and` doubles as the `:as` capture. `(not …)` and map `:as` stay rejected.
+- ✅ **ADR-161** — transducers as public surface (`transduce` + `xmap`/`xfilter`/
+  `xremove`/`xkeep`), so a user can write their own fusing stage.
+- ✅ **ADR-162** — the `lambda` alias retired; `fn` is the only spelling.
+- ✅ **ADR-163** — the convention questions settled *as decisions*: no `&key` (a
+  trailing options map is the rule), `fold`+`reduce` both stay documented,
+  `cond`'s bare `else` stays, `!`'s three meanings documented, naming lineage is
+  "best name for the job" + `apropos`, the failure convention is throw-for-bugs /
+  tagged-value-for-expected, and the reader gaps are documented rather than changed.
+- ✅ Also landed: `dissoc-in` (completing `get-in`/`assoc-in`/`update-in`), `for`
+  taking multiple body forms like every other iteration form, and a hint-table audit
+  (five hints named features that didn't exist).
+
+What that review consciously left OPEN, with the reasoning:
+
+- ⬜ **Callable data — `(:key m)`, `(m :key)`, `([v] i)`, `(#{…} x)`.** The one item
+  that touches the evaluator's call path, and the biggest remaining ergonomic gap
+  against the Clojure surface. `partial` (ADR-156) softened the workaround but
+  `(map :name people)` still has no spelling. **Needs an ADR first**, on scope:
+  keyword-only (smallest, keeps "a call head is a function" nearly intact) vs. the
+  full Clojure set (which makes `(m k)` and `(get m k)` two spellings of one thing,
+  against ADR-154's rule). Costs a check on the call path in the tree-walker, the VM
+  dispatcher, *and* the JIT. **[kernel]**
+- ⬜ **`sig` inline signatures.** A function's name, params and types live in two
+  forms with an ordering constraint that only bites under `BROOD_CONTRACTS=1`. The
+  fix — `(defn f ((x int) -> int) …)` — is an ADR-082 revision touching `defn`, the
+  checker's `sig_of`, `defrecord`'s emitted sigs, `sig!`'s wrapping, and every `sig`
+  in `std/`. Deferred with the reasoning in ADR-163, not dismissed. **[Brood]**
+- ⬜ **Re-host the seq protocol on ADR-158's protocols.** `count`/`first`/`conj`
+  dispatch in the prelude and the kernel, so a user type can never join the
+  collection protocol ADR-156 completed — policy still living in Rust. The blocker is
+  performance: these are the hottest paths in the language, so it is a measured
+  rewrite, not a promotion. **[kernel/Brood]**
+- ⬜ **Record-shape dispatch for protocols.** Records are structural maps (ADR-130),
+  so every `defrecord` value dispatches as `:map`. A second axis keyed on a `:type`
+  field would fix it and would *silently* change what any map carrying a `:type` key
+  dispatches to — rejected for now (ADR-158), workaround documented. **[Brood]**
+- ⬜ **Transducer early termination** (`reduced`) and stateful-stage lifecycle.
+  ADR-161 ships the one-arity contract `fold` needs; `take`-as-a-stage wants a
+  `reduced` sentinel threaded through `fold`, the library's hottest function.
+  **[Brood]**
+- ⬜ **A rope-level grapheme cursor.** ADR-159's three accessors unblock correctness
+  everywhere; a large buffer still wants a cursor that caches the segmentation.
+  Size it against a real editor workload. **[kernel]**
 - ⬜ **`contains?` on a vector/list, `first`/`map` on a string** — the two remaining
-  ✗ in the collection matrix, both deliberately left erroring by ADR-156.
-  `contains?` on a vector would have to answer by *index* (Clojure's trap:
-  `(contains? [1 2] 1)` is true for the wrong reason); a string would have to pick
-  codepoint vs grapheme for the caller. Revisit only with a concrete need — the
-  current loud error is defensible. **[Brood]**
-- ⬜ **Reader gaps worth a decision, not necessarily a change:** no `#_` form
-  discard (`comment` now covers the block case); `inf`/`nan`/`-inf` are *reader
-  float literals*, so those three tokens can never be symbols — undocumented, and
-  it contradicts the data-types table's stated rule that numeric intent needs a
-  digit; `1/2` reads as a **symbol** (and `/` is the namespace separator, so it
-  looks like namespace `1`, name `2`); `#|` produces the confusing "unterminated
-  |…| bar-quoted symbol" rather than "no block comments". **[kernel]**
-- ⬜ **`sig` placement.** A signature is a separate top-level form that must sit
-  *below* its `defn` (it rebinds the name under `BROOD_CONTRACTS=1`), so a
-  function's name, params, and types live in two places with an ordering constraint
-  that only fails under a flag. The one spot where the surface fails the
-  "easy for a human" test. An inline `(defn f ((x int) -> int) …)` is the obvious
-  alternative and a big change; ADR-082 chose the current shape deliberately, so
-  this needs a real ADR, not a tweak. **[Brood]**
+  ✗ in the collection matrix, both deliberately left erroring (ADR-156): `contains?`
+  on a vector would have to answer by *index* (Clojure's trap), and a string would
+  have to pick codepoint vs grapheme for the caller. **[Brood]**
+- ⬜ **`#|` says "unterminated `|…|` bar-quoted symbol"** rather than "Brood has no
+  block comments". A nicety; the reader hint table is otherwise now accurate.
+  **[kernel]**
+- ⬜ **Unbounded laziness** (`iterate`, `lazy-seq`) stays rejected — seq-views plus
+  processes cover it, and `Value::Lazy` adds a GC story, force semantics, and
+  head-holding pitfalls. Recorded in [deferred.md](docs/deferred.md) #2.
 
 ### `jit_lower_arm_inner` emit-loop decomposition — ✅ COMPLETE (2026-07-25)
 

@@ -344,10 +344,9 @@ never a false positive.
   positives (contract #5 holds — advisory, never gates). An intentional
   anaphoric macro (deliberate capture) would be flagged; none exist in-tree, and
   if one is written the lint should grow an opt-out rather than relax the gate.
-- ✅ **Protocol / behaviour conformance** (`check/protocol.rs`). Note the *macros*
-  are not in std — they live in the `hatch` package's `protocol` module (a
-  prototype awaiting promotion); the kernel supplies only this conformance pass, so
-  it lies dormant until a project loads that module. Beyond type
+- ✅ **Protocol / behaviour conformance** (`check/protocol.rs`). The *macros* live
+  in `std/protocol.blsp` (`(require 'protocol)`, ADR-158); this pass predated them
+  by months, back when they were a prototype in the `hatch` package. Beyond type
   misuse, the checker validates the `defprotocol` / `defbehaviour` / `defimpl` /
   `(:implements …)` family against the declared interface: a diagnostic per op an
   impl omits, per op whose arity disagrees, and per method the protocol never

@@ -899,14 +899,13 @@ fn foreign_constructs_hint_at_the_brood_way() {
 #[test]
 fn hints_name_only_features_that_exist() {
     let hint = |src: &str| run(&format!("(try {src} (catch e (get e :hint)))"));
-    // The hint may *name* defprotocol/defimpl — it must not imply std ships them.
-    // (They live in the `hatch` package's `protocol` module, a prototype; the kernel
-    // carries only the checker/LSP conformance pass, which is what made the old
-    // wording — "use `defprotocol`/`defimpl` (the `protocol` module)" — read as if a
-    // `(require 'protocol)` away.)
+    // The hint names `defprotocol`/`defimpl` and how to reach them. It said "(the
+    // `protocol` module)" for months while no such module was in std — the macros
+    // lived in the hatch package and only the checker pass was in-tree. ADR-158
+    // promoted them, so the hint must now carry the `require` that makes it true.
     let d = hint("(deftype foo)");
-    assert!(d.contains("NOT in std"), "{d}");
-    assert!(d.contains("hatch"), "{d}");
+    assert!(d.contains("(require 'protocol)"), "{d}");
+    assert!(d.contains("defprotocol"), "{d}");
     assert!(d.contains("defrecord"), "{d}");
     // `letfn` → letrec (a let-bound fn cannot call itself).
     assert!(hint("(letfn ((f (x) x)) 1)").contains("letrec"));

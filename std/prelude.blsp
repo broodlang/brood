@@ -901,6 +901,20 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
   "A nested copy of `m` with the value at the key sequence `path` replaced by `(apply f current args)` (creating intermediate maps as needed)."
   (assoc-in m path (apply f (get-in m path) args)))
 
+;; The nested-access family was `get-in`/`assoc-in`/`update-in` with no removal —
+;; so deleting a nested key meant a hand-written `(update-in m parent dissoc k)`,
+;; which every caller re-derived. Completes the set.
+(defn dissoc-in (m path)
+  "A nested copy of `m` with the key sequence `path` REMOVED (the sibling of
+`assoc-in`). A path that doesn't exist is a no-op, and intermediate maps are left in
+place even when they end up empty — removing a leaf never prunes its branch."
+  (let (k (first path) ks (rest path))
+    (cond
+      (not (map? m)) m
+      (empty? ks) (dissoc m k)
+      (contains? m k) (assoc m k (dissoc-in (get m k) ks))
+      else m)))
+
 (defn identity (x) "Return `x` unchanged." x)
 (defn zero? (n) "True if `n` is zero." (= n 0))
 (defn positive? (n) "True if `n` is greater than zero." (> n 0))
@@ -1312,18 +1326,32 @@ its printed form."
 ;; unemittable from a macro). Left as a list pattern it would silently try to match
 ;; a 2-element list headed by the symbol `unquote`, so name it instead.
 (defn match-stale-pin? (p) (and (pair? p) (= (first p) 'unquote)))
-;; `(or p q)` / `(and …)` / `(not …)` in pattern position — an attempted
-;; alternative/boolean pattern, which Brood does not have. Read as an ordinary
-;; list pattern it was SILENTLY a 3-element list whose head *binds a variable
-;; named `or`*, so `(match 2 ((or 1 2) :hit) (_ :miss))` quietly took the wrong
-;; branch, with no error anywhere. Name it instead (ADR-152).
-(defn match-logical-pattern? (p)
-  (and (pair? p) (symbol? (first p)) (match-member? (first p) '(or and not))))
-(defn match-logical-pattern-error (p)
-  (error (str "match: `(" (first p) " …)` is not a pattern — Brood has no"
-              " alternative/boolean patterns (a bare `" (first p) "` here would BIND"
-              " a variable of that name). Write one clause per alternative, or move"
-              " the test into a `:when` guard: (x :when (" (first p) " …) body…).")))
+;; `(or p q …)` — an ALTERNATIVE pattern: try each in order, first match wins
+;; (ADR-160). `(and p q …)` — a CONJUNCTION: every pattern must match the same
+;; value, which is also how you capture the whole while destructuring it (Clojure's
+;; `:as`, Rust's `x @ pat`): `(and whole {:keys [a]})`.
+(defn match-or-pattern? (p) (and (pair? p) (= (first p) 'or)))
+(defn match-and-pattern? (p) (and (pair? p) (= (first p) 'and)))
+;; `(not …)` stays rejected: it binds nothing and reads as a *guard*, which is what
+;; `:when` is for. Read as a plain list pattern it would silently bind a variable
+;; named `not`, so name it (ADR-152).
+(defn match-not-pattern? (p) (and (pair? p) (= (first p) 'not)))
+(defn match-not-pattern-error (p)
+  (error (str "match: `(not …)` is not a pattern — a negative match binds nothing,"
+              " so put the test in a `:when` guard instead:"
+              " (x :when (not " (pr-str (second p)) ") body…)."
+              " (Read as a list pattern it would BIND a variable named `not`.)")))
+
+;; Every alternative of an `or` must bind the SAME names — otherwise the body could
+;; reference a name only some alternatives bind, and which one it is depends on the
+;; input. Rust enforces the same rule for the same reason.
+(defn match-or-check (alts)
+  (let (name-sets (map (fn (a) (sort (map name (pattern-vars a)))) alts))
+    (when (not (every? (fn (ns) (= ns (first name-sets))) name-sets))
+      (error (str "match: every alternative of an `(or …)` pattern must bind the same"
+                  " names, got " (pr-str (map (fn (ns) ns) name-sets))
+                  " — a body can't reference a name only some alternatives bind."
+                  " Use separate clauses when the bindings differ.")))))
 
 ;; -- expand-time helpers --
 (defn match-member? (x xs)
@@ -1343,6 +1371,10 @@ its printed form."
     (match-pin? pat) nil
     (match-stale-pin? pat) nil
     (match-bytes-pattern? pat) (match-bytes-vars (rest pat))
+    ;; `or` binds the same names in every alternative (checked at compile), so the
+    ;; first alternative's set is the whole set; `and` binds the union.
+    (match-or-pattern? pat) (pattern-vars (second pat))
+    (match-and-pattern? pat) (match-seq-vars (rest pat))
     (pair? pat) (match-seq-vars pat)
     (vector? pat) (match-seq-vars (match-vec->list pat))
     (match-map-pattern? pat) (match-map-vars pat)
@@ -1373,8 +1405,12 @@ its printed form."
                              " 2-element list (unquote x), quote the head: ('unquote x).")
     (match-bytes-pattern? pat) (match-compile-bytes (rest pat) target bound success fail)
     ; (bytes seg…): destructure a bytes value, Elixir-style binary matching
-    (match-logical-pattern? pat) (match-logical-pattern-error pat)
-    ; (or p q) / (and …) / (not …): rejected, never read as a list pattern
+    (match-not-pattern? pat) (match-not-pattern-error pat)
+    ; (not …): rejected — a negative match binds nothing; use a :when guard
+    (match-or-pattern? pat) (match-compile-or (rest pat) target bound success fail)
+    ; (or p q …): first alternative that matches wins
+    (match-and-pattern? pat) (match-compile-and (rest pat) target bound success fail)
+    ; (and p q …): every pattern must match the same value (capture-and-destructure)
     (pair? pat) (match-compile-list pat target bound success fail)
     (vector? pat) (match-compile-vector pat target bound success fail)
     (match-map-pattern? pat) (match-compile-map pat target bound success fail)
@@ -1613,6 +1649,31 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
   (let (parts (match-split pat))
     (match-compile-seq (nth parts 0) (nth parts 1) (nth parts 2) target bound success fail)))
 
+;; `(or p q …)`: chain the alternatives, each falling through to the next. `success`
+;; is duplicated per alternative rather than hoisted into a thunk — that keeps every
+;; alternative's body in TAIL position (a `match` in tail position must stay O(1)
+;; stack), and alternatives are nearly always literals, so the duplication is small.
+(defn match-compile-or (alts target bound success fail)
+  (do
+    (match-or-check alts)
+    (match-compile-or--chain alts target bound success fail)))
+(defn match-compile-or--chain (alts target bound success fail)
+  (if (empty? alts)
+    fail
+    (match-compile (first alts) target bound success
+      (match-compile-or--chain (rest alts) target bound success fail))))
+
+;; `(and p q …)`: match every pattern against the SAME value, left to right, so
+;; later patterns see the names earlier ones bound (a repeated name is an equality
+;; constraint, as everywhere else). `(and whole {:keys [a]})` is the `:as` idiom.
+(defn match-compile-and (pats target bound success fail)
+  (if (empty? pats)
+    success
+    (match-compile (first pats) target bound
+      (match-compile-and (rest pats) target
+        (append bound (pattern-vars (first pats))) success fail)
+      fail)))
+
 (defn match-compile-seq (pats rest-pat has-rest target bound success fail)
   (if (empty? pats)
     (if has-rest
@@ -1670,28 +1731,67 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; anything, bound nothing, and the body then died on an unbound `v` — a
 ;; diagnostic pointing at the body, nowhere near the cause. (`{}` stays legal: no
 ;; keys to misread, so it is the honest "any map" pattern.)
+;; `:as` stays rejected. With general `{key subpattern}` support (ADR-160) a stray
+;; `:as` would otherwise read as "this map must have an `:as` key", silently matching
+;; something else entirely — and the `and`-pattern spells the intent exactly.
 (defn match-map-check (pat)
-  (let (bad (filter (fn (k) (not (or (= k :keys) (= k :or)))) (keys pat)))
-    (when (not (empty? bad))
-      (error (str "match: a map pattern understands only :keys and :or, got "
-                  (pr-str bad)
-                  " — general {:key subpattern} nesting and :as are not implemented."
-                  " Use {:keys [a b]} to bind by name, or bind the whole map and"
-                  " reach in with `get`.")))))
+  (when (contains? pat :as)
+    (error (str "match: a map pattern has no `:as` — capture the whole value with an"
+                " `and` pattern instead: (and " (pr-str (get pat :as))
+                " {…}). (As a plain key, `:as` would test for an `:as` KEY in the"
+                " map.)"))))
 
 ;; :keys value is a vector [a b] (or a list); return it as a list of symbols.
 (defn match-map-keys (pat)
   (let (kv (get pat :keys))
     (cond (nil? kv) nil (vector? kv) (match-vec->list kv) else kv)))
 
-(defn match-map-vars (pat) (do (match-map-check pat) (match-map-keys pat)))
+;; The explicit `{key subpattern}` entries — every key except the two markers — as
+;; a list of `[key subpattern]` pairs.
+(defn match-map-entries (pat)
+  (filter (fn (kv) (not (or (= (first kv) :keys) (= (first kv) :or))))
+    (map-pairs pat)))
+
+(defn match-map-vars (pat)
+  (do
+    (match-map-check pat)
+    (append (match-map-keys pat)
+      (fold (fn (acc kv) (append acc (pattern-vars (second kv)))) nil
+        (match-map-entries pat)))))
 
 (defn match-compile-map (pat target bound success fail)
   (do
     (match-map-check pat)
+    ;; Explicit `{key subpattern}` entries are tested FIRST (they can fail), then the
+    ;; lenient `:keys` binds wrap the success branch. The two halves differ on
+    ;; purpose, and the difference is the ecosystem each comes from:
+    ;;   {:keys [a b]}  — Clojure DESTRUCTURING: an absent key binds nil (or its
+    ;;                    `:or` default). Never fails.
+    ;;   {:k pat}       — Erlang/Elixir MAP PATTERN: the key must be PRESENT and its
+    ;;                    value must match `pat`, else the clause fails.
     `(if (map? ~target)
-       ~(match-map-binds (match-map-keys pat) (get pat :or) target success)
+       ~(match-compile-map-entries (match-map-entries pat) target bound
+          (match-map-binds (match-map-keys pat) (get pat :or) target success)
+          fail)
        ~fail)))
+
+;; Each explicit entry: require the key, bind its value to a temp, match the
+;; sub-pattern against it. The key is emitted QUOTED — in pattern position a key is a
+;; literal (`{[1 2] p}` looks up the vector `[1 2]`), never an expression to evaluate.
+(defn match-compile-map-entries (entries target bound success fail)
+  (if (empty? entries)
+    success
+    (let (kv (first entries)
+          k (first kv)
+          sub (second kv)
+          v (gensym "mval"))
+      `(if (contains? ~target (quote ~k))
+         (let (~v (get ~target (quote ~k)))
+           ~(match-compile sub v bound
+              (match-compile-map-entries (rest entries) target
+                (append bound (pattern-vars sub)) success fail)
+              fail))
+         ~fail))))
 
 ;; Bind each key symbol to (get target :key); when the key is absent, fall back to
 ;; its :or default (evaluated only then) if one is given, else nil.
@@ -2836,6 +2936,50 @@ for a higher-order op that wants a fixed answer."
 (defn %xkeep (f)
   (fn (rf) (fn (acc x) (let (y (f x)) (if (nil? y) acc (rf acc y))))))
 
+;; ---- transducers, as public surface (ADR-161) -------------------------------
+;; The stage constructors above stayed private for a reason that expired: the `l*`
+;; combinators cover the built-in stages, but a user who wants a stage of their OWN
+;; (`take-while`-as-a-stage, a stateful de-duplicator, a windower) had no way to
+;; write one and no way to run it. The contract is small enough to publish:
+;;
+;;   A TRANSDUCER is a function `(rf) -> rf'` where a REDUCING FUNCTION `rf` is
+;;   `(acc x) -> acc`. It wraps `rf` and may call it zero, one, or many times per
+;;   input. Compose stages with `comp` — LEFT to RIGHT in data-flow order, the
+;;   reverse of ordinary function composition, because each stage wraps the *next*
+;;   one's reducer.
+;;
+;; `xmap`/`xfilter`/`xremove`/`xkeep` are the built-in stages (the same functions
+;; the `l*` combinators use), and `transduce` runs a stack over any collection.
+(defn xmap (f)
+  "The `map` stage as a transducer: `(f x)` for each input. Compose with `comp`, run
+with `transduce`, or reach for `lmap` when you just want a fusing pipeline."
+  (%xmap f))
+(defn xfilter (pred)
+  "The `filter` stage as a transducer: keep inputs where `(pred x)` is truthy."
+  (%xfilter pred))
+(defn xremove (pred)
+  "The `remove` stage as a transducer: drop inputs where `(pred x)` is truthy."
+  (%xremove pred))
+(defn xkeep (f)
+  "The `keep` stage as a transducer: `(f x)` for each input, dropping `nil` results."
+  (%xkeep f))
+
+(defn transduce (xform rf init coll)
+  "Reduce `coll` with `rf`/`init` through the transducer `xform` — one pass, no
+intermediate collections. `(transduce (comp (xfilter odd?) (xmap sq)) + 0 (range 10))`
+sums the squares of the odd numbers, allocating nothing in between.
+
+`xform` is any `(rf) -> rf'` function, so a stage of your own is a plain `fn`:
+
+  (defn xtake-while (pred)          ; stop-at-first-failure, as a stage
+    (fn (rf) (fn (acc x) (if (pred x) (rf acc x) acc))))
+
+Stages compose LEFT to RIGHT in data-flow order under `comp` — `(comp (xfilter p)
+(xmap f))` filters before mapping — because each stage wraps the next one's reducer.
+`lmap`/`lfilter`/… are the ergonomic front end over the same machinery; use
+`transduce` when the stage stack is computed, reused, or your own."
+  (fold (xform rf) init coll))
+
 (defn %seqview-wrap (coll xf)
   "Wrap `coll` in a lazy seq-view applying transducer `xf`. If `coll` is already a
 view, compose `xf` onto its transducer (same source) so the stages fuse."
@@ -2930,8 +3074,8 @@ iterating for side effects."
                             "' has no collection — bindings must be paired as (var coll ...)")
     else (for--check-binds (rest (rest binds)))))
 
-(defmacro for (binds body)
-  "List comprehension: `(for (x xs) expr)` yields `expr` for each `x`; supports `:when guard` filters and multiple bindings (last varies fastest). Bindings may destructure."
+(defmacro for (binds & body)
+  "List comprehension: `(for (x xs) expr)` yields `expr` for each `x`; supports `:when guard` filters and multiple bindings (last varies fastest). Bindings may destructure. Multiple body forms are evaluated in order and the LAST one is collected (like `let`/`when`/`doseq`) — `for` took exactly one body form until 2026-07-26, the only iteration form that did."
   (do
     (when (vector? binds)
       (error "for: bindings must be a list, not a vector: write (for (x xs) expr)."
@@ -2939,7 +3083,9 @@ iterating for side effects."
         " *inside* a binding position is still destructuring: (for ([k v] pairs) k)."))
     (for--check-binds binds)
     (let (acc (gensym "acc"))
-      `(reverse (let (~acc nil) ~(for--fold acc (map identity binds) body))))))
+      `(reverse (let (~acc nil)
+                  ~(for--fold acc (map identity binds)
+                     (if (empty? (rest body)) (first body) (cons 'do body))))))))
 
 ;; (doseq (pat coll) body...) — run `body` for its side effects over each item,
 ;; returning nil. Just `for` run for effect (the result list is discarded). The

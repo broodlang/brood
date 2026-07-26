@@ -82,7 +82,7 @@ fn callback_arity(heap: &Heap, arg: Value, ctx: &Ctx) -> Option<Arity> {
 /// shape (here, [`guards::lambda_ret`], and `protocol`'s arity reader) must accept
 /// the two. Single source of truth so they can't drift.
 pub(super) fn is_fn_head(head: Symbol) -> bool {
-    value::symbol_is(head, kw::FN) || value::symbol_is(head, kw::LAMBDA)
+    value::symbol_is(head, kw::FN)
 }
 
 /// The arity of a **single-clause** `fn` literal — `(fn (a b) …)` → `exact(2)`,
@@ -160,12 +160,13 @@ fn lambda_literal_arity(heap: &Heap, form: Value) -> Option<Arity> {
     })
 }
 
-/// How a callback argument reads in a diagnostic — a named function by its name,
-/// an inline lambda as "the lambda".
+/// How a callback argument reads in a diagnostic — a named function by its name, an
+/// inline one as "the fn" (it said "the lambda" until ADR-162 retired that spelling;
+/// a diagnostic shouldn't name a form the language no longer has).
 fn callback_desc(arg: Value) -> String {
     match arg {
         Value::Sym(s) => name_of(s),
-        _ => "the lambda".to_string(),
+        _ => "the fn".to_string(),
     }
 }
 
@@ -506,7 +507,6 @@ static SPECIAL_HEAD: LazyLock<SymbolMap<SpecialHead>> = LazyLock::new(|| {
         (kw::LET, Let),
         (kw::LETREC, Letrec),
         (kw::FN, Fn),
-        (kw::LAMBDA, Fn),
         (kw::DEF, Def),
         (kw::DEFN, Defn),
         (kw::DEFMACRO, Defn),
