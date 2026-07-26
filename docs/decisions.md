@@ -9730,3 +9730,317 @@ The general lesson is the one ADR-155 also produced: on this runtime a *constant
 wrong position* can cost an order of magnitude by silently disqualifying an arm from a
 JIT subset. Neither the checker nor the benchmark suite catches that class — only an
 A/B against the previous shape does.
+
+## ADR-158 — Protocols move into `std/`: the polymorphism seam ships with the language
+
+**Context.** A review asked what Brood lacks as a language. The largest answer was
+open polymorphism: nothing in the tree let a *later* module add a case to an
+existing operation. Dispatch was a `cond` on `type-of` (closed — extending means
+editing the dispatcher) or multi-clause `defn` (closed the same way, per definition
+site). Worse, the runtime hint for `deftype`/`reify` told readers to *"use
+`defprotocol`/`defimpl` (the `protocol` module)"*, and **there was no such module**.
+
+The reason that hint existed is the interesting part: the kernel has carried
+`types/check/protocol.rs` for months — a full conformance pass that checks each
+`defimpl` against its `defprotocol`, reports a missing op, an arity disagreement, or
+an op the protocol never declared — plus LSP goto/hover over the same forms. The
+*tooling* for protocols was in-tree and dormant. The *macros* lived downstream in
+the `hatch` package (`hatch/src/protocol.blsp`), whose own module docstring called
+itself **"prototype for std/protocol"**. So the design had already been built,
+proven in a real application (hatch's JSON `Encode` protocol replaced a closed
+`cond` on `type-of`), and validated by the checker — it had simply never been
+promoted.
+
+**Decision — promote it verbatim into `std/protocol.blsp`** (embedded, opt-in via
+`(require 'protocol)` / `(:use protocol)`; never in the prelude). It is ~110 lines
+of Brood over two registry globals: `*protocols*` (name → declared op specs, the
+data the checker/LSP read) and `*impls*` (`[protocol op type-key]` → fn, the
+dispatch table). `defprotocol` defines one generic `defn` per op that calls
+`dispatch`; `defimpl` registers per-key implementations; `defbehaviour` records a
+module-level contract with no value dispatch. `hatch/src/protocol.blsp` is deleted
+and hatch consumes std's copy — its 750 tests pass unchanged, which is the migration
+proof.
+
+Why promote rather than design fresh: the mechanism is already the answer this repo
+would have arrived at (policy in Brood, mechanism nowhere — there is no kernel
+support at all), it is the one the in-tree checker already validates, and it has a
+downstream user. Designing a second facility would have orphaned both.
+
+**Decision — dispatch stays single, on `type-of` of the first argument.** No
+multiple dispatch, and **no second axis keyed on a `:type` field**, even though that
+is what would make `defrecord` values dispatchable per shape (records are structural
+maps, ADR-130, so they all land on `:map`). A `:type` axis would silently change
+what *any* map carrying a `:type` key dispatches to — a reinterpretation of existing
+data, which is the failure mode ADR-152 exists to prevent. Per ADR-011 the simple
+shape ships; the documented workaround is to branch on a field inside the `:map`
+implementation, and the record-shape axis is recorded in ROADMAP as a question
+rather than a plan.
+
+**Consequences.**
+- No kernel change, no new `Value`, no evaluator change: `defprotocol` lowers to
+  `defn`s + registry calls. The prelude is untouched, so a program that never
+  `require`s it pays nothing.
+- The `deftype`/`reify` hint is now *true*, and names `(require 'protocol)`.
+  `docs/types.md`'s protocol-conformance bullet no longer describes a dormant pass.
+- The collection protocol (ADR-156) is **still Rust-side** — `count`/`first`/`conj`
+  dispatch in the prelude and the kernel, so a user type cannot join it. Re-hosting
+  the seq protocol on this facility is the obvious follow-on and is deliberately not
+  attempted here: it is a performance-sensitive rewrite of the hottest paths in the
+  language, not a promotion.
+- New coverage in `tests/protocol_test.blsp` (15 cases): dispatch per kind,
+  `:default`, multi-argument ops, single-dispatch pinned explicitly, the loud
+  missing-impl error, openness (adding an impl for a built-in after the fact),
+  re-registration/hot-reload, introspection, records-dispatch-as-`:map` pinned as a
+  limitation, `defbehaviour` recording ops without defining functions, and
+  cross-process dispatch through the shared registries.
+- **Registration is configuration-time, and the tests proved it.** Both registries
+  are updated with `def` — a read-modify-write of an immutable map — so two processes
+  calling `defimpl` *concurrently* can lose one update. Top-level `defimpl` (the
+  normal case) runs single-threaded as the module loads and is safe; the rule is the
+  one telemetry's `attach`/`detach` already follow. This surfaced as a test that
+  passed standalone and failed under the full parallel suite, which is exactly the
+  property worth pinning — the registering tests are now `:serial` and the contract
+  is in the module docstring.
+- Writing the tests surfaced a second trap worth knowing: naming a protocol op
+  `describe` shadows the test framework's `describe` macro under `(:use test)`, and
+  the failure surfaces as "group name must be a string" from a *later* form. Generic
+  op names collide with macros exactly as any other global would.
+
+## ADR-159 — Grapheme-*indexed* string accessors: make the correct spelling the fast one
+
+**Context.** `docs/language.md` has stated the rule for months: *"A code point is not
+a character — a grapheme cluster is… This is the unit to step a cursor by; stepping
+by code point splits a cluster and corrupts the text."* But every **indexed** string
+operation — `string-length`, `char-at`, `substring`, `index-of` — is code-point
+indexed. So the only correct way to read the cluster at a cursor position was
+`(nth (string->graphemes s) i)`, which segments the *whole* string and allocates a
+vector of every cluster in it. On the editor's hottest path — a cursor motion per
+keystroke — that is O(line length) per character moved, and the incentive it creates
+is to quietly use the wrong unit because the right one is expensive.
+
+**Decision.** Add the three cluster-indexed accessors as kernel primitives, mirroring
+the code-point trio they shadow:
+
+| Cluster-indexed | Code-point-indexed counterpart |
+|---|---|
+| `(grapheme-count s)` | `string-length` |
+| `(grapheme-at s i [default])` | `char-at` |
+| `(substring-graphemes s start [end])` | `substring` |
+
+`grapheme-at` walks to `i` and stops, allocating one string; `grapheme-count`
+allocates nothing. Out-of-range reads return the default rather than raising, and
+slices clamp at both ends — the `nth`/`take`/`drop` convention, so cursor arithmetic
+at a line's edge needs no bounds guards.
+
+Rust, not Brood, because the boundary rules are UAX #29 tables (the same
+`unicode-segmentation` dependency `string->graphemes`/`display-width` already use) —
+not something the language can bootstrap. This is the "mechanism in Rust" case:
+`string->graphemes` remains the vector-producing form for when you genuinely want all
+the clusters.
+
+**Deliberately not done.** No grapheme-indexed `index-of`, no rope-level grapheme
+cursor. A rope cursor is the real answer for a large buffer (it can cache the
+segmentation), but it belongs with the rope, sized against a real editor workload —
+these three unblock the correct spelling everywhere first. Recorded in ROADMAP.
+
+**Consequences.** Purely additive; no existing behaviour changes and the code-point
+accessors keep their meaning (a byte/codepoint index is still the right unit for a
+parser, which is what `string->codepoints` serves). Coverage in
+`tests/strings_test.blsp`, every case built on a **decomposed** `e` + U+0301 so
+cluster and code-point indices genuinely differ — a precomposed U+00E9 would make the
+tests pass while proving nothing, which is the trap in testing this area.
+
+## ADR-160 — Alternative (`or`) and conjunction (`and`) patterns; map keys are sub-patterns
+
+**Context.** ADR-156 made three pattern shapes *loud errors* because they had been
+silent misreads: `(or 1 2)` read as a 3-element list pattern binding a variable named
+`or`, and a map pattern's unknown keys were ignored so `{:a v}` degenerated to "is it
+a map?". Turning them into errors was the right first move — but it also advertises
+the absence, and the three are the most-asked-for gaps in the grammar. General
+`{:key subpattern}` and `:as` had been deferred since the pattern compiler shipped.
+
+**Decision — implement `or` and `and`.**
+- **`(or p q …)`** tries each alternative in order; the first match wins. Every
+  alternative must bind the **same names**, checked at compile time with a clean
+  error. Without that rule a body could reference a name only some alternatives bind
+  and *which* it is depends on the input; Rust rejects it for the same reason.
+- **`(and p q …)`** matches every pattern against the same value, left to right, with
+  later patterns seeing the names earlier ones bound (so a repeated name is an
+  equality constraint, as everywhere else). This *is* the capture-while-destructuring
+  idiom — `(and whole {:keys [a]})` is Clojure's `:as`, Rust's `x @ pat` — which is
+  why no separate `:as` is needed.
+- **`(not …)` stays rejected.** A negative match binds nothing, which makes it a
+  *guard*, and `:when` is the guard slot. The hint says so.
+
+An `or`'s `success` branch is **duplicated per alternative** rather than hoisted into
+a shared thunk. That is deliberate: a thunk would put each body behind a call and cost
+the guarantee that a `match` in tail position stays O(1) stack. Alternatives are
+nearly always literals, so the duplication is small — and the tail-position property
+is pinned by a 30,000-iteration test.
+
+**Decision — a map pattern's explicit keys are sub-patterns, and the two halves keep
+different semantics on purpose:**
+
+| Spelling | Semantics | Absent key |
+|---|---|---|
+| `{:keys [a b]}` | Clojure destructuring | binds `nil` / the `:or` default; never fails |
+| `{:k pat}` | Erlang/Elixir map pattern | the clause **fails** |
+
+Requiring presence is what makes `{:status 200}` a useful *test* rather than a
+lenient bind, and it is what both ecosystems do for their respective syntaxes. Keys
+are emitted **quoted**: in pattern position a key is a literal (`{[1 2] p}` looks up
+the vector), never an expression. `{}` still matches any map.
+
+`:as` in a map pattern stays a hard error *because* explicit keys now work — it would
+otherwise read as "this map must have an `:as` key", the exact silent-misread class
+ADR-152 forbids. The error names the `and` spelling.
+
+**Consequences.** All of it is in the Brood pattern compiler (`std/prelude.blsp`) —
+no new special form, no kernel change — so it lands at every binding site at once:
+`match`, refutable `let`, `fn`/`defn` clauses, `receive`. 22 new cases in
+`tests/pattern_matching_test.blsp` cover alternatives (literal, binding, nested,
+mismatched-binding rejection, tail-position), conjunctions (capture, sequenced
+bindings, failure), and map sub-patterns (presence semantics, nesting, non-keyword
+keys, mixing with `:keys`, and all four binding sites).
+
+## ADR-161 — Transducers become public surface
+
+**Context.** The fusing stage constructors (`%xmap`/`%xfilter`/`%xremove`/`%xkeep`)
+have existed since ADR-111 as *private* plumbing behind `lmap`/`lfilter`/`lkeep`/
+`lremove`. That covered the built-in stages and nothing else: a user who wanted a
+stage of their own — `take-while` as a stage, a stateful de-duplicator, a windower —
+had no way to write one and no way to run one. Policy that Brood could express was
+locked inside the prelude's private namespace.
+
+**Decision.** Publish the contract and the entry point: `transduce` runs a stage stack
+over any collection (`(transduce xform rf init coll)`), and `xmap`/`xfilter`/
+`xremove`/`xkeep` are the built-in stages under public names. The contract is two
+sentences — a **reducing function** is `(acc x) -> acc`; a **transducer** is
+`(rf) -> rf'` — so a custom stage is a plain `fn` with no protocol to implement and no
+registration.
+
+Composition order is documented explicitly because it is the one confusing part:
+stages compose **left to right in data-flow order** under `comp`, the reverse of
+ordinary function composition, because each stage wraps the *next* one's reducer.
+
+**Not done:** no `eduction`, no early termination (`reduced`), no stateful-stage
+lifecycle (init/completion arities). Clojure's full protocol has three arities per
+stage; Brood's has one, which is all `fold` needs. Early termination is the first
+thing a real use will want (`take`), and it wants a `reduced` sentinel threaded
+through `fold` — a change to the hottest function in the library, deliberately not
+bundled here (ADR-011).
+
+**Consequences.** `lmap`/`lfilter`/… are unchanged and remain the ergonomic form —
+they now simply share a documented vocabulary with user stages. Purely additive: five
+new prelude functions, no kernel change.
+
+## ADR-162 — Retire the `lambda` alias: `fn` is the only spelling
+
+**Context.** ADR-098 decided to drop the `lambda`/`let*` aliases. `let*` went;
+`lambda` stayed, and ADR-108 then recorded the opposite — that both are exact
+synonyms canonicalised at macroexpand. Meanwhile `docs/language.md` claimed for
+months that *"the `lambda` synonym was removed — one spelling each"*, and the
+2026-07-26 downstream doc sweep removed mentions of it **on that basis**. So the
+language accepted a spelling its own reference said didn't exist, two ADRs
+contradicted each other, and the tooling highlighted it as a special form.
+
+**Decision.** Remove it. `fn` is the only spelling. The evidence: zero uses in
+`std/`, zero in all 12 sibling projects, and zero in `tests/` outside the one file
+that existed to test the alias itself. ADR-154 established the governing principle
+("one spelling each") and removed `car`/`cdr` on exactly this basis; ADR-108's
+"harmless alias" rationale doesn't survive it.
+
+Removed from: the evaluator's `SPECIAL_SPELLINGS`, the macroexpand canonicalisation,
+the checker's `is_fn_head` / `is_syntactic_keyword` / sig-head list, and the tooling
+`SPECIAL_FORMS` (so editors stop colouring it). `tests/lambda_test.blsp` is deleted.
+The `kw::LAMBDA` constant survives for one purpose: the unbound-symbol hint, which
+now says *"Brood spells `lambda` as `fn`"* — so the mistake is a one-line fix rather
+than a bare "unbound symbol".
+
+One diagnostic changed with it: an inline callback of the wrong arity was described
+as **"the lambda"**, which named a form the language no longer has. It now reads
+"the fn".
+
+**Consequences.** A breaking change with no known caller. Quoted data is unaffected
+(`'(lambda (x) x)` was always left alone — it is data, not a form). The evaluator's
+special-form table is one entry smaller, and the macroexpand hot path loses a
+per-combination symbol comparison.
+
+## ADR-163 — The convention questions the syntax review raised, settled
+
+The 2026-07-26 syntax review filed nine surface items. Three became code (ADR-160/161/
+162). The rest are **convention questions**, where the valuable output is a decision
+plus a written rule, not a change — and where changing would cost a wide breaking
+sweep for taste. Recorded together so they stop being re-litigated.
+
+**Named arguments: no `&key`; a trailing options map is the convention.** Spec §7.4
+designed `&key (width 80)` and never built it. It stays unbuilt. `{:keys [a b] :or
+{…}}` destructuring already gives the call-site readability (`(make-window {:width
+100 :title "x"})`), composes with `merge` for defaults — which `&key` does not — and
+costs no new parameter-list grammar, no new arity rules, and no interaction with
+`&optional`/`&`/patterns (a matrix that already has three documented "these don't
+combine" rules). The sweep the review anticipated turned out to be empty: no function
+in `std/` takes more than two `&optional` parameters, so there is nothing to migrate.
+The rule is now in `brood-for-claude.md`: three or more optional parameters → take an
+options map.
+
+**`fold` and `reduce` both stay, with the relationship documented.** `reduce` is the
+2-or-3-arg surface; `fold` is the strict 3-arg form it wraps, and is what all of
+`std/` folds with. Renaming `fold` to `%fold` would be a ~200-site mechanical rename
+of an *ambiguous* name — and the ADR-154 downstream sweep documented exactly how that
+goes wrong (a `fold` parameter and a `fold` call are the same shape in a Lisp, so
+call-position heuristics rename binders). Not worth it: `docs/language.md` now states
+that `reduce` dispatches to `fold` and that `fold` is the strict-arity primitive.
+
+**`cond`'s bare `else` stays** (ADR-004). `:else`, `true`, and `42` all catch by plain
+truthiness, so blessing the symbol `else` does add a reserved word for no capability —
+but it is used throughout `std/` and every sibling project, reads better than `:else`
+at the end of a long `cond`, and removing it would break every downstream `cond` in
+the workspace to delete one prelude line. Decision: keep, and document *why* it is
+special-cased rather than leaving readers to wonder.
+
+**`!` keeps its three meanings, documented.** `sig!` (enforced), `set-load-path!` /
+`clipboard-set!` (root/OS-state setters), `(! pid msg)` (the `proc/gen` cast). In a
+language with no data mutation the Scheme/Clojure "warns of mutation" reading is
+vacuous, so `!` is free to be per-context — but that must be *stated*, because an LLM
+or a newcomer will otherwise infer a rule that isn't there. `brood-for-claude.md` and
+the writing-brood skill now say: don't add a trailing `!` to a name of your own, and
+here is what the existing ones mean. Renaming `(! …)` to `cast` was considered and
+rejected: it is Erlang's spelling, it is the API hatch/`proc/gen` users already know,
+and the sweep would touch every gen-server client in the workspace.
+
+**Mixed naming lineage: write the rule down, don't rename.** `partition` (Clojure)
+sits beside `chunk-every`/`chunk-by` (Elixir), `enumerate` (Python), `scan`
+(Haskell), `&optional` (CL), `!`/`spawn` (Erlang), `letrec` (Scheme). Aligning on
+`partition`/`partition-all`/`partition-by` would be the tidiest single change, and it
+is still a breaking rename of three functions across the workspace to buy
+guessability that the docs can supply instead. Decision: the house rule is **"the
+best name for the job, from whichever language named it best"**, now stated in
+`brood-for-claude.md` — with the corollary that `apropos`/`doc-search` exist precisely
+because a name can't always be guessed.
+
+**Failure convention: `throw` for bugs, tagged values for expected alternatives.**
+`std/` mixes both (19 `[:ok …]`/`[:error …]` sites alongside `throw`), which left
+every caller to check which a given function does. The rule, now documented: **throw**
+when the caller almost certainly cannot continue (a type error, a missing file, a
+protocol violation — anything a bug would cause); return a **tagged vector** when
+failure is an ordinary outcome the caller is expected to branch on (a parse that may
+fail on user input, a lookup that may miss, a timeout). `error-message` remains the
+shape-agnostic accessor for the `catch` side.
+
+**Reader gaps: documented, not changed.** `inf`/`nan`/`-inf` are reader float
+literals, so those three tokens can never be symbols — now stated in the data-types
+table, which previously implied numeric intent requires a digit. `1/2` reads as a
+*symbol* (and `/` is the namespace separator, so it looks like namespace `1`, name
+`2`) — left alone: rejecting it would mean special-casing a shape no one writes on
+purpose, and it is already covered by the "no ratios" note. `#|` still produces
+"unterminated `|…|` bar-quoted symbol"; a dedicated "Brood has no block comments"
+message is a nicety, filed in ROADMAP rather than done.
+
+**`sig` placement stays below the definition; inline signatures need their own ADR.**
+The review's fairest criticism — a function's name, parameters, and types live in two
+forms with an ordering constraint that only bites under `BROOD_CONTRACTS=1` — is real,
+and the fix (`(defn f ((x int) -> int) …)`) is a change to `defn`, the checker's
+`sig_of`, `defrecord`'s emitted sigs, `sig!`'s wrapping, and every `sig` in `std/`.
+That is an ADR-082 revision, not a tweak. Deferred with the reasoning recorded, not
+dismissed.

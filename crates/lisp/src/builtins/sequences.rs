@@ -1055,6 +1055,63 @@ pub(super) fn string_to_graphemes(args: &[Value], _: EnvId, heap: &mut Heap) -> 
     Ok(heap.alloc_vector(vals))
 }
 
+/// `(grapheme-count s)` — how many **extended grapheme clusters** `s` has: the
+/// length a human means, and the exclusive upper bound for `grapheme-at`. One O(n)
+/// segmentation pass that allocates nothing (`string->graphemes` had to build a
+/// vector of n strings just to be counted).
+pub(super) fn grapheme_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use unicode_segmentation::UnicodeSegmentation;
+    let s = expect_string(heap, "grapheme-count", arg(args, 0))?;
+    Ok(Value::int(s.graphemes(true).count() as i64))
+}
+
+/// `(grapheme-at s i)` / `(grapheme-at s i default)` — the `i`-th grapheme cluster
+/// of `s` as a string, or `default`/`nil` when `i` is out of range (never an error,
+/// matching `nth`/`get`).
+///
+/// Why this is a primitive and not `(nth (string->graphemes s) i)`: the docs require
+/// a cursor to step by *cluster*, so that spelling was the only correct way to read
+/// one character — and it builds a vector of every cluster in the string on **every
+/// keystroke**. This walks to `i` and stops, allocating one string. The editor's
+/// hottest path stops being O(n) in the buffer line's length.
+pub(super) fn grapheme_at(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use unicode_segmentation::UnicodeSegmentation;
+    let s = expect_string(heap, "grapheme-at", arg(args, 0))?;
+    let i = expect_int(heap, "grapheme-at", arg(args, 1))?;
+    let default = args.get(2).copied().unwrap_or(Value::nil());
+    if i < 0 {
+        return Ok(default);
+    }
+    match s.graphemes(true).nth(i as usize) {
+        Some(g) => {
+            let g = g.to_string();
+            Ok(heap.alloc_string(&g))
+        }
+        None => Ok(default),
+    }
+}
+
+/// `(substring-graphemes s start)` / `(… s start end)` — the half-open cluster range
+/// `[start, end)` of `s` as a string, clamped to the ends (so it never errors, like
+/// `take`/`drop`). The grapheme-indexed counterpart of `substring`, which is
+/// codepoint-indexed and will happily slice a cluster in half — splitting `"é"`
+/// (e + U+0301) into a bare `e` and an orphan combining mark.
+pub(super) fn substring_graphemes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use unicode_segmentation::UnicodeSegmentation;
+    let s = expect_string(heap, "substring-graphemes", arg(args, 0))?;
+    let start = expect_int(heap, "substring-graphemes", arg(args, 1))?.max(0) as usize;
+    let end = match args.get(2) {
+        None | Some(Value::Nil) => None,
+        Some(_) => Some(expect_int(heap, "substring-graphemes", arg(args, 2))?.max(0) as usize),
+    };
+    let out: String = match end {
+        Some(e) if e <= start => String::new(),
+        Some(e) => s.graphemes(true).skip(start).take(e - start).collect(),
+        None => s.graphemes(true).skip(start).collect(),
+    };
+    Ok(heap.alloc_string(&out))
+}
+
 /// `(string-normalize s form)` — `s` in Unicode normalisation `form`, one of the
 /// keywords `:nfc` `:nfd` `:nfkc` `:nfkd`. Text that a human reads as identical can
 /// be several different strings — "é" is U+00E9 *or* U+0065 U+0301 — and Brood's `=`

@@ -272,32 +272,89 @@
   (test "a clause that isn't a (pattern body...) list" (assert-error (macroexpand '(match 1 5))))
   (test "& rest still works (sanity: a valid & does not error)"
     (assert= (match (list 1 2 3) ((a & b) (list a b))) (list 1 (list 2 3))))
-  ;; ADR-152: reject the shape, never reinterpret it. Both of these USED to be
-  ;; read as something else entirely, with no diagnostic at the mistake.
-  (test "an (or …) / (and …) / (not …) pattern is rejected, not read as a list pattern"
-    ;; Was: a 3-element list pattern binding a variable named `or` — so
-    ;; (match 2 ((or 1 2) :hit) (_ :miss)) silently answered :miss.
-    (assert-error (macroexpand '(match 2 ((or 1 2) :hit) (_ :miss))))
-    (assert-error (macroexpand '(match 2 ((and 1 2) :hit) (_ :miss))))
+  ;; ADR-152: reject the shape, never reinterpret it. `(not …)` and a map `:as` are
+  ;; the two that stay rejected — `or`/`and`/`{key subpattern}` became real patterns
+  ;; in ADR-160 (see the groups below), but these two would still silently mean
+  ;; something else.
+  (test "(not …) is rejected — a negative match binds nothing, so it's a guard"
     (assert-error (macroexpand '(match 2 ((not 1) :hit) (_ :miss))))
-    ;; The suggested spelling stays legal and answers correctly.
-    (assert= (match 2 (x :when (or (= x 1) (= x 2)) :hit) (_ :miss)) :hit))
-  (test "a map pattern key other than :keys/:or is rejected, not ignored"
-    ;; Was: an unknown key was dropped, so `{:a v}` degenerated to "is it a map?"
-    ;; — it matched anything, bound nothing, and the body died on unbound `v`.
-    (assert-error (macroexpand '(match {:a 1} ({:a v} v))))
+    ;; the spelling it points at
+    (assert= (match 2 (x :when (not (= x 1)) :hit) (_ :miss)) :hit))
+  (test "a map pattern's :as is rejected — it would test for an :as KEY"
     (assert-error (macroexpand '(match {:a 1} ({:keys [a] :as m} a))))
-    ;; …in every binding position that shares the grammar. `let`/`fn` are special
-    ;; forms — their pattern lowering runs in the compile pass, not macroexpansion —
-    ;; so these go through `eval-string` rather than `macroexpand`.
-    (assert-error (eval-string "(let ({:a v} {:a 1}) v)"))
-    (assert-error (eval-string "((fn ({:a v}) v) {:a 1})"))
-    (assert-error (eval-string "(do (defn pm-bad-map ({:a v}) v) (pm-bad-map {:a 1}))"))
-    (assert-error (eval-string "(do (send (self) {:a 1}) (receive ({:a v} v)))"))
-    ;; The supported subset is untouched, and `{}` stays the honest "any map".
+    ;; the `and` spelling it points at
+    (assert= (match {:a 1} ((and m {:keys [a]}) [a m])) [1 {:a 1}]))
+  (test "the :keys / :or subset and the `{}` any-map pattern still behave"
     (assert= (match {:a 1 :b 2} ({:keys [a b]} (+ a b))) 3)
     (assert= (match {} ({:keys [a] :or {a 7}} a)) 7)
     (assert= (match {:z 1} ({} :any-map) (_ :no)) :any-map)))
+
+;; ─────────────────────────────────────────────────────────────────────────────
+;; ALTERNATIVE / CONJUNCTION PATTERNS (ADR-160)
+;; ─────────────────────────────────────────────────────────────────────────────
+(describe "or patterns"
+  (test "the first matching alternative wins"
+    (assert= (match 2 ((or 1 2) :hit) (_ :miss)) :hit)
+    (assert= (match 3 ((or 1 2) :hit) (_ :miss)) :miss)
+    (assert= (map (fn (x) (match x ((or :a :b :c) :abc) (_ :other))) [:a :b :c :d])
+      (list :abc :abc :abc :other)))
+  (test "alternatives may bind, as long as every one binds the same names"
+    (assert= (match [2 9] ((or [1 x] [2 x]) x) (_ :miss)) 9)
+    (assert= (match [1 9] ((or [1 x] [2 x]) x) (_ :miss)) 9))
+  (test "alternatives that bind DIFFERENT names are a compile error"
+    ;; else the body would reference a name only some alternatives bind, and which
+    ;; it is would depend on the input (Rust rejects this for the same reason).
+    (assert-error (macroexpand '(match 1 ((or a 2) a)))))
+  (test "or nests inside other patterns"
+    (assert= (match (list :x 2) (((or :x :y) n) n) (_ :no)) 2)
+    (assert= (map (fn (m) (match m ((or {:a v} {:b v}) v) (_ :no))) [{:a 1} {:b 2} {:c 3}])
+      (list 1 2 :no)))
+  (test "or works at every binding site, not just match"
+    (assert= (let ((or [1 x] [2 x]) [2 42]) x) 42)
+    (assert= ((fn ((or 1 2)) :small) 2) :small))
+  (test "an or clause in tail position stays O(1) stack"
+    ;; `success` is duplicated per alternative precisely so each stays in tail
+    ;; position — a thunk would have cost the TCO guarantee.
+    (assert= (letrec (go (fn (n) (match n ((or 0 -1) :done) (_ (go (- n 1))))))
+               (go 30000))
+      :done)))
+
+(describe "and patterns"
+  (test "every pattern must match the same value"
+    (assert= (match 5 ((and 5 x) x) (_ :no)) 5)
+    (assert= (match 6 ((and 5 x) x) (_ :no)) :no))
+  (test "capture-the-whole-while-destructuring — Brood's `:as`"
+    (assert= (match {:a 1 :b 2} ((and whole {:keys [a]}) [a (count whole)])) [1 2])
+    (assert= (match [1 2] ((and w [a b]) [w a b])) [[1 2] 1 2]))
+  (test "later patterns see the names earlier ones bound"
+    ;; a repeated name is an equality constraint, as everywhere else
+    (assert= (match [7 7] ((and [a b] [_ ^a]) a) (_ :no)) 7)
+    (assert= (match [7 8] ((and [a b] [_ ^a]) a) (_ :no)) :no)))
+
+(describe "general map sub-patterns"
+  (test "{key subpattern} matches the value at that key"
+    (assert= (match {:a 1 :b 2} ({:a v} v)) 1)
+    (assert= (match {:status 200} ({:status 200} :ok) (_ :other)) :ok)
+    (assert= (match {:status 404} ({:status 200} :ok) (_ :other)) :other))
+  (test "an explicit key must be PRESENT — unlike lenient :keys"
+    ;; {:k pat} is an Erlang/Elixir map pattern (fails if absent); {:keys [k]} is
+    ;; Clojure destructuring (binds nil if absent). Both, on purpose.
+    (assert= (match {:b 1} ({:a v} v) (_ :absent)) :absent)
+    (assert= (match {:b 1} ({:keys [a]} (list :bound a))) (list :bound nil)))
+  (test "sub-patterns nest to any depth"
+    (assert= (match {:a {:b 7}} ({:a {:b n}} n) (_ :no)) 7)
+    (assert= (match {:a {:b 7}} ({:a {:b 8}} :eight) (_ :no)) :no)
+    (assert= (match {:a [1 2]} ({:a [x y]} (+ x y)) (_ :no)) 3))
+  (test "explicit keys mix with :keys / :or in one pattern"
+    (assert= (match {:t :x :n 3} ({:t :x :keys [n]} n) (_ :no)) 3)
+    (assert= (match {:t :y :n 3} ({:t :x :keys [n]} n) (_ :no)) :no))
+  (test "a non-keyword key works too (keys are literals in pattern position)"
+    (assert= (match {[1 2] :v} ({[1 2] found} found) (_ :no)) :v)
+    (assert= (match {"k" 1} ({"k" v} v) (_ :no)) 1))
+  (test "general sub-patterns work at every binding site"
+    (assert= (let ({:a v} {:a 5}) v) 5)
+    (assert= ((fn ({:a v}) v) {:a 6}) 6)
+    (assert= (do (defn pm-sub ({:a v}) v) (pm-sub {:a 7})) 7)))
 
 ;; ─────────────────────────────────────────────────────────────────────────────
 ;; TAIL POSITION — a match-driven loop must not overflow

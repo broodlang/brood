@@ -8939,3 +8939,73 @@ basic.rs) now pins them, including negative assertions — the `deftype` hint mu
 say "NOT in std" and name `hatch`. Worth extending whenever a hint is added: the
 `case` hint (removed earlier today, when `case` stopped being absent) was the
 same failure a few hours earlier.
+
+## 2026-07-26 — the syntax review's remainder: protocols, graphemes, patterns, transducers (ADR-158…163)
+
+Cleared every item the review left open. Three became capability, three became
+decisions, and one turned out to be already-built-but-unshipped.
+
+**Protocols were 90% done and 0% shipped (ADR-158).** The hint that started this said
+*"use `defprotocol`/`defimpl` (the `protocol` module)"* and no such module existed.
+Chasing that found the kernel carrying `types/check/protocol.rs` — a complete
+conformance pass — plus LSP goto/hover, dormant for months, while the macros lived in
+the **hatch package**, in a file whose own docstring says *"prototype for
+std/protocol"*. So the design was built, proven in a real app (hatch's JSON `Encode`
+replaced a closed `cond` on `type-of`), and checker-validated; nobody had promoted it.
+Promoted verbatim; hatch's copy deleted; hatch's 750 tests pass against std's. The
+lesson: a hint that names a nonexistent feature can mean the feature is *finished
+somewhere else*, not that it was never designed.
+
+**Grapheme-indexed accessors (ADR-159).** `language.md` has said for months that a
+cursor must step by cluster, while every indexed op is codepoint-indexed — so the
+correct spelling was `(nth (string->graphemes s) i)`, segmenting the whole string per
+keystroke. `grapheme-count` / `grapheme-at` / `substring-graphemes` walk to the index
+instead. Every test uses a **decomposed** `e` + U+0301: a precomposed U+00E9 makes the
+tests pass while proving nothing, which is the trap in this area.
+
+**`or`/`and`/map sub-patterns implemented (ADR-160).** ADR-156 had made all three loud
+errors that morning; making them work was the natural follow-through, and `and`
+doubles as the `:as` capture (`(and whole {:keys [a]})`) so no `:as` is needed. Two
+design points: an `or`'s alternatives must bind the **same names** (else the body
+references a name whose existence depends on the input — Rust's rule, same reason),
+and `success` is **duplicated per alternative** rather than thunked, because a thunk
+would cost the tail-position guarantee. Explicit map keys **require presence** while
+`:keys` stays lenient — Erlang semantics for the map-pattern spelling, Clojure
+semantics for the destructuring spelling, both on purpose.
+
+**Transducers made public (ADR-161).** The stage constructors had been private since
+ADR-111, which meant a user could not write a stage of their own. The contract is two
+sentences, so publishing it costs a paragraph: `transduce` + `xmap`/`xfilter`/
+`xremove`/`xkeep`, and a custom stage is a plain `fn`.
+
+**`lambda` retired (ADR-162).** ADR-098 said drop the aliases, `let*` went, `lambda`
+stayed, ADR-108 then said the opposite, and `language.md` claimed for months that it
+was gone — the docs sweep earlier today even removed mentions *on that basis*. Zero
+uses in `std/`, zero across 12 siblings, zero in tests outside the file testing the
+alias itself. Gone; the unbound-symbol hint names `fn`. One diagnostic changed with
+it: an inline callback of the wrong arity was called "the lambda", naming a form the
+language no longer has.
+
+**The convention questions became one ADR of decisions (ADR-163)**, not code: no
+`&key` (a trailing options map is the rule, and the migration sweep turned out empty —
+nothing in `std/` takes more than two `&optional`s); `fold`+`reduce` both stay with the
+relationship documented (renaming `fold` would be a 200-site rename of an ambiguous
+name, and ADR-154's sweep documented how that goes wrong); bare `else` stays; `!`'s
+three meanings documented rather than unified; naming lineage is "best name for the
+job" plus `apropos`; failure is throw-for-bugs / tagged-value-for-expected; the reader
+gaps get documentation. Also landed: `dissoc-in`, and `for` finally takes multiple body
+forms like every other iteration form.
+
+**A real property found by the parallel suite.** The protocol registries are updated
+with `def` — a read-modify-write of an immutable map — so *concurrent* `defimpl` calls
+can lose an update. A test registering impls inside parallel test bodies passed
+standalone and failed in the full run. That is the honest contract (register at load
+time, exactly like telemetry's `attach`), so it is now in the module docstring, in
+`language.md`, and the registering tests are `:serial`. Worth remembering as a pattern:
+"passes alone, fails in the suite" on a module with a global registry is almost always
+this.
+
+**Gates:** 3426 in-language tests, 861 Rust tests, `nest check` at zero warnings.
+The 6 `nest::registry` tests fail for an environment reason unrelated to any of this —
+`commit.gpgsign` + 1Password's `op-ssh-sign` makes `git commit` hang in the temp repos
+they build; a bare `git init && git commit` outside the repo reproduces it.

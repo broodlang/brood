@@ -36,7 +36,6 @@ pub(super) fn is_syntactic_keyword(name: &str) -> bool {
             | kw::DO
             | kw::DEF
             | kw::FN
-            | kw::LAMBDA
             | kw::LET
             | kw::LETREC
             | kw::DEFMACRO

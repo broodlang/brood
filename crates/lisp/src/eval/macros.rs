@@ -1249,16 +1249,9 @@ fn macroexpand_all_depth_inner(heap: &mut Heap, form: Value, env: EnvId, depth: 
                 if value::symbol_is(head, kw::QUOTE) || value::symbol_is(head, kw::QUASIQUOTE) {
                     return Ok(form);
                 }
-                // `lambda` is a synonym for `fn`. Canonicalise the head now — *after* the
-                // quote guard (so quoted data keeps its spelling) and *before* lowering — so
-                // the whole downstream pipeline (pattern lowering here, the VM compile pass,
-                // and the tree-walker's lowering re-entry) only ever sees `fn`.
-                let s = if value::symbol_is(head, kw::LAMBDA) {
-                    items[0] = value::sym(kw::FN);
-                    value::intern(kw::FN)
-                } else {
-                    head
-                };
+                // (`lambda` used to be canonicalised to `fn` here — the alias was
+                // retired in ADR-162; `fn` is the only spelling.)
+                let s = head;
                 // Desugar pattern binders into the Brood `match*` engine so they
                 // expand once here (fast) rather than per call. eval's `let`/`fn`
                 // then only ever see plain symbol binds.

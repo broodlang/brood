@@ -74,6 +74,53 @@
     (is (> (string-length "👨‍👩‍👧") 1))
     (assert= (display-width "👨‍👩‍👧") 2)))
 
+;; The grapheme-INDEXED accessors (ADR-159). `string->graphemes` already gave the
+;; clusters, but only as a whole vector — so the documented-correct cursor step
+;; ("step by cluster, never by codepoint") cost a vector of every cluster in the
+;; string on every keystroke. These walk to the index. Every case below uses a
+;; DECOMPOSED "é" (`e` + U+0301) so codepoint and cluster indices genuinely differ:
+;; that is the whole point, and a precomposed U+00E9 would silently prove nothing.
+(def gr-s (str "a" "e\u{301}" "👍" "b"))    ; 4 clusters, 5 codepoints
+
+(describe "grapheme-count / grapheme-at / substring-graphemes"
+  (test "cluster count differs from the codepoint count"
+    (assert= (grapheme-count gr-s) 4)
+    (assert= (string-length gr-s) 5)
+    (assert= (grapheme-count "") 0)
+    (assert= (grapheme-count "abc") 3))
+  (test "grapheme-at reads the i-th cluster whole"
+    (assert= (grapheme-at gr-s 0) "a")
+    (assert= (grapheme-at gr-s 1) "e\u{301}")
+    (assert= (grapheme-at gr-s 2) "👍")
+    (assert= (grapheme-at gr-s 3) "b"))
+  (test "grapheme-at agrees with string->graphemes at every index"
+    (let (v (string->graphemes gr-s))
+      (assert= (map (fn (i) (grapheme-at gr-s i)) (range (grapheme-count gr-s)))
+        (map (fn (i) (nth v i)) (range (count v))))))
+  (test "out of range yields the default, never an error (like nth/get)"
+    (assert= (grapheme-at gr-s 99) nil)
+    (assert= (grapheme-at gr-s 99 :none) :none)
+    (assert= (grapheme-at gr-s -1) nil)
+    (assert= (grapheme-at gr-s -1 :none) :none)
+    (assert= (grapheme-at "" 0) nil))
+  (test "substring-graphemes slices on cluster boundaries"
+    (assert= (substring-graphemes gr-s 1 3) (str "e\u{301}" "👍"))
+    (assert= (substring-graphemes gr-s 2) "👍b")
+    (assert= (substring-graphemes gr-s 0 1) "a"))
+  (test "the range is clamped at both ends, like take/drop"
+    (assert= (substring-graphemes gr-s 0 99) gr-s)
+    (assert= (substring-graphemes gr-s 3 1) "")
+    (assert= (substring-graphemes gr-s 99) "")
+    (assert= (substring-graphemes gr-s -5 2) (str "a" "e\u{301}")))
+  (test "slicing round-trips the whole string"
+    (assert= (substring-graphemes gr-s 0) gr-s)
+    (assert= (str (substring-graphemes gr-s 0 2) (substring-graphemes gr-s 2)) gr-s))
+  (test "codepoint substring CAN split a cluster — the reason these exist"
+    ;; `(substring gr-s 1 2)` takes the bare `e` and orphans the combining mark;
+    ;; the grapheme form keeps them together.
+    (assert= (substring gr-s 1 2) "e")
+    (assert= (substring-graphemes gr-s 1 2) "e\u{301}")))
+
 (describe "escapes"
   ;; Beyond the named `\e` / `\n` / `\t` / `\r` / `\0` / `\\` / `\"`, Brood
   ;; strings also support `\xHH` (two-hex-digit byte) and `\u{H..H}` (Unicode

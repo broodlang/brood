@@ -71,10 +71,17 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
    combinators `comp`/`partial`/`complement`/`constantly` all exist — reach for
    `(map (partial + 10) xs)` over a hand-written `fn`.
 
-10. **Patterns: two shapes are errors, not readings.** `(or p q)`/`(and …)`/
-   `(not …)` in pattern position is rejected (Brood has no alternative patterns —
-   use one clause each, or a `:when` guard), and a map pattern accepts only
-   `:keys`/`:or` (no general `{:key subpattern}`, no `:as`).
+10. **Patterns: `or`/`and`/map sub-patterns work; `not` and `:as` don't.**
+   `(or 1 2)` matches either (every alternative must bind the same names);
+   `(and whole {:keys [a]})` captures *and* destructures — that is Brood's `:as`;
+   `{:k pat}` requires the key present and matches its value (while `{:keys [a]}`
+   binds nil when absent). `(not …)` is an error (use a `:when` guard) and so is
+   `:as` inside a map pattern (use `and`).
+
+11. **`fn` only — there is no `lambda`** (ADR-162 retired the alias). Other names
+   with a one-word replacement, all now unbound with a hint: `car`→`first`,
+   `cdr`→`rest`, `concat`→`append`, `length`→`count`, `some?`→`any?`,
+   `entries`→`map-pairs`, `flat-map`→`mapcat`.
 
 ## Naming & shape (match std/)
 

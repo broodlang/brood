@@ -192,7 +192,6 @@ pub const SPECIAL_FORMS: &[&str] = &[
     kw::DO,
     kw::DEF,
     kw::FN,
-    kw::LAMBDA,
     kw::LET,
     kw::LETREC,
     kw::QUOTE,

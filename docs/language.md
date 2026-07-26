@@ -59,7 +59,7 @@ is the one piece that can't be guessed from Clojure; it has to be read.
 | Nil | `nil` | The empty value; also the empty list. |
 | Boolean | `true`, `false` | |
 | Integer | `0`, `42`, `-7` | 64-bit; arithmetic is overflow-checked. A result out of `i64` range promotes to an arbitrary-precision **bignum** rather than wrapping, and demotes back when it fits again — so the integer type is unbounded in practice. |
-| Float | `3.14`, `-0.5`, `1e3` | 64-bit. |
+| Float | `3.14`, `-0.5`, `1e3`, `inf`, `nan` | 64-bit. **`inf`, `-inf` and `nan` are reader literals** — those three bare tokens are floats, not symbols, so they can't be used as names (the digit-required rule below has these three exceptions). Test them with `infinite?` / `nan?`; `=` reports NaN as equal to nothing, per IEEE. |
 | Decimal | `1.50M`, `0M`, `-3.14M` | Exact arbitrary-precision base-10, for money and Postgres `numeric` — values a float can't hold (`(+ 0.1M 0.2M)` *is* `0.3M`). The literal is a trailing `M`; `(decimal x)` builds one from a string, int, bignum or float. Scale is significant in arithmetic (see [Arithmetic](#arithmetic)) but **not** in `=`, which compares values (`1.5M` = `1.50M`). |
 | String | `"hello\n"` | Escapes: `\n \t \r \e \0 \\ \"` (`\e` is ESC, for ANSI terminal control), `\xHH` (two-hex-digit byte), `\u{H..H}` (1–6-hex-digit Unicode codepoint). A malformed `\x`/`\u{}` is a read error, and so is an unknown **alphabetic** escape (`\d`, `\w`, `\s`, …) — that's almost always a regex class written in a plain string, where dropping the backslash would silently break the pattern, so write `\\d`. A `\X` escape of punctuation or a digit (`\.`, `\/`, `\1`) is literal `X` (how you write a literal metacharacter in a regex string). Readable printing is the inverse: it re-escapes `\n \t \r \e \0 \\ \"` by name and any other control char as `\u{H..H}`, so a printed string always re-reads to the same value. |
 | Symbol | `foo`, `+`, `my-fn`, `empty?`, `1+`, `++`, `...` | Names; interned. A bare token is a symbol unless it has genuine numeric intent — a digit present *and* every `+`/`-` in a valid sign position (leading, or right after an `e`/`E`); so `1+`, `2+3`, `++`, `--`, `...` are symbols, while `1e`/`1.2.3` are malformed-number read errors. A symbol whose name isn't a clean token — one built via `(symbol "a b")` with whitespace, delimiters, an empty name, or a spelling that would read as a number/keyword — prints (readably) and reads back as a `\|…\|` **bar-quoted** symbol (`\|a b\|`, `\|\|` for empty; `\|`/`\\` escape a literal bar/backslash), so every symbol round-trips through `pr-str`/`read`. |
@@ -194,6 +194,7 @@ Maps are immutable — every operation returns a **fresh** map:
 | `(zipmap ks vs)` | a map pairing `ks` with `vs` positionally (stops at the shorter) |
 | `(get-in m path)` / `(get-in m path default)` | the value at a nested key `path`, or `default`/`nil` |
 | `(assoc-in m path v)` | a nested copy with `v` stored at `path` (intermediate maps created) |
+| `(dissoc-in m path)` | a nested copy with `path` removed (a missing path is a no-op; empty branches are left in place) |
 | `(update-in m path f args…)` | a nested copy with `path`'s value replaced by `(f current args…)` |
 | `(count m)` / `(empty? m)` | number of entries / whether there are none |
 | `(map? x)` | whether `x` is a map |
@@ -241,6 +242,59 @@ field is typed, `(sig …)` declarations are emitted for the constructor and
 accessors, so the advisory checker (and `BROOD_CONTRACTS=1` runtime contracts) see
 the field types. See [ADR-130](decisions.md) and `docs/types.md` for the record
 type `(record :k T …)` this lowers to.
+
+### Polymorphism: protocols (`require 'protocol`)
+
+`defrecord` names a map's *shape*; a **protocol** names an operation that different
+types implement differently. `(require 'protocol)` gives open generic functions
+(ADR-158): each op dispatches on the **`type-of` of its first argument**, and an
+implementation can be added for any type — including a built-in — from any module,
+without editing the dispatcher.
+
+```clojure
+(require 'protocol)
+
+(defprotocol Encode
+  "Encode a value for the wire."
+  (encode [v] :-> string))
+
+(defimpl Encode :int    (encode [n] (str n)))
+(defimpl Encode :string (encode [s] (str "\"" s "\"")))
+(defimpl Encode :vector (encode [v] (str "[" (join "," (map encode v)) "]")))
+(defimpl Encode :default (encode [x] (error "Encode: unsupported: " (type-of x))))
+
+(encode [1 "a"])          ;=> "[1,\"a\"]"
+```
+
+Dispatch keys are runtime *kinds* — `:int` `:float` `:string` `:keyword` `:map`
+`:vector` `:set` `:nil` `:pid` … — plus **`:default`** as the fallback. A missing
+implementation is a **loud, named error** (`protocol Encode: no implementation of
+encode for :float`), never a silent `nil`. Re-registering a key replaces it, so
+implementations hot-reload like any `def`.
+
+This is the answer for the case a `cond` on `type-of` can't cover: a closed `cond`
+has to be *edited* to extend, while a protocol is extended from outside. Prefer
+`match`/`cond` when the set of cases is closed and local; reach for a protocol when
+third-party or later code must be able to add a case.
+
+**Records dispatch as `:map`.** Records are structural (ADR-130), so every
+`defrecord` value has `(type-of r)` = `:map` and they all land on the same `:map`
+implementation — branch on a field inside it (`(if (contains? m :radius) …)`) to
+specialise per shape. A second dispatch axis keyed on a `:type` field is
+deliberately not shipped (ADR-011): it would silently change what any map carrying
+a `:type` key dispatches to.
+
+**Register at load time.** Both registries are updated with `def`, so two processes
+calling `defimpl` *concurrently* can lose one update. Top-level `defimpl` forms — the
+normal case — run as the module loads and are safe; this is the same
+configuration-time rule telemetry's `attach`/`detach` follow.
+
+**`defbehaviour`** is the module-level counterpart — a contract a *module* satisfies
+by defining the ops as plain functions (no value dispatch); a module claims it with
+`(:implements Name)` in its header. Both forms record their ops in `*protocols*`,
+which `nest check` reads to report an implementation that omits a declared op, gets
+an arity wrong, or names an op the protocol never declared — and `(protocol-ops
+'Name)` exposes the same data to your own tooling.
 
 ## Sets
 
@@ -538,26 +592,63 @@ design and rationale see [pattern-matching.md](pattern-matching.md).
 | `[p1 p2 …]` | a vector of that exact length — the **tagged-data / tuple idiom** |
 | `{:keys [a b] :or {a 0}}` | a **map** — binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default); fails if the value isn't a map. `{}` matches any map. |
 | `(bytes seg…)` | a **`bytes` value**, destructured segment-by-segment — Erlang/Elixir bit syntax (see below) |
+| `(or p q …)` | any alternative — first match wins; every alternative must bind the same names |
+| `(and p q …)` | every pattern, against the same value — the capture-while-destructuring (`:as`) idiom |
+| `{:k p}` | a map with key `:k` **present**, whose value matches `p` (nests to any depth) |
 
 Patterns nest to any depth. **The one trap:** a bare symbol *binds* (and
 shadows) — it does **not** test against a same-named value. Match a known value
 with a keyword (`:ok`), a quoted symbol (`'none`), or a pin (`^x`).
 
-**Two shapes are rejected rather than reinterpreted** (ADR-152/156) — both used to
-be read as something else with no diagnostic at the mistake:
+### Alternatives, conjunctions, and map sub-patterns
 
-- **No alternative/boolean patterns.** `(or p q)`, `(and …)`, `(not …)` in pattern
-  position are a **clean error**. Read as an ordinary list pattern, `(or 1 2)` is a
-  3-element list whose head *binds a variable named `or`* — so
-  `(match 2 ((or 1 2) :hit) (_ :miss))` silently answered `:miss`. Write one clause
-  per alternative, or move the test into a guard:
-  `(match 2 (x :when (or (= x 1) (= x 2)) :hit) (_ :miss))`.
-- **A map pattern understands only `:keys` and `:or`.** Any other key — general
-  `{:key subpattern}` nesting or `:as`, both still deferred (ADR-011) — is a clean
-  error. An unknown key used to be *ignored*, which degenerated `{:a v}` to "is the
-  target a map?": it matched anything, bound nothing, and the body then failed on
-  an unbound `v`, pointing nowhere near the cause. To reach a nested value, bind the
-  map and use `get`/`get-in`.
+`(or p q …)` matches if **any** alternative matches, first one wins:
+
+```clojure
+(match code
+  ((or 200 201 204) :success)
+  ((or 301 302)     :redirect)
+  (_                :other))
+```
+
+Alternatives may bind, but **every alternative must bind the same names** — else the
+body could reference a name only some of them bind, and which one would depend on the
+input (`(or [1 x] [2 x])` is fine; `(or a 2)` is a compile error).
+
+`(and p q …)` matches when **every** pattern matches the same value, left to right,
+with later patterns seeing what earlier ones bound. That is how you capture the whole
+while destructuring it — Clojure's `:as`, Rust's `x @ pat`:
+
+```clojure
+(match msg
+  ((and whole {:keys [kind]}) (log kind whole)))
+```
+
+A map pattern's **explicit keys are sub-patterns**: `{:status 200}` requires the key
+to be *present* and its value to match, nesting to any depth
+(`{:user {:id id}}`). Note the deliberate split, one convention from each ecosystem:
+
+| Spelling | Semantics | If the key is absent |
+|---|---|---|
+| `{:keys [a b]}` | Clojure **destructuring** | binds `nil` (or the `:or` default); never fails |
+| `{:k pat}` | Erlang/Elixir **map pattern** | the clause **fails** |
+
+Both may appear in one pattern (`{:type :circle :keys [radius]}`), and `{}` still
+matches any map.
+
+**Two spellings stay rejected** rather than reinterpreted (ADR-152) — each would
+otherwise silently mean something else:
+
+- **`(not …)`** — a negative match binds nothing, which makes it a *guard*: write
+  `(x :when (not …) …)`. As a plain list pattern it would bind a variable named `not`.
+- **`:as` in a map pattern** — now that explicit keys are sub-patterns, `{… :as m}`
+  would read as "this map must have an `:as` key". Use `(and m {…})`.
+
+> Until 2026-07-26 `or`/`and`/`{key subpattern}` were all *silent misreads*:
+> `(match 2 ((or 1 2) :hit) (_ :miss))` answered `:miss` (binding a variable named
+> `or`), and a map pattern's unknown keys were ignored, so `{:a v}` degenerated to
+> "is it a map?" — matching anything, binding nothing. They were made hard errors in
+> ADR-156 and implemented in ADR-160.
 
 ### Bytes patterns (bit syntax)
 
@@ -1555,10 +1646,37 @@ to your mailbox — resend the queue on `[:nodeup …]`.
   (realise it first) — it can't cross a process boundary or the network as a
   live view.
 
+### Transducers
+`transduce`  `xmap`  `xfilter`  `xremove`  `xkeep`
+
+The `l*` combinators above are the ergonomic front end; `transduce` is the same
+machinery with the stages exposed, for when the pipeline is **computed, reused, or
+your own**:
+
+```clojure
+(transduce (comp (xfilter odd?) (xmap sq)) + 0 (range 10))   ;=> 165, one pass
+(transduce (xmap inc) conj [] (list 1 2 3))                  ;=> [2 3 4]
+```
+
+A **transducer** is a function `(rf) -> rf'`, where a **reducing function** `rf` is
+`(acc x) -> acc`; a stage wraps `rf` and may call it zero, one, or many times per
+input. So a stage of your own is a plain `fn` — no protocol to implement:
+
+```clojure
+(defn xtake-while (pred)
+  (fn (rf) (fn (acc x) (if (pred x) (rf acc x) acc))))
+
+(transduce (xtake-while (fn (n) (< n 3))) conj [] (range 6))  ;=> [0 1 2]
+```
+
+Stages compose **left to right in data-flow order** under `comp` — the reverse of
+ordinary function composition — because each stage wraps the *next* one's reducer.
+`(comp (xfilter p) (xmap f))` filters, then maps.
+
 ### Maps
 `hash-map`  `get`  `assoc`  `dissoc`  `contains?`  `keys`  `vals`  `reduce-kv`
 `merge`  `merge-with`  `update`  `update-vals`  `update-keys`  `select-keys`
-`zipmap`  `get-in`  `assoc-in`  `update-in`  `map?`
+`zipmap`  `get-in`  `assoc-in`  `dissoc-in`  `update-in`  `map?`
 
 See the [Maps](#maps) section above. `{ }` is the literal form; the rest are
 immutable operations that return fresh maps. `count`/`empty?` work on maps too,
@@ -1584,7 +1702,8 @@ for when the caller needs indexed access — the named form of
 
 `reduce` takes `(reduce f init coll)` or `(reduce f coll)` (first item as the
 seed); `fold` is the strict 3-argument form it wraps (`(fold f init coll)`) and is
-what the prelude itself folds with.
+what the prelude itself folds with. Both are public and both stay: `reduce` is the
+surface you reach for, `fold` the strict-arity primitive it dispatches to (ADR-163).
 
 The function combinators build the callbacks those ops take:
 
@@ -1621,7 +1740,8 @@ The function combinators build the callbacks those ops take:
 `string->number`  `number->string`  `index-of`  `includes?`  `join`
 `string-split`  `replace`  `trim`  `triml`  `trimr`  `blank?`  `starts-with?`
 `ends-with?`  `string-repeat`  `pad-left`  `pad-right`  `to-fixed`  `format`
-`string->graphemes`  `string-normalize`  `display-width`
+`string->graphemes`  `grapheme-count`  `grapheme-at`  `substring-graphemes`
+`string-normalize`  `display-width`
 
 - `str` concatenates the *display* form of its args; `pr-str` returns the
   *readable* form of one value.
@@ -1642,6 +1762,16 @@ The function combinators build the callbacks those ops take:
   code point splits a cluster and corrupts the text. `(apply str (string->graphemes
   s))` is `s`. `display-width` counts terminal cells over the same clusters (a CJK
   char or emoji is 2, a combining mark 0).
+- **The cluster-indexed accessors** are `grapheme-count`, `(grapheme-at s i
+  [default])`, and `(substring-graphemes s start [end])` — the grapheme-indexed
+  counterparts of `string-length`, `char-at`, and `substring`, which are all
+  *code-point*-indexed. Reach for these whenever an index is a cursor position:
+  `(substring s 1 2)` can slice a cluster in half (leaving a bare `e` and an orphan
+  combining mark) where `(substring-graphemes s 1 2)` keeps it whole. Out-of-range
+  reads yield the default and ranges clamp, exactly like `nth`/`take`. They exist so
+  the correct spelling is also the fast one: `(nth (string->graphemes s) i)` was the
+  only way to read one cluster, and it materialised every cluster in the string on
+  every keystroke (ADR-159).
 - **`=` is byte-structural, so text that reads identically can compare unequal**:
   `"é"` is U+00E9 *or* U+0065 U+0301. `(string-normalize s form)` normalises, with
   `form` one of `:nfc` `:nfd` `:nfkc` `:nfkd`. Canonical (`:nfc`/`:nfd`) preserves
@@ -2011,6 +2141,7 @@ Run `nest doc <module>` for the full API of any module.
 | `std/system.blsp` | `'system` | OS interaction: `env`, `env-all`, `argv`, `os-type`, `cmd`, `cmd-ok?`, `cmd-out`, `halt` (whole-machine `cwd`/`hostname` are root builtins) |
 | `std/crypto.blsp` | `'crypto` | Cryptography: ChaCha20-Poly1305 AEAD (`encrypt`/`decrypt`/`encrypt-str`/`decrypt-str`), `pbkdf2` (accepts a string or byte-vector password/salt — a binary salt is used as raw bytes), `random-bytes`, `random-key`, `random-nonce`, `secure=?` |
 | `std/agent.blsp` | `'agent` | Process-backed state cell (Elixir-style Agent): `start`, `get`, `update`, `get-and-update`, `cast`, `stop` |
+| `std/protocol.blsp` | `'protocol` | Open generic functions (ADR-158): `defprotocol` declares typed ops, `defimpl` registers a per-`type-of` implementation (`:int`/`:map`/…/`:default`), `defbehaviour` declares a contract a *module* satisfies; `protocol-ops` is the introspection hook the checker and LSP read |
 | `std/telemetry.blsp` | `'telemetry` | Erlang-`:telemetry`-style instrumentation; handlers run in an isolated listener process: `start-telemetry`, `stop-telemetry`, `emit`, `attach`, `detach`, `detach-all`, `forward`, `handlers`, `telemetry-sync`, the `span` macro |
 
 The following modules are also opt-in and live under `std/net/` and `std/tool/`:
