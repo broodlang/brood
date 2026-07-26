@@ -16,9 +16,19 @@
 > The only residual is cosmetic (`keys`/`count` include the id; use `fields`), deferred
 > as optional polish behind a future hidden slot.
 >
-> **Still open:** checker nominal-awareness + monomorphization, sealed abilities,
-> return-type dispatch, migrating/retiring `protocol`. The rest of this note captures the
-> problem, measurements, the language survey, and the design space that led here.
+> **Slice 3 (checker nominal-awareness) — foundation shipped.** A record's identity is
+> now a `module/name` **keyword** (not a symbol), because a keyword literal is exactly
+> what the type-checker tracks (`Ty::keyword_lit`) and map-literal inference already
+> folds each field's value type into a `fields` record shape — so a record's identity now
+> flows through inference as a literal, through variables, with **no new `Ty` machinery**.
+> That's the enabler for the two consumers, which remain open: a **missing-impl warning**
+> at call sites (must read the cross-file `*impls*` registry to stay sound — the checker's
+> cardinal no-false-positives rule), and **monomorphization** (compile-time impl
+> resolution + inlining; codegen).
+>
+> **Still open:** the missing-impl pass + monomorphization (Slice 3 consumers), sealed
+> abilities, return-type dispatch, migrating/retiring `protocol`. The rest of this note
+> captures the problem, measurements, the language survey, and the design space.
 
 ## The goal
 
