@@ -719,9 +719,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         if argc == 0 || argc > 2 {
             out.push((
                 heap.form_pos_only(form),
-                format!(
-                    "{shown}: a keyword accessor takes 1 or 2 arguments, got {argc}"
-                ),
+                format!("{shown}: a keyword accessor takes 1 or 2 arguments, got {argc}"),
             ));
         } else {
             // The receivers `apply_keyword` accepts: a map (by key), a set (by
