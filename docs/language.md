@@ -284,7 +284,7 @@ eagerly). They are reserved names.
 | `(if test then else?)` | Evaluate `then` if `test` is truthy, else `else` (or `nil`). |
 | `(do body...)` | Evaluate forms in order; result is the last. |
 | `(def name value)` | Define/redefine `name` in the **global** environment — redefinable, the language's only mutation. |
-| `(fn (params) body...)` | A lexical closure. `lambda` is an exact synonym. |
+| `(fn (params) body...)` | A lexical closure. (The `lambda` synonym was removed — one spelling each.) |
 | `(let (a 1 b 2) body...)` | Sequential local bindings (each sees the previous). Brood's `let` is already sequential, so there is no separate `let*`. |
 | `(letrec (f (fn ...) g (fn ...)) body...)` | Local **mutually recursive** bindings — every name is visible in every RHS (and to itself). Plain-symbol targets only; meant for fn definitions. |
 | `` (quasiquote tmpl) `` / `` `tmpl `` | Template: literal except `~x` inserts a value and `~@xs` splices a sequence. |
@@ -1851,7 +1851,7 @@ At the REPL the namespace tracks the last `defmodule`; `(current-ns)` reports it
 > time (ADR-070), enforced once the package manager lands (ADR-037).
 
 ### Introspection (editor tooling)
-`doc`  `arglist`  `global-names`  `bound?`  `all-globals`  `apropos`  `doc-search`
+`doc`  `arglist`  `global-names`  `bound?`  `apropos`  `doc-search`
 
 For self-description — the substrate an editor (and the planned language server,
 `docs/lsp.md`) reads for hover, signature help, completion, and "is this name
@@ -1871,7 +1871,7 @@ For **discovery** — finding what exists rather than describing a name you
 already know (the answer to "is there an RNG?" in one call):
 
 ```clojure
-(all-globals)            ;=> (… sorted list of every global …)  ; alias of global-names
+(global-names)           ;=> (… sorted list of every global …)
 (apropos "rand")         ;=> (rand-float rand-int rand-seed …)  ; names containing "rand"
 (apropos :shuffle)       ;=> (shuffle shuffle--acc)             ; string/symbol/keyword pattern
 (doc-search "random")    ;=> ([rand-int "…"] [sample "…"] …)    ; matches docstrings, not names

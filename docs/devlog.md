@@ -8632,3 +8632,50 @@ says not to "fix" this by shrinking the tests again, and re-skipping the documen
 hide the one case that reproduces it. `ptrace_scope` blocks `gdb -p` without root, so a
 stack sample needs `sudo sysctl -w kernel.yama.ptrace_scope=0` or running the case under
 gdb from the start.
+
+## 2026-07-26 — the ADR-154 rename, from downstream: what a mechanical rename gets wrong
+
+Swept the 12 sibling projects against the trimmed surface. Nine needed migration
+(brood-edit 163 failures, hatch 216, brood-chat 28, brood-terminal 16, willem 7,
+hatch-demo dead at load) and all are green again. The rename map itself was ADR-154's
+own list, applied by script. The interesting part is the two ways the script was wrong,
+because both produce a **passing** test suite while being wrong.
+
+### `entries` is also a variable name
+
+`entries`→`map-pairs` hit 66 sites in brood-edit, 29 in hatch, 18 in brood-chat. Many
+were not the prelude function at all: they were locals, `defn` parameters and prose
+(`presence--without (entries pid)`, `(filter git--staged? entries)`). A whole-symbol
+replace renamed the binder AND its uses, so the code stayed internally consistent and
+**every test still passed** — with user variables now shadowing a primitive. Nothing in
+the suite could have caught it; only reading the diff did.
+
+Reverting it took three passes, each revealing the next: bare references first, then
+`(let (map-pairs …` binding lists, then `(defn f (map-pairs pid)` parameter lists. A
+parameter list and a call are the same shape in a Lisp, so "only rewrite in call
+position" — the obvious guard — cannot tell them apart. What finally worked: a genuine
+call is `(map-pairs m)` *and* the name is not introduced as a binder anywhere in the
+form. For a rename of an ambiguous name, prefer a scope-aware pass, or read every hunk.
+
+### `(let (host …))` looks exactly like a call
+
+The same call-position heuristic renamed the binder in
+`(let (host (get opts :host "127.0.0.1")) … (tcp-connect host port))` and not the use,
+because a binding list opens with `(` directly before its first binder. store-postgres
+lost 22 tests to it. Three more hits were inside comments and a docstring, where the old
+name is prose and correct.
+
+### The rest
+
+- A genuinely stale test: brood-edit asserted completion offers `car`, removed by
+  ADR-154. Retargeted at `capitalize` — the behaviour under test is prefix completion of
+  globals, which any surviving `ca…` name exercises.
+- `hatch-demo` and `willem` consume hatch and store-postgres as **git** deps, so their
+  `_deps` copies stay broken until the dependency is pushed and `nest update` run. Order
+  matters: store → store-postgres → hatch → hatch-demo/willem.
+- Reference docs swept for names that no longer exist: `lambda` as an `fn` synonym,
+  `all-globals` as an in-language function (it survives as an *MCP tool* over
+  `global-names`, which is why the mcp.md row stays), and the `concat` alias in both
+  `brood-for-claude.md` and the writing-brood skill. Left `devlog.md`/`decisions.md`
+  alone — there the old names are the record of what was true, and editing them would
+  falsify it.

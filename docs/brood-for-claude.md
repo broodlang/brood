@@ -677,7 +677,7 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 `display`/`buffer`/`ansi`; `apropos`/`doc-search` search it interactively.)
 
 - **list / seq**: `first` `rest` `cons` `list` `count` `empty?` `nth`
-  `reverse` `map` `filter` `reduce` `fold` `append`/`concat` (variadic, over
+  `reverse` `map` `filter` `reduce` `fold` `append` (variadic, over
   lists *and* vectors, returning a list) `mapcat` `sort` `take`
   `drop` `range` `zip` `partition` `frequencies` `enumerate` `repeat`
   `repeatedly`
@@ -733,9 +733,10 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **meta / eval**: `apply` (call a fn with a list of args — the only way to
   splat) `eval` `read-string` `eval-string` `gensym` (fresh symbol, for macros)
 - **discovery / introspection**: `doc` `arglist` `bound?` `source-location`;
-  and to *find* what exists rather than guess names — `all-globals`,
+  and to *find* what exists rather than guess names — `global-names`,
   `apropos` (name substring, e.g. `(apropos "rand")`), `doc-search` (matches
-  docstrings). The same three are `nest mcp` tools. Reach for these instead of
+  docstrings). The same three are `nest mcp` tools (the name-list tool is called
+  `all-globals` there). Reach for these instead of
   probing names one at a time.
 - **timing**: `now` (ms since epoch) `now-ns` (ns since epoch) `bench`
   (macro: `(bench "label" expr)` prints `label: N ms`, returns `expr`)
