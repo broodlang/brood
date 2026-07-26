@@ -118,6 +118,18 @@
   (test "two records of different shape are never ="
     (refute (= (circle 3) (rect 3 3)))))
 
+;; ---- slice 4: sealed abilities record their closed member set (checker uses it) ----
+(defability Shape :sealed [circle rect] (area [self] :-> float))
+(impl Shape ability-test/circle (area [c] (* 3 (get c :r) (get c :r))))
+(impl Shape ability-test/rect   (area [r] (* (get r :w) (get r :h))))
+
+(describe "sealed abilities"
+  (test "the closed member set is recorded (bare names qualified to this ns)"
+    (assert= (ability/sealed-members 'Shape) (list :ability-test/circle :ability-test/rect)))
+  (test "sealing does not change dispatch"
+    (assert= (area (circle 2)) 12)
+    (assert= (area (rect 3 4)) 12)))
+
 ;; ---- late / open extension: an impl added after the fact, for a built-in ----
 (describe "open extension"
   :serial

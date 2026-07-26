@@ -198,6 +198,37 @@ fn ability_inference_is_silent_when_the_variable_is_covered() {
 }
 
 #[test]
+fn sealed_ability_flags_a_member_missing_an_impl() {
+    let ws = file_warnings(
+        "(require 'ability)\n\
+         (defmodule t)\n\
+         (ability/defrecord* circle (r))\n\
+         (ability/defrecord* rect (w h))\n\
+         (ability/defability Shape :sealed [circle rect] (area [self] :-> float))\n\
+         (ability/impl Shape t/circle (area [c] (get c :r)))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("sealed ability Shape: no impl of `area` for :t/rect")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn sealed_ability_complete_is_silent() {
+    let ws = file_warnings(
+        "(require 'ability)\n\
+         (defmodule t)\n\
+         (ability/defrecord* circle (r))\n\
+         (ability/defrecord* rect (w h))\n\
+         (ability/defability Shape :sealed [circle rect] (area [self] :-> float))\n\
+         (ability/impl Shape t/circle (area [c] (get c :r)))\n\
+         (ability/impl Shape t/rect (area [r] (get r :w)))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("sealed ability")), "{ws:?}");
+}
+
+#[test]
 fn ability_pass_never_flags_a_protocol_op() {
     // protocol op fns also dispatch through an `impl-for`; the ability pass must key
     // on the *qualified* `ability/impl-for`, so a protocol call is never mistaken.

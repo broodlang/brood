@@ -569,6 +569,10 @@ pub(super) struct AbilityInfo {
     ctors: HashMap<value::Symbol, String>,
     impls: HashSet<(String, String, String)>,
     defaults: HashSet<(String, String)>,
+    /// ability name → its declared op names (for the sealed-exhaustiveness check).
+    abilities: HashMap<String, Vec<String>>,
+    /// ability name → its SEALED member id names (closed set), if declared sealed.
+    sealed: HashMap<String, Vec<String>>,
 }
 
 impl AbilityInfo {
@@ -603,11 +607,150 @@ pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo
         collect_register_impls(heap, form, &mut impls, &mut defaults);
     }
     read_impls_registry(heap, &mut impls, &mut defaults);
+    let mut abilities = HashMap::new();
+    let mut sealed = HashMap::new();
+    for &form in expanded {
+        collect_register_ability(heap, form, &mut abilities);
+        collect_register_sealed(heap, form, &mut sealed);
+    }
+    read_abilities_registry(heap, &mut abilities);
+    read_sealed_registry(heap, &mut sealed);
     AbilityInfo {
         op_fns,
         ctors,
         impls,
         defaults,
+        abilities,
+        sealed,
+    }
+}
+
+/// Collect `(…/register-ability (quote A) (quote OPS))` → ability A's op names.
+fn collect_register_ability(heap: &Heap, form: Value, out: &mut HashMap<String, Vec<String>>) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        if let Some(&Value::Sym(h)) = items.first() {
+            if sym_name(Value::Sym(h)).as_deref() == Some("ability/register-ability") {
+                if let (Some(a), Some(ops_form)) = (
+                    items
+                        .get(1)
+                        .and_then(|&v| unquote(heap, v))
+                        .and_then(sym_name),
+                    items.get(2).and_then(|&v| unquote(heap, v)),
+                ) {
+                    let ops = list_items(heap, ops_form)
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|&spec| {
+                            list_items(heap, spec)?.first().copied().and_then(sym_name)
+                        })
+                        .collect();
+                    out.insert(a, ops);
+                }
+            }
+        }
+        for &item in items.get(1..).unwrap_or(&[]) {
+            collect_register_ability(heap, item, out);
+        }
+    })
+}
+
+/// Collect `(…/register-sealed (quote A) (list :id …))` → ability A's sealed member ids.
+fn collect_register_sealed(heap: &Heap, form: Value, out: &mut HashMap<String, Vec<String>>) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        if let Some(&Value::Sym(h)) = items.first() {
+            if sym_name(Value::Sym(h)).as_deref() == Some("ability/register-sealed") {
+                if let (Some(a), Some(&list_form)) = (
+                    items
+                        .get(1)
+                        .and_then(|&v| unquote(heap, v))
+                        .and_then(sym_name),
+                    items.get(2),
+                ) {
+                    // the members are the args of the `(list :id …)` form
+                    if let Some(litems) = list_items(heap, list_form) {
+                        let members = litems
+                            .get(1..)
+                            .unwrap_or(&[])
+                            .iter()
+                            .filter_map(|&m| sym_name(m))
+                            .collect();
+                        out.insert(a, members);
+                    }
+                }
+            }
+        }
+        for &item in items.get(1..).unwrap_or(&[]) {
+            collect_register_sealed(heap, item, out);
+        }
+    })
+}
+
+/// Union in the runtime `ability/*abilities*` registry — name → op specs.
+fn read_abilities_registry(heap: &Heap, out: &mut HashMap<String, Vec<String>>) {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("ability/*abilities*"))
+    else {
+        return;
+    };
+    for (name, specs) in heap.map_entries(mid) {
+        if let Some(a) = sym_name(name) {
+            let ops = list_items(heap, specs)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|&spec| list_items(heap, spec)?.first().copied().and_then(sym_name))
+                .collect();
+            out.entry(a).or_insert(ops);
+        }
+    }
+}
+
+/// Union in the runtime `ability/*sealed*` registry — name → member id keywords.
+fn read_sealed_registry(heap: &Heap, out: &mut HashMap<String, Vec<String>>) {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("ability/*sealed*"))
+    else {
+        return;
+    };
+    for (name, members) in heap.map_entries(mid) {
+        if let Some(a) = sym_name(name) {
+            let ids = list_items(heap, members)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|&m| sym_name(m))
+                .collect();
+            out.entry(a).or_insert(ids);
+        }
+    }
+}
+
+/// Sealed-ability exhaustiveness: every sealed member must have a *direct* impl of every
+/// declared op (a `:default` doesn't count — sealing means each member is handled
+/// explicitly). One warning per missing (ability, op, member).
+pub(super) fn check_sealed(info: &AbilityInfo, out: &mut Vec<(Option<Pos>, String)>) {
+    for (ability, members) in &info.sealed {
+        let Some(ops) = info.abilities.get(ability) else {
+            continue;
+        };
+        for op in ops {
+            for member in members {
+                if !info
+                    .impls
+                    .contains(&(ability.clone(), op.clone(), member.clone()))
+                {
+                    out.push((
+                        None,
+                        format!(
+                            "sealed ability {}: no impl of `{}` for :{}",
+                            ability, op, member
+                        ),
+                    ));
+                }
+            }
+        }
     }
 }
 
