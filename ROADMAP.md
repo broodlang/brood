@@ -17,6 +17,12 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ tried and reverte
 > This is the single canonical roadmap. Deep design lives in the per-topic docs
 > under [`docs/`](docs/) (ADRs in [`docs/decisions.md`](docs/decisions.md), a
 > dated history in [`docs/devlog.md`](docs/devlog.md)).
+>
+> **For the 1.0 language freeze specifically, read
+> [`docs/roadmap-for-v1.md`](docs/roadmap-for-v1.md)** — the short list of what must
+> change on the language *surface* before 1.0 (three items), what is deliberately
+> deferred because it is purely additive, and the draft freeze list of what Brood
+> permanently is not. This file remains the superset; that one is the release gate.
 
 ---
 
