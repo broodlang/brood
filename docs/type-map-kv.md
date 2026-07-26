@@ -2,7 +2,7 @@
 
 > Status: **slice 1 shipped** (Brood runtime), **slice 2 shipped** (checker
 > flat-accept), **slice 3 shipped** (full `map_kv` refinement in `Ty`).
-> `type-matches?` walks `entries` to verify each key/value pair; `parse_type`
+> `type-matches?` walks `map-pairs` to verify each key/value pair; `parse_type`
 > (`check/annot.rs:132-137`) now produces `Ty::map_of(k, v)`, and
 > `check/guards.rs:1188-1212` derives precise `get`/`keys`/`vals`/`assoc`
 > result types from `Ty::map_kv`.
@@ -38,7 +38,7 @@ deliberately not supported — if you only care about keys, use `(map K any)`.
 
 ### Runtime (`type-matches?`) — Brood only, no Rust
 
-The check walks `(entries m)` and verifies each `[k v]` pair:
+The check walks `(map-pairs m)` and verifies each `[k v]` pair:
 
 ```lisp
 ;; in the (pair? t) / (cond ...) branch of type-matches?:
@@ -50,10 +50,10 @@ The check walks `(entries m)` and verifies each `[k v]` pair:
              (every? (fn (kv)
                        (and (type-matches? ktype (first kv))
                             (type-matches? vtype (second kv))))
-                     (entries v)))))
+                     (map-pairs v)))))
 ```
 
-`entries` (alias for `map-pairs`) returns `[[k v] …]`; it's available at runtime
+`map-pairs` returns `[[k v] …]`; it's available at runtime
 when `type-matches?` is called. `second` = `(fn (p) (first (rest p)))` or can be
 inlined. This is the entire runtime change, pure Brood.
 
@@ -111,7 +111,7 @@ use `Ty::of(Tag::Map)` and keep working unchanged.
 
 ## Soundness
 
-- **Runtime:** walking `entries` on every call is O(n) in the map size. For
+- **Runtime:** walking `map-pairs` on every call is O(n) in the map size. For
   most annotation-checked maps this is acceptable; if it's a hot path, prefer
   `sig` (static-only) over `sig!`. Same trade-off as `(list int)` element checks.
 - **Checker (slice 1):** widening to flat `Ty::Map` is always sound — disjointness

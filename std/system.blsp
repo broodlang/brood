@@ -37,11 +37,6 @@
   "The current OS as a keyword: `:linux`, `:macos`, or `:windows`."
   (%os-type))
 
-;; `cwd` and `hostname` are already global builtins; expose them here under the
-;; system/ namespace too so they can be found alongside the other system functions.
-(def working-dir cwd)
-(def host hostname)
-
 ;; ---- subprocess -------------------------------------------------------------
 
 (defn cmd (prog & rest)

@@ -3,7 +3,7 @@
 > **Status:** increments 1–3 + α landed (2026-05-30). Inc-1: the resolution substrate
 > (resolver pass, forward-ref pre-scan, def-site keying, ns-aware checker). Inc-2:
 > **`(:use …)` imports + auto-require** — `(:use mod)` refers a module's public names
-> bare, `(:use mod :refer [a b])` a subset; the resolver consults the per-file import
+> bare, `(:use mod :only [a b])` a subset; the resolver consults the per-file import
 > table after the current namespace and before root. Inc-3 (**the big-bang**):
 > `defmodule` **is** the single namespace form — `ns` was dropped, a module *is* a
 > namespace — and all of `std/` + every test file were migrated in one pass
@@ -129,7 +129,7 @@ one thing it deliberately can't do is *hard* sealing — which §2 says we don't
 - A bare symbol resolves in order: **(1)** local lexical binding (unchanged —
   resolution only touches *free* references; the resolver tracks `let`/
   `letrec`/`fn` binders and over-approximates `match*` pattern binders), **(2)**
-  an imported/`:refer`'d name, **(3)** ns-qualified
+  an imported/`:only`'d name, **(3)** ns-qualified
   (`observe` → `observer/observe`) if such a global **already exists** *or* the
   name was **pre-scanned** as a def head this file will create (the forward-ref
   pre-scan — without it a reference to a later definition would silently stay
@@ -185,7 +185,7 @@ symbol mean here." **Single source of truth for resolution** — so the editor c
 never disagree with the runtime. This is worth more than any individual feature;
 it's what keeps a self-editing editor honest.
 
-Design constraint that falls out: the `ns` / `:use` / `:refer` forms must be
+Design constraint that falls out: the `ns` / `:use` / `:only` forms must be
 **analyzable as plain data from the tooling CST** (`syntax/cst.rs`, `scope.rs`)
 without evaluating — they are (just keyworded forms), so the LSP reads scope
 statically even though the rewrite is expand-time.
@@ -207,7 +207,7 @@ non-negotiable.
 Everything LSP Tier 2 wants is blocked by flatness and unlocked by namespaces,
 *provided* the `ns`/import surface stays statically readable (§4):
 
-- **Completion** — `(ns dash (:use [observer :refer [observe]]))` declares the
+- **Completion** — `(ns dash (:use [observer :only [observe]]))` declares the
   in-scope set; `observer/` completes that namespace's exports. Flat can only
   honestly offer "every global in the image."
 - **Cross-file go-to-def** — `observer/observe` deterministically names the file
@@ -327,7 +327,7 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
   (`std/tool/test.blsp`), `cond`, `when`, … — stay root. Which std *macros* earn a
   root home vs. a prefix is a per-name call.
 - **`defmodule` evolves into `ns`.** It already takes name + optional docstring;
-  it grows `:use`/`:refer`/`:export` and sets `*ns*`. `provide`/`require`/
+  it grows `:use`/`:only`/`:export` and sets `*ns*`. `provide`/`require`/
   `*load-path*`/`*features*` become the loader underneath auto-require — not
   replaced.
 - **std modules** get namespaced gradually; **package/user code** is namespaced
@@ -342,7 +342,7 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
    processes); the §3 resolution rules over *non-macro* references; forward-ref
    pre-scan; def-site keying; ns-aware checker. β-interim for macros (§7). Tested
    incl. the mandatory cross-process round-trip.
-2. ✅ **Imports + auto-require (inc-2)** — `(:use mod)` / `(:use mod :refer [a b])`
+2. ✅ **Imports + auto-require (inc-2)** — `(:use mod)` / `(:use mod :only [a b])`
    in the `ns` header; a per-file `imports` table on the `Heap` (bare → qualified)
    the resolver consults after the current namespace, before root; `%refer`
    enumerates a module's public (non-`--`) names or a subset; `:use` emits a

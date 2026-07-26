@@ -95,9 +95,9 @@
     (%load-string "(defmodule iappA (:use ilibA)) (defn run () (list (pub-x) (pub-y)))")
     (is (= (iappA/run) (list :x :y))))
 
-  (test "(:use mod :refer [..]) refers only the named symbols"
+  (test "(:use mod :only [..]) refers only the named symbols"
     (%load-string "(defmodule ilibB) (defn keep-me () :kept) (defn skip-me () :skipped)")
-    (%load-string "(defmodule iappB (:use ilibB :refer [keep-me])) (defn run () (keep-me))")
+    (%load-string "(defmodule iappB (:use ilibB :only [keep-me])) (defn run () (keep-me))")
     (is (= (iappB/run) :kept))
     ;; skip-me wasn't referred, so a bare reference would resolve to root (unbound),
     ;; not to ilibB/skip-me — confirm only the qualified one exists.

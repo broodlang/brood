@@ -99,13 +99,13 @@
                                                        ""
                                                        (list "(abc)"))
                       :ctrl-r))
-      (is (string-contains? (editor/lineedit/lineedit-display-prompt searching)
+      (is (includes? (editor/lineedit/lineedit-display-prompt searching)
             "reverse-i-search"))))
   (test "the query typed so far appears in the search prompt"
     (let (typed (fold (fn (st key) (editor/lineedit/lineedit-handle st key))
                   (editor/lineedit/lineedit-init "x> " "" (list "(abc)"))
                   (list :ctrl-r "a" "b")))
-      (is (string-contains? (editor/lineedit/lineedit-display-prompt typed) "ab"))))
+      (is (includes? (editor/lineedit/lineedit-display-prompt typed) "ab"))))
   (test "leaving the search restores the configured prompt"
     (let (state (fold (fn (st key) (editor/lineedit/lineedit-handle st key))
                   (editor/lineedit/lineedit-init "x> " "" (list "(abc)"))
@@ -287,11 +287,11 @@
                :point 6)
           ops (editor/lineedit/lineedit--multi-ops st))
       ;; the opener "(" (line 0) and the closer ")" (line 1) both render reversed
-      (is (some? (fn (op) (= op [:print "(" {:reverse true}])) ops))
-      (is (some? (fn (op) (= op [:print ")" {:reverse true}])) ops))
+      (is (any? (fn (op) (= op [:print "(" {:reverse true}])) ops))
+      (is (any? (fn (op) (= op [:print ")" {:reverse true}])) ops))
       ;; both physical lines are repainted (each carries its prompt)
-      (is (some? (fn (op) (= op [:print "p> "])) ops))
-      (is (some? (fn (op) (= op [:print "c> "])) ops)))))
+      (is (any? (fn (op) (= op [:print "p> "])) ops))
+      (is (any? (fn (op) (= op [:print "c> "])) ops)))))
 
 ;; Cross-process: an editor-state map crosses a heap boundary via send (deep copy)
 ;; and is edited on the far side, proving the immutable state survives copy-on-send

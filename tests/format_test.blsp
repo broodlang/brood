@@ -46,22 +46,22 @@
     (let (in "(very-long-function-name aaaaaaaaaaaaa bbbbbbbbbbbbb cccccccccccccc ddddddddddddd eeeeeeeeeeeee ffffffffffff)"
           out (format-source in))
       ;; Call-style with first-arg-ride: head + arg1 on first line, rest at +2.
-      (is (string-contains? out "(very-long-function-name aaaaaaaaaaaaa\n  bbbbbbbbbbbbb"))))
+      (is (includes? out "(very-long-function-name aaaaaaaaaaaaa\n  bbbbbbbbbbbbb"))))
   (test "a too-long defn keeps name + params on the head line + indents the body"
     (let (in "(defn long-function-name (x y z) (some-long-body-form x y z w v u u1 u2) (another-long-body x y z w v))"
           out (format-source in))
       ;; defn is in the header table (count = 2): name + params ride along.
-      (is (string-contains? out "(defn long-function-name (x y z)\n  (some-long-body-form"))))
+      (is (includes? out "(defn long-function-name (x y z)\n  (some-long-body-form"))))
   (test "let bindings break as pairs aligned under the first element"
     (let (in "(let (aaaaaaaaaaa-binding 1 bbbbbbbbbbb-binding 2 ccccccccccc-binding 3 ddddddddddd-binding 4 eeeeeeeeeee-binding 5) body)"
           out (format-source in))
       ;; Each binding pair on its own line, aligned at column 6 (one past `(`).
-      (is (string-contains? out "aaaaaaaaaaa-binding 1\n      bbbbbbbbbbb-binding 2"))))
+      (is (includes? out "aaaaaaaaaaa-binding 1\n      bbbbbbbbbbb-binding 2"))))
   (test "cond clauses break as test+result pairs at +2"
     (let (in "(cond (some-test-form x y z) (some-result-form a b) (another-test-form x y z) (another-result-form a b) else default)"
           out (format-source in))
       ;; Each `test result` pair on one body-indent line.
-      (is (string-contains? out
+      (is (includes? out
             "(some-test-form x y z) (some-result-form a b)\n  (another-test-form")))))
 
 (describe "format: assoc pairs its key/value args"
@@ -70,13 +70,13 @@
   ;; (the *format-pair-body* shape), not one element per line.
   (test "a broken assoc pairs key+value, collection on the head line"
     (let (out (format-source "(assoc m\n :alpha 1 :beta 2 :gamma 3)"))
-      (is (string-contains? out "(assoc m\n  :alpha 1\n  :beta 2\n  :gamma 3)"))
+      (is (includes? out "(assoc m\n  :alpha 1\n  :beta 2\n  :gamma 3)"))
       ;; never one element per line
-      (is (not (string-contains? out ":alpha\n")))))
+      (is (not (includes? out ":alpha\n")))))
   (test "a width-busting assoc pairs rather than splits"
     (let (out (format-source "(assoc configuration-map :alpha-key 100 :beta-key 200 :gamma-key 300 :delta-key 400 :epsilon-key 500 :zeta-key 600)"))
-      (is (string-contains? out ":alpha-key 100\n"))
-      (is (not (string-contains? out ":alpha-key\n")))))
+      (is (includes? out ":alpha-key 100\n"))
+      (is (not (includes? out ":alpha-key\n")))))
   (test "a short assoc stays on one line"
     (assert= (format-source "(assoc m :a 1 :b 2)") "(assoc m :a 1 :b 2)\n"))
   (test "assoc is idempotent when broken"
@@ -90,7 +90,7 @@
   (test "a broken receive keeps each clause on its own line, head alone"
     ;; an author newline after the head forces the broken shape (keep-broken)
     (let (out (format-source "(receive\n (:stop (cleanup)) ([:go x] (run x)) (after t (tick)))"))
-      (is (string-contains? out
+      (is (includes? out
             "(receive\n  (:stop (cleanup))\n  ([:go x] (run x))\n  (after t (tick)))"))))
   (test "a short receive stays on one line"
     (assert= (format-source "(receive ([:sse ev] ev))") "(receive ([:sse ev] ev))\n"))
@@ -103,17 +103,17 @@
     (assert= (format-source ";; hello\n(def x 1)") ";; hello\n(def x 1)\n"))
   (test "an inline comment forces multi-line on its enclosing list"
     (let (in "(defn f (x) ;; doc\n  x)" out (format-source in))
-      (is (string-contains? out ";; doc"))
+      (is (includes? out ";; doc"))
       ;; The body item moves to a new line at +2 indent.
-      (is (string-contains? out "\n  x)"))))
+      (is (includes? out "\n  x)"))))
   (test "blank lines between two top-level comments are preserved"
     (assert= (format-source ";; a\n\n;; b\n(def x 1)") ";; a\n\n;; b\n(def x 1)\n"))
   (test "a trailing comment on a top-level form is hoisted above it"
     (assert= (format-source "(def x 5) ;; note") ";; note\n(def x 5)\n"))
   (test "a trailing comment on a body form is hoisted above it"
     (let (out (format-source "(defn f (x)\n  (foo) ;; note\n  (bar))"))
-      (is (string-contains? out "  ;; note\n  (foo)"))
-      (is (not (string-contains? out "(foo) ;; note"))))))
+      (is (includes? out "  ;; note\n  (foo)"))
+      (is (not (includes? out "(foo) ;; note"))))))
 
 (describe "format: a comment just before a closing delimiter"
   ;; Regression (the bug that broke tests/adversarial_test.blsp): when the last
@@ -124,8 +124,8 @@
   (test "the closing paren drops below a trailing comment, not into it"
     (let (out (format-source "(describe \"x\"\n  (test \"a\" (is true))\n  ;; note\n  )"))
       ; `)` on its own line
-      (is (string-contains? out ";; note\n)"))
-      (is (not (string-contains? out ";; note)")))))
+      (is (includes? out ";; note\n)"))
+      (is (not (includes? out ";; note)")))))
   (test "the result is re-readable (not just CST-parseable)"
     ;; parse-source is lenient on unclosed lists; the real reader is not — pin it.
     (let (out (format-source "(describe \"x\"\n  (test \"a\")\n  ;; note\n  )"))
@@ -137,12 +137,12 @@
   ;; for a clause's partner form, DROPPING the comment. It must be preserved.
   (test "a comment after the last cond clause is not dropped"
     (let (out (format-source "(cond\n  (a 1)\n  ;; fallback\n  )"))
-      (is (string-contains? out ";; fallback"))
-      (is (string-contains? out ";; fallback\n)"))))
+      (is (includes? out ";; fallback"))
+      (is (includes? out ";; fallback\n)"))))
   (test "a comment between cond clauses is preserved and breaks the pair"
     (let (out (format-source "(cond\n  (a 1)\n  ;; mid\n  (b 2))"))
-      (is (string-contains? out ";; mid"))
-      (is (string-contains? out "(b 2)"))))
+      (is (includes? out ";; mid"))
+      (is (includes? out "(b 2)"))))
   ;; A comment in a let bindings list used to disable pair-grouping entirely,
   ;; splitting every `name value` onto two lines. The pair walker is comment-aware:
   ;; pairs stay together, a trailing comment is hoisted onto its own line above its
@@ -151,19 +151,19 @@
   (test "a trailing comment in let bindings is hoisted above its pair, kept intact"
     (let (out (format-source "(let (a 1\n      b 2  ; note\n      c 3)\n  body)"))
       ; hoisted above the pair
-      (is (string-contains? out "; note\n      b 2"))
+      (is (includes? out "; note\n      b 2"))
       ; not inline anymore
-      (is (not (string-contains? out "b 2  ; note")))
-      (is (not (string-contains? out "b\n")))))
+      (is (not (includes? out "b 2  ; note")))
+      (is (not (includes? out "b\n")))))
   (test "an own-line comment in let bindings stays on its own line, pairs intact"
     (let (out (format-source "(let (a 1\n      ;; mid\n      b 2)\n  body)"))
-      (is (string-contains? out "a 1\n      ;; mid\n      b 2"))))
+      (is (includes? out "a 1\n      ;; mid\n      b 2"))))
   (test "a comment in a map pairs up like bindings (not one element per line)"
     (let (out (format-source "(def m {:a 1\n        :b 2  ; note\n        :c 3})"))
-      (is (string-contains? out "; note"))
+      (is (includes? out "; note"))
       ; hoisted above, not inline
-      (is (not (string-contains? out ":b 2  ; note")))
-      (is (not (string-contains? out ":b\n")))))
+      (is (not (includes? out ":b 2  ; note")))
+      (is (not (includes? out ":b\n")))))
   (test "comments in pair-lists are idempotent"
     (let (out (format-source "(let (a 1\n      b 2  ; note\n      ;; mid\n      c 3)\n  body)"))
       (assert= out (format-source out)))))
@@ -174,13 +174,13 @@
   ;; the marker count — that's authorial intent.
   (test "single ; marker survives"
     (let (out (format-source "; one\n(def x 1)"))
-      (is (string-contains? out "; one"))))
+      (is (includes? out "; one"))))
   (test ";; marker (current-line column) survives"
     (let (out (format-source ";; section\n(def x 1)"))
-      (is (string-contains? out ";; section"))))
+      (is (includes? out ";; section"))))
   (test ";;; marker (top-level banner) survives"
     (let (out (format-source ";;; banner\n(def x 1)"))
-      (is (string-contains? out ";;; banner"))))
+      (is (includes? out ";;; banner"))))
   (test "a trailing comment is hoisted onto its own line above the code"
     ;; A comment after code on the same line moves to its own line *above* that
     ;; code (never stays trailing). The marker is preserved verbatim.
@@ -200,15 +200,15 @@
           out (format-source in))
       ;; The string content stays byte-for-byte — including the literal
       ;; newlines (we can't reflow inside a string literal).
-      (is (string-contains? out "\"line one\nline two\nline three\""))))
+      (is (includes? out "\"line one\nline two\nline three\""))))
   (test "a string longer than the width budget pushes itself to its own line, content untouched"
     (let (long-content "this is a really long string that exceeds the eighty column width budget the formatter uses"
           in (str "(def msg \"" long-content "\")")
           out (format-source in))
       ;; Content is preserved verbatim.
-      (is (string-contains? out (str "\"" long-content "\"")))
+      (is (includes? out (str "\"" long-content "\"")))
       ;; And the form breaks: string lands on its own line at +2 indent.
-      (is (string-contains? out (str "(def msg\n  \"" long-content "\""))))))
+      (is (includes? out (str "(def msg\n  \"" long-content "\""))))))
 
 (describe "format: reader macros + collections"
   (test "quote stays attached to its form" (assert= (format-source "'(a b c)") "'(a b c)\n"))

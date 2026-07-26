@@ -2,7 +2,7 @@
 ;; run by `brood test` (and cargo test, via crates/lisp/tests/suite.rs).
 
 ; file: the require-race fixtures
-(defmodule modules-test (:use test) (:use file))
+(defmodule modules-test (:use test))
 (describe "strings: substring & affixes"
   (test "substring is char-indexed"
     (assert= (substring "hello" 1 4) "ell")
@@ -52,7 +52,7 @@
                 "\n(defn ready () :ok)\n")
           saved-path *load-path*
           me (self))
-      (write-file path src)
+      (spit path src)
       (set-load-path! (cons "/tmp" *load-path*))
       (doseq (k (range 8))
         (spawn (send me
@@ -83,7 +83,7 @@
           ;; the module requires ITSELF mid-file — the degenerate cycle
           src "(defmodule reqcirc-mod)\n(require 'reqcirc-mod)\n(defn ok () :yes)\n"
           saved-path *load-path*)
-      (write-file path src)
+      (spit path src)
       (set-load-path! (cons "/tmp" *load-path*))
       (require 'reqcirc-mod)
       (set-load-path! saved-path)
@@ -112,4 +112,4 @@
     ;; `error` raises a plain string here, not a structured map — hence `str`, not
     ;; `(get e :message)`.
     (let (message (try (%load-string "(defmodule impl-e (:nonsense x))") (catch e (str e))))
-      (is (string-contains? message ":implements")))))
+      (is (includes? message ":implements")))))

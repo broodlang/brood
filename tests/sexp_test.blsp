@@ -45,7 +45,7 @@
     ;; top-level form start (else it slices mid-string and the CST parse of the fragment fails,
     ;; leaving forward-sexp stuck). Regression for the reported `(defmodule …"…(…"…)` bug.
     (let (src "(defmodule m\n\"doc\n(x)\nend\")\n(def y 1)"
-          dp (string-index-of src "(def y"))
+          dp (index-of src "(def y"))
       ; not the in-docstring (x)
       (let ([base sub] (narrow src dp))
         (assert= base 0))

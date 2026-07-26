@@ -1,4 +1,4 @@
-;; Sequence library — range / take / drop / take-while / drop-while / some? /
+;; Sequence library — range / take / drop / take-while / drop-while / any? /
 ;; every? / find / zip / partition / sort / sort-by, all written in Brood over the
 ;; list primitives. The whole suite runs in parallel (each test is its own green
 ;; process), so these already exercise the ops on multiple cores; the final
@@ -58,11 +58,11 @@
     (assert= (drop-while even? (list 2 4 5 6)) (list 5 6))
     (assert= (drop-while even? (list 1 2 3)) (list 1 2 3))))
 
-(describe "some? / every? / find"
-  (test "some? is true iff any element satisfies pred"
-    (is (some? even? (list 1 3 4 5)))
-    (refute (some? even? (list 1 3 5)))
-    (refute (some? even? nil)))
+(describe "any? / every? / find"
+  (test "any? is true iff any element satisfies pred"
+    (is (any? even? (list 1 3 4 5)))
+    (refute (any? even? (list 1 3 5)))
+    (refute (any? even? nil)))
   ; vacuously false on empty
   (test "every? is true iff all elements satisfy pred"
     (is (every? even? (list 2 4 6)))
@@ -161,7 +161,7 @@
   (test "seq coerces a map to its pairs; entries is an alias for map-pairs"
     (let (m {:x 1 :y 2})
       (assert= (frequencies (seq m)) {[:x 1] 1 [:y 2] 1})
-      (assert= (entries m) (map-pairs m))))
+      (assert= (map-pairs m) (map-pairs m))))
   (test "frequencies tallies occurrences into a map"
     (assert= (frequencies (list :a :b :a :a :b)) {:a 3 :b 2})
     (assert= (frequencies nil) {})

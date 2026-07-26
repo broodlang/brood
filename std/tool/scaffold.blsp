@@ -207,15 +207,15 @@ test discovery, lints, release, config)."
     "      (>= nxt width) [(- width 2) -1]\n"
     "      else           [nxt dir])))\n"
     "\n"
-    "(defn loop (pos dir width)\n"
-    "  (println (render pos width))\n"
-    "  (sleep 80)\n"
-    "  (let ([p d] (step pos dir width))\n"
-    "    (loop p d width)))\n"
-    "\n"
     "(defn main ()\n"
     "  \"Entry point: animate a bouncing marker.\"\n"
-    "  (loop 0 1 20))\n"))
+    "  ;; `loop`/`recur` is a local, stack-safe tail loop: the state (pos, dir)\n"
+    "  ;; is threaded through `recur` — no mutation, no top-level helper fn.\n"
+    "  (loop (pos 0 dir 1 width 20)\n"
+    "    (println (render pos width))\n"
+    "    (sleep 80)\n"
+    "    (let ([p d] (step pos dir width))\n"
+    "      (recur p d width))))\n"))
 
 (defn project--tui-test-template (nm)
   (str ";; Test the pure frame logic directly — the loop itself is exercised by\n"
@@ -488,7 +488,7 @@ test discovery, lints, release, config)."
     "  (test \"view shows the counter value\"\n"
     "    (let (f (app-view {:count 3} 80 24))\n"
     "      (is (> (count (filter (fn (op) (and (= (first op) :text)\n"
-    "                                          (string-contains? (nth op 3) \"count: 3\")))\n"
+    "                                          (includes? (nth op 3) \"count: 3\")))\n"
     "                            f))\n"
     "             0)))))\n"))
 

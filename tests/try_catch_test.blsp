@@ -234,16 +234,16 @@
     ;; error-of can intercept the compile-time error.
     (let (msg (error-of (eval '(try (+ 1 2) (fn (e) :caught)))))
       (is (string? msg))
-      (is (string-contains? msg "try:"))
-      (is (string-contains? msg "(catch"))))
+      (is (includes? msg "try:"))
+      (is (includes? msg "(catch"))))
 
   (test "error message names the fn form that was passed"
     (let (msg (error-of (eval '(try (+ 1 2) (fn (x) (* x 2))))))
-      (is (string-contains? msg "(fn"))))
+      (is (includes? msg "(fn"))))
 
   (test "error message suggests the right param name from the fn"
     (let (msg (error-of (eval '(try (throw :x) (fn (err) err)))))
-      (is (string-contains? msg "err"))))
+      (is (includes? msg "err"))))
 
   (test "correct syntax (catch e ...) does NOT trigger the guard"
     (assert= (try (throw :ok) (catch e e)) :ok))
@@ -278,7 +278,7 @@
     (deopt-heat 5000)
     (let (msg (caught-msg (fn () (deopt-adder "x"))))
       (is (string? msg))
-      (is (string-contains? msg "expected number"))))
+      (is (includes? msg "expected number"))))
 
   (test "try/catch works across repeated deopt calls"
     (deopt-heat 5000)

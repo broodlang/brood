@@ -126,7 +126,7 @@ highlights. Used to colour a printed result on an interactive TTY."
 (defn repl--meta-parts (line)
   "Split a `,cmd arg…` line (sans the leading `,`) into `[cmd rest]`, `rest` trimmed."
   (let (t (trim line)
-        sp (string-index-of t " "))
+        sp (index-of t " "))
     (if (< sp 0)
       [t ""]
       [(substring t 0 sp) (trim (substring t sp))])))
@@ -136,7 +136,7 @@ highlights. Used to colour a printed result on an interactive TTY."
   (and (> (string-length line) 0)
     (= (char-at line 0) ",")
     (let ([cmd _] (repl--meta-parts (substring line 1)))
-      (some? (fn (n) (= n cmd)) *repl-meta-names*))))
+      (any? (fn (n) (= n cmd)) *repl-meta-names*))))
 
 (defn repl--meta-help ()
   (println (str "\e[90m"

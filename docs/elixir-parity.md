@@ -91,7 +91,8 @@ node links are, per `dist.rs` / `dist/*`:
    hand-written `type-of` cascades in the generic seq/string ops.
 
 ### Tier 3 — ergonomics / defer-until-consumer
-- **String interpolation** `"#{x}"` (only printf-style `format` today).
+- **String interpolation** — ✅ shipped as `fmt`: `(fmt "x={x}")` (Brood's hole
+  syntax is `{expr}`, not Elixir's `#{expr}`); lowers to a plain `str`, ADR-154.
 - **Named / keyword `&key` arguments** — "designed but not in this version"
   (`language.md`); maps cover options today.
 - **Grapheme-correct string API** — strings are **codepoint-indexed** (Rust
@@ -115,8 +116,8 @@ These are BEAM/Erlang traits that do **not** make sense to copy into a Lisp:
   list. No `~c` wart to reconcile.
 - **The keyword-*list* type** — maps are the better fit and Brood already uses
   them for options.
-- **General sigil syntax** — reader/`format` cover most; only interpolation and
-  perhaps a regex literal are worth wanting.
+- **General sigil syntax** — reader/`format`/`fmt` cover most; only perhaps a
+  regex literal is worth wanting (string interpolation now ships as `fmt`).
 - **Tuples vs vectors** — already cleanly solved: the vector `[…]` is the
   tuple/tagged-data idiom (`[:ok v]`, `[:add a b]`).
 

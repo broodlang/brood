@@ -152,6 +152,35 @@
 
 (defn nt--part-scan (want) (nt--scan-part want nt--lines nil 0 nil))
 
+;; The case lines of one section, collected ONCE. The predicate is deliberately crude —
+;; "not blank, not an `@` header, has at least four `;`" — because it runs on all ~20,000
+;; lines, and the precise version (`nt--test-line?`, which folds tabs with `replace` and
+;; then `string-split`s) costs over 120 s in a DEBUG build all by itself.
+;;
+;; That cost is why sampling looked useless: it was paid per test regardless of how few
+;; cases the sample tested, so 16x sampling changed nothing measurable. Provable by
+;; running a slice with the modulus set so high that no case is tested at all — still
+;; >120 s. With the walk done once, a 1-in-16 slice is ~42 s. `nt--case` still does the
+;; real parsing, on the lines a slice actually tests.
+(defn nt--case-line? (line)
+  (and (not (blank? line))
+    (not (starts-with? (trim line) "@"))
+    (not (starts-with? (trim line) "#"))
+    (>= (count (string-split line ";")) 5)))
+
+(defn nt--collect (want lines here acc)
+  (if (nil? lines)
+    (reverse acc)
+    (let (line (first lines)
+          p (nt--part line))
+      (cond
+        p (nt--collect want (rest lines) p acc)
+        (not (= here want)) (nt--collect want (rest lines) here acc)
+        (nt--case-line? line) (nt--collect want (rest lines) here (cons line acc))
+        else (nt--collect want (rest lines) here acc)))))
+
+(def nt--part1-cases (nt--collect "Part1" nt--lines nil nil))
+
 ;; Part1 alone is ~16,000 cases x 6 normalisations — one test's worth of work in release,
 ;; but enough to blow the framework's 120 s per-test ceiling inside the DEBUG-build
 ;; `brood_suite_passes` wrapper when it is competing with the whole workspace. Chunking by
@@ -175,16 +204,34 @@
           (nt--scan-chunk want k n (rest lines) here (inc idx) (inc ran)
                           (if w (cons w bad) bad)))))))
 
-;; Part1 runs in FULL (`nt--part1-of` = 1). It was briefly sampled while chasing a
-;; timeout that turned out to be a misread of the framework: `*test-timeout-ms*` is a wall
-;; deadline for an entire *batch* of parallel workers, not a per-test ceiling, so shrinking
-;; one test never addressed it (and 16x sampling measurably didn't). The real fix is in
-;; `crates/lisp/tests/suite.rs`, which raises the batch budget for the debug-build wrapper.
-;; The slicing machinery is kept because it is the right tool if a future case genuinely
-;; needs splitting — set this to 4 and add the other three slices as their own tests.
-(def nt--part1-of 1)
+;; Part1 runs in FULL by default (`*ucd-part1-of*` = 1) — every one of its ~16,000 cases.
+;;
+;; The one context that cannot afford that is `brood_suite_passes`, the DEBUG-build
+;; wrapper that runs this suite under cargo: a case costs roughly 30x its release price
+;; there, so the full sweep is ~670 s of work inside a 600 s nextest cap on the whole
+;; suite binary. `crates/lisp/tests/suite.rs` turns this knob down to 16 for that wrapper
+;; only, which is why it is `defdyn` rather than a plain `def`. Release stays exhaustive:
+;; `nest test` and `make suite` sweep all of Part1 in ~5 s.
+;;
+;; An earlier attempt at sampling was abandoned because it "measurably didn't" help — and
+;; it didn't, because the per-test cost was the 20,000-line WALK, not the cases (see
+;; `nt--case-line?`). With the walk collected once, the sample is what it was meant to be.
+;;
+;; `index mod n` sampling, so the slice is spread across the whole section rather than
+;; being a prefix, and it is deterministic. The slicing machinery is kept because it is
+;; the right tool if a future case genuinely needs splitting — pass a different `k`.
+(defdyn *ucd-part1-of* 1)
 
-(defn nt--part1-slice () (nt--scan-chunk "Part1" 0 nt--part1-of nt--lines nil 0 0 nil))
+;; Every `*ucd-part1-of*`-th case of the pre-collected Part1 list, from offset `k`.
+(defn nt--slice-scan (lines k n idx ran bad)
+  (if (nil? lines)
+    [ran (reverse bad)]
+    (if (= (rem idx n) k)
+      (let (w (nt--wrong (nt--case (first lines))))
+        (nt--slice-scan (rest lines) k n (inc idx) (inc ran) (if w (cons w bad) bad)))
+      (nt--slice-scan (rest lines) k n (inc idx) ran bad))))
+
+(defn nt--part1-slice () (nt--slice-scan nt--part1-cases 0 *ucd-part1-of* 0 0 nil))
 
 ;; ---- the suite ---------------------------------------------------------------
 
@@ -218,9 +265,10 @@
 
   (test "Part1 — character by character (the bulk)"
     (let ([ran bad] (nt--part1-slice))
-      ;; ~16,000 cases; asserted so a change that guts the coverage fails rather than
-      ;; reading as a pass.
-      (is (> ran 16000))
+      ;; Scaled to the sample so BOTH contexts assert real coverage: ~16,000 cases at the
+      ;; default, ~1,000 under the debug wrapper's 1-in-16. A sampling change that guts
+      ;; the coverage fails rather than reading as a pass.
+      (is (> ran (quot 16000 *ucd-part1-of*)))
       (assert= (take 3 bad) ())))
 
   (test "Part2 — canonical order"

@@ -34,33 +34,33 @@
     (let (g (json-parse (tmlanguage))
           m (get (get (get g :repository) :special-form) :match))
       ;; regex metacharacters in keywords are escaped (`match*` → `match\*`)
-      (is (string-contains? m "match\\*"))
+      (is (includes? m "match\\*"))
       ;; the word forms and the operator forms both made it in
-      (is (string-contains? m "when"))
-      (is (string-contains? m "->>"))
+      (is (includes? m "when"))
+      (is (includes? m "->>"))
       ;; def-heads are NOT in the keyword alternation (they're the :definition rule)
-      (is (not (string-contains? m "defn")))
+      (is (not (includes? m "defn")))
       (is (map? (get (get g :repository) :definition)))))
 
   (test "(tree-sitter-highlights) emits a highlight query with the keyword set as #any-of?"
     (let (q (tree-sitter-highlights))
       ;; the data-driven head rule lists the canonical keywords literally (no regex
       ;; escaping needed — #any-of? compares node text)
-      (is (string-contains? q "#any-of? @keyword.control"))
-      (is (string-contains? q "\"when\""))
+      (is (includes? q "#any-of? @keyword.control"))
+      (is (includes? q "\"when\""))
       ; the `*` is a plain literal here
-      (is (string-contains? q "\"match*\""))
-      (is (string-contains? q "\"->>\""))
+      (is (includes? q "\"match*\""))
+      (is (includes? q "\"->>\""))
       ;; static node→capture rules + the separate def-head rule
-      (is (string-contains? q "@punctuation.bracket"))
-      (is (string-contains? q "(#match? @keyword \"^def\"))"))
+      (is (includes? q "@punctuation.bracket"))
+      (is (includes? q "(#match? @keyword \"^def\"))"))
       ;; def-heads are matched by the ^def rule, not listed in the keyword set
-      (is (not (string-contains? q "\"defn\"")))))
+      (is (not (includes? q "\"defn\"")))))
 
   (test "(emacs-special-forms) emits the brood-special-forms defconst from the same set"
     (let (e (emacs-special-forms))
-      (is (string-contains? e "(defconst brood-special-forms"))
-      (is (string-contains? e "\"when\""))
-      (is (string-contains? e "\"->>\""))
+      (is (includes? e "(defconst brood-special-forms"))
+      (is (includes? e "\"when\""))
+      (is (includes? e "\"->>\""))
       ;; same source of truth — no def-heads
-      (is (not (string-contains? e "\"defn\""))))))
+      (is (not (includes? e "\"defn\""))))))

@@ -60,7 +60,7 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 
 ;; ---- parse ------------------------------------------------------------------
 ;;
-;; Each `json--X (s i n)` reads from char index `i` of source `s` (length `n`) and
+;; Each `json--X (s i n)` reads from char index `i` of source `s` (count `n`) and
 ;; returns `[value next-index]`. Whitespace is skipped between tokens. Tail
 ;; recursion + accumulators throughout; `error` on anything malformed.
 
@@ -350,7 +350,7 @@ on malformed input or trailing content. Pure."
 char (< 0x20). The common case is a clean ASCII string, so this one O(n) codepoint
 scan lets `json--enc-escapes` skip ~27 whole-string `replace` passes (backslash/quote/
 the named escapes + every C0 control) that would each find nothing."
-  (some? (fn (c) (or (< c 32) (= c 34) (= c 92))) (string->codepoints s)))
+  (any? (fn (c) (or (< c 32) (= c 34) (= c 92))) (string->codepoints s)))
 
 (defn json--enc-escapes (s)
   "Escape the JSON-special characters in `s` (backslash first)."

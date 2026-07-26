@@ -465,8 +465,8 @@ result — never raise a false positive. Zero new across `std/` + `tests/`.
 **All previously-deferred items shipped (ADR-011).**
 
 - ✅ **Expanded curated sigs** — shipped: predicate group (`number?`/`empty?`/`list?`/
-  `contains?`/`member?`/`some?`/`every?` → `bool`) and string-converter group
-  (`symbol->string`/`join`/`string-capitalize`/`string-split` → `string`/`list`).
+  `contains?`/`member?`/`any?`/`every?` → `bool`) and string-converter group
+  (`symbol->string`/`join`/`capitalize`/`string-split` → `string`/`list`).
   Catches `(+ 1 (number? x))`, `(+ 1 (join …))`, etc.
 - ✅ **Rest/variadic in `(sig …)` annotations** — shipped: `(sig f (int & number -> int))`
   wires `Sig::rest` and the `sig!` macro generates a rest-checking wrapper.
@@ -480,7 +480,7 @@ result — never raise a false positive. Zero new across `std/` + `tests/`.
   via `every?` (one line); `parse_type` in `annot.rs` produces `Ty::intersect` for
   the static checker. See [`docs/type-intersections.md`](type-intersections.md).
 - ✅ **Map key/value types** `(map K V)` — fully shipped: `type-matches?` walks
-  `entries` for runtime contracts; `Ty::map_of` carries `map_kv` refinement in
+  `map-pairs` for runtime contracts; `Ty::map_of` carries `map_kv` refinement in
   the checker; `get`/`keys`/`vals`/`assoc` derive precise result types.
   See [`docs/type-map-kv.md`](type-map-kv.md).
 - ✅ **Type variables** `?A` — fully shipped: grammar (`parse_type`), runtime

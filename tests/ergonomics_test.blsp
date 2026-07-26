@@ -1,0 +1,82 @@
+;; Tests for the ergonomic prelude additions: string interpolation (`fmt`),
+;; local `loop`/`recur`, binding-conditionals (`if-let`/`when-let`), conditional
+;; and short-circuit threading (`cond->`/`some->`), `doto`, and `run!`.
+(defmodule ergonomics-test (:use test))
+
+(describe "fmt — string interpolation"
+  (test "splices expression values between literal text"
+    (let (a 3 b 4)
+      (assert= "sum=7 a=3" (fmt "sum={(+ a b)} a={a}"))))
+  (test "no holes is the literal string"
+    (assert= "plain text" (fmt "plain text")))
+  (test "doubled braces are literal braces"
+    (assert= "a {brace} b" (fmt "a {{brace}} b")))
+  (test "braces nest inside a hole (a map literal)"
+    (assert= "m={:a 1}" (fmt "m={ {:a 1} }")))
+  (test "adjacent holes"
+    (let (x 1 y 2) (assert= "12" (fmt "{x}{y}"))))
+  (test "composes with error"
+    (assert-error (throw (fmt "bad value: {(+ 1 2)}")))))
+
+(describe "loop / recur — local tail loop"
+  (test "sums with an accumulator in O(1) stack"
+    (assert= 500500 (loop (i 1 acc 0) (if (> i 1000) acc (recur (inc i) (+ acc i))))))
+  (test "builds a list and returns it"
+    (assert= [0 1 4 9] (into [] (loop (i 0 acc nil)
+                                  (if (= i 4) (reverse acc) (recur (inc i) (cons (* i i) acc)))))))
+  (test "deep tail loop does not overflow the stack"
+    (assert= 200000 (loop (n 200000 acc 0) (if (= n 0) acc (recur (dec n) (inc acc))))))
+  (test "nested loop keeps its own recur"
+    (assert= 9 (loop (i 0 total 0)
+                 (if (= i 3)
+                   total
+                   (recur (inc i)
+                     (loop (j 0 sub total) (if (= j 3) sub (recur (inc j) (inc sub))))))))))
+
+(describe "if-let / when-let"
+  (test "if-let binds and takes the then branch on a truthy value"
+    (assert= 11 (if-let (v (get {:x 10} :x)) (inc v) :none)))
+  (test "if-let takes the else branch on nil"
+    (assert= :none (if-let (v (get {:x 10} :y)) (inc v) :none)))
+  (test "if-let with no else yields nil when absent"
+    (assert= nil (if-let (v (get {} :y)) v)))
+  (test "when-let runs the body only when present"
+    (assert= 20 (when-let (v (get {:x 20} :x)) v))
+    (assert= nil (when-let (v (get {:x 20} :y)) v)))
+  (test "destructuring target tests the source value, not the pattern"
+    (assert= 3 (if-let ([a b] [1 2]) (+ a b) :none))
+    (assert= :none (if-let ([a b] nil) (+ a b) :none))))
+
+(describe "some-> / some->>"
+  (test "some-> threads as first arg and short-circuits on nil"
+    (assert= 6 (some-> {:a {:b 5}} (get :a) (get :b) inc))
+    (assert= nil (some-> {:a {:b 5}} (get :nope) (get :b) inc)))
+  (test "some->> threads as last arg"
+    (assert= [2 4] (some->> [1 2 3 4] (map inc) (filter even?) (into [])))))
+
+(describe "cond-> / cond->>"
+  (test "cond-> applies a step only when its guard is truthy"
+    (assert= {:a 1} (cond-> {} true (assoc :a 1) false (assoc :b 2)))
+    (assert= {:a 1 :b 2} (cond-> {} true (assoc :a 1) true (assoc :b 2))))
+  (test "leaves the value untouched when all guards are false"
+    (assert= 5 (cond-> 5 false inc false dec))))
+
+(describe "doto"
+  (test "runs side-effecting forms and returns the original value"
+    (let (t (table))
+      (assert= t (doto t (table-put :a 1) (table-put :b 2)))
+      (assert= 1 (table-get t :a))
+      (assert= 2 (table-get t :b)))))
+
+(describe "run!"
+  (test "applies a fn for effect and returns nil"
+    (let (t (table))
+      (assert= nil (run! (fn (x) (table-put t x true)) [:a :b :c]))
+      (assert= true (table-get t :b)))))
+
+;; ---- cross-process: the new forms survive send/spawn like any Brood code ----
+(describe "ergonomics across processes" :isolated
+  (test "a closure using fmt/loop deep-copies across a send and runs on the receiver"
+    (let (me (self))
+      (spawn (send me [:result (loop (i 0 acc "") (if (= i 3) acc (recur (inc i) (fmt "{acc}{i}"))))]))
+      (assert= "012" (receive ([:result r] r))))))

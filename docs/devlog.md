@@ -8462,3 +8462,52 @@ theirs, and Part1 runs in full again rather than sampled.
 Thirty-two `.blsp` files arrived unformatted; formatting `conformance_ucd_test.blsp`
 reflowed 97 lines around my 45, so I reverted that and kept the edit alone — the
 unformatted files are the author's to sweep.
+
+## 2026-07-26 — ergonomics & conciseness pass (ADR-154): add the sugar, cut the surface
+
+A whole-language review for conciseness/ergonomics. The core came out clean — the
+friction was all in the library/macro surface, so every change here is a pure prelude
+macro or a rename, no evaluator change. Two gaps dominated the evidence: **492 `(str …)`
++ 151 `(error "…" x)` sites** (no interpolation), and **83 top-level `--acc`/`--loop`
+helpers** (~4% of `std/`) that exist only to be a hand-written tail loop.
+
+**Added (all pure macros, zero core cost):**
+- **`fmt`** — `(fmt "x={x} sum={(+ a b)}")`, parsed at expand time into a plain
+  `(str …)`. `{{`/`}}` literal braces; braces nest in a hole. Not a reader sigil
+  (`#"…"`/`#b`/`#{` are taken and a macro is the ADR-006 way).
+- **`loop`/`recur`** — the local tail loop ADR-026 reserved "for if ergonomics demand
+  it"; the 83 helpers are that demand. Expands to a `letrec` closure (tail self-call ⇒
+  O(1) stack), `recur` rewritten by a macro-time code-walk that skips nested `loop`/
+  `quote`. Cost: `loop`/`recur` are no longer usable as identifiers — ~7 internal sites
+  renamed to `go` or converted to the macro (scaffold `tui-loop` template + font-zoom
+  example now showcase it).
+- **`if-let`/`when-let`** (test the source value via a temp, so destructuring targets
+  work), **`some->`/`some->>`/`cond->`/`cond->>`/`doto`**, **`run!`**.
+
+**Cut (one spelling each, no users so free):** `string-contains?`→`includes?` (306
+sites; superset merge), `string-index-of`→`index-of &optional from`,
+`string-last-index-of`→`last-index-of`, `string-capitalize`→`capitalize`,
+`string-upcase`/`downcase`→`upper`/`lower`, `flat-map`→`mapcat`, `length`→`count`,
+`entries`→`map-pairs`, `read-file`/`write-file`/`append-file`→`slurp`/`spit`/
+`spit-append`, `path-exists?`→`file-exists?`, `working-dir`→`cwd`, `host`→`hostname`,
+`some?`→`any?` (frees the Clojure-surprising name), and the deprecated `:refer` marker
+(→ `:only` only). Reverses ADR-153's deliberate keep of `car`/`cdr`.
+
+**Kept on purpose:** `multimap-`'s prefix (dropping it breaks *internal* resolution —
+a bare `get` inside namespace `multimap` would resolve to `multimap/get`, not the
+prelude) and `set/conj` (shadows only under `(:use set)`, the Clojure `clojure.set`
+contract, not a defter).
+
+### The one trap the mechanical rename hit
+
+Renaming call sites of common-word names (`entries`, `host`, `length`, `car`, `cdr`)
+with a *head-position* regex (`(?<=\()NAME`) also matched **let-binding and single-param
+positions** — `(let (entries …))` and `(defn f (entries) …)` both put the name right
+after `(`. So three single-param functions (`package--lockfile-content`,
+`package--index-by-name`, `coverage--line-index`) had their `entries` param silently
+renamed to `map-pairs` while the body kept using `entries` → runtime `unbound symbol`.
+`nest check` *missed* two of them (the `map-pairs` param shadows the global, confusing
+the checker), so the in-language suite — not the checker — is what caught them. Lesson:
+a symbol rename by regex is unsafe for names that double as locals; the real fix is an
+AST-aware rename, and the suite is the backstop. All fixed; `nest check` clean, suites
+green. Full coverage in `tests/ergonomics_test.blsp`.
