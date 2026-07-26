@@ -57,7 +57,7 @@ the existing `or` arm:
 
 ```lisp
 ;; current:
-(%eq h 'or) (some? (fn (s) (type-matches? s v)) (rest t))
+(%eq h 'or) (any? (fn (s) (type-matches? s v)) (rest t))
 
 ;; add:
 (%eq h 'and) (every? (fn (s) (type-matches? s v)) (rest t))

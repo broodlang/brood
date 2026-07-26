@@ -34,14 +34,14 @@
   (test "reductions alias"
     (assert= (scan + 0 '(1 2 3)) (scan + 0 '(1 2 3)))))
 
-(describe "flat-map"
+(describe "mapcat"
   (test "basic mapcat"
-    (assert= '(1 2 2 4 3 6) (flat-map (fn (x) (list x (* x 2))) '(1 2 3))))
+    (assert= '(1 2 2 4 3 6) (mapcat (fn (x) (list x (* x 2))) '(1 2 3))))
   (test "empty"
-    (assert= nil (flat-map (fn (x) (list x)) nil)))
+    (assert= nil (mapcat (fn (x) (list x)) nil)))
   (test "same as mapcat"
     (assert= (mapcat (fn (x) (list x x)) '(1 2 3))
-      (flat-map (fn (x) (list x x)) '(1 2 3)))))
+      (mapcat (fn (x) (list x x)) '(1 2 3)))))
 
 (describe "zip-with"
   (test "addition of pairs"

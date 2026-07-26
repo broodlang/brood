@@ -612,8 +612,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // Linear substring search — like `substring`/`lower`, it genuinely needs Rust:
     // Brood has no O(1) char access (char indexing into UTF-8 is O(index)), so a
     // pure-Brood scan re-skips and is unavoidably O(n²) — which made `doc-search`'s
-    // whole-namespace scan tens of seconds. `index-of` / `string-contains?` /
-    // `includes?` (std/prelude.blsp) ride on this; it's the search counterpart of
+    // whole-namespace scan tens of seconds. `index-of` / `includes?`
+    // (std/prelude.blsp) ride on this; it's the search counterpart of
     // the `substring` slice primitive.
     def(
         heap,

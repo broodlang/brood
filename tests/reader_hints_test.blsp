@@ -22,27 +22,27 @@
   (test "#(…) anonymous-fn reader macro → parse error naming (fn …)"
     (let (e (try (read-string "#(+ 1 %)") (catch e e)))
       (assert= (get e :kind) :parse)
-      (is (string-contains? (get e :hint) "(fn (x)"))))
+      (is (includes? (get e :hint) "(fn (x)"))))
   (test "#' var-quote → parse error naming plain quote"
     (let (e (try (read-string "#'foo") (catch e e)))
       (assert= (get e :kind) :parse)
-      (is (string-contains? (get e :hint) "'foo"))))
+      (is (includes? (get e :hint) "'foo"))))
   (test "#_ discard reader macro → parse error naming the ; comment idiom"
     (let (e (try (read-string "#_(skip me)") (catch e e)))
       (assert= (get e :kind) :parse)
-      (is (string-contains? (get e :hint) ";"))))
+      (is (includes? (get e :hint) ";"))))
   (test "#\"…\" regex literal → parse error naming (require 'regex)"
     (let (e (try (read-string "#\"[0-9]+\"") (catch e e)))
       (assert= (get e :kind) :parse)
-      (is (string-contains? (get e :hint) "regex"))))
+      (is (includes? (get e :hint) "regex"))))
   (test "\\c character literal → parse error naming the 1-char string idiom"
     (let (e (try (read-string "\\c") (catch e e)))
       (assert= (get e :kind) :parse)
-      (is (string-contains? (get e :hint) "1-char string")))
+      (is (includes? (get e :hint) "1-char string")))
     ;; a named char (\newline) hints the same way
     (let (e (try (read-string "\\newline") (catch e e)))
       (assert= (get e :kind) :parse)
-      (is (string-contains? (get e :hint) "int->char"))))
+      (is (includes? (get e :hint) "int->char"))))
   (test "the legitimate # forms still read (no false positive)"
     ; bytes literal
     (is (bytes? (read-string "#b\"hi\"")))
@@ -50,22 +50,22 @@
 (describe "let/letrec: Scheme/Clojure nested bindings get a hint"
   (test "(let ((a 1)) …) → hint to flatten the bindings"
     (let (h (hint-of "(let ((a 1)) a)"))
-      (is (string-contains? h "FLAT"))
-      (is (string-contains? h "(let (a 1 b 2)"))))
+      (is (includes? h "FLAT"))
+      (is (includes? h "(let (a 1 b 2)"))))
   (test "(letrec ((f ...)) …) → the letrec-flavoured hint"
     (let (h (hint-of "(letrec ((f (fn () 1))) (f))"))
-      (is (string-contains? h "(letrec (a 1 b 2)"))))
+      (is (includes? h "(letrec (a 1 b 2)"))))
   (test "(let ((a 1) (b 2)) …) — the even-length nested form — also hints"
     ;; The common case: an EVEN number of nested pairs. Without the compile-pass
     ;; guard this lowered to a refutable match on `(b 2)` and died with a
     ;; confusing "unbound symbol: b" instead of the flatten hint.
     (let (h (hint-of "(let ((a 1) (b 2)) (+ a b))"))
-      (is (string-contains? h "FLAT")))
+      (is (includes? h "FLAT")))
     ;; more than two pairs, and non-numeric literal values, hint too
-    (is (string-contains? (hint-of "(let ((a 1) (b 2) (c 3) (d 4)) a)") "FLAT"))
-    (is (string-contains? (hint-of "(let ((name \"bob\") (k :x)) name)") "FLAT")))
+    (is (includes? (hint-of "(let ((a 1) (b 2) (c 3) (d 4)) a)") "FLAT"))
+    (is (includes? (hint-of "(let ((name \"bob\") (k :x)) name)") "FLAT")))
   (test "(letrec ((f …) (g …)) …) — even, function-valued — hints"
-    (is (string-contains? (hint-of "(letrec ((f (fn () 1)) (g (fn () 2))) (f))") "FLAT")))
+    (is (includes? (hint-of "(letrec ((f (fn () 1)) (g (fn () 2))) (f))") "FLAT")))
   (test "a genuinely-flat let with an odd count has no false Scheme hint"
     ;; (let (a) …) is odd but NOT the nested-pair shape, so no misleading hint.
     (is (nil? (hint-of "(let (a) a)"))))
@@ -81,7 +81,7 @@
     ;; Clojure spellings *reinterpret* rather than fail — `(let [[a 1] [b 2]] …)`
     ;; destructured `[a 1]` against `[b 2]` and reported `unbound symbol: b`.
     (assert-error (eval (read-string "(let [a 1 b 2] (+ a b))")))
-    (is (string-contains? (hint-of "(let [a 1 b 2] (+ a b))") "lists-for-code"))
-    (is (string-contains? (hint-of "(let [[a 1] [b 2]] (+ a b))") "lists-for-code"))
+    (is (includes? (hint-of "(let [a 1 b 2] (+ a b))") "lists-for-code"))
+    (is (includes? (hint-of "(let [[a 1] [b 2]] (+ a b))") "lists-for-code"))
     ;; a vector *inside* a binding position is still destructuring
     (is (= (eval (read-string "(let ([a b] [1 2]) (+ a b))")) 3))))

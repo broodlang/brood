@@ -12,7 +12,7 @@
 ;; A fresh, created /tmp dir per call. `temp-dir` names it with `random-token`
 ;; (unique across processes *and* runs) — a bare gensym name recurs across runs,
 ;; and a killed run's leftovers then poison the next (list-files sees extras,
-;; append-file appends to stale content). See std/test.blsp.
+;; spit-append appends to stale content). See std/test.blsp.
 (defn ftmp ()
   (let (d (temp-dir "brood-file-"))
     (make-dir d)
@@ -20,16 +20,16 @@
 
 ; all distinct — none clobbered
 (describe "file: whole-file read/write/append"
-  (test "write-file then read-file round-trips"
+  (test "spit then slurp round-trips"
     (let (p (path-join (ftmp) "a.txt"))
-      (write-file p "hello")
-      (assert= (read-file p) "hello")))
-  (test "append-file adds to existing content (and creates if absent)"
+      (spit p "hello")
+      (assert= (slurp p) "hello")))
+  (test "spit-append adds to existing content (and creates if absent)"
     (let (p (path-join (ftmp) "b.txt"))
-      (append-file p "one")
-      (append-file p "two")
-      (assert= (read-file p) "onetwo")))
-  (test "spit-append is the atomic primitive append-file aliases"
+      (spit-append p "one")
+      (spit-append p "two")
+      (assert= (slurp p) "onetwo")))
+  (test "spit-append is the atomic primitive spit-append aliases"
     (let (p (path-join (ftmp) "c.txt"))
       ; creates when absent
       (spit-append p "x")
@@ -58,14 +58,14 @@
 (describe "file: size / delete / rename"
   (test "file-size reports byte length, nil when missing"
     (let (p (path-join (ftmp) "s.txt"))
-      (write-file p "12345")
+      (spit p "12345")
       (assert= (file-size p) 5)
       (assert= (file-size (path-join (ftmp) "nope.txt")) nil)))
   ; missing → nil
   (test "file-stat reports size/dir?/symlink? in one map, nil when missing"
     (let (d (ftmp)
           f (path-join d "stat.txt")
-          _ (write-file f "12345")
+          _ (spit f "12345")
           sf (file-stat f)
           sd (file-stat d))
       (assert= (get sf :size) 5)
@@ -87,24 +87,24 @@
   ; no-op when already gone
   (test "delete-file removes a file and is idempotent"
     (let (p (path-join (ftmp) "d.txt"))
-      (write-file p "x")
+      (spit p "x")
       (is (file? p))
       (delete-file p)
-      (refute (path-exists? p))
+      (refute (file-exists? p))
       (assert= (delete-file p) nil)))
   (test "rename-file moves content to a new path"
     (let (d (ftmp) a (path-join d "a.txt") b (path-join d "b.txt"))
-      (write-file a "moved")
+      (spit a "moved")
       (rename-file a b)
-      (refute (path-exists? a))
-      (assert= (read-file b) "moved")))
+      (refute (file-exists? a))
+      (assert= (slurp b) "moved")))
   (test "copy-file duplicates content, leaving the original"
     (let (d (ftmp) a (path-join d "src.txt") b (path-join d "dst.txt"))
-      (write-file a "copied")
+      (spit a "copied")
       (copy-file a b)
       ; original still there
-      (assert= (read-file a) "copied")
-      (assert= (read-file b) "copied"))))
+      (assert= (slurp a) "copied")
+      (assert= (slurp b) "copied"))))
 
 (describe "file: line I/O"
   (test "write-lines / read-lines round-trip without a trailing blank line"
@@ -113,36 +113,36 @@
       (assert= (read-lines p) (list "alpha" "beta" "gamma"))))
   (test "read-lines of an empty file is nil"
     (let (p (path-join (ftmp) "empty.txt"))
-      (write-file p "")
+      (spit p "")
       (assert= (read-lines p) nil))))
 
 (describe "file: predicates"
   (test "file? is true for a regular file, false for a directory"
     (let (d (ftmp) p (path-join d "f.txt"))
-      (write-file p "x")
+      (spit p "x")
       (is (file? p))
       (refute (file? d))
       (is (dir? d))))
-  (test "path-exists? covers files and directories"
+  (test "file-exists? covers files and directories"
     (let (d (ftmp) p (path-join d "f.txt"))
-      (write-file p "x")
-      (is (path-exists? p))
-      (is (path-exists? d))
-      (refute (path-exists? (path-join d "nope.txt"))))))
+      (spit p "x")
+      (is (file-exists? p))
+      (is (file-exists? d))
+      (refute (file-exists? (path-join d "nope.txt"))))))
 
 (describe "file: directory listing"
   (test "list-files and list-dirs separate files from subdirectories"
     (let (d (ftmp))
-      (write-file (path-join d "f1.txt") "a")
-      (write-file (path-join d "f2.txt") "b")
+      (spit (path-join d "f1.txt") "a")
+      (spit (path-join d "f2.txt") "b")
       (make-dir (path-join d "sub"))
       (assert= (sort (list-files d)) (list "f1.txt" "f2.txt"))
       (assert= (list-dirs d) (list "sub"))))
   (test "walk-files collects files recursively as full paths"
     (let (d (ftmp))
-      (write-file (path-join d "top.txt") "a")
+      (spit (path-join d "top.txt") "a")
       (make-dir (path-join d "sub"))
-      (write-file (path-join (path-join d "sub") "deep.txt") "b")
+      (spit (path-join (path-join d "sub") "deep.txt") "b")
       (assert= (sort (walk-files d))
         (sort (list (path-join d "top.txt") (path-join (path-join d "sub") "deep.txt")))))))
 

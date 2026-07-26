@@ -126,7 +126,7 @@
       (list true false true)))
   ;; Tail-recursive locals stay O(1) — letrec doesn't break TCO.
   (test "tail-recursive local is stack-safe"
-    (assert= (letrec (loop (fn (i acc) (if (= i 0) acc (loop (- i 1) (+ acc 1))))) (loop 10000 0))
+    (assert= (letrec (go (fn (i acc) (if (= i 0) acc (go (- i 1) (+ acc 1))))) (go 10000 0))
       10000)))
 
 (describe "parameter forms"

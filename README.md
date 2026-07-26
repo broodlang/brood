@@ -264,8 +264,9 @@ diverge, and the differences are deliberate:
 - **Concurrency is share-nothing processes + message passing**, not shared memory.
   There are **no atoms, refs, agents, STM, or transients** — no mutable reference
   cell of any kind. State lives in a process, or in a shared `Table`.
-- **The loop is recursion with proper tail calls** (Scheme-style). There is no
-  `loop`/`recur`, no `while`, and no `set!`.
+- **The loop is recursion with proper tail calls** (Scheme-style). `loop`/`recur`
+  is a local, stack-safe tail loop (a `letrec`-backed macro, not a special form);
+  there is no `while` and no `set!`.
 - **Code is lists, data is vectors.** Parameter lists are written `(x y)`, not
   `[x y]` — the opposite emphasis from Clojure.
 - **`def` is late-binding global rebinding** — that *is* live hot reload
@@ -301,8 +302,8 @@ thin client for a daemon).
 What remains is incremental, each item gated on a concrete need (ADR-011): the
 Tier-2 runtime-parity gaps (a cluster **registry**, mailbox **backpressure**,
 the **observability** stream, `gen_statem`/`Application` behaviours), Tier-3
-ergonomics (grapheme-correct strings, protocols/multimethods, string
-interpolation, `&key` args), full **server/daemon** socket serving, and the
+ergonomics (grapheme-correct strings, protocols/multimethods, `&key` args), full
+**server/daemon** socket serving, and the
 sandboxed **WASM component** extension host (ADR-145). The editor application
 itself is a separate downstream project, out of scope for this repo.
 

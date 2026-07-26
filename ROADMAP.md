@@ -288,7 +288,11 @@ the remote tier, `nest observe`/`nest mcp` consuming the stream — "Telemetry" 
 (codepoint-vs-grapheme indexing is a real divergence vs Elixir's `String`;
 `unicode-segmentation` is already a dep, wired only to display-width);
 **protocols/multimethods** (replace hand-written `type-of` cascades);
-**string interpolation**; **`&key` args** (designed — ADR-011); the dist
+**`&key` args** (designed — ADR-011); ⬜ **lexically-shadowable operators**
+("Option C" — resolve operator position against local scope first, so a macro
+name like `loop`/`for` stops being a reserved word; decision **deferred**, kept as
+reserved words for now, full spec + gotchas + hygiene notes in
+[deferred.md #7](docs/deferred.md)); the dist
 **`terminate/2` hook** + **FQDN long names** (dist refinements below). (The
 parked-`receive` mailbox-slot leak that used to sit here was fixed
 2026-07-23 — survey housekeeping above.)
@@ -944,7 +948,7 @@ Runtime housekeeping (both items landed):
   unspellable types, `sig!` couldn't expand early in the prelude, and
   `BROOD_CONTRACTS=1` turned a declaration into a rebinding — twice). Redundant
   aliases (`concat`, `intersperse`, `reductions`, `all-globals`) and `cond`'s
-  `:else` special case are gone; `car`/`cdr`/`lambda` kept. ⬜ Still open: whether
+  `:else` special case are gone; `lambda` kept, `car`/`cdr` removed (ADR-154). ⬜ Still open: whether
   `BROOD_CONTRACTS=1` should stop rewriting `sig` into `sig!` (it is why three of
   those four defects existed, and it blocks annotating the prelude at all), and
   `defrecord`'s 5-uses-all-in-the-prelude adoption question.

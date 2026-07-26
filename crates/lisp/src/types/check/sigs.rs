@@ -156,21 +156,21 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
         Sig::new(vec![Ty::of_tags(&[Tag::Map, Tag::Set]), any], bool_ty),
     );
     put("member?", Sig::new(vec![any, seq], bool_ty));
-    // some?/every?: both take a 1-ary callback and a sequence, return bool.
+    // any?/every?: both take a 1-ary callback and a sequence, return bool.
     // Curated because the body is a cond-recursive closure; infer_sig bails.
-    for n in ["some?", "every?"] {
+    for n in ["any?", "every?"] {
         put(n, Sig::new(vec![cb1.clone(), seq], bool_ty));
     }
     // String operations: branchy or `apply`-based bodies; infer_sig bails.
     //   symbol->string — branches on (symbol? s), returns (name s) which is string.
     //                    Domain is `symbol` so (symbol->string "x") is catchable.
     //   join           — complex if/apply body; always returns a string.
-    //   string-capitalize — if-branches, both arms produce strings.
+    //   capitalize     — if-branches, both arms produce strings.
     //   string-split   — accumulator recursion; returns a list of strings
     //                    (unrefined list — list<string> would warn on (first …) = nil).
     put("symbol->string", Sig::new(vec![sym_ty], str_ty));
     put("join", Sig::new(vec![any, seq], str_ty));
-    put("string-capitalize", Sig::new(vec![str_ty], str_ty));
+    put("capitalize", Sig::new(vec![str_ty], str_ty));
     put("string-split", Sig::new(vec![str_ty, str_ty], Ty::LIST));
     // Equality: `=`/`not=` are multi-arm closures; infer_sig bails on multi-arm.
     // Pin the bool result so `(+ 1 (= x y))` is caught.
@@ -188,13 +188,9 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     for n in ["starts-with?", "ends-with?"] {
         put(n, Sig::new(vec![str_ty, str_ty], bool_ty));
     }
-    //   string-contains? — `(>= (index-of s needle) 0)`; `index-of` treats a nil
-    //   haystack as the empty string (→ false), so arg 1 is `string | nil`, not a
-    //   plain `string` (a documented graceful-nil contract, see chaos_test).
-    put(
-        "string-contains?",
-        Sig::new(vec![str_ty.union(nil_ty), str_ty], bool_ty),
-    );
+    //   includes? — polymorphic membership `(>= (index-of coll x) 0)` over
+    //   list/vector/string (substring) and map (values); both args stay `any`.
+    put("includes?", Sig::new(vec![any, any], bool_ty));
     put("blank?", Sig::new(vec![str_ty], bool_ty));
     // String transforms: all call recursive helpers or use `apply`; infer_sig bails.
     //   trim/triml/trimr   — call tail-recursive aux helpers.
@@ -222,12 +218,12 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // format: variadic with a required string template arg and a string result.
     put("format", Sig::with_rest(vec![str_ty], any, str_ty));
     // Search → int: all have branchy/recursive/optional-param bodies.
-    //   index-of      — multi-clause cond over collection type.
+    //   index-of      — multi-clause cond over collection type; &optional from.
     //   index-where   — tail-recursive helper; 1-ary predicate.
-    //   string-index-of — &optional from param; infer_sig bails.
+    //   last-index-of — &optional before param; infer_sig bails.
     put("index-of", Sig::new(vec![any, any], int));
     put("index-where", Sig::new(vec![cb1, seq], int));
-    put("string-index-of", Sig::new(vec![str_ty, str_ty], int));
+    put("last-index-of", Sig::new(vec![str_ty, str_ty], int));
     m
 });
 

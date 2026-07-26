@@ -9428,3 +9428,90 @@ case (a symbol would otherwise be an unbound reference), a keyword never did, an
 `(cond … :else x)` still catches for the same reason `(cond … 42 x)` does. Kept
 deliberately, on the author's call: **`car`/`cdr`** (Lisp lineage a reader expects)
 and **`lambda`** (a second spelling of the `fn` special form).
+
+## ADR-154 — Ergonomics & conciseness pass: add the missing sugar, cut the redundant surface
+
+**Context.** A review (2026-07-26) of the whole language for conciseness and
+ergonomics found the *core* already terse and coherent — the friction was all one
+layer up, in the library/macro surface, where fixes are cheap (pure macros and
+renames, no evaluator change). Two gaps dominated, quantified across `std/`:
+- **String-building ceremony** — 492 `(str …)` and 151 `(error "…" x)` sites, no
+  interpolation. The house error convention *is* quote-chopped concatenation.
+- **The manual-loop tax** — 83 top-level `--acc`/`--loop`/`--at`/`--walk` helpers
+  (~4% of all `std/` functions) that exist only to be a hand-written tail loop,
+  each threading state through a separate top-level name far from its call site.
+
+The review also found redundant surface (two names for one thing) and a
+Clojure-surprising `some?`. Since Brood has **no external users** (and won't for
+months), the renames are free — the deciding factor for the trims below.
+
+**Decision — add the sugar (all pure prelude macros; zero core/runtime cost).**
+- **`fmt`** — string interpolation: `(fmt "x={x} sum={(+ a b)}")`. The template is
+  parsed at macro-expansion time and lowered to a plain `(str chunk expr …)`, so it
+  is *exactly* the hand-written `str` call minus the quote-chopping — no runtime
+  machinery, no new reader syntax, nothing to migrate. `{{`/`}}` are literal braces;
+  braces nest inside a hole. Chosen over a reader sigil because `#"…"` is already the
+  (rejected) Clojure-regex form and `#b"…"`/`#{…}` are taken — and because "policy in
+  Brood, mechanism in Rust" (ADR-006) prefers a macro to a permanent surface commitment.
+- **`loop`/`recur`** — the local tail loop ADR-026 reserved "for if ergonomics
+  demand it." The 83 helpers *are* that demand. `(loop (a init …) body…)` binds a
+  local recursion point; `(recur …)` re-enters it. It expands to a `letrec`-bound
+  closure whose self-call is a proper tail call, so it is O(1) stack exactly like the
+  hand-written accumulator loop — but stays *inline* instead of leaking a helper into
+  the namespace. `recur` is rewritten by a macro-time code-walk that does not descend
+  into a nested `loop` or a `quote`. Cost accepted: `loop`/`recur` are no longer usable
+  as ordinary identifiers (the Clojure tradeoff); ~7 internal sites that used `loop` as
+  a local name were renamed to `go` or converted to the macro (scaffold + font-zoom
+  example now showcase it). The Lisp-1 reserved-word question this raises — and the
+  alternative of making operators *lexically shadowable* (so `loop` need not be
+  reserved), plus why Lisp-2 was rejected — was discussed and **deferred**, keeping
+  reserved words for now; the full spec, gotchas, and hygiene analysis are recorded
+  in [deferred.md #7](deferred.md).
+- **`if-let` / `when-let`** — bind, test the *source* value (a fresh temp, so a
+  destructuring target behaves), branch. The AI-facing docs already *claimed* these
+  existed; now they do.
+- **`some->` / `some->>` / `cond->` / `cond->>` / `doto`** — the conditional and
+  short-circuit threading macros, built on the existing `thread-first/last-step`
+  placement helpers so "where the value goes" is defined once.
+- **`run!`** — the function-valued counterpart of `doseq` (`(run! println xs)`).
+
+**Decision — cut the redundant surface (one spelling each).** Merges/removals,
+call sites migrated: `string-contains?`→`includes?` (306 sites; `includes?` is the
+polymorphic superset, so this is a semantics-preserving mechanical merge),
+`string-index-of`→`index-of` (which gained an `&optional from`),
+`string-last-index-of`→`last-index-of`, `string-capitalize`→`capitalize`,
+`string-upcase`→`upper`, `string-downcase`→`lower`, `flat-map`→`mapcat`,
+`length`→`count`, `entries`→`map-pairs`, `read-file`/`write-file`/`append-file`→
+`slurp`/`spit`/`spit-append`, `path-exists?`→`file-exists?`, `working-dir`→`cwd`,
+`host`→`hostname`. **`some?`→`any?`** (it means "any element matches a predicate",
+which every Lisper misreads as Clojure's non-nil test — freeing the name removes a
+silent-wrong-program landmine; `some?` is now unbound, so misuse errors loudly).
+The deprecated **`:refer`** import marker is gone — `:only` is the sole filter, and
+any other marker is a clean error (ADR-152).
+
+- **String naming is now consistent by policy:** a `string-` prefix survives *only*
+  where the bare name would collide with another meaning (`string-repeat` vs the
+  list `repeat`) or is a kernel primitive (`string-length`, `string-split`);
+  everything else is bare.
+- **Reverses part of ADR-153**, which kept `car`/`cdr` "on the author's call" as
+  Lisp lineage. This session's explicit directive — simplify aggressively, there are
+  no users — supersedes that: `car`/`cdr` are gone (use `first`/`rest`).
+- **Deliberately *not* changed:** `multimap`'s `multimap-` prefix and `set/conj`
+  are **kept**. Dropping the multimap prefix would break the module *internally* —
+  inside namespace `multimap` a bare `get`/`assoc` resolves to `multimap/get`
+  (current-namespace-wins), not the prelude, so the prefix is load-bearing, not
+  stutter for its own sake. `set/conj` shadows the prelude `conj` only under
+  `(:use set)`, exactly like Clojure's `clojure.set` — a namespaced collection lib
+  intentionally provides names meant to shadow when used; that is the `:use` contract,
+  not a defect.
+
+**Consequences.**
+- Purely additive at the core: no new special form, no `Value` kind, no evaluator
+  change; the 8 special forms are untouched and immutability is unaffected.
+- The checker's curated signatures (`types/check/sigs.rs`) were re-keyed to the new
+  names; the `loop`/`recur` "Brood has no loop/recur" evaluator hint became a
+  "`recur` is only valid inside a `loop`" hint.
+- `nest check` stays at zero warnings across `std/` + `tests/`; the in-language
+  suite and the Rust checker tests are green. New coverage in
+  `tests/ergonomics_test.blsp` (fmt, loop/recur, if-let/when-let, some->/cond->,
+  doto, run!, incl. a cross-process send of a closure that uses fmt/loop).

@@ -31,19 +31,19 @@
 (describe "http: response rendering"
   (test "status line, Content-Length, and body (render-response is an iolist — ADR-139)"
     (let (s (utf8-bytes->string (bytes-concat (render-response (ok "<p>hi</p>")))))
-      (is (string-contains? s "HTTP/1.0 200 OK"))
-      (is (string-contains? s "Content-Length: 9"))
-      (is (string-contains? s "\r\n\r\n<p>hi</p>"))))
+      (is (includes? s "HTTP/1.0 200 OK"))
+      (is (includes? s "Content-Length: 9"))
+      (is (includes? s "\r\n\r\n<p>hi</p>"))))
   (test "Content-Length is the body's BYTE count, not codepoints (the UTF-8 bug)"
     ;; "héllo ☃" = 7 codepoints, 10 UTF-8 bytes — the old string-length render
     ;; said 7 and spec-honoring clients truncated the body.
     (let (s (utf8-bytes->string (bytes-concat (render-response (text-response "héllo ☃"))))
           b (bytes-concat (render-response {:status 200 :body (bytes 1 2 3)})))
-      (is (string-contains? s "Content-Length: 10"))
+      (is (includes? s "Content-Length: 10"))
       ;; a binary bytes body rides the plain-response path verbatim
       (is (= (match b ((bytes _ & r) (subbytes b (- (count b) 3))) (_ :no)) (bytes 1 2 3)))))
   (test "not-found renders a 404"
-    (is (string-contains? (utf8-bytes->string (bytes-concat (render-response (not-found))))
+    (is (includes? (utf8-bytes->string (bytes-concat (render-response (not-found))))
           "404 Not Found"))))
 
 (describe "http: content-length parsing is integer-safe"
@@ -84,10 +84,10 @@
 (describe "http: streaming responses (the connection-handoff seam)"
   (test "render-head emits the status line + custom headers, no Content-Length"
     (let (h (utf8-bytes->string (bytes-concat (render-head 200 {"Content-Type" "text/event-stream"}))))
-      (is (string-contains? h "HTTP/1.0 200 OK"))
-      (is (string-contains? h "Content-Type: text/event-stream"))
-      (is (string-contains? h "\r\n\r\n"))
-      (refute (string-contains? h "Content-Length"))))
+      (is (includes? h "HTTP/1.0 200 OK"))
+      (is (includes? h "Content-Type: text/event-stream"))
+      (is (includes? h "\r\n\r\n"))
+      (refute (includes? h "Content-Length"))))
   (test "streaming? distinguishes a stream-response from a plain response"
     (is (streaming? (stream-response 200 {} (fn (sock) nil))))
     (refute (streaming? (ok "hi"))))
@@ -111,11 +111,11 @@
           (tcp-send c "GET /events HTTP/1.0\r\nHost: localhost\r\n\r\n")
           (let (resp (utf8-bytes->string (tcp-drain c)))
             (tcp-close c)
-            (is (string-contains? resp "text/event-stream"))
-            (is (string-contains? resp "data: one"))
-            (is (string-contains? resp "data: two"))
+            (is (includes? resp "text/event-stream"))
+            (is (includes? resp "data: one"))
+            (is (includes? resp "data: two"))
             ;; the streaming path sends no Content-Length / Connection: close
-            (refute (string-contains? resp "Content-Length"))))))))
+            (refute (includes? resp "Content-Length"))))))))
 
 (describe "http: client url + response parsing"
   (test "parse-url splits scheme/host/port/path"
@@ -155,8 +155,8 @@
           (tcp-send c "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
           (let (resp (utf8-bytes->string (tcp-drain c)))
             (tcp-close c)
-            (is (string-contains? resp "200 OK"))
-            (is (string-contains? resp "<h1>brood</h1>")))))))
+            (is (includes? resp "200 OK"))
+            (is (includes? resp "<h1>brood</h1>")))))))
   (test "a truncated request head (no blank line, peer drops) doesn't kill the server"
     ;; Regression: http--read-raw did (subbytes head 0 -1) on a head with no
     ;; terminator, which threw and killed the connection's worker process
@@ -178,7 +178,7 @@
           (tcp-send c "GET / HTTP/1.0\r\n\r\n")
           (let (resp (utf8-bytes->string (tcp-drain c)))
             (tcp-close c)
-            (is (string-contains? resp "200 OK"))))))))
+            (is (includes? resp "200 OK"))))))))
 
 (describe "http: a binary request body survives byte-faithfully"
   ;; http-read-request reads in binary mode, so a POST body containing bytes that
@@ -203,9 +203,9 @@
               (bytes 255 128 65)])
           (let (resp (utf8-bytes->string (tcp-drain c)))
             (tcp-close c)
-            (is (string-contains? resp "200 OK"))
+            (is (includes? resp "200 OK"))
             ;; the body round-tripped as the exact bytes, not U+FFFD (65533)
-            (is (string-contains? resp "[255 128 65]"))))))))
+            (is (includes? resp "[255 128 65]"))))))))
 
 (describe "http: concurrent connections each get their own process"
   (test "many simultaneous GETs all complete (spawn-per-connection)"
@@ -229,7 +229,7 @@
         (dotimes (_ n)
           (receive
             ([:done status body] (assert= status 200)
-              (is (string-contains? body "/")))
+              (is (includes? body "/")))
             (after 5000 (is false))))))))
 
 ; added
@@ -294,7 +294,7 @@
         (let (resp (http-get (str "https://localhost:" (first pc) "/")
                      {:ca (second pc)}))
           (assert= (get resp :status) 200)
-          (is (string-contains? (body-text resp) "secure brood"))))))
+          (is (includes? (body-text resp) "secure brood"))))))
   (test "a binary body is byte-faithful over https too"
     (let (me (self))
       (spawn (do
@@ -328,8 +328,8 @@
           (tcp-send c "\n")
           (let (resp (utf8-bytes->string (tcp-drain c)))
             (tcp-close c)
-            (is (string-contains? resp "200 OK"))
-            (is (string-contains? resp "/drip")))))))
+            (is (includes? resp "200 OK"))
+            (is (includes? resp "/drip")))))))
   (test "a head over *http-max-head-bytes* with no terminator is dropped, not buffered"
     (let (me (self))
       (spawn (do

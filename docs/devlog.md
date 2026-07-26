@@ -8405,6 +8405,115 @@ completion silently returned nothing. The alias sweep had covered `.blsp` files 
 Rust *test* snippets but not Brood embedded in Rust *library* code; the checker's
 `(concat …)` element-type rule and a now-duplicate catalog row went too.
 
+## 2026-07-26 — the syntax finalization, from downstream: three brood defects it exposed
+
+Pulled `d471359` (the syntax finalization) and swept the 13 sibling projects. Eight were
+broken; the two mechanical migrations fixed five, and the other three were **brood bugs
+the projects found**, not project bugs.
+
+### The mechanical part
+
+`~x` → `^x` (ADR-150) and `concat` → `append`. The pin rewrite needs quasiquote context,
+so it was a scanner, and ADR-150's "167 pins migrated" made a free oracle: run the
+scanner over `std/` + `tests/` at the *previous* commit and diff its output against what
+landed. It reproduced **167** — and 207 of 209 files matched pin-for-pin, with the six
+differences all *new* text in that commit (the pin docs, scaffold templates). Zero cases
+where it rewrote a `~` the real migration had left alone, which is the direction that
+breaks quasiquote. Worth the ten minutes before touching six repos.
+
+### Defect 1 — `&optional` defaults were never namespace-qualified
+
+`(defn project-root (dir &optional (limit *project-search-depth*)) …)` raised
+`unbound symbol` — 25 failures in brood-edit alone. Param lists were passed through the
+resolver verbatim, which is right for the *binders* (they are not references) and wrong
+for a default *expression*, which is ordinary code in the defining module. It resolved at
+call time in whatever namespace the caller happened to be in.
+
+Reduced to: a default reading a plain `def` fails, an earmuffed `def` fails, a `defdyn`
+works, the same read in the body works. So this predates the finalization — it dates to
+ADR-065 (2026-05-30, `out.push(params); // verbatim`) and earmuffs *masked* it, since an
+ambient `*knob*` resolved from anywhere. ADR-151 removed the mask and the two-month-old
+hole surfaced. `resolve_param_defaults` resolves defaults while accumulating earlier
+binders as locals, so `(defn rect (w &optional (h w)) …)` — a documented shape — keeps
+working. Seven cases in `tests/namespace_test.blsp`.
+
+### Defect 2 — the tightened `defmodule` header rejected `(:implements …)`
+
+`defmodule--clause-heads` listed `:use`, `:use-internals`, `:alias`. But `:implements` is
+a **checker** annotation that brood's own `types/check/protocol.rs` reads straight out of
+the header; the loader's only job is to tolerate it. Making unrecognised clauses a hard
+error therefore turned every protocol-implementing module into a load error — willem's
+whole suite. The clause is now accepted and named in the error text.
+
+### Not a third defect — a misread, fixed properly upstream
+
+`brood_suite_passes` was also red on the UCD "Part1" conformance test, and I read the
+120 s ceiling as a *per-test* limit: one test measured 225 s, so I made the walk cheap
+(the `nt--test-line?` scan over 20,000 lines costs >120 s in a debug build on its own —
+provable by running a slice with the modulus set so high that no case is tested at all,
+which is still killed). It passed, but the diagnosis was wrong: `*test-timeout-ms*` is a
+deadline for a whole *batch* of parallel workers, not for one test. A single test is its
+own batch, which is why my measurement fit both readings and never discriminated between
+them. The real fix — `*test-slow-timeout-ms*`, a raised budget for a `:slow`/`:conformance`
+batch — landed upstream in 5a76f90 while I was working, so I dropped my change and took
+theirs, and Part1 runs in full again rather than sampled.
+
+### Left alone
+
+Thirty-two `.blsp` files arrived unformatted; formatting `conformance_ucd_test.blsp`
+reflowed 97 lines around my 45, so I reverted that and kept the edit alone — the
+unformatted files are the author's to sweep.
+
+## 2026-07-26 — ergonomics & conciseness pass (ADR-154): add the sugar, cut the surface
+
+A whole-language review for conciseness/ergonomics. The core came out clean — the
+friction was all in the library/macro surface, so every change here is a pure prelude
+macro or a rename, no evaluator change. Two gaps dominated the evidence: **492 `(str …)`
++ 151 `(error "…" x)` sites** (no interpolation), and **83 top-level `--acc`/`--loop`
+helpers** (~4% of `std/`) that exist only to be a hand-written tail loop.
+
+**Added (all pure macros, zero core cost):**
+- **`fmt`** — `(fmt "x={x} sum={(+ a b)}")`, parsed at expand time into a plain
+  `(str …)`. `{{`/`}}` literal braces; braces nest in a hole. Not a reader sigil
+  (`#"…"`/`#b`/`#{` are taken and a macro is the ADR-006 way).
+- **`loop`/`recur`** — the local tail loop ADR-026 reserved "for if ergonomics demand
+  it"; the 83 helpers are that demand. Expands to a `letrec` closure (tail self-call ⇒
+  O(1) stack), `recur` rewritten by a macro-time code-walk that skips nested `loop`/
+  `quote`. Cost: `loop`/`recur` are no longer usable as identifiers — ~7 internal sites
+  renamed to `go` or converted to the macro (scaffold `tui-loop` template + font-zoom
+  example now showcase it).
+- **`if-let`/`when-let`** (test the source value via a temp, so destructuring targets
+  work), **`some->`/`some->>`/`cond->`/`cond->>`/`doto`**, **`run!`**.
+
+**Cut (one spelling each, no users so free):** `string-contains?`→`includes?` (306
+sites; superset merge), `string-index-of`→`index-of &optional from`,
+`string-last-index-of`→`last-index-of`, `string-capitalize`→`capitalize`,
+`string-upcase`/`downcase`→`upper`/`lower`, `flat-map`→`mapcat`, `length`→`count`,
+`entries`→`map-pairs`, `read-file`/`write-file`/`append-file`→`slurp`/`spit`/
+`spit-append`, `path-exists?`→`file-exists?`, `working-dir`→`cwd`, `host`→`hostname`,
+`some?`→`any?` (frees the Clojure-surprising name), and the deprecated `:refer` marker
+(→ `:only` only). Reverses ADR-153's deliberate keep of `car`/`cdr`.
+
+**Kept on purpose:** `multimap-`'s prefix (dropping it breaks *internal* resolution —
+a bare `get` inside namespace `multimap` would resolve to `multimap/get`, not the
+prelude) and `set/conj` (shadows only under `(:use set)`, the Clojure `clojure.set`
+contract, not a defter).
+
+### The one trap the mechanical rename hit
+
+Renaming call sites of common-word names (`entries`, `host`, `length`, `car`, `cdr`)
+with a *head-position* regex (`(?<=\()NAME`) also matched **let-binding and single-param
+positions** — `(let (entries …))` and `(defn f (entries) …)` both put the name right
+after `(`. So three single-param functions (`package--lockfile-content`,
+`package--index-by-name`, `coverage--line-index`) had their `entries` param silently
+renamed to `map-pairs` while the body kept using `entries` → runtime `unbound symbol`.
+`nest check` *missed* two of them (the `map-pairs` param shadows the global, confusing
+the checker), so the in-language suite — not the checker — is what caught them. Lesson:
+a symbol rename by regex is unsafe for names that double as locals; the real fix is an
+AST-aware rename, and the suite is the backstop. All fixed; `nest check` clean, suites
+green. Full coverage in `tests/ergonomics_test.blsp`.
+
+
 ## 2026-07-26 — conformance corpora, suite 13: the Gabriel benchmarks, and a hole in the engine gate
 
 Every corpus so far feeds hostile **data** to one parser. This one runs whole

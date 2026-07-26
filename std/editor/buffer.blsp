@@ -302,14 +302,14 @@ A no-op when the ring is empty."
   "The char index of the first occurrence of `needle` in `buf`'s text at or after
 `from`, or nil if there is none. Pure — it does not move point; the caller composes
 `goto-char`/`set-mark`. The forward primitive incremental search rides on."
-  (let (i (string-index-of (buffer-text buf) needle from))
+  (let (i (index-of (buffer-text buf) needle from))
     (if (< i 0) nil i)))
 
 (defn buffer-search-backward (buf needle before)
   "The char index of the last occurrence of `needle` in `buf`'s text whose start is
 strictly before `before`, or nil if there is none. The backward counterpart of
 `buffer-search-forward`."
-  (let (i (string-last-index-of (buffer-text buf) needle before))
+  (let (i (last-index-of (buffer-text buf) needle before))
     (if (< i 0) nil i)))
 
 ;; ---- undo (an undo *tree*, Emacs-style) -------------------------------------

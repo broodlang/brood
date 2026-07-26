@@ -282,7 +282,7 @@ it; `stream-fn` runs in the connection's own worker process — which owns the s
 (defn serve-file (path)
   "A 200 response serving the file at `path` with a guessed Content-Type, or 404 if it is missing."
   (if (file? path)
-    (response 200 {"Content-Type" (mime-type path)} (read-file path))
+    (response 200 {"Content-Type" (mime-type path)} (slurp path))
     (not-found)))
 
 ;; ---- routing ----------------------------------------------------------------

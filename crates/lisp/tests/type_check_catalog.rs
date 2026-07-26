@@ -81,12 +81,12 @@ const SHOULD_WARN: &[(&str, &str)] = &[
     ("(+ 1 (list? (list 1 2)))", "+"),        // list? → bool
     ("(+ 1 (contains? {:a 1} :a))", "+"),     // contains? → bool
     ("(+ 1 (member? 1 (list 1 2)))", "+"),    // member? → bool
-    ("(+ 1 (some? int? (list 1 2)))", "+"),   // some? → bool
+    ("(+ 1 (any? int? (list 1 2)))", "+"),    // any? → bool
     ("(+ 1 (every? int? (list 1 2)))", "+"),  // every? → bool
     // ---- expanded curated sigs: string converters ----
     (r#"(+ 1 (symbol->string 'foo))"#, "+"),  // symbol->string → string
     (r#"(+ 1 (join ", " (list "a" "b")))"#, "+"), // join → string
-    (r#"(+ 1 (string-capitalize "hello"))"#, "+"), // string-capitalize → string
+    (r#"(+ 1 (capitalize "hello"))"#, "+"), // capitalize → string
 ];
 
 /// Each snippet must produce **zero** warnings — the false-positive guards.

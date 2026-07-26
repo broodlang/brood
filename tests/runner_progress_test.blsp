@@ -67,7 +67,7 @@
   (test "an ungrouped test traces just its name, with no group prefix"
     (def *test-trace* true)
     (let (line (with-out-str (test/trace-result (list "" "lonely" nil 1))))
-      (and (is (string-contains? line "lonely")) (refute (string-contains? line "›")))))
+      (and (is (includes? line "lonely")) (refute (includes? line "›")))))
   (test "trace prints nothing when off"
     (def *test-trace* false)
     (assert= (with-out-str (test/trace-result (progress-test--pass "t"))) ""))
@@ -79,23 +79,23 @@
   (test "a traced pass shows a tick, the label and the duration"
     (def *test-trace* true)
     (let (line (with-out-str (test/trace-result (progress-test--pass "adds"))))
-      (and (is (string-contains? line "✓"))
-        (is (string-contains? line "adds"))
-        (is (string-contains? line "1ms")))))
+      (and (is (includes? line "✓"))
+        (is (includes? line "adds"))
+        (is (includes? line "1ms")))))
   (test "a traced failure shows a cross and how many assertions failed"
     (def *test-trace* true)
     (let (line (with-out-str (test/trace-result (progress-test--fail "divides"))))
-      (and (is (string-contains? line "✗")) (is (string-contains? line "1 failure")))))
+      (and (is (includes? line "✗")) (is (includes? line "1 failure")))))
   (test "a traced skip shows a circle and says skipped, with no duration"
     (def *test-trace* true)
     (let (line (with-out-str (test/trace-result (progress-test--skip "needs db"))))
-      (and (is (string-contains? line "○"))
-        (is (string-contains? line "skipped"))
-        (refute (string-contains? line "0ms")))))
+      (and (is (includes? line "○"))
+        (is (includes? line "skipped"))
+        (refute (includes? line "0ms")))))
   (test "a traced test shows where it is declared"
     (def *test-trace* true)
     (let (line (with-out-str (test/trace-result (progress-test--at "x" "tests/a_test.blsp:12"))))
-      (is (string-contains? line "tests/a_test.blsp:12"))))
+      (is (includes? line "tests/a_test.blsp:12"))))
   (test "trace-result returns its result, so it can wrap the call site"
     (def *test-trace* false)
     (let (r (progress-test--pass "t")) (assert= (test/trace-result r) r))))
@@ -110,7 +110,7 @@
                                              :line 7
                                              :col 3
                                              :message "unbound symbol: nope"}))
-      (and (is (string-contains? (test/r-group r) "x_test.blsp"))
+      (and (is (includes? (test/r-group r) "x_test.blsp"))
         (assert= (test/r-name r) "failed to load")
         (is (test/r-failed? r)))))
   (test "the message says what went wrong"
@@ -118,16 +118,16 @@
                                              :line 1
                                              :col 1
                                              :message "unbound symbol: nope"}))
-      (is (string-contains? (first (second (first (test/r-fails r)))) "unbound symbol: nope"))))
+      (is (includes? (first (second (first (test/r-fails r)))) "unbound symbol: nope"))))
   (test "it carries the file and line for the anchor"
     (let (r (test/test--load-failure-result {:file "/nope/x.blsp" :line 9 :col 1 :message "boom"}))
-      (is (string-contains? (test/r-where r) ":9"))))
+      (is (includes? (test/r-where r) ":9"))))
   (test "a plain-string error still produces a usable failure"
     ;; Not every raise is a structured map.
     (let (r (test/test--load-failure-result "just a string"))
       (and (assert= (test/r-group r) "a test file")
         (is (test/r-failed? r))
-        (is (string-contains? (first (second (first (test/r-fails r)))) "just a string")))))
+        (is (includes? (first (second (first (test/r-fails r)))) "just a string")))))
   (test "a load failure counts as a failure, not a skip"
     (let (r (test/test--load-failure-result "boom"))
       (and (is (test/r-failed? r)) (refute (test/r-skipped? r))))))
@@ -156,7 +156,7 @@
   (test "the anchor names the failing test"
     (let (r (list "grp" "case" (list (list nil (list "x"))) 1)
           rec (first (test/r-fails r)))
-      (is (string-contains? (test/fail-anchor r rec) "grp › case"))))
+      (is (includes? (test/fail-anchor r rec) "grp › case"))))
   (test "a detail line's label is dimmed but its value is untouched"
     ;; Captured output has no colour, so the line must come back unchanged.
     (assert= (test/test--dim-label "actual: 3") "actual: 3"))

@@ -957,8 +957,8 @@ docs/testing.md for the full guide.")
 ;; Is any unit in this batch tagged for the raised budget? (`workers` is a list of
 ;; `(pid unit)`, a unit is `(mode group tests)`, and a test's meta carries its tags.)
 (defn collect--slow-batch? (workers)
-  (some? (fn (w)
-           (some? (fn (t) (some? (fn (tag) (includes? *test-long-tags* tag)) (test--tags t)))
+  (any? (fn (w)
+           (any? (fn (t) (any? (fn (tag) (includes? *test-long-tags* tag)) (test--tags t)))
              (third (second w))))
     workers))
 

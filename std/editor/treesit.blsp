@@ -45,7 +45,7 @@ when the kind isn't coloured (so `fontify` descends into its children)."
   "True if the 1-char string `c` is a letter. Brood's `<`/`<=` are numeric-only, so
 test by case-folding: a letter changes between upper- and lower-case, punctuation
 and digits don't."
-  (not (= (string-upcase c) (string-downcase c))))
+  (not (= (upper c) (lower c))))
 
 (defn anonymous-keyword? (node)
   "True for an anonymous token whose text is alphabetic — a language keyword

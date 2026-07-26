@@ -1,5 +1,5 @@
 ;; Ropes (ADR-045): the editor buffer's text storage — `string->rope` plus the
-;; rope-* primitive kernel (length / line-count / insert / delete / slice / line
+;; rope-* primitive kernel (count / line-count / insert / delete / slice / line
 ;; / char<->line). Immutable like every Brood value: every edit returns a
 ;; *fresh* rope and leaves its input untouched. Process-local: a rope lives in
 ;; one process's heap and never crosses in a message — its content moves as a
