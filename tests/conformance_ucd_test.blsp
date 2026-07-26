@@ -204,13 +204,13 @@
           (nt--scan-chunk want k n (rest lines) here (inc idx) (inc ran)
                           (if w (cons w bad) bad)))))))
 
-;; Part1 runs in FULL by default (`*ucd-part1-of*` = 1) — every one of its ~16,000 cases.
+;; Part1 runs in FULL by default (`BROOD_UCD_PART1_OF` unset) — every one of its ~16,000 cases.
 ;;
 ;; The one context that cannot afford that is `brood_suite_passes`, the DEBUG-build
 ;; wrapper that runs this suite under cargo: a case costs roughly 30x its release price
 ;; there, so the full sweep is ~670 s of work inside a 600 s nextest cap on the whole
 ;; suite binary. `crates/lisp/tests/suite.rs` turns this knob down to 16 for that wrapper
-;; only, which is why it is `defdyn` rather than a plain `def`. Release stays exhaustive:
+;; only. Release stays exhaustive:
 ;; `nest test` and `make suite` sweep all of Part1 in ~5 s.
 ;;
 ;; An earlier attempt at sampling was abandoned because it "measurably didn't" help — and
@@ -220,7 +220,12 @@
 ;; `index mod n` sampling, so the slice is spread across the whole section rather than
 ;; being a prefix, and it is deterministic. The slicing machinery is kept because it is
 ;; the right tool if a future case genuinely needs splitting — pass a different `k`.
-(defdyn *ucd-part1-of* 1)
+;; Read from the ENVIRONMENT, not from a global the wrapper defines first. The wrapper's
+;; `def` runs before this file is loaded, and this line is evaluated AT load — so a global
+;; default here overwrote the wrapper's 16 back to 1, the sweep stayed full, and the
+;; wrapper went on timing out. The environment is read at the same moment, by the code
+;; that needs it, so there is no ordering to get wrong.
+(def nt--part1-of (max 1 (or (string->number (or (getenv "BROOD_UCD_PART1_OF") "")) 1)))
 
 ;; Every `*ucd-part1-of*`-th case of the pre-collected Part1 list, from offset `k`.
 (defn nt--slice-scan (lines k n idx ran bad)
@@ -231,7 +236,7 @@
         (nt--slice-scan (rest lines) k n (inc idx) (inc ran) (if w (cons w bad) bad)))
       (nt--slice-scan (rest lines) k n (inc idx) ran bad))))
 
-(defn nt--part1-slice () (nt--slice-scan nt--part1-cases 0 *ucd-part1-of* 0 0 nil))
+(defn nt--part1-slice () (nt--slice-scan nt--part1-cases 0 nt--part1-of 0 0 nil))
 
 ;; ---- the suite ---------------------------------------------------------------
 
@@ -268,7 +273,7 @@
       ;; Scaled to the sample so BOTH contexts assert real coverage: ~16,000 cases at the
       ;; default, ~1,000 under the debug wrapper's 1-in-16. A sampling change that guts
       ;; the coverage fails rather than reading as a pass.
-      (is (> ran (quot 16000 *ucd-part1-of*)))
+      (is (> ran (quot 16000 nt--part1-of)))
       (assert= (take 3 bad) ())))
 
   (test "Part2 — canonical order"
