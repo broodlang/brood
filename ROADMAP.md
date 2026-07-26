@@ -62,14 +62,19 @@ Shipped as ADRs:
 
 What that review consciously left OPEN, with the reasoning:
 
-- ⬜ **Callable data — `(:key m)`, `(m :key)`, `([v] i)`, `(#{…} x)`.** The one item
-  that touches the evaluator's call path, and the biggest remaining ergonomic gap
-  against the Clojure surface. `partial` (ADR-156) softened the workaround but
-  `(map :name people)` still has no spelling. **Needs an ADR first**, on scope:
-  keyword-only (smallest, keeps "a call head is a function" nearly intact) vs. the
-  full Clojure set (which makes `(m k)` and `(get m k)` two spellings of one thing,
-  against ADR-154's rule). Costs a check on the call path in the tree-walker, the VM
-  dispatcher, *and* the JIT. **[kernel]**
+- ✅ **Callable keywords — `(:key m)`** (ADR-165, 2026-07-26). Keyword-only, in the
+  shared `eval::apply`, so a keyword is a first-class value the HOFs can take
+  (`(map :name people)`). Map/vector/set stay non-callable by decision.
+- ⬜ **`get`'s call + type-dispatch overhead, which the JIT cannot see through.**
+  Found while measuring ADR-165: against the `map-get` kernel op at 107 ms/1M, a
+  single-arity Brood wrapper costs **+124 ms**, its four-branch `cond` a further
+  **+138 ms**, and multi-arity dispatch **+24 ms** — total 393 ms, with the JIT
+  closing *none* of it (374 ms with the JIT off). This is the variadic-`+` finding
+  again (the one that motivated multi-arity dispatch, see CLAUDE.md): the fix is a
+  language capability — cheaper closure calls and/or type-dispatch the JIT can lower
+  — not moving more accessors into Rust, which only hides it. `get` is ~4,800 call
+  sites, so this is the single highest-leverage perf item in the library.
+  **[kernel/JIT]**
 - ⬜ **`sig` inline signatures.** A function's name, params and types live in two
   forms with an ordering constraint that only bites under `BROOD_CONTRACTS=1`. The
   fix — `(defn f ((x int) -> int) …)` — is an ADR-082 revision touching `defn`, the

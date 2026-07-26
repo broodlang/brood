@@ -879,6 +879,13 @@ fn eval_tail_loop(
                     env = new_scope;
                     continue 'tail;
                 }
+                // A keyword in head position is an accessor (ADR-165); the same
+                // helper `apply` uses, so a direct `(:k m)` and a routed
+                // `(apply :k …)` can't diverge.
+                ValueRef::Keyword(_) => {
+                    return apply_keyword(heap, cur_callee, &cur_argv)
+                        .map_err(|e| e.or_form_pos(heap, call_form));
+                }
                 other => {
                     return Err(not_a_function_error(heap, other).or_form_pos(heap, call_form));
                 }
@@ -941,21 +948,72 @@ fn eval_arguments(
     })
 }
 
+/// A **keyword applied as an accessor** — `(:name person)` ≡ `(get person :name)`,
+/// and `(:name person "unknown")` ≡ the 3-argument `get` (ADR-165).
+///
+/// A keyword is the *only* non-function value Brood lets you call. The exception is
+/// paid for by one shape: `(map :name people)`, the accessor-as-a-value that a
+/// higher-order op can take — without it every such call has to invent a throwaway
+/// binder (`(fn (p) (get p :name))`), which is 67 sites across the workspace and the
+/// most-reached-for shape in map-heavy code. Maps, vectors and sets stay
+/// non-callable: `(m k)` would be a second spelling of `get`, and a callable
+/// vector/set answers by index-or-membership, the ambiguity ADR-156 refused.
+///
+/// The receivers mirror `get` exactly, because divergence here would be a trap:
+/// a **map** looks up by key, a **set** by membership (yielding the element), `nil`
+/// is empty, and anything else is a type error *naming the keyword* — which is
+/// strictly more specific than `get`'s, since the key is in the message already.
+/// An integer-indexed collection is deliberately in that last group: `(:name deps)`
+/// where `deps` is a list of maps is the single most likely misuse of this feature
+/// (see ADR-164, which made the same shape loud for `get`).
+fn apply_keyword(heap: &mut Heap, kw: Value, argv: &[Value]) -> LispResult {
+    let shown = crate::syntax::printer::print(heap, kw);
+    if argv.is_empty() || argv.len() > 2 {
+        return Err(LispError::type_err(format!(
+            "{shown}: a keyword accessor takes 1 or 2 arguments, got {}",
+            argv.len()
+        ))
+        .with_hint(format!(
+            "`({shown} coll)` is the value at {shown}, `({shown} coll default)`              substitutes `default` when it is absent."
+        )));
+    }
+    let default = argv.get(1).copied().unwrap_or(Value::nil());
+    match argv[0].unpack() {
+        // A map: the value at the key. A set: the element itself when present, so
+        // `(:a s)` agrees with `(contains? s :a)` — the ADR-156 rule.
+        ValueRef::Map(id) => Ok(heap.map_get(id, kw).unwrap_or(default)),
+        ValueRef::Set(id) => Ok(heap
+            .map_get(id, kw)
+            .map(|_| kw)
+            .unwrap_or(default)),
+        // `nil` is the empty collection, as everywhere else in the language.
+        ValueRef::Nil => Ok(default),
+        other => {
+            // Same shape as `LispError::wrong_type` — `who: expected …, got tag (val)`
+            // — but built by hand so `who` is the keyword the caller wrote.
+            let got = crate::syntax::printer::print(heap, other);
+            let tag = crate::core::value::tag(other).name();
+            Err(LispError::type_err(format!(
+                "{shown}: expected a map, set or nil to look up in, got {tag} ({got})"
+            ))
+            .with_hint(format!(
+                "a keyword reads a KEY, so the argument has to be keyed. If that is a                  collection OF maps, you want one element of it (or `(map {shown} coll)`                  for all of them); for a nested key use `(get-in coll [{shown} …])`."
+            )))
+        }
+    }
+}
+
 /// The `cannot call non-function` error for a value in head position, with a hint
-/// chosen by what the value *is*. Brood deliberately has no callable data (a
-/// keyword/map/vector is not a function — no magic), so the reflexes that expect
-/// one need naming, exactly as the reader's `#(…)`/`#"…"` hints do. One helper,
-/// used by both engines, so the message and hint can't drift apart.
+/// chosen by what the value *is*. Apart from a keyword accessor (see
+/// [`apply_keyword`]) Brood has no callable data — a map/vector/set is not a
+/// function — so the reflexes that expect one need naming, exactly as the reader's
+/// `#(…)`/`#"…"` hints do. One helper, used by both engines, so the message and hint
+/// can't drift apart.
 pub(crate) fn not_a_function_error(heap: &Heap, v: Value) -> LispError {
     let shown = crate::syntax::printer::print(heap, v);
     let err = LispError::type_err(format!("cannot call non-function: {}", shown));
     match v.unpack() {
-        // `(:key m)` — Clojure's keyword-as-accessor. Reads fine, so only the
-        // runtime can name it.
-        ValueRef::Keyword(_) => err.with_hint(format!(
-            "a keyword isn't a function in Brood: write `(get m {shown})`, not `({shown} m)`. \
-             (If you meant C-style call syntax, the function goes inside the parens: `(f x)`.)"
-        )),
+        // (A keyword no longer lands here — ADR-165 made it callable.)
         // `({:a 1} :a)` — Clojure's map-as-function.
         ValueRef::Map(_) => err.with_hint(
             "a map isn't a function in Brood: look a key up with `(get m k)` \
@@ -991,6 +1049,12 @@ pub fn apply(heap: &mut Heap, callee: Value, argv: &[Value], env: EnvId) -> Lisp
     match callee.unpack() {
         ValueRef::Native(id) => call_native(heap, id, argv, env),
         ValueRef::Fn(id) => apply_closure(heap, id, argv),
+        // A keyword accessor (ADR-165). Handled *here*, in the shared apply, rather
+        // than in the compiler: that is what makes a keyword a first-class value the
+        // higher-order ops can take — `(map :name people)`, `(apply :name (list p))`
+        // — which is the entire reason for the exception. A compile-time rewrite of
+        // `(:k m)` would have covered only the syntactic head.
+        ValueRef::Keyword(_) => apply_keyword(heap, callee, argv),
         other => {
             // Shared with the evaluator's direct-combination path, so the two engines
             // — and direct vs `apply`-routed calls — never diverge in message or hint.

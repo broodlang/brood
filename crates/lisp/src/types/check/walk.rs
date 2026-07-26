@@ -218,9 +218,18 @@ fn is_debug_only_primitive(nm: &str) -> bool {
 ///  - a **`list<T>`** parameter also admits the empty list, which the lattice stores
 ///    as the separate `nil` tag (`Ty::list_of` is `pair`-only by design), so a `nil`
 ///    argument — the empty list — is consistent with it.
+///  - a **callable** parameter (a `(… -> …)` arrow, or the bare `fn | native` of
+///    `apply`) also admits a **keyword**, because a keyword IS callable as an
+///    accessor (ADR-165): `(map :name people)` is valid, and the lattice has no way
+///    to say "keyword, which behaves as (map -> any)" — `Tag::Keyword` and the
+///    function tags are disjoint bits. Without this the single most-motivating call
+///    for that feature would draw a warning.
 fn relax_param_for_arg(param: &Ty) -> Ty {
     use crate::types::Tag;
     let mut p = param.clone();
+    if p.contains_tag(Tag::Fn) || p.contains_tag(Tag::Native) {
+        p = p.union(Ty::of(Tag::Keyword));
+    }
     if let Some(fields) = p.record_fields() {
         if fields.values().any(|(_, required)| !*required) {
             let required_only: std::collections::BTreeMap<_, _> = fields

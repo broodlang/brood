@@ -9,6 +9,10 @@ Written 2026-07-26, at the end of the syntax review that produced ADR-155…163.
 
 ---
 
+> **Status, 2026-07-26:** item 1 is **done** (ADR-165). Items 2 and 3 — the two
+> genuinely irreversible decisions — are still open, and are all that stands between
+> here and a language freeze.
+
 ## The test
 
 Every remaining language item gets sorted by one question:
@@ -34,7 +38,18 @@ By this test, **three** items qualify. Everything else waits.
 
 ## 1. Callable keywords — `(:key m)`
 
-⬜ **Status: needs an ADR, then a small kernel change.** **[kernel]**
+✅ **Done — ADR-165** (2026-07-26). Implemented in `eval::apply`, the one function both
+engines funnel non-closure callees through, so a keyword is a first-class value the
+higher-order ops can take. Keywords only; map/vector/set stay non-callable. The
+checker's `relax_param_for_arg` admits a keyword wherever a callable is expected.
+
+> **The performance claim was struck from the justification.** `(:name p)` measures
+> 130 ms/1M vs `get`'s 393 ms, but that is the Brood/Rust boundary, not the syntax: the
+> breakdown is one Brood closure call (+124 ms) plus a four-branch `cond` (+138 ms),
+> and the JIT closes none of it (393 with, 374 without). Implemented in Brood it would
+> measure like `get`. Selling it on speed would be the move `CLAUDE.md` warns against.
+> It stands on the 67 accessor-lambda sites. What the measurement *did* surface — the
+> call + type-dispatch overhead the JIT can't see through — is now its own ROADMAP item.
 
 **What.** Make a keyword callable as a one-argument accessor:
 `(:name person)` ≡ `(get person :name)`, and `(:name person "unknown")` ≡ the 3-arg

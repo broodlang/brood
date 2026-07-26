@@ -197,8 +197,16 @@
     (assert= `(a ~(sf--inner 3)) '(a (b 3)))))
 
 (describe "ADR-152: calling data names the accessor"
-  (test "a keyword / map / set / vector in head position gets a hint"
-    (is (includes? (hint-of "(:a {:a 1})") "(get m :a)"))
+  ;; CHANGED 2026-07-26 (ADR-165): a KEYWORD is now callable — `(:a m)` is the
+  ;; accessor, and `(map :name people)` is the shape that bought the exception. The
+  ;; other three data kinds stay non-callable and keep their hints: a callable map
+  ;; would be a second spelling of `get`, and a callable vector/set answers by
+  ;; index-or-membership, the ambiguity ADR-156 refused.
+  (test "a keyword in head position is an ACCESSOR, not an error"
+    (assert= (:a {:a 1}) 1)
+    (assert= (:z {:a 1}) nil)
+    (assert= (:z {:a 1} :dflt) :dflt))
+  (test "map / set / vector in head position still get a hint"
     (is (includes? (hint-of "({:a 1} :a)") "(get m k)"))
     (is (includes? (hint-of "(#{1 2} 1)") "(contains? s x)"))
     (is (includes? (hint-of "([10 20] 1)") "(nth v i)")))

@@ -342,6 +342,53 @@
     (assert= (nth (list 1 2 3) 2) 3)
     (assert= (nth [1] 9 :d) :d)))
 
+;; A keyword is callable as an accessor (ADR-165) — the one exception to "the head of
+;; a form is a function". It exists for the higher-order shape: 67 sites in the
+;; workspace had to write `(fn (p) (get p :k))` to pass an accessor to map/filter/
+;; sort-by/keep. Implemented in the shared `eval::apply`, so a keyword is a first-class
+;; VALUE, not a syntactic head — that is what makes the HOF cases below work.
+(describe "keyword accessors"
+  (test "a keyword applied to a map is `get`"
+    (assert= (:name {:name "ada" :born 1815}) "ada")
+    (assert= (:born {:name "ada" :born 1815}) 1815)
+    (assert= (:missing {:a 1}) nil))
+  (test "the 2-arity form is the 3-argument get"
+    (assert= (:missing {:a 1} :dflt) :dflt)
+    (assert= (:a {:a 1} :dflt) 1))
+  (test "THE point: an accessor as a value, for any higher-order op"
+    (let (rows (list {:id 2 :name "b"} {:id 1 :name "a"}))
+      (assert= (map :name rows) (list "b" "a"))
+      (assert= (map :id (sort-by :id rows)) (list 1 2))
+      (assert= (count (filter :name rows)) 2)
+      (assert= (keep :id rows) (list 2 1))))
+  (test "it is a value, so it composes like any function"
+    (assert= (apply :name (list {:name "ada"})) "ada")
+    (assert= (let (f :name) (f {:name "ada"})) "ada")
+    (assert= ((comp :name first) (list {:name "ada"})) "ada")
+    (assert= ((if true :a :b) {:a 1 :b 2}) 1))
+  (test "receivers mirror get exactly — map, set by membership, nil empty"
+    (assert= (:a #{:a :b}) :a)
+    (assert= (:z #{:a :b}) nil)
+    (assert= (:z #{:a} :dflt) :dflt)
+    (assert= (:a nil) nil)
+    (assert= (:a nil :dflt) :dflt))
+  (test "anything else is a type error NAMING the keyword"
+    ;; the likely misuse: a collection OF maps where one map was meant
+    (let (msg (try (:name (list {:name "a"})) (catch e (error-message e))))
+      (is (includes? msg ":name:"))
+      (is (includes? msg "map, set or nil")))
+    (assert-error (:name [1 2]))
+    (assert-error (:name "str"))
+    (assert-error (:name 5)))
+  (test "a wrong arity names both valid forms"
+    (let (msg (try (eval-string "(:name)") (catch e (error-message e))))
+      (is (includes? msg "1 or 2 arguments")))
+    (assert-error (eval-string "(:name {:a 1} 1 2)")))
+  (test "no OTHER data is callable — map/vector/set keep their hints"
+    (assert-error (eval-string "({:a 1} :a)"))
+    (assert-error (eval-string "([10 20] 1)"))
+    (assert-error (eval-string "(#{1 2} 1)"))))
+
 ;; ---- explicit concurrency / parallelism (spawn, send, copy-on-send) ----------
 ;; :isolated so these run against a private globals copy and don't contend with
 ;; the parallel suite for the runner's mailbox. The runner is the ROOT process;
