@@ -9009,3 +9009,39 @@ this.
 The 6 `nest::registry` tests fail for an environment reason unrelated to any of this —
 `commit.gpgsign` + 1Password's `op-ssh-sign` makes `git commit` hang in the temp repos
 they build; a bare `git init && git commit` outside the repo reproduces it.
+
+### Follow-up, same day — verifying ADR-155/157 against the day's later commits
+
+`2455335` (hint audit) and `d945d3d` (protocols, grapheme indexing, or/and patterns,
+transducers — ADR-158…163) both landed after ADR-157. Two checks mattered and both came
+back clean, plus one correction to ADR-157 and one CI fix.
+
+**or/and patterns vs the `receive` protocol — the risk, checked.** ADR-155 has the
+`receive` macro derive a clause's binders from `pattern-vars` and unpack them
+positionally at the call site, so any pattern form where `pattern-vars` disagrees with
+what `match-compile` binds would silently hand a body the wrong variable. `d945d3d` adds
+two new pattern forms, so this was the exact shape of a latent break. It extended
+`pattern-vars` correctly — an or-pattern reports its first alternative's vars (all
+alternatives are forced to bind the same set by `match-or-check`), an and-pattern the
+union — and all five or/and shapes round-trip through a `receive` clause: first
+alternative, second alternative, and-pattern, or-with-guard, and an or nested inside a
+vector. The 17-form pattern matrix still passes too.
+
+**Coverage denominators DO move under ADR-157 — the ADR overclaimed.** It said "nothing
+about diagnostics or LSP nav moves", which is true but incomplete. `RecordLine` is
+emitted per positioned node in `emit.rs`, so a folded-away branch never gets one. A/B on
+a fixture (temporarily gating the fold to get the before number): `(if false (+ y 999)
+(- y 1))` reports **33% of 3 executable lines with the fold off, 50% of 2 with it on**.
+Judged an improvement and kept — an unreachable branch is not "uncovered", and counting
+it makes 100% unreachable for no actionable reason — but it is now recorded in ADR-157,
+since a project's percentage can move with no test changing.
+
+**rustfmt was red on main again.** `2455335` and `d945d3d` between them left four
+unformatted spots (`eval/mod.rs`'s two long hint arms, a `types/check/tests.rs`
+assertion, a `basic.rs` `run(…)` call). Same failure as `5f3d145` earlier today, and the
+same fix. Worth noting the pattern: three of the day's commits shipped with
+`cargo fmt --all --check` failing, so the dedicated rustfmt CI job would have been red on
+main each time.
+
+Merged-tree gates after all of it: **3428 in-language + 68 corpus tests, 865 Rust tests**,
+`nest check` zero warnings, fmt clean.

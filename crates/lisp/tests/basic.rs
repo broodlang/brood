@@ -914,9 +914,7 @@ fn hints_name_only_features_that_exist() {
     assert!(l.contains("lmap") && l.contains("lfilter"), "{l}");
     // The reader owns every `#X` spelling (so the `#` arm above is a backstop). Its
     // `#_` hint predated `comment` and offered only `;`.
-    let d = run(
-        "(try (read-string \"(x #_1)\") (catch e (get e :hint)))",
-    );
+    let d = run("(try (read-string \"(x #_1)\") (catch e (get e :hint)))");
     assert!(d.contains("comment"), "{d}");
     // ADR-154 removals carry their replacement.
     assert!(hint("(car (list 1))").contains("first"));

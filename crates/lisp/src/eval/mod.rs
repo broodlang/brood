@@ -1396,8 +1396,12 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
         "length" => "Brood spells `length` as `count` (works on any collection, plus strings).",
         "entries" => "Brood spells `entries` as `map-pairs` (a map's [k v] pairs as a list).",
         "flat-map" => "Brood spells `flat-map` as `mapcat`.",
-        "string-contains?" => "Brood spells `string-contains?` as `includes?` (strings and sequences).",
-        "string-index-of" => "Brood spells `string-index-of` as `index-of` (with an `&optional from`).",
+        "string-contains?" => {
+            "Brood spells `string-contains?` as `includes?` (strings and sequences)."
+        }
+        "string-index-of" => {
+            "Brood spells `string-index-of` as `index-of` (with an `&optional from`)."
+        }
         "string-upcase" => "Brood spells `string-upcase` as `upper`.",
         "string-downcase" => "Brood spells `string-downcase` as `lower`.",
         "string-capitalize" => "Brood spells `string-capitalize` as `capitalize`.",
