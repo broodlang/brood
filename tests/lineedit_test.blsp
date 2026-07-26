@@ -90,12 +90,14 @@
   ;; or the reverse-i-search one. Both were calling it as a private name until it was
   ;; promoted; these cases pin the contract they depend on.
   (test "an ordinary state shows its configured prompt"
-    (assert= (editor/lineedit/lineedit-display-prompt
-               (editor/lineedit/lineedit-init "x> " "" (list)))
+    (assert= (editor/lineedit/lineedit-display-prompt (editor/lineedit/lineedit-init "x> "
+                                                        ""
+                                                        (list)))
       "x> "))
   (test "a searching state shows the reverse-i-search prompt with the query in it"
-    (let (searching (editor/lineedit/lineedit-handle
-                      (editor/lineedit/lineedit-init "x> " "" (list "(abc)"))
+    (let (searching (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-init "x> "
+                                                       ""
+                                                       (list "(abc)"))
                       :ctrl-r))
       (is (string-contains? (editor/lineedit/lineedit-display-prompt searching)
             "reverse-i-search"))))
