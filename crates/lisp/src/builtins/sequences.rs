@@ -383,12 +383,55 @@ pub(super) fn sort_asc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     let mut items = heap.seq_items(arg(args, 0))?;
 
     // Validate before sorting so a non-numeric item produces one clear
-    // error rather than an indeterminate-order partial sort.
+    // error rather than an indeterminate-order partial sort. The same pass
+    // unboxes the all-`Int` case into a plain `Vec<i64>` — see below for why
+    // that is worth a second buffer.
+    let mut ints: Vec<i64> = Vec::with_capacity(items.len());
+    let mut all_int = true;
     for &v in &items {
         match v {
-            Value::Int(_) | Value::Float(_) => {}
+            Value::Int(n) => {
+                // Once a Float has been seen the i64 buffer is dead, but the
+                // loop still has to run to validate the remaining items.
+                if all_int {
+                    ints.push(n);
+                }
+            }
+            Value::Float(_) => {
+                all_int = false;
+                ints = Vec::new(); // release the partial buffer
+            }
             _ => return Err(LispError::wrong_type(heap, "sort", "number", v)),
         }
+    }
+
+    // All-`Int` fast path: sort raw i64s instead of `Value`s. The general
+    // `sort_by` below is a stable merge sort whose comparator re-`match`es a
+    // 24-byte enum on every one of the ~n log n comparisons; on a slice of
+    // i64 the compiler gets an unboxed, branch-predictable compare it can
+    // vectorise.
+    //
+    // Measured A/B on one binary, benchmark suite's `sort` row (375k ints):
+    // the sort call itself 106 -> 79 ms, the whole row 225 -> 196 ms. Note
+    // what that does NOT say: comparison was only ~27 ms of the original
+    // 106 ms. The rest is `seq_items` walking the cons spine in and
+    // `heap.list` allocating a fresh 375k-cell list out, and this fast path
+    // does not touch either. Anyone chasing the remaining ~79 ms should go
+    // after the traversal/rebuild (i.e. allocation), not the comparator —
+    // sorting is no longer the expensive part of `sort`.
+    //
+    // `sort_unstable` is safe to use here even though the general path is
+    // stable: two equal `Int`s are the same value, so no observable ordering
+    // distinguishes them. That does NOT hold for the mixed path, where an
+    // Int and a Float can compare equal while remaining distinguishable
+    // (`1` vs `1.0`), which is why only this branch drops stability.
+    if all_int {
+        ints.sort_unstable();
+        // Reuse the `items` allocation rather than building a second Vec.
+        for (slot, n) in items.iter_mut().zip(ints) {
+            *slot = Value::Int(n);
+        }
+        return Ok(heap.list(items));
     }
 
     // Stable sort. The int-int branch keeps full precision; mixed pairs

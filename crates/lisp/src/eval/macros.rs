@@ -1240,7 +1240,7 @@ fn macroexpand_all_depth_inner(heap: &mut Heap, form: Value, env: EnvId, depth: 
     let form = macroexpand(heap, form, env)?;
     match form.unpack() {
         ValueRef::Pair(_) => {
-            let mut items = match heap.list_to_vec(form) {
+            let items = match heap.list_to_vec(form) {
                 Ok(items) => items,
                 Err(_) => return Ok(form), // improper list: leave it be
             };
