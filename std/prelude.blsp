@@ -712,6 +712,25 @@ and a set its elements, as everywhere else `seq` applies."
 (defn nth-list (coll i d)
   (cond (empty? coll) d (= i 0) (first coll) else (nth-list (rest coll) (- i 1) d)))
 
+;; A non-integer index is a type error that must name `nth`. Before this it fell
+;; through to the guards and the list walk, where `(>= i 0)` / `(- i 1)` raised
+;; `>=: expected number, got keyword` and `-: expected number, got keyword` — errors
+;; naming an arithmetic helper the caller never wrote, in violation of the
+;; self-identifying-type-error promise in docs/language.md. `(nth v :k)` is a real
+;; mistake (usually a map/sequence mix-up), so it must say so.
+(defn nth--bad-index (coll i)
+  (error (str "nth: expected an integer index, got " (name (type-of i)) " (" (pr-str i) ")"
+              " — a vector, list, string or bytes is indexed by position, not by key")))
+;; The list arm is also where a NON-collection lands (`(nth 5 0)`), which used to
+;; surface as `empty?: expected collection, got int (5)` — an internal `nth-list`
+;; walks through, not the op the caller wrote. Checked once per `nth`, not per step:
+;; the vector/bytes arms never reach it, and a list walk is already O(n).
+(defn nth--seq-or-fail (coll i d)
+  (if (or (pair? coll) (nil? coll))
+    (nth-list coll i d)
+    (error (str "nth: expected a collection to index, got "
+                (name (type-of coll)) " (" (pr-str coll) ")"))))
+
 (defn nth "The item at index `i` of `coll` (0-based), or `default` (else `nil`) if out of range."
   ;; The fixed 2-arity arm is the hot path (`(nth v i)`): it is VM-eligible
   ;; (exact arity), so its body compiles to bytecode and the inner `vector-ref`
@@ -719,17 +738,19 @@ and a set its elements, as everywhere else `seq` applies."
   ;; whole thing to the tree-walker. The `& default` arm keeps the explicit-default
   ;; behaviour for the rarer 3-arg call.
   ((coll i) (cond
+              (not (int? i)) (nth--bad-index coll i)
               (vector? coll) (if (and (>= i 0) (< i (vector-length coll))) (vector-ref coll i) nil)
               (bytes? coll) (if (and (>= i 0) (< i (byte-length coll))) (byte-at coll i) nil)
-              else (nth-list coll i nil)))
+              else (nth--seq-or-fail coll i nil)))
   ((coll i & default) (cond
+                        (not (int? i)) (nth--bad-index coll i)
                         (vector? coll) (if (and (>= i 0) (< i (vector-length coll)))
                                          (vector-ref coll i)
                                          (first default))
                         (bytes? coll) (if (and (>= i 0) (< i (byte-length coll)))
                                         (byte-at coll i)
                                         (first default))
-                        else (nth-list coll i (first default)))))
+                        else (nth--seq-or-fail coll i (first default)))))
 
 ;; ---- numeric helpers ----
 ;; ---- map operations ----
@@ -743,32 +764,76 @@ and a set its elements, as everywhere else `seq` applies."
 ;; straight to the `map-get` kernel op — no variadic-rest dispatch, no `(first
 ;; default)`, and no extra call hop. The cond is repeated per arm (rather than
 ;; factored into a helper) precisely to avoid that extra call on the hot path.
+;; A `get` that cannot be answered — the cold path, factored out so the hot arms
+;; below stay one `cond` deep. Two distinct mistakes, so two distinct messages:
+;;   - an integer-indexed collection asked for by a non-integer key (`(get v :name)`,
+;;     almost always a map/sequence mix-up: `deps` where `dep` was meant);
+;;   - something that isn't a collection at all (`(get 5 :k)`).
+;; Both used to leak an error from an internal the caller never wrote — `-`, `>=`, or
+;; `empty?` — and `(get "s" :k)` was worse than either: it silently returned nil, so a
+;; typo'd accessor produced a plausible-looking absent value. The `default` argument
+;; deliberately does NOT suppress these: a default means "the key is absent", not
+;; "the key is the wrong type".
+(defn get--unanswerable (coll k)
+  (if (or (pair? coll) (vector? coll) (bytes? coll) (string? coll))
+    (error (str "get: expected an integer index, got " (name (type-of k)) " (" (pr-str k) ")"
+                " — a vector, list, string or bytes is indexed by position, not by key."
+                " Did you mean one element of it, or `get-in` for a nested key?"))
+    (error (str "get: expected a collection (map, set, vector, list, string or bytes), got "
+                (name (type-of coll)) " (" (pr-str coll) ")"))))
+
 (defn get "The value at key/index `k` in `coll`, or `default` (else `nil`) if absent.
 Maps look up by key; **a set looks up by membership** — it yields the element
 itself when present (so `(get s x)` agrees with `(contains? s x)`), never a
-positional index; vectors, lists, and strings index by integer position
-(out-of-range yields the default, never an error)."
+positional index; vectors, lists, strings and bytes index by integer position, where
+an out-of-range index yields the default. `nil` is an empty collection (`(get nil k)`
+is the default). A **non-integer key on an integer-indexed collection**, or any
+non-collection, is a type error naming `get` — the default covers an absent key, not
+a wrong-typed one."
+  ;; Branch order is load-bearing, not stylistic: map (much the most common), then
+  ;; set, then the two cheap `nil?`/`string?` prim checks, then ONE fallthrough to
+  ;; `nth` for every integer-indexed kind — the shape the pre-2026-07-26 version had.
+  ;; Factoring the kind test into a `get--indexed?` helper (four type checks behind a
+  ;; call) measured a ~1.8x slowdown on `(get v i)`: 1130ms → 2050ms per 2M.
+  ;;
+  ;; MEASURED COST of the diagnostics (2M calls, release+JIT): `(get m :k)` 735 → 739ms
+  ;; (noise), `(get v i)` 1130 → 1432ms (~27%). Accepted deliberately: the keyword-key
+  ;; form is 4796 call sites in the workspace and is unaffected, while the integer-key
+  ;; form is 124 — and positional access in hot code goes through `nth`/`vector-ref`
+  ;; (720 sites), whose wall time is unchanged. ~115ms of the delta is `nth`'s own
+  ;; entry check showing up through this call (an inlining-boundary effect, not
+  ;; instruction cost — `nth` measured standalone is identical either way).
   ((coll k) (cond
               (map? coll) (map-get coll k nil)
               (set? coll) (if (%set-has? coll k) k nil)
-              (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll)))
-                               (char-at coll k)
-                               nil)
-              else (nth coll k nil)))
+              (nil? coll) nil
+              (string? coll) (if (int? k)
+                               (if (and (>= k 0) (< k (string-length coll))) (char-at coll k) nil)
+                               (get--unanswerable coll k))
+              (int? k) (nth coll k nil)
+              else (get--unanswerable coll k)))
   ((coll k default) (cond
                       (map? coll) (map-get coll k default)
                       (set? coll) (if (%set-has? coll k) k default)
-                      (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll)))
-                                       (char-at coll k)
-                                       default)
-                      else (nth coll k default)))
+                      (nil? coll) default
+                      (string? coll) (if (int? k)
+                                       (if (and (>= k 0) (< k (string-length coll)))
+                                         (char-at coll k)
+                                         default)
+                                       (get--unanswerable coll k))
+                      (int? k) (nth coll k default)
+                      else (get--unanswerable coll k)))
   ((coll k & default) (cond
                         (map? coll) (map-get coll k (first default))
                         (set? coll) (if (%set-has? coll k) k (first default))
-                        (string? coll) (if (and (int? k) (>= k 0) (< k (string-length coll)))
-                                         (char-at coll k)
-                                         (first default))
-                        else (nth coll k (first default)))))
+                        (nil? coll) (first default)
+                        (string? coll) (if (int? k)
+                                         (if (and (>= k 0) (< k (string-length coll)))
+                                           (char-at coll k)
+                                           (first default))
+                                         (get--unanswerable coll k))
+                        (int? k) (nth coll k (first default))
+                        else (get--unanswerable coll k))))
 
 ;; (assoc m k1 v1 k2 v2 …) -> a fresh map with each pair added/updated.
 ;; Multi-pair builders, split by collection kind so the kernel op (`map-assoc` /

@@ -283,7 +283,64 @@
     (assert= (get [1 2] 9) nil)
     (assert= (get [1 2] 9 :none) :none)
     (assert= (get "hi" 5 :none) :none)
-    (assert= (get "hi" -1) nil)))
+    (assert= (get "hi" -1) nil))
+  (test "nil is an empty collection, for any key"
+    (assert= (get nil :k) nil)
+    (assert= (get nil 0) nil)
+    (assert= (get nil :k :dflt) :dflt))
+  (test "a set looks up by membership, yielding the element"
+    (assert= (get #{:a :b} :a) :a)
+    (assert= (get #{:a :b} :z) nil)
+    (assert= (get #{:a} :z :none) :none)))
+
+;; The diagnostics. `get` is the most-called accessor in the language (~4800 sites
+;; in the workspace), and until 2026-07-26 four of its five failure modes leaked an
+;; error from an internal the caller never wrote — `-`, `>=` or `empty?` from `nth`'s
+;; arithmetic — while the fifth (a keyword key on a STRING) silently returned nil.
+;; docs/language.md promises type errors "name the operation"; these did not.
+(describe "get / nth name themselves when they cannot answer"
+  (test "a non-integer key on an integer-indexed collection is a get error"
+    ;; the classic mistake: `deps` (a list of maps) where `dep` (one map) was meant
+    (let (msg (try (get (list {:name "a"}) :name) (catch e (error-message e))))
+      (is (includes? msg "get:"))
+      (is (includes? msg "integer index"))
+      (is (includes? msg "keyword"))
+      (refute (includes? msg "expected number")))   ; the old leaked `-`/`>=` wording
+    (assert-error (get [1 2] :name))
+    (assert-error (get (bytes 1 2) :name)))
+  (test "a keyword key on a string is an ERROR now, not a silent nil"
+    ;; the worst of the five: a typo'd accessor produced a plausible absent value
+    (assert-error (get "store" :name))
+    (assert= (get "store" 0) "s"))
+  (test "a non-collection is a get error naming the value"
+    (let (msg (try (get 5 :name) (catch e (error-message e))))
+      (is (includes? msg "get:"))
+      (is (includes? msg "collection"))
+      (is (includes? msg "int"))))
+  (test "a default does NOT mask a wrong-typed key — only an absent one"
+    (assert-error (get [1 2] :name :dflt))
+    (assert-error (get "s" :name :dflt))
+    (assert= (get [1 2] 9 :dflt) :dflt))
+  (test "nth names itself too — it was the source of the leaked messages"
+    (let (msg (try (nth [1 2] :k) (catch e (error-message e))))
+      (is (includes? msg "nth:"))
+      (is (includes? msg "integer index"))
+      (refute (includes? msg "expected number")))
+    (assert-error (nth (list 1 2) :k))
+    (let (msg (try (nth 5 0) (catch e (error-message e))))
+      (is (includes? msg "nth:"))
+      (is (includes? msg "collection"))
+      (refute (includes? msg "empty?"))))   ; the old leaked `empty?` wording
+  (test "every valid shape is untouched by the new checks"
+    (assert= (get {:a 1} :a) 1)
+    (assert= (get [10 20] 1) 20)
+    (assert= (get (list 10 20) 0) 10)
+    (assert= (get (range 5) 2) 2)
+    (assert= (get (bytes 7 8) 1) 8)
+    (assert= (get "abc" 2) "c")
+    (assert= (nth [1 2 3] 1) 2)
+    (assert= (nth (list 1 2 3) 2) 3)
+    (assert= (nth [1] 9 :d) :d)))
 
 ;; ---- explicit concurrency / parallelism (spawn, send, copy-on-send) ----------
 ;; :isolated so these run against a private globals copy and don't contend with

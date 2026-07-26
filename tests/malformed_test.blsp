@@ -171,8 +171,18 @@
   (test "(get nil key) returns nil"
     (assert= nil (get nil :k)))
 
-  (test "(get string key) returns nil — strings are traversable but not key-value maps"
-    (assert= nil (get "hello" :k)))
+  ;; CHANGED 2026-07-26: this used to assert `nil`, on the reasoning that "strings are
+  ;; traversable but not key-value maps". That made it the only one of `get`'s five
+  ;; failure modes to fail SILENTLY — `(:name s)` on a string that should have been a
+  ;; map produced a plausible-looking absent value instead of a complaint, and the
+  ;; mistake surfaced arbitrarily far away. A string is integer-indexed, so a keyword
+  ;; key is a type error like it is for a vector or a list.
+  (test "(get string keyword-key) is a type error, not a silent nil"
+    (assert-error (get "hello" :k))
+    ;; the integer-indexed form is unchanged, including out-of-range → default
+    (assert= "h" (get "hello" 0))
+    (assert= nil (get "hello" 99))
+    (assert= :d (get "hello" 99 :d)))
 
   (test "(get integer key) raises type error"
     (assert-error (get 42 :k)))

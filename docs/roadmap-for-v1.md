@@ -40,21 +40,45 @@ By this test, **three** items qualify. Everything else waits.
 `(:name person)` ≡ `(get person :name)`, and `(:name person "unknown")` ≡ the 3-arg
 `get`. Nothing else becomes callable.
 
-**Why it can't wait.** It is additive in the strict sense — today `(:k m)` raises
+**Why it might not wait.** It is additive in the strict sense — today `(:k m)` raises
 `cannot call non-function`, so no valid program changes meaning — but it is
-*idiom-shaping*, and the corpus is already enormous:
+*idiom-shaping*.
 
-| Shape | Sites |
-|---|---|
-| `(get x :keyword)` in `brood/std` + `brood/tests` | **1,485** |
-| `(get x :keyword)` across the 12 sibling projects | **4,795** |
-| Hand-written `(fn (p) (get p :k))` accessor lambdas | **82** |
+**The honest size of the case, after checking the actual sites:**
 
-Those 82 lambdas are the sharp end: `(map :name people)` is the most-reached-for
-shape in map-heavy code and currently has no spelling at all. Ship 1.0 without this
-and every line of `std/`, every sibling, and every example in the docs is written the
-old way — then adding it becomes a migration wave at exactly the moment stability was
-promised.
+| Shape | Sites | Would `(:k m)` improve it? |
+|---|---|---|
+| `(fn (p) (get p :k))` passed to a HOF | **67** (59 `map`, 4 `filter`, 3 `sort-by`, 1 `keep`) | **Yes** — `(map :name deps)` |
+| `(get x :keyword)` standalone | 4,796 | **No** — `(get m :name)` puts the subject first and reads better |
+| `(get (get x :a) :b)` nested | 81 | **No** — that's `get-in`, which exists and is used 166× |
+| `(-> m (get :a) (get :b))` threading | **0** | — (no sites; this argument was hypothetical) |
+
+So the case is **67 sites of one shape**: keyword-as-*function*, not
+keyword-as-shorter-`get`. An earlier draft of this file cited the 4,796 figure as
+justification; that number was doing rhetorical work it doesn't deserve, since almost
+none of those sites would be converted even with the feature.
+
+**And there is a cheaper alternative** that captures most of it with **no language
+change** — a prelude one-liner, so it can ship in 1.1 as easily as now:
+
+```clojure
+(defn getter (k) (fn (m) (get m k)))
+(map (getter :name) deps)
+```
+
+`partial` can't do this, because `get`'s key is its *second* argument. So the real
+question is narrow: **is `(map :name deps)` worth a permanent exception in the call
+path, when `(map (getter :name) deps)` costs one prelude function?** Arguments for:
+it is the most readable form, it is what any Clojure-fluent reader reaches for, and
+`getter` is a *third* spelling for one idea (against "one spelling each"). Against:
+67 sites, the only non-function value that becomes callable, care needed in three
+engines plus the checker, and the alternative is additive.
+
+**Prerequisite, now done:** ✅ **ADR-164** fixed `get`/`nth`'s diagnostics. Four of
+`get`'s five failure modes leaked an error from an internal (`-`, `<=`, `empty?`) and
+the fifth returned `nil` silently — and `(:name deps)` where `deps` is a *list* is
+exactly the most likely misuse of callable keywords, so it had to say something true
+first.
 
 **Scope — keywords only.** Not maps, not vectors, not sets:
 

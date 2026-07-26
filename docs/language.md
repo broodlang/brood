@@ -180,7 +180,7 @@ Maps are immutable — every operation returns a **fresh** map:
 
 | Form | Meaning |
 |---|---|
-| `(get m k)` / `(get m k default)` | the value at `k`; `nil` (or `default`) if absent |
+| `(get m k)` / `(get m k default)` | the value at `k`; `nil` (or `default`) if absent. A **wrong-typed key** (a keyword into a vector/list/string) or a non-collection is a *type error*, not the default — `default` means "absent", never "malformed" |
 | `(assoc m k1 v1 k2 v2 …)` | a new map with the pairs added/updated (also works on a **vector** with integer indices — replaces, never appends) |
 | `(dissoc m k1 k2 …)` | a new map with those keys removed |
 | `(contains? m k)` | whether `k` is present (distinguishes a stored `nil` from absence) |
@@ -896,6 +896,13 @@ Type errors are **self-identifying**: they name the operation, the type it
 wanted, and the tag + printed form of what actually arrived — e.g.
 `type error: +: expected number, got string ("x")`. The tag word is the
 [`type-of`](#predicates) name, so an error and `type-of` always agree.
+
+That is a promise the *implementation* has to keep, and `get`/`nth` didn't until
+2026-07-26 (ADR-164): a keyword key on a vector or list fell through to `nth`'s
+integer arithmetic and surfaced as `-: expected number, got keyword` — naming a
+helper the caller never wrote — and the same key on a **string** silently returned
+`nil`. Both now name `get`/`nth` and say what was expected. If you find a diagnostic
+that names an internal, treat it as a bug of the same class.
 
 ## Dynamic variables
 
