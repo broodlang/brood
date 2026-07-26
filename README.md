@@ -377,6 +377,8 @@ docs/          architecture, language reference, roadmap, decisions, dev log
 - [ROADMAP.md](ROADMAP.md) — milestones and status
 - [docs/benchmarking.md](docs/benchmarking.md) — how performance is measured;
   archived runs in [docs/benchmarks/](docs/benchmarks/)
+- [docs/protocol-dispatch-design.md](docs/protocol-dispatch-design.md) — the open
+  design question behind protocols: a dispatch identity for user-defined types
 - [docs/decisions.md](docs/decisions.md) — why the key choices were made (ADRs)
 - [docs/devlog.md](docs/devlog.md) — chronological work log
 - [docs/brood-for-claude.md](docs/brood-for-claude.md) — the pocket reference for AI
