@@ -4,7 +4,7 @@
   ONE concept, value dispatch on the FIRST argument's *identity*:
     - a built-in value dispatches on its `type-of` kind (`:int`, `:string`, `:map`, …);
     - an identity-carrying record (`defrecord*`) dispatches on its NOMINAL id — a
-      `module/name` symbol baked in at definition — so two record shapes in one module
+      `module/name` keyword baked in at definition — so two record shapes in one module
       dispatch apart, and a plain map (even one carrying a `:type` field) never does.
 
   This subsumes both jobs the old `protocol`/`behaviour` split handled separately:
@@ -28,10 +28,14 @@
       `[ability op]` key is built once (the macro emits it as a quoted literal) and
       each call only indexes by the argument's runtime id.
 
-  SLICE 1 LIMITATION: a record's identity lives in a reserved `:__id__` map field, so it
-  currently shows up in `keys`/`=`/`json-encode`. The planned kernel carve-out (a hidden
-  identity slot) removes that leak; the surface here — `defrecord*` and `identity-of` —
-  is stable across that change, so nothing outside this module should read `:__id__`.")
+  Identity representation: a record's id is a reserved `:__id__` map field holding a
+  `module/name` KEYWORD (Slice 3 — a keyword literal is what the type-checker tracks via
+  `Ty::keyword_lit`, so a record's identity flows through inference; the seam that makes
+  the checker nominal-aware). `json-encode` omits `:__id__` (Slice 2 — it must never reach
+  the wire); a record printing with its id, and being `≠` a bare map, are *correct*
+  (Elixir-struct semantics), not leaks. The only residual is cosmetic — `keys`/`count`
+  include the id; use `record?`/`record-id`/`fields` for the clean, id-free view, which
+  is also the stable seam a future hidden slot swaps behind (nothing else reads `:__id__`).")
 
 ; ---- registries -------------------------------------------------------------
 
@@ -53,7 +57,7 @@
 ; ---- dispatch identity ------------------------------------------------------
 
 (defn identity-of (x)
-  "The dispatch identity of `x`: its nominal record id (a `module/name` symbol) if it
+  "The dispatch identity of `x`: its nominal record id (a `module/name` keyword) if it
   is an identity-carrying record, else its `type-of` kind. This — with `record?` /
   `record-id` / `fields` — is the one seam a later kernel slot swaps behind; nothing
   outside this module reads `:__id__` directly."
@@ -64,7 +68,7 @@
   (and (map? x) (contains? x :__id__)))
 
 (defn record-id (x)
-  "The nominal id (`module/name` symbol) of record `x`, or nil if `x` is not a record.
+  "The nominal id (`module/name` keyword) of record `x`, or nil if `x` is not a record.
   Unlike `identity-of`, never falls back to `type-of`."
   (if (record? x) (get x :__id__) nil))
 
@@ -160,20 +164,23 @@
 
     (impl Size :int             (size [n] n))
     (impl Size geometry/circle  (size [c] (get c :r)))"
-  (cons 'do
-    (map
-      (fn (m)
-        (let (op-name (first m)
-              ; arg vector → list
-              arg-syms (map (fn (s) s) (second m))
-              body (rest (rest m)))
-          (list 'ability/register-impl
-            (list 'quote aname)
-            (list 'quote op-name)
-            (list 'quote key)
-            (cons 'fn (cons arg-syms body))
-            (list 'quote (current-ns)))))
-      methods)))
+  ; the dispatch id is a KEYWORD: a record id written as a symbol (`geometry/circle`) is
+  ; keyworded to match what `identity-of` produces; a built-in id (`:int`) is already one.
+  (let (id-kw (if (symbol? key) (keyword (name key)) key))
+    (cons 'do
+      (map
+        (fn (m)
+          (let (op-name (first m)
+                ; arg vector → list
+                arg-syms (map (fn (s) s) (second m))
+                body (rest (rest m)))
+            (list 'ability/register-impl
+              (list 'quote aname)
+              (list 'quote op-name)
+              id-kw
+              (cons 'fn (cons arg-syms body))
+              (list 'quote (current-ns)))))
+        methods))))
 
 (defmacro defrecord* (rec fields)
   "Like `defrecord`, but constructed values carry a NOMINAL identity — a `module/name`
@@ -183,8 +190,11 @@
 
     (defmodule geometry)
     (defrecord* circle (r))          ; (circle 2) → {:__id__ geometry/circle :r 2}"
-  (let (id (symbol (str (name (current-ns)) "/" (name rec))))
+  ;; The id is a KEYWORD (`:module/name`), not a symbol: a keyword literal is what the
+  ;; type-checker tracks (`Ty::keyword_lit`), so a record's identity flows through
+  ;; inference as a literal — the seam that makes the checker nominal-aware (Slice 3).
+  (let (id (keyword (str (name (current-ns)) "/" (name rec))))
     (list 'defn rec fields
       (cons 'hash-map
-        (cons :__id__ (cons (list 'quote id)
+        (cons :__id__ (cons id
           (mapcat (fn (f) (list (keyword (name f)) f)) fields)))))))

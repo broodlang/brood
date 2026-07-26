@@ -37,8 +37,8 @@
 (describe "nominal identity is opt-in"
   (test "a plain map dispatches as :map, not as any record"
     (assert= (size {:type :circle :r 9}) 2))   ; :map impl (count), NOT the circle impl
-  (test "the identity is a module/name symbol captured at definition"
-    (assert= (get (circle 1) :__id__) 'ability-test/circle))
+  (test "the identity is a module/name keyword captured at definition"
+    (assert= (get (circle 1) :__id__) :ability-test/circle))
   (test "a record is still a structural map for get/assoc"
     (assert= (get (circle 2) :r) 2)
     (assert= (get (assoc (circle 2) :r 9) :r) 9)))
@@ -106,7 +106,7 @@
   (test "record? / record-id / fields are the clean, id-free API"
     (is (record? (circle 3)))
     (refute (record? {:r 3}))
-    (assert= (record-id (circle 3)) 'ability-test/circle)
+    (assert= (record-id (circle 3)) :ability-test/circle)
     (assert= (record-id {:r 3}) nil)
     (assert= (fields (circle 3)) {:r 3}))
   (test "a record is NOT = to a bare map with the same fields (Elixir-struct semantics)"
