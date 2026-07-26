@@ -2422,18 +2422,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![pid_ty.union(map_ty), any], nil_ty),
         send,
     );
-    // Arg shape: (matcher: callable, timeout: int|nil, on-timeout: callable|nil).
-    // The `receive` macro in `std/prelude.blsp` expands to exactly this; the
-    // `callable|nil` on the third position is for the no-`after`-clause case
-    // (the macro passes `nil`).
+    // Arg shape: (matcher: callable, timeout: int|nil). The `receive` macro in
+    // `std/prelude.blsp` expands to exactly this. The matcher answers `[idx var…]`
+    // for the clause that matched (nil = no match); a timeout answers nil.
     def(
         heap,
         "%receive",
-        Arity::exact(3),
-        Sig::new(
-            vec![callable, int.union(nil_ty), callable.union(nil_ty)],
-            any,
-        ),
+        Arity::exact(2),
+        Sig::new(vec![callable, int.union(nil_ty)], any),
         receive_match,
     );
     // The dirty-native offload pool (ADR-144): the `offload` wrapper in the

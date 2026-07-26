@@ -113,7 +113,51 @@
     (send (self) :boom)
     (assert= (try (receive (:boom (throw [:handled]))) (catch e e)) [:handled])
     ;; the :boom was removed before its body ran, so the mailbox is now empty
-    (assert= (receive (:boom :still-there) (after 0 :drained)) :drained)))
+    (assert= (receive (:boom :still-there) (after 0 :drained)) :drained))
+
+  ;; ---- the clause protocol itself (ADR-155) ---------------------------------
+  ;; `%receive` only SELECTS a clause — it answers `[idx var…]` — and the bodies
+  ;; are emitted at the call site, which rebinds those vars positionally. So the
+  ;; binder list the matcher packs and the one the call site unpacks must agree
+  ;; exactly: same names, same order, wildcards and pins excluded, duplicates
+  ;; collapsed. These pin that agreement.
+
+  (test "wildcards are not binders — the surrounding vars keep their positions"
+    (send (self) [:multi 1 :skipped 2])
+    (assert= (receive ([:multi a _ b] [a b])) [1 2]))
+
+  (test "a non-linear pattern binds the repeat once and gates on equality"
+    (send (self) [:pair 4 5])
+    (send (self) [:pair 7 7])
+    ;; [:pair 4 5] fails the equality, so the scan leaves it and takes [:pair 7 7]
+    (assert= (receive ([:pair a a] a)) 7)
+    (assert= (receive ([:pair a b] [a b])) [4 5]))
+
+  (test "a pinned value is matched, not bound"
+    (let (tok (ref) other (ref))
+      (send (self) [:tok other :wrong])
+      (send (self) [:tok tok :right])
+      (assert= (receive ([:tok ^tok v] v)) :right)
+      (assert= (receive ([:tok ^other v] v)) :wrong)))
+
+  (test "a clause binding nil is a match, not a timeout"
+    ;; The primitive answers nil for BOTH no-match and timeout, so a matched
+    ;; clause whose binding (or whose body's value) is nil must not be mistaken
+    ;; for the deadline firing.
+    (send (self) [:v nil])
+    (assert= (receive ([:v x] (if (nil? x) :bound-nil :other)) (after 1000 :timed))
+      :bound-nil)
+    (send (self) :quiet)
+    (assert= (receive (:quiet nil) (after 1000 :timed)) nil))
+
+  (test "a tail-recursive receive loop runs in O(1) stack"
+    ;; The body sits in tail position at the call site, so `drain`'s self-call is
+    ;; an ordinary tail call — 20k deep must not grow the stack.
+    (defn drain-loop (k)
+      (if (= k 0)
+        :done
+        (do (send (self) [:x k]) (receive ([:x v] (drain-loop (- v 1)))))))
+    (assert= (drain-loop 20000) :done)))
 
 ;; ---- liveness at scale (full preemption proof is the Rust test) --------------
 

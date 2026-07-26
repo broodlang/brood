@@ -498,7 +498,11 @@ languages* (`nbody`, `regex`, `sieve`, `persistent-map`) — is now cleared
 (2026-07-17):** nbody left 7/7 with the `fsqrt` inline (2026-07-15), sieve is
 3/7 after the dense-Table work (2026-07-16), persistent-map is 6/7 (2026-07-15),
 and regex left 7/7 at ~92 ms compute, past Clojure (2026-07-17). The remaining
-open rows are `nqueens`, `ring`/`pingpong`, `bintree`, and `loop`.
+open rows were `nqueens`, `ring`/`pingpong`, `bintree`, and `loop`; the
+**2026-07-26 round took `ring` −48% and `pingpong` −22%** (ADR-155, the inline-receive
+lever) and re-measured the other three, which are **at their floors for now** —
+`loop` at ~4 cycles/iteration, `nqueens` and `bintree` allocation-bound with the
+plausible-looking JIT lever measured and refuted (see each row).
 `json`/`base64` stay excluded as gaps (Elixir/Node win them with native C codecs
 against our by-design pure-Brood code — a separate, lower-priority pure-Brood-codec
 track); `base64` is the residual coin-flip last place.
@@ -577,42 +581,71 @@ track); `base64` is the residual coin-flip last place.
   (2026-07-15), the lock-free dense store + resume-tier fix (sieve −33%, loop
   −75%, 2026-07-16), and the **JIT inlining dense table ops** (0.10 → 0.06 s,
   4/7 → 3/7, 2026-07-16). No bitset primitive needed. **[kernel]**
-- ⬜ **`nqueens` — was 15× (backtracking allocation); −31% from routing closure
-  arms through the call-profitability gate + deopt feedback (2026-07-16);
-  re-measure the ratio.** Residual: list/closure allocation per branch; overlaps
-  the HOF-fold and allocation paths (see
-  [`docs/compute-frontier.md`](docs/compute-frontier.md)). **[kernel]**
+- ⬜ **`nqueens` — 95 ms; allocation-bound, NOT dispatch-bound (re-confirmed
+  2026-07-26).** Was 15×; −31% from routing closure arms through the
+  call-profitability gate + deopt feedback (2026-07-16). Residual: list/closure
+  allocation per branch; overlaps the HOF-fold and allocation paths (see
+  [`docs/compute-frontier.md`](docs/compute-frontier.md)). **Negative result worth
+  not re-chasing:** `BROOD_JIT_DUMP_IR` shows `safe?` and the `reduce` step lambda
+  tiering but **`solve` never lowering** — its `(fn (acc c) …)` is an
+  `Inst::MakeClosure`, the exact JIT bail that was crippling `receive` (ADR-155).
+  It looks like the same bug and is not: rewriting the port with the `reduce`
+  replaced by an explicit tail loop — no closure anywhere, every arm free to tier —
+  measured **95 ms, identical to the original** (checksum 724 both ways). So
+  admitting `MakeClosure` to the JIT subset must be justified on some other
+  workload; it buys nothing here. **[kernel]**
 - ✅ **`ackermann` — was 14× (non-tail double recursion), FIXED (`f90910c`, 2026-07-13):
   4.02 → 0.36s, 7/7 → 3/7.** The i64 unboxed worker's subset checker only matched *non-tail*
   self-calls (fib's arg-position recursion); `ack`'s recursion is in *tail* position
   (`SelfCall`), and its native-recursion depth cap was a stale 1400 (< `ack`'s ~4093 depth).
   Taught the subset about tail self-calls + raised the cap to 32768. Now 3rd, past
   Node/Clojure/Ruby/Python. **[kernel/JIT]**
-- ⬜ **`ring` / `pingpong` — residual message machinery.** Already cut from ~13×
-  (ADR-135 top-level-as-green-process, 6.5 → 3.3 µs/RT + wake elision), then
-  closure arms shared behind an `Arc` (ring 2.02 → 1.50 s, pingpong ~18%,
-  2026-07-13) and closure-template caching (2026-07-11), then the mailbox
-  mutex trimmed to ONE acquisition per matched message (was three: peek+copy
-  under lock, remove, deadline-clear — optimistic first-candidate pop +
-  copy-outside-lock; pingpong ~2–4%, 2026-07-19); `type-of` became a compiled
-  prim (matcher dispatch cheaper everywhere; type-dispatch loops ~25–30%,
-  pingpong ~1–2%, 2026-07-19 — profiling REFUTED the copy hypothesis: the
-  `to_message`/`from_message` copy is ~2% of a pingpong RT). The measured
-  remainder is the matcher execution protocol itself (`hof_apply_step` →
-  full `vm_apply` per candidate + a fresh body-thunk closure per match) and
-  scheduler/capture — the deep lever is a BEAM-style inline receive (clauses
-  compiled into the owning arm's bytecode, no matcher closure, no thunk).
-  **[kernel]**
-- ⬜ **`bintree` — GC / allocation pressure.** Build+walk trees; per-node alloc +
-  minor-GC throughput vs BEAM. Inline small-vector storage (2026-07-01) and the
-  checkpoint purity exemption + nursery capacity seeding (2026-07-18) trimmed it;
-  the 2026-07-18 profile says what's LEFT is the deferred big-ticket JIT items
-  (~17% `jit_run_fast_link` + ~11% frame staging — the "true call inlining"
-  lever — and ~10% allocation FFI), not regressions. **[kernel]**
-- ⬜ **`loop` — raw iteration overhead.** Was 6×; the resume-tier fix took −75%
-  (2026-07-16). Residual per-iteration overhead: overflow-checked add,
-  reduction/safepoint tick, frame reset. Incremental JIT-tuning grind (BEAM
-  has a 25-yr lead) — expect small wins. **[kernel/JIT]**
+- 🟡 **`ring` / `pingpong` — the inline-receive lever SHIPPED 2026-07-26 (ADR-155):
+  `ring` 1376 → 720 ms (−48%), `pingpong` 249 → 194 ms (−22%).** Already cut from
+  ~13× before that (ADR-135 top-level-as-green-process, 6.5 → 3.3 µs/RT + wake
+  elision), then closure arms shared behind an `Arc` (ring 2.02 → 1.50 s, pingpong
+  ~18%, 2026-07-13) and closure-template caching (2026-07-11), then the mailbox
+  mutex trimmed to ONE acquisition per matched message (2026-07-19); `type-of`
+  became a compiled prim (2026-07-19 — profiling REFUTED the copy hypothesis: the
+  `to_message`/`from_message` copy is ~2% of a pingpong RT).
+
+  The 2026-07-26 round found the remainder was **not** scheduling: isolating a
+  self-send + `receive` (zero cross-process handoff) priced a receive at **820 ns**
+  vs 310 ns for `send`, i.e. `pingpong` was paying for receive machinery almost
+  exclusively. Two compounding defects, both from the body **thunk**: building +
+  calling it cost ~235 ns/message (vs ~50 ns for a small-vector protocol), and
+  because `Inst::MakeClosure` is outside the JIT subset it made the whole matcher
+  arm unlowerable — `BROOD_NO_JIT=1` and `BROOD_NO_HOF_JIT=1` both changed the
+  number by **zero**. Fix: `%receive` (arity 3 → 2) now only *selects* a clause
+  (`[idx var…]`, nil = no match, nil = timeout) and the macro emits every body at
+  the **call site**, so bodies compile into the owning arm and matcher arms tier
+  (`tail_call` on pingpong: 400,309 → 473).
+
+  ⬜ Still open: the per-candidate `vm_apply` in the scan — `BROOD_NO_HOF=1` is
+  197 → 509 ms, so that protocol is still doing real work. The deeper lever is
+  compiling the pattern *test* into the calling arm's bytecode so the scan makes no
+  closure call at all. Beyond that the residual is `send` (310 ns) + the remaining
+  receive (615 ns): mailbox lock, `from_message`, and the `hof_resolve` redone per
+  receive. **[kernel]**
+- ⬜ **`bintree` — GC / allocation pressure; 118 ms, unchanged (re-measured
+  2026-07-26).** Build+walk trees; per-node alloc + minor-GC throughput vs BEAM.
+  Inline small-vector storage (2026-07-01) and the checkpoint purity exemption +
+  nursery capacity seeding (2026-07-18) trimmed it; the 2026-07-18 profile says
+  what's LEFT is the deferred big-ticket JIT items (~17% `jit_run_fast_link` +
+  ~11% frame staging — the "true call inlining" lever — and ~10% allocation FFI),
+  not regressions. Its `[left right]` cells are returned from `make` and walked by
+  `check`, so they **escape** and scalar replacement is inapplicable; the only
+  lever left is a narrower cell representation, which spends a core invariant
+  (2026-07-24 spike). The one open watch-item. **[kernel]**
+- ⬜ **`loop` — raw iteration overhead; AT THE FLOOR (re-confirmed 2026-07-26).**
+  Was 6×; the resume-tier fix took −75% (2026-07-16). 50 ms wall ≈ 40 ms compute
+  for 30M iterations = **~1.33 ns/iter**, about four cycles for an
+  overflow-checked add, a compare, a branch and the safepoint tick. Measured and
+  rejected: threading the bound as a parameter instead of reading the global
+  (which is how the Elixir/Node ports are written, so *more* faithful) is
+  **70 ms vs 50 ms — slower**; the global read is already hoisted and the third
+  argument costs more than it saves. Incremental JIT-tuning grind (BEAM has a
+  25-yr lead) — expect small wins. **[kernel/JIT]**
 - ✅ **`persistent-map` — was 5.2× vs Elixir (612ms v 118ms), 7/7; FIXED by lever (1)
   (2026-07-15, benchmark transcription in `brood-benchmarks`, no kernel change):
   0.71 → 0.16 s locally (~4.4×), harness-scaled ≈ 138 ms → past Clojure's 285 ms
