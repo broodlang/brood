@@ -264,9 +264,9 @@ diverge, and the differences are deliberate:
 - **Concurrency is share-nothing processes + message passing**, not shared memory.
   There are **no atoms, refs, agents, STM, or transients** — no mutable reference
   cell of any kind. State lives in a process, or in a shared `Table`.
-- **The loop is recursion with proper tail calls** (Scheme-style). `loop`/`recur`
-  is a local, stack-safe tail loop (a `letrec`-backed macro, not a special form);
-  there is no `while` and no `set!`.
+- **The loop is recursion with proper tail calls** (Scheme-style). A local,
+  self-contained loop is a `letrec`-bound closure called by name; there is no
+  `loop`/`recur`, no `while`, and no `set!`.
 - **Code is lists, data is vectors.** Parameter lists are written `(x y)`, not
   `[x y]` — the opposite emphasis from Clojure.
 - **`def` is late-binding global rebinding** — that *is* live hot reload

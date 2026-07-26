@@ -467,14 +467,14 @@ destructure):
 (when-let (v (get m :k)) (use v))         ; body only when truthy
 ```
 
-**`loop`/`recur`** — a local, stack-safe tail loop; reach for it instead of a
-top-level `--acc` helper for a self-contained loop. It expands to a
-self-tail-calling `letrec`, so a tail `recur` is O(1) stack (and `loop`/`recur` are
-reserved — not usable as ordinary variable names):
+**Local loops** — there is **no `loop`/`recur`**; Brood has proper tail calls, so a
+self-contained loop is a `letrec`-bound closure you call by name (it closes over the
+enclosing scope, so you thread only the *changing* state, and the tail call is O(1)
+stack):
 
 ```clojure
-(loop (n 100000 acc 0)
-  (if (= n 0) acc (recur (- n 1) (+ acc n))))   ;=> 5000050000
+(letrec (go (fn (n acc) (if (= n 0) acc (go (- n 1) (+ acc n)))))
+  (go 100000 0))                                ;=> 5000050000, O(1) stack
 ```
 
 **`fmt`** — string interpolation. `(fmt "…{expr}…")` splices each `{expr}` hole's

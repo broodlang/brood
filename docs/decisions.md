@@ -9453,20 +9453,24 @@ months), the renames are free — the deciding factor for the trims below.
   braces nest inside a hole. Chosen over a reader sigil because `#"…"` is already the
   (rejected) Clojure-regex form and `#b"…"`/`#{…}` are taken — and because "policy in
   Brood, mechanism in Rust" (ADR-006) prefers a macro to a permanent surface commitment.
-- **`loop`/`recur`** — the local tail loop ADR-026 reserved "for if ergonomics
-  demand it." The 83 helpers *are* that demand. `(loop (a init …) body…)` binds a
-  local recursion point; `(recur …)` re-enters it. It expands to a `letrec`-bound
-  closure whose self-call is a proper tail call, so it is O(1) stack exactly like the
-  hand-written accumulator loop — but stays *inline* instead of leaking a helper into
-  the namespace. `recur` is rewritten by a macro-time code-walk that does not descend
-  into a nested `loop` or a `quote`. Cost accepted: `loop`/`recur` are no longer usable
-  as ordinary identifiers (the Clojure tradeoff); ~7 internal sites that used `loop` as
-  a local name were renamed to `go` or converted to the macro (scaffold + font-zoom
-  example now showcase it). The Lisp-1 reserved-word question this raises — and the
-  alternative of making operators *lexically shadowable* (so `loop` need not be
-  reserved), plus why Lisp-2 was rejected — was discussed and **deferred**, keeping
-  reserved words for now; the full spec, gotchas, and hygiene analysis are recorded
-  in [deferred.md #7](deferred.md).
+- **Local loops — `letrec`, not a `loop`/`recur` macro** (prototyped, then dropped).
+  The 83 top-level `--acc`/`--loop` helpers were the motivation, and a `loop`/`recur`
+  macro was built first (a `letrec` expansion with a macro-time code-walk rewriting
+  `recur`), then reshaped to a Scheme named-let, then **removed entirely**. The
+  reasoning, in order: (1) since Brood is a Lisp-1, a `loop` macro is a reserved word,
+  and the Lisp-1/Lisp-2 tradeoff (Lisp-2 frees the name but taxes every higher-order
+  call with `funcall`/`#'` — rejected); (2) `recur` earns its keep in *Clojure* mainly
+  because the JVM has **no tail-call optimization** — `recur` is the workaround. **Brood
+  has proper tail calls**, so `(defn f (x) (f (dec x)))` is already O(1); the core reason
+  for `recur` evaporates. (3) With `recur` gone, `loop` is just terse sugar over
+  `letrec`, which Brood already has — not worth a reserved word. **Decision: no
+  `loop`/`recur`.** A self-contained local loop is a `letrec`-bound closure called by
+  name — `(letrec (go (fn (i acc) … (go …))) (go 0 0))` — which closes over the
+  enclosing scope (thread only the changing state) and is O(1) via tail calls; a
+  top-level `defn` covers loops needing no enclosing locals. The `loop`/`recur`
+  unbound-symbol hint points to `letrec`. The general reserved-word cost of *other*
+  macros (`when`/`for`/`cond`/…), and the "make operators lexically shadowable" idea
+  (Option C) that would remove it, are recorded in [deferred.md #7](deferred.md).
 - **`if-let` / `when-let`** — bind, test the *source* value (a fresh temp, so a
   destructuring target behaves), branch. The AI-facing docs already *claimed* these
   existed; now they do.
@@ -9509,9 +9513,8 @@ any other marker is a clean error (ADR-152).
 - Purely additive at the core: no new special form, no `Value` kind, no evaluator
   change; the 8 special forms are untouched and immutability is unaffected.
 - The checker's curated signatures (`types/check/sigs.rs`) were re-keyed to the new
-  names; the `loop`/`recur` "Brood has no loop/recur" evaluator hint became a
-  "`recur` is only valid inside a `loop`" hint.
+  names; the `loop`/`recur` unbound-symbol hint points to `letrec` + tail recursion.
 - `nest check` stays at zero warnings across `std/` + `tests/`; the in-language
   suite and the Rust checker tests are green. New coverage in
-  `tests/ergonomics_test.blsp` (fmt, loop/recur, if-let/when-let, some->/cond->,
-  doto, run!, incl. a cross-process send of a closure that uses fmt/loop).
+  `tests/ergonomics_test.blsp` (fmt, if-let/when-let, some->/cond->, doto, run!,
+  incl. a cross-process send of a closure that uses fmt + a `letrec` loop).

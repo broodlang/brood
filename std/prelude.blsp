@@ -1116,32 +1116,16 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
   (let (name (first binding) expr (second binding) v (gensym "v"))
     `(let (~v ~expr) (when ~v (let (~name ~v) ~@body)))))
 
-;; ---- named loop with `recur` ------------------------------------------------
-;; The local-iteration form the library otherwise fakes with a top-level
-;; `name--acc`/`name--loop` helper. `(loop (a init …) body…)` binds a *local*
-;; recursion point; `(recur next-a …)` re-enters it with new values. It expands to
-;; a `letrec`-bound closure whose self-call — being a proper tail call — keeps the
-;; stack O(1) exactly like the hand-written accumulator loop, but stays inline
-;; instead of leaking a helper into the namespace. `recur` inside a nested `loop`
-;; or a `quote` is left alone (it belongs to the inner form / is literal data).
-(defn loop--names (binds) (if (empty? binds) nil (cons (first binds) (loop--names (rest (rest binds))))))
-(defn loop--vals (binds) (if (empty? binds) nil (cons (second binds) (loop--vals (rest (rest binds))))))
-(defn loop--rw-args (forms target)
-  (if (empty? forms) nil (cons (loop--rw (first forms) target) (loop--rw-args (rest forms) target))))
-(defn loop--rw (form target)
-  ;; rewrite each `(recur …)` into a self-call to `target`, without descending
-  ;; into a nested `loop` (its recurs are its own) or a `quote` (literal data).
-  (cond
-    (not (pair? form)) form
-    (= (first form) 'recur) (cons target (loop--rw-args (rest form) target))
-    (= (first form) 'loop) form
-    (= (first form) 'quote) form
-    else (loop--rw-args form target)))
-(defmacro loop (binds & body)
-  "Loop with a local recursion point: `(loop (a init …) body…)` binds each `a` and re-enters via `(recur next-a …)`. A tail `recur` runs in O(1) stack (it is a proper tail call). Prefer this over a top-level `--acc`/`--loop` helper for a self-contained loop."
-  (let (self (gensym "loop"))
-    `(letrec (~self (fn ~(loop--names binds) ~@(loop--rw-args body self)))
-       (~self ~@(loop--vals binds)))))
+;; ---- local loops: just use `letrec` -----------------------------------------
+;; Brood has no `loop`/`recur` macro. A self-contained *local* loop is a `letrec`-
+;; bound closure you call by name:
+;;   (letrec (go (fn (i acc) (if (= i n) acc (go (inc i) (+ acc i))))) (go 0 0))
+;; It closes over the enclosing scope (thread only the *changing* state; the loop's
+;; params are exactly what evolves), and a tail call to `go` is a proper tail call —
+;; O(1) stack. A top-level `defn` works too when the loop needs no enclosing locals.
+;; (`loop`/`recur` were prototyped then dropped: `recur` is a workaround for runtimes
+;; without tail calls — which Brood has — and `loop` was just `letrec` sugar not worth
+;; a reserved word. See ADR-154 / deferred.md.)
 
 ;; ---- side-effecting iteration (function form of `doseq`) --------------------
 (defn run! (f coll)
