@@ -110,6 +110,71 @@ fn protocol_complete_impl_is_clean() {
     assert!(!ws.iter().any(|w| w.contains("takes")), "{ws:?}");
 }
 
+// ---- ability missing-impl at call sites (Slice 3) ----
+// The pass runs over the EXPANDED tree, so these `(require 'ability)` so the
+// `defability`/`impl`/`defrecord*` macros load and expand (check_file evals top-level
+// requires). Identity for a literal is its `type-of` kind; for a `defrecord*` ctor
+// call, its nominal id.
+
+#[test]
+fn ability_flags_a_builtin_kind_with_no_impl() {
+    let ws = file_warnings(
+        "(require 'ability)\n\
+         (ability/defability Size (size [self] :-> int))\n\
+         (ability/impl Size :int (size [n] n))\n\
+         (defn bad () (size \"hi\"))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("Size: no impl of `size` for :string")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn ability_flags_a_record_with_no_impl() {
+    // `(defmodule t)` gives `defrecord*` a namespace to bake its `:t/rect` identity into
+    // (check_file's `file_ns` sets the compile ns from it); the top-level require loads
+    // the module so the qualified macros expand.
+    let ws = file_warnings(
+        "(require 'ability)\n\
+         (defmodule t)\n\
+         (ability/defability Size (size [self] :-> int))\n\
+         (ability/defrecord* rect (w h))\n\
+         (defn bad () (size (rect 1 2)))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("no impl of `size` for :")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn ability_is_silent_when_the_call_is_covered() {
+    let ws = file_warnings(
+        "(require 'ability)\n\
+         (ability/defability Size (size [self] :-> int))\n\
+         (ability/impl Size :int (size [n] n))\n\
+         (defn ok () (size 5))",
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("no impl of `size`")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn ability_pass_never_flags_a_protocol_op() {
+    // protocol op fns also dispatch through an `impl-for`; the ability pass must key
+    // on the *qualified* `ability/impl-for`, so a protocol call is never mistaken.
+    let ws = file_warnings(
+        "(require 'protocol)\n\
+         (protocol/defprotocol P (op [self] :-> any))\n\
+         (defn c () (op 5))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("ability P")), "{ws:?}");
+}
+
 // ---- behaviour conformance: `(:implements …)` on a module ----
 
 #[test]

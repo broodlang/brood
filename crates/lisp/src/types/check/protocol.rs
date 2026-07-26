@@ -11,7 +11,7 @@
 //! op specs `(op [args] …)`); it doesn't need the macros' definitions, so this is a
 //! pure static analysis independent of where the macros live (the std/Hatch prototype).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::core::heap::Heap;
 use crate::core::value::{self, Value};
@@ -343,4 +343,271 @@ fn is_rest_marker(v: Value) -> bool {
 fn bare_name(name: value::Symbol) -> String {
     let full = value::symbol_name(name);
     full.rsplit('/').next().unwrap_or(&full).to_string()
+}
+
+// ---- ability missing-impl at call sites (Slice 3) ---------------------------
+//
+// Warn on a call to an ability op whose FIRST argument has a *statically known*
+// identity — a literal, or a direct `defrecord*` constructor call — for which no
+// impl (and no `:default`) is registered.
+//
+// Soundness (the checker's no-false-positives rule): an op fn is recognised only by
+// its EXACT def symbol, fingerprinted by an `(…/impl-for (quote [A op]) …)` in its
+// body — so a same-named non-ability function is never mistaken for one, and a
+// cross-file op call (whose def isn't in this tree) is simply not checked. An id is
+// taken only when certain. The impl set unions this file's own `register-impl` forms
+// (not eval'd at check time) with the runtime `ability/*impls*` registry (cross-file
+// reachable impls), so an impl in either place suppresses the warning.
+
+/// `(quote X)` → `Some(X)`.
+fn unquote(heap: &Heap, v: Value) -> Option<Value> {
+    let items = list_items(heap, v)?;
+    if items.len() == 2 && head_is(&items, "quote") {
+        Some(items[1])
+    } else {
+        None
+    }
+}
+
+/// The last body form of `(fn ARGS BODY…)` / `(lambda …)`, or `None` for a non-fn.
+fn fn_last_body(heap: &Heap, v: Value) -> Option<Value> {
+    let items = list_items(heap, v)?;
+    let is_fn = matches!(items.first(),
+        Some(&Value::Sym(s)) if value::symbol_is(s, "fn") || value::symbol_is(s, "lambda"));
+    if !is_fn {
+        return None;
+    }
+    items.last().copied()
+}
+
+/// Search `form` for `(…/impl-for (quote [A op]) …)` → `(ability, op)`.
+fn find_op_key(heap: &Heap, form: Value) -> Option<(String, String)> {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let items = list_items(heap, form)?;
+        if let Some(&Value::Sym(h)) = items.first() {
+            if sym_name(Value::Sym(h)).as_deref() == Some("ability/impl-for") {
+                if let Some(Value::Vector(vid)) = items.get(1).and_then(|&v| unquote(heap, v)) {
+                    let vec = heap.vector(vid);
+                    if let (Some(&a), Some(&o)) = (vec.first(), vec.get(1)) {
+                        if let (Some(an), Some(on)) = (sym_name(a), sym_name(o)) {
+                            return Some((an, on));
+                        }
+                    }
+                }
+            }
+        }
+        items.iter().find_map(|&item| find_op_key(heap, item))
+})
+}
+
+/// If `form` is `(hash-map :__id__ :ID …)`, the id keyword's name.
+fn record_ctor_id(heap: &Heap, form: Value) -> Option<String> {
+    let items = list_items(heap, form)?;
+    if !matches!(items.first(), Some(&Value::Sym(h)) if bare_name(h) == "hash-map") {
+        return None;
+    }
+    // pairs after the head: find the value following the `:__id__` key
+    let mut i = 1;
+    while i + 1 < items.len() {
+        if matches!(items[i], Value::Keyword(k) if value::symbol_is(k, "__id__")) {
+            return sym_name(items[i + 1]);
+        }
+        i += 2;
+    }
+    None
+}
+
+/// Collect this file's ability op fns (`def sym → (ability, op)`) and record ctors
+/// (`def sym → id name`). Recurses — a `def` can nest inside a macro's `do`.
+fn collect_ability_defs(
+    heap: &Heap,
+    form: Value,
+    op_fns: &mut HashMap<value::Symbol, (String, String)>,
+    ctors: &mut HashMap<value::Symbol, String>,
+) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        let Some(&Value::Sym(head)) = items.first() else {
+            return;
+        };
+        if value::symbol_is(head, "quote") || value::symbol_is(head, "quasiquote") {
+            return;
+        }
+        if value::symbol_is(head, "def") {
+            if let (Some(&Value::Sym(name)), Some(&val)) = (items.get(1), items.get(2)) {
+                if let Some(body) = fn_last_body(heap, val) {
+                    if let Some(key) = find_op_key(heap, body) {
+                        op_fns.insert(name, key);
+                    }
+                    if let Some(id) = record_ctor_id(heap, body) {
+                        ctors.insert(name, id);
+                    }
+                }
+            }
+        }
+        for &item in items.get(1..).unwrap_or(&[]) {
+            collect_ability_defs(heap, item, op_fns, ctors);
+        }
+})
+}
+
+/// Collect `(…/register-impl (quote A) (quote op) :ID …)` forms from this file.
+fn collect_register_impls(
+    heap: &Heap,
+    form: Value,
+    impls: &mut HashSet<(String, String, String)>,
+    defaults: &mut HashSet<(String, String)>,
+) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        if let Some(&Value::Sym(h)) = items.first() {
+            if sym_name(Value::Sym(h)).as_deref() == Some("ability/register-impl") {
+                let a = items.get(1).and_then(|&v| unquote(heap, v)).and_then(sym_name);
+                let op = items.get(2).and_then(|&v| unquote(heap, v)).and_then(sym_name);
+                let id = items.get(3).copied().and_then(sym_name);
+                if let (Some(a), Some(op), Some(id)) = (a, op, id) {
+                    if id == "default" {
+                        defaults.insert((a, op));
+                    } else {
+                        impls.insert((a, op, id));
+                    }
+                }
+            }
+        }
+        for &item in items.get(1..).unwrap_or(&[]) {
+            collect_register_impls(heap, item, impls, defaults);
+        }
+})
+}
+
+/// Union in the runtime `ability/*impls*` registry — `[A op] → {id → …}` — so an impl
+/// reachable through a required module (not present as a form in this file) counts.
+fn read_impls_registry(
+    heap: &Heap,
+    impls: &mut HashSet<(String, String, String)>,
+    defaults: &mut HashSet<(String, String)>,
+) {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("ability/*impls*"))
+    else {
+        return;
+    };
+    for (op_key, inner) in heap.map_entries(mid) {
+        let Value::Vector(vid) = op_key else { continue };
+        let vec = heap.vector(vid);
+        let (Some(&a), Some(&o)) = (vec.first(), vec.get(1)) else {
+            continue;
+        };
+        let (Some(a), Some(o)) = (sym_name(a), sym_name(o)) else {
+            continue;
+        };
+        let Value::Map(inner_id) = inner else { continue };
+        for (idk, _) in heap.map_entries(inner_id) {
+            if let Some(id) = sym_name(idk) {
+                if id == "default" {
+                    defaults.insert((a.clone(), o.clone()));
+                } else {
+                    impls.insert((a.clone(), o.clone(), id));
+                }
+            }
+        }
+    }
+}
+
+/// The statically-known identity name of a call argument, or `None` if not certain.
+fn arg_identity(
+    heap: &Heap,
+    arg: Value,
+    ctors: &HashMap<value::Symbol, String>,
+) -> Option<String> {
+    match arg {
+        Value::Int(_) | Value::BigInt(_) => Some("int".into()),
+        Value::Float(_) => Some("float".into()),
+        Value::Str(_) => Some("string".into()),
+        Value::Keyword(_) => Some("keyword".into()),
+        Value::Bool(_) => Some("bool".into()),
+        Value::Map(_) => Some("map".into()),
+        Value::Vector(_) => Some("vector".into()),
+        // a direct constructor call `(circle …)` → the record's id
+        Value::Pair(_) => {
+            let items = list_items(heap, arg)?;
+            match items.first() {
+                Some(&Value::Sym(h)) => ctors.get(&h).cloned(),
+                _ => None,
+            }
+        }
+        // a variable, `nil`, a fn, … → not statically certain
+        _ => None,
+    }
+}
+
+/// Walk every call site; warn when an ability op is applied to a known-identity arg
+/// with no impl and no `:default`.
+#[allow(clippy::too_many_arguments)]
+fn walk_ability_calls(
+    heap: &Heap,
+    form: Value,
+    op_fns: &HashMap<value::Symbol, (String, String)>,
+    ctors: &HashMap<value::Symbol, String>,
+    impls: &HashSet<(String, String, String)>,
+    defaults: &HashSet<(String, String)>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        let Some(&Value::Sym(head)) = items.first() else {
+            return;
+        };
+        if value::symbol_is(head, "quote") || value::symbol_is(head, "quasiquote") {
+            return;
+        }
+        if let Some((a, op)) = op_fns.get(&head) {
+            if let Some(&arg) = items.get(1) {
+                if let Some(id) = arg_identity(heap, arg, ctors) {
+                    let covered = defaults.contains(&(a.clone(), op.clone()))
+                        || impls.contains(&(a.clone(), op.clone(), id.clone()));
+                    if !covered {
+                        let pos = heap.form_pos_only(form);
+                        out.push((
+                            pos,
+                            format!("ability {}: no impl of `{}` for :{}", a, op, id),
+                        ));
+                    }
+                }
+            }
+        }
+        for &item in &items {
+            walk_ability_calls(heap, item, op_fns, ctors, impls, defaults, out);
+        }
+})
+}
+
+/// Check ability op calls against registered impls (see the section comment above).
+pub(super) fn check_ability_calls(
+    heap: &Heap,
+    expanded: &[Value],
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    let mut op_fns: HashMap<value::Symbol, (String, String)> = HashMap::new();
+    let mut ctors: HashMap<value::Symbol, String> = HashMap::new();
+    for &form in expanded {
+        collect_ability_defs(heap, form, &mut op_fns, &mut ctors);
+    }
+    if op_fns.is_empty() {
+        return;
+    }
+    let mut impls: HashSet<(String, String, String)> = HashSet::new();
+    let mut defaults: HashSet<(String, String)> = HashSet::new();
+    for &form in expanded {
+        collect_register_impls(heap, form, &mut impls, &mut defaults);
+    }
+    read_impls_registry(heap, &mut impls, &mut defaults);
+    for &form in expanded {
+        walk_ability_calls(heap, form, &op_fns, &ctors, &impls, &defaults, out);
+    }
 }
