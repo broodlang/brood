@@ -865,9 +865,13 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // builtin like `check`, a prelude closure — is by definition the OLD
         // value; ADR-123: a def always wins). Only the file-local declared sig
         // may describe it; never the stale heap signature.
-        let sig = declared
-            .clone()
-            .or_else(|| (!ctx.is_file_global(s)).then(|| sig_of(heap, s)).flatten());
+        // `is_lexical_local` guards the heap fallback too: a shadowing local is not
+        // the global, so its arg/return types are unknown — never the primitive's.
+        let sig = declared.clone().or_else(|| {
+            (!ctx.is_lexical_local(s) && !ctx.is_file_global(s))
+                .then(|| sig_of(heap, s))
+                .flatten()
+        });
         // The real callable's arity is authoritative when known (a `sig!` wrapper
         // preserves the wrapped fn's arity); fall back to the declared param count
         // for a file-local defn the read-only checker can't inspect. A declared
@@ -875,22 +879,32 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // a fixed sig to a range instead of an exact count; a fixed-arity sig that
         // applies to a known-variadic global is suppressed (the sig's fixed count
         // is an undercount, so using it as an exact arity would be a false positive).
-        let arity = (!ctx.is_file_global(s))
-            .then(|| arity_of(heap, s))
-            .flatten()
-            .or_else(|| {
-                declared
-                    .filter(|sg| sg.rest.is_some() || !ctx.is_variadic_global(s))
-                    .map(|sg| {
-                        if sg.rest.is_some() {
-                            Arity::at_least(sg.params.len())
-                        } else if sg.optional.is_empty() {
-                            Arity::exact(sg.params.len())
-                        } else {
-                            Arity::range(sg.params.len(), sg.params.len() + sg.optional.len())
-                        }
-                    })
-            });
+        //
+        // A **lexical local shadows the global** — a `let`/`fn` binding named like a
+        // builtin (`(let (exit (get o :exit)) (exit model))`) is the local, not the
+        // primitive, so its arity is unknown here. Skip the whole computation, exactly
+        // as the declared-sig lookup above does (`is_lexical_local` → `None`);
+        // otherwise `arity_of` reads the global's arity and false-flags the call.
+        let arity = if ctx.is_lexical_local(s) {
+            None
+        } else {
+            (!ctx.is_file_global(s))
+                .then(|| arity_of(heap, s))
+                .flatten()
+                .or_else(|| {
+                    declared
+                        .filter(|sg| sg.rest.is_some() || !ctx.is_variadic_global(s))
+                        .map(|sg| {
+                            if sg.rest.is_some() {
+                                Arity::at_least(sg.params.len())
+                            } else if sg.optional.is_empty() {
+                                Arity::exact(sg.params.len())
+                            } else {
+                                Arity::range(sg.params.len(), sg.params.len() + sg.optional.len())
+                            }
+                        })
+                })
+        };
         // Unbound-symbol diagnostic: warn only when the head is **truly not
         // resolvable** — not local, not a syntactic keyword, not in the global
         // env (which includes `Value::Macro`s like `test` / `assert=` that
