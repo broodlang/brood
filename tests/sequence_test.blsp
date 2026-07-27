@@ -143,6 +143,30 @@
     (assert= (sort nil) nil)
     (assert= (sort []) nil)))
 
+;; `reverse-onto` is the one-pass spelling of `(append (reverse xs) ys)` — the shape
+;; every tail-recursive accumulator loop ends in. The equivalence to the long form is
+;; the property that matters, so each case asserts it directly.
+(describe "reverse-onto"
+  (test "reverses the prefix onto the tail"
+    (assert= (reverse-onto (list 3 2 1) (list 4 5)) (list 1 2 3 4 5)))
+  (test "agrees with (append (reverse xs) ys)"
+    (let (xs (list 5 4 3 2 1) ys (list 6 7))
+      (assert= (reverse-onto xs ys) (append (reverse xs) ys)))
+    (assert= (reverse-onto (range 20 0 -1) (list 21)) (append (reverse (range 20 0 -1)) (list 21))))
+  (test "either side may be empty"
+    (assert= (reverse-onto nil (list 4 5)) (list 4 5))
+    (assert= (reverse-onto (list 3 2 1) nil) (list 1 2 3))
+    (assert= (reverse-onto nil nil) nil))
+  (test "the prefix reads as a sequence, like reverse"
+    (assert= (reverse-onto [3 2 1] (list 4)) (list 1 2 3 4))
+    (assert= (reverse-onto #{1} (list 4)) (list 1 4)))
+  (test "the tail is shared, not copied — a long tail costs nothing"
+    ;; Splicing onto a 10k-element tail returns in O(prefix); this would be O(tail)
+    ;; if the tail were rebuilt, and the identity check pins it.
+    (let (tail (range 10000) out (reverse-onto (list 2 1) tail))
+      (assert= (count out) 10002)
+      (assert= (rest (rest out)) tail))))
+
 (describe "concat / mapcat / frequencies"
   (test "concat joins any number of sequences, over lists and vectors, into a list"
     (assert= (append (list 1 2) (list 3 4) (list 5)) (list 1 2 3 4 5))

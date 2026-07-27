@@ -1738,7 +1738,7 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 ### Lists & sequences
 `cons`  `first`  `rest`  `second`  `third`  `last`  `but-last`
 `list`  `vector`  `vec`  `conj`  `disj`  `into`  `seq`  `enumerate`
-`append`  `reverse`  `nth`  `count`  `empty?`
+`append`  `reverse`  `reverse-onto`  `nth`  `count`  `empty?`
 `range`  `take`  `drop`  `split-at`  `take-last`  `drop-last`  `take-while`  `drop-while`
 `member?`  `any?`  `every?`  `find`  `index-of`  `index-where`  `zip`
 `partition`  `sort`  `sort-by`  `subvec`  `remove`  `remove-nth`  `keep`
@@ -1759,6 +1759,11 @@ to your mailbox — resend the queue on `[:nodeup …]`.
 - `append` concatenates any number of sequences — lists *and* vectors, read as
   sequences — left to right, returning a **list**; wrap in `(into [] …)` for a
   vector. (The `concat` alias was removed — one spelling each.)
+- `reverse-onto` is `(append (reverse xs) ys)` in **one** pass instead of four, and
+  is the spelling to reach for in a tail-recursive loop that has accumulated a
+  reversed prefix and wants to splice it back in front of the remainder — the shape
+  every non-tail-to-tail rewrite lands in. `ys` is shared, not copied, so only the
+  prefix costs anything.
 - `range`: `(range hi)` → `0..hi-1`; `(range lo hi)` → `lo..hi-1`;
   `(range lo hi step)` steps (ascending or descending). The result is a **lazy
   range** — an O(1) value that stands in for the list it denotes: it prints,

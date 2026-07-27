@@ -65,7 +65,7 @@ If no values remain under `k`, the key is dropped."
   (letrec (go (fn (acc xs)
                 (cond
                   (nil? xs) (reverse acc)
-                  (= (first xs) v) (append (reverse acc) (rest xs))
+                  (= (first xs) v) (reverse-onto acc (rest xs))
                   else (go (cons (first xs) acc) (rest xs)))))
     (go nil lst)))
 
