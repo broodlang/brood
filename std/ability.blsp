@@ -24,7 +24,7 @@
 
   Two registries, mirroring `protocol`:
     *abilities* — name → declared op specs, as DATA (introspection / checker hook).
-    *impls*     — [ability op] → {id → {:fn f :from ns}}. Nested so the constant
+    *impls*     — [ability op] → {id → fn}. Nested so the constant
       `[ability op]` key is built once (the macro emits it as a quoted literal) and
       each call only indexes by the argument's runtime id.
 
@@ -41,8 +41,11 @@
 
 ; ability-name → op specs (introspection / checker / LSP)
 (def *abilities* {})
-; [ability op] → {id → {:fn f :from ns}} (runtime dispatch, provenance-tagged)
+; [ability op] → {id → fn} (runtime dispatch — the fn stored directly, no wrapper)
 (def *impls* {})
+; [ability op id] → registering ns (provenance for conflict detection; read only at
+; registration, never on dispatch — keeps the dispatch value a bare fn)
+(def *impl-from* {})
 
 (defn register-ability (aname specs)
   "Record ability `aname`'s declared op specs (raw forms) for the checker / LSP."
@@ -75,7 +78,12 @@
   is an identity-carrying record, else its `type-of` kind. This — with `record?` /
   `record-id` / `fields` — is the one seam a later kernel slot swaps behind; nothing
   outside this module reads `:__id__` directly."
-  (if (and (map? x) (contains? x :__id__)) (get x :__id__) (type-of x)))
+  ; one hash on the hot path: `get` (not `contains?` + `get`). `:__id__` is a reserved
+  ; keyword a record always carries and is never nil, so a present id is truthy.
+  (if (map? x)
+    (let (id (get x :__id__))
+      (if id id (type-of x)))
+    (type-of x)))
 
 (defn record? (x)
   "True if `x` is an identity-carrying record (a `defrecord*` value)."
@@ -101,20 +109,23 @@
   modify-write of `*impls*` — register at load time, as top-level `impl` does."
   (let (op-key [aname op]
         methods (or (get *impls* op-key) {})
-        prev (get methods key))
-    (if (and prev (not (= (get prev :from) from)))
+        prov-key [aname op key]
+        prev-from (get *impl-from* prov-key))
+    (if (and prev-from (not (= prev-from from)))
       (println "warning: ability " aname "/" op " for " key
-        " — impl from " (get prev :from) " overridden by " from " (last wins)")
+        " — impl from " prev-from " overridden by " from " (last wins)")
       nil)
-    (def *impls* (assoc *impls* op-key (assoc methods key {:fn f :from from})))
+    ; store the fn DIRECTLY (not `{:fn f}`) so dispatch skips a map-get; provenance lives
+    ; in *impl-from*, read only at registration (conflict detection), never on dispatch.
+    (def *impls* (assoc *impls* op-key (assoc methods key f)))
+    (def *impl-from* (assoc *impl-from* prov-key from))
     nil))
 
 (defn impl-for (op-key key)
   "The impl fn of op `op-key` (a `[ability op]` pair) for id `key`, falling back to a
   `:default` impl, or nil. One map fetch for the op's method set, then one by id."
-  (let (methods (get *impls* op-key)
-        rec (or (get methods key) (get methods :default)))
-    (if rec (get rec :fn) nil)))
+  (let (methods (get *impls* op-key))
+    (or (get methods key) (get methods :default))))
 
 (defn no-impl (op-key key)
   "The loud, located error an op raises when no impl (and no `:default`) covers id
