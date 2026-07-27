@@ -637,22 +637,27 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 ;; removes the need for separate `name--acc` globals. Each loop calls the user fn
 ;; directly — no extra `apply` frame per element. Inside `step`: `item` is bound to
 ;; the current element and `acc` is the current accumulator.
-(defmacro defseq (sym params docstring step)
-  "Define an eager sequence op that reverse-accumulates over `coll`.
+;; `item` and `acc` are *intentional* anaphora: a `defseq` step-expr is documented
+;; to reference them (`(cons (f item) acc)`), so they must stay literal — the `aif`
+;; `it` case the hygiene lint anticipates. Only the two anaphoric names are opted out;
+;; the purely-internal collection binder is auto-gensym'd (`coll#`) so it can't capture.
+(check-allow :hygiene
+  (defmacro defseq (sym params docstring step)
+    "Define an eager sequence op that reverse-accumulates over `coll`.
 `params` are the extra arguments before `coll`; inside `step`, `item` is the
 current element and `acc` is the current accumulator."
-  (if (not (string? docstring))
-    (error "defseq: third argument must be a docstring string, got "
-      (pr-str docstring)
-      ". Syntax: (defseq name (params...) \"docstring\" step-expr)")
-    `(defn ~sym (~@params coll)
-       ~docstring
-       (letrec (--loop (fn (coll acc)
-                         (if (empty? coll)
-                           acc
-                           (let (item (first coll))
-                             (--loop (rest coll) ~step)))))
-         (reverse (--loop (seq coll) nil))))))
+    (if (not (string? docstring))
+      (error "defseq: third argument must be a docstring string, got "
+        (pr-str docstring)
+        ". Syntax: (defseq name (params...) \"docstring\" step-expr)")
+      `(defn ~sym (~@params coll#)
+         ~docstring
+         (letrec (--loop (fn (coll# acc)
+                           (if (empty? coll#)
+                             acc
+                             (let (item (first coll#))
+                               (--loop (rest coll#) ~step)))))
+           (reverse (--loop (seq coll#) nil)))))))
 
 (defseq map
   (f)

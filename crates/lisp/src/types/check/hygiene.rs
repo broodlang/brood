@@ -70,6 +70,17 @@ fn check_macro_hygiene_inner(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos
         if value::symbol_is(head, kw::QUOTE) || value::symbol_is(head, kw::QUASIQUOTE) {
             return;
         }
+        // `(check-allow :hygiene …)` / `(%lint-allow :hygiene …)` — the author has
+        // declared this macro's captures intentional: an **anaphoric** macro (like
+        // `defseq`, whose spliced `step` is *documented* to reference `item`/`acc`,
+        // or `aif`'s `it`) deliberately binds a name for the caller's code to see.
+        // Skip its whole subtree. (Both spellings so it works before *or* after the
+        // `check-allow` macro expands.) Matches the recursion lint's opt-out.
+        if (value::symbol_is(head, "check-allow") || value::symbol_is(head, "%lint-allow"))
+            && matches!(items.get(1), Some(&Value::Keyword(cat)) if value::symbol_is(cat, "hygiene"))
+        {
+            return;
+        }
         if value::symbol_is(head, kw::DEFMACRO) && items.len() >= 3 {
             analyze_defmacro(heap, &items, form, out);
             // fall through: a nested `defmacro` in the body is still worth scanning.
@@ -129,6 +140,15 @@ fn find_templates(
     }
 }
 
+/// True when `v` is an `(unquote …)` / `(unquote-splicing …)` form — an
+/// expansion-time hole, not literal template structure. A binder sublist that is
+/// one (`(let ~bindings …)`) has no statically-knowable binders.
+fn is_unquote_form(heap: &Heap, v: Value) -> bool {
+    matches!(proper_list(heap, v).as_deref(),
+        Some([Value::Sym(h), ..])
+            if value::symbol_is(*h, kw::UNQUOTE) || value::symbol_is(*h, kw::UNQUOTE_SPLICING))
+}
+
 /// Walk a quasiquote template. At each `let`/`fn` binder form, flag a literal
 /// symbol binder when a macro parameter is spliced into that binder's scope.
 fn analyze_template(
@@ -157,7 +177,14 @@ fn analyze_template(
 
         let is_let = value::symbol_is(head, kw::LET);
         let is_fn = value::symbol_is(head, kw::FN);
-        if is_let && items.len() >= 2 {
+        // The binder sublist must be *literal* template structure. When it is a
+        // computed hole — `(let ~bindings body…)` / `(fn ~params body…)`, as a
+        // threading macro like `as->` builds its bindings with `~steps` — the
+        // binders aren't knowable from the template, so reading it as a literal
+        // `(b0 v0 …)` list would take the `unquote` head itself as the first binder
+        // (the `as-> binds unquote` false positive). Skip it.
+        let binders_literal = items.len() >= 2 && !is_unquote_form(heap, items[1]);
+        if is_let && binders_literal {
             // `(let (b0 v0 b1 v1 …) body…)`. Brood `let` is sequential, so binder
             // `bj`'s scope is the *later* bindings' value expressions plus the
             // body — NOT its own value `vj` (evaluated before `bj` is bound) and
@@ -181,7 +208,7 @@ fn analyze_template(
                     );
                 }
             }
-        } else if is_fn && items.len() >= 2 {
+        } else if is_fn && binders_literal {
             // `(fn (p…) body…)` — parameters are bound together; each is visible
             // in the body, so the body is every parameter's scope.
             if let Some(ps) = proper_list(heap, items[1]) {
