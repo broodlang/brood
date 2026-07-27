@@ -64,6 +64,15 @@ fn run_suite() {
     // file's own default won and the sweep stayed full (which is how this was missed).
     // SAFETY: single-threaded, before the interpreter loads any test file.
     unsafe { std::env::set_var("BROOD_UCD_PART1_OF", "16") };
+    // Same treatment, same reason, for tests/jit_deep_recursion_test.blsp (the KI-14
+    // guard-page regression). Those three cases are ~2.7 s release but ~210 s here — 38%
+    // of this wrapper — because the property under test is deep recursion and a debug
+    // frame is far heavier. The knob scales *repetition* only (warm-up passes, and how
+    // much of the 188-document corpus the third case re-scans); both deep documents are
+    // still parsed at full depth in a spawned process, so the regression stays guarded.
+    // Release (`nest test`, `make suite`) keeps the exhaustive form.
+    // SAFETY: as above — single-threaded, before any test file loads.
+    unsafe { std::env::set_var("BROOD_JDR_OF", "4") };
     if let Err(e) = interp.eval_str(
         "(require 'test) (def *test-timeout-ms* 600000) \
          (require 'project) (project/run-project-tests)",

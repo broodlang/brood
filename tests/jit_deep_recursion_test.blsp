@@ -19,12 +19,29 @@
 ;; OS process dying. Register-only — discovered and run by `nest test`.
 (defmodule jit-deep-recursion-test (:use test) (:use corpus))
 
+;; These cases run in FULL by default (`BROOD_JDR_OF` unset). They are inherently
+;; expensive — the property under test IS deep recursion, so the depth cannot be reduced
+;; without losing it — and in a DEBUG build they cost ~210 s, 38% of the whole
+;; `brood_suite_passes` wrapper. `crates/lisp/tests/suite.rs` turns this knob down for
+;; that wrapper only; `nest test` / `make suite` stay exhaustive at ~2.7 s release.
+;;
+;; What the knob scales is *repetition*, never depth: the warm-up count, and how much of
+;; the 188-document corpus the third case re-scans. Both deep documents are always parsed
+;; at their full depth, in a spawned process, in every context — that is the regression.
+;; Read from the ENVIRONMENT at the point of use, not from a global the wrapper defines
+;; first: the wrapper's `def` would run before this file loads (the mistake the UCD knob's
+;; comment records).
+(def jdr--of (max 1 (or (string->number (or (getenv "BROOD_JDR_OF") "")) 1)))
+
 (defn jdr--parse (path)
   (try (do (json/json-parse (slurp path)) :ok) (catch e :rejected)))
 
 ;; Warm in THIS process so the parser arms tier to native before the spawned run.
+;; One pass already tiers the arms; extra passes only buy confidence, so they are the
+;; first thing the knob drops.
 (defn jdr--warm (path k)
   (if (= k 0) :warmed (do (jdr--parse path) (jdr--warm path (- k 1)))))
+(defn jdr--warm-count (k) (max 1 (/ k jdr--of)))
 
 ;; Parse in a spawned green process — on a scheduler worker, which is where the
 ;; guard-page abort happened.
@@ -47,7 +64,7 @@
   (test "a 100k-deep document parses in a spawned process after warming"
     (require 'json)
     (let (p "tests/corpus/json/data/n_structure_100000_opening_arrays.json")
-      (jdr--warm p 3)
+      (jdr--warm p (jdr--warm-count 3))
       (assert= (jdr--in-spawn p) :rejected)))
   (test "the alternating array/object document too"
     ;; This one survived the FIRST cut of the fix: the stamp encoded "already inside the
@@ -55,16 +72,28 @@
     ;; check off at exactly the moment it was needed.
     (require 'json)
     (let (p "tests/corpus/json/data/n_structure_open_array_object.json")
-      (jdr--warm p 2)
+      (jdr--warm p (jdr--warm-count 2))
       (assert= (jdr--in-spawn p) :rejected)))
   (test "the whole n_ corpus scans in a spawned process after warming"
     ;; The scan the suite actually runs: 188 documents, warm parent then spawned child.
     (require 'json)
-    (let (files (filter (fn (f) (= (substring (path-basename f) 0 1) "n"))
-                  (corpus-files "json")))
-      (assert= 188 (count files))
+    (let (all (filter (fn (f) (= (substring (path-basename f) 0 1) "n"))
+                 (corpus-files "json"))
+          ;; Discovery is asserted in full regardless of the knob; only the re-scan is
+          ;; sampled. `index mod n` so the slice spreads across the corpus (and so keeps
+          ;; the deep documents) rather than taking a prefix — deterministic either way.
+          files (jdr--every-nth all jdr--of))
+      (assert= 188 (count all))
       (jdr--scan-warm files)
-      (assert= (jdr--scan-in-spawn files) 188))))
+      (assert= (jdr--scan-in-spawn files) (count files)))))
+
+(defn jdr--every-nth (xs n)
+  (if (= n 1) xs (jdr--every-nth--go xs n 0 nil)))
+(defn jdr--every-nth--go (xs n i acc)
+  (if (nil? xs)
+    (reverse acc)
+    (jdr--every-nth--go (rest xs) n (inc i)
+                        (if (= (rem i n) 0) (cons (first xs) acc) acc))))
 
 (defn jdr--scan (fs n)
   (if (nil? fs) n (do (jdr--parse (first fs)) (jdr--scan (rest fs) (inc n)))))
