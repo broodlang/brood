@@ -70,9 +70,20 @@ retries = 1
 # for the whole suite in one process; the meaningful per-case guard is still the inner
 # `*test-timeout-ms*`. If this needs raising again, first check whether a single case has
 # become slow (fix that instead) rather than reflexively bumping the budget.
+#
+# Raised 600s → 1200s on 2026-07-27, and the check above was done first, not skipped:
+# this wrapper was being SIGKILLed at the 600s cap because a single case *had* become
+# pathological — KI-14, the RUNTIME collector re-walking a deep process's whole root
+# stack at every safepoint. That is fixed (see docs/known-issues.md), and what's left is
+# real work: the wrapper now completes in **562s**, with the release path at 88s for the
+# same 3591 cases. 562s against a 600s cap is too thin a margin to be a meaningful signal
+# — a loaded CI runner would redden the whole suite for no code reason — so double the
+# budget rather than sit one slow scheduling quantum away from a false red. The inner
+# `*test-timeout-ms*` (600s here, set in tests/suite.rs) remains the guard that actually
+# catches a hung case; this is only the outer wall-clock backstop.
 [[profile.default.overrides]]
 filter = 'binary(suite)'
-slow-timeout = { period = "60s", terminate-after = 10 }
+slow-timeout = { period = "60s", terminate-after = 20 }
 # One retry, for the same reason `distribution`/`serve_attach` get one — and with a
 # sharper edge here. The in-language suite CONTAINS timing-sensitive cases that talk
 # to a local node (`tests/remote_spawn_test.blsp` does a `remote-spawn` round trip),

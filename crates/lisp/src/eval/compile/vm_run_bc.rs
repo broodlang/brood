@@ -470,10 +470,14 @@ pub(crate) fn vm_run_bc(
         // would otherwise force this whole block — the `cur_code()` `ArcSwap` load — on
         // *every* frame for the rest of the run, which is the multigen `rounds`-shape
         // overhead. The drain is instead advanced/freed on `rt_dirty` (mint) frames,
-        // which occur whenever code churns; the separate O(1) drain self-report below
+        // which occur whenever code churns; the separate drain self-report below
         // still runs every frame so acks stay current, and a completable drain frees at
         // the next mint (retaining one extra generation over a fully idle interval is
-        // bounded and harmless).
+        // bounded and harmless). That report is O(1) per frame only because
+        // `runtime_gen_referenced_private` short-circuits a cached verdict — the probe
+        // itself is O(this process's roots), i.e. O(recursion depth). This comment used to
+        // assert a flat "O(1) drain self-report", which is what let KI-14 hide: a deep
+        // process was re-walking 1.7M roots per report.
         if heap.rt_dirty() && !crate::process::macro_block_active() {
             heap.rt_dirty_clear();
             if heap.rt_gc_due() {

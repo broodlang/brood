@@ -420,8 +420,43 @@ impl Heap {
         let mut work: Vec<Value> = Vec::new();
         let mut env_work: Vec<EnvId> = Vec::new();
 
-        // Phase 1 (cheap: private roots + live arms) always runs — a process that
-        // *becomes* clean by dropping a root re-reports clean at its very next safepoint.
+        // Both phases below are guarded by a stale-dirty throttle. The design assumed
+        // Phase 1 was cheap enough to run unconditionally; that holds only while the seed
+        // is small, and `roots` — the VM operand/env stack — grows with recursion depth.
+        // A process 100 000 frames deep seeds ~1.7 million values per walk (KI-14).
+        let epoch = self.runtime.drain_epoch.load(Ordering::Relaxed);
+
+        // **A cached stale-dirty verdict short-circuits the WHOLE probe, Phase 1 included.**
+        // This check used to sit between the two phases, which meant a process dirty via
+        // Phase 2 still paid a full Phase-1 walk on every safepoint — and then threw the
+        // result away, because the verdict below is `true` regardless of what Phase 1 found.
+        // Pure waste, invisible while Phase 1 really was cheap. It is not cheap for a deeply
+        // recursing process: `roots` grows with depth, and the KI-14 run measured 78 000
+        // Phase-1 walks over a 1.7-million-entry root stack inside a *single* drain epoch,
+        // which is why that run never finished. Hoisting the check changes no verdict — it
+        // only skips work whose result was already discarded.
+        if self.p2_dirty_epoch.get() == epoch {
+            let t = self.p2_dirty_tick.get().wrapping_add(1);
+            self.p2_dirty_tick.set(t);
+            if !t.is_multiple_of(P2_REVALIDATE_STRIDE) {
+                return true; // stale-dirty: skip both walks this safepoint
+            }
+        }
+
+        // The Phase-1 throttle proper, for a process dirty *via Phase 1* — deep in
+        // draining-generation code, which the hoisted Phase-2 check above does not cover.
+        // Gated on seed size so a shallow process is never throttled and keeps reporting
+        // its transition to clean on the very next safepoint.
+        let p1_seed =
+            self.roots.len() + self.env_roots.len() + self.dynamics.len() + self.live_vm_arms.len();
+        let p1_large = p1_seed > P1_LARGE_SEED;
+        if p1_large && self.p1_dirty_epoch.get() == epoch {
+            let t = self.p1_dirty_tick.get().wrapping_add(1);
+            self.p1_dirty_tick.set(t);
+            if !t.is_multiple_of(P1_REVALIDATE_STRIDE) {
+                return true; // stale-dirty: skip the O(depth) re-walk this safepoint
+            }
+        }
         if self.seed_phase1_and_walk(
             gen,
             false,
@@ -430,8 +465,15 @@ impl Heap {
             &mut visited,
             &mut visited_env,
         ) {
+            // Arm / keep the re-validation throttle for this epoch (large seeds only).
+            if p1_large && self.p1_dirty_epoch.get() != epoch {
+                self.p1_dirty_epoch.set(epoch);
+                self.p1_dirty_tick.set(0);
+            }
             return true;
         }
+        // Clean via Phase 1 — disarm so a later re-dirty is caught at once.
+        self.p1_dirty_epoch.set(u64::MAX);
 
         // Phase 2 (expensive: the whole LOCAL heap) is **throttled once it has found this
         // process dirty for the current drain epoch**. A process pinned by a RUNTIME handle
@@ -444,17 +486,11 @@ impl Heap {
         // safepoints bounds that to 1/stride. Sound: a stale-dirty verdict only *delays*
         // drain completion (never fabricates a clean ack), and a process that becomes clean
         // re-validates within a stride. Only Phase-2 dirtiness arms the throttle — a process
-        // dirty via Phase 1 (running old-gen code) never sets it, so the cheap re-check above
-        // still reports its transition to clean immediately (the drain-completion tests rely
-        // on that promptness). The epoch key resets the throttle when a new drain arms.
-        let epoch = self.runtime.drain_epoch.load(Ordering::Relaxed);
-        if self.p2_dirty_epoch.get() == epoch {
-            let t = self.p2_dirty_tick.get().wrapping_add(1);
-            self.p2_dirty_tick.set(t);
-            if !t.is_multiple_of(P2_REVALIDATE_STRIDE) {
-                return true; // stale-dirty: skip the O(heap) re-walk this safepoint
-            }
-        }
+        // dirty via Phase 1 (running old-gen code) sets its own, separately-gated throttle,
+        // which stays disarmed for a shallow process — so such a process still reports its
+        // transition to clean immediately (the drain-completion tests rely on that
+        // promptness). The stale-dirty short-circuit itself is hoisted to the TOP of this
+        // function; see the comment there for why.
         let dirty = self.seed_phase2_and_walk(
             gen,
             &mut work,
@@ -545,8 +581,24 @@ impl Heap {
         // --- Live VM arms mid-execution: RUNTIME literals baked into Const/MakeClosure
         // (the one holder off the GC root graph, mirroring compaction's step 3b). Read
         // them via the arm-handle visitor, returning each value unchanged. ---
-        let live_arms = self.live_vm_arms.clone();
-        for arm in &live_arms {
+        //
+        // **Visit each DISTINCT arm once.** `live_vm_arms` is a per-frame stack, so a
+        // recursive function occupies one entry per *active frame* — a 100 000-deep parse
+        // holds 100 000 entries that are all the same `Arc`. An arm's handle set doesn't
+        // depend on which frame is running it, so walking it once per distinct arm is
+        // equivalent and collapses that to a handful.
+        //
+        // Without the dedup this walk alone is O(depth × arm size). It is one of three
+        // things that made a deep process's probe explode under KI-14; the throttles in
+        // `runtime_gen_referenced_private` bound how often the probe runs, while this bounds
+        // what a single run costs. (It also drops a full `Vec<Arc<_>>` clone — one atomic
+        // increment per active frame — that the walk previously took for borrow reasons it
+        // no longer needs.)
+        let mut seen_arms: HashSet<*const crate::eval::compile::CompiledArm> = HashSet::new();
+        for arm in self.live_vm_arms.iter() {
+            if !seen_arms.insert(Arc::as_ptr(arm)) {
+                continue;
+            }
             crate::eval::compile::rewrite_arm_handles(arm, &mut |v| {
                 work.push(v);
                 v
@@ -1365,6 +1417,24 @@ fn runtime_gen_of(v: Value) -> Option<usize> {
 /// handles rewritten to their new indices. Non-RUNTIME values (atoms, LOCAL,
 /// PRELUDE) are returned unchanged — only the runtime region moves.
 fn flush_rt_value(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, v: Value) -> Value {
+    // Deep-car-nesting guard — see `WALKER_RED_ZONE`, and the identical guard on the
+    // LOCAL twin `gc::flush_value`. The cdr spine below is iterative, but *car* nesting
+    // still recurses `flush_rt_value` ⇄ `flush_rt_pair` one native frame per level, and a
+    // deeply nested value promoted into RUNTIME (a 100 000-level JSON document under test)
+    // ran the thread into its guard page — an abort, not a catchable error. RT compaction
+    // fires at auto-safepoints (ADR-091), so the collecting thread's remaining stack is
+    // arbitrary; grow into heap-backed segments rather than assume there is room.
+    stacker::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
+        flush_rt_value_grown(old, new, fwd, v)
+    })
+}
+
+fn flush_rt_value_grown(
+    old: &CodeSlabs,
+    new: &CodeSlabs,
+    fwd: &mut RuntimeForward,
+    v: Value,
+) -> Value {
     // Only forward handles resident in the *source* generation; a handle already in
     // the destination generation (or PRELUDE, whose `region() != RUNTIME`) is left
     // untouched — load-bearing for cross-generation migration, where a live global's

@@ -9217,3 +9217,72 @@ tests pass** — the one remaining failure is KI-14's `brood_suite_passes` timeo
 which was already open and is unrelated to this work. Before this run it was 879,
 because of Bug 2. No behaviour changed: every edit is documentation, a doc comment,
 or one test assertion repointed at the hint it is supposed to be pinning.
+## 2026-07-27 — KI-14 root-caused and fixed: `make test` goes green
+
+**KI-14 was not what it looked like.** Filed as "one conformance test hangs, but only
+under the test framework", with a note that it was *not* deep recursion (the deep
+documents parse fine in a spawned process). Both halves of that framing were wrong in a
+way that mattered: the framework was irrelevant except for **how much code it had
+loaded**, and deep recursion was the trigger — just not in the parser. Full write-up in
+[known-issues.md](known-issues.md#ki-14).
+
+The hang is in the **ADR-091 RUNTIME collector's drain report**. Its two-phase liveness
+probe throttles Phase 2 (the O(heap) walk) but runs Phase 1 unconditionally, on the
+premise that Phase 1 is cheap. Phase 1 seeds from `roots` — the VM operand/env stack —
+so its cost is **O(recursion depth)**. Instrumenting the hung run, inside a *single* drain
+epoch: **78 409 Phase-1 walks over a 1.7-million-entry root stack.**
+
+Three compounding faults, in order of how much they cost:
+
+1. The Phase-2 stale-dirty short-circuit sat **between** the phases, so a Phase-2-dirty
+   process paid a full Phase-1 walk every safepoint and discarded the result. Hoisting it
+   changes no verdict — it only skips work that was already being thrown away.
+2. Phase 1 had no throttle of its own. Added `P1_REVALIDATE_STRIDE`, gated on
+   `P1_LARGE_SEED` so shallow processes keep their every-safepoint promptness.
+3. `live_vm_arms` is a per-frame stack, so a recursive function appears once per frame
+   (66 448 entries, a handful of distinct `Arc`s) and each arm's whole IR tree was
+   re-walked per entry. Deduped by `Arc` identity.
+
+Filed repro: hang → **9.8 s**. Full in-language suite including conformance: **3591 tests,
+all passing, 88 s** — the gate that could not go green.
+
+**Two real stack-overflow aborts found alongside it, both distinct from the hang.** Worth
+separating clearly, because the first one initially looked like the answer and is not:
+
+- **JIT arms could run the native stack into its guard page.** `jit_native_depth` + the
+  `stacker` probe guard the *dispatch* paths only; recursion through `brood_rt_call_slow`
+  re-enters Rust every level while the counter stays near zero, so neither cap ever fired.
+  Now every lowered arm's prologue compares its own frame address against a
+  `Heap::jit_stack_limit` stamped from the live remaining stack at each native entry
+  (three instructions), sets `jit_force_vm` and deopts on a trip. Deopt alone livelocks —
+  VM re-runs the arm, callee re-tiers, prologue trips again — which cost an hour before
+  the flag went in. Guarded by `tests/jit_deep_recursion_test.blsp`; verified it aborts
+  with the fix stashed.
+- **`gc_runtime::flush_rt_value` ⇄ `flush_rt_pair` recursed unguarded.** The cdr spine was
+  made iterative by an earlier fix; *car* nesting still recursed a native frame per level.
+  The LOCAL twin `gc::flush_value` already had `stacker::maybe_grow` — the RUNTIME one was
+  simply missed.
+
+**Swept for the same defect class** (recursive native walker over user-controlled depth,
+where the reader's 256-level cap doesn't apply because the value is built at runtime).
+Probed print, equality, hashing, compare, `send`, table put/get/snapshot, `def`/promote,
+GC, `macroexpand`, `eval`, sort, and map/set keys against 200 000-deep lists, vectors and
+maps. All bound cleanly except **`value_cmp`**, the ordering sibling of `equal` and
+`hash_value_into`: both of those grow the stack, it recursed raw and aborted. Fixed the
+same way, and `tests/deep_values_test.blsp` — which already pinned promote, GC, equality
+and hashing — now covers ordering and `sort` too.
+
+**Overlap with the documentation run above.** Both sessions touched
+`hints_name_only_features_that_exist`. That entry repointed the `deftype` hint at
+`defability` and fixed the test it had left red; this one carried it one step further —
+the hint said `(require 'ability)` "gives" `defability`, but `require` only *loads*, so
+the name stays qualified (`ability/defability`). The hint and its assertion now say
+`(:use ability)`, and the test checks that against the live image (`bound? 'defability`
+is `false` after a bare `require`) rather than only matching the wording.
+
+**Method note.** gdb cannot *attach* here (yama `ptrace_scope`), which is what stalled the
+original investigation. It can still *launch*: `gdb --batch -ex run -ex "thread apply all
+bt"` plus a background `pkill -INT` to sample a running hang. Four samples put every hit in
+`seed_phase1_and_walk`; a temporary `eprintln` counter turned that into the exact numbers
+above. Two wrong theories died on those measurements (image size, then epoch count) — the
+counter is what ended the guessing.
