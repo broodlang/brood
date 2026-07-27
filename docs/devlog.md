@@ -9286,3 +9286,43 @@ bt"` plus a background `pkill -INT` to sample a running hang. Four samples put e
 `seed_phase1_and_walk`; a temporary `eprintln` counter turned that into the exact numbers
 above. Two wrong theories died on those measurements (image size, then epoch count) — the
 counter is what ended the guessing.
+
+## 2026-07-27 — published benchmark run: KI-14's stack guard costs a call
+
+Full cross-language run against `1a3fc1c` (`brood-benchmarks` `c755975`), published.
+**Ranks are unchanged on all 28 rows and no row is last-of-seven**; the aggregate reads
+3.2× of .NET (was 3.0×), still 3rd of seven ahead of Elixir. Most rows drifted +2–5% in a
+field where every language's figure rose, i.e. machine drift, not a code change.
+
+**Two rows moved for a real reason, and it is the KI-14 fix above.** `fib` 57 → 75 ms and
+`pfib` 165 → 218 ms — the same ~+30%, seen once and then ×100. Bisected with three
+separately-built binaries (`26939e2` pre-guard / `f11f4cb` guard / `1a3fc1c` HEAD, identical
+`release-fast` + feature flags, best-of-7 wall each, `taskset`-pinned):
+
+| binary | `fib` wall | `pfib` wall |
+|---|---|---|
+| `26939e2` (pre-guard) | 70.1 ms | 182.8 ms |
+| `f11f4cb` (guard) | 85.6 ms | 239.0 ms |
+| `1a3fc1c` (HEAD) | 85.3 ms | 236.6 ms |
+
+So the whole move lands on `f11f4cb` and nothing after it contributes. That is the right
+trade — an abort that took the OS process and that `try`/`catch` could never see became a
+catchable error — and it was made with the perf cost unmeasured, which this run supplies.
+
+**The cost is probably not irreducible, and the suspect is named.** The prologue check
+itself is three instructions against a preloaded absolute address. But `stamp_stack_limit`
+calls `stacker::remaining_stack()` on **every** `jit_run_fast_link` — the ~26 ns
+Brood→Brood path that `fib` is made of. The limit is an absolute address valid for the
+whole thread stack, so re-deriving it per link is redundant work: stamping only at the
+outermost native entry (`jit_native_depth == 0`) plus wherever a green process is
+(re)scheduled onto a worker (stack bases differ, which is why the stamp is live rather than
+constant) should keep the guarantee while taking the probe off the hot path. Unmeasured;
+recorded as lever 0 in the benchmark repo's `FRONTIER.md`.
+`tests/jit_deep_recursion_test.blsp` aborts the process if the guard regresses, so the
+experiment checks itself.
+
+**Also re-measured, and better than the note it replaces:** `sort` read 194 ms in-suite.
+The 2026-07-26 table carried a hand-patched 188 ms from an isolated re-run (its full-run
+sample was 208 ms) — this run measures the row directly, so the footnote is gone. Base RSS
+is 20.2 MB: 3rd rather than 2nd, having drifted ~1 MB past Ruby's 19.2 MB, still the
+lightest of the compiled-class runtimes.
