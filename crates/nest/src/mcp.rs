@@ -367,9 +367,9 @@ fn initialize_result() -> Json {
 // `tools/list` + `tools/call`
 // ============================================================================
 
-/// Project the Brood-side tool catalogue (`(mcp/mcp-tools)`, in `std/mcp.blsp` —
+/// Project the Brood-side tool catalogue (`(mcp/mcp-tools)`, in `std/tool/mcp.blsp` —
 /// and any project-side extensions step 3 introduces) to the JSON shape
-/// `tools/list` requires. A missing `std/mcp.blsp` (or any error) collapses
+/// `tools/list` requires. A missing `std/tool/mcp.blsp` (or any error) collapses
 /// to an empty list — the server stays useful, just with no tools yet.
 fn list_tools(interp: &mut Interp) -> Vec<Json> {
     let cp = interp.heap.checkpoint();
@@ -381,7 +381,7 @@ fn list_tools(interp: &mut Interp) -> Vec<Json> {
     brood::builtins::begin_stdout_capture();
 
     // Best-effort require — silently ignore "no such module" so the server
-    // works the moment it boots, before `std/mcp.blsp` exists (step 3) and
+    // works the moment it boots, before `std/tool/mcp.blsp` exists (step 3) and
     // even if a project hasn't defined its own MCP extensions yet.
     let _ = interp.eval_str("(require 'mcp)");
 

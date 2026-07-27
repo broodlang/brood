@@ -18,7 +18,7 @@
 //!   checking is `nest check`.
 //! - `-j N` / `--max-parallel N` caps how many spawned processes run on OS
 //!   threads at once (0 = unlimited, the default). Bounds a concurrent
-//!   test run; see `std/test.blsp`.
+//!   test run; see `std/tool/test.blsp`.
 //!
 //! Hot-reload lives in `nest run --watch` — the language binary has no
 //! `--watch` flag. The two-file pattern (entry + helpers) is the cleanest
@@ -59,7 +59,7 @@ struct Cli {
     check: bool,
 
     /// Cap concurrent spawned processes (0 = unlimited). Useful for bounding
-    /// a concurrent test run; see `std/test.blsp`.
+    /// a concurrent test run; see `std/tool/test.blsp`.
     #[arg(
         short = 'j',
         long = "max-parallel",
@@ -133,8 +133,8 @@ fn run(cli: Cli) {
         return;
     }
 
-    // The REPL is now Brood (`std/repl.blsp`): bootstrap into `(repl/repl-run)`. On a
-    // TTY it raw-mode edits (std/lineedit.blsp); piped input keeps `read-line`.
+    // The REPL is now Brood (`std/tool/repl.blsp`): bootstrap into `(repl/repl-run)`. On a
+    // TTY it raw-mode edits (std/editor/lineedit.blsp); piped input keeps `read-line`.
     // The guard restores the terminal on a panic unwind (the Brood `term-raw-leave`
     // is the normal teardown); scope it so it drops before any error report + exit
     // (`process::exit` skips Drop). Restore is idempotent.
@@ -150,7 +150,7 @@ fn run(cli: Cli) {
 
 /// Boot an embedded release bundle (ADR-038) — the path taken when this binary
 /// was produced by `nest release`. Hands `args` (the app's argv) to the embedded
-/// app's `:main` via `std/project.blsp`. No CLI flags, no project dir, no source
+/// app's `:main` via `std/tool/project.blsp`. No CLI flags, no project dir, no source
 /// on disk: every module is read from the appended archive.
 fn run_bundle(args: Vec<String>) {
     // Honour BROOD_MEM_LIMIT etc.; a shipped app stays unlimited unless opted in.

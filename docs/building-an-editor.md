@@ -137,9 +137,8 @@ value — the buffer plus the top visible line (the viewport) — and render it:
 
 ```clojure
 ;; src/render.blsp
-(defmodule render "Pure buffer → frame rendering for my-editor.")
-(require 'editor/buffer)
-(require 'editor/display)
+(defmodule render "Pure buffer → frame rendering for my-editor."
+  (:use editor/buffer) (:use editor/display))   ; `:use` imports; a bare `require` only loads
 
 (defn render--line (ed row line-idx cols)
   "One text op for buffer line `line-idx` drawn at screen `row`, clipped to `cols`."
@@ -185,8 +184,8 @@ A **command** is a function `editor -> editor` (or `editor -> :quit` to exit). A
 
 ```clojure
 ;; src/commands.blsp
-(defmodule commands "Editor commands + the keymap for my-editor.")
-(require 'editor/buffer)
+(defmodule commands "Editor commands + the keymap for my-editor."
+  (:use editor/buffer))
 
 ;; edit/move commands lift a buffer op into an editor-state op
 (defn cmd--on-buffer (f)
@@ -239,11 +238,8 @@ state — until a command returns `:quit`.
 
 ```clojure
 ;; src/main.blsp
-(defmodule main "my-editor entry point.")
-(require 'editor/buffer)
-(require 'editor/display)
-(require 'render)
-(require 'commands)
+(defmodule main "my-editor entry point."
+  (:use editor/buffer) (:use editor/display) (:use render) (:use commands))
 
 (defn editor--loop (ed)
   "Render, wait for a key, dispatch, repeat — until a command returns :quit."
@@ -285,9 +281,7 @@ Everything except the loop is pure, so test it like any other Brood code:
 
 ```clojure
 ;; tests/editor_test.blsp
-(require 'test)
-(require render)
-(require commands)
+(defmodule editor-test (:use test) (:use render) (:use commands))
 
 (describe "editing commands"
   (test "self-insert + arrows"

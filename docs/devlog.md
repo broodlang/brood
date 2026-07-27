@@ -15,9 +15,13 @@ The session history is split so this file stays loadable:
   compacted into the digest above (full text recoverable via git if ever needed).
 
 You rarely read either top to bottom. For the *current* state of something, prefer
-the topic doc (see [README.md](README.md)) or the relevant `## ADR-NNN` in
+the topic doc (see [../README.md](../README.md) § Documentation) or the relevant `## ADR-NNN` in
 [decisions.md](decisions.md). Use the digest to place a change in time; for an early
 session's full text, find its `## YYYY-MM-DD — …` header in the archive.
+
+Entries are historical and are not rewritten, so a few older ones link to design
+docs since deleted (`concurrency-v2.md`, `supervision.md`, `incremental-check.md` —
+mostly trimmed in `fdce540` once their features shipped). Recover from git if needed.
 
 **Maintenance:** keep this lean. Append a new session as a **full entry** under
 "Recent"; once it's older than a day or two, condense it to its **one-line digest
@@ -9045,3 +9049,171 @@ main each time.
 
 Merged-tree gates after all of it: **3428 in-language + 68 corpus tests, 865 Rust tests**,
 `nest check` zero warnings, fmt clean.
+
+## 2026-07-27 — documentation run: `ability` reaches the docs, and validation found four real bugs
+
+A full sweep of `docs/` against the live tree, prompted by `b1989ff` retiring
+`defprotocol`/`defimpl`. The retirement itself shipped with **no documentation
+change at all**, so the language reference still taught a facility that no longer
+exists — and validating the rest of the docs mechanically turned up four defects
+that were nothing to do with abilities — including a **red test on main**.
+
+**`ability` was documented in exactly one place — the design note.** Grepping
+`defability|ability.blsp` across every doc + README + ROADMAP returned a single
+file, `protocol-dispatch-design.md`, while `language.md` §Polymorphism still
+presented `defprotocol`/`defimpl` as the live answer (complete with the
+now-false "records dispatch as `:map`, branch on a field inside"). Rewrote that
+section around abilities: the two dispatch identities, `defrecord*`, `:sealed`,
+drivers-as-values, `satisfies?`/`record?`/`record-id`/`fields`, and a
+`defbehaviour` subsection for the module-contract seam that stays. Added an
+`ability` section to `brood-for-claude.md` (the AI pocket reference had none),
+`std/ability.blsp` + a rewritten `std/protocol.blsp` row to the module table, and
+fixed the README's three protocol claims. Recorded the decision as **ADR-168** —
+the retirement had no ADR, and it settles a *pre-1.0 breaking* question, so it
+needed one. `roadmap-for-v1.md` §3 ("decide the protocol `:type` dispatch axis —
+permanently") is now closed by it: the `:type`-field axis is permanently rejected,
+and `defrecord*`'s construction-time identity is the explicit version that
+replaces it. Two of that file's three pre-freeze items are now done, leaving only
+the reader's permanent reservations.
+
+**Bug 1 — `impl` silently misregisters a bare record id (KI-15).** Found by
+following the `impl` docstring verbatim: `defability`'s `:sealed [circle rect]`
+qualifies a bare symbol against `(current-ns)`, but `impl`'s `id-kw` is a plain
+`(keyword (name key))`. Since `identity-of` yields `:geometry/circle`, a bare
+`(impl Shape circle …)` registers under `:circle` — a key no value ever presents.
+No error at registration; the sealed check reports the member unimplemented and
+the call dies with `no impl for :geometry/circle — have (:circle)`. Documented the
+qualified form as required and filed the asymmetry rather than changing dispatch
+semantics mid-docs-run.
+
+**Bug 2 — main was red, and the red test was itself a stale doc.** `b1989ff` rewrote
+the `deftype` hint to point at `defability`/`impl` but did not update
+`basic.rs::hints_name_only_features_that_exist`, which still asserts the hint
+contains `(require 'protocol)` and `defprotocol`. So `make test` reports **879
+passed, 1 failed, 1 timed out** — the failure being that assertion, the timeout
+being KI-14. The irony is exact: the test exists to enforce that "a hint must never
+name a feature the tree doesn't have," and its own assertion had become the thing
+naming a retired feature. Repointed at `(require 'ability)`/`defability` and
+recorded the episode in the test's doc comment, which already carries this history.
+
+**Bug 3 — the LSP was never migrated off the retired forms (KI-16).**
+`definition.rs`/`module_ref.rs` still match `"defbehaviour" | "defprotocol"` (dead
+arm), and `completion.rs` offers ops inside `(defimpl …)` — so op completion inside
+an `(impl …)` form is simply missing. `defbehaviour` goto/hover is unaffected.
+
+**Bug 4 — `packages.md` documented a primitive that does not exist.** It named
+`%sha256` in five places as "the **only** hashing primitive", with a code example
+built on it. The real primitive is `%digest` (with `%hmac`); `std/hash.blsp` is
+Brood over it and the package manager uses `hash/sha256-bytes` + `slurp-bytes`.
+Replaced the section with the shipped implementation — which also retired the
+doc's own caveat ("source files are UTF-8, so `slurp`-as-string is exact for v1; a
+binary dep would want a bytes read"), since the bytes read already landed.
+
+**Bug 5 — eight doc examples could not run, all the same bug.** Automated the check
+(extract every `lisp`/`clojure` block, map each `(require 'M)` against `M`'s actual
+exports from the live image, flag bare use of an exported name) — post-ADR-065 a
+bare `require` only *loads*, so every one of these was broken as written:
+`language.md`'s io-ports, `proc/gen`, `log` and `telemetry` examples,
+`building-an-editor.md` ×4 (one also had an unquoted `(require render)`), and
+`testing.md`'s headline example — which is the worst of them, since CLAUDE.md
+already documents this exact trap for `test`. All now open with `(:use …)` in a
+`defmodule` header; the scanner reports zero remaining.
+
+**Mechanical validation, and what it found.** Beyond the above:
+
+- **`primitives.md` claimed to be "the complete set of functions implemented in
+  Rust" and was missing 149 of them** — bitwise, transcendental math, decimals,
+  sets, Unicode/normalization, TCP/TLS, subprocess, crypto, git/archives,
+  coverage, GUI, audio, clipboard, scheduler/profiling, GC/VM stats, plus ~50 that
+  belonged in existing categories. Generated the rows from `PRIMITIVE_DOCS`
+  (name + arg list → arity + purpose) rather than by hand, so they match the
+  source. The completeness claim is now true, and it *stays* true by the existing
+  drift-guard test (`every_user_facing_primitive_is_documented_and_no_orphan_docs`,
+  verified passing) — every user-facing native must have a `PRIMITIVE_DOCS` entry,
+  and every entry now appears in the doc.
+- **`primitives.md` still said `catch` binds a message string.** It binds a
+  structured map (`:kind :message :code :file :line :col :hint`) for a kernel error
+  and the exact thrown value for a user `throw`. The stale text even called the
+  structured version a future refinement "once map literals exist". Rewrote it
+  against `error-codes.md`, with a runnable `:code`-branching example. Its
+  `LispError` sketch was also two fields out of date.
+- **`spawn` was listed as a native primitive** with arity ≥1. The primitive is
+  `%spawn` (arity 1, takes a thunk); `spawn` is the prelude macro. Fixed, and added
+  the missing `%spawn-link`.
+- **Env flags: the docs and the source had drifted both ways.** Every flag in
+  CLAUDE.md's table does exist (checked all 24). But 11 more exist in the tree and
+  were undocumented — `BROOD_DUMP_CODE`, `BROOD_LINMAP`, `BROOD_NO_JIT_COMPUTED`,
+  `BROOD_NO_HANDOFF`, `BROOD_DBG_CONST`, the GUI/audio runtime selectors, and four
+  implemented in *Brood* rather than Rust (`BROOD_CONTRACTS`,
+  `BROOD_NO_CHECK_CACHE`, `BROOD_TEST_NO_SCOPE`, `BROOD_HISTORY`) — added with
+  their real semantics read off the implementations. The seven flags that appear
+  only in devlog/decisions are historical and correctly absent from the table.
+- **Four `std` modules were absent from the module table** — `file`, `io`, `text`,
+  `ansi`. Wrote the rows from their actual exports (`io` is the *ports* toolkit;
+  `text` exports exactly `fill`; root `ansi` *strips* escapes where
+  `editor/ansi` *emits* them — worth disambiguating).
+- **The ADR index stopped at 129**, missing 130–167 despite the file's own promise
+  that the index keeps the numbering complete. Backfilled all 38 from the headings,
+  marked 158 superseded, added 168.
+- **Broken links and stale paths.** `concurrency-v2.md`, `supervision.md` and
+  `docs/README.md` were deleted or moved (the first two in `fdce540`, which claimed
+  to repoint every inbound link and missed three); `llm-native.md` pointed at
+  `docs/prompts/system.md` where the shipped file is `brood-task.md`;
+  `std/agent.blsp` → `std/proc/agent.blsp` and `std/reload.blsp` →
+  `std/tool/reload.blsp`. Verified the remaining ~50 "missing" paths are all
+  legitimate — proposed work items (`components.md`'s W2 `core/env.rs`),
+  hypotheticals (`node-connect.md` arguing *against* a `std/node.blsp`), install
+  paths, and scaffold placeholders.
+- **ADR cross-references are sound.** All 168 numbers cited across docs, `crates/`
+  and `std/` resolve; no duplicates; the four gaps (002/035/039/057) are the
+  archived ones and `decisions.md` says so.
+- **186 code blocks parsed; one didn't** — an elided map literal in `layers.md`
+  (`{… :type :magit-status …}`, odd form count). Fixed.
+- **The formal spec's normative table used Clojure brackets.** `spec.md` §7.1
+  documented `(fn [params] …)`, `(let [n₁ v₁ …] …)`, `(letrec […] …)` and
+  `(defmacro name [params] …)` — all four are **hard errors** in Brood
+  (`fn: parameter list must be a list, not a vector`). The worst placement possible
+  for that mistake: it contradicts ADR-149 and ADR-010's "code is lists, data is
+  vectors", in the one document that claims to define the language. Every other doc
+  had it right — `language.md` even tabulates the bracket form *as* an error with
+  its hint. Fixed, with the ADR-149 rule stated inline so the table can't drift back.
+- **`spec.md` §4's value model was missing 7 of 19 kinds** — `set`, `bytes`,
+  `decimal`, `rope`, `pid`, `ref`, `table` — while asserting "a value is exactly
+  one of" the twelve it listed. The `table` omission made the section
+  self-contradictory: the paragraph immediately below claimed every value is
+  immutable with "no atoms or cells", where `Table` is precisely the one
+  identity-mutable kind (ADR-107). Added the kinds and gave immutability its
+  one-exception carve-out, including *why* it's compatible with share-nothing (it
+  deep-clones in and out, so no two processes alias stored data). Also: `integer`
+  said "64-bit signed" with no mention of **bignum promotion** — `(* i64::MAX 2)`
+  is exact, so the type is unbounded in practice (`language.md` had this right).
+- **`spec.md` §5's evaluation rules predated callable keywords and set literals.**
+  Rule 4 said `h` evaluates to "a function" and "applying a non-function raises",
+  which is now wrong: a keyword is callable as an accessor (ADR-165), while map,
+  vector and set deliberately are *not*. Rule 3 covered vector literals but not map
+  or set literals (both evaluate their forms left to right — verified). And §11
+  still listed "a first-class set type + `#{…}` literal" as **deferred** when
+  ADR-060 shipped it; `type-of` reports `:set`.
+
+Also refreshed the now-historical framing of `protocol-dispatch-design.md`: the
+status block said "Slices 1–2 shipped" while the body described 3 and 4 as done and
+listed "retire/migrate `protocol`" as open. It is now marked resolved, with a note
+recording *which* fork was taken and why — the registry route, not the Go-style
+structural satisfaction the note had been leaning toward, because losing
+retroactive extension of a foreign record was the larger cost.
+
+Also fixed **11 stale `std/` paths in Rust doc comments** (`std/repl.blsp` →
+`std/tool/repl.blsp`, `std/http.blsp` → `std/net/http.blsp`, and so on) — two of
+which reach users directly: `nest --help`'s `-j` text and the `mailbox-size` /
+`process-info` docstrings that `(doc …)`, the LSP and MCP all surface.
+
+Every example quoted in the rewritten sections was executed against
+`target/release/brood` before being committed — including the claims that a record
+is `≠` a bare map, that `keys` includes `:__id__` while `fields` doesn't, and that a
+plain map carrying `:type` still dispatches as `:map`.
+
+**Gates.** `nest check` zero warnings; `cargo fmt --all --check` clean; **880 of 881
+tests pass** — the one remaining failure is KI-14's `brood_suite_passes` timeout,
+which was already open and is unrelated to this work. Before this run it was 879,
+because of Bug 2. No behaviour changed: every edit is documentation, a doc comment,
+or one test assertion repointed at the hint it is supposed to be pinning.

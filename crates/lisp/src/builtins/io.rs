@@ -210,7 +210,7 @@ pub(super) fn stdin_tty(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 // ---------- time ----------
 
 /// `(now)` — wall-clock milliseconds since the Unix epoch, as an integer.
-/// Subtract two readings to measure elapsed time (see `std/test.blsp`).
+/// Subtract two readings to measure elapsed time (see `std/tool/test.blsp`).
 pub(super) fn now(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -420,7 +420,7 @@ pub(super) fn mem_soft_limit(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult 
 // ---------- TCP sockets (ADR-062) ----------
 //
 // Thin non-blocking mechanism over `crate::net`; the active-socket / framing /
-// HTTP policy is Brood (std/tcp.blsp). A socket is `Value::Socket(id)`.
+// HTTP policy is Brood (std/net/tcp.blsp). A socket is `Value::Socket(id)`.
 
 pub(super) fn expect_socket(heap: &Heap, who: &str, v: Value) -> Result<u64, LispError> {
     expect!(heap, who, v, "socket",
@@ -776,7 +776,7 @@ pub(super) fn proc_close(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 //
 // Kernel-internal per-process state an observer needs but Brood can't reach:
 // `mailbox-size` and the `process-info` snapshot, assembled here from the
-// registry / scheduler / name / monitor tables. `std/observer.blsp` builds
+// registry / scheduler / name / monitor tables. `std/tool/observer.blsp` builds
 // everything else on top. (The terminal/GUI frontend lives in terminal.rs.)
 
 pub(super) fn mailbox_size(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -885,7 +885,7 @@ pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
 // ---------- filesystem ----------
 // Mechanism only: existence / directory reflection so the Brood module system and
 // the project test runner can resolve load paths and discover test files. Path
-// manipulation and all policy live in Brood (`std/prelude.blsp`, `std/project.blsp`).
+// manipulation and all policy live in Brood (`std/prelude.blsp`, `std/tool/project.blsp`).
 
 /// `(cwd)` — the process's current working directory as a string.
 pub(super) fn cwd(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -1149,7 +1149,7 @@ pub(super) fn bytes_to_value(bytes: impl AsRef<[u8]>, heap: &mut Heap) -> Value 
 
 /// `(read-line)` — read one line from stdin, returning it as a string with the
 /// trailing newline stripped, or `nil` at end of input (EOF / Ctrl-D). The one
-/// irreducible I/O mechanism the Brood-hosted REPL (`std/repl.blsp`) can't
+/// irreducible I/O mechanism the Brood-hosted REPL (`std/tool/repl.blsp`) can't
 /// bootstrap; line *editing* on a TTY comes free from the terminal's cooked
 /// mode, so this stays a plain blocking read.
 pub(super) fn read_line(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

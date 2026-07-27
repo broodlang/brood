@@ -3,7 +3,8 @@
 KI-9 is a one-off arity sighting judged a transient inconsistent-build artifact, not
 present in committed code; KI-10 no longer reproduces, incidentally fixed — both kept as
 records, not open bugs. **Open: KI-14 (a test hangs only under the test framework, so
-`make test` cannot go green) and KI-13 (type checker).**
+`make test` cannot go green), KI-13 (type checker), KI-15 (`impl` misregisters a bare
+record id) and KI-16 (the LSP still matches the retired `defprotocol`/`defimpl`).**
 This file is the condensed record — what each was, how it was fixed, and the regression
 test that guards it — so a recurrence is recognizable. For the narrative discovery
 writeup of the scheduler race, see
@@ -12,11 +13,80 @@ ADRs / topic docs.
 
 ---
 
+## KI-15 — `impl` silently misregisters a **bare** record id · **OPEN, found 2026-07-27**
+
+`ability`'s two macros disagree about whether a bare record symbol gets namespace-
+qualified, and the mismatch fails *silently* at registration:
+
+```lisp
+(defmodule geometry (:use ability))
+(defrecord* circle (r))
+(defability Shape :sealed [circle rect] (area [self] :-> float))  ; :sealed QUALIFIES → :geometry/circle
+(impl Shape circle (area [c] …))                                  ; impl does NOT     → :circle
+(area (circle 2))
+;; error: ability Shape/area: no impl for :geometry/circle — have (:circle)
+```
+
+`defability--sealed-vec`'s member mapping qualifies a bare symbol against
+`(current-ns)`; `impl`'s `id-kw` is a plain `(keyword (name key))`. Since
+`identity-of` produces the *qualified* `:module/name` keyword, the bare form
+registers under a key no value ever presents — so the impl never matches, the
+sealed-exhaustiveness check reports the member as unimplemented, and the failure
+only surfaces at the first call.
+
+**Workaround:** always write the id qualified — `(impl Shape geometry/circle …)`,
+which is what `tests/ability_test.blsp` and the documentation do.
+
+**Fix direction:** qualify a bare symbol in `impl` the same way `:sealed` does (a
+symbol with no `/` gets `(current-ns)` prepended), so both macros agree. A keyword
+id (`:int`, `:default`) must keep passing through untouched, and an already-
+qualified symbol must not be double-qualified. Alternatively make a bare,
+unqualifiable symbol an expansion-time *error* rather than a silent
+misregistration — but qualifying is the ergonomic answer and matches `:sealed`.
+Either way, add a test that a bare id and a qualified id reach the same impl.
+
+**Found by:** writing the ADR-168 documentation and following the `impl` docstring
+verbatim on a first attempt (docs run, 2026-07-27).
+
+---
+
+## KI-16 — the LSP still matches the retired `defprotocol`/`defimpl` · **OPEN, found 2026-07-27**
+
+ADR-168 removed `defprotocol`/`defimpl`, but the language server was not migrated
+with them:
+
+- `definition.rs` (`enclosing`/interface goto) and `module_ref.rs` match
+  `"defbehaviour" | "defprotocol"`. The `defprotocol` arm is dead code — harmless,
+  but it will never fire again.
+- `completion.rs` offers an interface's ops inside a `(defimpl …)` form
+  (`enclosing_defimpl`). Since `defimpl` no longer exists, **op completion inside
+  an `(impl …)` form is simply missing** — the one user-visible loss.
+- `completion.rs`'s test seeds `*protocols*` directly and is named
+  `offers_protocol_ops_inside_defimpl`.
+
+Nothing is broken for `defbehaviour` (goto + hover over `(:implements …)` still
+work); abilities are never claimed in a module header, so they were never part of
+that path. The gap is purely the `impl` completion affordance.
+
+**Fix direction:** rename `enclosing_defimpl` → `enclosing_impl` and match `impl`,
+reading ops from `ability/*abilities*` (via `introspect::protocol_ops`' ability
+sibling) as well as `*protocols*`; drop the `defprotocol` arms from
+`definition.rs`/`module_ref.rs`. Update the test name and seed.
+
+**Found by:** the documentation validation pass for ADR-168 (docs run, 2026-07-27).
+
+---
+
 ## KI-14 — one conformance test hangs forever, but only under the test framework · **OPEN, found 2026-07-27**
 
 `make test` cannot go green: `brood::suite brood_suite_passes` is SIGKILLed at its 600 s
 nextest cap on **both** tries. Deterministic, not a flaky deadline — and *not* a budget
 problem, so raising the cap is the wrong fix (`.config/nextest.toml` says as much).
+
+As of 2026-07-27 it is the **only** remaining failure: `880 of 881` otherwise pass. (That
+run also surfaced a stale assertion in `hints_name_only_features_that_exist` — the
+`deftype` hint had been repointed at `defability` by ADR-168 without updating its test —
+fixed the same day, so the tally was 879 before.)
 
 **Minimal repro** (hangs indefinitely; observed >10 min, never completes):
 
@@ -466,7 +536,7 @@ slots / no stale handles across a safepoint. (The per-worker *pinning* stopgap w
 later superseded by ADR-100's heap-captured continuations, which make cross-thread
 migration safe and routine.) **Guarded by:**
 `tests/concurrency_race.rs::fanout_with_concurrent_global_rebind_matches_serial`
-(the `concurrency-v2.md` §6 bar) and the self-diagnosing `flush_oob`/`flush_bound!`
+(the fan-out-matches-serial bar) and the self-diagnosing `flush_oob`/`flush_bound!`
 OOB check.
 
 ## KI-2 — `nest test` flaky / hangs when parallel tests share heavy global lookups · **fixed 2026-05-29**

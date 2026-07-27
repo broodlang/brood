@@ -13,9 +13,10 @@ of data-model features — not the scheduler/dist core. Audit performed 2026-07-
 against the live tree; file references are `path:line` at that time and are
 pointers, not guarantees they haven't moved.
 
-Guiding rule (from `docs/supervision.md`, ADR-039): **mechanism in Rust
-(spawn/send/receive/link/monitor/trap-exit/exit/scheduler/dist), policy in
-Brood** (`std/proc/*`, `std/*`). Most "gaps" below are policy to write in the
+Guiding rule (ADR-039, whose full text is archived in
+[`archive/decisions-superseded.md`](archive/decisions-superseded.md)): **mechanism
+in Rust** (spawn/send/receive/link/monitor/trap-exit/exit/scheduler/dist), **policy
+in Brood** (`std/proc/*`, `std/*`). Most "gaps" below are policy to write in the
 language, not kernel work.
 
 ## At or above parity — no work needed

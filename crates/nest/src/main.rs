@@ -7,7 +7,7 @@
 //! low-level "just run the language" tool.
 //!
 //! `nest` is a thin Rust shell. The actual policy — name checks, templates,
-//! discovery — is written in Brood (`std/project.blsp`) and driven through
+//! discovery — is written in Brood (`std/tool/project.blsp`) and driven through
 //! `Interp`, keeping behaviour in the language (ADR-006).
 //!
 //! Subcommands:
@@ -51,7 +51,7 @@ mod release;
 )]
 struct Cli {
     /// Cap concurrent spawned processes (0 = unlimited). Bounds a concurrent
-    /// test run; see `std/test.blsp`.
+    /// test run; see `std/tool/test.blsp`.
     #[arg(
         short = 'j',
         long = "max-parallel",
@@ -879,7 +879,7 @@ fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
     );
     let plist = opts.to_plist();
     if files.is_empty() {
-        // Whole-project discovery via std/project.blsp. Raises on failure,
+        // Whole-project discovery via std/tool/project.blsp. Raises on failure,
         // so a non-zero exit falls out of the eval error.
         // `test` is required up front, not left to `run-project-tests`: the option
         // plist can contain a `(test/test--make-filter …)` call, and arguments are
@@ -934,7 +934,7 @@ fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
 fn cmd_check(interp: &mut Interp, files: &[String]) {
     require_readable_files("check", files);
     // One checker, one path. Whole-project and file-list checks both go through
-    // `std/project.blsp`, which loads the project image *first* so cross-module /
+    // `std/tool/project.blsp`, which loads the project image *first* so cross-module /
     // namespace imports resolve through the heap's globals. The single-file path
     // used to be a separate Rust loop that skipped that setup — so every `:use`d
     // or qualified name in a namespaced file false-flagged as unbound (the
@@ -1132,7 +1132,7 @@ fn cmd_run(
     });
     let wrap = !watch.is_empty() || timed.is_some();
     let run_form: String = match file {
-        // No FILE: run the project's :main via std/project.blsp.
+        // No FILE: run the project's :main via std/tool/project.blsp.
         None => format!("(project/run-project (list {}))", escaped_args),
         // FILE: run that file. Inside a project, set up the project so its
         // `src/` is on `*load-path*` (the file can `(require 'foo)` other
@@ -1329,7 +1329,7 @@ fn cmd_grammar(interp: &mut Interp, target: GrammarTarget) {
 /// `nest repl` — project-aware REPL. Inside a project, pre-load every source
 /// file so the project's modules are immediately callable from the prompt.
 /// Outside a project, fall through to the plain language REPL (same UX as
-/// `brood`). The REPL itself is Brood (`std/repl.blsp`, ADR-048) — one
+/// `brood`). The REPL itself is Brood (`std/tool/repl.blsp`, ADR-048) — one
 /// implementation both binaries bootstrap into via `(repl/repl-run)`.
 fn cmd_repl(interp: &mut Interp) {
     if in_project() {
@@ -1343,8 +1343,8 @@ fn cmd_repl(interp: &mut Interp) {
     } else {
         eprintln!("nest repl — no project.blsp here; plain REPL (`brood` would do the same)");
     }
-    // The REPL is Brood now (`std/repl.blsp`), same as `brood` with no args. The
-    // interactive editor enters raw mode (std/lineedit.blsp), so guard the
+    // The REPL is Brood now (`std/tool/repl.blsp`), same as `brood` with no args. The
+    // interactive editor enters raw mode (std/editor/lineedit.blsp), so guard the
     // terminal: the Brood `term-raw-leave` is the normal teardown, but this
     // restores it on a panic unwind too. Scope it like `cmd_observe` so it drops
     // (restoring) before any error report + exit (`process::exit` skips Drop).
@@ -1360,7 +1360,7 @@ fn cmd_repl(interp: &mut Interp) {
 
 /// `nest mcp` — see docs/mcp.md (ADR-036). Strictly per-project.
 fn cmd_mcp(interp: &mut Interp) {
-    // `setup-tooling-image` (std/project.blsp) is the shared tooling bootstrap
+    // `setup-tooling-image` (std/tool/project.blsp) is the shared tooling bootstrap
     // the LSP also uses (via `introspect::load_tooling_image`) — sources + the
     // test/format frameworks — so the two servers can't drift on its contents.
     let bootstrap = r#"

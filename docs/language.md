@@ -297,58 +297,166 @@ accessors, so the advisory checker (and `BROOD_CONTRACTS=1` runtime contracts) s
 the field types. See [ADR-130](decisions.md) and `docs/types.md` for the record
 type `(record :k T …)` this lowers to.
 
-### Polymorphism: protocols (`require 'protocol`)
+### Polymorphism: abilities (`:use ability`)
 
-`defrecord` names a map's *shape*; a **protocol** names an operation that different
-types implement differently. `(require 'protocol)` gives open generic functions
-(ADR-158): each op dispatches on the **`type-of` of its first argument**, and an
-implementation can be added for any type — including a built-in — from any module,
-without editing the dispatcher.
+`defrecord` names a map's *shape*; an **ability** names an operation that different
+types implement differently. `std/ability.blsp` gives open generic functions
+(ADR-168): each op dispatches on the **identity of its first argument**, and an
+implementation can be added for any identity — including a built-in kind — from any
+module, at any time, without editing the dispatcher.
+
+Put `(:use ability)` in the module header — that loads *and* imports, so
+`defability`/`impl`/`defrecord*` read bare. (A bare `(require 'ability)` only loads
+it; you would then write `ability/defability`.)
+
+An argument's **dispatch identity** is one of two things:
+
+- for a built-in value, its `type-of` **kind** — `:int` `:float` `:string`
+  `:keyword` `:map` `:vector` `:set` `:nil` `:pid` …;
+- for a value built by **`defrecord*`**, its **nominal id** — a `:module/name`
+  keyword baked in at definition, so two record shapes defined in one module
+  dispatch apart.
 
 ```clojure
-(require 'protocol)
+(defmodule geometry (:use ability))
 
-(defprotocol Encode
-  "Encode a value for the wire."
-  (encode [v] :-> string))
+(defrecord* circle (r))
+(defrecord* rect (w h))
 
-(defimpl Encode :int    (encode [n] (str n)))
-(defimpl Encode :string (encode [s] (str "\"" s "\"")))
-(defimpl Encode :vector (encode [v] (str "[" (join "," (map encode v)) "]")))
-(defimpl Encode :default (encode [x] (error "Encode: unsupported: " (type-of x))))
+(defability Shape
+  "The area of a shape."
+  (area [self] :-> float))
 
-(encode [1 "a"])          ;=> "[1,\"a\"]"
+(impl Shape geometry/circle (area [c] (* 3.0 (get c :r) (get c :r))))
+(impl Shape geometry/rect   (area [r] (* (get r :w) (get r :h))))
+
+(area (circle 2))         ;=> 12.0
+(area (rect 3 4))         ;=> 12
 ```
 
-Dispatch keys are runtime *kinds* — `:int` `:float` `:string` `:keyword` `:map`
-`:vector` `:set` `:nil` `:pid` … — plus **`:default`** as the fallback. A missing
-implementation is a **loud, named error** (`protocol Encode: no implementation of
-encode for :float`), never a silent `nil`. Re-registering a key replaces it, so
-implementations hot-reload like any `def`.
+Built-in kinds work the same way, with **`:default`** as the fallback:
 
-This is the answer for the case a `cond` on `type-of` can't cover: a closed `cond`
-has to be *edited* to extend, while a protocol is extended from outside. Prefer
-`match`/`cond` when the set of cases is closed and local; reach for a protocol when
-third-party or later code must be able to add a case.
+```clojure
+(defability Size (size [self] :-> int))
+(impl Size :int      (size [n] n))
+(impl Size :string   (size [s] (count s)))
+(impl Size :default  (size [_] -1))
 
-**Records dispatch as `:map`.** Records are structural (ADR-130), so every
-`defrecord` value has `(type-of r)` = `:map` and they all land on the same `:map`
-implementation — branch on a field inside it (`(if (contains? m :radius) …)`) to
-specialise per shape. A second dispatch axis keyed on a `:type` field is
-deliberately not shipped (ADR-011): it would silently change what any map carrying
-a `:type` key dispatches to.
+(size 7) (size "hello") (size 1.5)     ;=> 7, 5, -1
+```
 
-**Register at load time.** Both registries are updated with `def`, so two processes
-calling `defimpl` *concurrently* can lose one update. Top-level `defimpl` forms — the
-normal case — run as the module loads and are safe; this is the same
-configuration-time rule telemetry's `attach`/`detach` follow.
+> **The `impl` dispatch id must be written the way `identity-of` produces it.** A
+> record's id is namespaced, so write it **qualified** — `geometry/circle`, not a
+> bare `circle`. A bare symbol registers under `:circle`, which no value ever
+> presents, so the impl silently never matches and the op raises `no impl for
+> :geometry/circle — have (:circle)`. (`defability`'s `:sealed` clause *does*
+> qualify a bare name against the current namespace; the asymmetry is
+> [KI-15](known-issues.md).)
 
-**`defbehaviour`** is the module-level counterpart — a contract a *module* satisfies
-by defining the ops as plain functions (no value dispatch); a module claims it with
-`(:implements Name)` in its header. Both forms record their ops in `*protocols*`,
-which `nest check` reads to report an implementation that omits a declared op, gets
-an arity wrong, or names an op the protocol never declared — and `(protocol-ops
-'Name)` exposes the same data to your own tooling.
+A missing implementation is a **loud, named error** — `ability Shape/area: no impl
+for :geometry/circle — have (…)`, listing the ids that *are* implemented — never a
+silent `nil`.
+
+**Records dispatch as themselves; plain maps do not.** `(type-of r)` is still
+`:map` for a `defrecord*` value and `get`/`assoc`/`=` still treat it structurally
+(ADR-130 is intact) — the nominal id is a *dispatch-only* notion layered on top.
+Only values built by a `defrecord*` constructor dispatch nominally: a plain map,
+**even one carrying a `:type` field**, stays `:map`. That is the ADR-011 line — the
+identity is explicit and construction-time, never inferred from a field.
+
+Plain `defrecord` values have no identity and so all land on the `:map` impl. Use
+`defrecord*` when a shape needs to dispatch.
+
+**A driver is just a value.** Because dispatch is on the first argument, "swap the
+backend" needs no config indirection and no module-atom dispatch — you pass a
+different value:
+
+```clojure
+(defmodule store (:use ability))
+
+(defability Store (fetch [self k]))
+(defrecord* pg  (pool))
+(defrecord* mem (data))
+(impl Store store/pg  (fetch [db k] (str "pg:" (get db :pool) "/" k)))
+(impl Store store/mem (fetch [db k] (get (get db :data) k)))
+
+(fetch (mem {"a" 1}) "a")          ;=> 1
+(fetch (pg "main") "a")            ;=> "pg:main/a"
+;; swapping the driver value swaps the impl — no config, no module atoms
+```
+
+**Sealed abilities.** `:sealed [id …]` names the **closed** set of ids the ability
+is meant to cover, and `nest check` then flags any member missing a direct impl of
+any declared op (a `:default` does not count). Runtime dispatch is unchanged —
+sealing is a contract, not a restriction:
+
+```clojure
+(defability Shape :sealed [circle rect] (area [self] :-> float))
+```
+
+**Introspection and helpers.** `(satisfies? 'Shape x)` is true when every declared
+op resolves for `x` (directly or via `:default`), so a caller can branch instead of
+letting the op raise. `(record? x)` / `(record-id x)` / `(fields x)` are the clean
+view of a record — `fields` returns the field map with the internal id omitted.
+`(ability-ops 'Shape)` exposes the declared op specs as data, the same hook the
+checker and LSP read.
+
+The id is held in a reserved `:__id__` field, which leaks into two structural
+views: `keys` and `count` include it, so `(count (circle 2))` is `2`, not `1`. Use
+`(fields r)` whenever you want the record's data alone — that is also the stable
+seam a future hidden slot would swap behind, so nothing else should read `:__id__`.
+A record being `≠` a bare map with the same fields, and printing with its id, are
+*intended* (Elixir-struct semantics), not leaks; `json-encode` omits the id, so it
+never reaches the wire.
+
+**What the checker does.** `nest check` verifies each `impl` provides the ability's
+declared ops at the right arity and flags an op the ability never declared. It also
+warns at a **call site** when an op is applied to an argument of statically-known
+identity — a literal, a direct `defrecord*` constructor call, or a record-typed
+variable — for which no impl and no `:default` is registered.
+
+**Register at load time.** `*impls*` is updated with `def`, so two processes calling
+`impl` *concurrently* can lose one update. Top-level `impl` forms — the normal case
+— run as the module loads and are safe; this is the same configuration-time rule
+telemetry's `attach`/`detach` follow. A re-registration from a *different* module is
+a loud cross-module conflict (warned, last wins); from the same module it is
+ordinary hot reload and stays silent.
+
+Prefer `match`/`cond` when the set of cases is closed and local; reach for an
+ability when third-party or later code must be able to add a case.
+
+#### `defbehaviour`: the module-as-implementor contract (`require 'protocol`)
+
+An ability dispatches on a **value**. When the unit that implements a contract is a
+*module* — a live view the router calls by name, say — there is no value to
+dispatch on, and that is `defbehaviour`'s job (`std/protocol.blsp`):
+
+```clojure
+;; where the contract is declared
+(defmodule views (:use protocol))
+(defbehaviour LiveModule
+  (mount [params])
+  (render [model])
+  (handle-event [name params model]))
+
+;; a module that satisfies it — the header claims it, the module defines the ops
+(defmodule counter-view (:use views) (:implements LiveModule))
+(defn mount (params) {:n 0})
+(defn render (model) (str "count: " (get model :n)))
+(defn handle-event (name params model) (assoc model :n (+ 1 (get model :n))))
+```
+
+`defbehaviour` declares the ops and defines **no functions of its own** — a module
+satisfies the contract by defining them itself and calling them directly. A module
+claims it with `(:implements Name)` in its header, and `nest check` verifies the
+module defines each declared op at the right arity. `(protocol-ops 'Name)` exposes
+the specs as data.
+
+> **`defprotocol` / `defimpl` were retired** (ADR-168) in favour of `ability`, which
+> subsumes them: they dispatched only on `type-of`, so no two records could ever
+> dispatch apart. `defbehaviour` stays because a module contract is genuinely a
+> different thing. Reaching for `defprotocol` now raises an unbound-symbol error
+> whose hint points at `defability`/`impl`.
 
 ## Sets
 
@@ -1023,11 +1131,13 @@ stdout/stderr ports. The defaults write to the real streams (and `*out*` honours
 the `with-out-str` capture), so out of the box `print` behaves exactly as you'd
 expect. The point is that you can **redirect** it.
 
-`(require 'io)` gives the port toolkit — constructors and the `with-out`/`with-err`
-scoping macros (thin wrappers over `binding`):
+`std/io.blsp` gives the port toolkit — constructors and the `with-out`/`with-err`
+scoping macros (thin wrappers over `binding`). Pull it in with `(:use io)` so the
+names read bare (a bare `(require 'io)` only *loads* it — you would then write
+`io/fn-port`):
 
 ```lisp
-(require 'io)
+(defmodule my-app (:use io))
 
 (with-out (fn-port (fn (s) (collect s)))   ; route output to a callback
   (println "captured by collect"))
@@ -1047,14 +1157,14 @@ port explicitly if it should redirect too.)
 
 ### Logging
 
-`(require 'log)` is an **async, safe logger** built on the same idea. A logger is
-one long-lived process (a `hatch` gen-server) holding a list of *backends*; each
+`std/log.blsp` is an **async, safe logger** built on the same idea. A logger is
+one long-lived process (a `proc/gen` server) holding a list of *backends*; each
 log call is a fire-and-forget cast, so it never blocks the caller, and the single
 process serialises every write — lines never interleave, and a backend that throws
 takes down only that line, not the caller.
 
 ```lisp
-(require 'log)
+(defmodule my-app (:use log))
 
 (start-logger)                          ; default: stdout, :info and up
 (log-info "server up" {:port 8080})     ; structured fields are optional
@@ -1322,13 +1432,16 @@ right tool for request/reply to a long-lived process.
 
 ### The `proc/gen` server framework (gen_server in Brood)
 
-`(require 'proc/gen)` packages the request/reply idiom above into a
+`std/proc/gen.blsp` packages the request/reply idiom above into a
 gen_server-style framework — ~180 lines of Brood over `spawn`/`send`/`receive`/
 `ref`/`monitor`, no kernel surface (ADR-099). A server carries one immutable
 state value through a tail-recursive `receive` loop; `defprocess` declares how it
-handles each kind of message:
+handles each kind of message. Pull it in with `(:use proc/gen)` so `defprocess`,
+`spawn-server` and `!` read bare (a bare `(require 'proc/gen)` only loads it):
 
 ```clojure
+(defmodule my-app (:use proc/gen))
+
 (defprocess counter (n)
   (init  (do (println "up") n))            ; runs once at startup; returns the initial state
   (cast  :inc            (+ n 1))          ; fire-and-forget; body = next state
@@ -2189,6 +2302,10 @@ Run `nest doc <module>` for the full API of any module.
 
 | Module | `require` name | What it provides |
 |--------|---------------|-----------------|
+| `std/file.blsp` | `'file` | Filesystem policy over the kernel's fs primitives: `read-lines`, `write-lines`, `file?`, `list-files`, `list-dirs`, `walk-files`, `path-extension`, `path-stem`. All Brood (ADR-006), no new Rust |
+| `std/io.blsp` | `'io` | Output **ports** — `stdout-port`, `stderr-port`, `process-port`, `fn-port`, `io-write`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of only `println` (see also `std/log.blsp`) |
+| `std/text.blsp` | `'text` | Plain-text transforms with no editor/buffer/IO dependency: `fill`, greedy word-wrap to a column width. Pure Brood over the string primitives, so it is reusable anywhere (fill-paragraph, wrapping help text or REPL output) |
+| `std/ansi.blsp` | `'ansi` | ANSI/VT100 escape-sequence **stripping** for pipe output — `strip-ansi` removes CSI colour/cursor sequences (reading a subprocess that emits colour). For *emitting* escapes in a display frontend, see `std/editor/ansi.blsp` instead |
 | `std/datetime.blsp` | `'datetime` | Gregorian calendar arithmetic: `date-new`, `date->unix`, `unix->date`, `date-add`, `date-diff`, `date-format`, `date-parse`, parse/format patterns |
 | `std/encoding.blsp` | `'encoding` | Hex and Base64 encode/decode over strings (`hex-encode`, `hex-decode`, `base64-encode`, `base64-decode`) and byte vectors (`hex-encode-bytes`, `hex-decode-bytes`, `base64-encode-bytes`, `base64-decode-bytes`, plus URL-safe forms — byte-faithful, no UTF-8 round-trip) |
 | `std/stats.blsp` | `'stats` | Descriptive statistics: `mean`, `median`, `variance`, `stddev`, `percentile`, `mode`, `frequencies`, `stats-min`, `stats-max` |
@@ -2205,8 +2322,9 @@ Run `nest doc <module>` for the full API of any module.
 | `std/path.blsp` | `'path` | Path string manipulation: `join`, `split`, `basename`, `dirname`, `extension`, `stem`, `normalize`, `relative-to`, `absolute?`, `with-extension` |
 | `std/system.blsp` | `'system` | OS interaction: `env`, `env-all`, `argv`, `os-type`, `cmd`, `cmd-ok?`, `cmd-out`, `halt` (whole-machine `cwd`/`hostname` are root builtins) |
 | `std/crypto.blsp` | `'crypto` | Cryptography: ChaCha20-Poly1305 AEAD (`encrypt`/`decrypt`/`encrypt-str`/`decrypt-str`), `pbkdf2` (accepts a string or byte-vector password/salt — a binary salt is used as raw bytes), `random-bytes`, `random-key`, `random-nonce`, `secure=?` |
-| `std/agent.blsp` | `'agent` | Process-backed state cell (Elixir-style Agent): `start`, `get`, `update`, `get-and-update`, `cast`, `stop` |
-| `std/protocol.blsp` | `'protocol` | Open generic functions (ADR-158): `defprotocol` declares typed ops, `defimpl` registers a per-`type-of` implementation (`:int`/`:map`/…/`:default`), `defbehaviour` declares a contract a *module* satisfies; `protocol-ops` is the introspection hook the checker and LSP read |
+| `std/proc/agent.blsp` | `'proc/agent` | Process-backed state cell (Elixir-style Agent): `start`, `get`, `update`, `get-and-update`, `cast`, `stop` |
+| `std/ability.blsp` | `'ability` | Open generic functions with nominal dispatch (ADR-168): `defability` declares typed ops (with an optional `:sealed [id …]` closed member set), `impl` registers an implementation for a dispatch id — a `type-of` kind (`:int`/`:map`/…/`:default`) or a `defrecord*` record's `:module/name` id — from any module at any time; `defrecord*` bakes that nominal id into a record; `satisfies?`, `record?`, `record-id`, `fields`, `identity-of`, and `ability-ops` (the checker/LSP introspection hook) |
+| `std/protocol.blsp` | `'protocol` | Behaviour contracts — the *module*-satisfies-a-contract seam: `defbehaviour` declares the ops a module must define (no value dispatch), claimed with `(:implements Name)` in a module header; `protocol-ops` is the introspection hook the checker and LSP read. Value dispatch is `ability` — `defprotocol`/`defimpl` were retired (ADR-168) |
 | `std/telemetry.blsp` | `'telemetry` | Erlang-`:telemetry`-style instrumentation; handlers run in an isolated listener process: `start-telemetry`, `stop-telemetry`, `emit`, `attach`, `detach`, `detach-all`, `forward`, `handlers`, `telemetry-sync`, the `span` macro |
 
 The following modules are also opt-in and live under `std/net/` and `std/tool/`:
@@ -2234,7 +2352,8 @@ attached to that event run on each emit — but in an **isolated listener proces
 a handler can never affect the emitting process:
 
 ```clojure
-(require 'telemetry)
+(defmodule my-app (:use telemetry) (:use log))
+
 (start-telemetry)                                  ; spawn the listener once; supervise it
 
 (attach :access-log [:http :request :stop]         ; id, event, handler

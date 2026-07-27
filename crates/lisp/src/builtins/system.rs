@@ -411,7 +411,7 @@ pub(super) fn tree_sitter_forget(args: &[Value], _: EnvId, heap: &mut Heap) -> L
 /// (`def`/`defmacro` and `def…`-named macros: `defn`, `defmodule`, `defdyn`,
 /// `defonce`, user definers). All other top-level forms — `(require …)`,
 /// `(load …)`, a `(main-loop 0)` entry call — are silently skipped. Used by the
-/// file watcher (`std/reload.blsp`): on the **second** and subsequent visits to
+/// file watcher (`std/tool/reload.blsp`): on the **second** and subsequent visits to
 /// a file we want to refresh the code (so the running program sees the new
 /// behaviour via late binding) but **not** re-run side-effecting top-level calls
 /// — re-executing those would spawn a duplicate long-running process (a

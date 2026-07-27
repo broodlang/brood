@@ -266,6 +266,71 @@ offending value appended via `str`-style trailing args:
 (error "reload-on-change: no such path: " path)
 ```
 
+## Polymorphism — abilities (`(require 'ability)`)
+
+When a `cond` on `type-of` would have to be *edited* for a caller to add a case, use
+an **ability**: an open generic function whose ops dispatch on the **first argument's
+identity**. Put `(:use ability)` in the module header — that both loads the module and
+makes the macros read bare, so no separate `(require 'ability)` is needed. (A bare
+`(require 'ability)` only *loads* it; you then write `ability/defability` etc.)
+
+An identity is either a built-in `type-of` **kind** (`:int`, `:string`, `:map`, …) or
+a **`defrecord*`** value's **nominal id** — a `:module/name` keyword baked in at
+definition, so two record shapes in one module dispatch apart.
+
+```lisp
+(defmodule geometry (:use ability))
+
+(defrecord* circle (r))                 ; a record WITH a dispatch identity
+(defrecord* rect (w h))
+
+(defability Shape (area [self] :-> float))
+
+(impl Shape geometry/circle (area [c] (* 3.0 (get c :r) (get c :r))))
+(impl Shape geometry/rect   (area [r] (* (get r :w) (get r :h))))
+
+(area (circle 2))       ;=> 12.0
+(area (rect 3 4))       ;=> 12
+```
+
+**Trap — write the `impl` id fully qualified.** `geometry/circle`, never a bare
+`circle`. A bare symbol registers under `:circle`, which no value ever presents, so
+the impl silently never matches and the call raises `no impl for :geometry/circle —
+have (:circle)`. (Confusingly, `defability`'s `:sealed [circle rect]` *does* accept
+bare names — that asymmetry is a known wart, [KI-15](known-issues.md).)
+
+Built-in kinds take `:default` as a fallback; without one, a missing impl is a loud
+named error, never `nil`:
+
+```lisp
+(defability Size (size [self] :-> int))
+(impl Size :int     (size [n] n))
+(impl Size :string  (size [s] (count s)))
+(impl Size :default (size [_] -1))
+```
+
+Other things worth knowing:
+
+- **Plain `defrecord` has no identity** — every such value dispatches as `:map`. Use
+  `defrecord*` when a shape must dispatch. A plain map carrying a `:type` field is
+  *never* rerouted; identity is explicit at construction, never sniffed.
+- **A record is still structurally a map.** `(type-of r)` is `:map`, and
+  `get`/`assoc`/`=` behave as on a map. The id lives in a reserved `:__id__` field, so
+  `keys`/`count` include it — use `(fields r)` for the clean, id-free map, and
+  `record?`/`record-id` to test/read the identity.
+- **A driver is just a value.** `(fetch db k)` picks its impl from `db`, so swapping
+  the backend means passing a different record — no config indirection.
+- **`:sealed [id …]`** declares a closed member set and makes `nest check` demand an
+  impl of every op for every member (exhaustiveness).
+- `(satisfies? 'Shape x)` to branch instead of letting a missing op raise.
+- **Register at load time.** Top-level `impl` forms are safe; two *processes* calling
+  `impl` concurrently can lose an update (it is a `def` under the hood).
+- `defbehaviour` (`(require 'protocol)`) is the *other* seam — a contract a **module**
+  satisfies by defining plain functions, claimed with `(:implements Name)` in the
+  header. No value dispatch. Use it when the implementor is a namespace, not a value.
+- **`defprotocol`/`defimpl` no longer exist** (retired, ADR-168). If you were about to
+  write one, write an ability.
+
 ## Patterns (`let`, `fn`, `match`, `receive`)
 
 The trap: a bare symbol *binds*, it doesn't match. To match a known value,

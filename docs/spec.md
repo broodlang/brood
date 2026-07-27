@@ -88,7 +88,7 @@ A value is exactly one of:
 |---|---|
 | **nil** | the empty value; also the empty list. |
 | **boolean** | `true`, `false`. |
-| **integer** | 64-bit signed. |
+| **integer** | 64-bit signed, with **automatic bignum promotion**: arithmetic is overflow-checked, and a result outside `i64` promotes to arbitrary precision rather than wrapping (demoting again when it fits). So the integer type is unbounded in practice. |
 | **float** | IEEE-754 double. |
 | **string** | immutable sequence of characters. |
 | **symbol** | an interned name. |
@@ -97,35 +97,61 @@ A value is exactly one of:
 | **vector** | a fixed sequence of values. |
 | **map** | immutable key→value associations (`{ }`); insertion-ordered, any value as a structurally-compared key. |
 | **function** | a closure (`fn`) or a primitive. |
+| **set** | immutable collection of distinct elements (`#{ }`); its own kind — never `=` to a map (ADR-060). |
+| **bytes** | immutable byte sequence (`#b"…"`), the binary counterpart of `string`; addressed by byte, and the subject of bit-syntax patterns (ADR-140). |
+| **decimal** | exact arbitrary-precision base-10 (`1.50M`), for money — values a float cannot hold. |
+| **rope** | immutable, char-indexed editor buffer text, backed by a rope structure (ADR-045). |
+| **pid** | a process identifier, carrying its node's identity. |
+| **ref** | a globally-unique reference token; tags a request to its reply. |
+| **table** | a shared, identity-mutable key→value store — **the one mutable kind** (see below). |
 
 Lists are not a distinct type: a "list" is either `nil` or a pair whose chain of
 `rest`s ends in `nil`.
 
-**All values are immutable.** No operation mutates an existing value; there are
-no data-mutation primitives (no `set-car!`, `vector-set!`, `string-set!`, no
-atoms or cells). Constructors and updates (`cons`, `assoc`, `conj`, `append`, …)
-return a fresh value and leave their arguments unchanged. The only mutation in
-the language is `def` rebinding a global binding (§6) — never the contents of a
-value (ADR-026).
+**All values are immutable, with exactly one exception.** No operation mutates an
+existing value; there are no data-mutation primitives (no `set-car!`,
+`vector-set!`, `string-set!`, and no mutable reference cell of any kind — no
+atoms, no Clojure-style refs or agents, no transients; Brood's **ref** kind above
+is an immutable unique *token*, not a cell).
+Constructors and updates (`cons`, `assoc`, `conj`, `append`, …) return a fresh
+value and leave their arguments unchanged. The only *binding* mutation in the
+language is `def` rebinding a global (§6) — never the contents of a value
+(ADR-026).
+
+The exception is **table**, Brood's ETS (ADR-107): a shared key→value store behind
+an opaque handle, mutated in place and shared by *identity*, so a handle sent to
+another process names the same store. It deep-clones keys and values on the way in
+and out, so no two processes ever alias stored data — which is what keeps it
+compatible with share-nothing concurrency. Every other kind is immutable, and
+per-process state normally lives in a process loop's arguments instead.
 
 ## 5. Evaluation
 
 Evaluation maps a (form, environment) pair to a value, or raises an error (§10).
 
 1. **nil, boolean, integer, float, string, keyword, function** evaluate to
-   themselves.
+   themselves — as does every other kind that is not a symbol, pair, or vector
+   (**bytes**, **decimal**, **rope**, **pid**, **ref**, **table**).
 2. A **symbol** evaluates to the value bound to it, looked up per §6; an unbound
    symbol raises an error.
 3. A **vector** `[e₁ … eₙ]` evaluates to a new vector of the evaluated elements,
-   left to right.
+   left to right. A **map literal** `{k₁ v₁ …}` and a **set literal** `#{e₁ … eₙ}`
+   likewise evaluate their forms left to right and build a fresh map / set.
 4. A **pair** `(h a₁ … aₙ)` is a *combination*:
    - If `h` is a symbol naming a **special form** (§7), the form's own rule
      applies (it decides which arguments are evaluated).
-   - Otherwise `h` is evaluated to a function `f`, then `a₁ … aₙ` are evaluated
+   - Otherwise `h` is evaluated to a callable `f`, then `a₁ … aₙ` are evaluated
      left to right, then `f` is **applied** to those arguments. Applying a
      closure binds its parameters (§7, `fn`) in a fresh environment whose parent
      is the closure's captured environment, and evaluates the body (an implicit
-     `do`). Applying a non-function raises an error.
+     `do`).
+   - A **keyword is callable** as an accessor: `(:k m)` is `(get m :k)`, so it can
+     be passed to a higher-order function (`(map :name people)`) (ADR-165).
+     Nothing else data-like is — `({:a 1} :a)`, `([10 20] 1)` and `(#{1} 1)` all
+     raise `cannot call non-function`, with a hint. A callable map would be a
+     second spelling of `get`, and a callable vector/set answers by
+     index-or-membership, an ambiguity Brood refuses.
+   - Applying anything else raises an error.
 
 ### 5.1 Tail position and tail calls
 
@@ -186,13 +212,13 @@ the expander calls, and `%make-macro` is the one primitive that tags it as such.
 | `(cond t₁ e₁ t₂ e₂ …)` | Even number of forms. Evaluate tests left to right; the first truthy test's `eᵢ` is the result (tail position). `else` or `:else` as a test always matches. No match ⇒ `nil`. |
 | `(do body...)` | Evaluate in order; result is the last (tail position), or `nil` if empty. |
 | `(def name v?)` | Evaluate `v` (or `nil`) and bind `name` globally (redefinable — the language's only mutation). Result: `name`. |
-| `(fn [params] body...)` | A closure capturing the current environment. |
-| `(let [n₁ v₁ …] body...)` | Sequential bindings in a new child frame (each `vᵢ` sees the previous bindings). |
-| `(letrec [n₁ v₁ …] body...)` | Mutually recursive bindings in a new child frame — every `nᵢ` is visible in every `vⱼ` (and to itself). Each name is pre-bound to `nil` before any `vⱼ` evaluates, so the form is for mutually recursive **functions** (their bodies fire at call time, by which point the real value is bound). Binding targets must be plain symbols. |
+| `(fn (params) body...)` | A closure capturing the current environment. The parameter list is a **list**, not a vector (ADR-149) — a vector there is an error. |
+| `(let (n₁ v₁ …) body...)` | Sequential bindings in a new child frame (each `vᵢ` sees the previous bindings). The binding container is a **flat list**, not a vector and not Scheme's double-parens (ADR-149); a vector *inside* it is still destructuring — `(let ([x y] p) …)`. |
+| `(letrec (n₁ v₁ …) body...)` | Mutually recursive bindings in a new child frame — every `nᵢ` is visible in every `vⱼ` (and to itself). Each name is pre-bound to `nil` before any `vⱼ` evaluates, so the form is for mutually recursive **functions** (their bodies fire at call time, by which point the real value is bound). Binding targets must be plain symbols. |
 | `(and a₁ …)` | Left to right; returns the first falsy value, else the last (tail position). Empty ⇒ `true`. |
 | `(or a₁ …)` | Left to right; returns the first truthy value, else the last (tail position). Empty ⇒ `nil`. |
 | `(quasiquote tmpl)` | Build a value from a template (§7.2). Reader shorthand: `` `tmpl ``. |
-| `(defmacro name [params] body...)` | Define a macro bound to `name` globally (§7.3). A prelude macro over `%make-macro`, not a core special form. |
+| `(defmacro name (params) body...)` | Define a macro bound to `name` globally (§7.3). A prelude macro over `%make-macro`, not a core special form. |
 
 ### 7.2 Quasiquote
 
@@ -356,17 +382,21 @@ The features this section once listed have all shipped: **dynamic variables**
 tries), **modules / namespaces** (`defmodule`), a **per-process tracing GC**
 (ADR-035 and its successors), **rest-parameter notation in `(sig …)`** (`&` /
 `&optional`, ADR-127), **records** (`defrecord` — pure sugar over closed maps,
-ADR-130), and **fusing lazy seq-views** (`lmap`/`lfilter`/`lkeep`/`lremove`
-threaded with `->>`, ADR-111) are all part of the language today and specified in
-the sections above.
+ADR-130), **fusing lazy seq-views** (`lmap`/`lfilter`/`lkeep`/`lremove` threaded
+with `->>`, ADR-111), a **first-class set** kind with the `#{…}` literal
+(ADR-060 — `type-of` reports `:set` and a set is never `=` to a map),
+**callable keywords** (ADR-165/167) and **abilities** — open generic functions
+with nominal dispatch (ADR-168) — are all part of the language today and
+specified in the sections above.
 
 The following are still on the roadmap and intentionally absent from this
 version:
 
 - **Unbounded lazy streams** (`iterate` and infinite producers). The fusing
-  lazy seq-views above cover finite pipelines; tail-recursive accumulators cover
-  the rest — an unbounded generator is deferred until an editor feature needs one.
-- **A first-class set type + `#{…}` literal** — the `set` library ships
-  (sets-over-maps, ADR-060); a distinct `Tag::Set` + reader literal is deferred.
+  lazy seq-views above cover finite pipelines; tail-recursive accumulators and
+  processes cover the rest — an unbounded generator is deferred until a concrete
+  feature needs one ([`deferred.md`](deferred.md) #2).
+- **Return-type dispatch and monomorphization for abilities** — additive
+  refinements of ADR-168, both post-1.0.
 
 See [ROADMAP.md](../ROADMAP.md) for sequencing.

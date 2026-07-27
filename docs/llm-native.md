@@ -346,9 +346,9 @@ report upstream instead.
 
 ## 14. A "Brood-aware" prompt fragment shipped with the language
 
-A small markdown file in `docs/` titled something like
-`docs/prompts/system.md` that any LLM-using project can include in
-its system prompt:
+A small markdown file in `docs/` that any LLM-using project can include in its
+system prompt. **Shipped** as [`docs/prompts/brood-task.md`](prompts/brood-task.md),
+served over MCP via `prompts/get` and reusable as a plain file by other harnesses:
 
 ```
 When writing Brood code:

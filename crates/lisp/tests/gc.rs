@@ -354,7 +354,7 @@ fn promotes_cyclic_local_closures_without_crashing() {
 /// (`process/message.rs`) is the message-path analogue of `promote` — it copies a
 /// closure's captured locals into the wire form. A router (a closure capturing a
 /// map whose values are handler closures) is the realistic trigger from
-/// `std/http.blsp`; before this was sound, `(spawn …)` of a thunk capturing such a
+/// `std/net/http.blsp`; before this was sound, `(spawn …)` of a thunk capturing such a
 /// handler overflowed the same way `def` did. Here a worker process captures the
 /// router via its spawn thunk, applies it, and sends the result back — proving the
 /// closure-capturing-closure graph round-trips a per-heap message copy. Companion

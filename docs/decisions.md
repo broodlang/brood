@@ -4,6 +4,14 @@ An **ADR** is an *Architecture Decision Record* — a short, dated note capturin
 one design choice and *why* we made it, so we don't accidentally relitigate
 settled questions. Newest at the bottom.
 
+> **Dangling links are expected in older entries.** Entries are historical records
+> and are not rewritten, so a few cite design/audit docs that have since been
+> deleted — `concurrency-v2.md`, `supervision.md`, `memory-review.md`,
+> `incremental-check.md`, `vm-perf-and-jit-runway.md`, `image-cache-plan.md`,
+> `feedback-retro-game-of-life.md` (most trimmed in `fdce540` once the features
+> they planned had shipped). Their content is superseded by the ADR that cites
+> them, the topic doc, or the source itself; recover the text from git if needed.
+
 ## Index
 
 This file holds the **in-force** ADRs. To jump to one, search for its
@@ -154,6 +162,45 @@ out to already exist (`nest check` has always exited 1 on any warning).
 | 127 | `&optional` params in `(sig …)` arrow grammar |
 | 128 | Tuple / positional product types |
 | 129 | `build-id` keys off the running binary's own mtime, not just git-sha |
+| 130 | `defrecord` is pure prelude sugar over closed maps, not a new `Value` kind |
+| 131 | Dead-clause lint broadens to precise surface `let`-locals (not just sig-typed params) |
+| 132 | `Control::Kill`: `(exit …)` reaches a process blocked in a native-nested `receive` |
+| 133 | `|…|` bar-quoted symbols and keywords for round-trip printing |
+| 134 | `editor/buffer-client`: the client half of the buffer-process protocol |
+| 135 | The top-level program is a green process (everything is a process) |
+| 136 | `require` is a concurrency contract: no observer sees a half-loaded module |
+| 137 | Runtime events: a push system monitor (`system-monitor`), consumed by telemetry |
+| 138 | The boot cache: expanded-prelude text, not a binary heap snapshot |
+| 139 | Iolists: write boundaries take nested string/bytes trees, flattened once |
+| 140 | Bit syntax: typed integer segments in the bytes pattern, pure Brood |
+| 141 | Byte-faithful sockets: binary mode is inbound-only, carrier strings are gone |
+| 142 | No growable read-buffer value; reads are chunk lists, scans are incremental |
+| 143 | The socket reactor: one mio thread for every socket; queued writes; TLS everywhere |
+| 144 | The dirty-native offload pool: blocking natives park a process, not a worker |
+| 145 | WASM component interop, slice 1: the sandboxed native-extension host |
+| 146 | Module privacy is enforced; `(:use-internals mod)` is the grant |
+| 147 | Package manager v2: tarball deps + a git-backed registry |
+| 148 | Test coverage is function-level, instrumented by hot reload |
+| 149 | A binding container is a **list**; a vector there is an error |
+| 150 | The pattern pin is `^expr`, not `~expr` |
+| 151 | Ambient names are **declared** (`defdyn`), not spelled (`*earmuffs*`) |
+| 152 | Reject the shape; never reinterpret it |
+| 153 | `sig` adoption: annotate `std/`, and what that exposed |
+| 154 | Ergonomics & conciseness pass: add the missing sugar, cut the redundant surface |
+| 155 | `receive` clause bodies compile into the *calling* function, not into a per-message thunk |
+| 156 | The collection protocol covers every collection; a misread shape is an error, not a reading |
+| 157 | A literal `if` test picks its branch at compile time |
+| 158 | Protocols move into `std/`: the polymorphism seam ships with the language *(value dispatch superseded by ADR-168; `defbehaviour` stands)* |
+| 159 | Grapheme-*indexed* string accessors: make the correct spelling the fast one |
+| 160 | Alternative (`or`) and conjunction (`and`) patterns; map keys are sub-patterns |
+| 161 | Transducers become public surface |
+| 162 | Retire the `lambda` alias: `fn` is the only spelling |
+| 163 | The convention questions the syntax review raised, settled |
+| 164 | `get`/`nth` diagnostics: an error must name the operation the caller wrote |
+| 165 | A keyword is callable as an accessor; nothing else data-like is |
+| 166 | Reserved names: the language's own functions cannot be redefined |
+| 167 | Keyword accessors are typed, not just callable |
+| 168 | `ability` is the one value-dispatch seam; `defprotocol`/`defimpl` retired |
 
 ---
 
@@ -10392,3 +10439,113 @@ justification was that it reads better.
   Verified false-positive-free the only way that counts: `nest check` stays at zero
   warnings across `std/` + `tests/`, and across all 11 sibling projects — roughly
   5,000 `get` call sites. A computed key and an unknown receiver both stay silent.
+
+## ADR-168 — `ability` is the one value-dispatch seam; `defprotocol`/`defimpl` retired
+
+**Status:** accepted. Supersedes ADR-158's *value dispatch*; ADR-158's
+`defbehaviour` (the module-as-implementor contract) is untouched and stays in
+`std/protocol.blsp`.
+
+**Context.** ADR-158 shipped `defprotocol`/`defimpl` — open generic functions
+dispatching on `(type-of first-arg)`. The design note
+[`protocol-dispatch-design.md`](protocol-dispatch-design.md) then measured why
+nobody used them: in the whole of `std`, exactly **one** module did. `type-of`
+distinguishes only ~13 built-in kinds, and every *application* type is a
+structural map (ADR-130: `defrecord` is sugar over a plain map, so every record
+reports `:map`). So a protocol could tell an `:int` from a `:string` but **could
+not tell one record from another** — which is the single most common reason to
+reach for a protocol at all. Speed was never the blocker; **dispatch identity for
+user types** was.
+
+That left two seams for one idea — `protocol` (dispatch on a value) and
+`behaviour` (a module satisfies a contract) — where the interesting half couldn't
+express the interesting case.
+
+**Decision.** One concept, **`ability`** (`std/ability.blsp`): open generic
+functions dispatching on the first argument's **identity**.
+
+1. **Identity, not kind.** `identity-of` returns a `defrecord*` value's **nominal
+   id** — a `:module/name` keyword baked in at macro-expansion via `(current-ns)`
+   — else the value's `type-of` kind. So two record shapes defined in one module
+   dispatch apart, and built-in kinds keep working with `:default` as the
+   fallback.
+2. **ADR-130 survives.** A record is still a structural map: `type-of` is `:map`,
+   and `get`/`assoc`/`=` are unchanged. The identity is a *dispatch-only* notion
+   layered on top, held in a reserved `:__id__` field.
+3. **The `:type`-field axis is permanently rejected.** Sniffing a `:type` key
+   would silently reroute *any* map that happens to carry one — the exact
+   implicitness ADR-011 rejects. A `defrecord*` identity is explicit and
+   construction-time, which is the same power made safe. This closes the
+   pre-1.0 breaking question in
+   [`roadmap-for-v1.md`](roadmap-for-v1.md) §3.
+4. **Registry, not structural satisfaction.** The design note leaned Go-style
+   (satisfaction *derived* from op resolution, coherent because nothing is
+   registered). We took the **registry** route instead: structural satisfaction
+   loses retroactive extension of a *foreign* record, and "make my type work with
+   their operation" is the flagship use case. Coherence is bought back
+   *explicitly* — every impl is tagged with its registering `current-ns`, so a
+   **cross-module** re-registration is a loud warning (last wins) while a
+   same-module one is ordinary hot reload and stays silent.
+5. **Drivers are values.** Because dispatch is on the first argument, "swap the
+   backend" is passing a different record — no config indirection, no module-atom
+   dispatch. Ambient selection becomes a one-line wrapper, not a second
+   mechanism.
+6. **Sealed abilities.** `:sealed [id …]` records a closed member set; the checker
+   then demands a *direct* impl of every op for every member (a `:default` doesn't
+   count). Runtime dispatch is unaffected — sealing is a contract.
+7. **`defprotocol`/`defimpl` are removed**, not deprecated (greenfield: no
+   compatibility shims). The `deftype`/`reify` runtime hint now points at
+   `defability`/`impl`, and reaching for `defprotocol` raises an unbound-symbol
+   error carrying that hint.
+8. **`defbehaviour` stays.** When the implementor is a *namespace* rather than a
+   value — a live view a router calls by name — there is no dispatch value, and
+   `(:implements …)` + a checker pass is the right shape. That is genuinely a
+   different problem, so it keeps its own (much smaller) module.
+
+**Checker support.** `types/check/protocol.rs` validates each `impl` against its
+ability's declared ops (missing op, arity disagreement, undeclared op), enforces
+sealed exhaustiveness, and warns at a **call site** when an op is applied to an
+argument of statically-known identity for which no impl and no `:default` exists.
+That last check is inference-driven, so a record-typed *variable* is caught too —
+enabled by `defrecord*` emitting a **map-literal** body plus a `sig`, so the
+record shape (carrying the `:__id__` keyword literal) flows through a `let`. Kept
+sound rather than aggressive: an op fn is recognised only by its exact def symbol,
+an identity is taken only when certain, and the impl set unions the file's own
+`register-impl` forms with the live `ability/*impls*` registry.
+
+**The identity leak, resolved pragmatically.** The obvious objection to a visible
+`:__id__` field is that it leaks into structural views. Verifying the constraints
+changed the plan rather than confirming it: the `Value` layout is JIT-pinned and
+map ops match `Value::Map` with catch-alls, so a `Record` variant is a pervasive,
+risky change — and, the key realization, a record being **`≠` a bare map is
+*correct*** (Elixir-struct semantics), and a record *printing* with its id is
+informative. So we do **not** want to hide the id from `=`. The one genuinely
+harmful leak — an internal key reaching external JSON — is fixed in std
+(`json-encode` omits `:__id__`), and `record?`/`record-id`/`fields` mean nothing
+outside `ability` touches the field. The residue is cosmetic (`keys`/`count`
+include the id; use `fields`), deferred behind a possible future hidden slot.
+
+**Consequences.**
+- One seam to learn and document instead of two-and-a-half. The polymorphism
+  section of [`language.md`](language.md) is now a single story.
+- ADR-011 is honoured on stricter terms than the rejected axis would have allowed:
+  the identity is opt-in per *definition*, not inferred per *value*.
+- Coherence is explicit rather than guaranteed. A cross-module clash is possible;
+  it is just never silent.
+- Retroactive extension of a foreign record works (register from any module), the
+  property structural satisfaction would have cost us.
+- **Still open:** return-type dispatch (needs bidirectional inference) and
+  monomorphization (static resolution where the identity is known — the runtime
+  win). Both additive, both post-1.0.
+- **Known warts:** `impl` requires the dispatch id written as `identity-of`
+  produces it — qualified (`geometry/circle`) — while `defability`'s `:sealed`
+  accepts a bare name and qualifies it; a bare `impl` id misregisters silently
+  (KI-15). The LSP still matches the retired `defprotocol`/`defimpl` and has not
+  been migrated (KI-16).
+
+**References.** ADR-158 (the protocol facility this supersedes), ADR-130 (records
+are structural — preserved), ADR-011 (defer power features / no implicit capture),
+ADR-006 (all of `ability` is Brood; zero new Rust primitives),
+[`protocol-dispatch-design.md`](protocol-dispatch-design.md) (the full design
+record: the measurements, the language survey, and the space explored),
+[`roadmap-for-v1.md`](roadmap-for-v1.md) §3 (the pre-freeze question this closes).

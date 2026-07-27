@@ -1,8 +1,8 @@
 //! Canonical spellings of the keyword *tags* the runtime puts into process
 //! mailbox messages and exit/monitor reasons — the wire contract between the
 //! Rust scheduler / monitor / link / dist machinery and the Brood code that
-//! `receive`s these messages (`std/prelude.blsp`, `std/supervisor.blsp`,
-//! `std/observer.blsp`, …).
+//! `receive`s these messages (`std/prelude.blsp`, `std/proc/supervisor.blsp`,
+//! `std/tool/observer.blsp`, …).
 //!
 //! Each is interned with `value::intern(..)` at its construction site. Before
 //! this module the bare strings `"down"` / `"EXIT"` / `"noconnection"` / … were

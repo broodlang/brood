@@ -141,7 +141,7 @@ pub(super) fn git_changed_files(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
 /// commit directly (servers that allow SHA-in-want, e.g. GitHub); falls back to
 /// fetching `ref` then checking out `commit`. Returns `:ok`, or throws with git's
 /// stderr. The package manager's fetch mechanism (ADR-037); the cache layout and
-/// when-to-reclone policy are Brood (std/package.blsp).
+/// when-to-reclone policy are Brood (std/tool/package.blsp).
 pub(super) fn git_clone(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let url = expect_string(heap, "%git-clone", arg(args, 0))?;
     let dest = expect_string(heap, "%git-clone", arg(args, 1))?;

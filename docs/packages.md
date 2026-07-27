@@ -7,8 +7,9 @@
 >
 > - **Slice 0 — done (2026-05-29):** manifest `:dependencies` parsing; the
 >   `(project …)` form is now a *quoting macro* (bare symbols in manifests).
-> - **Slice 1 — done (2026-05-29):** `:path` deps end-to-end. The `%sha256`
->   primitive + Brood tree-hashing, transitive resolution + conflict detection,
+> - **Slice 1 — done (2026-05-29):** `:path` deps end-to-end. A hashing
+>   primitive (then `%sha256`, since generalised to `%digest`) + Brood
+>   tree-hashing, transitive resolution + conflict detection,
 >   `project.lock.blsp` read/write, and `ensure-deps` wired into `project-setup`
 >   (a path dep's `src/` joins `*load-path*`, so `(require 'dep)` finds it).
 >   `std/tool/package.blsp` is the new module; no git, no network. The `(fetch)` verb
@@ -549,11 +550,13 @@ out-of-scope for v1.
   Returns `:ok` or throws.
 - `(%git-resolve-ref url ref)` — `git ls-remote URL REF` → commit hash
   string, or nil if not found.
-- `(%sha256 string)` — hash a byte string → hex string. The **only** hashing
-  primitive: per-file hashing is `(%sha256 (slurp path))` and the canonical
-  directory hash is a Brood tree-walk that combines per-file hashes (see
-  [Reproducibility notes](#reproducibility-notes) below) — both live in
-  `std/tool/package.blsp`, not the kernel. Also hashes the lock manifest.
+- `(%digest algo bytes)` — hash a byte sequence → a bytes digest. The **only**
+  hashing primitive (with `%hmac`); `std/hash.blsp` is Brood over it, exposing
+  `hash/sha256` (hex over a string) and `hash/sha256-bytes`. Per-file hashing is
+  `(hash/sha256-bytes (slurp-bytes path))` — byte-level, so a binary asset hashes
+  correctly — and the canonical directory hash is a Brood tree-walk combining
+  per-file hashes (see [Reproducibility notes](#reproducibility-notes) below); both
+  live in `std/tool/package.blsp`, not the kernel. Also hashes the lock manifest.
 - `(%http-get url)` — GET → bytes. **Deferred** with the `:tarball` source kind
   (ADR-011): it has no caller until then, so it isn't added yet. When a tarball
   dep lands, the kernel gains this one primitive and the source-kind dispatch in
@@ -585,24 +588,30 @@ out-of-scope for v1.
 
 ### Reproducibility notes
 
-The directory content-hash is **Brood** over the single `%sha256` primitive,
-not a directory-walking Rust primitive. It needs a canonical representation:
-walk paths in sorted order, and for each file emit its relative path, a NUL,
-and `(%sha256 (slurp path))`; `%sha256` the concatenation of those lines.
+The directory content-hash is **Brood** over the single `%digest` primitive (via
+`std/hash.blsp`), not a directory-walking Rust primitive. It needs a canonical
+representation: walk paths in sorted order, and for each file emit its relative
+path, a NUL, and that file's hash; then hash the concatenation of those lines.
 Approximates `git archive | sha256sum` but doesn't depend on git's behaviour.
 Skips `_deps/` (a dep's nested `_deps/` is its own concern, not part of this
 dep's content hash) and `.git/`.
 
+As implemented in `std/tool/package.blsp`:
+
 ```lisp
-(defn sha256-file (p) (%sha256 (slurp p)))
-(defn sha256-tree (dir)
-  (%sha256 (join "" (map (fn (p) (str (rel dir p) "\0" (sha256-file p) "\n"))
-                         (sort (tree-files dir))))))
+(defn package--sha256-file (path) (hash/sha256-bytes (slurp-bytes path)))
+
+(defn package-tree-hash (dir)
+  (hash/sha256 (join ""
+                 (map (fn (rel) (str rel "\0" (package--sha256-file (path-join dir rel)) "\n"))
+                   (package--tree-files dir)))))
 ```
 
-(Source files are UTF-8 text, so `slurp`-as-string is exact for v1; a future
-binary/tarball dep kind would want a bytes-level read, but that's deferred
-with the `:tarball` source.)
+Per-file hashing reads **bytes** (`slurp-bytes` + `hash/sha256-bytes`), so a dep
+containing a binary asset (image, font, …) hashes correctly — the earlier
+`slurp`-as-string form threw on any non-UTF-8 file. For a text file the hash is
+identical (its UTF-8 bytes *are* the file bytes), so existing lock hashes did not
+churn when this changed.
 
 ## See also
 

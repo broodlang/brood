@@ -30,12 +30,14 @@ Every remaining language item gets sorted by one question:
 An item fails the test for one of two reasons, and they are different:
 
 1. **Breaking** — adding it later would change what an existing, valid program
-   means. (Reserving reader syntax; a second protocol dispatch axis.)
+   means. (Reserving reader syntax; a second record dispatch axis.)
 2. **Idiom-shaping** — adding it later breaks nothing, but every line written before
    it reads dated, so adoption becomes a churn wave the moment you have promised
    stability. (Callable keywords.)
 
-By this test, **three** items qualify. Everything else waits.
+By this test, **three** items qualified. Everything else waits. Two are now
+done — callable keywords (ADR-165) and the record dispatch axis (ADR-168) — leaving
+**§2, the reader's permanent reservations**, as the one open pre-freeze decision.
 
 ---
 
@@ -136,23 +138,27 @@ Also worth writing down as permanent, since they are already irreversible:
 names), `|…|` bar-quoting owns the round-trip of odd symbols, and `#{…}` / `#b"…"`
 are the only two `#` literals.
 
-## 3. Decide the protocol `:type` dispatch axis — permanently
+## 3. Decide the record dispatch axis — ✅ done (ADR-168)
 
-⬜ **Status: a decision.** **[Brood]**
+ADR-158 shipped protocols dispatching on `type-of` of the first argument, which meant
+every `defrecord` value dispatched as `:map` (records are structural — ADR-130). A
+second axis keyed on a `:type` **field** would have fixed that, but **adding it later
+is breaking**: it changes what an existing map carrying a `:type` key dispatches to.
+So the question could not be left at "maybe" — it had to be settled before the freeze.
 
-ADR-158 shipped protocols dispatching on `type-of` of the first argument, which means
-every `defrecord` value dispatches as `:map` (records are structural — ADR-130). A
-second axis keyed on a `:type` field would fix that, and **adding it later is
-breaking**: it changes what an existing map carrying a `:type` key dispatches to.
+**Settled: neither of the two options originally listed.** The `:type`-field axis is
+**permanently rejected** — it captures shapes silently, which is exactly the ADR-011
+failure mode. But "records dispatch as `:map`, branch on a field inside" was not
+accepted either. Instead **ADR-168** gives a record an *explicit,
+construction-time* dispatch identity: a `defrecord*` bakes a `:module/name` keyword
+into each value, and `ability` dispatch keys on it. Nothing is inferred from a field,
+so a plain map carrying `:type` is never rerouted; and a record's structural
+behaviour is untouched (`type-of` is still `:map`, `get`/`assoc`/`=` still
+structural), so ADR-130 stands.
 
-So before 1.0 this becomes one of:
-
-- **Never** — records dispatch as `:map`, you branch on a field inside that impl.
-  Document it and close the question. (This is ADR-158's current, provisional stance.)
-- **An explicit opt-in** — e.g. a protocol declares its dispatch function, so nothing
-  is captured silently.
-
-Leaving it as "maybe" is the only option that isn't available.
+That closes the breaking question the freeze was worried about: the identity is opt-in
+at the definition site, and the field-sniffing axis is now a documented "never" on the
+freeze list below.
 
 ---
 
@@ -196,10 +202,11 @@ Draft, to be ratified as its own ADR before release:
 | Unbounded laziness / `lazy-seq` | Seq-views fuse pipelines; processes cover unbounded state | deferred.md #2 |
 | Alternative *negation* patterns (`(not …)`) | Binds nothing, so it is a guard — `:when` is the slot | ADR-160 |
 | `:as` in a map pattern | `(and whole {…})` says it exactly | ADR-160 |
-| Multiple dispatch | Single dispatch on the first argument; `match` covers the rest | ADR-158 |
-| Nominal types | `defrecord` is structural sugar over a map | ADR-130 |
+| Multiple dispatch | Single dispatch on the first argument's identity; `match` covers the rest | ADR-158, ADR-168 |
+| Dispatch inferred from a `:type` **field** | Would silently reroute any map carrying `:type`; a `defrecord*` identity is explicit and construction-time instead | ADR-168 |
+| Nominal *types* | `defrecord` is structural sugar over a map; `defrecord*` adds a dispatch-only identity, not a type — `type-of` is still `:map` and `=` stays structural | ADR-130, ADR-168 |
 | More than one spelling per thing | `lambda`, `let*`, `car`/`cdr`, `concat`, `some?`, `length` all removed | ADR-098, ADR-154, ADR-162 |
-| Monkey-patching the language | shipped functions are reserved; extend with protocols, shadow with `let`, or namespace it | ADR-166 |
+| Monkey-patching the language | shipped functions are reserved; extend with an ability, shadow with `let`, or namespace it | ADR-166 |
 
 ---
 
@@ -212,7 +219,7 @@ All purely additive — deferring costs a version number and nothing else.
   belongs in the "now" bucket. If annotations stay sparse and opt-in — three modules
   today (ADR-153) — then `(sig …)` below the definition is fine and this waits. An
   ADR-082 revision touching `defn`, `sig_of`, `defrecord`'s emitted sigs, and `sig!`.
-- ⬜ **Re-host the seq protocol on ADR-158 protocols.** The principled fix (policy out
+- ⬜ **Re-host the seq protocol on abilities (ADR-168).** The principled fix (policy out
   of Rust, so a user type can join `count`/`first`/`conj`) but a measured rewrite of
   the hottest paths in the language — exactly the work you don't want against a 1.0
   deadline. No surface change, so post-1.0 is free.
@@ -223,8 +230,10 @@ All purely additive — deferring costs a version number and nothing else.
   against a real editor workload.
 - ⬜ **`#|` block comments**, and small helpers like a plain `assert`. Additive by
   construction.
-- ⬜ **Record-shape protocol dispatch**, *if* item 3 above resolves to "an explicit
-  opt-in" rather than "never".
+- ⬜ **Monomorphization of ability dispatch** — resolving a call statically when the
+  argument's identity is known (the checker already computes that identity for its
+  missing-impl warning). A codegen win with no surface change, so post-1.0 is free.
+  Likewise **return-type dispatch**, which needs bidirectional inference.
 
 ---
 

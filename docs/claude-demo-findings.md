@@ -563,7 +563,7 @@ plus the prior MCP-server commits (`bd4aa2d`, `808b7f1`, `d662df7`).
   the MCP server inherits it. This is the REPL-without-a-REPL surface
   I asked for in `llm-native.md` §15.
 - **`--watch` (file-level reload).** `brood --watch <PATH>` and
-  `nest run --watch <PATH>` re-`load` on save (`std/reload.blsp`). The
+  `nest run --watch <PATH>` re-`load` on save (`std/tool/reload.blsp`). The
   structured JSON-lines feedback channel `llm-native.md` §6 asks for
   isn't there yet, but the trigger and the hot-reload machinery are.
 - **GNU-anchored error output.** `FILE:LINE:COL: KIND error: MESSAGE`

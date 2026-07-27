@@ -49,7 +49,7 @@ a list of layer references (symbols, or inline maps), **head = highest
 precedence**:
 
 ```clojure
-{:layers '(grid/layer magit/layer) :type :magit-status …}
+{:layers '(grid/layer magit/layer) :type :magit-status}   ; … plus whatever else the app keeps
 ```
 
 Resolution is one generic collector — **facets**: `(layer-collect ctx facet)`
