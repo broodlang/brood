@@ -44,9 +44,58 @@
       (assert= (get e :kind) :parse)
       (is (includes? (get e :hint) "int->char"))))
   (test "the legitimate # forms still read (no false positive)"
-    ; bytes literal
+    ; the only two: bytes and set
     (is (bytes? (read-string "#b\"hi\"")))
-    (is (= (read-string "#foo") '#foo))))
+    (is (set? (read-string "#{1 2}"))))
+  ;; `#` is a DISPATCH character, not an atom character. `#foo` used to read as a
+  ;; symbol (this test asserted that), which quietly spent the `#` space: any `#`
+  ;; form added after 1.0 would have been taking a token that was a legal name —
+  ;; a breaking change. Rejecting the whole space costs nothing and keeps every
+  ;; future `#` literal additive.
+  (test "any other #… is reserved, not a symbol"
+    (let (e (try (read-string "#foo") (catch e e)))
+      (assert= (get e :kind) :parse)
+      (is (includes? (get e :hint) "#{…}")))
+    ;; …including the Scheme/CL block comment, which used to read as the
+    ;; bar-quoted symbol `|#\|c\|#|` rather than being rejected.
+    (let (e (try (read-string "#|a comment|#") (catch e e)))
+      (assert= (get e :kind) :parse)
+      (is (includes? (get e :hint) "(comment"))))
+  ;; A trailing `#` is untouched — that is auto-gensym, and it is load-bearing.
+  (test "a trailing # is still auto-gensym, not affected"
+    (is (= (type-of (read-string "x#")) :symbol))))
+
+;; The digit-led rule: a token that leads with a digit MUST be a number. These all
+;; read as symbols before, which meant `0x1F` surfaced as a far-away "unbound
+;; symbol" instead of a reader error, and it silently spent every numeric syntax
+;; Brood might later want. Reserving them now keeps ratios / radix literals /
+;; digit separators / a bigint suffix purely additive after 1.0.
+(describe "digit-led tokens are reserved numeric syntax, not names"
+  (test "the reserved shapes each error with a targeted hint"
+    (let (cases [["1/2" "ratio"] ["0x1F" "radix"] ["1_000" "digit separator"]
+                 ["1N" "bigint"] ["3px" "must be a number"]])
+      (map (fn (c)
+             (let (e (try (read-string (first c)) (catch e e)))
+               (assert= (get e :kind) :parse)
+               (is (includes? (get e :hint) (second c)))))
+        cases)))
+  (test "every real numeric literal still reads"
+    (assert= (read-string "42") 42)
+    (assert= (read-string "1.5") 1.5)
+    (assert= (read-string "1e10") 1e10)
+    (assert= (read-string ".5") 0.5)
+    (assert= (read-string "5.") 5.0)
+    (assert= (type-of (read-string "1.50M")) :decimal)
+    (assert= (type-of (read-string "1M")) :decimal))
+  (test "names that merely contain a sign or dot are untouched"
+    ;; The rule keys on a digit AFTER the sign/dot, which is what keeps these legal.
+    (map (fn (t) (assert= (type-of (read-string t)) :symbol))
+      ["+" "-" "..." "..foo" "foo." ".foo" "foo/bar" "a1" "x2y"])
+    (assert= (type-of (read-string ":a/b")) :keyword))
+  (test "inf/nan still read as floats, not reserved tokens"
+    (is (infinite? (read-string "inf")))
+    (is (infinite? (read-string "-inf")))
+    (is (nan? (read-string "nan")))))
 (describe "let/letrec: Scheme/Clojure nested bindings get a hint"
   (test "(let ((a 1)) …) → hint to flatten the bindings"
     (let (h (hint-of "(let ((a 1)) a)"))
