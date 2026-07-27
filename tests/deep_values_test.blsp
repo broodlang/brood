@@ -3,8 +3,9 @@
 ;; (rest spines are iterative); since 2026-07-20 each recursion entry grows the
 ;; native stack in heap-backed segments (`stacker::maybe_grow`) instead of
 ;; overflowing — this file pins that for promote (`def`), GC flush, structural
-;; equality, and hashing (map keys). Each test body runs in its own green
-;; process, so the depths here also prove the guard works on worker stacks.
+;; equality, ordering (`compare`, and so `sort`), and hashing (map keys). Each
+;; test body runs in its own green process, so the depths here also prove the
+;; guard works on worker stacks.
 (defmodule deep-values-test (:use test))
 
 (defn build (n acc) (if (< n 1) acc (build (- n 1) (list acc))))
@@ -26,4 +27,14 @@
     (refute (= (build 30000 (list "z")) (build 30000 (list "w")))))
   (test "a deep value works as a map key (hashing)"
     (let (k (build 20000 (list "k")))
-      (is (= (get {k :hit} k) :hit)))))
+      (is (= (get {k :hit} k) :hit))))
+  ;; Ordering was the one walker in this family that never got the guard: `equal`
+  ;; and `hash_value_into` grow the stack, `value_cmp` recursed raw and aborted the
+  ;; process on a guard page (2026-07-27). It reaches Brood as `compare`, and
+  ;; through it every `sort`/`sort-by`/`min`/`max` over nested data.
+  (test "ordering: compare on two 30k-deep values"
+    (is (= (compare (build 30000 (list "z")) (build 30000 (list "z"))) 0))
+    (is (< (compare (build 30000 (list "w")) (build 30000 (list "z"))) 0)))
+  (test "ordering: sort over deep values"
+    (let (deep (list (build 20000 (list "b")) (build 20000 (list "a"))))
+      (is (= (count (sort deep)) 2)))))

@@ -617,6 +617,29 @@ impl Heap {
     /// them by content isn't well-defined here).
     pub fn value_cmp(&self, a: Value, b: Value) -> std::cmp::Ordering {
         use std::cmp::Ordering;
+        // Fast path + deep-car-nesting guard, mirroring `equal`/`hash_value_into`:
+        // the cons *spine* is walked iteratively below, but a nest built in the
+        // CAR (`(fold (fn (acc x) (list acc)) nil (range 200000))`) recurses one
+        // native frame per level, and the reader's 256-level cap can't see a value
+        // built at runtime. Unguarded this aborted the process on a guard page
+        // (2026-07-27); scalars never recurse, so the check stays off the hot
+        // sort/compare path.
+        match (a.unpack(), b.unpack()) {
+            (ValueRef::Int(x), ValueRef::Int(y)) => return x.cmp(&y),
+            (ValueRef::Nil, ValueRef::Nil) => return Ordering::Equal,
+            (ValueRef::Bool(x), ValueRef::Bool(y)) => return x.cmp(&y),
+            (ValueRef::Float(x), ValueRef::Float(y)) => {
+                return x.partial_cmp(&y).unwrap_or(Ordering::Equal)
+            }
+            _ => {}
+        }
+        stacker::maybe_grow(WALKER_RED_ZONE, WALKER_STACK_CHUNK, || {
+            self.value_cmp_grown(a, b)
+        })
+    }
+
+    fn value_cmp_grown(&self, a: Value, b: Value) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
         use Value::*; // Stage 1: -> use ValueRef::*; (matched via .unpack())
         match (a.unpack(), b.unpack()) {
             (Nil, Nil) => Ordering::Equal,
