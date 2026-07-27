@@ -16,7 +16,12 @@
 ;; cargo test notices real failures). We catch that last error so the demo
 ;; finishes by showing its report rather than dumping a backtrace.
 
-(require 'test)
+;; A `defmodule` with `(:use test)` so the framework's macros refer bare —
+;; post-ADR-065 a plain `(require 'test)` only loads the module and leaves
+;; `describe`/`test`/`assert=` qualified, which is why this file had stopped
+;; running (and read as a wall of `unbound symbol` warnings).
+(defmodule suite-failures-demo
+  (:use test))
 
 ;; --- tests that pass, so the report shows successes alongside failures ------
 (describe "passing examples"
