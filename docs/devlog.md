@@ -9364,3 +9364,54 @@ four pre-freeze language-surface items (ADR-165/166/168/169) are now done; the s
 freeze-ready** — what remains is ratifying the freeze list as its own ADR, plus the
 non-language release blockers (`nest format --check`, the registry-test signing-agent
 coupling).
+
+## 2026-07-27 (later) — the KI-14 guard cost, recovered: it was the second compare
+
+Follow-up to this morning's entry, which named `stamp_stack_limit`'s per-fast-link
+`stacker::remaining_stack()` probe as the suspect for `fib` 57 → 75 ms. **That was wrong, and
+the fix is elsewhere.** `fib` is now 74 ms against 88 for HEAD in a same-session best-of-7 A/B
+(`pfib` 252 → 202), which is parity with a build that has the guard deleted outright (73 / 199).
+
+**Hoisting the stamp measured exactly zero.** The hoist itself is sound and shipped — stamp at
+the outermost native entry (`jit_native_depth == 0`) plus at quantum start in `Process::drive`,
+since a green process resumes on whichever worker the scheduler routed it to and worker stack
+bases differ — but `fib` never executes it. `fib` tiers to the **i64 register worker**, which
+recurses natively through its own body; a fast link is not involved. Rebuilding with both KI-14
+prologue guards deleted recovered the whole 16 ms, which put the cost on the per-frame prologue
+and nowhere near the stamp.
+
+**Attributing inside the prologue, one binary per hypothesis** (fib, best-of-7, taskset-pinned):
+
+| build | `fib` | note |
+|---|---|---|
+| HEAD `2e5346c` | 89 ms | both guards as shipped |
+| `limit != 0` test dropped | 84 ms | the compare is unsigned — no address is `< 0`, so a `0` limit already disables the check for free |
+| frame-address probe dropped | 84 ms | ~0 |
+| `limit` load dropped | 82 ms | ~2 ms |
+| **frame-count cap dropped** | **73 ms** | full recovery |
+| both guards deleted | 73 ms | the floor |
+
+So it was never one expensive instruction — it was **two tests per level where one would do**.
+The byte guard ran alongside the old `I64_DEPTH_LIMIT` frame-count cap and `bor`'d the results,
+and a second compare on every level of a ~30 M-call recursion is ~18% of the row. The count cap
+is now gone: the byte test measures the resource that actually runs out and subsumes it, and a
+frame count is only ever right for one frame size — which is precisely what KI-14 was (the JSON
+document whose frames were heavy enough that 32 768 of them exhausted 16 MiB long before the
+count tripped).
+
+**The one thing the count cap still covered** is a `0` limit, i.e. a platform whose remaining
+stack can't be read: the unsigned compare then never trips and the guard fails open, which with
+no count behind it would be an unguarded native recursion. The i64 **wrapper** now checks the
+limit once per outermost activation and returns outcome 5 when it is `0` — the same
+"this fn belongs on the boxed path" signal the depth-bail raises, so `jit_tier` retires the
+register version and the boxed path (which keeps its dispatch-level depth caps) takes over.
+
+**The stamp hoist was kept on its own merits**, measured separately after the fact: ~5% on
+`bintree` (130 → 124 ms, best-of-15 — the 16.3 M-fast-link row), flat on `nqueens`/`json`/`sort`
+and on `fib`. Two stamp points, and the second is not optional: without the quantum-start stamp,
+a process that migrated to another worker while its depth counter was non-zero would keep
+comparing against the previous worker's stack.
+
+Guard integrity is unchanged: `tests/jit_deep_recursion_test.blsp` passes at 2.77 s vs 2.63 s for
+HEAD (same nest profile — an earlier 14.5 s reading was a `release-fast`/`--no-default-features`
+nest, not a regression).
