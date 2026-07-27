@@ -9415,3 +9415,44 @@ comparing against the previous worker's stack.
 Guard integrity is unchanged: `tests/jit_deep_recursion_test.blsp` passes at 2.77 s vs 2.63 s for
 HEAD (same nest profile — an earlier 14.5 s reading was a `release-fast`/`--no-default-features`
 nest, not a regression).
+
+## 2026-07-27 (later still) — `reverse-onto`: naming the shape every tail rewrite lands in
+
+The non-tail-recursion advice (`508445a`) pushes std toward accumulator loops, and each
+rewrite ends the same way: walk a list building a reversed prefix, then splice it back in
+front of the remainder. Written the obvious way — `(append (reverse acc) tail)` — that is
+**four passes**: `reverse` walks `acc`, then `append` folds both lists onto nil and reverses
+the result. The one-pass loop already existed as the private `reverse--acc`, and the
+prelude's own `merge--acc` carried a comment explaining why it used the fast form — but it
+had no public name, so `5b40e7b`'s three new rewrites (plus `queue`, `multimap`, `url`,
+`tool/test`) all reached for the slow spelling.
+
+So the idiom gets a name. Measured, 20k splices of a 500-element prefix:
+
+| form | time |
+|---|---|
+| `(append (reverse acc) tail)` | 2739 ms |
+| `(fold flip-cons tail acc)` | 1674 ms |
+| **`reverse-onto`** | **601 ms (4.6×)** |
+
+The `fold` form loses on the per-element `flip-cons` apply frame, which is exactly the
+reason `reverse--acc` was written as a dedicated loop in the first place. Applied at six
+call sites plus `append--onto` (so `append`/`mapcat` inherit it) and `merge--acc`.
+
+**A measurement that nearly went in wrong.** The first comparison built the accumulator with
+`(range 0 500)` — so `fold` hit `%range-reduce`, the kernel's counted-loop fast path, and
+came out *ahead* of the dedicated loop (1050 vs 1488 ms). With genuine consed lists, the
+shape the real call sites have, the ranking inverts. A lazy range is not a list, and a
+microbenchmark that hands one to `fold` is measuring the wrong function.
+
+**And one that did not survive scrutiny — recorded so it isn't re-found and believed.** The
+suite A/B read `wordcount` −5.8% and `bintree` −4.8%, solo-confirmed both. Neither program
+calls `append`, `mapcat`, `sort`, `reverse` or any module touched here, so there is no causal
+path. A definition-only control (the new `defn` present but unused) measured identical to
+upstream, and adding a further irrelevant `defn` did not move the changed build, so it is not
+alignment luck either. What settles it: the gain **shrinks with workload** — bintree −10.7%
+at N=50, −9.0% at N=100, −4.8% at N=200, −1.8% at N=400 — i.e. a fixed ~5 ms, not a
+per-operation win, while `fib`/`json`/`sort` are flat. Real, reproducible, unexplained, and
+**not** claimed as a benefit of this change. `sort` in particular was predicted to improve
+via `merge--acc` and measured +1.0%: its splices are short next to the row's real cost, which
+is building the input list.
