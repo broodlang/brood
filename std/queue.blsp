@@ -96,12 +96,16 @@ Stable: among equal priorities, earlier inserts pop first (FIFO)."
   (pq--sorted-insert pq priority value))
 
 (defn pq--sorted-insert (pq pri val)
-  (cond
-    (nil? pq) (list [pri val])
-    ;; strict `<` so a new item stops *after* existing equal-priority items —
-    ;; keeping ties in insertion order (FIFO) rather than popping newest-first.
-    (< pri (first (first pq))) (cons [pri val] pq)
-    else (cons (first pq) (pq--sorted-insert (rest pq) pri val))))
+  ;; Tail-recursive: accumulate the (reversed) higher-priority prefix and splice
+  ;; the new entry once, so a large queue can't overflow the stack on insert.
+  ;; Strict `<` so a new item stops *after* existing equal-priority items —
+  ;; keeping ties in insertion order (FIFO) rather than popping newest-first.
+  (letrec (go (fn (acc xs)
+                (cond
+                  (nil? xs) (append (reverse acc) (list [pri val]))
+                  (< pri (first (first xs))) (append (reverse acc) (cons [pri val] xs))
+                  else (go (cons (first xs) acc) (rest xs)))))
+    (go nil pq)))
 
 (defn pq-pop (pq)
   "Return `[min-value new-pq]`, or `:empty` if the queue is empty."
