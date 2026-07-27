@@ -2684,7 +2684,11 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "%node-connect",
         Arity::exact(2),
-        Sig::new(vec![sym, string], sym),
+        // The peer name may be a symbol OR a keyword — `expect_node_name` accepts
+        // both, and the prelude's `connect` passes the computed `:name@host`
+        // keyword (matches `register`/`whereis`/`monitor-node`). Returns the
+        // authoritative peer name, always as a keyword (`Value::keyword`).
+        Sig::new(vec![sym.union(kw), string], kw),
         node_connect,
     );
     def(
