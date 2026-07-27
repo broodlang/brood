@@ -1,5 +1,32 @@
 # Plan — the post-JIT single-threaded compute frontier
 
+> ## ⏯ RESUME HERE (2026-07-27) — the KI-14 stack guard costs ~30% of `fib`; hoist the stamp
+>
+> The 2026-07-27 published run turned up one non-drift movement: **`fib` 57 → 75 ms and `pfib`
+> 165 → 218 ms**, bisected with three separately-built binaries to **`f11f4cb`** (the KI-14 fix
+> that stops deep recursion through JIT'd code running the native stack into its guard page).
+> Pre-guard `26939e2` = 70.1 / 182.8 ms wall, `f11f4cb` = 85.6 / 239.0, HEAD `1a3fc1c` =
+> 85.3 / 236.6 — the whole move is that one commit, nothing after it. Ranks held (2/7 both).
+>
+> **This is the cheapest lever currently on the board, because it recovers a known cost rather
+> than hunting a new one.** The prologue check is three instructions against a preloaded absolute
+> address and is not the problem. The suspect is `stamp_stack_limit` (`jit_runtime.rs`), which
+> calls `stacker::remaining_stack()` on **every** `jit_run_fast_link` — the ~26 ns Brood→Brood
+> path `fib` consists of.
+>
+> `Heap::jit_stack_limit` is an **absolute address valid for the whole thread stack**, so
+> re-deriving it per fast link is redundant. Stamp instead at the outermost native entry
+> (`jit_native_depth == 0`) **plus** wherever a green process is (re)scheduled onto a worker —
+> that second point is not optional, and is the entire reason the stamp is computed live instead
+> of being a constant: worker and root-thread stack bases differ.
+>
+> Self-checking: `tests/jit_deep_recursion_test.blsp` aborts the process outright if the guard
+> loses its teeth, so a wrong hoist fails loudly rather than silently. Also probe whether the
+> now-unconditional `stack_headroom_ok()` in `jit_dispatch_call` matters — it is on the slow call
+> path, so likely not, but it has never been measured either.
+>
+> ---
+
 > ## ⏯ RESUME HERE (2026-07-24) — allocation frontier re-profiled; premise corrected
 >
 > Picking up the "allocation / GC frontier" item (`bintree` + `nqueens`, the two worst compute
