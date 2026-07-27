@@ -25,8 +25,7 @@
 call their exports as ordinary functions. `wasm-load` a `.wasm` (or WAT text
 via `wasm-instantiate`), `wasm-call` its exports, or `use-native` to bind every
 export as a named Brood function. Calls are fuel-metered and sandboxed; long
-calls go through the dirty-offload pool (`wasm-call-blocking`)."
-  (:use file))
+calls go through the dirty-offload pool (`wasm-call-blocking`).")
 
 (defn wasm-load (path)
   "Instantiate the compiled WASM component at `path` (a `.wasm` file). Returns
