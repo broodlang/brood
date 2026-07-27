@@ -156,6 +156,15 @@ benchmark: ## Run benchmarks; archive results to docs/benchmarks/<timestamp>.md
 quickbench: ## Fast (~10s) benchmark for iteration — no archive, few samples
 	./scripts/quickbench.sh $(ARGS)
 
+ab: ## A/B the working tree against a git ref on the cross-language rows: make ab BASE=<ref> ROWS="fib pfib" N=7
+	./scripts/ab-bench.sh $(if $(BASE),-b $(BASE),) $(if $(N),-n $(N),) $(ROWS) $(ARGS)
+
+ab-clean: ## Remove the baseline worktrees + builds that `make ab` created under target/ab/
+	@for d in target/ab/*/; do [ -d "$$d" ] && git worktree remove --force "$$d" 2>/dev/null || true; done
+	@rm -rf target/ab
+	@git worktree prune
+	@echo "removed target/ab"
+
 suite: ## Run the in-language suite via the project runner (discovers tests/**/*_test.blsp)
 	$(NEST) test
 
@@ -187,7 +196,15 @@ configure: ## Show current build options (./configure --with-gui to enable the G
 	@echo "WITH_AUDIO = $(WITH_AUDIO)$(if $(AUDIO_FEATURES), (audio-beep on),)"
 	@echo "Run ./configure --with-gui to enable the native window; ./configure --help for more."
 
-release: ## Build optimized `brood`, `nest` and `brood-lsp` into $(RELEASE_DIR) (gitignored; does NOT install — ./configure --with-gui first for the window)
+release-brood: ## Build ONLY the `brood` binary into $(RELEASE_DIR) — the perf-A/B build step (skips nest + brood-lsp)
+	# Exactly the flags `release` uses for the binary that RUNS user code, and
+	# nothing else: `scripts/ab-bench.sh` builds both sides of an A/B through this
+	# target so the two binaries cannot differ in profile or features. Note the
+	# package is `cli` (the binary), NOT `-p brood` (the lib) — `-p brood` does not
+	# relink $(RELEASE_DIR)/brood and silently benchmarks a stale binary.
+	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p cli $(RUN_FEATURES)
+
+release: release-brood ## Build optimized `brood`, `nest` and `brood-lsp` into $(RELEASE_DIR) (gitignored; does NOT install — ./configure --with-gui first for the window)
 	# Build the configured (./configure) binaries into the local, gitignored
 	# $(RELEASE_DIR) with the `release-fast` profile (stripped, no LTO) — fast
 	# to build. The separate `install` target copies them out to
@@ -195,7 +212,6 @@ release: ## Build optimized `brood`, `nest` and `brood-lsp` into $(RELEASE_DIR) 
 	# → ADR-038), so `nest release` ships a self-contained app with no Rust. (For an
 	# LTO'd shippable runtime, nest release rebuilds under `release-lean` — see
 	# docs/release.md.)
-	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p cli $(RUN_FEATURES)
 	BROOD_EMBED_RUNTIME=$(CURDIR)/$(RELEASE_DIR)/brood RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p nest $(RUN_FEATURES)
 	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p brood-lsp
 
