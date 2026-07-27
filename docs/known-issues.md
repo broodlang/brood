@@ -2,8 +2,7 @@
 
 KI-9 is a one-off arity sighting judged a transient inconsistent-build artifact, not
 present in committed code; KI-10 no longer reproduces, incidentally fixed — both kept as
-records, not open bugs. **Open: KI-14 (a test hangs only under the test framework, so
-`make test` cannot go green), KI-13 (type checker), KI-15 (`impl` misregisters a bare
+records, not open bugs. **Open: KI-13 (type checker), KI-15 (`impl` misregisters a bare
 record id) and KI-16 (the LSP still matches the retired `defprotocol`/`defimpl`).**
 This file is the condensed record — what each was, how it was fixed, and the regression
 test that guards it — so a recurrence is recognizable. For the narrative discovery
@@ -77,64 +76,91 @@ sibling) as well as `*protocols*`; drop the `defprotocol` arms from
 
 ---
 
-## KI-14 — one conformance test hangs forever, but only under the test framework · **OPEN, found 2026-07-27**
+## KI-14 — the RUNTIME collector re-walked a deep process's whole root stack at every safepoint · **found 2026-07-27, fixed 2026-07-27**
 
-`make test` cannot go green: `brood::suite brood_suite_passes` is SIGKILLed at its 600 s
-nextest cap on **both** tries. Deterministic, not a flaky deadline — and *not* a budget
-problem, so raising the cap is the wrong fix (`.config/nextest.toml` says as much).
-
-As of 2026-07-27 it is the **only** remaining failure: `880 of 881` otherwise pass. (That
-run also surfaced a stale assertion in `hints_name_only_features_that_exist` — the
-`deftype` hint had been repointed at `defability` by ADR-168 without updating its test —
-fixed the same day, so the tally was 879 before.)
-
-**Minimal repro** (hangs indefinitely; observed >10 min, never completes):
+**Symptom.** `make test` could not go green: `brood::suite brood_suite_passes` was
+SIGKILLed at its 600 s nextest cap, deterministically. One-line repro, which hung
+indefinitely (observed >10 min):
 
 ```sh
 nest test --only 'test:every n_ document'
 ```
 
-That is `JSONTestSuite: RFC 8259 accept/reject › every n_ document is rejected`
-(`tests/conformance_json_test.blsp:71`). Identified by bisecting `--partitions`, then
-confirming against the shard hash: it is the only conformance test satisfying all three
-hanging shards (42 mod 128, 10 mod 32, 2 mod 8 — `test--label-hash` in
-`std/tool/test.blsp:588`).
+**What made it confusing.** The same work outside the test framework was fast and correct:
+the identical scan over the identical 318 corpus files returned `[0 188 nil]` in seconds,
+each of the 188 `n_` documents parsed fine one-per-process, and the two deep-nesting
+documents parsed cleanly inside a spawned green process. It needed the framework context —
+and, it turned out, nothing about the framework except **how much code it had loaded**.
 
-**What makes it strange: the same work outside the framework is fine and fast.** Every
-one of these completes correctly in seconds:
+**Root cause.** The ADR-091 RUNTIME two-generation collector's cooperative drain report
+(`Heap::report_gen_liveness` → `runtime_gen_referenced_private`) probes in two phases:
+Phase 1 over the process's private roots and live arms, Phase 2 over its whole LOCAL heap.
+Phase 2 already had a stale-dirty throttle (`P2_REVALIDATE_STRIDE`) added for exactly this
+class of problem. Phase 1 was deliberately unthrottled, on the premise that it is the
+*cheap* probe.
 
-- `js--scan` copied verbatim into a plain script over the identical 318 corpus files →
-  `[0 188 nil]`, the expected answer.
-- All 188 `n_` documents parsed sequentially in one process → `DONE 188`.
-- All 188 parsed one-process-per-file → 176 verdicts, 0 hangs, 12 unreadable (those 12
-  are the invalid-UTF-8 files `slurp` legitimately refuses, as the test file's own header
-  comment at line 13 explains).
-- The two deep-nesting documents (100 000 and ~50 000 levels, the KI-11 pair) parsed
-  *inside a spawned green process* → both `:rejected`, cleanly.
-- An invalid-UTF-8 document parsed inside a spawned green process → `:rejected`.
+That premise has an unbounded term: `roots` is the VM operand/env stack, so **Phase 1's
+cost is O(recursion depth)**. Parsing a 100 000-level JSON document makes it enormous, and
+instrumenting the hung run showed the scale — inside a **single** drain epoch:
 
-So it is neither the parser, nor a single document, nor deep recursion, nor the UTF-8
-refusal path. It needs the framework context — green process on the worker pool.
+```
+drains: 1   phase1 walks: 78409
+[rt-dbg] phase1 roots=1727686 env=2 dyn=0 arms=66448
+```
 
-**Process state while hung:** the `nest` process sits at ~110 % CPU with 15 threads —
-one thread spinning, all others in `futex_do_wait`, and the reported-test count frozen
-(71 of the conformance set, unchanged over 7+ minutes). So one worker is in an infinite
-loop rather than everything being blocked.
+78 409 walks over a 1.7-million-entry root stack. Three compounding faults:
 
-**Not yet root-caused.** `gdb` cannot attach on this machine (yama `ptrace_scope`), and
-the `release-fast` binaries are stripped, so no native backtrace was obtained. Next
-steps: build unstripped with `debug-assertions=on` and either loosen `ptrace_scope` or
-attach a self-profiler; `BROOD_VM_TRACE=1` / `BROOD_NO_JIT=1` on the minimal repro to
-rule the JIT in or out (the JIT tiers up here, where the one-file-per-process scans
-never do — the most obvious asymmetry between the hanging and passing cases).
+1. **The Phase-2 stale-dirty short-circuit sat *between* the phases.** A process dirty via
+   Phase 2 therefore paid a full Phase-1 walk on every safepoint and then discarded the
+   result — the verdict is `true` regardless of what Phase 1 found. Pure waste, invisible
+   while Phase 1 really was cheap. This was the dominant cost.
+2. **Phase 1 had no throttle of its own,** so a process dirty *via Phase 1* (deep inside
+   draining-generation code) re-walked O(depth) every reporting safepoint.
+3. **`live_vm_arms` was walked per active frame, not per distinct arm.** It is a per-frame
+   stack, so a recursive function appears once per frame — 66 448 entries that are a
+   handful of distinct `Arc`s, each arm's whole IR tree re-walked every time.
 
-**Adjacent finding:** `nest observe`/attach tests leak a `brood` child — one was found
-still alive 2h22m after its run (`/tmp/brood-observe-<pid>/target.blsp`, ~2.7 % CPU).
-Independent of this hang, but it means a long session accumulates stray processes.
+Why loaded-code volume was the trigger: the drain only arms once the shared RUNTIME region
+crosses `BROOD_RT_GC_FLOOR`. Few files loaded → no drain → no probe → 520 ms. Whole suite
+loaded → drain armed → the above. `BROOD_RT_GC_FLOOR=100000000` (collector off) took the
+hung repro to 2.2 s, which is what confirmed the subsystem.
 
-**Not caused by** the sort/CI work in `1749307`: the hang reproduces with that commit
-reverted in effect (the test touches no sort path), and `observe_attach` — the other
-failure in that run — is fixed and passing at 5.9 s.
+**Fix.** Hoist the stale-dirty short-circuit above Phase 1 (changes no verdict — it only
+skips work whose result was already discarded); give Phase 1 its own `P1_REVALIDATE_STRIDE`
+throttle, gated on `P1_LARGE_SEED` so a shallow process keeps reporting on its very next
+safepoint (the promptness the drain-completion tests rely on); and dedup `live_vm_arms` by
+`Arc` identity. Soundness is the same argument Phase 2 already made: a stale-dirty verdict
+only *delays* drain completion, it can never fabricate a clean ack.
+
+**Result.** The filed repro: hang → **9.8 s**. Whole in-language suite including
+conformance: **3591 tests, all passing, 88 s**.
+
+**Guarded by** `tests/jit_deep_recursion_test.blsp` (deep recursion under the collector)
+and the existing `crates/lisp/tests/runtime_collector.rs` drain-completion tests, which pin
+the promptness the seed-size gate preserves.
+
+**Found alongside** two genuine stack-overflow aborts on the same corpus, both fixed and
+both distinct from the hang (each aborts rather than hangs, and neither is the reason
+`make test` was red):
+
+- **A JIT'd arm could run the native stack into its guard page.** The pre-existing guards
+  (`jit_native_depth` + the `stacker` headroom probe) sit on the *dispatch* paths, so they
+  only bound recursion that goes through a fast link; recursion via `brood_rt_call_slow`
+  re-enters Rust every level while the depth counter stays near zero. Fixed with a
+  three-instruction prologue guard in every lowered arm, checking the frame's address
+  against a `Heap::jit_stack_limit` stamped from the live remaining stack at each native
+  entry. On a trip it sets `jit_force_vm` and deopts, so the subtree drains through the
+  VM's bounded heap frames and raises the clean, catchable `MAX_BC_FRAMES` error. (Deopt
+  alone livelocks: the VM re-runs the arm, the callee re-tiers, the prologue trips again.)
+- **`gc_runtime::flush_rt_value` ⇄ `flush_rt_pair` recursed unguarded.** The cdr spine was
+  already iterative, but *car* nesting recursed one native frame per level, so promoting a
+  deeply nested value into the RUNTIME region aborted the thread. The LOCAL twin
+  (`gc::flush_value`) already had the `stacker::maybe_grow` guard; the RUNTIME one was
+  simply missed.
+
+**Adjacent finding, still open:** `nest observe`/attach tests leak a `brood` child — one was
+found alive 2h22m after its run (`/tmp/brood-observe-<pid>/target.blsp`, ~2.7% CPU).
+Independent of this bug, but a long session accumulates stray processes.
 
 ## KI-13 — cross-module return-type inference blows up exponentially in branch count · **OPEN, found 2026-07-26**
 

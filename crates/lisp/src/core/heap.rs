@@ -316,6 +316,30 @@ const DRAIN_REPORT_STRIDE: u32 = 64;
 /// that turns clean re-validates within a stride. See `runtime_gen_referenced_private`.
 const P2_REVALIDATE_STRIDE: u32 = 64;
 
+/// The Phase-1 counterpart of [`P2_REVALIDATE_STRIDE`], and the seed size above which it
+/// applies.
+///
+/// Phase 1 (private roots + live arms) is the *cheap* probe and is deliberately
+/// unthrottled, so a process that stops running draining-generation code acks on its very
+/// next safepoint — the promptness the drain-completion tests rely on. "Cheap" holds only
+/// while the seed is small, and one term in it is not bounded: `roots` is the VM operand /
+/// env stack, so it grows with **recursion depth**. A process 100 000 frames deep seeds
+/// hundreds of thousands of values per probe, and while it stays dirty it pays that on
+/// every reporting safepoint — quadratic in depth, and in practice a run that stops making
+/// progress (KI-14: one worker pinned at 100% CPU, the suite never finishing).
+///
+/// So throttle Phase 1 the same way Phase 2 already is, but **only for a large seed**: a
+/// shallow process (every drain-completion test, and the overwhelming majority of real
+/// ones) is below the threshold and keeps reporting on every safepoint, unchanged. Sound
+/// for the same reason as Phase 2 — a stale-dirty verdict only delays drain completion, it
+/// can never fabricate a clean ack, and a process that turns clean re-validates within a
+/// stride. See `runtime_gen_referenced_private`.
+const P1_REVALIDATE_STRIDE: u32 = 64;
+
+/// Seed size (roots + env roots + dynamics + live arms) above which a dirty Phase-1 verdict
+/// starts being cached between re-validations. See [`P1_REVALIDATE_STRIDE`].
+const P1_LARGE_SEED: usize = 4096;
+
 /// Live old-gen object count below which a **major** collection never fires —
 /// the old-gen counterpart of [`gc_floor`]. Crucially this is **not** zeroed by
 /// `BROOD_GC_STRESS`: stress makes *minor* collection fire at every safepoint
@@ -1850,6 +1874,13 @@ pub struct Heap {
     /// Plain `Cell`s: the `Heap` is single-threaded.
     p2_dirty_epoch: Cell<u64>,
     p2_dirty_tick: Cell<u32>,
+    /// **Phase-1 dirty re-validation throttle**, the deep-recursion counterpart of the
+    /// Phase-2 pair above. Armed only while this process's Phase-1 seed exceeds
+    /// [`P1_LARGE_SEED`] — a `roots` stack that has grown with recursion depth — so a
+    /// shallow process is never throttled and keeps acking on its very next safepoint.
+    /// See [`P1_REVALIDATE_STRIDE`].
+    p1_dirty_epoch: Cell<u64>,
+    p1_dirty_tick: Cell<u32>,
     /// The compiled arms **currently executing** on this process's stack — a stack
     /// pushed by `compile::vm_apply` (and the top-level `run`) on entry, the top
     /// updated on a tail-call into a different arm, popped on return. `runtime_collect`
@@ -2148,6 +2179,8 @@ impl Heap {
             drain_report_tick: Cell::new(0),
             p2_dirty_epoch: Cell::new(u64::MAX),
             p2_dirty_tick: Cell::new(0),
+            p1_dirty_epoch: Cell::new(u64::MAX),
+            p1_dirty_tick: Cell::new(0),
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
@@ -2218,6 +2251,8 @@ impl Heap {
             drain_report_tick: Cell::new(0),
             p2_dirty_epoch: Cell::new(u64::MAX),
             p2_dirty_tick: Cell::new(0),
+            p1_dirty_epoch: Cell::new(u64::MAX),
+            p1_dirty_tick: Cell::new(0),
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
