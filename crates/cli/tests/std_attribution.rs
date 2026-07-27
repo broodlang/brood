@@ -66,6 +66,12 @@ fn instrumented_lines() -> (BTreeMap<String, Vec<u32>>, TempFile) {
         .arg(&script.path)
         .env("BROOD_COVERAGE", "1")
         .env("BROOD_NO_JIT", "1")
+        // Line-coverage instrumentation is a VM-compiler pass (the `RecordLine`
+        // opcode), so pin the VM: the tree-walker differential job sets `BROOD_VM=0`
+        // in the environment, which this subprocess would otherwise inherit — running
+        // the script on the tree-walker, where no lines get instrumented and the
+        // attribution this test checks never happens.
+        .env("BROOD_VM", "1")
         .current_dir(repo_root())
         .output()
         .expect("run brood");
