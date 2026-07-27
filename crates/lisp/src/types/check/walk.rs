@@ -1274,7 +1274,13 @@ fn gradual_of(heap: &Heap, expr: Value, ctx: &Ctx) -> GradualTy {
         // guard-narrowed variable) is an over-approximation bound → `dynamic_within`
         // (the `∩` relation, which never over-warns on a merely-wider type).
         if let Some(t) = ctx.get(s) {
-            return if ctx.is_sig_param(s) {
+            // `any` is the exception: a param declared `any` (e.g. `(sig set (any ->
+            // set))` for "any seqable") carries *no* constraint — it is the gradual
+            // "unknown", not a precise top type. Treating it as `stat(ANY)` would then
+            // fail a `⊆` test against any narrower param (`(fold … coll)` wants a
+            // collection), a false positive. So `any` is always `dynamic` — the
+            // `dynamic()`-not-`Any` rule, applied to a declared param.
+            return if ctx.is_sig_param(s) && !t.is_any() {
                 GradualTy::stat(t)
             } else {
                 GradualTy::dynamic_within(t)
