@@ -423,6 +423,32 @@ pub(crate) fn jit_resolve_global_ic(heap: &mut Heap, sym: Symbol, site: u32) -> 
     }
 }
 
+/// Stamp [`Heap::jit_stack_limit`] from the live remaining stack, just before entering
+/// native code (KI-14). Absolute address, so nested native frames compare against it
+/// directly with no per-frame bookkeeping; recomputed at each entry so it is right on the
+/// root thread and on any worker, whose stack bases differ.
+///
+/// `0` (probe unavailable) disables the prologue check — fail open, matching what
+/// [`jit_native_headroom_ok`] already does with `None`.
+#[cfg(feature = "jit")]
+#[inline]
+fn stamp_stack_limit(heap: &mut Heap) {
+    let here = &heap as *const _ as usize;
+    heap.jit_stack_limit = match stacker::remaining_stack() {
+        // Room left: the limit is the address `margin` bytes above the stack bottom.
+        Some(left) if left > JIT_STACK_MARGIN_BYTES => here - (left - JIT_STACK_MARGIN_BYTES),
+        // **Already inside the margin — trip immediately.** `usize::MAX` is above every
+        // address, so the next prologue deopts. Encoding this as "disabled" (the obvious
+        // `_ => 0`) inverts the guard: it switches off at exactly the moment it is needed,
+        // which is how the first cut of this fix still let the 250 KB alternating-JSON
+        // document abort the process.
+        Some(_) => usize::MAX,
+        // Probe unavailable: 0 = no check, failing open exactly as `jit_native_headroom_ok`
+        // does with `None`.
+        None => 0,
+    };
+}
+
 /// Cap on native-to-native recursion (see [`Heap::jit_native_depth`]). Past this many
 /// native levels, drain the rest of the subtree on the VM (heap frames, bounded by
 /// [`MAX_BC_FRAMES`]) so deep non-tail recursion keeps working instead of overflowing the
@@ -465,6 +491,17 @@ pub(crate) fn jit_native_headroom_ok(depth: u32) -> bool {
     if depth < JIT_HEADROOM_PROBE_FROM {
         return true;
     }
+    stack_headroom_ok()
+}
+
+/// Is there room for another native link, **regardless of recorded depth**? The
+/// depth-gated [`jit_native_headroom_ok`] is the hot-path form; this is the one to use
+/// where the depth counter can't be trusted to reflect the real native nesting (KI-14):
+/// once an arm re-enters through a *native* frame the counter under-reports the true
+/// nesting, so the raw headroom probe is the only honest answer.
+#[cfg(feature = "jit")]
+#[inline]
+pub(crate) fn stack_headroom_ok() -> bool {
     match stacker::remaining_stack() {
         Some(left) => left > JIT_STACK_MARGIN_BYTES,
         None => true,
@@ -562,7 +599,10 @@ pub(crate) fn jit_run_fast_link(
     let saved = std::mem::replace(&mut heap.jit_call_env, env_root);
     let saved_fn = std::mem::replace(&mut heap.jit_dbg_fn, head);
     heap.jit_native_depth = native_depth + 1;
+    stamp_stack_limit(heap);
+    let saved_force_vm = heap.jit_force_vm;
     let outcome = f(heap as *mut Heap, base as i64);
+    heap.jit_force_vm = saved_force_vm;
     heap.jit_native_depth = native_depth;
     heap.jit_call_env = saved;
     heap.jit_dbg_fn = saved_fn;
@@ -746,8 +786,18 @@ pub(crate) fn jit_dispatch_call(
 ) -> Option<Value> {
     use std::sync::atomic::Ordering::Acquire;
     let n = heap.roots_len();
-    let over_cap = heap.jit_native_depth >= JIT_NATIVE_DEPTH_LIMIT
-        || !jit_native_headroom_ok(heap.jit_native_depth);
+    // KI-14: probe the stack **unconditionally** here, not `jit_native_headroom_ok(depth)`.
+    // That helper skips the probe below depth 64 as a hot-path optimisation, which is sound
+    // only where `jit_native_depth` actually counts the recursion. On this path it does not:
+    // a JIT'd arm recursing through `brood_rt_call_slow` → `jit_dispatch_call` re-enters
+    // Rust every level, yet the depth stays near zero, so the probe was never reached and
+    // neither cap ever fired — 100 000 levels of JSON nesting piled a JIT frame plus these
+    // Rust frames each, and the worker died on its guard page (an abort `try`/`catch` can't
+    // see, taking the OS process rather than the green one).
+    //
+    // Probing every slow call costs a thread-local read; the slow call already does far
+    // more work than that, and it is the only place that can see this recursion coming.
+    let over_cap = heap.jit_native_depth >= JIT_NATIVE_DEPTH_LIMIT || !stack_headroom_ok();
     let epoch = heap.global_epoch();
     // A free-global head isn't staged (`elided`): the callee is resolved via the call IC.
     // `stage_base` is where the callee frame starts — directly at the args for an elided
@@ -983,7 +1033,10 @@ pub(crate) fn jit_dispatch_call(
                     }
                 }
                 heap.jit_native_depth = depth + 1;
+                stamp_stack_limit(heap);
+                let saved_force_vm = heap.jit_force_vm;
                 let outcome = f(heap as *mut Heap, base as i64);
+                heap.jit_force_vm = saved_force_vm;
                 heap.jit_native_depth = depth;
                 heap.jit_call_env = saved;
                 heap.jit_dbg_fn = saved_fn;
@@ -1623,7 +1676,10 @@ pub(crate) fn jit_tier(
     // Best-effort arm name for the staged-stale diagnostic (recursive defns carry
     // `inline_name`; others reset to MAX so the value is never misleadingly stale).
     let saved_fn = std::mem::replace(&mut heap.jit_dbg_fn, arm.dbg_name.unwrap_or(u32::MAX));
+    stamp_stack_limit(heap);
+    let saved_force_vm = heap.jit_force_vm;
     let outcome = f(heap as *mut Heap, base as i64);
+    heap.jit_force_vm = saved_force_vm;
     heap.jit_call_env = saved_env;
     heap.jit_dbg_fn = saved_fn;
     // Outcome 5 = the unboxed-i64 worker hit its native-recursion depth cap. Register recursion
