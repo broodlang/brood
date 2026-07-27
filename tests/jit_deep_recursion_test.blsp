@@ -1,0 +1,75 @@
+;; KI-14 — a JIT'd deep recursion must not run the native stack into its guard page.
+;;
+;; `n_structure_100000_opening_arrays.json` recurses the JSON parser ~100 000 levels, and
+;; its sibling `n_structure_open_array_object.json` ~50 000 levels through two mutually
+;; recursive arms. Once those arms tier, the recursion runs native→native (a JIT'd frame
+;; plus `brood_rt_call_slow` → `jit_dispatch_call` per level) and NONE of the guards saw
+;; it: `jit_native_depth` stays near zero on that path, so the frame-count cap never fired
+;; and the `stacker` headroom probe — gated behind depth ≥ 64 — was never called. The
+;; worker died on its guard page: an abort `try`/`catch` cannot observe and no supervisor
+;; can restart, taking the OS process rather than the green one. That is what hung
+;; `brood_suite_passes`.
+;;
+;; It reproduces only when the arms are WARM — a cold spawn interprets and is fine — so
+;; each case warms in this process first and then parses inside a spawned green process,
+;; the shape the test framework itself produces.
+;;
+;; The assertion is deliberately weak (`:rejected`, the correct verdict for an invalid
+;; document): the property under test is that a VALUE comes back at all rather than the
+;; OS process dying. Register-only — discovered and run by `nest test`.
+(defmodule jit-deep-recursion-test (:use test) (:use corpus))
+
+(defn jdr--parse (path)
+  (try (do (json/json-parse (slurp path)) :ok) (catch e :rejected)))
+
+;; Warm in THIS process so the parser arms tier to native before the spawned run.
+(defn jdr--warm (path k)
+  (if (= k 0) :warmed (do (jdr--parse path) (jdr--warm path (- k 1)))))
+
+;; Parse in a spawned green process — on a scheduler worker, which is where the
+;; guard-page abort happened.
+(defn jdr--in-spawn (path)
+  (let (me (self))
+    (spawn (send me [:r (jdr--parse path)]))
+    (receive ([:r r] r) (after 60000 :TIMED-OUT))))
+
+(describe "KI-14: deep JIT'd recursion drains instead of overflowing"
+  ;; :serial — each case warms globals and leans on the whole worker stack; running them
+  ;; against other tests' allocation would make a failure hard to attribute.
+  ;;
+  ;;
+  ;; This file was briefly tagged `:conformance` and quarantined: it used to pass in 2.7 s
+  ;; alone and hard-kill at the 120 s cap inside the full suite. That was KI-14 — the
+  ;; RUNTIME collector re-walking a deep process's whole root stack at every safepoint —
+  ;; and it is fixed, so these run with everything else again. Deep recursion is exactly
+  ;; the shape that provoked it, which makes this file a useful canary for its return.
+  :serial
+  (test "a 100k-deep document parses in a spawned process after warming"
+    (require 'json)
+    (let (p "tests/corpus/json/data/n_structure_100000_opening_arrays.json")
+      (jdr--warm p 3)
+      (assert= (jdr--in-spawn p) :rejected)))
+  (test "the alternating array/object document too"
+    ;; This one survived the FIRST cut of the fix: the stamp encoded "already inside the
+    ;; margin" as limit 0, which the prologue read as *guard disabled* — switching the
+    ;; check off at exactly the moment it was needed.
+    (require 'json)
+    (let (p "tests/corpus/json/data/n_structure_open_array_object.json")
+      (jdr--warm p 2)
+      (assert= (jdr--in-spawn p) :rejected)))
+  (test "the whole n_ corpus scans in a spawned process after warming"
+    ;; The scan the suite actually runs: 188 documents, warm parent then spawned child.
+    (require 'json)
+    (let (files (filter (fn (f) (= (substring (path-basename f) 0 1) "n"))
+                  (corpus-files "json")))
+      (assert= 188 (count files))
+      (jdr--scan-warm files)
+      (assert= (jdr--scan-in-spawn files) 188))))
+
+(defn jdr--scan (fs n)
+  (if (nil? fs) n (do (jdr--parse (first fs)) (jdr--scan (rest fs) (inc n)))))
+(defn jdr--scan-warm (files) (jdr--scan files 0))
+(defn jdr--scan-in-spawn (files)
+  (let (me (self))
+    (spawn (send me [:r (jdr--scan files 0)]))
+    (receive ([:r r] r) (after 60000 :TIMED-OUT))))

@@ -1918,6 +1918,25 @@ pub struct Heap {
     /// doesn't), draining deeper recursion onto the VM instead of overflowing.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub(crate) jit_native_depth: u32,
+    /// **Absolute stack address below which a JIT'd arm must not run** (KI-14). Every
+    /// compiled arm's prologue loads this and deopts to the VM if its own frame sits
+    /// below it, so deep recursion drains into the bounded heap-frame loop instead of
+    /// running the native stack into its guard page — an abort `try`/`catch` cannot see
+    /// and no supervisor can restart.
+    ///
+    /// The pre-existing guards (`jit_native_depth` + the `stacker` headroom probe) sit on
+    /// the *dispatch* paths, so they only bound recursion that goes through a fast link.
+    /// A JSON parse 100 000 levels deep proved a path that reaches none of them: on the
+    /// root thread the depth cap fired at 1500, while in a spawned green process the probe
+    /// was never even called and the worker died. Checking in the prologue is the one place
+    /// every native frame must pass, whatever route created it.
+    ///
+    /// Written by the three native entry points (`jit_tier`, `jit_run_fast_link`, the
+    /// i64-worker wrapper) from the *live* remaining stack, so it is correct on the root
+    /// thread and on any worker regardless of their differing stack bases. `0` disables
+    /// the check (the probe couldn't read the stack — fail open, as the old code did).
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub(crate) jit_stack_limit: usize,
     /// Set while draining an over-deep native-recursion subtree on the VM ([`jit_tier`]
     /// reads it and declines to run native, keeping the recursion in the bounded heap-frame
     /// loop).
@@ -2137,6 +2156,7 @@ impl Heap {
             vm_global_ics: RefCell::new(Vec::new()),
             jit_call_env: EnvRoot::Stable(EnvId::GLOBAL),
             jit_native_depth: 0,
+            jit_stack_limit: 0,
             jit_force_vm: false,
             jit_dbg_fn: u32::MAX,
             jit_pending_error: None,
@@ -2206,6 +2226,7 @@ impl Heap {
             vm_global_ics: RefCell::new(Vec::new()),
             jit_call_env: EnvRoot::Stable(EnvId::GLOBAL),
             jit_native_depth: 0,
+            jit_stack_limit: 0,
             jit_force_vm: false,
             jit_dbg_fn: u32::MAX,
             jit_pending_error: None,

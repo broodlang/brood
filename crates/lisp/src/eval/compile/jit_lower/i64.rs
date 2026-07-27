@@ -671,9 +671,40 @@ pub(super) fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) ->
         // Depth cap → set sentinel + unwind (native-stack guard).
         let deep = b.create_block();
         let go = b.create_block();
-        let over = b
+        let over_count = b
             .ins()
             .icmp_imm(IntCC::SignedGreaterThanOrEqual, depth, I64_DEPTH_LIMIT);
+        // **Stack guard (KI-14).** The frame-count cap above is only ever right for one
+        // frame size — the comment on `I64_DEPTH_LIMIT` says so, and a JSON parse proved
+        // it: `n_structure_open_array_object.json` recurses ~100 000 levels through this
+        // worker with frames far heavier than the ~55–200 B the cap was sized for, so
+        // 32 768 frames exhausted the 16 MiB worker stack long before the count tripped.
+        // The result was a guard-page abort — not a catchable error — killing the OS
+        // process rather than the green one.
+        //
+        // So bail on *bytes* as well as frames: compare this frame's address against the
+        // limit the native entry point stamped (`Heap::jit_stack_limit`, an absolute
+        // address ~512 KiB above the stack bottom). Same sentinel as the depth-bail, so
+        // the arm switches to the boxed path and drains through heap frames — which is
+        // exactly what the count-bail already does, just triggered by the thing that
+        // actually runs out. `0` (probe unavailable) disables it, failing open.
+        let limit = b.ins().load(
+            ptr_ty,
+            MemFlagsData::trusted(),
+            heap,
+            std::mem::offset_of!(crate::core::heap::Heap, jit_stack_limit) as i32,
+        );
+        let probe = b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            8,
+            3,
+        ));
+        let here = b.ins().stack_addr(ptr_ty, probe, 0);
+        let low = b.ins().icmp(IntCC::UnsignedLessThan, here, limit);
+        let zero = b.ins().iconst(ptr_ty, 0);
+        let armed = b.ins().icmp(IntCC::NotEqual, limit, zero);
+        let over_bytes = b.ins().band(low, armed);
+        let over = b.ins().bor(over_count, over_bytes);
         b.ins().brif(over, deep, &[], go, &[]);
         b.seal_block(deep);
         b.seal_block(go);

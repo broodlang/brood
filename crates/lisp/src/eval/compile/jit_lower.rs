@@ -1402,6 +1402,62 @@ fn jit_lower_arm_inner(
         3,
     ));
 
+    // **Stack guard (KI-14).** Every native frame passes through here, whatever route
+    // created it — which is the point: the pre-existing guards (`jit_native_depth` + the
+    // `stacker` headroom probe) live on the *dispatch* paths and therefore only bound
+    // recursion that goes through a fast link. A 100 000-deep JSON parse found a path that
+    // reaches neither: on the root thread the depth cap fired at 1500, but in a spawned
+    // green process the probe was never called at all and the worker died on its guard
+    // page — a `SIGSEGV`-class abort that `try`/`catch` cannot observe and no supervisor
+    // can restart (the OS process goes, not the green process).
+    //
+    // Cost is three instructions on arm entry: load the limit the entry point stamped
+    // (`Heap::jit_stack_limit`), compare this frame's address against it, branch. On a
+    // trip we jump to `deopt`, NOT `error`: the VM owns deep recursion properly — it grows
+    // heap frames and raises the clean, catchable `MAX_BC_FRAMES` error — so draining there
+    // is both correct and the behaviour the non-JIT build already has. A `0` limit (the
+    // probe couldn't read the stack) skips the check, failing open exactly as the old
+    // headroom probe does with `None`.
+    {
+        let limit = b.ins().load(
+            ptr_ty,
+            cranelift_codegen::ir::MemFlagsData::trusted(),
+            heap,
+            std::mem::offset_of!(crate::core::heap::Heap, jit_stack_limit) as i32,
+        );
+        // The address of a scratch slot in *this* frame stands in for the stack pointer;
+        // the stack grows down, so `here < limit` means we have run past the budget.
+        let probe =
+            b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
+        let here = b.ins().stack_addr(ptr_ty, probe, 0);
+        let low = b.ins().icmp(IntCC::UnsignedLessThan, here, limit);
+        // `limit == 0` disables the guard.
+        let zero = b.ins().iconst(ptr_ty, 0);
+        let armed = b.ins().icmp(IntCC::NotEqual, limit, zero);
+        let trip = b.ins().band(low, armed);
+        let cont = b.create_block();
+        let bail = b.create_block();
+        b.ins().brif(trip, bail, &[], cont, &[]);
+        // On a trip, set `Heap::jit_force_vm` before deopting. Deopt alone is not enough:
+        // the VM re-runs the arm, the recursive callee tiers again, its prologue trips
+        // again — a livelock that spins at 100% CPU making no progress (which is what the
+        // suite showed before this store went in). The flag makes `jit_tier` decline to run
+        // native for the rest of this subtree, so the recursion drains through the bounded
+        // heap-frame loop and raises the clean `MAX_BC_FRAMES` error. The native entry
+        // points save/restore it around the call, so it is scoped to this subtree.
+        b.switch_to_block(bail);
+        let one = b.ins().iconst(types::I8, 1);
+        b.ins().store(
+            cranelift_codegen::ir::MemFlagsData::trusted(),
+            one,
+            heap,
+            std::mem::offset_of!(crate::core::heap::Heap, jit_force_vm) as i32,
+        );
+        b.ins().jump(deopt, &[]);
+        b.seal_block(bail);
+        b.switch_to_block(cont);
+    }
+
     // LICM hoist: resolve each invariant vector slot's element (ptr, len) once here in
     // the entry block (which dominates every loop block, so the values are usable in the
     // body). A non-vector slot branches to `deopt` (the VM then owns the exact result).
