@@ -45,10 +45,10 @@ pub fn completions(
     let mut items = Vec::new();
     let mut seen = HashSet::new();
 
-    // Inside `(defimpl Proto …)`, offer the protocol's ops first (so the snippet-y
+    // Inside `(impl Ability …)`, offer the ability's ops first (so the snippet-y
     // METHOD item shadows the generic global of the same name) — you get exactly the
     // ops you must implement, with their arities.
-    if let Some(proto) = enclosing_defimpl(cst, offset, text) {
+    if let Some(proto) = enclosing_impl(cst, offset, text) {
         for (name, arity) in introspect::protocol_ops(interp, &proto) {
             if seen.insert(name.clone()) {
                 let mut it = item(name, CompletionItemKind::METHOD);
@@ -137,24 +137,24 @@ fn item(label: String, kind: CompletionItemKind) -> CompletionItem {
     }
 }
 
-/// If byte `offset` falls inside a `(defimpl Proto …)` form, the protocol name
-/// `Proto`. Walks the CST for the innermost enclosing `defimpl` list (they don't
+/// If byte `offset` falls inside an `(impl Ability …)` form, the ability name
+/// `Ability`. Walks the CST for the innermost enclosing `impl` list (they don't
 /// nest, so the first found while descending is it).
-fn enclosing_defimpl(node: &Node, offset: u32, src: &str) -> Option<String> {
+fn enclosing_impl(node: &Node, offset: u32, src: &str) -> Option<String> {
     // Inclusive at the end: while typing, the cursor sits *after* the last char —
-    // `offset == span.end` of the still-unclosed `(defimpl …` — and we want to count
+    // `offset == span.end` of the still-unclosed `(impl …` — and we want to count
     // as inside it (`Span::contains` is end-exclusive).
     if offset < node.span.start || offset > node.span.end {
         return None;
     }
     for child in &node.children {
-        if let Some(p) = enclosing_defimpl(child, offset, src) {
+        if let Some(p) = enclosing_impl(child, offset, src) {
             return Some(p);
         }
     }
     if node.kind == NodeKind::List {
         let mut forms = node.forms();
-        if forms.next().map(|n| n.text(src)) == Some("defimpl") {
+        if forms.next().map(|n| n.text(src)) == Some("impl") {
             return forms.next().map(|n| n.text(src).to_string());
         }
     }
@@ -334,13 +334,13 @@ mod tests {
     }
 
     #[test]
-    fn offers_protocol_ops_inside_defimpl() {
-        // Seed the registry directly (defprotocol isn't loaded in a bare interp).
+    fn offers_ability_ops_inside_impl() {
+        // Seed the ability registry directly (defability isn't loaded in a bare interp).
         let mut interp = Interp::new();
         interp
-            .eval_str("(def *protocols* (assoc {} 'Encode (list (list 'encode '[v]))))")
+            .eval_str("(def *abilities* (assoc {} 'Encode (list (list 'encode '[v]))))")
             .unwrap();
-        let src = "(defimpl Encode :int (enc";
+        let src = "(impl Encode :int (enc";
         let root = cst::parse(src);
         let tree = scope::analyze(&root, src);
         let at = src.len() as u32; // cursor at end, inside the method form
@@ -348,11 +348,11 @@ mod tests {
         let enc = items
             .iter()
             .find(|i| i.label == "encode")
-            .expect("op `encode` offered inside (defimpl Encode …)");
+            .expect("op `encode` offered inside (impl Encode …)");
         assert_eq!(
             enc.kind,
             Some(CompletionItemKind::METHOD),
-            "tagged as a protocol op"
+            "tagged as an ability op"
         );
         assert!(
             enc.detail.as_deref().unwrap_or("").contains("Encode op"),

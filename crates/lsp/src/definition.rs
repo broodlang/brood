@@ -131,7 +131,7 @@ fn head_sym_is_not(chain: &[&Node], src: &str, node: &Node) -> bool {
     })
 }
 
-/// Locate the `(defbehaviour Name …)` / `(defprotocol Name …)` that declares the
+/// Locate the `(defbehaviour Name …)` / `(defability Name …)` that declares the
 /// behaviour `name`, by scanning the project's own `.blsp` files. The interface
 /// registry (`*protocols*`) records ops but not a def site, so — unlike a global —
 /// there's no `source-location` to ask; we parse each project file's CST and look
@@ -141,7 +141,7 @@ fn behaviour_location(interp: &mut Interp, name: &str) -> Option<Location> {
     behaviour_in_files(&introspect::project_files(interp), name)
 }
 
-/// Scan `files` for the `(defbehaviour name …)` / `(defprotocol name …)` form and
+/// Scan `files` for the `(defbehaviour name …)` / `(defability name …)` form and
 /// return a [`Location`] on its name token. Split from [`behaviour_location`] so it
 /// can be tested against an explicit file list (the live `project_files` needs a
 /// bootstrapped project). Unreadable files are skipped.
@@ -158,7 +158,7 @@ fn behaviour_in_files(files: &[String], name: &str) -> Option<Location> {
             let mut head = form.forms();
             let is_iface = head.next().is_some_and(|h| {
                 h.kind == NodeKind::Symbol
-                    && matches!(h.text(&text), "defbehaviour" | "defprotocol")
+                    && matches!(h.text(&text), "defbehaviour" | "defability")
             });
             let name_node = head.next();
             let matches_name =

@@ -2,8 +2,7 @@
 
 KI-9 is a one-off arity sighting judged a transient inconsistent-build artifact, not
 present in committed code; KI-10 no longer reproduces, incidentally fixed — both kept as
-records, not open bugs. **Open: KI-13 (type checker) and KI-16 (the LSP still matches the retired
-`defprotocol`/`defimpl`).**
+records, not open bugs. **Open: KI-13 (type checker).**
 This file is the condensed record — what each was, how it was fixed, and the regression
 test that guards it — so a recurrence is recognizable. For the narrative discovery
 writeup of the scheduler race, see
@@ -58,7 +57,14 @@ verbatim on a first attempt (docs run, 2026-07-27).
 
 ---
 
-## KI-16 — the LSP still matches the retired `defprotocol`/`defimpl` · **OPEN, found 2026-07-27**
+## KI-16 — the LSP still matches the retired `defprotocol`/`defimpl` · **FIXED 2026-07-27**
+
+**Fixed:** `introspect::protocol_ops` now scans both `*abilities*` and `*protocols*`, so
+`impl` op-completion works and `:implements` hovers still resolve; `completion.rs`'s
+`enclosing_impl` matches `(impl …)` (was `(defimpl …)`); `definition.rs`/`module_ref.rs`
+match `"defbehaviour" | "defability"` (was `| "defprotocol"`). Regression:
+`offers_ability_ops_inside_impl`. Original report:
+
 
 ADR-168 removed `defprotocol`/`defimpl`, but the language server was not migrated
 with them:

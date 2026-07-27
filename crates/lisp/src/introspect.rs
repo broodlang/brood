@@ -56,22 +56,27 @@ pub fn global_names(interp: &mut Interp) -> Vec<String> {
 /// `defimpl` op-completion in the LSP. Read-only (no allocation into LOCAL).
 pub fn protocol_ops(interp: &Interp, proto: &str) -> Vec<(String, usize)> {
     let heap = &interp.heap;
-    let Some(Value::Map(id)) = heap.env_get(heap.global(), value::intern("*protocols*")) else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
-    for (key, specs) in heap.map_entries(id) {
-        let Value::Sym(s) = key else { continue };
-        if value::symbol_name(s) != proto {
+    // Search both interface registries: `*abilities*` (defability ops — for `impl`
+    // op-completion) and `*protocols*` (defbehaviour ops — for `:implements` hovers).
+    // Ability and behaviour names are distinct, so scanning both is safe.
+    for reg in ["*abilities*", "*protocols*"] {
+        let Some(Value::Map(id)) = heap.env_get(heap.global(), value::intern(reg)) else {
             continue;
-        }
-        // Each spec is `(op-name [args…] …)`: name + the arg vector's length.
-        for op in heap.list_to_vec(specs).unwrap_or_default() {
-            let items = heap.list_to_vec(op).unwrap_or_default();
-            if let (Some(&Value::Sym(name)), Some(&Value::Vector(vid))) =
-                (items.first(), items.get(1))
-            {
-                out.push((value::symbol_name(name), heap.vector(vid).len()));
+        };
+        for (key, specs) in heap.map_entries(id) {
+            let Value::Sym(s) = key else { continue };
+            if value::symbol_name(s) != proto {
+                continue;
+            }
+            // Each spec is `(op-name [args…] …)`: name + the arg vector's length.
+            for op in heap.list_to_vec(specs).unwrap_or_default() {
+                let items = heap.list_to_vec(op).unwrap_or_default();
+                if let (Some(&Value::Sym(name)), Some(&Value::Vector(vid))) =
+                    (items.first(), items.get(1))
+                {
+                    out.push((value::symbol_name(name), heap.vector(vid).len()));
+                }
             }
         }
     }
