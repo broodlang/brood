@@ -29,9 +29,9 @@
       each call only indexes by the argument's runtime id.
 
   Identity representation: a record's id is a reserved `:__id__` map field holding a
-  `module/name` KEYWORD (Slice 3 — a keyword literal is what the type-checker tracks via
+  `module/name` KEYWORD — a keyword literal is what the type-checker tracks via
   `Ty::keyword_lit`, so a record's identity flows through inference; the seam that makes
-  the checker nominal-aware). `json-encode` omits `:__id__` (Slice 2 — it must never reach
+  the checker nominal-aware. `json-encode` omits `:__id__` (it must never reach
   the wire); a record printing with its id, and being `≠` a bare map, are *correct*
   (Elixir-struct semantics), not leaks. The only residual is cosmetic — `keys`/`count`
   include the id; use `record?`/`record-id`/`fields` for the clean, id-free view, which
@@ -241,18 +241,18 @@
   "Like `defrecord`, but constructed values carry a NOMINAL identity — a `module/name`
   symbol captured at definition — so `ability` dispatch tells them apart from other maps
   and other records. Otherwise a plain structural map: `get`/`assoc`/`=` treat it as its
-  fields (plus the reserved `:__id__` — slice 1; a hidden slot removes that leak later).
+  fields (plus the reserved `:__id__`; a future hidden kernel slot could remove that leak).
 
     (defmodule geometry)
     (defrecord* circle (r))          ; (circle 2) → {:__id__ geometry/circle :r 2}"
   ;; The id is a KEYWORD (`:module/name`), not a symbol: a keyword literal is what the
   ;; type-checker tracks (`Ty::keyword_lit`), so a record's identity flows through
-  ;; inference as a literal — the seam that makes the checker nominal-aware (Slice 3).
+  ;; inference as a literal — the seam that makes the checker nominal-aware.
   (let (id (keyword (str (name (current-ns)) "/" (name rec)))
         ;; Build a MAP LITERAL body (a real map value whose field values are the field
         ;; symbols), NOT a `(hash-map …)` call — so the checker infers the constructor's
         ;; result as a record SHAPE carrying the `:__id__` keyword literal. That is what
-        ;; makes a record's identity flow through inference to call sites (the Slice-3
+        ;; makes a record's identity flow through inference to call sites (the checker's
         ;; inference hook). At runtime it evaluates identically to `(hash-map …)`.
         body (apply hash-map (cons :__id__ (cons id
                (mapcat (fn (f) (list (keyword (name f)) f)) fields))))
