@@ -561,7 +561,7 @@ impl Ty {
             }
         }
         if let Some(f) = &self.fields {
-            for (_, (t, _)) in f.iter() {
+            for (t, _) in f.values() {
                 n += t.node_count(lim - n);
                 if n >= lim {
                     return n;

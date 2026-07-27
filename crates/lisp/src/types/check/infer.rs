@@ -196,7 +196,7 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                     if let Some((_, v)) = recv.as_ref().and_then(Ty::map_kv) {
                         return Some(v.clone().union(Ty::of(Tag::Nil)));
                     }
-                    return None;
+                    None
                 }
                 Some(Value::Sym(s)) => {
                     if value::symbol_is(s, kw::QUOTE) {
