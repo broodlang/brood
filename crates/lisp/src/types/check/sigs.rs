@@ -392,9 +392,9 @@ fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
     // `sym` is being inferred yields `None` and is deliberately NOT cached — the in-
     // progress result isn't final, and a sibling call after this one finishes must get the
     // real inferred sig, not the cycle's `None`.
-    let Some(_guard) = InferGuard::enter(sym) else {
-        return None;
-    };
+    // `_guard` is a named binding, not a bare `_`: it must live to the end of this function
+    // so the guard is released only after `infer_sig_inner` returns.
+    let _guard = InferGuard::enter(sym)?;
     let result = infer_sig_inner(heap, sym);
     SIG_MEMO.with(|m| m.borrow_mut().insert(sym, result.clone()));
     result
