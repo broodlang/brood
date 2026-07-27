@@ -901,17 +901,24 @@ fn foreign_constructs_hint_at_the_brood_way() {
 #[test]
 fn hints_name_only_features_that_exist() {
     let hint = |src: &str| run(&format!("(try {src} (catch e (get e :hint)))"));
-    // The hint names the polymorphism seam and how to reach it. It said "(the
-    // `protocol` module)" for months while no such module was in std — the macros
-    // lived in the hatch package and only the checker pass was in-tree. ADR-158
-    // promoted them, so the hint had to carry the `require` that makes it true;
-    // ADR-168 then retired `defprotocol`/`defimpl` for `ability`, so the target
-    // moved again. This assertion is the reason to keep the test: it went red on
-    // main when ADR-168 rewrote the hint without updating it here.
+    // The polymorphism hint must name a form the reader can actually reach. It has been
+    // wrong twice in the same way: first it pointed at a `protocol` module std didn't
+    // ship (the macros lived in the hatch package; only the checker pass was in-tree),
+    // and then — after ADR-168 retired `defprotocol`/`defimpl` for `ability` — it said
+    // `(require 'ability)` "gives" `defability`, but `require` only LOADS, leaving the
+    // name qualified (`ability/defability`). Referring to it bare needs `(:use ability)`.
+    // Keep this assertion: it went red on main when ADR-168 rewrote the hint without
+    // updating it here.
     let d = hint("(deftype foo)");
-    assert!(d.contains("(require 'ability)"), "{d}");
+    assert!(d.contains("(:use ability)"), "{d}");
     assert!(d.contains("defability"), "{d}");
     assert!(d.contains("defrecord"), "{d}");
+    // …and the claim is checked against the live image, not just the wording: after a
+    // bare `require` the name is NOT bare, which is precisely why the hint says `:use`.
+    assert_eq!(
+        run("(do (require 'ability) (list (bound? 'defability) (bound? 'ability/defability)))"),
+        "(false true)"
+    );
     // `letfn` → letrec (a let-bound fn cannot call itself).
     assert!(hint("(letfn ((f (x) x)) 1)").contains("letrec"));
     // `lazy-seq` names the seq-views that do exist.

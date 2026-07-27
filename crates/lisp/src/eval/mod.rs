@@ -1438,7 +1438,8 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
         | "defmethod" => {
             "Brood has no nominal types — for a named, optionally-typed record use \
              `defrecord` (sugar over a plain map, so records stay structural). For \
-             polymorphism, `(require 'ability)` gives `defability`/`impl` — open generic \
+             polymorphism, `(:use ability)` in your `defmodule` header gives \
+             `defability`/`impl` — open generic \
              functions dispatching on the first argument's identity (its `type-of` kind, \
              or a `defrecord*` record's nominal id), extensible from any module; a driver \
              is just a value you dispatch on. Or dispatch with `match`/`cond`; \
