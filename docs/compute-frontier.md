@@ -1,29 +1,39 @@
 # Plan — the post-JIT single-threaded compute frontier
 
-> ## ⏯ RESUME HERE (2026-07-27) — the KI-14 stack guard costs ~30% of `fib`; hoist the stamp
+> ## ✅ CLOSED (2026-07-27) — the KI-14 guard cost is recovered; the named suspect was wrong
 >
-> The 2026-07-27 published run turned up one non-drift movement: **`fib` 57 → 75 ms and `pfib`
-> 165 → 218 ms**, bisected with three separately-built binaries to **`f11f4cb`** (the KI-14 fix
-> that stops deep recursion through JIT'd code running the native stack into its guard page).
-> Pre-guard `26939e2` = 70.1 / 182.8 ms wall, `f11f4cb` = 85.6 / 239.0, HEAD `1a3fc1c` =
-> 85.3 / 236.6 — the whole move is that one commit, nothing after it. Ranks held (2/7 both).
+> The regression this block was opened for (**`fib` 57 → 75 ms, `pfib` 165 → 218 ms**, bisected to
+> `f11f4cb`) is **fixed**: `fib` 88 → 74 ms and `pfib` 252 → 202 ms on a same-session A/B, which is
+> parity with a build that has the guard removed entirely (73 / 199 ms). The guard keeps every bit
+> of its teeth — `tests/jit_deep_recursion_test.blsp` passes unchanged, at unchanged wall time.
 >
-> **This is the cheapest lever currently on the board, because it recovers a known cost rather
-> than hunting a new one.** The prologue check is three instructions against a preloaded absolute
-> address and is not the problem. The suspect is `stamp_stack_limit` (`jit_runtime.rs`), which
-> calls `stacker::remaining_stack()` on **every** `jit_run_fast_link` — the ~26 ns Brood→Brood
-> path `fib` consists of.
+> **The lever named here was the wrong one, and the measurement said so immediately.** The
+> hypothesis was that `stamp_stack_limit`'s `stacker::remaining_stack()` probe on every
+> `jit_run_fast_link` was the cost. Hoisting it to the outermost native entry (plus a quantum-start
+> stamp in `Process::drive`, since worker stack bases differ) measured **exactly zero on `fib`** —
+> because `fib` runs on the **i64 register worker**, which recurses natively and never touches a
+> fast link. A build with both prologue guards deleted recovered the full 16 ms, which located the
+> cost precisely: the **per-frame prologue check**, not the stamp.
 >
-> `Heap::jit_stack_limit` is an **absolute address valid for the whole thread stack**, so
-> re-deriving it per fast link is redundant. Stamp instead at the outermost native entry
-> (`jit_native_depth == 0`) **plus** wherever a green process is (re)scheduled onto a worker —
-> that second point is not optional, and is the entire reason the stamp is computed live instead
-> of being a constant: worker and root-thread stack bases differ.
+> Attributing *within* the prologue took three more one-line builds, and none of the obvious
+> suspects was it — dropping the frame-address probe saved ~0, dropping the `limit` load saved ~2 ms,
+> dropping the redundant `limit != 0` test saved 5. What cost the remaining ~11 ms was simply having
+> **two** tests per level instead of one: the byte check ran *alongside* the old frame-count cap
+> (`I64_DEPTH_LIMIT`), and `over_count | over_bytes` is a second compare on every level of a 30 M-call
+> recursion. Deleting the count cap — which the byte check subsumes, and which was itself the thing
+> KI-14 proved wrong — recovers all of it. The wrapper now refuses the register worker outright when
+> the limit is `0` (probe unavailable), which is the case the count cap had been covering.
 >
-> Self-checking: `tests/jit_deep_recursion_test.blsp` aborts the process outright if the guard
-> loses its teeth, so a wrong hoist fails loudly rather than silently. Also probe whether the
-> now-unconditional `stack_headroom_ok()` in `jit_dispatch_call` matters — it is on the slow call
-> path, so likely not, but it has never been measured either.
+> **The stamp hoist was kept anyway**, on its own measurement rather than the one it was proposed
+> for: it is worth ~5% on `bintree` (130 → 124 ms, best-of-15), the fast-link-heavy row, and nothing
+> anywhere else.
+>
+> Method note worth keeping: every step here was a separately-built binary and a best-of-N A/B, and
+> **the first two hypotheses were both wrong**. The cost of a wrong guess was ~16 s of build each,
+> which is why guessing was cheap and reasoning was not.
+>
+> Still unmeasured, inherited from this block: whether the now-unconditional `stack_headroom_ok()`
+> in `jit_dispatch_call` matters. It is on the slow call path, so probably not.
 >
 > ---
 

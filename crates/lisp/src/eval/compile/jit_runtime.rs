@@ -423,16 +423,21 @@ pub(crate) fn jit_resolve_global_ic(heap: &mut Heap, sym: Symbol, site: u32) -> 
     }
 }
 
-/// Stamp [`Heap::jit_stack_limit`] from the live remaining stack, just before entering
-/// native code (KI-14). Absolute address, so nested native frames compare against it
-/// directly with no per-frame bookkeeping; recomputed at each entry so it is right on the
-/// root thread and on any worker, whose stack bases differ.
+/// Stamp [`Heap::jit_stack_limit`] from the live remaining stack, before entering native
+/// code (KI-14). Absolute address, so nested native frames compare against it directly with
+/// no per-frame bookkeeping.
+///
+/// **Call this only where the stamp can actually change** — see
+/// [`stamp_stack_limit_if_outermost`] for the discipline. The value derives from the
+/// running thread's stack bottom, which is fixed for that thread, so it is invariant across
+/// a whole native recursion nest and only differs between the root thread and a worker (or
+/// between two workers).
 ///
 /// `0` (probe unavailable) disables the prologue check — fail open, matching what
 /// [`jit_native_headroom_ok`] already does with `None`.
 #[cfg(feature = "jit")]
 #[inline]
-fn stamp_stack_limit(heap: &mut Heap) {
+pub(crate) fn stamp_stack_limit(heap: &mut Heap) {
     let here = &heap as *const _ as usize;
     heap.jit_stack_limit = match stacker::remaining_stack() {
         // Room left: the limit is the address `margin` bytes above the stack bottom.
@@ -447,6 +452,33 @@ fn stamp_stack_limit(heap: &mut Heap) {
         // does with `None`.
         None => 0,
     };
+}
+
+/// Stamp the limit only at the **outermost** native entry — `native_depth` is the caller's
+/// pre-increment [`Heap::jit_native_depth`], so `0` means no native frame is on the stack
+/// below this one.
+///
+/// [`Heap::jit_stack_limit`] is an absolute address derived from the running thread's stack
+/// bottom, which does not move for the life of that thread. Re-deriving it at every
+/// Brood→Brood link therefore recomputed a constant, and `stacker::remaining_stack()` is not
+/// free. Worth ~5% on `bintree` (130 → 124 ms, best-of-15 — the 16.3 M-fast-link row).
+///
+/// It is worth **nothing** on `fib`, which is what this hoist was originally proposed to fix
+/// (see the 2026-07-27 devlog): `fib` tiers to the i64 register worker and recurses natively
+/// without ever taking a fast link. That regression was the *prologue* guard — specifically a
+/// redundant second compare per level — and is fixed in `jit_lower/i64.rs`, not here.
+///
+/// The stamp is still *live* rather than a constant because a green process resumes on
+/// whichever worker the scheduler routes it to, and worker stack bases differ — hence the
+/// second stamp point at quantum start in `Process::drive`. That one is what makes this
+/// gate safe if a quantum ever ends with the depth counter left raised: without it, a
+/// process that migrated would keep comparing against the previous worker's stack.
+#[cfg(feature = "jit")]
+#[inline]
+fn stamp_stack_limit_if_outermost(heap: &mut Heap, native_depth: u32) {
+    if native_depth == 0 {
+        stamp_stack_limit(heap);
+    }
 }
 
 /// Cap on native-to-native recursion (see [`Heap::jit_native_depth`]). Past this many
@@ -599,7 +631,7 @@ pub(crate) fn jit_run_fast_link(
     let saved = std::mem::replace(&mut heap.jit_call_env, env_root);
     let saved_fn = std::mem::replace(&mut heap.jit_dbg_fn, head);
     heap.jit_native_depth = native_depth + 1;
-    stamp_stack_limit(heap);
+    stamp_stack_limit_if_outermost(heap, native_depth);
     let saved_force_vm = heap.jit_force_vm;
     let outcome = f(heap as *mut Heap, base as i64);
     heap.jit_force_vm = saved_force_vm;
@@ -1033,7 +1065,7 @@ pub(crate) fn jit_dispatch_call(
                     }
                 }
                 heap.jit_native_depth = depth + 1;
-                stamp_stack_limit(heap);
+                stamp_stack_limit_if_outermost(heap, depth);
                 let saved_force_vm = heap.jit_force_vm;
                 let outcome = f(heap as *mut Heap, base as i64);
                 heap.jit_force_vm = saved_force_vm;
@@ -1676,7 +1708,12 @@ pub(crate) fn jit_tier(
     // Best-effort arm name for the staged-stale diagnostic (recursive defns carry
     // `inline_name`; others reset to MAX so the value is never misleadingly stale).
     let saved_fn = std::mem::replace(&mut heap.jit_dbg_fn, arm.dbg_name.unwrap_or(u32::MAX));
-    stamp_stack_limit(heap);
+    // VM→native entry. This one does not raise `jit_native_depth` itself, so the depth read
+    // here is the caller's: `0` means this is the outermost native frame on the thread and
+    // the limit has to be derived; anything else is a native→VM→native re-entry on the same
+    // stack, where the outer entry's stamp is still the right absolute address.
+    let native_depth = heap.jit_native_depth;
+    stamp_stack_limit_if_outermost(heap, native_depth);
     let saved_force_vm = heap.jit_force_vm;
     let outcome = f(heap as *mut Heap, base as i64);
     heap.jit_force_vm = saved_force_vm;
