@@ -937,41 +937,39 @@ tree-walker spends ~12.6 kB of native stack per frame, so `primes<=1000` (999-de
 trips the 12 MB budget there with a clean `recursion too deep` — correct, and release
 handles it fine. See `tests/corpus/gabriel/README.md`.
 
-### OPEN — a >100× slowdown for a test inside the debug `brood_suite_passes` wrapper
+### FIXED 2026-07-27 — the >100× slowdown was the RUNTIME collector, not contention
 
-Two independent observations of the same thing, both found while wiring the corpora, and
-both larger than contention alone should explain. **This is the one item left red.**
+Both observations below turned out to be one bug, filed as KI-14 and fixed: the ADR-091
+RUNTIME collector's drain report re-walked a deep process's entire root stack at every
+reporting safepoint. `roots` is the VM operand/env stack, so the "cheap" Phase-1 probe is
+really O(recursion depth); a 100k-deep JSON parse made it enormous, and a Phase-2-dirty
+process paid that walk on every safepoint only to discard the result. Measured in one
+drain epoch: **78,409 Phase-1 walks over a 1,727,686-entry root stack.** Full write-up and
+the three-part fix in [known-issues.md](docs/known-issues.md#ki-14).
 
-1. The two 100k-deep JSONTestSuite documents: ~400 ms standalone, >120 s inside the full
-   parallel suite (>250×).
-   **Reconfirmed 2026-07-26, and the "misdiagnosis" verdict was itself wrong.** They were
-   un-skipped on the reasoning that `*test-timeout-ms*` is a batch deadline that blamed
-   whichever worker reported last, so "nothing here is slow" (see the header of
-   `tests/conformance_json_test.blsp`). Measured on a binary built from current source:
-   `nest test` — the **release** path, not the debug wrapper — now runs for **~15 minutes**
-   and ends with `every n_ document is rejected` **hard-killed at 900 s**, while the same
-   file standalone passes in seconds. The batch-deadline story explains a *mislabelled*
-   failure; it does not explain 900 s of one thread at 90% CPU. Two things compounded:
-   the documents came back into the sweep, and `:conformance` now buys the 900 s
-   `*test-slow-timeout-ms*` budget, so what used to fail fast at the 120 s cap now grinds
-   for 900 s. So the slowdown is real, is not confined to the debug wrapper, and `nest test`
-   on main is currently red and slow because of it. Left as found — per the note below,
-   the fix is not to shrink the tests again.
-2. The UCD normalisation sweep: **1.1 s standalone in release**, still >120 s inside the
-   *debug*-build `brood_suite_passes` wrapper under full-workspace load (>100×). Sampling
-   it from ~16,000 cases down to ~1,000 did not help, which is what rules out test size as
-   the cause. `./target/release/nest test` runs the whole file in 2.6 s;
-   `./target/debug/nest test` in 31 s; only the wrapper-under-load case explodes.
+That explains the shape that made this look like contention: the drain only arms once the
+shared RUNTIME region crosses `BROOD_RT_GC_FLOOR`, so the differential was never
+concurrency or test size — it was **how much code the process had loaded**. Few files → no
+drain → fast; whole suite → drain armed → quadratic.
 
-So `cargo nextest run` is currently **red on `brood_suite_passes`** while
-`nest test` (the release path, 3400 tests) is green. Do not "fix" this by shrinking tests
-further — that was tried across four cycles and the number barely moves. The suspects
-worth checking first are the per-process GC under many concurrent green processes in a
-debug build, and whether the runner's `:isolated`/snapshot machinery interacts badly with
-a test holding a large live heap. `BROOD_GC_TRACE=1` on a debug wrapper run is the next
-step. If the sweeps need to come out of the debug wrapper in the meantime, the honest lever
-is tag-filtering `:slow` out of `run-project-tests` for that path only, keeping full
-coverage on `nest test` — not deleting cases.
+1. The two 100k-deep JSONTestSuite documents: `nest test --only 'test:every n_ document'`
+   went from a >10-minute hang to **9.8 s**. Full `nest test` including conformance:
+   **3592 tests, ~90 s**.
+2. The UCD normalisation sweep: **2.5 s for Part1 inside the debug wrapper**, down from
+   >120 s. Its sampling knob (`BROOD_UCD_PART1_OF`) is kept — the wrapper is still a debug
+   build — but it is no longer masking anything.
+
+`cargo nextest run` is green: **877/877, wrapper at ~435 s** under full concurrency.
+
+Worth recording for the next investigation of this kind, since the guesses below were
+confidently wrong: the suspects named here were the per-process GC under many concurrent
+green processes and the `:isolated`/snapshot machinery. Neither was involved. What found
+it was sampling the hung process under gdb (which cannot *attach* on this machine — yama
+`ptrace_scope` — but can *launch*: `gdb --batch -ex run` plus a background `pkill -INT`),
+then a temporary counter to turn the stack samples into numbers. Two theories — image size,
+then drain-epoch count — died on those measurements before the real cause showed up. The
+instinct the section did get right: **do not fix this by shrinking tests.** That was tried
+across four cycles and the number barely moved, because test size was never the variable.
 
 Six of the nine wired suites finding real defects — including the tree's one open bug
 (KI-13) — is the argument for the rest. Note the shift as the subjects got harder: the

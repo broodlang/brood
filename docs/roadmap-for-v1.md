@@ -242,17 +242,19 @@ All purely additive — deferring costs a version number and nothing else.
 Tracked in [`ROADMAP.md`](../ROADMAP.md); listed here so a release checklist doesn't
 miss them.
 
-- 🟥 **The conformance red.** Full `nest test` grinds to the 900 s cap on the two
-  100k-deep JSONTestSuite documents (`--exclude conformance` is green in ~30 s). This
-  is ROADMAP's one open red item and it predates the review. A 1.0 cannot ship with
-  the project's own suite unable to complete.
-- ⬜ **`nest format --check` is red on 46 files**, including `project.blsp`. The
-  formatter reflows regions the tree writes differently (splitting multi-arg
+- ✅ **The conformance red — fixed 2026-07-27 (KI-14).** It was not the documents: the
+  RUNTIME collector re-walked a deep process's whole root stack at every safepoint, so
+  cost scaled with loaded code, not test size. Full `nest test` including conformance is
+  **3592 tests in ~90 s**; `cargo nextest run` is 877/877.
+- ⬜ **`nest format --check` is red on 52 files** (was 46 when this was written, so it
+  is drifting), including `project.blsp`. The formatter reflows regions the tree writes differently (splitting multi-arg
   `error`/`str` calls), so it needs one deliberate whole-tree pass plus a decision on
   whether that style is wanted — not a drive-by.
 - ⬜ **The `nest::registry` tests** fail whenever the signing agent stops approving
   (`commit.gpgsign` + `op-ssh-sign` makes `git commit` hang in the temp repos they
   build). An environment condition, but one that makes CI results untrustworthy.
+  Currently **green** (6/6) with the agent unlocked — which is the problem: the result
+  tracks whether a desktop app is unlocked, so it should not gate CI at all.
 
 ---
 
