@@ -216,6 +216,21 @@ fn sealed_ability_flags_a_member_missing_an_impl() {
 }
 
 #[test]
+fn sealed_ability_bare_impl_id_qualifies_ki15() {
+    // KI-15: a bare impl id (`circle`) must qualify to the record's ns (`:t/circle`),
+    // matching `:sealed`, so a bare impl counts toward exhaustiveness. Before the fix it
+    // registered under `:circle` and the sealed check falsely flagged the member.
+    let ws = file_warnings(
+        "(require 'ability)\n\
+         (defmodule t)\n\
+         (ability/defrecord* circle (r))\n\
+         (ability/defability Shape :sealed [circle] (area [self] :-> float))\n\
+         (ability/impl Shape circle (area [c] (get c :r)))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("sealed ability")), "{ws:?}");
+}
+
+#[test]
 fn sealed_ability_complete_is_silent() {
     let ws = file_warnings(
         "(require 'ability)\n\

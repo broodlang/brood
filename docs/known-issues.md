@@ -2,8 +2,8 @@
 
 KI-9 is a one-off arity sighting judged a transient inconsistent-build artifact, not
 present in committed code; KI-10 no longer reproduces, incidentally fixed — both kept as
-records, not open bugs. **Open: KI-13 (type checker), KI-15 (`impl` misregisters a bare
-record id) and KI-16 (the LSP still matches the retired `defprotocol`/`defimpl`).**
+records, not open bugs. **Open: KI-13 (type checker) and KI-16 (the LSP still matches the retired
+`defprotocol`/`defimpl`).**
 This file is the condensed record — what each was, how it was fixed, and the regression
 test that guards it — so a recurrence is recognizable. For the narrative discovery
 writeup of the scheduler race, see
@@ -12,7 +12,16 @@ ADRs / topic docs.
 
 ---
 
-## KI-15 — `impl` silently misregisters a **bare** record id · **OPEN, found 2026-07-27**
+## KI-15 — `impl` silently misregisters a **bare** record id · **FIXED 2026-07-27**
+
+**Fixed:** `impl` and `:sealed` now share one helper, `ability--id-kw`, which qualifies a
+bare symbol against `(current-ns)` (`circle` → `:<ns>/circle`), keeps a keyword id
+untouched (`:int`, `:default`), and never double-qualifies an already-`/`-qualified
+symbol. So `(impl S circle …)` registers under the same `:<ns>/circle` a value presents.
+Regression tests: `tests/ability_test.blsp` "impl id qualification (KI-15)" (a bare id
+dispatches) and `sealed_ability_bare_impl_id_qualifies_ki15` (a bare impl satisfies a
+sealed member). Original report:
+
 
 `ability`'s two macros disagree about whether a bare record symbol gets namespace-
 qualified, and the mismatch fails *silently* at registration:
