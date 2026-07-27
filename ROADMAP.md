@@ -114,9 +114,11 @@ What that review consciously left OPEN, with the reasoning:
   ✗ in the collection matrix, both deliberately left erroring (ADR-156): `contains?`
   on a vector would have to answer by *index* (Clojure's trap), and a string would
   have to pick codepoint vs grapheme for the caller. **[Brood]**
-- ⬜ **`#|` says "unterminated `|…|` bar-quoted symbol"** rather than "Brood has no
-  block comments". A nicety; the reader hint table is otherwise now accurate.
-  **[kernel]**
+- ✅ **`#|…|#` now says "Brood has no block comments"** (ADR-169, 2026-07-27) rather
+  than reading as the bar-quoted symbol `|#\|…\|#|`. Folded into the broader reader
+  reservation: `#` is a dispatch character (`#{…}` / `#b"…"` its only forms) and a
+  digit-led non-number token (`1/2`, `0x1F`, `1_000`, `1N`, `1+`) is a reader error,
+  not a symbol — closing the freeze gate's §2 (reader's permanent reservations). **[kernel]**
 - ⬜ **Unbounded laziness** (`iterate`, `lazy-seq`) stays rejected — seq-views plus
   processes cover it, and `Value::Lazy` adds a GC story, force semantics, and
   head-holding pitfalls. Recorded in [deferred.md](docs/deferred.md) #2.
