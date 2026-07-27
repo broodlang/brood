@@ -36,7 +36,7 @@ dev-tools = []
 # raw CPU framebuffer, and cosmic-text shapes + rasterises glyphs (with font
 # fallback and color emoji, via its bundled swash) into the monospace cell grid.
 # The display *protocol* is unchanged Brood data (render ops); these just paint it
-# to a window instead of a terminal. See src/gui.rs and std/observer.blsp's `(observe)`.
+# to a window instead of a terminal. See src/gui.rs and std/tool/observer.blsp's `(observe)`.
 gui = ["dep:winit", "dep:softbuffer", "dep:cosmic-text", "clipboard"]
 # Audio output (the `audio-beep` builtin), via `rodio`. OPT-IN and independent of
 # `gui` on purpose: rodio→cpal links `libasound.so.2` as a hard runtime dependency

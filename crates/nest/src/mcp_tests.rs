@@ -254,7 +254,7 @@ fn bignum_step_churn_via_mcp_does_not_corrupt_heap() {
 
 #[test]
 fn tools_list_returns_the_baked_std_catalogue() {
-    // Step 3 ships `std/mcp.blsp` as a baked-in `EMBEDDED_MODULES` entry, so
+    // Step 3 ships `std/tool/mcp.blsp` as a baked-in `EMBEDDED_MODULES` entry, so
     // `(require 'mcp) (mcp/mcp-tools)` succeeds in a fresh `Interp` and the
     // dispatcher exposes the initial tool catalogue without any project setup.
     let mut interp = Interp::new();
@@ -296,7 +296,7 @@ fn tools_list_projects_a_brood_defined_catalogue() {
     let mut interp = Interp::new();
     // Pre-define an `mcp-tools` catalogue inline; mark `'mcp` as already
     // provided so the dispatcher's `(require 'mcp)` doesn't load the baked
-    // `std/mcp.blsp` and clobber our test catalogue. This is exactly the
+    // `std/tool/mcp.blsp` and clobber our test catalogue. This is exactly the
     // override path a project's own `mcp.blsp` will use (step 5): provide
     // the feature themselves, then bind their own `mcp-tools`.
     interp
@@ -645,7 +645,7 @@ fn value_to_json_rejects_unrepresentable_kinds() {
     assert!(value_to_json(&interp.heap, cl).is_err());
 }
 
-// ---- step 3 — end-to-end against the baked std/mcp.blsp catalogue --------
+// ---- step 3 — end-to-end against the baked std/tool/mcp.blsp catalogue --------
 //
 // Each test fires a real `tools/call` for one of the six live tools and
 // asserts on the parsed JSON in the `content[0].text` payload (the Brood

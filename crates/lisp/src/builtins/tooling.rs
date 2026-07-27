@@ -183,7 +183,7 @@ pub(super) fn arglist(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResul
 /// (for completion / workspace-symbol tooling and reproducible doc generation).
 /// Special forms and the core control/binding macros — the keyword-like heads:
 /// the single source of truth for "what reads as a keyword". Read from Brood via
-/// the `(special-forms)` primitive (so `std/highlight.blsp` highlights from this
+/// the `(special-forms)` primitive (so `std/editor/highlight.blsp` highlights from this
 /// list) and from the LSP (`semantic_tokens` / `completion` import it rather than
 /// keeping a copy), so the runtime and the tooling can't drift. Mirrors
 /// `brood.el`'s `brood-special-forms` plus the `def`-family heads.

@@ -1202,7 +1202,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // display protocol and reads keys. The protocol itself is Brood data (a
     // vector of render ops); these primitives are mechanism only. `term-poll`
     // returns a key (a 1-char string, or a keyword for specials) or nil on
-    // timeout; `term-draw` interprets a frame vector. See std/observer.blsp.
+    // timeout; `term-draw` interprets a frame vector. See std/tool/observer.blsp.
     def(
         heap,
         "term-enter",
@@ -1242,7 +1242,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // that must NOT take over the screen: `term-raw-enter`/`term-raw-leave` toggle
     // raw mode only (no alternate screen, cursor stays visible, scrollback kept),
     // and `term-emit` paints relative ops. The self-hosted REPL editor uses these
-    // (std/lineedit.blsp); `term-enter`/`term-draw` stay the full-screen path.
+    // (std/editor/lineedit.blsp); `term-enter`/`term-draw` stay the full-screen path.
     def(
         heap,
         "term-raw-enter",
@@ -1269,7 +1269,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // exist, erroring at call time without the feature). Unlike the single
     // terminal, there can be many windows: `gui-open` returns an integer window id
     // and the other primitives take it, so `(observe)` can spawn several at once.
-    // std/observer.blsp's `gui-display` wraps an id as a display map. See gui.rs.
+    // std/tool/observer.blsp's `gui-display` wraps an id as a display map. See gui.rs.
     def(
         heap,
         "gui-open",
@@ -1401,7 +1401,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     // The one process-introspection accessor the language can't reach from Brood
     // (the mailbox queue lives behind the scheduler registry). Everything else an
-    // observer shows — pid id, liveness — is assembled in Brood (std/observer.blsp).
+    // observer shows — pid id, liveness — is assembled in Brood (std/tool/observer.blsp).
     def(
         heap,
         "mailbox-size",
@@ -1818,7 +1818,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         builtin_modules,
     );
     // Release-bundle mechanism (ADR-038): an app produced by `nest release`
-    // carries its source appended to the binary. These let `std/project.blsp`
+    // carries its source appended to the binary. These let `std/tool/project.blsp`
     // boot it; `%builtin-module` (above) already consults the bundle, so
     // `require` resolves an app's modules with no load-path change.
     def(
@@ -2050,7 +2050,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     // The package manager's git mechanism (ADR-037): resolve a ref to a commit,
     // and clone+checkout a pinned commit. Thin shell-outs to `git`; the cache
-    // layout / lock file / conflict policy are all Brood (std/package.blsp).
+    // layout / lock file / conflict policy are all Brood (std/tool/package.blsp).
     def(
         heap,
         "%git-resolve-ref",
@@ -3050,8 +3050,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("ref", &[], "A fresh, globally-unique reference token (tags a request to its reply)."),
     ("monitor", &["pid"], "Watch pid; returns a monitor ref. Delivers [:down ref pid reason] when pid dies."),
     ("list-processes", &[], "Every currently-live pid on this runtime (one per registered mailbox). Order is unspecified — sort if you need stability. For agents/tools enumerating spawned processes."),
-    ("mailbox-size", &["pid"], "How many messages are queued in pid's mailbox (its receive backlog), or nil if pid is not a live local process. The one process-introspection accessor not reachable from Brood; see std/observer.blsp."),
-    ("process-info", &["pid"], "A snapshot map of a live local process: {:id :pid :node :name :status :mailbox :monitored-by :parent :memory :collections :reductions} (:pid the process's pid value, for acting on it with exit/send/monitor; :status is :running or :waiting; :name nil if unregistered; :parent the spawner's id, nil for the root; :memory the LOCAL heap bytes and :collections the cumulative GC count, both as of the process's last receive; :reductions the cumulative reduction count — Erlang's scheduling unit, updated every quantum; exact for spawned processes, coarse for the root). nil for a remote/dead pid. The Erlang-process_info-style introspection the observer reads; see std/observer.blsp."),
+    ("mailbox-size", &["pid"], "How many messages are queued in pid's mailbox (its receive backlog), or nil if pid is not a live local process. The one process-introspection accessor not reachable from Brood; see std/tool/observer.blsp."),
+    ("process-info", &["pid"], "A snapshot map of a live local process: {:id :pid :node :name :status :mailbox :monitored-by :parent :memory :collections :reductions} (:pid the process's pid value, for acting on it with exit/send/monitor; :status is :running or :waiting; :name nil if unregistered; :parent the spawner's id, nil for the root; :memory the LOCAL heap bytes and :collections the cumulative GC count, both as of the process's last receive; :reductions the cumulative reduction count — Erlang's scheduling unit, updated every quantum; exact for spawned processes, coarse for the root). nil for a remote/dead pid. The Erlang-process_info-style introspection the observer reads; see std/tool/observer.blsp."),
     ("term-enter", &[], "Enter raw mode + the alternate screen, hide the cursor, and enable mouse capture, taking over the terminal for a full-screen UI (so click/scroll reach term-poll). Pair with term-leave. (ADR-046 display seam.)"),
     ("term-leave", &[], "Restore the terminal: show the cursor, disable mouse capture, leave the alternate screen, disable raw mode. The normal-path teardown for term-enter."),
     ("term-size", &[], "The terminal size as [cols rows] in character cells."),

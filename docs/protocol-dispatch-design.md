@@ -1,10 +1,16 @@
 # Protocol dispatch & abilities — the polymorphism seam
 
-> Status: **Slices 1–2 shipped.** `std/ability.blsp` (`defability`/`impl`/`defrecord*`,
-> value-first nominal dispatch) + a checker arm + `tests/ability_test.blsp`. It unifies
-> value polymorphism and drivers-as-values, detects cross-module impl conflicts, and
-> dispatches records on a baked `module/name` identity.
+> Status: **Resolved and shipped — all four slices, `protocol` retired (ADR-168).**
+> `std/ability.blsp` (`defability`/`impl`/`defrecord*`, value-first nominal dispatch) +
+> a checker arm + `tests/ability_test.blsp`. It unifies value polymorphism and
+> drivers-as-values, detects cross-module impl conflicts, and dispatches records on a
+> baked `module/name` identity. `defprotocol`/`defimpl` have been **removed**;
+> `defbehaviour` stays in `std/protocol.blsp` as the module-contract seam. The
+> reference documentation is [language.md §Polymorphism](language.md); the rest of this
+> note is the design record — the problem, measurements, the language survey, and the
+> space that was explored to get here.
 >
+
 > **Slice 2 (identity leak) — resolved pragmatically, no kernel change.** Verifying the
 > constraints changed the plan: the `Value` layout is JIT-pinned and map ops match
 > `Value::Map` with catch-alls, so a `Record` variant is a pervasive, risky change; and
@@ -43,10 +49,16 @@
 > direct impl of any declared op (exhaustiveness — a `:default` doesn't count). Bare member
 > names are qualified to the current ns. Runtime dispatch is unchanged.
 >
-> **Still open:** **return-type dispatch** (needs bidirectional inference), **retire/migrate
-> `protocol`**, and **monomorphization** (codegen — the *runtime* win, deferred to last).
-> The rest of this note captures the problem, measurements, the language survey, and the
-> design space.
+> **Slice 5 (retire `protocol`) — shipped (ADR-168).** `defprotocol`/`defimpl` are gone:
+> they dispatched only on `type-of`, so no two records could ever dispatch apart — the
+> exact wall this note was written about, which `ability` now clears. `defbehaviour`
+> stays, because a module-as-implementor contract has no dispatch value.
+> `std/protocol.blsp` is now behaviours only, and the `deftype`/`reify` runtime hint
+> points at `defability`/`impl`.
+>
+> **Still open:** **return-type dispatch** (needs bidirectional inference) and
+> **monomorphization** (codegen — the *runtime* win, deferred to last; both are on the
+> post-1.0 list in [roadmap-for-v1.md](roadmap-for-v1.md)).
 
 ## The goal
 
@@ -64,12 +76,15 @@ advance. It favours either **retroactive registration** (anyone wires any type t
 any ability) or **structural satisfaction** (satisfaction is *derived*, never
 declared).
 
-## Where Brood is today (measured, not assumed)
+## Where Brood was when this note was written (measured, not assumed)
+
+> Historical — this is the *starting* state the analysis below reasons from. For what
+> shipped, see the status block above and [language.md §Polymorphism](language.md).
 
 - **Protocols** (`std/protocol.blsp`, ADR-158): `defprotocol` / `defimpl`, open
   generic functions dispatching on `(type-of first-arg)`. Two registries —
   `*protocols*` (op specs, read by the checker/LSP) and `*impls*` (the dispatch
-  table).
+  table). *(Since retired — ADR-168.)*
 - **Behaviours** (`defbehaviour` / `(:implements …)`): a *module* contract. Value
   dispatch does **not** happen; a module satisfies it by defining functions. And
   `:implements` is a **checker-only annotation** — there is *no* runtime
@@ -160,7 +175,8 @@ Refinements the prototype forced:
    construction-time, zero inference — exactly the implicit version ADR-011
    rejected, made safe.
 3. Openness survives: the registry keys on the `geometry/circle` symbol, so anyone
-   can `defimpl Encode geometry/circle` from any module.
+   can register an impl for `geometry/circle` from any module. (This is what shipped,
+   spelled `(impl Encode geometry/circle …)`.)
 
 ### The cost that decides it: the tag leaks
 
@@ -244,15 +260,24 @@ Honest trade vs. the registry route: structural satisfaction **loses retroactive
 extension of a *foreign* record** (its ops live in its own module → write an
 adapter, as Go makes you wrap), and can occasionally say "yes" by shape accident.
 
-- **Structural / Go (current lean):** one `ability`, satisfied by op-resolution
+- **Structural / Go (the lean at the time):** one `ability`, satisfied by op-resolution
   over `module/name`. Least machinery, coherent, maximally decoupled on both axes,
   unifies behaviours + protocols, uses only what Brood already has. Adapters for
   foreign retroactive extension.
-- **Registry / Clojure (the prototype):** keep `defimpl` on record-name identity.
-  Buys foreign retroactive extension, at the cost of coherence *and* the leaky-tag
-  problem above.
+- **Registry / Clojure (the prototype):** an explicit impl registered on record-name
+  identity. Buys foreign retroactive extension, at the cost of coherence *and* the
+  leaky-tag problem above.
 
-## Invention space (open)
+> **How it was resolved:** the **registry** route won, for the reason the "honest
+> trade" paragraph names — losing retroactive extension of a *foreign* record was the
+> larger cost, because "make *my* type work with *their* operation" is the flagship
+> use case. Coherence is bought back explicitly instead of by construction: every impl
+> is tagged with its registering namespace, so a cross-module clash is a loud warning
+> rather than a silent last-load-wins (constraint #7's "explicitly-not" branch). The
+> leaky-tag problem was resolved pragmatically rather than with a kernel carve-out —
+> see the Slice-2 note in the status block.
+
+## Invention space (explored; now closed)
 
 We are not obliged to pick an existing point. Seeds for a Brood-native synthesis:
 
@@ -291,15 +316,19 @@ We are not obliged to pick an existing point. Seeds for a Brood-native synthesis
 
 ## Already shipped vs. open
 
-- **Shipped:** ADR-158 protocol facility; the protocol dispatch-runtime work (nested
-  registry, inlined calls, `satisfies?`, richer missing-impl error). **Slice 1 of the
-  unified facility:** `std/ability.blsp` — `defability`/`impl`/`defrecord*`, value-first
-  nominal dispatch (record identity or `type-of`), drivers-as-values, provenance-tagged
-  cross-module conflict detection, `satisfies?`, `:default`; the `defability`/`impl`
-  checker arm (arity/missing/undeclared-op diagnostics under the noun "ability"); and
-  `tests/ability_test.blsp`. `defbehaviour`/`defprotocol` are untouched and coexist.
-- **Open (Slice 2+):** the kernel carve-out to stop `:__id__` leaking into
-  `keys`/`=`/`json-encode`; checker nominal-awareness + monomorphization; sealed
-  abilities (exhaustiveness + full static dispatch); return-type dispatch; and
-  migrating/retiring `protocol` once `ability` proves out. `defbehaviour` stays — the
+- **Shipped:** `std/ability.blsp` — `defability`/`impl`/`defrecord*`, value-first
+  nominal dispatch (record identity or `type-of`), drivers-as-values,
+  provenance-tagged cross-module conflict detection, `satisfies?`, `:default`,
+  `record?`/`record-id`/`fields`/`identity-of`; **sealed abilities** with
+  exhaustiveness checking; the checker arm (arity/missing/undeclared-op diagnostics
+  under the noun "ability") plus the inference-driven **missing-impl warning at call
+  sites**; `json-encode` omitting `:__id__`; and `tests/ability_test.blsp`.
+  `defprotocol`/`defimpl` **retired** (ADR-168); `defbehaviour` retained in
+  `std/protocol.blsp` with `tests/behaviour_test.blsp`.
+- **Open:** **return-type dispatch** (needs bidirectional inference) and
+  **monomorphization** (static resolution where the identity is known — the runtime
+  win). Both are post-1.0 additive items. Two cosmetic/tooling residues also remain:
+  `keys`/`count` on a record still include `:__id__` (use `fields`; a hidden kernel
+  slot is the eventual fix, deferred as optional polish), and the **LSP has not been
+  migrated** off `defprotocol`/`defimpl` (KI-16). `defbehaviour` stays — the
   module-as-implementor contract (Q3) is genuinely different from value dispatch.

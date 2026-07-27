@@ -22,7 +22,7 @@ so it works from anywhere inside a project.
 ## Writing tests
 
 ```lisp
-(require 'test)
+(defmodule arithmetic-test (:use test))     ; `:use`, not a bare `require` — see below
 
 (describe "arithmetic"
   (test "addition"   (assert= (+ 1 2 3) 6))
@@ -31,6 +31,16 @@ so it works from anywhere inside a project.
 (describe "errors"
   (test "catches a throw" (assert= (try (throw 42) (catch e e)) 42))
   (test "div-by-zero"     (assert-error (/ 1 0))))
+```
+
+**Open the file with `(:use test)`, not a bare `(require 'test)`.** Post-ADR-065 a
+bare `require` only *loads* a module — it imports nothing — so `describe`/`test`/
+`assert=` would stay qualified (`test/describe`, …). `(:use test)` in the
+`defmodule` header both loads and imports, which is what makes the macros read
+bare. Add a `(:use …)` per module under test too:
+
+```lisp
+(defmodule parser-test (:use test) (:use parser))
 ```
 
 A `*_test.blsp` file under `tests/` only **registers** its cases like this — it

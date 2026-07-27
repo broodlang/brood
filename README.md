@@ -182,6 +182,8 @@ from a project directory (`nest new <name>` scaffolds one):
 | `nest doc [module]` | Emit Markdown docs for the project, or one module. |
 | `nest repl` | A REPL with every project module pre-loaded. |
 | `nest add`/`remove`/`fetch`/`update`/`tree` | Dependency management (ADR-037). |
+| `nest publish`/`search` | Publish a version to, and search, the git-backed package registry index (ADR-147). |
+| `nest completions [shell]` | Print a shell integration script enabling TAB completion for `nest`. |
 | `nest grammar [target]` | Generate an editor syntax grammar (see below). |
 | `nest mcp` | Serve the project over MCP on stdio (see below). |
 | `nest observe` | A full-screen TUI process observer. |
@@ -235,11 +237,14 @@ small Rust kernel.
 
 Beyond that: first-class **sets** (`#{…}`), exact **decimals** (`1.50M`) for money,
 **`bytes`** with Erlang-style bit syntax, `defrecord` for named map shapes, and
-**protocols** (`(require 'protocol)`) for open generic functions when a `cond` on
-`type-of` can't be extended from outside. Collection ops are one protocol over every
-kind — `count`/`first`/`conj`/`into`/`get` accept a list, vector, map, set or `bytes`
-— and a **keyword is callable** as an accessor, so `(map :name people)` needs no
-throwaway lambda. Patterns support alternatives and conjunctions (`(or 1 2)`,
+**abilities** (`(require 'ability)`) for open generic functions when a `cond` on
+`type-of` can't be extended from outside — each op dispatches on its first
+argument's identity (a built-in kind, or a `defrecord*` record's own nominal id, so
+two record shapes dispatch apart), extensible from any module at any time. Collection
+ops are one interface over every kind — `count`/`first`/`conj`/`into`/`get` accept a
+list, vector, map, set or `bytes` — and a **keyword is callable** as an accessor, so
+`(map :name people)` needs no throwaway lambda. Patterns support alternatives and
+conjunctions (`(or 1 2)`,
 `(and whole {:keys [a]})`); text has grapheme-cluster-indexed accessors, because a
 cursor steps by cluster, not code point; and `transduce` exposes the fusing pipeline
 stages so you can write your own.
@@ -298,7 +303,7 @@ diverge, and the differences are deliberate:
 - **`def` is late-binding global rebinding** — that *is* live hot reload
   (a running process picks up a redefinition on its next call), not a Clojure var.
   But the language's **own** functions are reserved: no monkey-patching `get` or
-  `map`, unlike Clojure's `with-redefs`/`alter-var-root`. Extend with a protocol,
+  `map`, unlike Clojure's `with-redefs`/`alter-var-root`. Extend with an ability,
   shadow with `let`, or namespace it in a module.
 - **A keyword is callable, and nothing else data-like is.** `(:name p)` works;
   `({:a 1} :a)`, `([10 20] 1)` and `(#{1} 1)` are errors with hints — a callable map
@@ -335,10 +340,9 @@ thin client for a daemon).
 What remains is incremental, each item gated on a concrete need (ADR-011): the
 Tier-2 runtime-parity gaps (a cluster **registry**, mailbox **backpressure**,
 the **observability** stream, `gen_statem`/`Application` behaviours), Tier-3
-ergonomics (grapheme-correct strings, protocols/multimethods, `&key` args), full
-**server/daemon** socket serving, and the
-sandboxed **WASM component** extension host (ADR-145). The editor application
-itself is a separate downstream project, out of scope for this repo.
+ergonomics (grapheme-correct strings, `&key` args), full **server/daemon** socket
+serving, and the sandboxed **WASM component** extension host (ADR-145). The editor
+application itself is a separate downstream project, out of scope for this repo.
 
 The full plan is in [`ROADMAP.md`](ROADMAP.md).
 
@@ -364,8 +368,9 @@ docs/          architecture, language reference, roadmap, decisions, dev log
 - [ROADMAP.md](ROADMAP.md) — milestones and status
 - [docs/benchmarking.md](docs/benchmarking.md) — how performance is measured;
   archived runs in [docs/benchmarks/](docs/benchmarks/)
-- [docs/protocol-dispatch-design.md](docs/protocol-dispatch-design.md) — the open
-  design question behind protocols: a dispatch identity for user-defined types
+- [docs/protocol-dispatch-design.md](docs/protocol-dispatch-design.md) — how the
+  polymorphism seam was designed: the dispatch-identity problem for user-defined
+  types, the language survey, and how `ability` resolved it
 - [docs/decisions.md](docs/decisions.md) — why the key choices were made (ADRs)
 - [docs/devlog.md](docs/devlog.md) — chronological work log
 - [docs/brood-for-claude.md](docs/brood-for-claude.md) — the pocket reference for AI

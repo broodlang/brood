@@ -5,7 +5,7 @@
 //! (`[:clear]`, `[:text row col s face]`, `[:cursor row col]`) — plain Brood data.
 //! This module paints that frame to a native window instead of a terminal, and
 //! reads keystrokes back in the same encoding (`"a"`, `:up`, `:ctrl-c`, …). So
-//! `std/observer.blsp`, the REPL editor, and the future editor drive it through
+//! `std/tool/observer.blsp`, the REPL editor, and the future editor drive it through
 //! the identical `gui-*` ⇆ `term-*` surface and never know which backend is live.
 //!
 //! ## Threading & multiple windows

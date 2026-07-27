@@ -8,10 +8,10 @@
 > (`Suspended` — bytecode frames + operand stack), work-stealing is **general**
 > (any queued process, not fresh-only), and **live cross-worker migration
 > works**. Reduction-counted preemption (ADR-027) carries over unchanged; a
-> native-nested `receive` blocks its worker instead (the dirty carve-out,
-> concurrency-v2 §7.4). Sections below that narrate coroutines/pinning are the
-> as-built history of the corosensei era — read `concurrency-v2.md` §8 and
-> `crates/lisp/src/process/scheduler.rs` for the current engine. The
+> native-nested `receive` blocks its worker instead (the dirty carve-out). Sections
+> below that narrate coroutines/pinning are the as-built history of the corosensei
+> era — read `crates/lisp/src/process/scheduler.rs` (and its `pool`/`lifecycle`/
+> `guards` children) for the current engine, and ADR-100 for why it changed. The
 > *rationale* lives in [`concurrency.md`](concurrency.md).
 
 ## Goal & what changes

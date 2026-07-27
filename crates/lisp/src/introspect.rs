@@ -280,7 +280,7 @@ pub fn file_imports(interp: &mut Interp, src: &str) -> Vec<(String, String)> {
 // **Two MCP tools are not yet wrappable here** and are deliberately deferred:
 //   * `check_project` — the Brood-side `(check-project)` is print-oriented
 //     (GNU lines to stdout + an `Int` count). A structured variant in
-//     `std/project.blsp` (returning `[file line col message]` tuples) is the
+//     `std/tool/project.blsp` (returning `[file line col message]` tuples) is the
 //     right shape and lands with step 2 of the MCP plan, not here.
 //   * `run_tests`     — same issue: `(run-project-tests)` prints per-test
 //     GNU output and raises on failure. Needs a structured runner result.
@@ -641,7 +641,7 @@ pub fn call_form(fn_name: &str, string_args: &[&str]) -> String {
 /// Bootstrap a project image for **tooling** — the shared entry the `brood-lsp`
 /// server and `nest mcp` both use so they can't drift on what a tooling image
 /// contains. Routes to the Brood `(setup-tooling-image root)` in
-/// `std/project.blsp`: it puts the project's sources on `*load-path*`, loads
+/// `std/tool/project.blsp`: it puts the project's sources on `*load-path*`, loads
 /// them, and requires the `test` + `format` frameworks (so cross-module names
 /// and framework macros resolve in the advisory checker). `root` is the already
 /// resolved project-root directory.

@@ -405,7 +405,7 @@ pub(super) fn term_draw(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 
 /// `(term-raw-enter)` — raw mode only: no alternate screen, the cursor stays
 /// visible, scrollback is preserved. The seam for an *inline* line editor (the
-/// self-hosted REPL, std/lineedit.blsp), as opposed to `term-enter` which takes
+/// self-hosted REPL, std/editor/lineedit.blsp), as opposed to `term-enter` which takes
 /// over the whole screen for a full-screen TUI. Pair with `term-raw-leave`.
 ///
 /// Defensively *shows the cursor and disables mouse capture* on entry: terminal
@@ -600,7 +600,7 @@ pub(super) fn clamp_u16(n: i64) -> u16 {
 // back in the same encoding. The window/loop machinery lives in `crate::gui`
 // (behind the `gui` feature); these primitives just translate Brood `Value`s ⇄
 // the plain `gui::Op`/`gui::Key`/`gui::Face` the backend speaks. A composite
-// "broadcast" display in std/observer.blsp drives term + gui (+ remote later)
+// "broadcast" display in std/tool/observer.blsp drives term + gui (+ remote later)
 // from one frame — so the frontends can't drift. Without `--features gui` the
 // backend functions return a clear "rebuild with --features gui" error.
 

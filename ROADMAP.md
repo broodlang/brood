@@ -42,7 +42,10 @@ Shipped as ADRs:
 - ✅ **ADR-158** — protocols promoted from the `hatch` package into `std/protocol.blsp`
   (`defprotocol`/`defimpl`/`defbehaviour`), the open-dispatch answer. The kernel had
   carried the checker/LSP conformance pass for months while the macros lived
-  downstream.
+  downstream. **Superseded by ADR-168:** `defprotocol`/`defimpl` dispatched only on
+  `type-of`, so no two records could dispatch apart; they were retired in favour of
+  `std/ability.blsp` (`defability`/`impl`/`defrecord*`, nominal dispatch).
+  `defbehaviour` stays in `std/protocol.blsp`.
 - ✅ **ADR-159** — grapheme-*indexed* accessors (`grapheme-count`, `grapheme-at`,
   `substring-graphemes`), so the documented-correct cursor step stops costing a vector
   of every cluster in the string per keystroke.
@@ -88,15 +91,18 @@ What that review consciously left OPEN, with the reasoning:
   fix — `(defn f ((x int) -> int) …)` — is an ADR-082 revision touching `defn`, the
   checker's `sig_of`, `defrecord`'s emitted sigs, `sig!`'s wrapping, and every `sig`
   in `std/`. Deferred with the reasoning in ADR-163, not dismissed. **[Brood]**
-- ⬜ **Re-host the seq protocol on ADR-158's protocols.** `count`/`first`/`conj`
-  dispatch in the prelude and the kernel, so a user type can never join the
-  collection protocol ADR-156 completed — policy still living in Rust. The blocker is
-  performance: these are the hottest paths in the language, so it is a measured
-  rewrite, not a promotion. **[kernel/Brood]**
-- ⬜ **Record-shape dispatch for protocols.** Records are structural maps (ADR-130),
-  so every `defrecord` value dispatches as `:map`. A second axis keyed on a `:type`
-  field would fix it and would *silently* change what any map carrying a `:type` key
-  dispatches to — rejected for now (ADR-158), workaround documented. **[Brood]**
+- ⬜ **Re-host the seq protocol on abilities.** `count`/`first`/`conj` dispatch in the
+  prelude and the kernel, so a user type can never join the collection protocol
+  ADR-156 completed — policy still living in Rust. Now unblocked in *principle* by
+  ADR-168 (a record has a dispatch identity to register against); the remaining
+  blocker is performance: these are the hottest paths in the language, so it is a
+  measured rewrite, not a promotion. **[kernel/Brood]**
+- ✅ **Record-shape dispatch** — resolved by **ADR-168**. Records stay structural maps
+  (ADR-130 intact: `type-of` is still `:map`, `get`/`assoc`/`=` still structural), and
+  a `defrecord*` value carries a *dispatch-only* `:module/name` nominal identity baked
+  in at definition, so two record shapes dispatch apart. The rejected `:type`-field
+  axis stays rejected: it would silently reroute any map carrying a `:type` key, where
+  a `defrecord*` identity is explicit and construction-time.
 - ⬜ **Transducer early termination** (`reduced`) and stateful-stage lifecycle.
   ADR-161 ships the one-arity contract `fold` needs; `take`-as-a-stage wants a
   `reduced` sentinel threaded through `fold`, the library's hottest function.
@@ -380,7 +386,8 @@ the remote tier, `nest observe`/`nest mcp` consuming the stream — "Telemetry" 
 **Tier 3 — cheap ergonomic parity:** a **grapheme-correct string API**
 (codepoint-vs-grapheme indexing is a real divergence vs Elixir's `String`;
 `unicode-segmentation` is already a dep, wired only to display-width);
-**protocols/multimethods** (replace hand-written `type-of` cascades);
+~~**protocols/multimethods**~~ (✅ shipped as **abilities**, ADR-168 — open generic
+functions with nominal dispatch replace hand-written `type-of` cascades);
 **`&key` args** (designed — ADR-011); ⬜ **lexically-shadowable operators**
 ("Option C" — resolve operator position against local scope first, so a macro
 name like `for`/`when` stops being a reserved word; decision **deferred**, kept as

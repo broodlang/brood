@@ -375,11 +375,18 @@ module/behaviour names there also bind nothing, so they're recognized
 - `(:implements Bar)` → the behaviour name. The interface registry (`*protocols*`)
   records ops but *no def-site*, so there's no `source-location` to ask; instead
   `definition.rs` scans the project's `.blsp` files (`introspect::project_files`)
-  for the `(defbehaviour Bar …)` / `(defprotocol Bar …)` form and lands on its
-  name. Hover shows `(behaviour Bar)` plus its declared ops + arities
+  for the `(defbehaviour Bar …)` form and lands on its name. Hover shows
+  `(behaviour Bar)` plus its declared ops + arities
   (`introspect::protocol_ops`). A behaviour defined only in an external package
   (not a project file) has no goto target; hover still shows its ops if the
   declaring package is loaded.
+
+  > Only `defbehaviour` is relevant here: `(:implements …)` is the *module*-contract
+  > seam, and an **ability** is dispatched on a value rather than claimed by a module
+  > header, so it never appears in one. `definition.rs` and `module_ref.rs` still also
+  > match the retired `defprotocol` (dead arms), and `completion.rs` still offers ops
+  > inside a `(defimpl …)` rather than an `(impl …)` — see
+  > [KI-16](known-issues.md), the LSP has not been migrated to ADR-168 yet.
 
 **Document links** (`document_link.rs`) are the *passive* counterpart to goto:
 rather than waiting for the cursor, the server underlines **every** module name in

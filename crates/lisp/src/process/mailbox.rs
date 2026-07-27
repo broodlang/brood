@@ -755,7 +755,7 @@ pub(super) fn wake_for_timeout(pid: u64, gen: u64) {
 
 /// Every currently-registered local pid (one entry per live mailbox). Backs
 /// the `(list-processes)` primitive — agents introspecting what they've
-/// spawned, and the `nest mcp` `processes` tool (`std/mcp.blsp`, ADR-036).
+/// spawned, and the `nest mcp` `processes` tool (`std/tool/mcp.blsp`, ADR-036).
 /// Order is unspecified (hash-map iteration); callers that care can sort.
 pub fn list_local_pids() -> Vec<u64> {
     crate::core::sync::lock(&REGISTRY).keys().copied().collect()

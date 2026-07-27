@@ -890,7 +890,9 @@ fn foreign_constructs_hint_at_the_brood_way() {
 
 /// A hint must never name a feature the tree doesn't have, and must never deny one
 /// it does. Four in this table did (fixed 2026-07-26): `deftype` pointed at a
-/// `defprotocol`/`defimpl` "protocol module" that was never built, `letfn` at
+/// `defprotocol`/`defimpl` "protocol module" that was never built — and after
+/// ADR-168 retired those two for `ability`, this test's own assertion became the
+/// thing naming a feature the tree no longer has (fixed 2026-07-27). `letfn` at
 /// `let` + `fn` (which cannot recurse — the whole point of `letfn`), `lazy-seq` at
 /// "sequences are eager" with no mention of the `lmap`/`lfilter` seq-views that
 /// landed in ADR-111, and the `#` arm claimed `#{…}` was unavailable four ADRs
@@ -899,13 +901,16 @@ fn foreign_constructs_hint_at_the_brood_way() {
 #[test]
 fn hints_name_only_features_that_exist() {
     let hint = |src: &str| run(&format!("(try {src} (catch e (get e :hint)))"));
-    // The hint names `defprotocol`/`defimpl` and how to reach them. It said "(the
+    // The hint names the polymorphism seam and how to reach it. It said "(the
     // `protocol` module)" for months while no such module was in std — the macros
     // lived in the hatch package and only the checker pass was in-tree. ADR-158
-    // promoted them, so the hint must now carry the `require` that makes it true.
+    // promoted them, so the hint had to carry the `require` that makes it true;
+    // ADR-168 then retired `defprotocol`/`defimpl` for `ability`, so the target
+    // moved again. This assertion is the reason to keep the test: it went red on
+    // main when ADR-168 rewrote the hint without updating it here.
     let d = hint("(deftype foo)");
-    assert!(d.contains("(require 'protocol)"), "{d}");
-    assert!(d.contains("defprotocol"), "{d}");
+    assert!(d.contains("(require 'ability)"), "{d}");
+    assert!(d.contains("defability"), "{d}");
     assert!(d.contains("defrecord"), "{d}");
     // `letfn` → letrec (a let-bound fn cannot call itself).
     assert!(hint("(letfn ((f (x) x)) 1)").contains("letrec"));
@@ -1026,7 +1031,7 @@ fn spawned_process_picks_up_redefinition() {
 /// `%isolate` runs a thunk against a private copy of the global bindings: a
 /// `def` it makes takes effect *inside* the thunk but is rolled back when
 /// it returns. This is what gives `:isolated` tests true state isolation — a
-/// test's definitions can't leak to any other test (see std/test.blsp).
+/// test's definitions can't leak to any other test (see std/tool/test.blsp).
 #[test]
 fn isolate_rolls_back_global_defs() {
     let src = r#"
@@ -1504,7 +1509,7 @@ fn gensym_is_unique_across_threads() {
     }
 }
 
-/// The test registry (`*units*` in `std/test.blsp`) must be resettable so a
+/// The test registry (`*units*` in `std/tool/test.blsp`) must be resettable so a
 /// long-lived image — the `nest mcp` hot-reload session (ADR-013) — that loads
 /// the same test file twice doesn't double-count. `reset-units!` clears it; the
 /// project test runner calls it before (re)loading test files. Here we simulate

@@ -344,24 +344,41 @@ never a false positive.
   positives (contract #5 holds — advisory, never gates). An intentional
   anaphoric macro (deliberate capture) would be flagged; none exist in-tree, and
   if one is written the lint should grow an opt-out rather than relax the gate.
-- ✅ **Protocol / behaviour conformance** (`check/protocol.rs`). The *macros* live
-  in `std/protocol.blsp` (`(require 'protocol)`, ADR-158); this pass predated them
-  by months, back when they were a prototype in the `hatch` package. Beyond type
-  misuse, the checker validates the `defprotocol` / `defbehaviour` / `defimpl` /
-  `(:implements …)` family against the declared interface: a diagnostic per op an
-  impl omits, per op whose arity disagrees, and per method the protocol never
-  declared (almost always a typo). Behaviours additionally check that a module
-  claiming `(:implements Name)` actually *defines* each declared op at the right
-  arity. The interface registry is seeded from the runtime `*protocols*` map (so
-  an interface declared in an imported module is known) and read from the
-  **un-expanded** tree (the protocol shape vanishes after `defprotocol` lowers to
-  `defn`s + registry calls — the same reason `sig` and the hygiene lint read
-  un-expanded). An impl/claim of an *unknown* protocol is left alone (it may be
-  declared in a file this one doesn't import) — no false positive.
+- ✅ **Ability / behaviour conformance** (`check/protocol.rs`). The *macros* live in
+  `std/ability.blsp` (`(require 'ability)`, ADR-168) and `std/protocol.blsp`
+  (`defbehaviour`, ADR-158); this pass predated both by months, back when they were a
+  prototype in the `hatch` package. Beyond type misuse, the checker validates the
+  `defability` / `impl` / `defbehaviour` / `(:implements …)` family against the
+  declared interface: a diagnostic per op an impl omits, per op whose arity
+  disagrees, and per method the interface never declared (almost always a typo).
+  Behaviours additionally check that a module claiming `(:implements Name)` actually
+  *defines* each declared op at the right arity. **Sealed abilities** —
+  `(defability A :sealed [id …] …)` — add exhaustiveness: every declared member must
+  have a *direct* impl of every op (a `:default` does not count). The interface
+  registry is seeded from the runtime `*abilities*` / `*protocols*` maps (so an
+  interface declared in an imported module is known) and read from the
+  **un-expanded** tree (the shape vanishes after `defability` lowers to `defn`s +
+  registry calls — the same reason `sig` and the hygiene lint read un-expanded). An
+  impl/claim of an *unknown* interface is left alone (it may be declared in a file
+  this one doesn't import) — no false positive.
+- ✅ **Missing-impl warning at ability call sites** (`check/protocol.rs`,
+  `check_ability_calls`). Where the checker can determine an argument's dispatch
+  identity *statically* — a literal's `type-of` kind, a direct `defrecord*`
+  constructor call, or a record-typed variable via `expr_ty` — it warns when no impl
+  and no `:default` covers it. Kept sound rather than aggressive: an op fn is
+  recognised only by its exact def symbol (fingerprinted by a qualified
+  `ability/impl-for` in its body), an identity is taken only when certain, and the
+  impl set unions this file's `register-impl` forms with the runtime
+  `ability/*impls*` registry so cross-file impls count. Stack-guarded for deep forms.
 - ✅ **Non-tail self-recursion lint** (`check/recursion.rs`). A `defn` whose
   self-call sits in a non-tail position is flagged — deep non-tail recursion
-  overflows the small green-process coroutine stack (today an uncatchable
-  segfault, not a clean error). Advisory; the fix is a tail-recursive accumulator
+  exhausts the small green-process stack. Since 2026-06-29 that is a **clean,
+  catchable error**, not the uncatchable segfault it once was: under the VM the
+  ~1M `MAX_BC_FRAMES` cap raises `recursion too deep: exceeded the VM's
+  1048576-frame non-tail-call limit`, and the tree-walker has the equivalent
+  byte-budget guard — so a runaway function fails its own process and the runtime
+  survives. The lint still earns its keep, because the failure is a resource limit
+  rather than a correct answer. Advisory; the fix is a tail-recursive accumulator
   or a process-driven loop. A test that *deliberately* recurses non-tail (to
   exercise that path) opts out with `(check-allow :non-tail-recursion …)` — see
   the suppression directive below.
