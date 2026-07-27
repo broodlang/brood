@@ -157,8 +157,7 @@ fn behaviour_in_files(files: &[String], name: &str) -> Option<Location> {
             }
             let mut head = form.forms();
             let is_iface = head.next().is_some_and(|h| {
-                h.kind == NodeKind::Symbol
-                    && matches!(h.text(&text), "defbehaviour" | "defability")
+                h.kind == NodeKind::Symbol && matches!(h.text(&text), "defbehaviour" | "defability")
             });
             let name_node = head.next();
             let matches_name =
