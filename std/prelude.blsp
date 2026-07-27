@@ -3369,13 +3369,13 @@ leaves `s` unchanged."
   "The string `s` concatenated `n` times (the empty string if `n` <= 0)."
   (apply str (repeat n s)))
 
-(defn pad-left (s w)
-  "Right-justify `s` in a field of width `w`, padding with spaces on the left; `s` is returned unchanged if it is already at least `w` wide."
-  (let (n (string-length s)) (if (>= n w) s (str (string-repeat " " (- w n)) s))))
+(defn pad-left (s w &optional (pad " "))
+  "Right-justify `s` in a field of width `w`, padding with `pad` (a single-character string, a space by default) on the left; `s` is returned unchanged if it is already at least `w` wide."
+  (let (n (string-length s)) (if (>= n w) s (str (string-repeat pad (- w n)) s))))
 
-(defn pad-right (s w)
-  "Left-justify `s` in a field of width `w`, padding with spaces on the right; `s` is returned unchanged if it is already at least `w` wide."
-  (let (n (string-length s)) (if (>= n w) s (str s (string-repeat " " (- w n))))))
+(defn pad-right (s w &optional (pad " "))
+  "Left-justify `s` in a field of width `w`, padding with `pad` (a single-character string, a space by default) on the right; `s` is returned unchanged if it is already at least `w` wide."
+  (let (n (string-length s)) (if (>= n w) s (str s (string-repeat pad (- w n))))))
 
 ;; ---- string interpolation ---------------------------------------------------
 ;; `(fmt "…{expr}…")` builds a string from a template, splicing the value of each
