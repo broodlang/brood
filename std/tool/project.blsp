@@ -20,7 +20,7 @@ the `nest new` scaffolder."
   ;; release runtime (which strips the test framework, ADR-038) couldn't even
   ;; load `project` to boot a bundle. The test runner needs test only when it
   ;; actually runs — `run-project-tests` `(require 'test)`s and qualifies it.
-  (:use format))
+  )
 
 ;; --- the project, as set by the manifest -------------------------------------
 
