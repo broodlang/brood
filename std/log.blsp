@@ -87,8 +87,7 @@ e.g. an editor appending to its `*Messages*` buffer. Async and share-nothing."
 (defn file-backend (path & opts)
   "A backend that appends each formatted line to the file at `path` (low-volume —
 `spit-append` is a non-atomic read-modify-write today)."
-  (require 'file)
-  (apply backend (fn-port (fn (s) (file/append-file path s) nil)) opts))
+  (apply backend (fn-port (fn (s) (spit-append path s) nil)) opts))
 
 ;; ---- the logger process -----------------------------------------------------
 (defn log--emit (b rec)
