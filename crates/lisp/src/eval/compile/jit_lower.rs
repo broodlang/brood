@@ -1411,13 +1411,15 @@ fn jit_lower_arm_inner(
     // page — a `SIGSEGV`-class abort that `try`/`catch` cannot observe and no supervisor
     // can restart (the OS process goes, not the green process).
     //
-    // Cost is three instructions on arm entry: load the limit the entry point stamped
-    // (`Heap::jit_stack_limit`), compare this frame's address against it, branch. On a
+    // Cost is a load of the limit the entry point stamped (`Heap::jit_stack_limit`), one
+    // compare of this frame's address against it, and a predicted branch. On a
     // trip we jump to `deopt`, NOT `error`: the VM owns deep recursion properly — it grows
     // heap frames and raises the clean, catchable `MAX_BC_FRAMES` error — so draining there
     // is both correct and the behaviour the non-JIT build already has. A `0` limit (the
     // probe couldn't read the stack) skips the check, failing open exactly as the old
-    // headroom probe does with `None`.
+    // headroom probe does with `None` — and it does so for *free*, because the compare is
+    // unsigned: no address is `< 0`, so a zero limit can never trip. An explicit
+    // `limit != 0` test used to sit here and was pure overhead on every activation.
     {
         let limit = b.ins().load(
             ptr_ty,
@@ -1430,11 +1432,9 @@ fn jit_lower_arm_inner(
         let probe =
             b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
         let here = b.ins().stack_addr(ptr_ty, probe, 0);
-        let low = b.ins().icmp(IntCC::UnsignedLessThan, here, limit);
-        // `limit == 0` disables the guard.
-        let zero = b.ins().iconst(ptr_ty, 0);
-        let armed = b.ins().icmp(IntCC::NotEqual, limit, zero);
-        let trip = b.ins().band(low, armed);
+        // `limit == 0` (probe unavailable) disables the guard implicitly: this compare is
+        // unsigned, so no frame address is ever below zero.
+        let trip = b.ins().icmp(IntCC::UnsignedLessThan, here, limit);
         let cont = b.create_block();
         let bail = b.create_block();
         b.ins().brif(trip, bail, &[], cont, &[]);

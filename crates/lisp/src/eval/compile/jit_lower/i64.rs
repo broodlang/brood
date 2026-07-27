@@ -91,23 +91,18 @@ fn i64_has_self_call(node: &Node) -> bool {
     }
 }
 
-/// Native-recursion depth cap for the i64 worker — bounds the native (coroutine) stack the
-/// register recursion runs on (the general path's `JIT_NATIVE_DEPTH_LIMIT` lives in the boxed
-/// dispatch, which this path bypasses). On hitting it the worker sets the sentinel to `2`
-/// (depth-bail, vs `1` for overflow) and unwinds; the wrapper returns outcome 5, and `jit_tier`
-/// permanently switches the arm to the boxed path (which drains deep recursion via heap frames
-/// / `jit_force_vm`). Without that switch, a deep non-tail recursion would deopt-and-re-tier
-/// per level — a ~100× thrash.
-#[cfg(feature = "jit")]
-// Sized for the real stack, not the old (removed, ADR-100) coroutine stacks the `1400` was for:
-// a green process — including the top-level program — now runs on the 16 MiB worker-thread stack
-// (`WORKER_STACK_BYTES`) with a ~12 MiB budget. A register-worker frame is tiny (measured: a
-// simple 1-arg worker recurses past depth 290 000 — ~55 B/frame — before the guard page; a
-// spill-heavier arm like Ackermann is a few ×), so 32 768 leaves a >2× stack margin even at a
-// pessimistic ~200 B/frame while covering deep non-tail int recursion (Ackermann's ~4 k peak) that
-// the old cap forced onto the ~4× slower boxed path. Beyond it, the depth-bail still switches the
-// arm to the boxed path (which drains via heap frames), so a genuine runaway raises a clean error.
-const I64_DEPTH_LIMIT: i64 = 32768;
+// The i64 worker's native-recursion **frame-count** cap (`I64_DEPTH_LIMIT`, last valued at
+// 32 768) lived here and is gone as of 2026-07-27. It bounded the native stack the register
+// recursion runs on by counting levels, which is only ever right for one frame size — the
+// KI-14 abort was exactly a frame size it was wrong for. The worker's byte-based stack guard
+// (`jit_lower_arm_i64`'s prologue, comparing the frame address against `Heap::jit_stack_limit`)
+// measures the resource that actually runs out and therefore subsumes it, and dropping the
+// second per-level compare recovered the ~18% the guard had cost `fib`. The depth-bail
+// *sentinel* (`2`) it used to raise is unchanged — the byte guard raises the same one, so the
+// wrapper still returns outcome 5 and `jit_tier` still switches the arm permanently to the
+// boxed path (without that switch a deep non-tail recursion deopt-and-re-tiers per level, a
+// ~100× thrash). The `depth` parameter is still threaded: it costs nothing measurable and the
+// bail diagnostics read it.
 
 /// Functions (by defining-`defn` name) that a depth-bail proved are too deeply recursive for the
 /// register worker — they run the boxed path instead (which drains gracefully). Process-global
@@ -668,26 +663,32 @@ pub(super) fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) ->
         let ovf = b.block_params(entry)[nargs + 1];
         let heap = b.block_params(entry)[nargs + 2];
         let poisoned = b.create_block();
-        // Depth cap → set sentinel + unwind (native-stack guard).
+        // Stack guard → set sentinel + unwind.
         let deep = b.create_block();
         let go = b.create_block();
-        let over_count = b
-            .ins()
-            .icmp_imm(IntCC::SignedGreaterThanOrEqual, depth, I64_DEPTH_LIMIT);
-        // **Stack guard (KI-14).** The frame-count cap above is only ever right for one
-        // frame size — the comment on `I64_DEPTH_LIMIT` says so, and a JSON parse proved
-        // it: `n_structure_open_array_object.json` recurses ~100 000 levels through this
-        // worker with frames far heavier than the ~55–200 B the cap was sized for, so
-        // 32 768 frames exhausted the 16 MiB worker stack long before the count tripped.
-        // The result was a guard-page abort — not a catchable error — killing the OS
-        // process rather than the green one.
+        // **Stack guard (KI-14), and it is the ONLY per-level test.** Bail on *bytes*:
+        // compare this frame's address against the limit the native entry point stamped
+        // (`Heap::jit_stack_limit`, an absolute address ~512 KiB above the stack bottom).
+        // The sentinel is the same one the old frame-count cap set, so the arm switches to
+        // the boxed path and drains through heap frames.
         //
-        // So bail on *bytes* as well as frames: compare this frame's address against the
-        // limit the native entry point stamped (`Heap::jit_stack_limit`, an absolute
-        // address ~512 KiB above the stack bottom). Same sentinel as the depth-bail, so
-        // the arm switches to the boxed path and drains through heap frames — which is
-        // exactly what the count-bail already does, just triggered by the thing that
-        // actually runs out. `0` (probe unavailable) disables it, failing open.
+        // A frame *count* cap (`I64_DEPTH_LIMIT`, 32 768) used to run alongside this, and
+        // it was both wrong and expensive. Wrong: a count is only ever right for one frame
+        // size, which is what KI-14 was — `n_structure_open_array_object.json` recurses
+        // ~100 000 levels through this worker with frames far heavier than the ~55–200 B
+        // the cap was sized for, so 32 768 frames exhausted the 16 MiB worker stack long
+        // before the count tripped, and the process died on its guard page rather than
+        // raising a catchable error. Expensive: measuring the bytes AND the frames put a
+        // second compare on every level of the recursion, which the 2026-07-27 run priced
+        // at ~18% of `fib` (89 → 73 ms with it gone). The byte test subsumes the count
+        // test — it measures the thing that actually runs out — so the count is gone.
+        //
+        // What the count *did* still cover is the case where the byte limit is `0`, i.e.
+        // the platform could not read the stack: an unsigned compare against 0 never trips,
+        // so the guard fails open. With no count cap behind it that would be an unguarded
+        // native recursion, so the **wrapper refuses to run this worker at all when the
+        // limit is 0** (returns outcome 5 → `jit_tier` moves the fn to the boxed path,
+        // which keeps its own dispatch-level depth caps). See the wrapper's `nostack` bail.
         let limit = b.ins().load(
             ptr_ty,
             MemFlagsData::trusted(),
@@ -700,11 +701,7 @@ pub(super) fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) ->
             3,
         ));
         let here = b.ins().stack_addr(ptr_ty, probe, 0);
-        let low = b.ins().icmp(IntCC::UnsignedLessThan, here, limit);
-        let zero = b.ins().iconst(ptr_ty, 0);
-        let armed = b.ins().icmp(IntCC::NotEqual, limit, zero);
-        let over_bytes = b.ins().band(low, armed);
-        let over = b.ins().bor(over_count, over_bytes);
+        let over = b.ins().icmp(IntCC::UnsignedLessThan, here, limit);
         b.ins().brif(over, deep, &[], go, &[]);
         b.seal_block(deep);
         b.seal_block(go);
@@ -775,6 +772,31 @@ pub(super) fn jit_lower_i64_arm(jit: &mut crate::jit::Jit, arm: &CompiledArm) ->
         b.seal_block(entry);
         let heap = b.block_params(entry)[0];
         let base = b.block_params(entry)[1];
+        // **No stack limit → do not run the register worker at all.** The worker's only
+        // per-level guard is the byte compare against `Heap::jit_stack_limit`, and a `0` limit
+        // (the platform could not read the remaining stack) makes that unsigned compare fail
+        // open — which, with the frame-count cap gone, would leave the native recursion
+        // completely unguarded. Outcome 5 is the same "this fn belongs on the boxed path"
+        // signal the depth-bail raises, so `jit_tier` retires the register version for good and
+        // the boxed path — which still has its dispatch-level depth caps — takes over. One
+        // load + one predicted branch per *outermost* activation; the recursion never sees it.
+        {
+            let limit = b.ins().load(
+                ptr_ty,
+                MemFlagsData::trusted(),
+                heap,
+                std::mem::offset_of!(crate::core::heap::Heap, jit_stack_limit) as i32,
+            );
+            let nostack = b.create_block();
+            let armed = b.create_block();
+            b.ins().brif(limit, armed, &[], nostack, &[]);
+            b.seal_block(nostack);
+            b.seal_block(armed);
+            b.switch_to_block(nostack);
+            let o5 = b.ins().iconst(types::I64, 5);
+            b.ins().return_(&[o5]);
+            b.switch_to_block(armed);
+        }
         // Frame base address: roots + base*STRIDE. Args are at slots base+0..base+nargs-1; the
         // result goes back to slot base+0 (the VM's Done convention). The worker never touches
         // roots (it takes no heap), so this address stays valid across the worker call.

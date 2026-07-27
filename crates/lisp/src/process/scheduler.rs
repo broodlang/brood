@@ -741,6 +741,13 @@ impl Process {
     /// (`resume` is taken). The `&mut self` borrow ends when this returns, so `run_one`
     /// is then free to move/park/re-queue `self` on the outcome.
     fn drive(&mut self) -> Result<crate::eval::compile::VmOutcome, LispError> {
+        // Second of the two stamp points for the KI-14 native-stack guard (the other is the
+        // outermost native entry, see `stamp_stack_limit_if_outermost`). A process resumes on
+        // whichever worker the scheduler routed it to and worker stack bases differ, so the
+        // limit — an absolute address — has to be re-derived for this worker's stack before
+        // any of this quantum's native code compares against it.
+        #[cfg(feature = "jit")]
+        crate::eval::compile::stamp_stack_limit(&mut self.heap);
         let resume = self.resume.take().map(|b| *b);
         match self.program.as_mut() {
             // The root program process (ADR-135): drive the top-level forms.
