@@ -23,6 +23,11 @@ fn run(src: &'static str) -> Result<String, String> {
     std::thread::Builder::new()
         .stack_size(brood::process::WORKER_STACK_BYTES)
         .spawn(move || {
+            // JIT tests exercise the VM's native tier, so pin the VM regardless of the
+            // `BROOD_VM` env: the tree-walker differential job sets `BROOD_VM=0`, under
+            // which these top-level programs would run on the tree-walker — testing no
+            // JIT at all, and ~10× slower (timing out). Thread-local, set in-thread.
+            brood::eval::compile::set_forced_engine(Some(true));
             let mut interp = Interp::new();
             match interp.eval_str(src) {
                 Ok(v) => Ok(interp.print(v)),
@@ -77,6 +82,8 @@ fn overflow_promotes_to_bignum_under_jit() {
 
 #[test]
 fn comparisons_and_maps_are_correct_under_jit() {
+    // Runs in the main thread (not via `run`), so pin the VM here too — see `run`.
+    brood::eval::compile::set_forced_engine(Some(true));
     // Each comparison lives inside an `if` so the arm tiers; `>`/`>=` lower to `%lt`/`%le`
     // with a swapped arg-map, which the JIT must apply. Warm each, probe both sides of 5.
     let cmp = |op: &str| {
