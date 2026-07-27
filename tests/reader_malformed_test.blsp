@@ -56,17 +56,23 @@
     (is (symbol? (read-string "++")))
     (is (symbol? (read-string "--")))
     (is (symbol? (read-string "..."))))
-  (test "a misplaced sign (not leading, not after e) makes it a symbol"
-    ; Emacs-Lisp-style name
-    (is (symbol? (read-string "1+")))
-    (is (symbol? (read-string "1-")))
-    (is (symbol? (read-string "2+3")))
-    (is (symbol? (read-string "--5")))
-    (is (symbol? (read-string "12-34"))))
+  ;; A misplaced sign USED to make these symbols — `1+`/`1-` were readable as the
+  ;; Emacs-Lisp increment names. They are digit-led, so the reader now reserves them
+  ;; (see reader_hints_test.blsp). The ergonomic cost is nil: `inc`/`dec` are the
+  ;; Brood spelling, nothing in the tree or the sibling projects ever used `1+`/`1-`,
+  ;; and Clojure rejects the token too. What is bought is that `12-34` and `2+3` —
+  ;; far more likely a typo than a name — now fail at the token instead of becoming
+  ;; a symbol that goes unbound somewhere else entirely.
+  (test "a digit-led token with a misplaced sign is reserved, not a symbol"
+    (map (fn (t) (assert= (get (try (read-string t) (catch e e)) :kind) :parse))
+      ["1+" "1-" "2+3" "12-34"]))
+  (test "…but a sign run with no digit behind it is still a symbol"
+    ;; `--5` leads with `-` followed by `-`, not a digit, so it is not digit-led.
+    (is (symbol? (read-string "--5"))))
   (test "the read symbol is the expected one (round-trips through equality)"
     (assert= (read-string "++") '++)
     (assert= (read-string "...") '...)
-    (assert= (read-string "2+3") '2+3))
+    (assert= (read-string "--5") '--5))
   (test "a valid number is still a number, not a symbol"
     (is (number? (read-string "-5")))
     ; sign after e is a real exponent
@@ -115,8 +121,18 @@
     (assert= (pr-str 'hello) "hello")
     (assert= (pr-str :my-key) ":my-key")
     ; a valid symbol token
-    (assert= (pr-str (symbol "1+")) "1+")
+    (assert= (pr-str (symbol "foo1")) "foo1")
     (assert= (pr-str (keyword "123")) ":123"))
+  ;; `symbol`/`keyword` can still BUILD a name the reader would reserve — they take
+  ;; an arbitrary string. The round-trip is what must hold, and it does for free:
+  ;; `printer::symbol_needs_bars` asks `atom::classify`, so the moment `1+` stopped
+  ;; classifying as a Symbol the printer started bar-quoting it. No printer change
+  ;; was needed — that is the ADR-025 one-definition rule earning its keep.
+  (test "a programmatically-built reserved name round-trips through bars"
+    (map (fn (n)
+           (assert= (pr-str (symbol n)) (str "|" n "|"))
+           (assert= (read-string (pr-str (symbol n))) (symbol n)))
+      ["1+" "1/2" "0x1F" "1_000"]))
   (test "display (non-readable) prints the raw name, no bars"
     (assert= (str (symbol "a b")) "a b")
     (assert= (str (keyword "a b")) ":a b")))
