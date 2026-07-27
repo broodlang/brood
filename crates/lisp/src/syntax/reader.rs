@@ -255,13 +255,22 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Dispatch a leading `#`. Only `#b"…"` is special (a bytes literal); `#` is
-    /// otherwise an ordinary atom character, so anything else (`#q`, `#foo`) reads
-    /// as a symbol. Five common Clojure/Scheme/EDN `#`-reader-macros are caught with
-    /// a teaching hint (LLM-native errors, `docs/llm-native.md`) rather than
-    /// mis-parsed into a confusing downstream error (`#{…}` → "odd map", `#(…)` →
-    /// "unbound #", `#_` / `#"…"` → a stray symbol): `#{` reads as a set, and
-    /// `#(` / `#'` / `#_` / `#"` each raise a hint naming the Brood idiom.
+    /// Dispatch a leading `#`. **`#` is a dispatch character, not an atom
+    /// character**: `#{…}` (set) and `#b"…"` (bytes) are the only two forms, and
+    /// anything else after a leading `#` is a reader error.
+    ///
+    /// It used to fall through to `read_atom`, so an unrecognised `#…` interned as
+    /// a *symbol* — `#foo` was a legal name, and `#|a comment|#` read as the
+    /// symbol `|#\|a comment\|#|`. That quietly spent the `#` space: any `#` form
+    /// added after 1.0 would be taking a token that had been a valid name, which is
+    /// a breaking change. Rejecting the whole space now costs nothing (no real
+    /// program names anything `#foo`) and keeps every future `#` literal purely
+    /// additive — the same reasoning as the digit-led rule in
+    /// [`AtomKind::ReservedNumeric`](crate::syntax::atom::AtomKind::ReservedNumeric).
+    ///
+    /// The Clojure/Scheme/EDN forms Brood does not have get a teaching hint naming
+    /// the Brood idiom (LLM-native errors, `docs/llm-native.md`) instead of a
+    /// confusing downstream failure.
     fn read_hash(&mut self) -> Result<Value, LispError> {
         if self.s.starts_with("#b\"") {
             self.s.bump(); // '#'
@@ -311,7 +320,27 @@ impl<'a> Parser<'a> {
                 "Brood regexes are library values: `(require 'regex)`, then \
                  `(regex/match? \"pat\" s)` (or `regex/find`, `regex/replace`).",
             )),
-            _ => self.read_atom(),
+            // `#|…|#` — Scheme/CL block comment. Read as a bar-quoted symbol before
+            // this arm existed, so it silently became a name instead of a comment.
+            Some('|') => Err(LispError::parse(
+                "`#|…|#` is a Scheme/Common Lisp block comment, which Brood does not have",
+            )
+            .with_pos(pos)
+            .with_hint(
+                "Comment each line with `;` (a line comment runs to end of line), or \
+                 wrap the forms in `(comment …)` — its body is read but never evaluated.",
+            )),
+            // Any other `#…`, and a bare trailing `#`. Reserved, not a symbol.
+            _ => Err(LispError::parse(
+                "`#` is a dispatch character, and this is not one of Brood's `#` forms",
+            )
+            .with_pos(pos)
+            .with_hint(
+                "The only `#` literals are `#{…}` (a set) and `#b\"…\"` (bytes). `#` \
+                 cannot start a name — if you meant one, drop the `#`. (A trailing \
+                 `#`, as in `x#`, is different: that is auto-gensym inside a \
+                 quasiquote.)",
+            )),
         }
     }
 
@@ -544,6 +573,16 @@ impl<'a> Parser<'a> {
                 self.s.pos_at(token_start),
                 format!("malformed float literal: {}", token),
             )),
+            // Digit-led but not a number Brood has (`1/2`, `0x1F`, `1_000`, `1N`).
+            // Reserved syntax, so it errors here rather than interning as a symbol
+            // and resurfacing later as a puzzling "unbound symbol". The hint comes
+            // from `atom` so the CST explains it identically.
+            AtomKind::ReservedNumeric => Err(self
+                .err_at(
+                    self.s.pos_at(token_start),
+                    format!("`{}` is reserved numeric syntax, not a name", token),
+                )
+                .with_hint(atom::reserved_numeric_hint(token))),
         }
     }
 }

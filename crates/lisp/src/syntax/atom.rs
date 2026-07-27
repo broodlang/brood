@@ -39,6 +39,82 @@ pub enum AtomKind {
     /// sign / dot and held only number characters) but is malformed should fail
     /// loudly, not silently read back as a symbol.
     FloatInvalid,
+    /// A **digit-led** token that is not any number Brood has — `1/2`, `0x1F`,
+    /// `1_000`, `1N`, `3px`. Reserved, not a symbol.
+    ///
+    /// This is the three variants above generalised. They each say "a token whose
+    /// intent is numeric must not silently read back as a symbol", but they only
+    /// caught tokens made *entirely* of number characters, so anything with a
+    /// stray letter or punctuation leaked through to [`AtomKind::Symbol`] —
+    /// `0x1F` became an identifier, and surfaced far away as "unbound symbol"
+    /// rather than at the typo. The rule here is the same principle stated once,
+    /// on the token's first character instead of all of them:
+    ///
+    /// > **A token that leads with a digit (or a sign/dot then a digit) must be a
+    /// > number. If it is not one, it is a reader error — never a symbol.**
+    ///
+    /// Two things fall out. Diagnostics land at the mistake. And every numeric
+    /// syntax Brood might ever want — ratios, radix literals, digit separators, a
+    /// bigint suffix to match `1M` — stays **reservable after 1.0**, because none
+    /// of those tokens is a legal name today, so adding one can never break a
+    /// valid program. That is the whole reason to do this before 1.0: the reader
+    /// is the one surface where staying silent is a permanent commitment.
+    ///
+    /// Deliberately unaffected, because they are not digit-led: `+`, `-`, `...`,
+    /// `.foo`, `foo.`, `1M`/`1.0M` (decimals, classified above), `.5`, `5.`,
+    /// `1e10`, and `inf`/`nan`/`-inf`.
+    ReservedNumeric,
+}
+
+/// Does `token` lead like a number? True for a leading ASCII digit, and for a
+/// `+`/`-`/`.` immediately followed by one. This is the whole of the digit-led
+/// rule — see [`AtomKind::ReservedNumeric`].
+///
+/// The second clause is what keeps ordinary names working: `-`, `+`, `...`,
+/// `.foo` and `..bar` all have a sign/dot with no digit behind it, so they are
+/// not digit-led and stay symbols.
+fn digit_led(token: &str) -> bool {
+    let mut chars = token.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_digit() => true,
+        Some('+') | Some('-') | Some('.') => chars.next().is_some_and(|c| c.is_ascii_digit()),
+        _ => false,
+    }
+}
+
+/// The teaching hint for a [`AtomKind::ReservedNumeric`] token, picked from its
+/// shape. Lives here rather than in the reader so the CST and any other consumer
+/// give the same explanation (the [`classify`] one-definition rule, ADR-025).
+///
+/// Each arm names the syntax the token *looks* like and says what Brood does
+/// instead, in the style of the `#(…)`/`#'`/`#_` reader hints.
+pub fn reserved_numeric_hint(token: &str) -> &'static str {
+    let lower = token.to_ascii_lowercase();
+    if token.contains('/') {
+        // Note for a future ratio type: `/` is also the namespace separator, but
+        // the two never collide — a digit-led token is a number, `mod/name` is not.
+        return "Brood has no ratio type — `1/2` is reserved syntax, not a name. \
+                Write the division `(/ 1 2)` for a float, or use an exact decimal \
+                literal like `0.5M` (arbitrary-precision, no binary rounding).";
+    }
+    if lower.starts_with("0x") || lower.starts_with("0b") || lower.starts_with("0o") {
+        return "Brood has no radix literals — `0x1F` / `0b1010` / `0o17` are reserved \
+                syntax, not names. Parse at runtime with `(string->number \"1F\" 16)`, \
+                or write the value in decimal.";
+    }
+    if token.contains('_') {
+        return "Brood has no digit separators — `1_000` is reserved syntax, not a name. \
+                Write the digits out: `1000`.";
+    }
+    if lower.ends_with('n') {
+        return "Brood has no bigint suffix — `1N` is reserved syntax, not a name. \
+                Integers widen to arbitrary precision on overflow already, so plain \
+                `1` is enough; `1M` is the *decimal* literal.";
+    }
+    "A token that starts with a digit must be a number. Brood's numeric literals are \
+     integers (`42`), floats (`1.5`, `1e10`, `.5`), and exact decimals (`1.50M`). If you \
+     meant a name, start it with a letter — a digit-led token is reserved for numeric \
+     syntax."
 }
 
 /// Classify an atom token. No heap needed — atoms are numbers/keywords/symbols.
@@ -99,6 +175,12 @@ pub fn classify(token: &str) -> AtomKind {
     // A bare `:` is a symbol, not an empty keyword.
     if token.len() > 1 && token.starts_with(':') {
         return AtomKind::Keyword;
+    }
+    // Digit-led but none of the number forms above matched: reserved, not a symbol.
+    // Last, so every real literal — including `1M`, `.5`, `1e10` and the malformed
+    // ones that earn their own diagnostic — is classified first.
+    if digit_led(token) {
+        return AtomKind::ReservedNumeric;
     }
     AtomKind::Symbol
 }

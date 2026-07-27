@@ -428,6 +428,10 @@ impl<'a> Cst<'a> {
             // A float-shaped but unparseable token (`1e`, `1.2.3`) — a parse error
             // in the reader; an `Error` token here so the LSP flags it the same.
             AtomKind::FloatInvalid => NodeKind::Error,
+            // Digit-led but not a number (`1/2`, `0x1F`, `1_000`) — reserved syntax,
+            // so the tooling tree marks it an `Error` like the malformed literals
+            // above rather than a `Symbol` the LSP would offer to rename.
+            AtomKind::ReservedNumeric => NodeKind::Error,
         };
         self.leaf(kind, start)
     }
