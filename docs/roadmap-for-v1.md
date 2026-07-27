@@ -201,7 +201,9 @@ every answer below already exists, scattered across ADRs. A 1.0 that states clea
 what it refuses is far more trustworthy than one that leaves it implicit — and this is
 the document that stops the questions being re-litigated after the freeze.
 
-Draft, to be ratified as its own ADR before release:
+✅ **Ratified as [ADR-170](decisions.md) (2026-07-27).** The table below is the working
+copy; ADR-170 is the permanent record, with the generating principle (ADR-011 + the
+freeze asymmetry) and the note that every *relaxation* stays open post-1.0:
 
 | Refused | Why | Where decided |
 |---|---|---|
