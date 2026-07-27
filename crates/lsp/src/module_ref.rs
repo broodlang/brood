@@ -18,7 +18,7 @@ pub enum ClauseRef<'s> {
     /// module's source file; hovers its docstring.
     Module(&'s str),
     /// A behaviour/protocol name — `(:implements Bar)`. Navigates to its
-    /// `(defbehaviour …)`/`(defprotocol …)` form; hovers its declared ops.
+    /// `(defbehaviour …)`/`(defability …)` form; hovers its declared ops.
     Behaviour(&'s str),
 }
 
