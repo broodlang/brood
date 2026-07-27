@@ -10628,3 +10628,70 @@ one-definition rule the shared hint honours), ADR-011 (defer power features — 
 stay reservable, not shipped), [`llm-native.md`](llm-native.md) (the teaching-hint
 convention). Tests: `tests/reader_hints_test.blsp`, `tests/reader_malformed_test.blsp`,
 `tests/malformed_test.blsp`.
+
+## ADR-170 — The 1.0 freeze list: what Brood permanently is not
+
+**Context.** A 1.0 is a promise that the language *surface* stops moving. That promise
+is only credible if it is paired with an explicit statement of what the language
+**refuses** — the features a newcomer from Clojure/Scheme/CL will reach for and not
+find. Every one of those refusals had already been decided, in its own ADR, over the
+course of the language's design; but they were scattered, so the "why not X?" question
+kept being re-litigated. This ADR gathers them into one ratified list, the companion to
+[`roadmap-for-v1.md`](roadmap-for-v1.md)'s pre-freeze work: that file settles the few
+*irreversible* surface decisions that must happen before the freeze (ADR-165/166/168/169);
+this one records the permanent *absences*, so the freeze is a document a user can trust
+rather than a version bump.
+
+**The principle.** Two rules generate the whole list. **ADR-011** — favour the simplest
+surface, defer power features until a concrete need justifies them; every knob is a tax
+on every user, forever. And the **freeze asymmetry** (ADR-166): *relaxing* a restriction
+later is backward-compatible, so a refusal can always be reversed if a real need appears
+— *adding* a restriction later breaks whoever relied on its absence, which is why the
+irreversible reservations had to be made *before* 1.0. So the cost of refusing is
+recoverable and the cost of the feature is permanent; when in doubt, refuse.
+
+**Decision — the freeze list.** Brood 1.0 permanently does not have:
+
+| Refused | Why | Where decided |
+|---|---|---|
+| Mutation of data — no `set!`, atoms, cells, transients | The whole design rests on it: no write barriers, share-nothing processes, safe freezing | ADR-026, ADR-112 |
+| `while` / `loop` / `recur` | Proper tail calls make recursion O(1); `letrec` covers local loops | ADR-154 |
+| Named arguments (`&key`) | A trailing options map + `{:keys …}` reads the same and composes with `merge` | ADR-163 |
+| Metadata (`^{}`), reader macros, `#(…)`, `#_` | Permanent surface for what a macro already does; `^` is the pattern pin | ADR-150 |
+| A character type | A character is a 1-char string; the cursor unit is a grapheme cluster | ADR-159 |
+| Ratios | `(/ 1 2)` is a float, `0.5M` an exact decimal, and `/` is the namespace separator; the `1/2` token is *reserved* (rejected by the reader) so a post-1.0 ratio type stays additive | ADR-169 |
+| Digit-led tokens as names (`0x1F`, `1_000`, `1N`, `1+`) | A digit-led token must be a number; reserving the shapes keeps radix literals / digit separators / a bigint suffix additive after 1.0 | ADR-169 |
+| `#…` beyond `#{…}` / `#b"…"` (incl. `#\|…\|#` block comments) | `#` is a dispatch character; reserving the space keeps every future `#` literal additive | ADR-169, ADR-150 |
+| `contains?` answering by index on a vector | Clojure's trap: `(contains? [1 2] 1)` true for the wrong reason | ADR-156 |
+| Strings as seqable | Codepoint vs grapheme is the caller's decision; bridge explicitly | ADR-156, ADR-159 |
+| Unbounded laziness / `lazy-seq` | Seq-views fuse pipelines; processes cover unbounded state | deferred.md #2 |
+| Alternative *negation* patterns (`(not …)`) | Binds nothing, so it is a guard — `:when` is the slot | ADR-160 |
+| `:as` in a map pattern | `(and whole {…})` says it exactly | ADR-160 |
+| Multiple dispatch | Single dispatch on the first argument's identity; `match` covers the rest | ADR-158, ADR-168 |
+| Dispatch inferred from a `:type` **field** | Would silently reroute any map carrying `:type`; a `defrecord*` identity is explicit and construction-time instead | ADR-168 |
+| Nominal *types* | `defrecord` is structural sugar over a map; `defrecord*` adds a dispatch-only identity, not a type — `type-of` is still `:map` and `=` stays structural | ADR-130, ADR-168 |
+| More than one spelling per thing | `lambda`, `let*`, `car`/`cdr`, `concat`, `some?`, `length` all removed | ADR-098, ADR-154, ADR-162 |
+| Monkey-patching the language | shipped functions are reserved; extend with an ability, shadow with `let`, or namespace it | ADR-166 |
+
+**What this list is not.** It is not a list of things that can never be reconsidered —
+by the asymmetry above, any *relaxation* stays open (a future Brood could grow ratios,
+`&key`, or lazy sequences without breaking a single 1.0 program, because each is
+additive). It is the set of things 1.0 **ships without**, stated so the absence reads as
+a decision rather than an oversight. The genuinely irreversible entries — the reader
+reservations (ADR-169) and the record-dispatch axis (ADR-168) — are the ones that had to
+be settled *before* the freeze; the rest are simply deferred power features (ADR-011)
+that a later version may add.
+
+**Consequences.**
+- The freeze is a document, not just a tag: a user can read what Brood refuses and why,
+  with a one-click path to the full reasoning in each cited ADR.
+- The "why not X?" questions have a single canonical answer, so they stop being
+  re-litigated after 1.0.
+- `roadmap-for-v1.md`'s freeze-list section now points here as the ratified source; that
+  file remains the pre-freeze *work* tracker (the irreversible decisions + the deferred
+  list), and this ADR is the permanent *refusals* record.
+
+**References.** ADR-011 (defer power features — the generating principle), ADR-166 (the
+relax-is-safe / add-is-breaking asymmetry), [`roadmap-for-v1.md`](roadmap-for-v1.md) (the
+pre-freeze gate this ratifies the freeze-list half of), and every ADR cited in the table
+above.
