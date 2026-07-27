@@ -130,6 +130,15 @@
     (assert= (area (circle 2)) 12)
     (assert= (area (rect 3 4)) 12)))
 
+;; ---- KI-15: a bare impl id qualifies to the record's ns, like :sealed ----
+(defability Kilo (kilo [self] :-> int))
+(impl Kilo circle (kilo [c] 15))   ; BARE `circle` must qualify to :ability-test/circle
+
+(describe "impl id qualification (KI-15)"
+  (test "a bare record id reaches the value's qualified identity"
+    ;; before the fix this registered under :circle and never matched :ability-test/circle
+    (assert= (kilo (circle 9)) 15)))
+
 ;; ---- late / open extension: an impl added after the fact, for a built-in ----
 (describe "open extension"
   :serial
