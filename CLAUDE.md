@@ -185,7 +185,25 @@ cargo run -p cli file.blsp        # run a program file
 cargo run -p cli -- --test f.blsp # run one self-contained test file
 cargo run -p nest -- test         # discover + run the project's test suite
 cargo run -p nest -- new foo      # scaffold a new project
+make ab BASE=<ref>                # A/B the working tree vs a git ref on the benchmark rows
 ```
+
+**Measuring a perf change: use `make ab`** (`scripts/ab-bench.sh`), don't hand-roll
+it. It builds the baseline ref in a throwaway worktree and the working tree
+through the *same* `make release-brood` target, so profile and features cannot
+drift between the two sides; then it warms each binary's build-id-keyed boot
+cache, pins with `taskset`, and reports best-of-N per row against
+`../brood-benchmarks/bench/brood/*.blsp`. It aborts if the two binaries come out
+byte-identical, which is what a silently no-op'd build looks like. Examples:
+`make ab BASE=HEAD~3`, `make ab N=11 ROWS="fib pfib"`, `./scripts/ab-bench.sh --all`
+for the regression sweep, `--list` for the row names, `make ab-clean` to drop the
+worktrees. It measures brood against brood — the *published* cross-language
+numbers come from `bench/harness.py` in `brood-benchmarks` (all seven languages in
+one session; see that repo's `CLAUDE.md` for the publish order).
+
+A row that moves only a few percent in a sweep deserves a solo re-run before you
+believe it: interleaving A and B shifts thermal/cache state, and on 2026-07-27
+`persistent-map` read +3.7% in a sweep and 82 vs 81 ms measured directly.
 
 Cargo is the source of truth; a thin **`Makefile`** wraps the common commands as
 shortcuts (`make help` lists them): `make build`, `make test`, `make suite`,
