@@ -273,8 +273,12 @@
     (assert-error (read-string "1.2.3"))
     (assert-error (read-string "1e"))
     (assert= 10000000.0 (read-string "1e7")))
-  (test "\"#q\" reads as a symbol, not an error"
-    (is (symbol? (read-string "#q"))))
+  ;; `#q` used to read as a symbol. `#` is now a dispatch character — `#{…}` and
+  ;; `#b\"…\"` are the only forms — so an unrecognised one is a parse error. Same
+  ;; principle as the number-intent rule just above: a token whose shape says
+  ;; \"literal\" must not silently degrade into a name.
+  (test "\"#q\" is reserved, not a symbol"
+    (assert-error (read-string "#q")))
 
   (test "unknown alphabetic backslash escape is a hard read error (regex footgun)"
     ;; `"\d"` used to silently become `"d"`, breaking regex patterns; a letter
