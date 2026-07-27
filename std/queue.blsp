@@ -102,8 +102,8 @@ Stable: among equal priorities, earlier inserts pop first (FIFO)."
   ;; keeping ties in insertion order (FIFO) rather than popping newest-first.
   (letrec (go (fn (acc xs)
                 (cond
-                  (nil? xs) (append (reverse acc) (list [pri val]))
-                  (< pri (first (first xs))) (append (reverse acc) (cons [pri val] xs))
+                  (nil? xs) (reverse-onto acc (list [pri val]))
+                  (< pri (first (first xs))) (reverse-onto acc (cons [pri val] xs))
                   else (go (cons (first xs) acc) (rest xs)))))
     (go nil pq)))
 

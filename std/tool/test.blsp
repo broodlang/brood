@@ -384,8 +384,8 @@ docs/testing.md for the full guide.")
   ;; once, so ordering a large suite by duration can't overflow the stack.
   (letrec (go (fn (acc xs)
                 (cond
-                  (empty? xs) (append (reverse acc) (list x))
-                  (>= (second x) (second (first xs))) (append (reverse acc) (cons x xs))
+                  (empty? xs) (reverse-onto acc (list x))
+                  (>= (second x) (second (first xs))) (reverse-onto acc (cons x xs))
                   else (go (cons (first xs) acc) (rest xs)))))
     (go nil sorted)))
 (defn sort-by-ms (xs) (fold (fn (acc x) (insert-by-ms x acc)) nil xs))
