@@ -966,3 +966,20 @@ fn of_value_makes_a_keyword_singleton() {
     assert_eq!(t.to_string(), ":maximized");
     assert!(t.is_subtype(&Ty::of(Tag::Keyword)));
 }
+
+#[test]
+fn inferred_type_size_is_bounded_ki13() {
+    // Building a list-of-list-of-… far past the cap must WIDEN (drop the deep refinement),
+    // never retain the whole tree — otherwise `==`/`Hash`/`is_subtype` (recursive over the
+    // `Arc` refinement DAG) go superlinear and inference hangs (KI-13). `bounded` runs in
+    // every `seq_of`, so after many nestings the type stays within `MAX_TY_NODES`.
+    let mut t = Ty::of(Tag::Int);
+    for _ in 0..2000 {
+        t = Ty::list_of(t);
+    }
+    assert!(
+        t.node_count(MAX_TY_NODES * 8) <= MAX_TY_NODES,
+        "a deeply nested inferred type must stay within MAX_TY_NODES, got {}",
+        t.node_count(MAX_TY_NODES * 8)
+    );
+}
