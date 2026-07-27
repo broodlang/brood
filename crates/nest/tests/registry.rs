@@ -68,8 +68,20 @@ fn nest_at(dir: &Path, config_home: Option<&Path>, args: &[&str]) -> Out {
 }
 
 fn git(dir: &Path, args: &[&str]) {
+    // Neutralize any ambient signing / credential config so a `git commit`/`tag`
+    // here never blocks on a locked GPG/SSH signing agent — the test result must
+    // not depend on whether a developer's desktop keychain happens to be unlocked
+    // (that made CI flap). Matches the guard in `format_changed.rs`.
     let ok = Command::new("git")
         .current_dir(dir)
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
+            "credential.helper=",
+        ])
         .args(args)
         .output()
         .expect("run git")
