@@ -377,7 +377,7 @@ docs/testing.md for the full guide.")
 ;; shares one global table across all loaded modules, so `require`-ing test would
 ;; re-bind them for the whole image. Use the prelude's stack-safe versions.)
 
-;; Insertion sort of (name . ms) pairs, slowest first. O(n²), but there are only
+;; Insertion sort of [name ms] pairs, slowest first. O(n²), but there are only
 ;; ever a handful of tests, so simplicity wins.
 (defn insert-by-ms (x sorted)
   ;; Tail-recursive: accumulate the (reversed) smaller-ms prefix and splice `x`
@@ -385,7 +385,7 @@ docs/testing.md for the full guide.")
   (letrec (go (fn (acc xs)
                 (cond
                   (empty? xs) (append (reverse acc) (list x))
-                  (>= (rest x) (rest (first xs))) (append (reverse acc) (cons x xs))
+                  (>= (second x) (second (first xs))) (append (reverse acc) (cons x xs))
                   else (go (cons (first xs) acc) (rest xs)))))
     (go nil sorted)))
 (defn sort-by-ms (xs) (fold (fn (acc x) (insert-by-ms x acc)) nil xs))
@@ -1303,7 +1303,7 @@ docs/testing.md for the full guide.")
 (defn report-slow (results n)
   (println "")
   (println (str "Slowest " n " tests:"))
-  (let (timings (map (fn (r) (cons (full-name r) (r-ms r))) results))
+  (let (timings (map (fn (r) [(full-name r) (r-ms r)]) results))
     (fold (fn (_ entry)
             (println (str "  "
                        (pad-right (str (first entry)) 28)
@@ -1322,13 +1322,13 @@ docs/testing.md for the full guide.")
 ;; nothing when every test is under the threshold — the common, fast case stays
 ;; quiet.
 (defn report-slow-over (results over)
-  (let (slow (filter (fn (p) (> (rest p) over))
-               (map (fn (r) (cons (full-name r) (r-ms r))) results)))
+  (let (slow (filter (fn (p) (> (second p) over))
+               (map (fn (r) [(full-name r) (r-ms r)]) results)))
     (unless (empty? slow)
       (println "")
       (println (str "Slow tests (> " (secs-str over) "):"))
       (fold (fn (_ p)
-              (println (str "  " (pad-right (str (first p)) 40) " " (secs-str (rest p)))))
+              (println (str "  " (pad-right (str (first p)) 40) " " (secs-str (second p)))))
         nil
         (sort-by-ms slow)))))
 
