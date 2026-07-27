@@ -177,7 +177,25 @@ both distinct from the hang (each aborts rather than hangs, and neither is the r
 found alive 2h22m after its run (`/tmp/brood-observe-<pid>/target.blsp`, ~2.7% CPU).
 Independent of this bug, but a long session accumulates stray processes.
 
-## KI-13 — cross-module return-type inference blows up exponentially in branch count · **OPEN, found 2026-07-26**
+## KI-13 — cross-module return-type inference blows up exponentially in branch count · **PARTIALLY FIXED 2026-07-27, still OPEN**
+
+**Partial fix (2026-07-27).** The doc's suggested direction — cap the SIZE of an inferred
+type and widen past it — is now implemented: `Ty::bounded` widens any `Ty` whose refinement
+tree exceeds `MAX_TY_NODES` (64) to its flat tag set, applied at `union`, `intersect`, and
+every structural constructor (`seq_of`/`map_of`/`record_of`/`tuple_of`). Widening is a
+sound over-approximation, so it can only lose precision, never manufacture a warning; all
+254 checker tests still pass. This bounds `==`/`Hash`/`is_subtype` (recursive over a shared
+`Arc` refinement DAG, walked as a tree) to a constant and **fixes the moderate case**: the
+4-branch `deriv` went 25 s → 0.3 s.
+
+**Still open — a SECOND, independent cause.** The full 5-branch `deriv` still doesn't
+finish: with the size cap in place it is now dominated by exponential **call count**, not
+type size — `expr_ty` climbs past ~1.5M calls and keeps going. So the type walk itself is
+re-entered exponentially (the extra `*`/`/` branches add a `(map (fn (b) … (d b) …) …)`
+lambda-in-map, the likely multiplier). Capping size was necessary but not sufficient; the
+re-walk needs its own bound/memoization. The `(sig deriv (any -> any))` workaround still
+short-circuits it. Original report:
+
 
 **Symptom.** `nest check` never finishes. No diagnostic, no progress output, one core
 pegged. The LSP is the same code path, so an editor hovering the call site hangs with it.

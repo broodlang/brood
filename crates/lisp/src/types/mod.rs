@@ -120,6 +120,14 @@ const INT_BIT: u32 = 1u32 << bit(Tag::Int);
 const BOOL_BIT: u32 = 1u32 << bit(Tag::Bool);
 const STR_BIT: u32 = 1u32 << bit(Tag::Str);
 
+/// Max refinement-tree node count an inferred `Ty` retains; a `Ty` built past it (by
+/// `union` or a structural constructor) drops its structural refinements to "any". Bounds
+/// the SIZE of an inferred type — so a recursive value-builder can't grow a type whose
+/// `==`/`Hash`/`is_subtype` (recursive over `Arc` refinements, walking a shared DAG as a
+/// tree) goes superlinear (KI-13). Generous for real shapes — a record with its `:__id__`
+/// plus a handful of fields is well under it — so only pathological structure hits it.
+const MAX_TY_NODES: usize = 64;
+
 /// A set-theoretic type — a **set of runtime [`Tag`]s** with optional
 /// *structured refinements* on its function and sequence members (Step 5+,
 /// ADR-078).
@@ -299,6 +307,7 @@ impl Ty {
             elem: Some(Arc::new(elem)),
             ..Ty::flat(tags & SEQ_BITS)
         }
+        .bounded()
     }
 
     /// `map<K, V>` — a map whose keys have type `K` and values have type `V`.
@@ -307,6 +316,7 @@ impl Ty {
             map_kv: Some(Arc::new((key, val))),
             ..Ty::flat(MAP_BIT)
         }
+        .bounded()
     }
 
     /// A heterogeneous record shape — `field name → (declared type,
@@ -318,6 +328,7 @@ impl Ty {
             fields: Some(Arc::new(fields)),
             ..Ty::flat(MAP_BIT)
         }
+        .bounded()
     }
 
     /// The record-shape refinement, if this map type carries one. The bridge
@@ -335,6 +346,7 @@ impl Ty {
             tuple: Some(Arc::new(elems)),
             ..Ty::flat(VECTOR_BIT)
         }
+        .bounded()
     }
 
     /// The tuple-shape refinement, if this vector type carries one. The
@@ -524,6 +536,77 @@ impl Ty {
     /// do, it survives only when they agree (the union of two distinct
     /// arrows/element-types isn't a single one → widen to "any"). Widening is
     /// sound: a union is a supertype anyway.
+    /// Bounded node count of this `Ty`'s refinement tree, walked as a tree and stopping
+    /// once it reaches `lim` (so a shared `Arc` DAG that is exponential as a tree can't
+    /// make the count itself blow up). Used only by [`bounded`](Ty::bounded).
+    fn node_count(&self, lim: usize) -> usize {
+        let mut n = 1usize;
+        if n >= lim {
+            return n;
+        }
+        if let Some(e) = &self.elem {
+            n += e.node_count(lim - n);
+            if n >= lim {
+                return n;
+            }
+        }
+        if let Some(kv) = &self.map_kv {
+            n += kv.0.node_count(lim - n);
+            if n >= lim {
+                return n;
+            }
+            n += kv.1.node_count(lim - n);
+            if n >= lim {
+                return n;
+            }
+        }
+        if let Some(f) = &self.fields {
+            for (_, (t, _)) in f.iter() {
+                n += t.node_count(lim - n);
+                if n >= lim {
+                    return n;
+                }
+            }
+        }
+        if let Some(ts) = &self.tuple {
+            for t in ts.iter() {
+                n += t.node_count(lim - n);
+                if n >= lim {
+                    return n;
+                }
+            }
+        }
+        n
+    }
+
+    /// If this type's refinement tree exceeds [`MAX_TY_NODES`] nodes, widen it to the flat
+    /// tag set (dropping the structural refinements; the bounded literal sets are kept).
+    /// Sound — widening over-approximates, never manufacturing a false positive — and it
+    /// bounds every `Ty` to a fixed size so `union`/`==`/`Hash`/`is_subtype` stay linear.
+    fn bounded(self) -> Ty {
+        // fast path: no structural refinement means nothing to measure or drop.
+        if self.elem.is_none()
+            && self.map_kv.is_none()
+            && self.fields.is_none()
+            && self.tuple.is_none()
+        {
+            return self;
+        }
+        if self.node_count(MAX_TY_NODES + 1) > MAX_TY_NODES {
+            Ty {
+                arrow: None,
+                overload: None,
+                elem: None,
+                map_kv: None,
+                fields: None,
+                tuple: None,
+                ..self
+            }
+        } else {
+            self
+        }
+    }
+
     pub fn union(self, other: Ty) -> Ty {
         let tags = self.tags | other.tags;
         let arrow = merge_union(
@@ -605,6 +688,10 @@ impl Ty {
             lit_bool,
             lit_str,
         }
+        // Bound the result's size so a fixpoint that unions nested branch results (a
+        // recursive value-builder) can't grow the type without limit — every subsequent
+        // `union`/`is_subtype`/`==` input then stays within the cap (KI-13).
+        .bounded()
     }
 
     /// `self ∩ other` — values in both. When the relevant bit survives and one
@@ -691,6 +778,7 @@ impl Ty {
             lit_bool,
             lit_str,
         }
+        .bounded()
     }
 
     /// `¬self` — every value *not* in `self`, as a **sound over-approximation**:
