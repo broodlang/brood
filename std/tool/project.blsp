@@ -701,11 +701,31 @@ resolve in the advisory checker. Returns the project root."
 ;; by filename, which is fine for advisory GNU `FILE:LINE:COL` diagnostics. Honors
 ;; the `BROOD_NO_CHECK=1` opt-out — the same flag the `brood` CLI respects, so
 ;; callers' "exit non-zero on warning" gating gets 0 (no print) under it.
+;; A warning the checker reports but that does NOT gate the build (`nest check`'s
+;; exit code). Currently only the non-tail-recursion lint: since deep recursion
+;; became a catchable `MAX_BC_FRAMES` error rather than a silent stack overflow,
+;; that lint is an advisory perf/robustness hint — and it fires on correct code
+;; (inherently-tree recursion like merge-sort or a window tree, and bounded
+;; compile-time macro helpers, none of which can overflow). So it stays visible
+;; but must never fail CI. Classified by message text for now, pending structured
+;; warning severities (a fuller fix — see the roadmap).
+(defn project--advisory-warning? (w)
+  (includes? w "recursive call in non-tail position"))
+
+;; Print warning `w` and return the running gate count `n`, incremented only when
+;; `w` gates the build. An advisory warning prints with an `(advisory)` marker and
+;; leaves the count untouched — visible in the output, never a CI failure. Both
+;; the fresh and the cached check paths tally through this.
+(defn project--tally-warning (n w)
+  (if (project--advisory-warning? w)
+    (do (eprintln (str w "  (advisory — not gating)")) n)
+    (do (eprintln w) (+ n 1))))
+
 ;; The `:check` op (runs in a worker): check every file in `chunk`, PRINT each
-;; file's warnings, return the count. A global (not a shipped closure) so the
-;; worker resolves it through the global table — see `project--pfold-run`.
+;; file's warnings, return the GATING count. A global (not a shipped closure) so
+;; the worker resolves it through the global table — see `project--pfold-run`.
 (defn project--check-chunk (chunk)
-  (fold (fn (k f) (fold (fn (j w) (eprintln w) (+ j 1)) k (check-file f))) 0 chunk))
+  (fold (fn (k f) (fold project--tally-warning k (check-file f))) 0 chunk))
 
 ;; The from-scratch parallel path: fan `check-file` (print-in-worker) across the
 ;; pool. Used when the cache is off, absent, or the project is over the file cap.
@@ -755,7 +775,7 @@ resolve in the advisory checker. Returns the project root."
                 (project--pcheck-deps recheck))
         entries (fold (fn (m kv) (let ([p e] kv) (map-assoc m p e))) reuse fresh)
         ;; print every file's warnings (reused + fresh) and count them
-        n (fold (fn (n kv) (let ([_ e] kv) (fold (fn (k w) (eprintln w) (+ k 1)) n (nth e 1))))
+        n (fold (fn (n kv) (let ([_ e] kv) (fold project--tally-warning n (nth e 1))))
             0
             entries))
     (when (not (empty? recheck))
