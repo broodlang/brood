@@ -10549,3 +10549,82 @@ ADR-006 (all of `ability` is Brood; zero new Rust primitives),
 [`protocol-dispatch-design.md`](protocol-dispatch-design.md) (the full design
 record: the measurements, the language survey, and the space explored),
 [`roadmap-for-v1.md`](roadmap-for-v1.md) §3 (the pre-freeze question this closes).
+
+## ADR-169 — The reader reserves `#…` dispatch forms and digit-led non-number tokens
+
+**Context.** The reader is the one surface where staying silent is a *permanent*
+commitment. Two token spaces were being spent by accident:
+
+- **`#…`.** `#` was an ordinary atom character that fell through to `read_atom`, so
+  any unrecognised `#…` interned as a **symbol** — `#foo` was a legal name, and
+  `#|a comment|#` (a Scheme/CL block comment) read as the bar-quoted symbol
+  `|#\|a comment\|#|`. Only `#{…}` (set) and `#b"…"` (bytes) were real forms.
+- **Digit-led tokens.** The atom classifier only rejected tokens made *entirely* of
+  number characters (`1e`, `1.2.3`), so anything with a stray letter or punctuation
+  leaked through to a symbol — `0x1F`, `1/2`, `1_000`, `1N`, `1+`, `12-34` all
+  became identifiers, surfacing far away as "unbound symbol" instead of at the typo.
+
+Both are the same latent hazard: any `#` literal or numeric syntax Brood might add
+after 1.0 would be **taking a token that had been a valid name** — a breaking change.
+[`roadmap-for-v1.md`](roadmap-for-v1.md) §2 named the one concrete instance (`1/2`,
+which has to be rejected now if a ratio type is ever wanted) and asked for the whole
+space to be settled before the freeze. This ADR is that settlement.
+
+**Decision.** State the rule on the token's *first character* instead of all of them,
+and reject the whole space rather than the enumerated cases:
+
+1. **`#` is a dispatch character, not an atom character.** `#{…}` and `#b"…"` are the
+   only two `#` forms. Every other `#…` — including a bare trailing `#` on its own and
+   `#|…|#` — is a **reader error**, never a symbol. (A trailing `#` *inside* a token,
+   `x#`, is untouched — that is quasiquote auto-gensym, and it is load-bearing.)
+2. **A token that leads with a digit — or a sign/dot immediately followed by a digit —
+   must be a number.** If it is not one Brood has, it is a reader error, never a
+   symbol. Names with a sign or dot but *no digit behind it* (`+`, `-`, `...`,
+   `.foo`, `foo.`, `--5`) are not digit-led and stay symbols.
+
+Every rejection carries a teaching hint (the LLM-native error style,
+[`llm-native.md`](llm-native.md)): the Scheme/CL/Clojure form it *looks* like, named
+alongside the Brood idiom — `#|…|#` → `;`/`(comment …)`, `1/2` → `(/ 1 2)` or a
+`0.5M` decimal, `0x1F` → `(string->number "1F" 16)`, `1_000` → `1000`, `1N` → plain
+`1` (integers already widen to bignum). The hint for a reserved-numeric token lives in
+`syntax/atom.rs` (`reserved_numeric_hint`) so the reader and the tooling CST explain it
+identically (the ADR-025 one-definition rule), and `AtomKind::ReservedNumeric` maps to
+`NodeKind::Error` so the LSP flags it like a malformed literal rather than offering to
+rename it.
+
+**Why this is a freeze item, and why rejecting the whole space costs nothing.** The
+asymmetry is the same one ADR-166 turned on: *relaxing* a reservation later is
+backward-compatible; *adding* one is not. So a language freeze has to decide the
+reservations first — "later" is exactly what a freeze gives up. And the price is nil,
+because none of these tokens is a real name today: `inc`/`dec` are the Brood spelling
+of `1+`/`1-`, no in-tree or sibling program names anything `#foo` or `0x1F`, and
+Clojure rejects the same tokens. What is bought is that every future numeric syntax
+(ratios, radix literals, digit separators, a bigint suffix to pair with `1M`) and
+every future `#` literal stays **purely additive** after 1.0, and diagnostics land at
+the mistake instead of a distant unbound-symbol.
+
+**On ratios specifically (the §2 open question).** Deciding to *reserve* `1/2` is not
+deciding to *add* ratios — it keeps the option open at zero cost. The freeze list
+records ratios as a documented **"not in 1.0"**: `(/ 1 2)` yields a float and `0.5M`
+an exact decimal, and `/` is also the namespace separator (the two never collide — a
+digit-led token is a number, `mod/name` is not). Reserving the token means a post-1.0
+ratio type would be additive rather than breaking.
+
+**Consequences.**
+- The printer needed no change. `printer::symbol_needs_bars` already asks
+  `atom::classify`, so the moment `1+`/`0x1F` stopped classifying as `Symbol` the
+  printer began bar-quoting them — `(symbol "1+")` still round-trips, now as `|1+|`.
+  Another dividend of the one-definition rule.
+- Deliberately unaffected: `1M`/`1.0M` decimals, `.5`, `5.`, `1e10`, and the three
+  reader-literal floats `inf`/`nan`/`-inf` (already irreversible — ADR-062-era; those
+  bare tokens can never be names).
+- Closes the last open pre-freeze **language-surface** decision. The remaining v1
+  paperwork is ratifying the freeze list itself as its own ADR.
+
+**References.** [`roadmap-for-v1.md`](roadmap-for-v1.md) §2 (the pre-freeze question
+this closes), ADR-166 (reserved names — the same relax-is-safe/add-is-breaking
+asymmetry, applied to bindings instead of reader syntax), ADR-025 (the CST/reader
+one-definition rule the shared hint honours), ADR-011 (defer power features — ratios
+stay reservable, not shipped), [`llm-native.md`](llm-native.md) (the teaching-hint
+convention). Tests: `tests/reader_hints_test.blsp`, `tests/reader_malformed_test.blsp`,
+`tests/malformed_test.blsp`.

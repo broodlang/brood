@@ -9,12 +9,14 @@ Written 2026-07-26, at the end of the syntax review that produced ADR-155…163.
 
 ---
 
-> **Status, 2026-07-26:** item 1 is **done** (ADR-165), and a fourth item was added
-> and done the same day — **reserved names** (ADR-166), which belongs in this file
-> precisely because of the test below: *relaxing* a restriction later is
-> backward-compatible, *adding* one is not, so a language freeze has to decide it
-> first. Items 2 and 3 — the two remaining irreversible decisions — are all that
-> stands between here and the freeze.
+> **Status, 2026-07-27:** all four pre-freeze **language-surface** items are done —
+> callable keywords (ADR-165), the reader's permanent reservations (ADR-169), the
+> record dispatch axis (ADR-168), and reserved names (ADR-166). Each belongs in this
+> file for the same reason: *relaxing* a restriction later is backward-compatible,
+> *adding* one is not, so a language freeze has to decide it first. **The language
+> surface is now freeze-ready;** what remains is writing, not code — ratifying the
+> freeze list below as its own ADR — plus the non-language release blockers at the
+> bottom.
 
 ## The test
 
@@ -35,9 +37,10 @@ An item fails the test for one of two reasons, and they are different:
    it reads dated, so adoption becomes a churn wave the moment you have promised
    stability. (Callable keywords.)
 
-By this test, **three** items qualified. Everything else waits. Two are now
-done — callable keywords (ADR-165) and the record dispatch axis (ADR-168) — leaving
-**§2, the reader's permanent reservations**, as the one open pre-freeze decision.
+By this test, **three** items qualified — plus reserved names (§4), added later by the
+same logic. All are now done: callable keywords (ADR-165), the reader's permanent
+reservations (ADR-169), the record dispatch axis (ADR-168), and reserved names
+(ADR-166). Everything else waits.
 
 ---
 
@@ -119,22 +122,33 @@ risk of a regression.
 
 **Open questions for the ADR** — see the discussion notes at the bottom of this file.
 
-## 2. Settle what the reader permanently reserves
-
-⬜ **Status: a decision, then a paragraph.** **[kernel]**
+## 2. Settle what the reader permanently reserves — ✅ done (ADR-169)
 
 Reader syntax is the least forgiving surface to change after 1.0. Most current
-absences are safely additive — `#|…|#`, `#_`, `#"…"`, `#'`, `\c` all *error* today
-(each with a hint), so adding any of them later breaks nothing.
+absences were *already* safely additive — `#_`, `#"…"`, `#'`, `\c` all *error* today
+(each with a hint), so adding any of them later breaks nothing. What was **not**
+settled were the tokens that read as *symbols*: `1/2`, `0x1F`, `1_000`, `1N`, `1+`,
+and `#foo`/`#|…|#`. Each one, left as a name, would make the corresponding future
+literal a *breaking* change to add.
 
-Exactly one is not additive:
+**Settled by ADR-169: reject the whole space, stated on the token's first character.**
 
-- **`1/2` reads as a symbol today.** If a ratio type is ever wanted, that token has
-  to be **rejected now** to reserve it. If it is never wanted, say so in writing —
-  and note that `/` is the namespace separator, so the token is doubly spoken for.
+- **`#` is a dispatch character, not an atom character.** `#{…}` (set) and `#b"…"`
+  (bytes) are the only `#` forms; every other `#…` — including `#|…|#`, the Scheme/CL
+  block comment — is a reader error with a hint. (A trailing `#` inside a token, `x#`,
+  stays quasiquote auto-gensym.)
+- **A digit-led token must be a number.** A token leading with a digit, or a sign/dot
+  then a digit, that is not a number Brood has (`1/2`, `0x1F`, `1_000`, `1N`, `1+`,
+  `12-34`) is a reader error, not a symbol. Names with a sign/dot but no digit behind
+  (`+`, `-`, `...`, `.foo`, `--5`) are untouched.
 
-Also worth writing down as permanent, since they are already irreversible:
-`inf`/`nan`/`-inf` are reader float literals (so those three tokens can never be
+**Ratios: a documented "not in 1.0", token reserved.** `(/ 1 2)` gives a float, `0.5M`
+an exact decimal, and `/` is the namespace separator — so `1/2` is doubly spoken for.
+Reserving the token (rather than shipping the type) keeps a post-1.0 ratio type
+additive at zero cost. Recorded in the freeze list below.
+
+Also now permanent, and written down because they were already irreversible:
+`inf`/`nan`/`-inf` are reader float literals (those three bare tokens can never be
 names), `|…|` bar-quoting owns the round-trip of odd symbols, and `#{…}` / `#b"…"`
 are the only two `#` literals.
 
@@ -196,7 +210,9 @@ Draft, to be ratified as its own ADR before release:
 | Named arguments (`&key`) | A trailing options map + `{:keys …}` reads the same and composes with `merge` | ADR-163 |
 | Metadata (`^{}`), reader macros, `#(…)`, `#_` | Permanent surface for what a macro already does; `^` is the pattern pin | ADR-150 |
 | A character type | A character is a 1-char string; the cursor unit is a grapheme cluster | ADR-159 |
-| Ratios | *(decide — see item 2)* | — |
+| Ratios | `(/ 1 2)` is a float, `0.5M` an exact decimal, and `/` is the namespace separator; the `1/2` token is *reserved* (rejected by the reader) so a post-1.0 ratio type stays additive | ADR-169 |
+| Digit-led tokens as names (`0x1F`, `1_000`, `1N`, `1+`) | A digit-led token must be a number; reserving the shapes keeps radix literals / digit separators / a bigint suffix additive after 1.0 | ADR-169 |
+| `#…` beyond `#{…}` / `#b"…"` (incl. `#|…|#` block comments) | `#` is a dispatch character; reserving the space keeps every future `#` literal additive | ADR-169, ADR-150 |
 | `contains?` answering by index on a vector | Clojure's trap: `(contains? [1 2] 1)` true for the wrong reason | ADR-156 |
 | Strings as seqable | Codepoint vs grapheme is the caller's decision; bridge explicitly | ADR-156, ADR-159 |
 | Unbounded laziness / `lazy-seq` | Seq-views fuse pipelines; processes cover unbounded state | deferred.md #2 |
