@@ -9327,6 +9327,44 @@ sample was 208 ms) — this run measures the row directly, so the footnote is go
 is 20.2 MB: 3rd rather than 2nd, having drifted ~1 MB past Ruby's 19.2 MB, still the
 lightest of the compiled-class runtimes.
 
+## 2026-07-27 — reader reservations (ADR-169): the last pre-freeze language decision
+
+Closed `roadmap-for-v1.md` §2 — the reader's permanent reservations, the one open
+pre-freeze **language-surface** decision. The reader stopped spending two token spaces
+by accident, stated as one rule on a token's *first* character:
+
+- **`#` is a dispatch character, not an atom character.** `#{…}` (set) and `#b"…"`
+  (bytes) are the only `#` forms; every other `#…` — `#foo`, a bare trailing `#`, and
+  `#|…|#` (a Scheme/CL block comment, which had read as the bar-quoted symbol
+  `|#\|…\|#|`) — is a reader error with a teaching hint. A trailing `#` *inside* a token
+  (`x#`) stays quasiquote auto-gensym.
+- **A digit-led token must be a number.** A token leading with a digit, or a sign/dot
+  then a digit, that isn't a number Brood has (`1/2`, `0x1F`, `1_000`, `1N`, `1+`,
+  `12-34`) is a reader error — it used to intern as a symbol and resurface far away as
+  "unbound symbol". New `AtomKind::ReservedNumeric` + `digit_led`, with a shape-specific
+  hint (`reserved_numeric_hint`) shared by the reader and the tooling CST, and the kind
+  maps to `NodeKind::Error` so the LSP flags it like a malformed literal. Names with a
+  sign/dot but no digit behind (`+`, `-`, `...`, `.foo`, `--5`) are untouched.
+
+The point is the freeze asymmetry (same as ADR-166): *relaxing* a reservation later is
+backward-compatible, *adding* one is not — so a freeze has to reserve first. The cost is
+nil (no real program names anything `#foo`/`0x1F`; `inc`/`dec` are the Brood spelling of
+`1+`/`1-`; Clojure rejects the same tokens), and it keeps every future numeric syntax
+(ratios, radix literals, digit separators, a bigint suffix) and every future `#` literal
+purely additive. Ratios are now a documented "not in 1.0" with the `1/2` token reserved,
+so a later ratio type is additive rather than breaking. The printer needed no change —
+`symbol_needs_bars` asks `atom::classify`, so `(symbol "1+")` began bar-quoting to `|1+|`
+on its own (the ADR-025 one-definition rule).
+
+Docs: ADR-169; `roadmap-for-v1.md` §2 marked done + three freeze-list rows; `language.md`
+data-type table (Symbol row rewritten, `#|…|#` and digit-led rows added); the ROADMAP
+`#|` item closed. Tests (committed with the code, `e83affe`): `reader_hints_test.blsp`,
+`reader_malformed_test.blsp`, `malformed_test.blsp` — 20/20/72 green, build clean. **All
+four pre-freeze language-surface items (ADR-165/166/168/169) are now done; the surface is
+freeze-ready** — what remains is ratifying the freeze list as its own ADR, plus the
+non-language release blockers (`nest format --check`, the registry-test signing-agent
+coupling).
+
 ## 2026-07-27 (later) — the KI-14 guard cost, recovered: it was the second compare
 
 Follow-up to this morning's entry, which named `stamp_stack_limit`'s per-fast-link
