@@ -2,7 +2,7 @@
 
 KI-9 is a one-off arity sighting judged a transient inconsistent-build artifact, not
 present in committed code; KI-10 no longer reproduces, incidentally fixed — both kept as
-records, not open bugs. **Open: KI-13 (type checker).**
+records, not open bugs. **No open KIs.**
 This file is the condensed record — what each was, how it was fixed, and the regression
 test that guards it — so a recurrence is recognizable. For the narrative discovery
 writeup of the scheduler race, see
@@ -177,24 +177,31 @@ both distinct from the hang (each aborts rather than hangs, and neither is the r
 found alive 2h22m after its run (`/tmp/brood-observe-<pid>/target.blsp`, ~2.7% CPU).
 Independent of this bug, but a long session accumulates stray processes.
 
-## KI-13 — cross-module return-type inference blows up exponentially in branch count · **PARTIALLY FIXED 2026-07-27, still OPEN**
+## KI-13 — cross-module return-type inference blows up exponentially in branch count · **FIXED 2026-07-27**
 
-**Partial fix (2026-07-27).** The doc's suggested direction — cap the SIZE of an inferred
-type and widen past it — is now implemented: `Ty::bounded` widens any `Ty` whose refinement
-tree exceeds `MAX_TY_NODES` (64) to its flat tag set, applied at `union`, `intersect`, and
-every structural constructor (`seq_of`/`map_of`/`record_of`/`tuple_of`). Widening is a
-sound over-approximation, so it can only lose precision, never manufacture a warning; all
-254 checker tests still pass. This bounds `==`/`Hash`/`is_subtype` (recursive over a shared
-`Arc` refinement DAG, walked as a tree) to a constant and **fixes the moderate case**: the
-4-branch `deriv` went 25 s → 0.3 s.
+**Fixed — it had TWO independent causes, both now addressed.**
 
-**Still open — a SECOND, independent cause.** The full 5-branch `deriv` still doesn't
-finish: with the size cap in place it is now dominated by exponential **call count**, not
-type size — `expr_ty` climbs past ~1.5M calls and keeps going. So the type walk itself is
-re-entered exponentially (the extra `*`/`/` branches add a `(map (fn (b) … (d b) …) …)`
-lambda-in-map, the likely multiplier). Capping size was necessary but not sufficient; the
-re-walk needs its own bound/memoization. The `(sig deriv (any -> any))` workaround still
-short-circuits it. Original report:
+*Cause 1 — type size.* Inferring an undeclared recursive value-builder's return unions
+branch results into a `Ty` with a deep, `Arc`-shared refinement DAG; `==`/`Hash`/
+`is_subtype` (recursive, no sharing dedup) walk it as a tree → superlinear per op.
+`Ty::bounded` now widens any `Ty` whose refinement tree exceeds `MAX_TY_NODES` (64) to its
+flat tag set — a sound over-approximation — applied at `union`, `intersect`, and every
+structural constructor (`seq_of`/`map_of`/`record_of`/`tuple_of`), so no `Ty` ever gets
+large. Fixed the moderate case (4-branch `deriv`: 25 s → 0.3 s). Regression:
+`inferred_type_size_is_bounded_ki13`.
+
+*Cause 2 — walk count.* With size bounded, the full 5-branch `deriv` was still dominated by
+exponential **re-inference**: `sig_of`/`infer_sig` had no result cache, so a callee's body
+was re-walked on every request (~400k walks), and because the cycle guard is slipped by a
+self-call stored as a bare name vs the qualified name a caller resolved, the re-walks
+compounded. `infer_sig` now **memoizes** completed inferences per check pass (`SIG_MEMO`,
+cleared per `check_file`), capping it at one walk per distinct name. Full 5-branch `deriv`:
+>900 s → 1.1 s.
+
+Both are sound (widening / a deterministic memo for a read-only pass): 255 checker tests
+plus the full app ecosystem (hatch 750, brood-chat 102, hatch-demo 89, …) unchanged. The
+`(sig deriv (any -> any))` in the corpus is no longer load-bearing (kept as API hygiene).
+Original report:
 
 
 **Symptom.** `nest check` never finishes. No diagnostic, no progress output, one core

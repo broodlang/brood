@@ -307,6 +307,19 @@ thread_local! {
     /// is sound and conservative. Per-thread, so it stays correct under the
     /// parallel `nest check` worker pool (each worker has its own set).
     static INFERRING: RefCell<HashSet<Symbol>> = RefCell::new(HashSet::new());
+
+    /// Completed signature inferences for this check pass, keyed by symbol — the memo
+    /// behind [`infer_sig`]. Per-thread (sound under the parallel checker), and cleared
+    /// per file by [`clear_sig_memo`]. Stores the final `Option<Sig>` (including a
+    /// deliberate `None` for "inferred nothing"), never an in-progress cycle result.
+    static SIG_MEMO: RefCell<HashMap<Symbol, Option<Sig>>> = RefCell::new(HashMap::new());
+}
+
+/// Reset the per-pass inference memo. `check_file` calls this at the start of each file so
+/// one file's inferred signatures never leak into the next — and, in the long-lived LSP,
+/// so an edit re-infers rather than serving a stale cached sig.
+pub(super) fn clear_sig_memo() {
+    SIG_MEMO.with(|m| m.borrow_mut().clear());
 }
 
 /// Max cross-function depth for return-type inference. Tier-2 inference recurses
@@ -365,9 +378,29 @@ impl Drop for InferGuard {
 /// single signature / arity to state cleanly). Recursion — direct or mutual — is
 /// broken by [`InferGuard`], so a cyclic call graph just declines to infer.
 fn infer_sig(heap: &Heap, sym: Symbol) -> Option<Sig> {
-    // Break inference cycles (direct/mutual recursion reached via `expr_ty`).
-    let _guard = InferGuard::enter(sym)?;
+    // Memoize completed inferences: a function's inferred signature is deterministic for
+    // the read-only heap of a single check pass, so cache it. Without the cache every
+    // re-request re-walks the whole body — and when the cycle guard is *slipped* (a self-
+    // call stored as a bare name vs the qualified name the caller resolved), those re-walks
+    // compound into an exponential that hangs `nest check`/the LSP (KI-13, the `deriv`
+    // benchmark: ~400k body walks). The memo caps it at one walk per distinct name. It is
+    // cleared per `check_file` (see [`clear_sig_memo`]) so a later edit re-infers.
+    if let Some(cached) = SIG_MEMO.with(|m| m.borrow().get(&sym).cloned()) {
+        return cached;
+    }
+    // Break inference cycles (direct/mutual recursion via `expr_ty`). A re-entry *while*
+    // `sym` is being inferred yields `None` and is deliberately NOT cached — the in-
+    // progress result isn't final, and a sibling call after this one finishes must get the
+    // real inferred sig, not the cycle's `None`.
+    let Some(_guard) = InferGuard::enter(sym) else {
+        return None;
+    };
+    let result = infer_sig_inner(heap, sym);
+    SIG_MEMO.with(|m| m.borrow_mut().insert(sym, result.clone()));
+    result
+}
 
+fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
     let Value::Fn(cid) = super::deps::obs_global(heap, sym)? else {
         return None;
     };
