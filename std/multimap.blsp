@@ -60,10 +60,14 @@ If no values remain under `k`, the key is dropped."
           (assoc mm k new-vs))))))
 
 (defn multimap--remove-first (lst v)
-  (cond
-    (nil? lst) nil
-    (= (first lst) v) (rest lst)
-    else (cons (first lst) (multimap--remove-first (rest lst) v))))
+  ;; Tail-recursive: accumulate the (reversed) skipped prefix and splice once at
+  ;; the match, so removing from a long value list can't overflow the stack.
+  (letrec (go (fn (acc xs)
+                (cond
+                  (nil? xs) (reverse acc)
+                  (= (first xs) v) (append (reverse acc) (rest xs))
+                  else (go (cons (first xs) acc) (rest xs)))))
+    (go nil lst)))
 
 (defn multimap-keys (mm)
   "All keys in the multimap (insertion order)."

@@ -380,10 +380,14 @@ docs/testing.md for the full guide.")
 ;; Insertion sort of (name . ms) pairs, slowest first. O(n²), but there are only
 ;; ever a handful of tests, so simplicity wins.
 (defn insert-by-ms (x sorted)
-  (cond
-    (empty? sorted) (list x)
-    (>= (rest x) (rest (first sorted))) (cons x sorted)
-    else (cons (first sorted) (insert-by-ms x (rest sorted)))))
+  ;; Tail-recursive: accumulate the (reversed) smaller-ms prefix and splice `x`
+  ;; once, so ordering a large suite by duration can't overflow the stack.
+  (letrec (go (fn (acc xs)
+                (cond
+                  (empty? xs) (append (reverse acc) (list x))
+                  (>= (rest x) (rest (first xs))) (append (reverse acc) (cons x xs))
+                  else (go (cons (first xs) acc) (rest xs)))))
+    (go nil sorted)))
 (defn sort-by-ms (xs) (fold (fn (acc x) (insert-by-ms x acc)) nil xs))
 
 ;; A "N.N MB" formatter for the memory line (`quot` is the prelude's).
