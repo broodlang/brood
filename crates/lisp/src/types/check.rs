@@ -480,6 +480,9 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     // checker's allocations are bounded (one file) and reclaimed at the next real
     // safepoint after it returns. See ADR-054 / `docs/memory-review.md`.
     let _gc_block = crate::process::GcBlockGuard::enter();
+    // Fresh per-pass signature-inference memo: this file's inferred sigs must not leak
+    // into another file, nor (in the long-lived LSP) survive a source edit (KI-13).
+    sigs::clear_sig_memo();
     // Pass 1: macroexpand each form (recording the expanded shape we'll also
     // walk in pass 2). A macroexpand failure isn't this pass's job to report,
     // so we fall back to the un-expanded form silently.
