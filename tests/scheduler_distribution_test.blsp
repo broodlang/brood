@@ -69,7 +69,7 @@
   (test "spawn/exit accounting balances over a fan-out"
     ;; Every spawned process must also be accounted as exited once the fan drains —
     ;; a leak here is how a registry or lifecycle bug shows up first.
-    (let (me (self) s0 (get (sched-stats) :spawned) e0 (get (sched-stats) :exited))
+    (let (me (self) s0 (get (sched-stats) :spawned))
       (fan me 0)
       (drain 0)
       (let (spawned (- (get (sched-stats) :spawned) s0))
