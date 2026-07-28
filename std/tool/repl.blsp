@@ -367,31 +367,22 @@ lets an error escape the loop."
 ;; kernel contributes only the signal seam it must (`%install-interrupt-handler` /
 ;; `%interrupt-taken?`, ADR-006: signals are mechanism), and everything else is here.
 ;;
-;; ⚠ BLOCKED, and OFF by default — set `BROOD_REPL_INTERRUPT=1` to exercise it.
-;;
-;; A green process running inside a nested `eval` / `eval-string` does NOT honour the
-;; hard kill. Measured 2026-07-28, three children spinning on the same tail-recursive
-;; `spin`, each sent `(exit pid :kill)`:
-;;
-;;     direct call            → DIED reason=:kill
-;;     via eval-string        → SURVIVED
-;;     via (eval (read-first …)) → SURVIVED
-;;
-;; The preemption that honours a pending kill isn't reached from the nested-eval path,
-;; and a REPL has no choice but to go through it. So the machinery below is correct and
-;; the kill is simply never honoured: the first Ctrl-C would issue a kill that does
-;; nothing and the second would halt — two keypresses to get today's one-keypress
-;; outcome. That's a regression, hence off by default rather than shipped half-working.
-;;
-;; This is a kernel bug wider than the REPL: *any* spawned process evaluating code is
-;; currently unkillable, which reaches supervisors and `gen` servers too. The fix is a
-;; pending-kill check on the nested-eval safepoint (the scheduler already has the check
-;; — `park_on_receive` in `process/scheduler/pool.rs` — it just isn't consulted here).
-;; Flip the default once that lands; nothing else here needs to change.
-;;
-;; Why the rest needs no evaluator changes: the parent parks in `receive`, so the
+;; Why this needs no evaluator changes *here*: the parent parks in `receive`, so the
 ;; scheduler is free to run the child, and the *scheduler* is what enforces the kill.
-;; Nothing has to poll a flag inside `eval`.
+;; Nothing has to poll a flag inside `eval`. (It did need one kernel fix to work at
+;; all: a process spinning inside a nested `eval`/`eval-string` never honoured the
+;; hard kill, because the non-capturing eval paths' reduction tick was pure
+;; accounting — `tick_reporting_hard_kill` in `process/scheduler.rs` closed that,
+;; measured at ~4ms kill latency even on a JIT'd loop. The same fix is what makes
+;; supervisors able to kill a stuck code-evaluating child, so it stands on its own.)
+;;
+;; Off-switch: `(def *repl-interruptible* false)` in `.broodrc.blsp` reverts to the
+;; inline eval path with the default SIGINT disposition (Ctrl-C kills the runtime, as
+;; before) — the rc runs before the handler would be installed, so the `and` in
+;; `repl-run` short-circuits. A redefinable global, not an env knob, like every other
+;; REPL policy here. (Setting it false *at the prompt* also reroutes to inline eval,
+;; but the handler is already installed by then, so Ctrl-C during a long eval becomes
+;; inert rather than fatal — prefer the rc.)
 ;;
 ;; Three details that matter:
 ;;  - The child does its own printing and its own `*1`/`*e` bookkeeping. `def` reaches
@@ -405,7 +396,13 @@ lets an error escape the loop."
 ;;    trap the user at an unresponsive prompt, the second interrupt restores the old
 ;;    behaviour and exits 130. Escalation, not a dead end.
 
-(defdyn *repl-interruptible* false)
+;; The user-facing knob AND the armed state, one global. It defaults true ("arm if you
+;; can"); `repl-run` then resolves it to the real armed state by AND-ing in the things
+;; the user can't control — an interactive session, a platform with signals — AFTER the
+;; rc files load, so `(def *repl-interruptible* false)` in `.broodrc.blsp` sticks (the
+;; `and` short-circuits and the handler is never installed). By the first prompt it is
+;; always a plain boolean: armed or not.
+(defdyn *repl-interruptible* true)
 
 ;; How long the parent parks between interrupt polls. Short enough that Ctrl-C feels
 ;; instant, long enough to cost nothing: the parent is parked in `receive`, so this is
@@ -615,12 +612,14 @@ Loads the startup files first (`$BROOD_RC` or `~/.broodrc.blsp`, then a project-
 `./.broodrc.blsp`); a failure in one is reported and skipped, never fatal."
   (let (interactive (and (stdin-tty?) (stdout-tty?))
         _rc (repl--load-rc)
-        ;; Arm Ctrl-C only for an interactive session that asked for it — see the
-        ;; interruptible-eval notes above for why it's opt-in (the kill doesn't land
-        ;; through `eval` yet) and why a pipeline must keep the default SIGINT. `def`
-        ;; (not `binding`) because the flag has to reach the spawned loop process.
-        _armed (when (and interactive (= (getenv "BROOD_REPL_INTERRUPT") "1"))
-                 (def *repl-interruptible* (%install-interrupt-handler)))
+        ;; Resolve `*repl-interruptible*` to the real armed state: the user's knob (the
+        ;; rc has already run, so an opt-out short-circuits before the handler is ever
+        ;; installed) AND an interactive session (a pipeline must keep the default
+        ;; SIGINT — Ctrl-C on `echo … | brood` should kill it like any Unix program)
+        ;; AND the platform actually installing a handler. `def` (not `binding`)
+        ;; because the flag has to reach the spawned loop process.
+        _armed (def *repl-interruptible*
+                 (and *repl-interruptible* interactive (%install-interrupt-handler)))
         history (if interactive (repl--load-history) '()))
     (when (stdout-tty?) (eprint (str *repl-banner* "\n")))
     (repl--await (spawn (repl--loop interactive history)))
