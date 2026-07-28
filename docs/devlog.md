@@ -10057,3 +10057,24 @@ around that call, or a counter on the fast-link outcome path — instrumentation
 reading. Left there deliberately: the last two cliffs on this row cost a day and bought nothing,
 so the next attempt should confirm the payoff (does the arm run native afterwards, and does the
 row move?) before the fix is written.
+
+## 2026-07-28 (impl) — process-native tracing debugger (std/tool/debug, ADR-174)
+
+Built the actor-model answer to Elixir's `dbg` on the `spy` sink (ADR-173). The debugger
+is a *process*, which dissolves `dbg`/`pry`'s two limits: `break` parks a process with NO
+timeout (send snapshot → block on receive), and many processes hitting the same break each
+park independently and fan into an inspectable queue — no single-session bottleneck.
+
+Causal spans propagate TRANSPARENTLY across `spawn`: the debugger endpoint + current span
+live in one dynamic, `*trace-context*`, and the kernel seeds a child's dynamics from it at
+spawn (lifecycle.rs, reusing promote + push_dynamic → GC-safe; `#[cfg(dev-tools)]`-gated so
+a lean release compiles it out entirely). So a plain `(spawn (fn () (break …)))` inherits
+the debugger and parks with no re-wiring, and the debugger rebuilds a cross-process causal
+tree. Traces are data: value-distribution / outliers debug the *population*; debug-report /
+debug-watch (live) / debug-attach (interactive, key-driven resume) render it. New Heap
+method `current_dynamic`. tests/debug_test.blsp: 10 cross-process tests; verified under
+BROOD_GC_STRESS across concurrency/proc/scheduler/proctree/jit-shared-spawn.
+
+Deferred (ADR-174, ADR-011): send-level causality — following a value through a *message*.
+Perf-safe (cfg-gated Envelope, matcher untouched) but needs a GC-traced Value slot on the
+Heap across ~8 collector sites, so it lands as its own GC-stress-gated pass, not bundled.
