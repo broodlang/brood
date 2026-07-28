@@ -11357,3 +11357,72 @@ concentrates in Stage 1, which rewrites how every call site addresses its cache 
 extra indirection is on the IC hot path, so `make ab` gates it, not intuition. If Stage 1
 costs more than a few percent, Stage 2's memory win has to justify it explicitly rather
 than be assumed.
+
+## ADR-176 — Hard `:kill` honoured on the non-capturing eval paths; REPL Ctrl-C interrupts the eval, not the image
+
+**Status:** accepted (2026-07-28). Kernel: every eval path now honours a pending hard
+kill at its reduction rollover. REPL: Ctrl-C kills the running evaluation and returns
+to the prompt; the image survives.
+
+**Context.** `(exit pid :kill)` promises death "at the next reduction tick", and the
+top-level VM body driver delivers it (`tick_capture` + `capture_hard_kill_pending` →
+`VmOutcome::Killed`). But that check lived only on the *capturing* path. The other
+three execution routes — the tree-walker's `'tail:` loop, its `'dispatch` passthrough
+redirect, and a nested VM run behind a native frame (`eval`, `try`, an HOF) — ticked
+through plain `tick()`, which is pure accounting: on rollover, refresh the budget and
+keep going. Nothing on those paths ever read the kill flag, so **a process evaluating
+code via `eval`/`eval-string` was unkillable**: a spinning child died from a direct
+call and survived the identical loop under `eval-string`, forever. Nobody had noticed
+because nothing killed eval-ing processes until the REPL tried to (Ctrl-C evaluates
+everything through `eval-string`) — but the hole reached every supervisor and `gen`
+server facing a stuck code-evaluating child.
+
+**Decision.** One shared safepoint primitive, `tick_reporting_hard_kill()`
+(`process/scheduler.rs`): exactly `tick()`, except on the rollover — after `preempt()`
+refreshes the quantum — it also reports a pending hard kill. Five call sites adopt it:
+the tree-walker loop top, `passthrough_redirect_ok`, both `exec_chunk` self-tail
+safepoints' non-capture branches, and `vm_run_bc`'s non-capture frame boundary. A
+non-capturing path can't *return* an outcome across its native frames, but a kill only
+needs to **unwind**: on `true` the site raises `LispError::kill_signal()` — the
+pre-existing untrappable control signal from the native-nested-`receive` kill path —
+which `%try`/cleanup natives re-raise and the body driver converts to death with the
+mailbox's pending reason (`handle_capture_outcome` gains the conversion for the
+tree-walked-body shape, so no route leaks it as a crash).
+
+Two details are the actual lesson:
+
+- **The passthrough redirect is a load-bearing safepoint.** In a tree-walked loop whose
+  operators are thin wrappers (`>`/`-`/`+` are Brood defns over `%`-prims, ADR-069),
+  the hot path ticks in `passthrough_redirect_ok` — the reduction budget drains there,
+  so the loop-top check alone can be starved of rollovers. The eval *deadline* had
+  already escaped through this exact gap once (its check is in that function for that
+  reason); the kill check now sits beside it. Any future budget-consuming safepoint
+  must go in both places or it will repeat this bug.
+- **Checking only at the rollover keeps the hot path untouched** — one thread-local
+  decrement, as before; the flag load happens once per ~2000-reduction quantum.
+  Measured kill latency ~4ms on a JIT'd loop. On the root thread `CURRENT` is unset,
+  so the check is constant-false — the REPL's own top-level eval can't kill itself.
+
+**REPL consequence** (`std/tool/repl.blsp`, the feature this unblocked). Interactive
+sessions install a SIGINT handler (`%install-interrupt-handler` / `%interrupt-taken?`,
+the minimal kernel seam — a relaxed atomic store in the handler, a read-and-clear
+probe; ADR-006, signals are mechanism). Each submitted form evaluates in a spawned
+green process; the loop parks in `receive` polling the flag (~40ms), and Ctrl-C
+`(exit child :kill)`s it — `; interrupted`, prompt back, image intact; `def`s made by
+the child persist (shared code region). A second Ctrl-C while the first hasn't landed
+(an eval wedged inside one native builtin never reaches a reduction tick) halts with
+exit 130 — escalation, not a dead prompt. Piped sessions install nothing and keep the
+default disposition (`echo … | brood` still dies on Ctrl-C like any Unix program). The
+off-switch is `(def *repl-interruptible* false)` in `.broodrc.blsp` — a redefinable
+global resolved to the armed state after the rc loads, not an env knob.
+
+**Verification.** `tests/exit_test.blsp` pins the three routes (eval-string, eval of a
+read form, kill-through-`try`) plus soft-exit-still-deferred-inside-eval; repro'd and
+re-verified across default / `BROOD_NO_JIT=1` / `BROOD_VM=0`, under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`, and end-to-end through a pty (Ctrl-C during a
+runaway form; session, `*1`, and child-made `def`s all intact after).
+
+**References.** ADR-100 §8 (state-capture preemption and the `capture` gate this check
+was wrongly folded into), ADR-063 (exit signals), ADR-069 (thin-wrapper passthrough —
+why the redirect is the hot tick), ADR-052/ADR-048 (the REPL this serves), the
+2026-07-28 devlog entries (including the wrong first diagnosis and what it missed).

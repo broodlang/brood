@@ -81,6 +81,55 @@
       (exit p :kill)
       (assert= (ex-down-reason p m) :kill))))
 
+;; ---- kill inside a nested eval ------------------------------------------------
+;; A process spinning inside `eval` / `eval-string` runs on the NON-capturing eval
+;; paths (the tree-walker and nested VM runs behind the native frame), whose
+;; reduction tick was once pure accounting — so a hard `:kill` latched its flag and
+;; was never honoured: the direct-call spin above died while the identical loop
+;; under `eval-string` survived forever (found 2026-07-28 wiring REPL Ctrl-C, which
+;; evaluates everything through `eval-string`). Now every eval path checks the flag
+;; at its reduction rollover (`tick_reporting_hard_kill`) and unwinds with the
+;; untrappable kill signal. These pin each route separately, plus the two properties
+;; that make the REPL usable: the kill stays untrappable through `try`, and a soft
+;; exit still waits for a `receive` even inside `eval`.
+
+; the same tight loop, but entered through the reader + evaluator. QUALIFIED name in
+; the source text: a string reaches `eval-string` after this module's compile-time
+; namespace qualification, so a bare `ex-spin` would be unbound at runtime.
+(defn ex-spin-eval-string () (eval-string "(exit-test/ex-spin)"))
+(defn ex-spin-eval-form () (eval (read-first "(exit-test/ex-spin)")))
+; `try` around the eval'd spin — the kill must NOT surface as a catchable error
+(defn ex-spin-eval-try () (try (eval-string "(exit-test/ex-spin)") (catch e :caught)))
+
+(describe "exit reaches a nested eval (the non-capturing paths)"
+  (test "hard :kill stops a tight loop inside eval-string"
+    (let (p (spawn (ex-spin-eval-string)) m (monitor p))
+      (sleep 30)
+      (exit p :kill)
+      (assert= (ex-down-reason p m) :kill)))
+  (test "hard :kill stops a tight loop inside (eval (read-first …))"
+    (let (p (spawn (ex-spin-eval-form)) m (monitor p))
+      (sleep 30)
+      (exit p :kill)
+      (assert= (ex-down-reason p m) :kill)))
+  (test "the kill is untrappable through a try around the eval"
+    (let (p (spawn (ex-spin-eval-try)) m (monitor p))
+      (sleep 30)
+      (exit p :kill)
+      ; :kill, not :normal — a catch that swallowed the signal would return :caught
+      ; and the process would die :normal
+      (assert= (ex-down-reason p m) :kill)))
+  (test "a soft exit is still deferred inside eval (no receive => still running)"
+    (let (p (spawn (ex-spin-eval-string)) m (monitor p))
+      (sleep 30)
+      (exit p :polite)
+      ; the soft signal must NOT stop a spinning eval — only a hard :kill may
+      (assert= (receive ([:down ^m ^p r] [:died r]) (after 300 :still-running))
+        :still-running)
+      ; clean up with the hard kill (also re-proves it lands after the soft latch)
+      (exit p :kill)
+      (assert= (ex-down-reason p m) :kill))))
+
 ;; ---- mass force-unwind: kill many parked processes concurrently --------------
 (defn ex-spawn-parked (n acc)
   (if (= n 0)
