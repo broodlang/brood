@@ -136,10 +136,17 @@
 ; (the pre-ADR-172 behaviour). The type-owner-beats-ability-owner ordering below is fully
 ; determinable now and is the part this slice makes deterministic (order-independent).
 (defn impl-rank (aname key from)
-  (let (from-name (name from))
+  ;; `from` is nil at the root/REPL namespace (a top-level `impl`); guard it FIRST — both
+  ;; to avoid `(name nil)`, and so a nil `from-name` never `=`-matches a nil id/ability
+  ;; owner (a built-in id / unrecorded ability). A root impl is `other` for now (it is the
+  ;; app, but the app tier awaits ADR-070).
+  (let (from-name (if from (name from) nil)
+        id-owner (impl--id-owner key)
+        abl-owner (let (o (ability-owner-ns aname)) (if o (name o) nil)))
     (cond
-      (= from-name (impl--id-owner key)) 3
-      (= from-name (let (o (ability-owner-ns aname)) (if o (name o) nil))) 2
+      (nil? from-name) 1
+      (= from-name id-owner) 3
+      (= from-name abl-owner) 2
       else 1)))
 
 (defn register-impl (aname op key f from)

@@ -65,7 +65,11 @@ Shipped as ADRs:
     ability-owner > :default > native`. Dispatch specialized through the IC/JIT with
     deopt-on-reload; `:sealed` abilities go fully static/exhaustive; the runtime
     `*impls*` registry becomes the backstop. `Display` becomes always-on core (records
-    only, app-gated, guarded) superseding ADR-171's opt-in `show`. Needs
+    only, guarded) superseding ADR-171's opt-in `show` — at which point the interim
+    `show`/`display-on`/`display-off` scaffolding is removed (it's a known wart, kept as
+    the interim only because Display is a std module, not core; decided 2026-07-28 to
+    **leave it** rather than polish it — the jank vanishes when Display goes core, and the
+    safety it approximates is really owner-only coherence, not an activation gate). Needs
     [ADR-070](docs/decisions.md) (package-rooted namespaces) for the clean app/library
     line. **[kernel/checker/eval]**
     - ✅ **Slice 1 — optional + dev dependencies** (2026-07-28): the manifest takes
