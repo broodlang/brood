@@ -9532,3 +9532,43 @@ in the evaluator either precedes any eval, reads a freshly-unpacked id, or (line
 documented no-GC symbol lookup; `apply_closure` was already correct. `record_tw_entry` was
 the lone instance. The `vm_tail_arm_compaction` test loses the temporary VM pin (added
 while gating the differential job) and runs on both engines again.
+
+## 2026-07-28 — the GC's forwarding tables were hash maps; `sort` −17.6%
+
+Chasing the benchmark standing (`sort`/`bintree`/`nbody` are the three 6/7 rows within 8% of
+a rank) led to the collector. `sort` first, because it is also 22% of the aggregate.
+
+**Measured, not assumed.** Phase-isolating the row in separate processes: building the 375k
+list ≈65 ms, walking it ≈21 ms, `sort` on a *list* ≈97 ms but on a *vector* ≈47 ms. That 50 ms
+gap is not the sort — it is materializing 375k items. Raising `BROOD_GC_FLOOR` so collections
+stop firing took the whole row 210 → 132 ms, which said GC, not allocation. `(gc-stats)` then
+gave the number outright: **4 collections, 946,464 objects copied, 95.7 ms of pause in a 158 ms
+run — 61% of the row, at 101 ns per copied object.** Three hundred cycles to move 48 bytes.
+
+**The cause: `FlushForward` kept its forwarding pointers in ten `HashMap<u32, u32>`s.** Every
+copied object paid a SipHash probe plus an insert, and the insert rehashed as the table grew
+into the hundreds of thousands. But the keys *are slab indices* — dense, and bounded by the
+source slab's length — so they never needed hashing at all. Replaced with a dense `Vec<u32>`
+(`FwdTable`, `u32::MAX` = not-yet-copied), sized from the source generation up front.
+
+Same run afterwards: **same 4 collections, same 946,464 objects copied, pause 95.7 → 44.6 ms**
+(101 → 47 ns/object), wall 158 → 113 ms. Identical work, half the cost — which is the shape a
+real fix should have.
+
+Suite A/B against `4f5117e4`, best-of-7: **`sort` −17.6%** (216 → 178 ms), `json` −4.1%,
+`persistent-map` −3.7%, `pipeline` −2.1%, `wordcount` −1.9%; `fib` flat.
+
+**Why `bintree` and `nbody` did not move, which is the useful part.** They are not GC-*copy*
+bound — `(gc-stats)` per row: `bintree` 11 collections but only 45,175 objects copied (5.0 ms,
+~4% of the row), `nbody` 8 collections copying **798** objects (6.2 ms), `wordcount` zero
+collections. Their objects die young, so there is nothing to forward. The nursery-size dial
+splits them the same way: `BROOD_GC_FLOOR=2000000` takes `sort` −37% and `persistent-map` −12%
+but makes `bintree` **+19% worse** and `nbody` +9% worse — a bigger nursery helps live-set
+builders and hurts churners, so it is not a knob to turn globally.
+
+**Open, for the next pass:** `nbody` spends ~770 µs *per collection* while copying ~100
+objects, i.e. a fixed per-collection cost unrelated to live data. Two suspects, both in
+`minor_collect`: it rebuilds the whole `form_pos` map on every collection, and
+`Slabs::with_capacity_like` allocates a fresh nursery sized to the outgoing one each flip.
+Unmeasured — do not act on it before profiling, since this session has already had two
+confidently-named suspects turn out wrong.

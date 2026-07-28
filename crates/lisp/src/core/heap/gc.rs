@@ -52,7 +52,7 @@ impl Heap {
         let before = self.local_live_count();
         self.local_epoch = self.local_epoch.wrapping_add(1);
         let old = std::mem::take(&mut self.local);
-        let mut fwd = FlushForward::default();
+        let mut fwd = FlushForward::for_source(&old);
         fwd.epoch = self.local_epoch;
         for v in value_roots.iter_mut() {
             *v = flush_value(&old, &mut self.local, &mut fwd, *v);
@@ -82,7 +82,7 @@ impl Heap {
         // Legacy single-space flush: nursery→nursery, so keys stay young (age 0).
         let old_form_pos = std::mem::take(&mut self.form_pos);
         for (key, pos) in old_form_pos {
-            if let Some(&new_idx) = fwd.pairs.get(&(key as u32)) {
+            if let Some(new_idx) = fwd.pairs.lookup(key as u32) {
                 self.form_pos.insert(new_idx as u64, pos);
             }
         }
@@ -708,7 +708,7 @@ impl Heap {
             // the Vec-doubling ladder (see `Slabs::with_capacity_like`).
             (Slabs::with_capacity_like(&young), self.local_epoch, false)
         };
-        let mut fwd = FlushForward::default();
+        let mut fwd = FlushForward::for_source(&young);
         fwd.epoch = epoch;
         fwd.src_old = false; // copy nursery objects
         fwd.dest_old = dest_old;
@@ -754,7 +754,7 @@ impl Heap {
         for (key, pos) in old_form_pos {
             if (key >> 32) & 1 == 1 {
                 self.form_pos.insert(key, pos);
-            } else if let Some(&new_idx) = fwd.pairs.get(&(key as u32)) {
+            } else if let Some(new_idx) = fwd.pairs.lookup(key as u32) {
                 self.form_pos.insert((new_idx as u64) | new_age_bit, pos);
             }
         }
@@ -802,7 +802,7 @@ impl Heap {
         self.old_epoch = self.old_epoch.wrapping_add(1);
         let old_src = std::mem::take(&mut self.old);
         let mut dest = Slabs::default();
-        let mut fwd = FlushForward::default();
+        let mut fwd = FlushForward::for_source(&old_src);
         fwd.epoch = self.old_epoch;
         fwd.src_old = true; // copy old-gen objects
         fwd.dest_old = true; // into the fresh old space
@@ -834,15 +834,15 @@ impl Heap {
                 .into_iter()
                 .filter_map(|e| {
                     fwd.envs
-                        .get(&(e.index() as u32))
-                        .map(|&n| fwd.mint_env(n as usize))
+                        .lookup(e.index() as u32)
+                        .map(|n| fwd.mint_env(n as usize))
                 })
                 .collect();
         }
         let old_form_pos = std::mem::take(&mut self.form_pos);
         for (key, pos) in old_form_pos {
             if (key >> 32) & 1 == 1 {
-                if let Some(&new_idx) = fwd.pairs.get(&(key as u32)) {
+                if let Some(new_idx) = fwd.pairs.lookup(key as u32) {
                     self.form_pos.insert((new_idx as u64) | (1 << 32), pos);
                 }
             }
@@ -1251,6 +1251,60 @@ impl Heap {
 // children — a second hit on the same old handle returns the placeholder
 // instead of re-traversing.
 
+/// Forwarding table for one slab kind: **source slab index → destination slab index**.
+///
+/// A dense `Vec` rather than the `HashMap<u32, u32>` this replaced. The keys are slab
+/// indices — already dense, already bounded by the source slab's length — so hashing them
+/// was pure overhead, and it was the dominant cost of collection: every copied object paid
+/// a SipHash probe plus an insert, and the insert rehashed as the table grew into the
+/// hundreds of thousands. Measured on the benchmark suite's `sort` row (375k-cell build +
+/// sort, 2026-07-28): 4 collections copying 946k objects spent **95.7 ms of the row's
+/// 158 ms** in GC pause — 101 ns per copied object, ~300 cycles to move 48 bytes. An array
+/// index is a few of those cycles.
+///
+/// `NONE` marks "not yet copied". Sized from the source slab up front (see
+/// [`FlushForward::for_source`]) so the common path is a bounds-checked load and a store,
+/// with `set` growing defensively only if an index ever lands past the end.
+#[derive(Default)]
+struct FwdTable {
+    to: Vec<u32>,
+}
+
+impl FwdTable {
+    /// Sentinel for an entry that has not been copied yet. A real destination index can
+    /// never reach `u32::MAX` — the slab would have to hold 4 G objects first.
+    const NONE: u32 = u32::MAX;
+
+    /// A table covering `len` source slots, all unset.
+    fn with_len(len: usize) -> Self {
+        Self {
+            to: vec![Self::NONE; len],
+        }
+    }
+
+    /// The destination index `src` was copied to, or `None` if it has not been copied.
+    #[inline]
+    fn lookup(&self, src: u32) -> Option<u32> {
+        match self.to.get(src as usize) {
+            Some(&d) if d != Self::NONE => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Record that source index `src` now lives at destination index `dst`.
+    #[inline]
+    fn set(&mut self, src: u32, dst: u32) {
+        let i = src as usize;
+        if i >= self.to.len() {
+            // Only reachable if a handle points past the source slab's length, which the
+            // region/age guards should already exclude — grow rather than panic, and keep
+            // the growth amortized so a run of them can't go quadratic.
+            self.to.resize((i + 1).max(self.to.len() * 2), Self::NONE);
+        }
+        self.to[i] = dst;
+    }
+}
+
 #[derive(Default)]
 struct FlushForward {
     /// The generation epoch to stamp into every survivor handle minted into the
@@ -1267,19 +1321,42 @@ struct FlushForward {
     /// compacts old→old); `false` only for the legacy single-space `flush()` test
     /// helper, which stays nursery→nursery.
     dest_old: bool,
-    pairs: HashMap<u32, u32>,
-    vectors: HashMap<u32, u32>,
-    maps: HashMap<u32, u32>,
-    strings: HashMap<u32, u32>,
-    bigints: HashMap<u32, u32>,
-    decimals: HashMap<u32, u32>,
-    bytes: HashMap<u32, u32>,
-    ropes: HashMap<u32, u32>,
-    closures: HashMap<u32, u32>,
-    envs: HashMap<u32, u32>,
+    pairs: FwdTable,
+    vectors: FwdTable,
+    maps: FwdTable,
+    strings: FwdTable,
+    bigints: FwdTable,
+    decimals: FwdTable,
+    bytes: FwdTable,
+    ropes: FwdTable,
+    closures: FwdTable,
+    envs: FwdTable,
 }
 
 impl FlushForward {
+    /// A forwarding set sized for `src` — the generation this collection copies *out of*.
+    ///
+    /// Every forwarding key is an index into one of `src`'s slabs, so each table is
+    /// allocated at exactly that slab's length and indexed directly. Sizing up front costs
+    /// one `memset` per non-empty slab and removes hashing from the copy path entirely.
+    fn for_source(src: &Slabs) -> Self {
+        Self {
+            epoch: 0,
+            src_old: false,
+            dest_old: false,
+            pairs: FwdTable::with_len(src.pairs.len()),
+            vectors: FwdTable::with_len(src.vectors.len()),
+            maps: FwdTable::with_len(src.maps.len()),
+            strings: FwdTable::with_len(src.strings.len()),
+            bigints: FwdTable::with_len(src.bigints.len()),
+            decimals: FwdTable::with_len(src.decimals.len()),
+            bytes: FwdTable::with_len(src.bytes.len()),
+            ropes: FwdTable::with_len(src.ropes.len()),
+            closures: FwdTable::with_len(src.closures.len()),
+            envs: FwdTable::with_len(src.envs.len()),
+        }
+    }
+
     /// Does a `flush_*` copy this LOCAL handle? Only if its generation age matches
     /// the source space being collected; the other generation / shared regions are
     /// left in place.
@@ -1490,7 +1567,7 @@ fn flush_value_grown(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Va
 }
 
 fn flush_pair(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: PairId) -> PairId {
-    if let Some(&new_idx) = fwd.pairs.get(&(id.index() as u32)) {
+    if let Some(new_idx) = fwd.pairs.lookup(id.index() as u32) {
         return fwd.mint_pair(new_idx as usize);
     }
     // Walk the cdr spine **iteratively** so a long proper list doesn't recurse its
@@ -1508,13 +1585,13 @@ fn flush_pair(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: PairId) 
         match cur.unpack() {
             ValueRef::Pair(p) if fwd.copies(p.region(), p.is_old()) => {
                 let key = p.index() as u32;
-                if let Some(&n) = fwd.pairs.get(&key) {
+                if let Some(n) = fwd.pairs.lookup(key) {
                     break Value::pair(fwd.mint_pair(n as usize));
                 }
                 let (car, cdr) = old.pairs[flush_bound!(old.pairs, p, fwd, "pair")];
                 let new_idx = new.pairs.len();
                 new.pairs.push((Value::nil(), Value::nil()));
-                fwd.pairs.insert(key, new_idx as u32);
+                fwd.pairs.set(key, new_idx as u32);
                 spine.push((new_idx, car));
                 cur = cdr;
             }
@@ -1540,7 +1617,7 @@ fn flush_pair(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: PairId) 
 
 fn flush_vector(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: VecId) -> VecId {
     let key = id.index() as u32;
-    if let Some(&new_idx) = fwd.vectors.get(&key) {
+    if let Some(new_idx) = fwd.vectors.lookup(key) {
         return fwd.mint_vector(new_idx as usize);
     }
     // Reserve the destination slot and record the forwarding *before* flushing
@@ -1556,7 +1633,7 @@ fn flush_vector(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: VecId)
         len: 0,
         items: [Value::nil(); INLINE_VEC_CAP],
     });
-    fwd.vectors.insert(key, new_idx as u32);
+    fwd.vectors.set(key, new_idx as u32);
     let store = VecStore::from_flushed(n, |i| {
         let x = old.vectors[src_idx][i];
         flush_value(old, new, fwd, x)
@@ -1567,7 +1644,7 @@ fn flush_vector(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: VecId)
 
 fn flush_string(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: StrId) -> StrId {
     let key = id.index() as u32;
-    if let Some(&new_idx) = fwd.strings.get(&key) {
+    if let Some(new_idx) = fwd.strings.lookup(key) {
         return fwd.mint_string(new_idx as usize);
     }
     // Clone by variant. `Shared(arc)` becomes `Arc::clone` (+1 ref); the old
@@ -1582,13 +1659,13 @@ fn flush_string(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: StrId)
     };
     let new_idx = new.strings.len();
     new.strings.push(entry);
-    fwd.strings.insert(key, new_idx as u32);
+    fwd.strings.set(key, new_idx as u32);
     fwd.mint_string(new_idx)
 }
 
 fn flush_bigint(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: BigIntId) -> BigIntId {
     let key = id.index() as u32;
-    if let Some(&new_idx) = fwd.bigints.get(&key) {
+    if let Some(new_idx) = fwd.bigints.lookup(key) {
         return fwd.mint_bigint(new_idx as usize);
     }
     // A leaf: clone the value's digits into the new slab (the old slab drops
@@ -1596,7 +1673,7 @@ fn flush_bigint(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: BigInt
     let n = old.bigints[flush_bound!(old.bigints, id, fwd, "bigint")].clone();
     let new_idx = new.bigints.len();
     new.bigints.push(n);
-    fwd.bigints.insert(key, new_idx as u32);
+    fwd.bigints.set(key, new_idx as u32);
     fwd.mint_bigint(new_idx)
 }
 
@@ -1604,13 +1681,13 @@ fn flush_bigint(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: BigInt
 /// the new slab (the old slab drops right after `flush`).
 fn flush_decimal(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: DecimalId) -> DecimalId {
     let key = id.index() as u32;
-    if let Some(&new_idx) = fwd.decimals.get(&key) {
+    if let Some(new_idx) = fwd.decimals.lookup(key) {
         return fwd.mint_decimal(new_idx as usize);
     }
     let n = old.decimals[flush_bound!(old.decimals, id, fwd, "decimal")].clone();
     let new_idx = new.decimals.len();
     new.decimals.push(n);
-    fwd.decimals.insert(key, new_idx as u32);
+    fwd.decimals.set(key, new_idx as u32);
     fwd.mint_decimal(new_idx)
 }
 
@@ -1618,19 +1695,19 @@ fn flush_decimal(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: Decim
 /// clone the `Arc<SharedBlob>` (a refcount bump, not a byte copy) into the new slab.
 fn flush_bytes(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: BytesId) -> BytesId {
     let key = id.index() as u32;
-    if let Some(&new_idx) = fwd.bytes.get(&key) {
+    if let Some(new_idx) = fwd.bytes.lookup(key) {
         return fwd.mint_bytes(new_idx as usize);
     }
     let b = old.bytes[flush_bound!(old.bytes, id, fwd, "bytes")].clone();
     let new_idx = new.bytes.len();
     new.bytes.push(b);
-    fwd.bytes.insert(key, new_idx as u32);
+    fwd.bytes.set(key, new_idx as u32);
     fwd.mint_bytes(new_idx)
 }
 
 fn flush_rope(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: RopeId) -> RopeId {
     let key = id.index() as u32;
-    if let Some(&new_idx) = fwd.ropes.get(&key) {
+    if let Some(new_idx) = fwd.ropes.lookup(key) {
         return fwd.mint_rope(new_idx as usize);
     }
     // `ropey::Rope::clone` is a cheap `Arc`-node bump (no byte copy); the old
@@ -1639,13 +1716,13 @@ fn flush_rope(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: RopeId) 
     let rope = old.ropes[flush_bound!(old.ropes, id, fwd, "rope")].clone();
     let new_idx = new.ropes.len();
     new.ropes.push(rope);
-    fwd.ropes.insert(key, new_idx as u32);
+    fwd.ropes.set(key, new_idx as u32);
     fwd.mint_rope(new_idx)
 }
 
 fn flush_map(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: MapId) -> MapId {
     let key = id.index() as u32;
-    if let Some(&new_idx) = fwd.maps.get(&key) {
+    if let Some(new_idx) = fwd.maps.lookup(key) {
         return fwd.mint_map(new_idx as usize);
     }
     // Snapshot just the scalar/copy fields + arrays we need to walk.
@@ -1669,7 +1746,7 @@ fn flush_map(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: MapId) ->
     };
     let new_idx = new.maps.len();
     new.maps.push(MapNode::default());
-    fwd.maps.insert(key, new_idx as u32);
+    fwd.maps.set(key, new_idx as u32);
     let new_children: SmallVec<[MapId; 4]> = children_snapshot
         .iter()
         .map(|&c| {
@@ -1702,13 +1779,13 @@ fn flush_map(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: MapId) ->
 
 fn flush_closure(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: ClosureId) -> ClosureId {
     let key = id.index() as u32;
-    if let Some(&new_idx) = fwd.closures.get(&key) {
+    if let Some(new_idx) = fwd.closures.lookup(key) {
         return fwd.mint_closure(new_idx as usize);
     }
     let cl = old.closures[flush_bound!(old.closures, id, fwd, "closure")].clone();
     let new_idx = new.closures.len();
     new.closures.push(Closure::default());
-    fwd.closures.insert(key, new_idx as u32);
+    fwd.closures.set(key, new_idx as u32);
     let arms = cl
         .arms
         .iter()
@@ -1744,7 +1821,7 @@ fn flush_env(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, env: EnvId) -
         return env;
     }
     let key = env.index() as u32;
-    if let Some(&new_idx) = fwd.envs.get(&key) {
+    if let Some(new_idx) = fwd.envs.lookup(key) {
         return fwd.mint_env(new_idx as usize);
     }
     let (parent_snapshot, vars_snapshot): (Option<EnvId>, EnvVars) = {
@@ -1756,7 +1833,7 @@ fn flush_env(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, env: EnvId) -
         vars: SmallVec::new(),
         parent: None,
     });
-    fwd.envs.insert(key, new_idx as u32);
+    fwd.envs.set(key, new_idx as u32);
     let parent = parent_snapshot.map(|p| flush_env(old, new, fwd, p));
     let vars: EnvVars = vars_snapshot
         .iter()
