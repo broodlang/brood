@@ -281,6 +281,30 @@ always runs, even on error, so the terminal is restored."
     (term-leave)
     result))
 
+;; ---- single-step evaluation (spy + break fusion) ----------------------------
+;; `spy` instruments every evaluated subexpression; if the sink PARKS at each node
+;; instead of just recording it, you step through an expression's evaluation node by
+;; node. Because the value is emitted post-order, each pause shows a subexpression's
+;; *result* — resume to advance to the next. Run under `with-debugger` and drive the
+;; steps from `debug-repl` / `debug-attach`.
+(defn stepping-sink ()
+  "A `*spy-sink*` that parks the process at each `spy` node (one breakpoint per
+subexpression). Non-node entries (`:enter`/`:exit`) pass through."
+  (fn (entry)
+    (when (= (get entry :spy) :node)
+      (let (dbg (tc-debugger))
+        (when dbg
+          (send dbg [:break (self)
+                      {:label (str "step " (pr-str (get entry :form)))
+                       :vals [:value (get entry :value)]
+                       :span (tc-span)}])
+          (receive ([:resume] nil)))))))
+(defmacro step (expr)
+  "Evaluate `expr` in single-step mode: each `spy`-traced subexpression parks at a
+breakpoint until resumed, so you step through evaluation one node at a time. Run it
+under `with-debugger`; advance the steps from `debug-repl` (`r`) or `debug-attach`."
+  `(binding (*spy-sink* (stepping-sink)) (spy ~expr)))
+
 ;; ---- interactive debugger prompt (a REPL for the session) -------------------
 ;; A TYPING interface (cooked mode — no raw terminal, works even piped): prints the
 ;; state, then a `debug>` prompt. Line commands:
@@ -321,6 +345,7 @@ no raw-terminal setup and works when piped."
                               (println (debug--resume-nth dbg entries
                                          (try (eval-string (second parts)) (catch _ nil))))
                               (do (resume-all dbg) (println "resumed all")))
+                            (sleep 30)   ; let a resumed process reach its next break before redraw
                             (debug-repl dbg))
             else (do (try (println (str "=> " (pr-str (eval-string line))))
                        (catch e (println (str "! " (pr-str e)))))
