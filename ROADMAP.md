@@ -59,28 +59,28 @@ Shipped as ADRs:
   - ⬜ **Checker gap:** a `:use`d ability op from a *loose disk* module (not embedded,
     not in a project) is flagged `unbound symbol` though it runs; embedded/same-module
     use resolves. Surfaced by the `show` cross-module test. **[kernel/checker]**
-  - ⬜ **Abilities v2** ([ADR-172](docs/decisions.md), design decided 2026-07-28) —
-    tightens ADR-168's open runtime model to **app-sovereign coherence, enforced at
-    compile time, live-replaceable**: `impl` only what you own (ability or type),
-    `bridge` (app-only, greppable) for deliberate cross-library linking (reusable glue is
-    a package of functions the app's `bridge` calls — no `:bridges`/glue-package
-    authorization, dropped), precedence `app > type-owner >
-    ability-owner > :default > native`. Dispatch specialized through the IC/JIT with
-    deopt-on-reload; `:sealed` abilities go fully static/exhaustive; the runtime
-    `*impls*` registry becomes the backstop. `Display` becomes always-on core (records
-    only, guarded) superseding ADR-171's opt-in `show` — at which point the interim
-    `show`/`display-on`/`display-off` scaffolding is removed (it's a known wart, kept as
-    the interim only because Display is a std module, not core; decided 2026-07-28 to
-    **leave it** rather than polish it — the jank vanishes when Display goes core, and the
-    safety it approximates is really owner-only coherence, not an activation gate). Needs
-    [ADR-070](docs/decisions.md) (package-rooted namespaces) for the clean app/library
-    line. **[kernel/checker/eval]**
+  - 🟡 **Abilities v2** ([ADR-172](docs/decisions.md), design decided 2026-07-28,
+    **amended 2026-07-28**) — makes ADR-168's open runtime model **deterministic and
+    app-sovereign** without closing it. **Amendment: the orphan rule and the `bridge`
+    form are dropped before implementation** — abilities stay OPEN (`impl` legal for any
+    ability and any id, incl. primitives and unowned types), because `bridge` had zero
+    runtime substance (it expands to the same `register-impl` as `impl`) and the orphan
+    restriction guards a multi-third-party-library collision greenfield Brood doesn't
+    have. App sovereignty is delivered by the **precedence ladder alone**: `app >
+    type-owner > ability-owner > other`, same-tier cross-module collisions warned. If a
+    real orphan conflict ever appears, orphan-authorization becomes a **lint on plain
+    `impl`** (app/library line is already computable via package identity), advisory-live
+    / hard-CI — no new form. What remains: dispatch specialized through the IC/JIT with
+    deopt-on-reload, `:sealed` fully static/exhaustive, `Display` to always-on core
+    (records only, guarded) — at which point the interim `display-on`/`display-off`
+    scaffolding is removed. **[kernel/checker/eval]**
     - ✅ **Slice 1 — optional + dev dependencies** (2026-07-28): the manifest takes
       `:optional true` per dep and a `:dev-dependencies` list (tagged `:dev true`, own
-      slot) — the package-level seam the bridge story needs. **Slice 1b** wired dev-deps
-      end to end: `project--ensure-deps-on-path` load-paths them for dev/`nest test`,
-      `bundle-collect` excludes them from a release bundle (verified with a scratch
-      project). Optional-dep *resolution* (peer presence) lands with the bridge slice.
+      slot). **Slice 1b** wired dev-deps end to end: `project--ensure-deps-on-path`
+      load-paths them for dev/`nest test`, `bundle-collect` excludes them from a release
+      bundle (verified with a scratch project).
+    - ❌ **Slices 2 + 3 — `bridge` + coherence checking: dropped** (2026-07-28
+      amendment). No orphan rule, so no orphan escape hatch to build; `impl` stays open.
     - ✅ **Slice 4 — deterministic precedence, all four tiers** (2026-07-28):
       `std/ability.blsp` resolves competing impls by tier (**app > type-owner >
       ability-owner > other**), not load order — `defability` records its owner ns,
@@ -90,8 +90,12 @@ Shipped as ADRs:
       *ns-package*` maps each namespace to its owning package's name (static scan at
       project setup), and a ns whose package is `*project-name*` — or has no owner
       (root/REPL) — is the app. `ns-package`/`trace-with-packages` also tag stack frames
-      with their owning package. Slices 2, 3, 5, 6 (`bridge`, coherence checking, dispatch
-      specialization, always-on `Display`) still ⬜.
+      with their owning package.
+    - ⬜ **Slice 5 — dispatch specialization**: lower ability calls through the IC/JIT
+      with deopt-on-reload (today every call is a runtime `impl-for` map-get); `:sealed`
+      abilities compile to a closed exhaustive switch.
+    - ⬜ **Slice 6 — `Display` to always-on core**: records customize `str`/`print`
+      natively (guarded, app-gated); removes the interim `display-on`/`display-off`.
 - ✅ **ADR-159** — grapheme-*indexed* accessors (`grapheme-count`, `grapheme-at`,
   `substring-graphemes`), so the documented-correct cursor step stops costing a vector
   of every cluster in the string per keystroke.

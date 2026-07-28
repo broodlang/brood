@@ -211,10 +211,11 @@ the `nest new` scaffolder."
                  (= kind :version) (project--parse-registry-dep name entry)
                  else (error "project: dependency "
                         name " must be :git, :path, :tarball, or :version, got " kind))
-          ;; `:optional` (ADR-172) — a dep declared but not force-installed: the seam a
-          ;; bridge/glue package rides, present only when the app also depends on it.
-          ;; Recognised on every dep kind; defaults false. (Resolution semantics — peer
-          ;; presence — land with the bridge work; this normalises the manifest flag.)
+          ;; `:optional` (ADR-172) — a dep declared but not force-installed. Recognised on
+          ;; every dep kind; defaults false. (Resolution semantics — peer presence — are
+          ;; deferred: this normalises the manifest flag. The bridge/glue motivation was
+          ;; dropped in the 2026-07-28 amendment, so `:optional` is now the generic
+          ;; Cargo/Elixir optional dependency, decoupled from abilities.)
           optional (if (plist-get opts :optional) true false))
       (assoc base :optional optional))))
 

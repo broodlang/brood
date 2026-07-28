@@ -442,15 +442,17 @@ warns at a **call site** when an op is applied to an argument of statically-know
 identity — a literal, a direct `defrecord*` constructor call, or a record-typed
 variable — for which no impl and no `:default` is registered.
 
-> **Planned direction (not yet implemented): [ADR-172](decisions.md).** A decided
-> redesign tightens this open runtime model to **app-sovereign coherence, enforced at
-> compile time, still live-replaceable**: `impl` only what you own (the ability or the
-> type), a new `bridge` form (app-only) for deliberate cross-library linking (reusable
-> glue is a package of functions the app's `bridge` calls — no glue-package
-> authorization), and precedence `app > type-owner >
-> ability-owner > :default > native`. Dispatch specializes through the inline-cache/JIT
-> with deopt-on-reload; `:sealed` abilities go fully static; `Display` becomes always-on
-> core (superseding the opt-in `show`). This section documents what is implemented today.
+> **Direction: [ADR-172](decisions.md) (amended 2026-07-28).** This open runtime model
+> is kept open — `impl` stays legal for any ability and any id (primitive, owned, or
+> someone else's) — and made **deterministic and app-sovereign** by a precedence ladder
+> alone: `app > type-owner > ability-owner > :default > native`, with same-tier
+> cross-module collisions warned (shipped). The amendment **dropped** the earlier
+> `impl`-only-what-you-own orphan rule and the `bridge` form: `bridge` expanded to the
+> same registration as `impl` (no runtime substance), and the orphan rule guarded a
+> multi-third-party-library collision greenfield Brood doesn't have. Still ahead: dispatch
+> specialized through the inline-cache/JIT with deopt-on-reload, `:sealed` abilities fully
+> static, and `Display` to always-on core (superseding the opt-in `show`). This section
+> documents what is implemented today.
 
 **Register at load time.** `*impls*` is updated with `def`, so two processes calling
 `impl` *concurrently* can lose one update. Top-level `impl` forms — the normal case
