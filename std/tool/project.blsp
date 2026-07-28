@@ -45,6 +45,11 @@ the `nest new` scaffolder."
 ; override set before the run.
 (defdyn *project-dependencies* nil)
 ; list of normalised dep maps from the manifest's :dependencies (ADR-037)
+(defdyn *project-dev-dependencies* nil)
+; dev/test-only dep maps from the manifest's :dev-dependencies (ADR-172): resolved for
+; `nest test`/dev and on the dev load path, but excluded from a release bundle. Each
+; carries `:dev true`. Kept separate from *project-dependencies* so a release build (and
+; a published package's declared deps) never pulls a test-only dependency.
 (def *project-format-headers* nil)
 ; the manifest's :format-headers map ({head-symbol → header-count}) — extra formatter
 ; rules for this project's own macros; nil when unset
@@ -165,15 +170,22 @@ the `nest new` scaffolder."
     (error "project: each :dependencies entry must be a vector, got " entry))
   (when (< (vector-length entry) 3) (error "project: dependency entry is too short: " entry))
   (let (name (vector-ref entry 0)
-        kind (vector-ref entry 1))
+        kind (vector-ref entry 1)
+        opts (project--vec-drop entry 3))
     (when (not (symbol? name)) (error "project: dependency name must be a symbol, got " name))
-    (cond
-      (= kind :git) (project--parse-git-dep name entry)
-      (= kind :path) (project--parse-path-dep name entry)
-      (= kind :tarball) (project--parse-tarball-dep name entry)
-      (= kind :version) (project--parse-registry-dep name entry)
-      else (error "project: dependency "
-             name " must be :git, :path, :tarball, or :version, got " kind))))
+    (let (base (cond
+                 (= kind :git) (project--parse-git-dep name entry)
+                 (= kind :path) (project--parse-path-dep name entry)
+                 (= kind :tarball) (project--parse-tarball-dep name entry)
+                 (= kind :version) (project--parse-registry-dep name entry)
+                 else (error "project: dependency "
+                        name " must be :git, :path, :tarball, or :version, got " kind))
+          ;; `:optional` (ADR-172) — a dep declared but not force-installed: the seam a
+          ;; bridge/glue package rides, present only when the app also depends on it.
+          ;; Recognised on every dep kind; defaults false. (Resolution semantics — peer
+          ;; presence — land with the bridge work; this normalises the manifest flag.)
+          optional (if (plist-get opts :optional) true false))
+      (assoc base :optional optional))))
 
 ;; Parse the manifest's :dependencies value into a list of normalised dep maps.
 ;; Omitted/nil => empty list.
@@ -192,7 +204,7 @@ the `nest new` scaffolder."
 ;; and the `:main` pair — without quoting. Manifests are static data; nothing in
 ;; them is ever evaluated.
 (defmacro project (& opts)
-  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:main` and `:dependencies`. Arguments are literal data — write dep names and the `:main` pair as bare symbols."
+  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). A dep entry may carry `:optional true` (declared but not force-installed). Arguments are literal data — write dep names and the `:main` pair as bare symbols."
   ;; quasiquote (not `(list 'project-apply …)`) so α qualifies `project-apply`
   ;; to `project/project-apply` at this macro's definition (ADR-065 §7).
   `(project-apply (quote ~opts)))
@@ -234,6 +246,12 @@ the `nest new` scaffolder."
     (when tst (def *project-test-paths* (project--check-paths :test-paths tst)))
     (when m (def *project-main* (project--parse-main m))))
   (def *project-dependencies* (project-parse-deps (plist-get opts :dependencies)))
+  ;; `:dev-dependencies` (ADR-172) — parsed exactly like `:dependencies`, each tagged
+  ;; `:dev true` so the resolver can include them for dev/test and a release bundle can
+  ;; drop them. Kept in their own slot, never mixed into *project-dependencies*.
+  (def *project-dev-dependencies*
+    (map (fn (d) (assoc d :dev true))
+      (project-parse-deps (plist-get opts :dev-dependencies))))
   (def *project-format-headers* (plist-get opts :format-headers))
   (def *project-format-plugins* (plist-get opts :format-plugins))
   *project-name*)

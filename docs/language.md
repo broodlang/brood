@@ -31,7 +31,7 @@ these are the ones to unlearn:
 |---|---|---|
 | `(try … (catch Type e body))` | `catch` takes a **bare binding**: `(catch e body)`. There is no exception class. | A clean error naming the fix. (It used to bind the *class name* as the variable and evaluate `e` as a statement — and since the prelude defines `e`, `(catch Exception e (println "caught" e))` silently printed 2.718…, a wrong program with no diagnostic.) |
 | Multi-arity `(fn ((x) …) ((x y) …))` | **Supported** (ADR-047) — dispatch by argument count, like Clojure. But param lists are **lists** `(x)`, not vectors `[x]`, and a clause head may *also* be a same-arity **pattern** (Erlang-style; see [Pattern matching](#pattern-matching)). | A **clean error** with a hint: vector-headed clauses `([x] …) ([x y] …)` are rejected. (They used to read as one 2-parameter pattern clause with an empty body — a completely different function, diagnosed only later as a misleading arity error at the call site.) |
-| `{:a 1}` map literal | **Supported.** Immutable, insertion-ordered; `get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?` (see [Maps](#maps)). | Works as you'd expect. |
+| `{:a 1}` map literal | **Supported.** Immutable; `get`/`assoc`/`dissoc`/`keys`/`vals`/`contains?` (see [Maps](#maps)). Iteration order is **hash-derived, not insertion order** (unlike Clojure's array-map — see [Maps](#maps)). | Works as you'd expect, except don't rely on key order. |
 | `{:keys [a b]}` / `:or` map destructuring | **Supported** — a map literal in pattern position binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default): `(let ({:keys [a b] :or {b 0}} m) …)`, works in `let`/`fn`/`match`. General `{:key subpattern}` nesting and `:as` are deferred (ADR-011). | Works as in Clojure for the `:keys`/`:or` subset. |
 | `(defn f [x y] …)`, `(let [a 1 b 2] …)` | Param lists and `let` bindings are **lists** — `(x y)` / `(a 1 b 2)`. A vector *inside* one is still destructuring: `(let ([x y] p) …)`. | A clean error with a hint (ADR-149). The vector spelling was once accepted as an alias; that is what turned every Clojure binding shape into a silent misread — `(let [[a 1] [b 2]] …)` destructured `[a 1]` against `[b 2]` and reported `unbound symbol: b`. |
 | `(let [[a 1] [b 2]] …)` / Scheme's `(let ((a 1)) …)` | Bindings are **flat**: `(let (a 1 b 2) …)`. | A clean error **with a hint** to flatten (was accepted-then-confusing). |
@@ -68,7 +68,7 @@ is the one piece that can't be guessed from Clojure; it has to be read.
 | Keyword | `:ok`, `:else`, `:\|a b\|` | Self-evaluating named constants. Like symbols, a keyword whose name isn't a clean token (e.g. `(keyword "a b")`, `(keyword "")`) prints and reads as `:\|…\|`. |
 | List | `(1 2 3)`, `()`, `(1 . 2)` | Cons cells; `()` is `nil`. Quote to keep as data: `'(1 2 3)`. A dotted tail `(a . b)` makes an improper list (round-trips with the printer). |
 | Vector | `[1 2 3]` | A data type with O(1) indexing. Evaluates its elements. |
-| Map | `{:a 1 :b 2}`, `{}` | Immutable key→value associations; insertion-ordered. Evaluates its keys and values. Any value can be a key (compared structurally). |
+| Map | `{:a 1 :b 2}`, `{}` | Immutable key→value associations. Iteration order is hash-derived, **not** insertion order (see [Maps](#maps)). Evaluates its keys and values. Any value can be a key (compared structurally). |
 | Function | `#<fn name>`, `#<native +>` | Closures and builtins. |
 | Ref | `#<ref 0>` | A unique, opaque reference token from `(ref)` — no literal syntax; the only way to make one. Used to tag a request to its reply (see [Processes](#processes-concurrency)). |
 | Pid | `#<pid a/7>` | A process id from `self`/`spawn`; carries node identity (`node/id`). No literal syntax. The location-transparent handle for `send` — local or across a node link (see [Distributed nodes](#distributed-nodes)). |
@@ -76,7 +76,25 @@ is the one piece that can't be guessed from Clojure; it has to be read.
 ### Truthiness
 
 Only `nil` and `false` are falsy. **Everything else is truthy**, including `0`,
-`""`, and empty collections.
+`""`, and empty collections like `[]`, `{}`, and `#{}`.
+
+> **The one asymmetry — an empty *list* is falsy.** The rule is purely
+> `nil`/`false`, but the **empty list is `nil`** (`()` ≡ `nil`), so a list is the
+> one collection whose empty value is falsy, while an empty vector/map/set/string
+> is truthy:
+>
+> ```clojure
+> (if [] :yes :no)   ;=> :yes   ; empty vector — truthy
+> (if "" :yes :no)   ;=> :yes   ; empty string — truthy
+> (if {} :yes :no)   ;=> :yes   ; empty map — truthy
+> (if () :yes :no)   ;=> :no    ; empty list — () is nil, so FALSY
+> ```
+>
+> This bites when a function may return either a list or `nil` and you branch on
+> the result directly: an empty-list result takes the `else` branch. **To test
+> for emptiness uniformly across every collection, use `(empty? x)`** — never a
+> bare `(if x …)`. (`(if (seq x) …)` also works, since `seq` of an empty
+> collection is `nil`.)
 
 ## Immutability
 
@@ -188,8 +206,15 @@ Like vectors, a map literal **evaluates** its keys and values, so
 `{:sum (+ 1 2)}` is `{:sum 3}` and `{k 1}` uses the *value* of `k` as the key.
 Any value can be a key — keywords, strings, numbers, even vectors or maps — and
 keys are compared by **structural equality** (so `{[1 2] :v}` can be looked up
-with `[1 2]`). Duplicate keys keep the **last** value. Maps preserve **insertion
-order** when printed and when you ask for `keys`/`vals`. Map equality (`=`) is
+with `[1 2]`). Duplicate keys keep the **last** value.
+
+**Iteration order is unspecified — do not rely on it.** `keys`, `vals`, printing,
+and seqing a map yield entries in the **CHAMP trie's hash-derived order**
+(ADR-040), which is *neither* insertion order *nor* sorted, and may differ across
+runtimes or versions. (It is a function of the keys' hashes, not of how you built
+the map — so two `=` maps iterate alike — but treat the specific order as an
+implementation detail.) When you need a defined order, **sort the keys**
+(`(sort (keys m))`) or compare via `frequencies`. Map equality (`=`) is itself
 **order-independent**: `{:a 1 :b 2}` equals `{:b 2 :a 1}`.
 
 Maps are immutable — every operation returns a **fresh** map:
@@ -200,7 +225,7 @@ Maps are immutable — every operation returns a **fresh** map:
 | `(assoc m k1 v1 k2 v2 …)` | a new map with the pairs added/updated (also works on a **vector** with integer indices — replaces, never appends) |
 | `(dissoc m k1 k2 …)` | a new map with those keys removed |
 | `(contains? m k)` | whether `k` is present (distinguishes a stored `nil` from absence) |
-| `(keys m)` / `(vals m)` | the keys / values, as a list, in insertion order |
+| `(keys m)` / `(vals m)` | the keys / values, as a list, in the map's (hash-derived, unspecified) iteration order — sort if you need a defined order |
 | `(reduce-kv f init m)` | fold over the entries: `(f acc k v)` left to right → the final acc |
 | `(merge m1 m2 …)` | combine maps left to right; rightmost key wins (`nil` maps skipped) |
 | `(merge-with f m1 m2 …)` | like `merge`, but a shared key's value is `(f old new)` |
@@ -417,6 +442,15 @@ warns at a **call site** when an op is applied to an argument of statically-know
 identity — a literal, a direct `defrecord*` constructor call, or a record-typed
 variable — for which no impl and no `:default` is registered.
 
+> **Planned direction (not yet implemented): [ADR-172](decisions.md).** A decided
+> redesign tightens this open runtime model to **app-sovereign coherence, enforced at
+> compile time, still live-replaceable**: `impl` only what you own (the ability or the
+> type), a new `bridge` form (app-only) for deliberate cross-library linking, glue
+> packages authorized by the manifest's `:bridges`, and precedence `app > type-owner >
+> ability-owner > :default > native`. Dispatch specializes through the inline-cache/JIT
+> with deopt-on-reload; `:sealed` abilities go fully static; `Display` becomes always-on
+> core (superseding the opt-in `show`). This section documents what is implemented today.
+
 **Register at load time.** `*impls*` is updated with `def`, so two processes calling
 `impl` *concurrently* can lose one update. Top-level `impl` forms — the normal case
 — run as the module loads and are safe; this is the same configuration-time rule
@@ -426,6 +460,32 @@ ordinary hot reload and stays silent.
 
 Prefer `match`/`cond` when the set of cases is closed and local; reach for an
 ability when third-party or later code must be able to add a case.
+
+#### The display protocol: customizing how a record prints (`require 'show`)
+
+The standard library uses an ability for its one open-extension rendering seam —
+`std/show.blsp`, Elixir's `String.Chars` for Brood (ADR-171). `(require 'show)`
+gives a `Display` ability with op **`(to-str x)`** (a value → its display string),
+whose `:default` impl is the native `str`, and installs a hook so the **screen
+printers** (`print` / `println` / `eprint` / `eprintln`) let a *record* define how
+it prints. Built-ins are unchanged and pay no dispatch cost; with `show` unloaded
+there is no change at all.
+
+```clojure
+(defmodule money (:use ability) (:use show))
+(defrecord* usd (cents))
+(impl Display money/usd
+  (to-str [m] (str "$" (to-fixed (/ (get m :cents) 100.0) 2))))
+
+(println (usd 1050))          ; => $10.50   (not {:__id__ :money/usd, :cents 1050})
+(to-str (usd 1050))           ; => "$10.50" — the explicit call, for use inside str/fmt
+```
+
+Scope is the screen printers; `str` / `pr-str` / `fmt` stay on the native renderer
+(reach for `(to-str x)` explicitly there). It rides on the prelude's `*show*`
+dynamic var, so `(binding (*show* nil) …)` disables it for a scope. Default record
+printing keeps its `:__id__` — that is intended (records print unlike bare maps); the
+protocol is the per-record *override*, not a change to the default.
 
 #### `defbehaviour`: the module-as-implementor contract (`require 'protocol`)
 
@@ -2332,6 +2392,7 @@ Run `nest doc <module>` for the full API of any module.
 | `std/proc/agent.blsp` | `'proc/agent` | Process-backed state cell (Elixir-style Agent): `start`, `get`, `update`, `get-and-update`, `cast`, `stop` |
 | `std/ability.blsp` | `'ability` | Open generic functions with nominal dispatch (ADR-168): `defability` declares typed ops (with an optional `:sealed [id …]` closed member set), `impl` registers an implementation for a dispatch id — a `type-of` kind (`:int`/`:map`/…/`:default`) or a `defrecord*` record's `:module/name` id — from any module at any time; `defrecord*` bakes that nominal id into a record; `satisfies?`, `record?`, `record-id`, `fields`, `identity-of`, and `ability-ops` (the checker/LSP introspection hook) |
 | `std/protocol.blsp` | `'protocol` | Behaviour contracts — the *module*-satisfies-a-contract seam: `defbehaviour` declares the ops a module must define (no value dispatch), claimed with `(:implements Name)` in a module header; `protocol-ops` is the introspection hook the checker and LSP read. Value dispatch is `ability` — `defprotocol`/`defimpl` were retired (ADR-168) |
+| `std/show.blsp` | `'show` | The display protocol for printing (Elixir's `String.Chars`, ADR-171): a `Display` ability with op `(to-str x)` (value → display string, `:default` → native `str`), and a `*show*` hook so the screen printers `print`/`println`/`eprint`/`eprintln` let a `defrecord*` value define how it prints. Built on `ability`; built-ins unchanged. `(binding (*show* nil) …)` disables it |
 | `std/telemetry.blsp` | `'telemetry` | Erlang-`:telemetry`-style instrumentation; handlers run in an isolated listener process: `start-telemetry`, `stop-telemetry`, `emit`, `attach`, `detach`, `detach-all`, `forward`, `handlers`, `telemetry-sync`, the `span` macro |
 
 The following modules are also opt-in and live under `std/net/` and `std/tool/`:
