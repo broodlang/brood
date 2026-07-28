@@ -228,3 +228,26 @@ reprints `debug-report` every 500ms. Runs until Ctrl-C, or for a fixed frame cou
 if one is given (used by tests). Watch the paused queue fill/drain and the causal
 tree grow as a workload runs; drive resume from another session or a timer."
   (debug-watch--loop dbg (if (empty? frames) -1 (first frames))))
+
+;; ---- interactive terminal attach (key-driven) -------------------------------
+;; The driveable sibling of `debug-watch`: same live view, but it reads the keyboard
+;; (raw mode) so you resume parked processes without a timer. Pure IO shell over the
+;; same `debug-report`; input via `term-poll` (nil on the 400ms timeout → just redraw).
+(defn debug-attach--loop (dbg)
+  (print (str (ansi-clear) (ansi-home)))
+  (println "── debug-attach    [r] resume all parked    [q] quit ──")
+  (debug-report dbg)
+  (let (key (term-poll 400))
+    (cond
+      (or (= key "q") (= key :escape) (= key :ctrl-c)) :quit
+      (= key "r") (do (resume-all dbg) (debug-attach--loop dbg))
+      else (debug-attach--loop dbg))))
+(defn debug-attach (dbg)
+  "Interactive terminal view of the debug session: refreshes ~2×/s and handles keys —
+`r` resumes every parked process, `q` (or Esc / Ctrl-C) quits. Needs a real terminal
+(enters raw mode); `debug-watch` is the non-interactive read-only sibling. `term-leave`
+always runs, even on error, so the terminal is restored."
+  (term-enter)
+  (let (result (try (debug-attach--loop dbg) (catch _ :error)))
+    (term-leave)
+    result))
