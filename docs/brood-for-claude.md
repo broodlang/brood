@@ -27,7 +27,11 @@ A small, dynamic Lisp implemented in Rust.
   every running process on its next lookup.
 
 Files end `.blsp`. Run a file with `brood file.blsp`; REPL with bare `brood`;
-project tooling via `nest test` / `nest run` / `nest new <name>`.
+project tooling via `nest test` / `nest run` / `nest new <name>`. At the REPL:
+`*1`/`*2`/`*3` are the last results and `*e` the last error; `,help` lists the
+meta-commands (`,doc name`, `,apropos pat`, `,search words`, `,expand form`,
+`,time expr`); Ctrl-C interrupts the running evaluation without losing the
+session; huge results elide with `…` (see `pr-str-bounded`).
 
 ## Syntax
 

@@ -43,9 +43,21 @@ until end of input (Ctrl-D).
     (require 'repl)
     (repl-run)
 
-Driven from the shell by `brood` (no arguments) and `nest repl`. The prompts are
-the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
-`binding` to customise."
+Driven from the shell by `brood` (no arguments) and `nest repl`. Interactively:
+`*1` `*2` `*3` hold the last three results and `*e` the last error; `,help` lists
+the meta-commands (`,doc` `,apropos` `,search` `,expand` `,type` `,time` `,clear`);
+Ctrl-C interrupts the running evaluation (the image survives; press it twice to
+halt a wedged native — note user code that holds RAW mode turns Ctrl-C into a
+plain byte, so a blocked TUI needs a `kill -INT` from another terminal, which
+also recovers the session); results print through `pr-str-bounded` under
+`*print-length*` / `*print-level*` (use `(pr-str *1)` for the whole value).
+Startup files `~/.broodrc.blsp` (or `$BROOD_RC`) then `./.broodrc.blsp` load once
+per runtime — the place for `lineedit-bind`, `(def *lineedit-candidates* …)`,
+`(def *repl-interruptible* false)`, and other customisations.
+
+Nestable: `pry` (std/tool/debug.blsp) calls `(repl-run)` mid-session. The prompts
+are the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
+`binding` around the call to customise."
   (:use editor/lineedit)
   (:use editor/highlight))
 ;; ---- configuration (dynamic so a session can rebind them) -------------------
