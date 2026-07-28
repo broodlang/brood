@@ -152,6 +152,7 @@
 ;; crafted provenance (a `from` ns per registration), so the ordering is testable without
 ;; standing up real cross-module fixtures. Unique ability names avoid clashing the shared
 ;; registries. type-owner (3) > ability-owner (2) > other (1).
+; an ancestor ≠ owner
 (describe "impl precedence (deterministic by tier)"
   :serial
   (test "type-owner beats ability-owner regardless of registration order"
@@ -186,4 +187,11 @@
   (test "a nil `from` (root/REPL impl) doesn't crash — dispatch round-trips"
     (register-ability 'RootAb '((op [self])) 'somens)
     (register-impl 'RootAb 'op :int (fn (n) :root-impl) nil)
-    (assert= ((impl-for '[RootAb op] :int) nil) :root-impl)))
+    (assert= ((impl-for '[RootAb op] :int) nil) :root-impl))
+  ;; a NESTED-namespace module (e.g. editor/display) owns its record's id — the split is
+  ;; on the LAST `/` (the record name), so all leading segments stay in the owner name.
+  (test "a nested-namespace module owns its record id (last `/` splits name off)"
+    (register-ability 'NestAb '((op [self])) 'somelib)
+    ; the true owner
+    (assert= (impl-rank 'NestAb :editor/display/frame 'editor/display) 3)
+    (assert= (impl-rank 'NestAb :editor/display/frame 'editor) 1)))

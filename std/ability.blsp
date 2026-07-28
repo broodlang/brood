@@ -116,14 +116,17 @@
 
 ; ---- registration -----------------------------------------------------------
 
-; The owning module of a record id keyword `:mod/name` (the `mod` part, as a string), or
-; nil for a built-in id (`:int`, `:default` — no `/`). Used to place an impl in the tier
-; ladder: an impl whose registering ns equals this owns the type.
+; The owning module of a record id keyword `:mod/name` (as a string), or nil for a
+; built-in id (`:int`, `:default` — no `/`). The record NAME is the final `/`-segment, so
+; the module is everything BEFORE the last `/` — a nested module keeps all its segments
+; (`:editor/display/frame` → `editor/display`, not `editor`). Used to place an impl in the
+; tier ladder: an impl whose registering ns equals this owns the type.
 (defn impl--id-owner (key)
   (if (keyword? key)
-    (let (n (name key)
-          slash (index-of n "/"))
-      (if (>= slash 0) (substring n 0 slash) nil))
+    (let (parts (string-split (name key) "/"))
+      (if (> (count parts) 1)
+        (join "/" (take (- (count parts) 1) parts))
+        nil))
     nil))
 
 ; The precedence tier of an impl of `aname`, for id `key`, registered from ns `from`
