@@ -1101,6 +1101,35 @@ Runtime housekeeping (both items landed):
 
 ### Language core & types
 
+- 🟡 **Elixir-loved ergonomics — borrow the beloved features that fit a small,
+  immutable Lisp** (2026-07-28). Survey of what Brood still lacks vs. Elixir's
+  most-liked features (pipe / `with` / pattern-matching / OTP / specs / `mix` /
+  observer / streams / `get-in` are already covered; `#(…)` capture was
+  consciously declined). Ordered by value-to-effort:
+  - ✅ **`with`** — Elixir-style sequential match-binding with `:else`, as a
+    prelude macro over `match` (2026-07-28; see devlog). No new special form.
+  - ✅ **`spy`** (chose this name over `dbg`) — a *homoiconic tree-tracing* debug
+    macro (2026-07-28, ADR-173). Went beyond `dbg`'s fixed special-cases: fully
+    macroexpands and instruments every evaluated position in place, so it traces
+    the whole call tree (pipelines fall out for free — `(-> x f g)` → `(g (f x))`),
+    laziness is preserved, and it's referentially transparent. Output flows through
+    a swappable `*spy-sink*` (`defdyn`) so a host can capture the trace as data (the
+    editor-inline-values seam); default is an indented stderr tree. Prelude macro,
+    no core change. ⬜ Deferred: per-special-form descend rules beyond
+    `if`/`do`/`let`/`letrec`, source-position `file:line` (no primitive exposed
+    yet), a `:label` arg.
+  - ⬜ **Doctests** — runnable `>>>`-style examples in docstrings, executed by
+    `nest test`; reuses `std/tool/test.blsp` + doc infra. Fits "docs as
+    implemented." Bigger (docstring example parser + a discovery pass).
+  - ⬜ **`reduce-while`** (≈ `Enum.reduce_while`) — early-terminating fold via
+    `[:cont acc]` / `[:halt acc]`. Pure prelude fn over existing primitives.
+  - ⬜ **Function-head guards** — `:when` guards on `defn`/`fn` *clause heads*
+    (work in `match` today, not in arity/pattern clause heads — verified: the
+    guard is currently ignored). The one genuine *core* gap; touches the
+    evaluator / arity dispatch, so weigh against "keep the core small."
+  - ⬜ **`tap` / `then`** (Kernel) — single-fn pipe helpers. Marginal: `->`
+    already covers `then`, and `doto` covers multi-form `tap`. Ship only if the
+    exact spelling is wanted.
 - ✅ **Syntax finalisation pass (2026-07-25, ADR-149/150/151/152)** — closed the
   cases where the surface accepted a plausible-but-wrong spelling and
   **reinterpreted** it instead of rejecting it. Binding containers are lists (a

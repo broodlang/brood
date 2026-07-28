@@ -10987,3 +10987,54 @@ static dispatch), ADR-123–126 (checker never gates the live image; CI hard-rej
 ADR-130 (records as maps carrying `:__id__`), ADR-070 (package-rooted namespaces — the
 clean app/library line), ADR-011 (defer power features — why the always-on-in-core and
 bridge machinery are scoped, not maximal).
+
+## ADR-173 — `spy`: a homoiconic tree-tracing debug macro (borrow Elixir's `dbg`, do it more Lisp)
+
+**Status:** accepted, implemented (2026-07-28). `spy` ships in `std/prelude.blsp`;
+tests in `tests/spy_test.blsp`.
+
+**Context.** Elixir's `dbg` is one of its most-loved conveniences: wrap any
+expression (or drop `|> dbg()` into a pipeline) and it prints the source and value —
+of the whole expression and, for a pipe, each stage — then returns the value
+unchanged, so inserting/removing it never changes behaviour. Doing the same in Brood
+was flagged as the highest value-to-effort item on the "Elixir-loved ergonomics"
+backlog (after `with`, ADR — none; devlog 2026-07-28). The design question was whether
+to transliterate `dbg` (special-case a fixed set of constructs, reconstruct source
+from the AST) or exploit that Brood code *is* data.
+
+**Decision.** Ship it as **`spy`** (a Lisp-tradition name over `dbg`), a **prelude
+macro** — not a Rust builtin (ADR-006: mechanism in Rust, policy in Brood) — with
+three deliberate choices:
+
+**1 — Full homoiconic tree-trace, not a fixed special-case set.** `spy` fully
+macroexpands the form and instruments *every evaluated position* in place, so it
+traces the entire call tree, not just pipelines. Because `macroexpand` only resolves
+the *outer* head (`(+ 1 (when …))` leaves the inner `when`), the walker re-expands at
+every node. Instrumenting **in place** is what preserves evaluation semantics:
+laziness (an untaken `if` branch, a short-circuited `and` tail) and single-evaluation
+fall out for free, and referential transparency holds — the value is always returned
+unchanged. A pipeline needs **no special case**: `(-> x f g)` expands to `(g (f x))`
+and the ordinary call rule traces each stage. `fn` bodies, `quote`, and `quasiquote`
+are left opaque (a closure body runs later/elsewhere; quoted data never evaluates).
+This is strictly more than `dbg`, and simpler, because homoiconicity removes the
+AST-to-source reconstruction Elixir needs.
+
+**2 — A swappable sink (`*spy-sink*`), so a trace is DATA, not text.** Elixir's `dbg`
+hardwires printing. `spy` emits structured entries — `{:spy :enter :form f}`,
+`{:spy :node :form f :value v :depth d}`, `{:spy :exit :value v}` — through a `defdyn`
+sink. The default pretty-prints an indented tree to **stderr** (never corrupting
+stdout data); a host — the editor, the `nest observe` viewer, a test — rebinds the
+sink to capture the trace as data. This is the "even better than `dbg`" bet and the
+seam that lets the self-editing editor later render `spy` values as inline overlays
+(M2/M3). It also subsumes the "no-op in production" need without a separate gate
+(ADR-011): rebind the sink to a no-op — no `*debug*` knob added.
+
+**Consequences.** One new public macro (`spy`) + one dynamic (`*spy-sink*`); no core
+/ evaluator change, no new special form (ADR keeps the core small). Scope drawn at
+descend-into `if`/`do`/`let`/`letrec` + calls; other special forms trace their top
+value only (sound, conservative) — a fuller per-special-form rule table is deferred
+until wanted. No source position in the trace yet (no position primitive is exposed
+for a macro's argument form); the source *form* echo carries the information. Related:
+[[with]] (ADR — the prior ergonomics borrow), ADR-006 (write it in Brood), ADR-011
+(defer power — why the special-form rules and a `:label` arg are scoped, not maximal),
+ADR-013 (hot reload — the sink seam mirrors the late-binding philosophy).

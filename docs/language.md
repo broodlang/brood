@@ -812,6 +812,35 @@ value between the literal text and lowers to a plain `(str …)` (no runtime cos
 (fmt "sum={(+ a b)} for {name}")   ;=> "sum=7 for ada"
 ```
 
+**`spy`** — a homoiconic tree-tracing debug macro (Brood's answer to Elixir's `dbg`,
+ADR-173). `(spy expr)` evaluates `expr`, traces **every** evaluated subexpression's
+value in evaluation order, and returns the value **unchanged** — so it's referentially
+transparent: wrap or drop `spy` around any form with no behavioural change.
+
+```clojure
+(spy (+ (* a 2) (f 2)))     ; a=10, f adds 5
+;; stderr:
+;;   spy: (+ (* a 2) (f 2))
+;;       (* a 2) => 20
+;;       (f 2) => 7
+;;     (+ (* a 2) (f 2)) => 27
+;;   => 27
+;; returns 27
+```
+
+It fully macroexpands the form and instruments each evaluated position **in place**, so
+laziness is preserved (an untaken `if` branch or a short-circuited `and` tail never
+traces) and a **pipeline needs no special case** — `(-> x f g)` expands to `(g (f x))`
+and each stage traces as an ordinary call. `fn` bodies and quoted data are left opaque.
+Trace entries flow through the swappable **`*spy-sink*`** (a `defdyn`) — the default
+prints the indented tree to stderr, but a host can `binding` it to a collector and
+consume the trace as data (`{:spy :node :form … :value … :depth …}` maps), or to a
+no-op to silence it without editing code:
+
+```clojure
+(binding (*spy-sink* (fn (entry) nil)) (spy (heavy-computation)))  ; value, no output
+```
+
 > Note: a **nested quasiquote** (a `` ` `` inside a `` ` `` template) is
 > **rejected**, with a hint. Levels are not tracked, so an inner `~x` would be
 > expanded at the outer level — `` `(a `(b ~(+ 1 2))) `` used to yield
