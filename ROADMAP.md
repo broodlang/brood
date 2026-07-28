@@ -59,8 +59,9 @@ Shipped as ADRs:
   - ⬜ **Abilities v2** ([ADR-172](docs/decisions.md), design decided 2026-07-28) —
     tightens ADR-168's open runtime model to **app-sovereign coherence, enforced at
     compile time, live-replaceable**: `impl` only what you own (ability or type),
-    `bridge` (app-only, greppable) for deliberate cross-library linking, glue packages
-    authorized by the app manifest's `:bridges`, precedence `app > type-owner >
+    `bridge` (app-only, greppable) for deliberate cross-library linking (reusable glue is
+    a package of functions the app's `bridge` calls — no `:bridges`/glue-package
+    authorization, dropped), precedence `app > type-owner >
     ability-owner > :default > native`. Dispatch specialized through the IC/JIT with
     deopt-on-reload; `:sealed` abilities go fully static/exhaustive; the runtime
     `*impls*` registry becomes the backstop. `Display` becomes always-on core (records
@@ -73,7 +74,7 @@ Shipped as ADRs:
       end to end: `project--ensure-deps-on-path` load-paths them for dev/`nest test`,
       `bundle-collect` excludes them from a release bundle (verified with a scratch
       project). Optional-dep *resolution* (peer presence) lands with the bridge slice.
-      Slices 2–6 (`bridge`/`:bridges`, coherence checking, precedence, dispatch
+      Slices 2–6 (`bridge`, coherence checking, precedence, dispatch
       specialization, always-on `Display`) still ⬜.
 - ✅ **ADR-159** — grapheme-*indexed* accessors (`grapheme-count`, `grapheme-at`,
   `substring-graphemes`), so the documented-correct cursor step stops costing a vector

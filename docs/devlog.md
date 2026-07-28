@@ -9862,3 +9862,19 @@ is resolvable from a test (`(:use devtool)` passes under `nest test`), and
 `(bundle-collect root)` omits it (`devtool in bundle? false`). Optional-dep *resolution*
 (peer presence) still lands with the bridge slice; this is the dev-dep half. Suite green,
 `nest check` clean, formatted.
+
+## 2026-07-28 (design) — dropped `:bridges` from ADR-172: reusable glue is a package of functions
+
+A "do we really need `:bridges`?" question exposed a contradiction in the design: `bridge`
+was declared **app-only**, yet a glue *package* (a module of `bridge` forms authorized by a
+manifest `:bridges` list) is not the app. `:bridges` existed only to reconcile that — so it
+was dropped. `bridge` is now strictly app-only, full stop. Reusable glue doesn't need orphan
+impls in a package: the package exports plain **conversion functions**, and the **app** writes
+the `bridge` calling them (`(bridge JsonEncode (ecto/decimal (encode [d] (json-ecto/decimal->json
+d))))`). The app always declares the link — you can never get a bridge you didn't write — and
+`bridge` staying unambiguously app-only shrinks the ADR-070 dependency ("who is the app" only
+has to mean "the root/entry program"). The turnkey "add package X and it just works" is the one
+thing lost, but that *is* the silent/transitive behaviour the model rejects. Knock-on: `:optional`
+(shipped, slice 1) loses its strongest motivation (gating a glue package on both libs present),
+falling back to the generic Cargo/Elixir optional dependency; kept for now, worth revisiting.
+ADR-172 §2/§4/§5/§9/§10 + the walkthrough artifact updated.
