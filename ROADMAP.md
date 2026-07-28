@@ -44,46 +44,63 @@ Shipped as ADRs:
   carried the checker/LSP conformance pass for months while the macros lived
   downstream. **Superseded by ADR-168:** `defprotocol`/`defimpl` dispatched only on
   `type-of`, so no two records could dispatch apart; they were retired in favour of
-  `std/ability.blsp` (`defability`/`impl`/`defrecord*`, nominal dispatch).
-  `defbehaviour` stays in `std/protocol.blsp`.
-  - ✅ **The display protocol** (ADR-171, 2026-07-28) — the first std use of an
-    ability for open-extension rendering: `std/show.blsp`'s `Display`/`to-str`
-    (Elixir's `String.Chars`), with a zero-cost prelude `*show*` hook so the screen
-    printers let a record define how it prints. Second audit candidate — a
-    `JsonEncode` ability so user records serialize instead of `json--emit` erroring
-    — is the same shape, left as a follow-up. (Audit found only these two; the rest
-    of `std/` is correctly-closed `cond`/state-machines per ADR-011.)
+  the ability system (`defability`/`impl`/`defrecord`, nominal dispatch), now **core
+  in the prelude**. `defbehaviour` stays in `std/protocol.blsp`.
+  - ✅ **The display protocol** (ADR-171, 2026-07-28) — the first ability for
+    open-extension rendering: `Display`/`to-str` (Elixir's `String.Chars`), with a
+    zero-cost prelude `*show*` hook so the screen printers let a record define how it
+    prints. **Now core and always on** (slice 6 below): a record customizes printing
+    with just `(impl Display …)` — no `(require 'show)`, no activation step. Second
+    audit candidate — a `JsonEncode` ability so user records serialize instead of
+    `json--emit` erroring — is the same shape, left as a follow-up. (Audit found only
+    these two; the rest of `std/` is correctly-closed `cond`/state-machines per ADR-011.)
   - ⬜ **Checker gap:** a `:use`d ability op from a *loose disk* module (not embedded,
     not in a project) is flagged `unbound symbol` though it runs; embedded/same-module
     use resolves. Surfaced by the `show` cross-module test. **[kernel/checker]**
-  - ⬜ **Abilities v2** ([ADR-172](docs/decisions.md), design decided 2026-07-28) —
-    tightens ADR-168's open runtime model to **app-sovereign coherence, enforced at
-    compile time, live-replaceable**: `impl` only what you own (ability or type),
-    `bridge` (app-only, greppable) for deliberate cross-library linking (reusable glue is
-    a package of functions the app's `bridge` calls — no `:bridges`/glue-package
-    authorization, dropped), precedence `app > type-owner >
-    ability-owner > :default > native`. Dispatch specialized through the IC/JIT with
-    deopt-on-reload; `:sealed` abilities go fully static/exhaustive; the runtime
-    `*impls*` registry becomes the backstop. `Display` becomes always-on core (records
-    only, guarded) superseding ADR-171's opt-in `show` — at which point the interim
-    `show`/`display-on`/`display-off` scaffolding is removed (it's a known wart, kept as
-    the interim only because Display is a std module, not core; decided 2026-07-28 to
-    **leave it** rather than polish it — the jank vanishes when Display goes core, and the
-    safety it approximates is really owner-only coherence, not an activation gate). Needs
-    [ADR-070](docs/decisions.md) (package-rooted namespaces) for the clean app/library
-    line. **[kernel/checker/eval]**
+  - 🟡 **Abilities v2** ([ADR-172](docs/decisions.md), design decided 2026-07-28,
+    **amended 2026-07-28**) — makes ADR-168's open runtime model **deterministic and
+    app-sovereign** without closing it. **Amendment: the orphan rule and the `bridge`
+    form are dropped before implementation** — abilities stay OPEN (`impl` legal for any
+    ability and any id, incl. primitives and unowned types), because `bridge` had zero
+    runtime substance (it expands to the same `register-impl` as `impl`) and the orphan
+    restriction guards a multi-third-party-library collision greenfield Brood doesn't
+    have. App sovereignty is delivered by the **precedence ladder alone**: `app >
+    type-owner > ability-owner > other`, same-tier cross-module collisions warned. If a
+    real orphan conflict ever appears, orphan-authorization becomes a **lint on plain
+    `impl`** (app/library line is already computable via package identity), advisory-live
+    / hard-CI — no new form. What remains: dispatch specialized through the IC/JIT with
+    deopt-on-reload and `:sealed` fully static/exhaustive (slice 5). **The ability system
+    itself is now core** — folded into the prelude, so `defability`/`impl`/`defrecord`
+    are always available, no `(:use ability)`. **[kernel/checker/eval]**
     - ✅ **Slice 1 — optional + dev dependencies** (2026-07-28): the manifest takes
       `:optional true` per dep and a `:dev-dependencies` list (tagged `:dev true`, own
-      slot) — the package-level seam the bridge story needs. **Slice 1b** wired dev-deps
-      end to end: `project--ensure-deps-on-path` load-paths them for dev/`nest test`,
-      `bundle-collect` excludes them from a release bundle (verified with a scratch
-      project). Optional-dep *resolution* (peer presence) lands with the bridge slice.
-    - 🟡 **Slice 4 (part) — deterministic precedence** (2026-07-28): `std/ability.blsp`
-      resolves competing impls by tier (**type-owner > ability-owner > other**), not load
-      order — `defability` records its owner ns, `register-impl` keeps the highest-tier
-      impl per slot (a guard at registration; dispatch stays a plain map-get). The top
-      **app** tier awaits ADR-070 (app-vs-library). Slices 2, 3, 5, 6 (`bridge`, coherence
-      checking, dispatch specialization, always-on `Display`) still ⬜.
+      slot). **Slice 1b** wired dev-deps end to end: `project--ensure-deps-on-path`
+      load-paths them for dev/`nest test`, `bundle-collect` excludes them from a release
+      bundle (verified with a scratch project).
+    - ❌ **Slices 2 + 3 — `bridge` + coherence checking: dropped** (2026-07-28
+      amendment). No orphan rule, so no orphan escape hatch to build; `impl` stays open.
+    - ✅ **Slice 4 — deterministic precedence, all four tiers** (2026-07-28):
+      `std/ability.blsp` resolves competing impls by tier (**app > type-owner >
+      ability-owner > other**), not load order — `defability` records its owner ns,
+      `register-impl` keeps the highest-tier impl per slot (a guard at registration;
+      dispatch stays a plain map-get). The top **app** tier shipped via **package
+      identity** rather than waiting for full ADR-070 name-prefixing: a `defdyn
+      *ns-package*` maps each namespace to its owning package's name (static scan at
+      project setup), and a ns whose package is `*project-name*` — or has no owner
+      (root/REPL) — is the app. `ns-package`/`trace-with-packages` also tag stack frames
+      with their owning package.
+    - ⬜ **Slice 5 — dispatch specialization**: lower ability calls through the IC/JIT
+      with deopt-on-reload (today every call is a runtime `impl-for` map-get); `:sealed`
+      abilities compile to a closed exhaustive switch. A Brood-side fast path (collapse
+      `impl-for`'s double lookup) is the first step; a kernel inline cache the second.
+    - ✅ **Slice 6 — `Display` core, always on** (2026-07-28): the ability system +
+      `Display`/`Inspect` folded into the prelude; the prelude wires `*show*` on by
+      default. A record customizes printing with just `(impl Display …)` — no
+      `(require 'show)`, no `display-on`. `std/ability.blsp` + `std/show.blsp` deleted
+      (their content is now prelude); the `Interp` needs no per-runtime load. **Records
+      unified**: `defrecord`/`defrecord*` collapsed into one identity-carrying `defrecord`
+      (constructor + accessors + nominal id + dispatch); records are now nominal (not `=`
+      to a bare map). The star is gone.
 - ✅ **ADR-159** — grapheme-*indexed* accessors (`grapheme-count`, `grapheme-at`,
   `substring-graphemes`), so the documented-correct cursor step stops costing a vector
   of every cluster in the string per keystroke.
@@ -137,10 +154,10 @@ What that review consciously left OPEN, with the reasoning:
   measured rewrite, not a promotion. **[kernel/Brood]**
 - ✅ **Record-shape dispatch** — resolved by **ADR-168**. Records stay structural maps
   (ADR-130 intact: `type-of` is still `:map`, `get`/`assoc`/`=` still structural), and
-  a `defrecord*` value carries a *dispatch-only* `:module/name` nominal identity baked
+  a `defrecord` value carries a *dispatch-only* `:module/name` nominal identity baked
   in at definition, so two record shapes dispatch apart. The rejected `:type`-field
   axis stays rejected: it would silently reroute any map carrying a `:type` key, where
-  a `defrecord*` identity is explicit and construction-time.
+  a `defrecord` identity is explicit and construction-time.
 - ⬜ **Transducer early termination** (`reduced`) and stateful-stage lifecycle.
   ADR-161 ships the one-arity contract `fold` needs; `take`-as-a-stage wants a
   `reduced` sentinel threaded through `fold`, the library's hottest function.
@@ -1332,7 +1349,11 @@ Runtime housekeeping (both items landed):
   (`std/tool/test.blsp`, `test--make-filter`); `nest` only forwards argv.
   `tests/test_selection_test.blsp` (54 cases, incl. cross-process spec round-trip).
   ⬜ Still unmapped from `mix test`: `--stale` (needs a per-test dependency graph),
-  `--formatter`, `--breakpoints`. (`--cover` shipped — see "Test coverage" below.)
+  `--formatter`, `--breakpoints`. (`--cover` shipped — see "Test coverage" below.) A
+  **process-native tracing debugger** prototype now exists (`std/tool/debug`, ADR-174):
+  `break` parks without a timeout + a multi-process paused queue, `spy`-fed aggregate
+  queries, and a causal tree propagated transparently across `spawn`. Deferred: send-level
+  causality (a GC-traced Heap slot; own pass) and wiring it into `nest observe`.
 - ✅ **Test coverage — both tiers** — function-level `nest test --cover` (2026-07-24)
   (ADR-148, [`docs/coverage.md`](docs/coverage.md)): which project functions the
   suite never entered, plus `--cover-min PCT` to fail the run under a floor.

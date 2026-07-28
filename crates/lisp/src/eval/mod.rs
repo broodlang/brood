@@ -1444,13 +1444,12 @@ pub(crate) fn foreign_construct_hint(name: &str) -> Option<&'static str> {
         | "defmethod" => {
             "Brood has no nominal types — for a named, optionally-typed record use \
              `defrecord` (sugar over a plain map, so records stay structural). For \
-             polymorphism, `(:use ability)` in your `defmodule` header gives \
-             `defability`/`impl` — open generic \
-             functions dispatching on the first argument's identity (its `type-of` kind, \
-             or a `defrecord*` record's nominal id), extensible from any module; a driver \
-             is just a value you dispatch on. Or dispatch with `match`/`cond`; \
-             multi-clause `defn` dispatches on arity or pattern. (`defprotocol`/`defimpl` \
-             were retired in favour of `ability`.)"
+             polymorphism, `defability`/`impl`/`defrecord` are built in (core, no \
+             import) — open generic functions dispatching on the first argument's \
+             identity (its `type-of` kind, or a `defrecord` record's nominal id), \
+             extensible from any module; a driver is just a value you dispatch on. Or \
+             dispatch with `match`/`cond`; multi-clause `defn` dispatches on arity or \
+             pattern. (`defprotocol`/`defimpl` were retired in favour of `ability`.)"
         }
         "lazy-seq" | "lazy-cat" => {
             "Brood has no `lazy-seq` thunk. `map`/`filter` are EAGER; for a fusing, \

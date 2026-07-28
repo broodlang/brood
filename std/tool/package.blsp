@@ -562,6 +562,13 @@ package is unknown to this index."
     nil
     (let (entries (resolve-deps root deps (read-lockfile root)))
       (package--guard-collisions root entries)
+      ;; A dependency may NOT share your project's package name (ADR-172): package identity
+      ;; keys the ability app tier on it, so a same-named dep would silently gain app-override
+      ;; rights over your own types. Detect-and-reject, like the module-collision check.
+      (when (and *project-name* (includes? (map :name entries) *project-name*))
+        (error "package: a dependency shares your project's package name '"
+          *project-name*
+          "' — rename one (package identity keys the ability app tier on it, ADR-172)"))
       (package--write-lockfile-if-changed root entries)
       ;; identity: each dep's modules → the dep's `:name`.
       (package-record-ns-packages (map (fn (e) (list (get e :name) (package--dep-src-dir e)))

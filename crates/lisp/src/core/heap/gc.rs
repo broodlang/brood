@@ -63,6 +63,10 @@ impl Heap {
         for (_, v) in self.dynamics.iter_mut() {
             *v = flush_value(&old, &mut self.local, &mut fwd, *v);
         }
+        #[cfg(feature = "dev-tools")]
+        if let Some(v) = &mut self.trace_context {
+            *v = flush_value(&old, &mut self.local, &mut fwd, *v);
+        }
         for v in self.roots.iter_mut() {
             *v = flush_value(&old, &mut self.local, &mut fwd, *v);
         }
@@ -736,6 +740,10 @@ impl Heap {
         for (_, v) in self.dynamics.iter_mut() {
             *v = flush_value(src, dest, fwd, *v);
         }
+        #[cfg(feature = "dev-tools")]
+        if let Some(v) = &mut self.trace_context {
+            *v = flush_value(src, dest, fwd, *v);
+        }
         for v in self.roots.iter_mut() {
             *v = flush_value(src, dest, fwd, *v);
         }
@@ -996,6 +1004,10 @@ impl Heap {
             work.push(W::E(e, 0));
         }
         for &(_, v) in &self.dynamics {
+            work.push(W::V(v, 0));
+        }
+        #[cfg(feature = "dev-tools")]
+        if let Some(v) = self.trace_context {
             work.push(W::V(v, 0));
         }
         // The write-barrier `remembered` old frames are the *only* mutable old

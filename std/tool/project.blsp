@@ -42,15 +42,16 @@ the `nest new` scaffolder."
   `editor/display`). Returns the package name, or nil for an unrecorded/embedded (std)
   module, a root (unqualified) name, or when no project is loaded. This is the seam for
   surfacing package in stack traces — `(ns-package (get frame :fn))` — introspection, and
-  tooling."
-  (let (s (if (symbol? ns-or-name) ns-or-name (symbol ns-or-name)))
-    (or (get *ns-package* s)
-      ;; not a module directly — treat it as a qualified name, strip the last `/`-segment
-      ;; (the def/fn name) and look up its module.
-      (let (parts (string-split (str s) "/"))
-        (if (> (count parts) 1)
-          (get *ns-package* (symbol (join "/" (take (- (count parts) 1) parts))))
-          nil)))))
+  tooling. `nil` in (an anonymous / top-level trace frame has no `:fn`) yields `nil` out."
+  (when ns-or-name
+    (let (s (if (symbol? ns-or-name) ns-or-name (symbol ns-or-name)))
+      (or (get *ns-package* s)
+        ;; not a module directly — treat it as a qualified name, strip the last `/`-segment
+        ;; (the def/fn name) and look up its module.
+        (let (parts (string-split (str s) "/"))
+          (if (> (count parts) 1)
+            (get *ns-package* (symbol (join "/" (take (- (count parts) 1) parts))))
+            nil))))))
 
 (defn trace-with-packages (trace)
   "Annotate each stack-trace frame (`{:fn :file :line :col}`) with `:package` — the owning
@@ -210,10 +211,11 @@ the `nest new` scaffolder."
                  (= kind :version) (project--parse-registry-dep name entry)
                  else (error "project: dependency "
                         name " must be :git, :path, :tarball, or :version, got " kind))
-          ;; `:optional` (ADR-172) — a dep declared but not force-installed: the seam a
-          ;; bridge/glue package rides, present only when the app also depends on it.
-          ;; Recognised on every dep kind; defaults false. (Resolution semantics — peer
-          ;; presence — land with the bridge work; this normalises the manifest flag.)
+          ;; `:optional` (ADR-172) — a dep declared but not force-installed. Recognised on
+          ;; every dep kind; defaults false. (Resolution semantics — peer presence — are
+          ;; deferred: this normalises the manifest flag. The bridge/glue motivation was
+          ;; dropped in the 2026-07-28 amendment, so `:optional` is now the generic
+          ;; Cargo/Elixir optional dependency, decoupled from abilities.)
           optional (if (plist-get opts :optional) true false))
       (assoc base :optional optional))))
 

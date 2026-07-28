@@ -902,22 +902,18 @@ fn foreign_constructs_hint_at_the_brood_way() {
 fn hints_name_only_features_that_exist() {
     let hint = |src: &str| run(&format!("(try {src} (catch e (get e :hint)))"));
     // The polymorphism hint must name a form the reader can actually reach. It has been
-    // wrong twice in the same way: first it pointed at a `protocol` module std didn't
-    // ship (the macros lived in the hatch package; only the checker pass was in-tree),
-    // and then — after ADR-168 retired `defprotocol`/`defimpl` for `ability` — it said
-    // `(require 'ability)` "gives" `defability`, but `require` only LOADS, leaving the
-    // name qualified (`ability/defability`). Referring to it bare needs `(:use ability)`.
-    // Keep this assertion: it went red on main when ADR-168 rewrote the hint without
-    // updating it here.
+    // wrong before: it pointed at a `protocol` module std didn't ship, then at a
+    // `(:use ability)` import. Abilities are now CORE (folded into the prelude), so the
+    // hint must name them as built-in — no import — and the names must be bound bare in
+    // the live image with no require at all.
     let d = hint("(deftype foo)");
-    assert!(d.contains("(:use ability)"), "{d}");
     assert!(d.contains("defability"), "{d}");
     assert!(d.contains("defrecord"), "{d}");
-    // …and the claim is checked against the live image, not just the wording: after a
-    // bare `require` the name is NOT bare, which is precisely why the hint says `:use`.
+    // …and the claim is checked against the live image: `defability`/`impl`/`defrecord`
+    // are bound bare at the root, out of the box.
     assert_eq!(
-        run("(do (require 'ability) (list (bound? 'defability) (bound? 'ability/defability)))"),
-        "(false true)"
+        run("(list (bound? 'defability) (bound? 'impl) (bound? 'defrecord))"),
+        "(true true true)"
     );
     // `letfn` → letrec (a let-bound fn cannot call itself).
     assert!(hint("(letfn ((f (x) x)) 1)").contains("letrec"));

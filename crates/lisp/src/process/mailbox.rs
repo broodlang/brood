@@ -146,8 +146,28 @@ pub(super) struct Mailbox {
     pub(super) parent: AtomicU64,
 }
 
+/// A queued message plus, under `dev-tools`, the debugger causal context (ADR-174
+/// send-level) the sender carried. Access to the payload is always `.msg` — uniform
+/// across builds, so the receive matcher is untouched — and in a lean release this is
+/// a zero-cost newtype over `Message` (the `trace` field does not exist).
+pub(super) struct Envelope {
+    pub(super) msg: Message,
+    #[cfg(feature = "dev-tools")]
+    pub(super) trace: Option<Message>,
+}
+impl Envelope {
+    #[inline]
+    pub(super) fn plain(msg: Message) -> Self {
+        Envelope {
+            msg,
+            #[cfg(feature = "dev-tools")]
+            trace: None,
+        }
+    }
+}
+
 pub(super) struct MailboxState {
-    pub(super) queue: VecDeque<Message>,
+    pub(super) queue: VecDeque<Envelope>,
     /// The exit reason set by `(exit pid reason)` / link propagation, paired with
     /// `kill_pending`. Read (and cleared) when the target dies; written under this
     /// lock before the flag is published, so a reader that sees the flag set always
@@ -420,10 +440,22 @@ pub(super) fn wake_parked(st: &mut MailboxState) -> Option<Box<Process>> {
 /// a no-op if `pid` is gone. The shared tail of `send`, monitor `[:down …]`
 /// delivery, and inbound node-link messages (`crate::dist`).
 pub(crate) fn deliver(pid: u64, msg: Message) {
+    deliver_envelope(pid, Envelope::plain(msg));
+}
+
+/// Like [`deliver`], but the message carries a debugger causal context (ADR-174
+/// send-level): the receiver adopts `trace` when it pops this message. `dev-tools`
+/// only; the `send` primitive uses it when the sender has a trace context set.
+#[cfg(feature = "dev-tools")]
+pub(crate) fn deliver_traced(pid: u64, msg: Message, trace: Option<Message>) {
+    deliver_envelope(pid, Envelope { msg, trace });
+}
+
+fn deliver_envelope(pid: u64, env: Envelope) {
     let mailbox = REGISTRY.get(pid);
     if let Some(mb) = mailbox {
         let mut st = crate::core::sync::lock(&mb.state);
-        st.queue.push_back(msg);
+        st.queue.push_back(env);
         if let Some(proc) = wake_parked(&mut st) {
             drop(st);
             wake_enqueue(proc); // wake a parked green process (capture-mode → may migrate)
@@ -446,6 +478,18 @@ pub(crate) fn deliver(pid: u64, msg: Message) {
 /// is about the link, not the peer process.
 pub fn send(heap: &Heap, target_val: Value, msg_val: Value) -> Result<(), LispError> {
     let msg = to_message(heap, msg_val)?;
+    // (dev-tools) Send-level causality (ADR-174): if the sender carries a debugger
+    // trace context and the target is a LOCAL pid, ship the context alongside so the
+    // receiver adopts it on pop. Context is per-runtime, so it never crosses nodes;
+    // remote / name-addressed / no-context sends fall through to the normal route.
+    #[cfg(feature = "dev-tools")]
+    if let (Value::Pid { node, id }, Some(ctx)) = (target_val, heap.trace_context()) {
+        if crate::dist::is_local(node) {
+            let trace = to_message(heap, ctx)?;
+            deliver_traced(id, msg, Some(trace));
+            return Ok(());
+        }
+    }
     let (routed, node) = match target_val {
         Value::Pid { node, id } => (
             crate::dist::route(node, crate::dist::Target::Pid(id), msg),
@@ -719,10 +763,10 @@ fn scan_mailbox(
             if optimistic {
                 let m = st.queue.remove(*i).expect("bounds checked above");
                 drop(st);
-                let v = from_message(heap, &m);
+                let v = from_message(heap, &m.msg);
                 (Some(m), v)
             } else {
-                (None, from_message(heap, &st.queue[*i]))
+                (None, from_message(heap, &st.queue[*i].msg))
             }
         };
         let matcher = heap.root_at(rbase);
@@ -760,8 +804,28 @@ fn scan_mailbox(
             // native stack (running a body here would nest a `receive_match` per
             // message → worker-stack overflow). An optimistically-popped match is
             // already out of the queue — nothing left to do.
+            // A non-optimistic match removes the message now; grab it (dev-tools) so
+            // the receiver can adopt the sender's causal context (ADR-174 send-level).
+            #[cfg(feature = "dev-tools")]
+            let matched_trace = match &popped {
+                Some(env) => env.trace.clone(),
+                None => crate::core::sync::lock(&ctx.mailbox.state)
+                    .queue
+                    .remove(*i)
+                    .and_then(|e| e.trace),
+            };
+            #[cfg(not(feature = "dev-tools"))]
             if popped.is_none() {
                 crate::core::sync::lock(&ctx.mailbox.state).queue.remove(*i);
+            }
+            // Adopt the message's context so this receive — and anything it then
+            // spawns or sends — runs in the sender's causal context.
+            #[cfg(feature = "dev-tools")]
+            if let Some(t) = matched_trace {
+                let v = from_message(heap, &t);
+                // Adopted from a message (`own = false`): used to handle this message,
+                // but not propagated onward by `spawn` — so it can't leak transitively.
+                heap.set_trace_context(Some(v), false);
             }
             return Ok(Some(answer));
         }
@@ -781,7 +845,7 @@ fn scan_mailbox(
 /// perturbed before the optimistic-pop scheme — the scan index points at shifted
 /// content either way — so the clamp preserves the message, not a stronger
 /// ordering guarantee than the peek-era code had.)
-fn reinsert_candidate(ctx: &Ctx, i: usize, m: Message) {
+fn reinsert_candidate(ctx: &Ctx, i: usize, m: Envelope) {
     let mut st = crate::core::sync::lock(&ctx.mailbox.state);
     let idx = i.min(st.queue.len());
     st.queue.insert(idx, m);

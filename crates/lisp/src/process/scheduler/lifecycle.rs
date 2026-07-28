@@ -217,6 +217,25 @@ fn spawn_impl(heap: &Heap, f: Value, link_parent: bool) -> Result<u64, LispError
     let mut child = Heap::with_regions(prelude, runtime);
     child.set_global(EnvId::GLOBAL);
 
+    // Transparent causal-context propagation (opt-in, zero cost when unused): if the
+    // spawner has a debugger trace context set (the debugger sets it inside a
+    // `span`/`with-debugger`), promote it into the shared runtime — valid in the child,
+    // like the thunk `f` above — and seed the child's trace-context slot with it. So a
+    // plain `spawn`'d child inherits the debugger + causal span without an explicit
+    // hand-off; its `break`/`span` just work and nest under the parent. When no context
+    // is set (the default), this is one `Option` check per spawn and nothing more.
+    // Gated on `dev-tools` (the debugger's feature), so a lean release compiles it out.
+    #[cfg(feature = "dev-tools")]
+    if let Some(ctx) = heap.trace_context() {
+        // Only the spawner's OWN context propagates — a context merely adopted from a
+        // received message stays with the handler, so it can't leak through unrelated
+        // spawns (the child then owns its inherited copy and propagates it further).
+        if heap.trace_context_own() {
+            let ctx = heap.promote(ctx);
+            child.set_trace_context(Some(ctx), true);
+        }
+    }
+
     ensure_workers();
     // Spawn placement is scan-free (BEAM model): local worker if we're on one, else
     // round-robin; work-stealing rebalances. The O(workers) least-loaded `assign_worker`

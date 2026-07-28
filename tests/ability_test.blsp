@@ -1,13 +1,13 @@
 ;; Unified generic functions with nominal dispatch — `std/ability.blsp`. ONE concept,
 ;; value dispatch on the first argument's identity: a built-in dispatches on its
-;; `type-of` kind, an identity-carrying record (`defrecord*`) on its baked `module/name`
+;; `type-of` kind, an identity-carrying record (`defrecord`) on its baked `module/name`
 ;; id. Subsumes value polymorphism (the `protocol` job) and drivers-as-values (part of
 ;; the `behaviour` job). Register-only — discovered and run by `nest test`.
-(defmodule ability-test (:use test) (:use ability) (:use json))
+(defmodule ability-test (:use test) (:use json))
 
 ;; Records carry a nominal identity captured from THIS module (`ability-test`).
-(defrecord* circle (r))
-(defrecord* rect (w h))
+(defrecord circle (r))
+(defrecord rect (w h))
 
 ;; ---- value polymorphism: dispatch across built-in kinds AND record identities ----
 (defability Size (size [self] :-> int))
@@ -46,8 +46,8 @@
 
 ;; ---- drivers are values: the "behaviour" job in the SAME mechanism ----
 (defability Store (fetch [self k]))
-(defrecord* pg (pool))
-(defrecord* mem (data))
+(defrecord pg (pool))
+(defrecord mem (data))
 (impl Store ability-test/pg (fetch [db k] (str "pg:" (get db :pool) "/" k)))
 (impl Store ability-test/mem (fetch [db k] (get (get db :data) k)))
 
@@ -88,10 +88,10 @@
   :serial
   (test "a cross-module re-register overrides — last wins"
     (defability Ping (ping [self] :-> any))
-    (ability/register-impl 'Ping 'ping :int (fn (n) :a) 'lib-a)
+    (register-impl 'Ping 'ping :int (fn (n) :a) 'lib-a)
     (assert= (ping 1) :a)
     ;; a DIFFERENT module claims the same [ability op id] — warns, last wins
-    (ability/register-impl 'Ping 'ping :int (fn (n) :b) 'lib-b)
+    (register-impl 'Ping 'ping :int (fn (n) :b) 'lib-b)
     (assert= (ping 1) :b))
   (test "a same-module re-register (hot reload) overrides silently"
     ;; the `impl` macro tags both with THIS module — same provenance → no warning
@@ -126,7 +126,7 @@
 
 (describe "sealed abilities"
   (test "the closed member set is recorded (bare names qualified to this ns)"
-    (assert= (ability/sealed-members 'Shape) (list :ability-test/circle :ability-test/rect)))
+    (assert= (sealed-members 'Shape) (list :ability-test/circle :ability-test/rect)))
   (test "sealing does not change dispatch"
     (assert= (area (circle 2)) 12)
     (assert= (area (rect 3 4)) 12)))
@@ -151,8 +151,7 @@
 ;; `register-impl`/`register-ability`/`impl-for`/`impl-rank` are exercised directly with
 ;; crafted provenance (a `from` ns per registration), so the ordering is testable without
 ;; standing up real cross-module fixtures. Unique ability names avoid clashing the shared
-;; registries. type-owner (3) > ability-owner (2) > other (1).
-; an ancestor ≠ owner
+;; registries. app (4) > type-owner (3) > ability-owner (2) > other (1); an ancestor ≠ owner.
 (describe "impl precedence (deterministic by tier)"
   :serial
   (test "type-owner beats ability-owner regardless of registration order"
@@ -204,4 +203,23 @@
               *ns-package* (assoc *ns-package* 'appmod 'myproj))
       (assert= (impl-rank 'AppAb :foreign/rec 'appmod) 4)
       (assert= (impl-rank 'AppAb :foreign/rec nil) 4)
-      (assert= (impl-rank 'AppAb :foreign/rec 'deplib) 1))))
+      (assert= (impl-rank 'AppAb :foreign/rec 'deplib) 1)))
+  ;; regression (the nil-provenance bug): an app/root impl registers with `from` = nil, so
+  ;; `*impl-from*` records nil as the incumbent's provenance. If registration keys "is there
+  ;; an incumbent?" off truthiness of that stored `from` (nil → "none"), a LATER lower-tier
+  ;; impl mistakes the app slot for empty and clobbers it — silently reversing ADR-172's
+  ;; "the app can override anything, order-independent". The app must hold the slot when it
+  ;; registered FIRST, against every lower tier, in either order.
+  (test "an app/root impl (from=nil) is not displaced by a later lower tier"
+    (register-ability 'HoldAb '((op [self])) 'holdlib)
+    ;; app (nil) first, then ability-owner, type-owner, and 'other — none may displace it.
+    (register-impl 'HoldAb 'op :h/rec (fn (x) :app) nil)
+    (register-impl 'HoldAb 'op :h/rec (fn (x) :ability) 'holdlib)
+    (register-impl 'HoldAb 'op :h/rec (fn (x) :type) 'h)
+    (register-impl 'HoldAb 'op :h/rec (fn (x) :other) 'stranger)
+    (assert= ((impl-for '[HoldAb op] :h/rec) nil) :app)
+    ;; and for a built-in id, app-first then the ability owner: app still wins.
+    (register-ability 'HoldB '((op [self])) 'hblib)
+    (register-impl 'HoldB 'op :int (fn (n) :app) nil)
+    (register-impl 'HoldB 'op :int (fn (n) :ability) 'hblib)
+    (assert= ((impl-for '[HoldB op] :int) nil) :app)))

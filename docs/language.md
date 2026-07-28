@@ -299,24 +299,30 @@ which is why `count` is O(1) and structural key equality is O(log n).
 
 ### Records
 
-`defrecord` names a map shape. It is **sugar over a plain map** — there is no new
-value kind and no nominal type: a record *is* a map, so every map operation above
-still applies. `(defrecord point (x y))` defines a positional constructor and one
-accessor per field:
+`defrecord` names a map shape and gives it a **nominal identity**. There is no new
+value kind — a record *is* a map underneath, so every map operation above still applies
+— but the constructor bakes in a reserved `:__id__` field holding a `:module/name`
+keyword, so `ability` dispatch tells a record apart from a bare map and from other
+records. `(defrecord point (x y))` defines a positional constructor and one accessor per
+field:
 
 ```lisp
 (defrecord point (x y))
-(def p (point 3 4))      ; => {:x 3 :y 4}   — a plain immutable map
+(def p (point 3 4))      ; => {:__id__ :<ns>/point, :x 3, :y 4}
 (point-x p)              ; => 3             — accessor, one per field
-(assoc p :x 9)           ; => {:x 9 :y 4}   — update with ordinary map ops
-(= (point 1 2) {:x 1 :y 2})   ; => true     — structural equality, records ARE maps
+(assoc p :x 9)           ; => a fresh record {…:x 9 :y 4}, id and all
+(fields p)               ; => {:x 3 :y 4}   — the clean, id-free view
+(record? p) (record-id p); => true, :<ns>/point
+(= (point 1 2) {:x 1 :y 2})   ; => false    — a record is NOT = a bare map (nominal)
+(= (point 1 2) (point 1 2))   ; => true     — same shape + same id
 ```
 
 The accessors are the reason to reach for it: `(point-x p)` names the field, and a
-typo `(point-witdh p)` is a call to an **undefined function** — caught by `nest
-check` and at runtime — whereas `(get p :witdh)` silently returns `nil`. Because a
-record is just a map, there is no `point?` predicate (records are structural, not
-nominal) and functional update is plain `assoc`/`merge`.
+typo `(point-witdh p)` is a call to an **undefined function** — caught by `nest check`
+and at runtime — whereas `(get p :witdh)` silently returns `nil`. Records are **nominal,
+not structural** (Elixir-struct semantics): a record is never `=` to a bare map with the
+same fields, and `record?`/`record-id`/`fields` are the identity API. Functional update
+is plain `assoc`/`merge` (the id rides along).
 
 A field may carry a type — `(defrecord point ((x int) (y int)))` — and when every
 field is typed, `(sig …)` declarations are emitted for the constructor and
@@ -324,31 +330,30 @@ accessors, so the advisory checker (and `BROOD_CONTRACTS=1` runtime contracts) s
 the field types. See [ADR-130](decisions.md) and `docs/types.md` for the record
 type `(record :k T …)` this lowers to.
 
-### Polymorphism: abilities (`:use ability`)
+### Polymorphism: abilities
 
 `defrecord` names a map's *shape*; an **ability** names an operation that different
-types implement differently. `std/ability.blsp` gives open generic functions
-(ADR-168): each op dispatches on the **identity of its first argument**, and an
-implementation can be added for any identity — including a built-in kind — from any
-module, at any time, without editing the dispatcher.
+types implement differently. Abilities are **core** (in the prelude, ADR-168/172):
+open generic functions where each op dispatches on the **identity of its first
+argument**, and an implementation can be added for any identity — including a built-in
+kind — from any module, at any time, without editing the dispatcher.
 
-Put `(:use ability)` in the module header — that loads *and* imports, so
-`defability`/`impl`/`defrecord*` read bare. (A bare `(require 'ability)` only loads
-it; you would then write `ability/defability`.)
+`defability`/`impl`/`defrecord` are built in — always available, no import, no
+`(:use ability)`.
 
 An argument's **dispatch identity** is one of two things:
 
 - for a built-in value, its `type-of` **kind** — `:int` `:float` `:string`
   `:keyword` `:map` `:vector` `:set` `:nil` `:pid` …;
-- for a value built by **`defrecord*`**, its **nominal id** — a `:module/name`
+- for a value built by **`defrecord`**, its **nominal id** — a `:module/name`
   keyword baked in at definition, so two record shapes defined in one module
   dispatch apart.
 
 ```clojure
-(defmodule geometry (:use ability))
+(defmodule geometry)
 
-(defrecord* circle (r))
-(defrecord* rect (w h))
+(defrecord circle (r))
+(defrecord rect (w h))
 
 (defability Shape
   "The area of a shape."
@@ -384,26 +389,23 @@ A missing implementation is a **loud, named error** — `ability Shape/area: no 
 for :geometry/circle — have (…)`, listing the ids that *are* implemented — never a
 silent `nil`.
 
-**Records dispatch as themselves; plain maps do not.** `(type-of r)` is still
-`:map` for a `defrecord*` value and `get`/`assoc`/`=` still treat it structurally
-(ADR-130 is intact) — the nominal id is a *dispatch-only* notion layered on top.
-Only values built by a `defrecord*` constructor dispatch nominally: a plain map,
-**even one carrying a `:type` field**, stays `:map`. That is the ADR-011 line — the
-identity is explicit and construction-time, never inferred from a field.
-
-Plain `defrecord` values have no identity and so all land on the `:map` impl. Use
-`defrecord*` when a shape needs to dispatch.
+**Records dispatch as themselves; plain maps do not.** `(type-of r)` is still `:map`
+for a `defrecord` value and `get`/`assoc` still treat it as a map — the nominal id is
+carried in a reserved `:__id__` field (a record is *not* `=` to a bare map, though). A
+`defrecord` value dispatches on its `:module/name` id; a plain map, **even one carrying
+a `:type` field**, stays `:map` and lands on the `:map` impl. That is the ADR-011 line —
+the identity is explicit and construction-time, never inferred from a field.
 
 **A driver is just a value.** Because dispatch is on the first argument, "swap the
 backend" needs no config indirection and no module-atom dispatch — you pass a
 different value:
 
 ```clojure
-(defmodule store (:use ability))
+(defmodule store)
 
 (defability Store (fetch [self k]))
-(defrecord* pg  (pool))
-(defrecord* mem (data))
+(defrecord pg  (pool))
+(defrecord mem (data))
 (impl Store store/pg  (fetch [db k] (str "pg:" (get db :pool) "/" k)))
 (impl Store store/mem (fetch [db k] (get (get db :data) k)))
 
@@ -439,18 +441,20 @@ never reaches the wire.
 **What the checker does.** `nest check` verifies each `impl` provides the ability's
 declared ops at the right arity and flags an op the ability never declared. It also
 warns at a **call site** when an op is applied to an argument of statically-known
-identity — a literal, a direct `defrecord*` constructor call, or a record-typed
+identity — a literal, a direct `defrecord` constructor call, or a record-typed
 variable — for which no impl and no `:default` is registered.
 
-> **Planned direction (not yet implemented): [ADR-172](decisions.md).** A decided
-> redesign tightens this open runtime model to **app-sovereign coherence, enforced at
-> compile time, still live-replaceable**: `impl` only what you own (the ability or the
-> type), a new `bridge` form (app-only) for deliberate cross-library linking (reusable
-> glue is a package of functions the app's `bridge` calls — no glue-package
-> authorization), and precedence `app > type-owner >
-> ability-owner > :default > native`. Dispatch specializes through the inline-cache/JIT
-> with deopt-on-reload; `:sealed` abilities go fully static; `Display` becomes always-on
-> core (superseding the opt-in `show`). This section documents what is implemented today.
+> **Direction: [ADR-172](decisions.md) (amended 2026-07-28).** This open runtime model
+> is kept open — `impl` stays legal for any ability and any id (primitive, owned, or
+> someone else's) — and made **deterministic and app-sovereign** by a precedence ladder
+> alone: `app > type-owner > ability-owner > :default > native`, with same-tier
+> cross-module collisions warned (shipped). The amendment **dropped** the earlier
+> `impl`-only-what-you-own orphan rule and the `bridge` form: `bridge` expanded to the
+> same registration as `impl` (no runtime substance), and the orphan rule guarded a
+> multi-third-party-library collision greenfield Brood doesn't have. Still ahead: dispatch
+> specialized through the inline-cache/JIT with deopt-on-reload, `:sealed` abilities fully
+> static, and `Display` to always-on core (superseding the opt-in `show`). This section
+> documents what is implemented today.
 
 **Register at load time.** `*impls*` is updated with `def`, so two processes calling
 `impl` *concurrently* can lose one update. Top-level `impl` forms — the normal case
@@ -462,25 +466,20 @@ ordinary hot reload and stays silent.
 Prefer `match`/`cond` when the set of cases is closed and local; reach for an
 ability when third-party or later code must be able to add a case.
 
-#### The display protocol: customizing how a record prints (`require 'show`)
+#### The display protocol: customizing how a record prints
 
-The standard library uses an ability for its one open-extension rendering seam —
-`std/show.blsp`, Elixir's `String.Chars` for Brood (ADR-171). `(require 'show)`
-gives a `Display` ability with op **`(to-str x)`** (a value → its display string),
-whose `:default` impl is the native `str`. Loading it makes the protocol *available*
-but changes nothing on its own; the **app** calls **`(display-on)`** to make the
-**screen printers** (`print` / `println` / `eprint` / `eprintln`) honor a *record*'s
-impl. Activation is an app-level step, never a side effect of a library's `(:use show)`
-(ADR-172 §8: libraries propose impls, the app disposes). Built-ins are unchanged and
-pay no dispatch cost; without `(display-on)` there is no change at all.
+The `Display` ability — Elixir's `String.Chars` for Brood (ADR-171/172) — is **core
+and always on**. Its op **`(to-str x)`** turns a value into its display string; the
+`:default` impl is the native `str`. The **screen printers** (`print` / `println` /
+`eprint` / `eprintln`) route a *record* through its `Display` impl out of the box — no
+`(require 'show)`, no activation step. Built-ins are unchanged and pay no dispatch cost.
 
 ```clojure
-(defmodule money (:use ability) (:use show))
-(defrecord* usd (cents))
-(impl Display money/usd
+(defmodule money)             ; no (:use ability), no (:use show) — both are core
+(defrecord usd (cents))
+(impl Display usd
   (to-str [m] (str "$" (to-fixed (/ (get m :cents) 100.0) 2))))
 
-(display-on)                  ; the app opts in (once, at startup)
 (println (usd 1050))          ; => $10.50   (not {:__id__ :money/usd, :cents 1050})
 (to-str (usd 1050))           ; => "$10.50" — the explicit call, for use inside str/fmt
 ```
@@ -2448,9 +2447,7 @@ Run `nest doc <module>` for the full API of any module.
 | `std/system.blsp` | `'system` | OS interaction: `env`, `env-all`, `argv`, `os-type`, `cmd`, `cmd-ok?`, `cmd-out`, `halt` (whole-machine `cwd`/`hostname` are root builtins) |
 | `std/crypto.blsp` | `'crypto` | Cryptography: ChaCha20-Poly1305 AEAD (`encrypt`/`decrypt`/`encrypt-str`/`decrypt-str`), `pbkdf2` (accepts a string or byte-vector password/salt — a binary salt is used as raw bytes), `random-bytes`, `random-key`, `random-nonce`, `secure=?` |
 | `std/proc/agent.blsp` | `'proc/agent` | Process-backed state cell (Elixir-style Agent): `start`, `get`, `update`, `get-and-update`, `cast`, `stop` |
-| `std/ability.blsp` | `'ability` | Open generic functions with nominal dispatch (ADR-168): `defability` declares typed ops (with an optional `:sealed [id …]` closed member set), `impl` registers an implementation for a dispatch id — a `type-of` kind (`:int`/`:map`/…/`:default`) or a `defrecord*` record's `:module/name` id — from any module at any time; `defrecord*` bakes that nominal id into a record; `satisfies?`, `record?`, `record-id`, `fields`, `identity-of`, and `ability-ops` (the checker/LSP introspection hook) |
 | `std/protocol.blsp` | `'protocol` | Behaviour contracts — the *module*-satisfies-a-contract seam: `defbehaviour` declares the ops a module must define (no value dispatch), claimed with `(:implements Name)` in a module header; `protocol-ops` is the introspection hook the checker and LSP read. Value dispatch is `ability` — `defprotocol`/`defimpl` were retired (ADR-168) |
-| `std/show.blsp` | `'show` | The display protocol for printing (Elixir's `String.Chars`, ADR-171): a `Display` ability with op `(to-str x)` (value → display string, `:default` → native `str`), and a `*show*` hook so the screen printers `print`/`println`/`eprint`/`eprintln` let a `defrecord*` value define how it prints. Built on `ability`; built-ins unchanged. `(binding (*show* nil) …)` disables it |
 | `std/telemetry.blsp` | `'telemetry` | Erlang-`:telemetry`-style instrumentation; handlers run in an isolated listener process: `start-telemetry`, `stop-telemetry`, `emit`, `attach`, `detach`, `detach-all`, `forward`, `handlers`, `telemetry-sync`, the `span` macro |
 
 The following modules are also opt-in and live under `std/net/` and `std/tool/`:
