@@ -2280,6 +2280,24 @@ pub(super) fn binding(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
     result
 }
 
+/// `(%trace-context)` — the debugger's durable per-process causal context (ADR-174),
+/// or nil. A settable per-process slot (unlike a `binding`): `spawn` copies it into a
+/// child, `send` ships it, `receive` overwrites it on pop. `dev-tools` only.
+#[cfg(feature = "dev-tools")]
+pub(super) fn trace_context_get(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(heap.trace_context().unwrap_or(Value::Nil))
+}
+
+/// `(%set-trace-context ctx)` — set (or, with nil, clear) the per-process trace
+/// context. Returns nil. `dev-tools` only.
+#[cfg(feature = "dev-tools")]
+pub(super) fn trace_context_set(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    // Set from Brood (`with-debugger`/`span`) → this is the process's OWN context,
+    // so `spawn` propagates it. Message-adoption uses `own = false` (in the mailbox).
+    heap.set_trace_context(Some(arg(args, 0)), true);
+    Ok(Value::Nil)
+}
+
 // ---------- the dirty-native offload pool (ADR-144) ----------
 
 /// Natives a green process may run on the offload pool (`%offload`):
