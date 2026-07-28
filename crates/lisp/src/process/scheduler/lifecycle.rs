@@ -6,21 +6,6 @@
 //! reached here via `use super::*`, so this is a pure relocation.
 use super::*;
 
-/// The interned `*trace-context*` symbol — the single dynamic that `spawn`
-/// propagates to a child, giving transparent causal-context inheritance (the
-/// debugger endpoint + current span) without an explicit hand-off. Interned once;
-/// when no `binding` for it is active (the default), the parent's dynamics scan
-/// misses and the whole mechanism is inert.
-///
-/// Gated on `dev-tools`: the only consumer is the `debug` DEV_MODULE, so a lean
-/// (`--no-default-features`) release compiles neither this nor the spawn hook below
-/// — the propagation path vanishes entirely, not merely goes inert.
-#[cfg(feature = "dev-tools")]
-fn trace_ctx_sym() -> value::Symbol {
-    static SYM: std::sync::OnceLock<value::Symbol> = std::sync::OnceLock::new();
-    *SYM.get_or_init(|| value::intern("*trace-context*"))
-}
-
 /// A human descriptor for a process in death/crash diagnostics: its registered
 /// name plus pid when it has one (`ticker (pid 6)`), else the bare pid (`6`).
 /// Read the name *before* `deregister` clears it. Used only on the cold death
@@ -233,17 +218,22 @@ fn spawn_impl(heap: &Heap, f: Value, link_parent: bool) -> Result<u64, LispError
     child.set_global(EnvId::GLOBAL);
 
     // Transparent causal-context propagation (opt-in, zero cost when unused): if the
-    // spawner has a `*trace-context*` dynamic bound (the debugger sets it inside a
+    // spawner has a debugger trace context set (the debugger sets it inside a
     // `span`/`with-debugger`), promote it into the shared runtime — valid in the child,
-    // like the thunk `f` above — and seed the child's dynamics with it. So a plain
-    // `spawn`'d child inherits the debugger + causal span without an explicit hand-off;
-    // its `break`/`span` just work and nest under the parent. When no such binding is
-    // active (the default), this is one empty-stack check per spawn and nothing more.
+    // like the thunk `f` above — and seed the child's trace-context slot with it. So a
+    // plain `spawn`'d child inherits the debugger + causal span without an explicit
+    // hand-off; its `break`/`span` just work and nest under the parent. When no context
+    // is set (the default), this is one `Option` check per spawn and nothing more.
     // Gated on `dev-tools` (the debugger's feature), so a lean release compiles it out.
     #[cfg(feature = "dev-tools")]
-    if let Some(ctx) = heap.current_dynamic(trace_ctx_sym()) {
-        let ctx = heap.promote(ctx);
-        child.push_dynamic(trace_ctx_sym(), ctx);
+    if let Some(ctx) = heap.trace_context() {
+        // Only the spawner's OWN context propagates — a context merely adopted from a
+        // received message stays with the handler, so it can't leak through unrelated
+        // spawns (the child then owns its inherited copy and propagates it further).
+        if heap.trace_context_own() {
+            let ctx = heap.promote(ctx);
+            child.set_trace_context(Some(ctx), true);
+        }
     }
 
     ensure_workers();

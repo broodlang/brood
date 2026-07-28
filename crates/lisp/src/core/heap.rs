@@ -1707,6 +1707,20 @@ pub struct Heap {
     /// Empty whenever no `binding` is active — so it's free on the common path
     /// and holds no LOCAL handles across a top-level arena reset.
     dynamics: Vec<(Symbol, Value)>,
+    /// The debugger's durable per-process causal context (ADR-174 send-level slice):
+    /// a settable slot that, unlike a `binding` on [`dynamics`], survives across
+    /// `receive` and migration (so a long-lived server adopts the sender's context
+    /// per message). GC-traced exactly where `dynamics` is. `#[cfg(dev-tools)]` — a
+    /// lean release has no such field, so the whole send-level path compiles out.
+    #[cfg(feature = "dev-tools")]
+    trace_context: Option<Value>,
+    /// Whether [`trace_context`] is the process's OWN context (set by `with-debugger`
+    /// / `span`) — which `spawn` propagates to children — versus one merely ADOPTED
+    /// from a received message, which is used to handle that message but must NOT
+    /// propagate onward (else an adopted context leaks transitively through unrelated
+    /// spawns). Meaningful only when `trace_context` is `Some`.
+    #[cfg(feature = "dev-tools")]
+    trace_context_own: bool,
     /// Per-process **global inline cache** (perf): `symbol -> (runtime version,
     /// resolved value)`. Consulted by [`env_get`](Self::env_get) only after the
     /// local env chain misses *and* no dynamic binding shadows the name — i.e.
@@ -2223,6 +2237,10 @@ impl Heap {
             ns_known_names: HashSet::new(),
             imports: HashMap::new(),
             dynamics: Vec::new(),
+            #[cfg(feature = "dev-tools")]
+            trace_context: None,
+            #[cfg(feature = "dev-tools")]
+            trace_context_own: false,
             global_ic: RefCell::new(SymbolMap::default()),
             module_exports_cache: RefCell::new(None),
             known_ns_cache: RefCell::new(None),
@@ -2296,6 +2314,10 @@ impl Heap {
             ns_known_names: HashSet::new(),
             imports: HashMap::new(),
             dynamics: Vec::new(),
+            #[cfg(feature = "dev-tools")]
+            trace_context: None,
+            #[cfg(feature = "dev-tools")]
+            trace_context_own: false,
             global_ic: RefCell::new(SymbolMap::default()),
             module_exports_cache: RefCell::new(None),
             known_ns_cache: RefCell::new(None),
@@ -4118,6 +4140,31 @@ impl Heap {
             .rev()
             .find(|&&(s, _)| s == sym)
             .map(|&(_, v)| v)
+    }
+
+    /// The debugger's durable per-process trace context (ADR-174), or `None`. A
+    /// settable slot (unlike a `binding`): `spawn` copies it into a child, `send`
+    /// ships it, `receive` overwrites it on pop. GC-traced with [`dynamics`].
+    #[cfg(feature = "dev-tools")]
+    pub fn trace_context(&self) -> Option<Value> {
+        self.trace_context
+    }
+
+    /// Set (or clear) the durable per-process trace context. `own` marks it as this
+    /// process's own context (propagated by `spawn`) versus one adopted from a message
+    /// (not propagated). The value must be a promoted/LOCAL handle valid in this heap;
+    /// it is then traced like a root.
+    #[cfg(feature = "dev-tools")]
+    pub fn set_trace_context(&mut self, v: Option<Value>, own: bool) {
+        self.trace_context = v;
+        self.trace_context_own = own;
+    }
+
+    /// Whether the current [`trace_context`] is the process's OWN (propagate on spawn),
+    /// not merely adopted from a message.
+    #[cfg(feature = "dev-tools")]
+    pub fn trace_context_own(&self) -> bool {
+        self.trace_context_own
     }
 
     /// Snapshot the runtime's global bindings (`symbol -> value`). Cheap: the

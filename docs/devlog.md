@@ -10184,3 +10184,21 @@ BROOD_GC_STRESS across concurrency/proc/scheduler/proctree/jit-shared-spawn.
 Deferred (ADR-174, ADR-011): send-level causality — following a value through a *message*.
 Perf-safe (cfg-gated Envelope, matcher untouched) but needs a GC-traced Value slot on the
 Heap across ~8 collector sites, so it lands as its own GC-stress-gated pass, not bundled.
+
+## 2026-07-28 (impl) — debugger send-level causality: context follows a message (ADR-174 §4)
+
+Finished the deferred send-level slice: causality now follows a value A→B through a
+*message*, so a long-lived server (never wired to the debugger) handles each request in
+the *sender's* context — `dbg` can't do this at all. All `#[cfg(dev-tools)]`, so a lean
+release is byte-identical (verified: `cargo check --no-default-features` clean).
+
+Kernel: the durable context moved from a dynamic to a settable per-process `trace_context`
+slot on the `Heap`, GC-traced where `dynamics` is (5 collector sites) + a `%trace-context`
+/ `%set-trace-context` primitive pair. The mailbox message became an `Envelope { msg,
+#[cfg] trace }` — uniform `.msg`, so `receive_match` is untouched and release is a zero-cost
+newtype; `send` attaches the sender's context for a local pid, `receive` adopts it on pop.
+A context is tagged **own** (set by `with-debugger`/`span`, propagated by `spawn`) vs.
+**adopted** (from a message, not propagated onward) — a distinction a test forced: without
+it the framework's own result messages leaked context into later test processes and hung an
+unrelated "break with no debugger" case. Verified: debug suite 12 (incl. send-level +
+leak-prevention), `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` clean, concurrency/gen/proc green.
