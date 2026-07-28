@@ -49,7 +49,10 @@ Shipped as ADRs:
   - ✅ **The display protocol** (ADR-171, 2026-07-28) — the first std use of an
     ability for open-extension rendering: `std/show.blsp`'s `Display`/`to-str`
     (Elixir's `String.Chars`), with a zero-cost prelude `*show*` hook so the screen
-    printers let a record define how it prints. Second audit candidate — a
+    printers let a record define how it prints. Activation is an explicit app step —
+    `(display-on)` installs the hook, `(display-off)` / `(binding (*show* nil) …)` undo
+    it — never a side effect of loading (ADR-172 §5/§8: a library ships `impl Display`
+    proposals, the app disposes). Second audit candidate — a
     `JsonEncode` ability so user records serialize instead of `json--emit` erroring
     — is the same shape, left as a follow-up. (Audit found only these two; the rest
     of `std/` is correctly-closed `cond`/state-machines per ADR-011.)
@@ -78,12 +81,17 @@ Shipped as ADRs:
       end to end: `project--ensure-deps-on-path` load-paths them for dev/`nest test`,
       `bundle-collect` excludes them from a release bundle (verified with a scratch
       project). Optional-dep *resolution* (peer presence) lands with the bridge slice.
-    - 🟡 **Slice 4 (part) — deterministic precedence** (2026-07-28): `std/ability.blsp`
-      resolves competing impls by tier (**type-owner > ability-owner > other**), not load
-      order — `defability` records its owner ns, `register-impl` keeps the highest-tier
-      impl per slot (a guard at registration; dispatch stays a plain map-get). The top
-      **app** tier awaits ADR-070 (app-vs-library). Slices 2, 3, 5, 6 (`bridge`, coherence
-      checking, dispatch specialization, always-on `Display`) still ⬜.
+    - ✅ **Slice 4 — deterministic precedence, all four tiers** (2026-07-28):
+      `std/ability.blsp` resolves competing impls by tier (**app > type-owner >
+      ability-owner > other**), not load order — `defability` records its owner ns,
+      `register-impl` keeps the highest-tier impl per slot (a guard at registration;
+      dispatch stays a plain map-get). The top **app** tier shipped via **package
+      identity** rather than waiting for full ADR-070 name-prefixing: a `defdyn
+      *ns-package*` maps each namespace to its owning package's name (static scan at
+      project setup), and a ns whose package is `*project-name*` — or has no owner
+      (root/REPL) — is the app. `ns-package`/`trace-with-packages` also tag stack frames
+      with their owning package. Slices 2, 3, 5, 6 (`bridge`, coherence checking, dispatch
+      specialization, always-on `Display`) still ⬜.
 - ✅ **ADR-159** — grapheme-*indexed* accessors (`grapheme-count`, `grapheme-at`,
   `substring-graphemes`), so the documented-correct cursor step stops costing a vector
   of every cluster in the string per keystroke.

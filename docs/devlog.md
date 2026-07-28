@@ -10057,3 +10057,42 @@ around that call, or a counter on the fast-link outcome path — instrumentation
 reading. Left there deliberately: the last two cliffs on this row cost a day and bought nothing,
 so the next attempt should confirm the payoff (does the arm run native afterwards, and does the
 row move?) before the fix is written.
+
+## 2026-07-28 (impl) — Abilities v2 slice 4 (rest): the app tier lands via package identity
+
+The half slice 4 deferred — the top **app** tier, a program overriding *anything* — now
+works, without waiting for full package-rooted namespaces (ADR-070). The insight: the app
+tier only needs to answer *"does this namespace belong to the app or to a library?"*, which
+is a name→owner lookup, not a rename of every namespace. So instead of prefixing namespaces,
+we record **package identity**: a `defdyn *ns-package*` maps each namespace to its owning
+package's name, populated by a static scan at project setup (reusing
+`package--provided-modules` — no change to the hot `require`/`defmodule` path). A namespace is
+"the app" when its package equals `*project-name*` (the project's own `:name`), or when it has
+no recorded owner at all (root / REPL). `impl-rank` gains the top tier: **app (4) > type-owner
+(3) > ability-owner (2) > other (1)**, deterministic by tier regardless of load order. End to
+end: an app `impl` for `:int` beats a library's `impl` for the same slot, whichever registers
+first.
+
+Package identity also enriches diagnostics: `ns-package` resolves a namespace or a qualified
+name to its package, and `trace-with-packages` tags each stack frame with its owning package —
+so a trace reads "which library was this frame in", not just "which module".
+
+**Display protocol activation moved to an explicit app step** (ADR-172 §5/§8): loading `show`
+now only makes the protocol *available* (the ability + a library's `impl Display` proposals);
+the screen printers honor it after the app calls `(display-on)` (installs the `*show*` hook),
+undone by `(display-off)` or `(binding (*show* nil) …)`. A library ships proposals; the app
+disposes. This is interim scaffolding — it vanishes when `Display` becomes always-on core
+(slice 6) — and is kept deliberately un-polished (the safety it approximates is owner-only
+coherence, not an activation gate).
+
+**Bug hunt — three defects found and fixed** (all with reverting-fix-fails-the-test regression
+coverage): (1) HIGH — an app/root impl (`from` = nil) registered *before* a library impl was
+silently clobbered, because `(if prev-from … 0)` read a nil-from incumbent as rank 0; keyed off
+`(contains? *impl-from* …)` (presence, not truthiness) so a nil-from incumbent keeps its real
+tier. (2) `ns-package` crashed on a trace frame with no `:fn` via `(symbol nil)` — `when`-guarded.
+(3) a dependency whose `:name` equals the project's package name would wrongly get the app tier —
+rejected at resolve time with a rename message. Suites: ability 32, project 75, package 65, show
+12 + 5 — all green, incl. under `BROOD_GC_STRESS=1` and the tree-walker.
+
+Slices 2, 3, 5, 6 (`bridge`, coherence checking, dispatch specialization, always-on `Display`)
+remain.
