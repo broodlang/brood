@@ -63,6 +63,14 @@ rows=()
 # everything else is pinned to one CPU so a co-scheduled thread can't skew it.
 parallel_rows=" pfib spawn pipeline ring pingpong "
 
+# Rows this script CANNOT run: they need scaffolding the benchmark harness provides and
+# this one deliberately does not. `http` needs a local server (`bench/harness.py` starts
+# one per run, see its SERVER_FOR) — without it the program blocks forever on connect,
+# and because each row is timed rather than bounded, that is an unkillable-looking hang
+# rather than a failure. It cost a 4-hour zombie and a stuck `--all` sweep before this
+# guard existed. Use `bench/harness.py --only http` for that row.
+unsupported_rows=" http "
+
 die() { printf 'ab-bench: %s\n' "$*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
@@ -92,6 +100,22 @@ fi
 for r in "${rows[@]}"; do
   [ -f "$bench_dir/bench/brood/$r.blsp" ] || die "no such row: $r (try --list)"
 done
+
+# Drop the rows that need harness scaffolding, loudly — silence here is what turns an
+# unsupported row into a hang.
+kept=()
+for r in "${rows[@]}"; do
+  case "$unsupported_rows" in
+    *" $r "*) echo "ab-bench: skipping '$r' — needs the harness's local server; use \`bench/harness.py --only $r\`" >&2 ;;
+    *) kept+=("$r") ;;
+  esac
+done
+rows=("${kept[@]}")
+[ ${#rows[@]} -gt 0 ] || die "every requested row is unsupported here"
+
+# A row that blocks forever would otherwise be timed rather than failed, so bound each
+# run. Generous: the slowest row (`ring`) is ~0.8s and a cold JIT adds to the first.
+timeout_s="${AB_TIMEOUT:-120}"
 
 # ---- build side A (baseline) ----------------------------------------------
 if [ -n "$prebuilt_base" ]; then
@@ -143,6 +167,10 @@ best_of() { # $1 binary  $2 program  $3 cpu spec -> best wall ms
   local best=99999999 i t0 t1 ms
   for i in $(seq "$reps"); do
     t0=$(date +%s%N)
+    # NOT wrapped in `timeout`: GNU timeout inflates a ~155 ms run to a dead-constant
+    # 205 ms (measured 2026-07-28), so putting it inside the timed region silently
+    # destroys fidelity — every row read the same value and every delta read +0.0%.
+    # The hang guard lives on the warmup below, outside the measurement.
     taskset -c "$3" "$1" "$2" >/dev/null 2>&1 || true
     t1=$(date +%s%N)
     ms=$(( (t1 - t0) / 1000000 ))
@@ -161,8 +189,12 @@ for r in "${rows[@]}"; do
   prog="$bench_dir/bench/brood/$r.blsp"
   case "$parallel_rows" in *" $r "*) cpus="$all_cpus" ;; *) cpus="$pin_cpu" ;; esac
   # Footgun 4: discard one run per binary so the build-id-keyed boot cache is warm.
-  taskset -c "$cpus" "$base_bin" "$prog" >/dev/null 2>&1 || true
-  taskset -c "$cpus" "$new_bin"  "$prog" >/dev/null 2>&1 || true
+  # The warmup doubles as the hang guard: it is untimed, so `timeout` here costs
+  # nothing, and a row that blocks forever fails loudly instead of pinning a core.
+  timeout "$timeout_s" taskset -c "$cpus" "$base_bin" "$prog" >/dev/null 2>&1 \
+    || die "row '$r' did not finish within ${timeout_s}s on the baseline — needs harness scaffolding?"
+  timeout "$timeout_s" taskset -c "$cpus" "$new_bin"  "$prog" >/dev/null 2>&1 \
+    || die "row '$r' did not finish within ${timeout_s}s on the working tree" 
   b=$(best_of "$base_bin" "$prog" "$cpus")
   n=$(best_of "$new_bin"  "$prog" "$cpus")
   d=$(awk -v a="$b" -v c="$n" 'BEGIN{ if (a==0) print "n/a"; else printf "%+.1f%%", (c-a)*100.0/a }')
