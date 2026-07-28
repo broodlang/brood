@@ -179,4 +179,11 @@
     (assert= ((impl-for '[Sized sz] :int) nil) :int-sz))
   (test "ability-owner-ns records the defining namespace"
     (register-ability 'Owned '((op [self])) 'mymod)
-    (assert= (ability-owner-ns 'Owned) 'mymod)))
+    (assert= (ability-owner-ns 'Owned) 'mymod))
+  ;; regression: a top-level/REPL `impl` registers with `from` = nil (the root ns has no
+  ;; name). Before the guard this crashed `impl-rank`'s `(name from)`. Exercise the real
+  ;; path — `register-impl` with a nil `from`, then dispatch — which reproduces the crash.
+  (test "a nil `from` (root/REPL impl) doesn't crash — dispatch round-trips"
+    (register-ability 'RootAb '((op [self])) 'somens)
+    (register-impl 'RootAb 'op :int (fn (n) :root-impl) nil)
+    (assert= ((impl-for '[RootAb op] :int) nil) :root-impl)))
