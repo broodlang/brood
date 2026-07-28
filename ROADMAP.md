@@ -1355,10 +1355,20 @@ Runtime housekeeping (both items landed):
   `tests/test_selection_test.blsp` (54 cases, incl. cross-process spec round-trip).
   ⬜ Still unmapped from `mix test`: `--stale` (needs a per-test dependency graph),
   `--formatter`, `--breakpoints`. (`--cover` shipped — see "Test coverage" below.) A
-  **process-native tracing debugger** prototype now exists (`std/tool/debug`, ADR-174):
-  `break` parks without a timeout + a multi-process paused queue, `spy`-fed aggregate
-  queries, and a causal tree propagated transparently across `spawn`. Deferred: send-level
-  causality (a GC-traced Heap slot; own pass) and wiring it into `nest observe`.
+  **process-native tracing debugger** now exists (`std/tool/debug`, ADR-174): `break`
+  parks without a timeout + a multi-process paused queue, `break-when`, `spy`-fed
+  aggregate queries, a causal tree propagated transparently across **`spawn` AND `send`**
+  (a server handles a request in the sender's context), `step` single-step evaluation,
+  `pry` (drop into the real styled REPL at a debug point), and `eval-at` (evaluate an
+  expression in a breakpoint's captured scope — the *explicitly named* `break` locals).
+  ⬜ **Deferred — automatic locals capture (`eval-at` path B):** today `eval-at` sees only
+  the values you name at `break`, because the VM keeps locals in **positional slots, not by
+  name**, so a runtime primitive can't recover the rest (`%locals` works only under the
+  tree-walker). The automatic "every in-scope local by name" version is a **compiler
+  intrinsic** — teach the compiler to recognise `%scope`/`%locals` and emit, at that point,
+  a `{name → slot-value}` map from its lexical-scope table (in `eval/compile/`). Its own
+  focused, VM-careful pass. ⬜ Also deferred: an interactive `nest observe` debugger pane,
+  and `,resume`/`,step` as REPL meta-commands (needs a REPL command registry).
 - ✅ **Test coverage — both tiers** — function-level `nest test --cover` (2026-07-24)
   (ADR-148, [`docs/coverage.md`](docs/coverage.md)): which project functions the
   suite never entered, plus `--cover-min PCT` to fail the run under a floor.

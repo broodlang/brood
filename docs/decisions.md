@@ -11152,6 +11152,20 @@ the *sender's* context — the thing `dbg` cannot do at all. The mechanism, all
   found by a test: without it, the framework's own result messages leaked context into
   later test processes.)
 
+**5 — Eval in a paused process's captured scope (path A shipped; B deferred).** At a
+breakpoint you can evaluate expressions in the worker's scope — `eval-at` over the
+`%eval-in` primitive, which builds a fresh env from a `{name → value}` map and evaluates a
+form against it (GC-safe: a single-use frame per form, held forms + values rooted). Two
+paths, and the split is forced by the engine:
+- **A (shipped):** the map is the values *explicitly named* at `break` (`(break "here"
+  :n n :total total)`), so `(eval-at d 1 "(* n total)")` resolves them. Works under the VM.
+- **B (deferred):** *automatic* capture of every in-scope local by name. The VM keeps
+  locals in **positional slots, not by name** (`%locals` — which walks named env frames —
+  works only under the tree-walker), so no runtime primitive can recover them. B is a
+  **compiler intrinsic**: teach the compiler to emit a `{name → slot-value}` map from its
+  lexical-scope table at a `%scope` marker. Per ADR-011 it's a focused, VM-careful pass of
+  its own, not bundled — the roadmap tracks it.
+
 Related: ADR-173 ([[spy]] — the sink this builds on), ADR-006 (write it in Brood),
 ADR-013 (hot reload — the late-binding kinship), ADR-046/051 (`nest observe` — the render
 target for a future debugger pane). Still open: wiring the causal tree into `nest observe`
