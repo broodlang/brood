@@ -2119,6 +2119,20 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "%install-interrupt-handler",
+        Arity::exact(0),
+        Sig::nullary(bool_ty),
+        install_interrupt_handler,
+    );
+    def(
+        heap,
+        "%interrupt-taken?",
+        Arity::exact(0),
+        Sig::nullary(bool_ty),
+        interrupt_taken,
+    );
+    def(
+        heap,
         "run-process",
         Arity::exact(2),
         Sig::new(vec![string, seq], int),
@@ -3044,6 +3058,8 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("image-thumb", &["bytes", "max-w", "max-h"], "Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). nil when the bytes aren't a decodable image or the dims are non-positive. Per-call decode limits bound a decompression bomb. The one image primitive; rendering (half-block cells, a GUI texture) is Brood policy over the decoded buffer."),
     ("getenv", &["name"], "The value of environment variable name, or nil if unset."),
     ("hostname", &[], "This machine's short hostname (no domain). Used to qualify a node name as name@host."),
+    ("%install-interrupt-handler", &[], "Take over SIGINT so Ctrl-C records a request instead of terminating the runtime; returns true when installed (false with no Unix signals). Idempotent, and clears any pending request. Opt-in, so a script keeps dying on Ctrl-C: the REPL installs it, nothing else does."),
+    ("%interrupt-taken?", &[], "True if an interrupt arrived since the last call, clearing it (read-and-clear, so one Ctrl-C is acted on once). Poll this while a spawned evaluation runs and (exit pid :kill) it."),
     ("run-process", &["prog", "args"], "Run external program prog with an args list, inheriting stdio; returns its exit code."),
     ("%env-all", &[], "All environment variables as a map of string→string."),
     ("%argv", &[], "Command-line arguments as a vector of strings (including argv[0])."),

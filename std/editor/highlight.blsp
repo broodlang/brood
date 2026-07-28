@@ -306,6 +306,16 @@ and comments are ignored."
           (let (m (hl--opener-scan full 0 n bi '()))
             (if (< m 0) [bi :unmatched] [m bi])))))))
 
+(defn enclosing-open (full pos)
+  "The offset of the innermost *unclosed* opening bracket enclosing `pos`, or -1 when
+`pos` is at top level. Strings and comments are skipped, so a `(` inside a string
+doesn't count as nesting.
+
+Public because it is the one fact an auto-indenter needs — which form am I inside,
+and where does it start — and `enclosing-call` (right below) already computes it for
+signature hints; exposing it beats a second, subtly-different scan in the editor."
+  (hl--enc-scan full 0 pos (string-length full) '()))
+
 ;; ---- enclosing call (for signature hints) -----------------------------------
 
 (defn hl--enc-scan (full i pos n stack)
