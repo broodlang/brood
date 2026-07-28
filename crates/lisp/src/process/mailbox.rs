@@ -140,6 +140,10 @@ pub(super) struct Mailbox {
     /// their deadline, not before) — acceptable. The "spurious wakeups are harmless"
     /// re-validation in `receive_match` stays as the backstop.
     pub(super) timer_gen: AtomicU64,
+    /// The pid that spawned this process (`0` = none, i.e. the root). Written once before
+    /// the mailbox is published to the registry and never mutated after, so `Relaxed` is
+    /// enough — the registry insert is the release that publishes it.
+    pub(super) parent: AtomicU64,
 }
 
 pub(super) struct MailboxState {
@@ -195,6 +199,20 @@ pub(super) struct MailboxState {
 }
 
 impl Mailbox {
+    /// A mailbox for a process whose spawner is `parent` (`0` for the root, which has
+    /// none). The parent pid lives here rather than in a global `pid -> pid` map: it is
+    /// per-process data, the per-process record already exists and is already
+    /// registry-reachable, and the map cost two locked operations on every spawn and every
+    /// exit — pure contention under fan-out, for a value read in exactly one place
+    /// (`process-info`'s `:parent`).
+    pub(super) fn new_with_parent(parent: u64) -> Arc<Mailbox> {
+        let mb = Mailbox::new();
+        // Safe: the mailbox is not published to the registry until after this returns, so
+        // no other thread can observe the write.
+        mb.parent.store(parent, Ordering::Relaxed);
+        mb
+    }
+
     pub(super) fn new() -> Arc<Mailbox> {
         Arc::new(Mailbox {
             state: Mutex::new(MailboxState {
@@ -215,6 +233,7 @@ impl Mailbox {
             kill_pending: AtomicBool::new(false),
             trap_exit: AtomicBool::new(false),
             timer_gen: AtomicU64::new(0),
+            parent: AtomicU64::new(0),
         })
     }
 
@@ -268,15 +287,98 @@ impl Mailbox {
 /// pid → mailbox, for `send` to find a target from any thread.
 /// `pub(super)` so the `monitor` submodule can take the REGISTRY ↔ MONITORS
 /// liveness check inside its critical section (see `monitor::add_monitor`).
-pub(super) static REGISTRY: LazyLock<Mutex<HashMap<u64, Arc<Mailbox>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Number of registry shards. A power of two so the shard index is a mask, and comfortably
+/// above the worker count so a fan-out rarely collides.
+const REGISTRY_SHARDS: usize = 64;
+
+/// `pid -> Arc<Mailbox>`, sharded by pid.
+///
+/// This was a single global `Mutex<HashMap<..>>`, which every `spawn`, every `deregister`
+/// and every `deliver` (i.e. every message) had to take. Uncontended that is ~20 ns and
+/// invisible — `ring`/`pingpong` measured flat across worker counts, so message delivery
+/// was never the problem. **Fan-out is**: one process spawning while N workers deregister
+/// exited children serialises every one of them on the same mutex, and pure spawn measured
+/// 19 ms at 12 workers against 13 ms at 4 — the extra workers made it *slower*.
+///
+/// Sharding keeps the semantics exactly: a pid still resolves to a mailbox from any thread
+/// (so location-transparent `send` and the whole `dist` path are unchanged), and it is
+/// invisible to hot reload, which concerns the shared code region and globals table, never
+/// mailboxes.
+///
+/// **Lock ordering is preserved.** `add_monitor` takes MONITORS then a registry shard
+/// (nested); `deregister` takes a shard, releases, then NAMES, then MONITORS (sequential).
+/// A shard is therefore always the *inner* lock, exactly as the single registry was — and
+/// the two race against each other on the *same pid*, hence the same shard, so their
+/// check-and-modify pairing resolves as before. Whole-registry walks (`pids`, `len`) take
+/// one shard at a time and never hold two at once.
+pub(super) struct Registry {
+    shards: Vec<Mutex<HashMap<u64, Arc<Mailbox>>>>,
+}
+
+impl Registry {
+    fn shard(&self, pid: u64) -> &Mutex<HashMap<u64, Arc<Mailbox>>> {
+        &self.shards[(pid as usize) & (REGISTRY_SHARDS - 1)]
+    }
+
+    pub(super) fn get(&self, pid: u64) -> Option<Arc<Mailbox>> {
+        crate::core::sync::lock(self.shard(pid)).get(&pid).cloned()
+    }
+
+    pub(super) fn contains_key(&self, pid: u64) -> bool {
+        crate::core::sync::lock(self.shard(pid)).contains_key(&pid)
+    }
+
+    pub(super) fn insert(&self, pid: u64, mb: Arc<Mailbox>) {
+        crate::core::sync::lock(self.shard(pid)).insert(pid, mb);
+    }
+
+    pub(super) fn remove(&self, pid: u64) -> Option<Arc<Mailbox>> {
+        crate::core::sync::lock(self.shard(pid)).remove(&pid)
+    }
+
+    /// Every live pid. One shard locked at a time — never two, so this cannot deadlock
+    /// against a nested MONITORS/NAMES acquisition elsewhere.
+    pub(super) fn pids(&self) -> Vec<u64> {
+        let mut out = Vec::new();
+        for sh in &self.shards {
+            out.extend(crate::core::sync::lock(sh).keys().copied());
+        }
+        out
+    }
+
+    /// Every live `(pid, mailbox)`. Same one-shard-at-a-time discipline as [`pids`].
+    pub(super) fn entries(&self) -> Vec<(u64, Arc<Mailbox>)> {
+        let mut out = Vec::new();
+        for sh in &self.shards {
+            out.extend(
+                crate::core::sync::lock(sh)
+                    .iter()
+                    .map(|(k, v)| (*k, Arc::clone(v))),
+            );
+        }
+        out
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|sh| crate::core::sync::lock(sh).len())
+            .sum()
+    }
+}
+
+pub(super) static REGISTRY: LazyLock<Registry> = LazyLock::new(|| Registry {
+    shards: (0..REGISTRY_SHARDS)
+        .map(|_| Mutex::new(HashMap::new()))
+        .collect(),
+});
 
 /// Is `pid` currently registered (i.e. still alive)? Used by the
 /// named-spawn idempotence check in `dist::spawn_or_get` to decide
 /// whether to reuse an existing pid registered under a name or treat
 /// the name as stale and spawn fresh. Cheap — one mutex acquisition.
 pub(crate) fn is_alive(pid: u64) -> bool {
-    crate::core::sync::lock(&REGISTRY).contains_key(&pid)
+    REGISTRY.contains_key(pid)
 }
 
 /// Look up `pid`'s mailbox in the REGISTRY and, if it's a live local process, run
@@ -288,7 +390,7 @@ pub(crate) fn is_alive(pid: u64) -> bool {
 /// on). The shared registry-lookup-then-act step behind the read-only `process_*`
 /// accessors below.
 fn with_mailbox<T>(pid: u64, f: impl FnOnce(&Arc<Mailbox>) -> T) -> Option<T> {
-    let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned()?;
+    let mailbox = REGISTRY.get(pid)?;
     Some(f(&mailbox))
 }
 
@@ -318,7 +420,7 @@ pub(super) fn wake_parked(st: &mut MailboxState) -> Option<Box<Process>> {
 /// a no-op if `pid` is gone. The shared tail of `send`, monitor `[:down …]`
 /// delivery, and inbound node-link messages (`crate::dist`).
 pub(crate) fn deliver(pid: u64, msg: Message) {
-    let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned();
+    let mailbox = REGISTRY.get(pid);
     if let Some(mb) = mailbox {
         let mut st = crate::core::sync::lock(&mb.state);
         st.queue.push_back(msg);
@@ -738,7 +840,7 @@ fn wait_for_message(ctx: &Ctx, i: usize, deadline: Option<Instant>) {
 /// A no-op too if `send` already woke it. The process always re-validates its own
 /// deadline, so even a wakeup that slips through is harmless (at most one spurious).
 pub(super) fn wake_for_timeout(pid: u64, gen: u64) {
-    let mailbox = crate::core::sync::lock(&REGISTRY).get(&pid).cloned();
+    let mailbox = REGISTRY.get(pid);
     if let Some(mb) = mailbox {
         // Stale entry — the process has re-parked (or moved on) since this timer
         // was armed. Skip it: the live deadline has its own, current-gen entry.
@@ -758,7 +860,7 @@ pub(super) fn wake_for_timeout(pid: u64, gen: u64) {
 /// spawned, and the `nest mcp` `processes` tool (`std/tool/mcp.blsp`, ADR-036).
 /// Order is unspecified (hash-map iteration); callers that care can sort.
 pub fn list_local_pids() -> Vec<u64> {
-    crate::core::sync::lock(&REGISTRY).keys().copied().collect()
+    REGISTRY.pids()
 }
 
 /// The number of messages queued in local process `pid`'s mailbox (its receive

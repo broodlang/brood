@@ -178,7 +178,7 @@ pub fn monitor(target: u64) -> Value {
 /// have a TOCTOU window where the watcher gets stuck.
 pub(crate) fn add_monitor(target: u64, watcher: Watcher) {
     let mut mons = crate::core::sync::lock(&MONITORS);
-    if crate::core::sync::lock(&REGISTRY).contains_key(&target) {
+    if REGISTRY.contains_key(target) {
         mons.entry(target).or_default().push(watcher);
         return;
     }
