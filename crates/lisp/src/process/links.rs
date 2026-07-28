@@ -72,7 +72,7 @@ pub fn link(a: u64, b: u64) {
     // critical section (same shape as `monitor::add_monitor`).
     {
         let mut links = lock(&LINKS);
-        if lock(&REGISTRY).contains_key(&b) {
+        if REGISTRY.contains_key(b) {
             links.entry(a).or_default().insert(b);
             links.entry(b).or_default().insert(a);
             return;
@@ -101,7 +101,7 @@ pub fn unlink(a: u64, b: u64) {
 /// set, a linked peer's death arrives as a `[:EXIT pid reason]` *message* instead
 /// of killing this process. No-op (returns false) for a dead/unknown pid.
 pub fn set_trap_exit(pid: u64, on: bool) -> bool {
-    match lock(&REGISTRY).get(&pid) {
+    match REGISTRY.get(pid) {
         Some(mb) => mb.trap_exit.swap(on, Ordering::Relaxed),
         None => false,
     }
@@ -151,8 +151,8 @@ fn deliver_exit_to(peer: u64, dead_msg: Message, reason: Message) {
 
 /// Does `pid` trap exits? false for a dead/unknown pid.
 fn traps_exit(pid: u64) -> bool {
-    lock(&REGISTRY)
-        .get(&pid)
+    REGISTRY
+        .get(pid)
         .is_some_and(|mb| mb.trap_exit.load(Ordering::Relaxed))
 }
 

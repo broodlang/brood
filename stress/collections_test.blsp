@@ -95,7 +95,7 @@
   (test "take/drop partition"
     (let (xs (range 100))
       (do
-        (assert= (concat (take 30 xs) (drop 30 xs)) (seq xs))
+        (assert= (append (take 30 xs) (drop 30 xs)) (seq xs))
         (assert= (take 0 xs) ())
         (assert= (count (drop 100 xs)) 0)
         true)))

@@ -25,7 +25,7 @@
 //!   stack), so workers multiplexing several processes don't leak depths.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 
@@ -486,11 +486,17 @@ static MIGRATED: AtomicU64 = AtomicU64::new(0);
 /// `process-info`'s `:parent` (and a future process-tree view). A side table
 /// rather than a `Process` field because the `Process` isn't reachable from the
 /// registry while it runs; this is.
-static PARENTS: LazyLock<Mutex<HashMap<u64, u64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The pid that spawned `pid`, or `None` for the root process (or a dead pid).
 pub fn parent_of(pid: u64) -> Option<u64> {
-    crate::core::sync::lock(&PARENTS).get(&pid).copied()
+    // The parent rides the process's own mailbox (see `Mailbox::parent`) rather than a
+    // global `pid -> pid` map: same answer, no lock, and nothing to clean up on exit.
+    // `0` is the root's "no parent" sentinel, reported as `None` exactly as the absent
+    // map entry used to be.
+    REGISTRY
+        .get(pid)
+        .map(|mb| mb.parent.load(Ordering::Relaxed))
+        .filter(|&p| p != 0)
 }
 static RUNNING: AtomicUsize = AtomicUsize::new(0); // processes inside `resume` right now
 static PEAK_RUNNING: AtomicUsize = AtomicUsize::new(0);
@@ -809,7 +815,7 @@ pub fn current_pid() -> Option<u64> {
 /// run) and its parent, and `receive`/`self` register the root, so every process
 /// that could hold a reference to the draining generation is present.
 pub fn live_pids() -> Vec<u64> {
-    crate::core::sync::lock(&REGISTRY).keys().copied().collect()
+    REGISTRY.pids()
 }
 
 /// Tear down every **permanently-parked** green process belonging to
@@ -832,11 +838,11 @@ pub fn live_pids() -> Vec<u64> {
 /// mailbox that is removed right after (a send to a dead pid — a no-op).
 /// Returns how many processes were reaped.
 pub fn shutdown_runtime_parked(runtime: &Arc<crate::core::heap::RuntimeCode>) -> usize {
-    let pids: Vec<u64> = crate::core::sync::lock(&REGISTRY).keys().copied().collect();
+    let pids: Vec<u64> = REGISTRY.pids();
     let mut reaped = 0;
     for pid in pids {
-        let mailbox = match crate::core::sync::lock(&REGISTRY).get(&pid) {
-            Some(mb) => Arc::clone(mb),
+        let mailbox = match REGISTRY.get(pid) {
+            Some(mb) => mb,
             None => continue,
         };
         let taken: Option<Box<Process>> = {
@@ -911,10 +917,10 @@ fn report_parked_liveness() {
     // per-mailbox lock (the crate lock discipline) — hence the collect. A parked
     // process's heap is quiescent (no worker owns it) and shares the runtime `Arc`, so
     // its `report_gen_liveness` writes the shared drain ack map on its own behalf.
-    let parked: Vec<(u64, Arc<Mailbox>)> = crate::core::sync::lock(&REGISTRY)
-        .iter()
+    let parked: Vec<(u64, Arc<Mailbox>)> = REGISTRY
+        .entries()
+        .into_iter()
         .filter(|(_, mb)| mb.status.load(Ordering::Relaxed) == ST_WAITING)
-        .map(|(pid, mb)| (*pid, Arc::clone(mb)))
         .collect();
     for (pid, mailbox) in parked {
         let state = crate::core::sync::lock(&mailbox.state);
@@ -952,7 +958,7 @@ pub fn old_gen_drained(heap: &Heap) -> bool {
     // Both counts are O(1) relaxed loads; over-counting the sum (a parked process that
     // already acked is in both) only opens the gate an inspection early — `gen_drained`
     // below still guards the actual free, so a racy count never frees a referenced gen.
-    let live = crate::core::sync::lock(&REGISTRY).len() as u64;
+    let live = REGISTRY.len() as u64;
     if heap.drain_acked_count() + (parked_count() as u64) < live {
         return false;
     }
@@ -1003,7 +1009,7 @@ pub(super) fn ensure_ctx() -> Ctx {
         }
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
         let mailbox = Mailbox::new();
-        crate::core::sync::lock(&REGISTRY).insert(pid, Arc::clone(&mailbox));
+        REGISTRY.insert(pid, Arc::clone(&mailbox));
         let ctx = Ctx {
             pid,
             mailbox,

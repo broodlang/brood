@@ -3427,6 +3427,33 @@ impl Heap {
     /// cached `Arc` is impossible to observe wrongly — a generation is freed only once every
     /// process (this one included) has reported clean of it (ADR-091), so this process holds
     /// no live handle into a generation whose `Arc` it might still have cached.
+    /// Run `f` against RUNTIME generation `g`'s slabs **without bumping its refcount**.
+    ///
+    /// [`code_gen_pinned`](Self::code_gen_pinned) returns an owned `Arc` so a caller can hold
+    /// the generation alive across a borrow — necessary when handing out a reference, but pure
+    /// overhead for a read that copies its value straight out. The clone and its matching drop
+    /// are two atomic RMWs on a path that runs once per element of every `def`'d structure,
+    /// and they dominated it: measured 2026-07-28, `first` on a RUNTIME pair cost **77 ns**
+    /// against **1 ns** for the identical code on a LOCAL one — a 70x cliff that every global
+    /// data structure fell off (`sort` walks a 375k-element `def`'d list; `matmul` derefs a
+    /// `def`'d matrix ~16 M times).
+    ///
+    /// Soundness is unchanged: the cache still owns the `Arc`, so the generation cannot be
+    /// freed while `f` borrows it. `f` must not itself take a *mutable* borrow of this same
+    /// generation's cache slot — every caller is a trivial copy-out read, which cannot.
+    #[inline]
+    fn with_code_gen<R>(&self, g: usize, f: impl FnOnce(&CodeSlabs) -> R) -> R {
+        let ver = self.runtime.gen_version.load(Ordering::Acquire);
+        if self.gen_cache_ver[g].get() != ver {
+            *self.gen_cache[g].borrow_mut() = Some(self.runtime.gens[g].load_full());
+            self.gen_cache_ver[g].set(ver);
+        }
+        let cached = self.gen_cache[g].borrow();
+        f(cached
+            .as_ref()
+            .expect("gen cache populated on the version miss above"))
+    }
+
     #[inline]
     fn code_gen_pinned(&self, g: usize) -> Arc<CodeSlabs> {
         let ver = self.runtime.gen_version.load(Ordering::Acquire);
@@ -3498,11 +3525,11 @@ impl Heap {
                 self.local.pairs[id.index()]
             }
             PRELUDE => self.prelude.slabs.pairs[id.index()],
-            RUNTIME => *self
-                .code_gen_pinned(id.code_gen())
-                .pairs
-                .get(id.index())
-                .expect("runtime pair handle"),
+            // Copy-out read: borrow the generation rather than pinning it, so a pair
+            // deref costs no atomic refcount traffic (see `with_code_gen`).
+            RUNTIME => self.with_code_gen(id.code_gen(), |slabs| {
+                *slabs.pairs.get(id.index()).expect("runtime pair handle")
+            }),
             _ => unreachable!("invalid handle region"),
         }
     }
