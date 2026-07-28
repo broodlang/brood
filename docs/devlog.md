@@ -9942,3 +9942,24 @@ Tests: `tests/spy_test.blsp` (13) — transparency, trace-as-data via a capturin
 laziness (untaken branch / short-circuit absent), `let` RHS+body, fn-body opacity,
 quoted-data passthrough, error propagation, + cross-process (`:isolated`: a worker
 spy-computes and sends a value, fan-out/fan-in fold). Docs in `language.md`; ADR-173.
+
+## 2026-07-28 (fix) — `make install` installed a REPL-less `brood` (dev-tools split)
+
+`make install` built `brood`/`nest` `--no-default-features` (the lean runtime that
+gets embedded into `nest` for `nest release` app bundling) and copied *those* onto
+`$PREFIX/bin`. But the lean build strips `dev-tools`, i.e. the `DEV_MODULES`
+(`repl`/`test`/`observer`/`mcp`) — so the installed `brood` couldn't start its own
+REPL (`require: cannot find module 'repl'`), and this had been true for every
+`make install`. Root cause: one binary was serving two opposite needs — lean for
+*embedding/shipping*, full for *interactive use on PATH*.
+
+Fix (Makefile): split them. `release-brood` still builds the LEAN brood
+(`RUN_FEATURES`) — the embed base + what `make ab` measures — unchanged. `release`
+now builds `nest` and the installed `brood` with `INSTALL_FEATURES` (= `RUN_FEATURES`
++ `brood/dev-tools`); the dev `brood` is rebuilt *after* `nest` has already baked in
+the lean copy, so it overwrites the on-disk file without changing what apps ship.
+Net: `nest release` bundles stay lean, the `brood`/`nest` on your PATH get the REPL
+and `nest test`/`observe`/`mcp` back. Costs one extra ~12s brood build at install
+time. Verified: `make install` then `brood` REPLs; the embedded runtime is still
+lean (nest embeds release-brood's output, built before the dev overwrite). Docs:
+`docs/release.md` note added. (Surfaced while dogfooding `spy` in the REPL.)

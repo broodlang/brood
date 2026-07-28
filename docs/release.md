@@ -62,10 +62,18 @@ If you need data files, ship them alongside for now.
 ## The embedded lean+gui runtime (no Rust at release time)
 
 `nest release` does **not** append to your dev `brood`, and it does **not** need
-a compiler. `make install` builds one lean (stripped, no-LTO) runtime and
+a compiler. `make install` builds a lean (stripped, no-LTO) runtime and
 **bakes it into `nest`** (`crates/nest/build.rs` → `include_bytes!`); `nest
 release` just appends your app to that embedded copy — pure file-ops, no
 cargo/rustc. (Verified: it runs with an empty `PATH`.)
+
+> **The embedded runtime is lean; the binaries you install are not.** `make
+> install` builds the lean brood (for the embed above + `make ab`) **and**,
+> separately, the `brood`/`nest` it copies onto your `PATH` with `dev-tools`
+> ON — so your interactive `brood` has a **REPL** and `nest test`/`observe`/`mcp`
+> work (`INSTALL_FEATURES = RUN_FEATURES + brood/dev-tools` in the Makefile). Only
+> the *embedded* copy — the runtime apps ship with — is stripped of the
+> DEV_MODULES below. The `brood` on your PATH is the full one.
 
 The runtime is **lean** — `--no-default-features` strips, so it never compiles in:
 
