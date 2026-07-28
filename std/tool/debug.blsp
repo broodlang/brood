@@ -45,29 +45,28 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
 
 (defn debug--loop (state)
   (receive
-    ([:trace entry from]
-     (debug--loop (debug--record state {:kind :trace :pid from :entry entry})))
-    ([:span-enter span parent pid label]
-     (debug--loop (debug--record state {:kind :span-enter :span span :parent parent :pid pid :label label})))
-    ([:span-exit span pid value]
-     (debug--loop (debug--record state {:kind :span-exit :span span :pid pid :value value})))
+    ([:trace entry from] (debug--loop (debug--record state {:kind :trace :pid from :entry entry})))
+    ([:span-enter span parent pid label] (debug--loop (debug--record state
+                                                        {:kind :span-enter
+                                                         :span span
+                                                         :parent parent
+                                                         :pid pid
+                                                         :label label})))
+    ([:span-exit span pid value] (debug--loop (debug--record state
+                                                {:kind :span-exit :span span :pid pid :value value})))
     ([:break pid snapshot]
-     ;; The worker is now blocked on receive awaiting [:resume] — record it as paused.
-     (debug--loop (debug--record (assoc-in state [:paused pid] snapshot)
-                    {:kind :break :pid pid :label (get snapshot :label)})))
-    ([:resume pid]
-     (send pid [:resume])
-     (debug--loop (assoc state :paused (dissoc (get state :paused) pid))))
-    ([:resume-all reply]
-     (doseq (p (keys (get state :paused))) (send p [:resume]))
-     (when reply (send reply [:resumed (count (get state :paused))]))
-     (debug--loop (assoc state :paused {})))
-    ([:query reply]
-     (send reply [:state state])
-     (debug--loop state))
-    ([:stop reply]
-     (when reply (send reply [:stopped]))
-     :stopped)))
+      ;; The worker is now blocked on receive awaiting [:resume] — record it as paused.
+      (debug--loop (debug--record (assoc-in state [:paused pid] snapshot)
+                     {:kind :break :pid pid :label (get snapshot :label)})))
+    ([:resume pid] (send pid [:resume])
+      (debug--loop (assoc state :paused (dissoc (get state :paused) pid))))
+    ([:resume-all reply] (doseq (p (keys (get state :paused))) (send p [:resume]))
+      (when reply (send reply [:resumed (count (get state :paused))]))
+      (debug--loop (assoc state :paused {})))
+    ([:query reply] (send reply [:state state])
+      (debug--loop state))
+    ([:stop reply] (when reply (send reply [:stopped]))
+      :stopped)))
 
 (defn start-debugger ()
   "Spawn a fresh debugger process and return its pid. Bind it as `*debugger*` (or use `with-debugger`), then `spy` / `break` / `span` stream to it."
@@ -123,7 +122,8 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
   (get (dbg-state dbg) :events))
 (defn resume (dbg pid)
   "Release one parked process."
-  (send dbg [:resume pid]) nil)
+  (send dbg [:resume pid])
+  nil)
 (defn resume-all (dbg)
   "Release every parked process; returns how many were waiting."
   (let (me (self)) (send dbg [:resume-all me]) (receive ([:resumed n] n))))
@@ -153,9 +153,8 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
 
 (defn value-distribution (dbg form-string)
   "The distribution of observed values for one traced form, `{value -> count}`."
-  (frequencies
-    (keep (fn (o) (when (= (pr-str (get o :form)) form-string) (get o :value)))
-      (observations dbg))))
+  (frequencies (keep (fn (o) (when (= (pr-str (get o :form)) form-string) (get o :value)))
+                 (observations dbg))))
 
 (defn modal-value (dbg form-string)
   "The most-common observed value for a form (nil if never seen) — the population's 'normal'."
@@ -167,8 +166,9 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
 (defn outliers (dbg form-string)
   "The observations of `form-string` whose value is NOT the modal one — the few rows to inspect when the population mostly agrees. Each is `{:pid :form :value}`."
   (let (modal (modal-value dbg form-string))
-    (filter (fn (o) (and (= (pr-str (get o :form)) form-string)
-                      (not (= (get o :value) modal))))
+    (filter (fn (o)
+              (and (= (pr-str (get o :form)) form-string)
+                (not (= (get o :value) modal))))
       (observations dbg))))
 
 ;; ---- causal tree reconstruction ---------------------------------------------
@@ -178,14 +178,16 @@ list of root nodes, each `{:span :label :pid :value :children [...]}`. A span st
 running shows `:value :running`."
   (let (events (dbg-events dbg)
         enters (filter (fn (e) (= (get e :kind) :span-enter)) events)
-        exits  (filter (fn (e) (= (get e :kind) :span-exit)) events)
+        exits (filter (fn (e) (= (get e :kind) :span-exit)) events)
         value-of (fn (id)
                    (let (ex (first (filter (fn (e) (= (get e :span) id)) exits)))
                      (if ex (get ex :value) :running)))
         children-of (fn (parent-id)
                       (filter (fn (e) (= (get e :parent) parent-id)) enters)))
     (letrec (build (fn (e)
-                     {:span (get e :span) :label (get e :label) :pid (get e :pid)
+                     {:span (get e :span)
+                      :label (get e :label)
+                      :pid (get e :pid)
                       :value (value-of (get e :span))
                       :children (map build (children-of (get e :span)))}))
       (map build (filter (fn (e) (nil? (get e :parent))) enters)))))
@@ -206,8 +208,9 @@ causal tree, and the hottest traced forms by hit count. The one-call overview."
   (let (state (dbg-state dbg))
     (println "── parked processes ──")
     (doseq (entry (get state :paused))
-      (println (str "  " (first entry) "  " (get (second entry) :label)
-                 "  " (pr-str (get (second entry) :vals)))))
+      (println (str "  "
+                 (first entry) "  " (get (second entry) :label) "  "
+                 (pr-str (get (second entry) :vals)))))
     (println "── causal tree ──")
     (print-causal dbg)
     (println "── hot traced forms ──")

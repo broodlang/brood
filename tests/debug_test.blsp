@@ -61,7 +61,8 @@
           (spawn (with-debugger dbg (fn () (break (str "bp-" n)) (send me [:done]))))))
       (assert= true (wait-until dbg (fn (s) (= 5 (count (get s :paused)))) 200))
       (assert= 5 (resume-all dbg))
-      (letrec (drain (fn (k acc) (if (= k 0) acc (do (receive ([:done] nil)) (drain (dec k) (inc acc))))))
+      (letrec (drain (fn (k acc)
+                       (if (= k 0) acc (do (receive ([:done] nil)) (drain (dec k) (inc acc))))))
         (assert= 5 (drain 5 0)))
       (dbg-stop dbg))))
 
