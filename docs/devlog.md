@@ -9669,22 +9669,34 @@ So the spawn *rate* is genuinely competitive — 675 ns/process after the regist
 `Slabs` of eleven `Vec`s each, plus caches and maps, against the BEAM's ~330-word process.
 That is the case for pooling/recycling process heaps rather than constructing them.
 
-**But the bigger finding is parallel scaling, and it is not what I expected.** `pfib` — 100
-*independent* `fib(31)`s, embarrassingly parallel — on a 6-core/12-thread i5-11500H:
+**A parallel-scaling scare, which turned out to be my own measurement error — recorded
+because the error is the instructive part.** `pfib` and a pure-integer burn both appeared to
+scale only 2.3× on a 6-core/12-thread i5-11500H, with *two* workers showing **no speedup at
+all** over one. That reads as a serious serialization bug.
 
-| workers | 1 | 2 | 4 | 8 | 12 |
-|---|---|---|---|---|---|
-| wall | 457 ms | 463 ms | 275 ms | 205 ms | 208 ms |
-| speedup | 1.0× | **1.0×** | 1.7× | 2.3× | 2.3× |
+It was not. **`BROOD_J=1` does not give one worker** — `worker_count()` floors the real pool
+at 2 (the documented spare that lets a dirty-blocked worker be drained). So the "1 worker" and
+"2 worker" runs were *the same configuration*, which manufactured both the flat 1→2 result and
+a baseline that halved every speedup computed from it.
 
-**2.3× out of a possible ~6×**, and *two* workers give no speedup at all.
+Measured properly, from a true 2-worker baseline, going 2 → 12 workers on identical hardware
+and an identical workload:
 
-**The distribution machinery is not the cause**, which is the useful half. `(sched-stats)`
-during the run: at J=2, **99 steals** for 100 processes; at J=12, **100 steals**, peak-threads
-= 12, migrations 0. The processes really are being handed out to every worker — throughput
-just doesn't follow. So the next question is what serialises *inside* the workers (allocator?
-shared-region reads? memory bandwidth on 6 physical cores?), not whether the scheduler spreads
-work.
+| | 2 → 12 workers |
+|---|---|
+| machine ceiling (12 independent OS processes) | **3.0×** |
+| **Brood** | **2.5×** (83% of ceiling) |
+| Elixir / BEAM (`+S 2` → `+S 12`) | 2.4× (80%) |
+
+So Brood's parallel scaling is **on par with the BEAM and near the hardware ceiling**. There
+is no scheduler serialization to hunt. (The distribution machinery was never in doubt either:
+`(sched-stats)` showed 99 steals for 100 processes at 2 workers, 100 at 12, peak-threads
+matching the pool.)
+
+Two lessons worth keeping. First, **a "1×" speedup should have been suspicious enough to check
+the knob before the code** — no real contention produces *exactly* zero gain. Second, a
+control matters: running N independent OS processes established the machine's own 3.0× ceiling
+and is what made 2.5× legible as "83% of available" rather than "poor".
 
 **Coverage gap found while checking:** `work_stealing.rs`, `live_migration.rs`,
 `preemption.rs` and `concurrency_race.rs` prove the mechanisms are live and correct, but
