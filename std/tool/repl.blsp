@@ -183,27 +183,45 @@ highlights. Used to colour a printed result on an interactive TTY."
              "  *1 *2 *3        the last three result values;  *e  the last error" "\e[0m")))
 
 (defn repl--meta-doc (name)
-  "Print the docstring + arglist for `name` (a function/macro/primitive), or a note."
-  (try
-    (let (d (eval-string (str "(doc " name ")"))
-          a (eval-string (str "(arglist " name ")")))
-      (println (str "\e[36m(" name (if a (str " " (join " " (map str a))) "") ")\e[0m"))
-      (println (if d (str "\e[90m" d "\e[0m") "\e[90m(no documentation)\e[0m")))
-    (catch e (println (str "\e[90m(no such name: " name ")\e[0m")))))
+  "Print the docstring + arglist for `name` (a function/macro/primitive), or a note.
+The argument must read as exactly one symbol — it is spliced into code text, so
+anything else (`,doc foo)`, `,doc (fn …)`, `,doc foo) (extra) (`) would splice extra
+forms into the eval rather than fail cleanly."
+  (let (forms (try (read-all name) (catch _ nil))
+        sym (if (and (pair? forms) (empty? (rest forms))) (first forms) nil))
+    (if (not (symbol? sym))
+      (println (str "\e[90m(usage: ,doc <name>)\e[0m"))
+      (try
+        (let (d (eval-string (str "(doc " name ")"))
+              a (eval-string (str "(arglist " name ")")))
+          (println (str "\e[36m(" name (if a (str " " (join " " (map str a))) "") ")\e[0m"))
+          (println (if d (str "\e[90m" d "\e[0m") "\e[90m(no documentation)\e[0m")))
+        (catch e (println (str "\e[90m(no such name: " name ")\e[0m")))))))
+
+;; `,type` and `,time` EVALUATE user code, so they run through `repl--call` — the same
+;; interruptible runner as ordinary forms. `,time` exists precisely for expressions
+;; slow enough to wonder about, which makes an uninterruptible one a trap: Ctrl-C
+;; during the timing would set a flag nobody polls. Their output goes through the
+;; bounded printer for the same reason results do.
 
 (defn repl--meta-type (expr)
-  (try
-    (println (str "\e[33m" (type-of (eval-string expr)) "\e[0m"))
-    (catch e (eprint (str (repl--error-message e) "\n")))))
+  (repl--call (fn ()
+                (try
+                  (println (str "\e[33m" (type-of (eval-string expr)) "\e[0m"))
+                  (catch e (eprint (str (repl--error-message e) "\n")))))))
 
 (defn repl--meta-time (expr)
-  (try
-    (let (t0 (now)
-          v (eval-string expr)
-          ms (- (now) t0))
-      (when (stdout-tty?) (println (repl--colorize (pr-str v))))
-      (println (str "\e[90m; " ms " ms\e[0m")))
-    (catch e (eprint (str (repl--error-message e) "\n")))))
+  (repl--call
+    (fn ()
+      (try
+        (let (t0 (now)
+              v (eval-string expr)
+              ms (- (now) t0))
+          ; value shown only interactively (piped ,time reports just the
+          ; timing, as before) — and bounded, like any printed result
+          (when (stdout-tty?) (println (repl--colorize (pr-str-bounded v))))
+          (println (str "\e[90m; " ms " ms\e[0m")))
+        (catch e (eprint (str (repl--error-message e) "\n")))))))
 
 ;; `apropos` / `doc-search` have been in the prelude all along; the only thing missing
 ;; was a way to reach them without breaking your typing rhythm. `,apropos` searches
@@ -409,43 +427,97 @@ lets an error escape the loop."
 ;; a timer, not a spin.
 (def *repl-interrupt-poll-ms* 40)
 
-(defn repl--await-eval (child ref killed)
-  "Park until the spawned evaluation `child` dies, polling for Ctrl-C. Returns `:ok`
-normally, `:interrupted` when we killed it. Tail-recursive, so a long computation costs
-one parked process and a timer, not a spin."
+;; NESTED sessions and interrupt ownership. `pry` (std/tool/debug.blsp) launches
+;; `repl-run` *inside* an outer REPL's evaluation — so two loops are alive at once, and
+;; both would poll the one read-and-clear interrupt flag every 40ms. Whoever polled
+;; first would consume the Ctrl-C: if the OUTER loop won, it would hard-kill its child
+;; — which is the entire pry session — when the user only meant to stop one expression
+;; typed at the `debug>` prompt. So the flag has one owner at a time: the INNERMOST
+;; runner. Runners register in a stack (a `Table` — the sanctioned shared-mutable store
+;; — since the stack must be visible across the loop processes); only the pid at the
+;; head polls. Nesting is strict — an outer runner is parked in `receive` for as long
+;; as its child runs — so push/pop never race. If the head pid has *died* without
+;; popping (its runner was killed rather than returning), the next poller repairs the
+;; stack instead of leaving the flag permanently unowned.
+(def *repl--interrupt-owners* (table))
+
+(defn repl--interrupt-push ()
+  "Register the calling process as the innermost interrupt owner."
+  (table-put *repl--interrupt-owners*
+    :stack (cons (self) (or (table-get *repl--interrupt-owners* :stack) '()))))
+
+(defn repl--interrupt-pop ()
+  "Deregister the calling process (must be the current head — strict nesting)."
+  (table-put *repl--interrupt-owners*
+    :stack (rest (or (table-get *repl--interrupt-owners* :stack) '()))))
+
+(defn repl--interrupt-owner? ()
+  "Is the calling process the innermost live interrupt owner? Repairs the stack past
+dead heads (a runner that was killed instead of returning), so ownership can never be
+wedged on a corpse."
+  (let (stack (or (table-get *repl--interrupt-owners* :stack) '()))
+    (cond
+      (empty? stack) true
+      (= (first stack) (self)) true
+      ;; a dead head can't poll — drop it and re-ask
+      (nil? (process-info (first stack))) (do
+                                            (table-put *repl--interrupt-owners*
+                                              :stack (rest stack))
+                                            (repl--interrupt-owner?))
+      else false)))
+
+(defn repl--await-child (child ref killed)
+  "Park until the spawned `child` dies, polling for Ctrl-C — but only while we are the
+innermost interrupt owner, so a nested session's Ctrl-C is never stolen by an outer
+loop. Returns `:ok` normally, `:interrupted` when we killed it."
   (receive
     ([:down ^ref ^child _] (if killed
                              (do (println "\e[90m; interrupted\e[0m") :interrupted)
                              :ok))
     (after *repl-interrupt-poll-ms*
-      (if (%interrupt-taken?)
+      (if (and (repl--interrupt-owner?) (%interrupt-taken?))
         (if killed
           ;; The kill didn't land — a native builtin that never reaches a reduction
           ;; tick. Don't pretend to be interruptible; give the user their Unix Ctrl-C.
           (do
             (eprint "\n; evaluation is not yielding — halting\n")
             (%halt 130))
-          (do (exit child :kill) (repl--await-eval child ref true)))
-        (repl--await-eval child ref killed)))))
+          (do (exit child :kill) (repl--await-child child ref true)))
+        (repl--await-child child ref killed)))))
 
-(defn repl--eval-interruptible (src)
-  "Evaluate `src` in a spawned process so Ctrl-C can kill it without taking the image
-down with it. Returns `:ok` or `:interrupted`."
+(defn repl--call-interruptible (thunk)
+  "Run `thunk` in a spawned process so Ctrl-C can kill it without taking the image down
+with it — the shared runner behind evaluation AND the evaluating meta-commands
+(`,time`, `,type`), which are just as capable of running away. Returns `:ok` or
+`:interrupted`."
   (do
     ;; Drain a stale request first. In raw mode Ctrl-C is byte 0x03 (ISIG is off) and
     ;; never signals — but the gap between reads is cooked, so a Ctrl-C there would set
-    ;; the flag and otherwise abort the *next* expression the moment it started.
-    (%interrupt-taken?)
-    (let (child (spawn (repl--eval-print src))
-          ref (monitor child))
-      (repl--await-eval child ref false))))
+    ;; the flag and otherwise abort the *next* expression the moment it started. Only
+    ;; the innermost owner may drain: an outer runner draining here would eat a Ctrl-C
+    ;; belonging to a nested session. (Unreachable in practice — an outer loop is
+    ;; parked while a nested session runs — but the guard keeps the invariant local.)
+    (when (repl--interrupt-owner?) (%interrupt-taken?))
+    (repl--interrupt-push)
+    (let (child (spawn (thunk))
+          ref (monitor child)
+          result (repl--await-child child ref false))
+      (repl--interrupt-pop)
+      result)))
 
 (defn repl--eval (src)
   "Evaluate + print `src`, interruptibly when this session armed it (`repl-run` on a
 TTY), else inline. The seam the loop calls."
   (if *repl-interruptible*
-    (repl--eval-interruptible src)
+    (repl--call-interruptible (fn () (repl--eval-print src)))
     (repl--eval-print src)))
+
+(defn repl--call (thunk)
+  "Run `thunk` — a meta-command body that evaluates user code — interruptibly when the
+session is armed, else inline. The meta-command counterpart of `repl--eval`."
+  (if *repl-interruptible*
+    (repl--call-interruptible thunk)
+    (do (thunk) :ok)))
 
 ;; ---- history ----------------------------------------------------------------
 
@@ -588,17 +660,34 @@ from your home directory doesn't load the same file twice."
     (filter (fn (p) (not (nil? p)))
       (if (= user local) (list user) (list user local)))))
 
+;; Loaded ONCE per runtime, not once per `repl-run`: `pry` launches a nested `repl-run`
+;; mid-session, and re-running the user's rc there would re-execute its side effects
+;; and silently re-apply defs over the live session's state.
+(def *repl--rc-loaded* false)
+
 (defn repl--load-rc ()
-  "Load each existing startup file, reporting (but surviving) a failure in one. Runs
-before the banner so anything an rc prints reads as part of startup, and before the
-loop spawns so its `def`s are in place for the first prompt."
-  (fold (fn (_ path)
-          (when (try (file-exists? path) (catch _ false))
-            (try
-              (load path)
-              (catch e
-                (eprint (str "\e[33mwarning:\e[0m " path ": " (repl--error-message e) "\n"))))))
-    nil (repl--rc-paths)))
+  "Load each existing startup file, reporting (but surviving) a failure in one — once
+per runtime (a nested `repl-run`, e.g. `pry`, must not re-run the rc mid-session).
+Runs before the banner so anything an rc prints reads as part of startup, and before
+the loop spawns so its `def`s are in place for the first prompt."
+  (when (not *repl--rc-loaded*)
+    (def *repl--rc-loaded* true)
+    (fold (fn (_ path)
+            (when (try (file-exists? path) (catch _ false))
+              (try
+                (load path)
+                (catch e
+                  (eprint (str "\e[33mwarning:\e[0m "
+                            path ": " (repl--error-message e) "\n"))))))
+      nil (repl--rc-paths))))
+
+;; Which `repl-run` invocation owns the installed SIGINT handler — nil when none is
+;; installed. Only the invocation that *installed* it restores the default disposition
+;; on exit: a nested session (pry under the REPL) must leave the outer session's
+;; handler alone, while a transient session (pry under a *script*) must restore the
+;; script's normal fatal Ctrl-C — otherwise every later Ctrl-C sets a flag nobody
+;; polls and the script becomes uninterruptible.
+(def *repl--sigint-owner* nil)
 
 (defn repl-run ()
   "Run the read-eval-print loop on stdin until end of input (Ctrl-D). When stdin and
@@ -609,7 +698,10 @@ reclaims each command's transients at the safepoint — and this call blocks (pa
 in `receive`) until that process reaches end of input. Returns nil.
 
 Loads the startup files first (`$BROOD_RC` or `~/.broodrc.blsp`, then a project-local
-`./.broodrc.blsp`); a failure in one is reported and skipped, never fatal."
+`./.broodrc.blsp`, once per runtime); a failure in one is reported and skipped, never
+fatal. Nestable: `pry` calls this from inside a session — prompts rebound with
+`binding` around the call are honoured, and the SIGINT handler is installed/restored
+by the outermost invocation only."
   (let (interactive (and (stdin-tty?) (stdout-tty?))
         _rc (repl--load-rc)
         ;; Resolve `*repl-interruptible*` to the real armed state: the user's knob (the
@@ -618,9 +710,25 @@ Loads the startup files first (`$BROOD_RC` or `~/.broodrc.blsp`, then a project-
         ;; SIGINT — Ctrl-C on `echo … | brood` should kill it like any Unix program)
         ;; AND the platform actually installing a handler. `def` (not `binding`)
         ;; because the flag has to reach the spawned loop process.
-        _armed (def *repl-interruptible*
-                 (and *repl-interruptible* interactive (%install-interrupt-handler)))
+        armed (and *repl-interruptible* interactive (%install-interrupt-handler))
+        _set (def *repl-interruptible* armed)
+        ;; The first armed invocation owns the handler (a unique token compared at
+        ;; exit); a nested repl-run sees a non-nil owner and leaves restoration to it.
+        token (ref)
+        owner (and armed (nil? *repl--sigint-owner*))
+        _own (when owner (def *repl--sigint-owner* token))
+        ;; Capture the prompts HERE, where a caller's `binding` (pry's `debug> `) is
+        ;; still in scope — dynamics do not cross `spawn`, so the loop process would
+        ;; otherwise fall back to the defaults — and re-establish them in the loop.
+        prompt *repl-prompt*
+        cont-prompt *repl-cont-prompt*
         history (if interactive (repl--load-history) '()))
     (when (stdout-tty?) (eprint (str *repl-banner* "\n")))
-    (repl--await (spawn (repl--loop interactive history)))
+    (repl--await (spawn (binding (*repl-prompt* prompt *repl-cont-prompt* cont-prompt)
+                          (repl--loop interactive history))))
+    (when (and owner (= *repl--sigint-owner* token))
+      (%restore-interrupt-handler)
+      (def *repl--sigint-owner* nil)
+      ;; back to the "arm if you can" intent, so a later repl-run re-resolves afresh
+      (def *repl-interruptible* true))
     nil))
