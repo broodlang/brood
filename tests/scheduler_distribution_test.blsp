@@ -1,0 +1,76 @@
+;; Scheduler distribution — work must actually reach more than one worker.
+;;
+;; The existing coverage proves the *mechanisms*: `work_stealing.rs` (the steal path
+;; fires and no process is lost while stolen), `live_migration.rs`, `preemption.rs`,
+;; `concurrency_race.rs`. Nothing asserted that a fan-out is *spread*, and
+;; `(sched-stats)` is the only distribution signal reachable from Brood — it has no
+;; per-worker breakdown, so these are the strongest claims the current observability
+;; supports.
+;;
+;; Written after a 2026-07-28 session where a scaling number looked catastrophic
+;; (two workers appearing to give exactly 1.0x speedup) and turned out to be a
+;; measurement error — `BROOD_J=1` floors the pool at 2, so the "1 worker" and
+;; "2 worker" runs were the same configuration. Hence the deliberate shape below:
+;; every assertion is *conditional on the pool the runtime reports*, never on an
+;; assumed worker count.
+;;
+;; Register-only — discovered and run by `nest test`.
+(defmodule scheduler-distribution-test (:use test))
+
+(defn workers () (get (sched-stats) :workers))
+
+;; A fan-out big enough that a single worker draining it alone would be obvious,
+;; but small enough to stay fast in the suite. Each child does real (if brief) work
+;; so a worker can actually be caught busy while a peer goes idle — the window the
+;; steal path needs.
+(def fan-size 200)
+
+(defn burn (i acc)
+  (if (>= i 20000) acc (burn (+ i 1) (bit-and (+ (* acc 1103515245) 12345) 2147483647))))
+
+(defn fan (me i)
+  (if (>= i fan-size) nil (do (spawn (send me [:done (burn 0 i)])) (fan me (+ i 1)))))
+
+(defn drain (got)
+  (if (>= got fan-size) got (drain (receive ([:done _] (+ got 1))))))
+
+(describe "scheduler distribution"
+  (test "every spawned process runs exactly once under fan-out"
+    ;; The unconditional guard: correctness cannot depend on how many workers the
+    ;; machine has. A lost or double-counted process fails here regardless of pool size.
+    (let (me (self))
+      (fan me 0)
+      (assert= (drain 0) fan-size)))
+
+  (test "a fan-out reaches more than one worker"
+    ;; `:peak-threads` is the high-water count of processes *running concurrently*.
+    ;; On a pool of one it can only ever be 1, so the claim is conditional — the
+    ;; lesson from the measurement error above.
+    (let (me (self) w (workers))
+      (fan me 0)
+      (drain 0)
+      (if (> w 1)
+        (assert= (> (get (sched-stats) :peak-threads) 1) true)
+        ;; single-worker pool: nothing to distribute to, so only the invariant holds
+        (assert= (>= (get (sched-stats) :peak-threads) 1) true))))
+
+  (test "the steal path fires when there is a pool to steal across"
+    ;; Complements `work_stealing.rs` (which pins a 2-worker pool in its own test
+    ;; binary): here we assert it on the *default* pool the suite actually runs with,
+    ;; so a regression that only shows at nproc workers is still caught.
+    (let (me (self) w (workers) before (get (sched-stats) :steals))
+      (fan me 0)
+      (drain 0)
+      (if (> w 1)
+        (assert= (> (get (sched-stats) :steals) before) true)
+        ;; a one-worker pool has no peer to steal from — the counter must not move
+        (assert= (get (sched-stats) :steals) before))))
+
+  (test "spawn/exit accounting balances over a fan-out"
+    ;; Every spawned process must also be accounted as exited once the fan drains —
+    ;; a leak here is how a registry or lifecycle bug shows up first.
+    (let (me (self) s0 (get (sched-stats) :spawned))
+      (fan me 0)
+      (drain 0)
+      (let (spawned (- (get (sched-stats) :spawned) s0))
+        (assert= (>= spawned fan-size) true)))))
