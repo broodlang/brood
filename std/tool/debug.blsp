@@ -280,3 +280,48 @@ always runs, even on error, so the terminal is restored."
   (let (result (try (debug-attach--loop dbg) (catch _ :error)))
     (term-leave)
     result))
+
+;; ---- interactive debugger prompt (a REPL for the session) -------------------
+;; A TYPING interface (cooked mode — no raw terminal, works even piped): prints the
+;; state, then a `debug>` prompt. Line commands:
+;;   <Enter>  refresh      r    resume ALL parked     r N   resume the Nth parked
+;;   q        quit         (any Brood expr) evaluate it — e.g. (debug/dbg-events d)
+(defn debug--numbered (entries)
+  (letrec (go (fn (es i acc)
+                (if (empty? es)
+                  (reverse acc)
+                  (go (rest es) (inc i)
+                    (cons (str "  [" i "] " (first (first es)) "  "
+                            (get (second (first es)) :label) " "
+                            (pr-str (get (second (first es)) :vals)))
+                      acc)))))
+    (go entries 1 ())))
+(defn debug--resume-nth (dbg entries n)
+  (if (and (int? n) (>= n 1) (<= n (count entries)))
+    (do (resume dbg (first (nth entries (dec n)))) (str "resumed [" n "]"))
+    (str "no parked process [" n "]")))
+(defn debug-repl (dbg)
+  "An interactive debugger prompt — a REPL for `dbg`. Prints the numbered paused queue
+and the causal tree, then reads a line: `r` resume all, `r N` resume the Nth parked,
+Enter refresh, `q` quit, or any Brood expression to evaluate. Cooked mode, so it needs
+no raw-terminal setup and works when piped."
+  (let (entries (vec (get (dbg-state dbg) :paused)))
+    (println "── parked processes ──")
+    (doseq (line (debug--numbered entries)) (println line))
+    (doseq (line (cons "── causal tree ──" (causal--lines (causal-tree dbg) 0))) (println line))
+    (print "debug> ")
+    (let (raw (read-line))
+      (if (nil? raw)
+        :done
+        (let (line (trim raw) parts (string-split line " ") cmd (first parts))
+          (cond
+            (= line "q") :done
+            (or (= line "") (= line "p")) (debug-repl dbg)
+            (= cmd "r") (do (if (> (count parts) 1)
+                              (println (debug--resume-nth dbg entries
+                                         (try (eval-string (second parts)) (catch _ nil))))
+                              (do (resume-all dbg) (println "resumed all")))
+                            (debug-repl dbg))
+            else (do (try (println (str "=> " (pr-str (eval-string line))))
+                       (catch e (println (str "! " (pr-str e)))))
+                     (debug-repl dbg))))))))
