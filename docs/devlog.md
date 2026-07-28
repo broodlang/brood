@@ -9863,6 +9863,107 @@ is resolvable from a test (`(:use devtool)` passes under `nest test`), and
 (peer presence) still lands with the bridge slice; this is the dev-dep half. Suite green,
 `nest check` clean, formatted.
 
+## 2026-07-28 (design) — dropped `:bridges` from ADR-172: reusable glue is a package of functions
+
+A "do we really need `:bridges`?" question exposed a contradiction in the design: `bridge`
+was declared **app-only**, yet a glue *package* (a module of `bridge` forms authorized by a
+manifest `:bridges` list) is not the app. `:bridges` existed only to reconcile that — so it
+was dropped. `bridge` is now strictly app-only, full stop. Reusable glue doesn't need orphan
+impls in a package: the package exports plain **conversion functions**, and the **app** writes
+the `bridge` calling them (`(bridge JsonEncode (ecto/decimal (encode [d] (json-ecto/decimal->json
+d))))`). The app always declares the link — you can never get a bridge you didn't write — and
+`bridge` staying unambiguously app-only shrinks the ADR-070 dependency ("who is the app" only
+has to mean "the root/entry program"). The turnkey "add package X and it just works" is the one
+thing lost, but that *is* the silent/transitive behaviour the model rejects. Knock-on: `:optional`
+(shipped, slice 1) loses its strongest motivation (gating a glue package on both libs present),
+falling back to the generic Cargo/Elixir optional dependency; kept for now, worth revisiting.
+ADR-172 §2/§4/§5/§9/§10 + the walkthrough artifact updated.
+
+## 2026-07-28 (impl) — Abilities v2 slice 4 (part): deterministic precedence by tier
+
+`std/ability.blsp` now resolves competing impls by **precedence tier, not load order**
+(ADR-172 §3). `defability` records its owning namespace (`*ability-owner*`); each
+`register-impl` computes a tier from provenance via `impl-rank` — **type-owner (3) >
+ability-owner (2) > other (1)** — and the registry keeps the highest-tier impl for each
+`(ability, op, id)` slot: a strictly lower tier is dropped, so the winner is the same
+regardless of registration order. Done as a guard *at registration*, so `impl-for`
+(dispatch) stays a plain map-get — no per-call tier walk. Additive: single-impl cases and
+same-tier hot-reload are unchanged, so the whole ability/show suite stays green (+4
+precedence tests in `ability_test.blsp`, now 28).
+
+**Deferred (needs ADR-070):** the top **app** tier — the program overriding *anything*.
+Distinguishing an app module from a library one needs package-rooted namespaces; until
+then an app override registers as `other` and wins only by same-tier last-write (the
+pre-ADR-172 behaviour). The type-owner-beats-ability-owner half — fully determinable now —
+is what this slice makes deterministic.
+
+## 2026-07-28 (impl) — `with`: Elixir-style sequential match-binding (prelude macro)
+
+Added `with` to `std/prelude.blsp` next to `if-let`/`when-let`. Flat `pattern expr`
+pairs (the `let` shape); each `expr` is matched against its `pattern` in order, the
+first value that fails its pattern short-circuits, and the body runs only when every
+step matched with all bindings in scope. Pure sugar over nested `match` — **no new
+special form** (keeps the core small; a step lowers to `(match expr (pattern <rest>)
+(miss <miss-arm>))`). A trailing `:else` section is a set of `match` clauses run
+against the short-circuited value (like Elixir's `else`); with no `:else`, that value
+falls straight through — so an `[:error …]` becomes the result untouched.
+
+Considered and rejected a Result/Either **monad** abstraction: Brood is dynamic, so a
+"monad" here is just combinators with grander names and no law-enforcement — and it
+fights the small-core / ADR-011 (defer power) rules. `with` is exactly the pragmatic
+answer Elixir itself chose over monads. Tests in `tests/ergonomics_test.blsp` (happy
+path, fall-through, `:else`, empty bindings, map/tuple patterns) + cross-process
+coverage (a worker builds+sends `[:ok …]` result tuples, parent matches with `with`,
+plus a fan-out/fan-in fold). Docs in `docs/language.md` § binding-conditionals.
+
+## 2026-07-28 (impl) — `spy`: homoiconic tree-tracing debug macro (ADR-173)
+
+Borrowed Elixir's `dbg` but did it more Lisp. `(spy expr)` evaluates `expr`, traces
+every evaluated subexpression's value in evaluation order, and returns the value
+unchanged (referentially transparent — wrap/drop it freely). Named `spy` (Lisp
+tradition) over `dbg`. Prelude macro in `std/prelude.blsp` (not a Rust builtin).
+
+Design (ADR-173): rather than `dbg`'s fixed special-case set + AST-to-source
+reconstruction, `spy` exploits homoiconicity — fully macroexpands the form
+(re-expanding at every node, since `macroexpand` only resolves the outer head) and
+instruments each evaluated position **in place**. That preserves laziness for free (an
+untaken `if` branch / short-circuited `and` tail never traces) and makes pipelines a
+non-case: `(-> x f g)` → `(g (f x))`, each stage traced by the ordinary call rule.
+`fn` bodies, `quote`, `quasiquote` left opaque. Descends into `if`/`do`/`let`/`letrec`
++ calls; other special forms trace their top value only (sound, conservative).
+
+Second bet: a swappable **`*spy-sink*`** (`defdyn`) carrying structured entries
+(`:enter`/`:node`/`:exit` maps) — so a host (editor, `nest observe`, a test) captures
+the trace as *data*, not text; default pretty-prints an indented tree to stderr. This
+is the seam for future editor inline-values (M2/M3), and it subsumes "no-op in
+production" (rebind to a no-op) without an added gate.
+
+Tests: `tests/spy_test.blsp` (13) — transparency, trace-as-data via a capturing sink,
+laziness (untaken branch / short-circuit absent), `let` RHS+body, fn-body opacity,
+quoted-data passthrough, error propagation, + cross-process (`:isolated`: a worker
+spy-computes and sends a value, fan-out/fan-in fold). Docs in `language.md`; ADR-173.
+
+## 2026-07-28 (fix) — `make install` installed a REPL-less `brood` (dev-tools split)
+
+`make install` built `brood`/`nest` `--no-default-features` (the lean runtime that
+gets embedded into `nest` for `nest release` app bundling) and copied *those* onto
+`$PREFIX/bin`. But the lean build strips `dev-tools`, i.e. the `DEV_MODULES`
+(`repl`/`test`/`observer`/`mcp`) — so the installed `brood` couldn't start its own
+REPL (`require: cannot find module 'repl'`), and this had been true for every
+`make install`. Root cause: one binary was serving two opposite needs — lean for
+*embedding/shipping*, full for *interactive use on PATH*.
+
+Fix (Makefile): split them. `release-brood` still builds the LEAN brood
+(`RUN_FEATURES`) — the embed base + what `make ab` measures — unchanged. `release`
+now builds `nest` and the installed `brood` with `INSTALL_FEATURES` (= `RUN_FEATURES`
++ `brood/dev-tools`); the dev `brood` is rebuilt *after* `nest` has already baked in
+the lean copy, so it overwrites the on-disk file without changing what apps ship.
+Net: `nest release` bundles stay lean, the `brood`/`nest` on your PATH get the REPL
+and `nest test`/`observe`/`mcp` back. Costs one extra ~12s brood build at install
+time. Verified: `make install` then `brood` REPLs; the embedded runtime is still
+lean (nest embeds release-brood's output, built before the dev overwrite). Docs:
+`docs/release.md` note added. (Surfaced while dogfooding `spy` in the REPL.)
+
 ## 2026-07-28 (late) — a parked process kept its garbage *and* its capacity; trim at park
 
 Picking up the memory-per-process gap against the BEAM (5.4 KB vs 2.68 KB). The base figure

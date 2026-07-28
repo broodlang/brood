@@ -10818,9 +10818,10 @@ collide (only the type-owner and the ability-owner can even produce an impl for 
 
 **2 — Deliberate linking (`bridge`).** Orphan impls are *not* banned — they are moved
 behind a distinct, intent-revealing form. `(bridge A (id (op …)) …)` is the **only**
-sanctioned orphan site, and it is **app-only** (or inside a package the app authorized —
-see §4). It reads as *"I am the app, deliberately connecting two libraries I use,"* and
-every cross-library hookup in a codebase is greppable (`grep bridge`). Two shapes:
+sanctioned orphan site, and it is strictly **app-only** — a library writing `bridge` is
+a checker error. It reads as *"I am the app, deliberately connecting two libraries I
+use,"* and every cross-library hookup in a codebase is greppable (`grep bridge`). Two
+shapes:
 
     (bridge JsonEncode
       (ecto/decimal (encode [d] (decimal->json-number d)))
@@ -10840,21 +10841,34 @@ deterministic:
 (type-owner beats ability-owner: a type knows itself better than the ability author's
 default *for* that type.)
 
-**4 — Bridge/glue packages, app-authorized.** A third-party "glue" package (Elixir's
-"a package that impls types for another package") is simply a module of `bridge` forms.
-It is **inert until the app authorizes it** in the app's manifest — `:bridges [json-ecto]`
-in `project.blsp`, which is app-scoped by definition, so a library cannot authorize a
-bridge and a *transitive* dependency can never glue anything. Colliding authorized
-bridges for the same `(A, id)` are a **compile-time error the app resolves**, not a
-silent last-wins.
+**4 — Reusable glue, without a `:bridges` mechanism.** Elixir's "a package that impls
+types for another package" tempted an earlier design (a manifest `:bridges` list
+authorizing a glue package's orphan impls) — **dropped.** It contradicted §2 (`bridge`
+is app-only, yet a package isn't the app) and its only real value — the turnkey "add
+package X and it just works" — *is* the silent, transitive, ambient behaviour this whole
+model rejects. Reusable glue does not need orphan impls in a package; split it the
+ordinary way:
+
+- the package exports plain **conversion functions** (owned, coherent — no orphans):
+  `(defmodule json-ecto …) (defn decimal->json (d) …) (defn uuid->json (u) …)`;
+- the **app** writes the `bridge`, calling them:
+  `(bridge JsonEncode (ecto/decimal (encode [d] (json-ecto/decimal->json d))) …)`.
+
+The reusable logic lives in a package; the **app always declares the link**. You can
+never end up with a bridge you did not write — maximal auditability, and it keeps
+`bridge` unambiguously app-only (which shrinks the ADR-070 dependency: "who is the app"
+only has to answer "the root/entry program," never "an authorized bridge package").
+Colliding `bridge` forms for the same `(A, id)` remain a **compile-time error the app
+resolves**, not a silent last-wins.
 
 **5 — The unifying principle.** *Owned + explicit* is automatic; anything **borrowed** (a
-`bridge`) or **ambient** (an implicit path — §7) requires the **app** to opt in.
-**Libraries propose; the app disposes.** `:bridges` and `display-on` are the same act —
-the app authorizing an effect a library merely offered.
+`bridge`) or **ambient** (an implicit path — §7) requires the **app** to act. A `bridge`
+is the app *writing* the link; `display-on` is the app *enabling* the implicit path.
+**Libraries propose; the app disposes** — and nothing a library ships takes effect across
+the app without an explicit line the app wrote.
 
 **6 — Compile-time enforcement, live-safe.** Coherence (§1), the app-only rule for
-`bridge` (§2), bridge authorization + conflicts (§4), and `:sealed` exhaustiveness are
+`bridge` (§2), `bridge` conflicts (§4), and `:sealed` exhaustiveness are
 checked at **`nest check` / CI as a hard reject**, re-run on every reload — but stay
 **advisory in the live image** (ADR-123–126): a running REPL may momentarily hold a
 transient incoherent impl while you edit, and only *shipping* incoherence is blocked. The
@@ -10883,25 +10897,22 @@ never-fail path stay native. `Inspect`/`inspect` is the explicit debug form. Thi
 only Display-specific machinery; the *authority* rules above are uniform across every
 ability (Display is not privileged in who-may-impl, only in being on an implicit path).
 
-**9 — Optional dependencies (the companion to `bridge`).** Today the package manager
-(ADR-037) has one **required** `:dependencies` list plus per-dep `:features` (Cargo-style
-build flags); there is no optional/dev distinction. A clean bridge story needs one,
-because a glue package should only matter when *both* libraries it links are present —
-which is exactly Elixir's `optional: true` dependency (a library ships `Jason.Encoder`
-impls that compile only if `jason` is also present). So this ADR adds:
+**9 — Optional + dev dependencies.** Today the package manager (ADR-037) has one
+**required** `:dependencies` list plus per-dep `:features` (Cargo-style build flags); no
+optional/dev distinction. This ADR adds both — noting that with `:bridges` dropped (§4),
+`:optional`'s *strongest* motivation (gating a glue package on both libraries being
+present) is gone, so it falls back to the generic Cargo/Elixir optional dependency:
 
-- **`:optional` per-dep** — declared but not force-installed; resolved/active only when
-  the app *also* depends on it (peer-style presence), or enables it. A glue package is an
-  optional dep.
+- **`:optional` per-dep** — declared but not force-installed; present only when the app
+  *also* depends on it. Its remaining use is compile-if-present *library features* (a lib
+  optionally depends on `ecto` and exposes ecto helpers only when `ecto` is present) — a
+  real but less common pattern; already shipped and cheap, worth revisiting later for its
+  keep. A `bridge` in the *app* is likewise **compile-if-present**: `(bridge JsonEncode
+  (ecto/decimal …))` where `ecto` isn't a dependency is *inert*, not an error — the type
+  doesn't exist, so the form contributes nothing.
 - **`:dev-dependencies`** — a second list resolved for `nest test`/dev and on the dev
-  load path, but **excluded from a release bundle** (ADR-038).
-
-These compose with §2/§4 into the **three conditions for a live bridge**:
-*present* (optional dependency) → *authorized* (`:bridges`) → *wins* (the §3 ladder).
-And a `bridge` form is **compile-if-present**: `(bridge JsonEncode (ecto/decimal …))`
-where `ecto` isn't in the dependency set is *inert*, not an error — the type doesn't
-exist, so the form contributes nothing. This is the optional-impl semantics Elixir gets
-from `optional: true`, made explicit.
+  load path, but **excluded from a release bundle** (ADR-038). Unaffected by the `:bridges`
+  removal; the clearly-useful half.
 
 **10 — Implementation plan (staged).** Slices, in dependency order:
 
@@ -10909,10 +10920,11 @@ from `optional: true`, made explicit.
    normalize (`std/tool/project.blsp`), resolver honors them (`std/tool/package.blsp`),
    release excludes dev-deps (`bundle.rs`). *Independent of everything below — buildable
    now.*
-2. **`bridge` + `:bridges`** — the macro (owner-check-exempt, app-only site), manifest
-   authorization, compile-if-present inertness, same-tier conflict = error.
+2. **`bridge`** — the macro (owner-check-exempt, strictly app-only site), compile-if-present
+   inertness, same-`(A,id)` conflict = error. (No `:bridges` / glue-package authorization —
+   dropped, §4.)
 3. **Coherence checking** — owner-only `impl` (own ability or type), orphan → hard reject,
-   bridge conflicts, at `nest check` (`types/check/protocol.rs`, which already tracks
+   `bridge` conflicts, at `nest check` (`types/check/protocol.rs`, which already tracks
    record identity). *Wants ADR-070 for the clean app/library line; interim uses the
    root-namespace convention.*
 4. **Precedence resolution** — `app > type-owner > ability-owner > :default > native`,
@@ -10930,7 +10942,7 @@ only; everything else is independent. Slice 1 has no blockers and is the startin
 | | Brood (this) | Elixir | Rust | .NET | Ruby |
 |---|---|---|---|---|---|
 | Coherence enforced | `nest check`/CI, re-run on reload | release consolidation only | always (absolute) | by construction | never |
-| Orphan impl | `bridge`, app-authorized | allowed, silent, transitive | rejected | impossible | allowed (monkey-patch) |
+| Orphan impl | `bridge`, app-only, explicit | allowed, silent, transitive | rejected | impossible | allowed (monkey-patch) |
 | App is final authority | **yes**, deterministic | no | no | no | load-order |
 | Conflict | compile error, app resolves | last-wins + warning | can't happen | can't happen | silent |
 | Add impl at runtime | **yes** — re-checked + deopt | dev only | no | no | yes |
@@ -10975,3 +10987,54 @@ static dispatch), ADR-123–126 (checker never gates the live image; CI hard-rej
 ADR-130 (records as maps carrying `:__id__`), ADR-070 (package-rooted namespaces — the
 clean app/library line), ADR-011 (defer power features — why the always-on-in-core and
 bridge machinery are scoped, not maximal).
+
+## ADR-173 — `spy`: a homoiconic tree-tracing debug macro (borrow Elixir's `dbg`, do it more Lisp)
+
+**Status:** accepted, implemented (2026-07-28). `spy` ships in `std/prelude.blsp`;
+tests in `tests/spy_test.blsp`.
+
+**Context.** Elixir's `dbg` is one of its most-loved conveniences: wrap any
+expression (or drop `|> dbg()` into a pipeline) and it prints the source and value —
+of the whole expression and, for a pipe, each stage — then returns the value
+unchanged, so inserting/removing it never changes behaviour. Doing the same in Brood
+was flagged as the highest value-to-effort item on the "Elixir-loved ergonomics"
+backlog (after `with`, ADR — none; devlog 2026-07-28). The design question was whether
+to transliterate `dbg` (special-case a fixed set of constructs, reconstruct source
+from the AST) or exploit that Brood code *is* data.
+
+**Decision.** Ship it as **`spy`** (a Lisp-tradition name over `dbg`), a **prelude
+macro** — not a Rust builtin (ADR-006: mechanism in Rust, policy in Brood) — with
+three deliberate choices:
+
+**1 — Full homoiconic tree-trace, not a fixed special-case set.** `spy` fully
+macroexpands the form and instruments *every evaluated position* in place, so it
+traces the entire call tree, not just pipelines. Because `macroexpand` only resolves
+the *outer* head (`(+ 1 (when …))` leaves the inner `when`), the walker re-expands at
+every node. Instrumenting **in place** is what preserves evaluation semantics:
+laziness (an untaken `if` branch, a short-circuited `and` tail) and single-evaluation
+fall out for free, and referential transparency holds — the value is always returned
+unchanged. A pipeline needs **no special case**: `(-> x f g)` expands to `(g (f x))`
+and the ordinary call rule traces each stage. `fn` bodies, `quote`, and `quasiquote`
+are left opaque (a closure body runs later/elsewhere; quoted data never evaluates).
+This is strictly more than `dbg`, and simpler, because homoiconicity removes the
+AST-to-source reconstruction Elixir needs.
+
+**2 — A swappable sink (`*spy-sink*`), so a trace is DATA, not text.** Elixir's `dbg`
+hardwires printing. `spy` emits structured entries — `{:spy :enter :form f}`,
+`{:spy :node :form f :value v :depth d}`, `{:spy :exit :value v}` — through a `defdyn`
+sink. The default pretty-prints an indented tree to **stderr** (never corrupting
+stdout data); a host — the editor, the `nest observe` viewer, a test — rebinds the
+sink to capture the trace as data. This is the "even better than `dbg`" bet and the
+seam that lets the self-editing editor later render `spy` values as inline overlays
+(M2/M3). It also subsumes the "no-op in production" need without a separate gate
+(ADR-011): rebind the sink to a no-op — no `*debug*` knob added.
+
+**Consequences.** One new public macro (`spy`) + one dynamic (`*spy-sink*`); no core
+/ evaluator change, no new special form (ADR keeps the core small). Scope drawn at
+descend-into `if`/`do`/`let`/`letrec` + calls; other special forms trace their top
+value only (sound, conservative) — a fuller per-special-form rule table is deferred
+until wanted. No source position in the trace yet (no position primitive is exposed
+for a macro's argument form); the source *form* echo carries the information. Related:
+[[with]] (ADR — the prior ergonomics borrow), ADR-006 (write it in Brood), ADR-011
+(defer power — why the special-form rules and a `:label` arg are scoped, not maximal),
+ADR-013 (hot reload — the sink seam mirrors the late-binding philosophy).

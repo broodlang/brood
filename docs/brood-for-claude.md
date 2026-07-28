@@ -885,9 +885,10 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **I/O**: `print` `println` `slurp` `spit` `load` `eval-string` `read-string`.
   `print`/`println` **space-join** their args (Python-style, via `%render`) —
   distinct from `str`, which concatenates. To let a **record** define how it prints
-  on screen (Elixir's `String.Chars`), `(require 'show)`: it gives a `Display`
-  ability with `(to-str x)` and wires the screen printers to honor a record's
-  `(impl Display my/rec (to-str [r] …))` — built-ins unchanged (ADR-171).
+  on screen (Elixir's `String.Chars`), `(require 'show)` for the `Display` ability
+  with `(to-str x)`, then the **app** calls `(display-on)` to make the screen printers
+  honor a record's `(impl Display my/rec (to-str [r] …))` — an app-level opt-in, never a
+  side effect of loading; built-ins unchanged (ADR-171/172).
   `print`/`println` **flush stdout every call** — there's no separate flush, so
   an animation frame paints immediately. For raw terminal control without the
   full display protocol, `(:use editor/ansi)` in your `defmodule` header (a bare

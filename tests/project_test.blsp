@@ -486,3 +486,19 @@
     (is (> (string-length (scaffold/project--module-name "日本")) 0)))
   (test "the derived name is stable"
     (assert= (scaffold/project--module-name "x") (scaffold/project--module-name "x"))))
+
+;; Package identity accessor (ADR-172): resolve a namespace/qualified name → its package,
+;; and enrich a stack trace with per-frame :package. `*ns-package*` is bound directly here
+;; (no project scan needed to test the pure lookup).
+(describe "package identity: ns-package"
+  (test "resolves a module name and a qualified name to its owning package"
+    (binding (*ns-package* {'widget 'myapp (symbol "editor/display") 'myapp})
+      (assert= (ns-package 'widget) 'myapp)
+      (assert= (ns-package (symbol "widget/w")) 'myapp)
+      (assert= (ns-package (symbol "editor/display/draw")) 'myapp)
+      (assert= (ns-package (symbol "unknown/f")) nil)
+      (assert= (ns-package 'map) nil)))
+  (test "trace-with-packages annotates each frame with :package"
+    (binding (*ns-package* {'widget 'myapp})
+      (assert= (trace-with-packages (list {:fn "widget/w"} {:fn "map"}))
+        (list {:fn "widget/w" :package 'myapp} {:fn "map" :package nil})))))

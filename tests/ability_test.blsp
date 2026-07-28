@@ -146,3 +146,62 @@
   (test "a new impl can be added for any kind after the ability is declared"
     (impl Size :vector (size [v] (* 10 (count v))))
     (assert= (size [1 2 3]) 30)))
+
+;; ---- impl precedence: deterministic by tier, not load order (ADR-172 §3) ----
+;; `register-impl`/`register-ability`/`impl-for`/`impl-rank` are exercised directly with
+;; crafted provenance (a `from` ns per registration), so the ordering is testable without
+;; standing up real cross-module fixtures. Unique ability names avoid clashing the shared
+;; registries. type-owner (3) > ability-owner (2) > other (1).
+; an ancestor ≠ owner
+(describe "impl precedence (deterministic by tier)"
+  :serial
+  (test "type-owner beats ability-owner regardless of registration order"
+    ;; PaintA/PaintB owned by 'artlib; the record shapes/circle owned by 'shapes.
+    (register-ability 'PaintA '((paint [self])) 'artlib)
+    (register-impl 'PaintA 'paint :shapes/circle (fn (x) :ability) 'artlib)
+    (register-impl 'PaintA 'paint :shapes/circle (fn (x) :type) 'shapes)
+    (assert= ((impl-for '[PaintA paint] :shapes/circle) nil) :type)
+    ;; reverse order — same winner (the point: order-independent)
+    (register-ability 'PaintB '((paint [self])) 'artlib)
+    (register-impl 'PaintB 'paint :shapes/circle (fn (x) :type) 'shapes)
+    (register-impl 'PaintB 'paint :shapes/circle (fn (x) :ability) 'artlib)
+    (assert= ((impl-for '[PaintB paint] :shapes/circle) nil) :type))
+  ; owns neither
+  (test "impl-rank orders type-owner > ability-owner > other"
+    (register-ability 'Ranked '((op [self])) 'ownerns)
+    ; owns the type
+    (assert= (impl-rank 'Ranked :m/rec 'm) 3)
+    ; owns the ability
+    (assert= (impl-rank 'Ranked :m/rec 'ownerns) 2)
+    (assert= (impl-rank 'Ranked :m/rec 'stranger) 1))
+  (test "the ability owner may impl for a built-in id"
+    (register-ability 'Sized '((sz [self])) 'sizelib)
+    (register-impl 'Sized 'sz :int (fn (n) :int-sz) 'sizelib)
+    (assert= ((impl-for '[Sized sz] :int) nil) :int-sz))
+  (test "ability-owner-ns records the defining namespace"
+    (register-ability 'Owned '((op [self])) 'mymod)
+    (assert= (ability-owner-ns 'Owned) 'mymod))
+  ;; regression: a top-level/REPL `impl` registers with `from` = nil (the root ns has no
+  ;; name). Before the guard this crashed `impl-rank`'s `(name from)`. Exercise the real
+  ;; path — `register-impl` with a nil `from`, then dispatch — which reproduces the crash.
+  (test "a nil `from` (root/REPL impl) doesn't crash — dispatch round-trips"
+    (register-ability 'RootAb '((op [self])) 'somens)
+    (register-impl 'RootAb 'op :int (fn (n) :root-impl) nil)
+    (assert= ((impl-for '[RootAb op] :int) nil) :root-impl))
+  ;; a NESTED-namespace module (e.g. editor/display) owns its record's id — the split is
+  ;; on the LAST `/` (the record name), so all leading segments stay in the owner name.
+  (test "a nested-namespace module owns its record id (last `/` splits name off)"
+    (register-ability 'NestAb '((op [self])) 'somelib)
+    ; the true owner
+    (assert= (impl-rank 'NestAb :editor/display/frame 'editor/display) 3)
+    (assert= (impl-rank 'NestAb :editor/display/frame 'editor) 1))
+  ;; app tier (4): a module in the project's OWN package (*ns-package* → *project-name*), or
+  ;; a root/REPL impl (from=nil, the user IS the app), outranks type/ability owners.
+  (test "the project's own package (and root/REPL) is the top app tier"
+    (require 'project)
+    (register-ability 'AppAb '((op [self])) 'artlib)
+    (binding (*project-name* 'myproj
+              *ns-package* (assoc *ns-package* 'appmod 'myproj))
+      (assert= (impl-rank 'AppAb :foreign/rec 'appmod) 4)
+      (assert= (impl-rank 'AppAb :foreign/rec nil) 4)
+      (assert= (impl-rank 'AppAb :foreign/rec 'deplib) 1))))
