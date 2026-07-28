@@ -5,7 +5,7 @@
 ;;
 ;; NOTE: `Localize` and `*locale*` are defined HERE (not in std) on purpose — this is
 ;; a prototype of the pattern, not a committed API; where i18n lives is still open.
-(defmodule show-localize-test (:use ability) (:use show) (:use test))
+(defmodule show-localize-test (:use test))
 
 ;; The "current locale" — an ambient dynamic var, scoped with `binding`. A web
 ;; handler would `(binding (*locale* (request-locale req)) …)` around its render.
@@ -42,8 +42,7 @@
   show-localize-test/money
   (inspect [m] (str "#money<" (get m :amount) " " (name (get m :currency)) ">")))
 
-;; App opt-in so `(println money)` routes through the protocol (ADR-172 §5/§8).
-(display-on)
+;; Display is core and always on (ADR-172 §8) — no activation step.
 
 (describe "locale-aware Display via *locale*"
   (test "the ambient default locale (:en)"

@@ -3,7 +3,7 @@
 ;; `type-of` kind, an identity-carrying record (`defrecord*`) on its baked `module/name`
 ;; id. Subsumes value polymorphism (the `protocol` job) and drivers-as-values (part of
 ;; the `behaviour` job). Register-only — discovered and run by `nest test`.
-(defmodule ability-test (:use test) (:use ability) (:use json))
+(defmodule ability-test (:use test) (:use json))
 
 ;; Records carry a nominal identity captured from THIS module (`ability-test`).
 (defrecord* circle (r))
@@ -88,10 +88,10 @@
   :serial
   (test "a cross-module re-register overrides — last wins"
     (defability Ping (ping [self] :-> any))
-    (ability/register-impl 'Ping 'ping :int (fn (n) :a) 'lib-a)
+    (register-impl 'Ping 'ping :int (fn (n) :a) 'lib-a)
     (assert= (ping 1) :a)
     ;; a DIFFERENT module claims the same [ability op id] — warns, last wins
-    (ability/register-impl 'Ping 'ping :int (fn (n) :b) 'lib-b)
+    (register-impl 'Ping 'ping :int (fn (n) :b) 'lib-b)
     (assert= (ping 1) :b))
   (test "a same-module re-register (hot reload) overrides silently"
     ;; the `impl` macro tags both with THIS module — same provenance → no warning
@@ -126,7 +126,7 @@
 
 (describe "sealed abilities"
   (test "the closed member set is recorded (bare names qualified to this ns)"
-    (assert= (ability/sealed-members 'Shape) (list :ability-test/circle :ability-test/rect)))
+    (assert= (sealed-members 'Shape) (list :ability-test/circle :ability-test/rect)))
   (test "sealing does not change dispatch"
     (assert= (area (circle 2)) 12)
     (assert= (area (rect 3 4)) 12)))

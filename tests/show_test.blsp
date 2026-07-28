@@ -1,7 +1,7 @@
 ;; The display protocol (std/show.blsp): the `Display` ability + `to-str`, and the
 ;; `*show*` hook that makes the screen printers let a record define how it prints
 ;; (Elixir's `String.Chars`). Register-only — discovered and run by `nest test`.
-(defmodule show-test (:use ability) (:use show) (:use test))
+(defmodule show-test (:use test))
 
 (defrecord* usd (cents))
 (impl Display
@@ -10,9 +10,7 @@
 ; a record WITHOUT a custom Display impl
 (defrecord* plain (a))
 
-;; Activation is an app step now (ADR-172 §5/§8): loading `show` only makes the
-;; protocol available — the screen printers honor it once the app opts in here.
-(display-on)
+;; Display is core and always on (ADR-172 §8) — no activation step.
 
 (describe "to-str — the protocol op"
   (test "built-ins fall to :default (native str)"

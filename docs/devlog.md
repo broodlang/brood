@@ -10119,3 +10119,33 @@ three cases still run: `impl` for `:int`/`:string`, `Display` on a user record (
 orphan `Display :int` (`#42`). ADR-172 status + §-map amended; ROADMAP marks slices 2+3 ❌ dropped,
 5 (dispatch specialization) + 6 (`Display` to core) the substantive slices that remain;
 `language.md` "planned direction" block and the `:optional` comment de-bridged.
+
+## 2026-07-28 (impl) — Abilities v2 slice 6: abilities + Display are CORE (folded into the prelude)
+
+`Display` was never more than an ability plus one line wiring `*show*` — so making it "always
+on" meant making the *ability system* core. Folded `std/ability.blsp` + `std/show.blsp` into
+`std/prelude.blsp` (both files deleted): `defability`/`impl`/`defrecord*`, the registries +
+dispatch (`identity-of`/`impl-for`/`register-*`/precedence), and the `Display`/`Inspect`
+abilities with their `:default` impls now live at the root, and the prelude tail sets
+`(def *show* show--print-hook)`. Result: a record customizes how it prints with just
+`(impl Display …)` — **no `(require 'show)`, no `(:use ability)`, no `display-on`** — and the
+protocol is frozen once into the shared prelude region (zero per-runtime cost).
+
+The path there ruled out two alternatives: `(require 'show)` at the prelude tail **crashed boot**
+(module macros like `defability` aren't live during the frozen prelude build, so `show`'s
+`(:use ability)` can't expand); a one-line `Interp::new` post-boot load worked but was a Rust
+hook doing Brood policy and reloaded per runtime. Folding into the prelude wins because the boot
+loop already propagates macros form-by-form — `defability` defined early is visible to `Display`
+later in the same pass.
+
+Fallout, all fixed: the checker's ability pass (`types/check/protocol.rs`) matched the old
+*qualified* emit names (`ability/register-impl`, `ability/impl-for`, `ability/register-ability`,
+`ability/register-sealed`) — now unqualified/root, so the four string matches were updated (the
+missing-impl / sealed / conformance lints went silent until then). The `deftype` polymorphism
+hint and a `basic.rs` require-semantics test (both asserted `(:use ability)`) were rewritten to
+say "core, no import"; `check/tests.rs` dropped its `(require 'ability)` prefixes; the two
+embedded-module entries were removed; the `show`/`show_localize` tests dropped `(display-on)`;
+and the language/for-claude docs + the stdlib-module table were de-`:use`-d. `display-on`/
+`display-off` are gone (`(binding (*show* nil) …)` still scopes it off). Verified: ability 32,
+show 12, show_localize 5, json 30, checker ability 12, `basic` 102 — all green; `nest check`
+exits 0. This completes ADR-172 §8; slice 5 (dispatch specialization) is the last open slice.

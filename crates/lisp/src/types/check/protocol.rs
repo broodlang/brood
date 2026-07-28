@@ -377,7 +377,7 @@ fn find_op_key(heap: &Heap, form: Value) -> Option<(String, String)> {
     stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
         let items = list_items(heap, form)?;
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("ability/impl-for") {
+            if sym_name(Value::Sym(h)).as_deref() == Some("impl-for") {
                 if let Some(Value::Vector(vid)) = items.get(1).and_then(|&v| unquote(heap, v)) {
                     let vec = heap.vector(vid);
                     if let (Some(&a), Some(&o)) = (vec.first(), vec.get(1)) {
@@ -466,7 +466,7 @@ fn collect_register_impls(
             return;
         };
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("ability/register-impl") {
+            if sym_name(Value::Sym(h)).as_deref() == Some("register-impl") {
                 let a = items
                     .get(1)
                     .and_then(|&v| unquote(heap, v))
@@ -624,7 +624,7 @@ fn collect_register_ability(heap: &Heap, form: Value, out: &mut HashMap<String, 
             return;
         };
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("ability/register-ability") {
+            if sym_name(Value::Sym(h)).as_deref() == Some("register-ability") {
                 if let (Some(a), Some(ops_form)) = (
                     items
                         .get(1)
@@ -656,7 +656,7 @@ fn collect_register_sealed(heap: &Heap, form: Value, out: &mut HashMap<String, V
             return;
         };
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("ability/register-sealed") {
+            if sym_name(Value::Sym(h)).as_deref() == Some("register-sealed") {
                 if let (Some(a), Some(&list_form)) = (
                     items
                         .get(1)
