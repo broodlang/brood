@@ -10032,3 +10032,28 @@ by index, and those live on the process's own `roots`/`env_roots`, which `collec
 collecting at the park point is no more dangerous than collecting one instruction earlier, at
 the safepoint the process would have hit had it kept running. The process owns its heap there
 (no worker is running it), so the collection cannot race.
+
+## 2026-07-28 (late) — `nbody`'s third deopt cause: narrowed, not solved
+
+Following the trail left earlier (two deopt cliffs found, fixed, measured, reverted — the arms
+they would have helped were already bailed to the VM). `advance-body` still deopts 16 times and
+is then permanently BAILED, so nbody's physics runs interpreted. New evidence, so the next
+attempt starts here rather than at the beginning:
+
+- The deopt is **resumable** — `ckpt_slot: 14`, `resume_ip=17`, `depth=1` — unlike the minimal
+  repro I built earlier, which had no checkpoint. So the shapes are not the same and the repro
+  was misleading.
+- `resume_ip=17` lands on a **`Call`**, in the region
+  `… Call SetLocal Local JumpIfFalse Local Call Const Prim2 Jump …`. From the source that is
+  `(newvel b i 0 …)` followed by the `[nvx nvy nvz]` destructuring of its result.
+- **Both arms lower.** `advance-body` is arm 61; `newvel` is arm 67 (`SelfCall` + `MakeVector`,
+  no checkpoint). So this is not a missing compilation — it is a *call boundary* between a
+  self-recursive, vector-returning callee and a caller that immediately destructures.
+- No other arm deopts in the whole benchmark, and `newvel` itself never appears in the trace.
+
+What is NOT yet known: whether the deopt originates in the caller's guard on the returned value
+or is a deopt outcome propagated out of the fast link. Answering that wants the CLIF for arm 61
+around that call, or a counter on the fast-link outcome path — instrumentation rather than
+reading. Left there deliberately: the last two cliffs on this row cost a day and bought nothing,
+so the next attempt should confirm the payoff (does the arm run native afterwards, and does the
+row move?) before the fix is written.
