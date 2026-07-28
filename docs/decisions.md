@@ -11123,19 +11123,25 @@ Measured 2026-07-28, counting only sites compiled **after** seal seeding (i.e. t
 compiles a spawned process actually pays for; sites compiled during the prelude build
 predate sealing and read as unfrozen, which is a measurement artefact, not a result):
 
-| program | post-seal call sites | frozen callee | redefinable |
+| program | post-seal call sites | frozen callee | late-bound |
 |---|---|---|---|
-| top-level `fold`/`map`/`filter`/`count`/`str` | 81 | **80 (98.8%)** | 1 (`*out*`) |
-| the same work inside a `spawn` | 537 | **535 (99.6%)** | 2 (`unit`, `*out*`) |
+| top-level `fold`/`map`/`filter`/`count`/`str` | 81 | 80 (98.8%) | 1 (`*out*`) |
+| the same work inside a `spawn` | 537 | 535 (99.6%) | 2 (`unit`, `*out*`) |
+| **40 user fns calling each other** | 722 | **483 (66.9%)** | **239 (33.1%)** |
 
-~99% of a process's runtime-compiled call sites target a frozen callee. The residue is
-exactly what the rule predicts: a user function and a dynamic variable (ADR-166
-exemption 2 — a `defdyn` name is never reserved, so it must stay late-bound).
+**The fraction is workload-dependent, and the first two rows are not representative.**
+They are prelude-dominated microbenchmarks with one user function between them; a real
+application is full of user→user calls, every one of which is late-bound because user
+code *must* stay redefinable for ADR-013 hot reload. Adding 40 mutually-calling user
+functions drops the frozen share to 66.9%, and the late-bound share grows with the size
+of the user's own code. Quoting "~99%" as the design's operating point would be
+measuring the standard library and calling it an application.
 
-That largely dissolves the site-id obstacle above. If frozen callees are direct-linked
-they need **no IC slot at all**, so a shared arm carries IC slots only for the ~1% of
-sites that are genuinely late-bound — and the per-process IC blowup that forced
-arm-relative ids stops being the gating concern.
+Direct-linking still removes the IC slot for the frozen majority (67-99% of sites
+depending on workload), which is worth having on its own. But it does **not** dissolve
+the site-id obstacle — it scales it down by the frozen fraction. For user-heavy code a
+third of sites still need IC slots, and those are exactly the sites living in the user
+arms that Stage 2 would share.
 
 It also removes a cost we pay today for nothing: a user `def` bumps `global_epoch` and
 invalidates *every* IC, including prelude→prelude entries that no `def` could ever
@@ -11167,6 +11173,21 @@ affect. Direct links need no epoch guard, so hot reload stops disturbing frozen 
   promoted/immovable callees, so they arguably belong with the code too. Blocked on
   `CallIcEntry.fast` being a `Cell` (not `Sync`); it would need the atomic treatment
   `FastLink` already uses. Deferred until Stages 1–2 are measured — ADR-011.
+
+**User code and hot reload are untouched — that is the point of the ADR-166 line.**
+Direct-linking applies *only* to sealed names. A user function is never sealed, so its
+call sites keep the inline cache and the epoch guard, and ADR-013 hot reload behaves
+exactly as today. Sharing a *user* arm is likewise already-solved ground rather than new
+risk: `share_key` covers "a RUNTIME/PRELUDE arm" and the installer checks
+`epoch == global_epoch()` before use, so a `def` (which bumps `version` at
+`heap.rs:4072` — "Invalidate every process's global inline cache") invalidates the shared
+entry and the arm is recompiled. The asymmetry is the whole design: **frozen code is
+shared and bound once; user code is shared but epoch-guarded, and rebinding still wins.**
+
+A side benefit follows from the same asymmetry. Today one user `def` bumps the global
+version and invalidates *every* IC entry in *every* process, including prelude→prelude
+entries that no `def` could affect. Direct links carry no epoch guard, so after Stage 1 a
+hot reload stops disturbing frozen code.
 
 **Verification (required, not optional).** This touches the VM inner loop, the JIT, and
 GC-visible structures, so reading is not evidence:
