@@ -1,0 +1,149 @@
+;; Tests for `std/tool/debug` — the process-native tracing debugger.
+;; The whole feature is about processes, so these ARE the cross-process coverage:
+;; workers spy/park/span concurrently and fan into one debugger process. Bodies are
+;; tail-recursive (green-process stacks are small), and concurrent assertions settle
+;; via a bounded `wait-until` poll rather than a fixed sleep.
+(defmodule debug-test (:use test) (:use debug))
+
+;; Poll the debugger's state until `pred` holds (or the budget runs out). Returns
+;; whether it settled — deterministic enough for a debug-tool test, never hangs.
+(defn wait-until (dbg pred tries)
+  (cond
+    (pred (dbg-state dbg)) true
+    (<= tries 0) false
+    else (do (sleep 5) (wait-until dbg pred (dec tries)))))
+
+(defn trace-count (state)
+  (count (filter (fn (e) (= (get e :kind) :trace)) (get state :events))))
+
+;; A varying classification most workers agree on, a couple don't (mod 5 == 0).
+(defn classify (n) (if (= 0 (mod n 5)) :flag :ok))
+(defn exit-count (state)
+  (count (filter (fn (e) (= (get e :kind) :span-exit)) (get state :events))))
+
+(describe "debugger — no-op when unwired"
+  (test "break returns nil and does not block with no *debugger*"
+    (assert= nil (break "x" 1 2)))
+  (test "span runs its thunk and returns the value with no *debugger*"
+    (assert= 42 (span "s" (fn () 42)))))
+
+(describe "debugger — trace fan-in across processes"
+  :isolated
+  (test "spy events from many workers fan into one debugger's ordered log"
+    (let (dbg (start-debugger) me (self))
+      (dotimes (i 4)
+        (let (n i)
+          (spawn (with-debugger dbg (fn () (spy (* (inc n) n)) (send me [:done]))))))
+      (letrec (drain (fn (k) (when (> k 0) (receive ([:done] (drain (dec k)))))))
+        (drain 4))
+      (assert= true (wait-until dbg (fn (s) (>= (trace-count s) 4)) 200))
+      (dbg-stop dbg))))
+
+(describe "debugger — break parks without a timeout"
+  :isolated
+  (test "a parked process shows in :paused and finishes only after resume"
+    (let (dbg (start-debugger) me (self))
+      (spawn (with-debugger dbg (fn () (break "bp" :v 1) (send me [:done]))))
+      ;; it parks (no timeout) — confirm before resuming
+      (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))
+      ;; the parked snapshot carries the label + named values
+      (let (snap (first (vals (paused dbg))))
+        (assert= "bp" (get snap :label))
+        (assert= [:v 1] (get snap :vals)))
+      ;; only resuming lets it finish
+      (resume-all dbg)
+      (assert= :done (receive ([:done] :done)))
+      (dbg-stop dbg)))
+  (test "many processes park simultaneously and all resume (no single-session limit)"
+    (let (dbg (start-debugger) me (self))
+      (dotimes (i 5)
+        (let (n i)
+          (spawn (with-debugger dbg (fn () (break (str "bp-" n)) (send me [:done]))))))
+      (assert= true (wait-until dbg (fn (s) (= 5 (count (get s :paused)))) 200))
+      (assert= 5 (resume-all dbg))
+      (letrec (drain (fn (k acc) (if (= k 0) acc (do (receive ([:done] nil)) (drain (dec k) (inc acc))))))
+        (assert= 5 (drain 5 0)))
+      (dbg-stop dbg))))
+
+(describe "debugger — causal tree across processes"
+  :isolated
+  (test "span-spawn nests child spans under the parent, on distinct pids"
+    (let (dbg (start-debugger))
+      (with-debugger dbg
+        (fn ()
+          (span "root"
+            (fn ()
+              (dotimes (i 3) (let (n i) (span-spawn (str "w" n) (fn () (spy (* n 2))))))
+              nil))))
+      ;; wait until root + 3 worker spans have all closed
+      (assert= true (wait-until dbg (fn (s) (>= (exit-count s) 4)) 200))
+      (let (tree (causal-tree dbg))
+        (assert= 1 (count tree))
+        (let (root (first tree))
+          (assert= "root" (get root :label))
+          (assert= 3 (count (get root :children)))
+          ;; every child ran in a DIFFERENT process than the root
+          (let (root-pid (get root :pid)
+                child-pids (map (fn (c) (get c :pid)) (get root :children)))
+            (refute (any? (fn (p) (= p root-pid)) child-pids)))))
+      (dbg-stop dbg))))
+
+(describe "debugger — transparent causal propagation (kernel-propagated *trace-context*)"
+  :isolated
+  (test "a PLAIN spawn (no span-spawn, no with-debugger in the child) inherits the context and nests"
+    (let (dbg (start-debugger))
+      (with-debugger dbg
+        (fn ()
+          (span "root"
+            (fn ()
+              (dotimes (i 3) (let (n i) (spawn (span (str "c" n) (fn () (spy (* n 2)))))))
+              nil))))
+      (assert= true (wait-until dbg (fn (s) (>= (exit-count s) 4)) 200))
+      (let (tree (causal-tree dbg))
+        (assert= 1 (count tree))
+        (let (root (first tree))
+          (assert= "root" (get root :label))
+          (assert= 3 (count (get root :children)))
+          (let (root-pid (get root :pid)
+                child-pids (map (fn (c) (get c :pid)) (get root :children)))
+            (refute (any? (fn (p) (= p root-pid)) child-pids)))))
+      (dbg-stop dbg)))
+  (test "a plain spawn hitting break inherits the debugger and parks — no rewiring"
+    (let (dbg (start-debugger) me (self))
+      (with-debugger dbg
+        (fn () (spawn (do (break "inherited" :x 9) (send me [:done])))))
+      (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))
+      (assert= "inherited" (get (first (vals (paused dbg))) :label))
+      (resume-all dbg)
+      (assert= :done (receive ([:done] :done)))
+      (dbg-stop dbg))))
+
+(describe "debugger — aggregate / population queries"
+  :isolated
+  (test "value-distribution, modal-value and outliers summarise many workers"
+    (let (dbg (start-debugger) me (self))
+      (dotimes (i 10)
+        (let (n i)
+          (spawn (with-debugger dbg (fn () (spy (classify n)) (send me [:done]))))))
+      (letrec (drain (fn (k) (when (> k 0) (receive ([:done] (drain (dec k)))))))
+        (drain 10))
+      (assert= true (wait-until dbg (fn (s) (>= (trace-count s) 10)) 200))
+      ;; n = 0..9: mod 5 == 0 for 0 and 5 -> two :flag, eight :ok
+      (assert= {:flag 2 :ok 8} (value-distribution dbg "(classify n)"))
+      (assert= :ok (modal-value dbg "(classify n)"))
+      (assert= 2 (count (outliers dbg "(classify n)")))
+      (dbg-stop dbg))))
+
+(describe "debugger — data-driven breakpoints"
+  :isolated
+  (test "break-when parks only when its predicate holds"
+    (let (dbg (start-debugger) me (self))
+      ;; false predicate -> no park, worker runs straight through
+      (spawn (with-debugger dbg (fn () (break-when false "no" :x 1) (send me [:passed]))))
+      (assert= :passed (receive ([:passed] :passed)))
+      ;; true predicate -> parks until resumed
+      (spawn (with-debugger dbg (fn () (break-when true "yes" :x 2) (send me [:passed2]))))
+      (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))
+      (resume-all dbg)
+      (assert= :passed2 (receive ([:passed2] :passed2)))
+      (dbg-stop dbg))))

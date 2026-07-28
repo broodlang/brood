@@ -4105,6 +4105,21 @@ impl Heap {
         self.dynamics.pop();
     }
 
+    /// The current (innermost) value of dynamic variable `sym`, if a `binding` for
+    /// it is active — the read side of [`push_dynamic`]. An empty stack (the common
+    /// case) costs one `is_empty` check. Used by `spawn` to inherit a propagating
+    /// causal context (`*trace-context*`) into a child without an explicit hand-off.
+    pub fn current_dynamic(&self, sym: Symbol) -> Option<Value> {
+        if self.dynamics.is_empty() {
+            return None;
+        }
+        self.dynamics
+            .iter()
+            .rev()
+            .find(|&&(s, _)| s == sym)
+            .map(|&(_, v)| v)
+    }
+
     /// Snapshot the runtime's global bindings (`symbol -> value`). Cheap: the
     /// values are `Copy` handles. Pair with [`Heap::restore_globals`] to run code
     /// against a *private copy* of the globals — mutations to the live table can

@@ -11072,3 +11072,56 @@ for a macro's argument form); the source *form* echo carries the information. Re
 [[with]] (ADR — the prior ergonomics borrow), ADR-006 (write it in Brood), ADR-011
 (defer power — why the special-form rules and a `:label` arg are scoped, not maximal),
 ADR-013 (hot reload — the sink seam mirrors the late-binding philosophy).
+
+## ADR-174 — A process-native tracing debugger (`std/tool/debug`)
+
+**Status:** accepted, implemented (2026-07-28, `worktree-spy-debugger`). Prototype toward
+the ROADMAP `--breakpoints` gap. Spawn-level transparency shipped; send-level causality
+designed and deferred (below).
+
+**Context.** Elixir's `dbg`/`IEx.pry` is the reference for interactive debugging, and it
+has two limits everyone hits: a **pry timeout** (the process can't wait forever for the
+one IEx session) and **no multi-process story** (a second process hitting the same
+breakpoint queues behind the first and times out). Both stem from one root cause — the
+debugger is a *terminal*, not a process. Brood is an actor runtime (share-nothing green
+processes, immutable data, `spy`/ADR-173 already a swappable-sink tracer), so it can
+dissolve both limits structurally instead of porting `dbg`'s design.
+
+**Decision.** Make the debugger **a process**, and build the tool as **policy in Brood**
+(`std/tool/debug.blsp`, a `dev-tools` DEV_MODULE — compiled out of a lean release) over
+the thinnest kernel mechanism.
+
+**1 — `break` parks without a timeout.** A breakpoint `send`s the process's snapshot to a
+debugger process and blocks on `receive` for `[:resume]`. A parked process costs nothing
+(off the scheduler), so it waits **indefinitely** — no timeout to need. Many processes
+hitting the same `break` each park independently and fan into the debugger's mailbox as a
+**queue of paused processes**, each inspectable and resumable. `break-when` is a
+data-driven (predicate) breakpoint. This is the direct answer to `pry`'s two limits.
+
+**2 — Causal spans, transparently propagated across `spawn`.** The debugger endpoint +
+current span live in one dynamic, `*trace-context*`. The **kernel copies it into a child
+at `spawn`** (`scheduler/lifecycle.rs`, reusing the existing `promote` + `push_dynamic`
+machinery, so it's GC-safe — verified under `BROOD_GC_STRESS`). So a plain
+`(spawn (fn () (break …)))` inside a `with-debugger` scope inherits the debugger and
+parks with **no re-wiring**, and the debugger reconstructs a **cross-process causal tree**
+— something `dbg` cannot do. Opt-in and **`#[cfg(dev-tools)]`-gated**: a lean release
+compiles neither the hook nor the module (zero code, not merely zero cost); when the
+debugger is inactive it's one empty-dynamics-stack check per spawn.
+
+**3 — Traces are data, so debug the population.** `spy` entries flow to the debugger as
+structured events; `value-distribution` / `modal-value` / `outliers` fold them, so 10k
+processes hitting a trace point yield a *distribution* + the anomalies, not 10k text
+dumps (Elixir's failure mode). `causal-tree` / `debug-report` / the live `debug-watch` /
+interactive `debug-attach` render it.
+
+**Deferred: send-level causality.** Following a value A→B *through a message* (so a
+long-lived server adopts the sender's context) needs the mailbox to carry context and
+`receive` to apply it on pop. That is doable and perf-safe (an `Envelope { msg, #[cfg]
+trace }` — uniform `.msg`, matcher untouched; all `#[cfg(dev-tools)]` so release is
+byte-identical), **but** the durable per-process context must become a GC-traced `Value`
+slot on the `Heap` threaded through ~8 collector sites — the highest-care class of change
+in this kernel. Per ADR-011 (ship the solid thing; defer the risky refinement) it lands
+as its own focused, GC-stress-gated pass, not bundled here. Spawn-level already covers the
+common fan-out case. Related: ADR-173 ([[spy]] — the sink this builds on), ADR-006 (write
+it in Brood), ADR-013 (hot reload — the late-binding kinship), ADR-046/051 (`nest observe`
+— the render target for a future debugger pane).
