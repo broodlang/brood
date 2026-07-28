@@ -95,7 +95,7 @@ A value is exactly one of:
 | **keyword** | an interned, self-evaluating name (`:k`). |
 | **pair** | a cons cell `(a . b)`. Proper lists are pairs chained to a final `nil`. |
 | **vector** | a fixed sequence of values. |
-| **map** | immutable key→value associations (`{ }`); insertion-ordered, any value as a structurally-compared key. |
+| **map** | immutable key→value associations (`{ }`); iteration order is hash-derived (CHAMP, ADR-040), **not** insertion order; any value as a structurally-compared key. |
 | **function** | a closure (`fn`) or a primitive. |
 | **set** | immutable collection of distinct elements (`#{ }`); its own kind — never `=` to a map (ADR-060). |
 | **bytes** | immutable byte sequence (`#b"…"`), the binary counterpart of `string`; addressed by byte, and the subject of bit-syntax patterns (ADR-140). |

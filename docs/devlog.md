@@ -9533,6 +9533,146 @@ documented no-GC symbol lookup; `apply_closure` was already correct. `record_tw_
 the lone instance. The `vm_tail_arm_compaction` test loses the temporary VM pin (added
 while gating the differential job) and runs on both engines again.
 
+## 2026-07-28 (later) — map-order / truthiness / set doc fixes; string-seqability prototyped then rejected
+
+A language-ergonomics review (syntax deep-dive) surfaced a batch of doc-drift and one
+tempting-but-wrong feature.
+
+**String seqability — prototyped, then reverted (kept as institutional memory).** We
+briefly made a string seqable as its code points (native `first`/`rest` + prelude
+`seq`/`nth` + widened checker `seq`/`seqable` domains), so `(map upper "abc")` ⇒
+`("A" "B" "C")`. It built clean and passed the suite, but was **reverted before
+commit** on reflection: for a language whose north star is a *text editor*, making the
+ergonomic default (`map`/`first`/`rest` over a string) operate on **code points**
+nudges toward the exact cluster-corruption the grapheme API exists to prevent —
+`(first "e\u{301}")` returns a broken half-cluster. It also silently resolves the
+codepoint-vs-grapheme choice the 2026-07-26 deferral deliberately kept *explicit*, and
+the motivating friction was overstated (the JSON/regex parsers already index an
+`int`-codepoint vector via `string->codepoints` for speed, so string-seqability
+wouldn't touch them). **Decision: strings stay opaque; choose your unit explicitly —
+`string->list` (code points) or `string->graphemes` (clusters).** The ROADMAP item
+stays open. (Revisit only if a grapheme-default seq is wanted, which splits
+`count`/seq-length and diverges from `char-at`.)
+
+**Doc-drift fixes the review caught** (no behaviour change):
+- **Map iteration order.** `language.md`/`spec.md`/`brood-for-claude.md` claimed maps
+  were "insertion-ordered" — false since the ADR-030→ADR-040 CHAMP migration. Order is
+  hash-derived (canonical per key-set, so two `=` maps iterate alike, but neither
+  insertion order nor sorted, and not stable across builds). Reworded everywhere to
+  "unspecified — sort the keys if order matters." (ADR-040's own "no ADR-030 contract
+  broken" claim was the original slip; left as historical record.)
+- **Empty-list falsy asymmetry.** Documented loudly that while `[]`/`{}`/`#{}`/`""`
+  are truthy, the empty **list** is falsy because `()` ≡ `nil` — so `(empty? x)`, not
+  a bare `(if a-maybe-list …)`. Added to `language.md` Truthiness, `brood-for-claude`,
+  and the `writing-brood` skill.
+- **`brood-for-claude` staleness.** Its set entry still said "no `#{}` literal or
+  `set?` yet — test with `map?`" and "a set is a map of element→true" (both obsolete
+  since ADR-060 first-class sets); the `writing-brood` skill said the same. Both
+  rewritten. `set?` added to the predicate list.
+
+MCP/LSP need no separate change: they read the same builtin/prelude docstrings, and
+these were doc-comment fixes in the reference `.md` files, not builtin signatures.
+
+## 2026-07-28 (later still) — the display protocol: records customize screen printing (ADR-171)
+
+The "upgrade Brood to use `defability`" audit came back with a short, deliberate list:
+only **two** genuine candidates (everything else in `std/` is a correctly-closed
+`cond`/state-machine per ADR-011). The headline one — value rendering wanting
+third-party extension, i.e. Elixir's `String.Chars` — is now shipped.
+
+**`std/show.blsp`** (`require 'show`): a `Display` ability with one op `to-str`
+(value → display string), `:default` → the native `str`. Loading it installs a hook
+into a new prelude dynamic var **`*show*`** (nil by default), and the screen printers
+`print`/`println`/`eprint`/`eprintln` route each argument through it. The hook touches
+only **records**; every built-in passes through to the fast native renderer, so there
+is zero dispatch cost for the common case and — with `show` unloaded — no behavior
+change whatsoever (one `(if *show* …)` branch). A record then customizes its screen
+form: `(impl Display money/usd (to-str [m] (str "$" …)))` ⇒ `(println (usd 1050))`
+prints `$10.50` instead of `{:__id__ :money/usd, :cents 1050}`. `(binding (*show* nil)
+…)` disables it; `(to-str x)` is the explicit protocol call for use inside `str`/`fmt`.
+
+Scope is the screen printers only (the request was "printing to screen"): `str`/`pr-str`
+/`fmt` stay native — they are the hottest paths and a niche benefit doesn't justify
+routing every error message through a Brood ability. Default record printing keeps its
+`:__id__` (intended Elixir-struct semantics, ADR-130); the protocol is the *override*
+seam, not a reason to change the default. Full rationale in **ADR-171**.
+
+Tests: `tests/show_test.blsp` (12, incl. cross-process — a record `send`s home and prints
+via the protocol in another process, since `*show*` is a global and records deep-copy).
+`std/show.blsp` + the test check clean; the full non-conformance suite is green (the
+prelude print-path change is a no-op until `show` is loaded).
+
+**Two findings along the way.** (1) `print`/`println` **space-join** their args
+(`%render`, Python-style), distinct from `str`'s concatenation — worth remembering.
+(2) First cross-module use of a `defability` op surfaced a **checker gap**: a `:use`d
+ability op from a *loose disk* module (not embedded, not in a project) is flagged
+`unbound symbol` even though it runs — embedded modules (`show`) and same-module use
+resolve fine. Filed as a follow-up; it does not affect the shipped module. The second
+audit candidate (`json--emit` → a `JsonEncode` ability, so user records serialize
+instead of hitting the `else (error …)` tail) is the same shape and is left as a
+documented follow-up.
+
+**Follow-up (same day) — `Inspect` + a locale-aware prototype.** Added the companion
+**`Inspect`** ability (`(inspect x)` debug form, `:default` → `pr-str`, + `inspectln`);
+deliberately not wired into `pr-str` (round-trip guarantee). Worked the money / i18n
+question into `tests/show_localize_test.blsp`: a `Localize` ability `(localize [self
+locale])` (dispatch on value type, third-party-extensible) composed with `Display`
+reading an ambient `*locale*` dynamic var, so plain `(println money)` localizes and
+`(binding (*locale* :de) …)` switches it — per-process, verified across a spawn. And a
+cross-module demo confirmed the **impl-shipping** model: a library that puts `impl
+Display` at its module top level (Elixir's `defimpl`) makes a consumer's `(:use bank)` +
+`(println money)` show `$10.50` with no mention of `show`. The open design question —
+splitting the ability from the activation so a library can register an impl without
+flipping global print — is recorded in ADR-171, deferred (ADR-011).
+
+## 2026-07-28 (design) — Abilities v2 decided: app-sovereign coherence, `impl`/`bridge` (ADR-172)
+
+A design review turned the opt-in `Display` protocol (ADR-171) into a full rethink of the
+ability system's authority model, recorded as **ADR-172** (design accepted, not yet built).
+The reframe: the axis that matters isn't coherence, it's **authority** — the app must
+outrank every library — and the goal is compile-time guarantees *without* losing hot
+reload. The decided model:
+
+- **`impl` what you own** (the ability or the record type — Rust's orphan rule); built-ins
+  are owned by nobody, so only an ability's owner may impl for them.
+- **`bridge` what you link** — an app-only, greppable form for deliberate cross-library
+  glue (the sanctioned orphan site). A glue *package* is a module of `bridge` forms,
+  inert until the app authorizes it via the manifest's `:bridges`. This keeps Elixir's
+  "impl a foreign type" capability minus its silent/transitive footgun.
+- **App sovereignty** — the app may impl/bridge anything and wins; precedence
+  `app > type-owner > ability-owner > :default > native`.
+- **Compile-enforced, live-safe** — coherence/exhaustiveness/bridge rules are a hard
+  reject at `nest check`/CI, re-run on reload, advisory in the live image.
+- **Dispatch specialized via the IC/JIT with deopt-on-reload**; `:sealed` abilities go
+  fully static; the runtime `*impls*` registry becomes the backstop, not a freeze.
+- **Display becomes always-on core** (records only, app-gated, guarded), superseding
+  ADR-171's opt-in `show`.
+
+The through-line — *libraries propose, the app disposes* — unifies `:bridges` and
+`display-on` as the same act (the app authorizing a borrowed/ambient effect). Needs
+ADR-070 (package-rooted namespaces) for the clean app/library line; interim uses the
+program's root namespace. Ships-today `std/show.blsp` stays the interim runtime
+implementation until v2 is built.
+
+## 2026-07-28 (impl) — Abilities v2 slice 1: optional + dev dependencies in the manifest
+
+Started building ADR-172, from the bottom of the staged plan — the one slice with no
+blockers (it doesn't need ADR-070 or any kernel work). The package manifest now expresses
+the two dependency distinctions the bridge story needs:
+
+- **`:optional true`** on any dep entry (`[foo :git … :optional true]`) — declared but not
+  force-installed, the seam a bridge/glue package rides. `project-parse-dep` normalises it
+  onto every dep map (default `false`); full resolution semantics (peer presence) land with
+  the bridge slice.
+- **`:dev-dependencies`** — a second manifest list parsed exactly like `:dependencies`, each
+  map tagged `:dev true` and kept in its own `*project-dev-dependencies*` slot (never mixed
+  into `*project-dependencies*`), so a release bundle / a published package's declared deps
+  can drop test-only deps. Resolver + bundle consumption is the next step.
+
+All in `std/tool/project.blsp` (parsing/normalisation) + the manifest macro docstring.
+Tests: a new `:optional`/`:dev-dependencies` block in `project_test.blsp`; the existing
+dep-map assertions in `project_test`/`package_test` updated for the new `:optional false`
+key. Full non-conformance suite green, `nest check` clean, formatted.
 ## 2026-07-28 — the GC's forwarding tables were hash maps; `sort` −17.6%
 
 Chasing the benchmark standing (`sort`/`bintree`/`nbody` are the three 6/7 rows within 8% of

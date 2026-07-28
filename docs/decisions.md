@@ -10695,3 +10695,283 @@ that a later version may add.
 relax-is-safe / add-is-breaking asymmetry), [`roadmap-for-v1.md`](roadmap-for-v1.md) (the
 pre-freeze gate this ratifies the freeze-list half of), and every ADR cited in the table
 above.
+
+## ADR-171 — The display protocol: records customize printing via `Display`/`to-str`
+
+**Status:** accepted, implemented 2026-07-28.
+
+**Context.** `str`/`pr-str`/`%render` are kernel builtins that format every `Value` in
+Rust (`syntax/printer.rs`). A `defrecord*` value is structurally a `Value::Map`, so it
+prints as its raw map — `{:__id__ :money/usd, :cents 1050}`. There was no seam for a
+record to define *how it prints*: the equivalent of Elixir's `String.Chars`
+(`to_string/1`, used by `IO.puts` and interpolation) or Haskell's `Show`. With the
+`ability` system (ADR-168) in place, this is now expressible as an open generic, and
+doing so is the headline case in the "write the language in the language" audit — the
+one place value rendering genuinely wants third-party extension.
+
+**Decision.** Add an opt-in std module `std/show.blsp` (`require 'show`) built on
+`ability`:
+
+- **`(defability Display (to-str [self] :-> string))`** — one op, a value → its display
+  string.
+- **`(impl Display :default (to-str [x] (str x)))`** — the fallback is the native `str`,
+  so *nothing prints differently* until a record supplies its own impl. Pure extension.
+- **A late-bound prelude hook, `*show*`** (a dynamic var, nil by default). The screen
+  printers `print`/`println`/`eprint`/`eprintln` route each argument through it —
+  `(if *show* (map *show* xs) xs)` — so the default (nil) path is one branch and zero
+  cost. Loading `show` installs a hook that routes only **records** through `to-str`
+  (built-ins pass through untouched, staying on the fast native renderer); `(binding
+  (*show* nil) …)` disables it for a scope.
+
+A companion **`Inspect`** ability (op `(inspect x)`, `:default` → `pr-str`, plus
+`(inspectln x)` — the `IO.inspect` move, returns `x`) provides the DEBUG form, Elixir's
+`Inspect` alongside `String.Chars`. It is deliberately **not** wired into `pr-str`:
+`pr-str`'s output must round-trip (re-read to the same value), a kernel guarantee no
+protocol may override; `inspect` carries no round-trip contract, so a record shapes it
+freely (`#money<$10.50>`). `inspect` is called explicitly (or via `inspectln`), not
+through the print hook.
+
+**Shipping an impl with a library (the Elixir `defimpl` model).** A library ships its
+display by putting the `impl` at the **top level of the module that defines the
+record** — loading that module (which a consumer must do to reach the record) runs the
+`impl`, registering it into `*impls*` as a load-time side effect. So a consumer that
+`(:use bank)` to use `bank`'s `money` struct gets its `Display` impl **automatically**,
+without naming `show` — verified: `(println (money …))` shows `$10.50` from `(:use
+bank)` alone. Two activation levers for the library author:
+- putting `(:use show)` in the library's header **activates** protocol printing on load
+  (so implicit `(println record)` honors the impl app-wide — benign, since built-ins are
+  unchanged); and
+- a consumer needs `(:use show)` of its own only to call the protocol functions
+  (`to-str`/`inspect`) *explicitly* — implicit display through the print hook needs no
+  import. The open question deferred here (ADR-011): whether to **split** the ability
+  (side-effect-free `Display`/`Inspect` a library depends on to declare impls) from the
+  **activation** (`(def *show* …)`, an app/opt-in step), so a library can register an
+  impl *without* flipping global print behavior. Left for a concrete need.
+
+**Scope: the screen printers only.** `str`/`pr-str`/`fmt` stay on the native renderer —
+they are the hottest paths (every error message, every string build), and routing them
+through a Brood ability would regress them broadly for a niche benefit. Reach for
+`(to-str x)` explicitly to honor the protocol inside a `str`/`fmt` (the Elixir
+`to_string` move). This matches the request ("printing *to screen*") and keeps the
+change additive and reversible.
+
+**Why not change the default record printing (drop `:__id__`)?** Deliberately not:
+ADR-130/168 record that a record printing *with* its id — and being `≠` a bare map — is
+*intended* (Elixir-struct semantics), not a leak. The protocol is the seam to override
+that per-record, not a reason to change the default.
+
+**Why opt-in, not always-on?** The `ability` macros live in `std/ability.blsp`, loaded
+on demand, not in the bootstrapped core; the prelude cannot depend on them. So the hook
+is a prelude primitive (nil default) that the `show` module *installs* on load —
+Erlang-style late binding, and faithful to Elixir's "the protocol is there once its
+module is available." An always-on version would require moving the ability system into
+the core image; deferred (ADR-011) until a concrete need.
+
+**Consequences.**
+- A record can define its screen display: `(impl Display money/usd (to-str [m] …))`,
+  then `(println (usd 1050))` shows `$10.50`. Built-ins are byte-for-byte unchanged and
+  incur no dispatch cost; with `show` unloaded there is no behavior change at all.
+- First cross-module use of a `defability` op from another module (the test `(:use
+  show)` calling `to-str`). Surfaced a checker gap: a `:use`d ability op from a *loose
+  disk* module (not embedded, not in a project) is flagged unbound though it runs —
+  embedded modules and same-module use resolve fine. Filed as a follow-up; does not
+  affect `show`.
+- The second audit candidate — a `JsonEncode` ability letting user records serialize
+  instead of `json--emit` hitting its `else (error …)` tail — is the same shape and is
+  left as a documented follow-up.
+
+**References.** ADR-168 (abilities — the mechanism), ADR-130 (records as maps carrying
+`:__id__`), ADR-006 (policy in Brood, not Rust), ADR-011 (defer the always-on variant).
+
+## ADR-172 — Abilities v2: app-sovereign coherence, `impl`/`bridge`, compile-enforced, live-replaceable
+
+**Status:** accepted (design). **Not yet implemented** — this records the decided
+direction. What ships today is the interim: open runtime abilities (ADR-168) and the
+opt-in `Display` protocol (ADR-171, `std/show.blsp`). ADR-172 supersedes ADR-168's
+"open and late, any id from any module" registration model and ADR-171's
+opt-in/activate-on-load model; both stay in place until this is built.
+
+**Context.** ADR-168 made abilities *open and late* — `impl` for any id, from any
+module, at any time — dispatched through a runtime `*impls*` registry, coherence merely
+warned. That is essentially Elixir's protocol model: maximally flexible, but a
+dependency can silently change how a type behaves, conflicts are last-wins roulette, and
+there is no notion of the application outranking a library. ADR-171 shipped `Display`
+as an *opt-in* protocol whose activation was a load-time side effect of `(:use show)` —
+which meant a library could flip global print behavior just by being used. A design
+review (2026-07-28) reframed the problem: the axis that matters is not *coherence* but
+**authority** — the application author must outrank every library — and the goal is
+**compile-time guarantees without giving up hot reload** (the language's north star,
+ADR-013). Full Rust-style static dispatch is therefore off the table; the target is
+*static guarantees over live-replaceable semantics*.
+
+**Decision.** One authority model for every ability, enforced by the compiler, dispatched
+through the existing inline-cache/JIT path with deopt-on-reload, with the runtime
+registry retained as the source of truth and reload backstop.
+
+**1 — One coherence rule (`impl`).** `(impl A id …)` is legal **iff you own `A`**
+(you `defability`'d it) **or you own `id`** (you `defrecord*`'d that record type) — the
+Rust orphan rule. A built-in id (`:int`, `:string`, `:default`) is owned by nobody, so
+only the *ability's* owner may impl for it. This one rule kills three hazards at once: a
+library can't touch your types, can't hijack a built-in, and two owners can't silently
+collide (only the type-owner and the ability-owner can even produce an impl for a given
+`(A, id)`).
+
+**2 — Deliberate linking (`bridge`).** Orphan impls are *not* banned — they are moved
+behind a distinct, intent-revealing form. `(bridge A (id (op …)) …)` is the **only**
+sanctioned orphan site, and it is **app-only** (or inside a package the app authorized —
+see §4). It reads as *"I am the app, deliberately connecting two libraries I use,"* and
+every cross-library hookup in a codebase is greppable (`grep bridge`). Two shapes:
+
+    (bridge JsonEncode
+      (ecto/decimal (encode [d] (decimal->json-number d)))
+      (ecto/uuid    (encode [u] (json-str (uuid->string u)))))
+
+    (bridge JsonEncode :via json-str            ; uniform strategy for a family
+      ecto/date ecto/time ecto/naive-datetime)  ; each: (json-str (to-str x))
+
+So the whole rule is one clean line: **`impl` what you own; `bridge` what you link.**
+
+**3 — App sovereignty.** The app (the top-level program) is the single exemption: it may
+`impl`/`bridge` anything and always wins. Precedence on a resolved dispatch is
+deterministic:
+
+    app  >  type-owner  >  ability-owner  >  :default  >  native
+
+(type-owner beats ability-owner: a type knows itself better than the ability author's
+default *for* that type.)
+
+**4 — Bridge/glue packages, app-authorized.** A third-party "glue" package (Elixir's
+"a package that impls types for another package") is simply a module of `bridge` forms.
+It is **inert until the app authorizes it** in the app's manifest — `:bridges [json-ecto]`
+in `project.blsp`, which is app-scoped by definition, so a library cannot authorize a
+bridge and a *transitive* dependency can never glue anything. Colliding authorized
+bridges for the same `(A, id)` are a **compile-time error the app resolves**, not a
+silent last-wins.
+
+**5 — The unifying principle.** *Owned + explicit* is automatic; anything **borrowed** (a
+`bridge`) or **ambient** (an implicit path — §7) requires the **app** to opt in.
+**Libraries propose; the app disposes.** `:bridges` and `display-on` are the same act —
+the app authorizing an effect a library merely offered.
+
+**6 — Compile-time enforcement, live-safe.** Coherence (§1), the app-only rule for
+`bridge` (§2), bridge authorization + conflicts (§4), and `:sealed` exhaustiveness are
+checked at **`nest check` / CI as a hard reject**, re-run on every reload — but stay
+**advisory in the live image** (ADR-123–126): a running REPL may momentarily hold a
+transient incoherent impl while you edit, and only *shipping* incoherence is blocked. The
+guarantee is "you cannot ship incoherence," not Rust's "it cannot exist" — the price of
+keeping live editing.
+
+**7 — Dispatch: specialized, deoptimizable; sealed goes fully static.** An ability op is
+a call whose target depends on the first argument's identity — exactly what Brood's
+inline caches + JIT already specialize for ordinary calls, with deopt on type change.
+Lower ability calls through that path: **resolve at compile time where the receiver type
+is statically known** (a literal, a `defrecord*` result, a typed variable), cache
+(monomorphic/polymorphic IC) otherwise. Redefining an impl **deopts** the specialized
+call sites and they re-resolve on the next call — so late binding survives. `:sealed`
+abilities (a closed member set) compile to a **closed, exhaustive switch** — no runtime
+table, like a Rust enum. The runtime `*impls*` registry remains the source of truth and
+the reload backstop; the compiler is a *checking* layer and a *specialization* layer
+**over** it, never a freeze (this is where Brood must be more dynamic underneath than
+Elixir's frozen consolidation, precisely to keep §6's liveness).
+
+**8 — Display is the one implicit-path ability.** `Display`/`to-str` is wired into the
+core `str`/`print`/`fmt` path, **records only** (built-ins always format natively —
+nobody owns them, §1), **app-gated** (the implicit path is off until the app enables it;
+a library can never enable it), and **guarded** (a throwing impl → native fallback).
+`pr-str` and kernel error rendering **never** dispatch — the round-trip form and the
+never-fail path stay native. `Inspect`/`inspect` is the explicit debug form. This is the
+only Display-specific machinery; the *authority* rules above are uniform across every
+ability (Display is not privileged in who-may-impl, only in being on an implicit path).
+
+**9 — Optional dependencies (the companion to `bridge`).** Today the package manager
+(ADR-037) has one **required** `:dependencies` list plus per-dep `:features` (Cargo-style
+build flags); there is no optional/dev distinction. A clean bridge story needs one,
+because a glue package should only matter when *both* libraries it links are present —
+which is exactly Elixir's `optional: true` dependency (a library ships `Jason.Encoder`
+impls that compile only if `jason` is also present). So this ADR adds:
+
+- **`:optional` per-dep** — declared but not force-installed; resolved/active only when
+  the app *also* depends on it (peer-style presence), or enables it. A glue package is an
+  optional dep.
+- **`:dev-dependencies`** — a second list resolved for `nest test`/dev and on the dev
+  load path, but **excluded from a release bundle** (ADR-038).
+
+These compose with §2/§4 into the **three conditions for a live bridge**:
+*present* (optional dependency) → *authorized* (`:bridges`) → *wins* (the §3 ladder).
+And a `bridge` form is **compile-if-present**: `(bridge JsonEncode (ecto/decimal …))`
+where `ecto` isn't in the dependency set is *inert*, not an error — the type doesn't
+exist, so the form contributes nothing. This is the optional-impl semantics Elixir gets
+from `optional: true`, made explicit.
+
+**10 — Implementation plan (staged).** Slices, in dependency order:
+
+1. **Package manifest** — `:optional` per-dep flag + `:dev-dependencies` list: parse,
+   normalize (`std/tool/project.blsp`), resolver honors them (`std/tool/package.blsp`),
+   release excludes dev-deps (`bundle.rs`). *Independent of everything below — buildable
+   now.*
+2. **`bridge` + `:bridges`** — the macro (owner-check-exempt, app-only site), manifest
+   authorization, compile-if-present inertness, same-tier conflict = error.
+3. **Coherence checking** — owner-only `impl` (own ability or type), orphan → hard reject,
+   bridge conflicts, at `nest check` (`types/check/protocol.rs`, which already tracks
+   record identity). *Wants ADR-070 for the clean app/library line; interim uses the
+   root-namespace convention.*
+4. **Precedence resolution** — `app > type-owner > ability-owner > :default > native`,
+   deterministic and static; extend `*impls*`'s keying + `impl-for` to carry provenance.
+5. **Dispatch specialization** — lower ability op calls through the inline-cache/JIT path
+   with deopt-on-reload; `:sealed` → a closed switch. *The performance slice.*
+6. **Display always-on core** — records-only dispatch on the `str`/`%render` path,
+   app-gated `display-on`, guarded; supersede the opt-in `std/show.blsp` (ADR-171).
+
+ADR-070 (package-rooted namespaces) gates the clean app/library distinction in slices 2–3
+only; everything else is independent. Slice 1 has no blockers and is the starting point.
+
+**How it compares.**
+
+| | Brood (this) | Elixir | Rust | .NET | Ruby |
+|---|---|---|---|---|---|
+| Coherence enforced | `nest check`/CI, re-run on reload | release consolidation only | always (absolute) | by construction | never |
+| Orphan impl | `bridge`, app-authorized | allowed, silent, transitive | rejected | impossible | allowed (monkey-patch) |
+| App is final authority | **yes**, deterministic | no | no | no | load-order |
+| Conflict | compile error, app resolves | last-wins + warning | can't happen | can't happen | silent |
+| Add impl at runtime | **yes** — re-checked + deopt | dev only | no | no | yes |
+| Closed set exhaustiveness | `:sealed` → static | no | enums | no | no |
+| Safety · Speed · Liveness | ✓* · ✓* · ✓ | ~ · ✓ · ✗ (release) | ✓ · ✓ · ✗ | ✓ · ✓ · ✗ | ✗ · ~ · ✓ |
+
+The one novel cell is the last row: Brood aims for **all three** — Rust's guarantees with
+Ruby's liveness — because safety is a *checking* layer and speed a *specialization* layer
+over a registry that stays replaceable. The asterisks are honest: safety is *build-time*
+(§6), speed is *best-effort* (a statically-unknown receiver still uses a cached lookup).
+
+**Consequences.**
+
+*Advantages.* Compile-time safety without freezing (impls stay addable/replaceable);
+an authority layer no other language has (the app outranks every library,
+deterministically — the direct answer to "a dependency must never override me or act
+without my say-so"); one uniform `impl`/`bridge` rule across all abilities; graduated
+(`:sealed` static, open specialized-but-reopenable); and it reuses machinery that exists
+(`protocol.rs` identity tracking; the IC/JIT deopt path).
+
+*Limitations.* No unrestricted orphan impls — you `bridge` (deliberate, app-scoped) or
+newtype-wrap, more ceremony than Elixir's "just write it." Safety is build-time, not
+every-instant (the live image can transiently hold incoherence, by design). Speed is
+best-effort (dynamic-eval / heterogeneous receivers don't monomorphize). More machinery
+underneath (speculative specialization + deopt is heavier than a frozen table — the cost
+of liveness). And the clean *app-vs-library* line (who may `bridge`, whose `impl` wins)
+wants **package-rooted namespaces** ([ADR-070](decisions.md), not yet done); the interim
+convention is that the program's root namespace / entry module is the app. This ADR gives
+ADR-070 a concrete motivation.
+
+*Migration from what ships today.* `std/show.blsp` (ADR-171) is the interim runtime
+`Display`/`Inspect`; its activate-on-`:use` model becomes app-gated (`display-on`), and
+its open registration gains the §1 coherence rule. ADR-168's `*impls*` registry is
+retained but reframed as the runtime backstop under a compile-time checking +
+specialization layer, and `impl` gains the owner-or-ability restriction with `bridge` as
+the sanctioned orphan escape. No `Value` kind, special form, or immutability contract
+changes.
+
+**References.** ADR-168 (the open runtime ability mechanism this tightens), ADR-171 (the
+interim `Display` protocol), ADR-013 (hot reload — the constraint that rules out frozen
+static dispatch), ADR-123–126 (checker never gates the live image; CI hard-rejects),
+ADR-130 (records as maps carrying `:__id__`), ADR-070 (package-rooted namespaces — the
+clean app/library line), ADR-011 (defer power features — why the always-on-in-core and
+bridge machinery are scoped, not maximal).
