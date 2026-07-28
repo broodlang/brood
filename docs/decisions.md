@@ -11248,7 +11248,20 @@ affect. Direct links need no epoch guard, so hot reload stops disturbing frozen 
 **Staging (revised).** Each stage is independently landable and verifiable:
 
 - **Stage 1 — direct-link frozen callees.** A `Node::Call` whose callee is a sealed
-  global binds to it at compile time: no site id, no IC probe, no epoch check. Wins
+  global binds to it at compile time: no site id, no IC probe, no epoch check.
+  **Caveat found while reading the VM (2026-07-28), and it constrains the design:** the
+  call IC does not merely cache the *binding*, it caches the resolved
+  `(Arc<CompiledArm>, EnvId)` payload — `vm_call_ic_probe` returns both, and a hit skips
+  arm resolution entirely. So "bind the callee at compile time and drop the site" would
+  save the slot at the cost of re-resolving the arm on **every prelude call**, i.e. a
+  slowdown on the hottest paths in the system to buy memory. Stage 1 must therefore keep
+  an arm fast path. The natural form: for a *frozen* callee the resolution is permanently
+  valid and process-independent, so the cached arm belongs with the **shared code** (one
+  entry per site for the whole runtime) rather than in a per-process table — which is
+  Stage 3's mechanism, sound here precisely because the binding can never change. That
+  entangles Stage 1 with Stage 2 more than this ADR first assumed: sharing the *cache*
+  entry requires the cached `Arc<CompiledArm>` to be shared too. Sequence accordingly, and
+  do not land a Stage 1 that regresses `make ab` on the prelude-heavy rows. Wins
   memory (no IC slot for ~99% of sites) *and* speed (ADR-166's own stated motivation —
   "every prelude call has to be late-bound because any global might be rebound"), and is
   independently useful whether or not sharing ever lands. **Ordering caveat:** sealing is
