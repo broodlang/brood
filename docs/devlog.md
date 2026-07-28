@@ -9652,3 +9652,42 @@ fixes, so its bail has a third cause I did not find; whatever that is, it is ups
 two, and closing them without it changes nothing. The evidence trail (deopt counts per
 construct, the `Prim2SlotSlot SetLocal Prim2SlotInt Prim2SlotInt Prim2` fingerprint) is in this
 entry so the next attempt starts from the third cause, not the first two.
+
+## 2026-07-28 (evening) — 300K processes vs the BEAM: spawn rate is fine, memory and *scaling* are not
+
+Measured head-to-head at the scale that matters for a process-per-connection design,
+300,000 processes spawned and left **alive** (parked in `receive`):
+
+| | Brood | Elixir | |
+|---|---|---|---|
+| spawn time | 575 ms | 438 ms | 1.3× slower |
+| resident | 1.58 GB | 907 MB | 1.74× heavier |
+| **per process** | **5.4 KB** | **2.68 KB** | |
+
+So the spawn *rate* is genuinely competitive — 675 ns/process after the registry sharding
+(`1e64db5e`). The memory gap is the real one, and it points at the per-process `Heap`: two
+`Slabs` of eleven `Vec`s each, plus caches and maps, against the BEAM's ~330-word process.
+That is the case for pooling/recycling process heaps rather than constructing them.
+
+**But the bigger finding is parallel scaling, and it is not what I expected.** `pfib` — 100
+*independent* `fib(31)`s, embarrassingly parallel — on a 6-core/12-thread i5-11500H:
+
+| workers | 1 | 2 | 4 | 8 | 12 |
+|---|---|---|---|---|---|
+| wall | 457 ms | 463 ms | 275 ms | 205 ms | 208 ms |
+| speedup | 1.0× | **1.0×** | 1.7× | 2.3× | 2.3× |
+
+**2.3× out of a possible ~6×**, and *two* workers give no speedup at all.
+
+**The distribution machinery is not the cause**, which is the useful half. `(sched-stats)`
+during the run: at J=2, **99 steals** for 100 processes; at J=12, **100 steals**, peak-threads
+= 12, migrations 0. The processes really are being handed out to every worker — throughput
+just doesn't follow. So the next question is what serialises *inside* the workers (allocator?
+shared-region reads? memory bandwidth on 6 physical cores?), not whether the scheduler spreads
+work.
+
+**Coverage gap found while checking:** `work_stealing.rs`, `live_migration.rs`,
+`preemption.rs` and `concurrency_race.rs` prove the mechanisms are live and correct, but
+**nothing asserts balance or scaling**, and `(sched-stats)` is aggregate-only — there is no
+per-worker breakdown to write such a test against. A scaling assertion (embarrassingly
+parallel work must beat 1 worker by ≥ N×) would have caught the 1.0× at J=2 immediately.
