@@ -10096,3 +10096,26 @@ rejected at resolve time with a rename message. Suites: ability 32, project 75, 
 
 Slices 2, 3, 5, 6 (`bridge`, coherence checking, dispatch specialization, always-on `Display`)
 remain.
+
+## 2026-07-28 (design) — ADR-172 amended: `bridge` and the orphan rule dropped before build
+
+Pulled §1/§2 of ADR-172 apart and found the pair unnecessary. **`bridge` has no runtime
+substance** — it expands to the identical `register-impl` call as `impl`, same `(current-ns)`
+tag, same app tier; its sole purpose was to be the sanctioned, greppable, app-only channel for
+*orphan* impls so that `impl` could be restricted to owned slots. But the **orphan rule itself is
+premature**: "a library may not `impl` a type/ability it doesn't own" guards a
+multi-third-party-library collision that greenfield Brood (one app + `std`) does not have — and
+adopting it would break two capabilities we want and already have: impl'ing an ability for a
+**primitive** id (`:int`) from anywhere, and impl'ing a **library** ability (`Display`) for your
+own records. App sovereignty is already delivered by the **precedence ladder** (slice 4, shipped):
+`app > type-owner > ability-owner > other`, same-tier collisions warned. And the app/library line
+is **computable** (package identity), so if a real orphan conflict ever appears, orphan
+authorization is a **lint on plain `impl`** (advisory-live / hard-CI), never a second form.
+
+So: abilities stay the open ADR-168 registry, made deterministic by the ladder; `impl` is legal
+for any ability and any id; `bridge` is not built. Same reasoning that dropped `:bridges` (a second
+mechanism with no substance, for a restriction we don't adopt), applied one level up. Verified the
+three cases still run: `impl` for `:int`/`:string`, `Display` on a user record (`$500`), and an
+orphan `Display :int` (`#42`). ADR-172 status + §-map amended; ROADMAP marks slices 2+3 ❌ dropped,
+5 (dispatch specialization) + 6 (`Display` to core) the substantive slices that remain;
+`language.md` "planned direction" block and the `:optional` comment de-bridged.

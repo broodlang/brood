@@ -10785,11 +10785,43 @@ the core image; deferred (ADR-011) until a concrete need.
 
 ## ADR-172 — Abilities v2: app-sovereign coherence, `impl`/`bridge`, compile-enforced, live-replaceable
 
-**Status:** accepted (design). **Not yet implemented** — this records the decided
-direction. What ships today is the interim: open runtime abilities (ADR-168) and the
-opt-in `Display` protocol (ADR-171, `std/show.blsp`). ADR-172 supersedes ADR-168's
-"open and late, any id from any module" registration model and ADR-171's
-opt-in/activate-on-load model; both stay in place until this is built.
+**Status:** accepted (design), **amended 2026-07-28** — the orphan rule (§1) and the
+`bridge` form (§2, §4) are **dropped before implementation**; see the amendment
+immediately below. What ships: the precedence ladder (§3) via package identity, and the
+explicit-activation `Display` interim (ADR-171 + the 2026-07-28 `display-on`/`off`
+change). The dispatch-specialization (§7) and `Display`-to-core (§8) slices stand.
+
+**Amendment (2026-07-28) — abilities stay OPEN; no orphan rule, no `bridge` syntax.**
+A design review pulled §1/§2 apart and found the restriction unnecessary and the form
+substanceless:
+
+- **`bridge` has zero runtime substance.** It expands to the *identical* `register-impl`
+  call as `impl`, tagged with the same `(current-ns)`, landing at the same app tier — no
+  behavior `impl` lacks. Its only purpose was to be the sanctioned, greppable, app-only
+  channel for *orphan* impls, so that `impl` could be restricted to owned slots (§1).
+  A second form that does exactly what an existing form does, to support a restriction we
+  are not adopting, is precisely what "keep the language as small as possible" and ADR-011
+  forbid — the same reasoning that dropped `:bridges` (§4).
+- **The orphan rule (§1) is premature.** "A library must not `impl` a type/ability it
+  doesn't own" guards against a *multi-third-party-library* collision that greenfield
+  Brood (one app + `std`) does not have. Adopting it now would also break two capabilities
+  we want and already have: impl'ing an ability for a **primitive** id (`:int`, owned by
+  nobody) from anywhere, and impl'ing a **library** ability (`Display`) for your own
+  records — both orphans-or-restricted under §1.
+- **App sovereignty does not need either.** It is already delivered by the precedence
+  ladder (§3, shipped): **app > type-owner > ability-owner > other**, with same-tier
+  cross-module collisions warned. The app always wins; a library can't quietly outrank it.
+- **The app/library line is computable, so no keyword is needed for it.** Package identity
+  (`*ns-package*` vs `*project-name*`) already tells the checker who is the app. *If* a
+  real multi-library orphan conflict ever appears, orphan-authorization becomes a **lint on
+  plain `impl`** — "an orphan impl outside the app is flagged; inside the app it's allowed
+  and listed" — with no new form, and it stays **advisory in the live image / hard-reject in
+  CI** (§6). Deferred until such a conflict exists (ADR-011).
+
+Net model: **abilities remain the open ADR-168 registry, made deterministic by the §3
+precedence ladder.** `impl` is legal for any ability and any id — primitive, owned, or
+someone else's — exactly as it runs today. `bridge` is not built.
+
 
 **Context.** ADR-168 made abilities *open and late* — `impl` for any id, from any
 module, at any time — dispatched through a runtime `*impls*` registry, coherence merely
