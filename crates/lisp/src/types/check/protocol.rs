@@ -340,7 +340,7 @@ fn bare_name(name: value::Symbol) -> String {
 // ---- ability missing-impl at call sites (Slice 3) ---------------------------
 //
 // Warn on a call to an ability op whose FIRST argument has a *statically known*
-// identity — a literal, or a direct `defrecord*` constructor call — for which no
+// identity — a literal, or a direct `defrecord` constructor call — for which no
 // impl (and no `:default`) is registered.
 //
 // Soundness (the checker's no-false-positives rule): an op fn is recognised only by
@@ -377,7 +377,7 @@ fn find_op_key(heap: &Heap, form: Value) -> Option<(String, String)> {
     stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
         let items = list_items(heap, form)?;
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("ability/impl-for") {
+            if sym_name(Value::Sym(h)).as_deref() == Some("impl-for") {
                 if let Some(Value::Vector(vid)) = items.get(1).and_then(|&v| unquote(heap, v)) {
                     let vec = heap.vector(vid);
                     if let (Some(&a), Some(&o)) = (vec.first(), vec.get(1)) {
@@ -392,7 +392,7 @@ fn find_op_key(heap: &Heap, form: Value) -> Option<(String, String)> {
     })
 }
 
-/// The record id (`:__id__` keyword's name) a `defrecord*` constructor body carries —
+/// The record id (`:__id__` keyword's name) a `defrecord` constructor body carries —
 /// a map literal `{:__id__ :ID …}` (the current form) or a legacy `(hash-map :__id__ …)`.
 fn record_ctor_id(heap: &Heap, form: Value) -> Option<String> {
     // map literal body — `{:__id__ :ID …}`
@@ -466,7 +466,7 @@ fn collect_register_impls(
             return;
         };
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("ability/register-impl") {
+            if sym_name(Value::Sym(h)).as_deref() == Some("register-impl") {
                 let a = items
                     .get(1)
                     .and_then(|&v| unquote(heap, v))
@@ -624,7 +624,7 @@ fn collect_register_ability(heap: &Heap, form: Value, out: &mut HashMap<String, 
             return;
         };
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("ability/register-ability") {
+            if sym_name(Value::Sym(h)).as_deref() == Some("register-ability") {
                 if let (Some(a), Some(ops_form)) = (
                     items
                         .get(1)
@@ -656,7 +656,7 @@ fn collect_register_sealed(heap: &Heap, form: Value, out: &mut HashMap<String, V
             return;
         };
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("ability/register-sealed") {
+            if sym_name(Value::Sym(h)).as_deref() == Some("register-sealed") {
                 if let (Some(a), Some(&list_form)) = (
                     items
                         .get(1)
@@ -762,7 +762,7 @@ pub(super) fn ty_record_id(ty: &crate::types::Ty) -> Option<String> {
 }
 
 /// Syntactic pass: warn on an ability op call whose FIRST argument has a statically
-/// known identity from *syntax alone* — a literal or a direct `defrecord*` constructor
+/// known identity from *syntax alone* — a literal or a direct `defrecord` constructor
 /// call. The inference hook in `check_into` complements it for record-typed *variables*.
 fn walk_ability_calls(
     heap: &Heap,

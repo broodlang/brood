@@ -578,6 +578,8 @@ impl Heap {
         work.extend(self.roots.iter().copied());
         env_work.extend(self.env_roots.iter().copied());
         work.extend(self.dynamics.iter().map(|(_, v)| *v));
+        #[cfg(feature = "dev-tools")]
+        work.extend(self.trace_context.iter().copied());
         // --- Live VM arms mid-execution: RUNTIME literals baked into Const/MakeClosure
         // (the one holder off the GC root graph, mirroring compaction's step 3b). Read
         // them via the arm-handle visitor, returning each value unchanged. ---
@@ -1085,6 +1087,10 @@ impl Heap {
             *e = flush_rt_env(&old_code, &new, &mut fwd, *e);
         }
         for (_, v) in self.dynamics.iter_mut() {
+            *v = flush_rt_value(&old_code, &new, &mut fwd, *v);
+        }
+        #[cfg(feature = "dev-tools")]
+        if let Some(v) = &mut self.trace_context {
             *v = flush_rt_value(&old_code, &new, &mut fwd, *v);
         }
         // ...and the caller's extra live roots (the auto path's `expr`/`env`).

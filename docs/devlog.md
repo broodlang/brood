@@ -10058,6 +10058,151 @@ reading. Left there deliberately: the last two cliffs on this row cost a day and
 so the next attempt should confirm the payoff (does the arm run native afterwards, and does the
 row move?) before the fix is written.
 
+## 2026-07-28 (impl) — Abilities v2 slice 4 (rest): the app tier lands via package identity
+
+The half slice 4 deferred — the top **app** tier, a program overriding *anything* — now
+works, without waiting for full package-rooted namespaces (ADR-070). The insight: the app
+tier only needs to answer *"does this namespace belong to the app or to a library?"*, which
+is a name→owner lookup, not a rename of every namespace. So instead of prefixing namespaces,
+we record **package identity**: a `defdyn *ns-package*` maps each namespace to its owning
+package's name, populated by a static scan at project setup (reusing
+`package--provided-modules` — no change to the hot `require`/`defmodule` path). A namespace is
+"the app" when its package equals `*project-name*` (the project's own `:name`), or when it has
+no recorded owner at all (root / REPL). `impl-rank` gains the top tier: **app (4) > type-owner
+(3) > ability-owner (2) > other (1)**, deterministic by tier regardless of load order. End to
+end: an app `impl` for `:int` beats a library's `impl` for the same slot, whichever registers
+first.
+
+Package identity also enriches diagnostics: `ns-package` resolves a namespace or a qualified
+name to its package, and `trace-with-packages` tags each stack frame with its owning package —
+so a trace reads "which library was this frame in", not just "which module".
+
+**Display protocol activation moved to an explicit app step** (ADR-172 §5/§8): loading `show`
+now only makes the protocol *available* (the ability + a library's `impl Display` proposals);
+the screen printers honor it after the app calls `(display-on)` (installs the `*show*` hook),
+undone by `(display-off)` or `(binding (*show* nil) …)`. A library ships proposals; the app
+disposes. This is interim scaffolding — it vanishes when `Display` becomes always-on core
+(slice 6) — and is kept deliberately un-polished (the safety it approximates is owner-only
+coherence, not an activation gate).
+
+**Bug hunt — three defects found and fixed** (all with reverting-fix-fails-the-test regression
+coverage): (1) HIGH — an app/root impl (`from` = nil) registered *before* a library impl was
+silently clobbered, because `(if prev-from … 0)` read a nil-from incumbent as rank 0; keyed off
+`(contains? *impl-from* …)` (presence, not truthiness) so a nil-from incumbent keeps its real
+tier. (2) `ns-package` crashed on a trace frame with no `:fn` via `(symbol nil)` — `when`-guarded.
+(3) a dependency whose `:name` equals the project's package name would wrongly get the app tier —
+rejected at resolve time with a rename message. Suites: ability 32, project 75, package 65, show
+12 + 5 — all green, incl. under `BROOD_GC_STRESS=1` and the tree-walker.
+
+Slices 2, 3, 5, 6 (`bridge`, coherence checking, dispatch specialization, always-on `Display`)
+remain.
+
+## 2026-07-28 (design) — ADR-172 amended: `bridge` and the orphan rule dropped before build
+
+Pulled §1/§2 of ADR-172 apart and found the pair unnecessary. **`bridge` has no runtime
+substance** — it expands to the identical `register-impl` call as `impl`, same `(current-ns)`
+tag, same app tier; its sole purpose was to be the sanctioned, greppable, app-only channel for
+*orphan* impls so that `impl` could be restricted to owned slots. But the **orphan rule itself is
+premature**: "a library may not `impl` a type/ability it doesn't own" guards a
+multi-third-party-library collision that greenfield Brood (one app + `std`) does not have — and
+adopting it would break two capabilities we want and already have: impl'ing an ability for a
+**primitive** id (`:int`) from anywhere, and impl'ing a **library** ability (`Display`) for your
+own records. App sovereignty is already delivered by the **precedence ladder** (slice 4, shipped):
+`app > type-owner > ability-owner > other`, same-tier collisions warned. And the app/library line
+is **computable** (package identity), so if a real orphan conflict ever appears, orphan
+authorization is a **lint on plain `impl`** (advisory-live / hard-CI), never a second form.
+
+So: abilities stay the open ADR-168 registry, made deterministic by the ladder; `impl` is legal
+for any ability and any id; `bridge` is not built. Same reasoning that dropped `:bridges` (a second
+mechanism with no substance, for a restriction we don't adopt), applied one level up. Verified the
+three cases still run: `impl` for `:int`/`:string`, `Display` on a user record (`$500`), and an
+orphan `Display :int` (`#42`). ADR-172 status + §-map amended; ROADMAP marks slices 2+3 ❌ dropped,
+5 (dispatch specialization) + 6 (`Display` to core) the substantive slices that remain;
+`language.md` "planned direction" block and the `:optional` comment de-bridged.
+
+## 2026-07-28 (impl) — Abilities v2 slice 6: abilities + Display are CORE (folded into the prelude)
+
+`Display` was never more than an ability plus one line wiring `*show*` — so making it "always
+on" meant making the *ability system* core. Folded `std/ability.blsp` + `std/show.blsp` into
+`std/prelude.blsp` (both files deleted): `defability`/`impl`/`defrecord*`, the registries +
+dispatch (`identity-of`/`impl-for`/`register-*`/precedence), and the `Display`/`Inspect`
+abilities with their `:default` impls now live at the root, and the prelude tail sets
+`(def *show* show--print-hook)`. Result: a record customizes how it prints with just
+`(impl Display …)` — **no `(require 'show)`, no `(:use ability)`, no `display-on`** — and the
+protocol is frozen once into the shared prelude region (zero per-runtime cost).
+
+The path there ruled out two alternatives: `(require 'show)` at the prelude tail **crashed boot**
+(module macros like `defability` aren't live during the frozen prelude build, so `show`'s
+`(:use ability)` can't expand); a one-line `Interp::new` post-boot load worked but was a Rust
+hook doing Brood policy and reloaded per runtime. Folding into the prelude wins because the boot
+loop already propagates macros form-by-form — `defability` defined early is visible to `Display`
+later in the same pass.
+
+Fallout, all fixed: the checker's ability pass (`types/check/protocol.rs`) matched the old
+*qualified* emit names (`ability/register-impl`, `ability/impl-for`, `ability/register-ability`,
+`ability/register-sealed`) — now unqualified/root, so the four string matches were updated (the
+missing-impl / sealed / conformance lints went silent until then). The `deftype` polymorphism
+hint and a `basic.rs` require-semantics test (both asserted `(:use ability)`) were rewritten to
+say "core, no import"; `check/tests.rs` dropped its `(require 'ability)` prefixes; the two
+embedded-module entries were removed; the `show`/`show_localize` tests dropped `(display-on)`;
+and the language/for-claude docs + the stdlib-module table were de-`:use`-d. `display-on`/
+`display-off` are gone (`(binding (*show* nil) …)` still scopes it off). Verified: ability 32,
+show 12, show_localize 5, json 30, checker ability 12, `basic` 102 — all green; `nest check`
+exits 0. This completes ADR-172 §8; slice 5 (dispatch specialization) is the last open slice.
+
+**Records unified — one `defrecord`, always identity-carrying.** With abilities core, the
+`defrecord`/`defrecord*` split stopped earning its keep: the two forms had *diverged* (plain
+`defrecord` gave per-field accessors but no identity/dispatch; `defrecord*` gave identity but no
+accessors), forcing a silly either/or. Collapsed to **one `defrecord`** = positional constructor
++ per-field accessors + nominal `:__id__` identity + the record-shaped constructor `sig` (so a
+value's identity flows through the checker to dispatch sites). `defrecord*` and the star are gone.
+The only semantic change: a record is now **nominal, not structural** — never `=` to a bare map
+with the same fields (Elixir-struct semantics), and `keys`/`count` include `:__id__` (use
+`fields`/`record?`/`record-id` for the clean view). Blast radius was tiny — nothing depended on
+record-`=`-bare-map (grepped); the 9 call sites were mechanical renames; `record_test.blsp` was
+rewritten to the nominal semantics. Verified: record 12, ability 32, show 12, show_localize 5,
+json 30, checker-ability 12, `basic` 102 — all green. This also answers the "why the star?"
+question — there's no variant left to disambiguate.
+
+## 2026-07-28 (impl) — process-native tracing debugger (std/tool/debug, ADR-174)
+
+Built the actor-model answer to Elixir's `dbg` on the `spy` sink (ADR-173). The debugger
+is a *process*, which dissolves `dbg`/`pry`'s two limits: `break` parks a process with NO
+timeout (send snapshot → block on receive), and many processes hitting the same break each
+park independently and fan into an inspectable queue — no single-session bottleneck.
+
+Causal spans propagate TRANSPARENTLY across `spawn`: the debugger endpoint + current span
+live in one dynamic, `*trace-context*`, and the kernel seeds a child's dynamics from it at
+spawn (lifecycle.rs, reusing promote + push_dynamic → GC-safe; `#[cfg(dev-tools)]`-gated so
+a lean release compiles it out entirely). So a plain `(spawn (fn () (break …)))` inherits
+the debugger and parks with no re-wiring, and the debugger rebuilds a cross-process causal
+tree. Traces are data: value-distribution / outliers debug the *population*; debug-report /
+debug-watch (live) / debug-attach (interactive, key-driven resume) render it. New Heap
+method `current_dynamic`. tests/debug_test.blsp: 10 cross-process tests; verified under
+BROOD_GC_STRESS across concurrency/proc/scheduler/proctree/jit-shared-spawn.
+
+Deferred (ADR-174, ADR-011): send-level causality — following a value through a *message*.
+Perf-safe (cfg-gated Envelope, matcher untouched) but needs a GC-traced Value slot on the
+Heap across ~8 collector sites, so it lands as its own GC-stress-gated pass, not bundled.
+
+## 2026-07-28 (impl) — debugger send-level causality: context follows a message (ADR-174 §4)
+
+Finished the deferred send-level slice: causality now follows a value A→B through a
+*message*, so a long-lived server (never wired to the debugger) handles each request in
+the *sender's* context — `dbg` can't do this at all. All `#[cfg(dev-tools)]`, so a lean
+release is byte-identical (verified: `cargo check --no-default-features` clean).
+
+Kernel: the durable context moved from a dynamic to a settable per-process `trace_context`
+slot on the `Heap`, GC-traced where `dynamics` is (5 collector sites) + a `%trace-context`
+/ `%set-trace-context` primitive pair. The mailbox message became an `Envelope { msg,
+#[cfg] trace }` — uniform `.msg`, so `receive_match` is untouched and release is a zero-cost
+newtype; `send` attaches the sender's context for a local pid, `receive` adopts it on pop.
+A context is tagged **own** (set by `with-debugger`/`span`, propagated by `spawn`) vs.
+**adopted** (from a message, not propagated onward) — a distinction a test forced: without
+it the framework's own result messages leaked context into later test processes and hung an
+unrelated "break with no debugger" case. Verified: debug suite 12 (incl. send-level +
+leak-prevention), `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` clean, concurrency/gen/proc green.
+
 ## 2026-07-28 — per-process compiled code is the per-process memory cost
 
 Chasing the 4.58 GB that 300k live processes cost on the `spawn-live` benchmark (Elixir

@@ -1093,14 +1093,12 @@ place even when they end up empty — removing a leaf never prunes its branch."
 (%declare-dynamic '*err*)
 (def *err* %write-err)
 ;; `*show*` — a late-bound per-argument display transform for the SCREEN printers
-;; (`print`/`println`/`eprint`/`eprintln`). nil (the default) means "render each
-;; argument the built-in way", so there is zero cost until something opts in — one
-;; nil check per call. `std/show.blsp` (`(require 'show)`) installs a transform that
-;; routes a *record* through the `Display` ability's `to-str` op, so a record can
-;; define how it prints (Elixir's `String.Chars` model) while built-ins keep the
-;; fast native render. It is an ordinary dynamic var, so `(binding (*show* f) …)`
-;; overrides the display transform for a scope. Only the screen printers consult it;
-;; `str`/`pr-str`/`fmt` stay on the native renderer.
+;; (`print`/`println`/`eprint`/`eprintln`). Declared here; the Display protocol (core,
+;; defined at the end of this prelude) sets it to `show--print-hook`, which routes a
+;; *record* through the `Display` ability's `to-str` op so a record can define how it
+;; prints (Elixir's `String.Chars` model) while built-ins keep the fast native render.
+;; An ordinary dynamic var, so `(binding (*show* nil) …)` disables the transform for a
+;; scope. Only the screen printers consult it; `str`/`pr-str`/`fmt` stay native.
 (%declare-dynamic '*show*)
 (def *show* nil)
 (defn show--args (xs)
@@ -2895,41 +2893,70 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
 (defn defrecord--fname (f) (if (pair? f) (first f) f))
 (defn defrecord--ftype (f) (if (pair? f) (second f) nil))
 (defn defrecord--acc-sym (rec fld) (symbol (str (name rec) "-" (name fld))))
+(defn defrecord--qualify (nm)
+  "Qualify bare name `nm` (a string) against the current ns → a `:<ns>/nm` keyword; at
+root/REPL (no ns) there is no prefix, so it is a bare `:nm`. Shared by `defrecord` (which
+bakes a record's `:__id__`) and `ability--id-kw` (an impl's bare id) so the two AGREE — a
+record built at root and an impl for it at root must land on the same dispatch id."
+  (let (ns (current-ns))
+    (if ns (keyword (str (name ns) "/" nm)) (keyword nm))))
 
 ;; The `(sig …)` forms for an all-typed record: the constructor arrow, then one
 ;; accessor arrow per field. Built as plain data — `sig` reads the un-expanded type.
-(defn defrecord--sigs (rec fields)
-  (let (ftypes (map defrecord--ftype fields)
-        rec-ty (cons 'record
-                 (mapcat (fn (f)
-                           (list (keyword (name (defrecord--fname f)))
-                             (defrecord--ftype f)))
-                   fields))
-        ctor (list 'sig rec (append ftypes (list '-> rec-ty))))
-    (cons ctor
-      (map (fn (f)
-             (let (fnm (defrecord--fname f))
-               (list 'sig
-                 (defrecord--acc-sym rec fnm)
-                 (list (list 'record (keyword (name fnm)) (defrecord--ftype f))
-                   '-> (defrecord--ftype f)))))
-        fields))))
-
 (defmacro defrecord (rec fields)
-  "Define record `rec` with `fields` — a positional constructor `(rec …)` building
-an immutable map, plus a `rec-field` accessor per field. A field is a bare symbol
-or `(field type)`; when every field is typed, type signatures are emitted for the
-constructor and accessors. Records are plain maps: build with the constructor,
-update with `assoc`/`merge`, compare structurally (there is no `rec?` predicate)."
+  "Define record `rec` with `fields` — a positional constructor `(rec …)` plus a
+`rec-field` accessor per field. A record is an immutable map that also carries a
+**nominal identity**: a reserved `:__id__` field holding a `:module/name` keyword baked
+in at definition, so `ability` dispatch tells it apart from a bare map and from other
+records (Elixir-struct semantics — a record is NOT `=` to a bare map with the same
+fields). `record?`/`record-id`/`fields` are the clean, id-free view.
+
+A field is a bare symbol or `(field type)`; the constructor result is inferred as a
+record SHAPE carrying the `:__id__` keyword literal, so a value's identity flows through
+the checker to dispatch sites (`(let (c (circle 2)) (area c))` is checkable). When every
+field is typed, per-accessor signatures are emitted too.
+
+    (defmodule geometry)
+    (defrecord circle (r))          ; (circle 2) → {:__id__ :geometry/circle, :r 2}
+    (impl Shape circle (area [c] (* 3.14 (get c :r) (get c :r))))"
   (let (fnames (map defrecord--fname fields)
         fkws (map (fn (n) (keyword (name n))) fnames)
-        ctor `(defn ~rec (~@fnames) ~(zipmap fkws fnames))
+        ;; the nominal id — a `:module/name` KEYWORD (a keyword literal is what the
+        ;; checker tracks via `Ty::keyword_lit`), captured at definition.
+        id (defrecord--qualify (name rec))
+        ;; ctor body: a MAP LITERAL (built here, at macro time) whose values are the field
+        ;; symbols, with the reserved `:__id__` carrying the id keyword. Emitting a real
+        ;; map value (not a `(hash-map …)` call) is what makes the checker infer the result
+        ;; as a record shape carrying the `:__id__` keyword literal.
+        body (zipmap (cons :__id__ fkws) (cons id fnames))
+        ctor `(defn ~rec (~@fnames) ~body)
         accs (map (fn (f)
                     (let (fnm (defrecord--fname f))
                       `(defn ~(defrecord--acc-sym rec fnm) (r) (get r ~(keyword (name fnm))))))
                fields)
-        sigs (if (every? pair? fields) (defrecord--sigs rec fields) nil))
-    `(do ~ctor ~@accs ~@sigs nil)))
+        ;; the record-shaped constructor sig (always — this is the dispatch-inference
+        ;; seam): each field keeps its declared type, else `any`.
+        arg-tys (map (fn (f) (or (defrecord--ftype f) 'any)) fields)
+        rec-ty (cons 'record
+                 (cons :__id__
+                   (cons id
+                     (mapcat (fn (f)
+                               (list (keyword (name (defrecord--fname f)))
+                                 (or (defrecord--ftype f) 'any)))
+                       fields))))
+        ctor-sig (list 'sig rec (append arg-tys (list '-> rec-ty)))
+        ;; per-accessor sigs only when every field is typed (else an accessor call on a
+        ;; bare map would false-warn), mirroring the pre-unification behaviour.
+        acc-sigs (if (every? pair? fields)
+                   (map (fn (f)
+                          (let (fnm (defrecord--fname f))
+                            (list 'sig
+                              (defrecord--acc-sym rec fnm)
+                              (list (list 'record (keyword (name fnm)) (defrecord--ftype f))
+                                '-> (defrecord--ftype f)))))
+                     fields)
+                   nil))
+    `(do ~ctor-sig ~ctor ~@accs ~@acc-sigs nil)))
 
 ;; (min-by f coll) / (max-by f coll) — find the element whose key is smallest/largest.
 (defn min-by (f coll)
@@ -3992,3 +4019,314 @@ it waits for that load to finish (a half-evaluated module is never observable)."
   "Load each feature once (a no-op for any already loaded); errors on one not
 found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   (map require-one mods))
+
+;; ═══ Abilities + the Display protocol (core) ════════════════════════════════
+;; Open generic functions with nominal dispatch — Brood's unified polymorphism seam
+;; (ADR-168/172). Folded into the prelude (was std/ability.blsp + std/show.blsp) so
+;; `defability`/`impl`/`defrecord` and the always-on `Display`/`Inspect` protocol are
+;; core — no `(:use ability)`, no `(require 'show)`, no activation step. Dispatch is on
+;; the FIRST arg's identity (a built-in's `type-of` kind, or a `defrecord` value's
+;; nominal `module/name` id); resolution is by PRECEDENCE tier, not load order:
+;; app > type-owner > ability-owner > other.
+
+; ---- registries -------------------------------------------------------------
+
+; ability-name → op specs (introspection / checker / LSP)
+(def *abilities* {})
+; ability-name → the namespace that `defability`'d it (its OWNER, ADR-172): one input to
+; an impl's precedence tier — an impl from this ns is the ability-owner tier, and only this
+; ns may impl the ability for a built-in id (`:int`, `:default`).
+(def *ability-owner* {})
+; [ability op] → {id → fn} (runtime dispatch — the fn stored directly, no wrapper)
+(def *impls* {})
+; [ability op id] → registering ns (provenance for conflict detection; read only at
+; registration, never on dispatch — keeps the dispatch value a bare fn)
+(def *impl-from* {})
+
+(defn register-ability (aname specs &optional owner)
+  "Record ability `aname`'s declared op specs (raw forms) for the checker / LSP, and its
+  OWNER namespace (`defability`'s defining ns, ADR-172) for impl precedence."
+  (def *abilities* (assoc *abilities* aname specs))
+  (when owner (def *ability-owner* (assoc *ability-owner* aname owner)))
+  nil)
+
+(defn ability-owner-ns (aname)
+  "The namespace that `defability`'d `aname` (its owner), or nil."
+  (get *ability-owner* aname))
+
+(defn ability-ops (aname)
+  "The op specs declared for ability `aname` (or nil) — which ops an `impl` must
+  provide, with what arities."
+  (get *abilities* aname))
+
+; ability-name → its SEALED member ids (a closed set), or absent if open
+(def *sealed* {})
+
+(defn register-sealed (aname members)
+  "Record ability `aname`'s SEALED member ids — the closed set of identities it is meant
+  to be implemented for. The checker uses this for exhaustiveness: every member must have
+  an impl of every declared op. Runtime dispatch is unaffected (sealing is a contract)."
+  (def *sealed* (assoc *sealed* aname members))
+  nil)
+
+(defn sealed-members (aname)
+  "The sealed member ids of ability `aname` (a list of keyword ids), or nil if open."
+  (get *sealed* aname))
+
+; ---- dispatch identity ------------------------------------------------------
+
+(defn identity-of (x)
+  "The dispatch identity of `x`: its nominal record id (a `module/name` keyword) if it
+  is an identity-carrying record, else its `type-of` kind. This — with `record?` /
+  `record-id` / `fields` — is the one seam a later kernel slot swaps behind; nothing
+  outside this module reads `:__id__` directly."
+  ; one hash on the hot path: `get` (not `contains?` + `get`). `:__id__` is a reserved
+  ; keyword a record always carries and is never nil, so a present id is truthy.
+  (if (map? x)
+    (let (id (get x :__id__))
+      (if id id (type-of x)))
+    (type-of x)))
+
+(defn record? (x)
+  "True if `x` is an identity-carrying record (a `defrecord` value)."
+  (and (map? x) (contains? x :__id__)))
+
+(defn record-id (x)
+  "The nominal id (`module/name` keyword) of record `x`, or nil if `x` is not a record.
+  Unlike `identity-of`, never falls back to `type-of`."
+  (if (record? x) (get x :__id__) nil))
+
+(defn fields (x)
+  "The FIELDS of record `x` as a plain map — its identity omitted. The clean view for
+  code that wants a record's data without the internal id (`keys`/`count`/serialization
+  over this see only fields). A plain map is returned unchanged."
+  (if (record? x) (dissoc x :__id__) x))
+
+; ---- registration -----------------------------------------------------------
+
+; The owning module of a record id keyword `:mod/name` (as a string), or nil for a
+; built-in id (`:int`, `:default` — no `/`). The record NAME is the final `/`-segment, so
+; the module is everything BEFORE the last `/` — a nested module keeps all its segments
+; (`:editor/display/frame` → `editor/display`, not `editor`). Used to place an impl in the
+; tier ladder: an impl whose registering ns equals this owns the type.
+(defn impl--id-owner (key)
+  (if (keyword? key)
+    (let (parts (string-split (name key) "/"))
+      (if (> (count parts) 1)
+        (join "/" (take (- (count parts) 1) parts))
+        nil))
+    nil))
+
+; True if module `from` belongs to the current project's OWN package (ADR-172): its
+; `*ns-package*` entry (set at project setup) equals `*project-name*`. Guarded with `bound?`
+; so abilities still work when no project is loaded (a bare `brood script.blsp` — those
+; ambients are undeclared then). Root/REPL (`from` = nil) is handled by the caller as the app.
+(defn impl--app? (from)
+  (and from
+    (bound? '*project-name*) *project-name* (bound? '*ns-package*)
+    (= (get *ns-package* from) *project-name*)))
+
+(defn impl-rank (aname key from)
+  ;; Precedence tier (ADR-172 §3), higher wins: **app (4) > type-owner (3) > ability-owner
+  ;; (2) > other (1)**. `from` = nil is the root/REPL — the user IS the app, so app tier; a
+  ;; module whose package is the project's own is likewise the app. Otherwise `from` owns the
+  ;; record's type (id-owner) or the ability (its `:default`/built-in impls), else it's other.
+  ;; Guard the nil/app cases before `(name from)`.
+  (if (or (nil? from) (impl--app? from))
+    4
+    (let (from-name (name from)
+          id-owner (impl--id-owner key)
+          abl-owner (let (o (ability-owner-ns aname)) (if o (name o) nil)))
+      (cond
+        (= from-name id-owner) 3
+        (= from-name abl-owner) 2
+        else 1))))
+
+(defn register-impl (aname op key f from)
+  "Register impl `f` of `aname`'s `op` for dispatch id `key`, tagged with the registering
+  namespace `from`. Resolution is by PRECEDENCE, not load order (ADR-172 §3): the impl with
+  the highest tier for a `(aname, op, key)` slot wins, computed by `impl-rank`, so the result
+  is deterministic regardless of registration order. A same-tier re-register from a DIFFERENT
+  `from` is a genuine cross-module conflict (warned; last wins); from the SAME `from` it is
+  hot-reload (silent); a strictly lower-tier registration is ignored (a higher tier holds the
+  slot). Read-modify-write of `*impls*` — register at load time, as top-level `impl` does."
+  (let (op-key [aname op]
+        methods (or (get *impls* op-key) {})
+        prov-key [aname op key]
+        ; presence, not truthiness: a root/REPL/app incumbent records `from` = nil, so a
+        ; nil `prev-from` is ambiguous between "no incumbent" and "incumbent was the app".
+        ; Keying off `contains?` keeps a later lower tier from displacing an app impl.
+        has-prev (contains? *impl-from* prov-key)
+        prev-from (get *impl-from* prov-key)
+        new-rank (impl-rank aname key from)
+        ; recompute the incumbent's tier from its recorded `from` — no extra registry.
+        old-rank (if has-prev (impl-rank aname key prev-from) 0))
+    (when (and has-prev (= new-rank old-rank) (not (= prev-from from)))
+      (println "warning: ability "
+        aname "/" op " for " key " — same-tier impl from " prev-from " overridden by " from
+        " (last wins)"))
+    ; Store the winner only when the new impl's tier is >= the incumbent's — so a higher tier
+    ; always holds the slot and order can't decide it. A strictly lower tier is dropped (its
+    ; owner already has a stronger claim). The fn is stored DIRECTLY so dispatch (`impl-for`)
+    ; stays a plain map-get; provenance in *impl-from* is read only here, never on dispatch.
+    (when (>= new-rank old-rank)
+      (def *impls* (assoc *impls* op-key (assoc methods key f)))
+      (def *impl-from* (assoc *impl-from* prov-key from)))
+    nil))
+
+(defn impl-for (op-key key)
+  "The impl fn of op `op-key` (a `[ability op]` pair) for id `key`, falling back to a
+  `:default` impl, or nil. One map fetch for the op's method set, then one by id."
+  (let (methods (get *impls* op-key))
+    (or (get methods key) (get methods :default))))
+
+(defn no-impl (op-key key)
+  "The loud, located error an op raises when no impl (and no `:default`) covers id
+  `key`. Names the ability, the op, the id, and lists the ids that ARE implemented."
+  (let (aname (first op-key)
+        op (second op-key)
+        known (keys (or (get *impls* op-key) {})))
+    (if (empty? known)
+      (error "ability " aname "/" op ": no impl for " key)
+      (error "ability " aname "/" op ": no impl for " key " — have " known))))
+
+(defn satisfies? (aname x)
+  "True if ability `aname` is implemented for `x`'s identity — every declared op
+  resolves (directly or via `:default`). Lets a caller branch instead of letting the op
+  raise the missing-impl error. False for an unknown ability."
+  (let (key (identity-of x)
+        ops (ability-ops aname))
+    (if ops
+      (every? (fn (spec) (impl-for [aname (first spec)] key)) ops)
+      false)))
+
+; ---- macros -----------------------------------------------------------------
+
+(defn defability--sealed-vec (specs)
+  "The vector following `:sealed` in a `defability`'s specs (its closed member set), or nil."
+  (cond
+    (empty? specs) nil
+    (= (first specs) :sealed) (second specs)
+    else (defability--sealed-vec (rest specs))))
+
+(defn ability--id-kw (m)
+  "The dispatch-id keyword for an impl / sealed-member id `m`. A keyword is kept as-is
+  (`:int`, `:default`); a bare record symbol is qualified against the current ns
+  (`circle` → `:<ns>/circle`, matching what `defrecord` bakes into a value); an already-
+  qualified symbol is keyworded as-is (`geo/circle` → `:geo/circle`). Shared by `impl`
+  and `:sealed` so they agree on a bare id — otherwise `(impl S circle …)` would register
+  under `:circle` while a value presents `:<ns>/circle` and never match (KI-15)."
+  (if (symbol? m)
+    (if (includes? (name m) "/")
+      (keyword (name m))
+      (defrecord--qualify (name m)))
+    m))
+
+(defmacro defability (aname & specs)
+  "Declare ability `aname`. Each op spec `(op [args…] :-> ret?)` becomes a generic
+  function dispatching on its first argument's identity. An optional leading docstring
+  is allowed. Records the specs in *abilities* for the checker / LSP.
+
+  An optional `:sealed [id …]` clause names the CLOSED set of member ids the ability is
+  meant to cover; the checker then flags any member missing an impl of any op
+  (exhaustiveness). A bare record symbol is qualified with the current ns.
+
+    (defability Size  (size [self] :-> int))
+    (defability Store (fetch [self k]) (put [self k v]))
+    (defability Shape :sealed [circle rect] (area [self] :-> float))"
+  (let (ops (filter (fn (s) (pair? s)) specs)
+        sealed-vec (defability--sealed-vec specs)
+        sealed-ids (if sealed-vec (map ability--id-kw sealed-vec) nil)
+        ; pass `(current-ns)` as the owner — evaluated at load in the DEFINING module, so
+        ; `*ability-owner*` records where the ability was declared (ADR-172 precedence).
+        reg (cons (list 'register-ability
+                    (list 'quote aname) (list 'quote ops) (list 'current-ns))
+              (if sealed-ids
+                (list (list 'register-sealed
+                        (list 'quote aname) (cons 'list sealed-ids)))
+                nil))
+        op-defs (map
+                  (fn (op)
+                    (let (op-name (first op)
+                          ; arg vector → list; dispatch reads the FIRST arg's identity
+                          arg-syms (map (fn (s) s) (second op))
+                          first-arg (first arg-syms)
+                          ; a *constant* [ability op] key — a quoted literal, built once
+                          op-key (list 'quote [aname op-name])
+                          ; gensym'd temporaries so an op arg named `k`/`f` can't be captured
+                          id-sym (gensym)
+                          impl-sym (gensym))
+                      (list 'defn
+                        op-name arg-syms
+                        (list 'let
+                          (list id-sym
+                            (list 'identity-of first-arg) impl-sym (list 'impl-for op-key id-sym))
+                          (list 'if
+                            impl-sym
+                            ; direct, arity-correct call — no arg-list alloc, no `apply`
+                            (cons impl-sym arg-syms) (list 'no-impl op-key id-sym))))))
+                  ops))
+    (cons 'do (append reg op-defs))))
+
+(defmacro impl (aname key & methods)
+  "Register implementations of ability `aname` for dispatch id `key` — a `type-of`
+  keyword (`:int`, `:map`, …), a record's nominal id (`geometry/circle`), or `:default`.
+  Open and late: from any module, any time. Each method is `(op [args…] body…)`; the
+  registration is tagged with the current namespace for conflict detection.
+
+    (impl Size :int             (size [n] n))
+    (impl Size geometry/circle  (size [c] (get c :r)))"
+  ; the dispatch id is a KEYWORD: a record id written as a symbol (`geometry/circle`) is
+  ; keyworded to match what `identity-of` produces; a built-in id (`:int`) is already one.
+  (let (id-kw (ability--id-kw key))
+    (cons 'do
+      (map
+        (fn (m)
+          (let (op-name (first m)
+                ; arg vector → list
+                arg-syms (map (fn (s) s) (second m))
+                body (rest (rest m)))
+            (list 'register-impl
+              (list 'quote aname) (list 'quote op-name) id-kw (cons 'fn (cons arg-syms body))
+              (list 'quote (current-ns)))))
+        methods))))
+
+;; ── Display / Inspect: the print protocol (always on) ──────────────────────────
+(defability Display
+  "A value's human display string — what `print`/`println` show for it." (to-str [self] :-> string))
+
+;; Every built-in kind, and every record without a custom impl, lands here: the
+;; native `str` — i.e. exactly what printing produced before this module loaded.
+(impl Display :default (to-str [x] (str x)))
+
+;; `Inspect` — the DEBUG form (Elixir's `Inspect`, Haskell's `Show`), the companion
+;; to `Display`. `(inspect x)` is what you want in a log line or a REPL: unambiguous,
+;; type-revealing, and free to include a wrapper a human reads (`#money<$10.50>`).
+;; It is DISTINCT from `pr-str` on purpose — `pr-str` must *round-trip* (its output
+;; re-reads to the same value), so it is a kernel guarantee this protocol must not
+;; override. `inspect` carries no round-trip contract, so a record may shape it
+;; freely. `:default` is `pr-str` (the readable form) for everything uncustomised.
+(defability Inspect
+  "A value's debug string — for logs / the REPL. Unlike `pr-str`, need not re-read."
+  (inspect [self] :-> string))
+
+(impl Inspect :default (inspect [x] (pr-str x)))
+
+(defn inspectln (x)
+  "Print `x`'s debug form (`inspect`) followed by a newline — the `IO.inspect` move,
+  for tracing. Returns `x`, so it drops into a pipeline: `(-> v f inspectln g)`."
+  (println (inspect x))
+  x)
+
+;; The per-print-argument hook the prelude installs into `*show*` at the end of boot
+;; (Display is core, ADR-172 §8 — no activation step). Only a RECORD is routed through
+;; `to-str` (a `defrecord` value is the sole thing that can carry a custom impl); every
+;; other value passes through untouched so the built-in renderer stays on the fast path
+;; — no `identity-of`/`impl-for` lookup per printed int or string. Disable for a scope
+;; with `(binding (*show* nil) …)`.
+(defn show--print-hook (x)
+  (if (record? x) (to-str x) x))
+
+;; Wire the screen printers to honor `Display` for records, by default (ADR-172 §8).
+;; `(binding (*show* nil) …)` disables it for a scope.
+(def *show* show--print-hook)

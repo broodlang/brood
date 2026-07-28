@@ -10464,7 +10464,7 @@ express the interesting case.
 **Decision.** One concept, **`ability`** (`std/ability.blsp`): open generic
 functions dispatching on the first argument's **identity**.
 
-1. **Identity, not kind.** `identity-of` returns a `defrecord*` value's **nominal
+1. **Identity, not kind.** `identity-of` returns a `defrecord` value's **nominal
    id** — a `:module/name` keyword baked in at macro-expansion via `(current-ns)`
    — else the value's `type-of` kind. So two record shapes defined in one module
    dispatch apart, and built-in kinds keep working with `:default` as the
@@ -10474,7 +10474,7 @@ functions dispatching on the first argument's **identity**.
    layered on top, held in a reserved `:__id__` field.
 3. **The `:type`-field axis is permanently rejected.** Sniffing a `:type` key
    would silently reroute *any* map that happens to carry one — the exact
-   implicitness ADR-011 rejects. A `defrecord*` identity is explicit and
+   implicitness ADR-011 rejects. A `defrecord` identity is explicit and
    construction-time, which is the same power made safe. This closes the
    pre-1.0 breaking question in
    [`roadmap-for-v1.md`](roadmap-for-v1.md) §3.
@@ -10507,7 +10507,7 @@ ability's declared ops (missing op, arity disagreement, undeclared op), enforces
 sealed exhaustiveness, and warns at a **call site** when an op is applied to an
 argument of statically-known identity for which no impl and no `:default` exists.
 That last check is inference-driven, so a record-typed *variable* is caught too —
-enabled by `defrecord*` emitting a **map-literal** body plus a `sig`, so the
+enabled by `defrecord` emitting a **map-literal** body plus a `sig`, so the
 record shape (carrying the `:__id__` keyword literal) flows through a `let`. Kept
 sound rather than aggressive: an op fn is recognised only by its exact def symbol,
 an identity is taken only when certain, and the impl set unions the file's own
@@ -10668,8 +10668,8 @@ recoverable and the cost of the feature is permanent; when in doubt, refuse.
 | Alternative *negation* patterns (`(not …)`) | Binds nothing, so it is a guard — `:when` is the slot | ADR-160 |
 | `:as` in a map pattern | `(and whole {…})` says it exactly | ADR-160 |
 | Multiple dispatch | Single dispatch on the first argument's identity; `match` covers the rest | ADR-158, ADR-168 |
-| Dispatch inferred from a `:type` **field** | Would silently reroute any map carrying `:type`; a `defrecord*` identity is explicit and construction-time instead | ADR-168 |
-| Nominal *types* | `defrecord` is structural sugar over a map; `defrecord*` adds a dispatch-only identity, not a type — `type-of` is still `:map` and `=` stays structural | ADR-130, ADR-168 |
+| Dispatch inferred from a `:type` **field** | Would silently reroute any map carrying `:type`; a `defrecord` identity is explicit and construction-time instead | ADR-168 |
+| Nominal *types* | `defrecord` is structural sugar over a map; `defrecord` adds a dispatch-only identity, not a type — `type-of` is still `:map` and `=` stays structural | ADR-130, ADR-168 |
 | More than one spelling per thing | `lambda`, `let*`, `car`/`cdr`, `concat`, `some?`, `length` all removed | ADR-098, ADR-154, ADR-162 |
 | Monkey-patching the language | shipped functions are reserved; extend with an ability, shadow with `let`, or namespace it | ADR-166 |
 
@@ -10701,7 +10701,7 @@ above.
 **Status:** accepted, implemented 2026-07-28.
 
 **Context.** `str`/`pr-str`/`%render` are kernel builtins that format every `Value` in
-Rust (`syntax/printer.rs`). A `defrecord*` value is structurally a `Value::Map`, so it
+Rust (`syntax/printer.rs`). A `defrecord` value is structurally a `Value::Map`, so it
 prints as its raw map — `{:__id__ :money/usd, :cents 1050}`. There was no seam for a
 record to define *how it prints*: the equivalent of Elixir's `String.Chars`
 (`to_string/1`, used by `IO.puts` and interpolation) or Haskell's `Show`. With the
@@ -10785,11 +10785,45 @@ the core image; deferred (ADR-011) until a concrete need.
 
 ## ADR-172 — Abilities v2: app-sovereign coherence, `impl`/`bridge`, compile-enforced, live-replaceable
 
-**Status:** accepted (design). **Not yet implemented** — this records the decided
-direction. What ships today is the interim: open runtime abilities (ADR-168) and the
-opt-in `Display` protocol (ADR-171, `std/show.blsp`). ADR-172 supersedes ADR-168's
-"open and late, any id from any module" registration model and ADR-171's
-opt-in/activate-on-load model; both stay in place until this is built.
+**Status:** accepted (design), **amended 2026-07-28** — the orphan rule (§1) and the
+`bridge` form (§2, §4) are **dropped before implementation**; see the amendment
+immediately below. Shipped: the precedence ladder (§3) via package identity, and **§8 —
+`Display` is core and always on**: the whole ability system + `Display`/`Inspect` were
+folded into the prelude (`std/ability.blsp` + `std/show.blsp` deleted), so a record
+customizes printing with just `(impl Display …)` — no `(require 'show)`, no `display-on`
+(the interim activation is gone). Only **§7 (dispatch specialization)** remains.
+
+**Amendment (2026-07-28) — abilities stay OPEN; no orphan rule, no `bridge` syntax.**
+A design review pulled §1/§2 apart and found the restriction unnecessary and the form
+substanceless:
+
+- **`bridge` has zero runtime substance.** It expands to the *identical* `register-impl`
+  call as `impl`, tagged with the same `(current-ns)`, landing at the same app tier — no
+  behavior `impl` lacks. Its only purpose was to be the sanctioned, greppable, app-only
+  channel for *orphan* impls, so that `impl` could be restricted to owned slots (§1).
+  A second form that does exactly what an existing form does, to support a restriction we
+  are not adopting, is precisely what "keep the language as small as possible" and ADR-011
+  forbid — the same reasoning that dropped `:bridges` (§4).
+- **The orphan rule (§1) is premature.** "A library must not `impl` a type/ability it
+  doesn't own" guards against a *multi-third-party-library* collision that greenfield
+  Brood (one app + `std`) does not have. Adopting it now would also break two capabilities
+  we want and already have: impl'ing an ability for a **primitive** id (`:int`, owned by
+  nobody) from anywhere, and impl'ing a **library** ability (`Display`) for your own
+  records — both orphans-or-restricted under §1.
+- **App sovereignty does not need either.** It is already delivered by the precedence
+  ladder (§3, shipped): **app > type-owner > ability-owner > other**, with same-tier
+  cross-module collisions warned. The app always wins; a library can't quietly outrank it.
+- **The app/library line is computable, so no keyword is needed for it.** Package identity
+  (`*ns-package*` vs `*project-name*`) already tells the checker who is the app. *If* a
+  real multi-library orphan conflict ever appears, orphan-authorization becomes a **lint on
+  plain `impl`** — "an orphan impl outside the app is flagged; inside the app it's allowed
+  and listed" — with no new form, and it stays **advisory in the live image / hard-reject in
+  CI** (§6). Deferred until such a conflict exists (ADR-011).
+
+Net model: **abilities remain the open ADR-168 registry, made deterministic by the §3
+precedence ladder.** `impl` is legal for any ability and any id — primitive, owned, or
+someone else's — exactly as it runs today. `bridge` is not built.
+
 
 **Context.** ADR-168 made abilities *open and late* — `impl` for any id, from any
 module, at any time — dispatched through a runtime `*impls*` registry, coherence merely
@@ -10809,7 +10843,7 @@ through the existing inline-cache/JIT path with deopt-on-reload, with the runtim
 registry retained as the source of truth and reload backstop.
 
 **1 — One coherence rule (`impl`).** `(impl A id …)` is legal **iff you own `A`**
-(you `defability`'d it) **or you own `id`** (you `defrecord*`'d that record type) — the
+(you `defability`'d it) **or you own `id`** (you `defrecord`'d that record type) — the
 Rust orphan rule. A built-in id (`:int`, `:string`, `:default`) is owned by nobody, so
 only the *ability's* owner may impl for it. This one rule kills three hazards at once: a
 library can't touch your types, can't hijack a built-in, and two owners can't silently
@@ -10879,7 +10913,7 @@ keeping live editing.
 a call whose target depends on the first argument's identity — exactly what Brood's
 inline caches + JIT already specialize for ordinary calls, with deopt on type change.
 Lower ability calls through that path: **resolve at compile time where the receiver type
-is statically known** (a literal, a `defrecord*` result, a typed variable), cache
+is statically known** (a literal, a `defrecord` result, a typed variable), cache
 (monomorphic/polymorphic IC) otherwise. Redefining an impl **deopts** the specialized
 call sites and they re-resolve on the next call — so late binding survives. `:sealed`
 abilities (a closed member set) compile to a **closed, exhaustive switch** — no runtime
@@ -11039,7 +11073,71 @@ for a macro's argument form); the source *form* echo carries the information. Re
 (defer power — why the special-form rules and a `:label` arg are scoped, not maximal),
 ADR-013 (hot reload — the sink seam mirrors the late-binding philosophy).
 
-## ADR-174 — Compiled code belongs to the runtime, not the process (the BEAM module-area model)
+## ADR-174 — A process-native tracing debugger (`std/tool/debug`)
+
+**Status:** accepted, implemented (2026-07-28, `worktree-spy-debugger`). Prototype toward
+the ROADMAP `--breakpoints` gap. Spawn-level *and* send-level causality both shipped
+(§2 and §4).
+
+**Context.** Elixir's `dbg`/`IEx.pry` is the reference for interactive debugging, and it
+has two limits everyone hits: a **pry timeout** (the process can't wait forever for the
+one IEx session) and **no multi-process story** (a second process hitting the same
+breakpoint queues behind the first and times out). Both stem from one root cause — the
+debugger is a *terminal*, not a process. Brood is an actor runtime (share-nothing green
+processes, immutable data, `spy`/ADR-173 already a swappable-sink tracer), so it can
+dissolve both limits structurally instead of porting `dbg`'s design.
+
+**Decision.** Make the debugger **a process**, and build the tool as **policy in Brood**
+(`std/tool/debug.blsp`, a `dev-tools` DEV_MODULE — compiled out of a lean release) over
+the thinnest kernel mechanism.
+
+**1 — `break` parks without a timeout.** A breakpoint `send`s the process's snapshot to a
+debugger process and blocks on `receive` for `[:resume]`. A parked process costs nothing
+(off the scheduler), so it waits **indefinitely** — no timeout to need. Many processes
+hitting the same `break` each park independently and fan into the debugger's mailbox as a
+**queue of paused processes**, each inspectable and resumable. `break-when` is a
+data-driven (predicate) breakpoint. This is the direct answer to `pry`'s two limits.
+
+**2 — Causal spans, transparently propagated across `spawn`.** The debugger endpoint +
+current span live in one dynamic, `*trace-context*`. The **kernel copies it into a child
+at `spawn`** (`scheduler/lifecycle.rs`, reusing the existing `promote` + `push_dynamic`
+machinery, so it's GC-safe — verified under `BROOD_GC_STRESS`). So a plain
+`(spawn (fn () (break …)))` inside a `with-debugger` scope inherits the debugger and
+parks with **no re-wiring**, and the debugger reconstructs a **cross-process causal tree**
+— something `dbg` cannot do. Opt-in and **`#[cfg(dev-tools)]`-gated**: a lean release
+compiles neither the hook nor the module (zero code, not merely zero cost); when the
+debugger is inactive it's one empty-dynamics-stack check per spawn.
+
+**3 — Traces are data, so debug the population.** `spy` entries flow to the debugger as
+structured events; `value-distribution` / `modal-value` / `outliers` fold them, so 10k
+processes hitting a trace point yield a *distribution* + the anomalies, not 10k text
+dumps (Elixir's failure mode). `causal-tree` / `debug-report` / the live `debug-watch` /
+interactive `debug-attach` render it.
+
+**4 — Send-level causality (implemented).** Causality now follows a value A→B *through
+a message*, so a long-lived server (never wired to the debugger) handles each request in
+the *sender's* context — the thing `dbg` cannot do at all. The mechanism, all
+`#[cfg(dev-tools)]` so a lean release is byte-identical:
+- The durable context lives in a settable per-process **`trace_context` slot on the
+  `Heap`** (replacing the earlier dynamic), GC-traced exactly where `dynamics` is
+  (5 collector sites) — verified under `BROOD_GC_STRESS=1` + `BROOD_GC_VERIFY=1`.
+- The mailbox message becomes an **`Envelope { msg, #[cfg] trace }`** — access is uniform
+  `.msg`, so the receive matcher is untouched, and in release it's a zero-cost newtype
+  over `Message`. `send` attaches the sender's context for a **local** pid (context is
+  per-runtime, never crossing nodes); `receive` adopts it on pop.
+- A context is tagged **own** (set by `with-debugger`/`span`, propagated by `spawn`) vs.
+  **adopted** (from a message, used to handle it but NOT propagated onward) — so an
+  adopted context can't leak transitively through unrelated spawns. (This distinction was
+  found by a test: without it, the framework's own result messages leaked context into
+  later test processes.)
+
+Related: ADR-173 ([[spy]] — the sink this builds on), ADR-006 (write it in Brood),
+ADR-013 (hot reload — the late-binding kinship), ADR-046/051 (`nest observe` — the render
+target for a future debugger pane). Still open: wiring the causal tree into `nest observe`
+as an interactive pane, and cross-*node* causality (deliberately excluded — the debugger
+is per-runtime).
+
+## ADR-175 — Compiled code belongs to the runtime, not the process (the BEAM module-area model)
 
 **Context.** A green process costs ~15 KB, against the BEAM's ~2.7 KB for a process
 holding equivalent state. Measured 2026-07-28 (see devlog): the cost is not the mailbox,

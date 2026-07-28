@@ -787,10 +787,6 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // Fuzzy (subsequence) string matching + ranking: `fuzzy-match` / `fuzzy-filter`,
     // the matcher completion UIs ride on. Pure Brood, no dependencies. Opt-in.
     embedded_module!("fuzzy", "std/fuzzy.blsp"),
-    // The display protocol for printing (Elixir's `String.Chars`): the `Display`
-    // ability + `to-str`, and a `*show*` hook so the screen printers let a record
-    // define how it prints. Pure Brood on `ability`. Opt-in, never in the prelude.
-    embedded_module!("show", "std/show.blsp"),
     // Plain-text utilities (pure string->string): `fill` greedy word-wraps to a column
     // width — the engine behind an editor's fill-paragraph / M-q, and reusable for
     // wrapping help text or terminal output. No dependencies. Opt-in.
@@ -978,11 +974,6 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // Unified generic functions with NOMINAL dispatch (the value-polymorphism successor):
     // `defability` declares ops, `impl` registers per-identity impls from anywhere, and
     // dispatch is on the first argument's identity — its `type-of` kind, or a record's
-    // baked `module/name` id (`defrecord*`). Subsumes value polymorphism and
-    // drivers-as-values; a driver is just a value you dispatch on. Impls are provenance-
-    // tagged so a cross-module double-define is a loud conflict. Same checker pass as
-    // `protocol` (`types/check/protocol.rs`). Opt-in, never in the prelude.
-    embedded_module!("ability", "std/ability.blsp"),
     // The interactive REPL line editor (ADR-052): `highlight` is the pure lexical
     // syntax-highlighter / bracket-matcher / signature + completion scanners;
     // `lineedit` is the raw-mode, emacs-style editor built on it + the inline
@@ -1027,6 +1018,10 @@ const DEV_MODULES: &[EmbeddedModule] = &[
     embedded_module!("grammar", "std/tool/grammar.blsp"),
     // The process viewer / debug tooling (`nest observe`, `(observe)`).
     embedded_module!("observer", "std/tool/observer.blsp"),
+    // The process-native tracing debugger — `break` (park without timeout),
+    // `span`/`span-spawn` (cross-process causal tree), `spy` routed to a debugger
+    // process. The actor-model answer to Elixir's `dbg`.
+    embedded_module!("debug", "std/tool/debug.blsp"),
     // The hot-reload file watcher — a dev-loop convenience.
     embedded_module!("reload", "std/tool/reload.blsp"),
     // The Model Context Protocol tool surface — `(mcp-tools)` returns the
@@ -2274,6 +2269,24 @@ pub(super) fn binding(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult
         heap.pop_dynamic();
     }
     result
+}
+
+/// `(%trace-context)` — the debugger's durable per-process causal context (ADR-174),
+/// or nil. A settable per-process slot (unlike a `binding`): `spawn` copies it into a
+/// child, `send` ships it, `receive` overwrites it on pop. `dev-tools` only.
+#[cfg(feature = "dev-tools")]
+pub(super) fn trace_context_get(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(heap.trace_context().unwrap_or(Value::Nil))
+}
+
+/// `(%set-trace-context ctx)` — set (or, with nil, clear) the per-process trace
+/// context. Returns nil. `dev-tools` only.
+#[cfg(feature = "dev-tools")]
+pub(super) fn trace_context_set(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    // Set from Brood (`with-debugger`/`span`) → this is the process's OWN context,
+    // so `spawn` propagates it. Message-adoption uses `own = false` (in the mailbox).
+    heap.set_trace_context(Some(arg(args, 0)), true);
+    Ok(Value::Nil)
 }
 
 // ---------- the dirty-native offload pool (ADR-144) ----------
