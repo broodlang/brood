@@ -107,10 +107,14 @@ struct TwFrame {
 fn record_tw_entry(
     heap: &Heap,
     entered: &mut Option<TwFrame>,
-    id: crate::core::value::ClosureId,
+    // The closure's name, captured by the caller *before* `bind_params` — which can
+    // evaluate an `&optional` default that triggers a RUNTIME compaction and
+    // invalidates the closure's `ClosureId`. A `Symbol` is an interned `u32`, GC-
+    // stable, so it survives; re-reading `heap.closure(id)` here would deref a stale
+    // handle (a use-after-GC crash on the tree-walker, kernel-audit #2's twin).
+    name: Option<value::Symbol>,
     call_form: Value,
 ) {
-    let name = heap.closure(id).name;
     match entered {
         Some(fr) => fr.name = name,
         None => {
@@ -881,7 +885,9 @@ fn eval_tail_loop(
                         e
                     })?;
                     // Error-trace bookkeeping: this frame is now entering `id`'s body.
-                    record_tw_entry(heap, entered, id, call_form);
+                    // Pass the name captured *above* (pre-`bind_params`): the default
+                    // eval may have compacted the RUNTIME region and staled `id`.
+                    record_tw_entry(heap, entered, cl_name, call_form);
                     if body.is_empty() {
                         return Ok(Value::nil());
                     }

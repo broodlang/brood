@@ -17,7 +17,6 @@
 //! Lives in its own integration binary so it can drive `(runtime-collect)`
 //! deterministically without interfering with other tests' process state.
 
-use brood::eval::compile::set_forced_engine;
 use brood::Interp;
 
 /// `f` tail-calls `g` (an arm switch). `g`'s non-nil `&optional` default forces a
@@ -29,14 +28,12 @@ use brood::Interp;
 /// rewrites its handles in place, so the call returns the correct result.
 #[test]
 fn tail_call_into_optional_default_arm_survives_runtime_compaction() {
-    // This is a regression test for the **VM trampoline**'s `live_arm_set`-before-
-    // `push_frame` ordering (`vm_apply_inner`) — a code path the tree-walker doesn't
-    // have. Pin the VM so it tests that regardless of the `BROOD_VM` env (the
-    // tree-walker differential job sets `BROOD_VM=0`, under which these top-level
-    // forms would run on the tree-walker and hit a *separate*, torture-only
-    // tree-walker RUNTIME-compaction edge case — tracked in the roadmap, not this
-    // test's subject). Thread-local, reset after.
-    set_forced_engine(Some(true));
+    // Runs on BOTH engines (no forced engine): the VM path guards the
+    // `live_arm_set`-before-`push_frame` ordering (`vm_apply_inner`), and the
+    // tree-walker path guards its twin — `record_tw_entry` reading the callee's
+    // name from the pre-`bind_params` capture, not a `ClosureId` the default
+    // eval's compaction may have staled. The tree-walker half regressed under
+    // `BROOD_VM=0` until that fix; keeping it un-pinned exercises both.
     let mut interp = Interp::new();
     let prog = r#"
         ;; Inflate the shared RUNTIME closures slab with dead `def` versions at LOW
@@ -57,7 +54,6 @@ fn tail_call_into_optional_default_arm_survives_runtime_compaction() {
     let v = interp
         .eval_str(prog)
         .expect("tail-call/optional-default/compaction program errored (use-after-GC?)");
-    set_forced_engine(None);
     assert_eq!(
         interp.print(v),
         "\"result=4243\"",
