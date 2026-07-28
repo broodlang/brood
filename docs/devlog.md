@@ -9616,3 +9616,39 @@ cites "matmul's def'd rows". Its constant-index sibling `inline_vec_ref` still d
 the obvious next candidate; I left it alone because measurement said the rows it would help are
 not bailing (`nbody` 352 ms JIT vs 1112 ms VM, `matmul` 159 vs 1126), so the payoff is
 unproven. Worth doing on evidence, not on symmetry.
+
+## 2026-07-28 (evening) — two JIT deopt cliffs, both real, both NOT worth shipping
+
+Hunting more of the morning's shared-region cliff with `BROOD_DEOPT_TRACE=1` across the weak
+rows. One arm showed up: **`nbody`'s `advance-body` deopts 16 times and is then permanently
+BAILED** to the interpreter — its core physics function. `bintree`, `wordcount`, `pipeline` and
+`nqueens` are clean.
+
+Bisecting a minimal repro found **two** independent per-call deopts, both genuine:
+
+1. **`inline_vec_ref` deopts on non-LOCAL.** The constant-index `(nth bi 0)` on a `def`'d
+   vector-of-vectors — the dynamic-index sibling `vector_ref` already falls back to the FFI
+   instead (its doc even cites "matmul's def'd rows"). The fallback block already existed in
+   `inline_vec_ref`, unreachable, named `dead_ffi`.
+2. **Arithmetic with two type-erased operands guesses `int`.** `emit_prim2` takes the float
+   path only if an operand is *statically* float (or the arm has a float slot); with two
+   `Op::Handle`s — two vector reads — it falls through to `as_int`, which deopts on a `Float`.
+   Per evaluation, with no checkpoint, so the arm re-runs from the top on the VM. In a minimal
+   repro: **~497k deopts over 500k iterations**.
+
+Both were fixed — (2) by dispatching on the runtime tags into a float or int block joined
+through a boxed `Handle`. The repro went **495,751 deopts → 0**, and all six benchmark
+checksums stayed identical to `BROOD_NO_JIT=1`.
+
+**And the suite did not care.** A/B vs `c9d3fac8`, best-of-7 with the movers re-run solo at
+best-of-11: `nbody` **+2.2% worse**, `nqueens` −1.0%, everything else flat. With only fix (1):
+`nbody` +1.4% worse, `sort` +0.7%, the rest flat. So both changes were **reverted** — they cost
+a few instructions on paths where the old guess was right, and buy nothing where it was wrong,
+because the arms that hit the bad case were *already* bailed to the VM, where a deopt is free.
+
+Worth recording rather than re-discovering: **a deopt cliff is only worth closing if the arm
+would otherwise be running native.** `nbody`'s `advance-body` still deopts 16 times after both
+fixes, so its bail has a third cause I did not find; whatever that is, it is upstream of these
+two, and closing them without it changes nothing. The evidence trail (deopt counts per
+construct, the `Prim2SlotSlot SetLocal Prim2SlotInt Prim2SlotInt Prim2` fingerprint) is in this
+entry so the next attempt starts from the third cause, not the first two.
