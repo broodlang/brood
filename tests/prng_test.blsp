@@ -84,11 +84,7 @@
     (is (test/test--failure? (try
                                (do
                                  (test/check-property--loop 100
-                                   (fn (s) (rand-int s 10))
-                                   (fn (x) (< x 5))
-                                   nil
-                                   1
-                                   0)
+                                   (fn (s) (rand-int s 10)) (fn (x) (< x 5)) nil 1 0)
                                  :no-failure)
                                (catch e e))))))
 

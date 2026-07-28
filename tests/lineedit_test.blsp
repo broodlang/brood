@@ -91,25 +91,21 @@
   ;; promoted; these cases pin the contract they depend on.
   (test "an ordinary state shows its configured prompt"
     (assert= (editor/lineedit/lineedit-display-prompt (editor/lineedit/lineedit-init "x> "
-                                                        ""
-                                                        (list)))
+                                                        "" (list)))
       "x> "))
   (test "a searching state shows the reverse-i-search prompt with the query in it"
     (let (searching (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-init "x> "
-                                                       ""
-                                                       (list "(abc)"))
+                                                       "" (list "(abc)"))
                       :ctrl-r))
       (is (includes? (editor/lineedit/lineedit-display-prompt searching)
             "reverse-i-search"))))
   (test "the query typed so far appears in the search prompt"
     (let (typed (fold (fn (st key) (editor/lineedit/lineedit-handle st key))
-                  (editor/lineedit/lineedit-init "x> " "" (list "(abc)"))
-                  (list :ctrl-r "a" "b")))
+                  (editor/lineedit/lineedit-init "x> " "" (list "(abc)")) (list :ctrl-r "a" "b")))
       (is (includes? (editor/lineedit/lineedit-display-prompt typed) "ab"))))
   (test "leaving the search restores the configured prompt"
     (let (state (fold (fn (st key) (editor/lineedit/lineedit-handle st key))
-                  (editor/lineedit/lineedit-init "x> " "" (list "(abc)"))
-                  (list :ctrl-r :ctrl-g)))
+                  (editor/lineedit/lineedit-init "x> " "" (list "(abc)")) (list :ctrl-r :ctrl-g)))
       (assert= (editor/lineedit/lineedit-display-prompt state) "x> "))))
 
 (describe "lineedit/lineedit-handle — extra emacs/readline keys"
@@ -194,15 +190,13 @@
       (assert= (get c :search) nil)))
   (test "Enter accepts the match (keeps it, leaves search)"
     (let (e (fold editor/lineedit/lineedit-handle
-              (lineedit-reverse-search (rs--init) :ctrl-r)
-              (list "r" "e" "d"))
+              (lineedit-reverse-search (rs--init) :ctrl-r) (list "r" "e" "d"))
           a (editor/lineedit/lineedit-handle e :enter))
       (assert= (get a :text) "(reduce + 0 ys)")
       (assert= (get a :search) nil)))
   (test "any other key accepts then replays through the keymap"
     (let (e (fold editor/lineedit/lineedit-handle
-              (lineedit-reverse-search (rs--init) :ctrl-r)
-              (list "r" "e" "d"))
+              (lineedit-reverse-search (rs--init) :ctrl-r) (list "r" "e" "d"))
           a (editor/lineedit/lineedit-handle e :ctrl-a))
       ; accept + beginning-of-line
       (assert= (get a :search) nil)
@@ -216,9 +210,7 @@
   (test "an ambiguous set extends to the common prefix"
     (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "m" "a")) 2))
       (assert= (get (editor/lineedit/lineedit--apply-completion s
-                      0
-                      "ma"
-                      (list "map" "max" "mapcat"))
+                      0 "ma" (list "map" "max" "mapcat"))
                  :text)
         "ma"))))
 

@@ -24,8 +24,8 @@ The oracle is upstream's own expected output in `tests/corpus/gabriel/data/takl.
   (defn shorterp (x y)
     "Whether list `x` is shorter than list `y`."
     (and (not (nil? y))
-         (or (nil? x)
-             (shorterp (rest x) (rest y))))))
+      (or (nil? x)
+        (shorterp (rest x) (rest y))))))
 
 (check-allow :non-tail-recursion
   (defn mas (x y z)
@@ -33,5 +33,4 @@ The oracle is upstream's own expected output in `tests/corpus/gabriel/data/takl.
     (if (not (shorterp y x))
       z
       (mas (mas (rest x) y z)
-           (mas (rest y) z x)
-           (mas (rest z) x y)))))
+        (mas (rest y) z x) (mas (rest z) x y)))))

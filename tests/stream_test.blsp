@@ -190,8 +190,7 @@
   (test "split across chunks"
     (assert= ["hello" "world"]
       (stream/stream-to-vector (stream/stream-lines (stream/stream-from-list ["hel" "lo\n"
-                                                                               "wor"
-                                                                               "ld"])))))
+                                                                               "wor" "ld"])))))
   (test "trailing fragment without newline becomes last line"
     (assert= ["foo" "bar"]
       (stream/stream-to-vector (stream/stream-lines (stream/stream-from-list ["foo\nbar"])))))

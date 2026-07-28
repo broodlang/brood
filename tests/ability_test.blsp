@@ -11,12 +11,12 @@
 
 ;; ---- value polymorphism: dispatch across built-in kinds AND record identities ----
 (defability Size (size [self] :-> int))
-(impl Size :int             (size [n] n))
-(impl Size :string          (size [s] (count s)))
-(impl Size :map             (size [m] (count m)))
+(impl Size :int (size [n] n))
+(impl Size :string (size [s] (count s)))
+(impl Size :map (size [m] (count m)))
 (impl Size ability-test/circle (size [c] (get c :r)))
-(impl Size ability-test/rect   (size [r] (* (get r :w) (get r :h))))
-(impl Size :default         (size [_] -1))
+(impl Size ability-test/rect (size [r] (* (get r :w) (get r :h))))
+(impl Size :default (size [_] -1))
 
 (describe "value dispatch"
   (test "dispatches on a built-in's type-of kind"
@@ -35,8 +35,9 @@
 
 ;; ---- ADR-011: a plain map (even with a :type field) is NEVER rerouted ----
 (describe "nominal identity is opt-in"
+  ; :map impl (count), NOT the circle impl
   (test "a plain map dispatches as :map, not as any record"
-    (assert= (size {:type :circle :r 9}) 2))   ; :map impl (count), NOT the circle impl
+    (assert= (size {:type :circle :r 9}) 2))
   (test "the identity is a module/name keyword captured at definition"
     (assert= (get (circle 1) :__id__) :ability-test/circle))
   (test "a record is still a structural map for get/assoc"
@@ -45,9 +46,9 @@
 
 ;; ---- drivers are values: the "behaviour" job in the SAME mechanism ----
 (defability Store (fetch [self k]))
-(defrecord* pg  (pool))
+(defrecord* pg (pool))
 (defrecord* mem (data))
-(impl Store ability-test/pg  (fetch [db k] (str "pg:" (get db :pool) "/" k)))
+(impl Store ability-test/pg (fetch [db k] (str "pg:" (get db :pool) "/" k)))
 (impl Store ability-test/mem (fetch [db k] (get (get db :data) k)))
 
 (describe "drivers as values"
@@ -121,7 +122,7 @@
 ;; ---- slice 4: sealed abilities record their closed member set (checker uses it) ----
 (defability Shape :sealed [circle rect] (area [self] :-> float))
 (impl Shape ability-test/circle (area [c] (* 3 (get c :r) (get c :r))))
-(impl Shape ability-test/rect   (area [r] (* (get r :w) (get r :h))))
+(impl Shape ability-test/rect (area [r] (* (get r :w) (get r :h))))
 
 (describe "sealed abilities"
   (test "the closed member set is recorded (bare names qualified to this ns)"
@@ -132,8 +133,8 @@
 
 ;; ---- KI-15: a bare impl id qualifies to the record's ns, like :sealed ----
 (defability Kilo (kilo [self] :-> int))
-(impl Kilo circle (kilo [c] 15))   ; BARE `circle` must qualify to :ability-test/circle
-
+; BARE `circle` must qualify to :ability-test/circle
+(impl Kilo circle (kilo [c] 15))
 (describe "impl id qualification (KI-15)"
   (test "a bare record id reaches the value's qualified identity"
     ;; before the fix this registered under :circle and never matched :ability-test/circle

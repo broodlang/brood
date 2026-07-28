@@ -80,8 +80,8 @@
 ;; string on every keystroke. These walk to the index. Every case below uses a
 ;; DECOMPOSED "é" (`e` + U+0301) so codepoint and cluster indices genuinely differ:
 ;; that is the whole point, and a precomposed U+00E9 would silently prove nothing.
-(def gr-s (str "a" "e\u{301}" "👍" "b"))    ; 4 clusters, 5 codepoints
-
+; 4 clusters, 5 codepoints
+(def gr-s (str "a" "e\u{301}" "👍" "b"))
 (describe "grapheme-count / grapheme-at / substring-graphemes"
   (test "cluster count differs from the codepoint count"
     (assert= (grapheme-count gr-s) 4)

@@ -144,8 +144,7 @@ highlights. Used to colour a printed result on an interactive TTY."
              "  ,doc  <name>    docstring + arglist of a function/macro/primitive\n"
              "  ,type <expr>    evaluate <expr> and show its runtime type\n"
              "  ,time <expr>    evaluate <expr> and show elapsed time\n"
-             "  ,clear          clear the screen"
-             "\e[0m")))
+             "  ,clear          clear the screen" "\e[0m")))
 
 (defn repl--meta-doc (name)
   "Print the docstring + arglist for `name` (a function/macro/primitive), or a note."
@@ -214,10 +213,7 @@ innermost frame first (each location is the call site that entered the frame)."
              (cond
                (contains? f :line) (str " ("
                                      (if (contains? f :file) (str (get f :file) ":") "")
-                                     (get f :line)
-                                     ":"
-                                     (get f :col)
-                                     ")")
+                                     (get f :line) ":" (get f :col) ")")
                (contains? f :file) (str " (" (get f :file) ")")
                else "")))
       tr)))
@@ -228,8 +224,7 @@ innermost frame first (each location is the call site that entered the frame)."
 value."
   (if (and (map? e) (contains? e :message))
     (str (if (contains? e :kind) (str (name (get e :kind)) " error") "error")
-      ": "
-      (get e :message)
+      ": " (get e :message)
       (if (contains? e :line)
         (str " (line " (get e :line) ", col " (get e :col) ")")
         "")
@@ -325,9 +320,7 @@ Returns `{:eof false :history h}`."
 so bracket matches light up across lines), then we act on it. Ctrl-D on an empty line
 ends input; Ctrl-C drops the form and re-prompts."
   (let (r (lineedit-read *repl-prompt*
-            ""
-            history
-            {:cont-prompt *repl-cont-prompt* :complete? repl--complete?}))
+            "" history {:cont-prompt *repl-cont-prompt* :complete? repl--complete?}))
     (cond
       (get r :eof) {:eof true :history history}
       (get r :cancel) {:eof false :history history}
@@ -348,9 +341,9 @@ complete, echoing the prompt only when stdout is a TTY. Recurses on an incomplet
         (and (= acc "") (not (repl--content? line 0 (string-length line) false))) {:eof false
                                                                                    :history history}
         else (let (src (str acc line "\n"))
-                (if (= (repl--eval-print src) :more)
-                  (repl--read-eval-piped src history)
-                  {:eof false :history history}))))))
+               (if (= (repl--eval-print src) :more)
+                 (repl--read-eval-piped src history)
+                 {:eof false :history history}))))))
 
 (defn repl--read-eval (interactive acc history)
   "Read one form and act on it, returning `{:eof <bool> :history <list>}`. Interactive

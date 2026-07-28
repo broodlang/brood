@@ -235,29 +235,19 @@
 (describe "format: idempotency"
   (test "idempotent on a representative grab-bag"
     (let (samples (list ""
-                    "(+ 1 2)"
-                    "(defn add (x y) (+ x y))"
-                    ";; comment only"
-                    "(defn long-fn (x y z) (foo) (bar) (baz))"
-                    "'(a b c)"
-                    "(let (a 1 b 2) (+ a b))"
+                    "(+ 1 2)" "(defn add (x y) (+ x y))" ";; comment only"
+                    "(defn long-fn (x y z) (foo) (bar) (baz))" "'(a b c)" "(let (a 1 b 2) (+ a b))"
                     "(cond (= x 1) :one (= x 2) :two else :many)"
                     "(assoc m\n :alpha 1 :beta 2 :gamma 3)"
                     "(receive\n (:stop (cleanup)) ([:go x] (run x)) (after t (tick)))"
-                    "(if (and a b) c d)"
-                    "{:a 1 :b 2}"
-                    "[1 [2 [3 [4]]]]"
+                    "(if (and a b) c d)" "{:a 1 :b 2}" "[1 [2 [3 [4]]]]"
                     ;; comment + string cases that the new describes above cover.
-                    "; trailing\n;; section\n;;; banner\n(def x 1)"
-                    "(def x 1) ; trailing"
-                    "(defn f () 0) ;; nullary"
-                    "(def s \"hello world\")"
-                    "(def s \"a\\tb\\nc\")"
+                    "; trailing\n;; section\n;;; banner\n(def x 1)" "(def x 1) ; trailing"
+                    "(defn f () 0) ;; nullary" "(def s \"hello world\")" "(def s \"a\\tb\\nc\")"
                     "(def doc \"line one\nline two\nline three\")"))
       (fold (fn (_ s)
               (let (once (format-source s) twice (format-source once)) (assert= once twice)))
-        nil
-        samples)))
+        nil samples)))
   (test "the prelude is idempotent (format(format(prelude)) == format(prelude))"
     ;; The prelude is the largest single-file Brood program we have; idempotency
     ;; on it is a high-confidence smoke test of the whole walker.

@@ -307,9 +307,10 @@ for variadic tails."
         ;; symbol it keyed the declaration under, so ask about *that*.
         `(if (bound? (%register-sig '~name '~type))
            (sig! ~name ~type)
-           (error "sig: " '~name " is not defined yet, and BROOD_CONTRACTS=1 makes "
-             "`sig` install a runtime contract (which rebinds the name). Move this "
-             "`(sig " '~name " …)` BELOW the definition, or unset BROOD_CONTRACTS "
+           (error "sig: "
+             '~name " is not defined yet, and BROOD_CONTRACTS=1 makes "
+             "`sig` install a runtime contract (which rebinds the name). Move this " "`(sig " '~name
+             " …)` BELOW the definition, or unset BROOD_CONTRACTS "
              "to use it as a pure declaration."))
         nil)))
 
@@ -424,15 +425,8 @@ arity itself is the static checker's job."
   (when (and (pair? ptypes) (pair? args))
     (unless (type-matches? (first ptypes) (first args))
       (throw (str name
-               ": argument "
-               i
-               " expected "
-               (first ptypes)
-               ", got "
-               (type-of (first args))
-               " ("
-               (pr-str (first args))
-               ")")))
+               ": argument " i " expected " (first ptypes) ", got " (type-of (first args)) " ("
+               (pr-str (first args)) ")")))
     (contract--check-args name (rest ptypes) (rest args) (inc i))))
 
 (defn contract--check-rest (name rtype args)
@@ -440,13 +434,8 @@ arity itself is the static checker's job."
   (when (pair? args)
     (unless (type-matches? rtype (first args))
       (throw (str name
-               ": rest argument expected "
-               rtype
-               ", got "
-               (type-of (first args))
-               " ("
-               (pr-str (first args))
-               ")")))
+               ": rest argument expected " rtype ", got " (type-of (first args)) " ("
+               (pr-str (first args)) ")")))
     (contract--check-rest name rtype (rest args))))
 
 (defn sig--pos (xs x n)
@@ -488,13 +477,8 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
                        (let (~r (~orig ~@params))
                          (unless (type-matches? '~rtype ~r)
                            (throw (str '~name
-                                    ": result expected "
-                                    '~rtype
-                                    ", got "
-                                    (type-of ~r)
-                                    " ("
-                                    (pr-str ~r)
-                                    ")")))
+                                    ": result expected " '~rtype ", got " (type-of ~r) " ("
+                                    (pr-str ~r) ")")))
                          ~r)))))
               ;; variadic: (fixed… & rest-type -> ret)
               (let (fixed-ptypes (take amp-pos ptypes)
@@ -511,13 +495,8 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
                        (let (~r (apply ~orig (append (list ~@fixed-params) ~rest-param)))
                          (unless (type-matches? '~rtype ~r)
                            (throw (str '~name
-                                    ": result expected "
-                                    '~rtype
-                                    ", got "
-                                    (type-of ~r)
-                                    " ("
-                                    (pr-str ~r)
-                                    ")")))
+                                    ": result expected " '~rtype ", got " (type-of ~r) " ("
+                                    (pr-str ~r) ")")))
                          ~r)))))))))))
 
 ;; `and`/`or` short-circuit left-to-right and return the deciding value, with
@@ -562,9 +541,7 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
   (let (orphan (cond--orphan clauses))
     (if (and (not (nil? orphan)) (not (%eq orphan 'else)))
       (error "cond: odd number of clauses — expected test/expression pairs. "
-        "Did you forget an expression for '"
-        (pr-str orphan)
-        "'?")
+        "Did you forget an expression for '" (pr-str orphan) "'?")
       (if (empty? clauses)
         nil
         (let (test (first clauses) expr (first (rest clauses)) more (rest (rest clauses)))
@@ -588,8 +565,7 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 (defn macroexpand--loop (form n)
   (if (= n 0)
     (error "macroexpand: no fixpoint after "
-      macroexpand--max-rounds
-      " rounds (a macro that expands to itself?)")
+      macroexpand--max-rounds " rounds (a macro that expands to itself?)")
     (let (stepped (macroexpand-1 form))
       (if (= stepped form) form (macroexpand--loop stepped (- n 1))))))
 
@@ -664,8 +640,7 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 current element and `acc` is the current accumulator."
     (if (not (string? docstring))
       (error "defseq: third argument must be a docstring string, got "
-        (pr-str docstring)
-        ". Syntax: (defseq name (params...) \"docstring\" step-expr)")
+        (pr-str docstring) ". Syntax: (defseq name (params...) \"docstring\" step-expr)")
       `(defn ~sym (~@params coll#)
          ~docstring
          (letrec (--loop (fn (coll# acc)
@@ -676,13 +651,10 @@ current element and `acc` is the current accumulator."
            (reverse (--loop (seq coll#) nil)))))))
 
 (defseq map
-  (f)
-  "A list of `(f x)` for each `x` in `coll`."
-  (cons (f item) acc))
+  (f) "A list of `(f x)` for each `x` in `coll`." (cons (f item) acc))
 
 (defseq filter
-  (pred)
-  "A list of the items of `coll` for which `(pred x)` is truthy."
+  (pred) "A list of the items of `coll` for which `(pred x)` is truthy."
   (if (pred item) (cons item acc) acc))
 
 (defn mapv (f coll)
@@ -742,8 +714,9 @@ and a set its elements, as everywhere else `seq` applies."
 ;; self-identifying-type-error promise in docs/language.md. `(nth v :k)` is a real
 ;; mistake (usually a map/sequence mix-up), so it must say so.
 (defn nth--bad-index (coll i)
-  (error (str "nth: expected an integer index, got " (name (type-of i)) " (" (pr-str i) ")"
-              " — a vector, list, string or bytes is indexed by position, not by key")))
+  (error (str "nth: expected an integer index, got "
+           (name (type-of i)) " (" (pr-str i) ")"
+           " — a vector, list, string or bytes is indexed by position, not by key")))
 ;; The list arm is also where a NON-collection lands (`(nth 5 0)`), which used to
 ;; surface as `empty?: expected collection, got int (5)` — an internal `nth-list`
 ;; walks through, not the op the caller wrote. Checked once per `nth`, not per step:
@@ -752,7 +725,7 @@ and a set its elements, as everywhere else `seq` applies."
   (if (or (pair? coll) (nil? coll))
     (nth-list coll i d)
     (error (str "nth: expected a collection to index, got "
-                (name (type-of coll)) " (" (pr-str coll) ")"))))
+             (name (type-of coll)) " (" (pr-str coll) ")"))))
 
 (defn nth "The item at index `i` of `coll` (0-based), or `default` (else `nil`) if out of range."
   ;; The fixed 2-arity arm is the hot path (`(nth v i)`): it is VM-eligible
@@ -799,11 +772,12 @@ and a set its elements, as everywhere else `seq` applies."
 ;; "the key is the wrong type".
 (defn get--unanswerable (coll k)
   (if (or (pair? coll) (vector? coll) (bytes? coll) (string? coll))
-    (error (str "get: expected an integer index, got " (name (type-of k)) " (" (pr-str k) ")"
-                " — a vector, list, string or bytes is indexed by position, not by key."
-                " Did you mean one element of it, or `get-in` for a nested key?"))
+    (error (str "get: expected an integer index, got "
+             (name (type-of k)) " (" (pr-str k) ")"
+             " — a vector, list, string or bytes is indexed by position, not by key."
+             " Did you mean one element of it, or `get-in` for a nested key?"))
     (error (str "get: expected a collection (map, set, vector, list, string or bytes), got "
-                (name (type-of coll)) " (" (pr-str coll) ")"))))
+             (name (type-of coll)) " (" (pr-str coll) ")"))))
 
 (defn get "The value at key/index `k` in `coll`, or `default` (else `nil`) if absent.
 Maps look up by key; **a set looks up by membership** — it yields the element
@@ -928,8 +902,7 @@ can.)"
           (if (nil? m)
             acc
             (reduce-kv (fn (a k v) (assoc a k (if (contains? a k) (f (get a k) v) v))) acc m)))
-    {}
-    maps))
+    {} maps))
 
 (defn update (coll k f & args)
   "A collection like `coll` with the value at key/index `k` replaced by
@@ -971,8 +944,7 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
   (cond
     (empty? path) m
     (and (map? m) (contains? m (first path))) (get-in--walk (get m (first path))
-                                                (rest path)
-                                                default)
+                                                (rest path) default)
     else default))
 (defn get-in (m path & default)
   "The value in nested maps `m` at the key sequence `path`, or `default` (else `nil`) if any key along the way is absent. `(get-in m ())` is `m`."
@@ -1206,7 +1178,8 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 (defn some-thread--build (place forms step)
   (if (empty? forms)
     place
-    `(if (nil? ~place) nil
+    `(if (nil? ~place)
+       nil
        (let (~place ~(step place (first forms)))
          ~(some-thread--build place (rest forms) step)))))
 (defmacro some-> (x & forms)
@@ -1288,8 +1261,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 (defn try--class-catch? (clause)
   (let (handler (rest (rest clause)))
     (and (symbol? (second clause))
-      (> (count handler) 1)
-      (symbol? (first handler)))))
+      (> (count handler) 1) (symbol? (first handler)))))
 
 ;; (try body... (catch e handler...)) => (%try (fn () body...) (fn (e) handler...))
 ;; With no catch clause, it's just (do body...).
@@ -1299,7 +1271,8 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
     (if (and (pair? clause) (= (first clause) 'catch))
       (let (init (but-last body) evar (second clause) handler (rest (rest clause)))
         (if (try--class-catch? clause)
-          (error "try: `(catch " (str evar) " " (str (first handler))
+          (error "try: `(catch "
+            (str evar) " " (str (first handler))
             " …)` looks like Clojure's typed catch, which Brood does not have. "
             "`catch` takes ONE bare binding and no exception class: write `(catch "
             (str (first handler)) " …)` and branch on the caught value's shape in the body "
@@ -1312,8 +1285,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
         ;; Fail loud at macro-expansion time so the bug is caught before it silently becomes
         ;; (do body (fn (e) ...)) — a handler that is never installed.
         (error "try: last form is `"
-          (pr-str clause)
-          "` — did you mean `(catch "
+          (pr-str clause) "` — did you mean `(catch "
           (let (params (second clause))
             (if (and (pair? params) (not (nil? params)))
               (str (first params))
@@ -1426,9 +1398,8 @@ its printed form."
 (defn match-not-pattern? (p) (and (pair? p) (= (first p) 'not)))
 (defn match-not-pattern-error (p)
   (error (str "match: `(not …)` is not a pattern — a negative match binds nothing,"
-              " so put the test in a `:when` guard instead:"
-              " (x :when (not " (pr-str (second p)) ") body…)."
-              " (Read as a list pattern it would BIND a variable named `not`.)")))
+           " so put the test in a `:when` guard instead:" " (x :when (not " (pr-str (second p))
+           ") body…)." " (Read as a list pattern it would BIND a variable named `not`.)")))
 
 ;; Every alternative of an `or` must bind the SAME names — otherwise the body could
 ;; reference a name only some alternatives bind, and which one it is depends on the
@@ -1437,9 +1408,9 @@ its printed form."
   (let (name-sets (map (fn (a) (sort (map name (pattern-vars a)))) alts))
     (when (not (every? (fn (ns) (= ns (first name-sets))) name-sets))
       (error (str "match: every alternative of an `(or …)` pattern must bind the same"
-                  " names, got " (pr-str (map (fn (ns) ns) name-sets))
-                  " — a body can't reference a name only some alternatives bind."
-                  " Use separate clauses when the bindings differ.")))))
+               " names, got " (pr-str (map (fn (ns) ns) name-sets))
+               " — a body can't reference a name only some alternatives bind."
+               " Use separate clauses when the bindings differ.")))))
 
 ;; -- expand-time helpers --
 (defn match-member? (x xs)
@@ -1487,8 +1458,9 @@ its printed form."
     ; 'sym self-evaluates to the symbol
     (match-pin? pat) `(if (%eq ~target ~(second pat)) ~success ~fail)
     ; ^expr: match the value of expr
-    (match-stale-pin? pat) (error "match: `~" (pr-str (second pat))
-                             "` is not a pattern — a pin is written `^" (pr-str (second pat))
+    (match-stale-pin? pat) (error "match: `~"
+                             (pr-str (second pat)) "` is not a pattern — a pin is written `^"
+                             (pr-str (second pat))
                              "` (`~` belongs to quasiquote alone). To match the literal"
                              " 2-element list (unquote x), quote the head: ('unquote x).")
     (match-bytes-pattern? pat) (match-compile-bytes (rest pat) target bound success fail)
@@ -1621,8 +1593,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
         spec (match-bytes-int-spec (second seg)))
     (if (nil? spec)
       (error (str "match: unknown bytes segment spec "
-               (pr-str (second seg))
-               " (expected :u8/:i8/:u16[-be/-le]/…/:i64[-be/-le])"))
+               (pr-str (second seg)) " (expected :u8/:i8/:u16[-be/-le]/…/:i64[-be/-le])"))
       (let (w (vector-ref spec 0)
             reader (cond
                      (and (vector-ref spec 1) (vector-ref spec 2)) 'bytes-int-le
@@ -1667,12 +1638,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
     (cond
       ;; (sym :u16) — a typed integer segment (spec keyword in size position)
       (and (pair? seg) (keyword? (second seg))) (match-bytes-typed-seg seg
-                                                  more
-                                                  target
-                                                  off
-                                                  bound
-                                                  success
-                                                  fail)
+                                                  more target off bound success fail)
       ;; (sym n) — bind n bytes as a sub-bytes value; n is an int or an earlier binding
       (pair? seg) (let (s (first seg) szv (gensym "sz"))
                     `(let (~szv ~(second seg))
@@ -1682,11 +1648,8 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
                                    (list s `(subbytes ~target ~off (+ ~off ~szv)))) ~noff
                                (+ ~off ~szv))
                            ~(match-bytes-segs more
-                              target
-                              noff
-                              (if (match-wildcard? s) bound (append bound (list s)))
-                              success
-                              fail))
+                              target noff (if (match-wildcard? s) bound (append bound (list s)))
+                              success fail))
                          ~fail)))
       ;; _ — skip one byte
       (match-wildcard? seg) `(if (< ~off (byte-length ~target))
@@ -1704,11 +1667,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
                               `(if (< ~off (byte-length ~target))
                                  (let (~seg (byte-at ~target ~off) ~noff (+ ~off 1))
                                    ~(match-bytes-segs more
-                                      target
-                                      noff
-                                      (append bound (list seg))
-                                      success
-                                      fail))
+                                      target noff (append bound (list seg)) success fail))
                                  ~fail))
       ;; #b"…" literal — match those exact bytes (count known at expand time)
       (bytes? seg) (let (n (byte-length seg))
@@ -1748,8 +1707,8 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 (defn match-compile-or--chain (alts target bound success fail)
   (if (empty? alts)
     fail
-    (match-compile (first alts) target bound success
-      (match-compile-or--chain (rest alts) target bound success fail))))
+    (match-compile (first alts)
+      target bound success (match-compile-or--chain (rest alts) target bound success fail))))
 
 ;; `(and p q …)`: match every pattern against the SAME value, left to right, so
 ;; later patterns see the names earlier ones bound (a repeated name is an equality
@@ -1757,9 +1716,10 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 (defn match-compile-and (pats target bound success fail)
   (if (empty? pats)
     success
-    (match-compile (first pats) target bound
-      (match-compile-and (rest pats) target
-        (append bound (pattern-vars (first pats))) success fail)
+    (match-compile (first pats)
+      target bound
+      (match-compile-and (rest pats)
+        target (append bound (pattern-vars (first pats))) success fail)
       fail)))
 
 (defn match-compile-seq (pats rest-pat has-rest target bound success fail)
@@ -1773,12 +1733,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
           hd (gensym "hd")
           tl (gensym "tl")
           inner (match-compile-seq (rest pats)
-                  rest-pat
-                  has-rest
-                  tl
-                  (append bound (pattern-vars p))
-                  success
-                  fail)
+                  rest-pat has-rest tl (append bound (pattern-vars p)) success fail)
           head (match-compile p hd bound inner fail))
       `(if (pair? ~target) (let (~hd (first ~target) ~tl (rest ~target)) ~head) ~fail))))
 
@@ -1797,11 +1752,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
     (let (p (first pats)
           el (gensym "el")
           inner (match-compile-velems (rest pats)
-                  target
-                  (inc i)
-                  (append bound (pattern-vars p))
-                  success
-                  fail)
+                  target (inc i) (append bound (pattern-vars p)) success fail)
           this (match-compile p el bound inner fail))
       `(let (~el (vector-ref ~target ~i)) ~this))))
 
@@ -1825,9 +1776,8 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 (defn match-map-check (pat)
   (when (contains? pat :as)
     (error (str "match: a map pattern has no `:as` — capture the whole value with an"
-                " `and` pattern instead: (and " (pr-str (get pat :as))
-                " {…}). (As a plain key, `:as` would test for an `:as` KEY in the"
-                " map.)"))))
+             " `and` pattern instead: (and " (pr-str (get pat :as))
+             " {…}). (As a plain key, `:as` would test for an `:as` KEY in the" " map.)"))))
 
 ;; :keys value is a vector [a b] (or a list); return it as a list of symbols.
 (defn match-map-keys (pat)
@@ -1844,8 +1794,8 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
   (do
     (match-map-check pat)
     (append (match-map-keys pat)
-      (fold (fn (acc kv) (append acc (pattern-vars (second kv)))) nil
-        (match-map-entries pat)))))
+      (fold (fn (acc kv) (append acc (pattern-vars (second kv))))
+        nil (match-map-entries pat)))))
 
 (defn match-compile-map (pat target bound success fail)
   (do
@@ -1858,9 +1808,8 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
     ;;   {:k pat}       — Erlang/Elixir MAP PATTERN: the key must be PRESENT and its
     ;;                    value must match `pat`, else the clause fails.
     `(if (map? ~target)
-       ~(match-compile-map-entries (match-map-entries pat) target bound
-          (match-map-binds (match-map-keys pat) (get pat :or) target success)
-          fail)
+       ~(match-compile-map-entries (match-map-entries pat)
+          target bound (match-map-binds (match-map-keys pat) (get pat :or) target success) fail)
        ~fail)))
 
 ;; Each explicit entry: require the key, bind its value to a temp, match the
@@ -1875,9 +1824,10 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
           v (gensym "mval"))
       `(if (contains? ~target (quote ~k))
          (let (~v (get ~target (quote ~k)))
-           ~(match-compile sub v bound
-              (match-compile-map-entries (rest entries) target
-                (append bound (pattern-vars sub)) success fail)
+           ~(match-compile sub
+              v bound
+              (match-compile-map-entries (rest entries)
+                target (append bound (pattern-vars sub)) success fail)
               fail))
          ~fail))))
 
@@ -2013,12 +1963,12 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
   (cond
     (or (keyword? t) (int? t) (float? t) (decimal? t) (string? t) (bool? t) (nil? t)) t
     (and (pair? t) (= (first t) 'quote)) t
-    (symbol? t) (throw (str "case: the bare symbol test `" t "` would BIND, not compare"
-                            " — write `'" t "` for the literal symbol, or use `match`"
-                            " if you meant to bind it"))
+    (symbol? t) (throw (str "case: the bare symbol test `"
+                         t "` would BIND, not compare" " — write `'" t
+                         "` for the literal symbol, or use `match`" " if you meant to bind it"))
     else (throw (str "case: each test must be a literal (keyword/int/float/decimal/"
-                     "string/bool/nil, or 'symbol), got " (pr-str t)
-                     " — use `match` for destructuring, guards, or alternatives"))))
+                  "string/bool/nil, or 'symbol), got " (pr-str t)
+                  " — use `match` for destructuring, guards, or alternatives"))))
 
 ;; Flat `test result …` pairs → wrapped match clauses; a lone trailing form is the
 ;; default (an `_` clause). Flat pairs match `cond`'s shape, which is where a
@@ -2079,8 +2029,7 @@ match raises `[:match-error :case value patterns]`, exactly as `match` does."
 ;; exit — is handled by `spawn--body-thunk` below, which wraps a symbol as a *call*.)
 (defn spawn--thunk-form? (form)
   (and (list? form)
-    (not (empty? form))
-    (= (first form) 'fn)
+    (not (empty? form)) (= (first form) 'fn)
     (let (params (second form)) (and (list? params) (empty? params)))))
 
 ;; The process-body thunk a `spawn`-family macro wraps its body form in. Three cases,
@@ -2425,8 +2374,11 @@ message already sent stays sent."
 ;; pattern bound. Keeps the :when guard in place, so the match compiler still gates on
 ;; it and the guard still runs exactly once, during the scan.
 (defn receive--result-clause (prep)
-  (let (clause (nth prep 0) vars (nth prep 1) idx (nth prep 2)
-        pat (first clause) more (rest clause))
+  (let (clause (nth prep 0)
+        vars (nth prep 1)
+        idx (nth prep 2)
+        pat (first clause)
+        more (rest clause))
     (if (= (first more) :when)
       `(~pat :when ~(second more) [~idx ~@vars])
       `(~pat [~idx ~@vars]))))
@@ -2468,8 +2420,7 @@ message already sent stays sent."
     nil
     (if (and (pair? (first clauses)) (%eq (first (first clauses)) 'after))
       (error "receive: (after ...) must be the last clause, but it appears before "
-        (count (rest clauses))
-        " more clause(s)")
+        (count (rest clauses)) " more clause(s)")
       (receive--check-after (rest clauses)))))
 
 ;; Split clauses into [real-clauses ms-or-nil timeout-body-or-nil], peeling an
@@ -2665,8 +2616,7 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
     (let (h (quot n 2)
           parts (split-at h coll))
       (merge--runs less?
-        (merge-sort--n less? (nth parts 0) h)
-        (merge-sort--n less? (nth parts 1) (- n h))))))
+        (merge-sort--n less? (nth parts 0) h) (merge-sort--n less? (nth parts 1) (- n h))))))
 (defn merge--runs (less? a b) (merge--acc less? a b nil))
 (defn merge--acc (less? a b acc)
   (cond
@@ -2685,8 +2635,7 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
 ;; onto the reversed accumulator, then reverse once — so we never materialise the
 ;; intermediate list-of-sublists nor spread it through `apply append`.
 (defseq mapcat
-  (f)
-  "Map `f` over `coll` and concatenate the resulting lists into one."
+  (f) "Map `f` over `coll` and concatenate the resulting lists into one."
   (append--onto acc (f item)))
 
 (defn frequencies (coll)
@@ -2871,7 +2820,6 @@ A new chunk starts each time the return value of `f` changes."
 starting with `init`. `(scan + 0 '(1 2 3))` → `(0 1 3 6)`."
   (scan--acc f init (seq coll) (list init)))
 
-
 ;; (zip-with f a b) — map `f` over pairs, stopping at the shorter sequence.
 (defn zip-with--acc (f a b acc)
   (if (or (empty? a) (empty? b))
@@ -2881,7 +2829,6 @@ starting with `init`. `(scan + 0 '(1 2 3))` → `(0 1 3 6)`."
   "Map `f` over corresponding pairs from `a` and `b`, stopping at the shorter
 input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
   (zip-with--acc f (seq a) (seq b) nil))
-
 
 ;; ---- records: named, optionally-typed maps (defrecord — ADR-130) ------------
 ;; A record is a plain immutable map with a positional constructor and one
@@ -2921,8 +2868,7 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
                (list 'sig
                  (defrecord--acc-sym rec fnm)
                  (list (list 'record (keyword (name fnm)) (defrecord--ftype f))
-                   '->
-                   (defrecord--ftype f)))))
+                   '-> (defrecord--ftype f)))))
         fields))))
 
 (defmacro defrecord (rec fields)
@@ -3147,8 +3093,7 @@ iterating for side effects."
     (empty? binds) `(cons ~body ~acc)
     (= (first binds) :when) `(if ~(second binds) ~(for--fold acc (rest (rest binds)) body) ~acc)
     else `(fold (fn (~acc ~(first binds)) ~(for--fold acc (rest (rest binds)) body))
-            ~acc
-            ~(second binds))))
+            ~acc ~(second binds))))
 
 ;; Validate that binding pairs are complete — each variable has a collection, and each
 ;; :when has a guard expression. An odd-count suffix silently produces an empty result
@@ -3174,8 +3119,8 @@ iterating for side effects."
     (for--check-binds binds)
     (let (acc (gensym "acc"))
       `(reverse (let (~acc nil)
-                  ~(for--fold acc (map identity binds)
-                     (if (empty? (rest body)) (first body) (cons 'do body))))))))
+                  ~(for--fold acc
+                     (map identity binds) (if (empty? (rest body)) (first body) (cons 'do body))))))))
 
 ;; (doseq (pat coll) body...) — run `body` for its side effects over each item,
 ;; returning nil. Just `for` run for effect (the result list is discarded). The
@@ -3192,8 +3137,7 @@ iterating for side effects."
   "Run `body` with the bound name set to 0, 1, …, n-1 for side effect; returns `nil`. `bind` is `(var n)`."
   (if (not (and (pair? bind) (pair? (rest bind))))
     (error "dotimes: bind must be (var n), got "
-      (pr-str bind)
-      ". Syntax: (dotimes (i n) body...)")
+      (pr-str bind) ". Syntax: (dotimes (i n) body...)")
     `(do (dotimes--loop ~(second bind) (fn (~(first bind)) ~@body) 0) nil)))
 
 ;; (dolist (x xs) body...) — run `body` for each element of `xs`; returns nil.
@@ -3205,8 +3149,7 @@ iterating for side effects."
   "Run `body` with the bound name set to each element of the collection for side effect; returns `nil`. `bind` is `(var coll)`."
   (if (not (and (pair? bind) (pair? (rest bind))))
     (error "dolist: bind must be (var coll), got "
-      (pr-str bind)
-      ". Syntax: (dolist (x xs) body...)")
+      (pr-str bind) ". Syntax: (dolist (x xs) body...)")
     `(do (dolist--loop ~(second bind) (fn (~(first bind)) ~@body)) nil)))
 
 ;; (bench label expr) — wall-clock timing, in milliseconds (the resolution of
@@ -3240,7 +3183,6 @@ iterating for side effects."
 ;; (stack-safe over long strings); `substring` is O(index), so a full scan is
 ;; O(n²) — fine for the short strings this targets (the rope/buffer engine in M2
 ;; is the home for large-text performance).
-
 
 (defn capitalize (s)
   "Return `s` with the first character upper-cased and the rest lower-cased."
@@ -3290,13 +3232,12 @@ what incremental search rides on (formerly the separate `index-of`)."
       ;; scan would be O(n²) (char indexing is O(index)), which is too slow for
       ;; whole-namespace `doc-search`/`apropos` use. With a `from`, search the suffix
       ;; and re-offset, clamping `from` to `[0, length]`; the empty needle matches at `from`.
-      (string? coll)
-      (if (= start 0)
-        (%str-index-of coll x)
-        (let (n (string-length coll)
-              s0 (max 0 (min n start))
-              rel (%str-index-of (substring coll s0 n) x))
-          (if (< rel 0) -1 (+ s0 rel))))
+      (string? coll) (if (= start 0)
+                       (%str-index-of coll x)
+                       (let (n (string-length coll)
+                             s0 (max 0 (min n start))
+                             rel (%str-index-of (substring coll s0 n) x))
+                         (if (< rel 0) -1 (+ s0 rel))))
       else (index-of--seq-from coll x 0 start))))
 
 (defn index-where--from (pred coll i)
@@ -3418,7 +3359,8 @@ leaves `s` unchanged."
   ;; `read-string` it into a form. Braces nest by `depth` (a map/set literal inside).
   (cond
     (empty? chars) (error "fmt: unterminated '{' in template")
-    (and (= (first chars) "}") (= depth 0)) (fmt--lit (rest chars) nil (cons (read-string expr) parts))
+    (and (= (first chars) "}") (= depth 0)) (fmt--lit (rest chars)
+                                              nil (cons (read-string expr) parts))
     (= (first chars) "{") (fmt--hole (rest chars) (str expr "{") (inc depth) parts)
     (= (first chars) "}") (fmt--hole (rest chars) (str expr "}") (dec depth) parts)
     else (fmt--hole (rest chars) (str expr (first chars)) depth parts)))
@@ -3426,8 +3368,10 @@ leaves `s` unchanged."
   ;; scanning literal text: `buf` = reversed literal chars, `parts` = reversed forms
   (cond
     (empty? chars) (reverse (fmt--flush buf parts))
-    (and (= (first chars) "{") (= (second chars) "{")) (fmt--lit (rest (rest chars)) (cons "{" buf) parts)
-    (and (= (first chars) "}") (= (second chars) "}")) (fmt--lit (rest (rest chars)) (cons "}" buf) parts)
+    (and (= (first chars) "{") (= (second chars) "{")) (fmt--lit (rest (rest chars))
+                                                         (cons "{" buf) parts)
+    (and (= (first chars) "}") (= (second chars) "}")) (fmt--lit (rest (rest chars))
+                                                         (cons "}" buf) parts)
     (= (first chars) "{") (fmt--hole (rest chars) "" 0 (fmt--flush buf parts))
     else (fmt--lit (rest chars) (cons (first chars) buf) parts)))
 (defmacro fmt (template)
@@ -3467,10 +3411,7 @@ leaves `s` unchanged."
     (= (char-at fmt i) "s") (format--loop fmt (inc i) n (rest args) (str acc (str (first args))))
     (= (char-at fmt i) "d") (format--loop fmt (inc i) n (rest args) (str acc (str (first args))))
     (= (char-at fmt i) "f") (format--loop fmt
-                              (inc i)
-                              n
-                              (rest args)
-                              (str acc (to-fixed (first args) 6)))
+                              (inc i) n (rest args) (str acc (to-fixed (first args) 6)))
     (= (char-at fmt i) ".") (format--prec fmt (inc i) n args acc 0)
     else (error (str "format: unrecognized specifier '%" (char-at fmt i) "' at column " i))))
 
@@ -3479,17 +3420,12 @@ leaves `s` unchanged."
   (cond
     (>= i n) (error "format: unterminated %.Nf specifier")
     (= (char-at fmt i) "f") (format--loop fmt
-                              (inc i)
-                              n
-                              (rest args)
-                              (str acc (to-fixed (first args) p)))
+                              (inc i) n (rest args) (str acc (to-fixed (first args) p)))
     else (let (d (string->number (char-at fmt i)))
            (if (and (int? d) (>= d 0) (<= d 9))
              (format--prec fmt (inc i) n args acc (+ (* p 10) d))
              (error (str "format: expected digit or 'f' after '.' in specifier, got '"
-                      (char-at fmt i)
-                      "' at column "
-                      i))))))
+                      (char-at fmt i) "' at column " i))))))
 
 ;; ---- strings & paths --------------------------------------------------------
 ;; Helpers over `substring` (char-indexed, like `string-length`). Generic enough
@@ -3602,8 +3538,7 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
     (let (s (rand--step state)
           i (rem s (count remaining)))
       (shuffle--acc s
-        (append (take i remaining) (drop (inc i) remaining))
-        (cons (nth remaining i) acc)))))
+        (append (take i remaining) (drop (inc i) remaining)) (cons (nth remaining i) acc)))))
 
 (defn shuffle (seed coll)
   "Returns `[shuffled next-seed]`: the items of `coll` as a list in uniformly random order (Fisher–Yates)."
@@ -3733,8 +3668,9 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
         opts (rest (rest clause))
         marker (first opts))
     (when (and marker (not (= marker :only)))
-      (error "defmodule: unknown (:use " mod " " marker " …) marker — the only import "
-        "filter is :only, as `(:use " mod " :only [a b])`"))
+      (error "defmodule: unknown (:use "
+        mod " " marker " …) marker — the only import " "filter is :only, as `(:use " mod
+        " :only [a b])`"))
     (let (subset (if (= marker :only) (second opts) nil))
       (list (list 'require (list 'quote mod))
         (list '%refer (list 'quote mod) (list 'quote subset))))))
@@ -3754,8 +3690,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 (defn defmodule--internals-clause (clause)
   (let (mod (second clause))
     (list (list 'require (list 'quote mod))
-      (list '%refer (list 'quote mod) nil)
-      (list '%grant-internals (list 'quote mod)))))
+      (list '%refer (list 'quote mod) nil) (list '%grant-internals (list 'quote mod)))))
 
 (defn defmodule--internals-forms (clauses)
   (apply append
@@ -3812,11 +3747,10 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 
 (defn defmodule--check-clause (clause)
   (if (and (pair? clause)
-        (keyword? (first clause))
-        (includes? defmodule--clause-heads (first clause)))
+        (keyword? (first clause)) (includes? defmodule--clause-heads (first clause)))
     clause
-    (error "defmodule: unrecognised header form " (pr-str clause)
-      " — a `defmodule` header takes only (:use mod [:only [names]]),"
+    (error "defmodule: unrecognised header form "
+      (pr-str clause) " — a `defmodule` header takes only (:use mod [:only [names]]),"
       " (:use-internals mod), (:alias mod [:as short]), and (:implements Protocol)."
       " Check the spelling;"
       " Clojure's `(:require …)` is not a Brood clause (`:use` both loads and refers).")))

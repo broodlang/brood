@@ -141,14 +141,12 @@
                     ; multibyte edit
                     "café = 12\n"
                     ; larger change
-                    "def f\n  café\nend\n"
-                    "def f\n  café\nend\n")
+                    "def f\n  café\nend\n" "def f\n  café\nend\n")
             ok (reduce (fn (acc s)
                          (and acc
                            (= (tree-sitter-reparse k s :ruby)
                              (tree-sitter-parse s :ruby))))
-                 true
-                 edits))
+                 true edits))
         (is ok)
         ;; forget drops the buffer's cached tree and reports the count.
         (assert= (tree-sitter-forget k) 1)

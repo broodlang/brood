@@ -42,8 +42,7 @@
     ; symbol
     'symbol
     ; bool
-    true
-    false
+    true false
     ; nil
     nil
     ; pair list
@@ -177,8 +176,7 @@
                  :depth depth
                  :data [v (str "level-" depth) depth]
                  :children (list (nest-value 42 (- depth 1))
-                             (nest-value "leaf" (- depth 1))
-                             (nest-value [1 2 3] (- depth 1)))}
+                             (nest-value "leaf" (- depth 1)) (nest-value [1 2 3] (- depth 1)))}
       (- depth 1))))
 
 ;; This will loop! `nest-value` passes v through unchanged when depth > 0,

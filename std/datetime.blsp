@@ -51,8 +51,7 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
         m+ (if (> month 2) (- month 3) (+ month 9))
         doy (+ (dt--fdiv (+ (* 153 m+) 2) 5) (- day 1))
         doe (+ (* yoe 365)
-              (- (dt--fdiv yoe 4) (dt--fdiv yoe 100))
-              doy))
+              (- (dt--fdiv yoe 4) (dt--fdiv yoe 100)) doy))
     (- (+ (* era 146097) doe) 719468)))
 
 ;; ---- constructors -----------------------------------------------------------
@@ -99,8 +98,7 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
   "Convert a UTC datetime (or date) map to Unix epoch milliseconds."
   (let (days (dt--ymd->days (get dt :year) (get dt :month) (get dt :day))
         time-s (+ (* (get dt :hour 0) 3600)
-                 (* (get dt :minute 0) 60)
-                 (get dt :second 0))
+                 (* (get dt :minute 0) 60) (get dt :second 0))
         ms-val (get dt :ms 0))
     (+ (* (+ (* days 86400) time-s) 1000) ms-val)))
 
@@ -153,19 +151,12 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
 (defn date->iso8601 (d)
   "Format as \"YYYY-MM-DD\"."
   (str (dt--zero-pad (get d :year) 4)
-    "-"
-    (dt--zero-pad (get d :month) 2)
-    "-"
-    (dt--zero-pad (get d :day) 2)))
+    "-" (dt--zero-pad (get d :month) 2) "-" (dt--zero-pad (get d :day) 2)))
 
 (defn time->iso8601 (t)
   "Format as \"HH:MM:SS.mmm\"."
   (str (dt--zero-pad (get t :hour 0) 2)
-    ":"
-    (dt--zero-pad (get t :minute 0) 2)
-    ":"
-    (dt--zero-pad (get t :second 0) 2)
-    "."
+    ":" (dt--zero-pad (get t :minute 0) 2) ":" (dt--zero-pad (get t :second 0) 2) "."
     (dt--zero-pad (get t :ms 0) 3)))
 
 (defn dt->iso8601 (dt)
@@ -190,10 +181,7 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
     (let (c (char-at fmt i))
       (if (and (= c "%") (< (+ i 1) n))
         (dt--fmt-loop dt
-          fmt
-          (+ i 2)
-          n
-          (str acc (dt--fmt-code dt (char-at fmt (+ i 1)))))
+          fmt (+ i 2) n (str acc (dt--fmt-code dt (char-at fmt (+ i 1)))))
         (dt--fmt-loop dt fmt (+ i 1) n (str acc c))))))
 
 (defn dt-format (dt fmt)

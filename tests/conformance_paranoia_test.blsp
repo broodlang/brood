@@ -32,11 +32,14 @@
 ;; division by zero (error E0040, with a hint) rather than returning IEEE 754's infinity,
 ;; so `(/ 1.0 0.0)` is not available as a constructor here. `bits->float` is — which is
 ;; one of the things that primitive is for. Pinned as a deviation below.
-(defn pa--inf () (bits->float 9218868437227405312))    ; 7FF0000000000000
-(defn pa--neg-inf () (bits->float 18442240474082181120)) ; FFF0000000000000
-(defn pa--qnan () (bits->float 9221120237041090560))   ; 7FF8000000000000
-(defn pa--max-finite () (bits->float 9218868437227405311)) ; 7FEFFFFFFFFFFFFF
-
+; 7FF0000000000000
+(defn pa--inf () (bits->float 9218868437227405312))
+; FFF0000000000000
+(defn pa--neg-inf () (bits->float 18442240474082181120))
+; 7FF8000000000000
+(defn pa--qnan () (bits->float 9221120237041090560))
+; 7FEFFFFFFFFFFFFF
+(defn pa--max-finite () (bits->float 9218868437227405311))
 ;; ---- deriving the machine's properties, Paranoia-style ------------------------
 ;; The point of deriving rather than hardcoding: the derivation itself is the test. If
 ;; `radix` came back 10, or `precision` 24, the arithmetic would not be the binary64 the
@@ -90,7 +93,9 @@
 
 (defn pa--smallest-positive () (pa--tiny--acc 1.0))
 
-(describe "Paranoia: the derived machine properties" :tags [:conformance]
+(describe "Paranoia: the derived machine properties"
+  :tags
+  [:conformance]
 
   ;; The derivations must agree with binary64. Anything else means the arithmetic under
   ;; test is not what the rest of this file assumes.
@@ -109,9 +114,11 @@
   (test "epsilon agrees with the bit pattern"
     ;; independent confirmation via reinterpretation: 1.0's successor minus 1.0
     (assert= (pa--epsilon)
-             (- (bits->float (+ (float->bits 1.0) 1)) 1.0))))
+      (- (bits->float (+ (float->bits 1.0) 1)) 1.0))))
 
-(describe "Paranoia: guard digits and rounding" :tags [:conformance]
+(describe "Paranoia: guard digits and rounding"
+  :tags
+  [:conformance]
 
   ;; A missing guard digit is the classic hardware defect Paranoia was written to catch:
   ;; `(1 + eps) - 1` collapses to 0 on a machine that truncates the subtraction.
@@ -143,7 +150,9 @@
       (assert= (* x 1.0) x)
       (assert= (/ x 1.0) x))))
 
-(describe "Paranoia: exact integer arithmetic in the float domain" :tags [:conformance]
+(describe "Paranoia: exact integer arithmetic in the float domain"
+  :tags
+  [:conformance]
 
   ;; Every integer up to 2^53 is exactly representable; the boundary is where it stops.
   (test "integers below 2^53 are exact"
@@ -165,7 +174,9 @@
     (assert= (- 5.0 2) 3.0)
     (assert= (/ 6.0 3) 2.0)))
 
-(describe "Paranoia: the exponent range" :tags [:conformance]
+(describe "Paranoia: the exponent range"
+  :tags
+  [:conformance]
 
   ;; Derived, not asserted from a constant: halving from 1.0 must walk all the way down
   ;; to the smallest subnormal. A machine that flushed subnormals to zero would stop at
@@ -203,7 +214,9 @@
     ;; and one step past it is infinity
     (assert= (bits->float (+ (float->bits (pa--max-finite)) 1)) (pa--inf))))
 
-(describe "Paranoia: square root" :tags [:conformance]
+(describe "Paranoia: square root"
+  :tags
+  [:conformance]
 
   (test "sqrt is exact on perfect squares"
     (dolist (n [0.0 1.0 4.0 9.0 16.0 100.0 1048576.0])
@@ -223,7 +236,9 @@
     (is (> (sqrt (pow 2.0 -1074)) 0.0))
     (assert= (sqrt (pow 2.0 -1074)) (sqrt (bits->float 1)))))
 
-(describe "Paranoia: comparison and sign laws" :tags [:conformance]
+(describe "Paranoia: comparison and sign laws"
+  :tags
+  [:conformance]
 
   (test "the ordering is a total order"
     (dolist (p [[1.0 2.0] [-2.0 -1.0] [-1.0 1.0] [0.0 1.0e-300] [1.0e300 (pa--inf)]])

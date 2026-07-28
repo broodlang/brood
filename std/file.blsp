@@ -61,8 +61,7 @@ primitives. The kernel also provides the always-available file primitives
     (fold (fn (acc e)
             (let (p (path-join dir e))
               (if (dir? p) (append-two (walk-files p) acc) (cons p acc))))
-      nil
-      (list-dir dir))))
+      nil (list-dir dir))))
 
 ;; --- path helpers (complement prelude path-join / path-basename / parent-dir)
 (defn file--last-dot (s i)

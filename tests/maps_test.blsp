@@ -301,11 +301,12 @@
 (describe "get / nth name themselves when they cannot answer"
   (test "a non-integer key on an integer-indexed collection is a get error"
     ;; the classic mistake: `deps` (a list of maps) where `dep` (one map) was meant
+    ; the old leaked `-`/`>=` wording
     (let (msg (try (get (list {:name "a"}) :name) (catch e (error-message e))))
       (is (includes? msg "get:"))
       (is (includes? msg "integer index"))
       (is (includes? msg "keyword"))
-      (refute (includes? msg "expected number")))   ; the old leaked `-`/`>=` wording
+      (refute (includes? msg "expected number")))
     (assert-error (get [1 2] :name))
     (assert-error (get (bytes 1 2) :name)))
   (test "a keyword key on a string is an ERROR now, not a silent nil"
@@ -321,6 +322,7 @@
     (assert-error (get [1 2] :name :dflt))
     (assert-error (get "s" :name :dflt))
     (assert= (get [1 2] 9 :dflt) :dflt))
+  ; the old leaked `empty?` wording
   (test "nth names itself too — it was the source of the leaked messages"
     (let (msg (try (nth [1 2] :k) (catch e (error-message e))))
       (is (includes? msg "nth:"))
@@ -330,7 +332,7 @@
     (let (msg (try (nth 5 0) (catch e (error-message e))))
       (is (includes? msg "nth:"))
       (is (includes? msg "collection"))
-      (refute (includes? msg "empty?"))))   ; the old leaked `empty?` wording
+      (refute (includes? msg "empty?"))))
   (test "every valid shape is untouched by the new checks"
     (assert= (get {:a 1} :a) 1)
     (assert= (get [10 20] 1) 20)

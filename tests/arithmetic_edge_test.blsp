@@ -61,8 +61,7 @@
     (is (< 1 1.5))
     (is
       (<
-        1M
-        2))
+        1M 2))
     (is (<= 2 2.0)))
   (test "bigint vs float comparison stays correct (no precision flip)"
     ; 1e20 is not < 1.5

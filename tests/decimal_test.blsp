@@ -51,8 +51,7 @@
     ; different types
     (refute
       (=
-        1.5M
-        1.5))
+        1.5M 1.5))
     (is
       (=
         (decimal->float
@@ -76,41 +75,35 @@
     (is
       (=
         (+
-          0.1M
-          0.2M)
+          0.1M 0.2M)
         0.3M)))
   (test "multiplication"
     (is
       (=
         (*
-          2M
-          3M)
+          2M 3M)
         6M))
     (is
       (=
         (*
-          1.5M
-          2M)
+          1.5M 2M)
         3.0M)))
   (test "subtraction"
     (is
       (=
         (-
-          1.00M
-          0.99M)
+          1.00M 0.99M)
         0.01M)))
   (test "division"
     (is
       (=
         (/
-          10M
-          4M)
+          10M 4M)
         2.5M))
     (is
       (=
         (/
-          1M
-          8M)
+          1M 8M)
         0.125M)))
   (test "division by zero errors (not a panic)"
     (is
@@ -118,8 +111,7 @@
         (first
           (try
             (/
-              1M
-              0M)
+              1M 0M)
             (catch _ [:error])))
         :error))))
 
@@ -160,34 +152,26 @@
   (test "comparisons across int / decimal"
     (is
       (<
-        1.5M
-        2M))
+        1.5M 2M))
     ; decimal vs int
     (is
       (<
-        1.5M
-        2))
+        1.5M 2))
     (is
       (<=
-        2.0M
-        2M))
+        2.0M 2M))
     (is
       (>
-        3M
-        2.5M))
+        3M 2.5M))
     (is
       (=
         (max
-          1M
-          2.5M
-          2M)
+          1M 2.5M 2M)
         2.5M))
     (is
       (=
         (min
-          1.5M
-          1M
-          2M)
+          1.5M 1M 2M)
         1M))))
 
 (describe "decimal: construction"
@@ -214,16 +198,13 @@
   (test "1.5M == 1.50M (numerically equal regardless of scale)"
     (is
       (=
-        1.5M
-        1.50M))
+        1.5M 1.50M))
     (is
       (=
-        0.30M
-        0.3M))
+        0.30M 0.3M))
     (is
       (=
-        100M
-        100.00M)))
+        100M 100.00M)))
   (test "equal decimals hash equal (work as the same map key)"
     (let (m (assoc {}
               1.5M :a))

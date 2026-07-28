@@ -57,16 +57,9 @@
     (= i 0) (diff--backtrack table a b 0 (- j 1) (cons [:insert (nth b (- j 1))] acc))
     (= j 0) (diff--backtrack table a b (- i 1) 0 (cons [:delete (nth a (- i 1))] acc))
     (= (nth a (- i 1)) (nth b (- j 1))) (diff--backtrack table
-                                          a
-                                          b
-                                          (- i 1)
-                                          (- j 1)
-                                          (cons [:keep (nth a (- i 1))] acc))
+                                          a b (- i 1) (- j 1) (cons [:keep (nth a (- i 1))] acc))
     (>= (nth (nth table (- i 1)) j) (nth (nth table i) (- j 1))) (diff--backtrack table
-                                                                   a
-                                                                   b
-                                                                   (- i 1)
-                                                                   j
+                                                                   a b (- i 1) j
                                                                    (cons [:delete (nth a (- i 1))]
                                                                      acc))
     else (diff--backtrack table a b i (- j 1) (cons [:insert (nth b (- j 1))] acc))))
@@ -102,8 +95,7 @@ Returns `{:keeps n :deletes n :inserts n}`."
               (= tag :keep) (assoc acc :keeps (+ (get acc :keeps) 1))
               (= tag :delete) (assoc acc :deletes (+ (get acc :deletes) 1))
               else (assoc acc :inserts (+ (get acc :inserts) 1)))))
-    {:keeps 0 :deletes 0 :inserts 0}
-    ops))
+    {:keeps 0 :deletes 0 :inserts 0} ops))
 
 (defn diff-patch (a ops)
   "Apply diff `ops` to sequence `a`, producing sequence `b`. `a` is provided

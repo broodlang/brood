@@ -27,23 +27,8 @@ case-insensitively), and quoted-string arguments. Pure, so independently testabl
 ;; this after `upper`-casing, so lowercase / mixed case still highlights).
 (def dk--instructions
   (list "FROM"
-    "RUN"
-    "CMD"
-    "LABEL"
-    "MAINTAINER"
-    "EXPOSE"
-    "ENV"
-    "ADD"
-    "COPY"
-    "ENTRYPOINT"
-    "VOLUME"
-    "USER"
-    "WORKDIR"
-    "ARG"
-    "ONBUILD"
-    "STOPSIGNAL"
-    "HEALTHCHECK"
-    "SHELL"))
+    "RUN" "CMD" "LABEL" "MAINTAINER" "EXPOSE" "ENV" "ADD" "COPY" "ENTRYPOINT" "VOLUME" "USER"
+    "WORKDIR" "ARG" "ONBUILD" "STOPSIGNAL" "HEALTHCHECK" "SHELL"))
 
 ;; ---- scanning helpers -------------------------------------------------------
 
@@ -70,9 +55,7 @@ each consumed whole so spans stay non-overlapping; returns them ascending."
                                                                   close (dk--find line (inc i) n q)
                                                                   e (if (< close 0) n (inc close)))
                                                               (dk--strings line
-                                                                base
-                                                                e
-                                                                n
+                                                                base e n
                                                                 (cons [(+ base i) (+ base e)
                                                                         dk-face-string]
                                                                   acc)))
@@ -88,11 +71,11 @@ leading instruction keyword (when the first word is one) plus quoted-string args
       (>= lead n) '()
       (= (char-at line lead) "#") (list [(+ base lead) (+ base n) dk-face-comment])
       else (let (we (dk--word-end line lead n)
-                  word (substring line lead we))
-              (if (member? (upper word) dk--instructions)
-                (cons [(+ base lead) (+ base we) dk-face-instruction]
-                  (dk--strings line base we n '()))
-                (dk--strings line base lead n '()))))))
+                 word (substring line lead we))
+             (if (member? (upper word) dk--instructions)
+               (cons [(+ base lead) (+ base we) dk-face-instruction]
+                 (dk--strings line base we n '()))
+               (dk--strings line base lead n '()))))))
 
 (defn dk--lex (src i n acc)
   (if (>= i n)

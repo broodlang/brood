@@ -59,8 +59,9 @@
         l (cy--sha-scan algo (rest lines) (string->number l) msg ran bad)
         m (cy--sha-scan algo (rest lines) len m ran bad)
         d (let (got (cy--sha-digest algo (cy--msg-bytes len msg)))
-            (cy--sha-scan algo (rest lines) len msg (inc ran)
-                          (if (= got (lower d)) bad (cons [algo len (lower d) got] bad))))
+            (cy--sha-scan algo
+              (rest lines) len msg (inc ran)
+              (if (= got (lower d)) bad (cons [algo len (lower d) got] bad))))
         else (cy--sha-scan algo (rest lines) len msg ran bad)))))
 
 (defn cy--sha-file (algo name)
@@ -96,19 +97,19 @@
         t (cy--hmac-scan (rest lines) algo (string->number t) key msg ran skipped bad)
         k (cy--hmac-scan (rest lines) algo tlen k msg ran skipped bad)
         m (cy--hmac-scan (rest lines) algo tlen key m ran skipped bad)
-        mac
-        (if (nil? algo)
-          ;; an [L=28] (SHA-224) section — no target in Brood
-          (cy--hmac-scan (rest lines) algo tlen key msg ran (inc skipped) bad)
-          (let (got (cy--hmac-mac algo
-                                  (encoding/hex-decode-bytes key)
-                                  (encoding/hex-decode-bytes msg)
-                                  tlen))
-            (cy--hmac-scan (rest lines) algo tlen key msg (inc ran) skipped
-                           (if (= got (lower mac)) bad (cons [algo tlen (lower mac) got] bad)))))
+        mac (if (nil? algo)
+              ;; an [L=28] (SHA-224) section — no target in Brood
+              (cy--hmac-scan (rest lines) algo tlen key msg ran (inc skipped) bad)
+              (let (got (cy--hmac-mac algo
+                          (encoding/hex-decode-bytes key) (encoding/hex-decode-bytes msg) tlen))
+                (cy--hmac-scan (rest lines)
+                  algo tlen key msg (inc ran) skipped
+                  (if (= got (lower mac)) bad (cons [algo tlen (lower mac) got] bad)))))
         else (cy--hmac-scan (rest lines) algo tlen key msg ran skipped bad)))))
 
-(describe "NIST CAVP: SHA byte vectors" :tags [:conformance]
+(describe "NIST CAVP: SHA byte vectors"
+  :tags
+  [:conformance]
 
   (test "the corpus is present"
     (is (corpus-present? "crypto"))
@@ -139,11 +140,12 @@
       (is (> ran 5))
       (assert= (take 3 bad) ()))))
 
-(describe "NIST CAVP: HMAC vectors" :tags [:conformance :slow]
+(describe "NIST CAVP: HMAC vectors"
+  :tags
+  [:conformance :slow]
 
   (test "every HMAC case for a digest Brood exposes"
-    (let ([ran skipped bad]
-          (cy--hmac-scan (corpus-lines (cy--file "HMAC.rsp")) nil 0 "" "" 0 0 nil))
+    (let ([ran skipped bad] (cy--hmac-scan (corpus-lines (cy--file "HMAC.rsp")) nil 0 "" "" 0 0 nil))
       ;; ~1,575 cases across five digest sizes; the SHA-224 fifth has no target here, so
       ;; roughly four fifths run. Both counts asserted so a parser change that silently
       ;; stops running cases is caught rather than reading as a pass.
@@ -154,25 +156,27 @@
 ;; The published vectors everyone knows, spelled out — a failure here is legible without
 ;; opening a 839 KB .rsp, and they pin the string-input wrappers the .rsp files never
 ;; touch (the .rsp path is all bytes).
-(describe "the canonical published digests" :tags [:conformance]
+(describe "the canonical published digests"
+  :tags
+  [:conformance]
 
   (test "the empty-input digests"
     (assert= (hash/sha1 "") "da39a3ee5e6b4b0d3255bfef95601890afd80709")
     (assert= (hash/sha256 "")
-             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
     (assert= (hash/md5 "") "d41d8cd98f00b204e9800998ecf8427e"))
 
   (test "\"abc\" — the FIPS 180-4 worked example"
     (assert= (hash/sha1 "abc") "a9993e364706816aba3e25717850c26c9cd0d89d")
     (assert= (hash/sha256 "abc")
-             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"))
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"))
 
   (test "RFC 4231 §4.2 — HMAC-SHA-256 test case 1"
     ;; key = 20 bytes of 0x0b, data = "Hi There"
     (assert= (hash/hmac-sha256 (utf8-bytes->string (encoding/hex-decode-bytes "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"))
-                               "Hi There")
-             "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"))
+               "Hi There")
+      "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"))
 
   (test "RFC 4231 §4.3 — HMAC-SHA-256 test case 2 (\"Jefe\")"
     (assert= (hash/hmac-sha256 "Jefe" "what do ya want for nothing?")
-             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")))
+      "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")))

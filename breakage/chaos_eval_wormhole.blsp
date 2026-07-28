@@ -61,8 +61,7 @@
   (fold (fn (acc i)
           (let (fn-name (symbol (str "chaos-fn-" i)))
             (+ acc ((eval fn-name) i))))
-    0
-    (range 1000)))
+    0 (range 1000)))
 
 (println "sum of chaos-fn-N(N):" fn-sum)
 (println "expected 999000:" (= 999000 fn-sum))
@@ -72,8 +71,7 @@
 ;; Build a source string for a long `do` block with 500 `def` forms
 (defn make-def-src (n)
   (str "(do "
-    (join " " (map (fn (i) (str "(def chaos-var-" i " " (* i i) ")")) (range n)))
-    ")"))
+    (join " " (map (fn (i) (str "(def chaos-var-" i " " (* i i) ")")) (range n))) ")"))
 
 (def big-do-src (make-def-src 500))
 (println "big-do-src length:" (string-length big-do-src))

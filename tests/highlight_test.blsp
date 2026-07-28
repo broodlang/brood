@@ -16,9 +16,7 @@
   (test "tokens carry [start end kind text], whitespace skipped"
     (assert= (scan-tokens "(map 42 :k)")
       [[0 1 :open "("] [1 4 :symbol "map"]
-        [5 7 :number "42"]
-        [8 10 :keyword ":k"]
-        [10 11 :close ")"]]))
+        [5 7 :number "42"] [8 10 :keyword ":k"] [10 11 :close ")"]]))
   (test "strings honour escapes; comments run to end of input"
     (assert= (scan-tokens "\"a\\\"b\" ; c")
       [[0 6 :string "\"a\\\"b\""] [7 10 :comment "; c"]]))
@@ -76,10 +74,7 @@
   (test "chunks cover the whole line, coalescing default runs"
     (assert= (highlight-chunks "(+ 1)" 0 "(+ 1)" '())
       (list ["(" nil]
-        ["+" hl-face-function]
-        [" " nil]
-        ["1" hl-face-number]
-        [")" nil])))
+        ["+" hl-face-function] [" " nil] ["1" hl-face-number] [")" nil])))
   (test "an empty line yields no chunks"
     (assert= (highlight-chunks "" 0 "" '()) '())))
 
@@ -107,8 +102,7 @@
   (test "a covering range splits a run and merges on top of the span face"
     (assert= (fontify-runs "abc" 0 (list [0 3 {:fg :green}]) (list [1 2 {:reverse true}]))
       (list ["a" {:fg :green}]
-        ["b" {:fg :green :reverse true}]
-        ["c" {:fg :green}])))
+        ["b" {:fg :green :reverse true}] ["c" {:fg :green}])))
   (test "base offsets span / range lookups into buffer coordinates"
     ;; text "bc" begins at buffer offset 1, so the [1 2 …] span faces only "b"
     (assert= (fontify-runs "bc" 1 (list [1 2 hl-face-number]) '())
@@ -137,8 +131,7 @@
     (assert-error (span-runs "abc" 9223372036854775807 (list [0 1 {:fg :red}]))))
   (test "a large-but-non-overflowing base still tiles correctly"
     (assert= (span-runs "abc"
-               9223372036854775800
-               (list [9223372036854775801 9223372036854775806 {:fg :red}]))
+               9223372036854775800 (list [9223372036854775801 9223372036854775806 {:fg :red}]))
       (list ["a" nil] ["bc" {:fg :red}]))))
 
 (describe "special-form?"

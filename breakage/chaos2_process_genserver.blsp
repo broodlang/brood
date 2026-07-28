@@ -59,9 +59,7 @@
   (receive
     ([:request reply-to payload]
       ;; Simulate delay: 200ms
-      (receive (_ :ok) (after 200 :ok))
-      (send reply-to [:response payload])
-      (slow-server))
+      (receive (_ :ok) (after 200 :ok)) (send reply-to [:response payload]) (slow-server))
     (:stop :done)))
 
 (defn call-with-retry (server payload max-retries timeout-ms)
@@ -174,8 +172,7 @@
       server (spawn (map-server {})))
   ;; Populate: 10k entries
   (doseq (i (range 10000))
-    (send server [:put i (* i i) (self)])
-    (receive (:ok :ok) (after 1000 :timeout)))
+    (send server [:put i (* i i) (self)]) (receive (:ok :ok) (after 1000 :timeout)))
 
   ;; 50 concurrent readers
   (dotimes (i 50)

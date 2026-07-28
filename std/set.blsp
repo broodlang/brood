@@ -50,4 +50,3 @@ set). Duplicates collapse: `(set [1 1 2]) ⇒ #{1 2}`."
   "True when every element of `a` is also in `b`."
   (fold (fn (ok x) (if ok (contains? b x) false)) true a))
 (sig subset? (set set -> bool))
-

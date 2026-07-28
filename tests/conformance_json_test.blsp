@@ -43,19 +43,18 @@
 (defn js--scan (files kind want oks rejects wrong)
   (cond
     (nil? files) [oks rejects (reverse wrong)]
-    (not (= (js--kind (first files)) kind))
-    (js--scan (rest files) kind want oks rejects wrong)
-    else
-    (let (v (js--verdict (first files))
-          ok (= v :ok))
-      (js--scan (rest files) kind want
-                (if ok (inc oks) oks)
-                (if ok rejects (inc rejects))
-                (if (or (nil? want) (= v want))
-                  wrong
-                  (cons (path-basename (first files)) wrong))))))
+    (not (= (js--kind (first files)) kind)) (js--scan (rest files) kind want oks rejects wrong)
+    else (let (v (js--verdict (first files))
+               ok (= v :ok))
+           (js--scan (rest files)
+             kind want (if ok (inc oks) oks) (if ok rejects (inc rejects))
+             (if (or (nil? want) (= v want))
+               wrong
+               (cons (path-basename (first files)) wrong))))))
 
-(describe "JSONTestSuite: RFC 8259 accept/reject" :tags [:conformance]
+(describe "JSONTestSuite: RFC 8259 accept/reject"
+  :tags
+  [:conformance]
 
   (test "the corpus is present"
     (is (corpus-present? "json"))
@@ -80,10 +79,11 @@
       (assert= wrong ())
       (is (> (+ oks rejects) 30)))))
 
-
 ;; The specific traps the corpus is famous for, named so the sweep's coverage is
 ;; legible without opening 318 files.
-(describe "JSONTestSuite: the classic traps" :tags [:conformance]
+(describe "JSONTestSuite: the classic traps"
+  :tags
+  [:conformance]
 
   (test "a bare scalar is a valid JSON text (RFC 8259 §2, not the 2006 grammar)"
     (assert= (json/json-parse "123") 123)
@@ -98,11 +98,16 @@
     (assert-error (json/json-parse "['a']")))
 
   (test "the number grammar rejects what looks numeric but isn't"
-    (assert-error (json/json-parse "01"))       ; leading zero
-    (assert-error (json/json-parse "1."))       ; trailing point
-    (assert-error (json/json-parse ".1"))       ; leading point
-    (assert-error (json/json-parse "+1"))       ; leading plus
-    (assert-error (json/json-parse "1e"))       ; empty exponent
+    ; leading zero
+    (assert-error (json/json-parse "01"))
+    ; trailing point
+    (assert-error (json/json-parse "1."))
+    ; leading point
+    (assert-error (json/json-parse ".1"))
+    ; leading plus
+    (assert-error (json/json-parse "+1"))
+    ; empty exponent
+    (assert-error (json/json-parse "1e"))
     (assert-error (json/json-parse "Infinity"))
     (assert-error (json/json-parse "NaN")))
 

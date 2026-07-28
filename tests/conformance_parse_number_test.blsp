@@ -41,8 +41,7 @@
     [checked bad]
     (let (m (pn--mismatch (first lines)))
       (pn--scan-lines (rest lines)
-                      (if (< (string-length (first lines)) 32) checked (inc checked))
-                      (if m (cons m bad) bad)))))
+        (if (< (string-length (first lines)) 32) checked (inc checked)) (if m (cons m bad) bad)))))
 
 (defn pn--scan-files (files checked bad)
   (if (nil? files)
@@ -55,7 +54,8 @@
   (pn--scan-files (corpus-files "parse-number") 0 nil))
 
 (describe "parse-number-fxx: decimal text -> binary64 is bit-exact"
-  :tags [:conformance :slow]
+  :tags
+  [:conformance :slow]
 
   (test "the corpus is present"
     (is (corpus-present? "parse-number"))
@@ -73,13 +73,15 @@
 
 ;; The cases worth naming: each of these broke a shipped implementation. They are
 ;; in the corpus too, but spelled out here they document what the sweep protects.
-(describe "parse-number-fxx: the historically fatal inputs" :tags [:conformance]
+(describe "parse-number-fxx: the historically fatal inputs"
+  :tags
+  [:conformance]
 
   (test "the denormal that hung PHP's and Java's strtod"
     (assert= (float->bits (string->number "2.2250738585072011e-308"))
-             (hex->int "000FFFFFFFFFFFFF"))
+      (hex->int "000FFFFFFFFFFFFF"))
     (assert= (float->bits (string->number "2.2250738585072012e-308"))
-             (hex->int "0010000000000000")))
+      (hex->int "0010000000000000")))
 
   (test "exponents past every integer width clamp to zero or infinity"
     (assert= (float->bits (string->number "1e-9223372036854775809")) (hex->int "0000000000000000"))
@@ -90,10 +92,10 @@
   (test "half-way ties round to even"
     ;; 1 + 2^-53 sits exactly between 1.0 and the next double: ties-to-even -> 1.0.
     (assert= (float->bits (string->number "1.00000000000000011102230246251565404236316680908203125"))
-             (hex->int "3FF0000000000000"))
+      (hex->int "3FF0000000000000"))
     ;; A hair above the tie must step up.
     (assert= (float->bits (string->number "1.00000000000000011102230246251565404236316680908203126"))
-             (hex->int "3FF0000000000001")))
+      (hex->int "3FF0000000000001")))
 
   (test "the subnormal boundary"
     (assert= (float->bits (string->number "5e-324")) (hex->int "0000000000000001"))
@@ -106,17 +108,26 @@
 
 ;; float->bits is new kernel surface (it is what makes the sweep above possible), so
 ;; it gets its own coverage rather than being trusted implicitly.
-(describe "float->bits / bits->float" :tags [:conformance]
+(describe "float->bits / bits->float"
+  :tags
+  [:conformance]
 
   (test "round-trips every kind of double"
-    (dolist (b ["0000000000000000"   ; +0.0
-                "8000000000000000"   ; -0.0
-                "3FF0000000000000"   ; 1.0
-                "7FF0000000000000"   ; +inf
-                "FFF0000000000000"   ; -inf
-                "7FF8000000000000"   ; a quiet NaN
-                "0000000000000001"   ; the smallest subnormal
-                "7FEFFFFFFFFFFFFF"]) ; the largest finite
+    (dolist (b ["0000000000000000"
+                 ; +0.0
+                 ; -0.0
+                 "8000000000000000"
+                 ; 1.0
+                 "3FF0000000000000"
+                 ; +inf
+                 "7FF0000000000000"
+                 ; -inf
+                 "FFF0000000000000"
+                 ; a quiet NaN
+                 "7FF8000000000000"
+                 ; the smallest subnormal
+                 "0000000000000001" "7FEFFFFFFFFFFFFF"])
+      ; the largest finite
       (assert= (float->bits (bits->float (hex->int b))) (hex->int b))))
 
   (test "separates -0.0 from 0.0, which = collapses"

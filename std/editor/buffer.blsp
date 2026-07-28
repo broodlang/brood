@@ -169,8 +169,7 @@ the target line is long enough. Clamps to the buffer's line range."
   (let (rope (get buf :rope)
         col (buffer-column buf)
         target (buffer--clamp 0
-                 (dec (rope-line-count rope))
-                 (+ (rope-char->line rope (get buf :point)) n))
+                 (dec (rope-line-count rope)) (+ (rope-char->line rope (get buf :point)) n))
         line-start (rope-line->char rope target))
     (goto-char buf (+ line-start (min col (buffer--line-end-col buf target))))))
 
@@ -192,17 +191,8 @@ the target line is long enough. Clamps to the buffer's line range."
   "True if `c` is part of a word (not whitespace or a delimiter) — matches the
 line editor's M-f/M-b notion of a word."
   (not (or (= c " ")
-         (= c "\t")
-         (= c "\n")
-         (= c "(")
-         (= c ")")
-         (= c "[")
-         (= c "]")
-         (= c "{")
-         (= c "}")
-         (= c "\"")
-         (= c ";")
-         (= c ","))))
+         (= c "\t") (= c "\n") (= c "(") (= c ")") (= c "[") (= c "]") (= c "{") (= c "}")
+         (= c "\"") (= c ";") (= c ","))))
 
 (defn buffer--scan-fwd (text i n pred)
   "Smallest index ≥ `i` (up to `n`) whose char fails `pred` — advance while `pred`."
@@ -360,8 +350,8 @@ the editor restarts it whenever the previous command wasn't an undo.)"
     (and (get buf :undo-amalgamate) (not (empty? (get buf :undo)))) (assoc buf
                                                                       :undo-amalgamate false)
     else (assoc buf
-            :undo (cons (buffer--snapshot buf) (or (get buf :undo) ()))
-            :undo-amalgamate false)))
+           :undo (cons (buffer--snapshot buf) (or (get buf :undo) ()))
+           :undo-amalgamate false)))
 
 (defn disable-undo (buf)
   "Turn off undo recording for `buf` and drop any existing history. For a log / output
@@ -469,9 +459,7 @@ insertion point shift with the text. Throws if `buf` is read-only."
                                 :rope (rope-insert (get buf :rope) p s)
                                 :point (+ p (string-length s))
                                 :mark nil)
-        :insert
-        p
-        (string-length s)))))
+        :insert p (string-length s)))))
 
 (defn delete-char (buf &optional (n 1))
   "Delete `n` characters *after* point; point stays put. Recorded for undo (a
@@ -483,9 +471,7 @@ no-op at end-of-buffer is not recorded). Throws if `buf` is read-only."
       buf
       (let (buf (buffer--push-undo buf))
         (buffer--adjust-markers (assoc buf :rope (rope-delete (get buf :rope) p end) :mark nil)
-          :delete
-          p
-          end)))))
+          :delete p end)))))
 
 (defn delete-backward-char (buf &optional (n 1))
   "Delete `n` characters *before* point (backspace); point moves back with it.
@@ -500,9 +486,7 @@ Recorded for undo (a no-op at point 0 is not recorded). Throws if `buf` is read-
                                   :rope (rope-delete (get buf :rope) start p)
                                   :point start
                                   :mark nil)
-          :delete
-          start
-          p)))))
+          :delete start p)))))
 
 (defn delete-region (buf)
   "Delete the text between point and mark; point moves to the region start and
@@ -521,9 +505,7 @@ region is empty. Recorded for undo (restoring it brings back the mark too). Thro
                                       :rope (rope-delete (get buf :rope) lo hi)
                                       :point lo
                                       :mark nil)
-              :delete
-              lo
-              hi)))))))
+              :delete lo hi)))))))
 
 (defn replace-region (buf start end s)
   "Replace the characters in `[start, end)` with string `s`, leaving point just after
@@ -605,9 +587,7 @@ is the buffer pid the subscriber keys on."
   (doseq (s subs)
     (send (get s :pid)
       [:buffer-updated (self)
-        version
-        (let (proj (get s :proj)) (if (nil? proj) nil (proj buf)))
-        origin])))
+        version (let (proj (get s :proj)) (if (nil? proj) nil (proj buf))) origin])))
 
 (defn buffer--push-view (subs version view origin)
   "Push a ready-made `view` (a delta — see the `:splice` / `:marker-set` arms) to every
@@ -676,8 +656,7 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                                           :participants (get nb :participants {})}
                                          origin)
                                        (buffer--serve nb
-                                         subs
-                                         v
+                                         subs v
                                          (take 64 (cons [v lo hi (string-length repl) origin] rec))))))
       ;; A BASED splice: computed against `base`, so first TRANSFORM it over every
       ;; splice applied since (the `rec` ring, oldest-first over the window) — two
@@ -707,8 +686,7 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                                                :participants (get nb :participants {})}
                                               origin)
                                             (buffer--serve nb
-                                              subs
-                                              v
+                                              subs v
                                               (take 64
                                                 (cons [v tlo thi (string-length trepl) origin] rec))))))
       ;; A cursor move as data: no text change at all — the push carries markers + names
@@ -736,9 +714,7 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                             :participants (get nb :participants {})}
                            nil)
                          (buffer--serve nb
-                           subs
-                           v
-                           (take 64 (cons [v n n (string-length s) nil] rec))))))
+                           subs v (take 64 (cons [v n n (string-length s) nil] rec))))))
       ([:get f from r] (do (send from [:reply r (f buf)]) (buffer--serve buf subs version rec)))
       ;; An atomic [version view] snapshot — the RESYNC primitive: a client rebuilding
       ;; its copy after an ambiguous collision needs the text AND the version it
@@ -752,14 +728,10 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                                (monitor pid)
                                (send pid
                                  [:buffer-updated (self)
-                                   version
-                                   (if (nil? proj) nil (proj buf))
-                                   nil])
+                                   version (if (nil? proj) nil (proj buf)) nil])
                                (buffer--serve buf (cons {:pid pid :proj proj} subs) version rec)))
       ([:unsubscribe pid] (buffer--serve buf
-                            (remove (fn (s) (= (get s :pid) pid)) subs)
-                            version
-                            rec))
+                            (remove (fn (s) (= (get s :pid) pid)) subs) version rec))
       ([:down _ pid _]
         (let (ns (remove (fn (s) (= (get s :pid) pid)) subs)
               ;; the dead subscriber's transient markers: keyed BY its pid (its cursor)

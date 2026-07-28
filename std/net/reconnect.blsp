@@ -66,10 +66,7 @@ still answering control messages between attempts."
         (_ (reconnect--down spec peer opts subs delay))
         (after delay
           (reconnect--down spec
-            peer
-            opts
-            subs
-            (min (* delay 2) (get opts :max-ms 30000))))))))
+            peer opts subs (min (* delay 2) (get opts :max-ms 30000))))))))
 
 (defn reconnect--boot (spec opts)
   "Watcher body: connect (or start retrying immediately) and run the state loop."

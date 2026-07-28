@@ -31,8 +31,7 @@ read by call (`gen-call`). Run:  ./bin/cli examples/life.blsp")
   (board)
   "Owns the board: a :step cast advances it, a :board call reads it back. Driving
 the animation through these is the demo of process calls."
-  (cast :step (step board))
-  (call :board [board board]))
+  (cast :step (step board)) (call :board [board board]))
 
 (defn animate (srv frames w h)
   "Animate `frames` generations, advancing and reading the board by process call.

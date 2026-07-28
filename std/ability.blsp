@@ -112,8 +112,8 @@
         prov-key [aname op key]
         prev-from (get *impl-from* prov-key))
     (if (and prev-from (not (= prev-from from)))
-      (println "warning: ability " aname "/" op " for " key
-        " — impl from " prev-from " overridden by " from " (last wins)")
+      (println "warning: ability "
+        aname "/" op " for " key " — impl from " prev-from " overridden by " from " (last wins)")
       nil)
     ; store the fn DIRECTLY (not `{:fn f}`) so dispatch skips a map-get; provenance lives
     ; in *impl-from*, read only at registration (conflict detection), never on dispatch.
@@ -151,9 +151,10 @@
 
 (defn defability--sealed-vec (specs)
   "The vector following `:sealed` in a `defability`'s specs (its closed member set), or nil."
-  (cond (empty? specs) nil
-        (= (first specs) :sealed) (second specs)
-        else (defability--sealed-vec (rest specs))))
+  (cond
+    (empty? specs) nil
+    (= (first specs) :sealed) (second specs)
+    else (defability--sealed-vec (rest specs))))
 
 (defn ability--id-kw (m)
   "The dispatch-id keyword for an impl / sealed-member id `m`. A keyword is kept as-is
@@ -185,30 +186,31 @@
         sealed-ids (if sealed-vec (map ability--id-kw sealed-vec) nil)
         reg (cons (list 'ability/register-ability (list 'quote aname) (list 'quote ops))
               (if sealed-ids
-                (list (list 'ability/register-sealed (list 'quote aname)
-                        (cons 'list sealed-ids)))
+                (list (list 'ability/register-sealed
+                        (list 'quote aname) (cons 'list sealed-ids)))
                 nil))
         op-defs (map
-          (fn (op)
-            (let (op-name (first op)
-                  ; arg vector → list; dispatch reads the FIRST arg's identity
-                  arg-syms (map (fn (s) s) (second op))
-                  first-arg (first arg-syms)
-                  ; a *constant* [ability op] key — a quoted literal, built once
-                  op-key (list 'quote [aname op-name])
-                  ; gensym'd temporaries so an op arg named `k`/`f` can't be captured
-                  id-sym (gensym)
-                  impl-sym (gensym))
-              (list 'defn
-                op-name
-                arg-syms
-                (list 'let (list id-sym (list 'ability/identity-of first-arg)
-                                 impl-sym (list 'ability/impl-for op-key id-sym))
-                  (list 'if impl-sym
-                    ; direct, arity-correct call — no arg-list alloc, no `apply`
-                    (cons impl-sym arg-syms)
-                    (list 'ability/no-impl op-key id-sym))))))
-          ops))
+                  (fn (op)
+                    (let (op-name (first op)
+                          ; arg vector → list; dispatch reads the FIRST arg's identity
+                          arg-syms (map (fn (s) s) (second op))
+                          first-arg (first arg-syms)
+                          ; a *constant* [ability op] key — a quoted literal, built once
+                          op-key (list 'quote [aname op-name])
+                          ; gensym'd temporaries so an op arg named `k`/`f` can't be captured
+                          id-sym (gensym)
+                          impl-sym (gensym))
+                      (list 'defn
+                        op-name arg-syms
+                        (list 'let
+                          (list id-sym
+                            (list 'ability/identity-of first-arg) impl-sym
+                            (list 'ability/impl-for op-key id-sym))
+                          (list 'if
+                            impl-sym
+                            ; direct, arity-correct call — no arg-list alloc, no `apply`
+                            (cons impl-sym arg-syms) (list 'ability/no-impl op-key id-sym))))))
+                  ops))
     (cons 'do (append reg op-defs))))
 
 (defmacro impl (aname key & methods)
@@ -230,10 +232,7 @@
                 arg-syms (map (fn (s) s) (second m))
                 body (rest (rest m)))
             (list 'ability/register-impl
-              (list 'quote aname)
-              (list 'quote op-name)
-              id-kw
-              (cons 'fn (cons arg-syms body))
+              (list 'quote aname) (list 'quote op-name) id-kw (cons 'fn (cons arg-syms body))
               (list 'quote (current-ns)))))
         methods))))
 
@@ -254,16 +253,19 @@
         ;; result as a record SHAPE carrying the `:__id__` keyword literal. That is what
         ;; makes a record's identity flow through inference to call sites (the checker's
         ;; inference hook). At runtime it evaluates identically to `(hash-map …)`.
-        body (apply hash-map (cons :__id__ (cons id
-               (mapcat (fn (f) (list (keyword (name f)) f)) fields))))
+        body (apply hash-map
+               (cons :__id__
+                 (cons id
+                   (mapcat (fn (f) (list (keyword (name f)) f)) fields))))
         ;; Emit a `sig` for the constructor so its record-shaped return type — carrying
         ;; the `:__id__` keyword literal — flows through inference to call sites: this is
         ;; what lets `(let (c (circle 2)) (size c))` be checked. Fields are `any` (records
         ;; are structural — the identity is the point).
         arg-tys (map (fn (_) 'any) fields)
-        rec-ty (cons 'record (cons :__id__ (cons id
-                 (mapcat (fn (f) (list (keyword (name f)) 'any)) fields))))
+        rec-ty (cons 'record
+                 (cons :__id__
+                   (cons id
+                     (mapcat (fn (f) (list (keyword (name f)) 'any)) fields))))
         the-sig (list 'sig rec (append arg-tys (list '-> rec-ty))))
     (list 'do
-      the-sig
-      (list 'defn rec fields body))))
+      the-sig (list 'defn rec fields body))))

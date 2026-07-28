@@ -147,8 +147,7 @@ redundant slashes. An absolute path starts with the `\"/\"` component."
       (cond
         ;; `..` pops a resolved segment off the stack
         (and (= p "..") (not (nil? stack)) (not (= (first stack) ".."))) (normalize--reduce (rest parts)
-                                                                           (rest stack)
-                                                                           absolute)
+                                                                           (rest stack) absolute)
         ;; `..` that would climb above an absolute root is discarded — there is no
         ;; parent of `/`. (For a relative path it is kept, so `a/../..` → `..`.)
         (and (= p "..") absolute (nil? stack)) (normalize--reduce (rest parts) stack absolute)
@@ -205,4 +204,3 @@ divergent pair still yields a valid relative path (`/x/y` from `/a/b` → `../..
   "True if `p` exists and is a directory."
   (dir? p))
 (sig is-dir? (string -> bool))
-

@@ -74,18 +74,14 @@
           "must be :git, :path, :tarball, or :version")))
   (test "a :git dep without a :ref is rejected"
     (is (includes? (try
-                            (project/project-parse-dep '[parser :git "https://x.git"])
-                            (catch e e))
+                     (project/project-parse-dep '[parser :git "https://x.git"])
+                     (catch e e))
           "needs a :ref")))
   (test "a reserved opt is rejected so the manifest stays forward-compatible"
     (is (includes? (try
-                            (project/project-parse-dep '[parser :git
-                                                          "https://x.git"
-                                                          :ref
-                                                          "v1"
-                                                          :branch
-                                                          "main"])
-                            (catch e e))
+                     (project/project-parse-dep '[parser :git
+                                                   "https://x.git" :ref "v1" :branch "main"])
+                     (catch e e))
           "reserved for a future version")))
   (test "an entry that is too short is rejected"
     (is (includes? (try (project/project-parse-dep '[parser :path]) (catch e e))
@@ -269,8 +265,7 @@
               extracts (fold (fn (m p)
                                (let ([c pr dn] (project/project--scan-file-entry p))
                                  (map-assoc m p [0 c pr dn])))
-                         {}
-                         files)
+                         {} files)
               source-set (fold (fn (m p) (map-assoc m p true)) {} files))
           ;; duplicate-defs: extract path == sequential path
           (assert= (sort (project/project--duplicate-def-warnings extracts source-set))
@@ -390,8 +385,7 @@
   (test "a bare string is rejected, naming the key and the fix"
     (let (msg (try (project/project--check-paths :source-paths "src") (catch e e)))
       (and (is (includes? msg ":source-paths"))
-        (is (includes? msg "not a bare string"))
-        (is (includes? msg "[\"src\"]")))))
+        (is (includes? msg "not a bare string")) (is (includes? msg "[\"src\"]")))))
   (test "a vector of non-strings is rejected"
     (is (includes? (try (project/project--check-paths :source-paths [5]) (catch e e))
           "must contain only strings")))
@@ -412,8 +406,7 @@
       (spit manifest "(project :name \"x\"\n")
       (let (msg (try (project/project--apply-manifest manifest) (catch e e)))
         (and (is (includes? msg "cannot parse"))
-          (is (includes? msg manifest))
-          (is (includes? msg "line"))))))
+          (is (includes? msg manifest)) (is (includes? msg "line"))))))
   (test "an empty manifest says so rather than failing obscurely"
     (let (dir (temp-dir "brood-manifest-")
           manifest (path-join dir "project.blsp"))
@@ -428,8 +421,7 @@
       (spit manifest "(porject :name \"x\")\n")
       (let (msg (try (project/project--apply-manifest manifest) (catch e e)))
         (and (is (includes? msg "must begin with a (project"))
-          (is (includes? msg "porject"))
-          (is (includes? msg "being ignored"))))))
+          (is (includes? msg "porject")) (is (includes? msg "being ignored"))))))
   (test "a non-list manifest is rejected"
     (let (dir (temp-dir "brood-manifest-")
           manifest (path-join dir "project.blsp"))

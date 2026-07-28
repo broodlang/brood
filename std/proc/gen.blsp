@@ -72,12 +72,10 @@ always dropped (and a late `[:down]` flushed) before returning."
     (receive
       ([:reply ^r v] (demonitor m)
         ; flush a late down, don't leak it
-        (receive ([:down ^m _ _] :ok) (after 0 :ok))
-        v)
+        (receive ([:down ^m _ _] :ok) (after 0 :ok)) v)
       ([:down ^m _ reason] (error "gen-call: server " (pr-str pid) " died: " (pr-str reason)))
       (after ms
-        (demonitor m)
-        (error "gen-call: timed out after " ms " ms")))))
+        (demonitor m) (error "gen-call: timed out after " ms " ms")))))
 
 (defn stop (pid)
   "Tell a server process to exit its receive loop cleanly (running its

@@ -110,8 +110,7 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
 (defn uuid--hex? (c)
   (let (cp (char->int c))
     (or (and (>= cp 48) (<= cp 57))
-      (and (>= cp 97) (<= cp 102))
-      (and (>= cp 65) (<= cp 70)))))
+      (and (>= cp 97) (<= cp 102)) (and (>= cp 65) (<= cp 70)))))
 
 (defn uuid--valid-segment? (s expected-len)
   (and (= (string-length s) expected-len)
@@ -127,14 +126,9 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
 (defn uuid? (s)
   "True if `s` is a well-formed UUID string (8-4-4-4-12 hex, any case, with dashes)."
   (and (= (string-length s) 36)
-    (= (char-at s 8) "-")
-    (= (char-at s 13) "-")
-    (= (char-at s 18) "-")
-    (= (char-at s 23) "-")
-    (uuid--valid-segment? (substring s 0 8) 8)
-    (uuid--valid-segment? (substring s 9 13) 4)
-    (uuid--valid-segment? (substring s 14 18) 4)
-    (uuid--valid-segment? (substring s 19 23) 4)
+    (= (char-at s 8) "-") (= (char-at s 13) "-") (= (char-at s 18) "-") (= (char-at s 23) "-")
+    (uuid--valid-segment? (substring s 0 8) 8) (uuid--valid-segment? (substring s 9 13) 4)
+    (uuid--valid-segment? (substring s 14 18) 4) (uuid--valid-segment? (substring s 19 23) 4)
     (uuid--valid-segment? (substring s 24 36) 12)))
 
 ;; ---- name-based UUIDs (v3 and v5) -------------------------------------------
@@ -179,18 +173,10 @@ random. Use v7 for database keys and time-ordered IDs; use v4 for privacy."
         hex (fold (fn (acc i)
                     (let (b (if (= i 6) b6 (if (= i 8) b8 (nth bv i))))
                       (str acc
-                        (char-at uuid--hex-digits (quot b 16))
-                        (char-at uuid--hex-digits (rem b 16)))))
-              ""
-              (range 16)))
+                        (char-at uuid--hex-digits (quot b 16)) (char-at uuid--hex-digits (rem b 16)))))
+              "" (range 16)))
     (str (substring hex 0 8)
-      "-"
-      (substring hex 8 12)
-      "-"
-      (substring hex 12 16)
-      "-"
-      (substring hex 16 20)
-      "-"
+      "-" (substring hex 8 12) "-" (substring hex 12 16) "-" (substring hex 16 20) "-"
       (substring hex 20 32))))
 
 (defn uuid--name-based (ns-uuid name hash-fn version)

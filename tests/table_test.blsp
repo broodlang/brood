@@ -316,8 +316,7 @@
     (let (t (table) me (self) per 50 keys [:a :b :c :d])
       (fold (fn (_ k)
               (fold (fn (_ i) (spawn (do (table-incr t k) (send me :done)))) nil (range per)))
-        nil
-        keys)
+        nil keys)
       (assert= (tt-await (* per (count keys))) :ok)
       (assert= (table-get t :a) per)
       (assert= (table-get t :b) per)

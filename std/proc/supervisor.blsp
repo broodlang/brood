@@ -108,8 +108,7 @@ address the child by a stable name even though its pid changes across restarts."
         pid (start))
     (when (not (pid? pid))
       (error "supervisor: a child :start thunk must return a pid (got "
-        pid
-        ") — it should end in (spawn …) / (remote-spawn …) / (start-supervisor …)"))
+        pid ") — it should end in (spawn …) / (remote-spawn …) / (start-supervisor …)"))
     ; local or remote (ADR-067) — `link` routes by node
     (link pid)
     (when (get spec :name) (register (get spec :name) pid))
@@ -209,10 +208,7 @@ so the failure propagates — anyone monitoring the supervisor sees `[:down …
 restarts this whole sub-tree (escalation). Erlang terminates children on shutdown."
   (supervisor--terminate-many survivors)
   (error "supervisor: restart intensity exceeded ("
-    (get state :max-restarts)
-    " restarts in "
-    (get state :max-seconds)
-    "s)"))
+    (get state :max-restarts) " restarts in " (get state :max-seconds) "s)"))
 
 (defn supervisor--restart (state child)
   "Restart `child` (`:one-for-one`): record the restart in the intensity window;
@@ -257,8 +253,7 @@ abnormal (`:killed`) — leaving unaffected children running. Bounded by intensi
     (if over?
       (supervisor--giveup state (supervisor--drop (get state :children) trig-pid))
       (let ([unaffected affected] (supervisor--split-affected (get state :children)
-                                    trig-pid
-                                    (get state :strategy))
+                                    trig-pid (get state :strategy))
             survivors (remove (fn (c) (= (get c :pid) trig-pid)) affected)
             _ (supervisor--terminate-many survivors)
             restarted (remove nil?
@@ -329,8 +324,7 @@ request, like OTP's `restart_child`). Reply the new pid, or `:not-found`."
           (send from [:reply r (get fresh :pid)])
           (supervisor--loop (assoc state
                               :children (supervisor--replace (get state :children)
-                                          (get child :pid)
-                                          fresh))))))))
+                                          (get child :pid) fresh))))))))
 
 (defn supervisor--loop (state)
   "The supervisor's receive loop over its immutable `state` map."

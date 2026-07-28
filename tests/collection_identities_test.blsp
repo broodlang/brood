@@ -42,8 +42,7 @@
   (and (= (nth (conj v x) (count v)) x)
     ; conj appends at end
     ; into concatenates
-    (= (count (into v w)) (+ (count v) (count w)))
-    (= (count (conj v x)) (+ 1 (count v)))
+    (= (count (into v w)) (+ (count v) (count w))) (= (count (conj v x)) (+ 1 (count v)))
     (if (> (count v) 0) (= (nth (into v w) 0) (nth v 0)) true)))
 (defn hof-laws (v)
   (and (= (count (map (fn (x) (* x 2)) v)) (count v))
@@ -54,13 +53,11 @@
       ; map fusion
       (map (fn (x) (+ 1 x)) (map (fn (x) (* 2 x)) v)))
     ; sum invariant to order
-    (= (fold + 0 v) (fold + 0 (reverse v)))
-    (= (count (reverse v)) (count v))))
+    (= (fold + 0 v) (fold + 0 (reverse v))) (= (count (reverse v)) (count v))))
 
 (defn str-laws (a b)
   (and (= (string-length (str a b)) (+ (string-length a) (string-length b)))
-    (= (str a "") a)
-    (= (str "" a) a)))
+    (= (str a "") a) (= (str "" a) a)))
 
 (defn check-maps (s n)
   (if (= n 0)

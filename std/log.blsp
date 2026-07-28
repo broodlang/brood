@@ -44,12 +44,7 @@ stderr if none is running, so a log is never silently lost. A *backend* is an
 (defn log--default-format (rec)
   "The default line for a record: `[LEVEL ts] msg` plus a newline."
   (str "["
-    (or (get log--labels (get rec :level)) "?")
-    " "
-    (get rec :ts)
-    "] "
-    (get rec :msg)
-    "\n"))
+    (or (get log--labels (get rec :level)) "?") " " (get rec :ts) "] " (get rec :msg) "\n"))
 
 ;; ---- backends ---------------------------------------------------------------
 (defn backend (sink & opts)
@@ -115,8 +110,7 @@ so it walks either — `:backends` defaults to a vector but `add-backend` conses
         (log--dispatch (get cfg :backends) rec))
       cfg))
   (cast [:add-backend b] (assoc cfg :backends (cons b (apply list (get cfg :backends)))))
-  (cast [:set-level level] (assoc cfg :level level))
-  (query :config cfg))
+  (cast [:set-level level] (assoc cfg :level level)) (query :config cfg))
 
 ;; ---- lifecycle --------------------------------------------------------------
 (defn start-logger (& opts)

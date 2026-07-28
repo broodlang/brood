@@ -68,15 +68,7 @@ newline while the form is incomplete instead of submitting)."
 (defn lineedit--word-char? (c)
   "True if `c` is part of a word for M-f/M-b/C-w (i.e. not whitespace or a delimiter)."
   (not (or (= c " ")
-         (= c "\t")
-         (= c "(")
-         (= c ")")
-         (= c "[")
-         (= c "]")
-         (= c "{")
-         (= c "}")
-         (= c "\"")
-         (= c ";")
+         (= c "\t") (= c "(") (= c ")") (= c "[") (= c "]") (= c "{") (= c "}") (= c "\"") (= c ";")
          (= c ","))))
 
 (defn lineedit--path-word-char? (c)
@@ -271,7 +263,7 @@ observer's eval minibuffer (the `:hist` list `lineedit-init` is seeded with)."
       (= idx 0) (let (s (get state :saved))
                   (assoc state :hist-idx -1 :text s :point (string-length s)))
       else (let (ni (dec idx) entry (nth (get state :hist) ni))
-              (assoc state :hist-idx ni :text entry :point (string-length entry))))))
+             (assoc state :hist-idx ni :text entry :point (string-length entry))))))
 
 ;; ---- reverse incremental history search (C-r) -------------------------------
 ;; A modal sub-state on `:search` = `{:query :idx :orig-text :orig-point}`. While
@@ -335,8 +327,7 @@ can restore it, and selecting the newest match (empty query → newest entry)."
                                     :idx 0
                                     :orig-text (get state :text)
                                     :orig-point (get state :point)})
-    ""
-    0))
+    "" 0))
 
 ;; ---- completion -------------------------------------------------------------
 
@@ -670,13 +661,7 @@ line's start within the text (past `base`) so the lexer spans land on the right 
           here (if (= i 0) line-ops (cons [:nl] line-ops)))
       (append here
         (lineedit--multi-line-ops (rest lines)
-          (inc i)
-          (+ offset (string-length line) 1)
-          base
-          full
-          overrides
-          prompt
-          cont)))))
+          (inc i) (+ offset (string-length line) 1) base full overrides prompt cont)))))
 
 (defn lineedit--multi-ops (st)
   "The full op vector to repaint a MULTI-line form in place: up over the previous
@@ -702,8 +687,7 @@ tested in isolation."
     (append (if (> prev-row 0) (list [:up prev-row]) '())
       (list [:cr] [:clear-below])
       (lineedit--multi-line-ops lines 0 0 base full overrides prompt cont)
-      (if (> up-to-cursor 0) (list [:up up-to-cursor]) '())
-      (list [:cr] [:col col]))))
+      (if (> up-to-cursor 0) (list [:up up-to-cursor]) '()) (list [:cr] [:col col]))))
 
 (defn lineedit--render-multi (st)
   "Repaint a multi-line form (emit `lineedit--multi-ops`), and record the cursor row in
@@ -737,8 +721,7 @@ lines; moves up over any leftover render block first."
     (term-emit (into []
                  (append (if (> prev-row 0) (list [:up prev-row]) '())
                    (list [:cr] [:clear-below])
-                   (lineedit--multi-line-ops lines 0 0 base full '() prompt cont)
-                   (list [:nl]))))))
+                   (lineedit--multi-line-ops lines 0 0 base full '() prompt cont) (list [:nl]))))))
 
 ;; ---- the event loop (IO) ----------------------------------------------------
 

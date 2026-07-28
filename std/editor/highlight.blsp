@@ -167,8 +167,8 @@ else uncoloured. Accumulates in reverse."
                                    else nil))
                            (hl--spans rest false (if (nil? f) acc (cons [s e f] acc))))
         else (let (f (face (get hl--kind->face-name kind)))
-                ; :string / :number / :keyword
-                (hl--spans rest false (if (nil? f) acc (cons [s e f] acc))))))))
+               ; :string / :number / :keyword
+               (hl--spans rest false (if (nil? f) acc (cons [s e f] acc))))))))
 
 (defn highlight-spans (src)
   "Lexically tokenize Brood `src` into a list of `[start end face]` colour spans
@@ -222,7 +222,7 @@ scan; spans need not be sorted."
   (cond
     (empty? spans) nil
     else (let ([s e f] (first spans))
-            (if (and (>= pos s) (< pos e)) f (face-at (rest spans) pos)))))
+           (if (and (>= pos s) (< pos e)) f (face-at (rest spans) pos)))))
 
 (defn ranges-face (ranges pos)
   "Merge the faces of every `[lo hi face]` range in `ranges` covering offset `pos`
@@ -233,8 +233,7 @@ highlight, isearch overlays, and bracket-match are all such ranges."
             (not (and (>= pos lo) (< pos hi))) acc
             (nil? acc) f
             else (into acc f)))
-    nil
-    ranges))
+    nil ranges))
 
 (defn fontify-runs (text base spans ranges)
   "Coalesce `text` (its first char at buffer offset `base`) into a list of
@@ -255,9 +254,7 @@ Adjacent chars of equal face coalesce into one chunk; feed each to a `[:print st
 face]` op. A thin shell over `fontify-runs`: each `[pos face]` override is the
 one-char range `[pos (inc pos) face]`."
   (fontify-runs line
-    base
-    (highlight-spans full)
-    (map (fn ([p f]) [p (inc p) f]) overrides)))
+    base (highlight-spans full) (map (fn ([p f]) [p (inc p) f]) overrides)))
 
 ;; ---- bracket matching -------------------------------------------------------
 

@@ -7,10 +7,7 @@
 (describe "gen: cast and call"
   :isolated
   (defprocess counter
-    (n)
-    (cast :inc (+ n 1))
-    (cast [:add m] (+ n m))
-    (cast :ping (do n))
+    (n) (cast :inc (+ n 1)) (cast [:add m] (+ n m)) (cast :ping (do n))
     ; side-effect-free no-op: keep state
     (call :value [n n])
     ; read: reply n, state unchanged
@@ -63,10 +60,7 @@
   ;; the reply, no `[reply state]` pair needed. State is threaded along by the
   ;; macro, so casts still observe the right value across queries.
   (defprocess kv
-    (m)
-    (cast [:put k v] (assoc m k v))
-    (query [:get k] (get m k))
-    (query :size (count m)))
+    (m) (cast [:put k v] (assoc m k v)) (query [:get k] (get m k)) (query :size (count m)))
 
   (test "query replies the body and leaves state unchanged"
     (let (s (spawn-server kv {}))
@@ -94,11 +88,9 @@
   ;; `info` clauses match messages that are *not* a cast/call envelope — a raw
   ;; send, a monitor [:down …], a link [:EXIT …]. The server records the last one.
   (defprocess inbox
-    (last)
-    (cast [:watch pid] (do (monitor pid) last))
+    (last) (cast [:watch pid] (do (monitor pid) last))
     ; arm a monitor from inside the server
-    (query :last last)
-    (info [:note x] x)
+    (query :last last) (info [:note x] x)
     ; a plain send
     (info [:down _ _ r] r))
   ; a monitor down: record its reason
@@ -131,11 +123,9 @@
 (describe "gen: init runs once"
   :isolated
   (defprocess doubler
-    (n)
-    (init (* n 2))
+    (n) (init (* n 2))
     ; transform the seed, once
-    (cast :inc (+ n 1))
-    (query :value n))
+    (cast :inc (+ n 1)) (query :value n))
 
   (test "init transforms the seed exactly once (not per message)"
     (let (s (spawn-server doubler 10))
@@ -149,9 +139,7 @@
 (describe "gen: terminate runs on stop"
   :isolated
   (defprocess closer
-    (owner)
-    (query :ping :pong)
-    (terminate reason (send owner [:closed reason])))
+    (owner) (query :ping :pong) (terminate reason (send owner [:closed reason])))
 
   (test "terminate fires on (stop) with reason :normal"
     (let (s (spawn-server closer (self)))
