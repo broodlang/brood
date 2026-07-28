@@ -9,9 +9,13 @@
 ;;   - `(to-str x)` is the protocol op. Dispatches on x's identity: a record with a
 ;;     `Display` impl returns that; everything else falls to the `:default` impl,
 ;;     which is the native `str` — so an un-customized value prints exactly as before.
-;;   - Loading this module installs a per-argument hook into the prelude's `*show*`,
-;;     so `print`/`println`/`eprint`/`eprintln` route each RECORD argument through
-;;     `to-str` (built-ins stay on the fast native render — zero dispatch cost).
+;;   - Loading this module makes the protocol AVAILABLE (the ability + any impls a
+;;     library ships) but changes nothing on its own. The screen printers honor it
+;;     only after the APP calls `(display-on)`, which installs the per-argument hook
+;;     into the prelude's `*show*`. A library ships `impl Display …` proposals; the
+;;     app disposes (ADR-172 §5/§8). `(display-off)` / `(binding (*show* nil) …)` undo it.
+;;   - Only a RECORD argument is routed through `to-str` (built-ins stay on the fast
+;;     native render — zero dispatch cost).
 ;;   - Scope is the SCREEN printers, matching the request ("printing to screen"):
 ;;     `str`/`pr-str`/`fmt` stay native. Reach for `(to-str x)` explicitly to honor
 ;;     the protocol inside a `str`/`fmt` (the Elixir `to_string` move).
@@ -19,7 +23,8 @@
 (defmodule show
   "Display protocol for printing — Elixir's `String.Chars`, in Brood.
 
-    (require 'show)                       ; activate protocol printing
+    (require 'show)                       ; make the Display protocol available
+    (display-on)                          ; APP opt-in: screen printers now honor it
     (defmodule money (:use ability) (:use show))
     (defrecord* usd (cents))
     (impl Display money/usd
@@ -28,9 +33,10 @@
 
 `(to-str x)` converts any value to its display string: a record dispatches on its
 nominal id (custom impl, else the native `str`); every built-in falls to `:default`
-(the native `str`), so un-customized values are unchanged. Loading the module wires
-the screen printers (`print`/`println`/`eprint`/`eprintln`) to honor it via the
-prelude's `*show*` hook; `(binding (*show* nil) body…)` disables it for a scope.
+(the native `str`), so un-customized values are unchanged. `(display-on)` wires the
+screen printers (`print`/`println`/`eprint`/`eprintln`) to honor it via the prelude's
+`*show*` hook — an APP-level step, never a side effect of loading; `(display-off)`
+restores the default, and `(binding (*show* nil) body…)` disables it for a scope.
 
 Two protocols, mirroring Elixir:
   - **`Display`** / `(to-str x)` — the human display form (Elixir's `String.Chars`),
@@ -41,13 +47,13 @@ Two protocols, mirroring Elixir:
 
 **Shipping an impl with a library:** put the `impl` at the TOP LEVEL of the module
 that defines the record — loading the module (which a user must do to reach the
-record) registers the impl, exactly like Elixir's `defimpl`. Add `(:use show)` to
-that module's header to also activate protocol printing on load."
+record) registers the impl, exactly like Elixir's `defimpl`. The impl is inert until
+the APP calls `(display-on)`; a library must not call it itself (ADR-172 §5)."
   (:use ability))
 
 ;; The protocol. One op: a value → its display string. The `:default` impl is the
 ;; native `str`, so this is a pure *extension* seam — nothing prints differently
-;; until a record supplies its own impl.
+;; until a record supplies its own impl AND the app calls `(display-on)`.
 (defability Display
   "A value's human display string — what `print`/`println` show for it." (to-str [self] :-> string))
 
@@ -74,14 +80,27 @@ that module's header to also activate protocol printing on load."
   (println (inspect x))
   x)
 
-;; The per-print-argument hook installed into `*show*`. Only a RECORD is routed
-;; through `to-str` (a `defrecord*` value is the sole thing that can carry a custom
-;; impl); every other value passes through untouched so the built-in renderer stays
-;; on the fast path — no `identity-of`/`impl-for` lookup per printed int or string.
+;; The per-print-argument hook `display-on` installs into `*show*`. Only a RECORD is
+;; routed through `to-str` (a `defrecord*` value is the sole thing that can carry a
+;; custom impl); every other value passes through untouched so the built-in renderer
+;; stays on the fast path — no `identity-of`/`impl-for` lookup per printed int or string.
 (defn show--print-hook (x)
   (if (record? x) (to-str x) x))
 
-;; Activate: loading this module makes the screen printers honor `Display`. It is an
-;; ordinary `def` of the prelude's ambient `*show*` dynamic var, so it takes effect
-;; process-wide (and across spawned processes on their next print), Erlang-style.
-(def *show* show--print-hook)
+;; Activation is an explicit APP step, never a side effect of loading (ADR-172 §5/§8:
+;; a library ships `impl Display` proposals; the app decides whether the screen
+;; printers honor them). `display-on` is an ordinary `def` of the prelude's ambient
+;; `*show*` dynamic var, so it takes effect process-wide — and across spawned
+;; processes on their next print — Erlang-style. A library must NOT call it.
+(defn display-on ()
+  "Activate protocol printing: `print`/`println`/`eprint`/`eprintln` route each RECORD
+  argument through `to-str`. An APP-level opt-in — call it once from your entry point;
+  a library only registers impls, it never flips this. Reversible with `display-off`."
+  (def *show* show--print-hook)
+  nil)
+
+(defn display-off ()
+  "Deactivate protocol printing (restore the prelude default): records print their raw
+  map form again. Scoped disabling for one call is `(binding (*show* nil) …)`."
+  (def *show* nil)
+  nil)
