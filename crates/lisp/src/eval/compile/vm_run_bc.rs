@@ -352,6 +352,7 @@ pub(crate) fn vm_run_bc(
             cur_env = cur.env;
             cur_env_base = cur.env_base;
             cur_arm_slot = cur.arm_slot;
+            heap.set_ic_bases(cur.ic_bases);
             #[cfg(feature = "jit")]
             {
                 cur_back_edges = cur.back_edges;
@@ -373,6 +374,10 @@ pub(crate) fn vm_run_bc(
             } else {
                 usize::MAX
             };
+            {
+                let b = heap.vm_arm_block(&cur_arm);
+                heap.set_ic_bases(b);
+            }
             if let Err(mut e) = push_frame(heap, &cur_arm, args0, cur_env) {
                 heap.truncate_roots(entry_roots);
                 heap.truncate_env_roots(entry_env);
@@ -524,6 +529,7 @@ pub(crate) fn vm_run_bc(
                     env: cur_env,
                     env_base: cur_env_base,
                     arm_slot: cur_arm_slot,
+                    ic_bases: heap.ic_bases(),
                     #[cfg(feature = "jit")]
                     back_edges: cur_back_edges,
                 };
@@ -744,6 +750,7 @@ pub(crate) fn vm_run_bc(
                         cur_env = caller.env;
                         cur_env_base = caller.env_base;
                         cur_arm_slot = caller.arm_slot;
+                        heap.set_ic_bases(caller.ic_bases);
                         #[cfg(feature = "jit")]
                         {
                             // Restore the caller's back-edge counter so SelfCall
@@ -756,7 +763,12 @@ pub(crate) fn vm_run_bc(
                     }
                 }
             }
-            Ok(ChunkExit::Call { arm, args, genv }) => {
+            Ok(ChunkExit::Call {
+                arm,
+                args,
+                genv,
+                bases,
+            }) => {
                 if frames.len() + 1 > MAX_BC_FRAMES {
                     unwind(heap);
                     let mut e = crate::eval::bc_frame_depth_error(frames.len());
@@ -774,9 +786,11 @@ pub(crate) fn vm_run_bc(
                     env: cur_env,
                     env_base: cur_env_base,
                     arm_slot: cur_arm_slot,
+                    ic_bases: heap.ic_bases(),
                     #[cfg(feature = "jit")]
                     back_edges: cur_back_edges,
                 });
+                heap.set_ic_bases(bases);
                 cur_env_base = heap.env_roots_len();
                 cur_env = heap.root_env(genv);
                 cur_base = heap.roots_len();
@@ -801,8 +815,14 @@ pub(crate) fn vm_run_bc(
                     cur_back_edges = 0; // fresh counter for the callee's frame
                 }
             }
-            Ok(ChunkExit::Tail { arm, args, genv }) => {
+            Ok(ChunkExit::Tail {
+                arm,
+                args,
+                genv,
+                bases,
+            }) => {
                 crate::perf_bump!(tail_call);
+                heap.set_ic_bases(bases);
                 // Reuse the current frame for the tail callee (TCO): re-root its env,
                 // rebuild its slots in place. Same discipline as the `Node` trampoline.
                 heap.truncate_env_roots(cur_env_base);
@@ -856,6 +876,7 @@ pub(crate) fn vm_run_bc(
                     env: cur_env,
                     env_base: cur_env_base,
                     arm_slot: cur_arm_slot,
+                    ic_bases: heap.ic_bases(),
                     #[cfg(feature = "jit")]
                     back_edges: cur_back_edges,
                 };
@@ -883,6 +904,7 @@ pub(crate) fn vm_run_bc(
                     env: cur_env,
                     env_base: cur_env_base,
                     arm_slot: cur_arm_slot,
+                    ic_bases: heap.ic_bases(),
                     #[cfg(feature = "jit")]
                     back_edges: cur_back_edges,
                 };

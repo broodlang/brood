@@ -39,7 +39,7 @@ pub(crate) fn exec_call(
     // local-capturing closure's captured frames could shadow the symbol,
     // and they differ per closure *instance* while the site is shared.
     let probe_epoch = heap.global_epoch();
-    let mut fast: Option<(Arc<CompiledArm>, EnvId)> = None;
+    let mut fast: Option<(Arc<CompiledArm>, EnvId, (u32, u32))> = None;
     let cv: Value;
     'resolve: {
         if site != NO_SITE {
@@ -83,12 +83,14 @@ pub(crate) fn exec_call(
                             }
                             _ => None,
                         };
-                        fast = arm.clone();
+                        fast = arm
+                            .as_ref()
+                            .map(|(a, cenv)| (a.clone(), *cenv, heap.vm_arm_block(a)));
                         // Mirror vm_call_ic_put's LOCAL-env guard: arg eval below can
                         // trigger a LOCAL minor collect that moves the env without
                         // bumping the global epoch, so the epoch check at the fast-path
                         // use site wouldn't catch a stale LOCAL cenv.  Clear fast now.
-                        if let Some((_, cenv)) = &fast {
+                        if let Some((_, cenv, _)) = &fast {
                             if *cenv != EnvId::GLOBAL && cenv.region() == value::LOCAL {
                                 fast = None;
                             }
@@ -101,6 +103,8 @@ pub(crate) fn exec_call(
                                 epoch: probe_epoch,
                                 callee: v,
                                 arm,
+                                // Overwritten inside `vm_call_ic_put`.
+                                callee_bases: (0, 0),
                                 fast: std::cell::Cell::new(None),
                             },
                         );
@@ -143,13 +147,14 @@ pub(crate) fn exec_call(
     // but NOT the un-registered `fast` arm's node tree or its env
     // handle) — either bumps the epoch, so the stale fast path is
     // dropped and the rooted callee takes the generic path below.
-    if let Some((arm, cenv)) = fast {
+    if let Some((arm, cenv, bases)) = fast {
         if heap.global_epoch() == probe_epoch {
             let result = if tail {
                 Ok(Step::Tail {
                     compiled: arm,
                     args: argv,
                     genv: cenv,
+                    bases,
                 })
             } else {
                 vm_apply(heap, arm, &argv, cenv).map(Step::Done)
@@ -301,10 +306,12 @@ pub(crate) fn dispatch(
             // for natives below.
             let callee_env = heap.closure(id).env.unwrap_or_else(|| heap.global());
             if tail {
+                let bases = heap.vm_arm_block(&arm);
                 return Ok(Step::Tail {
                     compiled: arm,
                     args: cur_argv,
                     genv: callee_env,
+                    bases,
                 });
             }
             // JIT fast path: call jit_tier directly, bypassing vm_run_bc's per-call
@@ -327,11 +334,17 @@ pub(crate) fn dispatch(
                     let env_base = heap.env_roots_len();
                     let env_root = heap.root_env(callee_env);
                     let base = heap.roots_len();
+                    // Callee block installed BEFORE push_frame: an optional default is
+                    // compiled in the callee's scope, so its sites index the callee's
+                    // block during frame fill.
+                    let saved_bases = heap.set_ic_bases(heap.vm_arm_block(&arm));
                     if let Err(e) = push_frame(heap, &arm, &cur_argv, env_root) {
+                        heap.set_ic_bases(saved_bases);
                         heap.truncate_env_roots(env_base);
                         return Err(e);
                     }
                     let jit_outcome = jit_tier(&arm, heap, base, env_root);
+                    heap.set_ic_bases(saved_bases);
                     match jit_outcome {
                         Some(0) => {
                             crate::perf_bump!(jit_apply_fast);
@@ -588,7 +601,15 @@ pub(crate) fn vm_apply(
     // `top_level = false`: this is a nested run (the process-body driver is
     // `run_process_body`), so it does no loop-top preempt/kill capture — only the
     // body driver does. A `receive` suspend that surfaces here re-raises (§8.1).
-    match vm_run_bc(heap, compiled0, args, genv0, None, false)? {
+    //
+    // IC cursors (ADR-175 Phase A): `vm_run_bc`'s fresh entry installs the callee's
+    // block; the CALLER (whose arm continues after this nested run) needs its own
+    // block back, so save/restore around the run — the single chokepoint every
+    // nested activation goes through.
+    let saved_bases = heap.ic_bases();
+    let out = vm_run_bc(heap, compiled0, args, genv0, None, false);
+    heap.set_ic_bases(saved_bases);
+    match out? {
         VmOutcome::Done(v) => Ok(v),
         // A `receive` suspended inside this VM run — but this run is **nested** under a
         // native (a `map`/`try`/`binding`/`%isolate` callback that re-entered the VM via

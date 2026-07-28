@@ -462,6 +462,14 @@ pub enum Node {
 /// `nil` (no eval) for a nil-default param, or the compiled `optional_defaults`
 /// node (evaluated against the partially-built frame, so it can reference earlier
 /// params) for a real default.
+/// Mint a fresh [`CompiledArm::uid`]. Process-wide (not per-runtime): uniqueness is
+/// all that matters, and a single relaxed counter is cheaper than plumbing a
+/// per-runtime one through every construction site.
+pub(crate) fn next_arm_uid() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct CompiledArm {
     /// Required params — `argv[0..nrequired]` fill slots `0..nrequired`. Selection
     /// guarantees `argc >= nrequired`, so they're always present.
@@ -480,6 +488,27 @@ pub struct CompiledArm {
     pub rest_slot: Option<usize>,
     /// Total frame slots (params + optionals + rest + `let`/`letrec` binders).
     pub nslots: usize,
+    /// Call-site inline-cache slots this arm's body uses, numbered **arm-relative**
+    /// from 0 (ADR-175 Phase A). A process activating this arm resolves a contiguous
+    /// block of this many slots in its own IC tables ([`Heap::vm_arm_block`]) and runs
+    /// the arm with the block's base in `Heap::cur_ic_base` — so the *same* compiled
+    /// arm (and its JIT'd native code, whose site ids are baked in) is valid in every
+    /// process, each against its own IC block. Before this, sites were absolute in the
+    /// compiling process's table, which made a shared arm's ICs silently dead in every
+    /// *other* process (its sites failed their bounds checks).
+    pub nsites: u32,
+    /// Global-read IC slots, arm-relative from 0 — the `Node::GlobalIc` counterpart of
+    /// [`Self::nsites`], indexing `Heap::vm_global_ics` via `Heap::cur_gic_base`.
+    pub ngsites: u32,
+    /// Process-independent identity for this arm instance, from a global counter —
+    /// the key under which each process tracks its IC block for this arm
+    /// ([`Heap::vm_arm_block`]). An `Arc` pointer would ABA after a drop; this can't.
+    pub uid: u64,
+    /// Source position per arm-relative call site (indexed by site id), recorded at
+    /// compile time. `Heap::vm_arm_block` copies these into the process's absolute
+    /// `dbg_site_pos` table (debug builds) so the JIT stale-operand diagnostics can
+    /// name a site's `.blsp` file:line. Empty for synthetic/test arms.
+    pub site_pos: Box<[Option<(crate::error::Pos, Option<std::sync::Arc<str>>)>]>,
     pub body: Node,
     /// The body compiled to flat **bytecode** (`Chunk`). [`vm_run_bc`] runs this — the
     /// sole VM executor since ADR-100 Stage 5. `compile_arm` always fills it (every
@@ -730,6 +759,10 @@ pub(crate) enum Step {
         /// its free vars in *its* scope (Stage 2c: a tail call can cross into a
         /// closure with a different captured env).
         genv: EnvId,
+        /// The callee arm's IC block in this process ([`Heap::vm_arm_block`],
+        /// ADR-175 Phase A) — the driver installs it as the current bases when it
+        /// enters the arm.
+        bases: (u32, u32),
     },
 }
 
@@ -746,11 +779,15 @@ pub(crate) enum ChunkExit {
         arm: Arc<CompiledArm>,
         args: SmallVec<[Value; 4]>,
         genv: EnvId,
+        /// Callee IC block (see [`Step::Tail::bases`]).
+        bases: (u32, u32),
     },
     Call {
         arm: Arc<CompiledArm>,
         args: SmallVec<[Value; 4]>,
         genv: EnvId,
+        /// Callee IC block (see [`Step::Tail::bases`]).
+        bases: (u32, u32),
     },
     /// A clean `receive` on an empty mailbox raised `Control::Suspend` through the
     /// `%receive` native (state-capture path, ADR-100 §8). `exec_chunk` rewound `ip`

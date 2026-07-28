@@ -2020,6 +2020,18 @@ pub struct Heap {
     /// Same lifecycle: allocated at compile time, validated by (sym, epoch),
     /// cleared wholesale on a RUNTIME compaction.
     vm_global_ics: RefCell<Vec<Option<GlobalIcEntry>>>,
+    /// Per-arm IC block registry (ADR-175 Phase A): [`CompiledArm::uid`] → the
+    /// `(call-site base, global-site base)` this process allocated for that arm in
+    /// the tables above. Blocks are contiguous, lazily allocated on first activation
+    /// ([`Heap::vm_arm_block`]), and never individually freed — a `runtime_collect`
+    /// table clear drops the whole map in lockstep with the tables.
+    arm_ic_blocks: RefCell<std::collections::HashMap<u64, (u32, u32)>>,
+    /// The **currently executing arm's** IC block bases (call sites / global sites).
+    /// Set by the VM/JIT drivers at every arm transition; every site-indexed IC
+    /// method resolves `base + arm-relative site` through these. Plain `Cell`s: the
+    /// Heap is single-threaded (one worker owns a process at a time).
+    cur_ic_base: Cell<u32>,
+    cur_gic_base: Cell<u32>,
     /// JIT execution state, per process. These were thread-locals; moved onto the heap so
     /// (a) they travel with a process that migrates worker threads — notably `jit_force_vm`,
     /// which must stay set across a yield during an over-deep VM drain — and (b) each access
@@ -2281,6 +2293,9 @@ impl Heap {
             #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),
+            arm_ic_blocks: RefCell::new(std::collections::HashMap::new()),
+            cur_ic_base: Cell::new(0),
+            cur_gic_base: Cell::new(0),
             jit_call_env: EnvRoot::Stable(EnvId::GLOBAL),
             jit_native_depth: 0,
             jit_stack_limit: 0,
@@ -2358,6 +2373,9 @@ impl Heap {
             #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),
+            arm_ic_blocks: RefCell::new(std::collections::HashMap::new()),
+            cur_ic_base: Cell::new(0),
+            cur_gic_base: Cell::new(0),
             jit_call_env: EnvRoot::Stable(EnvId::GLOBAL),
             jit_native_depth: 0,
             jit_stack_limit: 0,
