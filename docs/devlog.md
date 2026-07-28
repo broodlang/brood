@@ -9673,3 +9673,161 @@ All in `std/tool/project.blsp` (parsing/normalisation) + the manifest macro docs
 Tests: a new `:optional`/`:dev-dependencies` block in `project_test.blsp`; the existing
 dep-map assertions in `project_test`/`package_test` updated for the new `:optional false`
 key. Full non-conformance suite green, `nest check` clean, formatted.
+## 2026-07-28 — the GC's forwarding tables were hash maps; `sort` −17.6%
+
+Chasing the benchmark standing (`sort`/`bintree`/`nbody` are the three 6/7 rows within 8% of
+a rank) led to the collector. `sort` first, because it is also 22% of the aggregate.
+
+**Measured, not assumed.** Phase-isolating the row in separate processes: building the 375k
+list ≈65 ms, walking it ≈21 ms, `sort` on a *list* ≈97 ms but on a *vector* ≈47 ms. That 50 ms
+gap is not the sort — it is materializing 375k items. Raising `BROOD_GC_FLOOR` so collections
+stop firing took the whole row 210 → 132 ms, which said GC, not allocation. `(gc-stats)` then
+gave the number outright: **4 collections, 946,464 objects copied, 95.7 ms of pause in a 158 ms
+run — 61% of the row, at 101 ns per copied object.** Three hundred cycles to move 48 bytes.
+
+**The cause: `FlushForward` kept its forwarding pointers in ten `HashMap<u32, u32>`s.** Every
+copied object paid a SipHash probe plus an insert, and the insert rehashed as the table grew
+into the hundreds of thousands. But the keys *are slab indices* — dense, and bounded by the
+source slab's length — so they never needed hashing at all. Replaced with a dense `Vec<u32>`
+(`FwdTable`, `u32::MAX` = not-yet-copied), sized from the source generation up front.
+
+Same run afterwards: **same 4 collections, same 946,464 objects copied, pause 95.7 → 44.6 ms**
+(101 → 47 ns/object), wall 158 → 113 ms. Identical work, half the cost — which is the shape a
+real fix should have.
+
+Suite A/B against `4f5117e4`, best-of-7: **`sort` −17.6%** (216 → 178 ms), `json` −4.1%,
+`persistent-map` −3.7%, `pipeline` −2.1%, `wordcount` −1.9%; `fib` flat.
+
+**Why `bintree` and `nbody` did not move, which is the useful part.** They are not GC-*copy*
+bound — `(gc-stats)` per row: `bintree` 11 collections but only 45,175 objects copied (5.0 ms,
+~4% of the row), `nbody` 8 collections copying **798** objects (6.2 ms), `wordcount` zero
+collections. Their objects die young, so there is nothing to forward. The nursery-size dial
+splits them the same way: `BROOD_GC_FLOOR=2000000` takes `sort` −37% and `persistent-map` −12%
+but makes `bintree` **+19% worse** and `nbody` +9% worse — a bigger nursery helps live-set
+builders and hurts churners, so it is not a knob to turn globally.
+
+**Open, for the next pass:** `nbody` spends ~770 µs *per collection* while copying ~100
+objects, i.e. a fixed per-collection cost unrelated to live data. Two suspects, both in
+`minor_collect`: it rebuilds the whole `form_pos` map on every collection, and
+`Slabs::with_capacity_like` allocates a fresh nursery sized to the outgoing one each flip.
+Unmeasured — do not act on it before profiling, since this session has already had two
+confidently-named suspects turn out wrong.
+
+## 2026-07-28 (later) — `def`'d data was a 70× cliff: the JIT deopted on every shared-region read
+
+Continuing the standing work. After the forwarding-table fix, `sort` was still only 1.4×
+faster with the JIT than without it (`bintree` 3.3×, `matmul` 7×) — so something in that row
+was refusing to run native.
+
+**The measurement that found it.** Walking a pair in a JIT'd loop, 2 M iterations, with the
+pair created **locally** vs the identical pair `def`'d:
+
+| | LOCAL | RUNTIME (`def`'d) |
+|---|---|---|
+| `first` | 7 ms (~1 ns) | **161 ms (~77 ns)** |
+| `vector-ref` | 8 ms | **210 ms (~101 ns)** |
+
+Then the confirming run: with `BROOD_NO_JIT=1` those same loops cost 137 ms and 210 ms — i.e.
+**the RUNTIME figures were already the interpreter's**. The JIT was contributing nothing.
+
+**Why.** `emit_prim1`'s inline `first`/`rest` checks the handle's region and **deopts** on
+anything but LOCAL. The deopt fires per element, the arm's consecutive-deopt counter bails it,
+and the whole loop reverts to the VM. The old comment called non-LOCAL "uncommon on hot
+cons-list paths" — but a global holding a data structure is ordinary Brood. `sort` does
+`(def data (sort …))` and then walks it; `matmul` derefs a `def`'d matrix ~16 M times.
+
+**What it is not.** The obvious fix — hoist a shared-region slab base and inline
+`base + idx*48` like the LOCAL path — **cannot work**: RUNTIME slabs are `boxcar::Vec`, chunked
+rather than contiguous precisely so they can be appended lock-free, so there is no single base
+pointer. (I wrote the accessors before discovering this and reverted them.) The `Arc::clone` in
+`code_gen_pinned` is also *not* the cost — removing it moved 161 → 148 ms, ~8%.
+
+So the fix is simply to stop deopting: non-LOCAL regions now call the same `car`/`cdr`
+callbacks the no-hoist path already used, joined with the inline result through a block
+parameter. One call per read instead of surrendering the loop. **RUNTIME `first`: 144 → 36 ms
+(4×)**, LOCAL unchanged at 7 ms.
+
+Suite A/B vs `46db4405`, best-of-7: **`sort` −17.3%** (179 → 148 ms); everything else flat,
+which is the expected shape — this fires only on `def`'d heap data. With the forwarding fix,
+`sort` is **216 → 148 ms, −31.5%** across the two changes.
+
+`vector_ref` (dynamic index) already fell back to the FFI rather than deopting — its own doc
+cites "matmul's def'd rows". Its constant-index sibling `inline_vec_ref` still deopts, and is
+the obvious next candidate; I left it alone because measurement said the rows it would help are
+not bailing (`nbody` 352 ms JIT vs 1112 ms VM, `matmul` 159 vs 1126), so the payoff is
+unproven. Worth doing on evidence, not on symmetry.
+
+## 2026-07-28 (evening) — two JIT deopt cliffs, both real, both NOT worth shipping
+
+Hunting more of the morning's shared-region cliff with `BROOD_DEOPT_TRACE=1` across the weak
+rows. One arm showed up: **`nbody`'s `advance-body` deopts 16 times and is then permanently
+BAILED** to the interpreter — its core physics function. `bintree`, `wordcount`, `pipeline` and
+`nqueens` are clean.
+
+Bisecting a minimal repro found **two** independent per-call deopts, both genuine:
+
+1. **`inline_vec_ref` deopts on non-LOCAL.** The constant-index `(nth bi 0)` on a `def`'d
+   vector-of-vectors — the dynamic-index sibling `vector_ref` already falls back to the FFI
+   instead (its doc even cites "matmul's def'd rows"). The fallback block already existed in
+   `inline_vec_ref`, unreachable, named `dead_ffi`.
+2. **Arithmetic with two type-erased operands guesses `int`.** `emit_prim2` takes the float
+   path only if an operand is *statically* float (or the arm has a float slot); with two
+   `Op::Handle`s — two vector reads — it falls through to `as_int`, which deopts on a `Float`.
+   Per evaluation, with no checkpoint, so the arm re-runs from the top on the VM. In a minimal
+   repro: **~497k deopts over 500k iterations**.
+
+Both were fixed — (2) by dispatching on the runtime tags into a float or int block joined
+through a boxed `Handle`. The repro went **495,751 deopts → 0**, and all six benchmark
+checksums stayed identical to `BROOD_NO_JIT=1`.
+
+**And the suite did not care.** A/B vs `c9d3fac8`, best-of-7 with the movers re-run solo at
+best-of-11: `nbody` **+2.2% worse**, `nqueens` −1.0%, everything else flat. With only fix (1):
+`nbody` +1.4% worse, `sort` +0.7%, the rest flat. So both changes were **reverted** — they cost
+a few instructions on paths where the old guess was right, and buy nothing where it was wrong,
+because the arms that hit the bad case were *already* bailed to the VM, where a deopt is free.
+
+Worth recording rather than re-discovering: **a deopt cliff is only worth closing if the arm
+would otherwise be running native.** `nbody`'s `advance-body` still deopts 16 times after both
+fixes, so its bail has a third cause I did not find; whatever that is, it is upstream of these
+two, and closing them without it changes nothing. The evidence trail (deopt counts per
+construct, the `Prim2SlotSlot SetLocal Prim2SlotInt Prim2SlotInt Prim2` fingerprint) is in this
+entry so the next attempt starts from the third cause, not the first two.
+
+## 2026-07-28 (evening) — 300K processes vs the BEAM: spawn rate is fine, memory and *scaling* are not
+
+Measured head-to-head at the scale that matters for a process-per-connection design,
+300,000 processes spawned and left **alive** (parked in `receive`):
+
+| | Brood | Elixir | |
+|---|---|---|---|
+| spawn time | 575 ms | 438 ms | 1.3× slower |
+| resident | 1.58 GB | 907 MB | 1.74× heavier |
+| **per process** | **5.4 KB** | **2.68 KB** | |
+
+So the spawn *rate* is genuinely competitive — 675 ns/process after the registry sharding
+(`1e64db5e`). The memory gap is the real one, and it points at the per-process `Heap`: two
+`Slabs` of eleven `Vec`s each, plus caches and maps, against the BEAM's ~330-word process.
+That is the case for pooling/recycling process heaps rather than constructing them.
+
+**But the bigger finding is parallel scaling, and it is not what I expected.** `pfib` — 100
+*independent* `fib(31)`s, embarrassingly parallel — on a 6-core/12-thread i5-11500H:
+
+| workers | 1 | 2 | 4 | 8 | 12 |
+|---|---|---|---|---|---|
+| wall | 457 ms | 463 ms | 275 ms | 205 ms | 208 ms |
+| speedup | 1.0× | **1.0×** | 1.7× | 2.3× | 2.3× |
+
+**2.3× out of a possible ~6×**, and *two* workers give no speedup at all.
+
+**The distribution machinery is not the cause**, which is the useful half. `(sched-stats)`
+during the run: at J=2, **99 steals** for 100 processes; at J=12, **100 steals**, peak-threads
+= 12, migrations 0. The processes really are being handed out to every worker — throughput
+just doesn't follow. So the next question is what serialises *inside* the workers (allocator?
+shared-region reads? memory bandwidth on 6 physical cores?), not whether the scheduler spreads
+work.
+
+**Coverage gap found while checking:** `work_stealing.rs`, `live_migration.rs`,
+`preemption.rs` and `concurrency_race.rs` prove the mechanisms are live and correct, but
+**nothing asserts balance or scaling**, and `(sched-stats)` is aggregate-only — there is no
+per-worker breakdown to write such a test against. A scaling assertion (embarrassingly
+parallel work must beat 1 worker by ≥ N×) would have caught the 1.0× at J=2 immediately.

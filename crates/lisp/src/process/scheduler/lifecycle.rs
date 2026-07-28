@@ -41,7 +41,7 @@ pub(super) fn deregister(pid: u64, reason: Message, heap: &Heap) {
     // lock while reaching for REGISTRY. Don't introduce a function that
     // holds REGISTRY while taking NAMES or MONITORS, or this becomes a
     // genuine ordering hazard.
-    let mailbox = crate::core::sync::lock(&REGISTRY).remove(&pid);
+    let mailbox = REGISTRY.remove(pid);
     // A process killed (link/monitor/`exit`) while parked never runs a status
     // transition back out of `ST_WAITING`, so square up the global parked count here —
     // else `parked_count` leaks upward and `report_parked_liveness` keeps scanning.
@@ -61,7 +61,6 @@ pub(super) fn deregister(pid: u64, reason: Message, heap: &Heap) {
     // that restarts a dead listener finds its port already being freed. A process
     // that `tcp-close`d its sockets has none left here — this is a no-op then.
     crate::net::close_process_sockets(pid);
-    crate::core::sync::lock(&PARENTS).remove(&pid);
     // Drop any registered names that pointed at this pid — Erlang semantics
     // (a name lives only as long as its process). Without this, named-spawn
     // would see the stale entry as "already running" and never respawn.
@@ -111,7 +110,7 @@ pub(crate) fn exit_propagate(pid: u64, reason: Message) {
 }
 
 fn exit_with(pid: u64, reason: Message, hard: bool) {
-    let mailbox = match crate::core::sync::lock(&REGISTRY).get(&pid).cloned() {
+    let mailbox = match REGISTRY.get(pid) {
         Some(mb) => mb,
         None => return, // already dead / never existed
     };
@@ -198,9 +197,8 @@ fn spawn_impl(heap: &Heap, f: Value, link_parent: bool) -> Result<u64, LispError
     // fan-out of many churny processes doesn't each climb to the single-process
     // GC ceiling. Balanced by the `live_process_dec` in `deregister`.
     crate::core::heap::live_process_inc();
-    crate::core::sync::lock(&PARENTS).insert(pid, parent);
-    let mailbox = Mailbox::new();
-    crate::core::sync::lock(&REGISTRY).insert(pid, Arc::clone(&mailbox));
+    let mailbox = Mailbox::new_with_parent(parent);
+    REGISTRY.insert(pid, Arc::clone(&mailbox));
 
     // Atomic link (`spawn_linked`): register the symmetric parent↔child link NOW — while
     // the child is registered (so `link`'s liveness check passes) but NOT yet enqueued, so
@@ -281,7 +279,7 @@ pub fn spawn_root_program(
     SPAWNED.fetch_add(1, Ordering::SeqCst);
     crate::core::heap::live_process_inc();
     let mailbox = Mailbox::new();
-    crate::core::sync::lock(&REGISTRY).insert(pid, Arc::clone(&mailbox));
+    REGISTRY.insert(pid, Arc::clone(&mailbox));
 
     ensure_workers();
     let worker_id = pick_spawn_worker();
