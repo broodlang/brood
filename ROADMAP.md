@@ -1332,7 +1332,11 @@ Runtime housekeeping (both items landed):
   (`std/tool/test.blsp`, `test--make-filter`); `nest` only forwards argv.
   `tests/test_selection_test.blsp` (54 cases, incl. cross-process spec round-trip).
   ⬜ Still unmapped from `mix test`: `--stale` (needs a per-test dependency graph),
-  `--formatter`, `--breakpoints`. (`--cover` shipped — see "Test coverage" below.)
+  `--formatter`, `--breakpoints`. (`--cover` shipped — see "Test coverage" below.) A
+  **process-native tracing debugger** prototype now exists (`std/tool/debug`, ADR-174):
+  `break` parks without a timeout + a multi-process paused queue, `spy`-fed aggregate
+  queries, and a causal tree propagated transparently across `spawn`. Deferred: send-level
+  causality (a GC-traced Heap slot; own pass) and wiring it into `nest observe`.
 - ✅ **Test coverage — both tiers** — function-level `nest test --cover` (2026-07-24)
   (ADR-148, [`docs/coverage.md`](docs/coverage.md)): which project functions the
   suite never entered, plus `--cover-min PCT` to fail the run under a floor.
