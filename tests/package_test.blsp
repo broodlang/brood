@@ -78,7 +78,7 @@
       (pkg-write-project root
         "a" "a" "(defn f () 1)" " :dependencies [[b :path \"../b\"]]")
       (assert= (package/package--manifest-deps (path-join root "project.blsp"))
-        (list {:name 'b :kind :path :path "../b"}))))
+        (list {:name 'b :kind :path :path "../b" :optional false}))))
   (test "a manifest without :dependencies yields nil"
     (let (root (pkg-fixture-root))
       (pkg-write-project root "a" "a" "(defn f () 1)" "")
@@ -266,7 +266,7 @@
             (assert= (get e2 :sha256) sha))))))
   (test ":tarball deps parse; a missing :sha256 is rejected"
     (assert= (project/project-parse-deps [['foo :tarball "https://x/foo.tar.gz" :sha256 "abc"]])
-      (list {:name 'foo :kind :tarball :url "https://x/foo.tar.gz" :sha256 "abc"}))
+      (list {:name 'foo :kind :tarball :url "https://x/foo.tar.gz" :sha256 "abc" :optional false}))
     (is (includes? (try
                      (project/project-parse-deps [['foo :tarball "https://x/foo.tar.gz"]])
                      (catch e (error-message e)))
@@ -350,7 +350,7 @@
                 "no registry entry"))))))
   (test ":version deps parse into a registry dep map"
     (assert= (project/project-parse-deps [['foo :version "1.2.0"]])
-      (list {:name 'foo :kind :registry :version "1.2.0"}))))
+      (list {:name 'foo :kind :registry :version "1.2.0" :optional false}))))
 
 ;; Namespace-collision detection (ADR-070). We test the cwd-free helpers
 ;; (`package--provided-modules` / `package--check-namespace-collisions`) directly,
@@ -447,7 +447,7 @@
       (is (includes? out "a keeper comment"))
       (let (form (read-string out))
         (assert= (project/project-parse-deps (plist-get (rest form) :dependencies))
-          (list {:name 'greeter :kind :path :path "../greeter"})))))
+          (list {:name 'greeter :kind :path :path "../greeter" :optional false})))))
   (test "add appends to an existing :dependencies"
     (let (src "(project :name \"app\" :dependencies [[a :path \"../a\"]])\n"
           out (package/package--manifest-add src

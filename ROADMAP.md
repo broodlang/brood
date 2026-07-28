@@ -46,6 +46,33 @@ Shipped as ADRs:
   `type-of`, so no two records could dispatch apart; they were retired in favour of
   `std/ability.blsp` (`defability`/`impl`/`defrecord*`, nominal dispatch).
   `defbehaviour` stays in `std/protocol.blsp`.
+  - ✅ **The display protocol** (ADR-171, 2026-07-28) — the first std use of an
+    ability for open-extension rendering: `std/show.blsp`'s `Display`/`to-str`
+    (Elixir's `String.Chars`), with a zero-cost prelude `*show*` hook so the screen
+    printers let a record define how it prints. Second audit candidate — a
+    `JsonEncode` ability so user records serialize instead of `json--emit` erroring
+    — is the same shape, left as a follow-up. (Audit found only these two; the rest
+    of `std/` is correctly-closed `cond`/state-machines per ADR-011.)
+  - ⬜ **Checker gap:** a `:use`d ability op from a *loose disk* module (not embedded,
+    not in a project) is flagged `unbound symbol` though it runs; embedded/same-module
+    use resolves. Surfaced by the `show` cross-module test. **[kernel/checker]**
+  - ⬜ **Abilities v2** ([ADR-172](docs/decisions.md), design decided 2026-07-28) —
+    tightens ADR-168's open runtime model to **app-sovereign coherence, enforced at
+    compile time, live-replaceable**: `impl` only what you own (ability or type),
+    `bridge` (app-only, greppable) for deliberate cross-library linking, glue packages
+    authorized by the app manifest's `:bridges`, precedence `app > type-owner >
+    ability-owner > :default > native`. Dispatch specialized through the IC/JIT with
+    deopt-on-reload; `:sealed` abilities go fully static/exhaustive; the runtime
+    `*impls*` registry becomes the backstop. `Display` becomes always-on core (records
+    only, app-gated, guarded) superseding ADR-171's opt-in `show`. Needs
+    [ADR-070](docs/decisions.md) (package-rooted namespaces) for the clean app/library
+    line. **[kernel/checker/eval]**
+    - ✅ **Slice 1 — optional + dev dependencies** (2026-07-28): the manifest now takes
+      `:optional true` per dep and a `:dev-dependencies` list (tagged `:dev true`, own
+      slot) — the package-level seam the bridge story needs. Parsing/normalisation done
+      in `std/tool/project.blsp`; resolver + release-bundle consumption is next. Slices
+      2–6 (`bridge`/`:bridges`, coherence checking, precedence, dispatch specialization,
+      always-on `Display`) still ⬜.
 - ✅ **ADR-159** — grapheme-*indexed* accessors (`grapheme-count`, `grapheme-at`,
   `substring-graphemes`), so the documented-correct cursor step stops costing a vector
   of every cluster in the string per keystroke.

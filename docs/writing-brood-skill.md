@@ -38,8 +38,10 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
    rejected in a pattern), a literal symbol with `'sym`, a constant with
    `42`/`:k`/`"s"`.
 
-5. **Truthiness:** only `nil` and `false` are falsy. `0`, `""`, `()` are
-   **truthy**. `cond`'s catch-all is `:else` (or `else`) — never `t`/`true`.
+5. **Truthiness:** only `nil` and `false` are falsy. `0`, `""`, `[]`, `{}`, `#{}`
+   are **truthy** — but the **empty *list* is falsy** (`()` ≡ `nil`), so test
+   emptiness with `(empty? x)`, never a bare `(if a-maybe-list …)`. `cond`'s
+   catch-all is `:else` (or `else`) — never `t`/`true`.
 
 6. **Don't tuple-destructure a single-clause top-level `defn` param.** Name the
    param, unpack in the body: `(defn area (p) (let ([x y] p) (* x y)))`, not
@@ -162,7 +164,7 @@ round-trips. Two faster moves:
   | a `flush` after `print` | nothing — `print` flushes stdout every call |
   | raw ANSI (`clear`/`home`/cursor) | `(:use editor/ansi)` (bare `(require 'editor/ansi)` leaves names qualified) → `(ansi-clear)`/`(ansi-home)`/`(ansi-cursor r c)` are **zero-arg fns returning an escape string** — call them: `(print (ansi-clear))`, never `(print ansi-clear)` (prints `#<fn …>`). A render loop wants `std/display`. |
   | a built-in RNG (`rand`) | `rng`/`rand-int`/`rand-float`/`shuffle`/`sample` — pure & seedable, return `[value next-seed]`; thread the seed through your state |
-  | a set / `#{}` | `(:use set)` (bare `(require 'set)` leaves names qualified) → a set is a **map of `element → true`**: membership `(contains? s x)`, elements `(keys s)`; adds `(set coll)`, `conj`/`disj`, `union`/`intersection`/`difference`/`subset?`. No `#{}` literal or `set?` — test with `map?`. |
+  | a set / `#{}` | First-class kernel value (ADR-060): `#{1 2 3}` literal, `(set? s)` true, `(map? s)` **false**, prints `#{…}`, never `=` to a map. Collection protocol works with no import — `(contains? s x)`, `(conj s x)`/`(disj s x)`, `(get s x)` (element or nil), `count`/`first`/`map`/`fold`/`into`/`vec`/`seq` (as elements). `(:use set)` adds only `(set coll)` (dedup) + `union`/`intersection`/`difference`/`subset?`. |
 
 ## When to reach for a process (vs staying pure)
 

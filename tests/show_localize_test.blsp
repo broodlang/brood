@@ -1,0 +1,75 @@
+;; A worked example / prototype: locale-aware display, the Elixir-`Money` shape.
+;; Shows how `Display`/`Inspect` (std/show.blsp) compose with an app-defined
+;; `Localize` ability + a `*locale*` dynamic var so even a plain `(println money)`
+;; localizes — the reusable half of an i18n story. Register-only; run by `nest test`.
+;;
+;; NOTE: `Localize` and `*locale*` are defined HERE (not in std) on purpose — this is
+;; a prototype of the pattern, not a committed API; where i18n lives is still open.
+(defmodule show-localize-test (:use ability) (:use show) (:use test))
+
+;; The "current locale" — an ambient dynamic var, scoped with `binding`. A web
+;; handler would `(binding (*locale* (request-locale req)) …)` around its render.
+(defdyn *locale* :en)
+
+;; A money value — the struct a `money` library would export.
+(defrecord* money (amount currency))
+
+(defn money--symbol (currency)
+  (case currency :usd "$" :eur "€" :gbp "£" "?"))
+
+;; Locale-aware rendering: en → "$10.50", de → "10,50 $" (comma decimal, trailing
+;; symbol). Deliberately tiny — a real one would use a CLDR table.
+(defn money--render (m locale)
+  (let (n (to-fixed (get m :amount) 2)
+        symbol (money--symbol (get m :currency)))
+    (case locale
+      :de (str (replace n "." ",") " " symbol)
+      (str symbol n))))
+
+;; `Localize` — rich, parameterized rendering dispatched on the VALUE's type, and
+;; open to third-party types (a Date, a Number, another lib's struct each impl it).
+(defability Localize (localize [self locale] :-> string))
+(impl Localize
+  show-localize-test/money (localize [m locale] (money--render m locale)))
+
+;; `Display` reads the AMBIENT locale, so plain `(println money)` localizes — the op
+;; stays 1-arg; the locale flows through the dynamic var, not an extra parameter.
+(impl Display
+  show-localize-test/money (to-str [m] (localize m *locale*)))
+
+;; `Inspect` — the debug form is locale-independent and self-describing.
+(impl Inspect
+  show-localize-test/money
+  (inspect [m] (str "#money<" (get m :amount) " " (name (get m :currency)) ">")))
+
+(describe "locale-aware Display via *locale*"
+  (test "the ambient default locale (:en)"
+    (assert= (to-str (money 10.5 :usd)) "$10.50")
+    (assert= (with-out-str (println (money 10.5 :usd))) "$10.50\n"))
+  (test "(binding (*locale* :de) …) switches the rendering, print included"
+    (assert= (binding (*locale* :de) (to-str (money 10.5 :eur))) "10,50 €")
+    (assert= (with-out-str (binding (*locale* :de) (println (money 10.5 :eur))))
+      "10,50 €\n"))
+  (test "the explicit Localize op takes the locale as data (no dynamic var)"
+    (assert= (localize (money 3 :gbp) :en) "£3.00")
+    (assert= (localize (money 3 :gbp) :de) "3,00 £")))
+
+(describe "Inspect is a distinct, locale-independent debug form"
+  (test "inspect vs display"
+    (assert= (inspect (money 10.5 :usd)) "#money<10.5 usd>")
+    ;; inspect ignores *locale*; display honors it
+    (assert= (binding (*locale* :de) (inspect (money 10.5 :usd))) "#money<10.5 usd>")
+    (assert= (binding (*locale* :de) (to-str (money 10.5 :usd))) "10,50 $")))
+
+;; Cross-process: *locale* is dynamic (process-local), and a record deep-copies on
+;; send. A worker renders under its OWN bound locale; the parent under its own.
+; parent still :en
+(describe "locale is per-process"
+  :isolated
+  (test "a worker binds its own locale; the parent keeps :en"
+    (let (me (self))
+      (spawn (send me [:r (binding (*locale* :de) (to-str (money 20 :eur)))]))
+      (let (worker-rendered (receive ([:r s] s)))
+        ; worker used :de
+        (assert= worker-rendered "20,00 €")
+        (assert= (to-str (money 20 :eur)) "€20.00")))))
