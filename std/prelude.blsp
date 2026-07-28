@@ -1092,21 +1092,36 @@ place even when they end up empty — removing a leaf never prunes its branch."
 (def *out* %write-out)
 (%declare-dynamic '*err*)
 (def *err* %write-err)
+;; `*show*` — a late-bound per-argument display transform for the SCREEN printers
+;; (`print`/`println`/`eprint`/`eprintln`). nil (the default) means "render each
+;; argument the built-in way", so there is zero cost until something opts in — one
+;; nil check per call. `std/show.blsp` (`(require 'show)`) installs a transform that
+;; routes a *record* through the `Display` ability's `to-str` op, so a record can
+;; define how it prints (Elixir's `String.Chars` model) while built-ins keep the
+;; fast native render. It is an ordinary dynamic var, so `(binding (*show* f) …)`
+;; overrides the display transform for a scope. Only the screen printers consult it;
+;; `str`/`pr-str`/`fmt` stay on the native renderer.
+(%declare-dynamic '*show*)
+(def *show* nil)
+(defn show--args (xs)
+  ;; Each print argument, run through the installed `*show*` transform — or the
+  ;; arguments untouched when none is installed (the default fast path).
+  (if *show* (map *show* xs) xs))
 (defn print (& xs)
   "Write the display forms of the arguments to the current `*out*` port (stdout by default); returns nil."
-  (*out* (apply %render xs))
+  (*out* (apply %render (show--args xs)))
   nil)
 (defn println (& xs)
   "Write the display forms of the arguments to the current `*out*` port, followed by a newline."
-  (*out* (str (apply %render xs) "\n"))
+  (*out* (str (apply %render (show--args xs)) "\n"))
   nil)
 (defn eprint (& xs)
   "Write the display forms of the arguments to the current `*err*` port (stderr by default); returns nil."
-  (*err* (apply %render xs))
+  (*err* (apply %render (show--args xs)))
   nil)
 (defn eprintln (& xs)
   "Write the display forms of the arguments to the current `*err*` port, followed by a newline."
-  (*err* (str (apply %render xs) "\n"))
+  (*err* (str (apply %render (show--args xs)) "\n"))
   nil)
 
 ;; `with-out-str` runs `body` for effect with stdout diverted into a capture

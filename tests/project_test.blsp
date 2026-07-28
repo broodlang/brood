@@ -55,13 +55,14 @@
 (describe "project: :dependencies parsing (ADR-037)"
   (test "a :git entry normalises to a dep map"
     (assert= (project/project-parse-dep '[parser :git "https://example.com/p.git" :ref "v1.2.0"])
-      {:name 'parser :kind :git :url "https://example.com/p.git" :ref "v1.2.0"}))
+      {:name 'parser :kind :git :url "https://example.com/p.git" :ref "v1.2.0" :optional false}))
   (test "a :path entry normalises to a dep map"
     (assert= (project/project-parse-dep '[shared :path "../shared"])
-      {:name 'shared :kind :path :path "../shared"}))
+      {:name 'shared :kind :path :path "../shared" :optional false}))
   (test "parse-deps maps over the whole vector"
     (assert= (project/project-parse-deps '[[a :path "../a"] [b :path "../b"]])
-      (list {:name 'a :kind :path :path "../a"} {:name 'b :kind :path :path "../b"})))
+      (list {:name 'a :kind :path :path "../a" :optional false}
+        {:name 'b :kind :path :path "../b" :optional false})))
   (test "nil dependencies parse to nil"
     (assert= (project/project-parse-deps nil) nil))
   (test "a non-vector :dependencies value is rejected"
@@ -87,6 +88,28 @@
     (is (includes? (try (project/project-parse-dep '[parser :path]) (catch e e))
           "too short"))))
 
+;; `:isolated` — `project-apply` clobbers the ambient `*project-*` globals; roll them back.
+(describe "project: :optional deps and :dev-dependencies (ADR-172)"
+  :isolated
+  (test ":optional defaults to false"
+    (assert= (get (project/project-parse-dep '[a :path "../a"]) :optional) false))
+  (test ":optional true is recorded on any dep kind"
+    (assert= (get (project/project-parse-dep '[a :path "../a" :optional true]) :optional) true)
+    (assert= (get (project/project-parse-dep '[a :git "u" :ref "r" :optional true]) :optional) true))
+  (test ":dev-dependencies parse and tag :dev true, kept separate from :dependencies"
+    (project/project-apply '(:name demo
+                              :dependencies [[core :git "u" :ref "r"]] :dev-dependencies
+                              [[testkit :path "../tk"]]))
+    ; production deps stay in their own slot, untagged
+    (assert= (map :name *project-dependencies*) (list 'core))
+    (assert= (map :dev *project-dependencies*) (list nil))
+    ; dev deps land in their own slot, tagged :dev true
+    (assert= (map :name *project-dev-dependencies*) (list 'testkit))
+    (assert= (map :dev *project-dev-dependencies*) (list true)))
+  (test "no :dev-dependencies parses to an empty dev-dep list"
+    (project/project-apply '(:name demo :dependencies [[core :path "../c"]]))
+    (assert= *project-dev-dependencies* nil)))
+
 ;; `:isolated` runs against a rolled-back private copy of the globals (ADR-017),
 ;; so the *project-* globals this clobbers via `(project ...)` don't leak.
 (describe "project: the (project ...) manifest macro treats its args as data"
@@ -97,8 +120,8 @@
       :version "0.0.1"
       :dependencies [[parser :git "https://example.com/p.git" :ref "v1"] [shared :path "../shared"]])
     (assert= *project-dependencies*
-      (list {:name 'parser :kind :git :url "https://example.com/p.git" :ref "v1"}
-        {:name 'shared :kind :path :path "../shared"}))))
+      (list {:name 'parser :kind :git :url "https://example.com/p.git" :ref "v1" :optional false}
+        {:name 'shared :kind :path :path "../shared" :optional false}))))
 
 ;; `:format-plugins` rules must resolve for EVERY dep kind: a `:path` dep's manifest
 ;; is read in place, a fetched dep's (:git/:tarball/:registry) from its `_deps/<name>/`

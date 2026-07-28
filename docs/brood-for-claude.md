@@ -17,8 +17,12 @@ A small, dynamic Lisp implemented in Rust.
   tail calls are guaranteed (including calls to *other* functions), so it's O(1)
   stack — or the combinators `fold` / `reduce` / `map` / `filter`. A *local*,
   self-contained loop is a `letrec`-bound closure called by name.
-- **Truthy / falsy**: only `nil` and `false` are falsy. `0`, `""`, `()` are
-  *truthy*.
+- **Truthy / falsy**: only `nil` and `false` are falsy. `0`, `""`, `[]`, `{}`,
+  `#{}` are *truthy*. **The one trap: an empty *list* is falsy**, because `()` ≡
+  `nil` — so `(if [] …)`/`(if "" …)`/`(if {} …)` take the `then` branch but
+  `(if () …)` takes `else`. A function returning a list-or-`nil` that you branch
+  on directly will treat an empty-list result as false. **Test emptiness with
+  `(empty? x)`** (uniform across every collection), never a bare `(if x …)`.
 - **Late binding**: globals can be re-defined; a redefinition is visible to
   every running process on its next lookup.
 
@@ -37,7 +41,8 @@ true  false  nil        ; booleans, nil
 name  foo-bar?  +       ; symbol (kebab-case is idiomatic)
 (f a b)                 ; call / list
 [1 2 3]                 ; vector — O(1) indexing
-{:a 1 :b 2}             ; map — immutable, insertion-ordered (no commas)
+{:a 1 :b 2}             ; map — immutable (no commas); key order is hash-derived,
+                        ;   NOT insertion order — sort keys if order matters
 'x   `(a ~b ~@xs)       ; quote / quasiquote / unquote / splice
 ```
 
@@ -836,18 +841,23 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   `[k v]` pairs; lists, vectors, strings, nil pass through). **Maps are seqable**:
   `(map f m)` / `(filter f m)` / `(fold f acc m)` / `(reduce f acc m)` /
   `(count m)` / `(into [] m)` all walk the map as its `[k v]` pairs — no need
-  for `(zip (keys m) (vals m))`. Iteration order is hash-driven (ADR-040), so
-  compare via `frequencies` when order would otherwise matter.
-- **set** (`(:use set)` in your `defmodule` header — `(require 'set)` alone
-  leaves the names qualified, `set/union`): a set is a **map of `element →
-  true`**, so
-  membership is `(contains? s x)`, elements `(keys s)`, size `(count s)`, and it's
-  seqable like any map. The module adds `(set coll)` (dedups), `conj`/`disj`,
-  `union`/`intersection`/`difference`/`subset?`. `(set [[0 0] [1 2]])` is the
-  natural live-cell model (structural vector keys). No `#{…}` literal or `set?`
-  yet (deferred) — test a set with `map?`.
+  for `(zip (keys m) (vals m))`. Iteration order (`keys`/`vals`/print/`seq`) is
+  **hash-derived (ADR-040), NOT insertion order and NOT sorted** — don't rely on
+  it; `(sort (keys m))` for a defined order, or compare via `frequencies`.
+- **set**: a **first-class kernel value** (`Value::Set`, ADR-060), written with a
+  `#{1 2 3}` literal (evaluates its elements and dedups). It is its *own* kind:
+  `(set? s)` is true, `(map? s)` is **false**, `(type-of s)` is `:set`, it prints
+  `#{…}`, and a set is **never** `=` to a map. It's a full member of the collection
+  protocol with no import: `(contains? s x)` tests membership, `(conj s x)`/`(disj s
+  x)` add/remove, `(get s x)` returns the *element* (not an index) or nil, `(count
+  s)`/`(first s)`/`map`/`fold`/`into`/`vec`/`seq` treat it as its elements, and
+  `(into #{} coll)` pours-and-dedups. `#{[0 0] [1 2]}` is the natural live-cell model
+  (structural vector keys). The **`set` library** (`(:use set)` — `(require 'set)`
+  alone leaves names qualified, `set/union`) adds only the set-specific extras:
+  `(set coll)` (build from a collection, dedups) and the algebra
+  `union`/`intersection`/`difference`/`subset?`.
 - **types**: `type-of` plus the `?` predicates — `int?` `float?` `string?`
-  `symbol?` `keyword?` `bool?` `nil?` `pair?` `vector?` `map?` `fn?` `ref?`
+  `symbol?` `keyword?` `bool?` `nil?` `pair?` `vector?` `map?` `set?` `fn?` `ref?`
   `pid?`
 - **arithmetic**: variadic `+ - * /`; comparison variadic chains
   `< > <= >= =`; `inc` `dec` `abs` `min` `max`; integer division `quot`
@@ -873,6 +883,11 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
 - **timing**: `now` (ms since epoch) `now-ns` (ns since epoch) `bench`
   (macro: `(bench "label" expr)` prints `label: N ms`, returns `expr`)
 - **I/O**: `print` `println` `slurp` `spit` `load` `eval-string` `read-string`.
+  `print`/`println` **space-join** their args (Python-style, via `%render`) —
+  distinct from `str`, which concatenates. To let a **record** define how it prints
+  on screen (Elixir's `String.Chars`), `(require 'show)`: it gives a `Display`
+  ability with `(to-str x)` and wires the screen printers to honor a record's
+  `(impl Display my/rec (to-str [r] …))` — built-ins unchanged (ADR-171).
   `print`/`println` **flush stdout every call** — there's no separate flush, so
   an animation frame paints immediately. For raw terminal control without the
   full display protocol, `(:use editor/ansi)` in your `defmodule` header (a bare

@@ -787,6 +787,10 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // Fuzzy (subsequence) string matching + ranking: `fuzzy-match` / `fuzzy-filter`,
     // the matcher completion UIs ride on. Pure Brood, no dependencies. Opt-in.
     embedded_module!("fuzzy", "std/fuzzy.blsp"),
+    // The display protocol for printing (Elixir's `String.Chars`): the `Display`
+    // ability + `to-str`, and a `*show*` hook so the screen printers let a record
+    // define how it prints. Pure Brood on `ability`. Opt-in, never in the prelude.
+    embedded_module!("show", "std/show.blsp"),
     // Plain-text utilities (pure string->string): `fill` greedy word-wraps to a column
     // width — the engine behind an editor's fill-paragraph / M-q, and reusable for
     // wrapping help text or terminal output. No dependencies. Opt-in.
