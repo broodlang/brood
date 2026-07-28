@@ -10804,7 +10804,15 @@ immediately below. Shipped: the precedence ladder (§3) via package identity, an
 `Display` is core and always on**: the whole ability system + `Display`/`Inspect` were
 folded into the prelude (`std/ability.blsp` + `std/show.blsp` deleted), so a record
 customizes printing with just `(impl Display …)` — no `(require 'show)`, no `display-on`
-(the interim activation is gone). Only **§7 (dispatch specialization)** remains.
+(the interim activation is gone), and **§7's inline cache** — ability dispatch through a
+per-op, epoch-validated inline cache (the `%dispatch` kernel primitive), so a hot
+monomorphic call skips the two `*impls*` CHAMP lookups; the shared `global_epoch`
+(bumped by `register-impl`'s `def *impls*` and by compaction) makes it reload-safe,
+GC-safe, and cross-process-correct with no new invalidation machinery, and it is
+invisible to the language (a pure memo of `impl-for`). Dispatch overhead vs a direct
+call roughly halved. What remains of §7 is compile-time *static* resolution where the
+receiver type is known, and the `:sealed` closed-switch — both pure optimizations over
+the working IC.
 
 **Amendment (2026-07-28) — abilities stay OPEN; no orphan rule, no `bridge` syntax.**
 A design review pulled §1/§2 apart and found the restriction unnecessary and the form

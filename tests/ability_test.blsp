@@ -147,6 +147,29 @@
     (impl Size :vector (size [v] (* 10 (count v))))
     (assert= (size [1 2 3]) 30)))
 
+;; ---- dispatch inline cache (ADR-172 §7): the per-op cache must stay transparent ----
+;; The `%dispatch` cache memoises id→impl; these prove it deopts on reload and doesn't
+;; leak one id's impl to another. WARM the cache (repeat calls) before each reload so a
+;; stale entry, if the epoch guard failed, would show.
+(describe "dispatch cache is transparent"
+  :serial
+  ; must deopt, not :v1
+  (test "a reload is picked up even after the cache is warm"
+    (defability Warm (warm [self] :-> any))
+    (impl Warm :int (warm [n] :v1))
+    ; warm the cache
+    (assert= (list (warm 1) (warm 1) (warm 1)) (list :v1 :v1 :v1))
+    ; reload → epoch bump
+    (impl Warm :int (warm [n] :v2))
+    (assert= (list (warm 1) (warm 1)) (list :v2 :v2)))
+  (test "distinct ids do not share a cached impl"
+    (defability Poly (poly [self] :-> any))
+    (impl Poly :int (poly [n] :int))
+    (impl Poly :string (poly [s] :string))
+    ;; alternate ids repeatedly — a mono cache must miss+re-resolve per id, never leak
+    (assert= (list (poly 1) (poly "a") (poly 2) (poly "b") (poly 3))
+      (list :int :string :int :string :int))))
+
 ;; ---- impl precedence: deterministic by tier, not load order (ADR-172 §3) ----
 ;; `register-impl`/`register-ability`/`impl-for`/`impl-rank` are exercised directly with
 ;; crafted provenance (a `from` ns per registration), so the ordering is testable without

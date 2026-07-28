@@ -89,10 +89,15 @@ Shipped as ADRs:
       project setup), and a ns whose package is `*project-name*` — or has no owner
       (root/REPL) — is the app. `ns-package`/`trace-with-packages` also tag stack frames
       with their owning package.
-    - ⬜ **Slice 5 — dispatch specialization**: lower ability calls through the IC/JIT
-      with deopt-on-reload (today every call is a runtime `impl-for` map-get); `:sealed`
-      abilities compile to a closed exhaustive switch. A Brood-side fast path (collapse
-      `impl-for`'s double lookup) is the first step; a kernel inline cache the second.
+    - 🟡 **Slice 5 — dispatch specialization** (2026-07-28): the **inline cache** shipped —
+      the `%dispatch` kernel primitive backs ability dispatch with a per-op, epoch-validated
+      cache (`ic[op-key] = (epoch, id, fn)`), so a hot monomorphic call skips `impl-for`'s
+      two CHAMP lookups. The shared `global_epoch` (bumped by `register-impl`'s `def *impls*`
+      and by RUNTIME compaction) makes it reload-safe, GC-safe (verified: debug tripwire +
+      heap-verifier clean under `GC_STRESS`), and cross-process-correct — no new invalidation
+      machinery — and it's invisible to the language (a pure memo of `impl-for`). Dispatch
+      overhead vs a direct call roughly halved. Still ⬜: compile-time *static* resolution
+      where the receiver type is known, and `:sealed` → a closed exhaustive switch.
     - ✅ **Slice 6 — `Display` core, always on** (2026-07-28): the ability system +
       `Display`/`Inspect` folded into the prelude; the prelude wires `*show*` on by
       default. A record customizes printing with just `(impl Display …)` — no

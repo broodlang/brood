@@ -2020,6 +2020,11 @@ pub struct Heap {
     /// Same lifecycle: allocated at compile time, validated by (sym, epoch),
     /// cleared wholesale on a RUNTIME compaction.
     vm_global_ics: RefCell<Vec<Option<GlobalIcEntry>>>,
+    /// Ability-dispatch inline cache (ADR-172 §7), keyed by an op's `[ability op]` symbol
+    /// pair packed into a `u64`, on the fast [`SymbolHasher`]. Per process, like the other
+    /// ICs; validated by (`id`, `global_epoch`) so it self-heals on any `def *impls*` /
+    /// compaction. See [`Self::vm_dispatch`].
+    dispatch_ics: RefCell<HashMap<u64, DispatchIcEntry, std::hash::BuildHasherDefault<SymbolHasher>>>,
     /// JIT execution state, per process. These were thread-locals; moved onto the heap so
     /// (a) they travel with a process that migrates worker threads — notably `jit_force_vm`,
     /// which must stay set across a yield during an over-deep VM drain — and (b) each access
@@ -2209,7 +2214,7 @@ mod vm_cache;
 // `stall_guard` is used by the RUNTIME compactor (`gc_runtime`) and the GUI paint
 // path, so it's re-exported unconditionally; `stall_guard_pid` by the scheduler.
 pub(crate) use self::gc::{stall_guard, stall_guard_pid, stall_threshold_ms};
-pub(crate) use self::vm_cache::{CallIcEntry, FastLink, GlobalIcEntry, VmCacheKey};
+pub(crate) use self::vm_cache::{CallIcEntry, DispatchIcEntry, FastLink, GlobalIcEntry, VmCacheKey};
 
 impl Heap {
     /// A bare heap with empty shared regions — used to *build* the prelude
@@ -2281,6 +2286,7 @@ impl Heap {
             #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),
+            dispatch_ics: RefCell::new(HashMap::default()),
             jit_call_env: EnvRoot::Stable(EnvId::GLOBAL),
             jit_native_depth: 0,
             jit_stack_limit: 0,
@@ -2358,6 +2364,7 @@ impl Heap {
             #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),
+            dispatch_ics: RefCell::new(HashMap::default()),
             jit_call_env: EnvRoot::Stable(EnvId::GLOBAL),
             jit_native_depth: 0,
             jit_stack_limit: 0,
