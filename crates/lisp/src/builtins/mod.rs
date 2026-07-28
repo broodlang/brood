@@ -547,6 +547,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![map_ty, any], map_ty),
         map_into,
     );
+    // Ability dispatch through the per-op inline cache (ADR-172 §7): (impls, op-key, id) →
+    // impl fn or nil. Internal; the op `defability` emits calls it, never user code.
+    def(
+        heap,
+        "%dispatch",
+        Arity::exact(3),
+        Sig::new(vec![map_ty, any, any], any),
+        dispatch,
+    );
 
     // set (the `#{…}` kernel type; the `set` library is Brood over these)
     def(

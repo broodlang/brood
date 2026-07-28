@@ -11,6 +11,19 @@ pub struct GlobalIcEntry {
     pub value: Value,
 }
 
+/// One ability-dispatch inline-cache entry (ADR-172 §7). Held in [`Heap::dispatch_ics`],
+/// keyed by an op's `[ability op]` symbol pair packed into a `u64`; memoises the impl
+/// `fn` resolved for the LAST-seen dispatch `id`, validated by (`id`, `epoch`). `callee`
+/// is immovable — it lives in `*impls*`, which `register-impl` promotes to RUNTIME by
+/// `def` — and a reload (`def *impls*`) or a RUNTIME compaction bumps `global_epoch`, so
+/// a stale entry misses and re-resolves. Semantically a pure memo of `impl-for`, invisible
+/// to the language.
+pub struct DispatchIcEntry {
+    pub id: Symbol,
+    pub epoch: u64,
+    pub callee: Value,
+}
+
 /// One call-site inline-cache entry — see the [`Heap::vm_call_ics`] field doc.
 /// `callee` is always an immovable (PRELUDE/RUNTIME/atom) value: global bindings
 /// are promoted by `env_define`, so the LOCAL collector never relocates it; the
@@ -228,6 +241,71 @@ impl Heap {
         if let Some(slot) = t.get_mut(site as usize) {
             *slot = Some(GlobalIcEntry { sym, epoch, value });
         }
+    }
+
+    /// Ability dispatch with a per-op inline cache (ADR-172 §7) — the `%dispatch`
+    /// primitive's engine. Given the current `*impls*` map (passed by the op, so the
+    /// kernel stays decoupled from the global's name), the op's `[ability op]` key
+    /// vector, and the first argument's dispatch `id` keyword, return the impl `fn` (or
+    /// `nil` when none, so the op raises `no-impl`). A HIT — same op-key, same id, current
+    /// `global_epoch` — returns the cached fn without touching `*impls*`; a MISS resolves
+    /// `impls[op-key][id]` (falling back to `:default`), caches it, and returns it. The
+    /// result is always identical to the pure `impl-for`: `*impls*` is immutable within an
+    /// epoch, and any `def *impls*` / compaction bumps the epoch so the entry misses.
+    pub fn vm_dispatch(&self, impls: Value, op_key: Value, id: Value) -> Value {
+        // op-key is the constant 2-symbol vector `[ability op]`; id is a keyword. If either
+        // isn't the shape `defability` emits, skip the cache and resolve purely.
+        let (key, id_sym) = match (self.dispatch_key(op_key), id) {
+            (Some(k), Value::Keyword(s)) => (k, s),
+            _ => return self.dispatch_resolve(impls, op_key, id),
+        };
+        let epoch = self.global_epoch();
+        if let Some(e) = self.dispatch_ics.borrow().get(&key) {
+            if e.epoch == epoch && e.id == id_sym {
+                return e.callee;
+            }
+        }
+        let callee = self.dispatch_resolve(impls, op_key, id);
+        // Cache only an immovable fn (mirrors `vm_global_ic_put`): a resolved impl lives in
+        // the RUNTIME-promoted `*impls*`, so this holds; the guard is belt-and-braces.
+        if !is_movable(callee) {
+            self.dispatch_ics
+                .borrow_mut()
+                .insert(key, DispatchIcEntry { id: id_sym, epoch, callee });
+        }
+        callee
+    }
+
+    /// Pack an op-key `[ability op]` vector's two interned symbols into a `u64` cache key,
+    /// or `None` if it isn't a 2-symbol vector.
+    fn dispatch_key(&self, op_key: Value) -> Option<u64> {
+        let v = match op_key {
+            Value::Vector(id) => self.vector(id),
+            _ => return None,
+        };
+        match (v.first(), v.get(1)) {
+            (Some(&Value::Sym(a)), Some(&Value::Sym(b))) if v.len() == 2 => {
+                Some(((a as u64) << 32) | (b as u64))
+            }
+            _ => None,
+        }
+    }
+
+    /// The pure resolution `impl-for` does: `impls[op-key][id]`, else `[:default]`, else nil.
+    fn dispatch_resolve(&self, impls: Value, op_key: Value, id: Value) -> Value {
+        let impls_id = match impls {
+            Value::Map(m) => m,
+            _ => return Value::nil(),
+        };
+        let methods_id = match self.map_get(impls_id, op_key) {
+            Some(Value::Map(m)) => m,
+            _ => return Value::nil(),
+        };
+        if let Some(f) = self.map_get(methods_id, id) {
+            return f;
+        }
+        self.map_get(methods_id, Value::Keyword(crate::core::value::intern("default")))
+            .unwrap_or_else(Value::nil)
     }
 
     /// Probe call-site `site`'s inline cache: a hit requires the same callee
