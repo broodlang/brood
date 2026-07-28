@@ -10057,3 +10057,56 @@ around that call, or a counter on the fast-link outcome path — instrumentation
 reading. Left there deliberately: the last two cliffs on this row cost a day and bought nothing,
 so the next attempt should confirm the payoff (does the arm run native afterwards, and does the
 row move?) before the fix is written.
+
+## 2026-07-28 — per-process compiled code is the per-process memory cost
+
+Chasing the 4.58 GB that 300k live processes cost on the `spawn-live` benchmark (Elixir
+holds the same 300k in 942 MB). Not a leak: per-process cost is flat and monotonic
+(17.7 KB/proc at N=10k → 15.3 at N=300k, the decline just fixed overhead amortising).
+Not the message either — payload length is irrelevant (k=0: 792 MB, k=64: 807 MB at N=50k).
+
+The decomposition, N=100k, all processes kept alive:
+
+| unit does | KB/proc |
+|---|---|
+| parks immediately, never runs | 6.26 |
+| wakes, replies, parks again | 14.87 |
+| same + one `(fold + 0 nil)` | 32.66 |
+
+`(fold + 0 nil)` folds an **empty list** and costs ~18 KB. The cause is that
+`vm_cache: RefCell<VmCacheMap<Option<Arc<CompiledClosure>>>>` and the inline-cache tables
+(`vm_call_ics` / `vm_fast_links` / `vm_global_ics`, indexed by *per-process* site ids) are
+per-process: every green process compiles its own copy of each prelude function it calls.
+The source/AST is shared via the PRELUDE/RUNTIME regions; the **compiled** form is not.
+
+Confirmed by scaling with the number of distinct prelude functions a unit calls (N=20k,
+`(mem-bytes)`, exact live bytes): 0 fns 13,786 B/proc; 1 (`fold`) 31,619; 2 (`+count`)
+49,954; 3 (`+map`) 59,914; 4 (`+filter`) 66,503 — roughly +6-18 KB per distinct callee.
+
+Ruled out, so don't re-chase: the `PARK_TRIM_GROWTH_SLOTS = 64` threshold (rebuilt with it
+at 0 — 32.72 → 31.72 KB/proc, noise); JIT inlining (`BROOD_NO_JIT=1` unchanged at 32.63);
+worker count (flat 33.5 KB/proc from J=2 to J=12, so not cross-thread page fragmentation);
+allocator retention (glibc arena knobs are no-ops — the allocator is **mimalloc**, and
+`mallinfo2` only sees the main arena, which is why it read a flat 67 KB while RSS was
+675 MB). `(mem-bytes)` is the right probe: it reported 31,618 B/proc against 674 MB RSS,
+94% accounted, so the memory is genuinely live, not fragmentation.
+
+Not fixed. The direction is to share compiled closures across processes the way the
+RUNTIME region already shares AST (keyed by closure handle + epoch); the IC tables must
+stay per-process, but they are only ~3.5 KB of the ~18 KB, and could be sparse rather
+than dense `Vec`s indexed by site id.
+
+**Benchmark harness** (`../brood-benchmarks`) gained the per-CPU columns this motivated:
+`cores` (CPU% / 100) and `CPU·s` (wall × cores), because wall time alone cannot tell
+"fast" from "cannot scale". On `spawn` at N=200k: Node runs at **102% CPU — one core**, a
+ceiling no machine lifts, while .NET's 804% is genuine thread-pool parallelism (its fast
+result was not a rigged port). Brood posts the best utilisation of the four (925%) and
+still loses on wall, burning 8.05 CPU-s to Node's 1.23 for identical work — the gap is
+per-core compute, not parallelism.
+
+That column also caught a measurement bug that had been flattering Python: 3.14 defaults
+multiprocessing to `forkserver`, so `pfib`'s pool workers were children of the forkserver
+and never reaped, and `/usr/bin/time` read 4% CPU on a run using 10.6 cores — ranking
+Python the *most* CPU-efficient runtime in the suite. Pinned the port to the `fork` context
+(1055% CPU, 26.07 CPU-s — the worst on the row) and added a guard that marks any row under
+50% CPU on a >200 ms run as under-reported and excludes it from the ranking.
