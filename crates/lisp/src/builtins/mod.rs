@@ -2126,6 +2126,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "%restore-interrupt-handler",
+        Arity::exact(0),
+        Sig::nullary(bool_ty),
+        restore_interrupt_handler,
+    );
+    def(
+        heap,
         "%interrupt-taken?",
         Arity::exact(0),
         Sig::nullary(bool_ty),
@@ -3077,6 +3084,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("getenv", &["name"], "The value of environment variable name, or nil if unset."),
     ("hostname", &[], "This machine's short hostname (no domain). Used to qualify a node name as name@host."),
     ("%install-interrupt-handler", &[], "Take over SIGINT so Ctrl-C records a request instead of terminating the runtime; returns true when installed (false with no Unix signals). Idempotent, and clears any pending request. Opt-in, so a script keeps dying on Ctrl-C: the REPL installs it, nothing else does."),
+    ("%restore-interrupt-handler", &[], "Restore the default SIGINT disposition (Ctrl-C terminates again) and clear any pending request — the uninstall half of %install-interrupt-handler, so a transient REPL (pry) inside a script gives the script its Ctrl-C back. Returns true when restored."),
     ("%interrupt-taken?", &[], "True if an interrupt arrived since the last call, clearing it (read-and-clear, so one Ctrl-C is acted on once). Poll this while a spawned evaluation runs and (exit pid :kill) it."),
     ("run-process", &["prog", "args"], "Run external program prog with an args list, inheriting stdio; returns its exit code."),
     ("%env-all", &[], "All environment variables as a map of string→string."),

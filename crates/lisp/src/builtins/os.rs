@@ -186,6 +186,27 @@ pub(super) fn install_interrupt_handler(_: &[Value], _: EnvId, _: &mut Heap) -> 
     }
 }
 
+/// `(%restore-interrupt-handler)` — restore the default SIGINT disposition (Ctrl-C
+/// terminates the runtime again) and clear any pending flag. The uninstall half of
+/// `%install-interrupt-handler`, for a *transient* REPL inside a longer run — a
+/// script that drops into `pry` must get its normal Ctrl-C back when the pry exits,
+/// or every later Ctrl-C sets a flag nobody polls and the script becomes
+/// uninterruptible. Returns true when restored (false with no Unix signals).
+pub(super) fn restore_interrupt_handler(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    #[cfg(unix)]
+    {
+        unsafe {
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+        }
+        INTERRUPT_REQUESTED.store(false, std::sync::atomic::Ordering::Relaxed);
+        Ok(Value::boolean(true))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(Value::boolean(false))
+    }
+}
+
 /// `(%interrupt-taken?)` — true if an interrupt has arrived since the last call,
 /// **clearing** it. Read-and-clear (rather than a plain read plus a separate reset)
 /// so two pollers can never both act on one Ctrl-C.
