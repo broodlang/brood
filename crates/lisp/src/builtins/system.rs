@@ -1027,6 +1027,10 @@ const DEV_MODULES: &[EmbeddedModule] = &[
     embedded_module!("grammar", "std/tool/grammar.blsp"),
     // The process viewer / debug tooling (`nest observe`, `(observe)`).
     embedded_module!("observer", "std/tool/observer.blsp"),
+    // The process-native tracing debugger — `break` (park without timeout),
+    // `span`/`span-spawn` (cross-process causal tree), `spy` routed to a debugger
+    // process. The actor-model answer to Elixir's `dbg`.
+    embedded_module!("debug", "std/tool/debug.blsp"),
     // The hot-reload file watcher — a dev-loop convenience.
     embedded_module!("reload", "std/tool/reload.blsp"),
     // The Model Context Protocol tool surface — `(mcp-tools)` returns the
