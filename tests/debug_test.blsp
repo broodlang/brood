@@ -62,7 +62,7 @@
       ;; the parked snapshot carries the label + named values
       (let (snap (first (vals (paused dbg))))
         (assert= "bp" (get snap :label))
-        (assert= [:v 1] (get snap :vals)))
+        (assert= {:v 1} (get snap :vals)))
       ;; only resuming lets it finish
       (resume-all dbg)
       (assert= :done (receive ([:done] :done)))
@@ -74,7 +74,8 @@
           (spawn (with-debugger dbg (fn () (break (str "bp-" n)) (send me [:done]))))))
       (assert= true (wait-until dbg (fn (s) (= 5 (count (get s :paused)))) 200))
       (assert= 5 (resume-all dbg))
-      (letrec (drain (fn (k acc) (if (= k 0) acc (do (receive ([:done] nil)) (drain (dec k) (inc acc))))))
+      (letrec (drain (fn (k acc)
+                       (if (= k 0) acc (do (receive ([:done] nil)) (drain (dec k) (inc acc))))))
         (assert= 5 (drain 5 0)))
       (dbg-stop dbg))))
 
@@ -137,8 +138,9 @@
     (let (dbg (start-debugger))
       (let (srv (spawn (sl-server)))
         (with-debugger dbg
-          (fn () (span "req"
-                   (fn () (send srv [:req 6 (self)]) (receive ([:done _] :ok))))))
+          (fn ()
+            (span "req"
+              (fn () (send srv [:req 6 (self)]) (receive ([:done _] :ok))))))
         (assert= true (wait-until dbg (fn (s) (>= (exit-count s) 2)) 200))
         (let (tree (causal-tree dbg))
           (assert= 1 (count tree))
@@ -174,12 +176,28 @@
       (letrec (drive (fn (tries)
                        (cond
                          (= tries 0) :gave-up
-                         (> (count (paused dbg)) 0) (do (resume-all dbg) (sleep 20) (drive (dec tries)))
+                         (> (count (paused dbg)) 0) (do
+                                                      (resume-all dbg)
+                                                      (sleep 20)
+                                                      (drive (dec tries)))
                          else :done)))
         (sleep 40)
         (drive 50))
       ;; stepping is transparent — the expression still yields the right value
       (assert= 10 (receive ([:result r] r)))
+      (dbg-stop dbg))))
+
+(describe "debugger — eval in a paused process's captured scope"
+  :isolated
+  (test "eval-at evaluates an expression against a breakpoint's named locals"
+    (let (dbg (start-debugger) me (self))
+      (spawn (with-debugger dbg (fn () (break "bp" :n 6 :total 10) (send me [:done]))))
+      (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))
+      (assert= 6 (eval-at dbg 1 "n"))
+      (assert= 60 (eval-at dbg 1 "(* n total)"))
+      (assert= 22 (eval-at dbg 1 "(+ (* n 2) total)"))
+      (resume-all dbg)
+      (assert= :done (receive ([:done] :done)))
       (dbg-stop dbg))))
 
 (describe "debugger — aggregate / population queries"
