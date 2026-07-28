@@ -9915,3 +9915,30 @@ answer Elixir itself chose over monads. Tests in `tests/ergonomics_test.blsp` (h
 path, fall-through, `:else`, empty bindings, map/tuple patterns) + cross-process
 coverage (a worker builds+sends `[:ok …]` result tuples, parent matches with `with`,
 plus a fan-out/fan-in fold). Docs in `docs/language.md` § binding-conditionals.
+
+## 2026-07-28 (impl) — `spy`: homoiconic tree-tracing debug macro (ADR-173)
+
+Borrowed Elixir's `dbg` but did it more Lisp. `(spy expr)` evaluates `expr`, traces
+every evaluated subexpression's value in evaluation order, and returns the value
+unchanged (referentially transparent — wrap/drop it freely). Named `spy` (Lisp
+tradition) over `dbg`. Prelude macro in `std/prelude.blsp` (not a Rust builtin).
+
+Design (ADR-173): rather than `dbg`'s fixed special-case set + AST-to-source
+reconstruction, `spy` exploits homoiconicity — fully macroexpands the form
+(re-expanding at every node, since `macroexpand` only resolves the outer head) and
+instruments each evaluated position **in place**. That preserves laziness for free (an
+untaken `if` branch / short-circuited `and` tail never traces) and makes pipelines a
+non-case: `(-> x f g)` → `(g (f x))`, each stage traced by the ordinary call rule.
+`fn` bodies, `quote`, `quasiquote` left opaque. Descends into `if`/`do`/`let`/`letrec`
++ calls; other special forms trace their top value only (sound, conservative).
+
+Second bet: a swappable **`*spy-sink*`** (`defdyn`) carrying structured entries
+(`:enter`/`:node`/`:exit` maps) — so a host (editor, `nest observe`, a test) captures
+the trace as *data*, not text; default pretty-prints an indented tree to stderr. This
+is the seam for future editor inline-values (M2/M3), and it subsumes "no-op in
+production" (rebind to a no-op) without an added gate.
+
+Tests: `tests/spy_test.blsp` (13) — transparency, trace-as-data via a capturing sink,
+laziness (untaken branch / short-circuit absent), `let` RHS+body, fn-body opacity,
+quoted-data passthrough, error propagation, + cross-process (`:isolated`: a worker
+spy-computes and sends a value, fan-out/fan-in fold). Docs in `language.md`; ADR-173.

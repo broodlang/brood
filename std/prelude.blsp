@@ -3627,6 +3627,102 @@ degrades to a plain case-insensitive name/docstring search, e.g.
                         (when (> hits 0) [hits s d])))))
             (global-names)))))))
 
+;; ---- spy: homoiconic tree-tracing debug (ADR-173) ---------------------------
+;; `(spy expr)` evaluates `expr`, traces every evaluated subexpression's value in
+;; evaluation order, and returns the value UNCHANGED — so it is referentially
+;; transparent: wrap or unwrap `spy` around any form with zero behavioural change
+;; (the Elixir `dbg` property). Unlike `dbg`, which special-cases a fixed handful
+;; of constructs, `spy` leans on homoiconicity: it fully macroexpands the form
+;; (re-expanding at every node, since `macroexpand` only resolves the outer head)
+;; and instruments each evaluated position IN PLACE, so laziness is preserved —
+;; an untaken `if` branch or a short-circuited `and` tail never traces. A pipeline
+;; needs no special case: `(-> x f g)` expands to `(g (f x))`, and the ordinary
+;; call rule traces each stage for free. Trace entries flow through the swappable
+;; `*spy-sink*`, so a host (the editor, the observer) can capture the trace as
+;; DATA rather than text; the default sink pretty-prints an indented tree to
+;; stderr. `fn` bodies, `quote`, and `quasiquote` are left opaque (a closure body
+;; runs later/elsewhere, quoted data never evaluates).
+
+;; The sink `spy` routes trace entries to (a 1-arg fn), or nil for the default
+;; stderr tree. Entries are maps: `{:spy :enter :form f}`,
+;; `{:spy :node :form f :value v :depth d}`, `{:spy :exit :value v}`. Rebind it
+;; (via `binding`) to capture a trace as data.
+(defdyn *spy-sink* nil)
+
+(defn spy--indent (depth) (apply str (map (constantly "  ") (range depth))))
+(defn spy--default-sink (entry)
+  "Default `*spy-sink*`: pretty-print one trace entry as an indented stderr line."
+  (case (:spy entry)
+    :enter (eprintln (str "spy: " (pr-str (:form entry))))
+    :node (eprintln (str "  "
+                      (spy--indent (:depth entry)) (pr-str (:form entry)) " => "
+                      (pr-str (:value entry))))
+    :exit (eprintln (str "=> " (pr-str (:value entry))))
+    nil))
+(defn spy--emit (entry) ((or *spy-sink* spy--default-sink) entry))
+(defn spy--node (form value depth)
+  ;; Runtime: emit a traced node's value, then return it untouched.
+  (spy--emit {:spy :node :form form :value value :depth depth})
+  value)
+(defn spy--run (form thunk)
+  (spy--emit {:spy :enter :form form})
+  (let (value (thunk)) (spy--emit {:spy :exit :value value}) value))
+
+;; Core forms whose heads must NOT be treated as function calls (their arguments
+;; are not plain eager operands). After a full macroexpand only these survive; the
+;; macro entries are belt-and-suspenders in case one reaches a node unexpanded.
+(def spy--special-forms
+  #{'if 'do
+    'def 'fn 'let 'letrec 'quote 'quasiquote 'defmacro 'defn 'defdyn 'defrecord 'defmodule 'when
+    'unless 'cond 'and 'or 'match 'match* 'case 'comment 'try 'catch 'throw 'receive 'binding
+    'dolist 'doseq 'dotimes 'for '-> '->> 'spawn 'spawn-link 'remote-spawn 'remote-spawn-sync 'error
+    'with-out-str 'with-err-str 'bench})
+
+(defn spy--walk-seq (forms depth) (map (fn (form) (spy--walk form depth)) forms))
+(defn spy--walk-binds (binds depth)
+  ;; A flat `(name expr …)` binding list — instrument the RHS positions only.
+  (letrec (go (fn (bs acc)
+                (cond
+                  (empty? bs) (reverse acc)
+                  (empty? (rest bs)) (reverse (cons (first bs) acc))
+                  else (go (rest (rest bs))
+                         (cons (spy--walk (second bs) depth) (cons (first bs) acc))))))
+    (go binds ())))
+(defn spy--walk-if (form depth)
+  ;; Instrument test + both branches in place; the branches stay lazy, so only the
+  ;; taken one ever traces.
+  (let (parts (rest form) test (first parts) then (second parts) d (inc depth))
+    (if (> (count parts) 2)
+      `(if ~(spy--walk test d) ~(spy--walk then d) ~(spy--walk (nth parts 2) d))
+      `(if ~(spy--walk test d) ~(spy--walk then d)))))
+(defn spy--walk-let (form depth)
+  (let (head (first form) binds (second form) body (rest (rest form)) d (inc depth))
+    `(~head ~(spy--walk-binds binds d) ~@(spy--walk-seq body d))))
+(defn spy--walk-call (form depth)
+  ;; (f a…) — every operand is eager, unconditional, once; instrument them all and
+  ;; trace this call node's value.
+  `(spy--node '~form (~@(spy--walk-seq form (inc depth))) ~depth))
+(defn spy--walk (form depth)
+  (if (not (pair? form))
+    form
+    (let (form (macroexpand form))
+      ; resolve the (outer) macro head
+      (if (not (pair? form))
+        ; a macro expanded to an atom
+        (spy--walk form depth)
+        (let (head (first form))
+          (cond
+            (or (= head 'fn) (= head 'quote) (= head 'quasiquote)) form
+            (= head 'if) (spy--walk-if form depth)
+            (= head 'do) `(do ~@(spy--walk-seq (rest form) (inc depth)))
+            (or (= head 'let) (= head 'letrec)) (spy--walk-let form depth)
+            (contains? spy--special-forms head) `(spy--node '~form ~form ~depth)
+            else (spy--walk-call form depth)))))))
+
+(defmacro spy (expr)
+  "Evaluate `expr`, trace every evaluated subexpression's value (in evaluation order) to `*spy-sink*` — default: an indented tree on stderr — and return the value unchanged. Referentially transparent: wrap or drop `spy` around any form with no behavioural change. Homoiconic: fully macroexpands and instruments in place, so laziness (an untaken branch, a short-circuited `and`) is preserved and pipelines trace stage-by-stage for free. `fn` bodies and quoted data are left opaque."
+  `(spy--run '~expr (fn () ~(spy--walk expr 0))))
+
 ;; ---- modules: Emacs-flat provide / require (ADR-019) ------------------------
 ;; A flat module system over the one shared global table: `provide` records a
 ;; loaded feature, `require` loads one once. Embedded std modules (test, project)
