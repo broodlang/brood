@@ -9862,3 +9862,72 @@ is resolvable from a test (`(:use devtool)` passes under `nest test`), and
 `(bundle-collect root)` omits it (`devtool in bundle? false`). Optional-dep *resolution*
 (peer presence) still lands with the bridge slice; this is the dev-dep half. Suite green,
 `nest check` clean, formatted.
+
+## 2026-07-28 (late) — a parked process kept its garbage *and* its capacity; trim at park
+
+Picking up the memory-per-process gap against the BEAM (5.4 KB vs 2.68 KB). The base figure
+turned out to be the least interesting part.
+
+**What a parked process actually holds.** 100k processes, each running a body then parking in
+`receive`, measured by RSS delta:
+
+| child body | KB/process |
+|---|---|
+| bare park (never allocated) | 5.40 |
+| cons 100 pairs, drop them, park | 14.42 |
+| cons 1,000 pairs, drop them, park | **54.70** |
+
+The list is *dead* in every case — dropped before the `receive`. A process that consed 1,000
+pairs (~48 KB) keeps essentially all of it, forever, while parked. For a process-per-connection
+server that is the difference between fitting a million and not.
+
+**Two mechanisms, separated by measurement.** Adding an explicit `(gc-collect)` before the park
+took the 1,000-pair case 54.1 → 19.0 KB, and bare-park is 5.4 — so:
+
+1. **Uncollected garbage** (54 → 19 KB): a parked process never reaches another safepoint, so
+   nothing ever collects it.
+2. **Retained capacity** (19 → 5.4 KB): after collecting, the slab `Vec`s still hold their
+   high-water capacity, and a nursery flip *deliberately* preserves it
+   (`Slabs::with_capacity_like`) so the next cycle skips the doubling ladder. Correct for a
+   running process; wrong for one that may never run again.
+
+**`Heap::trim_parked`** does both — collect, then `shrink_to_fit` the slabs, roots and env
+roots — called from `park_on_receive` at the one moment we know the process has nothing to do.
+This is Erlang's `hibernate/0`, applied automatically instead of by hand.
+
+| child body | before | after |
+|---|---|---|
+| bare park | 5.40 KB | 5.40 KB |
+| cons 100, park | 14.42 KB | **8.48 KB** |
+| cons 1,000, park | 54.70 KB | **8.50 KB** |
+
+**Getting the gate right took three tries, and the two failures are the instructive part.**
+The gate has to keep a latency-sensitive responder — which parks constantly with a small heap —
+off the collection path, without leaving accumulated garbage behind.
+
+1. **Absolute threshold, 32 KiB.** Latency perfect, and **memory non-monotonic in
+   allocation**: the 1,000-cons process crossed the gate and trimmed to 8.5 KB while the
+   100-cons process stayed under it and kept **14.5 KB**. Allocating *more* used *less*. Not
+   shippable — and I had written the table out without noticing until it was pointed out.
+2. **Absolute threshold, 4 KiB.** Monotonic (5.4 → 8.5 → 8.5) and `pingpong` **+193%**
+   (213 → 624 ms): that row parks 200k times and now paid a collection on nearly every one.
+3. **Growth since the last trim, with hysteresis.** The gate asks "has anything *new*
+   accumulated?", not "is the heap big?". Marking the *pre-trim high-water* rather than the
+   shrunken size is what makes it stick: marking the shrunken size lets the process regrow the
+   threshold immediately and oscillate (`pingpong` +8.5%); against the high-water, a steady
+   working set trims once and never again.
+
+Plus one measurement fix: the gate runs on *every* park, and summing eleven `capacity()`
+fields per generation (~25 ns) cost `ring` **+4.6%** on its own — the trims it gated cost
+nothing. A three-field element-count probe took that to +2.8% and `spawn` to 0.0%.
+
+**Final cost: `ring` +2.8%, `pingpong` +1.9%, `spawn`/`pfib`/`sort`/`bintree` flat**, against
+6.4× less memory for a process that did work before parking. At 300k processes that is ~2.5 GB
+against ~16 GB — the difference between fitting and not.
+
+**Soundness** rests on an invariant the code already documents rather than on my reading of it:
+`Suspended` holds only *control* state — its frames reference the operand stack and frame slots
+by index, and those live on the process's own `roots`/`env_roots`, which `collect` traces. So
+collecting at the park point is no more dangerous than collecting one instruction earlier, at
+the safepoint the process would have hit had it kept running. The process owns its heap there
+(no worker is running it), so the collection cannot race.

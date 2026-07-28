@@ -778,6 +778,78 @@ fn slab_live_count(s: &Slabs) -> usize {
 /// process with large spilled vectors under-reports `:memory` by their buffer
 /// bytes, acceptable for a comparative observability figure (the hard memory cap
 /// uses the global allocator counter, not this).
+/// How much retained capacity must have accumulated **since the last trim** before
+/// [`Heap::trim_parked`] does anything.
+///
+/// Note the "since the last trim": an absolute size threshold is the obvious design and it
+/// is wrong in both directions, which the 2026-07-28 measurements showed plainly.
+///
+/// * A **high** absolute gate (32 KiB) is latency-safe but makes memory non-monotonic in
+///   allocation: a process that consed 1,000 pairs crossed it and got trimmed to 8.5 KB,
+///   while one that consed *100* stayed under and kept **14.5 KB** — allocating more used
+///   less, which is indefensible to explain to a user.
+/// * A **low** absolute gate (4 KiB) fixes that (5.4 → 8.5 → 8.5 KB, monotonic) and costs
+///   `pingpong` **+193%** (213 → 624 ms), because that row parks 200k times and each park
+///   now pays a collection.
+///
+/// Growth-since-last-trim gets both. A responder that parks constantly reaches a steady
+/// working set, so after one trim its capacity stops growing and it never trims again — it
+/// pays one subtraction per park. A process that actually accumulated something trims once
+/// per accumulation, regardless of how large its heap is in absolute terms.
+///
+/// Measured in [`park_trim_probe`] slots rather than bytes so the gate stays a few loads:
+/// 64 slots is roughly a few KiB of pairs, i.e. the same intent as the 4 KiB it replaces.
+const PARK_TRIM_GROWTH_SLOTS: usize = 64;
+
+/// Retained *capacity* of a slab set, in bytes — what the process is holding from the
+/// allocator, as opposed to [`slab_bytes`]'s live contents. The two diverge sharply for a
+/// process that allocated and then dropped: the `Vec`s keep their high-water capacity, and a
+/// nursery flip deliberately preserves it (`Slabs::with_capacity_like`) so the next cycle
+/// does not re-pay the doubling ladder. That is right for a *running* process and wrong for
+/// a parked one, which may hold it for the rest of the program.
+fn slab_capacity_bytes(s: &Slabs) -> usize {
+    use std::mem::size_of;
+    s.pairs.capacity() * size_of::<(Value, Value)>()
+        + s.vectors.capacity() * size_of::<VecStore>()
+        + s.maps.capacity() * size_of::<MapNode>()
+        + s.strings.capacity() * size_of::<LocalString>()
+        + s.bigints.capacity() * size_of::<num_bigint::BigInt>()
+        + s.decimals.capacity() * size_of::<bigdecimal::BigDecimal>()
+        + s.bytes.capacity() * size_of::<Arc<SharedBlob>>()
+        + s.ropes.capacity() * size_of::<ropey::Rope>()
+        + s.closures.capacity() * size_of::<Closure>()
+        + s.natives.capacity() * size_of::<NativeFn>()
+        + s.envs.capacity() * size_of::<EnvFrame>()
+}
+
+/// A **cheap** stand-in for retained capacity, in slab elements, for the park-time gate.
+///
+/// [`slab_capacity_bytes`] sums eleven `capacity()` fields per generation and multiplies each
+/// by a size — ~25 ns, which is nothing once, and everything on a path that runs on every
+/// park. `ring` parks a million times: the full sum cost it **+4.6%** while the trims it
+/// gated cost nothing measurable. Three element counts from the nursery track growth just as
+/// well for a heuristic (pairs, vectors and env frames are what a working set is made of),
+/// and the trim itself still measures real bytes.
+#[inline]
+fn park_trim_probe(s: &Slabs) -> usize {
+    s.pairs.capacity() + s.vectors.capacity() + s.envs.capacity()
+}
+
+/// Hand every slab's unused capacity back to the allocator.
+fn shrink_slabs(s: &mut Slabs) {
+    s.pairs.shrink_to_fit();
+    s.vectors.shrink_to_fit();
+    s.maps.shrink_to_fit();
+    s.strings.shrink_to_fit();
+    s.bigints.shrink_to_fit();
+    s.decimals.shrink_to_fit();
+    s.bytes.shrink_to_fit();
+    s.ropes.shrink_to_fit();
+    s.closures.shrink_to_fit();
+    s.natives.shrink_to_fit();
+    s.envs.shrink_to_fit();
+}
+
 fn slab_bytes(s: &Slabs) -> usize {
     use std::mem::size_of;
     s.pairs.len() * size_of::<(Value, Value)>()
@@ -1699,6 +1771,9 @@ pub struct Heap {
     ///
     /// [`gc_enabled`]: Self::gc_enabled
     gc_threshold: usize,
+    /// [`park_trim_probe`] as of this process's last park-time trim — the baseline
+    /// [`Heap::trim_parked`] measures growth against, in slab elements.
+    park_trim_mark: usize,
     /// Adaptive **RUNTIME**-collection trigger: the eval safepoint reclaims the shared
     /// code region once the RUNTIME closure count crosses this — in-place compaction when
     /// this heap uniquely owns the runtime, else a step of the 2-generation collector.
@@ -2155,6 +2230,7 @@ impl Heap {
             roots: Vec::new(),
             env_roots: Vec::new(),
             gc_threshold: usize::MAX,
+            park_trim_mark: 0,
             rt_gc_threshold: usize::MAX,
             gc_enabled: false,
             rt_collect_block: std::cell::Cell::new(0),
@@ -2227,6 +2303,7 @@ impl Heap {
             roots: Vec::new(),
             env_roots: Vec::new(),
             gc_threshold: gc_floor(),
+            park_trim_mark: 0,
             rt_gc_threshold: rt_gc_floor(),
             gc_enabled: true,
             rt_collect_block: std::cell::Cell::new(0),

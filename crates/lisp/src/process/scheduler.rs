@@ -762,6 +762,12 @@ impl Process {
         }
     }
 
+    /// Trim this process's heap as it parks — see [`Heap::trim_parked`]. Kept here rather
+    /// than in `pool` so the `heap` field stays private to this module.
+    fn trim_on_park(&mut self) {
+        self.heap.trim_parked();
+    }
+
     /// Stash a captured continuation back into the process before it parks or re-queues
     /// (so the next `run_one` resumes from it).
     fn store_resume(&mut self, s: crate::eval::compile::Suspended) {
