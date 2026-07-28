@@ -9896,3 +9896,22 @@ Distinguishing an app module from a library one needs package-rooted namespaces;
 then an app override registers as `other` and wins only by same-tier last-write (the
 pre-ADR-172 behaviour). The type-owner-beats-ability-owner half — fully determinable now —
 is what this slice makes deterministic.
+
+## 2026-07-28 (impl) — `with`: Elixir-style sequential match-binding (prelude macro)
+
+Added `with` to `std/prelude.blsp` next to `if-let`/`when-let`. Flat `pattern expr`
+pairs (the `let` shape); each `expr` is matched against its `pattern` in order, the
+first value that fails its pattern short-circuits, and the body runs only when every
+step matched with all bindings in scope. Pure sugar over nested `match` — **no new
+special form** (keeps the core small; a step lowers to `(match expr (pattern <rest>)
+(miss <miss-arm>))`). A trailing `:else` section is a set of `match` clauses run
+against the short-circuited value (like Elixir's `else`); with no `:else`, that value
+falls straight through — so an `[:error …]` becomes the result untouched.
+
+Considered and rejected a Result/Either **monad** abstraction: Brood is dynamic, so a
+"monad" here is just combinators with grander names and no law-enforcement — and it
+fights the small-core / ADR-011 (defer power) rules. `with` is exactly the pragmatic
+answer Elixir itself chose over monads. Tests in `tests/ergonomics_test.blsp` (happy
+path, fall-through, `:else`, empty bindings, map/tuple patterns) + cross-process
+coverage (a worker builds+sends `[:ok …]` result tuples, parent matches with `with`,
+plus a fan-out/fan-in fold). Docs in `docs/language.md` § binding-conditionals.

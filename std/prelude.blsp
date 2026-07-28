@@ -1237,6 +1237,35 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
   (let (name (first binding) expr (second binding) v (gensym "v"))
     `(let (~v ~expr) (when ~v (let (~name ~v) ~@body)))))
 
+;; ---- with: sequential match-binding with fall-through -----------------------
+;; Elixir's `with`, spelled as flat `pattern expr` pairs (the `let` shape). Each
+;; `expr` is matched against its `pattern` in order; the first value that does
+;; NOT match short-circuits, and the body runs only when every step matched, with
+;; all bindings in scope. Pure sugar over nested `match`. A trailing `:else`
+;; section (its own `match` clauses) runs the short-circuited value through them;
+;; with no `:else`, the value that failed to match falls straight through as the
+;; result — so an `[:error …]` becomes the answer untouched.
+(defn with--split-else (forms before)
+  ;; [happy-forms else-clauses] — split `forms` at the first bare `:else` keyword.
+  (cond
+    (empty? forms) [(reverse before) nil]
+    (= (first forms) :else) [(reverse before) (rest forms)]
+    else (with--split-else (rest forms) (cons (first forms) before))))
+(defn with--build (bindings body else-clauses)
+  (if (empty? bindings)
+    `(do ~@body)
+    (let (pattern (first bindings)
+          expr (second bindings)
+          more (rest (rest bindings))
+          miss (gensym "miss"))
+      `(match ~expr
+         (~pattern ~(with--build more body else-clauses))
+         (~miss ~(if (empty? else-clauses) miss `(match ~miss ~@else-clauses)))))))
+(defmacro with (bindings & body)
+  "Sequentially match each `pattern expr` pair in `bindings`; the first value that fails its pattern short-circuits, else `body` runs (returning its last form) with every binding in scope. A trailing `:else` section of `match` clauses handles the short-circuited value; without one it is returned as-is. Brood's flat `with`, like Elixir's."
+  (let ([happy else-clauses] (with--split-else body []))
+    (with--build bindings happy else-clauses)))
+
 ;; ---- local loops: just use `letrec` -----------------------------------------
 ;; Brood has no `loop`/`recur` macro. A self-contained *local* loop is a `letrec`-
 ;; bound closure you call by name:
