@@ -2471,6 +2471,18 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![any], any),
         trace_context_set,
     );
+    // The debugger's eval-in-paused-context primitives (ADR-174) — capture a
+    // breakpoint's locals and evaluate expressions in that scope. `dev-tools` only.
+    #[cfg(feature = "dev-tools")]
+    def(heap, "%locals", Arity::exact(0), Sig::new(vec![], any), locals);
+    #[cfg(feature = "dev-tools")]
+    def(
+        heap,
+        "%eval-in",
+        Arity::exact(2),
+        Sig::new(vec![any, any], any),
+        eval_in,
+    );
     def(
         heap,
         "dynamic?",
