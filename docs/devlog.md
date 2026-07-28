@@ -10255,3 +10255,47 @@ and never reaped, and `/usr/bin/time` read 4% CPU on a run using 10.6 cores — 
 Python the *most* CPU-efficient runtime in the suite. Pinned the port to the `fork` context
 (1055% CPU, 26.07 CPU-s — the worst on the row) and added a guard that marks any row under
 50% CPU on a >200 ms run as under-reported and excludes it from the ranking.
+
+## 2026-07-28 (cont.) — decomposing `spawn-live`: what the 4 s is actually made of
+
+The published row is Brood's worst (5.35 s / 4.45 GB at 300k, last of five). Decomposed
+at N=300,000, so the next attempt starts from evidence rather than the headline:
+
+| unit does | wall | RSS |
+|---|---|---|
+| spawn + park, never woken | 2.28 s | 6.11 KB/proc |
+| + wake, reply, parent collects (no prelude call) | 2.88 s | 8.47 KB/proc |
+| + one `(fold + 0 p)` (the real row) | 4.04 s | 15.2 KB/proc |
+
+So per-process compiled code (ADR-175) is worth **+1.16 s and +2.0 GB** — real, but only
+~29% of the time. The rest is a **2.88 s / 8.5 KB-per-process floor** for spawning, waking
+and reaping 300k processes, against Elixir's 2.5 µs and ~3.1 KB. Fixing ADR-175 alone lands
+at ~2.9 s / 2.55 GB, still ~4× the BEAM. Both halves need work; neither alone closes it.
+
+Counterintuitive and worth remembering: **spawn-and-park (2.28 s) is slower than
+spawn-wake-exit (1.43 s)**. `spawn-live` deliberately holds all 300k alive, so nothing is
+reclaimed and allocator/cache pressure dominates. The row measures *residency*, so
+per-process footprint is the lever, not per-spawn CPU.
+
+**Dead end 1 — "cache the capture-free spawn thunk" is already implemented.** `spawn` does
+`heap.promote(f)` on its thunk, which appends a closure (plus captured env) to the shared
+append-only RUNTIME region, and at 300k live processes the ADR-091 collector can reclaim
+none of it. That looked like an easy win until reading `Heap::closure_const_cache`, whose
+doc names the exact case: a `(fn …)` with no lexical captures and no self-name is a
+constant, memoised once and promoted to a stable RUNTIME handle — *"`(spawn (worker))` in a
+fan-out drops ~7×"*. It works: capture-free spawn costs 6.14 KB/proc and capturing one int
+costs 7.13 KB, i.e. the ~1 KB delta is the capturing case paying for a real promoted env
+frame, not waste. **Do not re-propose this.**
+
+**Dead end 2 — per-phase allocation attribution via `live_bytes()` does not work.**
+`crate::core::alloc::live_bytes()` is process-wide across every worker thread, so deltas
+taken around phases of one `spawn` are contaminated by concurrent allocation on other
+workers (the samples came back including wrapped negatives). Whole-program differencing
+(spawn N, divide) is sound; per-call-site differencing is not. Attributing the remainder
+needs a real allocation profile.
+
+**Still unaccounted: ~2.9 KB of a parked process's 5,597 measured live bytes.** Identified:
+`Box<Process>` 1736 (with `Heap` 1648 inline), `Arc<Mailbox>` ~184 (`Mailbox` 168 /
+`MailboxState` 112 / `Message` 40), `Suspended` 128, slabs ~480, roots ~128, ICs ~40,
+registry ~50 — about 2.7 KB. The rest is unidentified; the earlier guess that it was
+per-spawn closure minting was wrong (see dead end 1).
