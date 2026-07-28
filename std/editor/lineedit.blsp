@@ -28,7 +28,9 @@
 (defmodule editor/lineedit
   "A raw-mode, emacs/readline-style line editor for the REPL, written in Brood
 (ADR-052). `(lineedit-read prompt prefix history)` reads one line with live
-syntax highlighting, bracket matching, signature hints, Tab completion, and the
+syntax highlighting, bracket matching, signature hints, Tab completion (which
+lists the matching candidates in columns below the input once it has no more
+characters to insert), and the
 emacs/readline keys — C-a/C-e, C-f/C-b, M-f/M-b, C-k/C-u/C-w, M-d, C-y, C-t, C-h,
 C-d, C-l, arrows, Home/End, and ↑/↓ (or C-p/C-n) history; it returns
 `{:line <str|nil> :eof <bool> :cancel <bool>}`.
@@ -60,6 +62,7 @@ newline while the form is incomplete instead of submitting)."
      :prefix prefix
      :cont-prompt (or (get o :cont-prompt) prompt)
      :complete? (get o :complete?)
+     :completions nil
      :last-row 0
      :done nil}))
 
@@ -344,9 +347,61 @@ all in (and a new project's own globals, since it's the live runtime)."
 ;; A plain redefinable global (hot-swappable), not baked into the completer.
 (def *lineedit-candidates* lineedit--candidates)
 
+;; How many rows of candidates a listing may occupy. Kept small on purpose: the
+;; renderer's geometry is *relative* (move up over the previous block, clear, reprint),
+;; so a listing tall enough to scroll the terminal would desync the cursor restore —
+;; the same limit the one-line signature hint lives under, just with more rows. A
+;; redefinable global, so a session on a tall terminal can raise it.
+(def *lineedit-completion-max-rows* 6)
+
+(defn lineedit--chunk (n items)
+  "Consecutive `n`-sized chunks of `items`, **keeping** a trailing partial chunk —
+unlike `partition`, which drops it. A listing must not silently lose its last row."
+  (if (empty? items)
+    '()
+    (cons (take n items) (lineedit--chunk n (drop n items)))))
+
+(defn lineedit--completion-rows (cands width)
+  "Pure: the display rows listing `cands` in a `width`-column terminal — laid out
+across in equal columns (row-major, as bash lists), capped at
+`*lineedit-completion-max-rows*` rows with a trailing `… +N more` when they don't all
+fit. Each row is truncated to `width - 1` columns so it can never wrap (a wrapped row
+would desync the `[:up n]` cursor restore)."
+  (let (room (max 1 (- width 1))
+        colw (+ 2 (fold (fn (w c) (max w (string-length c))) 0 cands))
+        ncols (max 1 (quot room colw))
+        total (count cands)
+        shown (min total (* ncols *lineedit-completion-max-rows*))
+        more (- total shown)
+        rows (map (fn (row)
+                    (let (line (trimr (apply str (map (fn (c) (pad-right c colw)) row))))
+                      (if (> (string-length line) room) (substring line 0 room) line)))
+               (lineedit--chunk ncols (take shown cands))))
+    (if (> more 0) (append rows (list (str "… +" more " more"))) rows)))
+
+(defn lineedit--completion-lines (st)
+  "The listing rows to paint below the input for `st` — empty unless the last key was a
+Tab that couldn't make progress (see `lineedit--apply-completion`). `st` must be
+reflowed (`:width` set)."
+  (let (cands (get st :completions))
+    (if (or (nil? cands) (empty? cands))
+      '()
+      (lineedit--completion-rows cands (or (get st :width) 80)))))
+
+(defn lineedit--completion-ops (rows)
+  "Render ops for listing `rows`: each row on its own new line, in the dim hint face."
+  (fold (fn (acc row) (append acc (list [:nl] [:print row lineedit-face-hint])))
+    '() rows))
+
 (defn lineedit--apply-completion (state sstart pfx cands)
   "Pure: replace the symbol prefix `[sstart, point)` with the completion of `pfx`
-against `cands` — the candidate itself when unique, else the longest common prefix."
+against `cands` — the candidate itself when unique, else the longest common prefix.
+
+When the common prefix adds *nothing* (several candidates whose shared prefix is
+already typed), attach `cands` as `:completions` so the renderer lists them below the
+input. That's the readline convention: Tab makes progress if it can, and shows you the
+alternatives when it can't — so a second Tab on `str` lists rather than sitting mute.
+Any other key clears the listing (`lineedit-handle`)."
   (let (text (get state :text)
         p (get state :point)
         n (string-length text)
@@ -357,7 +412,10 @@ against `cands` — the candidate itself when unique, else the longest common pr
     (assoc state
       :text (str (substring text 0 sstart) ins (substring text p n))
       :point (+ sstart (string-length ins))
-      :hist-idx -1)))
+      :hist-idx -1
+      :completions (if (and (= ins pfx) (not (empty? cands)) (not (empty? (rest cands))))
+                     cands
+                     nil))))
 
 (defn lineedit--complete (state)
   "Tab: complete the symbol under point against `*lineedit-candidates*` (the live
@@ -515,10 +573,16 @@ shared `keymap-dispatch`): a global `(fn (state key) -> state)` resolved by symb
 so redefining the command or rebinding the key hot-swaps behaviour. An unbound key
 self-inserts (a 1-char string) or is a no-op; a command that throws is caught so a
 bad binding can't crash the read. In reverse-search mode (`:search` set) keys route
-to `lineedit--search-key` instead. Pure apart from symbol resolution; testable."
-  (if (not (nil? (get state :search)))
-    (lineedit--search-key state key)
-    (keymap-dispatch *lineedit-keymap* state key lineedit--fallback)))
+to `lineedit--search-key` instead. Pure apart from symbol resolution; testable.
+
+Any pending completion listing is dropped *before* dispatch, so it survives exactly one
+keystroke: a Tab that can't make progress re-attaches it (`lineedit--apply-completion`),
+and typing the next character clears it. Clearing up front rather than per-command means
+a rebound key or a user's own command can't leave a stale listing on screen."
+  (let (st (if (nil? (get state :completions)) state (assoc state :completions nil)))
+    (if (not (nil? (get st :search)))
+      (lineedit--search-key st key)
+      (keymap-dispatch *lineedit-keymap* st key lineedit--fallback))))
 
 ;; ---- signature hint + bracket overrides (pure analysis -> render data) -------
 
@@ -618,8 +682,9 @@ available text columns, and prompt width for rendering."
 (defn lineedit--render-single (st)
   "Repaint a SINGLE-line input in place (the common case): move up over any block left
 by a previous multi-line render, carriage-return, clear below, reprint prompt + the
-highlighted (horizontally-scrolled) window, draw the signature hint on the line below
-(if any), then park the cursor. Returns `st` with `:last-row` 0 (cursor ends on row 0)."
+highlighted (horizontally-scrolled) window, draw the signature hint and then any
+completion listing on the lines below (if any), then park the cursor back on the input.
+Returns `st` with `:last-row` 0 (cursor ends on row 0)."
   (let (text (get st :text)
         point (get st :point)
         prefix (get st :prefix)
@@ -636,14 +701,19 @@ highlighted (horizontally-scrolled) window, draw the signature hint on the line 
         chunks (highlight-chunks full (+ base hs) vis overrides)
         raw-hint (if (get st :search) nil (lineedit--hint-pieces full cursorpos))
         hint (if (nil? raw-hint) nil (lineedit--fit raw-hint (dec (get st :width)) '()))
+        cand-rows (lineedit--completion-lines st)
         cursor-col (+ promptw (- point hs))
         head (append (if (> prev-row 0) (list [:up prev-row]) '())
                [[:cr] [:clear-below] [:print (lineedit-display-prompt st)]]
                (lineedit--chunk-ops chunks))
-        tail (if (nil? hint)
+        ;; Everything painted *below* the input line — the hint row, then the listing.
+        ;; We must climb back over exactly as many rows as we printed to repark.
+        below (append (if (nil? hint) '() (cons [:nl] (lineedit--chunk-ops hint)))
+                (lineedit--completion-ops cand-rows))
+        nbelow (+ (if (nil? hint) 0 1) (count cand-rows))
+        tail (if (= nbelow 0)
                (list [:col cursor-col])
-               (append (cons [:nl] (lineedit--chunk-ops hint))
-                 (list [:up 1] [:col cursor-col]))))
+               (append below (list [:up nbelow] [:col cursor-col]))))
     (term-emit (into [] (append head tail)))
     (assoc st :last-row 0)))
 
@@ -680,14 +750,18 @@ tested in isolation."
         overrides (lineedit-overrides full cursorpos)
         lines (string-split text "\n")
         nlines (count lines)
+        cand-rows (lineedit--completion-lines st)
         [cur-row cur-col] (lineedit--cursor-rc text point)
         promptw (string-length (if (= cur-row 0) prompt cont))
         col (+ promptw cur-col)
-        up-to-cursor (- (dec nlines) cur-row))
+        ;; The listing rows sit below the last form line, so the climb back to the
+        ;; cursor's row spans the remaining form lines *plus* the listing.
+        up-to-cursor (- (+ (dec nlines) (count cand-rows)) cur-row))
     (append (if (> prev-row 0) (list [:up prev-row]) '())
       (list [:cr] [:clear-below])
       (lineedit--multi-line-ops lines 0 0 base full overrides prompt cont)
-      (if (> up-to-cursor 0) (list [:up up-to-cursor]) '()) (list [:cr] [:col col]))))
+      (lineedit--completion-ops cand-rows) (if (> up-to-cursor 0) (list [:up up-to-cursor]) '())
+      (list [:cr] [:col col]))))
 
 (defn lineedit--render-multi (st)
   "Repaint a multi-line form (emit `lineedit--multi-ops`), and record the cursor row in

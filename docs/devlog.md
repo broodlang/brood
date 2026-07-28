@@ -10202,3 +10202,84 @@ A context is tagged **own** (set by `with-debugger`/`span`, propagated by `spawn
 it the framework's own result messages leaked context into later test processes and hung an
 unrelated "break with no debugger" case. Verified: debug suite 12 (incl. send-level +
 leak-prevention), `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` clean, concurrency/gen/proc green.
+
+## 2026-07-28 — REPL completion: list the candidates when Tab can't extend
+
+Tab completion has been in the line editor since ADR-052, but only in its
+insert-or-common-prefix form — which is invisible on an ambiguous prefix. Type `str`,
+press Tab, and *nothing happens*: the common prefix is already typed, so there is
+nothing to insert and nothing is drawn. From the outside that's indistinguishable from
+"completion isn't implemented", which is exactly how it got reported.
+
+Fixed by the readline convention: make progress if there is any, otherwise **show the
+alternatives**. `lineedit--apply-completion` now attaches the candidate list as
+`:completions` in precisely the case where its computed insertion equals the prefix it
+was given (several candidates, shared prefix already spelled out), and the renderer
+paints them in dim equal-width columns below the input — row-major, as bash lists.
+Because the *insertion* decision and the *listing* decision are the same `cond`, they
+can't disagree; a listing appears if and only if the keystroke did nothing visible.
+
+**Statelessness was the design constraint.** A cycling menu or ghost text would both
+need a mode — after Tab, what does the next key mean? — and a mode in a
+`(state, key) -> state` editor means every command has to know about it. A listing needs
+none: `lineedit-handle` drops `:completions` *before* dispatch, so it survives exactly
+one keystroke and no command (including a user's own rebinding) can leave a stale one on
+screen. Tab re-attaches it; anything else clears it.
+
+**Geometry is the real constraint.** Rendering is relative — climb up over the previous
+block, clear below, reprint, repark — so anything painted below the input has to be
+climbed back over exactly. The single-line path now sums the hint row and the listing
+rows into one `nbelow`, and the multi-line path's `up-to-cursor` spans the remaining form
+lines *plus* the listing (`(- (+ (dec nlines) ncand) cur-row)`) — the off-by-N that a
+naive append would have left, pinned by a test asserting the `[:up 3]`. Rows are capped
+at `*lineedit-completion-max-rows*` (6) with a `… +N more` tail and truncated to
+`width - 1`: a listing tall enough to scroll the terminal, or a row wide enough to wrap,
+desyncs the cursor restore — the same limit the one-line signature hint already lives
+under.
+
+All of it is Brood (`std/editor/lineedit.blsp`), all pure but the two render calls, so
+the layout is unit-tested with no terminal: 11 new cases covering the attach/no-attach
+boundary, one-keystroke lifetime, column layout, narrow-terminal wrapping, over-long
+truncation, the cap, and the multi-line repark. The two render calls were checked the
+only way they can be — driving the real REPL through a pty and reading the escapes:
+`str`+Tab gives 16 candidates in 3×6 with `[6A` back to col 11; `(map str`+Tab stacks the
+signature hint *and* 6 listing rows and climbs `[7A`; a two-line `defn` climbs `[6A` to
+row 1, col 14. `,help` gained a Tab line, since a feature nobody can see is worth
+advertising.
+
+Suite: 3669/3672, the 3 failures all `KI-14: deep JIT'd recursion` hard-killed at the
+120s cap — a debug-build speed artifact (unrelated to this change; they exercise JSON
+recursion depth, which never loads the editor).
+
+## 2026-07-28 (impl) — Abilities v2 slice 5: the dispatch inline cache (`%dispatch`)
+
+Ability dispatch was ~3.5× a direct call: each op did `(identity-of self)` then
+`(impl-for [A op] id)` — two global-`*impls*` CHAMP lookups (hash the `[ability op]`
+key, then the id) on top of the identity read. The Brood-side inline tricks were
+marginal (~6–11%) and rightly rejected as hacks, so this does it properly: a **per-op
+inline cache in the kernel**, mirroring the existing `GlobalIc`/`CallIc` machinery.
+
+`%dispatch(impls, op-key, id)` (one Rust builtin, `Heap::vm_dispatch`) memoises the
+resolved impl `fn` per op-key in a per-process map `ic[op-key] = (epoch, id, fn)`. A HIT
+— same op-key, same id, current epoch — returns the cached fn with no `*impls*` touch; a
+MISS resolves `impls[op-key][id]` (else `:default`) and caches. The op (from `defability`)
+passes `*impls*` in, so the kernel stays decoupled from the global's name and the
+resolution policy stays in Brood — the cache is a pure memo of `impl-for`, invisible to
+the language (the user calls `(sz b)` and never sees `%dispatch`).
+
+The elegant part is invalidation: the cache is validated by the shared `global_epoch`
+(`runtime.version`), which is bumped by **every `def`** — so `register-impl`'s
+`(def *impls*)` — **and by RUNTIME compaction**. So one epoch guard makes the cache
+reload-safe (a redefined impl misses → re-resolves), GC-safe (a moved RUNTIME fn handle
+misses; and the cached fn lives in the RUNTIME-promoted `*impls*`, stable under minor GC
++ rooted during the call), and cross-process-correct (a `def` in any process bumps the
+shared version) — no new invalidation machinery, no write barrier, nothing user-visible.
+`is_movable` gates caching as a belt-and-braces against ever storing a LOCAL handle.
+
+Result: dispatch **~8.5s → ~5.5s** over 5M calls (best-of-3, release) — the overhead vs a
+direct call (`~6.2s → ~3.2s`) roughly **halved**, ratio 3.5× → 2.4×. Verified correct
+(ability 34 incl. two new reload/poly IC-deopt tests, record/show/json green), GC-safe
+(debug per-deref tripwire + `GC_VERIFY` heap-verifier clean under `BROOD_GC_STRESS=1`),
+reload-transparent (warm the cache, redefine the impl, next call is the new one), and
+engine-agnostic (tree-walker `BROOD_VM=0` too). Remaining §7: compile-time static
+resolution where the receiver type is known, and `:sealed` → a closed switch.

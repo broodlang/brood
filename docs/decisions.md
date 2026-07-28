@@ -2973,6 +2973,19 @@ is ready, like `receive`) would make the block truly zero-cost — a nicety, not
   sub-mode in `std/lineedit.blsp`). The keymap was also generalised into a shared
   `std/keymap.blsp` (`keymap-dispatch`), the input-side counterpart to the display
   seam, now used by both the editor and `observe`.
+- **Completion now *lists* when it can't extend** (2026-07-28). Tab shipped
+  insert-or-common-prefix, which is silent on an ambiguous prefix: the user sees
+  nothing happen and can't tell whether completion exists, is broken, or has simply
+  run out of shared characters. The readline convention fixes the ambiguity for free —
+  make progress if there is any, otherwise **show the alternatives** — so
+  `lineedit--apply-completion` attaches the candidates as `:completions` exactly when
+  the common prefix adds nothing, and the renderer paints them in dim columns below the
+  input. Deliberately *not* a cycling menu or ghost text: both need a mode (what does
+  the next key mean?), while a listing is stateless — `lineedit-handle` drops it before
+  every dispatch, so it survives one keystroke and no command can leave it stale.
+  Capped at `*lineedit-completion-max-rows*` (6) because the renderer's geometry is
+  relative: a listing tall enough to scroll the terminal would desync the `[:up n]`
+  cursor restore, the same constraint the one-line signature hint already lives under.
 - Remaining limits (all additive follow-ups): a scheduler-parking key read (makes the
   benign worker block above truly zero-cost); lexical (not scope-aware) highlighting;
   completion from globals only (no locals-in-scope); display width approximated as one

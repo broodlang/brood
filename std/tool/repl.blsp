@@ -144,7 +144,8 @@ highlights. Used to colour a printed result on an interactive TTY."
              "  ,doc  <name>    docstring + arglist of a function/macro/primitive\n"
              "  ,type <expr>    evaluate <expr> and show its runtime type\n"
              "  ,time <expr>    evaluate <expr> and show elapsed time\n"
-             "  ,clear          clear the screen" "\e[0m")))
+             "  ,clear          clear the screen\n"
+             "  Tab             complete the name under the cursor; again to list matches" "\e[0m")))
 
 (defn repl--meta-doc (name)
   "Print the docstring + arglist for `name` (a function/macro/primitive), or a note."
