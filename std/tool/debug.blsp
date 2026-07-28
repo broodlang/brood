@@ -1,0 +1,253 @@
+(defmodule debug
+  "A process-native tracing debugger — the actor-model answer to Elixir's `dbg`.
+
+Elixir's `dbg`/`IEx.pry` is a synchronous, single-session, terminal-bound pause: it
+blocks the process waiting for the one IEx session, so it needs a TIMEOUT, and a
+second process hitting the same point queues behind the first. Both limits come from
+one root cause — the debugger is a terminal, not a process.
+
+Here the debugger IS a process. A paused worker `send`s its snapshot to the debugger
+and blocks on `receive` for a resume — parking indefinitely at zero cost, no timeout.
+Many workers hitting the same `break` each park independently and fan into the
+debugger's mailbox as a QUEUE of paused processes, each inspectable and resumable.
+
+Causal context propagates TRANSPARENTLY: the debugger endpoint + current span live in
+one dynamic, `*trace-context*`, which the kernel copies across `spawn` (opt-in, zero
+cost when unbound — see scheduler/lifecycle.rs). So a plain `(spawn (fn () (break …)))`
+inside a `with-debugger` scope inherits the debugger and parks — no re-wiring — and the
+debugger reconstructs a cross-process causal TREE, something `dbg` cannot do.
+
+Wire it up with `with-debugger`; trace with `spy` (its `*spy-sink*` is routed here),
+pause with `break`, and correlate with `span` (`span-spawn` is now just
+`(spawn (span …))` sugar). `debug-watch` gives a live terminal view."
+  (:use editor/ansi))
+
+;; ---- ambient wiring: ONE propagating context -------------------------------
+;; `*trace-context*` = {:debugger pid :span id} (or nil). This is the SINGLE dynamic
+;; the kernel propagates across `spawn` (scheduler/lifecycle.rs seeds a child's
+;; dynamics from it), so a plain `spawn`'d child inherits the debugger endpoint AND
+;; the current causal span with no explicit hand-off — `break`/`span` just work and
+;; nest under the parent. Zero cost when unbound: no `binding` active → nothing to
+;; propagate. Read it through the two accessors (both nil-safe on a missing context).
+(defdyn *trace-context* nil)
+(defn tc-debugger () (get *trace-context* :debugger))
+(defn tc-span () (get *trace-context* :span))
+
+;; ---- the debugger process ---------------------------------------------------
+;; State: {:events [ordered event maps] :paused {pid -> snapshot} :seq n}. The
+;; debugger's own mailbox order IS a global linearisation of concurrent events, so
+;; stamping each with an incrementing :seq gives a deterministic, mergeable log.
+(defn debug--record (state event)
+  (let (seq (get state :seq))
+    (assoc state
+      :seq (inc seq)
+      :events (conj (get state :events) (assoc event :seq seq)))))
+
+(defn debug--loop (state)
+  (receive
+    ([:trace entry from]
+     (debug--loop (debug--record state {:kind :trace :pid from :entry entry})))
+    ([:span-enter span parent pid label]
+     (debug--loop (debug--record state {:kind :span-enter :span span :parent parent :pid pid :label label})))
+    ([:span-exit span pid value]
+     (debug--loop (debug--record state {:kind :span-exit :span span :pid pid :value value})))
+    ([:break pid snapshot]
+     ;; The worker is now blocked on receive awaiting [:resume] — record it as paused.
+     (debug--loop (debug--record (assoc-in state [:paused pid] snapshot)
+                    {:kind :break :pid pid :label (get snapshot :label)})))
+    ([:resume pid]
+     (send pid [:resume])
+     (debug--loop (assoc state :paused (dissoc (get state :paused) pid))))
+    ([:resume-all reply]
+     (doseq (p (keys (get state :paused))) (send p [:resume]))
+     (when reply (send reply [:resumed (count (get state :paused))]))
+     (debug--loop (assoc state :paused {})))
+    ([:query reply]
+     (send reply [:state state])
+     (debug--loop state))
+    ([:stop reply]
+     (when reply (send reply [:stopped]))
+     :stopped)))
+
+(defn start-debugger ()
+  "Spawn a fresh debugger process and return its pid. Bind it as `*debugger*` (or use `with-debugger`), then `spy` / `break` / `span` stream to it."
+  (spawn (debug--loop {:events [] :paused {} :seq 0})))
+
+(defn debugger-sink ()
+  "A `*spy-sink*` value that forwards each `spy` entry to the debugger in the current `*trace-context*` (read at emit time, so it follows the context into spawned children)."
+  (fn (entry) (let (dbg (tc-debugger)) (when dbg (send dbg [:trace entry (self)])))))
+
+(defn with-debugger (dbg thunk)
+  "Run `thunk` wired to debugger `dbg`: `*trace-context*` carries it (and the current span) and `*spy-sink*` routes `spy` to it. Because the kernel propagates `*trace-context*` across `spawn`, children inherit the wiring with NO re-setup — a plain `(spawn (fn () (break …)))` inside here parks at `dbg`."
+  (binding (*trace-context* {:debugger dbg :span nil} *spy-sink* (debugger-sink))
+    (thunk)))
+
+;; ---- break: park without a timeout, fan into the paused queue ----------------
+(defn break (label & vals)
+  "Park THIS process at a breakpoint: snapshot `label` + the named `vals` + the current causal span to `*debugger*`, then block until the debugger sends `[:resume]` — with **no timeout** (a parked process costs nothing). Many processes hitting the same `break` each park independently and queue in the debugger. A no-op when `*debugger*` is nil, so it's safe to leave in place. Returns nil."
+  (let (dbg (tc-debugger))
+    (when dbg
+      (send dbg [:break (self) {:label label :vals (vec vals) :span (tc-span)}])
+      (receive ([:resume] nil)))))
+
+(defn break-when (pred label & vals)
+  "A data-driven breakpoint: park (via `break`) only when `pred` is truthy, else return nil untouched — `(break-when (< x 0) \"neg\" :x x)`. Conditional breaks are just a Brood predicate, so no recompile and no cost on the false path."
+  (when pred (apply break label vals)))
+
+;; ---- causal spans: correlate work across the share-nothing boundary ---------
+(defn span (label thunk)
+  "Run `thunk` inside a fresh causal span (a child of the current `*span*`), emitting enter/exit to `*debugger*`; returns `thunk`'s value. Nested `span`s and `span-spawn`ed children link to this one, so the debugger can rebuild the causal tree."
+  ;; pid-qualified so two processes' gensym counters can't collide into one node.
+  (let (dbg (tc-debugger) parent (tc-span) id [(self) (gensym "s")])
+    (when dbg (send dbg [:span-enter id parent (self) label]))
+    ;; Rebind the whole context (new span) AND the spy sink, so `spy` inside this
+    ;; span routes to the debugger even in a child that only *inherited* the context.
+    (binding (*trace-context* {:debugger dbg :span id} *spy-sink* (debugger-sink))
+      (let (value (thunk))
+        (when dbg (send dbg [:span-exit id (self) value]))
+        value))))
+
+(defn span-spawn (label thunk)
+  "`spawn` `thunk` wrapped in a `span`. With transparent context propagation (the kernel copies `*trace-context*` into the child) a plain `(spawn (span label thunk))` already inherits the debugger + parent span, so this is now just sugar for that."
+  (spawn (span label thunk)))
+
+;; ---- inspection / control (round-trip queries to the debugger) --------------
+(defn dbg-state (dbg)
+  "The debugger's full state snapshot: `{:events :paused :seq}`."
+  (let (me (self)) (send dbg [:query me]) (receive ([:state s] s))))
+(defn paused (dbg)
+  "The map of currently parked processes: `pid -> snapshot`."
+  (get (dbg-state dbg) :paused))
+(defn dbg-events (dbg)
+  "The ordered event log the debugger has collected."
+  (get (dbg-state dbg) :events))
+(defn resume (dbg pid)
+  "Release one parked process."
+  (send dbg [:resume pid]) nil)
+(defn resume-all (dbg)
+  "Release every parked process; returns how many were waiting."
+  (let (me (self)) (send dbg [:resume-all me]) (receive ([:resumed n] n))))
+(defn dbg-stop (dbg)
+  "Stop the debugger process."
+  (let (me (self)) (send dbg [:stop me]) (receive ([:stopped] :ok))))
+
+;; ---- aggregate / statistical querying (debug the population, not one hit) ----
+;; When thousands of processes hit the same trace point you don't want thousands of
+;; dumps (Elixir's failure mode) — you want the DISTRIBUTION and the OUTLIERS. Because
+;; traces are data, not text, these are plain folds over the debugger's event log.
+(defn trace-entries (dbg)
+  "The raw `:trace` events the debugger collected (each `{:pid :entry :seq …}`)."
+  (filter (fn (e) (= (get e :kind) :trace)) (dbg-events dbg)))
+
+(defn observations (dbg)
+  "Every `spy` node observation, flattened to `{:pid :form :value}`."
+  (keep (fn (e)
+          (let (entry (get e :entry))
+            (when (= (get entry :spy) :node)
+              {:pid (get e :pid) :form (get entry :form) :value (get entry :value)})))
+    (trace-entries dbg)))
+
+(defn hits (dbg)
+  "How many times each traced form was observed, `{form-string -> count}`."
+  (frequencies (map (fn (o) (pr-str (get o :form))) (observations dbg))))
+
+(defn value-distribution (dbg form-string)
+  "The distribution of observed values for one traced form, `{value -> count}`."
+  (frequencies
+    (keep (fn (o) (when (= (pr-str (get o :form)) form-string) (get o :value)))
+      (observations dbg))))
+
+(defn modal-value (dbg form-string)
+  "The most-common observed value for a form (nil if never seen) — the population's 'normal'."
+  (let (dist (value-distribution dbg form-string))
+    (if (empty? dist)
+      nil
+      (first (first (sort-by (fn (kv) (- (second kv))) dist))))))
+
+(defn outliers (dbg form-string)
+  "The observations of `form-string` whose value is NOT the modal one — the few rows to inspect when the population mostly agrees. Each is `{:pid :form :value}`."
+  (let (modal (modal-value dbg form-string))
+    (filter (fn (o) (and (= (pr-str (get o :form)) form-string)
+                      (not (= (get o :value) modal))))
+      (observations dbg))))
+
+;; ---- causal tree reconstruction ---------------------------------------------
+(defn causal-tree (dbg)
+  "Reconstruct the cross-process causal tree from the debugger's span events: a
+list of root nodes, each `{:span :label :pid :value :children [...]}`. A span still
+running shows `:value :running`."
+  (let (events (dbg-events dbg)
+        enters (filter (fn (e) (= (get e :kind) :span-enter)) events)
+        exits  (filter (fn (e) (= (get e :kind) :span-exit)) events)
+        value-of (fn (id)
+                   (let (ex (first (filter (fn (e) (= (get e :span) id)) exits)))
+                     (if ex (get ex :value) :running)))
+        children-of (fn (parent-id)
+                      (filter (fn (e) (= (get e :parent) parent-id)) enters)))
+    (letrec (build (fn (e)
+                     {:span (get e :span) :label (get e :label) :pid (get e :pid)
+                      :value (value-of (get e :span))
+                      :children (map build (children-of (get e :span)))}))
+      (map build (filter (fn (e) (nil? (get e :parent))) enters)))))
+
+(defn print--causal (nodes depth)
+  (doseq (node nodes)
+    (println (str (apply str (map (constantly "  ") (range depth)))
+               (get node :label) " [" (get node :pid) "] => " (pr-str (get node :value))))
+    (print--causal (get node :children) (inc depth))))
+(defn print-causal (dbg)
+  "Pretty-print the causal tree (`causal-tree`) as an indented, pid-tagged outline."
+  (print--causal (causal-tree dbg) 0))
+
+;; ---- one-glance session report ----------------------------------------------
+(defn debug-report (dbg)
+  "Print a session summary: parked processes (the break queue), the cross-process
+causal tree, and the hottest traced forms by hit count. The one-call overview."
+  (let (state (dbg-state dbg))
+    (println "── parked processes ──")
+    (doseq (entry (get state :paused))
+      (println (str "  " (first entry) "  " (get (second entry) :label)
+                 "  " (pr-str (get (second entry) :vals)))))
+    (println "── causal tree ──")
+    (print-causal dbg)
+    (println "── hot traced forms ──")
+    (doseq (kv (sort-by (fn (kv) (- (second kv))) (hits dbg)))
+      (println (str "  " (second kv) "×  " (first kv))))))
+
+;; ---- live terminal view -----------------------------------------------------
+(defn debug-watch--loop (dbg frames)
+  (print (str (ansi-clear) (ansi-home)))
+  (println "── debug-watch  (Ctrl-C to exit) ──")
+  (debug-report dbg)
+  (if (= frames 1)
+    :done
+    (do (sleep 500) (debug-watch--loop dbg (dec frames)))))
+(defn debug-watch (dbg & frames)
+  "Live, read-only terminal view of the debug session — clears the screen and
+reprints `debug-report` every 500ms. Runs until Ctrl-C, or for a fixed frame count
+if one is given (used by tests). Watch the paused queue fill/drain and the causal
+tree grow as a workload runs; drive resume from another session or a timer."
+  (debug-watch--loop dbg (if (empty? frames) -1 (first frames))))
+
+;; ---- interactive terminal attach (key-driven) -------------------------------
+;; The driveable sibling of `debug-watch`: same live view, but it reads the keyboard
+;; (raw mode) so you resume parked processes without a timer. Pure IO shell over the
+;; same `debug-report`; input via `term-poll` (nil on the 400ms timeout → just redraw).
+(defn debug-attach--loop (dbg)
+  (print (str (ansi-clear) (ansi-home)))
+  (println "── debug-attach    [r] resume all parked    [q] quit ──")
+  (debug-report dbg)
+  (let (key (term-poll 400))
+    (cond
+      (or (= key "q") (= key :escape) (= key :ctrl-c)) :quit
+      (= key "r") (do (resume-all dbg) (debug-attach--loop dbg))
+      else (debug-attach--loop dbg))))
+(defn debug-attach (dbg)
+  "Interactive terminal view of the debug session: refreshes ~2×/s and handles keys —
+`r` resumes every parked process, `q` (or Esc / Ctrl-C) quits. Needs a real terminal
+(enters raw mode); `debug-watch` is the non-interactive read-only sibling. `term-leave`
+always runs, even on error, so the terminal is restored."
+  (term-enter)
+  (let (result (try (debug-attach--loop dbg) (catch _ :error)))
+    (term-leave)
+    result))
