@@ -11038,3 +11038,110 @@ for a macro's argument form); the source *form* echo carries the information. Re
 [[with]] (ADR — the prior ergonomics borrow), ADR-006 (write it in Brood), ADR-011
 (defer power — why the special-form rules and a `:label` arg are scoped, not maximal),
 ADR-013 (hot reload — the sink seam mirrors the late-binding philosophy).
+
+## ADR-174 — Compiled code belongs to the runtime, not the process (the BEAM module-area model)
+
+**Context.** A green process costs ~15 KB, against the BEAM's ~2.7 KB for a process
+holding equivalent state. Measured 2026-07-28 (see devlog): the cost is not the mailbox,
+the payload, or GC retention — it is that **every process compiles its own copy of every
+function it calls**. `(fold + 0 nil)` — a fold over an *empty* list — costs ~18 KB in a
+freshly spawned process, and live bytes scale linearly with the number of *distinct*
+prelude functions a process touches (0 fns 13.8 KB/proc; 1 fn 31.6; 2 fns 50.0; 3 fns
+59.9; 4 fns 66.5). At 300k live processes that is the difference between 4.58 GB and
+Elixir's 942 MB on the same workload.
+
+The duplication is already recognised in the tree. From `JitWorkItem`'s doc: *"thousands
+of short-lived processes each queue their OWN `CompiledArm` copy of the same shared
+closure; without the dedupe a spawn storm compiled `fib` ~68×."* ADR-101's `share_key`
+fixed that for **native code** — a per-runtime `jit_code_cache` keyed by
+`(closure_id, argc)`, epoch-guarded, idempotent publish. It did not fix the bytecode,
+the `Node` tree, or the inline caches, which is what this ADR is about.
+
+**What Erlang does.** A BEAM process holds *no code*. The PCB is stack + heap + mailbox;
+code lives once per node in a module area, reached through the export table. Literals
+live in a shared, refcounted per-module literal area rather than being copied into each
+process. Hot reload is the current/old two-version rule, with old code purged once no
+process references it. That separation — **code is node-global, state is process-local**
+— is why a BEAM process is ~2.7 KB, and it is the property Brood lost by caching compiled
+artefacts on the `Heap`.
+
+Brood already has three of the four pieces:
+
+| BEAM | Brood today |
+|---|---|
+| module area (code) | shared PRELUDE / RUNTIME AST regions |
+| literal area | `ConstVal::Handle` into those regions |
+| export table + hot reload | global table + `global_epoch` / ADR-091 generations |
+| **compiled code, node-global** | **absent — per-process `vm_cache` + IC tables** |
+
+**Decision.** Move the compiled artefacts to the runtime, mirroring `jit_code_cache`:
+a per-`RuntimeCode` cache keyed by the existing `share_key` `(closure_id, argc)`, holding
+`Arc<CompiledArm>`, validated by `epoch == global_epoch()` before install. Processes
+install a shared arm instead of compiling their own. This is the module area, applied to
+the artefact that is currently the odd one out.
+
+**Explicitly rejected: dropping the retained `Node` tree.** The tree is 58% of
+compiled-arm memory and 75% of it looked droppable on a static eligibility test (31/38
+arms), so this was investigated first and rejected on five independent grounds:
+
+1. `pub body: Node` has no interior mutability, and arms live behind `Arc<CompiledArm>`.
+2. Unique ownership is never available — `CallIcEntry.arm`, `live_vm_arms` and
+   `CompiledClosure::compiled` all hold the same `Arc`.
+3. **The background JIT compiler thread holds an `Arc<CompiledArm>` off a queue and reads
+   `arm.body` to lower it.** A drop races a live cross-thread read: use-after-free.
+4. `Inst::TryCatch` holds `NodePtr`, a non-owning raw pointer *into* the arm's own tree,
+   so `body` and `chunk` can only ever be replaced atomically together.
+5. `vm_site_alloc` only pushes; call-site ids are never individually reclaimed. Every
+   drop→recompile cycle would leak IC slots monotonically — an optimisation that leaks
+   memory when repeated.
+
+Sharing avoids all five: nothing is dropped, nothing is recompiled, no lifetime changes.
+
+**The one real obstacle: call-site ids.** `vm_site_alloc` returns a *dense per-process*
+index (`t.len()-1`) that is baked into each compiled `Node::Call` and used to index the
+per-process IC tables. Share an arm and its baked ids come from whichever process
+compiled it, so every process's IC vectors must be dense up to the global maximum.
+Measured: a unit process uses 21 sites (4.3 KB of IC tables); the root uses 251 (33.4 KB).
+Naive sharing would push every process toward the root's figure to save ~14.5 KB of body
+— **a net loss of ~14 KB/proc**. So sharing is only correct together with a site-id fix,
+and is staged behind one.
+
+**Staging.** Each stage is independently landable and verifiable:
+
+- **Stage 1 — arm-relative site ids.** Sites become relative to their arm; each process
+  allocates one contiguous IC block per arm instance it runs, and the frame resolves
+  `base + rel`. `BcFrame` already carries `arm_slot`, so the base can hang off the
+  existing per-process arm registration rather than a new lookup. Pure refactor,
+  semantics identical, no sharing yet — verifiable on its own by the differential fuzzer
+  and `make ab`.
+- **Stage 2 — shared `CompiledArm` cache.** The `jit_code_cache` analogue over
+  `Arc<CompiledArm>`, same key, same epoch guard, same idempotent publish. With Stage 1
+  in place, per-process IC cost stays proportional to arms actually used.
+- **Stage 3 (optional) — shared inline caches.** BEAM's export table is node-global, and
+  our IC entries cache *global* resolutions that are already epoch-guarded and hold
+  promoted/immovable callees, so they arguably belong with the code too. Blocked on
+  `CallIcEntry.fast` being a `Cell` (not `Sync`); it would need the atomic treatment
+  `FastLink` already uses. Deferred until Stages 1–2 are measured — ADR-011.
+
+**Verification (required, not optional).** This touches the VM inner loop, the JIT, and
+GC-visible structures, so reading is not evidence:
+
+- the differential fuzzer (VM vs tree-walker) and the reader-robustness fuzzer;
+- `BROOD_GC_STRESS=1` + `BROOD_GC_VERIFY=1` over the suite — shared arms change what the
+  RUNTIME compactor's `rewrite_node` walks;
+- `BROOD_JIT_VERIFY=1`, plus a `BROOD_NO_JIT=1` A/B to separate a JIT miscompile from a
+  sharing bug;
+- **a TSAN build (`--features system-alloc`) is mandatory** — the hazard that killed the
+  drop design was a threading one, and Stage 2 publishes `Arc`s read by the background
+  compiler thread;
+- `make ab` across the full row set (sharing changes IC hit rates), and the 300k
+  `spawn-live` row for the memory claim itself;
+- an off-switch from the first commit (`BROOD_NO_SHARED_ARMS=1`), matching
+  `BROOD_NO_INLINE` / `BROOD_NO_HANDOFF`.
+
+**Consequences.** Expected: per-process cost drops toward the parked-process floor
+(~6.3 KB measured), since a process would hold state and IC blocks but no code. Risk
+concentrates in Stage 1, which rewrites how every call site addresses its cache — the
+extra indirection is on the IC hot path, so `make ab` gates it, not intuition. If Stage 1
+costs more than a few percent, Stage 2's memory win has to justify it explicitly rather
+than be assumed.
