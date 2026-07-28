@@ -467,10 +467,12 @@ ability when third-party or later code must be able to add a case.
 The standard library uses an ability for its one open-extension rendering seam —
 `std/show.blsp`, Elixir's `String.Chars` for Brood (ADR-171). `(require 'show)`
 gives a `Display` ability with op **`(to-str x)`** (a value → its display string),
-whose `:default` impl is the native `str`, and installs a hook so the **screen
-printers** (`print` / `println` / `eprint` / `eprintln`) let a *record* define how
-it prints. Built-ins are unchanged and pay no dispatch cost; with `show` unloaded
-there is no change at all.
+whose `:default` impl is the native `str`. Loading it makes the protocol *available*
+but changes nothing on its own; the **app** calls **`(display-on)`** to make the
+**screen printers** (`print` / `println` / `eprint` / `eprintln`) honor a *record*'s
+impl. Activation is an app-level step, never a side effect of a library's `(:use show)`
+(ADR-172 §8: libraries propose impls, the app disposes). Built-ins are unchanged and
+pay no dispatch cost; without `(display-on)` there is no change at all.
 
 ```clojure
 (defmodule money (:use ability) (:use show))
@@ -478,6 +480,7 @@ there is no change at all.
 (impl Display money/usd
   (to-str [m] (str "$" (to-fixed (/ (get m :cents) 100.0) 2))))
 
+(display-on)                  ; the app opts in (once, at startup)
 (println (usd 1050))          ; => $10.50   (not {:__id__ :money/usd, :cents 1050})
 (to-str (usd 1050))           ; => "$10.50" — the explicit call, for use inside str/fmt
 ```
@@ -764,6 +767,31 @@ destructure):
 ```clojure
 (if-let (v (get m :k)) (use v) :absent)   ; bind v; take `then` when truthy, else `else`
 (when-let (v (get m :k)) (use v))         ; body only when truthy
+```
+
+**`with`** — Elixir's `with`, spelled as flat `pattern expr` pairs (the `let`
+shape). Each `expr` is matched against its `pattern` in order; the first value
+that fails its pattern **short-circuits**, and the body runs only when every step
+matched, with all bindings in scope. It's pure sugar over nested `match` (no new
+special form):
+
+```clojure
+(with ([:ok account] (lookup user)
+       [:ok card]    (payment-method account)
+       [:ok receipt] (charge card 10))
+  receipt)                                  ; a step's [:error …] falls straight through
+```
+
+A trailing **`:else`** section is a set of `match` clauses run against the value
+that short-circuited (like Elixir's `else`); with no `:else`, that value is
+returned as-is:
+
+```clojure
+(with ([:ok user] (lookup id))
+  user
+  :else
+  ([:error :not-found] {:error "no such user"})
+  ([:error e]          {:error e}))
 ```
 
 **Local loops** — there is **no `loop`/`recur`**; Brood has proper tail calls, so a
