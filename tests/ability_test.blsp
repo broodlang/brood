@@ -151,8 +151,7 @@
 ;; `register-impl`/`register-ability`/`impl-for`/`impl-rank` are exercised directly with
 ;; crafted provenance (a `from` ns per registration), so the ordering is testable without
 ;; standing up real cross-module fixtures. Unique ability names avoid clashing the shared
-;; registries. type-owner (3) > ability-owner (2) > other (1).
-; an ancestor ≠ owner
+;; registries. app (4) > type-owner (3) > ability-owner (2) > other (1); an ancestor ≠ owner.
 (describe "impl precedence (deterministic by tier)"
   :serial
   (test "type-owner beats ability-owner regardless of registration order"
@@ -204,4 +203,23 @@
               *ns-package* (assoc *ns-package* 'appmod 'myproj))
       (assert= (impl-rank 'AppAb :foreign/rec 'appmod) 4)
       (assert= (impl-rank 'AppAb :foreign/rec nil) 4)
-      (assert= (impl-rank 'AppAb :foreign/rec 'deplib) 1))))
+      (assert= (impl-rank 'AppAb :foreign/rec 'deplib) 1)))
+  ;; regression (the nil-provenance bug): an app/root impl registers with `from` = nil, so
+  ;; `*impl-from*` records nil as the incumbent's provenance. If registration keys "is there
+  ;; an incumbent?" off truthiness of that stored `from` (nil → "none"), a LATER lower-tier
+  ;; impl mistakes the app slot for empty and clobbers it — silently reversing ADR-172's
+  ;; "the app can override anything, order-independent". The app must hold the slot when it
+  ;; registered FIRST, against every lower tier, in either order.
+  (test "an app/root impl (from=nil) is not displaced by a later lower tier"
+    (register-ability 'HoldAb '((op [self])) 'holdlib)
+    ;; app (nil) first, then ability-owner, type-owner, and 'other — none may displace it.
+    (register-impl 'HoldAb 'op :h/rec (fn (x) :app) nil)
+    (register-impl 'HoldAb 'op :h/rec (fn (x) :ability) 'holdlib)
+    (register-impl 'HoldAb 'op :h/rec (fn (x) :type) 'h)
+    (register-impl 'HoldAb 'op :h/rec (fn (x) :other) 'stranger)
+    (assert= ((impl-for '[HoldAb op] :h/rec) nil) :app)
+    ;; and for a built-in id, app-first then the ability owner: app still wins.
+    (register-ability 'HoldB '((op [self])) 'hblib)
+    (register-impl 'HoldB 'op :int (fn (n) :app) nil)
+    (register-impl 'HoldB 'op :int (fn (n) :ability) 'hblib)
+    (assert= ((impl-for '[HoldB op] :int) nil) :app)))

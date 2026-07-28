@@ -502,3 +502,14 @@
     (binding (*ns-package* {'widget 'myapp})
       (assert= (trace-with-packages (list {:fn "widget/w"} {:fn "map"}))
         (list {:fn "widget/w" :package 'myapp} {:fn "map" :package nil})))))
+
+;; regression: ns-package must tolerate nil (an anonymous / top-level trace frame has no
+;; :fn), and trace-with-packages must not crash on such a frame.
+(describe "package identity: ns-package handles missing names"
+  (test "nil / empty in → nil out (no crash)"
+    (assert= (ns-package nil) nil)
+    (assert= (ns-package "") nil))
+  (test "trace-with-packages tolerates a frame with no :fn"
+    (binding (*ns-package* {'widget 'myapp})
+      (assert= (trace-with-packages (list {:fn "widget/w"} {:file "x" :line 2}))
+        (list {:fn "widget/w" :package 'myapp} {:file "x" :line 2 :package nil})))))

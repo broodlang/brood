@@ -167,11 +167,15 @@
   (let (op-key [aname op]
         methods (or (get *impls* op-key) {})
         prov-key [aname op key]
+        ; presence, not truthiness: a root/REPL/app incumbent records `from` = nil, so a
+        ; nil `prev-from` is ambiguous between "no incumbent" and "incumbent was the app".
+        ; Keying off `contains?` keeps a later lower tier from displacing an app impl.
+        has-prev (contains? *impl-from* prov-key)
         prev-from (get *impl-from* prov-key)
         new-rank (impl-rank aname key from)
         ; recompute the incumbent's tier from its recorded `from` — no extra registry.
-        old-rank (if prev-from (impl-rank aname key prev-from) 0))
-    (when (and prev-from (= new-rank old-rank) (not (= prev-from from)))
+        old-rank (if has-prev (impl-rank aname key prev-from) 0))
+    (when (and has-prev (= new-rank old-rank) (not (= prev-from from)))
       (println "warning: ability "
         aname "/" op " for " key " — same-tier impl from " prev-from " overridden by " from
         " (last wins)"))
