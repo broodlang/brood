@@ -106,7 +106,7 @@
       (assert= (trim "  x  ") "x")
       (assert= (starts-with? "hé€" "hé") true)
       (assert= (ends-with? "hé€" "€") true)
-      (assert= (string-contains? "hé€" "é") true)
+      (assert= (includes? "hé€" "é") true)
       true))
   (test "number<->string round trips"
     (do
