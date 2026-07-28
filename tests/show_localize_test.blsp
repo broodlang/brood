@@ -42,6 +42,9 @@
   show-localize-test/money
   (inspect [m] (str "#money<" (get m :amount) " " (name (get m :currency)) ">")))
 
+;; App opt-in so `(println money)` routes through the protocol (ADR-172 §5/§8).
+(display-on)
+
 (describe "locale-aware Display via *locale*"
   (test "the ambient default locale (:en)"
     (assert= (to-str (money 10.5 :usd)) "$10.50")

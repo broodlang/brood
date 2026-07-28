@@ -9,6 +9,11 @@
 
 ; a record WITHOUT a custom Display impl
 (defrecord* plain (a))
+
+;; Activation is an app step now (ADR-172 §5/§8): loading `show` only makes the
+;; protocol available — the screen printers honor it once the app opts in here.
+(display-on)
+
 (describe "to-str — the protocol op"
   (test "built-ins fall to :default (native str)"
     (assert= (to-str 42) "42")
