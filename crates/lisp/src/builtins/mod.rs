@@ -2429,6 +2429,25 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![seq, seq, callable], any),
         binding,
     );
+    // The debugger's durable per-process causal context (ADR-174 send-level slice) —
+    // `dev-tools` only, so a lean release registers neither (the `debug` module that
+    // uses them is a DEV_MODULE too).
+    #[cfg(feature = "dev-tools")]
+    def(
+        heap,
+        "%trace-context",
+        Arity::exact(0),
+        Sig::new(vec![], any),
+        trace_context_get,
+    );
+    #[cfg(feature = "dev-tools")]
+    def(
+        heap,
+        "%set-trace-context",
+        Arity::exact(1),
+        Sig::new(vec![any], any),
+        trace_context_set,
+    );
     def(
         heap,
         "dynamic?",
