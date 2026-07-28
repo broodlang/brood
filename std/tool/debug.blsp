@@ -202,29 +202,37 @@ running shows `:value :running`."
                       :children (map build (children-of (get e :span)))}))
       (map build (filter (fn (e) (nil? (get e :parent))) enters)))))
 
-(defn print--causal (nodes depth)
-  (doseq (node nodes)
-    (println (str (apply str (map (constantly "  ") (range depth)))
-               (get node :label) " [" (get node :pid) "] => " (pr-str (get node :value))))
-    (print--causal (get node :children) (inc depth))))
+(defn causal--lines (nodes depth)
+  "The causal tree as a flat list of indented, pid-tagged strings (one per span)."
+  (mapcat (fn (node)
+            (cons (str (apply str (map (constantly "  ") (range depth)))
+                    (get node :label) " [" (get node :pid) "] => " (pr-str (get node :value)))
+              (causal--lines (get node :children) (inc depth))))
+    nodes))
 (defn print-causal (dbg)
   "Pretty-print the causal tree (`causal-tree`) as an indented, pid-tagged outline."
-  (print--causal (causal-tree dbg) 0))
+  (doseq (line (causal--lines (causal-tree dbg) 0)) (println line)))
 
 ;; ---- one-glance session report ----------------------------------------------
+(defn debug--report-lines (dbg)
+  "The session summary as a list of strings: parked processes (the break queue), the
+cross-process causal tree, and the hottest traced forms. Rendered by both the
+`println`-based `debug-report` (cooked mode) and the cursor-positioned `debug-attach`
+(raw mode, where `\\n` would not return to column 0)."
+  (let (state (dbg-state dbg))
+    (append
+      (cons "── parked processes ──"
+        (map (fn (entry) (str "  " (first entry) "  " (get (second entry) :label)
+                           "  " (pr-str (get (second entry) :vals))))
+          (get state :paused)))
+      (cons "── causal tree ──" (causal--lines (causal-tree dbg) 0))
+      (cons "── hot traced forms ──"
+        (map (fn (kv) (str "  " (second kv) "×  " (first kv)))
+          (sort-by (fn (kv) (- (second kv))) (hits dbg)))))))
 (defn debug-report (dbg)
   "Print a session summary: parked processes (the break queue), the cross-process
 causal tree, and the hottest traced forms by hit count. The one-call overview."
-  (let (state (dbg-state dbg))
-    (println "── parked processes ──")
-    (doseq (entry (get state :paused))
-      (println (str "  " (first entry) "  " (get (second entry) :label)
-                 "  " (pr-str (get (second entry) :vals)))))
-    (println "── causal tree ──")
-    (print-causal dbg)
-    (println "── hot traced forms ──")
-    (doseq (kv (sort-by (fn (kv) (- (second kv))) (hits dbg)))
-      (println (str "  " (second kv) "×  " (first kv))))))
+  (doseq (line (debug--report-lines dbg)) (println line)))
 
 ;; ---- live terminal view -----------------------------------------------------
 (defn debug-watch--loop (dbg frames)
@@ -245,10 +253,19 @@ tree grow as a workload runs; drive resume from another session or a timer."
 ;; The driveable sibling of `debug-watch`: same live view, but it reads the keyboard
 ;; (raw mode) so you resume parked processes without a timer. Pure IO shell over the
 ;; same `debug-report`; input via `term-poll` (nil on the 400ms timeout → just redraw).
+(defn debug-attach--render (dbg)
+  ;; In raw mode `\n` moves down but NOT to column 0, so a `println` frame staircases.
+  ;; Clear, then place every line absolutely at (row, col 1) with `ansi-cursor`.
+  (print (ansi-clear))
+  (letrec (place (fn (lines row)
+                   (when (not (empty? lines))
+                     (print (str (ansi-cursor row 1) (first lines)))
+                     (place (rest lines) (inc row)))))
+    (place (cons "── debug-attach    [r] resume all parked    [q] quit ──"
+             (debug--report-lines dbg))
+      1)))
 (defn debug-attach--loop (dbg)
-  (print (str (ansi-clear) (ansi-home)))
-  (println "── debug-attach    [r] resume all parked    [q] quit ──")
-  (debug-report dbg)
+  (debug-attach--render dbg)
   (let (key (term-poll 400))
     (cond
       (or (= key "q") (= key :escape) (= key :ctrl-c)) :quit
