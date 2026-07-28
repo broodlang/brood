@@ -72,6 +72,36 @@ the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
 ;; for the snappy common case.
 (def *repl-slow-ms* 200)
 
+;; ---- result history + last error ---------------------------------------------
+;; `*1` `*2` `*3` are the three most recent result values (newest first) and `*e` the
+;; last error, exactly as at a Clojure prompt. Without them a value you didn't think
+;; to name is simply gone — you retype the expression and recompute it, which for
+;; anything expensive or effectful is the wrong answer.
+;;
+;; They are `defdyn`s because that is the ONLY door to an ambient name (ADR-151): a
+;; plain `(def *1 …)` inside `(defmodule repl …)` would define `repl/*1`, while the
+;; user typing `*1` at the prompt means the bare root name. `defdyn` marks it never-
+;; namespaced, and — per its own docstring — a `def` of it from any module then
+;; rebinds that one root binding, which is what `repl--remember-*` below do. We `def`
+;; rather than `binding` on purpose: the value has to outlive the form that produced
+;; it, and a dynamic binding would unwind at the end of the very eval that set it.
+(defdyn *1 nil)
+(defdyn *2 nil)
+(defdyn *3 nil)
+(defdyn *e nil)
+
+(defn repl--remember-value (v)
+  "Shift `v` into the result history (`*1` newest, `*3` oldest). Returns `v`."
+  (do
+    (def *3 *2)
+    (def *2 *1)
+    (def *1 v)
+    v))
+
+(defn repl--remember-error (e)
+  "Record caught value `e` as `*e` so the prompt can inspect the last failure."
+  (do (def *e e) e))
+
 ;; ---- colourised output (TTY only) -------------------------------------------
 ;; The printed result is re-lexed with the *same* highlighter the line editor paints
 ;; input with (`highlight-spans`), and each span wrapped in an ANSI colour — so a
@@ -121,7 +151,8 @@ highlights. Used to colour a printed result on an interactive TTY."
 ;; it's a safe prefix. Only a *known* `,cmd` is intercepted — anything else falls
 ;; through to the normal reader (so a real syntax error still reports normally).
 
-(def *repl-meta-names* '("help" "?" "doc" "type" "time" "clear"))
+(def *repl-meta-names*
+  '("help" "?" "doc" "type" "time" "clear" "apropos" "search" "expand" "expand1"))
 
 (defn repl--meta-parts (line)
   "Split a `,cmd arg…` line (sans the leading `,`) into `[cmd rest]`, `rest` trimmed."
@@ -145,7 +176,11 @@ highlights. Used to colour a printed result on an interactive TTY."
              "  ,type <expr>    evaluate <expr> and show its runtime type\n"
              "  ,time <expr>    evaluate <expr> and show elapsed time\n"
              "  ,clear          clear the screen\n"
-             "  Tab             complete the name under the cursor; again to list matches" "\e[0m")))
+             "  ,apropos <pat>  globals whose NAME contains <pat>\n"
+             "  ,search <words> globals whose name or DOC matches <words>, best first\n"
+             "  ,expand <form>  fully macroexpand <form> (once: ,expand1)\n"
+             "  Tab             complete the name under the cursor; again to list matches\n"
+             "  *1 *2 *3        the last three result values;  *e  the last error" "\e[0m")))
 
 (defn repl--meta-doc (name)
   "Print the docstring + arglist for `name` (a function/macro/primitive), or a note."
@@ -170,6 +205,55 @@ highlights. Used to colour a printed result on an interactive TTY."
       (println (str "\e[90m; " ms " ms\e[0m")))
     (catch e (eprint (str (repl--error-message e) "\n")))))
 
+;; `apropos` / `doc-search` have been in the prelude all along; the only thing missing
+;; was a way to reach them without breaking your typing rhythm. `,apropos` searches
+;; NAMES, `,search` searches DOCSTRINGS too and ranks — the two halves of "I know what
+;; I want but not what it's called".
+
+(defn repl--meta-apropos (pattern)
+  "Print every global whose name contains `pattern`, one per line (dim), or a note."
+  (if (= pattern "")
+    (println "\e[90m(usage: ,apropos <pattern>)\e[0m")
+    (let (hits (try (apropos pattern) (catch _ nil)))
+      (if (empty? hits)
+        (println (str "\e[90m(nothing matching " pattern ")\e[0m"))
+        (fold (fn (_ s) (println (str "\e[36m" s "\e[0m"))) nil hits)))))
+
+(defn repl--meta-search (query)
+  "Print `doc-search` hits for `query` — `name` then a dim one-line doc summary."
+  (if (= query "")
+    (println "\e[90m(usage: ,search <words>)\e[0m")
+    (let (hits (try (doc-search query) (catch _ nil)))
+      (if (empty? hits)
+        (println (str "\e[90m(nothing matching " query ")\e[0m"))
+        (fold (fn (_ [name doc])
+                (println (str "\e[36m" name "\e[0m  \e[90m" (repl--first-line doc) "\e[0m")))
+          nil hits)))))
+
+(defn repl--first-line (s)
+  "The first line of `s`, truncated to a terminal-ish width — a docstring's summary
+line, so a multi-paragraph doc doesn't turn one search hit into a screenful."
+  (let (line (first (string-split (or s "") "\n"))
+        max 96)
+    (if (> (string-length line) max) (str (substring line 0 max) "…") line)))
+
+(defn repl--meta-expand (expr all)
+  "Print `expr` macroexpanded — fully when `all`, one step otherwise — syntax-coloured
+and run through the formatter, since an expansion is exactly the kind of dense nested
+form that is unreadable on one line."
+  (if (= expr "")
+    (println "\e[90m(usage: ,expand <form>)\e[0m")
+    (try
+      (let (form (read-first expr)
+            out (if all (macroexpand form) (macroexpand-1 form))
+            ;; `format` is required lazily — pretty-printing an expansion is worth a
+            ;; module load the first time you ask, but not on every REPL boot.
+            text (try
+                   (do (require 'format) (trim (format/format-source (pr-str out))))
+                   (catch _ (pr-str out))))
+        (println (if (stdout-tty?) (repl--colorize text) text)))
+      (catch e (eprint (str (repl--error-message e) "\n"))))))
+
 (defn repl--run-meta (line)
   "Dispatch a `,cmd` meta-command line (verified by `repl--meta?`). Returns nil; the
 loop just continues to the next prompt."
@@ -179,6 +263,10 @@ loop just continues to the next prompt."
       (= cmd "doc") (repl--meta-doc rest)
       (= cmd "type") (repl--meta-type rest)
       (= cmd "time") (repl--meta-time rest)
+      (= cmd "apropos") (repl--meta-apropos rest)
+      (= cmd "search") (repl--meta-search rest)
+      (= cmd "expand") (repl--meta-expand rest true)
+      (= cmd "expand1") (repl--meta-expand rest false)
       (= cmd "clear") (print "\e[2J\e[H"))))
 
 ;; ---- whitespace / comment skip ----------------------------------------------
@@ -234,8 +322,12 @@ value."
 
 (defn repl--print-value (v)
   "Print a result value — syntax-coloured (the input highlighter, reused) on an
-interactive TTY, plain on a pipe."
-  (let (s (pr-str v))
+interactive TTY, plain on a pipe.
+
+Printed with `pr-str-bounded`, so a huge or deeply-nested result elides with `…`
+instead of scrolling the session away; `(pr-str *1)` still shows the whole thing,
+and `(binding (*print-length* nil) …)` lifts the bound for a form."
+  (let (s (pr-str-bounded v))
     (println (if (stdout-tty?) (repl--colorize s) s))))
 
 (defn repl--eval-print (src)
@@ -247,14 +339,116 @@ lets an error escape the loop."
     (let (t0 (now)
           v (eval-string src)
           ms (- (now) t0))
+      (repl--remember-value v)
       (repl--print-value v)
       (when (and (stdout-tty?) (>= ms *repl-slow-ms*))
         (println (str "\e[90m; " ms " ms\e[0m")))
       :ok)
     (catch e
+      ;; An incomplete form is not a failure — it's "read another line" — so it must
+      ;; NOT land in `*e` and clobber the error the user is actually debugging.
       (if (repl--incomplete? e)
         :more
-        (do (eprint (str (repl--error-message e) "\n")) :error)))))
+        (do
+          (repl--remember-error e)
+          (eprint (str (repl--error-message e) "\n"))
+          :error)))))
+
+;; ---- interruptible evaluation ------------------------------------------------
+;; Ctrl-C during a long evaluation used to terminate the runtime: the default SIGINT
+;; disposition, arriving while the terminal is out of raw mode (the editor only holds
+;; raw mode for the *read*). So the price of stopping one runaway expression was the
+;; entire live image — every definition and every spawned process. In a language whose
+;; whole premise is a long-lived redefinable image, that is the worst possible trade.
+;;
+;; The fix uses machinery that already existed rather than adding an interrupt path to
+;; the evaluator: run each eval in its own **green process**, and `(exit pid :kill)` it
+;; — the untrappable hard kill, honoured at the target's next reduction tick. The
+;; kernel contributes only the signal seam it must (`%install-interrupt-handler` /
+;; `%interrupt-taken?`, ADR-006: signals are mechanism), and everything else is here.
+;;
+;; ⚠ BLOCKED, and OFF by default — set `BROOD_REPL_INTERRUPT=1` to exercise it.
+;;
+;; A green process running inside a nested `eval` / `eval-string` does NOT honour the
+;; hard kill. Measured 2026-07-28, three children spinning on the same tail-recursive
+;; `spin`, each sent `(exit pid :kill)`:
+;;
+;;     direct call            → DIED reason=:kill
+;;     via eval-string        → SURVIVED
+;;     via (eval (read-first …)) → SURVIVED
+;;
+;; The preemption that honours a pending kill isn't reached from the nested-eval path,
+;; and a REPL has no choice but to go through it. So the machinery below is correct and
+;; the kill is simply never honoured: the first Ctrl-C would issue a kill that does
+;; nothing and the second would halt — two keypresses to get today's one-keypress
+;; outcome. That's a regression, hence off by default rather than shipped half-working.
+;;
+;; This is a kernel bug wider than the REPL: *any* spawned process evaluating code is
+;; currently unkillable, which reaches supervisors and `gen` servers too. The fix is a
+;; pending-kill check on the nested-eval safepoint (the scheduler already has the check
+;; — `park_on_receive` in `process/scheduler/pool.rs` — it just isn't consulted here).
+;; Flip the default once that lands; nothing else here needs to change.
+;;
+;; Why the rest needs no evaluator changes: the parent parks in `receive`, so the
+;; scheduler is free to run the child, and the *scheduler* is what enforces the kill.
+;; Nothing has to poll a flag inside `eval`.
+;;
+;; Three details that matter:
+;;  - The child does its own printing and its own `*1`/`*e` bookkeeping. `def` reaches
+;;    the runtime's shared code region, so a definition made in the child is visible at
+;;    the next prompt — and the result value never has to be copied between heaps.
+;;  - Interactive sessions ONLY. A piped `echo … | brood` keeps the plain inline path
+;;    and the default SIGINT, so scripts and pipelines die on Ctrl-C like any other Unix
+;;    program; taking that over would be a nasty surprise in a shell pipeline.
+;;  - A second Ctrl-C **halts**. The hard kill lands at a reduction tick, so an
+;;    evaluation wedged inside a single native builtin may never take it; rather than
+;;    trap the user at an unresponsive prompt, the second interrupt restores the old
+;;    behaviour and exits 130. Escalation, not a dead end.
+
+(defdyn *repl-interruptible* false)
+
+;; How long the parent parks between interrupt polls. Short enough that Ctrl-C feels
+;; instant, long enough to cost nothing: the parent is parked in `receive`, so this is
+;; a timer, not a spin.
+(def *repl-interrupt-poll-ms* 40)
+
+(defn repl--await-eval (child ref killed)
+  "Park until the spawned evaluation `child` dies, polling for Ctrl-C. Returns `:ok`
+normally, `:interrupted` when we killed it. Tail-recursive, so a long computation costs
+one parked process and a timer, not a spin."
+  (receive
+    ([:down ^ref ^child _] (if killed
+                             (do (println "\e[90m; interrupted\e[0m") :interrupted)
+                             :ok))
+    (after *repl-interrupt-poll-ms*
+      (if (%interrupt-taken?)
+        (if killed
+          ;; The kill didn't land — a native builtin that never reaches a reduction
+          ;; tick. Don't pretend to be interruptible; give the user their Unix Ctrl-C.
+          (do
+            (eprint "\n; evaluation is not yielding — halting\n")
+            (%halt 130))
+          (do (exit child :kill) (repl--await-eval child ref true)))
+        (repl--await-eval child ref killed)))))
+
+(defn repl--eval-interruptible (src)
+  "Evaluate `src` in a spawned process so Ctrl-C can kill it without taking the image
+down with it. Returns `:ok` or `:interrupted`."
+  (do
+    ;; Drain a stale request first. In raw mode Ctrl-C is byte 0x03 (ISIG is off) and
+    ;; never signals — but the gap between reads is cooked, so a Ctrl-C there would set
+    ;; the flag and otherwise abort the *next* expression the moment it started.
+    (%interrupt-taken?)
+    (let (child (spawn (repl--eval-print src))
+          ref (monitor child))
+      (repl--await-eval child ref false))))
+
+(defn repl--eval (src)
+  "Evaluate + print `src`, interruptibly when this session armed it (`repl-run` on a
+TTY), else inline. The seam the loop calls."
+  (if *repl-interruptible*
+    (repl--eval-interruptible src)
+    (repl--eval-print src)))
 
 ;; ---- history ----------------------------------------------------------------
 
@@ -313,7 +507,7 @@ Returns `{:eof false :history h}`."
     (cond
       (repl--meta? form) (do (repl--run-meta form) (remember))
       (not (repl--content? form 0 (string-length form) false)) {:eof false :history history}
-      else (do (repl--eval-print form) (remember)))))
+      else (do (repl--eval form) (remember)))))
 
 (defn repl--read-eval-interactive (history)
   "Interactive read: the multi-line line editor reads a whole form in one session
@@ -369,14 +563,64 @@ Returns (and the process exits) at end of input."
   (let (r (monitor p))
     (receive ([:down ^r ^p _] nil))))
 
+;; ---- startup file -----------------------------------------------------------
+;; Everything in this REPL is redefinable at runtime — the prompt, the keymap, the
+;; completion source, every command — which was worth nothing while there was no
+;; place to *put* a redefinition: each customisation died with the session. The rc
+;; file is that place, and it's the payoff on ADR-048's premise rather than a new
+;; feature: `(lineedit-bind :ctrl-x 'my-cmd)`, `(def *lineedit-candidates* …)`,
+;; `(def *print-length* 20)` all become permanent by living in a file.
+;;
+;; Two files, user then project, both optional and both loaded in that order so a
+;; project can override a personal default. It is deliberately NOT a manifest key:
+;; this is a script, evaluated in the live image, not configuration to be parsed.
+;;
+;; A broken rc must never stop the REPL starting — that would be a customisation
+;; that locks you out of the tool you'd fix it with — so failure prints the error
+;; and carries on.
+
+(defn repl--rc-paths ()
+  "The startup files to load, in order: `$BROOD_RC` (else `$HOME/.broodrc.blsp`), then
+`./.broodrc.blsp` for a project-local one. Duplicates collapse, so running the REPL
+from your home directory doesn't load the same file twice."
+  (let (user (or (getenv "BROOD_RC")
+               (let (home (getenv "HOME")) (if home (path-join home ".broodrc.blsp") nil)))
+        ;; Compared against the *absolute* local path, since `user` is absolute — a
+        ;; bare "./.broodrc.blsp" would never match it and we'd load twice.
+        local (try (path-join (cwd) ".broodrc.blsp") (catch _ ".broodrc.blsp")))
+    (filter (fn (p) (not (nil? p)))
+      (if (= user local) (list user) (list user local)))))
+
+(defn repl--load-rc ()
+  "Load each existing startup file, reporting (but surviving) a failure in one. Runs
+before the banner so anything an rc prints reads as part of startup, and before the
+loop spawns so its `def`s are in place for the first prompt."
+  (fold (fn (_ path)
+          (when (try (file-exists? path) (catch _ false))
+            (try
+              (load path)
+              (catch e
+                (eprint (str "\e[33mwarning:\e[0m " path ": " (repl--error-message e) "\n"))))))
+    nil (repl--rc-paths)))
+
 (defn repl-run ()
   "Run the read-eval-print loop on stdin until end of input (Ctrl-D). When stdin and
 stdout are both a TTY it edits interactively (`std/lineedit.blsp`) with the banner +
 prompts; redirected stdin keeps the plain `read-line` path (prompt echoed only when
 stdout is a TTY). The loop runs in a spawned process — so Stage B's automatic GC
 reclaims each command's transients at the safepoint — and this call blocks (parked
-in `receive`) until that process reaches end of input. Returns nil."
+in `receive`) until that process reaches end of input. Returns nil.
+
+Loads the startup files first (`$BROOD_RC` or `~/.broodrc.blsp`, then a project-local
+`./.broodrc.blsp`); a failure in one is reported and skipped, never fatal."
   (let (interactive (and (stdin-tty?) (stdout-tty?))
+        _rc (repl--load-rc)
+        ;; Arm Ctrl-C only for an interactive session that asked for it — see the
+        ;; interruptible-eval notes above for why it's opt-in (the kill doesn't land
+        ;; through `eval` yet) and why a pipeline must keep the default SIGINT. `def`
+        ;; (not `binding`) because the flag has to reach the spawned loop process.
+        _armed (when (and interactive (= (getenv "BROOD_REPL_INTERRUPT") "1"))
+                 (def *repl-interruptible* (%install-interrupt-handler)))
         history (if interactive (repl--load-history) '()))
     (when (stdout-tty?) (eprint (str *repl-banner* "\n")))
     (repl--await (spawn (repl--loop interactive history)))

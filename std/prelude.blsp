@@ -3677,16 +3677,21 @@ faithful printing instead of losing the bound on the whole value."
 
 (defn pr--bounded (x level)
   "`x` printed at nesting `level`, honouring both bounds. Containers recurse;
-anything else goes to `pr-str`."
-  (if (and *print-level* (> level *print-level*))
-    "…"
-    (let (t (type-of x))
-      (cond
-        (= t :pair) (pr--safely (fn () (pr--bounded-seq x level "(" ")")) x)
-        (= t :vector) (pr--safely (fn () (pr--bounded-seq x level "[" "]")) x)
-        (= t :set) (pr--safely (fn () (pr--bounded-seq x level "#{" "}")) x)
-        (= t :map) (pr--safely (fn () (pr--bounded-map x level)) x)
-        else (pr-str x)))))
+anything else goes to `pr-str`.
+
+The depth bound is tested on *entering a container*, never on a leaf — so
+`*print-level*` 2 on `{:a {:b {:c 1}}}` elides the whole third map (`{:a {:b …}}`)
+rather than each of its keys and values separately (`{:a {:b {… …}}}`). A leaf always
+prints: eliding an atom would cost a character and save nothing."
+  (let (t (type-of x)
+        container (or (= t :pair) (= t :vector) (= t :set) (= t :map)))
+    (cond
+      (and container *print-level* (>= level *print-level*)) "…"
+      (= t :pair) (pr--safely (fn () (pr--bounded-seq x level "(" ")")) x)
+      (= t :vector) (pr--safely (fn () (pr--bounded-seq x level "[" "]")) x)
+      (= t :set) (pr--safely (fn () (pr--bounded-seq x level "#{" "}")) x)
+      (= t :map) (pr--safely (fn () (pr--bounded-map x level)) x)
+      else (pr-str x))))
 
 (defn pr-str-bounded (x)
   "Like `pr-str`, but eliding with `…` past `*print-length*` items per collection
