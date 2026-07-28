@@ -61,7 +61,16 @@ PERF_RUSTFLAGS := $(RUSTFLAGS) -C debug-assertions=off -C overflow-checks=off
 # Features baked into the binaries that RUN user code (brood, nest).
 # `--no-default-features` strips the dev/debug surface; cargo unions the rest.
 # brood-lsp runs no hot user code, so it takes none of these.
+#
+# RUN_FEATURES is the LEAN set: no `dev-tools`, so no `repl`/`test`/`observer`/`mcp`
+# DEV_MODULES. It builds the brood that gets EMBEDDED into nest for `nest release`
+# app bundling (small apps) and that `make ab` measures — both want it lean.
 RUN_FEATURES := --no-default-features $(GUI_FEATURES) $(GUI_GPU_FEATURES) $(AUDIO_FEATURES) $(TS_FEATURES) $(JIT_FEATURES)
+# INSTALL_FEATURES is RUN_FEATURES + `dev-tools`: the set for the brood/nest
+# actually INSTALLED onto your PATH, where the REPL, `nest test`, `nest observe`,
+# and `nest mcp` must work. `make install` builds the lean brood (embed base) AND
+# these dev binaries — the embedded runtime stays lean, the tools you run don't.
+INSTALL_FEATURES := $(RUN_FEATURES) --features brood/dev-tools
 
 # Copy the three binaries from $(1) into $(PREFIX)/bin — no rebuild, no cargo install.
 define install_binaries
@@ -207,13 +216,20 @@ release-brood: ## Build ONLY the `brood` binary into $(RELEASE_DIR) — the perf
 release: release-brood ## Build optimized `brood`, `nest` and `brood-lsp` into $(RELEASE_DIR) (gitignored; does NOT install — ./configure --with-gui first for the window)
 	# Build the configured (./configure) binaries into the local, gitignored
 	# $(RELEASE_DIR) with the `release-fast` profile (stripped, no LTO) — fast
-	# to build. The separate `install` target copies them out to
-	# $(PREFIX)/bin. The brood built here is embedded into nest (BROOD_EMBED_RUNTIME
-	# → ADR-038), so `nest release` ships a self-contained app with no Rust. (For an
-	# LTO'd shippable runtime, nest release rebuilds under `release-lean` — see
-	# docs/release.md.)
-	BROOD_EMBED_RUNTIME=$(CURDIR)/$(RELEASE_DIR)/brood RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p nest $(RUN_FEATURES)
+	# to build. The separate `install` target copies them out to $(PREFIX)/bin.
+	#
+	# The LEAN brood from `release-brood` (above) is what gets embedded into nest
+	# (BROOD_EMBED_RUNTIME → ADR-038), so `nest release` ships a small self-contained
+	# app with no Rust (an LTO'd shippable runtime rebuilds under `release-lean` — see
+	# docs/release.md). nest embeds it here, at nest's build, so the bytes are baked in
+	# before the dev `brood` below overwrites the file.
+	BROOD_EMBED_RUNTIME=$(CURDIR)/$(RELEASE_DIR)/brood RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p nest $(INSTALL_FEATURES)
 	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p brood-lsp
+	# The `brood` you actually RUN needs the REPL, so rebuild the installed binary WITH
+	# dev-tools (repl/test/observer/mcp), overwriting the lean embed source nest has
+	# already baked in. Split on purpose: apps ship the lean runtime; your PATH gets the
+	# full one. `make ab`/`make release-brood` rebuild the lean brood as needed.
+	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p cli $(INSTALL_FEATURES)
 
 install: release ## Build (per ./configure) + install `brood`, `nest`, `brood-lsp` into $(PREFIX)/bin
 	$(call install_binaries,$(RELEASE_DIR))

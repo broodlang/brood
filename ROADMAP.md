@@ -59,12 +59,17 @@ Shipped as ADRs:
   - ⬜ **Abilities v2** ([ADR-172](docs/decisions.md), design decided 2026-07-28) —
     tightens ADR-168's open runtime model to **app-sovereign coherence, enforced at
     compile time, live-replaceable**: `impl` only what you own (ability or type),
-    `bridge` (app-only, greppable) for deliberate cross-library linking, glue packages
-    authorized by the app manifest's `:bridges`, precedence `app > type-owner >
+    `bridge` (app-only, greppable) for deliberate cross-library linking (reusable glue is
+    a package of functions the app's `bridge` calls — no `:bridges`/glue-package
+    authorization, dropped), precedence `app > type-owner >
     ability-owner > :default > native`. Dispatch specialized through the IC/JIT with
     deopt-on-reload; `:sealed` abilities go fully static/exhaustive; the runtime
     `*impls*` registry becomes the backstop. `Display` becomes always-on core (records
-    only, app-gated, guarded) superseding ADR-171's opt-in `show`. Needs
+    only, guarded) superseding ADR-171's opt-in `show` — at which point the interim
+    `show`/`display-on`/`display-off` scaffolding is removed (it's a known wart, kept as
+    the interim only because Display is a std module, not core; decided 2026-07-28 to
+    **leave it** rather than polish it — the jank vanishes when Display goes core, and the
+    safety it approximates is really owner-only coherence, not an activation gate). Needs
     [ADR-070](docs/decisions.md) (package-rooted namespaces) for the clean app/library
     line. **[kernel/checker/eval]**
     - ✅ **Slice 1 — optional + dev dependencies** (2026-07-28): the manifest takes
@@ -73,8 +78,12 @@ Shipped as ADRs:
       end to end: `project--ensure-deps-on-path` load-paths them for dev/`nest test`,
       `bundle-collect` excludes them from a release bundle (verified with a scratch
       project). Optional-dep *resolution* (peer presence) lands with the bridge slice.
-      Slices 2–6 (`bridge`/`:bridges`, coherence checking, precedence, dispatch
-      specialization, always-on `Display`) still ⬜.
+    - 🟡 **Slice 4 (part) — deterministic precedence** (2026-07-28): `std/ability.blsp`
+      resolves competing impls by tier (**type-owner > ability-owner > other**), not load
+      order — `defability` records its owner ns, `register-impl` keeps the highest-tier
+      impl per slot (a guard at registration; dispatch stays a plain map-get). The top
+      **app** tier awaits ADR-070 (app-vs-library). Slices 2, 3, 5, 6 (`bridge`, coherence
+      checking, dispatch specialization, always-on `Display`) still ⬜.
 - ✅ **ADR-159** — grapheme-*indexed* accessors (`grapheme-count`, `grapheme-at`,
   `substring-graphemes`), so the documented-correct cursor step stops costing a vector
   of every cluster in the string per keystroke.
@@ -1092,6 +1101,35 @@ Runtime housekeeping (both items landed):
 
 ### Language core & types
 
+- 🟡 **Elixir-loved ergonomics — borrow the beloved features that fit a small,
+  immutable Lisp** (2026-07-28). Survey of what Brood still lacks vs. Elixir's
+  most-liked features (pipe / `with` / pattern-matching / OTP / specs / `mix` /
+  observer / streams / `get-in` are already covered; `#(…)` capture was
+  consciously declined). Ordered by value-to-effort:
+  - ✅ **`with`** — Elixir-style sequential match-binding with `:else`, as a
+    prelude macro over `match` (2026-07-28; see devlog). No new special form.
+  - ✅ **`spy`** (chose this name over `dbg`) — a *homoiconic tree-tracing* debug
+    macro (2026-07-28, ADR-173). Went beyond `dbg`'s fixed special-cases: fully
+    macroexpands and instruments every evaluated position in place, so it traces
+    the whole call tree (pipelines fall out for free — `(-> x f g)` → `(g (f x))`),
+    laziness is preserved, and it's referentially transparent. Output flows through
+    a swappable `*spy-sink*` (`defdyn`) so a host can capture the trace as data (the
+    editor-inline-values seam); default is an indented stderr tree. Prelude macro,
+    no core change. ⬜ Deferred: per-special-form descend rules beyond
+    `if`/`do`/`let`/`letrec`, source-position `file:line` (no primitive exposed
+    yet), a `:label` arg.
+  - ⬜ **Doctests** — runnable `>>>`-style examples in docstrings, executed by
+    `nest test`; reuses `std/tool/test.blsp` + doc infra. Fits "docs as
+    implemented." Bigger (docstring example parser + a discovery pass).
+  - ⬜ **`reduce-while`** (≈ `Enum.reduce_while`) — early-terminating fold via
+    `[:cont acc]` / `[:halt acc]`. Pure prelude fn over existing primitives.
+  - ⬜ **Function-head guards** — `:when` guards on `defn`/`fn` *clause heads*
+    (work in `match` today, not in arity/pattern clause heads — verified: the
+    guard is currently ignored). The one genuine *core* gap; touches the
+    evaluator / arity dispatch, so weigh against "keep the core small."
+  - ⬜ **`tap` / `then`** (Kernel) — single-fn pipe helpers. Marginal: `->`
+    already covers `then`, and `doto` covers multi-form `tap`. Ship only if the
+    exact spelling is wanted.
 - ✅ **Syntax finalisation pass (2026-07-25, ADR-149/150/151/152)** — closed the
   cases where the surface accepted a plausible-but-wrong spelling and
   **reinterpreted** it instead of rejecting it. Binding containers are lists (a

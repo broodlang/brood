@@ -27,6 +27,36 @@ the `nest new` scaffolder."
 (defdyn *project-root* nil)
 (defdyn *project-name* nil)
 (defdyn *project-version* nil)
+;; namespace → owning package name (ADR-172 package identity). Populated at project setup
+;; by a static scan of each provider's `(defmodule …)` names: the project's own `src/`
+;; modules map to `*project-name*`, a dependency's modules to that dep's `:name`. It is the
+;; ability system's app-vs-library seam — an impl whose module's package is `*project-name*`
+;; is the app (top precedence tier). A module absent here (embedded std, or none) is not the
+;; app. Purely identity: no name-rooting/prefixing (that stays the deferred ADR-070 upgrade).
+(defdyn *ns-package* {})
+
+(defn ns-package (ns-or-name)
+  "The owning package of a namespace or a qualified `mod/fn` name (ADR-172 package identity).
+  Resolves the MODULE either way — a module namespace (`widget`, `editor/display`) directly,
+  or the module of a qualified name (`widget/w` → `widget`, `editor/display/draw` →
+  `editor/display`). Returns the package name, or nil for an unrecorded/embedded (std)
+  module, a root (unqualified) name, or when no project is loaded. This is the seam for
+  surfacing package in stack traces — `(ns-package (get frame :fn))` — introspection, and
+  tooling."
+  (let (s (if (symbol? ns-or-name) ns-or-name (symbol ns-or-name)))
+    (or (get *ns-package* s)
+      ;; not a module directly — treat it as a qualified name, strip the last `/`-segment
+      ;; (the def/fn name) and look up its module.
+      (let (parts (string-split (str s) "/"))
+        (if (> (count parts) 1)
+          (get *ns-package* (symbol (join "/" (take (- (count parts) 1) parts))))
+          nil)))))
+
+(defn trace-with-packages (trace)
+  "Annotate each stack-trace frame (`{:fn :file :line :col}`) with `:package` — the owning
+  package of its function (ADR-172). `trace` is the `:trace` on a caught kernel-error map.
+  Frames whose function is root/std/unrecorded get `:package nil`."
+  (map (fn (frame) (assoc frame :package (ns-package (get frame :fn)))) trace))
 ;; Only ever set inside `project-setup` (from the manifest) and read by
 ;; `package` when it publishes — so they must be declared ambient here, like the
 ;; slots above: ambient is a `defdyn` declaration now, not an earmuff spelling.
@@ -483,16 +513,22 @@ resolve in the advisory checker. Returns the project root."
 ;; lazily so a depless project never loads it. Dep dirs go at the END of the path,
 ;; after the project's own sources, so the project's modules win on a name clash.
 (defn project--ensure-deps-on-path (root)
+  ;; `package` is required here (not `:use`d) to avoid a project↔package load cycle;
+  ;; qualify its entry points. It's needed for BOTH package-identity recording and deps.
+  (require 'package)
+  ;; Package identity (ADR-172): the project's own modules → its package name, so the
+  ;; ability system can tell an app module from a library. Always — even a depless project.
+  (when *project-name*
+    (package/package-record-ns-packages (map (fn (d) (list *project-name* d))
+                                          (project-abs-paths root *project-source-paths*))))
   ;; Dev/test setup sees BOTH the production deps and the `:dev-dependencies` (ADR-172):
   ;; a `nest test`/`nest run` in a dev image resolves and load-paths them all, exactly
   ;; like Cargo's dev-dependencies being available for tests locally. The release bundle
   ;; (`bundle-collect`) reads `*project-dependencies*` alone, so dev-deps are excluded
-  ;; from a shipped binary — the whole reason they live in their own slot.
+  ;; from a shipped binary — the whole reason they live in their own slot. `ensure-deps`
+  ;; also records each dep's modules → the dep's name in `*ns-package*`.
   (let (deps (append *project-dependencies* *project-dev-dependencies*))
     (when deps
-      ;; `package` is required lazily (not `:use`d) to avoid a project↔package load
-      ;; cycle; qualify its one entry point here.
-      (require 'package)
       (set-load-path! (append *load-path* (package/ensure-deps root deps))))))
 
 ;; Every .blsp file the project owns — its source files plus its test files.

@@ -445,8 +445,9 @@ variable — for which no impl and no `:default` is registered.
 > **Planned direction (not yet implemented): [ADR-172](decisions.md).** A decided
 > redesign tightens this open runtime model to **app-sovereign coherence, enforced at
 > compile time, still live-replaceable**: `impl` only what you own (the ability or the
-> type), a new `bridge` form (app-only) for deliberate cross-library linking, glue
-> packages authorized by the manifest's `:bridges`, and precedence `app > type-owner >
+> type), a new `bridge` form (app-only) for deliberate cross-library linking (reusable
+> glue is a package of functions the app's `bridge` calls — no glue-package
+> authorization), and precedence `app > type-owner >
 > ability-owner > :default > native`. Dispatch specializes through the inline-cache/JIT
 > with deopt-on-reload; `:sealed` abilities go fully static; `Display` becomes always-on
 > core (superseding the opt-in `show`). This section documents what is implemented today.
@@ -466,10 +467,12 @@ ability when third-party or later code must be able to add a case.
 The standard library uses an ability for its one open-extension rendering seam —
 `std/show.blsp`, Elixir's `String.Chars` for Brood (ADR-171). `(require 'show)`
 gives a `Display` ability with op **`(to-str x)`** (a value → its display string),
-whose `:default` impl is the native `str`, and installs a hook so the **screen
-printers** (`print` / `println` / `eprint` / `eprintln`) let a *record* define how
-it prints. Built-ins are unchanged and pay no dispatch cost; with `show` unloaded
-there is no change at all.
+whose `:default` impl is the native `str`. Loading it makes the protocol *available*
+but changes nothing on its own; the **app** calls **`(display-on)`** to make the
+**screen printers** (`print` / `println` / `eprint` / `eprintln`) honor a *record*'s
+impl. Activation is an app-level step, never a side effect of a library's `(:use show)`
+(ADR-172 §8: libraries propose impls, the app disposes). Built-ins are unchanged and
+pay no dispatch cost; without `(display-on)` there is no change at all.
 
 ```clojure
 (defmodule money (:use ability) (:use show))
@@ -477,6 +480,7 @@ there is no change at all.
 (impl Display money/usd
   (to-str [m] (str "$" (to-fixed (/ (get m :cents) 100.0) 2))))
 
+(display-on)                  ; the app opts in (once, at startup)
 (println (usd 1050))          ; => $10.50   (not {:__id__ :money/usd, :cents 1050})
 (to-str (usd 1050))           ; => "$10.50" — the explicit call, for use inside str/fmt
 ```
@@ -765,6 +769,31 @@ destructure):
 (when-let (v (get m :k)) (use v))         ; body only when truthy
 ```
 
+**`with`** — Elixir's `with`, spelled as flat `pattern expr` pairs (the `let`
+shape). Each `expr` is matched against its `pattern` in order; the first value
+that fails its pattern **short-circuits**, and the body runs only when every step
+matched, with all bindings in scope. It's pure sugar over nested `match` (no new
+special form):
+
+```clojure
+(with ([:ok account] (lookup user)
+       [:ok card]    (payment-method account)
+       [:ok receipt] (charge card 10))
+  receipt)                                  ; a step's [:error …] falls straight through
+```
+
+A trailing **`:else`** section is a set of `match` clauses run against the value
+that short-circuited (like Elixir's `else`); with no `:else`, that value is
+returned as-is:
+
+```clojure
+(with ([:ok user] (lookup id))
+  user
+  :else
+  ([:error :not-found] {:error "no such user"})
+  ([:error e]          {:error e}))
+```
+
 **Local loops** — there is **no `loop`/`recur`**; Brood has proper tail calls, so a
 self-contained loop is a `letrec`-bound closure you call by name (it closes over the
 enclosing scope, so you thread only the *changing* state, and the tail call is O(1)
@@ -781,6 +810,35 @@ value between the literal text and lowers to a plain `(str …)` (no runtime cos
 
 ```clojure
 (fmt "sum={(+ a b)} for {name}")   ;=> "sum=7 for ada"
+```
+
+**`spy`** — a homoiconic tree-tracing debug macro (Brood's answer to Elixir's `dbg`,
+ADR-173). `(spy expr)` evaluates `expr`, traces **every** evaluated subexpression's
+value in evaluation order, and returns the value **unchanged** — so it's referentially
+transparent: wrap or drop `spy` around any form with no behavioural change.
+
+```clojure
+(spy (+ (* a 2) (f 2)))     ; a=10, f adds 5
+;; stderr:
+;;   spy: (+ (* a 2) (f 2))
+;;       (* a 2) => 20
+;;       (f 2) => 7
+;;     (+ (* a 2) (f 2)) => 27
+;;   => 27
+;; returns 27
+```
+
+It fully macroexpands the form and instruments each evaluated position **in place**, so
+laziness is preserved (an untaken `if` branch or a short-circuited `and` tail never
+traces) and a **pipeline needs no special case** — `(-> x f g)` expands to `(g (f x))`
+and each stage traces as an ordinary call. `fn` bodies and quoted data are left opaque.
+Trace entries flow through the swappable **`*spy-sink*`** (a `defdyn`) — the default
+prints the indented tree to stderr, but a host can `binding` it to a collector and
+consume the trace as data (`{:spy :node :form … :value … :depth …}` maps), or to a
+no-op to silence it without editing code:
+
+```clojure
+(binding (*spy-sink* (fn (entry) nil)) (spy (heavy-computation)))  ; value, no output
 ```
 
 > Note: a **nested quasiquote** (a `` ` `` inside a `` ` `` template) is
