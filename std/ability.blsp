@@ -17,14 +17,16 @@
 
   Registration is OPEN and LATE: `impl` for any id, from any module, at any time. Each
   impl is tagged with its registering namespace (`current-ns`), and resolution is by
-  **precedence tier**, not load order (ADR-172): type-owner (owns the record) > ability-
-  owner (owns the ability, e.g. its `:default`/built-in impls) > other. So the winning
-  impl is deterministic regardless of registration order. A *same-tier* cross-module claim
-  on the same `[ability op id]` is a loud conflict (last wins); a *same-module* re-register
-  is hot-reload (silent); a strictly lower tier is ignored (a stronger owner holds the
-  slot). The advisory checker (`types/check/protocol.rs`) verifies each `impl` provides the
-  ability's declared ops at the right arity, at `nest check` time. (The top **app** tier —
-  the program overriding anything — awaits ADR-070; see `impl-rank`.)
+  **precedence tier**, not load order (ADR-172): **app** (a module in the current project's
+  own package, or a root/REPL impl) > **type-owner** (owns the record) > **ability-owner**
+  (owns the ability, e.g. its `:default`/built-in impls) > **other**. So the app can
+  override anything, and the winner is deterministic regardless of registration order. A
+  *same-tier* cross-module claim on the same `[ability op id]` is a loud conflict (last
+  wins); a *same-module* re-register is hot-reload (silent); a strictly lower tier is ignored
+  (a stronger owner holds the slot). The app tier reads package identity — `*ns-package*`
+  (namespace → package, set at project setup) vs `*project-name*`. The advisory checker
+  (`types/check/protocol.rs`) verifies each `impl` provides the ability's declared ops at the
+  right arity, at `nest check` time.
 
   Two registries, mirroring `protocol`:
     *abilities* — name → declared op specs, as DATA (introspection / checker hook).
@@ -129,28 +131,30 @@
         nil))
     nil))
 
-; The precedence tier of an impl of `aname`, for id `key`, registered from ns `from`
-; (ADR-172 §3). Higher wins: type-owner (3) > ability-owner (2) > other (1). A larger
-; number is a stronger claim on the `(aname, op, key)` slot.
-;
-; NOTE: the top **app** tier (the program overriding anything) is not yet distinguished —
-; it needs ADR-070's package-rooted namespaces to tell an app module from a library one.
-; Until then an app override registers as `other` and wins only by same-tier last-write
-; (the pre-ADR-172 behaviour). The type-owner-beats-ability-owner ordering below is fully
-; determinable now and is the part this slice makes deterministic (order-independent).
+; True if module `from` belongs to the current project's OWN package (ADR-172): its
+; `*ns-package*` entry (set at project setup) equals `*project-name*`. Guarded with `bound?`
+; so abilities still work when no project is loaded (a bare `brood script.blsp` — those
+; ambients are undeclared then). Root/REPL (`from` = nil) is handled by the caller as the app.
+(defn impl--app? (from)
+  (and from
+    (bound? '*project-name*) *project-name* (bound? '*ns-package*)
+    (= (get *ns-package* from) *project-name*)))
+
 (defn impl-rank (aname key from)
-  ;; `from` is nil at the root/REPL namespace (a top-level `impl`); guard it FIRST — both
-  ;; to avoid `(name nil)`, and so a nil `from-name` never `=`-matches a nil id/ability
-  ;; owner (a built-in id / unrecorded ability). A root impl is `other` for now (it is the
-  ;; app, but the app tier awaits ADR-070).
-  (let (from-name (if from (name from) nil)
-        id-owner (impl--id-owner key)
-        abl-owner (let (o (ability-owner-ns aname)) (if o (name o) nil)))
-    (cond
-      (nil? from-name) 1
-      (= from-name id-owner) 3
-      (= from-name abl-owner) 2
-      else 1)))
+  ;; Precedence tier (ADR-172 §3), higher wins: **app (4) > type-owner (3) > ability-owner
+  ;; (2) > other (1)**. `from` = nil is the root/REPL — the user IS the app, so app tier; a
+  ;; module whose package is the project's own is likewise the app. Otherwise `from` owns the
+  ;; record's type (id-owner) or the ability (its `:default`/built-in impls), else it's other.
+  ;; Guard the nil/app cases before `(name from)`.
+  (if (or (nil? from) (impl--app? from))
+    4
+    (let (from-name (name from)
+          id-owner (impl--id-owner key)
+          abl-owner (let (o (ability-owner-ns aname)) (if o (name o) nil)))
+      (cond
+        (= from-name id-owner) 3
+        (= from-name abl-owner) 2
+        else 1))))
 
 (defn register-impl (aname op key f from)
   "Register impl `f` of `aname`'s `op` for dispatch id `key`, tagged with the registering
