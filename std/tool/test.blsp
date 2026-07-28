@@ -228,9 +228,7 @@ docs/testing.md for the full guide.")
   "Register a group of tests: `(describe \"name\" [:serial | :isolated] [:tags [kw …]] body...)`. Tests run in parallel by default; `:serial` runs them sequentially in one process, `:isolated` each against a private copy of the globals. `:tags` attaches tags to every test in the group, which `nest test --only/--exclude/--include` select on."
   (if (keyword? group)
     (error "describe: group name must be a string, not keyword "
-      (pr-str group)
-      " — did you mean (describe \""
-      (pr-str group)
+      (pr-str group) " — did you mean (describe \"" (pr-str group)
       "\" ...) or did you accidentally omit the group name?")
     (let (parts (test--split-mods forms :parallel nil)
           mode (first parts)
@@ -263,9 +261,7 @@ docs/testing.md for the full guide.")
         thunks (map (fn (f) (list 'fn nil f)) body))
     ; each form -> (fn () form)
     `(register-test! ~name
-       (fn () (test--run (list ~@thunks) nil))
-       ~iso
-       (test--meta ~tags (quote ~loc) ~skip))))
+       (fn () (test--run (list ~@thunks) nil)) ~iso (test--meta ~tags (quote ~loc) ~skip))))
 
 (defmacro deftest (name & body)
   "Register a single test named by the (symbol) `name`, outside any `describe` group."
@@ -309,8 +305,7 @@ docs/testing.md for the full guide.")
        (unless (= ~a ~b)
          (test--fail (quote ~loc)
            (list (str "assert: " (pr-str (quote (assert= ~actual ~expected))))
-             (str "actual: " (pr-str ~a))
-             (str "expect: " (pr-str ~b))))))))
+             (str "actual: " (pr-str ~a)) (str "expect: " (pr-str ~b))))))))
 
 (defmacro assert-error (& body)
   "Assert that evaluating `body` raises an error; fails if it completes normally."
@@ -351,8 +346,7 @@ docs/testing.md for the full guide.")
         (check-property--loop n gen pred loc nxt (inc i))
         (test--fail loc
           (list (str "property failed on trial " (inc i) "/" n)
-            (str "counterexample: " (pr-str val))
-            (str "reproduce with seed: " seed)))))))
+            (str "counterexample: " (pr-str val)) (str "reproduce with seed: " seed)))))))
 
 (defmacro check-property (n gen pred)
   "Property test: run `n` trials, each drawing a value with `gen` (a `seed -> [value next-seed]` function over the PRNG) and asserting `(pred value)`. Deterministic; on the first counterexample fails with the value, trial, and seed. e.g. `(check-property 100 (fn (s) (rand-int s 1000)) (fn (x) (>= x 0)))`."
@@ -437,8 +431,7 @@ docs/testing.md for the full guide.")
     (if (< i 0)
       [selector-string ""]
       [(substring selector-string 0 i) (substring selector-string
-                                         (+ i 1)
-                                         (string-length selector-string))])))
+                                         (+ i 1) (string-length selector-string))])))
 
 ;; Build a filter spec from the raw strings a CLI hands over. Parsing lives here
 ;; rather than in `nest`, so the selector grammar has one definition and the Rust
@@ -471,8 +464,7 @@ docs/testing.md for the full guide.")
 ;; rather than demanding string equality.
 (defn test--same-file? (a b)
   (and (not (nil? a))
-    (not (nil? b))
-    (or (= a b) (test--path-suffix? a b) (test--path-suffix? b a))))
+    (not (nil? b)) (or (= a b) (test--path-suffix? a b) (test--path-suffix? b a))))
 
 (defn test--match-selector? (selector group-label test-name tags)
   (let (key (first selector)
@@ -485,8 +477,7 @@ docs/testing.md for the full guide.")
 (defn test--match-any? (selectors group-label test-name tags)
   (fold (fn (found selector)
           (or found (test--match-selector? selector group-label test-name tags)))
-    false
-    (or selectors (list))))
+    false (or selectors (list))))
 
 ;; Every registered test tuple, across units — the flat view the line resolver
 ;; and the shard assigner walk.
@@ -502,13 +493,11 @@ docs/testing.md for the full guide.")
           (let (t (second pair)
                 line (test--line t))
             (if (and (not (nil? line))
-                  (test--same-file? (test--file t) file)
-                  (<= line target)
+                  (test--same-file? (test--file t) file) (<= line target)
                   (or (nil? best) (> line best)))
               line
               best)))
-    nil
-    (test--all-tests units)))
+    nil (test--all-tests units)))
 
 ;; Resolve every FILE:LINE selector, warning about any that addresses no test —
 ;; a typo'd path or a line above the file's first test would otherwise just run
@@ -519,22 +508,17 @@ docs/testing.md for the full guide.")
             (if (nil? resolved)
               (do
                 (eprintln (str "warning: no test found at "
-                            (first entry)
-                            ":"
-                            (second entry)
-                            " — that file/line addresses nothing"))
+                            (first entry) ":" (second entry) " — that file/line addresses nothing"))
                 acc)
               (cons [(first entry) resolved] acc))))
-    nil
-    (or lines (list))))
+    nil (or lines (list))))
 
 (defn test--match-line? (t resolved-lines)
   (fold (fn (found entry)
           (or found
             (and (test--same-file? (test--file t) (first entry))
               (= (test--line t) (second entry)))))
-    false
-    (or resolved-lines (list))))
+    false (or resolved-lines (list))))
 
 (defn test--match-name? (t group-label names)
   (fold (fn (found n) (or found (= n (label group-label (first t))))) false (or names (list))))
@@ -555,11 +539,9 @@ docs/testing.md for the full guide.")
         only (get spec :only)
         names (get spec :names)
         positive? (or (not (empty? (or only (list))))
-                    (not (empty? (or (get spec :lines) (list))))
-                    (not (empty? (or names (list))))))
+                    (not (empty? (or (get spec :lines) (list)))) (not (empty? (or names (list))))))
     (and (or (not positive?)
-           (test--match-any? only group-label test-name tags)
-           (test--match-line? t resolved-lines)
+           (test--match-any? only group-label test-name tags) (test--match-line? t resolved-lines)
            (test--match-name? t group-label names))
       (not (and (test--match-any? (get spec :exclude) group-label test-name tags)
              (not (test--match-any? (get spec :include) group-label test-name tags)))))))
@@ -591,8 +573,7 @@ docs/testing.md for the full guide.")
 
 (defn test--label-hash (s)
   (let (h (fold (fn (acc c) (bit-and (* (bit-xor acc c) 16777619) test--fnv-mask))
-            2166136261
-            (string->codepoints s)))
+            2166136261 (string->codepoints s)))
     (bit-and (bit-xor h (bit-shift-right h 15)) test--fnv-mask)))
 
 ;; Keep only the tests belonging to shard `index` of `count` (0-based) — the
@@ -648,8 +629,7 @@ docs/testing.md for the full guide.")
   (if (nil? spec)
     units
     (test--order-units (test--shard-units (test--filter-units units spec)
-                         (or (get spec :shard) 0)
-                         (get spec :shards))
+                         (or (get spec :shard) 0) (get spec :shards))
       (get spec :seed))))
 
 ;; --- trace ---------------------------------------------------------------------
@@ -670,10 +650,7 @@ docs/testing.md for the full guide.")
 (defn trace-result (r)
   (when *test-trace*
     (println (str (trace--glyph r)
-               " "
-               (trace--label r)
-               "  "
-               (test--dim (trace--timing r))
+               " " (trace--label r) "  " (test--dim (trace--timing r))
                (if (= (r-where r) "") "" (str "  " (test--dim (r-where r))))
                (trace--failure-count r))))
   r)
@@ -745,8 +722,7 @@ docs/testing.md for the full guide.")
                      (r-skipped? r) (test--orange "○")
                      (r-failed? r) (test--red "F")
                      else (test--green "."))))
-      nil
-      results)))
+      nil results)))
 
 ;; Run one (name thunk) and produce its result (group name fails ms). The thunk
 ;; returns its own failure list (it catches its first failing assertion), sharing
@@ -794,8 +770,7 @@ docs/testing.md for the full guide.")
           (let (pid (spawn (send me (list :unit-result (self) (run-unit unit)))))
             (monitor pid)
             (cons (list pid unit) acc)))
-    nil
-    units))
+    nil units))
 
 ;; How many units run concurrently in the parallel phase. This BOUNDS MEMORY: the
 ;; GC is still a no-op (M1), so every *started* worker holds its entire allocation
@@ -911,9 +886,7 @@ docs/testing.md for the full guide.")
 (defn dead-unit-results (unit reason)
   (map (fn (t)
          (list (second unit)
-           (first t)
-           (list (list nil (list (str "test process died: " (pr-str reason)))))
-           0))
+           (first t) (list (list nil (list (str "test process died: " (pr-str reason))))) 0))
     (third unit)))
 
 ;; Account for each spawned worker exactly once — by its result if it reported,
@@ -935,8 +908,7 @@ docs/testing.md for the full guide.")
             (do
               (exit (first w) :kill)
               (append (timeout-unit-results (second w)) a))))
-    acc
-    workers))
+    acc workers))
 
 ;; A timeout failure per test in a hung unit — same shape as `dead-unit-results`:
 ;; `(group name fails ms)`, `fails` = `((loc detail-lines))`.
@@ -962,8 +934,8 @@ docs/testing.md for the full guide.")
 ;; `(pid unit)`, a unit is `(mode group tests)`, and a test's meta carries its tags.)
 (defn collect--slow-batch? (workers)
   (any? (fn (w)
-           (any? (fn (t) (any? (fn (tag) (includes? *test-long-tags* tag)) (test--tags t)))
-             (third (second w))))
+          (any? (fn (t) (any? (fn (tag) (includes? *test-long-tags* tag)) (test--tags t)))
+            (third (second w))))
     workers))
 
 (defn collect-units (workers acc)
@@ -994,9 +966,7 @@ docs/testing.md for the full guide.")
                                              (nil? (unit-of-pid pid workers)))
                                          (collect-loop pending workers reported acc deadline)
                                          (collect-loop (- pending 1)
-                                           workers
-                                           (cons pid reported)
-                                           (append (third msg) acc)
+                                           workers (cons pid reported) (append (third msg) acc)
                                            deadline)))
 
         ;; [:down mref pid reason]
@@ -1004,16 +974,11 @@ docs/testing.md for the full guide.")
                                     unit (unit-of-pid pid workers))
                                 (cond
                                   (member? pid reported) (collect-loop pending
-                                                           workers
-                                                           reported
-                                                           acc
-                                                           deadline)
+                                                           workers reported acc deadline)
                                   (nil? unit) (collect-loop pending workers reported acc deadline)
                                   else (collect-loop (- pending 1)
-                                         workers
-                                         reported
-                                         (append (dead-unit-results unit (nth msg 3)) acc)
-                                         deadline)))
+                                         workers reported
+                                         (append (dead-unit-results unit (nth msg 3)) acc) deadline)))
 
         ;; Anything else in the runner's mailbox isn't ours — skip it.
         else (collect-loop pending workers reported acc deadline)))))
@@ -1099,9 +1064,7 @@ docs/testing.md for the full guide.")
         ;; run calls `drain-runner` once PER FILE from one long-lived process, and a
         ;; leaked `:down` per file made every later `receive` scan past them all — O(n²)
         ;; over a large suite (100K files went from hours to seconds with this fix).
-        (demonitor mref)
-        (receive ([:down ^mref ^d _] :ok) (after 0 :ok))
-        rs)
+        (demonitor mref) (receive ([:down ^mref ^d _] :ok) (after 0 :ok)) rs)
       ([:down ^mref ^d reason] (error (str "test runner crashed: " reason))))))
 
 ;; Split the currently-registered units into (iso par) and drain them — the shared
@@ -1157,9 +1120,7 @@ docs/testing.md for the full guide.")
       "failed to load"
       (list (list (if (and file line col) (list file line col) nil)
               (list (str "cannot load: " message))))
-      0
-      false
-      (if (and (not (= shown "")) (not (nil? line))) (str shown ":" line) ""))))
+      0 false (if (and (not (= shown "")) (not (nil? line))) (str shown ":" line) ""))))
 
 (defn drain-files-scoped (loaders)
   ;; Accumulate each file's result LIST with `cons` (O(1)) into a reverse-order list of
@@ -1253,8 +1214,7 @@ docs/testing.md for the full guide.")
 (defn fail-anchor (r rec)
   (let (where (fail-where r rec))
     (str (if (= where "") "" (str (test--bold where) ": "))
-      (test--red "test failed: ")
-      (full-name r))))
+      (test--red "test failed: ") (full-name r))))
 
 ;; WHERE to look, as `file:line:col` — the part of a failure report you actually act
 ;; on, so it must always be present and short enough to read.
@@ -1283,8 +1243,7 @@ docs/testing.md for the full guide.")
           (println "")
           (println (fail-anchor r rec))
           (fold (fn (_ line) (println (str indent (test--dim-label line)))) nil (fail-lines-of rec)))
-    nil
-    (r-fails r)))
+    nil (r-fails r)))
 
 ;; Dim the `label:` prefix of a detail line so the VALUE is what stands out —
 ;; `actual:`/`expect:`/`assert:` are scaffolding, the values are the information.
@@ -1306,11 +1265,8 @@ docs/testing.md for the full guide.")
   (let (timings (map (fn (r) [(full-name r) (r-ms r)]) results))
     (fold (fn (_ entry)
             (println (str "  "
-                       (pad-right (str (first entry)) 28)
-                       (pad-left (str (rest entry)) 6)
-                       " ms")))
-      nil
-      (take n (sort-by-ms timings)))))
+                       (pad-right (str (first entry)) 28) (pad-left (str (rest entry)) 6) " ms")))
+      nil (take n (sort-by-ms timings)))))
 
 ;; "1.3s" from milliseconds — one decimal, rounded to nearest 0.1s.
 (defn secs-str (ms)
@@ -1329,8 +1285,7 @@ docs/testing.md for the full guide.")
       (println (str "Slow tests (> " (secs-str over) "):"))
       (fold (fn (_ p)
               (println (str "  " (pad-right (str (first p)) 40) " " (secs-str (second p)))))
-        nil
-        (sort-by-ms slow)))))
+        nil (sort-by-ms slow)))))
 
 (defn count-failed (results)
   ; tests with at least one failed assertion
@@ -1403,17 +1358,9 @@ docs/testing.md for the full guide.")
     ;; Built as one string rather than `println`'s space-joined arguments, so the
     ;; commas land correctly whether or not the optional skipped clause is present.
     (println (str total
-               " tests, "
-               (- total failed skipped)
-               " passed, "
-               failed
-               " failed"
-               (if (> skipped 0) (str ", " skipped " skipped") "")
-               " ("
-               fails
-               " failed assertions"
-               extra
-               ")"))
+               " tests, " (- total failed skipped) " passed, " failed " failed"
+               (if (> skipped 0) (str ", " skipped " skipped") "") " (" fails " failed assertions"
+               extra ")"))
     (println (str "  (" elapsed " ms wall, peak " (mb-str (mem-peak)) ")"))
     ;; Echo the seed whenever the order was randomised, so the run can be
     ;; reproduced. Deliberately says "same order", not "replay exactly": the seed
@@ -1422,10 +1369,7 @@ docs/testing.md for the full guide.")
     ;; alone. Promising exact replay here would be a lie.
     (when seed
       (println (str "  (random order, seed "
-                 seed
-                 " — same order with --seed "
-                 seed
-                 "; parallel tests still interleave)")))
+                 seed " — same order with --seed " seed "; parallel tests still interleave)")))
     (if (> failed 0) (error (str failed " test(s) failed")) :ok)))
 
 (defn run-tests (& opts)

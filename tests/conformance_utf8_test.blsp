@@ -33,7 +33,9 @@
 
 (defn u8--file () (first (corpus-files "utf8")))
 
-(describe "UTF-8 stress: the corpus file itself" :tags [:conformance]
+(describe "UTF-8 stress: the corpus file itself"
+  :tags
+  [:conformance]
 
   (test "the corpus is present"
     (is (corpus-present? "utf8"))
@@ -51,28 +53,43 @@
       ;; Kuhn's 2015-08-28 revision, as pinned in the corpus README.
       (assert= (count bs) 22781))))
 
-(describe "UTF-8 stress: Kuhn's catalogue" :tags [:conformance]
+(describe "UTF-8 stress: Kuhn's catalogue"
+  :tags
+  [:conformance]
 
   ;; §2 — boundary conditions. The first and last code point of each encoded length,
   ;; which is where an off-by-one in a hand-written decoder shows up.
   (test "2.1/2.2 first and last of each sequence length decode"
-    (assert= (u8--rejected (list "00"          ; U+0000, 1 byte
-                                 "C280"        ; U+0080, 2 bytes
-                                 "E0A080"      ; U+0800, 3 bytes
-                                 "F0908080"    ; U+10000, 4 bytes
-                                 "7F"          ; U+007F
-                                 "DFBF"        ; U+07FF
-                                 "EFBFBF"      ; U+FFFF
-                                 "F48FBFBF"))  ; U+10FFFF, the last code point
-             ()))
+    (assert=
+      ; U+10FFFF, the last code point
+      (u8--rejected
+        (list "00"
+          ; U+0000, 1 byte
+          ; U+0080, 2 bytes
+          "C280"
+          ; U+0800, 3 bytes
+          "E0A080"
+          ; U+10000, 4 bytes
+          "F0908080"
+          ; U+007F
+          "7F"
+          ; U+07FF
+          "DFBF"
+          ; U+FFFF
+          "EFBFBF" "F48FBFBF"))
+      ()))
 
   ;; The two code points that bracket the surrogate block, plus U+FFFD itself — an
   ;; off-by-one in the surrogate check rejects one of the neighbours.
   (test "2.3 the code points bracketing the surrogate block decode"
-    (assert= (u8--rejected (list "ED9FBF"     ; U+D7FF, last before the block
-                                 "EE8080"     ; U+E000, first after it
-                                 "EFBFBD"))   ; U+FFFD REPLACEMENT CHARACTER
-             ()))
+    (assert=
+      ; U+FFFD REPLACEMENT CHARACTER
+      (u8--rejected
+        (list "ED9FBF"
+          ; U+D7FF, last before the block
+          ; U+E000, first after it
+          "EE8080" "EFBFBD"))
+      ()))
 
   ;; §3.1 — a continuation byte with no lead byte.
   (test "3.1 unexpected continuation bytes are rejected"
@@ -80,8 +97,9 @@
 
   ;; §3.2 — a lead byte followed by a space instead of a continuation.
   (test "3.2 lonely start characters are rejected"
-    (assert= (u8--accepted (list "C020" "DF20" "E020" "EF20" "F020" "F720"
-                                 "F820" "FB20" "FC20" "FD20")) ()))
+    (assert= (u8--accepted (list "C020"
+                             "DF20" "E020" "EF20" "F020" "F720" "F820" "FB20" "FC20" "FD20"))
+      ()))
 
   ;; §3.3/3.4 — truncation, the bug a streaming decoder writes.
   (test "3.3 sequences with the last byte missing are rejected"
@@ -97,45 +115,62 @@
   ;; §4 — overlong forms. The security-critical class: an overlong "/" (C0 AF) slips a
   ;; path separator past a naive filter that only looks for the one-byte 2F.
   (test "4.1 overlong ASCII is rejected"
-    (assert= (u8--accepted (list "C0AF" "E080AF" "F08080AF" "F8808080AF"
-                                 "FC80808080AF")) ()))
+    (assert= (u8--accepted (list "C0AF"
+                             "E080AF" "F08080AF" "F8808080AF" "FC80808080AF"))
+      ()))
 
   (test "4.2 maximum overlong forms are rejected"
-    (assert= (u8--accepted (list "C1BF" "E09FBF" "F08FBFBF" "F887BFBFBF"
-                                 "FC83BFBFBFBF")) ()))
+    (assert= (u8--accepted (list "C1BF"
+                             "E09FBF" "F08FBFBF" "F887BFBFBF" "FC83BFBFBFBF"))
+      ()))
 
   (test "4.3 overlong NUL is rejected (the C0 80 trick)"
-    (assert= (u8--accepted (list "C080" "E08080" "F0808080" "F880808080"
-                                 "FC8080808080")) ()))
+    (assert= (u8--accepted (list "C080"
+                             "E08080" "F0808080" "F880808080" "FC8080808080"))
+      ()))
 
   ;; §5.1/5.2 — UTF-16 surrogates have no UTF-8 encoding. CESU-8 / "modified UTF-8"
   ;; emits them, so a decoder that accepts them accepts non-UTF-8 data.
   (test "5.1 single surrogates are rejected"
-    (assert= (u8--accepted (list "EDA080"   ; U+D800
-                                 "EDADBF"   ; U+DB7F
-                                 "EDAE80"   ; U+DB80
-                                 "EDAFBF"   ; U+DBFF
-                                 "EDB080"   ; U+DC00
-                                 "EDBE80"   ; U+DF80
-                                 "EDBFBF")) ; U+DFFF
-             ()))
+    (assert=
+      ; U+DFFF
+      (u8--accepted
+        (list "EDA080"
+          ; U+D800
+          ; U+DB7F
+          "EDADBF"
+          ; U+DB80
+          "EDAE80"
+          ; U+DBFF
+          "EDAFBF"
+          ; U+DC00
+          "EDB080"
+          ; U+DF80
+          "EDBE80" "EDBFBF"))
+      ()))
 
   (test "5.2 paired surrogates are rejected"
-    (assert= (u8--accepted (list "EDA080EDB080" "EDA080EDBFBF"
-                                 "EDAFBFEDB080" "EDAFBFEDBFBF")) ()))
+    (assert= (u8--accepted (list "EDA080EDB080"
+                             "EDA080EDBFBF" "EDAFBFEDB080" "EDAFBFEDBFBF"))
+      ()))
 
   ;; §5.3 — noncharacters ARE valid UTF-8. Rejecting them is as wrong as accepting a
   ;; surrogate: they are legal code points that merely must not be interchanged as text.
   (test "5.3 noncharacters are valid UTF-8 and must decode"
-    (assert= (u8--rejected (list "EFBFBE"     ; U+FFFE
-                                 "EFBFBF"     ; U+FFFF
-                                 "F09FBFBE"   ; U+1FFFE
-                                 "F48FBFBE")) ; U+10FFFE
-             ()))
+    (assert=
+      ; U+10FFFE
+      (u8--rejected
+        (list "EFBFBE"
+          ; U+FFFE
+          ; U+FFFF
+          "EFBFBF"
+          ; U+1FFFE
+          "F09FBFBE" "F48FBFBE"))
+      ()))
 
   ;; Beyond Kuhn: every sequence that decodes must re-encode to the same bytes.
   (test "round-trip: decode then encode is identity on the bytes"
-    (dolist (hex (list "00" "7F" "C280" "DFBF" "E0A080" "EFBFBF"
-                       "F0908080" "F48FBFBF" "EFBFBE"))
+    (dolist (hex (list "00"
+                   "7F" "C280" "DFBF" "E0A080" "EFBFBF" "F0908080" "F48FBFBF" "EFBFBE"))
       (assert= (string->utf8-bytes (utf8-bytes->string (u8--bytes hex)))
-               (u8--bytes hex)))))
+        (u8--bytes hex)))))

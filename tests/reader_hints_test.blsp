@@ -72,8 +72,8 @@
 ;; digit separators / a bigint suffix purely additive after 1.0.
 (describe "digit-led tokens are reserved numeric syntax, not names"
   (test "the reserved shapes each error with a targeted hint"
-    (let (cases [["1/2" "ratio"] ["0x1F" "radix"] ["1_000" "digit separator"]
-                 ["1N" "bigint"] ["3px" "must be a number"]])
+    (let (cases [["1/2" "ratio"] ["0x1F" "radix"]
+                  ["1_000" "digit separator"] ["1N" "bigint"] ["3px" "must be a number"]])
       (map (fn (c)
              (let (e (try (read-string (first c)) (catch e e)))
                (assert= (get e :kind) :parse)

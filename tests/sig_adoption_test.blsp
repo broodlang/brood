@@ -79,7 +79,6 @@
       (let (lines (string-split (or (%builtin-module m) "") "\n"))
         (assert= (sig--misplaced lines) nil)))))
 
-
 ;; Does line `b` define the name `(sig NAME …)` line `a` declares? That adjacency is
 ;; the placement that breaks under contracts mode.
 (defn sig--above-def? (a b)

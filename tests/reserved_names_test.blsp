@@ -87,7 +87,8 @@
     (let (sink (table))
       (def *out* (fn (s) (table-put sink :last s)))
       (print "redirected")
-      (def *out* %write-out)                    ; restore BEFORE asserting
+      ; restore BEFORE asserting
+      (def *out* %write-out)
       (assert= "redirected" (table-get sink :last))))
   (test "the scoped form is unaffected"
     (assert= "scoped" (with-out-str (print "scoped")))))
@@ -110,11 +111,15 @@
   (test "the reserved set is shared — a spawned process refuses too"
     ;; the set lives in the runtime's shared code region, like the globals table
     (let (me (self))
-      (spawn (send me [:result (try (do (eval-string "(def get (fn (a b) :x))") :allowed)
-                                    (catch e :refused))]))
+      (spawn (send me
+               [:result (try
+                          (do (eval-string "(def get (fn (a b) :x))") :allowed)
+                          (catch e :refused))]))
       (assert= :refused (receive ([:result r] r)))))
   (test "and a spawned process can still redefine its own names"
     (let (me (self))
-      (spawn (send me [:result (try (do (eval-string "(def rn-child (fn () 1))") :allowed)
-                                    (catch e :refused))]))
+      (spawn (send me
+               [:result (try
+                          (do (eval-string "(def rn-child (fn () 1))") :allowed)
+                          (catch e :refused))]))
       (assert= :allowed (receive ([:result r] r))))))

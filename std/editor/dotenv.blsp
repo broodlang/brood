@@ -39,8 +39,7 @@ classifies a `#` comment, an optional leading `export` keyword, the `KEY` of a
 (defn env--key-char? (c)
   "True if `c` may appear in a dotenv key (letters, digits, `_`, `.`)."
   (or (includes? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789" c)
-    (= c "_")
-    (= c ".")))
+    (= c "_") (= c ".")))
 (defn env--key-end (line i n)
   (if (and (< i n) (env--key-char? (char-at line i))) (env--key-end line (inc i) n) i))
 

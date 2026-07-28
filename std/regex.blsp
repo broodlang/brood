@@ -189,8 +189,8 @@ backreferences yet.")
     (empty? branches) [nx states]
     (empty? (rest branches)) (regex--nfa-seq (first branches) nx states)
     else (let ([b-start st1] (regex--nfa-seq (first branches) nx states)
-                [rest-start st2] (regex--nfa-alt (rest branches) nx st1))
-            (regex--push st2 {:t :split :a b-start :b rest-start}))))
+               [rest-start st2] (regex--nfa-alt (rest branches) nx st1))
+           (regex--push st2 {:t :split :a b-start :b rest-start}))))
 
 (defn regex--nfa (branches)
   "Compile the parsed branch list into {:states vec :start idx :match idx}."
@@ -240,10 +240,8 @@ object's per-call clone-out stays a few words — see the cache note above."
             m (count states)
             startbit (bit-shift-left 1 start)
             obj [m (bit-shift-left 1 (get nfa :match))
-                  (regex--eps-close states startbit 0 1 m)
-                  (regex--eps-close-mid states startbit m)
-                  (table)
-                  (table)])
+                  (regex--eps-close states startbit 0 1 m) (regex--eps-close-mid states startbit m)
+                  (table) (table)])
         (table-put regex--states-cache pattern {:states states :start start})
         (table-put regex--cache pattern obj)
         obj)
@@ -297,12 +295,7 @@ object's per-call clone-out stays a few words — see the cache note above."
   (if (>= j m)
     acc
     (regex--eps-step states
-      set
-      i
-      n
-      (inc j)
-      m
-      (if (regex--bit? set j) (bit-or acc (regex--eps-targets states j i n)) acc))))
+      set i n (inc j) m (if (regex--bit? set j) (bit-or acc (regex--eps-targets states j i n)) acc))))
 
 (defn regex--eps-close (states set i n m)
   "Expand epsilon moves (split/anchors) to a fixpoint at position `i`."
@@ -318,9 +311,7 @@ object's per-call clone-out stays a few words — see the cache note above."
   (if (>= j m)
     acc
     (regex--eps-step-mid states
-      set
-      (inc j)
-      m
+      set (inc j) m
       (if (regex--bit? set j)
         (let (st (nth states j))
           (if (= (get st :t) :split)
@@ -338,10 +329,7 @@ object's per-call clone-out stays a few words — see the cache note above."
   (if (>= j m)
     acc
     (regex--step states
-      set
-      c
-      (inc j)
-      m
+      set c (inc j) m
       (if (regex--bit? set j)
         (let (st (nth states j))
           (if (if (= (get st :t) :char) (regex--char-test? (get st :test) c) false)
@@ -422,15 +410,7 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table-get
                    (regex--delta-slow (regex--states-of pattern) memo m set (nth codes i))
                    nxt))
         (regex--run-search-loop pattern
-          exitmemo
-          memo
-          m
-          startmid
-          matchbit
-          codes
-          n
-          (+ i 1)
-          (bit-or nxt2 startmid))))))
+          exitmemo memo m startmid matchbit codes n (+ i 1) (bit-or nxt2 startmid))))))
 
 ;; ---- public entry points ----------------------------------------------------
 ;; The n == 0 edge (empty input) is the one case where the precomputed closures
@@ -453,15 +433,7 @@ start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a su
     (if (= n 0)
       (regex--empty-input? pattern (nth obj 1))
       (regex--run-search-loop pattern
-        (nth obj 5)
-        (nth obj 4)
-        (nth obj 0)
-        (nth obj 3)
-        (nth obj 1)
-        codes
-        n
-        0
-        (nth obj 2)))))
+        (nth obj 5) (nth obj 4) (nth obj 0) (nth obj 3) (nth obj 1) codes n 0 (nth obj 2)))))
 
 (defn matches? (pattern s)
   "True if `pattern` matches the **entire** string `s` (anchored both ends)."
@@ -471,11 +443,4 @@ start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a su
     (if (= n 0)
       (regex--empty-input? pattern (nth obj 1))
       (regex--run-anchored-loop pattern
-        (nth obj 5)
-        (nth obj 4)
-        (nth obj 0)
-        (nth obj 1)
-        codes
-        n
-        0
-        (nth obj 2)))))
+        (nth obj 5) (nth obj 4) (nth obj 0) (nth obj 1) codes n 0 (nth obj 2)))))

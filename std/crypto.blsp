@@ -102,9 +102,7 @@ is used as raw bytes — so a base64-decoded binary salt (e.g. Postgres SCRAM)
 round-trips faithfully rather than being UTF-8-decoded. Higher `iterations` =
 slower brute force; use ≥ 600,000 for password storage."
   (%pbkdf2-sha256-bytes (crypto--as-bytes password)
-    (crypto--as-bytes salt)
-    iterations
-    key-len))
+    (crypto--as-bytes salt) iterations key-len))
 
 ;; ---- utilities --------------------------------------------------------------
 
@@ -115,5 +113,4 @@ Returns true if `a` and `b` are identical, false otherwise."
     (= 0
       (fold (fn (acc pair)
               (bit-or acc (bit-xor (first pair) (second pair))))
-        0
-        (zip (seq a) (seq b))))))
+        0 (zip (seq a) (seq b))))))

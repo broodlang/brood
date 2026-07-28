@@ -43,8 +43,7 @@ process you own.")
   "`table` with any handler whose id is `id` removed from every event bucket."
   (fold (fn (acc ev)
           (assoc acc ev (filter (fn (h) (not (= (get h :id) id))) (get table ev))))
-    {}
-    (keys table)))
+    {} (keys table)))
 
 (defn telemetry--dispatch (bucket event measurements metadata)
   "Run every handler in `bucket` (the handlers for `event`), each guarded by
@@ -54,8 +53,7 @@ LISTENER process."
           (try
             (do ((get h :fn) event measurements metadata) failed)
             (catch _ (cons (get h :id) failed))))
-    nil
-    bucket))
+    nil bucket))
 
 (defn telemetry--run-handlers (event measurements metadata)
   "Dispatch `event` to its handlers and detach any that threw. Runs in the listener."
@@ -263,8 +261,7 @@ at start are the baseline (no spurious `:nodeup` for them)."
         result)
       (catch e
         (emit (telemetry--sub event :exception)
-          {:duration (- (now) t0)}
-          (assoc metadata :error (error-message e)))
+          {:duration (- (now) t0)} (assoc metadata :error (error-message e)))
         (throw e)))))
 
 (defmacro span (event metadata & body)
@@ -409,9 +406,7 @@ a final `{:le :inf :count n}` for the overflow bucket."
   (if (>= i (count bounds))
     (into [] (reverse (cons {:le :inf :count (get counts i 0)} acc)))
     (telemetry--dist-buckets bounds
-      counts
-      (+ i 1)
-      (cons {:le (nth bounds i) :count (get counts i 0)} acc))))
+      counts (+ i 1) (cons {:le (nth bounds i) :count (get counts i 0)} acc))))
 
 (defn telemetry--present (state)
   "Turn a raw metric accumulator into its reader shape: a `:summary` gets `:mean`
@@ -439,9 +434,7 @@ others pass through."
                                 :max (get state :max)
                                 :mean (if (> n 0) (/ (get state :sum) n) 0)
                                 :buckets (telemetry--dist-buckets (get state :bounds)
-                                           (get state :counts)
-                                           0
-                                           nil)})
+                                           (get state :counts) 0 nil)})
       else state)))
 
 (defn metric (id)
@@ -479,18 +472,11 @@ bucketed counts — linear interpolation within the containing bucket, the stand
 Returns nil unless `id` is a `distribution` with at least one observation."
   (let (state (table-get (telemetry--metrics) id nil))
     (when (and state
-            (= (get state :kind) :distribution)
-            (> (get state :count) 0))
+            (= (get state :kind) :distribution) (> (get state :count) 0))
       (let (bounds (get state :bounds)
             counts (get state :counts))
         (telemetry--quantile bounds
-          counts
-          (count bounds)
-          (* p (get state :count))
-          0
-          0
-          0
-          (get state :max))))))
+          counts (count bounds) (* p (get state :count)) 0 0 0 (get state :max))))))
 
 (defn sample-every (id n handler)
   "Wrap `handler` so it runs on every `n`th matching event (1-in-`n` sampling) —

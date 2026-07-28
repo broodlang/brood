@@ -96,7 +96,7 @@ port. The oracle is upstream's own expected output in
       (let (next (mazefun--next-random current)
             i (rem next (count lst)))
         (cons (nth lst i)
-              (mazefun--shuffle--acc (mazefun--list-remove-pos lst i) next))))))
+          (mazefun--shuffle--acc (mazefun--list-remove-pos lst i) next))))))
 
 (defn mazefun--shuffle (lst)
   (mazefun--shuffle--acc lst mazefun--initial-random))
@@ -109,15 +109,15 @@ port. The oracle is upstream's own expected output in
     (append (if (and (> i 0) (mazefun--matrix-read cave (- i 1) j))
               (list [(- i 1) j])
               nil)
-            (if (and (< i (- n 1)) (mazefun--matrix-read cave (+ i 1) j))
-              (list [(+ i 1) j])
-              nil)
-            (if (and (> j 0) (mazefun--matrix-read cave i (- j 1)))
-              (list [i (- j 1)])
-              nil)
-            (if (and (< j (- m 1)) (mazefun--matrix-read cave i (+ j 1)))
-              (list [i (+ j 1)])
-              nil))))
+      (if (and (< i (- n 1)) (mazefun--matrix-read cave (+ i 1) j))
+        (list [(+ i 1) j])
+        nil)
+      (if (and (> j 0) (mazefun--matrix-read cave i (- j 1)))
+        (list [i (- j 1)])
+        nil)
+      (if (and (< j (- m 1)) (mazefun--matrix-read cave i (+ j 1)))
+        (list [i (+ j 1)])
+        nil))))
 
 ;; Flood-fill: rename every cell of the cavity `old-cavity-id` to `new-cavity-id`.
 ;; Non-tail through the `fold`'s closure — the recursion is the fill.
@@ -128,14 +128,13 @@ port. The oracle is upstream's own expected output in
       (if (= cavity-id old-cavity-id)
         (fold (fn (c nc)
                 (mazefun--change-cavity--from c nc new-cavity-id old-cavity-id))
-              (mazefun--matrix-write cave i j new-cavity-id)
-              (mazefun--neighboring-cavities pos cave))
+          (mazefun--matrix-write cave i j new-cavity-id) (mazefun--neighboring-cavities pos cave))
         cave))))
 
 (defn mazefun--change-cavity (cave pos new-cavity-id)
   (let ([i j] pos)
-    (mazefun--change-cavity--from cave pos new-cavity-id
-                                  (mazefun--matrix-read cave i j))))
+    (mazefun--change-cavity--from cave
+      pos new-cavity-id (mazefun--matrix-read cave i j))))
 
 (defn mazefun--pierce (pos cave)
   (let ([i j] pos)
@@ -143,19 +142,17 @@ port. The oracle is upstream's own expected output in
 
 (defn mazefun--try-to-pierce (pos cave)
   (let (ncs (mazefun--neighboring-cavities pos cave))
-    (if (mazefun--duplicates?
-          (map (fn (nc) (let ([i j] nc) (mazefun--matrix-read cave i j))) ncs))
+    (if (mazefun--duplicates? (map (fn (nc) (let ([i j] nc) (mazefun--matrix-read cave i j))) ncs))
       cave
       (mazefun--pierce pos
-                       (fold (fn (c nc) (mazefun--change-cavity c nc pos))
-                             cave
-                             ncs)))))
+        (fold (fn (c nc) (mazefun--change-cavity c nc pos))
+          cave ncs)))))
 
 (defn mazefun--pierce-randomly (possible-holes cave)
   (if (nil? possible-holes)
     cave
     (mazefun--pierce-randomly (rest possible-holes)
-                              (mazefun--try-to-pierce (first possible-holes) cave))))
+      (mazefun--try-to-pierce (first possible-holes) cave))))
 
 (defn cave->maze (cave)
   "The cave with each cavity id rendered as `_` (open) and each wall as `*`."
@@ -166,18 +163,19 @@ port. The oracle is upstream's own expected output in
 returns the symbol `error` otherwise, as upstream does."
   (if (not (and (odd? n) (odd? m)))
     'error
-    (let (cave (mazefun--make-matrix n m (fn (i j)
-                                           (if (and (even? i) (even? j))
-                                             [i j]
-                                             false)))
-          possible-holes
-          (mazefun--concat
-            (mazefun--tabulate 0 n
-              (fn (i)
-                (mazefun--concat
-                  (mazefun--tabulate 0 m
-                    (fn (j)
-                      (if (= (even? i) (even? j))
-                        nil
-                        (list [i j])))))))))
+    (let (cave (mazefun--make-matrix n
+                 m
+                 (fn (i j)
+                   (if (and (even? i) (even? j))
+                     [i j]
+                     false)))
+          possible-holes (mazefun--concat (mazefun--tabulate 0
+                                            n
+                                            (fn (i)
+                                              (mazefun--concat (mazefun--tabulate 0
+                                                                 m
+                                                                 (fn (j)
+                                                                   (if (= (even? i) (even? j))
+                                                                     nil
+                                                                     (list [i j])))))))))
       (cave->maze (mazefun--pierce-randomly (mazefun--shuffle possible-holes) cave)))))

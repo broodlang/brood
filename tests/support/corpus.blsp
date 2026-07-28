@@ -41,7 +41,7 @@ of the two explicitly."
   (if subdir
     (corpus--entries (path-join (corpus-dir suite) subdir))
     (or (corpus--entries (path-join (corpus-dir suite) "full"))
-        (corpus--entries (path-join (corpus-dir suite) "data")))))
+      (corpus--entries (path-join (corpus-dir suite) "data")))))
 
 (defn corpus-lines (path)
   "The lines of corpus file `path`. Only the file's own trailing newline is dropped
@@ -49,7 +49,7 @@ of the two explicitly."
 significant and the rest ignore them anyway."
   (let (s (slurp path))
     (string-split (if (ends-with? s "\n") (substring s 0 (dec (string-length s))) s)
-                  "\n")))
+      "\n")))
 
 (defn corpus-forms (path)
   "Every s-expression in corpus file `path`, as a list. For the corpora whose data
@@ -65,9 +65,28 @@ reader, exactly as the Scheme harness's repeated `(read)` drops them."
 ;; decode lives here rather than being re-written in each runner.
 
 (def corpus--hex-digits
-  {"0" 0 "1" 1 "2" 2 "3" 3 "4" 4 "5" 5 "6" 6 "7" 7 "8" 8 "9" 9
-   "a" 10 "b" 11 "c" 12 "d" 13 "e" 14 "f" 15
-   "A" 10 "B" 11 "C" 12 "D" 13 "E" 14 "F" 15})
+  {"0" 0
+   "1" 1
+   "2" 2
+   "3" 3
+   "4" 4
+   "5" 5
+   "6" 6
+   "7" 7
+   "8" 8
+   "9" 9
+   "a" 10
+   "b" 11
+   "c" 12
+   "d" 13
+   "e" 14
+   "f" 15
+   "A" 10
+   "B" 11
+   "C" 12
+   "D" 13
+   "E" 14
+   "F" 15})
 
 (defn corpus--hex-at (s i n acc)
   (if (= i n)

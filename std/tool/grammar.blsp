@@ -66,12 +66,8 @@ part, from `special-keywords`). Returned as data so callers/tests can inspect it
   {:name "Brood"
    :scopeName "source.brood"
    :patterns [{:include "#comment"} {:include "#string"}
-               {:include "#definition"}
-               {:include "#special-form"}
-               {:include "#param-marker"}
-               {:include "#constant"}
-               {:include "#keyword"}
-               {:include "#number"}]
+               {:include "#definition"} {:include "#special-form"} {:include "#param-marker"}
+               {:include "#constant"} {:include "#keyword"} {:include "#number"}]
    :repository {:comment {:name "comment.line.semicolon.brood" :match ";.*$"}
                 :string {:name "string.quoted.double.brood"
                          :begin "\""
@@ -89,10 +85,7 @@ part, from `special-keywords`). Returned as data so callers/tests can inspect it
                 :keyword {:name "constant.keyword.brood" :match (str ":" grammar--sym "+")}
                 :number {:name "constant.numeric.brood"
                          :match (str "(?<!"
-                                  grammar--sym
-                                  ")-?[0-9]+(\\.[0-9]+)?(?!"
-                                  grammar--sym
-                                  ")")}}})
+                                  grammar--sym ")-?[0-9]+(\\.[0-9]+)?(?!" grammar--sym ")")}}})
 
 (defn tmlanguage ()
   "The VS Code TextMate grammar as JSON text (the `.tmLanguage.json` file body),
@@ -109,23 +102,15 @@ special-form rule, emitted with a `#any-of?` predicate over `special-keywords` (
 node-text, so no regex escaping)."
   (str ";; tree-sitter-brood highlight query.\n"
     ";; GENERATED from (special-forms) by `nest grammar tree-sitter` — do not hand-edit.\n\n"
-    "(comment) @comment\n"
-    "(string) @string\n"
-    "(escape_sequence) @string.escape\n"
-    "(number) @number\n"
-    "(keyword) @constant\n"
-    "(boolean) @constant.builtin\n"
-    "(nil) @constant.builtin\n\n"
-    "[\"(\" \")\" \"[\" \"]\" \"{\" \"}\"] @punctuation.bracket\n"
+    "(comment) @comment\n" "(string) @string\n" "(escape_sequence) @string.escape\n"
+    "(number) @number\n" "(keyword) @constant\n" "(boolean) @constant.builtin\n"
+    "(nil) @constant.builtin\n\n" "[\"(\" \")\" \"[\" \"]\" \"{\" \"}\"] @punctuation.bracket\n"
     "[\"'\" \"`\" \"~\" \"~@\"] @operator\n\n"
     ";; def… heads: the head reads as a keyword, the defined name as a definition.\n"
-    "((list . (symbol) @keyword (symbol) @function)\n"
-    " (#match? @keyword \"^def\"))\n\n"
+    "((list . (symbol) @keyword (symbol) @function)\n" " (#match? @keyword \"^def\"))\n\n"
     ";; special forms + core macros in head position (the canonical (special-forms)).\n"
-    "((list . (symbol) @keyword.control)\n"
-    " (#any-of? @keyword.control "
-    (join " " (map (fn (k) (str "\"" k "\"")) (special-keywords)))
-    "))\n"))
+    "((list . (symbol) @keyword.control)\n" " (#any-of? @keyword.control "
+    (join " " (map (fn (k) (str "\"" k "\"")) (special-keywords))) "))\n"))
 
 ;; ---- Emacs font-lock list ----------------------------------------------------
 
@@ -133,8 +118,6 @@ node-text, so no regex escaping)."
   "The Emacs `brood-special-forms` defconst (elisp text) built from the same
 `special-keywords`, so `brood-mode` can generate its highlight list too."
   (str "(defconst brood-special-forms\n"
-    "  '("
-    (join " " (map (fn (k) (str "\"" k "\"")) (special-keywords)))
-    ")\n"
+    "  '(" (join " " (map (fn (k) (str "\"" k "\"")) (special-keywords))) ")\n"
     "  \"Brood special forms and core macros to highlight.\n"
     "Generated from `(special-forms)` by `nest grammar emacs` — do not edit by hand.\")\n"))

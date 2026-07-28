@@ -79,13 +79,12 @@ plus any surplus already read past it. Policy is Brood; only the syscalls are Ru
 
 (defn tcp--read-until (sock sep acc)
   (receive
-    ([:tcp ^sock d]
-      (let (buf (bytes-concat (reverse (cons d acc)))
-            i (bytes-index-of buf sep))
-        (if (>= i 0)
-          (let (cut (+ i (count sep)))
-            [(subbytes buf 0 cut) (subbytes buf cut (count buf))])
-          (tcp--read-until sock sep (cons d acc)))))
+    ([:tcp ^sock d] (let (buf (bytes-concat (reverse (cons d acc)))
+                          i (bytes-index-of buf sep))
+                      (if (>= i 0)
+                        (let (cut (+ i (count sep)))
+                          [(subbytes buf 0 cut) (subbytes buf cut (count buf))])
+                        (tcp--read-until sock sep (cons d acc)))))
     ([:tcp-closed ^sock] [:closed (bytes-concat (reverse acc))])))
 
 (defn tcp-read-n (sock n)

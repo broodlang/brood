@@ -27,8 +27,7 @@ oracle is upstream's own expected output in `tests/corpus/gabriel/data/nqueens.i
   (if (nil? placed)
     true
     (and (not (= (first placed) (+ row dist)))
-         (not (= (first placed) (- row dist)))
-         (nqueens--ok? row (+ dist 1) (rest placed)))))
+      (not (= (first placed) (- row dist))) (nqueens--ok? row (+ dist 1) (rest placed)))))
 
 ;; The search itself is non-tail (two recursive calls summed) — that IS the benchmark.
 (check-allow :non-tail-recursion
@@ -38,7 +37,7 @@ oracle is upstream's own expected output in `tests/corpus/gabriel/data/nqueens.i
       (+ (if (nqueens--ok? (first x) 1 z)
            (nqueens--try (append (rest x) y) nil (cons (first x) z))
            0)
-         (nqueens--try (rest x) (cons (first x) y) z)))))
+        (nqueens--try (rest x) (cons (first x) y) z)))))
 
 (defn nqueens (n)
   "The number of solutions to the `n`-queens problem."

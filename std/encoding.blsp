@@ -29,8 +29,7 @@ For pure ASCII input the string and byte forms agree.")
           hi (quot b 16)
           lo (rem b 16))
       (encoding--hex-encode-loop (rest bs)
-        codes
-        (cons (nth codes lo) (cons (nth codes hi) acc))))))
+        codes (cons (nth codes lo) (cons (nth codes hi) acc))))))
 
 (defn encoding--hex-encode-codes (bs codes)
   (utf8-bytes->string (encoding--hex-encode-loop (seq bs) codes nil)))
@@ -59,8 +58,7 @@ UTF-8-encodes a string."
   (let (lower (string->codepoints "0123456789abcdef")
         upper (string->codepoints "0123456789ABCDEF"))
     (fold (fn (m i) (assoc (assoc m (nth lower i) i) (nth upper i) i))
-      {}
-      (range 16))))
+      {} (range 16))))
 
 ;; Decode hex `s` to a list of byte ints (reversed during accumulation, returned
 ;; in order), or the `:invalid` sentinel on a bad/odd input. `:invalid` rather
@@ -73,9 +71,7 @@ UTF-8-encodes a string."
           lo (get encoding--hex-val (nth s (+ i 1))))
       (if (and hi lo)
         (encoding--hex-decode-loop s
-          (+ i 2)
-          n
-          (cons (+ (* hi 16) lo) acc))
+          (+ i 2) n (cons (+ (* hi 16) lo) acc))
         :invalid))))
 
 (defn encoding--hex-decode-bytelist (s)
@@ -169,8 +165,7 @@ UTF-8 form."
 (defn encoding--b64-val-map (alpha)
   (let (cs (string->codepoints alpha))
     (fold (fn (m i) (assoc m (nth cs i) i))
-      {}
-      (range 64))))
+      {} (range 64))))
 
 (def encoding--b64-std-vals (encoding--b64-val-map encoding--b64-std))
 (def encoding--b64-url-vals (encoding--b64-val-map encoding--b64-url))

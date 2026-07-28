@@ -113,16 +113,14 @@
   (let (worker (spawn (receive
                         ([:echo s] (send me
                                      [:reply (string-length s)
-                                       (char-at s 0)
-                                       (char-at s (- (string-length s) 1))]))
+                                       (char-at s 0) (char-at s (- (string-length s) 1))]))
                         (after 10000 :timeout))))
     (send worker [:echo big-string])
     (let (r (receive ([:reply len first-ch last-ch] [len first-ch last-ch]) (after 10000 :timeout)))
       (println "P26: length=" (get r 0) "first=" (get r 1) "last=" (get r 2))
       (println "P26-correct:"
         (and (= 1048576 (get r 0))
-          (= "A" (get r 1))
-          (= "A" (get r 2)))))))
+          (= "A" (get r 1)) (= "A" (get r 2)))))))
 
 ;;; ---- P27: process spawning tree (depth 8 = 256 leaf processes) ----
 (println "=== P27: 256-leaf process tree ===")

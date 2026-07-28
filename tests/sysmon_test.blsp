@@ -124,11 +124,9 @@ worker's mailbox so it can't satisfy a later test's receive."
     (telemetry/start-telemetry)
     (let (me (self))
       (telemetry/attach :t-spawn
-        [:runtime :spawn]
-        (fn (_ _ md) (send me [:saw :spawn (get md :pid)])))
+        [:runtime :spawn] (fn (_ _ md) (send me [:saw :spawn (get md :pid)])))
       (telemetry/attach :t-exit
-        [:runtime :exit]
-        (fn (_ _ md) (send me [:saw :exit (get md :pid)])))
+        [:runtime :exit] (fn (_ _ md) (send me [:saw :exit (get md :pid)])))
       (let (watcher (telemetry/watch-runtime {:spawn true :exit true}))
         (let (child (spawn :done))
           (assert= child (receive ([:saw :spawn p] p) (after *test-wait-ms* :timeout)))

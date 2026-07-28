@@ -20,7 +20,7 @@ the `nest new` scaffolder."
   ;; release runtime (which strips the test framework, ADR-038) couldn't even
   ;; load `project` to boot a bundle. The test runner needs test only when it
   ;; actually runs — `run-project-tests` `(require 'test)`s and qualifies it.
-  )
+)
 
 ;; --- the project, as set by the manifest -------------------------------------
 
@@ -115,12 +115,8 @@ the `nest new` scaffolder."
   (fold (fn (_ k)
           (when (includes? *project--reserved-dep-opts* k)
             (error "project: dependency "
-              name
-              " uses "
-              k
-              ", which is reserved for a future version")))
-    nil
-    (project--plist-keys opts)))
+              name " uses " k ", which is reserved for a future version")))
+    nil (project--plist-keys opts)))
 
 (defn project--parse-git-dep (name entry)
   (let (url (vector-ref entry 2)
@@ -159,8 +155,7 @@ the `nest new` scaffolder."
     ;; thing pinning the fetched bytes to reviewed content (ADR-037 supply-chain).
     (when (not (string? sha))
       (error "project: :tarball dependency "
-        name
-        " needs a :sha256 \"<hex>\" (the archive's SHA-256 — the only integrity pin)"))
+        name " needs a :sha256 \"<hex>\" (the archive's SHA-256 — the only integrity pin)"))
     (project--reject-reserved-opts name opts)
     {:name name :kind :tarball :url url :sha256 sha}))
 
@@ -178,9 +173,7 @@ the `nest new` scaffolder."
       (= kind :tarball) (project--parse-tarball-dep name entry)
       (= kind :version) (project--parse-registry-dep name entry)
       else (error "project: dependency "
-             name
-             " must be :git, :path, :tarball, or :version, got "
-             kind))))
+             name " must be :git, :path, :tarball, or :version, got " kind))))
 
 ;; Parse the manifest's :dependencies value into a list of normalised dep maps.
 ;; Omitted/nil => empty list.
@@ -218,27 +211,13 @@ the `nest new` scaffolder."
       (or (vector? value) (pair? value)) (if (fold (fn (ok p) (and ok (string? p))) true value)
                                            value
                                            (error "project: "
-                                             key
-                                             " must contain only strings, got "
-                                             (pr-str value)
-                                             " — write it as "
-                                             key
-                                             " "
-                                             example))
+                                             key " must contain only strings, got " (pr-str value)
+                                             " — write it as " key " " example))
       (string? value) (error "project: "
-                        key
-                        " must be a VECTOR of paths, not a bare string — write it as "
-                        key
-                        " [\""
-                        value
-                        "\"]")
+                        key " must be a VECTOR of paths, not a bare string — write it as " key
+                        " [\"" value "\"]")
       else (error "project: "
-             key
-             " must be a vector of path strings, got "
-             (pr-str value)
-             " — write it as "
-             key
-             " "
+             key " must be a vector of path strings, got " (pr-str value) " — write it as " key " "
              example))))
 
 (defn project-apply (opts)
@@ -284,8 +263,7 @@ the `nest new` scaffolder."
                 (dir? p) (append-two (project--collect-tests p) acc)
                 (ends-with? entry "_test.blsp") (cons p acc)
                 else acc)))
-      nil
-      (list-dir dir))
+      nil (list-dir dir))
     nil))
 
 ;; Recursively collect every .blsp under `dir` (the project's source files).
@@ -299,8 +277,7 @@ the `nest new` scaffolder."
                 (dir? p) (append-two (project-collect-sources p) acc)
                 (ends-with? entry ".blsp") (cons p acc)
                 else acc)))
-      nil
-      (list-dir dir))
+      nil (list-dir dir))
     nil))
 
 ;; The feature a source file provides — the name of its top-level `(defmodule NAME …)`
@@ -314,8 +291,7 @@ the `nest new` scaffolder."
             (if (and (nil? acc) (pair? f) (= (first f) 'defmodule) (symbol? (second f)))
               (name (second f))
               acc))
-      nil
-      (read-all (slurp path)))
+      nil (read-all (slurp path)))
     (catch e nil)))
 
 ;; Whether to (re-)load a source file that provides feature `feat`, given the
@@ -349,10 +325,8 @@ the `nest new` scaffolder."
             (fold (fn (_ f)
                     (when (project--should-load? (project--file-feature f) skip-all? before)
                       (load f)))
-              nil
-              (project-collect-sources dir)))
-      nil
-      (project-abs-paths root *project-source-paths*))))
+              nil (project-collect-sources dir)))
+      nil (project-abs-paths root *project-source-paths*))))
 
 ;; Load the manifest (if present) and put the project's source dirs on *load-path*
 ;; so its modules are require-able by name.
@@ -375,8 +349,7 @@ A `:path` dep loads in place, so its manifest sits at its `:path`; a `:git` /
             (not (= (get d :name) dep-name)) acc
             (= (get d :kind) :path) (path-join (path-join root (get d :path)) "project.blsp")
             else (path-join (path-join (path-join root "_deps") (name dep-name)) "project.blsp")))
-    nil
-    *project-dependencies*))
+    nil *project-dependencies*))
 
 (defn project--manifest-format-headers (manifest-path)
   "Read the `:format-headers` map declared in the manifest at `manifest-path`; {} if
@@ -411,8 +384,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
 (so a project can retune a framework rule). {} when none are declared."
   (let (from-plugins (fold (fn (acc plugin)
                              (merge acc (project--plugin-format-headers root plugin)))
-                       {}
-                       (or *project-format-plugins* (list)))
+                       {} (or *project-format-plugins* (list)))
         own (or *project-format-headers* {}))
     (merge from-plugins own)))
 
@@ -437,20 +409,14 @@ rules merged in declaration order, then this project's own `:format-headers` on 
                    manifest-path
                    (if (map? e)
                      (str " at line "
-                       (get e :line)
-                       ", column "
-                       (get e :col)
-                       ": "
-                       (get e :message))
+                       (get e :line) ", column " (get e :col) ": " (get e :message))
                      (str ": " e))))))
     (cond
       (and (pair? form) (= (first form) 'project)) (project-apply (rest form))
       (nil? form) (error "project: " manifest-path " is empty — it must hold one (project …) form")
       else (error "project: "
-             manifest-path
-             " must begin with a (project …) form, got "
-             (pr-str (if (pair? form) (first form) form))
-             " — every setting in it is being ignored"))))
+             manifest-path " must begin with a (project …) form, got "
+             (pr-str (if (pair? form) (first form) form)) " — every setting in it is being ignored"))))
 
 (defn project-setup (root)
   (def *project-root* root)
@@ -615,8 +581,7 @@ resolve in the advisory checker. Returns the project root."
           (let (pid (spawn (send me (list :chunk (self) (project--pfold-run op chunk)))))
             (monitor pid)
             (cons (list pid chunk) acc)))
-    nil
-    chunks))
+    nil chunks))
 
 ;; Collect one group: fold each chunk value into `acc` via `combine`; a worker
 ;; that DIES before reporting is folded via `(on-death acc chunk reason)`. A
@@ -630,31 +595,17 @@ resolve in the advisory checker. Returns the project root."
         (= (first msg) :chunk) (let (pid (second msg) entry (project--pfold-entry pid workers))
                                  (if (or (member? pid reported) (nil? entry))
                                    (project--pfold-collect pending
-                                     workers
-                                     reported
-                                     acc
-                                     combine
-                                     on-death)
+                                     workers reported acc combine on-death)
                                    (project--pfold-collect (- pending 1)
-                                     workers
-                                     (cons pid reported)
-                                     (combine acc (third msg))
-                                     combine
+                                     workers (cons pid reported) (combine acc (third msg)) combine
                                      on-death)))
         (= (first msg) :down) (let (pid (third msg) entry (project--pfold-entry pid workers))
                                 (if (or (member? pid reported) (nil? entry))
                                   (project--pfold-collect pending
-                                    workers
-                                    reported
-                                    acc
-                                    combine
-                                    on-death)
+                                    workers reported acc combine on-death)
                                   (project--pfold-collect (- pending 1)
-                                    workers
-                                    (cons pid reported)
-                                    (on-death acc (second entry) (nth msg 3))
-                                    combine
-                                    on-death)))
+                                    workers (cons pid reported)
+                                    (on-death acc (second entry) (nth msg 3)) combine on-death)))
         else (project--pfold-collect pending workers reported acc combine on-death)))))
 
 ;; Run every group, one `*check-batch*`-sized batch in flight at a time.
@@ -684,11 +635,7 @@ resolve in the advisory checker. Returns the project root."
         ;; peak memory), and with `*check-oversample*` chunks per core the groups
         ;; still keep every core fed. All cores busy, live set ≈ one core-wide wave.
         (project--pfold-groups (project--chunk-list cores chunks nil)
-          op
-          combine
-          on-death
-          init
-          (self))))))
+          op combine on-death init (self))))))
 
 ;; Internal: run `check-file` over every file, print each warning to stderr (GNU
 ;; FILE:LINE:COL format), return the total count. Fanned across the worker pool
@@ -731,8 +678,7 @@ resolve in the advisory checker. Returns the project root."
 ;; pool. Used when the cache is off, absent, or the project is over the file cap.
 (defn project--check-files-fresh (files)
   (project--pfold-files files
-    :check
-    (fn (n c) (+ n c))
+    :check (fn (n c) (+ n c))
     (fn (n chunk reason)
       (eprintln (str "warning: check worker died on " (count chunk) " file(s): " (pr-str reason)))
       (+ n 1))
@@ -759,29 +705,24 @@ resolve in the advisory checker. Returns the project root."
                   (let ([reuse recheck] acc
                         c (map-get cache p nil))
                     (if (and c
-                          (= (nth c 0) (file-mtime p))
-                          (= (check-deps-fp (nth c 2)) (nth c 3)))
+                          (= (nth c 0) (file-mtime p)) (= (check-deps-fp (nth c 2)) (nth c 3)))
                       ; unchanged file + deps → reuse
                       [(map-assoc reuse p c) recheck]
                       [reuse (cons p recheck)])))
-                [{} nil]
-                files)
+                [{} nil] files)
         [reuse recheck] parts
         ;; re-check the dirty set in PARALLEL across the worker pool — safe now that
         ;; the dependency recorder is per-process (Heap::check_dep_rec). Each entry is
         ;; [mtime warnings dep-keys fp].
         fresh (fold (fn (m pair) (let ([p e] pair) (map-assoc m p e)))
-                {}
-                (project--pcheck-deps recheck))
+                {} (project--pcheck-deps recheck))
         entries (fold (fn (m kv) (let ([p e] kv) (map-assoc m p e))) reuse fresh)
         ;; print every file's warnings (reused + fresh) and count them
         n (fold (fn (n kv) (let ([_ e] kv) (fold project--tally-warning n (nth e 1))))
-            0
-            entries))
+            0 entries))
     (when (not (empty? recheck))
       (project--write-cache root
-        "checks"
-        (fold (fn (m kv) (let ([p e] kv) (map-assoc m p e))) cache entries)))
+        "checks" (fold (fn (m kv) (let ([p e] kv) (map-assoc m p e))) cache entries)))
     n))
 
 (defn project--check-files (files root)
@@ -812,8 +753,7 @@ resolve in the advisory checker. Returns the project root."
   (let (root (project-find-root (cwd)))
     (when (nil? root)
       (error "check-project-structured: not in a Brood project (no project.blsp found from "
-        (cwd)
-        ")"))
+        (cwd) ")"))
     (project--ensure-loaded root)
     (if (= (getenv "BROOD_NO_CHECK") "1")
       nil
@@ -880,8 +820,7 @@ resolve in the advisory checker. Returns the project root."
     (when (>= (count kids) 2)
       (let (head (first kids) nm (second kids))
         (when (and (= (project--node-kind head) :symbol)
-                (= (project--node-val head) "defmodule")
-                (= (project--node-kind nm) :symbol))
+                (= (project--node-val head) "defmodule") (= (project--node-kind nm) :symbol))
           (project--node-val nm))))))
 
 ;; The effective *global* key a def binds, mirroring the kernel resolver
@@ -909,8 +848,7 @@ resolve in the advisory checker. Returns the project root."
 ;; The project's source files (no tests) — the set the flat-namespace rule binds.
 (defn project--source-files (root)
   (fold (fn (acc d) (append acc (project-collect-sources d)))
-    nil
-    (project-abs-paths root *project-source-paths*)))
+    nil (project-abs-paths root *project-source-paths*)))
 
 ;; Warning strings for a *qualified* global key (`ns/name`, per
 ;; `project--file-def-names`) defined across more than one source file. Under
@@ -926,21 +864,15 @@ resolve in the advisory checker. Returns the project root."
                         (let ([path entry] kv)
                           (if (map-get source-set path false)
                             (fold (fn (m nm) (map-assoc m nm (cons path (map-get m nm nil))))
-                              acc
-                              (nth entry 3))
+                              acc (nth entry 3))
                             acc)))
-                  {}
-                  extracts))
+                  {} extracts))
     (keep (fn (entry)
             (let ([nm paths] entry
                   where (sort (distinct paths)))
               (when (> (count where) 1)
                 (str "warning: global '"
-                  nm
-                  "' is defined in "
-                  (count where)
-                  " source files ("
-                  (join ", " where)
+                  nm "' is defined in " (count where) " source files (" (join ", " where)
                   ") — same namespace; the last loaded wins (ADR-065)"))))
       by-name)))
 
@@ -958,20 +890,14 @@ resolve in the advisory checker. Returns the project root."
 (defn project--duplicate-def-warnings-seq (files)
   (let (by-name (fold (fn (acc path)
                         (fold (fn (m nm) (map-assoc m nm (cons path (map-get m nm nil))))
-                          acc
-                          (project--file-def-names path)))
-                  {}
-                  files))
+                          acc (project--file-def-names path)))
+                  {} files))
     (keep (fn (entry)
             (let ([nm paths] entry
                   where (sort (distinct paths)))
               (when (> (count where) 1)
                 (str "warning: global '"
-                  nm
-                  "' is defined in "
-                  (count where)
-                  " source files ("
-                  (join ", " where)
+                  nm "' is defined in " (count where) " source files (" (join ", " where)
                   ") — same namespace; the last loaded wins (ADR-065)"))))
       by-name)))
 
@@ -1133,13 +1059,10 @@ resolve in the advisory checker. Returns the project root."
   (if (empty? files)
     nil
     (project--pfold-files files
-      :scan-entries
-      (fn (acc chunk-results) (append-two chunk-results acc))
+      :scan-entries (fn (acc chunk-results) (append-two chunk-results acc))
       (fn (acc chunk reason)
         (eprintln (str "warning: check scan worker died on "
-                    (count chunk)
-                    " file(s), re-scanning: "
-                    (pr-str reason)))
+                    (count chunk) " file(s), re-scanning: " (pr-str reason)))
         (append-two (project--scan-entries-chunk chunk) acc))
       nil)))
 
@@ -1152,13 +1075,10 @@ resolve in the advisory checker. Returns the project root."
   (if (empty? files)
     nil
     (project--pfold-files files
-      :check-deps
-      (fn (acc chunk-results) (append-two chunk-results acc))
+      :check-deps (fn (acc chunk-results) (append-two chunk-results acc))
       (fn (acc chunk reason)
         (eprintln (str "warning: check worker died on "
-                    (count chunk)
-                    " file(s), re-checking: "
-                    (pr-str reason)))
+                    (count chunk) " file(s), re-checking: " (pr-str reason)))
         (append-two (project--check-deps-chunk chunk) acc))
       nil)))
 
@@ -1216,8 +1136,7 @@ resolve in the advisory checker. Returns the project root."
                                       (str path ": warning: unused private function: " bare))))
                             (nth entry 2))
                 acc)))
-      '()
-      extracts)))
+      '() extracts)))
 
 ;; Print the unused-private warnings to stderr and return the count. Advisory;
 ;; honors `BROOD_NO_CHECK=1` like the other whole-project passes.
@@ -1470,8 +1389,7 @@ resolve in the advisory checker. Returns the project root."
   (let (root (project-find-root (cwd)))
     (when (nil? root)
       (error "run-project-tests-structured: not in a Brood project (no project.blsp found from "
-        (cwd)
-        ")"))
+        (cwd) ")"))
     (project-setup root)
     (require 'test)
     (project-load-sources root)
@@ -1577,10 +1495,8 @@ std. Errors if `root` is nil (not in a project)."
       (cons manifest
         (fold (fn (acc d)
                 (fold (fn (a f) (append a (list (project--bundle-name d f) (slurp f))))
-                  acc
-                  (project-collect-sources d)))
-          nil
-          all-dirs)))))
+                  acc (project-collect-sources d)))
+          nil all-dirs)))))
 
 ;; (run-bundle args) — boot an embedded release bundle. The `brood` binary,
 ;; detecting its appended archive, calls this instead of starting a REPL. No
@@ -1637,8 +1553,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 
 (def *config-default-source*
   (str ";; Brood user config — tooling preferences (the sibling of project.blsp).\n"
-    ";; Edit to taste; any `nest` command re-reads it.\n"
-    "(config\n"
+    ";; Edit to taste; any `nest` command re-reads it.\n" "(config\n"
     "  :git-init false)   ; run `git init` in projects made by `nest new`\n"))
 
 ;; Ensure the config exists (writing a documented default the first time), then

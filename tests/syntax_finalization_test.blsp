@@ -108,7 +108,8 @@
       (make-dir dir)
       (let (f (path-join dir "sfc.blsp"))
         (defdyn *sf-knob* 1)
-        (spit f "(defmodule sfc)\n(defn read-knob () *sf-knob*)\n(defn bump () (def *sf-knob* 42))\n")
+        (spit f
+          "(defmodule sfc)\n(defn read-knob () *sf-knob*)\n(defn bump () (def *sf-knob* 42))\n")
         (load f)
         (assert= (sfc/read-knob) 1)
         (sfc/bump)
@@ -127,8 +128,7 @@
   (test "Clojure's typed catch is rejected, not silently misread"
     ;; Was: bound `Exception` to the raised value and evaluated the prelude's `e`
     ;; (2.718…) as a statement — a wrong program with no diagnostic.
-    (is (includes?
-          (err-of "(try (throw :x) (catch Exception e (str \"caught \" e)))")
+    (is (includes? (err-of "(try (throw :x) (catch Exception e (str \"caught \" e)))")
           "Clojure's typed catch")))
 
   (test "the one-binder forms still work"
@@ -139,8 +139,7 @@
   (test "an &optional marker in a pattern-dispatched fn is rejected"
     ;; Was: matched as a literal symbol, so the clause silently stopped being
     ;; variadic and `(f 1 2)` died with a [:match-error …].
-    (is (includes?
-          (err-of "(defn bad ((x) [:one x]) ((x &optional (y 5)) [:two x y]))")
+    (is (includes? (err-of "(defn bad ((x) [:one x]) ((x &optional (y 5)) [:two x y]))")
           "pattern-dispatched fn")))
 
   (test "arity clauses with &optional / & rest still work"

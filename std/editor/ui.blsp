@@ -101,8 +101,7 @@ screen (a larger frontend just shows it in its top-left)."
             (if (nil? acc)
               [c r]
               (let ([ac ar] acc) [(min ac c) (min ar r)]))))
-    nil
-    displays))
+    nil displays))
 
 (defn display--poll-loop (displays slice)
   (if (empty? displays)
@@ -224,8 +223,7 @@ a far-future timer can't oversleep a responsive app."
                                   (or (nil? acc) (< d acc)))
                               d
                               acc)))
-               nil
-               timers))
+               nil timers))
     (if (nil? best)
       *ui-idle-cap*
       (max 1 (min *ui-idle-cap* (- best now))))))
@@ -246,8 +244,7 @@ Only one timer fires per call; simultaneous timers serialize over successive ite
                                  (or (nil? acc) (< d (second acc))))
                              [name d]
                              acc)))
-              nil
-              timers))
+              nil timers))
     (if (nil? due)
       [nil clock]
       (let (name (first due))
@@ -358,12 +355,12 @@ re-raises, surfacing a genuine startup bug instead of spinning."
               ;; a real key/mouse/system event: with timers, stamp `:last-input` (resets
               ;; idle timers); then fold it. A throwing `update` drops this input.
               else (let (clock2 (if (nil? timers)
-                                   clock1
-                                   (assoc clock1 :last-input (ui--now model)))
-                          next (try
-                                 (update model raw cols rows)
-                                 (catch e (do (ui--log-error "update" e) model))))
-                      (ui--loop next model clock2 view update display)))))))))
+                                  clock1
+                                  (assoc clock1 :last-input (ui--now model)))
+                         next (try
+                                (update model raw cols rows)
+                                (catch e (do (ui--log-error "update" e) model))))
+                     (ui--loop next model clock2 view update display)))))))))
 
 (defn ui-run (model view update display)
   "Run a UI app over `display` (a frontend map): enter it, then loop —
@@ -414,8 +411,7 @@ non-blocking window. The shared loop behind the observer (and the editor)."
         ((get display :leave)))
       (catch e
         ; restore the terminal even on a frontend/startup error
-        ((get display :leave))
-        (throw e)))))
+        ((get display :leave)) (throw e)))))
 
 ;; ---- modal input overlays (the dispatch-fallthrough policy) -----------------
 ;; A `ui-run` app's `update` usually has a few *transient* modes that sit beside its
@@ -444,4 +440,4 @@ observer's minibuffer."
       (nil? o) (fallback model input)
       (let (owns (get o :owns?)) (or (nil? owns) (owns model input))) ((get o :handle) model input)
       else (let (exit (get o :exit))
-              (fallback (if (nil? exit) model (exit model)) input)))))
+             (fallback (if (nil? exit) model (exit model)) input)))))

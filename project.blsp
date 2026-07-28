@@ -12,7 +12,9 @@
 ;; `(:use corpus)` — the shared helper for locating the vendored external corpora
 ;; under tests/corpus/ (see ROADMAP "External conformance corpora"). It is source,
 ;; not tests: discovery only picks up `*_test.blsp`.
-(project :name "brood" :version "0.1.0"
-         :source-paths ["tests/support"]
-         :test-paths ["tests"])
+(project
+  :name "brood"
+  :version "0.1.0"
+  :source-paths ["tests/support"]
+  :test-paths ["tests"])
 ; override; e.g. :source-paths ["lib"] for a real app

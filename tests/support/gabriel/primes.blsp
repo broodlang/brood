@@ -40,7 +40,7 @@ upstream's own expected output in `tests/corpus/gabriel/data/primes.input`.")
     (if (nil? l)
       nil
       (cons (first l)
-            (sieve (primes--remove-multiples (first l) (rest l)))))))
+        (sieve (primes--remove-multiples (first l) (rest l)))))))
 
 (defn primes<= (n)
   "The list of primes up to and including `n`."

@@ -78,7 +78,7 @@
     ;; The scan the suite actually runs: 188 documents, warm parent then spawned child.
     (require 'json)
     (let (all (filter (fn (f) (= (substring (path-basename f) 0 1) "n"))
-                 (corpus-files "json"))
+                (corpus-files "json"))
           ;; Discovery is asserted in full regardless of the knob; only the re-scan is
           ;; sampled. `index mod n` so the slice spreads across the corpus (and so keeps
           ;; the deep documents) rather than taking a prefix — deterministic either way.
@@ -92,8 +92,8 @@
 (defn jdr--every-nth--go (xs n i acc)
   (if (nil? xs)
     (reverse acc)
-    (jdr--every-nth--go (rest xs) n (inc i)
-                        (if (= (rem i n) 0) (cons (first xs) acc) acc))))
+    (jdr--every-nth--go (rest xs)
+      n (inc i) (if (= (rem i n) 0) (cons (first xs) acc) acc))))
 
 (defn jdr--scan (fs n)
   (if (nil? fs) n (do (jdr--parse (first fs)) (jdr--scan (rest fs) (inc n)))))

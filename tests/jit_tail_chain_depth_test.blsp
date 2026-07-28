@@ -29,10 +29,11 @@
 ;; tail call). Non-tail by construction, so the checker's warning is expected and correct.
 (check-allow :non-tail-recursion
   (defn tc--value (n) (if (= n 0) [0 n] (tc--delegate (- n 1))))
-  (defn tc--delegate (n) (tc--step n))
-  (defn tc--step (n) (let ([v j] (tc--value n)) [(+ v 1) j])))
+  (defn tc--delegate (n) (tc--step n)) (defn tc--step (n) (let ([v j] (tc--value n)) [(+ v 1) j])))
 
-(describe "KI-11: JIT tail-chain recursion stays bounded" :tags [:regression]
+(describe "KI-11: JIT tail-chain recursion stays bounded"
+  :tags
+  [:regression]
 
   ;; The old threshold was between 10,000 and 20,000 levels; 30,000 is comfortably past
   ;; it and still fast. A regression here does not fail the test — it aborts the whole

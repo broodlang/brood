@@ -164,8 +164,7 @@
       (let (results (map (fn (_) (receive ([:r m] m) (after *test-wait-ms* :timeout))) (range 8)))
         (is (every? (fn (m)
                       (and (= (get m :id) 7)
-                        (= (get m :tags) ["a" "b"])
-                        (= (get m :ok) true)))
+                        (= (get m :tags) ["a" "b"]) (= (get m :ok) true)))
               results)))))
   (test "a value encoded in a worker parses back identically here"
     (let (me (self)

@@ -91,10 +91,7 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 ;; Assemble one module's Markdown from its title, module doc, and added names.
 (defn docs--render (title mdoc syms)
   (str "# module "
-    title
-    "\n\n"
-    (if (nil? mdoc) "" (str mdoc "\n\n"))
-    (docs--section-defs syms)
+    title "\n\n" (if (nil? mdoc) "" (str mdoc "\n\n")) (docs--section-defs syms)
     (docs--section-vars syms)))
 
 ;; --- public entry points -----------------------------------------------------
@@ -150,8 +147,7 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
       "`(require …)`. Generated from the live image (`nest doc --all`), so it is "
       "always in sync. Use `apropos`/`doc-search` to search it interactively; use "
       "`nest doc <module>` for an opt-in module (`display`, `buffer`, `ansi`, …).\n\n"
-      (docs--section-defs syms)
-      (docs--section-vars syms))))
+      (docs--section-defs syms) (docs--section-vars syms))))
 
 (defn generate-docs (& args)
   "Print Markdown documentation to stdout: the whole project with no args, or a single module given its name. The policy behind `nest doc`."

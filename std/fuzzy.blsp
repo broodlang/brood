@@ -59,8 +59,7 @@ camelCase hump (an upper preceded by a non-upper)."
   (let (prev (get st :prev)
         contiguous (and (not (nil? prev)) (= pos (inc prev)))
         bonus (+ 1
-                (if (fuzzy--boundary? cand pos) 8 0)
-                (if contiguous 6 0)
+                (if (fuzzy--boundary? cand pos) 8 0) (if contiguous 6 0)
                 (if (nil? prev) (- 0 (min 3 pos)) 0)))
     ; small leading-offset penalty, first match only
     {:score (+ (get st :score) bonus) :prev pos}))
@@ -105,6 +104,5 @@ That rebuild dominated ranking large candidate sets (thousands of project files)
                               (if (nil? m)
                                 acc
                                 (cons [[(- 0 (get m :score)) (string-length c) c] c] acc))))
-                      '()
-                      cands))
+                      '() cands))
       (map second (sort-by first decorated)))))

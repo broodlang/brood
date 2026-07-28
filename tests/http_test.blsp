@@ -257,14 +257,11 @@
                  (serve-loop ls
                    (fn (req)
                      (ok (str (get req :method)
-                           "|"
-                           (utf8-bytes->string (get req :body))
-                           "|"
+                           "|" (utf8-bytes->string (get req :body)) "|"
                            (get (get req :headers) "x-token"))))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (resp (http-post (str "http://127.0.0.1:" port "/act")
-                     "{\"a\":1}"
-                     {:headers {"X-Token" "secret" "Content-Type" "application/json"}}))
+                     "{\"a\":1}" {:headers {"X-Token" "secret" "Content-Type" "application/json"}}))
           (assert= (get resp :status) 200)
           ;; method echoed as POST, the JSON body intact, the custom header received
           (assert= (body-text resp) "POST|{\"a\":1}|secret")))))
@@ -304,8 +301,7 @@
                  (serve-loop ls
                    (fn (req)
                      (response 200
-                       {"Content-Type" "application/octet-stream"}
-                       (bytes 255 128 0 7)))))))
+                       {"Content-Type" "application/octet-stream"} (bytes 255 128 0 7)))))))
       (let (pc (receive ([:ready p ct] [p ct]) (after *test-wait-ms* :timeout)))
         (let (resp (http-get (str "https://localhost:" (first pc) "/blob")
                      {:ca (second pc)}))
@@ -359,8 +355,7 @@
                  (serve-loop ls
                    (fn (req)
                      (response 200
-                       {"Content-Type" "application/octet-stream"}
-                       (bytes 255 128 65 0 7)))))))
+                       {"Content-Type" "application/octet-stream"} (bytes 255 128 65 0 7)))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (resp (http-get (str "http://127.0.0.1:" port "/blob")))
           (assert= (get resp :status) 200)

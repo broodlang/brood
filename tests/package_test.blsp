@@ -76,10 +76,7 @@
   (test "extracts a dep's own :dependencies"
     (let (root (pkg-fixture-root))
       (pkg-write-project root
-        "a"
-        "a"
-        "(defn f () 1)"
-        " :dependencies [[b :path \"../b\"]]")
+        "a" "a" "(defn f () 1)" " :dependencies [[b :path \"../b\"]]")
       (assert= (package/package--manifest-deps (path-join root "project.blsp"))
         (list {:name 'b :kind :path :path "../b"}))))
   (test "a manifest without :dependencies yields nil"
@@ -96,13 +93,9 @@
           app-dir (path-join parent "app"))
       (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) (str \"hi \" w))" "")
       (pkg-write-project app-dir
-        "app"
-        "main"
-        "(defn main () 1)"
-        " :dependencies [[greeter :path \"../greeter\"]]")
+        "app" "main" "(defn main () 1)" " :dependencies [[greeter :path \"../greeter\"]]")
       (let (entries (resolve-deps app-dir
-                      (list {:name 'greeter :kind :path :path "../greeter"})
-                      nil))
+                      (list {:name 'greeter :kind :path :path "../greeter"}) nil))
         (assert= (count entries) 1)
         (let (e (first entries))
           (assert= (get e :name) 'greeter)
@@ -124,10 +117,9 @@
     (let (app (pkg-fixture-root))
       (pkg-write-project app "app" "main" "(defn main () 1)" "")
       (is (includes? (try
-                              (resolve-deps app
-                                (list {:name 'gone :kind :path :path "../gone"})
-                                nil)
-                              (catch e e))
+                       (resolve-deps app
+                         (list {:name 'gone :kind :path :path "../gone"}) nil)
+                       (catch e e))
             "not found")))))
 
 ;; :git deps (Slice 2) — exercised against a local git repo over a file:// URL, so
@@ -144,8 +136,7 @@
         (pkg-git-tag dep-dir "v1.0.0")
         (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
         (let (entries (resolve-deps app-dir
-                        (list {:name 'greeter :kind :git :url url :ref "v1.0.0"})
-                        nil))
+                        (list {:name 'greeter :kind :git :url url :ref "v1.0.0"}) nil))
           (assert= (count entries) 1)
           (let (e (first entries))
             (assert= (get e :kind) :git)
@@ -182,9 +173,7 @@
         (pkg-git-tag ansi "v2.0.0")
         ;; greeter (transitively) wants ansi v1.0.0
         (pkg-write-project greeter
-          "greeter"
-          "greeter"
-          "(defn g () 1)"
+          "greeter" "greeter" "(defn g () 1)"
           (str " :dependencies [[ansi :git \"" ansi-url "\" :ref \"v1.0.0\"]]"))
         (let (greeter-url (pkg-git-init greeter))
           (pkg-git-tag greeter "v1.0.0")
@@ -208,24 +197,20 @@
         (pkg-git-tag ansi "v1.0.0")
         (pkg-git-tag ansi "v2.0.0")
         (pkg-write-project greeter
-          "greeter"
-          "greeter"
-          "(defn g () 1)"
+          "greeter" "greeter" "(defn g () 1)"
           (str " :dependencies [[ansi :git \"" ansi-url "\" :ref \"v1.0.0\"]]"))
         (pkg-write-project pretty
-          "pretty"
-          "pretty"
-          "(defn p () 1)"
+          "pretty" "pretty" "(defn p () 1)"
           (str " :dependencies [[ansi :git \"" ansi-url "\" :ref \"v2.0.0\"]]"))
         (let (greeter-url (pkg-git-init greeter)
               pretty-url (pkg-git-init pretty))
           (pkg-write-project app "app" "main" "(defn main () 1)" "")
           (is (includes? (try
-                                  (resolve-deps app
-                                    (list {:name 'greeter :kind :git :url greeter-url :ref "main"}
-                                      {:name 'pretty :kind :git :url pretty-url :ref "main"})
-                                    nil)
-                                  (catch e e))
+                           (resolve-deps app
+                             (list {:name 'greeter :kind :git :url greeter-url :ref "main"}
+                               {:name 'pretty :kind :git :url pretty-url :ref "main"})
+                             nil)
+                           (catch e e))
                 "conflicting dependency")))))))
 
 ;; --- :tarball deps (ADR-037 v2) ---------------------------------------------
@@ -242,8 +227,7 @@
             sha (second ts))
         (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
         (let (entries (resolve-deps app-dir
-                        (list {:name 'greeter :kind :tarball :url url :sha256 sha})
-                        nil))
+                        (list {:name 'greeter :kind :tarball :url url :sha256 sha}) nil))
           (assert= (count entries) 1)
           (let (e (first entries)
                 target (path-join (path-join app-dir "_deps") "greeter"))
@@ -263,10 +247,9 @@
       (let (ts (pkg-tar-init parent "greeter") url (first ts))
         (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
         (is (includes? (try
-                                (resolve-deps app-dir
-                                  (list {:name 'greeter :kind :tarball :url url :sha256 "deadbeef"})
-                                  nil)
-                                (catch e (error-message e)))
+                         (resolve-deps app-dir
+                           (list {:name 'greeter :kind :tarball :url url :sha256 "deadbeef"}) nil)
+                         (catch e (error-message e)))
               "sha256 mismatch")))))
   (test "a second resolve is a cache hit (locked sha), no re-extract"
     (let (parent (pkg-fixture-root)
@@ -285,8 +268,8 @@
     (assert= (project/project-parse-deps [['foo :tarball "https://x/foo.tar.gz" :sha256 "abc"]])
       (list {:name 'foo :kind :tarball :url "https://x/foo.tar.gz" :sha256 "abc"}))
     (is (includes? (try
-                            (project/project-parse-deps [['foo :tarball "https://x/foo.tar.gz"]])
-                            (catch e (error-message e)))
+                     (project/project-parse-deps [['foo :tarball "https://x/foo.tar.gz"]])
+                     (catch e (error-message e)))
           "sha256"))))
 
 ;; --- the registry: publish / search / :version deps (ADR-147) ---------------
@@ -297,10 +280,7 @@
     (let (index (path-join (pkg-fixture-root) "index"))
       (make-dir index)
       (package/registry--append-entry index
-        "greeter"
-        "0.1.0"
-        "friendly greetings"
-        "https://x/greeter")
+        "greeter" "0.1.0" "friendly greetings" "https://x/greeter")
       (is (file-exists? (path-join index "packages/greeter.blsp")))
       (let (vs (package/registry--versions index 'greeter))
         (assert= (count vs) 1)
@@ -309,38 +289,29 @@
         (assert= (get (first vs) :ref) "v0.1.0"))
       ;; a second version appends; the same version again is refused
       (package/registry--append-entry index
-        "greeter"
-        "0.2.0"
-        "friendly greetings"
-        "https://x/greeter")
+        "greeter" "0.2.0" "friendly greetings" "https://x/greeter")
       (assert= (count (package/registry--versions index 'greeter)) 2)
       (is (includes? (try
-                              (package/registry--append-entry index
-                                "greeter"
-                                "0.2.0"
-                                "d"
-                                "https://x/greeter")
-                              (catch e (error-message e)))
+                       (package/registry--append-entry index
+                         "greeter" "0.2.0" "d" "https://x/greeter")
+                       (catch e (error-message e)))
             "already published"))))
   (test "publish requires :repository and :description"
     (let (index (path-join (pkg-fixture-root) "index"))
       (make-dir index)
       (is (includes? (try
-                              (package/registry--append-entry index "x" "1.0.0" "desc" nil)
-                              (catch e (error-message e)))
+                       (package/registry--append-entry index "x" "1.0.0" "desc" nil)
+                       (catch e (error-message e)))
             ":repository"))
       (is (includes? (try
-                              (package/registry--append-entry index "x" "1.0.0" nil "https://x")
-                              (catch e (error-message e)))
+                       (package/registry--append-entry index "x" "1.0.0" nil "https://x")
+                       (catch e (error-message e)))
             ":description"))))
   (test "search matches on name and description; find-version is exact"
     (let (index (path-join (pkg-fixture-root) "index"))
       (make-dir index)
       (package/registry--append-entry index
-        "greeter"
-        "0.1.0"
-        "friendly greetings"
-        "https://x/greeter")
+        "greeter" "0.1.0" "friendly greetings" "https://x/greeter")
       (assert= (package/registry--list-packages index) (list 'greeter))
       ; by name
       (is (package/registry--matches? index 'greeter "greet"))
@@ -373,11 +344,9 @@
             (assert= (vector-ref row 2) "1.0.0"))
           ;; an unknown version errors, pointing at `nest search`
           (is (includes? (try
-                                  (package/package--resolve-registry app-dir
-                                    {:name 'greeter :kind :registry :version "9.9.9"}
-                                    nil
-                                    index)
-                                  (catch er (error-message er)))
+                           (package/package--resolve-registry app-dir
+                             {:name 'greeter :kind :registry :version "9.9.9"} nil index)
+                           (catch er (error-message er)))
                 "no registry entry"))))))
   (test ":version deps parse into a registry dep map"
     (assert= (project/project-parse-deps [['foo :version "1.2.0"]])
@@ -406,12 +375,12 @@
       (pkg-write-project a "a" "util" "(defn f () 1)" "")
       (pkg-write-project b "b" "util" "(defn g () 2)" "")
       (is (includes? (try
-                              (package/package--check-namespace-collisions (list (list "dependency 'a'"
-                                                                                   (path-join a
-                                                                                     "src"))
-                                                                             (list "dependency 'b'"
-                                                                               (path-join b "src"))))
-                              (catch e e))
+                       (package/package--check-namespace-collisions (list (list "dependency 'a'"
+                                                                            (path-join a
+                                                                              "src"))
+                                                                      (list "dependency 'b'"
+                                                                        (path-join b "src"))))
+                       (catch e e))
             "collision"))))
   (test "distinct module names across providers are fine"
     (let (parent (pkg-fixture-root)
@@ -432,13 +401,9 @@
           app-dir (path-join parent "app"))
       (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
       (pkg-write-project app-dir
-        "app"
-        "main"
-        "(defn main () 1)"
-        " :dependencies [[greeter :path \"../greeter\"]]")
+        "app" "main" "(defn main () 1)" " :dependencies [[greeter :path \"../greeter\"]]")
       (let (entries (resolve-deps app-dir
-                      (list {:name 'greeter :kind :path :path "../greeter"})
-                      nil))
+                      (list {:name 'greeter :kind :path :path "../greeter"}) nil))
         (write-lockfile app-dir entries)
         (let (locked (read-lockfile app-dir))
           (is (vector? locked))
@@ -458,10 +423,7 @@
           app-dir (path-join parent "app"))
       (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
       (pkg-write-project app-dir
-        "app"
-        "main"
-        "(defn main () 1)"
-        " :dependencies [[greeter :path \"../greeter\"]]")
+        "app" "main" "(defn main () 1)" " :dependencies [[greeter :path \"../greeter\"]]")
       (let (dirs (ensure-deps app-dir (list {:name 'greeter :kind :path :path "../greeter"})))
         (assert= (count dirs) 1)
         ;; the dir is the dep's src/ (relative ".." is left unnormalised — the OS
@@ -535,10 +497,7 @@
           app-dir (path-join parent "app"))
       (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) (str \"hi \" w))" "")
       (pkg-write-project app-dir
-        "app"
-        "main"
-        "(defn main () 1)"
-        " :dependencies [[greeter :path \"../greeter\"]]")
+        "app" "main" "(defn main () 1)" " :dependencies [[greeter :path \"../greeter\"]]")
       (let (dirs (ensure-deps app-dir (list {:name 'greeter :kind :path :path "../greeter"})))
         (set-load-path! (append *load-path* dirs))
         (require 'greeter)

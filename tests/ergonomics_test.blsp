@@ -175,8 +175,11 @@
     (assert= (list 10 30) (for (x [1 2 3] :when (odd? x)) (* x 10)))))
 
 ;; ---- cross-process: the new forms survive send/spawn like any Brood code ----
-(describe "ergonomics across processes" :isolated
+(describe "ergonomics across processes"
+  :isolated
   (test "a closure using fmt + a letrec loop deep-copies across a send and runs on the receiver"
     (let (me (self))
-      (spawn (send me [:result (letrec (go (fn (i acc) (if (= i 3) acc (go (inc i) (fmt "{acc}{i}"))))) (go 0 ""))]))
+      (spawn (send me
+               [:result (letrec (go (fn (i acc) (if (= i 3) acc (go (inc i) (fmt "{acc}{i}")))))
+                          (go 0 ""))]))
       (assert= "012" (receive ([:result r] r))))))

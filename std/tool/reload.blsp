@@ -103,8 +103,7 @@ trigger, docs/type-soundness-reload.md).")
             (dir? p) (append-two (reload--collect-blsp p) acc)
             (ends-with? entry ".blsp") (cons p acc)
             else acc)))
-      nil
-      (list-dir dir))
+      nil (list-dir dir))
     nil))
 
 ;; The directory watcher loop. Holds the set of files we've already noticed.
