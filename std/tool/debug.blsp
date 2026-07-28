@@ -307,6 +307,26 @@ breakpoint until resumed, so you step through evaluation one node at a time. Run
 under `with-debugger`; advance the steps from `debug-repl` (`r`) or `debug-attach`."
   `(binding (*spy-sink* (stepping-sink)) (spy ~expr)))
 
+;; ---- pry: drop into the REAL REPL at a debug point --------------------------
+;; The `binding.pry` / `IEx.pry` move, done right: instead of a bespoke prompt, launch
+;; the actual `(repl-run)` — the fully-styled Brood REPL (syntax highlighting, history,
+;; `,help` / `,doc`, Tab-complete). It reuses the whole REPL wholesale (zero duplication),
+;; so it inherits every REPL improvement for free. Debugger control is ordinary eval:
+;; `(debug/paused d)`, `(debug/resume-all d)`, `(debug/step …)`; Ctrl-D leaves and
+;; continues. Runs in the process that OWNS the terminal (a script's main flow, or the
+;; REPL) — a parked worker can't take stdin, so you pry from there and inspect the queue.
+(defn pry (dbg)
+  "Drop into the REAL Brood REPL — fully styled (highlighting, history, `,help`, Tab) —
+to inspect this debug session interactively. Prints the paused queue + causal tree first,
+then hands you the prompt; use any expression (`(debug/paused d)`, `(debug/resume-all d)`,
+`(debug/step …)`, or any Brood). Ctrl-D leaves and continues. Reuses `repl-run` — so it's
+the real REPL, not a re-implementation."
+  (require 'repl)
+  (doseq (line (debug--report-lines dbg)) (println line))
+  (println "── pry: the real REPL. `(debug/…)` to drive the session · Ctrl-D to continue ──")
+  (binding (*repl-prompt* "debug> ")
+    (repl/repl-run)))
+
 ;; ---- interactive debugger prompt (a REPL for the session) -------------------
 ;; A TYPING interface (cooked mode — no raw terminal, works even piped): prints the
 ;; state, then a `debug>` prompt. Line commands:
