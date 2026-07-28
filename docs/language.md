@@ -445,8 +445,9 @@ variable — for which no impl and no `:default` is registered.
 > **Planned direction (not yet implemented): [ADR-172](decisions.md).** A decided
 > redesign tightens this open runtime model to **app-sovereign coherence, enforced at
 > compile time, still live-replaceable**: `impl` only what you own (the ability or the
-> type), a new `bridge` form (app-only) for deliberate cross-library linking, glue
-> packages authorized by the manifest's `:bridges`, and precedence `app > type-owner >
+> type), a new `bridge` form (app-only) for deliberate cross-library linking (reusable
+> glue is a package of functions the app's `bridge` calls — no glue-package
+> authorization), and precedence `app > type-owner >
 > ability-owner > :default > native`. Dispatch specializes through the inline-cache/JIT
 > with deopt-on-reload; `:sealed` abilities go fully static; `Display` becomes always-on
 > core (superseding the opt-in `show`). This section documents what is implemented today.
