@@ -483,11 +483,17 @@ resolve in the advisory checker. Returns the project root."
 ;; lazily so a depless project never loads it. Dep dirs go at the END of the path,
 ;; after the project's own sources, so the project's modules win on a name clash.
 (defn project--ensure-deps-on-path (root)
-  (when *project-dependencies*
-    ;; `package` is required lazily (not `:use`d) to avoid a project↔package load
-    ;; cycle; qualify its one entry point here.
-    (require 'package)
-    (set-load-path! (append *load-path* (package/ensure-deps root *project-dependencies*)))))
+  ;; Dev/test setup sees BOTH the production deps and the `:dev-dependencies` (ADR-172):
+  ;; a `nest test`/`nest run` in a dev image resolves and load-paths them all, exactly
+  ;; like Cargo's dev-dependencies being available for tests locally. The release bundle
+  ;; (`bundle-collect`) reads `*project-dependencies*` alone, so dev-deps are excluded
+  ;; from a shipped binary — the whole reason they live in their own slot.
+  (let (deps (append *project-dependencies* *project-dev-dependencies*))
+    (when deps
+      ;; `package` is required lazily (not `:use`d) to avoid a project↔package load
+      ;; cycle; qualify its one entry point here.
+      (require 'package)
+      (set-load-path! (append *load-path* (package/ensure-deps root deps))))))
 
 ;; Every .blsp file the project owns — its source files plus its test files.
 ;; The set the advisory type-checker walks for `(check-project)`.
@@ -1501,6 +1507,9 @@ std. Errors if `root` is nil (not in a project)."
       (when (and (pair? form) (= (first form) 'project)) (project-apply (rest form))))
     ;; Project source dirs first, then resolved dependency dirs (so a project
     ;; module wins a stem clash with a dep — matches `*load-path*` ordering).
+    ;; `*project-dependencies*` only — never `*project-dev-dependencies*` (ADR-172): a
+    ;; `:dev-dependencies` is test/dev-only, so it is deliberately excluded from the
+    ;; shipped bundle. (This is the payoff of keeping dev-deps in their own slot.)
     (let (src-dirs (project-abs-paths root *project-source-paths*)
           dep-dirs (if *project-dependencies*
                      (do (require 'package) (package/ensure-deps root *project-dependencies*))
