@@ -384,6 +384,59 @@ impl Heap {
         slab_bytes(&self.local)
     }
 
+    /// **Trim a process that is about to park.** Returns the bytes of retained capacity
+    /// handed back, or `0` if the process was below the threshold and nothing was done.
+    ///
+    /// A parked process is quiescent and may stay so for the life of the program, so the
+    /// two things a *running* heap is right to keep are exactly wrong here:
+    ///
+    /// 1. **Uncollected garbage.** A process that allocates and then parks never reaches
+    ///    another safepoint, so its dead data is pinned indefinitely. Measured 2026-07-28:
+    ///    100k processes that consed 1,000 pairs and parked cost **54.1 KB each**; the same
+    ///    with an explicit collection first cost **19.0 KB**.
+    /// 2. **Retained capacity.** After collecting, the slab `Vec`s still hold their
+    ///    high-water capacity (a nursery flip deliberately preserves it — see
+    ///    `Slabs::with_capacity_like`). That is the 19.0 KB against **5.4 KB** for a process
+    ///    that never allocated at all.
+    ///
+    /// So: collect, then shrink. This is Erlang's `hibernate/0` move, applied automatically
+    /// at the one moment we know the process has nothing to do.
+    ///
+    /// **Soundness.** The captured continuation (`Suspended`) holds only *control* state —
+    /// its frames reference the operand stack and frame slots by index, and those live on
+    /// this heap's own `roots`/`env_roots`, which `collect` traces. That is the same
+    /// invariant a running process relies on at every safepoint, so collecting here is no
+    /// more dangerous than collecting one instruction earlier.
+    ///
+    /// **Threshold.** Skipped entirely below `PARK_TRIM_MIN_BYTES` of retained capacity, so
+    /// a latency-sensitive process that parks constantly with a tiny heap (a ping-pong
+    /// responder, a `gen` server handling small messages) pays one integer comparison and
+    /// nothing else.
+    pub fn trim_parked(&mut self) -> usize {
+        // The gate runs on EVERY park, so it is three loads and a compare — see
+        // `park_trim_probe`. Only capacity accumulated *since the last trim* counts; an
+        // absolute threshold fails in both directions (`PARK_TRIM_GROWTH_SLOTS`).
+        let probe = park_trim_probe(&self.local);
+        if probe.saturating_sub(self.park_trim_mark) < PARK_TRIM_GROWTH_SLOTS {
+            return 0;
+        }
+        let before = slab_capacity_bytes(&self.local) + slab_capacity_bytes(&self.old);
+        self.collect(&mut [], &mut []);
+        shrink_slabs(&mut self.local);
+        shrink_slabs(&mut self.old);
+        self.roots.shrink_to_fit();
+        self.env_roots.shrink_to_fit();
+        let after = slab_capacity_bytes(&self.local) + slab_capacity_bytes(&self.old);
+        // Mark the **pre-trim high-water**, not the shrunken size. Marking `after` (the
+        // obvious choice) makes the gate oscillate: the process shrinks to X, regrows to
+        // X + 4 KiB, trims again, and a busy responder pays a collection every few
+        // messages — measured as `pingpong` +8.5%. Against the high-water, a process only
+        // trims when it accumulates *beyond a size it has already reached*, so a steady
+        // working set trims once and never again.
+        self.park_trim_mark = probe;
+        before.saturating_sub(after)
+    }
+
     /// Set this process's heap limit (bytes; `None` = unlimited), returning the
     /// previous setting — the `(process-flag :max-heap n)` mechanism. Clearing
     /// the limit also clears a pending hit, so `(process-flag :max-heap nil)`

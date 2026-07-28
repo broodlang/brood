@@ -474,6 +474,15 @@ fn park_on_receive(proc: Box<Process>, mailbox: &Arc<Mailbox>) {
         drop(st);
         wake_enqueue(proc);
     } else {
+        // The process is genuinely parking: no message, no kill, no elapsed deadline. This
+        // is the one moment we know it has nothing to do, so trim what it is holding —
+        // collect its garbage and hand back retained slab capacity (see
+        // `Heap::trim_parked`, which no-ops below its threshold so a small, frequently
+        // parking responder is unaffected). Done under the mailbox lock, which is already
+        // held and which a would-be sender needs anyway; the process owns its heap here
+        // (no worker is running it), so the collection cannot race.
+        let mut proc = proc;
+        proc.trim_on_park();
         st.waiter = Some(proc);
     }
 }
