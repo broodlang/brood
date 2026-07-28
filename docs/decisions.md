@@ -11171,3 +11171,176 @@ ADR-013 (hot reload — the late-binding kinship), ADR-046/051 (`nest observe` �
 target for a future debugger pane). Still open: wiring the causal tree into `nest observe`
 as an interactive pane, and cross-*node* causality (deliberately excluded — the debugger
 is per-runtime).
+
+## ADR-175 — Compiled code belongs to the runtime, not the process (the BEAM module-area model)
+
+**Context.** A green process costs ~15 KB, against the BEAM's ~2.7 KB for a process
+holding equivalent state. Measured 2026-07-28 (see devlog): the cost is not the mailbox,
+the payload, or GC retention — it is that **every process compiles its own copy of every
+function it calls**. `(fold + 0 nil)` — a fold over an *empty* list — costs ~18 KB in a
+freshly spawned process, and live bytes scale linearly with the number of *distinct*
+prelude functions a process touches (0 fns 13.8 KB/proc; 1 fn 31.6; 2 fns 50.0; 3 fns
+59.9; 4 fns 66.5). At 300k live processes that is the difference between 4.58 GB and
+Elixir's 942 MB on the same workload.
+
+The duplication is already recognised in the tree. From `JitWorkItem`'s doc: *"thousands
+of short-lived processes each queue their OWN `CompiledArm` copy of the same shared
+closure; without the dedupe a spawn storm compiled `fib` ~68×."* ADR-101's `share_key`
+fixed that for **native code** — a per-runtime `jit_code_cache` keyed by
+`(closure_id, argc)`, epoch-guarded, idempotent publish. It did not fix the bytecode,
+the `Node` tree, or the inline caches, which is what this ADR is about.
+
+**What Erlang does.** A BEAM process holds *no code*. The PCB is stack + heap + mailbox;
+code lives once per node in a module area, reached through the export table. Literals
+live in a shared, refcounted per-module literal area rather than being copied into each
+process. Hot reload is the current/old two-version rule, with old code purged once no
+process references it. That separation — **code is node-global, state is process-local**
+— is why a BEAM process is ~2.7 KB, and it is the property Brood lost by caching compiled
+artefacts on the `Heap`.
+
+Brood already has three of the four pieces:
+
+| BEAM | Brood today |
+|---|---|
+| module area (code) | shared PRELUDE / RUNTIME AST regions |
+| literal area | `ConstVal::Handle` into those regions |
+| export table + hot reload | global table + `global_epoch` / ADR-091 generations |
+| **compiled code, node-global** | **absent — per-process `vm_cache` + IC tables** |
+
+**Decision.** Move the compiled artefacts to the runtime, mirroring `jit_code_cache`:
+a per-`RuntimeCode` cache keyed by the existing `share_key` `(closure_id, argc)`, holding
+`Arc<CompiledArm>`, validated by `epoch == global_epoch()` before install. Processes
+install a shared arm instead of compiling their own. This is the module area, applied to
+the artefact that is currently the odd one out.
+
+**Explicitly rejected: dropping the retained `Node` tree.** The tree is 58% of
+compiled-arm memory and 75% of it looked droppable on a static eligibility test (31/38
+arms), so this was investigated first and rejected on five independent grounds:
+
+1. `pub body: Node` has no interior mutability, and arms live behind `Arc<CompiledArm>`.
+2. Unique ownership is never available — `CallIcEntry.arm`, `live_vm_arms` and
+   `CompiledClosure::compiled` all hold the same `Arc`.
+3. **The background JIT compiler thread holds an `Arc<CompiledArm>` off a queue and reads
+   `arm.body` to lower it.** A drop races a live cross-thread read: use-after-free.
+4. `Inst::TryCatch` holds `NodePtr`, a non-owning raw pointer *into* the arm's own tree,
+   so `body` and `chunk` can only ever be replaced atomically together.
+5. `vm_site_alloc` only pushes; call-site ids are never individually reclaimed. Every
+   drop→recompile cycle would leak IC slots monotonically — an optimisation that leaks
+   memory when repeated.
+
+Sharing avoids all five: nothing is dropped, nothing is recompiled, no lifetime changes.
+
+**The one real obstacle: call-site ids.** `vm_site_alloc` returns a *dense per-process*
+index (`t.len()-1`) that is baked into each compiled `Node::Call` and used to index the
+per-process IC tables. Share an arm and its baked ids come from whichever process
+compiled it, so every process's IC vectors must be dense up to the global maximum.
+Measured: a unit process uses 21 sites (4.3 KB of IC tables); the root uses 251 (33.4 KB).
+Naive sharing would push every process toward the root's figure to save ~14.5 KB of body
+— **a net loss of ~14 KB/proc**. So sharing is only correct together with a site-id fix,
+and is staged behind one.
+
+**The freeze changes the staging — Brood can do something the BEAM cannot.**
+ADR-166 seals every shipped function *permanently* (the BEAM's `sticky` has
+`code:unstick_mod/1`; we deliberately rejected that hatch). So for prelude code two
+things hold that have no Erlang equivalent:
+
+1. **Prelude compiled code is immortal.** No current/old duality, no purge, no
+   `check_process_code`, no epoch guard — the invalidation machinery Erlang needs
+   exists only because any module can be replaced, and ours cannot.
+2. **A call to a frozen callee can be direct-linked at compile time.** The callee can
+   never be rebound, so it is a constant. This is BEAM's *intra*-module direct call,
+   except the entire frozen prelude behaves as one module — where the BEAM would still
+   route a cross-module call through the export table, we can bind it outright.
+
+Measured 2026-07-28, counting only sites compiled **after** seal seeding (i.e. the
+compiles a spawned process actually pays for; sites compiled during the prelude build
+predate sealing and read as unfrozen, which is a measurement artefact, not a result):
+
+| program | post-seal call sites | frozen callee | late-bound |
+|---|---|---|---|
+| top-level `fold`/`map`/`filter`/`count`/`str` | 81 | 80 (98.8%) | 1 (`*out*`) |
+| the same work inside a `spawn` | 537 | 535 (99.6%) | 2 (`unit`, `*out*`) |
+| **40 user fns calling each other** | 722 | **483 (66.9%)** | **239 (33.1%)** |
+
+**The fraction is workload-dependent, and the first two rows are not representative.**
+They are prelude-dominated microbenchmarks with one user function between them; a real
+application is full of user→user calls, every one of which is late-bound because user
+code *must* stay redefinable for ADR-013 hot reload. Adding 40 mutually-calling user
+functions drops the frozen share to 66.9%, and the late-bound share grows with the size
+of the user's own code. Quoting "~99%" as the design's operating point would be
+measuring the standard library and calling it an application.
+
+Direct-linking still removes the IC slot for the frozen majority (67-99% of sites
+depending on workload), which is worth having on its own. But it does **not** dissolve
+the site-id obstacle — it scales it down by the frozen fraction. For user-heavy code a
+third of sites still need IC slots, and those are exactly the sites living in the user
+arms that Stage 2 would share.
+
+It also removes a cost we pay today for nothing: a user `def` bumps `global_epoch` and
+invalidates *every* IC, including prelude→prelude entries that no `def` could ever
+affect. Direct links need no epoch guard, so hot reload stops disturbing frozen code.
+
+**Staging (revised).** Each stage is independently landable and verifiable:
+
+- **Stage 1 — direct-link frozen callees.** A `Node::Call` whose callee is a sealed
+  global binds to it at compile time: no site id, no IC probe, no epoch check. Wins
+  memory (no IC slot for ~99% of sites) *and* speed (ADR-166's own stated motivation —
+  "every prelude call has to be late-bound because any global might be rebound"), and is
+  independently useful whether or not sharing ever lands. **Ordering caveat:** sealing is
+  seeded after the prelude is built, so a site compiled during boot must not be
+  direct-linked on the strength of a seal that is not yet populated — the compile path
+  has to distinguish "not sealed" from "not sealed *yet*", or it will silently bind
+  nothing at boot and everything later.
+- **Stage 1b — arm-relative site ids.** Sites become relative to their arm; each process
+  allocates one contiguous IC block per arm instance it runs, and the frame resolves
+  `base + rel` (`BcFrame` already carries `arm_slot`, so the base can hang off the
+  existing per-process arm registration rather than a new lookup). Originally the gating
+  stage; the freeze demotes it to **optional and much smaller**, since after Stage 1 it
+  covers only the ~1% late-bound residue. Deferred until Stage 2 measurement shows
+  whether it matters at all — ADR-011.
+- **Stage 2 — shared `CompiledArm` cache.** The `jit_code_cache` analogue over
+  `Arc<CompiledArm>`, same key, same epoch guard, same idempotent publish. With Stage 1
+  in place, per-process IC cost stays proportional to arms actually used.
+- **Stage 3 (optional) — shared inline caches.** BEAM's export table is node-global, and
+  our IC entries cache *global* resolutions that are already epoch-guarded and hold
+  promoted/immovable callees, so they arguably belong with the code too. Blocked on
+  `CallIcEntry.fast` being a `Cell` (not `Sync`); it would need the atomic treatment
+  `FastLink` already uses. Deferred until Stages 1–2 are measured — ADR-011.
+
+**User code and hot reload are untouched — that is the point of the ADR-166 line.**
+Direct-linking applies *only* to sealed names. A user function is never sealed, so its
+call sites keep the inline cache and the epoch guard, and ADR-013 hot reload behaves
+exactly as today. Sharing a *user* arm is likewise already-solved ground rather than new
+risk: `share_key` covers "a RUNTIME/PRELUDE arm" and the installer checks
+`epoch == global_epoch()` before use, so a `def` (which bumps `version` at
+`heap.rs:4072` — "Invalidate every process's global inline cache") invalidates the shared
+entry and the arm is recompiled. The asymmetry is the whole design: **frozen code is
+shared and bound once; user code is shared but epoch-guarded, and rebinding still wins.**
+
+A side benefit follows from the same asymmetry. Today one user `def` bumps the global
+version and invalidates *every* IC entry in *every* process, including prelude→prelude
+entries that no `def` could affect. Direct links carry no epoch guard, so after Stage 1 a
+hot reload stops disturbing frozen code.
+
+**Verification (required, not optional).** This touches the VM inner loop, the JIT, and
+GC-visible structures, so reading is not evidence:
+
+- the differential fuzzer (VM vs tree-walker) and the reader-robustness fuzzer;
+- `BROOD_GC_STRESS=1` + `BROOD_GC_VERIFY=1` over the suite — shared arms change what the
+  RUNTIME compactor's `rewrite_node` walks;
+- `BROOD_JIT_VERIFY=1`, plus a `BROOD_NO_JIT=1` A/B to separate a JIT miscompile from a
+  sharing bug;
+- **a TSAN build (`--features system-alloc`) is mandatory** — the hazard that killed the
+  drop design was a threading one, and Stage 2 publishes `Arc`s read by the background
+  compiler thread;
+- `make ab` across the full row set (sharing changes IC hit rates), and the 300k
+  `spawn-live` row for the memory claim itself;
+- an off-switch from the first commit (`BROOD_NO_SHARED_ARMS=1`), matching
+  `BROOD_NO_INLINE` / `BROOD_NO_HANDOFF`.
+
+**Consequences.** Expected: per-process cost drops toward the parked-process floor
+(~6.3 KB measured), since a process would hold state and IC blocks but no code. Risk
+concentrates in Stage 1, which rewrites how every call site addresses its cache — the
+extra indirection is on the IC hot path, so `make ab` gates it, not intuition. If Stage 1
+costs more than a few percent, Stage 2's memory win has to justify it explicitly rather
+than be assumed.
