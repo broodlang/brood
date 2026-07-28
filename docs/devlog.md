@@ -10466,3 +10466,34 @@ needs a real allocation profile.
 `MailboxState` 112 / `Message` 40), `Suspended` 128, slabs ~480, roots ~128, ICs ~40,
 registry ~50 — about 2.7 KB. The rest is unidentified; the earlier guess that it was
 per-spawn closure minting was wrong (see dead end 1).
+
+## 2026-07-28 (cont.) — rejected: skipping `live_vm_arms` registration for PRELUDE consts
+
+**Tried, measured, reverted. Do not re-attempt without new evidence.**
+
+`node_has_rt_handles` marks an arm as needing `live_vm_arms` registration if its body
+holds any `ConstVal::Handle`. A **PRELUDE** handle is immovable — the prelude is a
+separate immutable region `runtime_collect` never compacts, and `ConstVal`'s own doc says
+"PRELUDE handles never actually move (the flush is a no-op for them)". So registering such
+an arm looked like pure waste, and skipping it should have skipped an `Arc::clone` on the
+hot call path plus the cross-worker refcount contention the flag exists to avoid.
+
+It does not. Measured with `make ab` (best-of-7, then best-of-11 solo on the movers):
+
+| row | delta |
+|---|---|
+| fib / bintree / nqueens / sort / json / collatz | +2.6% … −0.7% (flat) |
+| **spawn** | **+6.3%** (solo, best-of-11) |
+| **ring** | **+4.0%** (solo, best-of-11) |
+
+No gain anywhere, a real cost on the process rows. Reverted.
+
+**Calibration worth keeping:** after reverting, an A/B of functionally identical binaries
+still read `spawn` **+3.1%**. That row's noise floor is ~3%, so treat anything under ~5%
+there as unproven — and the +6.3% above was a smaller real effect than the number suggests.
+
+**The reasoning error, for next time:** "this skips work on the hot path, so it must be
+faster" is a hypothesis, not a result. The registration presumably pays for something
+(`arm_slot` is threaded through `BcFrame` and the JIT paths), so removing it moves cost
+rather than deleting it. `make ab` is the gate precisely because plausible reasoning about
+this VM has been wrong repeatedly.
