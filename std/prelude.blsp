@@ -2893,26 +2893,16 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
 (defn defrecord--fname (f) (if (pair? f) (first f) f))
 (defn defrecord--ftype (f) (if (pair? f) (second f) nil))
 (defn defrecord--acc-sym (rec fld) (symbol (str (name rec) "-" (name fld))))
+(defn defrecord--qualify (nm)
+  "Qualify bare name `nm` (a string) against the current ns → a `:<ns>/nm` keyword; at
+root/REPL (no ns) there is no prefix, so it is a bare `:nm`. Shared by `defrecord` (which
+bakes a record's `:__id__`) and `ability--id-kw` (an impl's bare id) so the two AGREE — a
+record built at root and an impl for it at root must land on the same dispatch id."
+  (let (ns (current-ns))
+    (if ns (keyword (str (name ns) "/" nm)) (keyword nm))))
 
 ;; The `(sig …)` forms for an all-typed record: the constructor arrow, then one
 ;; accessor arrow per field. Built as plain data — `sig` reads the un-expanded type.
-(defn defrecord--sigs (rec fields)
-  (let (ftypes (map defrecord--ftype fields)
-        rec-ty (cons 'record
-                 (mapcat (fn (f)
-                           (list (keyword (name (defrecord--fname f)))
-                             (defrecord--ftype f)))
-                   fields))
-        ctor (list 'sig rec (append ftypes (list '-> rec-ty))))
-    (cons ctor
-      (map (fn (f)
-             (let (fnm (defrecord--fname f))
-               (list 'sig
-                 (defrecord--acc-sym rec fnm)
-                 (list (list 'record (keyword (name fnm)) (defrecord--ftype f))
-                   '-> (defrecord--ftype f)))))
-        fields))))
-
 (defmacro defrecord (rec fields)
   "Define record `rec` with `fields` — a positional constructor `(rec …)` plus a
 `rec-field` accessor per field. A record is an immutable map that also carries a
@@ -2933,7 +2923,7 @@ field is typed, per-accessor signatures are emitted too.
         fkws (map (fn (n) (keyword (name n))) fnames)
         ;; the nominal id — a `:module/name` KEYWORD (a keyword literal is what the
         ;; checker tracks via `Ty::keyword_lit`), captured at definition.
-        id (keyword (str (name (current-ns)) "/" (name rec)))
+        id (defrecord--qualify (name rec))
         ;; ctor body: a MAP LITERAL (built here, at macro time) whose values are the field
         ;; symbols, with the reserved `:__id__` carrying the id keyword. Emitting a real
         ;; map value (not a `(hash-map …)` call) is what makes the checker infer the result
@@ -2960,7 +2950,8 @@ field is typed, per-accessor signatures are emitted too.
         acc-sigs (if (every? pair? fields)
                    (map (fn (f)
                           (let (fnm (defrecord--fname f))
-                            (list 'sig (defrecord--acc-sym rec fnm)
+                            (list 'sig
+                              (defrecord--acc-sym rec fnm)
                               (list (list 'record (keyword (name fnm)) (defrecord--ftype f))
                                 '-> (defrecord--ftype f)))))
                      fields)
@@ -4032,9 +4023,9 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 ;; ═══ Abilities + the Display protocol (core) ════════════════════════════════
 ;; Open generic functions with nominal dispatch — Brood's unified polymorphism seam
 ;; (ADR-168/172). Folded into the prelude (was std/ability.blsp + std/show.blsp) so
-;; `defability`/`impl`/`defrecord*` and the always-on `Display`/`Inspect` protocol are
+;; `defability`/`impl`/`defrecord` and the always-on `Display`/`Inspect` protocol are
 ;; core — no `(:use ability)`, no `(require 'show)`, no activation step. Dispatch is on
-;; the FIRST arg's identity (a built-in's `type-of` kind, or a `defrecord*` value's
+;; the FIRST arg's identity (a built-in's `type-of` kind, or a `defrecord` value's
 ;; nominal `module/name` id); resolution is by PRECEDENCE tier, not load order:
 ;; app > type-owner > ability-owner > other.
 
@@ -4097,7 +4088,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
     (type-of x)))
 
 (defn record? (x)
-  "True if `x` is an identity-carrying record (a `defrecord*` value)."
+  "True if `x` is an identity-carrying record (a `defrecord` value)."
   (and (map? x) (contains? x :__id__)))
 
 (defn record-id (x)
@@ -4221,14 +4212,14 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 (defn ability--id-kw (m)
   "The dispatch-id keyword for an impl / sealed-member id `m`. A keyword is kept as-is
   (`:int`, `:default`); a bare record symbol is qualified against the current ns
-  (`circle` → `:<ns>/circle`, matching what `defrecord*` bakes into a value); an already-
+  (`circle` → `:<ns>/circle`, matching what `defrecord` bakes into a value); an already-
   qualified symbol is keyworded as-is (`geo/circle` → `:geo/circle`). Shared by `impl`
   and `:sealed` so they agree on a bare id — otherwise `(impl S circle …)` would register
   under `:circle` while a value presents `:<ns>/circle` and never match (KI-15)."
   (if (symbol? m)
     (if (includes? (name m) "/")
       (keyword (name m))
-      (keyword (str (name (current-ns)) "/" (name m))))
+      (defrecord--qualify (name m)))
     m))
 
 (defmacro defability (aname & specs)
@@ -4329,7 +4320,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 
 ;; The per-print-argument hook the prelude installs into `*show*` at the end of boot
 ;; (Display is core, ADR-172 §8 — no activation step). Only a RECORD is routed through
-;; `to-str` (a `defrecord*` value is the sole thing that can carry a custom impl); every
+;; `to-str` (a `defrecord` value is the sole thing that can carry a custom impl); every
 ;; other value passes through untouched so the built-in renderer stays on the fast path
 ;; — no `identity-of`/`impl-for` lookup per printed int or string. Disable for a scope
 ;; with `(binding (*show* nil) …)`.

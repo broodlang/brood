@@ -111,9 +111,9 @@ fn ability_impl_complete_is_clean() {
 }
 
 // ---- ability missing-impl at call sites (Slice 3) ----
-// The pass runs over the EXPANDED tree; `defability`/`impl`/`defrecord*` are core
+// The pass runs over the EXPANDED tree; `defability`/`impl`/`defrecord` are core
 // (prelude) macros, always available to expand. Identity for a literal is its `type-of`
-// kind; for a `defrecord*` ctor call, its nominal id.
+// kind; for a `defrecord` ctor call, its nominal id.
 
 #[test]
 fn ability_flags_a_builtin_kind_with_no_impl() {
@@ -132,14 +132,14 @@ fn ability_flags_a_builtin_kind_with_no_impl() {
 
 #[test]
 fn ability_flags_a_record_with_no_impl() {
-    // `(defmodule t)` gives `defrecord*` a namespace to bake its `:t/rect` identity into
+    // `(defmodule t)` gives `defrecord` a namespace to bake its `:t/rect` identity into
     // (check_file's `file_ns` sets the compile ns from it); the top-level require loads
     // the module so the qualified macros expand.
     let ws = file_warnings(
         "\
          (defmodule t)\n\
          (defability Size (size [self] :-> int))\n\
-         (defrecord* rect (w h))\n\
+         (defrecord rect (w h))\n\
          (defn bad () (size (rect 1 2)))",
     );
     assert!(
@@ -165,13 +165,13 @@ fn ability_is_silent_when_the_call_is_covered() {
 #[test]
 fn ability_flags_a_record_typed_variable_via_inference() {
     // `(let (r (rect 1 2)) (size r))` — the identity of a VARIABLE, caught by the
-    // `check_into` inference hook: `defrecord*` emits a `sig` so the constructor's
+    // `check_into` inference hook: `defrecord` emits a `sig` so the constructor's
     // record-shaped return type flows to the binding, and the hook reads its `:__id__`.
     let ws = file_warnings(
         "\
          (defmodule t)\n\
          (defability Size (size [self] :-> int))\n\
-         (defrecord* rect (w h))\n\
+         (defrecord rect (w h))\n\
          (defn bad () (let (r (rect 1 2)) (size r)))",
     );
     assert!(
@@ -186,7 +186,7 @@ fn ability_inference_is_silent_when_the_variable_is_covered() {
         "\
          (defmodule t)\n\
          (defability Size (size [self] :-> int))\n\
-         (defrecord* circle (r))\n\
+         (defrecord circle (r))\n\
          (impl Size t/circle (size [c] (get c :r)))\n\
          (defn ok () (let (c (circle 2)) (size c)))",
     );
@@ -201,8 +201,8 @@ fn sealed_ability_flags_a_member_missing_an_impl() {
     let ws = file_warnings(
         "\
          (defmodule t)\n\
-         (defrecord* circle (r))\n\
-         (defrecord* rect (w h))\n\
+         (defrecord circle (r))\n\
+         (defrecord rect (w h))\n\
          (defability Shape :sealed [circle rect] (area [self] :-> float))\n\
          (impl Shape t/circle (area [c] (get c :r)))",
     );
@@ -221,7 +221,7 @@ fn sealed_ability_bare_impl_id_qualifies_ki15() {
     let ws = file_warnings(
         "\
          (defmodule t)\n\
-         (defrecord* circle (r))\n\
+         (defrecord circle (r))\n\
          (defability Shape :sealed [circle] (area [self] :-> float))\n\
          (impl Shape circle (area [c] (get c :r)))",
     );
@@ -233,8 +233,8 @@ fn sealed_ability_complete_is_silent() {
     let ws = file_warnings(
         "\
          (defmodule t)\n\
-         (defrecord* circle (r))\n\
-         (defrecord* rect (w h))\n\
+         (defrecord circle (r))\n\
+         (defrecord rect (w h))\n\
          (defability Shape :sealed [circle rect] (area [self] :-> float))\n\
          (impl Shape t/circle (area [c] (get c :r)))\n\
          (impl Shape t/rect (area [r] (get r :w)))",

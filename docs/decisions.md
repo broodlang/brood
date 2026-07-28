@@ -10464,7 +10464,7 @@ express the interesting case.
 **Decision.** One concept, **`ability`** (`std/ability.blsp`): open generic
 functions dispatching on the first argument's **identity**.
 
-1. **Identity, not kind.** `identity-of` returns a `defrecord*` value's **nominal
+1. **Identity, not kind.** `identity-of` returns a `defrecord` value's **nominal
    id** — a `:module/name` keyword baked in at macro-expansion via `(current-ns)`
    — else the value's `type-of` kind. So two record shapes defined in one module
    dispatch apart, and built-in kinds keep working with `:default` as the
@@ -10474,7 +10474,7 @@ functions dispatching on the first argument's **identity**.
    layered on top, held in a reserved `:__id__` field.
 3. **The `:type`-field axis is permanently rejected.** Sniffing a `:type` key
    would silently reroute *any* map that happens to carry one — the exact
-   implicitness ADR-011 rejects. A `defrecord*` identity is explicit and
+   implicitness ADR-011 rejects. A `defrecord` identity is explicit and
    construction-time, which is the same power made safe. This closes the
    pre-1.0 breaking question in
    [`roadmap-for-v1.md`](roadmap-for-v1.md) §3.
@@ -10507,7 +10507,7 @@ ability's declared ops (missing op, arity disagreement, undeclared op), enforces
 sealed exhaustiveness, and warns at a **call site** when an op is applied to an
 argument of statically-known identity for which no impl and no `:default` exists.
 That last check is inference-driven, so a record-typed *variable* is caught too —
-enabled by `defrecord*` emitting a **map-literal** body plus a `sig`, so the
+enabled by `defrecord` emitting a **map-literal** body plus a `sig`, so the
 record shape (carrying the `:__id__` keyword literal) flows through a `let`. Kept
 sound rather than aggressive: an op fn is recognised only by its exact def symbol,
 an identity is taken only when certain, and the impl set unions the file's own
@@ -10668,8 +10668,8 @@ recoverable and the cost of the feature is permanent; when in doubt, refuse.
 | Alternative *negation* patterns (`(not …)`) | Binds nothing, so it is a guard — `:when` is the slot | ADR-160 |
 | `:as` in a map pattern | `(and whole {…})` says it exactly | ADR-160 |
 | Multiple dispatch | Single dispatch on the first argument's identity; `match` covers the rest | ADR-158, ADR-168 |
-| Dispatch inferred from a `:type` **field** | Would silently reroute any map carrying `:type`; a `defrecord*` identity is explicit and construction-time instead | ADR-168 |
-| Nominal *types* | `defrecord` is structural sugar over a map; `defrecord*` adds a dispatch-only identity, not a type — `type-of` is still `:map` and `=` stays structural | ADR-130, ADR-168 |
+| Dispatch inferred from a `:type` **field** | Would silently reroute any map carrying `:type`; a `defrecord` identity is explicit and construction-time instead | ADR-168 |
+| Nominal *types* | `defrecord` is structural sugar over a map; `defrecord` adds a dispatch-only identity, not a type — `type-of` is still `:map` and `=` stays structural | ADR-130, ADR-168 |
 | More than one spelling per thing | `lambda`, `let*`, `car`/`cdr`, `concat`, `some?`, `length` all removed | ADR-098, ADR-154, ADR-162 |
 | Monkey-patching the language | shipped functions are reserved; extend with an ability, shadow with `let`, or namespace it | ADR-166 |
 
@@ -10701,7 +10701,7 @@ above.
 **Status:** accepted, implemented 2026-07-28.
 
 **Context.** `str`/`pr-str`/`%render` are kernel builtins that format every `Value` in
-Rust (`syntax/printer.rs`). A `defrecord*` value is structurally a `Value::Map`, so it
+Rust (`syntax/printer.rs`). A `defrecord` value is structurally a `Value::Map`, so it
 prints as its raw map — `{:__id__ :money/usd, :cents 1050}`. There was no seam for a
 record to define *how it prints*: the equivalent of Elixir's `String.Chars`
 (`to_string/1`, used by `IO.puts` and interpolation) or Haskell's `Show`. With the
@@ -10843,7 +10843,7 @@ through the existing inline-cache/JIT path with deopt-on-reload, with the runtim
 registry retained as the source of truth and reload backstop.
 
 **1 — One coherence rule (`impl`).** `(impl A id …)` is legal **iff you own `A`**
-(you `defability`'d it) **or you own `id`** (you `defrecord*`'d that record type) — the
+(you `defability`'d it) **or you own `id`** (you `defrecord`'d that record type) — the
 Rust orphan rule. A built-in id (`:int`, `:string`, `:default`) is owned by nobody, so
 only the *ability's* owner may impl for it. This one rule kills three hazards at once: a
 library can't touch your types, can't hijack a built-in, and two owners can't silently
@@ -10913,7 +10913,7 @@ keeping live editing.
 a call whose target depends on the first argument's identity — exactly what Brood's
 inline caches + JIT already specialize for ordinary calls, with deopt on type change.
 Lower ability calls through that path: **resolve at compile time where the receiver type
-is statically known** (a literal, a `defrecord*` result, a typed variable), cache
+is statically known** (a literal, a `defrecord` result, a typed variable), cache
 (monomorphic/polymorphic IC) otherwise. Redefining an impl **deopts** the specialized
 call sites and they re-resolve on the next call — so late binding survives. `:sealed`
 abilities (a closed member set) compile to a **closed, exhaustive switch** — no runtime

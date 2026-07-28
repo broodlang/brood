@@ -10150,6 +10150,20 @@ and the language/for-claude docs + the stdlib-module table were de-`:use`-d. `di
 show 12, show_localize 5, json 30, checker ability 12, `basic` 102 — all green; `nest check`
 exits 0. This completes ADR-172 §8; slice 5 (dispatch specialization) is the last open slice.
 
+**Records unified — one `defrecord`, always identity-carrying.** With abilities core, the
+`defrecord`/`defrecord*` split stopped earning its keep: the two forms had *diverged* (plain
+`defrecord` gave per-field accessors but no identity/dispatch; `defrecord*` gave identity but no
+accessors), forcing a silly either/or. Collapsed to **one `defrecord`** = positional constructor
++ per-field accessors + nominal `:__id__` identity + the record-shaped constructor `sig` (so a
+value's identity flows through the checker to dispatch sites). `defrecord*` and the star are gone.
+The only semantic change: a record is now **nominal, not structural** — never `=` to a bare map
+with the same fields (Elixir-struct semantics), and `keys`/`count` include `:__id__` (use
+`fields`/`record?`/`record-id` for the clean view). Blast radius was tiny — nothing depended on
+record-`=`-bare-map (grepped); the 9 call sites were mechanical renames; `record_test.blsp` was
+rewritten to the nominal semantics. Verified: record 12, ability 32, show 12, show_localize 5,
+json 30, checker-ability 12, `basic` 102 — all green. This also answers the "why the star?"
+question — there's no variant left to disambiguate.
+
 ## 2026-07-28 (impl) — process-native tracing debugger (std/tool/debug, ADR-174)
 
 Built the actor-model answer to Elixir's `dbg` on the `spy` sink (ADR-173). The debugger
