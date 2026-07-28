@@ -11,11 +11,13 @@ and blocks on `receive` for a resume — parking indefinitely at zero cost, no t
 Many workers hitting the same `break` each park independently and fan into the
 debugger's mailbox as a QUEUE of paused processes, each inspectable and resumable.
 
-Causal context propagates TRANSPARENTLY: the debugger endpoint + current span live in
-one dynamic, `*trace-context*`, which the kernel copies across `spawn` (opt-in, zero
-cost when unbound — see scheduler/lifecycle.rs). So a plain `(spawn (fn () (break …)))`
-inside a `with-debugger` scope inherits the debugger and parks — no re-wiring — and the
-debugger reconstructs a cross-process causal TREE, something `dbg` cannot do.
+Causal context propagates TRANSPARENTLY: the debugger endpoint + current span live in a
+settable per-process slot (`%trace-context`), which the kernel copies across `spawn` and
+carries on a `send` for the receiver to adopt (opt-in, `#[cfg(dev-tools)]` so a lean
+release compiles it out — see scheduler/lifecycle.rs and process/mailbox.rs). So a plain
+`(spawn (fn () (break …)))` inside a `with-debugger` scope inherits the debugger and parks
+— no re-wiring — and a server handles a request in the *sender's* context; the debugger
+reconstructs a cross-process causal TREE, something `dbg` cannot do.
 
 Wire it up with `with-debugger`; trace with `spy` (its `*spy-sink*` is routed here),
 pause with `break`, and correlate with `span` (`span-spawn` is now just
@@ -79,7 +81,7 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
      :stopped)))
 
 (defn start-debugger ()
-  "Spawn a fresh debugger process and return its pid. Bind it as `*debugger*` (or use `with-debugger`), then `spy` / `break` / `span` stream to it."
+  "Spawn a fresh debugger process and return its pid. Wire it in with `with-debugger`, then `spy` / `break` / `span` stream to it."
   (spawn (debug--loop {:events [] :paused {} :seq 0})))
 
 (defn debugger-sink ()
@@ -93,7 +95,7 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
 
 ;; ---- break: park without a timeout, fan into the paused queue ----------------
 (defn break (label & vals)
-  "Park THIS process at a breakpoint: snapshot `label` + the named `vals` + the current causal span to `*debugger*`, then block until the debugger sends `[:resume]` — with **no timeout** (a parked process costs nothing). Many processes hitting the same `break` each park independently and queue in the debugger. A no-op when `*debugger*` is nil, so it's safe to leave in place. Returns nil."
+  "Park THIS process at a breakpoint: snapshot `label` + the named `vals` + the current causal span to the debugger in the process's trace context, then block until it sends `[:resume]` — with **no timeout** (a parked process costs nothing). Many processes hitting the same `break` each park independently and queue in the debugger. A no-op when no debugger is in context, so it's safe to leave in place. Returns nil."
   (let (ctx (%trace-context) dbg (get ctx :debugger))
     (when dbg
       (send dbg [:break (self) {:label label :vals (vec vals) :span (get ctx :span)}])
@@ -105,7 +107,7 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
 
 ;; ---- causal spans: correlate work across the share-nothing boundary ---------
 (defn span (label thunk)
-  "Run `thunk` inside a fresh causal span (a child of the current `*span*`), emitting enter/exit to `*debugger*`; returns `thunk`'s value. Nested `span`s and `span-spawn`ed children link to this one, so the debugger can rebuild the causal tree."
+  "Run `thunk` inside a fresh causal span (a child of the current context's span), emitting enter/exit to the debugger; returns `thunk`'s value. Nested `span`s and spawned/`send`-reached children link to this one, so the debugger can rebuild the causal tree."
   ;; pid-qualified so two processes' gensym counters can't collide into one node.
   (let (ctx (%trace-context) dbg (get ctx :debugger) parent (get ctx :span)
         id [(self) (gensym "s")])
