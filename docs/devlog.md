@@ -9508,3 +9508,27 @@ per-operation win, while `fib`/`json`/`sort` are flat. Real, reproducible, unexp
 via `merge--acc` and measured +1.0%: its splices are short next to the row's real cost, which
 is building the input list.
 
+
+## 2026-07-28 — tree-walker use-after-GC on `(runtime-collect)` in an `&optional` default
+
+Found chasing the tree-walker differential CI job: `vm_tail_arm_compaction` passed under
+the VM but crashed under `BROOD_VM=0` with `expect("runtime closure handle")`. Not a VM
+regression — a real tree-walker use-after-GC, pre-dating KI-14, that only the test's lean
+`Interp::new()` slab layout triggered (the CLI, with more RUNTIME code loaded, put the
+template at a safe index and never reproduced it).
+
+The backtrace named `eval::record_tw_entry`: the tree-walker's error-trace bookkeeping
+re-read `heap.closure(id).name` *after* `bind_params`, but `bind_params` evaluates the
+`&optional` default `(do (runtime-collect) 0)`, which compacts the RUNTIME closures slab
+and invalidates `id`'s index. The VM's `apply_closure` already avoided this by capturing
+the name up front (kernel-audit #2); the `eval_tail_loop` path didn't. The name was in
+fact already captured one line earlier (`cl_name`, for the arity-error trace), so
+`record_tw_entry` now takes that pre-captured `Option<Symbol>` (interned `u32`, GC-stable)
+instead of re-dereferencing the closure. Fixed on both engines under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`.
+
+Audited the sibling derefs for the same class — every other `heap.closure(`/`heap.native(`
+in the evaluator either precedes any eval, reads a freshly-unpacked id, or (line 844) is a
+documented no-GC symbol lookup; `apply_closure` was already correct. `record_tw_entry` was
+the lone instance. The `vm_tail_arm_compaction` test loses the temporary VM pin (added
+while gating the differential job) and runs on both engines again.
