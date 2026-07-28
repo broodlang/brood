@@ -10,17 +10,28 @@ Here the debugger IS a process. A paused worker `send`s its snapshot to the debu
 and blocks on `receive` for a resume — parking indefinitely at zero cost, no timeout.
 Many workers hitting the same `break` each park independently and fan into the
 debugger's mailbox as a QUEUE of paused processes, each inspectable and resumable.
-And because we control `send` context, causal spans thread across process boundaries,
-so the debugger reconstructs a cross-process causal TREE — something `dbg` cannot do.
+
+Causal context propagates TRANSPARENTLY: the debugger endpoint + current span live in
+one dynamic, `*trace-context*`, which the kernel copies across `spawn` (opt-in, zero
+cost when unbound — see scheduler/lifecycle.rs). So a plain `(spawn (fn () (break …)))`
+inside a `with-debugger` scope inherits the debugger and parks — no re-wiring — and the
+debugger reconstructs a cross-process causal TREE, something `dbg` cannot do.
 
 Wire it up with `with-debugger`; trace with `spy` (its `*spy-sink*` is routed here),
-pause with `break`, and correlate with `span` / `span-spawn`.")
+pause with `break`, and correlate with `span` (`span-spawn` is now just
+`(spawn (span …))` sugar). `debug-watch` gives a live terminal view."
+  (:use editor/ansi))
 
-;; ---- ambient wiring ---------------------------------------------------------
-;; *debugger* — the pid events flow to (nil = no-op, like spy's default sink).
-;; *span*     — the current causal span id (nil = a root).
-(defdyn *debugger* nil)
-(defdyn *span* nil)
+;; ---- ambient wiring: ONE propagating context -------------------------------
+;; `*trace-context*` = {:debugger pid :span id} (or nil). This is the SINGLE dynamic
+;; the kernel propagates across `spawn` (scheduler/lifecycle.rs seeds a child's
+;; dynamics from it), so a plain `spawn`'d child inherits the debugger endpoint AND
+;; the current causal span with no explicit hand-off — `break`/`span` just work and
+;; nest under the parent. Zero cost when unbound: no `binding` active → nothing to
+;; propagate. Read it through the two accessors (both nil-safe on a missing context).
+(defdyn *trace-context* nil)
+(defn tc-debugger () (get *trace-context* :debugger))
+(defn tc-span () (get *trace-context* :span))
 
 ;; ---- the debugger process ---------------------------------------------------
 ;; State: {:events [ordered event maps] :paused {pid -> snapshot} :seq n}. The
@@ -63,20 +74,21 @@ pause with `break`, and correlate with `span` / `span-spawn`.")
   (spawn (debug--loop {:events [] :paused {} :seq 0})))
 
 (defn debugger-sink ()
-  "A `*spy-sink*` value that forwards each `spy` entry to the current `*debugger*` (read at emit time, so it follows rebinding into workers)."
-  (fn (entry) (when *debugger* (send *debugger* [:trace entry (self)]))))
+  "A `*spy-sink*` value that forwards each `spy` entry to the debugger in the current `*trace-context*` (read at emit time, so it follows the context into spawned children)."
+  (fn (entry) (let (dbg (tc-debugger)) (when dbg (send dbg [:trace entry (self)])))))
 
 (defn with-debugger (dbg thunk)
-  "Run `thunk` with `*debugger*` = `dbg` and `*spy-sink*` wired to it — so every `spy`, `break`, and `span` inside streams to the debugger process."
-  (binding (*debugger* dbg *spy-sink* (debugger-sink))
+  "Run `thunk` wired to debugger `dbg`: `*trace-context*` carries it (and the current span) and `*spy-sink*` routes `spy` to it. Because the kernel propagates `*trace-context*` across `spawn`, children inherit the wiring with NO re-setup — a plain `(spawn (fn () (break …)))` inside here parks at `dbg`."
+  (binding (*trace-context* {:debugger dbg :span nil} *spy-sink* (debugger-sink))
     (thunk)))
 
 ;; ---- break: park without a timeout, fan into the paused queue ----------------
 (defn break (label & vals)
   "Park THIS process at a breakpoint: snapshot `label` + the named `vals` + the current causal span to `*debugger*`, then block until the debugger sends `[:resume]` — with **no timeout** (a parked process costs nothing). Many processes hitting the same `break` each park independently and queue in the debugger. A no-op when `*debugger*` is nil, so it's safe to leave in place. Returns nil."
-  (when *debugger*
-    (send *debugger* [:break (self) {:label label :vals (vec vals) :span *span*}])
-    (receive ([:resume] nil))))
+  (let (dbg (tc-debugger))
+    (when dbg
+      (send dbg [:break (self) {:label label :vals (vec vals) :span (tc-span)}])
+      (receive ([:resume] nil)))))
 
 (defn break-when (pred label & vals)
   "A data-driven breakpoint: park (via `break`) only when `pred` is truthy, else return nil untouched — `(break-when (< x 0) \"neg\" :x x)`. Conditional breaks are just a Brood predicate, so no recompile and no cost on the false path."
@@ -86,18 +98,18 @@ pause with `break`, and correlate with `span` / `span-spawn`.")
 (defn span (label thunk)
   "Run `thunk` inside a fresh causal span (a child of the current `*span*`), emitting enter/exit to `*debugger*`; returns `thunk`'s value. Nested `span`s and `span-spawn`ed children link to this one, so the debugger can rebuild the causal tree."
   ;; pid-qualified so two processes' gensym counters can't collide into one node.
-  (let (id [(self) (gensym "s")] parent *span*)
-    (when *debugger* (send *debugger* [:span-enter id parent (self) label]))
-    (binding (*span* id)
+  (let (dbg (tc-debugger) parent (tc-span) id [(self) (gensym "s")])
+    (when dbg (send dbg [:span-enter id parent (self) label]))
+    ;; Rebind the whole context (new span) AND the spy sink, so `spy` inside this
+    ;; span routes to the debugger even in a child that only *inherited* the context.
+    (binding (*trace-context* {:debugger dbg :span id} *spy-sink* (debugger-sink))
       (let (value (thunk))
-        (when *debugger* (send *debugger* [:span-exit id (self) value]))
+        (when dbg (send dbg [:span-exit id (self) value]))
         value))))
 
 (defn span-spawn (label thunk)
-  "`spawn` `thunk` as a new process, propagating `*debugger*` and the current `*span*` (as the child's parent) across the share-nothing boundary — so the worker's spans nest under this one in the causal tree. Returns the child pid."
-  (let (dbg *debugger* parent *span*)
-    (spawn (binding (*debugger* dbg *span* parent *spy-sink* (debugger-sink))
-             (span label thunk)))))
+  "`spawn` `thunk` wrapped in a `span`. With transparent context propagation (the kernel copies `*trace-context*` into the child) a plain `(spawn (span label thunk))` already inherits the debugger + parent span, so this is now just sugar for that."
+  (spawn (span label thunk)))
 
 ;; ---- inspection / control (round-trip queries to the debugger) --------------
 (defn dbg-state (dbg)
@@ -201,3 +213,18 @@ causal tree, and the hottest traced forms by hit count. The one-call overview."
     (println "── hot traced forms ──")
     (doseq (kv (sort-by (fn (kv) (- (second kv))) (hits dbg)))
       (println (str "  " (second kv) "×  " (first kv))))))
+
+;; ---- live terminal view -----------------------------------------------------
+(defn debug-watch--loop (dbg frames)
+  (print (str (ansi-clear) (ansi-home)))
+  (println "── debug-watch  (Ctrl-C to exit) ──")
+  (debug-report dbg)
+  (if (= frames 1)
+    :done
+    (do (sleep 500) (debug-watch--loop dbg (dec frames)))))
+(defn debug-watch (dbg & frames)
+  "Live, read-only terminal view of the debug session — clears the screen and
+reprints `debug-report` every 500ms. Runs until Ctrl-C, or for a fixed frame count
+if one is given (used by tests). Watch the paused queue fill/drain and the causal
+tree grow as a workload runs; drive resume from another session or a timer."
+  (debug-watch--loop dbg (if (empty? frames) -1 (first frames))))
