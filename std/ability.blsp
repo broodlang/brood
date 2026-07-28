@@ -16,11 +16,15 @@
       value — remain `defbehaviour`'s job; see `std/protocol.blsp`.)
 
   Registration is OPEN and LATE: `impl` for any id, from any module, at any time. Each
-  impl is tagged with its registering namespace (`current-ns`), so a *cross-module*
-  redefinition — a library and you both claiming the same `[ability op id]` — is a loud
-  conflict (last wins), while a *same-module* redefinition is hot-reload and stays
-  silent. The advisory checker (`types/check/protocol.rs`) verifies each `impl` provides
-  the ability's declared ops at the right arity, at `nest check` time.
+  impl is tagged with its registering namespace (`current-ns`), and resolution is by
+  **precedence tier**, not load order (ADR-172): type-owner (owns the record) > ability-
+  owner (owns the ability, e.g. its `:default`/built-in impls) > other. So the winning
+  impl is deterministic regardless of registration order. A *same-tier* cross-module claim
+  on the same `[ability op id]` is a loud conflict (last wins); a *same-module* re-register
+  is hot-reload (silent); a strictly lower tier is ignored (a stronger owner holds the
+  slot). The advisory checker (`types/check/protocol.rs`) verifies each `impl` provides the
+  ability's declared ops at the right arity, at `nest check` time. (The top **app** tier —
+  the program overriding anything — awaits ADR-070; see `impl-rank`.)
 
   Two registries, mirroring `protocol`:
     *abilities* — name → declared op specs, as DATA (introspection / checker hook).
@@ -41,16 +45,26 @@
 
 ; ability-name → op specs (introspection / checker / LSP)
 (def *abilities* {})
+; ability-name → the namespace that `defability`'d it (its OWNER, ADR-172): one input to
+; an impl's precedence tier — an impl from this ns is the ability-owner tier, and only this
+; ns may impl the ability for a built-in id (`:int`, `:default`).
+(def *ability-owner* {})
 ; [ability op] → {id → fn} (runtime dispatch — the fn stored directly, no wrapper)
 (def *impls* {})
 ; [ability op id] → registering ns (provenance for conflict detection; read only at
 ; registration, never on dispatch — keeps the dispatch value a bare fn)
 (def *impl-from* {})
 
-(defn register-ability (aname specs)
-  "Record ability `aname`'s declared op specs (raw forms) for the checker / LSP."
+(defn register-ability (aname specs &optional owner)
+  "Record ability `aname`'s declared op specs (raw forms) for the checker / LSP, and its
+  OWNER namespace (`defability`'s defining ns, ADR-172) for impl precedence."
   (def *abilities* (assoc *abilities* aname specs))
+  (when owner (def *ability-owner* (assoc *ability-owner* aname owner)))
   nil)
+
+(defn ability-owner-ns (aname)
+  "The namespace that `defability`'d `aname` (its owner), or nil."
+  (get *ability-owner* aname))
 
 (defn ability-ops (aname)
   "The op specs declared for ability `aname` (or nil) — which ops an `impl` must
@@ -102,23 +116,58 @@
 
 ; ---- registration -----------------------------------------------------------
 
+; The owning module of a record id keyword `:mod/name` (the `mod` part, as a string), or
+; nil for a built-in id (`:int`, `:default` — no `/`). Used to place an impl in the tier
+; ladder: an impl whose registering ns equals this owns the type.
+(defn impl--id-owner (key)
+  (if (keyword? key)
+    (let (n (name key)
+          slash (index-of n "/"))
+      (if (>= slash 0) (substring n 0 slash) nil))
+    nil))
+
+; The precedence tier of an impl of `aname`, for id `key`, registered from ns `from`
+; (ADR-172 §3). Higher wins: type-owner (3) > ability-owner (2) > other (1). A larger
+; number is a stronger claim on the `(aname, op, key)` slot.
+;
+; NOTE: the top **app** tier (the program overriding anything) is not yet distinguished —
+; it needs ADR-070's package-rooted namespaces to tell an app module from a library one.
+; Until then an app override registers as `other` and wins only by same-tier last-write
+; (the pre-ADR-172 behaviour). The type-owner-beats-ability-owner ordering below is fully
+; determinable now and is the part this slice makes deterministic (order-independent).
+(defn impl-rank (aname key from)
+  (let (from-name (name from))
+    (cond
+      (= from-name (impl--id-owner key)) 3
+      (= from-name (let (o (ability-owner-ns aname)) (if o (name o) nil))) 2
+      else 1)))
+
 (defn register-impl (aname op key f from)
-  "Register impl `f` of `aname`'s `op` for dispatch id `key`, tagged with the
-  registering namespace `from`. A re-register from a DIFFERENT `from` is a cross-module
-  conflict (warned; last wins); from the SAME `from` it is hot-reload (silent). Read-
-  modify-write of `*impls*` — register at load time, as top-level `impl` does."
+  "Register impl `f` of `aname`'s `op` for dispatch id `key`, tagged with the registering
+  namespace `from`. Resolution is by PRECEDENCE, not load order (ADR-172 §3): the impl with
+  the highest tier for a `(aname, op, key)` slot wins, computed by `impl-rank`, so the result
+  is deterministic regardless of registration order. A same-tier re-register from a DIFFERENT
+  `from` is a genuine cross-module conflict (warned; last wins); from the SAME `from` it is
+  hot-reload (silent); a strictly lower-tier registration is ignored (a higher tier holds the
+  slot). Read-modify-write of `*impls*` — register at load time, as top-level `impl` does."
   (let (op-key [aname op]
         methods (or (get *impls* op-key) {})
         prov-key [aname op key]
-        prev-from (get *impl-from* prov-key))
-    (if (and prev-from (not (= prev-from from)))
+        prev-from (get *impl-from* prov-key)
+        new-rank (impl-rank aname key from)
+        ; recompute the incumbent's tier from its recorded `from` — no extra registry.
+        old-rank (if prev-from (impl-rank aname key prev-from) 0))
+    (when (and prev-from (= new-rank old-rank) (not (= prev-from from)))
       (println "warning: ability "
-        aname "/" op " for " key " — impl from " prev-from " overridden by " from " (last wins)")
-      nil)
-    ; store the fn DIRECTLY (not `{:fn f}`) so dispatch skips a map-get; provenance lives
-    ; in *impl-from*, read only at registration (conflict detection), never on dispatch.
-    (def *impls* (assoc *impls* op-key (assoc methods key f)))
-    (def *impl-from* (assoc *impl-from* prov-key from))
+        aname "/" op " for " key " — same-tier impl from " prev-from " overridden by " from
+        " (last wins)"))
+    ; Store the winner only when the new impl's tier is >= the incumbent's — so a higher tier
+    ; always holds the slot and order can't decide it. A strictly lower tier is dropped (its
+    ; owner already has a stronger claim). The fn is stored DIRECTLY so dispatch (`impl-for`)
+    ; stays a plain map-get; provenance in *impl-from* is read only here, never on dispatch.
+    (when (>= new-rank old-rank)
+      (def *impls* (assoc *impls* op-key (assoc methods key f)))
+      (def *impl-from* (assoc *impl-from* prov-key from)))
     nil))
 
 (defn impl-for (op-key key)
@@ -184,7 +233,10 @@
   (let (ops (filter (fn (s) (pair? s)) specs)
         sealed-vec (defability--sealed-vec specs)
         sealed-ids (if sealed-vec (map ability--id-kw sealed-vec) nil)
-        reg (cons (list 'ability/register-ability (list 'quote aname) (list 'quote ops))
+        ; pass `(current-ns)` as the owner — evaluated at load in the DEFINING module, so
+        ; `*ability-owner*` records where the ability was declared (ADR-172 precedence).
+        reg (cons (list 'ability/register-ability
+                    (list 'quote aname) (list 'quote ops) (list 'current-ns))
               (if sealed-ids
                 (list (list 'ability/register-sealed
                         (list 'quote aname) (cons 'list sealed-ids)))

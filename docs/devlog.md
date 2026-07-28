@@ -9878,3 +9878,21 @@ thing lost, but that *is* the silent/transitive behaviour the model rejects. Kno
 (shipped, slice 1) loses its strongest motivation (gating a glue package on both libs present),
 falling back to the generic Cargo/Elixir optional dependency; kept for now, worth revisiting.
 ADR-172 §2/§4/§5/§9/§10 + the walkthrough artifact updated.
+
+## 2026-07-28 (impl) — Abilities v2 slice 4 (part): deterministic precedence by tier
+
+`std/ability.blsp` now resolves competing impls by **precedence tier, not load order**
+(ADR-172 §3). `defability` records its owning namespace (`*ability-owner*`); each
+`register-impl` computes a tier from provenance via `impl-rank` — **type-owner (3) >
+ability-owner (2) > other (1)** — and the registry keeps the highest-tier impl for each
+`(ability, op, id)` slot: a strictly lower tier is dropped, so the winner is the same
+regardless of registration order. Done as a guard *at registration*, so `impl-for`
+(dispatch) stays a plain map-get — no per-call tier walk. Additive: single-impl cases and
+same-tier hot-reload are unchanged, so the whole ability/show suite stays green (+4
+precedence tests in `ability_test.blsp`, now 28).
+
+**Deferred (needs ADR-070):** the top **app** tier — the program overriding *anything*.
+Distinguishing an app module from a library one needs package-rooted namespaces; until
+then an app override registers as `other` and wins only by same-tier last-write (the
+pre-ADR-172 behaviour). The type-owner-beats-ability-owner half — fully determinable now —
+is what this slice makes deterministic.

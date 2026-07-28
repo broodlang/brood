@@ -146,3 +146,37 @@
   (test "a new impl can be added for any kind after the ability is declared"
     (impl Size :vector (size [v] (* 10 (count v))))
     (assert= (size [1 2 3]) 30)))
+
+;; ---- impl precedence: deterministic by tier, not load order (ADR-172 §3) ----
+;; `register-impl`/`register-ability`/`impl-for`/`impl-rank` are exercised directly with
+;; crafted provenance (a `from` ns per registration), so the ordering is testable without
+;; standing up real cross-module fixtures. Unique ability names avoid clashing the shared
+;; registries. type-owner (3) > ability-owner (2) > other (1).
+(describe "impl precedence (deterministic by tier)"
+  :serial
+  (test "type-owner beats ability-owner regardless of registration order"
+    ;; PaintA/PaintB owned by 'artlib; the record shapes/circle owned by 'shapes.
+    (register-ability 'PaintA '((paint [self])) 'artlib)
+    (register-impl 'PaintA 'paint :shapes/circle (fn (x) :ability) 'artlib)
+    (register-impl 'PaintA 'paint :shapes/circle (fn (x) :type) 'shapes)
+    (assert= ((impl-for '[PaintA paint] :shapes/circle) nil) :type)
+    ;; reverse order — same winner (the point: order-independent)
+    (register-ability 'PaintB '((paint [self])) 'artlib)
+    (register-impl 'PaintB 'paint :shapes/circle (fn (x) :type) 'shapes)
+    (register-impl 'PaintB 'paint :shapes/circle (fn (x) :ability) 'artlib)
+    (assert= ((impl-for '[PaintB paint] :shapes/circle) nil) :type))
+  ; owns neither
+  (test "impl-rank orders type-owner > ability-owner > other"
+    (register-ability 'Ranked '((op [self])) 'ownerns)
+    ; owns the type
+    (assert= (impl-rank 'Ranked :m/rec 'm) 3)
+    ; owns the ability
+    (assert= (impl-rank 'Ranked :m/rec 'ownerns) 2)
+    (assert= (impl-rank 'Ranked :m/rec 'stranger) 1))
+  (test "the ability owner may impl for a built-in id"
+    (register-ability 'Sized '((sz [self])) 'sizelib)
+    (register-impl 'Sized 'sz :int (fn (n) :int-sz) 'sizelib)
+    (assert= ((impl-for '[Sized sz] :int) nil) :int-sz))
+  (test "ability-owner-ns records the defining namespace"
+    (register-ability 'Owned '((op [self])) 'mymod)
+    (assert= (ability-owner-ns 'Owned) 'mymod)))
