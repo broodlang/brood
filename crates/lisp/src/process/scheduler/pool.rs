@@ -417,6 +417,18 @@ fn handle_capture_outcome(
             deregister(proc.pid, reason, &proc.heap);
         }
         Ok(Err(e)) => {
+            // An unwinding untrappable kill (`Control::Kill`) that no VM driver
+            // converted — a tree-walked top-level body has no `Err`-arm conversion —
+            // is a kill, not a crash: retire with the mailbox's pending reason, no
+            // "process died" noise (a killed process is expected to die).
+            if e.is_kill_signal() {
+                let reason = crate::core::sync::lock(&mailbox.state)
+                    .kill
+                    .take()
+                    .unwrap_or_else(|| Message::Keyword(value::intern(pk::KILLED)));
+                deregister(proc.pid, reason, &proc.heap);
+                return;
+            }
             // An uncaught throw/error killed the process (Erlang let-it-crash).
             // The death reason carries the STRUCTURED error — `[:error {:kind
             // :message … :trace}]`, see `message::error_reason` — so a monitor /

@@ -86,7 +86,7 @@ pub fn parked_process_count() -> usize {
 // `receive` gate to tell a capturable top-level receive from a native-nested one.
 pub(crate) use scheduler::{
     capture_hard_kill_pending, capture_top_level, charge_native, dirty_block, in_capture_run,
-    set_capture_top_level, tick_capture, TreeWalkGuard,
+    set_capture_top_level, tick_capture, tick_reporting_hard_kill, TreeWalkGuard,
 };
 // The batched variant is called only from the JIT's runtime callback (`crate::jit`),
 // so its re-export is feature-gated to keep the no-`jit` build warning-free.
