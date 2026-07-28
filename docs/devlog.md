@@ -10370,3 +10370,99 @@ those safepoints see; `charge_native`'s time-based accounting is the next suspec
 
 Worth fixing on its own terms regardless of the REPL: any spawned process evaluating code
 is currently unkillable, which reaches supervisors and `gen` servers too.
+## 2026-07-28 — per-process compiled code is the per-process memory cost
+
+Chasing the 4.58 GB that 300k live processes cost on the `spawn-live` benchmark (Elixir
+holds the same 300k in 942 MB). Not a leak: per-process cost is flat and monotonic
+(17.7 KB/proc at N=10k → 15.3 at N=300k, the decline just fixed overhead amortising).
+Not the message either — payload length is irrelevant (k=0: 792 MB, k=64: 807 MB at N=50k).
+
+The decomposition, N=100k, all processes kept alive:
+
+| unit does | KB/proc |
+|---|---|
+| parks immediately, never runs | 6.26 |
+| wakes, replies, parks again | 14.87 |
+| same + one `(fold + 0 nil)` | 32.66 |
+
+`(fold + 0 nil)` folds an **empty list** and costs ~18 KB. The cause is that
+`vm_cache: RefCell<VmCacheMap<Option<Arc<CompiledClosure>>>>` and the inline-cache tables
+(`vm_call_ics` / `vm_fast_links` / `vm_global_ics`, indexed by *per-process* site ids) are
+per-process: every green process compiles its own copy of each prelude function it calls.
+The source/AST is shared via the PRELUDE/RUNTIME regions; the **compiled** form is not.
+
+Confirmed by scaling with the number of distinct prelude functions a unit calls (N=20k,
+`(mem-bytes)`, exact live bytes): 0 fns 13,786 B/proc; 1 (`fold`) 31,619; 2 (`+count`)
+49,954; 3 (`+map`) 59,914; 4 (`+filter`) 66,503 — roughly +6-18 KB per distinct callee.
+
+Ruled out, so don't re-chase: the `PARK_TRIM_GROWTH_SLOTS = 64` threshold (rebuilt with it
+at 0 — 32.72 → 31.72 KB/proc, noise); JIT inlining (`BROOD_NO_JIT=1` unchanged at 32.63);
+worker count (flat 33.5 KB/proc from J=2 to J=12, so not cross-thread page fragmentation);
+allocator retention (glibc arena knobs are no-ops — the allocator is **mimalloc**, and
+`mallinfo2` only sees the main arena, which is why it read a flat 67 KB while RSS was
+675 MB). `(mem-bytes)` is the right probe: it reported 31,618 B/proc against 674 MB RSS,
+94% accounted, so the memory is genuinely live, not fragmentation.
+
+Not fixed. The direction is to share compiled closures across processes the way the
+RUNTIME region already shares AST (keyed by closure handle + epoch); the IC tables must
+stay per-process, but they are only ~3.5 KB of the ~18 KB, and could be sparse rather
+than dense `Vec`s indexed by site id.
+
+**Benchmark harness** (`../brood-benchmarks`) gained the per-CPU columns this motivated:
+`cores` (CPU% / 100) and `CPU·s` (wall × cores), because wall time alone cannot tell
+"fast" from "cannot scale". On `spawn` at N=200k: Node runs at **102% CPU — one core**, a
+ceiling no machine lifts, while .NET's 804% is genuine thread-pool parallelism (its fast
+result was not a rigged port). Brood posts the best utilisation of the four (925%) and
+still loses on wall, burning 8.05 CPU-s to Node's 1.23 for identical work — the gap is
+per-core compute, not parallelism.
+
+That column also caught a measurement bug that had been flattering Python: 3.14 defaults
+multiprocessing to `forkserver`, so `pfib`'s pool workers were children of the forkserver
+and never reaped, and `/usr/bin/time` read 4% CPU on a run using 10.6 cores — ranking
+Python the *most* CPU-efficient runtime in the suite. Pinned the port to the `fork` context
+(1055% CPU, 26.07 CPU-s — the worst on the row) and added a guard that marks any row under
+50% CPU on a >200 ms run as under-reported and excludes it from the ranking.
+
+## 2026-07-28 (cont.) — decomposing `spawn-live`: what the 4 s is actually made of
+
+The published row is Brood's worst (5.35 s / 4.45 GB at 300k, last of five). Decomposed
+at N=300,000, so the next attempt starts from evidence rather than the headline:
+
+| unit does | wall | RSS |
+|---|---|---|
+| spawn + park, never woken | 2.28 s | 6.11 KB/proc |
+| + wake, reply, parent collects (no prelude call) | 2.88 s | 8.47 KB/proc |
+| + one `(fold + 0 p)` (the real row) | 4.04 s | 15.2 KB/proc |
+
+So per-process compiled code (ADR-175) is worth **+1.16 s and +2.0 GB** — real, but only
+~29% of the time. The rest is a **2.88 s / 8.5 KB-per-process floor** for spawning, waking
+and reaping 300k processes, against Elixir's 2.5 µs and ~3.1 KB. Fixing ADR-175 alone lands
+at ~2.9 s / 2.55 GB, still ~4× the BEAM. Both halves need work; neither alone closes it.
+
+Counterintuitive and worth remembering: **spawn-and-park (2.28 s) is slower than
+spawn-wake-exit (1.43 s)**. `spawn-live` deliberately holds all 300k alive, so nothing is
+reclaimed and allocator/cache pressure dominates. The row measures *residency*, so
+per-process footprint is the lever, not per-spawn CPU.
+
+**Dead end 1 — "cache the capture-free spawn thunk" is already implemented.** `spawn` does
+`heap.promote(f)` on its thunk, which appends a closure (plus captured env) to the shared
+append-only RUNTIME region, and at 300k live processes the ADR-091 collector can reclaim
+none of it. That looked like an easy win until reading `Heap::closure_const_cache`, whose
+doc names the exact case: a `(fn …)` with no lexical captures and no self-name is a
+constant, memoised once and promoted to a stable RUNTIME handle — *"`(spawn (worker))` in a
+fan-out drops ~7×"*. It works: capture-free spawn costs 6.14 KB/proc and capturing one int
+costs 7.13 KB, i.e. the ~1 KB delta is the capturing case paying for a real promoted env
+frame, not waste. **Do not re-propose this.**
+
+**Dead end 2 — per-phase allocation attribution via `live_bytes()` does not work.**
+`crate::core::alloc::live_bytes()` is process-wide across every worker thread, so deltas
+taken around phases of one `spawn` are contaminated by concurrent allocation on other
+workers (the samples came back including wrapped negatives). Whole-program differencing
+(spawn N, divide) is sound; per-call-site differencing is not. Attributing the remainder
+needs a real allocation profile.
+
+**Still unaccounted: ~2.9 KB of a parked process's 5,597 measured live bytes.** Identified:
+`Box<Process>` 1736 (with `Heap` 1648 inline), `Arc<Mailbox>` ~184 (`Mailbox` 168 /
+`MailboxState` 112 / `Message` 40), `Suspended` 128, slabs ~480, roots ~128, ICs ~40,
+registry ~50 — about 2.7 KB. The rest is unidentified; the earlier guess that it was
+per-spawn closure minting was wrong (see dead end 1).
