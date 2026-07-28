@@ -369,6 +369,8 @@ impl Interp {
         let runtime = Arc::new(RuntimeCode::seeded(&SHARED.bindings));
         let mut heap = Heap::with_regions(Arc::clone(&SHARED.code), runtime);
         heap.set_global(EnvId::GLOBAL);
+        // Abilities + the Display protocol are core — defined in the shared prelude
+        // (`*show*` is wired on there), so nothing to load per runtime here.
         Interp {
             heap,
             root: EnvId::GLOBAL,

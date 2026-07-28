@@ -324,17 +324,16 @@ accessors, so the advisory checker (and `BROOD_CONTRACTS=1` runtime contracts) s
 the field types. See [ADR-130](decisions.md) and `docs/types.md` for the record
 type `(record :k T …)` this lowers to.
 
-### Polymorphism: abilities (`:use ability`)
+### Polymorphism: abilities
 
 `defrecord` names a map's *shape*; an **ability** names an operation that different
-types implement differently. `std/ability.blsp` gives open generic functions
-(ADR-168): each op dispatches on the **identity of its first argument**, and an
-implementation can be added for any identity — including a built-in kind — from any
-module, at any time, without editing the dispatcher.
+types implement differently. Abilities are **core** (in the prelude, ADR-168/172):
+open generic functions where each op dispatches on the **identity of its first
+argument**, and an implementation can be added for any identity — including a built-in
+kind — from any module, at any time, without editing the dispatcher.
 
-Put `(:use ability)` in the module header — that loads *and* imports, so
-`defability`/`impl`/`defrecord*` read bare. (A bare `(require 'ability)` only loads
-it; you would then write `ability/defability`.)
+`defability`/`impl`/`defrecord*` are built in — always available, no import, no
+`(:use ability)`.
 
 An argument's **dispatch identity** is one of two things:
 
@@ -345,7 +344,7 @@ An argument's **dispatch identity** is one of two things:
   dispatch apart.
 
 ```clojure
-(defmodule geometry (:use ability))
+(defmodule geometry)
 
 (defrecord* circle (r))
 (defrecord* rect (w h))
@@ -399,7 +398,7 @@ backend" needs no config indirection and no module-atom dispatch — you pass a
 different value:
 
 ```clojure
-(defmodule store (:use ability))
+(defmodule store)
 
 (defability Store (fetch [self k]))
 (defrecord* pg  (pool))
@@ -464,25 +463,20 @@ ordinary hot reload and stays silent.
 Prefer `match`/`cond` when the set of cases is closed and local; reach for an
 ability when third-party or later code must be able to add a case.
 
-#### The display protocol: customizing how a record prints (`require 'show`)
+#### The display protocol: customizing how a record prints
 
-The standard library uses an ability for its one open-extension rendering seam —
-`std/show.blsp`, Elixir's `String.Chars` for Brood (ADR-171). `(require 'show)`
-gives a `Display` ability with op **`(to-str x)`** (a value → its display string),
-whose `:default` impl is the native `str`. Loading it makes the protocol *available*
-but changes nothing on its own; the **app** calls **`(display-on)`** to make the
-**screen printers** (`print` / `println` / `eprint` / `eprintln`) honor a *record*'s
-impl. Activation is an app-level step, never a side effect of a library's `(:use show)`
-(ADR-172 §8: libraries propose impls, the app disposes). Built-ins are unchanged and
-pay no dispatch cost; without `(display-on)` there is no change at all.
+The `Display` ability — Elixir's `String.Chars` for Brood (ADR-171/172) — is **core
+and always on**. Its op **`(to-str x)`** turns a value into its display string; the
+`:default` impl is the native `str`. The **screen printers** (`print` / `println` /
+`eprint` / `eprintln`) route a *record* through its `Display` impl out of the box — no
+`(require 'show)`, no activation step. Built-ins are unchanged and pay no dispatch cost.
 
 ```clojure
-(defmodule money (:use ability) (:use show))
+(defmodule money)             ; no (:use ability), no (:use show) — both are core
 (defrecord* usd (cents))
-(impl Display money/usd
+(impl Display usd
   (to-str [m] (str "$" (to-fixed (/ (get m :cents) 100.0) 2))))
 
-(display-on)                  ; the app opts in (once, at startup)
 (println (usd 1050))          ; => $10.50   (not {:__id__ :money/usd, :cents 1050})
 (to-str (usd 1050))           ; => "$10.50" — the explicit call, for use inside str/fmt
 ```
@@ -2450,9 +2444,7 @@ Run `nest doc <module>` for the full API of any module.
 | `std/system.blsp` | `'system` | OS interaction: `env`, `env-all`, `argv`, `os-type`, `cmd`, `cmd-ok?`, `cmd-out`, `halt` (whole-machine `cwd`/`hostname` are root builtins) |
 | `std/crypto.blsp` | `'crypto` | Cryptography: ChaCha20-Poly1305 AEAD (`encrypt`/`decrypt`/`encrypt-str`/`decrypt-str`), `pbkdf2` (accepts a string or byte-vector password/salt — a binary salt is used as raw bytes), `random-bytes`, `random-key`, `random-nonce`, `secure=?` |
 | `std/proc/agent.blsp` | `'proc/agent` | Process-backed state cell (Elixir-style Agent): `start`, `get`, `update`, `get-and-update`, `cast`, `stop` |
-| `std/ability.blsp` | `'ability` | Open generic functions with nominal dispatch (ADR-168): `defability` declares typed ops (with an optional `:sealed [id …]` closed member set), `impl` registers an implementation for a dispatch id — a `type-of` kind (`:int`/`:map`/…/`:default`) or a `defrecord*` record's `:module/name` id — from any module at any time; `defrecord*` bakes that nominal id into a record; `satisfies?`, `record?`, `record-id`, `fields`, `identity-of`, and `ability-ops` (the checker/LSP introspection hook) |
 | `std/protocol.blsp` | `'protocol` | Behaviour contracts — the *module*-satisfies-a-contract seam: `defbehaviour` declares the ops a module must define (no value dispatch), claimed with `(:implements Name)` in a module header; `protocol-ops` is the introspection hook the checker and LSP read. Value dispatch is `ability` — `defprotocol`/`defimpl` were retired (ADR-168) |
-| `std/show.blsp` | `'show` | The display protocol for printing (Elixir's `String.Chars`, ADR-171): a `Display` ability with op `(to-str x)` (value → display string, `:default` → native `str`), and a `*show*` hook so the screen printers `print`/`println`/`eprint`/`eprintln` let a `defrecord*` value define how it prints. Built on `ability`; built-ins unchanged. `(binding (*show* nil) …)` disables it |
 | `std/telemetry.blsp` | `'telemetry` | Erlang-`:telemetry`-style instrumentation; handlers run in an isolated listener process: `start-telemetry`, `stop-telemetry`, `emit`, `attach`, `detach`, `detach-all`, `forward`, `handlers`, `telemetry-sync`, the `span` macro |
 
 The following modules are also opt-in and live under `std/net/` and `std/tool/`:

@@ -77,8 +77,7 @@ fn file_warnings(src: &str) -> Vec<String> {
 
 // ---- ability impl conformance (Pass 2.6) ----
 // The conformance check (missing op / arity / undeclared) reads the *un-expanded*
-// `defability`/`impl` surface forms, so these need no `(require 'ability)`. `.contains`
-// ignores unbound-symbol noise from the un-loaded macros, irrelevant here.
+// `defability`/`impl` surface forms — which are core (prelude), always available.
 // (`defprotocol`/`defimpl` were retired in favour of `ability`.)
 
 #[test]
@@ -112,17 +111,16 @@ fn ability_impl_complete_is_clean() {
 }
 
 // ---- ability missing-impl at call sites (Slice 3) ----
-// The pass runs over the EXPANDED tree, so these `(require 'ability)` so the
-// `defability`/`impl`/`defrecord*` macros load and expand (check_file evals top-level
-// requires). Identity for a literal is its `type-of` kind; for a `defrecord*` ctor
-// call, its nominal id.
+// The pass runs over the EXPANDED tree; `defability`/`impl`/`defrecord*` are core
+// (prelude) macros, always available to expand. Identity for a literal is its `type-of`
+// kind; for a `defrecord*` ctor call, its nominal id.
 
 #[test]
 fn ability_flags_a_builtin_kind_with_no_impl() {
     let ws = file_warnings(
-        "(require 'ability)\n\
-         (ability/defability Size (size [self] :-> int))\n\
-         (ability/impl Size :int (size [n] n))\n\
+        "\
+         (defability Size (size [self] :-> int))\n\
+         (impl Size :int (size [n] n))\n\
          (defn bad () (size \"hi\"))",
     );
     assert!(
@@ -138,10 +136,10 @@ fn ability_flags_a_record_with_no_impl() {
     // (check_file's `file_ns` sets the compile ns from it); the top-level require loads
     // the module so the qualified macros expand.
     let ws = file_warnings(
-        "(require 'ability)\n\
+        "\
          (defmodule t)\n\
-         (ability/defability Size (size [self] :-> int))\n\
-         (ability/defrecord* rect (w h))\n\
+         (defability Size (size [self] :-> int))\n\
+         (defrecord* rect (w h))\n\
          (defn bad () (size (rect 1 2)))",
     );
     assert!(
@@ -153,9 +151,9 @@ fn ability_flags_a_record_with_no_impl() {
 #[test]
 fn ability_is_silent_when_the_call_is_covered() {
     let ws = file_warnings(
-        "(require 'ability)\n\
-         (ability/defability Size (size [self] :-> int))\n\
-         (ability/impl Size :int (size [n] n))\n\
+        "\
+         (defability Size (size [self] :-> int))\n\
+         (impl Size :int (size [n] n))\n\
          (defn ok () (size 5))",
     );
     assert!(
@@ -170,10 +168,10 @@ fn ability_flags_a_record_typed_variable_via_inference() {
     // `check_into` inference hook: `defrecord*` emits a `sig` so the constructor's
     // record-shaped return type flows to the binding, and the hook reads its `:__id__`.
     let ws = file_warnings(
-        "(require 'ability)\n\
+        "\
          (defmodule t)\n\
-         (ability/defability Size (size [self] :-> int))\n\
-         (ability/defrecord* rect (w h))\n\
+         (defability Size (size [self] :-> int))\n\
+         (defrecord* rect (w h))\n\
          (defn bad () (let (r (rect 1 2)) (size r)))",
     );
     assert!(
@@ -185,11 +183,11 @@ fn ability_flags_a_record_typed_variable_via_inference() {
 #[test]
 fn ability_inference_is_silent_when_the_variable_is_covered() {
     let ws = file_warnings(
-        "(require 'ability)\n\
+        "\
          (defmodule t)\n\
-         (ability/defability Size (size [self] :-> int))\n\
-         (ability/defrecord* circle (r))\n\
-         (ability/impl Size t/circle (size [c] (get c :r)))\n\
+         (defability Size (size [self] :-> int))\n\
+         (defrecord* circle (r))\n\
+         (impl Size t/circle (size [c] (get c :r)))\n\
          (defn ok () (let (c (circle 2)) (size c)))",
     );
     assert!(
@@ -201,12 +199,12 @@ fn ability_inference_is_silent_when_the_variable_is_covered() {
 #[test]
 fn sealed_ability_flags_a_member_missing_an_impl() {
     let ws = file_warnings(
-        "(require 'ability)\n\
+        "\
          (defmodule t)\n\
-         (ability/defrecord* circle (r))\n\
-         (ability/defrecord* rect (w h))\n\
-         (ability/defability Shape :sealed [circle rect] (area [self] :-> float))\n\
-         (ability/impl Shape t/circle (area [c] (get c :r)))",
+         (defrecord* circle (r))\n\
+         (defrecord* rect (w h))\n\
+         (defability Shape :sealed [circle rect] (area [self] :-> float))\n\
+         (impl Shape t/circle (area [c] (get c :r)))",
     );
     assert!(
         ws.iter()
@@ -221,11 +219,11 @@ fn sealed_ability_bare_impl_id_qualifies_ki15() {
     // matching `:sealed`, so a bare impl counts toward exhaustiveness. Before the fix it
     // registered under `:circle` and the sealed check falsely flagged the member.
     let ws = file_warnings(
-        "(require 'ability)\n\
+        "\
          (defmodule t)\n\
-         (ability/defrecord* circle (r))\n\
-         (ability/defability Shape :sealed [circle] (area [self] :-> float))\n\
-         (ability/impl Shape circle (area [c] (get c :r)))",
+         (defrecord* circle (r))\n\
+         (defability Shape :sealed [circle] (area [self] :-> float))\n\
+         (impl Shape circle (area [c] (get c :r)))",
     );
     assert!(!ws.iter().any(|w| w.contains("sealed ability")), "{ws:?}");
 }
@@ -233,13 +231,13 @@ fn sealed_ability_bare_impl_id_qualifies_ki15() {
 #[test]
 fn sealed_ability_complete_is_silent() {
     let ws = file_warnings(
-        "(require 'ability)\n\
+        "\
          (defmodule t)\n\
-         (ability/defrecord* circle (r))\n\
-         (ability/defrecord* rect (w h))\n\
-         (ability/defability Shape :sealed [circle rect] (area [self] :-> float))\n\
-         (ability/impl Shape t/circle (area [c] (get c :r)))\n\
-         (ability/impl Shape t/rect (area [r] (get r :w)))",
+         (defrecord* circle (r))\n\
+         (defrecord* rect (w h))\n\
+         (defability Shape :sealed [circle rect] (area [self] :-> float))\n\
+         (impl Shape t/circle (area [c] (get c :r)))\n\
+         (impl Shape t/rect (area [r] (get r :w)))",
     );
     assert!(!ws.iter().any(|w| w.contains("sealed ability")), "{ws:?}");
 }

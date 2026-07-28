@@ -271,20 +271,19 @@ offending value appended via `str`-style trailing args:
 (error "reload-on-change: no such path: " path)
 ```
 
-## Polymorphism — abilities (`(require 'ability)`)
+## Polymorphism — abilities (core)
 
 When a `cond` on `type-of` would have to be *edited* for a caller to add a case, use
 an **ability**: an open generic function whose ops dispatch on the **first argument's
-identity**. Put `(:use ability)` in the module header — that both loads the module and
-makes the macros read bare, so no separate `(require 'ability)` is needed. (A bare
-`(require 'ability)` only *loads* it; you then write `ability/defability` etc.)
+identity**. `defability`/`impl`/`defrecord*` are **core** (in the prelude) — always
+available, no import, no `(:use ability)`.
 
 An identity is either a built-in `type-of` **kind** (`:int`, `:string`, `:map`, …) or
 a **`defrecord*`** value's **nominal id** — a `:module/name` keyword baked in at
 definition, so two record shapes in one module dispatch apart.
 
 ```lisp
-(defmodule geometry (:use ability))
+(defmodule geometry)
 
 (defrecord* circle (r))                 ; a record WITH a dispatch identity
 (defrecord* rect (w h))
@@ -884,11 +883,10 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   (macro: `(bench "label" expr)` prints `label: N ms`, returns `expr`)
 - **I/O**: `print` `println` `slurp` `spit` `load` `eval-string` `read-string`.
   `print`/`println` **space-join** their args (Python-style, via `%render`) —
-  distinct from `str`, which concatenates. To let a **record** define how it prints
-  on screen (Elixir's `String.Chars`), `(require 'show)` for the `Display` ability
-  with `(to-str x)`, then the **app** calls `(display-on)` to make the screen printers
-  honor a record's `(impl Display my/rec (to-str [r] …))` — an app-level opt-in, never a
-  side effect of loading; built-ins unchanged (ADR-171/172).
+  distinct from `str`, which concatenates. A **record** defines how it prints on screen
+  (Elixir's `String.Chars`) via the core, always-on `Display` ability: just
+  `(impl Display my/rec (to-str [r] …))` and the screen printers honor it — no require,
+  no activation step; built-ins unchanged (ADR-171/172).
   `print`/`println` **flush stdout every call** — there's no separate flush, so
   an animation frame paints immediately. For raw terminal control without the
   full display protocol, `(:use editor/ansi)` in your `defmodule` header (a bare

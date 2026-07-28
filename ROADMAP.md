@@ -44,18 +44,16 @@ Shipped as ADRs:
   carried the checker/LSP conformance pass for months while the macros lived
   downstream. **Superseded by ADR-168:** `defprotocol`/`defimpl` dispatched only on
   `type-of`, so no two records could dispatch apart; they were retired in favour of
-  `std/ability.blsp` (`defability`/`impl`/`defrecord*`, nominal dispatch).
-  `defbehaviour` stays in `std/protocol.blsp`.
-  - ✅ **The display protocol** (ADR-171, 2026-07-28) — the first std use of an
-    ability for open-extension rendering: `std/show.blsp`'s `Display`/`to-str`
-    (Elixir's `String.Chars`), with a zero-cost prelude `*show*` hook so the screen
-    printers let a record define how it prints. Activation is an explicit app step —
-    `(display-on)` installs the hook, `(display-off)` / `(binding (*show* nil) …)` undo
-    it — never a side effect of loading (ADR-172 §5/§8: a library ships `impl Display`
-    proposals, the app disposes). Second audit candidate — a
-    `JsonEncode` ability so user records serialize instead of `json--emit` erroring
-    — is the same shape, left as a follow-up. (Audit found only these two; the rest
-    of `std/` is correctly-closed `cond`/state-machines per ADR-011.)
+  the ability system (`defability`/`impl`/`defrecord*`, nominal dispatch), now **core
+  in the prelude**. `defbehaviour` stays in `std/protocol.blsp`.
+  - ✅ **The display protocol** (ADR-171, 2026-07-28) — the first ability for
+    open-extension rendering: `Display`/`to-str` (Elixir's `String.Chars`), with a
+    zero-cost prelude `*show*` hook so the screen printers let a record define how it
+    prints. **Now core and always on** (slice 6 below): a record customizes printing
+    with just `(impl Display …)` — no `(require 'show)`, no activation step. Second
+    audit candidate — a `JsonEncode` ability so user records serialize instead of
+    `json--emit` erroring — is the same shape, left as a follow-up. (Audit found only
+    these two; the rest of `std/` is correctly-closed `cond`/state-machines per ADR-011.)
   - ⬜ **Checker gap:** a `:use`d ability op from a *loose disk* module (not embedded,
     not in a project) is flagged `unbound symbol` though it runs; embedded/same-module
     use resolves. Surfaced by the `show` cross-module test. **[kernel/checker]**
@@ -71,9 +69,9 @@ Shipped as ADRs:
     real orphan conflict ever appears, orphan-authorization becomes a **lint on plain
     `impl`** (app/library line is already computable via package identity), advisory-live
     / hard-CI — no new form. What remains: dispatch specialized through the IC/JIT with
-    deopt-on-reload, `:sealed` fully static/exhaustive, `Display` to always-on core
-    (records only, guarded) — at which point the interim `display-on`/`display-off`
-    scaffolding is removed. **[kernel/checker/eval]**
+    deopt-on-reload and `:sealed` fully static/exhaustive (slice 5). **The ability system
+    itself is now core** — folded into the prelude, so `defability`/`impl`/`defrecord*`
+    are always available, no `(:use ability)`. **[kernel/checker/eval]**
     - ✅ **Slice 1 — optional + dev dependencies** (2026-07-28): the manifest takes
       `:optional true` per dep and a `:dev-dependencies` list (tagged `:dev true`, own
       slot). **Slice 1b** wired dev-deps end to end: `project--ensure-deps-on-path`
@@ -93,9 +91,13 @@ Shipped as ADRs:
       with their owning package.
     - ⬜ **Slice 5 — dispatch specialization**: lower ability calls through the IC/JIT
       with deopt-on-reload (today every call is a runtime `impl-for` map-get); `:sealed`
-      abilities compile to a closed exhaustive switch.
-    - ⬜ **Slice 6 — `Display` to always-on core**: records customize `str`/`print`
-      natively (guarded, app-gated); removes the interim `display-on`/`display-off`.
+      abilities compile to a closed exhaustive switch. A Brood-side fast path (collapse
+      `impl-for`'s double lookup) is the first step; a kernel inline cache the second.
+    - ✅ **Slice 6 — `Display` core, always on** (2026-07-28): the ability system +
+      `Display`/`Inspect` folded into the prelude; the prelude wires `*show*` on by
+      default. A record customizes printing with just `(impl Display …)` — no
+      `(require 'show)`, no `display-on`. `std/ability.blsp` + `std/show.blsp` deleted
+      (their content is now prelude); the `Interp` needs no per-runtime load.
 - ✅ **ADR-159** — grapheme-*indexed* accessors (`grapheme-count`, `grapheme-at`,
   `substring-graphemes`), so the documented-correct cursor step stops costing a vector
   of every cluster in the string per keystroke.

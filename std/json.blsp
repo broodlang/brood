@@ -402,7 +402,7 @@ the named escapes + every C0 control) that would each find nothing."
     (string? v) (cons (json--enc-string v) acc)
     (keyword? v) (cons (json--enc-string (name v)) acc)
     (symbol? v) (cons (json--enc-string (name v)) acc)
-    ; a record (`ability/defrecord*`) is a map carrying a reserved `:__id__` identity
+    ; a record (`defrecord*`) is a map carrying a reserved `:__id__` identity
     ; key — encode it as its FIELDS, omitting the internal id (it must never reach the
     ; wire). Plain maps have no such key, so they are unaffected.
     (map? v) (cons "}"

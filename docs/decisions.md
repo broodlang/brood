@@ -10787,9 +10787,11 @@ the core image; deferred (ADR-011) until a concrete need.
 
 **Status:** accepted (design), **amended 2026-07-28** — the orphan rule (§1) and the
 `bridge` form (§2, §4) are **dropped before implementation**; see the amendment
-immediately below. What ships: the precedence ladder (§3) via package identity, and the
-explicit-activation `Display` interim (ADR-171 + the 2026-07-28 `display-on`/`off`
-change). The dispatch-specialization (§7) and `Display`-to-core (§8) slices stand.
+immediately below. Shipped: the precedence ladder (§3) via package identity, and **§8 —
+`Display` is core and always on**: the whole ability system + `Display`/`Inspect` were
+folded into the prelude (`std/ability.blsp` + `std/show.blsp` deleted), so a record
+customizes printing with just `(impl Display …)` — no `(require 'show)`, no `display-on`
+(the interim activation is gone). Only **§7 (dispatch specialization)** remains.
 
 **Amendment (2026-07-28) — abilities stay OPEN; no orphan rule, no `bridge` syntax.**
 A design review pulled §1/§2 apart and found the restriction unnecessary and the form
