@@ -72,5 +72,14 @@ else
   echo "FAIL  reader robustness — a crash/panic/hang on malformed input (see stress/fuzz_out/reader_*)"; fail=$((fail+1))
 fi
 
+# Parallel scaling: independent CPU-bound processes must use the pool. Catches the
+# collapse case (a lock serialising the workers), not small drift — see scaling.sh
+# for why the bound is deliberately weak and why the baseline is 2 workers.
+if out=$(BROOD="$BROOD" ./stress/scaling.sh); then
+  echo "$out"; case "$out" in skip*) ;; *) pass=$((pass+1));; esac
+else
+  echo "$out"; fail=$((fail+1))
+fi
+
 echo "---- stress: $pass passed, $fail failed, $xfail known-bug xfails, $xpass unexpected xpasses"
 [ "$fail" -eq 0 ] && [ "$xpass" -eq 0 ]
