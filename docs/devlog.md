@@ -9831,3 +9831,22 @@ work.
 **nothing asserts balance or scaling**, and `(sched-stats)` is aggregate-only — there is no
 per-worker breakdown to write such a test against. A scaling assertion (embarrassingly
 parallel work must beat 1 worker by ≥ N×) would have caught the 1.0× at J=2 immediately.
+
+## 2026-07-28 (impl) — Abilities v2 slice 1b: dev-deps resolve for dev, excluded from release
+
+Made the manifest flags from slice 1 actually do something end to end. Two seams in
+`std/tool/project.blsp`:
+
+- **`project--ensure-deps-on-path`** now load-paths `(append *project-dependencies*
+  *project-dev-dependencies*)`, so a `nest test`/`nest run` in a dev image resolves and
+  fetches dev-deps too — exactly like Cargo's dev-dependencies being available for tests
+  locally.
+- **`bundle-collect`** reads `*project-dependencies*` alone (unchanged), so a
+  `:dev-dependencies` is deliberately **excluded from the shipped bundle** — the payoff of
+  keeping dev-deps in their own slot.
+
+Verified end to end with a scratch project: a `:dev-dependencies [[devtool :path "../dt"]]`
+is resolvable from a test (`(:use devtool)` passes under `nest test`), and
+`(bundle-collect root)` omits it (`devtool in bundle? false`). Optional-dep *resolution*
+(peer presence) still lands with the bridge slice; this is the dev-dep half. Suite green,
+`nest check` clean, formatted.

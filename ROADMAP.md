@@ -67,12 +67,14 @@ Shipped as ADRs:
     only, app-gated, guarded) superseding ADR-171's opt-in `show`. Needs
     [ADR-070](docs/decisions.md) (package-rooted namespaces) for the clean app/library
     line. **[kernel/checker/eval]**
-    - ✅ **Slice 1 — optional + dev dependencies** (2026-07-28): the manifest now takes
+    - ✅ **Slice 1 — optional + dev dependencies** (2026-07-28): the manifest takes
       `:optional true` per dep and a `:dev-dependencies` list (tagged `:dev true`, own
-      slot) — the package-level seam the bridge story needs. Parsing/normalisation done
-      in `std/tool/project.blsp`; resolver + release-bundle consumption is next. Slices
-      2–6 (`bridge`/`:bridges`, coherence checking, precedence, dispatch specialization,
-      always-on `Display`) still ⬜.
+      slot) — the package-level seam the bridge story needs. **Slice 1b** wired dev-deps
+      end to end: `project--ensure-deps-on-path` load-paths them for dev/`nest test`,
+      `bundle-collect` excludes them from a release bundle (verified with a scratch
+      project). Optional-dep *resolution* (peer presence) lands with the bridge slice.
+      Slices 2–6 (`bridge`/`:bridges`, coherence checking, precedence, dispatch
+      specialization, always-on `Display`) still ⬜.
 - ✅ **ADR-159** — grapheme-*indexed* accessors (`grapheme-count`, `grapheme-at`,
   `substring-graphemes`), so the documented-correct cursor step stops costing a vector
   of every cluster in the string per keystroke.
