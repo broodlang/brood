@@ -12,7 +12,7 @@
 (defdyn *locale* :en)
 
 ;; A money value — the struct a `money` library would export.
-(defrecord* money (amount currency))
+(defrecord money (amount currency))
 
 (defn money--symbol (currency)
   (case currency :usd "$" :eur "€" :gbp "£" "?"))

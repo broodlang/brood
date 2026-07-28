@@ -76,12 +76,12 @@ Common macros (expanded once at the compile pass — runtime-free): `defmacro`
 (defdyn *log-level* :info)                          ; dynamic variable
 (binding (*log-level* :debug) (do-thing))           ; scoped rebind
 
-(defrecord point (x y))                             ; a record IS a map: sugar, no new type
-(point 3 4)                                         ; => {:x 3 :y 4}  (positional constructor)
+(defrecord point (x y))                             ; a record: a map + a nominal identity
+(point 3 4)                                         ; => {:__id__ :<ns>/point, :x 3, :y 4}
 (point-x (point 3 4))                               ; => 3  (accessor per field; a typo is a
                                                     ;        checker-caught undefined-fn, not silent nil)
-;; update with plain assoc/merge; no `point?` predicate (records are structural).
-;; Typed fields emit sigs: (defrecord point ((x int) (y int)))
+;; update with plain assoc/merge; `(record? r)`/`(record-id r)`/`(fields r)` are the id
+;; API; a record is NOT `=` to a bare map (nominal). Typed fields: (defrecord point ((x int) (y int)))
 ```
 
 A `fn`/`defn` body of several forms is an **implicit `do`**: each is evaluated
@@ -275,18 +275,18 @@ offending value appended via `str`-style trailing args:
 
 When a `cond` on `type-of` would have to be *edited* for a caller to add a case, use
 an **ability**: an open generic function whose ops dispatch on the **first argument's
-identity**. `defability`/`impl`/`defrecord*` are **core** (in the prelude) — always
+identity**. `defability`/`impl`/`defrecord` are **core** (in the prelude) — always
 available, no import, no `(:use ability)`.
 
 An identity is either a built-in `type-of` **kind** (`:int`, `:string`, `:map`, …) or
-a **`defrecord*`** value's **nominal id** — a `:module/name` keyword baked in at
+a **`defrecord`** value's **nominal id** — a `:module/name` keyword baked in at
 definition, so two record shapes in one module dispatch apart.
 
 ```lisp
 (defmodule geometry)
 
-(defrecord* circle (r))                 ; a record WITH a dispatch identity
-(defrecord* rect (w h))
+(defrecord circle (r))                 ; a record WITH a dispatch identity
+(defrecord rect (w h))
 
 (defability Shape (area [self] :-> float))
 
@@ -315,11 +315,13 @@ named error, never `nil`:
 
 Other things worth knowing:
 
-- **Plain `defrecord` has no identity** — every such value dispatches as `:map`. Use
-  `defrecord*` when a shape must dispatch. A plain map carrying a `:type` field is
-  *never* rerouted; identity is explicit at construction, never sniffed.
-- **A record is still structurally a map.** `(type-of r)` is `:map`, and
-  `get`/`assoc`/`=` behave as on a map. The id lives in a reserved `:__id__` field, so
+- **Every `defrecord` value carries a nominal identity** — so it dispatches on its own
+  `:module/name` id, and two record shapes dispatch apart even with identical fields. A
+  plain map (even one carrying a `:type` field) is *never* rerouted — it dispatches as
+  `:map`; identity comes only from `defrecord`, never sniffed.
+- **A record is still a map underneath.** `(type-of r)` is `:map`, and `get`/`assoc`
+  behave as on a map. But a record is **NOT `=`** to a bare map with the same fields
+  (nominal, Elixir-struct semantics). The id lives in a reserved `:__id__` field, so
   `keys`/`count` include it — use `(fields r)` for the clean, id-free map, and
   `record?`/`record-id` to test/read the identity.
 - **A driver is just a value.** `(fetch db k)` picks its impl from `db`, so swapping

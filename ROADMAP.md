@@ -44,7 +44,7 @@ Shipped as ADRs:
   carried the checker/LSP conformance pass for months while the macros lived
   downstream. **Superseded by ADR-168:** `defprotocol`/`defimpl` dispatched only on
   `type-of`, so no two records could dispatch apart; they were retired in favour of
-  the ability system (`defability`/`impl`/`defrecord*`, nominal dispatch), now **core
+  the ability system (`defability`/`impl`/`defrecord`, nominal dispatch), now **core
   in the prelude**. `defbehaviour` stays in `std/protocol.blsp`.
   - ✅ **The display protocol** (ADR-171, 2026-07-28) — the first ability for
     open-extension rendering: `Display`/`to-str` (Elixir's `String.Chars`), with a
@@ -70,7 +70,7 @@ Shipped as ADRs:
     `impl`** (app/library line is already computable via package identity), advisory-live
     / hard-CI — no new form. What remains: dispatch specialized through the IC/JIT with
     deopt-on-reload and `:sealed` fully static/exhaustive (slice 5). **The ability system
-    itself is now core** — folded into the prelude, so `defability`/`impl`/`defrecord*`
+    itself is now core** — folded into the prelude, so `defability`/`impl`/`defrecord`
     are always available, no `(:use ability)`. **[kernel/checker/eval]**
     - ✅ **Slice 1 — optional + dev dependencies** (2026-07-28): the manifest takes
       `:optional true` per dep and a `:dev-dependencies` list (tagged `:dev true`, own
@@ -97,7 +97,10 @@ Shipped as ADRs:
       `Display`/`Inspect` folded into the prelude; the prelude wires `*show*` on by
       default. A record customizes printing with just `(impl Display …)` — no
       `(require 'show)`, no `display-on`. `std/ability.blsp` + `std/show.blsp` deleted
-      (their content is now prelude); the `Interp` needs no per-runtime load.
+      (their content is now prelude); the `Interp` needs no per-runtime load. **Records
+      unified**: `defrecord`/`defrecord*` collapsed into one identity-carrying `defrecord`
+      (constructor + accessors + nominal id + dispatch); records are now nominal (not `=`
+      to a bare map). The star is gone.
 - ✅ **ADR-159** — grapheme-*indexed* accessors (`grapheme-count`, `grapheme-at`,
   `substring-graphemes`), so the documented-correct cursor step stops costing a vector
   of every cluster in the string per keystroke.
@@ -151,10 +154,10 @@ What that review consciously left OPEN, with the reasoning:
   measured rewrite, not a promotion. **[kernel/Brood]**
 - ✅ **Record-shape dispatch** — resolved by **ADR-168**. Records stay structural maps
   (ADR-130 intact: `type-of` is still `:map`, `get`/`assoc`/`=` still structural), and
-  a `defrecord*` value carries a *dispatch-only* `:module/name` nominal identity baked
+  a `defrecord` value carries a *dispatch-only* `:module/name` nominal identity baked
   in at definition, so two record shapes dispatch apart. The rejected `:type`-field
   axis stays rejected: it would silently reroute any map carrying a `:type` key, where
-  a `defrecord*` identity is explicit and construction-time.
+  a `defrecord` identity is explicit and construction-time.
 - ⬜ **Transducer early termination** (`reduced`) and stateful-stage lifecycle.
   ADR-161 ships the one-arity contract `fold` needs; `take`-as-a-stage wants a
   `reduced` sentinel threaded through `fold`, the library's hottest function.

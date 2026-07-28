@@ -1,13 +1,13 @@
 ;; Unified generic functions with nominal dispatch — `std/ability.blsp`. ONE concept,
 ;; value dispatch on the first argument's identity: a built-in dispatches on its
-;; `type-of` kind, an identity-carrying record (`defrecord*`) on its baked `module/name`
+;; `type-of` kind, an identity-carrying record (`defrecord`) on its baked `module/name`
 ;; id. Subsumes value polymorphism (the `protocol` job) and drivers-as-values (part of
 ;; the `behaviour` job). Register-only — discovered and run by `nest test`.
 (defmodule ability-test (:use test) (:use json))
 
 ;; Records carry a nominal identity captured from THIS module (`ability-test`).
-(defrecord* circle (r))
-(defrecord* rect (w h))
+(defrecord circle (r))
+(defrecord rect (w h))
 
 ;; ---- value polymorphism: dispatch across built-in kinds AND record identities ----
 (defability Size (size [self] :-> int))
@@ -46,8 +46,8 @@
 
 ;; ---- drivers are values: the "behaviour" job in the SAME mechanism ----
 (defability Store (fetch [self k]))
-(defrecord* pg (pool))
-(defrecord* mem (data))
+(defrecord pg (pool))
+(defrecord mem (data))
 (impl Store ability-test/pg (fetch [db k] (str "pg:" (get db :pool) "/" k)))
 (impl Store ability-test/mem (fetch [db k] (get (get db :data) k)))
 

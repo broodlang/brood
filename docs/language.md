@@ -299,24 +299,30 @@ which is why `count` is O(1) and structural key equality is O(log n).
 
 ### Records
 
-`defrecord` names a map shape. It is **sugar over a plain map** — there is no new
-value kind and no nominal type: a record *is* a map, so every map operation above
-still applies. `(defrecord point (x y))` defines a positional constructor and one
-accessor per field:
+`defrecord` names a map shape and gives it a **nominal identity**. There is no new
+value kind — a record *is* a map underneath, so every map operation above still applies
+— but the constructor bakes in a reserved `:__id__` field holding a `:module/name`
+keyword, so `ability` dispatch tells a record apart from a bare map and from other
+records. `(defrecord point (x y))` defines a positional constructor and one accessor per
+field:
 
 ```lisp
 (defrecord point (x y))
-(def p (point 3 4))      ; => {:x 3 :y 4}   — a plain immutable map
+(def p (point 3 4))      ; => {:__id__ :<ns>/point, :x 3, :y 4}
 (point-x p)              ; => 3             — accessor, one per field
-(assoc p :x 9)           ; => {:x 9 :y 4}   — update with ordinary map ops
-(= (point 1 2) {:x 1 :y 2})   ; => true     — structural equality, records ARE maps
+(assoc p :x 9)           ; => a fresh record {…:x 9 :y 4}, id and all
+(fields p)               ; => {:x 3 :y 4}   — the clean, id-free view
+(record? p) (record-id p); => true, :<ns>/point
+(= (point 1 2) {:x 1 :y 2})   ; => false    — a record is NOT = a bare map (nominal)
+(= (point 1 2) (point 1 2))   ; => true     — same shape + same id
 ```
 
 The accessors are the reason to reach for it: `(point-x p)` names the field, and a
-typo `(point-witdh p)` is a call to an **undefined function** — caught by `nest
-check` and at runtime — whereas `(get p :witdh)` silently returns `nil`. Because a
-record is just a map, there is no `point?` predicate (records are structural, not
-nominal) and functional update is plain `assoc`/`merge`.
+typo `(point-witdh p)` is a call to an **undefined function** — caught by `nest check`
+and at runtime — whereas `(get p :witdh)` silently returns `nil`. Records are **nominal,
+not structural** (Elixir-struct semantics): a record is never `=` to a bare map with the
+same fields, and `record?`/`record-id`/`fields` are the identity API. Functional update
+is plain `assoc`/`merge` (the id rides along).
 
 A field may carry a type — `(defrecord point ((x int) (y int)))` — and when every
 field is typed, `(sig …)` declarations are emitted for the constructor and
@@ -332,22 +338,22 @@ open generic functions where each op dispatches on the **identity of its first
 argument**, and an implementation can be added for any identity — including a built-in
 kind — from any module, at any time, without editing the dispatcher.
 
-`defability`/`impl`/`defrecord*` are built in — always available, no import, no
+`defability`/`impl`/`defrecord` are built in — always available, no import, no
 `(:use ability)`.
 
 An argument's **dispatch identity** is one of two things:
 
 - for a built-in value, its `type-of` **kind** — `:int` `:float` `:string`
   `:keyword` `:map` `:vector` `:set` `:nil` `:pid` …;
-- for a value built by **`defrecord*`**, its **nominal id** — a `:module/name`
+- for a value built by **`defrecord`**, its **nominal id** — a `:module/name`
   keyword baked in at definition, so two record shapes defined in one module
   dispatch apart.
 
 ```clojure
 (defmodule geometry)
 
-(defrecord* circle (r))
-(defrecord* rect (w h))
+(defrecord circle (r))
+(defrecord rect (w h))
 
 (defability Shape
   "The area of a shape."
@@ -383,15 +389,12 @@ A missing implementation is a **loud, named error** — `ability Shape/area: no 
 for :geometry/circle — have (…)`, listing the ids that *are* implemented — never a
 silent `nil`.
 
-**Records dispatch as themselves; plain maps do not.** `(type-of r)` is still
-`:map` for a `defrecord*` value and `get`/`assoc`/`=` still treat it structurally
-(ADR-130 is intact) — the nominal id is a *dispatch-only* notion layered on top.
-Only values built by a `defrecord*` constructor dispatch nominally: a plain map,
-**even one carrying a `:type` field**, stays `:map`. That is the ADR-011 line — the
-identity is explicit and construction-time, never inferred from a field.
-
-Plain `defrecord` values have no identity and so all land on the `:map` impl. Use
-`defrecord*` when a shape needs to dispatch.
+**Records dispatch as themselves; plain maps do not.** `(type-of r)` is still `:map`
+for a `defrecord` value and `get`/`assoc` still treat it as a map — the nominal id is
+carried in a reserved `:__id__` field (a record is *not* `=` to a bare map, though). A
+`defrecord` value dispatches on its `:module/name` id; a plain map, **even one carrying
+a `:type` field**, stays `:map` and lands on the `:map` impl. That is the ADR-011 line —
+the identity is explicit and construction-time, never inferred from a field.
 
 **A driver is just a value.** Because dispatch is on the first argument, "swap the
 backend" needs no config indirection and no module-atom dispatch — you pass a
@@ -401,8 +404,8 @@ different value:
 (defmodule store)
 
 (defability Store (fetch [self k]))
-(defrecord* pg  (pool))
-(defrecord* mem (data))
+(defrecord pg  (pool))
+(defrecord mem (data))
 (impl Store store/pg  (fetch [db k] (str "pg:" (get db :pool) "/" k)))
 (impl Store store/mem (fetch [db k] (get (get db :data) k)))
 
@@ -438,7 +441,7 @@ never reaches the wire.
 **What the checker does.** `nest check` verifies each `impl` provides the ability's
 declared ops at the right arity and flags an op the ability never declared. It also
 warns at a **call site** when an op is applied to an argument of statically-known
-identity — a literal, a direct `defrecord*` constructor call, or a record-typed
+identity — a literal, a direct `defrecord` constructor call, or a record-typed
 variable — for which no impl and no `:default` is registered.
 
 > **Direction: [ADR-172](decisions.md) (amended 2026-07-28).** This open runtime model
@@ -473,7 +476,7 @@ and always on**. Its op **`(to-str x)`** turns a value into its display string; 
 
 ```clojure
 (defmodule money)             ; no (:use ability), no (:use show) — both are core
-(defrecord* usd (cents))
+(defrecord usd (cents))
 (impl Display usd
   (to-str [m] (str "$" (to-fixed (/ (get m :cents) 100.0) 2))))
 

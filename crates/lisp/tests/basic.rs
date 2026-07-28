@@ -909,10 +909,10 @@ fn hints_name_only_features_that_exist() {
     let d = hint("(deftype foo)");
     assert!(d.contains("defability"), "{d}");
     assert!(d.contains("defrecord"), "{d}");
-    // …and the claim is checked against the live image: `defability`/`impl`/`defrecord*`
+    // …and the claim is checked against the live image: `defability`/`impl`/`defrecord`
     // are bound bare at the root, out of the box.
     assert_eq!(
-        run("(list (bound? 'defability) (bound? 'impl) (bound? 'defrecord*))"),
+        run("(list (bound? 'defability) (bound? 'impl) (bound? 'defrecord))"),
         "(true true true)"
     );
     // `letfn` → letrec (a let-bound fn cannot call itself).
