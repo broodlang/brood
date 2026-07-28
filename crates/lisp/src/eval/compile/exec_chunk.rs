@@ -415,7 +415,7 @@ pub(crate) fn exec_chunk(
                 for k in 0..argc {
                     argv.push(heap.root_at(n - argc + k));
                 }
-                let mut fast: Option<(Arc<CompiledArm>, EnvId)> = None;
+                let mut fast: Option<(Arc<CompiledArm>, EnvId, (u32, u32))> = None;
                 let (callee, drop_base) = if let Some(sym) = head {
                     let drop_base = n - argc;
                     if *site != NO_SITE && heap.is_global(cur_env) {
@@ -451,7 +451,9 @@ pub(crate) fn exec_chunk(
                                 }
                                 _ => None,
                             };
-                            fast = arm.clone();
+                            fast = arm
+                                .as_ref()
+                                .map(|(a, cenv)| (a.clone(), *cenv, heap.vm_arm_block(a)));
                             if !value::is_dynamic(*sym) {
                                 heap.vm_call_ic_put(
                                     *site,
@@ -461,6 +463,9 @@ pub(crate) fn exec_chunk(
                                         epoch,
                                         callee: v,
                                         arm,
+                                        // Overwritten inside `vm_call_ic_put` (it
+                                        // resolves the callee's block itself).
+                                        callee_bases: (0, 0),
                                         fast: std::cell::Cell::new(None),
                                     },
                                 );
@@ -496,7 +501,7 @@ pub(crate) fn exec_chunk(
                 // between, so the values are still valid. We skip the inline if GC is due
                 // so the outer loop can collect (and can't have stale off-heap SmallVec).
                 if *tail {
-                    if let Some((ref compiled, cenv)) = fast {
+                    if let Some((ref compiled, cenv, _)) = fast {
                         if std::ptr::eq(compiled.as_ref(), arm)
                             && arm.noptional == 0
                             && arm.rest_slot.is_none()
@@ -541,10 +546,11 @@ pub(crate) fn exec_chunk(
                 // resolved arm + args + env, **un-run**) and a native / tree-walked
                 // callee comes back executed as `Step::Done(value)`.
                 let step = match fast {
-                    Some((arm, cenv)) => Step::Tail {
+                    Some((arm, cenv, bases)) => Step::Tail {
                         compiled: arm,
                         args: argv,
                         genv: cenv,
+                        bases,
                     },
                     None => match dispatch(heap, callee, argv, true, cur_env) {
                         Ok(s) => s,
@@ -583,10 +589,12 @@ pub(crate) fn exec_chunk(
                             compiled,
                             args,
                             genv,
+                            bases,
                         } => ChunkExit::Tail {
                             arm: compiled,
                             args,
                             genv,
+                            bases,
                         },
                         Step::Done(v) => ChunkExit::Done(v),
                     });
@@ -598,12 +606,14 @@ pub(crate) fn exec_chunk(
                         compiled,
                         args,
                         genv,
+                        bases,
                     } => {
                         heap.truncate_roots(drop_base);
                         return Ok(ChunkExit::Call {
                             arm: compiled,
                             args,
                             genv,
+                            bases,
                         });
                     }
                     // Native / tree-walked callee already ran: push its value and continue.

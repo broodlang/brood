@@ -310,6 +310,11 @@ impl Heap {
         #[cfg(debug_assertions)]
         self.dbg_site_pos.borrow_mut().clear();
         self.vm_global_ics.borrow_mut().clear();
+        // ADR-175 Phase A: the per-arm block registry indexes the tables just cleared,
+        // so it clears in lockstep. Live arms re-resolve fresh blocks on their next
+        // activation; the currently-executing arm's stale cursors are benign (probes
+        // bounds-check → miss, and every entry validates sym+argc+epoch).
+        self.arm_ic_blocks.borrow_mut().clear();
         migrated
     }
 
@@ -363,6 +368,11 @@ impl Heap {
         #[cfg(debug_assertions)]
         self.dbg_site_pos.borrow_mut().clear();
         self.vm_global_ics.borrow_mut().clear();
+        // ADR-175 Phase A: the per-arm block registry indexes the tables just cleared,
+        // so it clears in lockstep. Live arms re-resolve fresh blocks on their next
+        // activation; the currently-executing arm's stale cursors are benign (probes
+        // bounds-check → miss, and every entry validates sym+argc+epoch).
+        self.arm_ic_blocks.borrow_mut().clear();
         // Drop the shared JIT-code caches (the version bump already epoch-invalidated
         // them; clearing reclaims the memory and prevents a recycled id lingering).
         if let Ok(mut c) = self.runtime.jit_code_cache.write() {
@@ -1151,6 +1161,11 @@ impl Heap {
         #[cfg(debug_assertions)]
         self.dbg_site_pos.borrow_mut().clear();
         self.vm_global_ics.borrow_mut().clear();
+        // ADR-175 Phase A: the per-arm block registry indexes the tables just cleared,
+        // so it clears in lockstep. Live arms re-resolve fresh blocks on their next
+        // activation; the currently-executing arm's stale cursors are benign (probes
+        // bounds-check → miss, and every entry validates sym+argc+epoch).
+        self.arm_ic_blocks.borrow_mut().clear();
 
         debug_assert!(
             verify_rt_slabs(&new),

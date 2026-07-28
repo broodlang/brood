@@ -86,7 +86,7 @@ pub use ir::{
 };
 // pub(super) items from ir: explicitly imported so `use ir::*` (pub-only) doesn't miss them.
 // pub items re-exported above; these are pub(super) items needed internally:
-use ir::{ArmSpec, ChunkExit, Step};
+use ir::{next_arm_uid, ArmSpec, ChunkExit, Step};
 // NodePtr is pub in ir, but not re-exported from mod.rs — import privately:
 use ir::NodePtr;
 
@@ -150,6 +150,19 @@ struct Scope {
     /// for an ordinary closure (and unset while compiling a nested `(fn …)`, which
     /// gets its own scope).
     self_call: Option<(Symbol, usize)>,
+    /// Per-arm call-site IC counter (ADR-175 Phase A): sites number from 0 within the
+    /// arm being compiled, so the compiled arm is position-independent — each process
+    /// resolves its own IC block for the arm and indexes `base + site`. Replaces the
+    /// per-process `Heap::vm_site_alloc` absolute numbering, under which a shared
+    /// arm's sites only made sense in the process that compiled it.
+    sites: u32,
+    /// Per-arm global-read IC counter — the `Node::GlobalIc` counterpart of `sites`.
+    gsites: u32,
+    /// Source positions per arm-relative call site (indexed by site id). Moved into
+    /// the [`CompiledArm`] at construction; see `CompiledArm::site_pos`. Unconditional
+    /// (not debug-gated) so every construction site stays cfg-free; the cost is a few
+    /// hundred bytes per compiled arm, shared per-runtime once arms are shared.
+    site_pos: Vec<Option<(crate::error::Pos, Option<std::sync::Arc<str>>)>>,
 }
 
 impl Scope {
@@ -162,7 +175,22 @@ impl Scope {
             unsafe_slots: Vec::new(),
             letrec_self: None,
             self_call: None,
+            sites: 0,
+            gsites: 0,
+            site_pos: Vec::new(),
         }
+    }
+    /// Allocate the next arm-relative call-site id (see the `sites` field).
+    fn site_alloc(&mut self) -> u32 {
+        let s = self.sites;
+        self.sites += 1;
+        s
+    }
+    /// Allocate the next arm-relative global-read site id.
+    fn gsite_alloc(&mut self) -> u32 {
+        let s = self.gsites;
+        self.gsites += 1;
+        s
     }
     fn with_params(params: &[Symbol]) -> Self {
         let mut s = Scope::new();
@@ -753,7 +781,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
             Some(slot) => Some(Node::Local(slot)),
             None => Some(Node::GlobalIc {
                 sym: s,
-                site: heap.vm_gsite_alloc(),
+                site: scope.gsite_alloc(),
             }),
         },
 
@@ -994,16 +1022,22 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
             // a local/computed callee can resolve to a different function per
             // call, so it keeps the generic path.
             let site = match callee {
-                Node::Global(_) => heap.vm_site_alloc(),
+                Node::Global(_) => scope.site_alloc(),
                 _ => NO_SITE,
             };
             let (pos, file) = match heap.form_pos(form) {
                 Some((p, f)) => (Some(p), f),
                 None => (None, None),
             };
-            #[cfg(debug_assertions)]
             if site != NO_SITE {
-                heap.dbg_set_site_pos(site, pos, file.clone());
+                // Arm-relative: accumulate on the scope; `compile_arm` moves the vec
+                // into the CompiledArm, and `Heap::vm_arm_block` copies it into the
+                // process's absolute table (debug builds) when the block is resolved.
+                let idx = site as usize;
+                if scope.site_pos.len() <= idx {
+                    scope.site_pos.resize(idx + 1, None);
+                }
+                scope.site_pos[idx] = pos.map(|p| (p, file.clone()));
             }
             Some(Node::Call {
                 callee: Box::new(callee),
@@ -1480,6 +1514,10 @@ fn compile_arm(
         optional_defaults,
         rest_slot: rest.map(|_| nrequired + noptional),
         nslots: nslots_total,
+        nsites: scope.sites,
+        ngsites: scope.gsites,
+        uid: next_arm_uid(),
+        site_pos: std::mem::take(&mut scope.site_pos).into_boxed_slice(),
         body,
         chunk,
         has_runtime_handles,
@@ -1722,6 +1760,9 @@ fn hof_fast_enabled() -> bool {
 pub(crate) struct HofArm {
     id: ClosureId,
     arm: Arc<CompiledArm>,
+    /// The step arm's IC block ([`Heap::vm_arm_block`]), resolved once here so the
+    /// per-element native fast-frame installs it without a registry lookup.
+    bases: (u32, u32),
 }
 
 /// Resolve `f` to a cached [`HofArm`] if it's a **plain fixed-arity-`argc` VM closure** (not a
@@ -1743,7 +1784,8 @@ pub(crate) fn hof_resolve(heap: &Heap, f: Value, argc: usize) -> Option<HofArm> 
     if arm.nrequired != argc || arm.noptional != 0 || arm.rest_slot.is_some() {
         return None;
     }
-    Some(HofArm { id, arm })
+    let bases = heap.vm_arm_block(&arm);
+    Some(HofArm { id, arm, bases })
 }
 
 /// Call the cached step closure on `args`. `f` is the *current* (rooted, GC-relocated) closure
@@ -1772,7 +1814,7 @@ pub(crate) fn hof_apply_step(
     // shape) or deopts.
     #[cfg(feature = "jit")]
     if hof_native_enabled() {
-        if let Some(r) = hof_apply_native(heap, &hof.arm, args, cenv) {
+        if let Some(r) = hof_apply_native(heap, &hof.arm, args, cenv, hof.bases) {
             return Some(r);
         }
     }
@@ -1804,6 +1846,7 @@ fn hof_apply_native(
     arm: &Arc<CompiledArm>,
     args: &[Value],
     cenv: EnvId,
+    bases: (u32, u32),
 ) -> Option<LispResult> {
     use std::sync::atomic::Ordering::Acquire;
     let argc = args.len();
@@ -1851,6 +1894,8 @@ fn hof_apply_native(
     let depth = heap.jit_native_depth;
     let saved = std::mem::replace(&mut heap.jit_call_env, env_root);
     let saved_fn = std::mem::replace(&mut heap.jit_dbg_fn, dbg_sym);
+    // The step's native reads its OWN IC block through the heap cursors (ADR-175).
+    let saved_bases = heap.set_ic_bases(bases);
     heap.jit_native_depth = depth + 1;
     // SAFETY: `code` is a finalized `extern "C" fn(*mut Heap, base)` from `jit_lower_arm`, kept
     // for the process in `GLOBAL_JIT`; the frame is at `roots[base..]`; validated current by the
@@ -1858,6 +1903,7 @@ fn hof_apply_native(
     let f: extern "C" fn(*mut Heap, i64) -> i64 = unsafe { std::mem::transmute(code) };
     let outcome = f(heap as *mut Heap, base as i64);
     heap.jit_native_depth = depth;
+    heap.set_ic_bases(saved_bases);
     heap.jit_call_env = saved;
     heap.jit_dbg_fn = saved_fn;
     // Deopt feedback (see `jit_deopt_feedback`): the HOF step arm is the canonical
@@ -1952,6 +1998,9 @@ fn force(heap: &mut Heap, step: Step) -> LispResult {
             compiled,
             args,
             genv,
+            // `vm_apply` resolves + installs the callee's block itself (and restores
+            // the caller's on exit), so the step's memoised bases aren't needed here.
+            bases: _,
         } => vm_apply(heap, compiled, &args, genv),
     }
 }
@@ -2029,6 +2078,9 @@ pub(crate) struct BcFrame {
     env: EnvRoot,
     env_base: usize,
     arm_slot: usize,
+    /// This frame's arm's IC block bases (ADR-175 Phase A) — reinstalled as the
+    /// heap's current cursors when control returns to (or resumes) this frame.
+    ic_bases: (u32, u32),
     /// Persisted back-edge counter for this frame — see `exec_chunk`'s `back_edges` param.
     #[cfg(feature = "jit")]
     back_edges: u32,
@@ -2121,6 +2173,13 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 optional_defaults: Box::new([]),
                 rest_slot: None,
                 nslots: scope.max,
+                // Top-level forms allocate sites through this scope like any arm; the
+                // throwaway arm needs the counts so `exec_value`'s activation resolves
+                // an IC block covering them.
+                nsites: scope.sites,
+                ngsites: scope.gsites,
+                uid: next_arm_uid(),
+                site_pos: std::mem::take(&mut scope.site_pos).into_boxed_slice(),
                 body: node,
                 // Top-level forms run via `exec_value` below, not the bytecode loop
                 // (Stage 1 bytecode is reached only through `vm_apply`); no chunk.
@@ -2165,7 +2224,12 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
             for _ in 0..scope.max {
                 heap.push_root(Value::nil());
             }
+            // Install the top-level form's IC block for its activation (ADR-175
+            // Phase A), restoring the caller's after — `run` nests (a `load` inside
+            // an arm), so the enclosing activation's cursors must survive.
+            let saved_bases = heap.set_ic_bases(heap.vm_arm_block(&arm));
             let r = exec_value(heap, &arm.body, base, genv);
+            heap.set_ic_bases(saved_bases);
             heap.truncate_roots(base);
             heap.truncate_env_roots(env_base);
             if arm_slot != usize::MAX {

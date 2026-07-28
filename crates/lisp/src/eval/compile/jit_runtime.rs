@@ -701,7 +701,7 @@ pub(crate) fn jit_run_fast_link(
             for k in 0..argc {
                 argv2.push(heap.root_at(base + k));
             }
-            if let Some((_, Some((arm, cenv)))) =
+            if let Some((_, Some((arm, cenv, _)))) =
                 heap.vm_call_ic_probe(site, head, argc as u32, epoch)
             {
                 // Deopt feedback (see `jit_deopt_feedback`): the fast-link hot path
@@ -922,9 +922,9 @@ pub(crate) fn jit_dispatch_call(
                 };
             }};
         }
-        let resolved: Option<(Arc<CompiledArm>, EnvId)> = if elided {
+        let resolved: Option<(Arc<CompiledArm>, EnvId, (u32, u32))> = if elided {
             match heap.vm_call_ic_probe(site, head, argc as u32, epoch) {
-                Some((_, Some((a, env)))) => Some((a, env)),
+                Some((_, Some(t))) => Some(t),
                 // IC hit on a NATIVE callee (arm-less entry, filled below on first
                 // resolve): the whole call is one arity-checked fn-pointer call.
                 Some((v, None)) if !over_cap => {
@@ -948,6 +948,7 @@ pub(crate) fn jit_dispatch_call(
                     match heap.env_get(cenv, head).map(|v| v.unpack()) {
                         Some(ValueRef::Fn(id)) => compiled_arm_for(heap, id, argc).map(|a| {
                             let env = heap.closure(id).env.unwrap_or_else(|| heap.global());
+                            let cb = heap.vm_arm_block(&a);
                             if !value::is_dynamic(head) {
                                 heap.vm_call_ic_put(
                                     site,
@@ -957,11 +958,13 @@ pub(crate) fn jit_dispatch_call(
                                         epoch,
                                         callee: Value::func(id),
                                         arm: Some((a.clone(), env)),
+                                        // Overwritten inside `vm_call_ic_put`.
+                                        callee_bases: (0, 0),
                                         fast: std::cell::Cell::new(None),
                                     },
                                 );
                             }
-                            (a, env)
+                            (a, env, cb)
                         }),
                         // A builtin callee: fill an arm-less IC entry (so the next call
                         // takes the direct path above) and call it now. Dynamic heads are
@@ -976,6 +979,7 @@ pub(crate) fn jit_dispatch_call(
                                         epoch,
                                         callee: Value::native(nid),
                                         arm: None,
+                                        callee_bases: (0, 0),
                                         fast: std::cell::Cell::new(None),
                                     },
                                 );
@@ -1000,12 +1004,15 @@ pub(crate) fn jit_dispatch_call(
                 }
             }
         } else if let ValueRef::Fn(id) = heap.root_at(stage_base).unpack() {
-            compiled_arm_for(heap, id, argc)
-                .map(|a| (a, heap.closure(id).env.unwrap_or_else(|| heap.global())))
+            compiled_arm_for(heap, id, argc).map(|a| {
+                let env = heap.closure(id).env.unwrap_or_else(|| heap.global());
+                let cb = heap.vm_arm_block(&a);
+                (a, env, cb)
+            })
         } else {
             None
         };
-        if let Some((arm, callee_env)) = resolved {
+        if let Some((arm, callee_env, callee_bases)) = resolved {
             let code = arm.jit_code.load(Acquire);
             let installed =
                 !code.is_null() && code != crate::jit::BAILED && code != crate::jit::QUEUED;
@@ -1067,7 +1074,12 @@ pub(crate) fn jit_dispatch_call(
                 heap.jit_native_depth = depth + 1;
                 stamp_stack_limit_if_outermost(heap, depth);
                 let saved_force_vm = heap.jit_force_vm;
+                // The callee's native code reads its OWN IC block through the heap
+                // cursors (fast-link base, IC callbacks) — install it for the call and
+                // restore the caller's around it, like `jit_call_env` above.
+                let saved_bases = heap.set_ic_bases(callee_bases);
                 let outcome = f(heap as *mut Heap, base as i64);
+                heap.set_ic_bases(saved_bases);
                 heap.jit_force_vm = saved_force_vm;
                 heap.jit_native_depth = depth;
                 heap.jit_call_env = saved;
@@ -1205,6 +1217,7 @@ pub(crate) fn jit_dispatch_call(
             compiled,
             args,
             genv,
+            bases: _,
         }) => vm_apply(heap, compiled, &args, genv),
         Err(e) => Err(e),
     };
@@ -1296,10 +1309,12 @@ pub(crate) fn jit_dispatch_tail(
             compiled,
             args,
             genv,
+            bases,
         } => ChunkExit::Tail {
             arm: compiled,
             args,
             genv,
+            bases,
         },
         Step::Done(v) => ChunkExit::Done(v),
     })
@@ -1400,6 +1415,7 @@ pub(crate) fn vm_resume_deopt(
             env: env_root,
             env_base,
             arm_slot,
+            ic_bases: heap.vm_arm_block(&arm),
             back_edges: 0,
         },
         entry_roots: base,
@@ -1408,7 +1424,12 @@ pub(crate) fn vm_resume_deopt(
         deadline: None,
     };
     let genv = heap.global();
-    match vm_run_bc(heap, arm, &[], genv, Some(s), false)? {
+    // Nested run: the caller's native frame continues with ITS block after this
+    // returns, so restore the cursors like `vm_apply` does.
+    let saved_bases = heap.ic_bases();
+    let out = vm_run_bc(heap, arm, &[], genv, Some(s), false);
+    heap.set_ic_bases(saved_bases);
+    match out? {
         VmOutcome::Done(v) => Ok(v),
         // Native-nested receive-suspend: same discipline as `vm_apply`.
         VmOutcome::Suspended(s) => {

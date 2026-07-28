@@ -24,6 +24,10 @@ pub struct CallIcEntry {
     /// The VM fast path: the callee's compiled arm for `argc` + its captured env,
     /// when the callee resolved to a non-passthrough VM-eligible closure.
     pub arm: Option<(Arc<crate::eval::compile::CompiledArm>, EnvId)>,
+    /// The callee arm's IC block in **this process** (resolved once at install via
+    /// [`Heap::vm_arm_block`]), so entering the callee on an IC hit sets the cursors
+    /// without a registry lookup on the hot path. Meaningless when `arm` is `None`.
+    pub callee_bases: (u32, u32),
     /// Cached JIT fast-link result `(code_ptr_as_usize, nslots, env)` — the validated
     /// output of [`Heap::vm_call_ic_fast_link`], memoised so the hot recursive call
     /// skips the per-call atomic loads (`jit_code`/`compile_epoch`) + arm-shape checks.
@@ -153,43 +157,83 @@ impl Heap {
         self.vm_cache.borrow_mut().insert(k, v);
     }
 
-    /// Allocate a fresh call-site id for a compiled `Node::Call` whose callee is
-    /// a global symbol (ADR-096). Interior-mutable (`&self`) because compilation
-    /// runs against a shared heap borrow.
-    pub fn vm_site_alloc(&self) -> u32 {
-        let mut t = self.vm_call_ics.borrow_mut();
-        t.push(None);
-        // Grow the IR-readable mirror in lockstep, so `vm_fast_links[site]` is always
-        // in range for any site `vm_call_ics` knows about (the JIT bounds-checks anyway,
-        // but this keeps the two tables the same length — see [`Self::vm_fast_links`]).
-        self.vm_fast_links.borrow_mut().push(FastLink::EMPTY);
+    /// Resolve **this process's IC block** for `arm` (ADR-175 Phase A): the pair of
+    /// contiguous base offsets — `(call-site base, global-site base)` — under which the
+    /// arm's arm-relative site ids index this process's IC tables. Lazily allocated on
+    /// first activation: the tables grow by `nsites`/`ngsites` and the block is
+    /// remembered under the arm's process-independent [`CompiledArm::uid`], so a shared
+    /// arm gets one block per process that actually runs it (and a process that never
+    /// runs it pays nothing). The compiling process is not special — it resolves a
+    /// block exactly like an installer would.
+    pub fn vm_arm_block(&self, arm: &crate::eval::compile::CompiledArm) -> (u32, u32) {
+        if arm.nsites == 0 && arm.ngsites == 0 {
+            return (0, 0); // site-free arm: any base works, never indexed
+        }
+        if let Some(&b) = self.arm_ic_blocks.borrow().get(&arm.uid) {
+            return b;
+        }
+        let base = {
+            let mut t = self.vm_call_ics.borrow_mut();
+            let base = t.len();
+            let new_len = base + arm.nsites as usize;
+            t.resize_with(new_len, || None);
+            // Grow the IR-readable mirror in lockstep, so `vm_fast_links[base + site]`
+            // is always in range for any site `vm_call_ics` knows about.
+            self.vm_fast_links
+                .borrow_mut()
+                .resize(new_len, FastLink::EMPTY);
+            base as u32
+        };
         #[cfg(debug_assertions)]
-        self.dbg_site_pos.borrow_mut().push(None);
-        (t.len() - 1) as u32
+        {
+            // Copy the arm's compile-time site positions into the absolute debug table.
+            let mut dbg = self.dbg_site_pos.borrow_mut();
+            dbg.resize(base as usize + arm.nsites as usize, None);
+            for (i, p) in arm.site_pos.iter().enumerate() {
+                if i < arm.nsites as usize {
+                    dbg[base as usize + i] = p.clone();
+                }
+            }
+        }
+        let gbase = {
+            let mut t = self.vm_global_ics.borrow_mut();
+            let gbase = t.len();
+            let new_len = gbase + arm.ngsites as usize;
+            t.resize_with(new_len, || None);
+            gbase as u32
+        };
+        self.arm_ic_blocks
+            .borrow_mut()
+            .insert(arm.uid, (base, gbase));
+        (base, gbase)
     }
 
-    /// DEBUG ONLY: record call site `site`'s source position (compile time). See
-    /// [`Self::dbg_site_pos`].
-    #[cfg(debug_assertions)]
-    pub fn dbg_set_site_pos(
-        &self,
-        site: u32,
-        pos: Option<crate::error::Pos>,
-        file: Option<Arc<str>>,
-    ) {
-        if let (Some(p), Some(slot)) = (pos, self.dbg_site_pos.borrow_mut().get_mut(site as usize))
-        {
-            *slot = Some((p, file));
-        }
+    /// The current activation's IC block bases — set by the drivers at every arm
+    /// transition (call/tail/return/resume/native entry), read by every site-indexed
+    /// method below. Returns the previous pair, for save/restore around a transition.
+    #[inline]
+    pub fn set_ic_bases(&self, bases: (u32, u32)) -> (u32, u32) {
+        let old = (self.cur_ic_base.get(), self.cur_gic_base.get());
+        self.cur_ic_base.set(bases.0);
+        self.cur_gic_base.set(bases.1);
+        old
+    }
+
+    /// The current activation's IC block bases (see [`Self::set_ic_bases`]).
+    #[inline]
+    pub fn ic_bases(&self) -> (u32, u32) {
+        (self.cur_ic_base.get(), self.cur_gic_base.get())
     }
 
     /// DEBUG ONLY: look up a call site's recorded source position as `file:line:col`.
+    /// `site` is arm-relative (the current activation's block is added, like every
+    /// site-indexed path).
     #[cfg(debug_assertions)]
     pub fn dbg_site_loc(&self, site: u32) -> String {
         match self
             .dbg_site_pos
             .borrow()
-            .get(site as usize)
+            .get((self.cur_ic_base.get() + site) as usize)
             .and_then(|o| o.clone())
         {
             Some((p, file)) => format!("{}:{}:{}", file.as_deref().unwrap_or("?"), p.line, p.col),
@@ -197,19 +241,12 @@ impl Heap {
         }
     }
 
-    /// Allocate a fresh global-read site id for a compiled `Node::GlobalIc`.
-    pub fn vm_gsite_alloc(&self) -> u32 {
-        let mut t = self.vm_global_ics.borrow_mut();
-        t.push(None);
-        (t.len() - 1) as u32
-    }
-
     /// Probe global-read site `site`: a hit requires the same symbol and the
     /// current epoch (see [`Self::vm_call_ic_probe`] for the validation story).
     #[inline]
     pub fn vm_global_ic_probe(&self, site: u32, sym: Symbol, epoch: u64) -> Option<Value> {
         let t = self.vm_global_ics.borrow();
-        let e = t.get(site as usize)?.as_ref()?;
+        let e = t.get((self.cur_gic_base.get() + site) as usize)?.as_ref()?;
         if e.sym == sym && e.epoch == epoch {
             Some(e.value)
         } else {
@@ -225,7 +262,7 @@ impl Heap {
             return;
         }
         let mut t = self.vm_global_ics.borrow_mut();
-        if let Some(slot) = t.get_mut(site as usize) {
+        if let Some(slot) = t.get_mut((self.cur_gic_base.get() + site) as usize) {
             *slot = Some(GlobalIcEntry { sym, epoch, value });
         }
     }
@@ -244,12 +281,17 @@ impl Heap {
         epoch: u64,
     ) -> Option<(
         Value,
-        Option<(Arc<crate::eval::compile::CompiledArm>, EnvId)>,
+        Option<(Arc<crate::eval::compile::CompiledArm>, EnvId, (u32, u32))>,
     )> {
         let t = self.vm_call_ics.borrow();
-        let e = t.get(site as usize)?.as_ref()?;
+        let e = t.get((self.cur_ic_base.get() + site) as usize)?.as_ref()?;
         if e.sym == sym && e.argc == argc && e.epoch == epoch {
-            Some((e.callee, e.arm.clone()))
+            Some((
+                e.callee,
+                e.arm
+                    .as_ref()
+                    .map(|(a, env)| (a.clone(), *env, e.callee_bases)),
+            ))
         } else {
             None
         }
@@ -274,7 +316,7 @@ impl Heap {
     ) -> Option<(*const u8, usize, EnvId)> {
         use std::sync::atomic::Ordering::Acquire;
         let t = self.vm_call_ics.borrow();
-        let e = t.get(site as usize)?.as_ref()?;
+        let e = t.get((self.cur_ic_base.get() + site) as usize)?.as_ref()?;
         if e.sym != sym || e.argc != argc || e.epoch != epoch {
             return None;
         }
@@ -318,7 +360,11 @@ impl Heap {
         // Mirror into the IR-readable flat table so the next call reaches the native code
         // straight from JIT'd code (epoch-guarded raw load) without re-entering this probe.
         // Same data, written in lockstep — [`brood_rt_fast_frame`] debug-asserts they agree.
-        if let Some(slot) = self.vm_fast_links.borrow_mut().get_mut(site as usize) {
+        if let Some(slot) = self
+            .vm_fast_links
+            .borrow_mut()
+            .get_mut((self.cur_ic_base.get() + site) as usize)
+        {
             *slot = FastLink {
                 epoch,
                 code: code as u64,
@@ -351,7 +397,11 @@ impl Heap {
         epoch: u64,
         func: u64,
     ) {
-        if let Some(slot) = self.vm_fast_links.borrow_mut().get_mut(site as usize) {
+        if let Some(slot) = self
+            .vm_fast_links
+            .borrow_mut()
+            .get_mut((self.cur_ic_base.get() + site) as usize)
+        {
             *slot = FastLink {
                 epoch,
                 code: func,
@@ -376,7 +426,13 @@ impl Heap {
         // and the IR's use of the pointer (a `def`/compaction that would clear it can't run
         // concurrently with this process executing an arm).
         let v = unsafe { &*self.vm_fast_links.as_ptr() };
-        (v.as_ptr(), v.len())
+        // Block-adjusted for the current activation (ADR-175 Phase A): the IR indexes
+        // with the arm-relative site id, so hand it the current arm's block as if it
+        // were the whole table. `min` guards a stale cursor after a `runtime_collect`
+        // table clear (the IR then sees len 0 → every site misses → slow path, exactly
+        // the pre-existing degradation semantics for a live arm across a clear).
+        let base = (self.cur_ic_base.get() as usize).min(v.len());
+        (unsafe { v.as_ptr().add(base) }, v.len() - base)
     }
 
     /// Install (or overwrite) call-site `site`'s inline cache entry. An
@@ -388,7 +444,7 @@ impl Heap {
     /// heap (whose "global" env is a plain LOCAL frame of unpromoted values)
     /// simply never caches, which is correct — its handles are re-tagged
     /// wholesale by `freeze_as_shared_code`.
-    pub fn vm_call_ic_put(&self, site: u32, entry: CallIcEntry) {
+    pub fn vm_call_ic_put(&self, site: u32, mut entry: CallIcEntry) {
         if is_movable(entry.callee) {
             return;
         }
@@ -397,13 +453,20 @@ impl Heap {
                 return;
             }
         }
+        // Resolve the callee arm's IC block BEFORE borrowing the table below —
+        // `vm_arm_block` may grow `vm_call_ics` (a nested mutable borrow otherwise).
+        entry.callee_bases = match &entry.arm {
+            Some((arm, _)) => self.vm_arm_block(arm),
+            None => (0, 0),
+        };
+        let abs = (self.cur_ic_base.get() + site) as usize;
         let mut t = self.vm_call_ics.borrow_mut();
-        if let Some(slot) = t.get_mut(site as usize) {
+        if let Some(slot) = t.get_mut(abs) {
             *slot = Some(entry);
             // The replacing entry's `fast` memo starts empty; clear the IR-readable mirror
             // too so it never leads the IC. It is re-populated the next time
             // [`Self::vm_call_ic_fast_link`] validates the (now installed) arm.
-            if let Some(fl) = self.vm_fast_links.borrow_mut().get_mut(site as usize) {
+            if let Some(fl) = self.vm_fast_links.borrow_mut().get_mut(abs) {
                 *fl = FastLink::EMPTY;
             }
         }
