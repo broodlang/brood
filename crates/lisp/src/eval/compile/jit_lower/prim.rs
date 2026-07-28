@@ -66,13 +66,47 @@ pub(super) fn emit_prim1(
                 //   bits 32..60 = gen epoch (ignored here)
                 //   bit  61     = age  (0=nursery, 1=old)
                 //   bits 62..63 = region (0=LOCAL, 1=PRELUDE, 2=RUNTIME)
-                // Deopt for non-LOCAL (PRELUDE/RUNTIME) — uncommon on hot cons-list
-                // paths; the VM handles those correctly.
+                // Non-LOCAL (PRELUDE/RUNTIME) reads take the `car`/`cdr` callback rather
+                // than deopting. Deopting here was a **70x cliff on `def`'d data**: the
+                // deopt fires per element, the arm's consecutive-deopt counter bails it,
+                // and the whole loop reverts to the interpreter — measured 2026-07-28 at
+                // 77 ns/element walking a `def`'d list against 1 ns for the identical loop
+                // over a LOCAL one, i.e. exactly the `BROOD_NO_JIT=1` time. A global
+                // holding a data structure is ordinary Brood (`sort` walks a `def`'d list;
+                // `matmul` derefs a `def`'d matrix ~16 M times), so this is not the rare
+                // path the old comment assumed.
+                //
+                // The shared regions cannot use the inline `base + idx*48` form at all:
+                // their slabs are `boxcar::Vec`, chunked rather than contiguous, so there
+                // is no single base pointer to hoist. One call per read is the cheap
+                // option, and it keeps the arm native instead of surrendering the loop.
                 let high2 = b.ins().ushr_imm(w1, 62);
                 let is_local = b.ins().icmp_imm(IntCC::Equal, high2, 0i64);
                 let local_cont = b.create_block();
-                b.ins().brif(is_local, local_cont, &[], deopt, &[]);
+                let shared_cont = b.create_block();
+                let join = b.create_block();
+                for _ in 0..3 {
+                    b.append_block_param(join, types::I64);
+                }
+                b.ins().brif(is_local, local_cont, &[], shared_cont, &[]);
+
+                // PRELUDE/RUNTIME: one callback, result joined with the inline path.
+                b.switch_to_block(shared_cont);
+                b.seal_block(shared_cont);
+                let sref = match op {
+                    PrimOp1::First => funcs.car,
+                    PrimOp1::Rest => funcs.cdr,
+                    _ => unreachable!(),
+                };
+                let shared = call_handle(b, sref, &[w0, w1, w2], funcs);
+                let (s0, s1, s2) = match shared {
+                    Op::Handle(a, c, d) => (a, c, d),
+                    _ => unreachable!("call_handle yields a Handle"),
+                };
+                b.ins().jump(join, &[s0.into(), s1.into(), s2.into()]);
+
                 b.switch_to_block(local_cont);
+                b.seal_block(local_cont);
                 // Age bit 61: 0=nursery, 1=old. After the LOCAL check, bits 62-63 are
                 // 0, so ushr by 61 gives exactly 0 or 1.
                 let age_shifted = b.ins().ushr_imm(w1, 61);
@@ -104,7 +138,12 @@ pub(super) fn emit_prim1(
                     field_ptr,
                     PAYLOAD_OFFSET as i32 + 8,
                 );
-                Op::Handle(rw0, rw1, rw2)
+                b.ins().jump(join, &[rw0.into(), rw1.into(), rw2.into()]);
+
+                b.switch_to_block(join);
+                b.seal_block(join);
+                let jp = b.block_params(join);
+                Op::Handle(jp[0], jp[1], jp[2])
             } else {
                 let fref = match op {
                     PrimOp1::First => funcs.car,

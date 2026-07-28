@@ -9572,3 +9572,47 @@ objects, i.e. a fixed per-collection cost unrelated to live data. Two suspects, 
 `Slabs::with_capacity_like` allocates a fresh nursery sized to the outgoing one each flip.
 Unmeasured — do not act on it before profiling, since this session has already had two
 confidently-named suspects turn out wrong.
+
+## 2026-07-28 (later) — `def`'d data was a 70× cliff: the JIT deopted on every shared-region read
+
+Continuing the standing work. After the forwarding-table fix, `sort` was still only 1.4×
+faster with the JIT than without it (`bintree` 3.3×, `matmul` 7×) — so something in that row
+was refusing to run native.
+
+**The measurement that found it.** Walking a pair in a JIT'd loop, 2 M iterations, with the
+pair created **locally** vs the identical pair `def`'d:
+
+| | LOCAL | RUNTIME (`def`'d) |
+|---|---|---|
+| `first` | 7 ms (~1 ns) | **161 ms (~77 ns)** |
+| `vector-ref` | 8 ms | **210 ms (~101 ns)** |
+
+Then the confirming run: with `BROOD_NO_JIT=1` those same loops cost 137 ms and 210 ms — i.e.
+**the RUNTIME figures were already the interpreter's**. The JIT was contributing nothing.
+
+**Why.** `emit_prim1`'s inline `first`/`rest` checks the handle's region and **deopts** on
+anything but LOCAL. The deopt fires per element, the arm's consecutive-deopt counter bails it,
+and the whole loop reverts to the VM. The old comment called non-LOCAL "uncommon on hot
+cons-list paths" — but a global holding a data structure is ordinary Brood. `sort` does
+`(def data (sort …))` and then walks it; `matmul` derefs a `def`'d matrix ~16 M times.
+
+**What it is not.** The obvious fix — hoist a shared-region slab base and inline
+`base + idx*48` like the LOCAL path — **cannot work**: RUNTIME slabs are `boxcar::Vec`, chunked
+rather than contiguous precisely so they can be appended lock-free, so there is no single base
+pointer. (I wrote the accessors before discovering this and reverted them.) The `Arc::clone` in
+`code_gen_pinned` is also *not* the cost — removing it moved 161 → 148 ms, ~8%.
+
+So the fix is simply to stop deopting: non-LOCAL regions now call the same `car`/`cdr`
+callbacks the no-hoist path already used, joined with the inline result through a block
+parameter. One call per read instead of surrendering the loop. **RUNTIME `first`: 144 → 36 ms
+(4×)**, LOCAL unchanged at 7 ms.
+
+Suite A/B vs `46db4405`, best-of-7: **`sort` −17.3%** (179 → 148 ms); everything else flat,
+which is the expected shape — this fires only on `def`'d heap data. With the forwarding fix,
+`sort` is **216 → 148 ms, −31.5%** across the two changes.
+
+`vector_ref` (dynamic index) already fell back to the FFI rather than deopting — its own doc
+cites "matmul's def'd rows". Its constant-index sibling `inline_vec_ref` still deopts, and is
+the obvious next candidate; I left it alone because measurement said the rows it would help are
+not bailing (`nbody` 352 ms JIT vs 1112 ms VM, `matmul` 159 vs 1126), so the payoff is
+unproven. Worth doing on evidence, not on symmetry.
