@@ -443,6 +443,48 @@ pub(crate) fn tick_capture_n(n: u32) -> bool {
     })
 }
 
+/// [`tick`], additionally reporting whether an untrappable hard `:kill` is pending —
+/// the reduction tick for every eval path that **cannot capture** a continuation.
+///
+/// The top-level VM body driver honours a hard kill by returning `VmOutcome::Killed`
+/// from its safepoint (`tick_capture` + `capture_hard_kill_pending`). Every other
+/// execution path — the tree-walker's `'tail:` loop, its `'dispatch` passthrough
+/// redirect, and a *nested* VM run behind `eval`/`try`/an HOF native — used plain
+/// [`tick`], which is pure accounting: on rollover, `preempt()` refreshes the budget
+/// and the loop keeps going. Nothing on those paths ever looked at the kill flag, so
+/// a process evaluating code via `eval`/`eval-string` was **unkillable**: `(exit pid
+/// :kill)` latched the flag and the target spun forever. (Measured: a spinning child
+/// died from a direct call but survived the identical loop under `eval-string`. The
+/// decisive routing detail: the loop's `>`/`-` are thin-wrapper passthroughs, so the
+/// hot path ticks in `passthrough_redirect_ok` — the same spot the eval *deadline*
+/// once escaped through, and for the same reason.)
+///
+/// A non-capturing path can't *return* an outcome across its native frames, but a
+/// kill doesn't need one — only unwinding. On `true` the caller raises
+/// [`LispError::kill_signal`](crate::error::LispError::kill_signal): untrappable
+/// (`%try` and the cleanup natives re-raise control signals), converted to
+/// `VmOutcome::Killed` by the body driver exactly as the native-nested-`receive`
+/// kill already is. The check runs only on rollover — once per ~2000-reduction
+/// quantum — so the hot path stays a plain thread-local decrement, and on the root
+/// thread (`CURRENT` unset) it is always `false`, so the REPL's own top-level eval
+/// can never kill itself.
+pub(crate) fn tick_reporting_hard_kill() -> bool {
+    let rolled_over = REDUCTIONS.with(|r| {
+        let n = r.get();
+        if n == 0 {
+            true
+        } else {
+            r.set(n - 1);
+            false
+        }
+    });
+    if !rolled_over {
+        return false;
+    }
+    preempt();
+    capture_hard_kill_pending()
+}
+
 /// Is an untrappable hard `:kill` pending for the current process? The driver checks this
 /// at a loop-top safepoint and stops. A *soft* exit isn't honoured here — it waits for
 /// the next `receive` (checked when `run_one` would park).

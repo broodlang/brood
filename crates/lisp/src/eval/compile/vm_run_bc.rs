@@ -542,8 +542,13 @@ pub(crate) fn vm_run_bc(
                     deadline: None,
                 }));
             }
-        } else {
-            crate::process::tick();
+        } else if crate::process::tick_reporting_hard_kill() {
+            // Nested (non-capture) run: no `Killed` outcome can cross the native
+            // boundary, but a hard kill only needs to STOP — unwind with the
+            // untrappable kill signal; the top-level driver's `Err` arm below converts
+            // it to `VmOutcome::Killed`. Same contract as the tree-walker's loop top.
+            unwind(heap);
+            return Err(crate::error::LispError::kill_signal());
         }
         if crate::process::deadline_exceeded() {
             unwind(heap);

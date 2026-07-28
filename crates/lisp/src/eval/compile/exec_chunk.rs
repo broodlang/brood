@@ -531,8 +531,12 @@ pub(crate) fn exec_chunk(
                                 if crate::process::tick_capture() {
                                     return Ok(ChunkExit::Preempt);
                                 }
-                            } else {
-                                crate::process::tick();
+                            } else if crate::process::tick_reporting_hard_kill() {
+                                // Nested (non-capture) run: no outcome can cross the
+                                // native frame, but a hard kill only needs to unwind —
+                                // the untrappable signal reaches the top-level driver,
+                                // which converts it to `VmOutcome::Killed`.
+                                return Err(crate::error::LispError::kill_signal());
                             }
                             if crate::process::deadline_exceeded() {
                                 return Err(crate::eval::deadline_error());
@@ -672,8 +676,9 @@ pub(crate) fn exec_chunk(
                         // Frame already reset; driver captures the continuation as-is.
                         return Ok(ChunkExit::Preempt);
                     }
-                } else {
-                    crate::process::tick();
+                } else if crate::process::tick_reporting_hard_kill() {
+                    // Nested (non-capture) run — see the sibling safepoint above.
+                    return Err(crate::error::LispError::kill_signal());
                 }
                 if crate::process::deadline_exceeded() {
                     return Err(crate::eval::deadline_error());

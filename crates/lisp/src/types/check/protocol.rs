@@ -372,13 +372,20 @@ fn fn_last_body(heap: &Heap, v: Value) -> Option<Value> {
     items.last().copied()
 }
 
-/// Search `form` for `(…/impl-for (quote [A op]) …)` → `(ability, op)`.
+/// Search `form` for an ability op's dispatch call → `(ability, op)`. `defability` emits
+/// `(%dispatch *impls* (quote [A op]) id)` (the op-key at index 2, ADR-172 §7's inline
+/// cache); the older `(impl-for (quote [A op]) id)` carried it at index 1.
 fn find_op_key(heap: &Heap, form: Value) -> Option<(String, String)> {
     stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
         let items = list_items(heap, form)?;
         if let Some(&Value::Sym(h)) = items.first() {
-            if sym_name(Value::Sym(h)).as_deref() == Some("impl-for") {
-                if let Some(Value::Vector(vid)) = items.get(1).and_then(|&v| unquote(heap, v)) {
+            let opkey_idx = match sym_name(Value::Sym(h)).as_deref() {
+                Some("%dispatch") => Some(2),
+                Some("impl-for") => Some(1),
+                _ => None,
+            };
+            if let Some(idx) = opkey_idx {
+                if let Some(Value::Vector(vid)) = items.get(idx).and_then(|&v| unquote(heap, v)) {
                     let vec = heap.vector(vid);
                     if let (Some(&a), Some(&o)) = (vec.first(), vec.get(1)) {
                         if let (Some(an), Some(on)) = (sym_name(a), sym_name(o)) {

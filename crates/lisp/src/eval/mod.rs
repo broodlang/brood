@@ -367,7 +367,19 @@ fn eval_tail_loop(
         // is where loops actually occur — leaf evals (symbols, literals) return
         // above without a tick. A cheap thread-local decrement; a no-op for the
         // root thread. See `process::tick`.
-        crate::process::tick();
+        //
+        // On the rollover the tick also honours a pending hard `:kill`
+        // (`tick_reporting_hard_kill`): the tree-walker runs nested behind native
+        // frames (`eval`/`eval-string`), so it can't return a `Killed` outcome — but
+        // it can *unwind*, and the untrappable kill signal is converted to process
+        // death by the body driver. Without this (and the same check in the
+        // `'dispatch` passthrough redirect, where thin-wrapper-heavy loops actually
+        // tick), a green process spinning inside `eval` could not be killed at all.
+        if crate::process::tick_reporting_hard_kill() {
+            // Deliberately undecorated (no `or_form_pos`): a control signal is not a
+            // user-visible error — it never prints, it only unwinds to the driver.
+            return Err(LispError::kill_signal());
+        }
         // Eval deadline (the `nest mcp` watchdog): abort a runaway that's exceeded
         // its time budget so it can't wedge the server. Inline — propagates as an
         // ordinary error through the dispatcher's existing handling. Cheap when no
@@ -1585,7 +1597,17 @@ pub(crate) fn passthrough_redirect_ok(inner: Value) -> Result<bool, LispError> {
     if !matches!(inner.unpack(), ValueRef::Fn(_) | ValueRef::Native(_)) {
         return Ok(false);
     }
-    crate::process::tick();
+    // The same tick also honours an untrappable hard `:kill` (checked only on the
+    // reduction rollover — `tick_reporting_hard_kill`). This site is load-bearing for
+    // killability exactly as it is for the deadline below: in a tree-walked loop whose
+    // operators are thin wrappers (`>`/`-`/`+` are Brood defns over `%`-prims), the
+    // hot path ticks *here*, so a check only at the `'tail:` loop top can be starved —
+    // which is how a process spinning inside `eval`/`eval-string` escaped `(exit pid
+    // :kill)` entirely. The raised control signal is untrappable (`%try` re-raises)
+    // and the body driver converts it to process death.
+    if crate::process::tick_reporting_hard_kill() {
+        return Err(LispError::kill_signal());
+    }
     if crate::process::deadline_exceeded() {
         return Err(deadline_error());
     }
