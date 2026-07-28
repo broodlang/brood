@@ -18,6 +18,19 @@
 
 ;; A varying classification most workers agree on, a couple don't (mod 5 == 0).
 (defn classify (n) (if (= 0 (mod n 5)) :flag :ok))
+
+;; A long-lived server with NO debugger wiring — it should handle each request in the
+;; sender's causal context, adopted transparently from the message (send-level).
+(defn sl-server ()
+  (receive
+    ([:req n from] (span (str "srv-" n) (fn () (spy (* n n)))) (send from [:done n]) (sl-server))
+    ([:halt] nil)))
+
+;; B adopts a context from a message, then spawns a child that reports whether IT sees
+;; a debugger — used to prove an adopted context does not leak onward through spawn.
+(defn leak-b (reporter)
+  (receive
+    ([:go] (spawn (send reporter [:child-has (not (nil? (tc-debugger)))])))))
 (defn exit-count (state)
   (count (filter (fn (e) (= (get e :kind) :span-exit)) (get state :events))))
 
@@ -118,6 +131,39 @@
       (resume-all dbg)
       (assert= :done (receive ([:done] :done)))
       (dbg-stop dbg))))
+
+(describe "debugger — send-level causality (context follows a message)"
+  :isolated
+  (test "a server handles a request in the SENDER's causal context, across processes"
+    (let (dbg (start-debugger))
+      (let (srv (spawn (sl-server)))
+        (with-debugger dbg
+          (fn () (span "req"
+                   (fn () (send srv [:req 6 (self)]) (receive ([:done _] :ok))))))
+        (assert= true (wait-until dbg (fn (s) (>= (exit-count s) 2)) 200))
+        (let (tree (causal-tree dbg))
+          (assert= 1 (count tree))
+          (let (root (first tree))
+            (assert= "req" (get root :label))
+            (assert= 1 (count (get root :children)))
+            (let (child (first (get root :children)))
+              (assert= "srv-6" (get child :label))
+              (assert= 36 (get child :value))
+              ;; the handler ran in a DIFFERENT process (the server), yet nests under req
+              (refute (= (get child :pid) (get root :pid))))))
+        (send srv [:halt])
+        (dbg-stop dbg)))))
+
+(describe "debugger — an adopted context does not leak onward"
+  :isolated
+  (test "a context adopted from a message is NOT propagated to a child the adopter spawns"
+    (let (dbg (start-debugger) me (self))
+      (let (b (spawn (leak-b me)))
+        (with-debugger dbg
+          (fn () (span "a" (fn () (send b [:go])))))
+        ;; b adopted a's context to handle [:go], but the child it spawns must not see it
+        (assert= [:child-has false] (receive ([:child-has v] [:child-has v])))
+        (dbg-stop dbg)))))
 
 (describe "debugger — aggregate / population queries"
   :isolated

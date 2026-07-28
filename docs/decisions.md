@@ -11076,8 +11076,8 @@ ADR-013 (hot reload — the sink seam mirrors the late-binding philosophy).
 ## ADR-174 — A process-native tracing debugger (`std/tool/debug`)
 
 **Status:** accepted, implemented (2026-07-28, `worktree-spy-debugger`). Prototype toward
-the ROADMAP `--breakpoints` gap. Spawn-level transparency shipped; send-level causality
-designed and deferred (below).
+the ROADMAP `--breakpoints` gap. Spawn-level *and* send-level causality both shipped
+(§2 and §4).
 
 **Context.** Elixir's `dbg`/`IEx.pry` is the reference for interactive debugging, and it
 has two limits everyone hits: a **pry timeout** (the process can't wait forever for the
@@ -11114,14 +11114,25 @@ processes hitting a trace point yield a *distribution* + the anomalies, not 10k 
 dumps (Elixir's failure mode). `causal-tree` / `debug-report` / the live `debug-watch` /
 interactive `debug-attach` render it.
 
-**Deferred: send-level causality.** Following a value A→B *through a message* (so a
-long-lived server adopts the sender's context) needs the mailbox to carry context and
-`receive` to apply it on pop. That is doable and perf-safe (an `Envelope { msg, #[cfg]
-trace }` — uniform `.msg`, matcher untouched; all `#[cfg(dev-tools)]` so release is
-byte-identical), **but** the durable per-process context must become a GC-traced `Value`
-slot on the `Heap` threaded through ~8 collector sites — the highest-care class of change
-in this kernel. Per ADR-011 (ship the solid thing; defer the risky refinement) it lands
-as its own focused, GC-stress-gated pass, not bundled here. Spawn-level already covers the
-common fan-out case. Related: ADR-173 ([[spy]] — the sink this builds on), ADR-006 (write
-it in Brood), ADR-013 (hot reload — the late-binding kinship), ADR-046/051 (`nest observe`
-— the render target for a future debugger pane).
+**4 — Send-level causality (implemented).** Causality now follows a value A→B *through
+a message*, so a long-lived server (never wired to the debugger) handles each request in
+the *sender's* context — the thing `dbg` cannot do at all. The mechanism, all
+`#[cfg(dev-tools)]` so a lean release is byte-identical:
+- The durable context lives in a settable per-process **`trace_context` slot on the
+  `Heap`** (replacing the earlier dynamic), GC-traced exactly where `dynamics` is
+  (5 collector sites) — verified under `BROOD_GC_STRESS=1` + `BROOD_GC_VERIFY=1`.
+- The mailbox message becomes an **`Envelope { msg, #[cfg] trace }`** — access is uniform
+  `.msg`, so the receive matcher is untouched, and in release it's a zero-cost newtype
+  over `Message`. `send` attaches the sender's context for a **local** pid (context is
+  per-runtime, never crossing nodes); `receive` adopts it on pop.
+- A context is tagged **own** (set by `with-debugger`/`span`, propagated by `spawn`) vs.
+  **adopted** (from a message, used to handle it but NOT propagated onward) — so an
+  adopted context can't leak transitively through unrelated spawns. (This distinction was
+  found by a test: without it, the framework's own result messages leaked context into
+  later test processes.)
+
+Related: ADR-173 ([[spy]] — the sink this builds on), ADR-006 (write it in Brood),
+ADR-013 (hot reload — the late-binding kinship), ADR-046/051 (`nest observe` — the render
+target for a future debugger pane). Still open: wiring the causal tree into `nest observe`
+as an interactive pane, and cross-*node* causality (deliberately excluded — the debugger
+is per-runtime).
