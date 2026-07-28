@@ -10497,3 +10497,48 @@ faster" is a hypothesis, not a result. The registration presumably pays for some
 (`arm_slot` is threaded through `BcFrame` and the JIT paths), so removing it moves cost
 rather than deleting it. `make ab` is the gate precisely because plausible reasoning about
 this VM has been wrong repeatedly.
+
+## 2026-07-28 (later) — The unkillable nested eval: found, fixed, REPL Ctrl-C on by default
+
+The morning entry ended with "root cause not located" and a wrong suspect
+(`charge_native`). Both corrections first, because the *misdiagnosis* is the useful
+part: the original four-site fix was aimed at real gaps, but the loop under test
+never ticked at any of them — and my instrumentation "proving" that was misread.
+The debug output had three line families; I grepped for one and piped the live run
+through `head`, so 2,800 `plain tick()` rollovers sat unexamined in the capture
+file while I concluded plain `tick()` had fired once. Re-counting the same file
+found them immediately. Diagnosis lesson: count every line family in the *whole*
+capture before concluding a path is dead.
+
+Those 2,800 rollovers pointed at the one `tick()` site never patched:
+`passthrough_redirect_ok`. That's the real mechanism — in a tree-walked loop like
+`(defn spin (n) (if (> n 0) (spin (- n 1)) :done))`, the operators `>` and `-` are
+thin-wrapper passthroughs (Brood defns over `%gt`/`%sub`, ADR-069), so the
+reduction budget drains in the `'dispatch` redirect gate, ~2 ticks per iteration,
+starving the loop-top safepoint of rollovers. The function's own docstring records
+the eval *deadline* escaping through this exact gap once. Same hole, third
+occupant: preemption fairness never needed a check there (`preempt()` just refreshes
+the budget wherever it fires), the deadline did and got one, and the kill check is
+now the second resident.
+
+The fix (ADR-176): `tick_reporting_hard_kill()` — `tick()` plus, on the rollover
+only, a pending-hard-kill probe — at all five non-capturing safepoints (tree-walker
+loop top, the passthrough gate, `exec_chunk` ×2, `vm_run_bc`). On `true` the site
+unwinds with the pre-existing untrappable `Control::Kill`, and
+`handle_capture_outcome` gains the kill-signal conversion so a tree-walked body
+retires with the mailbox reason instead of crashing as an uncaught error. Hot path
+unchanged (the probe is once per ~2000-reduction quantum); root thread constant-false.
+
+Verified: the three-route repro all `DIED reason=:kill` on default / `BROOD_NO_JIT=1`
+/ `BROOD_VM=0`; kill latency 4ms on a loop killed *after* 3s of JIT tiering;
+untrappable through `try`; soft exit still deferred inside eval; clean under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`; four new cases in `tests/exit_test.blsp`
+(12/12 that file — the full suite runs on the other machine).
+
+With the kernel honest, the REPL flipped on: interactive sessions arm SIGINT and run
+each form in a spawned process; Ctrl-C kills it (`; interrupted`, prompt back, image
++ `*1` + child-made `def`s intact — pty-verified), second Ctrl-C halts (exit 130) for
+an eval wedged in one native call. Piped sessions unchanged. Off-switch:
+`(def *repl-interruptible* false)` in `.broodrc.blsp` — the knob is the ambient
+global itself, resolved to the armed state after the rc loads (so the rc opt-out
+short-circuits the handler install), not an env var.
