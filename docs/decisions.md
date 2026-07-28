@@ -11106,14 +11106,59 @@ Naive sharing would push every process toward the root's figure to save ~14.5 KB
 — **a net loss of ~14 KB/proc**. So sharing is only correct together with a site-id fix,
 and is staged behind one.
 
-**Staging.** Each stage is independently landable and verifiable:
+**The freeze changes the staging — Brood can do something the BEAM cannot.**
+ADR-166 seals every shipped function *permanently* (the BEAM's `sticky` has
+`code:unstick_mod/1`; we deliberately rejected that hatch). So for prelude code two
+things hold that have no Erlang equivalent:
 
-- **Stage 1 — arm-relative site ids.** Sites become relative to their arm; each process
+1. **Prelude compiled code is immortal.** No current/old duality, no purge, no
+   `check_process_code`, no epoch guard — the invalidation machinery Erlang needs
+   exists only because any module can be replaced, and ours cannot.
+2. **A call to a frozen callee can be direct-linked at compile time.** The callee can
+   never be rebound, so it is a constant. This is BEAM's *intra*-module direct call,
+   except the entire frozen prelude behaves as one module — where the BEAM would still
+   route a cross-module call through the export table, we can bind it outright.
+
+Measured 2026-07-28, counting only sites compiled **after** seal seeding (i.e. the
+compiles a spawned process actually pays for; sites compiled during the prelude build
+predate sealing and read as unfrozen, which is a measurement artefact, not a result):
+
+| program | post-seal call sites | frozen callee | redefinable |
+|---|---|---|---|
+| top-level `fold`/`map`/`filter`/`count`/`str` | 81 | **80 (98.8%)** | 1 (`*out*`) |
+| the same work inside a `spawn` | 537 | **535 (99.6%)** | 2 (`unit`, `*out*`) |
+
+~99% of a process's runtime-compiled call sites target a frozen callee. The residue is
+exactly what the rule predicts: a user function and a dynamic variable (ADR-166
+exemption 2 — a `defdyn` name is never reserved, so it must stay late-bound).
+
+That largely dissolves the site-id obstacle above. If frozen callees are direct-linked
+they need **no IC slot at all**, so a shared arm carries IC slots only for the ~1% of
+sites that are genuinely late-bound — and the per-process IC blowup that forced
+arm-relative ids stops being the gating concern.
+
+It also removes a cost we pay today for nothing: a user `def` bumps `global_epoch` and
+invalidates *every* IC, including prelude→prelude entries that no `def` could ever
+affect. Direct links need no epoch guard, so hot reload stops disturbing frozen code.
+
+**Staging (revised).** Each stage is independently landable and verifiable:
+
+- **Stage 1 — direct-link frozen callees.** A `Node::Call` whose callee is a sealed
+  global binds to it at compile time: no site id, no IC probe, no epoch check. Wins
+  memory (no IC slot for ~99% of sites) *and* speed (ADR-166's own stated motivation —
+  "every prelude call has to be late-bound because any global might be rebound"), and is
+  independently useful whether or not sharing ever lands. **Ordering caveat:** sealing is
+  seeded after the prelude is built, so a site compiled during boot must not be
+  direct-linked on the strength of a seal that is not yet populated — the compile path
+  has to distinguish "not sealed" from "not sealed *yet*", or it will silently bind
+  nothing at boot and everything later.
+- **Stage 1b — arm-relative site ids.** Sites become relative to their arm; each process
   allocates one contiguous IC block per arm instance it runs, and the frame resolves
-  `base + rel`. `BcFrame` already carries `arm_slot`, so the base can hang off the
-  existing per-process arm registration rather than a new lookup. Pure refactor,
-  semantics identical, no sharing yet — verifiable on its own by the differential fuzzer
-  and `make ab`.
+  `base + rel` (`BcFrame` already carries `arm_slot`, so the base can hang off the
+  existing per-process arm registration rather than a new lookup). Originally the gating
+  stage; the freeze demotes it to **optional and much smaller**, since after Stage 1 it
+  covers only the ~1% late-bound residue. Deferred until Stage 2 measurement shows
+  whether it matters at all — ADR-011.
 - **Stage 2 — shared `CompiledArm` cache.** The `jit_code_cache` analogue over
   `Arc<CompiledArm>`, same key, same epoch guard, same idempotent publish. With Stage 1
   in place, per-process IC cost stays proportional to arms actually used.
