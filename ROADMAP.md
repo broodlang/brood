@@ -74,8 +74,12 @@ Shipped as ADRs:
       end to end: `project--ensure-deps-on-path` load-paths them for dev/`nest test`,
       `bundle-collect` excludes them from a release bundle (verified with a scratch
       project). Optional-dep *resolution* (peer presence) lands with the bridge slice.
-      Slices 2–6 (`bridge`, coherence checking, precedence, dispatch
-      specialization, always-on `Display`) still ⬜.
+    - 🟡 **Slice 4 (part) — deterministic precedence** (2026-07-28): `std/ability.blsp`
+      resolves competing impls by tier (**type-owner > ability-owner > other**), not load
+      order — `defability` records its owner ns, `register-impl` keeps the highest-tier
+      impl per slot (a guard at registration; dispatch stays a plain map-get). The top
+      **app** tier awaits ADR-070 (app-vs-library). Slices 2, 3, 5, 6 (`bridge`, coherence
+      checking, dispatch specialization, always-on `Display`) still ⬜.
 - ✅ **ADR-159** — grapheme-*indexed* accessors (`grapheme-count`, `grapheme-at`,
   `substring-graphemes`), so the documented-correct cursor step stops costing a vector
   of every cluster in the string per keystroke.
