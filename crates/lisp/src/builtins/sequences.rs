@@ -635,6 +635,15 @@ pub(super) fn map_into(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     Ok(heap.map_from_pairs_into(into, pairs))
 }
 
+/// `(%dispatch impls op-key id)` — ability dispatch through the per-op inline cache
+/// (ADR-172 §7). `impls` is the `*impls*` registry (passed by the op so the kernel stays
+/// decoupled from the global's name), `op-key` the constant `[ability op]` vector, `id`
+/// the first argument's dispatch keyword. Returns the impl `fn` (or nil). A pure,
+/// cache-transparent memo of `impl-for`; see [`Heap::vm_dispatch`].
+pub(super) fn dispatch(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(heap.vm_dispatch(arg(args, 0), arg(args, 1), arg(args, 2)))
+}
+
 /// `(map-get m k [default])` — the value `k` maps to, or `default` (nil if
 /// omitted) when absent.
 pub(super) fn map_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

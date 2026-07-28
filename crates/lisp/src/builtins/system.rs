@@ -740,6 +740,83 @@ pub(super) fn eval_string_inner(
     result
 }
 
+/// `(%locals)` — the CALLER's in-scope local bindings as a `{name → value}` map
+/// (innermost binding of each name wins; globals excluded). The debugger's `break`
+/// captures this so a paused process can be inspected / evaluated in its own scope.
+/// `dev-tools` only (its sole consumer is the `debug` DEV_MODULE).
+#[cfg(feature = "dev-tools")]
+pub(super) fn locals(_: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let mut seen: Vec<value::Symbol> = Vec::new();
+    let mut pairs: Vec<(Value, Value)> = Vec::new();
+    let mut cur = Some(env);
+    while let Some(e) = cur {
+        if e == EnvId::GLOBAL {
+            break;
+        }
+        // Collect this frame's bindings (innermost binding last → scan reversed) into an
+        // owned Vec, releasing the borrow before touching `heap` again.
+        let (parent, vars) = heap.env_frame_ref(e);
+        let frame: Vec<(value::Symbol, Value)> = vars.iter().rev().copied().collect();
+        cur = parent;
+        for (s, v) in frame {
+            if !seen.contains(&s) {
+                seen.push(s);
+                pairs.push((Value::symbol(s), v));
+            }
+        }
+    }
+    Ok(heap.map_from_pairs(pairs))
+}
+
+/// `(%eval-in "src" locals-map)` — read + evaluate `src`'s forms in a fresh environment
+/// holding `locals-map`'s `{name → value}` bindings over the globals; returns the last
+/// result. Lets the debugger evaluate an expression in a paused worker's captured scope,
+/// so a breakpoint's locals resolve. GC-safe: a fresh frame per form (used by exactly one
+/// `run`, so it can't go stale across a collection); held forms + local values are rooted
+/// across the eval. `dev-tools` only.
+#[cfg(feature = "dev-tools")]
+pub(super) fn eval_in(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let src = expect_string(heap, "%eval-in", arg(args, 0))?;
+    let entries: Vec<(value::Symbol, Value)> = match arg(args, 1) {
+        Value::Map(mid) => heap
+            .map_entries(mid)
+            .into_iter()
+            .filter_map(|(k, v)| match k {
+                Value::Sym(s) | Value::Keyword(s) => Some((s, v)),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let forms = reader::read_all(heap, &src)?;
+    let fbase = heap.roots_len();
+    for &form in &forms {
+        heap.push_root(form);
+    }
+    let lbase = heap.roots_len();
+    for &(_, v) in &entries {
+        heap.push_root(v);
+    }
+    let mut result: LispResult = Ok(Value::nil());
+    for i in 0..forms.len() {
+        let form = heap.root_at(fbase + i);
+        let frame = heap.new_env(Some(EnvId::GLOBAL));
+        for (j, &(s, _)) in entries.iter().enumerate() {
+            let v = heap.root_at(lbase + j);
+            heap.env_define(frame, s, v);
+        }
+        match crate::eval::compile::run(heap, form, frame) {
+            Ok(v) => result = Ok(v),
+            Err(e) => {
+                result = Err(e);
+                break;
+            }
+        }
+    }
+    heap.truncate_roots(fbase);
+    result
+}
+
 /// One baked-in std module: the `require` key, the source, and the **repo-relative
 /// path the source came from**.
 ///

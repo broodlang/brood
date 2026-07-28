@@ -3615,6 +3615,91 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
   "Returns `[shuffled next-seed]`: the items of `coll` as a list in uniformly random order (Fisher–Yates)."
   (shuffle--acc (rand-seed seed) (into [] coll) nil))
 
+;; ---- bounded printing -------------------------------------------------------
+;; `pr-str` is *faithful*: whatever it returns reads back as the same value, so it
+;; can never elide anything. That's the right contract for serialization and the
+;; wrong one for a screen — one 100k-element list at a REPL prompt scrolls your
+;; session away, and there is no way to ask for less.
+;;
+;; So bounding is a SEPARATE function rather than a flag on `pr-str`: nothing that
+;; round-trips data can accidentally acquire an eliding printer, and `pr-str`
+;; remains the escape hatch for seeing everything (`(pr-str *1)` after a truncated
+;; result). The two knobs are `defdyn`s, so they are ambient (usable bare from any
+;; namespace) and scopable with `binding`.
+;;
+;; Both markers are `…`, meaning "elided here" — for length as a trailing item, for
+;; depth in place of the subform. Deliberately ONE marker rather than Clojure's
+;; `…`/`#` pair: two symbols for one concept is a thing to learn for no gain, and a
+;; bare `#` would read as the start of a `#{…}` set to anything re-lexing the output
+;; (the REPL's result highlighter does exactly that).
+;;
+;; Only *containers* are traversed; every leaf and every value this doesn't know
+;; about (records with an `impl Display`, ropes, tables, functions) is handed to
+;; `pr-str` unchanged, so custom printing keeps working and this stays small.
+
+(defdyn *print-length* 100)
+(defdyn *print-level* 8)
+
+(defn pr--elide (parts over)
+  "`parts` joined for display, with the `…` length marker appended when `over`."
+  (join " " (if over (append parts (list "…")) parts)))
+
+(defn pr--limit (items)
+  "`[shown over?]` for `items` under `*print-length*` — at most that many items,
+plus whether any were dropped. Takes one extra item to detect the overflow, so a
+long collection is never walked past the limit."
+  (let (lim *print-length*)
+    (if (nil? lim)
+      [items false]
+      (let (taken (take (inc lim) items)
+            over (> (count taken) lim))
+        [(if over (take lim taken) taken) over]))))
+
+(defn pr--safely (thunk x)
+  "Run `thunk`, falling back to `(pr-str x)` if it raises. The guard for a value
+that looks like a container but doesn't walk like one — an improper/dotted pair
+such as `(cons 1 2)` is the real case. Per-node, so one odd subtree degrades to
+faithful printing instead of losing the bound on the whole value."
+  (try (thunk) (catch _ (pr-str x))))
+
+(defn pr--bounded-seq (x level open close)
+  (let ([shown over] (pr--limit x))
+    (str open (pr--elide (map (fn (i) (pr--bounded i (inc level))) shown) over) close)))
+
+(defn pr--bounded-map (x level)
+  (let ([shown over] (pr--limit (map-pairs x)))
+    (str "{"
+      (pr--elide (map (fn ([k v])
+                        (str (pr--bounded k (inc level)) " " (pr--bounded v (inc level))))
+                   shown)
+        over)
+      "}")))
+
+(defn pr--bounded (x level)
+  "`x` printed at nesting `level`, honouring both bounds. Containers recurse;
+anything else goes to `pr-str`.
+
+The depth bound is tested on *entering a container*, never on a leaf — so
+`*print-level*` 2 on `{:a {:b {:c 1}}}` elides the whole third map (`{:a {:b …}}`)
+rather than each of its keys and values separately (`{:a {:b {… …}}}`). A leaf always
+prints: eliding an atom would cost a character and save nothing."
+  (let (t (type-of x)
+        container (or (= t :pair) (= t :vector) (= t :set) (= t :map)))
+    (cond
+      (and container *print-level* (>= level *print-level*)) "…"
+      (= t :pair) (pr--safely (fn () (pr--bounded-seq x level "(" ")")) x)
+      (= t :vector) (pr--safely (fn () (pr--bounded-seq x level "[" "]")) x)
+      (= t :set) (pr--safely (fn () (pr--bounded-seq x level "#{" "}")) x)
+      (= t :map) (pr--safely (fn () (pr--bounded-map x level)) x)
+      else (pr-str x))))
+
+(defn pr-str-bounded (x)
+  "Like `pr-str`, but eliding with `…` past `*print-length*` items per collection
+and `*print-level*` levels of nesting (`nil` for either means no limit). For
+*display* — the result does not read back, so use `pr-str` when you need the whole
+value. This is what the REPL prints results with."
+  (pr--bounded x 0))
+
 ;; ---- discovery / introspection ----------------------------------------------
 ;; "What's in this image, and where?" — name- and doc-based search over the flat
 ;; global table, on top of the `global-names`/`doc` primitives. The first thing
@@ -4259,8 +4344,12 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
                       (list 'defn
                         op-name arg-syms
                         (list 'let
+                          ; `%dispatch` is `impl-for` through the per-op inline cache (ADR-172
+                          ; §7): the op passes `*impls*` so the kernel stays decoupled from the
+                          ; global's name; a hit skips the two CHAMP lookups. Cache-transparent.
                           (list id-sym
-                            (list 'identity-of first-arg) impl-sym (list 'impl-for op-key id-sym))
+                            (list 'identity-of first-arg) impl-sym
+                            (list '%dispatch '*impls* op-key id-sym))
                           (list 'if
                             impl-sym
                             ; direct, arity-correct call — no arg-list alloc, no `apply`

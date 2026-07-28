@@ -2973,6 +2973,19 @@ is ready, like `receive`) would make the block truly zero-cost — a nicety, not
   sub-mode in `std/lineedit.blsp`). The keymap was also generalised into a shared
   `std/keymap.blsp` (`keymap-dispatch`), the input-side counterpart to the display
   seam, now used by both the editor and `observe`.
+- **Completion now *lists* when it can't extend** (2026-07-28). Tab shipped
+  insert-or-common-prefix, which is silent on an ambiguous prefix: the user sees
+  nothing happen and can't tell whether completion exists, is broken, or has simply
+  run out of shared characters. The readline convention fixes the ambiguity for free —
+  make progress if there is any, otherwise **show the alternatives** — so
+  `lineedit--apply-completion` attaches the candidates as `:completions` exactly when
+  the common prefix adds nothing, and the renderer paints them in dim columns below the
+  input. Deliberately *not* a cycling menu or ghost text: both need a mode (what does
+  the next key mean?), while a listing is stateless — `lineedit-handle` drops it before
+  every dispatch, so it survives one keystroke and no command can leave it stale.
+  Capped at `*lineedit-completion-max-rows*` (6) because the renderer's geometry is
+  relative: a listing tall enough to scroll the terminal would desync the `[:up n]`
+  cursor restore, the same constraint the one-line signature hint already lives under.
 - Remaining limits (all additive follow-ups): a scheduler-parking key read (makes the
   benign worker block above truly zero-cost); lexical (not scope-aware) highlighting;
   completion from globals only (no locals-in-scope); display width approximated as one
@@ -10791,7 +10804,15 @@ immediately below. Shipped: the precedence ladder (§3) via package identity, an
 `Display` is core and always on**: the whole ability system + `Display`/`Inspect` were
 folded into the prelude (`std/ability.blsp` + `std/show.blsp` deleted), so a record
 customizes printing with just `(impl Display …)` — no `(require 'show)`, no `display-on`
-(the interim activation is gone). Only **§7 (dispatch specialization)** remains.
+(the interim activation is gone), and **§7's inline cache** — ability dispatch through a
+per-op, epoch-validated inline cache (the `%dispatch` kernel primitive), so a hot
+monomorphic call skips the two `*impls*` CHAMP lookups; the shared `global_epoch`
+(bumped by `register-impl`'s `def *impls*` and by compaction) makes it reload-safe,
+GC-safe, and cross-process-correct with no new invalidation machinery, and it is
+invisible to the language (a pure memo of `impl-for`). Dispatch overhead vs a direct
+call roughly halved. What remains of §7 is compile-time *static* resolution where the
+receiver type is known, and the `:sealed` closed-switch — both pure optimizations over
+the working IC.
 
 **Amendment (2026-07-28) — abilities stay OPEN; no orphan rule, no `bridge` syntax.**
 A design review pulled §1/§2 apart and found the restriction unnecessary and the form
@@ -11130,6 +11151,20 @@ the *sender's* context — the thing `dbg` cannot do at all. The mechanism, all
   adopted context can't leak transitively through unrelated spawns. (This distinction was
   found by a test: without it, the framework's own result messages leaked context into
   later test processes.)
+
+**5 — Eval in a paused process's captured scope (path A shipped; B deferred).** At a
+breakpoint you can evaluate expressions in the worker's scope — `eval-at` over the
+`%eval-in` primitive, which builds a fresh env from a `{name → value}` map and evaluates a
+form against it (GC-safe: a single-use frame per form, held forms + values rooted). Two
+paths, and the split is forced by the engine:
+- **A (shipped):** the map is the values *explicitly named* at `break` (`(break "here"
+  :n n :total total)`), so `(eval-at d 1 "(* n total)")` resolves them. Works under the VM.
+- **B (deferred):** *automatic* capture of every in-scope local by name. The VM keeps
+  locals in **positional slots, not by name** (`%locals` — which walks named env frames —
+  works only under the tree-walker), so no runtime primitive can recover them. B is a
+  **compiler intrinsic**: teach the compiler to emit a `{name → slot-value}` map from its
+  lexical-scope table at a `%scope` marker. Per ADR-011 it's a focused, VM-careful pass of
+  its own, not bundled — the roadmap tracks it.
 
 Related: ADR-173 ([[spy]] — the sink this builds on), ADR-006 (write it in Brood),
 ADR-013 (hot reload — the late-binding kinship), ADR-046/051 (`nest observe` — the render

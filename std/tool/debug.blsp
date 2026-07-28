@@ -11,11 +11,13 @@ and blocks on `receive` for a resume — parking indefinitely at zero cost, no t
 Many workers hitting the same `break` each park independently and fan into the
 debugger's mailbox as a QUEUE of paused processes, each inspectable and resumable.
 
-Causal context propagates TRANSPARENTLY: the debugger endpoint + current span live in
-one dynamic, `*trace-context*`, which the kernel copies across `spawn` (opt-in, zero
-cost when unbound — see scheduler/lifecycle.rs). So a plain `(spawn (fn () (break …)))`
-inside a `with-debugger` scope inherits the debugger and parks — no re-wiring — and the
-debugger reconstructs a cross-process causal TREE, something `dbg` cannot do.
+Causal context propagates TRANSPARENTLY: the debugger endpoint + current span live in a
+settable per-process slot (`%trace-context`), which the kernel copies across `spawn` and
+carries on a `send` for the receiver to adopt (opt-in, `#[cfg(dev-tools)]` so a lean
+release compiles it out — see scheduler/lifecycle.rs and process/mailbox.rs). So a plain
+`(spawn (fn () (break …)))` inside a `with-debugger` scope inherits the debugger and parks
+— no re-wiring — and a server handles a request in the *sender's* context; the debugger
+reconstructs a cross-process causal TREE, something `dbg` cannot do.
 
 Wire it up with `with-debugger`; trace with `spy` (its `*spy-sink*` is routed here),
 pause with `break`, and correlate with `span` (`span-spawn` is now just
@@ -78,7 +80,7 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
       :stopped)))
 
 (defn start-debugger ()
-  "Spawn a fresh debugger process and return its pid. Bind it as `*debugger*` (or use `with-debugger`), then `spy` / `break` / `span` stream to it."
+  "Spawn a fresh debugger process and return its pid. Wire it in with `with-debugger`, then `spy` / `break` / `span` stream to it."
   (spawn (debug--loop {:events [] :paused {} :seq 0})))
 
 (defn debugger-sink ()
@@ -92,11 +94,41 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
 
 ;; ---- break: park without a timeout, fan into the paused queue ----------------
 (defn break (label & vals)
-  "Park THIS process at a breakpoint: snapshot `label` + the named `vals` + the current causal span to `*debugger*`, then block until the debugger sends `[:resume]` — with **no timeout** (a parked process costs nothing). Many processes hitting the same `break` each park independently and queue in the debugger. A no-op when `*debugger*` is nil, so it's safe to leave in place. Returns nil."
+  "Park THIS process at a breakpoint: snapshot `label` + the named `vals` + the current causal span to the debugger in the process's trace context, then block until it sends `[:resume]` — with **no timeout** (a parked process costs nothing). Many processes hitting the same `break` each park independently and queue in the debugger. A no-op when no debugger is in context, so it's safe to leave in place. Returns nil."
   (let (ctx (%trace-context) dbg (get ctx :debugger))
     (when dbg
-      (send dbg [:break (self) {:label label :vals (vec vals) :span (get ctx :span)}])
+      (send dbg [:break (self) {:label label :vals (debug--pairs->map vals) :span (get ctx :span)}])
       (receive ([:resume] nil)))))
+
+;; Turn a `:name value …` argument list into a `{:name value}` map — the captured
+;; locals of a breakpoint, keyed for display AND for `%eval-in` (a keyword key `:n`
+;; binds the symbol `n`, so `(eval-at … "(* n n)")` resolves them).
+(defn debug--pairs->map (kvs)
+  (letrec (go (fn (ks m)
+                (if (or (empty? ks) (empty? (rest ks)))
+                  m
+                  (go (rest (rest ks)) (assoc m (first ks) (second ks))))))
+    (go kvs {})))
+
+;; ---- eval in a paused process's captured scope (ADR-174 §5, path A) ----------
+;; Evaluate an expression with a breakpoint's captured locals in scope — the
+;; explicit-capture form: only the values NAMED at `break` are available (the VM keeps
+;; locals in positional slots, not by name, so a runtime primitive can't recover the
+;; rest — the automatic version is a compiler intrinsic, deferred; see the roadmap).
+(defn locals-of (dbg n)
+  "The captured local bindings of the Nth parked process (1-based), as the `{:name value}`
+map it passed to `break`."
+  (let (entries (vec (get (dbg-state dbg) :paused)))
+    (when (and (>= n 1) (<= n (count entries)))
+      (get (second (nth entries (dec n))) :vals))))
+(defn eval-at (dbg n src)
+  "Evaluate `src` (a Brood expression string) in the captured scope of the Nth parked
+process (1-based, as shown by `paused` / `debug-repl`). The values named at its `break`
+are in scope: `(debug/eval-at d 1 \"(* n n)\")`. Only those named values are captured."
+  (let (locals (locals-of dbg n))
+    (if (nil? locals)
+      (error "eval-at: no parked process " n)
+      (%eval-in src locals))))
 
 (defn break-when (pred label & vals)
   "A data-driven breakpoint: park (via `break`) only when `pred` is truthy, else return nil untouched — `(break-when (< x 0) \"neg\" :x x)`. Conditional breaks are just a Brood predicate, so no recompile and no cost on the false path."
@@ -104,9 +136,11 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
 
 ;; ---- causal spans: correlate work across the share-nothing boundary ---------
 (defn span (label thunk)
-  "Run `thunk` inside a fresh causal span (a child of the current `*span*`), emitting enter/exit to `*debugger*`; returns `thunk`'s value. Nested `span`s and `span-spawn`ed children link to this one, so the debugger can rebuild the causal tree."
+  "Run `thunk` inside a fresh causal span (a child of the current context's span), emitting enter/exit to the debugger; returns `thunk`'s value. Nested `span`s and spawned/`send`-reached children link to this one, so the debugger can rebuild the causal tree."
   ;; pid-qualified so two processes' gensym counters can't collide into one node.
-  (let (ctx (%trace-context) dbg (get ctx :debugger) parent (get ctx :span)
+  (let (ctx (%trace-context)
+        dbg (get ctx :debugger)
+        parent (get ctx :span)
         id [(self) (gensym "s")])
     (when dbg (send dbg [:span-enter id parent (self) label]))
     ;; Set the whole context (new span) for the body AND bind the spy sink, so `spy`
@@ -204,30 +238,38 @@ running shows `:value :running`."
                       :children (map build (children-of (get e :span)))}))
       (map build (filter (fn (e) (nil? (get e :parent))) enters)))))
 
-(defn print--causal (nodes depth)
-  (doseq (node nodes)
-    (println (str (apply str (map (constantly "  ") (range depth)))
-               (get node :label) " [" (get node :pid) "] => " (pr-str (get node :value))))
-    (print--causal (get node :children) (inc depth))))
+(defn causal--lines (nodes depth)
+  "The causal tree as a flat list of indented, pid-tagged strings (one per span)."
+  (mapcat (fn (node)
+            (cons (str (apply str (map (constantly "  ") (range depth)))
+                    (get node :label) " [" (get node :pid) "] => " (pr-str (get node :value)))
+              (causal--lines (get node :children) (inc depth))))
+    nodes))
 (defn print-causal (dbg)
   "Pretty-print the causal tree (`causal-tree`) as an indented, pid-tagged outline."
-  (print--causal (causal-tree dbg) 0))
+  (doseq (line (causal--lines (causal-tree dbg) 0)) (println line)))
 
 ;; ---- one-glance session report ----------------------------------------------
+(defn debug--report-lines (dbg)
+  "The session summary as a list of strings: parked processes (the break queue), the
+cross-process causal tree, and the hottest traced forms. Rendered by both the
+`println`-based `debug-report` (cooked mode) and the cursor-positioned `debug-attach`
+(raw mode, where `\\n` would not return to column 0)."
+  (let (state (dbg-state dbg))
+    (append (cons "── parked processes ──"
+              (map (fn (entry)
+                     (str "  "
+                       (first entry) "  " (get (second entry) :label) "  "
+                       (pr-str (get (second entry) :vals))))
+                (get state :paused)))
+      (cons "── causal tree ──" (causal--lines (causal-tree dbg) 0))
+      (cons "── hot traced forms ──"
+        (map (fn (kv) (str "  " (second kv) "×  " (first kv)))
+          (sort-by (fn (kv) (- (second kv))) (hits dbg)))))))
 (defn debug-report (dbg)
   "Print a session summary: parked processes (the break queue), the cross-process
 causal tree, and the hottest traced forms by hit count. The one-call overview."
-  (let (state (dbg-state dbg))
-    (println "── parked processes ──")
-    (doseq (entry (get state :paused))
-      (println (str "  "
-                 (first entry) "  " (get (second entry) :label) "  "
-                 (pr-str (get (second entry) :vals)))))
-    (println "── causal tree ──")
-    (print-causal dbg)
-    (println "── hot traced forms ──")
-    (doseq (kv (sort-by (fn (kv) (- (second kv))) (hits dbg)))
-      (println (str "  " (second kv) "×  " (first kv))))))
+  (doseq (line (debug--report-lines dbg)) (println line)))
 
 ;; ---- live terminal view -----------------------------------------------------
 (defn debug-watch--loop (dbg frames)
@@ -248,10 +290,19 @@ tree grow as a workload runs; drive resume from another session or a timer."
 ;; The driveable sibling of `debug-watch`: same live view, but it reads the keyboard
 ;; (raw mode) so you resume parked processes without a timer. Pure IO shell over the
 ;; same `debug-report`; input via `term-poll` (nil on the 400ms timeout → just redraw).
+(defn debug-attach--render (dbg)
+  ;; In raw mode `\n` moves down but NOT to column 0, so a `println` frame staircases.
+  ;; Clear, then place every line absolutely at (row, col 1) with `ansi-cursor`.
+  (print (ansi-clear))
+  (letrec (place (fn (lines row)
+                   (when (not (empty? lines))
+                     (print (str (ansi-cursor row 1) (first lines)))
+                     (place (rest lines) (inc row)))))
+    (place (cons "── debug-attach    [r] resume all parked    [q] quit ──"
+             (debug--report-lines dbg))
+      1)))
 (defn debug-attach--loop (dbg)
-  (print (str (ansi-clear) (ansi-home)))
-  (println "── debug-attach    [r] resume all parked    [q] quit ──")
-  (debug-report dbg)
+  (debug-attach--render dbg)
   (let (key (term-poll 400))
     (cond
       (or (= key "q") (= key :escape) (= key :ctrl-c)) :quit
@@ -266,3 +317,99 @@ always runs, even on error, so the terminal is restored."
   (let (result (try (debug-attach--loop dbg) (catch _ :error)))
     (term-leave)
     result))
+
+;; ---- single-step evaluation (spy + break fusion) ----------------------------
+;; `spy` instruments every evaluated subexpression; if the sink PARKS at each node
+;; instead of just recording it, you step through an expression's evaluation node by
+;; node. Because the value is emitted post-order, each pause shows a subexpression's
+;; *result* — resume to advance to the next. Run under `with-debugger` and drive the
+;; steps from `debug-repl` / `debug-attach`.
+(defn stepping-sink ()
+  "A `*spy-sink*` that parks the process at each `spy` node (one breakpoint per
+subexpression). Non-node entries (`:enter`/`:exit`) pass through."
+  (fn (entry)
+    (when (= (get entry :spy) :node)
+      (let (dbg (tc-debugger))
+        (when dbg
+          (send dbg
+            [:break (self)
+              {:label (str "step " (pr-str (get entry :form)))
+               :vals [:value (get entry :value)]
+               :span (tc-span)}])
+          (receive ([:resume] nil)))))))
+(defmacro step (expr)
+  "Evaluate `expr` in single-step mode: each `spy`-traced subexpression parks at a
+breakpoint until resumed, so you step through evaluation one node at a time. Run it
+under `with-debugger`; advance the steps from `debug-repl` (`r`) or `debug-attach`."
+  `(binding (*spy-sink* (stepping-sink)) (spy ~expr)))
+
+;; ---- pry: drop into the REAL REPL at a debug point --------------------------
+;; The `binding.pry` / `IEx.pry` move, done right: instead of a bespoke prompt, launch
+;; the actual `(repl-run)` — the fully-styled Brood REPL (syntax highlighting, history,
+;; `,help` / `,doc`, Tab-complete). It reuses the whole REPL wholesale (zero duplication),
+;; so it inherits every REPL improvement for free. Debugger control is ordinary eval:
+;; `(debug/paused d)`, `(debug/resume-all d)`, `(debug/step …)`; Ctrl-D leaves and
+;; continues. Runs in the process that OWNS the terminal (a script's main flow, or the
+;; REPL) — a parked worker can't take stdin, so you pry from there and inspect the queue.
+(defn pry (dbg)
+  "Drop into the REAL Brood REPL — fully styled (highlighting, history, `,help`, Tab) —
+to inspect this debug session interactively. Prints the paused queue + causal tree first,
+then hands you the prompt; use any expression (`(debug/paused d)`, `(debug/resume-all d)`,
+`(debug/step …)`, or any Brood). Ctrl-D leaves and continues. Reuses `repl-run` — so it's
+the real REPL, not a re-implementation."
+  (require 'repl)
+  (doseq (line (debug--report-lines dbg)) (println line))
+  (println "── pry: the real REPL. `(debug/…)` to drive the session · Ctrl-D to continue ──")
+  (binding (*repl-prompt* "debug> ")
+    (repl/repl-run)))
+
+;; ---- interactive debugger prompt (a REPL for the session) -------------------
+;; A TYPING interface (cooked mode — no raw terminal, works even piped): prints the
+;; state, then a `debug>` prompt. Line commands:
+;;   <Enter>  refresh      r    resume ALL parked     r N   resume the Nth parked
+;;   q        quit         (any Brood expr) evaluate it — e.g. (debug/dbg-events d)
+(defn debug--numbered (entries)
+  (letrec (go (fn (es i acc)
+                (if (empty? es)
+                  (reverse acc)
+                  (go (rest es)
+                    (inc i)
+                    (cons (str "  ["
+                            i "] " (first (first es)) "  " (get (second (first es)) :label) " "
+                            (pr-str (get (second (first es)) :vals)))
+                      acc)))))
+    (go entries 1 ())))
+(defn debug--resume-nth (dbg entries n)
+  (if (and (int? n) (>= n 1) (<= n (count entries)))
+    (do (resume dbg (first (nth entries (dec n)))) (str "resumed [" n "]"))
+    (str "no parked process [" n "]")))
+(defn debug-repl (dbg)
+  "An interactive debugger prompt — a REPL for `dbg`. Prints the numbered paused queue
+and the causal tree, then reads a line: `r` resume all, `r N` resume the Nth parked,
+Enter refresh, `q` quit, or any Brood expression to evaluate. Cooked mode, so it needs
+no raw-terminal setup and works when piped."
+  (let (entries (vec (get (dbg-state dbg) :paused)))
+    (println "── parked processes ──")
+    (doseq (line (debug--numbered entries)) (println line))
+    (doseq (line (cons "── causal tree ──" (causal--lines (causal-tree dbg) 0))) (println line))
+    (print "debug> ")
+    (let (raw (read-line))
+      (if (nil? raw)
+        :done
+        (let (line (trim raw) parts (string-split line " ") cmd (first parts))
+          (cond
+            (= line "q") :done
+            (or (= line "") (= line "p")) (debug-repl dbg)
+            (= cmd "r") (do
+                          (if (> (count parts) 1)
+                            (println (debug--resume-nth dbg
+                                       entries (try (eval-string (second parts)) (catch _ nil))))
+                            (do (resume-all dbg) (println "resumed all")))
+                          ; let a resumed process reach its next break before redraw
+                          (sleep 30)
+                          (debug-repl dbg))
+            else (do
+                   (try
+                     (println (str "=> " (pr-str (eval-string line))))
+                     (catch e (println (str "! " (pr-str e)))))
+                   (debug-repl dbg))))))))

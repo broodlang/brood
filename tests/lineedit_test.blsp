@@ -212,7 +212,82 @@
       (assert= (get (editor/lineedit/lineedit--apply-completion s
                       0 "ma" (list "map" "max" "mapcat"))
                  :text)
-        "ma"))))
+        "ma")))
+  ;; The listing is attached only when Tab has nothing left to insert — that is the
+  ;; whole trigger, so pin both sides of it.
+  (test "a prefix Tab can't extend attaches the candidates for listing"
+    (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "m" "a")) 2)
+          a (editor/lineedit/lineedit--apply-completion s 0 "ma" (list "map" "max" "mapcat")))
+      (assert= (get a :completions) (list "map" "max" "mapcat"))))
+  (test "no listing when Tab makes progress, or when the candidate is unique"
+    (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "m" "a")) 2))
+      ; common prefix "map" extends "ma" -> progress, no list
+      (is (nil? (get (editor/lineedit/lineedit--apply-completion s 0 "ma" (list "map" "mapcat"))
+                  :completions)))
+      (is (nil? (get (editor/lineedit/lineedit--apply-completion s 0 "ma" (list "map"))
+                  :completions)))
+      (is (nil? (get (editor/lineedit/lineedit--apply-completion s 0 "ma" '())
+                  :completions)))))
+  (test "the listing survives exactly one keystroke — the next key clears it"
+    (let (listed (assoc (le--fresh) :completions (list "map" "max"))
+          typed (editor/lineedit/lineedit-handle listed "x"))
+      (is (nil? (get typed :completions)))
+      (assert= (get typed :text) "x")))
+  (test "Tab against the live image lists the globals sharing a typed prefix"
+    ;; end-to-end through the keymap: `lineedit--candidates` reads `global-names`, so
+    ;; `str` must be ambiguous (str, str-... etc.) with nothing more to insert.
+    (let (s (le--keys (le--fresh) (list "s" "t" "r"))
+          a (editor/lineedit/lineedit-handle s :tab)
+          cands (get a :completions))
+      (is (not (nil? cands)))
+      (is (any? (fn (c) (= c "str")) cands))
+      (is (every? (fn (c) (starts-with? c "str")) cands)))))
+
+(describe "lineedit/lineedit--completion-rows — pure listing layout"
+  (test "candidates lay out across in equal columns, one row when they fit"
+    ;; widest is 6 ("mapcat") -> colw 8; room 39 -> 4 columns, so all three on one row.
+    (let (rows (editor/lineedit/lineedit--completion-rows (list "map" "max" "mapcat") 40))
+      (assert= (count rows) 1)
+      (assert= (first rows) "map     max     mapcat")))
+  (test "a narrow terminal wraps into more rows and never exceeds width - 1"
+    (let (rows (editor/lineedit/lineedit--completion-rows (list "map" "max" "mapcat") 12))
+      ; colw 8, room 11 -> 1 column
+      (assert= (count rows) 3)
+      (is (every? (fn (r) (<= (string-length r) 11)) rows))))
+  (test "a candidate wider than the terminal is truncated, not wrapped"
+    (let (rows (editor/lineedit/lineedit--completion-rows (list (string-repeat "x" 50)
+                                                            (string-repeat "y" 50))
+                 20))
+      (is (every? (fn (r) (<= (string-length r) 19)) rows))))
+  (test "an over-long list is capped with a trailing count of the remainder"
+    ;; one column (colw 12 in a 13-column room) x 6 max rows = 6 shown of 9.
+    (let (cands (map (fn (i) (str "candidate-" i)) (range 0 9))
+          rows (editor/lineedit/lineedit--completion-rows cands 13))
+      (assert= (count rows) 7)
+      (assert= (last rows) "… +3 more")))
+  (test "each row is emitted on its own new line in the dim hint face"
+    (let (ops (editor/lineedit/lineedit--completion-ops (list "map" "max")))
+      (assert= ops
+        (list [:nl]
+          [:print "map" lineedit-face-hint] [:nl] [:print "max" lineedit-face-hint]))))
+  (test "no listing rows without pending completions"
+    (assert= (editor/lineedit/lineedit--completion-lines (assoc (editor/lineedit/lineedit-init "p> "
+                                                                  "" '())
+                                                           :width 40))
+      '()))
+  (test "a multi-line render prints the listing and climbs back over it to repark"
+    ;; The cursor must land back on its own form line, so the [:up n] has to span the
+    ;; remaining form lines PLUS the listing rows — the geometry bug this pins.
+    (let (st (assoc (editor/lineedit/lineedit-init "p> " "" '() {:cont-prompt "c> "})
+               ; point is on row 1 of 2; width 12 -> one candidate per row -> 3 rows
+               :text "(a\n b)"
+               :point 6
+               :completions (list "map" "max" "mapcat")
+               :width 12)
+          ops (editor/lineedit/lineedit--multi-ops st))
+      (is (any? (fn (op) (= op [:print "map" lineedit-face-hint])) ops))
+      ; (2 - 1 lines below row 0) + 3 listing rows - cursor row 1 = 3
+      (is (any? (fn (op) (= op [:up 3])) ops)))))
 
 (describe "lineedit/lineedit-handle — end-of-read signals"
   (test "C-d on an empty line signals EOF"

@@ -135,6 +135,73 @@ pub(super) fn halt_builtin(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     std::process::exit(code as i32);
 }
 
+// ---- interrupt (SIGINT) -----------------------------------------------------
+// A REPL has to survive Ctrl-C. The default SIGINT disposition terminates the
+// runtime, which at a prompt means losing the whole live image — every definition,
+// every spawned process — in order to interrupt one runaway expression.
+//
+// Signal handling is mechanism Brood cannot express, so the kernel offers the
+// smallest seam that makes it expressible and nothing more: a handler that only
+// *records* that a request arrived, plus a read-and-clear accessor. Every policy
+// question — who gets interrupted, what it costs, when to give up — stays in Brood
+// (`std/tool/repl.blsp` runs each eval in a spawned process and `(exit pid :kill)`s
+// it when the flag comes up), which is the whole point of ADR-006.
+//
+// Installed only on request, never by default: `brood script.blsp` must keep dying
+// on Ctrl-C like any other Unix program, and a library embedding the interpreter
+// must not have its host's signal disposition rewritten out from under it.
+
+#[cfg(unix)]
+static INTERRUPT_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The SIGINT handler. Runs on whichever scheduler thread the kernel picks, so it
+/// does the only thing that is async-signal-safe: one relaxed atomic store. No
+/// allocation, no locks, no I/O, no heap access.
+#[cfg(unix)]
+extern "C" fn brood_handle_sigint(_signum: libc::c_int) {
+    INTERRUPT_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `(%install-interrupt-handler)` — take over SIGINT so Ctrl-C sets a flag instead
+/// of killing the runtime. Returns true when a handler was installed (false on a
+/// platform without Unix signals, where the caller should keep its old behaviour).
+/// Idempotent, and clears any pending flag so a stale interrupt can't fire into the
+/// next thing that polls.
+pub(super) fn install_interrupt_handler(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    #[cfg(unix)]
+    {
+        INTERRUPT_REQUESTED.store(false, std::sync::atomic::Ordering::Relaxed);
+        // Via an explicit fn *pointer*: casting a fn *item* straight to an integer is
+        // what `function_casts_as_integer` warns about.
+        let handler: extern "C" fn(libc::c_int) = brood_handle_sigint;
+        unsafe {
+            libc::signal(libc::SIGINT, handler as usize as libc::sighandler_t);
+        }
+        Ok(Value::boolean(true))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(Value::boolean(false))
+    }
+}
+
+/// `(%interrupt-taken?)` — true if an interrupt has arrived since the last call,
+/// **clearing** it. Read-and-clear (rather than a plain read plus a separate reset)
+/// so two pollers can never both act on one Ctrl-C.
+pub(super) fn interrupt_taken(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
+    #[cfg(unix)]
+    {
+        Ok(Value::boolean(
+            INTERRUPT_REQUESTED.swap(false, std::sync::atomic::Ordering::Relaxed),
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(Value::boolean(false))
+    }
+}
+
 /// `(run-process prog args)` — run external program `prog` with `args` (a list or
 /// vector of strings), inheriting stdio, and return its exit code as an integer
 /// (-1 if killed by a signal). The Emacs `call-process` analogue: the general

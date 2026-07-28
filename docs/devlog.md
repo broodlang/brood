@@ -10203,6 +10203,173 @@ it the framework's own result messages leaked context into later test processes 
 unrelated "break with no debugger" case. Verified: debug suite 12 (incl. send-level +
 leak-prevention), `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` clean, concurrency/gen/proc green.
 
+## 2026-07-28 — REPL completion: list the candidates when Tab can't extend
+
+Tab completion has been in the line editor since ADR-052, but only in its
+insert-or-common-prefix form — which is invisible on an ambiguous prefix. Type `str`,
+press Tab, and *nothing happens*: the common prefix is already typed, so there is
+nothing to insert and nothing is drawn. From the outside that's indistinguishable from
+"completion isn't implemented", which is exactly how it got reported.
+
+Fixed by the readline convention: make progress if there is any, otherwise **show the
+alternatives**. `lineedit--apply-completion` now attaches the candidate list as
+`:completions` in precisely the case where its computed insertion equals the prefix it
+was given (several candidates, shared prefix already spelled out), and the renderer
+paints them in dim equal-width columns below the input — row-major, as bash lists.
+Because the *insertion* decision and the *listing* decision are the same `cond`, they
+can't disagree; a listing appears if and only if the keystroke did nothing visible.
+
+**Statelessness was the design constraint.** A cycling menu or ghost text would both
+need a mode — after Tab, what does the next key mean? — and a mode in a
+`(state, key) -> state` editor means every command has to know about it. A listing needs
+none: `lineedit-handle` drops `:completions` *before* dispatch, so it survives exactly
+one keystroke and no command (including a user's own rebinding) can leave a stale one on
+screen. Tab re-attaches it; anything else clears it.
+
+**Geometry is the real constraint.** Rendering is relative — climb up over the previous
+block, clear below, reprint, repark — so anything painted below the input has to be
+climbed back over exactly. The single-line path now sums the hint row and the listing
+rows into one `nbelow`, and the multi-line path's `up-to-cursor` spans the remaining form
+lines *plus* the listing (`(- (+ (dec nlines) ncand) cur-row)`) — the off-by-N that a
+naive append would have left, pinned by a test asserting the `[:up 3]`. Rows are capped
+at `*lineedit-completion-max-rows*` (6) with a `… +N more` tail and truncated to
+`width - 1`: a listing tall enough to scroll the terminal, or a row wide enough to wrap,
+desyncs the cursor restore — the same limit the one-line signature hint already lives
+under.
+
+All of it is Brood (`std/editor/lineedit.blsp`), all pure but the two render calls, so
+the layout is unit-tested with no terminal: 11 new cases covering the attach/no-attach
+boundary, one-keystroke lifetime, column layout, narrow-terminal wrapping, over-long
+truncation, the cap, and the multi-line repark. The two render calls were checked the
+only way they can be — driving the real REPL through a pty and reading the escapes:
+`str`+Tab gives 16 candidates in 3×6 with `[6A` back to col 11; `(map str`+Tab stacks the
+signature hint *and* 6 listing rows and climbs `[7A`; a two-line `defn` climbs `[6A` to
+row 1, col 14. `,help` gained a Tab line, since a feature nobody can see is worth
+advertising.
+
+Suite: 3669/3672, the 3 failures all `KI-14: deep JIT'd recursion` hard-killed at the
+120s cap — a debug-build speed artifact (unrelated to this change; they exercise JSON
+recursion depth, which never loads the editor).
+
+## 2026-07-28 (impl) — Abilities v2 slice 5: the dispatch inline cache (`%dispatch`)
+
+Ability dispatch was ~3.5× a direct call: each op did `(identity-of self)` then
+`(impl-for [A op] id)` — two global-`*impls*` CHAMP lookups (hash the `[ability op]`
+key, then the id) on top of the identity read. The Brood-side inline tricks were
+marginal (~6–11%) and rightly rejected as hacks, so this does it properly: a **per-op
+inline cache in the kernel**, mirroring the existing `GlobalIc`/`CallIc` machinery.
+
+`%dispatch(impls, op-key, id)` (one Rust builtin, `Heap::vm_dispatch`) memoises the
+resolved impl `fn` per op-key in a per-process map `ic[op-key] = (epoch, id, fn)`. A HIT
+— same op-key, same id, current epoch — returns the cached fn with no `*impls*` touch; a
+MISS resolves `impls[op-key][id]` (else `:default`) and caches. The op (from `defability`)
+passes `*impls*` in, so the kernel stays decoupled from the global's name and the
+resolution policy stays in Brood — the cache is a pure memo of `impl-for`, invisible to
+the language (the user calls `(sz b)` and never sees `%dispatch`).
+
+The elegant part is invalidation: the cache is validated by the shared `global_epoch`
+(`runtime.version`), which is bumped by **every `def`** — so `register-impl`'s
+`(def *impls*)` — **and by RUNTIME compaction**. So one epoch guard makes the cache
+reload-safe (a redefined impl misses → re-resolves), GC-safe (a moved RUNTIME fn handle
+misses; and the cached fn lives in the RUNTIME-promoted `*impls*`, stable under minor GC
++ rooted during the call), and cross-process-correct (a `def` in any process bumps the
+shared version) — no new invalidation machinery, no write barrier, nothing user-visible.
+`is_movable` gates caching as a belt-and-braces against ever storing a LOCAL handle.
+
+Result: dispatch **~8.5s → ~5.5s** over 5M calls (best-of-3, release) — the overhead vs a
+direct call (`~6.2s → ~3.2s`) roughly **halved**, ratio 3.5× → 2.4×. Verified correct
+(ability 34 incl. two new reload/poly IC-deopt tests, record/show/json green), GC-safe
+(debug per-deref tripwire + `GC_VERIFY` heap-verifier clean under `BROOD_GC_STRESS=1`),
+reload-transparent (warm the cache, redefine the impl, next call is the new one), and
+engine-agnostic (tree-walker `BROOD_VM=0` too). Remaining §7: compile-time static
+resolution where the receiver type is known, and `:sealed` → a closed switch.
+
+## 2026-07-28 — REPL: bounded printing, result history, rc file, auto-indent + M-q
+
+Four things chosen off a "what would make the REPL awesome" list. Three landed; the
+fourth turned into a kernel investigation that is *not* resolved — see the end.
+
+**Bounded printing** (`std/prelude.blsp`). `pr-str` is faithful — whatever it returns
+reads back — which is the right contract for serialization and the wrong one for a
+screen: one 100k-element list at a prompt scrolls the session away and there was no way
+to ask for less. So bounding is a separate function (`pr-str-bounded`) under two
+`defdyn` knobs (`*print-length*` 100, `*print-level*` 8, `nil` = unlimited), not a flag
+on `pr-str` — nothing that round-trips data can accidentally acquire an eliding printer,
+and `pr-str` stays the escape hatch for seeing everything. Only containers are
+traversed; every leaf and every value it doesn't know (a record with `impl Display`, a
+rope, a table) goes to `pr-str` untouched, so custom printing keeps working. One marker,
+`…`, for both bounds rather than Clojure's `…`/`#` pair: two symbols for one concept is
+a thing to learn for no gain, and a bare `#` re-lexes as the start of a `#{…}` set to
+anything reading the output back — which the REPL's own result highlighter does.
+
+The depth bound tests on *entering* a container, not on a leaf. Getting that wrong is
+what the first version did, and it shows up immediately: `*print-level* 2` on
+`{:a {:b {:c 1}}}` elided each of the inner map's keys and values separately
+(`{:a {:b {… …}}}`) instead of the subform (`{:a {:b …}}`).
+
+**Result history + discovery + rc** (`std/tool/repl.blsp`). `*1 *2 *3` and `*e`; a value
+you didn't think to name was previously just gone, and for anything expensive or
+effectful "retype it" is the wrong answer. These work because `defdyn` is the only door
+to an **ambient** (never-namespaced) name (ADR-151) — a plain `(def *1 …)` inside
+`(defmodule repl …)` defines `repl/*1`, while the user typing `*1` means the bare root
+name; `defdyn` also makes a later `def` from any module rebind that one root binding,
+which is exactly what the loop needs. `def` and not `binding`: the value has to outlive
+the form that produced it. An incomplete form deliberately does **not** land in `*e` —
+it isn't a failure, and clobbering the error you're debugging with "read another line"
+would be worse than nothing.
+
+`,apropos` and `,search` finally expose `apropos`/`doc-search`, which had been sitting in
+the prelude unreachable from the prompt, plus `,expand`/`,expand1` over `macroexpand`.
+And a startup file (`$BROOD_RC` or `~/.broodrc.blsp`, then `./.broodrc.blsp`): every
+customisation this REPL advertises — the keymap, the prompt, `*lineedit-candidates*` —
+died with the session because there was nowhere to put it, so the rc is the payoff on
+ADR-048's premise rather than a new feature. A broken rc reports and continues; a
+customisation that locks you out of the tool you'd fix it with is not acceptable.
+
+**Auto-indent + M-q** (`std/editor/lineedit.blsp`, `+ enclosing-open` in
+`highlight.blsp`). Continuation lines started at column 0. The indent rule is *read off*
+`std/format.blsp`'s actual output rather than invented, so typing and reformatting can't
+disagree: `(` and `[` continue at the opener's column + 2, `{` at + 1. That's the whole
+rule — no per-form table, because the header table changes what stays on line 1, never
+the body indent.
+
+`M-q` only accepts a reformat whose result reads back as the *same forms*. Not
+belt-and-braces: `format-source` doesn't raise on incomplete input, it **completes** it,
+so mid-typing `(defn f (x` came back as `(defn f (x ) )` — silently closing brackets the
+user hadn't. Comparing parsed forms rejects that while still allowing the whitespace and
+comment changes a formatter is entitled to make.
+
+**Interruptible Ctrl-C: built, blocked, off by default.** Today Ctrl-C during a long eval
+terminates the runtime (raw mode is only held for the *read*), so the price of stopping
+one expression is the whole live image. The intended fix needs no evaluator change: run
+each eval in a green process and `(exit pid :kill)` it. The kernel seam for that is two
+primitives over `libc` (`%install-interrupt-handler` / `%interrupt-taken?`) — verified
+working, and opt-in so a script keeps dying on Ctrl-C like any Unix program.
+
+It doesn't work, because **a process spinning inside `eval`/`eval-string` never honours
+the hard kill**:
+
+    direct call                → DIED reason=:kill
+    via eval-string            → SURVIVED
+    via (eval (read-first …))  → SURVIVED
+
+A REPL can't avoid `eval-string`, so the first Ctrl-C would issue a kill that does
+nothing and the second would halt — two keypresses for today's one-keypress outcome.
+That's a regression, so it's behind `BROOD_REPL_INTERRUPT=1` with the default untouched.
+
+The root cause is **not** located, and the obvious guess was wrong. Adding a pending-kill
+check at every plausible safepoint (`eval/mod.rs`'s `'tail:` loop top, both of
+`exec_chunk`'s self-tail safepoints, `vm_run_bc`'s frame boundary) changed nothing, so
+those edits were reverted rather than left speculative in a hot path. Instrumenting every
+reduction path showed why: the child *does* accrue reductions (~1000× slower than the
+direct call, i.e. tree-walked) yet reaches **no** rollover in `tick()`, `tick_capture()`,
+or any patched site, with or without the JIT — only the parent pid rolls over, and its
+kill flag is never set. So a nested eval's loop consumes its budget somewhere none of
+those safepoints see; `charge_native`'s time-based accounting is the next suspect, since
+`eval-string` is one long native call. Repro: `scratchpad/killtest2.blsp`.
+
+Worth fixing on its own terms regardless of the REPL: any spawned process evaluating code
+is currently unkillable, which reaches supervisors and `gen` servers too.
 ## 2026-07-28 — per-process compiled code is the per-process memory cost
 
 Chasing the 4.58 GB that 300k live processes cost on the `spawn-live` benchmark (Elixir
