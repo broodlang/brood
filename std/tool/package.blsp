@@ -543,6 +543,19 @@ package is unknown to this index."
 ;; place; no copy into _deps/.
 (defn package--dep-src-dir (e) (path-join (get e :resolved-path) "src"))
 
+;; Record each `[package-name src-dir]` provider's `(defmodule …)` names under its package
+;; in `*ns-package*` (ADR-172 package identity). A static scan — the same `defmodule`-name
+;; reads the collision check does — so it never touches the `require`/`defmodule` hot path.
+(defn package-record-ns-packages (pkg-dir-pairs)
+  "Record the modules of each `[package-name src-dir]` pair under that package name in the
+  ambient `*ns-package*` map. The ability system's app-vs-library seam; called at setup."
+  (def *ns-package*
+    (fold (fn (m pair)
+            (let (pkg (first pair)
+                  dir (second pair))
+              (fold (fn (mm mod) (assoc mm mod pkg)) m (package--provided-modules dir))))
+      *ns-package* pkg-dir-pairs)))
+
 (defn ensure-deps (root deps)
   "Resolve `deps`, refresh the lock file, and return the list of source dirs to add to *load-path* (one per resolved dep). Called from `project-setup`; a no-op when there are no deps."
   (if (empty? deps)
@@ -550,6 +563,9 @@ package is unknown to this index."
     (let (entries (resolve-deps root deps (read-lockfile root)))
       (package--guard-collisions root entries)
       (package--write-lockfile-if-changed root entries)
+      ;; identity: each dep's modules → the dep's `:name`.
+      (package-record-ns-packages (map (fn (e) (list (get e :name) (package--dep-src-dir e)))
+                                    entries))
       (map package--dep-src-dir entries))))
 
 ;; --- the `nest` verbs --------------------------------------------------------

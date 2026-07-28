@@ -194,4 +194,14 @@
     (register-ability 'NestAb '((op [self])) 'somelib)
     ; the true owner
     (assert= (impl-rank 'NestAb :editor/display/frame 'editor/display) 3)
-    (assert= (impl-rank 'NestAb :editor/display/frame 'editor) 1)))
+    (assert= (impl-rank 'NestAb :editor/display/frame 'editor) 1))
+  ;; app tier (4): a module in the project's OWN package (*ns-package* → *project-name*), or
+  ;; a root/REPL impl (from=nil, the user IS the app), outranks type/ability owners.
+  (test "the project's own package (and root/REPL) is the top app tier"
+    (require 'project)
+    (register-ability 'AppAb '((op [self])) 'artlib)
+    (binding (*project-name* 'myproj
+              *ns-package* (assoc *ns-package* 'appmod 'myproj))
+      (assert= (impl-rank 'AppAb :foreign/rec 'appmod) 4)
+      (assert= (impl-rank 'AppAb :foreign/rec nil) 4)
+      (assert= (impl-rank 'AppAb :foreign/rec 'deplib) 1))))
