@@ -117,7 +117,7 @@ Both of the large levers on this path have already been taken. What is left is t
 irreducible-looking remainder: one mailbox `Mutex` acquisition, `wake_parked`, a
 re-enqueue, worker pickup, and one matcher activation per candidate.
 
-- [ ] **L3 — selective-receive rescan is O(rounds × backlog). Measured 2026-07-29, and
+- [x] **L3 — DONE 2026-07-29 (fix 1, the structural pre-filter). Selective-receive rescan was O(rounds × backlog). Measured 2026-07-29, and
   it is the bigger half of this item.** The receive loop rebuilds *every* non-matching
   candidate into the heap (`from_message`, allocating garbage) on *every* scan, then runs
   the matcher on it. 2000 receive rounds against a static backlog:
@@ -133,8 +133,13 @@ re-enqueue, worker pickup, and one matcher activation per candidate.
   backlog. `MailboxState::scanned` already avoids re-running a *parked* scan for messages
   behind the mark, but a freshly-entered `receive` starts from zero every time.
 
+  **Shipped:** fix 1 below. Backlog 0/50/200/500 went 20/64/171/~420 ms → 21/23/26/34 ms
+  (12× at 500), for `pingpong` +1.3% / `ring` +2.6% on a one-message mailbox — the decode
+  is lazy (only when `queue.len() > 1`), which keeps the trivial case near-free. Fix 2
+  (receive markers) remains available for ref-addressed protocols.
+
   Two independent fixes, either worth doing:
-  1. **Don't rebuild to reject.** The expensive part per candidate is `from_message` +
+  1. **Don't rebuild to reject.** ✅ shipped The expensive part per candidate is `from_message` +
      a matcher activation. A cheap structural pre-filter on the `Message` (before it
      becomes a `Value`) would reject most non-matches without allocating — the common
      patterns are tag-led (`[:want _]`), so comparing the first element's keyword against
