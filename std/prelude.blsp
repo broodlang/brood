@@ -4527,6 +4527,155 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
               (list 'quote (current-ns)))))
         methods))))
 
+;; ── Multiple dispatch: `defmulti` / `defmethod` (ADR-179) ──────────────────────
+;; Dispatch on the IDENTITY-TUPLE of the arguments, resolved by EXACT match, then a declared
+;; `:default`, else a loud `no-method` error — never a nearest-neighbour guess. Ambiguity is
+;; impossible by construction (no partial wildcards). A `defmulti` may declare a closure
+;; algebra — `:commutative` or `:antisymmetric` — that derives each off-diagonal binary
+;; method's mirror, so a binary operator is authored as the upper triangle of its type matrix.
+;; The single-dispatch seam is still `defability`/`impl`; this is its multi-arg sibling.
+
+(def *methods* {})        ; multimethod name → { [id …] → fn, :default → fn }
+(def *multi-algebra* {})  ; multimethod name → :commutative | :antisymmetric | nil (declared)
+(def *method-from* {})    ; [mname key] → registering ns, for cross-module conflict detection
+
+(defn register-multi (mname algebra)
+  "Declare multimethod `mname` with optional closure `algebra` (nil, :commutative, or
+  :antisymmetric). Records the algebra so `register-method` can derive each mirror."
+  (def *multi-algebra* (assoc *multi-algebra* mname algebra))
+  nil)
+
+(defn multi-resolve (mname key)
+  "The method fn of multimethod `mname` for identity-tuple `key` (a vector), else the declared
+  `:default` method, else nil. Exact match or declared fallback — never a nearest guess."
+  (let (methods (get *methods* mname))
+    (or (get methods key) (get methods :default))))
+
+(defn no-method (mname key)
+  "The loud, structured error a multimethod raises when neither an exact method nor a
+  `:default` covers identity-tuple `key`: `{:kind :no-method :message … :multi :key :have}`
+  (the multiple-dispatch sibling of `no-impl`). `error-message` returns the human text."
+  (let (known (keys (or (get *methods* mname) {}))
+        message (if (empty? known)
+                  (str "multimethod " mname ": no method for " key)
+                  (str "multimethod " mname ": no method for " key " — have " known)))
+    (throw {:kind :no-method :message message :multi mname :key key :have known})))
+
+(defn register-method--store (mname key f)
+  "Store method `f` at EXACT `key` for `mname` (overwrites — an authored method always wins)."
+  (def *methods* (assoc *methods* mname (assoc (get *methods* mname {}) key f)))
+  nil)
+
+(defn register-method--derive (mname key f)
+  "Fill the CLOSURE-derived mirror at `key` only if ABSENT — an explicitly authored method of
+  the same key must never be clobbered by a derived one, whatever the load order."
+  (let (methods (get *methods* mname {}))
+    (when (not (contains? methods key))
+      (def *methods* (assoc *methods* mname (assoc methods key f)))))
+  nil)
+
+(defn register-method (mname key f from)
+  "Register method `f` of multimethod `mname` for identity-tuple `key` (a vector), tagged with
+  ns `from`. Derives the mirror per the declared algebra for a BINARY off-diagonal key
+  (:commutative → `(f y x)`; :antisymmetric → `(- 0 (f y x))`). STRICT: the multimethod must
+  be declared first, a closure needs a binary key, and a same-key re-register from a DIFFERENT
+  module is a loud conflict (last wins) — nothing is left unclear."
+  ; The multimethod must be declared (so its algebra/shape is known). Unclear otherwise —
+  ; fail at load, not silently at a later dispatch.
+  (when (not (contains? *multi-algebra* mname))
+    (error "defmethod " mname " " key ": no `(defmulti " mname " …)` is in scope — "
+      "declare the multimethod before adding methods"))
+  (let (prov [mname key]
+        has-prev (contains? *method-from* prov)
+        prev-from (get *method-from* prov))
+    (when (and has-prev (not (= prev-from from)))
+      (println "warning: multimethod " mname " method for " key
+        " — redefined from " prev-from " by " from " (last wins)"))
+    (register-method--store mname key f)
+    (def *method-from* (assoc *method-from* prov from)))
+  (let (algebra (get *multi-algebra* mname))
+    ; the `:default` catch-all is a keyword sentinel, not a tuple — never a closure target.
+    (when (and algebra (vector? key))
+      ; a closure encodes a BINARY-operator law; refuse to derive on a non-binary key.
+      (when (not (= (count key) 2))
+        (error "defmethod " mname " " key ": a " algebra " closure needs a binary (2-arg) "
+          "method, but this key has " (count key) " position(s)"))
+      (let (left (nth key 0) right (nth key 1))
+        ; skip the diagonal (key = its own mirror — it would wrap itself)
+        (when (not (= left right))
+          (let (mirror [right left])
+            (cond
+              (= algebra :commutative)
+                (register-method--derive mname mirror (fn (x y) (f y x)))
+              (= algebra :antisymmetric)
+                (register-method--derive mname mirror (fn (x y) (- 0 (f y x))))
+              else
+                (error "defmulti " mname ": unknown algebra " algebra
+                  " (expected :commutative, :antisymmetric, or none)")))))))
+  nil)
+
+(defmacro defmulti (mname & opts)
+  "Declare multimethod `mname`, dispatching on the IDENTITY-TUPLE of its arguments: an EXACT
+  method, then a `:default` method, else a loud `no-method` error — never a nearest guess.
+  An optional algebra keyword derives each off-diagonal binary method's mirror — `:commutative`
+  (`+`/`*`/`min`/`max`) or `:antisymmetric` (`compare-to`) — so a binary op is authored as the
+  UPPER TRIANGLE of its type-pair matrix. See [[decisions]] ADR-179.
+
+    (defmulti num-add :commutative)
+    (defmulti compare-to :antisymmetric)
+    (defmulti render)"
+  (let (algebra (if (empty? opts) nil (first opts)))
+    ; STRICT: an unknown algebra keyword is a clear declaration error — fail at expansion.
+    (when (and algebra (not (member? algebra (list :commutative :antisymmetric))))
+      (error "defmulti " mname ": unknown algebra " algebra
+        " (expected :commutative, :antisymmetric, or none)"))
+    (list 'do
+      (list 'register-multi (list 'quote mname) algebra)
+      (list 'defn mname '(& args)
+        (list 'let (list 'key (list 'mapv 'identity-of 'args)
+                    'f (list 'multi-resolve (list 'quote mname) 'key))
+          (list 'if 'f
+            (list 'apply 'f 'args)
+            (list 'no-method (list 'quote mname) 'key)))))))
+
+(defmacro defmethod (mname pattern arglist & body)
+  "Register a method of multimethod `mname` for identity `pattern` — a vector whose positions
+  are a built-in id keyword (`:int`) or a record name (`money`, `geo/circle`), the same
+  spelling `impl` uses. STRICT (no guessing): the pattern must be a vector of ids and the
+  method's arg count must match the pattern length — a mismatch fails at load.
+
+    (defmethod num-add [money money] (a b) (money (+ (cents a) (cents b))))
+    (defmethod num-add [money :int]  (m n) (money (+ (cents m) n)))    ; + is commutative
+    (defmethod render   :default     (x) (str x))                      ; the catch-all"
+  (cond
+    ; the catch-all: consulted only when no exact identity-tuple matches. A keyword sentinel,
+    ; not a tuple — so it is arity-agnostic and never a closure target.
+    (= pattern :default)
+      (list 'register-method (list 'quote mname) :default
+        (cons 'fn (cons arglist body)) (list 'current-ns))
+    (vector? pattern)
+      (do
+        (when (not (every? (fn (p) (or (symbol? p) (keyword? p))) pattern))
+          (error "defmethod " mname " " pattern ": each position must be a record name or a "
+            "built-in id keyword"))
+        ; `:default` is the whole-pattern catch-all, never a single position — reject the mix.
+        (when (any? (fn (p) (= p :default)) pattern)
+          (error "defmethod " mname " " pattern ": `:default` is the catch-all, not a dispatch "
+            "position — write `(defmethod " mname " :default …)`"))
+        (when (not (= (count pattern) (count arglist)))
+          (error "defmethod " mname " " pattern ": the method takes " (count arglist)
+            " arg(s) but the pattern has " (count pattern) " position(s)"))
+        ; resolve each position to the id keyword a value presents (records qualified, `impl`).
+        (let (key (mapv ability--id-kw pattern))
+          (list 'register-method
+            (list 'quote mname)
+            (list 'quote key)
+            (cons 'fn (cons arglist body))
+            (list 'current-ns))))
+    else
+      (error "defmethod " mname ": the dispatch pattern must be a vector of ids or "
+        "`:default`, got " pattern)))
+
 ;; ── Display / Inspect: the print protocol (always on) ──────────────────────────
 (defability Display
   "A value's human display string — what `print`/`println` show for it." (to-str [self] :-> string))
