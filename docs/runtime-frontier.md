@@ -161,13 +161,34 @@ benchmark row before believing it.
   A worker never touches them. Expected: several hundred bytes off `Box<Process>`'s
   1840 B, plus cache-density wins. Mechanical but wide; no semantic risk.
 - [ ] **M2 — shared IC entries for sealed callees** (ADR-175 Stage 3, the BEAM
-  export-table move). A sealed (ADR-166) binding's resolution is process-independent, so
+  export-table move). **Promoted over M3 by the analysis above:** every field an IC entry
+  caches — `(sym, argc, epoch, callee, arm, env)` — is process-independent *within a
+  runtime*, now that arms themselves are shared (ADR-175 Phase C). So the whole per-process
+  IC table is arguably a per-runtime structure wearing the wrong hat: sharing it removes
+  all 664 B **and** starts every spawned process warm, which is the latency half. The
+  blocker is unchanged and real — the tables are read by JIT'd code on the hot path, so
+  they need a lock-free design (`FastLink` is already `#[repr(C)]` plain data built for
+  raw reads, and `jit_code_cache` is already an `RwLock` shared across processes, so the
+  precedent exists) and the full TSAN/loom gate. This is the highest-value *and*
+  highest-risk item in group B. A sealed (ADR-166) binding's resolution is process-independent, so
   its IC entry can live with the *shared arm* (atomics/ArcSwap; `FastLink` is already
   `#[repr(C)]` plain data). Removes most per-process IC slots (664 B floor item) *and*
   starts every fresh process warm — a latency win for spawn-heavy code too. Risk:
   concurrent lock-free structure read by JIT'd code — the one option needing the full
   TSAN/loom treatment. Decide against M3 first: they overlap.
-- [ ] **M3 — direct-link sealed callees at compile time** (ADR-175 Stage 1). A call to a
+- [ ] **M3 — direct-link sealed callees at compile time** (ADR-175 Stage 1). **Design
+  analysed 2026-07-29; it does NOT deliver the memory win on its own.** An IC hit yields
+  four things: `(callee, arm, env, callee_bases)`. For a sealed callee the first three are
+  process-independent and permanent, so they bake into the shared chunk (a `OnceLock` per
+  site, filled once per runtime). But `callee_bases` — which IC block the callee's sites
+  use *in this process* — is inherently per-process (Phase A gives each process its own
+  block), and it is currently a `HashMap<uid, (u32,u32)>` lookup. So a direct-linked call
+  still needs a per-process lookup per call, and the 544 B of IC slots stays.
+  **Prerequisite, and worth doing anyway:** give each shared arm a *dense per-runtime
+  index* (it has a `uid` from a global counter today) so the per-process block table
+  becomes a `Vec` index instead of a hash lookup. That makes the base resolution cheap
+  enough to direct-link against, and shrinks `arm_ic_blocks` at the same time. Only then
+  does M3 pay. Original entry: A call to a
   sealed name needs no site, no probe, no epoch check — bake the callee into the shared
   chunk (`OnceLock<Arc<CompiledArm>>` per site, shared across processes). Kills the IC
   slot AND the per-call validation for 67–99% of sites (measured range, user-heavy vs
