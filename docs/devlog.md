@@ -10825,3 +10825,23 @@ so a version / money / card record sorts by a meaningful order instead of its ar
 record 18 (incl. semantic-version ordering + built-in-sort-unchanged), maps 83, no
 regression. Remaining of "lean into abilities": the numeric protocol (`+`/`-`/`*` for
 records) — the highest-risk one, since it touches the hottest paths.
+
+## 2026-07-29 (finding) — numeric protocol for records: Brood-side is a ~195× fib regression
+
+Tried a `Num` ability so records (money, complex, vectors) could use `+`/`-`/`*`/`/`, wired
+by a `(record? a)` branch in each operator's binary arm (`(if (record? a) (num-add a b)
+(%add a b))`), int/float falling straight to `%add`. It works — money arithmetic dispatches,
+ints/floats give the right answers — but the one mandatory `make ab`-style check killed it:
+**fib 35 went 60 ms → 11.7 s, ~195×.** A `(record? a)` branch, however cheap in isolation,
+makes `+` non-trivial enough that the JIT can no longer lower `(+ a b)` to a native int-add;
+the whole recursion falls back to slow interpreted calls. Reverted.
+
+Lesson (already in CLAUDE.md, now with a number): arithmetic operators are pure JIT
+substrate — *any* Brood-level branch in them is catastrophic. A numeric protocol has to be
+a kernel change: dispatch `Num` only from the `%add`/`%sub` *fallback* (operands not already
+numeric) or a JIT type-deopt, leaving the inlined path untouched — plus checker work to
+accept a `Num` record operand. Filed as a maybe-item in ROADMAP; the collection + `Ord`
+protocols (which don't touch the numeric hot path) shipped fine. Also confirmed the type
+checker is already clean for every shipped construct (Seqable/Conjable/Ord/Display): `nest
+check` is 0 warnings on the tree and on fresh user code — the `+` warnings were purely this
+reverted numeric change.

@@ -177,6 +177,17 @@ What that review consciously left OPEN, with the reasoning:
   through `Seqable` — they're JIT-inlined ops the hot `fold--loop` uses, so routing them
   needs kernel work (or raw `%first`/`%rest`); use `(first (seq c))` meanwhile — plus an
   optional `Counted` for O(1) `count`. **[Brood]**
+- ⬜ **(maybe) Numeric protocol — arithmetic for records (`Num`).** So a money value,
+  complex number, 2-D vector, or bignum can use `+`/`-`/`*`/`/` (the Elixir/Haskell `Num`
+  idea). **A Brood-side attempt (2026-07-29) was ❌ reverted**: putting a `(record? a)`
+  branch in `+`/`-`'s binary arm defeats the JIT's arithmetic specialization — measured a
+  **~195× fib regression** (60 ms → 11.7 s). It is therefore a **kernel** change or not at
+  all: dispatch a `Num` ability only from the `%add`/`%sub`/`%mul`/`%div` *fallback* (the
+  slow path taken when operands aren't already int/float) or via a JIT type-deopt, so the
+  inlined int/float path stays byte-for-byte untouched. Also needs matching **checker**
+  work — teaching `+`/`-`/`*`/`/` to accept a `Num` record operand without weakening the
+  number-only lint for everything else. Deferred as a focused, benchmark-gated effort;
+  lower priority than the collection/`Ord` protocols, which shipped. **[kernel/checker]**
 - ✅ **Record-shape dispatch** — resolved by **ADR-168**. Records stay structural maps
   (ADR-130 intact: `type-of` is still `:map`, `get`/`assoc`/`=` still structural), and
   a `defrecord` value carries a *dispatch-only* `:module/name` nominal identity baked
