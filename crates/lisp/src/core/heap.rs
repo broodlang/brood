@@ -1614,6 +1614,33 @@ pub(crate) struct CheckDepRec {
     pub(crate) protocols: bool,
 }
 
+/// **Loader / checker / namespace state — cold for a worker process** (ADR-175 follow-up,
+/// 2026-07-29). Every field here is used by the process that *loads modules or runs the
+/// checker*; a spawned green process that only runs Brood code never touches any of them.
+/// Held behind `Option<Box<ColdHeap>>` on the `Heap` so a worker pays 8 bytes instead of
+/// ~320, which matters because `Box<Process>` sits near a mimalloc size-class boundary:
+/// measured, +320 B of `Process` costs **+640 B of RSS per process**, so the same move
+/// downward is worth a class.
+///
+/// Allocated lazily by [`Heap::cold_mut`] on first write; readers go through
+/// [`Heap::cold`] and treat `None` as empty, which is exactly right — an absent
+/// `ColdHeap` means "this process has loaded nothing and checked nothing".
+#[derive(Default)]
+pub(crate) struct ColdHeap {
+    /// Nesting depth of an embedded-module load (ADR-166). See `Heap::in_module_load`.
+    pub(crate) module_load_depth: u32,
+    /// Source position of LOCAL list forms, keyed by [`form_pos_key`].
+    pub(crate) form_pos: HashMap<u64, (crate::error::Pos, Option<Arc<str>>)>,
+    /// The file currently being `load`ed, exposed via `(current-file)`.
+    pub(crate) current_file: Option<String>,
+    /// The namespace being compiled (`defmodule`).
+    pub(crate) compile_ns: Option<Symbol>,
+    /// Names the current namespace defines.
+    pub(crate) ns_known_names: HashSet<Symbol>,
+    /// `(:use …)` import map for the namespace being compiled.
+    pub(crate) imports: HashMap<Symbol, Symbol>,
+}
+
 pub struct Heap {
     /// The **nursery** (young generation): every `alloc_*` bumps into here, so it
     /// holds the freshly-allocated, mostly-short-lived objects. A *minor*
@@ -1640,7 +1667,7 @@ pub struct Heap {
     /// Per-process, so two processes loading different modules never see each
     /// other's exemption; incremented and decremented by `%load-module-source`,
     /// which restores it even when the load throws.
-    module_load_depth: u32,
+
     /// **Per-process pinned-read cache for the RUNTIME generations.** A RUNTIME handle
     /// deref must pin `gens[g]`'s `Arc<CodeSlabs>` (so a concurrent Stage-4 free can't drop
     /// it mid-read), but taking a fresh `ArcSwap::load` guard per deref dominated
@@ -1694,10 +1721,10 @@ pub struct Heap {
     /// Keyed by [`form_pos_key`] — the pair's slab index packed with its
     /// generation age bit, so a nursery pair and an old pair at the same slab
     /// index don't collide (the two LOCAL spaces share an index range).
-    form_pos: HashMap<u64, (crate::error::Pos, Option<Arc<str>>)>,
+
     /// The file currently being `load`ed, exposed via `(current-file)`. Saved and
     /// restored around each load so nested loads don't clobber the outer file.
-    current_file: Option<String>,
+
     /// The namespace currently being compiled into (ADR-065). `None` = root (the
     /// prelude, plain code, and the REPL until an `(ns …)` form runs). Set by the
     /// `(ns foo)` form via the `%in-ns` primitive; read by the resolver pass
@@ -1706,20 +1733,20 @@ pub struct Heap {
     /// across green processes (`RuntimeCode` is shared). File/module loaders save +
     /// reset this to root per file (so a `require`d file starts at root); the REPL
     /// driver leaves it sticky across entries.
-    compile_ns: Option<Symbol>,
+
     /// Names the current-namespace file will define (its top-level `def`/`defmacro`
     /// heads), pre-scanned when an `(ns …)` form runs so the resolver can qualify a
     /// *forward* reference (`bar` used before `foo/bar` is defined) — without it,
     /// such a reference would silently stay bare (order-dependent miscompile). Bare
     /// symbols only; consulted alongside the live global table. Cleared/repopulated
     /// per file by the loader.
-    ns_known_names: HashSet<Symbol>,
+
     /// Names the current file `(:use …)`-imported: bare name → qualified global
     /// (`describe` → `test/describe`). Populated by `%refer` when the `(ns …)`
     /// header runs; consulted by the resolver after the current namespace and
     /// before root fall-through. Per-file like `ns_known_names` — reset/restored
     /// by the loaders so imports never leak across files (ADR-065 inc-2).
-    imports: HashMap<Symbol, Symbol>,
+
     /// This process's dynamic-variable binding stack (the `binding` form). Each
     /// `binding` pushes its `(symbol, value)` pairs and pops them when its body
     /// returns (even on error); a read of a dynamic var consults this — latest
@@ -1763,18 +1790,12 @@ pub struct Heap {
     /// the header) and runs no `%isolate` rollback mid-loop, so the global set — hence the
     /// count — is stable across the loop. (NOT used by runtime `%refer`, where `%isolate`
     /// rollback could otherwise collide counts.) Per-process; built once per check.
-    module_exports_cache: RefCell<
-        Option<(
-            usize,
-            std::sync::Arc<std::collections::HashMap<String, Vec<(Symbol, Symbol)>>>,
-        )>,
-    >,
     /// Cached set of `mod/` namespace prefixes the loaded image knows — the checker's
     /// `known_ns` (decides whether an unresolved *qualified* name is a real unbound ref or
     /// one in an unloaded module). Same rationale + count-keying + checker-only soundness as
     /// [`module_exports_cache`](Self::module_exports_cache): rebuilding it by scanning all
     /// globals per file was the residual O(files²) after the header-eval redesign.
-    known_ns_cache: RefCell<Option<(usize, std::sync::Arc<std::collections::HashSet<String>>)>>,
+
     /// Phase-2 incremental-check dependency recorder (ADR-119). `Some` only while a
     /// `check-file-deps` runs *on this process*; the advisory checker's `obs_*`
     /// wrappers record every global observation into it. Living on the **heap** (not
@@ -1783,7 +1804,7 @@ pub struct Heap {
     /// worker pool without two concurrent checks (or a mid-check migration/preempt)
     /// clobbering each other's record. Off (`None`) for all normal eval; the record
     /// borrow on the hot per-symbol observation path is a single `RefCell` check.
-    check_dep_rec: RefCell<Option<CheckDepRec>>,
+
     /// Explicit GC root stack — the evaluator's **operand stack** (ADR-061).
     /// Every LOCAL [`Value`] an eval frame still needs *after* a nested `eval`
     /// (its accumulated `argv`, literal accumulators, `callee`, the `call_form`,
@@ -1793,6 +1814,22 @@ pub struct Heap {
     /// **any** eval depth, not just the outermost — see `docs/memory-model.md`.
     /// Also used by `eval_str`/`eval_source` for the unevaluated forms vector.
     /// Empty between top-level forms.
+    /// Loader/checker/namespace state — see [`ColdHeap`]. `None` until a module load,
+    /// namespace compile or checker run needs it, so a plain worker process never
+    /// allocates it (worth a mimalloc size class on `Box<Process>`).
+    cold: Option<Box<ColdHeap>>,
+    /// Checker caches. These stay on `Heap` rather than moving into [`ColdHeap`]
+    /// because they are filled through `&self` (the checker's read paths), which
+    /// cannot lazily allocate the boxed cold state. ~96 bytes; the six fields that
+    /// *are* in `ColdHeap` were enough to drop `Box<Process>` a size class.
+    module_exports_cache: RefCell<
+        Option<(
+            usize,
+            std::sync::Arc<std::collections::HashMap<String, Vec<(Symbol, Symbol)>>>,
+        )>,
+    >,
+    known_ns_cache: RefCell<Option<(usize, std::sync::Arc<std::collections::HashSet<String>>)>>,
+    check_dep_rec: RefCell<Option<CheckDepRec>>,
     roots: Vec<Value>,
     /// The env half of the operand stack (ADR-061): LOCAL [`EnvId`]s an eval
     /// frame still needs across a nested `eval` (its `scope`/`env`). Relocated in
@@ -2254,6 +2291,22 @@ pub(crate) use self::vm_cache::{
 };
 
 impl Heap {
+    /// The cold loader/checker state, if this process has ever needed it. `None` is the
+    /// normal case for a worker and means "empty" for every reader.
+    #[inline]
+    fn cold(&self) -> Option<&ColdHeap> {
+        self.cold.as_deref()
+    }
+
+    /// The cold state, allocating it on first use. Only write paths call this — a module
+    /// load, a `defmodule` compile, or a checker run.
+    #[inline]
+    fn cold_mut(&mut self) -> &mut ColdHeap {
+        self.cold.get_or_insert_with(Default::default)
+    }
+}
+
+impl Heap {
     /// A bare heap with empty shared regions — used to *build* the prelude
     /// before freezing it. Real runtimes use [`Heap::with_regions`]. GC is
     /// disabled here (the prelude is built once, then frozen — collection would
@@ -2261,7 +2314,6 @@ impl Heap {
     /// holes mid-build).
     pub fn new() -> Self {
         Heap {
-            module_load_depth: 0,
             local: Slabs::default(),
             old: Slabs::default(),
             gen_cache: [RefCell::new(None), RefCell::new(None)],
@@ -2273,17 +2325,13 @@ impl Heap {
             prelude: Arc::default(),
             runtime: Arc::default(),
             global: EnvId::local(0),
-            form_pos: HashMap::new(),
-            current_file: None,
-            compile_ns: None,
-            ns_known_names: HashSet::new(),
-            imports: HashMap::new(),
             dynamics: Vec::new(),
             #[cfg(feature = "dev-tools")]
             trace_context: None,
             #[cfg(feature = "dev-tools")]
             trace_context_own: false,
             global_ic: RefCell::new(SymbolMap::default()),
+            cold: None,
             module_exports_cache: RefCell::new(None),
             known_ns_cache: RefCell::new(None),
             check_dep_rec: RefCell::new(None),
@@ -2352,19 +2400,14 @@ impl Heap {
             closure_const_ver: Cell::new(u64::MAX),
             prelude,
             runtime,
-            module_load_depth: 0,
             global: EnvId::local(0),
-            form_pos: HashMap::new(),
-            current_file: None,
-            compile_ns: None,
-            ns_known_names: HashSet::new(),
-            imports: HashMap::new(),
             dynamics: Vec::new(),
             #[cfg(feature = "dev-tools")]
             trace_context: None,
             #[cfg(feature = "dev-tools")]
             trace_context_own: false,
             global_ic: RefCell::new(SymbolMap::default()),
+            cold: None,
             module_exports_cache: RefCell::new(None),
             known_ns_cache: RefCell::new(None),
             check_dep_rec: RefCell::new(None),
@@ -2878,8 +2921,10 @@ impl Heap {
         // Drop position metadata for the pairs just reclaimed (indices reused).
         // Keys pack the age bit at bit 32; this checkpoint path is nursery-only,
         // so compare the low-32 slab index against the checkpoint length.
-        if !self.form_pos.is_empty() {
-            self.form_pos.retain(|&k, _| (k as u32 as usize) < cp.pairs);
+        if self.cold.as_ref().is_some_and(|c| !c.form_pos.is_empty()) {
+            self.cold_mut()
+                .form_pos
+                .retain(|&k, _| (k as u32 as usize) < cp.pairs);
         }
         // The threshold is relative to live count; reclamation here is so cheap
         // that we let the next `gc_due` check recompute against the smaller heap.
@@ -2892,8 +2937,13 @@ impl Heap {
     pub fn set_form_pos(&mut self, v: Value, pos: crate::error::Pos) {
         if let Some(id) = v.as_pair() {
             if id.region() == crate::core::value::LOCAL {
-                let file: Option<Arc<str>> = self.current_file.as_deref().map(Arc::from);
-                self.form_pos.insert(form_pos_key(id), (pos, file));
+                let file: Option<Arc<str>> = self
+                    .cold()
+                    .and_then(|c| c.current_file.as_deref())
+                    .map(Arc::from);
+                self.cold_mut()
+                    .form_pos
+                    .insert(form_pos_key(id), (pos, file));
             }
         }
     }
@@ -2908,7 +2958,11 @@ impl Heap {
     pub fn form_pos(&self, v: Value) -> Option<(crate::error::Pos, Option<Arc<str>>)> {
         if let Some(id) = v.as_pair() {
             match id.region() {
-                crate::core::value::LOCAL => return self.form_pos.get(&form_pos_key(id)).cloned(),
+                crate::core::value::LOCAL => {
+                    return self
+                        .cold()
+                        .and_then(|c| c.form_pos.get(&form_pos_key(id)).cloned())
+                }
                 crate::core::value::RUNTIME => return self.runtime.position_of(id.index()),
                 _ => {}
             }
@@ -2925,12 +2979,12 @@ impl Heap {
     /// Set the file currently being loaded, returning the previous value so the
     /// caller can restore it (loads nest).
     pub fn set_current_file(&mut self, file: Option<String>) -> Option<String> {
-        std::mem::replace(&mut self.current_file, file)
+        std::mem::replace(&mut self.cold_mut().current_file, file)
     }
 
     /// The file currently being loaded, exposed to Brood via `(current-file)`.
     pub fn current_file(&self) -> Option<&str> {
-        self.current_file.as_deref()
+        self.cold().and_then(|c| c.current_file.as_deref())
     }
 
     // ----- current namespace (ADR-065) -----
@@ -2939,24 +2993,24 @@ impl Heap {
     /// value so the caller can restore it. File/module loaders save + reset to
     /// `None` per file; the `%in-ns` primitive sets it from an `(ns …)` form.
     pub fn set_compile_ns(&mut self, ns: Option<Symbol>) -> Option<Symbol> {
-        std::mem::replace(&mut self.compile_ns, ns)
+        std::mem::replace(&mut self.cold_mut().compile_ns, ns)
     }
 
     /// The namespace currently being compiled into, or `None` at root.
     pub fn compile_ns(&self) -> Option<Symbol> {
-        self.compile_ns
+        self.cold().and_then(|c| c.compile_ns)
     }
 
     /// Record the bare names the current-namespace file will define, so the
     /// resolver can qualify forward references. Returns the prior set so the
     /// caller can restore it (loads nest).
     pub fn set_ns_known_names(&mut self, names: HashSet<Symbol>) -> HashSet<Symbol> {
-        std::mem::replace(&mut self.ns_known_names, names)
+        std::mem::replace(&mut self.cold_mut().ns_known_names, names)
     }
 
     /// Is `sym` (a bare name) known to be defined in the current namespace's file?
     pub fn ns_knows_name(&self, sym: Symbol) -> bool {
-        self.ns_known_names.contains(&sym)
+        self.cold().is_some_and(|c| c.ns_known_names.contains(&sym))
     }
 
     /// Record one more bare name as defined in the current namespace's file. Used
@@ -2966,29 +3020,31 @@ impl Heap {
     /// raw form. Registering it before the def's body is resolved lets self-
     /// references (the recursion in `counter`'s loop) qualify to the same name.
     pub fn add_ns_known_name(&mut self, sym: Symbol) {
-        self.ns_known_names.insert(sym);
+        self.cold_mut().ns_known_names.insert(sym);
     }
 
     /// Replace the current file's `(:use …)` import table, returning the prior one
     /// so the caller can restore it (loads nest). Maps bare → qualified.
     pub fn set_imports(&mut self, imports: HashMap<Symbol, Symbol>) -> HashMap<Symbol, Symbol> {
-        std::mem::replace(&mut self.imports, imports)
+        std::mem::replace(&mut self.cold_mut().imports, imports)
     }
 
     /// Add one imported binding (bare name → qualified global). Used by `%refer`.
     pub fn add_import(&mut self, bare: Symbol, qualified: Symbol) {
-        self.imports.insert(bare, qualified);
+        self.cold_mut().imports.insert(bare, qualified);
     }
 
     /// The qualified global a bare name was `(:use …)`-imported to, if any.
     pub fn import_of(&self, bare: Symbol) -> Option<Symbol> {
-        self.imports.get(&bare).copied()
+        self.cold().and_then(|c| c.imports.get(&bare).copied())
     }
 
     /// Every `(bare, qualified)` import pair in the current file's table — for the
     /// LSP to offer imported names as bare completion candidates (ADR-065 §6).
     pub fn imported_pairs(&self) -> Vec<(Symbol, Symbol)> {
-        self.imports.iter().map(|(&b, &q)| (b, q)).collect()
+        self.cold()
+            .map(|c| c.imports.iter().map(|(&b, &q)| (b, q)).collect())
+            .unwrap_or_default()
     }
 
     // ===== Definition sites (cross-file xref; ADR-031) =========================
@@ -3002,7 +3058,7 @@ impl Heap {
     ///
     /// [`current_file`]: Self::current_file
     pub fn note_definition(&mut self, form: Value, pos: crate::error::Pos) {
-        let Some(file) = self.current_file.clone() else {
+        let Some(file) = self.cold().and_then(|c| c.current_file.clone()) else {
             return;
         };
         if let Some(name) = self.def_form_name(form) {
@@ -3035,7 +3091,7 @@ impl Heap {
             // Qualify the recorded name to the current namespace (ADR-065) so the
             // def-site key matches the global the resolver will actually define
             // (`foo/name`); a no-op at root or for an already-qualified name.
-            ValueRef::Sym(name) => Some(match self.compile_ns {
+            ValueRef::Sym(name) => Some(match self.compile_ns() {
                 Some(ns) => {
                     crate::eval::macros::qualify_name(&crate::core::value::symbol_name(ns), name)
                 }
@@ -3305,7 +3361,10 @@ impl Heap {
         let mut acc = tail;
         for (src, head) in nodes.into_iter().rev() {
             let idx = self.runtime.cur_code().pairs.push((head, acc));
-            if let Some((pos, file)) = self.form_pos.get(&form_pos_key(src)).cloned() {
+            if let Some((pos, file)) = self
+                .cold()
+                .and_then(|c| c.form_pos.get(&form_pos_key(src)).cloned())
+            {
                 self.runtime.set_position(idx, pos, file);
             }
             acc = Value::pair(PairId::runtime_gen(idx, self.runtime.cur_gen()));
@@ -4086,7 +4145,7 @@ impl Heap {
     /// this process is loading an embedded module, which is the one context allowed to
     /// (re)define its own surface.
     pub fn is_reserved_global(&self, sym: Symbol) -> bool {
-        self.module_load_depth == 0 && self.runtime.is_sealed(sym)
+        !self.in_module_load() && self.runtime.is_sealed(sym)
     }
 
     /// Reserve `sym`, so a later user `def` of it is refused. Called for every global
@@ -4097,17 +4156,18 @@ impl Heap {
 
     /// True while this process is loading an embedded std module.
     pub fn in_module_load(&self) -> bool {
-        self.module_load_depth > 0
+        self.cold().is_some_and(|c| c.module_load_depth > 0)
     }
 
     /// Enter/leave an embedded-module load. Paired by `%load-module-source`, which
     /// decrements even when the load throws — a leaked exemption would silently
     /// un-reserve the language.
     pub fn enter_module_load(&mut self) {
-        self.module_load_depth += 1;
+        self.cold_mut().module_load_depth += 1;
     }
     pub fn leave_module_load(&mut self) {
-        self.module_load_depth = self.module_load_depth.saturating_sub(1);
+        let d = &mut self.cold_mut().module_load_depth;
+        *d = d.saturating_sub(1);
     }
 
     pub fn env_define(&mut self, env: EnvId, sym: Symbol, val: Value) {
