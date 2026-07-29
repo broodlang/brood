@@ -288,21 +288,20 @@ Three things follow, and they redirect the remaining work:
    earlier. That figure came from processes that had *run* enough code to populate their
    caches; a process that only parks has little to give back. Both numbers are right for
    their workload — quote the workload with the number.
-3. **mimalloc size classes now dominate the arithmetic.** Padding `Process` and measuring:
-   1208 B → 3466 B/proc, 1272 → 3469, **1400 → 3743**, 1528 → 3746. Classes step ~256 B
-   with a boundary just above 1272.
+3. **Shrinking `Process` keeps paying, at roughly 1:1 — there is no size-class cliff to
+   aim at.** An earlier version of this section claimed classes step ~256 B with a boundary
+   just above 1272, so the next win was *binary*: cut exactly 184 B or get zero. **That was
+   wrong**, over-read from single-sample padding runs. Measuring the allocator directly
+   (`crates/lisp/tests/size_class_probe.rs`, 200k live allocations per size) shows mimalloc
+   is near-linear in this range — cost ≈ size + ~16 B, with no step anywhere: 1024 → 1039,
+   1152 → 1167, 1208 → 1215, 1280 → 1295, 1408 → 1423, 1536 → 1551.
 
-   So `Process` at 1208 has **~70 B of headroom, and shaving under that buys nothing** —
-   which retires the "keep trimming `Heap` fields" strategy that paid four times today.
-   The next win is **binary**: cut **184 B** (1208 → ≤1024) to drop a whole class, worth
-   ~277 B/process ≈ **83 MB**. Cut less and get zero.
-
-   Candidate cuts totalling ~232 B, all the same cold-by-use pattern, and they must land
-   *together* to pay at all: the six GC stat counters (48 B) + `proc_mem_limit`/
-   `proc_limit_hit` (32 B) + `dynamics` (24 B) + `remembered` (24 B) into one lazily-boxed
-   struct (8 B), `gen_cache` + `gen_cache_ver` (48 B → 8), and the two closure caches
-   (80 B → 8). Verify the boundary is really 1024 before starting — the probe above only
-   bracketed the 1280/1536 pair.
+   What *is* reproducible: padding `Process` by +192 B costs +277 B/process (3431–3466 →
+   3710–3743, three runs each), i.e. ~1.44× amplification — page-level slack, not a class
+   step. Shrinks this session came in at 0.65× (checker state, −240 B struct → −157
+   B/proc) and 1.19× (old gen, −264 → −313). So budget struct bytes at roughly 1:1 and
+   **keep shaving incrementally**; do not hold cuts back waiting for a threshold, and do
+   not expect a jackpot from crossing one.
 
 - [ ] **M2b — sharing the IC tables. Two findings, one of which corrects the other.**
 
