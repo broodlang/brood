@@ -96,9 +96,19 @@ If no values remain under `k`, the key is dropped."
   "All values across all keys as a flat list (insertion order within each key)."
   (fold (fn (acc vs) (append acc (reverse vs))) [] (vals (get mm :entries))))
 
+;; A multimap joins the collection protocol (ADR-172 §7): its `Seqable` view is its
+;; flattened `[k v]` associations (insertion order), so `count`/`map`/`filter`/`fold`/
+;; `for`/`into`-from work over the associations directly. (No `Conjable`: an association
+;; needs a key, which `conj`'s single element can't carry — use `multimap-assoc`.)
+(impl Seqable multimap/multimap
+  (to-seq [mm]
+    (mapcat (fn (pair) (map (fn (v) [(first pair) v]) (reverse (second pair))))
+      (map-pairs (get mm :entries)))))
+
 (defn multimap-size (mm)
-  "Total number of key-value pairs across all keys."
-  (fold (fn (n vs) (+ n (count vs))) 0 (vals (get mm :entries))))
+  "Total number of key-value pairs across all keys — i.e. `(count mm)` over its
+associations (its `Seqable` view)."
+  (count mm))
 
 (defn multimap-map-vals (mm f)
   "Return a multimap where each value list has been transformed by `(f key values-list)`."
