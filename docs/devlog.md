@@ -11377,3 +11377,38 @@ instead of erroring. Dropped it: `Ord` is now strict too — a record type must 
 no `std/` site sorts bare records — every `sort`/`sort-by` there is over scalars (strings,
 numbers, symbols) or `[k v]` vectors (kernel `compare`), so nothing regressed. Full suite green
 (894). `std/prelude.blsp` + language.md updated.
+
+## 2026-07-29 (cont.) — BROOD_MONO benchmarked against dynamic dispatch
+
+Measured the Tier-1 devirtualization (ADR-182) against dynamic ability dispatch. It's a
+runtime-flag A/B on ONE binary (toggle `BROOD_MONO`), so `make ab` (which compares two
+*builds*) doesn't apply — release+JIT binary, 5M dispatch calls in a tight tail loop, one
+op call per iteration, min-of-N. Correctness checked first: dynamic and mono print
+byte-identical results.
+
+| Dispatch shape | VM-only (`BROOD_NO_JIT=1`) | JIT-on (unpinned) |
+|---|---|---|
+| **Literal** `(sz 7)` | 2.67 → 1.01s = **2.6×** | 2.85 → 0.50s = **~5.7×** |
+| **Constructor** `(ar (circle 7))` | 6.58 → 3.52s = **1.9×** | 7.17 → 3.96s = **1.8×** |
+| Plain call (control, no ability) | — | 0.14 → 0.15s = **1.0×** (no-op) |
+
+Findings:
+- **Literal dispatch is the big win (~5.7× with the JIT).** Dynamic barely improves from VM
+  (2.67s) to JIT (2.85s) — the op body (`identity-of` + `%dispatch` + branch) resists JIT
+  optimization. Devirt turns it into a direct impl call the JIT *can* optimize (→0.50s), so
+  mono's value here is as much "unblocks the JIT" as "skips the two CHAMP lookups."
+- **Constructor dispatch wins less (~1.8×)** — the per-iteration `(circle 7)` record
+  allocation is a fixed cost both paths pay, so the dispatch saving is a smaller slice.
+- **Control is a no-op** (1.0× within noise) — mono touches nothing without ability dispatch.
+
+Caveats (why this doesn't move the standard rows): it's a best-case microbenchmark whose loop
+body is *only* dispatch; real code does work per call, so whole-program speedup is smaller. And
+Tier 1 fires only on **literal / direct-constructor** args — the common hot-loop shape
+`(map area shapes)` (a *variable* arg) is Tier 2, not devirtualized here — so on the standard
+benchmark rows the impact is ~zero, exactly as the design note predicted.
+
+Method note (relearned): single-core `taskset` pinning was wildly unreliable here — the
+background JIT compiler contends on the pinned core, giving a 6.74s→1.02s swing between runs
+of the *same* dynamic config. VM-only isolates the raw dispatch cost; unpinned gives the
+real-world number; the two agree in direction and magnitude. Same lesson as CLAUDE.md's
+"re-run unpinned when a change touches compilation volume."
