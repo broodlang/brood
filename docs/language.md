@@ -571,9 +571,15 @@ record shapes**. `Shape :sealed [circle rect]` means `(or circle rect)` as a typ
 write `(sig total (Shape -> float))` or return one from an op (`(scaled [self] :-> Shape)`).
 A member record satisfies it (records are open, so extra fields are fine); a non-record is a
 provable mismatch; anything whose type isn't pinned down defers — sound, no false positives.
-Only *sealed* abilities resolve this way (an open ability has no finite member set to
-enumerate); an open ability's name in type position stays unknown and the annotation is
-dropped rather than guessed.
+
+**Any ability name is a type (ADR-186).** An *open* ability (no `:sealed`) has no finite
+member set, so it resolves to the permissive **`any`** — a `sig` mentioning it (`(sig render
+(Display -> string))`) still *checks* (the return and other params flow), the open-ability
+parameter just accepts anything. That's the sound choice: an open ability's impls are late
+and may cover any value, so no argument can be rejected on the type — the "does this value
+implement it" safety is enforced at the op *call sites* instead. Sealed abilities keep their
+precise finite-union type; both work for abilities declared in *this* file or reachable
+through `(:use …)`.
 
 > **Direction: [ADR-172](decisions.md) (amended 2026-07-28).** This open runtime model
 > is kept open — `impl` stays legal for any ability and any id (primitive, owned, or

@@ -645,7 +645,7 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         // registry BEFORE parsing sigs, so a `(sig f (Shape -> …))` / `:-> Shape` referring
         // to a sealed ability (this file's or an imported one) resolves to the union of its
         // members' record shapes rather than being dropped as an unknown type name.
-        annot::set_ability_types(protocol::sealed_member_ids(heap, &expanded));
+        annot::set_ability_types(protocol::ability_type_table(heap, &expanded));
         for &form in &forms {
             register_declared_sig(heap, &mut ctx, file_ns_name.as_deref(), form);
         }

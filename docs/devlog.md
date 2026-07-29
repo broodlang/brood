@@ -11694,3 +11694,22 @@ to avoid a stale sig). Hovering `map` now shows `(fn seqable -> seqable)`.
 Both reuse existing checker entry points (no new checking logic), so they inherit the
 zero-false-positive guarantee. LSP hover tests 8 → 9; REPL verified (clean/disabled/incomplete
 all quiet).
+
+## 2026-07-29 (cont.) — any ability name is a type; checker sees the live registries (ADR-186)
+
+Two things, one fix. **The bug:** the checker read `ability/*abilities*`/`*sealed*`/`*impls*`,
+but those globals are the **bare** earmuff-ambient `*abilities*`/`*sealed*`/`*impls*` (ADR-151
+— an earmuffed name is never namespaced). So the reads resolved `unbound` and returned empty:
+the checker had only ever seen a *file's own* `register-*` forms, never abilities/impls/sealed
+reachable through `(:use …)`. Fixed to the bare names — surfaced only because the next feature
+needed imported abilities visible. The missing-impl call check now sees imported impls too,
+which only *removes* warnings (more impls found); zero new warnings across std/ + tests/.
+
+**Open abilities as types (extends ADR-181).** A sealed ability resolved to the finite union
+of its members; an *open* ability (no closed set) dropped the whole `sig`. Now every ability
+name resolves — sealed → the union (unchanged), open → the permissive `any`. `any` is the
+*sound* choice for open: impls are late/unbounded (`:default` may cover everything), so no arg
+can be rejected on the type; the real safety is the missing-impl check at op call sites. The
+payoff: `(sig render (Display -> string))` now survives (return + other params still checked)
+instead of being discarded. `ability_type_table` (all abilities → sealed-members | open) +
+`annot::ability_type` (→ union | `any`). Type suite 273 → 275; zero false positives.

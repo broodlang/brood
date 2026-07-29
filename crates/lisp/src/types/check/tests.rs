@@ -308,6 +308,43 @@ fn ability_op_any_return_imposes_no_impl_constraint() {
     );
 }
 
+// ---- open abilities as types: any ability name is a valid type (ADR-186) ----
+
+#[test]
+fn open_ability_name_resolves_as_a_permissive_type() {
+    // `Display` is an OPEN prelude ability (no closed member set). Naming it in a sig no
+    // longer drops the whole declaration — it resolves to a permissive `any`, so the rest of
+    // the sig survives: the `-> string` return flows and `(+ 1 (render 5))` is caught.
+    let w = file_warnings(
+        "\
+         (defmodule t)\n\
+         (sig render (Display -> string))\n\
+         (defn render (x) \"s\")\n\
+         (defn bad () (+ 1 (render 5)))",
+    );
+    assert!(
+        w.iter().any(|s| s.contains("+") && s.contains("number")),
+        "an open ability as a param type must keep the sig alive (return flows): {w:?}"
+    );
+}
+
+#[test]
+fn open_ability_param_accepts_anything() {
+    // The open-ability param is permissive (its safety is enforced at op call sites, not
+    // here) — so any argument is fine, no false positive.
+    let w = file_warnings(
+        "\
+         (defmodule t)\n\
+         (sig render (Display -> string))\n\
+         (defn render (x) \"s\")\n\
+         (defn ok () (render {:a 1}))",
+    );
+    assert!(
+        !w.iter().any(|s| s.contains("render") && s.contains("argument")),
+        "an open-ability param must accept anything: {w:?}"
+    );
+}
+
 // ---- typed ability op parameters: `(name T)` in an op spec (ADR-180) ----
 
 #[test]
