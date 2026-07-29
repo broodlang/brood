@@ -419,25 +419,44 @@ non-blocking window. The shared loop behind the observer (and the editor)."
 ;; incremental search, a y/n confirmation. `overlay-route` is the one fallthrough rule
 ;; they share — route a key to whichever overlay is open, else dispatch normally — so an
 ;; app lists its overlays as data instead of growing a bespoke `cond`. The editor and the
-;; observer both build on it (ADR-094).
+;; observer both build on it (ADR-094). An overlay is a record implementing the
+;; `Overlay` ability (ADR-183); the pre-ability map vtable
+;; `{:active? :owns? :handle :exit}` is the `:default` impl, so it keeps working.
+
+(defability Overlay
+  "A transient input overlay: a modal feature that sits beside an app's keymap and,
+while open, captures input. Implement it for a record per overlay — only the ops the
+overlay needs: a record that skips `overlay-owns?` captures every key, and one that
+skips `overlay-exit` needs no dismiss step (the `:default` impl supplies both, and
+also accepts the legacy map vtable `{:active? :owns? :handle :exit}` unchanged)."
+  (overlay-active? [self model] :-> any)      ; truthy while the overlay is open
+  (overlay-owns? [self model input] :-> any)  ; truthy when `input` is the overlay's to handle
+  (overlay-handle [self model input] :-> any) ; fold an owned key into the model
+  (overlay-exit [self model] :-> any))        ; dismiss before a non-owned key falls through
+
+(impl Overlay :default
+  ;; The legacy map vtable — and the fallback for a record implementing a subset of
+  ;; the ops: a record has no `:owns?`/`:exit` slot, so those fall back to the same
+  ;; nil policy the vtable had (capture-all / leave the model as-is).
+  (overlay-active? [o model] ((get o :active?) model))
+  (overlay-owns? [o model input] (let (owns (get o :owns?)) (or (nil? owns) (owns model input))))
+  (overlay-handle [o model input] ((get o :handle) model input))
+  (overlay-exit [o model] (let (exit (get o :exit)) (if (nil? exit) model (exit model)))))
 
 (defn overlay-active (overlays model)
-  "The first overlay in `overlays` whose `:active?` holds for `model` (list order =
-precedence), or nil. Each overlay is a map `{:active? :owns? :handle :exit}`."
-  (find (fn (o) ((get o :active?) model)) overlays))
+  "The first overlay in `overlays` open for `model` (`overlay-active?`; list order =
+precedence), or nil. An overlay is an `Overlay` record or the legacy map vtable."
+  (find (fn (o) (overlay-active? o model)) overlays))
 
 (defn overlay-route (overlays model input fallback)
   "Fold `input` into the first active overlay in `overlays`, or `(fallback model input)`
-when none is open. Each overlay is `{:active? (model)->bool, :owns? (model input)->bool
-or nil, :handle (model input)->model, :exit (model)->model or nil}`. The owning overlay
-handles the key; a key it does **not** own dismisses the overlay (`:exit`, if any) and is
-re-dispatched through `fallback` — Emacs' dismiss-and-process. `:owns?` nil is
-capture-all (every key is the overlay's); `:exit` nil leaves the model as-is before
-falling through. The shared seam behind the editor's transient overlays and the
-observer's minibuffer."
+when none is open. The owning overlay (`overlay-owns?`) handles the key; a key it does
+**not** own dismisses the overlay (`overlay-exit`) and is re-dispatched through
+`fallback` — Emacs' dismiss-and-process. Overlays are records implementing `Overlay`
+(or legacy map vtables — see the `:default` impl). The shared seam behind the editor's
+transient overlays and the observer's minibuffer."
   (let (o (overlay-active overlays model))
     (cond
       (nil? o) (fallback model input)
-      (let (owns (get o :owns?)) (or (nil? owns) (owns model input))) ((get o :handle) model input)
-      else (let (exit (get o :exit))
-             (fallback (if (nil? exit) model (exit model)) input)))))
+      (overlay-owns? o model input) (overlay-handle o model input)
+      else (fallback (overlay-exit o model) input))))
