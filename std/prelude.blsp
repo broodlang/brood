@@ -2951,6 +2951,13 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
 (defn defrecord--fname (f) (if (pair? f) (first f) f))
 (defn defrecord--ftype (f) (if (pair? f) (second f) nil))
 (defn defrecord--acc-sym (rec fld) (symbol (str (name rec) "-" (name fld))))
+(defn defrecord--derives (opts)
+  "The vector following `:derives` in a `defrecord`'s trailing opts (the abilities to
+  derive), or nil. Each named ability must declare a `:derive-record` recipe (ADR-185)."
+  (cond
+    (empty? opts) nil
+    (= (first opts) :derives) (second opts)
+    else (defrecord--derives (rest opts))))
 (defn defrecord--qualify (nm)
   "Qualify bare name `nm` (a string) against the current ns → a `:<ns>/nm` keyword; at
 root/REPL (no ns) there is no prefix, so it is a bare `:nm`. Shared by `defrecord` (which
@@ -2973,7 +2980,7 @@ record built at root and an impl for it at root must land on the same dispatch i
   (def *record-ids* (assoc *record-ids* id nm))
   nil)
 
-(defmacro defrecord (rec fields)
+(defmacro defrecord (rec fields & opts)
   "Define record `rec` with `fields` — a positional constructor `(rec …)` plus a
 `rec-field` accessor per field. A record is an immutable map that also carries a
 **nominal identity**: a reserved `:__id__` field holding a `:module/name` keyword baked
@@ -2986,9 +2993,16 @@ record SHAPE carrying the `:__id__` keyword literal, so a value's identity flows
 the checker to dispatch sites (`(let (c (circle 2)) (area c))` is checkable). When every
 field is typed, per-accessor signatures are emitted too.
 
+A trailing `:derives [Ability …]` clause auto-generates an impl of each named ability
+(Elixir `@derive` / Rust `#[derive]`, ADR-185): each ability's `:derive-record` recipe is
+called with the field names at expansion, and the methods it returns are spliced into an
+`(impl Ability rec …)`. The ability must declare a recipe (else a clean expansion error),
+and it must be loaded before this `defrecord`.
+
     (defmodule geometry)
     (defrecord circle (r))          ; (circle 2) → {:__id__ :geometry/circle, :r 2}
-    (impl Shape circle (area [c] (* 3.14 (get c :r) (get c :r))))"
+    (impl Shape circle (area [c] (* 3.14 (get c :r) (get c :r))))
+    (defrecord point (x y) :derives [Ord])   ; compare-to synthesized field-wise"
   (let (fnames (map defrecord--fname fields)
         fkws (map (fn (n) (keyword (name n))) fnames)
         ;; the nominal id — a `:module/name` KEYWORD (a keyword literal is what the
@@ -3025,8 +3039,20 @@ field is typed, per-accessor signatures are emitted too.
                               (list (list 'record (keyword (name fnm)) (defrecord--ftype f))
                                 '-> (defrecord--ftype f)))))
                      fields)
-                   nil))
-    `(do ~ctor-sig ~ctor ~@accs ~@acc-sigs (record-register ~id '~rec) nil)))
+                   nil)
+        ;; `:derives [A …]` → one `(derive-into 'A id 'fields (current-ns))` per ability. The
+        ;; recipe is run at LOAD (not expansion), because the checker expands this `defrecord`
+        ;; WITHOUT first evaluating the ability's `defability`, so the recipe isn't registered
+        ;; at expand time. `derive-into` registers the impls at load; the checker reads these
+        ;; forms statically (they mark the ability's ops as implemented for `id`).
+        derives (defrecord--derives opts)
+        derive-calls (if derives
+                       (map (fn (a)
+                              (list 'derive-into (list 'quote a) id
+                                (list 'quote fnames) (list 'current-ns)))
+                         derives)
+                       nil))
+    `(do ~ctor-sig ~ctor ~@accs ~@acc-sigs ~@derive-calls (record-register ~id '~rec) nil)))
 
 ;; (min-by f coll) / (max-by f coll) — find the element whose key is smallest/largest.
 (defn min-by (f coll)
@@ -4249,6 +4275,25 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   provide, with what arities."
   (get *abilities* aname))
 
+; ability-name → its `:derive-record` recipe (ADR-185): a fn `(fn (fields) …)` that, given
+; a record's field-name symbols, returns a list of `impl` METHOD forms `((op (args…) body…)
+; …)` for the ability's REQUIRED ops (provided ops come free). `defrecord`'s `:derives`
+; clause calls it at EXPANSION and splices the result into an `(impl <ability> <record> …)`,
+; so the derived methods are ordinary, statically-checkable impls. The per-ability recipe is
+; the Elixir `@derive` / Rust `#[derive]` model: each ability decides how it derives itself.
+(def *ability-derives* {})
+
+(defn register-ability-derive (aname recipe)
+  "Record ability `aname`'s `:derive-record` recipe (the fn `defrecord`'s `:derives` runs to
+  synthesise a structural impl). Rebindable like any registry — a later `defability` wins."
+  (def *ability-derives* (assoc *ability-derives* aname recipe))
+  nil)
+
+(defn ability-derive-recipe (aname)
+  "Ability `aname`'s `:derive-record` recipe fn (fields → `impl` method forms), or nil when
+  the ability declared none — i.e. it is not derivable, and `:derives [aname]` is an error."
+  (get *ability-derives* aname))
+
 ; ability-name → its SEALED member ids (a closed set), or absent if open
 (def *sealed* {})
 
@@ -4401,6 +4446,23 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   (let (methods (get *impls* op-key))
     (or (get methods key) (get methods :default))))
 
+(defn derive-into (aname id fields from)
+  "Load-time worker for `defrecord`'s `:derives` (ADR-185): register ability `aname`'s derived
+  impl for record id `id` (field-name symbols `fields`), tagged with ns `from`. Calls the
+  ability's `:derive-record` recipe to get a list of `impl` method forms `((op [args] body…)
+  …)`, evals each into a fn, and registers it for `id`. Loud error if `aname` is not derivable
+  (declares no recipe). Runs at load, so the ability's `defability` need only precede the
+  record's construction — not its macro-expansion."
+  (let (recipe (ability-derive-recipe aname))
+    (when (not recipe)
+      (error "defrecord :derives — ability " aname " is not derivable "
+        "(its defability declares no :derive-record recipe)"))
+    (doseq (m (recipe fields))
+      ;; a method form is `(op [args] body…)` (impl syntax — a `[args]` VECTOR); `fn` wants a
+      ;; LIST param, so convert the vector to a list, exactly as the `impl` macro does.
+      (register-impl aname (first m) id
+        (eval (cons 'fn (cons (map (fn (s) s) (second m)) (rest (rest m))))) from))))
+
 (defn no-impl (op-key key)
   "The loud, located error an op raises when no impl (and no `:default`) covers id
   `key`. Throws a STRUCTURED error map — `{:kind :no-impl :message … :ability :op :id
@@ -4435,6 +4497,15 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
     (= (first specs) :sealed) (second specs)
     else (defability--sealed-vec (rest specs))))
 
+(defn defability--derive-fn (specs)
+  "The form following `:derive-record` in a `defability`'s specs — the derive recipe (an
+  inline `(fn (fields) …)` or a fn-symbol), or nil. Distinct from an op spec (whose second
+  element is a `[args]` *vector*), so it is filtered out of the op list."
+  (cond
+    (empty? specs) nil
+    (= (first specs) :derive-record) (second specs)
+    else (defability--derive-fn (rest specs))))
+
 (defn ability--id-kw (m)
   "The dispatch-id keyword for an impl / sealed-member id `m`. A keyword is kept as-is
   (`:int`, `:default`); a bare record symbol is qualified against the current ns
@@ -4460,29 +4531,83 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
       (append (list 'apply impl-sym) (append fixed (list rest-sym))))
     (cons impl-sym arg-syms)))
 
+(defn defability--op-body (op)
+  "The default-implementation body of op spec `op` — everything after the arg vector and
+  any `:-> RET` — or nil when the op declares none. A spec `(op [args] :-> ret? body…)`
+  with a body is a PROVIDED op (ADR-185): `defability` emits its body as an auto-registered
+  `:default` impl, so an `impl` that omits the op still gets it (Rust/Haskell provided
+  methods, Elixir `Protocol`'s derived defaults). The body typically calls the ability's
+  *required* ops on `self`, so it works for any id that supplies those."
+  (let (tail (rest (rest op)))          ; forms after `(op-name [args])`
+    (if (= (first tail) :->)
+      (rest (rest tail))                 ; skip the `:-> ret` pair
+      tail)))
+
 (defmacro defability (aname & specs)
   "Declare ability `aname`. Each op spec `(op [args…] :-> ret?)` becomes a generic
   function dispatching on its first argument's identity. An optional leading docstring
   is allowed. Records the specs in *abilities* for the checker / LSP.
 
+  A **provided** op carries a default body after its spec — `(op [args] :-> ret? body…)`
+  — which `defability` registers as the op's `:default` impl (ADR-185). An `impl` that
+  omits a provided op inherits the default; one that supplies it overrides it (an id-keyed
+  impl always beats `:default`). Write the required ops as bodyless specs and derive the
+  rest — implement `compare-to`, get `lt`/`gt`/`min`/`max` free:
+
+    (defability Ord
+      (compare-to [self other] :-> int)                          ; required
+      (lt  [self other] :-> bool (< (compare-to self other) 0))   ; provided
+      (gt  [self other] :-> bool (> (compare-to self other) 0)))  ; provided
+
   An optional `:sealed [id …]` clause names the CLOSED set of member ids the ability is
-  meant to cover; the checker then flags any member missing an impl of any op
-  (exhaustiveness). A bare record symbol is qualified with the current ns.
+  meant to cover; the checker then flags any member missing an impl of any *required* op
+  (a provided op is satisfied by its default). A bare record symbol is qualified with the
+  current ns. An optional `:derive-record <fn>` clause makes the ability derivable: `<fn>`
+  maps a record's field names to a list of `impl` method forms, which `defrecord`'s
+  `:derives` splices in (see `defrecord`).
 
     (defability Size  (size [self] :-> int))
     (defability Store (fetch [self k]) (put [self k v]))
     (defability Shape :sealed [circle rect] (area [self] :-> float))"
-  (let (ops (filter (fn (s) (pair? s)) specs)
+  ; An op spec is a pair whose second element is the `[args]` VECTOR; that excludes a
+  ; `:derive-record` recipe `(fn (fields) …)` (its second is a `(fields)` *list*) and any
+  ; keyword-clause value, so only real ops are collected.
+  (let (ops (filter (fn (s) (and (pair? s) (vector? (second s)))) specs)
         sealed-vec (defability--sealed-vec specs)
         sealed-ids (if sealed-vec (map ability--id-kw sealed-vec) nil)
+        derive-fn (defability--derive-fn specs)
         ; pass `(current-ns)` as the owner — evaluated at load in the DEFINING module, so
         ; `*ability-owner*` records where the ability was declared (ADR-172 precedence).
-        reg (cons (list 'register-ability
-                    (list 'quote aname) (list 'quote ops) (list 'current-ns))
-              (if sealed-ids
-                (list (list 'register-sealed
-                        (list 'quote aname) (cons 'list sealed-ids)))
+        ; The specs are stored WITH their bodies so the checker can tell a provided op from
+        ; a required one (a body ⇒ provided ⇒ not demanded of a sealed member).
+        reg (append
+              (cons (list 'register-ability
+                      (list 'quote aname) (list 'quote ops) (list 'current-ns))
+                (if sealed-ids
+                  (list (list 'register-sealed
+                          (list 'quote aname) (cons 'list sealed-ids)))
+                  nil))
+              ; the `:derive-record` recipe is emitted UNQUOTED — evaluated to a closure at
+              ; load, so `defrecord`'s `:derives` can call it at expansion (ADR-185).
+              (if derive-fn
+                (list (list 'register-ability-derive (list 'quote aname) derive-fn))
                 nil))
+        ; A provided op (one with a default body) becomes a `:default` impl, registered from
+        ; the declaring ns (ability-owner tier) so an app/type impl can still override it. Its
+        ; body runs through ordinary dispatch, calling sibling ops on `self` by late binding.
+        provided-defs (fold
+                        (fn (acc op)
+                          (let (body (defability--op-body op))
+                            (if (empty? body)
+                              acc
+                              (let (arg-syms (map (fn (s) (if (pair? s) (first s) s))
+                                               (second op)))
+                                (append acc
+                                  (list (list 'register-impl
+                                          (list 'quote aname) (list 'quote (first op))
+                                          :default (cons 'fn (cons arg-syms body))
+                                          (list 'current-ns))))))))
+                        nil ops)
         op-defs (map
                   (fn (op)
                     (let (op-name (first op)
@@ -4520,7 +4645,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
                             (defability--op-call impl-sym arg-syms)
                             (list 'no-impl op-key id-sym))))))
                   ops))
-    (cons 'do (append reg op-defs))))
+    (cons 'do (append reg (append op-defs provided-defs)))))
 
 (defmacro impl (aname key & methods)
   "Register implementations of ability `aname` for dispatch id `key` — a `type-of`
