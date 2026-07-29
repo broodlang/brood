@@ -11071,3 +11071,38 @@ tests the fix surfaced. All in `std/prelude.blsp`, `crates/lisp/src/types/check/
 
 Full suite green (`make test`: 883 passed); `tests/ability_test.blsp` extended with variadic,
 structured-error, and polymorphic-cache (>4 ids) coverage.
+
+## 2026-07-29 (cont.) — ability ergonomics review: single-dispatch scope, no cross-type arithmetic, op-name uniqueness
+
+A design pass over the shipped ability system (`defability`/`impl`, ADR-172) asking "is
+this ergonomic, how does it compare to other ecosystems?" — landing three decisions that
+kept the language surface *unchanged* (no new syntax, no new forms). Recorded under ADR-172
+as amendment 2026-07-29b.
+
+- **`defmulti` considered and declined (for now).** The one thing single-dispatch can't
+  express is multiple/structural dispatch. But the entire shipped ability surface is
+  single-dispatch, nominal record dispatch already covers Clojure's main `defmulti` use
+  (dispatch on a map tag), and structural-map dispatch is *deliberately* closed by ADR-011.
+  That leaves only cross-type binary methods — declined below. So a Clojure-style
+  `defmulti`/`defmethod` seam is deferred with an explicit trigger rather than built (ADR-011
+  "don't pay the two-mechanisms tax until a concrete need appears").
+- **No implicit cross-type arithmetic.** `Num`/`Ord` are homogeneous single-dispatch. Fixed
+  the one visible footgun: `(+ 5 (money 50))` fell through `num_bin` to `num_to_f64` and died
+  with "expected number, got map". It now raises a named error ("a record operand must come
+  first — `Num` dispatches on the first argument … cross-type arithmetic is not implicit").
+  One `is_record` guard in `crates/lisp/src/builtins/numeric.rs`; `(+ money money)` unchanged.
+- **Op names are unique per module, now ship-blocking.** The checker already computed the
+  same-module op-name collision as its `ambiguous` set but only used it to suppress false
+  positives. It now *also* emits a diagnostic (`check_op_collisions` in
+  `types/check/protocol.rs`, wired in `check.rs`), so `nest check` rejects it (advisory in
+  the live image, per ADR-123–126). The runtime `register-ability` warning stays as the
+  cross-file backstop. No `ability-call`/`Shape/area` escape valve — greenfield renames.
+- **Doc drift fixed.** `language.md`'s `impl`-id note still called the bare/qualified
+  asymmetry an open issue; KI-15 fixed it on 2026-07-27, so the note now describes the shared
+  `ability--id-kw` behavior.
+
+Docs: `docs/language.md` (single-dispatch/binary-op note, op-name-uniqueness note,
+nominal-only on-ramp), `docs/decisions.md` (ADR-172 amendment 2026-07-29b). Tests:
+`tests/ability_test.blsp` ("Num is homogeneous single-dispatch"),
+`crates/lisp/tests/type_check_catalog.rs` (op-name uniqueness warn + two false-positive
+guards).

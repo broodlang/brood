@@ -211,6 +211,17 @@ pub(super) fn num_bin(
             if let Some(r) = num_record_dispatch(heap, who, a, b)? {
                 return Ok(r);
             }
+            // A record as the SECOND operand can't dispatch: `Num` is single-dispatch on
+            // the FIRST argument (a record first operand was handled above). Cross-type
+            // arithmetic is not implicit — a clear, named error beats "expected number,
+            // got map" from the float coercion below. (`(- 5 money)` and friends.)
+            if is_record(heap, b) {
+                return Err(LispError::runtime(format!(
+                    "{who}: a record operand must come first — `Num` dispatches on the \
+                     first argument, so write `({who} <record> …)`; cross-type arithmetic \
+                     is not implicit (convert explicitly)"
+                )));
+            }
             Ok(Value::Float(float_op(
                 num_to_f64(heap, who, a)?,
                 num_to_f64(heap, who, b)?,
@@ -227,21 +238,23 @@ pub(super) fn num_bin(
 /// byte-for-byte untouched (a Brood-side `(record? a)` branch in `+` measured a ~195×
 /// regression — this is the kernel form that avoids it). Returns `None` when `a` isn't a
 /// record, so the caller proceeds to its normal float / error path.
+/// True when `v` is an identity-carrying record — a map with the reserved `:__id__`
+/// key (`defrecord` bakes it in). A plain map is not a record. Mirrors `record?`.
+fn is_record(heap: &Heap, v: Value) -> bool {
+    matches!(v, Value::Map(m)
+        if heap
+            .map_get(m, Value::Keyword(crate::core::value::intern("__id__")))
+            .is_some())
+}
+
 fn num_record_dispatch(
     heap: &mut Heap,
     who: &str,
     a: Value,
     b: Value,
 ) -> Result<Option<Value>, LispError> {
-    let m = match a {
-        Value::Map(m) => m,
-        _ => return Ok(None),
-    };
     // a record is a map carrying the reserved `:__id__`; a plain map is not the Num path.
-    if heap
-        .map_get(m, Value::Keyword(crate::core::value::intern("__id__")))
-        .is_none()
-    {
+    if !is_record(heap, a) {
         return Ok(None);
     }
     let op = match who {

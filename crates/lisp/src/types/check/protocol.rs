@@ -466,6 +466,7 @@ fn collect_ability_defs(
     op_fns: &mut HashMap<value::Symbol, (String, String)>,
     ctors: &mut HashMap<value::Symbol, String>,
     ambiguous: &mut HashSet<value::Symbol>,
+    collisions: &mut Vec<(Option<Pos>, String)>,
 ) {
     stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
@@ -482,10 +483,23 @@ fn collect_ability_defs(
                 if let Some(body) = fn_last_body(heap, val) {
                     if let Some(key) = find_op_key(heap, body) {
                         match op_fns.get(&name) {
-                            // A second, DIFFERENT ability binds the same op-fn symbol: the
-                            // attribution is no longer certain — mark it ambiguous.
+                            // A second, DIFFERENT ability binds the same op-fn symbol in this
+                            // module: the later `defn` clobbers the earlier ability's generic
+                            // function. Op names must be unique within a module (a different
+                            // module's same-named op binds a distinct `<module>/op` global and
+                            // is fine). Mark ambiguous *and* record a diagnostic — the runtime
+                            // `register-ability` warns too; `nest check` makes it ship-blocking.
                             Some(prev) if *prev != key => {
                                 ambiguous.insert(name);
+                                collisions.push((
+                                    heap.form_pos_only(form),
+                                    format!(
+                                        "ability {}: op `{}` is already declared by ability {} \
+                                         in this module — op names must be unique per module \
+                                         (rename one)",
+                                        key.0, key.1, prev.0
+                                    ),
+                                ));
                             }
                             _ => {
                                 op_fns.insert(name, key);
@@ -499,7 +513,7 @@ fn collect_ability_defs(
             }
         }
         for &item in items.get(1..).unwrap_or(&[]) {
-            collect_ability_defs(heap, item, op_fns, ctors, ambiguous);
+            collect_ability_defs(heap, item, op_fns, ctors, ambiguous, collisions);
         }
     })
 }
@@ -615,6 +629,9 @@ pub(super) struct AbilityInfo {
     abilities: HashMap<String, Vec<String>>,
     /// ability name → its SEALED member id names (closed set), if declared sealed.
     sealed: HashMap<String, Vec<String>>,
+    /// Same-module op-name collisions: two abilities in this file declaring the same op
+    /// name (the second clobbers the first's generic fn). Emitted by `check_op_collisions`.
+    collisions: Vec<(Option<Pos>, String)>,
 }
 
 impl AbilityInfo {
@@ -641,8 +658,16 @@ pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo
     let mut op_fns = HashMap::new();
     let mut ctors = HashMap::new();
     let mut ambiguous = HashSet::new();
+    let mut collisions = Vec::new();
     for &form in expanded {
-        collect_ability_defs(heap, form, &mut op_fns, &mut ctors, &mut ambiguous);
+        collect_ability_defs(
+            heap,
+            form,
+            &mut op_fns,
+            &mut ctors,
+            &mut ambiguous,
+            &mut collisions,
+        );
     }
     // Drop op-fn symbols two different abilities bound (a same-name clobber): their
     // attribution is uncertain, so they're excluded from the static missing-impl pass.
@@ -670,7 +695,15 @@ pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo
         defaults,
         abilities,
         sealed,
+        collisions,
     }
+}
+
+/// Same-module op-name collisions (two abilities in this file declaring the same op name).
+/// One diagnostic per collision — advisory in the live image, ship-blocking under
+/// `nest check` (which exits nonzero on any warning), so op names stay unique per module.
+pub(super) fn check_op_collisions(info: &AbilityInfo, out: &mut Vec<(Option<Pos>, String)>) {
+    out.extend(info.collisions.iter().cloned());
 }
 
 /// Collect `(…/register-ability (quote A) (quote OPS))` → ability A's op names.
