@@ -117,10 +117,36 @@ Both of the large levers on this path have already been taken. What is left is t
 irreducible-looking remainder: one mailbox `Mutex` acquisition, `wake_parked`, a
 re-enqueue, worker pickup, and one matcher activation per candidate.
 
-- [ ] **L3 — matcher without a frame per candidate.** Lower the match to a frameless
-  predicate over the staged value (the `match` lowering pass exists), and/or BEAM's
-  OTP-24 receive-marker trick so a selective receive doesn't rescan already-rejected
-  messages. The HOF path proves the activation is expensive; this removes the rest of it.
+- [ ] **L3 — selective-receive rescan is O(rounds × backlog). Measured 2026-07-29, and
+  it is the bigger half of this item.** The receive loop rebuilds *every* non-matching
+  candidate into the heap (`from_message`, allocating garbage) on *every* scan, then runs
+  the matcher on it. 2000 receive rounds against a static backlog:
+
+  | backlog | wall | per rescanned message |
+  |---|---|---|
+  | 0 | 20 ms | — |
+  | 50 | 64 ms | 0.44 µs |
+  | 200 | 171 ms | 0.38 µs |
+
+  Linear in backlog × rounds, so a process with a busy mailbox that waits on a specific
+  tag (a `gen` server, a supervisor filtering `[:EXIT …]`) pays quadratically in the
+  backlog. `MailboxState::scanned` already avoids re-running a *parked* scan for messages
+  behind the mark, but a freshly-entered `receive` starts from zero every time.
+
+  Two independent fixes, either worth doing:
+  1. **Don't rebuild to reject.** The expensive part per candidate is `from_message` +
+     a matcher activation. A cheap structural pre-filter on the `Message` (before it
+     becomes a `Value`) would reject most non-matches without allocating — the common
+     patterns are tag-led (`[:want _]`), so comparing the first element's keyword against
+     the clause tags is enough. Needs the compiler to expose each `receive` clause's
+     leading tag, which the `match` lowering already knows.
+  2. **BEAM's OTP-24 receive markers** for the ref-addressed case: a `gen`-style call
+     stamps a unique ref, so the scan can start at the marker instead of the queue head.
+     Narrower (only helps ref-carrying protocols) but removes the rescan entirely there.
+
+  The original framing — "remove the per-candidate frame" — is the *smaller* half: with
+  the HOF fast path already shipped (worth 3.0× on the message rows), a single match on a
+  1-message mailbox is close to floor. The rescan is where the remaining time is.
 - [ ] **L4 — park/wake path.** Handoff already elides the futex wake in the common case.
   Remaining: the mailbox `Mutex` (a per-message uncontended lock), `wake_parked`,
   re-enqueue. Profile before designing — after L3, this is what is left of the 1.3 µs.
@@ -134,7 +160,46 @@ benchmark row before believing it.
 
 **A2 — the per-byte copy cost (owns real payload-carrying apps, not the microbenchmarks).**
 
-- [ ] **L1 — single-copy send to a parked receiver.** Local `send` today is *two* full
+- [ ] **L1 — single-copy send to a parked receiver. Design complete (2026-07-29), ready
+  to execute; not yet written.** Sketch, with the three questions that decide it already
+  answered in code:
+  1. *Can the sender touch the receiver's heap?* **Yes** — `deliver_envelope` takes the
+     mailbox state lock and `wake_parked(&mut st)` hands back the receiver's
+     `Box<Process>`, giving exclusive `&mut` on its `Heap`. Same quiescence `trim_parked`
+     uses. Sender holds `&Heap`, receiver `&mut Heap` — two distinct objects, so borrowck
+     is satisfied.
+  2. *Does the copier need incremental rooting?* **No** — and this is the finding that
+     makes L1 tractable. `from_message` already builds graphs in a receiver heap by
+     accumulating children in an ordinary off-heap `Vec<Value>` and then calling
+     `heap.list(vals)`. That is only sound because **allocation never collects** in this
+     runtime (collection runs at eval safepoints, never inside `alloc_*`). A cross-heap
+     copier can use the identical pattern.
+  3. *Where does the copied value live until the receiver pops it?* **This is the hard
+     part, and the first answer here was wrong.** The mailbox is not a GC root, so it
+     cannot hold a bare `Value` — correct. But the proposed fix (push it onto the
+     receiver's `roots` and carry the index) is **unsound**: `roots` is the *operand
+     stack*, not a general root set. `truncate_roots(n)` is called from **109 sites** —
+     every frame pop, every error unwind — so a long-lived mailbox value parked there is
+     silently dropped the moment the receiver returns from a call. Indices are stable
+     across a *collection* (which is what `Suspended` relies on), but not across the
+     stack discipline, and those are different guarantees.
+
+     So L1 needs a **new traced root set**: a per-heap `mailbox_roots: Vec<Value>` (or
+     equivalent) that `collect` walks and relocates, with a slot freed when a message is
+     consumed. That is a real GC change, not a bookkeeping detail, and it costs a vector
+     per process — partially offsetting the memory work in group B. The alternative is
+     BEAM's actual design: let the message live in the receiver's heap and have collection
+     scan the mailbox itself, which means taking the mailbox lock during collection.
+
+     **Re-cost:** this is no longer "~300 lines and a copier". Budget a GC root-set change
+     with the full GC_STRESS/GC_VERIFY/TSAN gate, and settle the root-set-vs-scan-mailbox
+     question first.
+
+  Work: a `copy_cross_heap(src: &Heap, dst: &mut Heap, v: Value) -> Value` mirroring
+  `to_message`/`from_message`'s shape over every `Value` kind, the new traced root set
+  from (3), an envelope variant naming the slot, and the two ends of the send/receive
+  path. `Message` stays for running receivers and every dist send. Gate with GC_STRESS,
+  GC_VERIFY, TSAN, and the differential fuzzers. Original entry: Local `send` today is *two* full
   copies through the wire-format `Message` (`Value → Message → Value`), with both
   intermediates becoming garbage. BEAM copies **once**, straight into the receiver's heap.
   **Feasibility confirmed:** `deliver_envelope` already takes the mailbox state lock and
@@ -161,13 +226,34 @@ benchmark row before believing it.
   A worker never touches them. Expected: several hundred bytes off `Box<Process>`'s
   1840 B, plus cache-density wins. Mechanical but wide; no semantic risk.
 - [ ] **M2 — shared IC entries for sealed callees** (ADR-175 Stage 3, the BEAM
-  export-table move). A sealed (ADR-166) binding's resolution is process-independent, so
+  export-table move). **Promoted over M3 by the analysis above:** every field an IC entry
+  caches — `(sym, argc, epoch, callee, arm, env)` — is process-independent *within a
+  runtime*, now that arms themselves are shared (ADR-175 Phase C). So the whole per-process
+  IC table is arguably a per-runtime structure wearing the wrong hat: sharing it removes
+  all 664 B **and** starts every spawned process warm, which is the latency half. The
+  blocker is unchanged and real — the tables are read by JIT'd code on the hot path, so
+  they need a lock-free design (`FastLink` is already `#[repr(C)]` plain data built for
+  raw reads, and `jit_code_cache` is already an `RwLock` shared across processes, so the
+  precedent exists) and the full TSAN/loom gate. This is the highest-value *and*
+  highest-risk item in group B. A sealed (ADR-166) binding's resolution is process-independent, so
   its IC entry can live with the *shared arm* (atomics/ArcSwap; `FastLink` is already
   `#[repr(C)]` plain data). Removes most per-process IC slots (664 B floor item) *and*
   starts every fresh process warm — a latency win for spawn-heavy code too. Risk:
   concurrent lock-free structure read by JIT'd code — the one option needing the full
   TSAN/loom treatment. Decide against M3 first: they overlap.
-- [ ] **M3 — direct-link sealed callees at compile time** (ADR-175 Stage 1). A call to a
+- [ ] **M3 — direct-link sealed callees at compile time** (ADR-175 Stage 1). **Design
+  analysed 2026-07-29; it does NOT deliver the memory win on its own.** An IC hit yields
+  four things: `(callee, arm, env, callee_bases)`. For a sealed callee the first three are
+  process-independent and permanent, so they bake into the shared chunk (a `OnceLock` per
+  site, filled once per runtime). But `callee_bases` — which IC block the callee's sites
+  use *in this process* — is inherently per-process (Phase A gives each process its own
+  block), and it is currently a `HashMap<uid, (u32,u32)>` lookup. So a direct-linked call
+  still needs a per-process lookup per call, and the 544 B of IC slots stays.
+  **Prerequisite, and worth doing anyway:** give each shared arm a *dense per-runtime
+  index* (it has a `uid` from a global counter today) so the per-process block table
+  becomes a `Vec` index instead of a hash lookup. That makes the base resolution cheap
+  enough to direct-link against, and shrinks `arm_ic_blocks` at the same time. Only then
+  does M3 pay. Original entry: A call to a
   sealed name needs no site, no probe, no epoch check — bake the callee into the shared
   chunk (`OnceLock<Arc<CompiledArm>>` per site, shared across processes). Kills the IC
   slot AND the per-call validation for 67–99% of sites (measured range, user-heavy vs
