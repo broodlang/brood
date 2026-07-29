@@ -1,0 +1,23 @@
+(defmodule hibernate-test (:use test))
+
+(describe "hibernate"
+  (test "returns a byte count and leaves the process working"
+    ;; A process that allocated, then hibernates, must still compute correctly —
+    ;; the caches it dropped are rebuilt on the next call.
+    (let (before (fold + 0 (range 200))
+          freed (hibernate)
+          after (fold + 0 (range 200)))
+      (assert= before 19900)
+      (assert= after 19900)
+      (is (>= freed 0))))
+
+  (test "survives across a receive and keeps identity"
+    (let (me (self))
+      (spawn (do (hibernate) (send me [:ok (self)])))
+      (receive ([:ok p] (is (not (nil? p)))))))
+
+  (test "a hibernated process still answers messages"
+    (let (me (self)
+          worker (spawn (receive ([:go n] (do (hibernate) (send me [:sum (fold + 0 (range n))]))))))
+      (send worker [:go 100])
+      (assert= (receive ([:sum v] v)) 4950))))

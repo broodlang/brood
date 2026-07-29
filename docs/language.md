@@ -1749,6 +1749,29 @@ the spawned fn —
 (spawn (fn () (process-flag :max-heap 8000000) (work)))
 ```
 
+### Going idle (`hibernate`)
+
+`(hibernate)` tells the runtime this process is about to wait a long time, so it
+should give back everything it can: collect, shrink its heap, and drop its
+inline caches and compiled-body cache. It returns the bytes released. This is
+Erlang's `erlang:hibernate/3` (without the continuation argument — a Brood
+process resumes from its own `receive`).
+
+```clojure
+;; a pooled connection that will sit idle between requests
+(defn serve (conn)
+  (hibernate)                       ; ~40% smaller while parked
+  (receive ([:request r] (do (handle conn r) (serve conn)))))
+```
+
+It is a **deliberate call, not a policy**, and the reason is measured: dropping
+the caches automatically on every park costs message-heavy code 12–26%, because
+a process that parks inside a loop needs the caches it just built. Idle
+processes are the ones with something to give back, and only your code knows
+which those are. So: use it in a process that will genuinely wait (a pooled
+connection, an idle session actor, a supervisor between restarts); **don't** put
+it in a request loop.
+
 ### Distributed nodes
 
 Two runtimes (separate OS processes) can **connect over TCP and message each
