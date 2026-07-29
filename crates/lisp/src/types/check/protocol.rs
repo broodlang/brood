@@ -19,10 +19,13 @@ use crate::error::Pos;
 
 use super::walk::list_items;
 
-/// One declared op: its name and arity (its `[args]` count).
+/// One declared op: its name, its fixed arity (params before any `&`), and whether it
+/// is variadic (has a `&`-rest). A declared op spec is always fixed; an *impl method* may
+/// be variadic, in which case it satisfies the op as long as it accepts the declared arity.
 struct Op {
     name: String,
     arity: usize,
+    variadic: bool,
 }
 
 /// A protocol's declared ops.
@@ -97,28 +100,42 @@ pub(super) fn check_impls(
             continue;
         };
         let pos = heap.form_pos_only(form);
-        // `(defimpl Proto key method…)` — the methods are items[3..].
-        let provided: HashMap<String, usize> = items
+        // `(defimpl Proto key method…)` — the methods are items[3..]. Keep each method's
+        // fixed arity *and* whether it is variadic (a `&`-rest impl satisfies a fixed op as
+        // long as it accepts the declared arity — the `defability` variadic-op path).
+        let provided: HashMap<String, (usize, bool)> = items
             .get(3..)
             .unwrap_or(&[])
             .iter()
-            .filter_map(|&m| parse_op(heap, m).map(|o| (o.name, o.arity)))
+            .filter_map(|&m| parse_op(heap, m).map(|o| (o.name, (o.arity, o.variadic))))
             .collect();
-        // Every declared op must be implemented, at the declared arity.
+        // Every declared op must be implemented, at a compatible arity.
         for op in &proto.ops {
             match provided.get(&op.name) {
                 None => out.push((
                     pos,
                     format!("{} {}: impl is missing op `{}`", noun, pname, op.name),
                 )),
-                Some(&arity) if arity != op.arity => out.push((
-                    pos,
-                    format!(
-                        "{} {}: op `{}` takes {} arg(s), this impl has {}",
-                        noun, pname, op.name, op.arity, arity
-                    ),
-                )),
-                Some(_) => {}
+                Some(&(arity, impl_variadic)) => {
+                    // A variadic OP declares no single arity to pin — accept any impl (mirrors
+                    // the behaviour checker's treatment of multi-arity). Otherwise a fixed impl
+                    // must match exactly; a variadic impl must accept the declared arity.
+                    let compatible = op.variadic
+                        || if impl_variadic {
+                            arity <= op.arity
+                        } else {
+                            arity == op.arity
+                        };
+                    if !compatible {
+                        out.push((
+                            pos,
+                            format!(
+                                "{} {}: op `{}` takes {} arg(s), this impl has {}",
+                                noun, pname, op.name, op.arity, arity
+                            ),
+                        ));
+                    }
+                }
             }
         }
         // A method the interface never declared is almost always a typo.
@@ -150,16 +167,24 @@ fn parse_protocol(heap: &Heap, form: Value) -> Option<(String, Protocol)> {
     Some((pname, Protocol { ops }))
 }
 
-/// Parse `(name [args] …)` → its op name + arity. Shared by protocol op specs and
-/// `defimpl` methods. `None` for a non-list (e.g. a docstring) or a malformed spec.
+/// Parse `(name [args] …)` → its op name, fixed arity, and variadic flag. Shared by
+/// protocol op specs and `impl` methods. The fixed arity counts params before a `&`-rest.
+/// `None` for a non-list (e.g. a docstring) or a malformed spec.
 fn parse_op(heap: &Heap, form: Value) -> Option<Op> {
     let items = list_items(heap, form)?;
     let name = sym_name(*items.first()?)?;
-    let arity = match *items.get(1)? {
-        Value::Vector(id) => heap.vector(id).len(),
+    let args = match *items.get(1)? {
+        Value::Vector(id) => heap.vector(id).to_vec(),
         _ => return None,
     };
-    Some(Op { name, arity })
+    let variadic = args.iter().any(|&a| is_rest_marker(a));
+    // Fixed params are those before the `&` marker (a variadic op takes >= that many).
+    let arity = args.iter().take_while(|&&a| !is_rest_marker(a)).count();
+    Some(Op {
+        name,
+        arity,
+        variadic,
+    })
 }
 
 /// True when `items`' head is the symbol `name`.
@@ -427,11 +452,20 @@ fn record_ctor_id(heap: &Heap, form: Value) -> Option<String> {
 
 /// Collect this file's ability op fns (`def sym → (ability, op)`) and record ctors
 /// (`def sym → id name`). Recurses — a `def` can nest inside a macro's `do`.
+///
+/// `ambiguous` records any op-fn global symbol that two DIFFERENT abilities bind (two
+/// abilities declaring the same op name, so the later `defn` clobbers the earlier's
+/// generic function — the same collision `register-ability` warns on at load). Such a
+/// symbol is removed from `op_fns` by `build_ability_info` so the static missing-impl
+/// pass neither false-warns (attributing a call to the wrong ability) nor false-passes
+/// (suppressing a real gap because the name resolves to the other ability). The runtime
+/// and `register-ability`'s warning cover that collision instead.
 fn collect_ability_defs(
     heap: &Heap,
     form: Value,
     op_fns: &mut HashMap<value::Symbol, (String, String)>,
     ctors: &mut HashMap<value::Symbol, String>,
+    ambiguous: &mut HashSet<value::Symbol>,
 ) {
     stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
@@ -447,7 +481,16 @@ fn collect_ability_defs(
             if let (Some(&Value::Sym(name)), Some(&val)) = (items.get(1), items.get(2)) {
                 if let Some(body) = fn_last_body(heap, val) {
                     if let Some(key) = find_op_key(heap, body) {
-                        op_fns.insert(name, key);
+                        match op_fns.get(&name) {
+                            // A second, DIFFERENT ability binds the same op-fn symbol: the
+                            // attribution is no longer certain — mark it ambiguous.
+                            Some(prev) if *prev != key => {
+                                ambiguous.insert(name);
+                            }
+                            _ => {
+                                op_fns.insert(name, key);
+                            }
+                        }
                     }
                     if let Some(id) = record_ctor_id(heap, body) {
                         ctors.insert(name, id);
@@ -456,7 +499,7 @@ fn collect_ability_defs(
             }
         }
         for &item in items.get(1..).unwrap_or(&[]) {
-            collect_ability_defs(heap, item, op_fns, ctors);
+            collect_ability_defs(heap, item, op_fns, ctors, ambiguous);
         }
     })
 }
@@ -597,8 +640,14 @@ impl AbilityInfo {
 pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo {
     let mut op_fns = HashMap::new();
     let mut ctors = HashMap::new();
+    let mut ambiguous = HashSet::new();
     for &form in expanded {
-        collect_ability_defs(heap, form, &mut op_fns, &mut ctors);
+        collect_ability_defs(heap, form, &mut op_fns, &mut ctors, &mut ambiguous);
+    }
+    // Drop op-fn symbols two different abilities bound (a same-name clobber): their
+    // attribution is uncertain, so they're excluded from the static missing-impl pass.
+    for sym in &ambiguous {
+        op_fns.remove(sym);
     }
     let mut impls = HashSet::new();
     let mut defaults = HashSet::new();
