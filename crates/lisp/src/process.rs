@@ -39,6 +39,8 @@ mod io_source;
 pub(crate) mod keywords;
 mod links;
 mod mailbox;
+/// Diagnostic counters for the L1 local-send fast path (`BROOD_L1_STATS=1`).
+pub use mailbox::l1_stats;
 mod message;
 mod monitor;
 mod scheduler;

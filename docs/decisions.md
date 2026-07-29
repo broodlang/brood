@@ -11594,3 +11594,79 @@ updated — `project_test`, `package_test`, `datetime_test`), and each of the fo
 narrower audit this widens), ADR-172 (the authority model, `:sealed`, `%dispatch`),
 ADR-011 (prefer the simplest design — the reason the rejection list is as long as the
 adoption list), ADR-130 (`defrecord`), the 2026-07-29 devlog entry.
+
+## ADR-178 — A parked receiver is a private heap: the single-copy local send
+
+**Status:** accepted (2026-07-29).
+
+**Context.** Every `send` between two local processes paid a full round trip through the
+wire format: `to_message` walked the value out of the sender's heap into a `Message`, and
+`from_message` rebuilt it in the receiver's. That is two complete traversals and two
+complete allocations of the payload for a delivery that never leaves the machine. It
+exists because the two heaps are genuinely isolated — a process's data is its own, and a
+message crosses as a deep copy (ADR-018) — so there is no shared representation to hand
+over.
+
+But the copy does not have to go through an *intermediate* form. The obstacle was never
+representational, it was access: the sender has no safe way to touch the receiver's heap,
+since that heap belongs to a process the scheduler may be running right now.
+
+**Decision.** When the target is a **local pid whose process is parked**, copy the value
+directly from the sender's heap into the receiver's, and skip the `Message` entirely.
+
+The access problem is solved by an ownership fact the mailbox already maintains: a parked
+process *is* its `Box<Process>`, sitting in `MailboxState::waiter`. Taking it out under
+the mailbox mutex is exactly how the scheduler claims a process to run it. So a sender
+that takes it holds the only reference in the system, and therefore holds exclusive `&mut`
+on that heap for as long as it keeps it — the same quiescence `trim_parked` already relies
+on. It copies, parks the result, and either hands the process to `wake_enqueue` or puts it
+back untouched.
+
+The copied value lands in `Heap::msg_roots`, a **traced slot table**, because a delivered
+message is reachable only from the mailbox, and the mailbox is not a GC root. It is a slot
+table and not a stack because `roots` is the operand stack — truncated from ~109 sites on
+every frame pop — so a value that must survive until a selective `receive` claims it
+cannot live there. Consumed slots are tombstoned and reused, so the table stays at the
+process's peak *undelivered* fast-path message count, normally 0 or 1.
+
+**Everything that isn't provably safe declines**, falling through to the unchanged wire
+path with its existing semantics and error messages: a running receiver (no exclusive
+access), a remote pid (a real serialisation), a sender carrying a debugger trace context,
+and any value the cross-heap copier doesn't handle (closures, ropes, macros, builtins,
+unrealised seq-views). The decline path restores `waiter` exactly as it found it.
+
+**Consequences.**
+- The win **scales with payload**, because what is removed is the marshalling, not the
+  scheduling. Pinned, best-of-5, against the same commit: −3.2% at an empty payload,
+  −9.0% at 16 elements, −24.2% at 64, −31.3% at 256, −34.9% at 1024. The asymptote says
+  roughly a third of a large-message send was pure `Value → Message → Value` work.
+- **The benchmark suite cannot show this**, and that is a property of the suite, not of
+  the change: `ring` sends a bare int and half of `pingpong`'s messages are a bare
+  keyword, so those rows measure the scheduler round-trip with nothing to copy
+  (`pingpong` ≈ −5%, `ring` within drift). Don't re-derive this from the rows and
+  conclude the change does nothing.
+- The fast path fires on essentially every local send in practice — instrumented at
+  **100%** on both `pingpong` and `ring` (`BROOD_L1_STATS=1`). The earlier guess that
+  direct handoff would leave receivers un-parked was wrong.
+- **The copy now happens while holding the target's mailbox mutex**, where `to_message`
+  previously ran outside it. Bounded by message size, but it is a real contention change
+  for a many-senders-to-one-target fan-in.
+- `copy_cross_heap` must mirror `to_message`'s value coverage. A value the wire path
+  learns to carry but the copier doesn't will silently take the slow route — correct, but
+  a quiet performance cliff. They are deliberately written to the same shape.
+- `msg_roots` is `Option<Box<Vec<Value>>>`, not an inline `Vec`. Inline it is 24 bytes on
+  every `Heap`, and a `Heap` is inline in `Box<Process>`, where bytes cost about 2:1 in
+  RSS through mimalloc's size classes: the inline version measured `spawn` **+5.9%**.
+  Lazily boxed it is 8 bytes and allocates only for a process actually handed a fast-path
+  message — `spawn` back to flat.
+
+**Alternatives rejected.** *Sharing the value instead of copying it* — that is a different
+language: per-process heaps and copy-on-send are what make a process's data its own and
+collection process-local (ADR-018). *Copying into a running receiver under a heap lock* —
+would put a lock on every heap access in the system to serve the send path. *Keeping the
+`Message` but pooling it* — pools the allocation and keeps both traversals, which are the
+actual cost.
+
+See also ADR-018 (per-process heaps, copy-on-send), ADR-035 (the tracing collector and
+what counts as a root), ADR-091 (shared-region collection), `docs/runtime-frontier.md`
+(where this sat in the option book, as L1), the 2026-07-29 devlog entry.
