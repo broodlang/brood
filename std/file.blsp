@@ -31,25 +31,32 @@ primitives. The kernel also provides the always-available file primitives
       (= text "") nil
       (ends-with? text "\n") (string-split (substring text 0 (dec (string-length text))) "\n")
       else (string-split text "\n"))))
+(sig read-lines (string -> (list string)))
 
 (defn write-lines (path lines)
   "Write `lines` (a sequence of strings) to `path`, one per line, each terminated by a newline."
   (spit path (fold (fn (acc l) (str acc l "\n")) "" lines)))
+;; `lines` is `any`, not `(list string)` — it is any seqable (`fold` accepts a list, vector,
+;; set or range), so a narrower type would false-flag a vector caller.
+(sig write-lines (string any -> nil))
 
 ;; --- predicates -------------------------------------------------------------
 
 (defn file? (path)
   "True if `path` exists and is a regular file (not a directory)."
   (and (file-exists? path) (not (dir? path))))
+(sig file? (string -> bool))
 
 ;; --- directory listing ------------------------------------------------------
 (defn list-files (dir)
   "The names of regular files directly under `dir` (excluding subdirectories), sorted."
   (filter (fn (e) (not (dir? (path-join dir e)))) (list-dir dir)))
+(sig list-files (string -> (list string)))
 
 (defn list-dirs (dir)
   "The names of subdirectories directly under `dir`, sorted."
   (filter (fn (e) (dir? (path-join dir e))) (list-dir dir)))
+(sig list-dirs (string -> (list string)))
 
 (defn walk-files (dir)
   "Every file path under `dir`, recursively (full paths, depth-first). nil if `dir` is not a directory."
@@ -62,6 +69,7 @@ primitives. The kernel also provides the always-available file primitives
             (let (p (path-join dir e))
               (if (dir? p) (append-two (walk-files p) acc) (cons p acc))))
       nil (list-dir dir))))
+(sig walk-files (string -> (list string)))
 
 ;; --- path helpers (complement prelude path-join / path-basename / parent-dir)
 (defn file--last-dot (s i)
@@ -75,9 +83,11 @@ primitives. The kernel also provides the always-available file primitives
   (let (base (path-basename path)
         i (file--last-dot base (dec (string-length base))))
     (if (<= i 0) "" (substring base i (string-length base)))))
+(sig path-extension (string -> string))
 
 (defn path-stem (path)
   "The basename of `path` with its extension removed (\"a/b.txt\" -> \"b\")."
   (let (base (path-basename path)
         ext (path-extension path))
     (if (= ext "") base (substring base 0 (- (string-length base) (string-length ext))))))
+(sig path-stem (string -> string))
