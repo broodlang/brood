@@ -11426,3 +11426,103 @@ runaway form; session, `*1`, and child-made `def`s all intact after).
 was wrongly folded into), ADR-063 (exit signals), ADR-069 (thin-wrapper passthrough —
 why the redirect is the hot tick), ADR-052/ADR-048 (the REPL this serves), the
 2026-07-28 devlog entries (including the wrong first diagnosis and what it missed).
+
+## ADR-177 — `std/` adopts abilities: which seams became protocols, and which stayed `cond`
+
+**Status.** Accepted, implemented 2026-07-29.
+
+**Context.** Abilities became core in ADR-168/172 (`defability`/`impl`/`defrecord`,
+nominal dispatch through `%dispatch`'s inline cache, precedence by tier), and ADR-171
+shipped the first one (`Display`). The 2026-07-28 audit that accompanied ADR-171 looked
+for more candidates in `std/` and found only two, concluding "the rest of `std/` is
+correctly-closed `cond`/state-machines per ADR-011". A second, deliberately more
+aggressive pass over the same tree found that conclusion too narrow: it had asked only
+"where does third-party extension want in?", which is one of *four* distinct reasons a
+site wants an ability.
+
+**Decision.** Adopt abilities at every `std/` seam matching one of these four shapes, and
+nowhere else. The shape is the criterion — not "could this be polymorphic?".
+
+1. **A closed `cond` with an `else (error …)` tail where the error is the whole problem.**
+   The set of cases is closed *by us* but shouldn't be. → `JsonEncode` in `std/json.blsp`
+   (`to-json`): a record picks its wire shape, and a pid / fn / datetime becomes encodable
+   by impl'ing it instead of hitting `json: cannot encode`. Registers **no `:default`** on
+   purpose — a `:default` would make every value "encodable" and turn the loud error into
+   an infinite recursion.
+
+2. **One `:kind` tag re-`cond`ed in several places.** The bug isn't dispatch, it's
+   *scatter*: adding a kind means finding every chain, and missing one fails late and
+   quietly. → the `:sealed` `Dependency` ability in `std/tool/package.blsp` over the four
+   dep records now defined in `std/tool/project.blsp`, replacing five separate
+   `(get dep :kind)` chains (resolve, compatibility, lock row, manifest entry, tree
+   label). Sealing is the point: `nest check` now reports a member missing an op, which no
+   `cond` chain could. A resolved *entry* is its dep record with the resolution fields
+   `assoc`'d on, so one ability covers both dep and entry.
+
+3. **A documented seam already waiting for a richer value.** → `Port` in `std/io.blsp`
+   (`io-write`), whose docstring already said it existed to let a port "grow into a richer
+   value (named, introspectable) without touching callers"; and `LogBackend` in
+   `std/log.blsp` (`backend-emit`), which lifts a backend from "a map whose `:format` fn
+   you may replace" to "a value that owns its whole write policy". Also `Response` in
+   `std/net/http.blsp` (`send-response`), which replaces the server's
+   `(contains? resp :stream)` branch — the two stock kinds differ in *who closes the
+   socket*, so that belongs with the response type.
+
+4. **A value type that is a plain map identified by structural sniffing.** Not an ability
+   at all — a `defrecord`, plus `Display`/`Inspect`. → `buffer` (was
+   `(and (map? x) (rope? (get x :rope)))`), `queue`/`pq`, `multimap`, and
+   `datetime`/`date`/`time-of-day`. The wins are a predicate that can't be fooled, a print
+   form that isn't the internal representation, and — for `pq` — an *empty* queue that is
+   truthy, since the old bare-list representation made `(if pq …)` silently false when
+   empty (`()` ≡ `nil`).
+
+`datetime` also earns a genuine ability: `Temporal`/`to-iso`, `:sealed` over the three
+types, collapsing `date->iso8601` / `time->iso8601` / `dt->iso8601` — three functions the
+caller had to choose between by knowing which shape it held — into one op that dispatches.
+
+**Sealed or open, deliberately per ability.** `Dependency` and `Temporal` are `:sealed`
+(the sets are genuinely closed and we want exhaustiveness). `JsonEncode`, `Port`,
+`LogBackend` and `Response` are **open** — each exists precisely so a type we don't know
+about can join.
+
+**Explicitly rejected**, so the next pass doesn't re-litigate them:
+
+- **The prelude's collection protocol** (`conj`/`get`/`nth`/`count`/`into`) — hot,
+  kernel-backed, closed by design; an ability taxes every collection op.
+- **`str`/`pr-str`/`fmt`** — settled by ADR-171 (`pr-str`'s round-trip guarantee; the
+  hottest path). Tier 3 below routes *policy-layer* string conversion through `to-str`,
+  which is not the same thing.
+- **Closed internal AST/CST node kinds** (`std/regex`, `std/format`, `std/tool/sexp`,
+  `std/editor/treesit`) — single-module, hot, and genuinely closed: correct `cond`/table
+  dispatch per ADR-011.
+- **`std/telemetry`'s metric kinds** — closed, one site, state in a `Table`. Sealing would
+  buy checker coverage only; not worth the churn.
+- **Error-value rendering** (`std/tool/test`, `std/tool/repl`, the prelude) — all three
+  render kernel error *maps*, so every id is `:map` and one impl would capture every map
+  in the image. Needs kernel errors to be records first; recorded as a follow-up.
+- **`std/proc/gen`, `std/proc/supervisor`** — the implementor is a module or a thunk, not a
+  value. That is `defbehaviour`'s job (ADR-168), already covered.
+- **`std/editor/layers`' buffer types** — a deliberate mode *registry* (Emacs major
+  modes), not type dispatch.
+- **`std/stream`** — a stream is a pid, so every stream presents identity `:pid` and
+  dispatch cannot tell kinds apart; the message protocol is already open.
+
+**Tier 3: `(str v)` → `(to-str v)` at policy-layer call sites.** `std/template`
+(substituted values), `std/csv` (cells), `std/url` (query values) now render values
+through `Display`, so a record substitutes/emits as the string its type defines. This is
+consistent with ADR-171 keeping `str` itself native: these are *library* call sites that
+were already stringifying a user value, not the kernel renderer. The csv change also fixes
+a latent bug — a non-string cell previously reached `includes?` and raised a type error.
+
+**Consequences.** `nest check` gained real exhaustiveness coverage over the dep kinds; six
+structural sniff-tests became identity checks; `std/` is now the worked example of the
+ability system rather than a tree that merely *could* use it. The costs are honest ones: a
+record is never `=` to a look-alike map (so tests comparing against map literals had to be
+updated — `project_test`, `package_test`, `datetime_test`), and each of the four
+`defrecord`-only conversions adds one wrapper allocation (`pq`, `multimap`) or one
+`:__id__` field (`buffer`, the temporal types, the dep records).
+
+**References.** ADR-168 (abilities subsume `defprotocol`), ADR-171 (`Display`, and the
+narrower audit this widens), ADR-172 (the authority model, `:sealed`, `%dispatch`),
+ADR-011 (prefer the simplest design — the reason the rejection list is as long as the
+adoption list), ADR-130 (`defrecord`), the 2026-07-29 devlog entry.

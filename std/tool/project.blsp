@@ -75,9 +75,9 @@ the `nest new` scaffolder."
 ; inside `run-project` (via `project-setup`), which would otherwise clobber an
 ; override set before the run.
 (defdyn *project-dependencies* nil)
-; list of normalised dep maps from the manifest's :dependencies (ADR-037)
+; list of dep records from the manifest's :dependencies (ADR-037)
 (defdyn *project-dev-dependencies* nil)
-; dev/test-only dep maps from the manifest's :dev-dependencies (ADR-172): resolved for
+; dev/test-only dep records from the manifest's :dev-dependencies (ADR-172): resolved for
 ; `nest test`/dev and on the dev load path, but excluded from a release bundle. Each
 ; carries `:dev true`. Kept separate from *project-dependencies* so a release build (and
 ; a published package's declared deps) never pulls a test-only dependency.
@@ -131,11 +131,48 @@ the `nest new` scaffolder."
 ;; --- dependency manifest parsing (ADR-037, packages.md) ----------------------
 ;; Each :dependencies entry is a vector: `[name :git URL :ref REF]` or
 ;; `[name :path PATH]` — `name` is the local symbol `require` will see. Parsed
-;; into a normalised dep map ({:name :kind :url/:path :ref}) for the package
-;; manager (std/package.blsp) to consume. The reserved opts :branch/:dir/:features
+;; into one of the four **dep records** below for the package manager
+;; (std/package.blsp) to consume. The reserved opts :branch/:dir/:features
 ;; are recognised but rejected in v1, so the manifest shape stays forward-compatible.
+;;
+;; A dep's KIND is its record identity, not a `:kind` field: the package manager
+;; dispatches every per-kind behaviour (resolve, lock entry, manifest entry,
+;; compatibility) through the `Dependency` ability it declares over these four types,
+;; which is `:sealed` over exactly this set — so `nest check` flags a new kind that
+;; forgets one of them. This module owns the *types* (it parses the manifest);
+;; std/package.blsp owns the *behaviour*. A resolved entry is one of these records with
+;; the resolution fields (`:resolved-path`/`:sha256`/`:commit`/`:deps`) assoc'd on, so it
+;; dispatches identically to the dep it came from.
 
 (def *project--reserved-dep-opts* (list :branch :dir :features))
+
+(defrecord dep-path (name path))
+(defrecord dep-git (name url ref))
+(defrecord dep-tarball (name url sha256))
+(defrecord dep-registry (name version))
+
+;; A dep's display form is its `nest tree` line — one place, so `(println dep)` and the
+;; tree agree. Registered here (the type owner) rather than in the package manager.
+(impl Display
+  project/dep-path (to-str [d] (str (get d :name) "  (path \"" (get d :path) "\")")))
+(impl Display
+  project/dep-git (to-str [d] (str (get d :name) "  (git " (get d :url) " @ " (get d :ref) ")")))
+(impl Display
+  project/dep-tarball (to-str [d] (str (get d :name) "  (tarball " (get d :url) ")")))
+(impl Display
+  project/dep-registry (to-str [d] (str (get d :name) "  (registry v" (get d :version) ")")))
+
+(def *project--dep-ids*
+  (list :project/dep-path :project/dep-git :project/dep-tarball :project/dep-registry))
+
+(defn dep? (x)
+  "True if `x` is a dependency record (any of the four kinds)."
+  (and (record? x) (includes? *project--dep-ids* (record-id x))))
+
+(defn dep-path? (x)
+  "True if `x` is a `:path` dependency — the one kind that loads **in place** rather
+than being fetched into `_deps/<name>/`."
+  (and (record? x) (= (record-id x) :project/dep-path)))
 
 ;; The elements of vector `v` from index `start` onward, as a list (tail-recursive).
 (defn project--vec-drop (v start) (project--vec-drop--acc v start (dec (vector-length v)) nil))
@@ -163,7 +200,7 @@ the `nest new` scaffolder."
     (when (not (string? ref))
       (error "project: :git dependency " name " needs a :ref \"<tag-or-commit>\""))
     (project--reject-reserved-opts name opts)
-    {:name name :kind :git :url url :ref ref}))
+    (dep-git name url ref)))
 
 (defn project--parse-path-dep (name entry)
   (let (path (vector-ref entry 2)
@@ -171,7 +208,7 @@ the `nest new` scaffolder."
     (when (not (string? path))
       (error "project: :path dependency " name " path must be a string, got " path))
     (project--reject-reserved-opts name opts)
-    {:name name :kind :path :path path}))
+    (dep-path name path)))
 
 (defn project--parse-registry-dep (name entry)
   (let (version (vector-ref entry 2)
@@ -179,7 +216,7 @@ the `nest new` scaffolder."
     (when (not (string? version))
       (error "project: registry dependency " name " version must be a string, got " version))
     (project--reject-reserved-opts name opts)
-    {:name name :kind :registry :version version}))
+    (dep-registry name version)))
 
 (defn project--parse-tarball-dep (name entry)
   (let (url (vector-ref entry 2)
@@ -193,9 +230,9 @@ the `nest new` scaffolder."
       (error "project: :tarball dependency "
         name " needs a :sha256 \"<hex>\" (the archive's SHA-256 — the only integrity pin)"))
     (project--reject-reserved-opts name opts)
-    {:name name :kind :tarball :url url :sha256 sha}))
+    (dep-tarball name url sha)))
 
-;; Normalise one `[name kind spec & opts]` entry into a dep map.
+;; Normalise one `[name kind spec & opts]` entry into the dep record for its kind.
 (defn project-parse-dep (entry)
   (when (not (vector? entry))
     (error "project: each :dependencies entry must be a vector, got " entry))
@@ -219,7 +256,7 @@ the `nest new` scaffolder."
           optional (if (plist-get opts :optional) true false))
       (assoc base :optional optional))))
 
-;; Parse the manifest's :dependencies value into a list of normalised dep maps.
+;; Parse the manifest's :dependencies value into a list of dep records.
 ;; Omitted/nil => empty list.
 (defn project-parse-deps (deps)
   (cond
@@ -397,7 +434,7 @@ A `:path` dep loads in place, so its manifest sits at its `:path`; a `:git` /
           (cond
             (not (nil? acc)) acc
             (not (= (get d :name) dep-name)) acc
-            (= (get d :kind) :path) (path-join (path-join root (get d :path)) "project.blsp")
+            (dep-path? d) (path-join (path-join root (get d :path)) "project.blsp")
             else (path-join (path-join (path-join root "_deps") (name dep-name)) "project.blsp")))
     nil *project-dependencies*))
 

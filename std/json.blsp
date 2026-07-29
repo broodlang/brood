@@ -392,6 +392,39 @@ the named escapes + every C0 control) that would each find nothing."
     (json--emit-list (rest xs)
       (json--emit (first xs) (if first? acc (cons "," acc))) false)))
 
+;; ---- JsonEncode: the extension seam for values JSON has no rule for ----------
+;;
+;; The built-in rules below are CLOSED — the JSON data model is fixed, so nil/bool/
+;; number/string/keyword/symbol/map/vector/list stay a plain `cond` (no dispatch cost
+;; on the hot path). What is open is everything *else*: a `defrecord` that wants a wire
+;; shape other than its fields, and the kinds `json--emit` can only `error` on today (a
+;; pid, a fn, a datetime record, a queue). `JsonEncode` is that seam — Brood's
+;; `Jason.Encoder`: one op returning a value the built-in rules DO cover, which
+;; `json--emit` then encodes normally.
+;;
+;; **No `:default` is registered, deliberately.** A `:default` would make every value
+;; "encodable" and turn the loud error into an infinite recursion (a pid's default would
+;; hand back the pid). With no `:default`, `json--custom` returning nil means exactly
+;; "no rule for this identity", which is the question both call sites below ask.
+(defability JsonEncode
+  "How a value converts to a JSON-encodable Brood value (nil / bool / number / string /
+  keyword / map / vector / list). The seam `json-encode` consults for a record with a
+  custom wire shape, and for any kind JSON has no built-in rule for."
+  (to-json [self] :-> any))
+
+(defn json--custom (v)
+  "`v`'s own `JsonEncode/to-json` impl, or nil when its identity has none. `JsonEncode`
+registers no `:default`, so nil here means \"no rule\" rather than \"the fallback\"."
+  (impl-for '[JsonEncode to-json] (identity-of v)))
+
+(defn json--emit-record (v acc)
+  "Emit record `v`. A custom `JsonEncode` impl decides the wire shape; otherwise the
+default is its FIELDS — the internal `:__id__` identity must never reach the wire."
+  (let (custom (json--custom v))
+    (if custom
+      (json--emit (custom v) acc)
+      (cons "}" (json--emit-pairs (map-pairs (fields v)) (cons "{" acc) true)))))
+
 (defn json--emit (v acc)
   "Emit `v`'s JSON fragments onto `acc` (reversed); returns the new acc."
   (cond
@@ -402,20 +435,22 @@ the named escapes + every C0 control) that would each find nothing."
     (string? v) (cons (json--enc-string v) acc)
     (keyword? v) (cons (json--enc-string (name v)) acc)
     (symbol? v) (cons (json--enc-string (name v)) acc)
-    ; a record (`defrecord`) is a map carrying a reserved `:__id__` identity
-    ; key — encode it as its FIELDS, omitting the internal id (it must never reach the
-    ; wire). Plain maps have no such key, so they are unaffected.
-    (map? v) (cons "}"
-               (json--emit-pairs (remove (fn (p) (= (first p) :__id__)) (map-pairs v))
-                 (cons "{" acc) true))
+    (record? v) (json--emit-record v acc)
+    (map? v) (cons "}" (json--emit-pairs (map-pairs v) (cons "{" acc) true))
     (vector? v) (cons "]" (json--emit-items v 0 (count v) (cons "[" acc)))
     (list? v) (cons "]" (json--emit-list v (cons "[" acc) true))
-    else (error "json: cannot encode " v)))
+    else (let (custom (json--custom v))
+           (if custom
+             (json--emit (custom v) acc)
+             (error "json: cannot encode "
+               v " (a " (type-of v) ") — give its type a JsonEncode impl to encode it")))))
 
 (defn json-encode (v)
   "Encode Brood value `v` as JSON text: nil → null, true/false → bool, a number → a
 number, a string → a quoted string, a keyword/symbol → a string of its name, a map →
-an object (keyword keys become string keys), a vector or list → an array. Errors on
-anything else (a pid, fn, …). Pure."
+an object (keyword keys become string keys), a vector or list → an array. A `defrecord`
+value encodes as its **fields** (its internal id never reaches the wire) unless its type
+has a `JsonEncode` impl, which then decides the wire shape. Any other kind (a pid, a fn)
+errors unless it has a `JsonEncode` impl. Pure."
   (apply str (reverse (json--emit v nil))))
 (sig json-encode (any -> string))

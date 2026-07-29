@@ -63,3 +63,42 @@
   (test "multimap-assoc-all"
     (let (mm (multimap/multimap-assoc-all (multimap/multimap-new) :k [1 2 3]))
       (assert= 3 (count (multimap/multimap-get mm :k))))))
+
+;; A multimap is a record wrapping the inner key→list map — so its identity can't leak
+;; into `multimap-keys`/`-size` (a bare-map representation would have exposed the
+;; reserved `:__id__` key through both).
+(describe "multimap is a record with its own identity"
+  (test "multimap? is true only for the real thing"
+    (is (multimap/multimap? (multimap/multimap-new)))
+    (is (multimap/multimap? (multimap/multimap-assoc (multimap/multimap-new) :k 1)))
+    (is (not (multimap/multimap? {:k (list 1)})))
+    (is (not (multimap/multimap? nil))))
+  (test "it carries its record id and is never = to a look-alike map"
+    (assert= (record-id (multimap/multimap-new)) :multimap/multimap)
+    (is (not (= (multimap/multimap-new) {}))))
+  (test "the identity never leaks into keys, size, or the map view"
+    (let (mm (multimap/multimap-assoc (multimap/multimap-new) :k 1))
+      (assert= (into [] (multimap/multimap-keys mm)) [:k])
+      (assert= (multimap/multimap-size mm) 1)
+      (is (not (includes? (into [] (multimap/multimap-keys mm)) :__id__)))
+      (is (not (contains? (multimap/multimap->map mm) :__id__)))))
+  (test "an empty multimap is empty by its own count, not the wrapper's"
+    (is (multimap/multimap-empty? (multimap/multimap-new)))
+    (is (not (multimap/multimap-empty? (multimap/multimap-assoc (multimap/multimap-new) :k 1)))))
+  (test "it displays as a summary and inspects as its contents"
+    (assert= (to-str (multimap/multimap-new)) "#<multimap 0 keys, 0 pairs>")
+    (let (mm (-> (multimap/multimap-new)
+               (multimap/multimap-assoc :k 1) (multimap/multimap-assoc :k 2)))
+      (assert= (to-str mm) "#<multimap 1 keys, 2 pairs>")
+      (assert= (inspect mm) "#<multimap {:k (1 2)}>"))))
+
+;; Cross-process: the record's identity survives the deep copy on `send`.
+(describe "multimap across processes"
+  :isolated
+  (test "a multimap built in a worker arrives as a multimap"
+    (let (me (self))
+      (spawn (send me [:mm (multimap/multimap-assoc-all (multimap/multimap-new) :k [1 2 3])]))
+      (let (back (receive ([:mm m] m) (after *test-wait-ms* :timeout)))
+        (is (multimap/multimap? back))
+        (assert= (multimap/multimap-size back) 3)
+        (assert= (into [] (multimap/multimap-get-all back :k)) [1 2 3])))))
