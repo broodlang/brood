@@ -53,8 +53,42 @@ pub(super) fn realize_seqviews(
     })
 }
 
+/// If `v` is a RECORD (a `Value::Map` carrying `:__id__`), return its `Seqable` view — the
+/// list its `to-seq` ability op yields (its fields id-free by default, or a custom
+/// collection's own sequence). Lets `first`/`rest`/`empty?` treat a record AS its sequence
+/// (ADR-172 §7). Only reached on the builtin fallback: `first`/`rest` are `PrimOp1`s the JIT
+/// inlines for lists, so the hot `fold--loop` never calls these. Returns `None` for a
+/// non-record, so the caller keeps its normal path (a plain map stays a map).
+pub(super) fn record_seq(heap: &mut Heap, v: Value) -> Result<Option<Value>, LispError> {
+    let m = match v {
+        Value::Map(m) => m,
+        _ => return Ok(None),
+    };
+    if heap
+        .map_get(m, Value::Keyword(crate::core::value::intern("__id__")))
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let genv = heap.global();
+    let callee = heap
+        .env_get(genv, crate::core::value::intern("to-seq"))
+        .ok_or_else(|| LispError::runtime("to-seq: the Seqable protocol is unavailable"))?;
+    Ok(Some(crate::eval::compile::apply_value(
+        heap,
+        callee,
+        &[v],
+        genv,
+    )?))
+}
+
 pub(super) fn first(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
-    let v = arg(args, 0);
+    let v0 = arg(args, 0);
+    // a record dispatches to its `Seqable` view first (custom collection or fields).
+    let v = match record_seq(heap, v0)? {
+        Some(s) => s,
+        None => v0,
+    };
     match v {
         Value::Pair(p) => Ok(heap.car(p)),
         Value::Vector(id) => Ok(heap.vector(id).first().copied().unwrap_or(Value::nil())),
@@ -95,7 +129,11 @@ pub(super) fn first(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
 }
 
 pub(super) fn rest(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
-    let v = arg(args, 0);
+    let v0 = arg(args, 0);
+    let v = match record_seq(heap, v0)? {
+        Some(s) => s,
+        None => v0,
+    };
     match v {
         Value::Pair(p) => Ok(heap.cdr(p)),
         Value::Vector(id) => {
@@ -157,7 +195,13 @@ pub(super) fn is_pair(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 }
 
 pub(super) fn is_empty(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
-    let x = arg(args, 0);
+    let x0 = arg(args, 0);
+    // a record is empty iff its `Seqable` view is (a custom empty queue, a field-less
+    // record) — not iff the raw map is (which always carries `:__id__`).
+    let x = match record_seq(heap, x0)? {
+        Some(s) => s,
+        None => x0,
+    };
     match x {
         Value::Nil => Ok(Value::boolean(true)),
         Value::Pair(_) | Value::Range(_) => Ok(Value::boolean(false)),
