@@ -1,0 +1,17 @@
+;; Tests for `*test-report-sink*` — the structured per-test reporting seam
+;; (the machine-readable counterpart of --trace, consumed by external runners).
+(defmodule test-report-sink-test (:use test))
+
+(describe "test framework — *test-report-sink*"
+  (test "run-test hands the finished result tuple to the sink and still returns it"
+    (let (me (self)
+          tuple (list "adds" (fn () '()) {:tags [] :file "f.blsp" :line 1 :skip false})
+          r (binding (*test-report-sink* (fn (rr) (send me [:reported rr])))
+              (run-test "math" tuple)))
+      (let (reported (receive ([:reported rr] rr) (after 1000 :timeout)))
+        (assert= "math" (r-group reported))
+        (assert= "adds" (r-name reported))
+        (assert= r reported))))
+  (test "a nil sink (the default) changes nothing"
+    (let (tuple (list "t" (fn () '()) {:tags [] :file "f.blsp" :line 1 :skip false}))
+      (assert= "t" (r-name (run-test "g" tuple))))))

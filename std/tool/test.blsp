@@ -647,7 +647,17 @@ docs/testing.md for the full guide.")
 ;;
 ;; Runs in the worker process, so lines from parallel workers interleave (each is one
 ;; flushed `println`), in waves of `*parallel-batch*`.
+;; The structured per-test reporting seam: a 1-arg fn (or nil) handed each result
+;; tuple as its test finishes, in the WORKER process — the machine-readable
+;; counterpart of `--trace`'s human line. A `defdyn`, so an external runner (an
+;; editor streaming results into a buffer, a CI formatter) installs one with a
+;; root-rebinding `(def *test-report-sink* f)` — the same seam shape as `*spy-sink*`,
+;; and deliberately a dynamic: `trace-result` itself ships in the binary, so it is a
+;; reserved name (ADR-166) and cannot be advised by redefinition.
+(defdyn *test-report-sink* nil)
+
 (defn trace-result (r)
+  (when *test-report-sink* (*test-report-sink* r))
   (when *test-trace*
     (println (str (trace--glyph r)
                " " (trace--label r) "  " (test--dim (trace--timing r))
