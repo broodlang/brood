@@ -1153,4 +1153,3 @@ mod charge_tests {
         assert_eq!(REDUCTIONS.with(|r| r.get()), 2000);
     }
 }
-
