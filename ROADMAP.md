@@ -811,7 +811,12 @@ track); `base64` is the residual coin-flip last place.
   ~18%, 2026-07-13) and closure-template caching (2026-07-11), then the mailbox
   mutex trimmed to ONE acquisition per matched message (2026-07-19); `type-of`
   became a compiled prim (2026-07-19 — profiling REFUTED the copy hypothesis: the
-  `to_message`/`from_message` copy is ~2% of a pingpong RT).
+  `to_message`/`from_message` copy is ~2% of a pingpong RT). **That refutation is
+  specific to `pingpong`'s message shape, not general** — it sends `[:ping me]` and a
+  bare `:pong`, so there is almost nothing to copy. ADR-178 (2026-07-29) removed one of
+  the two copies for a parked local receiver and measured the win scaling with payload:
+  −3% at an empty payload, −24% at 64 elements, −35% at 1024. Both readings are correct;
+  quote the message shape with the number.
 
   The 2026-07-26 round found the remainder was **not** scheduling: isolating a
   self-send + `receive` (zero cross-process handoff) priced a receive at **820 ns**
