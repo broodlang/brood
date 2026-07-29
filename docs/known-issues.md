@@ -154,18 +154,23 @@ conformance: **3591 tests, all passing, 88 s**.
 and the existing `crates/lisp/tests/runtime_collector.rs` drain-completion tests, which pin
 the promptness the seed-size gate preserves.
 
-**Residual — the canary's in-test timeout was too tight (2026-07-29).** The hang is fixed,
-but the guard tests' own `(after 60000 :TIMED-OUT)` liveness net began false-failing under
-the *grown* suite (3591 → 3800+ tests). The parse is bounded, not hanging — but with the
-drain armed (the whole suite's loaded code arms it — the very condition under test) it costs
-~36 s of CPU (measured at `BROOD_RT_GC_FLOOR=1`), and `:serial` serialises only *within* the
-group, so it competes with the rest of the suite for cores; contention pushed its wall-clock
-past 60 s, returning `:TIMED-OUT` ≠ `:rejected` on every run. The worker finished fine (the
-suite completed — no guard-page abort, the real KI-14 symptom), so this was a false failure,
-not a regression. Fixed by widening the net to 180 s (contention headroom; a genuinely dead
-worker still never replies, so it is still caught). The *underlying* residual — that a deep
-parse under an armed drain still pays a throttled-but-O(depth) Phase-1 cost — is bounded and
-left for a separate, ADR-gated collector-perf pass if it ever bites outside this canary.
+**Residual — the canary's timeouts were too tight for the grown suite (2026-07-29).** The
+hang is fixed, but the guard tests began hard-killing at the framework's 120 s per-test
+ceiling under the *grown* suite (3591 → 3800+ tests). Not a regression — a false timeout: the
+guard-page fix now makes deep recursion DEOPT to the VM and raise the catchable
+`MAX_BC_FRAMES` error (→ the parse returns `:rejected`), so the worker is *slow*, never dead.
+With the drain armed (the whole suite's loaded code arms it — the very condition under test)
+one parse costs ~36 s of CPU (measured at `BROOD_RT_GC_FLOOR=1`), and `:serial` serialises
+only *within* the group, so the warm passes + spawned parse compete with the rest of the
+suite for cores; the whole-test wall-clock overran 120 s (the suite still *completed* — no
+guard-page abort, the real KI-14 symptom). Fixed by tagging the group `:slow` (the
+`*test-slow-timeout-ms*` = 900 s batch budget the conformance corpora already use for work
+that is long, not stuck) and widening the in-test `after` liveness nets to 850 s (a stuck
+worker is still caught, cleanly, under the ceiling). The warm passes were kept — they are
+load-bearing (the spawned parse must hit the WARM native path, the condition the canary
+guards). The *underlying* residual — a deep-recursing process still pays a
+throttled-but-O(depth) Phase-1 drain-report cost — is bounded and left for a separate,
+ADR-gated collector-perf pass if it ever bites outside this canary.
 
 **Found alongside** two genuine stack-overflow aborts on the same corpus, both fixed and
 both distinct from the hang (each aborts rather than hangs, and neither is the reason

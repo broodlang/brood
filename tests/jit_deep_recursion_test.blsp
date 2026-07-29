@@ -47,19 +47,18 @@
 ;; guard-page abort happened.
 ;;
 ;; The `after` deadline is a **liveness net**, not a performance bound: its job is to turn
-;; "the worker died and will never reply" into a value rather than hanging the test. It must
-;; therefore clear the SLOWEST *live* run comfortably. That is the deep-recursion parse with
-;; the RUNTIME drain armed (which the whole suite's loaded code arms — KI-14) AND competing
-;; with the rest of the suite for cores (`:serial` serialises only within this group; all
-;; units still run together). Measured ~36 s of CPU for one parse at `BROOD_RT_GC_FLOOR=1`;
-;; under full-suite contention its wall-clock consistently overran the original 60 s, so the
-;; three cases false-failed with `:TIMED-OUT` every run even though the worker finished fine
-;; (the suite completed — no guard-page abort, the actual KI-14 symptom). 180 s gives the
-;; contention headroom; a genuinely dead worker still never replies, so it is still caught.
+;; "the worker died and will never reply" into a value rather than hanging. The guard-page
+;; fix means deep recursion now DEOPTS to the VM and raises the catchable `MAX_BC_FRAMES`
+;; error (→ `jdr--parse` returns `:rejected`) instead of aborting, so the worker is *slow*,
+;; never dead — it just needs a generous net. The parse costs ~36 s of CPU at
+;; `BROOD_RT_GC_FLOOR=1` and far more under the whole suite's drain + core contention
+;; (`:serial` serialises only within this group; all units still run together). At 850 s it
+;; clears any realistic contended run yet still sits under the `:slow` batch ceiling, so a
+;; genuinely stuck worker is caught with a clean `:TIMED-OUT` rather than the hard kill.
 (defn jdr--in-spawn (path)
   (let (me (self))
     (spawn (send me [:r (jdr--parse path)]))
-    (receive ([:r r] r) (after 180000 :TIMED-OUT))))
+    (receive ([:r r] r) (after 850000 :TIMED-OUT))))
 
 (describe "KI-14: deep JIT'd recursion drains instead of overflowing"
   ;; :serial — each case warms globals and leans on the whole worker stack; running them
@@ -71,7 +70,15 @@
   ;; RUNTIME collector re-walking a deep process's whole root stack at every safepoint —
   ;; and it is fixed, so these run with everything else again. Deep recursion is exactly
   ;; the shape that provoked it, which makes this file a useful canary for its return.
-  :serial
+  ;;
+  ;; `:slow` — the collector's *bounded* residual (a deep-recursing process still pays a
+  ;; throttled-but-O(depth) drain-report cost) makes each case's warm + spawned parse
+  ;; legitimately long once the whole suite's loaded code arms the drain AND every core is
+  ;; contended; the whole-test wall-clock overran the 120 s default ceiling, hard-killing a
+  ;; run that finishes fine given room. `:slow` buys the `*test-slow-timeout-ms*` (900 s)
+  ;; batch budget — the same lever the conformance corpora use for work that is long, not
+  ;; stuck. The underlying drain cost is left for an ADR-gated collector-perf pass.
+  :serial :tags [:slow]
   (test "a 100k-deep document parses in a spawned process after warming"
     (require 'json)
     (let (p "tests/corpus/json/data/n_structure_100000_opening_arrays.json")
@@ -112,5 +119,5 @@
 (defn jdr--scan-in-spawn (files)
   (let (me (self))
     (spawn (send me [:r (jdr--scan files 0)]))
-    ;; 180 s liveness net, as in `jdr--in-spawn` — contention headroom, not a perf bound.
-    (receive ([:r r] r) (after 180000 :TIMED-OUT))))
+    ;; 850 s liveness net, as in `jdr--in-spawn` — generous headroom under the `:slow` ceiling.
+    (receive ([:r r] r) (after 850000 :TIMED-OUT))))
