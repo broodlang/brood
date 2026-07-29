@@ -11494,3 +11494,24 @@ DEFERS), and **zero** new argument/return warnings across all of `std/` + `tests
 deferred item (a) discharged; language.md updated. This wraps the type-system arc — typed
 returns + typed params (ADR-180), sealed-ability-as-a-type (ADR-181), devirtualization
 (ADR-182).
+
+## 2026-07-29 (cont.) — multimethod check: inference hook + operator-sugar coverage
+
+Extended the ADR-179 static-coverage check two ways, both sound (zero false positives across
+`std/` + `tests/`, full suite 898 green; clippy + fmt clean).
+
+- **Inference hook** (`check_multi_call_inferred`, wired via `Ctx::multi()`, mirroring the
+  ability `check_ability_call_inferred`). A direct generic call at least one of whose args is a
+  *symbol* resolves each arg's identity syntactically OR from its inferred **record type**, so
+  `(let (m (usd 1)) (scale m 2.5))` is flagged. The symbol gate prevents double-warning with the
+  syntactic pass (a fully-literal call has no symbol arg).
+- **Operator-sugar coverage** (`check_operator_sugar`). `+`/`-`/`*`/`/` → `num-*` and
+  `<`/`<=`/`>`/`>=` → `compare-to` when a record is an operand: `(+ (usd 1) 2.5)` /
+  `(< money 5)` are flagged when the routed multimethod has no method for the pair. A record
+  operand is *required* — told apart from a number via the runtime `*record-ids*` registry
+  (ADR-182) — so pure `(+ 1 2)` is never touched. 2-arg only (a variadic fold's intermediate
+  type is unknown); the antisymmetric mirror makes `<`/`>` direction irrelevant.
+
+The deliberate runtime-error tests stay silent for free: an operator no-method test lives inside
+`try` (which `check_into` skips), and a direct-generic one uses a variable. `protocol.rs`,
+`walk.rs`, `check.rs`, `ctx.rs`, `type_check_catalog.rs`.
