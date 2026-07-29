@@ -10738,3 +10738,32 @@ maps 83 — green, GC-stress clean. Still to come (the user wants the full suite
 **build/lookup half** — `Conjable` (`conj`/`into`) and `Lookup` (`get`/`nth`) for custom
 collections — then the `Ord`/`Compare` ability (sort/min/max on records) and eventually a
 numeric protocol.
+
+## 2026-07-29 (impl) — collection protocol, build half + dogfooded onto std (queue/multimap)
+
+Added `Conjable` (op `-conj`), the build counterpart to `Seqable`: `conj`/`into` (both
+prelude defns, so no hot-path cost) dispatch for a RECORD — default is the map behaviour
+(assoc a `[k v]`, merge a map), a custom collection defines its own insertion. Same
+bootstrap-safe raw `map-get :__id__` gate as `seq`; `-conj` is only reached for records.
+
+Then dogfooded the whole protocol onto std's own collection types — the actual cleanup:
+`std/queue` and `std/multimap` now `(impl Seqable …)` (and queue `(impl Conjable …)`), so a
+queue/multimap is a **first-class collection**: `count`/`seq`/`map`/`filter`/`fold`/`for`/
+`into` (and `conj` for the queue) all work on it directly. Their bespoke functions
+collapsed onto the protocol — `queue-to-list` → `(seq q)`, `queue-from-list` →
+`(into (queue-new) xs)`, `multimap-size` → `(count mm)` — turning a parallel API into thin
+aliases. (pq/multimap take no `Conjable`: inserting needs a priority/key a bare `conj`
+can't carry — `pq-insert`/`multimap-assoc` stay.)
+
+Deferred: the Prim1 accessors `first`/`rest`/`empty?`/`nth` don't route through `Seqable` —
+they're JIT-inlined ops the hot `fold--loop` uses, so routing them safely needs kernel work
+(a general-builtin record branch, or raw `%first`/`%rest`); `(first (seq c))` meanwhile.
+
+Also chased down the recurring "KI-14 flakes" — they were **not real**: the canary
+(`tests/jit_deep_recursion_test.blsp`) parses a 100k-deep JSON in a spawned process with a
+60s `receive` timeout; run via `cargo run -p nest` (a **debug** build, ~10× slower) under
+full-suite load it exceeds 60s → `:TIMED-OUT`. On release (`make test` / `nest test`) it is
+2.9 s, 3/3. Lesson: verify the suite on release, not the debug `cargo run -p nest`.
+
+Verified (release): queue 27, multimap 20, record 16 (incl. custom Seqable+Conjable),
+ability 34, maps 83, json 41; full release suite clean.

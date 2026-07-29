@@ -2704,7 +2704,11 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
     ;; only build-local trie nodes inside one GC-quiet builtin; no `Value` is ever
     ;; mutable), so O(result-nodes) allocation, not O(n) fresh path-copies. A map
     ;; `from` is read as its entries first (`%map-into` takes a list/vector of `[k v]`).
-    (map? to) (%map-into to (if (map? from) (map-pairs from) from))
+    ;; a record target conj's each item via `Conjable` (a custom collection defines how);
+    ;; a plain map uses the GC-quiet CHAMP builder. `map-get` tells them apart.
+    (map? to) (if (map-get to :__id__ nil)
+                (fold conj--one to (seq from))
+                (%map-into to (if (map? from) (map-pairs from) from)))
     ;; Set target: add each item (duplicates collapse). Without this branch the
     ;; `else` poured a set into a LIST — `(into #{} [1 1 2])` was `(1 1 2)`.
     (set? to) (fold %set-add to from)
@@ -2720,10 +2724,15 @@ structural order (`compare`), so numeric, string, keyword, and vector keys all w
     (nil? coll) (list x)
     (vector? coll) (into coll [x])
     (set? coll) (%set-add coll x)
-    (map? coll) (cond
-                  (map? x) (merge coll x)
-                  (and (vector? x) (= (count x) 2)) (assoc coll (nth x 0) (nth x 1))
-                  else (error "conj: adding to a map takes a [k v] pair or a map, got " (pr-str x)))
+    ;; a record dispatches to its `Conjable` impl (default: the map behaviour below); a
+    ;; custom-collection record defines its own insertion. `map-get` distinguishes it from
+    ;; a plain map, and `-conj` is only reached for records, so its late definition is fine.
+    (map? coll) (if (map-get coll :__id__ nil)
+                  (-conj coll x)
+                  (cond
+                    (map? x) (merge coll x)
+                    (and (vector? x) (= (count x) 2)) (assoc coll (nth x 0) (nth x 1))
+                    else (error "conj: adding to a map takes a [k v] pair or a map, got " (pr-str x))))
     (pair? coll) (cons x coll)
     else (error "conj: not a collection: " (pr-str coll))))
 
@@ -4427,6 +4436,21 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   "A value's sequence view — the list that `seq`/`map`/`fold`/`for`/`into` iterate."
   (to-seq [self] :-> any))
 (impl Seqable :default (to-seq [x] (map-pairs (fields x))))
+
+;; Conjable — adding an element: the seam `conj`/`into` consult for a RECORD. The default
+;; is the map behaviour (a record is a map: assoc a `[k v]` pair, or merge a map), so a
+;; plain record conj's like a map; a custom-collection record overrides `-conj` to define
+;; its own insertion (a queue pushes, a stack prepends, …). Built-ins keep their native
+;; `conj--one` path — this fires only for a record.
+(defability Conjable
+  "Add element `x` to collection `self`, returning a fresh collection."
+  (-conj [self x] :-> any))
+(impl Conjable :default
+  (-conj [coll x]
+    (cond
+      (map? x) (merge coll x)
+      (and (vector? x) (%eq (count x) 2)) (assoc coll (nth x 0) (nth x 1))
+      else (error "conj: adding to a record takes a [k v] pair or a map, got " (pr-str x)))))
 
 ;; The per-print-argument hook the prelude installs into `*show*` at the end of boot
 ;; (Display is core, ADR-172 §8 — no activation step). Only a RECORD is routed through

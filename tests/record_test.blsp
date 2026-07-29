@@ -34,8 +34,10 @@
       (is (includes? ks :x))
       (is (includes? ks :y))
       (refute (includes? ks :__id__)))
-    (assert= (vals (point 1 2)) (vals {:x 1 :y 2}))
-    (assert= (map first (seq (point 1 2))) (list :x :y))))
+    ;; compare as MAPS/sets, never a fixed list order — map key order is hash-derived
+    ;; (CHAMP), so it differs between builds; `(seq r)` reconstructs to the field map.
+    (assert= (into {} (seq (point 1 2))) {:x 1 :y 2})
+    (assert= (into #{} (keys (point 1 2))) #{:x :y})))
 
 (describe "defrecord: records are immutable maps"
   ; original unchanged
@@ -71,21 +73,27 @@
   (test "an accessor on a bare map without that field returns nil (records are maps)"
     (assert= (point-y {:x 1}) nil)))
 
-;; ---- the collection protocol (Seqable): a custom record defines its own iteration ----
+;; ---- the collection protocol: a custom record joins iteration (Seqable) + build (Conjable) ----
 (defrecord stack (items))
-(impl Seqable stack (to-seq [s] (get s :items)))     ; iterate the items, not the fields
+(impl Seqable stack (to-seq [s] (get s :items)))         ; iterate the items, not the fields
+(impl Conjable stack (-conj [s x] (stack (cons x (get s :items)))))  ; prepend on conj
 
-(describe "defrecord: custom Seqable"
-  (test "a record with a Seqable impl iterates its own way"
+(describe "defrecord: custom collection (Seqable + Conjable)"
+  (test "Seqable — a custom record iterates its own way"
     (let (s (stack (list 10 20 30)))
       (assert= (seq s) (list 10 20 30))
-      (assert= (count s) 3)                            ; not 1 (the one `items` field)
+      (assert= (count s) 3)                              ; not 1 (the one `items` field)
       (assert= (fold + 0 s) 60)
       (assert= (map inc s) (list 11 21 31))
       (assert= (filter even? s) (list 10 20 30))))
-  (test "a record WITHOUT a Seqable impl still iterates as its fields"
-    (assert= (seq (point 1 2)) (list [:x 1] [:y 2]))
-    (assert= (count (point 1 2)) 2)))
+  (test "Conjable — conj/into build the custom collection its own way"
+    (assert= (seq (conj (stack (list)) 1)) (list 1))
+    (assert= (seq (fold conj (stack (list)) (list 1 2 3))) (list 3 2 1))  ; prepend
+    (assert= (seq (into (stack (list)) (list :a :b :c))) (list :c :b :a)))
+  (test "a record WITHOUT impls still iterates/conj's as its fields (map behaviour)"
+    (assert= (into {} (seq (point 1 2))) {:x 1 :y 2})   ; as a map — hash-order-independent
+    (assert= (count (point 1 2)) 2)
+    (assert= (fields (conj (point 1 2) [:z 3])) {:x 1 :y 2 :z 3})))
 
 ;; Records cross process boundaries as the maps they are — build in a worker, send home,
 ;; read with the accessors and the id (proves the record round-trips per-heap).

@@ -167,9 +167,16 @@ What that review consciously left OPEN, with the reasoning:
   branch fires only for a record, detected by one `:__id__` check, once per collection op,
   not per element), so zero cost to lists/vectors/maps. This also **fixed the `:__id__`
   leak** unified `defrecord` introduced — `(count r)`/`(keys r)`/`(seq r)` are now the
-  field view, not the raw map (which included `:__id__`). Still ⬜: the **build/lookup
-  half** — `conj`/`into` (a `Conjable` ability) and `get`/`nth` (a `Lookup` ability) for
-  custom collections; and an optional `Counted` for O(1) `count`. **[Brood]**
+  field view, not the raw map (which included `:__id__`). The **build half** also shipped:
+  a `Conjable` ability so `conj`/`into` (both prelude defns) dispatch for a record —
+  default is the map behaviour, a custom collection defines its own insertion. **Dogfooded
+  onto std**: `std/queue` and `std/multimap` now impl the protocol, so a queue/multimap is
+  a first-class collection (`count`/`seq`/`map`/`fold`/`for`/`conj`/`into` all work) and
+  their bespoke `queue-to-list`/`queue-from-list`/`multimap-size` collapsed into one-liners
+  over it. Still ⬜: the Prim1 accessors (`first`/`rest`/`empty?`/`nth`) don't route
+  through `Seqable` — they're JIT-inlined ops the hot `fold--loop` uses, so routing them
+  needs kernel work (or raw `%first`/`%rest`); use `(first (seq c))` meanwhile — plus an
+  optional `Counted` for O(1) `count`. **[Brood]**
 - ✅ **Record-shape dispatch** — resolved by **ADR-168**. Records stay structural maps
   (ADR-130 intact: `type-of` is still `:map`, `get`/`assoc`/`=` still structural), and
   a `defrecord` value carries a *dispatch-only* `:module/name` nominal identity baked
