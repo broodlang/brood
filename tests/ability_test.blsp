@@ -302,8 +302,8 @@
     ;; implicit, so a record-second operand names the problem instead of "expected number".
     (let (m (money 100)
           e (try (apply + (list 5 m)) (catch e (error-message e))))
-      (is (includes? e "must come first"))
-      (is (includes? e "cross-type"))))
+      (is (includes? e "cross-type"))
+      (is (includes? e "convert explicitly"))))
   (test "a hand-written {:__id__ nil} is a plain map, not a record (truthy-id rule)"
     ;; matches `record?`/`identity-of`: a nil id dispatches as :map, so arithmetic on it
     ;; gives the ordinary number error — NOT the record-first guidance.

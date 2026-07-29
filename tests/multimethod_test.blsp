@@ -1,0 +1,61 @@
+;; Multiple dispatch — `defmulti` / `defmethod` (ADR-178). Dispatch on the IDENTITY-TUPLE of
+;; the arguments: exact match, then a declared `:default`, else a loud `no-method` error —
+;; never a nearest guess. A `:commutative`/`:antisymmetric` algebra derives each off-diagonal
+;; binary method's mirror. `defmulti`/`defmethod` are core (prelude), so they refer bare.
+(defmodule multimethod-test (:use test))
+
+(defmulti mm-combine :commutative)
+(defmethod mm-combine [:int :string] (n s) (str n s))
+(defmethod mm-combine [:int :int]    (a b) (+ a b))
+
+(defmulti mm-cmp :antisymmetric)
+(defmethod mm-cmp [:int :string] (n s) 1)          ; an int sorts after a string, say
+
+(defmulti mm-desc)                                  ; no algebra
+(defmethod mm-desc :default (x) :other)
+(defmethod mm-desc [:int]   (n) :int)
+
+(describe "multiple dispatch"
+  (test "an exact identity-tuple dispatches to its method"
+    (assert= (mm-combine 2 3) 5)
+    (assert= (mm-combine 1 "x") "1x"))
+  (test "a :commutative op derives the mirror — same result in both orders"
+    (assert= (mm-combine "x" 1) "1x")
+    (assert= (mm-combine "x" 1) (mm-combine 1 "x")))
+  (test "a :antisymmetric op derives the NEGATED mirror"
+    (assert= (mm-cmp 5 "a") 1)
+    (assert= (mm-cmp "a" 5) -1))
+  (test "the diagonal is authored explicitly and is not clobbered by a mirror"
+    (assert= (mm-combine 2 3) 5))
+  (test ":default is the catch-all, consulted only when no exact tuple matches"
+    (assert= (mm-desc 7) :int)
+    (assert= (mm-desc "hi") :other)
+    (assert= (mm-desc :k) :other))
+  (test "no method and no :default raises a structured :no-method error"
+    (let (e (try (mm-combine 1.5 :kw) (catch e e)))
+      (assert= (get e :kind) :no-method)
+      (assert= (get e :multi) 'mm-combine)
+      (assert= (get e :key) [:float :keyword])
+      (is (member? [:int :int] (get e :have)))
+      (is (includes? (error-message e) "no method")))))
+
+;; ---- across processes: methods live in the shared code region; a spawned process resolves
+;; them against its own heap and the produced value round-trips back through `send`. ----
+(defn mm-spawn-workers (parent pairs)
+  (when (not (empty? pairs))
+    (let (p (first pairs))
+      (spawn (send parent [:r (mm-combine (nth p 0) (nth p 1))])))
+    (mm-spawn-workers parent (rest pairs))))
+
+(defn mm-collect (got total acc)
+  (if (= got total) acc
+    (mm-collect (+ got 1) total (receive ([:r v] (cons v acc))))))
+
+(describe "multiple dispatch across processes"
+  :isolated
+  (test "spawned processes resolve methods (incl. derived mirrors) and send results back"
+    (let (pairs [[2 3] [1 "x"] ["y" 4]])   ; exact, exact, and a commutative-mirror hit
+      (mm-spawn-workers (self) pairs)
+      (let (got (mm-collect 0 (count pairs) nil))
+        ;; order-independent: each worker returns its own result
+        (assert= (sort-by str got) (sort-by str (list 5 "1x" "4y")))))))

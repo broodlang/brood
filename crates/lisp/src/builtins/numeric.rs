@@ -216,11 +216,7 @@ pub(super) fn num_bin(
             // arithmetic is not implicit — a clear, named error beats "expected number,
             // got map" from the float coercion below. (`(- 5 money)` and friends.)
             if is_record(heap, b) {
-                return Err(LispError::runtime(format!(
-                    "{who}: a record operand must come first — `Num` dispatches on the \
-                     first argument, so write `({who} <record> …)`; cross-type arithmetic \
-                     is not implicit (convert explicitly)"
-                )));
+                return Err(cross_type_record_error(who, "arithmetic", "combines", "Num"));
             }
             Ok(Value::Float(float_op(
                 num_to_f64(heap, who, a)?,
@@ -238,6 +234,18 @@ pub(super) fn num_bin(
 /// byte-for-byte untouched (a Brood-side `(record? a)` branch in `+` measured a ~195×
 /// regression — this is the kernel form that avoids it). Returns `None` when `a` isn't a
 /// record, so the caller proceeds to its normal float / error path.
+/// The error for combining/comparing a record with a value of another kind. The record
+/// arithmetic/ordering abilities (`Num`/`Ord`) are **homogeneous** and do not coerce across
+/// types — direction-agnostic on purpose (`>` is `(%lt b a)`, so "put the record first" would
+/// be wrong for it). `noun`/`verb`/`ability` specialize it: ("arithmetic","combines","Num")
+/// or ("comparison","compares","Ord").
+fn cross_type_record_error(who: &str, noun: &str, verb: &str, ability: &str) -> LispError {
+    LispError::runtime(format!(
+        "{who}: cross-type {noun} is not implicit — a record {verb} only with a value its \
+         `{ability}` impl accepts; convert explicitly"
+    ))
+}
+
 /// True when `v` is an identity-carrying record — a map whose reserved `:__id__` key
 /// (`defrecord` bakes it in) holds a *truthy* id. A plain map, or a hand-written
 /// `{:__id__ nil}`, is not a record: this matches `record?`/`identity-of`, which
