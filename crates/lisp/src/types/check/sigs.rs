@@ -101,7 +101,10 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     // result (`(get (+ a b) :field)`) type-check cleanly.
     let num_or_record = num.union(Ty::of(Tag::Map));
     for n in ["+", "-", "*", "/"] {
-        put(n, Sig::variadic(num_or_record.clone(), num_or_record.clone()));
+        put(
+            n,
+            Sig::variadic(num_or_record.clone(), num_or_record.clone()),
+        );
     }
     // variadic comparison: numeric args, boolean result
     for n in ["<", "<=", ">", ">="] {
