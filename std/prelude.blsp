@@ -730,10 +730,12 @@ and a set its elements, as everywhere else `seq` applies."
 ;; walks through, not the op the caller wrote. Checked once per `nth`, not per step:
 ;; the vector/bytes arms never reach it, and a list walk is already O(n).
 (defn nth--seq-or-fail (coll i d)
-  (if (or (pair? coll) (nil? coll))
-    (nth-list coll i d)
-    (error (str "nth: expected a collection to index, got "
-             (name (type-of coll)) " (" (pr-str coll) ")"))))
+  (cond
+    (or (pair? coll) (nil? coll)) (nth-list coll i d)
+    ;; a record indexes through its `Seqable` view (a custom collection or its fields)
+    (record? coll) (nth-list (seq coll) i d)
+    else (error (str "nth: expected a collection to index, got "
+                  (name (type-of coll)) " (" (pr-str coll) ")"))))
 
 (defn nth "The item at index `i` of `coll` (0-based), or `default` (else `nil`) if out of range."
   ;; The fixed 2-arity arm is the hot path (`(nth v i)`): it is VM-eligible
