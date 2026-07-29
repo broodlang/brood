@@ -215,6 +215,16 @@ claim that dev-tools inflates `startup`/base-RSS; it doesn't.) It also makes the
 installed `nest` lean, so reinstall with the plain `make install` when you want
 `nest test`/`repl` back.
 
+**`make ab` pins compute rows to ONE core, which charges the benchmark for background
+JIT compilation.** That is right for measuring generated-code quality and wrong for any
+change that alters *how much* the background compiler does: the compiler thread competes
+with the benchmark for the single pinned core, so extra compiles read as a regression that
+a real (multi-core) run never pays. Found 2026-07-29 — ADR-175's shared compiled code
+makes more prelude arms tier up (18 lowered vs 7), which showed as `collatz` +8% pinned
+and **zero unpinned**. If a change touches tiering, compilation volume, or anything the
+background compiler does, re-run the row **unpinned** (`taskset` off) before believing a
+regression. `BROOD_JIT_DUMP_IR=1 … | grep -c '^\[jit-ir\]'` counts the compiles.
+
 A row that moves only a few percent in a sweep deserves a solo re-run before you
 believe it: interleaving A and B shifts thermal/cache state, and on 2026-07-27
 `persistent-map` read +3.7% in a sweep and 82 vs 81 ms measured directly.

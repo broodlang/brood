@@ -10870,3 +10870,74 @@ curated sig once an operand is a record, so the widened sig affects record arith
 regression), float loop unaffected, record 20 (incl. Num arithmetic + int/float-untouched),
 math 81, decimal 20, maps 83; `nest check` 0 warnings on the tree AND on `(+ money money)`.
 This completes the "lean into abilities" arc — collection (read+build), `Ord`, and now `Num`.
+## 2026-07-29 (cont.) — the ADR-175 "regression" was a `make ab` artifact
+
+The `collatz` +8% / `nqueens` +7.8% attributed to shared JIT-tier state in the two
+entries above **is not a real cost**, and the planned "split shared code from
+per-process tier state" fix would have solved nothing while undoing `spawn` −14.8%.
+
+Bisect first: the regression is Phase B (prelude sharing), not Phase C — `collatz`
++7.9% at the Phase A→B boundary, −0.9% at B→C. Then `BROOD_JIT_DUMP_IR` counts:
+sharing lowers **18 arms vs 7**, and the extra ones are prelude helpers (`not`, `fold`,
+`cond--orphan`, `fold--loop`) that never reach the threshold otherwise. That is the
+mechanism working as intended — hotness accumulates across the runtime instead of
+resetting per process, so more prelude code tiers up. It is *why* `spawn` gained 14.8%.
+
+The cost is paying for those compiles. `make ab` pins compute rows to **one core**
+(`AB_PIN_CPU`, default cpu2), so the background JIT compiler thread competes with the
+benchmark for that core; 11 extra compiles at ~0.7 ms each ≈ the 8 ms "regression".
+Give the compiler its own core and it vanishes:
+
+| collatz | 1-core pinned | unpinned |
+|---|---|---|
+| shared | 110 ms | 103 ms |
+| `BROOD_NO_SHARED_ARMS=1` | 102 ms | 104 ms |
+
+`nqueens` behaves the same, and under the **harness's** actual pinning (cores 8-11) both
+rows show no regression — so the published cross-language numbers were never affected.
+
+**Methodology lesson, now in CLAUDE.md:** `make ab`'s single-core pin is right for
+measuring generated-code quality and wrong for any change that alters *how much*
+background compilation happens — it charges the benchmark for compiler CPU that a real
+run does in parallel. Re-run such a change unpinned before believing a regression.
+
+## 2026-07-29 (cont.) — the green-process floor, finally attributed
+
+The `spawn-live` gap is now entirely the process floor (compiled code is shared per
+runtime since ADR-175). Roughly half of it was unattributed, and the earlier attempts
+failed for a recorded reason: whole-program differencing is exhausted, and per-phase
+`live_bytes()` deltas are invalid because that counter is process-wide across workers.
+
+Done properly with a **size-class histogram in the `Counting` global allocator**
+(temporary; env-armed from `main`, since an env read *inside* the allocator re-enters
+it). One trap worth writing down: dumping at `atexit` reads almost empty — `Interp::drop`
+retires parked processes first, so the interesting allocations are already gone. Dump
+while the interpreter is alive (right after `run_files`).
+
+Diffing N=50,000 parked processes against N=0: **15.8 live allocations and ~4.8 KB per
+process.**
+
+| size class | per proc | bytes/proc | what |
+|---|---|---|---|
+| ≤2048 | 1.00 | 2048 | `Box<Process>` (1840 B) |
+| **≤256** | **6.92** | **1773** | `Arc<Mailbox>` (184 B) + the `Heap`'s slab/root `Vec`s |
+| ≤128 | 2.96 | 379 | smaller `Vec` first-allocations |
+| ≤512 | 0.99 | 506 | |
+| ≤16/32/64 | ~3.9 | 142 | |
+
+The ≤256 cluster is the lever, and its cause is mechanical: `Value` is 24 B and
+`(Value,Value)` 48 B, so Rust's minimum non-zero `Vec` capacity (4 for these element
+sizes) makes every first-touched slab `Vec` a 192 B allocation — in the 256 class. A
+process touching ~6 of the 11 slab kinds pays ~6 × 192 B before storing anything.
+
+Fix directions, in rough order of payoff:
+1. **Arena the slabs** — one backing allocation for all 11 `Vec`s instead of one each.
+   Collapsing ~7 allocations into 1–2 is ~1 KB/proc against a 4.8 KB floor.
+2. **Explicit small initial capacity** (`Vec::with_capacity(1)` = 48 B, class 64) where a
+   slab kind is usually near-empty — cheaper to try, smaller win.
+3. `Process` is 1840 B, up from 1736 before ADR-175 Phase A (the IC block registry +
+   cursors). Still one 2048-class allocation, so it costs nothing extra today, but it is
+   ~200 B from the next class boundary.
+
+Not implemented — this entry is the measurement. The BEAM's ~3 KB against our ~4.8 KB of
+*allocation* (≈6.6 KB RSS) is now a concrete, itemised target rather than a mystery.
