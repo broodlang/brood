@@ -2640,11 +2640,15 @@ mailbox messages stay queued while waiting (selective receive)."
     (not (empty? more)) (merge-sort a (first more))
     (empty? a) nil
     (number? (first a)) (%sort-asc a)
+    ;; a record element sorts by its `Ord` (default = structural `compare`), so a type can
+    ;; define its own order; every built-in keeps the native `%sort-cmp` path.
+    (record? (first a)) (merge-sort (fn (x y) (< (ord-compare x y) 0)) a)
     else (%sort-cmp a)))
 (defn sort-by (key-fn coll)
   "Sort `coll` (stable, ascending) by comparing `(key-fn x)` of each item with the
-structural order (`compare`), so numeric, string, keyword, and vector keys all work."
-  (merge-sort (fn (x y) (< (compare (key-fn x) (key-fn y)) 0)) coll))
+structural order (`compare`) — or a key's own `Ord` if the key is a record. Numeric,
+string, keyword, vector, and record keys all work."
+  (merge-sort (fn (x y) (< (ord-compare (key-fn x) (key-fn y)) 0)) coll))
 ;; Split `coll` into its first `n` items and the rest in ONE pass — what
 ;; merge-sort needs instead of a separate `take` + `drop` (two walks). Generally
 ;; useful, so it's public.
@@ -4451,6 +4455,22 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
       (map? x) (merge coll x)
       (and (vector? x) (%eq (count x) 2)) (assoc coll (nth x 0) (nth x 1))
       else (error "conj: adding to a record takes a [k v] pair or a map, got " (pr-str x)))))
+
+;; Ord — total ordering: the seam `sort`/`sort-by` (and any `ord-compare` caller) consult
+;; for a RECORD. `compare-to` returns -1 / 0 / 1. The default is the kernel's structural
+;; `compare` (a record orders as its underlying map — deterministic and total, but NOT by
+;; field value); a type that wants a meaningful order (a version, a money value, a hand of
+;; cards) overrides `compare-to`.
+(defability Ord
+  "Compare `self` to `other`: -1 if `self` sorts before, 0 if equal, 1 if after."
+  (compare-to [self other] :-> int))
+(impl Ord :default (compare-to [a b] (compare a b)))
+
+;; Record-aware structural compare: an `Ord` record uses its impl, everything else the
+;; kernel `compare`. This is the comparator `sort`/`sort-by` use, so a record type orders
+;; itself while built-ins keep the native path.
+(defn ord-compare (a b)
+  (if (record? a) (compare-to a b) (compare a b)))
 
 ;; The per-print-argument hook the prelude installs into `*show*` at the end of boot
 ;; (Display is core, ADR-172 §8 — no activation step). Only a RECORD is routed through

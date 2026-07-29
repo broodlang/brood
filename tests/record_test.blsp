@@ -95,6 +95,24 @@
     (assert= (count (point 1 2)) 2)
     (assert= (fields (conj (point 1 2) [:z 3])) {:x 1 :y 2 :z 3})))
 
+;; ---- Ord: a record defines its own sort order ----
+(defrecord ver (major minor))
+(impl Ord ver
+  (compare-to [a b]
+    (let (c (compare (get a :major) (get b :major)))
+      (if (= c 0) (compare (get a :minor) (get b :minor)) c))))
+
+(describe "defrecord: custom Ord"
+  (test "sort/sort-by use a record's Ord (semantic-version order, not map order)"
+    (let (vs (list (ver 1 5) (ver 1 2) (ver 2 0) (ver 1 10)))
+      (assert= (map (fn (v) [(get v :major) (get v :minor)]) (sort vs))
+        (list [1 2] [1 5] [1 10] [2 0]))
+      (assert= (map (fn (v) (get v :minor)) (sort-by (fn (v) v) vs))
+        (list 2 5 10 0))))
+  (test "built-in sort is unchanged"
+    (assert= (sort (list 3 1 2)) (list 1 2 3))
+    (assert= (sort (list "b" "a" "c")) (list "a" "b" "c"))))
+
 ;; Records cross process boundaries as the maps they are — build in a worker, send home,
 ;; read with the accessors and the id (proves the record round-trips per-heap).
 (describe "defrecord: across processes"
