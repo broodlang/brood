@@ -266,36 +266,34 @@ benchmark row before believing it.
   `BROOD_GC_VERIFY` was what caught a blanket-rewrite bug here — aggregate collector walks
   need `old_opt()`, not the handle-deref `old()`.
 
-- [ ] **M2b-lite — share the FAT entry table only, keyed by `(arm_uid, site)`. NEW PLAN
-  2026-07-29, and it dominates the original M2b below.** Two findings reshape this:
+- [ ] **M2b — sharing the IC tables. Two findings, one of which corrects the other.**
 
-  1. **`vm_call_ics` is never read raw by JIT code** — only `vm_fast_links` is
-     (`vm_fast_links_base()`). So the fat table carries *none* of the stable-address /
-     use-after-realloc hazard that makes the original plan expensive. Verified by grep:
-     no reference to `vm_call_ics` anywhere under `jit/` or `jit_lower.rs`.
-  2. **After M2a the fat table is the COLD one.** The hot probe now returns from the
-     40-byte `FastLink` mirror without touching `CallIcEntry` at all; the fat entry is
-     consulted only on a miss. A shared structure behind an `RwLock` is therefore
-     affordable — the lock is off the hot path by construction.
+  **Still true and useful:** `vm_call_ics` is *never read raw by JIT code* — only
+  `vm_fast_links` is, via `vm_fast_links_base()`. Verified by grep: no reference to
+  `vm_call_ics` anywhere under `jit/` or `jit_lower.rs`. So the fat table carries none of
+  the stable-address / use-after-realloc hazard, and sharing it needs no block allocator.
 
-  So: move `vm_call_ics` to the runtime as `RwLock<HashMap<(u64 arm_uid, u32 site),
-  CallIcEntry>>`, leaving the per-process `vm_fast_links` mirror (and its `cur_ic_base` /
-  `arm_ic_blocks` machinery) exactly as they are. Keying by `(arm_uid, site)` instead of a
-  flat `base + site` index **dissolves the coupling that made the original plan
-  all-or-nothing**: no runtime-global base assignment is needed, so this no longer has to
-  land together with a shared-index scheme that would otherwise size every process's table
-  to the runtime's whole site count (a process touches ~4 sites).
+  **CORRECTED 2026-07-29 (same day, before any code was written):** an earlier version of
+  this entry claimed that after the fast-link collapse the fat table is *cold*, and
+  proposed an `RwLock<HashMap<(arm_uid, site), CallIcEntry>>` on that basis. **That premise
+  is wrong.** The collapse made `CallIcEntry` cold only for the **JIT** path
+  (`vm_call_ic_fast_link` now returns from the 40-byte mirror). `vm_call_ic_probe` — which
+  reads the fat table — is the primary IC hit path in the **VM dispatcher**
+  (`dispatch.rs`, the `call_ic_hit` counter), i.e. hot for *every interpreted call*. An
+  `RwLock` + hash probe there would regress every un-JIT'd call site in the system.
 
-  Worth ~256 B/process (≈77 MB at 300k, comparable to the old-gen win) *and* a warm start:
-  a freshly spawned process inherits every entry its peers already resolved. Entry content
-  is already *enforced* process-independent (`vm_call_ic_put` refuses a movable callee or a
-  LOCAL env), and the epoch already lives per-runtime in `Arc<RuntimeCode>`.
+  The accurate picture: **both tables are hot, on different engines.** The mirror is hot
+  for JIT'd calls, the fat table for interpreted ones. Sharing either needs a lock-free
+  read path, not a lock — which is the original difficulty, undiminished. What genuinely
+  improved is only that the fat table has no raw-pointer hazard, so its read path can be a
+  normal atomic protocol rather than a stable-address block allocator.
 
-  Open questions to settle first: `CallIcEntry` must be `Send + Sync` (it holds `Value`,
-  `Arc<CompiledArm>`, `EnvId` — all process-independent, but check); the `runtime_collect`
-  clears become runtime-wide, which is sound because compaction holds `Arc::get_mut` and is
-  therefore single-process; and a `HashMap` probe on the miss path is slower than a `Vec`
-  index, so measure the miss path before committing.
+  Cost it fresh before starting: worth ~256 B/process (≈77 MB at 300k) plus a warm start,
+  against a lock-free structure on the hottest path in the interpreter. `CallIcEntry` is
+  confirmed `Send + Sync` (compile-time assertion). Entry content is already enforced
+  process-independent (`vm_call_ic_put` refuses a movable callee or LOCAL env), and the
+  epoch already lives per-runtime in `Arc<RuntimeCode>`, so the *semantics* of sharing are
+  settled — only the read protocol is open.
 
 - [ ] **M2b — shared IC tables across a runtime's processes** (ADR-175 Stage 3, the BEAM
   export-table move). **Blocker found 2026-07-29 by reading the code, and it is bigger than
