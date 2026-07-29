@@ -174,18 +174,21 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![num, num], bool_ty),
         prim_le,
     );
+    // `min`/`max` accept a number OR an `Ord` record — they route through the `compare-to`
+    // multimethod on the record cold path (ADR-179), returning the same domain.
+    let num_or_record = num.union(map_ty);
     def(
         heap,
         "max",
         Arity::at_least(1),
-        Sig::variadic(num, num),
+        Sig::variadic(num_or_record.clone(), num_or_record.clone()),
         prim_max,
     );
     def(
         heap,
         "min",
         Arity::at_least(1),
-        Sig::variadic(num, num),
+        Sig::variadic(num_or_record.clone(), num_or_record),
         prim_min,
     );
     def(

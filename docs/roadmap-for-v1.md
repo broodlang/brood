@@ -248,10 +248,28 @@ All purely additive — deferring costs a version number and nothing else.
   against a real editor workload.
 - ⬜ **`#|` block comments**, and small helpers like a plain `assert`. Additive by
   construction.
+- ✅ **Typed ability ops — the `:-> RET` return type** (ADR-180, 2026-07-29). The op
+  spec's long-declared but ignored return tail is now consumed by the checker: an op's
+  return flows into inference at every call site (`(area s)` types as `float`), and each
+  `impl` body is graded against it (gradual, false-positive-clean). Zero return-type
+  warnings across all of `std/` + `tests/`. Runtime dispatch unchanged.
+- ✅ **A sealed ability is a type** (ADR-181, 2026-07-29). A `:sealed` ability's name is
+  usable in the type grammar as the union of its members' record shapes, so `(sig f (Shape
+  -> float))` and `:-> Shape` typecheck. Sealed-only (open abilities have no finite member
+  set); soundness audited head-on (the strict `⊆` record-in-union path) — zero false
+  positives across `std/` + `tests/`.
+- ✅ **Multiple dispatch — `defmulti`/`defmethod`** (ADR-179, 2026-07-29). The sibling of
+  single-dispatch abilities: a generic dispatching on the identity-*tuple* of its args,
+  resolved exact → `:default` → loud `no-method`, unambiguous by construction. A
+  `:commutative`/`:antisymmetric` closure derives each binary method's mirror, so `+`/`*` are
+  symmetric with no implicit coercion. `Num`/`Ord` moved onto it, wired into the operators on
+  the record cold path (hot numeric path untouched). Follow-up: a static-coverage `nest check`
+  warning for a statically-known missing method (abilities have one; multimethods don't yet).
 - ⬜ **Monomorphization of ability dispatch** — resolving a call statically when the
   argument's identity is known (the checker already computes that identity for its
   missing-impl warning). A codegen win with no surface change, so post-1.0 is free.
-  Likewise **return-type dispatch**, which needs bidirectional inference.
+  Likewise **return-type *dispatch*** (selecting the impl by expected return, distinct from
+  ADR-180's return-type *checking*), which needs bidirectional inference.
 
 ---
 

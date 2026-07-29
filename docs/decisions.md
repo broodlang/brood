@@ -11802,3 +11802,171 @@ that type.
 discharges), ADR-168 (the value-dispatch seam), ADR-026 (immutability — why `=` must stay a
 kernel guarantee), ADR-011 (ship the minimal correct form; defer wildcards and the coercion
 tower), the 2026-07-29 devlog entry.
+
+## ADR-180 — Typed ability ops: the checker consumes `:-> RET` return types
+
+**Status:** accepted + shipped (checker slice). The `defability` op-spec grammar has
+carried an optional `:-> RET` return-type tail since abilities shipped, and std/tests
+declared it *pervasively* (`(size [self] :-> int)`, `(to-str [self] :-> string)`, …) —
+but the checker **parsed and discarded it**. This ADR makes the checker consume it.
+
+**Context.** An ability op is a generic `defn` whose body is the dispatch machinery
+(`identity-of` → `impl-for` → the resolved call). To type inference that body is opaque, so
+an op call `(area shape)` had *no* result type — type information died at the one boundary
+where polymorphic code most needs it. Symmetrically, an `impl` body was never checked to
+actually *return* what its ability op promised. Both facts were already declared in the
+source; nothing read them.
+
+**Decision.** Consume `:-> RET` in the advisory checker (`types/check`), purely additive, no
+grammar/runtime change:
+
+1. **Call-site return-type flow.** `AbilityInfo` (`protocol.rs`) now parses each op's
+   `:-> RET` (via `annot::parse_type`) into `op_ret: (ability, op) → Ty`, filled from this
+   file's `register-ability` forms *and* the runtime `*abilities*` registry (so a return
+   declared in another module is visible). `infer::expr_ty`, on a call whose head is a
+   known ability op, returns that declared `Ty`. `(area s)` for `(area [self] :-> float)`
+   now types as `float`.
+2. **Impl-return conformance.** `walk::check_impl_returns` walks the expanded tree for each
+   `(register-impl 'A 'op :id (fn params body…) …)` and grades the impl body's last form
+   against the op's declared return, reusing the same `gradual_of` / `consistent_with`
+   machinery as the `sig` return check.
+
+**Why it's sound (no false positives — the checker's cardinal rule).** The return check is
+**gradual**, identical in spirit to ADR-110's `sig` return check: an over-approximated body
+(a call result, an unknown param) is `dynamic` and defers on the `∩`-relation; only a body
+*provably disjoint* from the declared return warns. A `:-> any` op imposes nothing (`any` is
+the gradual unknown, not `Any`). Verified against the whole tree: `nest check` over all of
+`std/` + `tests/` produces **zero** return-type warnings, and the declared returns are
+already dense there.
+
+**Advisory only; dispatch unchanged.** Like every checker output, the return type never
+gates the live image — a `def`/reload wins, `nest check` is the batch/CI gate. Runtime
+dispatch is byte-for-byte unchanged; the ability tests (42 → 46 with new coverage) pass.
+
+**Deferred (ADR-011).** (a) **Typed op *parameters*** — `(scale [self (factor float)] :->
+Shape)` — would let impl bodies see arg types and callers be arg-checked; return types
+deliver the headline win, params are a clean follow-on when a consumer wants them. (b)
+**An ability name as a return/param type** (`:-> Shape` meaning the union of the ability's
+members) — a nominal self-type; deferred with slice 2's sum-type work. (c) **Runtime
+enforcement** under a `BROOD_CONTRACTS`-style flag — checker-only for now, matching `sig`'s
+default.
+
+**References.** ADR-181 (ability-name-as-a-type, the follow-on this deferred item (b)
+becomes), ADR-172/168 (the ability seam), ADR-110 (the gradual `sig` return check this
+mirrors), ADR-024 (set-theoretic gradual types), ADR-011 (ship the minimal form, defer
+params/self-types), the 2026-07-29 devlog entry.
+
+## ADR-181 — A sealed ability is a type: the finite union of its members
+
+**Status:** accepted + shipped (checker slice). Discharges ADR-180's deferred item (b).
+
+**Context.** ADR-180 made an op's `:-> RET` a real type, which immediately raised the
+question of what an op could return *besides* a built-in kind — e.g. `(scaled [self] :->
+Shape)`, an op returning "some shape." And a plain function often wants to be typed over an
+ability's domain: `(sig total (Shape -> float))`. The type grammar had no way to name an
+ability, so `Shape` in type position was an unknown name and the whole sig was dropped.
+
+**Decision.** In the type grammar (`annot::parse_type`), a bare symbol that names a
+**sealed** ability resolves to the **union of its members' record shapes** — `Shape :sealed
+[circle rect]` becomes `(or (record :__id__ :ns/circle) (record :__id__ :ns/rect))`. Each
+member shape carries only the nominal `:__id__` keyword singleton — records are open
+(width-subtyped), so a real `(circle 2)` with extra fields is still a subtype, and
+`:__id__` is exactly what nominal dispatch and `ty_record_id` key on.
+
+**Sealed only, by soundness.** Only a **sealed** ability has a closed member set to
+enumerate into a *finite* union. An open ability is deliberately *not* a type (its name in
+type position stays unknown, the sig is dropped) — inventing an infinite or
+"any-record-that-implements-it" type would be either unsound or useless. "Sound, not
+complete": we'd rather resolve nothing than resolve something an impl could later widen.
+
+**Mechanism (per-file, matches the `sig` memo pattern).** A thread-local `ABILITY_TYPES`
+(sealed ability name → qualified member id names) is populated at the start of each
+`check_file` from `protocol::sealed_member_ids` — this file's own `register-sealed` forms
+(read from the *expanded* tree, where members are already ns-qualified) unioned with the
+runtime `ability/*sealed*` registry (imported abilities). Cleared per file (and on the
+ad-hoc `(check 'form)` path) so no table leaks between checks.
+
+**Why it's sound (the false-positive audit).** The call-argument check is the risk surface.
+It grades an arg against the param via the gradual relation: a **precise** arg (a map
+literal, a `sig`-typed param) with `⊆`, a **dynamic** arg (a constructor call, an inferred
+variable) with `∩ ≠ ⊥`. Both were verified against `Shape`: a map-literal member and a
+`Shape`-typed param (the strict `⊆`, record-in-union path) and a `(circle 2)` call (the
+lenient `∩` path) all pass **clean**; only a provably-non-record arg (an `int`) warns. A
+plain `map`-typed value is *not* provably-not-a-Shape (an unrefined map could carry
+`:__id__`), so it defers — never a false positive. Confirmed across all of `std/` +
+`tests/`: zero argument/type warnings introduced.
+
+**Composition with ADR-180.** Because the table is set before `build_ability_info` parses op
+returns, `:-> Shape` works too — an op may declare it returns another ability's domain, and
+that union flows into call-site inference like any other return type.
+
+**Deferred (ADR-011).** (a) An **open** ability as a type (needs a non-enumerated
+"implements" type — a real extension, unbuilt). (b) **Same-name abilities across modules**
+resolve by bare name (the registries are bare-keyed); a qualified `mod/Ability` type
+spelling is a clean follow-on if a collision ever bites.
+
+**References.** ADR-180 (typed ops — the sibling this composes with), ADR-172/168 (the
+ability seam + `:sealed`), ADR-024 (set-theoretic types — a union *is* set union here),
+ADR-011 (sealed-only, defer the open case), the 2026-07-29 devlog entry.
+
+## ADR-182 — Ability-dispatch monomorphization (`BROOD_MONO`, Tier 1)
+
+**Status:** accepted + shipped (Tier 1, **off by default**). The runtime companion to
+ADR-180/181's checker work — where the checker *proves* a dispatch identity, the compiler
+can *use* it. See [ability-monomorphization.md](ability-monomorphization.md) for the full
+design.
+
+**Context.** An ability op call (`(size 5)`) is a generic `defn` whose body is the dispatch
+machinery: `identity-of` (a `map?` + a `get`) → `impl-for` (two CHAMP fetches) → a branch →
+the impl call (~4× a direct call). When the first argument is a compile-time **literal**, its
+identity is statically certain, so all of that is redundant.
+
+**Decision.** Behind `BROOD_MONO` (off by default), the compiler rewrites an ability op call
+whose first arg is a `Node::Const` literal into a **direct call to the resolved impl fn** — a
+`Node::Const(impl_fn)` callee, skipping the dispatch body. The rewrite lives at the
+call-lowering seam (`compile_node`, `eval/compile/inline.rs::mono_devirtualize`) and mirrors
+runtime dispatch exactly: identity = the literal's `type-of` kind (byte-identical to the
+builtin), impl = `*impls*[[ability op]]` resolved by id then `:default` (`impl-for`'s order).
+
+**Soundness — two guarantees.**
+1. **Flag off (default): provably inert.** The only cost is one cached `mono_enabled()` bool;
+   the rewrite never runs, so default builds are byte-for-byte unchanged. Verified: the
+   ability suite is identical off vs on.
+2. **Flag on: correct, and GC-safe.** *Every* uncertainty declines the rewrite (arg neither a
+   literal nor a registered record constructor, a folded map literal that could be a record,
+   head not a registered ability op, no impl for the id) — the dynamic call is left
+   untouched, so a missing impl still raises the same structured `no-impl` error. A
+   same-named non-record fn passed as the constructor position (`(area (circleish 5))`) is
+   rejected via `*record-ids*` and stays dynamic. Verified byte-identical across
+   `:int`/`:string`/`:default`/record-constructor/non-record-call/no-impl shapes; the baked
+   impl fn is a promoted **RUNTIME** handle (globals promote deep), so `BROOD_GC_STRESS=1
+   BROOD_GC_VERIFY=1` under the flag is clean — no use-after-GC.
+
+**The late-binding trade-off (why it is flag-gated).** The rewrite captures the impl fn
+*value* at compile time; if that id's impl is later re-registered (drivers-as-values, hot
+reload), the devirtualized call is stale. Off-by-default resolves it cleanly: default builds
+keep 100% dynamic late-binding semantics; opting in trades that for speed, like `-O2`
+assuming no UB. This is the *documented, accepted* caveat, not a bug — never "fixed" by
+weakening the default.
+
+**Scope (Tier 1).** Both syntactic shapes the checker's `arg_identity` proves:
+1. a **literal** first arg (`(size 5)`) → identity is its `type-of` kind;
+2. a **direct record-constructor call** (`(area (circle 2))`) → the record's baked
+   `:module/name` id. Sound because a record id keyword's symbol *is* the qualified
+   constructor name, and membership in the `*record-ids*` registry — populated by
+   `defrecord` as ground truth — proves the head is a genuine record constructor, so a
+   same-named non-record fn (`(area (circleish 5))`) is rejected and left dynamic. (Trusting
+   a declared `sig` instead would be unsound: a sig is an unchecked contract that can lie,
+   and a wrong devirt is a miscompile, not a false warning.)
+
+Tier 1 proves the flag + mechanism + validation end-to-end (the vertical-slice pattern). It
+does *not* move hot-loop benchmarks where the arg is a *variable* (`(map area shapes)`) —
+that is **Tier 2**: devirtualizing a `sig`-typed / inferred variable by building the
+checker→compiler channel, the real hot-loop win and the real miscompile surface, deferred to
+a dedicated effort with whole-fleet validation.
+
+**References.** [ability-monomorphization.md](ability-monomorphization.md) (the end-to-end
+design + anchors), ADR-180/181 (the checker proofs this consumes), ADR-172/168 (the dispatch
+seam being optimized), ADR-101 (JIT-as-default — the tier this sits beneath), the 2026-07-29
+devlog entry.
+

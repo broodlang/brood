@@ -11187,6 +11187,127 @@ Method, again: the sweep said `spawn` +5.8% / `collatz` +2.8%; solo re-runs said
 Gate: suite 3797 green, TSAN 0 warnings, eval fuzzer 84k runs, `make stress` 33/33 across
 jit / no-jit / gc-stress / chaos.
 
+## 2026-07-29 (cont.) — typed ability ops: the checker consumes `:-> RET` (ADR-180)
+
+Opened as "improve the type system in light of the ability changes." The intersection is
+where the win was: abilities give records a nominal identity and the checker already bridged
+into it (record shapes, `ty_record_id`, missing-impl warnings, sealed exhaustiveness), but
+an ability op — the polymorphic boundary — was **type-opaque both ways**. The op spec's
+`:-> RET` return tail had been declared pervasively across `std/` + `tests/` since abilities
+shipped and was **parsed and thrown away**.
+
+So slice 1 is pure checker, no grammar/runtime change:
+
+- **Call-site flow.** `AbilityInfo` now parses each op's `:-> RET` into `op_ret: (ability,
+  op) → Ty` (from this file's `register-ability` forms *and* the `*abilities*` registry, so
+  cross-module returns are visible). `infer::expr_ty` returns it for a call on a known op
+  head, so `(area s)` for `(area [self] :-> float)` types as `float` — `(string-length (area
+  s))` is now flagged where it was silent.
+- **Impl conformance.** `walk::check_impl_returns` grades each `(register-impl … (fn …))`
+  body's last form against the op's declared return, reusing `gradual_of`/`consistent_with`
+  — the same false-positive-clean machinery as the ADR-110 `sig` return check. An `impl`
+  returning a string where the op says `:-> int` warns; an unknown/`number` body defers; a
+  `:-> any` op imposes nothing.
+
+Gate: `types::check` 195 green (+4 new), ability suite 42 → 46 (+4 in-language, via
+`check-string-structured`), and the safety check that matters — `nest check` over **all** of
+`std/` + `tests/` shows **zero** return-type warnings (the declarations are dense there, so
+this is the real false-positive test). Runtime dispatch byte-for-byte unchanged. Recorded in
+ADR-180; language.md §Polymorphism updated. Next: slice 2 (nominal sum types + `match`
+exhaustiveness over sealed abilities), then slice 3 (`BROOD_MONO` Tier 1 devirtualization).
+
+## 2026-07-29 (cont.) — multiple dispatch: `defmulti`/`defmethod`, and `Num`/`Ord` move to it
+
+Single-dispatch abilities cannot express a binary operator symmetrically (`(+ money 5)` can
+dispatch on `money`; `(+ 5 money)` cannot dispatch on the second arg). Built the deferred
+`defmulti` seam (ADR-179) and migrated `Num`/`Ord` onto it.
+
+- **Mechanism (`std/prelude.blsp`).** `defmulti`/`defmethod` dispatch on the identity-tuple of
+  the args, resolved by exact match → a single `:default` → a loud structured `no-method`.
+  Unambiguous by construction (no partial wildcards). A `:commutative`/`:antisymmetric` algebra
+  derives each off-diagonal binary method's mirror (`(f y x)` / `(- 0 (f y x))`), so a binary op
+  is authored as the upper triangle of its type matrix; an authored method always wins over a
+  derived one. STRICT: arg-count≠pattern-length, a closure on a non-binary pattern, an unknown
+  algebra, a method for an undeclared multi, and `:default` as a tuple position all fail at load.
+- **`Num`/`Ord` migrated.** They were `defability`s; now `(defmulti num-add :commutative)` etc.
+  and `(defmulti compare-to :antisymmetric)`. No implicit coercion — `(+ money 5)` needs an
+  authored `[money :int]` method; commutativity then makes `(+ 5 money)` agree.
+- **Kernel (`builtins/numeric.rs`, `mod.rs`).** `+`/`-`/`*`/`/` and `<`/`<=`/`>`/`>=`/`min`/`max`
+  route to the multimethods **only when a record is an operand** (the cold fallback where a
+  `record?` operand lands); pure int/float/decimal stays byte-for-byte on the fast path. The
+  old first-operand-only `num_record_dispatch` became a both-operand `num_multi_dispatch`, plus
+  a new `compare_multi_dispatch` for the comparison/min/max path.
+- **Checker (`types/check/sigs.rs`, `builtins/mod.rs`).** Widened `< <= > >=` (curated) and
+  `min`/`max` (their **primitive** sig, which outranks curated) to `number | record`, so
+  `(< (usd 1) (usd 2))` type-checks clean.
+- **Tests.** `tests/multimethod_test.blsp` (7, incl. cross-process); `tests/record_test.blsp`
+  Num/Ord via `defmethod` (usd*int scaling, commutative mirror, a `no-method` case, the
+  `{:__id__ nil}` truthy-id edge). Full suite green (885 passed).
+
+Known follow-ups: a `nest check` static-coverage warning for a *statically-known* missing
+method (abilities have `check_ability_calls`; multimethods don't yet), and a `make ab` pass for
+the two `is_record` tag-compares added to the float-comparison cold fallback.
+
+## 2026-07-29 (cont.) — a sealed ability is a type (ADR-181); soundness audit
+
+Slice 2 of the type-system-meets-abilities work. ADR-180's `:-> RET` raised "what else can
+an op return?" and "how do I type a function over an ability's domain?" — both need the
+ability *name* to be a type. So: in `annot::parse_type`, a bare symbol naming a **sealed**
+ability resolves to the union of its members' record shapes (`Shape :sealed [circle rect]` →
+`(or (record :__id__ :ns/circle) (record :__id__ :ns/rect))`). `(sig total (Shape ->
+float))` and `:-> Shape` now typecheck. Open abilities deliberately stay non-types (no finite
+member set) — sound-not-complete.
+
+Mechanism mirrors the `SIG_MEMO` pattern: a per-file thread-local `ABILITY_TYPES` populated
+before sig parsing from `protocol::sealed_member_ids` (this file's expanded `register-sealed`
+forms, where member ids are already ns-qualified, ∪ the runtime `*sealed*` registry), cleared
+per file *and* on the ad-hoc `(check 'form)` path so nothing leaks between checks.
+
+**Soundness audit (the user's explicit ask — "1000% sound, needn't be complete").** The
+call-argument check grades a precise arg (map literal, sig-typed param) with `⊆` and a
+dynamic arg (constructor call, inferred var) with `∩ ≠ ⊥`. The strict `⊆` path is where a
+record-in-union subtyping bug would surface, so it was tested head-on: a map-literal member,
+a `Shape`-typed param, and a `(circle 2)` call all pass clean; only a provable non-record
+(`int`) warns; a plain `map` defers (an unrefined map isn't provably-not-a-Shape). Then the
+definitive check — `nest check` over **all** of `std/` + `tests/`: every warning emitted is
+the pre-existing non-tail-recursion advisory, **zero** from types/abilities/returns/args
+across both slices. Slice 1 audited the same way: the impl-return and call-flow paths reuse
+ADR-110's gradual machinery, and on a *valid* program (impls honor their declared returns)
+neither can false-positive.
+
+Gate: `types::check` 264 green (+5 over slice 1's 259), ability suite 49 (+3 in-language).
+ADR-181; language.md + roadmap updated. Next: slice 3 — `BROOD_MONO` Tier 1 (off-by-default
+syntactic devirtualization); flag-off must be byte-identical, flag-on suite-green.
+
+## 2026-07-29 (cont.) — ability-dispatch monomorphization, Tier 1 (ADR-182); mono soundness
+
+Slice 3: the runtime companion to the two checker slices. Where the checker *proves* a
+dispatch identity, the compiler can *use* it. Behind `BROOD_MONO` (off by default), an
+ability op call with a **literal first arg** (`(size 5)`) is rewritten at the `compile_node`
+seam to a *direct* call to the resolved impl fn (`Node::Const(impl_fn)` callee), skipping the
+op body's `identity-of` + two `impl-for` CHAMP fetches. `mono_devirtualize`
+(`eval/compile/inline.rs`) mirrors runtime dispatch exactly — identity = the literal's
+`type-of` kind, impl = `*impls*[[ability op]]` by id then `:default`.
+
+**Soundness, two guarantees, both verified.** (1) Flag off = provably inert: the only cost is
+one cached `mono_enabled()` bool, so default builds are byte-for-byte unchanged (ability suite
+identical off vs on). (2) Flag on = correct + GC-safe: every uncertainty (arg not a literal,
+head not a registered op, a map literal that could be a nominal record, no impl for the id)
+*declines* the rewrite, so a missing impl still raises the same `no-impl`; verified
+byte-identical across `:int`/`:string`/`:default`/record-ctor/no-impl shapes, `BROOD_MONO_DBG`
+confirmed the rewrite fires exactly where expected; and the baked impl fn is a promoted RUNTIME
+handle, so `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` under the flag is clean (no use-after-GC,
+stored-handle verifier included).
+
+The late-binding trade-off (a captured impl goes stale on re-registration) is the *documented*
+reason it is flag-gated — not a bug. Tier 1 is literal-only (proves the mechanism; doesn't move
+hot loops); Tier 2 (inferred-variable devirt via a checker→compiler channel — the real win and
+the real miscompile surface) and the direct-constructor extension stay deferred with
+whole-fleet validation. ADR-182; CLAUDE.md flag table + ability-monomorphization.md updated.
+
+**All three slices land the "type-system-meets-abilities" arc:** typed op returns (ADR-180) →
+sealed ability as a type (ADR-181) → devirtualize the proven dispatch (ADR-182). Checker
+soundness held throughout — zero false positives across `std/` + `tests/`.
 ## 2026-07-29 (cont.) — 288 bytes of checker state off every process, and a regression that wasn't
 
 **The change.** Two pieces of `Heap` were inline-and-hot-by-accident but cold-by-use:
@@ -11223,6 +11344,74 @@ base-vs-base spread as the row's noise floor. Controlled: fib 0.0% (floor 0.0%),
 −0.9% (floor −0.9%), bintree +0.8% (floor +1.6%), pingpong +0.9% (floor +0.5%), spawn-live
 −1.2% (floor +0.4%). Neutral on time, real on memory. Note added to CLAUDE.md.
 
+## 2026-07-29 (cont.) — BROOD_MONO Tier 1: the direct-constructor shape (ADR-182)
+
+Completed Tier 1 by adding the second syntactic shape the checker's `arg_identity` already
+proves: a **direct record-constructor call** as the ability op's first arg — `(area (circle
+2))` devirtualizes to circle's impl, alongside the literal shape (`(size 5)`) shipped earlier.
+
+The soundness crux was proving, *at compile time*, that a call head is a genuine record
+constructor and what id it bakes. A record id keyword's symbol *is* the qualified constructor
+name (`:m/circle` ← `m/circle`), so identity is `keyword(ctor)` — but that alone can't tell a
+record constructor from a same-named plain fn. Trusting the constructor's declared `sig`
+(which carries a `(record :__id__ …)` return) is **unsound** — a sig is an unchecked contract
+that can lie, and a wrong devirt is a *miscompile*, not a false warning. So `defrecord` now
+populates a ground-truth `*record-ids*` registry (id-keyword → record name); mono devirtualizes
+only when `keyword(ctor) ∈ *record-ids*`. `(area (circleish 5))` — a non-record fn — is
+rejected and stays dynamic. Verified byte-identical (circle/rect → nominal impls; circleish →
+`:default`), and 49→51 ability tests green off, on, and under `BROOD_GC_STRESS=1
+BROOD_GC_VERIFY=1` (the baked impl fn is still a promoted RUNTIME handle).
+
+The registry is cheap always-on metadata (one `assoc` per `defrecord` at load, like `*impls*`)
+and independently useful; it does not touch the compile-time inert-when-off guarantee. Tier 2
+(inferred-*variable* devirt) stays deferred. ADR-182 / ability-monomorphization.md / CLAUDE.md
+updated.
+
+## 2026-07-29 (cont.) — `Ord` made strict, like `Num` (no structural `:default`)
+
+Follow-up to ADR-179. `Num` had no `:default` (a record pair with no `num-*` method is a loud
+`no-method`), but `Ord`'s `compare-to` kept a `:default` = kernel structural `compare`, so a
+record silently ordered by its map layout and `(< money 5)` returned a structural answer
+instead of erroring. Dropped it: `Ord` is now strict too — a record type must define
+`compare-to` to be ordered (`<`/`<=`/`>`/`>=`/`sort`), else `no-method`. Impact audit first:
+no `std/` site sorts bare records — every `sort`/`sort-by` there is over scalars (strings,
+numbers, symbols) or `[k v]` vectors (kernel `compare`), so nothing regressed. Full suite green
+(894). `std/prelude.blsp` + language.md updated.
+
+## 2026-07-29 (cont.) — BROOD_MONO benchmarked against dynamic dispatch
+
+Measured the Tier-1 devirtualization (ADR-182) against dynamic ability dispatch. It's a
+runtime-flag A/B on ONE binary (toggle `BROOD_MONO`), so `make ab` (which compares two
+*builds*) doesn't apply — release+JIT binary, 5M dispatch calls in a tight tail loop, one
+op call per iteration, min-of-N. Correctness checked first: dynamic and mono print
+byte-identical results.
+
+| Dispatch shape | VM-only (`BROOD_NO_JIT=1`) | JIT-on (unpinned) |
+|---|---|---|
+| **Literal** `(sz 7)` | 2.67 → 1.01s = **2.6×** | 2.85 → 0.50s = **~5.7×** |
+| **Constructor** `(ar (circle 7))` | 6.58 → 3.52s = **1.9×** | 7.17 → 3.96s = **1.8×** |
+| Plain call (control, no ability) | — | 0.14 → 0.15s = **1.0×** (no-op) |
+
+Findings:
+- **Literal dispatch is the big win (~5.7× with the JIT).** Dynamic barely improves from VM
+  (2.67s) to JIT (2.85s) — the op body (`identity-of` + `%dispatch` + branch) resists JIT
+  optimization. Devirt turns it into a direct impl call the JIT *can* optimize (→0.50s), so
+  mono's value here is as much "unblocks the JIT" as "skips the two CHAMP lookups."
+- **Constructor dispatch wins less (~1.8×)** — the per-iteration `(circle 7)` record
+  allocation is a fixed cost both paths pay, so the dispatch saving is a smaller slice.
+- **Control is a no-op** (1.0× within noise) — mono touches nothing without ability dispatch.
+
+Caveats (why this doesn't move the standard rows): it's a best-case microbenchmark whose loop
+body is *only* dispatch; real code does work per call, so whole-program speedup is smaller. And
+Tier 1 fires only on **literal / direct-constructor** args — the common hot-loop shape
+`(map area shapes)` (a *variable* arg) is Tier 2, not devirtualized here — so on the standard
+benchmark rows the impact is ~zero, exactly as the design note predicted.
+
+Method note (relearned): single-core `taskset` pinning was wildly unreliable here — the
+background JIT compiler contends on the pinned core, giving a 6.74s→1.02s swing between runs
+of the *same* dynamic config. VM-only isolates the raw dispatch cost; unpinned gives the
+real-world number; the two agree in direction and magnitude. Same lesson as CLAUDE.md's
+"re-run unpinned when a change touches compilation volume."
 ## 2026-07-29 (cont.) — the old generation is empty for 99.998% of processes
 
 `Heap` carried `old: Slabs` inline — eleven `Vec` headers, 264 B — on every process. A

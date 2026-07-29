@@ -590,6 +590,20 @@ fn read_impls_registry(
     }
 }
 
+/// Sealed abilities' member ids, keyed by ability name → the (qualified) member id name
+/// strings. Unions the file's own `register-sealed` forms (in the expanded tree, where the
+/// ids are already ns-qualified) with the runtime `ability/*sealed*` registry (imported
+/// abilities). Feeds `annot`'s ability-name-as-a-type resolution (a sealed ability is a
+/// finite union of its members' record shapes).
+pub(super) fn sealed_member_ids(heap: &Heap, expanded: &[Value]) -> HashMap<String, Vec<String>> {
+    let mut sealed = HashMap::new();
+    for &form in expanded {
+        collect_register_sealed(heap, form, &mut sealed);
+    }
+    read_sealed_registry(heap, &mut sealed);
+    sealed
+}
+
 /// The statically-known identity name of a call argument, or `None` if not certain.
 fn arg_identity(heap: &Heap, arg: Value, ctors: &HashMap<value::Symbol, String>) -> Option<String> {
     match arg {
@@ -627,6 +641,12 @@ pub(super) struct AbilityInfo {
     defaults: HashSet<(String, String)>,
     /// ability name → its declared op names (for the sealed-exhaustiveness check).
     abilities: HashMap<String, Vec<String>>,
+    /// `(ability, op)` → its declared **return type** (the `:-> RET` tail of the op
+    /// spec, parsed to a `Ty`). Populated from this file's `register-ability` forms and
+    /// the runtime `*abilities*` registry, so a return declared in another module is
+    /// visible here too. Drives call-site return-type inference (`op_ret_of`) and the
+    /// impl-return check.
+    op_ret: HashMap<(String, String), crate::types::Ty>,
     /// ability name → its SEALED member id names (closed set), if declared sealed.
     sealed: HashMap<String, Vec<String>>,
     /// Same-module op-name collisions: two abilities in this file declaring the same op
@@ -641,6 +661,17 @@ impl AbilityInfo {
     /// The `(ability, op)` an op-fn global symbol denotes, if any.
     pub(super) fn op_of(&self, sym: value::Symbol) -> Option<&(String, String)> {
         self.op_fns.get(&sym)
+    }
+    /// The declared return type of the ability op the global symbol `sym` denotes, if
+    /// any — the bridge that flows an op's `:-> RET` into call-site inference.
+    pub(super) fn op_ret_of(&self, sym: value::Symbol) -> Option<&crate::types::Ty> {
+        let (a, op) = self.op_fns.get(&sym)?;
+        self.op_ret.get(&(a.clone(), op.clone()))
+    }
+    /// The declared return type of `(ability, op)`, if any — the by-name path used by
+    /// the impl-return check (a `register-impl` carries the ability + op names).
+    pub(super) fn op_ret_by_name(&self, ability: &str, op: &str) -> Option<&crate::types::Ty> {
+        self.op_ret.get(&(ability.to_string(), op.to_string()))
     }
     /// True when neither an impl nor a `:default` covers `(ability, op, id)`.
     pub(super) fn missing(&self, ability: &str, op: &str, id: &str) -> bool {
@@ -682,21 +713,40 @@ pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo
     read_impls_registry(heap, &mut impls, &mut defaults);
     let mut abilities = HashMap::new();
     let mut sealed = HashMap::new();
+    // `(ability, op)` → its `:-> RET` return-type *form* (unparsed). Filled from this
+    // file's `register-ability` forms and the runtime registry, then parsed to `Ty`.
+    let mut ret_forms: HashMap<(String, String), Value> = HashMap::new();
     for &form in expanded {
-        collect_register_ability(heap, form, &mut abilities);
+        collect_register_ability(heap, form, &mut abilities, &mut ret_forms);
         collect_register_sealed(heap, form, &mut sealed);
     }
-    read_abilities_registry(heap, &mut abilities);
+    read_abilities_registry(heap, &mut abilities, &mut ret_forms);
     read_sealed_registry(heap, &mut sealed);
+    let op_ret = ret_forms
+        .into_iter()
+        .filter_map(|(k, form)| super::annot::parse_type(heap, form).map(|ty| (k, ty)))
+        .collect();
     AbilityInfo {
         op_fns,
         ctors,
         impls,
         defaults,
         abilities,
+        op_ret,
         sealed,
         collisions,
     }
+}
+
+/// The `:-> RET` return-type form of an op spec `(op [params] :-> RET)`, or `None` when
+/// the spec declares no return type. The arrow token is the keyword `:->` (a keyword
+/// named `->`); the return type is the form that follows it.
+fn spec_ret_form(heap: &Heap, spec: Value) -> Option<Value> {
+    let items = list_items(heap, spec)?;
+    let arrow = items
+        .iter()
+        .position(|&v| matches!(v, Value::Keyword(k) if value::symbol_is(k, "->")))?;
+    items.get(arrow + 1).copied()
 }
 
 /// Same-module op-name collisions (two abilities in this file declaring the same op name).
@@ -706,8 +756,14 @@ pub(super) fn check_op_collisions(info: &AbilityInfo, out: &mut Vec<(Option<Pos>
     out.extend(info.collisions.iter().cloned());
 }
 
-/// Collect `(…/register-ability (quote A) (quote OPS))` → ability A's op names.
-fn collect_register_ability(heap: &Heap, form: Value, out: &mut HashMap<String, Vec<String>>) {
+/// Collect `(…/register-ability (quote A) (quote OPS))` → ability A's op names, plus each
+/// op's `:-> RET` return-type form into `rets` (keyed by `(ability, op)`).
+fn collect_register_ability(
+    heap: &Heap,
+    form: Value,
+    out: &mut HashMap<String, Vec<String>>,
+    rets: &mut HashMap<(String, String), Value>,
+) {
     stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
@@ -721,19 +777,25 @@ fn collect_register_ability(heap: &Heap, form: Value, out: &mut HashMap<String, 
                         .and_then(sym_name),
                     items.get(2).and_then(|&v| unquote(heap, v)),
                 ) {
-                    let ops = list_items(heap, ops_form)
-                        .unwrap_or_default()
-                        .iter()
-                        .filter_map(|&spec| {
-                            list_items(heap, spec)?.first().copied().and_then(sym_name)
-                        })
-                        .collect();
+                    let mut ops = Vec::new();
+                    for &spec in list_items(heap, ops_form).unwrap_or_default().iter() {
+                        let Some(op) = list_items(heap, spec)
+                            .and_then(|it| it.first().copied())
+                            .and_then(sym_name)
+                        else {
+                            continue;
+                        };
+                        if let Some(ret) = spec_ret_form(heap, spec) {
+                            rets.entry((a.clone(), op.clone())).or_insert(ret);
+                        }
+                        ops.push(op);
+                    }
                     out.insert(a, ops);
                 }
             }
         }
         for &item in items.get(1..).unwrap_or(&[]) {
-            collect_register_ability(heap, item, out);
+            collect_register_ability(heap, item, out, rets);
         }
     })
 }
@@ -772,19 +834,32 @@ fn collect_register_sealed(heap: &Heap, form: Value, out: &mut HashMap<String, V
     })
 }
 
-/// Union in the runtime `ability/*abilities*` registry — name → op specs.
-fn read_abilities_registry(heap: &Heap, out: &mut HashMap<String, Vec<String>>) {
+/// Union in the runtime `ability/*abilities*` registry — name → op specs — recording each
+/// op's name and its `:-> RET` return-type form (the latter into `rets`).
+fn read_abilities_registry(
+    heap: &Heap,
+    out: &mut HashMap<String, Vec<String>>,
+    rets: &mut HashMap<(String, String), Value>,
+) {
     let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("ability/*abilities*"))
     else {
         return;
     };
     for (name, specs) in heap.map_entries(mid) {
         if let Some(a) = sym_name(name) {
-            let ops = list_items(heap, specs)
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|&spec| list_items(heap, spec)?.first().copied().and_then(sym_name))
-                .collect();
+            let mut ops = Vec::new();
+            for &spec in list_items(heap, specs).unwrap_or_default().iter() {
+                let Some(op) = list_items(heap, spec)
+                    .and_then(|it| it.first().copied())
+                    .and_then(sym_name)
+                else {
+                    continue;
+                };
+                if let Some(ret) = spec_ret_form(heap, spec) {
+                    rets.entry((a.clone(), op.clone())).or_insert(ret);
+                }
+                ops.push(op);
+            }
             out.entry(a).or_insert(ops);
         }
     }

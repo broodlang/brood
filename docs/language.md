@@ -385,21 +385,18 @@ must match the declared op's arity: a fixed impl exactly, a variadic impl as lon
 as it accepts that arity — `nest check` and load-time registration both flag a
 mismatch.
 
-**Single dispatch — and what that means for binary ops.** Dispatch is on the **first
-argument only** (Rust-trait / Clojure-protocol style, not CLOS multiple dispatch). For a
-unary op (`to-str`, `to-seq`) that is all there is to it. For an op that *combines two
-values* — the core `Ord` (`compare-to`) and `Num` (`num-add`/`num-sub`/…) abilities — it
-means the op is selected by the **first** operand's type, and the impl receives the second
-operand as an ordinary value it must handle itself. So these abilities are **homogeneous**:
-implement them for two operands of *your own* type (money + money, vector + vector, two
-records of the same shape sorting against each other), and reach for **explicit conversion**
-for anything mixed. Brood does **not** do implicit cross-type arithmetic — `(+ (money 100)
-(money 50))` is fine (both dispatch as `money`), but `(+ 5 (money 50))` is a named error
-(the record is not the first operand, and `5` is not a `money`); write `(+ (money 500)
-(money 50))` or convert. Genuinely-multiple-dispatch problems (a full numeric tower with
-`int + money` *and* `money + int`) are out of scope for abilities by design — see
-[ADR-172](decisions.md)'s note on deferring a `defmulti`-style seam until a concrete need
-appears.
+**Single dispatch — and its multiple-dispatch sibling.** An *ability* op dispatches on the
+**first argument only** (Rust-trait / Clojure-protocol style). For a unary op (`to-str`,
+`to-seq`) that is all there is to it. An op that *combines two values* — arithmetic and
+ordering — needs to see **both** operand types, which single dispatch cannot express
+symmetrically (`(+ money 5)` could dispatch on `money`, but `(+ 5 money)` cannot). So those
+live in the **`defmulti` multiple-dispatch seam**, not in an ability: `Num`
+(`num-add`/`num-sub`/`num-mul`/`num-div`) and `Ord` (`compare-to`) are **multimethods**
+dispatching on the operand *pair* (see [Multiple dispatch](#polymorphism-multiple-dispatch-defmulti)
+below, [ADR-179](decisions.md)). Author `(defmethod num-add [money money] …)` and
+`(defmethod num-mul [money :int] …)`; `+`/`*` are commutative, so the mirror is derived and
+`(+ 5 (money 50))` and `(+ (money 50) 5)` agree. There is **no implicit coercion** — a pair
+with no method is a loud `no-method`, never a silent conversion.
 
 **Op names are unique per module.** Each op becomes a generic function bound in the
 declaring module, so two abilities in *one* module declaring the same op name (`size`)
@@ -494,6 +491,33 @@ identity — a literal, a direct `defrecord` constructor call, or a record-typed
 variable — for which no impl and no `:default` is registered. Two abilities that
 declare the **same op name** in one namespace would have the second's generic function
 shadow the first's; `defability` warns at load when that shadowing is real.
+
+**Typed ops — the `:-> RET` return type (ADR-180).** An op spec's optional `:-> RET`
+tail is a real type the checker consumes, not a comment. Two things follow from it:
+
+- **The return flows into inference at every call site.** An op is a generic `defn`
+  whose body *is* the dispatch machinery, so its own type is opaque — the declared
+  return is the only static handle on what the call yields. `(area shape)` for `(area
+  [self] :-> float)` types as `float`, so `(+ (area s) 1.0)` checks and `(string-length
+  (area s))` is flagged. This is the single most useful place to recover type
+  information, because it's the polymorphic boundary where it would otherwise be lost.
+- **Each `impl` body is checked against it.** An impl of `(size [self] :-> int)` whose
+  body provably yields a non-`int` (a string literal, a `bool`) warns. The check is
+  **gradual and false-positive-clean** — exactly like a `sig` return: an
+  over-approximated body (a call result, an unknown param) is `dynamic` and defers; only
+  a body *provably disjoint* from the declared return warns. A `:-> any` op imposes no
+  constraint (`any` is the gradual unknown, not a top type). All advisory — the return
+  type never gates the live image, and dispatch is unchanged.
+
+**A sealed ability *is a type* (ADR-181).** A `:sealed` ability names a closed member set,
+so its name is usable directly in the type grammar — it denotes the **union of its members'
+record shapes**. `Shape :sealed [circle rect]` means `(or circle rect)` as a type, so you can
+write `(sig total (Shape -> float))` or return one from an op (`(scaled [self] :-> Shape)`).
+A member record satisfies it (records are open, so extra fields are fine); a non-record is a
+provable mismatch; anything whose type isn't pinned down defers — sound, no false positives.
+Only *sealed* abilities resolve this way (an open ability has no finite member set to
+enumerate); an open ability's name in type position stays unknown and the annotation is
+dropped rather than guessed.
 
 > **Direction: [ADR-172](decisions.md) (amended 2026-07-28).** This open runtime model
 > is kept open — `impl` stays legal for any ability and any id (primitive, owned, or
@@ -601,6 +625,67 @@ look-alike map can't satisfy, and a `Display` impl, so it prints as itself rathe
 its internals. Where a library renders a *user-supplied* value into text —
 `template/render`, `csv-emit`, `url/query-encode` — it goes through `to-str`, so your
 record's `Display` impl decides how it appears there too.
+
+#### Polymorphism: multiple dispatch (`defmulti`)
+
+An ability dispatches on one argument. When the choice of method depends on **more than one**
+argument — the classic case is a binary operator, where `int + money` and `money + int` are
+different situations — that is `defmulti`'s job ([ADR-179](decisions.md)). `defmulti` declares
+a generic that dispatches on the **identity-tuple** of its arguments; `defmethod` registers a
+method for an exact tuple of ids (a built-in id keyword `:int`, or a record name written like
+`impl`'s):
+
+```clojure
+(defrecord money (cents))
+(defmulti  num-add :commutative)                                  ; declare (with an algebra)
+(defmethod num-add [money money] (a b) (money (+ (cents a) (cents b))))
+(defmethod num-add [money :int]  (m n) (money (+ (cents m) n)))   ; scalar mixing, if you want it
+
+(+ (money 100) (money 50))   ;=> (money 150)
+(+ (money 100) 5)            ;=> (money 105)
+(+ 5 (money 100))            ;=> (money 105)   ; commutative: the [:int money] mirror is derived
+```
+
+**Resolution is total and unambiguous by construction.** A call resolves by (1) an **exact**
+tuple match, else (2) a single declared **`:default`** method, else (3) a loud, structured
+`no-method` error (`{:kind :no-method :multi :key :have}`). There are **no partial wildcards**
+and therefore **no ambiguity** — a key hits exactly one method or the default, never a
+"nearest" guess. (Partial patterns + a specificity order are deliberately deferred; they are
+where ambiguity lives, and Brood's flat record ids give no basis to break a tie — ADR-179.)
+
+**Closure algebra — authoring a binary op as its upper triangle.** A `defmulti` may declare an
+algebraic property that *derives* each off-diagonal method's mirror, so you write N(N+1)/2
+methods instead of N² and never hit a diagonal ambiguity:
+
+- **`:commutative`** (`+`, `*`, `min`, `max`) — registering `[A B]` also registers `[B A]` as
+  `(f y x)`. Sound because `a⊕b = b⊕a`.
+- **`:antisymmetric`** (`compare-to`) — the mirror is `(- 0 (f y x))`. Sound because
+  `cmp(a,b) = −cmp(b,a)`.
+- **none** (`-`, `/`) — no mirror; `(- 5 money)` is a `no-method`, because subtraction is
+  genuinely asymmetric and the system won't fabricate a mirror the math doesn't license.
+
+There is **no implicit coercion**: a closure derives the mirror of a method *you authored*, it
+never invents a conversion — so cross-type arithmetic is explicit-per-method yet symmetric.
+
+**`Num` and `Ord` are the built-in multimethods.** `+`/`-`/`*`/`/` route to
+`num-add`/`num-sub`/`num-mul`/`num-div`, and `<`/`<=`/`>`/`>=`/`min`/`max` route to
+`compare-to`, **only when a record is an operand** — pure `int`/`float`/`decimal` arithmetic
+stays byte-for-byte on the kernel's fast path (records never touch it). Both are **strict**:
+neither has a `:default`, so a record type must define the methods it means. `(+ (money 1)
+2.5)` with no matching method is a hard `no-method`, and likewise `(< (money 1) 2.5)` — and
+`(sort some-records)` — is a `no-method` until you give the record a `compare-to`. A record is
+never silently ordered by its underlying map layout; define `compare-to`/`num-*` for the pairs
+you actually mean.
+
+**Strict declarations (fail at load, and `nest check`).** A `defmethod` whose arg count differs
+from its pattern length, a closure on a non-binary pattern, an unknown algebra keyword, a
+method for an undeclared `defmulti`, or `:default` used as a tuple position are all **hard
+errors at load** — nothing unclear is silently accepted. Redefining a `defmethod` is ordinary
+hot reload (a `def` into the `*methods*` registry), visible on the next dispatch.
+
+Prefer an **ability** when dispatch is on one value; reach for **`defmulti`** when it depends on
+a combination. `=` is deliberately *not* a multimethod — equality stays a kernel guarantee so
+`hash`/sets/map-keys never desynchronise.
 
 ## Sets
 

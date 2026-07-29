@@ -104,10 +104,9 @@
 
 ;; ---- Ord: a record defines its own sort order ----
 (defrecord ver (major minor))
-(impl Ord ver
-  (compare-to [a b]
-    (let (c (compare (get a :major) (get b :major)))
-      (if (= c 0) (compare (get a :minor) (get b :minor)) c))))
+(defmethod compare-to [ver ver] (a b)
+  (let (c (compare (get a :major) (get b :major)))
+    (if (= c 0) (compare (get a :minor) (get b :minor)) c)))
 
 (describe "defrecord: custom Ord"
   (test "sort/sort-by use a record's Ord (semantic-version order, not map order)"
@@ -120,22 +119,34 @@
     (assert= (sort (list 3 1 2)) (list 1 2 3))
     (assert= (sort (list "b" "a" "c")) (list "a" "b" "c"))))
 
-;; ---- Num: a record does arithmetic via +/-/*// (kernel-dispatched, no hot-path cost) ----
+;; ---- Num: a record does arithmetic via +/-/*// (multimethods on both operands, ADR-179;
+;; kernel-dispatched, no hot-path cost). Same-type add/sub; scale by an int scalar for mul/div
+;; (`*` is commutative, so `(* 3 (usd …))` works via the derived mirror; `/` is not). ----
 (defrecord usd (cents))
-(impl Num usd
-  (num-add [a b] (usd (+ (get a :cents) (get b :cents))))
-  (num-sub [a b] (usd (- (get a :cents) (get b :cents))))
-  (num-mul [a b] (usd (* (get a :cents) b)))          ; scale by a scalar
-  (num-div [a b] (usd (quot (get a :cents) b))))
+(defmethod num-add [usd usd] (a b) (usd (+ (get a :cents) (get b :cents))))
+(defmethod num-sub [usd usd] (a b) (usd (- (get a :cents) (get b :cents))))
+(defmethod num-mul [usd :int] (m n) (usd (* (get m :cents) n)))       ; scale by a scalar
+(defmethod num-div [usd :int] (m n) (usd (quot (get m :cents) n)))
 
 (describe "defrecord: custom Num"
   (test "a Num record uses +/-/*// (dispatched from the kernel %add fallback)"
     (assert= (get (+ (usd 500) (usd 250)) :cents) 750)
     (assert= (get (- (usd 500) (usd 250)) :cents) 250)
     (assert= (get (* (usd 500) 3) :cents) 1500)
+    (assert= (get (* 3 (usd 500)) :cents) 1500)   ; commutative: the [:int usd] mirror is derived
     (assert= (get (/ (usd 900) 3) :cents) 300)
     ;; variadic + folds through the same dispatch
     (assert= (get (+ (usd 100) (usd 200) (usd 300)) :cents) 600))
+  (test "a pair with no method is a loud :no-method error, not a silent coercion"
+    ;; `usd` has no `[usd usd]` mul method — mixing errors instead of silently coercing.
+    (let (e (try (* (usd 5) (usd 5)) (catch e e)))
+      (assert= (get e :kind) :no-method)
+      (assert= (get e :multi) 'num-mul)))
+  (test "a hand-written {:__id__ nil} is a plain map, not a record (truthy-id rule)"
+    ;; matches `record?`/`identity-of`: a nil id dispatches as :map, so arithmetic gives the
+    ;; ordinary number error rather than routing to the Num multimethod.
+    (let (e (try (apply + (list 5 {:__id__ nil})) (catch e (error-message e))))
+      (is (includes? e "got map"))))
   (test "int/float arithmetic is untouched by the Num seam"
     (assert= (+ 1 2 3) 6)
     (assert= (* 2 3 4) 24)

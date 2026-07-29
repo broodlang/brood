@@ -2961,6 +2961,18 @@ record built at root and an impl for it at root must land on the same dispatch i
 
 ;; The `(sig …)` forms for an all-typed record: the constructor arrow, then one
 ;; accessor arrow per field. Built as plain data — `sig` reads the un-expanded type.
+;; id-keyword → record name: the set of nominal ids that are GENUINE `defrecord`
+;; identities. Ground truth for BROOD_MONO's direct-constructor devirtualization
+;; (ADR-182) — a constructor call `(circle 2)` may be devirtualized only when its baked
+;; id (`:module/circle`) is registered here, so a same-named non-record fn is never
+;; mistaken for a record constructor. Always populated (cheap load-time metadata, like
+;; `*impls*`); read only under the flag.
+(def *record-ids* {})
+(defn record-register (id nm)
+  "Record that `id` (a `:module/name` keyword) is a `defrecord`'s nominal identity."
+  (def *record-ids* (assoc *record-ids* id nm))
+  nil)
+
 (defmacro defrecord (rec fields)
   "Define record `rec` with `fields` — a positional constructor `(rec …)` plus a
 `rec-field` accessor per field. A record is an immutable map that also carries a
@@ -3014,7 +3026,7 @@ field is typed, per-accessor signatures are emitted too.
                                 '-> (defrecord--ftype f)))))
                      fields)
                    nil))
-    `(do ~ctor-sig ~ctor ~@accs ~@acc-sigs nil)))
+    `(do ~ctor-sig ~ctor ~@accs ~@acc-sigs (record-register ~id '~rec) nil)))
 
 ;; (min-by f coll) / (max-by f coll) — find the element whose key is smallest/largest.
 (defn min-by (f coll)
@@ -4735,29 +4747,32 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 ;; `compare` (a record orders as its underlying map — deterministic and total, but NOT by
 ;; field value); a type that wants a meaningful order (a version, a money value, a hand of
 ;; cards) overrides `compare-to`.
-(defability Ord
-  "Compare `self` to `other`: -1 if `self` sorts before, 0 if equal, 1 if after."
-  (compare-to [self other] :-> int))
-(impl Ord :default (compare-to [a b] (compare a b)))
+;; `compare-to` is a multimethod (ADR-179): `:antisymmetric`, so a `[ver :int]` method
+;; derives `[:int ver]` as its negation. STRICT like `Num` — there is NO `:default`: a record
+;; type must define `compare-to` to be ordered (`<`/`<=`/`>`/`>=`/`sort`), else the pair is a
+;; loud `no-method` (a record is not silently ordered by its map layout). `(compare-to a b)`
+;; → -1 / 0 / 1.
+(defmulti compare-to :antisymmetric)
 
-;; Record-aware structural compare: an `Ord` record uses its impl, everything else the
-;; kernel `compare`. This is the comparator `sort`/`sort-by` use, so a record type orders
-;; itself while built-ins keep the native path.
+;; Record-aware compare: a record uses its `compare-to` (a type with no `Ord` method is a loud
+;; no-method — strict), everything else the kernel `compare`. This is the comparator
+;; `sort`/`sort-by` use, so an `Ord` record type orders itself while built-ins keep the native
+;; path.
 (defn ord-compare (a b)
   (if (record? a) (compare-to a b) (compare a b)))
 
-;; Num — arithmetic for a RECORD (a money value, complex number, 2-D vector, bignum). A
-;; record operand to `+`/`-`/`*`/`/` dispatches here — but NOT from the operators (a Brood
-;; branch in `+` defeats the JIT's arithmetic specialization, a ~195× regression); the
-;; kernel `%add`/`%sub`/`%mul`/`%div` builtins call the matching `num-*` op only on their
-;; COLD non-numeric fallback, so int/float arithmetic is byte-for-byte untouched. There is
-;; NO `:default` — a record with no `Num` impl gets the ability's loud missing-impl error.
-(defability Num
-  "Arithmetic on a record type: each op takes two operands and returns a fresh value."
-  (num-add [self other] :-> any)
-  (num-sub [self other] :-> any)
-  (num-mul [self other] :-> any)
-  (num-div [self other] :-> any))
+;; Num — arithmetic for a RECORD (a money value, complex number, 2-D vector, bignum), as
+;; multimethods (ADR-179) dispatching on BOTH operands. A record operand to `+`/`-`/`*`/`/`
+;; dispatches here — but NOT from the operators themselves (a Brood branch in `+` defeats the
+;; JIT's arithmetic specialization, a ~195× regression); the kernel `%add`/`%sub`/`%mul`/`%div`
+;; builtins call the matching `num-*` multimethod only on their COLD fallback, when EITHER
+;; operand is a record, so int/float arithmetic is byte-for-byte untouched. `+`/`*` are
+;; `:commutative` (author `[usd :int]` and `[:int usd]` is derived); `-`/`/` are not. There is
+;; NO `:default` — a pair with no method gets the loud `no-method` error.
+(defmulti num-add :commutative)
+(defmulti num-sub)
+(defmulti num-mul :commutative)
+(defmulti num-div)
 
 ;; The per-print-argument hook the prelude installs into `*show*` at the end of boot
 ;; (Display is core, ADR-172 §8 — no activation step). Only a RECORD is routed through
