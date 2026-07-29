@@ -55,14 +55,6 @@ pub struct CallIcEntry {
     /// [`Heap::vm_arm_block`]), so entering the callee on an IC hit sets the cursors
     /// without a registry lookup on the hot path. Meaningless when `arm` is `None`.
     pub callee_bases: (u32, u32),
-    /// Cached JIT fast-link result `(code_ptr_as_usize, nslots, env)` — the validated
-    /// output of [`Heap::vm_call_ic_fast_link`], memoised so the hot recursive call
-    /// skips the per-call atomic loads (`jit_code`/`compile_epoch`) + arm-shape checks.
-    /// Populated lazily once the arm is installed + fast-linkable, and only valid at this
-    /// entry's `epoch` (a `def` bumps the epoch → the entry is re-resolved fresh via
-    /// [`Heap::vm_call_ic_put`], which clears this). Within an epoch an installed arm's
-    /// code pointer is stable (a recompile bumps the epoch), so the cache can't go stale.
-    pub fast: std::cell::Cell<Option<(usize, usize, EnvId)>>,
 }
 
 /// IR-readable mirror of one call site's fast-link, indexed by site id in
@@ -506,18 +498,26 @@ impl Heap {
         epoch: u64,
     ) -> Option<(*const u8, usize, EnvId)> {
         use std::sync::atomic::Ordering::Acquire;
+        let abs = (self.cur_ic_base.get() + site) as usize;
+        // Memoised hot path — read the [`FastLink`] mirror *alone*. It already carries
+        // everything the guard needs (`sym`/`argc`/`epoch`) plus the validated result, so
+        // a hit never touches the fat `CallIcEntry` at all: one 40-byte flat load instead
+        // of a 96-byte entry load. This used to be a `fast` memo duplicated *inside* the
+        // entry, written in lockstep with this table — two representations of one fact.
+        // Valid because within an epoch an installed arm's code pointer is stable (a `def`
+        // or a recompile bumps the epoch).
+        {
+            let fls = self.vm_fast_links.borrow();
+            if let Some(fl) = fls.get(abs) {
+                if fl.code != 0 && fl.epoch == epoch && fl.sym == sym && fl.argc == argc {
+                    return Some((fl.code as *const u8, fl.nslots as usize, EnvId(fl.env)));
+                }
+            }
+        }
         let t = self.vm_call_ics.borrow();
-        let e = t.get((self.cur_ic_base.get() + site) as usize)?.as_ref()?;
+        let e = t.get(abs)?.as_ref()?;
         if e.sym != sym || e.argc != argc || e.epoch != epoch {
             return None;
-        }
-        // Memoised hot path: the entry matched at this epoch and the arm was already
-        // validated as fast-linkable — return the cached `(code, nslots, env)` directly,
-        // skipping the two atomic `Acquire` loads + the arm-shape checks below. Valid
-        // because within an epoch an installed arm's code pointer is stable (a `def`
-        // bumps the epoch → a fresh entry; a recompile bumps it too).
-        if let Some((code, nslots, env)) = e.fast.get() {
-            return Some((code as *const u8, nslots, env));
         }
         let (arm, env) = e.arm.as_ref()?;
         let code = arm.jit_code.load(Acquire);
@@ -546,16 +546,10 @@ impl Heap {
         // bumps the epoch, so a stale memo here (with the small `nslots`) is invalidated
         // and re-validated through the IC miss path, picking up the new active size.
         let active_ns = arm.active_nslots();
-        // Fully validated + installed at this epoch — memoise for subsequent calls.
-        e.fast.set(Some((code as usize, active_ns, *env)));
-        // Mirror into the IR-readable flat table so the next call reaches the native code
-        // straight from JIT'd code (epoch-guarded raw load) without re-entering this probe.
-        // Same data, written in lockstep — [`brood_rt_fast_frame`] debug-asserts they agree.
-        if let Some(slot) = self
-            .vm_fast_links
-            .borrow_mut()
-            .get_mut((self.cur_ic_base.get() + site) as usize)
-        {
+        // Fully validated + installed at this epoch — publish into the one flat table that
+        // both this probe's hot path (above) and JIT'd code (an epoch-guarded raw load)
+        // read. One representation, one write.
+        if let Some(slot) = self.vm_fast_links.borrow_mut().get_mut(abs) {
             *slot = FastLink {
                 epoch,
                 code: code as u64,
@@ -654,8 +648,8 @@ impl Heap {
         let mut t = self.vm_call_ics.borrow_mut();
         if let Some(slot) = t.get_mut(abs) {
             *slot = Some(entry);
-            // The replacing entry's `fast` memo starts empty; clear the IR-readable mirror
-            // too so it never leads the IC. It is re-populated the next time
+            // Clear the IR-readable mirror so a stale link never leads the fresh entry.
+            // It is re-populated the next time
             // [`Self::vm_call_ic_fast_link`] validates the (now installed) arm.
             if let Some(fl) = self.vm_fast_links.borrow_mut().get_mut(abs) {
                 *fl = FastLink::EMPTY;
@@ -680,16 +674,10 @@ impl Heap {
     /// the upgrade's effect where it belongs and leaves peers' fast-links intact.
     #[cfg(feature = "jit")]
     pub(crate) fn invalidate_fast_links_for(&self, sym: Symbol) {
-        let ics = self.vm_call_ics.borrow();
         let mut fls = self.vm_fast_links.borrow_mut();
-        for (i, entry) in ics.iter().enumerate() {
-            if let Some(e) = entry {
-                if e.sym == sym {
-                    e.fast.set(None);
-                    if let Some(fl) = fls.get_mut(i) {
-                        *fl = FastLink::EMPTY;
-                    }
-                }
+        for fl in fls.iter_mut() {
+            if fl.sym == sym {
+                *fl = FastLink::EMPTY;
             }
         }
     }

@@ -11154,3 +11154,35 @@ where the existing TSAN tests didn't — many senders racing structured payloads
 repeatedly-parking receiver, checked by value so a dropped or corrupted delivery moves the
 total, plus a mixed fast-path/declined-closure variant that proves a decline restores the
 receiver untouched.
+
+## 2026-07-29 (cont.) — M2, and the duplicate fast-link it turned up first
+
+Went to cost M2 (shared IC tables) and came back with a blocker and a shipped win.
+
+**The blocker.** `vm_fast_links_base()` hands JIT'd code a *raw pointer* into the fast-link
+table, sound only under `SAFETY: single-threaded per process`. Sharing that table across a
+runtime's processes doesn't just need a lock — a peer growing it reallocates under a live
+raw pointer held by running native code. So M2 needs **stable-address per-arm blocks**
+(`boxcar` is the in-tree precedent), and runtime-global base assignment can't ship ahead of
+the shared table: a process touches ~4 sites, so runtime-global bases with per-process
+tables would size every process to the runtime's whole site count. Recorded in
+`runtime-frontier.md` as M2b so the next attempt starts from the real design.
+
+**The win it turned up.** `CallIcEntry.fast` (32 B) and the `FastLink` mirror held the same
+fact — the source comment already said "Same data, written in lockstep". `FastLink` carries
+`sym`/`argc`/`epoch` too, so the VM probe never needed the 96-byte entry on a hit; it now
+reads the same 40-byte flat table JIT'd code reads. One representation, one write.
+
+- **−157 B per live process**: spawn-live 1.94 → 1.89 GB (−47 MB over 300k processes).
+- Compute rows *improve*: pfib −3.5%, collatz −2.7%, fib −1.3%, bintree −0.8%, nqueens
+  flat, spawn-live −0.8%. `spawn` +1.9%. Dropping the memo was expected to cost the hot
+  recursive call an extra table touch; it didn't — one 40-byte flat slot beats a 96-byte
+  entry load.
+- It also makes M2b cheaper: what's worth sharing is now unambiguously a `#[repr(C)]`
+  plain-data slot, not an entry containing a `Cell`.
+
+Method, again: the sweep said `spawn` +5.8% / `collatz` +2.8%; solo re-runs said +1.9% and
+**−2.7%**. Two false regressions in one day — solo-confirm anything under ~5%.
+
+Gate: suite 3797 green, TSAN 0 warnings, eval fuzzer 84k runs, `make stress` 33/33 across
+jit / no-jit / gc-stress / chaos.
