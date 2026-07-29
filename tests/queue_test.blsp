@@ -35,6 +35,16 @@
     (let (q (queue/queue-from-list [10 20 30]))
       (assert= 10 (queue/queue-peek q))
       (assert= 3 (queue/queue-size q))))
+  ;; a queue is a first-class collection — the generic ops work on it directly
+  ;; (Seqable + Conjable, ADR-172 §7), not just the bespoke `queue-*` functions.
+  (test "generic collection ops work on a queue"
+    (let (q (queue/queue-from-list [1 2 3 4]))
+      (assert= [1 2 3 4] (into [] q))                 ; Seqable
+      (assert= 4 (count q))
+      (assert= (list 10 20 30 40) (map (fn (n) (* n 10)) q))
+      (assert= 10 (fold + 0 q))
+      (assert= (list 2 4) (filter even? q))
+      (assert= [1 2 3 4 5] (into [] (conj q 5)))))    ; Conjable
   (test "interleaved push/pop"
     (let (q0 (queue/queue-new)
           q1 (queue/queue-push q0 :a)
