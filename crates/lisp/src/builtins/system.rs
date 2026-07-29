@@ -1605,10 +1605,10 @@ pub(super) fn demonitor(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     }
 }
 
-/// `(%receive matcher timeout)` — the selective-receive primitive the `receive` macro
-/// (`std/prelude.blsp`) expands to. See `crate::process::receive_match`.
+/// `(%receive matcher timeout tags)` — the selective-receive primitive the `receive`
+/// macro (`std/prelude.blsp`) expands to. See `crate::process::receive_match`.
 pub(super) fn receive_match(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    crate::process::receive_match(heap, arg(args, 0), arg(args, 1))
+    crate::process::receive_match(heap, arg(args, 0), arg(args, 1), arg(args, 2))
 }
 
 pub(super) fn self_pid(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
