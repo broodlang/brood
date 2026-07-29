@@ -188,7 +188,7 @@ fuzz: ## Run one libFuzzer target briefly: make fuzz T=wire SECS=60 (targets: re
 	cd crates/lisp && ASAN_OPTIONS=symbolize=0 cargo +nightly fuzz run $(or $(T),reader) -- -max_total_time=$(or $(SECS),60) -rss_limit_mb=4096
 
 tsan: ## ThreadSanitizer over the concurrency-sensitive Rust tests (needs nightly + rust-src; system-alloc feature so mimalloc's un-instrumented internals don't report phantom races)
-	RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p brood --release --features brood/system-alloc --test table_tsan --test concurrency_race --test preemption --test live_migration --test gc
+	RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p brood --release --features brood/system-alloc --test table_tsan --test concurrency_race --test preemption --test live_migration --test local_send_race --test gc
 
 loom: ## Loom model-check of the dense-table migration protocol (exhaustive interleavings of a faithful model)
 	cargo test -p brood --release --features brood/loom-model --test loom_table_protocol

@@ -150,8 +150,23 @@ pub(super) struct Mailbox {
 /// send-level) the sender carried. Access to the payload is always `.msg` — uniform
 /// across builds, so the receive matcher is untouched — and in a lean release this is
 /// a zero-cost newtype over `Message` (the `trace` field does not exist).
+/// What a queued envelope carries. Two shapes, because a *local* send to a **parked**
+/// receiver can copy straight into that receiver's heap (L1) and skip the wire format
+/// entirely, while every other send — a running receiver, a remote node, a monitor
+/// `[:down …]` — still needs the heap-independent `Message`.
+pub(super) enum Payload {
+    /// Wire-format: rebuilt into the receiver's heap by `from_message` when popped.
+    Wire(Message),
+    /// Already in the receiver's heap, parked in `Heap::msg_roots` at this slot. Popping
+    /// it is `msg_root_take` — no rebuild, no allocation. `tag` carries the leading
+    /// keyword (if the value is a keyword-led vector), computed once at delivery so the
+    /// L3 selective-receive prefilter works on this payload too — without it, a
+    /// backlogged selective receive would go back to rescanning every candidate.
+    Local { slot: u32, tag: Option<u32> },
+}
+
 pub(super) struct Envelope {
-    pub(super) msg: Message,
+    pub(super) msg: Payload,
     #[cfg(feature = "dev-tools")]
     pub(super) trace: Option<Message>,
 }
@@ -159,7 +174,7 @@ impl Envelope {
     #[inline]
     pub(super) fn plain(msg: Message) -> Self {
         Envelope {
-            msg,
+            msg: Payload::Wire(msg),
             #[cfg(feature = "dev-tools")]
             trace: None,
         }
@@ -448,7 +463,102 @@ pub(crate) fn deliver(pid: u64, msg: Message) {
 /// only; the `send` primitive uses it when the sender has a trace context set.
 #[cfg(feature = "dev-tools")]
 pub(crate) fn deliver_traced(pid: u64, msg: Message, trace: Option<Message>) {
-    deliver_envelope(pid, Envelope { msg, trace });
+    deliver_envelope(
+        pid,
+        Envelope {
+            msg: Payload::Wire(msg),
+            trace,
+        },
+    );
+}
+
+/// **The L1 local-send fast path.** Try to deliver `v` to local process `pid` by copying
+/// it straight from the sender's heap into the receiver's, skipping the `Value → Message
+/// → Value` round trip. Returns `true` when it did.
+///
+/// Only fires when the receiver is **parked**: taking its `waiter` out of the mailbox
+/// state under the lock gives us its `Box<Process>`, and therefore exclusive `&mut` on
+/// its heap for the duration — the same quiescence `trim_parked` relies on. A running
+/// receiver, a remote pid, or a value the copier declines (a closure, a rope, an
+/// unrealised seq-view) all answer `false` and take the normal `Message` path with its
+/// existing semantics and error messages.
+///
+/// The copied value is parked in the receiver's `msg_roots` — a *traced* slot table —
+/// because the mailbox is not a GC root and `roots` is the operand stack.
+/// L1 hit/decline accounting, printed at exit under `BROOD_L1_STATS=1`. Plain relaxed
+/// counters — diagnostic only, never read by the runtime.
+pub mod l1_stats {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    pub static HIT: AtomicU64 = AtomicU64::new(0);
+    pub static NO_WAITER: AtomicU64 = AtomicU64::new(0);
+    pub static DECLINED: AtomicU64 = AtomicU64::new(0);
+    pub static NO_PROC: AtomicU64 = AtomicU64::new(0);
+    pub fn bump(c: &AtomicU64) {
+        if enabled() {
+            c.fetch_add(1, Relaxed);
+        }
+    }
+    pub fn enabled() -> bool {
+        static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *F.get_or_init(|| std::env::var_os("BROOD_L1_STATS").is_some())
+    }
+    pub fn dump_if_requested() {
+        if !enabled() {
+            return;
+        }
+        let (h, w, d, n) = (
+            HIT.load(Relaxed),
+            NO_WAITER.load(Relaxed),
+            DECLINED.load(Relaxed),
+            NO_PROC.load(Relaxed),
+        );
+        let total = h + w + d + n;
+        let pct = if total == 0 {
+            0.0
+        } else {
+            100.0 * h as f64 / total as f64
+        };
+        eprintln!(
+            "[l1] local-send fast path: {h} hit ({pct:.1}%), {w} not-parked, \
+             {d} value-declined, {n} no-process  (of {total} local sends)"
+        );
+    }
+}
+
+fn try_deliver_local(src: &Heap, pid: u64, v: Value) -> bool {
+    let Some(mb) = REGISTRY.get(pid) else {
+        l1_stats::bump(&l1_stats::NO_PROC);
+        return false;
+    };
+    let mut st = crate::core::sync::lock(&mb.state);
+    // Not parked → we have no safe access to its heap.
+    let Some(mut proc) = st.waiter.take() else {
+        l1_stats::bump(&l1_stats::NO_WAITER);
+        return false;
+    };
+    let copied = crate::process::message::copy_cross_heap(src, proc.heap_mut(), v);
+    let Some(copied) = copied else {
+        // Declined: put the process back exactly as we found it and let the caller
+        // deliver through `Message`. Nothing observable happened.
+        st.waiter = Some(proc);
+        l1_stats::bump(&l1_stats::DECLINED);
+        return false;
+    };
+    let tag = if no_msg_tag() {
+        None
+    } else {
+        leading_keyword(proc.heap_mut(), copied)
+    };
+    let slot = proc.heap_mut().msg_root_add(copied);
+    st.queue.push_back(Envelope {
+        msg: Payload::Local { slot, tag },
+        #[cfg(feature = "dev-tools")]
+        trace: None,
+    });
+    drop(st);
+    wake_enqueue(proc);
+    l1_stats::bump(&l1_stats::HIT);
+    true
 }
 
 fn deliver_envelope(pid: u64, env: Envelope) {
@@ -477,6 +587,25 @@ fn deliver_envelope(pid: u64, env: Envelope) {
 /// queue-and-retry. Process liveness stays silent either way — `:send-errors`
 /// is about the link, not the peer process.
 pub fn send(heap: &Heap, target_val: Value, msg_val: Value) -> Result<(), LispError> {
+    // L1 fast path: a LOCAL pid whose process is currently parked takes the value by
+    // direct heap-to-heap copy, skipping `to_message`/`from_message` entirely. Tried
+    // BEFORE serialising, since serialising is exactly the cost being avoided. Declines
+    // (running receiver, remote node, a value the copier doesn't handle) fall through to
+    // the wire path below with its semantics and error messages unchanged.
+    //
+    // Not taken when the sender carries a debugger trace context (dev-tools): that path
+    // ships the context alongside the message and is handled below.
+    #[cfg(feature = "dev-tools")]
+    let has_trace = heap.trace_context().is_some();
+    #[cfg(not(feature = "dev-tools"))]
+    let has_trace = false;
+    if !has_trace {
+        if let Value::Pid { node, id } = target_val {
+            if crate::dist::is_local(node) && try_deliver_local(heap, id, msg_val) {
+                return Ok(());
+            }
+        }
+    }
     let msg = to_message(heap, msg_val)?;
     // (dev-tools) Send-level causality (ADR-174): if the sender carries a debugger
     // trace context and the target is a LOCAL pid, ship the context alongside so the
@@ -589,6 +718,24 @@ fn collect_receive_tags(heap: &Heap, tags: Value, out: &mut [u32; MAX_RECEIVE_TA
 /// Every other shape answers `false` (scan it properly) — the filter must never skip a
 /// message a clause could match.
 #[inline]
+/// `BROOD_NO_MSGTAG=1` — deliver L1 fast-path messages without their leading-keyword tag,
+/// so the selective-receive prefilter can't use them. The A/B lever for what the tag carry
+/// is worth; off-switch only.
+fn no_msg_tag() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("BROOD_NO_MSGTAG").is_some())
+}
+
+/// The leading keyword of a keyword-led vector, in the receiver's heap — the in-heap
+/// counterpart of the `Message::Vector`/`Message::Keyword` peek `tag_rejects` does.
+fn leading_keyword(heap: &Heap, v: Value) -> Option<u32> {
+    let Value::Vector(h) = v else { return None };
+    match heap.vector(h).first() {
+        Some(Value::Keyword(k)) => Some(*k),
+        _ => None,
+    }
+}
+
 fn tag_rejects(tagset: &[u32], msg: &Message) -> bool {
     if tagset.is_empty() {
         return false;
@@ -826,7 +973,17 @@ fn scan_mailbox(
             if st.queue.len() > 1 && ntags.is_none() {
                 ntags = Some(collect_receive_tags(heap, tags, &mut tagbuf));
             }
-            if tag_rejects(&tagbuf[..ntags.unwrap_or(0)], &st.queue[*i].msg) {
+            if match &st.queue[*i].msg {
+                Payload::Wire(m) => tag_rejects(&tagbuf[..ntags.unwrap_or(0)], m),
+                // Already a heap value: the copy is spent, so there is nothing to save
+                // by rejecting it here. Let the matcher decide.
+                Payload::Local { tag, .. } => {
+                    match (tagbuf[..ntags.unwrap_or(0)].is_empty(), tag) {
+                        (false, Some(k)) => !tagbuf[..ntags.unwrap_or(0)].contains(k),
+                        _ => false,
+                    }
+                }
+            } {
                 *i += 1;
                 optimistic = false; // the head is no longer the candidate
                 continue;
@@ -834,10 +991,22 @@ fn scan_mailbox(
             if optimistic {
                 let m = st.queue.remove(*i).expect("bounds checked above");
                 drop(st);
-                let v = from_message(heap, &m.msg);
+                // A Local payload is already in this heap — take it out of its traced
+                // slot. A Wire one is rebuilt as before.
+                let v = match &m.msg {
+                    Payload::Wire(w) => from_message(heap, w),
+                    Payload::Local { slot, .. } => heap.msg_root_take(*slot),
+                };
                 (Some(m), v)
             } else {
-                (None, from_message(heap, &st.queue[*i].msg))
+                // Peek-in-place: a Local payload must NOT be taken here (the candidate
+                // may not match and has to stay queued), so read the slot without
+                // clearing it.
+                let v = match &st.queue[*i].msg {
+                    Payload::Wire(w) => from_message(heap, w),
+                    Payload::Local { slot, .. } => heap.msg_root_peek(*slot),
+                };
+                (None, v)
             }
         };
         let matcher = heap.root_at(rbase);
@@ -1175,7 +1344,7 @@ mod tests {
         // Empty mailbox, no timeout: the scan finds nothing and the capture branch
         // returns the suspend signal. `matcher` is never applied (the queue is empty),
         // so a plain `nil` suffices.
-        let r = receive_match(&mut heap, Value::nil(), Value::nil());
+        let r = receive_match(&mut heap, Value::nil(), Value::nil(), Value::nil());
         crate::process::scheduler::set_capture_top_level(prev_top);
         crate::process::scheduler::set_capture_run(false);
         crate::process::scheduler::CURRENT.with(|c| *c.borrow_mut() = None); // don't leak the dummy ctx

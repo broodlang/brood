@@ -742,3 +742,110 @@ mod chunk_tests {
         assert!(chunk_flush(&mut carry).is_none()); // nothing left
     }
 }
+
+// ===== Direct cross-heap copy (L1) ===========================================
+//
+// The local-send fast path. `send` normally serialises the value into a
+// heap-independent `Message` and the receiver rebuilds it — two full copies of the
+// graph, with both intermediates becoming garbage. That shape is right for the *dist*
+// wire (a peer node has its own heap and its own interner), but a local send to a
+// **parked** receiver can copy straight from one heap into the other, which is what the
+// BEAM does. Measured 2026-07-29: the round trip is ~580 ns of a ~1160 ns `[:tag v]`
+// message, so removing one of the two copies is worth ~25% of send+receive.
+//
+// Two invariants make this sound, both verified in the code rather than assumed:
+//
+//  * **Exclusive access.** Only ever called with the receiver *parked*: `wake_parked`
+//    hands the sender its `Box<Process>` under the mailbox state lock, so nothing else
+//    can touch that heap for the duration. A *running* receiver falls back to `Message`.
+//  * **No incremental rooting needed.** Allocation never collects in this runtime
+//    (collection runs at eval safepoints), so children accumulated in an ordinary Rust
+//    `Vec` while building a parent cannot go stale mid-copy. `from_message` relies on
+//    exactly this.
+//
+// The result must then be parked in `Heap::msg_roots` — a *traced* slot table — and not
+// on `roots`, which is the operand stack and is truncated on every frame pop.
+
+/// Deep-copy `v` out of `src` and into `dst`, returning the equivalent value in `dst`.
+/// `None` for anything the message path refuses (a rope, a macro, a builtin, an
+/// unrealised lazy seq) or that is nested past [`MAX_MESSAGE_DEPTH`] — the caller then
+/// falls back to the `Message` path, which produces the proper user-facing error.
+pub(crate) fn copy_cross_heap(src: &Heap, dst: &mut Heap, v: Value) -> Option<Value> {
+    copy_cross_heap_rec(src, dst, v, 0)
+}
+
+fn copy_cross_heap_rec(src: &Heap, dst: &mut Heap, v: Value, depth: u32) -> Option<Value> {
+    if depth >= MAX_MESSAGE_DEPTH {
+        return None;
+    }
+    Some(match v {
+        // Atoms carry no heap identity — they are the same value in any heap.
+        Value::Nil
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::Sym(_)
+        | Value::Keyword(_)
+        | Value::Ref(_)
+        | Value::Pid { .. } => v,
+        // Registry ids (runtime-global, not per-heap handles) cross unchanged, exactly
+        // as they do through `Message`.
+        Value::Socket(_) | Value::Subprocess(_) | Value::Table(_) => v,
+        Value::BigInt(id) => dst.int_from_bigint(src.bigint(id).clone()),
+        Value::Decimal(id) => dst.alloc_decimal(src.decimal(id).clone()),
+        // Byte blobs are `Arc`-shared by the message path too: an atomic bump, no copy.
+        Value::Bytes(id) => dst.alloc_bytes(Arc::clone(&src.bytes(id))),
+        Value::Str(id) => match src.local_shared_blob(id) {
+            Some(blob) => dst.alloc_string_from_shared(blob),
+            None => dst.alloc_string(&src.string(id).to_string()),
+        },
+        Value::Pair(_) => {
+            let items = src.list_to_vec(v).ok()?;
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(copy_cross_heap_rec(src, dst, item, depth + 1)?);
+            }
+            dst.list(out)
+        }
+        Value::Vector(id) => {
+            let items = src.vector(id).to_vec();
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(copy_cross_heap_rec(src, dst, item, depth + 1)?);
+            }
+            dst.alloc_vector(out)
+        }
+        // A range stands in for the list of its elements, like `to_message`.
+        Value::Range(id) => {
+            let items = src.range_to_vec(id);
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(copy_cross_heap_rec(src, dst, item, depth + 1)?);
+            }
+            dst.list(out)
+        }
+        Value::Map(id) => {
+            let entries = src.map_entries(id);
+            let mut out = Vec::with_capacity(entries.len());
+            for (k, val) in entries {
+                out.push((
+                    copy_cross_heap_rec(src, dst, k, depth + 1)?,
+                    copy_cross_heap_rec(src, dst, val, depth + 1)?,
+                ));
+            }
+            dst.map_from_pairs(out)
+        }
+        Value::Set(id) => {
+            let elems = src.set_elems(id);
+            let mut out = Vec::with_capacity(elems.len());
+            for e in elems {
+                out.push(copy_cross_heap_rec(src, dst, e, depth + 1)?);
+            }
+            dst.set_from_elems(out)
+        }
+        // Everything else — closures (which need the shared-code walk `Message` does),
+        // ropes, macros, builtins, unrealised seq-views — takes the `Message` path, so
+        // its existing semantics and error messages are unchanged.
+        _ => return None,
+    })
+}

@@ -785,6 +785,13 @@ fn worker_count() -> usize {
 static TEST_NO_WORKERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 impl Process {
+    /// Mutable access to this process's heap. Used by the L1 local-send fast path, which
+    /// holds the process exclusively (taken out of `MailboxState::waiter` under the lock)
+    /// while it copies a message straight in.
+    pub(super) fn heap_mut(&mut self) -> &mut Heap {
+        &mut self.heap
+    }
+
     /// Drive the body one quantum: run fresh, or resume the parked continuation
     /// (`resume` is taken). The `&mut self` borrow ends when this returns, so `run_one`
     /// is then free to move/park/re-queue `self` on the outcome.

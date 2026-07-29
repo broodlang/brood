@@ -11106,3 +11106,51 @@ nominal-only on-ramp), `docs/decisions.md` (ADR-172 amendment 2026-07-29b). Test
 `tests/ability_test.blsp` ("Num is homogeneous single-dispatch"),
 `crates/lisp/tests/type_check_catalog.rs` (op-name uniqueness warn + two false-positive
 guards).
+
+## 2026-07-29 (cont.) — L1: the single-copy local send, and a fold that kept the source form
+
+Two things, one of which was a bug in already-pushed work.
+
+**The bug first.** `make test` came back with 3 failures — quoted-symbol patterns falling
+through to the catch-all, and `'foo` dependency names arriving as "must be a symbol, got
+(quote foo)". They were **not** from the change in flight; a clean build of HEAD in a
+worktree reproduced them, which is the check worth doing before assuming your own diff did
+it. The cause was the all-constant vector-literal fold added with the receive tag filter
+(`eb983671`): it promoted the **raw source form**, but an element of a vector literal is a
+value-position *expression*. `[:tag 'go]` reads as `[:tag (quote go)]`, so the folded
+constant kept the list where the symbol belonged. Now it folds only when every element
+*evaluates to itself* — its compiled constant is structurally the source element — which
+covers the self-evaluating literals the optimisation was for (including the `receive` tag
+vector it was added for) and excludes anything evaluation changes. The general fix would
+build the constant from the compiled values, but `compile_node` holds only `&Heap`.
+Regression coverage added to `tests/vectors_test.blsp`, since both suites that caught it
+did so incidentally. Suite green again, pushed on its own as `be08019e`/`5e416438`.
+
+**L1 (ADR-178).** A `send` to a *parked* local process now copies the value straight from
+the sender's heap into the receiver's, skipping the `Value → Message → Value` round trip.
+The access is licensed by an ownership fact the mailbox already maintains: a parked process
+*is* its `Box<Process>` in `MailboxState::waiter`, so taking it under the mutex confers
+exclusive `&mut` on its heap. Anything not provably safe — a running receiver, a remote
+pid, a value the copier declines — falls through to the unchanged wire path.
+
+What the measurements actually said, including where they contradicted the plan:
+
+- **The win scales with payload**, because what's removed is marshalling, not scheduling.
+  Pinned, best-of-5, same commit: −3.2% empty, −9.0% at 16, −24.2% at 64, −31.3% at 256,
+  −34.9% at 1024.
+- **The benchmark rows can't show it.** `ring` sends a bare int; half of `pingpong`'s
+  messages are a bare keyword. `pingpong` ≈ −5%, `ring` within drift, everything else flat.
+  That's the suite's message shapes, not the change — recorded in the ADR so it isn't
+  re-derived backwards later.
+- **The "receivers aren't parked" theory for `ring` was wrong.** Added `BROOD_L1_STATS=1`
+  rather than keep guessing: the fast path hits **100%** on both rows.
+- **`spawn` +5.9%** on the first cut — a 24-byte `Vec` inline on every `Heap`, which is
+  inline in `Box<Process>`, where bytes cost ~2:1 in RSS via mimalloc size classes.
+  Lazily boxing it to 8 bytes took `spawn` back to flat and kept the payload curve.
+
+Gate: suite green, TSAN clean, `BROOD_GC_STRESS=1` and `BROOD_GC_VERIFY=1` clean. New
+`crates/lisp/tests/local_send_race.rs` (added to `make tsan`) attacks the ownership claim
+where the existing TSAN tests didn't — many senders racing structured payloads into one
+repeatedly-parking receiver, checked by value so a dropped or corrupted delivery moves the
+total, plus a mixed fast-path/declined-closure variant that proves a decline restores the
+receiver untouched.
