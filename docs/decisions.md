@@ -11673,6 +11673,12 @@ what counts as a root), ADR-091 (shared-region collection), `docs/runtime-fronti
 
 ## ADR-179 — Multiple dispatch (`defmulti`/`defmethod`): the resolution and closure algebra
 
+> **Numbering note.** The implementing commit `7c3fe552` cites "ADR-178" in its
+> message; the correct number is **179** — ADR-178 is the single-copy local send, landed
+> the same day. Everything in the tree (prelude, tests, this file) already says 179; only
+> that one commit message is wrong, and it is left as-is because rewriting pushed history
+> is not done in this repo.
+
 **Status:** accepted (design). **Supersedes** the "`defmulti` deferred" note in
 [ADR-172](decisions.md)'s amendment 2026-07-29b — the concrete trigger it named (binary
 arithmetic/ordering operators on record types) has arrived, so the deferred seam is built.
