@@ -681,7 +681,10 @@ impl AbilityInfo {
     }
     /// The declared per-position parameter types of the ability op `sym` denotes, if the op
     /// declares any — for call-site argument checking.
-    pub(super) fn op_params_of(&self, sym: value::Symbol) -> Option<&Vec<Option<crate::types::Ty>>> {
+    pub(super) fn op_params_of(
+        &self,
+        sym: value::Symbol,
+    ) -> Option<&Vec<Option<crate::types::Ty>>> {
         let (a, op) = self.op_fns.get(&sym)?;
         self.op_params.get(&(a.clone(), op.clone()))
     }
