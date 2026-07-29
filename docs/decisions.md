@@ -11322,6 +11322,13 @@ affect. Direct links need no epoch guard, so hot reload stops disturbing frozen 
   `vm_cache`) and generation-free handle recycling (fixed by stamping entries with the
   publisher's pre-compile `free_epoch`). Took a 40-arm user body from 37.1 to 4.55
   KB/proc and `spawn-live` to 3.00 s / 2.01 GB.
+- **Not needed: splitting shared code from per-process JIT-tier state.** Earlier entries
+  recorded a `collatz`/`nqueens` regression from shared `jit_calls`/`jit_deopts` and
+  proposed separating them. Measured 2026-07-29: the regression is an artifact of
+  `make ab`'s single-core pin (the background compiler competes with the benchmark for
+  the one core), and vanishes unpinned and under the benchmark harness's own pinning.
+  Sharing makes *more* prelude arms tier up — 18 lowered vs 7 — which is the mechanism
+  working, and the reason `spawn` gained 14.8%. Splitting the state would undo that.
 - **Stage 3 (optional) — shared inline caches.** BEAM's export table is node-global, and
   our IC entries cache *global* resolutions that are already epoch-guarded and hold
   promoted/immovable callees, so they arguably belong with the code too. Blocked on

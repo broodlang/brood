@@ -10784,3 +10784,34 @@ off-switch, and **with `BROOD_NO_JIT=1` sharing is slightly *faster*** (298 vs 3
 so the cost is tiering history, not the code sharing. Fix direction unchanged: split the
 shared code (body/chunk/shape) from per-process tier state. Trade as it stands: ~5–8% on
 two compute rows against −2.6 GB and −1 s at 300k processes.
+
+## 2026-07-29 (cont.) — the ADR-175 "regression" was a `make ab` artifact
+
+The `collatz` +8% / `nqueens` +7.8% attributed to shared JIT-tier state in the two
+entries above **is not a real cost**, and the planned "split shared code from
+per-process tier state" fix would have solved nothing while undoing `spawn` −14.8%.
+
+Bisect first: the regression is Phase B (prelude sharing), not Phase C — `collatz`
++7.9% at the Phase A→B boundary, −0.9% at B→C. Then `BROOD_JIT_DUMP_IR` counts:
+sharing lowers **18 arms vs 7**, and the extra ones are prelude helpers (`not`, `fold`,
+`cond--orphan`, `fold--loop`) that never reach the threshold otherwise. That is the
+mechanism working as intended — hotness accumulates across the runtime instead of
+resetting per process, so more prelude code tiers up. It is *why* `spawn` gained 14.8%.
+
+The cost is paying for those compiles. `make ab` pins compute rows to **one core**
+(`AB_PIN_CPU`, default cpu2), so the background JIT compiler thread competes with the
+benchmark for that core; 11 extra compiles at ~0.7 ms each ≈ the 8 ms "regression".
+Give the compiler its own core and it vanishes:
+
+| collatz | 1-core pinned | unpinned |
+|---|---|---|
+| shared | 110 ms | 103 ms |
+| `BROOD_NO_SHARED_ARMS=1` | 102 ms | 104 ms |
+
+`nqueens` behaves the same, and under the **harness's** actual pinning (cores 8-11) both
+rows show no regression — so the published cross-language numbers were never affected.
+
+**Methodology lesson, now in CLAUDE.md:** `make ab`'s single-core pin is right for
+measuring generated-code quality and wrong for any change that alters *how much*
+background compilation happens — it charges the benchmark for compiler CPU that a real
+run does in parallel. Re-run such a change unpinned before believing a regression.
