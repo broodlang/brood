@@ -1,14 +1,16 @@
 # Ability dispatch monomorphization — design note
 
-> Status: **Tier 1 shipped** (ADR-182, 2026-07-29), off by default behind `BROOD_MONO`.
-> A literal-first-arg ability op call is devirtualized to a direct impl call at the
-> `compile_node` seam (`eval/compile/inline.rs::mono_devirtualize`); every uncertainty
-> declines the rewrite. Flag-off is provably inert (one cached bool); flag-on is
-> byte-identical across all dispatch shapes and GC-safe under stress (the baked impl fn is
-> a promoted RUNTIME handle). `BROOD_MONO_DBG=1` traces each devirtualization. **Tier 2**
-> (inferred-variable devirtualization, the checker→compiler channel — the real hot-loop
-> win and the real miscompile surface) and the **direct-constructor** Tier-1 extension
-> remain deferred. Picking those up: read this note, then the anchors in [§Anchors](#anchors).
+> Status: **Tier 1 shipped in full** (ADR-182, 2026-07-29), off by default behind
+> `BROOD_MONO`. Both syntactic shapes are devirtualized at the `compile_node` seam
+> (`eval/compile/inline.rs::mono_devirtualize`): a **literal** first arg (identity = its
+> `type-of` kind) and a **direct record-constructor call** (identity = the record's baked
+> `:module/name` id, proven via the `*record-ids*` registry `defrecord` populates — a
+> same-named non-record fn is rejected). Every uncertainty declines the rewrite. Flag-off is
+> provably inert (one cached bool); flag-on is byte-identical across all dispatch shapes and
+> GC-safe under stress (the baked impl fn is a promoted RUNTIME handle). `BROOD_MONO_DBG=1`
+> traces each devirtualization. **Tier 2** (inferred-*variable* devirtualization — the
+> checker→compiler channel, the real hot-loop win and the real miscompile surface) remains
+> deferred. Picking it up: read this note, then the anchors in [§Anchors](#anchors).
 
 ## The problem
 

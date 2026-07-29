@@ -383,3 +383,15 @@
     (is (not (abt-warns-about?
           "(defmodule u) (defability Open (op [self] :-> int)) (sig f (Open -> int)) (defn f (s) 1) (defn g () (f 5))"
           "argument 1")))))
+
+(describe "direct-constructor ability calls (the BROOD_MONO Tier-1 devirt target)"
+  ;; `Size` (above) has circle/rect impls. Calling an op with a DIRECT constructor arg
+  ;; `(size (circle …))` is the shape the direct-constructor devirtualization rewrites;
+  ;; the RESULT must be identical whether or not mono is on (verified byte-identical), and
+  ;; a non-record `(op (some-fn …))` arg must dispatch on the fn's result identity, unchanged.
+  (test "an op on a direct record constructor dispatches to that record's impl"
+    (assert= (size (circle 5)) 5)          ; circle impl: (get c :r)
+    (assert= (size (rect 3 4)) 12))        ; rect impl: (* w h)
+  (test "an op on a non-record call dispatches on its result identity, not the fn name"
+    ;; `(str …)` yields a string → :string impl (count), NOT any record path.
+    (assert= (size (str "ab" "cd")) 4)))
