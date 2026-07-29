@@ -308,6 +308,65 @@ fn ability_op_any_return_imposes_no_impl_constraint() {
     );
 }
 
+// ---- typed ability op parameters: `(name T)` in an op spec (ADR-180) ----
+
+#[test]
+fn ability_op_typed_param_flags_a_bad_argument() {
+    // `scale`'s second param is declared `float`; passing a string is a provable mismatch —
+    // the argument-side sibling of the `:-> RET` return flow.
+    let ws = file_warnings(
+        "\
+         (defability Scale (scale [self (factor float)] :-> int))\n\
+         (impl Scale :int (scale [n f] n))\n\
+         (defn bad () (scale 5 \"x\"))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("Scale/scale: argument 2 expects float")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn ability_op_typed_param_accepts_a_good_argument() {
+    // A float where a float is wanted, and an untyped position — neither warns.
+    let ws = file_warnings(
+        "\
+         (defability Scale (scale [self (factor float)] :-> int))\n\
+         (impl Scale :int (scale [n f] n))\n\
+         (defn ok () (scale 5 2.5))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("argument")), "{ws:?}");
+}
+
+#[test]
+fn ability_op_untyped_params_impose_no_argument_constraint() {
+    // An all-bare op spec declares no arg types — any argument is fine.
+    let ws = file_warnings(
+        "\
+         (defability Plain (plain [self k] :-> int))\n\
+         (impl Plain :int (plain [n k] n))\n\
+         (defn ok () (plain 5 \"anything\"))",
+    );
+    assert!(!ws.iter().any(|w| w.contains("argument")), "{ws:?}");
+}
+
+#[test]
+fn ability_op_typed_param_flows_into_the_impl_body() {
+    // The impl param `f` inherits the op's declared `float`, so returning it where the op
+    // declares `:-> int` is a provable return mismatch (caught only because the param is typed).
+    let ws = file_warnings(
+        "\
+         (defability Scale (scale [self (factor float)] :-> int))\n\
+         (impl Scale :int (scale [n f] f))",
+    );
+    assert!(
+        ws.iter().any(|w| w
+            .contains("Scale/scale for :int: declared return type int but the impl yields float")),
+        "{ws:?}"
+    );
+}
+
 // ---- ability-name-as-a-type: a sealed ability is the union of its members (ADR-181) ----
 
 #[test]
