@@ -266,6 +266,37 @@ benchmark row before believing it.
   `BROOD_GC_VERIFY` was what caught a blanket-rewrite bug here — aggregate collector walks
   need `old_opt()`, not the handle-deref `old()`.
 
+- [ ] **M2b-lite — share the FAT entry table only, keyed by `(arm_uid, site)`. NEW PLAN
+  2026-07-29, and it dominates the original M2b below.** Two findings reshape this:
+
+  1. **`vm_call_ics` is never read raw by JIT code** — only `vm_fast_links` is
+     (`vm_fast_links_base()`). So the fat table carries *none* of the stable-address /
+     use-after-realloc hazard that makes the original plan expensive. Verified by grep:
+     no reference to `vm_call_ics` anywhere under `jit/` or `jit_lower.rs`.
+  2. **After M2a the fat table is the COLD one.** The hot probe now returns from the
+     40-byte `FastLink` mirror without touching `CallIcEntry` at all; the fat entry is
+     consulted only on a miss. A shared structure behind an `RwLock` is therefore
+     affordable — the lock is off the hot path by construction.
+
+  So: move `vm_call_ics` to the runtime as `RwLock<HashMap<(u64 arm_uid, u32 site),
+  CallIcEntry>>`, leaving the per-process `vm_fast_links` mirror (and its `cur_ic_base` /
+  `arm_ic_blocks` machinery) exactly as they are. Keying by `(arm_uid, site)` instead of a
+  flat `base + site` index **dissolves the coupling that made the original plan
+  all-or-nothing**: no runtime-global base assignment is needed, so this no longer has to
+  land together with a shared-index scheme that would otherwise size every process's table
+  to the runtime's whole site count (a process touches ~4 sites).
+
+  Worth ~256 B/process (≈77 MB at 300k, comparable to the old-gen win) *and* a warm start:
+  a freshly spawned process inherits every entry its peers already resolved. Entry content
+  is already *enforced* process-independent (`vm_call_ic_put` refuses a movable callee or a
+  LOCAL env), and the epoch already lives per-runtime in `Arc<RuntimeCode>`.
+
+  Open questions to settle first: `CallIcEntry` must be `Send + Sync` (it holds `Value`,
+  `Arc<CompiledArm>`, `EnvId` — all process-independent, but check); the `runtime_collect`
+  clears become runtime-wide, which is sound because compaction holds `Arc::get_mut` and is
+  therefore single-process; and a `HashMap` probe on the miss path is slower than a `Vec`
+  index, so measure the miss path before committing.
+
 - [ ] **M2b — shared IC tables across a runtime's processes** (ADR-175 Stage 3, the BEAM
   export-table move). **Blocker found 2026-07-29 by reading the code, and it is bigger than
   "needs a lock":** `vm_fast_links_base()` hands JIT'd code a **raw pointer** into the
