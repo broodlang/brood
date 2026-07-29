@@ -272,7 +272,8 @@ fn ability_impl_return_mismatch_is_flagged() {
          (impl Size :int (size [n] \"hi\"))",
     );
     assert!(
-        ws.iter().any(|w| w.contains("Size/size for :int: declared return type int but the impl yields")
+        ws.iter().any(|w| w
+            .contains("Size/size for :int: declared return type int but the impl yields")
             && w.contains("hi")),
         "{ws:?}"
     );
@@ -345,7 +346,8 @@ fn sealed_ability_type_accepts_a_member_record() {
          (defn ok () (total (circle 2)))",
     );
     assert!(
-        !ws.iter().any(|w| w.contains("total") && w.contains("argument 1")),
+        !ws.iter()
+            .any(|w| w.contains("total") && w.contains("argument 1")),
         "a member record must satisfy the ability type: {ws:?}"
     );
 }

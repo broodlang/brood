@@ -1644,6 +1644,7 @@ pub(crate) struct ColdHeap {
 
 /// Checker-only heap state, lazily boxed off [`Heap`] (see [`Heap::check`]). None of it
 /// is touched by running Brood code — only by `nest check` / `check-file-deps`.
+#[derive(Default)]
 pub(crate) struct CheckHeap {
     /// `mod/` prefix → its public `(bare, qualified)` export pairs, keyed by the global
     /// count so a `def` invalidates it. Lets a whole-project check build the index in ONE
@@ -1656,16 +1657,6 @@ pub(crate) struct CheckHeap {
     known_ns: Option<(usize, std::sync::Arc<std::collections::HashSet<String>>)>,
     /// The in-flight incremental-check dependency record (ADR-119).
     dep_rec: Option<CheckDepRec>,
-}
-
-impl Default for CheckHeap {
-    fn default() -> Self {
-        CheckHeap {
-            exports: None,
-            known_ns: None,
-            dep_rec: None,
-        }
-    }
 }
 
 impl Heap {
@@ -1869,6 +1860,9 @@ pub struct Heap {
     /// is inline in `Box<Process>`, where bytes cost about 2:1 in RSS via mimalloc's size
     /// classes — measured at `spawn` +5.9% for the inline `Vec`. `None` until this process
     /// is actually handed a fast-path message, which most processes never are.
+    // `Box<Vec>` is deliberate, not the redundant box clippy assumes: boxing keeps this
+    // 8 bytes inline on every `Heap` instead of the `Vec`'s 24 (the +5.9%-spawn cost above).
+    #[allow(clippy::box_collection)]
     msg_roots: Option<Box<Vec<Value>>>,
     /// Loader/checker/namespace state — see [`ColdHeap`]. `None` until a module load,
     /// namespace compile or checker run needs it, so a plain worker process never
