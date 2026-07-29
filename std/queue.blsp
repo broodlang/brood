@@ -80,15 +80,23 @@ look-alike, and each prints as itself (`inspect` shows the contents).")
     :empty
     (first (get q :front))))
 
+;; The queue joins the collection protocol (ADR-172 §7): `Seqable` gives it the generic
+;; `seq`/`count`/`map`/`filter`/`fold`/`for` and `into`-from-a-queue; `Conjable` gives it
+;; `conj` and `into`-into-a-queue. So a queue is a first-class collection — the `queue-*`
+;; helpers below are now thin aliases over the protocol, not a parallel API.
+(impl Seqable queue/queue
+  (to-seq [q]
+    (if (= (get q :size) 0) nil (append (get q :front) (reverse (get q :back))))))
+(impl Conjable queue/queue (-conj [q v] (queue-push q v)))
+
 (defn queue-to-list (q)
-  "All elements in FIFO order as a list."
-  (if (queue-empty? q)
-    nil
-    (append (get q :front) (reverse (get q :back)))))
+  "All elements in FIFO order as a list — the queue's `Seqable` view. `(seq q)` /
+`(into [] q)` / `(map f q)` / `(fold f init q)` / `(for (x q) …)` all work directly."
+  (seq q))
 
 (defn queue-from-list (xs)
-  "Build a queue from a list or vector, front → back."
-  (fold queue-push (queue-new) xs))
+  "Build a queue from a list or vector, front → back — i.e. `(into (queue-new) xs)`."
+  (into (queue-new) xs))
 
 ;; A queue shows its shape, not its two-list representation: `Display` is the O(1)
 ;; summary (size + the element that pops next), `Inspect` the full FIFO contents for a
@@ -168,9 +176,14 @@ Stable: among equal priorities, earlier inserts pop first (FIFO)."
     :empty
     (first (first (get q :entries)))))
 
+;; The pq joins the protocol too: `Seqable` yields its values in priority order, so
+;; `seq`/`count`/`map`/`fold`/`for`/`into`-from work on a pq. (No `Conjable`: inserting
+;; needs a priority, which `conj`'s single element can't carry — use `pq-insert`.)
+(impl Seqable queue/pq (to-seq [q] (map second (get q :entries))))
+
 (defn pq-to-list (q)
-  "All values in priority order (min first) as a list."
-  (map second (get q :entries)))
+  "All values in priority order (min first) as a list — the pq's `Seqable` view (`(seq q)`)."
+  (seq q))
 
 (impl Display
   queue/pq

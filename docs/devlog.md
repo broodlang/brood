@@ -10739,6 +10739,34 @@ maps 83 — green, GC-stress clean. Still to come (the user wants the full suite
 collections — then the `Ord`/`Compare` ability (sort/min/max on records) and eventually a
 numeric protocol.
 
+## 2026-07-29 (impl) — collection protocol, build half + dogfooded onto std (queue/multimap)
+
+Added `Conjable` (op `-conj`), the build counterpart to `Seqable`: `conj`/`into` (both
+prelude defns, so no hot-path cost) dispatch for a RECORD — default is the map behaviour
+(assoc a `[k v]`, merge a map), a custom collection defines its own insertion. Same
+bootstrap-safe raw `map-get :__id__` gate as `seq`; `-conj` is only reached for records.
+
+Then dogfooded the whole protocol onto std's own collection types — the actual cleanup:
+`std/queue` and `std/multimap` now `(impl Seqable …)` (and queue `(impl Conjable …)`), so a
+queue/multimap is a **first-class collection**: `count`/`seq`/`map`/`filter`/`fold`/`for`/
+`into` (and `conj` for the queue) all work on it directly. Their bespoke functions
+collapsed onto the protocol — `queue-to-list` → `(seq q)`, `queue-from-list` →
+`(into (queue-new) xs)`, `multimap-size` → `(count mm)` — turning a parallel API into thin
+aliases. (pq/multimap take no `Conjable`: inserting needs a priority/key a bare `conj`
+can't carry — `pq-insert`/`multimap-assoc` stay.)
+
+Deferred: the Prim1 accessors `first`/`rest`/`empty?`/`nth` don't route through `Seqable` —
+they're JIT-inlined ops the hot `fold--loop` uses, so routing them safely needs kernel work
+(a general-builtin record branch, or raw `%first`/`%rest`); `(first (seq c))` meanwhile.
+
+Also chased down the recurring "KI-14 flakes" — they were **not real**: the canary
+(`tests/jit_deep_recursion_test.blsp`) parses a 100k-deep JSON in a spawned process with a
+60s `receive` timeout; run via `cargo run -p nest` (a **debug** build, ~10× slower) under
+full-suite load it exceeds 60s → `:TIMED-OUT`. On release (`make test` / `nest test`) it is
+2.9 s, 3/3. Lesson: verify the suite on release, not the debug `cargo run -p nest`.
+
+Verified (release): queue 27, multimap 20, record 16 (incl. custom Seqable+Conjable),
+ability 34, maps 83, json 41; full release suite clean.
 ## 2026-07-29 (cont.) — ADR-175 Phase C: user-code arms share too
 
 Phase B shared only PRELUDE closures. Phase C extends the runtime-shared cache to every
@@ -10785,6 +10813,38 @@ so the cost is tiering history, not the code sharing. Fix direction unchanged: s
 shared code (body/chunk/shape) from per-process tier state. Trade as it stands: ~5–8% on
 two compute rows against −2.6 GB and −1 s at 300k processes.
 
+## 2026-07-29 (impl) — `Ord` ability: a record defines its own sort order
+
+Added `Ord` (op `compare-to` → -1/0/1). `sort`/`sort-by` (prelude defns) now compare
+through `ord-compare` — a record's `Ord` impl if it has one, else the kernel `compare` —
+so a version / money / card record sorts by a meaningful order instead of its arbitrary
+(but deterministic) structural map order. Hybrid as ever: the kernel `compare`/`%sort-asc`/
+`%sort-cmp` stay native for built-ins; only a record element/key routes through `Ord`
+(`sort` gains one `(record? (first a))` branch). Default `compare-to` is the structural
+`compare`, so records without a custom order still sort deterministically. Verified:
+record 18 (incl. semantic-version ordering + built-in-sort-unchanged), maps 83, no
+regression. Remaining of "lean into abilities": the numeric protocol (`+`/`-`/`*` for
+records) — the highest-risk one, since it touches the hottest paths.
+
+## 2026-07-29 (finding) — numeric protocol for records: Brood-side is a ~195× fib regression
+
+Tried a `Num` ability so records (money, complex, vectors) could use `+`/`-`/`*`/`/`, wired
+by a `(record? a)` branch in each operator's binary arm (`(if (record? a) (num-add a b)
+(%add a b))`), int/float falling straight to `%add`. It works — money arithmetic dispatches,
+ints/floats give the right answers — but the one mandatory `make ab`-style check killed it:
+**fib 35 went 60 ms → 11.7 s, ~195×.** A `(record? a)` branch, however cheap in isolation,
+makes `+` non-trivial enough that the JIT can no longer lower `(+ a b)` to a native int-add;
+the whole recursion falls back to slow interpreted calls. Reverted.
+
+Lesson (already in CLAUDE.md, now with a number): arithmetic operators are pure JIT
+substrate — *any* Brood-level branch in them is catastrophic. A numeric protocol has to be
+a kernel change: dispatch `Num` only from the `%add`/`%sub` *fallback* (operands not already
+numeric) or a JIT type-deopt, leaving the inlined path untouched — plus checker work to
+accept a `Num` record operand. Filed as a maybe-item in ROADMAP; the collection + `Ord`
+protocols (which don't touch the numeric hot path) shipped fine. Also confirmed the type
+checker is already clean for every shipped construct (Seqable/Conjable/Ord/Display): `nest
+check` is 0 warnings on the tree and on fresh user code — the `+` warnings were purely this
+reverted numeric change.
 ## 2026-07-29 (cont.) — the ADR-175 "regression" was a `make ab` artifact
 
 The `collatz` +8% / `nqueens` +7.8% attributed to shared JIT-tier state in the two
