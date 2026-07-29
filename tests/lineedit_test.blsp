@@ -339,9 +339,10 @@
                (assoc (editor/lineedit/lineedit-init "x> " "" '() {:complete? complete?})
                  :text text
                  :point (string-length text))))
-      ;; incomplete form: Enter adds "\n", does NOT submit
+      ;; incomplete form: Enter adds "\n" plus the structural auto-indent (two past
+      ;; the opening paren's column — see lineedit--indent-for), does NOT submit
       (let (st (editor/lineedit/lineedit-submit (mk "(defn f") nil))
-        (assert= (get st :text) "(defn f\n")
+        (assert= (get st :text) "(defn f\n  ")
         (is (nil? (get st :done))))
       ;; complete form: Enter submits
       (let (st (editor/lineedit/lineedit-submit (mk "(+ 1 2)") nil))

@@ -161,6 +161,40 @@ impl Heap {
             .map(|cc| cc.as_ref().and_then(|cc| cc.arm_for(argc).cloned()))
     }
 
+    /// ADR-175 Phase B off-switch: `BROOD_NO_SHARED_ARMS=1` makes every process
+    /// compile privately, exactly as before the shared cache. The A/B / bisect lever.
+    pub fn shared_arms_disabled() -> bool {
+        static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *OFF.get_or_init(|| std::env::var_os("BROOD_NO_SHARED_ARMS").is_some())
+    }
+
+    /// Look up the runtime-shared compiled closure for PRELUDE closure-handle `bits`
+    /// (ADR-175 Phase B). One read-lock on first touch per process per closure; after
+    /// that the process's own `vm_cache` serves every call.
+    pub fn shared_closure_lookup(
+        &self,
+        bits: u64,
+    ) -> Option<Arc<crate::eval::compile::CompiledClosure>> {
+        self.runtime
+            .shared_closures
+            .read()
+            .ok()?
+            .get(&bits)
+            .cloned()
+    }
+
+    /// Publish a compiled closure to the runtime-shared cache. Idempotent — all
+    /// publishers compiled the identical closure from the same shared AST.
+    pub fn shared_closure_publish(
+        &self,
+        bits: u64,
+        cc: Arc<crate::eval::compile::CompiledClosure>,
+    ) {
+        if let Ok(mut m) = self.runtime.shared_closures.write() {
+            m.insert(bits, cc);
+        }
+    }
+
     /// Record the compile result for closure key `k` (eligible body or `None`).
     pub fn vm_cache_put(
         &self,

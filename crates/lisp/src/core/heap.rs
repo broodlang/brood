@@ -1231,6 +1231,20 @@ pub struct RuntimeCode {
     /// because a raw code pointer isn't `Send`/`Sync`; reconstituted on read. Empty
     /// unless the JIT runs.
     jit_code_cache: RwLock<HashMap<(u64, u16), (usize, u64)>>,
+    /// **Shared compiled-closure cache** (ADR-175 Phase B — the BEAM module-area move):
+    /// PRELUDE closure handle bits → the compiled closure, shared by every process of
+    /// this runtime. Before this, each green process compiled its own copy of every
+    /// prelude function it called (~18 KB per distinct callee per process — the
+    /// spawn-live 4.5 GB cause). Eligibility is strict (see `compiled_arm_for`):
+    /// PRELUDE-region key (never freed/recycled, so no ADR-091 free-epoch discipline
+    /// needed here) and **immortal** arms (no RUNTIME-region handle anywhere, so
+    /// `runtime_collect`'s per-process rewrite never touches them — a shared arm
+    /// rewritten by two processes would double-forward its handles). Publish is
+    /// idempotent: every process compiles the identical closure from the same shared
+    /// AST, so last-writer-wins is safe. `BROOD_NO_SHARED_ARMS=1` bypasses (ADR-175's
+    /// off-switch). Arm site ids are arm-relative (Phase A), so a shared arm's ICs
+    /// work in every process, each against its own block.
+    shared_closures: RwLock<HashMap<u64, Arc<crate::eval::compile::CompiledClosure>>>,
     /// Companion to `jit_code_cache` for the two-stage-tiering **inlined** upgrade
     /// (the deferred, self-inlined body). Same `(closure_id, argc)` key and
     /// `(code_ptr, compile_epoch)` value, but a separate map because a slot holds
@@ -1385,6 +1399,7 @@ impl Default for RuntimeCode {
             def_sites: RwLock::new(HashMap::new()),
             positions: RwLock::new(HashMap::new()),
             jit_code_cache: RwLock::new(HashMap::new()),
+            shared_closures: RwLock::new(HashMap::new()),
             jit_inline_cache: RwLock::new(HashMap::new()),
             declared_sigs: RwLock::new(SymbolMap::default()),
             drain_active: AtomicBool::new(false),
@@ -1489,6 +1504,7 @@ impl RuntimeCode {
             def_sites: RwLock::new(HashMap::new()),
             positions: RwLock::new(HashMap::new()),
             jit_code_cache: RwLock::new(HashMap::new()),
+            shared_closures: RwLock::new(HashMap::new()),
             jit_inline_cache: RwLock::new(HashMap::new()),
             declared_sigs: RwLock::new(SymbolMap::default()),
             drain_active: AtomicBool::new(false),
