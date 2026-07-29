@@ -11222,3 +11222,42 @@ control** — `taskset`-pinned best-of-15 for base, base again, then new, readin
 base-vs-base spread as the row's noise floor. Controlled: fib 0.0% (floor 0.0%), spawn
 −0.9% (floor −0.9%), bintree +0.8% (floor +1.6%), pingpong +0.9% (floor +0.5%), spawn-live
 −1.2% (floor +0.4%). Neutral on time, real on memory. Note added to CLAUDE.md.
+
+## 2026-07-29 (cont.) — the old generation is empty for 99.998% of processes
+
+`Heap` carried `old: Slabs` inline — eleven `Vec` headers, 264 B — on every process. A
+process only populates an old generation by surviving a minor collection, and a short-lived
+worker never collects at all. Measured before writing any of it: **7 of 300,000**
+spawn-live processes ever promote. So it is now `Option<Box<Slabs>>` (8 B), allocated on
+first promotion.
+
+The shape that makes it safe: reads go through `old()`, callable only where an OLD handle is
+already in hand — and an OLD handle can only exist if a promotion allocated the slabs, so
+the `expect` is unreachable by construction. Aggregate walks use `old_opt()` and tolerate
+absence. Mutation goes through `old_mut()`, which allocates.
+
+**−73 MB on spawn-live** (1.847 → 1.774 GB), spawn-live −1.7%.
+
+**It costs `fib` +2.6%, and that is real** — measured against a ~1% base spread, and it
+survives the layout control below. `fib` promotes heavily, so it pays the extra indirection
+on OLD-handle derefs (and on the two JIT old-slab base-pointer shims). Shipped anyway: the
+process floor is the `spawn-live` gap, which is our worst row, and 73 MB at 300k processes
+outweighs 2.6% on one compute row. Reverting is a contained change if that judgement is
+wrong.
+
+Two process notes worth keeping:
+
+- **A blanket regex over 91 `self.old` sites broke the collector**, and only `BROOD_GC_VERIFY`
+  caught it: `verify_local_graph`, the trace stats and the JIT base-pointer shims all run at
+  *every* collection, but the rewrite gave them `old()`, which `expect`s an old generation
+  that usually doesn't exist. Base completed the probe in <120 s; the new binary timed out.
+  The lesson is that "reads use `old()`" is only true for handle derefs — aggregate walks
+  are a different category and needed `old_opt()`.
+- **A padding control separates layout from mechanism.** `sort` first read +2.7%; restoring
+  the removed 256 B as dead padding took it to +0.0%, so that was struct-layout shift, not
+  the change — and indeed the final unpadded measurement has `sort` at −0.6%. `fib` kept
+  +2.6% under padding, which is how we know its cost is the indirection. Any change that
+  shrinks a hot struct should run this control before believing a nearby row moved.
+
+Gate: suite 3804 green, `make stress` 33/33, TSAN 0 warnings, GC_STRESS and GC_VERIFY clean
+(including a probe that deliberately populates and re-reads an old generation).

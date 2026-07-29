@@ -803,7 +803,7 @@ impl Heap {
         match id.region() {
             LOCAL if id.is_old() => {
                 local_gc_check!(old, self, id, "rope");
-                SlabRef::direct(&self.old.ropes[id.index()])
+                SlabRef::direct(&self.old().ropes[id.index()])
             }
             LOCAL => {
                 local_gc_check!(nursery, self, id, "rope");
@@ -859,7 +859,7 @@ impl Heap {
         match id.region() {
             LOCAL if id.is_old() => {
                 local_gc_check!(old, self, id, "bigint");
-                SlabRef::direct(&self.old.bigints[id.index()])
+                SlabRef::direct(&self.old().bigints[id.index()])
             }
             LOCAL => {
                 local_gc_check!(nursery, self, id, "bigint");
@@ -888,7 +888,7 @@ impl Heap {
         match id.region() {
             LOCAL if id.is_old() => {
                 local_gc_check!(old, self, id, "decimal");
-                SlabRef::direct(&self.old.decimals[id.index()])
+                SlabRef::direct(&self.old().decimals[id.index()])
             }
             LOCAL => {
                 local_gc_check!(nursery, self, id, "decimal");
@@ -918,7 +918,7 @@ impl Heap {
         match id.region() {
             LOCAL if id.is_old() => {
                 local_gc_check!(old, self, id, "bytes");
-                SlabRef::direct(&self.old.bytes[id.index()])
+                SlabRef::direct(&self.old().bytes[id.index()])
             }
             LOCAL => {
                 local_gc_check!(nursery, self, id, "bytes");
@@ -979,7 +979,7 @@ impl Heap {
     /// debug-gated — the production `local_shared_blob` path uses it too.
     fn string_slot(&self, id: StrId) -> &LocalString {
         if id.is_old() {
-            &self.old.strings[id.index()]
+            &self.old().strings[id.index()]
         } else {
             &self.local.strings[id.index()]
         }

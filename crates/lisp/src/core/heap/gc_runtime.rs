@@ -632,7 +632,7 @@ impl Heap {
         visited: &mut HashSet<(usize, usize)>,
         visited_env: &mut HashSet<(usize, usize)>,
     ) -> bool {
-        for slabs in [&self.local, &self.old] {
+        for slabs in [Some(&self.local), self.old_opt()].into_iter().flatten() {
             for (a, b) in slabs.pairs.iter() {
                 work.push(*a);
                 work.push(*b);
@@ -1112,7 +1112,9 @@ impl Heap {
         }
         // 3. The LOCAL heap (both generations) — any slot may embed a RUNTIME handle.
         rewrite_local_rt_handles(&mut self.local, &old_code, &new, &mut fwd);
-        rewrite_local_rt_handles(&mut self.old, &old_code, &new, &mut fwd);
+        if let Some(o) = self.old.as_deref_mut() {
+            rewrite_local_rt_handles(o, &old_code, &new, &mut fwd);
+        }
         // 3b. The LIVE compiled-VM arms on this process's execution stack. Their
         // `Arc`'d node trees are off the GC root graph (and held by `&Node` during
         // execution, so the `Arc` can't be swapped), but they embed promoted RUNTIME
