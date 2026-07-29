@@ -87,6 +87,12 @@ const SHOULD_WARN: &[(&str, &str)] = &[
     (r#"(+ 1 (symbol->string 'foo))"#, "+"),  // symbol->string → string
     (r#"(+ 1 (join ", " (list "a" "b")))"#, "+"), // join → string
     (r#"(+ 1 (capitalize "hello"))"#, "+"), // capitalize → string
+    // ---- op names must be unique within a module (ADR-172) ----
+    // two abilities declaring the same op name `area` clobber each other's generic fn.
+    (
+        "(defability Shape (area [self])) (defability Sizer (area [thing]))",
+        "unique per module",
+    ),
 ];
 
 /// Each snippet must produce **zero** warnings — the false-positive guards.
@@ -141,6 +147,11 @@ const SHOULD_NOT_WARN: &[&str] = &[
     "(sig identity (?A -> ?A)) (defn identity (x) x) (+ 1 (identity 42))",
     "(sig my-first ((list ?A) -> ?A)) (defn my-first (xs) (first xs)) (+ 1 (my-first (list 1 2 3)))",
     r#"(sig const (?A ?B -> ?A)) (defn const (x y) x) (+ 1 (const 42 "x"))"#,
+    // ---- ability op-name uniqueness: only a REAL same-name collision warns ----
+    // distinct op names across two abilities are fine (each binds its own generic fn).
+    "(defability Shape (area [self])) (defability Boxer (volume [self]))",
+    // redeclaring the SAME ability (hot reload) re-binds the same op — not a collision.
+    "(defability Shape (area [self])) (defability Shape (area [self]))",
 ];
 
 #[test]
