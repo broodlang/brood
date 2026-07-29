@@ -2265,11 +2265,11 @@ mod gen_handle_tests {
             "remembered entry kept a stale epoch after the major (use-after-GC)"
         );
         assert!(
-            r.index() < h.old.envs.len(),
+            r.index() < h.old().envs.len(),
             "remembered entry is out of bounds after the major (use-after-GC): \
              index {} >= old.envs.len() {}",
             r.index(),
-            h.old.envs.len(),
+            h.old().envs.len(),
         );
         assert_eq!(
             r.index(),
@@ -2281,7 +2281,7 @@ mod gen_handle_tests {
         h.minor_collect(false, &mut [], &mut roots);
         let keep = roots[0];
         assert!(keep.is_old());
-        let bound = h.old.envs[keep.index()]
+        let bound = h.old().envs[keep.index()]
             .vars
             .iter()
             .find(|(s, _)| *s == x)
@@ -2318,7 +2318,7 @@ mod gen_handle_tests {
         let mut roots = vec![frame];
         h.minor_collect(false, &mut [], &mut roots);
         let frame = roots[0];
-        assert_eq!(h.old.envs[frame.index()].vars.len(), 64);
+        assert_eq!(h.old().envs[frame.index()].vars.len(), 64);
     }
 
     // ── flush_nursery_old_refs regression tests ──────────────────────────────
@@ -2384,11 +2384,11 @@ mod gen_handle_tests {
             _ => panic!("expected Str"),
         };
         assert!(
-            new_idx < h.old.strings.len(),
+            new_idx < h.old().strings.len(),
             "string index {new_idx} OOB (len {}); pre-major index was {pre_major_idx}",
-            h.old.strings.len()
+            h.old().strings.len()
         );
-        assert_eq!(h.old.strings[new_idx].as_str(), "hello-env-var");
+        assert_eq!(h.old().strings[new_idx].as_str(), "hello-env-var");
     }
 
     /// Nursery env frame with an OLD pair var is rewritten after flip+major.
@@ -2434,11 +2434,11 @@ mod gen_handle_tests {
             _ => panic!("expected Pair"),
         };
         assert!(
-            new_idx < h.old.pairs.len(),
+            new_idx < h.old().pairs.len(),
             "pair index {new_idx} OOB (len {}); pre-major was {pre_major_idx}",
-            h.old.pairs.len()
+            h.old().pairs.len()
         );
-        let (car, _) = h.old.pairs[new_idx];
+        let (car, _) = h.old().pairs[new_idx];
         assert!(matches!(car.unpack(), ValueRef::Int(99)));
     }
 
@@ -2493,9 +2493,9 @@ mod gen_handle_tests {
             _ => panic!("expected Fn"),
         };
         assert!(
-            new_idx < h.old.closures.len(),
+            new_idx < h.old().closures.len(),
             "closure index {new_idx} OOB (len {}); pre-major was {pre_major_idx}",
-            h.old.closures.len()
+            h.old().closures.len()
         );
     }
 
@@ -2549,10 +2549,10 @@ mod gen_handle_tests {
             "closure env must still be old-gen after major"
         );
         assert!(
-            env_id.index() < h.old.envs.len(),
+            env_id.index() < h.old().envs.len(),
             "closure env index {} OOB (len {}); pre-major was {pre_major_env_idx}",
             env_id.index(),
-            h.old.envs.len()
+            h.old().envs.len()
         );
         // The env lookup chain must work: env_get returns throb = 3.14.
         let val = h.env_get(env_id, sym).expect("throb must be findable");
@@ -2605,11 +2605,11 @@ mod gen_handle_tests {
             _ => panic!("expected Str"),
         };
         assert!(
-            new_idx < h.old.strings.len(),
+            new_idx < h.old().strings.len(),
             "optional default index {new_idx} OOB (len {}); pre-major was {pre_idx}",
-            h.old.strings.len()
+            h.old().strings.len()
         );
-        assert_eq!(h.old.strings[new_idx].as_str(), "default-str");
+        assert_eq!(h.old().strings[new_idx].as_str(), "default-str");
     }
 
     /// Nursery closure whose arm body contains an OLD string literal is rewritten.
@@ -2654,11 +2654,11 @@ mod gen_handle_tests {
             _ => panic!("expected Str"),
         };
         assert!(
-            new_idx < h.old.strings.len(),
+            new_idx < h.old().strings.len(),
             "body literal index {new_idx} OOB (len {}); pre-major was {pre_idx}",
-            h.old.strings.len()
+            h.old().strings.len()
         );
-        assert_eq!(h.old.strings[new_idx].as_str(), "body-literal");
+        assert_eq!(h.old().strings[new_idx].as_str(), "body-literal");
     }
 
     /// Nursery map (CHAMP root) with an OLD string as a data value is rewritten.
@@ -2694,11 +2694,11 @@ mod gen_handle_tests {
             _ => panic!("expected Str, got {result:?}"),
         };
         assert!(
-            new_idx < h.old.strings.len(),
+            new_idx < h.old().strings.len(),
             "map value index {new_idx} OOB (len {}); pre-major was {pre_idx}",
-            h.old.strings.len()
+            h.old().strings.len()
         );
-        assert_eq!(h.old.strings[new_idx].as_str(), "map-value");
+        assert_eq!(h.old().strings[new_idx].as_str(), "map-value");
     }
 
     /// Nursery pair with an OLD string car is rewritten after flip+major.
@@ -2731,11 +2731,11 @@ mod gen_handle_tests {
             _ => panic!("expected Str"),
         };
         assert!(
-            new_idx < h.old.strings.len(),
+            new_idx < h.old().strings.len(),
             "pair car index {new_idx} OOB (len {}); pre-major was {pre_idx}",
-            h.old.strings.len()
+            h.old().strings.len()
         );
-        assert_eq!(h.old.strings[new_idx].as_str(), "pair-car");
+        assert_eq!(h.old().strings[new_idx].as_str(), "pair-car");
     }
 
     /// Nursery vector with an OLD string element is rewritten after flip+major.
@@ -2765,11 +2765,11 @@ mod gen_handle_tests {
             _ => panic!("expected Str"),
         };
         assert!(
-            new_idx < h.old.strings.len(),
+            new_idx < h.old().strings.len(),
             "vector elem index {new_idx} OOB (len {}); pre-major was {pre_idx}",
-            h.old.strings.len()
+            h.old().strings.len()
         );
-        assert_eq!(h.old.strings[new_idx].as_str(), "vec-elem");
+        assert_eq!(h.old().strings[new_idx].as_str(), "vec-elem");
     }
 
     /// Nursery env with an OLD parent env: the parent pointer is rewritten.
@@ -2806,10 +2806,10 @@ mod gen_handle_tests {
             "parent must still be old-gen after major"
         );
         assert!(
-            parent_ptr.index() < h.old.envs.len(),
+            parent_ptr.index() < h.old().envs.len(),
             "parent index {} OOB (len {}); pre-major was {pre_idx}",
             parent_ptr.index(),
-            h.old.envs.len()
+            h.old().envs.len()
         );
         // The env lookup must traverse the parent chain correctly.
         let val = h
@@ -2869,8 +2869,8 @@ mod gen_handle_tests {
         match val.unpack() {
             ValueRef::Str(id) => {
                 assert!(id.is_old());
-                assert!(id.index() < h.old.strings.len(), "string OOB after major");
-                assert_eq!(h.old.strings[id.index()].as_str(), "map-child-keeper");
+                assert!(id.index() < h.old().strings.len(), "string OOB after major");
+                assert_eq!(h.old().strings[id.index()].as_str(), "map-child-keeper");
             }
             _ => panic!("expected Str"),
         }
@@ -2935,12 +2935,12 @@ mod gen_handle_tests {
                 _ => panic!("{label}: expected Str"),
             };
             assert!(
-                new_idx < h.old.strings.len(),
+                new_idx < h.old().strings.len(),
                 "{label}: index {new_idx} OOB (len {}); pre-major was {pre_idx}",
-                h.old.strings.len()
+                h.old().strings.len()
             );
             assert_eq!(
-                h.old.strings[new_idx].as_str(),
+                h.old().strings[new_idx].as_str(),
                 "shared-keeper",
                 "{label}: wrong content"
             );

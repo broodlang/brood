@@ -8,7 +8,8 @@
 //! scan runs over the *un-expanded* forms — like the hygiene lint. Nothing here
 //! enforces the declaration at run time yet; that is slice 2 (the strong arrow).
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::core::heap::Heap;
 use crate::core::value::{self, Symbol, Tag, Value};
@@ -16,6 +17,54 @@ use crate::types::{Sig, Ty};
 
 use super::ctx::{SigTerm, SigWithVars};
 use super::walk::list_items;
+
+thread_local! {
+    /// Per-file table: a **sealed** ability's name → its member id name strings (already
+    /// ns-qualified, e.g. `"geom/circle"`). Populated at the start of each `check_file`
+    /// from the expanded tree + the runtime registry (`protocol::sealed_member_ids`), and
+    /// cleared per file. Lets [`parse_type`] resolve a bare ability name in type position
+    /// (`(sig f (Shape -> float))`, `:-> Shape`) to the finite union of its members' record
+    /// shapes. Only **sealed** abilities have a closed member set to enumerate (ADR-181).
+    static ABILITY_TYPES: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
+}
+
+/// Install this file's sealed-ability member table (call before parsing sigs). Overwrites
+/// any prior file's table.
+pub(super) fn set_ability_types(map: HashMap<String, Vec<String>>) {
+    ABILITY_TYPES.with(|m| *m.borrow_mut() = map);
+}
+
+/// Drop the sealed-ability table — per-file hygiene, mirroring [`super::sigs::clear_sig_memo`].
+pub(super) fn clear_ability_types() {
+    ABILITY_TYPES.with(|m| m.borrow_mut().clear());
+}
+
+/// A sealed ability `name` as a **type**: the union of its members' record shapes, each a
+/// `(record :__id__ :<member>)` (the nominal identity a `defrecord` value carries). `None`
+/// when `name` isn't a known sealed ability, so a non-ability symbol falls through
+/// unchanged. The `:__id__`-only shape is intentionally minimal — records are open
+/// (width-subtyped), so a real `(circle 2)` with extra fields is still a subtype, and the
+/// singleton `:__id__` is exactly what nominal dispatch + `ty_record_id` key on.
+fn ability_type(name: &str) -> Option<Ty> {
+    ABILITY_TYPES.with(|m| {
+        let table = m.borrow();
+        let members = table.get(name)?;
+        let mut acc: Option<Ty> = None;
+        for member in members {
+            let mut fields = BTreeMap::new();
+            fields.insert(
+                value::intern("__id__"),
+                (Ty::keyword_lit(value::intern(member)), true),
+            );
+            let shape = Ty::record_of(fields);
+            acc = Some(match acc {
+                Some(a) => a.union(shape),
+                None => shape,
+            });
+        }
+        acc
+    })
+}
 
 /// The lattice point a base type *name* denotes — the spellings `type-of`
 /// returns, plus the named unions (`number` = int∪float, `list` = nil∪pair,
@@ -75,7 +124,10 @@ pub(super) fn parse_type(heap: &Heap, form: Value) -> Option<Ty> {
             if name.starts_with('?') {
                 return Some(Ty::ANY);
             }
-            base_ty(&name)
+            // A base type name wins; otherwise a bare **sealed ability** name resolves to
+            // the union of its members' record shapes (ADR-181) — `(sig f (Shape -> …))`,
+            // `:-> Shape`. An unknown symbol still yields `None` (dropped, never guessed).
+            base_ty(&name).or_else(|| ability_type(&name))
         }
         // `nil` reads as the literal `Value::Nil`, not a symbol — so a type-expr
         // like `(or int nil)` lands here, not in `base_ty`.
@@ -286,7 +338,9 @@ fn parse_type_term(heap: &Heap, form: Value, vars: &mut HashMap<String, u32>) ->
                 let idx = *vars.entry(name.to_owned()).or_insert(next);
                 return Some(SigTerm::Var(idx));
             }
-            base_ty(&name).map(SigTerm::Ty)
+            base_ty(&name)
+                .or_else(|| ability_type(&name))
+                .map(SigTerm::Ty)
         }
         Value::Nil => Some(SigTerm::Ty(Ty::of(Tag::Nil))),
         Value::Pair(_) => {

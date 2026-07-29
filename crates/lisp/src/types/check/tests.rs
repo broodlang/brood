@@ -242,6 +242,179 @@ fn sealed_ability_complete_is_silent() {
     assert!(!ws.iter().any(|w| w.contains("sealed ability")), "{ws:?}");
 }
 
+// ---- typed ability ops: `:-> RET` return types (return-type flow + impl check) ----
+
+#[test]
+fn ability_op_return_type_flows_to_call_site() {
+    // `size :-> int`, so `(size 5)` yields an `int`; feeding it to `string-length`
+    // (which wants a string) is a provable mismatch — proving the declared return
+    // flowed into inference at the op call site.
+    let ws = file_warnings(
+        "\
+         (defability Size (size [self] :-> int))\n\
+         (impl Size :int (size [n] n))\n\
+         (defn bad () (string-length (size 5)))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("string-length") && w.contains("int")),
+        "the op's :-> int return should flow so string-length flags it: {ws:?}"
+    );
+}
+
+#[test]
+fn ability_impl_return_mismatch_is_flagged() {
+    // The impl body is a string literal, but `size` declares `:-> int` — a provable
+    // disjointness the impl-return check catches.
+    let ws = file_warnings(
+        "\
+         (defability Size (size [self] :-> int))\n\
+         (impl Size :int (size [n] \"hi\"))",
+    );
+    assert!(
+        ws.iter().any(|w| w
+            .contains("Size/size for :int: declared return type int but the impl yields")
+            && w.contains("hi")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn ability_impl_return_consistent_is_silent() {
+    // An `int` literal body conforms; an unknown (`n`) body defers (gradual) — neither warns.
+    let ws = file_warnings(
+        "\
+         (defability Size (size [self] :-> int))\n\
+         (impl Size :int (size [n] 5))\n\
+         (impl Size :float (size [n] n))",
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("declared return type")),
+        "{ws:?}"
+    );
+}
+
+#[test]
+fn ability_op_any_return_imposes_no_impl_constraint() {
+    // A `:-> any` op is the gradual unknown — an impl may return anything.
+    let ws = file_warnings(
+        "\
+         (defability Blob (blob [self] :-> any))\n\
+         (impl Blob :int (blob [n] \"whatever\"))",
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("declared return type")),
+        "{ws:?}"
+    );
+}
+
+// ---- ability-name-as-a-type: a sealed ability is the union of its members (ADR-181) ----
+
+#[test]
+fn sealed_ability_name_resolves_as_a_type_in_a_sig() {
+    // `Shape` = `(or circle rect)`; a non-record int passed where `Shape` is wanted is a
+    // provable mismatch — the ability name parsed as a real (finite) union type.
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defrecord circle (r))\n\
+         (defrecord rect (w h))\n\
+         (defability Shape :sealed [circle rect] (area [self] :-> float))\n\
+         (sig total (Shape -> float))\n\
+         (defn total (s) 1.0)\n\
+         (defn bad () (total 5))",
+    );
+    assert!(
+        ws.iter()
+            .any(|w| w.contains("total") && w.contains("argument 1")),
+        "an int passed where a sealed-ability type is wanted should warn: {ws:?}"
+    );
+}
+
+#[test]
+fn sealed_ability_type_accepts_a_member_record() {
+    // A genuine member `(circle 2)` satisfies `Shape` — no false positive (records are open,
+    // so the extra `:r` field is fine).
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defrecord circle (r))\n\
+         (defrecord rect (w h))\n\
+         (defability Shape :sealed [circle rect] (area [self] :-> float))\n\
+         (sig total (Shape -> float))\n\
+         (defn total (s) 1.0)\n\
+         (defn ok () (total (circle 2)))",
+    );
+    assert!(
+        !ws.iter()
+            .any(|w| w.contains("total") && w.contains("argument 1")),
+        "a member record must satisfy the ability type: {ws:?}"
+    );
+}
+
+#[test]
+fn sealed_ability_type_soundness_precise_paths() {
+    // SOUNDNESS (no false positives on the strict `⊆` path): a **map literal** member and a
+    // `Shape`-typed param are *precise* args (checked with subtyping, not disjointness), so a
+    // record-in-union subtyping bug would surface here. Both must pass clean.
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defrecord circle (r))\n\
+         (defrecord rect (w h))\n\
+         (defability Shape :sealed [circle rect] (area [self] :-> float))\n\
+         (impl Shape t/circle (area [c] (* 1.0 (get c :r))))\n\
+         (impl Shape t/rect (area [r] (* 1.0 (get r :w))))\n\
+         (sig total (Shape -> float))\n\
+         (defn total (s) (area s))\n\
+         (defn ok-literal () (total {:__id__ :t/circle :r 2}))\n\
+         (sig relay (Shape -> float))\n\
+         (defn relay (s) (total s))",
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("argument 1")),
+        "neither a map-literal member nor a Shape-typed param may false-positive: {ws:?}"
+    );
+}
+
+#[test]
+fn sealed_ability_type_in_op_return_position() {
+    // `:-> Shape` — an op whose declared return is another (sealed) ability's domain. The
+    // return flows: feeding it to `string-length` (wants string) is a provable mismatch.
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defrecord circle (r))\n\
+         (defrecord rect (w h))\n\
+         (defability Shape :sealed [circle rect] (area [self] :-> float))\n\
+         (defability Scaled (scaled [self] :-> Shape))\n\
+         (impl Scaled :int (scaled [n] (circle n)))\n\
+         (defn bad (x) (string-length (scaled x)))",
+    );
+    assert!(
+        ws.iter().any(|w| w.contains("string-length")),
+        "a `:-> Shape` return should flow as the member union: {ws:?}"
+    );
+}
+
+#[test]
+fn non_sealed_ability_name_is_not_a_type() {
+    // An OPEN ability has no closed member set, so its name is *not* a type — the sig is
+    // dropped (unknown type name), and no spurious warning appears from treating it as one.
+    let ws = file_warnings(
+        "\
+         (defmodule t)\n\
+         (defability Open (op [self] :-> int))\n\
+         (sig f (Open -> int))\n\
+         (defn f (s) 1)\n\
+         (defn use-it () (f 5))",
+    );
+    assert!(
+        !ws.iter().any(|w| w.contains("argument 1")),
+        "an open ability name must not resolve to a type (sig dropped): {ws:?}"
+    );
+}
+
 // ---- behaviour conformance: `(:implements …)` on a module ----
 
 #[test]

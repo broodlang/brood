@@ -203,52 +203,21 @@ pub(super) fn num_bin(
             let scale = dec_scale(x.fractional_digit_count(), y.fractional_digit_count());
             Ok(heap.alloc_decimal(dec_op(x, y).with_scale(scale)))
         }
-        // A float operand anywhere: the float path (a BigInt/Decimal coerces via
-        // `f64` — float contagion, like Clojure's double contagion). But first, a RECORD
-        // first operand dispatches the `Num` protocol (cold path — ints/floats never reach
-        // here). A plain non-numeric operand still errors in `num_to_f64` below.
-        _ => {
-            if let Some(r) = num_record_dispatch(heap, who, a, b)? {
-                return Ok(r);
-            }
-            // A record as the SECOND operand can't dispatch: `Num` is single-dispatch on
-            // the FIRST argument (a record first operand was handled above). Cross-type
-            // arithmetic is not implicit — a clear, named error beats "expected number,
-            // got map" from the float coercion below. (`(- 5 money)` and friends.)
-            if is_record(heap, b) {
-                return Err(cross_type_record_error(
-                    who,
-                    "arithmetic",
-                    "combines",
-                    "Num",
-                ));
-            }
-            Ok(Value::Float(float_op(
-                num_to_f64(heap, who, a)?,
-                num_to_f64(heap, who, b)?,
-            )))
+        // A record operand (a map with a truthy __id__) routes to the `Num` multimethod,
+        // dispatching on both operands. Gating on the Map *tag* keeps the record check off
+        // the numeric path — a float/decimal operand falls straight to the float arm. A pair
+        // with no method raises `no-method`; a plain (non-record) map errors in `num_to_f64`.
+        (Value::Map(_), _) | (_, Value::Map(_)) if is_record(heap, a) || is_record(heap, b) => {
+            num_multi_dispatch(heap, who, a, b)
         }
+        // A float operand anywhere: the float path (a BigInt/Decimal coerces via `f64` —
+        // float contagion, like Clojure's double contagion). A plain non-numeric operand
+        // still errors in `num_to_f64`.
+        _ => Ok(Value::Float(float_op(
+            num_to_f64(heap, who, a)?,
+            num_to_f64(heap, who, b)?,
+        ))),
     }
-}
-
-/// The `Num` protocol fallback (ADR-172 §7): when an arithmetic operator's first operand
-/// is a RECORD, dispatch to its `Num` ability op — `num-add`/`num-sub`/`num-mul`/`num-div`
-/// — so a money value, complex number, 2-D vector, or bignum can use `+`/`-`/`*`/`/`. This
-/// is reached ONLY on the cold non-numeric fallback: the JIT/VM inlines int+int and
-/// float+float and never calls the `%add` builtin for them, so the numeric hot path is
-/// byte-for-byte untouched (a Brood-side `(record? a)` branch in `+` measured a ~195×
-/// regression — this is the kernel form that avoids it). Returns `None` when `a` isn't a
-/// record, so the caller proceeds to its normal float / error path.
-/// The error for combining/comparing a record with a value of another kind. The record
-/// arithmetic/ordering abilities (`Num`/`Ord`) are **homogeneous** and do not coerce across
-/// types — direction-agnostic on purpose (`>` is `(%lt b a)`, so "put the record first" would
-/// be wrong for it). `noun`/`verb`/`ability` specialize it: ("arithmetic","combines","Num")
-/// or ("comparison","compares","Ord").
-fn cross_type_record_error(who: &str, noun: &str, verb: &str, ability: &str) -> LispError {
-    LispError::runtime(format!(
-        "{who}: cross-type {noun} is not implicit — a record {verb} only with a value its \
-         `{ability}` impl accepts; convert explicitly"
-    ))
 }
 
 /// True when `v` is an identity-carrying record — a map whose reserved `:__id__` key
@@ -263,33 +232,52 @@ fn is_record(heap: &Heap, v: Value) -> bool {
     }
 }
 
-fn num_record_dispatch(
-    heap: &mut Heap,
-    who: &str,
-    a: Value,
-    b: Value,
-) -> Result<Option<Value>, LispError> {
-    // a record is a map carrying the reserved `:__id__`; a plain map is not the Num path.
-    if !is_record(heap, a) {
-        return Ok(None);
-    }
+/// Dispatch an arithmetic operator to the `Num` MULTIMETHOD (ADR-179) when a record is an
+/// operand: `+`/`-`/`*`/`/` → `num-add`/`num-sub`/`num-mul`/`num-div`, each dispatching on
+/// BOTH operand identities. Reached ONLY on the cold fallback — the JIT/VM inlines int+int
+/// and float+float and never calls `%add` for them, so the numeric hot path is byte-for-byte
+/// untouched (a Brood `(record? a)` branch in `+` measured ~195×). A pair with no method
+/// raises the multimethod's loud `no-method` error, so mixed types are explicit, never
+/// silently coerced.
+fn num_multi_dispatch(heap: &mut Heap, who: &str, a: Value, b: Value) -> LispResult {
     let op = match who {
         "+" => "num-add",
         "-" => "num-sub",
         "*" => "num-mul",
         "/" => "num-div",
-        _ => return Ok(None),
+        _ => unreachable!("num_multi_dispatch: {who} is not a Num operator"),
     };
     let genv = heap.global();
     let callee = heap
         .env_get(genv, crate::core::value::intern(op))
         .ok_or_else(|| {
-            LispError::runtime(format!(
-                "{who}: a record operand needs a `Num` ability impl to use `{who}`"
-            ))
+            LispError::runtime(format!("{who}: the `{op}` multimethod is not loaded"))
         })?;
-    let result = crate::eval::compile::apply_value(heap, callee, &[a, b], genv)?;
-    Ok(Some(result))
+    crate::eval::compile::apply_value(heap, callee, &[a, b], genv)
+}
+
+/// Dispatch a comparison operator to the `Ord` MULTIMETHOD (`compare-to`, ADR-179) when a
+/// record is an operand, returning the sign as an `Ordering`. `compare-to` dispatches on both
+/// operands and returns an int (<0 before, 0 equal, >0 after). Cold path only — pure numeric
+/// comparison never reaches here.
+fn compare_multi_dispatch(
+    heap: &mut Heap,
+    who: &str,
+    a: Value,
+    b: Value,
+) -> Result<std::cmp::Ordering, LispError> {
+    let genv = heap.global();
+    let callee = heap
+        .env_get(genv, crate::core::value::intern("compare-to"))
+        .ok_or_else(|| {
+            LispError::runtime(format!("{who}: the `compare-to` multimethod is not loaded"))
+        })?;
+    match crate::eval::compile::apply_value(heap, callee, &[a, b], genv)? {
+        Value::Int(n) => Ok(n.cmp(&0)),
+        _ => Err(LispError::runtime(format!(
+            "{who}: `compare-to` must return an int (-1/0/1)"
+        ))),
+    }
 }
 
 pub(super) fn prim_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -333,10 +321,11 @@ pub(super) fn prim_mul(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 
 pub(super) fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = two(args, "/")?;
-    // A record numerator dispatches the `Num` protocol (`num-div`); `Value::Map` check is
-    // one tag-compare, and int/float division is JIT-inlined and never reaches here.
-    if let Some(r) = num_record_dispatch(heap, "/", a, b)? {
-        return Ok(r);
+    // A record operand (either position) dispatches the `Num` multimethod (`num-div`, on both
+    // operands); the `is_record` check is cheap, and int/float division is JIT-inlined and
+    // never reaches here.
+    if is_record(heap, a) || is_record(heap, b) {
+        return num_multi_dispatch(heap, "/", a, b);
     }
     let bf = num_to_f64(heap, "/", b)?;
     if bf == 0.0 {
@@ -395,6 +384,14 @@ pub(super) fn prim_lt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let lt = match (a, b) {
         (Value::Int(x), Value::Int(y)) => x < y,
         _ if both_exact(a, b) => heap.value_cmp(a, b) == std::cmp::Ordering::Less,
+        // A record operand (a map with a truthy __id__) routes to the `Ord` multimethod.
+        // Gating on the Map *tag* in the pattern keeps the record check off the numeric
+        // path — a float/decimal operand never reaches the `is_record` guard below.
+        (Value::Map(_), _) | (_, Value::Map(_)) if is_record(heap, a) || is_record(heap, b) => {
+            return Ok(Value::boolean(
+                compare_multi_dispatch(heap, "<", a, b)? == std::cmp::Ordering::Less,
+            ));
+        }
         _ => num_to_f64(heap, "<", a)? < num_to_f64(heap, "<", b)?,
     };
     Ok(Value::boolean(lt))
@@ -409,6 +406,12 @@ pub(super) fn prim_le(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let le = match (a, b) {
         (Value::Int(x), Value::Int(y)) => x <= y,
         _ if both_exact(a, b) => heap.value_cmp(a, b) != std::cmp::Ordering::Greater,
+        // Map-tagged record operand → the `Ord` multimethod; the numeric path stays pure.
+        (Value::Map(_), _) | (_, Value::Map(_)) if is_record(heap, a) || is_record(heap, b) => {
+            return Ok(Value::boolean(
+                compare_multi_dispatch(heap, "<=", a, b)? != std::cmp::Ordering::Greater,
+            ));
+        }
         _ => num_to_f64(heap, "<=", a)? <= num_to_f64(heap, "<=", b)?,
     };
     Ok(Value::boolean(le))
@@ -420,6 +423,12 @@ pub(super) fn prim_max(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         let replace = match (best, v) {
             (Value::Int(a), Value::Int(b)) => b > a,
             _ if both_exact(best, v) => heap.value_cmp(best, v) == std::cmp::Ordering::Less,
+            // record (Map-tagged): keep the larger — replace when best sorts before v.
+            (Value::Map(_), _) | (_, Value::Map(_))
+                if is_record(heap, best) || is_record(heap, v) =>
+            {
+                compare_multi_dispatch(heap, "max", best, v)? == std::cmp::Ordering::Less
+            }
             _ => num_to_f64(heap, "max", v)? > num_to_f64(heap, "max", best)?,
         };
         if replace {
@@ -435,6 +444,12 @@ pub(super) fn prim_min(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         let replace = match (best, v) {
             (Value::Int(a), Value::Int(b)) => b < a,
             _ if both_exact(best, v) => heap.value_cmp(best, v) == std::cmp::Ordering::Greater,
+            // record (Map-tagged): keep the smaller — replace when best sorts after v.
+            (Value::Map(_), _) | (_, Value::Map(_))
+                if is_record(heap, best) || is_record(heap, v) =>
+            {
+                compare_multi_dispatch(heap, "min", best, v)? == std::cmp::Ordering::Greater
+            }
             _ => num_to_f64(heap, "min", v)? < num_to_f64(heap, "min", best)?,
         };
         if replace {

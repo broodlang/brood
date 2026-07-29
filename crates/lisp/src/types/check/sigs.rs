@@ -106,9 +106,11 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
             Sig::variadic(num_or_record.clone(), num_or_record.clone()),
         );
     }
-    // variadic comparison: numeric args, boolean result
+    // variadic comparison: a numeric arg OR an `Ord` record — `< <= > >=` route through the
+    // `compare-to` multimethod on the record cold path (ADR-179), so `(< (usd 1) (usd 2))` is
+    // legal; boolean result. (A record is a map, hence the `num_or_record` domain.)
     for n in ["<", "<=", ">", ">="] {
-        put(n, Sig::variadic(num, Ty::of(Tag::Bool)));
+        put(n, Sig::variadic(num_or_record.clone(), Ty::of(Tag::Bool)));
     }
     // `mod` is Brood (over `rem`), but its types are fixed
     put("mod", Sig::new(vec![int, int], int));
@@ -133,10 +135,18 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     for n in ["println", "eprintln", "eprint"] {
         put(n, Sig::variadic(any, nil_ty));
     }
-    // min/max: at least one number arg (fixed) plus variadic number rest → number.
+    // min/max: at least one number-or-`Ord`-record arg (fixed) plus a variadic rest of the
+    // same → same domain (they route through `compare-to` for records, ADR-179).
     // Variadic via rest; infer_sig bails on rest-param closures, so curate.
     for n in ["min", "max"] {
-        put(n, Sig::with_rest(vec![num], num, num));
+        put(
+            n,
+            Sig::with_rest(
+                vec![num_or_record.clone()],
+                num_or_record.clone(),
+                num_or_record.clone(),
+            ),
+        );
     }
     // higher-order: the first arg is a callback of a *known arity* — what the
     // combinator calls it with. The arrow's parameter count drives the

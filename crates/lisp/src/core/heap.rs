@@ -1644,6 +1644,7 @@ pub(crate) struct ColdHeap {
 
 /// Checker-only heap state, lazily boxed off [`Heap`] (see [`Heap::check`]). None of it
 /// is touched by running Brood code — only by `nest check` / `check-file-deps`.
+#[derive(Default)]
 pub(crate) struct CheckHeap {
     /// `mod/` prefix → its public `(bare, qualified)` export pairs, keyed by the global
     /// count so a `def` invalidates it. Lets a whole-project check build the index in ONE
@@ -1658,34 +1659,24 @@ pub(crate) struct CheckHeap {
     dep_rec: Option<CheckDepRec>,
 }
 
-impl Default for CheckHeap {
-    fn default() -> Self {
-        CheckHeap {
-            exports: None,
-            known_ns: None,
-            dep_rec: None,
-        }
-    }
-}
-
 impl Heap {
     /// The old-generation slabs. Callers must already hold an OLD handle, whose existence
     /// implies a promotion allocated this — see [`Heap::old`](Self::old)'s field docs.
     #[inline]
-    pub(crate) fn old(&self) -> &Slabs {
+    fn old(&self) -> &Slabs {
         self.old
             .as_deref()
             .expect("an OLD handle implies the old generation was allocated")
     }
     /// The old-generation slabs for mutation, allocating on first promotion.
     #[inline]
-    pub(crate) fn old_mut(&mut self) -> &mut Slabs {
+    fn old_mut(&mut self) -> &mut Slabs {
         self.old.get_or_insert_with(Box::default)
     }
     /// The old generation if this process ever promoted — for aggregate walks (capacity
     /// sums, GC scans) that must tolerate its absence rather than assume it.
     #[inline]
-    pub(crate) fn old_opt(&self) -> Option<&Slabs> {
+    fn old_opt(&self) -> Option<&Slabs> {
         self.old.as_deref()
     }
 }
@@ -1897,6 +1888,9 @@ pub struct Heap {
     /// is inline in `Box<Process>`, where bytes cost about 2:1 in RSS via mimalloc's size
     /// classes — measured at `spawn` +5.9% for the inline `Vec`. `None` until this process
     /// is actually handed a fast-path message, which most processes never are.
+    // `Box<Vec>` is deliberate, not the redundant box clippy assumes: boxing keeps this
+    // 8 bytes inline on every `Heap` instead of the `Vec`'s 24 (the +5.9%-spawn cost above).
+    #[allow(clippy::box_collection)]
     msg_roots: Option<Box<Vec<Value>>>,
     /// Loader/checker/namespace state — see [`ColdHeap`]. `None` until a module load,
     /// namespace compile or checker run needs it, so a plain worker process never

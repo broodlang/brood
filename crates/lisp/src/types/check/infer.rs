@@ -237,6 +237,19 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                         if let Some(sg) = ctx.declared_sig(s) {
                             return Some(sg.ret);
                         }
+                        // An **ability op** with a declared `:-> RET` return type. The op
+                        // is a generic `defn` whose body is the dispatch machinery, so its
+                        // own inferred type is opaque — the declared return is the only
+                        // static handle on what `(area shape)` yields, and flowing it here
+                        // lets a call result feed the rest of inference (`(+ (area s) 1.0)`).
+                        // Sound: the checker already warns when an impl's body doesn't
+                        // conform to this return (`walk::check_impl_returns`), so the
+                        // declared type is a contract, not a guess.
+                        if let Some(info) = ctx.ability() {
+                            if let Some(ret) = info.op_ret_of(s) {
+                                return Some(ret.clone());
+                            }
+                        }
                     }
                     // Sequence-aware refinements (`list`/`vector` constructors,
                     // `first`/`last`/`nth` extractors) and the integer-closed
