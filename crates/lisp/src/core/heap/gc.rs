@@ -84,10 +84,14 @@ impl Heap {
         // with them. (Any still-live form's position survives the arena flip
         // rather than being discarded.)
         // Legacy single-space flush: nursery→nursery, so keys stay young (age 0).
-        let old_form_pos = std::mem::take(&mut self.form_pos);
-        for (key, pos) in old_form_pos {
-            if let Some(new_idx) = fwd.pairs.lookup(key as u32) {
-                self.form_pos.insert(new_idx as u64, pos);
+        // Source positions are loader state: absent for a worker process, in which case
+        // there is nothing to remap and we skip the walk entirely (see `ColdHeap`).
+        if self.cold.is_some() {
+            let old_form_pos = std::mem::take(&mut self.cold_mut().form_pos);
+            for (key, pos) in old_form_pos {
+                if let Some(new_idx) = fwd.pairs.lookup(key as u32) {
+                    self.cold_mut().form_pos.insert(new_idx as u64, pos);
+                }
             }
         }
         // GC observability (Tier-1). After the flip the fresh slabs hold exactly
@@ -862,12 +866,16 @@ impl Heap {
         // nursery entries drop; existing OLD entries are untouched (old didn't move
         // in a minor).
         let new_age_bit: u64 = if tenure { 1 << 32 } else { 0 };
-        let old_form_pos = std::mem::take(&mut self.form_pos);
-        for (key, pos) in old_form_pos {
-            if (key >> 32) & 1 == 1 {
-                self.form_pos.insert(key, pos);
-            } else if let Some(new_idx) = fwd.pairs.lookup(key as u32) {
-                self.form_pos.insert((new_idx as u64) | new_age_bit, pos);
+        if self.cold.is_some() {
+            let old_form_pos = std::mem::take(&mut self.cold_mut().form_pos);
+            for (key, pos) in old_form_pos {
+                if (key >> 32) & 1 == 1 {
+                    self.cold_mut().form_pos.insert(key, pos);
+                } else if let Some(new_idx) = fwd.pairs.lookup(key as u32) {
+                    self.cold_mut()
+                        .form_pos
+                        .insert((new_idx as u64) | new_age_bit, pos);
+                }
             }
         }
         // Install the relocated space. Tenure: `dest` is the grown old gen; the
@@ -951,11 +959,15 @@ impl Heap {
                 })
                 .collect();
         }
-        let old_form_pos = std::mem::take(&mut self.form_pos);
-        for (key, pos) in old_form_pos {
-            if (key >> 32) & 1 == 1 {
-                if let Some(new_idx) = fwd.pairs.lookup(key as u32) {
-                    self.form_pos.insert((new_idx as u64) | (1 << 32), pos);
+        if self.cold.is_some() {
+            let old_form_pos = std::mem::take(&mut self.cold_mut().form_pos);
+            for (key, pos) in old_form_pos {
+                if (key >> 32) & 1 == 1 {
+                    if let Some(new_idx) = fwd.pairs.lookup(key as u32) {
+                        self.cold_mut()
+                            .form_pos
+                            .insert((new_idx as u64) | (1 << 32), pos);
+                    }
                 }
             }
         }
