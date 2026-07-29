@@ -624,8 +624,7 @@ fn read_impls_registry(
     impls: &mut HashSet<(String, String, String)>,
     defaults: &mut HashSet<(String, String)>,
 ) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*impls*"))
-    else {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*impls*")) else {
         return;
     };
     for (op_key, inner) in heap.map_entries(mid) {
@@ -677,7 +676,13 @@ pub(super) fn ability_type_table(
             &mut provided,
         );
     }
-    read_abilities_registry(heap, &mut names, &mut ret_forms, &mut op_params, &mut provided);
+    read_abilities_registry(
+        heap,
+        &mut names,
+        &mut ret_forms,
+        &mut op_params,
+        &mut provided,
+    );
     // Sealed abilities → their closed member set.
     let mut sealed: HashMap<String, Vec<String>> = HashMap::new();
     for &form in expanded {
@@ -1030,8 +1035,7 @@ fn read_abilities_registry(
     params: &mut HashMap<(String, String), Vec<Option<crate::types::Ty>>>,
     provided: &mut HashSet<(String, String)>,
 ) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*abilities*"))
-    else {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*abilities*")) else {
         return;
     };
     for (name, specs) in heap.map_entries(mid) {
@@ -1062,8 +1066,7 @@ fn read_abilities_registry(
 
 /// Union in the runtime `*sealed*` registry — name → member id keywords.
 fn read_sealed_registry(heap: &Heap, out: &mut HashMap<String, Vec<String>>) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*sealed*"))
-    else {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*sealed*")) else {
         return;
     };
     for (name, members) in heap.map_entries(mid) {
