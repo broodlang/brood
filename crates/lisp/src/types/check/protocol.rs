@@ -647,6 +647,12 @@ pub(super) struct AbilityInfo {
     /// visible here too. Drives call-site return-type inference (`op_ret_of`) and the
     /// impl-return check.
     op_ret: HashMap<(String, String), crate::types::Ty>,
+    /// `(ability, op)` → its declared **parameter types**, one entry per position (the
+    /// `(name T)` sibling of `:-> RET`, ADR-180). `None` at a position = untyped there (the
+    /// common case — `self` is untyped, and most params are bare). Drives call-site argument
+    /// checking (`op_params_of`) and precise impl-body param binding. Same two sources as
+    /// `op_ret`, so a param type declared in another module is visible here too.
+    op_params: HashMap<(String, String), Vec<Option<crate::types::Ty>>>,
     /// ability name → its SEALED member id names (closed set), if declared sealed.
     sealed: HashMap<String, Vec<String>>,
     /// Same-module op-name collisions: two abilities in this file declaring the same op
@@ -672,6 +678,21 @@ impl AbilityInfo {
     /// the impl-return check (a `register-impl` carries the ability + op names).
     pub(super) fn op_ret_by_name(&self, ability: &str, op: &str) -> Option<&crate::types::Ty> {
         self.op_ret.get(&(ability.to_string(), op.to_string()))
+    }
+    /// The declared per-position parameter types of the ability op `sym` denotes, if the op
+    /// declares any — for call-site argument checking.
+    pub(super) fn op_params_of(&self, sym: value::Symbol) -> Option<&Vec<Option<crate::types::Ty>>> {
+        let (a, op) = self.op_fns.get(&sym)?;
+        self.op_params.get(&(a.clone(), op.clone()))
+    }
+    /// The declared per-position parameter types of `(ability, op)` — the by-name path used
+    /// by the impl-body param binding.
+    pub(super) fn op_params_by_name(
+        &self,
+        ability: &str,
+        op: &str,
+    ) -> Option<&Vec<Option<crate::types::Ty>>> {
+        self.op_params.get(&(ability.to_string(), op.to_string()))
     }
     /// True when neither an impl nor a `:default` covers `(ability, op, id)`.
     pub(super) fn missing(&self, ability: &str, op: &str, id: &str) -> bool {
@@ -716,11 +737,14 @@ pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo
     // `(ability, op)` → its `:-> RET` return-type *form* (unparsed). Filled from this
     // file's `register-ability` forms and the runtime registry, then parsed to `Ty`.
     let mut ret_forms: HashMap<(String, String), Value> = HashMap::new();
+    // `(ability, op)` → its per-position parameter types (parsed eagerly, unlike `ret_forms`,
+    // since `spec_param_types` already produces `Ty`s).
+    let mut op_params: HashMap<(String, String), Vec<Option<crate::types::Ty>>> = HashMap::new();
     for &form in expanded {
-        collect_register_ability(heap, form, &mut abilities, &mut ret_forms);
+        collect_register_ability(heap, form, &mut abilities, &mut ret_forms, &mut op_params);
         collect_register_sealed(heap, form, &mut sealed);
     }
-    read_abilities_registry(heap, &mut abilities, &mut ret_forms);
+    read_abilities_registry(heap, &mut abilities, &mut ret_forms, &mut op_params);
     read_sealed_registry(heap, &mut sealed);
     let op_ret = ret_forms
         .into_iter()
@@ -733,6 +757,7 @@ pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo
         defaults,
         abilities,
         op_ret,
+        op_params,
         sealed,
         collisions,
     }
@@ -749,6 +774,30 @@ fn spec_ret_form(heap: &Heap, spec: Value) -> Option<Value> {
     items.get(arrow + 1).copied()
 }
 
+/// The per-position parameter types of an op spec `(op [p0 (p1 T1) …] …)`: `Some(ty)` for a
+/// typed `(name T)` entry, `None` for a bare symbol (or a `&`-rest marker). `None` (the
+/// whole result) when the spec has no param vector or declares no type at all — so an op
+/// with all-bare params contributes nothing to argument checking.
+fn spec_param_types(heap: &Heap, spec: Value) -> Option<Vec<Option<crate::types::Ty>>> {
+    let items = list_items(heap, spec)?;
+    let Some(&Value::Vector(vid)) = items.get(1) else {
+        return None;
+    };
+    let types: Vec<Option<crate::types::Ty>> = heap
+        .vector(vid)
+        .to_vec()
+        .iter()
+        .map(|&p| {
+            // `(name T)` → parse T; a bare symbol / `&` → no type.
+            list_items(heap, p)
+                .and_then(|it| it.get(1).copied())
+                .and_then(|t| super::annot::parse_type(heap, t))
+        })
+        .collect();
+    // Skip an all-untyped op — nothing to check, and no need to store a vec of `None`s.
+    types.iter().any(Option::is_some).then_some(types)
+}
+
 /// Same-module op-name collisions (two abilities in this file declaring the same op name).
 /// One diagnostic per collision — advisory in the live image, ship-blocking under
 /// `nest check` (which exits nonzero on any warning), so op names stay unique per module.
@@ -763,6 +812,7 @@ fn collect_register_ability(
     form: Value,
     out: &mut HashMap<String, Vec<String>>,
     rets: &mut HashMap<(String, String), Value>,
+    params: &mut HashMap<(String, String), Vec<Option<crate::types::Ty>>>,
 ) {
     stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
@@ -788,6 +838,9 @@ fn collect_register_ability(
                         if let Some(ret) = spec_ret_form(heap, spec) {
                             rets.entry((a.clone(), op.clone())).or_insert(ret);
                         }
+                        if let Some(ptys) = spec_param_types(heap, spec) {
+                            params.entry((a.clone(), op.clone())).or_insert(ptys);
+                        }
                         ops.push(op);
                     }
                     out.insert(a, ops);
@@ -795,7 +848,7 @@ fn collect_register_ability(
             }
         }
         for &item in items.get(1..).unwrap_or(&[]) {
-            collect_register_ability(heap, item, out, rets);
+            collect_register_ability(heap, item, out, rets, params);
         }
     })
 }
@@ -840,6 +893,7 @@ fn read_abilities_registry(
     heap: &Heap,
     out: &mut HashMap<String, Vec<String>>,
     rets: &mut HashMap<(String, String), Value>,
+    params: &mut HashMap<(String, String), Vec<Option<crate::types::Ty>>>,
 ) {
     let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("ability/*abilities*"))
     else {
@@ -857,6 +911,9 @@ fn read_abilities_registry(
                 };
                 if let Some(ret) = spec_ret_form(heap, spec) {
                     rets.entry((a.clone(), op.clone())).or_insert(ret);
+                }
+                if let Some(ptys) = spec_param_types(heap, spec) {
+                    params.entry((a.clone(), op.clone())).or_insert(ptys);
                 }
                 ops.push(op);
             }
@@ -1023,12 +1080,35 @@ pub(super) struct MultiInfo {
     methods: HashMap<String, HashSet<Vec<String>>>,
     /// multimethod names that have a `:default` catch-all method.
     defaults: HashSet<String>,
+    /// id-names that are genuine `defrecord` identities (this file's ctors + the runtime
+    /// `*record-ids*` registry). Lets the operator-sugar check tell a record operand from a
+    /// plain number, so `(+ 1 2)` is never checked but `(+ (usd 1) 2.5)` is.
+    record_ids: HashSet<String>,
 }
 
 impl MultiInfo {
     fn is_empty(&self) -> bool {
         self.generics.is_empty()
     }
+    /// The multimethod name a generic global symbol denotes, if any.
+    pub(super) fn generic_of(&self, sym: value::Symbol) -> Option<&String> {
+        self.generics.get(&sym)
+    }
+    /// True when neither an exact method nor a `:default` covers `mname`'s identity `tuple`.
+    fn missing(&self, mname: &str, tuple: &[String]) -> bool {
+        !self.defaults.contains(mname)
+            && !self.methods.get(mname).is_some_and(|s| s.contains(tuple))
+    }
+}
+
+/// The diagnostic for a multimethod call whose identity tuple has no method.
+fn multi_missing_warning(mname: &str, tuple: &[String]) -> String {
+    let key = tuple
+        .iter()
+        .map(|s| format!(":{}", s))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("multimethod {}: no method for [{}]", mname, key)
 }
 
 /// Search `form` for a multimethod generic's dispatch call → the multimethod name. `defmulti`
@@ -1242,11 +1322,104 @@ pub(super) fn build_multi_info(heap: &Heap, expanded: &[Value]) -> MultiInfo {
             set.extend(mirrors);
         }
     }
+    // Record ids: this file's own ctors' ids, plus the runtime `*record-ids*` registry.
+    let mut record_ids: HashSet<String> = ctors.values().cloned().collect();
+    read_record_ids_registry(heap, &mut record_ids);
     MultiInfo {
         generics,
         ctors,
         methods,
         defaults,
+        record_ids,
+    }
+}
+
+/// Union in the runtime `*record-ids*` registry — id-keyword → record name (ADR-182) — so a
+/// record type loaded from another module is known here too. Only the ids (keys) are needed.
+fn read_record_ids_registry(heap: &Heap, out: &mut HashSet<String>) {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*record-ids*")) else {
+        return;
+    };
+    for (id, _name) in heap.map_entries(mid) {
+        if let Some(id) = sym_name(id) {
+            out.insert(id);
+        }
+    }
+}
+
+/// The multimethod an arithmetic/comparison operator routes to on a record operand (ADR-179):
+/// `+`/`-`/`*`/`/` → `num-*`, and `<`/`<=`/`>`/`>=` → `compare-to` (the antisymmetric mirror
+/// makes the direction irrelevant). `None` for a non-operator head.
+fn operator_multimethod(head: value::Symbol) -> Option<&'static str> {
+    Some(if value::symbol_is(head, "+") {
+        "num-add"
+    } else if value::symbol_is(head, "-") {
+        "num-sub"
+    } else if value::symbol_is(head, "*") {
+        "num-mul"
+    } else if value::symbol_is(head, "/") {
+        "num-div"
+    } else if value::symbol_is(head, "<")
+        || value::symbol_is(head, "<=")
+        || value::symbol_is(head, ">")
+        || value::symbol_is(head, ">=")
+    {
+        "compare-to"
+    } else {
+        return None;
+    })
+}
+
+/// Operator-sugar coverage (ADR-179): a 2-arg `(+ a b)` / `(< a b)` etc. routes to a `Num`/`Ord`
+/// multimethod when a record is an operand. Warn when both operand identities are known, at
+/// least one is a record (so pure `(+ 1 2)` is never touched), and the routed multimethod has
+/// no method for the pair. Only the 2-arg form — a variadic fold's intermediate type is unknown.
+pub(super) fn check_operator_sugar(
+    heap: &Heap,
+    head: value::Symbol,
+    items: &[Value],
+    info: &MultiInfo,
+    ctx: &super::ctx::Ctx,
+    pos: Option<Pos>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    if info.record_ids.is_empty() {
+        return;
+    }
+    let Some(mname) = operator_multimethod(head) else {
+        return;
+    };
+    let args = items.get(1..).unwrap_or(&[]);
+    if args.len() != 2 {
+        return;
+    }
+    let (Some(a), Some(b)) = (
+        multi_arg_identity(heap, args[0], info, ctx),
+        multi_arg_identity(heap, args[1], info, ctx),
+    ) else {
+        return;
+    };
+    // Only when a record is actually involved — else the kernel handles it (no `num-*` method
+    // exists for `[int int]`, and warning there would be nonsense).
+    if !info.record_ids.contains(&a) && !info.record_ids.contains(&b) {
+        return;
+    }
+    let tuple = vec![a, b];
+    if info.missing(mname, &tuple) {
+        let key = tuple
+            .iter()
+            .map(|s| format!(":{}", s))
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push((
+            pos,
+            format!(
+                "{}: no `{}` method for [{}]",
+                value::symbol_name(head),
+                mname,
+                key
+            ),
+        ));
     }
 }
 
@@ -1278,20 +1451,10 @@ fn walk_multi_calls(
                     .map(|&a| arg_identity(heap, a, &info.ctors))
                     .collect();
                 if let Some(tuple) = tuple {
-                    let covered = info.defaults.contains(mname)
-                        || info
-                            .methods
-                            .get(mname)
-                            .is_some_and(|set| set.contains(&tuple));
-                    if !covered {
-                        let key = tuple
-                            .iter()
-                            .map(|s| format!(":{}", s))
-                            .collect::<Vec<_>>()
-                            .join(" ");
+                    if info.missing(mname, &tuple) {
                         out.push((
                             heap.form_pos_only(form),
-                            format!("multimethod {}: no method for [{}]", mname, key),
+                            multi_missing_warning(mname, &tuple),
                         ));
                     }
                 }
@@ -1314,5 +1477,54 @@ pub(super) fn check_multi_calls(
     }
     for &form in expanded {
         walk_multi_calls(heap, form, info, out);
+    }
+}
+
+/// An argument's dispatch identity for a multimethod call: syntactic (a literal or a direct
+/// `defrecord` ctor call) first, else the record id of its *inferred* type (a record-typed
+/// variable). `None` when neither is certain — the tuple then stays unknown and the call is
+/// not judged (sound: no false positive on an unknown operand).
+pub(super) fn multi_arg_identity(
+    heap: &Heap,
+    arg: Value,
+    info: &MultiInfo,
+    ctx: &super::ctx::Ctx,
+) -> Option<String> {
+    if let Some(id) = arg_identity(heap, arg, &info.ctors) {
+        return Some(id);
+    }
+    let ty = super::infer::expr_ty(heap, arg, ctx)?;
+    ty_record_id(&ty)
+}
+
+/// The inference hook: at a `defmulti` generic call at least one of whose args is a *symbol*
+/// (so the syntactic pass deferred — a symbol never resolves syntactically), resolve every
+/// arg's identity syntactically-or-by-inferred-record-type and warn when the full tuple has no
+/// method and no `:default`. Complements `walk_multi_calls`; the symbol gate prevents a
+/// double warning (a call the syntactic pass could fully resolve has no symbol arg).
+pub(super) fn check_multi_call_inferred(
+    heap: &Heap,
+    head: value::Symbol,
+    items: &[Value],
+    info: &MultiInfo,
+    ctx: &super::ctx::Ctx,
+    pos: Option<Pos>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    let Some(mname) = info.generics.get(&head) else {
+        return;
+    };
+    let args = items.get(1..).unwrap_or(&[]);
+    if args.is_empty() || !args.iter().any(|a| matches!(a, Value::Sym(_))) {
+        return;
+    }
+    let tuple: Option<Vec<String>> = args
+        .iter()
+        .map(|&a| multi_arg_identity(heap, a, info, ctx))
+        .collect();
+    if let Some(tuple) = tuple {
+        if info.missing(mname, &tuple) {
+            out.push((pos, multi_missing_warning(mname, &tuple)));
+        }
     }
 }

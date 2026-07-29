@@ -216,6 +216,11 @@ pub(super) struct Ctx {
     /// to a record-typed value with no impl. `None` in a file with no `defability`.
     /// Shared (`Arc`) so cloning `Ctx` as the walk descends stays cheap.
     ability: Option<std::sync::Arc<super::protocol::AbilityInfo>>,
+    /// Multimethod facts for the file (`defmulti` generic symbols + covered tuples) — set
+    /// once at the file level so `check_into` can flag a generic call whose args' identities
+    /// come from *inference* (a record-typed variable), complementing the syntactic pass.
+    /// `None` in a file with no `defmulti`. Shared (`Arc`) so cloning `Ctx` stays cheap.
+    multi: Option<std::sync::Arc<super::protocol::MultiInfo>>,
     types: HashMap<Symbol, Ty>,
     /// **Path narrowings** — the type of a *compound path* asserted by an
     /// enclosing guard, keyed by a base symbol plus a chain of [`PathKey`]s
@@ -376,6 +381,16 @@ impl Ctx {
     /// Install the file's ability facts (once, at the top of file checking).
     pub(super) fn set_ability(&mut self, info: std::sync::Arc<super::protocol::AbilityInfo>) {
         self.ability = Some(info);
+    }
+
+    /// The file's multimethod facts, if any (`None` unless `set_multi` ran at file level).
+    pub(super) fn multi(&self) -> Option<&super::protocol::MultiInfo> {
+        self.multi.as_deref()
+    }
+
+    /// Install the file's multimethod facts (once, at the top of file checking).
+    pub(super) fn set_multi(&mut self, info: std::sync::Arc<super::protocol::MultiInfo>) {
+        self.multi = Some(info);
     }
 
     pub(super) fn with_suppressed(&self, mask: u8) -> Ctx {

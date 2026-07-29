@@ -11450,3 +11450,47 @@ Two process notes worth keeping:
 
 Gate: suite 3804 green, `make stress` 33/33, TSAN 0 warnings, GC_STRESS and GC_VERIFY clean
 (including a probe that deliberately populates and re-reads an old generation).
+
+## 2026-07-29 (cont.) — multimethod static-coverage check (the ADR-179 follow-up)
+
+Discharged the deferred follow-up: `nest check` now flags a direct `defmulti` generic call
+whose FULL argument tuple is statically known (every arg a literal or a `defrecord` ctor call)
+but has no exact method and no `:default` — the multimethod analogue of `check_ability_calls`,
+so an unclear dispatch fails at type-check, not only at runtime.
+
+- `types/check/protocol.rs`: `build_multi_info` (recognises a generic by its `multi-resolve`
+  body fingerprint — sound, like the ability `%dispatch` fingerprint; collects methods from
+  this file's `register-method` forms + the runtime `*methods*` registry) and `check_multi_calls`.
+- **Closure mirrors accounted for:** a `:commutative`/`:antisymmetric` `[A B]` method also
+  covers `[B A]`, mirroring the runtime's `register-method--derive`, so `(scale 3 money)` for a
+  `[money :int]` method does NOT false-warn. This was a real false positive caught in testing.
+- Only judges a call all of whose args have a certain identity — one unknown arg (a variable)
+  defers. No inference hook yet (record-typed *variables* aren't judged); syntactic-only, sound.
+- Scope: fires on a **direct** generic call (`(num-add …)`, a user `(defmulti mine)` call), not
+  on the `+`/`<` operator sugar (which the checker doesn't see through to `num-add`).
+
+Zero false positives across `std/` + `tests/` (full suite 894 green); clippy + fmt clean.
+Tests: `type_check_catalog.rs` (a miss warns; covered/mirror/`:default`/unknown-arg stay silent).
+
+## 2026-07-29 (cont.) — typed ability op parameters `(name T)` (ADR-180 follow-on)
+
+Completed the typed-abilities story: an op could already declare what it *returns* (`:-> RET`,
+ADR-180); now it can declare what it *accepts*. `(scale [self (factor float)] :-> int)` wraps
+a param as `(name T)` — the argument-side sibling of the return type.
+
+Runtime: one line in `defability` — strip the type from the generated op `defn`
+(`(factor float)` → `factor`), so it stays a checker-only annotation and dispatch is unchanged
+(still on the first arg's identity; `(arglist scale)` → `(self factor)`). Checker: parse the
+param vector's `(name T)` entries into `AbilityInfo.op_params` (same two sources as `op_ret`),
+then (1) check each argument at a typed position at the call site — `(scale s "x")` warns
+"argument 2 expects float" — reusing the exact sig-param gradual relation (`gradual_of` +
+`consistent_with` + `relax_param_for_arg`), and (2) bind the impl body's param at that type so
+returning it against a disjoint `:-> RET` is caught.
+
+False-positive-clean by construction (untyped positions — every bare param and `self` —
+impose nothing, so all existing all-bare op specs are inert): full type suite 264 → 268,
+ability suite 51 → 54 (+3 in-language, incl. the soundness case that an unknown-typed arg
+DEFERS), and **zero** new argument/return warnings across all of `std/` + `tests/`. ADR-180's
+deferred item (a) discharged; language.md updated. This wraps the type-system arc — typed
+returns + typed params (ADR-180), sealed-ability-as-a-type (ADR-181), devirtualization
+(ADR-182).
