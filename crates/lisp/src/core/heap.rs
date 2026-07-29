@@ -111,7 +111,7 @@ macro_rules! region_ref {
                         stringify!($name),
                         id.0,
                     );
-                    SlabRef::direct(&self.old.$field[id.index()])
+                    SlabRef::direct(&self.old().$field[id.index()])
                 }
                 LOCAL => {
                     #[cfg(debug_assertions)]
@@ -1669,6 +1669,28 @@ impl Default for CheckHeap {
 }
 
 impl Heap {
+    /// The old-generation slabs. Callers must already hold an OLD handle, whose existence
+    /// implies a promotion allocated this — see [`Heap::old`](Self::old)'s field docs.
+    #[inline]
+    pub(crate) fn old(&self) -> &Slabs {
+        self.old
+            .as_deref()
+            .expect("an OLD handle implies the old generation was allocated")
+    }
+    /// The old-generation slabs for mutation, allocating on first promotion.
+    #[inline]
+    pub(crate) fn old_mut(&mut self) -> &mut Slabs {
+        self.old.get_or_insert_with(Box::default)
+    }
+    /// The old generation if this process ever promoted — for aggregate walks (capacity
+    /// sums, GC scans) that must tolerate its absence rather than assume it.
+    #[inline]
+    pub(crate) fn old_opt(&self) -> Option<&Slabs> {
+        self.old.as_deref()
+    }
+}
+
+impl Heap {
     /// The checker state, allocating it on first use. Callers hold `&self` (see
     /// [`Heap::check`]), so this returns a guard rather than a reference.
     fn check_mut(&self) -> std::cell::RefMut<'_, Box<CheckHeap>> {
@@ -1695,7 +1717,13 @@ pub struct Heap {
     /// data is immutable, an old object can never come to point at a young one, so
     /// the old generation is **not a root set for a minor collection** — no write
     /// barrier, no remembered set.
-    old: Slabs,
+    /// The old generation, lazily boxed. Empty for almost every process — measured at
+    /// **7 of 300,000** on `spawn-live`, because a process only populates it by surviving a
+    /// minor collection, and a short-lived worker never collects at all. Inline it is 264 B
+    /// (eleven `Vec` headers) on every `Heap`, which is inline in `Box<Process>`; boxed it
+    /// is 8. Reads go through [`Heap::old`], which may only be called when an OLD handle
+    /// exists — and an OLD handle can only exist if a promotion allocated this.
+    old: Option<Box<Slabs>>,
     prelude: Arc<SharedCode>,
     runtime: Arc<RuntimeCode>,
     /// Nesting depth of an **embedded-module load** in this process (ADR-166). While
@@ -2406,7 +2434,7 @@ impl Heap {
     pub fn new() -> Self {
         Heap {
             local: Slabs::default(),
-            old: Slabs::default(),
+            old: None,
             gen_cache: [RefCell::new(None), RefCell::new(None)],
             gen_cache_ver: [Cell::new(u64::MAX), Cell::new(u64::MAX)],
             closure_tpl_cache: RefCell::new(ClosureTemplateMap::default()),
@@ -2482,7 +2510,7 @@ impl Heap {
     pub fn with_regions(prelude: Arc<SharedCode>, runtime: Arc<RuntimeCode>) -> Self {
         Heap {
             local: Slabs::default(),
-            old: Slabs::default(),
+            old: None,
             gen_cache: [RefCell::new(None), RefCell::new(None)],
             gen_cache_ver: [Cell::new(u64::MAX), Cell::new(u64::MAX)],
             closure_tpl_cache: RefCell::new(ClosureTemplateMap::default()),
@@ -3693,7 +3721,7 @@ impl Heap {
                 // Only LOCAL (nursery/old) — the bug-#2 garbage is young/local; PRELUDE/RUNTIME
                 // are stable boxcar slabs (different len API), skip.
                 let len = match id.region() {
-                    LOCAL if id.is_old() => self.old.$field.len(),
+                    LOCAL if id.is_old() => self.old_opt().map_or(0, |o| o.$field.len()),
                     LOCAL => self.local.$field.len(),
                     _ => return None,
                 };
@@ -3817,7 +3845,7 @@ impl Heap {
         match id.region() {
             LOCAL if id.is_old() => {
                 local_gc_check!(old, self, id, "pair");
-                self.old.pairs[id.index()]
+                self.old().pairs[id.index()]
             }
             LOCAL => {
                 local_gc_check!(nursery, self, id, "pair");
@@ -3874,7 +3902,7 @@ impl Heap {
         match id.region() {
             LOCAL if id.is_old() => {
                 local_gc_check!(old, self, id, "string");
-                SlabRef::direct(self.old.strings[id.index()].as_str())
+                SlabRef::direct(self.old().strings[id.index()].as_str())
             }
             LOCAL => {
                 local_gc_check!(nursery, self, id, "string");
@@ -3904,7 +3932,7 @@ impl Heap {
         match id.region() {
             LOCAL if id.is_old() => {
                 local_gc_check!(old, self, id, "closure");
-                SlabRef::direct(&self.old.closures[id.index()])
+                SlabRef::direct(&self.old().closures[id.index()])
             }
             LOCAL => {
                 local_gc_check!(nursery, self, id, "closure");
@@ -3986,7 +4014,7 @@ impl Heap {
             LOCAL if env.is_old() => {
                 #[cfg(debug_assertions)]
                 self.check_epoch_aged(true, env.generation(), env.index(), "env_frame", env.0);
-                SlabRef::direct(&self.old.envs[env.index()])
+                SlabRef::direct(&self.old().envs[env.index()])
             }
             LOCAL => {
                 #[cfg(debug_assertions)]
@@ -4305,7 +4333,7 @@ impl Heap {
             // bound until the next tenure clears it. The linear scan is fine:
             // deduped, the set holds one entry per *distinct* old frame mutated
             // since the last minor, which is tiny.
-            self.old.envs[env.index()].vars.push((sym, val));
+            self.old_mut().envs[env.index()].vars.push((sym, val));
             if !self.remembered.contains(&env) {
                 self.remembered.push(env);
             }

@@ -257,6 +257,15 @@ benchmark row before believing it.
   filled through `&self`; a `RefCell<Option<Box<_>>>` with a `RefMut::map` guard is the
   shape that works. Time-neutral, verified against measured per-row noise floors.
 
+- [x] **M1c — DONE 2026-07-29. The old generation is lazily boxed.** `old: Slabs` (264 B,
+  eleven `Vec` headers) → `Option<Box<Slabs>>` (8 B). Measured first: only **7 of 300,000**
+  spawn-live processes ever promote, so it was pure struct overhead for the rest.
+  **−73 MB on spawn-live** (1.847 → 1.774 GB), row time −1.7%. **Costs `fib` +2.6%** (real,
+  survives a padding control) because `fib` promotes and pays an extra indirection on
+  OLD-handle derefs; taken as a deliberate trade in favour of the process floor.
+  `BROOD_GC_VERIFY` was what caught a blanket-rewrite bug here — aggregate collector walks
+  need `old_opt()`, not the handle-deref `old()`.
+
 - [ ] **M2b — shared IC tables across a runtime's processes** (ADR-175 Stage 3, the BEAM
   export-table move). **Blocker found 2026-07-29 by reading the code, and it is bigger than
   "needs a lock":** `vm_fast_links_base()` hands JIT'd code a **raw pointer** into the

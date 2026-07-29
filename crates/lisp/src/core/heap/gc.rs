@@ -184,7 +184,8 @@ impl Heap {
     /// GC and were promoted). Companion to [`local_pair_nursery_base`].
     #[cfg(feature = "jit")]
     pub(crate) fn local_pair_old_base(&self) -> *const u8 {
-        self.old.pairs.as_ptr() as *const u8
+        self.old_opt()
+            .map_or(std::ptr::null(), |o| o.pairs.as_ptr() as *const u8)
     }
 
     /// Raw byte pointer to the LOCAL nursery **vector** slab, so a no-call/no-GC
@@ -202,7 +203,8 @@ impl Heap {
     /// [`local_vec_nursery_base`].
     #[cfg(feature = "jit")]
     pub(crate) fn local_vec_old_base(&self) -> *const u8 {
-        self.old.vectors.as_ptr() as *const u8
+        self.old_opt()
+            .map_or(std::ptr::null(), |o| o.vectors.as_ptr() as *const u8)
     }
 
     /// Current root-stack depth, for a balanced `truncate_roots(roots_len())`
@@ -450,10 +452,13 @@ impl Heap {
     /// Returns the bytes of slab capacity handed back (the IC drop is not counted — it is
     /// not slab capacity).
     pub fn hibernate(&mut self) -> usize {
-        let before = slab_capacity_bytes(&self.local) + slab_capacity_bytes(&self.old);
+        let before =
+            slab_capacity_bytes(&self.local) + self.old_opt().map_or(0, slab_capacity_bytes);
         self.collect(&mut [], &mut []);
         shrink_slabs(&mut self.local);
-        shrink_slabs(&mut self.old);
+        if let Some(o) = self.old.as_deref_mut() {
+            shrink_slabs(o);
+        }
         self.roots.shrink_to_fit();
         self.env_roots.shrink_to_fit();
         // The part the automatic path won't do.
@@ -471,7 +476,8 @@ impl Heap {
         // long-idle process can give back. Shared arms (ADR-175) are held by the runtime,
         // so dropping our reference is cheap and they re-install on the next call.
         self.vm_cache.borrow_mut().clear();
-        let after = slab_capacity_bytes(&self.local) + slab_capacity_bytes(&self.old);
+        let after =
+            slab_capacity_bytes(&self.local) + self.old_opt().map_or(0, slab_capacity_bytes);
         // Reset the auto-trim high-water: after a deliberate deep shrink, the next
         // ordinary park should judge growth from here, not from the pre-hibernate peak.
         self.park_trim_mark = park_trim_probe(&self.local);
@@ -486,13 +492,17 @@ impl Heap {
         if probe.saturating_sub(self.park_trim_mark) < PARK_TRIM_GROWTH_SLOTS {
             return 0;
         }
-        let before = slab_capacity_bytes(&self.local) + slab_capacity_bytes(&self.old);
+        let before =
+            slab_capacity_bytes(&self.local) + self.old_opt().map_or(0, slab_capacity_bytes);
         self.collect(&mut [], &mut []);
         shrink_slabs(&mut self.local);
-        shrink_slabs(&mut self.old);
+        if let Some(o) = self.old.as_deref_mut() {
+            shrink_slabs(o);
+        }
         self.roots.shrink_to_fit();
         self.env_roots.shrink_to_fit();
-        let after = slab_capacity_bytes(&self.local) + slab_capacity_bytes(&self.old);
+        let after =
+            slab_capacity_bytes(&self.local) + self.old_opt().map_or(0, slab_capacity_bytes);
         // Mark the **pre-trim high-water**, not the shrunken size. Marking `after` (the
         // obvious choice) makes the gate oscillate: the process shrinks to X, regrows to
         // X + 4 KiB, trims again, and a busy responder pays a collection every few
@@ -543,7 +553,7 @@ impl Heap {
     /// O(1) (slab lens × sizes); no-op unless a limit is set.
     fn note_proc_limit(&mut self) {
         if let Some(limit) = self.proc_mem_limit {
-            let live = slab_bytes(&self.local) + slab_bytes(&self.old);
+            let live = slab_bytes(&self.local) + self.old_opt().map_or(0, slab_bytes);
             if live > limit {
                 self.proc_limit_hit = Some(live);
             }
@@ -680,8 +690,8 @@ impl Heap {
                     self.local.strings.len(),
                     self.local.envs.len(),
                     self.local.closures.len(),
-                    self.old.pairs.len(),
-                    self.old.vectors.len(),
+                    self.old_opt().map_or(0, |o| o.pairs.len()),
+                    self.old_opt().map_or(0, |o| o.vectors.len()),
                 );
             }
         }
@@ -762,7 +772,7 @@ impl Heap {
     /// append-only between major collections, so the slab lengths *are* the
     /// live count. Drives the major-collection threshold.
     pub fn old_live_count(&self) -> usize {
-        slab_live_count(&self.old)
+        self.old_opt().map_or(0, slab_live_count)
     }
 
     /// A **minor collection**. `tenure` selects the destination of the nursery's
@@ -829,7 +839,11 @@ impl Heap {
         // Tenure: append survivors to the old gen (take it out, append, put back).
         // Flip: survivors go to a fresh nursery that becomes the new `local`.
         let (mut dest, epoch, dest_old) = if tenure {
-            (std::mem::take(&mut self.old), self.old_epoch, true)
+            (
+                self.old.take().map(|b| *b).unwrap_or_default(),
+                self.old_epoch,
+                true,
+            )
         } else {
             // Flip: seed the fresh nursery with the outgoing one's capacity so
             // neither the survivor copy nor the next cycle's allocations re-pay
@@ -851,19 +865,19 @@ impl Heap {
             let n = if tenure {
                 dest.envs[e.index()].vars.len()
             } else {
-                self.old.envs[e.index()].vars.len()
+                self.old().envs[e.index()].vars.len()
             };
             for i in 0..n {
                 let (s, v) = if tenure {
                     dest.envs[e.index()].vars[i]
                 } else {
-                    self.old.envs[e.index()].vars[i]
+                    self.old().envs[e.index()].vars[i]
                 };
                 let nv = flush_value(&young, &mut dest, &mut fwd, v);
                 if tenure {
                     dest.envs[e.index()].vars[i] = (s, nv);
                 } else {
-                    self.old.envs[e.index()].vars[i] = (s, nv);
+                    self.old_mut().envs[e.index()].vars[i] = (s, nv);
                 }
             }
         }
@@ -895,7 +909,7 @@ impl Heap {
         // doubling-ladder rationale as the flip path). Flip: `dest` is the fresh
         // nursery; the old gen was untouched.
         if tenure {
-            self.old = dest;
+            self.old = Some(Box::new(dest));
             self.local = Slabs::with_capacity_like(&young);
         } else {
             self.local = dest;
@@ -932,7 +946,7 @@ impl Heap {
     fn major_collect(&mut self, value_roots: &mut [Value], env_roots: &mut [EnvId]) {
         let before_old = self.old_live_count();
         self.old_epoch = self.old_epoch.wrapping_add(1);
-        let old_src = std::mem::take(&mut self.old);
+        let old_src = self.old.take().map(|b| *b).unwrap_or_default();
         let mut dest = Slabs::default();
         let mut fwd = FlushForward::for_source(&old_src);
         fwd.epoch = self.old_epoch;
@@ -957,7 +971,7 @@ impl Heap {
         // through the env forwarding table (`fwd.envs`, populated by `flush_roots`)
         // and drop any whose frame wasn't copied — it was unreachable, so the major
         // reclaimed it. Skipping this leaves the next `minor_collect` indexing
-        // `self.old.envs[e.index()]` with a stale handle and no bounds/epoch check
+        // `self.old().envs[e.index()]` with a stale handle and no bounds/epoch check
         // (and `BROOD_GC_VERIFY`'s remembered walk uses a safe `.get()`, so it
         // never flags it) — a silent use-after-GC.
         if !self.remembered.is_empty() {
@@ -983,7 +997,7 @@ impl Heap {
                 }
             }
         }
-        self.old = dest;
+        self.old = Some(Box::new(dest));
         let survivors = self.old_live_count();
         self.gc_runs = self.gc_runs.saturating_add(1);
         self.gc_copied = self.gc_copied.saturating_add(survivors as u64);
@@ -1047,23 +1061,23 @@ impl Heap {
         let old_ep = Self::epoch_in_gen_width(self.old_epoch);
         let mut seen_pair = [
             vec![false; self.local.pairs.len()],
-            vec![false; self.old.pairs.len()],
+            vec![false; self.old_opt().map_or(0, |o| o.pairs.len())],
         ];
         let mut seen_vec = [
             vec![false; self.local.vectors.len()],
-            vec![false; self.old.vectors.len()],
+            vec![false; self.old_opt().map_or(0, |o| o.vectors.len())],
         ];
         let mut seen_map = [
             vec![false; self.local.maps.len()],
-            vec![false; self.old.maps.len()],
+            vec![false; self.old_opt().map_or(0, |o| o.maps.len())],
         ];
         let mut seen_clo = [
             vec![false; self.local.closures.len()],
-            vec![false; self.old.closures.len()],
+            vec![false; self.old_opt().map_or(0, |o| o.closures.len())],
         ];
         let mut seen_env = [
             vec![false; self.local.envs.len()],
-            vec![false; self.old.envs.len()],
+            vec![false; self.old_opt().map_or(0, |o| o.envs.len())],
         ];
         let mut work: Vec<W> = Vec::new();
         for &v in extra_roots {
@@ -1099,7 +1113,7 @@ impl Heap {
         // GC_VERIFY O(old) per collection and timed out the large-structure tests.
         for &e in &self.remembered {
             if e.is_old() {
-                if let Some(frame) = self.old.envs.get(e.index()) {
+                if let Some(frame) = self.old_opt().and_then(|o| o.envs.get(e.index())) {
                     for &(_, v) in &frame.vars {
                         work.push(W::V(v, e.0));
                     }
@@ -1133,7 +1147,13 @@ impl Heap {
             match w {
                 W::V(v, parent) => match v.unpack() {
                     ValueRef::Pair(id) if id.region() == LOCAL => {
-                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        let Some(slabs) = (if id.is_old() {
+                            self.old_opt()
+                        } else {
+                            Some(&self.local)
+                        }) else {
+                            continue;
+                        };
                         bad(
                             "pair",
                             id.is_old(),
@@ -1155,7 +1175,13 @@ impl Heap {
                         }
                     }
                     ValueRef::Vector(id) if id.region() == LOCAL => {
-                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        let Some(slabs) = (if id.is_old() {
+                            self.old_opt()
+                        } else {
+                            Some(&self.local)
+                        }) else {
+                            continue;
+                        };
                         bad(
                             "vector",
                             id.is_old(),
@@ -1179,7 +1205,13 @@ impl Heap {
                     // A range's backing vector holds only ints — validate the
                     // handle itself (bounds + epoch), nothing to descend into.
                     ValueRef::Range(id) if id.region() == LOCAL => {
-                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        let Some(slabs) = (if id.is_old() {
+                            self.old_opt()
+                        } else {
+                            Some(&self.local)
+                        }) else {
+                            continue;
+                        };
                         bad(
                             "range",
                             id.is_old(),
@@ -1195,7 +1227,13 @@ impl Heap {
                     // vector (it shares the vectors slab, so it dedups via
                     // `seen_vec`).
                     ValueRef::SeqView(id) if id.region() == LOCAL => {
-                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        let Some(slabs) = (if id.is_old() {
+                            self.old_opt()
+                        } else {
+                            Some(&self.local)
+                        }) else {
+                            continue;
+                        };
                         bad(
                             "seq-view",
                             id.is_old(),
@@ -1217,7 +1255,13 @@ impl Heap {
                         }
                     }
                     ValueRef::Map(id) | ValueRef::Set(id) if id.region() == LOCAL => {
-                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        let Some(slabs) = (if id.is_old() {
+                            self.old_opt()
+                        } else {
+                            Some(&self.local)
+                        }) else {
+                            continue;
+                        };
                         bad(
                             "map",
                             id.is_old(),
@@ -1244,7 +1288,13 @@ impl Heap {
                         }
                     }
                     ValueRef::Str(id) if id.region() == LOCAL => {
-                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        let Some(slabs) = (if id.is_old() {
+                            self.old_opt()
+                        } else {
+                            Some(&self.local)
+                        }) else {
+                            continue;
+                        };
                         bad(
                             "string",
                             id.is_old(),
@@ -1256,7 +1306,13 @@ impl Heap {
                         );
                     }
                     ValueRef::BigInt(id) if id.region() == LOCAL => {
-                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        let Some(slabs) = (if id.is_old() {
+                            self.old_opt()
+                        } else {
+                            Some(&self.local)
+                        }) else {
+                            continue;
+                        };
                         bad(
                             "bigint",
                             id.is_old(),
@@ -1268,7 +1324,13 @@ impl Heap {
                         );
                     }
                     ValueRef::Decimal(id) if id.region() == LOCAL => {
-                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        let Some(slabs) = (if id.is_old() {
+                            self.old_opt()
+                        } else {
+                            Some(&self.local)
+                        }) else {
+                            continue;
+                        };
                         bad(
                             "decimal",
                             id.is_old(),
@@ -1280,7 +1342,13 @@ impl Heap {
                         );
                     }
                     ValueRef::Bytes(id) if id.region() == LOCAL => {
-                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        let Some(slabs) = (if id.is_old() {
+                            self.old_opt()
+                        } else {
+                            Some(&self.local)
+                        }) else {
+                            continue;
+                        };
                         bad(
                             "bytes",
                             id.is_old(),
@@ -1292,7 +1360,13 @@ impl Heap {
                         );
                     }
                     ValueRef::Rope(id) if id.region() == LOCAL => {
-                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        let Some(slabs) = (if id.is_old() {
+                            self.old_opt()
+                        } else {
+                            Some(&self.local)
+                        }) else {
+                            continue;
+                        };
                         bad(
                             "rope",
                             id.is_old(),
@@ -1304,7 +1378,13 @@ impl Heap {
                         );
                     }
                     ValueRef::Fn(id) | ValueRef::Macro(id) if id.region() == LOCAL => {
-                        let slabs = if id.is_old() { &self.old } else { &self.local };
+                        let Some(slabs) = (if id.is_old() {
+                            self.old_opt()
+                        } else {
+                            Some(&self.local)
+                        }) else {
+                            continue;
+                        };
                         bad(
                             "closure",
                             id.is_old(),
@@ -1340,7 +1420,7 @@ impl Heap {
                     if e == EnvId::GLOBAL || e.region() != LOCAL {
                         continue;
                     }
-                    let slabs = if e.is_old() { &self.old } else { &self.local };
+                    let slabs = if e.is_old() { self.old() } else { &self.local };
                     bad(
                         "env",
                         e.is_old(),
@@ -2127,7 +2207,7 @@ mod gen_handle_tests {
     /// set through the env forwarding table. A flip *retains* `remembered` (the
     /// old->young edges persist); the subsequent major then relocates those old
     /// frames and bumps `old_epoch`, leaving every retained entry a stale index
-    /// *and* a stale epoch. The next minor indexes `self.old.envs[e.index()]`
+    /// *and* a stale epoch. The next minor indexes `self.old().envs[e.index()]`
     /// directly — no bounds/epoch check — so a stale entry is a silent
     /// use-after-GC: an OOB `Vec` panic when the compacted old gen is smaller, a
     /// wrong-frame read otherwise. (`BROOD_GC_VERIFY` misses it too — its
@@ -2197,7 +2277,7 @@ mod gen_handle_tests {
             "remembered should point at the surviving kept frame"
         );
         // The deref path the bug corrupts: a subsequent minor reads
-        // `self.old.envs[r.index()]`. Must not panic; the young binding survives.
+        // `self.old().envs[r.index()]`. Must not panic; the young binding survives.
         h.minor_collect(false, &mut [], &mut roots);
         let keep = roots[0];
         assert!(keep.is_old());
