@@ -107,6 +107,6 @@ That rebuild dominated ranking large candidate sets (thousands of project files)
                                 (cons [[(- 0 (get m :score)) (string-length c) c] c] acc))))
                       '() cands))
       (map second (sort-by first decorated)))))
-;; `cands` / the result are any seqable of strings (empty query returns `cands` as-is,
-;; else a ranked list), so `any` — a narrower type would false-flag a vector caller.
-(sig fuzzy-filter (string any -> any))
+;; `cands` and the result are `seqable` (empty query returns `cands` as-is, else a ranked
+;; list) — the domain checks the argument without false-flagging a vector caller.
+(sig fuzzy-filter (string seqable -> seqable))

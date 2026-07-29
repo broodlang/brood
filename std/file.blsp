@@ -36,9 +36,10 @@ primitives. The kernel also provides the always-available file primitives
 (defn write-lines (path lines)
   "Write `lines` (a sequence of strings) to `path`, one per line, each terminated by a newline."
   (spit path (fold (fn (acc l) (str acc l "\n")) "" lines)))
-;; `lines` is `any`, not `(list string)` — it is any seqable (`fold` accepts a list, vector,
-;; set or range), so a narrower type would false-flag a vector caller.
-(sig write-lines (string any -> nil))
+;; `lines` is `seqable`, not `(list string)` — `fold` accepts a list, vector, set or range,
+;; so the broader domain checks the argument (a non-seqable is flagged) without false-flagging
+;; a vector caller the way `(list string)` would.
+(sig write-lines (string seqable -> nil))
 
 ;; --- predicates -------------------------------------------------------------
 

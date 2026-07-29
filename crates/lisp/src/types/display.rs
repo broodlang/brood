@@ -21,6 +21,9 @@ impl fmt::Display for Ty {
         if *self == Ty::LIST {
             return f.write_str("list");
         }
+        if *self == Ty::SEQABLE {
+            return f.write_str("seqable");
+        }
         // A purely-function type with a known signature: show the arrow, or
         // every arm of an overload joined with ` and ` (matching the `(and
         // …)` annotation syntax that produces it).
