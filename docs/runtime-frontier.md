@@ -174,7 +174,23 @@ benchmark row before believing it.
   prelude-heavy). Constraint (recorded in ADR-175): must keep an arm fast path, since
   today's IC caches the resolved arm. **M3 subsumes most of M2's win at lower concurrency
   risk; evaluate first.**
-- [ ] **M4 — process-shell recycling.** Per-worker free-list of retired
+- [ ] **M4 — process-shell recycling. DEPRIORITISED 2026-07-29 — premise measured wrong.**
+  The claim below was "a large cut to the 7.6 µs spawn path". Decomposed, spawn is not
+  where the time is:
+
+  | stage | µs/proc |
+  |---|---|
+  | spawn + immediate exit | **0.90** |
+  | + body work | 1.13 |
+  | + park, 300k staying resident | **5.17** |
+
+  So the spawn machinery is 17% of a spawn-and-park workload, and recycling addresses only
+  the ~15.8 allocations inside it (~0.4 µs) — a ceiling near 8%. Meanwhile it is the
+  *riskiest* item on this list (pid reuse, monitor/link references to a recycled mailbox,
+  epoch discipline on a reused heap). Poor risk/reward until the 4.04 µs of park+residency
+  is addressed. **Residency is the real cost, and it scales with per-process memory** —
+  which is why `hibernate` made the same workload *faster* (0.68 → 0.45 s), and why M1/M3
+  now outrank this. Original entry: Per-worker free-list of retired
   `(Box<Process>, Arc<Mailbox>)` shells; re-init the cheap fields on spawn. Precedent:
   ERTS allocator free-lists, every thread pool. Expected: spawn 15.8 allocs → ~2, a large
   cut to the 7.6 µs spawn path; floor unchanged. Risk: staleness bugs (epoch stamps
@@ -220,14 +236,13 @@ immutability-fraught).
 Revised after the payload measurement above moved L1 off the latency gap.
 
 1. ~~**M5 `(hibernate)`**~~ — **DONE** (8.18 → 4.94 KB/proc).
-2. **M4 shell recycling** — bounded, attacks the 7.6 µs / 15.8-alloc spawn path, no
-   GC-semantics change.
-3. **L3 measurement, then the fix** — split the 2 µs/message into lock / wake / match.
+2. **M1 cold-heap split** — promoted: shrinks the 1840 B `Box<Process>` for every worker,
+   and *residency is latency* on this workload (78% of spawn-and-park is park+residency,
+   which scales with per-process memory).
+3. **M3 direct-link sealed callees** — removes the 664 B of IC tables per process on top.
+4. **L3 measurement, then the fix** — split the 2 µs/message into lock / wake / match.
    This is what actually owns the `pingpong`/`ring` gap, and the measurement is cheap.
-4. **M1 cold-heap split** — mechanical floor win, no semantic risk, any time.
-5. **M3 direct-link sealed callees** — speed + floor together; settle M3-vs-M2 first
-   (they overlap; M3 has lower concurrency risk).
-6. **L1 single-copy send** — big win for payload-carrying apps, ~0 for the benchmark
+5. **L1 single-copy send** — big win for payload-carrying apps, ~0 for the benchmark
    latency rows. Worth doing on its merits, but it is not the latency fix.
 7. **M2 / M6 / M7 / L2** — re-evaluate after the above land.
 
