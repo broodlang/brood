@@ -234,6 +234,46 @@ benchmark row before believing it.
   `current_file`, `dynamics`) behind one `Option<Box<ColdHeap>>` allocated on first use.
   A worker never touches them. Expected: several hundred bytes off `Box<Process>`'s
   1840 B, plus cache-density wins. Mechanical but wide; no semantic risk.
+- [x] **M2a — DONE 2026-07-29. One fast-link representation, not two.** `CallIcEntry.fast`
+  (a 32-byte `Cell<Option<(code, nslots, env)>>`) and the `FastLink` mirror held the *same
+  fact*, written in lockstep — the code said so itself. `FastLink` already carries
+  `sym`/`argc`/`epoch`, so the VM's hot probe never needed the fat entry: it now reads the
+  one 40-byte flat table that JIT'd code reads, and a hit never touches `CallIcEntry` at
+  all. `CallIcEntry` 96 → 64 B.
+
+  Measured: **−157 B per live process** (spawn-live 1.94 → 1.89 GB, −47 MB over 300k), and
+  the compute rows *improve* — pfib −3.5%, collatz −2.7%, fib −1.3%, bintree −0.8%,
+  nqueens flat, spawn-live −0.8%, `spawn` +1.9%. Removing the memo was expected to cost
+  the hot recursive call a second table touch; it didn't, because reading one 40-byte flat
+  slot beats loading a 96-byte entry.
+
+  Method note: the *sweep* reported `spawn` +5.8% and `collatz` +2.8%; solo re-runs gave
+  +1.9% and **−2.7%**. Believe the solo run, as `ab-bench` says.
+
+- [ ] **M2b — shared IC tables across a runtime's processes** (ADR-175 Stage 3, the BEAM
+  export-table move). **Blocker found 2026-07-29 by reading the code, and it is bigger than
+  "needs a lock":** `vm_fast_links_base()` hands JIT'd code a **raw pointer** into the
+  table, sound today only because `SAFETY: single-threaded per process` — nothing can grow
+  or clear it while an arm runs. Sharing the table across processes voids that outright: a
+  peer growing it reallocates under a live raw pointer (use-after-realloc, not merely a
+  torn read). So a shared table must be **block-allocated with stable addresses** — each
+  arm gets a contiguous block, allocated once per *runtime*, that never moves; the JIT
+  then holds a pointer to that arm's block. `boxcar` is the in-tree precedent (it already
+  backs the shared RUNTIME code region for exactly this stable-ref reason).
+
+  What is now settled in favour: entry content is *enforced* process-independent
+  (`vm_call_ic_put` refuses a movable callee or a LOCAL env), the epoch already lives
+  per-runtime in `Arc<RuntimeCode>`, and after M2a the thing worth sharing is a 40-byte
+  `#[repr(C)]` plain-data slot rather than a 96-byte entry holding a `Cell`. Publication
+  can be epoch-last-release, and since all writers resolve identically, a racing writer
+  writes the same bytes.
+
+  Note the base assignment is **not** independently shippable: bases are per-process
+  first-touch today (`vm_arm_block`), and making them runtime-global while tables stay
+  per-process would size every process's table to the runtime's *total* site count — a
+  process touches only ~4 sites. Runtime-global bases and the shared table must land
+  together.
+
 - [ ] **M2 — shared IC entries for sealed callees** (ADR-175 Stage 3, the BEAM
   export-table move). **Promoted over M3 by the analysis above:** every field an IC entry
   caches — `(sym, argc, epoch, callee, arm, env)` — is process-independent *within a
