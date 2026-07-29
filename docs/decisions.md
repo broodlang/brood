@@ -11594,3 +11594,129 @@ updated — `project_test`, `package_test`, `datetime_test`), and each of the fo
 narrower audit this widens), ADR-172 (the authority model, `:sealed`, `%dispatch`),
 ADR-011 (prefer the simplest design — the reason the rejection list is as long as the
 adoption list), ADR-130 (`defrecord`), the 2026-07-29 devlog entry.
+
+## ADR-178 — Multiple dispatch (`defmulti`/`defmethod`): the resolution and closure algebra
+
+**Status:** accepted (design). **Supersedes** the "`defmulti` deferred" note in
+[ADR-172](decisions.md)'s amendment 2026-07-29b — the concrete trigger it named (binary
+arithmetic/ordering operators on record types) has arrived, so the deferred seam is built.
+
+**Context.** Abilities (ADR-168/172) are **single-dispatch** — an op selects its
+implementation from the identity of its *first* argument. That cannot express a binary
+operator symmetrically: `(+ money 5)` dispatches on `money`, but `(+ 5 money)` cannot
+dispatch on `money` because it is the *second* argument, so the two orders behave
+differently and there is no way to make them agree. "No implicit cross-type arithmetic" and
+"no `defmulti`" *together* force accepting that asymmetry. We reopened the question and chose
+to build the seam — but only with a resolution rule that is **provably total and
+unambiguous**, because a naive multiple-dispatch design silently returns wrong answers in
+exactly two places (ambiguous method selection, and the binary-operator diagonal).
+
+**Decision.** Add `defmulti`/`defmethod` — dispatch on the **tuple of argument identities** —
+as a distinct seam *alongside* single-dispatch abilities (the Clojure split). Move `Num` and
+`Ord` onto it. Abilities stay the single-dispatch sugar for the common case (`Display`,
+`Port`, `Seqable`, …); `defmulti` is the explicit mechanism for the rare multiple-dispatch
+case. The design is the algebra below; nothing else is load-bearing.
+
+**1 — The dispatch key.** For an n-ary generic, a call's key is the tuple
+`(identity-of a₁, …, identity-of aₙ)`, where `identity-of` is the same function abilities
+use: a built-in value's `type-of` kind (`:int`, `:float`, …) or a `defrecord` value's
+nominal `:module/name` id. A `defmethod` registers an **exact** key.
+
+**2 — Resolution: total and unambiguous *by construction*.** Given a call key `q`:
+
+1. **Exact match** — a method registered at `q` is called. Keys are unique, so there is at
+   most one.
+2. **Single default** — else, if a `:default` method (the all-positions catch-all) is
+   registered, it is called.
+3. **Else** — a loud, structured `no-method` error (the `{:kind :no-method :multi :key
+   :have}` shape, the multiple-dispatch sibling of abilities' `:no-impl`), listing the
+   registered keys.
+
+This is the *entire* rule, and its crucial property is that **it cannot be ambiguous**:
+with no partial wildcards, a key hits its unique exact method or the single default —
+there is no specificity partial-order to resolve, no `[money _]`-vs-`[_ money]` tie, no
+CLOS class-precedence subtlety. Resolution is a total function on keys (partial only up to
+the loud `no-method` error).
+
+This is deliberately the **minimal correct core.** Partial wildcards (a pattern like
+`[money _]` matching `(money, anything)`) plus a specificity order are *exactly* where
+ambiguity lives: `(money, money)` would be applicable to both `[money _]` and `[_ money]`,
+neither more specific, and Brood has **no type hierarchy** to break the tie (record ids are
+flat). So partial wildcards are **deferred** (ADR-011); if a real need appears, they are a
+separate decision that must define the specificity partial-order *and* make an unresolved
+tie a loud ambiguity error (never a silent pick). Exact-tuple + single-default ships now
+because it is the version that is unambiguous without any of that machinery.
+
+**3 — Closure combinators: the mathematically correct binary-operator handling.** A binary
+operator over N types naively needs N² methods, and the naive fix (wildcards) reintroduces
+ambiguity at the diagonal. Instead, a generic may declare an **algebraic property** of the
+operator, and registration derives the mirror method from it:
+
+- **`:commutative`** (for `+`, `*`, `min`, `max`): registering method `m` at key `(A, B)`
+  with `A ≠ B` also registers the derived method `m'(x, y) ≜ m(y, x)` at key `(B, A)`. Sound
+  **iff the operator is commutative** — the derived method, called on `(x:B, y:A)`, computes
+  `m(y, x)` with `y:A, x:B`, matching `m`'s declared `(A, B)`, and `a⊕b = b⊕a` makes the
+  value correct.
+- **`:antisymmetric`** (for `compare-to`): the mirror is `m'(x, y) ≜ −m(y, x)`. Sound
+  **iff `cmp(a, b) = −cmp(b, a)`**, which is a law of any total order.
+- **none** (for `-`, `/`): no mirror is derived. Subtraction and division are genuinely
+  asymmetric in their operands, so a mixed-type case must be authored explicitly per order
+  (or left as a `no-method` error). The system refuses to fabricate a mirror the math does
+  not license.
+
+The diagonal `(A, A)` is **never** derived (it would be its own mirror), so it must be
+written explicitly — which is why there is **no diagonal ambiguity**: for a commutative op
+you author the **upper triangle** of the type-pair matrix (diagonal included), the lower
+triangle is generated, and every key resolves to exactly one method. N(N+1)/2 authored
+methods, zero ambiguity, provably correct values.
+
+**4 — No implicit coercion.** A closure derives the *mirror* of an **authored** method; it
+never invents a conversion. `(+ 5 money)` works **only** if the author wrote a `[money int]`
+(or `[int money]`) method; commutativity then makes both orders agree, but nothing coerces
+`5` into a `money`. This keeps "no implicit cross-type arithmetic" (the earlier decision)
+while delivering the symmetry that single dispatch could not — cross-type is *explicit per
+method*, yet *symmetric* once written. A Common-Lisp-style promotion/coercion tower (where a
+record registers `int → T` and mixed operands auto-promote to a join) is **rejected** — it
+*is* implicit cross-type, and for general records the coercion is ill-defined (is `5` five
+dollars or five cents? the vector `[5]` or `[5 5 5]`?).
+
+**5 — The operator roster.**
+
+| Op(s) | Seam | Algebra |
+|---|---|---|
+| `+`, `*` | `Num` multimethod | `:commutative` |
+| `-`, `/` | `Num` multimethod | none (asymmetric) |
+| `compare-to` | `Ord` multimethod | `:antisymmetric` |
+| `< <= > >= min max` | *not* multimethods | route through `%lt`/`%le`/compare on the record cold path → `compare-to` |
+| `=` | **kernel structural** | *not* a multimethod |
+
+`=` is **excluded on purpose**: equality is nominal-structural for records already, and a
+custom `=` would desynchronise `hash`/sets/map-keys (two "equal" values with different
+hashes breaks the CHAMP and set invariants). Equality stays a kernel guarantee.
+
+**6 — Kernel integration, hot path preserved.** Pure `int`/`float`/`decimal` arithmetic and
+comparison stay **byte-for-byte** on the kernel's numeric fast path. The multimethod is
+consulted **only** on the cold fallback when an operand is a record — the same site
+`num_record_dispatch` occupies today, generalised to fire when *either* operand is a record
+and to build the two-identity key. The built-in numeric tower (contagion `int→decimal→float`,
+float wins inexact) is unchanged and is not something records participate in. So no numeric
+benchmark moves.
+
+**7 — Relationship to abilities; liveness.** Abilities remain single-dispatch (an ability op
+*is* the n=1 special case, but keeping it a distinct, simpler mechanism avoids taxing the
+99% single-dispatch case with tuple machinery). `defmulti`/`defmethod` register into a
+`*methods*` registry exactly as `impl` registers into `*impls*`, so hot reload, the
+epoch-validated dispatch cache, and cross-process correctness all carry over unchanged — a
+redefined `defmethod` is an ordinary `def`, visible on the next dispatch.
+
+**8 — Deferred (ADR-011), with named triggers.** (a) **Partial wildcards + specificity**:
+build only if a real need for `[T _]`-style patterns appears, and only with a defined
+specificity order and loud-ambiguity semantics. (b) **Coercion/promotion tower**: rejected
+above; revisit only if a genuine numeric-tower type (rational, complex, a bignum a user
+defines) makes explicit-per-pair authoring painful *and* the coercion is unambiguous for
+that type.
+
+**References.** ADR-172 (abilities/single-dispatch, the deferred-`defmulti` note this
+discharges), ADR-168 (the value-dispatch seam), ADR-026 (immutability — why `=` must stay a
+kernel guarantee), ADR-011 (ship the minimal correct form; defer wildcards and the coercion
+tower), the 2026-07-29 devlog entry.
