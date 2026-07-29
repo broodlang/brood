@@ -11970,3 +11970,44 @@ design + anchors), ADR-180/181 (the checker proofs this consumes), ADR-172/168 (
 seam being optimized), ADR-101 (JIT-as-default — the tier this sits beneath), the 2026-07-29
 devlog entry.
 
+
+## ADR-183 — `Overlay`: the modal-overlay seam becomes an ability
+
+**Status:** accepted + shipped.
+
+**Context.** `editor/ui/overlay-route` (ADR-094) is the fallthrough rule every `ui-run`
+app's transient modes share: the minibuffer, a completion popup, incremental search — one
+of them is open, it captures input, a non-owned key dismisses it and re-dispatches. Until
+now an overlay was a closure vtable, `{:active? :owns? :handle :exit}`, with nil slots
+carrying policy (`:owns?` nil = capture-all, `:exit` nil = no dismiss step). That shape
+predates abilities; it is exactly the pattern `defability` now expresses directly — a
+fixed op set dispatched on the value's identity — and the first downstream consumer (the
+myedit editor, 8 overlays) was about to copy the vtable convention further.
+
+**Decision.** `editor/ui` declares
+
+```lisp
+(defability Overlay
+  (overlay-active? [self model] :-> any)
+  (overlay-owns? [self model input] :-> any)
+  (overlay-handle [self model input] :-> any)
+  (overlay-exit [self model] :-> any))
+```
+
+and `overlay-active`/`overlay-route` dispatch through the ops. An overlay is a record
+implementing the ability — **only the ops it needs**: the `:default` impl reads the
+legacy map vtable, and because a record carries no `:active?`/`:owns?`/`:exit` keys, a
+record that skips `overlay-owns?` falls through to capture-all and one that skips
+`overlay-exit` to leave-as-is — the vtable's nil policy, now supplied by the dispatch
+tier order (record impl → `:default`) instead of by nil checks in the router.
+
+**Compatibility.** The map vtable keeps working unchanged (it *is* the `:default` impl);
+the observer's minibuffer needed no edit. Records and vtables mix freely in one overlay
+list. Late binding is preserved: re-registering an impl hot-swaps the open overlay's
+behaviour, same as the closure slots did.
+
+**Why not a `defmulti`.** Dispatch is on one value (the overlay); the ability is the
+single-dispatch seam and keeps the inline-cache fast path (ADR-172).
+
+**References.** ADR-094 (overlay-route), ADR-168/172 (abilities), `tests/ui_test.blsp`
+("overlay-route — Overlay ability records").
