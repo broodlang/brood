@@ -4151,12 +4151,44 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 ; [ability op id] → registering ns (provenance for conflict detection; read only at
 ; registration, never on dispatch — keeps the dispatch value a bare fn)
 (def *impl-from* {})
+; qualified-op-fn-symbol → the ability that declared it. An ability op becomes a global
+; `defn` named after the op (qualified to the declaring ns), so two abilities in the SAME
+; ns declaring the same op name would have the second silently clobber the first's op
+; function. This registry lets `register-ability` warn on that collision instead of losing
+; an op silently (ADR-172; the checker can't see a same-ns clobber either). Keyed by the
+; QUALIFIED symbol (`<ns>/op` or bare `op` at root) so cross-module same-name ops — which
+; get distinct globals and never clash — do not false-warn.
+(def *op-ability* {})
+
+(defn ability--qualify-op (owner op-name)
+  "The global symbol an ability op's `defn` binds: `op-name` qualified to the declaring ns
+  `owner` (`<owner>/op`), or bare `op-name` when `owner` is nil (root/REPL). Mirrors how the
+  `defn` `defability` emits is namespaced at load, so `*op-ability*` keys on the real global."
+  (if owner (symbol (str (name owner) "/" (name op-name))) op-name))
 
 (defn register-ability (aname specs &optional owner)
   "Record ability `aname`'s declared op specs (raw forms) for the checker / LSP, and its
-  OWNER namespace (`defability`'s defining ns, ADR-172) for impl precedence."
+  OWNER namespace (`defability`'s defining ns, ADR-172) for impl precedence. Warns if an op
+  name is already owned by a DIFFERENT ability in the same ns — that op's generic function
+  would otherwise be silently clobbered (only the last-defined ability's op survives)."
   (def *abilities* (assoc *abilities* aname specs))
   (when owner (def *ability-owner* (assoc *ability-owner* aname owner)))
+  ;; Record op-name ownership and warn on a same-ns cross-ability collision. A re-declaration
+  ;; of the SAME ability (hot reload) re-registers its own ops — same owner → no warning.
+  (for (spec specs)
+    (when (pair? spec)
+      (let (qsym (ability--qualify-op owner (first spec))
+            prev (get *op-ability* qsym))
+        ; Warn only when a real generic function is at stake: a DIFFERENT ability already
+        ; owns this op name AND that name is bound (its `defability` emitted the `defn`, so a
+        ; second `defability` of the same op name genuinely shadows it). A direct
+        ; `register-ability` that never defines a generic fn (crafted precedence fixtures) is
+        ; harmless and stays quiet.
+        (when (and prev (not (= prev aname)) (bound? qsym))
+          (println "warning: ability " aname " declares op `" (first spec)
+            "` already owned by ability " prev
+            " — its generic function will be shadowed (rename one op)"))
+        (def *op-ability* (assoc *op-ability* qsym aname)))))
   nil)
 
 (defn ability-owner-ns (aname)
@@ -4197,8 +4229,12 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
     (type-of x)))
 
 (defn record? (x)
-  "True if `x` is an identity-carrying record (a `defrecord` value)."
-  (and (map? x) (contains? x :__id__)))
+  "True if `x` is an identity-carrying record (a `defrecord` value). Requires a
+  *truthy* `:__id__` — matching `identity-of`, which treats a nil/false id as a plain
+  map and dispatches on `type-of`. (A `defrecord` value always carries a truthy keyword
+  id; the guard only matters for a hand-written `{:__id__ nil …}` literal, which must not
+  be seen as a record by `record?`/`record-id`/`fields` while dispatching as `:map`.)"
+  (if (and (map? x) (get x :__id__)) true false))
 
 (defn record-id (x)
   "The nominal id (`module/name` keyword) of record `x`, or nil if `x` is not a record.
@@ -4251,6 +4287,32 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
         (= from-name abl-owner) 2
         else 1))))
 
+(defn impl--fn-arity (f)
+  "The impl fn `f`'s shape as `[fixed-count variadic?]` — the number of fixed params (before
+  any `&`) and whether it takes a `&`-rest — read from `(arglist f)`."
+  (let (params (arglist f)
+        fixed (count (take-while (fn (s) (not (= s '&))) params)))
+    [fixed (member? '& params)]))
+
+(defn register-impl--check-arity (aname op f)
+  "Warn if impl `f`'s arity is incompatible with `aname`'s declared `op` arity. Only runs
+  when the ability is KNOWN (in `*abilities*`) — an impl registered before its `defability`
+  (legal, ADR-172 late binding) simply isn't arity-checked here; the checker covers the rest.
+  A fixed-arity impl must match exactly; a variadic impl must accept the declared arity."
+  (let (specs (get *abilities* aname)
+        op-spec (if specs (first (filter (fn (s) (= (first s) op)) specs)) nil)
+        op-args (if op-spec (second op-spec) nil))
+    ; Skip a variadic OP spec — it declares no single arity to pin against (matches the
+    ; checker). Only a fixed op spec is arity-checked.
+    (when (and op-spec (not (member? '& op-args)))
+      (let (op-arity (count op-args)
+            shape (impl--fn-arity f)
+            fixed (nth shape 0)
+            variadic (nth shape 1))
+        (when (if variadic (> fixed op-arity) (not (= fixed op-arity)))
+          (println "warning: ability " aname "/" op " expects " op-arity
+            " arg(s), but this impl takes " (if variadic (str fixed "+") fixed)))))))
+
 (defn register-impl (aname op key f from)
   "Register impl `f` of `aname`'s `op` for dispatch id `key`, tagged with the registering
   namespace `from`. Resolution is by PRECEDENCE, not load order (ADR-172 §3): the impl with
@@ -4259,6 +4321,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   `from` is a genuine cross-module conflict (warned; last wins); from the SAME `from` it is
   hot-reload (silent); a strictly lower-tier registration is ignored (a higher tier holds the
   slot). Read-modify-write of `*impls*` — register at load time, as top-level `impl` does."
+  (register-impl--check-arity aname op f)
   (let (op-key [aname op]
         methods (or (get *impls* op-key) {})
         prov-key [aname op key]
@@ -4291,13 +4354,18 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 
 (defn no-impl (op-key key)
   "The loud, located error an op raises when no impl (and no `:default`) covers id
-  `key`. Names the ability, the op, the id, and lists the ids that ARE implemented."
+  `key`. Throws a STRUCTURED error map — `{:kind :no-impl :message … :ability :op :id
+  :have}` — so a handler can branch on the parts (`(get e :id)`) without string-parsing;
+  `error-message` still returns the `:message`, so a `(catch e (error-message e))` reads
+  the same human text as before. Names the ability, the op, the id, and the ids that ARE
+  implemented."
   (let (aname (first op-key)
         op (second op-key)
-        known (keys (or (get *impls* op-key) {})))
-    (if (empty? known)
-      (error "ability " aname "/" op ": no impl for " key)
-      (error "ability " aname "/" op ": no impl for " key " — have " known))))
+        known (keys (or (get *impls* op-key) {}))
+        message (if (empty? known)
+                  (str "ability " aname "/" op ": no impl for " key)
+                  (str "ability " aname "/" op ": no impl for " key " — have " known)))
+    (throw {:kind :no-impl :message message :ability aname :op op :id key :have known})))
 
 (defn satisfies? (aname x)
   "True if ability `aname` is implemented for `x`'s identity — every declared op
@@ -4330,6 +4398,18 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
       (keyword (name m))
       (defrecord--qualify (name m)))
     m))
+
+(defn defability--op-call (impl-sym arg-syms)
+  "The dispatch call an op emits once its impl `impl-sym` is resolved. A fixed-arity op
+  emits a direct `(impl self a b …)` — no arg-list allocation. A VARIADIC op (a `&` in the
+  arg vector) emits `(apply impl self a … rest)`, because `&` is a binding marker, not a
+  call-position argument — a direct `(impl self & rest)` would pass the symbol `&` as an
+  argument (an unbound-symbol error at every call)."
+  (if (member? '& arg-syms)
+    (let (fixed (take-while (fn (s) (not (= s '&))) arg-syms)
+          rest-sym (second (drop-while (fn (s) (not (= s '&))) arg-syms)))
+      (append (list 'apply impl-sym) (append fixed (list rest-sym))))
+    (cons impl-sym arg-syms)))
 
 (defmacro defability (aname & specs)
   "Declare ability `aname`. Each op spec `(op [args…] :-> ret?)` becomes a generic
@@ -4365,6 +4445,13 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
                           ; gensym'd temporaries so an op arg named `k`/`f` can't be captured
                           id-sym (gensym)
                           impl-sym (gensym))
+                      ; A generic op dispatches on its FIRST argument, so a zero-arg op has
+                      ; nothing to dispatch on — every value would route to the `:nil` impl.
+                      ; Reject it at expansion rather than silently degrade.
+                      (when (empty? arg-syms)
+                        (error "defability " aname ": op `" op-name
+                          "` takes no arguments — a generic op must have at least one "
+                          "argument (it dispatches on the first)"))
                       (list 'defn
                         op-name arg-syms
                         (list 'let
@@ -4376,8 +4463,10 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
                             (list '%dispatch '*impls* op-key id-sym))
                           (list 'if
                             impl-sym
-                            ; direct, arity-correct call — no arg-list alloc, no `apply`
-                            (cons impl-sym arg-syms) (list 'no-impl op-key id-sym))))))
+                            ; the resolved call — direct for a fixed arity, `apply` for a
+                            ; variadic op (`defability--op-call`)
+                            (defability--op-call impl-sym arg-syms)
+                            (list 'no-impl op-key id-sym))))))
                   ops))
     (cons 'do (append reg op-defs))))
 
