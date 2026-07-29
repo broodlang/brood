@@ -1,0 +1,82 @@
+;;; Regression guard for float-global unboxing in the JIT (`unbox_float_global` /
+;;; `CompiledArm::float_globals`).
+;;;
+;;; The tier-time profile snapshots the live *frame*, so it only ever types an arm's
+;;; PARAMETERS. An arm whose floats arrive from a `def`'d constant instead — nbody's
+;;; `advance-body (b i)`, a vector and an int, multiplying by the global `dt` — read as
+;;; non-float-context, so `(* dt x)` lowered to the integer path and `as_int`'s tag-check
+;;; deopted on every activation. Sixteen consecutive deopts mark the arm BAILED, and the
+;;; hottest function in the row ran interpreted for the rest of the program (nbody 1.8×).
+;;;
+;;; The fix records which free globals held a `Value::Float` at tier time and unboxes
+;;; those reads behind `as_f64`'s existing tag guard. That guard — not the observation —
+;;; is what makes it sound: a global that is no longer a float deopts to the VM. These
+;;; tests pin the *observable* half of that contract (the perf half is the benchmark's
+;;; job): every shape below must produce the identical value on both engines, since the
+;;; suite runs each test under the JIT and the VM (ADR-076).
+
+(defmodule jit-float-global-test (:use test))
+
+(def fg-dt 0.5)
+(def fg-scale 2.5)
+
+;; The nbody `advance-body` shape: non-float params (a vector and an int), floats
+;; supplied by a global, result rebuilt into a fresh vector. The unboxed `Op::Float`
+;; has to re-box correctly on the way into `MakeVector`.
+(defn fg-step (v i)
+  [(+ (nth v 0) (* fg-dt (nth v 3)))
+   (+ (nth v 1) (* fg-dt (nth v 4)))
+   (nth v 2) (nth v 3) (nth v 4) (nth v 5)])
+
+(defn fg-run (k v)
+  (if (>= k 2000) v (fg-run (+ k 1) (fg-step v 0))))
+
+;; A float global consumed by a *comparison* rather than arithmetic.
+(defn fg-count (i acc)
+  (if (>= i 2000)
+    acc
+    (fg-count (+ i 1) (if (< fg-dt 1.0) (+ acc 1) acc))))
+
+;; A float global that flows straight into a binding and back out as a value — no
+;; arithmetic at all, so the unboxed operand must round-trip through the slot.
+(defn fg-passthru (i last)
+  (if (>= i 2000) last (fg-passthru (+ i 1) fg-scale)))
+
+;; Private to the rebinding test below (see the comment there).
+(def fgr-dt 0.5)
+(defn fgr-run (k acc)
+  (if (>= k 2000) acc (fgr-run (+ k 1) (+ acc (* fgr-dt 3)))))
+
+(describe "JIT float-global unboxing"
+  (test "nbody-shaped arm: float global × vector element, non-float params"
+    ;; 2000 steps of x += dt*vx with vx = 3.0 → 0.5*3.0*2000 = 3000.0. Every value
+    ;; here is a multiple of 0.5, so the sum is EXACT in binary floating point — an
+    ;; `assert=` on a float is only honest when the arithmetic is exact.
+    (let (out (fg-run 0 [0.0 0.0 7.0 3.0 4.0 9.0]))
+      (assert= 3000.0 (nth out 0))
+      (assert= 4000.0 (nth out 1))
+      ;; untouched lanes must survive the rebuild verbatim
+      (assert= 7.0 (nth out 2))
+      (assert= 3.0 (nth out 3))
+      (assert= 9.0 (nth out 5))))
+
+  (test "float global in a comparison, not arithmetic"
+    (assert= 2000 (fg-count 0 0)))
+
+  (test "float global read as a plain value round-trips"
+    (assert= 2.5 (fg-passthru 0 0.0)))
+
+  ;; The soundness edge: the observation is made once, at tier time, but the guard is
+  ;; per-read. Rebinding the global to a NON-float after the arm is hot must keep
+  ;; producing the right answer (the tag-check deopts to the VM), not a miscompile.
+  ;; Its own global + arm, touched by no other test here: the suite runs each test in
+  ;; its own green process against the *shared* runtime globals (ADR-013 hot reload), so
+  ;; a `def` of a global another test reads would race it.
+  (test "rebinding a float global to an int after tiering stays correct"
+    (let (hot (fgr-run 0 0.0))
+      (assert= 3000.0 hot))
+    (def fgr-dt 2)
+    ;; now integer arithmetic: 2*3 added 2000 times
+    (let (out (fgr-run 0 0))
+      (assert= 12000 out))
+    (def fgr-dt 0.5)))

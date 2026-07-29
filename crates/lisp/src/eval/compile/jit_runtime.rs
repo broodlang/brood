@@ -57,6 +57,41 @@ pub(crate) struct JitCompiler {
 pub(crate) static JIT_ARM_KEEPALIVE: std::sync::Mutex<Vec<Arc<CompiledArm>>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Is float-global unboxing enabled? **Default ON** (`BROOD_NO_FLOAT_GLOBAL` opts out —
+/// the A/B baseline lever). Read once: all processes of a runtime share an arm's compiled
+/// code, so the eligibility decision must be deterministic across them.
+#[cfg(feature = "jit")]
+fn float_global_unbox_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_NO_FLOAT_GLOBAL").is_none())
+}
+
+/// Snapshot which free globals this arm reads currently hold a `Value::Float` into
+/// [`CompiledArm::float_globals`] (see that field for why the param profile alone is not
+/// enough). Runs on the thread that wins the tiering election — the only place that has
+/// both the arm and a `Heap`; the lowering thread has no heap. Once per arm: the
+/// `OnceLock` makes a later observation a no-op, which is what keeps a shared arm's
+/// lowering deterministic across the processes of a runtime.
+#[cfg(feature = "jit")]
+fn record_float_globals(arm: &CompiledArm, heap: &Heap, env: EnvId) {
+    if !float_global_unbox_enabled() || arm.float_globals.get().is_some() {
+        return;
+    }
+    let Some(chunk) = arm.chunk.as_ref() else {
+        return;
+    };
+    let mut syms: Vec<crate::core::value::Symbol> = Vec::new();
+    for inst in &chunk.code {
+        let (Inst::Global(s) | Inst::GlobalIc { sym: s, .. }) = inst else {
+            continue;
+        };
+        if !syms.contains(s) && matches!(heap.env_get(env, *s), Some(Value::Float(_))) {
+            syms.push(*s);
+        }
+    }
+    let _ = arm.float_globals.set(syms.into_boxed_slice());
+}
+
 /// A self-tail loop that has spun this many back-edges while its arm sits QUEUED
 /// compiles synchronously (`jit_compile_now`): a bounded ~ms block beats an
 /// unbounded interpreted tail (sieve's p=2 `mark` pass raced the cold-start
@@ -1558,6 +1593,11 @@ pub(crate) fn jit_tier(
             let slot_tags: Vec<u8> = (0..arm.nslots)
                 .map(|i| crate::core::value::tag(heap.root_at(base + i)) as u8)
                 .collect();
+            // The frame profile types only *params*; record the arm's float-valued free
+            // globals too, so a float-context arm whose floats arrive from a `def`'d
+            // constant isn't lowered onto the integer path (see `record_float_globals`).
+            let genv = heap.read_root_env(env);
+            record_float_globals(arm, heap, genv);
             if JIT_COMPILER
                 .primary
                 .try_send((arm.clone(), slot_tags, heap.runtime_tag()))
