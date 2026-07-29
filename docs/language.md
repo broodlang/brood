@@ -691,10 +691,14 @@ from its pattern length, a closure on a non-binary pattern, an unknown algebra k
 method for an undeclared `defmulti`, or `:default` used as a tuple position are all **hard
 errors at load** — nothing unclear is silently accepted. Redefining a `defmethod` is ordinary
 hot reload (a `def` into the `*methods*` registry), visible on the next dispatch. And a
-**missing method is caught statically**: `nest check` warns on a direct generic call whose full
-argument tuple is known (every arg a literal or a `defrecord` constructor) but has no method
-and no `:default` — accounting for the closure mirror, so a `:commutative` call in either order
-stays silent. So an unclear dispatch fails at type-check, not only at runtime.
+**missing method is caught statically**: `nest check` warns on a call whose argument tuple is
+known but has no method and no `:default` — accounting for the closure mirror, so a
+`:commutative` call in either order stays silent. An arg's identity is known from a literal, a
+`defrecord` constructor, **or its inferred type** (a record-typed variable — `(let (m (usd 1))
+(scale m 2.5))` is flagged). This covers **direct generic calls** *and* the **operator sugar**:
+`(+ (money 1) 2.5)` and `(< money 5)` route to `num-add`/`compare-to`, so an uncovered record
+operand is flagged there too (a pure-number call like `(+ 1 2)` is never touched). So an
+unclear dispatch fails at type-check, not only at runtime.
 
 Prefer an **ability** when dispatch is on one value; reach for **`defmulti`** when it depends on
 a combination. `=` is deliberately *not* a multimethod — equality stays a kernel guarantee so
