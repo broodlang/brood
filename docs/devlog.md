@@ -11014,3 +11014,18 @@ state to be *smaller*, not dropped — e.g. shrinking `CallIcEntry` (96 B, of wh
 `fast` memo is 32) or sharing IC entries for frozen callees across processes (ADR-175
 Stage 3, sound because a sealed binding's resolution is process-independent). Those are
 design changes, not tuning, and should be costed before being attempted.
+
+## 2026-07-29 (cont.) — the runtime option book: docs/runtime-frontier.md
+
+Wrote the full analysis-and-menu for the remaining runtime gaps to the BEAM —
+per-process anatomy as measured this week, how ERTS/Go/Pony structure the same problems,
+and every option with precedent, expected win, and risk. Key verified facts driving it:
+local `send` is TWO full copies through the wire-format `Message` (BEAM copies once,
+directly into the receiver's heap); a BEAM process is one memory block (heap up, stack
+down) with no per-process code state at all (the export table is the shared, always-warm
+"IC"); X registers are scheduler-owned; hibernation is opt-in — ERTS hit the exact
+tradeoff our reverted IC-drop hit and gave it to the programmer.
+
+Execution order chosen: (hibernate) builtin → process-shell recycling → single-copy send
+to a parked receiver → direct-link sealed callees → cold-heap split. The list lives in
+the doc; items get ticked or moved to its dead-ends section as they're measured.
