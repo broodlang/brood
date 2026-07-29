@@ -10812,3 +10812,16 @@ off-switch, and **with `BROOD_NO_JIT=1` sharing is slightly *faster*** (298 vs 3
 so the cost is tiering history, not the code sharing. Fix direction unchanged: split the
 shared code (body/chunk/shape) from per-process tier state. Trade as it stands: ~5–8% on
 two compute rows against −2.6 GB and −1 s at 300k processes.
+
+## 2026-07-29 (impl) — `Ord` ability: a record defines its own sort order
+
+Added `Ord` (op `compare-to` → -1/0/1). `sort`/`sort-by` (prelude defns) now compare
+through `ord-compare` — a record's `Ord` impl if it has one, else the kernel `compare` —
+so a version / money / card record sorts by a meaningful order instead of its arbitrary
+(but deterministic) structural map order. Hybrid as ever: the kernel `compare`/`%sort-asc`/
+`%sort-cmp` stay native for built-ins; only a record element/key routes through `Ord`
+(`sort` gains one `(record? (first a))` branch). Default `compare-to` is the structural
+`compare`, so records without a custom order still sort deterministically. Verified:
+record 18 (incl. semantic-version ordering + built-in-sort-unchanged), maps 83, no
+regression. Remaining of "lean into abilities": the numeric protocol (`+`/`-`/`*` for
+records) — the highest-risk one, since it touches the hottest paths.
