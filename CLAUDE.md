@@ -201,6 +201,20 @@ worktrees. It measures brood against brood — the *published* cross-language
 numbers come from `bench/harness.py` in `brood-benchmarks` (all seven languages in
 one session; see that repo's `CLAUDE.md` for the publish order).
 
+**Installing for a published benchmark run: always install the LEAN build** —
+`make install INSTALL_FEATURES='$(RUN_FEATURES)'`. That harness runs whatever
+`brood` is on `PATH`, and a plain `make install` adds `brood/dev-tools` (the REPL,
+`nest test`, the observer, the MCP server) — developer tooling that is not part of
+the runtime an app ships. The reason is **build consistency, not a startup cost**:
+`RUN_FEATURES` is already what `make ab` measures and what `nest release` embeds,
+so installing lean keeps the published numbers, the A/B numbers, and what users run
+on one build. (Measured 2026-07-29, same commit, best-of-9: lean and dev-tools
+startup are identical — 10 ms / 18.8 MB each — because the DEV_MODULES are
+`require`d on demand, not baked into the boot image. Don't repeat the plausible
+claim that dev-tools inflates `startup`/base-RSS; it doesn't.) It also makes the
+installed `nest` lean, so reinstall with the plain `make install` when you want
+`nest test`/`repl` back.
+
 A row that moves only a few percent in a sweep deserves a solo re-run before you
 believe it: interleaving A and B shifts thermal/cache state, and on 2026-07-27
 `persistent-map` read +3.7% in a sweep and 82 vs 81 ms measured directly.
