@@ -1939,6 +1939,37 @@ fn inferred_params_intersect_across_positions() {
 }
 
 #[test]
+fn infers_a_tail_recursive_function_return_from_its_base_case() {
+    // A self-recursive call in a branch position contributes ⊥ to the return union, so
+    // `count-down`'s return infers from its base case `:done` (keyword) — feeding it to
+    // `string-length` (wants string) is then a provable misuse. Before this, the self-call
+    // made the return uninferrable and the misuse went uncaught.
+    let w = check_with_defs(
+        &["(defn count-down (n) (if (<= n 0) :done (count-down (- n 1))))"],
+        "(string-length (count-down 5))",
+    );
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "a recursive fn's base-case return should flow to its caller: {w:?}"
+    );
+}
+
+#[test]
+fn recursive_inference_defers_when_the_base_case_is_unknown() {
+    // SOUNDNESS: an accumulator-returning recursion (`acc` is an unconstrained param → the
+    // base case is unknown) must infer an unknown return, never a spuriously-narrow one — so
+    // a caller using its result in any way is NOT false-flagged.
+    let w = check_with_defs(
+        &["(defn sum-acc (xs acc) (if (empty? xs) acc (sum-acc (rest xs) (+ acc (first xs)))))"],
+        "(string-length (sum-acc (list 1 2) 0))",
+    );
+    assert!(
+        !w.iter().any(|s| s.contains("string-length")),
+        "an unknown (param) base case must defer, not false-flag: {w:?}"
+    );
+}
+
+#[test]
 fn does_not_infer_through_branches_or_lets() {
     // A body with `if`/complex `let` is *not* a single straight-line expression
     // — inference must skip it, leaving the closure untyped (no warning).

@@ -11515,3 +11515,30 @@ Extended the ADR-179 static-coverage check two ways, both sound (zero false posi
 The deliberate runtime-error tests stay silent for free: an operator no-method test lives inside
 `try` (which `check_into` skips), and a direct-generic one uses a variable. `protocol.rs`,
 `walk.rs`, `check.rs`, `ctx.rs`, `type_check_catalog.rs`.
+
+## 2026-07-29 (cont.) — the `seqable` type + recursion inference (making types pay off)
+
+Two moves to make the type system *do more* rather than build more machinery, prompted by a
+sig-adoption pilot (std carries sigs on ~1% of its defns — the checker only helps where types
+are declared).
+
+**A `seqable` type (`Ty::SEQABLE`).** A `sig` had no way to say "any seqable of T": `(list T)`
+false-flags a vector caller, so a polymorphic-sequence parameter had to fall back to `any` (no
+checking). Added `seqable` to the grammar — the named union `nil | pair | vector | set | map |
+bytes` (a range/seqview reads as `pair`; `string` excluded, matching runtime seqability), the
+same domain the curated combinator sigs already used internally, now nameable with a clean
+`Display`. `write-lines`/`fuzzy-filter`'s seq params moved off `any` to `seqable`: a
+vector/list/set/map caller passes, a non-seqable (`5`, `"abc"`) is flagged.
+
+**Recursion inference.** The inferencer (`sigs::infer_sig`) gave up on any recursive function
+— a self-call's type is unknown (cycle), so the return deferred, and callers of the ~ubiquitous
+`--acc`/`--loop` helpers got no checking. Fix: when inferring a function's own signature, a
+self-recursive call in a *branch-result* position contributes ⊥ to the return union (a new
+`Ctx::inferring_self`, consumed in `infer::branch_union`). Sound by induction — the recursive
+branch returns exactly the fixpoint the base cases already define, so skipping it lets the
+return infer from the base cases. A `count-down` returning `:done` now flows to its callers;
+an accumulator-returning recursion (unknown base case) still defers, never false-flags.
+
+The cardinal-sin gate held both times: type suite 268 → 270, and **zero** new false positives
+across all of `std/` + `tests/`. Next lever on inference: multi-arity/rest closures, and the
+bottom-up fixpoint order so a caller of an as-yet-un-inferred function still resolves.
