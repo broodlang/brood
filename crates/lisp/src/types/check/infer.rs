@@ -451,6 +451,16 @@ fn control_flow_ty(heap: &Heap, head: Symbol, items: &[Value], ctx: &Ctx) -> Opt
 fn branch_union(heap: &Heap, forms: &[Value], ctx: &Ctx) -> Option<Ty> {
     let mut acc: Option<Ty> = None;
     for &f in forms {
+        // **Recursion inference.** When inferring a function's own signature, a
+        // self-recursive call in a branch-result position contributes ⊥ to the union — by
+        // induction it returns exactly the function's return type (the fixpoint), so the
+        // *other* (base-case) branches determine it. Skipping it is what lets a tail-recursive
+        // `(if base acc (self …))` infer its return from `base` instead of deferring on the
+        // unknown self-call. Sound: the recursive branch adds nothing the fixpoint doesn't
+        // already contain. If every branch is a self-call, `acc` stays `None` → defer.
+        if is_inferring_self_call(heap, f, ctx) {
+            continue;
+        }
         let t = expr_ty(heap, f, ctx)?;
         acc = Some(match acc {
             Some(a) => a.union(t),
@@ -458,6 +468,18 @@ fn branch_union(heap: &Heap, forms: &[Value], ctx: &Ctx) -> Option<Ty> {
         });
     }
     acc
+}
+
+/// True when `form` is a direct call `(self …)` to the function whose signature is currently
+/// being inferred (see [`Ctx::inferring_self`]). The head symbol is `closure.name`, exactly
+/// what a self-call resolves to (mirrors `sigs::infer_from_single_call`'s self check).
+fn is_inferring_self_call(heap: &Heap, form: Value, ctx: &Ctx) -> bool {
+    let Some(self_name) = ctx.inferring_self() else {
+        return false;
+    };
+    list_items(heap, form)
+        .and_then(|items| items.first().copied())
+        .is_some_and(|head| matches!(head, Value::Sym(s) if s == self_name))
 }
 
 /// Parse a `let`-family bindings form into a flat `[name val name val …]` vec —
