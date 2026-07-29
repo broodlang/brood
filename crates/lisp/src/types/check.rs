@@ -681,6 +681,9 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         let ability_info = std::sync::Arc::new(protocol::build_ability_info(heap, &expanded));
         protocol::check_ability_calls(heap, &expanded, &ability_info, &mut out);
         protocol::check_sealed(&ability_info, &mut out);
+        // Op names must be unique within a module: two abilities declaring the same op
+        // name would clobber each other's generic function (ADR-172).
+        protocol::check_op_collisions(&ability_info, &mut out);
         ctx.set_ability(ability_info);
         // Pass 3: check each expanded form with the accumulated file-globals.
         for &form in &expanded {

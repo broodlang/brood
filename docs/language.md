@@ -385,13 +385,39 @@ must match the declared op's arity: a fixed impl exactly, a variadic impl as lon
 as it accepts that arity — `nest check` and load-time registration both flag a
 mismatch.
 
-> **The `impl` dispatch id must be written the way `identity-of` produces it.** A
-> record's id is namespaced, so write it **qualified** — `geometry/circle`, not a
-> bare `circle`. A bare symbol registers under `:circle`, which no value ever
-> presents, so the impl silently never matches and the op raises `no impl for
-> :geometry/circle — have (:circle)`. (`defability`'s `:sealed` clause *does*
-> qualify a bare name against the current namespace; the asymmetry is
-> [KI-15](known-issues.md).)
+**Single dispatch — and what that means for binary ops.** Dispatch is on the **first
+argument only** (Rust-trait / Clojure-protocol style, not CLOS multiple dispatch). For a
+unary op (`to-str`, `to-seq`) that is all there is to it. For an op that *combines two
+values* — the core `Ord` (`compare-to`) and `Num` (`num-add`/`num-sub`/…) abilities — it
+means the op is selected by the **first** operand's type, and the impl receives the second
+operand as an ordinary value it must handle itself. So these abilities are **homogeneous**:
+implement them for two operands of *your own* type (money + money, vector + vector, two
+records of the same shape sorting against each other), and reach for **explicit conversion**
+for anything mixed. Brood does **not** do implicit cross-type arithmetic — `(+ (money 100)
+(money 50))` is fine (both dispatch as `money`), but `(+ 5 (money 50))` is a named error
+(the record is not the first operand, and `5` is not a `money`); write `(+ (money 500)
+(money 50))` or convert. Genuinely-multiple-dispatch problems (a full numeric tower with
+`int + money` *and* `money + int`) are out of scope for abilities by design — see
+[ADR-172](decisions.md)'s note on deferring a `defmulti`-style seam until a concrete need
+appears.
+
+**Op names are unique per module.** Each op becomes a generic function bound in the
+declaring module, so two abilities in *one* module declaring the same op name (`size`)
+would clobber each other's generic function. That collision is warned at load and is a
+`nest check` reject (ship-blocking, advisory in the live image) — rename one op. A
+*different* module declaring the same op name is fine: it binds a distinct `<module>/op`
+global. (A use-site clash — `(:use)`ing two modules that each export `size`, then calling
+bare `size` — is the ordinary module-import ambiguity the module system resolves, not an
+ability-specific rule.)
+
+> **The `impl` dispatch id resolves to the way `identity-of` produces it.** `impl`
+> and `:sealed` share one helper (`ability--id-kw`): a **bare** record symbol is
+> qualified against the current namespace (`circle` → `:<ns>/circle`), an
+> already-`/`-qualified symbol is used as written (`geometry/circle` — the form to
+> use for a record from *another* module), and a keyword id (`:int`, `:default`) is
+> left untouched. So a same-module `(impl Shape circle …)` and `(impl Shape
+> geometry/circle …)` register under the same id a value presents; the earlier
+> bare/qualified asymmetry is fixed ([KI-15](known-issues.md)).
 
 A missing implementation is a **loud, named error** — `ability Shape/area: no impl
 for :geometry/circle — have (…)`, listing the ids that *are* implemented — never a
@@ -406,6 +432,15 @@ carried in a reserved `:__id__` field (a record is *not* `=` to a bare map, thou
 `defrecord` value dispatches on its `:module/name` id; a plain map, **even one carrying
 a `:type` field**, stays `:map` and lands on the `:map` impl. That is the ADR-011 line —
 the identity is explicit and construction-time, never inferred from a field.
+
+> **On-ramp: reach for `defrecord` *before* you want polymorphism.** Because dispatch is
+> nominal, there is no structural path — you cannot `impl` an ability for "a map whose
+> `:kind` is `:circle`". If you are building a value on plain maps told apart by a tag
+> field and later want to dispatch on the kind, the move is to make it a `defrecord` first
+> (its predicate `circle?` and its `:__id__` then carry the identity), then `impl` against
+> that. This is a deliberate constraint, not a gap — it keeps identity construction-time
+> and explicit — but it lands as a small refactor if you defer it, so prefer records for
+> any value you expect to dispatch on.
 
 **A driver is just a value.** Because dispatch is on the first argument, "swap the
 backend" needs no config indirection and no module-atom dispatch — you pass a
