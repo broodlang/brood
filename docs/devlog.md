@@ -10542,3 +10542,51 @@ an eval wedged in one native call. Piped sessions unchanged. Off-switch:
 `(def *repl-interruptible* false)` in `.broodrc.blsp` — the knob is the ambient
 global itself, resolved to the armed state after the rc loads (so the rc opt-out
 short-circuits the handler install), not an env var.
+
+## 2026-07-29 — ADR-175 Phases A+B land: shared compiled code, spawn-live −37%
+
+**Phase A — arm-relative IC site ids.** Sites number from 0 within each compiled arm;
+each process lazily resolves a contiguous IC block per arm it activates
+(`Heap::vm_arm_block`, keyed by a process-independent arm uid) and the drivers install
+the running arm's block as heap cursors at every transition (call/tail/return/resume/
+suspend-capture; `vm_apply`/`vm_resume_deopt` as save/restore chokepoints; dispatch's
+callee-JIT path before `push_frame` so optional defaults index the callee's block; the
+JIT's direct native entries; the HOF per-element fast frame). Zero JIT IR changes —
+`brood_rt_fastlink_base` returns a block-adjusted base/len. Perf: all 8 A/B rows within
+noise (max +3.0% on `spawn`, at its floor). Also fixes a live degradation: shared native
+code previously ran with the compiling process's absolute site ids, failing every other
+process's bounds checks — ICs silently dead in installers.
+
+**Phase B — runtime-shared compiled closures** (the BEAM module-area move). PRELUDE
+closure handle → `Arc<CompiledClosure>` in `RuntimeCode`, `jit_code_cache` pattern.
+Strict gate: PRELUDE-region keys only (never freed/recycled — no ADR-091 free-epoch
+discipline needed) and **immortal** arms (no RUNTIME-region handle anywhere, checked by
+running `rewrite_arm_handles` with a recording identity fn — the one authoritative walk
+— so two processes can never double-forward a shared arm; PRELUDE handles are immovable
+so the rewriter is identity on them). `BROOD_NO_SHARED_ARMS=1` is the off-switch.
+
+Measured (N=300k spawn-live; per-proc figures at N=100k):
+
+| | before | after |
+|---|---|---|
+| spawn-live wall | 4.04 s | **3.32 s (−18%)** |
+| spawn-live RSS | 4.57 GB | **2.86 GB (−37%)** |
+| fold-unit live bytes | 32.7 KB/proc | **21.1 (−35%)** |
+| user-code body (body_big) | 37.1 | 37.5 (unchanged — user arms not shared yet) |
+
+Suite: 883/883 after fixing a stale `lineedit` assertion (the new auto-indent feature
+inserts `\n  `; the pre-feature test expected bare `\n` — updated to the feature's
+documented contract, "two past the opening paren's column").
+
+**Open regression, documented not hidden: `collatz` +8.0% (solo, best-of-11).** The
+off-switch recovers it (110→103 ms) and it vanishes under `BROOD_NO_JIT` (+1.2%, noise)
+— so it is JIT-tiering-state persistence: a shared arm shares `jit_calls`/`jit_deopts`/
+`compile_epoch`, changing when native code runs vs the per-process cold start (a
+re-installed shared arm keeps its tiering history where a recompile used to reset it —
+`sort` moved −5.2% by the same mechanism, in the winning direction). Fix direction:
+split the shared code (body/chunk/shape) from per-process tier state. Until then the
+trade is +8% on one row against −1.7 GB at 300k processes.
+
+**Next (not started): share RUNTIME-keyed user arms** — the remaining ~30 KB/proc in
+body_big-class workloads. Needs free-epoch discipline in the shared map (RUNTIME keys
+recycle) and either idempotent-rewrite proof or the immortality gate generalised.

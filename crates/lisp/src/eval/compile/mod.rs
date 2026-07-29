@@ -1700,10 +1700,70 @@ fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<Compi
     if let Some(hit) = heap.vm_cache_arm(key, argc) {
         return hit;
     }
+    // Shared-closure fast path (ADR-175 Phase B): a PRELUDE closure another process
+    // already compiled is installed instead of recompiled — the compiled form lives
+    // once per runtime, like the AST it was compiled from. PRELUDE keys only: those
+    // handles are never freed/recycled (no ADR-091 free-epoch aliasing), and the
+    // ADR-166 seal means the binding can never change under the cache.
+    let shareable = !crate::core::heap::Heap::shared_arms_disabled()
+        && id.region() == value::PRELUDE
+        && matches!(key, VmCacheKey::Runtime(_));
+    if shareable {
+        if let Some(cc) = heap.shared_closure_lookup(id.0) {
+            let cc = Some(cc);
+            heap.vm_cache_put(key, cc.clone());
+            return cc.and_then(|cc| cc.arm_for(argc).cloned());
+        }
+    }
     // Cold: compile + cache the closure once, then take the arm.
     let compiled = compile_closure(heap, id).map(Arc::new);
     heap.vm_cache_put(key, compiled.clone());
+    // Publish for the runtime's other processes — only when every arm is **immortal**
+    // (no RUNTIME-region handle anywhere, so `runtime_collect`'s per-process rewrite
+    // pass never touches the shared arm — two processes rewriting one arm would
+    // double-forward its handles) and capture-free (belt: PRELUDE-keyed closures are
+    // top-level, which never capture).
+    if shareable {
+        if let Some(cc) = &compiled {
+            if closure_is_immortal(cc) {
+                heap.shared_closure_publish(id.0, cc.clone());
+            }
+        }
+    }
     compiled.and_then(|cc| cc.arm_for(argc).cloned())
+}
+
+/// Is every compiled arm of `cc` free of RUNTIME-region handles (and captures)?
+/// PRELUDE handles are fine — that region is immortal and never compacted, so
+/// `rewrite_arm_handles` is the identity on such an arm and sharing it across
+/// processes can never double-forward anything. Checked by *running* the rewriter
+/// with a recording identity function — the one authoritative walk over every
+/// handle position (body consts, `MakeClosure` `fn_rest`, optional defaults, chunk
+/// consts), so this can't drift from what `runtime_collect` actually rewrites.
+fn closure_is_immortal(cc: &CompiledClosure) -> bool {
+    for spec in &cc.arms {
+        if let Some(arm) = &spec.compiled {
+            if !arm.capture_names.is_empty() {
+                return false;
+            }
+            let mut movable = false;
+            rewrite_arm_handles(arm, &mut |v: Value| {
+                // `needs_root_slot` = movable under SOME collector (LOCAL copy or
+                // RUNTIME compaction); only atoms + PRELUDE are truly fixed. A
+                // compiled const can't be LOCAL (`const_node` promotes), so this is
+                // precisely "has a RUNTIME-region handle" — via the audited
+                // predicate rather than hand-rolled bit math.
+                if crate::core::heap::needs_root_slot(v) {
+                    movable = true;
+                }
+                v
+            });
+            if movable {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Compile `f`'s body NOW, without calling it, and cache the result. Returns whether
