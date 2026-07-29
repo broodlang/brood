@@ -11932,13 +11932,15 @@ builtin), impl = `*impls*[[ability op]]` resolved by id then `:default` (`impl-f
 1. **Flag off (default): provably inert.** The only cost is one cached `mono_enabled()` bool;
    the rewrite never runs, so default builds are byte-for-byte unchanged. Verified: the
    ability suite is identical off vs on.
-2. **Flag on: correct, and GC-safe.** *Every* uncertainty declines the rewrite (arg not a
-   literal, head not a registered ability op, a map literal that could be a nominal record,
-   no impl for the id) — the dynamic call is left untouched, so a missing impl still raises
-   the same structured `no-impl` error. Records (constructor calls) are *not* `Node::Const`,
-   so they stay dynamic. Verified byte-identical across `:int`/`:string`/`:default`/record/
-   no-impl shapes; the baked impl fn is a promoted **RUNTIME** handle (globals promote deep),
-   so `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` under the flag is clean — no use-after-GC.
+2. **Flag on: correct, and GC-safe.** *Every* uncertainty declines the rewrite (arg neither a
+   literal nor a registered record constructor, a folded map literal that could be a record,
+   head not a registered ability op, no impl for the id) — the dynamic call is left
+   untouched, so a missing impl still raises the same structured `no-impl` error. A
+   same-named non-record fn passed as the constructor position (`(area (circleish 5))`) is
+   rejected via `*record-ids*` and stays dynamic. Verified byte-identical across
+   `:int`/`:string`/`:default`/record-constructor/non-record-call/no-impl shapes; the baked
+   impl fn is a promoted **RUNTIME** handle (globals promote deep), so `BROOD_GC_STRESS=1
+   BROOD_GC_VERIFY=1` under the flag is clean — no use-after-GC.
 
 **The late-binding trade-off (why it is flag-gated).** The rewrite captures the impl fn
 *value* at compile time; if that id's impl is later re-registered (drivers-as-values, hot
@@ -11947,13 +11949,21 @@ keep 100% dynamic late-binding semantics; opting in trades that for speed, like 
 assuming no UB. This is the *documented, accepted* caveat, not a bug — never "fixed" by
 weakening the default.
 
-**Scope (Tier 1) and deferral.** Literal first-args only — this proves the flag + mechanism +
-validation end-to-end (the vertical-slice pattern) and does *not* move hot-loop benchmarks (a
-loop variable isn't syntactically known). **Tier 2** — devirtualizing a `sig`-typed / inferred
-*variable* by building the checker→compiler channel — is the real hot-loop win and the real
-miscompile surface; deferred to a dedicated effort with whole-fleet validation. The
-**direct-constructor** extension (`(area (circle 2))` → the record's nominal id) is a small,
-sound Tier-1 addition deferred until measured to matter.
+**Scope (Tier 1).** Both syntactic shapes the checker's `arg_identity` proves:
+1. a **literal** first arg (`(size 5)`) → identity is its `type-of` kind;
+2. a **direct record-constructor call** (`(area (circle 2))`) → the record's baked
+   `:module/name` id. Sound because a record id keyword's symbol *is* the qualified
+   constructor name, and membership in the `*record-ids*` registry — populated by
+   `defrecord` as ground truth — proves the head is a genuine record constructor, so a
+   same-named non-record fn (`(area (circleish 5))`) is rejected and left dynamic. (Trusting
+   a declared `sig` instead would be unsound: a sig is an unchecked contract that can lie,
+   and a wrong devirt is a miscompile, not a false warning.)
+
+Tier 1 proves the flag + mechanism + validation end-to-end (the vertical-slice pattern). It
+does *not* move hot-loop benchmarks where the arg is a *variable* (`(map area shapes)`) —
+that is **Tier 2**: devirtualizing a `sig`-typed / inferred variable by building the
+checker→compiler channel, the real hot-loop win and the real miscompile surface, deferred to
+a dedicated effort with whole-fleet validation.
 
 **References.** [ability-monomorphization.md](ability-monomorphization.md) (the end-to-end
 design + anchors), ADR-180/181 (the checker proofs this consumes), ADR-172/168 (the dispatch

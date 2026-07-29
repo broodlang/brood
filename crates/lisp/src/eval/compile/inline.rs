@@ -31,25 +31,56 @@ fn global_map(heap: &Heap, name: &str) -> Option<MapId> {
     }
 }
 
-/// If call head `op` is an ability op AND `args[0]` is a literal whose dispatch identity has
-/// a concrete impl, return `Node::Const(impl_fn)` — the callee for a direct call that
-/// bypasses the op's dispatch body. `None` (leave the dynamic call alone) on ANY uncertainty.
-///
-/// Mirrors the runtime dispatch (`identity-of` → `impl-for`) exactly: for a non-record
-/// literal the identity is its `type-of` kind (`value::tag(v).keyword()`, byte-identical to
-/// the `type-of` builtin), and the impl set is `*impls*[[ability op]]` resolved by that id
-/// then `:default` — the same order `impl-for` uses.
-pub(crate) fn mono_devirtualize(heap: &Heap, op: Symbol, args: &[Node]) -> Option<Node> {
-    // arg0 must be a compile-time constant literal (a folded `Node::Const`).
-    let arg0 = match args.first()? {
-        Node::Const(cv) => cv.load(),
-        _ => return None,
-    };
-    // Records dispatch nominally on their `:__id__`; a folded map literal could be one.
-    // Exclude every map — Tier 1 is built-in-kind literals only (records are the extension).
-    if matches!(arg0.unpack(), ValueRef::Map(_)) {
-        return None;
+/// The statically-provable dispatch identity of a call's first-argument `Node`, or `None`
+/// when it isn't certain. Mirrors `identity-of`: a non-record literal → its `type-of` kind;
+/// a direct record-constructor call → the record's baked `:module/name` id. Every other
+/// shape (a variable, a non-record call, a map literal that *could* be a record) → `None`.
+fn mono_arg_identity(heap: &Heap, arg: &Node) -> Option<Value> {
+    match arg {
+        // A literal constant. A folded map literal could be a record (`{:__id__ …}`), whose
+        // identity is nominal — exclude every map (the direct-ctor path covers real records).
+        Node::Const(cv) => {
+            let v = cv.load();
+            if matches!(v.unpack(), ValueRef::Map(_)) {
+                return None;
+            }
+            Some(Value::keyword(value::tag(v).keyword()))
+        }
+        // A direct constructor call `(circle 2)`. Its baked id is `:<qualified-ctor-name>`,
+        // i.e. `keyword(ctor)`. It is a record constructor iff that id is registered in
+        // `*record-ids*` (ground truth from `defrecord`) — so a same-named plain fn, whose
+        // call would NOT carry that `:__id__`, is rejected.
+        Node::Call { callee, .. } => {
+            let ctor = match &**callee {
+                Node::Global(s) | Node::GlobalIc { sym: s, .. } => *s,
+                _ => return None,
+            };
+            let id = Value::keyword(ctor);
+            let records = global_map(heap, "*record-ids*")?;
+            heap.map_get(records, id).map(|_| id)
+        }
+        _ => None,
     }
+}
+
+/// If call head `op` is an ability op AND `args[0]` has a statically-provable dispatch
+/// identity with a concrete impl, return `Node::Const(impl_fn)` — the callee for a direct
+/// call that bypasses the op's dispatch body. `None` (leave the dynamic call alone) on ANY
+/// uncertainty.
+///
+/// Mirrors the runtime dispatch (`identity-of` → `impl-for`) exactly. Two proven arg shapes
+/// (ADR-182, mirroring the checker's `arg_identity`):
+///   - a **literal** `Node::Const` (non-record) → identity is its `type-of` kind
+///     (`value::tag(v).keyword()`, byte-identical to the `type-of` builtin);
+///   - a **direct record-constructor call** `(circle 2)` → identity is the record's baked
+///     `:module/circle` id. Sound because the id keyword's symbol *is* the qualified
+///     constructor name, and membership in `*record-ids*` (populated by `defrecord`) proves
+///     the head is a genuine record constructor — a same-named non-record fn is rejected.
+/// The impl set is `*impls*[[ability op]]` resolved by that id then `:default` — the order
+/// `impl-for` uses.
+pub(crate) fn mono_devirtualize(heap: &Heap, op: Symbol, args: &[Node]) -> Option<Node> {
+    // The dispatch identity of arg0, if statically certain.
+    let id_kw = mono_arg_identity(heap, args.first()?)?;
     // The head global must be a registered ability op → its ability name symbol.
     let op_ability = global_map(heap, "*op-ability*")?;
     let ability = match heap.map_get(op_ability, Value::Sym(op)) {
@@ -59,8 +90,6 @@ pub(crate) fn mono_devirtualize(heap: &Heap, op: Symbol, args: &[Node]) -> Optio
     // `*impls*` keys on `[ability op]` where `op` is the op name AS WRITTEN in `defability`
     // (a quoted literal, never ns-qualified) — i.e. the bare last segment of the op global.
     let op_bare = value::intern(value::symbol_name(op).rsplit('/').next().unwrap_or(""));
-    // Identity of a non-record literal = its `type-of` kind keyword — exactly the builtin.
-    let id_kw = Value::keyword(value::tag(arg0).keyword());
     let default_kw = Value::keyword(value::intern("default"));
     // Find the `[ability op]` method set, then resolve the id (then `:default`), as
     // `impl-for` does. Iterate rather than build a key — compile-time, not hot; and it
