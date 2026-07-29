@@ -10543,6 +10543,51 @@ an eval wedged in one native call. Piped sessions unchanged. Off-switch:
 global itself, resolved to the armed state after the rc loads (so the rc opt-out
 short-circuits the handler install), not an env var.
 
+## 2026-07-28 (review pass) — REPL hardening: nested sessions, interrupt ownership, meta-command gaps
+
+A critical review of the day's REPL work, driven by actually composing the pieces —
+in particular with `pry` (std/tool/debug.blsp), which launches `repl-run` *inside* a
+session and therefore exercises every seam at once. Five real defects, all fixed and
+pty-verified; the printer came out clean (lazy ranges print bounded without realising;
+records are maps so they bound for free; the 30s "printing hang" suspect turned out to
+be debug-build *eval* cost — `(do (map inc (range 0 3e7)) :made)` is just as slow).
+
+1. **pry's `debug>` prompt was lost.** `(binding (*repl-prompt* "debug> ") (repl-run))`
+   binds a dynamic, but the loop runs in a spawned process and dynamics don't cross
+   `spawn` — the nested prompt silently fell back to `brood> `. `repl-run` now captures
+   the prompts in the caller's extent and re-`binding`s them inside the spawn body.
+2. **Interrupt theft between nested sessions.** Outer and nested loops both polled the
+   one read-and-clear flag every 40ms; whoever won consumed the Ctrl-C, and an outer
+   win would hard-kill its child — the entire pry — when the user meant to stop one
+   expression at the `debug>` prompt. (Trials favoured the inner by phase luck, but the
+   race is architectural.) Ownership is now explicit: runners register in a stack (a
+   `Table`, the sanctioned shared-mutable store — strict nesting means push/pop never
+   race) and only the innermost live owner polls; a dead head (a runner killed rather
+   than returning) is repaired past, so ownership can't wedge on a corpse.
+3. **A script that pried lost its Ctrl-C forever.** `repl-run` installed the SIGINT
+   handler and never removed it, so after pry returned, Ctrl-C set a flag nobody polls
+   — the script became uninterruptible. New `%restore-interrupt-handler` primitive
+   (SIG_DFL, the uninstall half of the seam), and the *outermost armed* `repl-run`
+   owns restoration via a token: pry-under-REPL leaves the outer handler alone,
+   pry-under-script restores fatal Ctrl-C on exit. Verified both ways.
+4. **The rc re-ran on every nested session** — side effects re-executed, defs
+   re-applied mid-session. Once-per-runtime latch.
+5. **`,time`/`,type` evaluated user code inline** — uninterruptible (Ctrl-C during
+   `,time` of the exact slow expression it exists for would set a flag nobody reads),
+   and `,time` printed unbounded. Both now run through the same interruptible runner
+   as ordinary forms (`repl--call`), and `,time` prints bounded. `,doc` also stopped
+   splicing raw input into code text — `,doc foo) (halt 0) (` would have *evaluated*
+   the injected forms (eval-string reads all, then evals all); the argument must now
+   read as exactly one symbol.
+
+Also: the earlier auto-indent change had silently broken lineedit_test's "Enter inserts
+a newline" case (it now inserts an *indented* newline — intended, but the file was
+never re-run after that change; process lesson repeated: run the owning test file after
+every behaviour change, not just the new feature's cases). Test updated to pin the new
+behaviour. Full sweep green: repl 14, exit 12, lineedit 56; pty scenarios — nested
+prompt, nested-eval Ctrl-C, `,time` Ctrl-C, outer-after-nested Ctrl-C, rc-once,
+script-pry restore, completion listing, auto-indent, bounded print, `*1` — all pass.
+
 ## 2026-07-29 — ADR-175 Phases A+B land: shared compiled code, spawn-live −37%
 
 **Phase A — arm-relative IC site ids.** Sites number from 0 within each compiled arm;

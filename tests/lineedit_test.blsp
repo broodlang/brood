@@ -330,7 +330,7 @@
       ; col 3, line 1
       (assert= (editor/lineedit/lineedit--down-point t 3) 11)
       (is (nil? (editor/lineedit/lineedit--down-point t 10)))))
-  (test "Enter inserts a newline while the form is incomplete, submits when complete"
+  (test "Enter inserts an indented newline while the form is incomplete, submits when complete"
     (let (
           ; complete unless exactly this
           incomplete? (fn (s) (= s "(defn f"))
@@ -339,8 +339,8 @@
                (assoc (editor/lineedit/lineedit-init "x> " "" '() {:complete? complete?})
                  :text text
                  :point (string-length text))))
-      ;; incomplete form: Enter adds "\n" plus the structural auto-indent (two past
-      ;; the opening paren's column — see lineedit--indent-for), does NOT submit
+      ;; incomplete form: Enter adds a newline INDENTED to the structural column
+      ;; (opener at col 0 -> continuation at col 2), and does NOT submit
       (let (st (editor/lineedit/lineedit-submit (mk "(defn f") nil))
         (assert= (get st :text) "(defn f\n  ")
         (is (nil? (get st :done))))
