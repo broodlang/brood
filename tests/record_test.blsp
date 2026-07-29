@@ -113,6 +113,27 @@
     (assert= (sort (list 3 1 2)) (list 1 2 3))
     (assert= (sort (list "b" "a" "c")) (list "a" "b" "c"))))
 
+;; ---- Num: a record does arithmetic via +/-/*// (kernel-dispatched, no hot-path cost) ----
+(defrecord usd (cents))
+(impl Num usd
+  (num-add [a b] (usd (+ (get a :cents) (get b :cents))))
+  (num-sub [a b] (usd (- (get a :cents) (get b :cents))))
+  (num-mul [a b] (usd (* (get a :cents) b)))          ; scale by a scalar
+  (num-div [a b] (usd (quot (get a :cents) b))))
+
+(describe "defrecord: custom Num"
+  (test "a Num record uses +/-/*// (dispatched from the kernel %add fallback)"
+    (assert= (get (+ (usd 500) (usd 250)) :cents) 750)
+    (assert= (get (- (usd 500) (usd 250)) :cents) 250)
+    (assert= (get (* (usd 500) 3) :cents) 1500)
+    (assert= (get (/ (usd 900) 3) :cents) 300)
+    ;; variadic + folds through the same dispatch
+    (assert= (get (+ (usd 100) (usd 200) (usd 300)) :cents) 600))
+  (test "int/float arithmetic is untouched by the Num seam"
+    (assert= (+ 1 2 3) 6)
+    (assert= (* 2 3 4) 24)
+    (assert= (+ 1.5 2.5) 4.0)))
+
 ;; Records cross process boundaries as the maps they are — build in a worker, send home,
 ;; read with the accessors and the id (proves the record round-trips per-heap).
 (describe "defrecord: across processes"

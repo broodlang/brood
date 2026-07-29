@@ -10845,6 +10845,31 @@ protocols (which don't touch the numeric hot path) shipped fine. Also confirmed 
 checker is already clean for every shipped construct (Seqable/Conjable/Ord/Display): `nest
 check` is 0 warnings on the tree and on fresh user code — the `+` warnings were purely this
 reverted numeric change.
+
+## 2026-07-29 (impl) — numeric protocol, done properly in the kernel (zero regression)
+
+The Brood-side `Num` was a ~195× fib regression (a `(record? a)` branch defeats the JIT's
+arithmetic specialization). The kernel form has **zero** cost: the `%add`/`%sub`/`%mul`/
+`%div` builtins dispatch `Num` only from their COLD non-numeric fallback — a new
+`num_record_dispatch` checks if the first operand is a record (a `Value::Map` carrying
+`:__id__`), and if so applies the matching `num-*` ability op via `apply_value`; otherwise
+it returns `None` and the builtin proceeds to its float/error path. The int/float hot path
+is untouched — the JIT inlines int+int / float+float and never calls the `%add` builtin, so
+it never reaches the fallback. Measured: **fib 35 = 61 ms**, identical to baseline (60 ms).
+The operators stay `(%add a b)` — no Brood branch, so nothing to defeat the JIT.
+
+The `Num` ability (`num-add`/`num-sub`/`num-mul`/`num-div`, no `:default`) lives in the
+prelude; a record with no impl raises the ability's loud missing-impl error. A money value
+does `(+ (usd 500) (usd 250))` → `750`, variadic `+` folds through the same dispatch.
+
+Checker: `+`/`-`/`*`/`/` widened from `number` to `number | map` (a record is a map), so
+`(+ money money)` and `(get (+ a b) :field)` type-check. Precision is preserved — the
+structural `numeric_call_ty` types a pure-numeric call as int/float and only DEFERS to the
+curated sig once an operand is a record, so the widened sig affects record arithmetic only;
+`(+ "a" 1)` is still caught (a string isn't `number|map`). Verified: fib 61 ms (zero
+regression), float loop unaffected, record 20 (incl. Num arithmetic + int/float-untouched),
+math 81, decimal 20, maps 83; `nest check` 0 warnings on the tree AND on `(+ money money)`.
+This completes the "lean into abilities" arc — collection (read+build), `Ord`, and now `Num`.
 ## 2026-07-29 (cont.) — the ADR-175 "regression" was a `make ab` artifact
 
 The `collatz` +8% / `nqueens` +7.8% attributed to shared JIT-tier state in the two
