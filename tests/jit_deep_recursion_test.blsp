@@ -45,10 +45,21 @@
 
 ;; Parse in a spawned green process — on a scheduler worker, which is where the
 ;; guard-page abort happened.
+;;
+;; The `after` deadline is a **liveness net**, not a performance bound: its job is to turn
+;; "the worker died and will never reply" into a value rather than hanging the test. It must
+;; therefore clear the SLOWEST *live* run comfortably. That is the deep-recursion parse with
+;; the RUNTIME drain armed (which the whole suite's loaded code arms — KI-14) AND competing
+;; with the rest of the suite for cores (`:serial` serialises only within this group; all
+;; units still run together). Measured ~36 s of CPU for one parse at `BROOD_RT_GC_FLOOR=1`;
+;; under full-suite contention its wall-clock consistently overran the original 60 s, so the
+;; three cases false-failed with `:TIMED-OUT` every run even though the worker finished fine
+;; (the suite completed — no guard-page abort, the actual KI-14 symptom). 180 s gives the
+;; contention headroom; a genuinely dead worker still never replies, so it is still caught.
 (defn jdr--in-spawn (path)
   (let (me (self))
     (spawn (send me [:r (jdr--parse path)]))
-    (receive ([:r r] r) (after 60000 :TIMED-OUT))))
+    (receive ([:r r] r) (after 180000 :TIMED-OUT))))
 
 (describe "KI-14: deep JIT'd recursion drains instead of overflowing"
   ;; :serial — each case warms globals and leans on the whole worker stack; running them
@@ -101,4 +112,5 @@
 (defn jdr--scan-in-spawn (files)
   (let (me (self))
     (spawn (send me [:r (jdr--scan files 0)]))
-    (receive ([:r r] r) (after 60000 :TIMED-OUT))))
+    ;; 180 s liveness net, as in `jdr--in-spawn` — contention headroom, not a perf bound.
+    (receive ([:r r] r) (after 180000 :TIMED-OUT))))
