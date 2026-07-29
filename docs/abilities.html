@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Brood abilities — one dispatch, from print to +</title>
+<style>
+  :root {
+    --bg: #f5f7f7; --surface: #ffffff; --surface-2: #eef2f1; --ink: #15201e;
+    --muted: #576663; --faint: #7d8b88; --line: #e0e6e5; --line-strong: #cdd6d4;
+    --accent: #0f7d78; --accent-ink: #0a5a56; --accent-soft: #e4f1ef; --accent-tint: #f0f7f6;
+    --good: #2f8f66; --warn: #b07d15; --bad: #c14a3b;
+    --elixir: #6b4e8f; --rust: #b7410e; --ruby: #c1352f; --clojure: #5881d8;
+    --shadow: 0 1px 2px rgba(20,40,38,.05), 0 8px 28px rgba(20,40,38,.06);
+    --mono: ui-monospace, "Cascadia Code", "Cascadia Mono", Menlo, "SF Mono", "Roboto Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1312; --surface: #141c1b; --surface-2: #1a2423; --ink: #e7efed;
+      --muted: #96a4a1; --faint: #76837f; --line: #253130; --line-strong: #33413f;
+      --accent: #46c3b6; --accent-ink: #6fd3c8; --accent-soft: rgba(70,195,182,.12); --accent-tint: rgba(70,195,182,.06);
+      --good: #4bbd88; --warn: #d6a53c; --bad: #e0685a;
+      --elixir: #a184c4; --rust: #e07a4a; --ruby: #e0655e; --clojure: #82a6f0;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f5f7f7; --surface: #ffffff; --surface-2: #eef2f1; --ink: #15201e;
+    --muted: #576663; --faint: #7d8b88; --line: #e0e6e5; --line-strong: #cdd6d4;
+    --accent: #0f7d78; --accent-ink: #0a5a56; --accent-soft: #e4f1ef; --accent-tint: #f0f7f6;
+    --good: #2f8f66; --warn: #b07d15; --bad: #c14a3b;
+    --elixir: #6b4e8f; --rust: #b7410e; --ruby: #c1352f; --clojure: #5881d8;
+    --shadow: 0 1px 2px rgba(20,40,38,.05), 0 8px 28px rgba(20,40,38,.06);
+  }
+  :root[data-theme="dark"] {
+    --bg: #0d1312; --surface: #141c1b; --surface-2: #1a2423; --ink: #e7efed;
+    --muted: #96a4a1; --faint: #76837f; --line: #253130; --line-strong: #33413f;
+    --accent: #46c3b6; --accent-ink: #6fd3c8; --accent-soft: rgba(70,195,182,.12); --accent-tint: rgba(70,195,182,.06);
+    --good: #4bbd88; --warn: #d6a53c; --bad: #e0685a;
+    --elixir: #a184c4; --rust: #e07a4a; --ruby: #e0655e; --clojure: #82a6f0;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); line-height: 1.6; font-size: 16px; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 1140px; margin: 0 auto; padding: clamp(1.5rem, 4vw, 3.5rem) clamp(1.1rem, 4vw, 2.5rem) 5rem; }
+
+  .eyebrow { font-family: var(--mono); font-size: .72rem; letter-spacing: .16em; text-transform: uppercase; color: var(--accent-ink); margin: 0 0 1rem; display: flex; align-items: center; gap: .6rem; }
+  .eyebrow::before { content: ""; width: 1.6rem; height: 2px; background: var(--accent); display: inline-block; }
+  h1 { font-weight: 680; font-size: clamp(1.9rem, 4.6vw, 3.05rem); line-height: 1.05; letter-spacing: -.022em; margin: 0 0 .95rem; text-wrap: balance; max-width: 15ch; }
+  h1 .fade { color: var(--muted); }
+  h1 .m { font-family: var(--mono); color: var(--accent-ink); font-weight: 620; letter-spacing: -.03em; }
+  .lead { font-size: clamp(1.02rem, 1.6vw, 1.2rem); color: var(--muted); max-width: 60ch; margin: 0; }
+  .lead strong { color: var(--ink); font-weight: 620; }
+  .tagline { margin-top: 1.1rem; font-family: var(--mono); font-size: .82rem; color: var(--accent-ink); background: var(--accent-soft); display: inline-block; padding: .4rem .75rem; border-radius: 8px; letter-spacing: .01em; }
+
+  .theme-toggle { position: fixed; top: 1rem; right: 1rem; z-index: 20; font-family: var(--mono); font-size: .72rem; letter-spacing: .04em; background: var(--surface); color: var(--muted); border: 1px solid var(--line-strong); border-radius: 999px; padding: .4rem .8rem; cursor: pointer; }
+  .theme-toggle:hover { color: var(--accent-ink); border-color: var(--accent); }
+  .theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  section { margin-top: clamp(3rem, 6vw, 4.5rem); }
+  .sec-head { margin-bottom: 1.6rem; }
+  h2 { font-size: clamp(1.28rem, 2.3vw, 1.68rem); font-weight: 640; letter-spacing: -.012em; margin: 0 0 .45rem; text-wrap: balance; }
+  h2 .m { font-family: var(--mono); color: var(--accent-ink); font-size: .92em; }
+  .sec-head p { margin: 0; color: var(--muted); max-width: 66ch; }
+  .kicker { font-family: var(--mono); font-size: .7rem; letter-spacing: .15em; text-transform: uppercase; color: var(--faint); display: block; margin-bottom: .5rem; }
+  .note { font-size: .84rem; color: var(--faint); margin-top: 1.1rem; max-width: 70ch; }
+  .note b { color: var(--muted); }
+  :not(pre) > code { background: var(--surface-2); padding: .08em .38em; border-radius: 5px; font-size: .85em; font-family: var(--mono); }
+
+  /* the four-property strip */
+  .props { display: grid; grid-template-columns: repeat(4, 1fr); gap: .9rem; margin-top: 1.4rem; }
+  @media (max-width: 760px){ .props { grid-template-columns: 1fr 1fr; } }
+  .prop-card { background: var(--surface); border: 1px solid var(--line); border-radius: 13px; padding: 1.1rem 1.15rem; box-shadow: var(--shadow); }
+  .prop-card .pk { font-family: var(--mono); font-size: .68rem; letter-spacing: .1em; text-transform: uppercase; color: var(--accent-ink); }
+  .prop-card h3 { margin: .35rem 0 .35rem; font-size: 1.05rem; font-weight: 640; }
+  .prop-card p { margin: 0; font-size: .84rem; color: var(--muted); line-height: 1.5; }
+
+  /* code cards */
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; }
+  @media (max-width: 900px){ .cards { grid-template-columns: 1fr; } }
+  .snip { background: var(--surface); border: 1px solid var(--line); border-radius: 13px; overflow: hidden; box-shadow: var(--shadow); display: flex; flex-direction: column; }
+  .snip .cap { display: flex; align-items: center; gap: .55rem; padding: .72rem 1rem; border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: .74rem; letter-spacing: .01em; color: var(--muted); background: var(--surface-2); }
+  .snip .cap b { color: var(--accent-ink); font-weight: 600; }
+  .snip .cap .tag { margin-left: auto; font-size: .62rem; letter-spacing: .07em; text-transform: uppercase; padding: .16rem .5rem; border-radius: 999px; font-weight: 600; }
+  .tag.core { color: var(--accent-ink); background: var(--accent-soft); }
+  .tag.you { color: var(--good); background: color-mix(in srgb, var(--good) 14%, transparent); }
+  pre { margin: 0; padding: 1rem 1.1rem; overflow-x: auto; font-family: var(--mono); font-size: .79rem; line-height: 1.7; color: var(--ink); background: var(--surface); flex: 1; }
+  pre .c { color: var(--faint); font-style: italic; }
+  pre .k { color: var(--accent-ink); font-weight: 600; }
+  pre .s { color: var(--good); }
+  pre .p { color: var(--muted); }
+  pre .r { color: var(--accent-ink); }
+  pre .n { color: var(--bad); font-weight: 600; }
+
+  /* comparison matrix */
+  .table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); background: var(--surface); }
+  .matrix { min-width: 820px; width: 100%; border-collapse: collapse; font-size: .86rem; }
+  .matrix thead th { position: sticky; top: 0; background: var(--surface); z-index: 3; text-align: left; font-weight: 600; vertical-align: bottom; padding: .9rem .9rem .75rem; border-bottom: 2px solid var(--line-strong); white-space: nowrap; }
+  .matrix th.dim, .matrix td.dim { position: sticky; left: 0; background: var(--surface); z-index: 2; border-right: 1px solid var(--line); font-weight: 600; color: var(--ink); white-space: normal; min-width: 160px; }
+  .matrix thead th.dim { z-index: 4; }
+  .matrix th.bc, .matrix td.bc { background: var(--accent-tint); }
+  .matrix th.bc { border-bottom-color: var(--accent); }
+  .matrix td.bc { border-left: 2px solid var(--accent); border-right: 2px solid var(--accent); color: var(--ink); }
+  .matrix tbody td { padding: .78rem .9rem; border-bottom: 1px solid var(--line); vertical-align: top; color: var(--muted); line-height: 1.45; }
+  .matrix tbody tr:last-child td { border-bottom: none; }
+  .lang { display: inline-flex; align-items: center; gap: .5rem; font-family: var(--mono); font-weight: 600; color: var(--ink); font-size: .84rem; }
+  .lang::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--lang); flex: none; }
+  .m { font-family: var(--mono); font-size: .82em; color: var(--ink); }
+  td.bc .m { color: var(--accent-ink); }
+  .yes { color: var(--good); font-weight: 700; } .no { color: var(--bad); font-weight: 700; } .par { color: var(--warn); font-weight: 700; }
+
+  /* advantages / limits */
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; }
+  @media (max-width: 820px){ .two { grid-template-columns: 1fr; } }
+  .panel { border: 1px solid var(--line); border-radius: 14px; padding: 1.5rem 1.6rem; box-shadow: var(--shadow); background: var(--surface); }
+  .panel.adv { border-color: color-mix(in srgb, var(--good) 30%, var(--line)); }
+  .panel.lim { border-color: color-mix(in srgb, var(--warn) 30%, var(--line)); }
+  .panel h3 { margin: 0 0 1rem; font-size: 1.02rem; font-weight: 640; display: flex; align-items: center; gap: .5rem; }
+  .panel h3 .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .adv h3 .dot { background: var(--good); } .lim h3 .dot { background: var(--warn); }
+  .panel ul { list-style: none; margin: 0; padding: 0; display: grid; gap: .95rem; }
+  .panel li { display: grid; grid-template-columns: 1.1rem 1fr; gap: .6rem; font-size: .92rem; }
+  .panel li b { font-weight: 640; color: var(--ink); }
+  .panel li span { color: var(--muted); }
+  .adv li::before { content: "+"; color: var(--good); font-weight: 800; font-family: var(--mono); }
+  .lim li::before { content: "\2212"; color: var(--warn); font-weight: 800; font-family: var(--mono); }
+
+  footer { margin-top: 3.5rem; padding-top: 1.4rem; border-top: 1px solid var(--line); color: var(--faint); font-size: .8rem; font-family: var(--mono); letter-spacing: .02em; line-height: 1.7; }
+  .fade-up { opacity: 0; transform: translateY(10px); animation: fu .7s cubic-bezier(.2,.7,.3,1) forwards; }
+  @keyframes fu { to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { .fade-up { animation: none; opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+
+<button class="theme-toggle" id="tt" aria-label="Toggle theme">◑ theme</button>
+
+<div class="wrap">
+  <header class="fade-up">
+    <p class="eyebrow">Brood · abilities · shipped</p>
+    <h1>One dispatch, from <span class="m">print</span> to <span class="m">+</span></h1>
+    <p class="lead">An <strong>ability</strong> is an open generic function that dispatches on its first argument's identity. It's the <strong>one mechanism</strong> in Brood for polymorphism — the same <code>defability</code>/<code>impl</code> powers how a value prints, iterates, sorts, and does arithmetic. Core to the language, no import, and fast enough to leave on.</p>
+    <div class="tagline">open · deterministic · inline-cached · hot-reloadable</div>
+  </header>
+
+  <!-- THE IDEA -->
+  <section class="fade-up">
+    <div class="sec-head">
+      <span class="kicker">The idea in ten lines</span>
+      <h2>Declare an operation; implement it per type</h2>
+      <p>Dispatch is on the <em>identity</em> of the first argument — a built-in's <code>type-of</code> kind (<code>:int</code>, <code>:string</code>, …), or a <code>defrecord</code>'s nominal <code>:module/name</code>. Implement for <em>any</em> identity, from anywhere.</p>
+    </div>
+    <div class="cards">
+      <div class="snip">
+        <div class="cap"><b>defability</b> + <b>impl</b> · dispatch on identity <span class="tag core">core</span></div>
+<pre>(<span class="k">defability</span> Sized (size [self] <span class="p">:-></span> int))
+
+(<span class="k">impl</span> Sized <span class="p">:int</span>    (size [n] n))       <span class="c">; a primitive</span>
+(<span class="k">impl</span> Sized <span class="p">:string</span> (size [s] (count s)))
+(<span class="k">impl</span> Sized <span class="p">:vector</span> (size [v] (count v)))
+
+(size <span class="p">42</span>)      <span class="c">;=> 42</span>
+(size <span class="s">"hello"</span>) <span class="c">;=> 5</span>
+(size [<span class="p">1</span> <span class="p">2</span> <span class="p">3</span>]) <span class="c">;=> 3   — one call site, three types</span></pre>
+      </div>
+      <div class="snip">
+        <div class="cap">a driver is just a value <span class="tag you">your type</span></div>
+<pre>(<span class="k">defability</span> Store (fetch [self key]))
+
+(<span class="k">defrecord</span> pg  (pool))            <span class="c">; two backends,</span>
+(<span class="k">defrecord</span> mem (data))            <span class="c">; each its own type</span>
+(<span class="k">impl</span> Store pg  (fetch [db k] (pg-get (get db <span class="p">:pool</span>) k)))
+(<span class="k">impl</span> Store mem (fetch [db k] (get (get db <span class="p">:data</span>) k)))
+
+(fetch db <span class="s">"user:1"</span>)   <span class="c">; picks the impl from db's identity —</span>
+                    <span class="c">; swap the value, swap the backend. No</span>
+                    <span class="c">; config, no module-atom indirection.</span></pre>
+      </div>
+    </div>
+    <p class="note">No <code>(:use ability)</code>, no registration ceremony — <b>abilities are part of the prelude</b>. <code>defability</code> declares the ops, <code>impl</code> registers one for a dispatch id, and the call site just calls the op.</p>
+  </section>
+
+  <!-- THE SAME MECHANISM, FOUR JOBS -->
+  <section>
+    <div class="sec-head">
+      <span class="kicker">The same mechanism, four jobs</span>
+      <h2>Print, iterate, sort, add — all one thing</h2>
+      <p>Other languages give each of these a <em>separate</em> mechanism (a <code>ToString</code>, an <code>Enumerable</code>, a <code>Comparable</code>, operator overloading). In Brood they're all abilities — the standard library's, that your types opt into.</p>
+    </div>
+    <div class="cards">
+
+      <div class="snip">
+        <div class="cap"><b>Display</b> · how a value prints <span class="tag core">always on</span></div>
+<pre>(<span class="k">defmodule</span> bank)
+(<span class="k">defrecord</span> money (amount currency))
+
+(<span class="k">impl</span> Display money
+  (to-str [m] (str <span class="s">"$"</span> (to-fixed (get m <span class="p">:amount</span>) <span class="p">2</span>))))
+
+(println (money <span class="p">10.5</span> <span class="p">:usd</span>))   <span class="c">;=> $10.50</span>
+<span class="c">; no activation step — a record just prints itself.</span></pre>
+      </div>
+
+      <div class="snip">
+        <div class="cap"><b>Seqable</b> + <b>Conjable</b> · a first-class collection <span class="tag you">your type</span></div>
+<pre>(<span class="k">defrecord</span> stack (items))
+(<span class="k">impl</span> Seqable  stack (to-seq [s] (get s <span class="p">:items</span>)))
+(<span class="k">impl</span> Conjable stack (-conj  [s x] (stack (cons x (get s <span class="p">:items</span>)))))
+
+(<span class="k">def</span> s (stack (list <span class="p">1</span> <span class="p">2</span> <span class="p">3</span>)))
+(count s)          <span class="c">;=> 3</span>
+(fold + <span class="p">0</span> s)       <span class="c">;=> 6</span>
+(map inc s)        <span class="c">;=> (2 3 4)</span>
+(first s)          <span class="c">;=> 1</span>
+(seq (conj s <span class="p">0</span>))   <span class="c">;=> (0 1 2 3)  — works with every seq op</span></pre>
+      </div>
+
+      <div class="snip">
+        <div class="cap"><b>Ord</b> · a type's own sort order <span class="tag you">your type</span></div>
+<pre>(<span class="k">defrecord</span> ver (major minor))
+(<span class="k">impl</span> Ord ver
+  (compare-to [a b]
+    (<span class="k">let</span> (c (compare (get a <span class="p">:major</span>) (get b <span class="p">:major</span>)))
+      (<span class="k">if</span> (= c <span class="p">0</span>) (compare (get a <span class="p">:minor</span>) (get b <span class="p">:minor</span>)) c))))
+
+(sort (list (ver <span class="p">1</span> <span class="p">10</span>) (ver <span class="p">1</span> <span class="p">2</span>) (ver <span class="p">2</span> <span class="p">0</span>)))
+<span class="c">;=> (v1.2  v1.10  v2.0)   — semantic order, not 1.10 &lt; 1.2</span></pre>
+      </div>
+
+      <div class="snip">
+        <div class="cap"><b>Num</b> · arithmetic for your type <span class="tag you">your type</span></div>
+<pre>(<span class="k">defrecord</span> usd (cents))
+(<span class="k">impl</span> Num usd
+  (num-add [a b] (usd (+ (get a <span class="p">:cents</span>) (get b <span class="p">:cents</span>))))
+  (num-mul [a b] (usd (* (get a <span class="p">:cents</span>) b))))   <span class="c">; by a scalar</span>
+
+(+ (usd <span class="p">500</span>) (usd <span class="p">250</span>))   <span class="c">;=> usd 750</span>
+(* (usd <span class="p">500</span>) <span class="p">3</span>)           <span class="c">;=> usd 1500</span>
+<span class="c">; int/float math is untouched — see "zero-cost", below.</span></pre>
+      </div>
+
+    </div>
+    <p class="note">Every one of these is an ordinary ability the prelude ships and your record <em>opts into</em>. There's nothing special about <code>Display</code> or <code>+</code> — they're the same open dispatch as <code>Sized</code> above.</p>
+  </section>
+
+  <!-- FOUR PROPERTIES -->
+  <section>
+    <div class="sec-head">
+      <span class="kicker">Why it's usable, not just expressive</span>
+      <h2>Open, deterministic, fast, live</h2>
+      <p>Openness usually costs you determinism (whose impl wins?) or speed (a lookup every call) or the ability to change things at runtime. Brood's ability layer keeps all four.</p>
+    </div>
+    <div class="props">
+      <div class="prop-card">
+        <span class="pk">open</span>
+        <h3>Implement anything</h3>
+        <p>An <code>impl</code> for any ability and any id — a primitive, your record, or a library's type. No orphan rule.</p>
+      </div>
+      <div class="prop-card">
+        <span class="pk">deterministic</span>
+        <h3>Precedence, not roulette</h3>
+        <p>When two impls compete for a slot, a fixed order decides: <span class="m">app &gt; type-owner &gt; ability-owner &gt; other</span> — never load order. A same-tier clash warns.</p>
+      </div>
+      <div class="prop-card">
+        <span class="pk">fast</span>
+        <h3>Inline-cached</h3>
+        <p>A per-op cache memoizes <span class="m">id → impl</span>, validated by an epoch, so a hot monomorphic call is about 2× a direct call — down from ~3.5× with a plain registry lookup.</p>
+      </div>
+      <div class="prop-card">
+        <span class="pk">live</span>
+        <h3>Redefine at runtime</h3>
+        <p>Re-<code>impl</code> at the REPL and running processes pick it up next call — the cache deopts on the reload epoch. Erlang-style.</p>
+      </div>
+    </div>
+    <p class="note"><b>The "app is sovereign" part matters in practice:</b> because the application's own module outranks every library (top of the precedence order), a dependency can never quietly change how <em>your</em> types behave — you can always override it, deterministically.</p>
+  </section>
+
+  <!-- ZERO-COST -->
+  <section>
+    <div class="sec-head">
+      <span class="kicker">The part that's easy to get wrong</span>
+      <h2>Zero cost on the hot path</h2>
+      <p>Making <code>+</code> or <code>first</code> dispatch to a record <em>looks</em> like it should slow down ordinary <code>int</code> and list code. It doesn't — because the dispatch lives in the cold fallback, not the operator.</p>
+    </div>
+    <div class="cards">
+      <div class="snip">
+        <div class="cap">the naive way — a branch in the operator <span class="tag" style="color:var(--bad);background:color-mix(in srgb,var(--bad) 14%,transparent)">195× slower</span></div>
+<pre>(<span class="k">defn</span> + ((a b)
+  (<span class="k">if</span> (record? a) (num-add a b) (%add a b))))
+<span class="c">; the JIT can no longer prove `+` is an int-add,</span>
+<span class="c">; so it stops specializing arithmetic entirely.</span>
+<span class="n">fib 35:  60 ms  ->  11,700 ms</span>   <span class="c">— measured, reverted</span></pre>
+      </div>
+      <div class="snip">
+        <div class="cap">the kernel way — dispatch in the fallback <span class="tag you">0×</span></div>
+<pre>(<span class="k">defn</span> + ((a b) (%add a b)))    <span class="c">; operator unchanged</span>
+
+<span class="c">; %add inlines int+int / float+float (JIT). A record</span>
+<span class="c">; isn't a number, so it falls to the builtin, whose</span>
+<span class="c">; COLD path dispatches Num. The hot path never sees it.</span>
+<span class="r">fib 35:  61 ms</span>   <span class="c">— identical to baseline</span></pre>
+      </div>
+    </div>
+    <p class="note">The same trick powers <code>first</code>/<code>rest</code>/<code>empty?</code> for custom collections: they're JIT-inlined for lists, and a record only reaches the fallback that consults <code>Seqable</code>. A tight <code>fold</code> over a million-element list is unchanged. <b>The measurement is the load-bearing part</b> — the branch-in-the-operator version was written, benchmarked, and thrown away.</p>
+  </section>
+
+  <!-- COMPARISON -->
+  <section>
+    <div class="sec-head">
+      <span class="kicker">Side by side</span>
+      <h2>How other languages split these apart</h2>
+      <p>The axes that matter for an open dispatch mechanism. Brood's row is the point: it doesn't force a trade between openness, determinism, speed, and liveness — and it uses one mechanism where others use several.</p>
+    </div>
+    <div class="table-scroll">
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th class="dim">Dimension</th>
+            <th class="bc"><span class="lang" style="--lang:var(--accent)">Brood</span></th>
+            <th><span class="lang" style="--lang:var(--rust)">Rust</span></th>
+            <th><span class="lang" style="--lang:var(--elixir)">Elixir</span></th>
+            <th><span class="lang" style="--lang:var(--clojure)">Clojure</span></th>
+            <th><span class="lang" style="--lang:var(--ruby)">Ruby</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="dim">One mechanism for all of it</td>
+            <td class="bc">yes — <span class="m">ability</span> is print, seq, sort, math</td>
+            <td>traits (but no runtime extension)</td>
+            <td>protocols + behaviours, split</td>
+            <td>protocols + multimethods</td>
+            <td>ad-hoc: <span class="m">to_s</span>, <span class="m">&lt;=&gt;</span>, <span class="m">each</span>, op methods</td>
+          </tr>
+          <tr>
+            <td class="dim">Implement for a foreign type</td>
+            <td class="bc"><span class="yes">yes</span> — any id, any module</td>
+            <td><span class="no">no</span> (orphan rule; newtype)</td>
+            <td><span class="yes">yes</span></td>
+            <td><span class="yes">yes</span></td>
+            <td><span class="yes">yes</span> (monkey-patch)</td>
+          </tr>
+          <tr>
+            <td class="dim">Conflict resolution</td>
+            <td class="bc"><span class="yes">deterministic</span> precedence; clash warns</td>
+            <td>can't happen (coherence)</td>
+            <td><span class="par">last compiled</span> + warning</td>
+            <td><span class="par">last defined</span> wins</td>
+            <td><span class="no">last defined</span>, silent</td>
+          </tr>
+          <tr>
+            <td class="dim">App outranks libraries</td>
+            <td class="bc"><span class="yes">yes</span> — app tier is top</td>
+            <td>n/a</td>
+            <td><span class="no">no</span> — a dep is equally authoritative</td>
+            <td><span class="no">no</span></td>
+            <td><span class="no">no</span> — order roulette</td>
+          </tr>
+          <tr>
+            <td class="dim">Dispatch cost</td>
+            <td class="bc">inline-cached (~2× direct); <span class="m">+</span>/<span class="m">first</span> inline to 0</td>
+            <td><span class="yes">monomorphized, zero</span></td>
+            <td>frozen table at release</td>
+            <td>cached polymorphic IC</td>
+            <td>method lookup</td>
+          </tr>
+          <tr>
+            <td class="dim">Add / replace an impl at runtime</td>
+            <td class="bc"><span class="yes">yes</span> — cache deopts, live</td>
+            <td><span class="no">no</span></td>
+            <td><span class="par">dev only</span> (not in a release)</td>
+            <td><span class="yes">yes</span></td>
+            <td><span class="yes">yes</span></td>
+          </tr>
+          <tr>
+            <td class="dim">Types check the impls</td>
+            <td class="bc">advisory checker; <span class="m">nest check</span>/CI hard-rejects</td>
+            <td><span class="yes">enforced</span></td>
+            <td>optional (dialyzer)</td>
+            <td><span class="no">no</span></td>
+            <td><span class="no">no</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- LEDGER -->
+  <section>
+    <div class="sec-head">
+      <span class="kicker">The honest ledger</span>
+      <h2>What it buys, and what it costs</h2>
+    </div>
+    <div class="two">
+      <div class="panel adv">
+        <h3><span class="dot"></span>What it buys</h3>
+        <ul>
+          <li><div><b>One idea to learn.</b> <span>Printing, iteration, ordering, and arithmetic are the same open dispatch. A new protocol is a <code>defability</code>; joining one is an <code>impl</code>. There's no separate <em>Enumerable</em>-vs-<em>Comparable</em>-vs-operator-overloading vocabulary.</span></div></li>
+          <li><div><b>Your types are first-class.</b> <span>A record can print itself, iterate, sort, and do arithmetic — the same standard-library operations built-ins get. A custom collection works with <code>map</code>/<code>fold</code>/<code>for</code>/<code>conj</code>, not a parallel API.</span></div></li>
+          <li><div><b>Open, but not chaotic.</b> <span>You can implement anything (Elixir/Ruby freedom), yet conflicts resolve by a fixed precedence with the app on top — no last-wins roulette, and a dependency can't silently change your types.</span></div></li>
+          <li><div><b>Fast enough to leave on.</b> <span>An epoch-validated inline cache halves dispatch overhead, and the operator/accessor hot paths (<code>+</code>, <code>first</code>, <code>fold</code>) pay <em>nothing</em> — dispatch lives in the cold fallback, verified by benchmark.</span></div></li>
+          <li><div><b>Live.</b> <span>Redefine an impl at the REPL; running green processes pick it up on their next call. The cache deopts on the reload epoch — hot reload survives the specialization.</span></div></li>
+        </ul>
+      </div>
+      <div class="panel lim">
+        <h3><span class="dot"></span>What it costs</h3>
+        <ul>
+          <li><div><b>Dispatch is cached, not monomorphized.</b> <span>A call on a statically-unknown receiver does an inline-cache probe, not Rust's zero-cost monomorphization. Fast, but not free — the price of staying open and live.</span></div></li>
+          <li><div><b>Coherence is a convention, not a proof.</b> <span>There's no orphan rule; two libraries <em>can</em> both impl for the same slot. Precedence makes the winner deterministic and the checker warns, but it's discipline + a lint, not Rust's "it cannot exist."</span></div></li>
+          <li><div><b>The zero-cost paths need kernel support.</b> <span><code>+</code>, <code>first</code>, <code>rest</code> can't dispatch from Brood without defeating the JIT (a measured 195× arithmetic regression). Extending them means a kernel fallback — more machinery under the hood than a plain function.</span></div></li>
+          <li><div><b>Records carry a hidden identity field.</b> <span>A <code>defrecord</code> value is a map with a reserved <code>:__id__</code> key, so it is not <code>=</code> to a bare map (Elixir-struct semantics). The collection ops hide it; <code>record?</code>/<code>fields</code> give the clean view.</span></div></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>brood · abilities · open dispatch on first-arg identity · precedence: app &gt; type-owner &gt; ability-owner &gt; other · inline-cached, deopt-on-reload · Display · Seqable · Conjable · Ord · Num — one mechanism</footer>
+</div>
+
+<script>
+  (function () {
+    var btn = document.getElementById('tt'), root = document.documentElement;
+    btn.addEventListener('click', function () {
+      var isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+      var cur = root.getAttribute('data-theme') || (isDark ? 'dark' : 'light');
+      root.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
+    });
+  })();
+</script>
+</body>
+</html>
