@@ -1049,12 +1049,22 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
             })
         }
 
-        // Vector literal — evaluate each element (value position), build fresh.
+        // Vector literal — evaluate each element (value position), build fresh…
         ValueRef::Vector(id) => {
             let items = heap.vector(id).to_vec();
             let mut nodes = Vec::with_capacity(items.len());
             for e in items {
                 nodes.push(compile_node(heap, e, scope, false)?);
+            }
+            // …unless every element is itself constant, in which case the whole
+            // literal is a constant: promote it once and share that instance. Sound
+            // *because Brood data is immutable* — no one can tell a shared vector from
+            // a freshly built one, since neither can be mutated. Without this, a
+            // literal like `[:a :b]` in a hot path allocates on every evaluation
+            // (measured 2026-07-29: the `receive` tag-filter vector cost `pingpong`
+            // +3.6% / `ring` +2.4% purely in per-call allocation).
+            if nodes.iter().all(|n| matches!(n, Node::Const(_))) {
+                return Some(const_node(heap, form));
             }
             Some(Node::Vector(nodes.into_boxed_slice()))
         }
