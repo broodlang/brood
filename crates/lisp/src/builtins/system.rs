@@ -1468,6 +1468,17 @@ pub(super) fn unlink_proc(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult 
 ///   ADR-043 hard cap (whole-OS-process abort). Policy lives in Brood: a spawn
 ///   wrapper that sets the limit first is `(spawn (fn () (process-flag
 ///   :max-heap n) (work)))`.
+/// `(hibernate)` — tell the runtime this process is going idle for a long time, so it
+/// should give back everything it can: collect, shrink its heap slabs and root vectors,
+/// and drop its inline caches and compiled-body cache. Erlang's `erlang:hibernate/3`,
+/// minus the continuation argument (Brood processes park in `receive`, so there is no
+/// need to re-enter via an explicit MFA).
+///
+/// Returns the bytes of slab capacity released.
+pub(super) fn hibernate_proc(_args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(Value::Int(heap.hibernate() as i64))
+}
+
 pub(super) fn process_flag(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let flag = match arg(args, 0) {
         Value::Keyword(k) => k,

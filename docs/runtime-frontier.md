@@ -179,7 +179,13 @@ benchmark row before believing it.
   ERTS allocator free-lists, every thread pool. Expected: spawn 15.8 allocs → ~2, a large
   cut to the 7.6 µs spawn path; floor unchanged. Risk: staleness bugs (epoch stamps
   already guard heap handles; the mailbox needs a generation bump for pid reuse safety).
-- [ ] **M5 — `(hibernate)` builtin — the Erlang answer to the reverted experiment.**
+- [x] **M5 — `(hibernate)` builtin — DONE 2026-07-29.** Measured: a process that works
+  briefly then parks goes **8.18 → 4.94 KB/proc (−40%)**, and the run is *faster*
+  (0.68 → 0.45 s at 100k processes) because the smaller footprint eases allocator
+  pressure. `Heap::hibernate` collects, shrinks slabs + root vectors, and drops the IC
+  tables, the block registry and the compiled-body cache (all pure caches, epoch-validated
+  — shared arms re-install from the runtime). Tests in `tests/hibernate_test.blsp`.
+  Original entry:
   Opt-in: drop IC tables, shrink slabs, trim roots (we *measured* this at 3.89 KB/proc);
   the process pays cache rebuild on wake **by its own choice**, exactly `erlang:hibernate/3`.
   Small, safe, and gives real long-idle apps (connection-per-process servers) the win the
@@ -213,8 +219,7 @@ immutability-fraught).
 
 Revised after the payload measurement above moved L1 off the latency gap.
 
-1. **M5 `(hibernate)`** — small, safe, Erlang-blessed; converts an already-measured
-   reverted patch into a feature. Half a day.
+1. ~~**M5 `(hibernate)`**~~ — **DONE** (8.18 → 4.94 KB/proc).
 2. **M4 shell recycling** — bounded, attacks the 7.6 µs / 15.8-alloc spawn path, no
    GC-semantics change.
 3. **L3 measurement, then the fix** — split the 2 µs/message into lock / wake / match.
