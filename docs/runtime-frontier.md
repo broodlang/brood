@@ -303,6 +303,57 @@ Three things follow, and they redirect the remaining work:
    **keep shaving incrementally**; do not hold cuts back waiting for a threshold, and do
    not expect a jackpot from crossing one.
 
+#### The bare shell, allocation by allocation (measured 2026-07-29)
+
+A temporary size-histogram in the counting allocator (an atomic per allocation — for a
+measurement build only; removed, redo it the same way) gives the **complete** per-process
+profile of `spawn` + park at 300k processes. It sums to ~3019 B against 3037 B measured,
+so this is the whole of it — nothing is unattributed any more:
+
+| bytes | per process | what |
+|---|---|---|
+| 1184 × 1 | 1184 | the `Box<Process>` (the `Heap` is inline in it) |
+| 256 × 2 | 510 | one is `vm_call_ics` (4 × 64 B) |
+| 160 × 2 | 319 | one is `vm_fast_links` (4 × 40 B) |
+| 184 × 1 | 184 | `Arc<Mailbox>` (168 B + Arc header) |
+| 180 × 1 | 179 | |
+| 84 × 2 | 167 | one is `arm_ic_blocks` |
+| 136 × 1 | 136 | `Suspended` (the parked continuation) |
+| 116, 96, 56, 32, 24, 16 | 340 | |
+
+Identities come from differencing the same workload with `(hibernate)`, which drops exactly
+one 256, one 160 and one 84 — so **the IC tables really are ~500 B/process**, confirming the
+536 B estimate by direct measurement rather than by adding up `size_of`s.
+
+What this changes:
+
+- **M2b is the single biggest reducible item** at ~500 B/process (≈150 MB at 300k), second
+  only to the `Box<Process>` itself, which is irreducible without M7.
+- The **second 256 / 160 / 84 of each pair survives hibernate** and is still unidentified by
+  *name* (though now pinned by size). Identifying them needs allocation backtraces, not more
+  differencing — that is the next measurement, and it is cheap: tag the histogram at
+  process-construction boundaries.
+- Roughly 950 B/process survives `hibernate` across the small buckets. No single item there
+  is worth a risky change; they are only worth attacking as a group, if at all.
+
+> **Hard constraint on M2b, found 2026-07-29 before writing code: IC state may NOT hang off
+> a `CompiledArm`.** The obvious design — give each shared arm a `Box<[AtomicUsize]>` of
+> per-site slots, since ADR-175 already shares arms per runtime — is **unsound for prelude
+> arms**, which are the common call target. `SHARED` is a process-wide
+> `LazyLock<SharedBundle>` and every `Interp::new()` does `Arc::clone(&SHARED.code)` while
+> constructing its **own** `RuntimeCode`. So a prelude `CompiledArm` is shared across
+> *runtimes*, not merely across the processes of one runtime — and an IC entry caches a
+> *global* resolution, which is per-runtime by construction. Hanging slots on the arm would
+> let one runtime's resolutions serve another's calls: a wrong-callee miscompile, not a
+> stale-cache warning.
+>
+> Shared IC state must therefore live on **`RuntimeCode`**, keyed by `(arm_uid, site)`.
+> That reintroduces the per-activation base lookup as the design problem: today
+> `vm_arm_block` is a per-*process* `HashMap` probe per activation (no synchronisation);
+> a per-*runtime* table needs that probe to stay lock-free, or to be resolved once per
+> activation and carried — `BcFrame::ic_bases` already carries exactly this, so the
+> resolution point exists.
+
 - [ ] **M2b — sharing the IC tables. Two findings, one of which corrects the other.**
 
   **Still true and useful:** `vm_call_ics` is *never read raw by JIT code* — only
