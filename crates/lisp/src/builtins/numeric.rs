@@ -250,7 +250,9 @@ fn num_multi_dispatch(heap: &mut Heap, who: &str, a: Value, b: Value) -> LispRes
     let genv = heap.global();
     let callee = heap
         .env_get(genv, crate::core::value::intern(op))
-        .ok_or_else(|| LispError::runtime(format!("{who}: the `{op}` multimethod is not loaded")))?;
+        .ok_or_else(|| {
+            LispError::runtime(format!("{who}: the `{op}` multimethod is not loaded"))
+        })?;
     crate::eval::compile::apply_value(heap, callee, &[a, b], genv)
 }
 
