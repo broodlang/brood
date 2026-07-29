@@ -473,5 +473,55 @@
     (pm-def-fac pm-qfac)
     (assert= (pm-qfac 5) 120)))
 
+;; ---- record patterns: (record name {map-pattern}?) — ADR-186 ----
+;; A record is a map carrying a nominal `:__id__`; a record pattern asserts that id (derived
+;; syntactically from the name) and then matches an ordinary map pattern against the fields.
+(defrecord pm-circle (r))
+(defrecord pm-rect (w h))
+(defrecord pm-pt (x y))
+
+(describe "record patterns"
+  (test "matches a defrecord value by nominal id and binds fields"
+    (assert= (match (pm-circle 5) ((record pm-circle {:r r}) r)) 5)
+    (assert= (match (pm-rect 3 4) ((record pm-rect {:w w :h h}) (* w h))) 12))
+  (test ":keys shorthand composes inside a record pattern"
+    (assert= (match (pm-pt 1 2) ((record pm-pt {:keys [x y]}) [x y])) [1 2]))
+  (test "an id-only record pattern (no field map) matches any instance"
+    (assert= (match (pm-circle 9) ((record pm-circle) :yes)) :yes))
+  (test "a non-matching record id falls through to the next clause"
+    (assert= (match (pm-rect 1 1)
+               ((record pm-circle {:r r}) :circle)
+               ((record pm-rect {:w w :h h}) :rect)) :rect))
+  (test "a plain map with the same fields is NOT a record match"
+    (assert= (match {:r 5} ((record pm-circle {:r r}) :circle) (_ :map)) :map))
+  (test "a non-map value is NOT a record match"
+    (assert= (match 42 ((record pm-circle {:r r}) :circle) (_ :other)) :other))
+  (test "a record pattern composes with a :when guard"
+    (assert= (match (pm-circle 10)
+               ((record pm-circle {:r r}) :when (> r 5) :big)
+               ((record pm-circle {}) :small)) :big))
+  (test "a qualified id (mod/name) matches the value's baked id"
+    (assert= (match (pm-rect 2 2)
+               ((record pattern-matching-test/pm-rect {:w w :h h}) [w h])) [2 2]))
+  (test "a record pattern nests inside other patterns"
+    (assert= (match [:shape (pm-circle 7)]
+               ([:shape (record pm-circle {:r r})] r)) 7)))
+
+;; ---- record patterns across processes: a record survives send (deep copy) and matches ----
+(defn pm-shape-worker (parent s)
+  (spawn (send parent [:s (match s
+                            ((record pm-circle {:r r})    [:circle r])
+                            ((record pm-rect {:w w :h h}) [:rect (* w h)]))])))
+(describe "record patterns across processes"
+  :isolated
+  (test "a record pattern matches a value received from another process"
+    (let (parent (self))
+      (pm-shape-worker parent (pm-circle 4))
+      (pm-shape-worker parent (pm-rect 2 3))
+      (let (a (receive ([:s v] v))
+            b (receive ([:s v] v)))
+        (is (member? [:circle 4] (list a b)))
+        (is (member? [:rect 6] (list a b)))))))
+
 ;; No (run-tests) call: register-only. The project test runner (`brood test`,
 ;; ADR-020) discovers this file and runs the whole suite once.

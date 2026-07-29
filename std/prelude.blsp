@@ -1454,6 +1454,15 @@ its printed form."
            " so put the test in a `:when` guard instead:" " (x :when (not " (pr-str (second p))
            ") body…)." " (Read as a list pattern it would BIND a variable named `not`.)")))
 
+;; `(record name {map-pattern}?)` — a RECORD pattern (ADR-186): matches a `defrecord` value
+;; whose nominal id is `name` (a bare symbol qualified to the current ns, or a `mod/name`),
+;; then matches the optional map pattern against its fields. A record is a map, so this is an
+;; id assertion plus an ordinary map pattern — `:keys`/`:or`/nested `{:k p}` all compose. The
+;; id is derived SYNTACTICALLY from `name` (via `ability--id-kw`), so no registry lookup is
+;; needed at expansion (unlike a positional pattern, which would need the definition's field
+;; order — deferred). Named, like `and`/`or`/`bytes`, so a plain list pattern isn't stolen.
+(defn match-record-pattern? (p) (and (pair? p) (= (first p) 'record)))
+
 ;; Every alternative of an `or` must bind the SAME names — otherwise the body could
 ;; reference a name only some alternatives bind, and which one it is depends on the
 ;; input. Rust enforces the same rule for the same reason.
@@ -1487,6 +1496,8 @@ its printed form."
     ;; first alternative's set is the whole set; `and` binds the union.
     (match-or-pattern? pat) (pattern-vars (second pat))
     (match-and-pattern? pat) (match-seq-vars (rest pat))
+    ;; a record pattern binds whatever its (optional) inner map pattern binds
+    (match-record-pattern? pat) (let (mp (first (rest (rest pat)))) (if mp (pattern-vars mp) nil))
     (pair? pat) (match-seq-vars pat)
     (vector? pat) (match-seq-vars (match-vec->list pat))
     (match-map-pattern? pat) (match-map-vars pat)
@@ -1524,6 +1535,8 @@ its printed form."
     ; (or p q …): first alternative that matches wins
     (match-and-pattern? pat) (match-compile-and (rest pat) target bound success fail)
     ; (and p q …): every pattern must match the same value (capture-and-destructure)
+    (match-record-pattern? pat) (match-compile-record pat target bound success fail)
+    ; (record name {…}): a defrecord value of nominal id `name`, then a map pattern
     (pair? pat) (match-compile-list pat target bound success fail)
     (vector? pat) (match-compile-vector pat target bound success fail)
     (match-map-pattern? pat) (match-compile-map pat target bound success fail)
@@ -1895,6 +1908,25 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
                    `(if (contains? ~target ~kw) (get ~target ~kw) ~(get ors k))
                    `(get ~target ~kw)))
       `(let (~k ~getter) ~(match-map-binds (rest keys) ors target success)))))
+
+;; `(record name {map-pattern}?)` — assert the target is a `defrecord` value of nominal id
+;; `name`, then match the optional map pattern against its fields. `record-id` returns the
+;; value's `:__id__` (or nil for a non-record), so the whole test is a single `%eq` against
+;; the id derived from `name` at expansion; a non-record simply fails. The inner map pattern
+;; is compiled by the ordinary map path, so `{:k p}` / `:keys` / `:or` all work unchanged.
+(defn match-compile-record (pat target bound success fail)
+  (let (name (second pat)
+        mappat (first (rest (rest pat))))
+    (when (not (symbol? name))
+      (error (str "match: (record name …) needs a record NAME symbol, got " (pr-str name)
+               " — e.g. (record circle {:r r}) or (record geometry/circle {:r r}).")))
+    (when (and mappat (not (map? mappat)))
+      (error (str "match: (record " (pr-str name) " …) — the field pattern must be a map"
+               " pattern like {:field p} or {:keys [f]}, got " (pr-str mappat))))
+    (let (id (ability--id-kw name))
+      `(if (%eq (record-id ~target) ~id)
+         ~(if mappat (match-compile mappat target bound success fail) success)
+         ~fail))))
 
 ;; -- clauses: (pattern [:when guard] body...) — one shape for match / fn / receive --
 (defn match-parse-clause (clause)

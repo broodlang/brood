@@ -1110,6 +1110,7 @@ design and rationale see [pattern-matching.md](pattern-matching.md).
 | `(or p q …)` | any alternative — first match wins; every alternative must bind the same names |
 | `(and p q …)` | every pattern, against the same value — the capture-while-destructuring (`:as`) idiom |
 | `{:k p}` | a map with key `:k` **present**, whose value matches `p` (nests to any depth) |
+| `(record name {…})` | a **`defrecord` value** whose nominal id is `name` (bare → current ns, or `mod/name`), then the map pattern `{…}` against its fields (`{:k p}`/`:keys`/`:or` all compose); the `{…}` is optional (id-only). A plain map or non-record fails |
 
 Patterns nest to any depth. **The one trap:** a bare symbol *binds* (and
 shadows) — it does **not** test against a same-named value. Match a known value

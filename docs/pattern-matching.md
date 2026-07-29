@@ -70,6 +70,8 @@ One vocabulary, shared by every site:
 | `(p1 & rest)` | head(s) + tail bound — reuses the `&` rest marker |
 | `[p1 p2 …]` | a vector of exactly that length — the Erlang *tuple* |
 | `{:keys [a b] :or {a 0}}` | a **map** — binds each `:keys` symbol to the same-named keyword's value (nil if absent, or the `:or` default); fails if the target isn't a map |
+| `{:k p}` | a map with key `:k` **present**, value matches `p` |
+| `(record name {…})` | a **`defrecord` value** of nominal id `name` (bare → current ns, or `mod/name`), then the map pattern `{…}` (optional; `{:k p}`/`:keys`/`:or` compose) against its fields. A record is a map carrying `:__id__`, so this is an id assertion + a map pattern; a plain map or non-record fails |
 | `(bytes seg…)` | a **`bytes` value**, destructured segment-by-segment — bit syntax: byte/`#b"…"` literals, one-byte binders, sized `(x n)` sub-bytes (dynamic sizes), typed integers `(x :u16)`/`(x :i32-le)`/…, `& rest` — see `docs/language.md` §Bytes patterns |
 | nested | patterns compose to any depth |
 
