@@ -1,9 +1,15 @@
 ;; std/multimap.blsp — multi-valued maps. (require 'multimap)
 ;;
-;; A multimap is a map from keys to lists of values. Implemented as a plain
-;; Brood map where each value is a list. Values are prepended on insert, so
-;; `multimap-get` returns them in reverse insertion order; use `multimap-get-all`
-;; to get insertion order (at the cost of a reverse).
+;; A multimap is a map from keys to lists of values, wrapped in a `multimap` RECORD.
+;; Values are prepended on insert, so `multimap-get` returns them in reverse insertion
+;; order; use `multimap-get-all` to get insertion order (at the cost of a reverse).
+;;
+;; The record wraps the inner map rather than *being* it: a record carries its identity
+;; in a reserved `:__id__` field, which `keys`/`count` would see — so a bare-map
+;; representation would have leaked `:__id__` out of `multimap-keys` and counted it in
+;; `multimap-empty?`. Wrapping keeps the inner map pristine and buys the identity:
+;; `multimap?` is a real predicate, a multimap is never `=` to a plain key→list map, and
+;; it prints as itself.
 
 (defmodule multimap
   "Multi-valued map: one key may have multiple associated values.
@@ -14,19 +20,31 @@
                  (multimap/multimap-assoc :color \"blue\")
                  (multimap/multimap-assoc :size  \"large\")))
       (multimap/multimap-get-all mm :color))   ;; => (\"red\" \"blue\")
-      (multimap/multimap-size mm)               ;; => 3")
+      (multimap/multimap-size mm)               ;; => 3
+
+A multimap is a **record** wrapping a key→list map, so it is its own type rather than a
+map that happens to hold lists: `multimap?` is a real predicate, it is never `=` to a
+look-alike map, and it prints as `#<multimap …>` (`multimap->map` is the plain-map view,
+`inspect` the full contents).")
+
+(defrecord multimap (entries))
+
+(defn multimap? (x)
+  "True if `x` is a multimap — by identity, not by shape."
+  (and (record? x) (= (record-id x) :multimap/multimap)))
 
 (defn multimap-new ()
   "An empty multimap."
-  {})
+  (multimap {}))
 
 (defn multimap-empty? (mm)
   "True if the multimap has no entries."
-  (= (count mm) 0))
+  (= (count (get mm :entries)) 0))
 
 (defn multimap-assoc (mm k v)
   "Return a multimap with value `v` added under key `k`."
-  (assoc mm k (cons v (get mm k nil))))
+  (let (entries (get mm :entries))
+    (multimap (assoc entries k (cons v (get entries k nil))))))
 
 (defn multimap-assoc-all (mm k vs)
   "Return a multimap with all values in list `vs` added under key `k`."
@@ -34,30 +52,31 @@
 
 (defn multimap-get (mm k)
   "All values for key `k` in reverse insertion order, or nil if absent."
-  (get mm k nil))
+  (get (get mm :entries) k nil))
 
 (defn multimap-get-all (mm k)
   "All values for key `k` in insertion order (oldest first), or nil if absent."
-  (reverse (get mm k nil)))
+  (reverse (multimap-get mm k)))
 
 (defn multimap-contains? (mm k)
   "True if `k` has at least one value in the multimap."
-  (not (nil? (get mm k nil))))
+  (not (nil? (multimap-get mm k))))
 
 (defn multimap-dissoc (mm k)
   "Return a multimap with all values for key `k` removed."
-  (dissoc mm k))
+  (multimap (dissoc (get mm :entries) k)))
 
 (defn multimap-remove-value (mm k v)
   "Return a multimap with the first occurrence of `v` removed from key `k`.
 If no values remain under `k`, the key is dropped."
-  (let (vs (get mm k nil))
+  (let (entries (get mm :entries)
+        vs (get entries k nil))
     (if (nil? vs)
       mm
       (let (new-vs (multimap--remove-first vs v))
         (if (nil? new-vs)
-          (dissoc mm k)
-          (assoc mm k new-vs))))))
+          (multimap (dissoc entries k))
+          (multimap (assoc entries k new-vs)))))))
 
 (defn multimap--remove-first (lst v)
   ;; Tail-recursive: accumulate the (reversed) skipped prefix and splice once at
@@ -71,26 +90,37 @@ If no values remain under `k`, the key is dropped."
 
 (defn multimap-keys (mm)
   "All keys in the multimap (insertion order)."
-  (keys mm))
+  (keys (get mm :entries)))
 
 (defn multimap-values (mm)
   "All values across all keys as a flat list (insertion order within each key)."
-  (fold (fn (acc vs) (append acc (reverse vs))) [] (vals mm)))
+  (fold (fn (acc vs) (append acc (reverse vs))) [] (vals (get mm :entries))))
 
 (defn multimap-size (mm)
   "Total number of key-value pairs across all keys."
-  (fold (fn (n vs) (+ n (count vs))) 0 (vals mm)))
+  (fold (fn (n vs) (+ n (count vs))) 0 (vals (get mm :entries))))
 
 (defn multimap-map-vals (mm f)
   "Return a multimap where each value list has been transformed by `(f key values-list)`."
-  (fold (fn (m pair)
-          (let (k (first pair)
-                vs (second pair))
-            (assoc m k (f k vs))))
-    {} (map-pairs mm)))
+  (multimap (fold (fn (m pair)
+                    (let (k (first pair)
+                          vs (second pair))
+                      (assoc m k (f k vs))))
+              {} (map-pairs (get mm :entries)))))
 
 (defn multimap->map (mm)
   "Flatten the multimap to a plain map from key → list-of-values (insertion order)."
   (fold (fn (m pair)
           (assoc m (first pair) (reverse (second pair))))
-    {} (map-pairs mm)))
+    {} (map-pairs (get mm :entries))))
+
+;; `Display` is the O(1) summary (how many keys, how many pairs); `Inspect` shows the
+;; whole thing — the plain-map view, so a log line reads as data rather than a wrapper.
+(impl Display
+  multimap/multimap
+  (to-str [mm]
+    (str "#<multimap "
+      (count (multimap-keys mm)) " keys, " (multimap-size mm) " pairs>")))
+
+(impl Inspect
+  multimap/multimap (inspect [mm] (str "#<multimap " (pr-str (multimap->map mm)) ">")))

@@ -341,6 +341,29 @@ Other things worth knowing:
 - **`defprotocol`/`defimpl` no longer exist** (retired, ADR-168). If you were about to
   write one, write an ability.
 
+### The abilities `std/` already ships (ADR-177)
+
+`impl` one of these for your own record and that library accepts your type — you don't
+edit the library. Beyond the core `Display` (`to-str`, what `println` shows) and `Inspect`
+(`inspect`, the debug form):
+
+| `impl` this | to get |
+|---|---|
+| `JsonEncode` — `(to-json x)`, from `json` | `json-encode` handles your type (a record's wire shape; a pid/fn/datetime at all). **No `:default`** — an unimpl'd kind still errors loudly. |
+| `Port` — `(io-write p s)`, from `io` | your value is an output port (`with-out`, logger sinks). A bare 1-arg fn already is one. |
+| `LogBackend` — `(backend-emit b rec)`, from `log` | a backend that batches / emits JSON lines / samples. `backend-passes?` is the stock level+filter gate. |
+| `Response` — `(send-response r sock)`, from `net/http` | a response kind with its own wire behaviour, including who closes the socket. |
+| `Dependency` (**sealed**), from `package` · `Temporal` — `(to-iso x)` (**sealed**), from `datetime` | a new manifest dep kind / calendar type. Sealed ⇒ `nest check` demands every op. |
+
+Also: `std/`'s value types are **records**, not plain maps — `buffer`, `queue`, `pq`,
+`multimap`, `datetime`/`date`/`time-of-day`, and the four dependency kinds. So
+`(buffer? x)` / `(queue? x)` / `(date? x)` are identity checks a look-alike map fails, each
+prints as itself (`#<buffer *scratch* 11 chars>`, `2026-07-29T…Z`) rather than dumping its
+internals, and **none of them is `=` to a map with the same fields** — build them with
+their constructors, and don't compare one against a map literal in a test. Where a library
+renders a *user* value to text (`template/render`, `csv-emit`, `url/query-encode`) it calls
+`to-str`, so your `Display` impl governs that output too.
+
 ## Patterns (`let`, `fn`, `match`, `receive`)
 
 The trap: a bare symbol *binds*, it doesn't match. To match a known value,

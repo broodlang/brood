@@ -40,12 +40,15 @@ tried. Unknown keys render as empty string. Nested `{{` are not supported."
             (template--loop after data (str acc before val))))))))
 
 (defn template--lookup (data key)
-  "Look up `key` in `data`, trying string key then keyword key. Returns \"\" if absent."
+  "Look up `key` in `data`, trying string key then keyword key. Returns \"\" if absent.
+A substituted value is rendered with `to-str` (the `Display` protocol), so a record
+substitutes as the string its type defines — a money record as `$10.50`, a datetime as
+its ISO form — rather than as its field map."
   (let (v (get data key))
     (cond
-      (not (nil? v)) (str v)
+      (not (nil? v)) (to-str v)
       else (let (kv (get data (keyword key)))
-             (if (nil? kv) "" (str kv))))))
+             (if (nil? kv) "" (to-str kv))))))
 
 ;; ---- render-all -------------------------------------------------------------
 

@@ -79,3 +79,58 @@
     (let (pq (-> (queue/pq-new)
                (queue/pq-insert 1 :a) (queue/pq-insert 1 :b) (queue/pq-insert 1 :c)))
       (assert= [:a :b :c] (into [] (queue/pq-to-list pq))))))
+
+;; Both structures are records, so each has a nominal identity rather than being "a map
+;; with the right keys" / "a list of pairs". That is what `queue?`/`pq?` test, what keeps
+;; either from comparing `=` to a look-alike, and what carries their print form.
+(describe "queue and pq are records with their own identity"
+  (test "queue? / pq? are true only for the real thing"
+    (is (queue/queue? (queue/queue-new)))
+    (is (queue/queue? (queue/queue-push (queue/queue-new) 1)))
+    (is (not (queue/queue? (queue/pq-new))))
+    (is (queue/pq? (queue/pq-new)))
+    (is (queue/pq? (queue/pq-insert (queue/pq-new) 1 :a)))
+    (is (not (queue/pq? (queue/queue-new)))))
+  (test "neither is a plain collection in disguise"
+    (is (not (queue/queue? {:front nil :back nil :size 0})))
+    (is (not (queue/pq? (list [1 :a]))))
+    (is (not (= (queue/queue-new) {:front nil :back nil :size 0}))))
+  (test "each carries its record id"
+    (assert= (record-id (queue/queue-new)) :queue/queue)
+    (assert= (record-id (queue/pq-new)) :queue/pq))
+  ;; An EMPTY pq used to be `nil` (a bare list), and `()` is the one falsy collection in
+  ;; Brood — so `(if pq …)` took the else branch on an empty queue. A record is truthy.
+  (test "an empty pq is truthy, unlike the bare list it used to be"
+    (is (if (queue/pq-new) true false))
+    (is (queue/pq-empty? (queue/pq-new))))
+  (test "a queue displays as a summary and inspects as its contents"
+    (assert= (to-str (queue/queue-new)) "#<queue empty>")
+    (let (q (queue/queue-from-list (list 1 2 3)))
+      (assert= (to-str q) "#<queue 3 front=1>")
+      (assert= (inspect q) "#<queue (1 2 3)>")))
+  (test "a pq displays as a summary and inspects as its entries"
+    (assert= (to-str (queue/pq-new)) "#<pq empty>")
+    (let (pq (-> (queue/pq-new) (queue/pq-insert 2 :b) (queue/pq-insert 1 :a)))
+      (assert= (to-str pq) "#<pq 2 min=1>")
+      (assert= (inspect pq) "#<pq ([1 :a] [2 :b])>"))))
+
+;; Cross-process: a record deep-copies on `send` and keeps its `:__id__`, so a queue
+;; built in a worker is still a queue here — identity survives the heap crossing.
+(describe "queue across processes"
+  :isolated
+  (test "queues built in workers arrive as queues and pop in order"
+    (let (me (self))
+      (doseq (i (range 4))
+        (spawn (send me [:q (queue/queue-from-list (list i (+ i 10)))])))
+      (let (results (map (fn (_) (receive ([:q q] q) (after *test-wait-ms* :timeout)))
+                      (range 4)))
+        (is (every? queue/queue? results))
+        (is (every? (fn (q) (= (queue/queue-size q) 2)) results))
+        (assert= (into [] (sort (map (fn (q) (queue/queue-peek q)) results))) [0 1 2 3]))))
+  (test "a pq survives a round trip and keeps its ordering"
+    (let (me (self)
+          pq (-> (queue/pq-new) (queue/pq-insert 3 :c) (queue/pq-insert 1 :a)))
+      (spawn (send me [:pq pq]))
+      (let (back (receive ([:pq p] p) (after *test-wait-ms* :timeout)))
+        (is (queue/pq? back))
+        (assert= (into [] (queue/pq-to-list back)) [:a :c])))))

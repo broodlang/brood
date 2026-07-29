@@ -10635,3 +10635,81 @@ trade is +8% on one row against −1.7 GB at 300k processes.
 **Next (not started): share RUNTIME-keyed user arms** — the remaining ~30 KB/proc in
 body_big-class workloads. Needs free-epoch discipline in the shared map (RUNTIME keys
 recycle) and either idempotent-rewrite proof or the immortality gate generalised.
+
+## 2026-07-29 — `std/` adopts abilities across the tree (ADR-177)
+
+A second, deliberately aggressive pass over `std/` + the prelude for ability candidates.
+The 2026-07-28 audit (with ADR-171) found only two and called the rest "correctly-closed
+`cond`". That was too narrow: it asked only "where does third-party extension want in?",
+which is one of four reasons a site wants an ability. Full rationale + the rejection list
+in **ADR-177**; what shipped:
+
+**Abilities (6).**
+- **`JsonEncode`/`to-json`** (`std/json.blsp`) — the ADR-171 follow-up. A record picks its
+  wire shape; a pid/fn/datetime becomes encodable by impl'ing instead of hitting
+  `json: cannot encode`. **No `:default`** on purpose (it would turn the loud error into
+  infinite recursion). Bonus speedup: the old code ran an O(n) `remove :__id__` filter over
+  *every* map; plain maps now skip it (`record?` first).
+- **`Dependency`** (`std/tool/package.blsp`), `:sealed` over four dep records now in
+  `std/tool/project.blsp` — replaces **five** scattered `(get dep :kind)` chains (resolve,
+  compatibility, lock row, manifest entry, tree label). Verified the payoff directly: drop
+  an op and `nest check` reports `sealed ability … no impl of \`X\` for :…`. A resolved
+  entry is its dep record + resolution fields `assoc`'d, so one ability covers dep *and*
+  entry. The tree label became the `Display` impl, so `(println dep)` and `nest tree` can't
+  drift.
+- **`Port`/`io-write`** (`std/io.blsp`) — the module docstring already asked for this
+  ("room to grow a port into a richer value … without touching callers"). `(impl Port :fn)`
+  keeps every fn port working; `standard-port`/`process-port`/`file-port` are records that
+  print as `#<port stdout>`. `*out*`/`*err*` still hold a bare fn (the prelude calls it
+  directly — no dispatch on the print path); `port-fn` adapts a record at that boundary and
+  `with-out`/`with-err` apply it.
+- **`LogBackend`/`backend-emit`** (`std/log.blsp`) — a backend goes from "a map whose
+  `:format` fn you may replace" to a value owning its whole write policy; `backend-passes?`
+  is the reusable level/filter gate. `file-backend` now uses `io`'s `file-port`.
+- **`Response`/`send-response`** (`std/net/http.blsp`) — replaces the server's
+  `(contains? resp :stream)` branch. The two kinds differ in *who closes the socket*, so
+  that lives with the type. Deliberately open (a sendfile / chunked / 101-upgrade response
+  is a `defrecord` + `impl` elsewhere).
+- **`Temporal`/`to-iso`** (`std/datetime.blsp`), `:sealed` over the three temporal types —
+  collapses `date->iso8601`/`time->iso8601`/`dt->iso8601`, three functions the caller chose
+  between by knowing which shape it held.
+
+**Records for plain maps that were identified by sniffing (5).** `buffer` (was
+`(and (map? x) (rope? (get x :rope)))` — a map with a real rope passed), `queue`, `pq`,
+`multimap`, `datetime`/`date`/`time-of-day`. Each gains an unfoolable predicate and a print
+form that isn't its internal representation. Two findings worth keeping:
+- **`pq` fixes a live footgun.** It was a bare list, and `()` ≡ `nil` is the one falsy
+  collection — so `(if pq …)` was silently false for an *empty* queue and true otherwise.
+  A record is always truthy.
+- **`multimap` had to WRAP, not become, the map.** A record carries `:__id__` as a real
+  field, so a record-as-map would have leaked it out of `multimap-keys` and counted it in
+  `multimap-empty?`. Wrapping keeps the inner map pristine. (`buffer` is fine unwrapped —
+  nothing calls `keys`/`count` on one.)
+
+**Tier 3.** `(str v)` → `(to-str v)` at three policy-layer call sites — `std/template`
+(substitutions), `std/csv` (cells), `std/url` (query values) — so a record renders as its
+own display string. Consistent with ADR-171 keeping `str` itself native. The csv one also
+fixes a latent bug: a non-string cell used to reach `includes?` and raise a type error.
+
+**Suite.** 3762 tests green in release (+~60 new). Test updates were the honest cost of the
+change: a record is never `=` to a look-alike map, so `project_test` / `package_test` /
+`datetime_test` map-literal comparisons became constructor comparisons. New coverage
+includes cross-process blocks for every value-carrying conversion (a record deep-copies on
+`send` and keeps its `:__id__`, so `*impls*` dispatch works identically at both ends).
+
+**Two process lessons.**
+1. **`cargo build --bin brood` does not rebuild `nest`.** std modules are `include_str!`'d,
+   so a std edit needs *both* binaries rebuilt. Mid-session I dropped `--bin nest`, and 40
+   `nest test` failures looked like a concurrency race (nondeterministic counts across runs)
+   when they were just a stale embedded std. Same family as the 2026-06-18 `-p brood` A/B
+   trap: **rebuild every binary that embeds what you edited.**
+2. **The 3 KI-14 failures in the debug suite are timeouts, not regressions** (120s cap;
+   6–18s each in release). Only `json-parse` is involved — untouched by the encoder change.
+
+**Pre-existing flake noticed, not fixed.** `tests/ability_test.blsp` is the *only* file that
+registers impls at test-*run* time (~20 `impl`/`register-impl` calls inside `test` bodies,
+in `:serial` groups). Those race with each other on `*impls*`'s read-modify-write — the
+caveat `language.md` documents ("two processes calling `impl` concurrently can lose one
+update"). One full-suite run lost the `Size`/`:vector` registration; the next was green.
+The fix is to make those groups `:isolated` (which runs a unit alone) rather than
+`:serial` — left alone as out of scope, since `:isolated` also rolls globals back.

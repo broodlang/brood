@@ -50,10 +50,18 @@ Shipped as ADRs:
     open-extension rendering: `Display`/`to-str` (Elixir's `String.Chars`), with a
     zero-cost prelude `*show*` hook so the screen printers let a record define how it
     prints. **Now core and always on** (slice 6 below): a record customizes printing
-    with just `(impl Display …)` — no `(require 'show)`, no activation step. Second
-    audit candidate — a `JsonEncode` ability so user records serialize instead of
-    `json--emit` erroring — is the same shape, left as a follow-up. (Audit found only
-    these two; the rest of `std/` is correctly-closed `cond`/state-machines per ADR-011.)
+    with just `(impl Display …)` — no `(require 'show)`, no activation step.
+  - ✅ **`std/` adopts abilities** ([ADR-177](docs/decisions.md), 2026-07-29) — a second,
+    wider audit than ADR-171's (which found only two candidates by asking solely about
+    third-party extension). Shipped six abilities — `JsonEncode` (the ADR-171 follow-up),
+    `Dependency` (`:sealed`, replacing five scattered `:kind` cond chains in the package
+    manager — `nest check` now reports a missing op), `Port` (`std/io`'s documented
+    "richer port value" seam), `LogBackend`, `Response` (`std/net/http`), `Temporal`
+    (`:sealed`) — plus `defrecord` identities for five value types that were previously
+    identified by structural sniffing (`buffer`, `queue`, `pq`, `multimap`, the temporal
+    types). ADR-177 also records the **rejection list** (the prelude's collection
+    protocol, `str`/`pr-str`, closed AST/CST node kinds, telemetry metric kinds,
+    `std/stream`, the `proc/*` module contracts) so the next pass doesn't re-litigate it.
   - ⬜ **Checker gap:** a `:use`d ability op from a *loose disk* module (not embedded,
     not in a project) is flagged `unbound symbol` though it runs; embedded/same-module
     use resolves. Surfaced by the `show` cross-module test. **[kernel/checker]**

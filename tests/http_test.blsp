@@ -117,6 +117,55 @@
             ;; the streaming path sends no Content-Length / Connection: close
             (refute (includes? resp "Content-Length"))))))))
 
+;; ---- the Response ability ---------------------------------------------------
+;; A response is a record, and "how it reaches the socket" (including who closes it) is
+;; the one `send-response` op rather than a `(contains? resp :stream)` branch in the
+;; server. The end-to-end behaviour of both stock kinds is covered above and in
+;; serve_test; here we cover the dispatch itself, and a response type from OUTSIDE
+;; std/net/http — the reason the ability is not sealed.
+
+(defrecord probe-response (target))
+
+;; A third-party response kind: instead of writing to the socket it reports what it was
+;; handed, so the dispatch is testable without a real connection.
+(impl Response
+  http-test/probe-response
+  (send-response [resp sock]
+    (send (get resp :target) [:sent sock]) nil))
+
+(describe "http: responses are records with a Response impl"
+  (test "the two stock kinds have distinct identities"
+    (assert= (record-id (ok "hi")) :net/http/response)
+    (assert= (record-id (stream-response 200 {} (fn (sock) nil)))
+      :net/http/stream-response))
+  (test "streaming? is an identity check, not a key sniff"
+    (is (streaming? (stream-response 200 {} (fn (sock) nil))))
+    (refute (streaming? (ok "hi")))
+    ;; a plain map carrying a :stream key is NOT a stream-response
+    (refute (streaming? {:status 200 :headers {} :stream (fn (sock) nil)})))
+  (test "every response kind satisfies Response"
+    (is (satisfies? 'Response (ok "hi")))
+    (is (satisfies? 'Response (stream-response 200 {} (fn (sock) nil))))
+    (is (satisfies? 'Response (probe-response (self))))
+    (is (not (satisfies? 'Response {:status 200}))))
+  (test "the constructors still build the documented fields"
+    (let (r (response 201 {"X" "1"} "body"))
+      (assert= (get r :status) 201)
+      (assert= (get r :headers) {"X" "1"})
+      (assert= (get r :body) "body")))
+  (test "a parsed client response is a response record"
+    (let (r (parse-response "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhi"))
+      (assert= (record-id r) :net/http/response)
+      (assert= (get r :status) 200)
+      (assert= (body-text r) "hi")))
+  (test "a third-party response type is dispatched by the same op"
+    (let (me (self))
+      (send-response (probe-response me) :not-a-real-socket)
+      (assert= (receive ([:sent sock] sock) (after *test-wait-ms* :timeout))
+        :not-a-real-socket)))
+  (test "a value with no Response impl raises the named ability error"
+    (assert-error (send-response {:status 200 :body "x"} :sock))))
+
 (describe "http: client url + response parsing"
   (test "parse-url splits scheme/host/port/path"
     (let (u (net/http/parse-url "https://api.github.com/zen"))
