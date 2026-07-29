@@ -105,7 +105,6 @@ pub(crate) fn exec_call(
                                 arm,
                                 // Overwritten inside `vm_call_ic_put`.
                                 callee_bases: (0, 0),
-                                fast: std::cell::Cell::new(None),
                             },
                         );
                     }

@@ -960,7 +960,6 @@ pub(crate) fn jit_dispatch_call(
                                         arm: Some((a.clone(), env)),
                                         // Overwritten inside `vm_call_ic_put`.
                                         callee_bases: (0, 0),
-                                        fast: std::cell::Cell::new(None),
                                     },
                                 );
                             }
@@ -980,7 +979,6 @@ pub(crate) fn jit_dispatch_call(
                                         callee: Value::native(nid),
                                         arm: None,
                                         callee_bases: (0, 0),
-                                        fast: std::cell::Cell::new(None),
                                     },
                                 );
                                 // Flat-cell publish: the IR's next call at this site goes

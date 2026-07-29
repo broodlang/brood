@@ -125,11 +125,13 @@ fn run(cli: Cli) {
     if cli.test {
         run_test_files(&mut interp, &cli.files);
         brood::perf::dump_if_requested(); // BROOD_PERF_STATS=1 — VM work attribution
+        brood::process::l1_stats::dump_if_requested(); // BROOD_L1_STATS=1
         return;
     }
     if !cli.files.is_empty() {
         run_files(&mut interp, &cli.files);
         brood::perf::dump_if_requested(); // BROOD_PERF_STATS=1 — VM work attribution
+        brood::process::l1_stats::dump_if_requested(); // BROOD_L1_STATS=1
         return;
     }
 

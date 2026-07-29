@@ -4527,7 +4527,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
               (list 'quote (current-ns)))))
         methods))))
 
-;; ── Multiple dispatch: `defmulti` / `defmethod` (ADR-178) ──────────────────────
+;; ── Multiple dispatch: `defmulti` / `defmethod` (ADR-179) ──────────────────────
 ;; Dispatch on the IDENTITY-TUPLE of the arguments, resolved by EXACT match, then a declared
 ;; `:default`, else a loud `no-method` error — never a nearest-neighbour guess. Ambiguity is
 ;; impossible by construction (no partial wildcards). A `defmulti` may declare a closure
@@ -4619,7 +4619,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   method, then a `:default` method, else a loud `no-method` error — never a nearest guess.
   An optional algebra keyword derives each off-diagonal binary method's mirror — `:commutative`
   (`+`/`*`/`min`/`max`) or `:antisymmetric` (`compare-to`) — so a binary op is authored as the
-  UPPER TRIANGLE of its type-pair matrix. See [[decisions]] ADR-178.
+  UPPER TRIANGLE of its type-pair matrix. See [[decisions]] ADR-179.
 
     (defmulti num-add :commutative)
     (defmulti compare-to :antisymmetric)
