@@ -12157,3 +12157,37 @@ per-ability recipe, if repetition warrants it.
 ADR-179 (multimethods — the multi-arg sibling; why ordering isn't an ability), ADR-011 (ship
 the minimal form), ADR-130 (records as maps), `tests/ability_test.blsp` ("provided
 (default-body) ops", "derive: …").
+
+## ADR-186 — Any ability name is a type; the checker reads the live ability registries
+
+**Status:** accepted + shipped. Extends ADR-181 (sealed-ability-as-a-type) to *open*
+abilities, and fixes a latent bug that had kept the checker blind to imported abilities.
+
+**The bug.** The checker's registry reads were keyed `ability/*abilities*` /
+`ability/*sealed*` / `ability/*impls*`, but the runtime registries are the **bare**,
+earmuff-ambient globals `*abilities*` / `*sealed*` / `*impls*` (an earmuffed name is
+ambient, never namespaced — ADR-151). So those reads resolved `unbound` and returned empty:
+the checker only ever saw a *file's own* `register-*` forms, never abilities/impls/sealed
+declarations reachable through `(:use …)`. Fixed to the bare names. The missing-impl call
+check now sees imported impls too — which can only *remove* warnings (more impls found), so
+strictly safer; verified zero new warnings across `std/` + `tests/`.
+
+**Open abilities as types.** ADR-181 resolved only a *sealed* ability's name (a closed member
+set → a finite union of record shapes). An *open* ability has no closed set, so naming it in
+a `sig` dropped the whole declaration. Now every known ability name resolves:
+- **sealed** → the finite union of its members' record shapes (unchanged);
+- **open** → the permissive **`any`**.
+
+Why `any` for open, not the union of currently-registered impl ids: an open ability's impls
+are late and unbounded (any module may add one, `:default` may cover everything), so **no
+argument can be soundly rejected** on the type — a finite-union type would false-positive the
+moment a caller passes a value whose impl is registered elsewhere. `any` is the sound choice;
+the real "does this value implement the ability" safety is enforced where it belongs — at the
+ability *op call sites* (the missing-impl check), not at the parameter type. The payoff is
+that a `sig` mentioning an open ability (`(sig render (Display -> string))`) now *survives* —
+its return and other params are still checked — instead of being discarded wholesale.
+
+**References.** ADR-181 (sealed-ability-as-a-type, the base this extends), ADR-151 (earmuffed
+names are ambient — why the bare registry names are correct), ADR-172/168 (the ability seam +
+the missing-impl call check that carries the open-ability safety), ADR-011 (`any` is the
+minimal sound resolution; defer a richer "implements X" type), the 2026-07-29 devlog entry.

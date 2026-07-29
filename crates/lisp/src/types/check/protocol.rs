@@ -407,7 +407,7 @@ fn bare_name(name: value::Symbol) -> String {
 // body — so a same-named non-ability function is never mistaken for one, and a
 // cross-file op call (whose def isn't in this tree) is simply not checked. An id is
 // taken only when certain. The impl set unions this file's own `register-impl` forms
-// (not eval'd at check time) with the runtime `ability/*impls*` registry (cross-file
+// (not eval'd at check time) with the runtime `*impls*` registry (cross-file
 // reachable impls), so an impl in either place suppresses the warning.
 
 /// `(quote X)` → `Some(X)`.
@@ -617,14 +617,14 @@ fn collect_derive_into(heap: &Heap, form: Value, out: &mut Vec<(String, String)>
     })
 }
 
-/// Union in the runtime `ability/*impls*` registry — `[A op] → {id → …}` — so an impl
+/// Union in the runtime `*impls*` registry — `[A op] → {id → …}` — so an impl
 /// reachable through a required module (not present as a form in this file) counts.
 fn read_impls_registry(
     heap: &Heap,
     impls: &mut HashSet<(String, String, String)>,
     defaults: &mut HashSet<(String, String)>,
 ) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("ability/*impls*"))
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*impls*"))
     else {
         return;
     };
@@ -652,18 +652,49 @@ fn read_impls_registry(
     }
 }
 
-/// Sealed abilities' member ids, keyed by ability name → the (qualified) member id name
-/// strings. Unions the file's own `register-sealed` forms (in the expanded tree, where the
-/// ids are already ns-qualified) with the runtime `ability/*sealed*` registry (imported
-/// abilities). Feeds `annot`'s ability-name-as-a-type resolution (a sealed ability is a
-/// finite union of its members' record shapes).
-pub(super) fn sealed_member_ids(heap: &Heap, expanded: &[Value]) -> HashMap<String, Vec<String>> {
-    let mut sealed = HashMap::new();
+/// The ability-name-as-a-type table for `annot` (ADR-181/186): every known ability name →
+/// `Some(member ids)` if it is **sealed** (the qualified, closed member set → a finite union
+/// of record shapes) or `None` if it is **open** (→ the permissive `any`). Unions the file's
+/// own `register-ability`/`register-sealed` forms (expanded tree; sealed ids already
+/// ns-qualified) with the runtime `*abilities*` + `*sealed*` registries
+/// (imported abilities). A name absent from the result is not an ability.
+pub(super) fn ability_type_table(
+    heap: &Heap,
+    expanded: &[Value],
+) -> HashMap<String, Option<Vec<String>>> {
+    // All ability names (their op names are irrelevant here — just the name set).
+    let mut names: HashMap<String, Vec<String>> = HashMap::new();
+    let mut ret_forms: HashMap<(String, String), Value> = HashMap::new();
+    let mut op_params: HashMap<(String, String), Vec<Option<crate::types::Ty>>> = HashMap::new();
+    let mut provided: HashSet<(String, String)> = HashSet::new(); // unused here; the collectors require it
+    for &form in expanded {
+        collect_register_ability(
+            heap,
+            form,
+            &mut names,
+            &mut ret_forms,
+            &mut op_params,
+            &mut provided,
+        );
+    }
+    read_abilities_registry(heap, &mut names, &mut ret_forms, &mut op_params, &mut provided);
+    // Sealed abilities → their closed member set.
+    let mut sealed: HashMap<String, Vec<String>> = HashMap::new();
     for &form in expanded {
         collect_register_sealed(heap, form, &mut sealed);
     }
     read_sealed_registry(heap, &mut sealed);
-    sealed
+    // Every ability → Some(members) if sealed, else None (open). A sealed ability declared
+    // without a `defability` op list still counts (fold it in).
+    let mut table: HashMap<String, Option<Vec<String>>> = HashMap::new();
+    for name in names.into_keys() {
+        let sealed_members = sealed.get(&name).cloned();
+        table.insert(name, sealed_members);
+    }
+    for (name, members) in sealed {
+        table.entry(name).or_insert(Some(members));
+    }
+    table
 }
 
 /// The statically-known identity name of a call argument, or `None` if not certain.
@@ -990,7 +1021,7 @@ fn collect_register_sealed(heap: &Heap, form: Value, out: &mut HashMap<String, V
     })
 }
 
-/// Union in the runtime `ability/*abilities*` registry — name → op specs — recording each
+/// Union in the runtime `*abilities*` registry — name → op specs — recording each
 /// op's name and its `:-> RET` return-type form (the latter into `rets`).
 fn read_abilities_registry(
     heap: &Heap,
@@ -999,7 +1030,7 @@ fn read_abilities_registry(
     params: &mut HashMap<(String, String), Vec<Option<crate::types::Ty>>>,
     provided: &mut HashSet<(String, String)>,
 ) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("ability/*abilities*"))
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*abilities*"))
     else {
         return;
     };
@@ -1029,9 +1060,9 @@ fn read_abilities_registry(
     }
 }
 
-/// Union in the runtime `ability/*sealed*` registry — name → member id keywords.
+/// Union in the runtime `*sealed*` registry — name → member id keywords.
 fn read_sealed_registry(heap: &Heap, out: &mut HashMap<String, Vec<String>>) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("ability/*sealed*"))
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*sealed*"))
     else {
         return;
     };
