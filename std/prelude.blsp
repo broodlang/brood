@@ -4472,6 +4472,19 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 (defn ord-compare (a b)
   (if (record? a) (compare-to a b) (compare a b)))
 
+;; Num — arithmetic for a RECORD (a money value, complex number, 2-D vector, bignum). A
+;; record operand to `+`/`-`/`*`/`/` dispatches here — but NOT from the operators (a Brood
+;; branch in `+` defeats the JIT's arithmetic specialization, a ~195× regression); the
+;; kernel `%add`/`%sub`/`%mul`/`%div` builtins call the matching `num-*` op only on their
+;; COLD non-numeric fallback, so int/float arithmetic is byte-for-byte untouched. There is
+;; NO `:default` — a record with no `Num` impl gets the ability's loud missing-impl error.
+(defability Num
+  "Arithmetic on a record type: each op takes two operands and returns a fresh value."
+  (num-add [self other] :-> any)
+  (num-sub [self other] :-> any)
+  (num-mul [self other] :-> any)
+  (num-div [self other] :-> any))
+
 ;; The per-print-argument hook the prelude installs into `*show*` at the end of boot
 ;; (Display is core, ADR-172 §8 — no activation step). Only a RECORD is routed through
 ;; `to-str` (a `defrecord` value is the sole thing that can carry a custom impl); every
