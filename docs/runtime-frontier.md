@@ -228,27 +228,10 @@ benchmark row before believing it.
 
 ### B. Process memory floor (~4.5 KB → toward ~3 KB)
 
-- [ ] **M1 — split `Heap` into hot core + lazily-boxed cold state.** Move the
-  loader/checker/ns fields (`form_pos`, `imports`, `ns_known_names`,
-  `module_exports_cache`, `known_ns_cache`, `check_dep_rec`, `compile_ns`,
-  `current_file`, `dynamics`) behind one `Option<Box<ColdHeap>>` allocated on first use.
-  A worker never touches them. Expected: several hundred bytes off `Box<Process>`'s
-  1840 B, plus cache-density wins. Mechanical but wide; no semantic risk.
-- [x] **M2a — DONE 2026-07-29. One fast-link representation, not two.** `CallIcEntry.fast`
-  (a 32-byte `Cell<Option<(code, nslots, env)>>`) and the `FastLink` mirror held the *same
-  fact*, written in lockstep — the code said so itself. `FastLink` already carries
-  `sym`/`argc`/`epoch`, so the VM's hot probe never needed the fat entry: it now reads the
-  one 40-byte flat table that JIT'd code reads, and a hit never touches `CallIcEntry` at
-  all. `CallIcEntry` 96 → 64 B.
-
-  Measured: **−157 B per live process** (spawn-live 1.94 → 1.89 GB, −47 MB over 300k), and
-  the compute rows *improve* — pfib −3.5%, collatz −2.7%, fib −1.3%, bintree −0.8%,
-  nqueens flat, spawn-live −0.8%, `spawn` +1.9%. Removing the memo was expected to cost
-  the hot recursive call a second table touch; it didn't, because reading one 40-byte flat
-  slot beats loading a 96-byte entry.
-
-  Method note: the *sweep* reported `spawn` +5.8% and `collatz` +2.8%; solo re-runs gave
-  +1.9% and **−2.7%**. Believe the solo run, as `ab-bench` says.
+- [x] **M1 — DONE 2026-07-29. `Heap` split into hot core + lazily-boxed cold state.** The
+  loader/checker/namespace fields moved behind `Option<Box<ColdHeap>>`, allocated on first
+  use, so a plain worker process never pays for them (`spawn` −13.6%). Continued by M1b/M1c
+  below; together `Heap` went 1616 → 1120 B this day.
 
 - [x] **M1b — DONE 2026-07-29. Checker state off the process.** `check_dep_rec` (208 B —
   four `HashSet`s) plus the two checker caches → one lazily-boxed `CheckHeap` (288 → 16 B),
@@ -376,53 +359,14 @@ What this changes:
   improved is only that the fat table has no raw-pointer hazard, so its read path can be a
   normal atomic protocol rather than a stable-address block allocator.
 
-  Cost it fresh before starting: worth ~256 B/process (≈77 MB at 300k) plus a warm start,
+  **Settle M2b before M3 — they overlap.** Cost it fresh before starting: worth ~500 B/process
+  (measured, see the allocation profile above) (≈77 MB at 300k) plus a warm start,
   against a lock-free structure on the hottest path in the interpreter. `CallIcEntry` is
   confirmed `Send + Sync` (compile-time assertion). Entry content is already enforced
   process-independent (`vm_call_ic_put` refuses a movable callee or LOCAL env), and the
   epoch already lives per-runtime in `Arc<RuntimeCode>`, so the *semantics* of sharing are
   settled — only the read protocol is open.
 
-- [ ] **M2b — shared IC tables across a runtime's processes** (ADR-175 Stage 3, the BEAM
-  export-table move). **Blocker found 2026-07-29 by reading the code, and it is bigger than
-  "needs a lock":** `vm_fast_links_base()` hands JIT'd code a **raw pointer** into the
-  table, sound today only because `SAFETY: single-threaded per process` — nothing can grow
-  or clear it while an arm runs. Sharing the table across processes voids that outright: a
-  peer growing it reallocates under a live raw pointer (use-after-realloc, not merely a
-  torn read). So a shared table must be **block-allocated with stable addresses** — each
-  arm gets a contiguous block, allocated once per *runtime*, that never moves; the JIT
-  then holds a pointer to that arm's block. `boxcar` is the in-tree precedent (it already
-  backs the shared RUNTIME code region for exactly this stable-ref reason).
-
-  What is now settled in favour: entry content is *enforced* process-independent
-  (`vm_call_ic_put` refuses a movable callee or a LOCAL env), the epoch already lives
-  per-runtime in `Arc<RuntimeCode>`, and after M2a the thing worth sharing is a 40-byte
-  `#[repr(C)]` plain-data slot rather than a 96-byte entry holding a `Cell`. Publication
-  can be epoch-last-release, and since all writers resolve identically, a racing writer
-  writes the same bytes.
-
-  Note the base assignment is **not** independently shippable: bases are per-process
-  first-touch today (`vm_arm_block`), and making them runtime-global while tables stay
-  per-process would size every process's table to the runtime's *total* site count — a
-  process touches only ~4 sites. Runtime-global bases and the shared table must land
-  together.
-
-- [ ] **M2 — shared IC entries for sealed callees** (ADR-175 Stage 3, the BEAM
-  export-table move). **Promoted over M3 by the analysis above:** every field an IC entry
-  caches — `(sym, argc, epoch, callee, arm, env)` — is process-independent *within a
-  runtime*, now that arms themselves are shared (ADR-175 Phase C). So the whole per-process
-  IC table is arguably a per-runtime structure wearing the wrong hat: sharing it removes
-  all 664 B **and** starts every spawned process warm, which is the latency half. The
-  blocker is unchanged and real — the tables are read by JIT'd code on the hot path, so
-  they need a lock-free design (`FastLink` is already `#[repr(C)]` plain data built for
-  raw reads, and `jit_code_cache` is already an `RwLock` shared across processes, so the
-  precedent exists) and the full TSAN/loom gate. This is the highest-value *and*
-  highest-risk item in group B. A sealed (ADR-166) binding's resolution is process-independent, so
-  its IC entry can live with the *shared arm* (atomics/ArcSwap; `FastLink` is already
-  `#[repr(C)]` plain data). Removes most per-process IC slots (664 B floor item) *and*
-  starts every fresh process warm — a latency win for spawn-heavy code too. Risk:
-  concurrent lock-free structure read by JIT'd code — the one option needing the full
-  TSAN/loom treatment. Decide against M3 first: they overlap.
 - [ ] **M3 — direct-link sealed callees at compile time** (ADR-175 Stage 1). **Design
   analysed 2026-07-29; it does NOT deliver the memory win on its own.** An IC hit yields
   four things: `(callee, arm, env, callee_bases)`. For a sealed callee the first three are
