@@ -11713,3 +11713,33 @@ can be rejected on the type; the real safety is the missing-impl check at op cal
 payoff: `(sig render (Display -> string))` now survives (return + other params still checked)
 instead of being discarded. `ability_type_table` (all abilities → sealed-members | open) +
 `annot::ability_type` (→ union | `any`). Type suite 273 → 275; zero false positives.
+
+## 2026-07-29 (cont.) — record patterns in `match` (ADR-187, part 1)
+
+Closing the biggest structural gap from the "most-loved languages" review: first-class
+matching on a record. A `defrecord` value is a map with a reserved `:__id__`, so it could
+already be matched with `{:__id__ :geo/circle :r r}` — verbose, exposes the key, doesn't
+assert record-ness. Added the concise `(record name {map-pattern}?)` pattern.
+
+```lisp
+(match shape
+  ((record circle {:r r})        (* 3.14 r r))
+  ((record rect   {:keys [w h]}) (* w h))
+  (_                             :other))
+```
+
+**Keyword-field, not positional — and that's the right call, not a compromise.** Brood
+records are hash-ordered maps (field order lives only in the `defrecord`), so, like
+Elixir/Clojure, fields bind by key. Positional would also need the definition's field order
+at macro-expand time — the same checker-fragility `:derives` hit (ADR-185) — so it's out.
+
+Mechanics (all in the Brood matcher, `std/prelude.blsp`): a `record`-headed pattern (named
+like `and`/`or`/`bytes`, since `(circle r)` is already a *list* pattern), id derived
+**syntactically** via `ability--id-kw` (so it lowers identically in the checker's expand pass
+and at runtime — no `*record-ids*` lookup), test is one `(%eq (record-id t) :id)` wrapping the
+ordinary map-pattern compile (so `{:k p}`/`:keys`/`:or`/nesting compose free). No special
+form. 10 tests added to `tests/pattern_matching_test.blsp` (incl. nesting + cross-process:
+130 → 140), `nest check` clean.
+
+**Next (ADR-187 part 2):** sealed-match exhaustiveness — warn when a `match` on a
+sealed-ability-typed scrutinee (ADR-181/186) misses a member and has no catch-all.

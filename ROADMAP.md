@@ -77,6 +77,14 @@ Shipped as ADRs:
     a checker pass reads the `derive-into` forms so a derived record still satisfies
     call-site and `:sealed` checks. Composes with provided ops (derive the required op,
     inherit the rest). **[prelude/checker]**
+  - 🟡 **Record patterns + sealed-match exhaustiveness** ([ADR-187](docs/decisions.md)) — the
+    biggest structural gap from the most-loved-languages review (Rust/Gleam/Elm-style
+    match-on-a-constructor). ✅ **Part 1: `(record name {map-pattern})`** — matches a
+    `defrecord` value by nominal id (derived syntactically, checker-safe) then a map pattern
+    against its fields (`{:k p}`/`:keys`/`:or` compose); keyword-field not positional
+    (records are hash-ordered maps, à la Elixir/Clojure). A Brood pattern-compiler clause, no
+    special form. ⬜ **Part 2: exhaustiveness** — warn when a `match` on a sealed-ability-typed
+    scrutinee (ADR-181/186) misses a member with no catch-all. **[prelude/checker]**
   - ⬜ **Checker gap:** a `:use`d ability op from a *loose disk* module (not embedded,
     not in a project) is flagged `unbound symbol` though it runs; embedded/same-module
     use resolves. Surfaced by the `show` cross-module test. **[kernel/checker]**

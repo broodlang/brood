@@ -12191,3 +12191,64 @@ its return and other params are still checked — instead of being discarded who
 names are ambient — why the bare registry names are correct), ADR-172/168 (the ability seam +
 the missing-impl call check that carries the open-ability safety), ADR-011 (`any` is the
 minimal sound resolution; defer a richer "implements X" type), the 2026-07-29 devlog entry.
+
+## ADR-187 — Record patterns in `match`: `(record name {map-pattern})`
+
+**Status:** accepted + shipped (part 1 — the pattern; part 2 — sealed-match exhaustiveness —
+in progress).
+
+**Context.** A `defrecord` value is a map carrying a reserved `:__id__` (`:module/name`), so
+it could already be matched with the map pattern `{:__id__ :geometry/circle :r r}` — but that
+is verbose, exposes the internal key, and doesn't *assert* record-ness. The most-loved
+languages (Rust `Circle { r }`, Elixir `%Circle{r: r}`, Swift/Gleam/OCaml enum-case patterns)
+make matching a constructor concise and first-class; Brood had the mechanism but not the
+spelling. This is the pattern half of closing that gap; match-exhaustiveness over a sealed
+member set is the second half.
+
+**Decision.** Add a `(record name {map-pattern}?)` pattern to the Brood pattern compiler
+(`std/prelude.blsp`, `match-compile-record`). It asserts the target is a `defrecord` value of
+nominal id `name`, then matches the optional inner map pattern against its fields:
+
+```lisp
+(match shape
+  ((record circle {:r r})           (* 3.14 r r))
+  ((record rect   {:keys [w h]})    (* w h))
+  ((record point)                   :some-point)      ; id-only, binds nothing
+  (_                                :other))
+```
+
+**1 — Keyword-field, not positional.** Fields bind by keyword (the inner map pattern), not by
+position. This is deliberate and idiomatic: Brood records are **hash-ordered maps** (field
+order lives only in the `defrecord`, never in the value), and Elixir/Clojure records match by
+key for the same reason. A positional `(circle r)` would also need the definition's field
+order *at macro-expansion time* — the same checker-fragility ADR-185's `:derives` hit (the
+checker expands without evaluating) — so it is rejected, not merely deferred.
+
+**2 — A marker head, because `(circle r)` is already a list pattern.** `(circle r)` means "a
+2-element list, bind `circle` and `r`" — a real, common pattern. So a record pattern needs a
+distinguishing head; `record` is named like `and`/`or`/`bytes` (ADR-152/160), claiming that
+one head shape. The inner `{…}` is an ordinary map pattern, so `{:k p}`, `:keys`, `:or`, and
+nesting all compose for free (the id check simply wraps `match-compile-map`).
+
+**3 — The id is derived syntactically — no registry, checker-safe.** `name` is turned into
+its dispatch id by `ability--id-kw` (bare `circle` → `:<current-ns>/circle`; `geo/circle` →
+`:geo/circle`) — the *same* helper `impl`/`:sealed` use, so the pattern's id agrees with the
+value's baked `:__id__` and with cross-module spellings. No `*record-ids*` lookup, so the
+pattern lowers identically in the checker's expand pass and at runtime. The whole test is a
+single `(%eq (record-id target) :id)`: `record-id` returns nil for a non-record (a plain map
+with the same fields, or a non-map), so those correctly fall through.
+
+**4 — No new core.** A pattern-compiler clause in the existing Brood matcher (the `try`/`match`
+precedent — a macro over primitives), not a special form; `let`/`fn`/`receive` destructuring
+inherit it because they share the one compiler.
+
+**Part 2 (in progress) — sealed-match exhaustiveness.** A `match` whose scrutinee has a
+statically-known sealed-ability type (ADR-181, ADR-186 — a sealed ability *is* the finite
+union of its member ids) and whose arms are record patterns should warn, advisorily, for any
+member left uncovered when there is no catch-all. It reuses the sealed member sets the checker
+already reads (`sealed_member_ids`, `protocol.rs`).
+
+**References.** ADR-130 (records are maps + `:__id__`), ADR-181/186 (a sealed ability is a
+type — drives part 2), ADR-172/168 (`ability--id-kw`, the shared id derivation), ADR-152/160
+(named pattern heads `not`/`and`/`or`), ADR-185 (why expand-time record metadata is avoided),
+`tests/pattern_matching_test.blsp` ("record patterns").
