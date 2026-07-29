@@ -11542,3 +11542,45 @@ an accumulator-returning recursion (unknown base case) still defers, never false
 The cardinal-sin gate held both times: type suite 268 → 270, and **zero** new false positives
 across all of `std/` + `tests/`. Next lever on inference: multi-arity/rest closures, and the
 bottom-up fixpoint order so a caller of an as-yet-un-inferred function still resolves.
+
+## 2026-07-29 (cont.) — the per-process memory, finally attributed byte for byte
+
+No code shipped in this stretch; it retired a standing "roughly half is unattributed" note
+and killed three plausible-but-wrong ideas before any of them cost an implementation.
+
+**The profile.** A temporary size-histogram in the counting allocator (an atomic per
+allocation — measurement builds only, removed afterwards) gives the whole of `spawn` + park
+at 300k processes: `Box<Process>` 1184 B, two 256s (one is `vm_call_ics`), two 160s (one is
+`vm_fast_links`), `Arc<Mailbox>` 184, a 180, two 84s (one is `arm_ic_blocks`), `Suspended`
+136, and ~340 across small buckets. It sums to **~3019 B against 3037 measured** — that is
+all of it. Identities come from differencing the same workload under `(hibernate)`, which
+drops exactly one 256, one 160 and one 84, so **the IC tables are ~500 B/process** by
+measurement rather than by adding up `size_of`s. That makes M2b the biggest *reducible*
+item, second only to the `Box<Process>` itself.
+
+**Three corrections, all caught by testing the claim instead of building on it:**
+
+- *"The fat IC table is cold after the fast-link collapse."* No — the collapse made it cold
+  for the **JIT** path only. `vm_call_ic_probe` is the primary IC hit path in the VM
+  dispatcher, so it is hot for every *interpreted* call. The `RwLock<HashMap>` design that
+  followed from this would have regressed every un-JIT'd call site.
+- *"mimalloc has a size-class cliff just above 1272, so the next win is binary — cut exactly
+  184 B or get zero."* No. That was over-read from single-sample padding runs. Measuring the
+  allocator directly (`crates/lisp/tests/size_class_probe.rs`, 200k live allocations per
+  size) shows it is near-linear here: 1024 → 1039, 1208 → 1215, 1280 → 1295, 1536 → 1551.
+  The reproducible +277 B/proc for +192 B of `Process` is ~1.44× page-level slack, not a
+  class step. Incremental shaving keeps paying at roughly 1:1 — do not hold cuts back for a
+  threshold that does not exist.
+- *"Hang the shared IC slots on the `CompiledArm`, since ADR-175 already shares arms."*
+  **Unsound**, and the failure mode is a wrong-callee miscompile rather than a stale-cache
+  warning: `SHARED` is a process-wide `LazyLock` and every `Interp::new()` clones the same
+  `Arc<SharedCode>` while building its **own** `RuntimeCode`, so a prelude arm is shared
+  across *runtimes* — and an IC entry caches a *global* resolution, which is per-runtime.
+  Shared IC state must live on `RuntimeCode`, keyed by `(arm_uid, site)`.
+
+Also corrected: `(hibernate)` reclaims **12%** on a bare shell, not the ~40% recorded
+earlier. That figure came from processes that had run enough code to populate their caches;
+quote the workload with the number.
+
+Kept as tooling: `size_class_probe.rs` (`#[ignore]`d — a measurement, not an assertion).
+The allocator histogram was removed and its recipe written into `runtime-frontier.md`.
