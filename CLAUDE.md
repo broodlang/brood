@@ -229,6 +229,16 @@ A row that moves only a few percent in a sweep deserves a solo re-run before you
 believe it: interleaving A and B shifts thermal/cache state, and on 2026-07-27
 `persistent-map` read +3.7% in a sweep and 82 vs 81 ms measured directly.
 
+**A solo `make ab` re-run is not always enough — some rows drift between whole
+invocations.** On 2026-07-29 `pingpong` read +4.3% in a sweep and **+5.3% solo**, which
+looked like a confirmed regression; its `make ab` *baseline* had meanwhile wandered
+209 → 230 ms across the day's runs (~10%), so the "confirmation" was measuring drift
+twice. The reliable method for a suspect row is a **fixed baseline binary + a base-vs-base
+control**: keep the `target/ab/<sha>/…/brood` binary, run `taskset`-pinned best-of-15 for
+base, base again, then new, and read the base-vs-base spread as that row's noise floor.
+The same change then measured +0.9% against a +0.5% floor — neutral. Don't report a
+regression whose size is within a couple of multiples of the floor you haven't measured.
+
 Cargo is the source of truth; a thin **`Makefile`** wraps the common commands as
 shortcuts (`make help` lists them): `make build`, `make test`, `make suite`,
 `make repl`, and `make benchmark`. **`make test` runs the suite via

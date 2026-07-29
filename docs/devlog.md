@@ -11308,3 +11308,38 @@ whole-fleet validation. ADR-182; CLAUDE.md flag table + ability-monomorphization
 **All three slices land the "type-system-meets-abilities" arc:** typed op returns (ADR-180) →
 sealed ability as a type (ADR-181) → devirtualize the proven dispatch (ADR-182). Checker
 soundness held throughout — zero false positives across `std/` + `tests/`.
+## 2026-07-29 (cont.) — 288 bytes of checker state off every process, and a regression that wasn't
+
+**The change.** Two pieces of `Heap` were inline-and-hot-by-accident but cold-by-use:
+
+- `check_dep_rec` + `module_exports_cache` + `known_ns_cache` → one lazily-boxed
+  `CheckHeap` (288 B → 16 B). `check_dep_rec` alone was **208 bytes** — four `HashSet`s —
+  on every process, when only `nest check` ever touches it. M1 left these behind because
+  they are all filled through `&self`, so they couldn't use `ColdHeap`'s
+  `Option<Box<_>>` shape; putting the box behind a `RefCell` and handing out a
+  `RefMut::map` guard solves exactly that blocker.
+- `dbg_site_pos` gated to `#[cfg(debug_assertions)]`. Every *use* was already gated; the
+  field was not, so release carried 32 B of provably dead weight per process.
+
+`Heap` 1616 → 1376 B (−15%). Measured **−47 MB on spawn-live** (1.894 → 1.847 GB,
+−157 B/process — the 240 B struct shrink rounds through mimalloc's size classes). Checker
+verified intact: zero warnings project-wide including a forced `BROOD_NO_CHECK_CACHE=1`
+full recheck, and a deliberately bad file still warns.
+
+**The regression that wasn't, which is the more useful half.** `make ab` reported
+`pingpong` +4.3% in a sweep, then **+5.3% on a solo re-run** — by the rule we'd written
+down, a confirmed regression. It wasn't. The row's `make ab` *baseline* had drifted
+209 → 230 ms across the day's invocations (~10%), so the solo "confirmation" measured
+drift a second time.
+
+Two wrong hypotheses got chased before the measurement was fixed, both worth recording as
+dead ends: it is *not* an extra indirection on a hot path (`rec_check_dep_*` is called only
+from `types::check::deps`, never from running code — checked, not assumed), and the
+bisect that seemed to split the cost between the two pieces (+2.3% for the box alone) was
+itself noise.
+
+The method that actually answers it: a fixed baseline binary plus a **base-vs-base
+control** — `taskset`-pinned best-of-15 for base, base again, then new, reading the
+base-vs-base spread as the row's noise floor. Controlled: fib 0.0% (floor 0.0%), spawn
+−0.9% (floor −0.9%), bintree +0.8% (floor +1.6%), pingpong +0.9% (floor +0.5%), spawn-live
+−1.2% (floor +0.4%). Neutral on time, real on memory. Note added to CLAUDE.md.
