@@ -10875,3 +10875,44 @@ rows show no regression — so the published cross-language numbers were never a
 measuring generated-code quality and wrong for any change that alters *how much*
 background compilation happens — it charges the benchmark for compiler CPU that a real
 run does in parallel. Re-run such a change unpinned before believing a regression.
+
+## 2026-07-29 (cont.) — the green-process floor, finally attributed
+
+The `spawn-live` gap is now entirely the process floor (compiled code is shared per
+runtime since ADR-175). Roughly half of it was unattributed, and the earlier attempts
+failed for a recorded reason: whole-program differencing is exhausted, and per-phase
+`live_bytes()` deltas are invalid because that counter is process-wide across workers.
+
+Done properly with a **size-class histogram in the `Counting` global allocator**
+(temporary; env-armed from `main`, since an env read *inside* the allocator re-enters
+it). One trap worth writing down: dumping at `atexit` reads almost empty — `Interp::drop`
+retires parked processes first, so the interesting allocations are already gone. Dump
+while the interpreter is alive (right after `run_files`).
+
+Diffing N=50,000 parked processes against N=0: **15.8 live allocations and ~4.8 KB per
+process.**
+
+| size class | per proc | bytes/proc | what |
+|---|---|---|---|
+| ≤2048 | 1.00 | 2048 | `Box<Process>` (1840 B) |
+| **≤256** | **6.92** | **1773** | `Arc<Mailbox>` (184 B) + the `Heap`'s slab/root `Vec`s |
+| ≤128 | 2.96 | 379 | smaller `Vec` first-allocations |
+| ≤512 | 0.99 | 506 | |
+| ≤16/32/64 | ~3.9 | 142 | |
+
+The ≤256 cluster is the lever, and its cause is mechanical: `Value` is 24 B and
+`(Value,Value)` 48 B, so Rust's minimum non-zero `Vec` capacity (4 for these element
+sizes) makes every first-touched slab `Vec` a 192 B allocation — in the 256 class. A
+process touching ~6 of the 11 slab kinds pays ~6 × 192 B before storing anything.
+
+Fix directions, in rough order of payoff:
+1. **Arena the slabs** — one backing allocation for all 11 `Vec`s instead of one each.
+   Collapsing ~7 allocations into 1–2 is ~1 KB/proc against a 4.8 KB floor.
+2. **Explicit small initial capacity** (`Vec::with_capacity(1)` = 48 B, class 64) where a
+   slab kind is usually near-empty — cheaper to try, smaller win.
+3. `Process` is 1840 B, up from 1736 before ADR-175 Phase A (the IC block registry +
+   cursors). Still one 2048-class allocation, so it costs nothing extra today, but it is
+   ~200 B from the next class boundary.
+
+Not implemented — this entry is the measurement. The BEAM's ~3 KB against our ~4.8 KB of
+*allocation* (≈6.6 KB RSS) is now a concrete, itemised target rather than a mystery.
