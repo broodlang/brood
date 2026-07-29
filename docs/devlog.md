@@ -10767,3 +10767,48 @@ full-suite load it exceeds 60s → `:TIMED-OUT`. On release (`make test` / `nest
 
 Verified (release): queue 27, multimap 20, record 16 (incl. custom Seqable+Conjable),
 ability 34, maps 83, json 41; full release suite clean.
+## 2026-07-29 (cont.) — ADR-175 Phase C: user-code arms share too
+
+Phase B shared only PRELUDE closures. Phase C extends the runtime-shared cache to every
+shared-region closure (PRELUDE + RUNTIME), so **user code compiles once per runtime**
+instead of once per process. LOCAL closures stay unshared (recycled handles, movable
+embedded handles).
+
+**The blocker was misdiagnosed, in our favour.** The recorded reason RUNTIME keys were
+excluded was "two processes rewriting one shared arm would double-forward its handles".
+Reading the compactor shows that is *impossible*: `runtime_collect` runs only under
+`Arc::get_mut` on the runtime — i.e. when this is the sole process. The real hazard is the
+mirror image: compaction rewrites arms on the **execution stack** (`live_vm_arms`), so a
+merely *cached* shared arm is on no stack, is never visited, and keeps pre-compaction
+handles. Fixed by clearing the shared cache where the compactor already clears `vm_cache`.
+The second hazard — a freed generation recycling handles bit-identically (ADR-091) — is
+handled by stamping each entry with the `free_epoch` its publisher observed **before**
+compiling and validating on lookup, so a free mid-compile leaves the entry stale rather
+than poisonous. `closure_is_immortal` is deleted: it guarded the impossible hazard and
+excluded essentially all user code (whose constants are promoted to RUNTIME).
+
+Measured (N=300k spawn-live; per-proc at N=100k):
+
+| | pre-ADR-175 | Phase B | **Phase C** |
+|---|---|---|---|
+| spawn-live wall | 4.04 s | 3.47 s | **3.00 s** |
+| spawn-live RSS | 4.57 GB | 2.80 GB | **2.01 GB** |
+| 40-arm user body | 37.1 KB/proc | 37.5 | **4.55** |
+| trivial body | 6.27 KB/proc | 6.78 | **4.52** |
+
+`body_big` converged onto `body_small` exactly as predicted, and both fell *below* the old
+6.27 KB floor — small bodies were being duplicated too. Same-binary off-switch A/B at 300k:
+3.00 s / 2.01 GB shared vs 4.91 s / 4.33 GB with `BROOD_NO_SHARED_ARMS=1`.
+
+Gate: suite 883/883, stress 33/33. `make ab` vs Phase B: **`spawn` −21.7%**, `ring` −5.2%,
+everything else flat — sharing is a speed win as well as a memory one.
+
+**Open, unchanged in kind: shared JIT-tier state.** A shared arm shares
+`jit_calls`/`jit_deopts`/`compile_epoch`, so tiering history persists across installs where
+a per-process recompile reset it. Cumulative `make ab` vs pre-ADR-175 (`e6ab599b`):
+`spawn` −14.8%, `ring` −3.9%, `fib` −1.3%, but `nqueens` **+7.8%** and `collatz` **+4.9%**
+(both solo-confirmed). Attribution for `nqueens`: 111 ms shared vs 107 ms with the
+off-switch, and **with `BROOD_NO_JIT=1` sharing is slightly *faster*** (298 vs 302 ms) —
+so the cost is tiering history, not the code sharing. Fix direction unchanged: split the
+shared code (body/chunk/shape) from per-process tier state. Trade as it stands: ~5–8% on
+two compute rows against −2.6 GB and −1 s at 300k processes.

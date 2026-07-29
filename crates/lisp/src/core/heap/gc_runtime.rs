@@ -1153,6 +1153,13 @@ impl Heap {
         // id then either falls out of range (ignored) or aliases a fresh site, which
         // the probe's sym+argc+epoch validation makes harmless (ADR-096).
         self.vm_cache.borrow_mut().clear();
+        // ...and the RUNTIME-shared compiled closures (ADR-175). The live arms above were
+        // rewritten because they are on this process's execution stack; a merely *cached*
+        // shared arm is on no stack, so its embedded RUNTIME handles still address the
+        // pre-compaction region. Dropping the cache makes every process recompile from the
+        // (already rewritten) AST. Safe unconditionally — compaction holds `Arc::get_mut`
+        // on the runtime, so this is the only process.
+        self.shared_closures_clear();
         self.global_ic.borrow_mut().clear();
         self.vm_call_ics.borrow_mut().clear();
         // Clear the IR-readable mirror in lockstep (recycled sites get a fresh slot; a

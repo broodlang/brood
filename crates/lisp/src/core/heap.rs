@@ -1244,7 +1244,13 @@ pub struct RuntimeCode {
     /// AST, so last-writer-wins is safe. `BROOD_NO_SHARED_ARMS=1` bypasses (ADR-175's
     /// off-switch). Arm site ids are arm-relative (Phase A), so a shared arm's ICs
     /// work in every process, each against its own block.
-    shared_closures: RwLock<HashMap<u64, Arc<crate::eval::compile::CompiledClosure>>>,
+    /// Value is `(free_epoch_at_compile, closure)`. The stamp is read **before** the
+    /// publisher compiles and validated against the live `free_epoch` on lookup, so a
+    /// closure compiled against a generation that was freed mid-compile can never be
+    /// installed by anyone (ADR-091: a freed slot is reused with bit-identical
+    /// `(gen, index)` handles, which is exactly what the per-process `vm_cache` guards
+    /// with `sync_free_epoch`).
+    shared_closures: RwLock<HashMap<u64, (u64, Arc<crate::eval::compile::CompiledClosure>)>>,
     /// Companion to `jit_code_cache` for the two-stage-tiering **inlined** upgrade
     /// (the deferred, self-inlined body). Same `(closure_id, argc)` key and
     /// `(code_ptr, compile_epoch)` value, but a separate map because a slot holds
