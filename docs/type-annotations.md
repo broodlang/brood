@@ -126,7 +126,9 @@ unconditionally as if it can't be `nil` is still caught. `&optional` before
 dropped by the parser rather than misparsed.
 
 Base names map to the same lattice points the predicates imply (`number` =
-`int∪float`, `list` = `nil∪pair`, `fn` = `fn∪native`, …).
+`int∪float`, `list` = `nil∪pair`, `fn` = `fn∪native`, `seqable` =
+`nil∪pair∪vector∪set∪map∪bytes` — every collection the sequence combinators walk, `string`
+excluded — for a polymorphic-sequence parameter without falling back to `any`, …).
 
 A `(sig name (… -> …))` whose type-expr is an **arrow** declares a function
 signature. Non-arrow `(sig x int)` (a value's type) declares a **value type**:

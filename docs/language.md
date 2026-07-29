@@ -385,6 +385,52 @@ must match the declared op's arity: a fixed impl exactly, a variadic impl as lon
 as it accepts that arity — `nest check` and load-time registration both flag a
 mismatch.
 
+**Provided ops (default bodies).** An op whose spec carries a **body** —
+`(op [args] :-> ret? body…)` — is *provided*: `defability` registers that body as the
+op's `:default` impl. An `impl` that supplies only the **required** ops (the bodyless
+specs) inherits every provided op; an id-keyed impl of a provided op **overrides** its
+default. Write the minimal contract and derive the rest (Rust/Haskell *provided methods*,
+Elixir's derived protocol defaults) — implement `compare-to`, get the rest free:
+
+```clojure
+(defability Ord
+  (compare-to [self other] :-> int)                           ; required
+  (lt  [self other] :-> bool (< (compare-to self other) 0))   ; provided
+  (gt  [self other] :-> bool (> (compare-to self other) 0)))  ; provided
+
+(impl Ord money/amount                       ; only the required op
+  (compare-to [a b] (- (cents a) (cents b))))
+(lt (amount 100) (amount 200))               ;=> true   — via the provided default
+```
+
+To **override** a provided op for a type, add its method to that type's `impl` (the same
+form as the required ops), since each `impl` form is checked for completeness on its own.
+A provided op called on an id that implements *none* of the ability runs the default body,
+which raises the ordinary `no-impl` for the required op it delegates to.
+
+**Deriving (`:derives`).** A record can auto-generate an ability impl instead of writing it,
+Elixir `@derive` / Rust `#[derive]` style. The ability declares **how** it derives itself
+with a `:derive-record` recipe (field names → `impl` method forms for its *required* ops);
+the record opts in with `:derives`:
+
+```clojure
+(defability Columns
+  (columns [self] :-> vector)                       ; required — derived
+  (ncols [self] :-> int (count (columns self)))     ; provided — composes with derive
+  :derive-record
+  (fn (flds)
+    (list `(columns [r] [~@(map (fn (f) `(get r ~(keyword (name f)))) flds)]))))
+
+(defrecord point (x y) :derives [Columns])
+(columns (point 3 4))    ;=> [3 4]     — synthesized
+(ncols   (point 3 4))    ;=> 2         — provided op, on the derived required op
+```
+
+The recipe runs at **load** (via `derive-into`), so the ability's `defability` need only be
+loaded before the record is used. Deriving an ability that declares no `:derive-record` is a
+clean error; the checker treats a derived record as implementing every op of the ability, so
+it satisfies call-site and `:sealed` checks.
+
 **Single dispatch — and its multiple-dispatch sibling.** An *ability* op dispatches on the
 **first argument only** (Rust-trait / Clojure-protocol style). For a unary op (`to-str`,
 `to-seq`) that is all there is to it. An op that *combines two values* — arithmetic and
@@ -457,9 +503,10 @@ different value:
 ;; swapping the driver value swaps the impl — no config, no module atoms
 ```
 
-**Sealed abilities.** `:sealed [id …]` names the **closed** set of ids the ability
+**Sealed abilities (provided ops excluded).** `:sealed [id …]` names the **closed** set of ids the ability
 is meant to cover, and `nest check` then flags any member missing a direct impl of
-any declared op (a `:default` does not count). Runtime dispatch is unchanged —
+any **required** op (a `:default` does not count; a *provided* op is satisfied by its
+default, so members need not implement it). Runtime dispatch is unchanged —
 sealing is a contract, not a restriction:
 
 ```clojure
@@ -524,9 +571,15 @@ record shapes**. `Shape :sealed [circle rect]` means `(or circle rect)` as a typ
 write `(sig total (Shape -> float))` or return one from an op (`(scaled [self] :-> Shape)`).
 A member record satisfies it (records are open, so extra fields are fine); a non-record is a
 provable mismatch; anything whose type isn't pinned down defers — sound, no false positives.
-Only *sealed* abilities resolve this way (an open ability has no finite member set to
-enumerate); an open ability's name in type position stays unknown and the annotation is
-dropped rather than guessed.
+
+**Any ability name is a type (ADR-186).** An *open* ability (no `:sealed`) has no finite
+member set, so it resolves to the permissive **`any`** — a `sig` mentioning it (`(sig render
+(Display -> string))`) still *checks* (the return and other params flow), the open-ability
+parameter just accepts anything. That's the sound choice: an open ability's impls are late
+and may cover any value, so no argument can be rejected on the type — the "does this value
+implement it" safety is enforced at the op *call sites* instead. Sealed abilities keep their
+precise finite-union type; both work for abilities declared in *this* file or reachable
+through `(:use …)`.
 
 > **Direction: [ADR-172](decisions.md) (amended 2026-07-28).** This open runtime model
 > is kept open — `impl` stays legal for any ability and any id (primitive, owned, or
@@ -1057,6 +1110,7 @@ design and rationale see [pattern-matching.md](pattern-matching.md).
 | `(or p q …)` | any alternative — first match wins; every alternative must bind the same names |
 | `(and p q …)` | every pattern, against the same value — the capture-while-destructuring (`:as`) idiom |
 | `{:k p}` | a map with key `:k` **present**, whose value matches `p` (nests to any depth) |
+| `(record name {…})` | a **`defrecord` value** whose nominal id is `name` (bare → current ns, or `mod/name`), then the map pattern `{…}` against its fields (`{:k p}`/`:keys`/`:or` all compose); the `{…}` is optional (id-only). A plain map or non-record fails |
 
 Patterns nest to any depth. **The one trap:** a bare symbol *binds* (and
 shadows) — it does **not** test against a same-named value. Match a known value

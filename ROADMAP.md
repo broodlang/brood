@@ -62,6 +62,29 @@ Shipped as ADRs:
     types). ADR-177 also records the **rejection list** (the prelude's collection
     protocol, `str`/`pr-str`, closed AST/CST node kinds, telemetry metric kinds,
     `std/stream`, the `proc/*` module contracts) so the next pass doesn't re-litigate it.
+  - ✅ **Provided ops (default method bodies)** ([ADR-185](docs/decisions.md), 2026-07-29)
+    — an op spec may carry a body (`(op [args] :-> ret? body…)`), which `defability`
+    registers as the op's `:default` impl. Implement the required ops, inherit the derived
+    ones (Rust/Haskell provided methods, Elixir's derived defaults); an id-keyed impl
+    overrides a default. A prelude-macro change over the existing `:default` mechanism — no
+    new special form — plus a checker adjustment (provided ops excluded from per-impl
+    completeness and `:sealed` exhaustiveness; required ops still demanded). **[prelude/checker]**
+  - ✅ **Deriving — `:derives`** ([ADR-185](docs/decisions.md) part 2, 2026-07-29) — a
+    `defability` declares a `:derive-record` recipe (each ability decides how it derives
+    itself, Elixir `@derive` / Rust `#[derive]`), and a `defrecord` opts in with
+    `:derives [A …]`. Derivation runs at **load** (`derive-into`), not expansion — the
+    checker macro-expands without evaluating, so an expand-time recipe call would break it;
+    a checker pass reads the `derive-into` forms so a derived record still satisfies
+    call-site and `:sealed` checks. Composes with provided ops (derive the required op,
+    inherit the rest). **[prelude/checker]**
+  - 🟡 **Record patterns + sealed-match exhaustiveness** ([ADR-187](docs/decisions.md)) — the
+    biggest structural gap from the most-loved-languages review (Rust/Gleam/Elm-style
+    match-on-a-constructor). ✅ **Part 1: `(record name {map-pattern})`** — matches a
+    `defrecord` value by nominal id (derived syntactically, checker-safe) then a map pattern
+    against its fields (`{:k p}`/`:keys`/`:or` compose); keyword-field not positional
+    (records are hash-ordered maps, à la Elixir/Clojure). A Brood pattern-compiler clause, no
+    special form. ⬜ **Part 2: exhaustiveness** — warn when a `match` on a sealed-ability-typed
+    scrutinee (ADR-181/186) misses a member with no catch-all. **[prelude/checker]**
   - ⬜ **Checker gap:** a `:use`d ability op from a *loose disk* module (not embedded,
     not in a project) is flagged `unbound symbol` though it runs; embedded/same-module
     use resolves. Surfaced by the `show` cross-module test. **[kernel/checker]**

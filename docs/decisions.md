@@ -12070,3 +12070,185 @@ park, pinned by a test.
 **References.** ADR-173 (spy), ADR-174 (the debugger process), ADR-013 (late binding,
 the instrumentation seam), ADR-166 (reserved names), `tests/debug_test.blsp`
 ("function-boundary instrumentation").
+
+## ADR-185 — Provided ops + `:derives`: default method bodies and per-ability derivation
+
+**Status:** accepted + shipped.
+
+**Context.** Abilities (ADR-168/172) declared op *specs* only — every `impl` had to supply a
+body for **every** op — and a record had to hand-write each impl. Comparing Brood's
+polymorphism to the most-loved languages, the dispatch *core* (open extension, precedence
+tiers, multiple dispatch with operator algebra, hot reload) is ahead of the pack, but two
+loved ergonomics were missing: **provided methods** (Rust traits, Swift protocol extensions,
+Haskell typeclasses — implement the required ops, inherit the derived ones) and **deriving**
+(Elixir `@derive`, Rust `#[derive]` — synthesise a standard impl for a record). Both are
+prelude-level; neither needs a new special form.
+
+### Part 1 — Provided ops (default bodies)
+
+An op spec may carry a **body** after its optional `:-> RET`: `(op [args] :-> ret? body…)`.
+`defability` registers that body as the op's `:default` impl (from the declaring ns →
+ability-owner tier). A bodyless spec stays **required**.
+
+```lisp
+(defability Ord
+  (compare-to [self other] :-> int)                          ; required
+  (lt [self other] :-> bool (< (compare-to self other) 0))   ; provided
+  (gt [self other] :-> bool (> (compare-to self other) 0)))  ; provided
+```
+
+**Why `:default`, not new machinery.** Dispatch already falls back id-impl → `:default`
+(`impl-for`), so a provided op needs no change to the generated generic function or the
+dispatch path — it is an auto-registered impl, and the inline cache, precedence, hot reload,
+and cross-process paths all carry over. An id-keyed impl of a provided op **overrides** its
+default for free (id key beats `:default`). A provided op called on an id implementing
+nothing runs the body, which raises the ordinary `no-impl` for the required op it delegates
+to. Each `impl` *form* is completeness-checked on its own, so an override is written in the
+same form as the required ops (a standalone partial impl trips the pre-existing "missing op"
+lint — unchanged).
+
+### Part 2 — `:derives` (per-ability derivation)
+
+A `defability` may declare a `:derive-record <recipe>` clause; a `defrecord` may declare
+`:derives [Ability …]`. This is the **Elixir/Rust model — each ability decides how it
+derives itself** (rejected: a single generic structural default, which can't express a
+non-structural op). The recipe is `(fn (fields) …) → a list of `impl` method forms`; it is
+run to synthesise the ability's **required** ops (provided ops then come free).
+
+```lisp
+(defability Columns
+  (columns [self] :-> vector)                      ; required — derived
+  (ncols [self] :-> int (count (columns self)))    ; provided — composes
+  :derive-record
+  (fn (flds) (list `(columns [r] [~@(map (fn (f) `(get r ~(keyword (name f)))) flds)]))))
+(defrecord point (x y) :derives [Columns])         ; columns synthesized; ncols free
+```
+
+**Load-time, not expand-time — the decisive constraint.** The obvious design (defrecord
+expands to a static `(impl …)` by calling the recipe during expansion) **breaks the
+checker**: the checker macro-expands a file *without* evaluating it, so an ability's recipe
+isn't registered when a later `defrecord` expands — the recipe lookup returns nil and the
+expansion errors, cascading to `unbound symbol`. So `defrecord :derives` instead expands to a
+`(derive-into 'A id 'fields (current-ns))` **call** that runs at *load*, where the recipe is
+registered (sequential top-level eval). `derive-into` looks up the recipe, evals each method
+form into a fn, and `register-impl`s it — reusing the whole open/late registry path.
+
+**Checker visibility.** Because derivation is now a load-time call, the derived methods
+aren't static `impl` forms the checker can see — so a small checker pass reads `derive-into`
+forms and marks **every** op of the ability as implemented for that id. A derived record
+therefore satisfies both the call-site missing-impl check and `:sealed` exhaustiveness
+without the recipe being run at check time.
+
+### Checker (advisory) — three passes learned "provided"/"derived"
+
+Per-`impl` completeness and `:sealed` exhaustiveness both skip a **provided** op (its default
+covers it), while a **required** op is still demanded; and derived ids count as implementing
+every op. `nest check` stays zero-warning across `std/` + `tests/`.
+
+**No new core.** Entirely prelude (`defability`/`defrecord` macros + `derive-into`) plus an
+advisory checker adjustment: no new special form, no `Value` kind, no builtin.
+
+**Deferred (ADR-011).** (a) Wiring recipes onto built-in abilities (e.g. a structural
+`Display`); ordering for records is a *multimethod* (`compare-to`, ADR-179), a different seam
+than ability `:derive-record`. (b) A generic structural default as a convenience *atop* the
+per-ability recipe, if repetition warrants it.
+
+**References.** ADR-168/172 (abilities, the `:default` fallback and precedence tiers),
+ADR-179 (multimethods — the multi-arg sibling; why ordering isn't an ability), ADR-011 (ship
+the minimal form), ADR-130 (records as maps), `tests/ability_test.blsp` ("provided
+(default-body) ops", "derive: …").
+
+## ADR-186 — Any ability name is a type; the checker reads the live ability registries
+
+**Status:** accepted + shipped. Extends ADR-181 (sealed-ability-as-a-type) to *open*
+abilities, and fixes a latent bug that had kept the checker blind to imported abilities.
+
+**The bug.** The checker's registry reads were keyed `ability/*abilities*` /
+`ability/*sealed*` / `ability/*impls*`, but the runtime registries are the **bare**,
+earmuff-ambient globals `*abilities*` / `*sealed*` / `*impls*` (an earmuffed name is
+ambient, never namespaced — ADR-151). So those reads resolved `unbound` and returned empty:
+the checker only ever saw a *file's own* `register-*` forms, never abilities/impls/sealed
+declarations reachable through `(:use …)`. Fixed to the bare names. The missing-impl call
+check now sees imported impls too — which can only *remove* warnings (more impls found), so
+strictly safer; verified zero new warnings across `std/` + `tests/`.
+
+**Open abilities as types.** ADR-181 resolved only a *sealed* ability's name (a closed member
+set → a finite union of record shapes). An *open* ability has no closed set, so naming it in
+a `sig` dropped the whole declaration. Now every known ability name resolves:
+- **sealed** → the finite union of its members' record shapes (unchanged);
+- **open** → the permissive **`any`**.
+
+Why `any` for open, not the union of currently-registered impl ids: an open ability's impls
+are late and unbounded (any module may add one, `:default` may cover everything), so **no
+argument can be soundly rejected** on the type — a finite-union type would false-positive the
+moment a caller passes a value whose impl is registered elsewhere. `any` is the sound choice;
+the real "does this value implement the ability" safety is enforced where it belongs — at the
+ability *op call sites* (the missing-impl check), not at the parameter type. The payoff is
+that a `sig` mentioning an open ability (`(sig render (Display -> string))`) now *survives* —
+its return and other params are still checked — instead of being discarded wholesale.
+
+**References.** ADR-181 (sealed-ability-as-a-type, the base this extends), ADR-151 (earmuffed
+names are ambient — why the bare registry names are correct), ADR-172/168 (the ability seam +
+the missing-impl call check that carries the open-ability safety), ADR-011 (`any` is the
+minimal sound resolution; defer a richer "implements X" type), the 2026-07-29 devlog entry.
+
+## ADR-187 — Record patterns in `match`: `(record name {map-pattern})`
+
+**Status:** accepted + shipped (part 1 — the pattern; part 2 — sealed-match exhaustiveness —
+in progress).
+
+**Context.** A `defrecord` value is a map carrying a reserved `:__id__` (`:module/name`), so
+it could already be matched with the map pattern `{:__id__ :geometry/circle :r r}` — but that
+is verbose, exposes the internal key, and doesn't *assert* record-ness. The most-loved
+languages (Rust `Circle { r }`, Elixir `%Circle{r: r}`, Swift/Gleam/OCaml enum-case patterns)
+make matching a constructor concise and first-class; Brood had the mechanism but not the
+spelling. This is the pattern half of closing that gap; match-exhaustiveness over a sealed
+member set is the second half.
+
+**Decision.** Add a `(record name {map-pattern}?)` pattern to the Brood pattern compiler
+(`std/prelude.blsp`, `match-compile-record`). It asserts the target is a `defrecord` value of
+nominal id `name`, then matches the optional inner map pattern against its fields:
+
+```lisp
+(match shape
+  ((record circle {:r r})           (* 3.14 r r))
+  ((record rect   {:keys [w h]})    (* w h))
+  ((record point)                   :some-point)      ; id-only, binds nothing
+  (_                                :other))
+```
+
+**1 — Keyword-field, not positional.** Fields bind by keyword (the inner map pattern), not by
+position. This is deliberate and idiomatic: Brood records are **hash-ordered maps** (field
+order lives only in the `defrecord`, never in the value), and Elixir/Clojure records match by
+key for the same reason. A positional `(circle r)` would also need the definition's field
+order *at macro-expansion time* — the same checker-fragility ADR-185's `:derives` hit (the
+checker expands without evaluating) — so it is rejected, not merely deferred.
+
+**2 — A marker head, because `(circle r)` is already a list pattern.** `(circle r)` means "a
+2-element list, bind `circle` and `r`" — a real, common pattern. So a record pattern needs a
+distinguishing head; `record` is named like `and`/`or`/`bytes` (ADR-152/160), claiming that
+one head shape. The inner `{…}` is an ordinary map pattern, so `{:k p}`, `:keys`, `:or`, and
+nesting all compose for free (the id check simply wraps `match-compile-map`).
+
+**3 — The id is derived syntactically — no registry, checker-safe.** `name` is turned into
+its dispatch id by `ability--id-kw` (bare `circle` → `:<current-ns>/circle`; `geo/circle` →
+`:geo/circle`) — the *same* helper `impl`/`:sealed` use, so the pattern's id agrees with the
+value's baked `:__id__` and with cross-module spellings. No `*record-ids*` lookup, so the
+pattern lowers identically in the checker's expand pass and at runtime. The whole test is a
+single `(%eq (record-id target) :id)`: `record-id` returns nil for a non-record (a plain map
+with the same fields, or a non-map), so those correctly fall through.
+
+**4 — No new core.** A pattern-compiler clause in the existing Brood matcher (the `try`/`match`
+precedent — a macro over primitives), not a special form; `let`/`fn`/`receive` destructuring
+inherit it because they share the one compiler.
+
+**Part 2 (in progress) — sealed-match exhaustiveness.** A `match` whose scrutinee has a
+statically-known sealed-ability type (ADR-181, ADR-186 — a sealed ability *is* the finite
+union of its member ids) and whose arms are record patterns should warn, advisorily, for any
+member left uncovered when there is no catch-all. It reuses the sealed member sets the checker
+already reads (`sealed_member_ids`, `protocol.rs`).
+
+**References.** ADR-130 (records are maps + `:__id__`), ADR-181/186 (a sealed ability is a
+type — drives part 2), ADR-172/168 (`ability--id-kw`, the shared id derivation), ADR-152/160
+(named pattern heads `not`/`and`/`or`), ADR-185 (why expand-time record metadata is avoided),
+`tests/pattern_matching_test.blsp` ("record patterns").

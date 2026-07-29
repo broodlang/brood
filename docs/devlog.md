@@ -11543,6 +11543,63 @@ The cardinal-sin gate held both times: type suite 268 → 270, and **zero** new 
 across all of `std/` + `tests/`. Next lever on inference: multi-arity/rest closures, and the
 bottom-up fixpoint order so a caller of an as-yet-un-inferred function still resolves.
 
+## 2026-07-29 (cont.) — provided ops: default method bodies in `defability` (ADR-185)
+
+Comparing Brood's ability/dispatch stack to the most-loved languages, the dispatch *core*
+(open extension, precedence tiers, multiple dispatch with operator algebra, hot reload) is
+ahead of the pack — but one loved ergonomic was missing: **provided methods** (Rust traits,
+Swift protocol extensions, Haskell typeclasses — implement the required ops, inherit the
+derived ones). Built it.
+
+**The change.** An op spec may now carry a **body** after its optional `:-> RET`:
+`(op [args] :-> ret? body…)`. `defability` registers that body as the op's `:default` impl
+(from the declaring ns → ability-owner tier). A bodyless spec stays a **required** op.
+`(defability Ord (compare-to [self other] :-> int) (lt [self other] :-> bool (< (compare-to
+self other) 0)) …)` — an `impl` writes only `compare-to` and inherits `lt`/`gt`/…; an
+id-keyed impl of a provided op overrides it (id key beats `:default`).
+
+**Why it's small.** Dispatch already falls back id-impl → `:default`, so the generated
+generic function and the dispatch path are **unchanged** — a provided op is just an
+auto-registered impl, and the inline cache / precedence / hot reload / cross-process paths
+all carry over. No new special form, no `Value` kind, no builtin: a prelude macro change
+(`defability--op-body` + a `fold` emitting the `register-impl` forms) plus a checker
+adjustment. Specs are stored *with* bodies in `*abilities*` so the checker can tell provided
+from required.
+
+**Checker.** Two advisory passes learned "provided" (`spec_has_body` + an `Op.provided`
+flag / an `AbilityInfo.provided` set): per-`impl` completeness no longer demands a provided
+op, and `:sealed` exhaustiveness no longer demands it of a member — but a **required** op is
+still demanded in both. `nest check` stays zero-warning across `std/` + `tests/`.
+
+**Wrinkle worth noting.** Each `impl` *form* is completeness-checked on its own, so
+*overriding* a provided op is done by adding its method to that type's existing `impl` (same
+form as the required ops), not as a standalone later `impl` (that trips the pre-existing
+"impl is missing op" lint — unchanged behaviour).
+
+9 tests added to `tests/ability_test.blsp` (runtime inherit/override/delegation, the four
+checker interactions, cross-process): 54 → 63, all green. **Deferred (ADR-011):** `derive`
+(Elixir `@derive` / Rust `#[derive]`) — auto-generate the *required* op structurally for a
+record so `(defrecord point (x y) :derives [Ord])` needs no body; it composes directly with
+provided ops (derive the one required op, inherit the rest) and is the natural next step.
+
+## 2026-07-29 (cont.) — inference for multi-arity / variadic / optional closures
+
+The inferencer bailed on any closure that wasn't single-arm-no-rest-no-optional — which is a
+lot of std (every multi-arity or variadic function). It couldn't pin their *param* types
+(those vary per arm), but it CAN infer the **return**: the union of each arm's tail with the
+arm's binders bound to `ANY` (`infer_return_only`, a params-less `Sig`). That return flows to
+callers; arity stays checked independently by `arity_of`, so a params-less sig loses nothing.
+
+Sound because a union of arm returns is a *supertype* of whatever a given call actually
+returns — it can only *under*-flag a caller, never false-positive; and any arm whose return
+can't be typed defers the whole thing. A multi-arity `describe` returning `:one | :two` now
+flags `(string-length (describe 5))`; a variadic `(joiner a & xs)` returning a string flags
+`(+ 1 (joiner "x"))`; arity errors on the same functions still fire.
+
+Cardinal-sin gate held over the bigger surface: type suite 270 → 273, zero new false positives
+across std/ + tests/. Remaining inference lever: bottom-up fixpoint order so a caller of an
+as-yet-un-inferred function resolves without depending on evaluation order.
+
 ## 2026-07-29 (cont.) — the per-process memory, finally attributed byte for byte
 
 No code shipped in this stretch; it retired a standing "roughly half is unattributed" note
@@ -11584,6 +11641,108 @@ quote the workload with the number.
 
 Kept as tooling: `size_class_probe.rs` (`#[ignore]`d — a measurement, not an assertion).
 The allocator histogram was removed and its recipe written into `runtime-frontier.md`.
+
+## 2026-07-29 (cont.) — `:derives`: per-ability record derivation (ADR-185 part 2)
+
+The follow-on the provided-ops entry named as "the natural next step." A `defability` may
+now declare a `:derive-record` recipe and a `defrecord` may `:derives [Ability …]` — Elixir
+`@derive` / Rust `#[derive]`, but **each ability decides how it derives itself** (the recipe
+maps a record's field names to `impl` method forms for the required ops; provided ops then
+come free). `(defrecord point (x y) :derives [Columns])` synthesises `columns` and inherits
+`ncols`.
+
+**The decisive design point: derivation runs at LOAD, not expansion.** The obvious approach
+— `defrecord` calls the recipe during macro-expansion and emits a static `(impl …)` — breaks
+the checker, which macro-expands a file *without evaluating it*: the ability's recipe isn't
+registered when a later `defrecord` expands, so the lookup returns nil, the expansion errors,
+and it cascades to `unbound symbol`. (Confirmed empirically before choosing.) So `:derives`
+expands to a `(derive-into 'A id 'fields (current-ns))` *call* run at load, where sequential
+top-level eval guarantees the recipe is registered; `derive-into` evals each method form into
+a fn and `register-impl`s it. A small checker pass reads the `derive-into` forms and marks
+every op of the ability implemented for that id, so a derived record satisfies call-site and
+`:sealed` checks without running the recipe.
+
+Prelude only (`defrecord`/`defability` macros + `derive-into`) plus the one checker pass. 6
+derive tests added (structural derivation, provided-op composition, the not-derivable error,
+two checker interactions, cross-process); with the 9 provided-op tests, `tests/ability_test`
+is 54 → 69, all green, `nest check` zero-warning.
+
+> Process note: a `git merge` of `main` mid-work reverted the uncommitted prelude/checker/test
+> edits for the provided-ops half (the committed devlog/roadmap entries survived); they were
+> re-applied on top of the merge, so both halves now land together.
+
+## 2026-07-29 (cont.) — the checker meets the REPL and LSP hover
+
+The type checker ran in every batch path (`nest`, `brood`, MCP) and LSP *diagnostics*, but
+two interactive surfaces were blind to it. Closed both, keeping the checker's own
+soundness/advisory discipline.
+
+**REPL advisory checking** (`std/tool/repl.blsp`). `repl--eval-print` now runs the checker on
+each input before evaluating it (`mapcat check (read-all src)`, fragment mode). The REPL is
+the one place *every def is loaded*, so inference applies to the whole live image — a call to
+a just-defined function is checked against its *inferred* signature (`(string-length (dbl 5))`
+warns right after `(defn dbl (x) (+ x 1))`). Fragment mode skips operand-unbound so a typo's
+`unbound` isn't printed twice (eval raises that). Advisory: printed before the result, never
+blocks it, silent when clean / on incomplete input / under `BROOD_NO_CHECK`.
+
+**LSP hover type signatures.** Hover surfaced the arglist + docstring but not the checker's
+*type* sig. Added `types::check::signature_string` (the tooling view of `sigs::sig_of`) →
+`introspect::type_signature` → rendered under the arglist for a resolvable free name
+(builtins/prelude/imports — stably loaded; a buffer-only def isn't loaded, so it's excluded
+to avoid a stale sig). Hovering `map` now shows `(fn seqable -> seqable)`.
+
+Both reuse existing checker entry points (no new checking logic), so they inherit the
+zero-false-positive guarantee. LSP hover tests 8 → 9; REPL verified (clean/disabled/incomplete
+all quiet).
+
+## 2026-07-29 (cont.) — any ability name is a type; checker sees the live registries (ADR-186)
+
+Two things, one fix. **The bug:** the checker read `ability/*abilities*`/`*sealed*`/`*impls*`,
+but those globals are the **bare** earmuff-ambient `*abilities*`/`*sealed*`/`*impls*` (ADR-151
+— an earmuffed name is never namespaced). So the reads resolved `unbound` and returned empty:
+the checker had only ever seen a *file's own* `register-*` forms, never abilities/impls/sealed
+reachable through `(:use …)`. Fixed to the bare names — surfaced only because the next feature
+needed imported abilities visible. The missing-impl call check now sees imported impls too,
+which only *removes* warnings (more impls found); zero new warnings across std/ + tests/.
+
+**Open abilities as types (extends ADR-181).** A sealed ability resolved to the finite union
+of its members; an *open* ability (no closed set) dropped the whole `sig`. Now every ability
+name resolves — sealed → the union (unchanged), open → the permissive `any`. `any` is the
+*sound* choice for open: impls are late/unbounded (`:default` may cover everything), so no arg
+can be rejected on the type; the real safety is the missing-impl check at op call sites. The
+payoff: `(sig render (Display -> string))` now survives (return + other params still checked)
+instead of being discarded. `ability_type_table` (all abilities → sealed-members | open) +
+`annot::ability_type` (→ union | `any`). Type suite 273 → 275; zero false positives.
+
+## 2026-07-29 (cont.) — record patterns in `match` (ADR-187, part 1)
+
+Closing the biggest structural gap from the "most-loved languages" review: first-class
+matching on a record. A `defrecord` value is a map with a reserved `:__id__`, so it could
+already be matched with `{:__id__ :geo/circle :r r}` — verbose, exposes the key, doesn't
+assert record-ness. Added the concise `(record name {map-pattern}?)` pattern.
+
+```lisp
+(match shape
+  ((record circle {:r r})        (* 3.14 r r))
+  ((record rect   {:keys [w h]}) (* w h))
+  (_                             :other))
+```
+
+**Keyword-field, not positional — and that's the right call, not a compromise.** Brood
+records are hash-ordered maps (field order lives only in the `defrecord`), so, like
+Elixir/Clojure, fields bind by key. Positional would also need the definition's field order
+at macro-expand time — the same checker-fragility `:derives` hit (ADR-185) — so it's out.
+
+Mechanics (all in the Brood matcher, `std/prelude.blsp`): a `record`-headed pattern (named
+like `and`/`or`/`bytes`, since `(circle r)` is already a *list* pattern), id derived
+**syntactically** via `ability--id-kw` (so it lowers identically in the checker's expand pass
+and at runtime — no `*record-ids*` lookup), test is one `(%eq (record-id t) :id)` wrapping the
+ordinary map-pattern compile (so `{:k p}`/`:keys`/`:or`/nesting compose free). No special
+form. 10 tests added to `tests/pattern_matching_test.blsp` (incl. nesting + cross-process:
+130 → 140), `nest check` clean.
+
+**Next (ADR-187 part 2):** sealed-match exhaustiveness — warn when a `match` on a
+sealed-ability-typed scrutinee (ADR-181/186) misses a member and has no catch-all.
 
 ## 2026-07-29 (cont.) — a float global silently bailed nbody's hottest arm (1.8×)
 

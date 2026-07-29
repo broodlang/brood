@@ -19,50 +19,61 @@ use super::ctx::{SigTerm, SigWithVars};
 use super::walk::list_items;
 
 thread_local! {
-    /// Per-file table: a **sealed** ability's name → its member id name strings (already
-    /// ns-qualified, e.g. `"geom/circle"`). Populated at the start of each `check_file`
-    /// from the expanded tree + the runtime registry (`protocol::sealed_member_ids`), and
-    /// cleared per file. Lets [`parse_type`] resolve a bare ability name in type position
-    /// (`(sig f (Shape -> float))`, `:-> Shape`) to the finite union of its members' record
-    /// shapes. Only **sealed** abilities have a closed member set to enumerate (ADR-181).
-    static ABILITY_TYPES: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
+    /// Per-file table: an ability's name → its type resolution (ADR-181/186). `Some(members)`
+    /// for a **sealed** ability — the closed, ns-qualified member id set that becomes the
+    /// finite union of member record shapes; `None` for an **open** ability — no closed set,
+    /// so it resolves to the permissive `any` (its safety is enforced at op call sites, not
+    /// at the type). A name *absent* from the table isn't an ability at all. Populated at the
+    /// start of each `check_file` (`protocol::ability_type_table`), cleared per file. Lets
+    /// [`parse_type`] resolve any ability name in type position (`(sig f (Shape -> float))`,
+    /// `:-> Shape`, `(sig g (Display -> string))`).
+    static ABILITY_TYPES: RefCell<HashMap<String, Option<Vec<String>>>> =
+        RefCell::new(HashMap::new());
 }
 
-/// Install this file's sealed-ability member table (call before parsing sigs). Overwrites
-/// any prior file's table.
-pub(super) fn set_ability_types(map: HashMap<String, Vec<String>>) {
+/// Install this file's ability-type table (call before parsing sigs). Overwrites any prior
+/// file's table.
+pub(super) fn set_ability_types(map: HashMap<String, Option<Vec<String>>>) {
     ABILITY_TYPES.with(|m| *m.borrow_mut() = map);
 }
 
-/// Drop the sealed-ability table — per-file hygiene, mirroring [`super::sigs::clear_sig_memo`].
+/// Drop the ability-type table — per-file hygiene, mirroring [`super::sigs::clear_sig_memo`].
 pub(super) fn clear_ability_types() {
     ABILITY_TYPES.with(|m| m.borrow_mut().clear());
 }
 
-/// A sealed ability `name` as a **type**: the union of its members' record shapes, each a
-/// `(record :__id__ :<member>)` (the nominal identity a `defrecord` value carries). `None`
-/// when `name` isn't a known sealed ability, so a non-ability symbol falls through
-/// unchanged. The `:__id__`-only shape is intentionally minimal — records are open
-/// (width-subtyped), so a real `(circle 2)` with extra fields is still a subtype, and the
-/// singleton `:__id__` is exactly what nominal dispatch + `ty_record_id` key on.
+/// An ability `name` as a **type**. A **sealed** ability → the union of its members' record
+/// shapes, each a `(record :__id__ :<member>)` (the nominal identity a `defrecord` value
+/// carries); the `:__id__`-only shape is intentionally minimal — records are open, so a real
+/// `(circle 2)` with extra fields is still a subtype, and the singleton `:__id__` is exactly
+/// what nominal dispatch keys on. An **open** ability → `any`: it has no closed member set
+/// and impls (incl. `:default`) may cover any value, so no argument can be soundly rejected
+/// on the type — but naming it keeps the rest of a `sig` alive (its return, its other
+/// params) instead of dropping the whole declaration. `None` when `name` isn't an ability.
 fn ability_type(name: &str) -> Option<Ty> {
     ABILITY_TYPES.with(|m| {
-        let table = m.borrow();
-        let members = table.get(name)?;
-        let mut acc: Option<Ty> = None;
-        for member in members {
-            let mut fields = BTreeMap::new();
-            fields.insert(
-                value::intern("__id__"),
-                (Ty::keyword_lit(value::intern(member)), true),
-            );
-            let shape = Ty::record_of(fields);
-            acc = Some(match acc {
-                Some(a) => a.union(shape),
-                None => shape,
-            });
+        match m.borrow().get(name)? {
+            // Open ability: permissive — the type checks nothing, but the sig survives.
+            None => Some(Ty::ANY),
+            // Sealed ability: the finite union of its members' record shapes.
+            Some(members) => {
+                let mut acc: Option<Ty> = None;
+                for member in members {
+                    let mut fields = BTreeMap::new();
+                    fields.insert(
+                        value::intern("__id__"),
+                        (Ty::keyword_lit(value::intern(member)), true),
+                    );
+                    let shape = Ty::record_of(fields);
+                    acc = Some(match acc {
+                        Some(a) => a.union(shape),
+                        None => shape,
+                    });
+                }
+                // A sealed ability with no members is degenerate → permissive rather than NEVER.
+                acc.or(Some(Ty::ANY))
+            }
         }
-        acc
     })
 }
 

@@ -26,6 +26,12 @@ struct Op {
     name: String,
     arity: usize,
     variadic: bool,
+    /// A **provided** ability op — its `defability` spec carries a default body (ADR-185),
+    /// so `defability` registers it as a `:default` impl. An `impl` need not supply it (the
+    /// default covers it), but may override it — so it is not *required*, yet is still a
+    /// valid op name (an override isn't flagged as unknown). Always false for a protocol /
+    /// behaviour op and for an impl method (they have no default-body notion).
+    provided: bool,
 }
 
 /// A protocol's declared ops.
@@ -109,9 +115,12 @@ pub(super) fn check_impls(
             .iter()
             .filter_map(|&m| parse_op(heap, m).map(|o| (o.name, (o.arity, o.variadic))))
             .collect();
-        // Every declared op must be implemented, at a compatible arity.
+        // Every declared *required* op must be implemented, at a compatible arity. A
+        // provided op (ADR-185) is covered by its default when omitted, so its absence is
+        // fine; when present it is an override and is still arity-checked below.
         for op in &proto.ops {
             match provided.get(&op.name) {
+                None if op.provided => {}
                 None => out.push((
                     pos,
                     format!("{} {}: impl is missing op `{}`", noun, pname, op.name),
@@ -156,13 +165,21 @@ fn parse_protocol(heap: &Heap, form: Value) -> Option<(String, Protocol)> {
         return None;
     }
     let pname = sym_name(*items.get(1)?)?;
-    // The op specs are the remaining list items; a leading docstring (a string, not
-    // a list) is skipped by `parse_op` returning `None`.
+    // A `defability` op may be *provided* (a default body, ADR-185) — such an op is not
+    // required of an impl. Protocols/behaviours have no such notion. The op specs are the
+    // remaining list items; a leading docstring (a string, not a list) is skipped by
+    // `parse_op` returning `None`.
+    let is_ability = head_is(&items, "defability");
     let ops = items
         .get(2..)
         .unwrap_or(&[])
         .iter()
-        .filter_map(|&op| parse_op(heap, op))
+        .filter_map(|&op| {
+            parse_op(heap, op).map(|mut o| {
+                o.provided = is_ability && spec_has_body(heap, op);
+                o
+            })
+        })
         .collect();
     Some((pname, Protocol { ops }))
 }
@@ -184,7 +201,24 @@ fn parse_op(heap: &Heap, form: Value) -> Option<Op> {
         name,
         arity,
         variadic,
+        provided: false,
     })
+}
+
+/// True when op spec `spec` carries a default-implementation body — a form beyond the arg
+/// vector and the optional `:-> RET`. Such a **provided** op (ADR-185) is registered as a
+/// `:default` impl by `defability`, so it is satisfied for every id and is never demanded
+/// of a sealed member. The `:->` arrow, when present, always sits at index 2 (right after
+/// the arg vector), so the body — if any — starts at index 4, else at index 2.
+fn spec_has_body(heap: &Heap, spec: Value) -> bool {
+    let Some(items) = list_items(heap, spec) else {
+        return false;
+    };
+    let body_start = match items.get(2) {
+        Some(&Value::Keyword(k)) if value::symbol_is(k, "->") => 4,
+        _ => 2,
+    };
+    items.len() > body_start
 }
 
 /// True when `items`' head is the symbol `name`.
@@ -373,7 +407,7 @@ fn bare_name(name: value::Symbol) -> String {
 // body — so a same-named non-ability function is never mistaken for one, and a
 // cross-file op call (whose def isn't in this tree) is simply not checked. An id is
 // taken only when certain. The impl set unions this file's own `register-impl` forms
-// (not eval'd at check time) with the runtime `ability/*impls*` registry (cross-file
+// (not eval'd at check time) with the runtime `*impls*` registry (cross-file
 // reachable impls), so an impl in either place suppresses the warning.
 
 /// `(quote X)` → `Some(X)`.
@@ -555,14 +589,42 @@ fn collect_register_impls(
     })
 }
 
-/// Union in the runtime `ability/*impls*` registry — `[A op] → {id → …}` — so an impl
+/// Collect `(derive-into (quote A) :id (quote (fields)) (current-ns))` forms → `(ability A,
+/// id)` pairs. `defrecord`'s `:derives` emits these; the recipe runs at *load*, not at check
+/// time, so the checker can't see the generated methods directly. Instead it treats a derived
+/// id as implementing **every** op of the ability (ADR-185) — so a derived member satisfies
+/// call-site missing-impl and `:sealed` exhaustiveness without running the recipe.
+fn collect_derive_into(heap: &Heap, form: Value, out: &mut Vec<(String, String)>) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        if let Some(&Value::Sym(h)) = items.first() {
+            if sym_name(Value::Sym(h)).as_deref() == Some("derive-into") {
+                let a = items
+                    .get(1)
+                    .and_then(|&v| unquote(heap, v))
+                    .and_then(sym_name);
+                let id = items.get(2).copied().and_then(sym_name);
+                if let (Some(a), Some(id)) = (a, id) {
+                    out.push((a, id));
+                }
+            }
+        }
+        for &item in items.get(1..).unwrap_or(&[]) {
+            collect_derive_into(heap, item, out);
+        }
+    })
+}
+
+/// Union in the runtime `*impls*` registry — `[A op] → {id → …}` — so an impl
 /// reachable through a required module (not present as a form in this file) counts.
 fn read_impls_registry(
     heap: &Heap,
     impls: &mut HashSet<(String, String, String)>,
     defaults: &mut HashSet<(String, String)>,
 ) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("ability/*impls*"))
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*impls*"))
     else {
         return;
     };
@@ -590,18 +652,49 @@ fn read_impls_registry(
     }
 }
 
-/// Sealed abilities' member ids, keyed by ability name → the (qualified) member id name
-/// strings. Unions the file's own `register-sealed` forms (in the expanded tree, where the
-/// ids are already ns-qualified) with the runtime `ability/*sealed*` registry (imported
-/// abilities). Feeds `annot`'s ability-name-as-a-type resolution (a sealed ability is a
-/// finite union of its members' record shapes).
-pub(super) fn sealed_member_ids(heap: &Heap, expanded: &[Value]) -> HashMap<String, Vec<String>> {
-    let mut sealed = HashMap::new();
+/// The ability-name-as-a-type table for `annot` (ADR-181/186): every known ability name →
+/// `Some(member ids)` if it is **sealed** (the qualified, closed member set → a finite union
+/// of record shapes) or `None` if it is **open** (→ the permissive `any`). Unions the file's
+/// own `register-ability`/`register-sealed` forms (expanded tree; sealed ids already
+/// ns-qualified) with the runtime `*abilities*` + `*sealed*` registries
+/// (imported abilities). A name absent from the result is not an ability.
+pub(super) fn ability_type_table(
+    heap: &Heap,
+    expanded: &[Value],
+) -> HashMap<String, Option<Vec<String>>> {
+    // All ability names (their op names are irrelevant here — just the name set).
+    let mut names: HashMap<String, Vec<String>> = HashMap::new();
+    let mut ret_forms: HashMap<(String, String), Value> = HashMap::new();
+    let mut op_params: HashMap<(String, String), Vec<Option<crate::types::Ty>>> = HashMap::new();
+    let mut provided: HashSet<(String, String)> = HashSet::new(); // unused here; the collectors require it
+    for &form in expanded {
+        collect_register_ability(
+            heap,
+            form,
+            &mut names,
+            &mut ret_forms,
+            &mut op_params,
+            &mut provided,
+        );
+    }
+    read_abilities_registry(heap, &mut names, &mut ret_forms, &mut op_params, &mut provided);
+    // Sealed abilities → their closed member set.
+    let mut sealed: HashMap<String, Vec<String>> = HashMap::new();
     for &form in expanded {
         collect_register_sealed(heap, form, &mut sealed);
     }
     read_sealed_registry(heap, &mut sealed);
-    sealed
+    // Every ability → Some(members) if sealed, else None (open). A sealed ability declared
+    // without a `defability` op list still counts (fold it in).
+    let mut table: HashMap<String, Option<Vec<String>>> = HashMap::new();
+    for name in names.into_keys() {
+        let sealed_members = sealed.get(&name).cloned();
+        table.insert(name, sealed_members);
+    }
+    for (name, members) in sealed {
+        table.entry(name).or_insert(Some(members));
+    }
+    table
 }
 
 /// The statically-known identity name of a call argument, or `None` if not certain.
@@ -655,6 +748,10 @@ pub(super) struct AbilityInfo {
     op_params: HashMap<(String, String), Vec<Option<crate::types::Ty>>>,
     /// ability name → its SEALED member id names (closed set), if declared sealed.
     sealed: HashMap<String, Vec<String>>,
+    /// `(ability, op)` pairs that are **provided** — the op carries a default body in its
+    /// `defability` spec (ADR-185), registered as a `:default` impl. A provided op is
+    /// satisfied for every id, so `check_sealed` never demands it of a sealed member.
+    provided: HashSet<(String, String)>,
     /// Same-module op-name collisions: two abilities in this file declaring the same op
     /// name (the second clobbers the first's generic fn). Emitted by `check_op_collisions`.
     collisions: Vec<(Option<Pos>, String)>,
@@ -743,12 +840,41 @@ pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo
     // `(ability, op)` → its per-position parameter types (parsed eagerly, unlike `ret_forms`,
     // since `spec_param_types` already produces `Ty`s).
     let mut op_params: HashMap<(String, String), Vec<Option<crate::types::Ty>>> = HashMap::new();
+    let mut provided: HashSet<(String, String)> = HashSet::new();
     for &form in expanded {
-        collect_register_ability(heap, form, &mut abilities, &mut ret_forms, &mut op_params);
+        collect_register_ability(
+            heap,
+            form,
+            &mut abilities,
+            &mut ret_forms,
+            &mut op_params,
+            &mut provided,
+        );
         collect_register_sealed(heap, form, &mut sealed);
     }
-    read_abilities_registry(heap, &mut abilities, &mut ret_forms, &mut op_params);
+    read_abilities_registry(
+        heap,
+        &mut abilities,
+        &mut ret_forms,
+        &mut op_params,
+        &mut provided,
+    );
     read_sealed_registry(heap, &mut sealed);
+    // `:derives [A]` on a record (ADR-185) registers A's impl for that id at LOAD, not at
+    // check time — so expand each `derive-into` form into the impls set here: a derived id
+    // implements every op of the ability. This makes a derived member satisfy the call-site
+    // and `:sealed` checks (which read `impls`) without running the recipe.
+    let mut derives: Vec<(String, String)> = Vec::new();
+    for &form in expanded {
+        collect_derive_into(heap, form, &mut derives);
+    }
+    for (a, id) in &derives {
+        if let Some(ops) = abilities.get(a) {
+            for op in ops {
+                impls.insert((a.clone(), op.clone(), id.clone()));
+            }
+        }
+    }
     let op_ret = ret_forms
         .into_iter()
         .filter_map(|(k, form)| super::annot::parse_type(heap, form).map(|ty| (k, ty)))
@@ -762,6 +888,7 @@ pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo
         op_ret,
         op_params,
         sealed,
+        provided,
         collisions,
     }
 }
@@ -816,6 +943,7 @@ fn collect_register_ability(
     out: &mut HashMap<String, Vec<String>>,
     rets: &mut HashMap<(String, String), Value>,
     params: &mut HashMap<(String, String), Vec<Option<crate::types::Ty>>>,
+    provided: &mut HashSet<(String, String)>,
 ) {
     stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
@@ -844,6 +972,9 @@ fn collect_register_ability(
                         if let Some(ptys) = spec_param_types(heap, spec) {
                             params.entry((a.clone(), op.clone())).or_insert(ptys);
                         }
+                        if spec_has_body(heap, spec) {
+                            provided.insert((a.clone(), op.clone()));
+                        }
                         ops.push(op);
                     }
                     out.insert(a, ops);
@@ -851,7 +982,7 @@ fn collect_register_ability(
             }
         }
         for &item in items.get(1..).unwrap_or(&[]) {
-            collect_register_ability(heap, item, out, rets, params);
+            collect_register_ability(heap, item, out, rets, params, provided);
         }
     })
 }
@@ -890,15 +1021,16 @@ fn collect_register_sealed(heap: &Heap, form: Value, out: &mut HashMap<String, V
     })
 }
 
-/// Union in the runtime `ability/*abilities*` registry — name → op specs — recording each
+/// Union in the runtime `*abilities*` registry — name → op specs — recording each
 /// op's name and its `:-> RET` return-type form (the latter into `rets`).
 fn read_abilities_registry(
     heap: &Heap,
     out: &mut HashMap<String, Vec<String>>,
     rets: &mut HashMap<(String, String), Value>,
     params: &mut HashMap<(String, String), Vec<Option<crate::types::Ty>>>,
+    provided: &mut HashSet<(String, String)>,
 ) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("ability/*abilities*"))
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*abilities*"))
     else {
         return;
     };
@@ -918,6 +1050,9 @@ fn read_abilities_registry(
                 if let Some(ptys) = spec_param_types(heap, spec) {
                     params.entry((a.clone(), op.clone())).or_insert(ptys);
                 }
+                if spec_has_body(heap, spec) {
+                    provided.insert((a.clone(), op.clone()));
+                }
                 ops.push(op);
             }
             out.entry(a).or_insert(ops);
@@ -925,9 +1060,9 @@ fn read_abilities_registry(
     }
 }
 
-/// Union in the runtime `ability/*sealed*` registry — name → member id keywords.
+/// Union in the runtime `*sealed*` registry — name → member id keywords.
 fn read_sealed_registry(heap: &Heap, out: &mut HashMap<String, Vec<String>>) {
-    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("ability/*sealed*"))
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*sealed*"))
     else {
         return;
     };
@@ -944,14 +1079,19 @@ fn read_sealed_registry(heap: &Heap, out: &mut HashMap<String, Vec<String>>) {
 }
 
 /// Sealed-ability exhaustiveness: every sealed member must have a *direct* impl of every
-/// declared op (a `:default` doesn't count — sealing means each member is handled
-/// explicitly). One warning per missing (ability, op, member).
+/// declared **required** op (a `:default` doesn't count — sealing means each member is
+/// handled explicitly). A **provided** op (one with a default body, ADR-185) is satisfied
+/// by its default for every member, so it is skipped. One warning per missing
+/// (ability, op, member).
 pub(super) fn check_sealed(info: &AbilityInfo, out: &mut Vec<(Option<Pos>, String)>) {
     for (ability, members) in &info.sealed {
         let Some(ops) = info.abilities.get(ability) else {
             continue;
         };
         for op in ops {
+            if info.provided.contains(&(ability.clone(), op.clone())) {
+                continue;
+            }
             for member in members {
                 if !info
                     .impls
