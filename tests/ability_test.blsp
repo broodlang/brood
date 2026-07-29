@@ -284,6 +284,33 @@
           e (try (narrow arg) (catch e e)))
       (is (member? :int (get e :have))))))
 
+;; ---- Num is homogeneous single-dispatch: no implicit cross-type arithmetic ----
+(defrecord money (cents))
+(impl Num money
+  (num-add [a b] (money (+ (get a :cents) (get b :cents))))
+  (num-sub [a b] (money (- (get a :cents) (get b :cents))))
+  (num-mul [a b] (money (* (get a :cents) (get b :cents))))
+  (num-div [a b] (money (/ (get a :cents) (get b :cents)))))
+
+(describe "Num is homogeneous single-dispatch"
+  (test "arithmetic on two records of the same type dispatches on the first operand"
+    (assert= (get (+ (money 100) (money 50)) :cents) 150)
+    (assert= (get (- (money 100) (money 50)) :cents) 50))
+  (test "a record as the SECOND operand is a clear error, not a silent coercion"
+    ;; `apply` hides the operands from the static arithmetic check — this exercises the
+    ;; RUNTIME path: `Num` dispatches on the FIRST arg and cross-type arithmetic is not
+    ;; implicit, so a record-second operand names the problem instead of "expected number".
+    (let (m (money 100)
+          e (try (apply + (list 5 m)) (catch e (error-message e))))
+      (is (includes? e "must come first"))
+      (is (includes? e "cross-type"))))
+  (test "a hand-written {:__id__ nil} is a plain map, not a record (truthy-id rule)"
+    ;; matches `record?`/`identity-of`: a nil id dispatches as :map, so arithmetic on it
+    ;; gives the ordinary number error — NOT the record-first guidance.
+    (let (e (try (apply + (list 5 {:__id__ nil})) (catch e (error-message e))))
+      (is (includes? e "got map"))
+      (refute (includes? e "must come first")))))
+
 ;; ---- polymorphic dispatch cache (ADR-172 §7): more ids than cache ways ----
 ;; A monomorphic cache would re-resolve (still correct) but a leak/aliasing bug would show
 ;; as a wrong impl when > DISPATCH_IC_WAYS distinct ids alternate through one op.

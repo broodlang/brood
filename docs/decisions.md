@@ -10825,6 +10825,48 @@ first); **impl arity** is checked at registration as well as by `nest check`; an
 throws a structured `{:kind :no-impl :ability :op :id :have}` map** (branchable; the message
 is unchanged). See `docs/devlog.md` 2026-07-29 and `tests/ability_test.blsp`.
 
+**Amendment (2026-07-29b) — single-dispatch scope is deliberate; `defmulti` deferred.** A
+design review of the ergonomics settled three questions, all *without* enlarging the
+language:
+
+- **Abilities are single-dispatch, on purpose (no `defmulti` yet).** Dispatch is on the
+  first argument's identity only. The entire shipped ability surface (`Display`, `Inspect`,
+  `Seqable`, `Port`, `JsonEncode`, `Response`, `Dependency`, `Temporal`, …) is single-dispatch
+  and wants nothing more — and *nominal record dispatch already absorbs* the biggest slice of
+  what Clojure reaches for `defmulti` to do (dispatch on a map's tag). What single dispatch
+  can't express is (a) **multiple dispatch** (an arg-tuple key, the binary-method case) and
+  (b) **structural dispatch on a plain map's field** — and (b) is deliberately *closed* by
+  the ADR-011 nominal-identity line, not a gap. That leaves only cross-type binary methods,
+  which the next point declines to serve implicitly. So a `defmulti`/`defmethod` seam (a
+  second, arbitrary-dispatch polymorphism mechanism, interpreted tier, no type hierarchy —
+  the Clojure split) is **deferred with an explicit trigger**: build it *if and when* a
+  concrete need for dispatch-on-multiple-args or dispatch-on-a-computed-value appears that
+  single-dispatch + records can't serve acceptably. Until then it is the "two ways to be
+  polymorphic" tax ADR-011 tells us not to pay. If built, it would also be the principled
+  home for structural dispatch (subsuming (b)) — abilities would stay the fast, nominal,
+  JIT-specialized core.
+- **No implicit cross-type arithmetic.** `Num`/`Ord` are therefore **homogeneous**:
+  implement them for two operands of your own type; convert explicitly for anything mixed.
+  `(+ (money 100) (money 50))` dispatches on the first `money` and works; `(+ 5 (money 50))`
+  is a **named error** ("a record operand must come first … cross-type arithmetic is not
+  implicit"), not a silent coercion or a confusing "expected number, got map". One kernel
+  change (`num_bin`'s fallback in `builtins/numeric.rs`); no reverse-ops, no widening.
+- **Op names are unique per module (ship-blocking).** Two abilities in one module declaring
+  the same op name clobber each other's generic function. This was already warned at load
+  (`register-ability`); `nest check` now emits it as a diagnostic too — advisory in the live
+  image, ship-blocking in CI (the checker already had the collision computed as its
+  `ambiguous` set; it is now surfaced, not swallowed). A different module's same-named op
+  binds a distinct `<module>/op` global and is unaffected; a use-site `(:use)` clash is the
+  ordinary module-import ambiguity, not an ability rule. **No `ability-call`/`Shape/area`
+  escape valve was added** — in single-owner greenfield you rename; the valve only earns its
+  keep in a multi-third-party-library collision, the same scenario the 2026-07-28 amendment
+  found greenfield Brood doesn't have. Deferred by the same reasoning.
+
+Net: **no new syntax and no new language surface** — a clearer arithmetic error, one new
+`nest check` rule over existing behavior, and three decisions written down. See
+`docs/devlog.md` 2026-07-29, `tests/ability_test.blsp` ("Num is homogeneous single-dispatch"),
+and `crates/lisp/tests/type_check_catalog.rs` (op-name uniqueness).
+
 **Amendment (2026-07-28) — abilities stay OPEN; no orphan rule, no `bridge` syntax.**
 A design review pulled §1/§2 apart and found the restriction unnecessary and the form
 substanceless:
