@@ -93,6 +93,11 @@ const SHOULD_WARN: &[(&str, &str)] = &[
         "(defability Shape (area [self])) (defability Sizer (area [thing]))",
         "unique per module",
     ),
+    // ---- multimethod missing-method: a fully-known tuple with no method (ADR-179) ----
+    (
+        "(defmulti mm) (defmethod mm [:int :int] (a b) a) (defn f () (mm 1 \"x\"))",
+        "no method for",
+    ),
 ];
 
 /// Each snippet must produce **zero** warnings — the false-positive guards.
@@ -152,6 +157,15 @@ const SHOULD_NOT_WARN: &[&str] = &[
     "(defability Shape (area [self])) (defability Boxer (volume [self]))",
     // redeclaring the SAME ability (hot reload) re-binds the same op — not a collision.
     "(defability Shape (area [self])) (defability Shape (area [self]))",
+    // ---- multimethod coverage: a covered tuple, a derived mirror, and :default stay silent ----
+    // an exact method covers the call.
+    "(defmulti mm) (defmethod mm [:int :int] (a b) a) (defn f () (mm 1 2))",
+    // a :commutative op's [A B] method also covers the mirror order [B A] — must NOT warn.
+    "(defmulti mm :commutative) (defmethod mm [:int :string] (a b) a) (defn f () (mm \"x\" 1))",
+    // a :default method catches any tuple.
+    "(defmulti mm) (defmethod mm :default (a b) a) (defn f () (mm 1 \"x\"))",
+    // an arg of unknown identity (a variable) leaves the tuple uncertain — defer, don't warn.
+    "(defmulti mm) (defmethod mm [:int :int] (a b) a) (defn f (x) (mm x 2))",
 ];
 
 #[test]

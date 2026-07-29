@@ -32,7 +32,11 @@
     (assert= (mm-desc "hi") :other)
     (assert= (mm-desc :k) :other))
   (test "no method and no :default raises a structured :no-method error"
-    (let (e (try (mm-combine 1.5 :kw) (catch e e)))
+    ;; `x`/`k` are vars so the static missing-method check can't judge the call — this
+    ;; exercises the RUNTIME error path (the checker's call-site pass covers the literal case).
+    (let (x 1.5
+          k :kw
+          e (try (mm-combine x k) (catch e e)))
       (assert= (get e :kind) :no-method)
       (assert= (get e :multi) 'mm-combine)
       (assert= (get e :key) [:float :keyword])
