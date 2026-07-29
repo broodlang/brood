@@ -266,6 +266,44 @@ benchmark row before believing it.
   `BROOD_GC_VERIFY` was what caught a blanket-rewrite bug here — aggregate collector walks
   need `old_opt()`, not the handle-deref `old()`.
 
+### Where the per-process memory actually goes (measured 2026-07-29)
+
+Staged differencing at 300k processes, baseline RSS subtracted — this is the allocation
+profile the earlier entries said was missing:
+
+| stage | B/process |
+|---|---|
+| fixed structs (`Process` 1208 incl. `Heap` 1120, `Mailbox` 168, `Suspended` 136) | 1512 |
+| **hibernated bare shell** (spawn, `(hibernate)`, park) | **3037** |
+| bare shell (spawn, park, never messaged) | 3467 |
+| + one delivered message | 3630 |
+| full `spawn-live` | 5916 |
+
+Three things follow, and they redirect the remaining work:
+
+1. **~1.5 KB per process is allocation that survives `hibernate`** — larger than the IC
+   tables (~536 B). Struct-field shaving cannot reach it; it is `Box`/`Vec`/`HashMap`
+   *allocations*, not inline bytes.
+2. **`hibernate` reclaims only ~430 B on a bare shell (12%)**, not the ~40% recorded
+   earlier. That figure came from processes that had *run* enough code to populate their
+   caches; a process that only parks has little to give back. Both numbers are right for
+   their workload — quote the workload with the number.
+3. **mimalloc size classes now dominate the arithmetic.** Padding `Process` and measuring:
+   1208 B → 3466 B/proc, 1272 → 3469, **1400 → 3743**, 1528 → 3746. Classes step ~256 B
+   with a boundary just above 1272.
+
+   So `Process` at 1208 has **~70 B of headroom, and shaving under that buys nothing** —
+   which retires the "keep trimming `Heap` fields" strategy that paid four times today.
+   The next win is **binary**: cut **184 B** (1208 → ≤1024) to drop a whole class, worth
+   ~277 B/process ≈ **83 MB**. Cut less and get zero.
+
+   Candidate cuts totalling ~232 B, all the same cold-by-use pattern, and they must land
+   *together* to pay at all: the six GC stat counters (48 B) + `proc_mem_limit`/
+   `proc_limit_hit` (32 B) + `dynamics` (24 B) + `remembered` (24 B) into one lazily-boxed
+   struct (8 B), `gen_cache` + `gen_cache_ver` (48 B → 8), and the two closure caches
+   (80 B → 8). Verify the boundary is really 1024 before starting — the probe above only
+   bracketed the 1280/1536 pair.
+
 - [ ] **M2b — sharing the IC tables. Two findings, one of which corrects the other.**
 
   **Still true and useful:** `vm_call_ics` is *never read raw by JIT code* — only
