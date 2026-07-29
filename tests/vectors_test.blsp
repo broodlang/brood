@@ -138,3 +138,32 @@
       true))
   (test "non-collection errors"
     (assert= (try (conj 42 1) (catch e :err)) :err)))
+
+;; Constant folding of vector literals (compile/mod.rs). An all-constant literal is
+;; folded to a single shared instance — sound only because Brood data is immutable.
+;; The trap: an element is a value-position *expression*, so the fold must not keep
+;; the source form. `'go` reads as the list `(quote go)` and evaluates to the symbol
+;; `go`; an early version folded the raw form and so produced `[:tag (quote go)]`,
+;; silently breaking quoted-symbol patterns and `'foo` dependency names.
+(describe "vector literals: constant folding preserves element evaluation"
+  (test "a quoted symbol in a literal stays a symbol"
+    (do
+      (assert= (second [:tag 'go]) 'go)
+      (assert= (symbol? (second [:tag 'go])) true)
+      (assert= (match [:tag 'go] ([:tag 'go] :matched) (_ :no)) :matched)
+      true))
+  (test "a quoted list in a literal is the list, not the quote form"
+    (do
+      (assert= (second [:tag '(1 2)]) (list 1 2))
+      (assert= (first [:tag '(1 2)]) :tag)
+      true))
+  (test "nested literals fold without disturbing quoted elements"
+    (do
+      (assert= (match [[:a 'x] [:b 2]] ([[:a 'x] [:b 2]] :matched) (_ :no)) :matched)
+      (assert= (second (first [[:a 'x] [:b 2]])) 'x)
+      true))
+  (test "self-evaluating literals still fold to equal values"
+    (do
+      (assert= [:a :b] [:a :b])
+      (assert= [1 2 [3 "s"]] [1 2 [3 "s"]])
+      true)))
