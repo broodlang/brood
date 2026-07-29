@@ -68,9 +68,15 @@ Shipped as ADRs:
     ones (Rust/Haskell provided methods, Elixir's derived defaults); an id-keyed impl
     overrides a default. A prelude-macro change over the existing `:default` mechanism — no
     new special form — plus a checker adjustment (provided ops excluded from per-impl
-    completeness and `:sealed` exhaustiveness; required ops still demanded). **Next:
-    `derive`** (Elixir `@derive` / Rust `#[derive]`) — auto-generate a record's *required*
-    op structurally, composing with provided ops to need no body at all. **[prelude/checker]**
+    completeness and `:sealed` exhaustiveness; required ops still demanded). **[prelude/checker]**
+  - ✅ **Deriving — `:derives`** ([ADR-185](docs/decisions.md) part 2, 2026-07-29) — a
+    `defability` declares a `:derive-record` recipe (each ability decides how it derives
+    itself, Elixir `@derive` / Rust `#[derive]`), and a `defrecord` opts in with
+    `:derives [A …]`. Derivation runs at **load** (`derive-into`), not expansion — the
+    checker macro-expands without evaluating, so an expand-time recipe call would break it;
+    a checker pass reads the `derive-into` forms so a derived record still satisfies
+    call-site and `:sealed` checks. Composes with provided ops (derive the required op,
+    inherit the rest). **[prelude/checker]**
   - ⬜ **Checker gap:** a `:use`d ability op from a *loose disk* module (not embedded,
     not in a project) is flagged `unbound symbol` though it runs; embedded/same-module
     use resolves. Surfaced by the `show` cross-module test. **[kernel/checker]**

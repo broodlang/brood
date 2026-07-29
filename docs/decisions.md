@@ -12070,3 +12070,90 @@ park, pinned by a test.
 **References.** ADR-173 (spy), ADR-174 (the debugger process), ADR-013 (late binding,
 the instrumentation seam), ADR-166 (reserved names), `tests/debug_test.blsp`
 ("function-boundary instrumentation").
+
+## ADR-185 — Provided ops + `:derives`: default method bodies and per-ability derivation
+
+**Status:** accepted + shipped.
+
+**Context.** Abilities (ADR-168/172) declared op *specs* only — every `impl` had to supply a
+body for **every** op — and a record had to hand-write each impl. Comparing Brood's
+polymorphism to the most-loved languages, the dispatch *core* (open extension, precedence
+tiers, multiple dispatch with operator algebra, hot reload) is ahead of the pack, but two
+loved ergonomics were missing: **provided methods** (Rust traits, Swift protocol extensions,
+Haskell typeclasses — implement the required ops, inherit the derived ones) and **deriving**
+(Elixir `@derive`, Rust `#[derive]` — synthesise a standard impl for a record). Both are
+prelude-level; neither needs a new special form.
+
+### Part 1 — Provided ops (default bodies)
+
+An op spec may carry a **body** after its optional `:-> RET`: `(op [args] :-> ret? body…)`.
+`defability` registers that body as the op's `:default` impl (from the declaring ns →
+ability-owner tier). A bodyless spec stays **required**.
+
+```lisp
+(defability Ord
+  (compare-to [self other] :-> int)                          ; required
+  (lt [self other] :-> bool (< (compare-to self other) 0))   ; provided
+  (gt [self other] :-> bool (> (compare-to self other) 0)))  ; provided
+```
+
+**Why `:default`, not new machinery.** Dispatch already falls back id-impl → `:default`
+(`impl-for`), so a provided op needs no change to the generated generic function or the
+dispatch path — it is an auto-registered impl, and the inline cache, precedence, hot reload,
+and cross-process paths all carry over. An id-keyed impl of a provided op **overrides** its
+default for free (id key beats `:default`). A provided op called on an id implementing
+nothing runs the body, which raises the ordinary `no-impl` for the required op it delegates
+to. Each `impl` *form* is completeness-checked on its own, so an override is written in the
+same form as the required ops (a standalone partial impl trips the pre-existing "missing op"
+lint — unchanged).
+
+### Part 2 — `:derives` (per-ability derivation)
+
+A `defability` may declare a `:derive-record <recipe>` clause; a `defrecord` may declare
+`:derives [Ability …]`. This is the **Elixir/Rust model — each ability decides how it
+derives itself** (rejected: a single generic structural default, which can't express a
+non-structural op). The recipe is `(fn (fields) …) → a list of `impl` method forms`; it is
+run to synthesise the ability's **required** ops (provided ops then come free).
+
+```lisp
+(defability Columns
+  (columns [self] :-> vector)                      ; required — derived
+  (ncols [self] :-> int (count (columns self)))    ; provided — composes
+  :derive-record
+  (fn (flds) (list `(columns [r] [~@(map (fn (f) `(get r ~(keyword (name f)))) flds)]))))
+(defrecord point (x y) :derives [Columns])         ; columns synthesized; ncols free
+```
+
+**Load-time, not expand-time — the decisive constraint.** The obvious design (defrecord
+expands to a static `(impl …)` by calling the recipe during expansion) **breaks the
+checker**: the checker macro-expands a file *without* evaluating it, so an ability's recipe
+isn't registered when a later `defrecord` expands — the recipe lookup returns nil and the
+expansion errors, cascading to `unbound symbol`. So `defrecord :derives` instead expands to a
+`(derive-into 'A id 'fields (current-ns))` **call** that runs at *load*, where the recipe is
+registered (sequential top-level eval). `derive-into` looks up the recipe, evals each method
+form into a fn, and `register-impl`s it — reusing the whole open/late registry path.
+
+**Checker visibility.** Because derivation is now a load-time call, the derived methods
+aren't static `impl` forms the checker can see — so a small checker pass reads `derive-into`
+forms and marks **every** op of the ability as implemented for that id. A derived record
+therefore satisfies both the call-site missing-impl check and `:sealed` exhaustiveness
+without the recipe being run at check time.
+
+### Checker (advisory) — three passes learned "provided"/"derived"
+
+Per-`impl` completeness and `:sealed` exhaustiveness both skip a **provided** op (its default
+covers it), while a **required** op is still demanded; and derived ids count as implementing
+every op. `nest check` stays zero-warning across `std/` + `tests/`.
+
+**No new core.** Entirely prelude (`defability`/`defrecord` macros + `derive-into`) plus an
+advisory checker adjustment: no new special form, no `Value` kind, no builtin.
+
+**Deferred (ADR-011).** (a) Wiring recipes onto built-in abilities (e.g. a structural
+`Display`); ordering for records is a *multimethod* (`compare-to`, ADR-179), a different seam
+than ability `:derive-record`. (b) A generic structural default as a convenience *atop* the
+per-ability recipe, if repetition warrants it.
+
+**References.** ADR-168/172 (abilities, the `:default` fallback and precedence tiers),
+ADR-179 (multimethods — the multi-arg sibling; why ordering isn't an ability), ADR-011 (ship
+the minimal form), ADR-130 (records as maps), `tests/ability_test.blsp` ("provided
+(default-body) ops", "derive: …").
