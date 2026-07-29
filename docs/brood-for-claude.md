@@ -324,10 +324,11 @@ Other things worth knowing:
   plain map (even one carrying a `:type` field) is *never* rerouted — it dispatches as
   `:map`; identity comes only from `defrecord`, never sniffed.
 - **A record is still a map underneath.** `(type-of r)` is `:map`, and `get`/`assoc`
-  behave as on a map. But a record is **NOT `=`** to a bare map with the same fields
-  (nominal, Elixir-struct semantics). The id lives in a reserved `:__id__` field, so
-  `keys`/`count` include it — use `(fields r)` for the clean, id-free map, and
-  `record?`/`record-id` to test/read the identity.
+  behave as on a map — `(get r :__id__)` even reaches the id. But a record is **NOT `=`**
+  to a bare map with the same fields (nominal, Elixir-struct semantics), and its
+  **collection view is the fields, id-free**: `seq`/`count`/`keys`/`vals`/`map`/`fold`
+  over a record see its fields, never `:__id__` (via the `Seqable` ability). Use
+  `record?`/`record-id`/`fields` to test/read the identity explicitly.
 - **A driver is just a value.** `(fetch db k)` picks its impl from `db`, so swapping
   the backend means passing a different record — no config indirection.
 - **`:sealed [id …]`** declares a closed member set and makes `nest check` demand an
