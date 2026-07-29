@@ -11843,13 +11843,23 @@ already dense there.
 gates the live image — a `def`/reload wins, `nest check` is the batch/CI gate. Runtime
 dispatch is byte-for-byte unchanged; the ability tests (42 → 46 with new coverage) pass.
 
-**Deferred (ADR-011).** (a) **Typed op *parameters*** — `(scale [self (factor float)] :->
-Shape)` — would let impl bodies see arg types and callers be arg-checked; return types
-deliver the headline win, params are a clean follow-on when a consumer wants them. (b)
-**An ability name as a return/param type** (`:-> Shape` meaning the union of the ability's
-members) — a nominal self-type; deferred with slice 2's sum-type work. (c) **Runtime
-enforcement** under a `BROOD_CONTRACTS`-style flag — checker-only for now, matching `sig`'s
-default.
+**Shipped follow-on — typed op *parameters* `(name T)` (2026-07-29).** An op spec's params
+may now be typed — `(scale [self (factor float)] :-> int)` — the argument-side sibling of
+`:-> RET`. Two effects, both reusing the gradual sig-param machinery (so false-positive-clean
+by the same argument): an **argument** at a typed position is checked at every call site
+(`(scale s "x")` → "argument 2 expects float"), and the **impl body** binds the param at that
+type (returning it against a disjoint `:-> RET` is caught). The `defability` macro strips the
+type from the generated op `defn` (`(factor float)` → `factor`), so it is a checker-only
+annotation; dispatch is unchanged (still on the first argument's identity). Untyped positions
+— including `self` and every bare param — impose nothing, so all existing all-bare op specs
+are unaffected (verified: zero new warnings across `std/` + `tests/`). Parsing +
+`AbilityInfo.op_params` in `types/check/protocol.rs`; the call-site check in
+`walk::check_into`'s ability hook.
+
+**Deferred (ADR-011).** (b) **An ability name as a return/param type** (`:-> Shape` meaning
+the union of the ability's members) — a nominal self-type; **shipped** as ADR-181. (c)
+**Runtime enforcement** under a `BROOD_CONTRACTS`-style flag — checker-only for now, matching
+`sig`'s default.
 
 **References.** ADR-181 (ability-name-as-a-type, the follow-on this deferred item (b)
 becomes), ADR-172/168 (the ability seam), ADR-110 (the gradual `sig` return check this

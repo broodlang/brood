@@ -4483,8 +4483,11 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
         op-defs (map
                   (fn (op)
                     (let (op-name (first op)
-                          ; arg vector → list; dispatch reads the FIRST arg's identity
-                          arg-syms (map (fn (s) s) (second op))
+                          ; arg vector → list of bare param symbols; dispatch reads the FIRST
+                          ; arg's identity. A param may be typed `(name T)` (the `:-> RET`
+                          ; sibling — a checker-only annotation, ADR-180); strip the type here
+                          ; so the generated `defn` gets a plain symbol, `factor` not `(factor float)`.
+                          arg-syms (map (fn (s) (if (pair? s) (first s) s)) (second op))
                           first-arg (first arg-syms)
                           ; a *constant* [ability op] key — a quoted literal, built once
                           op-key (list 'quote [aname op-name])

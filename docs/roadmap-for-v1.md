@@ -263,8 +263,10 @@ All purely additive — deferring costs a version number and nothing else.
   resolved exact → `:default` → loud `no-method`, unambiguous by construction. A
   `:commutative`/`:antisymmetric` closure derives each binary method's mirror, so `+`/`*` are
   symmetric with no implicit coercion. `Num`/`Ord` moved onto it, wired into the operators on
-  the record cold path (hot numeric path untouched). Follow-up: a static-coverage `nest check`
-  warning for a statically-known missing method (abilities have one; multimethods don't yet).
+  the record cold path (hot numeric path untouched). `nest check` flags a direct generic call
+  whose full argument tuple is statically known but uncovered (closure mirrors accounted for),
+  the `defmulti` analogue of the ability missing-impl pass — so an unclear dispatch fails at
+  type-check, not just at runtime.
 - ⬜ **Monomorphization of ability dispatch** — resolving a call statically when the
   argument's identity is known (the checker already computes that identity for its
   missing-impl warning). A codegen win with no surface change, so post-1.0 is free.

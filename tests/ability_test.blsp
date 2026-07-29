@@ -395,3 +395,21 @@
   (test "an op on a non-record call dispatches on its result identity, not the fn name"
     ;; `(str …)` yields a string → :string impl (count), NOT any record path.
     (assert= (size (str "ab" "cd")) 4)))
+
+(describe "typed ability op parameters: (name T) in an op spec (ADR-180)"
+  (test "a bad argument to a typed op param is flagged"
+    (is (abt-warns-about?
+          "(defability Sc (sc [self (factor float)] :-> int)) (impl Sc :int (sc [n f] n)) (defn bad () (sc 5 \"x\"))"
+          "argument 2 expects float")))
+  (test "a correct argument, and an untyped position, stay silent"
+    (is (not (abt-warns-about?
+          "(defability Sc (sc [self (factor float)] :-> int)) (impl Sc :int (sc [n f] n)) (defn ok () (sc 5 2.5))"
+          "argument")))
+    (is (not (abt-warns-about?
+          "(defability Pl (pl [self k] :-> int)) (impl Pl :int (pl [n k] n)) (defn ok () (pl 5 \"anything\"))"
+          "argument"))))
+  (test "an unknown-typed argument DEFERS — soundness (no false positive)"
+    ;; `(sc 5 x)` where x is an untyped param is dynamic → the ∩ relation never over-warns.
+    (is (not (abt-warns-about?
+          "(defability Sc (sc [self (factor float)] :-> int)) (impl Sc :int (sc [n f] n)) (defn f (x) (sc 5 x))"
+          "argument")))))

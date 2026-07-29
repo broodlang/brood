@@ -714,7 +714,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
     // param) — so `(let (c (circle 2)) (size c))` is flagged when `Size` has no impl for
     // circle. Gated: file has abilities, head is a known op fn, arg is a symbol.
     if let (Some(info), Value::Sym(h)) = (ctx.ability(), head) {
-        if info.op_of(h).is_some() {
+        if let Some((ability, op)) = info.op_of(h) {
             if let Some(&Value::Sym(_)) = items.get(1) {
                 if let Some(ty) = super::infer::expr_ty(heap, items[1], ctx) {
                     super::protocol::check_ability_call_inferred(
@@ -726,7 +726,67 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
                     );
                 }
             }
+            // **Typed op params** (ADR-180): check each argument against the op's declared
+            // `(name T)` parameter type — the argument-side sibling of the `:-> RET` flow.
+            // Same gradual relation as the sig-param check (`gradual_of` + `consistent_with`
+            // + `relax_param_for_arg`), so it is false-positive-clean: a precise arg is
+            // checked `⊆`, a dynamic arg `∩ ≠ ⊥`, and an unknown/NEVER arg defers. Param `i`
+            // corresponds to argument `items[i + 1]` (`self` is param 0 / `items[1]`).
+            if let Some(params) = info.op_params_of(h) {
+                for (i, pty) in params.iter().enumerate() {
+                    let Some(pty) = pty else { continue };
+                    let Some(&arg) = items.get(i + 1) else { break };
+                    let g = gradual_of(heap, arg, ctx);
+                    if !g.bound.is_never()
+                        && !g.clone().consistent_with(relax_param_for_arg(pty))
+                        && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH)
+                    {
+                        out.push((
+                            arg_pos(heap, arg, form),
+                            format!(
+                                "ability {}/{}: argument {} expects {}, got {} ({})",
+                                ability,
+                                op,
+                                i + 1,
+                                pty,
+                                g.bound,
+                                crate::syntax::printer::print(heap, arg),
+                            ),
+                        ));
+                    }
+                }
+            }
         }
+    }
+
+    // **Multimethod generic call whose args' identities come (partly) from inference** — the
+    // `defmulti` analogue of the ability hook above (ADR-179). Fires when a `defmulti` generic
+    // is applied with at least one symbol arg (so the syntactic pass in `protocol` deferred);
+    // resolves each arg's identity syntactically or from its inferred record type.
+    if let (Some(info), Value::Sym(h)) = (ctx.multi(), head) {
+        if info.generic_of(h).is_some() {
+            super::protocol::check_multi_call_inferred(
+                heap,
+                h,
+                &items,
+                info,
+                ctx,
+                heap.form_pos_only(form),
+                out,
+            );
+        }
+        // **Operator sugar on a record operand** (ADR-179): `(+ (usd 1) 2.5)` / `(< money 5)`
+        // route to `num-*`/`compare-to`; warn when the routed multimethod has no method for the
+        // pair. A record operand is required, so pure `(+ 1 2)` / `(< 1 2)` is never touched.
+        super::protocol::check_operator_sugar(
+            heap,
+            h,
+            &items,
+            info,
+            ctx,
+            heap.form_pos_only(form),
+            out,
+        );
     }
 
     // **Keyword accessor** `(:key coll [default])` (ADR-165). A keyword head is not a
@@ -1322,11 +1382,16 @@ fn check_one_impl_return(
     let Some(&params_form) = fn_items.get(1) else {
         return;
     };
-    // Bind the impl's params as unknowns (the op spec declares no arg types yet), then
-    // grade the body's last form against the declared return.
+    // Bind the impl's params, seeding each with the op spec's declared `(name T)` type where
+    // present (a contract, bound authoritatively like a sig param so the body checks against
+    // it) and unknown otherwise, then grade the body's last form against the declared return.
+    let param_types = info.op_params_by_name(&ability, &op);
     let mut scope = ctx.clone();
-    for p in fn_params(heap, params_form) {
-        scope = scope.bind(p, None);
+    for (i, p) in fn_params(heap, params_form).into_iter().enumerate() {
+        match param_types.and_then(|pts| pts.get(i)).and_then(Option::as_ref) {
+            Some(ty) => scope = scope.bind_sig_param(p, ty.clone()),
+            None => scope = scope.bind(p, None),
+        }
     }
     let body_start = match (fn_items.get(2), fn_items.get(3)) {
         (Some(Value::Str(_)), Some(_)) => 3,
