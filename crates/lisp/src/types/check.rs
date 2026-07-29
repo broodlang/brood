@@ -431,6 +431,17 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
     }
 }
 
+/// The **type signature** of the callable `sym` resolves to — declared, curated, or
+/// inferred (all of `sigs::sig_of`'s sources) — rendered as its arrow string, e.g.
+/// `(int -> int)` or `(fn seqable -> seqable)`. `None` for a non-callable, an unknown
+/// name, or one whose signature can't be pinned. The tooling-facing view of the
+/// inferencer (LSP hover, docs); reads only, never gates. The per-file inference memo is
+/// cleared first so a re-edited/reloaded function re-infers rather than showing a stale sig.
+pub fn signature_string(heap: &Heap, sym: Symbol) -> Option<String> {
+    sigs::clear_sig_memo();
+    sigs::sig_of(heap, sym).map(|s| s.to_string())
+}
+
 /// Check one form, returning a warning per provable misuse. Empty when nothing is
 /// provably wrong (which includes "not enough static info").
 pub fn check_form(heap: &Heap, form: Value) -> Vec<String> {

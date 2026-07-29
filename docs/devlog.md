@@ -11641,3 +11641,56 @@ quote the workload with the number.
 
 Kept as tooling: `size_class_probe.rs` (`#[ignore]`d — a measurement, not an assertion).
 The allocator histogram was removed and its recipe written into `runtime-frontier.md`.
+
+## 2026-07-29 (cont.) — `:derives`: per-ability record derivation (ADR-185 part 2)
+
+The follow-on the provided-ops entry named as "the natural next step." A `defability` may
+now declare a `:derive-record` recipe and a `defrecord` may `:derives [Ability …]` — Elixir
+`@derive` / Rust `#[derive]`, but **each ability decides how it derives itself** (the recipe
+maps a record's field names to `impl` method forms for the required ops; provided ops then
+come free). `(defrecord point (x y) :derives [Columns])` synthesises `columns` and inherits
+`ncols`.
+
+**The decisive design point: derivation runs at LOAD, not expansion.** The obvious approach
+— `defrecord` calls the recipe during macro-expansion and emits a static `(impl …)` — breaks
+the checker, which macro-expands a file *without evaluating it*: the ability's recipe isn't
+registered when a later `defrecord` expands, so the lookup returns nil, the expansion errors,
+and it cascades to `unbound symbol`. (Confirmed empirically before choosing.) So `:derives`
+expands to a `(derive-into 'A id 'fields (current-ns))` *call* run at load, where sequential
+top-level eval guarantees the recipe is registered; `derive-into` evals each method form into
+a fn and `register-impl`s it. A small checker pass reads the `derive-into` forms and marks
+every op of the ability implemented for that id, so a derived record satisfies call-site and
+`:sealed` checks without running the recipe.
+
+Prelude only (`defrecord`/`defability` macros + `derive-into`) plus the one checker pass. 6
+derive tests added (structural derivation, provided-op composition, the not-derivable error,
+two checker interactions, cross-process); with the 9 provided-op tests, `tests/ability_test`
+is 54 → 69, all green, `nest check` zero-warning.
+
+> Process note: a `git merge` of `main` mid-work reverted the uncommitted prelude/checker/test
+> edits for the provided-ops half (the committed devlog/roadmap entries survived); they were
+> re-applied on top of the merge, so both halves now land together.
+
+## 2026-07-29 (cont.) — the checker meets the REPL and LSP hover
+
+The type checker ran in every batch path (`nest`, `brood`, MCP) and LSP *diagnostics*, but
+two interactive surfaces were blind to it. Closed both, keeping the checker's own
+soundness/advisory discipline.
+
+**REPL advisory checking** (`std/tool/repl.blsp`). `repl--eval-print` now runs the checker on
+each input before evaluating it (`mapcat check (read-all src)`, fragment mode). The REPL is
+the one place *every def is loaded*, so inference applies to the whole live image — a call to
+a just-defined function is checked against its *inferred* signature (`(string-length (dbl 5))`
+warns right after `(defn dbl (x) (+ x 1))`). Fragment mode skips operand-unbound so a typo's
+`unbound` isn't printed twice (eval raises that). Advisory: printed before the result, never
+blocks it, silent when clean / on incomplete input / under `BROOD_NO_CHECK`.
+
+**LSP hover type signatures.** Hover surfaced the arglist + docstring but not the checker's
+*type* sig. Added `types::check::signature_string` (the tooling view of `sigs::sig_of`) →
+`introspect::type_signature` → rendered under the arglist for a resolvable free name
+(builtins/prelude/imports — stably loaded; a buffer-only def isn't loaded, so it's excluded
+to avoid a stale sig). Hovering `map` now shows `(fn seqable -> seqable)`.
+
+Both reuse existing checker entry points (no new checking logic), so they inherit the
+zero-false-positive guarantee. LSP hover tests 8 → 9; REPL verified (clean/disabled/incomplete
+all quiet).
