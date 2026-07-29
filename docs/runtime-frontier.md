@@ -148,17 +148,32 @@ benchmark row before believing it.
      `heap.list(vals)`. That is only sound because **allocation never collects** in this
      runtime (collection runs at eval safepoints, never inside `alloc_*`). A cross-heap
      copier can use the identical pattern.
-  3. *Where does the copied value live until the receiver pops it?* The mailbox is **not**
-     a GC root, so it cannot hold a bare `Value`. Push the copied value onto the
-     receiver's `roots` and put the index in the envelope. Sound because a collection
-     while parked relocates roots *in place*, keeping indices valid — the same invariant
-     `Suspended` depends on (ADR-100 §8).
+  3. *Where does the copied value live until the receiver pops it?* **This is the hard
+     part, and the first answer here was wrong.** The mailbox is not a GC root, so it
+     cannot hold a bare `Value` — correct. But the proposed fix (push it onto the
+     receiver's `roots` and carry the index) is **unsound**: `roots` is the *operand
+     stack*, not a general root set. `truncate_roots(n)` is called from **109 sites** —
+     every frame pop, every error unwind — so a long-lived mailbox value parked there is
+     silently dropped the moment the receiver returns from a call. Indices are stable
+     across a *collection* (which is what `Suspended` relies on), but not across the
+     stack discipline, and those are different guarantees.
+
+     So L1 needs a **new traced root set**: a per-heap `mailbox_roots: Vec<Value>` (or
+     equivalent) that `collect` walks and relocates, with a slot freed when a message is
+     consumed. That is a real GC change, not a bookkeeping detail, and it costs a vector
+     per process — partially offsetting the memory work in group B. The alternative is
+     BEAM's actual design: let the message live in the receiver's heap and have collection
+     scan the mailbox itself, which means taking the mailbox lock during collection.
+
+     **Re-cost:** this is no longer "~300 lines and a copier". Budget a GC root-set change
+     with the full GC_STRESS/GC_VERIFY/TSAN gate, and settle the root-set-vs-scan-mailbox
+     question first.
 
   Work: a `copy_cross_heap(src: &Heap, dst: &mut Heap, v: Value) -> Value` mirroring
-  `to_message`/`from_message`'s shape over every `Value` kind, an `Envelope::Rooted(usize)`
-  variant, and the two ends of the send/receive path. `Message` stays for running
-  receivers and every dist send. Expect ~300 lines; gate with GC_STRESS, TSAN, and the
-  differential fuzzers. Original entry: Local `send` today is *two* full
+  `to_message`/`from_message`'s shape over every `Value` kind, the new traced root set
+  from (3), an envelope variant naming the slot, and the two ends of the send/receive
+  path. `Message` stays for running receivers and every dist send. Gate with GC_STRESS,
+  GC_VERIFY, TSAN, and the differential fuzzers. Original entry: Local `send` today is *two* full
   copies through the wire-format `Message` (`Value → Message → Value`), with both
   intermediates becoming garbage. BEAM copies **once**, straight into the receiver's heap.
   **Feasibility confirmed:** `deliver_envelope` already takes the mailbox state lock and
