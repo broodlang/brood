@@ -458,7 +458,13 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
     // (Kept independent of the param demands above so the return type — and every
     // test pinned to it — is byte-identical to before.)
     let tail = *arm.body.last()?;
-    let mut ctx = Ctx::default();
+    // Mark the ctx as inferring `self_name`, so a self-recursive call in a branch result is
+    // skipped in the return union (see `infer::branch_union`) — this is what lets a
+    // tail-recursive function's return infer from its base cases instead of deferring.
+    let mut ctx = match self_name {
+        Some(name) => Ctx::default().with_inferring_self(name),
+        None => Ctx::default(),
+    };
     for &p in &params {
         ctx = ctx.bind(p, Some(Ty::ANY));
     }
