@@ -336,6 +336,24 @@ What this changes:
 - Roughly 950 B/process survives `hibernate` across the small buckets. No single item there
   is worth a risky change; they are only worth attacking as a group, if at all.
 
+> **Hard constraint on M2b, found 2026-07-29 before writing code: IC state may NOT hang off
+> a `CompiledArm`.** The obvious design — give each shared arm a `Box<[AtomicUsize]>` of
+> per-site slots, since ADR-175 already shares arms per runtime — is **unsound for prelude
+> arms**, which are the common call target. `SHARED` is a process-wide
+> `LazyLock<SharedBundle>` and every `Interp::new()` does `Arc::clone(&SHARED.code)` while
+> constructing its **own** `RuntimeCode`. So a prelude `CompiledArm` is shared across
+> *runtimes*, not merely across the processes of one runtime — and an IC entry caches a
+> *global* resolution, which is per-runtime by construction. Hanging slots on the arm would
+> let one runtime's resolutions serve another's calls: a wrong-callee miscompile, not a
+> stale-cache warning.
+>
+> Shared IC state must therefore live on **`RuntimeCode`**, keyed by `(arm_uid, site)`.
+> That reintroduces the per-activation base lookup as the design problem: today
+> `vm_arm_block` is a per-*process* `HashMap` probe per activation (no synchronisation);
+> a per-*runtime* table needs that probe to stay lock-free, or to be resolved once per
+> activation and carried — `BcFrame::ic_bases` already carries exactly this, so the
+> resolution point exists.
+
 - [ ] **M2b — sharing the IC tables. Two findings, one of which corrects the other.**
 
   **Still true and useful:** `vm_call_ics` is *never read raw by JIT code* — only
