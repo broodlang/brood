@@ -204,12 +204,63 @@ pub(super) fn num_bin(
             Ok(heap.alloc_decimal(dec_op(x, y).with_scale(scale)))
         }
         // A float operand anywhere: the float path (a BigInt/Decimal coerces via
-        // `f64` — float contagion, like Clojure's double contagion).
-        _ => Ok(Value::Float(float_op(
-            num_to_f64(heap, who, a)?,
-            num_to_f64(heap, who, b)?,
-        ))),
+        // `f64` — float contagion, like Clojure's double contagion). But first, a RECORD
+        // first operand dispatches the `Num` protocol (cold path — ints/floats never reach
+        // here). A plain non-numeric operand still errors in `num_to_f64` below.
+        _ => {
+            if let Some(r) = num_record_dispatch(heap, who, a, b)? {
+                return Ok(r);
+            }
+            Ok(Value::Float(float_op(
+                num_to_f64(heap, who, a)?,
+                num_to_f64(heap, who, b)?,
+            )))
+        }
     }
+}
+
+/// The `Num` protocol fallback (ADR-172 §7): when an arithmetic operator's first operand
+/// is a RECORD, dispatch to its `Num` ability op — `num-add`/`num-sub`/`num-mul`/`num-div`
+/// — so a money value, complex number, 2-D vector, or bignum can use `+`/`-`/`*`/`/`. This
+/// is reached ONLY on the cold non-numeric fallback: the JIT/VM inlines int+int and
+/// float+float and never calls the `%add` builtin for them, so the numeric hot path is
+/// byte-for-byte untouched (a Brood-side `(record? a)` branch in `+` measured a ~195×
+/// regression — this is the kernel form that avoids it). Returns `None` when `a` isn't a
+/// record, so the caller proceeds to its normal float / error path.
+fn num_record_dispatch(
+    heap: &mut Heap,
+    who: &str,
+    a: Value,
+    b: Value,
+) -> Result<Option<Value>, LispError> {
+    let m = match a {
+        Value::Map(m) => m,
+        _ => return Ok(None),
+    };
+    // a record is a map carrying the reserved `:__id__`; a plain map is not the Num path.
+    if heap
+        .map_get(m, Value::Keyword(crate::core::value::intern("__id__")))
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let op = match who {
+        "+" => "num-add",
+        "-" => "num-sub",
+        "*" => "num-mul",
+        "/" => "num-div",
+        _ => return Ok(None),
+    };
+    let genv = heap.global();
+    let callee = heap
+        .env_get(genv, crate::core::value::intern(op))
+        .ok_or_else(|| {
+            LispError::runtime(format!(
+                "{who}: a record operand needs a `Num` ability impl to use `{who}`"
+            ))
+        })?;
+    let result = crate::eval::compile::apply_value(heap, callee, &[a, b], genv)?;
+    Ok(Some(result))
 }
 
 pub(super) fn prim_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -253,6 +304,11 @@ pub(super) fn prim_mul(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 
 pub(super) fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let (a, b) = two(args, "/")?;
+    // A record numerator dispatches the `Num` protocol (`num-div`); `Value::Map` check is
+    // one tag-compare, and int/float division is JIT-inlined and never reaches here.
+    if let Some(r) = num_record_dispatch(heap, "/", a, b)? {
+        return Ok(r);
+    }
     let bf = num_to_f64(heap, "/", b)?;
     if bf == 0.0 {
         return Err(LispError::runtime("division by zero")

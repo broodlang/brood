@@ -92,9 +92,16 @@ static CURATED_SIGS: LazyLock<SymbolMap<Sig>> = LazyLock::new(|| {
     let mut put = |name: &str, sig: Sig| {
         m.insert(value::intern(name), sig);
     };
-    // variadic arithmetic: every argument must be a number
+    // Variadic arithmetic. A numeric arg — or a `Num` RECORD, which the kernel's
+    // `%add`/`%sub`/`%mul`/`%div` fallback dispatches to the type's `Num` ability (ADR-172
+    // §7) — so `(+ money money)` is legal. A record is a map, so the domain/result widen to
+    // `number | map`; the RESULT of a pure-numeric call is still typed precisely by
+    // `numeric_call_ty` (int/float), which defers to this sig only once an operand is a
+    // record/unknown — so numeric precision is unaffected, while record arithmetic and its
+    // result (`(get (+ a b) :field)`) type-check cleanly.
+    let num_or_record = num.union(Ty::of(Tag::Map));
     for n in ["+", "-", "*", "/"] {
-        put(n, Sig::variadic(num, num));
+        put(n, Sig::variadic(num_or_record.clone(), num_or_record.clone()));
     }
     // variadic comparison: numeric args, boolean result
     for n in ["<", "<=", ">", ">="] {
