@@ -62,6 +62,15 @@ Shipped as ADRs:
     types). ADR-177 also records the **rejection list** (the prelude's collection
     protocol, `str`/`pr-str`, closed AST/CST node kinds, telemetry metric kinds,
     `std/stream`, the `proc/*` module contracts) so the next pass doesn't re-litigate it.
+  - ✅ **Provided ops (default method bodies)** ([ADR-185](docs/decisions.md), 2026-07-29)
+    — an op spec may carry a body (`(op [args] :-> ret? body…)`), which `defability`
+    registers as the op's `:default` impl. Implement the required ops, inherit the derived
+    ones (Rust/Haskell provided methods, Elixir's derived defaults); an id-keyed impl
+    overrides a default. A prelude-macro change over the existing `:default` mechanism — no
+    new special form — plus a checker adjustment (provided ops excluded from per-impl
+    completeness and `:sealed` exhaustiveness; required ops still demanded). **Next:
+    `derive`** (Elixir `@derive` / Rust `#[derive]`) — auto-generate a record's *required*
+    op structurally, composing with provided ops to need no body at all. **[prelude/checker]**
   - ⬜ **Checker gap:** a `:use`d ability op from a *loose disk* module (not embedded,
     not in a project) is flagged `unbound symbol` though it runs; embedded/same-module
     use resolves. Surfaced by the `show` cross-module test. **[kernel/checker]**
