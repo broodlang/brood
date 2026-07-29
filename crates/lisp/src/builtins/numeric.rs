@@ -216,7 +216,12 @@ pub(super) fn num_bin(
             // arithmetic is not implicit — a clear, named error beats "expected number,
             // got map" from the float coercion below. (`(- 5 money)` and friends.)
             if is_record(heap, b) {
-                return Err(cross_type_record_error(who, "arithmetic", "combines", "Num"));
+                return Err(cross_type_record_error(
+                    who,
+                    "arithmetic",
+                    "combines",
+                    "Num",
+                ));
             }
             Ok(Value::Float(float_op(
                 num_to_f64(heap, who, a)?,
