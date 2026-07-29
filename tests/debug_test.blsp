@@ -229,3 +229,82 @@
       (resume-all dbg)
       (assert= :passed2 (receive ([:passed2] :passed2)))
       (dbg-stop dbg))))
+
+;; A module-level target for the trace-fn/break-fn tests: instrumentation rebinds a
+;; GLOBAL by name, so the subject must be one (a let-local has no name to rebind).
+(defn tfn-square (n) (* n n))
+(defn tfn-add (a b) (+ a b))
+
+(describe "debugger — function-boundary instrumentation (trace-fn / break-fn)"
+  :isolated
+  (test "trace-fn emits :call and :return through *spy-sink* and is value-transparent"
+    (let (me (self))
+      (trace-fn 'debug-test/tfn-square)
+      (let (r (binding (*spy-sink* (fn (e) (send me [:spy-entry e])))
+                (tfn-square 7)))
+        (assert= 49 r)
+        (let (call (receive ([:spy-entry e] e) (after 1000 :timeout))
+              ret (receive ([:spy-entry e] e) (after 1000 :timeout)))
+          (assert= :call (get call :spy))
+          (assert= 'debug-test/tfn-square (get call :fn))
+          (assert= (list 7) (get call :args))
+          (assert= :return (get ret :spy))
+          (assert= 49 (get ret :value))))
+      (untrace-fn 'debug-test/tfn-square)))
+  (test "untrace-fn restores the original — the sink sees nothing afterwards"
+    (let (me (self))
+      (trace-fn 'debug-test/tfn-add)
+      (untrace-fn 'debug-test/tfn-add)
+      (assert= 5 (binding (*spy-sink* (fn (e) (send me [:spy-entry e])))
+                   (tfn-add 2 3)))
+      (assert= :quiet (receive ([:spy-entry e] e) (after 50 :quiet)))))
+  (test "re-tracing is idempotent: the registry keeps the ORIGINAL, not a wrapper"
+    (do
+      (trace-fn 'debug-test/tfn-add)
+      (trace-fn 'debug-test/tfn-add)   ; twice — must not stack wrappers
+      (untrace-fn 'debug-test/tfn-add)
+      (let (me (self))
+        (assert= 5 (binding (*spy-sink* (fn (e) (send me [:spy-entry e])))
+                     (tfn-add 2 3)))
+        (assert= :quiet (receive ([:spy-entry e] e) (after 50 :quiet))))))
+  (test "traced-fns lists the instrumented names; untrace-all clears them"
+    (do
+      (trace-fn 'debug-test/tfn-square)
+      (trace-fn 'debug-test/tfn-add)
+      (assert= 2 (count (traced-fns)))
+      (assert= 2 (untrace-all))
+      (assert= 0 (count (traced-fns)))))
+  (test "break-fn parks the caller with :args in scope for eval-at, then delegates"
+    (let (dbg (start-debugger) me (self))
+      (break-fn 'debug-test/tfn-square)
+      (spawn (with-debugger dbg (fn () (send me [:result (tfn-square 6)]))))
+      (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))
+      ;; the snapshot: label = the fn name, :args = the argument list
+      (let (snap (second (first (vec (paused dbg)))))
+        (assert= "debug-test/tfn-square" (get snap :label))
+        (assert= (list 6) (get (get snap :vals) :args)))
+      (assert= (list 6) (eval-at dbg 1 "args"))
+      (resume-all dbg)
+      (assert= 36 (receive ([:result r] r) (after 1000 :timeout)))
+      (untrace-fn 'debug-test/tfn-square)
+      (dbg-stop dbg))))
+
+(describe "debugger — step parks carry an eval-at-able :vals map"
+  :isolated
+  (test "eval-at resolves `value` at a step park (the :vals shape matches break's)"
+    (let (dbg (start-debugger) me (self))
+      (spawn (with-debugger dbg (fn () (send me [:result (step (* 2 3))]))))
+      (assert= true (wait-until dbg (fn (s) (> (count (get s :paused)) 0)) 200))
+      ;; the first parked node's value is in scope as `value`
+      (let (v (eval-at dbg 1 "value"))
+        (is (int? v)))
+      ;; drive the remaining steps to completion
+      (letrec (drive (fn (tries)
+                       (cond
+                         (= tries 0) :gave-up
+                         (> (count (paused dbg)) 0) (do (resume-all dbg) (sleep 10) (drive (dec tries)))
+                         else :done)))
+        (sleep 20)
+        (drive 100))
+      (assert= 6 (receive ([:result r] r) (after 1000 :timeout)))
+      (dbg-stop dbg))))
