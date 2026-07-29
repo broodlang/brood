@@ -2486,6 +2486,32 @@ message already sent stays sent."
       ;; timeout answer and the timeout branch is provably dead — the macro omits it.
       [clauses nil nil])))
 
+;; The set of leading keyword tags a `receive`'s clauses can match, or nil when the
+;; filter cannot be used. Passed to `%receive` as a THIRD argument so the mailbox scan
+;; can reject a non-matching message by peeking its tag, without first rebuilding it
+;; into the heap (`from_message`) and running the matcher — the cost that makes a
+;; selective receive against a backlog O(rounds x backlog). Measured 2026-07-29 at
+;; ~0.4us per rescanned message.
+;;
+;; Conservative by construction: it answers nil (no filtering, scan everything) unless
+;; EVERY clause is a vector pattern whose head is a literal keyword. A catch-all
+;; pattern, a bare symbol, a map/list pattern or a non-keyword head all disable it, so
+;; the filter can never skip a message some clause would have matched. Guards are
+;; irrelevant to it — a `:when` can only reject a message the tag already admitted.
+(defn receive--tags (clauses)
+  (if (empty? clauses)
+    nil
+    (let (pat (first (first clauses))
+          tag (if (and (vector? pat) (> (count pat) 0) (keyword? (first pat)))
+                (first pat)
+                nil))
+      (if (nil? tag)
+        nil                              ; one un-taggable clause disables the filter
+        (let (rest-tags (receive--tags (rest clauses)))
+          (if (and (nil? rest-tags) (not (empty? (rest clauses))))
+            nil                          ; a later clause disabled it
+            (cons tag rest-tags)))))))
+
 (defmacro receive (& clauses)
   "Selectively receive a message from the mailbox: run the first `(pattern [:when guard] body...)` clause that matches, leaving others queued. An optional final `(after ms body...)` clause fires on timeout; `(receive)` blocks for the next message."
   (do
@@ -2504,13 +2530,21 @@ message already sent stays sent."
                     `(fn (~msg) [0 ~msg])
                     `(fn (~msg)
                        ~(match-build-from (map receive--result-clause preps) msg nil)))
-          dispatch (if (empty? real) `(nth ~r 1) (receive--dispatch preps r)))
+          dispatch (if (empty? real) `(nth ~r 1) (receive--dispatch preps r))
+          ;; nil when the filter can't apply (see `receive--tags`). Built as a vector
+          ;; FORM (`[~@tags]`), not by calling a function: a plain list would expand to
+          ;; `(:tag …)`, which evaluates as a keyword accessor call (ADR-165) rather
+          ;; than data — and calling `vec` here would run at macro-expansion time
+          ;; *during the prelude build*, where its own dependency (`into`, defined
+          ;; ~2000 lines later) does not exist yet.
+          tag-list (if (empty? real) nil (receive--tags real))
+          tags (if (nil? tag-list) nil `[~@tag-list]))
       ;; `%receive` returns the matcher's result vector, or nil on timeout (only
       ;; reachable with an `after` clause — nil is unambiguous because a match always
       ;; answers with a vector). The bodies run HERE, in the caller's tail position.
       (if (nil? ms)
-        `(let (~r (%receive ~matcher nil)) ~dispatch)
-        `(let (~r (%receive ~matcher ~ms))
+        `(let (~r (%receive ~matcher nil ~tags)) ~dispatch)
+        `(let (~r (%receive ~matcher ~ms ~tags))
            (if (nil? ~r) ~on-time ~dispatch))))))
 
 ;; ---- dirty-native offload (ADR-144) -----------------------------------------

@@ -1,0 +1,65 @@
+;; The leading-keyword filter (`receive--tags` + `%receive`'s tag argument) lets a
+;; selective receive reject a queued message by peeking its tag, without rebuilding it
+;; into the heap. It is a PURE FILTER: these cases pin that it never changes which
+;; clause runs — only how fast a non-match is rejected.
+(defmodule receive-filter-test (:use test))
+
+(describe "receive tag filter"
+  (test "skips non-matching tags and still matches the right clause, in order"
+    (let (me (self))
+      (send me [:junk 1])
+      (send me [:junk 2])
+      (send me [:want 42])
+      (send me [:junk 3])
+      (assert= (receive ([:want n] n)) 42)
+      ;; the junk is still queued, in arrival order
+      (assert= (receive ([:junk n] n)) 1)
+      (assert= (receive ([:junk n] n)) 2)
+      (assert= (receive ([:junk n] n)) 3)))
+
+  (test "a catch-all clause disables the filter — everything still matches"
+    ;; A bare-symbol pattern is not tag-led, so `receive--tags` answers nil and the
+    ;; scan must examine every message rather than skipping on tag.
+    (let (me (self))
+      (send me [:anything 7])
+      (assert= (receive (m m)) [:anything 7])
+      (send me :bare-keyword)
+      (assert= (receive (m m)) :bare-keyword)))
+
+  (test "non-vector messages are never skipped"
+    ;; The filter only rejects a tag-led VECTOR whose head is absent; any other shape
+    ;; must fall through to the matcher.
+    (let (me (self))
+      (send me 99)
+      (send me "str")
+      (assert= (receive (m m)) 99)
+      (assert= (receive (m m)) "str")))
+
+  (test "guards still gate a tag the filter admitted"
+    (let (me (self))
+      (send me [:n 1])
+      (send me [:n 5])
+      ;; :n passes the tag filter both times; the guard picks the second.
+      (assert= (receive ([:n x] :when (> x 3) x)) 5)
+      (assert= (receive ([:n x] x)) 1)))
+
+  (test "multi-clause: each tag reaches its own clause"
+    (let (me (self))
+      (send me [:b 2])
+      (send me [:a 1])
+      (assert= (receive ([:a x] [:got-a x]) ([:b x] [:got-b x])) [:got-b 2])
+      (assert= (receive ([:a x] [:got-a x]) ([:b x] [:got-b x])) [:got-a 1])))
+
+  (test "timeout still fires when only unmatchable tags are queued"
+    (let (me (self))
+      (send me [:junk 1])
+      (assert= (receive ([:never x] x) (after 20 :timed-out)) :timed-out)
+      ;; and the junk survived the timed-out scan
+      (assert= (receive ([:junk n] n)) 1)))
+
+  (test "works across a process boundary"
+    (let (me (self)
+          w (spawn (receive ([:go n] (send me [:done (* n 2)])))))
+      (send w [:noise 1])
+      (send w [:go 21])
+      (assert= (receive ([:done v] v)) 42))))

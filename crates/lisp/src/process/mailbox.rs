@@ -554,7 +554,55 @@ pub(crate) fn read_name_address(heap: &Heap, mid: MapId) -> Result<(Symbol, Symb
 /// a match always answers with a vector, and with a `nil` timeout expiry is unreachable.
 ///
 /// A green process suspends while waiting; the root thread blocks.
-pub fn receive_match(heap: &mut Heap, matcher: Value, timeout: Value) -> LispResult {
+/// Upper bound on clause tags the leading-keyword filter tracks. A `receive` with more
+/// clauses than this simply scans unfiltered — the array keeps the check branch-free and
+/// off the heap, and real receives are far below it.
+const MAX_RECEIVE_TAGS: usize = 8;
+
+/// Read the `tags` argument the `receive` macro passes into a fixed array, returning how
+/// many were collected. `0` means "no filtering": either the macro passed nil (some clause
+/// is not tag-led) or the vector was longer than [`MAX_RECEIVE_TAGS`].
+fn collect_receive_tags(heap: &Heap, tags: Value, out: &mut [u32; MAX_RECEIVE_TAGS]) -> usize {
+    let Value::Vector(id) = tags else {
+        return 0;
+    };
+    let items = heap.vector(id);
+    if items.is_empty() || items.len() > MAX_RECEIVE_TAGS {
+        return 0;
+    }
+    let mut n = 0;
+    for v in items.iter() {
+        match v {
+            Value::Keyword(k) => {
+                out[n] = *k;
+                n += 1;
+            }
+            // Anything else means the macro built something unexpected; fail open.
+            _ => return 0,
+        }
+    }
+    n
+}
+
+/// Can `msg` be rejected without rebuilding it into the heap? True only when the filter
+/// is active AND the message is a vector whose head is a keyword that no clause names.
+/// Every other shape answers `false` (scan it properly) — the filter must never skip a
+/// message a clause could match.
+#[inline]
+fn tag_rejects(tagset: &[u32], msg: &Message) -> bool {
+    if tagset.is_empty() {
+        return false;
+    }
+    match msg {
+        Message::Vector(items) => match items.first() {
+            Some(Message::Keyword(k)) => !tagset.contains(k),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+pub fn receive_match(heap: &mut Heap, matcher: Value, timeout: Value, tags: Value) -> LispResult {
     let ctx = ensure_ctx();
     // Whether this `receive` runs under state capture (a capture-mode green process):
     // the receive is re-entered from scratch on every wake, so its deadline must be
@@ -607,7 +655,7 @@ pub fn receive_match(heap: &mut Heap, matcher: Value, timeout: Value) -> LispRes
         // non-matches). The wait, below, is the only blocking step — this split is
         // the seam the coming state-capture path uses: there, a `None` becomes a
         // *suspend signal* returned to the scheduler instead of a `wait_for_message`.
-        match scan_mailbox(heap, &ctx, rbase, &mut i) {
+        match scan_mailbox(heap, &ctx, rbase, &mut i, tags) {
             Ok(Some(matched)) => {
                 // The receive completed (a clause matched) — clear any persisted
                 // capture-mode deadline so the next receive starts fresh. A nil-timeout
@@ -730,6 +778,8 @@ fn scan_mailbox(
     ctx: &Ctx,
     rbase: usize,
     i: &mut usize,
+    // The clauses' leading-keyword vector (or nil). Decoded LAZILY — see below.
+    tags: Value,
 ) -> Result<Option<Value>, LispError> {
     // Resolve the matcher to its compiled VM arm lazily, on the FIRST queued candidate:
     // each candidate then runs the pattern dispatch through the bytecode VM / JIT
@@ -751,6 +801,9 @@ fn scan_mailbox(
     // per candidate — the scan's lock count stays ≤ the peek-only scheme's for
     // every backlog length.
     let mut optimistic = true;
+    // Lazily-decoded clause tags (see the filter below). `None` = not decoded yet.
+    let mut tagbuf = [0u32; MAX_RECEIVE_TAGS];
+    let mut ntags: Option<usize> = None;
     loop {
         // (A hard `:kill` is caught at the VM driver's loop top; a soft exit at the
         // `park_on_receive` boundary — not here, since there's no coroutine to suspend.)
@@ -759,6 +812,24 @@ fn scan_mailbox(
             let mut st = crate::core::sync::lock(&ctx.mailbox.state);
             if *i >= st.queue.len() {
                 return Ok(None); // scanned to the end with no match
+            }
+            // Leading-keyword filter: reject a candidate no clause could match without
+            // rebuilding it into the heap or running the matcher. This is what keeps a
+            // selective receive from being O(rounds x backlog) — a non-matching message
+            // costs a keyword compare instead of a `from_message` + a matcher
+            // activation. Conservative: only fires for a tag-led vector whose head is
+            // absent from the clause set (see `receive--tags`).
+            //
+            // Decoded lazily, and only when there is a backlog to filter: the dominant
+            // shape is a one-message mailbox whose single candidate matches, and paying
+            // a decode per receive for that cost `pingpong` ~3.5%.
+            if st.queue.len() > 1 && ntags.is_none() {
+                ntags = Some(collect_receive_tags(heap, tags, &mut tagbuf));
+            }
+            if tag_rejects(&tagbuf[..ntags.unwrap_or(0)], &st.queue[*i].msg) {
+                *i += 1;
+                optimistic = false; // the head is no longer the candidate
+                continue;
             }
             if optimistic {
                 let m = st.queue.remove(*i).expect("bounds checked above");
