@@ -221,6 +221,12 @@ pub(super) struct Ctx {
     /// come from *inference* (a record-typed variable), complementing the syntactic pass.
     /// `None` in a file with no `defmulti`. Shared (`Arc`) so cloning `Ctx` stays cheap.
     multi: Option<std::sync::Arc<super::protocol::MultiInfo>>,
+    /// The function whose signature is being **inferred** (`sigs::infer_sig`), if any. A
+    /// self-recursive call to it in a branch-result position contributes ⊥ to the return
+    /// union — by induction it returns the same as the base cases, so skipping it lets a
+    /// recursive function's return infer from its non-recursive branches. `None` outside
+    /// return inference. (Set only on the return-inference `Ctx`, never the file walk.)
+    inferring_self: Option<Symbol>,
     types: HashMap<Symbol, Ty>,
     /// **Path narrowings** — the type of a *compound path* asserted by an
     /// enclosing guard, keyed by a base symbol plus a chain of [`PathKey`]s
@@ -391,6 +397,18 @@ impl Ctx {
     /// Install the file's multimethod facts (once, at the top of file checking).
     pub(super) fn set_multi(&mut self, info: std::sync::Arc<super::protocol::MultiInfo>) {
         self.multi = Some(info);
+    }
+
+    /// A clone marked as inferring `sym`'s signature — so a self-recursive call is skipped
+    /// in return-union inference (see the `inferring_self` field).
+    pub(super) fn with_inferring_self(&self, sym: Symbol) -> Ctx {
+        let mut c = self.clone();
+        c.inferring_self = Some(sym);
+        c
+    }
+    /// The function whose signature is being inferred, if this `Ctx` is a return-inference one.
+    pub(super) fn inferring_self(&self) -> Option<Symbol> {
+        self.inferring_self
     }
 
     pub(super) fn with_suppressed(&self, mask: u8) -> Ctx {
