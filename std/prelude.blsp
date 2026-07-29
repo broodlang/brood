@@ -3833,13 +3833,16 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 
 (defn spy--indent (depth) (apply str (map (constantly "  ") (range depth))))
 (defn spy--default-sink (entry)
-  "Default `*spy-sink*`: pretty-print one trace entry as an indented stderr line."
+  "Default `*spy-sink*`: pretty-print one trace entry as an indented stderr line.
+`:call`/`:return` are the function-boundary entries `debug/trace-fn` emits."
   (case (:spy entry)
     :enter (eprintln (str "spy: " (pr-str (:form entry))))
     :node (eprintln (str "  "
                       (spy--indent (:depth entry)) (pr-str (:form entry)) " => "
                       (pr-str (:value entry))))
     :exit (eprintln (str "=> " (pr-str (:value entry))))
+    :call (eprintln (str "trace: " (pr-str (cons (:fn entry) (:args entry)))))
+    :return (eprintln (str "trace: " (pr-str (:fn entry)) " => " (pr-str (:value entry))))
     nil))
 (defn spy--emit (entry) ((or *spy-sink* spy--default-sink) entry))
 (defn spy--node (form value depth)

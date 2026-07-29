@@ -134,6 +134,85 @@ are in scope: `(debug/eval-at d 1 \"(* n n)\")`. Only those named values are cap
   "A data-driven breakpoint: park (via `break`) only when `pred` is truthy, else return nil untouched — `(break-when (< x 0) \"neg\" :x x)`. Conditional breaks are just a Brood predicate, so no recompile and no cost on the false path."
   (when pred (apply break label vals)))
 
+;; ---- function-boundary instrumentation (trace-fn / break-fn) -----------------
+;; `spy` instruments a FORM in source; these instrument a FUNCTION in the live image
+;; with no source edit — the Erlang `dbg:tpl` / Emacs `trace-function` move. The name
+;; is rebound to a wrapper (late binding, ADR-013: every existing call site takes the
+;; new definition on its next call — the same def-rebinding seam `nest test --cover`
+;; instruments with); the original fn value is kept in `*traced-fns*` and restored by
+;; `untrace-fn`. Traffic goes through the same `*spy-sink*` seam `spy` uses, so it
+;; follows the sink wherever it points (stderr, the debugger, an editor buffer).
+;; Reserved names (ADR-166) mean a prelude/std name cannot be rebound — these are for
+;; YOUR functions. The wrapper is variadic, so every arity of a multi-clause fn goes
+;; through it; its `arglist` reads `(& args)` while traced.
+
+(def *traced-fns* {})  ; sym -> the original fn value (`untrace-fn` restores it)
+
+(defn debug--original (sym)
+  ;; The pre-instrumentation fn for `sym`: the registry entry when already traced
+  ;; (re-tracing must not capture a wrapper as the original), else the live value.
+  (or (get *traced-fns* sym)
+    (if (bound? sym) (eval sym) (error "trace-fn: unbound symbol " sym))))
+
+(defn debug--rebind (sym replacement)
+  ;; Rebind global `sym` to the fn value `replacement` — built as data and eval'd,
+  ;; so the module-privacy walk (which reads hand-written source) is not in play and
+  ;; a qualified name rebinds like it does from the REPL.
+  (eval (list 'def sym replacement))
+  nil)
+
+(defn trace-fn (sym)
+  "Trace function `sym` (a quoted, usually qualified symbol) at its boundary: rebind it
+to a wrapper that emits `{:spy :call :fn sym :args …}` before delegating and
+`{:spy :return :fn sym :value …}` after, through `*spy-sink*`. The value is returned
+unchanged and a thrown error passes through untraced. Idempotent; `untrace-fn`
+restores the original. Not for a macro or a builtin (there is no fn value to wrap),
+nor a reserved prelude/std name (ADR-166)."
+  (let (orig (debug--original sym))
+    (when (not (fn? orig)) (error "trace-fn: not a function: " sym))
+    (def *traced-fns* (assoc *traced-fns* sym orig))
+    (debug--rebind sym
+      (fn (& args)
+        (spy--emit {:spy :call :fn sym :args args})
+        (let (value (apply orig args))
+          (spy--emit {:spy :return :fn sym :value value})
+          value)))
+    sym))
+
+(defn break-fn (sym)
+  "A function-boundary breakpoint: rebind `sym` so every call first parks the calling
+process (`break`, label = the fn name, `:args` = the argument list in scope for
+`eval-at`) and then delegates to the original. A no-op park when no debugger is in
+context (`break`'s own rule), so a break-fn'd function still works un-debugged.
+`untrace-fn` restores the original."
+  (let (orig (debug--original sym))
+    (when (not (fn? orig)) (error "break-fn: not a function: " sym))
+    (def *traced-fns* (assoc *traced-fns* sym orig))
+    (debug--rebind sym
+      (fn (& args)
+        (break (str sym) :args args)
+        (apply orig args)))
+    sym))
+
+(defn untrace-fn (sym)
+  "Restore `sym` to its pre-`trace-fn`/`break-fn` definition and drop it from the
+registry. Unknown/untraced syms are a no-op (returns nil)."
+  (let (orig (get *traced-fns* sym))
+    (when orig
+      (debug--rebind sym orig)
+      (def *traced-fns* (dissoc *traced-fns* sym))
+      sym)))
+
+(defn untrace-all ()
+  "Restore every traced/broken function (`untrace-fn` each); returns how many."
+  (let (syms (keys *traced-fns*))
+    (doseq (s syms) (untrace-fn s))
+    (count syms)))
+
+(defn traced-fns ()
+  "The symbols currently instrumented by `trace-fn`/`break-fn`."
+  (keys *traced-fns*))
+
 ;; ---- causal spans: correlate work across the share-nothing boundary ---------
 (defn span (label thunk)
   "Run `thunk` inside a fresh causal span (a child of the current context's span), emitting enter/exit to the debugger; returns `thunk`'s value. Nested `span`s and spawned/`send`-reached children link to this one, so the debugger can rebuild the causal tree."
@@ -333,8 +412,11 @@ subexpression). Non-node entries (`:enter`/`:exit`) pass through."
         (when dbg
           (send dbg
             [:break (self)
+              ;; :vals is a MAP, same as `break`'s (`debug--pairs->map`) — so
+              ;; `locals-of` / `eval-at` work on a step-park too: the traced node's
+              ;; value is in scope as `value` (`(eval-at d 1 "value")`).
               {:label (str "step " (pr-str (get entry :form)))
-               :vals [:value (get entry :value)]
+               :vals {:value (get entry :value)}
                :span (tc-span)}])
           (receive ([:resume] nil)))))))
 (defmacro step (expr)
