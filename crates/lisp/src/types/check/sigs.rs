@@ -486,7 +486,11 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
 /// return can't be typed, so an under-approximation never leaks. Sound: a union of arm
 /// returns is a supertype of whatever a given call actually returns, so it can only
 /// *under*-flag a caller, never false-positive.
-fn infer_return_only(heap: &Heap, cid: crate::core::value::ClosureId, self_name: Option<Symbol>) -> Option<Sig> {
+fn infer_return_only(
+    heap: &Heap,
+    cid: crate::core::value::ClosureId,
+    self_name: Option<Symbol>,
+) -> Option<Sig> {
     // Collect each arm's binders + tail (owned) before calling `expr_ty`, which re-borrows
     // the heap. An empty-body arm makes the whole thing undecidable — bail.
     let arms: Vec<(Vec<Symbol>, Value)> = {

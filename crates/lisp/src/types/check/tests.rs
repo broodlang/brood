@@ -340,7 +340,8 @@ fn open_ability_param_accepts_anything() {
          (defn ok () (render {:a 1}))",
     );
     assert!(
-        !w.iter().any(|s| s.contains("render") && s.contains("argument")),
+        !w.iter()
+            .any(|s| s.contains("render") && s.contains("argument")),
         "an open-ability param must accept anything: {w:?}"
     );
 }
@@ -2025,10 +2026,7 @@ fn infers_a_multi_arity_return_as_the_union_of_its_arms() {
 fn infers_a_variadic_return() {
     // A rest-param closure was skipped before; now its return (`(str a)` → string) flows, so
     // feeding it to `+` (wants a number) is caught.
-    let w = check_with_defs(
-        &["(defn joiner (a & xs) (str a))"],
-        "(+ 1 (joiner \"x\"))",
-    );
+    let w = check_with_defs(&["(defn joiner (a & xs) (str a))"], "(+ 1 (joiner \"x\"))");
     assert!(
         w.iter().any(|s| s.contains("+") && s.contains("number")),
         "a variadic fn's return should flow: {w:?}"
@@ -2044,7 +2042,8 @@ fn complex_closure_return_only_keeps_arity_checking() {
         "(describe 1 2 3)",
     );
     assert!(
-        w.iter().any(|s| s.contains("describe") && s.contains("arg")),
+        w.iter()
+            .any(|s| s.contains("describe") && s.contains("arg")),
         "arity checking must survive return-only inference: {w:?}"
     );
 }
