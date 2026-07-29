@@ -225,6 +225,18 @@ impl Ty {
         Ty::flat((1u32 << bit(Tag::Int)) | (1u32 << bit(Tag::Float)) | (1u32 << bit(Tag::Decimal)));
     /// `nil ∪ pair` — the named union the prelude's `list?` predicate implies.
     pub const LIST: Ty = Ty::flat((1u32 << bit(Tag::Nil)) | (1u32 << bit(Tag::Pair)));
+    /// The **seqable** union — every collection the sequence combinators walk (a list —
+    /// `nil`/`pair`, a range/seqview reading as `pair` — a vector, set, map, or `bytes`;
+    /// `string` is deliberately excluded). The named type a polymorphic-sequence `sig`
+    /// parameter uses (`(sig f (seqable -> …))`) instead of falling back to `any`.
+    pub const SEQABLE: Ty = Ty::flat(
+        (1u32 << bit(Tag::Nil))
+            | (1u32 << bit(Tag::Pair))
+            | (1u32 << bit(Tag::Vector))
+            | (1u32 << bit(Tag::Set))
+            | (1u32 << bit(Tag::Map))
+            | (1u32 << bit(Tag::Bytes)),
+    );
 
     /// A flat (unrefined) type from a raw tag bitset — the internal constructor
     /// every flat `Ty` funnels through. `const` so the named points above can be
