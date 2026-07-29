@@ -10814,6 +10814,17 @@ call roughly halved. What remains of §7 is compile-time *static* resolution whe
 receiver type is known, and the `:sealed` closed-switch — both pure optimizations over
 the working IC.
 
+**Amendment (2026-07-29) — dispatch hardening.** A review of the shipped system fixed a
+batch of correctness/ergonomic gaps, all keeping the model above intact: **§7's inline
+cache is now polymorphic** (4-way, round-robin eviction, one shared epoch) so an op applied
+over mixed identities in a loop no longer re-resolves every call; **variadic ops** (`&`-rest,
+dispatched on the first arg) work — the op emits `apply`, not a broken direct call — and a
+**zero-arg op is rejected** (nothing to dispatch on); **op-name collisions** across two
+abilities in one namespace are diagnosed (the second's generic `defn` would shadow the
+first); **impl arity** is checked at registration as well as by `nest check`; and **`no-impl`
+throws a structured `{:kind :no-impl :ability :op :id :have}` map** (branchable; the message
+is unchanged). See `docs/devlog.md` 2026-07-29 and `tests/ability_test.blsp`.
+
 **Amendment (2026-07-28) — abilities stay OPEN; no orphan rule, no `bridge` syntax.**
 A design review pulled §1/§2 apart and found the restriction unnecessary and the form
 substanceless:

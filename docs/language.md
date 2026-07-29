@@ -377,6 +377,14 @@ Built-in kinds work the same way, with **`:default`** as the fallback:
 (size 7) (size "hello") (size 1.5)     ;=> 7, 5, -1
 ```
 
+**Op arity.** An op dispatches on its **first** argument, so it must take at least
+one — a zero-arg op `(op [])` is a clean expansion-time error. Beyond the first, an
+op may take more fixed arguments (`(fetch [self k])`) or a `&`-rest
+(`(cat [self & rest])`, dispatched on `self`, the rest passed through). An `impl`
+must match the declared op's arity: a fixed impl exactly, a variadic impl as long
+as it accepts that arity — `nest check` and load-time registration both flag a
+mismatch.
+
 > **The `impl` dispatch id must be written the way `identity-of` produces it.** A
 > record's id is namespaced, so write it **qualified** — `geometry/circle`, not a
 > bare `circle`. A bare symbol registers under `:circle`, which no value ever
@@ -387,7 +395,10 @@ Built-in kinds work the same way, with **`:default`** as the fallback:
 
 A missing implementation is a **loud, named error** — `ability Shape/area: no impl
 for :geometry/circle — have (…)`, listing the ids that *are* implemented — never a
-silent `nil`.
+silent `nil`. The thrown value is a **structured map**, `{:kind :no-impl :message …
+:ability :op :id :have}`, so a handler can branch on the parts —
+`(catch e (get e :id))` — rather than parse the string; `error-message` still
+returns that same human text.
 
 **Records dispatch as themselves; plain maps do not.** `(type-of r)` is still `:map`
 for a `defrecord` value and `get`/`assoc` still treat it as a map — the nominal id is
@@ -445,7 +456,9 @@ never reaches the wire.
 declared ops at the right arity and flags an op the ability never declared. It also
 warns at a **call site** when an op is applied to an argument of statically-known
 identity — a literal, a direct `defrecord` constructor call, or a record-typed
-variable — for which no impl and no `:default` is registered.
+variable — for which no impl and no `:default` is registered. Two abilities that
+declare the **same op name** in one namespace would have the second's generic function
+shadow the first's; `defability` warns at load when that shadowing is real.
 
 > **Direction: [ADR-172](decisions.md) (amended 2026-07-28).** This open runtime model
 > is kept open — `impl` stays legal for any ability and any id (primitive, owned, or
@@ -454,10 +467,11 @@ variable — for which no impl and no `:default` is registered.
 > cross-module collisions warned (shipped). The amendment **dropped** the earlier
 > `impl`-only-what-you-own orphan rule and the `bridge` form: `bridge` expanded to the
 > same registration as `impl` (no runtime substance), and the orphan rule guarded a
-> multi-third-party-library collision greenfield Brood doesn't have. Still ahead: dispatch
-> specialized through the inline-cache/JIT with deopt-on-reload, `:sealed` abilities fully
-> static, and `Display` to always-on core (superseding the opt-in `show`). This section
-> documents what is implemented today.
+> multi-third-party-library collision greenfield Brood doesn't have. Dispatch now runs
+> through a **polymorphic per-op inline cache** (`%dispatch`, 4-way) that deopts on
+> reload (a `def *impls*`/compaction bumps the epoch), and `Display` is always-on core.
+> Still ahead: `:sealed` abilities fully static, and JIT specialization of the dispatch
+> site. This section documents what is implemented today.
 
 **Register at load time.** `*impls*` is updated with `def`, so two processes calling
 `impl` *concurrently* can lose one update. Top-level `impl` forms — the normal case
