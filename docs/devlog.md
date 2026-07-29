@@ -10973,3 +10973,44 @@ more than the IC tables added. But those tables are where the next attempt shoul
 and the honest next step is *per-allocation-site* attribution (backtraces), not another
 guess from size classes. The arena-the-slabs idea from the previous entry is now
 lower-priority than it looked: slab `Vec`s account for ~110 B/proc, not ~1 KB.
+
+## 2026-07-29 (cont.) — the process floor is working state, not waste
+
+Per-structure attribution of a parked process (probe in `trim_parked`, since size-class
+profiling had gone as far as it could):
+
+| structure | bytes | |
+|---|---|---|
+| `vm_call_ics` | 384 | cap 4 × 96 B (`Option<CallIcEntry>`) |
+| `vm_fast_links` | 160 | cap 4 × 40 B |
+| `arm_ic_blocks` | 120 | 2 entries |
+| `roots` | 192 | |
+| slabs | 256 | |
+| `live_vm_arms` | 32 | |
+| **per-process tables** | **1144** | plus `Box<Process>` 1840, `Arc<Mailbox>` 184, `Suspended` 128 |
+
+So the **inline-cache tables are 664 B** — the largest single identified item, and the one
+worth attacking. They are pure caches (every entry validated on `(sym, argc, epoch)`), so
+dropping them is always safe; `runtime_collect` already does exactly that.
+
+**Dropping them on park works, and costs too much.** Measured:
+
+| policy | parked floor | spawn-live | pingpong | ring |
+|---|---|---|---|---|
+| baseline | 4.53 KB/proc | 2.00 GB | — | — |
+| drop on every park | 3.89 | 1.75 GB | **+26.1%** | **+18.1%** |
+| drop on **first** park only | 3.91 | 1.74 GB | **+11.5%** | **+16.9%** |
+
+The first-park heuristic barely helps, which is the informative part: the cost is not the
+*frequency* of dropping but that a process loses the caches it built during startup and
+has to rebuild them at the start of its hot loop. Both reverted — 0.64 KB/proc is not
+worth 12-17% on the message-latency rows, which are already the widest gap to Elixir.
+
+**Conclusion for this line of work.** Three attempts, all measured, all reverted:
+park-trim threshold (nothing), capacity-1 slab first-touch (110 B, `bintree` +4.8%), IC
+table drop (640 B, `pingpong`/`ring` +12-17%). The pattern is consistent: **the ~4.5 KB is
+working state a process genuinely uses, not slack.** Getting to the BEAM's ~3 KB needs the
+state to be *smaller*, not dropped — e.g. shrinking `CallIcEntry` (96 B, of which the
+`fast` memo is 32) or sharing IC entries for frozen callees across processes (ADR-175
+Stage 3, sound because a sealed binding's resolution is process-independent). Those are
+design changes, not tuning, and should be costed before being attempted.
