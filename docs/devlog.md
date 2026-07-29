@@ -11542,3 +11542,60 @@ an accumulator-returning recursion (unknown base case) still defers, never false
 The cardinal-sin gate held both times: type suite 268 → 270, and **zero** new false positives
 across all of `std/` + `tests/`. Next lever on inference: multi-arity/rest closures, and the
 bottom-up fixpoint order so a caller of an as-yet-un-inferred function still resolves.
+
+## 2026-07-29 (cont.) — provided ops: default method bodies in `defability` (ADR-185)
+
+Comparing Brood's ability/dispatch stack to the most-loved languages, the dispatch *core*
+(open extension, precedence tiers, multiple dispatch with operator algebra, hot reload) is
+ahead of the pack — but one loved ergonomic was missing: **provided methods** (Rust traits,
+Swift protocol extensions, Haskell typeclasses — implement the required ops, inherit the
+derived ones). Built it.
+
+**The change.** An op spec may now carry a **body** after its optional `:-> RET`:
+`(op [args] :-> ret? body…)`. `defability` registers that body as the op's `:default` impl
+(from the declaring ns → ability-owner tier). A bodyless spec stays a **required** op.
+`(defability Ord (compare-to [self other] :-> int) (lt [self other] :-> bool (< (compare-to
+self other) 0)) …)` — an `impl` writes only `compare-to` and inherits `lt`/`gt`/…; an
+id-keyed impl of a provided op overrides it (id key beats `:default`).
+
+**Why it's small.** Dispatch already falls back id-impl → `:default`, so the generated
+generic function and the dispatch path are **unchanged** — a provided op is just an
+auto-registered impl, and the inline cache / precedence / hot reload / cross-process paths
+all carry over. No new special form, no `Value` kind, no builtin: a prelude macro change
+(`defability--op-body` + a `fold` emitting the `register-impl` forms) plus a checker
+adjustment. Specs are stored *with* bodies in `*abilities*` so the checker can tell provided
+from required.
+
+**Checker.** Two advisory passes learned "provided" (`spec_has_body` + an `Op.provided`
+flag / an `AbilityInfo.provided` set): per-`impl` completeness no longer demands a provided
+op, and `:sealed` exhaustiveness no longer demands it of a member — but a **required** op is
+still demanded in both. `nest check` stays zero-warning across `std/` + `tests/`.
+
+**Wrinkle worth noting.** Each `impl` *form* is completeness-checked on its own, so
+*overriding* a provided op is done by adding its method to that type's existing `impl` (same
+form as the required ops), not as a standalone later `impl` (that trips the pre-existing
+"impl is missing op" lint — unchanged behaviour).
+
+9 tests added to `tests/ability_test.blsp` (runtime inherit/override/delegation, the four
+checker interactions, cross-process): 54 → 63, all green. **Deferred (ADR-011):** `derive`
+(Elixir `@derive` / Rust `#[derive]`) — auto-generate the *required* op structurally for a
+record so `(defrecord point (x y) :derives [Ord])` needs no body; it composes directly with
+provided ops (derive the one required op, inherit the rest) and is the natural next step.
+
+## 2026-07-29 (cont.) — inference for multi-arity / variadic / optional closures
+
+The inferencer bailed on any closure that wasn't single-arm-no-rest-no-optional — which is a
+lot of std (every multi-arity or variadic function). It couldn't pin their *param* types
+(those vary per arm), but it CAN infer the **return**: the union of each arm's tail with the
+arm's binders bound to `ANY` (`infer_return_only`, a params-less `Sig`). That return flows to
+callers; arity stays checked independently by `arity_of`, so a params-less sig loses nothing.
+
+Sound because a union of arm returns is a *supertype* of whatever a given call actually
+returns — it can only *under*-flag a caller, never false-positive; and any arm whose return
+can't be typed defers the whole thing. A multi-arity `describe` returning `:one | :two` now
+flags `(string-length (describe 5))`; a variadic `(joiner a & xs)` returning a string flags
+`(+ 1 (joiner "x"))`; arity errors on the same functions still fire.
+
+Cardinal-sin gate held over the bigger surface: type suite 270 → 273, zero new false positives
+across std/ + tests/. Remaining inference lever: bottom-up fixpoint order so a caller of an
+as-yet-un-inferred function resolves without depending on evaluation order.
