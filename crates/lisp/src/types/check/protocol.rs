@@ -998,3 +998,321 @@ pub(super) fn check_ability_call_inferred(
         }
     }
 }
+
+// ---- multimethod missing-method at call sites (ADR-179) ------------------------------
+//
+// The `defmulti` analogue of `check_ability_calls`: warn on a direct call to a multimethod
+// generic whose FULL argument tuple has a statically-known identity — every arg a literal or
+// a direct `defrecord` constructor call — for which no exact method and no `:default` is
+// registered. Sound like the ability pass: a generic is recognised only by the exact def
+// symbol whose body fingerprints as `(multi-resolve (quote NAME) …)`, so a same-named plain
+// function is never mistaken for one, and a call whose generic is defined in another file is
+// simply not checked. Only warns when *every* argument's identity is certain — one unknown
+// arg defers. Methods union this file's `register-method` forms with the runtime `*methods*`
+// registry (cross-file/reachable methods), so a method in either place suppresses the warning.
+
+/// Precomputed multimethod facts for a file: which globals are `defmulti` generics, which
+/// record constructors exist, and which identity-tuples (plus `:default`) each multimethod
+/// covers (this file's `register-method` forms + the runtime `*methods*` registry).
+pub(super) struct MultiInfo {
+    /// generic-fn global symbol → the multimethod's name.
+    generics: HashMap<value::Symbol, String>,
+    /// record constructor symbol → its `:module/name` id-name (`(circle …)` → circle's id).
+    ctors: HashMap<value::Symbol, String>,
+    /// multimethod name → the set of exact identity-tuples it has a method for.
+    methods: HashMap<String, HashSet<Vec<String>>>,
+    /// multimethod names that have a `:default` catch-all method.
+    defaults: HashSet<String>,
+}
+
+impl MultiInfo {
+    fn is_empty(&self) -> bool {
+        self.generics.is_empty()
+    }
+}
+
+/// Search `form` for a multimethod generic's dispatch call → the multimethod name. `defmulti`
+/// emits `(defn NAME (& args) (let (… (multi-resolve (quote NAME) key)) …))`, so the body
+/// carries a `(multi-resolve (quote NAME) …)` — the fingerprint, mirroring `find_op_key`.
+fn find_multi_name(heap: &Heap, form: Value) -> Option<String> {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let items = list_items(heap, form)?;
+        if let Some(&Value::Sym(h)) = items.first() {
+            if sym_name(Value::Sym(h)).as_deref() == Some("multi-resolve") {
+                if let Some(name) = items
+                    .get(1)
+                    .and_then(|&v| unquote(heap, v))
+                    .and_then(sym_name)
+                {
+                    return Some(name);
+                }
+            }
+        }
+        items.iter().find_map(|&item| find_multi_name(heap, item))
+    })
+}
+
+/// Collect this file's multimethod generics (`def sym → name`) and record ctors
+/// (`def sym → id`). Recurses — a `def` can nest inside a macro's `do`.
+fn collect_multi_defs(
+    heap: &Heap,
+    form: Value,
+    generics: &mut HashMap<value::Symbol, String>,
+    ctors: &mut HashMap<value::Symbol, String>,
+) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        let Some(&Value::Sym(head)) = items.first() else {
+            return;
+        };
+        if value::symbol_is(head, "quote") || value::symbol_is(head, "quasiquote") {
+            return;
+        }
+        if value::symbol_is(head, "def") {
+            if let (Some(&Value::Sym(name)), Some(&val)) = (items.get(1), items.get(2)) {
+                if let Some(body) = fn_last_body(heap, val) {
+                    if let Some(mname) = find_multi_name(heap, body) {
+                        generics.insert(name, mname);
+                    }
+                    if let Some(id) = record_ctor_id(heap, body) {
+                        ctors.insert(name, id);
+                    }
+                }
+            }
+        }
+        for &item in items.get(1..).unwrap_or(&[]) {
+            collect_multi_defs(heap, item, generics, ctors);
+        }
+    })
+}
+
+/// Collect `(register-method (quote NAME) KEY …)` forms — KEY is `(quote [id …])` for a
+/// tuple method or a bare `:default` keyword for the catch-all.
+fn collect_register_methods(
+    heap: &Heap,
+    form: Value,
+    methods: &mut HashMap<String, HashSet<Vec<String>>>,
+    defaults: &mut HashSet<String>,
+) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        if let Some(&Value::Sym(h)) = items.first() {
+            if sym_name(Value::Sym(h)).as_deref() == Some("register-method") {
+                if let Some(mname) = items
+                    .get(1)
+                    .and_then(|&v| unquote(heap, v))
+                    .and_then(sym_name)
+                {
+                    match items.get(2).copied() {
+                        Some(Value::Keyword(k)) if value::symbol_is(k, "default") => {
+                            defaults.insert(mname);
+                        }
+                        Some(key) => {
+                            if let Some(tuple) = key_tuple(heap, unquote(heap, key)) {
+                                methods.entry(mname).or_default().insert(tuple);
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
+        for &item in items.get(1..).unwrap_or(&[]) {
+            collect_register_methods(heap, item, methods, defaults);
+        }
+    })
+}
+
+/// A dispatch key vector `[id …]` → the tuple of id-name strings, or `None` if it isn't a
+/// vector of symbols/keywords.
+fn key_tuple(heap: &Heap, key: Option<Value>) -> Option<Vec<String>> {
+    let Some(Value::Vector(vid)) = key else {
+        return None;
+    };
+    heap.vector(vid).iter().map(|&e| sym_name(e)).collect()
+}
+
+/// Union in the runtime `*methods*` registry — `NAME → {tuple|:default → fn}` — so a method
+/// reachable through a required module (not a form in this file) counts.
+fn read_methods_registry(
+    heap: &Heap,
+    methods: &mut HashMap<String, HashSet<Vec<String>>>,
+    defaults: &mut HashSet<String>,
+) {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*methods*")) else {
+        return;
+    };
+    for (name_v, inner) in heap.map_entries(mid) {
+        let Some(mname) = sym_name(name_v) else {
+            continue;
+        };
+        let Value::Map(inner_id) = inner else {
+            continue;
+        };
+        for (key, _fn) in heap.map_entries(inner_id) {
+            match key {
+                Value::Keyword(k) if value::symbol_is(k, "default") => {
+                    defaults.insert(mname.clone());
+                }
+                Value::Vector(vid) => {
+                    let tuple: Option<Vec<String>> =
+                        heap.vector(vid).iter().map(|&e| sym_name(e)).collect();
+                    if let Some(tuple) = tuple {
+                        methods.entry(mname.clone()).or_default().insert(tuple);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Collect `(register-multi (quote NAME) ALGEBRA)` → NAME's closure-algebra name
+/// (`commutative`/`antisymmetric`); a nil algebra is skipped.
+fn collect_register_multi(heap: &Heap, form: Value, algebras: &mut HashMap<String, String>) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        if let Some(&Value::Sym(h)) = items.first() {
+            if sym_name(Value::Sym(h)).as_deref() == Some("register-multi") {
+                if let Some(mname) = items
+                    .get(1)
+                    .and_then(|&v| unquote(heap, v))
+                    .and_then(sym_name)
+                {
+                    if let Some(alg) = items.get(2).and_then(|&v| sym_name(v)) {
+                        algebras.insert(mname, alg);
+                    }
+                }
+            }
+        }
+        for &item in items.get(1..).unwrap_or(&[]) {
+            collect_register_multi(heap, item, algebras);
+        }
+    })
+}
+
+/// Union in the runtime `*multi-algebra*` registry — NAME → algebra keyword (or nil).
+fn read_multi_algebra_registry(heap: &Heap, algebras: &mut HashMap<String, String>) {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*multi-algebra*"))
+    else {
+        return;
+    };
+    for (name_v, alg_v) in heap.map_entries(mid) {
+        if let (Some(mname), Some(alg)) = (sym_name(name_v), sym_name(alg_v)) {
+            algebras.entry(mname).or_insert(alg);
+        }
+    }
+}
+
+/// Gather the multimethod facts for a file from its expanded tree + the runtime registry.
+pub(super) fn build_multi_info(heap: &Heap, expanded: &[Value]) -> MultiInfo {
+    let mut generics = HashMap::new();
+    let mut ctors = HashMap::new();
+    for &form in expanded {
+        collect_multi_defs(heap, form, &mut generics, &mut ctors);
+    }
+    let mut methods = HashMap::new();
+    let mut defaults = HashSet::new();
+    for &form in expanded {
+        collect_register_methods(heap, form, &mut methods, &mut defaults);
+    }
+    read_methods_registry(heap, &mut methods, &mut defaults);
+    // Account for the closure mirror the runtime derives: a `:commutative`/`:antisymmetric`
+    // multimethod's authored `[A B]` (A ≠ B) also covers `[B A]`. Without this, a call in the
+    // mirror order (`(scale 3 money)` for a `[money :int]` method) would false-warn when the
+    // file's own methods are read from forms (not yet in the runtime registry).
+    let mut algebras = HashMap::new();
+    for &form in expanded {
+        collect_register_multi(heap, form, &mut algebras);
+    }
+    read_multi_algebra_registry(heap, &mut algebras);
+    for (mname, set) in methods.iter_mut() {
+        if algebras.contains_key(mname) {
+            let mirrors: Vec<Vec<String>> = set
+                .iter()
+                .filter(|t| t.len() == 2 && t[0] != t[1])
+                .map(|t| vec![t[1].clone(), t[0].clone()])
+                .collect();
+            set.extend(mirrors);
+        }
+    }
+    MultiInfo {
+        generics,
+        ctors,
+        methods,
+        defaults,
+    }
+}
+
+/// Walk every call site; warn when a multimethod generic is applied to a fully
+/// statically-known argument tuple with no exact method and no `:default`.
+fn walk_multi_calls(
+    heap: &Heap,
+    form: Value,
+    info: &MultiInfo,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        let Some(&Value::Sym(head)) = items.first() else {
+            return;
+        };
+        if value::symbol_is(head, "quote") || value::symbol_is(head, "quasiquote") {
+            return;
+        }
+        if let Some(mname) = info.generics.get(&head) {
+            let args = items.get(1..).unwrap_or(&[]);
+            // Only judge a call every one of whose args has a certain identity — one unknown
+            // arg (a variable, a call result) leaves the tuple unknown, so we defer.
+            if !args.is_empty() {
+                let tuple: Option<Vec<String>> = args
+                    .iter()
+                    .map(|&a| arg_identity(heap, a, &info.ctors))
+                    .collect();
+                if let Some(tuple) = tuple {
+                    let covered = info.defaults.contains(mname)
+                        || info
+                            .methods
+                            .get(mname)
+                            .is_some_and(|set| set.contains(&tuple));
+                    if !covered {
+                        let key = tuple
+                            .iter()
+                            .map(|s| format!(":{}", s))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        out.push((
+                            heap.form_pos_only(form),
+                            format!("multimethod {}: no method for [{}]", mname, key),
+                        ));
+                    }
+                }
+            }
+        }
+        for &item in &items {
+            walk_multi_calls(heap, item, info, out);
+        }
+    })
+}
+
+pub(super) fn check_multi_calls(
+    heap: &Heap,
+    expanded: &[Value],
+    info: &MultiInfo,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    if info.is_empty() {
+        return;
+    }
+    for &form in expanded {
+        walk_multi_calls(heap, form, info, out);
+    }
+}
