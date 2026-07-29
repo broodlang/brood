@@ -86,7 +86,13 @@
         ;; all-but-the-first byte — O(n) per step, O(n^2) total (a 50k-byte reduce
         ;; spiked ~1.3 GB RSS). `bytes->list` is a single O(n) native pass.
         (if (%eq t :map)
-          (map-pairs coll)
+          ;; A record (a map carrying `:__id__`) takes its `Seqable` view — the fields,
+          ;; id-free, by default — so it never leaks `:__id__` into map/fold/keys and a
+          ;; custom collection can define its own iteration. `to-seq` is only reached for
+          ;; records (never at boot, which has none), so its late definition is fine.
+          (if (map-get coll :__id__ nil)
+            (to-seq coll)
+            (map-pairs coll))
           (if (%eq t :bytes) (bytes->list coll) coll))))))
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
@@ -700,7 +706,9 @@ and a set its elements, as everywhere else `seq` applies."
     (string? coll) (string-length coll)
     (vector? coll) (vector-length coll)
     (bytes? coll) (byte-length coll)
-    (map? coll) (map-count coll)
+    ;; a record counts as its `Seqable` view (its fields, id-free, by default) — not the
+    ;; raw map, which would include the internal `:__id__`. `map-get` distinguishes it.
+    (map? coll) (if (map-get coll :__id__ nil) (count (to-seq coll)) (map-count coll))
     (set? coll) (%set-count coll)
     else (count--acc coll 0)))
 
@@ -861,8 +869,9 @@ For a map, keys are added or replaced; for a vector, integer indices in
 ;; [k v] vectors, in one O(n) pass. `keys`/`vals`/`contains?`/`reduce-kv` are all
 ;; Brood over it — no per-key `get`, so no O(n²) (this replaced the old `map-keys`
 ;; primitive + get-per-key `vals`).
-(defn keys (m) "The keys of map `m`, in insertion order." (map first (map-pairs m)))
-(defn vals (m) "The values of map `m`, in insertion order." (map second (map-pairs m)))
+;; `seq` (not `map-pairs`) so a record's keys/vals are its fields — no internal `:__id__`.
+(defn keys (m) "The keys of map `m` (a record's are its fields, id-free)." (map first (seq m)))
+(defn vals (m) "The values of map `m` (a record's are its fields, id-free)." (map second (seq m)))
 (defn contains? (m k)
   "True if map `m` has key `k` (distinguishes a stored `nil`/`false` from
 absence). O(1) via the CHAMP hash path (`map-get`), not an O(n) key scan: probe
@@ -4182,9 +4191,9 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   (if (record? x) (get x :__id__) nil))
 
 (defn fields (x)
-  "The FIELDS of record `x` as a plain map — its identity omitted. The clean view for
-  code that wants a record's data without the internal id (`keys`/`count`/serialization
-  over this see only fields). A plain map is returned unchanged."
+  "The FIELDS of record `x` as a plain map — its identity omitted. The explicit id-free
+  view; the default `Seqable` view a record's `seq`/`count`/`keys`/`map`/`fold` already
+  give (so those don't leak `:__id__`). A plain map is returned unchanged."
   (if (record? x) (dissoc x :__id__) x))
 
 ; ---- registration -----------------------------------------------------------
@@ -4406,6 +4415,18 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   for tracing. Returns `x`, so it drops into a pipeline: `(-> v f inspectln g)`."
   (println (inspect x))
   x)
+
+;; Seqable — a value's list/seq view: the seam `seq` (and thus `map`/`filter`/`fold`/
+;; `for`/`into`, plus `count`/`keys`/`vals`) consults for a RECORD. The default is the
+;; record's fields (id-free) as `[k v]` pairs, so a record iterates, counts, and keys as
+;; its fields and never leaks the internal `:__id__`; a custom-collection record overrides
+;; `to-seq` to define its own iteration. Built-ins never reach here — `seq` takes their
+;; native path — so this is purely the record extension point (à la `Display`), at zero
+;; cost to built-ins.
+(defability Seqable
+  "A value's sequence view — the list that `seq`/`map`/`fold`/`for`/`into` iterate."
+  (to-seq [self] :-> any))
+(impl Seqable :default (to-seq [x] (map-pairs (fields x))))
 
 ;; The per-print-argument hook the prelude installs into `*show*` at the end of boot
 ;; (Display is core, ADR-172 §8 — no activation step). Only a RECORD is routed through

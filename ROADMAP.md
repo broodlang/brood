@@ -159,12 +159,17 @@ What that review consciously left OPEN, with the reasoning:
   fix — `(defn f ((x int) -> int) …)` — is an ADR-082 revision touching `defn`, the
   checker's `sig_of`, `defrecord`'s emitted sigs, `sig!`'s wrapping, and every `sig`
   in `std/`. Deferred with the reasoning in ADR-163, not dismissed. **[Brood]**
-- ⬜ **Re-host the seq protocol on abilities.** `count`/`first`/`conj` dispatch in the
-  prelude and the kernel, so a user type can never join the collection protocol
-  ADR-156 completed — policy still living in Rust. Now unblocked in *principle* by
-  ADR-168 (a record has a dispatch identity to register against); the remaining
-  blocker is performance: these are the hottest paths in the language, so it is a
-  measured rewrite, not a promotion. **[kernel/Brood]**
+- 🟡 **Re-host the seq protocol on abilities** (2026-07-29). The **read/iteration half
+  shipped**: a `Seqable` ability (op `to-seq`, default = a record's fields id-free) that
+  `seq` — and so `map`/`filter`/`fold`/`for`/`into`, plus `count`/`keys`/`vals` — consults
+  for a RECORD, so a custom-collection record defines its own iteration and joins the
+  protocol. Hybrid, à la `Display`: built-ins keep their native fast path (the `Seqable`
+  branch fires only for a record, detected by one `:__id__` check, once per collection op,
+  not per element), so zero cost to lists/vectors/maps. This also **fixed the `:__id__`
+  leak** unified `defrecord` introduced — `(count r)`/`(keys r)`/`(seq r)` are now the
+  field view, not the raw map (which included `:__id__`). Still ⬜: the **build/lookup
+  half** — `conj`/`into` (a `Conjable` ability) and `get`/`nth` (a `Lookup` ability) for
+  custom collections; and an optional `Counted` for O(1) `count`. **[Brood]**
 - ✅ **Record-shape dispatch** — resolved by **ADR-168**. Records stay structural maps
   (ADR-130 intact: `type-of` is still `:map`, `get`/`assoc`/`=` still structural), and
   a `defrecord` value carries a *dispatch-only* `:module/name` nominal identity baked
