@@ -150,9 +150,30 @@ impl fmt::Display for Ty {
             }
             return f.write_str(&parts.join(" | "));
         }
+        // Factor the `number` alias out of a *larger* pure-tag union: a type that admits
+        // every `number` member (int, float, decimal) plus something else — e.g. the
+        // arithmetic operators' argument domain `number | map` (records participating via
+        // the `Num` ability) — renders as `number | map`, not `int | float | map | decimal`.
+        // (An exact `number` is already named above; this only fires for a strict superset.)
+        let number_tags = Ty::NUMBER.tags;
+        let factor_number = (self.tags & number_tags) == number_tags && self.tags != number_tags;
         let mut first = true;
+        let mut number_emitted = false;
         for tag in ALL_TAGS {
             if self.contains_tag(tag) {
+                // Collapse the number members into a single `number` token at the first one.
+                if factor_number && (1u32 << bit(tag)) & number_tags != 0 {
+                    if number_emitted {
+                        continue;
+                    }
+                    number_emitted = true;
+                    if !first {
+                        f.write_str(" | ")?;
+                    }
+                    first = false;
+                    f.write_str("number")?;
+                    continue;
+                }
                 if !first {
                     f.write_str(" | ")?;
                 }

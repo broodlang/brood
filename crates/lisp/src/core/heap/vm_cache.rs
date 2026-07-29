@@ -11,17 +11,31 @@ pub struct GlobalIcEntry {
     pub value: Value,
 }
 
-/// One ability-dispatch inline-cache entry (ADR-172 §7). Held in [`Heap::dispatch_ics`],
-/// keyed by an op's `[ability op]` symbol pair packed into a `u64`; memoises the impl
-/// `fn` resolved for the LAST-seen dispatch `id`, validated by (`id`, `epoch`). `callee`
-/// is immovable — it lives in `*impls*`, which `register-impl` promotes to RUNTIME by
-/// `def` — and a reload (`def *impls*`) or a RUNTIME compaction bumps `global_epoch`, so
-/// a stale entry misses and re-resolves. Semantically a pure memo of `impl-for`, invisible
-/// to the language.
+/// Number of impl `id → fn` associations one op's dispatch cache holds — a small
+/// **polymorphic** cache (ADR-172 §7). A single slot (monomorphic) thrashes on an op
+/// applied over mixed identities in one loop (`to-str`/`inspect` across a heterogeneous
+/// collection, a comparator over several record types), re-resolving on every call; a
+/// handful of ways cover the common degree of polymorphism at a fixed, tiny cost.
+pub const DISPATCH_IC_WAYS: usize = 4;
+
+/// One op's ability-dispatch inline cache (ADR-172 §7). Held in [`Heap::dispatch_ics`],
+/// keyed by an op's `[ability op]` symbol pair packed into a `u64`; memoises up to
+/// [`DISPATCH_IC_WAYS`] `id → impl-fn` associations, all validated by a single shared
+/// `epoch`. Each `callee` is immovable — it lives in `*impls*`, which `register-impl`
+/// promotes to RUNTIME by `def` — and a reload (`def *impls*`) or a RUNTIME compaction
+/// bumps `global_epoch`, so the whole entry goes stale and re-resolves. Semantically a
+/// pure memo of `impl-for`, invisible to the language.
 pub struct DispatchIcEntry {
-    pub id: Symbol,
     pub epoch: u64,
-    pub callee: Value,
+    /// Valid ways `0..len`; the dispatch `id` of each cached association.
+    pub ids: [Symbol; DISPATCH_IC_WAYS],
+    /// The impl fn cached for the matching `ids[i]`.
+    pub callees: [Value; DISPATCH_IC_WAYS],
+    /// Number of populated ways (`<= DISPATCH_IC_WAYS`).
+    pub len: u8,
+    /// Round-robin victim once full — evicts the oldest way, so a genuinely
+    /// megamorphic op keeps churning the same slots rather than growing.
+    pub cursor: u8,
 }
 
 /// One call-site inline-cache entry — see the [`Heap::vm_call_ics`] field doc.
@@ -357,22 +371,54 @@ impl Heap {
         };
         let epoch = self.global_epoch();
         if let Some(e) = self.dispatch_ics.borrow().get(&key) {
-            if e.epoch == epoch && e.id == id_sym {
-                return e.callee;
+            if e.epoch == epoch {
+                for i in 0..e.len as usize {
+                    if e.ids[i] == id_sym {
+                        return e.callees[i];
+                    }
+                }
             }
         }
         let callee = self.dispatch_resolve(impls, op_key, id);
         // Cache only an immovable fn (mirrors `vm_global_ic_put`): a resolved impl lives in
         // the RUNTIME-promoted `*impls*`, so this holds; the guard is belt-and-braces.
         if !is_movable(callee) {
-            self.dispatch_ics.borrow_mut().insert(
-                key,
-                DispatchIcEntry {
-                    id: id_sym,
-                    epoch,
-                    callee,
-                },
-            );
+            let mut ics = self.dispatch_ics.borrow_mut();
+            let e = ics.entry(key).or_insert_with(|| DispatchIcEntry {
+                epoch,
+                ids: [0; DISPATCH_IC_WAYS],
+                callees: [Value::nil(); DISPATCH_IC_WAYS],
+                len: 0,
+                cursor: 0,
+            });
+            // A stale epoch invalidates every way at once — reset before inserting.
+            if e.epoch != epoch {
+                e.epoch = epoch;
+                e.len = 0;
+                e.cursor = 0;
+            }
+            // Update in place if this id is already a way (a benign re-resolve race);
+            // else append into a free way, or round-robin evict the oldest when full.
+            let mut slot = None;
+            for i in 0..e.len as usize {
+                if e.ids[i] == id_sym {
+                    slot = Some(i);
+                    break;
+                }
+            }
+            let slot = slot.unwrap_or_else(|| {
+                if (e.len as usize) < DISPATCH_IC_WAYS {
+                    let s = e.len as usize;
+                    e.len += 1;
+                    s
+                } else {
+                    let s = e.cursor as usize;
+                    e.cursor = (e.cursor + 1) % DISPATCH_IC_WAYS as u8;
+                    s
+                }
+            });
+            e.ids[slot] = id_sym;
+            e.callees[slot] = callee;
         }
         callee
     }
