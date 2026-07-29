@@ -555,6 +555,34 @@ fn collect_register_impls(
     })
 }
 
+/// Collect `(derive-into (quote A) :id (quote (fields)) (current-ns))` forms → `(ability A,
+/// id)` pairs. `defrecord`'s `:derives` emits these; the recipe runs at *load*, not at check
+/// time, so the checker can't see the generated methods directly. Instead it treats a derived
+/// id as implementing **every** op of the ability (ADR-185) — so a derived member satisfies
+/// call-site missing-impl and `:sealed` exhaustiveness without running the recipe.
+fn collect_derive_into(heap: &Heap, form: Value, out: &mut Vec<(String, String)>) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        if let Some(&Value::Sym(h)) = items.first() {
+            if sym_name(Value::Sym(h)).as_deref() == Some("derive-into") {
+                let a = items
+                    .get(1)
+                    .and_then(|&v| unquote(heap, v))
+                    .and_then(sym_name);
+                let id = items.get(2).copied().and_then(sym_name);
+                if let (Some(a), Some(id)) = (a, id) {
+                    out.push((a, id));
+                }
+            }
+        }
+        for &item in items.get(1..).unwrap_or(&[]) {
+            collect_derive_into(heap, item, out);
+        }
+    })
+}
+
 /// Union in the runtime `ability/*impls*` registry — `[A op] → {id → …}` — so an impl
 /// reachable through a required module (not present as a form in this file) counts.
 fn read_impls_registry(
@@ -749,6 +777,21 @@ pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo
     }
     read_abilities_registry(heap, &mut abilities, &mut ret_forms, &mut op_params);
     read_sealed_registry(heap, &mut sealed);
+    // `:derives [A]` on a record (ADR-185) registers A's impl for that id at LOAD, not at
+    // check time — so expand each `derive-into` form into the impls set here: a derived id
+    // implements every op of the ability. This makes a derived member satisfy the call-site
+    // and `:sealed` checks (which read `impls`) without running the recipe.
+    let mut derives: Vec<(String, String)> = Vec::new();
+    for &form in expanded {
+        collect_derive_into(heap, form, &mut derives);
+    }
+    for (a, id) in &derives {
+        if let Some(ops) = abilities.get(a) {
+            for op in ops {
+                impls.insert((a.clone(), op.clone(), id.clone()));
+            }
+        }
+    }
     let op_ret = ret_forms
         .into_iter()
         .filter_map(|(k, form)| super::annot::parse_type(heap, form).map(|ty| (k, ty)))
