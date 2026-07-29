@@ -1970,6 +1970,49 @@ fn recursive_inference_defers_when_the_base_case_is_unknown() {
 }
 
 #[test]
+fn infers_a_multi_arity_return_as_the_union_of_its_arms() {
+    // A multi-arity closure has no single param signature, but its return is the union of
+    // each arm's tail — here `:one | :two`. Feeding that to `string-length` (wants string)
+    // is a provable misuse. (Before, a multi-arity closure was skipped entirely.)
+    let w = check_with_defs(
+        &["(defn describe ((x) :one) ((x y) :two))"],
+        "(string-length (describe 5))",
+    );
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "a multi-arity fn's union return should flow: {w:?}"
+    );
+}
+
+#[test]
+fn infers_a_variadic_return() {
+    // A rest-param closure was skipped before; now its return (`(str a)` → string) flows, so
+    // feeding it to `+` (wants a number) is caught.
+    let w = check_with_defs(
+        &["(defn joiner (a & xs) (str a))"],
+        "(+ 1 (joiner \"x\"))",
+    );
+    assert!(
+        w.iter().any(|s| s.contains("+") && s.contains("number")),
+        "a variadic fn's return should flow: {w:?}"
+    );
+}
+
+#[test]
+fn complex_closure_return_only_keeps_arity_checking() {
+    // The return-only sig is params-less, but arity is checked independently (`arity_of`),
+    // so a wrong-arity call to the multi-arity fn is still flagged — no regression.
+    let w = check_with_defs(
+        &["(defn describe ((x) :one) ((x y) :two))"],
+        "(describe 1 2 3)",
+    );
+    assert!(
+        w.iter().any(|s| s.contains("describe") && s.contains("arg")),
+        "arity checking must survive return-only inference: {w:?}"
+    );
+}
+
+#[test]
 fn does_not_infer_through_branches_or_lets() {
     // A body with `if`/complex `let` is *not* a single straight-line expression
     // — inference must skip it, leaving the closure untyped (no warning).
