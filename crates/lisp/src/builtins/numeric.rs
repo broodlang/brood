@@ -203,39 +203,12 @@ pub(super) fn num_bin(
             let scale = dec_scale(x.fractional_digit_count(), y.fractional_digit_count());
             Ok(heap.alloc_decimal(dec_op(x, y).with_scale(scale)))
         }
-<<<<<<< HEAD
         // A record operand (a map with a truthy __id__) routes to the `Num` multimethod,
         // dispatching on both operands. Gating on the Map *tag* keeps the record check off
         // the numeric path — a float/decimal operand falls straight to the float arm. A pair
         // with no method raises `no-method`; a plain (non-record) map errors in `num_to_f64`.
         (Value::Map(_), _) | (_, Value::Map(_)) if is_record(heap, a) || is_record(heap, b) => {
             num_multi_dispatch(heap, who, a, b)
-=======
-        // A float operand anywhere: the float path (a BigInt/Decimal coerces via
-        // `f64` — float contagion, like Clojure's double contagion). But first, a RECORD
-        // first operand dispatches the `Num` protocol (cold path — ints/floats never reach
-        // here). A plain non-numeric operand still errors in `num_to_f64` below.
-        _ => {
-            if let Some(r) = num_record_dispatch(heap, who, a, b)? {
-                return Ok(r);
-            }
-            // A record as the SECOND operand can't dispatch: `Num` is single-dispatch on
-            // the FIRST argument (a record first operand was handled above). Cross-type
-            // arithmetic is not implicit — a clear, named error beats "expected number,
-            // got map" from the float coercion below. (`(- 5 money)` and friends.)
-            if is_record(heap, b) {
-                return Err(cross_type_record_error(
-                    who,
-                    "arithmetic",
-                    "combines",
-                    "Num",
-                ));
-            }
-            Ok(Value::Float(float_op(
-                num_to_f64(heap, who, a)?,
-                num_to_f64(heap, who, b)?,
-            )))
->>>>>>> 8bb98a6379ce7f1196f456d4d5ca5930d5ff742e
         }
         // A float operand anywhere: the float path (a BigInt/Decimal coerces via `f64` —
         // float contagion, like Clojure's double contagion). A plain non-numeric operand
