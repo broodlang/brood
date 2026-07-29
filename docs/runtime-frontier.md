@@ -103,6 +103,27 @@ sends a bare keyword (`Message::Keyword` is an enum variant, no allocation) and 
 small token. The 2.8–3.5× gap to Elixir on those rows is the **2 µs of park/wake/match**,
 not serialization. Both problems are real; they need different fixes.
 
+**Decomposed further 2026-07-29 — and it corrects the split above.** Self-send (mailbox
++ match, never parks) against cross-process ping-pong, and then by message shape:
+
+| measurement | per send+receive | reading |
+|---|---|---|
+| self-send, no park/wake | 1.19 µs | the mailbox/copy/match path alone |
+| cross-process ping-pong | 1.37 µs | **park + wake + enqueue + pickup is only ~0.18 µs (13%)** |
+| `:ping` (bare atom) | 580 ns | fixed: lock, queue, match activation, dispatch |
+| `[:ping i]` | 1160 ns | **+580 ns for a 2-element vector** |
+| `[:ping i i i]` | 1380 ns | +~110 ns per extra element |
+
+Two conclusions, both against what this file previously said:
+
+1. **L4 (park/wake) is not where the time is** — 13%. Deprioritise it.
+2. **L1 applies to essentially every real message, not just big payloads.** The earlier
+   "payload 0 ⇒ L1 buys ~0" reading was an artefact of the probe: its "payload 0" case
+   still sent `[:ping from p]`, a 3-element vector. Only a *bare atom* avoids the copy.
+   Since real protocols are tagged tuples (`[:call ref args]`, `[:EXIT pid reason]`), the
+   two-copy path costs ~50% of a typical small message, and halving it is worth **~25%**
+   of send+receive — on the latency rows too, not only payload-heavy ones.
+
 **A1 — the per-message fixed cost (owns the latency rows).** Decomposed at 200 000 round
 trips / 400 000 messages, payload 0 (≈1.3 µs per message at baseline):
 
@@ -152,9 +173,11 @@ re-enqueue, worker pickup, and one matcher activation per candidate.
   The original framing — "remove the per-candidate frame" — is the *smaller* half: with
   the HOF fast path already shipped (worth 3.0× on the message rows), a single match on a
   1-message mailbox is close to floor. The rescan is where the remaining time is.
-- [ ] **L4 — park/wake path.** Handoff already elides the futex wake in the common case.
-  Remaining: the mailbox `Mutex` (a per-message uncontended lock), `wake_parked`,
-  re-enqueue. Profile before designing — after L3, this is what is left of the 1.3 µs.
+- [x] **L4 — park/wake path: MEASURED AND RULED OUT (2026-07-29).** Isolating it
+  (self-send vs cross-process, same message shape) puts the entire park + wake + enqueue +
+  worker-pickup path at **~0.18 µs of a 1.37 µs send+receive — 13%**. Direct handoff
+  already took the large win here (1.9×). Not worth further work while the copy path is
+  ~50%.
 
 **Methodology note, learned the hard way twice now:** size these microbenchmarks so JIT
 compilation amortizes. At 20 000 round trips `BROOD_NO_JIT=1` looked *18% faster*, which
