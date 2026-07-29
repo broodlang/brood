@@ -317,6 +317,33 @@ named error, never `nil`:
 (impl Size :default (size [_] -1))
 ```
 
+**Provided ops — implement the required ones, inherit the rest.** An op spec with a
+**body** — `(op [args] :-> ret? body…)` — is *provided*: its body becomes the op's
+`:default` impl. An `impl` supplies only the bodyless **required** ops and inherits the
+provided ones; to override a provided op, add its method to that type's `impl` (same form).
+This is Rust/Haskell provided methods / Elixir's derived defaults:
+
+```lisp
+(defability Ord
+  (compare-to [self other] :-> int)                          ; required
+  (lt [self other] :-> bool (< (compare-to self other) 0)))  ; provided
+(impl Ord money/amount (compare-to [a b] (- (cents a) (cents b))))
+(lt (amount 1) (amount 2))     ;=> true   — free, via the provided default
+```
+
+**Deriving — `:derives` auto-generates an impl.** An ability declares a `:derive-record`
+recipe (field names → `impl` method forms); a record opts in with `:derives [A]` (Elixir
+`@derive` / Rust `#[derive]`). The recipe runs at load, so the `defability` must precede the
+record's use; deriving an ability with no recipe is a clean error.
+
+```lisp
+(defability Columns
+  (columns [self] :-> vector)
+  :derive-record (fn (fs) (list `(columns [r] [~@(map (fn (f) `(get r ~(keyword (name f)))) fs)]))))
+(defrecord point (x y) :derives [Columns])
+(columns (point 3 4))          ;=> [3 4]   — synthesized, no impl written
+```
+
 Other things worth knowing:
 
 - **Every `defrecord` value carries a nominal identity** — so it dispatches on its own
@@ -332,7 +359,8 @@ Other things worth knowing:
 - **A driver is just a value.** `(fetch db k)` picks its impl from `db`, so swapping
   the backend means passing a different record — no config indirection.
 - **`:sealed [id …]`** declares a closed member set and makes `nest check` demand an
-  impl of every op for every member (exhaustiveness).
+  impl of every **required** op for every member (a provided op is covered by its
+  default, so it is not demanded; a derived record counts as implementing every op).
 - `(satisfies? 'Shape x)` to branch instead of letting a missing op raise.
 - **Register at load time.** Top-level `impl` forms are safe; two *processes* calling
   `impl` concurrently can lose an update (it is a `def` under the hood).
