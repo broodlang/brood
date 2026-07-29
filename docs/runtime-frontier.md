@@ -84,25 +84,73 @@ and a wire-format message hop even locally. Each is an option below.
 
 Grouped; each with precedent, expected win, cost, risk. Ordered within groups.
 
-### A. Message latency (`pingpong`/`ring`, the widest honest gap)
+### A. Message cost — TWO separate problems, measured apart
 
-- [ ] **L1 — single-copy send to a parked receiver.** When `send` finds the receiver
-  parked (the `waiter` is owned under the mailbox state lock — the same quiescence
-  `trim_parked` already relies on), copy the value graph **directly sender-heap →
-  receiver-heap**, skipping `Message` entirely; enqueue a small "already-in-heap"
-  variant. Precedent: BEAM's copy-into-receiver-heap. Expected: the dominant shape
-  (send-then-block ping-pong) drops from 2 copies + garbage to 1 copy; this attacks the
-  2.8–3.5× directly. Cost: a cross-heap copier with rooting/epoch care; the `Message`
-  path stays for running receivers and dist. **The highest-value single item on this
-  list.** Risk: medium — new GC-visible path, needs GC_STRESS + TSAN + differential gate.
+A payload ping-pong (20 000 round trips, `/tmp/pp_payload.blsp` shape) separates them:
+
+| payload | wall | what it shows |
+|---|---|---|
+| 0 elems | 80 ms | **~2 µs/message of park + wake + match** — no copy at all |
+| 16 | 113 ms | copy ≈ 29% |
+| 64 | 173 ms | copy ≈ 54% |
+| 256 | 485 ms | copy ≈ **84%** |
+
+(That table is at 20 000 round trips; see the methodology note below — the *ratios*
+between payloads hold, the absolute per-message figure at scale is ~1.3 µs.)
+
+So **copy cost is proportional to payload, and the latency rows carry none** — `pingpong`
+sends a bare keyword (`Message::Keyword` is an enum variant, no allocation) and `ring` a
+small token. The 2.8–3.5× gap to Elixir on those rows is the **2 µs of park/wake/match**,
+not serialization. Both problems are real; they need different fixes.
+
+**A1 — the per-message fixed cost (owns the latency rows).** Decomposed at 200 000 round
+trips / 400 000 messages, payload 0 (≈1.3 µs per message at baseline):
+
+| config | wall | reading |
+|---|---|---|
+| baseline | 527 ms | |
+| `BROOD_NO_HANDOFF=1` | 1003 ms | **direct handoff is worth 1.9×** — already the single biggest win on this path, and already shipped |
+| `BROOD_NO_HOF=1` | 1574 ms | **the HOF matcher fast path is worth 3.0×** — likewise shipped |
+| `BROOD_NO_JIT=1` | 528 ms | the JIT is **neutral** here; this path is not compute |
+
+Both of the large levers on this path have already been taken. What is left is the
+irreducible-looking remainder: one mailbox `Mutex` acquisition, `wake_parked`, a
+re-enqueue, worker pickup, and one matcher activation per candidate.
+
+- [ ] **L3 — matcher without a frame per candidate.** Lower the match to a frameless
+  predicate over the staged value (the `match` lowering pass exists), and/or BEAM's
+  OTP-24 receive-marker trick so a selective receive doesn't rescan already-rejected
+  messages. The HOF path proves the activation is expensive; this removes the rest of it.
+- [ ] **L4 — park/wake path.** Handoff already elides the futex wake in the common case.
+  Remaining: the mailbox `Mutex` (a per-message uncontended lock), `wake_parked`,
+  re-enqueue. Profile before designing — after L3, this is what is left of the 1.3 µs.
+
+**Methodology note, learned the hard way twice now:** size these microbenchmarks so JIT
+compilation amortizes. At 20 000 round trips `BROOD_NO_JIT=1` looked *18% faster*, which
+is pure non-amortized compile cost — the same artefact that produced the phantom `collatz`
+regression under `make ab`'s single-core pin. At 200 000 it is a dead heat, and on the
+real `ring` row the JIT is 7% **faster**. Always cross-check a micro against the
+benchmark row before believing it.
+
+**A2 — the per-byte copy cost (owns real payload-carrying apps, not the microbenchmarks).**
+
+- [ ] **L1 — single-copy send to a parked receiver.** Local `send` today is *two* full
+  copies through the wire-format `Message` (`Value → Message → Value`), with both
+  intermediates becoming garbage. BEAM copies **once**, straight into the receiver's heap.
+  **Feasibility confirmed:** `deliver_envelope` already takes the mailbox state lock and
+  `wake_parked` hands the sender the receiver's `Box<Process>` — so the sender holds
+  exclusive `&mut` on a parked receiver's heap, the same quiescence `trim_parked` uses.
+  **Design constraint found:** the mailbox is *not* a GC root (today's queue holds
+  heap-independent `Message`s), so a copied `Value` must be rooted in the receiver — push
+  it onto the receiver's `roots` and carry the index in the envelope. That is sound
+  because a collection while parked relocates roots *in place*, keeping indices valid —
+  the identical invariant `Suspended` relies on (ADR-100 §8). Expected: halves the copy
+  cost, i.e. up to ~40% of a 256-element send; **~0 on `pingpong`/`ring`**. Falls back to
+  `Message` for running receivers and all dist sends. Risk: medium-high — a new
+  cross-heap copier on a GC-visible path; full GC_STRESS + TSAN + differential gate.
 - [ ] **L2 — heap fragments for running receivers** (BEAM's other half): copy into a
-  fragment the receiver adopts at its next safepoint, removing the `Message` hop for the
-  non-parked case too. Do only after L1 proves the copier.
-- [ ] **L3 — matcher without a frame per candidate.** The receive matcher is a compiled
-  arm; scanning N buffered messages costs N `vm_apply`-class activations. Options: lower
-  the match into a frameless predicate over the staged value (the match-lowering pass
-  already exists for `match`), or cache per-message match failure (BEAM's OTP-24 marker
-  optimization for selective receive). Measure the scan share first with perf-stats.
+  fragment the receiver adopts at its next safepoint, removing the `Message` hop when the
+  receiver isn't parked. Only after L1 proves the copier.
 
 ### B. Process memory floor (~4.5 KB → toward ~3 KB)
 
@@ -163,13 +211,19 @@ immutability-fraught).
 
 ## Recommended execution order
 
+Revised after the payload measurement above moved L1 off the latency gap.
+
 1. **M5 `(hibernate)`** — small, safe, Erlang-blessed; converts an already-measured
-   reverted patch into a feature.
-2. **M4 shell recycling** — bounded, big spawn win, no GC-semantics change.
-3. **L1 single-copy send** — the highest-value item; needs its own careful gate.
-4. **M3 direct-link sealed callees** — speed + floor together; design vs M2 first.
-5. **M1 cold-heap split** — mechanical floor win, any time.
-6. **L3 matcher cost** — measure first, then decide.
+   reverted patch into a feature. Half a day.
+2. **M4 shell recycling** — bounded, attacks the 7.6 µs / 15.8-alloc spawn path, no
+   GC-semantics change.
+3. **L3 measurement, then the fix** — split the 2 µs/message into lock / wake / match.
+   This is what actually owns the `pingpong`/`ring` gap, and the measurement is cheap.
+4. **M1 cold-heap split** — mechanical floor win, no semantic risk, any time.
+5. **M3 direct-link sealed callees** — speed + floor together; settle M3-vs-M2 first
+   (they overlap; M3 has lower concurrency risk).
+6. **L1 single-copy send** — big win for payload-carrying apps, ~0 for the benchmark
+   latency rows. Worth doing on its merits, but it is not the latency fix.
 7. **M2 / M6 / M7 / L2** — re-evaluate after the above land.
 
 ## Dead ends (measured; don't re-attempt without new evidence)
