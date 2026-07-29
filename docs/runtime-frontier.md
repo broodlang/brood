@@ -266,6 +266,35 @@ benchmark row before believing it.
   `BROOD_GC_VERIFY` was what caught a blanket-rewrite bug here — aggregate collector walks
   need `old_opt()`, not the handle-deref `old()`.
 
+- [ ] **M2b — sharing the IC tables. Two findings, one of which corrects the other.**
+
+  **Still true and useful:** `vm_call_ics` is *never read raw by JIT code* — only
+  `vm_fast_links` is, via `vm_fast_links_base()`. Verified by grep: no reference to
+  `vm_call_ics` anywhere under `jit/` or `jit_lower.rs`. So the fat table carries none of
+  the stable-address / use-after-realloc hazard, and sharing it needs no block allocator.
+
+  **CORRECTED 2026-07-29 (same day, before any code was written):** an earlier version of
+  this entry claimed that after the fast-link collapse the fat table is *cold*, and
+  proposed an `RwLock<HashMap<(arm_uid, site), CallIcEntry>>` on that basis. **That premise
+  is wrong.** The collapse made `CallIcEntry` cold only for the **JIT** path
+  (`vm_call_ic_fast_link` now returns from the 40-byte mirror). `vm_call_ic_probe` — which
+  reads the fat table — is the primary IC hit path in the **VM dispatcher**
+  (`dispatch.rs`, the `call_ic_hit` counter), i.e. hot for *every interpreted call*. An
+  `RwLock` + hash probe there would regress every un-JIT'd call site in the system.
+
+  The accurate picture: **both tables are hot, on different engines.** The mirror is hot
+  for JIT'd calls, the fat table for interpreted ones. Sharing either needs a lock-free
+  read path, not a lock — which is the original difficulty, undiminished. What genuinely
+  improved is only that the fat table has no raw-pointer hazard, so its read path can be a
+  normal atomic protocol rather than a stable-address block allocator.
+
+  Cost it fresh before starting: worth ~256 B/process (≈77 MB at 300k) plus a warm start,
+  against a lock-free structure on the hottest path in the interpreter. `CallIcEntry` is
+  confirmed `Send + Sync` (compile-time assertion). Entry content is already enforced
+  process-independent (`vm_call_ic_put` refuses a movable callee or LOCAL env), and the
+  epoch already lives per-runtime in `Arc<RuntimeCode>`, so the *semantics* of sharing are
+  settled — only the read protocol is open.
+
 - [ ] **M2b — shared IC tables across a runtime's processes** (ADR-175 Stage 3, the BEAM
   export-table move). **Blocker found 2026-07-29 by reading the code, and it is bigger than
   "needs a lock":** `vm_fast_links_base()` hands JIT'd code a **raw pointer** into the
