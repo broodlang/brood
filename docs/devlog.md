@@ -10916,3 +10916,35 @@ Fix directions, in rough order of payoff:
 
 Not implemented — this entry is the measurement. The BEAM's ~3 KB against our ~4.8 KB of
 *allocation* (≈6.6 KB RSS) is now a concrete, itemised target rather than a mystery.
+
+## 2026-07-29 (cont.) — two attempts at the process floor, both reverted
+
+Following the allocation profile above, two cheap levers were tried against the ~4.5 KB
+parked-process floor. Both measured, both reverted; the profile's *attribution* is
+corrected as a result.
+
+**1. Park-trim threshold.** `trim_parked` collects + `shrink_to_fit`s a parking process's
+slabs, but `PARK_TRIM_GROWTH_SLOTS = 64` skips it for a process that allocated little —
+exactly the `spawn-live` shape. Rebuilt with the threshold at 0 (always trim):
+**4.59 → 4.60 KB/proc**, i.e. nothing. (Same result as the first time this was tried, when
+compiled code still dominated — so it is not that the win was hidden then.)
+
+**2. Capacity-1 first touch in `alloc_slot!`.** Rust's `RawVec` rounds a first push up to
+capacity 4, so a 48-byte `(Value, Value)` slab allocates 192 B before holding anything;
+forcing `reserve_exact(1)` should have saved ~144 B per touched slab. Predicted ~700
+B/proc. **Measured 4.52 → 4.41 KB/proc — 110 B**, and it cost `bintree` **+4.8%** (solo,
+best-of-11): allocation-heavy code pays the extra 1→2→4 reallocs. Bad trade, reverted.
+
+**The prediction being 6× off is the useful result** — the slab `Vec`s are *not* the bulk
+of the 6.92 allocations/proc in the 129–256 B class. Working back from the measured sizes,
+the likely composition is `Arc<Mailbox>` (184 B), `Suspended.frames` (4 × 64 = 256 B),
+`roots` (8 × 24 = 192 B), and **four from the per-process IC tables** — `vm_call_ics`,
+`vm_fast_links`, `vm_global_ics` and the `arm_ic_blocks` registry. That last group is
+ADR-175 Phase A's, and it is now the largest identified item in the floor.
+
+Worth stating plainly: Phase A did **not** make the floor worse — measured against the
+pre-ADR-175 binary the floor went **6.27 → 4.53 KB/proc**, because sharing removed far
+more than the IC tables added. But those tables are where the next attempt should look,
+and the honest next step is *per-allocation-site* attribution (backtraces), not another
+guess from size classes. The arena-the-slabs idea from the previous entry is now
+lower-priority than it looked: slab `Vec`s account for ~110 B/proc, not ~1 KB.
