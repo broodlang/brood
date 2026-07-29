@@ -1814,6 +1814,23 @@ pub struct Heap {
     /// **any** eval depth, not just the outermost — see `docs/memory-model.md`.
     /// Also used by `eval_str`/`eval_source` for the unevaluated forms vector.
     /// Empty between top-level forms.
+    /// **Delivered-message slots (ADR-177 / L1).** When a `send` finds this process
+    /// *parked*, it copies the value straight into this heap — skipping the wire-format
+    /// `Message` round trip entirely — and parks the result here; the envelope in the
+    /// mailbox carries the slot index. A traced root set, flushed in place by `collect`
+    /// exactly like [`Self::roots`], because a queued message can sit through any number
+    /// of the receiver's collections before a selective `receive` gets to it.
+    ///
+    /// It is a **slot table, not a stack**: `roots` is the operand stack and is truncated
+    /// from ~109 sites (every frame pop), so a long-lived value cannot live there. A
+    /// consumed slot is tombstoned to `nil` and reused, so the table stays as small as the
+    /// process's peak *undelivered* Local message count — normally 0 or 1.
+    ///
+    /// Boxed and lazily allocated: inline it is 24 bytes on every `Heap`, and a `Heap`
+    /// is inline in `Box<Process>`, where bytes cost about 2:1 in RSS via mimalloc's size
+    /// classes — measured at `spawn` +5.9% for the inline `Vec`. `None` until this process
+    /// is actually handed a fast-path message, which most processes never are.
+    msg_roots: Option<Box<Vec<Value>>>,
     /// Loader/checker/namespace state — see [`ColdHeap`]. `None` until a module load,
     /// namespace compile or checker run needs it, so a plain worker process never
     /// allocates it (worth a mimalloc size class on `Box<Process>`).
@@ -2291,6 +2308,40 @@ pub(crate) use self::vm_cache::{
 };
 
 impl Heap {
+    /// Park a message value copied into this heap, returning its slot index. Reuses a
+    /// tombstoned slot when one is free so a steady request/response process never grows
+    /// the table past one entry.
+    pub fn msg_root_add(&mut self, v: Value) -> u32 {
+        let table = self.msg_roots.get_or_insert_with(Box::default);
+        if let Some(i) = table.iter().position(|s| matches!(s, Value::Nil)) {
+            table[i] = v;
+            return i as u32;
+        }
+        table.push(v);
+        (table.len() - 1) as u32
+    }
+
+    /// Take the value out of slot `i`, tombstoning it for reuse. Returns `nil` for an
+    /// out-of-range index, which cannot happen for an envelope this heap produced.
+    pub fn msg_root_take(&mut self, i: u32) -> Value {
+        match self.msg_roots.as_mut().and_then(|t| t.get_mut(i as usize)) {
+            Some(slot) => std::mem::replace(slot, Value::nil()),
+            None => Value::nil(),
+        }
+    }
+
+    /// Read slot `i` without clearing it — the peek-in-place scan path, where a
+    /// candidate that fails to match must stay queued with its slot intact.
+    pub fn msg_root_peek(&self, i: u32) -> Value {
+        self.msg_roots
+            .as_ref()
+            .and_then(|t| t.get(i as usize))
+            .copied()
+            .unwrap_or(Value::nil())
+    }
+}
+
+impl Heap {
     /// The cold loader/checker state, if this process has ever needed it. `None` is the
     /// normal case for a worker and means "empty" for every reader.
     #[inline]
@@ -2331,6 +2382,7 @@ impl Heap {
             #[cfg(feature = "dev-tools")]
             trace_context_own: false,
             global_ic: RefCell::new(SymbolMap::default()),
+            msg_roots: None,
             cold: None,
             module_exports_cache: RefCell::new(None),
             known_ns_cache: RefCell::new(None),
@@ -2407,6 +2459,7 @@ impl Heap {
             #[cfg(feature = "dev-tools")]
             trace_context_own: false,
             global_ic: RefCell::new(SymbolMap::default()),
+            msg_roots: None,
             cold: None,
             module_exports_cache: RefCell::new(None),
             known_ns_cache: RefCell::new(None),

@@ -466,7 +466,6 @@ pub(crate) fn exec_chunk(
                                         // Overwritten inside `vm_call_ic_put` (it
                                         // resolves the callee's block itself).
                                         callee_bases: (0, 0),
-                                        fast: std::cell::Cell::new(None),
                                     },
                                 );
                             }

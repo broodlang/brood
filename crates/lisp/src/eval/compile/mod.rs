@@ -1057,13 +1057,28 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                 nodes.push(compile_node(heap, e, scope, false)?);
             }
             // …unless every element is itself constant, in which case the whole
-            // literal is a constant: promote it once and share that instance. Sound
+            // literal is a constant: build it once and share that instance. Sound
             // *because Brood data is immutable* — no one can tell a shared vector from
             // a freshly built one, since neither can be mutated. Without this, a
             // literal like `[:a :b]` in a hot path allocates on every evaluation
             // (measured 2026-07-29: the `receive` tag-filter vector cost `pingpong`
             // +3.6% / `ring` +2.4% purely in per-call allocation).
-            if nodes.iter().all(|n| matches!(n, Node::Const(_))) {
+            //
+            // Folding to `form` is only valid when every element *evaluates to itself* —
+            // i.e. its compiled constant is structurally what the source element already
+            // was. That holds for the self-evaluating literals this is for (`[:a :b]`,
+            // `[1 2]`, nested literals of them) and excludes the case that made the first
+            // version of this a real bug: `'go` compiles to the symbol `go` while the
+            // source element is still the *list* `(quote go)`, so folding the raw form
+            // produced `[:tag (quote go)]` — which broke quoted-symbol patterns and
+            // `'foo` dependency names. `compile_node` only holds `&Heap`, so building a
+            // fresh constant from the compiled values isn't available here; requiring
+            // self-evaluation keeps the win without needing it.
+            let self_evaluating = nodes
+                .iter()
+                .zip(heap.vector(id).iter())
+                .all(|(n, &src)| matches!(n, Node::Const(c) if heap.equal(c.load(), src)));
+            if self_evaluating {
                 return Some(const_node(heap, form));
             }
             Some(Node::Vector(nodes.into_boxed_slice()))

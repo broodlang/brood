@@ -117,12 +117,14 @@ not serialization. Both problems are real; they need different fixes.
 Two conclusions, both against what this file previously said:
 
 1. **L4 (park/wake) is not where the time is** — 13%. Deprioritise it.
-2. **L1 applies to essentially every real message, not just big payloads.** The earlier
-   "payload 0 ⇒ L1 buys ~0" reading was an artefact of the probe: its "payload 0" case
-   still sent `[:ping from p]`, a 3-element vector. Only a *bare atom* avoids the copy.
-   Since real protocols are tagged tuples (`[:call ref args]`, `[:EXIT pid reason]`), the
-   two-copy path costs ~50% of a typical small message, and halving it is worth **~25%**
-   of send+receive — on the latency rows too, not only payload-heavy ones.
+2. **L1 applies to essentially every real message, not just big payloads** — though by
+   less than this table suggested. The "payload 0 ⇒ L1 buys ~0" reading was an artefact of
+   the probe (its "payload 0" case still sent a 3-element vector; only a *bare atom*
+   avoids the copy), and real protocols are tagged tuples. But the ~25% this section
+   originally predicted for the latency rows did not materialise: L1 shipped at ≈−5% on
+   `pingpong` and within drift on `ring`, because removing one of two copies of a
+   2-element vector is a smaller share of a message than the decomposition implied. The
+   win is real and grows to −35% with payload — see the L1 entry below.
 
 **A1 — the per-message fixed cost (owns the latency rows).** Decomposed at 200 000 round
 trips / 400 000 messages, payload 0 (≈1.3 µs per message at baseline):
@@ -188,59 +190,38 @@ benchmark row before believing it.
 
 **A2 — the per-byte copy cost (owns real payload-carrying apps, not the microbenchmarks).**
 
-- [ ] **L1 — single-copy send to a parked receiver. Design complete (2026-07-29), ready
-  to execute; not yet written.** Sketch, with the three questions that decide it already
-  answered in code:
-  1. *Can the sender touch the receiver's heap?* **Yes** — `deliver_envelope` takes the
-     mailbox state lock and `wake_parked(&mut st)` hands back the receiver's
-     `Box<Process>`, giving exclusive `&mut` on its `Heap`. Same quiescence `trim_parked`
-     uses. Sender holds `&Heap`, receiver `&mut Heap` — two distinct objects, so borrowck
-     is satisfied.
-  2. *Does the copier need incremental rooting?* **No** — and this is the finding that
-     makes L1 tractable. `from_message` already builds graphs in a receiver heap by
-     accumulating children in an ordinary off-heap `Vec<Value>` and then calling
-     `heap.list(vals)`. That is only sound because **allocation never collects** in this
-     runtime (collection runs at eval safepoints, never inside `alloc_*`). A cross-heap
-     copier can use the identical pattern.
-  3. *Where does the copied value live until the receiver pops it?* **This is the hard
-     part, and the first answer here was wrong.** The mailbox is not a GC root, so it
-     cannot hold a bare `Value` — correct. But the proposed fix (push it onto the
-     receiver's `roots` and carry the index) is **unsound**: `roots` is the *operand
-     stack*, not a general root set. `truncate_roots(n)` is called from **109 sites** —
-     every frame pop, every error unwind — so a long-lived mailbox value parked there is
-     silently dropped the moment the receiver returns from a call. Indices are stable
-     across a *collection* (which is what `Suspended` relies on), but not across the
-     stack discipline, and those are different guarantees.
+- [x] **L1 — DONE 2026-07-29 (ADR-178). Single-copy send to a parked receiver.** A `send`
+  to a local pid whose process is parked copies the value straight from the sender's heap
+  into the receiver's, skipping the `Value → Message → Value` round trip. Access is
+  licensed by ownership, not a lock on the heap: a parked process *is* its `Box<Process>`
+  in `MailboxState::waiter`, so taking it under the mailbox mutex confers exclusive `&mut`
+  — the same quiescence `trim_parked` uses. The copy parks in `Heap::msg_roots`, a new
+  **traced slot table** (`roots` is the operand stack, truncated from ~109 sites, so a
+  message awaiting a selective `receive` cannot live there). A running receiver, a remote
+  pid, or a value the copier declines falls through to the unchanged wire path.
 
-     So L1 needs a **new traced root set**: a per-heap `mailbox_roots: Vec<Value>` (or
-     equivalent) that `collect` walks and relocates, with a slot freed when a message is
-     consumed. That is a real GC change, not a bookkeeping detail, and it costs a vector
-     per process — partially offsetting the memory work in group B. The alternative is
-     BEAM's actual design: let the message live in the receiver's heap and have collection
-     scan the mailbox itself, which means taking the mailbox lock during collection.
+  **Measured, pinned, best-of-5, same commit — the win scales with payload**, because what
+  is removed is marshalling, not scheduling: −3.2% at payload 0, −9.0% at 16, −24.2% at 64,
+  −31.3% at 256, −34.9% at 1024. Roughly a third of a large-message send was pure
+  marshalling.
 
-     **Re-cost:** this is no longer "~300 lines and a copier". Budget a GC root-set change
-     with the full GC_STRESS/GC_VERIFY/TSAN gate, and settle the root-set-vs-scan-mailbox
-     question first.
+  **The benchmark rows cannot show this** — `ring` sends a bare int and half of `pingpong`'s
+  messages are a bare keyword, so those rows are scheduler round-trip with nothing to copy
+  (`pingpong` ≈ −5%, `ring` within drift, everything else flat). That is a property of the
+  suite's message shapes; don't read the rows backwards and conclude the change is inert.
 
-  Work: a `copy_cross_heap(src: &Heap, dst: &mut Heap, v: Value) -> Value` mirroring
-  `to_message`/`from_message`'s shape over every `Value` kind, the new traced root set
-  from (3), an envelope variant naming the slot, and the two ends of the send/receive
-  path. `Message` stays for running receivers and every dist send. Gate with GC_STRESS,
-  GC_VERIFY, TSAN, and the differential fuzzers. Original entry: Local `send` today is *two* full
-  copies through the wire-format `Message` (`Value → Message → Value`), with both
-  intermediates becoming garbage. BEAM copies **once**, straight into the receiver's heap.
-  **Feasibility confirmed:** `deliver_envelope` already takes the mailbox state lock and
-  `wake_parked` hands the sender the receiver's `Box<Process>` — so the sender holds
-  exclusive `&mut` on a parked receiver's heap, the same quiescence `trim_parked` uses.
-  **Design constraint found:** the mailbox is *not* a GC root (today's queue holds
-  heap-independent `Message`s), so a copied `Value` must be rooted in the receiver — push
-  it onto the receiver's `roots` and carry the index in the envelope. That is sound
-  because a collection while parked relocates roots *in place*, keeping indices valid —
-  the identical invariant `Suspended` relies on (ADR-100 §8). Expected: halves the copy
-  cost, i.e. up to ~40% of a 256-element send; **~0 on `pingpong`/`ring`**. Falls back to
-  `Message` for running receivers and all dist sends. Risk: medium-high — a new
-  cross-heap copier on a GC-visible path; full GC_STRESS + TSAN + differential gate.
+  Two predictions in the pre-work design were wrong and are corrected here: the fast path
+  does **not** miss because of direct handoff (instrumented at **100%** hit on both
+  `pingpong` and `ring` via `BROOD_L1_STATS=1`), and the traced root set must be *lazily
+  boxed* — an inline 24-byte `Vec` on every `Heap` cost `spawn` **+5.9%**, since a `Heap`
+  is inline in `Box<Process>` where bytes run ~2:1 into RSS through mimalloc size classes.
+  `Option<Box<Vec<Value>>>` at 8 bytes put `spawn` back to flat.
+
+  Ongoing cost to watch: `copy_cross_heap` must mirror `to_message`'s value coverage, or a
+  newly-carryable value quietly takes the slow route; and the copy now runs while holding
+  the target's mailbox mutex, which is a real contention change for a many-senders-to-one
+  fan-in.
+
 - [ ] **L2 — heap fragments for running receivers** (BEAM's other half): copy into a
   fragment the receiver adopts at its next safepoint, removing the `Message` hop when the
   receiver isn't parked. Only after L1 proves the copier.
@@ -253,6 +234,46 @@ benchmark row before believing it.
   `current_file`, `dynamics`) behind one `Option<Box<ColdHeap>>` allocated on first use.
   A worker never touches them. Expected: several hundred bytes off `Box<Process>`'s
   1840 B, plus cache-density wins. Mechanical but wide; no semantic risk.
+- [x] **M2a — DONE 2026-07-29. One fast-link representation, not two.** `CallIcEntry.fast`
+  (a 32-byte `Cell<Option<(code, nslots, env)>>`) and the `FastLink` mirror held the *same
+  fact*, written in lockstep — the code said so itself. `FastLink` already carries
+  `sym`/`argc`/`epoch`, so the VM's hot probe never needed the fat entry: it now reads the
+  one 40-byte flat table that JIT'd code reads, and a hit never touches `CallIcEntry` at
+  all. `CallIcEntry` 96 → 64 B.
+
+  Measured: **−157 B per live process** (spawn-live 1.94 → 1.89 GB, −47 MB over 300k), and
+  the compute rows *improve* — pfib −3.5%, collatz −2.7%, fib −1.3%, bintree −0.8%,
+  nqueens flat, spawn-live −0.8%, `spawn` +1.9%. Removing the memo was expected to cost
+  the hot recursive call a second table touch; it didn't, because reading one 40-byte flat
+  slot beats loading a 96-byte entry.
+
+  Method note: the *sweep* reported `spawn` +5.8% and `collatz` +2.8%; solo re-runs gave
+  +1.9% and **−2.7%**. Believe the solo run, as `ab-bench` says.
+
+- [ ] **M2b — shared IC tables across a runtime's processes** (ADR-175 Stage 3, the BEAM
+  export-table move). **Blocker found 2026-07-29 by reading the code, and it is bigger than
+  "needs a lock":** `vm_fast_links_base()` hands JIT'd code a **raw pointer** into the
+  table, sound today only because `SAFETY: single-threaded per process` — nothing can grow
+  or clear it while an arm runs. Sharing the table across processes voids that outright: a
+  peer growing it reallocates under a live raw pointer (use-after-realloc, not merely a
+  torn read). So a shared table must be **block-allocated with stable addresses** — each
+  arm gets a contiguous block, allocated once per *runtime*, that never moves; the JIT
+  then holds a pointer to that arm's block. `boxcar` is the in-tree precedent (it already
+  backs the shared RUNTIME code region for exactly this stable-ref reason).
+
+  What is now settled in favour: entry content is *enforced* process-independent
+  (`vm_call_ic_put` refuses a movable callee or a LOCAL env), the epoch already lives
+  per-runtime in `Arc<RuntimeCode>`, and after M2a the thing worth sharing is a 40-byte
+  `#[repr(C)]` plain-data slot rather than a 96-byte entry holding a `Cell`. Publication
+  can be epoch-last-release, and since all writers resolve identically, a racing writer
+  writes the same bytes.
+
+  Note the base assignment is **not** independently shippable: bases are per-process
+  first-touch today (`vm_arm_block`), and making them runtime-global while tables stay
+  per-process would size every process's table to the runtime's *total* site count — a
+  process touches only ~4 sites. Runtime-global bases and the shared table must land
+  together.
+
 - [ ] **M2 — shared IC entries for sealed callees** (ADR-175 Stage 3, the BEAM
   export-table move). **Promoted over M3 by the analysis above:** every field an IC entry
   caches — `(sym, argc, epoch, callee, arm, env)` — is process-independent *within a
@@ -350,15 +371,17 @@ immutability-fraught).
 Revised after the payload measurement above moved L1 off the latency gap.
 
 1. ~~**M5 `(hibernate)`**~~ — **DONE** (8.18 → 4.94 KB/proc).
-2. **M1 cold-heap split** — promoted: shrinks the 1840 B `Box<Process>` for every worker,
-   and *residency is latency* on this workload (78% of spawn-and-park is park+residency,
-   which scales with per-process memory).
-3. **M3 direct-link sealed callees** — removes the 664 B of IC tables per process on top.
-4. **L3 measurement, then the fix** — split the 2 µs/message into lock / wake / match.
-   This is what actually owns the `pingpong`/`ring` gap, and the measurement is cheap.
-5. **L1 single-copy send** — big win for payload-carrying apps, ~0 for the benchmark
-   latency rows. Worth doing on its merits, but it is not the latency fix.
-7. **M2 / M6 / M7 / L2** — re-evaluate after the above land.
+2. ~~**M1 cold-heap split**~~ — **DONE** (`spawn` −13.6%).
+3. ~~**L3 selective-receive pre-filter**~~ — **DONE** (backlog 500: ~420 ms → 34 ms).
+4. ~~**L1 single-copy send**~~ — **DONE**, ADR-178. Confirmed as predicted: a large win for
+   payload-carrying apps (−35% at 1024), ≈−5% on `pingpong` and flat on `ring`. It was
+   never the latency fix, and shipping it did not make it one.
+5. **M2 shared IC tables** — the largest remaining per-process item (664 B) *and* a warm
+   start. Highest value and highest risk; needs a lock-free design plus TSAN/loom.
+6. **M3 direct-link sealed callees** — blocked behind M2.
+7. **M4 / M6 / M7 / L2** — re-evaluate after the above land. What still owns the
+   `pingpong`/`ring` gap is the per-message fixed cost (mailbox mutex, `wake_parked`,
+   re-enqueue, one matcher activation), not the copy.
 
 ## Dead ends (measured; don't re-attempt without new evidence)
 
