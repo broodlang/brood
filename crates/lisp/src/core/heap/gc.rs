@@ -416,6 +416,57 @@ impl Heap {
     /// a latency-sensitive process that parks constantly with a tiny heap (a ping-pong
     /// responder, a `gen` server handling small messages) pays one integer comparison and
     /// nothing else.
+    /// **`(hibernate)` — the opt-in deep shrink** (Erlang's `erlang:hibernate/3`).
+    /// Unconditionally does everything [`trim_parked`] does — collect, shrink the slabs,
+    /// shrink the root vectors — and additionally **drops this process's inline-cache
+    /// tables**, which the automatic path deliberately does not.
+    ///
+    /// Why this is a *builtin* and not a policy: dropping the ICs was measured
+    /// (2026-07-29) at 4.53 → 3.89 KB per parked process, but doing it automatically on
+    /// park costs `pingpong` +26% and `ring` +18% — a process that parks in a loop must
+    /// keep the caches it built entering its hot loop. Restricting it to the first park
+    /// barely helped (+11.5%). ERTS reached the same fork and resolved it the same way:
+    /// the *programmer* says when a process is going idle for a long time. This is that
+    /// call. Use it in a process about to wait a long while (a pooled connection, an idle
+    /// session actor); do not use it in a request loop.
+    ///
+    /// Sound because the IC tables are pure caches — every entry is validated against
+    /// `(sym, argc, epoch)` before use, so discarding them costs a miss and a
+    /// re-resolution, never a wrong answer. `runtime_collect` already clears them out
+    /// from under live arms on exactly that reasoning; the currently-running activation's
+    /// `ic_bases` then names a block in an empty table, and every probe simply misses.
+    ///
+    /// Returns the bytes of slab capacity handed back (the IC drop is not counted — it is
+    /// not slab capacity).
+    pub fn hibernate(&mut self) -> usize {
+        let before = slab_capacity_bytes(&self.local) + slab_capacity_bytes(&self.old);
+        self.collect(&mut [], &mut []);
+        shrink_slabs(&mut self.local);
+        shrink_slabs(&mut self.old);
+        self.roots.shrink_to_fit();
+        self.env_roots.shrink_to_fit();
+        // The part the automatic path won't do.
+        self.vm_call_ics.borrow_mut().clear();
+        self.vm_call_ics.borrow_mut().shrink_to_fit();
+        self.vm_fast_links.borrow_mut().clear();
+        self.vm_fast_links.borrow_mut().shrink_to_fit();
+        self.vm_global_ics.borrow_mut().clear();
+        self.vm_global_ics.borrow_mut().shrink_to_fit();
+        // Blocks index the tables just dropped, so they go in lockstep; the next
+        // activation re-resolves a fresh block.
+        self.arm_ic_blocks.borrow_mut().clear();
+        self.arm_ic_blocks.borrow_mut().shrink_to_fit();
+        // The compiled-body cache is a cache too, and by far the largest thing a
+        // long-idle process can give back. Shared arms (ADR-175) are held by the runtime,
+        // so dropping our reference is cheap and they re-install on the next call.
+        self.vm_cache.borrow_mut().clear();
+        let after = slab_capacity_bytes(&self.local) + slab_capacity_bytes(&self.old);
+        // Reset the auto-trim high-water: after a deliberate deep shrink, the next
+        // ordinary park should judge growth from here, not from the pre-hibernate peak.
+        self.park_trim_mark = park_trim_probe(&self.local);
+        before.saturating_sub(after)
+    }
+
     pub fn trim_parked(&mut self) -> usize {
         // The gate runs on EVERY park, so it is three loads and a compare — see
         // `park_trim_probe`. Only capacity accumulated *since the last trim* counts; an
