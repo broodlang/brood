@@ -2961,6 +2961,18 @@ record built at root and an impl for it at root must land on the same dispatch i
 
 ;; The `(sig …)` forms for an all-typed record: the constructor arrow, then one
 ;; accessor arrow per field. Built as plain data — `sig` reads the un-expanded type.
+;; id-keyword → record name: the set of nominal ids that are GENUINE `defrecord`
+;; identities. Ground truth for BROOD_MONO's direct-constructor devirtualization
+;; (ADR-182) — a constructor call `(circle 2)` may be devirtualized only when its baked
+;; id (`:module/circle`) is registered here, so a same-named non-record fn is never
+;; mistaken for a record constructor. Always populated (cheap load-time metadata, like
+;; `*impls*`); read only under the flag.
+(def *record-ids* {})
+(defn record-register (id nm)
+  "Record that `id` (a `:module/name` keyword) is a `defrecord`'s nominal identity."
+  (def *record-ids* (assoc *record-ids* id nm))
+  nil)
+
 (defmacro defrecord (rec fields)
   "Define record `rec` with `fields` — a positional constructor `(rec …)` plus a
 `rec-field` accessor per field. A record is an immutable map that also carries a
@@ -3014,7 +3026,7 @@ field is typed, per-accessor signatures are emitted too.
                                 '-> (defrecord--ftype f)))))
                      fields)
                    nil))
-    `(do ~ctor-sig ~ctor ~@accs ~@acc-sigs nil)))
+    `(do ~ctor-sig ~ctor ~@accs ~@acc-sigs (record-register ~id '~rec) nil)))
 
 ;; (min-by f coll) / (max-by f coll) — find the element whose key is smallest/largest.
 (defn min-by (f coll)
@@ -4736,14 +4748,16 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 ;; field value); a type that wants a meaningful order (a version, a money value, a hand of
 ;; cards) overrides `compare-to`.
 ;; `compare-to` is a multimethod (ADR-179): `:antisymmetric`, so a `[ver :int]` method
-;; derives `[:int ver]` as its negation. `:default` = the kernel structural `compare`, so a
-;; record with no method still orders (as its map). `(compare-to a b)` → -1 / 0 / 1.
+;; derives `[:int ver]` as its negation. STRICT like `Num` — there is NO `:default`: a record
+;; type must define `compare-to` to be ordered (`<`/`<=`/`>`/`>=`/`sort`), else the pair is a
+;; loud `no-method` (a record is not silently ordered by its map layout). `(compare-to a b)`
+;; → -1 / 0 / 1.
 (defmulti compare-to :antisymmetric)
-(defmethod compare-to :default (a b) (compare a b))
 
-;; Record-aware structural compare: an `Ord` record uses its impl, everything else the
-;; kernel `compare`. This is the comparator `sort`/`sort-by` use, so a record type orders
-;; itself while built-ins keep the native path.
+;; Record-aware compare: a record uses its `compare-to` (a type with no `Ord` method is a loud
+;; no-method — strict), everything else the kernel `compare`. This is the comparator
+;; `sort`/`sort-by` use, so an `Ord` record type orders itself while built-ins keep the native
+;; path.
 (defn ord-compare (a b)
   (if (record? a) (compare-to a b) (compare a b)))
 

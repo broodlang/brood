@@ -670,11 +670,12 @@ never invents a conversion — so cross-type arithmetic is explicit-per-method y
 **`Num` and `Ord` are the built-in multimethods.** `+`/`-`/`*`/`/` route to
 `num-add`/`num-sub`/`num-mul`/`num-div`, and `<`/`<=`/`>`/`>=`/`min`/`max` route to
 `compare-to`, **only when a record is an operand** — pure `int`/`float`/`decimal` arithmetic
-stays byte-for-byte on the kernel's fast path (records never touch it). One asymmetry to know:
-`Num` has **no `:default`**, so `(+ (money 1) 2.5)` with no matching method is a hard
-`no-method`; `Ord` **keeps** a `:default` (the kernel's structural `compare`), so *any* record
-`sort`s without a custom `compare-to`, and `(< (money 1) 2.5)` falls back to that total order
-rather than erroring. Define `compare-to`/`num-*` for the pairs you actually mean.
+stays byte-for-byte on the kernel's fast path (records never touch it). Both are **strict**:
+neither has a `:default`, so a record type must define the methods it means. `(+ (money 1)
+2.5)` with no matching method is a hard `no-method`, and likewise `(< (money 1) 2.5)` — and
+`(sort some-records)` — is a `no-method` until you give the record a `compare-to`. A record is
+never silently ordered by its underlying map layout; define `compare-to`/`num-*` for the pairs
+you actually mean.
 
 **Strict declarations (fail at load, and `nest check`).** A `defmethod` whose arg count differs
 from its pattern length, a closure on a non-binary pattern, an unknown algebra keyword, a
