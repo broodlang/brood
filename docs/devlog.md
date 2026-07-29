@@ -11343,3 +11343,37 @@ control** — `taskset`-pinned best-of-15 for base, base again, then new, readin
 base-vs-base spread as the row's noise floor. Controlled: fib 0.0% (floor 0.0%), spawn
 −0.9% (floor −0.9%), bintree +0.8% (floor +1.6%), pingpong +0.9% (floor +0.5%), spawn-live
 −1.2% (floor +0.4%). Neutral on time, real on memory. Note added to CLAUDE.md.
+
+## 2026-07-29 (cont.) — BROOD_MONO Tier 1: the direct-constructor shape (ADR-182)
+
+Completed Tier 1 by adding the second syntactic shape the checker's `arg_identity` already
+proves: a **direct record-constructor call** as the ability op's first arg — `(area (circle
+2))` devirtualizes to circle's impl, alongside the literal shape (`(size 5)`) shipped earlier.
+
+The soundness crux was proving, *at compile time*, that a call head is a genuine record
+constructor and what id it bakes. A record id keyword's symbol *is* the qualified constructor
+name (`:m/circle` ← `m/circle`), so identity is `keyword(ctor)` — but that alone can't tell a
+record constructor from a same-named plain fn. Trusting the constructor's declared `sig`
+(which carries a `(record :__id__ …)` return) is **unsound** — a sig is an unchecked contract
+that can lie, and a wrong devirt is a *miscompile*, not a false warning. So `defrecord` now
+populates a ground-truth `*record-ids*` registry (id-keyword → record name); mono devirtualizes
+only when `keyword(ctor) ∈ *record-ids*`. `(area (circleish 5))` — a non-record fn — is
+rejected and stays dynamic. Verified byte-identical (circle/rect → nominal impls; circleish →
+`:default`), and 49→51 ability tests green off, on, and under `BROOD_GC_STRESS=1
+BROOD_GC_VERIFY=1` (the baked impl fn is still a promoted RUNTIME handle).
+
+The registry is cheap always-on metadata (one `assoc` per `defrecord` at load, like `*impls*`)
+and independently useful; it does not touch the compile-time inert-when-off guarantee. Tier 2
+(inferred-*variable* devirt) stays deferred. ADR-182 / ability-monomorphization.md / CLAUDE.md
+updated.
+
+## 2026-07-29 (cont.) — `Ord` made strict, like `Num` (no structural `:default`)
+
+Follow-up to ADR-179. `Num` had no `:default` (a record pair with no `num-*` method is a loud
+`no-method`), but `Ord`'s `compare-to` kept a `:default` = kernel structural `compare`, so a
+record silently ordered by its map layout and `(< money 5)` returned a structural answer
+instead of erroring. Dropped it: `Ord` is now strict too — a record type must define
+`compare-to` to be ordered (`<`/`<=`/`>`/`>=`/`sort`), else `no-method`. Impact audit first:
+no `std/` site sorts bare records — every `sort`/`sort-by` there is over scalars (strings,
+numbers, symbols) or `[k v]` vectors (kernel `compare`), so nothing regressed. Full suite green
+(894). `std/prelude.blsp` + language.md updated.
