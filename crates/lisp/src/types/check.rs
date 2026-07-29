@@ -42,12 +42,16 @@
 //!    `reduce`-based / higher-order Brood closures the checker can't infer but
 //!    that matter (`+ - * / < <= > >= mod map filter reduce`; see
 //!    [`sigs::curated_sig`]). Each is a Brood `defn`, but its sig is pinned by hand.
-//! 3. **Basic inference** for a closure whose body is **one straight-line
-//!    expression** (a single direct call to a known sig; no `if`/`cond`/`let`/
-//!    `match`/recursion). Each closure parameter inherits the type the callee
-//!    expects at the position(s) where the parameter is passed; the closure's
-//!    return is the callee's. Sound because a straight-line use is
-//!    unconditional — no control-flow analysis (see [`sigs::sig_of`]).
+//! 3. **Inference** ([`sigs::infer_sig`]) — a bounded, sound, one-step-deep inferencer
+//!    (no unification / global solve). **Parameters** come from *unconditional* type
+//!    demands across the body (a guarded use never constrains a param). **The return** is
+//!    the body tail's type via `expr_ty`, which unions `if`/`cond`/`let`/`do`/`case`
+//!    results — so a branchy body is inferred, not skipped. Plus: a self-recursive call in
+//!    a branch result contributes ⊥ (recursion infers from base cases), and a
+//!    multi-arity / `&optional` / rest closure gets a params-less return-only sig (the
+//!    union of its arm tails; arity is checked separately). Sound throughout — params
+//!    under-constrained, returns over-approximated, callees looked up non-inferring — so
+//!    zero false positives (see [`sigs::sig_of`]).
 //!
 //! Argument types in a call come from literals, nested calls with a known
 //! return type, and **a context-tracked map of local-variable narrowings**:
