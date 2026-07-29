@@ -11314,6 +11314,14 @@ affect. Direct links need no epoch guard, so hot reload stops disturbing frozen 
 - **Stage 2 — shared `CompiledArm` cache.** The `jit_code_cache` analogue over
   `Arc<CompiledArm>`, same key, same epoch guard, same idempotent publish. With Stage 1
   in place, per-process IC cost stays proportional to arms actually used.
+- **Phase C (done, 2026-07-29) — share RUNTIME-keyed user arms.** The eligibility gate
+  now admits every shared-region closure, not just PRELUDE. The "double-rewrite" blocker
+  recorded above is impossible (the compactor holds `Arc::get_mut` on the runtime, so it
+  runs single-process); the actual hazards are a *cached* shared arm being missed by
+  compaction's stack-only rewrite (fixed by clearing the shared cache alongside
+  `vm_cache`) and generation-free handle recycling (fixed by stamping entries with the
+  publisher's pre-compile `free_epoch`). Took a 40-arm user body from 37.1 to 4.55
+  KB/proc and `spawn-live` to 3.00 s / 2.01 GB.
 - **Stage 3 (optional) — shared inline caches.** BEAM's export table is node-global, and
   our IC entries cache *global* resolutions that are already epoch-guarded and hold
   promoted/immovable callees, so they arguably belong with the code too. Blocked on
