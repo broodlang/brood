@@ -425,18 +425,24 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
         return None;
     };
     let closure = heap.closure(cid);
-    // Only infer for a plain single-arity closure (no optionals / rest). A
-    // multi-arity closure has no single signature to infer — bail.
-    if closure.arms.len() != 1 {
-        return None;
+    let self_name = closure.name;
+    // A **complex** closure — multi-arity, or with optionals / a rest param — has no single
+    // *parameter* signature to pin, but its RETURN is still the union of each arm's tail,
+    // which flows to callers. Infer that (a params-less sig), since arity is checked
+    // independently (`arity_of`) and a union of arm returns is a sound over-approximation —
+    // a supertype can only *under*-flag a caller, never false-positive.
+    let simple = closure.arms.len() == 1
+        && closure.arms[0].optionals.is_empty()
+        && closure.arms[0].rest.is_none();
+    if !simple {
+        return infer_return_only(heap, cid, self_name);
     }
     let arm = &closure.arms[0];
-    if arm.body.is_empty() || !arm.optionals.is_empty() || arm.rest.is_some() {
+    if arm.body.is_empty() {
         return None;
     }
     // Copy out before we ask `sig_of` / `expr_ty` (which borrow the heap again).
     let params: Vec<Symbol> = arm.params.clone();
-    let self_name = closure.name;
 
     // Tier 1: precise params + return from a single known-callee call.
     if arm.body.len() == 1 {
@@ -470,6 +476,53 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
     }
     let ret = expr_ty(heap, tail, &ctx)?;
     Some(Sig::new(param_tys, ret))
+}
+
+/// **Return-only inference** for a complex closure (multi-arity, optionals, or a rest
+/// param). Each arm's return is the type of its tail form with the arm's binders bound to
+/// `ANY`; the closure's return is their union. Yields a *params-less* [`Sig`] — it flows the
+/// return to callers but imposes no argument constraint (which would be wrong, since the
+/// params vary per arm); arity is still checked by [`arity_of`]. Defers (`None`) if any arm's
+/// return can't be typed, so an under-approximation never leaks. Sound: a union of arm
+/// returns is a supertype of whatever a given call actually returns, so it can only
+/// *under*-flag a caller, never false-positive.
+fn infer_return_only(heap: &Heap, cid: crate::core::value::ClosureId, self_name: Option<Symbol>) -> Option<Sig> {
+    // Collect each arm's binders + tail (owned) before calling `expr_ty`, which re-borrows
+    // the heap. An empty-body arm makes the whole thing undecidable — bail.
+    let arms: Vec<(Vec<Symbol>, Value)> = {
+        let c = heap.closure(cid);
+        let mut out = Vec::with_capacity(c.arms.len());
+        for a in c.arms.iter() {
+            let &tail = a.body.last()?;
+            let mut binders = a.params.clone();
+            // `optionals` are `(name, default-expr)` pairs — bind just the names.
+            binders.extend(a.optionals.iter().map(|(name, _)| *name));
+            if let Some(r) = a.rest {
+                binders.push(r);
+            }
+            out.push((binders, tail));
+        }
+        out
+    };
+    if arms.is_empty() {
+        return None;
+    }
+    let mut ret: Option<Ty> = None;
+    for (binders, tail) in &arms {
+        let mut ctx = match self_name {
+            Some(name) => Ctx::default().with_inferring_self(name),
+            None => Ctx::default(),
+        };
+        for &p in binders {
+            ctx = ctx.bind(p, Some(Ty::ANY));
+        }
+        let t = expr_ty(heap, *tail, &ctx)?;
+        ret = Some(match ret {
+            Some(a) => a.union(t),
+            None => t,
+        });
+    }
+    Some(Sig::new(vec![], ret?))
 }
 
 /// Collect each parameter's **unconditional** type demand across the whole body:

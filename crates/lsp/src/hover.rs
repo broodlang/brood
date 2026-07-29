@@ -67,7 +67,12 @@ pub fn hover(
             // bare imported name or a qualified `observer/observe` finds its docs.
             let resolved = introspect::resolve_in_source(interp, text, name);
             let (sig, doc) = introspect::signature(interp, &resolved);
-            render_global(name, sig, doc)?
+            // The checker's TYPE signature (declared/curated/inferred) for a resolvable
+            // name — shown under the arglist. Only for free names: they're stably loaded
+            // (builtins/prelude/imports), whereas a buffer def isn't loaded, so its sig
+            // would be stale/absent.
+            let ty = introspect::type_signature(interp, &resolved);
+            render_global(name, sig, ty, doc)?
         }
         Resolution::NotASymbol => return None,
     };
@@ -95,13 +100,22 @@ fn render_def(d: &defs::Def) -> String {
     s
 }
 
-/// Render a free (prelude/builtin) name. With neither a signature nor a doc
-/// there's nothing useful to show, so the popup is suppressed (`None`).
-fn render_global(name: &str, sig: Option<String>, doc: Option<String>) -> Option<String> {
-    if sig.is_none() && doc.is_none() {
+/// Render a free (prelude/builtin) name: its arglist, then the checker's type signature
+/// (when known), then its docstring. With none of the three there's nothing useful to
+/// show, so the popup is suppressed (`None`).
+fn render_global(
+    name: &str,
+    sig: Option<String>,
+    ty: Option<String>,
+    doc: Option<String>,
+) -> Option<String> {
+    if sig.is_none() && ty.is_none() && doc.is_none() {
         return None;
     }
     let mut s = code(sig.as_deref().unwrap_or(name));
+    if let Some(ty) = ty {
+        s.push_str(&format!("\n\n`{ty}`"));
+    }
     if let Some(doc) = doc {
         s.push_str("\n\n");
         s.push_str(&doc);
@@ -191,6 +205,17 @@ mod tests {
         let md = hover_at("(cons 1 xs)", "cons").expect("hover on cons");
         assert!(md.contains("(cons x xs)"), "signature missing: {md:?}");
         assert!(md.contains("pair"), "doc missing: {md:?}");
+    }
+
+    #[test]
+    fn hover_shows_the_checker_type_signature_of_a_builtin() {
+        // Beyond the arglist + docstring, hover now surfaces the checker's TYPE signature
+        // (an arrow) for a resolvable name — `map`'s domain/result.
+        let md = hover_at("(map f xs)", "map").expect("hover on map");
+        assert!(
+            md.contains("->"),
+            "expected a type-signature arrow in the hover: {md:?}"
+        );
     }
 
     #[test]

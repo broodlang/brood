@@ -131,8 +131,10 @@ documented (the struct doc + ADR-024); no checker consumes it yet.
 
 ### Step 3 — signatures the checker reads ✅
 A callee's signature (argument `Ty`s + result `Ty`) comes from three sources,
-simplest-first — deliberately **no inference engine** (see the rationale in
-[How it runs](#how-it-runs--and-why-its-outside-the-runtime)):
+simplest-first — no full Hindley–Milner inference engine (no unification, no global
+constraint solve; see the rationale in
+[How it runs](#how-it-runs--and-why-its-outside-the-runtime)), but a **bounded, sound,
+one-step-deep inferencer** that now covers control-flow, recursion, and complex closures:
 
 - ✅ **Primitives** — every [`NativeFn`](../crates/lisp/src/core/value.rs)
   carries a [`Sig`](../crates/lisp/src/types/mod.rs) field next to its `Arity`
@@ -153,17 +155,29 @@ simplest-first — deliberately **no inference engine** (see the rationale in
   domains are kept to the widest type the body accepts so a tighter sig never
   false-positives. This is what makes `(+ 1 "x")` and `(even? "x")` catchable
   even though both are plain Brood closures.
-- ✅ **Basic inference** (`check::infer_sig`) — *only* for a fn whose body is a
-  **single straight-line expression** (no `if`/`cond`/`when`/`let`/`match`/
-  recursion, no `&optional`/rest params): each closure parameter inherits the
-  type the callee expects at the position(s) where the parameter is used
-  directly (intersected across positions); the closure's return is the
-  callee's. Anything with a branch / binding / recursion → infer nothing.
-  Sound **because a straight-line use is unconditional** — no control-flow
-  analysis, no fixpoint, no false-positive class. The callee is itself only
-  looked up via the *non-inferring* `primitive_sig`/`curated_sig` (so a chain
-  `defn a (x) (b x)` / `defn b (x) (a x)` can't loop). Catches one-liner
-  wrappers (`inc`, `twice`, simple user `defn`s); skips everything subtle.
+- ✅ **Inference** (`check::infer_sig`) — signatures for a plain (non-macro) closure,
+  split into a **parameter** side and a **return** side, each independently sound:
+  - **Parameters** come from *unconditional* type demands across the body (the
+    demand tier below): a position guaranteed to execute on every call. A guarded
+    use never constrains a param, so no false positive.
+  - **The return** is the type of the body's tail via `expr_ty`, which unions the
+    result positions of `if`/`cond`/`when`/`let`/`do`/`case` — so a branchy body is
+    no longer skipped (it was, historically). Two extensions make this reach most
+    of `std`:
+    - **Recursion** (2026-07-29): a self-recursive call in a branch-result position
+      contributes ⊥ to the union — by induction it returns the fixpoint the base
+      cases already define — so a tail-recursive `--acc`/`--loop` helper's return
+      infers from its base cases instead of deferring on the unknown self-call.
+    - **Complex closures** (2026-07-29): a multi-arity / `&optional` / rest closure
+      has no single *param* signature, but its **return** is the union of each arm's
+      tail (`infer_return_only`, a params-less `Sig`); arity is checked separately.
+  Sound throughout: params are *under*-constrained (defer on any guarded/uncertain
+  use); a return union is a *supertype* of what a call actually returns (it can only
+  *under*-flag a caller, never false-positive); any untypeable arm/branch defers the
+  whole thing; and a callee is looked up via the *non-inferring*
+  `primitive_sig`/`curated_sig` (one step deep, so `a→b→a` can't loop). Verified: the
+  cardinal-sin gate — **zero** false positives across `std/` + `tests/` — held on
+  every extension.
 
 **Parameter inference — unconditional-demand tier (✅ 2026-07-25).** Beyond the
 single-call precise tier, `infer_sig` (`collect_param_demands` in `sigs.rs`) now

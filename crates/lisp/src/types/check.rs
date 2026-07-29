@@ -42,12 +42,16 @@
 //!    `reduce`-based / higher-order Brood closures the checker can't infer but
 //!    that matter (`+ - * / < <= > >= mod map filter reduce`; see
 //!    [`sigs::curated_sig`]). Each is a Brood `defn`, but its sig is pinned by hand.
-//! 3. **Basic inference** for a closure whose body is **one straight-line
-//!    expression** (a single direct call to a known sig; no `if`/`cond`/`let`/
-//!    `match`/recursion). Each closure parameter inherits the type the callee
-//!    expects at the position(s) where the parameter is passed; the closure's
-//!    return is the callee's. Sound because a straight-line use is
-//!    unconditional — no control-flow analysis (see [`sigs::sig_of`]).
+//! 3. **Inference** ([`sigs::infer_sig`]) — a bounded, sound, one-step-deep inferencer
+//!    (no unification / global solve). **Parameters** come from *unconditional* type
+//!    demands across the body (a guarded use never constrains a param). **The return** is
+//!    the body tail's type via `expr_ty`, which unions `if`/`cond`/`let`/`do`/`case`
+//!    results — so a branchy body is inferred, not skipped. Plus: a self-recursive call in
+//!    a branch result contributes ⊥ (recursion infers from base cases), and a
+//!    multi-arity / `&optional` / rest closure gets a params-less return-only sig (the
+//!    union of its arm tails; arity is checked separately). Sound throughout — params
+//!    under-constrained, returns over-approximated, callees looked up non-inferring — so
+//!    zero false positives (see [`sigs::sig_of`]).
 //!
 //! Argument types in a call come from literals, nested calls with a known
 //! return type, and **a context-tracked map of local-variable narrowings**:
@@ -427,6 +431,17 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
     }
 }
 
+/// The **type signature** of the callable `sym` resolves to — declared, curated, or
+/// inferred (all of `sigs::sig_of`'s sources) — rendered as its arrow string, e.g.
+/// `(int -> int)` or `(fn seqable -> seqable)`. `None` for a non-callable, an unknown
+/// name, or one whose signature can't be pinned. The tooling-facing view of the
+/// inferencer (LSP hover, docs); reads only, never gates. The per-file inference memo is
+/// cleared first so a re-edited/reloaded function re-infers rather than showing a stale sig.
+pub fn signature_string(heap: &Heap, sym: Symbol) -> Option<String> {
+    sigs::clear_sig_memo();
+    sigs::sig_of(heap, sym).map(|s| s.to_string())
+}
+
 /// Check one form, returning a warning per provable misuse. Empty when nothing is
 /// provably wrong (which includes "not enough static info").
 pub fn check_form(heap: &Heap, form: Value) -> Vec<String> {
@@ -630,7 +645,7 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         // registry BEFORE parsing sigs, so a `(sig f (Shape -> …))` / `:-> Shape` referring
         // to a sealed ability (this file's or an imported one) resolves to the union of its
         // members' record shapes rather than being dropped as an unknown type name.
-        annot::set_ability_types(protocol::sealed_member_ids(heap, &expanded));
+        annot::set_ability_types(protocol::ability_type_table(heap, &expanded));
         for &form in &forms {
             register_declared_sig(heap, &mut ctx, file_ns_name.as_deref(), form);
         }

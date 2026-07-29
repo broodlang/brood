@@ -2,7 +2,7 @@
 
 KI-9 is a one-off arity sighting judged a transient inconsistent-build artifact, not
 present in committed code; KI-10 no longer reproduces, incidentally fixed — both kept as
-records, not open bugs. **No open KIs.**
+records, not open bugs. **Open: KI-17** (a checker reachability gap — a workaround exists).
 This file is the condensed record — what each was, how it was fixed, and the regression
 test that guards it — so a recurrence is recognizable. For the narrative discovery
 writeup of the scheduler race, see
@@ -10,6 +10,30 @@ writeup of the scheduler race, see
 ADRs / topic docs.
 
 ---
+
+## KI-17 — `nest check` validates qualified names against ITS load set, not the entry point's · **OPEN 2026-07-29**
+
+**Symptom.** A qualified call to a module the running program never loads —
+`(path/basename f)` in a file whose module neither `(:use path)` nor
+`(require 'path)` — passes `nest check` clean, then raises
+`unbound symbol: path/basename` at runtime. Hit twice in one day downstream
+(myedit: `path/basename`, then a cross-module form value with the same shape).
+
+**Cause.** `check-project` loads the whole project image (sources + test files)
+before checking; any file's `require` binds the qualified name image-wide, so the
+checker resolves it for EVERY file — including files whose own load graph never
+pulls that module in. The check answers "bound in the check image", not "bound when
+this module is reachable from the entry point".
+
+**Sketch of a fix.** Per-module reachability: check each file against the modules
+its own header/`require` closure loads (the loader already knows the edges). Costly
+to do exactly (dynamic `require` in fn bodies is load-time-undecidable); a useful
+approximation: warn when a hand-written `mod/name` reference appears in a file whose
+static require-closure never mentions `mod`.
+
+**Workaround.** Discipline: every qualified `mod/…` call needs a `(require 'mod)`
+in that file (a bare require avoids `(:use …)` import shadowing, e.g. std path's
+`join` vs the prelude's).
 
 ## KI-15 — `impl` silently misregisters a **bare** record id · **FIXED 2026-07-27**
 
