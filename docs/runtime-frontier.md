@@ -117,10 +117,36 @@ Both of the large levers on this path have already been taken. What is left is t
 irreducible-looking remainder: one mailbox `Mutex` acquisition, `wake_parked`, a
 re-enqueue, worker pickup, and one matcher activation per candidate.
 
-- [ ] **L3 — matcher without a frame per candidate.** Lower the match to a frameless
-  predicate over the staged value (the `match` lowering pass exists), and/or BEAM's
-  OTP-24 receive-marker trick so a selective receive doesn't rescan already-rejected
-  messages. The HOF path proves the activation is expensive; this removes the rest of it.
+- [ ] **L3 — selective-receive rescan is O(rounds × backlog). Measured 2026-07-29, and
+  it is the bigger half of this item.** The receive loop rebuilds *every* non-matching
+  candidate into the heap (`from_message`, allocating garbage) on *every* scan, then runs
+  the matcher on it. 2000 receive rounds against a static backlog:
+
+  | backlog | wall | per rescanned message |
+  |---|---|---|
+  | 0 | 20 ms | — |
+  | 50 | 64 ms | 0.44 µs |
+  | 200 | 171 ms | 0.38 µs |
+
+  Linear in backlog × rounds, so a process with a busy mailbox that waits on a specific
+  tag (a `gen` server, a supervisor filtering `[:EXIT …]`) pays quadratically in the
+  backlog. `MailboxState::scanned` already avoids re-running a *parked* scan for messages
+  behind the mark, but a freshly-entered `receive` starts from zero every time.
+
+  Two independent fixes, either worth doing:
+  1. **Don't rebuild to reject.** The expensive part per candidate is `from_message` +
+     a matcher activation. A cheap structural pre-filter on the `Message` (before it
+     becomes a `Value`) would reject most non-matches without allocating — the common
+     patterns are tag-led (`[:want _]`), so comparing the first element's keyword against
+     the clause tags is enough. Needs the compiler to expose each `receive` clause's
+     leading tag, which the `match` lowering already knows.
+  2. **BEAM's OTP-24 receive markers** for the ref-addressed case: a `gen`-style call
+     stamps a unique ref, so the scan can start at the marker instead of the queue head.
+     Narrower (only helps ref-carrying protocols) but removes the rescan entirely there.
+
+  The original framing — "remove the per-candidate frame" — is the *smaller* half: with
+  the HOF fast path already shipped (worth 3.0× on the message rows), a single match on a
+  1-message mailbox is close to floor. The rescan is where the remaining time is.
 - [ ] **L4 — park/wake path.** Handoff already elides the futex wake in the common case.
   Remaining: the mailbox `Mutex` (a per-message uncontended lock), `wake_parked`,
   re-enqueue. Profile before designing — after L3, this is what is left of the 1.3 µs.
