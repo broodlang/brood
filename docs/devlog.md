@@ -11029,3 +11029,45 @@ tradeoff our reverted IC-drop hit and gave it to the programmer.
 Execution order chosen: (hibernate) builtin → process-shell recycling → single-copy send
 to a parked receiver → direct-link sealed callees → cold-heap split. The list lives in
 the doc; items get ticked or moved to its dead-ends section as they're measured.
+
+## 2026-07-29 (cont.) — defability hardening: variadic ops, collisions, polymorphic dispatch
+
+Reviewed the ability system (`defability`/`impl`, ADR-172) and fixed a batch of
+correctness/ergonomic bugs found by probing the release binary, plus 7 stale checker
+tests the fix surfaced. All in `std/prelude.blsp`, `crates/lisp/src/types/check/protocol.rs`,
+`crates/lisp/src/core/heap/vm_cache.rs`, `crates/lisp/src/types/display.rs`.
+
+- **Variadic ops were silently broken.** `(op [self & args])` emitted a *direct* call
+  `(impl self & args)`, so `&` was passed as an argument — an unbound-symbol error at every
+  call, with no diagnostic at declaration. The op now emits `(apply impl self … rest)` for a
+  `&`-rest arg (`defability--op-call`).
+- **Zero-arg ops** (`(op [])`) dispatched every value on `(identity-of nil)` → the `:nil`
+  impl (no polymorphism, no error). Now rejected at macro-expansion.
+- **`record?` disagreed with dispatch.** It used `contains?`, so a hand-written
+  `{:__id__ nil …}` was a "record" to `record?`/`record-id`/`fields` yet dispatched as
+  `:map` (`identity-of` requires a *truthy* id). `record?` now requires a truthy id.
+- **Op-name collisions silently clobbered.** Two abilities declaring the same op name in one
+  ns overwrite each other's generic `defn`. `register-ability` now warns — guarded by
+  `bound?` so it fires only when a real generic function is shadowed (crafted precedence
+  fixtures using bare `register-ability` stay quiet).
+- **Impl arity** is validated at registration (`register-impl--check-arity`): a warning when
+  an impl's arity is incompatible with the declared op, for known abilities (a fixed op skips
+  when its own spec is variadic).
+- **`no-impl`** now throws a structured `{:kind :no-impl :message :ability :op :id :have}`
+  instead of a bare string, so a handler can branch on the parts; `error-message` still
+  returns the same human text.
+- **Dispatch inline cache is now polymorphic** (`DISPATCH_IC_WAYS = 4`, ADR-172 §7). The
+  monomorphic cache re-resolved on every call for an op applied over mixed identities in one
+  loop (`to-str`/`inspect` over a heterogeneous collection); it now memoises up to 4 `id→fn`
+  associations per op under one epoch guard, round-robin eviction when full.
+- **Checker:** an op-fn symbol two different abilities bind is marked ambiguous and dropped
+  from the static missing-impl pass (no false-warn, no false-pass); `parse_op` understands
+  `&`, so a variadic impl of a fixed op no longer false-warns on arity.
+- **`number`-alias display.** Records doing arithmetic via the `Num` ability widened the
+  operators' argument domain to `number | map`; since `{int,float,decimal,map}` ≠ `Ty::NUMBER`
+  the printer spelled out `int | float | map | decimal`, breaking 7 checker tests that assert
+  the message names `number`. The printer now factors the `number` alias out of any strict
+  pure-tag superset, so it reads `number | map` — clearer messages *and* the tests pass.
+
+Full suite green (`make test`: 883 passed); `tests/ability_test.blsp` extended with variadic,
+structured-error, and polymorphic-cache (>4 ids) coverage.

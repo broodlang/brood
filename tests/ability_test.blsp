@@ -246,3 +246,96 @@
     (register-impl 'HoldB 'op :int (fn (n) :app) nil)
     (register-impl 'HoldB 'op :int (fn (n) :ability) 'hblib)
     (assert= ((impl-for '[HoldB op] :int) nil) :app)))
+
+;; ---- variadic ops: a `&`-rest op dispatches on the first arg, passes the rest ----
+;; Before the fix the op emitted a direct `(impl self & rest)` call — `&` was passed as an
+;; argument (unbound-symbol error at every call). It now emits `(apply impl self … rest)`.
+(defability Cat (cat [self & rest] :-> any))
+(impl Cat :string (cat [s & rest] (apply str s rest)))
+(impl Cat :int (cat [n & rest] (fold + n rest)))
+
+(describe "variadic ops"
+  (test "a & rest op dispatches on the first arg and receives the rest"
+    (assert= (cat "a" "b" "c") "abc")
+    (assert= (cat 1 2 3 4) 10))
+  (test "a variadic op works with only its required arg (empty rest)"
+    (assert= (cat "x") "x")
+    (assert= (cat 7) 7)))
+
+;; ---- no-impl raises a STRUCTURED error, not a bare string ----
+(defability Narrow (narrow [self] :-> any))
+(impl Narrow :int (narrow [n] n))
+
+(describe "no-impl raises a structured error"
+  ;; `arg` is a var so the STATIC missing-impl check can't judge it — this exercises the
+  ;; RUNTIME error path (same reason the `only` test above uses a variable).
+  (test "the thrown value carries :kind / :ability / :op / :id and a message"
+    (let (arg "s"
+          e (try (narrow arg) (catch e e)))
+      (assert= (get e :kind) :no-impl)
+      (assert= (get e :ability) 'Narrow)
+      (assert= (get e :op) 'narrow)
+      (assert= (get e :id) :string)
+      ;; error-message still yields the human text, so a plain handler is unchanged
+      (is (includes? (error-message e) "Narrow"))
+      (is (includes? (error-message e) ":string"))))
+  (test ":have lists the ids that ARE implemented"
+    (let (arg "s"
+          e (try (narrow arg) (catch e e)))
+      (is (member? :int (get e :have))))))
+
+;; ---- polymorphic dispatch cache (ADR-172 §7): more ids than cache ways ----
+;; A monomorphic cache would re-resolve (still correct) but a leak/aliasing bug would show
+;; as a wrong impl when > DISPATCH_IC_WAYS distinct ids alternate through one op.
+(defability Poly6 (p6 [self] :-> any))
+(impl Poly6 :int (p6 [_] :int))
+(impl Poly6 :string (p6 [_] :string))
+(impl Poly6 :keyword (p6 [_] :kw))
+(impl Poly6 :float (p6 [_] :float))
+(impl Poly6 :bool (p6 [_] :bool))
+(impl Poly6 :vector (p6 [_] :vec))
+
+(describe "polymorphic dispatch cache"
+  (test "6 distinct ids (> cache ways) each resolve to their own impl"
+    (assert= (list (p6 1) (p6 "a") (p6 :k) (p6 1.5) (p6 true) (p6 [0]))
+      (list :int :string :kw :float :bool :vec)))
+  (test "re-hitting an id after churning all six does not leak another id's impl"
+    (assert= (list (p6 1) (p6 "a") (p6 1) (p6 :k) (p6 "a") (p6 1))
+      (list :int :string :int :kw :string :int))))
+
+;; ---- across processes: dispatch (polymorphic + variadic) works off the main process ----
+;; Each worker builds a value via an ability op in its OWN process and sends it back; this
+;; exercises dispatch on the worker's per-process inline cache and heap, not just the parent's.
+(defability Kindly (kindly [self] :-> any))
+(impl Kindly :int (kindly [_] :int))
+(impl Kindly :string (kindly [_] :string))
+(impl Kindly :keyword (kindly [_] :kw))
+(impl Kindly :float (kindly [_] :float))
+(impl Kindly :bool (kindly [_] :bool))
+(impl Kindly :vector (kindly [_] :vec))
+
+(defability Gather (gather [self & rest] :-> any))
+(impl Gather :int (gather [n & rest] (fold + n rest)))
+
+(defn abt-spawn-workers (parent xs)
+  (when (not (empty? xs))
+    (spawn (send parent [:r (kindly (first xs))]))
+    (abt-spawn-workers parent (rest xs))))
+(defn abt-collect (got total acc)
+  (if (= got total) acc
+    (abt-collect (+ got 1) total (receive ([:r v] (cons v acc))))))
+
+(describe "abilities across processes"
+  :isolated
+  (test "polymorphic dispatch resolves each worker's own id in its own process"
+    (let (xs [1 "a" :k 1.5 true [0]])
+      (abt-spawn-workers (self) xs)
+      (let (kinds (abt-collect 0 (count xs) nil))
+        (assert= (count kinds) 6)
+        ;; order is nondeterministic — assert every expected impl was reached
+        (is (every? (fn (k) (member? k kinds))
+              (list :int :string :kw :float :bool :vec))))))
+  (test "a variadic op runs in a spawned worker"
+    (let (parent (self))
+      (spawn (send parent [:sum (gather 1 2 3 4)]))
+      (assert= (receive ([:sum v] v)) 10))))
