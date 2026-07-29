@@ -20,7 +20,8 @@
 
 (defmodule editor/buffer
   "An immutable text buffer for building editors, written in Brood over the rope
-primitives (ADR-045). A *buffer* is a map:
+primitives (ADR-045). A *buffer* is a **record** (so `buffer?` is an identity check, and
+a buffer is never `=` to a look-alike map) whose fields are:
 
     {:rope <rope> :point <int> :mark <int|nil> :name <string> :file <string|nil>
      :undo (<snapshot>…) :pending-undo (<snapshot>…)}
@@ -54,15 +55,41 @@ Where `end-of-line` lands and the rightmost column point can hold on that line."
     (if (ends-with? lt "\n") (dec (string-length lt)) (string-length lt))))
 
 ;; ---- construction -----------------------------------------------------------
+;;
+;; A buffer is a RECORD, so its type is its identity rather than "a map that happens to
+;; hold a rope under `:rope`" — `buffer?` can't be fooled by a look-alike, a buffer never
+;; compares `=` to a bare map, and it prints as `#<buffer …>` instead of dumping the whole
+;; rope and undo history. Every op still `assoc`es (a record IS a map), and `assoc`
+;; preserves the identity, so a buffer stays a buffer through the whole pipeline —
+;; including the extra keys other layers stamp on (`:markers`, `:type`, `:layers`).
+;;
+;; The generated field accessors are re-defined below with docstrings.
+
+(defrecord buffer (rope point mark name file undo pending-undo))
 
 (defn make-buffer (text &optional (name "*scratch*") (file nil))
   "A fresh buffer holding `text`, with point at 0, no mark, and an empty undo history.
 `name` is a label (default `\"*scratch*\"`); `file` is the backing path or nil."
-  {:rope (string->rope text) :point 0 :mark nil :name name :file file :undo () :pending-undo ()})
+  (buffer (string->rope text) 0 nil name file () ()))
 
 (defn buffer? (x)
-  "True if `x` is a buffer value (a map with a rope under `:rope`)."
-  (and (map? x) (rope? (get x :rope))))
+  "True if `x` is a buffer value — by record identity, not by shape."
+  (and (record? x) (= (record-id x) :editor/buffer/buffer)))
+
+;; A buffer's display form is a short identification — never its text: a buffer can hold
+;; a megabyte of rope plus an undo history, and `println`ing that (or seeing it in an
+;; error message) is never what was wanted. `inspect` adds point/mark for debugging.
+(impl Display
+  editor/buffer/buffer
+  (to-str [b] (str "#<buffer " (get b :name) " " (rope-length (get b :rope)) " chars>")))
+
+(impl Inspect
+  editor/buffer/buffer
+  (inspect [b]
+    (str "#<buffer "
+      (get b :name) " " (rope-length (get b :rope)) " chars" " point=" (get b :point)
+      (if (get b :mark) (str " mark=" (get b :mark)) "")
+      (if (get b :file) (str " file=" (get b :file)) "") ">")))
 
 (defn buffer-from-file (path)
   "Read the file at `path` into a fresh buffer, with `:file` set to `path` so

@@ -57,8 +57,11 @@ The `term-*` primitives (`term-enter`, `term-leave`, `term-size`, `term-poll`,
 
 ## 2. The buffer model (`std/editor/buffer.blsp`)
 
-A **buffer** is a map `{:rope :point :mark :name :file}`. You rarely touch those
-keys directly — you use the pure functions, each returning a new buffer:
+A **buffer** is a record with fields `{:rope :point :mark :name :file}` — so `buffer?`
+is an identity check rather than "a map that happens to hold a rope", and a buffer prints
+as `#<buffer *scratch* 11 chars>` rather than dumping its rope and undo history. You
+rarely touch the fields directly — you use the pure functions, each returning a new
+buffer:
 
 ```clojure
 (def b (make-buffer "hello world"))   ; point at 0, no mark

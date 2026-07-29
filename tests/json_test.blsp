@@ -140,8 +140,10 @@
   (test "a single-key object (order is deterministic for one key)"
     (assert= (json-encode {"a" 1}) "{\"a\":1}")
     (assert= (json-encode {:b [true nil]}) "{\"b\":[true,null]}"))
+  ;; A fn, not a pid: the JsonEncode block below deliberately impls `:pid` to show a
+  ;; built-in kind being opened, so the "no rule for this kind" case is a fn here.
   (test "cannot encode a non-JSON value"
-    (is (try (do (json-encode (self)) false) (catch e true)))))
+    (is (try (do (json-encode (fn (x) x)) false) (catch e true)))))
 
 (describe "json round-trips (parse ∘ encode = identity)"
   (test "values survive encode → parse (objects come back keyword-keyed)"
@@ -150,6 +152,46 @@
     (assert= (json-parse (json-encode {:n -2.5 :s "a\"b\nc"})) {:n -2.5 :s "a\"b\nc"}))
   (test "string keys encode fine and parse back as keywords (encode accepts either)"
     (assert= (json-parse (json-encode {"repo" "brood" "stars" 3})) {:repo "brood" :stars 3})))
+
+;; ---- records + the JsonEncode ability ---------------------------------------
+;; A record encodes as its FIELDS by default (its `:__id__` identity must never reach
+;; the wire); a `JsonEncode` impl overrides that wire shape. The ability registers no
+;; `:default`, so a kind JSON has no rule for still errors loudly until impl'd.
+
+(defrecord point (x y))
+(defrecord usd (cents))
+(defrecord wrapped (inner))
+
+(impl JsonEncode json-test/usd (to-json [m] (str "$" (get m :cents))))
+(impl JsonEncode :pid (to-json [p] (str p)))
+
+(describe "encoding records"
+  (test "a record encodes as its fields, with the internal id omitted"
+    (assert= (json-parse (json-encode (point 1 2))) {:x 1 :y 2})
+    (is (not (includes? (json-encode (point 1 2)) "__id__"))))
+  (test "a nested record encodes as fields too"
+    (assert= (json-parse (json-encode (wrapped (point 3 4)))) {:inner {:x 3 :y 4}}))
+  (test "a record in a map value or a vector element is encoded"
+    (assert= (json-parse (json-encode {:p (point 5 6)})) {:p {:x 5 :y 6}})
+    (assert= (json-parse (json-encode [(point 0 0)])) [{:x 0 :y 0}]))
+  (test "a plain map is unaffected — no id to strip"
+    (assert= (json-encode {:x 1}) "{\"x\":1}")))
+
+(describe "the JsonEncode ability"
+  (test "a JsonEncode impl decides the wire shape instead of the fields"
+    (assert= (json-encode (usd 1050)) "\"$1050\"")
+    (assert= (json-parse (json-encode (usd 25))) "$25"))
+  (test "the impl applies wherever the record appears"
+    (assert= (json-parse (json-encode {:m (usd 7)})) {:m "$7"})
+    (assert= (json-parse (json-encode [(usd 1) (usd 2)])) ["$1" "$2"]))
+  (test "an impl opens a kind that has no built-in JSON rule"
+    ;; :pid is impl'd above — without it this raises
+    (is (string? (json-parse (json-encode (self))))))
+  (test "a kind with no impl still errors loudly"
+    (assert-error (json-encode (fn (x) x))))
+  (test "no :default is registered — nil means 'no rule', not 'the fallback'"
+    (is (nil? (impl-for '[JsonEncode to-json] :fn)))
+    (is (not (nil? (impl-for '[JsonEncode to-json] :json-test/usd))))))
 
 ;; Cross-process: parse in spawned workers and fan the results back in — the parsed
 ;; maps/vectors are deep-copied across per-process heaps on `send`, proving they
@@ -171,4 +213,20 @@
           v {:repo "brood" :runs [1 2 3]})
       (spawn (send me [:enc (json-encode v)]))
       (let (s (receive ([:enc s] s) (after *test-wait-ms* :timeout)))
-        (assert= (json-parse s) v)))))
+        (assert= (json-parse s) v))))
+  ;; `*impls*` is a global, so a spawned process sees the same registry; a record
+  ;; deep-copies on `send` and keeps its `:__id__`, so it dispatches identically at
+  ;; either end. Both directions are checked.
+  (test "a record's JsonEncode impl applies in a spawned process too"
+    (let (me (self))
+      (doseq (i (range 4)) (spawn (send me [:enc (json-encode (usd i))])))
+      (let (results (map (fn (_) (receive ([:enc s] s) (after *test-wait-ms* :timeout)))
+                      (range 4)))
+        (assert= (into [] (sort (map json-parse results))) ["$0" "$1" "$2" "$3"]))))
+  (test "a record built in a worker encodes via its impl after crossing heaps"
+    (let (me (self))
+      (spawn (send me [:rec (usd 99)]))
+      (let (r (receive ([:rec r] r) (after *test-wait-ms* :timeout)))
+        (is (record? r))
+        (assert= (record-id r) :json-test/usd)
+        (assert= (json-encode r) "\"$99\"")))))

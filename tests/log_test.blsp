@@ -120,6 +120,75 @@
     ;; fallback path writes to stderr; the call must still return nil cleanly
     (assert= (log-info "nowhere") nil)))
 
+;; ---- the LogBackend ability -------------------------------------------------
+;; A backend is any value with a `LogBackend` impl, so a backend that does something
+;; other than "format one line and write it" needs no change to std/log.blsp. This one
+;; sends the record itself (not a formatted line) and reuses the standard level/filter
+;; gate via `backend-passes?`.
+
+(defrecord raw-backend (target min-level filter))
+
+(impl LogBackend
+  log-test/raw-backend
+  (backend-emit [b record]
+    (when (backend-passes? b record)
+      (send (get b :target) [:rec record]))
+    nil))
+
+(describe "log: a third-party LogBackend"
+  :isolated
+  (test "a custom backend record receives records instead of formatted lines"
+    (let (me (self))
+      (start-logger {:level :debug :backends [(raw-backend me :debug nil)]})
+      (log-info "structured" {:category :lsp})
+      (let (rec (receive ([:rec r] r) (after *test-wait-ms* :timeout)))
+        (stop-logger)
+        (assert= (get rec :level) :info)
+        (assert= (get rec :msg) "structured")
+        (assert= (get (get rec :meta) :category) :lsp))))
+  (test "a custom backend reusing backend-passes? honours :min-level"
+    (let (me (self))
+      (start-logger {:level :debug :backends [(raw-backend me :warn nil)]})
+      (log-info "dropped")
+      (log-error "kept")
+      (let (rec (receive ([:rec r] r) (after *test-wait-ms* :timeout)))
+        (stop-logger)
+        (assert= (get rec :msg) "kept"))))
+  (test "custom and stock backends coexist on one logger"
+    (let (me (self))
+      (start-logger {:level :debug :backends [(raw-backend me :debug nil) (lt-collect me)]})
+      (log-info "both")
+      ;; one record from the custom backend, one formatted line from the stock one
+      (let (first-message (receive
+                            ([:rec r] [:rec r])
+                            ([:line s] [:line s])
+                            (after *test-wait-ms* :timeout))
+            second-message (receive
+                             ([:rec r] [:rec r])
+                             ([:line s] [:line s])
+                             (after *test-wait-ms* :timeout)))
+        (stop-logger)
+        (is (not (= (first first-message) (first second-message))))))))
+
+(describe "log: the stock backend is a record"
+  (test "backend builds a line-backend with the documented defaults"
+    (let (b (backend (fn-port (fn (s) s))))
+      (is (record? b))
+      (assert= (record-id b) :log/line-backend)
+      (assert= (get b :min-level) :debug)
+      (is (nil? (get b :filter)))))
+  (test "a backend prints as itself, naming its sink"
+    (assert= (to-str (stdout-backend)) "#<log-backend #<port stdout> min=:debug>")
+    (assert= (to-str (backend (stderr-port) {:min-level :warn}))
+      "#<log-backend #<port stderr> min=:warn>")
+    (is (includes? (to-str (backend (stdout-port) {:filter (fn (r) true)})) "filtered")))
+  (test "file-backend writes through a file-port"
+    (assert= (record-id (get (file-backend "/tmp/brood-log-test.log") :sink)) :io/file-port))
+  (test "satisfies? reports whether a value can serve as a backend"
+    (is (satisfies? 'LogBackend (stdout-backend)))
+    (is (satisfies? 'LogBackend (raw-backend (self) :debug nil)))
+    (is (not (satisfies? 'LogBackend {:sink (fn (s) s)})))))
+
 ;; ---- concurrency ------------------------------------------------------------
 (describe "log: safe under concurrency"
   :isolated

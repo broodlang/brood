@@ -48,3 +48,58 @@
     (let (me (self))
       (try (with-out (process-port me) (throw "boom")) (catch e nil))
       (assert= (with-out-str (println "after-throw")) "after-throw\n"))))
+
+;; ---- the Port ability -------------------------------------------------------
+;; `io-write` is an ability op, so a port is any value with an impl: a bare 1-arg fn
+;; (the original representation, kept working by the `:fn` impl) or a record that
+;; carries its target and prints as itself.
+
+(describe "io: ports are Port impls"
+  (test "a bare 1-arg fn is a port"
+    (let (me (self))
+      (io-write (fn (s) (send me [:io-write s])) "raw fn")
+      (assert= (receive ([:io-write s] s) (after *test-wait-ms* :timeout)) "raw fn")))
+  (test "port? is true for a fn port and for each port record"
+    (is (port? (fn (s) s)))
+    (is (port? (stdout-port)))
+    (is (port? (stderr-port)))
+    (is (port? (process-port (self))))
+    (is (port? (file-port "/tmp/nonexistent"))))
+  (test "port? is false for a value that cannot be written to"
+    (is (not (port? 42)))
+    (is (not (port? "a string")))
+    (is (not (port? {:not :a-port}))))
+  (test "a port record prints as itself, not as a field map"
+    (assert= (to-str (stdout-port)) "#<port stdout>")
+    (assert= (to-str (stderr-port)) "#<port stderr>")
+    (assert= (to-str (file-port "/tmp/x.log")) "#<port file /tmp/x.log>")
+    (is (includes? (to-str (process-port (self))) "#<port process ")))
+  (test "a stdout port record still routes through the capture stack"
+    (assert= (with-out-str (io-write (stdout-port) "captured")) "captured"))
+  (test "port-fn adapts a record port to the bare fn *out* holds"
+    (let (me (self)
+          f (port-fn (process-port me)))
+      (is (fn? f))
+      (f "adapted")
+      (assert= (receive ([:io-write s] s) (after *test-wait-ms* :timeout)) "adapted")))
+  (test "port-fn passes a fn port straight through"
+    (let (f (fn (s) s))
+      (is (= (port-fn f) f)))))
+
+;; A port defined *outside* std/io — the point of the ability. `counting-port` wraps
+;; another port and rewrites what is written, with no change to io.blsp.
+(defrecord counting-port (target))
+(impl Port
+  io-test/counting-port
+  (io-write [p s] (io-write (get p :target) (str "[" (string-length s) "] " s))))
+
+(describe "io: a third-party port type"
+  (test "a record from another module is a port once it impls Port"
+    (is (port? (counting-port (stdout-port))))
+    (assert= (with-out-str (io-write (counting-port (stdout-port)) "abc")) "[3] abc"))
+  (test "with-out installs a third-party port like any other"
+    (let (me (self))
+      (with-out (counting-port (process-port me)) (print "xy"))
+      (assert= (receive ([:io-write s] s) (after *test-wait-ms* :timeout)) "[2] xy")))
+  (test "a value with no Port impl raises the named ability error"
+    (assert-error (io-write 42 "nope"))))

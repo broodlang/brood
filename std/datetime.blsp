@@ -54,30 +54,35 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
               (- (dt--fdiv yoe 4) (dt--fdiv yoe 100)) doy))
     (- (+ (* era 146097) doe) 719468)))
 
-;; ---- constructors -----------------------------------------------------------
+;; ---- the three temporal types ------------------------------------------------
+;;
+;; Each is a RECORD, so the three are genuinely distinct types rather than three plain
+;; maps told apart by which keys they carry. That buys real predicates (`datetime?` /
+;; `date?` / `time-of-day?` — a date is not "a datetime missing its time"), a per-type
+;; display form (an ISO string, not `{:year 2026, :month 7, …}`), and dispatch: the
+;; `Temporal` ability below renders any of them, and a fourth temporal type from
+;; elsewhere (a zoned datetime, a fiscal quarter) can join by impl'ing it.
 
-(defn datetime (year month day hour minute second ms)
-  "A datetime map {:year :month :day :hour :minute :second :ms}."
-  {:year year
-   :month month
-   :day day
-   :hour hour
-   :minute minute
-   :second second
-   :ms ms})
+(defrecord datetime (year month day hour minute second ms))
+(defrecord date (year month day))
+(defrecord time-of-day (hour minute second ms))
 
-(defn date (year month day)
-  "A date map {:year :month :day}."
-  {:year year :month month :day day})
+(defn datetime? (x)
+  "True if `x` is a datetime (date *and* time-of-day)."
+  (and (record? x) (= (record-id x) :datetime/datetime)))
 
-(defn time-of-day (hour minute second ms)
-  "A time-of-day map {:hour :minute :second :ms}."
-  {:hour hour :minute minute :second second :ms ms})
+(defn date? (x)
+  "True if `x` is a date (no time component)."
+  (and (record? x) (= (record-id x) :datetime/date)))
+
+(defn time-of-day? (x)
+  "True if `x` is a time-of-day (no date component)."
+  (and (record? x) (= (record-id x) :datetime/time-of-day)))
 
 ;; ---- epoch conversion -------------------------------------------------------
 
 (defn epoch-ms->dt (ms)
-  "Convert Unix epoch milliseconds to a UTC datetime map."
+  "Convert Unix epoch milliseconds to a UTC datetime."
   (let (total-s (dt--fdiv ms 1000)
         ms-part (- ms (* total-s 1000))
         days (dt--fdiv total-s 86400)
@@ -86,16 +91,11 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
         minute (dt--fdiv (rem time-s 3600) 60)
         second (rem time-s 60)
         ymd (dt--days->ymd days))
-    {:year (get ymd :year)
-     :month (get ymd :month)
-     :day (get ymd :day)
-     :hour hour
-     :minute minute
-     :second second
-     :ms ms-part}))
+    (datetime (get ymd :year) (get ymd :month) (get ymd :day) hour minute second ms-part)))
 
 (defn dt->epoch-ms (dt)
-  "Convert a UTC datetime (or date) map to Unix epoch milliseconds."
+  "Convert a UTC datetime (or date — its time is taken as midnight) to Unix epoch
+milliseconds."
   (let (days (dt--ymd->days (get dt :year) (get dt :month) (get dt :day))
         time-s (+ (* (get dt :hour 0) 3600)
                  (* (get dt :minute 0) 60) (get dt :second 0))
@@ -109,9 +109,8 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
   (epoch-ms->dt (now)))
 
 (defn today ()
-  "The current UTC date {:year :month :day}."
-  (let (dt (utc-now))
-    {:year (get dt :year) :month (get dt :month) :day (get dt :day)}))
+  "The current UTC date."
+  (dt->date (utc-now)))
 
 ;; ---- accessors --------------------------------------------------------------
 
@@ -127,41 +126,50 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
 
 (defn dt->date (dt)
   "Extract the date portion of a datetime."
-  {:year (get dt :year) :month (get dt :month) :day (get dt :day)})
+  (date (get dt :year) (get dt :month) (get dt :day)))
 
 (defn dt->time (dt)
   "Extract the time-of-day portion of a datetime."
-  {:hour (get dt :hour 0)
-   :minute (get dt :minute 0)
-   :second (get dt :second 0)
-   :ms (get dt :ms 0)})
+  (time-of-day (get dt :hour 0) (get dt :minute 0) (get dt :second 0) (get dt :ms 0)))
 
 (defn date+time (d t)
-  "Combine a date map and a time-of-day map into a datetime."
-  {:year (get d :year)
-   :month (get d :month)
-   :day (get d :day)
-   :hour (get t :hour 0)
-   :minute (get t :minute 0)
-   :second (get t :second 0)
-   :ms (get t :ms 0)})
+  "Combine a date and a time-of-day into a datetime."
+  (datetime (get d :year)
+    (get d :month) (get d :day) (get t :hour 0) (get t :minute 0) (get t :second 0) (get t :ms 0)))
 
-;; ---- formatting -------------------------------------------------------------
+;; ---- formatting: the Temporal ability ----------------------------------------
+;;
+;; ISO 8601 rendering is per-type — a date has no time part, a time-of-day no date — so
+;; it was three functions (`date->iso8601` / `time->iso8601` / `dt->iso8601`) that callers
+;; had to choose between by knowing which shape they held. It is now ONE op, `to-iso`,
+;; dispatching on the value: `(to-iso x)` renders whichever of the three `x` is, and the
+;; ability is `:sealed` so `nest check` flags a temporal type that forgets it.
 
-(defn date->iso8601 (d)
-  "Format as \"YYYY-MM-DD\"."
+(defability Temporal
+  "A calendar value that renders as ISO 8601." :sealed [datetime date time-of-day]
+  (to-iso [self] :-> string))
+
+;; The two halves, shared by the three impls (a datetime is date + \"T\" + time + \"Z\").
+(defn dt--iso-date (d)
   (str (dt--zero-pad (get d :year) 4)
     "-" (dt--zero-pad (get d :month) 2) "-" (dt--zero-pad (get d :day) 2)))
 
-(defn time->iso8601 (t)
-  "Format as \"HH:MM:SS.mmm\"."
+(defn dt--iso-time (t)
   (str (dt--zero-pad (get t :hour 0) 2)
     ":" (dt--zero-pad (get t :minute 0) 2) ":" (dt--zero-pad (get t :second 0) 2) "."
     (dt--zero-pad (get t :ms 0) 3)))
 
-(defn dt->iso8601 (dt)
-  "Format as \"YYYY-MM-DDTHH:MM:SS.mmmZ\" (UTC)."
-  (str (date->iso8601 dt) "T" (time->iso8601 dt) "Z"))
+(impl Temporal datetime/date (to-iso [d] (dt--iso-date d)))
+(impl Temporal datetime/time-of-day (to-iso [t] (dt--iso-time t)))
+(impl Temporal
+  datetime/datetime (to-iso [dt] (str (dt--iso-date dt) "T" (dt--iso-time dt) "Z")))
+
+;; A temporal value's display form is its ISO string — so `(println (utc-now))` shows
+;; `2026-07-28T14:03:11.000Z`, not the field map. `str`/`pr-str` stay native (ADR-171),
+;; so the data form is still available for debugging via `pr-str`.
+(impl Display datetime/datetime (to-str [dt] (to-iso dt)))
+(impl Display datetime/date (to-str [d] (to-iso d)))
+(impl Display datetime/time-of-day (to-str [t] (to-iso t)))
 
 (defn dt--fmt-code (dt code)
   (cond
@@ -203,7 +211,7 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
       0)))
 
 (defn dt--parse-time-str (s)
-  ;; Parse "HH:MM:SS" or "HH:MM:SS.mmm" → time-of-day map, or nil.
+  ;; Parse "HH:MM:SS" or "HH:MM:SS.mmm" → a time-of-day, or nil.
   (let (dot-parts (string-split s ".")
         hms-str (first dot-parts)
         frac-str (if (> (count dot-parts) 1) (nth dot-parts 1) "")
@@ -217,7 +225,7 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
           (time-of-day h mn sc ms-val))))))
 
 (defn parse-date (s)
-  "Parse an ISO 8601 date string \"YYYY-MM-DD\" → date map, or nil on failure."
+  "Parse an ISO 8601 date string \"YYYY-MM-DD\" → a `date`, or nil on failure."
   (let (parts (string-split s "-"))
     (when (= (count parts) 3)
       (let (y (dt--parse-int (nth parts 0))
@@ -227,11 +235,11 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
           (date y m d))))))
 
 (defn parse-time (s)
-  "Parse \"HH:MM:SS\" or \"HH:MM:SS.mmm\" (optional trailing Z) → time map, or nil."
+  "Parse \"HH:MM:SS\" or \"HH:MM:SS.mmm\" (optional trailing Z) → a `time-of-day`, or nil."
   (dt--parse-time-str (first (string-split s "Z"))))
 
 (defn parse-iso8601 (s)
-  "Parse an ISO 8601 datetime string \"YYYY-MM-DDTHH:MM:SS[.mmm][Z]\" → datetime map, or nil."
+  "Parse an ISO 8601 datetime string \"YYYY-MM-DDTHH:MM:SS[.mmm][Z]\" → a `datetime`, or nil."
   (let (parts (string-split s "T"))
     (when (= (count parts) 2)
       (let (d (parse-date (nth parts 0))

@@ -179,11 +179,15 @@ maps from header→value strings. An empty or header-only CSV returns nil/empty.
   (or (includes? s ",")
     (includes? s "\"") (includes? s "\n") (includes? s "\r")))
 
-(defn csv--emit-field (s)
-  "Emit a single CSV field, quoting it if necessary. Interior quotes are doubled."
-  (if (csv--field-needs-quoting? s)
-    (str "\"" (replace s "\"" "\"\"") "\"")
-    s))
+(defn csv--emit-field (v)
+  "Emit a single CSV field, quoting it if necessary. Interior quotes are doubled.
+A non-string cell is rendered with `to-str` (the `Display` protocol) first — so a number
+emits as its digits, and a record emits as the string its type defines rather than as its
+field map (or, as before `to-str`, a type error out of the quoting scan)."
+  (let (s (if (string? v) v (to-str v)))
+    (if (csv--field-needs-quoting? s)
+      (str "\"" (replace s "\"" "\"\"") "\"")
+      s)))
 
 (defn csv--emit-row (fields)
   "Emit a single CSV row as a string (no trailing newline)."
@@ -196,7 +200,9 @@ maps from header→value strings. An empty or header-only CSV returns nil/empty.
     (csv--emit-rows (rest rows) (cons (csv--emit-row (first rows)) acc))))
 
 (defn csv-emit (rows)
-  "Serialize a list of rows (each a list or vector of strings) to a CSV string.
+  "Serialize a list of rows (each a list or vector of cells) to a CSV string. A cell that
+is not a string is rendered with `to-str` (so a number, keyword, or record emits its
+display form).
 Fields containing commas, quotes, or newlines are quoted; interior quotes are
 doubled. Rows are separated by `\\n`."
   (if (or (nil? rows) (empty? rows))

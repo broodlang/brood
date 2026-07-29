@@ -523,6 +523,33 @@ the specs as data.
 > different thing. Reaching for `defprotocol` now raises an unbound-symbol error
 > whose hint points at `defability`/`impl`.
 
+#### The abilities the standard library ships
+
+Beyond the core `Display`/`Inspect`, `std/` declares these (ADR-177). Each is the
+extension point for its module: `impl` it for your own type and that module accepts the
+type with no change to it.
+
+| Ability | Op | Module | Sealed? | What impl'ing it buys |
+|---|---|---|---|---|
+| `JsonEncode` | `(to-json x)` | `json` | open | `json-encode` accepts your type — a record picks its wire shape, and a kind JSON has no rule for (a pid, a datetime) stops erroring. No `:default`. |
+| `Port` | `(io-write port s)` | `io` | open | Your value is an output port: `io-write`, `with-out`/`with-err`, and every logger backend take it. A bare 1-arg fn is a port via the `:fn` impl. |
+| `LogBackend` | `(backend-emit b record)` | `log` | open | A backend that does something other than "format one line and write it" — batching, JSON lines, sampling. Reuse `backend-passes?` for the standard level/filter gate. |
+| `Response` | `(send-response r sock)` | `net/http` | open | A response kind with its own wire behaviour (sendfile, chunked, a 101 upgrade), including whether it closes the socket. |
+| `Dependency` | `dep-kind`, `dep-resolve`, `dep-check-compatible`, `dep-lock-vec`, `dep-entry-node` | `package` | **sealed** | A new manifest dependency kind. Sealed, so `nest check` reports any op you forget. |
+| `Temporal` | `(to-iso x)` | `datetime` | **sealed** | ISO 8601 rendering for a calendar value. |
+
+Sealed vs open is a per-ability judgement: `Dependency` and `Temporal` cover genuinely
+closed sets and want exhaustiveness checking; the rest exist so a type the module has
+never heard of can join.
+
+`std/` also uses `defrecord` for the value types that were once plain maps told apart by
+their shape — `buffer`, `queue`, `pq`, `multimap`, `datetime`/`date`/`time-of-day`, and the
+four dependency kinds. Each has an identity-based predicate (`buffer?`, `queue?`, …) that a
+look-alike map can't satisfy, and a `Display` impl, so it prints as itself rather than as
+its internals. Where a library renders a *user-supplied* value into text —
+`template/render`, `csv-emit`, `url/query-encode` — it goes through `to-str`, so your
+record's `Display` impl decides how it appears there too.
+
 ## Sets
 
 A **set** is a first-class kernel value written `#{1 2 3}` — an unordered
@@ -1269,10 +1296,17 @@ A **`process-port`** sends each string to a process as `[:io-write s]`. That is
 how output reaches a *buffer*: the process that owns the buffer (an editor's
 `*Messages*`, say) receives the message and appends it. The string crosses the
 process boundary as a copied message — async and share-nothing, never a mutated
-value — which is exactly why it's safe. Because ports are plain functions, `print`
-gains no special cases and `with-out-str` is unaffected. (Dynamic bindings don't
+value — which is exactly why it's safe. (Dynamic bindings don't
 reach a `spawn`ed child, so a child starts with the default `*out*`; hand it a
 port explicitly if it should redirect too.)
+
+A port is any value implementing the **`Port`** ability, whose one op is `io-write` — so
+a bare 1-arg fn is a port (that is the `:fn` impl), and so is a port *record* that
+carries its target and prints as itself (`#<port stdout>`, `#<port file /tmp/app.log>`).
+`port?` tests it, and your own type joins with `defrecord` + `impl Port`. `*out*`/`*err*`
+still hold a plain fn, which the prelude's `print` calls directly — so printing pays no
+dispatch cost, `print` gains no special cases, and `with-out-str` is unaffected;
+`with-out`/`with-err` adapt a record port at that boundary for you (`port-fn`).
 
 ### Logging
 
@@ -1292,10 +1326,11 @@ takes down only that line, not the caller.
 ;;    [WARN  1736…] disk low
 ```
 
-Levels are `:debug` < `:info` < `:warn` < `:error`. A **backend** is an `io`
-port + a minimum level + a formatter, so the logger *reuses* ports rather than
-inventing its own sink. Build one with `stdout-backend` / `stderr-backend` /
-`file-backend` / `fn-backend` / `process-backend`, and add it live:
+Levels are `:debug` < `:info` < `:warn` < `:error`. A **backend** is any value
+implementing the **`LogBackend`** ability (one op, `backend-emit`, handed each record).
+The stock one is an `io` port + a minimum level + a filter + a formatter, so the logger
+*reuses* ports rather than inventing its own sink; build it with `stdout-backend` /
+`stderr-backend` / `file-backend` / `fn-backend` / `process-backend`, and add it live:
 
 ```lisp
 (add-backend (file-backend "app.log"))         ; also append to a file
@@ -1307,6 +1342,11 @@ inventing its own sink. Build one with `stdout-backend` / `stderr-backend` /
 editor process can fold it into its `*Messages*` buffer. The default logger is
 registered under the name `:logger` (found via `whereis`); `(log …)` falls back to
 stderr when none is running, so a log is never silently lost.
+
+For a backend that does something other than write one formatted line — batch records,
+emit JSON lines, sample — `defrecord` your own and `impl LogBackend` for it; the logger
+takes it unchanged, and `backend-passes?` gives you the same `:min-level`/`:filter` gate
+every stock backend honours.
 
 Both `io` and `log` are written in Brood over the process primitives — Rust only
 supplies the render/write split behind `print` (`%render`, `%write-out`,
@@ -2427,7 +2467,7 @@ Run `nest doc <module>` for the full API of any module.
 | Module | `require` name | What it provides |
 |--------|---------------|-----------------|
 | `std/file.blsp` | `'file` | Filesystem policy over the kernel's fs primitives: `read-lines`, `write-lines`, `file?`, `list-files`, `list-dirs`, `walk-files`, `path-extension`, `path-stem`. All Brood (ADR-006), no new Rust |
-| `std/io.blsp` | `'io` | Output **ports** — `stdout-port`, `stderr-port`, `process-port`, `fn-port`, `io-write`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of only `println` (see also `std/log.blsp`) |
+| `std/io.blsp` | `'io` | Output **ports** — the `Port` ability (`io-write`), `stdout-port`, `stderr-port`, `process-port`, `file-port`, `fn-port`, and the `with-out`/`with-err` redirections — so output has a first-class destination instead of only `println` (see also `std/log.blsp`) |
 | `std/text.blsp` | `'text` | Plain-text transforms with no editor/buffer/IO dependency: `fill`, greedy word-wrap to a column width. Pure Brood over the string primitives, so it is reusable anywhere (fill-paragraph, wrapping help text or REPL output) |
 | `std/ansi.blsp` | `'ansi` | ANSI/VT100 escape-sequence **stripping** for pipe output — `strip-ansi` removes CSI colour/cursor sequences (reading a subprocess that emits colour). For *emitting* escapes in a display frontend, see `std/editor/ansi.blsp` instead |
 | `std/datetime.blsp` | `'datetime` | Gregorian calendar arithmetic: `date-new`, `date->unix`, `unix->date`, `date-add`, `date-diff`, `date-format`, `date-parse`, parse/format patterns |
