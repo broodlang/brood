@@ -10713,3 +10713,28 @@ caveat `language.md` documents ("two processes calling `impl` concurrently can l
 update"). One full-suite run lost the `Size`/`:vector` registration; the next was green.
 The fix is to make those groups `:isolated` (which runs a unit alone) rather than
 `:serial` — left alone as out of scope, since `:isolated` also rolls globals back.
+
+## 2026-07-29 (impl) — the collection protocol, read half: a `Seqable` ability
+
+`seq`/`count`/`keys`/`vals` dispatched via a closed `cond` over built-in collection kinds
+with no extension point — and, since unified `defrecord` made every record carry `:__id__`,
+they *leaked* it: `(count (point 1 2))` was 3, `(keys r)` included `:__id__`, `(map f r)`
+iterated the id. Fixed both at once with a `Seqable` ability (op `to-seq`), hybrid à la
+`Display`: `seq` keeps every built-in's native path and, for a RECORD only (one `:__id__`
+check), takes its `Seqable` view — the fields id-free by default (`(map-pairs (fields x))`),
+or whatever a custom impl returns. So `map`/`filter`/`fold`/`for`/`into` (which all coerce
+through `seq`) and `count`/`keys`/`vals` now give a record its clean field view, and a
+custom-collection record — `(impl Seqable stack (to-seq [s] (get s :items)))` — joins the
+protocol: `seq`/`count`/`fold`/`map`/`filter` all iterate its items.
+
+Bootstrap-order care: `seq` is defined before `map?`/`cond`/the ability machinery, so it
+detects a record with the raw `map-get` builtin and calls `to-seq` **late-bound** — only
+ever reached for a record, which never exists at boot, so the forward reference is safe.
+The `:__id__` check is once per collection *operation* (seq/count are called once, not
+per element), so built-ins and plain maps pay effectively nothing.
+
+Verified: record 15 (incl. custom-Seqable + leak-fix tests), ability 34, show 12, json 41,
+maps 83 — green, GC-stress clean. Still to come (the user wants the full suite): the
+**build/lookup half** — `Conjable` (`conj`/`into`) and `Lookup` (`get`/`nth`) for custom
+collections — then the `Ord`/`Compare` ability (sort/min/max on records) and eventually a
+numeric protocol.

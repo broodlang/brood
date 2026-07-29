@@ -430,10 +430,13 @@ view of a record — `fields` returns the field map with the internal id omitted
 `(ability-ops 'Shape)` exposes the declared op specs as data, the same hook the
 checker and LSP read.
 
-The id is held in a reserved `:__id__` field, which leaks into two structural
-views: `keys` and `count` include it, so `(count (circle 2))` is `2`, not `1`. Use
-`(fields r)` whenever you want the record's data alone — that is also the stable
-seam a future hidden slot would swap behind, so nothing else should read `:__id__`.
+The id is held in a reserved `:__id__` field, reachable by direct `(get r :__id__)`,
+but the record's **collection view is the fields, id-free**: `seq`/`count`/`keys`/`vals`
+— and `map`/`filter`/`fold`/`for`/`into`, which coerce through `seq` — see only the
+fields, so `(count (circle 2))` is `1`. This is the `Seqable` ability (op `to-seq`,
+default = the fields); a custom-collection record overrides it to define its own
+iteration. `(fields r)` gives the id-free map explicitly; nothing else should read
+`:__id__` directly (the stable seam a future hidden slot would swap behind).
 A record being `≠` a bare map with the same fields, and printing with its id, are
 *intended* (Elixir-struct semantics), not leaks; `json-encode` omits the id, so it
 never reaches the wire.
