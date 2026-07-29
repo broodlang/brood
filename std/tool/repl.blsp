@@ -360,13 +360,35 @@ and `(binding (*print-length* nil) …)` lifts the bound for a form."
   (let (s (pr-str-bounded v))
     (println (if (stdout-tty?) (repl--colorize s) s))))
 
+;; ---- advisory type-check (the checker, at the prompt) -----------------------
+;; The REPL is the one place every `def` is already LOADED, so the checker's inference
+;; applies to the whole live image — a call to a just-defined function is checked against
+;; its *inferred* signature, not just its declared one. Fragment-mode `check` (no
+;; operand-unbound), so a genuine typo's `unbound` isn't printed twice: `eval` raises that;
+;; here we surface the type/arity misuse it can't. Advisory — printed before the result,
+;; never blocks it, silent when clean, on incomplete input, or under `BROOD_NO_CHECK`.
+(defn repl--check-warnings (src)
+  "The advisory type-check warning strings for REPL input `src` (each complete form checked
+against the live image), or nil. Nil on incomplete input — there is nothing to check yet."
+  (if (getenv "BROOD_NO_CHECK")
+    nil
+    (mapcat check (try (read-all src) (catch _ nil)))))
+
+(defn repl--warn (src)
+  "Print `src`'s advisory type-check warnings to stderr — yellow on a TTY, plain on a pipe."
+  (for (w (repl--check-warnings src))
+    (eprint (if (stdout-tty?)
+              (str "\e[33mwarning:\e[0m " w "\n")
+              (str "warning: " w "\n")))))
+
 (defn repl--eval-print (src)
-  "Evaluate `src` in the running image. Returns `:ok` after printing its (coloured)
-value — plus a dim `; N ms` note when the eval was slow — `:more` if `src` is an
-incomplete form (read another line), or `:error` after reporting a real error. Never
-lets an error escape the loop."
+  "Evaluate `src` in the running image. Prints any advisory type-check warnings first, then
+returns `:ok` after printing its (coloured) value — plus a dim `; N ms` note when the eval
+was slow — `:more` if `src` is an incomplete form (read another line), or `:error` after
+reporting a real error. Never lets an error escape the loop."
   (try
-    (let (t0 (now)
+    (let (_ (repl--warn src)
+          t0 (now)
           v (eval-string src)
           ms (- (now) t0))
       (repl--remember-value v)

@@ -121,6 +121,19 @@ pub fn signature(interp: &mut Interp, name: &str) -> (Option<String>, Option<Str
     out
 }
 
+/// The **type signature** of `name` as the checker sees it — declared, curated, or
+/// inferred — rendered as an arrow string (`(int -> int)`), or `None` when the name is
+/// unbound / not a callable / can't be pinned. Reads the loaded image (so it covers
+/// builtins, the prelude, and required modules; a *buffer-only* def the session hasn't
+/// loaded won't resolve). Total, LOCAL-clean — the same discipline as [`signature`].
+pub fn type_signature(interp: &mut Interp, name: &str) -> Option<String> {
+    let sym = value::intern_existing(name)?;
+    let cp = interp.heap.checkpoint();
+    let out = crate::types::check::signature_string(&interp.heap, sym);
+    interp.heap.reset_local_to(cp);
+    out
+}
+
 /// The raw parameter tokens of a global function/macro `name` — the names *and*
 /// the `&optional` / `&` markers, in source order (e.g. `["a", "&optional", "b",
 /// "&", "rest"]`). `None` when `name` is unbound or has no params (a builtin or a
