@@ -301,11 +301,11 @@ definition, so two record shapes in one module dispatch apart.
 (area (rect 3 4))       ;=> 12
 ```
 
-**Trap — write the `impl` id fully qualified.** `geometry/circle`, never a bare
-`circle`. A bare symbol registers under `:circle`, which no value ever presents, so
-the impl silently never matches and the call raises `no impl for :geometry/circle —
-have (:circle)`. (Confusingly, `defability`'s `:sealed [circle rect]` *does* accept
-bare names — that asymmetry is a known wart, [KI-15](known-issues.md).)
+**Impl ids qualify like `defrecord` does.** A bare id (`circle`) qualifies to the
+CURRENT module (`:your-module/circle`), matching a record defined in the same module;
+implementing for ANOTHER module's record needs the qualified spelling
+(`geometry/circle`). `impl` and `:sealed` resolve ids identically (the old
+silently-never-matches asymmetry was KI-15, fixed 2026-07-27).
 
 Built-in kinds take `:default` as a fallback; without one, a missing impl is a loud
 named error, never `nil`:

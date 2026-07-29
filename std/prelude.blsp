@@ -2708,7 +2708,8 @@ mailbox messages stay queued while waiting (selective receive)."
     (not (empty? more)) (merge-sort a (first more))
     (empty? a) nil
     (number? (first a)) (%sort-asc a)
-    ;; a record element sorts by its `Ord` (default = structural `compare`), so a type can
+    ;; a record element sorts by its `Ord` (`compare-to`, STRICT — no structural default,
+    ;; ADR-179: sorting records without a method is a no-method error), so a type can
     ;; define its own order; every built-in keeps the native `%sort-cmp` path.
     (record? (first a)) (merge-sort (fn (x y) (< (ord-compare x y) 0)) a)
     else (%sort-cmp a)))
@@ -2971,8 +2972,9 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
 ;; The accessors are the point: `(point-x p)` names the field, and a typo
 ;; `(point-witdh p)` is an undefined-function error the checker catches — where
 ;; `(get p :witdh)` silently returns nil. Records ARE maps (no new Value or tag),
-;; so update with `assoc`/`merge` and compare structurally; there is no `point?`
-;; predicate (records are structural, not nominal — ADR-130).
+;; so update with `assoc`/`merge` — but they are NOMINAL since ADR-177: the baked
+;; `:__id__` makes `(= (point 1 2) {:x 1 :y 2})` false and carries dispatch
+;; identity. No generated `point?` predicate; write one over `record-id` if needed.
 ;;
 ;; A field may carry a type: `(defrecord point ((x int) (y int)))`. When *every*
 ;; field is typed, `sig`s are emitted too — the constructor's `(record …)` return
