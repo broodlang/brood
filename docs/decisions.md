@@ -12021,3 +12021,52 @@ single-dispatch seam and keeps the inline-cache fast path (ADR-172).
 
 **References.** ADR-094 (overlay-route), ADR-168/172 (abilities), `tests/ui_test.blsp`
 ("overlay-route — Overlay ability records").
+
+## ADR-184 — `trace-fn`/`break-fn`: function-boundary instrumentation in the live image
+
+**Status:** accepted + shipped.
+
+**Context.** `spy` (ADR-173) instruments a *form in source* and `break` is a *call in
+source* — both require editing the code being debugged. The classic operational move —
+Erlang's `dbg:tpl`, Emacs' `trace-function` — is instrumenting a **function by name in
+the running image**: "show me every call to `foo`", "pause whoever calls `bar`", with
+no source edit and a clean uninstall. Brood already has the sanctioned seam for this:
+`def` rebinding + late binding (ADR-013), the same mechanism `nest test --cover`
+instruments with. The first consumer is the myedit editor's debugger UI (trace/break
+the function at point), but the REPL wants it just as much.
+
+**Decision.** `std/tool/debug` gains a registry + four functions:
+
+```lisp
+(trace-fn 'my/fn)    ; rebind to a wrapper: {:spy :call :fn sym :args …} before,
+                     ; {:spy :return :fn sym :value …} after — through *spy-sink*
+(break-fn 'my/fn)    ; rebind to a wrapper: (break "my/fn" :args args), then delegate —
+                     ; so eval-at resolves `args` at the park; a no-op park un-debugged
+(untrace-fn 'my/fn)  ; restore the original from *traced-fns*
+(untrace-all)        ; restore everything; returns how many
+(traced-fns)         ; the instrumented names
+```
+
+The original fn **value** is kept in `*traced-fns*` (sym → fn); re-tracing reads the
+registry first, so instrumentation never stacks. The wrapper is variadic (`& args`) —
+every arity of a multi-clause fn routes through it (the cost: `arglist` reads `(& args)`
+while traced, and the runtime prints its honest `[reload] arity changed` note on
+install/uninstall). Emission rides `*spy-sink*`, so trace-fn traffic follows the sink
+anywhere `spy`'s does — stderr (the default sink learned `:call`/`:return`), the
+debugger process (`debugger-sink`), an editor buffer. The rebinding is built as data
+and `eval`'d, so the module-privacy source walk (ADR-146) is not in play — same
+standing as a REPL `def`.
+
+**Boundaries.** Not for macros or builtins (no fn value to wrap — checked, loud error)
+and not for prelude/std names (ADR-166 reserves them; the error is the reserved-name
+error). Function-boundary only: arguments and return value, no interior nodes — wrap
+the body in `spy` (source-level) when you need the tree.
+
+**Also fixed here:** `stepping-sink` sent `:vals` as a *vector* where `break` sends a
+*map*, so `locals-of`/`eval-at` on a step-park silently bound nothing and raised
+unbound-symbol. It now sends `{:value v}` — `(eval-at d 1 "value")` works at a step
+park, pinned by a test.
+
+**References.** ADR-173 (spy), ADR-174 (the debugger process), ADR-013 (late binding,
+the instrumentation seam), ADR-166 (reserved names), `tests/debug_test.blsp`
+("function-boundary instrumentation").
