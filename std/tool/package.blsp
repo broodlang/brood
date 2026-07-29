@@ -80,12 +80,12 @@ land in a later slice."
         nil))))
 
 ;; --- resolution --------------------------------------------------------------
-;; Resolve the transitive dep set into a flat list of resolved entry-maps
+;; Resolve the transitive dep set into a flat list of resolved entries
 ;; (depth-first; direct deps first, then their deps). A name required twice at
 ;; different sources is a loud error — the user pins it in the root manifest.
 
 (defn resolve-deps (root deps lock)
-  "Resolve `deps` (normalised dep maps from the manifest) and everything they transitively pull in, into a flat list of resolved entry-maps. `lock` is the prior project.lock.blsp :dependencies (or nil) — a matching git entry reuses its pinned commit instead of re-running `git ls-remote`; pass nil to force re-resolution (`nest update`). A root (direct) dep wins over a transitive one at a different ref (Go-style MVS-without-the-solver); two *transitive* deps at differing refs are a loud error the user pins explicitly."
+  "Resolve `deps` (dep records from the manifest) and everything they transitively pull in, into a flat list of resolved entries — each its dep record with `:resolved-path`/`:sha256`/`:deps` (and `:commit`) assoc'd on, so it keeps the dep's identity and dispatches through the same `Dependency` impls. `lock` is the prior project.lock.blsp :dependencies (or nil) — a matching git entry reuses its pinned commit instead of re-running `git ls-remote`; pass nil to force re-resolution (`nest update`). A root (direct) dep wins over a transitive one at a different ref (Go-style MVS-without-the-solver); two *transitive* deps at differing refs are a loud error the user pins explicitly."
   ;; `deps` is the direct (root-manifest) set; it's queued first, so every direct
   ;; dep is resolved before any transitive one (the loop appends sub-deps to the
   ;; queue's tail). That ordering is what makes "direct wins" a simple lookup.
@@ -114,14 +114,98 @@ land in a later slice."
              (append (rest queue) (get entry :deps)) (assoc resolved nm entry) (cons nm order)
              lock-index direct))))
 
+;; --- the Dependency ability (ADR-172) ---------------------------------------
+;; A dependency's KIND is its record identity (`project/dep-path` / `-git` / `-tarball`
+;; / `-registry`, defined by the manifest owner, std/project.blsp), and every per-kind
+;; behaviour is an op of this one ability rather than a `(get dep :kind)` `cond` repeated
+;; per behaviour. That was the actual bug risk here: adding a fifth kind meant finding
+;; five scattered chains, and missing one failed late (a resolvable dep that couldn't be
+;; written to the lock, or an `else` branch quietly treating it as a `:path`).
+;;
+;; `:sealed` names the closed set, so `nest check` reports a member missing any op — the
+;; exhaustiveness the `cond` chains could never give. Runtime dispatch is unchanged by
+;; sealing; a kind is still resolved by identity.
+;;
+;; A resolved *entry* is its dep record with the resolution fields assoc'd on, so it
+;; carries the same identity and dispatches through the same impls (`dep-lock-vec`
+;; below is called on entries, `dep-resolve` on deps).
+(defability Dependency
+  "A project dependency: where its source comes from, and how it is resolved, locked,
+  written back to the manifest, and reconciled with another request for the same name.
+  Sealed over the four manifest kinds."
+  :sealed [project/dep-path project/dep-git project/dep-tarball project/dep-registry]
+  (dep-kind [self] :-> keyword) (dep-resolve [self root locked]) (dep-check-compatible [self other])
+  (dep-lock-vec [self] :-> vector) (dep-entry-node [self] :-> vector))
+
+(impl Dependency
+  project/dep-path (dep-kind [d] :path) (dep-resolve [d root locked] (package--resolve-path root d))
+  (dep-check-compatible [d other]
+    (when (not (= (get d :path) (get other :path)))
+      (package--conflict other
+        (str "required at both \"" (get d :path) "\" and \"" (get other :path) "\""))))
+  (dep-lock-vec [e]
+    (apply vector
+      (list (get e :name)
+        :path (get e :path) :sha256 (get e :sha256) :deps (package--dep-names-vec (get e :deps)))))
+  (dep-entry-node [d]
+    [:vector (vector [:symbol (name (get d :name))]
+               [:keyword ":path"] [:str (package--str-lit (get d :path))])]))
+
+(impl Dependency
+  project/dep-git (dep-kind [d] :git)
+  (dep-resolve [d root locked] (package--resolve-git root d locked))
+  (dep-check-compatible [d other]
+    (when (not (and (= (get d :url) (get other :url)) (= (get d :ref) (get other :ref))))
+      (package--conflict other
+        (str "required at both "
+          (get d :url) " @ " (get d :ref) " and " (get other :url) " @ " (get other :ref)))))
+  (dep-lock-vec [e]
+    (apply vector
+      (list (get e :name)
+        :git (get e :url) :ref (get e :ref) :commit (get e :commit) :sha256 (get e :sha256) :deps
+        (package--dep-names-vec (get e :deps)))))
+  (dep-entry-node [d]
+    [:vector (vector [:symbol (name (get d :name))]
+               [:keyword ":git"] [:str (package--str-lit (get d :url))] [:keyword ":ref"]
+               [:str (package--str-lit (get d :ref))])]))
+
+(impl Dependency
+  project/dep-tarball (dep-kind [d] :tarball)
+  (dep-resolve [d root locked] (package--resolve-tarball root d))
+  (dep-check-compatible [d other]
+    (when (not (and (= (get d :url) (get other :url)) (= (get d :sha256) (get other :sha256))))
+      (package--conflict other
+        (str "required as two different tarballs (" (get d :url) " and " (get other :url) ")"))))
+  (dep-lock-vec [e]
+    (apply vector
+      (list (get e :name)
+        :tarball (get e :url) :sha256 (get e :sha256) :deps (package--dep-names-vec (get e :deps)))))
+  (dep-entry-node [d]
+    [:vector (vector [:symbol (name (get d :name))]
+               [:keyword ":tarball"] [:str (package--str-lit (get d :url))] [:keyword ":sha256"]
+               [:str (package--str-lit (get d :sha256))])]))
+
+(impl Dependency
+  project/dep-registry (dep-kind [d] :registry)
+  (dep-resolve [d root locked] (package--resolve-registry root d locked nil))
+  (dep-check-compatible [d other]
+    (when (not (= (get d :version) (get other :version)))
+      (package--conflict other
+        (str "required at two registry versions ("
+          (get d :version) " and " (get other :version) ")"))))
+  (dep-lock-vec [e]
+    (apply vector
+      (list (get e :name)
+        :registry (get e :version) :git (get e :url) :ref (get e :ref) :commit (get e :commit)
+        :sha256 (get e :sha256) :deps (package--dep-names-vec (get e :deps)))))
+  ;; The manifest spells a registry dep `:version` (the kind keyword is `:registry`
+  ;; only inside the lock, which also records the resolved git source).
+  (dep-entry-node [d]
+    [:vector (vector [:symbol (name (get d :name))]
+               [:keyword ":version"] [:str (package--str-lit (get d :version))])]))
+
 (defn package--resolve-one (root dep lock-index)
-  (cond
-    (= (get dep :kind) :path) (package--resolve-path root dep)
-    (= (get dep :kind) :git) (package--resolve-git root dep (get lock-index (get dep :name)))
-    (= (get dep :kind) :tarball) (package--resolve-tarball root dep)
-    (= (get dep :kind) :registry) (package--resolve-registry root
-                                    dep (get lock-index (get dep :name)) nil)
-    else (error "package: unknown dependency kind " (get dep :kind))))
+  (dep-resolve dep root (get lock-index (get dep :name))))
 
 ;; Index a lock's :dependencies vector by dep name → its plist (the :git/:ref/
 ;; :commit/… key-values), for reuse during resolution. nil lock → empty index.
@@ -129,16 +213,17 @@ land in a later slice."
   (fold (fn (m v) (let (lst (vec->list v)) (assoc m (first lst) (rest lst))))
     {} (if (nil? lock) nil (vec->list lock))))
 
+;; A resolved entry is the DEP RECORD with the resolution fields assoc'd on — same
+;; identity, so it dispatches through the same `Dependency` impls (that is what lets one
+;; ability serve both `dep-resolve` on a dep and `dep-lock-vec` on an entry).
 (defn package--resolve-path (root dep)
   (let (abs (path-join root (get dep :path)))
     (when (not (dir? abs))
       (error "package: :path dependency " (get dep :name) " not found at " abs))
-    {:name (get dep :name)
-     :kind :path
-     :path (get dep :path)
-     :resolved-path abs
-     :sha256 (package-tree-hash abs)
-     :deps (package--manifest-deps (path-join abs "project.blsp"))}))
+    (assoc dep
+      :resolved-path abs
+      :sha256 (package-tree-hash abs)
+      :deps (package--manifest-deps (path-join abs "project.blsp")))))
 
 ;; --- git deps (ADR-037 Slice 2) ---------------------------------------------
 ;; A git dep is cloned into _deps/<name>/ and pinned to an exact commit. The
@@ -191,14 +276,11 @@ land in a later slice."
       ;; plain `nest run`/`test` (which auto-resolves via ensure-deps) walk and
       ;; SHA-256 every dep file each invocation. Reuse the locked hash; only read
       ;; the dep's manifest (one small file) for its transitive deps.
-      {:name nm
-       :kind :git
-       :url url
-       :ref ref
-       :commit commit
-       :resolved-path target
-       :sha256 (package--reuse-or-hash locked commit target)
-       :deps (package--manifest-deps (path-join target "project.blsp"))}
+      (assoc dep
+        :commit commit
+        :resolved-path target
+        :sha256 (package--reuse-or-hash locked commit target)
+        :deps (package--manifest-deps (path-join target "project.blsp")))
       ;; Cache miss: (re)clone the pinned commit, hash the tree, record the meta.
       (do
         (when (dir? target) (%rm-rf target))
@@ -207,14 +289,11 @@ land in a later slice."
         (offload %git-clone url target ref commit)
         (let (sha (package-tree-hash target))
           (package--write-pkg-meta target url ref commit sha)
-          {:name nm
-           :kind :git
-           :url url
-           :ref ref
-           :commit commit
-           :resolved-path target
-           :sha256 sha
-           :deps (package--manifest-deps (path-join target "project.blsp"))})))))
+          (assoc dep
+            :commit commit
+            :resolved-path target
+            :sha256 sha
+            :deps (package--manifest-deps (path-join target "project.blsp"))))))))
 
 ;; The locked sha when it's for this exact commit; otherwise hash the tree.
 (defn package--reuse-or-hash (locked commit target)
@@ -278,12 +357,9 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
         sha (get dep :sha256)
         target (package--git-target root nm))
     (if (package--tarball-cache-current? target sha)
-      {:name nm
-       :kind :tarball
-       :url url
-       :sha256 sha
-       :resolved-path target
-       :deps (package--manifest-deps (path-join target "project.blsp"))}
+      (assoc dep
+        :resolved-path target
+        :deps (package--manifest-deps (path-join target "project.blsp")))
       (do
         (when (dir? target) (%rm-rf target))
         (let (bytes (package--fetch-bytes url)
@@ -299,12 +375,9 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
             (offload %untar-gz archive target 1)
             (delete-file archive)
             (package--write-tarball-meta target url sha)
-            {:name nm
-             :kind :tarball
-             :url url
-             :sha256 sha
-             :resolved-path target
-             :deps (package--manifest-deps (path-join target "project.blsp"))}))))))
+            (assoc dep
+              :resolved-path target
+              :deps (package--manifest-deps (path-join target "project.blsp")))))))))
 
 ;; --- package registry (ADR-147): a git-backed metadata index ----------------
 ;; The registry is just a git repo of package metadata — no hosted server, no
@@ -388,38 +461,26 @@ package is unknown to this index."
         nm " " version " (run `nest search " (name nm) "` to see what's published)"))
     (when (nil? (get entry :git))
       (error "package: registry entry " nm " " version " has no :git source"))
-    (let (git-dep {:name nm :kind :git :url (get entry :git) :ref (get entry :ref)}
-          resolved (package--resolve-git root git-dep locked))
-      (assoc (assoc resolved :kind :registry) :version version))))
+    ;; Resolve through a synthetic git dep, then carry that resolution onto a REGISTRY
+    ;; entry: the lock records the version *and* the git source it resolved to. `fields`
+    ;; drops the git record's identity, and `:name` is already on the registry record.
+    (let (resolved (package--resolve-git root
+                     (dep-git nm (get entry :git) (get entry :ref)) locked))
+      (merge (dep-registry nm version) (dissoc (fields resolved) :name)))))
 
-;; Two resolutions of the same name must agree on their source (kind + location).
+;; Two resolutions of the same name must agree on their source. Different kinds can
+;; never agree (checked here, since it is the one rule that is *about* the pair rather
+;; than about either kind); same-kind agreement is the `dep-check-compatible` op, so each
+;; kind states what "the same source" means for it.
+(defn package--conflict (dep detail)
+  (error "package: conflicting dependency "
+    (get dep :name) " " detail " — pin it explicitly in your root manifest"))
+
 (defn package--check-compatible (existing dep)
-  (cond
-    (not (= (get existing :kind) (get dep :kind))) (error "package: conflicting dependency "
-                                                     (get dep :name) " required as both "
-                                                     (get existing :kind) " and " (get dep :kind)
-                                                     " — pin it explicitly in your root manifest")
-    (= (get dep :kind) :git) (when (not (and (= (get existing :url) (get dep :url))
-                                          (= (get existing :ref) (get dep :ref))))
-                               (error "package: conflicting dependency "
-                                 (get dep :name) " required at both " (get existing :url) " @ "
-                                 (get existing :ref) " and " (get dep :url) " @ " (get dep :ref)
-                                 " — pin it explicitly in your root manifest"))
-    (= (get dep :kind) :tarball) (when (not (and (= (get existing :url) (get dep :url))
-                                              (= (get existing :sha256) (get dep :sha256))))
-                                   (error "package: conflicting dependency "
-                                     (get dep :name) " required as two different tarballs ("
-                                     (get existing :url) " and " (get dep :url)
-                                     ") — pin it explicitly in your root manifest"))
-    (= (get dep :kind) :registry) (when (not (= (get existing :version) (get dep :version)))
-                                    (error "package: conflicting dependency "
-                                      (get dep :name) " required at two registry versions ("
-                                      (get existing :version) " and " (get dep :version)
-                                      ") — pin it explicitly in your root manifest"))
-    else (when (not (= (get existing :path) (get dep :path)))
-           (error "package: conflicting dependency "
-             (get dep :name) " required at both \"" (get existing :path) "\" and \"" (get dep :path)
-             "\" — pin it explicitly in your root manifest"))))
+  (if (not (= (record-id existing) (record-id dep)))
+    (package--conflict dep
+      (str "required as both " (dep-kind existing) " and " (dep-kind dep)))
+    (dep-check-compatible existing dep)))
 
 ;; --- namespace-collision detection (ADR-070) --------------------------------
 ;; Namespaces aren't package-rooted yet (a deferred upgrade — ADR-070): every
@@ -490,28 +551,10 @@ package is unknown to this index."
 
 (defn package--dep-names-vec (deps) (apply vector (map :name deps)))
 
-(defn package--entry->lock-vec (e)
-  (apply vector
-    (cond
-      (= (get e :kind) :git) (append (list (get e :name)
-                                       :git (get e :url) :ref (get e :ref) :commit (get e :commit)
-                                       :sha256 (get e :sha256))
-                               (list :deps (package--dep-names-vec (get e :deps))))
-      (= (get e :kind) :tarball) (append (list (get e :name)
-                                           :tarball (get e :url) :sha256 (get e :sha256))
-                                   (list :deps (package--dep-names-vec (get e :deps))))
-      (= (get e :kind) :registry) (append (list (get e :name)
-                                            :registry (get e :version) :git (get e :url) :ref
-                                            (get e :ref) :commit (get e :commit) :sha256
-                                            (get e :sha256))
-                                    (list :deps (package--dep-names-vec (get e :deps))))
-      else (append (list (get e :name) :path (get e :path) :sha256 (get e :sha256))
-             (list :deps (package--dep-names-vec (get e :deps)))))))
-
 (defn package--lockfile-content (entries)
   (str ";; project.lock.blsp — generated by `nest fetch`. Do not edit by hand.\n"
     (pr-str (list 'lock
-              :version 1 :dependencies (apply vector (map package--entry->lock-vec entries))))
+              :version 1 :dependencies (apply vector (map dep-lock-vec entries))))
     "\n"))
 
 (defn package--lockfile-path (root) (path-join root "project.lock.blsp"))
@@ -635,15 +678,7 @@ package is unknown to this index."
 (defn package--index-by-name (entries)
   (fold (fn (m e) (assoc m (get e :name) e)) {} entries))
 
-(defn package--dep-label (dep)
-  (cond
-    (= (get dep :kind) :path) (str (get dep :name) "  (path \"" (get dep :path) "\")")
-    (= (get dep :kind) :git) (str (get dep :name) "  (git " (get dep :url) " @ " (get dep :ref) ")")
-    (= (get dep :kind) :tarball) (str (get dep :name) "  (tarball " (get dep :url) ")")
-    (= (get dep :kind) :registry) (str (get dep :name) "  (registry v" (get dep :version) ")")
-    else (str (get dep :name))))
-
-;; Print `deps` (a list of dep maps) as an indented tree, recursing into each
+;; Print `deps` (a list of dep records) as an indented tree, recursing into each
 ;; dep's resolved direct deps via `index`. `seen` breaks cycles / shared deps:
 ;; a name already printed is shown once more, marked, without re-descending.
 (defn package--print-tree (deps index prefix seen)
@@ -651,7 +686,9 @@ package is unknown to this index."
     (let (nm (get d :name)
           dup (includes? seen nm)
           entry (get index nm))
-      (println (str prefix "- " (package--dep-label d) (if dup " (already shown)" "")))
+      ;; a dep's tree label is its DISPLAY form (`impl Display` per kind, in
+      ;; std/project.blsp beside the records), so this and `(println dep)` can't drift
+      (println (str prefix "- " (to-str d) (if dup " (already shown)" "")))
       (when (and entry (not dup) (not (empty? (get entry :deps))))
         (package--print-tree (get entry :deps) index (str prefix "  ") (cons nm seen))))))
 
@@ -676,27 +713,10 @@ package is unknown to this index."
 ;; The pure text transforms (`package--manifest-add`/`-remove`) take a manifest
 ;; string and return a new one, so they unit-test without touching the filesystem.
 
-;; Build a CST entry node from a normalised dep map — `[name :path "p"]` /
+;; Build a CST entry node from a dep record — `[name :path "p"]` /
 ;; `[name :git "url" :ref "ref"]` as nested [kind payload] vectors. (String specs
 ;; carry no quotes, so the simple `"…"` wrapping is exact for v1.)
 (defn package--str-lit (s) (str "\"" s "\""))
-(defn package--dep->entry-node (dep)
-  (cond
-    (= (get dep :kind) :path) [:vector (vector [:symbol (name (get dep :name))]
-                                         [:keyword ":path"]
-                                         [:str (package--str-lit (get dep :path))])]
-    (= (get dep :kind) :git) [:vector (vector [:symbol (name (get dep :name))]
-                                        [:keyword ":git"] [:str (package--str-lit (get dep :url))]
-                                        [:keyword ":ref"] [:str (package--str-lit (get dep :ref))])]
-    (= (get dep :kind) :tarball) [:vector (vector [:symbol (name (get dep :name))]
-                                            [:keyword ":tarball"]
-                                            [:str (package--str-lit (get dep :url))]
-                                            [:keyword ":sha256"]
-                                            [:str (package--str-lit (get dep :sha256))])]
-    (= (get dep :kind) :registry) [:vector (vector [:symbol (name (get dep :name))]
-                                             [:keyword ":version"]
-                                             [:str (package--str-lit (get dep :version))])]
-    else (error "package: cannot build a manifest entry for kind " (get dep :kind))))
 
 ;; Is `n` the manifest's top-level (project …) list node?
 (defn package--project-list? (n)
@@ -878,7 +898,7 @@ package is unknown to this index."
         ;; concurrent `nest add` can no longer erase this one.
         (let (manifest (path-join root "project.blsp")
               edit (package--edit-manifest! root
-                     (fn (src) (package--manifest-add src (package--dep->entry-node dep))))
+                     (fn (src) (package--manifest-add src (dep-entry-node dep))))
               original (vector-ref edit 0)
               written (vector-ref edit 1))
           (let (outcome (try

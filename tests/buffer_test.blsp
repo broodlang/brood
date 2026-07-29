@@ -35,6 +35,25 @@
     (refute (buffer? "hello"))
     (refute (buffer? {:rope "not-a-rope"}))
     (refute (buffer? 3)))
+  ;; A buffer is a record: its type is its IDENTITY, so `buffer?` can't be fooled by a
+  ;; map carrying a real rope under `:rope` (the old structural test accepted exactly
+  ;; that), and a buffer is never `=` to a look-alike map.
+  (test "buffer? is an identity check, not a shape check"
+    (refute (buffer? {:rope (string->rope "hello") :point 0 :mark nil}))
+    (assert= (record-id (make-buffer "x")) :editor/buffer/buffer)
+    (is (record? (make-buffer "x"))))
+  (test "the identity survives every op that threads the buffer"
+    (is (buffer? (insert (make-buffer "ab") "c")))
+    (is (buffer? (goto-char (make-buffer "ab") 1)))
+    (is (buffer? (undo (insert (make-buffer "ab") "c"))))
+    (is (buffer? (set-mark (make-buffer "ab")))))
+  (test "a buffer displays as a short identification, never its text"
+    (assert= (to-str (make-buffer "hello world")) "#<buffer *scratch* 11 chars>")
+    (assert= (to-str (make-buffer "x" "notes")) "#<buffer notes 1 chars>")
+    (is (not (includes? (to-str (make-buffer "secret")) "secret"))))
+  (test "inspect adds the debugging detail"
+    (let (b (set-mark (goto-char (make-buffer "hello" "notes" "/tmp/n.txt") 3)))
+      (assert= (inspect b) "#<buffer notes 5 chars point=3 mark=3 file=/tmp/n.txt>")))
   (test "line reads"
     (let (b (make-buffer "alpha\nbeta\ngamma"))
       (assert= (buffer-line-count b) 3)
