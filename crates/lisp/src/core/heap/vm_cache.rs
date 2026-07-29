@@ -168,30 +168,55 @@ impl Heap {
         *OFF.get_or_init(|| std::env::var_os("BROOD_NO_SHARED_ARMS").is_some())
     }
 
-    /// Look up the runtime-shared compiled closure for PRELUDE closure-handle `bits`
-    /// (ADR-175 Phase B). One read-lock on first touch per process per closure; after
-    /// that the process's own `vm_cache` serves every call.
+    /// The runtime's current free-generation epoch (ADR-091). Read *before* compiling a
+    /// closure that may be published to the shared cache, and validated on lookup.
+    pub fn free_epoch_now(&self) -> u64 {
+        self.runtime.free_epoch.load(Ordering::Relaxed)
+    }
+
+    /// Look up the runtime-shared compiled closure for closure-handle `bits` (ADR-175).
+    /// One read-lock on first touch per process per closure; after that the process's
+    /// own `vm_cache` serves every call. An entry stamped with a superseded
+    /// `free_epoch` is ignored — its RUNTIME handles may address a freed, since-recycled
+    /// slot (the hazard `sync_free_epoch` guards for the per-process cache).
     pub fn shared_closure_lookup(
         &self,
         bits: u64,
     ) -> Option<Arc<crate::eval::compile::CompiledClosure>> {
-        self.runtime
-            .shared_closures
-            .read()
-            .ok()?
-            .get(&bits)
-            .cloned()
+        let cur = self.free_epoch_now();
+        let m = self.runtime.shared_closures.read().ok()?;
+        match m.get(&bits) {
+            Some((fe, cc)) if *fe == cur => Some(cc.clone()),
+            _ => None,
+        }
     }
 
-    /// Publish a compiled closure to the runtime-shared cache. Idempotent — all
-    /// publishers compiled the identical closure from the same shared AST.
+    /// Publish a compiled closure to the runtime-shared cache under the free-epoch the
+    /// publisher observed **before** compiling. Idempotent — every publisher compiles
+    /// the identical closure from the same shared AST — and self-invalidating: if a
+    /// generation was freed during the compile, `fe` is already stale, so no process
+    /// will install it.
     pub fn shared_closure_publish(
         &self,
         bits: u64,
+        fe: u64,
         cc: Arc<crate::eval::compile::CompiledClosure>,
     ) {
         if let Ok(mut m) = self.runtime.shared_closures.write() {
-            m.insert(bits, cc);
+            m.insert(bits, (fe, cc));
+        }
+    }
+
+    /// Drop every runtime-shared compiled closure. Called by the RUNTIME **compactor**
+    /// alongside its per-process `vm_cache` clear: compaction rewrites the RUNTIME
+    /// handles embedded in arms on this process's execution stack (`live_vm_arms`), but
+    /// a shared arm that is merely *cached* sits on no stack and is never visited, so
+    /// its handles would still address the pre-compaction region. Sound to do
+    /// unconditionally: compaction runs only under `Arc::get_mut` on the runtime — i.e.
+    /// when this is the sole process — so no peer can be mid-install.
+    pub fn shared_closures_clear(&self) {
+        if let Ok(mut m) = self.runtime.shared_closures.write() {
+            m.clear();
         }
     }
 
