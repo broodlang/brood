@@ -1388,7 +1388,10 @@ fn check_one_impl_return(
     let param_types = info.op_params_by_name(&ability, &op);
     let mut scope = ctx.clone();
     for (i, p) in fn_params(heap, params_form).into_iter().enumerate() {
-        match param_types.and_then(|pts| pts.get(i)).and_then(Option::as_ref) {
+        match param_types
+            .and_then(|pts| pts.get(i))
+            .and_then(Option::as_ref)
+        {
             Some(ty) => scope = scope.bind_sig_param(p, ty.clone()),
             None => scope = scope.bind(p, None),
         }
