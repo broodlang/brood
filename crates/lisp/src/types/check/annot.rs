@@ -87,6 +87,14 @@ fn base_ty(name: &str) -> Option<Ty> {
         "list" => Ty::LIST,
         "map" => Ty::of(Tag::Map),
         "set" => Ty::of(Tag::Set),
+        // The **seqable** union — every collection the sequence combinators (`fold`/`map`/
+        // `filter`/`count`/`first`/…) walk: a list (`nil`/`pair` — a range/seqview reads as
+        // `pair`), a vector, a set, a map (as `[k v]` pairs), or `bytes`. Deliberately
+        // excludes `string` (not seqable — bridge with `string->list`). Lets a `sig` name a
+        // polymorphic-sequence parameter precisely instead of falling back to `any`, so a
+        // vector caller is no longer false-flagged by a `(list T)` annotation. Mirrors the
+        // internal `seq` domain the curated combinator sigs already use.
+        "seqable" => Ty::SEQABLE,
         // `bytes` and `decimal` are runtime tags (`type-of` returns them, and
         // `bytes?`/`decimal?` narrow to them) that had no *spelling* here — so no
         // signature could mention a bytes value, which is most of what
