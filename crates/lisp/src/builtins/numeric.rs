@@ -238,13 +238,16 @@ pub(super) fn num_bin(
 /// byte-for-byte untouched (a Brood-side `(record? a)` branch in `+` measured a ~195×
 /// regression — this is the kernel form that avoids it). Returns `None` when `a` isn't a
 /// record, so the caller proceeds to its normal float / error path.
-/// True when `v` is an identity-carrying record — a map with the reserved `:__id__`
-/// key (`defrecord` bakes it in). A plain map is not a record. Mirrors `record?`.
+/// True when `v` is an identity-carrying record — a map whose reserved `:__id__` key
+/// (`defrecord` bakes it in) holds a *truthy* id. A plain map, or a hand-written
+/// `{:__id__ nil}`, is not a record: this matches `record?`/`identity-of`, which
+/// dispatch a nil/false id as `:map` (devlog 2026-07-29).
 fn is_record(heap: &Heap, v: Value) -> bool {
-    matches!(v, Value::Map(m)
-        if heap
-            .map_get(m, Value::Keyword(crate::core::value::intern("__id__")))
-            .is_some())
+    let Value::Map(m) = v else { return false };
+    match heap.map_get(m, Value::Keyword(crate::core::value::intern("__id__"))) {
+        Some(id) => !matches!(id, Value::Nil | Value::Bool(false)),
+        None => false,
+    }
 }
 
 fn num_record_dispatch(
