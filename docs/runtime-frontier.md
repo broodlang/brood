@@ -250,6 +250,13 @@ benchmark row before believing it.
   Method note: the *sweep* reported `spawn` +5.8% and `collatz` +2.8%; solo re-runs gave
   +1.9% and **−2.7%**. Believe the solo run, as `ab-bench` says.
 
+- [x] **M1b — DONE 2026-07-29. Checker state off the process.** `check_dep_rec` (208 B —
+  four `HashSet`s) plus the two checker caches → one lazily-boxed `CheckHeap` (288 → 16 B),
+  and `dbg_site_pos` gated to debug builds (32 B of release-dead weight). `Heap` 1616 →
+  1376 B; **−47 MB on spawn-live** (−157 B/process). M1 left these inline because they are
+  filled through `&self`; a `RefCell<Option<Box<_>>>` with a `RefMut::map` guard is the
+  shape that works. Time-neutral, verified against measured per-row noise floors.
+
 - [ ] **M2b — shared IC tables across a runtime's processes** (ADR-175 Stage 3, the BEAM
   export-table move). **Blocker found 2026-07-29 by reading the code, and it is bigger than
   "needs a lock":** `vm_fast_links_base()` hands JIT'd code a **raw pointer** into the

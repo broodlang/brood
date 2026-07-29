@@ -1626,6 +1626,7 @@ pub(crate) struct CheckDepRec {
 /// [`Heap::cold`] and treat `None` as empty, which is exactly right — an absent
 /// `ColdHeap` means "this process has loaded nothing and checked nothing".
 #[derive(Default)]
+
 pub(crate) struct ColdHeap {
     /// Nesting depth of an embedded-module load (ADR-166). See `Heap::in_module_load`.
     pub(crate) module_load_depth: u32,
@@ -1639,6 +1640,44 @@ pub(crate) struct ColdHeap {
     pub(crate) ns_known_names: HashSet<Symbol>,
     /// `(:use …)` import map for the namespace being compiled.
     pub(crate) imports: HashMap<Symbol, Symbol>,
+}
+
+/// Checker-only heap state, lazily boxed off [`Heap`] (see [`Heap::check`]). None of it
+/// is touched by running Brood code — only by `nest check` / `check-file-deps`.
+pub(crate) struct CheckHeap {
+    /// `mod/` prefix → its public `(bare, qualified)` export pairs, keyed by the global
+    /// count so a `def` invalidates it. Lets a whole-project check build the index in ONE
+    /// pass instead of rescanning every global per file (O(files²)).
+    exports: Option<(
+        usize,
+        std::sync::Arc<std::collections::HashMap<String, Vec<(Symbol, Symbol)>>>,
+    )>,
+    /// The set of `mod/` namespace prefixes in the loaded image, count-keyed and shared.
+    known_ns: Option<(usize, std::sync::Arc<std::collections::HashSet<String>>)>,
+    /// The in-flight incremental-check dependency record (ADR-119).
+    dep_rec: Option<CheckDepRec>,
+}
+
+impl Default for CheckHeap {
+    fn default() -> Self {
+        CheckHeap {
+            exports: None,
+            known_ns: None,
+            dep_rec: None,
+        }
+    }
+}
+
+impl Heap {
+    /// The checker state, allocating it on first use. Callers hold `&self` (see
+    /// [`Heap::check`]), so this returns a guard rather than a reference.
+    fn check_mut(&self) -> std::cell::RefMut<'_, Box<CheckHeap>> {
+        let mut b = self.check.borrow_mut();
+        if b.is_none() {
+            *b = Some(Box::default());
+        }
+        std::cell::RefMut::map(b, |o| o.as_mut().expect("just filled"))
+    }
 }
 
 pub struct Heap {
@@ -1839,14 +1878,14 @@ pub struct Heap {
     /// because they are filled through `&self` (the checker's read paths), which
     /// cannot lazily allocate the boxed cold state. ~96 bytes; the six fields that
     /// *are* in `ColdHeap` were enough to drop `Box<Process>` a size class.
-    module_exports_cache: RefCell<
-        Option<(
-            usize,
-            std::sync::Arc<std::collections::HashMap<String, Vec<(Symbol, Symbol)>>>,
-        )>,
-    >,
-    known_ns_cache: RefCell<Option<(usize, std::sync::Arc<std::collections::HashSet<String>>)>>,
-    check_dep_rec: RefCell<Option<CheckDepRec>>,
+    /// Checker-only state — see [`CheckHeap`]. Lazily boxed and `None` until a check
+    /// actually runs, because it is **288 bytes** inline (`check_dep_rec` alone is 208,
+    /// four `HashSet`s) on every `Heap`, and a `Heap` is inline in `Box<Process>`. A
+    /// spawned worker process never checks anything, so it never pays for this. Behind a
+    /// `RefCell` rather than a plain `Option<Box<_>>` (the shape [`ColdHeap`] uses)
+    /// because every one of these is filled through `&self` — which is exactly why M1
+    /// left them inline.
+    check: RefCell<Option<Box<CheckHeap>>>,
     roots: Vec<Value>,
     /// The env half of the operand stack (ADR-061): LOCAL [`EnvId`]s an eval
     /// frame still needs across a nested `eval` (its `scope`/`env`). Relocated in
@@ -2089,6 +2128,7 @@ pub struct Heap {
     /// back to its `.blsp` file:line (call-site ids are positional + reset on
     /// `runtime_collect`, so this is grown/cleared in lockstep). For diagnosing the JIT
     /// stale-operand bug — see `dbg_site_pos` / `dbg_set_site_pos`.
+    #[cfg(debug_assertions)]
     #[cfg(debug_assertions)]
     dbg_site_pos: RefCell<Vec<Option<(crate::error::Pos, Option<Arc<str>>)>>>,
     /// Global-read inline caches (ADR-096) — the value-position counterpart of
@@ -2384,9 +2424,7 @@ impl Heap {
             global_ic: RefCell::new(SymbolMap::default()),
             msg_roots: None,
             cold: None,
-            module_exports_cache: RefCell::new(None),
-            known_ns_cache: RefCell::new(None),
-            check_dep_rec: RefCell::new(None),
+            check: RefCell::new(None),
             roots: Vec::new(),
             env_roots: Vec::new(),
             gc_threshold: usize::MAX,
@@ -2420,6 +2458,7 @@ impl Heap {
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
+            #[cfg(debug_assertions)]
             #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),
@@ -2461,9 +2500,7 @@ impl Heap {
             global_ic: RefCell::new(SymbolMap::default()),
             msg_roots: None,
             cold: None,
-            module_exports_cache: RefCell::new(None),
-            known_ns_cache: RefCell::new(None),
-            check_dep_rec: RefCell::new(None),
+            check: RefCell::new(None),
             roots: Vec::new(),
             env_roots: Vec::new(),
             gc_threshold: gc_floor(),
@@ -2497,6 +2534,7 @@ impl Heap {
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
+            #[cfg(debug_assertions)]
             #[cfg(debug_assertions)]
             dbg_site_pos: RefCell::new(Vec::new()),
             vm_global_ics: RefCell::new(Vec::new()),
@@ -4367,8 +4405,8 @@ impl Heap {
     /// `mod/*` globals) — the checker then `require`s it first. Checker use only.
     pub fn module_public_exports(&self, prefix: &str) -> Vec<(Symbol, Symbol)> {
         let count = self.runtime.globals_read().len();
-        let fresh =
-            matches!(self.module_exports_cache.borrow().as_ref(), Some((c, _)) if *c == count);
+        let fresh = matches!(self.check.borrow().as_ref()
+            .and_then(|c| c.exports.as_ref()), Some((c, _)) if *c == count);
         if !fresh {
             let mut map: std::collections::HashMap<String, Vec<(Symbol, Symbol)>> =
                 std::collections::HashMap::new();
@@ -4384,11 +4422,12 @@ impl Heap {
                     }
                 }
             }
-            *self.module_exports_cache.borrow_mut() = Some((count, std::sync::Arc::new(map)));
+            self.check_mut().exports = Some((count, std::sync::Arc::new(map)));
         }
-        self.module_exports_cache
+        self.check
             .borrow()
             .as_ref()
+            .and_then(|c| c.exports.as_ref())
             .and_then(|(_, m)| m.get(prefix).cloned())
             .unwrap_or_default()
     }
@@ -4400,7 +4439,12 @@ impl Heap {
     /// all but the first file (was an O(globals) scan per file → O(files²)).
     pub fn known_ns_prefixes(&self) -> std::sync::Arc<std::collections::HashSet<String>> {
         let count = self.runtime.globals_read().len();
-        if let Some((c, arc)) = self.known_ns_cache.borrow().as_ref() {
+        if let Some((c, arc)) = self
+            .check
+            .borrow()
+            .as_ref()
+            .and_then(|c| c.known_ns.as_ref())
+        {
             if *c == count {
                 return std::sync::Arc::clone(arc);
             }
@@ -4413,7 +4457,7 @@ impl Heap {
             }
         }
         let arc = std::sync::Arc::new(set);
-        *self.known_ns_cache.borrow_mut() = Some((count, std::sync::Arc::clone(&arc)));
+        self.check_mut().known_ns = Some((count, std::sync::Arc::clone(&arc)));
         arc
     }
 
@@ -4424,21 +4468,34 @@ impl Heap {
 
     /// Start recording global observations into a fresh record on this heap.
     pub(crate) fn begin_check_dep_record(&self) {
-        *self.check_dep_rec.borrow_mut() = Some(CheckDepRec::default());
+        self.check_mut().dep_rec = Some(CheckDepRec::default());
     }
     /// Drain and return the recorded observations (clearing the recorder).
     pub(crate) fn take_check_dep_record(&self) -> Option<CheckDepRec> {
-        self.check_dep_rec.borrow_mut().take()
+        self.check
+            .borrow_mut()
+            .as_mut()
+            .and_then(|c| c.dep_rec.take())
     }
     /// Record an observed global symbol (binding/arity/sig).
     pub(crate) fn rec_check_dep_sym(&self, sym: Symbol) {
-        if let Some(d) = self.check_dep_rec.borrow_mut().as_mut() {
+        if let Some(d) = self
+            .check
+            .borrow_mut()
+            .as_mut()
+            .and_then(|c| c.dep_rec.as_mut())
+        {
             d.syms.insert(sym);
         }
     }
     /// Record a queried `mod/` known-namespace prefix.
     pub(crate) fn rec_check_dep_ns(&self, prefix: &str) {
-        if let Some(d) = self.check_dep_rec.borrow_mut().as_mut() {
+        if let Some(d) = self
+            .check
+            .borrow_mut()
+            .as_mut()
+            .and_then(|c| c.dep_rec.as_mut())
+        {
             if !d.known_ns.contains(prefix) {
                 d.known_ns.insert(prefix.to_string());
             }
@@ -4446,7 +4503,12 @@ impl Heap {
     }
     /// Record a `mod/` prefix whose export set was read.
     pub(crate) fn rec_check_dep_exports(&self, prefix: &str) {
-        if let Some(d) = self.check_dep_rec.borrow_mut().as_mut() {
+        if let Some(d) = self
+            .check
+            .borrow_mut()
+            .as_mut()
+            .and_then(|c| c.dep_rec.as_mut())
+        {
             if !d.exports.contains(prefix) {
                 d.exports.insert(prefix.to_string());
             }
@@ -4454,13 +4516,23 @@ impl Heap {
     }
     /// Record that the `*protocols*` table was consulted.
     pub(crate) fn rec_check_dep_protocols(&self) {
-        if let Some(d) = self.check_dep_rec.borrow_mut().as_mut() {
+        if let Some(d) = self
+            .check
+            .borrow_mut()
+            .as_mut()
+            .and_then(|c| c.dep_rec.as_mut())
+        {
             d.protocols = true;
         }
     }
     /// Record a global DEFINED in the file being checked (excluded from dep-keys).
     pub(crate) fn rec_check_dep_own(&self, sym: Symbol) {
-        if let Some(d) = self.check_dep_rec.borrow_mut().as_mut() {
+        if let Some(d) = self
+            .check
+            .borrow_mut()
+            .as_mut()
+            .and_then(|c| c.dep_rec.as_mut())
+        {
             d.own.insert(sym);
         }
     }
