@@ -1,11 +1,14 @@
 # Ability dispatch monomorphization — design note
 
-> Status: **Designed, not started.** A flag-gated (`BROOD_MONO`, off by default)
-> compile-time devirtualization of `ability` op calls, to remove the dynamic-dispatch
-> overhead when the target impl is statically provable. The mechanism is understood
-> end-to-end (pipeline, integration seam, flag pattern); what remains is a scope
-> decision (Tier 1 vs Tier 2 below) and the implementation. Nothing has been built.
-> Picking this up: read this note, then the anchors in [§Anchors](#anchors).
+> Status: **Tier 1 shipped** (ADR-182, 2026-07-29), off by default behind `BROOD_MONO`.
+> A literal-first-arg ability op call is devirtualized to a direct impl call at the
+> `compile_node` seam (`eval/compile/inline.rs::mono_devirtualize`); every uncertainty
+> declines the rewrite. Flag-off is provably inert (one cached bool); flag-on is
+> byte-identical across all dispatch shapes and GC-safe under stress (the baked impl fn is
+> a promoted RUNTIME handle). `BROOD_MONO_DBG=1` traces each devirtualization. **Tier 2**
+> (inferred-variable devirtualization, the checker→compiler channel — the real hot-loop
+> win and the real miscompile surface) and the **direct-constructor** Tier-1 extension
+> remain deferred. Picking those up: read this note, then the anchors in [§Anchors](#anchors).
 
 ## The problem
 

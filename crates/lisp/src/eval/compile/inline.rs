@@ -1,6 +1,106 @@
 //! Node→Node optimizer passes: linmap rewrite + self/leaf inlining (extracted from mod.rs).
 use super::*;
 
+// ===================== ability-dispatch monomorphization (BROOD_MONO, ADR-182) ==========
+//
+// Tier 1, **off by default**. When `BROOD_MONO` is set, an ability op call whose first
+// argument is a compile-time **literal** (a `Node::Const`) has its dispatch identity proven
+// at compile time — so the call is rewritten to a *direct* call to the resolved impl fn,
+// skipping the op body's `identity-of` + `impl-for` (two CHAMP lookups + a branch). Every
+// uncertainty (arg not literal, head not an ability op, no impl for the id) → **no rewrite**:
+// the dynamic op call is left exactly as-is. Soundness over completeness.
+//
+// The late-binding trade-off (a captured impl fn goes stale if that id's impl is later
+// re-registered) is the reason this is flag-gated: default builds keep 100% dynamic
+// semantics; opting in trades that for speed, like `-O2` assuming no UB (ADR-182). Records
+// (a map literal carrying `:__id__`) are conservatively **excluded** — Tier 1 targets
+// built-in-kind literals only; the nominal-record case is Tier 1's direct-ctor extension.
+
+/// Is compile-time ability devirtualization enabled? Off by default; `BROOD_MONO` opts in.
+/// Cached once (Rust-side), like the JIT levers.
+pub(crate) fn mono_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_MONO").is_some())
+}
+
+/// A global whose value is a CHAMP map (`*op-ability*`, `*impls*`), or `None`.
+fn global_map(heap: &Heap, name: &str) -> Option<MapId> {
+    match heap.env_get(heap.global(), value::intern(name))? {
+        Value::Map(id) => Some(id),
+        _ => None,
+    }
+}
+
+/// If call head `op` is an ability op AND `args[0]` is a literal whose dispatch identity has
+/// a concrete impl, return `Node::Const(impl_fn)` — the callee for a direct call that
+/// bypasses the op's dispatch body. `None` (leave the dynamic call alone) on ANY uncertainty.
+///
+/// Mirrors the runtime dispatch (`identity-of` → `impl-for`) exactly: for a non-record
+/// literal the identity is its `type-of` kind (`value::tag(v).keyword()`, byte-identical to
+/// the `type-of` builtin), and the impl set is `*impls*[[ability op]]` resolved by that id
+/// then `:default` — the same order `impl-for` uses.
+pub(crate) fn mono_devirtualize(heap: &Heap, op: Symbol, args: &[Node]) -> Option<Node> {
+    // arg0 must be a compile-time constant literal (a folded `Node::Const`).
+    let arg0 = match args.first()? {
+        Node::Const(cv) => cv.load(),
+        _ => return None,
+    };
+    // Records dispatch nominally on their `:__id__`; a folded map literal could be one.
+    // Exclude every map — Tier 1 is built-in-kind literals only (records are the extension).
+    if matches!(arg0.unpack(), ValueRef::Map(_)) {
+        return None;
+    }
+    // The head global must be a registered ability op → its ability name symbol.
+    let op_ability = global_map(heap, "*op-ability*")?;
+    let ability = match heap.map_get(op_ability, Value::Sym(op)) {
+        Some(Value::Sym(a)) => a,
+        _ => return None,
+    };
+    // `*impls*` keys on `[ability op]` where `op` is the op name AS WRITTEN in `defability`
+    // (a quoted literal, never ns-qualified) — i.e. the bare last segment of the op global.
+    let op_bare = value::intern(value::symbol_name(op).rsplit('/').next().unwrap_or(""));
+    // Identity of a non-record literal = its `type-of` kind keyword — exactly the builtin.
+    let id_kw = Value::keyword(value::tag(arg0).keyword());
+    let default_kw = Value::keyword(value::intern("default"));
+    // Find the `[ability op]` method set, then resolve the id (then `:default`), as
+    // `impl-for` does. Iterate rather than build a key — compile-time, not hot; and it
+    // avoids depending on freshly-built-vector CHAMP equality.
+    let impls = global_map(heap, "*impls*")?;
+    let mut methods_map = None;
+    for (key, methods) in heap.map_entries(impls) {
+        if let (Value::Vector(vid), Value::Map(mid)) = (key, methods) {
+            let v = heap.vector(vid);
+            if matches!((v.first(), v.get(1)),
+                (Some(&Value::Sym(a)), Some(&Value::Sym(o))) if a == ability && o == op_bare)
+            {
+                methods_map = Some(mid);
+                break;
+            }
+        }
+    }
+    let methods_map = methods_map?;
+    // Exact id wins, else `:default` — `impl-for`'s exact order. Keyword keys need no alloc.
+    let impl_fn = heap
+        .map_get(methods_map, id_kw)
+        .or_else(|| heap.map_get(methods_map, default_kw))?;
+    // Only a real fn value is safe to call directly.
+    if !matches!(impl_fn.unpack(), ValueRef::Fn(_)) {
+        return None;
+    }
+    if std::env::var_os("BROOD_MONO_DBG").is_some() {
+        eprintln!(
+            "[mono] devirtualized {}/{} for :{} → direct impl call",
+            value::symbol_name(ability),
+            value::symbol_name(op_bare),
+            value::symbol_name(match id_kw {
+                Value::Keyword(s) => s,
+                _ => op_bare,
+            }),
+        );
+    }
+    Some(Node::Const(ConstVal::new(impl_fn)))
+}
+
 /// Whitelisted map READ ops (return a value — safe in any position) → Table op.
 pub(crate) fn linmap_read_op(sym: Symbol) -> Option<&'static str> {
     match value::symbol_name_opt(sym)? {

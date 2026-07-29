@@ -1010,13 +1010,24 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
             // A free-symbol head compiles to a plain `Node::Global` (not a
             // `GlobalIc`): the call's own site IC below caches the head's full
             // resolution, so a read IC there would be redundant (and waste a site).
-            let callee = match head.unpack() {
+            let mut callee = match head.unpack() {
                 ValueRef::Sym(h) if scope.lookup(h).is_none() => Node::Global(h),
                 _ => compile_node(heap, head, scope, false)?,
             };
             let mut args = Vec::with_capacity(items.len() - 1);
             for &a in &items[1..] {
                 args.push(compile_node(heap, a, scope, false)?);
+            }
+            // BROOD_MONO Tier 1 (ADR-182): devirtualize an ability op call with a literal
+            // first argument to a direct call to the resolved impl. Off by default — the
+            // `mono_enabled()` bool is the only cost then, so default builds are unchanged.
+            // A Const callee falls through to the NO_SITE (computed-head) path below.
+            if inline::mono_enabled() {
+                if let Node::Global(op) = callee {
+                    if let Some(direct) = inline::mono_devirtualize(heap, op, &args) {
+                        callee = direct;
+                    }
+                }
             }
             // A free-global callee gets a call-site inline-cache id (ADR-096);
             // a local/computed callee can resolve to a different function per
