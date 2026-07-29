@@ -134,7 +134,31 @@ benchmark row before believing it.
 
 **A2 — the per-byte copy cost (owns real payload-carrying apps, not the microbenchmarks).**
 
-- [ ] **L1 — single-copy send to a parked receiver.** Local `send` today is *two* full
+- [ ] **L1 — single-copy send to a parked receiver. Design complete (2026-07-29), ready
+  to execute; not yet written.** Sketch, with the three questions that decide it already
+  answered in code:
+  1. *Can the sender touch the receiver's heap?* **Yes** — `deliver_envelope` takes the
+     mailbox state lock and `wake_parked(&mut st)` hands back the receiver's
+     `Box<Process>`, giving exclusive `&mut` on its `Heap`. Same quiescence `trim_parked`
+     uses. Sender holds `&Heap`, receiver `&mut Heap` — two distinct objects, so borrowck
+     is satisfied.
+  2. *Does the copier need incremental rooting?* **No** — and this is the finding that
+     makes L1 tractable. `from_message` already builds graphs in a receiver heap by
+     accumulating children in an ordinary off-heap `Vec<Value>` and then calling
+     `heap.list(vals)`. That is only sound because **allocation never collects** in this
+     runtime (collection runs at eval safepoints, never inside `alloc_*`). A cross-heap
+     copier can use the identical pattern.
+  3. *Where does the copied value live until the receiver pops it?* The mailbox is **not**
+     a GC root, so it cannot hold a bare `Value`. Push the copied value onto the
+     receiver's `roots` and put the index in the envelope. Sound because a collection
+     while parked relocates roots *in place*, keeping indices valid — the same invariant
+     `Suspended` depends on (ADR-100 §8).
+
+  Work: a `copy_cross_heap(src: &Heap, dst: &mut Heap, v: Value) -> Value` mirroring
+  `to_message`/`from_message`'s shape over every `Value` kind, an `Envelope::Rooted(usize)`
+  variant, and the two ends of the send/receive path. `Message` stays for running
+  receivers and every dist send. Expect ~300 lines; gate with GC_STRESS, TSAN, and the
+  differential fuzzers. Original entry: Local `send` today is *two* full
   copies through the wire-format `Message` (`Value → Message → Value`), with both
   intermediates becoming garbage. BEAM copies **once**, straight into the receiver's heap.
   **Feasibility confirmed:** `deliver_envelope` already takes the mailbox state lock and
