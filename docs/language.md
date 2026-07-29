@@ -508,6 +508,15 @@ tail is a real type the checker consumes, not a comment. Two things follow from 
   a body *provably disjoint* from the declared return warns. A `:-> any` op imposes no
   constraint (`any` is the gradual unknown, not a top type). All advisory — the return
   type never gates the live image, and dispatch is unchanged.
+- **Parameters may be typed too — `(name T)`.** An op spec's params are bare symbols by
+  default; wrap one as `(name T)` to declare its type: `(scale [self (factor float)] :->
+  int)`. The type is the same checker-only annotation as `:-> RET` (dispatch is still on the
+  first argument's identity), and it does two things: an **argument** at that position is
+  checked at every call site — `(scale s "x")` warns "argument 2 expects float" — and the
+  **impl body** sees the param at that type, so returning it against a disjoint `:-> RET` is
+  caught. Same gradual, false-positive-clean relation as a `sig` param: a precise argument is
+  checked `⊆`, a dynamic one `∩ ≠ ⊥`, an unknown one defers. Untyped positions (the common
+  case, including `self`) impose nothing.
 
 **A sealed ability *is a type* (ADR-181).** A `:sealed` ability names a closed member set,
 so its name is usable directly in the type grammar — it denotes the **union of its members'

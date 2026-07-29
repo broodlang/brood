@@ -700,8 +700,9 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         protocol::check_op_collisions(&ability_info, &mut out);
         // Multimethod missing-method: a direct `defmulti` generic call whose full argument
         // tuple is statically known but has no exact method and no `:default` (ADR-179).
-        let multi_info = protocol::build_multi_info(heap, &expanded);
+        let multi_info = std::sync::Arc::new(protocol::build_multi_info(heap, &expanded));
         protocol::check_multi_calls(heap, &expanded, &multi_info, &mut out);
+        ctx.set_multi(multi_info);
         ctx.set_ability(ability_info);
         // Ability impl-return conformance: an op declaring `:-> RET` has each of its
         // impls' bodies checked against that return type (gradual, false-positive-clean).
