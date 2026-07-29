@@ -441,6 +441,11 @@ pub fn check_form(heap: &Heap, form: Value) -> Vec<String> {
 /// --check` / `nest check`. The position is the *call form*'s, recorded by the
 /// reader; an unrecorded form (e.g. one a macro synthesised) yields `None`.
 pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
+    // This ad-hoc single-form path never populates the sealed-ability-as-a-type table
+    // (that's `check_file`'s job). Clear it so a prior `check_file` on this thread can't
+    // leak a stale table into a `(check 'form)` — defensive: an ability type is sound
+    // regardless, but an empty table here is unambiguously so.
+    annot::clear_ability_types();
     let mut out = Vec::new();
     check_into(heap, form, &Ctx::default(), &mut out);
     out
@@ -483,6 +488,10 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
     // Fresh per-pass signature-inference memo: this file's inferred sigs must not leak
     // into another file, nor (in the long-lived LSP) survive a source edit (KI-13).
     sigs::clear_sig_memo();
+    // Fresh per-file sealed-ability-as-a-type table (ADR-181); repopulated below once the
+    // expanded tree is built, so a bare `(sig f (Shape -> …))` resolves. Cleared here so a
+    // panic mid-check can't leak one file's abilities into the next.
+    annot::clear_ability_types();
     // Pass 1: macroexpand each form (recording the expanded shape we'll also
     // walk in pass 2). A macroexpand failure isn't this pass's job to report,
     // so we fall back to the un-expanded form silently.
@@ -617,6 +626,11 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         // `g` while the call resolved to `ns/g`), so no user `(sig …)` in a module ever
         // reached the call-argument check.
         let file_ns_name: Option<String> = file_ns.map(value::symbol_name);
+        // Populate the sealed-ability-as-a-type table (ADR-181) from the expanded tree +
+        // registry BEFORE parsing sigs, so a `(sig f (Shape -> …))` / `:-> Shape` referring
+        // to a sealed ability (this file's or an imported one) resolves to the union of its
+        // members' record shapes rather than being dropped as an unknown type name.
+        annot::set_ability_types(protocol::sealed_member_ids(heap, &expanded));
         for &form in &forms {
             register_declared_sig(heap, &mut ctx, file_ns_name.as_deref(), form);
         }
@@ -685,6 +699,10 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         // name would clobber each other's generic function (ADR-172).
         protocol::check_op_collisions(&ability_info, &mut out);
         ctx.set_ability(ability_info);
+        // Ability impl-return conformance: an op declaring `:-> RET` has each of its
+        // impls' bodies checked against that return type (gradual, false-positive-clean).
+        // Runs with `ctx` carrying the ability facts just set.
+        walk::check_impl_returns(heap, &expanded, &ctx, &mut out);
         // Pass 3: check each expanded form with the accumulated file-globals.
         for &form in &expanded {
             check_into(heap, form, &ctx, &mut out);

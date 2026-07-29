@@ -1236,6 +1236,138 @@ fn check_fn_seeded(
     }
 }
 
+/// Impl-return conformance: walk the expanded tree for each `(register-impl 'A 'op :id
+/// (fn params body…) 'ns)` and, when ability `A`'s op `op` declares a `:-> RET` return
+/// type, check the impl's body against it. The gradual relation keeps this
+/// false-positive-clean the same way the `sig` return check does — an over-approximated
+/// body (a call result) is `dynamic` and defers; only a body *provably disjoint* from the
+/// declared return warns. Called after `ctx.set_ability(…)`, so `ctx.ability()` is live.
+pub(super) fn check_impl_returns(
+    heap: &Heap,
+    expanded: &[Value],
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    if ctx.ability().is_none_or(|i| i.is_empty()) {
+        return;
+    }
+    for &form in expanded {
+        walk_impl_returns(heap, form, ctx, out);
+    }
+}
+
+fn walk_impl_returns(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<Pos>, String)>) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        if let Some(&Value::Sym(head)) = items.first() {
+            if value::symbol_is(head, kw::QUOTE) || value::symbol_is(head, kw::QUASIQUOTE) {
+                return;
+            }
+            if head_name(head) == "register-impl" {
+                check_one_impl_return(heap, &items, ctx, out);
+            }
+        }
+        for &item in items.get(1..).unwrap_or(&[]) {
+            walk_impl_returns(heap, item, ctx, out);
+        }
+    })
+}
+
+/// Check one `(register-impl 'A 'op :id (fn params body…) 'ns)` against its op's declared
+/// return type. The ability + op names come from the two quoted args; the impl fn is
+/// arg 4.
+fn check_one_impl_return(
+    heap: &Heap,
+    items: &[Value],
+    ctx: &Ctx,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
+    let info = match ctx.ability() {
+        Some(i) => i,
+        None => return,
+    };
+    let (Some(ability), Some(op)) = (
+        items.get(1).and_then(|&v| quoted_sym_name(heap, v)),
+        items.get(2).and_then(|&v| quoted_sym_name(heap, v)),
+    ) else {
+        return;
+    };
+    let Some(ret) = info.op_ret_by_name(&ability, &op) else {
+        return;
+    };
+    // An `any` declared return imposes no constraint — nothing to check.
+    if ret.is_any() {
+        return;
+    }
+    let id = items.get(3).copied().and_then(|v| match v {
+        Value::Keyword(k) => Some(value::symbol_name(k)),
+        _ => None,
+    });
+    let Some(&fn_form) = items.get(4) else {
+        return;
+    };
+    let Some(fn_items) = list_items(heap, fn_form) else {
+        return;
+    };
+    if !matches!(fn_items.first(), Some(&Value::Sym(s)) if is_fn_head(s)) {
+        return;
+    }
+    // Multi-clause impl fns aren't produced by `impl`; if one appears, don't try to
+    // pin a single arity — skip.
+    if crate::eval::macros::fn_is_arity_multi_clause(heap, &fn_items) {
+        return;
+    }
+    let Some(&params_form) = fn_items.get(1) else {
+        return;
+    };
+    // Bind the impl's params as unknowns (the op spec declares no arg types yet), then
+    // grade the body's last form against the declared return.
+    let mut scope = ctx.clone();
+    for p in fn_params(heap, params_form) {
+        scope = scope.bind(p, None);
+    }
+    let body_start = match (fn_items.get(2), fn_items.get(3)) {
+        (Some(Value::Str(_)), Some(_)) => 3,
+        _ => 2,
+    };
+    let Some(&ret_form) = fn_items.get(body_start..).and_then(|b| b.last()) else {
+        return;
+    };
+    let g = gradual_of(heap, ret_form, &scope);
+    if !g.consistent_with(ret.clone()) && !ctx.is_suppressed(super::ctx::SUPPRESS_TYPE_MISMATCH) {
+        let id_str = id.map(|i| format!(" for :{i}")).unwrap_or_default();
+        out.push((
+            heap.form_pos_only(ret_form),
+            format!(
+                "ability {ability}/{op}{id_str}: declared return type {} but the impl yields {}",
+                ret, g.bound
+            ),
+        ));
+    }
+}
+
+/// `(quote SYM)` → the symbol's name; used to read `register-impl`'s quoted ability / op.
+fn quoted_sym_name(heap: &Heap, v: Value) -> Option<String> {
+    let items = list_items(heap, v)?;
+    if items.len() == 2 && matches!(items[0], Value::Sym(s) if value::symbol_is(s, kw::QUOTE)) {
+        match items[1] {
+            Value::Sym(s) | Value::Keyword(s) => Some(value::symbol_name(s)),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// The bare (last `/`-segment) name of a symbol head — `ability/register-impl` and a
+/// bare `register-impl` both read as `"register-impl"`.
+fn head_name(sym: Symbol) -> String {
+    let full = value::symbol_name(sym);
+    full.rsplit('/').next().unwrap_or(&full).to_string()
+}
+
 /// The items of `form` when it is an `(fn …)` form, else `None` —
 /// so `check_def` can recognise the `(def name (fn …))` shape that `defn`
 /// expands to.
