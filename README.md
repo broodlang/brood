@@ -385,6 +385,9 @@ docs/          architecture, language reference, roadmap, decisions, dev log
   types, the language survey, and how `ability` resolved it
 - [docs/decisions.md](docs/decisions.md) — why the key choices were made (ADRs)
 - [docs/devlog.md](docs/devlog.md) — chronological work log
+- [docs/handoff.md](docs/handoff.md) — **start here to pick work back up**: current state,
+  open threads in priority order, the stress harnesses, and the measurement traps that have
+  produced wrong results before
 - [docs/brood-for-claude.md](docs/brood-for-claude.md) — the pocket reference for AI
   assistants writing Brood (also embedded in the binary via `%builtin-doc`)
 

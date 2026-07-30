@@ -158,7 +158,9 @@ std/                     standard library written in Brood, grouped (ADR-085):
                          (`crates/lisp/src/net.rs`, ADR-062). The REPL is Brood too
                          (`std/tool/repl.blsp`, ADR-048); the binaries bootstrap
                          into `(repl-run)`.
-docs/                    architecture, language, roadmap, decisions, devlog
+docs/                    architecture, language, roadmap, decisions, devlog,
+                         handoff.md (current state + open threads — read first when
+                         resuming work; measurement traps are listed there)
 ```
 
 The CLI is split (ADR-028, the `rustc`/`cargo` model): **`brood` runs the
