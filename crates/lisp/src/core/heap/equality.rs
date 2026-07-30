@@ -725,15 +725,16 @@ impl Heap {
             // ratio; against a Float compare exactly (every finite f64 is a dyadic
             // rational); against a Decimal promote the (exact) decimal to a ratio.
             (Ratio(x), Ratio(y)) => self.ratio(x).cmp(&self.ratio(y)),
-            (Ratio(x), Int(y)) => self
-                .ratio(x)
-                .cmp(&num_rational::BigRational::from_integer(num_bigint::BigInt::from(y))),
+            (Ratio(x), Int(y)) => self.ratio(x).cmp(&num_rational::BigRational::from_integer(
+                num_bigint::BigInt::from(y),
+            )),
             (Int(x), Ratio(y)) => {
-                num_rational::BigRational::from_integer(num_bigint::BigInt::from(x)).cmp(&self.ratio(y))
+                num_rational::BigRational::from_integer(num_bigint::BigInt::from(x))
+                    .cmp(&self.ratio(y))
             }
-            (Ratio(x), BigInt(y)) => self
-                .ratio(x)
-                .cmp(&num_rational::BigRational::from_integer(self.bigint(y).clone())),
+            (Ratio(x), BigInt(y)) => self.ratio(x).cmp(&num_rational::BigRational::from_integer(
+                self.bigint(y).clone(),
+            )),
             (BigInt(x), Ratio(y)) => {
                 num_rational::BigRational::from_integer(self.bigint(x).clone()).cmp(&self.ratio(y))
             }

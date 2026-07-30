@@ -442,7 +442,12 @@ pub(super) fn prim_denominator(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
             Ok(heap.int_from_bigint(d))
         }
         Value::Int(_) | Value::BigInt(_) => Ok(Value::int(1)),
-        _ => Err(LispError::wrong_type(heap, "denominator", "int or ratio", x)),
+        _ => Err(LispError::wrong_type(
+            heap,
+            "denominator",
+            "int or ratio",
+            x,
+        )),
     }
 }
 
@@ -466,7 +471,9 @@ pub(super) fn prim_to_decimal(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
         }
         Value::Float(f) => match BigDecimal::try_from(f) {
             Ok(d) => Ok(heap.alloc_decimal(d)),
-            Err(_) => Err(LispError::runtime("->decimal: cannot convert a non-finite float")),
+            Err(_) => Err(LispError::runtime(
+                "->decimal: cannot convert a non-finite float",
+            )),
         },
         _ => Err(LispError::wrong_type(heap, "->decimal", "number", x)),
     }

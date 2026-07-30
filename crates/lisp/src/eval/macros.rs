@@ -276,7 +276,11 @@ type HygScope = Vec<(value::Symbol, value::Symbol)>;
 
 /// Look up `s` (innermost — last — binding wins).
 fn hyg_lookup(scope: &[(value::Symbol, value::Symbol)], s: value::Symbol) -> Option<value::Symbol> {
-    scope.iter().rev().find(|(orig, _)| *orig == s).map(|(_, t)| *t)
+    scope
+        .iter()
+        .rev()
+        .find(|(orig, _)| *orig == s)
+        .map(|(_, t)| *t)
 }
 
 /// A plain binder we rename: not `_`, not a `&`-marker, not `#`-suffixed
@@ -387,7 +391,12 @@ fn hyg_list(heap: &mut Heap, form: Value, scope: &[(value::Symbol, value::Symbol
     hyg_generic(heap, form, &items, scope)
 }
 
-fn hyg_generic(heap: &mut Heap, form: Value, items: &[Value], scope: &[(value::Symbol, value::Symbol)]) -> Value {
+fn hyg_generic(
+    heap: &mut Heap,
+    form: Value,
+    items: &[Value],
+    scope: &[(value::Symbol, value::Symbol)],
+) -> Value {
     let mut out = Vec::with_capacity(items.len());
     for &it in items {
         out.push(hyg_walk(heap, it, scope));
@@ -424,7 +433,12 @@ fn hyg_binder_out(target: Value, scope: &[(value::Symbol, value::Symbol)]) -> Va
 /// `(let/letrec (b0 v0 …) body…)` — rename plain-symbol binders. `letrec` binders
 /// are all in scope for every RHS and the body; plain `let` is sequential (a binder
 /// scopes only the *later* RHSs and the body — matching `resolve_let`).
-fn hyg_let(heap: &mut Heap, form: Value, items: &[Value], scope: &[(value::Symbol, value::Symbol)]) -> Value {
+fn hyg_let(
+    heap: &mut Heap,
+    form: Value,
+    items: &[Value],
+    scope: &[(value::Symbol, value::Symbol)],
+) -> Value {
     let letrec = matches!(items.first().map(|v| v.unpack()),
         Some(ValueRef::Sym(h)) if value::symbol_is(h, kw::LETREC));
     let binds_form = items.get(1).copied().unwrap_or(Value::nil());
@@ -467,7 +481,12 @@ fn hyg_let(heap: &mut Heap, form: Value, items: &[Value], scope: &[(value::Symbo
 
 /// `(fn …)` — single-arity `(params body…)` or multi-arity `(doc? (params body…)…)`.
 /// Params bind together in their body. Mirrors `resolve_fn`'s dispatch.
-fn hyg_fn(heap: &mut Heap, form: Value, items: &[Value], scope: &[(value::Symbol, value::Symbol)]) -> Value {
+fn hyg_fn(
+    heap: &mut Heap,
+    form: Value,
+    items: &[Value],
+    scope: &[(value::Symbol, value::Symbol)],
+) -> Value {
     let parts = &items[1..];
     let (has_doc, clause_start) = match parts.first().map(|v| v.unpack()) {
         Some(ValueRef::Str(_)) if parts.len() > 1 => (true, 1),
@@ -495,7 +514,11 @@ fn hyg_fn(heap: &mut Heap, form: Value, items: &[Value], scope: &[(value::Symbol
     rebuild_list(heap, form, out)
 }
 
-fn hyg_arity_clause(heap: &mut Heap, clause: Value, scope: &[(value::Symbol, value::Symbol)]) -> Value {
+fn hyg_arity_clause(
+    heap: &mut Heap,
+    clause: Value,
+    scope: &[(value::Symbol, value::Symbol)],
+) -> Value {
     let cparts = match heap.list_to_vec(clause) {
         Ok(c) if !c.is_empty() => c,
         _ => return clause,
@@ -533,7 +556,9 @@ fn hyg_param_list(heap: &mut Heap, params: Value, inner: &mut HygScope) -> Value
 /// to the runtime expand path (fresh gensyms per expansion). Skips `quote`/`unquote`/
 /// `quasiquote` subtrees (a `let` in caller code or quoted data isn't the template's).
 fn template_introduces_binder(heap: &Heap, v: Value) -> bool {
-    stacker::maybe_grow(64 * 1024, 1024 * 1024, || template_introduces_binder_inner(heap, v))
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        template_introduces_binder_inner(heap, v)
+    })
 }
 
 fn template_introduces_binder_inner(heap: &Heap, v: Value) -> bool {
@@ -572,10 +597,9 @@ fn template_introduces_binder_inner(heap: &Heap, v: Value) -> bool {
             .to_vec()
             .iter()
             .any(|&it| template_introduces_binder(heap, it)),
-        ValueRef::Map(id) => heap
-            .map_entries(id)
-            .iter()
-            .any(|(k, val)| template_introduces_binder(heap, *k) || template_introduces_binder(heap, *val)),
+        ValueRef::Map(id) => heap.map_entries(id).iter().any(|(k, val)| {
+            template_introduces_binder(heap, *k) || template_introduces_binder(heap, *val)
+        }),
         ValueRef::Set(id) => heap
             .set_elems(id)
             .iter()
@@ -592,7 +616,8 @@ fn hyg_binder_renamable(t: &Value) -> bool {
 /// Does any clause of this `fn` form have a renamable plain-symbol param?
 fn fn_has_renamable_param(heap: &Heap, items: &[Value]) -> bool {
     let parts = &items[1..];
-    let clause_start = matches!(parts.first().map(|v| v.unpack()), Some(ValueRef::Str(_)) if parts.len() > 1) as usize;
+    let clause_start = matches!(parts.first().map(|v| v.unpack()), Some(ValueRef::Str(_)) if parts.len() > 1)
+        as usize;
     let clauses = &parts[clause_start..];
     if !clauses.is_empty() && clauses.iter().all(|&f| is_arity_clause(heap, f)) {
         clauses.iter().any(|&c| {

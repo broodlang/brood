@@ -46,8 +46,8 @@ use crate::core::keywords as kw;
 use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
     BigIntId, BytesId, Closure, ClosureArm, ClosureId, ClosureTemplate, DecimalId, EnvId, MapId,
-    NativeFn, NativeId, PairId, Passthrough, RatioId, RopeId, StrId, Symbol, Value, ValueRef, VecId, LOCAL,
-    PRELUDE, RUNTIME,
+    NativeFn, NativeId, PairId, Passthrough, RatioId, RopeId, StrId, Symbol, Value, ValueRef,
+    VecId, LOCAL, PRELUDE, RUNTIME,
 };
 use crate::error::LispError;
 
