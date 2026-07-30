@@ -65,3 +65,33 @@
       (is (every? (fn (e) (= (get e :kind) :exit)) evs))))
   (test "the tool is in the catalogue"
     (is (includes? (map (fn (t) (get t :name)) (mcp/mcp-tools)) "watch-runtime"))))
+
+;; Ability/record introspection + snippet type-check + lookup :type (2026-07-30).
+(describe "mcp ability introspection tools"
+  (test "abilities lists the core abilities"
+    (is (includes? (get (mcp/mcp-abilities-tool {}) :abilities) "Display")))
+  (test "ability describes ops, sealed members, requires, and impls"
+    (mcp/mcp-eval-tool
+      {:source "(defrecord mcpt-circle (r)) (defability McptShape :sealed [mcpt-circle] (mcpt-area [self] :-> float) (mcpt-big? [self o] :-> bool (> (mcpt-area self) 0))) (impl McptShape mcpt-circle (mcpt-area [c] 1.0))"})
+    (let (r (mcp/mcp-ability-tool {:name "McptShape"}))
+      (assert= (get r :sealed) true)
+      (is (includes? (get r :members) "mcpt-circle"))
+      (is (includes? (get r :impls) "mcpt-circle"))
+      (assert= (count (get r :ops)) 2)
+      ;; the provided op carries :provided true; the required one false
+      (let (provided (filter (fn (o) (get o :provided)) (get r :ops)))
+        (assert= (count provided) 1))))
+  (test "an unknown ability name returns an :error map, not a throw"
+    (is (contains? (mcp/mcp-ability-tool {:name "NoSuchAbilityXyz"}) :error))))
+
+(describe "mcp check-source tool"
+  (test "flags a type error in a snippet"
+    (is (not (empty? (get (mcp/mcp-check-source-tool {:source "(defn f (x) (string-length 5))"}) :diagnostics)))))
+  (test "is clean for well-typed code"
+    (assert= {:diagnostics []} (mcp/mcp-check-source-tool {:source "(+ 1 2)"})))
+  (test "a non-string :source is rejected"
+    (assert-error (mcp/mcp-check-source-tool {:source 42}))))
+
+(describe "mcp lookup carries the checker type"
+  (test "lookup includes a :type signature string"
+    (is (string? (get (mcp/mcp-lookup-tool {:name "count"}) :type)))))

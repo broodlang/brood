@@ -217,10 +217,22 @@ fn head_sym<'s>(node: &Node, src: &'s str) -> Option<&'s str> {
     (first.kind == NodeKind::Symbol).then(|| first.text(src))
 }
 
-/// Pass 1: collect `def`/`defn`/`defmacro` names into the global scope.
+/// Pass 1: collect definition names into the global scope. Beyond the plain
+/// `def`/`defn`/`defmacro`, this includes the definer *macros* whose name is also
+/// at index 1 — `defrecord` (the name doubles as the constructor), `defability`
+/// (the ability name), and `defdyn` (a dynamic var). Registering them means a use
+/// of a record constructor / ability / dyn-var defined in *this* buffer resolves
+/// as a document `Global` (not `Free`), so hover, signature help, same-file
+/// goto-definition and find-references work on a buffer the server hasn't run. The
+/// globals those macros *synthesize* (a record's `foo-<field>` accessors, an
+/// ability's op dispatchers) still resolve `Free` — they aren't def heads here —
+/// and reach their site through the runtime def-site table instead.
 fn collect_globals(node: &Node, src: &str, out: &mut Vec<Binding>) {
     if let Some(head) = head_sym(node, src) {
-        if matches!(head, kw::DEF | kw::DEFN | kw::DEFMACRO) {
+        if matches!(
+            head,
+            kw::DEF | kw::DEFN | kw::DEFMACRO | kw::DEFRECORD | kw::DEFABILITY | kw::DEFDYN
+        ) {
             if let Some(name) = node.forms().nth(1) {
                 if name.kind == NodeKind::Symbol {
                     out.push(Binding {
