@@ -196,6 +196,7 @@ pub(crate) fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
             });
         }
         Node::Call {
+            staged,
             callee,
             args,
             tail,
@@ -207,10 +208,13 @@ pub(crate) fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
             // the head is a free global, carry its symbol + `site` so the call-site IC
             // can cache the resolved arm (Stage 5); the callee is still pushed and
             // resolved in-order, so the IC is a pure cache.
-            let head = if let Node::Global(s) = &**callee {
-                Some(*s)
-            } else {
-                None
+            // The head symbol, for the call-site IC. A *staged* head has already been
+            // rewritten to a `GlobalIc` by the compiler, so match that shape too — keeping
+            // `head` populated is what lets the IC keep caching the resolved arm.
+            let head = match &**callee {
+                Node::Global(s) => Some(*s),
+                Node::GlobalIc { sym, .. } if *staged => Some(*sym),
+                _ => None,
             };
             // A free-global head is NOT staged: `Inst::Call` resolves it through the call IC
             // (or `env_get` on a miss), so there's no redundant head-`Global` push + per-call
@@ -222,7 +226,9 @@ pub(crate) fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
             // and reverted: it forces `head: None`, which disables the call-site IC, and
             // `json` went 168 ms -> 1159 ms (6x). A correct fix needs the head resolved
             // through the IC *before* the args (its own global-IC site), not a plain stage.
-            if head.is_none() {
+            // Staged: emit the callee BEFORE the args, so the operator is resolved first
+            // (KI-19). A computed callee is staged for the same structural reason.
+            if head.is_none() || *staged {
                 emit_node(callee, code)?;
             }
             for a in args.iter() {
@@ -234,6 +240,7 @@ pub(crate) fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
                 pos: *pos,
                 site: *site,
                 head,
+                staged: *staged,
             });
         }
         Node::SelfCall { args, pos: _ } => {

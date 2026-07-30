@@ -1036,6 +1036,33 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                 Node::Global(_) => scope.site_alloc(),
                 _ => NO_SITE,
             };
+            // KI-19: the operator must be resolved BEFORE the arguments, matching the
+            // tree-walker. Only an argument that can run user code can rebind it, so only
+            // those calls pay anything: the head becomes a `GlobalIc` (resolved at IC speed
+            // ahead of the args) and the call is marked `staged`. `head`/`site` are kept, so
+            // the call-site IC still caches the arm — see `Inst::Call::staged`.
+            // …but only for a head that can *actually* be rebound. A **reserved** name —
+            // everything the language ships: prelude, builtins, embedded std modules — is
+            // refused by `def` (ADR-166), so its resolution cannot change mid-call and the
+            // elided head stays correct. That exemption is what keeps the cost off the
+            // prelude-heavy rows: staging every call regressed `regex` 31%, `wordcount` 11%
+            // and `sieve` 9%, almost all of it calls to `first`/`rest`/`str`-class names
+            // that were never rebindable.
+            //
+            // (A module load is the one context allowed to define its own reserved surface,
+            // and `is_reserved_global` already reports false while one is in progress, so
+            // that path stages conservatively.)
+            let staged = site != NO_SITE
+                && args.iter().any(node_runs_user_code)
+                && !matches!(callee, Node::Global(sym) if heap.is_reserved_global(sym));
+            if staged {
+                if let Node::Global(sym) = callee {
+                    callee = Node::GlobalIc {
+                        sym,
+                        site: scope.gsite_alloc(),
+                    };
+                }
+            }
             let (pos, file) = match heap.form_pos(form) {
                 Some((p, f)) => (Some(p), f),
                 None => (None, None),
@@ -1051,6 +1078,7 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                 scope.site_pos[idx] = pos.map(|p| (p, file.clone()));
             }
             Some(Node::Call {
+                staged,
                 callee: Box::new(callee),
                 args: args.into_boxed_slice(),
                 tail,
@@ -1186,6 +1214,24 @@ fn is_elem_read(a: &Node, b: &Node, slot: usize, nelems: usize) -> Option<usize>
 
 /// Call `f` on every child of `node` (not `node` itself). Used by the
 /// EA analyses to avoid repeating structural recursion.
+/// Can evaluating `n` run arbitrary user code — and therefore execute a `def`?
+///
+/// Only a call (or a `try`, whose body is one) can; reads, arithmetic, literals and control
+/// flow over those cannot, however deeply nested. Decides whether a call's free-global head
+/// must be resolved before its arguments (KI-19, see `Inst::Call::staged`). Conservative in
+/// the safe direction: an unrecognised node counts as "runs code".
+fn node_runs_user_code(n: &Node) -> bool {
+    match n {
+        Node::Call { .. } | Node::SelfCall { .. } | Node::TryCatch { .. } => true,
+        Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => false,
+        _ => {
+            let mut found = false;
+            walk_children(n, |c| found = found || node_runs_user_code(c));
+            found
+        }
+    }
+}
+
 fn walk_children<F: FnMut(&Node)>(node: &Node, mut f: F) {
     match node {
         Node::If(a, b, c) => {
