@@ -1170,6 +1170,11 @@ fn jit_lower_arm_inner(
     let glob_id = m
         .declare_function("brood_rt_global", Linkage::Import, &glob_sig)
         .ok()?;
+    // Same signature, but resolves WITHOUT parking an unbound error — the entry hoist
+    // deopts on unbound rather than raising (see `brood_rt_global_probe`).
+    let globprobe_id = m
+        .declare_function("brood_rt_global_probe", Linkage::Import, &glob_sig)
+        .ok()?;
     // brood_rt_global_ic(heap, out, sym, site) -> status: as above but through the
     // per-site global inline cache (no `env_get` walk on a cache hit).
     let mut globic_sig = m.make_signature();
@@ -1380,6 +1385,7 @@ fn jit_lower_arm_inner(
     #[cfg(debug_assertions)]
     let _dbg_check_slot_ref = m.declare_func_in_func(dbg_check_slot_id, b.func);
     let glob_ref = m.declare_func_in_func(glob_id, b.func);
+    let globprobe_ref = m.declare_func_in_func(globprobe_id, b.func);
     let globic_ref = m.declare_func_in_func(globic_id, b.func);
     let callslow_ref = m.declare_func_in_func(callslow_id, b.func);
     let pushn_ref = m.declare_func_in_func(pushn_id, b.func);
@@ -1704,16 +1710,22 @@ fn jit_lower_arm_inner(
             hoisted.insert(slot, (ptr, vlen));
         }
         // Resolve each hoisted global once (sorted for deterministic codegen). Unbound ⇒
-        // `error` (matches the VM's unbound-global error); non-vector ⇒ `deopt`.
+        // `deopt`, NOT `error`: the hoist runs at entry for every global the arm mentions,
+        // including ones only a cold branch reads, so raising here reported `unbound
+        // symbol` for a branch the VM never evaluates — `(defn pick (n) (if (< n 0)
+        // never-defined-global (+ n 1)))` worked until it got hot, then threw. Deopting
+        // hands the arm to the VM, which evaluates only the branch actually taken and
+        // raises only if that branch really reads the name. `brood_rt_global_probe` is the
+        // non-parking resolve, so no phantom error is left behind. Non-vector ⇒ `deopt`.
         let mut gsyms: Vec<Symbol> = hoist_globals.iter().copied().collect();
         gsyms.sort_unstable();
         for sym in gsyms {
             let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
             let symv = b.ins().iconst(types::I32, sym as i64);
-            let c = b.ins().call(glob_ref, &[heap, out_addr, symv]);
+            let c = b.ins().call(globprobe_ref, &[heap, out_addr, symv]);
             let status = b.inst_results(c)[0];
             let okb = b.create_block();
-            b.ins().brif(status, error, &[], okb, &[]);
+            b.ins().brif(status, deopt, &[], okb, &[]);
             b.switch_to_block(okb);
             let w0 = b.ins().stack_load(types::I64, out_slot, 0);
             let w1 = b
@@ -1733,16 +1745,17 @@ fn jit_lower_arm_inner(
             hoisted_global.insert(sym, (ptr, vlen, w0, w1, w2));
         }
         // Scalar globals (#1): resolve each once at entry into its `Value` words — no vector
-        // base, no per-access IC. Unbound ⇒ `error` (matches the VM's late-bound lookup).
+        // base, no per-access IC. Unbound ⇒ `deopt`, for the same reason as the vector
+        // hoist above: an entry-time resolve must not raise for a branch that never runs.
         let mut ssyms: Vec<Symbol> = hoist_scalar_globals.iter().copied().collect();
         ssyms.sort_unstable();
         for sym in ssyms {
             let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
             let symv = b.ins().iconst(types::I32, sym as i64);
-            let c = b.ins().call(glob_ref, &[heap, out_addr, symv]);
+            let c = b.ins().call(globprobe_ref, &[heap, out_addr, symv]);
             let status = b.inst_results(c)[0];
             let okb = b.create_block();
-            b.ins().brif(status, error, &[], okb, &[]);
+            b.ins().brif(status, deopt, &[], okb, &[]);
             b.switch_to_block(okb);
             let w0 = b.ins().stack_load(types::I64, out_slot, 0);
             let w1 = b
