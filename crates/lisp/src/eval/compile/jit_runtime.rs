@@ -753,9 +753,28 @@ pub(crate) fn jit_run_fast_link(
             for k in 0..argc {
                 argv2.push(heap.root_at(base + k));
             }
-            if let Some((_, Some((arm, cenv, _)))) =
-                heap.vm_call_ic_probe(site, head, argc as u32, epoch)
-            {
+            // Resolve the callee's arm. The IC probe is only an *optimisation* for finding
+            // it, so a miss must not change behaviour — but it did: the branch below used to
+            // be skipped entirely on a miss, falling through to `brood_rt_call_slow`, which
+            // **calls the callee again**. By then its native code has already run, so any
+            // effect it performed happened twice (KI-18: both arms of a multi-arity fn were
+            // entered 50 016 times instead of 50 000, exactly 16 — the deopt-bail threshold
+            // — before the arm bailed and the duplication stopped). On a miss, resolve the
+            // arm the slow way by name and take the same checkpoint-resume path.
+            let resolved = heap
+                .vm_call_ic_probe(site, head, argc as u32, epoch)
+                .and_then(|(_, a)| a)
+                .map(|(arm, cenv, _)| (arm, cenv))
+                .or_else(|| {
+                    let genv = heap.read_root_env(heap.jit_call_env);
+                    match heap.env_get(genv, head) {
+                        Some(Value::Fn(id)) => {
+                            super::compiled_arm_for(heap, id, argc).map(|a| (a, callee_env))
+                        }
+                        _ => None,
+                    }
+                });
+            if let Some((arm, cenv)) = resolved {
                 // Deopt feedback (see `jit_deopt_feedback`): the fast-link hot path
                 // carries no arm reference, so runs go uncounted here — only deopts.
                 // Undercounted runs only make a mixed arm bail sooner (conservative).
