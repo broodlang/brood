@@ -11,6 +11,33 @@ writeup of the scheduler race, see
 [claude-demo-findings.md](claude-demo-findings.md); deeper rationale is in the cited
 ADRs / topic docs.
 
+## Index — all resolved (⌘F the `KI-N` to jump)
+
+| # | What | Status |
+|---|---|---|
+| KI-19 | VM resolved a call's free-global head *after* its arguments | ✅ fixed 2026-07-30 |
+| KI-18 | a JIT deopt could re-run a `table-put` (effect duplication) | ✅ fixed 2026-07-30 |
+| KI-17 | `nest check` validated qualified names against its load set, not per-file reachability | ✅ fixed 2026-07-30 |
+| KI-16 | the LSP still matched the retired `defprotocol`/`defimpl` | ✅ fixed 2026-07-27 |
+| KI-15 | `impl` silently misregistered a **bare** record id | ✅ fixed 2026-07-27 |
+| KI-14 | RUNTIME collector re-walked a deep process's whole root stack every safepoint | ✅ fixed 2026-07-27 |
+| KI-13 | cross-module return-type inference blew up exponentially in branch count (checker hang) | ✅ fixed 2026-07-27 |
+| KI-12 | a frozen prelude global's inner handle resolved to the wrong object | ✅ fixed 2026-07-26 |
+| KI-11 | JIT tail-chain recursion escaped the native-depth cap | ✅ fixed 2026-07-26 |
+| KI-10 | `receive` compile cliff at the 13th arm | ☑️ no longer reproduces (2026-07-25) |
+| KI-9 | arity error from a closure shipped in a `spawn` body | ☑️ transient build artifact; not in committed code |
+| KI-8 | RUNTIME form-position table stranded by compaction | ✅ fixed 2026-07-03 |
+| KI-7 | declared `(sig …)` type-expressions corrupted by RUNTIME compaction | ✅ fixed 2026-07-03 |
+| KI-6 | `%isolate` snapshot/restore not RUNTIME-compaction-safe | ✅ fixed 2026-07-03 |
+| KI-5 | `nest test` OOMs — shared RUNTIME region accumulates every test file's code | ✅ fixed 2026-07-03 |
+| KI-4 | bitset stored as a non-UTF-8 `Value::Str` corrupts the GC on promote | ✅ fixed 2026-06-15 |
+| KI-3 | RUNTIME compaction strands live VM / tree-walker constants | ✅ fixed 2026-06-01 |
+| KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
+| KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
+
+**No open issues.** Every KI above is fixed, incidentally fixed, or a non-reproducing
+transient — each kept as a record with its regression test, so a recurrence is recognizable.
+
 ---
 
 ## KI-19 — the VM resolved a call's free-global head **after** its arguments · **FIXED 2026-07-30**
