@@ -11807,3 +11807,34 @@ failing test, where the runtime's own self-healing (deopt feedback → `BAILED`)
 converting a deopt storm into silent interpretation. The JIT-vs-no-JIT ratio is what
 surfaced it — `fib` gets 54× and `collatz` 40× from the JIT, but `nbody` only 3.2×,
 `bintree` 3.5× and `nqueens` 3.4×. That ratio per row is a cheap standing check.
+
+## 2026-07-30 — sealed-match exhaustiveness (ADR-187 part 2)
+
+Finished the second half of ADR-187: a `match` on a scrutinee typed as a sealed ability now
+warns for any member no clause handles. Two sound pieces.
+
+**The lattice fix (`annot::ability_type`).** A sealed ability's type was `Ty::union` over its
+member record shapes — but `Ty::union` widens a differing `fields` map away, so it collapsed to
+bare `map` and lost the member set (fine for rejecting non-maps, useless for exhaustiveness).
+Built it instead at its true set-theoretic denotation: a single `%{__id__: (:a | :b | …)}` with
+a keyword-lit union on `:__id__`. That's *equal as a set of values* to `⋃ₘ %{__id__: :m}`
+because each member shape is an open record constraining only `:__id__` — so it's a sound
+rewrite, not a widening. `Ty::union` stays untouched (field-wise-merging arbitrary records
+there would invent cross terms). Bonus: `(sig f (Shape -> …))` now rejects a non-member record
+precisely, not just a non-map.
+
+**The pass (`check::exhaustive`).** Reads the un-expanded forms (a `match` is gone after
+expansion), threading a `Ctx` — defn params seeded from their `sig`, `let` bindings — and at
+each match resolves the scrutinee via `expr_ty`, extracts the `:__id__` lit set, checks
+coverage. Sound by construction: unknown scrutinee / `:when` guard / any non-record,
+non-catch-all arm → defer to silence; an unguarded `(record NAME …)` covers NAME (over-counting
+a refutable inner only under-warns); ids compare by final `mod/NAME` segment.
+
+**The one non-obvious bug:** ADR-188 made `register_declared_sig` qualify each sig target to the
+file namespace, so inside a `(defmodule M …)` a defn's sig lives in `ctx.declared_sig` under
+`M/name`, not bare — `sig_of` had to try the qualified key against `ctx` (not just the heap
+store) or module code never resolved its scrutinee. Fixed; the walk now tracks the current ns.
+
+7 tests in `tests/ability_test.blsp` (missing-member warns; exhaustive / catch-all / untyped /
+guarded all silent; let threads the type; the message names the member). Whole-repo `nest
+check` stays zero sealed-match false positives.

@@ -60,22 +60,31 @@ fn last_seg(s: &str) -> &str {
     s.rsplit('/').next().unwrap_or(s)
 }
 
-/// A defn/def name's declared sig, trying the bare name (root ns / `ctx` record), the heap
-/// store, and — inside a `(defmodule M …)` — the qualified `M/name` the store actually keys.
-fn sig_of(heap: &Heap, ctx: &Ctx, name: value::Symbol, ns: Option<&str>) -> Option<crate::types::Sig> {
+/// A defn/def name's declared sig. `register_declared_sig` qualifies each `(sig …)` target to
+/// the file's namespace (ADR-188), so inside a `(defmodule M …)` the current file's sig for a
+/// bare `name` is stored in `ctx` under `M/name` — try that before the (cross-file) heap store.
+fn sig_of(
+    heap: &Heap,
+    ctx: &Ctx,
+    name: value::Symbol,
+    ns: Option<&str>,
+) -> Option<crate::types::Sig> {
+    let qualified = ns.map(|n| value::intern(&format!("{}/{}", n, value::symbol_name(name))));
     ctx.declared_sig(name)
+        .or_else(|| qualified.and_then(|q| ctx.declared_sig(q)))
         .or_else(|| declared_heap_sig(heap, name))
-        .or_else(|| {
-            ns.and_then(|n| {
-                let qualified = value::intern(&format!("{}/{}", n, value::symbol_name(name)));
-                declared_heap_sig(heap, qualified)
-            })
-        })
+        .or_else(|| qualified.and_then(|q| declared_heap_sig(heap, q)))
 }
 
 /// Recurse, threading `ctx` and the current namespace. Binding forms extend the scope; a
 /// `match` is analysed; a `quote`/`quasiquote` subtree is skipped (data / patterns, not code).
-fn walk(heap: &Heap, form: Value, ctx: &Ctx, ns: Option<&str>, out: &mut Vec<(Option<Pos>, String)>) {
+fn walk(
+    heap: &Heap,
+    form: Value,
+    ctx: &Ctx,
+    ns: Option<&str>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
     stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
         let Some(items) = list_items(heap, form) else {
             return;
@@ -119,7 +128,13 @@ fn walk(heap: &Heap, form: Value, ctx: &Ctx, ns: Option<&str>, out: &mut Vec<(Op
 /// sealed-ability-typed param resolves to its record-id set), then walk the body. Only the
 /// single-arity shape is seeded; a multi-clause `defn` falls through to a plain recurse
 /// (unseeded → scrutinees stay unknown → silent, still sound).
-fn walk_defn(heap: &Heap, items: &[Value], ctx: &Ctx, ns: Option<&str>, out: &mut Vec<(Option<Pos>, String)>) {
+fn walk_defn(
+    heap: &Heap,
+    items: &[Value],
+    ctx: &Ctx,
+    ns: Option<&str>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
     let (Some(&Value::Sym(name)), Some(&params_form)) = (items.get(1), items.get(2)) else {
         recurse_rest(heap, items, ctx, ns, out);
         return;
@@ -142,7 +157,13 @@ fn walk_defn(heap: &Heap, items: &[Value], ctx: &Ctx, ns: Option<&str>, out: &mu
 }
 
 /// `(def name (fn …))` — the shape `defn` expands to; seed the fn from `name`'s sig.
-fn walk_def(heap: &Heap, items: &[Value], ctx: &Ctx, ns: Option<&str>, out: &mut Vec<(Option<Pos>, String)>) {
+fn walk_def(
+    heap: &Heap,
+    items: &[Value],
+    ctx: &Ctx,
+    ns: Option<&str>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
     if let (Some(&Value::Sym(name)), Some(&val)) = (items.get(1), items.get(2)) {
         if let Some(vitems) = list_items(heap, val) {
             if matches!(vitems.first(), Some(&Value::Sym(h)) if value::symbol_is(h, "fn")) {
@@ -156,7 +177,13 @@ fn walk_def(heap: &Heap, items: &[Value], ctx: &Ctx, ns: Option<&str>, out: &mut
 }
 
 /// `(fn (params…) body…)` — params are binders (unknown type unless seeded); walk the body.
-fn walk_fn(heap: &Heap, items: &[Value], ctx: &Ctx, ns: Option<&str>, out: &mut Vec<(Option<Pos>, String)>) {
+fn walk_fn(
+    heap: &Heap,
+    items: &[Value],
+    ctx: &Ctx,
+    ns: Option<&str>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
     walk_fn_seeded(heap, items, ctx, ns, out, None);
 }
 
@@ -189,7 +216,13 @@ fn walk_fn_seeded(
 
 /// `(let (v1 e1 …) body…)` — bind each simple `sym` target to `expr_ty(rhs)` in the
 /// progressively-extended scope (a destructuring target binds nothing), then walk the body.
-fn walk_let(heap: &Heap, items: &[Value], ctx: &Ctx, ns: Option<&str>, out: &mut Vec<(Option<Pos>, String)>) {
+fn walk_let(
+    heap: &Heap,
+    items: &[Value],
+    ctx: &Ctx,
+    ns: Option<&str>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
     let mut scope = ctx.clone();
     if let Some(&binds_form) = items.get(1) {
         if let Some(binds) = list_items(heap, binds_form) {
@@ -211,7 +244,13 @@ fn walk_let(heap: &Heap, items: &[Value], ctx: &Ctx, ns: Option<&str>, out: &mut
     }
 }
 
-fn recurse_rest(heap: &Heap, items: &[Value], ctx: &Ctx, ns: Option<&str>, out: &mut Vec<(Option<Pos>, String)>) {
+fn recurse_rest(
+    heap: &Heap,
+    items: &[Value],
+    ctx: &Ctx,
+    ns: Option<&str>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
     for &it in items.iter().skip(1) {
         walk(heap, it, ctx, ns, out);
     }
