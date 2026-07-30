@@ -385,6 +385,12 @@ never a false positive.
   registry calls — the same reason `sig` and the hygiene lint read un-expanded). An
   impl/claim of an *unknown* interface is left alone (it may be declared in a file
   this one doesn't import) — no false positive.
+- ✅ **Ability bounds** (ADR-181/186). A sealed ability name *is* a type (the union of its
+  members), so a `sig` parameter typed with it is a bound — `(sig draw (Shape -> string))`
+  ≡ Rust's `T: Shape`, and `(and A B)` is a multi-ability bound (`T: A + B`). No separate
+  bounds syntax: naming the ability (or intersecting several) *is* the bound, checked at every
+  call site. An *open* ability is permissive (`any`) — its late impls may cover any value, so
+  no argument is soundly rejectable on the type; the safety falls to the op call site below.
 - ✅ **Missing-impl warning at ability call sites** (`check/protocol.rs`,
   `check_ability_calls`). Where the checker can determine an argument's dispatch
   identity *statically* — a literal's `type-of` kind, a direct `defrecord*`
