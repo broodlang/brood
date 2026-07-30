@@ -367,7 +367,9 @@ fn unrequired_module(heap: &Heap, ctx: &Ctx, s: Symbol) -> Option<String> {
 
 /// The KI-17 reachability diagnostic text for a reference to unrequired `module`.
 fn unrequired_msg(module: &str) -> String {
-    format!("qualified reference to unrequired module: {module} (add (require '{module}) to this file)")
+    format!(
+        "qualified reference to unrequired module: {module} (add (require '{module}) to this file)"
+    )
 }
 
 /// True when a call whose head is `s` *evaluates its arguments as values* — `s`

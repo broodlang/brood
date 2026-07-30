@@ -351,7 +351,9 @@ fn collect_required_modules(
     forms: &[Value],
     file_ns: Option<Symbol>,
 ) -> HashSet<String> {
-    let mut mods: HashSet<String> = extract_import_module_names(heap, forms).into_iter().collect();
+    let mut mods: HashSet<String> = extract_import_module_names(heap, forms)
+        .into_iter()
+        .collect();
     if let Some(ns) = file_ns {
         mods.insert(value::symbol_name(ns));
     }
@@ -369,7 +371,9 @@ fn collect_required_modules(
 pub fn module_direct_requires(heap: &Heap, forms: &[Value]) -> (Option<String>, Vec<String>) {
     let file_ns = crate::eval::macros::file_ns(heap, forms);
     let own = file_ns.map(value::symbol_name);
-    let mut deps: HashSet<String> = extract_import_module_names(heap, forms).into_iter().collect();
+    let mut deps: HashSet<String> = extract_import_module_names(heap, forms)
+        .into_iter()
+        .collect();
     for &form in forms {
         collect_require_targets(heap, form, &mut deps);
     }
