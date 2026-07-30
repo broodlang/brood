@@ -1,0 +1,50 @@
+;;; Regression guard: a *nested* VM activation must not overflow the native stack.
+;;;
+;;; The VM's ordinary calls cost no Rust stack — they push heap frames inside one
+;;; `vm_run_bc` loop, capped by `MAX_BC_FRAMES`, which is why 200 000-deep non-tail
+;;; recursion returns cleanly. But a `try` body, an `&optional` default and every native
+;;; callback re-enter through `exec_value` → `exec_call` → `vm_apply` → `vm_run_bc`,
+;;; adding real Rust frames per Brood level. Nothing on that path reaches `eval`, so the
+;;; tree-walker's byte guard never saw it: `(defn f (n) (if (= n 0) 0 (try (+ 1 (f (- n 1)))
+;;; (catch e 0))))` at n=200000 died on the guard page — `fatal runtime error: stack
+;;; overflow, aborting`, exit 134, core dumped.
+;;;
+;;; That failure mode is the reason this matters beyond one program: a SIGSEGV takes the
+;;; **OS process**, not the green process, so `try`/`catch` cannot observe it and no
+;;; supervisor can restart it. `vm_apply` now probes the remaining native stack and raises
+;;; the ordinary catchable depth error instead (the VM sibling of the JIT's KI-14 fix).
+;;;
+;;; The exact depth reached is deliberately NOT asserted — it is a function of frame size
+;;; and the reserve, and pinning it would make this a change-detector. What must hold is:
+;;; the program finishes, the error is catchable, and the non-`try` path still recurses
+;;; deep on heap frames.
+
+(defmodule vm-nested-stack-guard-test (:use test))
+
+(check-allow :non-tail-recursion
+  ;; The `try` shape: each level re-enters the VM natively.
+  (defn nsg-try (n) (if (= n 0) 0 (try (+ 1 (nsg-try (- n 1))) (catch e 0))))
+  ;; The same recursion with no `try` — stays in heap frames.
+  (defn nsg-plain (n) (if (= n 0) 0 (+ 1 (nsg-plain (- n 1)))))
+  ;; The same `try` re-entry, but re-raising instead of swallowing, so the depth error
+  ;; escapes to the caller — that is what makes catchability observable.
+  (defn nsg-raise (n) (if (= n 0) 0 (+ 1 (try (nsg-raise (- n 1)) (catch e (throw e)))))))
+
+(describe "nested-activation native stack guard"
+  (test "deep recursion through a try body terminates instead of aborting"
+    ;; Before the fix this never returned — the OS process died with SIGSEGV.
+    (let (out (nsg-try 200000))
+      (is (int? out))
+      ;; The inner `catch` swallowed the depth error, so the count is the depth the
+      ;; guard allowed — bounded well under the requested 200 000.
+      (is (> out 0))
+      (is (< out 200000))))
+
+  (test "the depth error is catchable, not fatal"
+    ;; `nsg-raise` re-raises, so the depth error propagates out to this `try` — the
+    ;; whole claim: an ordinary catchable error, where a SIGSEGV was unobservable.
+    (assert= :caught (try (nsg-raise 200000) (catch e :caught))))
+
+  (test "non-tail recursion without a try still uses heap frames and goes deep"
+    ;; The guard must not have narrowed the ordinary VM path.
+    (assert= 200000 (nsg-plain 200000))))

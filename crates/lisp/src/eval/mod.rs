@@ -1649,6 +1649,29 @@ pub(crate) fn stack_depth_error(used: usize) -> LispError {
     )
 }
 
+/// Native-stack exhaustion at a **nested activation** (`vm_apply`) — the VM's
+/// counterpart to [`stack_depth_error`], which guards the tree-walker.
+///
+/// Same catchable [`STACK_DEPTH_EXCEEDED`] code, different remedy in the hint:
+/// this one is not the `BROOD_STACK_BUDGET` byte budget (that guard measures
+/// bytes since the outermost `eval`, and a VM re-entry never reaches `eval`), it
+/// is real Rust stack running out. Raising the budget cannot help; restructuring
+/// the recursion can.
+pub(crate) fn native_stack_error(remaining: usize) -> LispError {
+    LispError::runtime(format!(
+        "recursion too deep: {remaining} bytes of native stack left, under the \
+         {}-byte reserve — non-tail recursion through a `try` body, an `&optional` \
+         default, or a native callback re-enters the VM on the Rust stack",
+        crate::process::NATIVE_STACK_MARGIN_BYTES
+    ))
+    .with_code(crate::error::error_codes::STACK_DEPTH_EXCEEDED)
+    .with_hint(
+        "rewrite as a tail-recursive loop (proper tail calls are O(1) stack), or move the \
+         recursion out of the `try` body — a plain VM call uses heap frames, not the \
+         native stack, and recurses far deeper",
+    )
+}
+
 /// "memory limit exceeded …" — the ADR-043 soft-memory backstop.
 /// "process heap limit exceeded …" — this process's live heap stayed over its
 /// own `(process-flag :max-heap n)` cap after a collection. Catchable; uncaught

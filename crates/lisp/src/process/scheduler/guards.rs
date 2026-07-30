@@ -163,6 +163,43 @@ impl Drop for GcBlockGuard {
 /// Tunable; bump if a feature lands with heavier frames.
 pub const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
+/// Native-stack reserve kept free for one more *nested activation* — see
+/// [`native_stack_headroom_ok`]. Enough for the deepest single re-entry chain
+/// (`vm_apply` → `vm_run_bc` → `exec_chunk` → a native callback) plus the frames
+/// that build and unwind the error itself.
+pub const NATIVE_STACK_MARGIN_BYTES: usize = 512 * 1024;
+
+/// Is there room on the **native** (Rust) stack for another nested activation?
+///
+/// [`stack_overflow_check`] guards the *tree-walker*, whose recursion it can see:
+/// it is called from `eval` and measures bytes since that quantum's outermost
+/// `eval`. The bytecode VM's ordinary calls consume no native stack at all — they
+/// push heap frames inside one `vm_run_bc` loop, which is why 200 000-deep
+/// non-tail recursion returns cleanly and is capped by `MAX_BC_FRAMES`.
+///
+/// But some VM paths **re-enter natively**: a `try` body, an `&optional` default,
+/// and every native callback (`map`/`binding`/`%isolate`) run through
+/// `exec_value` → `exec_call` → `vm_apply` → `vm_run_bc`, adding real Rust frames
+/// per Brood level. Nothing on that path reaches `eval`, so the byte guard never
+/// fired and a recursive `try` body died on the guard page — a `SIGSEGV` that
+/// `try`/`catch` cannot observe and no supervisor can restart, because the OS
+/// process goes, not the green process. This is the VM sibling of the JIT's
+/// KI-14 `stack_headroom_ok` fix.
+///
+/// Probing the *remaining* stack, rather than counting frames or bytes-since-a-base,
+/// is the honest measure here for the same reason it was in the JIT: once a chain
+/// re-enters through a native frame, no counter this side of it reflects the true
+/// nesting, and frame weight varies far too much to convert to a count.
+///
+/// `None` (platform can't report) is treated as "fine" — the pre-existing behaviour.
+#[inline]
+pub fn native_stack_headroom_ok() -> bool {
+    match stacker::remaining_stack() {
+        Some(left) => left > NATIVE_STACK_MARGIN_BYTES,
+        None => true,
+    }
+}
+
 /// Stack-budget guard against runaway *non-tail* recursion (ADR-043). The
 /// evaluator is a native tree-walker: every nested `eval`/`macroexpand` frame
 /// (i.e. every level of non-tail recursion) consumes real Rust stack, and an
