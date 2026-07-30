@@ -578,6 +578,65 @@ resolve in the advisory checker. Returns the project root."
     (append (fold (fn (a d) (append a (project-collect-sources d))) nil src-dirs)
       (fold (fn (a d) (append a (project--collect-tests d))) nil test-dirs))))
 
+;; ── KI-17 reachability: each file's transitive require-closure ────────────────
+;; A file that names `mod/foo` must be able to REACH `mod`; otherwise the reference
+;; resolves only by load-order luck (another file pulled `mod` in first) and breaks
+;; the moment that file moves — the KI-17 bug (docs/known-issues.md). `check-file`
+;; flags such a reference, but only when told which modules the file may reach. That
+;; set must be the *transitive* closure of the file's own requires (a file reaches
+;; `mod` if it, or a module it requires, recursively, `:use`s / `(require 'mod)`s it):
+;; e.g. a test that `(:use editor/treesit)` legitimately names `face/…` because
+;; treesit itself requires `editor/face`. Only the whole-project driver sees every
+;; header, so it builds the module→direct-deps graph (one native `%module-direct-requires`
+;; parse per file) and closes it per file, then hands each file's set to `check-file`.
+
+;; {file -> {:module name :requires [dep …]}} for every file — one native parse each.
+(defn project--module-infos (files)
+  (fold (fn (acc f)
+          (map-assoc acc f
+            (try (%module-direct-requires f) (catch e {:module nil :requires []}))))
+    {} files))
+
+;; The transitive set of module names reachable from `seeds` (a list/vector of module
+;; names) over `module->deps` (module-name -> [direct-dep …]). Breadth-first; a module
+;; absent from the graph is treated as a leaf.
+(defn project--close-modules (seeds module->deps)
+  (letrec (go (fn (frontier seen)
+                (if (empty? frontier)
+                  seen
+                  (let (m (first frontier))
+                    (if (contains? seen m)
+                      (go (rest frontier) seen)
+                      (go (append (rest frontier) (or (map-get module->deps m nil) []))
+                        (conj seen m)))))))
+    (go seeds #{})))
+
+;; {file -> [reachable-module-name …]} : each file's transitive require-closure
+;; (including its own module), built from the whole `files` universe. Passed to
+;; `check-file` as its KI-17 reachability set.
+(defn project--require-closures (files)
+  (let (infos (project--module-infos files)
+        module->deps (fold (fn (m kv)
+                             (let ([_f info] kv
+                                   name (map-get info :module nil))
+                               (if name
+                                 (map-assoc m name (map-get info :requires nil))
+                                 m)))
+                       {} infos))
+    (fold (fn (acc kv)
+            (let ([f info] kv
+                  own (map-get info :module nil)
+                  closed (project--close-modules (map-get info :requires nil) module->deps)
+                  with-own (if own (conj closed own) closed))
+              (map-assoc acc f (vec with-own))))
+      {} infos)))
+
+;; Pair each file with its closure (from the map) — the `[file closure]` element the
+;; parallel check ops carry, so the closure rides along as DATA to each worker (never a
+;; shipped closure value; see `project--pfold-run`).
+(defn project--with-closures (files closures)
+  (map (fn (f) [f (map-get closures f nil)]) files))
+
 ;; (check-project) — advisory pre-flight: run `check-file` over every source +
 ;; test file in the project, printing each warning to stderr as a GNU
 ;; `FILE:LINE:COL: warning: …` line (editor-parseable, matches `brood --check`).
@@ -770,13 +829,18 @@ resolve in the advisory checker. Returns the project root."
 ;; The `:check` op (runs in a worker): check every file in `chunk`, PRINT each
 ;; file's warnings, return the GATING count. A global (not a shipped closure) so
 ;; the worker resolves it through the global table — see `project--pfold-run`.
+;; `chunk` is a list of `[file closure]` pairs (the closure = the file's KI-17
+;; reachability set, carried as data so it reaches the worker).
 (defn project--check-chunk (chunk)
-  (fold (fn (k f) (fold project--tally-warning k (check-file f))) 0 chunk))
+  (fold (fn (k pair)
+          (let ([f cl] pair)
+            (fold project--tally-warning k (check-file f cl))))
+    0 chunk))
 
 ;; The from-scratch parallel path: fan `check-file` (print-in-worker) across the
 ;; pool. Used when the cache is off, absent, or the project is over the file cap.
-(defn project--check-files-fresh (files)
-  (project--pfold-files files
+(defn project--check-files-fresh (files closures)
+  (project--pfold-files (project--with-closures files closures)
     :check (fn (n c) (+ n c))
     (fn (n chunk reason)
       (eprintln (str "warning: check worker died on " (count chunk) " file(s): " (pr-str reason)))
@@ -796,23 +860,29 @@ resolve in the advisory checker. Returns the project root."
 ;; cold run pays a one-time full sequential check (parallel dep-capture is deferred —
 ;; it needs the recorder moved into the per-process context). Manifest = `{path ->
 ;; [mtime warnings dep-keys fp]}`, merged like the extract cache (anti-thrash).
-(defn project--check-files-cached (files root)
+(defn project--check-files-cached (files root closures)
   (let (cache (project--read-cache root "checks")
         parts (fold
                 ; else re-check
                 (fn (acc p)
                   (let ([reuse recheck] acc
-                        c (map-get cache p nil))
+                        c (map-get cache p nil)
+                        cl (map-get closures p nil))
+                    ;; Reuse iff mtime + dep-fingerprint AND the KI-17 closure (5th
+                    ;; entry field) are unchanged — a closure shift (another file's
+                    ;; requires changed) can add/remove a reachability warning without
+                    ;; this file's mtime moving, so it must invalidate the cache too.
                     (if (and c
-                          (= (nth c 0) (file-mtime p)) (= (check-deps-fp (nth c 2)) (nth c 3)))
-                      ; unchanged file + deps → reuse
+                          (= (nth c 0) (file-mtime p)) (= (check-deps-fp (nth c 2)) (nth c 3))
+                          (= (nth c 4 nil) cl))
+                      ; unchanged file + deps + closure → reuse
                       [(map-assoc reuse p c) recheck]
-                      [reuse (cons p recheck)])))
+                      [reuse (cons [p cl] recheck)])))
                 [{} nil] files)
         [reuse recheck] parts
         ;; re-check the dirty set in PARALLEL across the worker pool — safe now that
         ;; the dependency recorder is per-process (Heap::check_dep_rec). Each entry is
-        ;; [mtime warnings dep-keys fp].
+        ;; [mtime warnings dep-keys fp closure].
         fresh (fold (fn (m pair) (let ([p e] pair) (map-assoc m p e)))
                 {} (project--pcheck-deps recheck))
         entries (fold (fn (m kv) (let ([p e] kv) (map-assoc m p e))) reuse fresh)
@@ -825,12 +895,20 @@ resolve in the advisory checker. Returns the project root."
     n))
 
 (defn project--check-files (files root)
-  (cond
-    (= (getenv "BROOD_NO_CHECK") "1") 0
-    ;; No cache when it's disabled, there's no project root, or the project is over
-    ;; the file cap (the manifest read would rival re-checking) — parallel fresh path.
-    (or (project--cache-off?) (nil? root) (>= (count files) (project--cache-max-files))) (project--check-files-fresh files)
-    else (project--check-files-cached files root)))
+  (if (= (getenv "BROOD_NO_CHECK") "1")
+    0
+    ;; Build the KI-17 reachability closures from the WHOLE project (every file's
+    ;; header), not just `files` — a `nest check FILE` still needs the full graph to
+    ;; resolve `FILE`'s transitive requires, else a transitively-reached module would
+    ;; false-positive. Outside a project (no root) the checked files are the universe;
+    ;; there the lint is inert anyway (only the file's own requires are loaded).
+    (let (closures (project--require-closures (if root (project--all-files root) files)))
+      (cond
+        ;; No cache when it's disabled, there's no project root, or the project is over
+        ;; the file cap (the manifest read would rival re-checking) — parallel fresh path.
+        (or (project--cache-off?) (nil? root) (>= (count files) (project--cache-max-files)))
+          (project--check-files-fresh files closures)
+        else (project--check-files-cached files root closures)))))
 
 ;; Make sure the project is set up and all its sources are loaded — the
 ;; precondition for the checker to resolve cross-file names through the
@@ -862,17 +940,18 @@ resolve in the advisory checker. Returns the project root."
       ;; cheap thread-local check — otherwise), so a large project's `check`
       ;; reports live instead of one silent wait.
       (let (files (project--all-files root)
+            closures (project--require-closures files)
             total (count files))
-        (project--check-fold files total 0 nil)))))
+        (project--check-fold files closures total 0 nil)))))
 
-(defn project--check-fold (files total done acc)
+(defn project--check-fold (files closures total done acc)
   (if (nil? files)
     acc
     (let (f (first files)
-          diags (check-file-structured f)
+          diags (check-file-structured f (map-get closures f nil))
           done2 (inc done))
       (%mcp-progress done2 total (str "checked " (path-basename f)))
-      (project--check-fold (rest files) total done2 (append-two diags acc)))))
+      (project--check-fold (rest files) closures total done2 (append-two diags acc)))))
 
 ;; --- duplicate-global detection (flat namespace, ADR-019) --------------------
 ;; The project shares one flat global table: exactly one binding per name across
@@ -1075,16 +1154,18 @@ resolve in the advisory checker. Returns the project root."
         [path [mt counts privs def-names]]))
     chunk))
 
-;; The `:check-deps` op (runs in a worker): for each file, run `check-file-deps` and
-;; return `[path [mtime warnings dep-keys fp]]` — the Phase-2 check-result cache
-;; entry. Safe in a worker now that the dependency recorder is per-process
-;; (`Heap::check_dep_rec`), so dep-capture parallelises across the pool. mtime read
-;; BEFORE the check (same race-safety as `:scan-entries`).
+;; The `:check-deps` op (runs in a worker): for each `[path closure]` pair, run
+;; `check-file-deps` and return `[path [mtime warnings dep-keys fp closure]]` — the
+;; Phase-2 check-result cache entry (the closure is the KI-17 reachability set, stored
+;; so a closure shift invalidates the entry). Safe in a worker now that the dependency
+;; recorder is per-process (`Heap::check_dep_rec`), so dep-capture parallelises across
+;; the pool. mtime read BEFORE the check (same race-safety as `:scan-entries`).
 (defn project--check-deps-chunk (chunk)
-  (map (fn (p)
-         (let (mt (file-mtime p)
-               r (check-file-deps p))
-           [p [mt (nth r 0) (nth r 1) (nth r 2)]]))
+  (map (fn (pair)
+         (let ([p cl] pair
+               mt (file-mtime p)
+               r (check-file-deps p cl))
+           [p [mt (nth r 0) (nth r 1) (nth r 2) cl]]))
     chunk))
 
 ;; ── incremental check cache (Phase 1, ADR-119) ───────────────────────────────
@@ -1099,7 +1180,8 @@ resolve in the advisory checker. Returns the project root."
 ;; cache carries a `(build-id)`+version stamp and is dropped on mismatch (the
 ;; extract depends on the Rust `parse-source`, so it isn't portable across binaries).
 ;; Opt out with `BROOD_NO_CHECK_CACHE=1`.
-(def *check-cache-version* "v1")
+; v2: check-result entries gained a 5th field, the KI-17 require-closure (ADR-189).
+(def *check-cache-version* "v2")
 (defn project--cache-stamp () (str (build-id) "|" *check-cache-version*))
 (defn project--cache-off? () (= (getenv "BROOD_NO_CHECK_CACHE") "1"))
 

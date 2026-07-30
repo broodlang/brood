@@ -263,6 +263,20 @@ fn is_ns_header(heap: &Heap, form: Value) -> bool {
 /// Parse the `(defmodule … (:use mod) …)` header from the *unexpanded* `forms`
 /// and return the module names explicitly listed in `:use` clauses.
 fn extract_use_module_names(heap: &Heap, forms: &[Value]) -> Vec<String> {
+    extract_clause_modules(heap, forms, &["use"])
+}
+
+/// Every module named in an *import* clause of the header — both `(:use mod)` and
+/// `(:use-internals mod)`, either of which loads `mod`. Used for the KI-17 reachability
+/// set (a `:use-internals` module is genuinely reachable). Kept separate from
+/// [`extract_use_module_names`], whose `:use`-only view backs the unused-import lint.
+fn extract_import_module_names(heap: &Heap, forms: &[Value]) -> Vec<String> {
+    extract_clause_modules(heap, forms, &["use", "use-internals"])
+}
+
+/// The module names listed by any header clause whose keyword is in `keywords`
+/// (e.g. `:use` / `:use-internals`), read from the *unexpanded* `(defmodule …)` form.
+fn extract_clause_modules(heap: &Heap, forms: &[Value], keywords: &[&str]) -> Vec<String> {
     for &form in forms {
         if !is_ns_header(heap, form) {
             continue;
@@ -277,10 +291,10 @@ fn extract_use_module_names(heap: &Heap, forms: &[Value]) -> Vec<String> {
         let mut cur = clauses;
         while let Value::Pair(p) = cur {
             let (clause, next) = heap.pair(p);
-            // Each (:use mod …) clause starts with the :use keyword.
+            // Each (:use mod …) / (:use-internals mod …) clause starts with its keyword.
             if let Some(items) = list_items(heap, clause) {
                 if let Some(Value::Keyword(kw_sym)) = items.first() {
-                    if value::symbol_is(*kw_sym, "use") {
+                    if keywords.iter().any(|k| value::symbol_is(*kw_sym, k)) {
                         if let Some(&Value::Sym(mod_sym)) = items.get(1) {
                             result.push(value::symbol_name(mod_sym).to_string());
                         }
@@ -292,6 +306,129 @@ fn extract_use_module_names(heap: &Heap, forms: &[Value]) -> Vec<String> {
         return result;
     }
     Vec::new()
+}
+
+/// The module name a top-level `(require …)` targets, if any — `(require 'mod)`,
+/// `(require "mod")`, or `(require 'mod :as m)`. `None` for a non-require form or a
+/// dynamic require whose module argument isn't a literal symbol/string (harmless: an
+/// un-added prefix can only *add* a warning, so a dynamic require that this misses is
+/// caught by the `raw_qualified` guard / the sweep, never a silent unsoundness the
+/// other way).
+fn require_target(heap: &Heap, form: Value) -> Option<String> {
+    let items = list_items(heap, form)?;
+    match items.first() {
+        Some(&Value::Sym(h)) if value::symbol_is(h, "require") => {}
+        _ => return None,
+    }
+    match *items.get(1)? {
+        // `'mod` reads as `(quote mod)`.
+        arg @ Value::Pair(_) => {
+            let inner = list_items(heap, arg)?;
+            match (inner.first(), inner.get(1)) {
+                (Some(&Value::Sym(q)), Some(&Value::Sym(m))) if value::symbol_is(q, "quote") => {
+                    Some(value::symbol_name(m))
+                }
+                _ => None,
+            }
+        }
+        Value::Sym(m) => Some(value::symbol_name(m)),
+        Value::Str(id) => Some(heap.string(id).to_string()),
+        _ => None,
+    }
+}
+
+/// The KI-17 reachability set — module prefixes the file makes reachable *itself*:
+/// every `(:use M)` in its header, every `(require 'M)` **anywhere** in the file
+/// (including one nested in a function body — `project.blsp` requires `test`/`package`
+/// lazily inside the functions that use them, to keep startup lean), and its own
+/// namespace. A file that requires `M` *somewhere* is treated as reaching `M` for the
+/// whole file — an over-approximation, which is the sound direction (it can only
+/// *suppress* a warning, never invent one). Direct requires only, not their transitive
+/// closure; matching the discipline that a file `require`s what it names. See
+/// [`Ctx::required_mods`] and `walk::unrequired_module`.
+fn collect_required_modules(
+    heap: &Heap,
+    forms: &[Value],
+    file_ns: Option<Symbol>,
+) -> HashSet<String> {
+    let mut mods: HashSet<String> = extract_import_module_names(heap, forms).into_iter().collect();
+    if let Some(ns) = file_ns {
+        mods.insert(value::symbol_name(ns));
+    }
+    for &form in forms {
+        collect_require_targets(heap, form, &mut mods);
+    }
+    mods
+}
+
+/// A file's own module name (from its `(defmodule …)` header, or `None`) and the module
+/// names it **directly** pulls in — `(:use …)` / `(:use-internals …)` clauses plus every
+/// `(require 'M)` anywhere in the file. The edge list the whole-project driver
+/// (`std/tool/project.blsp`) closes transitively into each file's KI-17 reachability set,
+/// then feeds back to [`check_file_ext`]. Own ns is excluded from `requires`.
+pub fn module_direct_requires(heap: &Heap, forms: &[Value]) -> (Option<String>, Vec<String>) {
+    let file_ns = crate::eval::macros::file_ns(heap, forms);
+    let own = file_ns.map(value::symbol_name);
+    let mut deps: HashSet<String> = extract_import_module_names(heap, forms).into_iter().collect();
+    for &form in forms {
+        collect_require_targets(heap, form, &mut deps);
+    }
+    if let Some(ref n) = own {
+        deps.remove(n);
+    }
+    let mut deps: Vec<String> = deps.into_iter().collect();
+    deps.sort(); // deterministic order (no Date/random in the checker)
+    (own, deps)
+}
+
+/// Add every `(require 'M)` target reachable in `form` — descending through list,
+/// vector, and map structure so a `require` nested in any function body is found.
+fn collect_require_targets(heap: &Heap, form: Value, out: &mut HashSet<String>) {
+    // Guard the deep-form recursion the same way `count_defs` does — a pathologically
+    // nested source must not overflow the checker's stack (tests/…deep_forms).
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        if let Some(m) = require_target(heap, form) {
+            out.insert(m);
+        }
+        match form {
+            Value::Pair(pid) => {
+                let (car, cdr) = heap.pair(pid);
+                collect_require_targets(heap, car, out);
+                collect_require_targets(heap, cdr, out);
+            }
+            Value::Vector(vid) => {
+                for v in heap.vector(vid).iter() {
+                    collect_require_targets(heap, *v, out);
+                }
+            }
+            Value::Map(mid) => {
+                for (k, v) in heap.map_entries(mid).iter() {
+                    collect_require_targets(heap, *k, out);
+                    collect_require_targets(heap, *v, out);
+                }
+            }
+            _ => {}
+        }
+    })
+}
+
+/// Every qualified symbol *name* (`"mod/name"`, module segment non-empty) appearing
+/// anywhere in the un-expanded `forms` — the user-written references. Over-approximate
+/// (includes quoted data and binder positions), which is sound for the KI-17 lint: it
+/// only *permits* a warning the walk independently decides to emit (and the walk already
+/// excludes quotes/binders), so a name present only after macro expansion is treated as
+/// macro-injected and never flagged.
+fn collect_raw_qualified(heap: &Heap, forms: &[Value]) -> HashSet<String> {
+    collect_all_syms(heap, forms)
+        .into_iter()
+        .filter_map(|s| {
+            let n = value::symbol_name(s);
+            match n.rfind('/') {
+                Some(slash) if slash > 0 => Some(n),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// Populate the current file's import table from a `(defmodule … (:use …)/(:alias …))`
@@ -494,6 +631,21 @@ pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
 /// its un-expanded shape — the eval path will surface the same parse-time
 /// error later anyway, so the checker just stays quiet there.
 pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)> {
+    check_file_ext(heap, forms, &[])
+}
+
+/// [`check_file`] with an explicit **KI-17 reachability set** — the file's *transitive*
+/// require-closure (module names), computed by the whole-project driver
+/// (`std/tool/project.blsp`, which alone sees every file's header). Unioned with the
+/// file's own direct requires (which `check_file_ext` derives from `forms`), it becomes
+/// [`Ctx::required_mods`]: a user-written `mod/name` whose `mod` is outside the closure
+/// resolves only by load-order luck and is flagged. Pass `&[]` for the single-file /
+/// LSP path, where the un-required module simply isn't loaded and the lint is inert.
+pub fn check_file_ext(
+    heap: &mut Heap,
+    forms: &[Value],
+    extra_required: &[String],
+) -> Vec<(Option<Pos>, String)> {
     let mut out = Vec::new();
     // Block the copying GC for the whole check: this fn holds LOCAL handles in
     // Rust `Vec`s (`forms`/`expanded`) *across* the `eval` of `(require …)` forms
@@ -622,6 +774,16 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         // per file was the residual O(files²) after the header-eval redesign — an O(1) `Arc`
         // clone on all but the first file of a whole-project check.
         ctx.set_known_ns_arc(heap.known_ns_prefixes());
+        // KI-17: arm the unrequired-module lint. `required_mods` is what THIS file
+        // pulls in (its `:use`/`require` + own ns); `raw_qualified` restricts the lint
+        // to references the user literally wrote. In a whole-project check every module
+        // is bound image-wide, so a user-written `mod/name` whose `mod` is absent here
+        // resolves only by load-order luck — the walk flags it. (In single-file mode an
+        // un-required module isn't bound at all, so the lint is naturally inert there.)
+        let mut required = collect_required_modules(heap, &forms, file_ns);
+        required.extend(extra_required.iter().cloned());
+        ctx.set_required_mods(required);
+        ctx.set_raw_qualified(collect_raw_qualified(heap, &forms));
         for &form in &expanded {
             collect_def_names(heap, form, &mut ctx);
         }
@@ -937,8 +1099,17 @@ pub fn check_file_with_deps(
     heap: &mut Heap,
     forms: &[Value],
 ) -> (Vec<(Option<Pos>, String)>, Value) {
+    check_file_with_deps_ext(heap, forms, &[])
+}
+
+/// [`check_file_with_deps`] with the KI-17 reachability set (see [`check_file_ext`]).
+pub fn check_file_with_deps_ext(
+    heap: &mut Heap,
+    forms: &[Value],
+    extra_required: &[String],
+) -> (Vec<(Option<Pos>, String)>, Value) {
     deps::begin_record(heap);
-    let warnings = check_file(heap, forms);
+    let warnings = check_file_ext(heap, forms, extra_required);
     let dep_keys = deps::take_dep_keys(heap);
     (warnings, dep_keys)
 }

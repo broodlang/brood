@@ -11838,3 +11838,37 @@ store) or module code never resolved its scrutinee. Fixed; the walk now tracks t
 7 tests in `tests/ability_test.blsp` (missing-member warns; exhaustive / catch-all / untyped /
 guarded all silent; let threads the type; the message names the member). Whole-repo `nest
 check` stays zero sealed-match false positives.
+
+## 2026-07-30 (cont.) — per-file require-reachability lint closes KI-17 (ADR-189)
+
+KI-17: `nest check` loaded the whole project image before checking, so a qualified reference
+`mod/name` resolved for *every* file — even one that never `require`s `mod`. A file naming
+`path/basename` without `(require 'path)` passed clean, then blew up at runtime the moment the
+sibling that happened to load `path` first moved. Fixed by teaching the checker per-file
+**reachability**.
+
+**Mechanism / policy split.** `check-file{,-deps,-structured}` gained an optional reachability
+set (module names the file may name qualified); `check_file_ext` unions it with the file's own
+direct requires (`:use` / `:use-internals` / any nested `(require 'M)`) + its own ns and flags a
+**user-written** `mod/name` whose `mod` is outside it. Only the whole-project driver sees every
+header, so `std/tool/project.blsp` builds the module→direct-requires graph once (new native
+`%module-direct-requires`), closes it **transitively** per file, and threads each file's set
+through the fresh / cached / structured paths as **data** in the parallel `[file closure]`
+chunks.
+
+**Soundness, driven by the sweep.** Direct-requires-only lit 18 warnings on `std/`+`tests/`, 17
+false. The transitive closure clears legitimately-transitive references (a test `(:use
+editor/treesit)` naming `face/…`, since treesit requires `editor/face`); a `raw_qualified` guard
+limits the lint to references the user *literally wrote* (never a macro-injected one); and it's
+inert in single-file/LSP/REPL mode (an un-required module isn't loaded, so the ordinary unbound
+check covers it). The lone genuine residue — `coverage` naming `project/…`, uncircle-able since
+project requires coverage — got a *lazy* runtime `(require 'project)` in the one function that
+uses it (idempotent, non-circular, the discipline the lint enforces). Net: **zero** false
+positives across the whole tree; the lint fires precisely on the real bug (verified end-to-end
+with a bad `nest check` project + a Rust regression test).
+
+Two implementation notes: `collect_require_targets` needed the same `stacker::maybe_grow` guard
+the rest of the checker uses (a pathologically deep form overflowed it); and the check-result
+cache entry gained a 5th field (the closure), so a closure shift re-checks the dependent even
+when its own mtime didn't move — cache version v1→v2. Docs: KI-17 → FIXED, ADR-189, `check-allow
+:unrequired` category.

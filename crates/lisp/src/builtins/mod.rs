@@ -2226,23 +2226,32 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(
         heap,
         "check-file",
-        Arity::exact(1),
-        Sig::new(vec![string], list_ty),
+        Arity::range(1, 2),
+        // 2nd arg (optional required-mods) is a list OR vector of module names — `any`
+        // so a vector closure doesn't trip the arg-type lint on our own callers.
+        Sig::with_rest(vec![string], any, list_ty),
         check_file_builtin,
     );
     def(
         heap,
         "check-file-structured",
-        Arity::exact(1),
-        Sig::new(vec![string], list_ty),
+        Arity::range(1, 2),
+        Sig::with_rest(vec![string], any, list_ty),
         check_file_structured,
     );
     def(
         heap,
         "check-file-deps",
+        Arity::range(1, 2),
+        Sig::with_rest(vec![string], any, any),
+        check_file_deps,
+    );
+    def(
+        heap,
+        "%module-direct-requires",
         Arity::exact(1),
         Sig::new(vec![string], any),
-        check_file_deps,
+        module_direct_requires,
     );
     def(
         heap,
@@ -3017,9 +3026,10 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("table-drop", &["t"], "Remove table t from the registry, freeing its store. Idempotent; returns true if it existed. Other handles to t then error on use."),
     ("type-of", &["x"], "The runtime type of x as a keyword (:int, :string, :pair, ...)."),
     ("check", &["form"], "Advisory type-check a quoted form: a list of warning strings, or nil. Never raises."),
-    ("check-file", &["path"], "Advisory type-check every top-level form in the file at path: a list of `path:line:col: warning: …` strings, or nil. Does not evaluate the file."),
-    ("check-file-structured", &["path"], "Like check-file but returns a list of `{:file :line :col :message}` maps instead of GNU-format strings — for tools (the `nest mcp` `check` tool, editor diagnostics)."),
-    ("check-file-deps", &["path"], "Incremental-cache check (ADR-119): returns [warnings dep-keys fingerprint] — the GNU warning strings, the set of global observations the check made, and a fingerprint of them against the current image. Store dep-keys+fingerprint; reuse warnings on a later run iff (check-deps-fp dep-keys) still matches and the file's mtime is unchanged."),
+    ("check-file", &["path", "&optional required-mods"], "Advisory type-check every top-level form in the file at path: a list of `path:line:col: warning: …` strings, or nil. Does not evaluate the file. `required-mods` is the file's transitive require-closure (module-name strings) — the KI-17 reachability set that flags a qualified `mod/name` whose module the file never requires; omit it (single-file / editor) to disable that lint."),
+    ("check-file-structured", &["path", "&optional required-mods"], "Like check-file but returns a list of `{:file :line :col :message}` maps instead of GNU-format strings — for tools (the `nest mcp` `check` tool, editor diagnostics). `required-mods`: see check-file."),
+    ("check-file-deps", &["path", "&optional required-mods"], "Incremental-cache check (ADR-119): returns [warnings dep-keys fingerprint] — the GNU warning strings, the set of global observations the check made, and a fingerprint of them against the current image. Store dep-keys+fingerprint; reuse warnings on a later run iff (check-deps-fp dep-keys) still matches and the file's mtime is unchanged. `required-mods`: see check-file."),
+    ("%module-direct-requires", &["path"], "Parse the file at path (no eval) and return `{:module <name-or-nil> :requires [<module-name> …]}` — its own module name and the modules it directly `:use`s / `:use-internals` / `(require 'M)`s. The edge list `project.blsp` closes transitively into each file's check-file reachability set (KI-17)."),
     ("check-deps-fp", &["dep-keys"], "Recompute the fingerprint of a file's dep-keys (from check-file-deps) against the current global image. The incremental check cache reuses a file's warnings iff this equals the stored fingerprint."),
     ("check-string-structured", &["src"], "Advisory type-check the source string `src`, returning a list of `{:line :col :message}` maps (1-based positions), or `()` when `src` doesn't parse (e.g. incomplete input) — the string-source counterpart of check-file-structured, for live editor-buffer diagnostics."),
     ("str", &["&", "xs"], "Concatenate the display forms of the arguments into one string."),
