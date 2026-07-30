@@ -194,14 +194,15 @@ pub(super) fn cst_to_value(heap: &mut Heap, node: &cst::Node, src: &str) -> Valu
     let tag = |k: &'static str| Value::keyword(value::intern(k));
     match node.kind {
         // Leaves: [kind raw-text].
-        Symbol | Keyword | Int | Float | Decimal | Str | Bool | Nil | Whitespace | Comment
-        | Error => {
+        Symbol | Keyword | Int | Float | Decimal | Ratio | Str | Bool | Nil | Whitespace
+        | Comment | Error => {
             let k = match node.kind {
                 Symbol => "symbol",
                 Keyword => "keyword",
                 Int => "int",
                 Float => "float",
                 Decimal => "decimal",
+                Ratio => "ratio",
                 Str => "str",
                 Bool => "bool",
                 Nil => "nil",
@@ -305,6 +306,7 @@ pub(super) fn cst_node_kind_name(kind: cst::NodeKind) -> &'static str {
         Int => "int",
         Float => "float",
         Decimal => "decimal",
+        Ratio => "ratio",
         Str => "str",
         Bool => "bool",
         Nil => "nil",
@@ -341,8 +343,8 @@ pub(super) fn cst_to_positioned(
     ];
     match node.kind {
         // Leaves carry their raw source text; positions alone make them navigable.
-        Symbol | Keyword | Int | Float | Decimal | Str | Bool | Nil | Whitespace | Comment
-        | Error => {
+        Symbol | Keyword | Int | Float | Decimal | Ratio | Str | Bool | Nil | Whitespace
+        | Comment | Error => {
             let text = heap.alloc_string(node.text(src));
             pairs.push((kw("text"), text));
         }
@@ -1829,6 +1831,49 @@ pub(super) fn spawn_count(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// (bounded by the worker-pool size); how much parallelism was actually reached.
 pub(super) fn peak_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::int(crate::process::peak_threads() as i64))
+}
+
+/// `(features)` — the optional build features this runtime was compiled with, as a
+/// vector of keywords (e.g. `[:jit :treesit :gui]`).
+///
+/// The point is that a *bound* builtin does not imply a working one: with the `gui`
+/// feature off, `gui-open` is still bound and still raises at call time, so
+/// `(bound? 'gui-open)` answers "yes" on a runtime that cannot open a window. An
+/// app that wants to degrade rather than fail needs to ask the build, not the
+/// environment — and the only alternative was provoking the error and matching on
+/// its prose, which silently breaks whenever the message is reworded.
+pub(super) fn features(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    // Order is stable (declaration order, not cfg order) so a printed value diffs
+    // cleanly between builds.
+    let mut out = Vec::new();
+    if cfg!(feature = "gui") {
+        out.push(value::kw("gui"));
+    }
+    if cfg!(feature = "gui-gpu") {
+        out.push(value::kw("gui-gpu"));
+    }
+    if cfg!(feature = "audio") {
+        out.push(value::kw("audio"));
+    }
+    if cfg!(feature = "clipboard") {
+        out.push(value::kw("clipboard"));
+    }
+    if cfg!(feature = "jit") {
+        out.push(value::kw("jit"));
+    }
+    if cfg!(feature = "treesit") {
+        out.push(value::kw("treesit"));
+    }
+    if cfg!(feature = "wasm") {
+        out.push(value::kw("wasm"));
+    }
+    if cfg!(feature = "dev-tools") {
+        out.push(value::kw("dev-tools"));
+    }
+    if cfg!(feature = "perf-stats") {
+        out.push(value::kw("perf-stats"));
+    }
+    Ok(heap.alloc_vector(out))
 }
 
 /// `(worker-threads)` — size of the scheduler's worker-thread pool that runs the

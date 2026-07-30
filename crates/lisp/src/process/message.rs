@@ -38,6 +38,9 @@ pub enum Message {
     /// across nodes without a custom byte layout. The receiver's `from_message`
     /// parses it back into a `Value::Decimal`.
     Decimal(String),
+    /// An exact rational, sent as its `num/den` string (mirrors [`Message::Decimal`]).
+    /// The receiver's `from_message` parses it back into a `Value::Ratio`.
+    Ratio(String),
     Float(f64),
     /// A small string sent inline by deep copy. Used for strings below
     /// [`crate::core::blob::SHARED_BLOB_THRESHOLD`] (where atomic refcount
@@ -228,6 +231,8 @@ fn to_message_rec(
         Value::BigInt(id) => Message::BigInt(heap.bigint(id).to_string()),
         // A decimal ships as its canonical decimal string (mirrors BigInt).
         Value::Decimal(id) => Message::Decimal(heap.decimal(id).to_string()),
+        // A ratio ships as its `num/den` string (mirrors BigInt/Decimal).
+        Value::Ratio(id) => Message::Ratio(heap.ratio(id).to_string()),
         // Raw bytes ship their Arc<SharedBlob> by reference (no byte copy). Byte-clean.
         Value::Bytes(id) => Message::Bytes(Arc::clone(&heap.bytes(id))),
         Value::Float(f) => Message::Float(f),
@@ -493,6 +498,10 @@ pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
             // wire frame; fall back to 0 rather than panic the receiver.
             Err(_) => Value::int(0),
         },
+        Message::Ratio(s) => match s.parse::<num_rational::BigRational>() {
+            Ok(n) => heap.alloc_ratio(n),
+            Err(_) => Value::int(0),
+        },
         Message::Float(f) => Value::float(*f),
         Message::Sym(s) => Value::symbol(*s),
         Message::Keyword(s) => Value::keyword(*s),
@@ -708,6 +717,7 @@ fn copy_cross_heap_rec(src: &Heap, dst: &mut Heap, v: Value, depth: u32) -> Opti
         Value::Socket(_) | Value::Subprocess(_) | Value::Table(_) => v,
         Value::BigInt(id) => dst.int_from_bigint(src.bigint(id).clone()),
         Value::Decimal(id) => dst.alloc_decimal(src.decimal(id).clone()),
+        Value::Ratio(id) => dst.alloc_ratio(src.ratio(id).clone()),
         // Byte blobs are `Arc`-shared by the message path too: an atomic bump, no copy.
         Value::Bytes(id) => dst.alloc_bytes(Arc::clone(&src.bytes(id))),
         Value::Str(id) => match src.local_shared_blob(id) {

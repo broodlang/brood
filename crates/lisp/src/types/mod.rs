@@ -34,7 +34,7 @@ use crate::core::value::{self, Symbol, Tag, Value};
 /// the source of [`TAG_COUNT`]. **Must list every [`Tag`] variant in discriminant
 /// order**; the compiler can't enumerate variants, so `tag_universe_is_consistent`
 /// (below) is what guards completeness, ordering, and the universe size.
-const ALL_TAGS: [Tag; 22] = [
+const ALL_TAGS: [Tag; 23] = [
     Tag::Nil,
     Tag::Bool,
     Tag::Int,
@@ -57,6 +57,7 @@ const ALL_TAGS: [Tag; 22] = [
     Tag::Bytes,
     Tag::Decimal,
     Tag::Set,
+    Tag::Ratio,
 ];
 
 /// The number of tag atoms — derived from [`ALL_TAGS`], not hand-counted.
@@ -221,8 +222,12 @@ impl Ty {
     pub const ANY: Ty = Ty::flat(UNIVERSE);
     /// `int ∪ float ∪ decimal` — the named union the prelude's `number?` predicate
     /// implies. A `decimal` is a number (but not an integer).
-    pub const NUMBER: Ty =
-        Ty::flat((1u32 << bit(Tag::Int)) | (1u32 << bit(Tag::Float)) | (1u32 << bit(Tag::Decimal)));
+    pub const NUMBER: Ty = Ty::flat(
+        (1u32 << bit(Tag::Int))
+            | (1u32 << bit(Tag::Float))
+            | (1u32 << bit(Tag::Decimal))
+            | (1u32 << bit(Tag::Ratio)),
+    );
     /// `nil ∪ pair` — the named union the prelude's `list?` predicate implies.
     pub const LIST: Ty = Ty::flat((1u32 << bit(Tag::Nil)) | (1u32 << bit(Tag::Pair)));
     /// The **seqable** union — every collection the sequence combinators walk (a list —
@@ -481,14 +486,14 @@ impl Ty {
     }
 
     /// The type of a concrete value — the bridge from a runtime value to its type.
-    /// A keyword becomes its **literal singleton** (`:foo`, not the whole `keyword`
-    /// tag), so a literal in code is checked against an enumerated keyword sig.
-    /// Ints deliberately stay flat here (unlike keywords) — see
-    /// `docs/type-int-literals.md`'s "Deferred" section: making every int
-    /// literal in code a singleton cascades into every misuse-warning message
-    /// that happens to mention a literal int (7 existing tests broke on exact
-    /// wording, e.g. "got int" → "got 5"), a materially bigger and riskier
-    /// change than this slice's scope (declared-sig literal sets).
+    /// A keyword/int/bool becomes its **literal singleton** (`:foo`/`5`/`true`, not
+    /// the whole `keyword`/`int`/`bool` tag), so a literal in code is checked
+    /// precisely against an enumerated sig (`5` vs `(or 5 6 7)`). Ints and bools
+    /// were once left flat here to avoid the message-wording churn a singleton
+    /// causes ("got int" → "got 5"); that churn was accepted and the singletons
+    /// shipped in B0 (gating — see `docs/type-int-literals.md`). Strings need the
+    /// heap to read their bytes, so `of_value` (heap-free) leaves a string flat and
+    /// `expr_ty` builds the `str_lit` where it has the heap. Bignums stay flat `int`.
     pub fn of_value(v: Value) -> Ty {
         match v {
             // Literal singletons (B0 — literal-singleton precision): a literal's
@@ -520,6 +525,7 @@ impl Ty {
             "int?" => Ty::of(Tag::Int),
             "float?" => Ty::of(Tag::Float),
             "decimal?" => Ty::of(Tag::Decimal),
+            "ratio?" => Ty::of(Tag::Ratio),
             "symbol?" => Ty::of(Tag::Sym),
             "keyword?" => Ty::of(Tag::Keyword),
             "string?" => Ty::of(Tag::Str),

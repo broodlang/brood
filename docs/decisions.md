@@ -3837,7 +3837,59 @@ with adding scopes later if a real need ever appears.
 **References.** ADR-009 (quasiquote), ADR-065/`namespaces.md` §7 (the two-concerns
 split; #1 still open), ADR-064 (the quasiquote→Brood move this rides alongside),
 ADR-034 (symbols ship by name — why scope-bearing identifiers are costly here),
-ADR-006/011 (Brood-first, smallest core), `types/check/hygiene.rs` (the lint).
+ADR-006/011 (Brood-first, smallest core).
+
+### Amendment (2026-07-30) — automatic binding hygiene ("Option A")
+
+**What changed.** Binding hygiene (concern #2) is now the **default**, not opt-in. A
+quasiquote template's own `let`/`letrec`/`fn` binders — introduced as *plain literal*
+symbols — are alpha-renamed to fresh gensyms by the expander before the template is
+built, so a macro no longer needs `x#` or `(gensym)` to have an uncapturable temp.
+`x#`/`(gensym)` keep working (now redundant). The **opt-out for intentional anaphora**
+(a name deliberately exposed to the caller's spliced code, `it` in an `aif`, or
+`defseq`'s `item`/`acc`) is `~'name` — an unquoted quoted symbol, which lands in a
+`~unquote` hole the rename never descends, so it emits the literal name. The advisory
+capture lint (`types/check/hygiene.rs`) is **retired** — it would now only false-positive
+on the safe common case.
+
+**Why this is not the full-hygiene "no" above.** The original ADR declined full
+Scheme hygiene because solving *both* capture halves needs per-symbol lexical context
+(fat `Value::Sym`), which fights ship-by-name (ADR-034) and homoiconicity and taxes
+every eval + the GC. But concern **#1** (free-reference transparency) was *already* made
+automatic by the auto-qualifying resolver (ADR-065 §7). So the only remaining capture
+vector is a template's own introduced binders, and closing that is a **structural
+alpha-rename of the template** — no per-symbol context, no `Value::Sym` change, no
+cross-process cost. It reuses the scope-tracking the namespace resolver already does
+(`resolve_let`/`resolve_fn`). Option C (full Scheme hygiene) stays rejected on the
+performance grounds above.
+
+**Mechanism** (`eval/macros.rs`, `hygiene_rename` + `hyg_*`). A scope-aware pre-pass
+in `expand_quasiquote`: it maps each renamable binder → a fresh gensym and rewrites
+*only the references that binder actually binds* (so a same-named prelude reference
+elsewhere in the template is untouched — correct even when a binder shadows a prelude
+name; this is why it is scope-keyed, not `#`'s flat name-keyed table). A template that
+introduces a renamable binder takes the **runtime** expand path (like `#`), gated by
+`template_introduces_binder`, so two nested expansions of one macro (`(m (m x))`) get
+distinct binders. GC-blocked while it builds the parallel template tree, exactly like
+`resolve`.
+
+**v1 scope.** Only `let`/`letrec`/`fn` plain-symbol binders are renamed. Destructuring
+binders, `match*` pattern binders, and computed (`~params`/`~bindings`) or `defn`
+binders inside a template stay literal — a **sound under-approximation** (leaving a
+binder un-renamed only preserves the pre-change capturable-but-explicit behaviour; it
+never miscompiles a real macro), opt into `#`/`(gensym)` there as before. The one
+documented non-soundness is the pathological case of an outer template binder shadowed
+by a *computed* inner binder of the same name — vanishingly rare, not exhibited by any
+real macro.
+
+**Migration.** One macro: `defseq` (`std/prelude.blsp`) moved its two anaphora to
+`~'item`/`~'acc` and dropped its internal `coll#`/`check-allow :hygiene`. Everything
+else kept working (`#`/`gensym` still valid). Tests: `tests/hygiene_test.blsp` (capture
+prevention for `let`/`fn`/`letrec` binders, nested-expansion distinctness, the `~'`
+opt-out, `#` still works, and cross-process round-trips).
+
+**Updated references.** `eval/macros.rs` (`hygiene_rename`), `tests/hygiene_test.blsp`,
+`tests/autogensym_test.blsp` (the `#` mechanism it complements).
 
 ## ADR-067 — Process links + `trap_exit` (the supervisor's structural orphan fix)
 
@@ -10696,7 +10748,7 @@ recoverable and the cost of the feature is permanent; when in doubt, refuse.
 | Named arguments (`&key`) | A trailing options map + `{:keys …}` reads the same and composes with `merge` | ADR-163 |
 | Metadata (`^{}`), reader macros, `#(…)`, `#_` | Permanent surface for what a macro already does; `^` is the pattern pin | ADR-150 |
 | A character type | A character is a 1-char string; the cursor unit is a grapheme cluster | ADR-159 |
-| Ratios | `(/ 1 2)` is a float, `0.5M` an exact decimal, and `/` is the namespace separator; the `1/2` token is *reserved* (rejected by the reader) so a post-1.0 ratio type stays additive | ADR-169 |
+| ~~Ratios~~ — **superseded by ADR-196** (shipped as a kernel type): `1/2` is a literal, `(/ 1 2)` is exact (`1/2`), `->float` escapes. A relaxation the freeze allows. | ADR-169 → ADR-196 |
 | Digit-led tokens as names (`0x1F`, `1_000`, `1N`, `1+`) | A digit-led token must be a number; reserving the shapes keeps radix literals / digit separators / a bigint suffix additive after 1.0 | ADR-169 |
 | `#…` beyond `#{…}` / `#b"…"` (incl. `#\|…\|#` block comments) | `#` is a dispatch character; reserving the space keeps every future `#` literal additive | ADR-169, ADR-150 |
 | `contains?` answering by index on a vector | Clojure's trap: `(contains? [1 2] 1)` true for the wrong reason | ADR-156 |
@@ -12668,3 +12720,38 @@ half of the message-cost item, and it needs a different mechanism (BEAM's is the
 **References.** ADR-155 (`receive` as a macro over `%receive`, which is why the pin can be
 derived at expansion time), ADR-178 (the L1 local-send fast path and the tag pre-filter this
 composes with), `docs/runtime-frontier.md` A1/A6, devlog 2026-07-30.
+
+## ADR-196 — Ask the build, not the environment: `features` / `feature?`
+
+**Status:** accepted + implemented (2026-07-30).
+
+**Context.** Optional build features (`gui`, `audio`, `gui-gpu`, `treesit`, `jit`)
+register their builtins unconditionally and fail at *call* time — `gui-open` raises
+`gui backend not compiled in` on a build without `--features gui`
+(`crates/lisp/src/gui.rs`). So the obvious capability probe is actively misleading:
+`(bound? 'gui-open)` is **true** on a runtime that cannot open a window, which is
+worse than having no predicate, because it reads like an answer.
+
+A downstream app that wants to degrade rather than fail (the `waggle` browser,
+opening a window when it can and falling back to the terminal when it cannot) was
+left with only one option: call the builtin, catch the error, and **match on its
+message text**. That works and is quietly awful — rewording the error string turns a
+graceful fallback into a crash, and no test in either repo would notice.
+
+**Decision.** One Rust builtin, `(features)`, returning the compiled-in optional
+features as a vector of keywords; one prelude predicate, `(feature? :gui)`, over it.
+An unknown feature name is **false**, not an error — the question is "can you do
+this?", and a runtime that has never heard of a feature certainly cannot, so false is
+both correct and forward-compatible with names added later.
+
+**Consequences.** Mechanism in Rust (`cfg!` is the only thing that needs to be), policy
+in Brood — `feature?` is a one-line `includes?`. `(features)` also makes the build
+introspectable, which is what keeps a typo'd keyword discoverable despite `feature?`
+returning false for it.
+
+The deliberate non-goal: this reports what was **compiled in**, not what will *work*
+right now. A `gui` build still fails on a headless box, and no build-time predicate can
+say otherwise — runtime availability stays a `try`. The claim is narrower and honest:
+you can now tell "this binary lacks the feature" from "this feature failed", which is
+exactly the distinction the error-message match could not make.
+

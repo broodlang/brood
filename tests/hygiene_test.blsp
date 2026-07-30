@@ -1,0 +1,93 @@
+;;; Automatic binding hygiene (ADR-066 amendment — "Option A").
+;;;
+;;; A quasiquote template's own `let`/`letrec`/`fn` binders are alpha-renamed to
+;;; fresh gensyms by the expander, so a *plain literal* binder (no `#`, no
+;;; `(gensym)`) can neither capture nor be captured by caller code spliced in with
+;;; `~`/`~@`. Hygiene is the default; `~'name` opts a binder OUT (intentional
+;;; anaphora). Complements the already-automatic free-reference hygiene (the
+;;; auto-qualifying resolver). See `eval::macros` (`hygiene_rename`).
+
+(defmodule hygiene-test (:use test))
+
+;; The classic capture trap, written with a PLAIN binder `r` — no `#`. Naive
+;; expansion would be `(let (r false) (if r r <caller-r>))`, capturing the caller's
+;; `r`. Auto-hygiene renames the template's `r`, so the caller's `r` survives.
+(defmacro my-or (a b) `(let (r ~a) (if r r ~b)))
+
+;; A plain `fn` param `acc` must not capture caller code spliced into its body.
+(defmacro each-inc (body) `(map (fn (acc) ~body) [1 2 3]))
+
+;; letrec + a plain internal loop binder + accumulator — the `defseq` shape,
+;; without any `#`.
+(defmacro sum-to (n)
+  `(letrec (loop (fn (i acc)
+                   (if (> i ~n) acc (loop (+ i 1) (+ acc i)))))
+     (loop 1 0)))
+
+;; Nested expansion of ONE macro needs DISTINCT binders, or the inner `t` captures
+;; the outer: `(dbl (dbl x))`.
+(defmacro dbl (x) `(let (t ~x) (+ t t)))
+
+;; Intentional anaphora: `~'it` opts the binder OUT of hygiene, so the caller's
+;; branch can reference `it`.
+(defmacro aif (test then else) `(let (~'it ~test) (if ~'it ~then ~else)))
+
+;; `#` auto-gensym still works (redundant now, but not broken).
+(defmacro still-hash (a b) `(let (r# ~a) (if r# r# ~b)))
+
+(describe "automatic binding hygiene"
+  :isolated
+
+  (test "a plain let binder does not capture a spliced caller binding"
+    ;; Without hygiene this returns false (caller's r captured); with it, 99.
+    (assert= (let (r 99) (my-or false r)) 99)
+    (assert= (my-or false 42) 42)
+    (assert= (my-or 7 99) 7))
+
+  (test "a plain fn param does not capture spliced caller code"
+    ;; Caller's `acc` (= 100) must be what `~body` sees, not the fn's element param.
+    (assert= (let (acc 100) (each-inc (+ acc 1))) (list 101 101 101)))
+
+  (test "letrec internal binders are hygienic"
+    (assert= (sum-to 5) 15)
+    ;; A caller `loop`/`i`/`acc` in scope must not be captured by the macro's.
+    (let (loop 1 i 2 acc 3)
+      (assert= (sum-to 4) 10)
+      (assert= (+ loop i acc) 6)))
+
+  (test "nested expansion of one macro keeps binders distinct"
+    (assert= (dbl (dbl 5)) 20)
+    (assert= (dbl (dbl (dbl 2))) 16))
+
+  (test "~'name opts a binder out — anaphora is visible to the caller"
+    (assert= (aif 7 (* it 2) :none) 14)
+    (assert= (aif false :yes :no) :no))
+
+  (test "auto-gensym #-binders still work"
+    (assert= (let (r 1) (still-hash false r)) 1))
+
+  (test "defseq-based sequence ops remain correct"
+    (assert= (map (fn (x) (* x x)) (list 1 2 3 4)) (list 1 4 9 16))
+    (assert= (filter (fn (x) (> x 2)) (list 1 2 3 4)) (list 3 4))
+    (assert= (remove (fn (x) (> x 2)) (list 1 2 3 4)) (list 1 2))))
+
+;; ---- across processes -------------------------------------------------------
+;; A hygienic macro must behave identically when its result is built in a spawned
+;; process and sent home (deep copy + re-intern by name across per-process heaps).
+
+(defn caps-worker (parent)
+  ;; `r` is the caller-side name the naive capture would clobber; must stay 77.
+  (send parent (let (r 77) (my-or false r))))
+
+(defn sumto-worker (parent) (send parent (sum-to 10)))
+
+(describe "hygiene across processes"
+  :isolated
+
+  (test "no capture after building the value in another process"
+    (let (me (self) _ (spawn (caps-worker me)))
+      (assert= (receive) 77)))
+
+  (test "letrec-loop macro result round-trips a send"
+    (let (me (self) _ (spawn (sumto-worker me)))
+      (assert= (receive) 55))))

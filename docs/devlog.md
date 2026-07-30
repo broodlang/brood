@@ -12629,6 +12629,119 @@ also *why* Stage 6 (an upgrade hook for long-lived processes) exists.
 **Gates:** full suite green, `nest check` clean (one pre-existing advisory in a JIT torture
 test), metamorphic differential fuzzer 420 checks / 0 divergences / 0 crashes.
 
+## 2026-07-30 (cont.) — automatic macro binding hygiene (ADR-066 amendment, "Option A")
+
+Made binding hygiene the **default**: a quasiquote template's own `let`/`letrec`/`fn` binders
+(plain literal symbols) are alpha-renamed to fresh gensyms by the expander, so a macro's temp can
+neither capture nor be captured by spliced caller code **without** `x#`/`(gensym)`. The
+`(let (r ~a) (if r r ~b))` capture trap is now safe as written; `(let (r 99) (my-or false r))`
+returns 99, not false. `#`/`gensym` still work (redundant). Anaphora opts OUT with `~'name`
+(`aif`'s `it`). Retired the advisory capture lint (`types/check/hygiene.rs`) — it would only
+false-positive now.
+
+Why this is cheap where full Scheme hygiene (Option C, rejected on perf) is not: free-reference
+hygiene (concern #1) was already automatic via the auto-qualifying resolver (ADR-065 §7), so the
+*only* remaining capture vector is a template's own binders — a structural alpha-rename, no fat
+`Value::Sym`, no cross-process cost. Mechanism (`eval/macros.rs`): `hygiene_rename` +
+`hyg_walk`/`hyg_let`/`hyg_fn`, a **scope-aware** pre-pass in `expand_quasiquote` that renames only
+the references a binder actually binds (so a same-named prelude reference is untouched — correct
+even when a binder shadows a prelude name). A template that introduces a renamable binder takes
+the runtime expand path (gated by `template_introduces_binder`), like `#`, so nested expansions of
+one macro (`(m (m x))`) get distinct binders. GC-blocked like `resolve`. v1 renames only
+plain-symbol `let`/`letrec`/`fn` binders; destructuring/`match*`/computed binders stay literal (a
+sound under-approximation — never miscompiles a real macro). Migration was one macro (`defseq` →
+`~'item`/`~'acc`, dropped `coll#`/`check-allow`). Tests: `tests/hygiene_test.blsp` (7 cases +
+2 cross-process). Also cleaned three stale docs found en route: `deferred.md §6` (int/bool/string
+literal precision shipped in B0, not deferred), the self-contradictory `of_value` comment
+(`types/mod.rs`), and `namespaces.md` §2/§12 (privacy is enforced per ADR-146, not lint-only).
+
+## 2026-07-30 (cont.) — exact rationals: a Brood-first prototype (`std/ratio.blsp`)
+
+Ratios are on the freeze list as "refused, `1/2` token reserved" (ADR-169/170). Weighed the
+two implementations: a pure-Brood record vs a kernel `Value::Ratio`. An ability/record gives you
+arithmetic + display but **can't be a real number** — no `1/2` reader literal (a reader literal
+must build a self-evaluating *kernel* value; Brood has no reader macros, ADR-150), not `=` to an
+equal integer (structural map equality; there is no numeric-tower `=`), and `pr-str` prints the
+underlying map rather than round-tripping. Those four properties (literal, `=`-with-ints, tower
+ordering, round-trip) are exactly the kernel-only ones, and `Value::Decimal` (`0.5M`) is the
+proof a numeric kernel type is a contained ~8-file change.
+
+Per the dogfood-first rule (CLAUDE.md), shipped the **Brood prototype first** to settle the
+reduce/gcd/sign/contagion design in the language before committing kernel surface: `std/ratio.blsp`
+— `(rational n d)` builds a reduced, positive-denominator ratio record; `+`/`-`/`*`/`/` dispatch
+through the `Num` multimethods (ADR-179, `[ratio ratio]` + `[ratio :int]`; `+`/`*` commutative
+mirrors derived, `-`/`/` write `[:int ratio]` explicitly); `<`/`<=`/`sort` through `compare-to`
+(`:antisymmetric`, cross-multiplied); `Display` prints `num/den`. All results renormalise, so two
+reduced-equal ratios are structurally `=` and sort together; a ratio+float pair is a loud
+`:no-method`. Embedded (opt-in, `system.rs`), `tests/ratio_test.blsp` (12 cases incl. cross-process
+round-trip proving the record + method dispatch survive a `send`).
+
+**Promotion criterion** (recorded so it isn't re-litigated): promote to a kernel `Value::Ratio`
+(a near-clone of `Value::Decimal`) **iff** the prototype shows the kernel-only properties are
+load-bearing in real use — the `1/2` literal, `=` with integers, and numeric-tower ordering/
+contagion (incl. the ratio+decimal rule the decimal path leaves open). Until then the prototype is
+the answer, and the freeze stays additive (ADR-169 reserved the token for exactly this).
+
+## 2026-07-30 (cont.) — exact rationals promoted to a kernel type (ADR-196)
+
+Promoted the ratio prototype to a kernel `Value::Ratio` (`num_rational::BigRational`), after it
+proved the four kernel-only properties are load-bearing. `1/2` is now a reader literal, and **`/`
+on integers is exact**: `(/ 1 2)` → `1/2`, `(/ 6 3)` → `2` (this overrides the freeze row
+"`(/ 1 2)` is a float" — a discussed, deliberate relaxation; `->float`/`->decimal` are the escape
+hatches). Full tower with int/decimal/float contagion (ratio+decimal is exact and lossless —
+`(+ 1/2 0.5M)` → `1`); ratio arms in `value_cmp`/`equal`/`hash`; reader/printer/wire/message; both
+GC collectors + region/checkpoint plumbing (mirrored on `Value::Decimal` at every site).
+Normalize invariant: a denominator of 1 demotes to `Int`, so a ratio is never integer-valued
+(`4/2` IS `2`).
+
+**Perf note (the reason exact `/` is affordable):** `/` already returned int-or-float by
+divisibility, and the JIT's unboxed loop already deopts on inexact division — so the hot path is
+unchanged; only the inexact cold path now allocates a ratio instead of a float. The VM inline
+`prim_apply` defers inexact `/` to `prim_div`; the JIT deopt lands there too.
+
+Conversions: `numerator`/`denominator`/`->decimal` (kernel builtins), `->float`/`rational`/`ratio?`
+(prelude). `number?` includes `:ratio`; the checker's `NUMBER` union too, so arithmetic/`<`/`sort`
+type-clean. `sort`/`%sort-asc` widened to the whole numeric tower (fixed a latent decimal-sort
+bug). The `std/ratio.blsp` prototype is deleted (superseded). Types/LSP/MCP all know `:ratio`.
+Found + fixed a debug-only discriminant bound (`tag > 24` → `> 25`, dispatch.rs + jit/mod.rs) that
+rejected the new tag. Tests: `tests/ratio_test.blsp` (14, incl. cross-process). En route fixed a
+merge break: origin's receive-mark test called `receive_match` with the pre-`pin` arity.
+
+## 2026-07-30 (cont.) — asking the build what it can do; a rounded `rect`; KI-21
+
+Three gaps surfaced by writing a **downstream app** (`../waggle`, a browser for a
+hypermedia protocol) rather than by working on the runtime — which is the point of
+having one.
+
+**KI-21 fixed** (`crates/nest/src/main.rs`). `nest run --for` and `--watch` wrap the
+program in a generated `receive` whose source is a Rust string literal, and it still
+carried a pre-ADR-150 pin: `([:down _ ~p reason] …)`. Since ADR-150 made `~`
+quasiquote-only, **both flags failed on every file**, with a `match: \`~p\` is not a
+pattern` error and no file/line. One character (`~p` → `^p`).
+
+The lesson generalises past the typo: **Brood source generated from Rust string
+literals is invisible to `nest check` and to the in-language suite.** Nothing could
+have caught this except running the flag, and nothing did, because the wrapper is
+only emitted when `--for`/`--watch` is set. Any such snippet needs an *execution*
+test, not a reading — worth a grep for the others.
+
+**`features` + `feature?` (ADR-196).** A builtin from an absent optional feature is
+still *bound* and still raises when called, so `(bound? 'gui-open)` answers yes on a
+runtime that cannot open a window. The app was reduced to calling it and matching on
+the error's prose (`index-of … "gui backend"`) — which silently turns a graceful
+terminal fallback into a crash the day someone rewords `NOT_COMPILED`. `(features)`
+is one Rust builtin over `cfg!`; `feature?` is a prelude one-liner over it.
+
+**`rect` takes a corner radius.** `frect` was rounded but GUI-only and `rect` was
+square but universal, so rounded chrome needed *both* — an `frect` for the window plus
+a `rect` inside it for the terminal, correct only because the two shared a colour.
+`rect`'s optional 6th element rounds in the GUI and is ignored by the terminal, the
+same asymmetry `cursor-zone` and `frect` already rely on. A zero radius emits the
+5-element op unchanged, so every existing frame is byte-identical.
+
+Verified: full in-language suite 3941 green, `display_test` + `introspection_test`
+extended, `nest run --for 800ms` now exits 0 and prints `[stopped after 800ms]`.
+
 ## 2026-07-30 (cont.) — the std/ scale sweep starts: two quadratics in the framed reads
 
 Picked up handoff thread 1 (the `std/` scale sweep, unstarted) on the reasoning that two of

@@ -930,8 +930,8 @@ pub unsafe extern "C" fn brood_rt_dbg_check_slot(
 ) {
     let h = &*heap;
     let tag = (w0 as u64 & 0xff) as u8;
-    // Invalid tag byte → definitely garbage.
-    let bad_tag = tag > 24;
+    // Invalid tag byte → definitely garbage. Value's max discriminant is `Ratio` (25).
+    let bad_tag = tag > 25;
     // Reconstruct the full Value and check for a stale/garbage LOCAL handle (a handle
     // whose generation epoch doesn't match the live epoch, or whose slab index is OOB —
     // i.e. read from a freed/wrong location). This catches the bug-#2 garbage that the

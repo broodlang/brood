@@ -1448,6 +1448,7 @@ struct RuntimeForward {
     strings: HashMap<u32, u32>,
     bigints: HashMap<u32, u32>,
     decimals: HashMap<u32, u32>,
+    ratios: HashMap<u32, u32>,
     bytes: HashMap<u32, u32>,
     ropes: HashMap<u32, u32>,
     closures: HashMap<u32, u32>,
@@ -1500,6 +1501,7 @@ fn runtime_gen_of(v: Value) -> Option<usize> {
         ValueRef::Str(id) => in_rt(id.region(), id.code_gen()),
         ValueRef::BigInt(id) => in_rt(id.region(), id.code_gen()),
         ValueRef::Decimal(id) => in_rt(id.region(), id.code_gen()),
+        ValueRef::Ratio(id) => in_rt(id.region(), id.code_gen()),
         ValueRef::Bytes(id) => in_rt(id.region(), id.code_gen()),
         ValueRef::Rope(id) => in_rt(id.region(), id.code_gen()),
         ValueRef::Fn(id) | ValueRef::Macro(id) => in_rt(id.region(), id.code_gen()),
@@ -1567,6 +1569,9 @@ fn flush_rt_value_grown(
         }
         ValueRef::Decimal(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::decimal(flush_rt_decimal(old, new, fwd, id))
+        }
+        ValueRef::Ratio(id) if id.region() == RUNTIME && id.code_gen() == g => {
+            Value::ratio(flush_rt_ratio(old, new, fwd, id))
         }
         ValueRef::Bytes(id) if id.region() == RUNTIME && id.code_gen() == g => {
             Value::bytes(flush_rt_bytes(old, new, fwd, id))
@@ -1701,6 +1706,24 @@ fn flush_rt_decimal(
     let new_idx = new.decimals.push(v);
     fwd.decimals.insert(key, new_idx as u32);
     DecimalId::runtime_gen(new_idx, dest)
+}
+
+/// Flush a RUNTIME ratio during a runtime-region compaction (mirrors
+/// [`flush_rt_decimal`]). A leaf — clone the value into the new region.
+fn flush_rt_ratio(
+    old: &CodeSlabs,
+    new: &CodeSlabs,
+    fwd: &mut RuntimeForward,
+    id: RatioId,
+) -> RatioId {
+    let (key, dest) = (id.index() as u32, fwd.dest_gen);
+    if let Some(&n) = fwd.ratios.get(&key) {
+        return RatioId::runtime_gen(n as usize, dest);
+    }
+    let v = old.ratios.get(id.index()).expect("rt ratio").clone();
+    let new_idx = new.ratios.push(v);
+    fwd.ratios.insert(key, new_idx as u32);
+    RatioId::runtime_gen(new_idx, dest)
 }
 
 /// Flush a RUNTIME bytes value during a runtime-region compaction (mirrors
@@ -1863,13 +1886,14 @@ fn flush_rt_env(old: &CodeSlabs, new: &CodeSlabs, fwd: &mut RuntimeForward, env:
 /// the exact failure mode a moving collector must never ship. (In-bounds is a
 /// necessary soundness check; the redef test additionally pins the live *count*.)
 fn verify_rt_slabs(s: &CodeSlabs) -> bool {
-    let (np, nv, nm, ns, nb, nd, nby, nr, nc, ne) = (
+    let (np, nv, nm, ns, nb, nd, nra, nby, nr, nc, ne) = (
         s.pairs.count(),
         s.vectors.count(),
         s.maps.count(),
         s.strings.count(),
         s.bigints.count(),
         s.decimals.count(),
+        s.ratios.count(),
         s.bytes.count(),
         s.ropes.count(),
         s.closures.count(),
@@ -1887,6 +1911,7 @@ fn verify_rt_slabs(s: &CodeSlabs) -> bool {
             ValueRef::Str(id) if id.region() == RUNTIME => id.index() < ns,
             ValueRef::BigInt(id) if id.region() == RUNTIME => id.index() < nb,
             ValueRef::Decimal(id) if id.region() == RUNTIME => id.index() < nd,
+            ValueRef::Ratio(id) if id.region() == RUNTIME => id.index() < nra,
             ValueRef::Bytes(id) if id.region() == RUNTIME => id.index() < nby,
             ValueRef::Rope(id) if id.region() == RUNTIME => id.index() < nr,
             ValueRef::Fn(id) | ValueRef::Macro(id) if id.region() == RUNTIME => id.index() < nc,
