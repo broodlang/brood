@@ -22,6 +22,7 @@ is the old behaviour. If something misbehaves, bisect with these before bisectin
 | Spawn placement spills off a backlogged worker (A5) | `BROOD_SPAWN_SPILL=999999` (or `BROOD_SPAWN_RR=1` for the other extreme) | `latency` p50 5×, p99 2.9× |
 | Selective-receive scan takes the mailbox lock once (A6) | — | 4× per step against a backlog |
 | Receive-mark (ADR-195) | `BROOD_NO_RECV_MARK=1` | backlogged reply O(backlog) → **O(1)**, 653 µs → 4 µs at 32k |
+| Framed reads scan a straddle probe, not the accumulator (ADR-142 correction) | — (bug fix) | drip-fed frame O(total²) → **O(total)**; 4000 chunks 1568 → 90 ms |
 
 Net on the supervised path: **15×** (8000 children, 3746 → 244 ms; Elixir 233 ms).
 
@@ -40,11 +41,19 @@ From the published run (`brood-benchmarks/results/`):
 
 ## 3. Open threads, in the order I'd take them
 
-1. **`std/` scale sweep — best value per hour, unstarted.** Two of the three quadratics fixed
-   this session were in **Brood policy code, not the kernel** (a list `append` per child, a
-   list re-`filter` per restart), and nothing in the suite exercises `std/` frameworks at
-   scale. Run `proc/gen`, `proc/agent`, `std/net/*`, `editor/buffer` at 10k+ and look for
-   superlinearity. No design work required; today's evidence says the hit rate is not low.
+1. **`std/` scale sweep — started, and the hit rate is high.** The premise held: two of the
+   three quadratics fixed the previous session were in **Brood policy code, not the kernel**,
+   and `std/net/*` yielded two more on the first look — `tcp--read-until` rebuilding and
+   rescanning its whole accumulator per chunk (O(total²), 16× the chunks → 169× the time, no
+   size cap, remotely triggerable), and `http--read-until` still O(head²) in *memcpy* because
+   ADR-142 fixed only the scan half. Both fixed with a straddle probe; flat ~15 µs/chunk to
+   64 000 chunks. Harness: `scripts/fuzz/stress/net_framed_scale.blsp`.
+   **Still unswept: `proc/gen`, `proc/agent`, `editor/buffer` at 10k+.** Two lessons for
+   whoever continues: a comment asserting linearity is not evidence (both of these had one),
+   and grep for a `concat`/`append`/`filter` whose argument is the *accumulator* — that is the
+   shape. Also, the framed-read combinators are testable without a socket: they consume
+   `[:tcp sock data]` from the mailbox and only pin `sock` by equality, so the drip can be
+   fabricated with `send` to self.
 2. **Per-message cost — the last real gap.** Brood's `latency` p50 is 27 µs vs Elixir's 8 µs,
    and it is the same number behind `pingpong`, `ring` and most of what remains in
    `supervisor`. A request here is spawn + send + a collector receive. See frontier A1/A3.
@@ -74,6 +83,10 @@ All three live in `scripts/fuzz/stress/` and carry usage headers:
   BROOD_SPAWN_SPILL=999999`); without one, an alarming RSS curve cannot be attributed.
 - **`receive_backlog.blsp`** — the receive-mark's benchmark. ~4 µs at any backlog; if it ever
   goes linear again, the mark stopped applying.
+- **`net_framed_scale.blsp`** — the framed reads at scale. ns/chunk must be FLAT in `CHUNKS`;
+  it carries its own two controls (`tcp-read-n`, already O(total), and a receive-and-discard
+  floor at ~1.0–1.7 µs/chunk), because an absolute per-chunk number means nothing without
+  them. That row has a ~15% run-to-run spread — don't read a small delta off it.
 - **`reload_cost.blsp`** — fixed-iteration memory harness (see the trap below).
 
 Plus the existing `scripts/fuzz/run.sh <generator>` (differential across 4 engine configs)
