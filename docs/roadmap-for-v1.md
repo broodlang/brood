@@ -142,10 +142,12 @@ literal a *breaking* change to add.
   `12-34`) is a reader error, not a symbol. Names with a sign/dot but no digit behind
   (`+`, `-`, `...`, `.foo`, `--5`) are untouched.
 
-**Ratios: a documented "not in 1.0", token reserved.** `(/ 1 2)` gives a float, `0.5M`
-an exact decimal, and `/` is the namespace separator — so `1/2` is doubly spoken for.
-Reserving the token (rather than shipping the type) keeps a post-1.0 ratio type
-additive at zero cost. Recorded in the freeze list below.
+**Ratios — shipped as a kernel type (ADR-196), superseding this "not in 1.0" note.**
+This section originally reserved the `1/2` token and left ratios out of 1.0 (`(/ 1 2)`
+gave a float). That reservation did its job: shipping the ratio type *later* was
+additive, so ADR-196 promoted it — `1/2` is now a literal and `/` on integers is exact
+(`(/ 1 2)` → `1/2`). A *relaxation* the freeze explicitly allows; the freeze rows below
+are marked superseded.
 
 Also now permanent, and written down because they were already irreversible:
 `inf`/`nan`/`-inf` are reader float literals (those three bare tokens can never be
