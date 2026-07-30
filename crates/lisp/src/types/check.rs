@@ -972,6 +972,9 @@ pub fn check_file_ext(
         // a record-typed *variable* passed to an op with no impl.
         protocol::check_ability_calls(heap, &expanded, &ability_info, &mut out);
         protocol::check_sealed(&ability_info, &mut out);
+        // Super-ability conformance (ADR-193): an id implementing an ability must also implement
+        // that ability's `:requires` prerequisites.
+        protocol::check_requires(&ability_info, &mut out);
         // Op names must be unique within a module: two abilities declaring the same op
         // name would clobber each other's generic function (ADR-172).
         protocol::check_op_collisions(&ability_info, &mut out);

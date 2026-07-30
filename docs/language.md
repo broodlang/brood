@@ -513,6 +513,18 @@ sealing is a contract, not a restriction:
 (defability Shape :sealed [circle rect] (area [self] :-> float))
 ```
 
+**Super-abilities (`:requires`).** `:requires [A B …]` names prerequisite abilities — an id that
+implements this ability must also implement each of them, which `nest check` enforces (ADR-193).
+It's Rust's `trait Ord: Eq`: implement `Ord` for a type and forget `Eq`, and you're told at check
+time, not by a runtime `no-impl` later. Advisory and checker-only, like `:sealed` (late binding
+means it can't gate); a required ability's *provided* op is satisfied by its default.
+
+```clojure
+(defability Eq  (eqv [self other] :-> bool))
+(defability Ord :requires [Eq] (compare-to [self other] :-> int))
+(impl Ord money (compare-to [a b] …))   ; warns unless `money` also impls Eq
+```
+
 **Introspection and helpers.** `(satisfies? 'Shape x)` is true when every declared
 op resolves for `x` (directly or via `:default`), so a caller can branch instead of
 letting the op raise. `(record? x)` / `(record-id x)` / `(fields x)` are the clean
