@@ -11891,3 +11891,33 @@ module. `:alias` in fact `require`s its target, so `extract_import_module_names`
 it. Regression test `ki17_alias_clause_feeds_the_require_closure`; the fuzzer re-runs clean
 (200 valid + 30 transitive → 0 false positives, 30 negative controls → 0 misses), and the
 full `std/`+`tests/` sweep stays at zero.
+
+## 2026-07-30 — occurrence typing: inferred params check callers (ADR-190)
+
+Made the checker pay off on *unannotated* code. ADR-188 inferred each same-file function's
+return but stored a **return-only** sig — deliberately, "so it never constrains an argument."
+So `(needstr 5)` against `(defn needstr (s) (string-length s))` went unflagged even though `s`
+is obviously `string`. Flipped that: Pass 2.8 now carries each function's inferred **parameter
+demands**, and the caller arg-check consumes them.
+
+**The soundness argument (why flagging callers from inferred params is safe).**
+`collect_param_demands` under-constrains — only unconditional uses of known-sig callees
+constrain a param — so the inferred param type is a *superset* of the true valid-argument type.
+An arg disjoint from a superset is disjoint from the truth, so it genuinely errors; the flag is
+never a false positive, only an under-warn. Whole-repo `nest check`: **zero** new warnings.
+
+**Ability-op occurrence typing.** A use of a sealed op — `(area s)` — demands `s` be a member
+(a non-member no-impls), so `s` infers to `%{__id__: (:circle | :rect)}` with no sig. Emitted
+only when sound: the op is unambiguous (one ability), sealed (closed set), and `:default`-free.
+`(shout 5)` → flagged; `(shout (circle 2))` → silent; add a `:default` → silent (any value ok).
+
+**Two things I proved out and rejected along the way:**
+- **Accessor occurrence typing is unsound.** `(point-x p) ⇒ p : point` (nominal) flags a bare
+  `{:x 9}`, which works at runtime — a false positive `nest check` caught in `record_test`.
+  Accessors are structural `get`; only dispatching ops carry sound nominal identity.
+- The demand needs the sealed-op table built *before* Pass 2.8 (params are computed there), and
+  a return-deferred function (e.g. one returning an ability op whose facts aren't on `ctx` yet)
+  still needs its params stored — handled by a post-fixpoint pass.
+
+Annotations stay optional and win when present. 7 tests in `sig_adoption_test.blsp`. Net: write
+plain Brood, and a wrong caller is flagged — the derived-benefit goal.
