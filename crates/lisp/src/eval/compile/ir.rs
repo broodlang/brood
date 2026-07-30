@@ -1078,9 +1078,14 @@ pub enum Inst {
     /// head is a free global (`head = Some(sym)`, `site != NO_SITE`) and the frame
     /// resolves frees through the process global, the cached `(arm, env)` for
     /// `(site, sym, argc, epoch)` is used directly — skipping `dispatch`'s
-    /// passthrough probe + `compiled_arm_for`. The callee is still resolved in-order
-    /// (the pushed value), so eval order is unchanged and a `def` bumping the epoch
-    /// invalidates the entry (the in-order callee then takes the generic path).
+    /// passthrough probe + `compiled_arm_for`.
+    ///
+    /// **Eval order** (KI-19, ADR-191): eliding the head moves its resolution *after* the
+    /// arguments, which diverges from the tree-walker when an argument rebinds it. The
+    /// compiler therefore sets [`staged`](Self::Call::staged) for a rebindable head whose
+    /// args can run user code, and the callee is taken off the stack instead. `head`/`site`
+    /// stay populated either way, so the IC keeps caching the arm; a `def` bumping the epoch
+    /// invalidates the entry as before.
     Call {
         argc: usize,
         tail: bool,

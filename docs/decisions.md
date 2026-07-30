@@ -12439,3 +12439,48 @@ ADR-181/186 (a sealed ability is a finite record-id union — the ability-op dom
 ADR-172/168 (sealed abilities, the `:default` fallback), ADR-023/024 (advisory, gradual, no
 false positives — the soundness bar this holds to), `tests/sig_adoption_test.blsp`
 ("occurrence typing"), the 2026-07-30 devlog entry.
+
+## ADR-191 — A call's free-global head is resolved *before* its arguments, via a `staged` flag
+
+**Context.** The tree-walker evaluates a call's operator first (`eval_arguments` receives an
+already-evaluated callee). The VM did not: `emit` elided a free-global head entirely and
+`Inst::Call` resolved it through the call-site IC *after* the arguments had run. An argument
+that rebinds the head therefore produced different answers on the two engines —
+`(defn g () (f (bump)))` where `bump` re-`def`s `f` gave `:new` on the VM and `:old` on the
+tree-walker (KI-19). The elision was not gratuitous: it removes a redundant head push and an
+`env_get` per call, on the hottest path in the system.
+
+**Decision.** `Inst::Call` carries a `staged: bool`. The compiler stages the head — as a
+`GlobalIc`, so it still resolves at IC speed — ahead of the arguments for exactly the calls
+that can be affected: a **rebindable** global head with at least one argument that can run
+user code (`node_runs_user_code`: a call, self-call or `try`, however deeply nested). `head`
+and `site` stay populated when staged, and the VM validates the IC's cached callee against
+the staged value by closure identity. The JIT treats a staged head as a computed callee
+(`head: None`, `site: NO_SITE`) so it calls the staged value rather than re-resolving.
+
+**Reserved names are exempt.** `def` refuses a name the language ships (ADR-166), so its
+resolution cannot change mid-call and the elided head stays correct for it. This is what
+makes the fix nearly free: the prelude-heavy rows are almost entirely calls to
+`first`/`rest`/`str`-class names that were never rebindable.
+
+**Alternatives, both implemented and rejected on measurement** — recorded because each looks
+obviously right until it is run:
+
+1. *Stage the head as a plain `Global` read.* Correct, and it costs `json` **6×**
+   (168 → 1159 ms). The elided head's real value is the call IC's cached **arm**, not the
+   callee lookup; demoting to the computed-callee path throws that away.
+2. *Stage it via its own global-IC site, leaving `head: None`.* Fixes both the ordering and
+   the lookup cost — and **aborts the process** on every row with a JIT'd call
+   (`brood_rt_call_slow` → `unbound_error` → non-unwinding panic). `emit` decides
+   elided-vs-staged from the callee node while `jit_lower` decides it from `(head, site)`, so
+   a staged head left `head: None` with a live `site` and the JIT resolved a head that was no
+   longer there. Setting `site = NO_SITE` removes the abort and reinstates the 6×.
+3. *Stage every call, not just rebindable ones.* Costs `regex` **31%**, `wordcount` 11%,
+   `sieve` 9%.
+
+**Consequences.** Both engines now match the tree-walker's operator-first order. Cost is one
+operand push on the narrow set of calls that can actually be affected; the benchmark rows are
+flat (`json` −3.6%, `bintree` −2.0%, `fib` +0.4%, `nbody` +0.1%, with `regex`/`wordcount`/
+`sieve` at baseline on solo re-runs). The trade is explicit: a staged call forgoes the JIT's
+in-IR fast link, which is keyed on an elided head symbol — acceptable because such a call
+already pays a nested activation for the argument that forced the staging.
