@@ -12916,3 +12916,16 @@ sidesteps the time-boxed-differencing trap; compare at equal `iter=`, never equa
 the `pkill -f` trap in CLAUDE.md caught me exactly as documented: `pkill -f "mirror[.]sh"`
 killed the shell that was writing `mirror.sh`, because the bracket trick protects the
 *pattern*, not the rest of the command line. Kill by PID.
+
+**First sequence run: `OK soak complete: 813534 iterations, rss_kb=869468 rt-closures=72`** —
+zero invariant violations, and run 2 (control) auto-started, so the harness works end to end.
+It also showed a **second** effect: throughput decayed *within* the run, 2041 → 633 → 362 →
+259 it/s across successive 200k-iteration segments while RSS went 28 → 923 MB — ~8× in 29
+minutes. That is confounded (the growth-curve run was competing for CPU and memory bandwidth
+the whole time, and was itself growing; a solo 25 s run did 3537 it/s), so it is recorded as
+an observation, not a result. It disentangles for free later in the night: once the
+growth-curve run hits its 6 GB cap the remaining sequence runs are effectively solo, so a
+late armed run's opening rate against run 1's 2041 it/s separates contention from intrinsic
+decay with no new experiment. If it is intrinsic it matters more than the RSS growth does —
+a server that slows 8× in half an hour of churn is a worse problem than one that holds a
+gigabyte.
