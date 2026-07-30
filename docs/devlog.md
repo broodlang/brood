@@ -11922,6 +11922,25 @@ only when sound: the op is unambiguous (one ability), sealed (closed set), and `
 Annotations stay optional and win when present. 7 tests in `sig_adoption_test.blsp`. Net: write
 plain Brood, and a wrong caller is flagged — the derived-benefit goal.
 
+## 2026-07-30 (cont.) — occurrence typing works cross-file (ADR-190 follow-up)
+
+Closed the one gap in ADR-190: ability-op occurrence typing now fires **across files**, not
+just within one. A `(defn shout (s) (area s))` in module A, called wrongly as `(shout 99)` in
+module B, is flagged with `s : %{__id__: (:a | :b)}` — no annotation anywhere.
+
+The bug was in `infer_sig` (the *loaded*-closure path `sig_of` uses for an imported function):
+`let ret = expr_ty(tail)?` discarded the inferred **params** whenever the **return** couldn't
+be inferred — and a function returning an ability op can't resolve its return on the bare
+inference ctx (the ability facts aren't bound there). So it now returns the params with an
+`ANY` return when a param is genuinely constrained — the loaded-path mirror of Pass 2.8's
+post-fixpoint fallback. Sound (params under-constrain; the `ANY` return just defers).
+
+Diagnosis note to self: the primitive-demand path (`label`) crossed files fine because
+primitive sigs are global; the ability-op path didn't, which is what pointed at the
+return-discards-params behaviour. (Also spent a minute chasing a stale `nest` binary — `nest`
+is a separate binary embedding the lib, so `cargo build --bin brood` alone doesn't rebuild it.)
+Whole brood repo stays warning-clean.
+
 ## 2026-07-30 (cont.) — the GC/VM/JIT correctness sweep: eleven defects, KI-18 and KI-19 closed
 
 Three review passes over the GC, the bytecode VM and the JIT, then fixing everything they
