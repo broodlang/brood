@@ -12050,3 +12050,65 @@ false positive). 5 tests; whole repo warning-clean (no std ability declares `:re
 This completes item #1 of the six deferred abstractions; the other five are recorded on the
 roadmap with their urgency (all ADR-011 "wait for a concrete need" except open-ability bounds,
 which is a declined non-goal).
+
+## 2026-07-30 (cont.) — benchmark fairness, a published run, and three refuted perf hypotheses
+
+The afternoon after the correctness sweep. Net: **`nbody` −47% published**, two benchmark
+ports corrected, one memory win, and three hypotheses retired with measurements. Recording
+the negatives at length because each one looked obviously right and cost real time.
+
+**`spawn-live` was giving .NET, Node and Python unearned credit — two defects.** (1) .NET's
+`TaskCompletionSource` resumes its continuation **inline on the setter's thread** by default;
+probed at **1000 of 1000 inline, none on the pool**, so "wake 300 000 concurrent units" was
+300 000 synchronous closure calls with no scheduling at all. `RunContinuationsAsynchronously`
+fixes it. (2) Brood and Elixir have each unit *send a reply message* the parent receives
+individually — two copied messages per unit — while Node/Python/.NET returned a value into a
+pre-allocated array via `Promise.all`/`gather`/`WhenAll`, a reference store. All three now
+drain a queue one item at a time. **Neither fix moved the standings**: forcing .NET to
+schedule made it *faster* (345 → 294 ms, cores 1.0× → 1.6×). The credit is largely earned;
+what those runtimes don't provide is structural, so the real fix was presentational — the row
+now leads with Brood vs Elixir, its only peer.
+
+**Payload representation.** Brood and Elixir copied a 16-cell cons list where the array ports
+memcpy'd 64 bytes. Both now use their contiguous container (vector / BEAM tuple) — the mapping
+`nbody` already documents, so both peers move together and the comparison stays level. Worth
+**11% of wall and 0.6% of memory** under the harness. An earlier single-run pair had suggested
+21%/33% and was published before being checked; the memory half was pure sampling noise.
+
+**`sort` never had a memory defect.** Its "191 MB, 6× the field" was a *classification*
+artifact: the row sat in the like-for-like table while pitting immutable-linked-list-sort
+against in-place-array-sort. Memory splits exactly on that line — 124–191 MB for the three
+persistent languages, 25–67 MB for the four in-place ones — and Brood is **1.19× Elixir** on
+the same structure. Reclassified. Attribution, from `gc-stats` phase instrumentation: ~750 000
+cons cells live at peak (the input list *and* the new sorted one, since immutability forbids
+sorting in place) at 48 bytes each, doubled by the copying collector's to-space and again by
+`Vec` capacity growth.
+
+**Three refuted hypotheses — do not re-chase.**
+1. *Nursery growth factor* (`2 × live`), called "the dominant term" for `sort`: sweeping
+   2.0 → 1.5 → 1.25 → 1.1 moves it **not at all** (183–187 MB). `BROOD_GC_GROWTH` kept as a
+   knob purely because it made the refutation possible; its doc says so.
+2. *Tenure-path nursery reservation*: this one is real but small — the nursery restarts empty
+   on a tenure yet reserved the outgoing nursery's full length. Worth −7.7% json, −7.5%
+   base64, −3.9% bintree, time flat. Shipped.
+3. *Installing the callee's IC block on a fast link* (KI-20): correct, and **reverted** at
+   `bintree` +5.5% for no gain — the bases lookup lands on `jit_dispatch_fast_frame`, the path
+   whose whole purpose is to skip the IC probe, and which is dominated by self-recursion where
+   the install is a no-op. Any retry must pass the bases through the IR alongside the
+   `code`/`nslots`/`env` it already loads.
+
+**A diagnostic worth keeping: the JIT-vs-no-JIT ratio per row.** `fib` 38×, `loop` 31×,
+`collatz` 28× at the top; `reduce`/`strings` 1.0×, the codec rows 1.1–1.2×, `sort` 1.3×,
+`pipeline` 1.3×. It is what exposed nbody's silent bail, and it cheaply separates
+"interpreter-bound" from "JIT working". Caveat learned the same day: `jit_native` counts
+native *entries*, so a self-tail loop shows **1** for a whole 375k-iteration run — `sort`'s
+`jit_native = 2` is correct, not a bail.
+
+**Measurement discipline.** Three apparent benchmark movements this session were drift and
+were rejected by controlled `make ab`: `spawn` +20%, `spawn-live` −22%, `persistent-map`
++12.8%. Two were reported as regressions before machine load was checked; the −22% would have
+been published as a win. A single harness sample does not separate signal from drift on this
+box **in either direction**. Also fixed a self-inflicted version of the same problem: nine
+orphaned wait-loops (`until ! pgrep -f <pattern>`, where the pattern matched the watcher's own
+command line, so the condition could never go false — oldest ran 17 hours) were polluting the
+liveness checks used to decide whether the machine was quiet.
