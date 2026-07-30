@@ -177,7 +177,7 @@ arg silently becoming `nil`.
 | | `%try` | 2 | call a thunk; on raise, call the handler with the caught value |
 | | `%isolate` | 1 | call a thunk against a private copy of the globals; roll back its `def`s afterward (used by `:isolated` tests) |
 | **Processes** | `%spawn` | 1 | run a **0-arg thunk** in a new green process; returns its pid. `spawn` is the prelude macro over it — `(spawn expr)` wraps `expr` in the thunk, and `(spawn name expr)` is the named/idempotent form (a live registration under `name` short-circuits and `expr` is never evaluated) |
-| | `%spawn-link` | 1 | as `%spawn`, but bidirectionally linked to the caller; `spawn-link` is the macro over it |
+| | `%spawn-link` | 1 | as `%spawn`, but the symmetric caller↔child link is registered **before the child is enqueued** (atomic spawn+link, ADR-067), so an instant exit still reports its true reason — a spawn-then-`link` can find the child already dead and reports `:noproc`, losing it. `spawn-link` is the macro over it |
 | | `send` | 2 | copy a message into a pid's mailbox |
 | | `%receive` | 3 | selective-receive primitive (matcher fn, timeout-ms-or-nil, on-timeout thunk-or-nil); `receive` is a Brood macro over it |
 | | `self` | 0 | this process's pid |

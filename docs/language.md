@@ -1739,6 +1739,7 @@ child's own pid** — to hand the parent's pid in, bind it in an enclosing `let`
 | Form | Meaning |
 |---|---|
 | `(spawn expr)` | Run `expr` (unevaluated) in a new green process; returns its pid. Free locals are captured; `(self)` inside is the *child's* pid. |
+| `(spawn-link expr)` | As `spawn`, but the child is **linked to the caller atomically** — before it can run (Erlang `spawn_link`), so even an instant exit reports its *true* reason. What supervised children use. See *Links* below. |
 | `(send target msg)` | Copy `msg` into `target`'s mailbox (non-blocking; a dead/unknown target is a no-op). `target` is a pid (local **or remote** — see [Distributed nodes](#distributed-nodes)) or a `{:name :node}` address. |
 | `(receive clause...)` | Take the first matching message (see below); suspend until one arrives. `(receive)` with no clauses takes the next message. |
 | `(self)` | Your own pid — a `:pid` value carrying this node's identity. |
@@ -1916,6 +1917,45 @@ monitors anywhere in the fallen tree report the root cause — not a blanket
 `:kill`. Links are what `proc/supervisor`'s trapping supervisor loop is built
 on; remote (cross-node) links deliver the same shapes, plus `:noconnection` on
 a net-split.
+
+#### `spawn-link` — spawn and link atomically
+
+`(spawn-link expr)` spawns `expr` in a new process **already linked** to the
+caller (Erlang `spawn_link`) and returns its pid. It takes one expression, like
+`spawn`, and a `(fn () …)` body is passed through rather than re-wrapped; there
+is no named form (`register` the child if it needs a name).
+
+The point is the **atomicity**, not the brevity. The link is registered while
+the child's mailbox is live but *before* the child is enqueued to run, so the
+child cannot exit before the link exists — its eventual death always reaches you
+as `[:EXIT pid reason]` carrying the **real** reason. Hand-rolling it as
+`(let (p (spawn expr)) (link p) p)` leaves a gap: a child that finishes inside it
+is linked *dead*, and link-to-dead reports `:noproc` — which **replaces** the
+true reason, so a clean `:normal` return arrives looking like a failure.
+
+```clojure
+(trap-exit true)
+
+(let (p (spawn-link :ok))                  ; child returns immediately
+  (receive ([:EXIT ^p reason] reason)))    ;=> :normal — always
+
+(let (p (spawn :ok))                       ; the hand-rolled version: `link` races the child
+  (receive (after 20 :settle))             ; ...lose the race (here, deliberately)
+  (link p)
+  (receive ([:EXIT ^p reason] reason)))    ;=> :noproc — the :normal is gone
+```
+
+That difference is not cosmetic: a supervisor whose restart policy keys off the
+reason (`:transient` restarts only on an *abnormal* exit) will spuriously restart
+a child that merely finished fast — a real bug this repo shipped and fixed
+(2026-06-14). And the gap makes the hand-rolled form untrustworthy rather than
+merely sometimes-wrong: drop the `after` above and `link` usually wins, so the
+failure only appears under load — exactly where a supervisor matters.
+
+**Use `spawn-link` for anything supervised.** `std/proc/supervisor.blsp`'s
+`:start` thunks do (`(fn () (spawn-link (worker …)))`), and `proc/gen`'s
+`spawn-server-link` is the same guarantee for a `defprocess` server. The prelude
+macro expands to the `%spawn-link` primitive (ADR-067).
 
 ### Timers
 
