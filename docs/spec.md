@@ -100,6 +100,7 @@ A value is exactly one of:
 | **set** | immutable collection of distinct elements (`#{ }`); its own kind — never `=` to a map (ADR-060). |
 | **bytes** | immutable byte sequence (`#b"…"`), the binary counterpart of `string`; addressed by byte, and the subject of bit-syntax patterns (ADR-140). |
 | **decimal** | exact arbitrary-precision base-10 (`1.50M`), for money — values a float cannot hold. |
+| **ratio** | exact rational (`1/2`), always reduced with a positive denominator; `/` on integers is exact (`(/ 1 2)` → `1/2`), and a denominator of 1 demotes to an integer (ADR-196). |
 | **rope** | immutable, char-indexed editor buffer text, backed by a rope structure (ADR-045). |
 | **pid** | a process identifier, carrying its node's identity. |
 | **ref** | a globally-unique reference token; tags a request to its reply. |

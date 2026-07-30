@@ -244,6 +244,9 @@ literal — no constructor call.
 |  | `decimal->string` | 1 | The canonical decimal string of decimal d (no M suffix). |
 |  | `decimal->float` | 1 | Decimal d as an (inexact) float. |
 |  | `to-fixed` | 2 | Render number x as a string with exactly n digits after the decimal point (rounded). n must be >= 0. |
+| **Ratio** (exact rational — the `1/2` literal; `/` on integers is exact, ADR-196) | `numerator` | 1 | The numerator of a ratio (`(numerator 3/4)` → 3), or an integer itself. |
+|  | `denominator` | 1 | The positive denominator of a ratio (`(denominator 3/4)` → 4), or 1 for an integer. |
+|  | `->decimal` | 1 | A number as an exact base-10 decimal — exact for an integer or terminating ratio (`1/2` → `0.5M`); a non-terminating ratio rounds to the default precision. (`->float`, `ratio?`, and `rational` are prelude functions.) |
 | **Set** (`#{…}`; CHAMP-backed. `%`-internal — `std/set.blsp` is the library) | `%set` | 2 | Build a set from the element args (the programmatic form of the `#{ }` literal). Dedups by structural equality. The `set` library's constructor is Brood over this. |
 |  | `%set-add` | 2 | A fresh set like s with element x added (a set already holding x is returned unchanged). O(log n). |
 |  | `%set-remove` | 2 | A fresh set like s with element x removed (absent → unchanged). O(log n). |

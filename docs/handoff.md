@@ -4,8 +4,20 @@
 measurements live in [`devlog.md`](devlog.md); the option book lives in
 [`runtime-frontier.md`](runtime-frontier.md). Read this to pick the work back up cold.
 
-**As of 2026-07-30**, brood `92c1ef2d`, brood-benchmarks `10d669e`. Both repos clean and
-pushed; nothing half-finished.
+**As of 2026-07-30**, brood `56c2501`, brood-benchmarks `10d669e`. Nothing half-finished.
+
+Since the perf session this document was written for, the tree also gained **automatic macro
+hygiene** and **exact rationals as a kernel type** (`Value::Ratio`, ADR-196 — `1/2` is a
+reader literal and `(/ 1 2)` is exact), plus the ADR-166 Phase 1 reserved-name plan and
+ADR-197. Those are language work, not runtime work, so §§1–5 below still describe the
+current runtime picture unchanged.
+
+**Two of the three 1.0 release blockers in [`roadmap-for-v1.md`](roadmap-for-v1.md) moved**
+(re-measured 2026-07-30): `nest::registry` is **resolved** — the tests pin
+`commit.gpgsign=false`/`tag.gpgsign=false`, so CI no longer tracks whether a desktop signing
+agent is unlocked — and `nest format --check` is red on **26 files, not 52**. The formatter
+red is a **style verdict, not a bug**: 40% of its diff is documented comment *hoisting*.
+Read that entry before touching the formatter; do not run it tree-wide first.
 
 ---
 
@@ -41,19 +53,22 @@ From the published run (`brood-benchmarks/results/`):
 
 ## 3. Open threads, in the order I'd take them
 
-1. **`std/` scale sweep — started, and the hit rate is high.** The premise held: two of the
-   three quadratics fixed the previous session were in **Brood policy code, not the kernel**,
-   and `std/net/*` yielded two more on the first look — `tcp--read-until` rebuilding and
-   rescanning its whole accumulator per chunk (O(total²), 16× the chunks → 169× the time, no
-   size cap, remotely triggerable), and `http--read-until` still O(head²) in *memcpy* because
-   ADR-142 fixed only the scan half. Both fixed with a straddle probe; flat ~15 µs/chunk to
-   64 000 chunks. Harness: `scripts/fuzz/stress/net_framed_scale.blsp`.
-   **Still unswept: `proc/gen`, `proc/agent`, `editor/buffer` at 10k+.** Two lessons for
-   whoever continues: a comment asserting linearity is not evidence (both of these had one),
-   and grep for a `concat`/`append`/`filter` whose argument is the *accumulator* — that is the
-   shape. Also, the framed-read combinators are testable without a socket: they consume
-   `[:tcp sock data]` from the mailbox and only pin `sock` by equality, so the drip can be
-   fabricated with `send` to self.
+1. **`std/` scale sweep — started, harness in §4, and the hit rate is real.** The premise held:
+   two of the three quadratics fixed the perf session were in **Brood policy code, not the
+   kernel**, and `std/net/*` yielded two more on the first look — `tcp--read-until` rebuilding
+   and rescanning its whole accumulator per chunk (O(total²), 16× the chunks → 169× the time,
+   no size cap, remotely triggerable), and `http--read-until` still O(head²) in *memcpy*
+   because ADR-142 had fixed only the scan half. Both fixed with a straddle probe; flat
+   ~15 µs/chunk to 64 000 chunks (`net_framed_scale.blsp`).
+   **Swept and clean:** `proc/agent update`, `buffer insert`, `buffer forward-line`
+   (`scale_sweep.blsp`). **Still open:** `proc/gen gen-call`'s ratio is unstable and needs
+   three points + medians before it means anything; `std/net/*` beyond the framed reads,
+   `editor/*` beyond buffer, and the rest of `std/tool/*` are unswept.
+   Two lessons for whoever continues: **a comment asserting linearity is not evidence** (both
+   net findings sat under one, and one of them was an ADR's claim), and the shape to grep for
+   is a `concat`/`append`/`filter` whose argument is the **accumulator**. Also, a `receive`-based
+   combinator needs no socket to test at scale: it consumes `[:tcp sock data]` from the mailbox
+   and only pins `sock` by equality, so the drip is fabricated with `send` to self.
 2. **Per-message cost — the last real gap.** Brood's `latency` p50 is 27 µs vs Elixir's 8 µs,
    and it is the same number behind `pingpong`, `ring` and most of what remains in
    `supervisor`. A request here is spawn + send + a collector receive. See frontier A1/A3.
@@ -88,6 +103,12 @@ All three live in `scripts/fuzz/stress/` and carry usage headers:
   floor at ~1.0–1.7 µs/chunk), because an absolute per-chunk number means nothing without
   them. That row has a ~15% run-to-run spread — don't read a small delta off it.
 - **`reload_cost.blsp`** — fixed-iteration memory harness (see the trap below).
+- **`scale_sweep.blsp`** — thread #1's harness, added 2026-07-30. Runs a `std/` framework op
+  at N and 4N and prints the ratio (linear ~4×, quadratic ~16×). **Its header carries the
+  measurement caveat and must be read first:** `proc/agent update`, `buffer insert` and
+  `buffer forward-line` measured linear; `proc/gen gen-call` read 10.21× then 7.77× at base
+  2000 but 2.93× at base 4000, which is not a quadratic's signature (a quadratic does not
+  improve as the base grows). Extend it to three points + medians before believing any row.
 
 Plus the existing `scripts/fuzz/run.sh <generator>` (differential across 4 engine configs)
 and `dist_chaos*.sh` (multi-node, closure-shipping).

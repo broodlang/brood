@@ -142,10 +142,12 @@ literal a *breaking* change to add.
   `12-34`) is a reader error, not a symbol. Names with a sign/dot but no digit behind
   (`+`, `-`, `...`, `.foo`, `--5`) are untouched.
 
-**Ratios: a documented "not in 1.0", token reserved.** `(/ 1 2)` gives a float, `0.5M`
-an exact decimal, and `/` is the namespace separator — so `1/2` is doubly spoken for.
-Reserving the token (rather than shipping the type) keeps a post-1.0 ratio type
-additive at zero cost. Recorded in the freeze list below.
+**Ratios — shipped as a kernel type (ADR-196), superseding this "not in 1.0" note.**
+This section originally reserved the `1/2` token and left ratios out of 1.0 (`(/ 1 2)`
+gave a float). That reservation did its job: shipping the ratio type *later* was
+additive, so ADR-196 promoted it — `1/2` is now a literal and `/` on integers is exact
+(`(/ 1 2)` → `1/2`). A *relaxation* the freeze explicitly allows; the freeze rows below
+are marked superseded.
 
 Also now permanent, and written down because they were already irreversible:
 `inf`/`nan`/`-inf` are reader float literals (those three bare tokens can never be
@@ -291,15 +293,31 @@ miss them.
   RUNTIME collector re-walked a deep process's whole root stack at every safepoint, so
   cost scaled with loaded code, not test size. Full `nest test` including conformance is
   **3592 tests in ~90 s**; `cargo nextest run` is 877/877.
-- ⬜ **`nest format --check` is red on 52 files** (was 46 when this was written, so it
-  is drifting), including `project.blsp`. The formatter reflows regions the tree writes differently (splitting multi-arg
-  `error`/`str` calls), so it needs one deliberate whole-tree pass plus a decision on
-  whether that style is wanted — not a drive-by.
-- ⬜ **The `nest::registry` tests** fail whenever the signing agent stops approving
-  (`commit.gpgsign` + `op-ssh-sign` makes `git commit` hang in the temp repos they
-  build). An environment condition, but one that makes CI results untrustworthy.
-  Currently **green** (6/6) with the agent unlocked — which is the problem: the result
-  tracks whether a desktop app is unlocked, so it should not gate CI at all.
+- ⬜ **`nest format --check` is red on 26 files** — down from 52, measured 2026-07-30 at
+  `56c2501` (319 considered, 26 rewritten). A whole-tree pass (run in a throwaway
+  worktree) produces **+570/−380 across 175 hunks**, and the diff is two distinct things:
+  - **≈69 hunks (40%) are comment *hoisting*** — a same-line trailing comment moved onto
+    its own line above the form, so `nil ; one un-taggable clause disables the filter`
+    becomes two lines. This is **intended, documented behaviour**, not a bug
+    (`std/format.blsp:476`, and `last-nonws-comment?` at `:369` exists to keep a closing
+    paren from landing inside a hoisted comment). The tree's authors do not write that
+    way, which is the entire disagreement.
+  - **The remainder splits multi-arg `error`/`str`/`println` calls** at points that read
+    worse than the hand-written source (`(str "match: (record " ⏎ (pr-str name) …)`), plus
+    a residue of legitimately unformatted new code (`ratio_test.blsp`,
+    `ability_test.blsp`, written the same day).
+
+  So this is **a style verdict, not a defect hunt** — which is why it stays ⬜. Decide
+  hoisting first: keep it and take one deliberate whole-tree pass (accepting the loss of
+  aligned trailing comments), or drop it — teach `format.blsp` to leave a same-line
+  comment in place, which also simplifies `last-nonws-comment?`/`comment-on-own-line?` —
+  and re-measure, because 40% of the red goes away with it. Do not run the formatter
+  tree-wide before that call is made.
+- ✅ **The `nest::registry` tests — resolved.** They now build their temp repos with
+  `-c commit.gpgsign=false -c tag.gpgsign=false` (`crates/nest/tests/registry.rs:75`),
+  so `git commit` no longer reaches `op-ssh-sign` and the result no longer tracks whether
+  a desktop signing agent is unlocked. **6/6 green with the agent irrelevant** (verified
+  2026-07-30). `format_changed.rs` pins the same way.
 
 ---
 
