@@ -367,7 +367,9 @@ fn unrequired_module(heap: &Heap, ctx: &Ctx, s: Symbol) -> Option<String> {
 
 /// The KI-17 reachability diagnostic text for a reference to unrequired `module`.
 fn unrequired_msg(module: &str) -> String {
-    format!("qualified reference to unrequired module: {module} (add (require '{module}) to this file)")
+    format!(
+        "qualified reference to unrequired module: {module} (add (require '{module}) to this file)"
+    )
 }
 
 /// True when a call whose head is `s` *evaluates its arguments as values* — `s`
@@ -967,11 +969,21 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         // may describe it; never the stale heap signature.
         // `is_lexical_local` guards the heap fallback too: a shadowing local is not
         // the global, so its arg/return types are unknown — never the primitive's.
-        let sig = declared.clone().or_else(|| {
-            (!ctx.is_lexical_local(s) && !ctx.is_file_global(s))
-                .then(|| sig_of(heap, s))
-                .flatten()
-        });
+        let sig = declared
+            .clone()
+            .or_else(|| {
+                (!ctx.is_lexical_local(s) && !ctx.is_file_global(s))
+                    .then(|| sig_of(heap, s))
+                    .flatten()
+            })
+            .or_else(|| {
+                // A same-file function's inferred sig (Pass 2.8, ADR-190) — now carrying param
+                // demands, so a same-file caller's args are checked (the file isn't loaded, so
+                // `sig_of`'s heap path above can't see it). A lexical local shadows the global.
+                (!ctx.is_lexical_local(s))
+                    .then(|| ctx.inferred_fn_sig(s))
+                    .flatten()
+            });
         // The real callable's arity is authoritative when known (a `sig!` wrapper
         // preserves the wrapped fn's arity); fall back to the declared param count
         // for a file-local defn the read-only checker can't inspect. A declared

@@ -12373,3 +12373,57 @@ warning, never invent one.
 
 **References.** KI-17 (docs/known-issues.md), ADR-119 (the incremental check cache the closure
 field extends), ADR-065 (modules/namespaces), the 2026-07-30 devlog entry.
+
+## ADR-190 — Occurrence typing: inferred parameters check callers (derived, no annotation)
+
+**Status:** accepted + shipped.
+
+**Context.** The type system's benefit was gated on **annotation**: a `(sig …)` on a function
+made its callers' arguments checked, but an unannotated function checked nothing on its
+callers. ADR-188's same-file inference already derived each function's *return* — but stored a
+**return-only** sig ("a params-less sig, so it never constrains an argument"), so `(needstr 5)`
+against `(defn needstr (s) (string-length s))` went unflagged even though `s` is plainly
+`string` and the call errors. The goal (docs/types.md, the Elixir/set-theoretic direction):
+lean into **derived types** so a user gets the benefit *without* being made to type — while
+keeping annotations optional and additive.
+
+**Decision.** Make the checker **consume inferred parameter types**, so an unannotated
+function checks its callers. Two pieces, both **sound**:
+
+**1 — Pass 2.8 carries inferred params.** `check_file`'s same-file fixpoint now stores each
+single-def function's inferred *parameter demands* (`sigs::infer_params_from_form` →
+`collect_param_demands`) alongside its return, and a return-*deferred* candidate still gets its
+params with an `ANY` return. The caller arg-check (`walk`) consumes `ctx.inferred_fn_sig` for a
+file-global callee (the file isn't loaded, so `sig_of`'s heap path can't see it).
+
+**Why it's sound to flag callers from inferred params.** `collect_param_demands`
+**under-constrains** — it captures only *unconditional* uses of known-sig callees (a guarded
+use never constrains), so the inferred param type is a **superset** of the true valid-argument
+type. An argument disjoint from that superset is disjoint from the truth too, so it *genuinely*
+errors at runtime — the flag is never a false positive, only ever an *under*-warn. (This is the
+mirror of the return side, which over-approximates.) Verified: **zero** new warnings across
+`std/` + `tests/`.
+
+**2 — Ability-op occurrence typing.** A use of a **sealed** ability op — `(area s)` — demands
+its first argument be a member of the ability (a non-member `no-impl`s at runtime), so `s`
+infers to the member union `%{__id__: (:a | :b | …)}` with no annotation. `protocol::sealed_op_domain`
+supplies the demand from a per-file table (`annot::set_sealed_op_domains`, built from
+`AbilityInfo` before Pass 2.8), and it is emitted **only when provably sound**: the op is
+declared by exactly one ability (unambiguous), that ability is sealed (a closed set, so
+late-bound impls can't widen the domain), and it has **no `:default`** impl (which would accept
+any value). Everything else → no demand.
+
+**Rejected — accessor occurrence typing.** Deriving a *nominal* record identity from an
+accessor use (`(point-x p)` ⇒ `p : point`) is **unsound**: `point-x` is `(get r :x)`, so it
+works on any map with `:x`, and a bare `{:x 9}` is a *valid* argument — flagging it violates
+"never warn on a use valid for the current image." Accessors are structural; only *ability
+ops* (which dispatch, and error on a non-member) carry sound nominal identity.
+
+**Annotations stay optional.** A user `(sig …)` still wins (it's the author's stated contract);
+inference only fills the gap where none is declared. Nothing here makes anyone type.
+
+**References.** ADR-188 (same-file inference — the return side this completes with params),
+ADR-181/186 (a sealed ability is a finite record-id union — the ability-op domain),
+ADR-172/168 (sealed abilities, the `:default` fallback), ADR-023/024 (advisory, gradual, no
+false positives — the soundness bar this holds to), `tests/sig_adoption_test.blsp`
+("occurrence typing"), the 2026-07-30 devlog entry.

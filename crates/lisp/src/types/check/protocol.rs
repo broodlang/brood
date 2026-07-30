@@ -651,6 +651,53 @@ fn read_impls_registry(
     }
 }
 
+/// The occurrence-typing domain of a sealed op (ADR-190): the member-union type
+/// `%{__id__: (:a | :b | …)}` an argument to op `op_sym` must have, or `None` when no sound
+/// demand exists (read from the per-file table `annot::set_sealed_op_domains` installed).
+pub(super) fn sealed_op_domain(op_sym: value::Symbol) -> Option<crate::types::Ty> {
+    let full = value::symbol_name(op_sym);
+    let op_last = full.rsplit('/').next().unwrap_or(&full);
+    let members = super::annot::sealed_op_members(op_last)?;
+    let id_ty = members.iter().fold(None::<crate::types::Ty>, |acc, m| {
+        let lit = crate::types::Ty::keyword_lit(value::intern(m));
+        Some(match acc {
+            Some(a) => a.union(lit),
+            None => lit,
+        })
+    })?;
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert(value::intern("__id__"), (id_ty, true));
+    Some(crate::types::Ty::record_of(fields))
+}
+
+/// Build the per-file sealed-op occurrence-typing domains from `AbilityInfo` (ADR-190): op-name
+/// → member ids, for each op declared by **exactly one** ability, that ability **sealed** (a
+/// closed set, so late-bound impls can't widen it), with **no `:default`** impl (which would
+/// accept any value). Installed via `annot::set_sealed_op_domains` — `AbilityInfo` sees this
+/// file's abilities, which the heap registries don't during `--check`.
+pub(super) fn build_sealed_op_domains(info: &AbilityInfo) -> HashMap<String, Vec<String>> {
+    let mut op_count: HashMap<&String, usize> = HashMap::new();
+    for ops in info.abilities.values() {
+        for op in ops {
+            *op_count.entry(op).or_default() += 1;
+        }
+    }
+    let mut out = HashMap::new();
+    for (ability, members) in &info.sealed {
+        let Some(ops) = info.abilities.get(ability) else {
+            continue;
+        };
+        for op in ops {
+            if op_count.get(op) == Some(&1)
+                && !info.defaults.contains(&(ability.clone(), op.clone()))
+            {
+                out.insert(op.clone(), members.clone());
+            }
+        }
+    }
+    out
+}
+
 /// The ability-name-as-a-type table for `annot` (ADR-181/186): every known ability name →
 /// `Some(member ids)` if it is **sealed** (the qualified, closed member set → a finite union
 /// of record shapes) or `None` if it is **open** (→ the permissive `any`). Unions the file's

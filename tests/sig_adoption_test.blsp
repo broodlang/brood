@@ -90,3 +90,31 @@
 (defn sig--misplaced (lines)
   (keep (fn (pair) (let ([a b] pair) (when (sig--above-def? a b) a)))
     (zip lines (rest lines))))
+
+;; ---- occurrence typing: inferred params check callers, zero annotations (ADR-190) ----
+;; Pass 2.8 now carries each same-file function's inferred PARAMETER demands (not just its
+;; return), and the caller arg-check consumes them. Sound: the demands under-constrain (a
+;; superset of the true valid-argument type), so a flagged argument is one that genuinely
+;; errors at runtime — never a false positive.
+(describe "occurrence typing — inferred params flag callers"
+  (test "a param inferred from a primitive use checks callers"
+    (is (warns-about? "(defmodule ot1) (defn needstr (s) (string-length s)) (defn c () (needstr 5))"
+          "expects string")))
+  (test "a correct caller is silent"
+    (assert= (warns-of "(defmodule ot2) (defn needstr (s) (string-length s)) (defn c () (needstr \"hi\"))") nil))
+  (test "an unconstrained param never flags (no demand → sound)"
+    (assert= (warns-of "(defmodule ot3) (defn id2 (s) s) (defn c () (id2 5))") nil))
+  (test "a guarded use never constrains the param (sound)"
+    (assert= (warns-of "(defmodule ot4) (defn g (s) (if (string? s) (string-length s) 0)) (defn c () (g 5))") nil)))
+
+(describe "occurrence typing — a sealed ability op derives the param"
+  (test "a param used as a sealed op's arg is inferred to the member union; a non-member caller is flagged"
+    (is (warns-about?
+          "(defmodule ot5) (defrecord circle (r)) (defrecord rect (w h)) (defability Shape :sealed [circle rect] (area [self] :-> float)) (impl Shape circle (area [c] 1.0)) (impl Shape rect (area [r] 1.0)) (defn shout (s) (area s)) (defn c () (shout 5))"
+          "__id__")))
+  (test "a member caller is silent"
+    (assert= (warns-of
+          "(defmodule ot6) (defrecord circle (r)) (defability Shape :sealed [circle] (area [self] :-> float)) (impl Shape circle (area [c] 1.0)) (defn shout (s) (area s)) (defn c () (shout (circle 2)))") nil))
+  (test "a :default impl makes the op accept any value — no demand (sound)"
+    (assert= (warns-of
+          "(defmodule ot7) (defrecord circle (r)) (defability Shape :sealed [circle] (area [self] :-> float)) (impl Shape circle (area [c] 1.0)) (impl Shape :default (area [_] 0.0)) (defn shout (s) (area s)) (defn c () (shout 5))") nil)))

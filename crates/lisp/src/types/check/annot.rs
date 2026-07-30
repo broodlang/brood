@@ -29,6 +29,14 @@ thread_local! {
     /// `:-> Shape`, `(sig g (Display -> string))`).
     static ABILITY_TYPES: RefCell<HashMap<String, Option<Vec<String>>>> =
         RefCell::new(HashMap::new());
+
+    /// op-name (last `/` segment) → its sealed ability's member ids — the occurrence-typing
+    /// domain (ADR-190). Only ops declared by exactly one ability, that ability SEALED and
+    /// `:default`-free, so a `(area s)` use derives `s : Shape` soundly. Built per file from
+    /// `AbilityInfo` (which sees this file's abilities, unlike the heap registries under
+    /// `--check`) and installed by `set_sealed_op_domains`.
+    static SEALED_OP_DOMAINS: RefCell<HashMap<String, Vec<String>>> =
+        RefCell::new(HashMap::new());
 }
 
 /// Install this file's ability-type table (call before parsing sigs). Overwrites any prior
@@ -40,6 +48,18 @@ pub(super) fn set_ability_types(map: HashMap<String, Option<Vec<String>>>) {
 /// Drop the ability-type table — per-file hygiene, mirroring [`super::sigs::clear_sig_memo`].
 pub(super) fn clear_ability_types() {
     ABILITY_TYPES.with(|m| m.borrow_mut().clear());
+}
+
+/// Install this file's sealed-op occurrence-typing domains (ADR-190). Overwrites the prior
+/// file's (an empty map when nothing is eligible, so nothing leaks across files).
+pub(super) fn set_sealed_op_domains(map: HashMap<String, Vec<String>>) {
+    SEALED_OP_DOMAINS.with(|m| *m.borrow_mut() = map);
+}
+
+/// The member ids of the sealed ability an op-name anchors, if it is an eligible occurrence-
+/// typing op (see `set_sealed_op_domains`), else `None`.
+pub(super) fn sealed_op_members(op_name: &str) -> Option<Vec<String>> {
+    SEALED_OP_DOMAINS.with(|m| m.borrow().get(op_name).cloned())
 }
 
 /// An ability `name` as a **type**. A **sealed** ability → the union of its members' record
