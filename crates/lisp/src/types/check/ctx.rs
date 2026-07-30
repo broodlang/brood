@@ -196,6 +196,10 @@ pub(super) const SUPPRESS_TYPE_MISMATCH: u8 = 1 << 2;
 /// wasm `use-native` binding, a plugin loader). The one lint whose ground truth
 /// is the live image, not the source.
 pub(super) const SUPPRESS_UNBOUND: u8 = 1 << 3;
+/// `(check-allow :unrequired …)` — a qualified reference `mod/name` whose module the
+/// file never `require`s/`:use`s (KI-17). Suppresses the load-order-reachability lint
+/// for a file that deliberately relies on an ambient require pulled in elsewhere.
+pub(super) const SUPPRESS_UNREQUIRED: u8 = 1 << 4;
 
 /// One step of a narrowable access path: a keyword field (`(get x :k)`) or a
 /// fixed integer index (`(nth x 0)` / `(first x)` / `(second x)` / `(third x)`).
@@ -294,6 +298,15 @@ pub(super) struct Ctx {
     /// is authoritative. Only populated for globals defined exactly once (a
     /// redefined global's type is ambiguous — it stays `dynamic()`).
     inferred_value_ty: HashMap<Symbol, Ty>,
+    /// **Same-file inferred function signatures** — the sig the checker inferred for a
+    /// `(defn …)` in *this* file, from its form (the file isn't loaded while it's checked, so
+    /// `sigs::sig_of`'s loaded-closure inference can't see it). Populated by `check_file`'s
+    /// fixpoint pass and read at a call site *after* a declared sig (which is authoritative),
+    /// so a same-file caller gets the same checking a cross-module caller of a loaded function
+    /// already got. Return-only for now (params-less), so it flows results without imposing
+    /// argument constraints. Redefinable-global caution is the caller's (treated as an
+    /// over-approximation, like the loaded-inferred sigs).
+    inferred_fn_sig: HashMap<Symbol, Sig>,
     /// User-declared sigs that contain type variables (`?A`) — the full
     /// [`SigWithVars`] for unification at call sites.  Populated alongside
     /// [`declared`] when the sig annotation has at least one `?`-symbol.
@@ -348,6 +361,21 @@ pub(super) struct Ctx {
     /// `Arc` so per-scope `Ctx` clones don't copy the set. Populated by
     /// [`check_file`]; empty in fragment mode (so any qualified name is left alone).
     known_ns: Arc<HashSet<String>>,
+    /// **KI-17 reachability set** — module prefixes this file makes reachable *itself*:
+    /// every `(:use M)` in its header, every top-level `(require 'M)`, and its own
+    /// namespace. `Some` only in whole-project mode ([`check_file`] with the image
+    /// loaded), where an un-required module is nonetheless *bound* image-wide; a
+    /// user-written qualified reference to a module outside this set then resolves only
+    /// by load-order luck and is flagged. `None` disables the lint — in single-file /
+    /// fragment / REPL mode an un-required module simply isn't bound, so the ordinary
+    /// unbound check already covers it. `Arc` so per-scope clones don't copy the set.
+    required_mods: Option<Arc<HashSet<String>>>,
+    /// The full qualified symbol *names* (`"mod/name"`) that appear literally in the
+    /// **un-expanded** source — the user-written references. The KI-17 lint fires only
+    /// for a reference in this set, so a *macro-injected* `other/helper` (present only in
+    /// the expanded tree, naming a module the user's file never mentions) is never
+    /// flagged. `Arc` so per-scope clones stay cheap.
+    raw_qualified: Arc<HashSet<String>>,
 }
 
 impl Ctx {
@@ -577,6 +605,24 @@ impl Ctx {
     pub(super) fn module_is_known(&self, prefix: &str) -> bool {
         self.known_ns.contains(prefix)
     }
+    /// Record the KI-17 reachability set (see [`required_mods`](Ctx::required_mods)) —
+    /// enables the unrequired-module lint for this (whole-file) check.
+    pub(super) fn set_required_mods(&mut self, mods: HashSet<String>) {
+        self.required_mods = Some(Arc::new(mods));
+    }
+    /// The file's reachability set, or `None` when the lint is disabled (fragment mode).
+    pub(super) fn required_mods(&self) -> Option<&HashSet<String>> {
+        self.required_mods.as_deref()
+    }
+    /// Record the set of user-written qualified symbol names (see
+    /// [`raw_qualified`](Ctx::raw_qualified)).
+    pub(super) fn set_raw_qualified(&mut self, names: HashSet<String>) {
+        self.raw_qualified = Arc::new(names);
+    }
+    /// Did the qualified name `name` (`"mod/name"`) appear literally in the source?
+    pub(super) fn raw_qualified_has(&self, name: &str) -> bool {
+        self.raw_qualified.contains(name)
+    }
     /// Record that file-local `sym`'s value is a **variadic** `fn` (has a `&`
     /// rest param). Consulted by the arity check so a `(sig …)`-derived *exact*
     /// arity is never used to flag a variadic defn (see `variadic_globals`).
@@ -616,6 +662,19 @@ impl Ctx {
     pub(super) fn add_inferred_value_ty(&mut self, sym: Symbol, ty: Ty) {
         if !self.declared_value_ty.contains_key(&sym) {
             self.inferred_value_ty.insert(sym, ty);
+        }
+    }
+    /// The same-file inferred function signature for `sym`, if one was recorded. Read
+    /// *after* [`declared_sig`] (authoritative). Callers treat its return as an
+    /// over-approximation (a call result), like a loaded-inferred sig.
+    pub(super) fn inferred_fn_sig(&self, sym: Symbol) -> Option<Sig> {
+        self.inferred_fn_sig.get(&sym).cloned()
+    }
+    /// Record a same-file inferred function sig (Pass 2.8). No-op if a sig is already
+    /// declared for `sym` — a declaration wins.
+    pub(super) fn add_inferred_fn_sig(&mut self, sym: Symbol, sig: Sig) {
+        if !self.declared.contains_key(&sym) {
+            self.inferred_fn_sig.insert(sym, sig);
         }
     }
     /// The full (variable-bearing) declared sig for `sym`, if it was parsed

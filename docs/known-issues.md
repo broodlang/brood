@@ -2,9 +2,9 @@
 
 KI-9 is a one-off arity sighting judged a transient inconsistent-build artifact, not
 present in committed code; KI-10 no longer reproduces, incidentally fixed — both kept as
-records, not open bugs. **Open: KI-17** (a checker reachability gap — a workaround exists)
-**KI-18** (a bounded, one-time effect duplication in a deopt-thrashing multi-arity fn) and
-**KI-19** (the VM resolves a call's free-global head after its arguments).
+records, not open bugs. **KI-17** (the checker reachability gap) is now **FIXED** (ADR-189).
+**Open: KI-18** (a bounded, one-time effect duplication in a deopt-thrashing multi-arity fn)
+and **KI-19** (the VM resolves a call's free-global head after its arguments).
 This file is the condensed record — what each was, how it was fixed, and the regression
 test that guards it — so a recurrence is recognizable. For the narrative discovery
 writeup of the scheduler race, see
@@ -91,29 +91,40 @@ penalty and will be bailed. Worth closing, not worth blocking on.
 
 ---
 
-## KI-17 — `nest check` validates qualified names against ITS load set, not the entry point's · **OPEN 2026-07-29**
+## KI-17 — `nest check` validated qualified names against ITS load set, not per-file reachability · **FIXED 2026-07-30**
+
+**Fixed (ADR-189).** `check-file` now takes a per-file **reachability set** — the
+file's *transitive* require-closure — and flags a **user-written** qualified
+reference `mod/name` whose `mod` is outside it (bound in the image only by load-order
+luck). `std/tool/project.blsp` builds the module→direct-requires graph once
+(`%module-direct-requires`, one native parse per file), closes it transitively per
+file, and threads each file's set through the fresh / cached / structured check paths
+(carried as data in the parallel chunks). Soundness — the checker's cardinal rule —
+held zero false positives across the whole `std/` + `tests/` sweep: the transitive
+closure clears legitimately-transitive references (a test that `(:use editor/treesit)`
+naming `face/…`, since treesit requires `editor/face`), the guard restricts the lint
+to references the user *literally wrote* (never a macro-injected one), and a genuine
+circular case (`coverage` naming `project/…`, which can't `(require 'project)` without
+a cycle) is resolved by a *lazy* runtime `(require 'project)` in the one function that
+uses it. Regression tests: `ki17_flags_a_qualified_reference_to_an_unrequired_module`
+(Rust) and the end-to-end `nest check` on a project with a bad reference. Suppress a
+deliberate exception with `(check-allow :unrequired form…)`. Original report:
 
 **Symptom.** A qualified call to a module the running program never loads —
 `(path/basename f)` in a file whose module neither `(:use path)` nor
-`(require 'path)` — passes `nest check` clean, then raises
+`(require 'path)` — passed `nest check` clean, then raised
 `unbound symbol: path/basename` at runtime. Hit twice in one day downstream
 (myedit: `path/basename`, then a cross-module form value with the same shape).
 
 **Cause.** `check-project` loads the whole project image (sources + test files)
 before checking; any file's `require` binds the qualified name image-wide, so the
-checker resolves it for EVERY file — including files whose own load graph never
-pulls that module in. The check answers "bound in the check image", not "bound when
-this module is reachable from the entry point".
+checker resolved it for EVERY file — including files whose own load graph never
+pulls that module in. The check answered "bound in the check image", not "bound when
+this module is reachable".
 
-**Sketch of a fix.** Per-module reachability: check each file against the modules
-its own header/`require` closure loads (the loader already knows the edges). Costly
-to do exactly (dynamic `require` in fn bodies is load-time-undecidable); a useful
-approximation: warn when a hand-written `mod/name` reference appears in a file whose
-static require-closure never mentions `mod`.
-
-**Workaround.** Discipline: every qualified `mod/…` call needs a `(require 'mod)`
-in that file (a bare require avoids `(:use …)` import shadowing, e.g. std path's
-`join` vs the prelude's).
+**Workaround (pre-fix).** Discipline: every qualified `mod/…` call needs a
+`(require 'mod)` in that file (a bare require avoids `(:use …)` import shadowing,
+e.g. std path's `join` vs the prelude's) — which the lint now enforces.
 
 ## KI-15 — `impl` silently misregisters a **bare** record id · **FIXED 2026-07-27**
 

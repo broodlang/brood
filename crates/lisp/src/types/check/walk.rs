@@ -300,6 +300,8 @@ fn lint_allow_mask(category: Option<Value>) -> u8 {
         super::ctx::SUPPRESS_TYPE_MISMATCH
     } else if value::symbol_is(k, "unbound") {
         super::ctx::SUPPRESS_UNBOUND
+    } else if value::symbol_is(k, "unrequired") {
+        super::ctx::SUPPRESS_UNREQUIRED
     } else {
         0
     }
@@ -332,6 +334,40 @@ fn is_unbound(heap: &Heap, ctx: &Ctx, s: Symbol) -> bool {
         }
     }
     true
+}
+
+/// **KI-17** — a *user-written* qualified reference `mod/name` that resolves in the
+/// loaded image but whose module `mod` the file never `require`s/`:use`s. It works only
+/// by load-order luck (another file pulled `mod` in first); reorder or drop that file and
+/// it raises `unbound symbol: mod/name` at runtime. Returns `Some(mod)` to warn.
+///
+/// Silent unless the file's reachability set is known ([`Ctx::required_mods`], whole-
+/// project mode), the symbol is genuinely *bound* (an unbound one is [`is_unbound`]'s
+/// job — the two are mutually exclusive), and the exact reference is *user-written*
+/// ([`Ctx::raw_qualified_has`] — never a macro-injected reference to a module the file
+/// doesn't mention). Each guard removes a false-positive class, keeping the lint sound.
+fn unrequired_module(heap: &Heap, ctx: &Ctx, s: Symbol) -> Option<String> {
+    let required = ctx.required_mods()?;
+    let nm = name_of(s);
+    let slash = nm.rfind('/')?;
+    let module = &nm[..slash];
+    if module.is_empty() {
+        return None; // a bare `/` (division), not a qualified reference
+    }
+    if required.contains(module) || !ctx.raw_qualified_has(&nm) {
+        return None;
+    }
+    // A local shadow, or a name the loaded image doesn't bind, is not this lint's
+    // concern (the latter is `is_unbound`'s).
+    if ctx.is_local(s) || !is_globally_bound(heap, s) {
+        return None;
+    }
+    Some(module.to_string())
+}
+
+/// The KI-17 reachability diagnostic text for a reference to unrequired `module`.
+fn unrequired_msg(module: &str) -> String {
+    format!("qualified reference to unrequired module: {module} (add (require '{module}) to this file)")
 }
 
 /// True when a call whose head is `s` *evaluates its arguments as values* — `s`
@@ -397,6 +433,10 @@ fn check_value_leaf(
     if let Value::Sym(s) = form {
         if is_unbound(heap, ctx, s) && !ctx.is_suppressed(super::ctx::SUPPRESS_UNBOUND) {
             out.push((heap.form_pos_only(parent), unbound_msg(&name_of(s))));
+        } else if !ctx.is_suppressed(super::ctx::SUPPRESS_UNREQUIRED) {
+            if let Some(m) = unrequired_module(heap, ctx, s) {
+                out.push((heap.form_pos_only(parent), unrequired_msg(&m)));
+            }
         }
     }
 }
@@ -978,6 +1018,10 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
         if is_unbound(heap, ctx, s) && !ctx.is_suppressed(super::ctx::SUPPRESS_UNBOUND) {
             out.push((heap.form_pos_only(form), unbound_msg(&name_of(s))));
             // Still recurse into args below — they may carry their own issues.
+        } else if !ctx.is_suppressed(super::ctx::SUPPRESS_UNREQUIRED) {
+            if let Some(m) = unrequired_module(heap, ctx, s) {
+                out.push((heap.form_pos_only(form), unrequired_msg(&m)));
+            }
         }
 
         // Operand-position unbound symbols. When the head evaluates its arguments
@@ -1815,7 +1859,7 @@ fn params_form_has_rest(heap: &Heap, form: Value) -> bool {
     })
 }
 
-fn fn_params(heap: &Heap, form: Value) -> Vec<Symbol> {
+pub(super) fn fn_params(heap: &Heap, form: Value) -> Vec<Symbol> {
     let items = match form {
         Value::Vector(id) => heap.vector(id).to_vec(),
         Value::Nil | Value::Pair(_) => list_items(heap, form).unwrap_or_default(),

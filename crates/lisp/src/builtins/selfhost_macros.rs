@@ -50,7 +50,8 @@ pub(super) fn check_file_builtin(args: &[Value], _env: EnvId, heap: &mut Heap) -
     })?;
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
-    let warnings = crate::types::check::check_file(heap, &just_forms);
+    let required = required_mods_arg(heap, arg(args, 1));
+    let warnings = crate::types::check::check_file_ext(heap, &just_forms, &required);
     let mut out = Vec::with_capacity(warnings.len());
     for (pos, msg) in &warnings {
         let s = match pos {
@@ -60,6 +61,65 @@ pub(super) fn check_file_builtin(args: &[Value], _env: EnvId, heap: &mut Heap) -
         out.push(heap.alloc_string(&s));
     }
     Ok(heap.list(out))
+}
+
+/// A `required-mods` argument (a list/vector of module-name strings or symbols) → a
+/// `Vec<String>`. `nil` / absent → empty. Backs the optional KI-17 reachability set on
+/// the `check-file*` builtins.
+fn required_mods_arg(heap: &Heap, v: Value) -> Vec<String> {
+    // Flatten to a Vec<Value> first (list or vector), then read each element's name —
+    // keeps the heap borrows non-overlapping.
+    let items: Vec<Value> = match v {
+        Value::Vector(vid) => heap.vector(vid).iter().copied().collect(),
+        _ => {
+            let mut acc = Vec::new();
+            let mut cur = v;
+            while let Value::Pair(p) = cur {
+                let (car, cdr) = heap.pair(p);
+                acc.push(car);
+                cur = cdr;
+            }
+            acc
+        }
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Value::Str(id) => out.push(heap.string(id).to_string()),
+            Value::Sym(s) => out.push(value::symbol_name(s)),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `(%module-direct-requires path)` — the file's own module name and the modules it
+/// directly `:use`s / `(require 'M)`s, as `{:module <name-or-nil> :requires [<name> …]}`.
+/// `std/tool/project.blsp` builds the require graph from these and closes it transitively
+/// into each file's `check-file` reachability set (KI-17). Reads, never evaluates.
+pub(super) fn module_direct_requires(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let path = expect_string(heap, "%module-direct-requires", arg(args, 0))?;
+    let src = std::fs::read_to_string(&path).map_err(|e| {
+        LispError::runtime(format!("%module-direct-requires: cannot read {}: {}", path, e))
+            .with_code(crate::error::error_codes::FILE_IO)
+    })?;
+    let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
+    let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
+    let (own, deps) = crate::types::check::module_direct_requires(heap, &just_forms);
+    // No GC safepoint fires inside a single builtin, so these handles stay live without
+    // rooting (same discipline as `check_file_structured`).
+    let dep_vals: Vec<Value> = deps.iter().map(|d| heap.alloc_string(d)).collect();
+    let requires_val = heap.alloc_vector(dep_vals);
+    let module_val = match own {
+        Some(n) => heap.alloc_string(&n),
+        None => Value::Nil,
+    };
+    let module_kw = Value::keyword(value::intern("module"));
+    let requires_kw = Value::keyword(value::intern("requires"));
+    Ok(heap.map_from_pairs(vec![
+        (module_kw, module_val),
+        (requires_kw, requires_val),
+    ]))
 }
 
 /// `(check-file-deps path)` — the incremental-cache counterpart of `check-file`
@@ -82,7 +142,9 @@ pub(super) fn check_file_deps(args: &[Value], _env: EnvId, heap: &mut Heap) -> L
     // returns before we allocate the result — the allocations below don't hit a
     // safepoint, so `dep_keys`/`fp_val`/`warns` stay live without extra rooting
     // (same discipline as `check_file_builtin`).
-    let (warnings, dep_keys) = crate::types::check::check_file_with_deps(heap, &just_forms);
+    let required = required_mods_arg(heap, arg(args, 1));
+    let (warnings, dep_keys) =
+        crate::types::check::check_file_with_deps_ext(heap, &just_forms, &required);
     let fp = crate::types::check::deps_fingerprint(heap, dep_keys);
     let fp_val = heap.alloc_string(&fp);
     let mut warn_vals = Vec::with_capacity(warnings.len());
@@ -125,7 +187,8 @@ pub(super) fn check_file_structured(args: &[Value], _env: EnvId, heap: &mut Heap
     })?;
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
-    let warnings = crate::types::check::check_file(heap, &just_forms);
+    let required = required_mods_arg(heap, arg(args, 1));
+    let warnings = crate::types::check::check_file_ext(heap, &just_forms, &required);
     let file_kw = Value::keyword(value::intern("file"));
     let line_kw = Value::keyword(value::intern("line"));
     let col_kw = Value::keyword(value::intern("col"));

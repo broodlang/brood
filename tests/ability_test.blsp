@@ -525,3 +525,43 @@
     (let (parent (self))
       (spawn (send parent [:c (columns (cpoint 7 8))]))
       (assert= (receive ([:c v] v)) [7 8]))))
+
+;; ---- sealed-match exhaustiveness (ADR-187 part 2) ----
+;; Advisory + SOUND: a `match` on a scrutinee statically typed as a sealed ability (a finite
+;; record-id union) warns for any member no clause handles. Everything unprovable defers to
+;; silence — unknown scrutinee, a `:when` guard, a non-record arm — so zero false positives.
+;; These assert on the checker's warnings via `abt-warns-about?` (a static feature).
+(defn abt-exh-src (body)
+  "A checkable source: records c/r, a `:sealed [c r]` ability S, and `body` (the fn under test)."
+  (str "(defmodule u) (defrecord c (x)) (defrecord r (y)) "
+    "(defability S :sealed [c r] (op [self] :-> int)) " body))
+
+(describe "sealed-match exhaustiveness"
+  (test "a match on a sealed-typed param missing a member warns"
+    (is (abt-warns-about?
+          (abt-exh-src "(sig f (S -> int)) (defn f (s) (match s ((record c {:x x}) 1)))")
+          "no clause handles")))
+  (test "an exhaustive match (every member covered) is silent"
+    (is (not (abt-warns-about?
+          (abt-exh-src "(sig f (S -> int)) (defn f (s) (match s ((record c {:x x}) 1) ((record r {}) 2)))")
+          "no clause handles"))))
+  (test "a `_` catch-all makes it exhaustive"
+    (is (not (abt-warns-about?
+          (abt-exh-src "(sig f (S -> int)) (defn f (s) (match s ((record c {:x x}) 1) (_ 2)))")
+          "no clause handles"))))
+  (test "an UNtyped scrutinee defers — unknown type, no warning (sound)"
+    (is (not (abt-warns-about?
+          (abt-exh-src "(defn f (s) (match s ((record c {:x x}) 1)))")
+          "no clause handles"))))
+  (test "a `:when` guard defers the whole match (sound — a guard may not fire)"
+    (is (not (abt-warns-about?
+          (abt-exh-src "(sig f (S -> int)) (defn f (s) (match s ((record c {:x x}) :when true 1) ((record r {}) 2)))")
+          "no clause handles"))))
+  (test "a let binding threads the sealed type to the scrutinee"
+    (is (abt-warns-about?
+          (abt-exh-src "(sig f (S -> int)) (defn f (a) (let (s a) (match s ((record c {:x x}) 1))))")
+          "no clause handles")))
+  (test "the warning names the specific missing member id"
+    (is (abt-warns-about?
+          (abt-exh-src "(sig f (S -> int)) (defn f (s) (match s ((record c {:x x}) 1)))")
+          ":u/r"))))

@@ -1977,6 +1977,47 @@ fn inferred_params_intersect_across_positions() {
 }
 
 #[test]
+fn same_file_caller_checked_against_inferred_return() {
+    // The file being checked isn't loaded, so this exercises Pass 2.8's form-based inference:
+    // `dbl` is inferred (same-file) to return a number, so `(string-length (dbl 5))` is caught
+    // — a same-file caller now gets the checking a loaded-function caller already did.
+    let w = file_warnings(
+        "(defmodule t)\n(defn dbl (x) (+ x 1))\n(defn bad () (string-length (dbl 5)))",
+    );
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "same-file inferred return should flow to a caller: {w:?}"
+    );
+}
+
+#[test]
+fn same_file_forward_reference_resolves_via_fixpoint() {
+    // Caller defined BEFORE callee — the bounded fixpoint still resolves `later`'s return.
+    let w = file_warnings(
+        "(defmodule t)\n(defn bad () (+ 1 (later 1)))\n(defn later (x) (str x))",
+    );
+    assert!(
+        w.iter().any(|s| s.contains('+') && s.contains("number")),
+        "a forward reference should resolve in the fixpoint: {w:?}"
+    );
+}
+
+#[test]
+fn same_file_reassigned_global_return_stays_dynamic() {
+    // SOUNDNESS: a lazily-initialized global (nil default, reassigned to a table) must make
+    // the returning function's return *dynamic*, not the stale `nil` — else a table use of
+    // the result would false-flag. Guards Pass 2.8 against the earmuffed / reassigned-global
+    // imprecision.
+    let w = file_warnings(
+        "(defmodule t)\n(def *g* nil)\n(defn getg () (when (nil? *g*) (def *g* (table))) *g*)\n(defn u () (table-get (getg) :k))",
+    );
+    assert!(
+        !w.iter().any(|s| s.contains("table-get") && s.contains("argument")),
+        "a reassigned global's return must stay dynamic (no false positive): {w:?}"
+    );
+}
+
+#[test]
 fn infers_a_tail_recursive_function_return_from_its_base_case() {
     // A self-recursive call in a branch position contributes ⊥ to the return union, so
     // `count-down`'s return infers from its base case `:done` (keyword) — feeding it to
@@ -3687,6 +3728,43 @@ fn unknown_module_qualified_name_is_not_unbound() {
         w.iter()
             .any(|m| m.contains("unbound symbol: test/no-such-fn")),
         "a typo in a known module must still be flagged: {w:?}"
+    );
+}
+
+#[test]
+fn ki17_flags_a_qualified_reference_to_an_unrequired_module() {
+    // KI-17: a module bound in the loaded image, referenced qualified by a file that
+    // never `require`s/`:use`s it — resolving only by load-order luck. The whole-project
+    // driver passes each file its transitive require-closure; a reference outside that
+    // closure is flagged. Excluded → warn; included → silent (the require-what-you-name fix).
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str("(defmodule ki17mod \"m\")\n(defn foo (x) x)")
+        .expect("module loads");
+    let forms =
+        crate::syntax::reader::read_all(&mut interp.heap, "(defn go (x) (ki17mod/foo x))")
+            .expect("parse");
+
+    // Empty reachability set → unreachable-from-this-file → warn.
+    let warned = crate::types::check::check_file_ext(&mut interp.heap, &forms, &[]);
+    assert!(
+        warned
+            .iter()
+            .any(|(_, m)| m.contains("unrequired module: ki17mod")),
+        "expected an unrequired-module warning, got {warned:?}"
+    );
+    // The plain unbound lint must NOT also fire (the reference resolves).
+    assert!(
+        warned.iter().all(|(_, m)| !m.contains("unbound symbol")),
+        "a bound-but-unrequired reference is not 'unbound': {warned:?}"
+    );
+
+    // The module in the reachability set → silent.
+    let ok =
+        crate::types::check::check_file_ext(&mut interp.heap, &forms, &["ki17mod".to_string()]);
+    assert!(
+        ok.iter().all(|(_, m)| !m.contains("unrequired module")),
+        "expected silence when the module is reachable, got {ok:?}"
     );
 }
 

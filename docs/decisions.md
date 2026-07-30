@@ -12194,8 +12194,7 @@ minimal sound resolution; defer a richer "implements X" type), the 2026-07-29 de
 
 ## ADR-187 — Record patterns in `match`: `(record name {map-pattern})`
 
-**Status:** accepted + shipped (part 1 — the pattern; part 2 — sealed-match exhaustiveness —
-in progress).
+**Status:** accepted + shipped (part 1 — the pattern; part 2 — sealed-match exhaustiveness).
 
 **Context.** A `defrecord` value is a map carrying a reserved `:__id__` (`:module/name`), so
 it could already be matched with the map pattern `{:__id__ :geometry/circle :r r}` — but that
@@ -12242,13 +12241,132 @@ with the same fields, or a non-map), so those correctly fall through.
 precedent — a macro over primitives), not a special form; `let`/`fn`/`receive` destructuring
 inherit it because they share the one compiler.
 
-**Part 2 (in progress) — sealed-match exhaustiveness.** A `match` whose scrutinee has a
-statically-known sealed-ability type (ADR-181, ADR-186 — a sealed ability *is* the finite
-union of its member ids) and whose arms are record patterns should warn, advisorily, for any
-member left uncovered when there is no catch-all. It reuses the sealed member sets the checker
-already reads (`sealed_member_ids`, `protocol.rs`).
+**Part 2 — sealed-match exhaustiveness (shipped).** A `match` whose scrutinee is statically
+typed as a sealed ability warns, advisorily, for any member left uncovered when there is no
+catch-all. Two pieces, both **sound**:
+
+*5a — The lattice fix (`annot::ability_type`).* A sealed ability's type is built at its **true
+set-theoretic denotation** — a *single* record shape `%{__id__: (:a | :b | …)}` (a keyword-lit
+union on `:__id__`), not `Ty::union` over the N member shapes. That union is *equal as a set of
+values* precisely because each member shape is an open record constraining only `:__id__`
+(`⋃ₘ %{__id__: :m}` = "maps whose `:__id__` ∈ members"). Building it directly matters because
+`Ty::union` merges a differing `fields` map by "widen-unless-identical" → it would collapse to
+bare `map` and **lose the member set**. Field-wise-merging arbitrary records in `Ty::union`
+would be *unsound* (it invents cross terms), so that stays untouched; only this union — where
+the shapes differ solely in `:__id__` — collapses soundly to a lit-union field. Bonus: this
+also makes `(sig f (Shape -> …))` reject a *non-member* record precisely, not just a non-map.
+
+*5b — The pass (`check::exhaustive`).* Reads the **un-expanded** forms (a `match` survives only
+pre-expansion), threading a `Ctx` (defn params seeded from their `sig` — namespace-qualified per
+ADR-188 — and `let` bindings). At each `(match scrutinee …)` it resolves the scrutinee via
+`expr_ty`; if the type carries a closed keyword-lit `:__id__` set (5a), it checks coverage.
+Sound by construction — it defers to silence on everything it can't prove: an unknown scrutinee
+(`expr_ty → None`), a `:when` guard, or any non-record / non-catch-all arm; an unguarded
+`(record NAME …)` covers NAME (over-counting a refutable inner only *under*-warns); ids compare
+by final `mod/NAME` segment (a mismatch only under-warns). Verified **zero false positives**
+across `std/` + `tests/`.
 
 **References.** ADR-130 (records are maps + `:__id__`), ADR-181/186 (a sealed ability is a
-type — drives part 2), ADR-172/168 (`ability--id-kw`, the shared id derivation), ADR-152/160
-(named pattern heads `not`/`and`/`or`), ADR-185 (why expand-time record metadata is avoided),
-`tests/pattern_matching_test.blsp` ("record patterns").
+type — the base part 2 extends), ADR-188 (namespace-qualified sigs — the seam the pass reads),
+ADR-172/168 (`ability--id-kw`, the shared id derivation), ADR-152/160 (named pattern heads
+`not`/`and`/`or`), ADR-185 (why expand-time record metadata is avoided),
+`tests/pattern_matching_test.blsp` ("record patterns"), `tests/ability_test.blsp`
+("sealed-match exhaustiveness").
+
+## ADR-188 — Same-file function inference: the checker infers a file's own functions
+
+**Status:** accepted + shipped. Closes the last big inference gap and, doing so, found a
+latent primitive-signature bug.
+
+**The gap.** `sigs::sig_of`'s inferencer reads the *loaded* closure (`obs_global`), so it
+infers any function the image already has — the whole prelude, std, and `(:use …)`d modules,
+chaining through callees. But a file's OWN `(defn …)`s aren't loaded while that file is
+checked (`check_file` is advisory, no-eval), so they were invisible: a same-file caller of a
+same-file function got *no* result checking. That is most of what `nest check` / the LSP /
+`brood <file>` do on the file you're editing (the REPL never had the gap — there everything
+is loaded).
+
+**Decision.** `check_file` gains **Pass 2.8**: infer each single-def, unshadowed, un-declared
+function's **return** from its *form* (`sigs::infer_return_from_form` — the form twin of the
+loaded-closure inferencer), record it in `Ctx` (`inferred_fn_sig`), and consult it at a call
+site *after* a declared sig. A bounded **fixpoint** resolves callees leaf-up: the form
+inferencer returns `None` (records nothing) until every function a return depends on is
+already recorded, so a function is stored *only* with its callees' FINAL sigs — no
+stale/narrow intermediate can leak (sound at any cap; a forward reference resolves in a later
+pass, a cross-function cycle stays deferred). Return-only for now (a params-less sig), so it
+flows results without imposing argument constraints.
+
+**Soundness fixes it forced (the value of the zero-false-positive gate).** Enabling it
+surfaced two latent imprecisions that had been harmless only because nothing consumed them:
+1. A **reassigned global** typed as its initial value. The lazy-init `(when (nil? *g*) (def
+   *g* (table))) *g*` returns a table, but Gap A pinned `*g*` to its `nil` default (it counted
+   only *top-level* defs, missing the nested reassignment; and the earmuffed-global skip sat
+   after the inferred-value read). Fixed: count defs **recursively** (a global def'd anywhere
+   more than once is reassigned → `dynamic`), and skip earmuffed globals in Gap A too — the
+   principled completion of "a redefinable global is `dynamic()`, not its default."
+2. **`%node-listen`'s primitive `Sig`** said its node-name arg was a `symbol` and it returned
+   a `symbol`, but `expect_node_name` accepts a keyword-or-symbol and `node-start` returns the
+   `:name@host` keyword (as `%node-connect` already declared). A real, latent sig bug — the
+   inference of `node--qualify` (returns a keyword) is what exposed it. Corrected to match.
+
+After both, the full `std/` + `tests/` sweep is clean — zero false positives.
+
+**Deferred.** Same-file **parameter** inference (higher false-positive risk — it constrains
+callers' args) and per-arm multi-arity params; and the `and`/`or`-guard and
+higher-order-callback inference still listed in `check.rs`.
+
+**References.** ADR-110/024 (the gradual, advisory type discipline this inherits), ADR-125
+(a redefinable global is `dynamic()` — why a reassigned global can't be pinned), the
+2026-07-29 devlog entry.
+
+## ADR-189 — Per-file require-reachability lint: flag a qualified reference to an unrequired module (KI-17)
+
+**Status:** accepted + shipped. Closes KI-17.
+
+**The gap.** `nest check` loads the *whole* project image before checking, so a qualified
+reference `mod/name` resolves for **every** file — even one whose own load graph never pulls
+`mod` in. So a file that names `path/basename` but never `(require 'path)`s passed clean, then
+raised `unbound symbol: path/basename` at runtime whenever the sibling that happened to load
+`path` first was reordered or removed. The check answered "bound in the whole-project image",
+not "reachable from *this* file." (Hit twice downstream — the myedit `path/basename` bug.)
+
+**Decision.** The checker flags a **user-written** qualified reference whose module is not in
+the file's **transitive require-closure**. Mechanism (Rust) and policy (Brood) split cleanly:
+- `check-file` / `check-file-deps` / `check-file-structured` take an optional **reachability
+  set** — module names the file may name qualified. `check_file_ext` unions it with the file's
+  own direct requires (`:use` / `:use-internals` / any nested `(require 'M)`) and its own ns.
+- Only the whole-project driver sees every header, so **`std/tool/project.blsp`** builds the
+  module→direct-requires graph once (a new native builtin `%module-direct-requires`, one parse
+  per file), closes it **transitively** per file, and threads each file's set through the
+  fresh, cached, and structured check paths — carried **as data** in the parallel chunks
+  (`[file closure]` pairs), never as a shipped closure value.
+
+**Why transitive, and three false-positive classes it kills.** Soundness (zero false
+positives) is the checker's cardinal rule, so the lint had to model runtime reachability, not
+a stricter approximation. The `std/` + `tests/` sweep drove it: a direct-requires-only version
+lit 18 warnings, 17 of them false. The transitive closure clears **transitive** references (a
+test that `(:use editor/treesit)` legitimately names `face/…`, since treesit itself requires
+`editor/face`); a `raw_qualified` guard restricts the lint to references the user **literally
+wrote** in the source, never a **macro-injected** one to a module the file doesn't mention; and
+the lint is naturally **inert** in single-file / LSP / REPL mode (an un-required module isn't
+loaded there, so the ordinary unbound check covers it). The one genuine residue — `coverage`
+naming `project/…`, which can't `(require 'project)` at the top level without a **cycle**
+(project requires coverage) — is fixed by a *lazy* runtime `(require 'project)` in the single
+function that uses it: idempotent, non-circular, and the honest expression of the discipline
+the lint enforces. Net: zero false positives across the whole tree.
+
+**Cache.** The check-result cache entry gains a 5th field, the file's closure; a reused entry
+must match it, so a closure shift (another file's requires changed) re-checks the dependent
+even when its own mtime didn't move. Cache version bumped v1→v2.
+
+**Escape hatch.** `(check-allow :unrequired form…)` suppresses the lint for a deliberate
+exception the checker can't prove safe.
+
+**Deferred.** The reachability set is the file's *own* transitive closure, not the entry
+point's — so a library module meant to be required by consumers is checked as self-contained
+(the right granularity for a whole-project lint). A dynamic `(require modname)` with a
+non-literal argument is invisible to the graph (load-time-undecidable); it can only *miss* a
+warning, never invent one.
+
+**References.** KI-17 (docs/known-issues.md), ADR-119 (the incremental check cache the closure
+field extends), ADR-065 (modules/namespaces), the 2026-07-30 devlog entry.
