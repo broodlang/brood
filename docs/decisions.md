@@ -12194,8 +12194,7 @@ minimal sound resolution; defer a richer "implements X" type), the 2026-07-29 de
 
 ## ADR-187 — Record patterns in `match`: `(record name {map-pattern})`
 
-**Status:** accepted + shipped (part 1 — the pattern; part 2 — sealed-match exhaustiveness —
-in progress).
+**Status:** accepted + shipped (part 1 — the pattern; part 2 — sealed-match exhaustiveness).
 
 **Context.** A `defrecord` value is a map carrying a reserved `:__id__` (`:module/name`), so
 it could already be matched with the map pattern `{:__id__ :geometry/circle :r r}` — but that
@@ -12242,16 +12241,37 @@ with the same fields, or a non-map), so those correctly fall through.
 precedent — a macro over primitives), not a special form; `let`/`fn`/`receive` destructuring
 inherit it because they share the one compiler.
 
-**Part 2 (in progress) — sealed-match exhaustiveness.** A `match` whose scrutinee has a
-statically-known sealed-ability type (ADR-181, ADR-186 — a sealed ability *is* the finite
-union of its member ids) and whose arms are record patterns should warn, advisorily, for any
-member left uncovered when there is no catch-all. It reuses the sealed member sets the checker
-already reads (`sealed_member_ids`, `protocol.rs`).
+**Part 2 — sealed-match exhaustiveness (shipped).** A `match` whose scrutinee is statically
+typed as a sealed ability warns, advisorily, for any member left uncovered when there is no
+catch-all. Two pieces, both **sound**:
+
+*5a — The lattice fix (`annot::ability_type`).* A sealed ability's type is built at its **true
+set-theoretic denotation** — a *single* record shape `%{__id__: (:a | :b | …)}` (a keyword-lit
+union on `:__id__`), not `Ty::union` over the N member shapes. That union is *equal as a set of
+values* precisely because each member shape is an open record constraining only `:__id__`
+(`⋃ₘ %{__id__: :m}` = "maps whose `:__id__` ∈ members"). Building it directly matters because
+`Ty::union` merges a differing `fields` map by "widen-unless-identical" → it would collapse to
+bare `map` and **lose the member set**. Field-wise-merging arbitrary records in `Ty::union`
+would be *unsound* (it invents cross terms), so that stays untouched; only this union — where
+the shapes differ solely in `:__id__` — collapses soundly to a lit-union field. Bonus: this
+also makes `(sig f (Shape -> …))` reject a *non-member* record precisely, not just a non-map.
+
+*5b — The pass (`check::exhaustive`).* Reads the **un-expanded** forms (a `match` survives only
+pre-expansion), threading a `Ctx` (defn params seeded from their `sig` — namespace-qualified per
+ADR-188 — and `let` bindings). At each `(match scrutinee …)` it resolves the scrutinee via
+`expr_ty`; if the type carries a closed keyword-lit `:__id__` set (5a), it checks coverage.
+Sound by construction — it defers to silence on everything it can't prove: an unknown scrutinee
+(`expr_ty → None`), a `:when` guard, or any non-record / non-catch-all arm; an unguarded
+`(record NAME …)` covers NAME (over-counting a refutable inner only *under*-warns); ids compare
+by final `mod/NAME` segment (a mismatch only under-warns). Verified **zero false positives**
+across `std/` + `tests/`.
 
 **References.** ADR-130 (records are maps + `:__id__`), ADR-181/186 (a sealed ability is a
-type — drives part 2), ADR-172/168 (`ability--id-kw`, the shared id derivation), ADR-152/160
-(named pattern heads `not`/`and`/`or`), ADR-185 (why expand-time record metadata is avoided),
-`tests/pattern_matching_test.blsp` ("record patterns").
+type — the base part 2 extends), ADR-188 (namespace-qualified sigs — the seam the pass reads),
+ADR-172/168 (`ability--id-kw`, the shared id derivation), ADR-152/160 (named pattern heads
+`not`/`and`/`or`), ADR-185 (why expand-time record metadata is avoided),
+`tests/pattern_matching_test.blsp` ("record patterns"), `tests/ability_test.blsp`
+("sealed-match exhaustiveness").
 
 ## ADR-188 — Same-file function inference: the checker infers a file's own functions
 
