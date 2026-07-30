@@ -1525,9 +1525,14 @@ fn compile_arm(
     // Deopt-resume checkpoint slots (see `CompiledArm::ckpt_slot`): one packed
     // journal slot + room for the deepest post-call operand stack. Reserved above
     // the spill slots; zero cost for call-free arms (`ckpt_depth` is None).
+    // `self_arity` is this arm's own fixed arity, and `None` when argc doesn't select an
+    // arm 1:1 (optionals / a rest param) — see the pure-self exemption in `jit_ckpt_depth`,
+    // which must not treat a call to a *sibling* arm of the same multi-arity `defn` as a
+    // call back into this provably effect-free one.
+    let self_arity = (noptional == 0 && rest.is_none()).then_some(nrequired);
     let ckpt_depth = chunk
         .as_ref()
-        .and_then(|c| jit_ckpt_depth(&c.code, defn_name));
+        .and_then(|c| jit_ckpt_depth(&c.code, defn_name, self_arity));
     let (ckpt_slot, ckpt_reserve) = match ckpt_depth {
         Some(d) => ((scope.max + spill_reserve) as u32, 1 + d),
         None => (u32::MAX, 0),
