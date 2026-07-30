@@ -26,6 +26,33 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ tried and reverte
 
 ---
 
+## Contents
+
+- [**Active work**](#active-work--dated-findings--backlogs) — dated findings & backlogs (the
+  large, time-ordered section; skim by the `###` sub-headers below)
+  - [Runtime-feature parity](#runtime-feature-parity-program--beam--net--node-2026-07-22) ·
+    [Robustness gaps vs BEAM/.NET](#robustness-gaps-vs-beam--net-2026-07-18-runtime-survey) ·
+    [Elixir-parity perf gaps](#elixir-parity-performance-gaps-2026-07-12-refreshed-2026-07-18) ·
+    [Stability backlog](#stability-backlog-2026-07-10) ·
+    [External conformance corpora](#external-conformance-corpora-2026-07-25)
+- [**Done — the foundation**](#done--the-foundation) — shipped milestones (M1–M4)
+- [**What's next — by area**](#whats-next--by-area) — the forward-looking backlog:
+  [Language core & types](#language-core--types) · [VM & JIT](#vm--jit) ·
+  [Tooling & errors](#tooling--errors) · [Editor & display](#editor-m2--display-m3) ·
+  [Server / daemon](#server--daemon-m4) · [Packaging & ecosystem](#packaging--ecosystem)
+- [**Design notes**](#design-notes-context-for-the-above) ·
+  [**Cross-cutting open questions**](#cross-cutting-open-questions-revisit-dont-build-yet) ·
+  [**Killed directions**](#killed-directions-dont-retry) ·
+  [**Out of scope**](#out-of-scope-deferred-additive-later) ·
+  [**Guiding principles**](#guiding-principles)
+
+**Status at a glance (2026-07-30):** M1–M4 shipped. No open bugs — every issue in
+[`docs/known-issues.md`](docs/known-issues.md) is resolved. The abilities/types thread is
+complete (dispatch, provided methods, `:derives`, record patterns, exhaustiveness, ability
+bounds, super-abilities, occurrence typing). Active fronts: **perf/JIT tuning**, the **seq
+protocol on abilities** (read half done), **std-library breadth** (no markdown/WHATWG-URL yet),
+and **observability**. See "What's next — by area".
+
 ## Active work — dated findings & backlogs
 
 ### Syntax review — ✅ COMPLETE (2026-07-26)
@@ -1055,8 +1082,8 @@ still produces infinity, so infinities exist — they just aren't reachable by d
 *and* the VM+JIT, including `nboyer`'s three rewrite counts (95024/591777/1813975, exact)
 and `chudnovsky`'s ten 50-to-500-digit integers. Two findings, one a real defect:
 
-⬜ **KI-13 (OPEN) — `nest check` hangs on the `deriv` port.** Cross-module return-type
-inference for an undeclared recursive callee blows up **exponentially in branch count**:
+✅ **KI-13 (FIXED 2026-07-27) — `nest check` hung on the `deriv` port.** Cross-module return-type
+inference for an undeclared recursive callee blew up **exponentially in branch count**:
 2/3/4/5 recursive `cond` branches building nested list structure cost 105 ms / 105 ms /
 **8.7 s** / did-not-finish-in-900 s. The same call *inside* the defining module is
 instant — it is the cross-module `sig_of` → `infer_sig` → `expr_ty` path, where nothing
@@ -1118,8 +1145,8 @@ then drain-epoch count — died on those measurements before the real cause show
 instinct the section did get right: **do not fix this by shrinking tests.** That was tried
 across four cycles and the number barely moved, because test size was never the variable.
 
-Six of the nine wired suites finding real defects — including the tree's one open bug
-(KI-13) — is the argument for the rest. Note the shift as the subjects got harder: the
+Six of the nine wired suites finding real defects — including the checker hang KI-13
+(since fixed) — is the argument for the rest. Note the shift as the subjects got harder: the
 suites aimed at Rust crates behind thin wrappers found nothing, the ones aimed at
 pure-Brood libraries found a bug each, and the one that runs whole *programs* through the
 real toolchain (Gabriel) found its bugs in the **checker and the test harness** rather
