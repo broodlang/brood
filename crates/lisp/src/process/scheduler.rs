@@ -1033,10 +1033,16 @@ pub fn old_gen_drained(heap: &Heap) -> bool {
 /// shared-safe `ArcSwap` store, so it needs no unique ownership. A no-op when no drain
 /// is armed or the generation isn't drained yet.
 pub fn free_drained_gen(heap: &Heap) -> bool {
+    // Snapshot the drain identity (epoch + generation) ONCE and carry it into the free,
+    // which re-validates it under the aging gate. Reading `drain_gen()` separately after
+    // validating was the TOCTOU: another process can complete the free, end the drain and
+    // arm a new one for the *other* generation in between, leaving this call to free a
+    // generation that is neither drained nor dead. See `Heap::free_runtime_gen`.
+    let (epoch, gen) = heap.drain_identity();
     if !old_gen_drained(heap) {
         return false;
     }
-    heap.free_runtime_gen(heap.drain_gen())
+    heap.free_runtime_gen(gen, epoch)
 }
 
 /// Are we currently running inside a **green** (spawned) process — as opposed to the

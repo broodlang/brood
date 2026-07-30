@@ -604,6 +604,33 @@ fn invariant_global_vecs(node: &Node, out: &mut std::collections::HashSet<Symbol
     }
 }
 
+/// Can executing `i` **allocate** into the LOCAL heap? Anything that can invalidates an
+/// entry-hoisted slab base pointer (`local.pairs`/`local.vectors` are `Vec`s — a push can
+/// reallocate) and needs the back-edge GC safepoint that bounds the nursery.
+///
+/// One list, two consumers (`has_cons` and `has_alloc_safepoint`), because hand-enumerating
+/// it twice is what let the table ops slip out of both: `table-get`/`table-has?` take a
+/// hashed branch for out-of-shape keys and call `from_message`, which does `alloc_pair` /
+/// `alloc_vector` per element. An arm mixing `first`/`rest` with a table read therefore
+/// hoisted a pair base at entry and kept using it across a reallocation — a use-after-free
+/// that survived only because glibc often extends a large block in place — and, via
+/// `has_cons`, never emitted a back-edge safepoint, so its nursery grew unbounded for the
+/// whole native run.
+#[cfg(feature = "jit")]
+fn inst_may_allocate(i: &Inst) -> bool {
+    match i {
+        Inst::Prim2 { op, .. } | Inst::Prim2SlotSlot { op, .. } | Inst::Prim2SlotInt { op, .. } => {
+            matches!(
+                op,
+                PrimOp::Cons | PrimOp::TableGet | PrimOp::TableHas | PrimOp::VectorRef
+            )
+        }
+        Inst::Prim3 { .. } => true, // table-put: the store deep-copies key and value
+        Inst::MakeVector(_) | Inst::MakeMap(_) | Inst::MakeClosure { .. } => true,
+        _ => false,
+    }
+}
+
 /// Compile `arm`'s chunk to a native `extern "C" fn(heap: *mut Heap, base: i64) -> i64`
 /// for the Step-A int subset, or `None` to bail to the VM. The compiled fn reads its
 /// frame slots from `roots[base..]`, computes in registers, **boxes the result into
@@ -1402,21 +1429,7 @@ fn jit_lower_arm_inner(
     let const_load_ref = m.declare_func_in_func(const_load_id, b.func);
     // Whether the arm allocates (`cons`) — gates the back-edge GC safepoint that bounds
     // the nursery. (`car`/`rest` don't allocate.)
-    let has_cons = code.iter().any(|i| {
-        matches!(
-            i,
-            Inst::Prim2 {
-                op: PrimOp::Cons,
-                ..
-            } | Inst::Prim2SlotSlot {
-                op: PrimOp::Cons,
-                ..
-            } | Inst::Prim2SlotInt {
-                op: PrimOp::Cons,
-                ..
-            } | Inst::MakeVector(_)
-        )
-    });
+    let has_cons = code.iter().any(inst_may_allocate);
 
     // One Cranelift block per leader (with `depth` I64 params), plus entry/deopt. The
     // Done block (`ip == len`) takes **no** params: the result is returned via
@@ -1644,21 +1657,7 @@ fn jit_lower_arm_inner(
                 }
             )
         });
-        let has_alloc_safepoint = code.iter().any(|i| {
-            matches!(
-                i,
-                Inst::Prim2 {
-                    op: PrimOp::Cons,
-                    ..
-                } | Inst::Prim2SlotSlot {
-                    op: PrimOp::Cons,
-                    ..
-                } | Inst::Prim2SlotInt {
-                    op: PrimOp::Cons,
-                    ..
-                } | Inst::MakeVector(_)
-            )
-        });
+        let has_alloc_safepoint = code.iter().any(inst_may_allocate);
         // A non-tail Call is a GC safepoint: minor_collect replaces `self.local` entirely
         // (std::mem::take), so any pointer to `local.pairs` cached before the call is
         // invalid after it. Only inline when there are no such safepoints.
