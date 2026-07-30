@@ -196,6 +196,10 @@ pub(super) const SUPPRESS_TYPE_MISMATCH: u8 = 1 << 2;
 /// wasm `use-native` binding, a plugin loader). The one lint whose ground truth
 /// is the live image, not the source.
 pub(super) const SUPPRESS_UNBOUND: u8 = 1 << 3;
+/// `(check-allow :unrequired …)` — a qualified reference `mod/name` whose module the
+/// file never `require`s/`:use`s (KI-17). Suppresses the load-order-reachability lint
+/// for a file that deliberately relies on an ambient require pulled in elsewhere.
+pub(super) const SUPPRESS_UNREQUIRED: u8 = 1 << 4;
 
 /// One step of a narrowable access path: a keyword field (`(get x :k)`) or a
 /// fixed integer index (`(nth x 0)` / `(first x)` / `(second x)` / `(third x)`).
@@ -357,6 +361,21 @@ pub(super) struct Ctx {
     /// `Arc` so per-scope `Ctx` clones don't copy the set. Populated by
     /// [`check_file`]; empty in fragment mode (so any qualified name is left alone).
     known_ns: Arc<HashSet<String>>,
+    /// **KI-17 reachability set** — module prefixes this file makes reachable *itself*:
+    /// every `(:use M)` in its header, every top-level `(require 'M)`, and its own
+    /// namespace. `Some` only in whole-project mode ([`check_file`] with the image
+    /// loaded), where an un-required module is nonetheless *bound* image-wide; a
+    /// user-written qualified reference to a module outside this set then resolves only
+    /// by load-order luck and is flagged. `None` disables the lint — in single-file /
+    /// fragment / REPL mode an un-required module simply isn't bound, so the ordinary
+    /// unbound check already covers it. `Arc` so per-scope clones don't copy the set.
+    required_mods: Option<Arc<HashSet<String>>>,
+    /// The full qualified symbol *names* (`"mod/name"`) that appear literally in the
+    /// **un-expanded** source — the user-written references. The KI-17 lint fires only
+    /// for a reference in this set, so a *macro-injected* `other/helper` (present only in
+    /// the expanded tree, naming a module the user's file never mentions) is never
+    /// flagged. `Arc` so per-scope clones stay cheap.
+    raw_qualified: Arc<HashSet<String>>,
 }
 
 impl Ctx {
@@ -585,6 +604,24 @@ impl Ctx {
     /// a real unbound reference or a dynamically/elsewhere-defined one.
     pub(super) fn module_is_known(&self, prefix: &str) -> bool {
         self.known_ns.contains(prefix)
+    }
+    /// Record the KI-17 reachability set (see [`required_mods`](Ctx::required_mods)) —
+    /// enables the unrequired-module lint for this (whole-file) check.
+    pub(super) fn set_required_mods(&mut self, mods: HashSet<String>) {
+        self.required_mods = Some(Arc::new(mods));
+    }
+    /// The file's reachability set, or `None` when the lint is disabled (fragment mode).
+    pub(super) fn required_mods(&self) -> Option<&HashSet<String>> {
+        self.required_mods.as_deref()
+    }
+    /// Record the set of user-written qualified symbol names (see
+    /// [`raw_qualified`](Ctx::raw_qualified)).
+    pub(super) fn set_raw_qualified(&mut self, names: HashSet<String>) {
+        self.raw_qualified = Arc::new(names);
+    }
+    /// Did the qualified name `name` (`"mod/name"`) appear literally in the source?
+    pub(super) fn raw_qualified_has(&self, name: &str) -> bool {
+        self.raw_qualified.contains(name)
     }
     /// Record that file-local `sym`'s value is a **variadic** `fn` (has a `&`
     /// rest param). Consulted by the arity check so a `(sig …)`-derived *exact*

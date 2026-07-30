@@ -3732,6 +3732,43 @@ fn unknown_module_qualified_name_is_not_unbound() {
 }
 
 #[test]
+fn ki17_flags_a_qualified_reference_to_an_unrequired_module() {
+    // KI-17: a module bound in the loaded image, referenced qualified by a file that
+    // never `require`s/`:use`s it — resolving only by load-order luck. The whole-project
+    // driver passes each file its transitive require-closure; a reference outside that
+    // closure is flagged. Excluded → warn; included → silent (the require-what-you-name fix).
+    let mut interp = crate::Interp::new();
+    interp
+        .eval_str("(defmodule ki17mod \"m\")\n(defn foo (x) x)")
+        .expect("module loads");
+    let forms =
+        crate::syntax::reader::read_all(&mut interp.heap, "(defn go (x) (ki17mod/foo x))")
+            .expect("parse");
+
+    // Empty reachability set → unreachable-from-this-file → warn.
+    let warned = crate::types::check::check_file_ext(&mut interp.heap, &forms, &[]);
+    assert!(
+        warned
+            .iter()
+            .any(|(_, m)| m.contains("unrequired module: ki17mod")),
+        "expected an unrequired-module warning, got {warned:?}"
+    );
+    // The plain unbound lint must NOT also fire (the reference resolves).
+    assert!(
+        warned.iter().all(|(_, m)| !m.contains("unbound symbol")),
+        "a bound-but-unrequired reference is not 'unbound': {warned:?}"
+    );
+
+    // The module in the reachability set → silent.
+    let ok =
+        crate::types::check::check_file_ext(&mut interp.heap, &forms, &["ki17mod".to_string()]);
+    assert!(
+        ok.iter().all(|(_, m)| !m.contains("unrequired module")),
+        "expected silence when the module is reachable, got {ok:?}"
+    );
+}
+
+#[test]
 fn unexpandable_macro_calls_dont_false_flag() {
     // A file-local macro the checker can't expand: its arguments are opaque
     // syntax. (a) A macro that `def`s its symbol arg — the name must not look

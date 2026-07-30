@@ -12318,3 +12318,55 @@ higher-order-callback inference still listed in `check.rs`.
 **References.** ADR-110/024 (the gradual, advisory type discipline this inherits), ADR-125
 (a redefinable global is `dynamic()` — why a reassigned global can't be pinned), the
 2026-07-29 devlog entry.
+
+## ADR-189 — Per-file require-reachability lint: flag a qualified reference to an unrequired module (KI-17)
+
+**Status:** accepted + shipped. Closes KI-17.
+
+**The gap.** `nest check` loads the *whole* project image before checking, so a qualified
+reference `mod/name` resolves for **every** file — even one whose own load graph never pulls
+`mod` in. So a file that names `path/basename` but never `(require 'path)`s passed clean, then
+raised `unbound symbol: path/basename` at runtime whenever the sibling that happened to load
+`path` first was reordered or removed. The check answered "bound in the whole-project image",
+not "reachable from *this* file." (Hit twice downstream — the myedit `path/basename` bug.)
+
+**Decision.** The checker flags a **user-written** qualified reference whose module is not in
+the file's **transitive require-closure**. Mechanism (Rust) and policy (Brood) split cleanly:
+- `check-file` / `check-file-deps` / `check-file-structured` take an optional **reachability
+  set** — module names the file may name qualified. `check_file_ext` unions it with the file's
+  own direct requires (`:use` / `:use-internals` / any nested `(require 'M)`) and its own ns.
+- Only the whole-project driver sees every header, so **`std/tool/project.blsp`** builds the
+  module→direct-requires graph once (a new native builtin `%module-direct-requires`, one parse
+  per file), closes it **transitively** per file, and threads each file's set through the
+  fresh, cached, and structured check paths — carried **as data** in the parallel chunks
+  (`[file closure]` pairs), never as a shipped closure value.
+
+**Why transitive, and three false-positive classes it kills.** Soundness (zero false
+positives) is the checker's cardinal rule, so the lint had to model runtime reachability, not
+a stricter approximation. The `std/` + `tests/` sweep drove it: a direct-requires-only version
+lit 18 warnings, 17 of them false. The transitive closure clears **transitive** references (a
+test that `(:use editor/treesit)` legitimately names `face/…`, since treesit itself requires
+`editor/face`); a `raw_qualified` guard restricts the lint to references the user **literally
+wrote** in the source, never a **macro-injected** one to a module the file doesn't mention; and
+the lint is naturally **inert** in single-file / LSP / REPL mode (an un-required module isn't
+loaded there, so the ordinary unbound check covers it). The one genuine residue — `coverage`
+naming `project/…`, which can't `(require 'project)` at the top level without a **cycle**
+(project requires coverage) — is fixed by a *lazy* runtime `(require 'project)` in the single
+function that uses it: idempotent, non-circular, and the honest expression of the discipline
+the lint enforces. Net: zero false positives across the whole tree.
+
+**Cache.** The check-result cache entry gains a 5th field, the file's closure; a reused entry
+must match it, so a closure shift (another file's requires changed) re-checks the dependent
+even when its own mtime didn't move. Cache version bumped v1→v2.
+
+**Escape hatch.** `(check-allow :unrequired form…)` suppresses the lint for a deliberate
+exception the checker can't prove safe.
+
+**Deferred.** The reachability set is the file's *own* transitive closure, not the entry
+point's — so a library module meant to be required by consumers is checked as self-contained
+(the right granularity for a whole-project lint). A dynamic `(require modname)` with a
+non-literal argument is invisible to the graph (load-time-undecidable); it can only *miss* a
+warning, never invent one.
+
+**References.** KI-17 (docs/known-issues.md), ADR-119 (the incremental check cache the closure
+field extends), ADR-065 (modules/namespaces), the 2026-07-30 devlog entry.

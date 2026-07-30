@@ -59,6 +59,8 @@ byte-identical + GC-safe. Benchmark: ~5.7× on literal dispatch, ~1.8× on const
   resolvable name's type signature.
 - **REPL:** advisory warnings before each result, using live-image inference (every def is
   loaded there, so inference is at its most complete).
+- **Reachability (ADR-189):** `nest check` flags a qualified `mod/name` whose module the file
+  never (transitively) requires — the KI-17 load-order-luck bug — with zero false positives.
 
 ---
 
@@ -91,10 +93,11 @@ appears.
   item c) — checker-only today, matching `sig`'s default.
 
 ### Checker correctness
-- **KI-17 (open)** — `nest check` validates a qualified `mod/name` against *its* load set, not
-  the entry point's reachability, so a call to a module the program never loads passes and then
-  fails at runtime. Workaround: a `(require 'mod)` in every file that uses `mod/…`. Fix sketch
-  in [known-issues.md](known-issues.md).
+- **KI-17 — FIXED (ADR-189).** `nest check` now flags a user-written qualified `mod/name`
+  whose module the file doesn't transitively require (it resolved only by load-order luck).
+  The whole-project driver builds each file's transitive require-closure and threads it to
+  `check-file`; zero false positives across `std/` + `tests/`. See
+  [ADR-189](decisions.md) / [known-issues.md](known-issues.md).
 
 ### Tooling
 - **LSP hover / inlay inferred types for *buffer* functions.** Hover shows types only for
@@ -131,4 +134,5 @@ appears.
 
 ADRs: **180** typed op returns/params · **181** sealed ability as a type · **182** mono
 devirtualization · **185** provided op bodies · **186** any ability name is a type · **187**
-record patterns + exhaustiveness · **188** same-file inference.
+record patterns + exhaustiveness · **188** same-file inference · **189** per-file
+require-reachability lint (KI-17).
