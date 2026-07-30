@@ -912,6 +912,13 @@ pub fn self_pid() -> u64 {
     ensure_ctx().pid
 }
 
+/// This process's mailbox arrival sequence right now — the lock-free `seq_hint`, read
+/// relaxed. Used by `(ref)` to stamp a receive-mark (ADR-195); see [`Mailbox::seq_hint`]
+/// for why a racy read is sound in the only direction it can err.
+pub fn self_mailbox_seq() -> u64 {
+    ensure_ctx().mailbox.seq_hint.load(Ordering::Relaxed)
+}
+
 /// This process's pid **without** minting a context — `None` if it has none yet.
 /// A process with no ctx has never `spawn`ed or messaged, so it isn't in
 /// [`REGISTRY`] and can't be sharing a runtime under a drain — so skipping its

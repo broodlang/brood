@@ -1624,7 +1624,7 @@ pub(super) fn demonitor(args: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// `(%receive matcher timeout tags)` — the selective-receive primitive the `receive`
 /// macro (`std/prelude.blsp`) expands to. See `crate::process::receive_match`.
 pub(super) fn receive_match(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    crate::process::receive_match(heap, arg(args, 0), arg(args, 1), arg(args, 2))
+    crate::process::receive_match(heap, arg(args, 0), arg(args, 1), arg(args, 2), arg(args, 3))
 }
 
 pub(super) fn self_pid(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
@@ -1633,8 +1633,13 @@ pub(super) fn self_pid(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 
 /// `(ref)` — a fresh, globally-unique reference token. Shares the runtime's ref
 /// counter with `(monitor …)` so every ref is distinct.
-pub(super) fn make_ref(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    Ok(Value::ref_(crate::process::next_ref()))
+pub(super) fn make_ref(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = crate::process::next_ref();
+    // Stamp the receive-mark (ADR-195): a `receive` pinned on this ref can skip every
+    // message already in our mailbox, since none of them can carry a ref that did not
+    // exist when they were enqueued. One relaxed atomic load, no mailbox lock.
+    heap.set_recv_mark(id, crate::process::self_mailbox_seq());
+    Ok(Value::ref_(id))
 }
 
 // ----- distributed nodes -----------------------------------------------------

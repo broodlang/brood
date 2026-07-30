@@ -91,6 +91,14 @@ pub(super) fn clear_parked(mb: &Mailbox) {
 /// "deliver → wake" handshakes stay race-free (see `receive_match`/`send`/`run_one`).
 pub(super) struct Mailbox {
     pub(super) state: Mutex<MailboxState>,
+    /// The mailbox's `next_seq` republished as a lock-free hint, bumped after every push.
+    /// `(ref)` reads it to stamp a receive-mark without taking the mailbox lock (ADR-195).
+    ///
+    /// A racy read is sound in the only direction it can err: a stale-low value marks
+    /// *earlier* than necessary (we scan a few extra messages — correct, just less
+    /// optimal), and a value that races high can only include messages already enqueued,
+    /// which by definition predate the ref and therefore cannot carry it.
+    pub(super) seq_hint: AtomicU64,
     /// Wakes a *root* process blocked in `receive` (greens are woken by being
     /// re-queued instead).
     pub(super) cv: Condvar,
@@ -167,14 +175,32 @@ pub(super) enum Payload {
 
 pub(super) struct Envelope {
     pub(super) msg: Payload,
+    /// Arrival sequence, assigned under the mailbox lock by [`MailboxState::push`].
+    /// Monotonic per mailbox, so the queue is always ordered by it — which is what lets
+    /// a `receive` pinned on a fresh `ref` binary-search to the first message that could
+    /// possibly carry that ref instead of walking the backlog (the receive-mark, ADR-195).
+    pub(super) seq: u64,
     #[cfg(feature = "dev-tools")]
     pub(super) trace: Option<Message>,
 }
+impl MailboxState {
+    /// Push `env` onto the queue, stamping its arrival sequence and republishing the
+    /// lock-free hint. Every enqueue goes through here so `seq` is never left at 0.
+    #[inline]
+    pub(super) fn push(&mut self, mb: &Mailbox, mut env: Envelope) {
+        env.seq = self.next_seq;
+        self.next_seq += 1;
+        self.queue.push_back(env);
+        mb.seq_hint.store(self.next_seq, Ordering::Relaxed);
+    }
+}
+
 impl Envelope {
     #[inline]
     pub(super) fn plain(msg: Message) -> Self {
         Envelope {
             msg: Payload::Wire(msg),
+            seq: 0, // replaced by `MailboxState::push`
             #[cfg(feature = "dev-tools")]
             trace: None,
         }
@@ -183,6 +209,8 @@ impl Envelope {
 
 pub(super) struct MailboxState {
     pub(super) queue: VecDeque<Envelope>,
+    /// Next arrival sequence to hand out. Only ever increases; see [`Envelope::seq`].
+    pub(super) next_seq: u64,
     /// The exit reason set by `(exit pid reason)` / link propagation, paired with
     /// `kill_pending`. Read (and cleared) when the target dies; written under this
     /// lock before the flag is published, so a reader that sees the flag set always
@@ -252,12 +280,14 @@ impl Mailbox {
         Arc::new(Mailbox {
             state: Mutex::new(MailboxState {
                 queue: VecDeque::new(),
+                next_seq: 0,
                 waiter: None,
                 scanned: 0,
                 kill: None,
                 kill_hard: false,
                 recv_deadline: None,
             }),
+            seq_hint: AtomicU64::new(0),
             cv: Condvar::new(),
             // The root (which never goes through enqueue/run_one) keeps this; a
             // spawned green is set RUNNABLE by `enqueue` immediately after.
@@ -467,6 +497,7 @@ pub(crate) fn deliver_traced(pid: u64, msg: Message, trace: Option<Message>) {
         pid,
         Envelope {
             msg: Payload::Wire(msg),
+            seq: 0, // replaced by `MailboxState::push`
             trace,
         },
     );
@@ -550,11 +581,15 @@ fn try_deliver_local(src: &Heap, pid: u64, v: Value) -> bool {
         leading_keyword(proc.heap_mut(), copied)
     };
     let slot = proc.heap_mut().msg_root_add(copied);
-    st.queue.push_back(Envelope {
-        msg: Payload::Local { slot, tag },
-        #[cfg(feature = "dev-tools")]
-        trace: None,
-    });
+    st.push(
+        &mb,
+        Envelope {
+            msg: Payload::Local { slot, tag },
+            seq: 0,
+            #[cfg(feature = "dev-tools")]
+            trace: None,
+        },
+    );
     drop(st);
     wake_enqueue(proc);
     l1_stats::bump(&l1_stats::HIT);
@@ -565,7 +600,7 @@ fn deliver_envelope(pid: u64, env: Envelope) {
     let mailbox = REGISTRY.get(pid);
     if let Some(mb) = mailbox {
         let mut st = crate::core::sync::lock(&mb.state);
-        st.queue.push_back(env);
+        st.push(&mb, env);
         if let Some(proc) = wake_parked(&mut st) {
             drop(st);
             wake_enqueue(proc); // wake a parked green process (capture-mode → may migrate)
@@ -749,7 +784,13 @@ fn tag_rejects(tagset: &[u32], msg: &Message) -> bool {
     }
 }
 
-pub fn receive_match(heap: &mut Heap, matcher: Value, timeout: Value, tags: Value) -> LispResult {
+pub fn receive_match(
+    heap: &mut Heap,
+    matcher: Value,
+    timeout: Value,
+    tags: Value,
+    pin: Value,
+) -> LispResult {
     let ctx = ensure_ctx();
     // Whether this `receive` runs under state capture (a capture-mode green process):
     // the receive is re-entered from scratch on every wake, so its deadline must be
@@ -796,13 +837,23 @@ pub fn receive_match(heap: &mut Heap, matcher: Value, timeout: Value, tags: Valu
     // mailbox, so the scanned prefix is stable and `send` only appends.)
     let rbase = heap.roots_len();
     heap.push_root(matcher); // rbase + 0
+
+    // Receive-mark (ADR-195): when EVERY clause pins a ref this process minted, no message
+    // already queued when that ref was made can match — the ref did not exist yet — so the
+    // scan may start at the first message with `seq >= mark` instead of the front. That is
+    // what makes a request/reply receive O(1) in a backlogged mailbox rather than O(backlog).
+    // Any doubt (pin absent, not a ref, not the ref we last minted) falls back to 0.
+    let mark = match pin {
+        Value::Ref(id) => heap.recv_mark_for(id),
+        _ => None,
+    };
     let mut i = 0usize;
     loop {
         // Scan the queued messages for a ready clause (advancing `i` past
         // non-matches). The wait, below, is the only blocking step — this split is
         // the seam the coming state-capture path uses: there, a `None` becomes a
         // *suspend signal* returned to the scheduler instead of a `wait_for_message`.
-        match scan_mailbox(heap, &ctx, rbase, &mut i, tags) {
+        match scan_mailbox(heap, &ctx, rbase, &mut i, tags, mark) {
             Ok(Some(matched)) => {
                 // The receive completed (a clause matched) — clear any persisted
                 // capture-mode deadline so the next receive starts fresh. A nil-timeout
@@ -927,6 +978,9 @@ fn scan_mailbox(
     i: &mut usize,
     // The clauses' leading-keyword vector (or nil). Decoded LAZILY — see below.
     tags: Value,
+    // The receive-mark, if this receive pinned a ref we minted (ADR-195): no message with
+    // `seq` below it can match, so the scan may start past them.
+    mark: Option<u64>,
 ) -> Result<Option<Value>, LispError> {
     // Resolve the matcher to its compiled VM arm lazily, on the FIRST queued candidate:
     // each candidate then runs the pattern dispatch through the bytecode VM / JIT
@@ -959,6 +1013,21 @@ fn scan_mailbox(
             let mut st = crate::core::sync::lock(&ctx.mailbox.state);
             if *i >= st.queue.len() {
                 return Ok(None); // scanned to the end with no match
+            }
+            // Receive-mark: skip straight past every message that predates the pinned ref.
+            // The queue is ordered by `seq`, so this is a binary search, and it runs only
+            // while `*i` is still pointing at an older message (i.e. once per receive).
+            if let Some(m) = mark {
+                if st.queue[*i].seq < m {
+                    let lo = st.queue.partition_point(|e| e.seq < m);
+                    if lo > *i {
+                        *i = lo;
+                        optimistic = false; // the head is no longer the candidate
+                    }
+                    if *i >= st.queue.len() {
+                        return Ok(None);
+                    }
+                }
             }
             // Leading-keyword filter: reject a candidate no clause could match without
             // rebuilding it into the heap or running the matcher. This is what keeps a

@@ -12501,3 +12501,39 @@ the wrong instrument here and I nearly published it: it pins to **one core**, wh
 What remains of the latency gap is the **median**: 27 µs against Elixir's 8 µs, which is
 per-message cost (a request is spawn + send + collector receive), not scheduling. Recorded as
 `runtime-frontier.md` A5/A6.
+
+## 2026-07-30 (cont.) — the receive-mark (ADR-195), and a correction to this morning's p99.9 claim
+
+**The receive-mark shipped.** Every synchronous call in Brood is `(let (r (ref)) (send …)
+(receive ([:reply ^r v] …)))`, and each one scanned the mailbox from the front — so a busy
+process paid for its own backlog on every reply, which is precisely backwards. Envelopes now
+carry a monotonic arrival sequence; `(ref)` stamps the sequence current at the moment it mints
+(one relaxed atomic load off a lock-free `seq_hint`, no mailbox lock); and a `receive` whose
+clauses *all* pin that ref binary-searches to the first message that could carry it. Sound
+because a message enqueued before the ref existed cannot contain it — refs are unforgeable
+counter values. Every uncertainty (clauses disagree, pin is not a ref, ref not the one we last
+minted) declines the hint and scans from the front.
+
+Per ref-pinned round trip against a tag-rejected backlog, this morning → now: 500 → 16/4 µs,
+2 000 → 50/4 µs, 8 000 → 175/4 µs, **32 000 → 653/4 µs**. Flat: O(backlog) → O(1), 163× at
+32k, and unchanged at 3 µs with no backlog. Validated on the armed build (GC tripwire +
+verifier), five distribution-chaos runs, and six new tests pinning the cases where it must
+*not* skip — a foreign ref whose reply predates our own mint, a second ref evicting the mark,
+the same ref serving two receives, and a message queued before the ref still being there
+afterwards.
+
+**Correction: this morning's "p99.9 5× better" was a measurement error.** The spawn-placement
+entry quoted the `latency` row as 2902 → 562 µs at p99.9. That number was not a median — the
+sweep sorted its five runs **by p99** and printed the middle run's whole p50/p99/p99.9 triple,
+so the p99.9 shown was whichever value that one run happened to score. Measured properly, with
+per-metric medians over 11 runs, two samples of the *same* binaries disagreed on p99.9 by 3×
+(baseline 3574 vs 3028 µs; new build 1139 vs 3484 µs). **p99.9 is not resolvable on this
+workload at this sample size**, and the docs now say so instead of claiming a win.
+
+What survives is solid and agrees across every measurement taken: **p50 136 → 27 µs (5.0×)**
+and **p99 735 → 256 µs (2.9×)**, with the threshold sweep monotonic in both.
+
+The lesson is the same one this repo keeps relearning, in a new costume: the statistic has to
+be computed the way it is reported. "Median of five" was true of the *run*, not of the *metric*,
+and the difference was invisible until a metric with 3× variance sat in the same row as two
+stable ones.

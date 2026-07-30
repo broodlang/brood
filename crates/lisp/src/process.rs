@@ -74,11 +74,11 @@ pub use scheduler::{
     begin_capture, capture_append, current_pid, deadline_exceeded, exit, exit_count,
     free_drained_gen, gc_block_depth, in_green_process, live_pids, macro_block_active,
     migrate_count, native_stack_headroom_ok, old_gen_drained, parent_of, peak_threads, pid_value,
-    preempt_count, report_drain_liveness, self_pid, set_deadline, set_max_parallel,
-    set_test_no_workers, shutdown_runtime_parked, spawn, spawn_count, spawn_linked,
-    spawn_root_program, stack_budget, stack_overflow_check, steal_count, take_capture,
-    test_drive_quanta, tick, worker_threads, yield_now, GcBlockGuard, MacroBlockGuard,
-    NATIVE_STACK_MARGIN_BYTES, WORKER_STACK_BYTES,
+    preempt_count, report_drain_liveness, self_mailbox_seq, self_pid, set_deadline,
+    set_max_parallel, set_test_no_workers, shutdown_runtime_parked, spawn, spawn_count,
+    spawn_linked, spawn_root_program, stack_budget, stack_overflow_check, steal_count,
+    take_capture, test_drive_quanta, tick, worker_threads, yield_now, GcBlockGuard,
+    MacroBlockGuard, NATIVE_STACK_MARGIN_BYTES, WORKER_STACK_BYTES,
 };
 /// Currently-parked process count, runtime-wide — teardown/leak test hook.
 pub fn parked_process_count() -> usize {

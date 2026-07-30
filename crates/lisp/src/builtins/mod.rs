@@ -2559,11 +2559,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     // answers nil. `tags` is the set of leading keywords the clauses can match, or
     // nil to scan everything — a pure filter that lets the scan reject a message by
     // peeking its tag instead of rebuilding it into the heap (see `receive--tags`).
+    // `pin` (4th) is the receive-mark hint: the value every clause pins, when they all pin
+    // the same one (see `receive--pin`). If it is a `ref` this process minted, the scan can
+    // start past every message that predates it — nil disables the hint (ADR-195).
     def(
         heap,
         "%receive",
-        Arity::exact(3),
-        Sig::new(vec![callable, int.union(nil_ty), any], any),
+        Arity::exact(4),
+        Sig::new(vec![callable, int.union(nil_ty), any, any], any),
         receive_match,
     );
     // The dirty-native offload pool (ADR-144): the `offload` wrapper in the
