@@ -48,8 +48,9 @@ use super::monitor;
 // `stack_base_set` are scheduler-internal (only `install_ctx` resets them).
 mod guards;
 pub use guards::{
-    gc_block_depth, macro_block_active, stack_budget, stack_overflow_check, GcBlockGuard,
-    MacroBlockGuard, WORKER_STACK_BYTES,
+    gc_block_depth, macro_block_active, native_stack_headroom_ok, stack_budget,
+    stack_overflow_check, GcBlockGuard, MacroBlockGuard, NATIVE_STACK_MARGIN_BYTES,
+    WORKER_STACK_BYTES,
 };
 use guards::{gc_block_set, macro_block_set, stack_base_set};
 
