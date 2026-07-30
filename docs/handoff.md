@@ -4,8 +4,20 @@
 measurements live in [`devlog.md`](devlog.md); the option book lives in
 [`runtime-frontier.md`](runtime-frontier.md). Read this to pick the work back up cold.
 
-**As of 2026-07-30**, brood `92c1ef2d`, brood-benchmarks `10d669e`. Both repos clean and
-pushed; nothing half-finished.
+**As of 2026-07-30**, brood `56c2501`, brood-benchmarks `10d669e`. Nothing half-finished.
+
+Since the perf session this document was written for, the tree also gained **automatic macro
+hygiene** and **exact rationals as a kernel type** (`Value::Ratio`, ADR-196 — `1/2` is a
+reader literal and `(/ 1 2)` is exact), plus the ADR-166 Phase 1 reserved-name plan and
+ADR-197. Those are language work, not runtime work, so §§1–5 below still describe the
+current runtime picture unchanged.
+
+**Two of the three 1.0 release blockers in [`roadmap-for-v1.md`](roadmap-for-v1.md) moved**
+(re-measured 2026-07-30): `nest::registry` is **resolved** — the tests pin
+`commit.gpgsign=false`/`tag.gpgsign=false`, so CI no longer tracks whether a desktop signing
+agent is unlocked — and `nest format --check` is red on **26 files, not 52**. The formatter
+red is a **style verdict, not a bug**: 40% of its diff is documented comment *hoisting*.
+Read that entry before touching the formatter; do not run it tree-wide first.
 
 ---
 
@@ -40,7 +52,8 @@ From the published run (`brood-benchmarks/results/`):
 
 ## 3. Open threads, in the order I'd take them
 
-1. **`std/` scale sweep — best value per hour, unstarted.** Two of the three quadratics fixed
+1. **`std/` scale sweep — best value per hour, harness now exists (§4), no finding yet.**
+   Two of the three quadratics fixed
    this session were in **Brood policy code, not the kernel** (a list `append` per child, a
    list re-`filter` per restart), and nothing in the suite exercises `std/` frameworks at
    scale. Run `proc/gen`, `proc/agent`, `std/net/*`, `editor/buffer` at 10k+ and look for
@@ -75,6 +88,12 @@ All three live in `scripts/fuzz/stress/` and carry usage headers:
 - **`receive_backlog.blsp`** — the receive-mark's benchmark. ~4 µs at any backlog; if it ever
   goes linear again, the mark stopped applying.
 - **`reload_cost.blsp`** — fixed-iteration memory harness (see the trap below).
+- **`scale_sweep.blsp`** — thread #1's harness, added 2026-07-30. Runs a `std/` framework op
+  at N and 4N and prints the ratio (linear ~4×, quadratic ~16×). **Its header carries the
+  measurement caveat and must be read first:** `proc/agent update`, `buffer insert` and
+  `buffer forward-line` measured linear; `proc/gen gen-call` read 10.21× then 7.77× at base
+  2000 but 2.93× at base 4000, which is not a quadratic's signature (a quadratic does not
+  improve as the base grows). Extend it to three points + medians before believing any row.
 
 Plus the existing `scripts/fuzz/run.sh <generator>` (differential across 4 engine configs)
 and `dist_chaos*.sh` (multi-node, closure-shipping).
