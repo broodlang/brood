@@ -648,6 +648,7 @@ pub(crate) fn jit_run_fast_link(
     code: usize,
     nslots: usize,
     callee_env: EnvId,
+    callee_bases: (u32, u32),
 ) -> FastLinkOutcome {
     heap.truncate_roots(stage_base + argc);
     // DEBUG ONLY: the JIT fast path bypasses `push_frame`, so validate the staged args
@@ -685,7 +686,17 @@ pub(crate) fn jit_run_fast_link(
     heap.jit_native_depth = native_depth + 1;
     stamp_stack_limit_if_outermost(heap, native_depth);
     let saved_force_vm = heap.jit_force_vm;
+    // KI-20: the callee's native code reads its OWN per-arm IC block through the heap
+    // cursors (`vm_call_ic_put`/`vm_global_ic_put`/fast-link publishes). Install the callee's
+    // bases for the call and restore the caller's around it — exactly as the cloning
+    // native-link path in `jit_dispatch_call` does. Without this the callee wrote into the
+    // caller's IC slots (and vice versa); never a wrong answer (every probe re-validates
+    // `sym`/`argc`/`epoch`, so a crossed entry simply misses) but both arms ran permanently
+    // cache-cold, and `dbg_site_loc` reported the wrong site. The bases arrive as args (they
+    // rode in the `FastLink` slot), so this is two `Cell` writes, no table lookup.
+    let saved_bases = heap.set_ic_bases(callee_bases);
     let outcome = f(heap as *mut Heap, base as i64);
+    heap.set_ic_bases(saved_bases);
     heap.jit_force_vm = saved_force_vm;
     heap.jit_native_depth = native_depth;
     heap.jit_call_env = saved;
@@ -841,6 +852,7 @@ pub(crate) fn jit_dispatch_fast_frame(
     nslots: usize,
     code: usize,
     env: u64,
+    callee_bases: (u32, u32),
 ) -> FastLinkOutcome {
     let n = heap.roots_len();
     let epoch = heap.global_epoch();
@@ -861,15 +873,16 @@ pub(crate) fn jit_dispatch_fast_frame(
     {
         let auth = heap.vm_call_ic_fast_link(site, head, argc as u32, epoch);
         debug_assert!(
-            matches!(auth, Some((c, ns, e)) if c as usize == code && ns == nslots && e == callee_env),
+            matches!(auth, Some((c, ns, e, b)) if c as usize == code && ns == nslots && e == callee_env && b == callee_bases),
             "fast-link mirror desynced from the call IC (site {site}, head {head}): \
-             mirror=(code={code:#x}, nslots={nslots}, env={:#x}) auth={auth:?} — the IR's \
-             epoch+sym+argc guard should make this unreachable (see FastLink)",
+             mirror=(code={code:#x}, nslots={nslots}, env={:#x}, bases={callee_bases:?}) \
+             auth={auth:?} — the IR's epoch+sym+argc guard should make this unreachable \
+             (see FastLink)",
             callee_env.0
         );
     }
     jit_run_fast_link(
-        heap, argc, site, head, epoch, stage_base, code, nslots, callee_env,
+        heap, argc, site, head, epoch, stage_base, code, nslots, callee_env, callee_bases,
     )
 }
 
@@ -937,7 +950,7 @@ pub(crate) fn jit_dispatch_call(
     // times). Args are already staged at `[stage_base, stage_base+argc)`. Mirrors the
     // cloning path's frame setup + outcome handling; deopt (rare) re-probes for the arm.
     if elided && !over_cap {
-        if let Some((code, nslots, callee_env)) =
+        if let Some((code, nslots, callee_env, callee_bases)) =
             heap.vm_call_ic_fast_link(site, head, argc as u32, epoch)
         {
             match jit_run_fast_link(
@@ -950,6 +963,7 @@ pub(crate) fn jit_dispatch_call(
                 code as usize,
                 nslots,
                 callee_env,
+                callee_bases,
             ) {
                 FastLinkOutcome::Done(v) => return Some(v),
                 FastLinkOutcome::Error => return None,

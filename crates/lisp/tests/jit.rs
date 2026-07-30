@@ -558,6 +558,31 @@ fn non_tail_mutual_recursion_fast_links_both_heads() {
 }
 
 #[test]
+fn fast_linked_callee_uses_its_own_ic_block() {
+    // KI-20 regression. A JIT fast link (`jit_run_fast_link`) enters the callee's native
+    // code; before the fix it left `ic_bases` pointing at the CALLER's per-arm inline-cache
+    // block, so the callee resolved its own call sites / global reads against the caller's
+    // slots (and vice versa). Never a wrong answer — every IC read re-validates
+    // `sym`/`argc`/`epoch`, so a crossed entry just misses — but both arms ran cache-cold.
+    // A three-level chain where each hot arm fast-links the next in NON-tail position and the
+    // callee then makes its OWN fast-linked call: `outer`→`middle`→`inner`, each a distinct
+    // free-global head, so each has a distinct IC block. If `middle` ran under `outer`'s base
+    // its call to `inner` would read the wrong slot; the crossing is silent, so the guard is
+    // the answer plus the debug cross-check in `jit_dispatch_fast_frame` (asserts the
+    // IR-passed bases equal the authoritative IC's on every fast-frame call in debug builds).
+    // Warmed past tiering so all three arms are native and fast-link. `inner 4` = 4;
+    // `middle n` sums `inner 4` down the chain; `outer 8` alternates; must match the VM.
+    is(
+        "(defn inner (n) (if (< n 1) 0 (+ 1 (inner (- n 1)))))
+         (defn middle (n) (if (< n 1) 0 (+ (inner 4) (middle (- n 1)))))
+         (defn outer (n) (if (< n 1) 0 (+ (middle 3) (outer (- n 1)))))
+         (defn run (k last) (if (< k 1) last (run (- k 1) (outer 8))))
+         (run 100000 0)",
+        "96", // outer 8 → 8×(middle 3) → 8×3×(inner 4)=8×3×4 = 96
+    );
+}
+
+#[test]
 fn redefining_a_fast_linked_callee_is_honored() {
     // Late binding across the fast-link: warm `f` (a non-tail caller of `g`) so the call
     // site fast-links to `g`'s native code, then `def` a new `g`. The epoch bump must

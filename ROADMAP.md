@@ -1039,7 +1039,8 @@ documents *abort the OS process*, because deep non-tail recursion on the **JIT**
 overflows the native stack while the bytecode VM and the tree-walker both handle the
 identical input correctly. That is a JIT call-path bug, not a JSON one — any Brood
 service parsing untrusted nested input is killable with a few kilobytes, and
-`try`/`catch` cannot see it. Open; see `docs/known-issues.md`.
+`try`/`catch` cannot see it. **Fixed 2026-07-26** (the JIT tail-chain native-depth cap);
+see `docs/known-issues.md`.
 
 *UCD*: NormalizationTest's ~19,000 cases pass the full conformance closure (every one
 of the five columns normalising into every form, not just `NFC(source)` — idempotence

@@ -1272,7 +1272,8 @@ fn jit_lower_arm_inner(
         .ok()?;
     // Track B / Technique A — the in-IR fast call path. brood_rt_fastlink_base(heap,
     // out_len: *mut u64) -> *const FastLink: base + length of the IR-readable fast-link
-    // mirror. brood_rt_fast_frame(heap, out, site, head, argc, nslots, code, env) -> status:
+    // mirror. brood_rt_fast_frame(heap, out, site, head, argc, nslots, code, env,
+    // callee_ic_base, callee_gic_base) -> status:
     // run the (already epoch-validated, flat-table-read) native fast-link. Status 0 = done,
     // 1 = error parked, 2 = could-not-link (fall to brood_rt_call_slow).
     let mut flbase_sig = m.make_signature();
@@ -1291,6 +1292,8 @@ fn jit_lower_arm_inner(
     fastframe_sig.params.push(AbiParam::new(types::I32)); // nslots
     fastframe_sig.params.push(AbiParam::new(types::I64)); // code (native entry ptr as u64)
     fastframe_sig.params.push(AbiParam::new(types::I64)); // env (EnvId raw word)
+    fastframe_sig.params.push(AbiParam::new(types::I32)); // callee_ic_base
+    fastframe_sig.params.push(AbiParam::new(types::I32)); // callee_gic_base
     fastframe_sig.returns.push(AbiParam::new(types::I64)); // status
     let fastframe_id = m
         .declare_function("brood_rt_fast_frame", Linkage::Import, &fastframe_sig)

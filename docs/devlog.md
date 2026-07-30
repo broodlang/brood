@@ -12196,3 +12196,32 @@ completion; a non-snippet client gets a plain `(area [self] )` skeleton, never l
 2 tests (the skeleton's four paren/snippet modes + the end-to-end insert_text). The sibling
 type-directed record-field completion is on the roadmap backlog — it needs inferred types in the
 completion path, worth ~a day, deferred until then.
+
+## 2026-07-30 (cont.) — KI-20 fixed: JIT fast link installs the callee's IC block
+
+The last open known-issue. `jit_run_fast_link` (the shared body of the in-IR fast-link and
+`jit_dispatch_call`'s fast-link caller) set the callee's env/dbg-fn/native-depth/stack-limit
+before entering its native code but **not** `ic_bases` — so the callee ran against the
+*caller's* per-arm inline-cache block. Never a wrong answer (every IC read re-validates
+`sym`/`argc`/`epoch`, so a crossed entry just misses) but both arms ran permanently
+cache-cold, and `dbg_site_loc`/`[jit-staged-stale]` reported the wrong site. The cloning
+native-link path already installed the callee bases; only the fast path didn't.
+
+Fixed exactly the way the reverted 2026-07-30 attempt's post-mortem prescribed — **no
+hot-path lookup**. The callee's bases now ride in the `FastLink` slot (`_pad` → `callee_ic_base`
++ a new `callee_gic_base`); `vm_call_ic_fast_link` stamps them from the entry's already-resolved
+`CallIcEntry::callee_bases` (so no `vm_arm_block` call and no borrow on the publish path, and the
+memoised hot path returns them straight from the slot it already read); the IR loads them
+alongside `code`/`nslots`/`env` (two `u32` loads from the same cache line) and passes them as two
+more args to `brood_rt_fast_frame`; and `jit_run_fast_link` does `set_ic_bases`/restore around the
+native call — two `Cell` writes off handed-in values, the runtime never re-reads the table. A
+native flat cell carries `(0,0)`. The first attempt regressed `bintree` +5.5% because it read the
+bases via a `RefCell` borrow + bounds-checked index *per call* inside `jit_dispatch_fast_frame`;
+this one adds none, and a pinned best-of-9 A/B (`fib`, `bintree`) measured **+0.0%** vs a +0.0%
+base-vs-base floor.
+
+A debug cross-check in `jit_dispatch_fast_frame` now asserts the IR-passed bases equal the
+authoritative IC's (`b == callee_bases`), tripping on any future mirror desync across the whole
+debug suite. Verified: jit (35) + differential + jit_runtime_compaction green under
+`BROOD_GC_STRESS=1 BROOD_JIT_VERIFY=1`, full `make test` green. `docs/known-issues.md` now has
+**no open issues**.
