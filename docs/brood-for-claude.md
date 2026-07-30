@@ -639,15 +639,36 @@ and registers the new pid. The name is auto-reaped on death.
 (spawn (worker))                                   ; fire-and-forget; crashes exit the process
 (spawn :ticker (ticker 0))                         ; named + idempotent
 
-;; Userland supervisor — re-spawn on crash:
+;; Userland supervisor — re-spawn on crash. `^ref` PINS the ref (match the value
+;; in `ref`, don't rebind); `~` is quasiquote-only and is a compile error here.
 (defn supervise (worker-fn)
   (let (pid (spawn (worker-fn)) ref (monitor pid))
     (receive
-      ([:down ~ref _ :normal] :ok)
-      ([:down ~ref _ reason]
+      ([:down ^ref _ :normal] :ok)
+      ([:down ^ref _ reason]
         (println "child died: " (pr-str reason) " — restarting")
         (supervise worker-fn)))))
 ```
+
+**`(spawn-link expr)` when you need the child's death to reach you** — it spawns
+and `link`s **atomically**, which a hand-rolled `(let (p (spawn expr)) (link p) p)`
+does *not*: a child that exits inside that gap is linked dead and reports
+`:noproc`, silently **replacing** its real reason, so a fast `:normal` return
+reads as a crash. Links are symmetric (either side's abnormal death takes the
+other down, or arrives as a trappable `[:EXIT pid reason]` after
+`(trap-exit true)`), and `spawn-link` takes one expression like `spawn` — no
+named form.
+
+```lisp
+(trap-exit true)
+(let (p (spawn-link (worker)))                     ; linked before the child runs
+  (receive ([:EXIT ^p :normal] :done)              ; true reason, never :noproc
+           ([:EXIT ^p reason]  (restart reason))))
+```
+
+Use it for anything supervised — `std/proc/supervisor.blsp`'s `:start` thunks are
+`(fn () (spawn-link (worker …)))`, and `proc/gen`'s `spawn-server-link` is the
+same idea for a `defprocess` server.
 
 ## Distributed nodes — named processes & cross-node addressing
 
@@ -968,8 +989,9 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   ESC byte is the `\e` string escape. (For a render-op frame buffer, use
   `std/display`.)
 - **Filesystem (stat-class)**: `file-exists?` `dir?` `list-dir` `file-mtime` `file-stat`
-- **processes**: `spawn` (incl. named-spawn `(spawn :name expr)`)
-  `send` `receive` `self` `ref` `monitor` `demonitor` `register` `whereis`
+- **processes**: `spawn` (incl. named-spawn `(spawn :name expr)`) `spawn-link`
+  `send` `receive` `self` `ref` `monitor` `demonitor` `link` `unlink` `trap-exit`
+  `register` `whereis`
   — plus the **`proc/gen`** framework below
 - **lazy fusing views**: `lmap` `lfilter` `lkeep` `lremove` (thread with `->>`;
   realise with `seq`/`into`) plus `comp` for function composition
