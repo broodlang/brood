@@ -286,6 +286,34 @@ costs**, and the reason we sit ~13× off `DynamicSupervisor` after the O(N²) fi
   collector reclaims promptly (ADR-091 stage 4); the blocker is reclamation, not the
   handoff.
 
+**A4 — the `latency` row: our tail is 13× the BEAM's, and our median is 15× (measured
+2026-07-30).** The benchmark suite gained an open-loop row that holds a fixed 20,000 req/s
+arrival schedule and makes every 20th request occupy ~500 µs of CPU, reporting percentiles
+over the *other* 95% — i.e. what a busy handler does to everyone else. Offered load is 0.5
+cores of twelve, so nothing is capacity-limited and the tail is scheduling, not saturation.
+
+| | p50 | p99 | p99.9 | max | cores | CPU·s |
+|---|---|---|---|---|---|---|
+| Elixir | 8 µs | 59 µs | 98 µs | 601 µs | 1.9× | 5.28 |
+| **Brood** | **121 µs** | **439 µs** | **1300 µs** | 2134 µs | 1.3× | 3.32 |
+| Node | <1 µs | 451 µs | 561 µs | 1047 µs | 1.0× | 2.55 |
+| .NET | 4 µs | 714 µs | 12627 µs | 15082 µs | 2.4× | 6.04 |
+
+Two separate Brood problems, and they want different fixes:
+
+- **The 121 µs median is per-message cost**, not scheduling — it is A1/A3 showing up again
+  (a request here is spawn + send + a collector receive). Elixir's is 8 µs. Same family as
+  `pingpong`/`ring`.
+- **The 1300 µs p99.9 is scheduling.** A fat handler should cost its neighbours nothing on a
+  12-core box at 0.5 cores of load, and it costs them milliseconds. The first hypothesis to
+  test is **spawn placement**: processes are placed at spawn and not migrated
+  (`docs/scheduler.md`), so a dispatcher spawning every handler can pile them onto its own
+  worker, where one 500 µs handler then blocks the queue behind it. Note we also use only
+  1.3× cores against Elixir's 1.9× on the same offered load — consistent with work landing on
+  too few workers. Not yet investigated.
+
+Worth stating plainly: Node, single-threaded, has a better p99.9 than Brood on this row.
+
 ### B. Process memory floor (~4.5 KB → toward ~3 KB)
 
 - [x] **M1 — DONE 2026-07-29. `Heap` split into hot core + lazily-boxed cold state.** The
