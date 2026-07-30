@@ -882,7 +882,16 @@ pub(crate) fn jit_dispatch_fast_frame(
         );
     }
     jit_run_fast_link(
-        heap, argc, site, head, epoch, stage_base, code, nslots, callee_env, callee_bases,
+        heap,
+        argc,
+        site,
+        head,
+        epoch,
+        stage_base,
+        code,
+        nslots,
+        callee_env,
+        callee_bases,
     )
 }
 
