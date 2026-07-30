@@ -82,9 +82,18 @@ From the published run (`brood-benchmarks/results/`):
 4. **Per-process memory floor** — 5.9 KB vs the BEAM's 3.1 KB, roughly half unattributed.
    Frontier section B. Needs an allocator size-class histogram behind a cargo feature; there
    is no heaptrack/valgrind on this box, only `perf`.
-5. **Endurance.** The soaks were 30 minutes (~1.5 M self-checking iterations, zero failures).
-   An unattended overnight run against `soak_selfcheck.blsp` is the one gap that cannot be
-   closed by watching.
+5. **Endurance — a 9-hour run is IN FLIGHT as of 2026-07-30 ~23:45.** The soaks had been 30
+   minutes (~1.5 M self-checking iterations, zero failures); the unattended overnight run is
+   now going, armed **and** control, against a pinned copy of the `86cd3fb3` binary so a
+   rebuild can't change what is under test. Results + how to read them:
+   **`~/brood-soak-2026-07-30/`** (`README.md` there, logs mirrored every minute from the
+   session `/tmp` dir; a `FINISHED` file appears when both end). Each run is capped at
+   `MemoryMax=6G` in its own systemd user scope, so a runaway is OOM-killed in its own cgroup
+   rather than taking the box down — hitting the cap is itself a finding, with the growth
+   curve in the log. `SOAK_REPORT` is in *iterations*, so armed vs control `rss_kb` is
+   comparable at equal `iter=` (never at equal `t=` — that is the time-boxed trap in §5).
+   The detector was verified to trip before launch: draining one message fewer than queued
+   gave `ERROR at iteration 0: backlog lost: saw 63 of 64`.
 
 **Explicitly NOT open: a memory leak.** See §5 — it was chased and does not exist.
 
