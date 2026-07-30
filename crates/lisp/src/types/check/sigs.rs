@@ -619,6 +619,23 @@ pub(super) fn infer_params_from_form(heap: &Heap, fn_form: Value) -> Option<Vec<
         return None; // params vary per clause — no single demand to store
     }
     let plist = *items.get(1)?;
+    // Skip a variadic (`&`) / `&optional` fn: its parameters don't map 1:1 to argument
+    // positions (a rest binder collects the args into a *list*, not each arg), so a
+    // per-position demand can't be soundly checked at a call site — it would flag a valid
+    // `(vf 1 2 3)`. Mirrors `infer_sig`, which already yields a params-less sig for a complex
+    // closure on the loaded path.
+    let raw = match plist {
+        Value::Vector(id) => heap.vector(id).to_vec(),
+        _ => super::walk::list_items(heap, plist).unwrap_or_default(),
+    };
+    if raw.iter().any(|&it| {
+        matches!(it, Value::Sym(s)
+            if value::symbol_is(s, kw::AMP)
+                || value::symbol_is(s, kw::AMP_OPTIONAL)
+                || value::symbol_is(s, kw::AMP_REST))
+    }) {
+        return None;
+    }
     let params = super::walk::fn_params(heap, plist);
     if params.is_empty() {
         return None;
