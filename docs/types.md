@@ -171,6 +171,16 @@ one-step-deep inferencer** that now covers control-flow, recursion, and complex 
     - **Complex closures** (2026-07-29): a multi-arity / `&optional` / rest closure
       has no single *param* signature, but its **return** is the union of each arm's
       tail (`infer_return_only`, a params-less `Sig`); arity is checked separately.
+    - **Same-file functions** (2026-07-29): `sig_of` reads the *loaded* closure, so a
+      file's own `(defn …)` — not loaded while the file is checked — was invisible, and
+      same-file callers went unchecked. `check_file`'s **Pass 2.8** infers each such
+      function's return from its *form* (`infer_return_from_form`) and records it in `Ctx`,
+      resolving callees leaf-up over a bounded **fixpoint** (a caller sees a later-defined
+      callee; a cross-function cycle defers). A function is stored only once its callees are
+      final, so no stale/narrow value leaks — and a **reassigned global** (the lazy-init
+      `(when (nil? *g*) (def *g* …))`) is left `dynamic` (nested-def counting +
+      earmuffed-global skip), so its returner doesn't false-flag. This surfaced a real bug:
+      `%node-listen`'s primitive `Sig` said `symbol` where a node name is a keyword.
   Sound throughout: params are *under*-constrained (defer on any guarded/uncertain
   use); a return union is a *supertype* of what a call actually returns (it can only
   *under*-flag a caller, never false-positive); any untypeable arm/branch defers the

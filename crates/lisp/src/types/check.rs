@@ -32,7 +32,8 @@
 //!
 //! ## Where signatures come from (Step 3)
 //!
-//! Three sources, simplest-first — *no inference engine* (`docs/types.md`):
+//! Three sources, simplest-first — a bounded, sound inferencer rather than a full
+//! unification engine (`docs/types.md`):
 //!
 //! 1. **Primitives** — every [`NativeFn`](crate::core::value::NativeFn) carries
 //!    a `Sig` ([contract point #6, enforced](../docs/types.md#compatibility-contract))
@@ -90,11 +91,13 @@
 //!   [`check_file`] accumulates top-level `def`/`defn`/`defmacro` / `defdyn`
 //!   names across the forms in a file.
 //!
-//! Not yet (later increments): inference through `cond`/`match`, structured /
-//! `and`/`or`-chained guards, recursion, higher-order. The checker runs
-//! automatically as the pre-flight in `brood <file>` / `nest test` / `nest run`
-//! / `nest check`; the in-process entry points are [`check_file`] (whole file)
-//! and the `(check 'form)` builtin (a fragment).
+//! Inference now covers control-flow returns (`if`/`cond`/`let`/`do`/`case`), recursion,
+//! multi-arity/variadic closures, and — via `check_file`'s Pass 2.8 fixpoint — a file's own
+//! functions (form-based, since the file isn't loaded while checked). Still deferred:
+//! `and`/`or`-chained guard narrowing and higher-order-callback result inference. The checker
+//! runs automatically as the pre-flight in `brood <file>` / `nest test` / `nest run` /
+//! `nest check`; the in-process entry points are [`check_file`] (whole file) and the
+//! `(check 'form)` builtin (a fragment).
 //!
 //! **Operand-position unbound symbols.** The unbound-symbol diagnostic fires on
 //! both a combination's *head* and its *operand / value* positions — `(+ 1 typo)`,
@@ -113,6 +116,7 @@
 mod annot;
 mod ctx;
 pub(super) mod deps;
+mod exhaustive;
 mod guards;
 mod hygiene;
 mod infer;
@@ -671,9 +675,7 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         {
             let mut def_count: HashMap<Symbol, usize> = HashMap::new();
             for &form in &expanded {
-                if let Some((name, _)) = def_name_and_value(heap, form) {
-                    *def_count.entry(name).or_insert(0) += 1;
-                }
+                count_defs(heap, form, &mut def_count);
             }
             for &form in &expanded {
                 let Some((name, rhs)) = def_name_and_value(heap, form) else {
@@ -683,9 +685,18 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
                 // **dynamic variable** (`defdyn`): a dynvar's `def` sets only the
                 // default, but `binding` rebinds it to any type in a dynamic extent, so
                 // its value type isn't fixed — it must stay `dynamic()`.
+                // Also skip an **earmuffed** `*name*` global: it is dynamic by convention
+                // (reassigned over its lifetime — the lazy-init `(when (nil? *g*) (def *g*
+                // …))` pattern is common), so pinning it to its load-time default value would
+                // false-positive once it is reassigned — and, now that Pass 2.8 infers a
+                // function's return from its body, that narrow value would propagate into the
+                // return of any function that reads the global (e.g. `telemetry--metrics`).
+                // `global_value_ty` already skips earmuffed globals; this makes the inferred
+                // (Gap A) path — consulted first — agree.
                 if def_count.get(&name) != Some(&1)
                     || ctx.is_file_macro(name)
                     || value::is_dynamic(name)
+                    || infer::is_earmuffed(name)
                 {
                     continue;
                 }
@@ -693,6 +704,53 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
                     if !ty.contains_tag(value::Tag::Fn) && !ty.contains_tag(value::Tag::Native) {
                         ctx.add_inferred_value_ty(name, ty);
                     }
+                }
+            }
+        }
+        // Pass 2.8: **same-file function-return inference.** The file being checked isn't
+        // loaded, so `sigs::sig_of`'s loaded-closure inference can't see its own `(defn …)`s
+        // — a same-file caller got no result checking (only cross-module callers of *loaded*
+        // functions did). Infer each single-def, unshadowed, un-declared function's return
+        // from its FORM (`sigs::infer_return_from_form`) and record it in `ctx`, so a
+        // same-file call flows the result exactly as a loaded-function call already does.
+        //
+        // A bounded fixpoint resolves callees leaf-up: `infer_return_from_form` returns
+        // `None` (defers, records nothing) until every function its return depends on is
+        // already recorded, so a function is only ever stored with its callees' FINAL sigs —
+        // no stale/narrow intermediate leaks (sound at any cap; a cross-function cycle or a
+        // chain deeper than the cap simply stays deferred). Return-only (a params-less sig),
+        // so it never constrains an argument. Runs after Gap A so a `(def g <expr>)` value
+        // type its body reads is already in scope.
+        {
+            let mut def_count: HashMap<Symbol, usize> = HashMap::new();
+            for &form in &expanded {
+                count_defs(heap, form, &mut def_count);
+            }
+            let candidates: Vec<(Symbol, Value)> = expanded
+                .iter()
+                .filter_map(|&form| {
+                    let (name, rhs) = def_name_and_value(heap, form)?;
+                    (def_count.get(&name) == Some(&1)
+                        && !ctx.is_file_macro(name)
+                        && !value::is_dynamic(name)
+                        && ctx.declared_sig(name).is_none())
+                    .then_some((name, rhs))
+                })
+                .collect();
+            // Iterate to a fixed point; break as soon as a pass records nothing new. The cap
+            // bounds a pathological deep chain (the tail just stays deferred — sound).
+            for _ in 0..16 {
+                let mut changed = false;
+                for &(name, rhs) in &candidates {
+                    if let Some(ret) = sigs::infer_return_from_form(heap, rhs, Some(name), &ctx) {
+                        if ctx.inferred_fn_sig(name).map(|s| s.ret) != Some(ret.clone()) {
+                            ctx.add_inferred_fn_sig(name, crate::types::Sig::new(vec![], ret));
+                            changed = true;
+                        }
+                    }
+                }
+                if !changed {
+                    break;
                 }
             }
         }
@@ -732,6 +790,11 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         for &form in &expanded {
             recursion::check_recursion(heap, form, &mut out);
         }
+        // Pass 3.6: sealed-`match` exhaustiveness (ADR-187 part 2). Reads the *un-expanded*
+        // forms (a `match` survives only pre-expansion) with `ctx` carrying the file's sigs
+        // and abilities, so a scrutinee typed as a sealed ability resolves to its record-id
+        // set. Sound: anything it can't prove total defers to silence.
+        exhaustive::check_matches(heap, &forms, &ctx, &mut out);
         // Pass 4: macro-hygiene lint over the *un-expanded* forms — `defmacro`
         // templates and their `~unquote` structure only survive pre-expansion
         // (`macroexpand_all` leaves quasiquote opaque, and the template is gone once
@@ -835,6 +898,35 @@ fn def_name_and_value(heap: &Heap, form: Value) -> Option<(Symbol, Value)> {
         return None;
     };
     Some((name, items[2]))
+}
+
+/// Count every `(def NAME …)` for each name across `form`, **including nested** defs (a
+/// reassignment inside a function body, a `do`, a `when`, …) — not just top-level. A global
+/// def'd more than once anywhere is *reassigned*, so its type isn't its first value; the
+/// value-type inference (Gap A) and the same-file return inference (Pass 2.8) both use this
+/// to leave such a global `dynamic()` rather than pinning it to a stale initial value (the
+/// lazy-init `(when (nil? *g*) (def *g* (table)))` pattern — else a function returning `*g*`
+/// infers `nil` and false-flags its callers). Skips quoted subtrees.
+fn count_defs(heap: &Heap, form: Value, counts: &mut HashMap<Symbol, usize>) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        let Some(&Value::Sym(head)) = items.first() else {
+            return;
+        };
+        if value::symbol_is(head, kw::QUOTE) || value::symbol_is(head, kw::QUASIQUOTE) {
+            return;
+        }
+        if value::symbol_is(head, kw::DEF) {
+            if let Some(&Value::Sym(name)) = items.get(1) {
+                *counts.entry(name).or_insert(0) += 1;
+            }
+        }
+        for &item in items.get(1..).unwrap_or(&[]) {
+            count_defs(heap, item, counts);
+        }
+    })
 }
 
 /// [`check_file`] plus the Phase-2 incremental-cache **dep-keys** for the file: the

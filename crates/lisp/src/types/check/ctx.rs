@@ -294,6 +294,15 @@ pub(super) struct Ctx {
     /// is authoritative. Only populated for globals defined exactly once (a
     /// redefined global's type is ambiguous — it stays `dynamic()`).
     inferred_value_ty: HashMap<Symbol, Ty>,
+    /// **Same-file inferred function signatures** — the sig the checker inferred for a
+    /// `(defn …)` in *this* file, from its form (the file isn't loaded while it's checked, so
+    /// `sigs::sig_of`'s loaded-closure inference can't see it). Populated by `check_file`'s
+    /// fixpoint pass and read at a call site *after* a declared sig (which is authoritative),
+    /// so a same-file caller gets the same checking a cross-module caller of a loaded function
+    /// already got. Return-only for now (params-less), so it flows results without imposing
+    /// argument constraints. Redefinable-global caution is the caller's (treated as an
+    /// over-approximation, like the loaded-inferred sigs).
+    inferred_fn_sig: HashMap<Symbol, Sig>,
     /// User-declared sigs that contain type variables (`?A`) — the full
     /// [`SigWithVars`] for unification at call sites.  Populated alongside
     /// [`declared`] when the sig annotation has at least one `?`-symbol.
@@ -616,6 +625,19 @@ impl Ctx {
     pub(super) fn add_inferred_value_ty(&mut self, sym: Symbol, ty: Ty) {
         if !self.declared_value_ty.contains_key(&sym) {
             self.inferred_value_ty.insert(sym, ty);
+        }
+    }
+    /// The same-file inferred function signature for `sym`, if one was recorded. Read
+    /// *after* [`declared_sig`] (authoritative). Callers treat its return as an
+    /// over-approximation (a call result), like a loaded-inferred sig.
+    pub(super) fn inferred_fn_sig(&self, sym: Symbol) -> Option<Sig> {
+        self.inferred_fn_sig.get(&sym).cloned()
+    }
+    /// Record a same-file inferred function sig (Pass 2.8). No-op if a sig is already
+    /// declared for `sym` — a declaration wins.
+    pub(super) fn add_inferred_fn_sig(&mut self, sym: Symbol, sig: Sig) {
+        if !self.declared.contains_key(&sym) {
+            self.inferred_fn_sig.insert(sym, sig);
         }
     }
     /// The full (variable-bearing) declared sig for `sym`, if it was parsed

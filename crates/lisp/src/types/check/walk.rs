@@ -1815,7 +1815,7 @@ fn params_form_has_rest(heap: &Heap, form: Value) -> bool {
     })
 }
 
-fn fn_params(heap: &Heap, form: Value) -> Vec<Symbol> {
+pub(super) fn fn_params(heap: &Heap, form: Value) -> Vec<Symbol> {
     let items = match form {
         Value::Vector(id) => heap.vector(id).to_vec(),
         Value::Nil | Value::Pair(_) => list_items(heap, form).unwrap_or_default(),

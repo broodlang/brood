@@ -55,23 +55,37 @@ fn ability_type(name: &str) -> Option<Ty> {
         match m.borrow().get(name)? {
             // Open ability: permissive — the type checks nothing, but the sig survives.
             None => Some(Ty::ANY),
-            // Sealed ability: the finite union of its members' record shapes.
+            // Sealed ability: the finite union of its members' record shapes, built at its
+            // true set-theoretic denotation as a SINGLE record shape whose `:__id__` is the
+            // union of the member keyword-literals: `%{__id__: (:c | :r | …)}`.
+            //
+            // This is *equal as a set of values* to `⋃ₘ %{__id__: :m}` precisely because each
+            // member shape is an OPEN record constraining only `:__id__` — so the union is
+            // exactly "maps whose `:__id__` ∈ members". We build the single shape directly
+            // rather than `Ty::union`-ing the member shapes, because `Ty::union` widens a
+            // differing `fields` map away (a sound over-approximation → `map`, but it drops the
+            // member set). Field-wise-merging arbitrary records in `Ty::union` would be UNSOUND
+            // (it invents cross terms), so that stays as-is; only *this* union, where the
+            // shapes differ solely in `:__id__`, collapses soundly to a lit-union field. The
+            // preserved `:__id__` lit set is what drives both a precise non-member rejection
+            // and sealed-`match` exhaustiveness (ADR-187 part 2).
             Some(members) => {
-                let mut acc: Option<Ty> = None;
-                for member in members {
-                    let mut fields = BTreeMap::new();
-                    fields.insert(
-                        value::intern("__id__"),
-                        (Ty::keyword_lit(value::intern(member)), true),
-                    );
-                    let shape = Ty::record_of(fields);
-                    acc = Some(match acc {
-                        Some(a) => a.union(shape),
-                        None => shape,
-                    });
+                let id_ty = members.iter().fold(None::<Ty>, |acc, member| {
+                    let lit = Ty::keyword_lit(value::intern(member));
+                    Some(match acc {
+                        Some(a) => a.union(lit),
+                        None => lit,
+                    })
+                });
+                match id_ty {
+                    Some(id) => {
+                        let mut fields = BTreeMap::new();
+                        fields.insert(value::intern("__id__"), (id, true));
+                        Some(Ty::record_of(fields))
+                    }
+                    // A sealed ability with no members is degenerate → permissive, not NEVER.
+                    None => Some(Ty::ANY),
                 }
-                // A sealed ability with no members is degenerate → permissive rather than NEVER.
-                acc.or(Some(Ty::ANY))
             }
         }
     })
