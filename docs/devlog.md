@@ -12877,3 +12877,42 @@ correctness, precisely *because* Newton's initial guess underflowed on subnormal
 
 **Gates:** `make test` **919 passed, 0 failed** (was 7 failed + a panicking in-language suite),
 `nest check` clean but for the one pre-existing JIT-torture advisory, `cargo fmt --all` clean.
+
+## 2026-07-31 — the overnight soak, and why nine hours does not fit
+
+Set up the unattended endurance run the handoff had been asking for (thread 5). The first
+thing it produced was a reason it could not be run the way it was specified.
+
+**RSS under sustained churn grows ~1 KB/iteration and does not plateau — with OR without
+`MIMALLOC_PURGE_DELAY=0`.** Measured with purge delay 0: 24 → 270 → 474 MB at 0 / 200k /
+400k iterations. On the default allocator, ~34 MB/min armed and ~73 MB/min control,
+near-linear in time. At ~670 it/s a 9-hour run of `soak_selfcheck.blsp` needs roughly
+**21 GB**, so every configuration would have been OOM-killed partway and left a truncated
+log — the weakest possible evidence for the one question the run exists to answer.
+
+This is not a new leak: A8 already established that RSS is allocator retention against a
+live set of tens of KB, and that finding still holds. What is new is the **rate**, and that
+the documented mitigation only slows it. **It turns thread 3 (allocator policy) from a
+preference into a constraint:** as things stand, no available allocator configuration lets
+this workload run unbounded overnight. A long-lived server doing this much churn per second
+needs an answer, and "spend memory for speed" is not one at 1 KB/iteration.
+
+**So the night runs as a sequence, not a marathon:** repeated 30-minute soaks (the duration
+already validated at ~1.5 M iterations), alternating armed and control, each reaching a
+definite `OK soak complete` with memory released between runs, halting the whole sequence on
+any `ERROR`. Plus one default-config run left going deliberately to measure the growth curve
+to its 6 GB cap, since where it dies is worth knowing precisely. Every run sits in its own
+`systemd-run --scope -p MemoryMax=6G`, so a runaway is killed inside its own cgroup instead
+of destabilising a 30 GB desktop. Results, and how to read them:
+`~/brood-soak-2026-07-30/README.md` → `sequence.log`.
+
+**The detector was verified before being trusted**, per the standing rule: draining one
+message fewer than queued gave `ERROR at iteration 0: backlog lost: saw 63 of 64` and exit 1
+on this exact binary.
+
+**Two process notes.** `SOAK_REPORT` is in *iterations*, so heartbeats land at equal
+iteration counts and `rss_kb` is comparable across runs at equal `iter=` — the property that
+sidesteps the time-boxed-differencing trap; compare at equal `iter=`, never equal `t=`. And
+the `pkill -f` trap in CLAUDE.md caught me exactly as documented: `pkill -f "mirror[.]sh"`
+killed the shell that was writing `mirror.sh`, because the bracket trick protects the
+*pattern*, not the rest of the command line. Kill by PID.
