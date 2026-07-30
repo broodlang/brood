@@ -371,6 +371,7 @@ pub(crate) fn shift_slots(node: &Node, delta: usize) -> Node {
                 .collect(),
         ),
         Node::Call {
+            staged,
             callee,
             args,
             tail: _,
@@ -378,6 +379,7 @@ pub(crate) fn shift_slots(node: &Node, delta: usize) -> Node {
             file,
             site,
         } => Node::Call {
+            staged: *staged,
             callee: Box::new(shift_slots(callee, delta)),
             args: args.iter().map(|n| shift_slots(n, delta)).collect(),
             // **Demote to non-tail.** A spliced body always lands in the *operand*

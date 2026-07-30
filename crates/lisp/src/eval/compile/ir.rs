@@ -344,6 +344,8 @@ pub enum Node {
         pos: Option<Pos>,
         file: Option<std::sync::Arc<str>>,
         site: u32,
+        /// The callee is staged ahead of the args — see [`Inst::Call::staged`] (KI-19).
+        staged: bool,
     },
     /// A **direct `letrec` self-recursive tail call** (the self-call optimization).
     /// Emitted only for a tail call whose head is the closure's own self-name with
@@ -1085,6 +1087,20 @@ pub enum Inst {
         pos: Option<Pos>,
         site: u32,
         head: Option<Symbol>,
+        /// Is the free-global callee **staged on the operand stack** (below the args)
+        /// rather than resolved at the call?
+        ///
+        /// KI-19: the tree-walker evaluates the operator first, but eliding the head moves
+        /// its resolution *after* the arguments, so an argument that rebinds it made the
+        /// engines disagree — `(f (bump))` gave `:new` on the VM and `:old` everywhere
+        /// else. The compiler now stages the head for exactly those calls whose arguments
+        /// can run user code (the only way a `def` can happen mid-call).
+        ///
+        /// `head`/`site` stay populated when this is set, which is the whole point: the
+        /// call-site IC still caches the resolved **arm** — the thing the elided head was
+        /// really buying — and the staged value is validated against the IC's cached
+        /// callee. Dropping to the plain computed-callee path instead cost `json` 6×.
+        staged: bool,
     },
     /// Direct `letrec` self-tail-call (always tail position): args have been pushed;
     /// returns a `Step::SelfTail` so the trampoline re-enters this arm in place.

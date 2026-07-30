@@ -235,6 +235,7 @@ fn vm_run_bc_captures_and_resumes_a_suspend() {
                 pos: None,
                 site: NO_SITE,
                 head: None,
+                staged: false,
             },
         ],
     };
@@ -667,8 +668,11 @@ fn jit_lowers_an_arm_ending_in_a_tail_call() {
                 site: NO_SITE,
                 // Computed callee: `fb` is staged on the operand stack (the `Global(fb)`
                 // at ip 6 above), so `head` is `None`. This is the shape that lowers — the
-                // staged callee is exactly what `jit_dispatch_tail` reads back.
+                // staged callee is exactly what `jit_dispatch_tail` reads back. (Not the
+                // KI-19 `staged` flag, which is for a *free-global* head resolved ahead of
+                // its args — here there is no head symbol at all.)
                 head: None,
+                staged: false,
             }, // 15
         ],
     };
@@ -746,6 +750,7 @@ fn jit_lowers_an_arm_ending_in_a_tail_call() {
                 pos: None,
                 site: NO_SITE,
                 head: Some(fb), // free-global head, elided from the stack
+                staged: false,
             }, // 14
         ],
     };
@@ -828,6 +833,7 @@ fn jit_lowers_an_arm_ending_in_a_tail_call() {
                 pos: None,
                 site: NO_SITE,
                 head: Some(fb),
+                staged: false,
             }, // 10
         ],
     };

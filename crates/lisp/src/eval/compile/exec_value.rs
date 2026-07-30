@@ -474,6 +474,7 @@ pub(crate) fn exec_value(
             unreachable!("Node::SelfCall is tail-only — exec_node handles it");
         }
         Node::Call {
+            staged: _,
             callee,
             args,
             tail,
