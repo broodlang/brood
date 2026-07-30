@@ -12741,4 +12741,3 @@ same asymmetry `cursor-zone` and `frect` already rely on. A zero radius emits th
 
 Verified: full in-language suite 3941 green, `display_test` + `introspection_test`
 extended, `nest run --for 800ms` now exits 0 and prints `[stopped after 800ms]`.
-
