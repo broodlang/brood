@@ -10699,6 +10699,11 @@ an exact decimal, and `/` is also the namespace separator (the two never collide
 digit-led token is a number, `mod/name` is not). Reserving the token means a post-1.0
 ratio type would be additive rather than breaking.
 
+> **Superseded for `1/2` (ADR-196, 2026-07-30).** The reservation did its job: shipping
+> the ratio type later was additive, so `1/2` is now a **ratio literal** and `/` on
+> integers is exact (`(/ 1 2)` → `1/2`). The rest of ADR-169's reservations (`0x1F`,
+> `1_000`, `1N`, `#…`) stand.
+
 **Consequences.**
 - The printer needed no change. `printer::symbol_needs_bars` already asks
   `atom::classify`, so the moment `1+`/`0x1F` stopped classifying as `Symbol` the
@@ -12721,7 +12726,7 @@ half of the message-cost item, and it needs a different mechanism (BEAM's is the
 derived at expansion time), ADR-178 (the L1 local-send fast path and the tag pre-filter this
 composes with), `docs/runtime-frontier.md` A1/A6, devlog 2026-07-30.
 
-## ADR-196 — Ask the build, not the environment: `features` / `feature?`
+## ADR-197 — Ask the build, not the environment: `features` / `feature?`
 
 **Status:** accepted + implemented (2026-07-30).
 

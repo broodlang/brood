@@ -12725,7 +12725,7 @@ have caught this except running the flag, and nothing did, because the wrapper i
 only emitted when `--for`/`--watch` is set. Any such snippet needs an *execution*
 test, not a reading — worth a grep for the others.
 
-**`features` + `feature?` (ADR-196).** A builtin from an absent optional feature is
+**`features` + `feature?` (ADR-197).** A builtin from an absent optional feature is
 still *bound* and still raises when called, so `(bound? 'gui-open)` answers yes on a
 runtime that cannot open a window. The app was reduced to calling it and matching on
 the error's prose (`index-of … "gui backend"`) — which silently turns a graceful
@@ -12806,7 +12806,10 @@ the straddle: a delimiter delivered one byte per chunk (every straddle slot in u
 near-miss sharing the delimiter's prefix across a boundary, and a correct cut offset after 200
 chunks. The first two initially failed on my own wrong expectations, not on the code.
 
-**Still open in this thread:** `proc/gen`, `proc/agent`, `editor/buffer` at 10k+ are unswept.
+**Still open in this thread:** `proc/agent update`, `buffer insert` and `buffer forward-line`
+were swept clean in parallel with this work via `scale_sweep.blsp`; `proc/gen gen-call`'s ratio
+is unstable there and needs three points plus medians before it means anything. `std/net/*`
+beyond the framed reads, `editor/*` beyond buffer, and `std/tool/*` are still unswept.
 
 **Gates:** `tcp`/`http`/`sse` suites green (79 tests), `nest check` clean apart from the one
 pre-existing JIT-torture advisory. The rest of the suite is **red on merge, not on this work**:

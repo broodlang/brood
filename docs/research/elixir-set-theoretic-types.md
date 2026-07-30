@@ -10,8 +10,10 @@ article 4 (`programming-journal.org/2024/8/9/`). arXiv:2306.06391.
 `pdftotext -layout`. This file is a *detailed technical summary* assembled by reading
 the full extracted text, with definitions / rules / formulas quoted **verbatim** where
 they matter (quotes use the paper's notation; ASCII transliterations of the math
-symbols are noted inline). The full raw extraction is kept alongside this file as
-`_elixir-types-raw.txt` (39 pp.) for verbatim cross-checking. Companion papers the
+symbols are noted inline). The full raw extraction (`_elixir-types-raw.txt`, 39 pp.)
+was kept alongside this file for verbatim cross-checking until 2026-07-30; re-extract
+from the arXiv PDF with `pdftotext -layout` if a quote needs re-verifying. Companion
+papers the
 authors cite for the omitted proofs/algorithms: **[8]** (records/maps), **[9]**
 (function arity, guard analysis, gradual typing — *this is where the strong-arrow and
 `?`-propagation rules are proved*), **[30]** = Lanvin's PhD thesis (set-theoretic
