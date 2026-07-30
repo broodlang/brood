@@ -36,15 +36,36 @@ through a full resolution: **`json` went 168 ms → 1159 ms (6×)** while `fib`/
 `bintree` were flat. Restricting the staging to calls whose arguments can run user code (a
 `node_runs_user_code` walk) does not help, because in `json` that is most of them.
 
-A real fix has to keep IC-speed resolution while moving it *before* the arguments — i.e. a
-head-resolution instruction with its own **global**-IC site, emitted ahead of the args, with
-`Inst::Call` consuming the staged value. Note the global-IC and call-IC site id spaces are
-independent (`ngsites` vs `nsites`), so it needs a real gsite, not the call site — reusing
-the call site is a separate latent defect in the tail-call head path.
+**A second approach was tried and also rejected (2026-07-30).** Giving the head its own
+global-IC site and staging it ahead of the args does fix the ordering, and it fixes the
+`env_get` cost (`fib`, `pipeline`, `ackermann` all stayed flat) — but it **aborts the
+process** on any row with a JIT'd call: `json`, `bintree`, `nqueens` and `wordcount` all
+died in `brood_rt_call_slow` → `unbound_error` → non-unwinding panic. The reason is the
+other half of the protocol: `emit` decides "elided vs staged" from the callee node, while
+the *JIT* decides it from `(head, site)`. Staging the head leaves `head: None` with a valid
+`site`, and `jit_lower`'s `emit_call` takes the elided path and tries to resolve a head that
+is no longer there. Setting `site = NO_SITE` instead removes the abort but reinstates the
+6× — because the call-site IC caches the resolved **arm**, and that is what the elided head
+is really buying, not the callee lookup.
+
+So the real fix is a **call-protocol change across both engines**, not an emit tweak:
+
+* `Inst::Call` needs to carry the head symbol *and* a `staged` flag, so the VM can take the
+  callee off the stack while still probing the call IC by `(site, sym, argc, epoch)` for the
+  arm — using the cached arm when the cached callee is identical to the staged one, and
+  resolving otherwise.
+* `jit_lower`'s `emit_call` needs the matching shape: resolve the head early, then still use
+  the epoch-guarded in-IR fast link (which is keyed on the head symbol) against the staged
+  value. Without that the JIT loses the fast link, which is the `fib`/`bintree` hot path.
+
+Note also that the global-IC and call-IC site id spaces are independent (`ngsites` vs
+`nsites`), so this needs a real gsite, not the call site — reusing the call site is a
+separate latent defect in the tail-call head path.
 
 Severity: only observable when an argument expression rebinds the function being called.
-Worth closing for engine-differential cleanliness (the fuzzer can reach it), not worth a 6×
-regression on a benchmark row.
+
+Worth closing for engine-differential cleanliness (the fuzzer can reach it), but it is a
+day of work on the hottest path in the system, not a patch.
 
 ---
 
