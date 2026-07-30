@@ -179,7 +179,7 @@ arg silently becoming `nil`.
 | **Processes** | `%spawn` | 1 | run a **0-arg thunk** in a new green process; returns its pid. `spawn` is the prelude macro over it — `(spawn expr)` wraps `expr` in the thunk, and `(spawn name expr)` is the named/idempotent form (a live registration under `name` short-circuits and `expr` is never evaluated) |
 | | `%spawn-link` | 1 | as `%spawn`, but the symmetric caller↔child link is registered **before the child is enqueued** (atomic spawn+link, ADR-067), so an instant exit still reports its true reason — a spawn-then-`link` can find the child already dead and reports `:noproc`, losing it. `spawn-link` is the macro over it |
 | | `send` | 2 | copy a message into a pid's mailbox |
-| | `%receive` | 3 | selective-receive primitive (matcher fn, timeout-ms-or-nil, on-timeout thunk-or-nil); `receive` is a Brood macro over it |
+| | `%receive` | 4 | selective-receive primitive: matcher fn, timeout-ms-or-nil, clause **tag** vector-or-nil (the leading-keyword pre-filter, ADR-178), and the **pin** value-or-nil (the receive-mark hint — the ref every clause pins, when they all pin the same one, ADR-195). `receive` is a Brood macro over it, and derives both hints at expansion time. (The old entry said the third argument was an on-timeout thunk; it has been the tag filter for some time.) |
 | | `self` | 0 | this process's pid |
 | | `ref` | 0 | a fresh, globally-unique reference token (`Value::Ref`); tags request↔reply |
 | | `monitor` | 1 | watch a pid (local or remote); returns a monitor ref. Delivers `[:down ref pid reason]` on death (`:noproc` if already dead; `:noconnection` if a remote peer's link drops) |

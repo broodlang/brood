@@ -752,6 +752,18 @@ fn collect_receive_tags(heap: &Heap, tags: Value, out: &mut [u32; MAX_RECEIVE_TA
 /// is active AND the message is a vector whose head is a keyword that no clause names.
 /// Every other shape answers `false` (scan it properly) — the filter must never skip a
 /// message a clause could match.
+/// Whether the receive-mark is armed (ADR-195). `BROOD_NO_RECV_MARK=1` disables it, so every
+/// receive scans from the front as it did before — the A/B lever, the bisect lever, and the
+/// stopgap if a skipped message is ever suspected.
+///
+/// This one earns an off-switch more than most changes do: a wrong skip does not crash, it
+/// silently fails to deliver a message, which is the hardest class of fault to attribute
+/// after the fact.
+fn recv_mark_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("BROOD_NO_RECV_MARK").is_none())
+}
+
 #[inline]
 /// `BROOD_NO_MSGTAG=1` — deliver L1 fast-path messages without their leading-keyword tag,
 /// so the selective-receive prefilter can't use them. The A/B lever for what the tag carry
@@ -844,7 +856,7 @@ pub fn receive_match(
     // what makes a request/reply receive O(1) in a backlogged mailbox rather than O(backlog).
     // Any doubt (pin absent, not a ref, not the ref we last minted) falls back to 0.
     let mark = match pin {
-        Value::Ref(id) => heap.recv_mark_for(id),
+        Value::Ref(id) if recv_mark_enabled() => heap.recv_mark_for(id),
         _ => None,
     };
     let mut i = 0usize;

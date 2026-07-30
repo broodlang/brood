@@ -2564,11 +2564,17 @@ message already sent stays sent."
     else nil))
 
 (defn receive--pin (clauses)
-  "The expression pinned by every clause, or nil when they do not agree."
+  "The **symbol** pinned by every clause, or nil when they do not agree.
+
+Restricted to a symbol deliberately. The hint is emitted as a form that the call site
+evaluates *in addition to* the matcher's own evaluation of the same pin, so anything with a
+side effect (or a value that could differ between the two evaluations) would be run twice.
+A pinned symbol — `^r`, which is the whole idiom this exists for — reads a binding and cannot
+differ. Any other pinned expression declines the hint and scans from the front."
   (if (empty? clauses)
     nil
     (let (first-pin (receive--pinned-in (first (first clauses))))
-      (if (or (nil? first-pin) (= first-pin :none))
+      (if (or (nil? first-pin) (= first-pin :none) (not (symbol? first-pin)))
         nil
         (if (empty? (rest clauses))
           first-pin
