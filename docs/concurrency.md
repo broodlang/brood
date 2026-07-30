@@ -151,7 +151,9 @@ This is the largest *core* undertaking in the project. Two consequences:
    that delivers `[:down mref pid reason]` to the monitoring process when `pid`
    dies (`:noproc` if already dead), in `process.rs`. The one supervision
    mechanism that needs a primitive; the rest is Brood (the `hatch` library).
-7. ✅ Links + `trap-exit` (ADR-067), userland supervision trees
+7. ✅ Links + `trap-exit` (ADR-067) — including **atomic `spawn-link`**, which links
+   the child before it can run so its true exit reason (not a racy `:noproc`) always
+   reaches the parent — userland supervision trees
    (`std/proc/supervisor.blsp` — `:one-for-one`/`:one-for-all`/`:rest-for-one`),
    and registered names (`register`/`whereis`/`(spawn :name …)`) all shipped.
 

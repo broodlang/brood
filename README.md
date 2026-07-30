@@ -268,6 +268,16 @@ Brood runs on a closure-compiling bytecode VM with a Cranelift **tier-1 JIT** fo
 loops, a **generational** per-process GC, and fusing lazy pipelines. Speed is treated
 as a measured property, not a claim:
 
+- [**broodlang/brood-benchmarks**](https://github.com/broodlang/brood-benchmarks) — the
+  **cross-language suite**: 31 programs across Brood, Elixir, Clojure, Node, .NET, Python
+  and Ruby (28 implemented in every language; `spawn-live` runs in five, though only Brood
+  and Elixir provide the same guarantees there — the others are coroutines on a shared heap,
+  included so the difference is legible; `supervisor` runs only in Brood and Elixir; and
+  `latency` reports **percentiles under a fixed arrival rate**, which is the row that shows
+  what a runtime does to ordinary requests while one handler is busy), run under one harness, with the published numbers and the methodology
+  behind them — including which rows are like-for-like comparisons and which are not.
+  Start there for "how fast is Brood *against other runtimes*"; the docs below are the
+  in-repo view of where Brood's own time goes.
 - [**docs/benchmarking.md**](docs/benchmarking.md) — how to run and read the
   benches. `make benchmark` runs the [`divan`](https://github.com/nvzqz/divan) suite in
   `crates/lisp/benches/` and **archives each run with full environment metadata** to
@@ -368,6 +378,8 @@ docs/          architecture, language reference, roadmap, decisions, dev log
 - [ROADMAP.md](ROADMAP.md) — milestones and status
 - [docs/benchmarking.md](docs/benchmarking.md) — how performance is measured;
   archived runs in [docs/benchmarks/](docs/benchmarks/)
+- [broodlang/brood-benchmarks](https://github.com/broodlang/brood-benchmarks) — the
+  cross-language benchmark suite and its published results
 - [docs/protocol-dispatch-design.md](docs/protocol-dispatch-design.md) — how the
   polymorphism seam was designed: the dispatch-identity problem for user-defined
   types, the language survey, and how `ability` resolved it

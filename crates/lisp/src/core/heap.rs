@@ -2591,6 +2591,20 @@ impl Heap {
         Arc::clone(&self.runtime)
     }
 
+    /// Whether `other` is a heap of the **same runtime** — i.e. the two processes
+    /// read one shared RUNTIME code region through the same `Arc`, so a handle into
+    /// it is meaningful in both. Pointer comparison, no `Arc` clone.
+    ///
+    /// This is the precondition for handing a promoted (shared-region) handle from
+    /// one process to another instead of deep-copying: `spawn` relies on it
+    /// implicitly (parent and child share the region by construction), and the
+    /// local-send closure fast path checks it explicitly, because the process
+    /// REGISTRY is global — two `Interp`s in one OS process (a test harness, an
+    /// embedder) have *different* regions, and a handle must never cross that line.
+    pub fn shares_runtime_with(&self, other: &Heap) -> bool {
+        Arc::ptr_eq(&self.runtime, &other.runtime)
+    }
+
     /// Consume this (builder) heap: move everything it allocated into a frozen
     /// [`SharedCode`] (PRELUDE) region — re-tagging every handle local→prelude —
     /// and return that region plus the global env's bindings

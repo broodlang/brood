@@ -62,3 +62,66 @@
       {:xs [1 2 {:y (list :a :b)}] :n 999999999999}))
   (test "300 random nested values round-trip identically"
     (is (check-rt 20260717 300))))
+
+;; A closure crossing a local send is handed over as a shared-code handle when it is
+;; already shared (it captures no locals) and deep-copied otherwise (ADR-194). Both
+;; routes must be indistinguishable to the program: same result, same late binding of
+;; free globals, same behaviour after the closure is retained across a `def` reload.
+(def reload-probe 10)
+
+(defn free-thunk () (* reload-probe 2))       ; captures nothing -> already shared
+
+(defn holder (parent)
+  (receive ([:hold f] (receive ([:call from] (do (send from [:got (f)]) (holder parent)))))))
+
+(defn hold-then-call (f)
+  (let (me (self) h (spawn (holder me)))
+    (do (send h [:hold f])
+        (send h [:call me])
+        (receive ([:got v] v) (after *test-wait-ms* :timeout)))))
+
+(describe "closures survive a send by either route (shared handle or copy)"
+  (test "a closure capturing no locals runs correctly on the receiver"
+    (assert= 20 (hold-then-call free-thunk)))
+
+  (test "an inline closure over only globals runs correctly on the receiver"
+    (assert= 20 (hold-then-call (fn () (* reload-probe 2)))))
+
+  (test "a closure capturing a local carries its captured value"
+    (let (n 7)
+      (assert= 21 (hold-then-call (fn () (* n 3))))))
+
+  ;; The same computation reached both ways: the first closure names only globals, so it
+  ;; travels as a shared handle; the second captures `n`, so it is deep-copied. Same answer.
+  (test "the shared-handle route and the copy route agree"
+    (let (n 10)
+      (assert= [20 20]
+        [(hold-then-call (fn () (* reload-probe 2)))
+          (hold-then-call (fn () (* n 2)))])))
+
+  ;; A local binding shadows the global lexically, so this closure captures the LOCAL
+  ;; and takes the copy route — pinned here because it is the boundary the rule turns on.
+  (test "a local shadowing a global is captured, not resolved as the global"
+    (let (reload-probe 100)
+      (assert= 200 (hold-then-call (fn () (* reload-probe 2))))))
+
+  (test "a closure capturing a local is unaffected by the global of the same name"
+    (let (reload-probe 3)
+      (assert= 6 (hold-then-call (fn () (* reload-probe 2)))))))
+
+;; The retained-handle case: the receiver holds the closure across a redefinition of the
+;; global it calls. Free globals are late-bound, so it must see the NEW value — a shared
+;; handle must not pin the old binding. Its own global + `:isolated`, because it rebinds
+;; one and the suite runs every test concurrently in its own process.
+(def reload-target 10)
+(defn reload-thunk () (* reload-target 2))
+
+(describe "a retained shared closure follows a hot-reloaded global"
+  :isolated
+  (test "a closure held by another process sees a global redefined after it was sent"
+    (let (me (self)
+          h (spawn (holder me))
+          _ (send h [:hold reload-thunk])
+          _ (def reload-target 50)
+          _ (send h [:call me]))
+      (assert= 100 (receive ([:got v] v) (after *test-wait-ms* :timeout))))))
