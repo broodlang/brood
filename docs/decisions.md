@@ -3837,7 +3837,59 @@ with adding scopes later if a real need ever appears.
 **References.** ADR-009 (quasiquote), ADR-065/`namespaces.md` §7 (the two-concerns
 split; #1 still open), ADR-064 (the quasiquote→Brood move this rides alongside),
 ADR-034 (symbols ship by name — why scope-bearing identifiers are costly here),
-ADR-006/011 (Brood-first, smallest core), `types/check/hygiene.rs` (the lint).
+ADR-006/011 (Brood-first, smallest core).
+
+### Amendment (2026-07-30) — automatic binding hygiene ("Option A")
+
+**What changed.** Binding hygiene (concern #2) is now the **default**, not opt-in. A
+quasiquote template's own `let`/`letrec`/`fn` binders — introduced as *plain literal*
+symbols — are alpha-renamed to fresh gensyms by the expander before the template is
+built, so a macro no longer needs `x#` or `(gensym)` to have an uncapturable temp.
+`x#`/`(gensym)` keep working (now redundant). The **opt-out for intentional anaphora**
+(a name deliberately exposed to the caller's spliced code, `it` in an `aif`, or
+`defseq`'s `item`/`acc`) is `~'name` — an unquoted quoted symbol, which lands in a
+`~unquote` hole the rename never descends, so it emits the literal name. The advisory
+capture lint (`types/check/hygiene.rs`) is **retired** — it would now only false-positive
+on the safe common case.
+
+**Why this is not the full-hygiene "no" above.** The original ADR declined full
+Scheme hygiene because solving *both* capture halves needs per-symbol lexical context
+(fat `Value::Sym`), which fights ship-by-name (ADR-034) and homoiconicity and taxes
+every eval + the GC. But concern **#1** (free-reference transparency) was *already* made
+automatic by the auto-qualifying resolver (ADR-065 §7). So the only remaining capture
+vector is a template's own introduced binders, and closing that is a **structural
+alpha-rename of the template** — no per-symbol context, no `Value::Sym` change, no
+cross-process cost. It reuses the scope-tracking the namespace resolver already does
+(`resolve_let`/`resolve_fn`). Option C (full Scheme hygiene) stays rejected on the
+performance grounds above.
+
+**Mechanism** (`eval/macros.rs`, `hygiene_rename` + `hyg_*`). A scope-aware pre-pass
+in `expand_quasiquote`: it maps each renamable binder → a fresh gensym and rewrites
+*only the references that binder actually binds* (so a same-named prelude reference
+elsewhere in the template is untouched — correct even when a binder shadows a prelude
+name; this is why it is scope-keyed, not `#`'s flat name-keyed table). A template that
+introduces a renamable binder takes the **runtime** expand path (like `#`), gated by
+`template_introduces_binder`, so two nested expansions of one macro (`(m (m x))`) get
+distinct binders. GC-blocked while it builds the parallel template tree, exactly like
+`resolve`.
+
+**v1 scope.** Only `let`/`letrec`/`fn` plain-symbol binders are renamed. Destructuring
+binders, `match*` pattern binders, and computed (`~params`/`~bindings`) or `defn`
+binders inside a template stay literal — a **sound under-approximation** (leaving a
+binder un-renamed only preserves the pre-change capturable-but-explicit behaviour; it
+never miscompiles a real macro), opt into `#`/`(gensym)` there as before. The one
+documented non-soundness is the pathological case of an outer template binder shadowed
+by a *computed* inner binder of the same name — vanishingly rare, not exhibited by any
+real macro.
+
+**Migration.** One macro: `defseq` (`std/prelude.blsp`) moved its two anaphora to
+`~'item`/`~'acc` and dropped its internal `coll#`/`check-allow :hygiene`. Everything
+else kept working (`#`/`gensym` still valid). Tests: `tests/hygiene_test.blsp` (capture
+prevention for `let`/`fn`/`letrec` binders, nested-expansion distinctness, the `~'`
+opt-out, `#` still works, and cross-process round-trips).
+
+**Updated references.** `eval/macros.rs` (`hygiene_rename`), `tests/hygiene_test.blsp`,
+`tests/autogensym_test.blsp` (the `#` mechanism it complements).
 
 ## ADR-067 — Process links + `trap_exit` (the supervisor's structural orphan fix)
 

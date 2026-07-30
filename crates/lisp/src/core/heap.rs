@@ -46,7 +46,7 @@ use crate::core::keywords as kw;
 use crate::core::map_champ::{self, MapNode, MAX_DEPTH};
 use crate::core::value::{
     BigIntId, BytesId, Closure, ClosureArm, ClosureId, ClosureTemplate, DecimalId, EnvId, MapId,
-    NativeFn, NativeId, PairId, Passthrough, RopeId, StrId, Symbol, Value, ValueRef, VecId, LOCAL,
+    NativeFn, NativeId, PairId, Passthrough, RatioId, RopeId, StrId, Symbol, Value, ValueRef, VecId, LOCAL,
     PRELUDE, RUNTIME,
 };
 use crate::error::LispError;
@@ -440,6 +440,7 @@ fn handle_key(v: Value) -> Option<(u8, u32, u8)> {
         ValueRef::Str(id) => (6, id.index() as u32, id.region()),
         ValueRef::BigInt(id) => (7, id.index() as u32, id.region()),
         ValueRef::Decimal(id) => (8, id.index() as u32, id.region()),
+        ValueRef::Ratio(id) => (13, id.index() as u32, id.region()),
         ValueRef::Bytes(id) => (9, id.index() as u32, id.region()),
         ValueRef::Fn(id) => (10, id.index() as u32, id.region()),
         ValueRef::Macro(id) => (11, id.index() as u32, id.region()),
@@ -479,6 +480,7 @@ fn to_prelude(v: Value) -> Value {
         ValueRef::Str(id) => Value::str_(StrId::prelude(id.index())),
         ValueRef::BigInt(id) => Value::bigint(BigIntId::prelude(id.index())),
         ValueRef::Decimal(id) => Value::decimal(DecimalId::prelude(id.index())),
+        ValueRef::Ratio(id) => Value::ratio(RatioId::prelude(id.index())),
         // A `bytes` handle used to fall through the `other` arm below, keeping its
         // LOCAL tag — so a `#b"…"` literal reaching a prelude global would resolve
         // in the wiped builder heap after the freeze. No prelude form produces one
@@ -703,6 +705,11 @@ struct Slabs {
     /// `Value` children. Unlike `bigints` there is no normalize-into-`Int`
     /// invariant — a decimal is its own type and any value is stored as-is.
     decimals: Vec<bigdecimal::BigDecimal>,
+    /// Exact rationals (mirrors `decimals`). One `num_rational::BigRational` per live
+    /// `Value::Ratio`; immutable, holds no `Value` children. Always reduced with a
+    /// positive denominator; a denominator of 1 is demoted to `Int` at construction
+    /// (`Heap::alloc_ratio`), so no entry here is ever integer-valued.
+    ratios: Vec<num_rational::BigRational>,
     /// **Raw bytes** — byte-clean immutable leaves, one `Arc<SharedBlob>` per live
     /// value (arbitrary bytes, never UTF-8, own slab + handle). The `Arc` is the unit
     /// of cross-process sharing (a refcount bump, not a byte copy).
@@ -743,6 +750,7 @@ impl Slabs {
             strings: Vec::with_capacity(like.strings.len()),
             bigints: Vec::with_capacity(like.bigints.len()),
             decimals: Vec::with_capacity(like.decimals.len()),
+            ratios: Vec::with_capacity(like.ratios.len()),
             bytes: Vec::with_capacity(like.bytes.len()),
             ropes: Vec::with_capacity(like.ropes.len()),
             closures: Vec::with_capacity(like.closures.len()),
@@ -759,6 +767,7 @@ fn slab_live_count(s: &Slabs) -> usize {
         + s.strings.len()
         + s.bigints.len()
         + s.decimals.len()
+        + s.ratios.len()
         + s.bytes.len()
         + s.ropes.len()
         + s.closures.len()
@@ -815,6 +824,7 @@ fn slab_capacity_bytes(s: &Slabs) -> usize {
         + s.strings.capacity() * size_of::<LocalString>()
         + s.bigints.capacity() * size_of::<num_bigint::BigInt>()
         + s.decimals.capacity() * size_of::<bigdecimal::BigDecimal>()
+        + s.ratios.capacity() * size_of::<num_rational::BigRational>()
         + s.bytes.capacity() * size_of::<Arc<SharedBlob>>()
         + s.ropes.capacity() * size_of::<ropey::Rope>()
         + s.closures.capacity() * size_of::<Closure>()
@@ -843,6 +853,7 @@ fn shrink_slabs(s: &mut Slabs) {
     s.strings.shrink_to_fit();
     s.bigints.shrink_to_fit();
     s.decimals.shrink_to_fit();
+    s.ratios.shrink_to_fit();
     s.bytes.shrink_to_fit();
     s.ropes.shrink_to_fit();
     s.closures.shrink_to_fit();
@@ -858,6 +869,7 @@ fn slab_bytes(s: &Slabs) -> usize {
         + s.strings.len() * size_of::<LocalString>()
         + s.bigints.len() * size_of::<num_bigint::BigInt>()
         + s.decimals.len() * size_of::<bigdecimal::BigDecimal>()
+        + s.ratios.len() * size_of::<num_rational::BigRational>()
         + s.bytes.len() * size_of::<Arc<SharedBlob>>()
         + s.ropes.len() * size_of::<ropey::Rope>()
         + s.closures.len() * size_of::<Closure>()
@@ -893,6 +905,7 @@ pub struct LocalCheckpoint {
     strings: usize,
     bigints: usize,
     decimals: usize,
+    ratios: usize,
     bytes: usize,
     ropes: usize,
     closures: usize,
@@ -926,6 +939,9 @@ struct CodeSlabs {
     /// Decimals `def`'d into a global / baked as a literal into shared RUNTIME
     /// code (mirrors `bigints`). Immutable, holds no handles; append-only.
     decimals: boxcar::Vec<bigdecimal::BigDecimal>,
+    /// Rationals `def`'d into a global / baked as a literal into shared RUNTIME
+    /// code (mirrors `decimals`). Immutable, holds no handles; append-only.
+    ratios: boxcar::Vec<num_rational::BigRational>,
     /// Raw bytes `def`'d into a global / captured by a promoted closure (mirrors
     /// `bigints`). Byte-clean `Arc<SharedBlob>`, never read as UTF-8.
     /// Append-only; the Arc is shared, not copied.
@@ -1076,6 +1092,7 @@ impl CodeSlabs {
             && self.strings.count() == 0
             && self.bigints.count() == 0
             && self.decimals.count() == 0
+            && self.ratios.count() == 0
             && self.bytes.count() == 0
             && self.ropes.count() == 0
             && self.closures.count() == 0
@@ -1454,6 +1471,11 @@ impl RuntimeCode {
     fn push_decimal(&self, v: bigdecimal::BigDecimal) -> DecimalId {
         let g = self.cur_gen();
         DecimalId::runtime_gen(self.gens[g].load().decimals.push(v), g)
+    }
+    #[inline]
+    fn push_ratio(&self, v: num_rational::BigRational) -> RatioId {
+        let g = self.cur_gen();
+        RatioId::runtime_gen(self.gens[g].load().ratios.push(v), g)
     }
     #[inline]
     fn push_bytes(&self, v: Arc<SharedBlob>) -> BytesId {
@@ -2299,6 +2321,7 @@ pub fn is_movable(v: Value) -> bool {
         ValueRef::Str(id) => id.region() == LOCAL,
         ValueRef::BigInt(id) => id.region() == LOCAL,
         ValueRef::Decimal(id) => id.region() == LOCAL,
+        ValueRef::Ratio(id) => id.region() == LOCAL,
         ValueRef::Bytes(id) => id.region() == LOCAL,
         ValueRef::Rope(id) => id.region() == LOCAL,
         ValueRef::Fn(id) | ValueRef::Macro(id) => id.region() == LOCAL,
@@ -2331,6 +2354,7 @@ pub fn needs_root_slot(v: Value) -> bool {
         ValueRef::Str(id) => shared(id.region()),
         ValueRef::BigInt(id) => shared(id.region()),
         ValueRef::Decimal(id) => shared(id.region()),
+        ValueRef::Ratio(id) => shared(id.region()),
         ValueRef::Bytes(id) => shared(id.region()),
         ValueRef::Rope(id) => shared(id.region()),
         ValueRef::Fn(id) | ValueRef::Macro(id) => shared(id.region()),
@@ -2689,6 +2713,13 @@ impl Heap {
                 let n = self.decimal(id).clone();
                 self.alloc_decimal(n)
             }
+            ValueRef::Ratio(id) => {
+                if id.region() == LOCAL {
+                    return v;
+                }
+                let n = self.ratio(id).clone();
+                self.alloc_ratio(n)
+            }
             ValueRef::Bytes(id) => {
                 if id.region() == LOCAL {
                     return v;
@@ -3026,6 +3057,7 @@ impl Heap {
             strings: self.local.strings.len(),
             bigints: self.local.bigints.len(),
             decimals: self.local.decimals.len(),
+            ratios: self.local.ratios.len(),
             bytes: self.local.bytes.len(),
             ropes: self.local.ropes.len(),
             closures: self.local.closures.len(),
@@ -3066,6 +3098,7 @@ impl Heap {
         self.local.strings.truncate(cp.strings);
         self.local.bigints.truncate(cp.bigints);
         self.local.decimals.truncate(cp.decimals);
+        self.local.ratios.truncate(cp.ratios);
         self.local.bytes.truncate(cp.bytes);
         self.local.ropes.truncate(cp.ropes);
         self.local.closures.truncate(cp.closures);
@@ -3460,6 +3493,11 @@ impl Heap {
                 // A leaf: clone the value into the shared region (no children).
                 let n = self.decimal(id).clone();
                 Value::decimal(self.runtime.push_decimal(n))
+            }
+            ValueRef::Ratio(id) if id.region() == LOCAL => {
+                // A leaf: clone the value into the shared region (no children).
+                let n = self.ratio(id).clone();
+                Value::ratio(self.runtime.push_ratio(n))
             }
             ValueRef::Bytes(id) if id.region() == LOCAL => {
                 // A leaf: share the Arc<SharedBlob> into the shared region byte-clean —

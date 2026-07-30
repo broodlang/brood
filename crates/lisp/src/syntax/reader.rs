@@ -573,6 +573,26 @@ impl<'a> Parser<'a> {
                 self.s.pos_at(token_start),
                 format!("malformed float literal: {}", token),
             )),
+            // A ratio literal `num/den` (`1/2`, `-3/4`). `classify` validated the
+            // shape; `BigRational`'s parse reduces it, and `alloc_ratio` demotes a
+            // denominator of 1 to an `Int` (so `4/2` reads as `2`).
+            AtomKind::Ratio => match token.parse::<num_rational::BigRational>() {
+                Ok(n) => Ok(self.heap.alloc_ratio(n)),
+                Err(_) => Err(self.err_at(
+                    self.s.pos_at(token_start),
+                    format!("malformed ratio literal: {}", token),
+                )),
+            },
+            AtomKind::RatioInvalid => Err(self
+                .err_at(
+                    self.s.pos_at(token_start),
+                    format!("malformed ratio literal: {}", token),
+                )
+                .with_hint(
+                    "a ratio is `num/den` with an integer numerator over a positive, \
+                     nonzero integer denominator — write `-1/2` (sign on the numerator), \
+                     not `1/-2`, and not `1/0`",
+                )),
             // Digit-led but not a number Brood has (`1/2`, `0x1F`, `1_000`, `1N`).
             // Reserved syntax, so it errors here rather than interning as a symbol
             // and resurfacing later as a puzzling "unbound symbol". The hint comes

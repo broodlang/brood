@@ -32,6 +32,15 @@ pub enum AtomKind {
     /// as a decimal — the reader turns it into a parse error, the CST an `Error` node
     /// (mirrors [`AtomKind::IntOverflow`]).
     DecimalInvalid,
+    /// An exact **rational** literal: `num/den` — a signed integer numerator over a
+    /// positive nonzero integer denominator (`1/2`, `-3/4`, `10/20`). The reader
+    /// parses it into a reduced `num_rational::BigRational`. Additive: this token was
+    /// reserved (a reader error) before the kernel ratio type.
+    Ratio,
+    /// A ratio-shaped token (digit-led, containing `/`) that isn't a valid ratio —
+    /// `1/0` (zero denominator), `1/-2` (signed denominator), `1/2/3` (two slashes).
+    /// The reader turns it into a parse error, the CST an `Error` node.
+    RatioInvalid,
     /// A float-shaped token (number-shaped, with a `.`/`e`/`E`) that does not parse
     /// as an `f64` — e.g. `1e`, `1.2.3`, `1e+`, `1.2e3.4`. The reader turns it into
     /// a parse error, the CST an `Error` node (mirrors [`AtomKind::IntOverflow`]).
@@ -176,6 +185,13 @@ pub fn classify(token: &str) -> AtomKind {
     if token.len() > 1 && token.starts_with(':') {
         return AtomKind::Keyword;
     }
+    // A ratio literal `num/den` — digit-led and containing `/` (which no int/float/
+    // decimal shape has, so this can't shadow them). `/` is also the namespace
+    // separator, but the two never collide: a digit-led token is a number, `mod/name`
+    // is not. A malformed one (`1/0`, `1/-2`, `1/2/3`) is `RatioInvalid`, not a symbol.
+    if digit_led(token) && token.contains('/') {
+        return classify_ratio(token);
+    }
     // Digit-led but none of the number forms above matched: reserved, not a symbol.
     // Last, so every real literal — including `1M`, `.5`, `1e10` and the malformed
     // ones that earn their own diagnostic — is classified first.
@@ -183,6 +199,28 @@ pub fn classify(token: &str) -> AtomKind {
         return AtomKind::ReservedNumeric;
     }
     AtomKind::Symbol
+}
+
+/// Classify a digit-led token containing `/` as `Ratio` or `RatioInvalid`. A valid
+/// ratio is exactly one `/` splitting an integer numerator (optional leading sign)
+/// from a positive nonzero integer denominator. Numerator/denominator may exceed
+/// `i64` (parsed as `BigInt`); the reader reduces the result.
+fn classify_ratio(token: &str) -> AtomKind {
+    let Some((num, den)) = token.split_once('/') else {
+        return AtomKind::RatioInvalid;
+    };
+    let num_ok = num.parse::<num_bigint::BigInt>().is_ok();
+    let den_ok = !den.is_empty()
+        && den.bytes().all(|b| b.is_ascii_digit())
+        && den
+            .parse::<num_bigint::BigInt>()
+            .map(|d| d != num_bigint::BigInt::from(0))
+            .unwrap_or(false);
+    if num_ok && den_ok {
+        AtomKind::Ratio
+    } else {
+        AtomKind::RatioInvalid
+    }
 }
 
 /// Inter-form trivia whitespace: real whitespace, plus `,` (a comma is

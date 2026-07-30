@@ -385,6 +385,7 @@ handle!(VecId);
 handle!(StrId);
 handle!(BigIntId);
 handle!(DecimalId);
+handle!(RatioId);
 handle!(BytesId);
 handle!(RopeId);
 handle!(ClosureId);
@@ -549,6 +550,16 @@ pub enum Value {
     /// (ADR-026 immutability). Added at the END, after `Decimal`, to preserve the
     /// JIT's pinned discriminant order.
     Set(MapId),
+    /// An exact **rational** number (`1/2`) — a heap leaf handle into the per-process
+    /// `ratios` slab, mirroring [`Value::Decimal`] (an immutable leaf holding no
+    /// `Value` children, backed by `num_rational::BigRational` = `Ratio<BigInt>`,
+    /// always kept reduced with a positive denominator). Its OWN type: `type-of` is
+    /// `:ratio`, distinct from `int`/`float`/`decimal`. `/` on two integers that do
+    /// not divide evenly yields a ratio (exact), not a float — reach for `->float`
+    /// for an inexact value. A ratio whose denominator is 1 is demoted to an `Int`
+    /// on construction, so a `Ratio` never numerically equals an integer. Added at
+    /// the END to preserve the JIT's pinned discriminant order.
+    Ratio(RatioId),
 }
 
 /// The **unpacked** view of a [`Value`] — the form you `match` against.
@@ -682,6 +693,9 @@ impl Value {
     pub fn decimal(id: DecimalId) -> Value {
         Value::Decimal(id)
     }
+    pub fn ratio(id: RatioId) -> Value {
+        Value::Ratio(id)
+    }
 
     // ----- hot accessors (for the `if let Value::X(..) = v` shape) -----
 
@@ -754,6 +768,7 @@ pub enum Tag {
     Bytes,
     Decimal,
     Set,
+    Ratio,
 }
 
 impl Tag {
@@ -783,6 +798,7 @@ impl Tag {
             Tag::Bytes => "bytes",
             Tag::Decimal => "decimal",
             Tag::Set => "set",
+            Tag::Ratio => "ratio",
         }
     }
 
@@ -792,8 +808,8 @@ impl Tag {
     /// code that was essentially the entire `intern` cost (~98% of all interns were
     /// a tag name like `"pair"`). Indexed by the `#[repr(u8)]` discriminant.
     pub fn keyword(self) -> Symbol {
-        static KW: LazyLock<[Symbol; 22]> = LazyLock::new(|| {
-            const TAGS: [Tag; 22] = [
+        static KW: LazyLock<[Symbol; 23]> = LazyLock::new(|| {
+            const TAGS: [Tag; 23] = [
                 Tag::Nil,
                 Tag::Bool,
                 Tag::Int,
@@ -816,8 +832,9 @@ impl Tag {
                 Tag::Bytes,
                 Tag::Decimal,
                 Tag::Set,
+                Tag::Ratio,
             ];
-            let mut out = [0u32; 22];
+            let mut out = [0u32; 23];
             for t in TAGS {
                 out[t as usize] = intern(t.name());
             }
@@ -866,6 +883,8 @@ pub fn tag(v: Value) -> Tag {
         Value::Decimal(_) => Tag::Decimal,
         // A set is its OWN type — distinct from map (unlike a range/pair alias).
         Value::Set(_) => Tag::Set,
+        // A ratio is its OWN exact type — distinct from int/float/decimal.
+        Value::Ratio(_) => Tag::Ratio,
     }
 }
 
@@ -1225,6 +1244,7 @@ pub(crate) mod jit_layout {
             Value::Bytes(BytesId::local(0)),
             Value::Decimal(DecimalId::local(0)),
             Value::Set(MapId::local(0)),
+            Value::Ratio(RatioId::local(0)),
         ];
         // Exhaustiveness guard: this match must name every variant. When a new
         // variant appears, add it here AND to `all` above.
@@ -1254,7 +1274,8 @@ pub(crate) mod jit_layout {
                 | Value::Table(_)
                 | Value::Bytes(_)
                 | Value::Decimal(_)
-                | Value::Set(_) => {}
+                | Value::Set(_)
+                | Value::Ratio(_) => {}
             }
         }
         all

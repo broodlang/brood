@@ -194,14 +194,15 @@ pub(super) fn cst_to_value(heap: &mut Heap, node: &cst::Node, src: &str) -> Valu
     let tag = |k: &'static str| Value::keyword(value::intern(k));
     match node.kind {
         // Leaves: [kind raw-text].
-        Symbol | Keyword | Int | Float | Decimal | Str | Bool | Nil | Whitespace | Comment
-        | Error => {
+        Symbol | Keyword | Int | Float | Decimal | Ratio | Str | Bool | Nil | Whitespace
+        | Comment | Error => {
             let k = match node.kind {
                 Symbol => "symbol",
                 Keyword => "keyword",
                 Int => "int",
                 Float => "float",
                 Decimal => "decimal",
+                Ratio => "ratio",
                 Str => "str",
                 Bool => "bool",
                 Nil => "nil",
@@ -305,6 +306,7 @@ pub(super) fn cst_node_kind_name(kind: cst::NodeKind) -> &'static str {
         Int => "int",
         Float => "float",
         Decimal => "decimal",
+        Ratio => "ratio",
         Str => "str",
         Bool => "bool",
         Nil => "nil",
@@ -341,8 +343,8 @@ pub(super) fn cst_to_positioned(
     ];
     match node.kind {
         // Leaves carry their raw source text; positions alone make them navigable.
-        Symbol | Keyword | Int | Float | Decimal | Str | Bool | Nil | Whitespace | Comment
-        | Error => {
+        Symbol | Keyword | Int | Float | Decimal | Ratio | Str | Bool | Nil | Whitespace
+        | Comment | Error => {
             let text = heap.alloc_string(node.text(src));
             pairs.push((kw("text"), text));
         }
@@ -884,6 +886,11 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // width — the engine behind an editor's fill-paragraph / M-q, and reusable for
     // wrapping help text or terminal output. No dependencies. Opt-in.
     embedded_module!("text", "std/text.blsp"),
+    // Exact rational numbers — a Brood-first prototype for the freeze-list `ratios`
+    // row (ADR-070): `rational` builds a reduced ratio that does `+`/`-`/`*`/`/` via
+    // the `Num` ability, orders via `Ord`/`compare-to`, and prints via `Display`.
+    // Pure Brood, no dependencies. Opt-in, never in the prelude.
+    embedded_module!("ratio", "std/ratio.blsp"),
     embedded_module!("project", "std/tool/project.blsp"),
     embedded_module!("coverage", "std/tool/coverage.blsp"),
     embedded_module!("complete", "std/tool/complete.blsp"),

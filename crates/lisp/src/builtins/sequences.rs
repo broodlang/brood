@@ -441,9 +441,13 @@ pub(super) fn sort_asc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
                     ints.push(n);
                 }
             }
-            Value::Float(_) => {
-                all_int = false;
-                ints = Vec::new(); // release the partial buffer
+            // Any other number (Float/BigInt/Ratio/Decimal) drops the i64 fast
+            // path; the general `value_cmp` sort below orders the full tower.
+            Value::Float(_) | Value::BigInt(_) | Value::Ratio(_) | Value::Decimal(_) => {
+                if all_int {
+                    all_int = false;
+                    ints = Vec::new(); // release the partial buffer
+                }
             }
             _ => return Err(LispError::wrong_type(heap, "sort", "number", v)),
         }
@@ -478,29 +482,11 @@ pub(super) fn sort_asc(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         return Ok(heap.list(items));
     }
 
-    // Stable sort. The int-int branch keeps full precision; mixed pairs
-    // promote to f64 (same compromise as `prim_lt`'s mixed case — past
-    // 2^53 the float compare can collapse two distinct ints, but that
-    // matches what `<` itself would do).
-    items.sort_by(|a, b| match (*a, *b) {
-        (Value::Int(x), Value::Int(y)) => x.cmp(&y),
-        _ => {
-            let xf = match *a {
-                Value::Int(n) => n as f64,
-                Value::Float(f) => f,
-                _ => unreachable!(),
-            };
-            let yf = match *b {
-                Value::Int(n) => n as f64,
-                Value::Float(f) => f,
-                _ => unreachable!(),
-            };
-            // NaN sorts as Equal (would otherwise break `sort_by`'s total
-            // ordering). Real Brood `<` doesn't admit NaN past `(nan? x)`
-            // anyway, so this is the lesser evil.
-            xf.partial_cmp(&yf).unwrap_or(std::cmp::Ordering::Equal)
-        }
-    });
+    // Stable sort over the full numeric tower via the canonical `value_cmp`
+    // (exact for Int/BigInt/Ratio/Decimal; Int-vs-Float compares precisely in
+    // base 10). Only reached once a non-`Int` number appeared, so the common
+    // all-int case above never pays for it.
+    items.sort_by(|a, b| heap.value_cmp(*a, *b));
 
     Ok(heap.list(items))
 }

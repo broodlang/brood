@@ -125,11 +125,50 @@ pub(super) fn is_decimal(v: Value) -> bool {
     matches!(v, Value::Decimal(_))
 }
 
-/// True iff both operands are *exact* numbers (`Int`/`BigInt`/`Decimal`) — the
-/// shape `value_cmp` orders precisely (no f64 precision loss). A `Float` operand
+/// True iff `v` is an exact `Ratio` (its own type — not an integer, since a
+/// denominator of 1 is demoted to `Int` on construction).
+pub(super) fn is_ratio(v: Value) -> bool {
+    matches!(v, Value::Ratio(_))
+}
+
+/// Rationalizable-exact: `Int`/`BigInt`/`Ratio`/`Decimal` — everything the exact
+/// ratio path can promote losslessly. A `Float` is excluded (it forces contagion).
+fn is_rationalizable(v: Value) -> bool {
+    is_integer(v) || is_ratio(v) || is_decimal(v)
+}
+
+/// Read an exact number as a `BigRational` — `Int`/`BigInt`/`Ratio` via
+/// `as_bigrational`, and a `Decimal` losslessly (its value is `mantissa · 10⁻ˢᶜᵃˡᵉ`,
+/// exactly `mantissa / 10ˢᶜᵃˡᵉ`). Panics on a non-rationalizable value (callers gate
+/// with [`is_rationalizable`]).
+fn to_bigrational(heap: &Heap, v: Value) -> num_rational::BigRational {
+    use num_bigint::BigInt;
+    if let Some(r) = heap.as_bigrational(v) {
+        return r;
+    }
+    if let Value::Decimal(id) = v {
+        let (m, scale) = heap.decimal(id).as_bigint_and_exponent();
+        return if scale >= 0 {
+            num_rational::BigRational::new(m, BigInt::from(10).pow(scale as u32))
+        } else {
+            num_rational::BigRational::from_integer(m * BigInt::from(10).pow((-scale) as u32))
+        };
+    }
+    unreachable!("to_bigrational on a non-rationalizable value")
+}
+
+/// Is this `BigRational` zero? (Its numerator is zero.) The exact-division
+/// denominator check.
+fn ratio_is_zero(r: &num_rational::BigRational) -> bool {
+    use num_traits::Zero;
+    r.is_zero()
+}
+
+/// True iff both operands are *exact* numbers (`Int`/`BigInt`/`Ratio`/`Decimal`) —
+/// the shape `value_cmp` orders precisely (no f64 precision loss). A `Float` operand
 /// is excluded so the comparison falls to the inexact f64 path.
 fn both_exact(a: Value, b: Value) -> bool {
-    (is_integer(a) || is_decimal(a)) && (is_integer(b) || is_decimal(b))
+    is_rationalizable(a) && is_rationalizable(b)
 }
 
 /// Coerce an integer-or-float `Value` to `f64` for the float arithmetic path —
@@ -144,6 +183,9 @@ pub(super) fn num_to_f64(heap: &Heap, who: &str, v: Value) -> Result<f64, LispEr
             use bigdecimal::ToPrimitive as _;
             Ok(heap.decimal(id).to_f64().unwrap_or(f64::INFINITY))
         }
+        // A ratio coerced to f64 is the float-contagion path (`(+ 1/2 1.5)`), and
+        // the `->float` conversion.
+        Value::Ratio(id) => Ok(heap.ratio(id).to_f64().unwrap_or(f64::INFINITY)),
         _ => expect_number(heap, who, v),
     }
 }
@@ -161,6 +203,7 @@ pub(super) fn num_bin(
     big_op: fn(num_bigint::BigInt, num_bigint::BigInt) -> num_bigint::BigInt,
     dec_op: fn(bigdecimal::BigDecimal, bigdecimal::BigDecimal) -> bigdecimal::BigDecimal,
     dec_scale: fn(i64, i64) -> i64,
+    ratio_op: fn(num_rational::BigRational, num_rational::BigRational) -> num_rational::BigRational,
     float_op: fn(f64, f64) -> f64,
 ) -> LispResult {
     let (a, b) = two(args, who)?;
@@ -180,6 +223,16 @@ pub(super) fn num_bin(
             let y = heap.as_bigint(b).expect("integer");
             let r = big_op(x, y);
             Ok(heap.int_from_bigint(r))
+        }
+        // A ratio operand, and the other is rationalizable-exact (Int/BigInt/Ratio/
+        // Decimal): compute exactly in `BigRational` and return a reduced `Ratio`
+        // (demoted to `Int` when the denominator reduces to 1). A `Decimal` operand
+        // promotes losslessly (so `(+ 1/2 0.5M)` is `1/1`). Checked before the decimal
+        // arm so a ratio wins over a decimal; a `Float` operand falls to contagion.
+        _ if (is_ratio(a) || is_ratio(b)) && is_rationalizable(a) && is_rationalizable(b) => {
+            let x = to_bigrational(heap, a);
+            let y = to_bigrational(heap, b);
+            Ok(heap.alloc_ratio(ratio_op(x, y)))
         }
         // A decimal operand, and the other is exact (Int/BigInt/Decimal): compute
         // exactly in BigDecimal and return a `Decimal`. (A Float operand falls
@@ -291,6 +344,7 @@ pub(super) fn prim_add(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         // ideal exponent of a sum: the finer of the two scales
         |sa, sb| sa.max(sb),
         |a, b| a + b,
+        |a, b| a + b,
     )
 }
 pub(super) fn prim_sub(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -302,6 +356,7 @@ pub(super) fn prim_sub(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         |a, b| a - b,
         |a, b| a - b,
         |sa, sb| sa.max(sb),
+        |a, b| a - b,
         |a, b| a - b,
     )
 }
@@ -316,6 +371,7 @@ pub(super) fn prim_mul(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         // ideal exponent of a product: the scales add
         |sa, sb| sa + sb,
         |a, b| a * b,
+        |a, b| a * b,
     )
 }
 
@@ -327,52 +383,100 @@ pub(super) fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     if is_record(heap, a) || is_record(heap, b) {
         return num_multi_dispatch(heap, "/", a, b);
     }
-    let bf = num_to_f64(heap, "/", b)?;
-    if bf == 0.0 {
-        return Err(LispError::runtime("division by zero")
-            .with_code(crate::error::error_codes::DIV_BY_ZERO)
-            .with_hint("guard the denominator: (when (not= y 0) (/ x y))"));
+    // ---- Exact rational division (ADR-XXX) ----
+    // `/` on two integers is EXACT: `(/ 6 3)` → `2` (an Int, divides evenly), but
+    // `(/ 1 2)` → `1/2` (a reduced Ratio) rather than a float. Likewise any division
+    // involving a `Ratio` (with the other operand rationalizable — Int/BigInt/Ratio/
+    // Decimal, a Decimal promoting losslessly) is exact. `alloc_ratio` demotes a
+    // denominator of 1 back to an integer. Reach for `->float` for an inexact result.
+    if (is_integer(a) && is_integer(b))
+        || ((is_ratio(a) || is_ratio(b)) && is_rationalizable(a) && is_rationalizable(b))
+    {
+        let y = to_bigrational(heap, b);
+        if ratio_is_zero(&y) {
+            return Err(div_by_zero());
+        }
+        let x = to_bigrational(heap, a);
+        return Ok(heap.alloc_ratio(x / y));
     }
-    // A decimal operand with both operands exact (Int/BigInt/Decimal): exact
-    // BigDecimal division, returning a `Decimal`. (`bf == 0.0` above already
-    // rejected a zero denominator, so this never panics.) A Float operand falls
-    // through to the float-contagion path below.
+    // ---- Exact decimal division (a decimal operand, no ratio; both exact) ----
     if (is_decimal(a) || is_decimal(b))
         && (is_integer(a) || is_decimal(a))
         && (is_integer(b) || is_decimal(b))
     {
-        let x = heap.as_bigdecimal(a).expect("exact number");
         let y = heap.as_bigdecimal(b).expect("exact number");
+        if num_traits::Zero::is_zero(&y) {
+            return Err(div_by_zero());
+        }
+        let x = heap.as_bigdecimal(a).expect("exact number");
         return Ok(heap.alloc_decimal(x / y));
     }
-    match (a, b) {
-        // Exact integer quotient when it divides evenly; otherwise a float.
-        // `checked_*` guards the one overflowing case (`i64::MIN / -1`), which
-        // then falls through to the float path instead of panicking.
-        (Value::Int(x), Value::Int(y)) => match (x.checked_rem(y), x.checked_div(y)) {
-            (Some(0), Some(q)) => Ok(Value::int(q)),
-            _ => Ok(Value::Float(x as f64 / y as f64)),
-        },
-        // Both integers, at least one a BigInt: exact quotient when it divides
-        // evenly (demoted — `(/ 2^200 2^100)` is the exact `2^100`); otherwise a
-        // float. Division by zero was already caught via `bf == 0.0`.
-        _ if is_integer(a) && is_integer(b) => {
-            let x = heap.as_bigint(a).expect("integer");
-            let y = heap.as_bigint(b).expect("integer");
-            // BigInt `%`/`/` both truncate toward zero (like i64), so an even
-            // division gives a zero remainder and the exact quotient. Compute the
-            // remainder first; only divide when it's the exact path (cold path,
-            // so the second pass is fine — and avoids pulling `num-integer` just
-            // for `div_rem`).
-            let r = &x % &y;
-            if num_traits::Zero::is_zero(&r) {
-                Ok(heap.int_from_bigint(x / y))
-            } else {
-                Ok(Value::Float(num_to_f64(heap, "/", a)? / bf))
-            }
-        }
-        _ => Ok(Value::Float(num_to_f64(heap, "/", a)? / bf)),
+    // ---- Float contagion ----
+    let bf = num_to_f64(heap, "/", b)?;
+    if bf == 0.0 {
+        return Err(div_by_zero());
     }
+    Ok(Value::Float(num_to_f64(heap, "/", a)? / bf))
+}
+
+/// `(numerator x)` — the numerator of a ratio, or an integer itself (its
+/// numerator over 1). Errors on a non-rational number.
+pub(super) fn prim_numerator(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let x = arg(args, 0);
+    match x {
+        Value::Ratio(id) => {
+            let n = heap.ratio(id).numer().clone();
+            Ok(heap.int_from_bigint(n))
+        }
+        Value::Int(_) | Value::BigInt(_) => Ok(x),
+        _ => Err(LispError::wrong_type(heap, "numerator", "int or ratio", x)),
+    }
+}
+
+/// `(denominator x)` — the (positive) denominator of a ratio, or `1` for an integer.
+pub(super) fn prim_denominator(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let x = arg(args, 0);
+    match x {
+        Value::Ratio(id) => {
+            let d = heap.ratio(id).denom().clone();
+            Ok(heap.int_from_bigint(d))
+        }
+        Value::Int(_) | Value::BigInt(_) => Ok(Value::int(1)),
+        _ => Err(LispError::wrong_type(heap, "denominator", "int or ratio", x)),
+    }
+}
+
+/// `(->decimal x)` — a number as an exact base-10 `Decimal`. Exact for an integer or
+/// a terminating ratio (`1/2` → `0.5M`); a non-terminating ratio (`1/3`) rounds to
+/// `bigdecimal`'s default precision. A `Float` coerces through its decimal form.
+pub(super) fn prim_to_decimal(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use bigdecimal::BigDecimal;
+    let x = arg(args, 0);
+    match x {
+        Value::Decimal(_) => Ok(x),
+        Value::Int(i) => Ok(heap.alloc_decimal(BigDecimal::from(i))),
+        Value::BigInt(id) => {
+            let n = heap.bigint(id).clone();
+            Ok(heap.alloc_decimal(BigDecimal::from(n)))
+        }
+        Value::Ratio(id) => {
+            let r = heap.ratio(id).clone();
+            let d = BigDecimal::from(r.numer().clone()) / BigDecimal::from(r.denom().clone());
+            Ok(heap.alloc_decimal(d))
+        }
+        Value::Float(f) => match BigDecimal::try_from(f) {
+            Ok(d) => Ok(heap.alloc_decimal(d)),
+            Err(_) => Err(LispError::runtime("->decimal: cannot convert a non-finite float")),
+        },
+        _ => Err(LispError::wrong_type(heap, "->decimal", "number", x)),
+    }
+}
+
+/// The shared `division by zero` error (`/` raises rather than returning IEEE ∞).
+fn div_by_zero() -> LispError {
+    LispError::runtime("division by zero")
+        .with_code(crate::error::error_codes::DIV_BY_ZERO)
+        .with_hint("guard the denominator: (when (not= y 0) (/ x y))")
 }
 
 pub(super) fn prim_lt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

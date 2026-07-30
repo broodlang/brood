@@ -981,27 +981,47 @@ evaluated in its place. Templates are written with quasiquote: `` `x `` quotes,
 (macroexpand-1 '(defn f (x) x))   ;=> (def f (fn (x) x))
 ```
 
-### Auto-gensym (`x#`) — opt-in hygiene
+### Macro hygiene — automatic
 
-Inside a backtick template, a symbol whose name ends in `#` (e.g. `tmp#`) expands
-to a **fresh gensym**, the *same* one for every occurrence within that one
-backtick expansion and a *distinct* one per expansion. This is the Clojure
-shorthand for a non-capturing macro binding — a `tmp#` the template introduces can
-neither capture nor be captured by the caller's `tmp`, with no manual `gensym`:
+Macros are **hygienic by default**. A `let`/`letrec`/`fn` binder a backtick
+template introduces is automatically alpha-renamed to a fresh symbol, so a plain
+literal binder can neither capture nor be captured by caller code spliced in with
+`~`/`~@` — no `gensym`, no `#`:
 
 ```clojure
 (defmacro my-or (a b)
-  `(let (r# ~a)            ; r# -> a fresh symbol, e.g. r__417
-     (if r# r# ~b)))       ; same r__417
+  `(let (r ~a)            ; plain `r` — auto-renamed to a fresh symbol
+     (if r r ~b)))
 
 (let (r 1) (my-or false r))   ;=> 1  (the caller's `r` is not captured)
 ```
 
-Auto-gensym fires only on *literal* template symbols; a `x#` inside an unquote
-(`~(… x# …)`) is ordinary user code and is left alone. To emit a **literal**
-`x#` (e.g. an anaphoric binding the caller is meant to see), unquote a quoted
-symbol: `` `(let (~'it ~val) ~@body) ``. `gensym` itself remains available for
-cases where you need a fresh symbol outside a template.
+The rename is scope-aware (it touches only the references a binder actually binds)
+and fresh per expansion (so nested expansions of one macro, `(m (m x))`, get
+distinct binders). Free references in a template (`helper`, `map`) are handled
+separately — they **auto-qualify** to the macro's defining namespace — so both
+halves of hygiene are automatic.
+
+**Opting a binder OUT — anaphora.** When a template *deliberately* introduces a
+name for the caller's spliced code to reference (an anaphoric macro like `aif`),
+write it as an unquoted quoted symbol, `~'name`, which emits the literal name:
+
+```clojure
+(defmacro aif (test then else)
+  `(let (~'it ~test)          ; ~'it stays the literal `it`
+     (if ~'it ~then ~else)))
+
+(aif (find x) (use it) :none)  ; the caller's `it` refers to the binding
+```
+
+**`x#` and `gensym` still work** (now redundant): a symbol ending in `#` inside a
+template still becomes a fresh gensym (the Clojure shorthand), and `gensym`
+remains available for a fresh symbol outside a template. New code needs neither.
+
+*v1 limit:* only plain-symbol `let`/`letrec`/`fn` binders are auto-renamed;
+destructuring binders, `match*` pattern binders, and computed (`~params`) binders
+inside a template stay literal — opt into `#`/`gensym` there if capture is a
+concern.
 
 The `->`, `->>`, and `as->` threading macros are also defined in the prelude:
 
@@ -1108,11 +1128,13 @@ no-op to silence it without editing code:
 > `(a (quasiquote (b 3)))` where the standard reading leaves `(+ 1 2)`
 > unevaluated. A `` ` `` inside an `~unquote` is ordinary code and stays legal, so
 > the macro-writing-a-macro spelling is `` `(a ~(inner-template x)) ``. Level
-> tracking can land later without breaking anything accepted today (ADR-011). Auto-gensym (`x#`) / `gensym`
-> handle *binding* capture; *free* references in a macro template **auto-qualify**
-> to the macro's defining namespace (ADR-066 α), so a macro expands correctly when
-> used in another namespace without hand-qualifying. The advisory hygiene lint
-> flags a plain literal binder that could capture a spliced argument. See spec §7.
+> tracking can land later without breaking anything accepted today (ADR-011).
+> Macros are hygienic both ways automatically: a template's introduced `let`/`fn`
+> **binders** are alpha-renamed so they can't capture spliced caller code (ADR-066
+> amendment; opt a binder out with `~'name`), and its *free* references
+> **auto-qualify** to the macro's defining namespace (ADR-066 α), so a macro
+> expands correctly when used in another namespace without hand-qualifying. See
+> the "Macro hygiene" section above and spec §7.
 
 ## Pattern matching
 

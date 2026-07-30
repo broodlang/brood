@@ -415,6 +415,7 @@ names accept anything, so a contract never throws on a type it can't interpret."
     (%eq t 'int) (int? v)
     (%eq t 'float) (float? v)
     (%eq t 'decimal) (decimal? v)
+    (%eq t 'ratio) (ratio? v)
     (%eq t 'string) (string? v)
     (%eq t 'bool) (bool? v)
     (%eq t 'keyword) (keyword? v)
@@ -593,6 +594,9 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 (defn decimal? (x)
   "True if `x` is an exact base-10 decimal (e.g. `1.50M`)."
   (%eq (type-of x) :decimal))
+(defn ratio? (x)
+  "True if `x` is an exact rational (e.g. `1/2`)."
+  (%eq (type-of x) :ratio))
 (defn symbol? (x) "True if `x` is a symbol." (%eq (type-of x) :symbol))
 (defn keyword? (x) "True if `x` is a keyword." (%eq (type-of x) :keyword))
 (defn vector? (x) "True if `x` is a vector." (%eq (type-of x) :vector))
@@ -618,8 +622,16 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 
 ;; ---- derived predicates ----
 (defn number? (x)
-  "True if `x` is an int, a float, or a decimal."
-  (or (int? x) (float? x) (decimal? x)))
+  "True if `x` is an int, a float, a decimal, or a ratio."
+  (or (int? x) (float? x) (decimal? x) (ratio? x)))
+(defn ->float (x)
+  "The number `x` as an (inexact) float — the escape hatch from an exact ratio or
+decimal to fast float math (`(->float 1/2)` → `0.5`)."
+  (* 1.0 x))
+(defn rational (n d)
+  "The exact rational `n`/`d` — reduced, with a positive denominator (a denominator
+of 1 gives an integer). Same as `(/ n d)` for integers; errors when `d` is 0."
+  (/ n d))
 (defn list? (x) "True if `x` is a proper list (`nil` or a pair)." (or (nil? x) (pair? x)))
 
 ;; ---- list accessors ----
@@ -636,25 +648,26 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 ;; directly — no extra `apply` frame per element. Inside `step`: `item` is bound to
 ;; the current element and `acc` is the current accumulator.
 ;; `item` and `acc` are *intentional* anaphora: a `defseq` step-expr is documented
-;; to reference them (`(cons (f item) acc)`), so they must stay literal — the `aif`
-;; `it` case the hygiene lint anticipates. Only the two anaphoric names are opted out;
-;; the purely-internal collection binder is auto-gensym'd (`coll#`) so it can't capture.
-(check-allow :hygiene
-  (defmacro defseq (sym params docstring step)
-    "Define an eager sequence op that reverse-accumulates over `coll`.
+;; to reference them (`(cons (f item) acc)`), so they opt out of automatic binding
+;; hygiene with `~'item`/`~'acc` — an unquoted quoted symbol stays the literal name
+;; (the `aif` `it` case). Every other binder here — `coll`, `--loop` — is auto-renamed
+;; by the hygiene pass (ADR-066 amendment) so it can't capture the caller's `step`
+;; code; no `#`/`(gensym)` needed.
+(defmacro defseq (sym params docstring step)
+  "Define an eager sequence op that reverse-accumulates over `coll`.
 `params` are the extra arguments before `coll`; inside `step`, `item` is the
 current element and `acc` is the current accumulator."
-    (if (not (string? docstring))
-      (error "defseq: third argument must be a docstring string, got "
-        (pr-str docstring) ". Syntax: (defseq name (params...) \"docstring\" step-expr)")
-      `(defn ~sym (~@params coll#)
-         ~docstring
-         (letrec (--loop (fn (coll# acc)
-                           (if (empty? coll#)
-                             acc
-                             (let (item (first coll#))
-                               (--loop (rest coll#) ~step)))))
-           (reverse (--loop (seq coll#) nil)))))))
+  (if (not (string? docstring))
+    (error "defseq: third argument must be a docstring string, got "
+      (pr-str docstring) ". Syntax: (defseq name (params...) \"docstring\" step-expr)")
+    `(defn ~sym (~@params coll)
+       ~docstring
+       (letrec (--loop (fn (coll ~'acc)
+                         (if (empty? coll)
+                           acc
+                           (let (~'item (first coll))
+                             (--loop (rest coll) ~step)))))
+         (reverse (--loop (seq coll) nil))))))
 
 (defseq map
   (f) "A list of `(f x)` for each `x` in `coll`." (cons (f item) acc))
@@ -2046,7 +2059,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; symbol test is therefore rejected rather than read as a binder.
 (defn case--check-test (t)
   (cond
-    (or (keyword? t) (int? t) (float? t) (decimal? t) (string? t) (bool? t) (nil? t)) t
+    (or (keyword? t) (int? t) (float? t) (decimal? t) (ratio? t) (string? t) (bool? t) (nil? t)) t
     (and (pair? t) (= (first t) 'quote)) t
     (symbol? t) (throw (str "case: the bare symbol test `"
                          t "` would BIND, not compare" " — write `'" t

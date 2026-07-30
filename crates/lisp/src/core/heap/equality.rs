@@ -34,6 +34,40 @@ fn bigdecimal_cmp_float(b: &bigdecimal::BigDecimal, f: f64) -> std::cmp::Orderin
     b.cmp(&bigdecimal::BigDecimal::try_from(f).expect("finite f64 → BigDecimal"))
 }
 
+/// Order a `BigRational` against a float **exactly** — the ratio-vs-float `value_cmp`
+/// arm. Every finite `f64` is a dyadic rational, so `from_float` is exact; `NaN` is
+/// `Equal` and `±∞` bound everything (mirrors [`bigdecimal_cmp_float`]).
+fn ratio_cmp_float(r: &num_rational::BigRational, f: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if f.is_nan() {
+        return Ordering::Equal;
+    }
+    if f.is_infinite() {
+        return if f > 0.0 {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
+    }
+    match num_rational::BigRational::from_float(f) {
+        Some(rf) => r.cmp(&rf),
+        None => Ordering::Equal, // finite handled above, so unreachable
+    }
+}
+
+/// Convert an exact `BigDecimal` to the equal `BigRational` (lossless — a decimal
+/// `mantissa · 10⁻ˢᶜᵃˡᵉ` is exactly `mantissa / 10ˢᶜᵃˡᵉ`). Used only by the rare
+/// ratio-vs-decimal ordering arm; `BigRational::new` reduces the result.
+fn bigdecimal_to_ratio(d: &bigdecimal::BigDecimal) -> num_rational::BigRational {
+    use num_bigint::BigInt;
+    let (mantissa, scale) = d.as_bigint_and_exponent(); // value = mantissa · 10^(-scale)
+    if scale >= 0 {
+        num_rational::BigRational::new(mantissa, BigInt::from(10).pow(scale as u32))
+    } else {
+        num_rational::BigRational::from_integer(mantissa * BigInt::from(10).pow((-scale) as u32))
+    }
+}
+
 /// Tag ranks for `value_cmp`'s heterogeneous fallback. The order is mostly
 /// aesthetic — what matters is that it's *fixed* so a heterogeneous sort is
 /// reproducible. Numbers come first (most common), then strings/keywords/
@@ -42,7 +76,11 @@ fn tag_rank(v: Value) -> u8 {
     match v.unpack() {
         ValueRef::Nil => 0,
         ValueRef::Bool(_) => 1,
-        ValueRef::Int(_) | ValueRef::BigInt(_) | ValueRef::Float(_) | ValueRef::Decimal(_) => 2,
+        ValueRef::Int(_)
+        | ValueRef::BigInt(_)
+        | ValueRef::Float(_)
+        | ValueRef::Decimal(_)
+        | ValueRef::Ratio(_) => 2,
         ValueRef::Str(_) => 3,
         ValueRef::Keyword(_) => 4,
         ValueRef::Sym(_) => 5,
@@ -193,6 +231,14 @@ impl Heap {
                 // normalized-equality used in `equal` below.
                 22u8.hash(h);
                 self.decimal(id).normalized().to_string().hash(h);
+            }
+            ValueRef::Ratio(id) => {
+                // Distinct fresh tag byte (23). A `BigRational` is always reduced with
+                // a positive denominator, so its `num/den` string is canonical — equal
+                // ratios hash the same, and a ratio never collides with an int/decimal
+                // (each carries its own tag byte and a ratio is never integer-valued).
+                23u8.hash(h);
+                self.ratio(id).to_string().hash(h);
             }
             ValueRef::Float(f) => {
                 3u8.hash(h);
@@ -448,6 +494,10 @@ impl Heap {
             (Decimal(x), Decimal(y)) => {
                 self.decimal(x).normalized() == self.decimal(y).normalized()
             }
+            // Two ratios are equal iff numerically equal — both are reduced with a
+            // positive denominator, so `==` is exact. A ratio is its own type (and is
+            // never integer-valued), so a Ratio vs anything else is `_ => false`.
+            (Ratio(x), Ratio(y)) => self.ratio(x) == self.ratio(y),
             (Bytes(x), Bytes(y)) => self.bytes(x).as_bytes() == self.bytes(y).as_bytes(),
             (Float(x), Float(y)) => x == y,
             (Sym(x), Sym(y)) => x == y,
@@ -671,6 +721,26 @@ impl Heap {
             }
             (Decimal(x), Float(y)) => bigdecimal_cmp_float(&self.decimal(x), y),
             (Float(x), Decimal(y)) => bigdecimal_cmp_float(&self.decimal(y), x).reverse(),
+            // Ratios order by value; against an Int/BigInt promote the integer to a
+            // ratio; against a Float compare exactly (every finite f64 is a dyadic
+            // rational); against a Decimal promote the (exact) decimal to a ratio.
+            (Ratio(x), Ratio(y)) => self.ratio(x).cmp(&self.ratio(y)),
+            (Ratio(x), Int(y)) => self
+                .ratio(x)
+                .cmp(&num_rational::BigRational::from_integer(num_bigint::BigInt::from(y))),
+            (Int(x), Ratio(y)) => {
+                num_rational::BigRational::from_integer(num_bigint::BigInt::from(x)).cmp(&self.ratio(y))
+            }
+            (Ratio(x), BigInt(y)) => self
+                .ratio(x)
+                .cmp(&num_rational::BigRational::from_integer(self.bigint(y).clone())),
+            (BigInt(x), Ratio(y)) => {
+                num_rational::BigRational::from_integer(self.bigint(x).clone()).cmp(&self.ratio(y))
+            }
+            (Ratio(x), Float(y)) => ratio_cmp_float(&self.ratio(x), y),
+            (Float(x), Ratio(y)) => ratio_cmp_float(&self.ratio(y), x).reverse(),
+            (Ratio(x), Decimal(y)) => self.ratio(x).cmp(&bigdecimal_to_ratio(&self.decimal(y))),
+            (Decimal(x), Ratio(y)) => bigdecimal_to_ratio(&self.decimal(x)).cmp(&self.ratio(y)),
             (Str(x), Str(y)) => self.string(x).cmp(&self.string(y)),
             // Symbols/keywords sort by spelling so it's stable and human-meaningful.
             (Sym(x), Sym(y)) | (Keyword(x), Keyword(y)) => {

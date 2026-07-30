@@ -90,6 +90,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     const table_ty: Ty = Ty::of(Tag::Table);
     const bytes_ty: Ty = Ty::of(Tag::Bytes);
     const decimal_ty: Ty = Ty::of(Tag::Decimal);
+    const ratio_ty: Ty = Ty::of(Tag::Ratio);
     const kw: Ty = Ty::of(Tag::Keyword);
     const sym: Ty = Ty::of(Tag::Sym);
     const bool_ty: Ty = Ty::of(Tag::Bool);
@@ -216,6 +217,30 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![int, int], int),
         prim_quot,
+    );
+    // Ratio parts + conversions (exact rationals, ADR-XXX). `numerator`/`denominator`
+    // accept an int (numerator = itself, denominator = 1) or a ratio.
+    let int_or_ratio = int.union(ratio_ty);
+    def(
+        heap,
+        "numerator",
+        Arity::exact(1),
+        Sig::new(vec![int_or_ratio.clone()], int),
+        prim_numerator,
+    );
+    def(
+        heap,
+        "denominator",
+        Arity::exact(1),
+        Sig::new(vec![int_or_ratio], int),
+        prim_denominator,
+    );
+    def(
+        heap,
+        "->decimal",
+        Arity::exact(1),
+        Sig::new(vec![num], decimal_ty),
+        prim_to_decimal,
     );
     // `floor` is the single irreducible Float→Int crossing; ceil/round/pow/
     // sqrt are all Brood over it + rem/`/`/`*`/`<` (std/prelude.blsp).
@@ -2909,6 +2934,9 @@ pub fn register(heap: &mut Heap, root: EnvId) {
 #[rustfmt::skip]
 static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("rem", &["a", "b"], "Integer remainder of a / b (truncated, taking the sign of the dividend)."),
+    ("numerator", &["x"], "The numerator of a ratio (`(numerator 3/4)` → 3), or an integer itself."),
+    ("denominator", &["x"], "The positive denominator of a ratio (`(denominator 3/4)` → 4), or 1 for an integer."),
+    ("->decimal", &["x"], "A number as an exact base-10 decimal — exact for an integer or terminating ratio (`1/2` → `0.5M`); a non-terminating ratio rounds to the default precision."),
     ("floor", &["x"], "Round x toward negative infinity to an integer."),
     ("bit-and", &["a", "b"], "Bitwise AND of integers a and b."),
     ("bit-or", &["a", "b"], "Bitwise (inclusive) OR of integers a and b."),
