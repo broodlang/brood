@@ -12,6 +12,9 @@
 ; registers the :syntax/* faces fontify resolves
 (require 'editor/highlight)
 (require 'editor/treesit)
+; editor/highlight loads editor/face transitively, but the checker wants the
+; qualified `editor/face/face` refs below to name a module this file requires.
+(require 'editor/face)
 
 ;; The ruby/elixir grammars are opt-in (--features treesit-grammars); the kernel
 ;; ships none by default. Skip these suites when absent so a bare `cargo test`
