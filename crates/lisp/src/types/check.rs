@@ -818,6 +818,13 @@ pub fn check_file_ext(
         // to a sealed ability (this file's or an imported one) resolves to the union of its
         // members' record shapes rather than being dropped as an unknown type name.
         annot::set_ability_types(protocol::ability_type_table(heap, &expanded));
+        // ADR-190: build the ability facts + the sealed-op occurrence-typing domains HERE —
+        // before any pass runs `sig_of` (Gap A, Pass 2.8, the body walk) — so an imported
+        // function's inferred sig is never cached *without* the sealed-op demand. Keyed by op
+        // name off `AbilityInfo`, which sees this file's abilities AND imported ones (via the
+        // heap registries), so the demand fires for a same- or other-file sealed op alike.
+        let ability_info = std::sync::Arc::new(protocol::build_ability_info(heap, &expanded));
+        annot::set_sealed_op_domains(protocol::build_sealed_op_domains(&ability_info));
         for &form in &forms {
             register_declared_sig(heap, &mut ctx, file_ns_name.as_deref(), form);
         }
@@ -875,12 +882,6 @@ pub fn check_file_ext(
                 }
             }
         }
-        // Build the ability facts + install the sealed-op occurrence-typing domains
-        // (ADR-190) BEFORE Pass 2.8, so that pass's parameter inference can derive `s : Shape`
-        // from an unannotated `(area s)` use. `build_ability_info` reads only the heap +
-        // expanded forms, so hoisting it here is safe; it's reused by the ability passes below.
-        let ability_info = std::sync::Arc::new(protocol::build_ability_info(heap, &expanded));
-        annot::set_sealed_op_domains(protocol::build_sealed_op_domains(&ability_info));
         // Pass 2.8: **same-file function inference.** The file being checked isn't
         // loaded, so `sigs::sig_of`'s loaded-closure inference can't see its own `(defn …)`s
         // — a same-file caller got no checking (only cross-module callers of *loaded*
