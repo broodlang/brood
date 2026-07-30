@@ -50,6 +50,16 @@ A `:name` (keyword) registers the child's pid so callers address it by a **stabl
 name** (`(whereis :worker)`) that survives restarts. Without `:name`, a pid held
 across a restart is a dead reference.
 
+**Prefer a `:start` thunk that captures no locals** — `(fn () (spawn-link (worker)))`,
+or a named top-level `(defn start-worker () (spawn-link (worker)))` passed as
+`:start start-worker` (OTP's MFA shape). The supervisor keeps every child's `:start`
+so it can restart it, and a thunk that refers only to globals is already shared code:
+handing it to the supervisor costs a handle. One that captures a local
+(`(fn () (spawn-link (worker n)))`) is copied into the supervisor instead — correct,
+and roughly 9× more expensive per child. That is the right trade to make when a child
+genuinely needs per-instance state; it is only worth avoiding when you are starting
+thousands of otherwise-identical children.
+
 Shutdown policy (how the supervisor *terminates* a child — on `stop-supervisor`, a
 group restart, or intensity shutdown): `:brutal-kill` (default) hard-kills it;
 `:infinity` sends `[:$stop]` and waits for a clean exit; an integer waits that many
@@ -114,22 +124,68 @@ address the child by a stable name even though its pid changes across restarts."
     (when (get spec :name) (register (get spec :name) pid))
     (assoc spec :pid pid)))
 
+;; ---- the children collection ------------------------------------------------
+;; `:children` is a **map pid → child record**, not a list. A supervisor grown to
+;; thousands of children is the ordinary dynamic-supervisor case, and on a list
+;; every operation walked (and re-allocated) the whole thing: `start-child`
+;; `append`ed, so N children cost O(N²) — measured 447µs per child at N=8000
+;; against Elixir's ~5µs, and `restart-child` reached 19ms/op at 4000 children.
+;; Keyed by pid, insert / find / replace / drop are all O(1)-ish.
+;;
+;; Start order still matters (`which-children`, `:rest-for-one`, shutdown order),
+;; so each record carries a `:seq` stamped from the state's monotonic `:next-seq`,
+;; and the ordered views sort by it — they are O(n) operations anyway, so the sort
+;; costs them nothing they weren't already paying. `:ids` indexes `:id` → pid so
+;; the by-`:id` client API (`terminate-child`/`restart-child`) stays O(1) too —
+;; which assumes `:id`s are distinct (they are a diagnostic label, and OTP requires
+;; uniqueness). If two children share one, a by-`:id` lookup finds the
+;; later-started of them; both are still supervised, restarted and torn down.
+
+(defn supervisor--ordered (children)
+  "Every child record in **start order** — the order `:children` itself used to be
+kept in, reconstructed from each record's `:seq`."
+  (sort-by (fn (c) (get c :seq)) (vals children)))
+
 (defn supervisor--find (children pid)
   "The child record whose `:pid` is `pid`, or `nil`."
-  (find (fn (c) (= (get c :pid) pid)) children))
+  (get children pid))
 
-(defn supervisor--replace (children pid fresh)
-  "`children` with the record whose `:pid` is `pid` replaced by `fresh`."
-  (map (fn (c) (if (= (get c :pid) pid) fresh c)) children))
-
-(defn supervisor--drop (children pid)
-  "`children` without the record whose `:pid` is `pid`."
-  (remove (fn (c) (= (get c :pid) pid)) children))
-
-(defn supervisor--find-by-key (children key)
+(defn supervisor--find-by-key (children ids key)
   "Find a child by its `:pid` *or* its `:id` — the runtime child API
-(`terminate-child`/`restart-child`) accepts either. `nil` if neither matches."
-  (find (fn (c) (or (= (get c :pid) key) (= (get c :id) key))) children))
+(`terminate-child`/`restart-child`) accepts either. `nil` if neither matches.
+Both lookups are direct: `children` is keyed by pid, `ids` maps `:id` → pid."
+  (or (get children key) (get children (get ids key))))
+
+(defn supervisor--put (state child)
+  "`state` with `child` recorded under its live pid (and its `:id` indexed, if it
+has one). Every insert of a child record goes through here, so the `:children` /
+`:ids` invariant lives in one place."
+  (let (id (get child :id))
+    (assoc state
+      :children (assoc (get state :children) (get child :pid) child)
+      :ids (if (nil? id) (get state :ids) (assoc (get state :ids) id (get child :pid))))))
+
+(defn supervisor--remove (state pid)
+  "`state` with the child at `pid` dropped from supervision, and its `:id` index
+entry dropped with it (only if that entry still points at *this* pid — a restarted
+child under the same `:id` must keep the index pointing at its fresh pid)."
+  (let (child (get (get state :children) pid)
+        id (get child :id)
+        ids (get state :ids))
+    (assoc state
+      :children (dissoc (get state :children) pid)
+      :ids (if (and id (= (get ids id) pid)) (dissoc ids id) ids))))
+
+(defn supervisor--swap (state old-pid fresh)
+  "`state` with the child formerly at `old-pid` replaced by its `fresh` incarnation
+(a restart mints a new pid, so the map key changes). `fresh` carries the old
+record's `:seq`, so the child keeps its place in start order."
+  (supervisor--put (supervisor--remove state old-pid) fresh))
+
+(defn supervisor--rebuild (state records)
+  "`state` with exactly `records` as its children, indexes rebuilt from scratch.
+For the group restarts, which recompute a whole affected set at once."
+  (fold supervisor--put (assoc state :children {} :ids {}) records))
 
 ;; ---- terminating a healthy child (link + exit, ADR-063/067) -----------------
 
@@ -172,7 +228,8 @@ a harmless no-op and the selective drain consumes the `[:EXIT]` already queued.
 (defn supervisor--terminate-many (children)
   "Terminate every child in `children` (each assumed alive / not-yet-drained) per
 its `:shutdown` policy, draining each one's `[:EXIT]`. **Reverse start order**
-(`children` is kept in start order, so we tear down last-started-first) — matching
+(`children` is an ordered *sequence* of records — callers pass
+`supervisor--ordered` — so we tear down last-started-first) — matching
 OTP, so a child that depends on an earlier-started sibling is stopped first.
 Sequential: a child marked `:infinity` (a sub-supervisor) is fully torn down —
 recursively — before the next, so a whole tree shuts down depth-first."
@@ -180,26 +237,56 @@ recursively — before the next, so a whole tree shuts down depth-first."
 
 ;; ---- restart-intensity window -----------------------------------------------
 
-(defn supervisor--recent (restarts now-ms window-ms)
-  "Keep only restart timestamps within `window-ms` of `now-ms` (prune the rest)."
-  (filter (fn (t) (<= (- now-ms t) window-ms)) restarts))
+;; The window is a **two-list queue** — `{:front oldest-first :back newest-first :count n}`
+;; — so recording a restart and expiring the stale ones is amortized O(1): a new timestamp
+;; is consed onto `:back`, and pruning pops from `:front`, refilling it by reversing
+;; `:back` only when it runs dry (each timestamp therefore moves at most once).
+;;
+;; It used to be a plain list re-`filter`ed on every restart, which is O(R) per restart and
+;; O(R²) for a supervisor doing R restarts inside one window — and R is bounded by
+;; `:max-restarts`, which a supervisor legitimately sets high when it supervises thousands
+;; of children. Measured on the `supervisor` benchmark row: 5000 restarts spent 4.5 s in
+;; here, against 0.6 s for the (linear) fill of the same run.
+
+(defn supervisor--window-prune (w now-ms window-ms)
+  "Drop every timestamp in `w` older than `window-ms` before `now-ms`, refilling `:front`
+from the reversed `:back` when it empties. Tail-recursive."
+  (let (front (get w :front))
+    (cond
+      (empty? front) (let (b (get w :back))
+                       (if (empty? b)
+                         w
+                         (supervisor--window-prune (assoc w :front (reverse b) :back ())
+                           now-ms window-ms)))
+      (> (- now-ms (first front)) window-ms) (supervisor--window-prune (assoc w
+                                                                        :front (rest front)
+                                                                        :count (- (get w :count) 1))
+                                               now-ms window-ms)
+      else w)))
+
+(defn supervisor--window-add (w t window-ms)
+  "`w` with a restart at `t` recorded and everything outside the window expired."
+  (supervisor--window-prune (assoc w :back (cons t (get w :back)) :count (+ (get w :count) 1))
+    t window-ms))
+
+(defn supervisor--empty-window () {:front () :back () :count 0})
 
 (defn supervisor--bump-intensity (state)
-  "Record a restart at `now` and prune the window; return `[over? recent]` where
+  "Record a restart at `now` and expire the window; return `[over? window]` where
 `over?` is true if the count now exceeds `:max-restarts` (the crash loop won't
-settle) and `recent` is the pruned-and-extended timestamp list."
-  (let (t (now)
-        window (* 1000 (get state :max-seconds))
-        recent (cons t (supervisor--recent (get state :restarts) t window)))
-    [(> (count recent) (get state :max-restarts)) recent]))
+settle) and `window` is the updated intensity window."
+  (let (window-ms (* 1000 (get state :max-seconds))
+        w (supervisor--window-add (get state :restarts) (now) window-ms))
+    [(> (get w :count) (get state :max-restarts)) w]))
 
 ;; ---- the supervisor process -------------------------------------------------
 
 (defn supervisor--summarize (children)
-  "Project child records to client-facing summaries (drop the `:start` closure so
-the reply stays small and copies cheaply across `send`)."
+  "Project the child records to client-facing summaries **in start order** (and
+drop the `:start` closure, plus the internal `:seq`, so the reply stays small and
+copies cheaply across `send`)."
   (map (fn (c) {:id (get c :id) :pid (get c :pid) :restart (get c :restart :permanent)})
-    children))
+    (supervisor--ordered children)))
 
 (defn supervisor--giveup (state survivors)
   "Restart intensity exceeded: terminate the still-running `survivors`, then throw
@@ -217,17 +304,19 @@ The crashed `child` is already gone (its `[:EXIT]` consumed), so giving up
 terminates only the *other* children."
   (let ([over? recent] (supervisor--bump-intensity state))
     (if over?
-      (supervisor--giveup state (supervisor--drop (get state :children) (get child :pid)))
-      (let (fresh (supervisor--start-child child)
-            children (supervisor--replace (get state :children) (get child :pid) fresh))
-        (supervisor--loop (assoc state :children children :restarts recent))))))
+      (supervisor--giveup state
+        (supervisor--ordered (dissoc (get state :children) (get child :pid))))
+      (let (fresh (supervisor--start-child child))
+        (supervisor--loop (assoc (supervisor--swap state (get child :pid) fresh)
+                            :restarts recent))))))
 
 ; :one-for-all (and the never-here :one-for-one)
 (defn supervisor--split-affected (children pid strategy)
   "The `[unaffected affected]` split of `children` for a group restart triggered by
 the child with `:pid` `pid`. `:one-for-all` → everything is affected;
 `:rest-for-one` → the trigger and everything started *after* it (the suffix), with
-the earlier-started prefix left untouched. (`children` is in start order.)"
+the earlier-started prefix left untouched. (`children` is an ordered *sequence* of
+records here — callers pass `supervisor--ordered`.)"
   (if (= strategy :rest-for-one)
     [(take-while (fn (c) (not (= (get c :pid) pid))) children) (drop-while (fn (c)
                                                                              (not (= (get c :pid)
@@ -251,8 +340,9 @@ abnormal (`:killed`) — leaving unaffected children running. Bounded by intensi
   (let ([over? recent] (supervisor--bump-intensity state)
         trig-pid (get trigger :pid))
     (if over?
-      (supervisor--giveup state (supervisor--drop (get state :children) trig-pid))
-      (let ([unaffected affected] (supervisor--split-affected (get state :children)
+      (supervisor--giveup state (supervisor--ordered (dissoc (get state :children) trig-pid)))
+      (let ([unaffected affected] (supervisor--split-affected (supervisor--ordered (get state
+                                                                                    :children))
                                     trig-pid (get state :strategy))
             survivors (remove (fn (c) (= (get c :pid) trig-pid)) affected)
             _ (supervisor--terminate-many survivors)
@@ -261,7 +351,8 @@ abnormal (`:killed`) — leaving unaffected children running. Bounded by intensi
                                (supervisor--maybe-restart c
                                  (if (= (get c :pid) trig-pid) reason :killed)))
                           affected)))
-        (supervisor--loop (assoc state :children (append unaffected restarted) :restarts recent))))))
+        (supervisor--loop (assoc (supervisor--rebuild state (append unaffected restarted))
+                            :restarts recent))))))
 
 (defn supervisor--handle-exit (state pid reason)
   "An `[:EXIT pid reason]` arrived (we link + trap). Three cases:
@@ -273,15 +364,14 @@ abnormal (`:killed`) — leaving unaffected children running. Bounded by intensi
     when the trigger actually restarts).
   - otherwise: ignore (a stale `[:EXIT]` for a child already removed)."
   (cond
-    (= pid (get state :parent)) (supervisor--terminate-many (get state :children))
+    (= pid (get state :parent)) (supervisor--terminate-many (supervisor--ordered (get state
+                                                                                  :children)))
     ; returns nil → we exit :normal
     else (let (child (supervisor--find (get state :children) pid))
            (cond
              (nil? child) (supervisor--loop state)
-             (not (supervisor--restartable? (get child :restart :permanent) reason)) (supervisor--loop (assoc state
-                                                                                                         :children (supervisor--drop (get state
-                                                                                                                                       :children)
-                                                                                                                     pid)))
+             (not (supervisor--restartable? (get child :restart :permanent) reason)) (supervisor--loop (supervisor--remove state
+                                                                                                        pid))
              (= (get state :strategy) :one-for-one) (supervisor--restart state child)
              else (supervisor--group-restart state child reason)))))
 
@@ -294,37 +384,35 @@ abnormal (`:killed`) — leaving unaffected children running. Bounded by intensi
 (defn supervisor--do-start-child (state spec from r)
   "Handle `[:start-child spec]`: start + link the new child, append it (preserving
 start order), reply its pid."
-  (let (child (supervisor--start-child spec))
+  (let (seq (get state :next-seq 0)
+        child (assoc (supervisor--start-child spec) :seq seq))
     (send from [:reply r (get child :pid)])
-    (supervisor--loop (assoc state :children (append (get state :children) (list child))))))
+    (supervisor--loop (assoc (supervisor--put state child) :next-seq (+ seq 1)))))
 
 (defn supervisor--do-terminate-child (state key from r)
   "Handle `[:terminate-child key]` (key = `:id` or pid): terminate the child per
 its `:shutdown` and drop it from supervision (no restart). Reply `:ok`, or
 `:not-found`."
-  (let (child (supervisor--find-by-key (get state :children) key))
+  (let (child (supervisor--find-by-key (get state :children) (get state :ids) key))
     (if (nil? child)
       (do (send from [:reply r :not-found]) (supervisor--loop state))
       (do
         (supervisor--terminate-child child)
         (send from [:reply r :ok])
-        (supervisor--loop (assoc state
-                            :children (supervisor--drop (get state :children) (get child :pid))))))))
+        (supervisor--loop (supervisor--remove state (get child :pid)))))))
 
 (defn supervisor--do-restart-child (state key from r)
   "Handle `[:restart-child key]`: terminate the child and start a fresh incarnation
 from the same spec (not counted against the intensity window — it's an explicit
 request, like OTP's `restart_child`). Reply the new pid, or `:not-found`."
-  (let (child (supervisor--find-by-key (get state :children) key))
+  (let (child (supervisor--find-by-key (get state :children) (get state :ids) key))
     (if (nil? child)
       (do (send from [:reply r :not-found]) (supervisor--loop state))
       (do
         (supervisor--terminate-child child)
         (let (fresh (supervisor--start-child child))
           (send from [:reply r (get fresh :pid)])
-          (supervisor--loop (assoc state
-                              :children (supervisor--replace (get state :children)
-                                          (get child :pid) fresh))))))))
+          (supervisor--loop (supervisor--swap state (get child :pid) fresh)))))))
 
 (defn supervisor--loop (state)
   "The supervisor's receive loop over its immutable `state` map."
@@ -339,7 +427,7 @@ request, like OTP's `restart_child`). Reply the new pid, or `:not-found`."
     ([:start-child spec from r] (supervisor--do-start-child state spec from r))
     ([:terminate-child key from r] (supervisor--do-terminate-child state key from r))
     ([:restart-child key from r] (supervisor--do-restart-child state key from r))
-    ([:$stop] (supervisor--terminate-many (get state :children)))))
+    ([:$stop] (supervisor--terminate-many (supervisor--ordered (get state :children))))))
 
 (defn supervisor--init (children opts parent)
   "Runs inside the freshly spawned supervisor process: trap exits (so child deaths
@@ -348,21 +436,25 @@ build the initial state, and enter the loop. `parent` is the pid that called
 `start-supervisor` — if it's a supervisor it linked us in its own `start-child`, so
 its death reaches us as `[:EXIT parent …]` and we shut our subtree down."
   (trap-exit true)
-  (let (started (supervisor--start-each children ()))
-    (supervisor--loop {:children started
-                       :parent parent
-                       :strategy (get opts :strategy :one-for-one)
-                       :max-restarts (get opts :max-restarts 3)
-                       :max-seconds (get opts :max-seconds 5)
-                       :restarts ()})))
+  (let (started (supervisor--start-each children 0 ()))
+    (supervisor--loop (supervisor--rebuild {:children {}
+                                            :ids {}
+                                            :parent parent
+                                            :strategy (get opts :strategy :one-for-one)
+                                            :max-restarts (get opts :max-restarts 3)
+                                            :max-seconds (get opts :max-seconds 5)
+                                            :next-seq (count started)
+                                            :restarts (supervisor--empty-window)}
+                        started))))
 
-(defn supervisor--start-each (specs acc)
-  "Start each spec in order, accumulating child records (tail-recursive, so
-children start left-to-right and `acc` preserves that order on reverse)."
+(defn supervisor--start-each (specs i acc)
+  "Start each spec in order, accumulating child records stamped with their start
+position `:seq` (tail-recursive, so children start left-to-right and `acc`
+preserves that order on reverse)."
   (if (empty? specs)
     (reverse acc)
-    (supervisor--start-each (rest specs)
-      (cons (supervisor--start-child (first specs)) acc))))
+    (supervisor--start-each (rest specs) (+ i 1)
+      (cons (assoc (supervisor--start-child (first specs)) :seq i) acc))))
 
 ;; ---- public client API ------------------------------------------------------
 

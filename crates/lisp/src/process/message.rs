@@ -680,6 +680,15 @@ pub(crate) fn copy_cross_heap(src: &Heap, dst: &mut Heap, v: Value) -> Option<Va
     copy_cross_heap_rec(src, dst, v, 0)
 }
 
+/// Whether a closure crossing a **same-runtime** local send is handed over as a shared
+/// RUNTIME handle (the default) instead of being deep-copied into the receiver.
+/// `BROOD_NO_SHARE_FN=1` reverts to the copy — the A/B and bisect lever, and the
+/// stopgap if a shared handle is ever implicated in a fault. Read once and cached.
+fn share_fn_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("BROOD_NO_SHARE_FN").is_none())
+}
+
 fn copy_cross_heap_rec(src: &Heap, dst: &mut Heap, v: Value, depth: u32) -> Option<Value> {
     if depth >= MAX_MESSAGE_DEPTH {
         return None;
@@ -749,9 +758,67 @@ fn copy_cross_heap_rec(src: &Heap, dst: &mut Heap, v: Value, depth: u32) -> Opti
             }
             dst.set_from_elems(out)
         }
-        // Everything else — closures (which need the shared-code walk `Message` does),
-        // ropes, macros, builtins, unrealised seq-views — takes the `Message` path, so
-        // its existing semantics and error messages are unchanged.
+        // A closure that **already lives in the shared code region** crosses to a process
+        // of the **same runtime** by handle, not by copy. Both processes read that region
+        // through the same `Arc`, so the handle means the same thing in `dst` — this is
+        // what `spawn` relies on for its thunk. Copying instead gives the receiver a
+        // private duplicate of code its own runtime already has: measured at **436 bytes
+        // against 48** for the same trivial thunk, ~670 objects each, which is what made a
+        // supervisor retaining one `:start` closure per child spend two thirds of
+        // `start-child` in GC (docs/runtime-frontier.md A3).
+        //
+        // **It deliberately does NOT promote a local closure to make it shareable**, even
+        // though that would widen the win to inline `(fn () …)` specs. Promotion appends
+        // to the append-only RUNTIME region, and a *transient* closure — sent, used,
+        // dropped — then costs a whole aging/drain/free cycle to reclaim instead of dying
+        // at the next minor GC. Measured over N sent-and-discarded closures, peak RSS went
+        // 129 / 190 / 340 / 541 MB at N = 100k / 200k / 400k / 800k against a flat
+        // 112–180 MB for the copy: growth proportional to closures sent, which is a leak
+        // in any long-running receiver. Restricted to already-shared closures there is no
+        // new promotion and no growth at all: at N=800k, 150 MB against the copy's 181 MB for
+        // transient closures, and 121 vs 129 MB when the sent closure is already shared
+        // (best-of-3 peak RSS — single runs of this vary by tens of MB).
+        // Widening this needs the RUNTIME collector to reclaim promptly (ADR-091 stage 4),
+        // not a looser rule here.
+        //
+        // What this covers in practice: a closure that captures **no local variables**
+        // (it refers only to globals) is already a RUNTIME-region value, so the idiomatic
+        // supervisor spec `(fn () (spawn-link (worker)))` is handed over by handle —
+        // measured 6 µs against 54 µs per send for the same shape capturing a local.
+        // A closure that *does* capture a local is a LOCAL value and takes the copy, which
+        // is correct and unchanged; it simply does not get the win.
+        //
+        // Not covered yet: a **PRELUDE**-region closure (sending `map` itself, say) still
+        // copies. It is arguably safer than the RUNTIME case — the prelude is immutable and
+        // never collected — but it needs its own guard (the prelude is a second `Arc`, and
+        // `shares_runtime_with` only compares the runtime one) and its own validation run,
+        // so it is left as a follow-up rather than folded in untested.
+        //
+        // Guards, all load-bearing:
+        //  - `region() == RUNTIME` — the no-new-promotion rule above.
+        //  - `shares_runtime_with` — the process REGISTRY is global, so a second `Interp`
+        //    in the same OS process has a *different* region; its handles must not cross.
+        //    Cross-**node** sends never reach here at all (they serialise via `Message`).
+        //  - `share_fn_enabled` — `BROOD_NO_SHARE_FN=1` reverts to the copy, so this is
+        //    A/B-able and instantly revertible without a rebuild.
+        //  - anything else declines (`None`) to the existing `Message` path unchanged.
+        //
+        // Lifetime: a shared handle retained in `dst`'s LOCAL data pins its RUNTIME
+        // generation, and that is *sound* — the drain's Phase 2 walks the whole local
+        // heap, so `runtime_gen_referenced` sees it and refuses to free underneath us;
+        // aging never moves handles, and compaction requires unique ownership. It costs
+        // reclamation latency for a superseded version whose only remaining reference is
+        // a receiver's retained handle — bounded by that value's lifetime.
+        Value::Fn(id)
+            if share_fn_enabled()
+                && id.region() == crate::core::value::RUNTIME
+                && src.shares_runtime_with(dst) =>
+        {
+            v
+        }
+        // Everything else — a closure we declined to share, ropes, macros, builtins,
+        // unrealised seq-views — takes the `Message` path, so its existing semantics and
+        // error messages are unchanged.
         _ => return None,
     })
 }
