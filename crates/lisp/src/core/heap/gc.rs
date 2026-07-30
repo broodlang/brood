@@ -910,7 +910,19 @@ impl Heap {
         // nursery; the old gen was untouched.
         if tenure {
             self.old = Some(Box::new(dest));
-            self.local = Slabs::with_capacity_like(&young);
+            // The nursery restarts EMPTY on a tenure — every survivor was moved into the
+            // old gen — so reserving the *outgoing* nursery's full length holds a
+            // peak-sized allocation the next cycle may never touch. That is the least
+            // justified of the two `with_capacity_like` uses: on the flip path below,
+            // `dest` genuinely holds the survivors, so its capacity is in use. `sort`
+            // builds a 375k-cell list and peaks at 191 MB against .NET's 30 MB and
+            // Ruby's 25 MB, and this reservation is a large part of the difference.
+            // `BROOD_GC_TENURE_RESERVE=1` restores the old behaviour for an A/B.
+            self.local = if std::env::var_os("BROOD_GC_TENURE_RESERVE").is_some() {
+                Slabs::with_capacity_like(&young)
+            } else {
+                Slabs::default()
+            };
         } else {
             self.local = dest;
         }
