@@ -11940,3 +11940,14 @@ primitive sigs are global; the ability-op path didn't, which is what pointed at 
 return-discards-params behaviour. (Also spent a minute chasing a stale `nest` binary — `nest`
 is a separate binary embedding the lib, so `cargo build --bin brood` alone doesn't rebuild it.)
 Whole brood repo stays warning-clean.
+
+## 2026-07-30 (cont.) — occurrence typing: variadic false-positive fix (ADR-190)
+
+Probing for gaps found one real **false positive**: a variadic `(defn vf (& xs) (fold + 0 xs))`
+inferred `xs : seqable` (from `fold`) and the caller check applied it to *argument 1* — so a
+valid `(vf 1 2 3)` was flagged "expects seqable, got 1". The rest binder collects the args into
+a *list*, so its demand doesn't map to any single argument position. Fix: `infer_params_from_form`
+now skips a fn with `&`/`&optional` (mirroring `infer_sig`, which already guards complex
+closures on the loaded path — cross-file variadics were already clean). Battery of edge probes
+(guarded, multi-arity, let-rebind, higher-order, structural accessor, member caller,
+multi-demand intersection) is otherwise clean; whole repo stays warning-free.
