@@ -12050,3 +12050,29 @@ false positive). 5 tests; whole repo warning-clean (no std ability declares `:re
 This completes item #1 of the six deferred abstractions; the other five are recorded on the
 roadmap with their urgency (all ADR-011 "wait for a concrete need" except open-ability bounds,
 which is a declined non-goal).
+
+## 2026-07-30 (cont.) — LSP goto-definition reaches macro-defined globals (defrecord/defability)
+
+Reported symptom: `M-.` on a record constructor (`fib-job`) from another module found nothing.
+Root cause was two-fold. (1) The cross-file def-site table is keyed by `def_form_name`, which only
+recognizes a form whose *outermost* head is `def`/`defn`/`defmacro` — but `defrecord` expands to a
+`(do (defn ctor …) (defn accessor …) …)`, so the `do` head matched nothing and the inner `defn`s
+were never recorded. (2) The `load` builtin (the path the LSP uses to bootstrap project modules,
+and reload) called `note_definition` **only on the un-expanded form**, unlike the file-runner in
+`lib.rs`, which notes the expanded form too — so even a recognizable expansion wouldn't have been
+seen under `(load …)`.
+
+Fix, both halves: `note_definition` now **descends into a `(do …)`**, recording each inner
+`def`/`defn`/`defmacro` at the outer call-site `pos`; and `load`/reload now note the **expanded**
+form as well (matching the file-runner). Result: `(source-location 'foundry/fib-job)` /
+`…/fib-job-n` / `…/run` all resolve to the `defrecord`/`defability` line, so cross-file *and*
+same-file (via the `Free`→`source-location` fallback) goto work for constructors, accessors, and
+ability op dispatchers — every macro-synthesized global, generally, not a per-macro special case.
+
+Secondary gap closed in the same pass: the CST-based outline/workspace-symbols/hover layer
+(`defs.rs`) only parsed `def`/`defn`/`defmacro`, so `defrecord`/`defability` never appeared in the
+document outline. Added `DefKind::Record` (→ `STRUCT`, fields as constructor params) and
+`DefKind::Ability` (→ `INTERFACE`). Left line 721's `eval-string`-class loop alone (no file
+context, records no sites). 4 new Rust tests (2 in `defs.rs`, 1 end-to-end in `definition.rs`, plus
+the empirical `source-location` probe); full `-p brood` + `-p brood-lsp` suites green; `docs/lsp.md`
+step 1 updated (it had documented the "`do` isn't recorded yet" limitation explicitly).

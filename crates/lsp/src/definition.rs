@@ -295,6 +295,48 @@ mod tests {
     }
 
     #[test]
+    fn jumps_to_a_defrecord_constructor_across_files() {
+        // A record constructor is *synthesized* by the `defrecord` macro (which
+        // expands to a `do` of `defn`s), so it isn't in the buffer's CST. The
+        // loader records the expanded form's def sites, so cross-file goto on the
+        // constructor still lands on the `(defrecord …)` line — the fix for
+        // "can't navigate to a record constructor from another module".
+        let dir = std::env::temp_dir().join(format!("brood_rec_def_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("geo.blsp"),
+            "(defmodule geo)\n(defrecord circle (r))\n",
+        )
+        .unwrap();
+
+        let mut interp = Interp::new();
+        interp
+            .eval_str(&format!(
+                "(def *load-path* (cons \"{}\" *load-path*))",
+                dir.display()
+            ))
+            .expect("extend load-path");
+
+        let src = "(defmodule app (:use geo))\n(circle 2)";
+        let uri: Uri = "file:///app.blsp".parse().unwrap();
+        let root = cst::parse(src);
+        let tree = scope::analyze(&root, src);
+        let index = LineIndex::new(src);
+        let at = src.rfind("circle").unwrap() as u32; // the call site
+
+        let loc = definition(&mut interp, &uri, src, &root, &tree, &index, at)
+            .expect("goto to a record constructor");
+        assert!(
+            loc.uri.as_str().ends_with("geo.blsp"),
+            "should jump to geo.blsp, got {:?}",
+            loc.uri
+        );
+        // The `(defrecord circle …)` form is on the second line (0-based line 1).
+        assert_eq!(loc.range.start.line, 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn jumps_from_a_use_clause_to_the_module_file() {
         // Goto-def on the module name *in the `(:use …)` clause itself* opens that
         // module's file (like `require`), located on the live `*load-path*`.
