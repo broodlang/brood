@@ -12537,3 +12537,45 @@ The lesson is the same one this repo keeps relearning, in a new costume: the sta
 be computed the way it is reported. "Median of five" was true of the *run*, not of the *metric*,
 and the difference was invisible until a metric with 3× variance sat in the same row as two
 stable ones.
+
+## 2026-07-30 (cont.) — soak: 1.5M self-checking iterations, and RSS is not what it looks like
+
+Answering "are we sure we gained this without losing stability?" with evidence rather than
+assurance. A soak is sustained load with an invariant checked on *every* iteration — the
+distinction matters here, because the failure mode I was worried about (a wrongly-applied
+receive-mark) does not crash: it silently fails to deliver, and a survive-only soak would
+sail straight past it.
+
+Each iteration: a ref-pinned round trip against a **64-message backlog** (the reply must
+arrive *and* all 64 junk messages must still be queued afterwards — the direct detector for a
+wrong skip), a supervised child crashed and restarted, a shared closure and a capturing one
+crossing a send, a hot-reloaded global, and a 32-process spawn burst. The detector was itself
+verified by deliberately corrupting an invariant: it printed `ERROR at iteration 0` and halted.
+
+Two 30-minute runs, the second a **control with every one of the day's mechanisms reverted**
+via its off-switch (`BROOD_NO_RECV_MARK=1 BROOD_NO_SHARE_FN=1 BROOD_SPAWN_SPILL=999999`):
+
+| | iterations | RSS | errors |
+|---|---|---|---|
+| all new | **792 829** | 860 MB | **0** |
+| control | 747 818 | 2069 MB | **0** |
+
+~26 M spawns and ~52 M messages per run. The new code did **6% more work on 2.4× less
+memory**, and the gap widened monotonically through the run — the strongest evidence yet that
+the day's changes help a *sustained* workload rather than only a benchmark.
+
+**Right-sizing the run was itself a judgement worth recording.** The first attempt was two
+3-hour runs; that is the wrong instrument. Correctness here scales with *iterations*, not
+wall-clock, and 30 min already buys ~800k iterations (~52 M messages). Three hours buys 6×
+that — and a bug needing 30 M iterations to surface would not be reliably caught at 30 M
+either. That is an overnight, unattended job, not one to sit and watch.
+
+**What the soak actually found** was not the thing it was hunting: RSS climbs steadily and
+never plateaus (276 → 600 MB over 500k iterations), in *both* configurations. Two probes
+turned an alarming curve into a result — removing hot reload changed nothing (so not the
+RUNTIME region), and after 77k iterations with **2.5 M spawns** the live set was **4 processes
+and 59 KB** against 207 MB RSS, falling only to 178 MB after quiescing and a forced
+collection. So the language's accounting is clean and the pages are held by the allocator.
+Recorded as `runtime-frontier.md` **A8**, with the consequence stated plainly: **RSS is not a
+proxy for live data on this runtime**, and the retained figure tracks cumulative churn rather
+than a working-set peak, which points at fragmentation rather than a high-water mark.
