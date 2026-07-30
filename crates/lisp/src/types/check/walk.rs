@@ -20,8 +20,9 @@ use crate::types::{GradualTy, Ty};
 
 use super::ctx::{Ctx, PathKey};
 use super::guards::{
-    find_redundant_clause, guard_assertion, is_syntactic_keyword, literal_eq_test_raw,
-    match_exhaustiveness_gap, path_guard_assertion, render_literal_pattern,
+    and_conjunct_guards, find_redundant_clause, guard_assertion, is_syntactic_keyword,
+    literal_eq_test_raw, match_exhaustiveness_gap, or_same_var_narrowing, path_guard_assertion,
+    render_literal_pattern,
 };
 use super::infer::{expr_ty, global_value_ty};
 use super::sigs::{
@@ -2026,6 +2027,24 @@ fn check_if(
             (t, e)
         }
         None => (then_ctx, else_ctx),
+    };
+    // Layer **chained-guard** narrowing on top: every conjunct of an `and`-test narrows
+    // the then-branch (a truthy `and` proves all of them), and an `or`-test whose disjuncts
+    // are all biconditional guards over one variable narrows both branches (then → the
+    // union, else → its complement). All via intersecting `narrow`, so they compose with
+    // the single-guard and path narrowings above. Guards read against the original `ctx`
+    // (for let-alias resolution); the tightening lands on the branch ctxs.
+    let (then_ctx, else_ctx) = {
+        let mut t = then_ctx;
+        let mut e = else_ctx;
+        for g in and_conjunct_guards(heap, test, ctx) {
+            t = t.narrow(g.sym, g.ty);
+        }
+        if let Some((sym, union)) = or_same_var_narrowing(heap, test, ctx) {
+            t = t.narrow(sym, union.clone());
+            e = e.narrow(sym, union.negate());
+        }
+        (t, e)
     };
     check_value_leaf(heap, then_form, form, &then_ctx, out);
     check_into(heap, then_form, &then_ctx, out);

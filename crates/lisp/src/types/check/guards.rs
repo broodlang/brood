@@ -301,6 +301,130 @@ fn and_first_conjunct_guard(heap: &Heap, binding: Value, body: Value, ctx: &Ctx)
     })
 }
 
+/// The `(cond, rest)` of a two-armed short-circuit expansion `(let (g cond) (if g A B))`
+/// where `A`/`B` are each either `g` or the remaining chain. `want_then_g` selects the
+/// shape: `true` for `and` — `(if g rest g)` (then is the remainder, else is `g`); `false`
+/// for `or` — `(if g g rest)` (then is `g`, else is the remainder). Returns `(cond, rest)`.
+fn chain_shape(heap: &Heap, test: Value, want_then_g: bool) -> Option<(Value, Value)> {
+    let items = list_items(heap, test)?;
+    if items.len() != 3
+        || !matches!(items.first(), Some(&Value::Sym(h)) if value::symbol_is(h, kw::LET))
+    {
+        return None;
+    }
+    let bs = list_items(heap, items[1])?;
+    if bs.len() != 2 {
+        return None;
+    }
+    let Value::Sym(g) = bs[0] else { return None };
+    let cond = bs[1];
+    let body = list_items(heap, items[2])?;
+    let is_if = matches!(body.first(), Some(&Value::Sym(s)) if value::symbol_is(s, kw::IF));
+    if body.len() != 4 || !is_if {
+        return None;
+    }
+    let is_g = |v: Value| matches!(v, Value::Sym(s) if s == g);
+    // `and`: (if g REST g) → then is the remainder. `or`: (if g g REST) → else is it.
+    if want_then_g {
+        // and-shape: test == g, else == g, remainder is the THEN slot.
+        if is_g(body[1]) && is_g(body[3]) {
+            return Some((cond, body[2]));
+        }
+    } else {
+        // or-shape: test == g, then == g, remainder is the ELSE slot.
+        if is_g(body[1]) && is_g(body[2]) {
+            return Some((cond, body[3]));
+        }
+    }
+    None
+}
+
+/// Every conjunct guard of an `and`-expansion test — a truthy `and` proves **all**
+/// conjuncts hold, so each narrows the *then*-branch (each `then_only`: a falsy `and`
+/// proves nothing). `[]` when `test` is not an and-expansion (so a plain guard, already
+/// handled by [`guard_assertion`], adds nothing here). Sound to apply all to the then-ctx.
+pub(super) fn and_conjunct_guards(heap: &Heap, test: Value, ctx: &Ctx) -> Vec<Guard> {
+    let mut out = Vec::new();
+    let mut cur = test;
+    let mut matched = false;
+    loop {
+        match chain_shape(heap, cur, true) {
+            Some((cond, rest)) => {
+                matched = true;
+                if let Some(g) = guard_assertion(heap, cond, ctx) {
+                    out.push(Guard {
+                        then_only: true,
+                        ..g
+                    });
+                }
+                cur = rest;
+            }
+            None => {
+                // The last conjunct is a bare guard expression (only counted once we've
+                // seen at least one `and` link, so a non-`and` test yields nothing).
+                if matched {
+                    if let Some(g) = guard_assertion(heap, cur, ctx) {
+                        out.push(Guard {
+                            then_only: true,
+                            ..g
+                        });
+                    }
+                }
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// If `test` is an `or`-expansion whose disjuncts are **all** biconditional guards over
+/// the **same** variable, return `(sym, ⋃ tyᵢ)`. The then-branch narrows `sym` to the
+/// union (a truthy `or` ⇒ some disjunct holds); the else-branch to its complement (a falsy
+/// `or` ⇒ none hold — sound only because every disjunct is biconditional). `None` the moment
+/// a disjunct is `then_only`, targets another variable, or isn't a recognised guard.
+pub(super) fn or_same_var_narrowing(heap: &Heap, test: Value, ctx: &Ctx) -> Option<(Symbol, Ty)> {
+    let mut cur = test;
+    let mut sym: Option<Symbol> = None;
+    let mut union = Ty::NEVER;
+    let mut matched = false;
+    // Fold one disjunct's guard into the accumulator; returns `false` to abort.
+    let take = |g: Option<Guard>, sym: &mut Option<Symbol>, union: &mut Ty| -> bool {
+        match g {
+            Some(guard) if !guard.then_only => {
+                match sym {
+                    None => *sym = Some(guard.sym),
+                    Some(s) if *s == guard.sym => {}
+                    _ => return false, // a different variable — no single-var narrowing
+                }
+                *union = union.clone().union(guard.ty);
+                true
+            }
+            _ => false,
+        }
+    };
+    loop {
+        match chain_shape(heap, cur, false) {
+            Some((cond, rest)) => {
+                matched = true;
+                if !take(guard_assertion(heap, cond, ctx), &mut sym, &mut union) {
+                    return None;
+                }
+                cur = rest;
+            }
+            None => {
+                if !matched {
+                    return None;
+                }
+                if !take(guard_assertion(heap, cur, ctx), &mut sym, &mut union) {
+                    return None;
+                }
+                break;
+            }
+        }
+    }
+    sym.map(|s| (s, union))
+}
+
 /// If `a` is a symbol and `b` is a self-evaluating literal, return the guard
 /// `(a, type-of(b))`. Used by `guard_assertion`'s `%eq` arm to recognise both
 /// `(%eq sym lit)` and `(%eq lit sym)`. Returns `None` when `b` is itself a
