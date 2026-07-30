@@ -875,9 +875,15 @@ pub fn check_file_ext(
                 }
             }
         }
-        // Pass 2.8: **same-file function-return inference.** The file being checked isn't
+        // Build the ability facts + install the sealed-op occurrence-typing domains
+        // (ADR-190) BEFORE Pass 2.8, so that pass's parameter inference can derive `s : Shape`
+        // from an unannotated `(area s)` use. `build_ability_info` reads only the heap +
+        // expanded forms, so hoisting it here is safe; it's reused by the ability passes below.
+        let ability_info = std::sync::Arc::new(protocol::build_ability_info(heap, &expanded));
+        annot::set_sealed_op_domains(protocol::build_sealed_op_domains(&ability_info));
+        // Pass 2.8: **same-file function inference.** The file being checked isn't
         // loaded, so `sigs::sig_of`'s loaded-closure inference can't see its own `(defn …)`s
-        // — a same-file caller got no result checking (only cross-module callers of *loaded*
+        // — a same-file caller got no checking (only cross-module callers of *loaded*
         // functions did). Infer each single-def, unshadowed, un-declared function's return
         // from its FORM (`sigs::infer_return_from_form`) and record it in `ctx`, so a
         // same-file call flows the result exactly as a loaded-function call already does.
@@ -886,9 +892,11 @@ pub fn check_file_ext(
         // `None` (defers, records nothing) until every function its return depends on is
         // already recorded, so a function is only ever stored with its callees' FINAL sigs —
         // no stale/narrow intermediate leaks (sound at any cap; a cross-function cycle or a
-        // chain deeper than the cap simply stays deferred). Return-only (a params-less sig),
-        // so it never constrains an argument. Runs after Gap A so a `(def g <expr>)` value
-        // type its body reads is already in scope.
+        // chain deeper than the cap simply stays deferred). The stored sig now also carries
+        // the function's inferred **parameter demands** (ADR-190), so a same-file caller's
+        // arguments are checked — sound because those demands under-constrain (a superset of
+        // the true type, so a flagged arg genuinely errors). Runs after Gap A so a
+        // `(def g <expr>)` value type its body reads is already in scope.
         {
             let mut def_count: HashMap<Symbol, usize> = HashMap::new();
             for &form in &expanded {
@@ -912,13 +920,34 @@ pub fn check_file_ext(
                 for &(name, rhs) in &candidates {
                     if let Some(ret) = sigs::infer_return_from_form(heap, rhs, Some(name), &ctx) {
                         if ctx.inferred_fn_sig(name).map(|s| s.ret) != Some(ret.clone()) {
-                            ctx.add_inferred_fn_sig(name, crate::types::Sig::new(vec![], ret));
+                            // ADR-190: carry the inferred parameter demands too, so a same-file
+                            // caller's arguments are checked (not just the return). Sound:
+                            // `infer_params_from_form` under-constrains, so a flagged arg is one
+                            // that genuinely errors. Params are body-derived (independent of this
+                            // fixpoint, which only resolves returns), so recomputing is stable.
+                            let params =
+                                sigs::infer_params_from_form(heap, rhs).unwrap_or_default();
+                            ctx.add_inferred_fn_sig(name, crate::types::Sig::new(params, ret));
                             changed = true;
                         }
                     }
                 }
                 if !changed {
                     break;
+                }
+            }
+            // A candidate whose return stayed **deferred** (e.g. it returns an ability op the
+            // ability facts aren't on `ctx` for yet) still gets its inferred param demands
+            // (ADR-190) with an `ANY` return — so its callers are argument-checked even without
+            // a resolved return. Runs after the fixpoint, so the return dynamics are untouched.
+            for &(name, rhs) in &candidates {
+                if ctx.inferred_fn_sig(name).is_none() {
+                    if let Some(params) = sigs::infer_params_from_form(heap, rhs) {
+                        ctx.add_inferred_fn_sig(
+                            name,
+                            crate::types::Sig::new(params, crate::types::Ty::ANY),
+                        );
+                    }
                 }
             }
         }
@@ -933,7 +962,6 @@ pub fn check_file_ext(
         // Ability call-site checks: the syntactic pass (literals / direct ctor args) runs
         // now; the same facts go into `ctx` so `check_into`'s inference hook can also flag
         // a record-typed *variable* passed to an op with no impl.
-        let ability_info = std::sync::Arc::new(protocol::build_ability_info(heap, &expanded));
         protocol::check_ability_calls(heap, &expanded, &ability_info, &mut out);
         protocol::check_sealed(&ability_info, &mut out);
         // Op names must be unique within a module: two abilities declaring the same op

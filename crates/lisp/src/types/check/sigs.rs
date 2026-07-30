@@ -595,6 +595,37 @@ pub(super) fn infer_return_from_form(
     ret
 }
 
+/// A single-arity file function's inferred **parameter demands**, read from its
+/// `(fn (params) body…)` form (ADR-190) — each param's unconditional type demand across the
+/// body (see [`collect_param_demands`]). `None` for a multi-arity / malformed / no-param fn
+/// (no single demand to pin). **Sound for caller-flagging:** `collect_param_demands`
+/// under-constrains (a superset of the true valid-argument type), so an argument disjoint from
+/// a demand is disjoint from the truth too — it genuinely errors at runtime, never a false
+/// positive. The companion of [`infer_return_from_form`] (which yields the return).
+pub(super) fn infer_params_from_form(heap: &Heap, fn_form: Value) -> Option<Vec<Ty>> {
+    let items = super::walk::list_items(heap, fn_form)?;
+    if !matches!(items.first(), Some(&Value::Sym(s)) if super::walk::is_fn_head(s)) {
+        return None;
+    }
+    if crate::eval::macros::fn_is_arity_multi_clause(heap, &items) {
+        return None; // params vary per clause — no single demand to store
+    }
+    let plist = *items.get(1)?;
+    let params = super::walk::fn_params(heap, plist);
+    if params.is_empty() {
+        return None;
+    }
+    let body_start = match (items.get(2), items.get(3)) {
+        (Some(Value::Str(_)), Some(_)) => 3, // skip a leading docstring
+        _ => 2,
+    };
+    let body: Vec<Value> = items.get(body_start..)?.to_vec();
+    if body.is_empty() {
+        return None;
+    }
+    Some(collect_param_demands(heap, &body, &params))
+}
+
 /// Collect each parameter's **unconditional** type demand across the whole body:
 /// the type a known-sig callee requires of a parameter passed *directly* in a
 /// position guaranteed to execute on every call — a call argument, a `do` form, a
@@ -719,12 +750,22 @@ fn collect_demands(
     // A parameter passed *directly* to a known-sig callee takes the demanded type;
     // every argument is itself an unconditional position (nested calls contribute).
     let callee_sig = primitive_sig(heap, h).or_else(|| curated_sig(h));
+    // Ability-op occurrence typing (ADR-190): a call to a *sealed* ability op demands its
+    // FIRST argument be a member of that ability (a non-member `no-impl`s at runtime), so a
+    // `(defn f (s) (area s))` derives `s : Shape` with no annotation. `None` unless provably
+    // sound — see `protocol::sealed_op_domain`.
+    let op_domain = super::protocol::sealed_op_domain(h);
     for (i, &arg) in items[1..].iter().enumerate() {
         if let Value::Sym(a) = arg {
             if !shadowed.contains(&a) {
                 if let Some(pos) = params.iter().position(|&p| p == a) {
                     if let Some(expected) = callee_sig.as_ref().and_then(|s| s.param(i)) {
                         tys[pos] = tys[pos].clone().intersect(expected);
+                    }
+                    if i == 0 {
+                        if let Some(dom) = op_domain.clone() {
+                            tys[pos] = tys[pos].clone().intersect(dom);
+                        }
                     }
                 }
             }
