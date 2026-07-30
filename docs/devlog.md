@@ -12628,3 +12628,69 @@ also *why* Stage 6 (an upgrade hook for long-lived processes) exists.
 
 **Gates:** full suite green, `nest check` clean (one pre-existing advisory in a JIT torture
 test), metamorphic differential fuzzer 420 checks / 0 divergences / 0 crashes.
+
+## 2026-07-30 (cont.) — the std/ scale sweep starts: two quadratics in the framed reads
+
+Picked up handoff thread 1 (the `std/` scale sweep, unstarted) on the reasoning that two of
+the three quadratics fixed the previous session were in **Brood policy code, not the kernel**.
+Both of today's are too, and both were in code whose own comments asserted it was linear.
+
+**`tcp--read-until` was O(total²) in copy *and* scan.** It `bytes-concat`ed the whole
+accumulator and rescanned it from offset 0 on **every** chunk — three lines under a comment
+claiming both framed-read combinators concat "once, never per-chunk (no O(total²) rebuild)".
+True of `tcp-read-n`, false of its sibling. And it has no size cap (the caller frames what it
+reads), so a peer that drip-feeds and never sends the delimiter was a remotely-triggerable
+CPU amplifier. Measured, 64-byte chunks: 250 → 9.3 ms, 1000 → 106 ms, 4000 → **1568 ms**.
+16× the chunks cost **169×** the time.
+
+**`http--read-until`'s ADR-142 fix was half a fix.** Threading a `from` offset made each byte
+be *scanned* once but left `(bytes-concat acc d)` per chunk, which is the same O(head²) in
+**memcpy** — the slow-loris amplifier had moved from scanning to copying, not gone away.
+ADR-142 also claimed the chunk-list idiom made every `std/net` read path O(n) in copies;
+neither `read-until` was. Corrected in the ADR.
+
+**The fix, same shape in both.** Leave the reversed chunk list alone; carry the last
+`(|sep|−1)` bytes forward as a **straddle probe** and scan only `[probe | chunk]` per chunk
+(O(chunk)); concatenate **once**, on the delimiter, when the caller actually needs the bytes.
+The cut offset comes from the running byte total plus the index into the probe, so it never
+rescans. A match must include a byte of the new chunk (|probe| < |sep|), so nothing already
+reported past can re-match. Result: **flat ~15 µs/chunk from 250 to 64 000 chunks** (4 MB
+drip-fed in 64 000 chunks: 969 ms, where the old code would have needed hours).
+
+**New harness `scripts/fuzz/stress/net_framed_scale.blsp`**, with the two controls the handoff
+demands: `tcp-read-n` over the same drip (already O(total) — the reference for the accumulate
+path) and a **floor** that receives the same messages and discards them (~1.0–1.7 µs/chunk,
+pure mailbox cost). It needs no socket and no network: the combinators consume `[:tcp sock
+data]` from the *mailbox*, and the clauses only pin `sock` by equality, so the drip is
+fabricated with `send` to self — deterministic, no kernel read granularity or coalescing.
+
+**`count` on a `bytes` value costs 514 ns; `byte-length` costs 36 ns.** `count` reaches bytes
+at the bottom of a five-deep type-predicate `cond` in the prelude (`range?`/`seqview?`/
+`string?`/`vector?`/`bytes?`). Switching the three per-chunk calls took the loop 22 → 15
+µs/chunk. Reordering the `cond` is not the fix (whoever is last pays); the real answer is
+type dispatch, which is thread 2 material. Worth knowing that `count` is not free.
+
+**Refuted, before it became a theory:** that work inside a `receive` clause body runs on the
+tree-walker. It doesn't — identical work in a clause body vs. called out to a plain function
+measured 1424 vs 1466 ns. This looked live because a primitive timed at 375 ns standalone
+appeared to cost 5.4 µs inside a receive loop; that gap was an artifact of the ad-hoc harness,
+not of clause bodies. Re-measuring with every result consumed (in case dead pure calls were
+being eliminated) reproduced the standalone numbers exactly, so that suspicion was unfounded
+too. The residual ~15 µs/chunk is a **constant**, flat across a 256× range of backlog sizes,
+so it is not the mailbox and not GC; it stays unexplained and is per-message-cost territory.
+
+**Noise discipline:** the 16 000-chunk row has a ~15% spread over 5 runs (13.8–16.0 µs). The
+`byte-length` win (22 → 15) clears that; a two-arg-vs-list `bytes-concat` tweak did not, so it
+is kept for being simpler code and claimed as nothing.
+
+**`make test` was broken at HEAD** — `mailbox.rs`'s capture-receive unit test still called
+`receive_match` with 4 arguments after the receive-mark (ADR-195) added `pin`. Rust lib tests
+therefore could not build, so last session's green run cannot have included them. Fixed.
+
+**Contract pinned in tests:** `tcp-read-until`'s `rest` is only surplus from the chunk that
+*completed* the delimiter — a later, still-queued chunk is not surplus. Three new cases cover
+the straddle: a delimiter delivered one byte per chunk (every straddle slot in use), a
+near-miss sharing the delimiter's prefix across a boundary, and a correct cut offset after 200
+chunks. The first two initially failed on my own wrong expectations, not on the code.
+
+**Still open in this thread:** `proc/gen`, `proc/agent`, `editor/buffer` at 10k+ are unswept.

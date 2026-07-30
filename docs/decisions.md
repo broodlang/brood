@@ -8937,6 +8937,21 @@ chunk boundary is still found — each byte is scanned once. A companion
 `*http-max-head-bytes*` cap (64 KiB) bounds the memory a terminator-less head
 can pin.
 
+**Correction (2026-07-30).** Two claims above were wrong, and the fix was half a
+fix. (1) "O(n) in copies … already what every `std/net` read path does" was not
+true of the two `read-until` loops: both called `bytes-concat` on the *whole*
+accumulator per chunk. (2) "What was still quadratic was CPU, not copying" had it
+backwards — threading `from` fixed the scan and left the per-chunk rebuild, so
+`http--read-until` stayed O(head²) in **memcpy**; the slow-loris amplifier had
+moved, not gone. `tcp--read-until` was worse: quadratic in both, with no size cap
+at all (250 KB drip-fed as 4000 chunks took 1.57 s, and 16× the chunk count cost
+169× the time — a peer that drip-feeds and never sends the delimiter). Both now
+keep the reversed chunk list untouched and scan each new chunk against a
+`(|sep|−1)`-byte **straddle probe** carried forward, concatenating **once**, at
+return: flat ~15 µs/chunk from 250 to 64 000 chunks. The decision not to build a
+buffer value stands — the chunk-list idiom was right, but "the idiom is O(n)" has
+to be checked per call site, not assumed from the idiom.
+
 **Why record a non-build.** So the item doesn't resurface: the honest reading
 of the hatch audit's ask ("an append buffer that freezes to `bytes`") is that
 it predated iolists, `bytes`-native sockets, and bit syntax — with those three

@@ -55,23 +55,29 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
 (defdyn *http-max-head-bytes* 65536)
 
 ;; The socket is in binary mode, so `[:tcp …]` chunks are `bytes` values: accumulate
-;; with `bytes-concat`, scan with `bytes-index-of`. The head is ASCII (decoded for
-;; parsing); the body stays raw `bytes` so a binary payload round-trips faithfully.
-;; `from` is where the next marker scan starts — everything before it was already
-;; scanned, so each inbound chunk is scanned once (a full rescan per chunk made a
-;; drip-fed head O(head²) CPU, the slow-loris amplifier; ADR-142). It backs up
-;; (byte-length marker - 1) bytes so a marker straddling a chunk boundary is found.
-(defn http--read-until (sock acc from marker)
-  (if (>= (bytes-index-of acc marker from) 0)
-    acc
-    (if (> (byte-length acc) *http-max-head-bytes*)
-      nil
-      (receive
-        ([:tcp ^sock d] (http--read-until sock
-                          (bytes-concat acc d)
-                          (max 0 (- (byte-length acc) (- (byte-length marker) 1))) marker))
-        ([:tcp-closed ^sock] (if (= (byte-length acc) 0) nil acc))
-        (after *http-read-timeout-ms* (if (= (byte-length acc) 0) nil acc))))))
+;; in a reversed chunk list, scan with `bytes-index-of`. The head is ASCII (decoded
+;; for parsing); the body stays raw `bytes` so a binary payload round-trips faithfully.
+;; `chunks` is the chunks in reverse, `have` their running byte total, and `tail` the
+;; last (byte-length marker - 1) bytes accumulated — so a marker straddling a chunk
+;; boundary is still found while each inbound chunk is scanned exactly once, against
+;; `[tail | chunk]`. ONE `bytes-concat`, at return.
+;;
+;; ADR-142 fixed the *scan* half of this with a start offset but still rebuilt the
+;; whole buffer per chunk, which is the same O(head²) in copying — the slow-loris
+;; amplifier had moved from scanning to memcpy rather than gone away.
+(defn http--read-until (sock chunks have tail marker)
+  (if (> have *http-max-head-bytes*)
+    nil
+    (receive
+      ([:tcp ^sock d] (let (probe (bytes-concat tail d)
+                            k (max 0 (- (byte-length marker) 1))
+                            pn (byte-length probe))
+                        (if (>= (bytes-index-of probe marker) 0)
+                          (apply bytes-concat (reverse (cons d chunks)))
+                          (http--read-until sock (cons d chunks) (+ have (byte-length d))
+                            (if (<= pn k) probe (subbytes probe (- pn k) pn)) marker))))
+      ([:tcp-closed ^sock] (if (= have 0) nil (apply bytes-concat (reverse chunks))))
+      (after *http-read-timeout-ms* (if (= have 0) nil (apply bytes-concat (reverse chunks)))))))
 
 ;; Body read, O(n): collect chunks in a list (O(1) per chunk) and join **once** at
 ;; the end — never re-copy the growing buffer per chunk (that `(bytes-concat acc d)`
@@ -93,7 +99,7 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
   ;; incomplete request → nil, so the caller closes the socket cleanly — NOT
   ;; `(subbytes head 0 -1)`, which threw and killed the connection's worker
   ;; process (leaking the fd) on a truncated head. A remotely-triggerable crash.
-  (let (head (http--read-until sock #b"" 0 #b"\r\n\r\n")
+  (let (head (http--read-until sock nil 0 #b"" #b"\r\n\r\n")
         marker (if (nil? head) -1 (bytes-index-of head #b"\r\n\r\n")))
     (if (< marker 0)
       nil
