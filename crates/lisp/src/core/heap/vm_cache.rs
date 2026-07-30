@@ -83,7 +83,18 @@ pub struct FastLink {
     /// fast path. `u32::MAX` head/`0` argc in an [`Self::EMPTY`] slot match nothing real.
     pub sym: u32,
     pub argc: u32,
-    pub _pad: u32,
+    /// The callee arm's IC block bases in **this process** (its `(cur_ic_base, cur_gic_base)`),
+    /// mirrored from the [`CallIcEntry::callee_bases`] this slot was resolved from. The IR
+    /// loads them alongside `code`/`nslots`/`env` and hands them to `brood_rt_fast_frame`, so
+    /// [`jit_run_fast_link`] can install the callee's cursors around its native call the same
+    /// way the cloning native-link path does (KI-20) — without re-reading the table on the hot
+    /// path. `0` for a native flat cell (a builtin runs no IC-using arm). The `set_ic_bases`
+    /// this feeds is two `Cell` writes, so it costs no lookup — the whole point of riding here
+    /// rather than being re-resolved in the runtime callback.
+    ///
+    /// [`jit_run_fast_link`]: crate::eval::compile::jit_run_fast_link
+    pub callee_ic_base: u32,
+    pub callee_gic_base: u32,
 }
 
 impl FastLink {
@@ -96,7 +107,8 @@ impl FastLink {
         nslots: 0,
         sym: u32::MAX,
         argc: 0,
-        _pad: 0,
+        callee_ic_base: 0,
+        callee_gic_base: 0,
     };
 }
 
@@ -496,7 +508,7 @@ impl Heap {
         sym: Symbol,
         argc: u32,
         epoch: u64,
-    ) -> Option<(*const u8, usize, EnvId)> {
+    ) -> Option<(*const u8, usize, EnvId, (u32, u32))> {
         use std::sync::atomic::Ordering::Acquire;
         let abs = (self.cur_ic_base.get() + site) as usize;
         // Memoised hot path — read the [`FastLink`] mirror *alone*. It already carries
@@ -510,7 +522,12 @@ impl Heap {
             let fls = self.vm_fast_links.borrow();
             if let Some(fl) = fls.get(abs) {
                 if fl.code != 0 && fl.epoch == epoch && fl.sym == sym && fl.argc == argc {
-                    return Some((fl.code as *const u8, fl.nslots as usize, EnvId(fl.env)));
+                    return Some((
+                        fl.code as *const u8,
+                        fl.nslots as usize,
+                        EnvId(fl.env),
+                        (fl.callee_ic_base, fl.callee_gic_base),
+                    ));
                 }
             }
         }
@@ -519,6 +536,11 @@ impl Heap {
         if e.sym != sym || e.argc != argc || e.epoch != epoch {
             return None;
         }
+        // The callee arm's IC block, resolved authoritatively when the entry was installed
+        // (`vm_call_ic_put` → `vm_arm_block`). Read it straight off the entry — no
+        // `vm_arm_block` call here (which would want `vm_call_ics` mutably while `t` holds it
+        // immutably), and no lookup on the hot path since it rides into the slot below.
+        let callee_bases = e.callee_bases;
         let (arm, env) = e.arm.as_ref()?;
         let code = arm.jit_code.load(Acquire);
         if code.is_null() || code == crate::jit::BAILED || code == crate::jit::QUEUED {
@@ -561,10 +583,11 @@ impl Heap {
                 // (ADR-096) can never read another arm's link. See [`FastLink`].
                 sym,
                 argc,
-                _pad: 0,
+                callee_ic_base: callee_bases.0,
+                callee_gic_base: callee_bases.1,
             };
         }
-        Some((code as *const u8, active_ns, *env))
+        Some((code as *const u8, active_ns, *env, callee_bases))
     }
 
     /// Publish a NATIVE (builtin) callee into the IR-readable [`FastLink`] mirror:
@@ -594,7 +617,11 @@ impl Heap {
                 nslots: u32::MAX,
                 sym,
                 argc,
-                _pad: 0,
+                // A native flat cell runs a builtin, not an IC-using Brood arm, so it needs
+                // no callee cursors — the IR branches to the native trampoline before ever
+                // consulting these.
+                callee_ic_base: 0,
+                callee_gic_base: 0,
             };
         }
     }

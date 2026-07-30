@@ -1181,8 +1181,10 @@ pub unsafe extern "C" fn brood_rt_fastlink_base(
 
 /// Run a JIT'd arm's **non-tail** free-global call via the in-IR fast-link path: the IR has
 /// validated the call site's flat-table entry (`site < len` && epoch-current) and read
-/// `(nslots, code, env)` from it; this sets up the callee frame and runs it, writing the
-/// result to `*out`. Returns the status the IR branches on: `0` = done, `1` = error
+/// `(nslots, code, env, callee_ic_base, callee_gic_base)` from it; this sets up the callee
+/// frame, installs the callee's IC-block cursors around its native call (KI-20 — so it reads
+/// its own inline caches, not the caller's), runs it, and writes the result to `*out`.
+/// Returns the status the IR branches on: `0` = done, `1` = error
 /// (parked for the arm to propagate), `2` = could-not-fast-link (over the native-recursion
 /// cap, or the IC moved) — the IR falls to [`brood_rt_call_slow`] with the args left
 /// staged. See [`crate::eval::compile::jit_dispatch_fast_frame`].
@@ -1201,6 +1203,8 @@ pub unsafe extern "C" fn brood_rt_fast_frame(
     nslots: u32,
     code: u64,
     env: u64,
+    callee_ic_base: u32,
+    callee_gic_base: u32,
 ) -> i64 {
     use crate::eval::compile::FastLinkOutcome;
     match crate::eval::compile::jit_dispatch_fast_frame(
@@ -1211,6 +1215,7 @@ pub unsafe extern "C" fn brood_rt_fast_frame(
         nslots as usize,
         code as usize,
         env,
+        (callee_ic_base, callee_gic_base),
     ) {
         FastLinkOutcome::Done(v) => {
             *out = v;

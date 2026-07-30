@@ -4,8 +4,8 @@ KI-9 is a one-off arity sighting judged a transient inconsistent-build artifact,
 present in committed code; KI-10 no longer reproduces, incidentally fixed — both kept as
 records, not open bugs. **KI-17** (the checker reachability gap) is now **FIXED** (ADR-189).
 **KI-18** (effect duplication on a deopt) and **KI-19** (call-head evaluation order) are
-both now **FIXED**. **Open: KI-20** (a fast link runs the callee against the caller's IC
-block — a cold cache, never a wrong answer).
+both now **FIXED**, as is **KI-20** (a fast link ran the callee against the caller's IC
+block — a cold cache, never a wrong answer). **No open issues.**
 This file is the condensed record — what each was, how it was fixed, and the regression
 test that guards it — so a recurrence is recognizable. For the narrative discovery
 writeup of the scheduler race, see
@@ -16,6 +16,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-20 | a JIT fast link ran the callee against the *caller's* IC block (cold cache) | ✅ fixed 2026-07-30 |
 | KI-19 | VM resolved a call's free-global head *after* its arguments | ✅ fixed 2026-07-30 |
 | KI-18 | a JIT deopt could re-run a `table-put` (effect duplication) | ✅ fixed 2026-07-30 |
 | KI-17 | `nest check` validated qualified names against its load set, not per-file reachability | ✅ fixed 2026-07-30 |
@@ -41,40 +42,41 @@ transient — each kept as a record with its regression test, so a recurrence is
 
 ---
 
-## KI-20 — a JIT fast link runs the callee against the **caller's** IC block · OPEN (cache-only)
+## KI-20 — a JIT fast link ran the callee against the **caller's** IC block · **fixed 2026-07-30**
 
-`jit_run_fast_link` sets `jit_call_env`, `jit_dbg_fn`, `jit_native_depth` and the stack limit
+`jit_run_fast_link` set `jit_call_env`, `jit_dbg_fn`, `jit_native_depth` and the stack limit
 before entering the callee's native code — but not `ic_bases`, which the cloning native-link
-path does set. `FastLink` carries no callee block, unlike `CallIcEntry`. So callee B runs with
-arm A's `cur_ic_base`/`cur_gic_base`, and B's `vm_call_ic_put` / `vm_global_ic_put` /
-`vm_fast_link_publish_native` write into A's slots, and vice versa.
+path in `jit_dispatch_call` *does* set. `FastLink` (the IR-readable fast-path mirror) carried
+no callee block, unlike `CallIcEntry`. So callee B ran with arm A's `cur_ic_base`/`cur_gic_base`,
+and B's `vm_call_ic_put` / `vm_global_ic_put` / `vm_fast_link_publish_native` wrote into A's
+slots, and vice versa.
 
 **Never a wrong answer.** Every read path re-validates `(sym, argc, epoch)`, so a crossed
-entry simply misses. The cost is that both arms run with a permanently cold cache. It also
-makes `dbg_site_loc` and `[jit-staged-stale]` report the wrong source position.
+entry simply misses. The cost was that both arms ran with a permanently cold cache; it also
+made `dbg_site_loc` and `[jit-staged-stale]` report the wrong source position.
 
-**Invisible on the benchmark suite, by construction.** Self-recursion is unaffected — caller
-and callee are the same arm, hence the same block — and `fib`/`bintree` are exactly that
-shape, which is what the tuning work on this path was measured against.
+**The fix (the one the earlier reverted attempt spelled out).** The callee's block bases now
+**ride in the `FastLink` slot** — `_pad` became `callee_ic_base`, and a `callee_gic_base` was
+added (the struct grows one 8-byte slot). `vm_call_ic_fast_link` stamps them from the entry's
+already-resolved `CallIcEntry::callee_bases` (no `vm_arm_block` call on the publish path, no
+lookup on the memoised hot path), the IR loads them alongside `code`/`nslots`/`env` (two extra
+`u32` loads from the same cache line) and passes them as two more args to `brood_rt_fast_frame`,
+and `jit_run_fast_link` does `set_ic_bases(callee_bases)` around the native call and restores —
+exactly as the cloning path already did. So the runtime callback **never re-reads the table**:
+the whole install is two `Cell` writes off values it was handed. A native flat cell carries
+`(0, 0)` (a builtin runs no IC-using arm).
 
-**A fix was implemented and reverted 2026-07-30; read this before trying again.** Widening
-`FastLink` with `callee_ic_base`/`callee_gic_base` (the spare `_pad` word plus four bytes),
-populating them at the publish sites, and installing/restoring them around the native call is
-correct and passes every checksum — but it cost **`bintree` +5.5%** (confirmed solo at
-best-of-15) for **no measurable gain** (`pipeline` −1.9%, `nqueens` −1.8%, both inside noise).
+**Why the first attempt regressed and this one doesn't.** The reverted version read the bases
+inside `jit_dispatch_fast_frame` via a `RefCell` borrow + a bounds-checked index **per call** —
+on the very path whose purpose is to skip the IC probe, and dominated by self-recursion where
+the install is a no-op — costing `bintree` +5.5% for no gain. Riding the bases in the slot adds
+no lookup: a pinned best-of-9 A/B (`fib`, `bintree`) measured **+0.0%** against a +0.0%
+base-vs-base floor.
 
-The reason is specific and is the constraint on any retry: the hot path is
-`jit_dispatch_fast_frame`, driven by the IR's in-line fast path, and reading the bases there
-meant a `RefCell` borrow plus a bounds-checked index **per call** — on the very path whose
-whole purpose is to skip the IC probe. Worse, that path is dominated by self-recursion, where
-the install is a no-op, so the suite pays the lookup and collects none of the benefit.
-
-**A retry must not add a lookup.** The bases have to ride along with the `code`/`nslots`/`env`
-the IR already loads from the `FastLink` slot — i.e. two extra `u32` loads in generated code
-and two more arguments to `brood_rt_fast_frame` — so the Rust side never re-reads the table.
-That is a `jit_lower` change, not a runtime one. Worth doing when the capturing-closure
-fast-link (which needs `FastLink` widened anyway, for a capture descriptor) is attempted,
-since the two share the plumbing and would amortise one hot-path change between them.
+**Guard.** A debug cross-check in `jit_dispatch_fast_frame` asserts the IR-passed bases equal
+what the authoritative IC resolves (`b == callee_bases`), so a future mirror desync trips in
+debug across the whole suite. The correctness net is the full differential + jit suites (the
+change can only make a callee read its *own* caches, never produce a wrong value).
 
 ---
 

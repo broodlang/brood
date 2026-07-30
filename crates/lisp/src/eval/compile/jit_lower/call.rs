@@ -208,6 +208,8 @@ pub(super) fn emit_call(
         let fl_env_off = std::mem::offset_of!(FastLink, env) as i32;
         let fl_sym_off = std::mem::offset_of!(FastLink, sym) as i32;
         let fl_argc_off = std::mem::offset_of!(FastLink, argc) as i32;
+        let fl_cib_off = std::mem::offset_of!(FastLink, callee_ic_base) as i32;
+        let fl_cgb_off = std::mem::offset_of!(FastLink, callee_gic_base) as i32;
         let len_slot =
             b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
         let len_addr = b.ins().stack_addr(ptr_ty, len_slot, 0);
@@ -289,10 +291,19 @@ pub(super) fn emit_call(
         let env_v = b
             .ins()
             .load(types::I64, MemFlagsData::trusted(), slot_ptr, fl_env_off);
+        // KI-20: the callee's IC-block bases ride in the slot alongside code/nslots/env, so
+        // `jit_run_fast_link` can install the callee's cursors around its native call without
+        // re-reading the table (two extra u32 loads from the same cache line, two extra args).
+        let cib_v = b
+            .ins()
+            .load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_cib_off);
+        let cgb_v = b
+            .ins()
+            .load(types::I32, MemFlagsData::trusted(), slot_ptr, fl_cgb_off);
         let ffc = b.ins().call(
             funcs.fastframe,
             &[
-                heap, out_addr, site_v, head_v, argc_v, nslots_v, code_v, env_v,
+                heap, out_addr, site_v, head_v, argc_v, nslots_v, code_v, env_v, cib_v, cgb_v,
             ],
         );
         let fst = b.inst_results(ffc)[0];
