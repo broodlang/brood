@@ -12440,3 +12440,64 @@ authoritative IC's (`b == callee_bases`), tripping on any future mirror desync a
 debug suite. Verified: jit (35) + differential + jit_runtime_compaction green under
 `BROOD_GC_STRESS=1 BROOD_JIT_VERIFY=1`, full `make test` green. `docs/known-issues.md` now has
 **no open issues**.
+
+## 2026-07-30 (cont.) — the tail was spawn placement: one threshold, p99.9 5× better
+
+Acting on the three gaps the `latency` row exposed. Two of the three are now fixed, and the
+first one turned out to be a one-line policy question rather than anything structural.
+
+**The diagnostic came first, and it was decisive.** Running the latency workload with
+`(sched-stats)`: 12 workers, 20 002 spawns, **2406 steals (12%), 0 migrations**. So 88% of
+handlers ran on whichever worker the dispatcher happened to be on. `pick_spawn_worker` placed
+every child on the spawner's own worker (BEAM model, cache locality, no scan) and relied on
+work-stealing to rebalance — and stealing, which only takes *not-yet-started* work, got to
+one in eight.
+
+**First attempt: force round-robin. Wrong answer, and the reason is the interesting part.**
+`BROOD_SPAWN_RR=1` moved `latency` p50 141 → 12 µs and p99 674 → 168 µs — and cost
+`supervisor` **2.6×** (862 → 2223 ms). A supervisor's `start-child` is a request/reply that
+spawns one child; scattering each child to a different worker turns every one into a
+cross-worker wakeup. Two shapes, opposite preferences.
+
+Also worth recording as a measurement lesson: my first attempt to test the placement
+hypothesis in *Brood* (split dispatch across K dispatcher processes) produced nonsense —
+1/2/4/8 dispatchers gave 2661/486/5423/5929 µs at p99, non-monotonic — because each
+dispatcher **spins** on the arrival schedule, so K dispatchers permanently burn K of 12
+workers. The experiment measured its own instrument. The env-knob A/B in the kernel was the
+right test.
+
+**Shipped: spill on backlog.** Keep the child local while our own queue is *empty* — the case
+the locality argument is actually about — and spill round-robin once anything is waiting.
+`BROOD_SPAWN_SPILL`, default 1. Cost is one `try_lock` on our own queue (a failed try_lock
+reads as "no backlog", which is right: the only contender is a thief, and a thief means the
+queue is draining anyway).
+
+| `latency`, median of 5 | p50 | p99 | p99.9 |
+|---|---|---|---|
+| always-local (before) | 141 µs | 674 µs | 2902 µs |
+| **spill ≥1 (now)** | **27 µs** | **232 µs** | **562 µs** |
+| always round-robin | 12 µs | 168 µs | 3864 µs |
+
+Swept 1/2/4/8: monotonic in p50 and p99, so 1 it is. Note the shipped setting beats *both*
+extremes at p99.9.
+
+**Also shipped: the selective-receive scan no longer takes the mailbox mutex per candidate.**
+The tag pre-filter needs only the envelope's tag, but the scan released and re-acquired the
+lock for every rejected message — a lock round-trip per queued message on every receive, paid
+by exactly the processes that can least afford it. Skipping all rejected candidates under one
+hold: per ref-pinned round trip against a backlog, 500 → 16/6 µs, 2000 → 48/13 µs, 8000 →
+176/44 µs (before/after), and unchanged at 3 µs with no backlog. Still O(backlog); the
+receive-mark is what makes it O(1), and is still open.
+
+**Validation.** Full suite green. Unpinned A/B against `af25b7b3`: `spawn` −10%,
+`pingpong`/`ring`/`pfib`/`supervisor` flat. `spawn-live` first read +8.9%, which a
+base-vs-base control demolished — **the same binary against itself spread 20.6%** (2383 vs
+2873 ms), and the new build then measured −9.4%. That row cannot resolve anything under ~20%
+on this box; this is the fifth time it has produced a phantom. The `make ab` sweep was also
+the wrong instrument here and I nearly published it: it pins to **one core**, which is why
+`spawn-live` reads 6740 ms there against 2469 in the harness — and a single-core pin makes a
+*placement* change meaningless by construction.
+
+What remains of the latency gap is the **median**: 27 µs against Elixir's 8 µs, which is
+per-message cost (a request is spawn + send + collector receive), not scheduling. Recorded as
+`runtime-frontier.md` A5/A6.

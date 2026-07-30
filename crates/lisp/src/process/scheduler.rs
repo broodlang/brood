@@ -683,10 +683,66 @@ fn assign_worker() -> usize {
 /// fall back to round-robin rather than strand the child there.
 fn pick_spawn_worker() -> usize {
     let n = WORKERS.len().max(1);
+    if spawn_round_robin() {
+        // `BROOD_SPAWN_RR=1`: place every child round-robin instead of on the spawner's
+        // worker. The A/B lever for the tail-latency question — a dispatcher that spawns a
+        // handler per request puts them all on its own queue, where one slow handler blocks
+        // the rest, and stealing only rebalanced 12% of them on the `latency` row.
+        return NEXT_WORKER.fetch_add(1, Ordering::Relaxed) % n;
+    }
     match CURRENT_WORKER.with(|c| c.get()) {
-        Some(w) if w < n && !WORKER_DIRTY[w].load(Ordering::Relaxed) => w,
+        Some(w) if w < n && !WORKER_DIRTY[w].load(Ordering::Relaxed) => {
+            // Local placement is right while our own queue is short — the child is about to
+            // run on a warm cache and the spawner keeps going. It is wrong once we have a
+            // backlog: a dispatcher spawning a handler per request piles every one onto its
+            // own queue, where a single slow handler blocks all of them, and stealing only
+            // rebalanced 12% of them on the `latency` row (p50 142µs local vs 11µs
+            // round-robin). So spill to another worker once the backlog crosses a threshold.
+            //
+            // Cost is one `try_lock` on our OWN queue — uncontended in the common case, and
+            // nothing like the O(workers) scan `assign_worker` runs. A failed `try_lock`
+            // reads as "no backlog" and keeps the child local: the only contender for that
+            // lock is a thief, whose presence means the queue is being drained anyway.
+            let backlog = match WORKERS[w].0.try_lock() {
+                Ok(q) => q.len(),
+                Err(_) => 0,
+            };
+            if backlog >= spawn_spill_threshold() {
+                NEXT_WORKER.fetch_add(1, Ordering::Relaxed) % n
+            } else {
+                w
+            }
+        }
         _ => NEXT_WORKER.fetch_add(1, Ordering::Relaxed) % n,
     }
+}
+
+/// Backlog at which a spawn stops going to the spawner's own worker and spills round-robin.
+/// `BROOD_SPAWN_SPILL=<n>` overrides; `0` spills always (equivalent to `BROOD_SPAWN_RR=1`),
+/// and a huge value restores the pre-2026-07-30 always-local behaviour for an A/B.
+///
+/// Default **1**: keep the child local only when our queue is *empty*, which is the case the
+/// locality argument is actually about (a supervisor spawning one child, the spawner about to
+/// continue). One already-waiting process means we are dispatching, and dispatching to our own
+/// queue is what produced the tail. Swept on the `latency` row (median of 5, p50/p99/p99.9):
+/// always-local 141/674/2902 µs · spill 8 78/457/3354 · spill 4 62/397/3852 · spill 2 48/289
+/// · **spill 1 27/232/562** · always-RR 12/168/3864. Always-RR looks tempting on p50 and is
+/// not the answer: it costs `supervisor` 2.6× (862 → 2223 ms) by scattering every child of a
+/// request/reply spawn across workers. Spill 1 leaves that row at 843 ms.
+fn spawn_spill_threshold() -> usize {
+    static T: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *T.get_or_init(|| {
+        std::env::var("BROOD_SPAWN_SPILL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1)
+    })
+}
+
+/// Whether spawn placement is forced round-robin (`BROOD_SPAWN_RR=1`). Read once, cached.
+fn spawn_round_robin() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("BROOD_SPAWN_RR").is_some())
 }
 
 /// Total processes spawned since program start (read by `(spawn-count)`).

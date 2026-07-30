@@ -973,20 +973,35 @@ fn scan_mailbox(
             if st.queue.len() > 1 && ntags.is_none() {
                 ntags = Some(collect_receive_tags(heap, tags, &mut tagbuf));
             }
-            if match &st.queue[*i].msg {
-                Payload::Wire(m) => tag_rejects(&tagbuf[..ntags.unwrap_or(0)], m),
-                // Already a heap value: the copy is spent, so there is nothing to save
-                // by rejecting it here. Let the matcher decide.
-                Payload::Local { tag, .. } => {
-                    match (tagbuf[..ntags.unwrap_or(0)].is_empty(), tag) {
-                        (false, Some(k)) => !tagbuf[..ntags.unwrap_or(0)].contains(k),
-                        _ => false,
-                    }
+            // Skip every tag-rejected candidate under THIS one lock hold. The filter needs
+            // nothing but the envelope's tag, so releasing and re-acquiring the mailbox mutex
+            // per rejected message — which is what this did — cost one lock round-trip per
+            // queued message per receive, on top of the O(backlog) walk itself. A process
+            // with a backlog pays that on every selective receive.
+            let mut skipped_any = false;
+            loop {
+                if *i >= st.queue.len() {
+                    return Ok(None); // scanned to the end with no match
                 }
-            } {
+                let rejected = match &st.queue[*i].msg {
+                    Payload::Wire(m) => tag_rejects(&tagbuf[..ntags.unwrap_or(0)], m),
+                    // Already a heap value: the copy is spent, so there is nothing to save
+                    // by rejecting it here. Let the matcher decide.
+                    Payload::Local { tag, .. } => {
+                        match (tagbuf[..ntags.unwrap_or(0)].is_empty(), tag) {
+                            (false, Some(k)) => !tagbuf[..ntags.unwrap_or(0)].contains(k),
+                            _ => false,
+                        }
+                    }
+                };
+                if !rejected {
+                    break;
+                }
                 *i += 1;
+                skipped_any = true;
+            }
+            if skipped_any {
                 optimistic = false; // the head is no longer the candidate
-                continue;
             }
             if optimistic {
                 let m = st.queue.remove(*i).expect("bounds checked above");
