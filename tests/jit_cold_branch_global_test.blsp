@@ -16,8 +16,10 @@
 
 (defmodule jit-cold-branch-global-test (:use test))
 
-;; The cold branch reads a global that is never defined anywhere.
-(defn cbg-pick (n) (if (< n 0) cbg-never-defined (+ n 1)))
+;; The cold branch reads a global that is never defined anywhere. `check-allow :unbound`
+;; keeps `nest check` at zero warnings — the reference is deliberately unbound (the whole
+;; point of the test); `check-allow` is a runtime no-op, so behaviour is unchanged.
+(defn cbg-pick (n) (check-allow :unbound (if (< n 0) cbg-never-defined (+ n 1))))
 (defn cbg-drive (i n acc)
   (if (= i n) acc (cbg-drive (+ i 1) n (+ acc (cbg-pick i)))))
 
@@ -26,8 +28,9 @@
 (defn cbg-late-drive (i n acc)
   (if (= i n) acc (cbg-late-drive (+ i 1) n (+ acc (cbg-late i)))))
 
-;; A global read on the LIVE path, never defined — must still raise.
-(defn cbg-boom (n) (+ n cbg-truly-never-defined))
+;; A global read on the LIVE path, never defined — must still raise. (Deliberately
+;; unbound; `check-allow :unbound` keeps `nest check` clean without changing behaviour.)
+(defn cbg-boom (n) (check-allow :unbound (+ n cbg-truly-never-defined)))
 
 (describe "entry-hoisted globals and cold branches"
   (test "an unbound global on an untaken branch does not raise once hot"

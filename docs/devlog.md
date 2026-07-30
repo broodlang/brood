@@ -12013,3 +12013,22 @@ now skips a fn with `&`/`&optional` (mirroring `infer_sig`, which already guards
 closures on the loaded path — cross-file variadics were already clean). Battery of edge probes
 (guarded, multi-arity, let-rebind, higher-order, structural accessor, member caller,
 multi-demand intersection) is otherwise clean; whole repo stays warning-free.
+
+## 2026-07-30 (cont.) — chained-guard narrowing (and/or) + inference-gap wrap-up
+
+Closed the ADR-011-deferred guard-narrowing gaps in `check_if`. **`and`**: a truthy
+`(and A B C)` proves every conjunct, so each narrows the then-branch — not just the first
+(`and_conjunct_guards` descends the nested `(let (g cond) (if g rest g))` expansion). A falsy
+`and` proves nothing, so the else-branch is left alone. **`or`**: when every disjunct is a
+biconditional guard over one variable, the then-branch narrows to the union and the else to its
+complement (`or_same_var_narrowing`); a then-only or cross-variable disjunct declines. All via
+intersecting `narrow`, composing with the single-guard and path narrowings. Zero new warnings
+across the `std/`+`tests/` sweep; 4 regression tests including negative controls (falsy-and,
+different-var-or).
+
+That, plus the parallel ADR-190 (inferred parameters check callers), leaves the inference arc
+essentially done: control-flow returns, recursion, multi-arity/variadic returns, same-file
+functions, inferred params, and/or narrowing, and HOF-callback results are all covered. The one
+remaining piece — **per-arm parameter checking of a multi-arity callee** — stays deferred:
+sound to leave (a missed check is a false negative, never a false positive), and closing it
+needs an inferred-overload path + per-argc arm selection in the call-check for marginal value.
