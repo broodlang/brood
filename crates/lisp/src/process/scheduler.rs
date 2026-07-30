@@ -912,11 +912,16 @@ pub fn self_pid() -> u64 {
     ensure_ctx().pid
 }
 
-/// This process's mailbox arrival sequence right now — the lock-free `seq_hint`, read
-/// relaxed. Used by `(ref)` to stamp a receive-mark (ADR-195); see [`Mailbox::seq_hint`]
-/// for why a racy read is sound in the only direction it can err.
+/// This process's mailbox arrival sequence right now, for `(ref)` to stamp a receive-mark
+/// (ADR-195). Takes the mailbox lock — deliberately, rather than keeping a lock-free hint
+/// republished on every push: a hint costs an atomic store per *message*, which rows that
+/// never call `(ref)` still pay (measured: `pingpong` +5.7%, `ring` +4.0%). Reading it here
+/// moves that cost onto ref creation, which is rarer than sending by construction, and the
+/// caller is about to take the same lock to `send` anyway.
 pub fn self_mailbox_seq() -> u64 {
-    ensure_ctx().mailbox.seq_hint.load(Ordering::Relaxed)
+    let mb = ensure_ctx().mailbox;
+    let seq = crate::core::sync::lock(&mb.state).next_seq;
+    seq
 }
 
 /// This process's pid **without** minting a context — `None` if it has none yet.
