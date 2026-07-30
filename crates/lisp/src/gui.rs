@@ -79,6 +79,9 @@ impl Default for Face {
 pub enum CursorShape {
     ColResize,
     RowResize,
+    /// A hand / link pointer — the `:pointer` shape a clickable text region (a
+    /// results-buffer row, a mode-line segment) requests to read as a link.
+    Pointer,
 }
 
 /// How the text cursor is drawn at its cell. `Block` (the default) overlays the
@@ -408,6 +411,7 @@ pub(crate) mod backend {
         match shape {
             super::CursorShape::ColResize => CursorIcon::EwResize, // ↔ side-by-side divider
             super::CursorShape::RowResize => CursorIcon::NsResize, // ↕ stacked divider
+            super::CursorShape::Pointer => CursorIcon::Pointer,    // 👆 a clickable link
         }
     }
 
