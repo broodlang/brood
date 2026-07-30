@@ -93,6 +93,12 @@
   (defn ut-flet (n)
     (if (< n 2.0) n (let (h (/ n 2.0)) (+ (ut-flet (- n 1.0)) (ut-flet (- n 2.0)) h)))))
 
+;; Recursive so it tiers to the float register worker (a flat fn would stay boxed); the
+;; division is the last thing it does, on the worker's unboxed f64 path.
+(check-allow :non-tail-recursion
+  (defn ut-fdiv0 (x d)
+    (if (< x 1.0) (/ 1.0 d) (+ (ut-fdiv0 (- x 1.0) d) 1.0))))
+
 (describe "unboxed-f64 register worker"
   (test "float shallow-wide recursion"
     (assert= 17711.0 (ut-ffib 22.0)))
@@ -104,4 +110,19 @@
     (assert= 2000.0 (ut-fdeep 2000.0)))
 
   (test "float let bindings"
-    (assert= 26555.0 (ut-flet 20.0))))
+    (assert= 26555.0 (ut-flet 20.0)))
+
+  ;; Brood's `/` RAISES on a zero divisor; it does not yield IEEE infinity (`prim_div`
+  ;; tests `b == 0.0` first). The float worker emitted a bare `fdiv`, so a JIT'd `(/ x 0.0)`
+  ;; returned `inf` where every other engine raised — a JIT-only wrong answer, and the
+  ;; float sibling of the ÷0 guard the integer path always had.
+  (test "float division by zero raises, like the VM"
+    (assert= :div0 (try (ut-fdiv0 6.0 0.0) (catch e :div0))))
+
+  ;; `b == 0.0` is true for negative zero too, so the guard must catch it.
+  (test "float division by negative zero also raises"
+    (assert= :div0 (try (ut-fdiv0 6.0 -0.0) (catch e :div0))))
+
+  (test "a nonzero divisor still divides in registers"
+    ;; 1.0/2.0 at the base, then +1.0 once per level for x = 6.0 down to 1.0.
+    (assert= 6.5 (ut-fdiv0 6.0 2.0))))
