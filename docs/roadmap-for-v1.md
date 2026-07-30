@@ -212,7 +212,7 @@ freeze asymmetry) and the note that every *relaxation* stays open post-1.0:
 | Named arguments (`&key`) | A trailing options map + `{:keys …}` reads the same and composes with `merge` | ADR-163 |
 | Metadata (`^{}`), reader macros, `#(…)`, `#_` | Permanent surface for what a macro already does; `^` is the pattern pin | ADR-150 |
 | A character type | A character is a 1-char string; the cursor unit is a grapheme cluster | ADR-159 |
-| Ratios | `(/ 1 2)` is a float, `0.5M` an exact decimal, and `/` is the namespace separator; the `1/2` token is *reserved* (rejected by the reader) so a post-1.0 ratio type stays additive | ADR-169 |
+| ~~Ratios~~ — **superseded by ADR-196** (shipped as a kernel type): `1/2` is a literal, `(/ 1 2)` is exact (`1/2`), `->float` escapes. A relaxation the freeze allows. | ADR-169 → ADR-196 |
 | Digit-led tokens as names (`0x1F`, `1_000`, `1N`, `1+`) | A digit-led token must be a number; reserving the shapes keeps radix literals / digit separators / a bigint suffix additive after 1.0 | ADR-169 |
 | `#…` beyond `#{…}` / `#b"…"` (incl. `#|…|#` block comments) | `#` is a dispatch character; reserving the space keeps every future `#` literal additive | ADR-169, ADR-150 |
 | `contains?` answering by index on a vector | Clojure's trap: `(contains? [1 2] 1)` true for the wrong reason | ADR-156 |
@@ -243,15 +243,13 @@ All purely additive — deferring costs a version number and nothing else.
   deadline. No surface change, so post-1.0 is free.
 - ⬜ **Transducer early termination** (`reduced` threaded through `fold`) and
   stateful-stage lifecycle. ADR-161 ships the one-arity contract `fold` needs.
-- 🟡 **Exact rationals.** A **Brood-first prototype shipped** (`std/ratio.blsp`,
-  2026-07-30): `(rational n d)` builds a reduced ratio that does `+`/`-`/`*`/`/` via the
-  `Num` ability, orders via `Ord`, prints via `Display`. It deliberately lacks the four
-  *kernel-only* properties — the `1/2` reader literal, `=` with an equal integer,
-  numeric-tower ordering/contagion, and `pr-str` round-trip. **Promote to a kernel
-  `Value::Ratio`** (a near-clone of `Value::Decimal`) only if those prove load-bearing in
-  real use; until then the prototype is the answer. The `1/2` token stays reserved (ADR-169),
-  so the kernel type remains additive. The freeze row below still holds for 1.0 (no literal,
-  no kernel type).
+- ✅ **Exact rationals — shipped as a kernel type (ADR-196, 2026-07-30).** After a
+  Brood-first prototype proved the four *kernel-only* properties (the `1/2` literal, `=` with an
+  integer, numeric-tower ordering/contagion, `pr-str` round-trip) were load-bearing, ratios were
+  promoted to `Value::Ratio`. `1/2` is a reader literal, `/` on integers is **exact** (`(/ 1 2)`
+  → `1/2`, `(/ 6 3)` → `2`), `->float`/`->decimal` are the escape hatches. This **supersedes**
+  the two freeze rows below (ratios-refused, `(/ 1 2)`-is-float) — a *relaxation*, which the
+  freeze explicitly leaves open (ADR-170).
 - ⬜ **A rope-level grapheme cursor.** ADR-159's three accessors unblock correctness
   everywhere; a large buffer wants a cursor that caches the segmentation. Size it
   against a real editor workload.

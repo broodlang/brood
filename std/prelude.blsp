@@ -3438,6 +3438,16 @@ iterating for side effects."
 ;; O(n²) — fine for the short strings this targets (the rope/buffer engine in M2
 ;; is the home for large-text performance).
 
+(defn feature? (name)
+  "True if this runtime was built with the optional feature `name` (a keyword —
+`:gui`, `:jit`, `:audio`, `:treesit`, …). See `(features)` for the whole list.
+
+Reach for this instead of `bound?` when a capability is optional: a builtin from
+an absent feature is still **bound** and still raises when called, so `(bound?
+'gui-open)` answers yes on a runtime that cannot open a window. An app that wants
+to degrade rather than fail asks the build."
+  (includes? (features) name))
+
 (defn capitalize (s)
   "Return `s` with the first character upper-cased and the rest lower-cased."
   (if (= (string-length s) 0)

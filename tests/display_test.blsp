@@ -97,3 +97,23 @@
     (assert= (tooltip 10 4 ["main" "clean"] {:bg :blue} {:fg :white} 80 24)
       (list [:rect 8 4 7 2 {:bg :blue}]
         [:text 8 4 " main  " {:fg :white}] [:text 9 4 " clean " {:fg :white}]))))
+
+;; A rounded `rect` is one op that degrades on its own: the GUI rounds the fill,
+;; the terminal ignores the radius and space-fills as always. Before this, rounded
+;; chrome needed an `frect` for the window plus a `rect` inside it for the
+;; terminal, and the two-op idiom was only correct because the colours matched.
+(describe "rect corner radius"
+  (test "no radius emits the 5-element op, unchanged"
+    (assert= (rect 1 2 8 3 {:bg :blue}) [:rect 1 2 8 3 {:bg :blue}]))
+
+  (test "an explicit zero radius is still the 5-element op"
+    (assert= (rect 1 2 8 3 {:bg :blue} 0.0) [:rect 1 2 8 3 {:bg :blue}]))
+
+  (test "a radius is appended as a 6th element"
+    (assert= (rect 0 4 10 1 {:bg :white} 0.5) [:rect 0 4 10 1 {:bg :white} 0.5]))
+
+  (test "an integer radius is accepted too"
+    (assert= (rect 0 0 4 2 {:bg :red} 1) [:rect 0 0 4 2 {:bg :red} 1]))
+
+  (test "a rounded rect is still a rect op, so a frontend needs no new arm"
+    (assert= (first (rect 0 0 4 1 {:bg :red} 0.4)) :rect)))

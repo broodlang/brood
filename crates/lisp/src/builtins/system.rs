@@ -886,11 +886,6 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // width — the engine behind an editor's fill-paragraph / M-q, and reusable for
     // wrapping help text or terminal output. No dependencies. Opt-in.
     embedded_module!("text", "std/text.blsp"),
-    // Exact rational numbers — a Brood-first prototype for the freeze-list `ratios`
-    // row (ADR-070): `rational` builds a reduced ratio that does `+`/`-`/`*`/`/` via
-    // the `Num` ability, orders via `Ord`/`compare-to`, and prints via `Display`.
-    // Pure Brood, no dependencies. Opt-in, never in the prelude.
-    embedded_module!("ratio", "std/ratio.blsp"),
     embedded_module!("project", "std/tool/project.blsp"),
     embedded_module!("coverage", "std/tool/coverage.blsp"),
     embedded_module!("complete", "std/tool/complete.blsp"),
@@ -1836,6 +1831,49 @@ pub(super) fn spawn_count(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// (bounded by the worker-pool size); how much parallelism was actually reached.
 pub(super) fn peak_threads(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
     Ok(Value::int(crate::process::peak_threads() as i64))
+}
+
+/// `(features)` — the optional build features this runtime was compiled with, as a
+/// vector of keywords (e.g. `[:jit :treesit :gui]`).
+///
+/// The point is that a *bound* builtin does not imply a working one: with the `gui`
+/// feature off, `gui-open` is still bound and still raises at call time, so
+/// `(bound? 'gui-open)` answers "yes" on a runtime that cannot open a window. An
+/// app that wants to degrade rather than fail needs to ask the build, not the
+/// environment — and the only alternative was provoking the error and matching on
+/// its prose, which silently breaks whenever the message is reworded.
+pub(super) fn features(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    // Order is stable (declaration order, not cfg order) so a printed value diffs
+    // cleanly between builds.
+    let mut out = Vec::new();
+    if cfg!(feature = "gui") {
+        out.push(value::kw("gui"));
+    }
+    if cfg!(feature = "gui-gpu") {
+        out.push(value::kw("gui-gpu"));
+    }
+    if cfg!(feature = "audio") {
+        out.push(value::kw("audio"));
+    }
+    if cfg!(feature = "clipboard") {
+        out.push(value::kw("clipboard"));
+    }
+    if cfg!(feature = "jit") {
+        out.push(value::kw("jit"));
+    }
+    if cfg!(feature = "treesit") {
+        out.push(value::kw("treesit"));
+    }
+    if cfg!(feature = "wasm") {
+        out.push(value::kw("wasm"));
+    }
+    if cfg!(feature = "dev-tools") {
+        out.push(value::kw("dev-tools"));
+    }
+    if cfg!(feature = "perf-stats") {
+        out.push(value::kw("perf-stats"));
+    }
+    Ok(heap.alloc_vector(out))
 }
 
 /// `(worker-threads)` — size of the scheduler's worker-thread pool that runs the

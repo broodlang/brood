@@ -383,7 +383,7 @@ pub(super) fn prim_div(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     if is_record(heap, a) || is_record(heap, b) {
         return num_multi_dispatch(heap, "/", a, b);
     }
-    // ---- Exact rational division (ADR-XXX) ----
+    // ---- Exact rational division (ADR-196) ----
     // `/` on two integers is EXACT: `(/ 6 3)` → `2` (an Int, divides evenly), but
     // `(/ 1 2)` → `1/2` (a reduced Ratio) rather than a float. Likewise any division
     // involving a `Ratio` (with the other operand rationalizable — Int/BigInt/Ratio/

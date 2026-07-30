@@ -1201,7 +1201,7 @@ fn cmd_run(
         format!(
             "(let (p (%spawn (fn () {}))) \
                   (monitor p) \
-                  (receive ([:down _ ~p reason] (println \"[exit]\" reason)) {}))",
+                  (receive ([:down _ ^p reason] (println \"[exit]\" reason)) {}))",
             run_form, after_clause
         )
     } else {

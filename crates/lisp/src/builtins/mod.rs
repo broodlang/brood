@@ -218,7 +218,7 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![int, int], int),
         prim_quot,
     );
-    // Ratio parts + conversions (exact rationals, ADR-XXX). `numerator`/`denominator`
+    // Ratio parts + conversions (exact rationals, ADR-196). `numerator`/`denominator`
     // accept an int (numerator = itself, denominator = 1) or a ratio.
     let int_or_ratio = int.union(ratio_ty);
     def(
@@ -1310,8 +1310,8 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(
         heap,
         "gui-open",
-        Arity::range(0, 3),
-        Sig::new(vec![string, int, int], int),
+        Arity::range(0, 4),
+        Sig::new(vec![string, int, int, map_ty], int),
         gui_open,
     );
     def(
@@ -1369,6 +1369,27 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Arity::exact(2),
         Sig::new(vec![int, bool_ty], nil_ty),
         gui_maximize,
+    );
+    def(
+        heap,
+        "gui-minimize!",
+        Arity::exact(1),
+        Sig::new(vec![int], nil_ty),
+        gui_minimize,
+    );
+    def(
+        heap,
+        "gui-drag-move",
+        Arity::exact(1),
+        Sig::new(vec![int], nil_ty),
+        gui_drag_move,
+    );
+    def(
+        heap,
+        "gui-drag-resize",
+        Arity::exact(2),
+        Sig::new(vec![int, kw], nil_ty),
+        gui_drag_resize,
     );
     def(
         heap,
@@ -2769,6 +2790,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "features",
+        Arity::exact(0),
+        Sig::nullary(seq),
+        features,
+    );
+    def(
+        heap,
         "build-id",
         Arity::exact(0),
         Sig::nullary(string),
@@ -3197,7 +3225,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("term-size", &[], "The terminal size as [cols rows] in character cells."),
     ("term-poll", &["ms"], "Wait up to ms milliseconds for an input event; return a key (a 1-char string for printables, or a keyword for specials: :up :down :left :right :enter :escape :backspace :tab :back-tab :delete :home :end :page-up :page-down, ctrl combos like :ctrl-c, alt combos like :alt-f), a mouse event as a vector [:mouse action button row col mods] (action: :press :release :drag :scroll-up :scroll-down — :drag is motion with a button held, reported once per cell crossed; button: :left :right :middle or nil for scroll; row/col 0-based cells; mods a vector of held modifier keywords in :ctrl :alt :shift order, [] when none — so Ctrl+wheel etc. are bindable), or nil on timeout. Always pass a finite ms."),
     ("term-draw", &["frame"], "Paint a frame — a vector of render ops: [:clear], [:text row col str], [:text row col str face], [:rect row col w h face], [:cursor row col] / [:cursor row col style]. A face is a map like {:fg :red :bold true}; a colour is a palette keyword (:red … :dark-grey, the terminal's named colour) or an explicit [r g b] vector / \"#rrggbb\" hex string (a true-colour cell). [:rect …] fills a w×h cell block with the face's background (a solid panel). The optional cursor `style` is :block (default), :bar, or :underline — the steady caret shape. The in-process frontend for the display protocol; returns nil."),
-    ("gui-open", &["title?", "width?", "height?"], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui-title!. Optional `width` `height` (logical pixels, both required together) set the initial window size (default 840x560). Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:move`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held and `:move` is bare motion with none (button nil), both delivered once per cell crossed (so mouse-look / hover need no click); `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable; a `:press` carries a trailing 7th element, its click-chain count `[… mods n]` — 1 single, 2 double, 3 triple, … for repeated presses of the same button in the same cell within the double-click window, so double-click-to-select-word and triple-click-to-select-line are bindable; the terminal reports 1), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
+    ("gui-open", &["title?", "width?", "height?", "opts?"], "Open a new native window and return its integer id (needs the runtime built with --features gui; errors otherwise). An optional `title` string sets the OS title-bar text (default `Brood`); change it later with gui-title!. Optional `width` `height` (logical pixels, both required together) set the initial window size (default 840x560). Optional `opts` map: `{:decorations false}` opens a **borderless** window — no OS title bar or frame — for an app that draws its own chrome (a browser's tab strip and toolbar) and would otherwise sit under a redundant second title. Its key/mouse input is delivered to the CALLING process's mailbox as messages — a key as a 1-char string / keyword (`:up`, `:ctrl-c`), the mouse as `[:mouse action button row col mods]` (action `:press`/`:release`/`:drag`/`:move`/`:scroll-up`/`:scroll-down` — `:drag` is motion with a button held and `:move` is bare motion with none (button nil), both delivered once per cell crossed (so mouse-look / hover need no click); `mods` a vector of held modifier keywords in `:ctrl :alt :shift` order, `[]` when none, so Ctrl+wheel / Ctrl+drag are bindable; a `:press` carries a trailing 7th element, its click-chain count `[… mods n]` — 1 single, 2 double, 3 triple, … for repeated presses of the same button in the same cell within the double-click window, so double-click-to-select-word and triple-click-to-select-line are bindable; the terminal reports 1), a resize as `[:resize cols rows]` (the new cell grid, so the loop re-renders at the new size) — so the consumer parks in `(receive)` instead of polling (ADR-058). Clicking the window's close button delivers a dedicated `:close` message — distinct from the Escape *key* (`:escape`), so an app can quit on the X without conflating it with Escape (which an editor binds to cancel/normal-mode); `ui-run` quits on `:close` automatically. Starts the GUI thread on the first call; each call is an independent window, so several observers can run at once. Pass the id to the other gui-* primitives; pair with gui-close."),
     ("gui-close", &["id"], "Close window id (the teardown for gui-open). Idempotent; an unknown id is a no-op."),
     ("gui-title!", &["id", "text"], "Set window id's OS title-bar text to the string text at runtime (the title gui-open gave it, or the default, otherwise). Needs --features gui; a no-op if the GUI thread never started or id isn't a live window. Returns nil."),
     ("gui-icon!", &["id", "rgba", "w", "h"], "Set window id's taskbar / title-bar icon from raw RGBA pixels: rgba is a vector of w*h*4 byte ints (0-255), row-major, 4 per pixel (red, green, blue, alpha). Needs --features gui; a silent no-op if the GUI thread never started, id isn't a live window, or the data length isn't w*h*4. Where the OS shows it depends on the platform (X11/Windows use it directly; Wayland prefers a .desktop file). Returns nil."),
@@ -3205,6 +3233,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("gui-grab-cursor", &["id", "on"], "Confine the pointer to window id while `on` is truthy, release it otherwise — for mouse-look that shouldn't let the cursor slip out of the window and click another app. Uses the platform's `Confined` grab (cursor stays inside but keeps moving, so an absolute position-based look maps edge-to-edge), falling back to `Locked` where that's all the platform offers. Off by default; an app opts in. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
     ("gui-fullscreen!", &["id", "on"], "Make window id borderless-fullscreen while `on` is truthy (covering the whole monitor it's on, NO title bar / decorations — distraction-free), or restore it to a normal window otherwise. For a big-but-normal window that keeps its title bar, use gui-maximize! instead. The fullscreen/restore triggers a resize, so the consumer gets the usual [:resize cols rows] message and re-renders at the new size. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
     ("gui-maximize!", &["id", "on"], "Maximise window id while `on` is truthy (fill the screen's work area, KEEPING the title bar / decorations), or restore it to its previous size otherwise — e.g. an editor's init file opening big without going true-fullscreen. The maximise/restore triggers a resize, so the consumer gets the usual [:resize cols rows] message and re-renders at the new size. Errors only if id isn't a live window. Needs --features gui. Returns nil."),
+    ("gui-minimize!", &["id"], "Iconify window `id`. The counterpart of gui-maximize! for an app that draws its own window controls, which a borderless window (gui-open with {:decorations false}) must."),
+    ("gui-drag-move", &["id"], "Hand window `id` to the window manager for an interactive move, for the rest of the currently-held press. What a borderless window needs to stay movable: with no OS title bar there is nothing to grab, so the app nominates a region of its own chrome (a browser's tab strip) and calls this when a press lands there. A platform that declines the gesture is a no-op, not an error."),
+    ("gui-drag-resize", &["id", "dir"], "Hand window `id` to the window manager for an interactive resize from `dir` — :north :south :east :west :north-east :north-west :south-east :south-west. The window-frame counterpart of gui-drag-move, for a borderless window that draws its own edges. A platform that declines the gesture is a no-op, not an error."),
     ("gui-size", &["id"], "Window id's size as [cols rows] in character cells (tracks resize / HiDPI), same shape as term-size."),
     ("audio-beep", &["freq-hz", "ms", "vol"], "Play a short tone of freq-hz for ms milliseconds, optionally at peak amplitude vol (0..1, default ~0.18 — pass a small vol for quiet/ambient sounds). Fire-and-forget — it never blocks the caller, and overlapping beeps mix — so a game can blip from its frame loop. Synthesised on a dedicated audio thread (needs --features audio). A graceful no-op without the feature, when there's no audio device, or when muted via BROOD_AUDIO=0 or BROOD_GUI_HEADLESS. Returns nil."),
     ("gui-held-key", &["id"], "The key window id currently sees as physically held — the same value its press delivered (a 1-char string, or a keyword like :ctrl-n / :up) — or nil when none is held. Tracked from press/release transitions in the event loop (NOT winit's ke.repeat, unreliable on Wayland), so it's the source of truth for a held key: a consumer-paced auto-repeat polls it each tick and stops the instant it no longer matches, so a missed key-up (e.g. lost on focus change) can't cause runaway repeat."),
@@ -3228,6 +3259,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("system-monitor", &["&optional", "pid", "opts"], "Read, arm, or clear the kernel system monitor — runtime events pushed to ONE subscriber process as [:system kind subject-pid detail] mailbox messages (Erlang system_monitor/2 shape; the observability event stream's kernel sources). Kinds: :gc {:pause-us :collections :live} (a collection of subject's heap finished), :spawn (detail = parent pid), :exit (detail = the structured exit reason monitors see), :deopt (detail = the JIT arm's fn name, or nil). No args reads the current config map (nil if unarmed); (system-monitor nil) clears; (system-monitor pid) arms every event at pid; (system-monitor pid {:gc true :gc-min-pause-us 1000 :exit true}) selects exactly the truthy keys (:gc-min-pause-us = report only pauses that long, BEAM's long_gc). Arming/clearing returns the PREVIOUS config. One subscriber at a time (last wins); events about the subscriber itself are never sent (no feedback loops), and the subscriber's death disarms the stream. Policy lives in telemetry/watch-runtime, which re-emits these as telemetry events."),
     ("peak-threads", &[], "High-water mark of OS threads running processes concurrently."),
     ("worker-threads", &[], "The size of the scheduler's worker-thread pool (about nproc)."),
+    ("features", &[], "The optional build features this runtime was compiled with, as a vector of keywords (e.g. [:jit :treesit :gui]). A *bound* builtin does not imply a working one — with the `gui` feature off, `gui-open` is still bound and raises at call time — so an app that degrades rather than fails must ask the build, not `bound?`. `feature?` is the predicate over this."),
     ("build-id", &[], "This brood build's identity as \"<version>+<git-sha>+<binary-stamp>\" (e.g. \"0.1.0+dcab7ca+18f2e1a9b3c4d5e6\") — the correct staleness stamp for an on-disk cache of anything the kernel computes. Changes on any rebuild, committed or not: the binary-stamp half is this executable's own mtime, read at runtime, so it can't go stale the way a git-sha-only stamp would across an uncommitted local rebuild."),
     ("steal-count", &[], "How many fresh processes the scheduler work-stole across worker threads since program start; 0 means placement-at-spawn kept the pool even."),
     ("register", &["name", "pid"], "Bind a local name so peers can address this process via {:name name :node this-node}. Returns the pid."),
