@@ -12197,6 +12197,221 @@ completion; a non-snippet client gets a plain `(area [self] )` skeleton, never l
 type-directed record-field completion is on the roadmap backlog — it needs inferred types in the
 completion path, worth ~a day, deferred until then.
 
+## 2026-07-30 (cont.) — supervised `spawn-link` was quadratic: the supervisor's child list → a pid-keyed map
+
+Started from "get `spawn-link` to Elixir, we are way behind". **The primitive
+itself is not behind** — measured four ways against `elixir -pa` precompiled
+modules (checksums verified; `.exs` scripts pay ~100 ms of module compilation per
+run and must not be used for this):
+
+| N = 100 000, compute (wall − startup) | Brood | Elixir |
+|---|---|---|
+| `spawn` fan-out + fib(15) + reply | 238 ms | 212 ms |
+| same with `spawn-link` / `spawn_link` | 274 ms | 271 ms |
+| **marginal cost of the link itself** | **0.36 µs** | **0.59 µs** |
+
+At the published `spawn` size (N=10 000) Brood is 39 vs 23 ms, reproducing the
+benchmark row; linking costs us *less* than the BEAM. So the gap the row hints at
+is process creation, not linking.
+
+**The real gap is the supervised path**, which is what `spawn-link` exists for.
+`nest`-shaped dynamic supervisor, N children added one at a time:
+
+| N | old | Elixir `DynamicSupervisor` | ratio |
+|---|---|---|---|
+| 1 000 | 129 ms | 15 ms | 8.6× |
+| 4 000 | 998 ms | 28 ms | 36× |
+| 8 000 | 3 579 ms | 42 ms | **85×** |
+
+Per-child: 110 → 447 µs as N grows — linear per op, i.e. **quadratic total**,
+against Elixir's flat ~5 µs. `supervisor--do-start-child` ended with
+`(append (get state :children) (list child))`: an O(N) list copy per child.
+`restart-child` was worse — `find` + `map`-replace over the same list reached
+**19.5 ms/op** at 4 000 children.
+
+**Fix (in Brood, `std/proc/supervisor.blsp`):** `:children` is now a **map pid →
+child record** instead of a list. Start order — needed by `which-children`,
+`:rest-for-one` and shutdown ordering — lives on each record as `:seq`, stamped
+from a monotonic `:next-seq`, and the ordered views sort by it (they are O(n)
+operations anyway). `:ids` indexes `:id` → pid so the by-`:id` client API stays
+direct too. The list-era helpers (`supervisor--replace`/`--drop`) are gone,
+replaced by state-level `--put`/`--remove`/`--swap`/`--rebuild` so the
+children/ids invariant lives in one place.
+
+Measured on **one binary** (the pre-change module `load`ed against the same
+build, so no profile/feature drift):
+
+| | old | new |
+|---|---|---|
+| `start-child`, N=8 000 | 3 566 ms | 572 ms (**6.2×**) |
+| per-child at N=8 000 | 442 µs | 65 µs |
+| `restart-child`, K=1 000 | 963 µs/op | 100 µs/op |
+| `restart-child`, K=4 000 | 20 873 µs/op | 123 µs/op (**169×**, now flat in K) |
+
+20/20 supervisor tests pass, plus `link`/`gen`/`agent`.
+
+**What is left, and why it is a kernel item, not a supervisor one.** Isolated
+per-variant runs (each in its own process, best-of-5, N=4 000) attribute the
+remaining ~65 µs per `start-child`:
+
+| variant | µs/op |
+|---|---|
+| round trip + `spawn-link` + `link`, no bookkeeping | 16.75 |
+| + map bookkeeping, pid only | 18.75 |
+| + retain the record without its `:start` closure | 22.75 |
+| + retain the full record (`:start` closure included) | **64.75** |
+
+So retaining the child's `:start` closure costs ~42 µs. The supervisor's own GC
+stats (read out of the supervisor process) say why: **324 collections copying
+2.69 M objects, 189 ms of pause** out of 278 ms total, against 35/68 k without
+the closure. Tenuring is working; each retained closure is simply ~670 objects,
+because **`send` deep-copies a closure's code**:
+
+| a `(fn () (spawn-link (idle)))` thunk | retained footprint |
+|---|---|
+| built and held in-process | 48 bytes |
+| the same thunk received via `send` | **436 bytes** (9×) |
+| received and discarded | 36 bytes |
+
+`closure_to_message` (`process/message.rs`) deep-copies every arm's body forms
+per message, and `closure_from_message` re-allocates them in the receiver. For a
+**same-runtime** send that is avoidable: all processes of a runtime already share
+one code region, and `spawn` already `promote`s its thunk into it. Sharing the
+code on a local closure send (copying only the captured locals, as now) would cut
+the retained record ~9× and take `start-child` from ~65 µs toward ~23 µs — and it
+is general, paying off for every closure that crosses a process (child specs,
+`gen` callbacks, task fan-out, `offload`), not just supervisors. Cross-*node*
+sends must keep serializing the code (different runtime). **Done in the next
+entry** — though not in the form proposed here: promoting a local closure on send
+leaks the shared region, so only the *already-shared* case ships (ADR-194).
+
+## 2026-07-30 (cont.) — closure sends share already-shared code; promoting-on-send measured and rejected (ADR-194)
+
+The follow-up to the supervisor entry above, and it did not survive contact with
+measurement in its proposed form.
+
+**Where the sends actually go.** `BROOD_L1_STATS=1` on the supervisor bench: of
+8002 local sends, 4002 hit the L1 fast path, **3996 were parked-but-declined**,
+and only **4** were not-parked. `copy_cross_heap` declines closures outright, so
+a closure-carrying message loses the fast path *for the whole message* — the spec
+map included. That put the fix in the L1 copier, with both heaps in hand, and
+meant `to_message`/`from_message` and the cross-node path never had to change.
+
+**Attempt 1 — promote any sent closure (rejected).** Implemented first, because
+it also covers inline capturing thunks. It works and is fast, and it leaks: a
+promoted closure lands in the append-only RUNTIME region, so a *transient* one
+(sent, used, dropped) needs a full aging/drain/free cycle to reclaim instead of
+dying at the next minor GC. Peak RSS over N sent-and-discarded closures:
+
+| N sent | promote-on-send | copy (baseline) |
+|---|---|---|
+| 100 000 | 129 MB | 112 MB |
+| 200 000 | 190 MB | 121 MB |
+| 400 000 | 340 MB | 143 MB |
+| 800 000 | **541 MB** | 180 MB |
+
+Growth proportional to closures sent — a leak in any long-running receiver, which
+is precisely what this runtime is for. `BROOD_RT_GC_FLOOR=64` (aging as hard as it
+goes) barely moved it: the blocker is reclamation convergence (ADR-091 stage 4),
+not the handoff.
+
+**Shipped — share only what is already shared.** A closure whose value is already
+a RUNTIME-region handle crosses by handle; nothing is ever promoted on send. No
+new region entries, so no growth: the same 800k run is flat at 150 MB.
+
+The rule lands where it matters because **a closure that captures no locals is
+already a RUNTIME value**. Measured per send: `(fn () (spawn-link (idle)))` — only
+globals — **6 µs**; `(fn () (+ i 1))` capturing a local — **54 µs** (declines to
+the copy, as before). So the idiomatic child spec is covered and a capturing one
+still works, just at the old price. Guards: `region() == RUNTIME`,
+`shares_runtime_with` (the process REGISTRY is global — a second `Interp` in one OS
+process has a different region), and `BROOD_NO_SHARE_FN=1` as the off-switch.
+
+**Result on the supervised path** (N=8000 `start-child`, wall incl. ~18 ms startup):
+
+| | wall |
+|---|---|
+| list-based supervisor + copied closures (start of day) | 3 882 ms |
+| pid-map supervisor, `BROOD_NO_SHARE_FN=1` | 575 ms |
+| pid-map supervisor + shared closures | **251 ms** |
+| Elixir `DynamicSupervisor` | 228 ms |
+
+**16× end to end, and 5.3× → 1.1× of Elixir on wall** (compute 233 vs 44 ms, so
+~5× on compute). L1 hit rate on that path: 50% → 100%.
+
+**Stability, which was the gating requirement.** Lock order first: the copier runs
+holding the receiver's mailbox mutex, and the only writer of `promote_lock` is
+`age_runtime`, which holds it across an atomic generation flip and touches no
+mailbox, no allocation, no I/O — so it cannot invert. Soundness of a retained
+shared handle: the drain's Phase 2 walks the receiver's whole LOCAL heap, so
+`runtime_gen_referenced` sees it and won't free underneath; aging never moves
+handles and compaction requires unique ownership. Then measured, all on the
+debug-assertions build (per-deref GC tripwire + heap verifier armed), each config
+paired against `BROOD_NO_SHARE_FN=1` and required to produce **identical
+checksums**: mass spawn + retained shared handles + hot reload (`def` rebinding
+under load) at `BROOD_RT_GC_FLOOR=64`, the same under `BROOD_GC_VERIFY=1`, and
+under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. Five distribution-chaos runs
+(3 × `dist_chaos_remote_spawn.sh` — closures over the wire — and 2 × `dist_chaos.sh`)
+with `crashed=0` and no panics. Zero tripwire or verifier reports anywhere.
+
+## 2026-07-30 (cont.) — a benchmark row for what a server actually feels like
+
+The suite could not see the thing this runtime is *for*. Every concurrency row measured
+throughput with a **closed loop** — the generator waits for each reply before sending the
+next — which is coordinated omission: when the system stalls, the generator stops sending
+and the stall never enters the numbers. So a runtime could win every row and still be the
+one that feels bad in production, and nothing here would say so.
+
+The new `latency` row (brood-benchmarks `dc7a35f`) is open loop: request *i* is scheduled
+at `start + i × (1s/20,000)` regardless of whether the system keeps up, and latency is
+measured from that scheduled instant, so queueing delay lands in the number. Every 20th
+request occupies ~500 µs of CPU; percentiles cover the **other 95%**, so the question is
+what a busy handler does to everyone else. Offered load is 0.5 cores of twelve — nothing
+is capacity-limited, and the tail is scheduling rather than saturation.
+
+| | p50 | p99 | p99.9 | max | cores | CPU·s |
+|---|---|---|---|---|---|---|
+| Elixir | 8 µs | 59 µs | 98 µs | 601 µs | 1.9× | 5.28 |
+| **Brood** | 121 µs | 439 µs | 1300 µs | 2134 µs | 1.3× | 3.32 |
+| Node | <1 µs | 451 µs | 561 µs | 1047 µs | 1.0× | 2.55 |
+| Python | 42 µs | 478 µs | 624 µs | 852 µs | 1.0× | 2.53 |
+| .NET | 4 µs | 714 µs | 12627 µs | 15082 µs | 2.4× | 6.04 |
+
+.NET has the best median in the field and the worst tail by 20× — a 3157× spread from p50
+to p99.9 against Elixir's 12×, while spending the most CPU of any port. Node and Python,
+single-threaded, beat it at the tail: their p99 is exactly one fat request's duration,
+because you wait behind at most one and then it stops.
+
+**Three methodology mistakes, each caught by measuring rather than reasoning**, and all
+three are the kind that would have produced a publishable-looking but meaningless row:
+
+1. **Closed loop** (above) — fixed before the first numbers.
+2. **Sizing the fat request in work units.** Units take 20× longer on a runtime 20× slower
+   at arithmetic, so the row would have re-measured compute speed — which every other row
+   already does. Now each port calibrates its own loop to ~500 µs at startup *and reports
+   what it achieved*, so a mis-calibration is visible instead of silently voiding the
+   comparison. That check paid immediately: calibrating **cold on a JIT** sized Brood's fat
+   request 25× too small (2361 units, warm cost ~20 µs, against a 500 µs target), because
+   the single sample measured the interpreter. Warm first, then take the best of nine.
+3. **Percentiles over all requests.** Fat requests are 5% and take ≥500 µs by construction,
+   so they occupied every high percentile and hid the only interesting question.
+
+Occupancy is real work rather than a clock spin for two reasons: it allocates, so the GC
+participates as a handler's would; and spinning on many .NET pool threads **crashed the
+CLR** — `Internal CLR error (0x80131506)` in ~3 runs of 10, reproduced with both
+`Task.Run` and `ThreadPool.UnsafeQueueUserWorkItem`. With calibrated work, 0 failures in 10.
+
+**What it says about Brood**, recorded as `runtime-frontier.md` A4 rather than buried: our
+121 µs median is 15× Elixir's and is per-message cost (A1/A3 again — a request here is
+spawn + send + collector receive); our 1300 µs p99.9 is 13× Elixir's and is *scheduling* —
+a fat handler should cost its neighbours nothing at 0.5 cores of load on twelve, and it
+costs them milliseconds. First hypothesis to test is spawn placement: processes are placed
+at spawn and never migrated, so a dispatcher spawning every handler can pile them onto its
+own worker, where one 500 µs handler blocks the queue behind it. We also used 1.3× cores
+where Elixir used 1.9× on identical offered load, which fits. Not yet investigated.
+
+Node, single-threaded, has a better p99.9 than we do. That is the honest headline.
+
 ## 2026-07-30 (cont.) — KI-20 fixed: JIT fast link installs the callee's IC block
 
 The last open known-issue. `jit_run_fast_link` (the shared body of the in-IR fast-link and

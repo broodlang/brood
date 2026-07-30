@@ -238,6 +238,82 @@ benchmark row before believing it.
   fragment the receiver adopts at its next safepoint, removing the `Message` hop when the
   receiver isn't parked. Only after L1 proves the copier.
 
+**A3 — a sent closure carries its CODE, and a retained one keeps paying for it (measured
+2026-07-30).** A1/A2 both measure data payloads. A closure payload is a third case, and the
+worst one: the same trivial thunk costs **48 bytes** built and held in-process but **436
+bytes** (9×) once it has crossed a `send`. `closure_to_message` deep-copies every arm's
+body forms per message and `closure_from_message` re-allocates them in the receiver, so a
+process holding N received closures holds N private copies of code its runtime already
+shares — ~670 objects each.
+
+The bill lands as **GC**, not copy time, and only when the receiver *retains* the closure.
+A dynamic supervisor is the canonical case: it must keep each child's `:start` thunk to
+restart it. Attributed per-variant (own process, best-of-5, N=4 000 children, and via the
+supervisor process's own `gc-stats`):
+
+| supervisor keeps… | µs per `start-child` | collections | objects copied | GC pause |
+|---|---|---|---|---|
+| the record minus `:start` | 22.75 | 35 | 68 k | 13.7 ms |
+| the full record | **64.75** | **324** | **2.69 M** | **189 ms of 278 ms** |
+
+So retention costs ~42 µs/child — **two thirds of what a supervised `spawn-link` now
+costs**, and the reason we sit ~13× off `DynamicSupervisor` after the O(N²) fix (devlog
+2026-07-30). Tenuring is not broken; the objects are simply real.
+
+- [x] **Share already-shared closure code on a same-runtime send (shipped 2026-07-30).**
+  A closure whose value already lives in the shared code region crosses a local send by
+  **handle**, not by copy: both processes read that region through the same `Arc`, which is
+  what `spawn` already relies on for its thunk. In `copy_cross_heap` (the L1 parked-receiver
+  path — 3996 of 4000 supervisor sends were parked-but-declined *because* of the closure,
+  so this is where they were being lost), guarded by `region() == RUNTIME` +
+  `shares_runtime_with` + `BROOD_NO_SHARE_FN=1` as the off-switch. Cross-node sends never
+  reach it. Worth **2.4×** on supervised `start-child` (600 → 250 ms at N=8000) and takes
+  the L1 hit rate on that path from 50% to 100%.
+
+  In practice it covers the idiomatic case, because a closure that captures **no locals**
+  is already a RUNTIME value: `(fn () (spawn-link (worker)))` is handed over by handle at
+  **6 µs** per send, the same shape capturing a local copies at **54 µs**.
+
+- **Rejected on measurement: promoting a local closure on send to make it shareable.**
+  The obvious widening — `promote` any sent closure — was implemented and measured first,
+  and it turns a transient closure (sent, used, dropped) into an append-only RUNTIME entry
+  that needs a whole aging/drain/free cycle to reclaim instead of dying at the next minor
+  GC. Peak RSS over N sent-and-discarded closures: **129 / 190 / 340 / 541 MB** at N =
+  100k / 200k / 400k / 800k, against a flat 112–180 MB for the copy — growth proportional
+  to closures sent, i.e. a leak in any long-running receiver, and `BROOD_RT_GC_FLOOR=64`
+  (aging as hard as it goes) barely dented it. Restricted to already-shared closures the
+  same run is flat (150 MB at N=800k). Do not re-attempt the wider rule until the RUNTIME
+  collector reclaims promptly (ADR-091 stage 4); the blocker is reclamation, not the
+  handoff.
+
+**A4 — the `latency` row: our tail is 13× the BEAM's, and our median is 15× (measured
+2026-07-30).** The benchmark suite gained an open-loop row that holds a fixed 20,000 req/s
+arrival schedule and makes every 20th request occupy ~500 µs of CPU, reporting percentiles
+over the *other* 95% — i.e. what a busy handler does to everyone else. Offered load is 0.5
+cores of twelve, so nothing is capacity-limited and the tail is scheduling, not saturation.
+
+| | p50 | p99 | p99.9 | max | cores | CPU·s |
+|---|---|---|---|---|---|---|
+| Elixir | 8 µs | 59 µs | 98 µs | 601 µs | 1.9× | 5.28 |
+| **Brood** | **121 µs** | **439 µs** | **1300 µs** | 2134 µs | 1.3× | 3.32 |
+| Node | <1 µs | 451 µs | 561 µs | 1047 µs | 1.0× | 2.55 |
+| .NET | 4 µs | 714 µs | 12627 µs | 15082 µs | 2.4× | 6.04 |
+
+Two separate Brood problems, and they want different fixes:
+
+- **The 121 µs median is per-message cost**, not scheduling — it is A1/A3 showing up again
+  (a request here is spawn + send + a collector receive). Elixir's is 8 µs. Same family as
+  `pingpong`/`ring`.
+- **The 1300 µs p99.9 is scheduling.** A fat handler should cost its neighbours nothing on a
+  12-core box at 0.5 cores of load, and it costs them milliseconds. The first hypothesis to
+  test is **spawn placement**: processes are placed at spawn and not migrated
+  (`docs/scheduler.md`), so a dispatcher spawning every handler can pile them onto its own
+  worker, where one 500 µs handler then blocks the queue behind it. Note we also use only
+  1.3× cores against Elixir's 1.9× on the same offered load — consistent with work landing on
+  too few workers. Not yet investigated.
+
+Worth stating plainly: Node, single-threaded, has a better p99.9 than Brood on this row.
+
 ### B. Process memory floor (~4.5 KB → toward ~3 KB)
 
 - [x] **M1 — DONE 2026-07-29. `Heap` split into hot core + lazily-boxed cold state.** The
