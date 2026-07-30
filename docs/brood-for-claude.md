@@ -954,6 +954,12 @@ in the REPL. (`nest doc <module>` does the same for an opt-in module like
   (truncating) / `rem` (truncated remainder) / `mod` (Euclidean);
   `floor` `ceil` `round` `round-to` (round to N decimals, stays a number)
   `pow` `sqrt`. Integer `+ - *` **error on overflow** (they don't wrap).
+  **`/` is exact** (ADR-196): `(/ 1 2)` → `1/2` (a **ratio**, not a float),
+  `(/ 6 3)` → `2` (divides evenly → int). `1/2` is a literal; ratios do the full
+  tower (ratio+decimal is exact, ratio+float contagion). Reach for `->float`
+  (or `->decimal`) for an inexact result; `numerator`/`denominator` read the parts.
+  Number types: `int` (bignum on overflow) · `float` · `decimal` (`1.50M`, exact
+  base-10) · `ratio` (`1/2`, exact rational). `number?`/`ratio?`/`decimal?` test them.
 - **bitwise**: `bit-and` `bit-or` `bit-xor` `bit-not` `bit-shift-left`
   `bit-shift-right` (64-bit, arithmetic right shift; shift amount in `[0,64)`).
 - **randomness** (pure & seedable — there is *no* global RNG; thread the seed):

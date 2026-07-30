@@ -49,8 +49,8 @@ A `Ty` **is a set of values**, and the type operations *are* set operations:
   at runtime. Function members can additionally carry a structured *arrow*
   refinement (Step 5+, ADR-078).
 - `Ty::NEVER` = `⊥` (empty set, subtype of everything); `Ty::ANY` = `⊤` (all
-  tags); the named unions `Ty::NUMBER` (`int∪float`), `Ty::LIST` (`nil∪pair`)
-  match the `number?`/`list?` predicates.
+  tags); the named unions `Ty::NUMBER` (`int∪float∪decimal∪ratio`), `Ty::LIST`
+  (`nil∪pair`) match the `number?`/`list?` predicates.
 - **`dynamic()`** *(step 2, `GradualTy`)* is the **gradual** type — and it
   lives *inside* the set-theoretic algebra, not bolted beside it. It's a bounded
   type `dynamic(bound)` (pure `dynamic()` = `dynamic(ANY)`) whose `bound` is an
