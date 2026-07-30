@@ -3,7 +3,7 @@ use crate::core::value::{self, EnvId, Value};
 use crate::error::{LispError, LispResult};
 
 use super::io::capture_write;
-use super::numeric::{arg, expect_bigint, expect_int, expect_number, expect_string};
+use super::numeric::{arg, expect_bigint, expect_int, expect_string, num_to_f64};
 // The thin crossterm seam: enter/leave the alternate screen, read keys, and
 // paint a *frame* — a Brood vector of render ops. The protocol's meaning is
 // data (the ops); these primitives are the in-process frontend that interprets
@@ -748,12 +748,12 @@ pub(super) fn gui_open(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 /// when there's no audio device, or when muted (`BROOD_AUDIO=0` /
 /// `BROOD_GUI_HEADLESS`). Returns nil.
 pub(super) fn audio_beep(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let freq = expect_number(heap, "audio-beep", arg(args, 0))?;
-    let ms = expect_number(heap, "audio-beep", arg(args, 1))?;
+    let freq = num_to_f64(heap, "audio-beep", arg(args, 0))?;
+    let ms = num_to_f64(heap, "audio-beep", arg(args, 1))?;
     // Optional 3rd arg is peak amplitude; 0.0 (also the default) means "use the
     // backend's default volume".
     let vol = if args.len() >= 3 {
-        expect_number(heap, "audio-beep", arg(args, 2))? as f32
+        num_to_f64(heap, "audio-beep", arg(args, 2))? as f32
     } else {
         0.0
     };

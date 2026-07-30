@@ -12726,6 +12726,53 @@ half of the message-cost item, and it needs a different mechanism (BEAM's is the
 derived at expansion time), ADR-178 (the L1 local-send fast path and the tag pre-filter this
 composes with), `docs/runtime-frontier.md` A1/A6, devlog 2026-07-30.
 
+## ADR-196 — Exact rationals as a kernel type: `1/2` is a literal and integer `/` is exact
+
+> **Written after the fact (2026-07-30).** The implementation, the semantics and the
+> reference docs all shipped, but no ADR-196 section was ever added — `decisions.md` went
+> 195 → 197 while ten places (including a *superseding* note inside ADR-169) pointed here.
+> This records the decision **as implemented and tested**, from the shipped behaviour and
+> the reference docs; the rationale is reconstructed, so the author should correct anything
+> it puts words in their mouth about.
+
+**Decision.** Exact rationals are a **kernel `Value::Ratio`** (`num_rational::BigRational`),
+not a library type: `1/2` is a reader literal, and **`/` on integers is exact** — `(/ 1 2)`
+is `1/2`, not `0.5`. A ratio is always stored reduced with a positive denominator, and a
+denominator of 1 demotes to an integer, so `4/2` **is** `2` and `(/ 12 3)` is `4`. `->float`
+(and `->decimal`) convert out; `numerator`/`denominator` read the parts.
+
+**Why a kernel type rather than `std/ratio.blsp`.** A Brood-first prototype was built and
+then removed: the type has to participate in the arithmetic tower (`ratio+int → ratio`,
+`ratio+decimal → ratio` losslessly, `ratio+float → float` by contagion), in `=`/ordering, in
+the reader and printer, and in `to_message`/`promote` so it survives a send — none of which a
+library type can join. It is the same reasoning as `Decimal` and bignums.
+
+**Why this was additive, not breaking.** ADR-169 reserved every digit-led token as
+"must be a number", so `1/2` was already a *reader error* rather than a symbol. Spending the
+reservation cost nothing and broke nothing — the payoff ADR-169 was written to bank.
+
+**Consequences (all observed, several as test failures).**
+- `=` is **exactness-sensitive**: `(= 1/2 0.5)` and `(= 3 3.0)` are false. Exactness is part
+  of a number's identity, so a function's *return exactness* is part of its contract.
+- Anything computing `(/ int int)` now yields a ratio where it used to yield a float. That is
+  the intent for `/` itself, and it made `(/ 7 2)`, `stats/median [1 2 3 4]` and an inexact
+  JIT division report exact values — correct, and it invalidated their old expectations.
+- It also **fixes** two things by construction: `(/ i64::MIN -1)` is the exact bignum 2^63
+  where it used to overflow into an imprecise float, and `(pow 2 -2000)` is exactly
+  `1/2^2000` where a float reciprocal underflowed to `0.0` (which is why
+  `pow--reciprocal`'s exponent-halving machinery is now only needed for a *float* base).
+- Two real bugs it surfaced rather than caused, both fixed 2026-07-30: `round-to` returned a
+  ratio for a float input (rounding recovers no exactness a float never had), and the float
+  math family (`floor`/`ceil`/`to-fixed`, every transcendental) accepted only `Int`/`Float`,
+  so it rejected a ratio — and had always rejected bignums and decimals too. They now coerce
+  through the tower-aware `num_to_f64`, and `floor` on a ratio is computed **exactly** rather
+  than through f64, so `(floor (/ a b))` stays right past 2^53.
+
+**References.** ADR-169 (the digit-led reservation this spends), `docs/language.md`
+§Numbers + §Arithmetic, `docs/spec.md`, `docs/primitives.md`, `tests/ratio_test.blsp`,
+and the `1.0` freeze list in `roadmap-for-v1.md` (which records ratios as a relaxation the
+freeze allows).
+
 ## ADR-197 — Ask the build, not the environment: `features` / `feature?`
 
 **Status:** accepted + implemented (2026-07-30).

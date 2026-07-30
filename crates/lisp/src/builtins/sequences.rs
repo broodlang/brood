@@ -4,7 +4,7 @@ use crate::error::{LispError, LispResult};
 use crate::syntax::printer;
 
 use super::numeric::{
-    arg, expect_int, expect_number, expect_rope, expect_rope_ref, expect_string, two,
+    arg, expect_int, expect_rope, expect_rope_ref, expect_string, num_to_f64, two,
 };
 use super::realize_seqview;
 use crate::eval::apply;
@@ -1237,7 +1237,7 @@ pub(super) fn string_normalize(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
 /// `0.015873015873015872`), which is wrong for tabular/console output. An int `x`
 /// is promoted, so `(to-fixed 3 2)` is `"3.00"`. `n` must be non-negative.
 pub(super) fn to_fixed(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let x = expect_number(heap, "to-fixed", arg(args, 0))?;
+    let x = num_to_f64(heap, "to-fixed", arg(args, 0))?;
     let n = expect_int(heap, "to-fixed", arg(args, 1))?;
     if n < 0 {
         return Err(LispError::runtime(format!(

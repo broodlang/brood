@@ -18,7 +18,10 @@
   (test "mul/div/mod"
     (assert= (* 2 3 4) 24)
     (assert= (/ 12 3) 4)
-    (assert= (/ 7 2) 3.5)
+    ;; `/` on integers is exact (ADR-196): 7/2 is a ratio, and it divides down to an
+    ;; int only when it divides evenly.
+    (assert= (/ 7 2) 7/2)
+    (assert= (->float (/ 7 2)) 3.5)
     (assert= (mod 10 3) 1))
   ;; `mod` is euclidean (Brood over `rem`): the result is always in [0, (abs b)),
   ;; even when the operands are negative.

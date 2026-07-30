@@ -80,9 +80,13 @@
   (test "÷0 deep in the worker raises the VM's exact error"
     (assert-error (ut-div0 5)))
 
-  (test "int / : exact stays in the worker, inexact deopts to Float, ÷0 is the VM's exact error"
+  ;; Since ADR-196 an inexact int `/` deopts to a RATIO, not a Float — the unboxed i64
+  ;; worker still has to bail out of its register, just to a different heap value.
+  ;; Verified identical under the JIT, BROOD_NO_JIT=1 and the tree-walker.
+  (test "int / : exact stays in the worker, inexact deopts to a ratio, ÷0 is the VM's exact error"
     (assert= (ut-div 10) 1024)
-    (assert= (ut-div-inexact 20) 70.66666666666667)
+    (assert= (ut-div-inexact 20) 212/3)
+    (assert= (->float (ut-div-inexact 20)) 70.66666666666667)
     (assert-error (ut-div-slash0 5))))
 
 ;; ---- float sibling ---- (also deliberately non-tail; see the integer group)

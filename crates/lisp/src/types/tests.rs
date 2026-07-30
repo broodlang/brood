@@ -8,6 +8,7 @@ fn singletons_and_named_unions() {
         Ty::of(Tag::Int)
             .union(Ty::of(Tag::Float))
             .union(Ty::of(Tag::Decimal))
+            .union(Ty::of(Tag::Ratio))
     );
     assert_eq!(Ty::LIST, Ty::of(Tag::Nil).union(Ty::of(Tag::Pair)));
     assert!(Ty::of(Tag::Int).contains_tag(Tag::Int));
@@ -40,10 +41,12 @@ fn negation_and_difference() {
     let not_nil = Ty::of(Tag::Nil).negate();
     assert!(!not_nil.contains_tag(Tag::Nil));
     assert!(not_nil.contains_tag(Tag::Int));
-    // number \ int = float ∪ decimal
+    // number \ int = float ∪ decimal ∪ ratio  (ratio joined NUMBER with ADR-196)
     assert_eq!(
         Ty::NUMBER.difference(Ty::of(Tag::Int)),
-        Ty::of(Tag::Float).union(Ty::of(Tag::Decimal))
+        Ty::of(Tag::Float)
+            .union(Ty::of(Tag::Decimal))
+            .union(Ty::of(Tag::Ratio))
     );
 }
 

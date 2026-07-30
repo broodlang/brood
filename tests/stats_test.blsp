@@ -38,8 +38,12 @@
 (describe "median"
   (test "odd length — middle element"
     (assert= (stats/median [3 1 2]) 2))
+  ;; Exact in, exact out: averaging the two middle ints divides exactly (ADR-196), so
+  ;; this is the ratio 5/2, not the float 2.5 — `=` distinguishes them. `->float` when
+  ;; an inexact answer is what you want.
   (test "even length — mean of two middle values"
-    (assert= (stats/median [1 2 3 4]) 2.5))
+    (assert= (stats/median [1 2 3 4]) 5/2)
+    (assert= (->float (stats/median [1 2 3 4])) 2.5))
   (test "single element"
     (assert= (stats/median [42]) 42))
   (test "already sorted"

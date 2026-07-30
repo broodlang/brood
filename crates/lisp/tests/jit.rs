@@ -284,7 +284,7 @@ fn inlined_self_call_with_tail_helper_does_not_drop_wrapper() {
          (defn s (b e) (cond (< e 0) (/ 1 (s b (- e))) else (r2acc b e 1)))
          (defn run (k last) (if (< k 1) last (run (- k 1) (s 2 -2))))
          (run 50000 0)",
-        "0.25", // 1 / (s 2 2) = 1 / 4
+        "1/4", // 1 / (s 2 2) = 1/4 — exact since ADR-196; the bug this guards gave `4`
     );
 }
 
@@ -347,15 +347,16 @@ fn integer_division_family_under_jit() {
 }
 
 #[test]
-fn exact_division_inlines_inexact_deopts_to_float() {
-    // `%div` (`/`) yields an Int only on an exact quotient; a remainder means a Float the
-    // native builds, so the JIT must deopt then. Warm `(/ 24 x)`, then probe exact (4, 6)
-    // and inexact (5 → 4.8, deopt → VM Float). Matches the VM exactly.
+fn exact_division_inlines_inexact_deopts_to_ratio() {
+    // `%div` (`/`) yields an Int only on an exact quotient; a remainder means a value the
+    // native can't hold, so the JIT must deopt then. Since ADR-196 that value is an exact
+    // RATIO rather than a Float. Warm `(/ 24 x)`, then probe exact (4, 6) and inexact
+    // (5 → 24/5, deopt → VM ratio). Matches the VM exactly.
     is(
         "(defn d (x) (/ 24 x))
          (defn run (k last) (if (< k 1) last (run (- k 1) (d 4))))
          (list (do (run 20000 0) (d 4)) (d 6) (d 5))",
-        "(6 4 4.8)",
+        "(6 4 24/5)",
     );
 }
 

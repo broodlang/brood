@@ -2149,10 +2149,14 @@ to your mailbox — resend the queue on `[:nodeup …]`.
   decimal *places* but stays a **number** (`(round-to 3.14159 2)` → `3.14`); for
   a fixed-width *string* like `"3.10"`, use `to-fixed` (under Strings). `pow` requires an **integer exponent**
   (use `sqrt` for roots): an int base with a non-negative exponent stays an int
-  (overflow raises, like `*`); a negative exponent gives the reciprocal as a
-  float. `sqrt` is always a **float** and is *approximate* — it's computed in
-  Brood (Newton's method), not a hardware sqrt; redefine it if you need
-  bit-exactness.
+  (overflow raises, like `*`); a negative exponent gives the reciprocal, which is
+  **exact** for an exact base (`(pow 2 -1)` → `1/2`, and `(pow 2 -2000)` is exactly
+  `1/2^2000` — no underflow) and a float for a float base. `sqrt` is always a
+  **float**: it delegates to `%f64-sqrt` (`f64::sqrt`), so it is IEEE-correct
+  including subnormals and ±0 — not the Newton's-method approximation it once was.
+  All of these accept the whole numeric tower: an int, float, bignum, decimal or
+  ratio argument coerces, and `floor` on a **ratio** is computed exactly rather
+  than through f64 (so `(floor (/ a b))` is right past 2^53).
 - `min`/`max` are variadic and require at least one argument. `even?`/`odd?`
   classify integers.
 - Only `%add`/`%sub`/`%mul`/`%div`/`%lt`/`%eq`, `rem`, and `floor` are Rust
