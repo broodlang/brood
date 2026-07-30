@@ -776,7 +776,7 @@ impl Heap {
         let live_total = self.local_live_count() + self.old_live_count();
         self.gc_threshold = std::cmp::max(
             gc_floor(),
-            ((((live_total as f64) * Self::gc_growth()) as usize).min(NURSERY_MAX)),
+            (((live_total as f64) * Self::gc_growth()) as usize).min(NURSERY_MAX),
         );
         // Escalate to a *major* (compact the old generation) only when it has grown
         // MAJOR_GROWTH× since the last major — so majors stay rare while minors keep
