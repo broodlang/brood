@@ -2436,6 +2436,63 @@ fn guards_for_number_and_list_unions_narrow_to_the_union() {
 }
 
 #[test]
+fn and_narrows_the_then_branch_on_every_conjunct() {
+    // A truthy `and` proves ALL conjuncts, so the second (and third) conjunct's
+    // narrowing must reach the then-branch, not just the first (ADR-011 gap close).
+    let w = warnings_expanded("(if (and (int? a) (string? b)) (+ 1 b) 0)");
+    assert!(
+        w.iter().any(|s| s.contains("+") && s.contains("string")),
+        "the 2nd `and` conjunct should narrow b to string in the then-branch: {w:?}"
+    );
+    let w3 = warnings_expanded("(if (and (int? a) (int? b) (string? c)) (+ c 1) 0)");
+    assert!(
+        w3.iter().any(|s| s.contains("+") && s.contains("string")),
+        "the 3rd `and` conjunct should narrow c to string: {w3:?}"
+    );
+}
+
+#[test]
+fn and_falsy_does_not_narrow_the_else_branch() {
+    // A falsy `and` may have failed on any conjunct, so it proves NOTHING — the
+    // else-branch must not be narrowed (would be a false positive).
+    let w = warnings_expanded("(if (and (int? a) (string? b)) 0 (+ 1 b))");
+    assert!(
+        !w.iter().any(|s| s.contains("+")),
+        "a falsy `and` must not narrow the else-branch: {w:?}"
+    );
+}
+
+#[test]
+fn or_same_var_narrows_both_branches() {
+    // Every disjunct a biconditional guard over the same var: the then-branch is the
+    // union (a truthy `or` ⇒ some disjunct holds), the else-branch its complement (a
+    // falsy `or` ⇒ none hold). So `(string-length c)` in the else flags — c is not string.
+    let w = warnings_expanded("(if (or (nil? c) (string? c)) 0 (string-length c))");
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "the else of an all-same-var `or` should narrow c to ¬(nil|string): {w:?}"
+    );
+    // But a valid use in either branch stays silent — `str` accepts anything, and the
+    // then-branch is the union (nil|string), which overlaps everything `str` wants.
+    let ok = warnings_expanded("(if (or (nil? c) (string? c)) (str c) (str c))");
+    assert!(
+        ok.is_empty(),
+        "a valid `or`-guarded use must stay silent: {ok:?}"
+    );
+}
+
+#[test]
+fn or_over_different_vars_does_not_narrow() {
+    // Disjuncts over *different* variables give no single-variable narrowing — the
+    // else-branch must not flag a use of either (would be a false positive).
+    let w = warnings_expanded("(if (or (nil? a) (string? b)) 0 (string-length a))");
+    assert!(
+        !w.iter().any(|s| s.contains("string-length")),
+        "an `or` over different vars must not narrow: {w:?}"
+    );
+}
+
+#[test]
 fn non_guard_tests_dont_narrow() {
     // The test isn't a recognised type predicate, so x stays unknown in
     // both branches — `(first x)` must not warn.
