@@ -211,13 +211,24 @@ fn jit_spill_reserve(_code: &[Inst]) -> usize {
 /// a native (where all effects live), a computed callee, `table-put`, a catch
 /// frame — keeps the exactly-once checkpoint machinery.
 #[cfg(feature = "jit")]
-pub(super) fn jit_ckpt_depth(code: &[Inst], self_name: Option<Symbol>) -> Option<usize> {
+pub(super) fn jit_ckpt_depth(
+    code: &[Inst],
+    self_name: Option<Symbol>,
+    self_arity: Option<usize>,
+) -> Option<usize> {
     if std::env::var_os("BROOD_NO_DEOPT_RESUME").is_some() {
         return None; // chicken switch: legacy from-ip-0 re-run everywhere
     }
     if let Some(me) = self_name {
         let pure_self = code.iter().all(|i| match i {
-            Inst::Call { head, .. } => *head == Some(me),
+            // `me` is the CLOSURE's name, shared by every arm of a multi-arity `defn`
+            // (each arm gets the same `defn_name`). So a head match alone does not mean
+            // "calls back into this same, provably effect-free arm" — a 1-arg arm calling
+            // `(f v 0)` dispatches to the 2-arg arm, which may do anything, including a
+            // `table-put`. Require the argc to select THIS arm, and `self_arity` is
+            // `None` for an arm with optionals or a rest param (where argc → arm is not
+            // 1:1), which declines the exemption rather than guessing.
+            Inst::Call { head, argc, .. } => *head == Some(me) && Some(*argc) == self_arity,
             Inst::Prim3 {
                 op: PrimOp3::TablePut,
                 ..
@@ -233,7 +244,7 @@ pub(super) fn jit_ckpt_depth(code: &[Inst], self_name: Option<Symbol>) -> Option
     let mut depth: Vec<Option<usize>> = vec![None; len + 1];
     depth[0] = Some(0);
     let mut work = vec![0usize];
-    let mut max_after_call: Option<usize> = None;
+    let mut max_after_ckpt: Option<usize> = None;
     // merge: assign-or-check a depth at ip; push to the worklist on first visit.
     fn merge(depth: &mut [Option<usize>], work: &mut Vec<usize>, ip: usize, d: usize) -> bool {
         match depth[ip] {
@@ -266,7 +277,28 @@ pub(super) fn jit_ckpt_depth(code: &[Inst], self_name: Option<Symbol>) -> Option
             Inst::Pop | Inst::SetLocal(_) => d >= 1 && merge(&mut depth, &mut work, ip + 1, d - 1),
             Inst::Prim1 { .. } => d >= 1 && merge(&mut depth, &mut work, ip + 1, d),
             Inst::Prim2 { .. } => d >= 2 && merge(&mut depth, &mut work, ip + 1, d - 1),
-            Inst::Prim3 { .. } => d >= 3 && merge(&mut depth, &mut work, ip + 1, d - 2),
+            // `table-put` is the one *effect* in the boxed subset. It must be a
+            // checkpoint site for the same reason a completed call is: a deopt after it
+            // otherwise re-runs the arm from ip 0 on the VM and puts a second time. It
+            // is not hypothetical — before this, an arm with a `table-put` and **no**
+            // non-tail call got no journal at all (the accumulator stayed `None`), and a
+            // 200 000-iteration driver landed a counter on 402 047. (Worse, the VM
+            // re-run re-enters `jit_tier`, so each deopting activation put *three*
+            // times.) Journaling here bounds it to exactly once and keeps the dense-table
+            // lowering (the sieve lever), which refusing to lower such arms would lose.
+            Inst::Prim3 {
+                op: PrimOp3::TablePut,
+                ..
+            } => {
+                let after = d.checked_sub(2);
+                match after {
+                    Some(a) if d >= 3 => {
+                        max_after_ckpt = Some(max_after_ckpt.map_or(a, |m: usize| m.max(a)));
+                        merge(&mut depth, &mut work, ip + 1, a)
+                    }
+                    _ => false,
+                }
+            }
             Inst::MakeVector(n) => d >= *n && merge(&mut depth, &mut work, ip + 1, d - n + 1),
             Inst::MakeMap(n) => d >= 2 * n && merge(&mut depth, &mut work, ip + 1, d - 2 * n + 1),
             Inst::MakeClosure { names, .. } => {
@@ -291,7 +323,7 @@ pub(super) fn jit_ckpt_depth(code: &[Inst], self_name: Option<Symbol>) -> Option
                     true // terminal: the driver reuses the frame
                 } else {
                     let after = d - consumed + 1;
-                    max_after_call = Some(max_after_call.map_or(after, |m| m.max(after)));
+                    max_after_ckpt = Some(max_after_ckpt.map_or(after, |m| m.max(after)));
                     merge(&mut depth, &mut work, ip + 1, after)
                 }
             }
@@ -300,10 +332,14 @@ pub(super) fn jit_ckpt_depth(code: &[Inst], self_name: Option<Symbol>) -> Option
             return None; // inconsistent depths — disable checkpointing for this arm
         }
     }
-    max_after_call
+    max_after_ckpt
 }
 #[cfg(not(feature = "jit"))]
-pub(super) fn jit_ckpt_depth(_code: &[Inst], _self_name: Option<Symbol>) -> Option<usize> {
+pub(super) fn jit_ckpt_depth(
+    _code: &[Inst],
+    _self_name: Option<Symbol>,
+    _self_arity: Option<usize>,
+) -> Option<usize> {
     None
 }
 
@@ -565,6 +601,33 @@ fn invariant_global_vecs(node: &Node, out: &mut std::collections::HashSet<Symbol
             invariant_global_vecs(handler, out);
         }
         Node::Const(_) | Node::Local(_) | Node::Global(_) | Node::GlobalIc { .. } => {}
+    }
+}
+
+/// Can executing `i` **allocate** into the LOCAL heap? Anything that can invalidates an
+/// entry-hoisted slab base pointer (`local.pairs`/`local.vectors` are `Vec`s — a push can
+/// reallocate) and needs the back-edge GC safepoint that bounds the nursery.
+///
+/// One list, two consumers (`has_cons` and `has_alloc_safepoint`), because hand-enumerating
+/// it twice is what let the table ops slip out of both: `table-get`/`table-has?` take a
+/// hashed branch for out-of-shape keys and call `from_message`, which does `alloc_pair` /
+/// `alloc_vector` per element. An arm mixing `first`/`rest` with a table read therefore
+/// hoisted a pair base at entry and kept using it across a reallocation — a use-after-free
+/// that survived only because glibc often extends a large block in place — and, via
+/// `has_cons`, never emitted a back-edge safepoint, so its nursery grew unbounded for the
+/// whole native run.
+#[cfg(feature = "jit")]
+fn inst_may_allocate(i: &Inst) -> bool {
+    match i {
+        Inst::Prim2 { op, .. } | Inst::Prim2SlotSlot { op, .. } | Inst::Prim2SlotInt { op, .. } => {
+            matches!(
+                op,
+                PrimOp::Cons | PrimOp::TableGet | PrimOp::TableHas | PrimOp::VectorRef
+            )
+        }
+        Inst::Prim3 { .. } => true, // table-put: the store deep-copies key and value
+        Inst::MakeVector(_) | Inst::MakeMap(_) | Inst::MakeClosure { .. } => true,
+        _ => false,
     }
 }
 
@@ -1134,6 +1197,11 @@ fn jit_lower_arm_inner(
     let glob_id = m
         .declare_function("brood_rt_global", Linkage::Import, &glob_sig)
         .ok()?;
+    // Same signature, but resolves WITHOUT parking an unbound error — the entry hoist
+    // deopts on unbound rather than raising (see `brood_rt_global_probe`).
+    let globprobe_id = m
+        .declare_function("brood_rt_global_probe", Linkage::Import, &glob_sig)
+        .ok()?;
     // brood_rt_global_ic(heap, out, sym, site) -> status: as above but through the
     // per-site global inline cache (no `env_get` walk on a cache hit).
     let mut globic_sig = m.make_signature();
@@ -1344,6 +1412,7 @@ fn jit_lower_arm_inner(
     #[cfg(debug_assertions)]
     let _dbg_check_slot_ref = m.declare_func_in_func(dbg_check_slot_id, b.func);
     let glob_ref = m.declare_func_in_func(glob_id, b.func);
+    let globprobe_ref = m.declare_func_in_func(globprobe_id, b.func);
     let globic_ref = m.declare_func_in_func(globic_id, b.func);
     let callslow_ref = m.declare_func_in_func(callslow_id, b.func);
     let pushn_ref = m.declare_func_in_func(pushn_id, b.func);
@@ -1360,21 +1429,7 @@ fn jit_lower_arm_inner(
     let const_load_ref = m.declare_func_in_func(const_load_id, b.func);
     // Whether the arm allocates (`cons`) — gates the back-edge GC safepoint that bounds
     // the nursery. (`car`/`rest` don't allocate.)
-    let has_cons = code.iter().any(|i| {
-        matches!(
-            i,
-            Inst::Prim2 {
-                op: PrimOp::Cons,
-                ..
-            } | Inst::Prim2SlotSlot {
-                op: PrimOp::Cons,
-                ..
-            } | Inst::Prim2SlotInt {
-                op: PrimOp::Cons,
-                ..
-            } | Inst::MakeVector(_)
-        )
-    });
+    let has_cons = code.iter().any(inst_may_allocate);
 
     // One Cranelift block per leader (with `depth` I64 params), plus entry/deopt. The
     // Done block (`ip == len`) takes **no** params: the result is returned via
@@ -1602,21 +1657,7 @@ fn jit_lower_arm_inner(
                 }
             )
         });
-        let has_alloc_safepoint = code.iter().any(|i| {
-            matches!(
-                i,
-                Inst::Prim2 {
-                    op: PrimOp::Cons,
-                    ..
-                } | Inst::Prim2SlotSlot {
-                    op: PrimOp::Cons,
-                    ..
-                } | Inst::Prim2SlotInt {
-                    op: PrimOp::Cons,
-                    ..
-                } | Inst::MakeVector(_)
-            )
-        });
+        let has_alloc_safepoint = code.iter().any(inst_may_allocate);
         // A non-tail Call is a GC safepoint: minor_collect replaces `self.local` entirely
         // (std::mem::take), so any pointer to `local.pairs` cached before the call is
         // invalid after it. Only inline when there are no such safepoints.
@@ -1668,16 +1709,22 @@ fn jit_lower_arm_inner(
             hoisted.insert(slot, (ptr, vlen));
         }
         // Resolve each hoisted global once (sorted for deterministic codegen). Unbound ⇒
-        // `error` (matches the VM's unbound-global error); non-vector ⇒ `deopt`.
+        // `deopt`, NOT `error`: the hoist runs at entry for every global the arm mentions,
+        // including ones only a cold branch reads, so raising here reported `unbound
+        // symbol` for a branch the VM never evaluates — `(defn pick (n) (if (< n 0)
+        // never-defined-global (+ n 1)))` worked until it got hot, then threw. Deopting
+        // hands the arm to the VM, which evaluates only the branch actually taken and
+        // raises only if that branch really reads the name. `brood_rt_global_probe` is the
+        // non-parking resolve, so no phantom error is left behind. Non-vector ⇒ `deopt`.
         let mut gsyms: Vec<Symbol> = hoist_globals.iter().copied().collect();
         gsyms.sort_unstable();
         for sym in gsyms {
             let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
             let symv = b.ins().iconst(types::I32, sym as i64);
-            let c = b.ins().call(glob_ref, &[heap, out_addr, symv]);
+            let c = b.ins().call(globprobe_ref, &[heap, out_addr, symv]);
             let status = b.inst_results(c)[0];
             let okb = b.create_block();
-            b.ins().brif(status, error, &[], okb, &[]);
+            b.ins().brif(status, deopt, &[], okb, &[]);
             b.switch_to_block(okb);
             let w0 = b.ins().stack_load(types::I64, out_slot, 0);
             let w1 = b
@@ -1697,16 +1744,17 @@ fn jit_lower_arm_inner(
             hoisted_global.insert(sym, (ptr, vlen, w0, w1, w2));
         }
         // Scalar globals (#1): resolve each once at entry into its `Value` words — no vector
-        // base, no per-access IC. Unbound ⇒ `error` (matches the VM's late-bound lookup).
+        // base, no per-access IC. Unbound ⇒ `deopt`, for the same reason as the vector
+        // hoist above: an entry-time resolve must not raise for a branch that never runs.
         let mut ssyms: Vec<Symbol> = hoist_scalar_globals.iter().copied().collect();
         ssyms.sort_unstable();
         for sym in ssyms {
             let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
             let symv = b.ins().iconst(types::I32, sym as i64);
-            let c = b.ins().call(glob_ref, &[heap, out_addr, symv]);
+            let c = b.ins().call(globprobe_ref, &[heap, out_addr, symv]);
             let status = b.inst_results(c)[0];
             let okb = b.create_block();
-            b.ins().brif(status, error, &[], okb, &[]);
+            b.ins().brif(status, deopt, &[], okb, &[]);
             b.switch_to_block(okb);
             let w0 = b.ins().stack_load(types::I64, out_slot, 0);
             let w1 = b
@@ -2221,7 +2269,16 @@ fn jit_lower_arm_inner(
             // call result) into the reserved frame slots plus the packed
             // `(resume_ip << 16) | depth`, so a LATER deopt in this activation
             // resumes right here instead of re-running (and re-effecting) from ip 0.
-            if ckpt_active && matches!(&code[j], Inst::Call { tail: false, .. }) {
+            if ckpt_active
+                && matches!(
+                    &code[j],
+                    Inst::Call { tail: false, .. }
+                        | Inst::Prim3 {
+                            op: PrimOp3::TablePut,
+                            ..
+                        }
+                )
+            {
                 let ckpt_base = arm.ckpt_slot as i64 + 1;
                 for (k, &op) in stack.iter().enumerate() {
                     store_op(&mut b, ckpt_base + k as i64, op);

@@ -560,6 +560,24 @@ pub struct CompiledArm {
     /// soundness argument the `has_float_slot` optimism already rests on. Set once,
     /// by whichever process wins the tiering CAS.
     pub float_globals: std::sync::OnceLock<Box<[Symbol]>>,
+    /// Does the global named by `dbg_name` still resolve to **this very arm**? Observed at
+    /// each tiering election (where a `Heap` is in hand) and read by the unboxed register
+    /// worker, which lowers a *non-tail* `(f …)` whose head is `dbg_name` to a direct call
+    /// to itself.
+    ///
+    /// That link is what makes `fib` fast, but `dbg_name` is only the symbol the closure
+    /// was first `def`'d under — not evidence the global still binds this closure. Alias
+    /// the closure (`(def f h)`), rebind `h`, and call through the alias: the old body's
+    /// recursive `(h …)` must see the NEW `h` (late binding, ADR-013), yet the hard link
+    /// kept calling the old arm — `(f 12)` gave 12 where every other engine gave 1001.
+    /// Re-establishing the link on recompile does not help: the epoch bump invalidates the
+    /// arm, and the recompile then bakes the same wrong callee in again.
+    ///
+    /// An `AtomicBool` rather than a `OnceLock` precisely because it must be *re-observed*:
+    /// a `def` bumps the global epoch, `jit_tier` invalidates, and the next election
+    /// re-checks before the arm is lowered again. `false` is the safe answer (fall back to
+    /// the epoch-guarded IC call), so an unobserved arm simply forgoes the link.
+    pub self_global_ok: std::sync::atomic::AtomicBool,
     /// Deopt-resume checkpoint layout (devlog 2026-07-16 fix): `u32::MAX` = no
     /// checkpointing (no non-tail calls in the chunk — a from-ip-0 re-run is
     /// then effect-free). Otherwise `ckpt_slot` is the frame slot holding the

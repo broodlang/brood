@@ -1,0 +1,72 @@
+;;; Regression guard for the LINMAP wrapper-split (`BROOD_LINMAP=0` disables it).
+;;;
+;;; LINMAP proves a map accumulator is *linear* — no other reference can observe it — and
+;;; rewrites the fold to build in place on a `Table`, snapshotting back to an immutable map
+;;; at the end. That keeps ADR-026 intact: the mutation is an implementation detail of
+;;; constructing the value, never a mutable value the language can see. Two ways it broke:
+;;;
+;;;   1. The wrapper applied `table-snapshot` to the loop's result **unconditionally**, but
+;;;      the linearity proof deliberately admits a base case that returns something OTHER
+;;;      than the accumulator — a whitelisted read of it, or a plain constant. Those folds
+;;;      died with `table-snapshot: expected table, got int (3)`. The proof was right; the
+;;;      wrapper had to account for what it allows.
+;;;
+;;;   2. The source rewrite descended into `(quote …)`, turning inert DATA into table ops:
+;;;      `(println '(map-get acc 1))` printed `(table-get acc 1)`. The probe cannot catch
+;;;      this — a quoted form compiles to one `Node::Const`, so the analysis sees no
+;;;      accumulator use at all and passes while the rewrite walks straight through it.
+;;;
+;;; Every test asserts the value the fold should produce; each is checked against the
+;;; disabled path in CI simply by the suite running under both engines, and by hand with
+;;; `BROOD_LINMAP=0`, which must agree.
+
+(defmodule linmap-soundness-test (:use test))
+
+;; Base case returns a *derived scalar*, not the accumulator.
+(defn lm-count-uniq (xs acc)
+  (if (empty? xs)
+    (map-count acc)
+    (lm-count-uniq (rest xs) (map-int-add acc (first xs) 1))))
+
+;; Base case returns a whitelisted *read* of the accumulator.
+(defn lm-hits (xs acc)
+  (if (empty? xs)
+    (map-get acc :a)
+    (lm-hits (rest xs) (map-int-add acc (first xs) 1))))
+
+;; Base case returns a plain constant — the accumulator is never returned at all.
+(defn lm-done (xs acc)
+  (if (empty? xs) :done (lm-done (rest xs) (map-int-add acc (first xs) 1))))
+
+;; Base case returns the accumulator itself — the shape the optimisation is for.
+(defn lm-tally (xs acc)
+  (if (empty? xs) acc (lm-tally (rest xs) (map-int-add acc (first xs) 1))))
+
+;; Quoted data alongside a qualifying accumulator fold.
+(defn lm-quoted (xs acc)
+  (if (empty? xs)
+    (list acc '(map-get acc 1))
+    (lm-quoted (rest xs) (map-int-add acc (first xs) 1))))
+
+(describe "LINMAP wrapper-split soundness"
+  (test "a base case returning a derived scalar"
+    (assert= 3 (lm-count-uniq '(:a :b :a :c) {})))
+
+  (test "a base case returning a read of the accumulator"
+    (assert= 2 (lm-hits '(:a :b :a) {})))
+
+  (test "a base case returning a constant"
+    (assert= :done (lm-done '(:a) {})))
+
+  (test "a base case returning the accumulator is still an immutable map"
+    (let (out (lm-tally '(:a :b :a) {}))
+      (assert= 2 (map-get out :a))
+      (assert= 1 (map-get out :b))
+      ;; It must come back as a map, not leak the in-place table.
+      (assert= :map (type-of out))))
+
+  (test "quoted data is left alone by the source rewrite"
+    (let (out (lm-quoted '(:a) {}))
+      (assert= 1 (map-get (first out) :a))
+      ;; The datum must still be `(map-get acc 1)` — not rewritten to a table op.
+      (assert= 'map-get (first (first (rest out)))))))

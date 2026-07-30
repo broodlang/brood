@@ -1,0 +1,52 @@
+;;; Regression guard: a `def` of the function a loop is running must be observed (ADR-013).
+;;;
+;;; `Inst::SelfCall` is the VM's zero-lookup loop back-edge — it resets the frame and jumps
+;;; to ip 0 without consulting the global at all. That is exactly why a redefinition was
+;;; invisible: a loop kept running the old body to completion, so the VM answered `8` where
+;;; the tree-walker answered `:replaced`.
+;;;
+;;; The consequence is bigger than the toy: hot reload is the reason `def` rebinds a global
+;;; at all, and a long-lived `(defn serve (state) … (serve next))` — the shape every server
+;;; process in this runtime takes — could never be reloaded while it was running. The
+;;; sibling `Inst::Call` tail path was always correct, because its IC resolution is
+;;; epoch-guarded and a rebind fails its identity check.
+;;;
+;;; `SelfCall` now compares the global epoch (bumped by every `def`) against the value seen
+;;; when the frame was entered, and on a change re-resolves once: still this arm ⇒ keep
+;;; looping, otherwise apply the new binding. The self-call is in tail position, so the new
+;;; callee's value is the frame's result.
+;;;
+;;; Each test owns its globals: the suite runs tests concurrently against the shared runtime
+;;; global table, so a `def` of a name another test reads would race it.
+
+(defmodule vm-selfcall-reload-test (:use test))
+
+(defn scr-swap () (def scr-loop (fn (n acc) :replaced)) nil)
+(defn scr-loop (n acc)
+  (if (= n 0)
+    acc
+    (do (if (= n 5) (scr-swap) nil)
+        (scr-loop (- n 1) (+ acc 1)))))
+
+;; A loop that is never redefined — it must keep looping at full speed and stay correct.
+(defn scr-plain (n acc) (if (= n 0) acc (scr-plain (- n 1) (+ acc 1))))
+
+;; A long-running loop redefined from *outside* after it has gone hot, the shape a live
+;; server reload takes. Redefinition happens between calls here (a running green process
+;; would see it on its next iteration).
+(defn scr-serve (n acc) (if (= n 0) acc (scr-serve (- n 1) (+ acc 2))))
+
+(describe "SelfCall observes a redefinition of its own function"
+  (test "a loop that redefines itself mid-run picks up the new body"
+    ;; Redefinition fires at n = 5, so the remaining iterations run the NEW body.
+    (assert= :replaced (scr-loop 8 0))
+    ;; And a later call goes straight to the new definition.
+    (assert= :replaced (scr-loop 3 0)))
+
+  (test "an untouched loop is unaffected and still tail-recurses deeply"
+    (assert= 100000 (scr-plain 100000 0)))
+
+  (test "a hot loop redefined from outside is reloaded on the next call"
+    (assert= 200000 (scr-serve 100000 0))
+    (def scr-serve (fn (n acc) :reloaded))
+    (assert= :reloaded (scr-serve 10 0))))

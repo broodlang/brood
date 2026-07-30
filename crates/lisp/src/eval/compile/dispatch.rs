@@ -601,6 +601,19 @@ pub(crate) fn vm_apply(
     // `run_process_body`), so it does no loop-top preempt/kill capture — only the
     // body driver does. A `receive` suspend that surfaces here re-raises (§8.1).
     //
+    // Native-stack guard. This is the single chokepoint every *nested* activation goes
+    // through, and a nested run is the one VM shape that consumes real Rust stack per
+    // Brood level: an ordinary call pushes a heap frame inside one `vm_run_bc` loop
+    // (capped by `MAX_BC_FRAMES`), but a `try` body / `&optional` default / native
+    // callback re-enters through `exec_value` → `exec_call` → here. Nothing on that path
+    // reaches `eval`, so the tree-walker's byte guard never saw it and a recursive `try`
+    // body died on the guard page — a SIGSEGV `try`/`catch` cannot observe and no
+    // supervisor can restart (the OS process goes, not the green process). Fail here
+    // instead, with the same catchable error the tree-walker raises.
+    if !crate::process::native_stack_headroom_ok() {
+        let left = stacker::remaining_stack().unwrap_or(0);
+        return Err(crate::eval::native_stack_error(left));
+    }
     // IC cursors (ADR-175 Phase A): `vm_run_bc`'s fresh entry installs the callee's
     // block; the CALLER (whose arm continues after this nested run) needs its own
     // block back, so save/restore around the run — the single chokepoint every

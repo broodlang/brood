@@ -965,10 +965,19 @@ pub(crate) const LEAF_INLINE_MAX_BLOCKS: usize = 8;
 /// Does `body` qualify as a spliceable **leaf**? No calls of any kind (so no tail
 /// flags to demote and no recursion), no closure creation, no `try` (its handler
 /// protocol is frame-relative), no global reads (their IC sites belong to the callee's
-/// arm), no RUNTIME-handle consts (the stored derivation is never rewritten by
-/// `runtime_collect` — epoch gating makes that safe, but excluding them keeps the
-/// stored bits inert), and small. Prims, locals, consts, `if`/`do`/`let`, vector/map
-/// literals are all fine.
+/// arm), **no `table-put`** (see below), no RUNTIME-handle consts (the stored derivation
+/// is never rewritten by `runtime_collect` — epoch gating makes that safe, but excluding
+/// them keeps the stored bits inert), and small. Prims, locals, consts, `if`/`do`/`let`,
+/// vector/map literals are all fine.
+///
+/// `table-put` is excluded because the inlined engine **cannot journal**: its lowering
+/// runs with `ckpt_active = inline.is_none()`, and `jit_ckpt_read` refuses the inlined
+/// engine outright, so a deopt from spliced code resumes from ip 0. That is only sound
+/// while the spliced body is effect-free — which the old list assumed by ruling out
+/// calls, on the premise that calls are where effects live. `table-put` is an effect
+/// that is *not* a call, so splicing one let a deopt re-run it: a 200 000-iteration
+/// driver landed its counter on 200 762 even after the caller's own journal was fixed,
+/// and `BROOD_NO_LEAF_INLINE=1` was exactly 200 000.
 #[cfg(feature = "jit")]
 pub(crate) fn leaf_body_qualifies(body: &Node) -> bool {
     fn clean(n: &Node) -> bool {
@@ -978,7 +987,11 @@ pub(crate) fn leaf_body_qualifies(body: &Node) -> bool {
             | Node::MakeClosure { .. }
             | Node::TryCatch { .. }
             | Node::Global(_)
-            | Node::GlobalIc { .. } => false,
+            | Node::GlobalIc { .. }
+            | Node::Prim3 {
+                op: PrimOp3::TablePut,
+                ..
+            } => false,
             _ => {
                 let mut ok = true;
                 walk_children(n, |c| ok = ok && clean(c));

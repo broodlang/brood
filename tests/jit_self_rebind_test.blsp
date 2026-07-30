@@ -1,0 +1,49 @@
+;;; Regression guard: the unboxed register worker's direct self-link must respect late
+;;; binding (ADR-013).
+;;;
+;;; The worker lowers a *non-tail* `(f …)` whose head matches the arm's `dbg_name` to a
+;;; direct call to itself — that link is what makes `fib` fast. But `dbg_name` is only the
+;;; symbol the closure was first `def`'d under, not evidence the global still binds this
+;;; closure. Alias the closure, rebind the name, and call through the alias: the old body's
+;;; recursive call must see the NEW binding. It didn't — `(f 12)` answered 12 where the VM
+;;; and the tree-walker both answered 1001, and `BROOD_NO_I64=1` also answered 1001.
+;;;
+;;; Re-establishing the link on recompile does not fix it: the `def` bumps the global epoch
+;;; and invalidates the arm, but the recompile bakes the same wrong callee back in. The arm
+;;; now carries `self_global_ok`, re-observed at every tiering election, and declines the
+;;; link when the name no longer resolves to this arm.
+;;;
+;;; Each function needs its own globals: the suite runs tests concurrently against the
+;;; shared runtime global table, so a `def` of a name another test reads would race it.
+
+(defmodule jit-self-rebind-test (:use test))
+
+(check-allow :non-tail-recursion
+  ;; Non-tail self-recursion over ints — exactly the shape that tiers to the worker.
+  (defn sr-h (n) (if (< n 2) n (+ (sr-h (- n 1)) 1)))
+  (defn sr-warm (i) (if (< i 1) 0 (do (sr-h 12) (sr-warm (- i 1)))))
+
+  ;; A second, untouched pair: rebinding one function must not disturb another's link.
+  (defn sr-keep (n) (if (< n 2) n (+ (sr-keep (- n 1)) 1)))
+  (defn sr-keep-warm (i) (if (< i 1) 0 (do (sr-keep 12) (sr-keep-warm (- i 1))))))
+
+(def sr-alias sr-h)
+
+(describe "register-worker self-link respects late binding"
+  (test "rebinding the name is seen by an aliased closure's recursive call"
+    ;; Drive it hot enough to tier and take the direct self-link.
+    (sr-warm 2000)
+    (assert= 12 (sr-alias 12))
+    ;; Rebind the *name*. `sr-alias` still holds the ORIGINAL closure, whose body calls
+    ;; `sr-h` — which must now resolve to the new definition.
+    (def sr-h (fn (n) 1000))
+    (sr-warm 5000)
+    ;; 1000 from the new `sr-h`, + 1 from the original body's `(+ … 1)`.
+    (assert= 1001 (sr-alias 12))
+    ;; And the plain name gives the new definition outright.
+    (assert= 1000 (sr-h 12)))
+
+  (test "an untouched recursive fn keeps recursing correctly"
+    (sr-keep-warm 2000)
+    (assert= 12 (sr-keep 12))
+    (assert= 30 (sr-keep 30))))

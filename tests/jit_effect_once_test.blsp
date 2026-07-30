@@ -1,0 +1,68 @@
+;;; Regression guard: a JIT deopt must never re-run an effect.
+;;;
+;;; `table-put` is the only effect in the JIT's boxed subset (Brood data is immutable —
+;;; ADR-026 — so a `Table` is the one thing a JIT'd arm can observably change). The deopt
+;;; machinery keeps effects exactly-once by journaling a resume point, but three separate
+;;; places assumed **effects only live in calls**, and each let a deopt re-run a put:
+;;;
+;;;   1. `jit_ckpt_depth` allocated no journal at all for an arm with a `table-put` and no
+;;;      non-tail call — its doc called such an arm "effect-free by construction". A
+;;;      200 000-iteration driver landed its counter on 402 047 (the VM re-run itself
+;;;      re-enters `jit_tier`, so each deopting activation put three times).
+;;;   2. The pure-self-recursion exemption matched on the head *symbol*, ignoring argc.
+;;;      `defn_name` is shared by every arm of a multi-arity `defn`, so a 1-arg arm calling
+;;;      its own 2-arg sibling was treated as calling back into itself.
+;;;   3. The leaf inliner spliced a `table-put`-bearing callee into a caller. The inlined
+;;;      engine cannot journal (`ckpt_active = inline.is_none()`, and `jit_ckpt_read`
+;;;      refuses it outright), so its deopt resumes from ip 0 — sound only for an
+;;;      effect-free body, which `leaf_body_qualifies` enforced by excluding *calls*.
+;;;
+;;; Each test below drives an arm hot enough to tier, then forces a type deopt on every
+;;; activation, and asserts the effect count equals the iteration count exactly. They are
+;;; sensitive: with `BROOD_NO_DEOPT_RESUME=1` (the from-ip-0 chicken switch) the first two
+;;; over-count, and with the leaf-inline exclusion removed the third does.
+
+(defmodule jit-effect-once-test (:use test))
+
+(def eo-n 50000)
+
+;; --- 1. effectful arm, NO non-tail call, deopt via i64 overflow ---
+(def eo-t1 (table))
+(defn eo-bump1 (t k big)
+  (do (table-put t k (+ 1 (table-get t k)))
+      (* big big)))                       ; overflows i64 -> deopt, every call
+(defn eo-drive1 (t i big)
+  (if (= i 0) nil (do (eo-bump1 t 0 big) (eo-drive1 t (- i 1) big))))
+
+;; --- 2. same shape, deopt via an out-of-range `nth` instead of overflow ---
+(def eo-t2 (table))
+(defn eo-bump2 (t v)
+  (do (table-put t 0 (+ 1 (table-get t 0)))
+      (nth v 9)))                         ; out of range -> deopt
+(defn eo-drive2 (t i v)
+  (if (= i 0) nil (do (try (eo-bump2 t v) (catch e nil)) (eo-drive2 t (- i 1) v))))
+
+;; --- 3. a small calls-free callee holding the effect: the leaf-inline candidate ---
+(def eo-t3 (table))
+(defn eo-leaf (t x)                        ; small, calls-free -> would be spliced
+  (do (table-put t 0 (+ 1 (table-get t 0))) x))
+(defn eo-caller (t big)
+  (* (eo-leaf t 1) big big))               ; overflow after the splice -> deopt
+(defn eo-drive3 (t i big)
+  (if (= i 0) nil (do (eo-caller t big) (eo-drive3 t (- i 1) big))))
+
+(describe "a JIT deopt never re-runs a table-put"
+  (test "effectful arm with no non-tail call"
+    (table-put eo-t1 0 0)
+    (eo-drive1 eo-t1 eo-n 4000000000)
+    (assert= eo-n (table-get eo-t1 0)))
+
+  (test "effectful arm deopting on an out-of-range read"
+    (table-put eo-t2 0 0)
+    (eo-drive2 eo-t2 eo-n [1 2])
+    (assert= eo-n (table-get eo-t2 0)))
+
+  (test "effect inside a leaf-inlined callee"
+    (table-put eo-t3 0 0)
+    (eo-drive3 eo-t3 eo-n 4000000000)
+    (assert= eo-n (table-get eo-t3 0))))
