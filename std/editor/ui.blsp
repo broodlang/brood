@@ -168,6 +168,12 @@ synthesized back-compat timer below and any app that hasn't moved to named timer
 ;; ceiling on the poll timeout so a far-future (or fired-and-done) timer can't make
 ;; the loop oversleep. Input still wakes it immediately; this only bounds the idle wait.
 
+(def *ui-input-batch* 1024)
+;; The most inputs `ui--drain-input` folds into ONE render when a `:coalesce-input?`
+;; app has a backlog (see below) — a ceiling so a self-feeding source (an `update`
+;; that re-enqueues to itself) can't starve the render forever; hitting it just renders
+;; and the next iteration drains the rest.
+
 (defn ui--now (model)
   "The current wall-clock in ms — `(now)`, unless the model carries a `:now-fn` (a
 0-arg fn), which the loop calls instead. The injection seam tests use to drive timers
@@ -272,6 +278,29 @@ already-open window instead of opening a duplicate (e.g. a repeated `(observe)`)
 `where` names the phase it came from (`\"view\"` / `\"update\"`). Returns nil."
   (eprintln (str "ui-run: " where " error (recovering to last good frame): " (error-message e))))
 
+(defn ui--drain-input (model update display cols rows fuel)
+  "Fold every input ALREADY queued into `model` WITHOUT rendering between them, returning
+`[model' pending]`. The render, not the fold, is the per-input cost, so a burst of async
+events (a streaming test / run / collab feed, a paste) that would otherwise force one full
+frame *each* collapses to a single render at the settled model. Non-blocking — a `(:poll 0)`
+that returns nil means the queue is empty, so we stop and let the caller render. `pending`
+is a control message (`:close` / `:focus`) pulled mid-drain that the caller must act on
+structurally rather than fold; nil when the queue drained clean. `fuel` bounds one batch
+(`*ui-input-batch*`) and `:done` stops it early. Opt-in per app via the model's
+`:coalesce-input?` flag — off by default, so a non-coalescing app renders once per input
+exactly as before."
+  (if (or (<= fuel 0) (get model :done))
+    [model nil]
+    (let (raw ((get display :poll) 0))
+      (cond
+        (nil? raw) [model nil]                 ; queue empty — render the settled model
+        (quit-request? raw) [model raw]        ; a close/focus control message: hand it back
+        (focus-request? raw) [model raw]       ; (the loop, not update, owns these)
+        else (let (next (try
+                          (update model raw cols rows)
+                          (catch e (do (ui--log-error "update" e) model))))
+               (ui--drain-input next update display cols rows (dec fuel)))))))
+
 (defn ui--loop (model last-good clock view update display)
   "The inner recursion of `ui-run` (own function so each turn is a proper tail call —
 O(1) stack). Renders, parks the poll until the soonest timer is due, folds the input
@@ -357,10 +386,26 @@ re-raises, surfacing a genuine startup bug instead of spinning."
               else (let (clock2 (if (nil? timers)
                                   clock1
                                   (assoc clock1 :last-input (ui--now model)))
-                         next (try
-                                (update model raw cols rows)
-                                (catch e (do (ui--log-error "update" e) model))))
-                     (ui--loop next model clock2 view update display)))))))))
+                         next0 (try
+                                 (update model raw cols rows)
+                                 (catch e (do (ui--log-error "update" e) model)))
+                         ;; a `:coalesce-input?` app also drains any inputs ALREADY queued
+                         ;; into this same fold, so a burst renders once instead of once
+                         ;; per event (`ui--drain-input`); a control message pulled mid-drain
+                         ;; comes back as `pending` for the loop to act on. Default apps skip
+                         ;; the drain and render per input exactly as before.
+                         drained (if (get model :coalesce-input?)
+                                   (ui--drain-input next0 update display cols rows *ui-input-batch*)
+                                   [next0 nil])
+                         next (first drained)
+                         pending (second drained))
+                     (cond
+                       (quit-request? pending) nil
+                       (focus-request? pending) (let (f (get display :focus))
+                                                  (do
+                                                    (when f (f))
+                                                    (ui--loop next next clock2 view update display)))
+                       else (ui--loop next model clock2 view update display))))))))))
 
 (defn ui-run (model view update display)
   "Run a UI app over `display` (a frontend map): enter it, then loop —
@@ -376,6 +421,17 @@ poll until the soonest is due and folds `[:timer name]` when it fires — so a s
 animation timer and several idle one-shots coexist, each on its own clock. A model
 with no `:timers` key keeps the legacy single beat (`:tick-ms`, default 1000 ms),
 delivered as the bare keyword `:tick`. See `ui--loop` and the named-timers section.
+
+**Input coalescing (`:coalesce-input? true`).** By default the loop renders once per
+input. An app that streams async events into its own mailbox — a test/run feed, collab
+deltas, an SSE push — can flip this flag so the loop, after folding one input, folds any
+inputs ALREADY queued into the same turn and renders once at the settled model
+(`ui--drain-input`). Since rendering, not folding, is the per-event cost, this turns a
+burst of N events from N full frames into one — a 900-test run streams in as it finishes
+instead of over seconds of frames. Intermediate frames within a burst are never seen
+anyway; a throwing `update` still drops just its one input, and a `:close`/`:focus` pulled
+mid-burst is still honoured. Off leaves the per-input behaviour (and every existing app)
+exactly as before.
 
 **The window's close button (the X) always quits.** A GUI frontend delivers it as
 a `:close` input (distinct from the Escape *key*, `:escape`), and `ui-run` treats
