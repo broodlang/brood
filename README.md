@@ -269,11 +269,11 @@ loops, a **generational** per-process GC, and fusing lazy pipelines. Speed is tr
 as a measured property, not a claim:
 
 - [**broodlang/brood-benchmarks**](https://github.com/broodlang/brood-benchmarks) — the
-  **cross-language suite**: 29 programs across Brood, Elixir, Clojure, Node, .NET, Python
-  and Ruby (28 implemented in every language; `spawn-live` only in the runtimes that have
-  isolated preemptive processes), run under one harness, with the published numbers and
-  the methodology behind them — including which rows are like-for-like comparisons and
-  which are not.
+  **cross-language suite**: 30 programs across Brood, Elixir, Clojure, Node, .NET, Python
+  and Ruby (28 implemented in every language; `spawn-live` in the five whose units can be
+  compared at all, and `supervisor` only in Brood and Elixir — the two with a runtime
+  supervisor), run under one harness, with the published numbers and the methodology
+  behind them — including which rows are like-for-like comparisons and which are not.
   Start there for "how fast is Brood *against other runtimes*"; the docs below are the
   in-repo view of where Brood's own time goes.
 - [**docs/benchmarking.md**](docs/benchmarking.md) — how to run and read the
