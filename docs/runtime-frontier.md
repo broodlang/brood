@@ -381,6 +381,31 @@ server's main loop matching several tags) still walks its backlog; the tag filte
 that walk cheap, not free. BEAM solves it with a saved scan position per receive *site*, which
 is a different mechanism from the per-ref mark and is the remaining piece.
 
+**A8 — RSS growth under sustained churn is allocator retention, not a leak (measured
+2026-07-30, soak).** A self-checking soak (ref-pinned round trips against a 64-message
+backlog, supervised crash/restart, closure sends, spawn bursts) climbs steadily in RSS:
+276 MB at 100k iterations, 503 MB at 400k, 600 MB at 500k, with no plateau. That looks
+exactly like a leak and is not one. Two probes settle it:
+
+- **Removing hot reload changes nothing** (29 → 190 MB over the same 100k iterations), so it
+  is not `def` appending to the RUNTIME region — it is the message/spawn churn itself.
+- **The live set is tiny.** After 77k iterations and **2.5 million** spawns: 4 live processes,
+  **59 KB** of live local heap, and RSS 207 MB — falling only to 178 MB after quiescing and a
+  forced collection.
+
+So the language's own accounting is clean and the memory is retained by the allocator
+(mimalloc holds freed pages; each of millions of short-lived process heaps leaves mapped
+pages behind). Two consequences worth separating: RSS is **not** a proxy for live data on
+this runtime, and the retained figure keeps rising with cumulative churn rather than
+settling at a peak working set — which points at fragmentation rather than a fixed
+high-water mark.
+
+Next probe for whoever picks up B: mimalloc's purge/decommit options
+(`MIMALLOC_PURGE_DELAY`, `mi_option_purge_decommits`) to see how much is returnable, and
+whether process-heap arenas can be pooled and reused rather than freed per spawn. Note this
+is a *different* question from the per-process floor below, which is about live bytes per
+parked process; this one is about pages the allocator never gives back.
+
 ### B. Process memory floor (~4.5 KB → toward ~3 KB)
 
 - [x] **M1 — DONE 2026-07-29. `Heap` split into hot core + lazily-boxed cold state.** The
