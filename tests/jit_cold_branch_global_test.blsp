@@ -1,0 +1,48 @@
+;;; Regression guard: entry-hoisting a global must not raise for a branch that never runs.
+;;;
+;;; The JIT resolves every global an arm mentions once, at the entry block, so a hot loop
+;;; doesn't pay a lookup per iteration. But "every global the arm mentions" includes ones
+;;; only a *cold* branch reads, and an unbound one raised right there — so a function that
+;;; worked fine suddenly threw `unbound symbol` the moment it got hot, for a name the VM
+;;; never evaluates. Realistic triggers: a global bound later in load order, or one defined
+;;; only on some platform/feature path.
+;;;
+;;; The hoist now deopts on unbound instead of raising, handing the arm to the VM, which
+;;; evaluates only the branch actually taken. The resolve used there is non-parking
+;;; (`brood_rt_global_probe`), so no phantom error is left in the heap.
+;;;
+;;; The counter-test matters as much as the fix: a name that IS read on the live path must
+;;; still raise the ordinary catchable error.
+
+(defmodule jit-cold-branch-global-test (:use test))
+
+;; The cold branch reads a global that is never defined anywhere.
+(defn cbg-pick (n) (if (< n 0) cbg-never-defined (+ n 1)))
+(defn cbg-drive (i n acc)
+  (if (= i n) acc (cbg-drive (+ i 1) n (+ acc (cbg-pick i)))))
+
+;; The cold branch reads a global defined only LATER (load-order shape).
+(defn cbg-late (n) (if (< n 0) cbg-defined-later (+ n 2)))
+(defn cbg-late-drive (i n acc)
+  (if (= i n) acc (cbg-late-drive (+ i 1) n (+ acc (cbg-late i)))))
+
+;; A global read on the LIVE path, never defined — must still raise.
+(defn cbg-boom (n) (+ n cbg-truly-never-defined))
+
+(describe "entry-hoisted globals and cold branches"
+  (test "an unbound global on an untaken branch does not raise once hot"
+    ;; 100k iterations is well past the tiering threshold; before the fix this threw.
+    (assert= 5000050000 (cbg-drive 0 100000 0)))
+
+  (test "a global defined after the fn got hot is read correctly when reached"
+    (assert= 5000150000 (cbg-late-drive 0 100000 0))
+    (def cbg-defined-later 7)
+    ;; Now take the previously-cold branch: it must see the new binding.
+    (assert= 7 (cbg-late -1)))
+
+  (test "an unbound global on the live path still raises, catchably"
+    (assert= :caught (try (cbg-boom 1) (catch e :caught)))
+    ;; And still raises after the arm has been driven hot.
+    (let (n (cbg-drive 0 20000 0))
+      (is (> n 0))
+      (assert= :caught (try (cbg-boom 2) (catch e :caught))))))
