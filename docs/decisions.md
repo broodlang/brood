@@ -12419,6 +12419,18 @@ works on any map with `:x`, and a bare `{:x 9}` is a *valid* argument — flaggi
 "never warn on a use valid for the current image." Accessors are structural; only *ability
 ops* (which dispatch, and error on a non-member) carry sound nominal identity.
 
+**3 — Works across files.** The checks flow project-wide: a caller in module B is checked
+against a function inferred in module A. The primitive-demand path was already cross-file
+(primitive sigs are global); the **ability-op** path is now too, because `AbilityInfo` unions
+this file's abilities with imported ones. One fix was needed to complete it: `infer_sig` (the
+*loaded*-closure path `sig_of` uses) previously discarded a function's inferred **params**
+whenever its **return** couldn't be inferred (`let ret = expr_ty(tail)?`) — and a function
+returning an ability op can't resolve its return on the bare inference ctx. So it now surfaces
+the params with an `ANY` return when a param is actually constrained (the loaded-path mirror of
+Pass 2.8's post-fixpoint fallback). Sound — the params still under-constrain; the `ANY` return
+just defers. Verified: `(shout 99)` calling an imported sealed op is flagged cross-file, and
+the whole brood repo stays warning-clean.
+
 **Annotations stay optional.** A user `(sig …)` still wins (it's the author's stated contract);
 inference only fills the gap where none is declared. Nothing here makes anyone type.
 
