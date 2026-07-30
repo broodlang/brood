@@ -1,0 +1,110 @@
+;; std/ scale sweep — look for superlinearity in Brood policy code.
+;;
+;; Each row runs the same work at N and 4N. A linear op reports ~4x; a quadratic
+;; reports ~16x. Two of the three quadratics fixed on 2026-07-30 were in std/,
+;; not the kernel, and nothing in the suite exercises these frameworks at scale.
+;;
+;;   N=2000 brood scripts/fuzz/stress/scale_sweep.blsp
+;;
+;; TWO POINTS ARE NOT A MEASUREMENT — read this before believing a row.
+;; A single invocation's two timings are NOT enough to call a shape. Readings for
+;; `proc/gen gen-call` on 2026-07-30, same binary (56c2501):
+;;
+;;   base N=2000 -> ratio 10.21, then 7.77 on a re-run   (flags SUPERLINEAR)
+;;   base N=4000 -> ratio  2.93                          (reads linear)
+;;
+;; And the absolutes disagree ACROSS invocations: 8000 calls cost 143 ms in one
+;; process, 16000 cost 217 ms in another. A genuine quadratic does NOT get better
+;; as the base grows, so this is not one; the shape is consistent with a fixed
+;; cost (GC growth / tier-up) crossing a threshold between 2000 and 8000 calls,
+;; which both runs at base 4000 already pay. Do not report it as a quadratic
+;; without doing the work below — the ratio column at small N is not evidence.
+;;
+;; To actually confirm a row: sweep a THIRD point (N, 4N, 16N) inside ONE
+;; invocation, repeat the whole invocation an odd number of times, take medians,
+;; and establish the row's own base-vs-base floor first (see docs/handoff.md §5).
+;; A ratio near 16x that HOLDS or GROWS across three points and repeated runs is
+;; a quadratic; anything smaller needs the floor before it is reportable.
+;;
+;; Rows measured linear on 2026-07-30: proc/agent update, buffer insert,
+;; buffer forward-line. proc/gen gen-call is unresolved, per the above.
+
+(defmodule scale-sweep (:use proc/agent) (:use proc/gen) (:use editor/buffer))
+
+(def n (let (e (getenv "N")) (if e (string->number e) 2000)))
+
+(defn ms (f)
+  (let (t0 (now-ns)
+        _ (f))
+    (quot (- (now-ns) t0) 1000000)))
+
+(defn us (f k)
+  (let (t0 (now-ns)
+        _ (f))
+    (quot (- (now-ns) t0) (* k 1000))))
+
+(defn row (label base f)
+  (let (t1 (ms (fn () (f base)))
+        t4 (ms (fn () (f (* 4 base))))
+        ratio (if (= t1 0) 0 (quot (* 100 t4) t1)))
+    (println (str label
+               " N=" base ": " t1 " ms   4N: " t4 " ms   ratio " (quot ratio 100) "."
+               (rem ratio 100) (if (> ratio 800) "   <-- SUPERLINEAR" "")))))
+
+;; ---- proc/agent: N sequential updates against one agent ---------------------
+
+(defn loop-updates (pid k)
+  (if (= k 0)
+    nil
+    (do
+      (update pid (fn (s) (+ s 1)))
+      (loop-updates pid (- k 1)))))
+
+(defn agent-updates (k)
+  (let (pid (start (fn () 0))
+        _ (loop-updates pid k))
+    (stop pid)))
+
+;; ---- proc/gen: N synchronous calls against one server -----------------------
+
+(defprocess counter-server
+  (state) (call :bump [(+ state 1) (+ state 1)]))
+
+(defn loop-calls (pid k)
+  (if (= k 0)
+    nil
+    (do
+      (gen-call pid :bump)
+      (loop-calls pid (- k 1)))))
+
+(defn gen-calls (k)
+  (let (pid (spawn-server counter-server 0)
+        _ (loop-calls pid k))
+    (proc/gen/stop pid)))
+
+;; ---- editor/buffer: N inserts, then N line navigations ----------------------
+
+(defn loop-inserts (buf k)
+  (if (= k 0)
+    buf
+    (loop-inserts (insert buf "hello\n") (- k 1))))
+
+(defn buffer-inserts (k)
+  (loop-inserts (make-buffer "") k))
+
+(defn loop-nav (buf k)
+  (if (= k 0)
+    buf
+    (loop-nav (forward-line buf 1) (- k 1))))
+
+(defn buffer-nav (k)
+  (let (buf (loop-inserts (make-buffer "") k))
+    (loop-nav (goto-char buf 0) k)))
+
+;; ---- run -------------------------------------------------------------------
+
+(println "std/ scale sweep — linear ~4x, quadratic ~16x")
+(row "proc/agent  update  " n agent-updates)
+(row "proc/gen    gen-call" n gen-calls)
+(row "buffer      insert  " n buffer-inserts)
+(row "buffer      fwd-line" n buffer-nav)
