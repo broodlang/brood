@@ -51,6 +51,19 @@
 (defn eo-drive3 (t i big)
   (if (= i 0) nil (do (eo-caller t big) (eo-drive3 t (- i 1) big))))
 
+;; --- 4. the multi-arity shape: a 1-arg arm calling its own 2-arg sibling, which holds
+;; the effect. The caller's arm deopts on the sibling's float return, and the fast link
+;; that ran it could not re-probe the call IC afterwards — so it told the caller to fall
+;; through to the slow path, which called the whole thing AGAIN. Both arms were entered
+;; 16 extra times (the deopt-bail threshold) before the arm bailed and it stopped.
+(def eo-t4 (table))
+(def eo-u4 (table))
+(defn eo-multi
+  ((v)     (do (table-put eo-u4 0 (+ 1 (table-get eo-u4 0))) (+ (eo-multi v 0) (nth v 0))))
+  ((v acc) (do (table-put eo-t4 0 (+ 1 (table-get eo-t4 0))) 1.5)))
+(defn eo-drive4 (i v)
+  (if (= i 0) nil (do (eo-multi v) (eo-drive4 (- i 1) v))))
+
 (describe "a JIT deopt never re-runs a table-put"
   (test "effectful arm with no non-tail call"
     (table-put eo-t1 0 0)
@@ -65,4 +78,13 @@
   (test "effect inside a leaf-inlined callee"
     (table-put eo-t3 0 0)
     (eo-drive3 eo-t3 eo-n 4000000000)
-    (assert= eo-n (table-get eo-t3 0))))
+    (assert= eo-n (table-get eo-t3 0)))
+
+  (test "a multi-arity fn whose sibling arm holds the effect (KI-18)"
+    (table-put eo-t4 0 0)
+    (table-put eo-u4 0 0)
+    (eo-drive4 eo-n [1 2])
+    ;; BOTH arms must be entered exactly once per iteration: the caller's re-run
+    ;; duplicated the sibling call, so each over-counted by the same 16.
+    (assert= eo-n (table-get eo-u4 0))
+    (assert= eo-n (table-get eo-t4 0))))

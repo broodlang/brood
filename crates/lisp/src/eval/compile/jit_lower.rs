@@ -606,16 +606,18 @@ fn invariant_global_vecs(node: &Node, out: &mut std::collections::HashSet<Symbol
 
 /// Can executing `i` **allocate** into the LOCAL heap? Anything that can invalidates an
 /// entry-hoisted slab base pointer (`local.pairs`/`local.vectors` are `Vec`s — a push can
-/// reallocate) and needs the back-edge GC safepoint that bounds the nursery.
+/// reallocate), so an arm containing one must not hoist those bases.
 ///
-/// One list, two consumers (`has_cons` and `has_alloc_safepoint`), because hand-enumerating
-/// it twice is what let the table ops slip out of both: `table-get`/`table-has?` take a
-/// hashed branch for out-of-shape keys and call `from_message`, which does `alloc_pair` /
-/// `alloc_vector` per element. An arm mixing `first`/`rest` with a table read therefore
-/// hoisted a pair base at entry and kept using it across a reallocation — a use-after-free
-/// that survived only because glibc often extends a large block in place — and, via
-/// `has_cons`, never emitted a back-edge safepoint, so its nursery grew unbounded for the
-/// whole native run.
+/// This is the *correctness* predicate. `table-get`/`table-has?` are in it because they take
+/// a hashed branch for out-of-shape keys and call `from_message`, which does `alloc_pair` /
+/// `alloc_vector` per element — an arm mixing `first`/`rest` with a table read hoisted a pair
+/// base at entry and kept using it across a reallocation, a use-after-free that survived only
+/// because glibc often extends a large block in place.
+///
+/// Deliberately **wider** than [`inst_allocates_hot`], which gates the back-edge GC
+/// safepoint: being conservative here only costs an inline read, and the two are coupled in
+/// the safe direction — a safepoint that can fire must imply the hoist is off, never the
+/// reverse.
 #[cfg(feature = "jit")]
 fn inst_may_allocate(i: &Inst) -> bool {
     match i {
@@ -626,6 +628,29 @@ fn inst_may_allocate(i: &Inst) -> bool {
             )
         }
         Inst::Prim3 { .. } => true, // table-put: the store deep-copies key and value
+        Inst::MakeVector(_) | Inst::MakeMap(_) | Inst::MakeClosure { .. } => true,
+        _ => false,
+    }
+}
+
+/// Does `i` allocate on its **fast path** — the gate for emitting a back-edge GC safepoint?
+///
+/// Narrower than [`inst_may_allocate`] by exactly the table ops, and measured: including them
+/// cost `sieve` **6%** (confirmed solo at best-of-15 after a 8% sweep reading), because a
+/// dense table op lowers to an inline `xchg`/load that allocates nothing — only the hashed
+/// FFI fallback can, and that is the uncommon shape.
+///
+/// Leaving them out does not let the nursery run away, which is what the safepoint is for:
+/// the back edge emits `brood_rt_tick_n` **independently of this predicate**, so a native
+/// loop still yields on its reduction quantum and a collection runs there. Growth is bounded
+/// by one quantum, exactly as it already is for every other arm that allocates nothing on its
+/// fast path.
+#[cfg(feature = "jit")]
+fn inst_allocates_hot(i: &Inst) -> bool {
+    match i {
+        Inst::Prim2 { op, .. } | Inst::Prim2SlotSlot { op, .. } | Inst::Prim2SlotInt { op, .. } => {
+            matches!(op, PrimOp::Cons)
+        }
         Inst::MakeVector(_) | Inst::MakeMap(_) | Inst::MakeClosure { .. } => true,
         _ => false,
     }
@@ -1429,7 +1454,7 @@ fn jit_lower_arm_inner(
     let const_load_ref = m.declare_func_in_func(const_load_id, b.func);
     // Whether the arm allocates (`cons`) — gates the back-edge GC safepoint that bounds
     // the nursery. (`car`/`rest` don't allocate.)
-    let has_cons = code.iter().any(inst_may_allocate);
+    let has_cons = code.iter().any(inst_allocates_hot);
 
     // One Cranelift block per leader (with `depth` I64 params), plus entry/deopt. The
     // Done block (`ip == len`) takes **no** params: the result is returned via
@@ -2122,8 +2147,20 @@ fn jit_lower_arm_inner(
                     tail,
                     site,
                     head,
+                    staged,
                     pos: _,
                 } => {
+                    // KI-19: a staged head is already on the operand stack, resolved before
+                    // the args. The JIT must consume it and call *that* value — re-resolving
+                    // would observe a `def` an argument performed. That is exactly the
+                    // computed-callee shape it already handles, so hand it over as one
+                    // (`head: None`, `site: NO_SITE`); the in-IR fast link, which is keyed on
+                    // an elided head symbol, does not apply to these calls.
+                    let (head, site) = if *staged {
+                        (&None, &NO_SITE)
+                    } else {
+                        (head, site)
+                    };
                     match call::emit_call(
                         &mut b,
                         &mut stack,

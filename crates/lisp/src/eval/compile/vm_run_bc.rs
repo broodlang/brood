@@ -698,7 +698,15 @@ pub(crate) fn vm_run_bc(
                             // the journal slots) — never re-running, and so never
                             // re-effecting, the code before it. A preempt / cold
                             // arm keeps the ip-0 entry (checkpoint reads 0 there).
-                            if matches!(jit_outcome, Some(1)) {
+                            // Outcome 2 (preempt) takes this too. A preempt normally lands on
+                            // a back edge, where the journal was just reset to 0 and
+                            // `jit_ckpt_read` returns `None` — so this is a no-op there, and
+                            // the ip-0 entry is kept exactly as before. But if a preempt ever
+                            // lands *after* a completed call or a `table-put`, re-running from
+                            // ip 0 would repeat that effect, and the journal is precisely the
+                            // record of what must not be redone. Honouring it costs nothing
+                            // and removes a whole class of "is preemption safe here?".
+                            if matches!(jit_outcome, Some(1) | Some(2)) {
                                 if let Some((rip, depth)) = jit_ckpt_read(heap, &cur_arm, cur_base)
                                 {
                                     let cb = cur_base + cur_arm.ckpt_slot as usize + 1;

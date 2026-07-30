@@ -3,8 +3,8 @@
 KI-9 is a one-off arity sighting judged a transient inconsistent-build artifact, not
 present in committed code; KI-10 no longer reproduces, incidentally fixed — both kept as
 records, not open bugs. **KI-17** (the checker reachability gap) is now **FIXED** (ADR-189).
-**Open: KI-18** (a bounded, one-time effect duplication in a deopt-thrashing multi-arity fn)
-and **KI-19** (the VM resolves a call's free-global head after its arguments).
+**KI-18** (effect duplication on a deopt) and **KI-19** (call-head evaluation order) are
+both now **FIXED**. **No open KIs.**
 This file is the condensed record — what each was, how it was fixed, and the regression
 test that guards it — so a recurrence is recognizable. For the narrative discovery
 writeup of the scheduler race, see
@@ -13,81 +13,72 @@ ADRs / topic docs.
 
 ---
 
-## KI-19 — the VM resolves a call's free-global head **after** its arguments · OPEN
+## KI-19 — the VM resolved a call's free-global head **after** its arguments · **FIXED 2026-07-30**
 
-The tree-walker evaluates the operator first (`eval_arguments` receives an already-evaluated
-callee). The VM does not stage a free-global head at all: `emit.rs` elides it and
-`Inst::Call` resolves it through the call-site IC *after* the arguments have run. An
-argument that rebinds the head therefore makes the engines disagree:
+**Fixed.** The tree-walker evaluates the operator first; the VM elided a free-global head
+and resolved it through the call-site IC *after* the arguments ran, so an argument that
+rebound the head made the engines disagree — `(f (bump))` gave `:new` on the VM and `:old`
+on the tree-walker.
 
-```lisp
-(defn f (x) :old)
-(defn bump () (def f (fn (x) :new)) 1)
-(defn g () (f (bump)))
-(g)          ;; VM => :new    BROOD_VM=0 => :old
-```
+`Inst::Call` now carries a `staged` flag. The compiler stages the head (as a `GlobalIc`,
+resolved at IC speed) ahead of the args for exactly the calls that can be affected: a
+**rebindable** global head with at least one argument that can run user code. `head` and
+`site` stay populated, so the call-site IC still caches the resolved **arm** — validated by
+closure identity against the staged callee, one compare on the common path. The JIT treats
+a staged head as a computed callee (`head: None`, `site: NO_SITE`) so it calls the staged
+value rather than re-resolving.
 
-`Inst::Call`'s doc claiming "the callee is still resolved in-order … so eval order is
-unchanged" is stale — it predates the head elision.
+Three things had to be got right, and each was learned by measuring a wrong version:
 
-**The obvious fix is measured and rejected.** Staging the head so it evaluates first forces
-`head: None` on `Inst::Call`, which disables the call-site IC and sends every such call
-through a full resolution: **`json` went 168 ms → 1159 ms (6×)** while `fib`/`nqueens`/
-`bintree` were flat. Restricting the staging to calls whose arguments can run user code (a
-`node_runs_user_code` walk) does not help, because in `json` that is most of them.
+* **Don't demote to the plain computed-callee path.** What the elided head really buys is
+  the IC's cached *arm*, not the callee lookup: dropping it cost `json` 168 → 1159 ms (6×).
+* **`head: None` with a live `site` aborts the JIT.** `emit` decides elided-vs-staged from
+  the callee node while `jit_lower` decides it from `(head, site)`; a mismatch made the JIT
+  resolve a head that wasn't there — `json`/`bintree`/`nqueens`/`wordcount` all died in
+  `brood_rt_call_slow` → `unbound_error` → non-unwinding panic.
+* **Exempt reserved names.** `def` refuses a name the language ships (ADR-166), so its
+  resolution cannot change mid-call and the elided head stays correct. Staging every call
+  regressed `regex` 31%, `wordcount` 11% and `sieve` 9% — almost entirely `first`/`rest`/
+  `str`-class calls that were never rebindable.
 
-A real fix has to keep IC-speed resolution while moving it *before* the arguments — i.e. a
-head-resolution instruction with its own **global**-IC site, emitted ahead of the args, with
-`Inst::Call` consuming the staged value. Note the global-IC and call-IC site id spaces are
-independent (`ngsites` vs `nsites`), so it needs a real gsite, not the call site — reusing
-the call site is a separate latent defect in the tail-call head path.
+Rows flat on an idle machine: `json` −3.6%, `bintree` −2.0%, `fib` +0.4%, `nbody` +0.1%,
+and the three largest movers at baseline on a solo re-run (`regex` 95.7 ms, `wordcount`
+50.6, `sieve` 49.7). `Inst::Call`'s stale doc comment claiming eval order was unchanged is
+gone with the change that made it false.
 
-Severity: only observable when an argument expression rebinds the function being called.
-Worth closing for engine-differential cleanliness (the fuzzer can reach it), not worth a 6×
-regression on a benchmark row.
+Regression test: `tests/vm_call_head_order_test.blsp`.
 
 ---
 
-## KI-18 — a deopt-thrashing arm can duplicate an effect **16 times, once** · OPEN (bounded)
+## KI-18 — a deopt could re-run a `table-put` · **FIXED 2026-07-30**
 
-A JIT deopt must never re-run a `table-put`. Three ways it could were found and fixed
-(see `tests/jit_effect_once_test.blsp` and the 2026-07-30 devlog): no journal for a
-call-free effectful arm, a multi-arity self-call exemption that ignored argc, and the
-leaf inliner splicing an effectful callee into an engine that cannot journal. Those made
-the corruption **unbounded and proportional to the workload** — 200 000 iterations put
-402 047 times — and all three now count exactly.
+**Fixed.** Four distinct paths let a JIT deopt re-execute an effect; the first three were
+closed earlier the same day (no journal for a call-free effectful arm, a multi-arity
+self-call exemption that ignored argc, and the leaf inliner splicing an effectful callee
+into an engine that cannot journal). Those made the corruption unbounded and proportional
+to the workload — 200 000 iterations put 402 047 times.
 
-What remains is bounded and does not scale. Repro:
+The fourth was the residual recorded here, and it is now fixed too: **`jit_run_fast_link`
+treated an IC re-probe miss as "give up and let the caller redo the call"**. By then the
+callee's native code had already run, so the caller's `brood_rt_call_slow` executed it a
+second time — effect included. It showed up as a bounded over-count of exactly 16 (the
+`DEOPT_BAIL_CONSECUTIVE` threshold, after which the arm bails and the duplication stops),
+independent of iteration count. The IC probe is only an *optimisation* for locating the
+arm, so a miss must not change behaviour: it now resolves the arm by name
+(`env_get` → `compiled_arm_for`) and takes the same checkpoint-resume path as a hit.
 
-```lisp
-(def tt (table)) (table-put tt 0 0)
-(def uu (table)) (table-put uu 0 0)
-(defn f
-  ((v)     (do (table-put uu 0 (+ 1 (table-get uu 0))) (+ (f v 0) (nth v 0))))
-  ((v acc) (do (table-put tt 0 (+ 1 (table-get tt 0))) 1.5)))
-(defn drive (v i n) (if (= i n) nil (do (f v) (drive v (+ i 1) n))))
-(drive [1 2] 0 50000)
-```
+Found by elimination, after instrumenting every re-run path: the deopt paths all resumed
+correctly at their journal, `[fl-fallthrough]` was the one that fired 16 times, and
+counting entries to *each arm separately* showed the caller was re-entered too — which is
+what pointed above `f` rather than inside it.
 
-Both counters read **50 016** under the JIT and 50 000 with `BROOD_NO_JIT=1`. The excess
-is exactly **16 — the `DEOPT_BAIL_CONSECUTIVE` threshold — and is independent of the
-iteration count** (10 000 → 10 016, 200 000 → 200 016): one transition window, then the
-arm is marked `BAILED` and runs correctly on the VM forever after. It was 24 before the
-three fixes.
+Also hardened while here: the checkpoint resume now covers **preempt** (outcome 2), not
+just deopt. A preempt normally lands on a back edge where the journal is 0, so this is a
+no-op there; but if one ever landed after a completed call or a `table-put`, the ip-0
+re-run would have repeated it.
 
-What is ruled out by measurement, so don't re-chase it: it is not the register worker
-(`BROOD_NO_I64=1` is unchanged), not either inliner (both off, unchanged), and not any
-from-ip-0 re-run — instrumenting every `vm_apply` re-run path showed **none** fires, while
-all 16 deopts resume correctly at their journal (`rip=3`). Counting entries to each arm
-separately shows the *caller* is entered 16 times too, so the extra activations originate
-above `f`, in `drive` — a self-tail loop whose back-edge resets the journal. The likely
-suspects are the outcomes the checkpoint path does not cover (preempt, outcome 2, keeps
-the ip-0 entry by design) or a fast-link `Fallthrough` after the callee already ran.
-
-Severity: a *deliberately* type-thrashing multi-arity function — one whose arms return
-different types through the same call site — corrupts a `Table` count by a fixed 16 before
-self-healing. Real code that thrashes this way is already paying a large performance
-penalty and will be bailed. Worth closing, not worth blocking on.
+Regression tests: `tests/jit_effect_once_test.blsp`, four shapes including the multi-arity
+one, each asserting the effect count equals the iteration count exactly.
 
 ---
 

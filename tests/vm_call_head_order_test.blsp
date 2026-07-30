@@ -1,0 +1,53 @@
+;;; Regression guard: a call's operator is resolved BEFORE its arguments (KI-19).
+;;;
+;;; The tree-walker evaluates the operator first (`eval_arguments` receives an
+;;; already-evaluated callee). The VM used to elide a free-global head entirely and resolve
+;;; it through the call-site IC *after* the arguments had run, so an argument that rebound
+;;; the head made the engines disagree: `(f (bump))` gave `:new` on the VM and `:old`
+;;; everywhere else.
+;;;
+;;; The fix stages the head ahead of the args for exactly the calls that can be affected —
+;;; a *rebindable* (non-reserved) global head with at least one argument that can run user
+;;; code. `Inst::Call` keeps its `head`/`site`, so the call-site IC still caches the
+;;; resolved arm and is validated by closure identity against the staged callee; dropping
+;;; to the plain computed-callee path instead cost `json` 6×.
+;;;
+;;; Reserved names (prelude, builtins, embedded std modules) are exempt: `def` refuses them
+;;; (ADR-166), so their resolution cannot change mid-call. Without that exemption the fix
+;;; cost `regex` 31%, almost all of it `first`/`rest`-class calls that were never
+;;; rebindable.
+;;;
+;;; Each test owns its globals — the suite runs tests concurrently against the shared
+;;; runtime global table, so a `def` of a name another test reads would race it.
+
+(defmodule vm-call-head-order-test (:use test))
+
+(defn cho-f (x) :old)
+(defn cho-bump () (def cho-f (fn (x) :new)) 1)
+(defn cho-g () (cho-f (cho-bump)))
+
+;; The same shape, but the rebinding argument is nested inside other work.
+(defn cho-h (a b) (list :old a b))
+(defn cho-bump2 () (def cho-h (fn (a b) :new)) 7)
+(defn cho-g2 () (cho-h (+ 1 (cho-bump2)) 3))
+
+;; A hot loop over the staged shape: the staging must survive tiering, and the call-site
+;; IC must keep caching the arm (this is the path the `staged` flag exists to preserve).
+(defn cho-add (a b) (+ a b))
+(defn cho-id (x) x)
+(defn cho-loop (i acc)
+  (if (= i 0) acc (cho-loop (- i 1) (cho-add acc (cho-id 1)))))
+
+(describe "a call's operator is resolved before its arguments"
+  (test "an argument that rebinds the head does not affect this call"
+    ;; The operator was resolved first, so this call runs the ORIGINAL `cho-f`.
+    (assert= :old (cho-g))
+    ;; The rebinding did take effect — for the NEXT call.
+    (assert= :new (cho-f 1)))
+
+  (test "the same holds when the rebinding argument is nested"
+    (assert= '(:old 8 3) (cho-g2))
+    (assert= :new (cho-h 1 2)))
+
+  (test "a hot staged call stays correct and keeps looping"
+    (assert= 100000 (cho-loop 100000 0))))
