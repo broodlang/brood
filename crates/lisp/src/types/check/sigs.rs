@@ -525,6 +525,72 @@ fn infer_return_only(heap: &Heap, cid: crate::core::value::ClosureId, self_name:
     Some(Sig::new(vec![], ret?))
 }
 
+/// **Same-file return inference** from a `(fn …)` *form* (not a loaded closure): the union of
+/// each arm's tail type, with the arm's params bound to `ANY` in a clone of `base_ctx` — so a
+/// call to another *file-local* function whose sig is already in `base_ctx` resolves. Powers
+/// `check_file`'s fixpoint pass, letting a function defined in the file being checked (which
+/// isn't loaded, so [`sig_of`] can't see it) still flow its return to same-file callers. The
+/// return-only counterpart of [`infer_return_only`] for the form path; `None` if any arm's
+/// tail can't be typed (defer — never an under-approximation). `self_name` skips a
+/// self-recursive branch (see `infer::branch_union`).
+pub(super) fn infer_return_from_form(
+    heap: &Heap,
+    fn_form: Value,
+    self_name: Option<Symbol>,
+    base_ctx: &Ctx,
+) -> Option<Ty> {
+    let items = super::walk::list_items(heap, fn_form)?;
+    if !matches!(items.first(), Some(&Value::Sym(s)) if super::walk::is_fn_head(s)) {
+        return None;
+    }
+    // (params, tail) per arm — a multi-arity fn's clauses, or the single arm.
+    let mut arms: Vec<(Vec<Symbol>, Value)> = Vec::new();
+    if crate::eval::macros::fn_is_arity_multi_clause(heap, &items) {
+        let clauses = match items.get(1..) {
+            // skip a leading docstring
+            Some([Value::Str(_), rest @ ..]) if !rest.is_empty() => rest,
+            Some(rest) => rest,
+            None => return None,
+        };
+        for &clause in clauses {
+            let citems = super::walk::list_items(heap, clause)?;
+            if citems.len() < 2 {
+                return None; // a clause with no body — can't type
+            }
+            let plist = *citems.first()?;
+            let tail = *citems.last()?;
+            arms.push((super::walk::fn_params(heap, plist), tail));
+        }
+    } else {
+        let plist = *items.get(1)?;
+        let body_start = match (items.get(2), items.get(3)) {
+            (Some(Value::Str(_)), Some(_)) => 3,
+            _ => 2,
+        };
+        let tail = *items.get(body_start..).and_then(|b| b.last())?;
+        arms.push((super::walk::fn_params(heap, plist), tail));
+    }
+    if arms.is_empty() {
+        return None;
+    }
+    let mut ret: Option<Ty> = None;
+    for (binders, tail) in &arms {
+        let mut ctx = match self_name {
+            Some(n) => base_ctx.with_inferring_self(n),
+            None => base_ctx.clone(),
+        };
+        for &p in binders {
+            ctx = ctx.bind(p, Some(Ty::ANY));
+        }
+        let t = expr_ty(heap, *tail, &ctx)?;
+        ret = Some(match ret {
+            Some(a) => a.union(t),
+            None => t,
+        });
+    }
+    ret
+}
+
 /// Collect each parameter's **unconditional** type demand across the whole body:
 /// the type a known-sig callee requires of a parameter passed *directly* in a
 /// position guaranteed to execute on every call — a call argument, a `do` form, a

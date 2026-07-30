@@ -12252,3 +12252,49 @@ already reads (`sealed_member_ids`, `protocol.rs`).
 type — drives part 2), ADR-172/168 (`ability--id-kw`, the shared id derivation), ADR-152/160
 (named pattern heads `not`/`and`/`or`), ADR-185 (why expand-time record metadata is avoided),
 `tests/pattern_matching_test.blsp` ("record patterns").
+
+## ADR-188 — Same-file function inference: the checker infers a file's own functions
+
+**Status:** accepted + shipped. Closes the last big inference gap and, doing so, found a
+latent primitive-signature bug.
+
+**The gap.** `sigs::sig_of`'s inferencer reads the *loaded* closure (`obs_global`), so it
+infers any function the image already has — the whole prelude, std, and `(:use …)`d modules,
+chaining through callees. But a file's OWN `(defn …)`s aren't loaded while that file is
+checked (`check_file` is advisory, no-eval), so they were invisible: a same-file caller of a
+same-file function got *no* result checking. That is most of what `nest check` / the LSP /
+`brood <file>` do on the file you're editing (the REPL never had the gap — there everything
+is loaded).
+
+**Decision.** `check_file` gains **Pass 2.8**: infer each single-def, unshadowed, un-declared
+function's **return** from its *form* (`sigs::infer_return_from_form` — the form twin of the
+loaded-closure inferencer), record it in `Ctx` (`inferred_fn_sig`), and consult it at a call
+site *after* a declared sig. A bounded **fixpoint** resolves callees leaf-up: the form
+inferencer returns `None` (records nothing) until every function a return depends on is
+already recorded, so a function is stored *only* with its callees' FINAL sigs — no
+stale/narrow intermediate can leak (sound at any cap; a forward reference resolves in a later
+pass, a cross-function cycle stays deferred). Return-only for now (a params-less sig), so it
+flows results without imposing argument constraints.
+
+**Soundness fixes it forced (the value of the zero-false-positive gate).** Enabling it
+surfaced two latent imprecisions that had been harmless only because nothing consumed them:
+1. A **reassigned global** typed as its initial value. The lazy-init `(when (nil? *g*) (def
+   *g* (table))) *g*` returns a table, but Gap A pinned `*g*` to its `nil` default (it counted
+   only *top-level* defs, missing the nested reassignment; and the earmuffed-global skip sat
+   after the inferred-value read). Fixed: count defs **recursively** (a global def'd anywhere
+   more than once is reassigned → `dynamic`), and skip earmuffed globals in Gap A too — the
+   principled completion of "a redefinable global is `dynamic()`, not its default."
+2. **`%node-listen`'s primitive `Sig`** said its node-name arg was a `symbol` and it returned
+   a `symbol`, but `expect_node_name` accepts a keyword-or-symbol and `node-start` returns the
+   `:name@host` keyword (as `%node-connect` already declared). A real, latent sig bug — the
+   inference of `node--qualify` (returns a keyword) is what exposed it. Corrected to match.
+
+After both, the full `std/` + `tests/` sweep is clean — zero false positives.
+
+**Deferred.** Same-file **parameter** inference (higher false-positive risk — it constrains
+callers' args) and per-arm multi-arity params; and the `and`/`or`-guard and
+higher-order-callback inference still listed in `check.rs`.
+
+**References.** ADR-110/024 (the gradual, advisory type discipline this inherits), ADR-125
+(a redefinable global is `dynamic()` — why a reassigned global can't be pinned), the
+2026-07-29 devlog entry.

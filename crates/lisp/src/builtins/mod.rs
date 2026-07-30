@@ -2750,7 +2750,10 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "%node-listen",
         Arity::exact(3),
-        Sig::new(vec![sym, string, string], sym),
+        // The node name may be a symbol OR a keyword — `expect_node_name` accepts both, and
+        // the prelude's `node-start` passes the computed `:name@host` keyword (matching
+        // `%node-connect`). Returns the qualified node name, always a keyword.
+        Sig::new(vec![sym.union(kw), string, string], kw),
         node_listen,
     );
     def(

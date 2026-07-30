@@ -11743,3 +11743,27 @@ form. 10 tests added to `tests/pattern_matching_test.blsp` (incl. nesting + cros
 
 **Next (ADR-187 part 2):** sealed-match exhaustiveness — warn when a `match` on a
 sealed-ability-typed scrutinee (ADR-181/186) misses a member and has no catch-all.
+
+## 2026-07-29 (cont.) — same-file function inference; the checker at the REPL + hover (ADR-188)
+
+The last big inference gap: `sig_of` infers only *loaded* functions, so a file's own `(defn
+…)`s were invisible while that file was checked — same-file callers got no result checking
+(the whole point of `nest check`/LSP-on-a-file). `check_file` Pass 2.8 now infers each
+function's return from its FORM (`infer_return_from_form`) and records it in `Ctx`, resolving
+callees leaf-up over a bounded fixpoint: a function is stored only once its callees are final,
+so nothing stale leaks (forward refs resolve; cycles defer). Return-only for now.
+
+Enabling it earned its keep by forcing two soundness fixes (both latent, harmless only because
+nothing consumed them before): a **reassigned global** was pinned to its `nil` init (Gap A
+counted only top-level defs and read the value before the earmuff skip) → now defs are counted
+recursively and earmuffed globals skipped, so a lazily-initialized `*g*` stays `dynamic`; and
+**`%node-listen`'s primitive `Sig`** said `symbol` where a node name is a keyword (a real bug,
+inconsistent with `%node-connect`) → corrected. Full std/ + tests/ sweep clean.
+
+Also this stretch (earlier): the checker now runs at the **REPL** (advisory warnings before
+each result, live-image inference) and **LSP hover** shows a name's type signature; and any
+**ability name is a type** (open → `any`, sealed → member union), which required fixing the
+checker's dead `ability/*…*` registry reads to the bare `*…*` globals.
+
+Type suite 275 → 278; the four interactive/inference asks (REPL check, hover types, open
+abilities as types, same-file inference) all landed with zero false positives.

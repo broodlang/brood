@@ -1976,6 +1976,47 @@ fn inferred_params_intersect_across_positions() {
 }
 
 #[test]
+fn same_file_caller_checked_against_inferred_return() {
+    // The file being checked isn't loaded, so this exercises Pass 2.8's form-based inference:
+    // `dbl` is inferred (same-file) to return a number, so `(string-length (dbl 5))` is caught
+    // — a same-file caller now gets the checking a loaded-function caller already did.
+    let w = file_warnings(
+        "(defmodule t)\n(defn dbl (x) (+ x 1))\n(defn bad () (string-length (dbl 5)))",
+    );
+    assert!(
+        w.iter().any(|s| s.contains("string-length")),
+        "same-file inferred return should flow to a caller: {w:?}"
+    );
+}
+
+#[test]
+fn same_file_forward_reference_resolves_via_fixpoint() {
+    // Caller defined BEFORE callee — the bounded fixpoint still resolves `later`'s return.
+    let w = file_warnings(
+        "(defmodule t)\n(defn bad () (+ 1 (later 1)))\n(defn later (x) (str x))",
+    );
+    assert!(
+        w.iter().any(|s| s.contains('+') && s.contains("number")),
+        "a forward reference should resolve in the fixpoint: {w:?}"
+    );
+}
+
+#[test]
+fn same_file_reassigned_global_return_stays_dynamic() {
+    // SOUNDNESS: a lazily-initialized global (nil default, reassigned to a table) must make
+    // the returning function's return *dynamic*, not the stale `nil` — else a table use of
+    // the result would false-flag. Guards Pass 2.8 against the earmuffed / reassigned-global
+    // imprecision.
+    let w = file_warnings(
+        "(defmodule t)\n(def *g* nil)\n(defn getg () (when (nil? *g*) (def *g* (table))) *g*)\n(defn u () (table-get (getg) :k))",
+    );
+    assert!(
+        !w.iter().any(|s| s.contains("table-get") && s.contains("argument")),
+        "a reassigned global's return must stay dynamic (no false positive): {w:?}"
+    );
+}
+
+#[test]
 fn infers_a_tail_recursive_function_return_from_its_base_case() {
     // A self-recursive call in a branch position contributes ⊥ to the return union, so
     // `count-down`'s return infers from its base case `:done` (keyword) — feeding it to
