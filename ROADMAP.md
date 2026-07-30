@@ -218,6 +218,11 @@ What that review consciously left OPEN, with the reasoning:
   optimisation arriving by the same insight, and it is the mechanism behind the item
   below rather than a separate idea. The checker can likewise stop typing reserved
   globals as `dynamic()` and give them precise types. **[kernel/JIT]**
+  - 📋 **Phase 1 is planned** (2026-07-30, held pending the concurrent JIT perf thread):
+    compile-time resolution of reserved-defn call heads + drop the staleness guard +
+    checker precise-typing. Concrete, step-ordered, ready to execute — see
+    [`docs/plan-reserved-early-binding.md`](docs/plan-reserved-early-binding.md). Phases 2
+    (multi-arity devirt) and 3 (see-through inlining of `get`'s `cond`) build on it.
 - ⬜ **`get`'s call + type-dispatch overhead, which the JIT cannot see through.**
   Found while measuring ADR-165: against the `map-get` kernel op at 107 ms/1M, a
   single-arity Brood wrapper costs **+124 ms**, its four-branch `cond` a further

@@ -1,0 +1,98 @@
+;;; Exact rational numbers — the kernel `Value::Ratio` type (ADR-196).
+;;;
+;;; `1/2` is a reader literal; `/` on integers is EXACT (`(/ 1 2)` → `1/2`,
+;;; `(/ 6 3)` → `2`). Ratios are their own numeric type — `type-of` is `:ratio`,
+;;; `number?` true, they do the full arithmetic tower with int/decimal/float
+;;; contagion, order with `<`/`sort`, and are `=` by value (reduced). A ratio whose
+;;; denominator reduces to 1 is demoted to an integer (`2/1` IS `2`), so the question
+;;; "is a ratio `=` to an equal integer?" never arises — an integral ratio is an int.
+
+(defmodule ratio-test (:use test))
+
+(describe "ratio: literals + reduction"
+  (test "the 1/2 literal reads, prints, and round-trips"
+    (assert= (to-str 1/2) "1/2")
+    (assert= (pr-str 1/2) "1/2")
+    (is (ratio? 1/2))
+    (is (= 1/2 (read-string "1/2"))))
+  (test "literals reduce, carry a positive denominator, and demote when integral"
+    (assert= 2/4 1/2)
+    (assert= 6/4 3/2)
+    (assert= (/ 1 -2) -1/2)  ; sign normalized onto the numerator
+    (assert= 4/2 2)          ; denominator 1 → an integer
+    (is (int? 4/2))
+    (is (ratio? 1/2)))
+  (test "type-of and number?"
+    (assert= (type-of 1/2) :ratio)
+    (is (number? 1/2))
+    (is (not (int? 1/2)))
+    (is (not (float? 1/2)))))
+
+(describe "ratio: exact division"
+  (test "/ on integers is exact — a ratio, not a float"
+    (assert= (/ 1 2) 1/2)
+    (assert= (type-of (/ 1 2)) :ratio)
+    (assert= (/ 6 3) 2)          ; divides evenly → int
+    (assert= (type-of (/ 6 3)) :int)
+    (assert= (/ 100 3) 100/3)
+    (assert= (/ 3 6) 1/2))
+  (test "a zero denominator still raises"
+    (let (e (try (/ 1 0) (catch e (get e :code))))
+      (assert= e "E0040"))))
+
+(describe "ratio: arithmetic tower + contagion"
+  (test "ratio ∘ ratio stays exact, reducing"
+    (assert= (+ 1/2 1/3) 5/6)
+    (assert= (+ 1/2 1/2) 1)              ; reduces to an int
+    (assert= (- 3/4 1/4) 1/2)
+    (assert= (* 2/3 3/4) 1/2)
+    (assert= (/ 1/2 3/4) 2/3)
+    (assert= (+ 1/2 1/3 1/6) 1))        ; variadic
+  (test "ratio + int stays a ratio (both directions)"
+    (assert= (+ 1/2 2) 5/2)
+    (assert= (+ 2 1/2) 5/2)
+    (assert= (- 1 1/3) 2/3)
+    (assert= (* 3 1/2) 3/2))
+  (test "ratio + float is float contagion"
+    (assert= (+ 1/2 1.5) 2.0)
+    (assert= (type-of (+ 1/2 1.5)) :float))
+  (test "ratio + decimal is exact (decimal promotes losslessly)"
+    (assert= (+ 1/2 0.5M) 1)
+    (assert= (+ 1/4 0.25M) 1/2)))
+
+(describe "ratio: ordering, equality, conversion"
+  (test "compares and sorts by value"
+    (is (< 1/3 1/2))
+    (is (> 3/4 5/7))
+    (is (< 1/3 1))
+    (assert= (sort (list 3/4 1/2 2/3)) (list 1/2 2/3 3/4)))
+  (test "= is by value; two reduced-equal ratios are equal and hash together"
+    (is (= 1/2 2/4))
+    (is (= (frequencies (list 1/2 2/4 1/2)) {1/2 3})))
+  (test "numerator / denominator"
+    (assert= (numerator 3/4) 3)
+    (assert= (denominator 3/4) 4)
+    (assert= (numerator 5) 5)
+    (assert= (denominator 5) 1))
+  (test "->float and ->decimal escape hatches"
+    (assert= (->float 1/2) 0.5)
+    (assert= (->float 3/4) 0.75)
+    (assert= (->decimal 1/2) 0.5M)
+    (assert= (rational 3 6) 1/2)))
+
+;; ---- across processes -------------------------------------------------------
+;; A ratio is a heap leaf, so it deep-copies (re-parsed from its `num/den` string)
+;; across per-process heaps on a `send`. Build it in a worker, send it home, and
+;; confirm it's still a valid ratio whose arithmetic/ordering still work.
+
+(defn ratio-worker (parent) (send parent (+ 1/2 1/3)))
+
+(describe "ratio: across processes"
+  :isolated
+  (test "a ratio built in another process round-trips a send"
+    (let (me (self) _ (spawn (ratio-worker me)))
+      (let (r (receive))
+        (is (ratio? r))
+        (assert= r 5/6)
+        (assert= (* r 6) 5)          ; arithmetic still works after the round-trip
+        (is (< r 1))))))

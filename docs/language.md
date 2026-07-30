@@ -43,8 +43,8 @@ these are the ones to unlearn:
 | `#"[0-9]+"` regex literal | Regexes are library values: `(require 'regex)` then `(regex/match? "pat" s)`. | A parse error **with a hint** naming `(require 'regex)` (was a stray `#`-symbol). |
 | `\c` / `\newline` character literal | No character type — a character is a 1-char string `"c"` (or `(int->char 99)`). | A parse error **with a hint** naming the 1-char string (was `unbound symbol: \c`). |
 | `#\|…\|#` block comment (Scheme/CL) | No block comments — comment each line with `;`, or wrap forms in `(comment …)` (read but never evaluated). | A parse error **with a hint** (ADR-169; used to read as a bar-quoted symbol). Any other `#…` is likewise reserved — `#` is a dispatch character, and `#{…}` / `#b"…"` are its only forms. |
-| `1/2` ratio, `0x1F`/`0b1010` radix, `1_000` separators, `1N` bigint | None of these — a digit-led token must be a number Brood has. `(/ 1 2)` is a float, `0.5M` an exact decimal, `(string->number "1F" 16)` parses hex, `1000` needs no separator, plain `1` already widens to bignum. | A parse error **with a targeted hint** (ADR-169; these read as symbols before, surfacing as a far-away "unbound symbol"). Reserving the tokens keeps each future numeric syntax additive. |
-| `(/ 7 2)` → ratio `7/2` | No ratios. Integer args give an integer **only when they divide evenly**; otherwise a float. `(/ 12 3)` → `4`, `(/ 7 2)` → `3.5`. | A float where you expected an exact ratio. |
+| `0x1F`/`0b1010` radix, `1_000` separators, `1N` bigint | None of these — a digit-led token must be a number Brood has. `(string->number "1F" 16)` parses hex, `1000` needs no separator, plain `1` already widens to bignum. | A parse error **with a targeted hint** (ADR-169; these read as symbols before, surfacing as a far-away "unbound symbol"). Reserving the tokens keeps each future numeric syntax additive. |
+| `(/ 7 2)` → ratio `7/2` | **Yes — this is what happens** (ADR-196). `/` on integers is exact: `(/ 7 2)` → `7/2`, `(/ 12 3)` → `4` (divides evenly → int). `1/2` is a reader literal. Reach for `->float` when you want an inexact result. | A ratio, exactly as in Clojure/Scheme. |
 
 Within a *single* clause, optional and rest arguments use the Common-Lisp /
 Emacs-Lisp spelling (`&optional`, `&`), described under
@@ -63,8 +63,9 @@ is the one piece that can't be guessed from Clojure; it has to be read.
 | Integer | `0`, `42`, `-7` | 64-bit; arithmetic is overflow-checked. A result out of `i64` range promotes to an arbitrary-precision **bignum** rather than wrapping, and demotes back when it fits again — so the integer type is unbounded in practice. |
 | Float | `3.14`, `-0.5`, `1e3`, `inf`, `nan` | 64-bit. **`inf`, `-inf` and `nan` are reader literals** — those three bare tokens are floats, not symbols, so they can't be used as names (the digit-required rule below has these three exceptions). Test them with `infinite?` / `nan?`; `=` reports NaN as equal to nothing, per IEEE. |
 | Decimal | `1.50M`, `0M`, `-3.14M` | Exact arbitrary-precision base-10, for money and Postgres `numeric` — values a float can't hold (`(+ 0.1M 0.2M)` *is* `0.3M`). The literal is a trailing `M`; `(decimal x)` builds one from a string, int, bignum or float. Scale is significant in arithmetic (see [Arithmetic](#arithmetic)) but **not** in `=`, which compares values (`1.5M` = `1.50M`). |
+| Ratio | `1/2`, `-3/4`, `22/7` | Exact rational (`num_rational::BigRational`), always **reduced** with a positive denominator (ADR-196). `1/2` is a literal; **`/` on integers is exact** — `(/ 1 2)` is `1/2`, `(/ 6 3)` is `2` (a denominator of 1 demotes to an integer, so `4/2` IS `2`). Does the full arithmetic tower: ratio+int/ratio → ratio, ratio+decimal → ratio (lossless), ratio+float → float (contagion). `->float`/`->decimal` convert out; `numerator`/`denominator` read the parts. `=` is by value (`1/2` = `2/4`). |
 | String | `"hello\n"` | Escapes: `\n \t \r \e \0 \\ \"` (`\e` is ESC, for ANSI terminal control), `\xHH` (two-hex-digit byte), `\u{H..H}` (1–6-hex-digit Unicode codepoint). A malformed `\x`/`\u{}` is a read error, and so is an unknown **alphabetic** escape (`\d`, `\w`, `\s`, …) — that's almost always a regex class written in a plain string, where dropping the backslash would silently break the pattern, so write `\\d`. A `\X` escape of punctuation or a digit (`\.`, `\/`, `\1`) is literal `X` (how you write a literal metacharacter in a regex string). Readable printing is the inverse: it re-escapes `\n \t \r \e \0 \\ \"` by name and any other control char as `\u{H..H}`, so a printed string always re-reads to the same value. |
-| Symbol | `foo`, `+`, `my-fn`, `empty?`, `++`, `...` | Names; interned. **A token that leads with a digit — or a sign/dot immediately followed by a digit — must be a number** (ADR-169): if it isn't one Brood has (`1/2`, `0x1F`, `1_000`, `1N`, `1+`, `12-34`) it's a *reader error*, never a symbol, so those tokens stay reserved for future numeric syntax. A sign or dot with **no** digit behind it is not digit-led and stays a symbol — `+`, `-`, `...`, `.foo`, `foo.`, `--5`, `++`. A symbol whose name isn't a clean token — one built via `(symbol "a b")` with whitespace, delimiters, an empty name, or a spelling that would read as a number/keyword (including a reserved one, `(symbol "1+")`) — prints (readably) and reads back as a `\|…\|` **bar-quoted** symbol (`\|a b\|`, `\|1+\|`, `\|\|` for empty; `\|`/`\\` escape a literal bar/backslash), so every symbol round-trips through `pr-str`/`read`. |
+| Symbol | `foo`, `+`, `my-fn`, `empty?`, `++`, `...` | Names; interned. **A token that leads with a digit — or a sign/dot immediately followed by a digit — must be a number** (ADR-169): if it isn't one Brood has (`0x1F`, `1_000`, `1N`, `1+`, `12-34`; but `1/2` *is* a ratio now — ADR-196) it's a *reader error*, never a symbol, so those tokens stay reserved for future numeric syntax. A sign or dot with **no** digit behind it is not digit-led and stays a symbol — `+`, `-`, `...`, `.foo`, `foo.`, `--5`, `++`. A symbol whose name isn't a clean token — one built via `(symbol "a b")` with whitespace, delimiters, an empty name, or a spelling that would read as a number/keyword (including a reserved one, `(symbol "1+")`) — prints (readably) and reads back as a `\|…\|` **bar-quoted** symbol (`\|a b\|`, `\|1+\|`, `\|\|` for empty; `\|`/`\\` escape a literal bar/backslash), so every symbol round-trips through `pr-str`/`read`. |
 | Keyword | `:ok`, `:else`, `:\|a b\|` | Self-evaluating named constants. Like symbols, a keyword whose name isn't a clean token (e.g. `(keyword "a b")`, `(keyword "")`) prints and reads as `:\|…\|`. |
 | List | `(1 2 3)`, `()`, `(1 . 2)` | Cons cells; `()` is `nil`. Quote to keep as data: `'(1 2 3)`. A dotted tail `(a . b)` makes an improper list (round-trips with the printer). |
 | Vector | `[1 2 3]` | A data type with O(1) indexing. Evaluates its elements. |
@@ -981,27 +982,47 @@ evaluated in its place. Templates are written with quasiquote: `` `x `` quotes,
 (macroexpand-1 '(defn f (x) x))   ;=> (def f (fn (x) x))
 ```
 
-### Auto-gensym (`x#`) — opt-in hygiene
+### Macro hygiene — automatic
 
-Inside a backtick template, a symbol whose name ends in `#` (e.g. `tmp#`) expands
-to a **fresh gensym**, the *same* one for every occurrence within that one
-backtick expansion and a *distinct* one per expansion. This is the Clojure
-shorthand for a non-capturing macro binding — a `tmp#` the template introduces can
-neither capture nor be captured by the caller's `tmp`, with no manual `gensym`:
+Macros are **hygienic by default**. A `let`/`letrec`/`fn` binder a backtick
+template introduces is automatically alpha-renamed to a fresh symbol, so a plain
+literal binder can neither capture nor be captured by caller code spliced in with
+`~`/`~@` — no `gensym`, no `#`:
 
 ```clojure
 (defmacro my-or (a b)
-  `(let (r# ~a)            ; r# -> a fresh symbol, e.g. r__417
-     (if r# r# ~b)))       ; same r__417
+  `(let (r ~a)            ; plain `r` — auto-renamed to a fresh symbol
+     (if r r ~b)))
 
 (let (r 1) (my-or false r))   ;=> 1  (the caller's `r` is not captured)
 ```
 
-Auto-gensym fires only on *literal* template symbols; a `x#` inside an unquote
-(`~(… x# …)`) is ordinary user code and is left alone. To emit a **literal**
-`x#` (e.g. an anaphoric binding the caller is meant to see), unquote a quoted
-symbol: `` `(let (~'it ~val) ~@body) ``. `gensym` itself remains available for
-cases where you need a fresh symbol outside a template.
+The rename is scope-aware (it touches only the references a binder actually binds)
+and fresh per expansion (so nested expansions of one macro, `(m (m x))`, get
+distinct binders). Free references in a template (`helper`, `map`) are handled
+separately — they **auto-qualify** to the macro's defining namespace — so both
+halves of hygiene are automatic.
+
+**Opting a binder OUT — anaphora.** When a template *deliberately* introduces a
+name for the caller's spliced code to reference (an anaphoric macro like `aif`),
+write it as an unquoted quoted symbol, `~'name`, which emits the literal name:
+
+```clojure
+(defmacro aif (test then else)
+  `(let (~'it ~test)          ; ~'it stays the literal `it`
+     (if ~'it ~then ~else)))
+
+(aif (find x) (use it) :none)  ; the caller's `it` refers to the binding
+```
+
+**`x#` and `gensym` still work** (now redundant): a symbol ending in `#` inside a
+template still becomes a fresh gensym (the Clojure shorthand), and `gensym`
+remains available for a fresh symbol outside a template. New code needs neither.
+
+*v1 limit:* only plain-symbol `let`/`letrec`/`fn` binders are auto-renamed;
+destructuring binders, `match*` pattern binders, and computed (`~params`) binders
+inside a template stay literal — opt into `#`/`gensym` there if capture is a
+concern.
 
 The `->`, `->>`, and `as->` threading macros are also defined in the prelude:
 
@@ -1108,11 +1129,13 @@ no-op to silence it without editing code:
 > `(a (quasiquote (b 3)))` where the standard reading leaves `(+ 1 2)`
 > unevaluated. A `` ` `` inside an `~unquote` is ordinary code and stays legal, so
 > the macro-writing-a-macro spelling is `` `(a ~(inner-template x)) ``. Level
-> tracking can land later without breaking anything accepted today (ADR-011). Auto-gensym (`x#`) / `gensym`
-> handle *binding* capture; *free* references in a macro template **auto-qualify**
-> to the macro's defining namespace (ADR-066 α), so a macro expands correctly when
-> used in another namespace without hand-qualifying. The advisory hygiene lint
-> flags a plain literal binder that could capture a spliced argument. See spec §7.
+> tracking can land later without breaking anything accepted today (ADR-011).
+> Macros are hygienic both ways automatically: a template's introduced `let`/`fn`
+> **binders** are alpha-renamed so they can't capture spliced caller code (ADR-066
+> amendment; opt a binder out with `~'name`), and its *free* references
+> **auto-qualify** to the macro's defining namespace (ADR-066 α), so a macro
+> expands correctly when used in another namespace without hand-qualifying. See
+> the "Macro hygiene" section above and spec §7.
 
 ## Pattern matching
 
@@ -2727,6 +2750,22 @@ redefined.
 (bound? 'no-such)      ;=> false
 (member? 'map (global-names))  ;=> true        ; every global, for completion
 ```
+
+**`bound?` is about names, not capabilities** — and for optional build features the
+two disagree. A builtin from a feature this binary lacks is still bound and still
+raises when called, so ask the build instead (ADR-196):
+
+```clojure
+(features)             ;=> [:gui :clipboard :jit :treesit :wasm :dev-tools]
+(feature? :gui)        ;=> true    ; can this binary open a window at all?
+(feature? :nonesuch)   ;=> false   ; unknown names are false, not an error
+(bound? 'gui-open)     ;=> true    ; …even on a build with no gui backend
+```
+
+`features` reports what was **compiled in**, not what will work right now — a `gui`
+build still fails on a headless box. It buys you the distinction between "this binary
+lacks the feature" and "this feature failed", which is the one an app needs to decide
+whether to degrade or to report.
 
 For **discovery** — finding what exists rather than describing a name you
 already know (the answer to "is there an RNG?" in one call):

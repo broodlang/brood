@@ -59,7 +59,7 @@ instead of once per cell. `msg` unchanged when it isn't a drag (incl. nil on tim
       (after 0 msg))
     msg))
 
-(defn gui-display ()
+(defn gui-display (&optional (opts nil))
   "Open a **new** native window and return a display (the `{:enter :leave :size
 :draw :poll}` map) bound to it — each call is a separate window, so several
 observers (or editor windows) can run at once. Unlike `*term-display*` (one
@@ -69,6 +69,11 @@ opened eagerly here, so `:enter` is a no-op and `:leave` closes it. Needs the
 runtime built with `--features gui` (`./configure --with-gui && make install`), else
 `gui-open` errors. The map also carries the raw `:window` id.
 
+`opts` is passed through to `gui-open`, so a frontend can ask for a window that
+suits it: `:title` names it, and `{:decorations false}` drops the OS title bar and
+frame for an app that draws its own chrome (a browser's tab strip and toolbar) and
+would otherwise sit under a redundant second title.
+
 **Create and poll it in the same process.** `:draw`/`:size`/`:leave` act on the
 captured window id, but `:poll` is a `receive` on the *calling* process's mailbox
 (that's where `gui-open` delivers this window's input, ADR-058) — it ignores the
@@ -77,7 +82,7 @@ hand it to another process to run. And because the delivered key/mouse messages
 carry no window id, one process should drive **one** window (which is why
 `(observe)` spawns a process per window) — two windows in one process would mix
 their input. Both are deferred trade-offs (ADR-059), fine for the observer."
-  (let (id (gui-open))
+  (let (id (gui-open (get opts :title) nil nil opts))
     {:enter (fn () nil)
      :leave (fn () (gui-close id))
      :size (fn () (gui-size id))

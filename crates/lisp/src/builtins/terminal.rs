@@ -727,8 +727,18 @@ pub(super) fn gui_open(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
             expect_int(heap, "gui-open", arg(args, 2))? as f64,
         )),
     };
-    let id =
-        crate::gui::open(crate::process::self_pid(), title, size).map_err(LispError::runtime)?;
+    // 4th arg: an opts map. `:decorations false` gives a borderless window — for an
+    // app that draws its own chrome and would otherwise sit under a redundant OS
+    // title bar. Absent (every existing caller) means decorated, as before.
+    let decorations = match arg(args, 3) {
+        Value::Map(id) => match heap.map_get(id, value::kw("decorations")) {
+            Some(v) => crate::eval::truthy(v),
+            None => true,
+        },
+        _ => true,
+    };
+    let id = crate::gui::open(crate::process::self_pid(), title, size, decorations)
+        .map_err(LispError::runtime)?;
     Ok(Value::int(id as i64))
 }
 
@@ -815,6 +825,41 @@ pub(super) fn gui_fullscreen(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
     let id = gui_window_id(heap, "gui-fullscreen!", arg(args, 0))?;
     let on = crate::eval::truthy(arg(args, 1));
     crate::gui::fullscreen(id, on).map_err(LispError::runtime)?;
+    Ok(Value::nil())
+}
+
+/// `(gui-minimize! id)` — iconify window `id`. The counterpart of `gui-maximize!`
+/// for an app that draws its own window controls, which a borderless window
+/// (`gui-open` with `{:decorations false}`) must.
+pub(super) fn gui_minimize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "gui-minimize!", arg(args, 0))?;
+    crate::gui::minimize(id).map_err(LispError::runtime)?;
+    Ok(Value::nil())
+}
+
+/// `(gui-drag-move id)` — hand window `id` to the window manager for an interactive
+/// move, for the rest of the currently-held press.
+///
+/// This is what a borderless window needs to stay movable: with no OS title bar
+/// there is nothing to grab, so the app nominates a region of its own chrome (a
+/// browser's tab strip) and calls this when a press lands there.
+pub(super) fn gui_drag_move(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "gui-drag-move", arg(args, 0))?;
+    crate::gui::drag_move(id).map_err(LispError::runtime)?;
+    Ok(Value::nil())
+}
+
+/// `(gui-drag-resize id dir)` — hand window `id` to the window manager for an
+/// interactive resize from `dir`: `:north` `:south` `:east` `:west` `:north-east`
+/// `:north-west` `:south-east` `:south-west`. The window-frame counterpart of
+/// `gui-drag-move`, for a borderless window that draws its own edges.
+pub(super) fn gui_drag_resize(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let id = gui_window_id(heap, "gui-drag-resize", arg(args, 0))?;
+    let dir = match arg(args, 1) {
+        Value::Keyword(sym) => value::symbol_name(sym),
+        v => expect_string(heap, "gui-drag-resize", v)?,
+    };
+    crate::gui::drag_resize(id, &dir).map_err(LispError::runtime)?;
     Ok(Value::nil())
 }
 
@@ -946,12 +991,20 @@ fn parse_gui_ops(
                 continue;
             };
             let face = gui_face(heap, parts.get(5).copied().unwrap_or(Value::nil()));
+            // Optional 7th element: a corner radius in cell units. Absent (every
+            // existing frame) means 0.0 — a square panel, byte-for-byte the old
+            // behaviour.
+            let radius = match parts.get(6).copied() {
+                Some(v @ (Value::Int(_) | Value::Float(_))) => num(v),
+                _ => 0.0,
+            };
             ops.push(crate::gui::Op::Rect {
                 row: clamp_u16(row_i),
                 col: clamp_u16(col_i),
                 w: clamp_u16(w_i),
                 h: clamp_u16(h_i),
                 face,
+                radius,
             });
         } else if tag == tags.frect_t {
             let x = num(arg(&parts, 1));

@@ -49,6 +49,9 @@ pub enum NodeKind {
     /// A `M`-suffixed decimal literal (`1.50M`). Its own kind so `nest format`
     /// preserves it round-trippably.
     Decimal,
+    /// A `num/den` ratio literal (`1/2`). Its own kind so the LSP colours it as a
+    /// number and `nest format` preserves it.
+    Ratio,
     Str,
     Bool,
     Nil,
@@ -425,6 +428,10 @@ impl<'a> Cst<'a> {
             // (bad numeric prefix) is an `Error`, like `IntOverflow`.
             AtomKind::Decimal => NodeKind::Decimal,
             AtomKind::DecimalInvalid => NodeKind::Error,
+            // A valid `num/den` ratio literal is its own kind; an invalid one
+            // (`1/0`, `1/-2`, `1/2/3`) is an `Error`, like `IntOverflow`.
+            AtomKind::Ratio => NodeKind::Ratio,
+            AtomKind::RatioInvalid => NodeKind::Error,
             // A float-shaped but unparseable token (`1e`, `1.2.3`) — a parse error
             // in the reader; an `Error` token here so the LSP flags it the same.
             AtomKind::FloatInvalid => NodeKind::Error,

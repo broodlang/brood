@@ -247,12 +247,16 @@ impl GlWindow {
 
         for op in frame {
             match op {
+                // `radius` is ignored here for the same reason `FRect`'s is: this GPU
+                // path has no rounded-quad shader yet, so a rounded panel renders
+                // square. The active CPU painter rounds it properly.
                 Op::Rect {
                     row,
                     col,
                     w,
                     h,
                     face,
+                    radius: _,
                 } => {
                     if let Some(bg) = face.bg {
                         push(

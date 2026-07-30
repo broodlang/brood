@@ -902,6 +902,56 @@ impl Heap {
         }
     }
 
+    /// Materialise an exact `Value::Ratio` from an owned `num_rational::BigRational`
+    /// (mirrors [`alloc_decimal`](Self::alloc_decimal)). Enforces the normalize
+    /// invariant: a `BigRational` is always reduced with a positive denominator, and
+    /// a **denominator of 1 is an integer** — so it is demoted to `Int`/`BigInt`
+    /// (via [`int_from_bigint`](Self::int_from_bigint)), and a `Value::Ratio` is
+    /// therefore never integer-valued (so it never numerically equals an integer).
+    pub fn alloc_ratio(&mut self, n: num_rational::BigRational) -> Value {
+        use num_traits::One;
+        if n.denom().is_one() {
+            return self.int_from_bigint(n.numer().clone());
+        }
+        let idx = self.local.ratios.len();
+        self.local.ratios.push(n);
+        Value::ratio(RatioId::local_gen(idx, self.local_epoch))
+    }
+
+    /// Resolve a ratio handle to its `&num_rational::BigRational` (mirrors
+    /// [`decimal`](Self::decimal)). Honours the GC epoch tripwire like every leaf.
+    pub fn ratio(&self, id: RatioId) -> SlabRef<'_, num_rational::BigRational> {
+        match id.region() {
+            LOCAL if id.is_old() => {
+                local_gc_check!(old, self, id, "ratio");
+                SlabRef::direct(&self.old().ratios[id.index()])
+            }
+            LOCAL => {
+                local_gc_check!(nursery, self, id, "ratio");
+                SlabRef::direct(&self.local.ratios[id.index()])
+            }
+            PRELUDE => SlabRef::direct(&self.prelude.slabs.ratios[id.index()]),
+            RUNTIME => self.rt_slab_ref(id.code_gen(), |c| {
+                c.ratios.get(id.index()).expect("runtime ratio handle")
+            }),
+            _ => unreachable!("invalid handle region"),
+        }
+    }
+
+    /// Read any *rationalisable* exact number (`Int`, `BigInt`, or `Ratio`) as an
+    /// owned `num_rational::BigRational`, for the ratio arithmetic path. Returns
+    /// `None` for a `Float` (inexact — the float-contagion path handles that), a
+    /// `Decimal` (converted explicitly at the call site), or a non-number.
+    pub fn as_bigrational(&self, v: Value) -> Option<num_rational::BigRational> {
+        use num_rational::BigRational;
+        match v.unpack() {
+            ValueRef::Int(i) => Some(BigRational::from_integer(num_bigint::BigInt::from(i))),
+            ValueRef::BigInt(id) => Some(BigRational::from_integer(self.bigint(id).clone())),
+            ValueRef::Ratio(id) => Some(self.ratio(id).clone()),
+            _ => None,
+        }
+    }
+
     /// Materialise a `Value::Bytes` into LOCAL from an `Arc<SharedBlob>` of raw bytes
     /// (mirrors [`alloc_bigint`](Self::alloc_bigint)). Byte-clean — the bytes
     /// are arbitrary, never assumed UTF-8.

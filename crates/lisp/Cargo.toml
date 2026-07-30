@@ -169,6 +169,11 @@ num-traits = "0.2"
 # dep) — a `BigDecimal` is a `BigInt` mantissa + an `i64` scale. Mirrors the bignum
 # leaf for storage/GC; the `M`-suffix literal (`1.50M`) and the `decimal` builtin.
 bigdecimal = "0.4"
+# Exact rational numbers (`Value::Ratio`): `(/ 1 2)` and the `1/2` literal. A
+# `BigRational` is `Ratio<BigInt>` (built on `num-bigint`, already a dep), kept
+# reduced with a positive denominator automatically. Mirrors the bignum/decimal
+# leaf for storage/GC. `num-integer` (its gcd dependency) rides in transitively.
+num-rational = "0.4"
 # HMAC-SHA256 for the node-link handshake (ADR-034 v2): the cookie isn't sent on
 # the wire — each side proves possession of it by HMAC'ing a peer-supplied
 # nonce, so an eavesdropper can't replay the value. Vetted RustCrypto crates;

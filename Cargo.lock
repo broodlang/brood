@@ -428,6 +428,7 @@ dependencies = [
  "mimalloc",
  "mio",
  "num-bigint",
+ "num-rational",
  "num-traits",
  "raw-window-handle",
  "rcgen",

@@ -43,6 +43,10 @@ fn write_value(out: &mut String, heap: &Heap, v: Value, readable: bool, depth: u
             out.push_str(&heap.decimal(id).to_string());
             out.push('M');
         }
+        // A ratio prints as `num/den` (e.g. `1/2`), which re-reads to the same
+        // value — `BigRational`'s `Display` is exactly that form, and it is always
+        // reduced with a positive denominator. Both readable and display use it.
+        ValueRef::Ratio(id) => out.push_str(&heap.ratio(id).to_string()),
         // Raw bytes print as a `#b"…"` literal that re-reads to the same value:
         // printable ASCII verbatim, the named escapes by name, every other byte as
         // `\xHH`. Both readable and display use this form — bytes have no raw text.

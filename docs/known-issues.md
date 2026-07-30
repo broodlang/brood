@@ -5,7 +5,8 @@ present in committed code; KI-10 no longer reproduces, incidentally fixed — bo
 records, not open bugs. **KI-17** (the checker reachability gap) is now **FIXED** (ADR-189).
 **KI-18** (effect duplication on a deopt) and **KI-19** (call-head evaluation order) are
 both now **FIXED**, as is **KI-20** (a fast link ran the callee against the caller's IC
-block — a cold cache, never a wrong answer). **No open issues.**
+block — a cold cache, never a wrong answer), as is **KI-21** (`nest run --for` /
+`--watch` emitted a pre-ADR-150 `~p` pin and failed on every file). **No open issues.**
 This file is the condensed record — what each was, how it was fixed, and the regression
 test that guards it — so a recurrence is recognizable. For the narrative discovery
 writeup of the scheduler race, see
@@ -16,6 +17,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-21 | `nest run --for` / `--watch` generated a legacy `~p` pin — failed on any file | ✅ fixed 2026-07-30 |
 | KI-20 | a JIT fast link ran the callee against the *caller's* IC block (cold cache) | ✅ fixed 2026-07-30 |
 | KI-19 | VM resolved a call's free-global head *after* its arguments | ✅ fixed 2026-07-30 |
 | KI-18 | a JIT deopt could re-run a `table-put` (effect duplication) | ✅ fixed 2026-07-30 |
@@ -827,3 +829,46 @@ covers per-pane font); `gui-font!` takes an optional window id for per-window fo
   queues, then made moot by ADR-100 (heap-captured continuations).
 - **`cargo test --test suite` debug segfault** — coroutine stack overflow, not a
   memory bug; `WORKER_STACK_BYTES` raised (pages mmap'd lazily, ~0 cost until needed).
+
+## KI-21 — `nest run --for` / `--watch` emit a pre-ADR-150 `~p` pin
+
+**Status:** ✅ **fixed** 2026-07-30 (`~p` → `^p`). Found while smoke-testing a
+TUI/GUI app end to end.
+
+**Symptom.** Any `nest run --for <duration>` or `nest run --watch <path>` fails
+immediately, whatever the file:
+
+```
+$ printf '(println "hi")\n' > /tmp/t.blsp
+$ nest run /tmp/t.blsp --for 1s
+error: match: `~p` is not a pattern — a pin is written `^p` (`~` belongs to
+quasiquote alone). To match the literal 2-element list (unquote x), quote the
+head: ('unquote x).
+    at error / match-compile-velems ×3 / match-compile-vector /
+       match-build-clause / receive
+```
+
+Plain `nest run <file>` is unaffected — only the wrapped path.
+
+**Cause.** `crates/nest/src/main.rs:1203` builds the wrapper source as a string:
+
+```rust
+"(let (p (%spawn (fn () {}))) \
+      (monitor p) \
+      (receive ([:down _ ~p reason] (println \"[exit]\" reason)) {}))",
+```
+
+`~p` was the pin syntax before **ADR-150** moved pins to `^p` and made `~`
+quasiquote-only. The generated `receive` therefore fails to compile at runtime.
+Because the wrapper is only emitted when `timed.is_some()` or `--watch` is set,
+nothing in the normal `nest run` path exercises it — and since the code is a Rust
+string literal, neither `nest check` nor the Brood test suite can see it.
+
+**Fix.** `~p` → `^p` in that format string. Verified: `nest run --for 800ms` over a
+trivial file now exits 0 and prints `[stopped after 800ms]`.
+
+**Guard — still owed.** A test that actually *runs* `nest run --for 200ms` and asserts
+a zero exit. The general lesson is the durable part: **Brood source generated from Rust
+string literals is invisible to `nest check` and to the in-language suite**, so every
+such snippet needs an execution test rather than a reading. Worth grepping for the
+others.
