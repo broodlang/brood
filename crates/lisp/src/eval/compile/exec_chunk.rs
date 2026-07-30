@@ -412,9 +412,11 @@ pub(crate) fn exec_chunk(
                 pos,
                 site,
                 head,
+                staged,
             } => {
                 let pos = *pos;
                 let argc = *argc;
+                let staged = *staged;
                 let n = heap.roots_len();
                 let cur_env = heap.read_root_env(genv);
                 // The top `argc` operands are always the args. A **free-global** head
@@ -430,7 +432,53 @@ pub(crate) fn exec_chunk(
                     argv.push(heap.root_at(n - argc + k));
                 }
                 let mut fast: Option<(Arc<CompiledArm>, EnvId, (u32, u32))> = None;
-                let (callee, drop_base) = if let Some(sym) = head {
+                // KI-19: a *staged* head was resolved before the args (it sits below them),
+                // so the callee is that value — not a fresh resolution, which would observe
+                // a `def` an argument performed. The call-site IC is still consulted for the
+                // resolved **arm**, validated by identity against the staged callee: on the
+                // overwhelmingly common path nothing rebound, the IC's cached callee is the
+                // same value, and this costs one `Value` compare over the elided head.
+                let (callee, drop_base) = if staged {
+                    let drop_base = n - argc - 1;
+                    let v = heap.root_at(drop_base);
+                    if let Some(sym) = head {
+                        if *site != NO_SITE && heap.is_global(cur_env) {
+                            let epoch = heap.global_epoch();
+                            if let Some((cached, payload)) =
+                                heap.vm_call_ic_probe(*site, *sym, argc as u32, epoch)
+                            {
+                                // Identity, not equality: the IC's cached arm is only valid
+                                // for the very closure it was resolved from. A non-closure
+                                // callee is never arm-cached anyway, so it simply misses.
+                                let same = matches!(
+                                    (cached.unpack(), v.unpack()),
+                                    (ValueRef::Fn(a), ValueRef::Fn(b)) if a == b
+                                );
+                                if same {
+                                    crate::perf_bump!(call_ic_hit);
+                                    fast = payload;
+                                }
+                            }
+                        }
+                    }
+                    if fast.is_none() {
+                        crate::perf_bump!(call_ic_miss);
+                        fast = match v.unpack() {
+                            ValueRef::Fn(id)
+                                if crate::eval::passthrough_arm(heap, id, argc).is_none() =>
+                            {
+                                compiled_arm_for(heap, id, argc).map(|arm| {
+                                    let cenv =
+                                        heap.closure(id).env.unwrap_or_else(|| heap.global());
+                                    let block = heap.vm_arm_block(&arm);
+                                    (arm, cenv, block)
+                                })
+                            }
+                            _ => None,
+                        };
+                    }
+                    (v, drop_base)
+                } else if let Some(sym) = head {
                     let drop_base = n - argc;
                     if *site != NO_SITE && heap.is_global(cur_env) {
                         let epoch = heap.global_epoch();

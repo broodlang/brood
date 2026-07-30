@@ -2122,8 +2122,20 @@ fn jit_lower_arm_inner(
                     tail,
                     site,
                     head,
+                    staged,
                     pos: _,
                 } => {
+                    // KI-19: a staged head is already on the operand stack, resolved before
+                    // the args. The JIT must consume it and call *that* value — re-resolving
+                    // would observe a `def` an argument performed. That is exactly the
+                    // computed-callee shape it already handles, so hand it over as one
+                    // (`head: None`, `site: NO_SITE`); the in-IR fast link, which is keyed on
+                    // an elided head symbol, does not apply to these calls.
+                    let (head, site) = if *staged {
+                        (&None, &NO_SITE)
+                    } else {
+                        (head, site)
+                    };
                     match call::emit_call(
                         &mut b,
                         &mut stack,
