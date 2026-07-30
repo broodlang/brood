@@ -123,6 +123,13 @@ pub enum Op {
         w: u16,
         h: u16,
         face: Face,
+        /// Corner radius in **cell units**, 0.0 for a square panel. The GUI rounds
+        /// the fill; the terminal frontend ignores it and space-fills as always, so
+        /// one op serves both frontends (the same asymmetry `CursorZone` and
+        /// `FRect` already rely on). Rounded chrome — a pill address field, a
+        /// button highlight — no longer needs an `FRect` for the window plus a
+        /// `Rect` for the terminal.
+        radius: f32,
     },
     /// A **sub-cell** rounded rectangle: like `Rect`, but its position and size are in
     /// **cell units as floats** (`x`/`y` top-left, `w`/`h` size — `0.4` cells wide,
@@ -287,6 +294,7 @@ mod disabled {
         _subscriber: u64,
         _title: Option<String>,
         _size: Option<(f64, f64)>,
+        _decorations: bool,
     ) -> Result<u64, String> {
         Err(NOT_COMPILED.into())
     }
@@ -306,6 +314,15 @@ mod disabled {
         Err(NOT_COMPILED.into())
     }
     pub fn maximize(_id: u64, _on: bool) -> Result<(), String> {
+        Err(NOT_COMPILED.into())
+    }
+    pub fn minimize(_id: u64) -> Result<(), String> {
+        Err(NOT_COMPILED.into())
+    }
+    pub fn drag_move(_id: u64) -> Result<(), String> {
+        Err(NOT_COMPILED.into())
+    }
+    pub fn drag_resize(_id: u64, _dir: &str) -> Result<(), String> {
         Err(NOT_COMPILED.into())
     }
     pub fn fullscreen(_id: u64, _on: bool) -> Result<(), String> {
@@ -342,14 +359,14 @@ mod disabled {
 
 #[cfg(not(feature = "gui"))]
 pub use disabled::{
-    bg, close, draw, focus, font, fullscreen, grab, held_key, icon, inset, maximize, open,
-    register_family, size, title,
+    bg, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key, icon, inset,
+    maximize, minimize, open, register_family, size, title,
 };
 
 #[cfg(feature = "gui")]
 pub use backend::{
-    bg, close, draw, focus, font, fullscreen, grab, held_key, icon, inset, maximize, open,
-    register_family, size, title,
+    bg, close, drag_move, drag_resize, draw, focus, font, fullscreen, grab, held_key, icon, inset,
+    maximize, minimize, open, register_family, size, title,
 };
 
 #[cfg(feature = "gui")]
@@ -474,6 +491,10 @@ pub(crate) mod backend {
             subscriber: u64,
             title: Option<String>,
             size: Option<(f64, f64)>,
+            /// False for a borderless window — no OS title bar or frame, so an app
+            /// that draws its own chrome (a browser's tab strip + toolbar) owns the
+            /// whole surface instead of sitting under a redundant second title.
+            decorations: bool,
             reply: Sender<Result<OpenReply, String>>,
         },
         /// Replace window `id`'s frame and repaint it.
@@ -502,6 +523,17 @@ pub(crate) mod backend {
         /// the title bar / decorations — it just fills the screen's work area. Behind
         /// `gui-maximize!` — what an editor `init.blsp` toggles to open big.
         Maximize { id: u64, on: bool },
+        /// Iconify window `id`. The counterpart of `Maximize` for an app that draws
+        /// its own window controls and therefore has no OS minimise button.
+        Minimize { id: u64 },
+        /// Hand window `id` to the window manager for an interactive **move** —
+        /// the gesture an OS title bar would have provided. A borderless window
+        /// (`decorations: false`) has no title bar to grab, so the app nominates a
+        /// region of its own chrome (a browser's tab strip) and calls this on press.
+        DragMove { id: u64 },
+        /// Hand window `id` to the window manager for an interactive **resize** from
+        /// `dir` — the gesture an OS window frame would have provided.
+        DragResize { id: u64, dir: String },
         /// Make window `id` borderless-fullscreen (`on`) or restore it — fills the
         /// whole monitor with no title bar / decorations (distraction-free). Behind
         /// `gui-fullscreen!`; the title-keeping sibling is `Maximize`.
@@ -621,6 +653,7 @@ pub(crate) mod backend {
         subscriber: u64,
         title: Option<String>,
         size: Option<(f64, f64)>,
+        decorations: bool,
     ) -> Result<u64, String> {
         // Headless: register a fake window (fixed cell grid, no input) without ever
         // starting winit, so nothing pops up.
@@ -645,6 +678,7 @@ pub(crate) mod backend {
                 subscriber,
                 title,
                 size,
+                decorations,
                 reply: reply_tx,
             })
             .map_err(|_| "gui thread is gone".to_string())?;
@@ -726,6 +760,63 @@ pub(crate) mod backend {
             .lock()
             .unwrap()
             .send_event(UserEvent::Maximize { id, on })
+            .map_err(|_| "gui thread is gone".to_string())
+    }
+
+    /// `(gui-minimize! id)` — iconify window `id`. Dispatched like `maximize`.
+    pub fn minimize(id: u64) -> Result<(), String> {
+        {
+            let w = windows().lock().unwrap();
+            if !w.contains_key(&id) {
+                return Err("gui window not open".into());
+            }
+        }
+        if headless() {
+            return Ok(());
+        }
+        gui()?
+            .lock()
+            .unwrap()
+            .send_event(UserEvent::Minimize { id })
+            .map_err(|_| "gui thread is gone".to_string())
+    }
+
+    /// `(gui-drag-move id)` — start an interactive window move.
+    pub fn drag_move(id: u64) -> Result<(), String> {
+        {
+            let w = windows().lock().unwrap();
+            if !w.contains_key(&id) {
+                return Err("gui window not open".into());
+            }
+        }
+        if headless() {
+            return Ok(());
+        }
+        gui()?
+            .lock()
+            .unwrap()
+            .send_event(UserEvent::DragMove { id })
+            .map_err(|_| "gui thread is gone".to_string())
+    }
+
+    /// `(gui-drag-resize id dir)` — start an interactive resize from edge/corner `dir`.
+    pub fn drag_resize(id: u64, dir: &str) -> Result<(), String> {
+        {
+            let w = windows().lock().unwrap();
+            if !w.contains_key(&id) {
+                return Err("gui window not open".into());
+            }
+        }
+        if headless() {
+            return Ok(());
+        }
+        gui()?
+            .lock()
+            .unwrap()
+            .send_event(UserEvent::DragResize {
+                id,
+                dir: dir.to_string(),
+            })
             .map_err(|_| "gui thread is gone".to_string())
     }
 
@@ -1118,6 +1209,7 @@ pub(crate) mod backend {
         subscriber: u64,
         title: Option<String>,
         size: Option<(f64, f64)>,
+        decorations: bool,
         families: Families,
         base_px: f32,
         default_family: Option<u32>,
@@ -1129,6 +1221,7 @@ pub(crate) mod backend {
             .create_window(
                 Window::default_attributes()
                     .with_title(title.unwrap_or_else(|| "Brood".to_string()))
+                    .with_decorations(decorations)
                     .with_inner_size(LogicalSize::new(w, h)),
             )
             .map_err(|e| format!("window: {e}"))?;
@@ -1209,6 +1302,7 @@ pub(crate) mod backend {
             u64,
             Option<String>,
             Option<(f64, f64)>,
+            bool,
             Sender<Result<OpenReply, String>>,
         )>,
     }
@@ -1223,6 +1317,7 @@ pub(crate) mod backend {
             subscriber: u64,
             title: Option<String>,
             size: Option<(f64, f64)>,
+            decorations: bool,
             reply: Sender<Result<OpenReply, String>>,
         ) {
             let id = next_id();
@@ -1231,6 +1326,7 @@ pub(crate) mod backend {
                 subscriber,
                 title,
                 size,
+                decorations,
                 self.families.clone(),
                 self.default_px,
                 self.default_family,
@@ -1262,8 +1358,10 @@ pub(crate) mod backend {
         fn resumed(&mut self, event_loop: &ActiveEventLoop) {
             event_loop.set_control_flow(ControlFlow::Wait);
             self.resumed = true;
-            for (subscriber, title, size, reply) in std::mem::take(&mut self.pending_open) {
-                self.open_window(event_loop, subscriber, title, size, reply);
+            for (subscriber, title, size, decorations, reply) in
+                std::mem::take(&mut self.pending_open)
+            {
+                self.open_window(event_loop, subscriber, title, size, decorations, reply);
             }
         }
 
@@ -1274,12 +1372,14 @@ pub(crate) mod backend {
                     subscriber,
                     title,
                     size,
+                    decorations,
                     reply,
                 } => {
                     if self.resumed {
-                        self.open_window(event_loop, subscriber, title, size, reply);
+                        self.open_window(event_loop, subscriber, title, size, decorations, reply);
                     } else {
-                        self.pending_open.push((subscriber, title, size, reply));
+                        self.pending_open
+                            .push((subscriber, title, size, decorations, reply));
                     }
                 }
                 // Set a live window's OS title-bar text (behind gui-title!).
@@ -1355,6 +1455,36 @@ pub(crate) mod backend {
                 // Maximise the window (fill the work area, keep the title bar) or
                 // restore it. The resize that follows republishes the new cell grid
                 // like any other, so the loop re-renders at the bigger size.
+                UserEvent::Minimize { id } => {
+                    if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
+                        w.window.set_minimized(true);
+                    }
+                }
+                // Both drags hand the gesture to the window manager, which then owns
+                // it until the button is released — so a failure here (an unsupported
+                // platform, or no button actually held) is ignored rather than raised:
+                // the app asked politely and the WM declined.
+                UserEvent::DragMove { id } => {
+                    if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
+                        let _ = w.window.drag_window();
+                    }
+                }
+                UserEvent::DragResize { id, dir } => {
+                    if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
+                        use winit::window::ResizeDirection as RD;
+                        let d = match dir.as_str() {
+                            "north" => RD::North,
+                            "south" => RD::South,
+                            "east" => RD::East,
+                            "west" => RD::West,
+                            "north-east" => RD::NorthEast,
+                            "north-west" => RD::NorthWest,
+                            "south-east" => RD::SouthEast,
+                            _ => RD::SouthWest,
+                        };
+                        let _ = w.window.drag_resize_window(d);
+                    }
+                }
                 UserEvent::Maximize { id, on } => {
                     if let Some(w) = self.ids.get(&id).and_then(|wid| self.wins.get(wid)) {
                         w.window.set_maximized(on);
@@ -1869,8 +1999,13 @@ pub(crate) mod backend {
     fn apply_font(w: &mut Win, family: Option<u32>, px: Option<f32>) {
         w.renderer.set_font(family, px);
         update_cells(&w.window, &w.renderer, &w.size);
-        // A new font changes the cell size; the new sub-cell remainder is re-placed at
-        // paint time (`grid_origin`), so there's nothing to resize here.
+        // A new font changes the cell size, hence the (cols, rows) grid — exactly like a
+        // window resize. Wake the app loop with the new grid so it RE-RENDERS its content at
+        // the new size; without this the redraw below only repaints the stale old frame and
+        // the buffer body goes blank until the next unrelated input/timer (the font-switch UI
+        // break). The sub-cell remainder is re-placed at paint time (`grid_origin`).
+        let (cols, rows) = *w.size.lock().unwrap();
+        deliver(w.subscriber, resize_message(cols, rows));
         w.window.request_redraw();
     }
 
@@ -3005,6 +3140,7 @@ pub(crate) mod backend {
                     w,
                     h,
                     face,
+                    radius,
                 } => {
                     // A solid panel: fill the w×h cell block with the face background
                     // (reverse swaps in the fg). No background → nothing to paint.
@@ -3016,16 +3152,34 @@ pub(crate) mod backend {
                         let visible_h = (h_px - clip_skip).max(0) as usize;
                         if visible_h > 0 {
                             let render_top = top_signed.max(oy as isize) as usize;
-                            fill_cell(
-                                buf,
-                                fb_w,
-                                fb_h,
-                                ox + *col as usize * cw,
-                                render_top,
-                                *w as usize * cw,
-                                visible_h,
-                                pack(bg),
-                            );
+                            if *radius > 0.0 {
+                                // Rounded: the same AA filler `FRect` uses, over the
+                                // cell-aligned box. Clipping is shared with the square
+                                // path above, so a rounded panel scrolls identically.
+                                fill_rrect(
+                                    buf,
+                                    fb_w,
+                                    fb_h,
+                                    (ox + *col as usize * cw) as f32,
+                                    render_top as f32,
+                                    (*w as usize * cw) as f32,
+                                    visible_h as f32,
+                                    *radius * cw as f32,
+                                    bg,
+                                    1.0,
+                                );
+                            } else {
+                                fill_cell(
+                                    buf,
+                                    fb_w,
+                                    fb_h,
+                                    ox + *col as usize * cw,
+                                    render_top,
+                                    *w as usize * cw,
+                                    visible_h,
+                                    pack(bg),
+                                );
+                            }
                         }
                     }
                 }

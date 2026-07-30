@@ -12681,3 +12681,64 @@ round-trip proving the record + method dispatch survive a `send`).
 load-bearing in real use — the `1/2` literal, `=` with integers, and numeric-tower ordering/
 contagion (incl. the ratio+decimal rule the decimal path leaves open). Until then the prototype is
 the answer, and the freeze stays additive (ADR-169 reserved the token for exactly this).
+
+## 2026-07-30 (cont.) — exact rationals promoted to a kernel type (ADR-196)
+
+Promoted the ratio prototype to a kernel `Value::Ratio` (`num_rational::BigRational`), after it
+proved the four kernel-only properties are load-bearing. `1/2` is now a reader literal, and **`/`
+on integers is exact**: `(/ 1 2)` → `1/2`, `(/ 6 3)` → `2` (this overrides the freeze row
+"`(/ 1 2)` is a float" — a discussed, deliberate relaxation; `->float`/`->decimal` are the escape
+hatches). Full tower with int/decimal/float contagion (ratio+decimal is exact and lossless —
+`(+ 1/2 0.5M)` → `1`); ratio arms in `value_cmp`/`equal`/`hash`; reader/printer/wire/message; both
+GC collectors + region/checkpoint plumbing (mirrored on `Value::Decimal` at every site).
+Normalize invariant: a denominator of 1 demotes to `Int`, so a ratio is never integer-valued
+(`4/2` IS `2`).
+
+**Perf note (the reason exact `/` is affordable):** `/` already returned int-or-float by
+divisibility, and the JIT's unboxed loop already deopts on inexact division — so the hot path is
+unchanged; only the inexact cold path now allocates a ratio instead of a float. The VM inline
+`prim_apply` defers inexact `/` to `prim_div`; the JIT deopt lands there too.
+
+Conversions: `numerator`/`denominator`/`->decimal` (kernel builtins), `->float`/`rational`/`ratio?`
+(prelude). `number?` includes `:ratio`; the checker's `NUMBER` union too, so arithmetic/`<`/`sort`
+type-clean. `sort`/`%sort-asc` widened to the whole numeric tower (fixed a latent decimal-sort
+bug). The `std/ratio.blsp` prototype is deleted (superseded). Types/LSP/MCP all know `:ratio`.
+Found + fixed a debug-only discriminant bound (`tag > 24` → `> 25`, dispatch.rs + jit/mod.rs) that
+rejected the new tag. Tests: `tests/ratio_test.blsp` (14, incl. cross-process). En route fixed a
+merge break: origin's receive-mark test called `receive_match` with the pre-`pin` arity.
+
+## 2026-07-30 (cont.) — asking the build what it can do; a rounded `rect`; KI-21
+
+Three gaps surfaced by writing a **downstream app** (`../waggle`, a browser for a
+hypermedia protocol) rather than by working on the runtime — which is the point of
+having one.
+
+**KI-21 fixed** (`crates/nest/src/main.rs`). `nest run --for` and `--watch` wrap the
+program in a generated `receive` whose source is a Rust string literal, and it still
+carried a pre-ADR-150 pin: `([:down _ ~p reason] …)`. Since ADR-150 made `~`
+quasiquote-only, **both flags failed on every file**, with a `match: \`~p\` is not a
+pattern` error and no file/line. One character (`~p` → `^p`).
+
+The lesson generalises past the typo: **Brood source generated from Rust string
+literals is invisible to `nest check` and to the in-language suite.** Nothing could
+have caught this except running the flag, and nothing did, because the wrapper is
+only emitted when `--for`/`--watch` is set. Any such snippet needs an *execution*
+test, not a reading — worth a grep for the others.
+
+**`features` + `feature?` (ADR-196).** A builtin from an absent optional feature is
+still *bound* and still raises when called, so `(bound? 'gui-open)` answers yes on a
+runtime that cannot open a window. The app was reduced to calling it and matching on
+the error's prose (`index-of … "gui backend"`) — which silently turns a graceful
+terminal fallback into a crash the day someone rewords `NOT_COMPILED`. `(features)`
+is one Rust builtin over `cfg!`; `feature?` is a prelude one-liner over it.
+
+**`rect` takes a corner radius.** `frect` was rounded but GUI-only and `rect` was
+square but universal, so rounded chrome needed *both* — an `frect` for the window plus
+a `rect` inside it for the terminal, correct only because the two shared a colour.
+`rect`'s optional 6th element rounds in the GUI and is ignored by the terminal, the
+same asymmetry `cursor-zone` and `frect` already rely on. A zero radius emits the
+5-element op unchanged, so every existing frame is byte-identical.
+
+Verified: full in-language suite 3941 green, `display_test` + `introspection_test`
+extended, `nest run --for 800ms` now exits 0 and prints `[stopped after 800ms]`.
+

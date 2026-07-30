@@ -1427,7 +1427,7 @@ mod tests {
         // Empty mailbox, no timeout: the scan finds nothing and the capture branch
         // returns the suspend signal. `matcher` is never applied (the queue is empty),
         // so a plain `nil` suffices.
-        let r = receive_match(&mut heap, Value::nil(), Value::nil(), Value::nil());
+        let r = receive_match(&mut heap, Value::nil(), Value::nil(), Value::nil(), Value::nil());
         crate::process::scheduler::set_capture_top_level(prev_top);
         crate::process::scheduler::set_capture_run(false);
         crate::process::scheduler::CURRENT.with(|c| *c.borrow_mut() = None); // don't leak the dummy ctx

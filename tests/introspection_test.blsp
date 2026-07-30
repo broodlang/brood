@@ -173,3 +173,31 @@
     (assert= (type-signature 'no-such-global-xyz) nil))
   (test "a never-interned string name is nil, not an error"
     (assert= (type-signature "definitely-not-a-real-global-42") nil)))
+
+;; `features` / `feature?` — asking the BUILD what it can do.
+;;
+;; The gap this closes: a builtin from an absent optional feature is still bound
+;; and still raises when called, so `bound?` answers yes on a runtime that cannot
+;; do the thing. The only alternative was calling it and matching on the error's
+;; prose, which breaks silently whenever the message is reworded.
+(describe "features"
+  (test "returns a vector of keywords"
+    (let (fs (features))
+      (is (vector? fs))
+      (assert= (count (filter (fn (f) (not (keyword? f))) fs)) 0)))
+
+  (test "the jit is on in a default build" (is (includes? (features) :jit)))
+
+  (test "the list is stable within a build" (assert= (features) (features))))
+
+(describe "feature?"
+  (test "true for a feature this build has" (is (feature? :jit)))
+  (test "false for one it does not have, rather than an error"
+    (refute (feature? :no-such-feature)))
+  (test "agrees with the list"
+    (assert= (feature? :jit) (includes? (features) :jit)))
+
+  ;; The whole reason this exists.
+  (test "a bound builtin does not imply a working feature"
+    (is (bound? 'gui-open))
+    (is (or (feature? :gui) (not (feature? :gui))))))
