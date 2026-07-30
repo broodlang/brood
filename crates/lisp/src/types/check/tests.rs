@@ -3769,6 +3769,28 @@ fn ki17_flags_a_qualified_reference_to_an_unrequired_module() {
 }
 
 #[test]
+fn ki17_alias_clause_feeds_the_require_closure() {
+    // Regression (generative fuzzer find): `(:alias mod :as x)` *loads* `mod` (it
+    // `require`s it, then adds the `x/` prefix), so `module_direct_requires` must report
+    // `mod` as a direct dependency — else a file that `:alias`es a module and also names
+    // it qualified (or via the alias, which macro-expands to `mod/…`) false-positives.
+    let mut interp = crate::Interp::new();
+    let forms = crate::syntax::reader::read_all(
+        &mut interp.heap,
+        "(defmodule c \"c\" (:use ua) (:use-internals ub) (:alias uc :as x))\n(defn use () 1)",
+    )
+    .expect("parse");
+    let (own, deps) = crate::types::check::module_direct_requires(&interp.heap, &forms);
+    assert_eq!(own.as_deref(), Some("c"));
+    for m in ["ua", "ub", "uc"] {
+        assert!(
+            deps.iter().any(|d| d == m),
+            "{m} should be a direct require (deps = {deps:?})"
+        );
+    }
+}
+
+#[test]
 fn unexpandable_macro_calls_dont_false_flag() {
     // A file-local macro the checker can't expand: its arguments are opaque
     // syntax. (a) A macro that `def`s its symbol arg — the name must not look

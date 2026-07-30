@@ -266,12 +266,14 @@ fn extract_use_module_names(heap: &Heap, forms: &[Value]) -> Vec<String> {
     extract_clause_modules(heap, forms, &["use"])
 }
 
-/// Every module named in an *import* clause of the header — both `(:use mod)` and
-/// `(:use-internals mod)`, either of which loads `mod`. Used for the KI-17 reachability
-/// set (a `:use-internals` module is genuinely reachable). Kept separate from
+/// Every module named in an *import* clause of the header — `(:use mod)`,
+/// `(:use-internals mod)`, and `(:alias mod [:as short])`, each of which **loads** `mod`
+/// (an `:alias` `(require …)`s its target, then adds the `short/` prefix; references via
+/// the alias macro-expand to `mod/…`). Used for the KI-17 reachability set — a module
+/// reached by any of these is genuinely required. Kept separate from
 /// [`extract_use_module_names`], whose `:use`-only view backs the unused-import lint.
 fn extract_import_module_names(heap: &Heap, forms: &[Value]) -> Vec<String> {
-    extract_clause_modules(heap, forms, &["use", "use-internals"])
+    extract_clause_modules(heap, forms, &["use", "use-internals", "alias"])
 }
 
 /// The module names listed by any header clause whose keyword is in `keywords`

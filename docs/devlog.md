@@ -11872,3 +11872,22 @@ the rest of the checker uses (a pathologically deep form overflowed it); and the
 cache entry gained a 5th field (the closure), so a closure shift re-checks the dependent even
 when its own mtime didn't move — cache version v1→v2. Docs: KI-17 → FIXED, ADR-189, `check-allow
 :unrequired` category.
+
+## 2026-07-30 (cont.) — correctness sweeps + a fuzzer-found KI-17 false positive
+
+Two adversarial correctness sweeps after the KI-17 fix. **Kernel soundness:** the
+recently-changed paths (single-copy local send, `defmulti` dispatch, IC rework) plus
+maps/CHAMP and all 12 JIT tests, under `BROOD_GC_STRESS=1` + `BROOD_GC_VERIFY=1` +
+`BROOD_JIT_VERIFY=1` on a debug-assertions release build — **clean, zero faults**.
+**Checker false positives:** a battery of valid programs across every checker feature
+shipped this session — clean.
+
+Then a **generative reachability fuzzer** (hundreds of valid multi-module programs varying
+import style — direct / `:use` / `:use-internals` / `:alias` / transitive — and nested
+module names) found one real false positive: the KI-17 require-closure ignored the
+`(:alias mod :as x)` clause, so a file that aliased a module and also named it qualified
+(`mod/f`, or `x/f` which macro-expands to `mod/f`) was flagged as referencing an unrequired
+module. `:alias` in fact `require`s its target, so `extract_import_module_names` now includes
+it. Regression test `ki17_alias_clause_feeds_the_require_closure`; the fuzzer re-runs clean
+(200 valid + 30 transitive → 0 false positives, 30 negative controls → 0 misses), and the
+full `std/`+`tests/` sweep stays at zero.
