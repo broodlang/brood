@@ -32,7 +32,8 @@
 //!
 //! ## Where signatures come from (Step 3)
 //!
-//! Three sources, simplest-first — *no inference engine* (`docs/types.md`):
+//! Three sources, simplest-first — a bounded, sound inferencer rather than a full
+//! unification engine (`docs/types.md`):
 //!
 //! 1. **Primitives** — every [`NativeFn`](crate::core::value::NativeFn) carries
 //!    a `Sig` ([contract point #6, enforced](../docs/types.md#compatibility-contract))
@@ -90,11 +91,13 @@
 //!   [`check_file`] accumulates top-level `def`/`defn`/`defmacro` / `defdyn`
 //!   names across the forms in a file.
 //!
-//! Not yet (later increments): inference through `cond`/`match`, structured /
-//! `and`/`or`-chained guards, recursion, higher-order. The checker runs
-//! automatically as the pre-flight in `brood <file>` / `nest test` / `nest run`
-//! / `nest check`; the in-process entry points are [`check_file`] (whole file)
-//! and the `(check 'form)` builtin (a fragment).
+//! Inference now covers control-flow returns (`if`/`cond`/`let`/`do`/`case`), recursion,
+//! multi-arity/variadic closures, and — via `check_file`'s Pass 2.8 fixpoint — a file's own
+//! functions (form-based, since the file isn't loaded while checked). Still deferred:
+//! `and`/`or`-chained guard narrowing and higher-order-callback result inference. The checker
+//! runs automatically as the pre-flight in `brood <file>` / `nest test` / `nest run` /
+//! `nest check`; the in-process entry points are [`check_file`] (whole file) and the
+//! `(check 'form)` builtin (a fragment).
 //!
 //! **Operand-position unbound symbols.** The unbound-symbol diagnostic fires on
 //! both a combination's *head* and its *operand / value* positions — `(+ 1 typo)`,
@@ -113,6 +116,7 @@
 mod annot;
 mod ctx;
 pub(super) mod deps;
+mod exhaustive;
 mod guards;
 mod hygiene;
 mod infer;
@@ -259,6 +263,20 @@ fn is_ns_header(heap: &Heap, form: Value) -> bool {
 /// Parse the `(defmodule … (:use mod) …)` header from the *unexpanded* `forms`
 /// and return the module names explicitly listed in `:use` clauses.
 fn extract_use_module_names(heap: &Heap, forms: &[Value]) -> Vec<String> {
+    extract_clause_modules(heap, forms, &["use"])
+}
+
+/// Every module named in an *import* clause of the header — both `(:use mod)` and
+/// `(:use-internals mod)`, either of which loads `mod`. Used for the KI-17 reachability
+/// set (a `:use-internals` module is genuinely reachable). Kept separate from
+/// [`extract_use_module_names`], whose `:use`-only view backs the unused-import lint.
+fn extract_import_module_names(heap: &Heap, forms: &[Value]) -> Vec<String> {
+    extract_clause_modules(heap, forms, &["use", "use-internals"])
+}
+
+/// The module names listed by any header clause whose keyword is in `keywords`
+/// (e.g. `:use` / `:use-internals`), read from the *unexpanded* `(defmodule …)` form.
+fn extract_clause_modules(heap: &Heap, forms: &[Value], keywords: &[&str]) -> Vec<String> {
     for &form in forms {
         if !is_ns_header(heap, form) {
             continue;
@@ -273,10 +291,10 @@ fn extract_use_module_names(heap: &Heap, forms: &[Value]) -> Vec<String> {
         let mut cur = clauses;
         while let Value::Pair(p) = cur {
             let (clause, next) = heap.pair(p);
-            // Each (:use mod …) clause starts with the :use keyword.
+            // Each (:use mod …) / (:use-internals mod …) clause starts with its keyword.
             if let Some(items) = list_items(heap, clause) {
                 if let Some(Value::Keyword(kw_sym)) = items.first() {
-                    if value::symbol_is(*kw_sym, "use") {
+                    if keywords.iter().any(|k| value::symbol_is(*kw_sym, k)) {
                         if let Some(&Value::Sym(mod_sym)) = items.get(1) {
                             result.push(value::symbol_name(mod_sym).to_string());
                         }
@@ -288,6 +306,129 @@ fn extract_use_module_names(heap: &Heap, forms: &[Value]) -> Vec<String> {
         return result;
     }
     Vec::new()
+}
+
+/// The module name a top-level `(require …)` targets, if any — `(require 'mod)`,
+/// `(require "mod")`, or `(require 'mod :as m)`. `None` for a non-require form or a
+/// dynamic require whose module argument isn't a literal symbol/string (harmless: an
+/// un-added prefix can only *add* a warning, so a dynamic require that this misses is
+/// caught by the `raw_qualified` guard / the sweep, never a silent unsoundness the
+/// other way).
+fn require_target(heap: &Heap, form: Value) -> Option<String> {
+    let items = list_items(heap, form)?;
+    match items.first() {
+        Some(&Value::Sym(h)) if value::symbol_is(h, "require") => {}
+        _ => return None,
+    }
+    match *items.get(1)? {
+        // `'mod` reads as `(quote mod)`.
+        arg @ Value::Pair(_) => {
+            let inner = list_items(heap, arg)?;
+            match (inner.first(), inner.get(1)) {
+                (Some(&Value::Sym(q)), Some(&Value::Sym(m))) if value::symbol_is(q, "quote") => {
+                    Some(value::symbol_name(m))
+                }
+                _ => None,
+            }
+        }
+        Value::Sym(m) => Some(value::symbol_name(m)),
+        Value::Str(id) => Some(heap.string(id).to_string()),
+        _ => None,
+    }
+}
+
+/// The KI-17 reachability set — module prefixes the file makes reachable *itself*:
+/// every `(:use M)` in its header, every `(require 'M)` **anywhere** in the file
+/// (including one nested in a function body — `project.blsp` requires `test`/`package`
+/// lazily inside the functions that use them, to keep startup lean), and its own
+/// namespace. A file that requires `M` *somewhere* is treated as reaching `M` for the
+/// whole file — an over-approximation, which is the sound direction (it can only
+/// *suppress* a warning, never invent one). Direct requires only, not their transitive
+/// closure; matching the discipline that a file `require`s what it names. See
+/// [`Ctx::required_mods`] and `walk::unrequired_module`.
+fn collect_required_modules(
+    heap: &Heap,
+    forms: &[Value],
+    file_ns: Option<Symbol>,
+) -> HashSet<String> {
+    let mut mods: HashSet<String> = extract_import_module_names(heap, forms).into_iter().collect();
+    if let Some(ns) = file_ns {
+        mods.insert(value::symbol_name(ns));
+    }
+    for &form in forms {
+        collect_require_targets(heap, form, &mut mods);
+    }
+    mods
+}
+
+/// A file's own module name (from its `(defmodule …)` header, or `None`) and the module
+/// names it **directly** pulls in — `(:use …)` / `(:use-internals …)` clauses plus every
+/// `(require 'M)` anywhere in the file. The edge list the whole-project driver
+/// (`std/tool/project.blsp`) closes transitively into each file's KI-17 reachability set,
+/// then feeds back to [`check_file_ext`]. Own ns is excluded from `requires`.
+pub fn module_direct_requires(heap: &Heap, forms: &[Value]) -> (Option<String>, Vec<String>) {
+    let file_ns = crate::eval::macros::file_ns(heap, forms);
+    let own = file_ns.map(value::symbol_name);
+    let mut deps: HashSet<String> = extract_import_module_names(heap, forms).into_iter().collect();
+    for &form in forms {
+        collect_require_targets(heap, form, &mut deps);
+    }
+    if let Some(ref n) = own {
+        deps.remove(n);
+    }
+    let mut deps: Vec<String> = deps.into_iter().collect();
+    deps.sort(); // deterministic order (no Date/random in the checker)
+    (own, deps)
+}
+
+/// Add every `(require 'M)` target reachable in `form` — descending through list,
+/// vector, and map structure so a `require` nested in any function body is found.
+fn collect_require_targets(heap: &Heap, form: Value, out: &mut HashSet<String>) {
+    // Guard the deep-form recursion the same way `count_defs` does — a pathologically
+    // nested source must not overflow the checker's stack (tests/…deep_forms).
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        if let Some(m) = require_target(heap, form) {
+            out.insert(m);
+        }
+        match form {
+            Value::Pair(pid) => {
+                let (car, cdr) = heap.pair(pid);
+                collect_require_targets(heap, car, out);
+                collect_require_targets(heap, cdr, out);
+            }
+            Value::Vector(vid) => {
+                for v in heap.vector(vid).iter() {
+                    collect_require_targets(heap, *v, out);
+                }
+            }
+            Value::Map(mid) => {
+                for (k, v) in heap.map_entries(mid).iter() {
+                    collect_require_targets(heap, *k, out);
+                    collect_require_targets(heap, *v, out);
+                }
+            }
+            _ => {}
+        }
+    })
+}
+
+/// Every qualified symbol *name* (`"mod/name"`, module segment non-empty) appearing
+/// anywhere in the un-expanded `forms` — the user-written references. Over-approximate
+/// (includes quoted data and binder positions), which is sound for the KI-17 lint: it
+/// only *permits* a warning the walk independently decides to emit (and the walk already
+/// excludes quotes/binders), so a name present only after macro expansion is treated as
+/// macro-injected and never flagged.
+fn collect_raw_qualified(heap: &Heap, forms: &[Value]) -> HashSet<String> {
+    collect_all_syms(heap, forms)
+        .into_iter()
+        .filter_map(|s| {
+            let n = value::symbol_name(s);
+            match n.rfind('/') {
+                Some(slash) if slash > 0 => Some(n),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// Populate the current file's import table from a `(defmodule … (:use …)/(:alias …))`
@@ -490,6 +631,21 @@ pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
 /// its un-expanded shape — the eval path will surface the same parse-time
 /// error later anyway, so the checker just stays quiet there.
 pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)> {
+    check_file_ext(heap, forms, &[])
+}
+
+/// [`check_file`] with an explicit **KI-17 reachability set** — the file's *transitive*
+/// require-closure (module names), computed by the whole-project driver
+/// (`std/tool/project.blsp`, which alone sees every file's header). Unioned with the
+/// file's own direct requires (which `check_file_ext` derives from `forms`), it becomes
+/// [`Ctx::required_mods`]: a user-written `mod/name` whose `mod` is outside the closure
+/// resolves only by load-order luck and is flagged. Pass `&[]` for the single-file /
+/// LSP path, where the un-required module simply isn't loaded and the lint is inert.
+pub fn check_file_ext(
+    heap: &mut Heap,
+    forms: &[Value],
+    extra_required: &[String],
+) -> Vec<(Option<Pos>, String)> {
     let mut out = Vec::new();
     // Block the copying GC for the whole check: this fn holds LOCAL handles in
     // Rust `Vec`s (`forms`/`expanded`) *across* the `eval` of `(require …)` forms
@@ -618,6 +774,16 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         // per file was the residual O(files²) after the header-eval redesign — an O(1) `Arc`
         // clone on all but the first file of a whole-project check.
         ctx.set_known_ns_arc(heap.known_ns_prefixes());
+        // KI-17: arm the unrequired-module lint. `required_mods` is what THIS file
+        // pulls in (its `:use`/`require` + own ns); `raw_qualified` restricts the lint
+        // to references the user literally wrote. In a whole-project check every module
+        // is bound image-wide, so a user-written `mod/name` whose `mod` is absent here
+        // resolves only by load-order luck — the walk flags it. (In single-file mode an
+        // un-required module isn't bound at all, so the lint is naturally inert there.)
+        let mut required = collect_required_modules(heap, &forms, file_ns);
+        required.extend(extra_required.iter().cloned());
+        ctx.set_required_mods(required);
+        ctx.set_raw_qualified(collect_raw_qualified(heap, &forms));
         for &form in &expanded {
             collect_def_names(heap, form, &mut ctx);
         }
@@ -671,9 +837,7 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         {
             let mut def_count: HashMap<Symbol, usize> = HashMap::new();
             for &form in &expanded {
-                if let Some((name, _)) = def_name_and_value(heap, form) {
-                    *def_count.entry(name).or_insert(0) += 1;
-                }
+                count_defs(heap, form, &mut def_count);
             }
             for &form in &expanded {
                 let Some((name, rhs)) = def_name_and_value(heap, form) else {
@@ -683,9 +847,18 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
                 // **dynamic variable** (`defdyn`): a dynvar's `def` sets only the
                 // default, but `binding` rebinds it to any type in a dynamic extent, so
                 // its value type isn't fixed — it must stay `dynamic()`.
+                // Also skip an **earmuffed** `*name*` global: it is dynamic by convention
+                // (reassigned over its lifetime — the lazy-init `(when (nil? *g*) (def *g*
+                // …))` pattern is common), so pinning it to its load-time default value would
+                // false-positive once it is reassigned — and, now that Pass 2.8 infers a
+                // function's return from its body, that narrow value would propagate into the
+                // return of any function that reads the global (e.g. `telemetry--metrics`).
+                // `global_value_ty` already skips earmuffed globals; this makes the inferred
+                // (Gap A) path — consulted first — agree.
                 if def_count.get(&name) != Some(&1)
                     || ctx.is_file_macro(name)
                     || value::is_dynamic(name)
+                    || infer::is_earmuffed(name)
                 {
                     continue;
                 }
@@ -693,6 +866,53 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
                     if !ty.contains_tag(value::Tag::Fn) && !ty.contains_tag(value::Tag::Native) {
                         ctx.add_inferred_value_ty(name, ty);
                     }
+                }
+            }
+        }
+        // Pass 2.8: **same-file function-return inference.** The file being checked isn't
+        // loaded, so `sigs::sig_of`'s loaded-closure inference can't see its own `(defn …)`s
+        // — a same-file caller got no result checking (only cross-module callers of *loaded*
+        // functions did). Infer each single-def, unshadowed, un-declared function's return
+        // from its FORM (`sigs::infer_return_from_form`) and record it in `ctx`, so a
+        // same-file call flows the result exactly as a loaded-function call already does.
+        //
+        // A bounded fixpoint resolves callees leaf-up: `infer_return_from_form` returns
+        // `None` (defers, records nothing) until every function its return depends on is
+        // already recorded, so a function is only ever stored with its callees' FINAL sigs —
+        // no stale/narrow intermediate leaks (sound at any cap; a cross-function cycle or a
+        // chain deeper than the cap simply stays deferred). Return-only (a params-less sig),
+        // so it never constrains an argument. Runs after Gap A so a `(def g <expr>)` value
+        // type its body reads is already in scope.
+        {
+            let mut def_count: HashMap<Symbol, usize> = HashMap::new();
+            for &form in &expanded {
+                count_defs(heap, form, &mut def_count);
+            }
+            let candidates: Vec<(Symbol, Value)> = expanded
+                .iter()
+                .filter_map(|&form| {
+                    let (name, rhs) = def_name_and_value(heap, form)?;
+                    (def_count.get(&name) == Some(&1)
+                        && !ctx.is_file_macro(name)
+                        && !value::is_dynamic(name)
+                        && ctx.declared_sig(name).is_none())
+                    .then_some((name, rhs))
+                })
+                .collect();
+            // Iterate to a fixed point; break as soon as a pass records nothing new. The cap
+            // bounds a pathological deep chain (the tail just stays deferred — sound).
+            for _ in 0..16 {
+                let mut changed = false;
+                for &(name, rhs) in &candidates {
+                    if let Some(ret) = sigs::infer_return_from_form(heap, rhs, Some(name), &ctx) {
+                        if ctx.inferred_fn_sig(name).map(|s| s.ret) != Some(ret.clone()) {
+                            ctx.add_inferred_fn_sig(name, crate::types::Sig::new(vec![], ret));
+                            changed = true;
+                        }
+                    }
+                }
+                if !changed {
+                    break;
                 }
             }
         }
@@ -732,6 +952,11 @@ pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)
         for &form in &expanded {
             recursion::check_recursion(heap, form, &mut out);
         }
+        // Pass 3.6: sealed-`match` exhaustiveness (ADR-187 part 2). Reads the *un-expanded*
+        // forms (a `match` survives only pre-expansion) with `ctx` carrying the file's sigs
+        // and abilities, so a scrutinee typed as a sealed ability resolves to its record-id
+        // set. Sound: anything it can't prove total defers to silence.
+        exhaustive::check_matches(heap, &forms, &ctx, &mut out);
         // Pass 4: macro-hygiene lint over the *un-expanded* forms — `defmacro`
         // templates and their `~unquote` structure only survive pre-expansion
         // (`macroexpand_all` leaves quasiquote opaque, and the template is gone once
@@ -837,6 +1062,35 @@ fn def_name_and_value(heap: &Heap, form: Value) -> Option<(Symbol, Value)> {
     Some((name, items[2]))
 }
 
+/// Count every `(def NAME …)` for each name across `form`, **including nested** defs (a
+/// reassignment inside a function body, a `do`, a `when`, …) — not just top-level. A global
+/// def'd more than once anywhere is *reassigned*, so its type isn't its first value; the
+/// value-type inference (Gap A) and the same-file return inference (Pass 2.8) both use this
+/// to leave such a global `dynamic()` rather than pinning it to a stale initial value (the
+/// lazy-init `(when (nil? *g*) (def *g* (table)))` pattern — else a function returning `*g*`
+/// infers `nil` and false-flags its callers). Skips quoted subtrees.
+fn count_defs(heap: &Heap, form: Value, counts: &mut HashMap<Symbol, usize>) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        let Some(&Value::Sym(head)) = items.first() else {
+            return;
+        };
+        if value::symbol_is(head, kw::QUOTE) || value::symbol_is(head, kw::QUASIQUOTE) {
+            return;
+        }
+        if value::symbol_is(head, kw::DEF) {
+            if let Some(&Value::Sym(name)) = items.get(1) {
+                *counts.entry(name).or_insert(0) += 1;
+            }
+        }
+        for &item in items.get(1..).unwrap_or(&[]) {
+            count_defs(heap, item, counts);
+        }
+    })
+}
+
 /// [`check_file`] plus the Phase-2 incremental-cache **dep-keys** for the file: the
 /// serializable set of global observations the check made (see [`deps`]). Runs the
 /// same check under a dependency recorder. Returns `(warnings, dep_keys)`; feed
@@ -845,8 +1099,17 @@ pub fn check_file_with_deps(
     heap: &mut Heap,
     forms: &[Value],
 ) -> (Vec<(Option<Pos>, String)>, Value) {
+    check_file_with_deps_ext(heap, forms, &[])
+}
+
+/// [`check_file_with_deps`] with the KI-17 reachability set (see [`check_file_ext`]).
+pub fn check_file_with_deps_ext(
+    heap: &mut Heap,
+    forms: &[Value],
+    extra_required: &[String],
+) -> (Vec<(Option<Pos>, String)>, Value) {
     deps::begin_record(heap);
-    let warnings = check_file(heap, forms);
+    let warnings = check_file_ext(heap, forms, extra_required);
     let dep_keys = deps::take_dep_keys(heap);
     (warnings, dep_keys)
 }

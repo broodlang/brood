@@ -318,8 +318,11 @@ The checker reads the marker: `recursion.rs` skips a `:non-tail-recursion`-tagge
 subtree entirely, and a `SUPPRESS_*` bit (see `check/ctx.rs`) threads down the walk
 so `check_if`'s redundant-clause lint declines inside an `:unreachable-clause`
 scope. Recognised categories today: **`:non-tail-recursion`**,
-**`:unreachable-clause`**, and **`:type-mismatch`** (a `sig`-declared return or
-call-site argument the wrapped code deliberately violates). An unrecognised
+**`:unreachable-clause`**, **`:type-mismatch`** (a `sig`-declared return or
+call-site argument the wrapped code deliberately violates), **`:unbound`** (a name
+bound only at runtime), and **`:unrequired`** (ADR-189 — a qualified `mod/name` whose
+module the file deliberately reaches via another require, e.g. a circular dependency
+that can't `(require 'mod)` at the top level). An unrecognised
 category suppresses nothing — a typo is a
 no-op that still lints, never a silent blanket opt-out. This is what lets
 `nest check` stay at **zero** warnings project-wide without weakening any lint.

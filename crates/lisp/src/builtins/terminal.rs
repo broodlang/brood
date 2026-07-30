@@ -873,6 +873,7 @@ struct GuiOpTags {
     cursor_zone_t: value::Symbol,
     col_resize_t: value::Symbol,
     row_resize_t: value::Symbol,
+    pointer_t: value::Symbol,
     vspans_t: value::Symbol,
     cells_t: value::Symbol,
     cells_rgb_t: value::Symbol,
@@ -889,6 +890,7 @@ impl GuiOpTags {
             cursor_zone_t: value::intern("cursor-zone"),
             col_resize_t: value::intern("col-resize"),
             row_resize_t: value::intern("row-resize"),
+            pointer_t: value::intern("pointer"),
             vspans_t: value::intern("vspans"),
             cells_t: value::intern("cells"),
             cells_rgb_t: value::intern("cells-rgb"),
@@ -1007,6 +1009,9 @@ fn parse_gui_ops(
                 }
                 Some(Value::Keyword(s)) if *s == tags.row_resize_t => {
                     Some(crate::gui::CursorShape::RowResize)
+                }
+                Some(Value::Keyword(s)) if *s == tags.pointer_t => {
+                    Some(crate::gui::CursorShape::Pointer)
                 }
                 _ => None,
             };

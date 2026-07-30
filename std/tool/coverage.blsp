@@ -248,6 +248,11 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 
 (defn coverage-line-results (source-dirs)
   "Per-file line coverage as a list of `{:file :total :covered :missing}`, `missing` being the instrumented lines that never ran. Only files under `source-dirs` are measured, so std and the prelude — which the recorder also sees — can't dilute the number; files with nothing instrumented are omitted rather than counted as 0%."
+  ;; `project` is required lazily here rather than in the header: `project` itself
+  ;; requires `coverage` (for `nest test --cover`), so a top-level require would be
+  ;; circular. This runtime require is idempotent (project is already loaded whenever
+  ;; coverage runs from `nest`) and makes the `project/…` reference self-sufficient.
+  (require 'project)
   (let (hits (coverage--hit-index)
         instrumented (coverage--instrumented-index)
         files (or (coverage--safely (fn ()

@@ -11744,6 +11744,30 @@ form. 10 tests added to `tests/pattern_matching_test.blsp` (incl. nesting + cros
 **Next (ADR-187 part 2):** sealed-match exhaustiveness — warn when a `match` on a
 sealed-ability-typed scrutinee (ADR-181/186) misses a member and has no catch-all.
 
+## 2026-07-29 (cont.) — same-file function inference; the checker at the REPL + hover (ADR-188)
+
+The last big inference gap: `sig_of` infers only *loaded* functions, so a file's own `(defn
+…)`s were invisible while that file was checked — same-file callers got no result checking
+(the whole point of `nest check`/LSP-on-a-file). `check_file` Pass 2.8 now infers each
+function's return from its FORM (`infer_return_from_form`) and records it in `Ctx`, resolving
+callees leaf-up over a bounded fixpoint: a function is stored only once its callees are final,
+so nothing stale leaks (forward refs resolve; cycles defer). Return-only for now.
+
+Enabling it earned its keep by forcing two soundness fixes (both latent, harmless only because
+nothing consumed them before): a **reassigned global** was pinned to its `nil` init (Gap A
+counted only top-level defs and read the value before the earmuff skip) → now defs are counted
+recursively and earmuffed globals skipped, so a lazily-initialized `*g*` stays `dynamic`; and
+**`%node-listen`'s primitive `Sig`** said `symbol` where a node name is a keyword (a real bug,
+inconsistent with `%node-connect`) → corrected. Full std/ + tests/ sweep clean.
+
+Also this stretch (earlier): the checker now runs at the **REPL** (advisory warnings before
+each result, live-image inference) and **LSP hover** shows a name's type signature; and any
+**ability name is a type** (open → `any`, sealed → member union), which required fixing the
+checker's dead `ability/*…*` registry reads to the bare `*…*` globals.
+
+Type suite 275 → 278; the four interactive/inference asks (REPL check, hover types, open
+abilities as types, same-file inference) all landed with zero false positives.
+
 ## 2026-07-29 (cont.) — a float global silently bailed nbody's hottest arm (1.8×)
 
 **`advance-body`, called 250 000 times in `nbody`, ran interpreted for the entire
@@ -11783,3 +11807,68 @@ failing test, where the runtime's own self-healing (deopt feedback → `BAILED`)
 converting a deopt storm into silent interpretation. The JIT-vs-no-JIT ratio is what
 surfaced it — `fib` gets 54× and `collatz` 40× from the JIT, but `nbody` only 3.2×,
 `bintree` 3.5× and `nqueens` 3.4×. That ratio per row is a cheap standing check.
+
+## 2026-07-30 — sealed-match exhaustiveness (ADR-187 part 2)
+
+Finished the second half of ADR-187: a `match` on a scrutinee typed as a sealed ability now
+warns for any member no clause handles. Two sound pieces.
+
+**The lattice fix (`annot::ability_type`).** A sealed ability's type was `Ty::union` over its
+member record shapes — but `Ty::union` widens a differing `fields` map away, so it collapsed to
+bare `map` and lost the member set (fine for rejecting non-maps, useless for exhaustiveness).
+Built it instead at its true set-theoretic denotation: a single `%{__id__: (:a | :b | …)}` with
+a keyword-lit union on `:__id__`. That's *equal as a set of values* to `⋃ₘ %{__id__: :m}`
+because each member shape is an open record constraining only `:__id__` — so it's a sound
+rewrite, not a widening. `Ty::union` stays untouched (field-wise-merging arbitrary records
+there would invent cross terms). Bonus: `(sig f (Shape -> …))` now rejects a non-member record
+precisely, not just a non-map.
+
+**The pass (`check::exhaustive`).** Reads the un-expanded forms (a `match` is gone after
+expansion), threading a `Ctx` — defn params seeded from their `sig`, `let` bindings — and at
+each match resolves the scrutinee via `expr_ty`, extracts the `:__id__` lit set, checks
+coverage. Sound by construction: unknown scrutinee / `:when` guard / any non-record,
+non-catch-all arm → defer to silence; an unguarded `(record NAME …)` covers NAME (over-counting
+a refutable inner only under-warns); ids compare by final `mod/NAME` segment.
+
+**The one non-obvious bug:** ADR-188 made `register_declared_sig` qualify each sig target to the
+file namespace, so inside a `(defmodule M …)` a defn's sig lives in `ctx.declared_sig` under
+`M/name`, not bare — `sig_of` had to try the qualified key against `ctx` (not just the heap
+store) or module code never resolved its scrutinee. Fixed; the walk now tracks the current ns.
+
+7 tests in `tests/ability_test.blsp` (missing-member warns; exhaustive / catch-all / untyped /
+guarded all silent; let threads the type; the message names the member). Whole-repo `nest
+check` stays zero sealed-match false positives.
+
+## 2026-07-30 (cont.) — per-file require-reachability lint closes KI-17 (ADR-189)
+
+KI-17: `nest check` loaded the whole project image before checking, so a qualified reference
+`mod/name` resolved for *every* file — even one that never `require`s `mod`. A file naming
+`path/basename` without `(require 'path)` passed clean, then blew up at runtime the moment the
+sibling that happened to load `path` first moved. Fixed by teaching the checker per-file
+**reachability**.
+
+**Mechanism / policy split.** `check-file{,-deps,-structured}` gained an optional reachability
+set (module names the file may name qualified); `check_file_ext` unions it with the file's own
+direct requires (`:use` / `:use-internals` / any nested `(require 'M)`) + its own ns and flags a
+**user-written** `mod/name` whose `mod` is outside it. Only the whole-project driver sees every
+header, so `std/tool/project.blsp` builds the module→direct-requires graph once (new native
+`%module-direct-requires`), closes it **transitively** per file, and threads each file's set
+through the fresh / cached / structured paths as **data** in the parallel `[file closure]`
+chunks.
+
+**Soundness, driven by the sweep.** Direct-requires-only lit 18 warnings on `std/`+`tests/`, 17
+false. The transitive closure clears legitimately-transitive references (a test `(:use
+editor/treesit)` naming `face/…`, since treesit requires `editor/face`); a `raw_qualified` guard
+limits the lint to references the user *literally wrote* (never a macro-injected one); and it's
+inert in single-file/LSP/REPL mode (an un-required module isn't loaded, so the ordinary unbound
+check covers it). The lone genuine residue — `coverage` naming `project/…`, uncircle-able since
+project requires coverage — got a *lazy* runtime `(require 'project)` in the one function that
+uses it (idempotent, non-circular, the discipline the lint enforces). Net: **zero** false
+positives across the whole tree; the lint fires precisely on the real bug (verified end-to-end
+with a bad `nest check` project + a Rust regression test).
+
+Two implementation notes: `collect_require_targets` needed the same `stacker::maybe_grow` guard
+the rest of the checker uses (a pathologically deep form overflowed it); and the check-result
+cache entry gained a 5th field (the closure), so a closure shift re-checks the dependent even
+when its own mtime didn't move — cache version v1→v2. Docs: KI-17 → FIXED, ADR-189, `check-allow
+:unrequired` category.

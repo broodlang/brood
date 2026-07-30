@@ -23,7 +23,7 @@ use std::cell::Cell;
 /// at least one char between the stars). Such a global is dynamic by convention —
 /// rebound over its lifetime — so the checker types a use of it as unknown rather
 /// than pinning it to its current (usually default) heap value.
-fn is_earmuffed(s: Symbol) -> bool {
+pub(super) fn is_earmuffed(s: Symbol) -> bool {
     let name = value::symbol_name_ref(s);
     name.len() > 2 && name.starts_with('*') && name.ends_with('*')
 }
@@ -235,6 +235,13 @@ pub(super) fn expr_ty(heap: &Heap, form: Value, ctx: &Ctx) -> Option<Ty> {
                             return Some(resolve_overload_ret(sigs, &arg_tys));
                         }
                         if let Some(sg) = ctx.declared_sig(s) {
+                            return Some(sg.ret);
+                        }
+                        // A **same-file inferred** function sig (Pass 2.8): the return the
+                        // checker inferred for a `(defn …)` in this file, which `sig_of`'s
+                        // loaded-closure path can't see (the file isn't loaded while checked).
+                        // After a declaration (authoritative), before the loaded lookup below.
+                        if let Some(sg) = ctx.inferred_fn_sig(s) {
                             return Some(sg.ret);
                         }
                         // An **ability op** with a declared `:-> RET` return type. The op
