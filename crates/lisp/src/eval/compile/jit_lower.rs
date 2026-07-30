@@ -649,6 +649,35 @@ pub(crate) fn jit_lower_arm(
     jit_lower_arm_inner(jit, arm, slot_tags, None)
 }
 
+/// Unbox a free-global read that was observed holding a `Value::Float` at tier time
+/// ([`CompiledArm::float_globals`]) into an `Op::Float`, so arithmetic over it takes the
+/// float path instead of the integer default.
+///
+/// Without this, an arm whose *parameters* carry no float — nbody's `advance-body (b i)`,
+/// a vector and an int — is not float-context, so `(* dt nvx)` falls through
+/// `emit_prim2`'s dispatch to `as_int`, whose tag-check deopts on the float `dt`. That
+/// deopts on **every** activation, and sixteen in a row mark the arm `BAILED`, so the
+/// hottest function in the row runs interpreted for the rest of the program.
+///
+/// Soundness is [`as_f64`]'s existing tag guard, not the tier-time observation: a global
+/// that is no longer a float (a `def` since, or a different runtime sharing this arm's
+/// code) fails the guard and deopts to the VM. A stale guess costs a deopt; it can never
+/// miscompile. This is the same argument the `has_float_slot` optimism already rests on.
+#[cfg(feature = "jit")]
+fn unbox_float_global(
+    b: &mut cranelift_frontend::FunctionBuilder,
+    sym: Symbol,
+    op: Op,
+    frame: emit::Frame,
+    float_globals: &[Symbol],
+) -> Op {
+    if float_globals.contains(&sym) {
+        Op::Float(emit::as_f64(b, op, frame))
+    } else {
+        op
+    }
+}
+
 /// Is the unboxed-`i64` fast path enabled? **Default ON** (`BROOD_NO_I64` opts out — the A/B
 /// baseline lever). Read once (all processes of a runtime must agree — the code is shared and
 /// the eligibility/frame decisions must be deterministic).
@@ -849,6 +878,15 @@ fn jit_lower_arm_inner(
     // `as_int`-on-a-float). When the guess is right the result is `Op::Float`, which
     // `store_op` marks float, so the whole `(nth …)`-fed arithmetic chain stays unboxed.
     let has_float_slot = slot_tags.contains(&profile_tag_float);
+    // Free globals observed holding a `Value::Float` when this arm was elected for
+    // tiering — the global-read counterpart of the `slot_tags` param profile. Empty when
+    // unset (an arm lowered through a path that had no `Heap`, or `BROOD_NO_FLOAT_GLOBAL`),
+    // which reproduces the pre-change lowering exactly.
+    let float_globals: &[Symbol] = arm
+        .float_globals
+        .get()
+        .map(|b| &**b)
+        .unwrap_or(&[] as &[Symbol]);
     // Per-slot "holds a `Value::Bool`" flag — the boolean analogue of `slot_float`, but
     // seeded all-false: a bool is rarely a loop *param*, and the case that matters is a
     // let-binder, e.g. `(and X Y)` → `(let (g X) (if g Y g))` storing a comparison result
@@ -1987,7 +2025,13 @@ fn jit_lower_arm_inner(
                         // Hoisted scalar global (#1): the value was resolved once at entry;
                         // reuse its words as a `Handle` (no per-access `brood_rt_global_ic`).
                         // The back-edge epoch guard deopts on a rebind (late-binding-exact).
-                        stack.push(Op::Handle(w0, w1, w2));
+                        stack.push(unbox_float_global(
+                            &mut b,
+                            *s,
+                            Op::Handle(w0, w1, w2),
+                            frame,
+                            float_globals,
+                        ));
                     } else if let Some(&(ptr, len, w0, w1, w2)) = hoisted_global.get(s) {
                         stack.push(Op::HoistedVec {
                             ptr,
@@ -2016,7 +2060,13 @@ fn jit_lower_arm_inner(
                         let w2 =
                             b.ins()
                                 .stack_load(types::I64, out_slot, PAYLOAD_OFFSET as i32 + 8);
-                        stack.push(Op::Handle(w0, w1, w2));
+                        stack.push(unbox_float_global(
+                            &mut b,
+                            *s,
+                            Op::Handle(w0, w1, w2),
+                            frame,
+                            float_globals,
+                        ));
                     }
                 }
                 Inst::Call {

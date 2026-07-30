@@ -545,6 +545,21 @@ pub struct CompiledArm {
     /// arms pay a single bool test; watched healthy arms one relaxed load.
     pub deopt_watch: bool,
     pub jit_deopts: std::sync::atomic::AtomicU32,
+    /// Free globals this arm reads that held a `Value::Float` when the arm was
+    /// enqueued for tiering — the global-read counterpart of the tier-time
+    /// `slot_tags` param profile. The profile snapshots the live *frame*, so it
+    /// only ever types **parameters**; an arm whose floats arrive from a `def`'d
+    /// constant instead (nbody's `advance-body`, which takes `(b i)` — a vector and
+    /// an int — and multiplies by the global `dt`) reads as non-float-context, and
+    /// its `(* dt nvx)` lowers to the *integer* path, whose `as_int` tag-check
+    /// deopts on every activation. Sixteen consecutive deopts then mark the arm
+    /// `BAILED` and nbody's hottest function runs interpreted for the whole run.
+    /// Recording the symbols here lets the lowering unbox such a read to an
+    /// `Op::Float` behind `as_f64`'s existing tag guard, so a stale or
+    /// per-runtime-divergent observation is a deopt, never a miscompile — the same
+    /// soundness argument the `has_float_slot` optimism already rests on. Set once,
+    /// by whichever process wins the tiering CAS.
+    pub float_globals: std::sync::OnceLock<Box<[Symbol]>>,
     /// Deopt-resume checkpoint layout (devlog 2026-07-16 fix): `u32::MAX` = no
     /// checkpointing (no non-tail calls in the chunk — a from-ip-0 re-run is
     /// then effect-free). Otherwise `ckpt_slot` is the frame slot holding the

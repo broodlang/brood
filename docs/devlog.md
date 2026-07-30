@@ -11767,3 +11767,43 @@ checker's dead `ability/*…*` registry reads to the bare `*…*` globals.
 
 Type suite 275 → 278; the four interactive/inference asks (REPL check, hover types, open
 abilities as types, same-file inference) all landed with zero false positives.
+
+## 2026-07-29 (cont.) — a float global silently bailed nbody's hottest arm (1.8×)
+
+**`advance-body`, called 250 000 times in `nbody`, ran interpreted for the entire
+benchmark.** `BROOD_DEOPT_TRACE=1` showed it deopting 16 times in a row and then going
+`BAILED` — the deopt-feedback backstop doing exactly its job, on an arm that should
+never have been deopting.
+
+The cause is a gap in how float context is inferred. The tier-time profile
+(`slot_tags`) snapshots the *live frame*, so it only ever types an arm's **parameters**;
+let-binder slots read nil at that instant and get their types from the body's writes
+during lowering. `has_float_slot` — the flag that lets `emit_prim2` route a type-erased
+`Op::Handle` through the float path — is `slot_tags.contains(Tag::Float)`. But
+`advance-body (b i)` takes a *vector* and an *int*. Every float it touches arrives from
+`(nth bi k)` or from the global `dt`, so the arm reads as non-float-context, `(* dt nvx)`
+falls through to the integer branch, and `as_int`'s tag-check deopts on the float — every
+single activation.
+
+Bisected on the source rather than guessed: replacing `dt` with the literal `0.01` took
+the deopts to zero, and adding one *unused* float parameter did the same. Both confirm the
+discriminator is the param profile, not anything about the arithmetic.
+
+**Fix:** record which free globals an arm reads that held a `Value::Float` when it was
+elected for tiering (`CompiledArm::float_globals`, filled by `record_float_globals` on the
+thread that wins the election — the lowering thread has no `Heap`), and unbox those reads
+to an `Op::Float` at the read site. Soundness is `as_f64`'s existing tag guard, not the
+observation: a global that is no longer a float — a `def` since, or another runtime sharing
+this arm's code — fails the guard and deopts to the VM. A stale guess costs a deopt and can
+never miscompile, which is the same argument `has_float_slot`'s optimism already rests on.
+
+`nbody` 0.36 → 0.20 s (**1.80×**), checksum unchanged, zero deopts.
+`BROOD_NO_FLOAT_GLOBAL=1` is the off-switch / A-B lever.
+Regression test: `tests/jit_float_global_test.blsp` (the nbody shape, a float global in a
+comparison, a plain value round-trip, and a rebind-to-int after tiering).
+
+**Worth remembering as a class, not a one-off:** a *perf* bug with no wrong answer and no
+failing test, where the runtime's own self-healing (deopt feedback → `BAILED`) hid it by
+converting a deopt storm into silent interpretation. The JIT-vs-no-JIT ratio is what
+surfaced it — `fib` gets 54× and `collatz` 40× from the JIT, but `nbody` only 3.2×,
+`bintree` 3.5× and `nqueens` 3.4×. That ratio per row is a cheap standing check.
