@@ -12353,3 +12353,61 @@ under load) at `BROOD_RT_GC_FLOOR=64`, the same under `BROOD_GC_VERIFY=1`, and
 under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`. Five distribution-chaos runs
 (3 × `dist_chaos_remote_spawn.sh` — closures over the wire — and 2 × `dist_chaos.sh`)
 with `crashed=0` and no panics. Zero tripwire or verifier reports anywhere.
+
+## 2026-07-30 (cont.) — a benchmark row for what a server actually feels like
+
+The suite could not see the thing this runtime is *for*. Every concurrency row measured
+throughput with a **closed loop** — the generator waits for each reply before sending the
+next — which is coordinated omission: when the system stalls, the generator stops sending
+and the stall never enters the numbers. So a runtime could win every row and still be the
+one that feels bad in production, and nothing here would say so.
+
+The new `latency` row (brood-benchmarks `dc7a35f`) is open loop: request *i* is scheduled
+at `start + i × (1s/20,000)` regardless of whether the system keeps up, and latency is
+measured from that scheduled instant, so queueing delay lands in the number. Every 20th
+request occupies ~500 µs of CPU; percentiles cover the **other 95%**, so the question is
+what a busy handler does to everyone else. Offered load is 0.5 cores of twelve — nothing
+is capacity-limited, and the tail is scheduling rather than saturation.
+
+| | p50 | p99 | p99.9 | max | cores | CPU·s |
+|---|---|---|---|---|---|---|
+| Elixir | 8 µs | 59 µs | 98 µs | 601 µs | 1.9× | 5.28 |
+| **Brood** | 121 µs | 439 µs | 1300 µs | 2134 µs | 1.3× | 3.32 |
+| Node | <1 µs | 451 µs | 561 µs | 1047 µs | 1.0× | 2.55 |
+| Python | 42 µs | 478 µs | 624 µs | 852 µs | 1.0× | 2.53 |
+| .NET | 4 µs | 714 µs | 12627 µs | 15082 µs | 2.4× | 6.04 |
+
+.NET has the best median in the field and the worst tail by 20× — a 3157× spread from p50
+to p99.9 against Elixir's 12×, while spending the most CPU of any port. Node and Python,
+single-threaded, beat it at the tail: their p99 is exactly one fat request's duration,
+because you wait behind at most one and then it stops.
+
+**Three methodology mistakes, each caught by measuring rather than reasoning**, and all
+three are the kind that would have produced a publishable-looking but meaningless row:
+
+1. **Closed loop** (above) — fixed before the first numbers.
+2. **Sizing the fat request in work units.** Units take 20× longer on a runtime 20× slower
+   at arithmetic, so the row would have re-measured compute speed — which every other row
+   already does. Now each port calibrates its own loop to ~500 µs at startup *and reports
+   what it achieved*, so a mis-calibration is visible instead of silently voiding the
+   comparison. That check paid immediately: calibrating **cold on a JIT** sized Brood's fat
+   request 25× too small (2361 units, warm cost ~20 µs, against a 500 µs target), because
+   the single sample measured the interpreter. Warm first, then take the best of nine.
+3. **Percentiles over all requests.** Fat requests are 5% and take ≥500 µs by construction,
+   so they occupied every high percentile and hid the only interesting question.
+
+Occupancy is real work rather than a clock spin for two reasons: it allocates, so the GC
+participates as a handler's would; and spinning on many .NET pool threads **crashed the
+CLR** — `Internal CLR error (0x80131506)` in ~3 runs of 10, reproduced with both
+`Task.Run` and `ThreadPool.UnsafeQueueUserWorkItem`. With calibrated work, 0 failures in 10.
+
+**What it says about Brood**, recorded as `runtime-frontier.md` A4 rather than buried: our
+121 µs median is 15× Elixir's and is per-message cost (A1/A3 again — a request here is
+spawn + send + collector receive); our 1300 µs p99.9 is 13× Elixir's and is *scheduling* —
+a fat handler should cost its neighbours nothing at 0.5 cores of load on twelve, and it
+costs them milliseconds. First hypothesis to test is spawn placement: processes are placed
+at spawn and never migrated, so a dispatcher spawning every handler can pile them onto its
+own worker, where one 500 µs handler blocks the queue behind it. We also used 1.3× cores
+where Elixir used 1.9× on identical offered load, which fits. Not yet investigated.
+
+Node, single-threaded, has a better p99.9 than we do. That is the honest headline.
