@@ -84,6 +84,11 @@ appears.
   (ADR-011).
 
 ### Abilities / dispatch
+- ✅ **Ability bounds** (ADR-192) — a *sealed* ability name in a `sig` reads as `where T: Ability`;
+  `(and A B)` = `T: A + B`. Open abilities are ignored as bounds (late binding makes them unsound),
+  so no under-warn. Shared with occurrence typing's nominal domains.
+- ✅ **Super-abilities `:requires`** (ADR-193) — `(defability B (:requires A) …)` makes `nest check`
+  demand every implementor of `B` also satisfy `A`. Checker-only conformance contract, no dispatch change.
 - **Return-type dispatch** — selecting an impl by expected return; needs bidirectional
   inference. The long-standing open item in [protocol-dispatch-design.md](protocol-dispatch-design.md).
 - **Qualified cross-module ability type names** (`mod/Ability` in a `sig`) — today ability
