@@ -474,8 +474,16 @@ fn infer_sig_inner(heap: &Heap, sym: Symbol) -> Option<Sig> {
     for &p in &params {
         ctx = ctx.bind(p, Some(Ty::ANY));
     }
-    let ret = expr_ty(heap, tail, &ctx)?;
-    Some(Sig::new(param_tys, ret))
+    match expr_ty(heap, tail, &ctx) {
+        Some(ret) => Some(Sig::new(param_tys, ret)),
+        // The return couldn't be inferred (e.g. the body calls an ability op whose facts aren't
+        // on this bare ctx). Still surface the parameter demands with an `ANY` return when a
+        // param is actually constrained (ADR-190), so a *cross-file* caller's arguments are
+        // checked — sound, since the demands under-constrain. A wholly-unconstrained param set
+        // stays deferred (`None`), preserving the prior return-only behaviour exactly.
+        None if param_tys.iter().any(|t| *t != Ty::ANY) => Some(Sig::new(param_tys, Ty::ANY)),
+        None => None,
+    }
 }
 
 /// **Return-only inference** for a complex closure (multi-arity, optionals, or a rest
