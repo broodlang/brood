@@ -513,8 +513,8 @@ pub(crate) fn dispatch(
 pub(crate) fn dbg_check_args(args: &[Value], label: &str) {
     for (i, a) in args.iter().enumerate() {
         let tag = (unsafe { std::mem::transmute::<Value, [i64; 3]>(*a) }[0] as u64 & 0xff) as u8;
-        // Value has ~22 variants (max discriminant ~21); well above that is garbage.
-        if tag > 24 {
+        // Value's max discriminant is `Ratio` (25); above that is garbage.
+        if tag > 25 {
             panic!("[arg-origin] {label}: arg[{i}] has invalid Value tag {tag:#x} — corrupt (non-Value) memory passed into a frame");
         }
     }

@@ -22,8 +22,6 @@
 //!   (`if`/`let`/`fn`/`def`/`defn`) plus `collect_def_names`.
 //! - [`annot`] — reads `(sig …)` declarations off the *un-expanded* tree, so a
 //!   user-declared signature seeds the checks for that name.
-//! - [`hygiene`] — the macro-hygiene lint: a `defmacro` template whose literal
-//!   binder can capture spliced caller code.
 //! - [`protocol`] — protocol / behaviour conformance: `defprotocol` /
 //!   `defbehaviour` / `defimpl` / `(:implements …)` checked for missing or
 //!   wrong-arity ops.
@@ -125,7 +123,6 @@ mod ctx;
 pub(super) mod deps;
 mod exhaustive;
 mod guards;
-mod hygiene;
 mod infer;
 mod protocol;
 mod recursion;
@@ -1002,13 +999,10 @@ pub fn check_file_ext(
         // and abilities, so a scrutinee typed as a sealed ability resolves to its record-id
         // set. Sound: anything it can't prove total defers to silence.
         exhaustive::check_matches(heap, &forms, &ctx, &mut out);
-        // Pass 4: macro-hygiene lint over the *un-expanded* forms — `defmacro`
-        // templates and their `~unquote` structure only survive pre-expansion
-        // (`macroexpand_all` leaves quasiquote opaque, and the template is gone once
-        // a macro is applied). Reads only.
-        for &form in &forms {
-            hygiene::check_macro_hygiene(heap, form, &mut out);
-        }
+        // (The macro binding-capture lint was retired when automatic binding hygiene
+        // shipped — ADR-066 amendment: a template's `let`/`fn` binders are alpha-renamed
+        // to fresh gensyms by the expander, so a plain literal binder can no longer
+        // capture spliced caller code and the lint would only false-positive.)
         // Pass 4.5: unused `(:use …)` imports — a `:use` clause that contributes no
         // symbol ever referenced in the file's expanded forms. Read the `:use` module
         // names from the *unexpanded* header (the clause is gone after expansion), then

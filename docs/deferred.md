@@ -224,7 +224,21 @@ formatter-behaviour issue.
 - Stash unrelated formatter changes (`git stash --keep-index`, then
   `nest format`, then `git stash pop` — fiddly).
 
-## 6. Call-site argument literal precision for int/bool/string
+## 6. Call-site argument literal precision for int/bool/string — ✅ SHIPPED (B0, 2026-07-07)
+
+**Status.** Done, not deferred — the note below is kept for the record but the feature
+exists. `Ty::of_value` (`crates/lisp/src/types/mod.rs:492`) now makes int and bool
+literals singletons exactly like keywords, and `expr_ty`
+(`crates/lisp/src/types/check/infer.rs:296`) builds the string singleton where it has
+the heap. So `(status-handler 999)` against a declared `(or 200 404 500)` is caught at
+type-check today, same disjointness path as the keyword case. The approach that shipped
+was the *opposite* of the "call-site-only helper" sketch below: rather than add a second
+inference path (which risks drift), B0 sharpened the single shared `of_value`/`expr_ty`
+primitive, so there is exactly one inference path feeding both the disjointness check and
+the rendered message. The message-wording churn the note feared was accepted as a
+one-time ~19-assertion update (the sharper "got 5" text is strictly better).
+
+--- historical note (the state when this was deferred) ---
 
 **Why deferred.** A literal *keyword* argument at a call site already gets
 static disjointness checking: `Ty::of_value` (the runtime-value → static-type
@@ -322,13 +336,46 @@ style that is Brood's whole idiom. Rejected.
 5. Minor: scope-tracking expansion adds cold-start cost (expansion is already the
    bulk of the ~31ms boot).
 
-**Relation to full hygiene.** Brood is only *partially* hygienic vs Elixir
-(free-reference auto-qualification is automatic — the part C needs — but
-introduced-binding capture protection is opt-in `x#` + an advisory lint, where
-Elixir is automatic-with-`var!`-opt-out). C's scope-aware expander is a step
-*toward* the deferred full-hygiene work (ADR-066), so the two are complementary.
+**Relation to full hygiene.** Brood is now hygienic **both ways automatically**, like
+Elixir: free-reference auto-qualification (the part C needs) *and* introduced-binding
+capture protection (automatic alpha-rename of template `let`/`fn` binders, `~'name` to
+opt out — ADR-066 amendment, 2026-07-30) are both default. C's scope-aware *operator*
+resolution is a further step in the same direction (it reuses the same binder-scope
+tracking the hygiene rename and the namespace resolver already do), so they compose.
 
 **Trigger to pick this up.** Real evidence that reserved operator words cost
 something — a user (or downstream project) that genuinely wants a local named for a
 reserved operator and finds `go`/rename unacceptable — plus appetite for the
 scope-aware expander. Until then, A stands.
+
+## 8. Inline `sig`s — `(defn f ((x int) -> int) …)` — deferred, optionality is the doubt
+
+**Context.** Today a function's signature lives in a *separate* `(sig f (int -> int))`
+form, conventionally below the `defn`, with an ordering constraint that only bites
+under `BROOD_CONTRACTS=1` (the sig must be in scope when the contract shim wraps).
+The frequently-proposed "modern" alternative is to fold the types into `defn`'s
+parameter list — `(defn f ((x int) -> int) …)` — the ML/Rust/TypeScript/Elixir-`@spec`
+shape. Tracked in ROADMAP.md and roadmap-for-v1.md as an ADR-082 revision.
+
+**Why it's deferred (and the specific doubt).** It's purely additive, so it costs a
+version number to wait (ADR-011). But the deeper reservation — recorded here as the
+thing to resolve before picking it up — is that **a sig is *optional*, and inlining an
+optional annotation into the mandatory `defn` form is in tension with that
+optionality.** Keeping the signature a separate opt-in form means the common,
+un-annotated `defn` stays clean and the annotation is visibly a *separate choice* you
+add, rather than a slot in the definition form that reads as "left blank." Inline types
+are natural in languages where the annotation is *expected* (or mandatory); Brood's
+annotations are sparse and opt-in (three modules today, ADR-153), which is exactly the
+regime where a separate form arguably fits better. The roadmap-for-v1 judgment call is
+the same axis seen from the release side: inline only earns "do it now" *if* types are
+meant to be widely annotated by 1.0; if they stay sparse, the separate form is fine and
+this waits.
+
+**What to decide when picked up.** Whether the optionality argument wins, or whether
+there's a spelling that stays optional yet inline (e.g. inline types allowed but never
+required, `(defn f (x y) …)` still legal alongside `(defn f ((x int) (y int) -> int) …)`)
+— and whether that dual shape is worth the `defn`/`sig_of`/`defrecord`-emitted-sigs/`sig!`
+churn. The ergonomic/precision gap is author-time, not a runtime footgun, so there's no
+urgency.
+
+**Workaround today.** Write the `(sig …)` form; it's the documented spelling and works.

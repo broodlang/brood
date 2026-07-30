@@ -1379,6 +1379,24 @@ impl Heap {
                             id.0,
                         );
                     }
+                    ValueRef::Ratio(id) if id.region() == LOCAL => {
+                        let Some(slabs) = (if id.is_old() {
+                            self.old_opt()
+                        } else {
+                            Some(&self.local)
+                        }) else {
+                            continue;
+                        };
+                        bad(
+                            "ratio",
+                            id.is_old(),
+                            id.generation(),
+                            id.index(),
+                            slabs.ratios.len(),
+                            parent,
+                            id.0,
+                        );
+                    }
                     ValueRef::Bytes(id) if id.region() == LOCAL => {
                         let Some(slabs) = (if id.is_old() {
                             self.old_opt()
@@ -1590,6 +1608,7 @@ struct FlushForward {
     strings: FwdTable,
     bigints: FwdTable,
     decimals: FwdTable,
+    ratios: FwdTable,
     bytes: FwdTable,
     ropes: FwdTable,
     closures: FwdTable,
@@ -1613,6 +1632,7 @@ impl FlushForward {
             strings: FwdTable::with_len(src.strings.len()),
             bigints: FwdTable::with_len(src.bigints.len()),
             decimals: FwdTable::with_len(src.decimals.len()),
+            ratios: FwdTable::with_len(src.ratios.len()),
             bytes: FwdTable::with_len(src.bytes.len()),
             ropes: FwdTable::with_len(src.ropes.len()),
             closures: FwdTable::with_len(src.closures.len()),
@@ -1652,6 +1672,7 @@ mint_fn!(mint_map, MapId);
 mint_fn!(mint_string, StrId);
 mint_fn!(mint_bigint, BigIntId);
 mint_fn!(mint_decimal, DecimalId);
+mint_fn!(mint_ratio, RatioId);
 mint_fn!(mint_bytes, BytesId);
 mint_fn!(mint_rope, RopeId);
 mint_fn!(mint_closure, ClosureId);
@@ -1811,6 +1832,9 @@ fn flush_value_grown(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, v: Va
         ValueRef::Decimal(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::decimal(flush_decimal(old, new, fwd, id))
         }
+        ValueRef::Ratio(id) if fwd.copies(id.region(), id.is_old()) => {
+            Value::ratio(flush_ratio(old, new, fwd, id))
+        }
         ValueRef::Bytes(id) if fwd.copies(id.region(), id.is_old()) => {
             Value::bytes(flush_bytes(old, new, fwd, id))
         }
@@ -1952,6 +1976,20 @@ fn flush_decimal(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: Decim
     new.decimals.push(n);
     fwd.decimals.set(key, new_idx as u32);
     fwd.mint_decimal(new_idx)
+}
+
+/// Flush a LOCAL ratio (mirrors [`flush_decimal`]). A leaf — clone the value into
+/// the new slab (the old slab drops right after `flush`).
+fn flush_ratio(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: RatioId) -> RatioId {
+    let key = id.index() as u32;
+    if let Some(new_idx) = fwd.ratios.lookup(key) {
+        return fwd.mint_ratio(new_idx as usize);
+    }
+    let n = old.ratios[flush_bound!(old.ratios, id, fwd, "ratio")].clone();
+    let new_idx = new.ratios.len();
+    new.ratios.push(n);
+    fwd.ratios.set(key, new_idx as u32);
+    fwd.mint_ratio(new_idx)
 }
 
 /// Flush a LOCAL bytes value (mirrors [`flush_bigint`]). A byte-clean leaf —

@@ -243,6 +243,15 @@ All purely additive — deferring costs a version number and nothing else.
   deadline. No surface change, so post-1.0 is free.
 - ⬜ **Transducer early termination** (`reduced` threaded through `fold`) and
   stateful-stage lifecycle. ADR-161 ships the one-arity contract `fold` needs.
+- 🟡 **Exact rationals.** A **Brood-first prototype shipped** (`std/ratio.blsp`,
+  2026-07-30): `(rational n d)` builds a reduced ratio that does `+`/`-`/`*`/`/` via the
+  `Num` ability, orders via `Ord`, prints via `Display`. It deliberately lacks the four
+  *kernel-only* properties — the `1/2` reader literal, `=` with an equal integer,
+  numeric-tower ordering/contagion, and `pr-str` round-trip. **Promote to a kernel
+  `Value::Ratio`** (a near-clone of `Value::Decimal`) only if those prove load-bearing in
+  real use; until then the prototype is the answer. The `1/2` token stays reserved (ADR-169),
+  so the kernel type remains additive. The freeze row below still holds for 1.0 (no literal,
+  no kernel type).
 - ⬜ **A rope-level grapheme cursor.** ADR-159's three accessors unblock correctness
   everywhere; a large buffer wants a cursor that caches the segmentation. Size it
   against a real editor workload.
