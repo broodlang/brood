@@ -1295,20 +1295,20 @@ Runtime housekeeping (both items landed):
 - ⬜ **Merely-wider inference case** — a body typed exactly `number` (int ∪ float)
   declared `int`, e.g. `(/ x 2)`; can't be pinned without occurrence/range analysis
   and flagging it would false-positive on int-valued runs (ADR-011).
-- 🟡 **Parameter-type inference from body usage** — the **sound (unconditional-demand)
-  slice shipped 2026-07-25.** `infer_sig` now infers a parameter's type from every
-  position that is *guaranteed to execute* on a call — a call argument (including
-  nested), a `do` form, a `let`-binding RHS/body, an `if`/`when`/`cond`/`match` *test*,
-  an `and`/`or` *first* operand — intersecting multiple demands
-  (`collect_param_demands`, `sigs.rs`). Positions gated by a branch/guard (arms,
-  short-circuit tails, `try` bodies, nested `fn`s) are skipped, and an inner binder
-  shadowing a param excludes it — so the guarded-use false positive can't arise. This
-  is the guard-aware dominance analysis the item wanted, in its provably-sound form.
-  Verified: 413 checker tests (incl. new guarded/shadowing/nested false-positive
-  guards), `nest check` clean on `tests/`, and a whole-`std/` before/after sweep that
-  **added zero** argument-type warnings (and net-removed one — see below). ⬜ Remaining
-  (deferred, ADR-011): demands from *conditional* positions (needs full occurrence
-  typing to stay clean) and the merely-wider return case above.
+- ✅ **Parameter-type inference from body usage → callers checked** (occurrence typing,
+  [ADR-190](docs/decisions.md), completed 2026-07-30). The **sound (unconditional-demand)
+  slice shipped 2026-07-25**: `infer_sig` infers a parameter's type from every position
+  *guaranteed to execute* on a call — a call argument (incl. nested), a `do` form, a
+  `let`-binding RHS/body, an `if`/`when`/`cond`/`match` *test*, an `and`/`or` *first* operand —
+  intersecting demands (`collect_param_demands`, `sigs.rs`); branch/guard-gated positions are
+  skipped and a shadowing binder excludes the param, so the guarded-use false positive can't
+  arise. **ADR-190 then wired the consumer**: Pass 2.8 stores each same-file function's inferred
+  *params* (not just its return), the caller arg-check consumes them, and it works **cross-file**
+  (`sig_of` surfaces params even when the return defers) — so an unannotated function now flags
+  a wrong caller. Plus **ability-op occurrence typing**: `(area s)` on a sealed, `:default`-free
+  op derives `s : Shape`. Sound throughout (under-constrained → under-warn); whole repo
+  warning-clean. ⬜ Remaining (deferred, ADR-011): demands from *conditional* positions, per-arm
+  checking of a multi-arity callee, and the merely-wider return case above.
 - ✅ **Earmuffed-global typing** (2026-07-25, companion to the above): the checker now
   types a `*earmuffed*` global as unknown (like a `defdyn`), not by its load-time
   default value — a redefinable/dynamic-by-convention global (`*project-root*`, a plain

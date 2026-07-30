@@ -356,11 +356,23 @@ Other things worth knowing:
   **collection view is the fields, id-free**: `seq`/`count`/`keys`/`vals`/`map`/`fold`
   over a record see its fields, never `:__id__` (via the `Seqable` ability). Use
   `record?`/`record-id`/`fields` to test/read the identity explicitly.
+- **Match a record by id + fields** with `(record name {:k p …})` — the `name` fixes the
+  nominal id (bare = current ns, or `mod/name`) and the optional `{…}` is a map pattern over
+  its fields (`{:k p}` / `:keys` / `:or` compose); a plain map or a different record fails.
+  Over a *sealed* ability's members, `nest check` flags a non-exhaustive `match`.
 - **A driver is just a value.** `(fetch db k)` picks its impl from `db`, so swapping
   the backend means passing a different record — no config indirection.
 - **`:sealed [id …]`** declares a closed member set and makes `nest check` demand an
   impl of every **required** op for every member (a provided op is covered by its
   default, so it is not demanded; a derived record counts as implementing every op).
+- **Ability bounds — a sealed ability name in a `sig` is a bound.** `(sig area (Shape -> float))`
+  reads "any `T` implementing `Shape`"; `(and Shape Size)` demands both (`T: Shape + Size`).
+  Sealed only — an *open* ability can't be a sound bound (late binding could add a member
+  later), so the checker ignores an open-ability name in a sig rather than under-warning
+  (ADR-192). This is what gives occurrence typing its nominal domains too.
+- **Super-abilities — `(defability B (:requires A) …)`.** A conformance contract: every
+  implementor of `B` must also satisfy `A`, and `nest check` demands it (ADR-193). Checker-only,
+  no runtime dispatch change; `:requires [A C]` chains several.
 - `(satisfies? 'Shape x)` to branch instead of letting a missing op raise.
 - **Register at load time.** Top-level `impl` forms are safe; two *processes* calling
   `impl` concurrently can lose an update (it is a `def` under the hood).
