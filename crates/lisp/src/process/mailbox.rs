@@ -91,14 +91,6 @@ pub(super) fn clear_parked(mb: &Mailbox) {
 /// "deliver → wake" handshakes stay race-free (see `receive_match`/`send`/`run_one`).
 pub(super) struct Mailbox {
     pub(super) state: Mutex<MailboxState>,
-    /// The mailbox's `next_seq` republished as a lock-free hint, bumped after every push.
-    /// `(ref)` reads it to stamp a receive-mark without taking the mailbox lock (ADR-195).
-    ///
-    /// A racy read is sound in the only direction it can err: a stale-low value marks
-    /// *earlier* than necessary (we scan a few extra messages — correct, just less
-    /// optimal), and a value that races high can only include messages already enqueued,
-    /// which by definition predate the ref and therefore cannot carry it.
-    pub(super) seq_hint: AtomicU64,
     /// Wakes a *root* process blocked in `receive` (greens are woken by being
     /// re-queued instead).
     pub(super) cv: Condvar,
@@ -187,11 +179,10 @@ impl MailboxState {
     /// Push `env` onto the queue, stamping its arrival sequence and republishing the
     /// lock-free hint. Every enqueue goes through here so `seq` is never left at 0.
     #[inline]
-    pub(super) fn push(&mut self, mb: &Mailbox, mut env: Envelope) {
+    pub(super) fn push(&mut self, mut env: Envelope) {
         env.seq = self.next_seq;
         self.next_seq += 1;
         self.queue.push_back(env);
-        mb.seq_hint.store(self.next_seq, Ordering::Relaxed);
     }
 }
 
@@ -287,7 +278,6 @@ impl Mailbox {
                 kill_hard: false,
                 recv_deadline: None,
             }),
-            seq_hint: AtomicU64::new(0),
             cv: Condvar::new(),
             // The root (which never goes through enqueue/run_one) keeps this; a
             // spawned green is set RUNNABLE by `enqueue` immediately after.
@@ -581,15 +571,12 @@ fn try_deliver_local(src: &Heap, pid: u64, v: Value) -> bool {
         leading_keyword(proc.heap_mut(), copied)
     };
     let slot = proc.heap_mut().msg_root_add(copied);
-    st.push(
-        &mb,
-        Envelope {
-            msg: Payload::Local { slot, tag },
-            seq: 0,
-            #[cfg(feature = "dev-tools")]
-            trace: None,
-        },
-    );
+    st.push(Envelope {
+        msg: Payload::Local { slot, tag },
+        seq: 0,
+        #[cfg(feature = "dev-tools")]
+        trace: None,
+    });
     drop(st);
     wake_enqueue(proc);
     l1_stats::bump(&l1_stats::HIT);
@@ -600,7 +587,7 @@ fn deliver_envelope(pid: u64, env: Envelope) {
     let mailbox = REGISTRY.get(pid);
     if let Some(mb) = mailbox {
         let mut st = crate::core::sync::lock(&mb.state);
-        st.push(&mb, env);
+        st.push(env);
         if let Some(proc) = wake_parked(&mut st) {
             drop(st);
             wake_enqueue(proc); // wake a parked green process (capture-mode → may migrate)

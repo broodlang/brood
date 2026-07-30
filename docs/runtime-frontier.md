@@ -381,44 +381,49 @@ server's main loop matching several tags) still walks its backlog; the tag filte
 that walk cheap, not free. BEAM solves it with a saved scan position per receive *site*, which
 is a different mechanism from the per-ref mark and is the remaining piece.
 
-**A8 — RSS under sustained churn: a bounded allocator premium plus a per-`def` leak
-(measured 2026-07-30; this entry CORRECTS its first version).**
+**A8 — there is no reload leak; RSS growth under churn is allocator retention (measured
+2026-07-30; this entry has been WRONG TWICE and is now measured properly).**
 
-The first version of A8 concluded that the soak's RSS growth was churn, not hot reload,
-because removing reload still went 29 → 190 MB over 100k iterations. That compared two
-*endpoints at one iteration count* instead of two *growth shapes*, and it was wrong. Held at
-a fixed ~100k iterations and varying only the reload frequency:
+Two earlier versions of this entry each blamed something different, and both were artifacts of
+the same mistake: differencing **time-based** runs. A time-boxed run does a *different number of
+iterations* per configuration, and RSS tracks iterations — so every such comparison measured
+the iteration count, not the thing under test. Corrected by fixing the **iteration count** and
+repeating:
 
-| reloads during the run | RSS |
+| workload (40 000 iterations, medians of 3) | RSS delta |
 |---|---|
-| ~1030 | 258 MB |
-| ~103 | 218 MB |
-| ~10 | 202 MB |
-| **0** | **181 MB** |
+| 0 reloads | 94.1 MB |
+| **1 000 reloads** | **91.7 MB** |
 
-Three separable components, and only one of them grows without bound:
+**Hot reload costs nothing measurable.** In isolation a `def` is ~500 B and does not scale with
+process count (0 / 200 / 2000 live processes: 518 / 489 / 452 B per `def`). `:runtime-closures`
+never moves in any of these workloads — 68 before and after, threshold 4096 — so the shared code
+region is not implicated at all. The earlier "~75 KB per `def`" and "~270 MB/hour" figures were
+wrong; there is no ADR-091 reclamation problem visible here.
 
-1. **Churn is bounded.** With no reloads, RSS plateaus: 175 MB at 62k iterations, 181 MB at
-   101k — iterations up 64%, memory up 3%. Millions of short-lived process heaps cost a
-   *working-set premium*, not a leak.
-2. **Each `def` retains ~75 KB.** Growth is proportional to reload count, for a `def` of a
-   single integer — so it is the reload *machinery* (RUNTIME-region append plus whatever it
-   invalidates), not the value. This is the ADR-091 stage-4 reclamation gap, now with a price
-   tag: a process hot-reloading once a second gives up ~270 MB/hour.
-3. **The allocator holds ~2.5× on top of (1), and it is returnable.** `MIMALLOC_PURGE_DELAY=0`
-   takes the same workload from 208 MB to **90 MB** (83 MB also decommitting), for **~4%**
-   fewer iterations in the same wall-clock. Live data throughout is ~59 KB, so RSS is
-   emphatically not a proxy for live bytes here.
+**What does grow is churn, and it is the allocator holding pages, not us:**
 
-What is *not* worth re-testing: the live set. After 77k iterations and 2.5 M spawns it was 4
-live processes and 59 KB, falling only from 207 to 178 MB after a quiesce and a forced
-collection. Nothing is being retained by the language.
+| iterations (1 spawn + 1 round trip each) | RSS delta | per 1k iters |
+|---|---|---|
+| 20 000 | 51 MB | 2570 KB |
+| 40 000 | 96 MB | 2406 KB |
+| 80 000 | 158 MB | 1973 KB |
+| 160 000 | 284 MB | 1775 KB |
 
-**Open, in priority order.** (a) The per-`def` 75 KB is the only unbounded term and the only
-real leak — ADR-091 stage 4. (b) The mimalloc premium is a *policy* question this project has
-already answered once in the other direction ("spend memory for speed", devlog 2026-06-15);
-2.5× RSS for 4% throughput deserves re-deciding now that the runtime targets long-lived
-servers, and at minimum wants documenting as a knob rather than being discovered by accident.
+Sublinear — the per-iteration cost falls as the run grows — but no plateau. Meanwhile the live
+set is *tiny*: after 2.5 M spawns, 4 live processes and 59 KB of live local heap. Nothing is
+retained by the language; the pages are held by mimalloc. `MIMALLOC_PURGE_DELAY=0` recovers
+**17%** on this workload and **~2.3×** on a heavier-churn one (the soak, ~33 spawns/iteration),
+for ~4% throughput.
+
+**So the open item is not a leak — it is an allocator policy question**, and a smaller one than
+this entry twice claimed. Worth doing: measure `mi_collect(true)` at a natural quiescence point
+(e.g. when a runtime's live-process count drops sharply), and check whether pooling process-heap
+arenas beats freeing them per spawn — that attacks the fragmentation at the source rather than
+asking the allocator to give pages back afterwards.
+
+**The lesson, since it cost two wrong entries:** never difference time-boxed runs. Fix the work,
+repeat the run, compare medians.
 
 ### B. Process memory floor (~4.5 KB → toward ~3 KB)
 

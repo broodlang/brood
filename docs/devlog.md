@@ -12579,3 +12579,52 @@ collection. So the language's accounting is clean and the pages are held by the 
 Recorded as `runtime-frontier.md` **A8**, with the consequence stated plainly: **RSS is not a
 proxy for live data on this runtime**, and the retained figure tracks cumulative churn rather
 than a working-set peak, which points at fragmentation rather than a high-water mark.
+
+## 2026-07-30 (cont.) — chasing the leak that wasn't, and two corrections
+
+Went after the open items with "tackle all potential issues" as the brief. The headline is
+that **the leak does not exist**, and that finding cost two wrong entries before it was
+measured properly.
+
+**A8 was wrong twice, both times from the same mistake.** Version 1 blamed message/spawn
+churn; version 2 blamed hot reload at ~75 KB per `def` (and quoted "~270 MB/hour"). Both were
+artifacts of differencing **time-boxed** runs: a time-boxed run does a different number of
+iterations per configuration, and RSS tracks iterations — so every such comparison measured
+the iteration count rather than the thing under test. Measured with a **fixed iteration
+count**, repeated, medians:
+
+| 40 000 iterations | RSS delta |
+|---|---|
+| 0 reloads | 94.1 MB |
+| 1 000 reloads | 91.7 MB |
+
+Hot reload costs nothing measurable. A `def` in isolation is ~500 B and does not scale with
+live-process count (0/200/2000 processes → 518/489/452 B). `:runtime-closures` never moved in
+any workload (68 before and after, threshold 4096), so the shared code region was never
+implicated and there is no ADR-091 reclamation problem visible here. What grows is churn —
+20k→51 MB, 160k→284 MB, sublinear but no plateau — against a live set of 59 KB after 2.5 M
+spawns. That is allocator fragmentation, and `MIMALLOC_PURGE_DELAY=0` recovers 17% here (2.3×
+on a heavier-churn workload) for ~4% throughput. A8 now carries the lesson in the entry:
+never difference time-boxed runs.
+
+**The receive-mark's cost, measured properly.** The published run showed `pingpong` +6.5% and
+`ring` +9.6%. Two A/B attempts disagreed with each other (+5.7%/+4.0%, then +4.5%/+4.9%), and
+one configuration that should have been *slower* came out faster — the tell that it was drift.
+A base-vs-base control put the floor at **0.5%** on those rows, against which the honest
+figures are **pingpong +2.8%, ring +2.3%**. Real, and now published as such. I tried to
+recover it by moving the per-send atomic store onto `(ref)` (sends outnumber ref creation, and
+those rows never call `ref`); the store was not the cost, so the change stays only because it
+is the better shape, and the residual is structural — a `seq` field per envelope and an
+argument per receive.
+
+**Hot reload does not reach a self-recursive loop.** A tail self-call compiles to
+`Node::SelfCall`, which re-runs the current arm *without resolving the callee*. So redefining
+a *called* global reaches a running loop (verified: it returns the new value), while
+redefining the *looping function itself* does not — the loop keeps its old body until it
+returns, and only a fresh call gets the new one. This is exactly Erlang's local-vs-remote rule
+and it is correct by design, but `live-editing.md` claimed "the loop … picks up new code via
+late binding", which is false in that case. Corrected there with both measurements, and it is
+also *why* Stage 6 (an upgrade hook for long-lived processes) exists.
+
+**Gates:** full suite green, `nest check` clean (one pre-existing advisory in a JIT torture
+test), metamorphic differential fuzzer 420 checks / 0 divergences / 0 crashes.

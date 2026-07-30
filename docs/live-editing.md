@@ -33,6 +33,19 @@ running `nest mcp` image:
   is *mostly already done* (see Stage 8).
 - **Cross-process** — a `def` reaches every spawned process on its next lookup
   (the shared `Arc<RuntimeCode>`).
+- **…but a self-recursive loop keeps running its own old body** (verified
+  2026-07-30). A *tail self-call* compiles to `Node::SelfCall`, which re-runs the
+  current arm through the trampoline **without resolving the callee** — so
+  redefining the looping function *itself* does not reach a process already inside
+  it; only a **fresh** call gets the new body. Redefining any *other* global that
+  the loop calls does reach it, on the loop's next call to it. Measured both ways:
+  redefining a called global → the running loop returns the new value; redefining
+  the loop function → the running loop returns the old one while a fresh call
+  returns the new. This is precisely Erlang's local-vs-remote rule (`loop()` keeps
+  running old code, `?MODULE:loop()` switches), and it is *why* Stage 6 exists: a
+  long-lived loop needs an explicit hand-off point to adopt new code. Say "on its
+  next lookup", not "running loops pick up new code", because a self-call is not a
+  lookup.
 - **In-flight calls are safe** — append-only code means a call already running
   the old closure finishes on it; the next call gets the new one.
 - **Process-threaded state already survives reload.** This Lisp is strictly
@@ -40,7 +53,8 @@ running `nest mcp` image:
   idiomatic place for editor state is therefore a long-running green process
   that threads its state through its own loop argument. That state is
   *per-process data*, not a global binding, so reload doesn't touch it — the
-  loop keeps its state and picks up new code via late binding. The state problem
+  loop keeps its state, and picks up new code for everything it *calls* (though not
+  for its own body until it returns — see the self-call bullet above). The state problem
   below is real but *narrower* than "Emacs loses nothing": it's specifically
   about state and resources bound at **global** scope.
 - **A reload trigger exists** — `std/tool/reload.blsp` polls file mtimes and calls
