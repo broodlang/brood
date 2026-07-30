@@ -1426,8 +1426,15 @@ mod tests {
         let mut heap = Heap::new();
         // Empty mailbox, no timeout: the scan finds nothing and the capture branch
         // returns the suspend signal. `matcher` is never applied (the queue is empty),
-        // so a plain `nil` suffices.
-        let r = receive_match(&mut heap, Value::nil(), Value::nil(), Value::nil());
+        // so a plain `nil` suffices — and `nil` for `pin` means no receive-mark
+        // (ADR-195), which is what an unpinned receive passes.
+        let r = receive_match(
+            &mut heap,
+            Value::nil(),
+            Value::nil(),
+            Value::nil(),
+            Value::nil(),
+        );
         crate::process::scheduler::set_capture_top_level(prev_top);
         crate::process::scheduler::set_capture_run(false);
         crate::process::scheduler::CURRENT.with(|c| *c.borrow_mut() = None); // don't leak the dummy ctx

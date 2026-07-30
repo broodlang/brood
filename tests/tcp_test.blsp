@@ -180,6 +180,70 @@
           (tcp-close ls)
           (assert= (utf8-bytes->string (nth r 0)) "abc\r\n\r\n")
           (assert= (utf8-bytes->string (nth r 1)) "xyz")))))
+  ;; The scan keeps only the last (|sep|-1) bytes of history, so a delimiter spread
+  ;; over as many chunks as it has bytes is the exact boundary case — one byte per
+  ;; chunk means every straddle slot is in use. A `tail` off by one loses the match
+  ;; and the read hangs to EOF instead of framing.
+  (test "tcp-read-until finds a delimiter delivered one byte per chunk"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp-controlling-process s (self))
+        (tcp-set-binary s true)
+        ;; drive the mailbox directly: the kernel is free to coalesce real socket
+        ;; reads, and this case is precisely about NOT being coalesced.
+        (dolist (b (list "a" "b" "\r" "\n" "\r" "\n" "z"))
+          (send (self) [:tcp s (bytes-concat b)]))
+        (let (r (tcp-read-until s "\r\n\r\n"))
+          (assert= (utf8-bytes->string (nth r 0)) "ab\r\n\r\n")
+          ;; `rest` is only surplus from the chunk that COMPLETED the delimiter, and
+          ;; here that chunk is the bare "\n" — so "z" is not surplus, it is still an
+          ;; unreceived message. It must survive for the next framed read.
+          (assert= (utf8-bytes->string (nth r 1)) "")
+          (let (r2 (tcp-read-n s 1))
+            (tcp-close c)
+            (tcp-close s)
+            (tcp-close ls)
+            (assert= (utf8-bytes->string (nth r2 0)) "z"))))))
+  ;; A near-miss that shares a prefix with the delimiter must not be reported: the
+  ;; straddle window carries "\r\n\r" forward, so a following "x" has to reject.
+  (test "tcp-read-until does not match a partial delimiter carried across chunks"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp-controlling-process s (self))
+        (tcp-set-binary s true)
+        ;; the last chunk both completes the delimiter and carries surplus, so this
+        ;; also pins the cut offset (computed from the running total + an index into
+        ;; the straddle probe, never from a scan of the whole buffer).
+        (dolist (b (list "h" "\r\n\r" "x" "\r\n" "\r\ntail"))
+          (send (self) [:tcp s (bytes-concat b)]))
+        (let (r (tcp-read-until s "\r\n\r\n"))
+          (tcp-close c)
+          (tcp-close s)
+          (tcp-close ls)
+          (assert= (utf8-bytes->string (nth r 0)) "h\r\n\rx\r\n\r\n")
+          (assert= (utf8-bytes->string (nth r 1)) "tail")))))
+  ;; The frame boundary is computed from a running byte total plus an offset into the
+  ;; straddle probe, not from a scan of the whole buffer — so the cut must still land
+  ;; correctly after many chunks have gone by.
+  (test "tcp-read-until cuts at the right offset after many chunks"
+    (let (ls (tcp-listen "127.0.0.1" 0)
+          port (tcp-local-port ls))
+      (let (c (tcp-connect "127.0.0.1" port)
+            s (receive ([:tcp-accept ^ls cs] cs) (after 5000 :timeout)))
+        (tcp-controlling-process s (self))
+        (tcp-set-binary s true)
+        (dotimes (i 200) (send (self) [:tcp s (bytes-concat "0123456789")]))
+        (send (self) [:tcp s (bytes-concat "END\r\n\r\nrest")])
+        (let (r (tcp-read-until s "\r\n\r\n"))
+          (tcp-close c)
+          (tcp-close s)
+          (tcp-close ls)
+          (assert= (byte-length (nth r 0)) (+ 2000 3 4))
+          (assert= (utf8-bytes->string (nth r 1)) "rest")))))
   (test "tcp-read-until returns [:closed acc] when the delimiter never arrives"
     (let (ls (tcp-listen "127.0.0.1" 0)
           port (tcp-local-port ls))

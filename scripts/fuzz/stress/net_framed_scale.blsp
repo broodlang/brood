@@ -1,0 +1,85 @@
+;; net_framed_scale — scale harness for the framed-read combinators (std/net/tcp.blsp,
+;; std/net/http.blsp). Part of the std/ scale sweep (handoff thread 1).
+;;
+;;   CHUNKS=<n> SIZE=<bytes> brood scripts/fuzz/stress/net_framed_scale.blsp
+;;
+;; Reads a delimited frame that arrives as CHUNKS separate chunks of SIZE bytes each.
+;; The combinators consume `[:tcp sock data]` messages from the *mailbox*, so no socket
+;; and no network are needed: fabricate the drip with `send` to self and the measurement
+;; is deterministic — no kernel read granularity, no coalescing, no timing jitter from
+;; the reader thread. `sock` is only pinned by equality in the receive clauses, so any
+;; value works as the handle.
+;;
+;; What it is looking for: cost per chunk must be FLAT in CHUNKS. If total time grows
+;; with the square of CHUNKS, a read loop is rebuilding (or rescanning) its whole
+;; accumulator per chunk. Both loops are meant to be O(total) — one concat at the end,
+;; each inbound byte scanned once.
+;;
+;; The delimiter is planted in the LAST chunk only, so every earlier chunk is a full
+;; miss — the worst case, and the drip-fed slow-loris shape.
+
+(defmodule net-framed-scale (:use net/tcp))
+
+(def chunks (let (e (getenv "CHUNKS")) (if e (string->number e) 2000)))
+(def size (let (e (getenv "SIZE")) (if e (string->number e) 64)))
+
+(def sep "\r\n\r\n")
+(def filler (bytes-concat (string-repeat "x" size)))
+(def final (bytes-concat (list (string-repeat "y" size) sep "TRAILER")))
+
+;; Queue the whole drip up front, then read: the reader never waits, so the number
+;; measured is pure accumulate/scan cost, not scheduling.
+(defn drip (sock k)
+  (if (= k 0)
+    (send (self) [:tcp sock final])
+    (do (send (self) [:tcp sock filler]) (drip sock (- k 1)))))
+
+(defn bench-tcp-read-until (sock)
+  (do
+    (drip sock chunks)
+    (let (t0 (now-ns)
+          r (tcp-read-until sock sep)
+          us (quot (- (now-ns) t0) 1000))
+      (do
+        (if (not (= (utf8-bytes->string (nth r 1)) "TRAILER"))
+          (do (println "ERROR: wrong remainder") (%halt 1))
+          nil)
+        (if (not (= (count (nth r 0)) (+ (* size (+ chunks 1)) (count sep))))
+          (do (println (str "ERROR: wrong frame length " (count (nth r 0)))) (%halt 1))
+          nil)
+        us))))
+
+;; Control 1: `tcp-read-n` over the same drip. It was already O(total) (running byte
+;; count, one concat), so it is the reference for what the accumulate path costs when
+;; nothing rescans.
+(defn bench-tcp-read-n (sock)
+  (do
+    (drip sock chunks)
+    (let (t0 (now-ns)
+          r (tcp-read-n sock (* size (+ chunks 1)))
+          us (quot (- (now-ns) t0) 1000))
+      us)))
+
+;; Control 2: the harness floor — receive the same messages and do nothing with them.
+;; Whatever this costs is per-message mailbox cost, not framed-read cost, and must be
+;; subtracted before attributing anything to the combinators.
+(defn sink (sock k)
+  (if (= k 0) :ok (receive ([:tcp ^sock d] (sink sock (- k 1))))))
+
+(defn bench-floor (sock)
+  (do
+    (drip sock chunks)
+    (let (t0 (now-ns)
+          r (sink sock (+ chunks 1))
+          us (quot (- (now-ns) t0) 1000))
+      us)))
+
+(defn report (what us)
+  (println (str (pad-right what 16) " chunks=" chunks " size=" size
+                " total-bytes=" (* size (+ chunks 1))
+                " us=" us
+                " ns/chunk=" (quot (* us 1000) chunks))))
+
+(report "floor" (bench-floor :sock-floor))
+(report "tcp-read-n" (bench-tcp-read-n :sock-n))
+(report "tcp-read-until" (bench-tcp-read-until :sock-a))
