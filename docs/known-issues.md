@@ -3,12 +3,48 @@
 KI-9 is a one-off arity sighting judged a transient inconsistent-build artifact, not
 present in committed code; KI-10 no longer reproduces, incidentally fixed — both kept as
 records, not open bugs. **Open: KI-17** (a checker reachability gap — a workaround exists)
-and **KI-18** (a bounded, one-time effect duplication in a deopt-thrashing multi-arity fn).
+**KI-18** (a bounded, one-time effect duplication in a deopt-thrashing multi-arity fn) and
+**KI-19** (the VM resolves a call's free-global head after its arguments).
 This file is the condensed record — what each was, how it was fixed, and the regression
 test that guards it — so a recurrence is recognizable. For the narrative discovery
 writeup of the scheduler race, see
 [claude-demo-findings.md](claude-demo-findings.md); deeper rationale is in the cited
 ADRs / topic docs.
+
+---
+
+## KI-19 — the VM resolves a call's free-global head **after** its arguments · OPEN
+
+The tree-walker evaluates the operator first (`eval_arguments` receives an already-evaluated
+callee). The VM does not stage a free-global head at all: `emit.rs` elides it and
+`Inst::Call` resolves it through the call-site IC *after* the arguments have run. An
+argument that rebinds the head therefore makes the engines disagree:
+
+```lisp
+(defn f (x) :old)
+(defn bump () (def f (fn (x) :new)) 1)
+(defn g () (f (bump)))
+(g)          ;; VM => :new    BROOD_VM=0 => :old
+```
+
+`Inst::Call`'s doc claiming "the callee is still resolved in-order … so eval order is
+unchanged" is stale — it predates the head elision.
+
+**The obvious fix is measured and rejected.** Staging the head so it evaluates first forces
+`head: None` on `Inst::Call`, which disables the call-site IC and sends every such call
+through a full resolution: **`json` went 168 ms → 1159 ms (6×)** while `fib`/`nqueens`/
+`bintree` were flat. Restricting the staging to calls whose arguments can run user code (a
+`node_runs_user_code` walk) does not help, because in `json` that is most of them.
+
+A real fix has to keep IC-speed resolution while moving it *before* the arguments — i.e. a
+head-resolution instruction with its own **global**-IC site, emitted ahead of the args, with
+`Inst::Call` consuming the staged value. Note the global-IC and call-IC site id spaces are
+independent (`ngsites` vs `nsites`), so it needs a real gsite, not the call site — reusing
+the call site is a separate latent defect in the tail-call head path.
+
+Severity: only observable when an argument expression rebinds the function being called.
+Worth closing for engine-differential cleanliness (the fuzzer can reach it), not worth a 6×
+regression on a benchmark row.
 
 ---
 
