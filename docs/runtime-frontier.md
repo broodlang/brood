@@ -7,16 +7,28 @@ we have, how Erlang/Go/Pony solve the same problems, and every option with its e
 win, cost, and risk, ordered for execution. Tick items off here as they land; move
 anything measured-and-rejected to the dead-ends list at the bottom.
 
-Current standing (2026-07-29, all measured this week):
+Current standing (**refreshed 2026-07-30** from the published run; the rest measured that
+week):
 
 | metric | Brood | BEAM/Elixir |
 |---|---|---|
-| live process (spawn-live, RSS/proc) | ~6.6 KB | ~3 KB |
+| `spawn-live` wall | **2.42 s** | **0.71 s** (3.4×) |
+| live process (spawn-live, RSS/proc) | **~5.9 KB** (1.67 GB) | **~3.1 KB** (0.89 GB) |
 | parked-process allocation floor | ~4.5 KB | ~2.7 KB (338 words) |
 | spawn+park | ~7.6 µs, 15.8 allocs | ~1–2 µs |
 | message round-trip (`pingpong`) | ~2.8× Elixir | — |
 | ring hop | ~3.5× Elixir | — |
 | parallel scaling (2→12 workers) | 2.5× of a 3.0× ceiling | BEAM 2.4× same box |
+
+**Note on the 2026-07-30 benchmark refresh.** The `spawn-live` ports were corrected that day
+and the numbers above are from the corrected row, so they are not comparable to earlier
+figures cell-for-cell: .NET's `TaskCompletionSource` was resuming continuations *inline on the
+setter's thread* (measured 1000/1000, none on the pool), so its "300k concurrent units" were
+300k synchronous closure calls; and Node/Python/.NET collected results by returning values
+into a pre-allocated array while Brood and Elixir pay for a second copied message per unit.
+Both fixed. Also: Brood and Elixir now send a **contiguous** payload (vector / tuple) rather
+than a cons list, matching the array ports — worth 11% of wall and ~0% of memory, which is
+itself the useful datum: **the 1.67 GB is the process floor, not the messages.**
 
 ## Part 1 — what we actually have (measured, not assumed)
 
