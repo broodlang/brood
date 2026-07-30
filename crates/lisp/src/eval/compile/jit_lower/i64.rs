@@ -338,13 +338,24 @@ fn lower_i64_arith(
     y: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
     use cranelift_codegen::ir::{condcodes::IntCC, InstBuilder};
-    // Float: plain IEEE ops, no overflow (inf/NaN are valid results) — far simpler than int.
+    // Float: plain IEEE ops, no *overflow* (inf/NaN are valid float results) — far simpler
+    // than int. Division still needs the ÷0 guard: Brood's `/` **raises** "division by
+    // zero" rather than yielding IEEE infinity (`prim_div` tests `b == 0.0` before
+    // dividing), so a bare `fdiv` returned `inf` where the VM raised — a JIT-only wrong
+    // answer. `fcmp Equal` against 0.0 is true for -0.0 too, matching `b == 0.0` exactly.
     if cx.kind == Scalar::Float {
         return match op {
             PrimOp::Add => b.ins().fadd(x, y),
             PrimOp::Sub => b.ins().fsub(x, y),
             PrimOp::Mul => b.ins().fmul(x, y),
-            PrimOp::Div => b.ins().fdiv(x, y),
+            PrimOp::Div => {
+                let zero = b.ins().f64const(0.0);
+                let div0 = b
+                    .ins()
+                    .fcmp(cranelift_codegen::ir::condcodes::FloatCC::Equal, y, zero);
+                i64_guard_overflow(b, cx, div0);
+                b.ins().fdiv(x, y)
+            }
             _ => unreachable!("float checker restricts arith ops to +,-,*,/"),
         };
     }
