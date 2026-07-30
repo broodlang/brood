@@ -7,7 +7,7 @@ the "why" of each piece, the ADRs cited below in [decisions.md](decisions.md).
 The invariant that governs everything here: **the checker is advisory and sound — it warns
 only on a *provable* misuse and never false-positives.** Every item below was landed against
 a hard gate: the full `std/` + `tests/` sweep stays clean (zero false positives) and the
-`types::check` unit suite (278 tests) stays green.
+`types::check` unit suite stays green.
 
 ---
 
@@ -70,13 +70,18 @@ Ordered roughly by value. None of these are blockers; each is additive or a
 pay-when-it-hurts item, and the guiding rule (ADR-011) is to defer until a concrete need
 appears.
 
-### Inference (the highest-leverage remaining area)
-- **Same-file *parameter* inference.** Pass 2.8 is return-only. Params are higher-risk (they
-  constrain callers' args, so a wrong inference false-positives) — the natural next increment,
-  gated hard on the sweep.
-- **Per-arm multi-arity params** (an overload sig) — currently multi-arity is return-only.
-- **`and`/`or`-chained guard narrowing** and **higher-order callback result inference** —
-  the two "not yet" items still listed in the `check.rs` module doc.
+### Inference — mostly closed
+- ✅ **Same-file *parameter* inference** — shipped (ADR-190, occurrence typing): a caller's
+  arguments are checked against a derived param type, no annotation needed.
+- ✅ **`and`/`or`-chained guard narrowing** — shipped: every `and` conjunct narrows the
+  then-branch; a same-variable `or` narrows both branches (then → union, else → complement).
+- ✅ **Higher-order callback result inference** — already worked (`(map f xs)` flows `f`'s
+  element type; `(string-length (first (map inc xs)))` flags).
+- ⏸ **Per-arm multi-arity params** — the one remaining piece. A multi-arity closure still gets
+  a params-less return-only sig, so a call's args aren't checked against the matching arm.
+  Sound to leave (a missed check is a false negative, never a false positive); closing it needs
+  an inferred-overload path + per-argc arm selection in the call-check, for marginal value
+  (ADR-011).
 
 ### Abilities / dispatch
 - **Return-type dispatch** — selecting an impl by expected return; needs bidirectional
@@ -135,4 +140,6 @@ appears.
 ADRs: **180** typed op returns/params · **181** sealed ability as a type · **182** mono
 devirtualization · **185** provided op bodies · **186** any ability name is a type · **187**
 record patterns + exhaustiveness · **188** same-file inference · **189** per-file
-require-reachability lint (KI-17).
+require-reachability lint (KI-17) · **190** occurrence typing (inferred params check callers)
+· **191** staged call head (KI-19). Chained-guard `and`/`or` narrowing shipped 2026-07-30
+(no separate ADR — it closes the ADR-011-deferred inference gaps).

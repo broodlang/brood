@@ -92,12 +92,19 @@
 //!   names across the forms in a file.
 //!
 //! Inference now covers control-flow returns (`if`/`cond`/`let`/`do`/`case`), recursion,
-//! multi-arity/variadic closures, and — via `check_file`'s Pass 2.8 fixpoint — a file's own
-//! functions (form-based, since the file isn't loaded while checked). Still deferred:
-//! `and`/`or`-chained guard narrowing and higher-order-callback result inference. The checker
-//! runs automatically as the pre-flight in `brood <file>` / `nest test` / `nest run` /
-//! `nest check`; the in-process entry points are [`check_file`] (whole file) and the
-//! `(check 'form)` builtin (a fragment).
+//! multi-arity/variadic closure *returns*, a file's own functions (`check_file`'s Pass 2.8
+//! fixpoint, form-based since the file isn't loaded while checked), inferred *parameters*
+//! (ADR-190 — a caller's arguments are checked against a derived param type), **`and`/`or`-
+//! chained guard narrowing** (every `and` conjunct narrows the then-branch; a same-variable
+//! `or` narrows both branches), and higher-order-callback results (a `(map f xs)` element
+//! type flows from `f`'s return). The one remaining deferred piece is **per-arm parameter
+//! checking of a *multi-arity* callee** — a multi-arity closure still gets a params-less
+//! return-only sig, so a call's arguments aren't checked against the matching arm. Leaving it
+//! is sound (a missed check is a false negative, never a false positive); closing it would
+//! need an inferred-overload path plus per-argc arm selection in the call-check, for marginal
+//! value (ADR-011). The checker runs automatically as the pre-flight in `brood <file>` /
+//! `nest test` / `nest run` / `nest check`; the in-process entry points are [`check_file`]
+//! (whole file) and the `(check 'form)` builtin (a fragment).
 //!
 //! **Operand-position unbound symbols.** The unbound-symbol diagnostic fires on
 //! both a combination's *head* and its *operand / value* positions — `(+ 1 typo)`,
