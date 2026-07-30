@@ -2297,6 +2297,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![sym.union(string), string], any),
         references_in_source,
     );
+    def(
+        heap,
+        "type-signature",
+        Arity::exact(1),
+        Sig::new(vec![sym.union(string)], string.union(nil_ty)),
+        type_signature,
+    );
 
     // introspection (editor tooling; see docs/lsp.md) — derive what we can from
     // the bound value (arglist, doc); enumerate the global table for completion.
@@ -3129,6 +3136,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("form-pos", &["form"], "A form's [line col] source position, or nil."),
     ("current-file", &[], "The path of the file currently being loaded, or nil."),
     ("source-location", &["name"], "Where global name was defined, as [file line col], or nil. Quote it: (source-location 'foo)."),
+    ("type-signature", &["name"], "The checker's type signature for global `name` (declared/curated/inferred) as an arrow string like \"(int -> int)\", or nil if it can't be pinned. Symbol or string arg: (type-signature 'map)."),
     ("references-in-source", &["name", "source"], "Occurrences of the global `name` in `source`, as a list of [line col] (1-based); locals that shadow it are excluded."),
     ("doc", &["f"], "The docstring of a function, macro, or primitive, or nil."),
     ("arglist", &["f"], "The parameter list of a function, macro, or primitive, or nil."),

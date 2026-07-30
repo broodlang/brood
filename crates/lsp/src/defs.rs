@@ -1,9 +1,15 @@
 //! Top-level definitions read straight off the tooling CST: the model behind
 //! `documentSymbol` and the document side of `hover`. A pure walk over the
-//! root's direct `def` / `defn` / `defmacro` forms — no evaluation, so it works
-//! on a buffer the server never runs (and couldn't, mid-edit). Mirrors the
-//! `def`-family handling in [`scope`](brood::syntax::scope), but keeps the
-//! richer surface (params, docstring) the outline and hover want.
+//! root's direct `def` / `defn` / `defmacro` / `defrecord` / `defability` forms —
+//! no evaluation, so it works on a buffer the server never runs (and couldn't,
+//! mid-edit). Mirrors the `def`-family handling in
+//! [`scope`](brood::syntax::scope), but keeps the richer surface (params,
+//! docstring) the outline and hover want. A `defrecord`'s name doubles as its
+//! constructor (so its fields become the signature params); a `defability`
+//! surfaces as an interface. The globals those macros *synthesize* (accessors,
+//! op dispatchers) aren't visible here — they're navigable through the runtime
+//! def-site table instead (`source-location`, populated on load; see
+//! [`crate::definition`]).
 
 use brood::error::Span;
 use brood::syntax::cst::{Node, NodeKind};
@@ -17,6 +23,11 @@ pub enum DefKind {
     Fn,
     /// `(defmacro name (params) …)` — a macro.
     Macro,
+    /// `(defrecord name (fields) …)` — a record; the name doubles as the
+    /// constructor, so its `params` are the fields.
+    Record,
+    /// `(defability Name (ops…) …)` — an ability (a generic-function interface).
+    Ability,
 }
 
 impl DefKind {
@@ -26,7 +37,15 @@ impl DefKind {
             DefKind::Var => "def",
             DefKind::Fn => "defn",
             DefKind::Macro => "defmacro",
+            DefKind::Record => "defrecord",
+            DefKind::Ability => "defability",
         }
+    }
+
+    /// Whether a signature renders with a parenthesized parameter list (a
+    /// callable) rather than as a bare name.
+    fn is_callable(self) -> bool {
+        matches!(self, DefKind::Fn | DefKind::Macro | DefKind::Record)
     }
 }
 
@@ -52,7 +71,7 @@ impl Def<'_> {
     /// A one-line signature for hover / outline detail: `(name p1 p2)` for a
     /// fn/macro, or just `name` for a var.
     pub fn signature(&self) -> String {
-        if self.kind == DefKind::Var {
+        if !self.kind.is_callable() {
             return self.name.to_string();
         }
         let mut s = String::from("(");
@@ -98,6 +117,8 @@ fn parse_def<'s>(form: &Node, src: &'s str) -> Option<Def<'s>> {
         "def" => DefKind::Var,
         "defn" => DefKind::Fn,
         "defmacro" => DefKind::Macro,
+        "defrecord" => DefKind::Record,
+        "defability" => DefKind::Ability,
         _ => return None,
     };
     let name = forms.next()?;
@@ -105,21 +126,31 @@ fn parse_def<'s>(form: &Node, src: &'s str) -> Option<Def<'s>> {
         return None; // e.g. `(def (destructure) …)` — deferred, not a plain name
     }
 
-    let (params, doc) = if kind == DefKind::Var {
-        (Vec::new(), None)
-    } else {
+    // Params: the fields (Record) or the arglist (Fn/Macro); none for a Var or an
+    // Ability (whose name isn't itself callable). Docstring: only Fn/Macro carry a
+    // leading-string doc in the position we read — a Record's third form is its
+    // field list, not a docstring.
+    let (params, doc) = if kind.is_callable() {
         let params = forms
             .next()
             .filter(|p| matches!(p.kind, NodeKind::List | NodeKind::Vector))
             .map(|p| p.forms().map(|n| n.text(src)).collect())
             .unwrap_or_default();
-        // Docstring: a leading string with more body after it.
-        let body: Vec<&Node> = forms.collect();
-        let doc = match body.as_slice() {
-            [first, _, ..] if first.kind == NodeKind::Str => Some(str_contents(first.text(src))),
-            _ => None,
+        let doc = if matches!(kind, DefKind::Fn | DefKind::Macro) {
+            // A leading string with more body after it (a lone string is a return value).
+            let body: Vec<&Node> = forms.collect();
+            match body.as_slice() {
+                [first, _, ..] if first.kind == NodeKind::Str => {
+                    Some(str_contents(first.text(src)))
+                }
+                _ => None,
+            }
+        } else {
+            None
         };
         (params, doc)
+    } else {
+        (Vec::new(), None)
     };
 
     Some(Def {
@@ -182,6 +213,35 @@ mod tests {
     fn keeps_optional_and_rest_markers_in_signature() {
         let ds = defs("(defn f (a &optional (b 1) & cs) a)");
         assert_eq!(ds[0].signature(), "(f a &optional (b 1) & cs)");
+    }
+
+    #[test]
+    fn recognizes_defrecord_as_a_struct_whose_fields_are_the_constructor_params() {
+        let ds = defs("(defrecord point (x y))");
+        assert_eq!(ds.len(), 1);
+        assert_eq!(ds[0].kind, DefKind::Record);
+        assert_eq!(ds[0].name, "point");
+        assert_eq!(ds[0].params, vec!["x", "y"]);
+        // The name doubles as the constructor, so it renders as a callable.
+        assert_eq!(ds[0].signature(), "(point x y)");
+    }
+
+    #[test]
+    fn defrecord_derives_and_typed_fields_dont_leak_into_params() {
+        // `:derives …` opts come after the field list and must not be read as fields.
+        let ds = defs("(defrecord point (x y) :derives [Fields])");
+        assert_eq!(ds[0].params, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn recognizes_defability_as_an_interface_by_name() {
+        let ds = defs("(defability Shape :sealed [circle] (area [self] :-> float))");
+        assert_eq!(ds.len(), 1);
+        assert_eq!(ds[0].kind, DefKind::Ability);
+        assert_eq!(ds[0].name, "Shape");
+        // The ability name isn't itself callable — it renders as a bare name.
+        assert!(ds[0].params.is_empty());
+        assert_eq!(ds[0].signature(), "Shape");
     }
 
     #[test]

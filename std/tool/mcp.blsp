@@ -209,9 +209,10 @@ image stays in sync with disk."
         {:ok false :error (mcp--error-shape e)}))))
 
 (defn mcp-lookup-tool (args)
-  "`lookup` — describe a global name. Returns `{:name :arglist :doc
+  "`lookup` — describe a global name. Returns `{:name :arglist :doc :type
 :source-location}` (arglist a list of param symbols incl. `&optional`/`&`
-markers; doc a string or nil; source-location `[file line col]` or nil).
+markers; doc a string or nil; type the checker's arrow signature string or nil;
+source-location `[file line col]` or nil).
 Unbound names come back as `{:name :error}` rather than a thrown error, so
 the agent can branch on `(get r :error)` cleanly."
   (let (name (get args :name))
@@ -225,6 +226,7 @@ the agent can branch on `(get r :error)` cleanly."
           {:name name
            :arglist (arglist val)
            :doc (doc val)
+           :type (type-signature sym)
            :source-location (source-location sym)})
         (catch e
           {:name name :error (mcp--error-shape e)})))))
@@ -272,7 +274,7 @@ null}` — agents shouldn't have to disambiguate \"no warnings\" from
   (try
     {:diagnostics (or (check-project-structured) [])}
     (catch e
-      {:error (str e)})))
+      {:error (mcp--error-shape e)})))
 
 (defn mcp-run-tests-tool (args)
   "`run-tests` — run the project test suite. Returns the structured runner
@@ -283,7 +285,7 @@ Outside a Brood project, returns `{:error msg}`."
   (try
     (run-project-tests-structured)
     (catch e
-      {:error (str e)})))
+      {:error (mcp--error-shape e)})))
 
 (defn mcp--process-infos ()
   "A `(process-info pid)` stat map for every live process, dropping any that died
@@ -468,6 +470,73 @@ like `eval`. Returns `{:error msg}` on failure."
       (catch e
         {:error (mcp--error-shape e)}))))
 
+;; ---- ability / record introspection ----------------------------------------
+
+(defn mcp--op-provided? (spec)
+  "Does an op spec `(name [params] :-> ret? body…)` carry a body (a provided
+default) rather than being a bare required op? Skip the name + params, then the
+optional `:-> ret`, and check whether anything remains."
+  (let (tail (drop 2 spec)
+        tail (if (= (first tail) :->) (drop 2 tail) tail))
+    (not (empty? tail))))
+
+(defn mcp--ability-impls (aname ops)
+  "The type keys (as strings) that implement any op of ability `aname`, unioned
+across its ops via the `*impls*` registry."
+  (let (op-names (map first ops)
+        type-keys (fold (fn (acc op)
+                          (let (methods (get *impls* [aname op]))
+                            (if methods (into acc (keys methods)) acc)))
+                        #{} op-names))
+    (sort (map name (vec type-keys)))))
+
+(defn mcp-abilities-tool (args)
+  "`abilities` — list every ability defined in the image, sorted. Returns
+`{:abilities [name …]}`. The discovery entry point for `ability`."
+  {:abilities (sort (map str (keys *abilities*)))})
+
+(defn mcp-ability-tool (args)
+  "`ability` — describe one ability: its ops (each with params and whether it's a
+provided default), whether it's sealed and its member types, what it `:requires`,
+its owner namespace, whether it's derivable, and which types implement it. Returns
+`{:name :ops :sealed :members :requires :owner :derivable :impls}`, or
+`{:name :error}` when `:name` isn't a known ability."
+  (let (name-str (get args :name))
+    (when (not (string? name-str))
+      (throw "ability: :name must be a string"))
+    (let (aname (read-string name-str))
+      (if (not (contains? *abilities* aname))
+        {:name name-str :error (str "not an ability: " name-str)}
+        (let (ops (ability-ops aname)
+              members (sealed-members aname)
+              reqs (ability-requires aname)
+              owner (ability-owner-ns aname))
+          {:name name-str
+           :ops (map (fn (spec)
+                       {:op (str (first spec))
+                        :params (map str (second spec))
+                        :provided (mcp--op-provided? spec)})
+                  ops)
+           :sealed (not (nil? members))
+           :members (if members (map name members) [])
+           :requires (if reqs (map str reqs) [])
+           :owner (if owner (str owner) nil)
+           :derivable (not (nil? (ability-derive-recipe aname)))
+           :impls (mcp--ability-impls aname ops)})))))
+
+(defn mcp-check-source-tool (args)
+  "`check-source` — advisory type-check a source STRING (not the whole project),
+for iterating on a snippet before committing it to a file. Returns
+`{:diagnostics [{:line :col :message} …]}` — empty when clean or when `:source`
+doesn't parse (incomplete input). Backed by `check-string-structured`."
+  (let (src (get args :source))
+    (when (not (string? src))
+      (throw "check-source: :source must be a string"))
+    (try
+      {:diagnostics (or (check-string-structured src) [])}
+      (catch e
+        {:error (mcp--error-shape e)}))))
+
 ;; ---- catalogue -------------------------------------------------------------
 
 (defn mcp-tools ()
@@ -477,8 +546,10 @@ its own list that conses additional entries onto this one — `def` rebinds
 globals (ADR-013), so the dispatcher sees the project's version on its next
 fetch.
 
-Twenty tools work today (in a project context — `write`/`edit` need a root): the
-eight v0 tools, `callers` (cross-file
+Twenty-three tools work today (in a project context — `write`/`edit` need a root):
+the eight v0 tools, the ability/type introspection trio `abilities` / `ability`
+(describe an ability's ops, sealed members, `:requires`, impls) / `check-source`
+(type-check a snippet string), `callers` (cross-file
 find-references), the three discovery tools `apropos` / `all-globals` /
 `doc-search` (search the flat namespace by name or docstring rather than
 looking up a name you already know), `bench` (time an expression in the
@@ -524,12 +595,29 @@ Brood pattern, `std/tool/explain.blsp`)."
               :required ["path" "old" "new"]}
      :handler mcp-edit-tool}
     {:name "lookup"
-     :description "Look up a global name: returns its arglist, docstring, and source location (file/line/col)."
+     :description "Look up a global name: returns its arglist, docstring, type signature (the checker's arrow string, e.g. \"(int -> int)\"), and source location (file/line/col)."
      :schema {:type "object"
               :properties {:name {:type "string"
                                   :description "The name to look up (no leading quote)"}}
               :required ["name"]}
      :handler mcp-lookup-tool}
+    {:name "abilities"
+     :description "List every ability (generic-function interface) defined in the image, sorted. Returns {:abilities [name ...]}. The discovery entry point — pass a name to `ability` for details."
+     :schema {:type "object" :properties {}}
+     :handler mcp-abilities-tool}
+    {:name "ability"
+     :description "Describe an ability: its ops (each with params and whether it's a provided default), whether it's :sealed and its member types, what it :requires (super-abilities), its owner namespace, whether it's derivable (:derives), and which types implement it. Returns {:name :ops :sealed :members :requires :owner :derivable :impls}, or {:name :error} for an unknown name. Use it to understand a dispatch point before writing an `impl`."
+     :schema {:type "object"
+              :properties {:name {:type "string"
+                                  :description "The ability name (no leading quote), e.g. \"Display\""}}
+              :required ["name"]}
+     :handler mcp-ability-tool}
+    {:name "check-source"
+     :description "Advisory type-check a source STRING (not the whole project) — for iterating on a snippet before writing it to a file. Returns {:diagnostics [{:line :col :message} ...]}, empty when clean. Complements `check` (whole project) and `eval` (which runs code without type advice)."
+     :schema {:type "object"
+              :properties {:source {:type "string" :description "Brood source to type-check"}}
+              :required ["source"]}
+     :handler mcp-check-source-tool}
     {:name "macroexpand"
      :description "Macro-expand a form. Default is one step (`:mode \"1\"`); pass `:mode \"all\"` for full expansion."
      :schema {:type "object"

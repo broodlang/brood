@@ -20,6 +20,8 @@ pub fn document_symbols(root: &Node, text: &str, index: &LineIndex) -> Vec<Docum
                 kind: match d.kind {
                     DefKind::Var => SymbolKind::VARIABLE,
                     DefKind::Fn | DefKind::Macro => SymbolKind::FUNCTION,
+                    DefKind::Record => SymbolKind::STRUCT,
+                    DefKind::Ability => SymbolKind::INTERFACE,
                 },
                 tags: None,
                 deprecated: None,

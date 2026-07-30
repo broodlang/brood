@@ -508,7 +508,15 @@ pub(super) fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispRe
         // re-saved def site.
         heap.note_definition(form, pos);
         result = crate::eval::macros::compile(heap, form, root)
-            .and_then(|f| crate::eval::eval(heap, f, root))
+            .and_then(|f| {
+                // Also record the *expanded* form's def sites, so a macro-defined
+                // global whose raw head isn't a def*` (a `defrecord` constructor /
+                // accessor, a `defability` op) gets a site too — matching the
+                // file-runner (`lib.rs`). Without this, cross-file goto-definition
+                // on those names finds nothing under `(load …)` / project modules.
+                heap.note_definition(f, pos);
+                crate::eval::eval(heap, f, root)
+            })
             .map_err(|e| e.or_pos(pos).or_file(path.clone()));
         if result.is_err() {
             break;
@@ -570,7 +578,15 @@ pub(super) fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         let form = heap.root_at(base + i);
         heap.note_definition(form, pos);
         result = crate::eval::macros::compile(heap, form, root)
-            .and_then(|f| crate::eval::eval(heap, f, root))
+            .and_then(|f| {
+                // Also record the *expanded* form's def sites, so a macro-defined
+                // global whose raw head isn't a def*` (a `defrecord` constructor /
+                // accessor, a `defability` op) gets a site too — matching the
+                // file-runner (`lib.rs`). Without this, cross-file goto-definition
+                // on those names finds nothing under `(load …)` / project modules.
+                heap.note_definition(f, pos);
+                crate::eval::eval(heap, f, root)
+            })
             .map_err(|e| e.or_pos(pos).or_file(path.clone()));
         if result.is_err() {
             break;

@@ -56,6 +56,38 @@ pub(super) fn source_location(args: &[Value], _env: EnvId, heap: &mut Heap) -> L
     }
 }
 
+/// `(type-signature 'name)` — the checker's type signature for the global `name`
+/// (declared, curated, or inferred), as an arrow string like `"(int -> int)"`, or
+/// `nil` when it has no pinnable signature (unbound, non-callable, or a value the
+/// checker can't type). Reads the loaded image, same discipline as `arglist`/`doc`.
+/// The introspection foundation the LSP hover and the `nest mcp` `lookup` tool
+/// share (so they can't drift on what a name's type is). `name` may be a symbol or
+/// a string; a never-interned name names no global, so it returns `nil`.
+pub(super) fn type_signature(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
+    let sym = match arg(args, 0) {
+        Value::Sym(s) => s,
+        Value::Str(id) => {
+            let name = heap.string(id).to_string();
+            match value::intern_existing(&name) {
+                Some(s) => s,
+                None => return Ok(Value::nil()),
+            }
+        }
+        other => {
+            return Err(LispError::wrong_type(
+                heap,
+                "type-signature",
+                "symbol or string",
+                other,
+            ))
+        }
+    };
+    match crate::types::check::signature_string(heap, sym) {
+        Some(signature) => Ok(heap.alloc_string(&signature)),
+        None => Ok(Value::nil()),
+    }
+}
+
 /// `(references-in-source name source)` — every occurrence of the global `name`
 /// in `source`, as a list of `[line col]` (both 1-based), in document order. A
 /// local that shadows the name is excluded. Pure: it parses the string and
@@ -200,6 +232,8 @@ pub const SPECIAL_FORMS: &[&str] = &[
     kw::DEFN,
     kw::DEFDYN,
     kw::DEFRECORD,
+    kw::DEFABILITY,
+    kw::IMPL,
     kw::DEFMODULE,
     kw::WHEN,
     kw::UNLESS,

@@ -15,7 +15,9 @@ use std::collections::HashSet;
 use brood::syntax::cst::{Node, NodeKind};
 use brood::syntax::scope::{BindingKind, ScopeTree};
 use brood::Interp;
-use lsp_types::{CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind};
+use lsp_types::{
+    CompletionItem, CompletionItemKind, Documentation, InsertTextFormat, MarkupContent, MarkupKind,
+};
 
 use brood::introspect;
 
@@ -31,6 +33,7 @@ pub fn completions(
     cst: &Node,
     text: &str,
     offset: u32,
+    snippet_support: bool,
 ) -> Vec<CompletionItem> {
     // Module-name context: inside `(require '…)` or a `(:use …)`/`(:alias …)`
     // clause the only sensible candidates are requireable modules — offer those
@@ -47,17 +50,32 @@ pub fn completions(
 
     // Inside `(impl Ability …)`, offer the ability's ops first (so the snippet-y
     // METHOD item shadows the generic global of the same name) — you get exactly the
-    // ops you must implement, with their arities.
+    // ops you must implement, each as a ready-to-fill method skeleton.
     if let Some(proto) = enclosing_impl(cst, offset, text) {
+        // Is the method's own `(` already typed (cursor sits inside `(op…`), or are
+        // we directly in the impl form? If the innermost list is the impl form
+        // itself, the skeleton must supply the wrapping parens.
+        let paren_open = innermost_list(cst, offset)
+            .and_then(|list| list.forms().next())
+            .is_some_and(|head| head.text(text) != "impl");
         for (name, arity) in introspect::protocol_ops(interp, &proto) {
             if seen.insert(name.clone()) {
-                let mut it = item(name, CompletionItemKind::METHOD);
+                let mut it = item(name.clone(), CompletionItemKind::METHOD);
                 it.detail = Some(format!(
                     "{} op ({} arg{})",
                     proto,
                     arity,
                     if arity == 1 { "" } else { "s" }
                 ));
+                it.insert_text = Some(impl_method_skeleton(
+                    &name,
+                    arity,
+                    paren_open,
+                    snippet_support,
+                ));
+                if snippet_support {
+                    it.insert_text_format = Some(InsertTextFormat::SNIPPET);
+                }
                 items.push(it);
             }
         }
@@ -137,6 +155,32 @@ fn item(label: String, kind: CompletionItemKind) -> CompletionItem {
     }
 }
 
+/// The text inserted when an ability op is picked inside `(impl …)`: the method
+/// skeleton `(op [self …] body)`, so the user fills in the body rather than
+/// retyping the shape. With `snippet` (the client declared `snippetSupport`), the
+/// params and body are tabstops (`${1:self}` … `$0`); otherwise a plain skeleton
+/// with an empty body (no `$`-syntax a non-snippet client would insert literally).
+/// `paren_open` = the method's own `(` is already typed, so the wrapping parens are
+/// omitted (the first arg is conventionally `self`; later args are `arg2`, `arg3`).
+fn impl_method_skeleton(name: &str, arity: usize, paren_open: bool, snippet: bool) -> String {
+    let (open, close) = if paren_open { ("", "") } else { ("(", ")") };
+    let param = |i: usize| -> String {
+        let bare = if i == 0 {
+            "self".to_string()
+        } else {
+            format!("arg{}", i + 1)
+        };
+        if snippet {
+            format!("${{{}:{}}}", i + 1, bare)
+        } else {
+            bare
+        }
+    };
+    let params = (0..arity).map(param).collect::<Vec<_>>().join(" ");
+    let body = if snippet { "$0" } else { "" };
+    format!("{open}{name} [{params}] {body}{close}")
+}
+
 /// If byte `offset` falls inside an `(impl Ability …)` form, the ability name
 /// `Ability`. Walks the CST for the innermost enclosing `impl` list (they don't
 /// nest, so the first found while descending is it).
@@ -213,7 +257,7 @@ mod tests {
         let root = cst::parse(src);
         let tree = scope::analyze(&root, src);
         let at = src.find(needle).unwrap() as u32;
-        completions(&mut interp, &tree, &root, src, at)
+        completions(&mut interp, &tree, &root, src, at, true)
             .into_iter()
             .map(|i| i.label)
             .collect()
@@ -247,7 +291,7 @@ mod tests {
         let root = cst::parse(src);
         let tree = scope::analyze(&root, src);
         let at = src.rfind("uni").unwrap() as u32;
-        let items = completions(&mut interp, &tree, &root, src, at);
+        let items = completions(&mut interp, &tree, &root, src, at, true);
         let union = items
             .iter()
             .find(|i| i.label == "union")
@@ -317,7 +361,7 @@ mod tests {
             let root = cst::parse(src);
             let tree = scope::analyze(&root, src);
             let at = src.len() as u32;
-            let labels: Vec<String> = completions(&mut interp, &tree, &root, src, at)
+            let labels: Vec<String> = completions(&mut interp, &tree, &root, src, at, true)
                 .into_iter()
                 .map(|i| i.label)
                 .collect();
@@ -344,7 +388,7 @@ mod tests {
         let root = cst::parse(src);
         let tree = scope::analyze(&root, src);
         let at = src.len() as u32; // cursor at end, inside the method form
-        let items = completions(&mut interp, &tree, &root, src, at);
+        let items = completions(&mut interp, &tree, &root, src, at, true);
         let enc = items
             .iter()
             .find(|i| i.label == "encode")
@@ -358,6 +402,33 @@ mod tests {
             enc.detail.as_deref().unwrap_or("").contains("Encode op"),
             "{:?}",
             enc.detail
+        );
+        // A fillable method skeleton is inserted: params + a body tabstop. The
+        // cursor sits inside the already-typed `(`, so no wrapping parens.
+        assert_eq!(enc.insert_text.as_deref(), Some("encode [${1:self}] $0"));
+        assert_eq!(enc.insert_text_format, Some(InsertTextFormat::SNIPPET));
+    }
+
+    #[test]
+    fn impl_method_skeleton_covers_parens_and_snippet_modes() {
+        // snippet + method `(` already open → tabstops, no wrapping parens.
+        assert_eq!(
+            impl_method_skeleton("area", 1, true, true),
+            "area [${1:self}] $0"
+        );
+        // snippet + directly in the impl form → supply the wrapping parens.
+        assert_eq!(
+            impl_method_skeleton("area", 1, false, true),
+            "(area [${1:self}] $0)"
+        );
+        // no snippet support → a plain skeleton, empty body, never literal `$`.
+        assert_eq!(
+            impl_method_skeleton("cmp", 2, false, false),
+            "(cmp [self arg2] )"
+        );
+        assert_eq!(
+            impl_method_skeleton("cmp", 2, true, false),
+            "cmp [self arg2] "
         );
     }
 }

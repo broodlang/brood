@@ -159,3 +159,17 @@
           after (get (gc-stats) :live))
       (is (> (count kept) 0))
       (is (>= after before)))))
+
+;; type-signature (ADR-031; the checker signature the LSP hover + `nest mcp`
+;; `lookup` share — a thin builtin over the checker's `signature_string`).
+(describe "type-signature"
+  (test "returns the checker's arrow signature for a builtin"
+    (let (sig (type-signature 'count))
+      (is (string? sig))
+      (is (includes? sig "-> int"))))
+  (test "accepts a string name too, same as the symbol"
+    (assert= (type-signature "inc") (type-signature 'inc)))
+  (test "an interned-but-unbound name has no signature"
+    (assert= (type-signature 'no-such-global-xyz) nil))
+  (test "a never-interned string name is nil, not an error"
+    (assert= (type-signature "definitely-not-a-real-global-42") nil)))
