@@ -15,6 +15,9 @@
   (:use editor/display)
   (:use editor/keymap))
 
+; the lineedit-focus suite below refers to editor/lineedit by qualified name
+(require 'editor/lineedit)
+
 (describe "display render-op constructors"
   (test "clear / text / cursor build tagged op vectors"
     (assert= (clear) [:clear])
