@@ -1,0 +1,105 @@
+;; soak_selfcheck — sustained load with an invariant checked EVERY iteration.
+;; SOAK_SECS=<n> SOAK_BACKLOG=<n> SOAK_REPORT=<n> brood scripts/fuzz/stress/soak_selfcheck.blsp
+;; Prints `ERROR at iteration N: ...` and halts on any violation; otherwise heartbeats and
+;; ends with `OK soak complete`. Deliberate child crashes go to stdout, so filter with
+;; `| grep -v 'died: error'` for a readable log.
+;;
+;; Pair it with a control that reverts the mechanisms under test, e.g.
+;;   BROOD_NO_RECV_MARK=1 BROOD_NO_SHARE_FN=1 BROOD_SPAWN_SPILL=999999
+;; Without a control an alarming RSS curve cannot be attributed to anything.
+;; Soak: sustained self-checking load over every path changed on 2026-07-30.
+;;
+;; The point is not "does it survive" but "does it stay CORRECT" — every iteration asserts
+;; an invariant, and any violation prints ERROR and stops. The failure this is really hunting
+;; is a wrongly-applied receive-mark, which does not crash: it silently fails to deliver, and
+;; surfaces only as a reply that never comes or a backlog message that vanished.
+;;
+;; Exercised each round:
+;;   * ref-pinned request/reply against a deliberate mailbox backlog   (receive-mark, ADR-195)
+;;   * the backlog is then drained and counted                         (nothing may be skipped)
+;;   * a supervised child crashes and is restarted                     (spawn-link, supervisor)
+;;   * a closure with no captures and one with captures cross a send   (shared vs copied, ADR-194)
+;;   * a global the shared closure calls is hot-reloaded               (RUNTIME churn + late binding)
+;;   * a burst of spawns                                               (placement spill)
+(defmodule soak (:use proc/supervisor))
+
+(def secs (let (e (getenv "SOAK_SECS")) (if e (string->number e) 3600)))
+(def backlog (let (e (getenv "SOAK_BACKLOG")) (if e (string->number e) 64)))
+(def report-every (let (e (getenv "SOAK_REPORT")) (if e (string->number e) 30000)))
+
+(def reload-target 2)
+(defn shared-thunk () (* reload-target 21))     ; no captures -> shared handle
+(defn echo-server () (receive ([:ping from r] (do (send from [:reply r :pong]) (echo-server)))))
+(def srv (spawn (echo-server)))
+
+(defn rss-kb ()
+  ;; /proc/self/status has "VmRSS:\t   12345 kB" — tab-then-spaces, so scan for the digit
+  ;; run rather than splitting on a separator.
+  (let (txt (slurp "/proc/self/status")
+        i (index-of txt "VmRSS:"))
+    (if (< i 0)
+      0
+      (let (chunk (substring txt (+ i 6) (+ i 32))
+            d0 (string-span-until chunk 0 "0123456789")
+            d1 (string-span chunk d0 "0123456789"))
+        (if (>= d0 d1) 0 (string->number (substring chunk d0 d1)))))))
+
+;; --- invariant helpers -------------------------------------------------------
+(defn stuff (k) (if (= k 0) :ok (do (send (self) [:junk k]) (stuff (- k 1)))))
+
+(defn drain-junk (k seen)
+  (if (= k 0)
+    seen
+    (receive ([:junk _] (drain-junk (- k 1) (+ seen 1)))
+             (after 2000 seen))))
+
+;; One ref-pinned round trip with `backlog` junk messages queued in front of the reply.
+(defn round-trip ()
+  (let (r (ref))
+    (do (send srv [:ping (self) r])
+        (receive ([:reply ^r v] v) (after 5000 :TIMEOUT)))))
+
+(defn crashy () (receive (:die (error "soak")) (:ok :ok)))
+(defn start-crashy () (spawn-link (crashy)))
+
+(defn burst (k) (if (= k 0) :ok (do (spawn :ok) (burst (- k 1)))))
+
+;; --- the loop ----------------------------------------------------------------
+(def sup (start-supervisor [] {:strategy :one-for-one :max-restarts 100000000 :max-seconds 60}))
+(def t-start (now))
+(def deadline (+ t-start (* secs 1000)))
+
+(defn fail (what n)
+  (do (println (str "ERROR at iteration " n ": " what)) (%halt 1)))
+
+(defn loop-once (n reloads)
+  (do
+    ;; 1. backlog + pinned round trip; the reply must arrive and the junk must survive
+    (stuff backlog)
+    (let (v (round-trip))
+      (when (not (= v :pong)) (fail (str "round-trip returned " (pr-str v)) n)))
+    (let (seen (drain-junk backlog 0))
+      (when (not (= seen backlog)) (fail (str "backlog lost: saw " seen " of " backlog) n)))
+    ;; 2. supervised crash + restart
+    (let (pid (start-child sup {:id (mod n 8) :start start-crashy :restart :permanent}))
+      (do (send pid :die)
+          (terminate-child sup (mod n 8))))
+    ;; 3. closures across a send, shared and captured, against a hot-reloaded global
+    (let (got (round-trip))                        ; keeps the server warm
+      (when (not (= got :pong)) (fail "server stopped replying" n)))
+    (when (= 0 (mod n 97))
+      (eval (list 'def 'reload-target (+ 2 (mod n 5)))))
+    ;; 4. spawn burst (placement)
+    (burst 32)
+    ;; heartbeat
+    (when (= 0 (mod n report-every))
+      (println (str "t=" (quot (- (now) t-start) 1000) "s iter=" n
+                    " reloads=" reloads " rss_kb=" (rss-kb)
+                    " children=" (count-children sup))))
+    (if (> (now) deadline)
+      (println (str "OK soak complete: " n " iterations, rss_kb=" (rss-kb)
+                    " rt-closures=" (get (gc-stats) :runtime-closures)
+                    " rt-threshold=" (get (gc-stats) :runtime-threshold)))
+      (loop-once (+ n 1) (if (= 0 (mod n 97)) (+ reloads 1) reloads)))))
+
+(loop-once 0 0)

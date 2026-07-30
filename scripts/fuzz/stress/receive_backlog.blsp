@@ -1,0 +1,20 @@
+;; receive_backlog — the receive-mark's benchmark (ADR-195).
+;; BACKLOG=<n> N=<n> brood scripts/fuzz/stress/receive_backlog.blsp
+;; Expect ~4us per round trip at ANY backlog; BROOD_NO_RECV_MARK=1 restores O(backlog)
+;; (653us at 32k). If this ever goes linear again, the mark stopped applying.
+;; Selective receive against a mailbox backlog. The receiver holds B messages no clause can
+;; match (tag-rejected), then does N ref-pinned round trips through a server. Each reply scan
+;; walks past the whole backlog, so this measures the per-candidate cost of that walk — the
+;; part the single-lock skip changes. (The O(backlog) walk itself is the receive-mark item;
+;; this only makes each step cheaper.)
+(def backlog (let (e (getenv "BACKLOG")) (if e (string->number e) 2000)))
+(def n (let (e (getenv "N")) (if e (string->number e) 2000)))
+(defn server () (receive ([:ping from r] (do (send from [:reply r :pong]) (server)))))
+(def s (spawn (server)))
+(defn stuff (k) (if (= k 0) :ok (do (send (self) [:junk k]) (stuff (- k 1)))))
+(stuff backlog)
+(defn call1 () (let (r (ref)) (do (send s [:ping (self) r]) (receive ([:reply ^r v] v)))))
+(defn go (i) (if (>= i n) i (do (call1) (go (+ i 1)))))
+(def t0 (now-ns))
+(go 0)
+(println (str "backlog=" backlog " us/round-trip=" (quot (- (now-ns) t0) (* n 1000))))
