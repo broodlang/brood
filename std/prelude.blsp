@@ -1033,8 +1033,18 @@ place even when they end up empty — removing a leaf never prunes its branch."
 ;; Subject to the usual binary-float caveat: a "halfway" decimal like 1.255 isn't
 ;; exactly representable, so it may round the way its nearest f64 actually lies.
 (defn round-to (x places)
-  "Round `x` to `places` decimal places (halves away from zero); returns a number."
-  (let (scale (pow 10 places)) (/ (round (* x scale)) scale)))
+  "Round `x` to `places` decimal places (halves away from zero); returns a number —
+a float for a float `x` unless the rounded value is an integer, exact for an exact `x`."
+  ;; The final `/` is `round`'s int result over the int scale, so since ADR-196 made
+  ;; integer `/` exact it yields a RATIO whenever it doesn't divide evenly, and
+  ;; `(round-to 3.14159 2)` came back `157/50` instead of `3.14`. Rounding recovers no
+  ;; exactness a float never had, so a float `x` converts back — which restores the
+  ;; pre-ADR-196 contract exactly: that `/` was float division, giving a float in the
+  ;; non-integral case and an int in the integral one (`(round-to 2.5 0)` → 3, because
+  ;; a denominator of 1 demotes). An exact `x` keeps the exact answer.
+  (let (scale (pow 10 places)
+        r (/ (round (* x scale)) scale))
+    (if (and (float? x) (ratio? r)) (->float r) r)))
 
 ;; (quot a b) — truncated integer division (toward zero), the quotient partner to
 ;; `rem`. (a - (rem a b)) is exactly divisible by b, so `/` returns an exact int
@@ -1045,13 +1055,19 @@ place even when they end up empty — removing a leaf never prunes its branch."
 
 ;; (pow base exp) — `exp` must be an integer (use `sqrt` for roots). Int base +
 ;; non-negative exp stays an int (overflow raises, like `*`); a negative exp gives
-;; the reciprocal (a float). Tail-recursive, so a large exponent is O(1) stack.
+;; the reciprocal. Tail-recursive, so a large exponent is O(1) stack.
+;;
+;; Since ADR-196 an EXACT base's reciprocal is a ratio, which is both better and
+;; immune to the underflow the machinery below exists for: `(pow 2 -2000)` is exactly
+;; 1/2^2000, where a float reciprocal would be 0.0. A float base still goes through
+;; that machinery — an f64 has nowhere exact to put the answer.
 ;; True for an infinite float: doubling leaves it unchanged and it isn't zero. Used to
 ;; detect that the positive power overflowed, without naming a magic constant.
 (defn pow--inf? (x) (and (float? x) (not (= x 0.0)) (= x (* x 2.0))))
 
 (defn pow (base exp)
-  "`base` raised to integer `exp`. A negative exponent gives the (float) reciprocal."
+  "`base` raised to integer `exp`. A negative exponent gives the reciprocal — **exact**
+(a ratio) for an exact `base`, a float for a float `base`."
   (cond
     (not (int? exp)) (error "pow: exponent must be an integer (use sqrt for roots), got " exp)
     (< exp 0) (pow--reciprocal base exp)

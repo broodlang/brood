@@ -680,8 +680,16 @@ pub(super) fn floor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
         Value::Int(n) => Ok(Value::int(n)),
         // A bignum is already an integer — it is its own floor.
         v @ Value::BigInt(_) => Ok(v),
+        // A ratio floors **exactly**, not through f64. Since ADR-196 made `/` on
+        // integers exact, `(floor (/ a b))` is an ordinary idiom, and routing it
+        // through f64 would round the answer for ratios beyond 2^53 — a wrong
+        // integer, not merely an imprecise one.
+        Value::Ratio(id) => {
+            let r = heap.ratio(id).clone();
+            Ok(heap.int_from_bigint(r.floor().to_integer()))
+        }
         v => {
-            let f = expect_number(heap, "floor", v)?.floor();
+            let f = num_to_f64(heap, "floor", v)?.floor();
             if !f.is_finite() {
                 return Err(LispError::runtime(format!(
                     "floor: argument {} has no integer floor",
@@ -958,7 +966,7 @@ pub(super) fn prim_decimal_to_float(args: &[Value], _: EnvId, heap: &mut Heap) -
 macro_rules! math1_unrestricted {
     ($name:ident, $brood:literal, $method:ident) => {
         pub(super) fn $name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-            let x = expect_number(heap, $brood, arg(args, 0))?;
+            let x = num_to_f64(heap, $brood, arg(args, 0))?;
             Ok(Value::float(x.$method()))
         }
     };
@@ -967,7 +975,7 @@ macro_rules! math1_unrestricted {
 macro_rules! math1_bounded {
     ($name:ident, $brood:literal, $method:ident) => {
         pub(super) fn $name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-            let x = expect_number(heap, $brood, arg(args, 0))?;
+            let x = num_to_f64(heap, $brood, arg(args, 0))?;
             if x < -1.0 || x > 1.0 {
                 return Err(LispError::runtime(format!(
                     "{}: argument {} is out of domain [-1, 1]",
@@ -982,7 +990,7 @@ macro_rules! math1_bounded {
 macro_rules! math1_positive {
     ($name:ident, $brood:literal, $method:ident) => {
         pub(super) fn $name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-            let x = expect_number(heap, $brood, arg(args, 0))?;
+            let x = num_to_f64(heap, $brood, arg(args, 0))?;
             if x <= 0.0 {
                 return Err(LispError::runtime(format!(
                     "{}: argument {} must be positive",
@@ -1006,7 +1014,7 @@ math1_positive!(math_log2, "log2", log2);
 math1_positive!(math_log10, "log10", log10);
 
 pub(super) fn math_f64_sqrt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let x = expect_number(heap, "%f64-sqrt", arg(args, 0))?;
+    let x = num_to_f64(heap, "%f64-sqrt", arg(args, 0))?;
     if x < 0.0 {
         return Err(LispError::runtime(format!(
             "%f64-sqrt: argument {} must be non-negative",
@@ -1017,7 +1025,7 @@ pub(super) fn math_f64_sqrt(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
 }
 
 pub(super) fn math_atan2(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let y = expect_number(heap, "atan2", arg(args, 0))?;
-    let x = expect_number(heap, "atan2", arg(args, 1))?;
+    let y = num_to_f64(heap, "atan2", arg(args, 0))?;
+    let x = num_to_f64(heap, "atan2", arg(args, 1))?;
     Ok(Value::float(y.atan2(x)))
 }

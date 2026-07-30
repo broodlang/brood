@@ -12820,3 +12820,60 @@ float math builtins don't accept the new tag) and `types::tests::negation_and_di
 asserting `number \ int = float ∪ decimal`, which the new `Tag` invalidates. This work's diff
 is `std/net/*`, `tests/tcp_test.blsp`, docs, one harness and a 3-line comment — it cannot reach
 `/`. Flagged for whoever finishes the rationals work; not fixed here.
+
+## 2026-07-30 (cont.) — the rationals fallout: two real bugs, and the tower was never fully wired
+
+Merging exact rationals (ADR-196) left the suite red — 7 nextest failures and 12 in-language
+ones. All but two were stale expectations, and the two that weren't had been latent for much
+longer than this session.
+
+**Real bug 1: the float math family never accepted the numeric tower.** `expect_number`
+coerces only `Int`/`Float`, and `floor`, `ceil`, `to-fixed`, `%f64-sqrt`, `atan2` and every
+transcendental (`sin`/`cos`/`tan`/`atan`/`exp`/`asin`/`acos`/`ln`/`log2`/`log10`) used it — so
+they rejected a **bignum and a decimal too**, and had done all along. Nothing hit it because
+nothing routinely produced those in the middle of float math; making `/` exact did, and
+`(sqrt (/ 200 3))` — an ordinary mean-then-sqrt, which is exactly how the telemetry summary
+computes stddev — raised `%f64-sqrt: expected number, got ratio (200/3)`. They now go through
+`num_to_f64`, the tower-aware coercion that already existed one screen away in the same file
+for the arithmetic path. `floor` on a **ratio** is done *exactly* instead (`.floor()` on the
+`BigRational`): since `/` is exact, `(floor (/ a b))` is an ordinary idiom, and via f64 it
+would return the **wrong integer** past 2^53, not merely an imprecise one.
+
+**Real bug 2: `round-to` returned a ratio for a float input.** It is
+`(/ (round (* x scale)) scale)` — int over int, so now exact: `(round-to 3.14159 2)` came back
+`157/50`. Rounding recovers no exactness a float never had, so a float `x` converts back. The
+fix reproduces the pre-ADR-196 contract *exactly* rather than inventing a new one — that `/`
+was float division, giving a float when it didn't divide evenly and an int when it did, which
+is why `(round-to 2.5 0)` was `3`. Guarding on `(ratio? r)` keeps all four of those cases.
+
+**A behaviour change kept rather than reverted: `pow` with a negative exponent.** An exact
+base now gives an exact ratio (`(pow 2 -1)` → `1/2`), and it is *immune* to the underflow that
+`pow--reciprocal`'s exponent-halving machinery exists to dodge — `(pow 2 -2000)` is exactly
+`1/2^2000` where a float reciprocal is `0.0`. That machinery is now only needed for a float
+base, and the test pins both halves including the `(pow 2.0 -1074)` → `5e-324` subnormal case.
+
+**`=` is exactness-sensitive** — `(= 1/2 0.5)` and `(= 3 3.0)` are both false. Worth knowing
+before reading any of these expectation changes: a function's return *exactness* is part of
+its contract, so "it's still numerically 2.5" is not a defence. Where a test wanted the
+inexact value it now says so with `->float`.
+
+**Two things ADR-196 fixes for free**, both of which read as test failures first:
+`(/ i64::MIN -1)` is the exact bignum 2^63 where the i64 fast path used to overflow into an
+imprecise float, and an inexact division under the JIT's unboxed i64 worker deopts to a ratio
+rather than a float. That second one was the only failure that could have been a *miscompile*,
+so it was checked before being edited: JIT, `BROOD_NO_JIT=1` and the tree-walker all return
+`212/3`, and `(/ 24 5)` is `24/5` on all three. The worker still bails out of its register —
+just to a different heap value.
+
+**ADR-196 had no section in `decisions.md`.** It went 195 → 197 while ten references pointed
+at it, including a *superseding* note inside ADR-169 — so the reader ADR-169 sends looking for
+"what replaced this" found nothing. Written up now from the shipped behaviour and the
+reference docs, and marked as reconstructed: the author should correct the rationale.
+
+**Also corrected: two stale claims about `sqrt`.** `docs/language.md` and `math_test`'s header
+both said it is "computed in Brood (Newton's method), not a hardware sqrt" and is approximate.
+The prelude's own comment says the opposite — it delegates to `%f64-sqrt` for IEEE
+correctness, precisely *because* Newton's initial guess underflowed on subnormals.
+
+**Gates:** `make test` **919 passed, 0 failed** (was 7 failed + a panicking in-language suite),
+`nest check` clean but for the one pre-existing JIT-torture advisory, `cargo fmt --all` clean.

@@ -58,7 +58,9 @@ fn arithmetic() {
     assert_eq!(run("(- 10 3 2)"), "5");
     assert_eq!(run("(- 5)"), "-5");
     assert_eq!(run("(/ 12 3)"), "4");
-    assert_eq!(run("(/ 7 2)"), "3.5");
+    // `/` on integers is exact (ADR-196): a ratio unless it divides evenly.
+    assert_eq!(run("(/ 7 2)"), "7/2");
+    assert_eq!(run("(->float (/ 7 2))"), "3.5");
     assert_eq!(run("(mod 7 3)"), "1");
 }
 
@@ -1199,16 +1201,14 @@ fn integer_overflow_does_not_panic() {
     assert_eq!(run("(mod -9223372036854775808 -1)"), "0");
     assert_eq!(run("(rem -9223372036854775808 -1)"), "0");
     assert_eq!(run("(quot -9223372036854775808 -1)"), "9223372036854775808");
-    // `/` keeps its i64 fast path: the `i64::MIN / -1` overflow falls through to
-    // the float path (the Int/Int arm doesn't promote — only the explicit bignum
-    // operand case does), so this stays a `Float` as before.
-    assert!(matches!(
-        Interp::new().eval_str("(/ -9223372036854775808 -1)"),
-        Ok(brood::core::value::Value::Float(_))
-    ));
+    // `i64::MIN / -1` used to overflow the i64 fast path and fall through to the float
+    // path, giving an imprecise `Float`. Exact division (ADR-196) makes it the exact
+    // bignum 2^63 instead — the quotient divides evenly, so it is an integer, not a
+    // ratio. Strictly better: the old answer was 9223372036854775808.0.
+    assert_eq!(run("(/ -9223372036854775808 -1)"), "9223372036854775808");
     // Ordinary integer division/modulo unaffected.
     assert_eq!(run("(/ 12 3)"), "4");
-    assert_eq!(run("(/ 7 2)"), "3.5");
+    assert_eq!(run("(/ 7 2)"), "7/2");
     assert_eq!(run("(mod -7 3)"), "2");
     assert_eq!(run("(rem -7 3)"), "-1");
 }
