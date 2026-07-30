@@ -12807,3 +12807,13 @@ near-miss sharing the delimiter's prefix across a boundary, and a correct cut of
 chunks. The first two initially failed on my own wrong expectations, not on the code.
 
 **Still open in this thread:** `proc/gen`, `proc/agent`, `editor/buffer` at 10k+ are unswept.
+
+**Gates:** `tcp`/`http`/`sse` suites green (79 tests), `nest check` clean apart from the one
+pre-existing JIT-torture advisory. The rest of the suite is **red on merge, not on this work**:
+`origin/main`'s in-flight exact-rationals commit (its own message says WIP) makes `/` return an
+exact ratio where a float was expected — 7 nextest failures and 12 in-language ones, every one
+of the shape `(/ 7 2)` → `7/2`, plus `%f64-sqrt: expected number, got ratio` (a real gap: the
+float math builtins don't accept the new tag) and `types::tests::negation_and_difference`
+asserting `number \ int = float ∪ decimal`, which the new `Tag` invalidates. This work's diff
+is `std/net/*`, `tests/tcp_test.blsp`, docs, one harness and a 3-line comment — it cannot reach
+`/`. Flagged for whoever finishes the rationals work; not fixed here.
