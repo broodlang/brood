@@ -1567,6 +1567,7 @@ fn compile_arm(
         deopt_watch,
         jit_deopts: AtomicU32::new(0),
         float_globals: std::sync::OnceLock::new(),
+        self_global_ok: std::sync::atomic::AtomicBool::new(false),
         ckpt_slot,
         compile_epoch: AtomicU64::new(0),
         share_key: None,
@@ -1709,6 +1710,16 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
 /// immovable RUNTIME code region. A LOCAL closure whose body was built from movable
 /// LOCAL forms (e.g. conased by `eval`/quasiquote) has no stable key *and* would
 /// put movable handles in the cached `Node` tree, so it's left to the tree-walker.
+/// The already-compiled arm for `id`/`argc`, **without compiling anything** — a pure cache
+/// read, unlike [`compiled_arm_for`], which compiles on a miss. Used at the tiering election
+/// to answer "does this global still resolve to this same arm?" (see
+/// [`CompiledArm::self_global_ok`]), where compiling would be re-entrant and expensive.
+/// `None` on a miss, which callers must treat as "don't know" — never as "yes".
+pub(crate) fn cached_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<CompiledArm>> {
+    let key = cache_key(heap, id)?;
+    heap.vm_cache_arm(key, argc).flatten()
+}
+
 fn cache_key(heap: &Heap, id: ClosureId) -> Option<VmCacheKey> {
     match id.region() {
         value::RUNTIME | value::PRELUDE => Some(VmCacheKey::Runtime(id.0)),
@@ -2262,6 +2273,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 deopt_watch: false,
                 jit_deopts: AtomicU32::new(0),
                 float_globals: std::sync::OnceLock::new(),
+                self_global_ok: std::sync::atomic::AtomicBool::new(false),
                 ckpt_slot: u32::MAX,
                 compile_epoch: AtomicU64::new(0),
                 share_key: None,

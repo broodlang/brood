@@ -54,6 +54,18 @@ fn arm_scalar_kind(arm: &CompiledArm) -> Option<Scalar> {
     if i64_too_deep(self_sym) || !i64_has_self_call(&arm.body) {
         return None;
     }
+    // The worker lowers a *non-tail* `(f …)` whose head is `dbg_name` to a direct call to
+    // itself. `dbg_name` is only the symbol this closure was first `def`'d under, so that
+    // is sound only while the global still binds THIS arm — see `self_global_ok`, which is
+    // re-observed at every tiering election. Without the check, aliasing the closure and
+    // rebinding the name kept the old body calling itself: `(def f h)`, `(def h …)`,
+    // `(f 12)` answered 12 where the VM and tree-walker both answered 1001.
+    if !arm
+        .self_global_ok
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return None;
+    }
     let empty = std::collections::HashSet::new();
     [Scalar::Int, Scalar::Float]
         .into_iter()
