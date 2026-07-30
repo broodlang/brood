@@ -12334,7 +12334,10 @@ not "reachable from *this* file." (Hit twice downstream — the myedit `path/bas
 the file's **transitive require-closure**. Mechanism (Rust) and policy (Brood) split cleanly:
 - `check-file` / `check-file-deps` / `check-file-structured` take an optional **reachability
   set** — module names the file may name qualified. `check_file_ext` unions it with the file's
-  own direct requires (`:use` / `:use-internals` / any nested `(require 'M)`) and its own ns.
+  own direct requires (`:use` / `:use-internals` / `:alias` / any nested `(require 'M)`) and its
+  own ns. (`:alias mod :as x` `require`s `mod` and adds an `x/`→`mod/` prefix that macro-expands
+  away; it must feed the require-set — a generative fuzzer caught its omission as a false
+  positive on a file that both aliases a module and names it qualified.)
 - Only the whole-project driver sees every header, so **`std/tool/project.blsp`** builds the
   module→direct-requires graph once (a new native builtin `%module-direct-requires`, one parse
   per file), closes it **transitively** per file, and threads each file's set through the
