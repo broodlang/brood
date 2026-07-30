@@ -3169,15 +3169,48 @@ impl Heap {
     /// is intact. A no-op when no file is set (e.g. the REPL) or the form isn't a
     /// definition.
     ///
+    /// A `(do …)` is descended into: a definer macro like `defrecord`/`defability`
+    /// expands to a `do` wrapping several inner `def`/`defn`s (the constructor, its
+    /// accessors, the ability's op dispatchers). The loaders call this on the
+    /// *expanded* form too, so recording each inner def at the same call-site `pos`
+    /// gives those macro-synthesized globals a def-site — otherwise cross-file
+    /// goto-definition on a record constructor or ability op finds nothing (ADR-031).
+    ///
     /// [`current_file`]: Self::current_file
     pub fn note_definition(&mut self, form: Value, pos: crate::error::Pos) {
         let Some(file) = self.cold().and_then(|c| c.current_file.clone()) else {
             return;
         };
+        self.note_definition_with_file(form, &file, pos);
+    }
+
+    /// Record `form`'s def-site under `file`, descending into a `(do …)`. Split from
+    /// [`note_definition`] so the `do` recursion resolves `current_file` just once.
+    fn note_definition_with_file(&mut self, form: Value, file: &str, pos: crate::error::Pos) {
         if let Some(name) = self.def_form_name(form) {
-            self.runtime
-                .def_sites_write()
-                .insert(name, SourceLoc { file, pos });
+            self.runtime.def_sites_write().insert(
+                name,
+                SourceLoc {
+                    file: file.to_string(),
+                    pos,
+                },
+            );
+            return;
+        }
+        // Not a definer itself — if it's a `(do child…)`, record each child.
+        let ValueRef::Pair(p) = form.unpack() else {
+            return;
+        };
+        let ValueRef::Sym(head) = self.car(p).unpack() else {
+            return;
+        };
+        if !crate::core::value::symbol_is(head, kw::DO) {
+            return;
+        }
+        let mut rest = self.cdr(p);
+        while let ValueRef::Pair(cell) = rest.unpack() {
+            self.note_definition_with_file(self.car(cell), file, pos);
+            rest = self.cdr(cell);
         }
     }
 

@@ -93,6 +93,8 @@ fn symbol_kind(kind: DefKind) -> SymbolKind {
         DefKind::Fn => SymbolKind::FUNCTION,
         DefKind::Macro => SymbolKind::FUNCTION, // no dedicated "macro" kind in LSP
         DefKind::Var => SymbolKind::VARIABLE,
+        DefKind::Record => SymbolKind::STRUCT,
+        DefKind::Ability => SymbolKind::INTERFACE,
     }
 }
 
