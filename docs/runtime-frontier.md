@@ -286,8 +286,8 @@ costs**, and the reason we sit ~13× off `DynamicSupervisor` after the O(N²) fi
   collector reclaims promptly (ADR-091 stage 4); the blocker is reclamation, not the
   handoff.
 
-**A4 — the `latency` row: our tail is 13× the BEAM's, and our median is 15× (measured
-2026-07-30).** The benchmark suite gained an open-loop row that holds a fixed 20,000 req/s
+**A4 — the `latency` row: our tail was 13× the BEAM's, and our median 15× (measured
+2026-07-30; the placement half is now fixed — see A5).** The benchmark suite gained an open-loop row that holds a fixed 20,000 req/s
 arrival schedule and makes every 20th request occupy ~500 µs of CPU, reporting percentiles
 over the *other* 95% — i.e. what a busy handler does to everyone else. Offered load is 0.5
 cores of twelve, so nothing is capacity-limited and the tail is scheduling, not saturation.
@@ -312,7 +312,48 @@ Two separate Brood problems, and they want different fixes:
   1.3× cores against Elixir's 1.9× on the same offered load — consistent with work landing on
   too few workers. Not yet investigated.
 
-Worth stating plainly: Node, single-threaded, has a better p99.9 than Brood on this row.
+Worth stating plainly: Node, single-threaded, had a better p99.9 than Brood on this row.
+
+**A5 — spawn placement was the tail, and the fix is one threshold (shipped 2026-07-30).**
+The A4 hypothesis was right. Placement was *always* the spawner's own worker, so a dispatcher
+spawning a handler per request piled every one onto a single queue, where one slow handler
+blocked the rest; stealing rebalanced **12%** of 20,002 spawns and live migration never fired
+(`migrations=0`). `pick_spawn_worker` now spills round-robin once the local queue has any
+backlog (`BROOD_SPAWN_SPILL`, default 1) — one `try_lock` on our own queue, not the
+O(workers) scan `assign_worker` runs.
+
+| `latency`, median of 5 | p50 | p99 | p99.9 |
+|---|---|---|---|
+| always-local (before) | 141 µs | 674 µs | 2902 µs |
+| **spill ≥1 (now)** | **27 µs** | **232 µs** | **562 µs** |
+| always round-robin | 12 µs | 168 µs | 3864 µs |
+
+Always-RR wins p50 and is **not** the answer: it costs `supervisor` **2.6×** (862 → 2223 ms)
+by scattering the children of a request/reply spawn across workers. The threshold keeps
+locality exactly where the argument for it holds — an empty queue — and spreads only when we
+are demonstrably dispatching. Unpinned A/B against `af25b7b3`: `spawn` −10%, `pingpong`/`ring`/
+`pfib`/`supervisor` flat, `spawn-live` neutral (a base-vs-base control put that row's own noise
+floor at **20.6%**, so it cannot resolve anything smaller here).
+
+What is left of A4 is the **median**, which is per-message cost, not scheduling: 27 µs against
+Elixir's 8 µs. That is A1/A3 territory — a request here is spawn + send + a collector receive.
+
+**A6 — the selective-receive scan took the mailbox mutex per candidate (shipped 2026-07-30).**
+The tag pre-filter needs nothing but the envelope's tag, but the scan released and re-acquired
+the mailbox lock for every rejected message, so a backlogged process paid a lock round-trip per
+queued message on *every* selective receive. Now the scan skips all rejected candidates under
+one lock hold. Per ref-pinned round trip against a tag-rejected backlog:
+
+| backlog | before | after |
+|---|---|---|
+| 0 | 3 µs | 3 µs (no cost when there is no backlog) |
+| 500 | 16 µs | **6 µs** |
+| 2 000 | 48 µs | **13 µs** |
+| 8 000 | 176 µs | **44 µs** |
+
+Still **O(backlog)** — 4× cheaper per step, not a different complexity class. The receive-mark
+(skip to the position the pinned `ref` was created at) is what makes it O(1), and is still the
+open item.
 
 ### B. Process memory floor (~4.5 KB → toward ~3 KB)
 
