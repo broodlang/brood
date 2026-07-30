@@ -343,10 +343,58 @@ impl Heap {
     /// concurrent `load()` on the slot is still memory-safe: `ArcSwap` hands out
     /// either the old or new `Arc`, both valid — the drain only rules out a *semantic*
     /// use of an old-gen handle.)
-    pub fn free_runtime_gen(&self, old_gen: usize) -> bool {
-        if old_gen == self.runtime.cur_gen() || self.runtime.gens[old_gen].load().is_empty() {
+    /// `epoch` is the `drain_epoch` the caller validated the drain at. The free is
+    /// **single-flighted through the same gate as aging** and re-validates that epoch
+    /// while holding it — see the race this closes, below.
+    pub fn free_runtime_gen(&self, old_gen: usize, epoch: u64) -> bool {
+        // The destructive store below replaces a whole generation, so it must not run
+        // concurrently with an aging cycle (which flips `current_gen` and migrates the live
+        // image into the other slot) nor with a second freer.
+        //
+        // Before this, `free_drained_gen` validated the drain and then read `drain_gen()`
+        // *separately*, and the free itself ran outside `begin_aging`'s CAS. Two processes
+        // could both pass the validation and both enter; the first frees and ends the drain,
+        // a third then ages — flipping `current_gen` to the just-freed slot and migrating
+        // every live global into it — and the second, still holding its stale view, stores an
+        // empty slab over **the current generation**. Every migrated global's handle then
+        // points into an empty `boxcar`: `expect("runtime closure handle")`, or a recycled
+        // slot read. The shorter variant needs no double-entry at all, only the split read:
+        // validate for gen 0, someone else frees and re-arms a drain of gen 1, then
+        // `drain_gen()` returns 1 and this frees a generation that is neither drained nor
+        // dead. A milder outcome of the same race — a late `end_gen_drain` clearing a newly
+        // armed drain — wedges aging permanently behind the 2-versions-max back-pressure,
+        // so the region grows without bound.
+        //
+        // Reachable by default in any multi-process program once the shared closure count
+        // crosses `rt_gc_floor` (4096): a `spawn` fan-out with a capturing thunk promotes one
+        // RUNTIME closure per spawn, and every process arrives at this path in the same window.
+        if !self.begin_aging() {
+            return false; // an aging cycle or another freer owns the region right now
+        }
+        // Two callers, two liveness proofs. The cooperative drain (`free_drained_gen`)
+        // arms one and must own *this* epoch and generation; the single-process path frees
+        // after `runtime_gen_referenced` says no, with no drain armed at all. Accept either,
+        // and refuse when a drain is armed that this call does not own — that is exactly the
+        // stale-view case.
+        let drain_armed = self.runtime.drain_active.load(Ordering::Acquire);
+        let owns_drain = drain_armed
+            && self.runtime.drain_epoch.load(Ordering::Relaxed) == epoch
+            && self.runtime.drain_gen.load(Ordering::Relaxed) == old_gen;
+        let ok = (owns_drain || !drain_armed)
+            && old_gen != self.runtime.cur_gen()
+            && !self.runtime.gens[old_gen].load().is_empty();
+        if !ok {
+            self.end_aging();
             return false;
         }
+        let out = self.free_runtime_gen_locked(old_gen, owns_drain);
+        self.end_aging();
+        out
+    }
+
+    /// The destructive half of [`free_runtime_gen`], run with the aging gate held and the
+    /// drain epoch re-validated. Split out so the gate is released on every path.
+    fn free_runtime_gen_locked(&self, old_gen: usize, owns_drain: bool) -> bool {
         // Drop the whole generation: store a fresh empty slab; the old `Arc` releases
         // when the last (already none, by the drain) reader guard does.
         self.runtime.gens[old_gen].store(Arc::new(CodeSlabs::default()));
@@ -381,8 +429,14 @@ impl Heap {
         if let Ok(mut c) = self.runtime.jit_inline_cache.write() {
             c.clear();
         }
-        // The drain is complete.
-        self.end_gen_drain();
+        // End the drain only if this call actually owned one. Ending unconditionally was
+        // the milder half of the same race: a late free could clear a drain armed by a
+        // *newer* cycle, leaving `drain_active` false with the other generation non-empty —
+        // which parks aging forever behind the 2-versions-max back-pressure and grows the
+        // region without bound.
+        if owns_drain {
+            self.end_gen_drain();
+        }
         true
     }
 
@@ -847,6 +901,16 @@ impl Heap {
 
     /// The generation currently being drained (meaningful only while
     /// [`drain_active`](Self::drain_active)).
+    /// The current drain's `(epoch, generation)` read as one snapshot — the identity a
+    /// freer must carry from validation through to the destructive store, so it cannot free
+    /// a generation a *newer* drain armed. See [`free_runtime_gen`](Self::free_runtime_gen).
+    pub fn drain_identity(&self) -> (u64, usize) {
+        let rt = &self.runtime;
+        let epoch = rt.drain_epoch.load(Ordering::Relaxed);
+        let gen = rt.drain_gen.load(Ordering::Relaxed);
+        (epoch, gen)
+    }
+
     pub fn drain_gen(&self) -> usize {
         self.runtime.drain_gen.load(Ordering::Relaxed)
     }
