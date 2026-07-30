@@ -381,30 +381,44 @@ server's main loop matching several tags) still walks its backlog; the tag filte
 that walk cheap, not free. BEAM solves it with a saved scan position per receive *site*, which
 is a different mechanism from the per-ref mark and is the remaining piece.
 
-**A8 — RSS growth under sustained churn is allocator retention, not a leak (measured
-2026-07-30, soak).** A self-checking soak (ref-pinned round trips against a 64-message
-backlog, supervised crash/restart, closure sends, spawn bursts) climbs steadily in RSS:
-276 MB at 100k iterations, 503 MB at 400k, 600 MB at 500k, with no plateau. That looks
-exactly like a leak and is not one. Two probes settle it:
+**A8 — RSS under sustained churn: a bounded allocator premium plus a per-`def` leak
+(measured 2026-07-30; this entry CORRECTS its first version).**
 
-- **Removing hot reload changes nothing** (29 → 190 MB over the same 100k iterations), so it
-  is not `def` appending to the RUNTIME region — it is the message/spawn churn itself.
-- **The live set is tiny.** After 77k iterations and **2.5 million** spawns: 4 live processes,
-  **59 KB** of live local heap, and RSS 207 MB — falling only to 178 MB after quiescing and a
-  forced collection.
+The first version of A8 concluded that the soak's RSS growth was churn, not hot reload,
+because removing reload still went 29 → 190 MB over 100k iterations. That compared two
+*endpoints at one iteration count* instead of two *growth shapes*, and it was wrong. Held at
+a fixed ~100k iterations and varying only the reload frequency:
 
-So the language's own accounting is clean and the memory is retained by the allocator
-(mimalloc holds freed pages; each of millions of short-lived process heaps leaves mapped
-pages behind). Two consequences worth separating: RSS is **not** a proxy for live data on
-this runtime, and the retained figure keeps rising with cumulative churn rather than
-settling at a peak working set — which points at fragmentation rather than a fixed
-high-water mark.
+| reloads during the run | RSS |
+|---|---|
+| ~1030 | 258 MB |
+| ~103 | 218 MB |
+| ~10 | 202 MB |
+| **0** | **181 MB** |
 
-Next probe for whoever picks up B: mimalloc's purge/decommit options
-(`MIMALLOC_PURGE_DELAY`, `mi_option_purge_decommits`) to see how much is returnable, and
-whether process-heap arenas can be pooled and reused rather than freed per spawn. Note this
-is a *different* question from the per-process floor below, which is about live bytes per
-parked process; this one is about pages the allocator never gives back.
+Three separable components, and only one of them grows without bound:
+
+1. **Churn is bounded.** With no reloads, RSS plateaus: 175 MB at 62k iterations, 181 MB at
+   101k — iterations up 64%, memory up 3%. Millions of short-lived process heaps cost a
+   *working-set premium*, not a leak.
+2. **Each `def` retains ~75 KB.** Growth is proportional to reload count, for a `def` of a
+   single integer — so it is the reload *machinery* (RUNTIME-region append plus whatever it
+   invalidates), not the value. This is the ADR-091 stage-4 reclamation gap, now with a price
+   tag: a process hot-reloading once a second gives up ~270 MB/hour.
+3. **The allocator holds ~2.5× on top of (1), and it is returnable.** `MIMALLOC_PURGE_DELAY=0`
+   takes the same workload from 208 MB to **90 MB** (83 MB also decommitting), for **~4%**
+   fewer iterations in the same wall-clock. Live data throughout is ~59 KB, so RSS is
+   emphatically not a proxy for live bytes here.
+
+What is *not* worth re-testing: the live set. After 77k iterations and 2.5 M spawns it was 4
+live processes and 59 KB, falling only from 207 to 178 MB after a quiesce and a forced
+collection. Nothing is being retained by the language.
+
+**Open, in priority order.** (a) The per-`def` 75 KB is the only unbounded term and the only
+real leak — ADR-091 stage 4. (b) The mimalloc premium is a *policy* question this project has
+already answered once in the other direction ("spend memory for speed", devlog 2026-06-15);
+2.5× RSS for 4% throughput deserves re-deciding now that the runtime targets long-lived
+servers, and at minimum wants documenting as a knob rather than being discovered by accident.
 
 ### B. Process memory floor (~4.5 KB → toward ~3 KB)
 
