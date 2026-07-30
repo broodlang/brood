@@ -12032,3 +12032,21 @@ functions, inferred params, and/or narrowing, and HOF-callback results are all c
 remaining piece — **per-arm parameter checking of a multi-arity callee** — stays deferred:
 sound to leave (a missed check is a false negative, never a false positive), and closing it
 needs an inferred-overload path + per-argc arm selection in the call-check for marginal value.
+
+## 2026-07-30 (cont.) — super-abilities: `:requires` (ADR-193)
+
+`(defability Ord :requires [Eq] …)` — an implementor of `Ord` must also implement `Eq`, enforced
+at check time (Rust's `trait Ord: Eq`). Previously the dependency lived in a comment and surfaced
+as a runtime `no-impl` deep in a provided-method body. `check_requires` (modelled on
+`check_sealed`): for each id implementing an ability with `:requires`, every op of each required
+ability must resolve (direct impl, `:default`, or provided op) — else *"ability Ord requires Eq:
+:money implements Ord but has no impl of `eqv` for Eq"*.
+
+Prelude clause + `*ability-requires*` registry (mirrors `*sealed*`) + one advisory checker pass —
+no runtime change, no new special form. Composes with the rest: a required ability's provided op
+is satisfied by its default; a `:default` covers any id; an unknown required ability defers (no
+false positive). 5 tests; whole repo warning-clean (no std ability declares `:requires` yet).
+
+This completes item #1 of the six deferred abstractions; the other five are recorded on the
+roadmap with their urgency (all ADR-011 "wait for a concrete need" except open-ability bounds,
+which is a declined non-goal).

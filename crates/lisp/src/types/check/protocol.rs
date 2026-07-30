@@ -800,6 +800,9 @@ pub(super) struct AbilityInfo {
     op_params: HashMap<(String, String), Vec<Option<crate::types::Ty>>>,
     /// ability name → its SEALED member id names (closed set), if declared sealed.
     sealed: HashMap<String, Vec<String>>,
+    /// ability name → its REQUIRED (super-)abilities (ADR-193): any id implementing this
+    /// ability must also implement each of them. Drives `check_requires`.
+    requires: HashMap<String, Vec<String>>,
     /// `(ability, op)` pairs that are **provided** — the op carries a default body in its
     /// `defability` spec (ADR-185), registered as a `:default` impl. A provided op is
     /// satisfied for every id, so `check_sealed` never demands it of a sealed member.
@@ -886,6 +889,7 @@ pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo
     read_impls_registry(heap, &mut impls, &mut defaults);
     let mut abilities = HashMap::new();
     let mut sealed = HashMap::new();
+    let mut requires: HashMap<String, Vec<String>> = HashMap::new();
     // `(ability, op)` → its `:-> RET` return-type *form* (unparsed). Filled from this
     // file's `register-ability` forms and the runtime registry, then parsed to `Ty`.
     let mut ret_forms: HashMap<(String, String), Value> = HashMap::new();
@@ -903,6 +907,7 @@ pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo
             &mut provided,
         );
         collect_register_sealed(heap, form, &mut sealed);
+        collect_register_ability_requires(heap, form, &mut requires);
     }
     read_abilities_registry(
         heap,
@@ -912,6 +917,7 @@ pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo
         &mut provided,
     );
     read_sealed_registry(heap, &mut sealed);
+    read_requires_registry(heap, &mut requires);
     // `:derives [A]` on a record (ADR-185) registers A's impl for that id at LOAD, not at
     // check time — so expand each `derive-into` form into the impls set here: a derived id
     // implements every op of the ability. This makes a derived member satisfy the call-site
@@ -940,6 +946,7 @@ pub(super) fn build_ability_info(heap: &Heap, expanded: &[Value]) -> AbilityInfo
         op_ret,
         op_params,
         sealed,
+        requires,
         provided,
         collisions,
     }
@@ -1073,6 +1080,63 @@ fn collect_register_sealed(heap: &Heap, form: Value, out: &mut HashMap<String, V
     })
 }
 
+/// Collect `(…/register-ability-requires (quote A) (list (quote R) …))` → ability A's required
+/// (super-)abilities (ADR-193). The required names are emitted *quoted*, so each is unquoted.
+fn collect_register_ability_requires(
+    heap: &Heap,
+    form: Value,
+    out: &mut HashMap<String, Vec<String>>,
+) {
+    stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
+        let Some(items) = list_items(heap, form) else {
+            return;
+        };
+        if let Some(&Value::Sym(h)) = items.first() {
+            if sym_name(Value::Sym(h)).as_deref() == Some("register-ability-requires") {
+                if let (Some(a), Some(&list_form)) = (
+                    items
+                        .get(1)
+                        .and_then(|&v| unquote(heap, v))
+                        .and_then(sym_name),
+                    items.get(2),
+                ) {
+                    if let Some(litems) = list_items(heap, list_form) {
+                        let reqs = litems
+                            .get(1..)
+                            .unwrap_or(&[])
+                            .iter()
+                            .filter_map(|&r| unquote(heap, r).and_then(sym_name))
+                            .collect();
+                        out.insert(a, reqs);
+                    }
+                }
+            }
+        }
+        for &item in items.get(1..).unwrap_or(&[]) {
+            collect_register_ability_requires(heap, item, out);
+        }
+    })
+}
+
+/// Union in the runtime `*ability-requires*` registry — name → its required abilities (bare
+/// name symbols) — so a `:requires` declared in an imported module is visible here too.
+fn read_requires_registry(heap: &Heap, out: &mut HashMap<String, Vec<String>>) {
+    let Some(Value::Map(mid)) = heap.env_get(heap.global(), value::intern("*ability-requires*"))
+    else {
+        return;
+    };
+    for (name, reqs) in heap.map_entries(mid) {
+        if let Some(a) = sym_name(name) {
+            let rs = list_items(heap, reqs)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|&r| sym_name(r))
+                .collect();
+            out.entry(a).or_insert(rs);
+        }
+    }
+}
+
 /// Union in the runtime `*abilities*` registry — name → op specs — recording each
 /// op's name and its `:-> RET` return-type form (the latter into `rets`).
 fn read_abilities_registry(
@@ -1133,6 +1197,53 @@ fn read_sealed_registry(heap: &Heap, out: &mut HashMap<String, Vec<String>>) {
 /// handled explicitly). A **provided** op (one with a default body, ADR-185) is satisfied
 /// by its default for every member, so it is skipped. One warning per missing
 /// (ability, op, member).
+/// Super-ability conformance (ADR-193): if ability `A` declares `:requires [R …]`, every id
+/// that implements `A` must also implement each `R` (every op of `R`, directly or via a
+/// `:default`/provided op). Advisory, like `check_sealed` — a declared conformance contract,
+/// not a gate. An unknown required ability (not in the registry) is skipped (no false
+/// positive). The implementor set is `A`'s sealed members plus any id with a direct `A` impl.
+pub(super) fn check_requires(info: &AbilityInfo, out: &mut Vec<(Option<Pos>, String)>) {
+    for (ability, reqs) in &info.requires {
+        // Ids that implement `ability`: its sealed members (the intended set) + any id with a
+        // direct impl of one of its ops.
+        let mut implementors: std::collections::BTreeSet<&String> =
+            std::collections::BTreeSet::new();
+        if let Some(members) = info.sealed.get(ability) {
+            implementors.extend(members);
+        }
+        for (a, _op, id) in &info.impls {
+            if a == ability {
+                implementors.insert(id);
+            }
+        }
+        for req in reqs {
+            let Some(req_ops) = info.abilities.get(req) else {
+                continue; // required ability unknown here — can't check, no false positive
+            };
+            for id in &implementors {
+                for op in req_ops {
+                    // A provided op is satisfied by its default; a `:default` impl covers any id.
+                    if info.provided.contains(&(req.clone(), op.clone()))
+                        || info.defaults.contains(&(req.clone(), op.clone()))
+                        || info
+                            .impls
+                            .contains(&(req.clone(), op.clone(), (*id).clone()))
+                    {
+                        continue;
+                    }
+                    out.push((
+                        None,
+                        format!(
+                            "ability {} requires {}: :{} implements {} but has no impl of `{}` for {}",
+                            ability, req, id, ability, op, req
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn check_sealed(info: &AbilityInfo, out: &mut Vec<(Option<Pos>, String)>) {
     for (ability, members) in &info.sealed {
         let Some(ops) = info.abilities.get(ability) else {
