@@ -1,0 +1,134 @@
+# Type system — status & what's left
+
+**As of 2026-07-30.** A wrap-up of the checker/type-system work, what it now does, and the
+honest backlog. For the model and the compatibility contract see [types.md](types.md); for
+the "why" of each piece, the ADRs cited below in [decisions.md](decisions.md).
+
+The invariant that governs everything here: **the checker is advisory and sound — it warns
+only on a *provable* misuse and never false-positives.** Every item below was landed against
+a hard gate: the full `std/` + `tests/` sweep stays clean (zero false positives) and the
+`types::check` unit suite (278 tests) stays green.
+
+---
+
+## What we have
+
+### The lattice (`types/mod.rs`)
+Set-theoretic + gradual (ADR-023/024). A `Ty` is a set of runtime tags with
+union/intersect/negate and *semantic* subtyping; `dynamic()` (`GradualTy`) is the valve for
+redefinable globals. Refinements on the flat lattice: function **arrows**, sequence **element
+types**, **`(map K V)`**, **record shapes**, **literal singletons** (keyword/int/bool/string),
+**tuples**, and the named unions `number` / `list` / **`seqable`**.
+
+### Signatures the checker reads (`types/check/sigs.rs`)
+Simplest-first: **primitives** (every `NativeFn` carries a `Sig`), **curated** stdlib (a
+hand-vetted table for variadic/HOF closures), and **inference**. Inference is now broad and
+sound:
+- **Params** from *unconditional* type demands (a guarded use never constrains a param).
+- **Returns** from the body tail via `expr_ty`, unioning `if`/`cond`/`let`/`do`/`case`.
+- **Recursion** — a self-recursive branch contributes ⊥, so a tail-recursive `--acc`/`--loop`
+  infers from its base cases (ADR-188 devlog).
+- **Complex closures** — multi-arity / `&optional` / rest get a params-less return-only sig
+  (union of arm tails); arity is checked independently.
+- **Same-file functions** (ADR-188) — `check_file` Pass 2.8 infers a file's own `defn`s from
+  their *forms* (the file isn't loaded while checked) over a bounded leaf-up **fixpoint**, so
+  same-file callers finally get checked.
+
+### Typed abilities (ADR-180/181/186)
+- Op specs carry types: `(area [self (factor float)] :-> float)`. The **return** flows into
+  inference at every call site; **impl bodies** are checked against it; **arguments** at typed
+  params are checked. `:-> any` / bare params impose nothing.
+- **Any ability name is a type**: a `:sealed` ability → the finite union of its members'
+  record shapes; an **open** ability → the permissive `any` (so a `sig` using it survives; the
+  real "does this value implement it" safety is the op-call missing-impl check).
+- Ability call-site checks: missing-impl warnings (literal / ctor / inferred-variable args),
+  sealed exhaustiveness, per-module op-name uniqueness.
+- Record patterns in `match` and sealed-`match` exhaustiveness (ADR-187, `check/exhaustive.rs`).
+- Provided (default) op bodies (ADR-185).
+
+### Devirtualization (ADR-182) — `BROOD_MONO`, **off by default**
+Tier 1 rewrites an ability op call with a literal or direct-record-constructor first arg to a
+direct impl call (skips `identity-of`/`impl-for`). Flag-off is provably inert; flag-on is
+byte-identical + GC-safe. Benchmark: ~5.7× on literal dispatch, ~1.8× on constructor dispatch
+(microbenchmark — Tier 1 doesn't move the standard rows, whose hot loops pass *variables*).
+
+### Reach — the checker runs everywhere
+- **Batch:** `nest check` / `nest test` / `nest run` / `brood <file>` / `brood --check`.
+- **MCP:** `load` / `check` return structured diagnostics.
+- **LSP:** editor diagnostics (syntactic **+** semantic `check_file`); **hover** shows a
+  resolvable name's type signature.
+- **REPL:** advisory warnings before each result, using live-image inference (every def is
+  loaded there, so inference is at its most complete).
+
+---
+
+## What's left
+
+Ordered roughly by value. None of these are blockers; each is additive or a
+pay-when-it-hurts item, and the guiding rule (ADR-011) is to defer until a concrete need
+appears.
+
+### Inference (the highest-leverage remaining area)
+- **Same-file *parameter* inference.** Pass 2.8 is return-only. Params are higher-risk (they
+  constrain callers' args, so a wrong inference false-positives) — the natural next increment,
+  gated hard on the sweep.
+- **Per-arm multi-arity params** (an overload sig) — currently multi-arity is return-only.
+- **`and`/`or`-chained guard narrowing** and **higher-order callback result inference** —
+  the two "not yet" items still listed in the `check.rs` module doc.
+
+### Abilities / dispatch
+- **Return-type dispatch** — selecting an impl by expected return; needs bidirectional
+  inference. The long-standing open item in [protocol-dispatch-design.md](protocol-dispatch-design.md).
+- **Qualified cross-module ability type names** (`mod/Ability` in a `sig`) — today ability
+  type names resolve by bare name.
+- **Tier-2 monomorphization** — devirtualizing an *inferred-variable* op call
+  (`(map area shapes)`), the real hot-loop win. It's the miscompile surface; needs the
+  checker→compiler channel + whole-fleet validation. See
+  [ability-monomorphization.md](ability-monomorphization.md).
+
+### Runtime
+- **Runtime contracts for ability ops** under a `BROOD_CONTRACTS`-style flag (ADR-180 deferred
+  item c) — checker-only today, matching `sig`'s default.
+
+### Checker correctness
+- **KI-17 (open)** — `nest check` validates a qualified `mod/name` against *its* load set, not
+  the entry point's reachability, so a call to a module the program never loads passes and then
+  fails at runtime. Workaround: a `(require 'mod)` in every file that uses `mod/…`. Fix sketch
+  in [known-issues.md](known-issues.md).
+
+### Tooling
+- **LSP hover / inlay inferred types for *buffer* functions.** Hover shows types only for
+  *loaded* names today; a buffer's own edited functions aren't loaded (and hover must not eval
+  them), so their inferred types aren't shown. Needs a from-CST inference path or an isolated
+  scratch load.
+- **`sig` adoption across std.** Only ~1% of std's 2160 defns carry a hand-written `sig`
+  (path, set, json, plus the file/fuzzy pilot). More coverage = more caller checking, and it
+  dogfoods the type system — but "better inference" is the higher-leverage alternative that
+  scales without manual annotation.
+
+### Precision residues (sound to leave)
+- The **merely-wider residue** — a body typed exactly `number` declared `int` (e.g.
+  `(/ x 2)`): pinning it needs occurrence/range analysis; flagging it would false-positive, so
+  it stays deferred (ADR-011).
+- **Element-typed `(seq T)`** — `seqable` is unrefined today; a genuine element-typed seqable
+  needs extending the `elem` refinement beyond `Pair|Vector`.
+
+---
+
+## Where things live
+
+| Concern | File |
+|---|---|
+| Lattice (`Ty`, ops, named unions) | `crates/lisp/src/types/mod.rs` |
+| Checker entry + passes (`check_file`) | `crates/lisp/src/types/check.rs` |
+| Signature sources + inference | `crates/lisp/src/types/check/sigs.rs`, `infer.rs` |
+| Type-annotation grammar (`sig`, `seqable`, ability-as-type) | `crates/lisp/src/types/check/annot.rs` |
+| Ability/multimethod checks | `crates/lisp/src/types/check/protocol.rs` |
+| Record-pattern exhaustiveness | `crates/lisp/src/types/check/exhaustive.rs` |
+| Devirtualization (`BROOD_MONO`) | `crates/lisp/src/eval/compile/inline.rs` |
+| REPL advisory check | `std/tool/repl.blsp` |
+| LSP hover / diagnostics | `crates/lsp/src/{hover,main}.rs` |
+
+ADRs: **180** typed op returns/params · **181** sealed ability as a type · **182** mono
+devirtualization · **185** provided op bodies · **186** any ability name is a type · **187**
+record patterns + exhaustiveness · **188** same-file inference.
