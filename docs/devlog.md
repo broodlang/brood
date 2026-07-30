@@ -12181,3 +12181,18 @@ context — a mis-fire would malform an insertion). Doc drift fixed: stale `mcp.
 `docs/mcp.md` / `mcp.blsp` tool counts (17/20 → 23). Tests: 6 new LSP (rename cascade, in-buffer
 record/ability goto, STRUCT/INTERFACE tokens, defrecord/defability outline), 4 `type-signature`,
 6 MCP-tool. Full suites green: 450 lib, 126 brood-lsp, 3914 in-language.
+
+## 2026-07-30 (cont.) — LSP: `impl` op-body snippet completion
+
+Follow-up to the records/abilities tooling sweep. Completing an ability op inside `(impl …)`
+now inserts a fillable method skeleton — `(area [self] $0)` — instead of just the bare op name,
+so you fill the body rather than retype the shape. `impl_method_skeleton` builds it from the op's
+arity (first param `self`, then `arg2`…), and detects whether the method's own `(` is already
+typed (cursor inside `(op…` → omit the wrapping parens) vs sitting directly in the impl form
+(supply them). Snippet syntax (`${1:self}`/`$0`) is **gated on the client's `snippetSupport`**:
+the server now reads that one capability at `initialize` (previously it discarded the client
+params entirely) and threads a `snippet_support` bool through `main_loop`/`handle_request` to
+completion; a non-snippet client gets a plain `(area [self] )` skeleton, never literal `$`.
+2 tests (the skeleton's four paren/snippet modes + the end-to-end insert_text). The sibling
+type-directed record-field completion is on the roadmap backlog — it needs inferred types in the
+completion path, worth ~a day, deferred until then.
