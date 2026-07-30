@@ -44,6 +44,10 @@ pub(crate) fn exec_chunk(
     // the spinning-loop sync compile, which needs the Arc for the keepalive.
     let arm: &CompiledArm = arm_arc.as_ref();
     let chunk = arm.chunk.as_ref().expect("exec_chunk: arm has no chunk");
+    // Global epoch as of entering this frame — the hot-reload guard for `Inst::SelfCall`
+    // (see there). A `def` bumps the epoch, so an unchanged value means no rebinding can
+    // have happened since, and the loop takes its zero-lookup fast path.
+    let mut self_epoch = heap.global_epoch();
     while *ip < chunk.code.len() {
         let inst = &chunk.code[*ip];
         *ip += 1;
@@ -650,6 +654,47 @@ pub(crate) fn exec_chunk(
                 let mut argv: SmallVec<[Value; 4]> = SmallVec::with_capacity(*argc);
                 for k in 0..*argc {
                     argv.push(heap.root_at(n - argc + k));
+                }
+                // Hot-reload guard (ADR-013). `SelfCall` is the zero-lookup loop back-edge:
+                // it resets the frame and jumps to ip 0 without consulting the global at
+                // all. That is why a `def` of the very function a loop is running was never
+                // observed — `(defn loop1 …)` that redefines itself mid-loop ran the whole
+                // loop on the old body (8) where the tree-walker saw the new one
+                // (`:replaced`). For a long-lived `(defn serve (state) … (serve next))` that
+                // means the process can never be reloaded, which is the case hot reload
+                // exists for. The sibling `Inst::Call` tail path is already correct: its IC
+                // resolution is epoch-guarded, so a rebind fails its `ptr::eq(compiled, arm)`
+                // and falls through to a real dispatch.
+                //
+                // Cost on the hot path is one relaxed u64 load and a compare per iteration —
+                // the epoch only moves on a `def`, so `loop`/`collatz` take the same path as
+                // before. On a bump we re-resolve once and, if the name still names this arm,
+                // re-arm and keep looping.
+                let ep = heap.global_epoch();
+                if ep != self_epoch {
+                    self_epoch = ep;
+                    if let Some(name) = arm.dbg_name {
+                        let env = heap.read_root_env(genv);
+                        let still_us = match heap.env_get(env, name) {
+                            Some(Value::Fn(id)) => super::cached_arm_for(heap, id, *argc)
+                                .is_some_and(|other| other.uid == arm.uid),
+                            // Unbound, or bound to something that isn't a closure: the name
+                            // no longer denotes this loop, so stop looping on the old body.
+                            _ => false,
+                        };
+                        if !still_us {
+                            // The self-call is in TAIL position, so the rebound callee's
+                            // value IS this frame's result — apply it and finish. One native
+                            // frame for the transition only; the new function does its own
+                            // tail-call elimination internally.
+                            let callee = heap
+                                .env_get(env, name)
+                                .ok_or_else(|| crate::eval::unbound_error(heap, name))?;
+                            heap.truncate_roots(base + arm.nslots);
+                            let out = super::apply_value(heap, callee, &argv, env)?;
+                            return Ok(ChunkExit::Done(out));
+                        }
+                    }
                 }
                 // Reset frame in place (same as the old outer-loop SelfTail handler).
                 heap.truncate_roots(base + arm.nslots);
