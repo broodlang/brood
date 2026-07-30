@@ -3,8 +3,8 @@
 KI-9 is a one-off arity sighting judged a transient inconsistent-build artifact, not
 present in committed code; KI-10 no longer reproduces, incidentally fixed — both kept as
 records, not open bugs. **KI-17** (the checker reachability gap) is now **FIXED** (ADR-189).
-**Open: KI-18** (a bounded, one-time effect duplication in a deopt-thrashing multi-arity fn)
-and **KI-19** (the VM resolves a call's free-global head after its arguments).
+**KI-18** (effect duplication on a deopt) is now **FIXED**. **Open: KI-19** (the VM
+resolves a call's free-global head after its arguments).
 This file is the condensed record — what each was, how it was fixed, and the regression
 test that guards it — so a recurrence is recognizable. For the narrative discovery
 writeup of the scheduler race, see
@@ -48,46 +48,35 @@ regression on a benchmark row.
 
 ---
 
-## KI-18 — a deopt-thrashing arm can duplicate an effect **16 times, once** · OPEN (bounded)
+## KI-18 — a deopt could re-run a `table-put` · **FIXED 2026-07-30**
 
-A JIT deopt must never re-run a `table-put`. Three ways it could were found and fixed
-(see `tests/jit_effect_once_test.blsp` and the 2026-07-30 devlog): no journal for a
-call-free effectful arm, a multi-arity self-call exemption that ignored argc, and the
-leaf inliner splicing an effectful callee into an engine that cannot journal. Those made
-the corruption **unbounded and proportional to the workload** — 200 000 iterations put
-402 047 times — and all three now count exactly.
+**Fixed.** Four distinct paths let a JIT deopt re-execute an effect; the first three were
+closed earlier the same day (no journal for a call-free effectful arm, a multi-arity
+self-call exemption that ignored argc, and the leaf inliner splicing an effectful callee
+into an engine that cannot journal). Those made the corruption unbounded and proportional
+to the workload — 200 000 iterations put 402 047 times.
 
-What remains is bounded and does not scale. Repro:
+The fourth was the residual recorded here, and it is now fixed too: **`jit_run_fast_link`
+treated an IC re-probe miss as "give up and let the caller redo the call"**. By then the
+callee's native code had already run, so the caller's `brood_rt_call_slow` executed it a
+second time — effect included. It showed up as a bounded over-count of exactly 16 (the
+`DEOPT_BAIL_CONSECUTIVE` threshold, after which the arm bails and the duplication stops),
+independent of iteration count. The IC probe is only an *optimisation* for locating the
+arm, so a miss must not change behaviour: it now resolves the arm by name
+(`env_get` → `compiled_arm_for`) and takes the same checkpoint-resume path as a hit.
 
-```lisp
-(def tt (table)) (table-put tt 0 0)
-(def uu (table)) (table-put uu 0 0)
-(defn f
-  ((v)     (do (table-put uu 0 (+ 1 (table-get uu 0))) (+ (f v 0) (nth v 0))))
-  ((v acc) (do (table-put tt 0 (+ 1 (table-get tt 0))) 1.5)))
-(defn drive (v i n) (if (= i n) nil (do (f v) (drive v (+ i 1) n))))
-(drive [1 2] 0 50000)
-```
+Found by elimination, after instrumenting every re-run path: the deopt paths all resumed
+correctly at their journal, `[fl-fallthrough]` was the one that fired 16 times, and
+counting entries to *each arm separately* showed the caller was re-entered too — which is
+what pointed above `f` rather than inside it.
 
-Both counters read **50 016** under the JIT and 50 000 with `BROOD_NO_JIT=1`. The excess
-is exactly **16 — the `DEOPT_BAIL_CONSECUTIVE` threshold — and is independent of the
-iteration count** (10 000 → 10 016, 200 000 → 200 016): one transition window, then the
-arm is marked `BAILED` and runs correctly on the VM forever after. It was 24 before the
-three fixes.
+Also hardened while here: the checkpoint resume now covers **preempt** (outcome 2), not
+just deopt. A preempt normally lands on a back edge where the journal is 0, so this is a
+no-op there; but if one ever landed after a completed call or a `table-put`, the ip-0
+re-run would have repeated it.
 
-What is ruled out by measurement, so don't re-chase it: it is not the register worker
-(`BROOD_NO_I64=1` is unchanged), not either inliner (both off, unchanged), and not any
-from-ip-0 re-run — instrumenting every `vm_apply` re-run path showed **none** fires, while
-all 16 deopts resume correctly at their journal (`rip=3`). Counting entries to each arm
-separately shows the *caller* is entered 16 times too, so the extra activations originate
-above `f`, in `drive` — a self-tail loop whose back-edge resets the journal. The likely
-suspects are the outcomes the checkpoint path does not cover (preempt, outcome 2, keeps
-the ip-0 entry by design) or a fast-link `Fallthrough` after the callee already ran.
-
-Severity: a *deliberately* type-thrashing multi-arity function — one whose arms return
-different types through the same call site — corrupts a `Table` count by a fixed 16 before
-self-healing. Real code that thrashes this way is already paying a large performance
-penalty and will be bailed. Worth closing, not worth blocking on.
+Regression tests: `tests/jit_effect_once_test.blsp`, four shapes including the multi-arity
+one, each asserting the effect count equals the iteration count exactly.
 
 ---
 
