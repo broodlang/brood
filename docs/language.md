@@ -581,6 +581,22 @@ implement it" safety is enforced at the op *call sites* instead. Sealed abilitie
 precise finite-union type; both work for abilities declared in *this* file or reachable
 through `(:use …)`.
 
+**Ability bounds — this *is* `where T: Ability`.** Because an ability name is a type, a `sig`
+parameter typed with a **sealed** ability is exactly a bound: "this argument must satisfy the
+ability." `(sig draw (Shape -> string))` requires a `Shape`, and a caller passing a non-member
+is flagged — whether or not `draw`'s body uses a `Shape` op. Two abilities intersect the
+ordinary way, so **`(and A B)` is a multi-ability bound** (Rust's `T: A + B`):
+
+```clojure
+(sig render ((and Shape Comparable) -> string))   ; must be a Shape AND a Comparable
+```
+
+An **open** ability as a bound is deliberately permissive (`any`, above) — its impls are late
+and may cover any value, so no caller can be soundly rejected; the check happens at the op call
+site instead. There is no separate bounds syntax and none is needed: name the sealed ability
+(or intersect several), and the checker enforces it — no annotation of the bound beyond the
+type itself.
+
 > **Direction: [ADR-172](decisions.md) (amended 2026-07-28).** This open runtime model
 > is kept open — `impl` stays legal for any ability and any id (primitive, owned, or
 > someone else's) — and made **deterministic and app-sovereign** by a precedence ladder
