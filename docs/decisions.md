@@ -3867,9 +3867,18 @@ favour of the general one):
   trapping peer gets `[:EXIT]`; a non-trapping peer with an **abnormal** reason is
   killed (propagation, cascading through *its* links); `:normal` never propagates
   to a non-trapping peer.
-- **`spawn-link`** — a prelude macro (`(let (p# (spawn …)) (link p#) p#)`); no
-  kernel surface (linking a child that dies in the gap is safe — link-to-dead
-  fires `[:EXIT … :noproc]`).
+- **`spawn-link`** — originally a prelude macro (`(let (p# (spawn …)) (link p#) p#)`)
+  with no kernel surface, on the reasoning that linking a child that dies in the gap
+  is safe because link-to-dead fires `[:EXIT … :noproc]`. **That reasoning was wrong
+  and this is superseded (2026-06-14):** `:noproc` *replaces* the real reason, so a
+  child that returns `:normal` inside the gap arrives looking abnormal — which made
+  `supervisor.blsp` spuriously restart a fast `:transient` child (a real bug behind a
+  flaky test). `spawn-link` is now a macro over a **`%spawn-link` primitive**
+  (`spawn_linked` → `spawn_impl(link_parent: true)` in
+  `process/scheduler/lifecycle.rs`): the symmetric link is registered once the child's
+  mailbox is in `REGISTRY` (so the liveness check passes) but *before* the child is
+  enqueued, so it cannot exit before the link exists and its true exit reason always
+  reaches the parent.
 
 **Propagation hardness — D-simple.** Brood couples "untrappable/immediate" to
 `reason == :kill`. A non-trapping peer must die *immediately* (even mid-CPU-loop),
@@ -12540,3 +12549,57 @@ warning-clean (no std ability declares `:requires` yet).
 **References.** ADR-185 (provided ops — a required ability's provided op is satisfied by default),
 ADR-181 (sealed abilities — the sibling conformance contract), ADR-172/168 (the ability seam),
 ADR-011 (the composition-over-power discipline), `tests/ability_test.blsp` ("super-abilities").
+
+## ADR-194 — A closure crosses a local send by shared handle only when it is *already* shared
+
+**Context.** Processes of one runtime share a code region (ADR-013,
+`docs/shared-code.md`); `spawn` already `promote`s its thunk into it, so parent and child
+run one copy. `send` did not: `closure_to_message` deep-copies every arm's body forms and
+`closure_from_message` re-allocates them in the receiver, so a process holding a received
+closure holds a private duplicate of code its own runtime already has. Measured on the same
+trivial thunk: **48 bytes** held in-process, **436 bytes** (~670 objects) after crossing a
+`send`. That is what made a dynamic supervisor — which must retain each child's `:start`
+thunk to restart it — spend **two thirds of `start-child` in GC** (324 collections copying
+2.69 M objects; `docs/runtime-frontier.md` A3). Separately, `copy_cross_heap` (the L1
+parked-receiver fast path) *declines* closures, so a closure-carrying message lost the fast
+path entirely — 3996 of 4000 supervisor sends were parked-but-declined.
+
+**Decision.** On a **local** send between processes of the **same runtime**, a closure whose
+value is already a RUNTIME-region handle is handed to the receiver **unchanged**; everything
+else copies exactly as before. Implemented in `copy_cross_heap` only — `to_message` /
+`from_message` and the cross-node path are untouched, so remote sends still serialize code
+(a different runtime is a different region). Guards: `region() == RUNTIME`,
+`Heap::shares_runtime_with` (the process REGISTRY is global, so a second `Interp` in one OS
+process has a different region), and `BROOD_NO_SHARE_FN=1` as the off-switch.
+
+**Rejected: promote a local closure on send to make it shareable.** Implemented and measured
+first, since it would also cover capturing thunks. It leaks: promotion appends to the
+append-only RUNTIME region, so a transient closure needs a whole aging/drain/free cycle to
+reclaim instead of dying at the next minor GC. Peak RSS over N sent-and-discarded closures
+ran 129 / 190 / 340 / **541** MB at N = 100k / 200k / 400k / 800k against a flat 112–180 MB
+for the copy — growth proportional to closures sent, i.e. unbounded in a long-running
+receiver, and `BROOD_RT_GC_FLOOR=64` barely dented it. Restricted to already-shared closures
+the same run is flat (150 MB). **The blocker is reclamation convergence (ADR-091 stage 4),
+not the handoff** — do not re-attempt the wider rule before that lands.
+
+**Why the narrow rule is still worth it.** A closure that captures **no locals** is already a
+RUNTIME value, so the idiomatic spec `(fn () (spawn-link (worker)))` is covered: **6 µs** per
+send against **54 µs** for the same shape capturing a local. Supervised `start-child` at
+N=8000 went 575 → 251 ms (2.4×), L1 hit rate on that path 50% → 100%.
+
+**Soundness.** A shared handle retained in the receiver's LOCAL data pins its RUNTIME
+generation, which is exactly what the collector expects: the drain's Phase 2 walks the whole
+local heap, so `runtime_gen_referenced` sees the handle and refuses to free under it; aging
+never moves handles; compaction requires unique ownership. There is also no new lock
+exposure: the shipped rule takes no lock at all (it returns the handle), unlike the rejected
+promote-on-send version, which acquired `promote_lock` (read) while holding the receiver's
+mailbox mutex — safe on analysis, since the sole writer `age_runtime` holds it across an
+atomic flip touching no mailbox, but moot now. Validated on the debug-assertions build (per-deref
+GC tripwire + heap verifier) across mass spawn + hot reload + forced RUNTIME aging, under
+`BROOD_GC_VERIFY` and `BROOD_GC_STRESS`, each paired against `BROOD_NO_SHARE_FN=1` for
+identical checksums, plus five distribution-chaos runs including closure-shipping
+`remote-spawn`.
+
+**References.** ADR-013 (shared live code), ADR-091 (RUNTIME region aging/compaction),
+ADR-178 (the L1 local-send fast path this extends), ADR-033 (closures as data on the wire —
+unchanged), `docs/runtime-frontier.md` A3, devlog 2026-07-30.
