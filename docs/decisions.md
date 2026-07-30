@@ -12711,7 +12711,7 @@ half of the message-cost item, and it needs a different mechanism (BEAM's is the
 derived at expansion time), ADR-178 (the L1 local-send fast path and the tag pre-filter this
 composes with), `docs/runtime-frontier.md` A1/A6, devlog 2026-07-30.
 
-## ADR-196 — Ask the build, not the environment: `features` / `feature?`
+## ADR-197 — Ask the build, not the environment: `features` / `feature?`
 
 **Status:** accepted + implemented (2026-07-30).
 

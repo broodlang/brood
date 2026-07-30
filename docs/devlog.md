@@ -12725,7 +12725,7 @@ have caught this except running the flag, and nothing did, because the wrapper i
 only emitted when `--for`/`--watch` is set. Any such snippet needs an *execution*
 test, not a reading — worth a grep for the others.
 
-**`features` + `feature?` (ADR-196).** A builtin from an absent optional feature is
+**`features` + `feature?` (ADR-197).** A builtin from an absent optional feature is
 still *bound* and still raises when called, so `(bound? 'gui-open)` answers yes on a
 runtime that cannot open a window. The app was reduced to calling it and matching on
 the error's prose (`index-of … "gui backend"`) — which silently turns a graceful
