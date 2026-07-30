@@ -11941,6 +11941,68 @@ return-discards-params behaviour. (Also spent a minute chasing a stale `nest` bi
 is a separate binary embedding the lib, so `cargo build --bin brood` alone doesn't rebuild it.)
 Whole brood repo stays warning-clean.
 
+## 2026-07-30 (cont.) — the GC/VM/JIT correctness sweep: eleven defects, KI-18 and KI-19 closed
+
+Three review passes over the GC, the bytecode VM and the JIT, then fixing everything they
+found. Each fix carries a regression test that was **verified to fail without it**. Full
+detail lives in the commits; this is the shape of what was wrong and the two lessons worth
+keeping.
+
+**The defects clustered around one wrong premise: "effects only live in calls."** Four
+separate paths let a JIT deopt re-run a `table-put` — no journal for a call-free effectful
+arm; a multi-arity self-call exemption that matched the head symbol and ignored argc (every
+arm of a `defn` shares `dbg_name`); the leaf inliner splicing an effectful callee into an
+engine that cannot journal; and `jit_run_fast_link` treating an IC re-probe miss as "let the
+caller redo the call" *after* the callee's native code had already run. A 200 000-iteration
+driver put 402 047 times. All four now count exactly.
+
+**The rest, briefly.** A recursive `try` body SIGSEGV'd the OS process — `vm_apply` is the
+one VM shape that consumes real Rust stack per Brood level (`try`/`&optional`/native
+callbacks re-enter through it) and nothing on that path reaches `eval`, so the tree-walker's
+byte guard never saw it; it now probes native headroom, the VM sibling of the JIT's KI-14
+fix. The register worker hard-linked a non-tail self-call on `dbg_name` alone, so aliasing a
+closure and rebinding the name kept the old body calling itself (`12` where every other
+engine said `1001`). `Inst::SelfCall` never re-checked the global it loops on, so a
+long-lived `(defn serve (state) … (serve next))` could never be hot-reloaded — the shape hot
+reload exists for. Float `÷0` returned `inf` where the VM raises. LINMAP's wrapper
+snapshotted a result its own linearity proof allows to be a non-table, and its rewrite
+descended into `(quote …)`, corrupting data. Entry-hoisted globals raised `unbound symbol`
+for branches that never execute. The RUNTIME generation free was neither single-flighted nor
+epoch-validated — two processes could wipe a generation that had since become current. And
+table ops were missing from the allocation predicate, so a hoisted pair-slab base survived a
+`from_message` reallocation: a use-after-free alive only by allocator luck.
+
+**Lesson 1 — the runtime's self-healing hid a bug for months.** nbody's hottest arm deopted
+on every activation and the sixteen-deopt rule bailed it to the interpreter, so a deopt storm
+became *silent interpretation*: no error, no failing test, just a slow row. The diagnostic
+that exposed it is cheap and worth keeping as a standing check: **the JIT-vs-no-JIT ratio per
+row.** `fib` gets 54× and `collatz` 40×; nbody was 3.2×, and `bintree` (3.5×) and `nqueens`
+(3.4×) still sit in that band.
+
+**Lesson 2 — one predicate should not gate two things with different widths.** Adding table
+ops to `inst_may_allocate` fixed the use-after-free but also added a back-edge GC safepoint,
+costing `sieve` 6%. The safepoint's justification ("the nursery grows unbounded") did not
+survive checking: the back edge emits `brood_rt_tick_n` *independently*, so a native loop
+already yields on its quantum. The gates are now deliberately asymmetric — a safepoint that
+can fire must imply the hoist is off, never the reverse.
+
+**Two attempts at KI-19 failed before the third worked, and the failures are the useful
+part.** Staging the call head so the operator resolves first is correct but cost `json` 6×
+(168 → 1159 ms) — because what the elided head really buys is the call IC's cached *arm*, not
+the callee lookup. Doing it via a global-IC site fixed that but **aborted the process** on
+every JIT'd row: `emit` decides elided-vs-staged from the callee node while `jit_lower`
+decides from `(head, site)`, so a staged head left `head: None` with a live `site` and the JIT
+resolved a head that wasn't there. The shipped form keeps `head`/`site` populated behind a
+`staged` flag (IC still caches the arm, validated by closure identity) and exempts
+**reserved** names, which `def` refuses under ADR-166 — without that exemption it cost `regex`
+31%, almost all of it `first`/`rest`-class calls that were never rebindable.
+
+**Measurement note.** Three apparent benchmark movements this session were drift, not results
+— `spawn` +20%, `spawn-live` −22%, `persistent-map` +12.8% — all rejected by controlled `make
+ab`. Two were reported as regressions before checking machine load. A single harness sample
+does not separate signal from drift on this box **in either direction**; the −22% would have
+been published as a win.
+
 ## 2026-07-30 (cont.) — occurrence typing: variadic false-positive fix (ADR-190)
 
 Probing for gaps found one real **false positive**: a variadic `(defn vf (& xs) (fold + 0 xs))`
