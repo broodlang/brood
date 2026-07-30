@@ -27,6 +27,8 @@ const T_NUMBER: u32 = 4;
 const T_COMMENT: u32 = 5;
 const T_ENUM_MEMBER: u32 = 6;
 const T_NAMESPACE: u32 = 7;
+const T_STRUCT: u32 = 8;
+const T_INTERFACE: u32 = 9;
 // Token-modifier bits into [`legend`]'s `token_modifiers`.
 const M_DEFINITION: u32 = 1 << 0;
 
@@ -42,6 +44,10 @@ pub fn legend() -> SemanticTokensLegend {
             SemanticTokenType::COMMENT,
             SemanticTokenType::ENUM_MEMBER,
             SemanticTokenType::NAMESPACE,
+            // A `defrecord` name is a struct type; a `defability` name an interface —
+            // so an editor tints a type distinctly from a plain function.
+            SemanticTokenType::STRUCT,
+            SemanticTokenType::INTERFACE,
         ],
         token_modifiers: vec![SemanticTokenModifier::DEFINITION],
     }
@@ -89,6 +95,10 @@ enum Role {
     Head,
     /// The name a `def`-family form binds (its second form).
     DefName,
+    /// The name a `defrecord` binds — a struct type (its constructor).
+    RecordName,
+    /// The name a `defability` binds — an interface.
+    AbilityName,
     /// Anything else.
     Normal,
 }
@@ -103,7 +113,7 @@ fn walk(
 ) {
     match node.kind {
         NodeKind::List => {
-            let def_head = head_sym(node, src).map(is_def_head).unwrap_or(false);
+            let head = head_sym(node, src);
             let mut form_i = 0usize;
             for child in &node.children {
                 if child.kind.is_trivia() {
@@ -112,7 +122,12 @@ fn walk(
                 }
                 let r = match form_i {
                     0 => Role::Head,
-                    1 if def_head => Role::DefName,
+                    1 => match head {
+                        Some("defrecord") => Role::RecordName,
+                        Some("defability") => Role::AbilityName,
+                        Some(h) if is_def_head(h) => Role::DefName,
+                        _ => Role::Normal,
+                    },
                     _ => Role::Normal,
                 };
                 walk(child, src, tree, r, index, out);
@@ -157,6 +172,10 @@ fn push_symbol(
     let (ttype, tmods) = if role == Role::DefName {
         // The name being defined.
         (T_FUNCTION, M_DEFINITION)
+    } else if role == Role::RecordName {
+        (T_STRUCT, M_DEFINITION)
+    } else if role == Role::AbilityName {
+        (T_INTERFACE, M_DEFINITION)
     } else if role == Role::Head && SPECIAL_FORMS.contains(&name) {
         (T_KEYWORD, 0)
     } else {
@@ -333,6 +352,34 @@ mod tests {
             "+ fn: {toks:?}"
         );
         assert!(toks.iter().any(|t| t.3 == T_VARIABLE), "local x: {toks:?}");
+    }
+
+    #[test]
+    fn classifies_a_defrecord_name_as_a_struct() {
+        // `point` (5 chars) at col 11 is a struct type, with the definition modifier.
+        let toks = tokens("(defrecord point (x y))");
+        assert!(
+            toks.contains(&(0, 1, 9, T_KEYWORD, 0)),
+            "defrecord keyword: {toks:?}"
+        );
+        assert!(
+            toks.contains(&(0, 11, 5, T_STRUCT, M_DEFINITION)),
+            "point struct: {toks:?}"
+        );
+    }
+
+    #[test]
+    fn classifies_a_defability_name_as_an_interface() {
+        // `Shape` (5 chars) at col 12 is an interface, with the definition modifier.
+        let toks = tokens("(defability Shape (area [s]))");
+        assert!(
+            toks.contains(&(0, 1, 10, T_KEYWORD, 0)),
+            "defability keyword: {toks:?}"
+        );
+        assert!(
+            toks.contains(&(0, 12, 5, T_INTERFACE, M_DEFINITION)),
+            "Shape interface: {toks:?}"
+        );
     }
 
     #[test]

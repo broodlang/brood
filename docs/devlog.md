@@ -12138,3 +12138,46 @@ box **in either direction**. Also fixed a self-inflicted version of the same pro
 orphaned wait-loops (`until ! pgrep -f <pattern>`, where the pattern matched the watcher's own
 command line, so the condition could never go false — oldest ran 17 hours) were polluting the
 liveness checks used to decide whether the machine was quiet.
+
+## 2026-07-30 (cont.) — LSP + MCP: records/abilities become first-class to the tooling
+
+A follow-on sweep after the goto-definition fix, closing the same macro-generated-global blind
+spot across the rest of the tooling. Two survey agents (one LSP, one MCP) found the gaps; four
+landed.
+
+**LSP correctness.** `scope.rs`'s `collect_globals` registered document globals only for
+`def`/`defn`/`defmacro` — so a record constructor or ability name defined *in the buffer*
+resolved `Free`, and hover / signature-help / same-file-goto (all gated on `Defined{Global}`)
+showed nothing. Added `defrecord`/`defability`/`defdyn` to it; one change fixes all three
+features. Then the **P0**: renaming a `defrecord` rewrote the record name and its constructor
+calls but **not** the `foo-<field>` accessors the macro synthesizes — after the record
+re-expanded as `bar-<field>`, every `foo-<field>` call site dangled. `workspace.rs::rename` now
+cascades: it finds the record's `(defrecord … (fields))` form (in a file that resolves the name
+back to the target, so two same-named records don't cross wires) and renames each accessor in
+lockstep. An ability needs no cascade — its op names are independent of the ability name.
+
+**A `type-signature` builtin.** `(type-signature 'name)` exposes the checker's arrow signature
+(`crate::types::check::signature_string`) to the language — the same string the LSP hover shows.
+Thin Rust-over-the-checker bridge; both LSP and MCP now share one source for "what's this name's
+type."
+
+**MCP.** The ability system was invisible over MCP. Added `abilities` (list) and `ability`
+(describe one: ops with provided-default flags, sealed members, `:requires`, owner, derivable,
+and implementors computed from `*impls*`), `check-source` (type-check a snippet string via
+`check-string-structured`), and folded `:type` into `lookup`. Also: `check`/`run-tests` now use
+the structured `mcp--error-shape` like every other tool, and `wrap_as_mcp_content` sets MCP's
+`isError` on any soft-error result.
+
+**Semantic tokens + keyword classification.** `defability`/`impl` were missing from
+`SPECIAL_FORMS` (the shared source of truth for highlighting/completion/grammar), so they
+coloured as ordinary calls; added them. A `defrecord` name now tokenizes as `STRUCT` and a
+`defability` name as `INTERFACE` (legend + role classification), instead of both reading as
+plain functions.
+
+Consciously deferred (genuine nice-to-haves the survey rated low): record-field completion
+inside a constructor/map, and `impl` op-body snippet insertion (both depend on fiddly cursor/paren
+context — a mis-fire would malform an insertion). Doc drift fixed: stale `mcp.rs` "step 3" /
+"prompts empty" comments, the `brood://project` promise (dropped — reachable via `eval`), and the
+`docs/mcp.md` / `mcp.blsp` tool counts (17/20 → 23). Tests: 6 new LSP (rename cascade, in-buffer
+record/ability goto, STRUCT/INTERFACE tokens, defrecord/defability outline), 4 `type-signature`,
+6 MCP-tool. Full suites green: 450 lib, 126 brood-lsp, 3914 in-language.

@@ -25,7 +25,8 @@
 //! - `resources/list`,
 //!   `resources/read`        — static doc/source URIs baked in via
 //!                             `include_str!` (see [`RESOURCES`]).
-//! - `prompts/list`          — empty; Tier-1 (step 5) work.
+//! - `prompts/list`,
+//!   `prompts/get`           — the `brood-task` prompt (ADR-036).
 //! - `ping`, `shutdown`,
 //!   `exit`                  — the boring lifecycle pieces.
 //!
@@ -367,10 +368,10 @@ fn initialize_result() -> Json {
 // `tools/list` + `tools/call`
 // ============================================================================
 
-/// Project the Brood-side tool catalogue (`(mcp/mcp-tools)`, in `std/tool/mcp.blsp` —
-/// and any project-side extensions step 3 introduces) to the JSON shape
-/// `tools/list` requires. A missing `std/tool/mcp.blsp` (or any error) collapses
-/// to an empty list — the server stays useful, just with no tools yet.
+/// Project the Brood-side tool catalogue (`(mcp/mcp-tools)`, in `std/tool/mcp.blsp`,
+/// plus any project-side extensions a project's own `mcp.blsp` conses on) to the
+/// JSON shape `tools/list` requires. Any error building the catalogue collapses to
+/// an empty list — the server stays useful, just with no tools.
 fn list_tools(interp: &mut Interp) -> Vec<Json> {
     let cp = interp.heap.checkpoint();
     let roots_base = interp.heap.roots_len();
@@ -380,9 +381,8 @@ fn list_tools(interp: &mut Interp) -> Vec<Json> {
     // discard it (a `tools/list` reply has no place to surface stray output).
     brood::builtins::begin_stdout_capture();
 
-    // Best-effort require — silently ignore "no such module" so the server
-    // works the moment it boots, before `std/tool/mcp.blsp` exists (step 3) and
-    // even if a project hasn't defined its own MCP extensions yet.
+    // Best-effort require — silently ignore "no such module" so the server still
+    // boots even if a project hasn't defined its own MCP extensions.
     let _ = interp.eval_str("(require 'mcp)");
 
     let tools = match interp.eval_str("(mcp/mcp-tools)") {
@@ -647,7 +647,13 @@ fn find_handler(heap: &Heap, tools: Value, name: &str) -> Option<Value> {
 /// agent parses). If the handler `(print …)`d anything, that captured stdout
 /// rides along as a second, clearly-labelled text block — so `print`-based
 /// debugging surfaces in the reply instead of corrupting the JSON-RPC channel.
+///
+/// A handler signals a *soft* failure (the `docs/mcp.md` convention) by returning
+/// a map with a non-null `:error` key. Those get MCP's `isError: true`, so a client
+/// can distinguish a failed call from a successful one without parsing the payload.
 fn wrap_as_mcp_content(content: Json, captured_stdout: &str) -> Json {
+    let is_error =
+        matches!(&content, Json::Object(m) if m.get("error").is_some_and(|v| !v.is_null()));
     let text = match &content {
         Json::String(s) => s.clone(),
         other => serde_json::to_string_pretty(other).unwrap_or_default(),
@@ -659,7 +665,13 @@ fn wrap_as_mcp_content(content: Json, captured_stdout: &str) -> Json {
             "text": format!("[captured stdout]\n{captured_stdout}"),
         }));
     }
-    json!({ "content": blocks })
+    let mut result = json!({ "content": blocks });
+    if is_error {
+        if let Some(object) = result.as_object_mut() {
+            object.insert("isError".to_string(), Json::Bool(true));
+        }
+    }
+    result
 }
 
 // ============================================================================
@@ -668,8 +680,9 @@ fn wrap_as_mcp_content(content: Json, captured_stdout: &str) -> Json {
 
 /// Static resources served by URI. The doc set is baked in at compile time —
 /// the agent gets the canonical Brood references over MCP without needing
-/// filesystem access. Step 3 will add a dynamic `brood://project` URI that
-/// reads `project.blsp` from the bootstrapped project root.
+/// filesystem access. (Project-specific state — the manifest, source — is reachable
+/// through the `eval` tool, e.g. `(slurp "project.blsp")`, so there's no dynamic
+/// resource here yet; add one if a read-only project URI proves worth the plumbing.)
 const RESOURCES: &[(&str, &str, &str)] = &[
     (
         "brood://docs/brood-for-claude",

@@ -295,6 +295,30 @@ mod tests {
     }
 
     #[test]
+    fn jumps_from_a_constructor_call_to_the_defrecord_in_buffer() {
+        // `(defrecord point …)` registers `point` as a document global (scope.rs),
+        // so goto on a constructor call resolves in-buffer to the record's name
+        // token at column 11 — no loaded image needed.
+        assert_eq!(
+            def_char_at("(defrecord point (x y))\n(point 1 2)", "point 1"),
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn jumps_from_a_use_to_the_defability_in_buffer() {
+        // Same for an ability name: a `sig` reference to `Shape` resolves to the
+        // `(defability Shape …)` name token at column 12.
+        assert_eq!(
+            def_char_at(
+                "(defability Shape (area [s]))\n(sig f (Shape -> int))",
+                "Shape -"
+            ),
+            Some(12)
+        );
+    }
+
+    #[test]
     fn jumps_to_a_defrecord_constructor_across_files() {
         // A record constructor is *synthesized* by the `defrecord` macro (which
         // expands to a `do` of `defn`s), so it isn't in the buffer's CST. The
