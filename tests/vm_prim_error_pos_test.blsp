@@ -1,0 +1,31 @@
+;;; Regression guard: an error from a bytecode inline-prim fast path must carry the
+;;; failing form's position, not the caller's.
+;;;
+;;; `exec_chunk`'s fused prim arms (`Prim2SlotSlot`/`Prim2SlotInt`/`Prim2`, and `Prim3`'s
+;;; `table-put` key check) propagated with a bare `?` while every sibling path used
+;;; `tag_pos(e, pos)`. An error tagged nowhere picks up the position of whatever frame
+;;; catches it, so a `table-has?` failing inside a helper reported the *call site* two
+;;; lines away — the VM said 4:15 where the tree-walker said 3:3.
+;;;
+;;; A wrong line number in an error is a debugging tax that scales with codebase size, and
+;;; it is silent: nothing fails, you just look in the wrong place.
+
+(defmodule vm-prim-error-pos-test (:use test))
+
+(def pep-t (table))
+
+;; NOTE: the assertion below pins the line of the `table-has?` form. If you insert or
+;; remove lines above it, update the expected number to match.
+(defn pep-probe (k)
+  (table-has? pep-t k))
+
+(describe "inline-prim errors carry the failing form's position"
+  (test "a table-has? type error reports the prim's line, not the call site"
+    (let (line (try (pep-probe (fn (x) x)) (catch e (get e :line))))
+      ;; The `(table-has? pep-t k)` form inside `pep-probe`, NOT the `(pep-probe …)`
+      ;; call a few lines below — which is what an untagged error reported.
+      (assert= 20 line)))
+
+  (test "the message still describes the real failure"
+    (let (msg (try (pep-probe (fn (x) x)) (catch e (get e :message))))
+      (is (> (count msg) 0)))))

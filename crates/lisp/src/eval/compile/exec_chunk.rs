@@ -284,7 +284,9 @@ pub(crate) fn exec_chunk(
                 let sb = heap.root_at(n - 1);
                 let x = [sa, sb][map[0] as usize];
                 let y = [sa, sb][map[1] as usize];
-                match prim2_inline_exec(heap, *op, *map, false, *head, guard, x, y)? {
+                match prim2_inline_exec(heap, *op, *map, false, *head, guard, x, y)
+                    .map_err(|e| tag_pos(e, *pos))?
+                {
                     Some(v) => {
                         heap.truncate_roots(n - 2);
                         heap.push_root(v);
@@ -323,9 +325,13 @@ pub(crate) fn exec_chunk(
                     if let ValueRef::Table(tid) = sa.unpack() {
                         // Same key guard as the native — a closure/NaN key raises the
                         // identical error; a non-Table first operand defers below.
-                        crate::core::table::check_key("table-put", sb)?;
+                        crate::core::table::check_key("table-put", sb)
+                            .map_err(|e| tag_pos(e, *pos))?;
                         crate::perf_bump!(prim2_inline);
-                        done = Some(crate::core::table::put(heap, tid, sb, sc)?);
+                        done = Some(
+                            crate::core::table::put(heap, tid, sb, sc)
+                                .map_err(|e| tag_pos(e, *pos))?,
+                        );
                     }
                 }
                 match done {
@@ -353,7 +359,9 @@ pub(crate) fn exec_chunk(
                 let sb = heap.root_at(base + slot_b);
                 let x = [sa, sb][map[0] as usize];
                 let y = [sa, sb][map[1] as usize];
-                let v = match prim2_inline_exec(heap, *op, *map, false, *head, guard, x, y)? {
+                let v = match prim2_inline_exec(heap, *op, *map, false, *head, guard, x, y)
+                    .map_err(|e| tag_pos(e, *pos))?
+                {
                     Some(v) => v,
                     None => {
                         let save = heap.roots_len();
@@ -378,7 +386,9 @@ pub(crate) fn exec_chunk(
                 let sb = Value::int(*int_b);
                 let x = [sa, sb][map[0] as usize];
                 let y = [sa, sb][map[1] as usize];
-                let v = match prim2_inline_exec(heap, *op, *map, *swapped, *head, guard, x, y)? {
+                let v = match prim2_inline_exec(heap, *op, *map, *swapped, *head, guard, x, y)
+                    .map_err(|e| tag_pos(e, *pos))?
+                {
                     Some(v) => v,
                     None => {
                         // Dispatch to the user `head` in the ORIGINAL call order. For the

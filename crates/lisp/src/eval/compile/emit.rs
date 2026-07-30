@@ -215,6 +215,13 @@ pub(crate) fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
             // A free-global head is NOT staged: `Inst::Call` resolves it through the call IC
             // (or `env_get` on a miss), so there's no redundant head-`Global` push + per-call
             // `env_get`. A computed callee (head `None`) is staged below the args as before.
+            //
+            // NOTE (KI-19): this moves the head's resolution to *after* the arguments, while
+            // the tree-walker resolves the operator *first*. An argument that rebinds the
+            // head makes the engines disagree. Staging the head to fix the order was tried
+            // and reverted: it forces `head: None`, which disables the call-site IC, and
+            // `json` went 168 ms -> 1159 ms (6x). A correct fix needs the head resolved
+            // through the IC *before* the args (its own global-IC site), not a plain stage.
             if head.is_none() {
                 emit_node(callee, code)?;
             }
