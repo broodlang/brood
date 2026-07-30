@@ -18,6 +18,12 @@
 (defn drain-saw (acc)
   (receive ([:saw x] (drain-saw (cons x acc))) (after 0 (reverse acc))))
 
+;; Like drain-saw, but for the [:folded x] echoes `update` announces — the inputs it
+;; actually processed (so a coalescing test can prove EVERY input was folded even when
+;; only one frame rendered).
+(defn drain-folded (acc)
+  (receive ([:folded x] (drain-folded (cons x acc))) (after 0 (reverse acc))))
+
 ;; A scripted display: inputs arrive as `[:input …]` messages (selectively polled,
 ;; so interleaved `[:saw …]` render-echoes are skipped and survive for `drain-saw`).
 (defn r--display (me)
@@ -297,6 +303,71 @@
       (assert= (editor/ui/ui--coalesce-drag [:mouse :drag :left 5 5 []])
         [:mouse :drag :left 7 7 []])
       (assert= (receive (m m) (after 200 :none)) "k"))))
+
+;; ui--drain-input — fold every input ALREADY queued into one turn (one render), so an
+;; app that streams async events into its own mailbox (a test/run feed, collab deltas)
+;; doesn't pay one full frame per event. Opt-in per app via `:coalesce-input?`.
+(describe "ui--drain-input"
+  ; a display whose :poll(0) returns the next queued message (any shape), nil when empty —
+  ; like a real frontend at timeout, so the drain terminates on the empty queue.
+  (defn di--display (me)
+    {:poll (fn (ms) (receive (m m) (after 0 nil)))})
+  (defn di--count (m i c r) (update m :acc (fn (a) (conj a i))))
+  (test "folds the whole queued backlog, then stops at the empty poll (no pending)"
+    (let (me (self)
+          _ (do (send me [:input :a]) (send me [:input :b]) (send me [:input :c]))
+          result (editor/ui/ui--drain-input {:acc []} di--count (di--display me) 80 24 1024))
+      (assert= (:acc (first result)) [[:input :a] [:input :b] [:input :c]])  ; all three folded
+      (is (nil? (second result)))))                                          ; queue drained clean
+  (test "an empty queue folds nothing — the model passes through unchanged"
+    (let (me (self))
+      (assert= (editor/ui/ui--drain-input {:acc [:x]} di--count (di--display me) 80 24 1024)
+        [{:acc [:x]} nil])))
+  (test "a :close pulled mid-drain comes back as pending (the loop acts on it, not update)"
+    (let (me (self)
+          _ (do (send me [:input :a]) (send me :close) (send me [:input :b]))
+          result (editor/ui/ui--drain-input {:acc []} di--count (di--display me) 80 24 1024))
+      (assert= (:acc (first result)) [[:input :a]])  ; folded :a, then stopped at :close
+      (assert= (second result) :close)))             ; handed back (":b" stays queued)
+  (test "fuel bounds a single batch — the rest drains on the next turn"
+    (let (me (self)
+          _ (do (send me [:input :a]) (send me [:input :b]) (send me [:input :c]))
+          result (editor/ui/ui--drain-input {:acc []} di--count (di--display me) 80 24 2))
+      (assert= (:acc (first result)) [[:input :a] [:input :b]])  ; only 2 folded (fuel = 2)
+      (is (nil? (second result))))))
+
+;; The loop-level behaviour: with :coalesce-input? a queued burst renders ONCE; without it,
+;; the legacy once-per-input frames are untouched (the opt-in is inert by default).
+(defn ci--display (me)
+  {:enter (fn () nil) :leave (fn () :left) :size (fn () [80 24]) :draw (fn (f) nil)
+   ; selective on [:input] so the view's [:saw] / update's [:folded] echoes survive to drain
+   :poll (fn (ms) (receive ([:input i] i) (after 0 nil)))})
+
+(describe "ui-run — input coalescing (:coalesce-input?)"
+  (test "a queued burst folds into ONE render, but every input is still processed"
+    (let (me (self))
+      (send me [:input :inc]) (send me [:input :inc]) (send me [:input :inc]) (send me [:input :quit])
+      (ui-run {:n 0 :coalesce-input? true}
+        (fn (m c r) (do (send me [:saw (get m :n)]) []))
+        (fn (m input c r)
+          (do (send me [:folded input])
+            (cond (= input :inc) (assoc m :n (+ (get m :n) 1))
+              (= input :quit) (assoc m :done true)
+              else m)))
+        (ci--display me))
+      (assert= (drain-saw []) (list 0))                            ; one frame — the burst coalesced
+      (assert= (drain-folded []) (list :inc :inc :inc :quit))))    ; yet all four inputs folded
+  (test "without the flag the same burst renders once per input (opt-in only)"
+    (let (me (self))
+      (send me [:input :inc]) (send me [:input :inc]) (send me [:input :quit])
+      (ui-run {:n 0}
+        (fn (m c r) (do (send me [:saw (get m :n)]) []))
+        (fn (m input c r)
+          (cond (= input :inc) (assoc m :n (+ (get m :n) 1))
+            (= input :quit) (assoc m :done true)
+            else m))
+        (ci--display me))
+      (assert= (drain-saw []) (list 0 1 2)))))  ; per-input frames: 0, 1, 2
 ;; ---- named timers (ADR-102) ------------------------------------------------
 ;; The firing logic is pure (deadline math over a clock map + the timer specs), so it
 ;; tests deterministically with hand-supplied `now`/`clock` — no wall-clock, no loop.
