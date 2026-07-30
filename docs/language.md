@@ -2753,7 +2753,7 @@ redefined.
 
 **`bound?` is about names, not capabilities** — and for optional build features the
 two disagree. A builtin from a feature this binary lacks is still bound and still
-raises when called, so ask the build instead (ADR-196):
+raises when called, so ask the build instead (ADR-197):
 
 ```clojure
 (features)             ;=> [:gui :clipboard :jit :treesit :wasm :dev-tools]
