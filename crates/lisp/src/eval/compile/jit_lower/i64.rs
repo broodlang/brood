@@ -54,6 +54,18 @@ fn arm_scalar_kind(arm: &CompiledArm) -> Option<Scalar> {
     if i64_too_deep(self_sym) || !i64_has_self_call(&arm.body) {
         return None;
     }
+    // The worker lowers a *non-tail* `(f …)` whose head is `dbg_name` to a direct call to
+    // itself. `dbg_name` is only the symbol this closure was first `def`'d under, so that
+    // is sound only while the global still binds THIS arm — see `self_global_ok`, which is
+    // re-observed at every tiering election. Without the check, aliasing the closure and
+    // rebinding the name kept the old body calling itself: `(def f h)`, `(def h …)`,
+    // `(f 12)` answered 12 where the VM and tree-walker both answered 1001.
+    if !arm
+        .self_global_ok
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return None;
+    }
     let empty = std::collections::HashSet::new();
     [Scalar::Int, Scalar::Float]
         .into_iter()
@@ -338,13 +350,24 @@ fn lower_i64_arith(
     y: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
     use cranelift_codegen::ir::{condcodes::IntCC, InstBuilder};
-    // Float: plain IEEE ops, no overflow (inf/NaN are valid results) — far simpler than int.
+    // Float: plain IEEE ops, no *overflow* (inf/NaN are valid float results) — far simpler
+    // than int. Division still needs the ÷0 guard: Brood's `/` **raises** "division by
+    // zero" rather than yielding IEEE infinity (`prim_div` tests `b == 0.0` before
+    // dividing), so a bare `fdiv` returned `inf` where the VM raised — a JIT-only wrong
+    // answer. `fcmp Equal` against 0.0 is true for -0.0 too, matching `b == 0.0` exactly.
     if cx.kind == Scalar::Float {
         return match op {
             PrimOp::Add => b.ins().fadd(x, y),
             PrimOp::Sub => b.ins().fsub(x, y),
             PrimOp::Mul => b.ins().fmul(x, y),
-            PrimOp::Div => b.ins().fdiv(x, y),
+            PrimOp::Div => {
+                let zero = b.ins().f64const(0.0);
+                let div0 = b
+                    .ins()
+                    .fcmp(cranelift_codegen::ir::condcodes::FloatCC::Equal, y, zero);
+                i64_guard_overflow(b, cx, div0);
+                b.ins().fdiv(x, y)
+            }
             _ => unreachable!("float checker restricts arith ops to +,-,*,/"),
         };
     }

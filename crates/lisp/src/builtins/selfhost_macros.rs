@@ -100,8 +100,11 @@ fn required_mods_arg(heap: &Heap, v: Value) -> Vec<String> {
 pub(super) fn module_direct_requires(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     let path = expect_string(heap, "%module-direct-requires", arg(args, 0))?;
     let src = std::fs::read_to_string(&path).map_err(|e| {
-        LispError::runtime(format!("%module-direct-requires: cannot read {}: {}", path, e))
-            .with_code(crate::error::error_codes::FILE_IO)
+        LispError::runtime(format!(
+            "%module-direct-requires: cannot read {}: {}",
+            path, e
+        ))
+        .with_code(crate::error::error_codes::FILE_IO)
     })?;
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let just_forms: Vec<Value> = forms.into_iter().map(|(f, _)| f).collect();
@@ -116,10 +119,7 @@ pub(super) fn module_direct_requires(args: &[Value], _env: EnvId, heap: &mut Hea
     };
     let module_kw = Value::keyword(value::intern("module"));
     let requires_kw = Value::keyword(value::intern("requires"));
-    Ok(heap.map_from_pairs(vec![
-        (module_kw, module_val),
-        (requires_kw, requires_val),
-    ]))
+    Ok(heap.map_from_pairs(vec![(module_kw, module_val), (requires_kw, requires_val)]))
 }
 
 /// `(check-file-deps path)` — the incremental-cache counterpart of `check-file`

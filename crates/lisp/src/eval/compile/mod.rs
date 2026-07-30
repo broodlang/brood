@@ -1525,9 +1525,14 @@ fn compile_arm(
     // Deopt-resume checkpoint slots (see `CompiledArm::ckpt_slot`): one packed
     // journal slot + room for the deepest post-call operand stack. Reserved above
     // the spill slots; zero cost for call-free arms (`ckpt_depth` is None).
+    // `self_arity` is this arm's own fixed arity, and `None` when argc doesn't select an
+    // arm 1:1 (optionals / a rest param) — see the pure-self exemption in `jit_ckpt_depth`,
+    // which must not treat a call to a *sibling* arm of the same multi-arity `defn` as a
+    // call back into this provably effect-free one.
+    let self_arity = (noptional == 0 && rest.is_none()).then_some(nrequired);
     let ckpt_depth = chunk
         .as_ref()
-        .and_then(|c| jit_ckpt_depth(&c.code, defn_name));
+        .and_then(|c| jit_ckpt_depth(&c.code, defn_name, self_arity));
     let (ckpt_slot, ckpt_reserve) = match ckpt_depth {
         Some(d) => ((scope.max + spill_reserve) as u32, 1 + d),
         None => (u32::MAX, 0),
@@ -1562,6 +1567,7 @@ fn compile_arm(
         deopt_watch,
         jit_deopts: AtomicU32::new(0),
         float_globals: std::sync::OnceLock::new(),
+        self_global_ok: std::sync::atomic::AtomicBool::new(false),
         ckpt_slot,
         compile_epoch: AtomicU64::new(0),
         share_key: None,
@@ -1704,6 +1710,16 @@ fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
 /// immovable RUNTIME code region. A LOCAL closure whose body was built from movable
 /// LOCAL forms (e.g. conased by `eval`/quasiquote) has no stable key *and* would
 /// put movable handles in the cached `Node` tree, so it's left to the tree-walker.
+/// The already-compiled arm for `id`/`argc`, **without compiling anything** — a pure cache
+/// read, unlike [`compiled_arm_for`], which compiles on a miss. Used at the tiering election
+/// to answer "does this global still resolve to this same arm?" (see
+/// [`CompiledArm::self_global_ok`]), where compiling would be re-entrant and expensive.
+/// `None` on a miss, which callers must treat as "don't know" — never as "yes".
+pub(crate) fn cached_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<CompiledArm>> {
+    let key = cache_key(heap, id)?;
+    heap.vm_cache_arm(key, argc).flatten()
+}
+
 fn cache_key(heap: &Heap, id: ClosureId) -> Option<VmCacheKey> {
     match id.region() {
         value::RUNTIME | value::PRELUDE => Some(VmCacheKey::Runtime(id.0)),
@@ -2257,6 +2273,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 deopt_watch: false,
                 jit_deopts: AtomicU32::new(0),
                 float_globals: std::sync::OnceLock::new(),
+                self_global_ok: std::sync::atomic::AtomicBool::new(false),
                 ckpt_slot: u32::MAX,
                 compile_epoch: AtomicU64::new(0),
                 share_key: None,

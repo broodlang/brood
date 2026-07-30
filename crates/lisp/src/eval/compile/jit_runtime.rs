@@ -92,6 +92,23 @@ fn record_float_globals(arm: &CompiledArm, heap: &Heap, env: EnvId) {
     let _ = arm.float_globals.set(syms.into_boxed_slice());
 }
 
+/// Re-observe whether `dbg_name` still resolves to **this very arm**, into
+/// [`CompiledArm::self_global_ok`]. Called at each tiering election, before lowering, so a
+/// `def` that rebound the name (which bumps the epoch and invalidates the arm) is seen by
+/// the recompile. A cache miss, a non-closure binding, or an arity that selects a different
+/// arm all answer `false` — the safe direction, costing only the direct-call optimisation.
+#[cfg(feature = "jit")]
+fn record_self_global_ok(arm: &CompiledArm, heap: &Heap, env: EnvId) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let ok = match arm.dbg_name.and_then(|s| heap.env_get(env, s)) {
+        Some(Value::Fn(id)) => {
+            super::cached_arm_for(heap, id, arm.nrequired).is_some_and(|other| other.uid == arm.uid)
+        }
+        _ => false,
+    };
+    arm.self_global_ok.store(ok, Relaxed);
+}
+
 /// A self-tail loop that has spun this many back-edges while its arm sits QUEUED
 /// compiles synchronously (`jit_compile_now`): a bounded ~ms block beats an
 /// unbounded interpreted tail (sieve's p=2 `mark` pass raced the cold-start
@@ -1598,6 +1615,7 @@ pub(crate) fn jit_tier(
             // constant isn't lowered onto the integer path (see `record_float_globals`).
             let genv = heap.read_root_env(env);
             record_float_globals(arm, heap, genv);
+            record_self_global_ok(arm, heap, genv);
             if JIT_COMPILER
                 .primary
                 .try_send((arm.clone(), slot_tags, heap.runtime_tag()))

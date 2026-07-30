@@ -107,6 +107,7 @@ impl Jit {
             brood_rt_call_native_fl as *const u8,
         );
         builder.symbol("brood_rt_global", brood_rt_global as *const u8);
+        builder.symbol("brood_rt_global_probe", brood_rt_global_probe as *const u8);
         builder.symbol("brood_rt_global_ic", brood_rt_global_ic as *const u8);
         builder.symbol("brood_rt_call_slow", brood_rt_call_slow as *const u8);
         builder.symbol(
@@ -176,6 +177,7 @@ impl Jit {
                 ("cdr", brood_rt_cdr as *const () as usize),
                 ("cons", brood_rt_cons as *const () as usize),
                 ("global", brood_rt_global as *const () as usize),
+                ("global_probe", brood_rt_global_probe as *const () as usize),
                 ("global_ic", brood_rt_global_ic as *const () as usize),
                 ("const_load", brood_rt_const_load as *const () as usize),
                 ("vector_ref", brood_rt_vector_ref as *const () as usize),
@@ -1039,6 +1041,34 @@ pub unsafe extern "C" fn brood_rt_const_load(
 /// (it returns the error outcome, 3). Reads the *live* env, so a `def` rebind is seen
 /// immediately (late binding, exactly like the VM's `Inst::Global`).
 ///
+/// # Safety
+/// `heap`/`out` must be live; `sym` is an interned [`crate::core::value::Symbol`].
+#[no_mangle]
+pub unsafe extern "C" fn brood_rt_global_probe(
+    heap: *mut Heap,
+    out: *mut crate::core::value::Value,
+    sym: u32,
+) -> i64 {
+    // Speculative sibling of `brood_rt_global` for the **entry hoist**: resolves without
+    // parking an error, because the caller's answer to "unbound" is to deopt, not to raise.
+    //
+    // The hoist resolves every global the arm mentions at entry, including ones only a cold
+    // branch reads — so raising there reported `unbound symbol` for a branch the VM never
+    // evaluates: `(defn pick (n) (if (< n 0) never-defined-global (+ n 1)))` worked until it
+    // got hot, then threw. Deopting instead hands the arm to the VM, which evaluates only
+    // the branch actually taken and raises only if that branch really reads the name. A
+    // parked error would then be a lie left in the heap, hence this non-parking form.
+    let h = &mut *heap;
+    let env = h.read_root_env(h.jit_call_env);
+    match h.env_get(env, sym) {
+        Some(v) => {
+            *out = v;
+            0
+        }
+        None => 1,
+    }
+}
+
 /// # Safety
 /// `heap`/`out` must be live; `sym` is an interned [`crate::core::value::Symbol`].
 #[no_mangle]

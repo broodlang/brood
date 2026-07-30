@@ -1424,6 +1424,16 @@ fn linmap_split_def(heap: &mut Heap, items: &[Value]) -> Option<Value> {
     if body.len() > 1 && matches!(body[0].unpack(), ValueRef::Str(_)) {
         return None;
     }
+    // A `quasiquote` anywhere in the body declines the split. The probe runs on the *Node*
+    // IR, where an unquote's contents are ordinary code, so an `acc` use inside one counts
+    // toward the linearity proof — but `linmap_rewrite_form` cannot safely rewrite inside a
+    // quasiquote (it would have to distinguish quoted structure from unquoted code), and
+    // leaving it alone would let a `map-get` reach the in-place `Table`. Plain `quote` needs
+    // no gate: it is inert data the probe sees as a `Const`, and the rewriter now passes it
+    // through untouched.
+    if body.iter().any(|&f| form_has_quasiquote(heap, f, 0)) {
+        return None;
+    }
     // Soundness gate: reuse the Node-level reachability analysis as a probe.
     let idx = crate::eval::compile::linmap_probe(heap, name_sym, &params, body)?;
 
@@ -1446,10 +1456,43 @@ fn linmap_split_def(heap: &mut Heap, items: &[Value]) -> Option<Value> {
         }
     }
     let inner_call = heap.list(call);
-    let snap = heap.list(vec![value::sym("table-snapshot"), inner_call]);
+    // Snapshot the loop's result back to an immutable map **only when it is the table**.
+    // The accumulator is what the linearity proof licenses rewriting in place, but the base
+    // case is free to return something else entirely — `(map-count acc)`, `(map-get acc :a)`,
+    // or a plain constant — and an unconditional `table-snapshot` then failed on a value it
+    // was never given: `table-snapshot: expected table, got int (3)`. `linmap_linear` admits
+    // those returns deliberately (a whitelisted *read* of the accumulator, or a `Const`), so
+    // the wrapper, not the proof, is what has to account for them.
+    //
+    // `(= :table (type-of r))` rather than a predicate call: `type-of` is a total PrimOp1
+    // (never deopts) and the comparison is against an interned keyword, so this costs one
+    // tag read on the way out of a fold — and only on the way out, not per element.
+    let r_val = value::gensym("linmap-out");
+    let type_of = heap.list(vec![value::sym("type-of"), r_val]);
+    let is_table = heap.list(vec![value::sym("="), value::kw("table"), type_of]);
+    let snap_call = heap.list(vec![value::sym("table-snapshot"), r_val]);
+    let cond = heap.list(vec![value::sym(kw::IF), is_table, snap_call, r_val]);
+    let bind = heap.list(vec![r_val, inner_call]);
+    let snap = heap.list(vec![value::sym(kw::LET), bind, cond]);
     let wrapper_fn = heap.list(vec![value::sym(kw::FN), param_form, snap]);
     let wrapper_def = heap.list(vec![value::sym(kw::DEF), items[1], wrapper_fn]);
     Some(heap.list(vec![value::sym(kw::DO), inner_def, wrapper_def]))
+}
+
+/// Does `form` contain a `quasiquote` anywhere? Guards the linmap wrapper-split (see the
+/// call site). Depth-bounded so a pathological datum can't recurse the compiler thread.
+fn form_has_quasiquote(heap: &Heap, form: Value, depth: usize) -> bool {
+    if depth > 64 {
+        return true; // too deep to prove clean — decline the split
+    }
+    match heap.list_to_vec(form) {
+        Ok(items) => items.iter().enumerate().any(|(i, &it)| {
+            (i == 0
+                && matches!(it.unpack(), ValueRef::Sym(s) if value::symbol_is(s, kw::QUASIQUOTE)))
+                || form_has_quasiquote(heap, it, depth + 1)
+        }),
+        Err(_) => false,
+    }
 }
 
 /// Source rewrite for the inner loop of a wrapper-split: turn the self-recursion
@@ -1513,6 +1556,14 @@ fn linmap_rewrite_form(
                 c.push(linmap_rewrite_form(heap, a, name, inner, acc));
             }
             return heap.list(c);
+        }
+        // `(quote …)` is inert DATA, never evaluated — rewriting inside it corrupts the
+        // datum instead of the program. `(println '(map-get acc 1))` printed
+        // `(table-get acc 1)`. The probe cannot catch this: a quoted form compiles to a
+        // single `Node::Const`, so the linearity analysis sees no `acc` use at all and
+        // passes, while the source rewrite walks straight through the quote.
+        if value::symbol_is(h, kw::QUOTE) {
+            return form;
         }
     }
     let out: Vec<Value> = items

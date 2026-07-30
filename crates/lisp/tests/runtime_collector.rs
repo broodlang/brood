@@ -779,7 +779,12 @@ fn free_reclaims_after_cross_process_drain() {
     );
 
     // Free it: the slot empties, the drain ends, and aging can reclaim slot 0.
-    assert!(interp.heap.free_runtime_gen(0), "free the drained gen 0");
+    assert!(
+        interp
+            .heap
+            .free_runtime_gen(0, interp.heap.drain_identity().0),
+        "free the drained gen 0"
+    );
     assert!(!interp.heap.drain_active(), "the drain ended");
     assert!(
         !interp.heap.runtime_gen_referenced(0),
@@ -823,7 +828,12 @@ fn reused_slot_runs_new_code_not_stale_cache() {
 
     // Free gen 0 (bumps `free_epoch`), then age back into the freed slot 0 and define a
     // NEW `f` there — its handle can reuse the old `f`'s `(gen 0, index)` bits.
-    assert!(interp.heap.free_runtime_gen(0), "free drained gen 0");
+    assert!(
+        interp
+            .heap
+            .free_runtime_gen(0, interp.heap.drain_identity().0),
+        "free drained gen 0"
+    );
     assert!(interp.heap.age_runtime(), "age back into the freed slot 0");
     assert_eq!(interp.heap.runtime_cur_gen(), 0);
     interp
@@ -897,7 +907,12 @@ fn migration_re_exports_globals_so_a_stable_global_does_not_pin() {
         !interp.heap.runtime_gen_referenced(0),
         "gen 0 is unreferenced after migration — a stable global no longer pins it",
     );
-    assert!(interp.heap.free_runtime_gen(0), "free the drained gen 0");
+    assert!(
+        interp
+            .heap
+            .free_runtime_gen(0, interp.heap.drain_identity().0),
+        "free the drained gen 0"
+    );
 
     // Everything still works after the free, and fresh code runs on the compacted region.
     {
@@ -999,7 +1014,9 @@ fn migration_drain_free_cycles_and_stays_bounded() {
             "cycle {cycle}: gen {old} drained",
         );
         assert!(
-            interp.heap.free_runtime_gen(old),
+            interp
+                .heap
+                .free_runtime_gen(old, interp.heap.drain_identity().0),
             "cycle {cycle}: free gen {old}",
         );
 
@@ -1055,7 +1072,12 @@ fn a_def_of_an_old_gen_value_is_rehomed_off_the_freed_generation() {
 
     // Free gen 0. With the re-home fix `g` was copied into gen 1, so this is safe;
     // without it `g` still points into the now-empty gen-0 slab.
-    assert!(interp.heap.free_runtime_gen(0), "gen 0 freed");
+    assert!(
+        interp
+            .heap
+            .free_runtime_gen(0, interp.heap.drain_identity().0),
+        "gen 0 freed"
+    );
 
     // `g` must still resolve + run — proving it was re-homed off the freed generation.
     let r = interp.eval_str("(g)").expect("call g after gen 0 freed");
