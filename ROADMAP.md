@@ -77,14 +77,38 @@ Shipped as ADRs:
     a checker pass reads the `derive-into` forms so a derived record still satisfies
     call-site and `:sealed` checks. Composes with provided ops (derive the required op,
     inherit the rest). **[prelude/checker]**
-  - 🟡 **Record patterns + sealed-match exhaustiveness** ([ADR-187](docs/decisions.md)) — the
-    biggest structural gap from the most-loved-languages review (Rust/Gleam/Elm-style
-    match-on-a-constructor). ✅ **Part 1: `(record name {map-pattern})`** — matches a
-    `defrecord` value by nominal id (derived syntactically, checker-safe) then a map pattern
-    against its fields (`{:k p}`/`:keys`/`:or` compose); keyword-field not positional
-    (records are hash-ordered maps, à la Elixir/Clojure). A Brood pattern-compiler clause, no
-    special form. ⬜ **Part 2: exhaustiveness** — warn when a `match` on a sealed-ability-typed
-    scrutinee (ADR-181/186) misses a member with no catch-all. **[prelude/checker]**
+  - ✅ **Record patterns + sealed-match exhaustiveness** ([ADR-187](docs/decisions.md), 2026-07-29)
+    — the biggest structural gap from the most-loved-languages review (Rust/Gleam/Elm-style
+    match-on-a-constructor). **Part 1: `(record name {map-pattern})`** — matches a `defrecord`
+    value by nominal id (derived syntactically, checker-safe) then a map pattern against its
+    fields (`{:k p}`/`:keys`/`:or` compose); keyword-field not positional. **Part 2:
+    exhaustiveness** — a `match` on a sealed-ability-typed scrutinee (declared or inferred)
+    warns for any uncovered member with no catch-all. Sound by construction. **[prelude/checker]**
+  - ✅ **Occurrence typing — inferred params check callers** ([ADR-190](docs/decisions.md),
+    2026-07-30) — an unannotated function's inferred parameter types flag wrong callers, incl.
+    the sealed-op-derived case, cross-file. Sound (under-constrained → under-warn). **[checker]**
+  - ✅ **Ability bounds** ([ADR-192](docs/decisions.md)) — a sealed ability name in a `sig` is
+    `where T: Ability`; `(and A B)` is `T: A + B`. Documented (already worked via ADR-181/186).
+  - ✅ **Super-abilities — `:requires`** ([ADR-193](docs/decisions.md), 2026-07-30) — an
+    implementor of an ability must also implement its declared prerequisites (`Ord :requires
+    [Eq]`, Rust's `trait Ord: Eq`), enforced by the checker. **[prelude/checker]**
+  - 📥 **Deferred ability/type abstractions** (from the loved-languages review, ADR-011 —
+    ship when a concrete need names them; all *sound* to skip, none a correctness gap):
+    - ⬜ *low* — **Parametric / associated abilities** (`(Collection E)`, Haskell/Rust
+      associated types). Highest cost, lowest value for a *dynamic gradual* language (containers
+      duck-type; `?A` sig vars + `(list T)` cover most). Defer hardest.
+    - ⬜ *low-med* — **Custom match extractors / view patterns** (F# active patterns, Scala
+      `unapply`). Match on computed meaning, not just shape. `:when` guards + record patterns
+      cover the common case; wait for a parsing-heavy need.
+    - ⬜ *med* — **Exhaustiveness from *inferred* scrutinees** — a `match` on an occurrence-typed
+      param (no `sig`) gets exhaustiveness. Small (`exhaustive.rs` reads inferred sigs), but
+      narrow reach (must both constrain *and* hand-match the scrutinee).
+    - ⬜ *med* — **Per-arm parameter checking of a multi-arity callee** — a multi-arity closure
+      gets a return-only sig, so its args aren't checked against the matching arm. Needs an
+      inferred-overload path + per-argc arm selection; the miss is a false *negative* (sound).
+    - 🚫 *won't* — **Open-ability bounds** — declined, not deferred: an open ability accepts
+      late impls, so no argument is soundly rejectable on the type (ADR-123/124). Safety lives
+      at the op call site instead.
   - ⬜ **Checker gap:** a `:use`d ability op from a *loose disk* module (not embedded,
     not in a project) is flagged `unbound symbol` though it runs; embedded/same-module
     use resolves. Surfaced by the `show` cross-module test. **[kernel/checker]**
