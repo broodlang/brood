@@ -1993,9 +1993,7 @@ fn same_file_caller_checked_against_inferred_return() {
 #[test]
 fn same_file_forward_reference_resolves_via_fixpoint() {
     // Caller defined BEFORE callee — the bounded fixpoint still resolves `later`'s return.
-    let w = file_warnings(
-        "(defmodule t)\n(defn bad () (+ 1 (later 1)))\n(defn later (x) (str x))",
-    );
+    let w = file_warnings("(defmodule t)\n(defn bad () (+ 1 (later 1)))\n(defn later (x) (str x))");
     assert!(
         w.iter().any(|s| s.contains('+') && s.contains("number")),
         "a forward reference should resolve in the fixpoint: {w:?}"
@@ -2012,7 +2010,8 @@ fn same_file_reassigned_global_return_stays_dynamic() {
         "(defmodule t)\n(def *g* nil)\n(defn getg () (when (nil? *g*) (def *g* (table))) *g*)\n(defn u () (table-get (getg) :k))",
     );
     assert!(
-        !w.iter().any(|s| s.contains("table-get") && s.contains("argument")),
+        !w.iter()
+            .any(|s| s.contains("table-get") && s.contains("argument")),
         "a reassigned global's return must stay dynamic (no false positive): {w:?}"
     );
 }
@@ -3741,9 +3740,8 @@ fn ki17_flags_a_qualified_reference_to_an_unrequired_module() {
     interp
         .eval_str("(defmodule ki17mod \"m\")\n(defn foo (x) x)")
         .expect("module loads");
-    let forms =
-        crate::syntax::reader::read_all(&mut interp.heap, "(defn go (x) (ki17mod/foo x))")
-            .expect("parse");
+    let forms = crate::syntax::reader::read_all(&mut interp.heap, "(defn go (x) (ki17mod/foo x))")
+        .expect("parse");
 
     // Empty reachability set → unreachable-from-this-file → warn.
     let warned = crate::types::check::check_file_ext(&mut interp.heap, &forms, &[]);
