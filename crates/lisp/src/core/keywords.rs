@@ -30,6 +30,8 @@ pub const DEFN: &str = "defn";
 pub const DEFMACRO: &str = "defmacro";
 pub const DEFDYN: &str = "defdyn";
 pub const DEFRECORD: &str = "defrecord";
+pub const DEFABILITY: &str = "defability";
+pub const IMPL: &str = "impl";
 pub const DEFMODULE: &str = "defmodule";
 pub const FN: &str = "fn";
 // Retired as a spelling (ADR-162) — `fn` is the only one. The constant survives

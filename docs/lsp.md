@@ -339,8 +339,12 @@ each thing was defined as it loaded*, and `M-.` is a lookup against it. The plan
    the form's start. **Span-accurate through macros for *definitions***, because
    the site is captured before macroexpansion (ADR-022) discards spans. (The file
    loaders — the `load` builtin and `eval_source` — call `Heap::note_definition`
-   on each un-expanded top-level form. *Top-level only* for now; a `def` nested in
-   a `do` isn't recorded yet.)
+   on each top-level form, **both un-expanded and expanded**. The un-expanded pass
+   keeps span-accurate sites for `def`/`defn`/`defmacro`; the expanded pass, which
+   descends into a `(do …)`, catches the globals a definer *macro* synthesizes — a
+   `defrecord` constructor and its accessors, a `defability`'s op dispatchers — at
+   the macro's call-site position. So goto-definition on a record constructor or an
+   ability op resolves cross-file, not just on hand-written `defn`s. 2026-07-30.)
 2. ✅ **`(source-location 'foo) → [file line col]`** (or nil) — one Rust
    primitive; policy on top is Brood. Already useful standalone (error provenance,
    `nest`, a self-hosted REPL `M-.`) before any LSP wiring consumes it.

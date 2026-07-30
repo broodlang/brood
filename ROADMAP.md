@@ -1454,6 +1454,15 @@ Runtime housekeeping (both items landed):
 
 ### Tooling & errors
 
+- ⬜ **LSP: type-directed record-field completion** (deferred 2026-07-30). Completing a
+  `:keyword` inside a `get`/`assoc`/`update`/map-literal whose value is a known record
+  should offer *that record's* field names. The context detection is easy CST work; the
+  hard part is knowing which record the value is — it needs the checker's inferred type
+  threaded into the completion path (not wired today). A cheap heuristic (offer every
+  `defrecord`'s field names as keywords) was considered and rejected as too noisy to beat
+  the generic global list. Do it as the type-directed version when it's worth ~a day.
+  (The sibling `impl` op-body **snippet** completion shipped — a fillable
+  `(op [self] …)` skeleton, snippet-gated on the client's `snippetSupport`.)
 - ✅ **`nest test` selection — `mix test` parity** — shipped 2026-07-24. The suite
   had **no way to run a subset by name**: 2965 tests, and the only narrowing was a
   file path. Now `--only`/`--exclude`/`--include SELECTOR` (a tag, `test:substr`,

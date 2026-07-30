@@ -6,11 +6,14 @@ the project tool: `nest mcp`. This is the agent-side counterpart to
 *agents* operating on the project at the level of named verbs and a long-lived
 image.
 
-> Status: **implemented, v0** (2026-05-28). Recorded as
+> Status: **implemented, v0** (2026-05-28; catalogue since grown to 23 tools —
+> see the tool table below). Recorded as
 > [ADR-036](decisions.md#adr-036--nest-mcp-a-per-project-model-context-protocol-server-tools-surface-in-brood).
-> Six of the eight tools live, three Tier-1 niceties in place (project-defined
-> tool discovery, `prompts/get`, `.mcp.json` scaffolded by `nest new`). The
-> single remaining piece is the **`*out*` dynvar / `with-out-str` work**
+> The full catalogue is live (including the once-stubbed `check` / `run-tests` /
+> `processes`, and the 2026-07-30 ability/type trio `abilities` / `ability` /
+> `check-source`), with the three Tier-1 niceties in place (project-defined tool
+> discovery, `prompts/get`, `.mcp.json` scaffolded by `nest new`). The remaining
+> piece is the **`*out*` dynvar / `with-out-str` work**
 > (step 1c-c) — needed to fold a `:stdout` field into `EvalResult` and to
 > safely redirect `print` output away from the dispatcher's stdout. Deferred
 > until a concrete need; agents using `eval` should return data via the
@@ -148,7 +151,7 @@ The contract for every operation:
 
 ## The tool surface (Brood, in `std/tool/mcp.blsp`)
 
-Seventeen tools, each earning its place by needing the runtime to answer —
+Twenty-three tools, each earning its place by needing the runtime to answer —
 anything a plain file read or grep would answer is **not** here, because
 Claude Code already has those:
 
@@ -158,7 +161,10 @@ Claude Code already has those:
 | `load`        | `{file}`                    | `{ok, diagnostics, shadows}`           | Reload a `.blsp` into the live image, *and* check it: `diagnostics` are `check-file-structured` warnings (type/arity/unbound/non-tail-recursion); `shadows` flags names this file also-defines in another source file (flat-namespace collision) |
 | `write`       | `{path, content}`           | `{ok, path, diagnostics, shadows}`     | Create/overwrite a project file *through* the image, not the raw filesystem: `path` is project-relative and sandboxed under the project root (absolute paths, `~`, `..` rejected); a `.blsp` file is loaded into the session and checked, so success carries `diagnostics`/`shadows` like `load` (failure is `{ok: false, error}`) |
 | `edit`        | `{path, old, new}`          | `{ok, path, diagnostics, shadows}`     | Exact-string replace in a project file (sandboxed like `write`; `old` must occur exactly once); a `.blsp` file is reloaded and checked, same result shape as `write` |
-| `lookup`      | `{name}`                    | `{arglist, doc, source_location, kind}`| Resolves prelude, project, macros uniformly |
+| `lookup`      | `{name}`                    | `{arglist, doc, type, source_location}`| Resolves prelude, project, macros uniformly; `type` is the checker's arrow signature (shared with LSP hover) |
+| `abilities`   | `{}`                        | `{abilities: [name]}`                  | List every ability (generic-function interface) in the image — the discovery entry point for `ability` |
+| `ability`     | `{name}`                    | `{ops, sealed, members, requires, owner, derivable, impls}` or `{error}` | Describe a dispatch point: its ops (with params, provided-default flag), sealed member set, `:requires` super-abilities, and which types implement it — read it before writing an `impl` |
+| `check-source`| `{source}`                  | `{diagnostics: [{line, col, message}]}`| Advisory type-check a source **string** (not the whole project) — iterate on a snippet before writing it to a file |
 | `macroexpand` | `{form, mode: "1"\|"all"}`  | `{expanded}`                           | Teaches the agent quasiquote/`when-let`/etc. |
 | `run-tests`   | `{file?, name?}`            | `[{name, status, output}]`             | Structured, not GNU-line parsing |
 | `check`       | `{file?}`                   | `[{file, line, col, message}]`         | Advisory type-check, structured |

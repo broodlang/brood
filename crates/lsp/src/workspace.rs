@@ -136,23 +136,114 @@ pub fn rename(
         return None;
     }
     // The namespace prefix to keep on qualified occurrences (e.g. `observer`).
-    let prefix = target.strip_suffix(short_name(&target)).unwrap_or("");
+    let prefix = target
+        .strip_suffix(short_name(&target))
+        .unwrap_or("")
+        .to_string();
     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-    for r in refs {
+    let push_edit = |r: Ref, new_bare: &str, changes: &mut HashMap<Uri, Vec<TextEdit>>| {
         let new_text = if r.qualified {
-            format!("{prefix}{new_name}") // `prefix` already ends in `/`
+            format!("{prefix}{new_bare}") // `prefix` already ends in `/`
         } else {
-            new_name.to_string()
+            new_bare.to_string()
         };
         changes.entry(r.uri).or_default().push(TextEdit {
             range: r.range,
             new_text,
         });
+    };
+    for r in refs {
+        push_edit(r, new_name, &mut changes);
+    }
+    // Cascade: renaming a record constructor must also rename its `foo-<field>`
+    // accessors, which the `defrecord` macro synthesizes from the record name. Miss
+    // them and they dangle — the re-expanded record defines `bar-<field>` while every
+    // `foo-<field>` call site still points at a name that no longer exists (the P0
+    // corruption this closes). An ability rename needs no cascade: its op names are
+    // independent of the ability name.
+    let short = short_name(&target).to_string();
+    for field in record_fields(interp, docs, current, &target) {
+        let accessor_old = format!("{short}-{field}");
+        let accessor_new = format!("{new_name}-{field}");
+        let (_, accessor_refs) = collect(interp, docs, current, &accessor_old);
+        for r in accessor_refs {
+            push_edit(r, &accessor_new, &mut changes);
+        }
     }
     Some(WorkspaceEdit {
         changes: Some(changes),
         ..Default::default()
     })
+}
+
+/// The field names of the record whose constructor global is `target`, found by
+/// locating its `(defrecord … (fields …))` form among the project sources — but
+/// only in a file that resolves the bare name back to `target`, so two same-named
+/// records in different namespaces don't cross wires. Empty when `target` isn't a
+/// record (a plain fn or an ability), which makes the accessor cascade a no-op.
+fn record_fields(
+    interp: &mut Interp,
+    docs: &Documents,
+    current: &Uri,
+    target: &str,
+) -> Vec<String> {
+    let short = short_name(target);
+    for source in project_sources(interp, docs, current) {
+        let text = source.text().to_string();
+        if introspect::resolve_in_source(interp, &text, short) != target {
+            continue;
+        }
+        let parsed;
+        let root = match source.analysis() {
+            Some(a) => &a.cst,
+            None => {
+                parsed = crate::analyze(&text);
+                &parsed.cst
+            }
+        };
+        for form in root.forms() {
+            let is_defrecord = form.kind == NodeKind::List
+                && form
+                    .forms()
+                    .next()
+                    .is_some_and(|h| h.kind == NodeKind::Symbol && h.text(&text) == "defrecord");
+            if !is_defrecord {
+                continue;
+            }
+            if form
+                .forms()
+                .nth(1)
+                .is_some_and(|n| n.kind == NodeKind::Symbol && n.text(&text) == short)
+            {
+                return field_names(form, &text);
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// The field names from a `(defrecord name (f1 f2 (f3 type) …))` field list at
+/// index 2. A field is a bare symbol, or a `(name type)` list for a typed field —
+/// either way the accessor is named after the leading symbol (`name`).
+fn field_names(defrecord: &Node, src: &str) -> Vec<String> {
+    let Some(fields) = defrecord.forms().nth(2) else {
+        return Vec::new();
+    };
+    if !matches!(fields.kind, NodeKind::List | NodeKind::Vector) {
+        return Vec::new();
+    }
+    fields
+        .forms()
+        .filter_map(|f| match f.kind {
+            NodeKind::Symbol => Some(f.text(src).to_string()),
+            NodeKind::List => f
+                .forms()
+                .next()
+                .filter(|n| n.kind == NodeKind::Symbol)
+                .map(|n| n.text(src).to_string()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// One searchable source file. An **open** document carries a borrow of its
@@ -332,6 +423,59 @@ mod tests {
             !changes.contains_key(&uri_b),
             "b.blsp's unrelated observe must NOT be renamed; touched: {:?}",
             changes.keys().map(|u| u.as_str()).collect::<Vec<_>>()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rename_of_a_record_cascades_to_its_accessors() {
+        // Renaming record `point` → `coord` must also rewrite the `point-x` /
+        // `point-y` accessors the `defrecord` macro synthesizes — else they dangle
+        // after the record re-expands as `coord-x`/`coord-y` (the P0 fix).
+        let dir = std::env::temp_dir().join(format!("brood_rec_rename_{}", std::process::id()));
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(dir.join("project.blsp"), "(project :name foo)\n").unwrap();
+        std::fs::write(
+            src.join("a.blsp"),
+            "(defmodule a)\n(defrecord point (x y))\n(defn mag (p) (+ (point-x p) (point-y p)))\n(point 1 2)\n",
+        )
+        .unwrap();
+
+        let mut interp = Interp::new();
+        introspect::load_tooling_image(&mut interp, &dir.display().to_string()).ok();
+
+        let a_path = src.join("a.blsp");
+        let a_src = std::fs::read_to_string(&a_path).unwrap();
+        let uri_a = crate::path_to_uri(&a_path.display().to_string()).unwrap();
+        let mut docs = Documents::new();
+        docs.insert(
+            uri_a.clone(),
+            Document {
+                text: a_src.clone(),
+                analysis: analyze(&a_src),
+                version: 1,
+            },
+        );
+
+        let edit =
+            rename(&mut interp, &docs, &uri_a, "point", "coord").expect("rename point → coord");
+        let edits = edit.changes.unwrap();
+        let new_texts: Vec<&str> = edits[&uri_a].iter().map(|e| e.new_text.as_str()).collect();
+        // record name (defrecord) + constructor call → coord
+        assert!(
+            new_texts.iter().filter(|t| **t == "coord").count() >= 2,
+            "record name + ctor call renamed: {new_texts:?}"
+        );
+        // both accessors cascade
+        assert!(
+            new_texts.contains(&"coord-x"),
+            "point-x accessor cascaded: {new_texts:?}"
+        );
+        assert!(
+            new_texts.contains(&"coord-y"),
+            "point-y accessor cascaded: {new_texts:?}"
         );
 
         std::fs::remove_dir_all(&dir).ok();

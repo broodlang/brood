@@ -12051,6 +12051,32 @@ This completes item #1 of the six deferred abstractions; the other five are reco
 roadmap with their urgency (all ADR-011 "wait for a concrete need" except open-ability bounds,
 which is a declined non-goal).
 
+## 2026-07-30 (cont.) — LSP goto-definition reaches macro-defined globals (defrecord/defability)
+
+Reported symptom: `M-.` on a record constructor (`fib-job`) from another module found nothing.
+Root cause was two-fold. (1) The cross-file def-site table is keyed by `def_form_name`, which only
+recognizes a form whose *outermost* head is `def`/`defn`/`defmacro` — but `defrecord` expands to a
+`(do (defn ctor …) (defn accessor …) …)`, so the `do` head matched nothing and the inner `defn`s
+were never recorded. (2) The `load` builtin (the path the LSP uses to bootstrap project modules,
+and reload) called `note_definition` **only on the un-expanded form**, unlike the file-runner in
+`lib.rs`, which notes the expanded form too — so even a recognizable expansion wouldn't have been
+seen under `(load …)`.
+
+Fix, both halves: `note_definition` now **descends into a `(do …)`**, recording each inner
+`def`/`defn`/`defmacro` at the outer call-site `pos`; and `load`/reload now note the **expanded**
+form as well (matching the file-runner). Result: `(source-location 'foundry/fib-job)` /
+`…/fib-job-n` / `…/run` all resolve to the `defrecord`/`defability` line, so cross-file *and*
+same-file (via the `Free`→`source-location` fallback) goto work for constructors, accessors, and
+ability op dispatchers — every macro-synthesized global, generally, not a per-macro special case.
+
+Secondary gap closed in the same pass: the CST-based outline/workspace-symbols/hover layer
+(`defs.rs`) only parsed `def`/`defn`/`defmacro`, so `defrecord`/`defability` never appeared in the
+document outline. Added `DefKind::Record` (→ `STRUCT`, fields as constructor params) and
+`DefKind::Ability` (→ `INTERFACE`). Left line 721's `eval-string`-class loop alone (no file
+context, records no sites). 4 new Rust tests (2 in `defs.rs`, 1 end-to-end in `definition.rs`, plus
+the empirical `source-location` probe); full `-p brood` + `-p brood-lsp` suites green; `docs/lsp.md`
+step 1 updated (it had documented the "`do` isn't recorded yet" limitation explicitly).
+
 ## 2026-07-30 (cont.) — benchmark fairness, a published run, and three refuted perf hypotheses
 
 The afternoon after the correctness sweep. Net: **`nbody` −47% published**, two benchmark
@@ -12112,6 +12138,64 @@ box **in either direction**. Also fixed a self-inflicted version of the same pro
 orphaned wait-loops (`until ! pgrep -f <pattern>`, where the pattern matched the watcher's own
 command line, so the condition could never go false — oldest ran 17 hours) were polluting the
 liveness checks used to decide whether the machine was quiet.
+
+## 2026-07-30 (cont.) — LSP + MCP: records/abilities become first-class to the tooling
+
+A follow-on sweep after the goto-definition fix, closing the same macro-generated-global blind
+spot across the rest of the tooling. Two survey agents (one LSP, one MCP) found the gaps; four
+landed.
+
+**LSP correctness.** `scope.rs`'s `collect_globals` registered document globals only for
+`def`/`defn`/`defmacro` — so a record constructor or ability name defined *in the buffer*
+resolved `Free`, and hover / signature-help / same-file-goto (all gated on `Defined{Global}`)
+showed nothing. Added `defrecord`/`defability`/`defdyn` to it; one change fixes all three
+features. Then the **P0**: renaming a `defrecord` rewrote the record name and its constructor
+calls but **not** the `foo-<field>` accessors the macro synthesizes — after the record
+re-expanded as `bar-<field>`, every `foo-<field>` call site dangled. `workspace.rs::rename` now
+cascades: it finds the record's `(defrecord … (fields))` form (in a file that resolves the name
+back to the target, so two same-named records don't cross wires) and renames each accessor in
+lockstep. An ability needs no cascade — its op names are independent of the ability name.
+
+**A `type-signature` builtin.** `(type-signature 'name)` exposes the checker's arrow signature
+(`crate::types::check::signature_string`) to the language — the same string the LSP hover shows.
+Thin Rust-over-the-checker bridge; both LSP and MCP now share one source for "what's this name's
+type."
+
+**MCP.** The ability system was invisible over MCP. Added `abilities` (list) and `ability`
+(describe one: ops with provided-default flags, sealed members, `:requires`, owner, derivable,
+and implementors computed from `*impls*`), `check-source` (type-check a snippet string via
+`check-string-structured`), and folded `:type` into `lookup`. Also: `check`/`run-tests` now use
+the structured `mcp--error-shape` like every other tool, and `wrap_as_mcp_content` sets MCP's
+`isError` on any soft-error result.
+
+**Semantic tokens + keyword classification.** `defability`/`impl` were missing from
+`SPECIAL_FORMS` (the shared source of truth for highlighting/completion/grammar), so they
+coloured as ordinary calls; added them. A `defrecord` name now tokenizes as `STRUCT` and a
+`defability` name as `INTERFACE` (legend + role classification), instead of both reading as
+plain functions.
+
+Consciously deferred (genuine nice-to-haves the survey rated low): record-field completion
+inside a constructor/map, and `impl` op-body snippet insertion (both depend on fiddly cursor/paren
+context — a mis-fire would malform an insertion). Doc drift fixed: stale `mcp.rs` "step 3" /
+"prompts empty" comments, the `brood://project` promise (dropped — reachable via `eval`), and the
+`docs/mcp.md` / `mcp.blsp` tool counts (17/20 → 23). Tests: 6 new LSP (rename cascade, in-buffer
+record/ability goto, STRUCT/INTERFACE tokens, defrecord/defability outline), 4 `type-signature`,
+6 MCP-tool. Full suites green: 450 lib, 126 brood-lsp, 3914 in-language.
+
+## 2026-07-30 (cont.) — LSP: `impl` op-body snippet completion
+
+Follow-up to the records/abilities tooling sweep. Completing an ability op inside `(impl …)`
+now inserts a fillable method skeleton — `(area [self] $0)` — instead of just the bare op name,
+so you fill the body rather than retype the shape. `impl_method_skeleton` builds it from the op's
+arity (first param `self`, then `arg2`…), and detects whether the method's own `(` is already
+typed (cursor inside `(op…` → omit the wrapping parens) vs sitting directly in the impl form
+(supply them). Snippet syntax (`${1:self}`/`$0`) is **gated on the client's `snippetSupport`**:
+the server now reads that one capability at `initialize` (previously it discarded the client
+params entirely) and threads a `snippet_support` bool through `main_loop`/`handle_request` to
+completion; a non-snippet client gets a plain `(area [self] )` skeleton, never literal `$`.
+2 tests (the skeleton's four paren/snippet modes + the end-to-end insert_text). The sibling
+type-directed record-field completion is on the roadmap backlog — it needs inferred types in the
+completion path, worth ~a day, deferred until then.
 
 ## 2026-07-30 (cont.) — supervised `spawn-link` was quadratic: the supervisor's child list → a pid-keyed map
 
