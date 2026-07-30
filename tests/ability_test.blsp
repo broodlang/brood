@@ -565,3 +565,26 @@
     (is (abt-warns-about?
           (abt-exh-src "(sig f (S -> int)) (defn f (s) (match s ((record c {:x x}) 1)))")
           ":u/r"))))
+
+;; ---- super-abilities: :requires — an implementor must also implement the prerequisite (ADR-193) ----
+(describe "super-abilities (:requires)"
+  (test "an id implementing an ability but not its required ability is flagged"
+    (is (abt-warns-about?
+          "(defmodule u) (defrecord m (n)) (defability Eq (eqv [self other] :-> bool)) (defability Ord :requires [Eq] (compare-to [self other] :-> int)) (impl Ord u/m (compare-to [a b] 0))"
+          "requires Eq")))
+  (test "implementing the required ability too is silent"
+    (is (not (abt-warns-about?
+          "(defmodule u) (defrecord m (n)) (defability Eq (eqv [self other] :-> bool)) (defability Ord :requires [Eq] (compare-to [self other] :-> int)) (impl Eq u/m (eqv [a b] true)) (impl Ord u/m (compare-to [a b] 0))"
+          "requires"))))
+  (test "a provided op of the required ability is satisfied by its default"
+    (is (not (abt-warns-about?
+          "(defmodule u) (defrecord m (n)) (defability Eq (eqv [self other] :-> bool (= self other))) (defability Ord :requires [Eq] (compare-to [self other] :-> int)) (impl Ord u/m (compare-to [a b] 0))"
+          "requires"))))
+  (test "a sealed ability's member must satisfy the requirement too"
+    (is (abt-warns-about?
+          "(defmodule u) (defrecord m (n)) (defability Eq (eqv [self other] :-> bool)) (defability Ord :sealed [m] :requires [Eq] (compare-to [self other] :-> int)) (impl Ord u/m (compare-to [a b] 0))"
+          "requires Eq")))
+  (test "an unknown required ability defers — no false positive"
+    (is (not (abt-warns-about?
+          "(defmodule u) (defrecord m (n)) (defability Ord :requires [NoSuchAbility] (compare-to [self other] :-> int)) (impl Ord u/m (compare-to [a b] 0))"
+          "requires")))))
