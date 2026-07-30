@@ -2107,6 +2107,16 @@ pub struct Heap {
     /// See [`P1_REVALIDATE_STRIDE`].
     p1_dirty_epoch: Cell<u64>,
     p1_dirty_tick: Cell<u32>,
+    /// **Receive-mark** (ADR-195): the most recent `(ref)` this process minted, paired with
+    /// its mailbox's arrival sequence at that instant. A `receive` whose every clause pins
+    /// that ref can start its scan at the first message with `seq >= mark`, because a
+    /// message enqueued *before* the ref existed cannot possibly carry it — turning a
+    /// backlogged selective receive from O(backlog) into a binary search.
+    ///
+    /// One entry, deliberately: it covers `(let (r (ref)) (send …) (receive ([:reply ^r v]
+    /// …)))`, which is every synchronous call in the language. A nested call evicts it and
+    /// the outer receive simply scans from the front — slower, never wrong.
+    recv_mark: Cell<(u64, u64)>,
     /// The compiled arms **currently executing** on this process's stack — a stack
     /// pushed by `compile::vm_apply` (and the top-level `run`) on entry, the top
     /// updated on a tail-call into a different arm, popped on return. `runtime_collect`
@@ -2477,6 +2487,7 @@ impl Heap {
             p2_dirty_tick: Cell::new(0),
             p1_dirty_epoch: Cell::new(u64::MAX),
             p1_dirty_tick: Cell::new(0),
+            recv_mark: Cell::new((0, 0)),
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
@@ -2553,6 +2564,7 @@ impl Heap {
             p2_dirty_tick: Cell::new(0),
             p1_dirty_epoch: Cell::new(u64::MAX),
             p1_dirty_tick: Cell::new(0),
+            recv_mark: Cell::new((0, 0)),
             live_vm_arms: Vec::new(),
             vm_call_ics: RefCell::new(Vec::new()),
             vm_fast_links: RefCell::new(Vec::new()),
@@ -2601,6 +2613,19 @@ impl Heap {
     /// local-send closure fast path checks it explicitly, because the process
     /// REGISTRY is global — two `Interp`s in one OS process (a test harness, an
     /// embedder) have *different* regions, and a handle must never cross that line.
+    /// Record that `ref_id` was minted when this process's mailbox was at arrival
+    /// sequence `seq` — see [`Heap::recv_mark`].
+    pub fn set_recv_mark(&self, ref_id: u64, seq: u64) {
+        self.recv_mark.set((ref_id, seq));
+    }
+
+    /// The arrival sequence to start a scan at for a receive pinned on `ref_id`, or
+    /// `None` when that ref is not the one we last minted (so we must scan from the front).
+    pub fn recv_mark_for(&self, ref_id: u64) -> Option<u64> {
+        let (id, seq) = self.recv_mark.get();
+        (id == ref_id).then_some(seq)
+    }
+
     pub fn shares_runtime_with(&self, other: &Heap) -> bool {
         Arc::ptr_eq(&self.runtime, &other.runtime)
     }

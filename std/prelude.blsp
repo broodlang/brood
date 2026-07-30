@@ -2544,6 +2544,37 @@ message already sent stays sent."
             nil                          ; a later clause disabled it
             (cons tag rest-tags)))))))
 
+;; The receive-mark hint (ADR-195): the expression EVERY clause pins, when they all pin the
+;; same one — `([:reply ^r v] …)` yields `r`. Any clause that pins nothing, or pins something
+;; different, disables it (nil), exactly like `receive--tags`. The kernel only acts on it when
+;; the value turns out to be a `ref` this process minted, so a false positive here costs
+;; nothing but a wasted comparison.
+(defn receive--pinned-in (pat)
+  "The single pinned expression inside `pat`, or nil if it pins none or several."
+  (cond
+    (match-pin? pat) (second pat)
+    (vector? pat) (fold (fn (acc p)
+                          (let (inner (receive--pinned-in p))
+                            (cond
+                              (nil? inner) acc
+                              (nil? acc) inner
+                              (= acc inner) acc
+                              else :none)))
+                    nil (seq pat))
+    else nil))
+
+(defn receive--pin (clauses)
+  "The expression pinned by every clause, or nil when they do not agree."
+  (if (empty? clauses)
+    nil
+    (let (first-pin (receive--pinned-in (first (first clauses))))
+      (if (or (nil? first-pin) (= first-pin :none))
+        nil
+        (if (empty? (rest clauses))
+          first-pin
+          (let (rest-pin (receive--pin (rest clauses)))
+            (if (= rest-pin first-pin) first-pin nil)))))))
+
 (defmacro receive (& clauses)
   "Selectively receive a message from the mailbox: run the first `(pattern [:when guard] body...)` clause that matches, leaving others queued. An optional final `(after ms body...)` clause fires on timeout; `(receive)` blocks for the next message."
   (do
@@ -2570,13 +2601,16 @@ message already sent stays sent."
           ;; *during the prelude build*, where its own dependency (`into`, defined
           ;; ~2000 lines later) does not exist yet.
           tag-list (if (empty? real) nil (receive--tags real))
-          tags (if (nil? tag-list) nil `[~@tag-list]))
+          tags (if (nil? tag-list) nil `[~@tag-list])
+          ;; The receive-mark hint — see `receive--pin`. Emitted as the pinned FORM, so it
+          ;; evaluates at the call site to the same value the pattern compares against.
+          pin (if (empty? real) nil (receive--pin real)))
       ;; `%receive` returns the matcher's result vector, or nil on timeout (only
       ;; reachable with an `after` clause — nil is unambiguous because a match always
       ;; answers with a vector). The bodies run HERE, in the caller's tail position.
       (if (nil? ms)
-        `(let (~r (%receive ~matcher nil ~tags)) ~dispatch)
-        `(let (~r (%receive ~matcher ~ms ~tags))
+        `(let (~r (%receive ~matcher nil ~tags ~pin)) ~dispatch)
+        `(let (~r (%receive ~matcher ~ms ~tags ~pin))
            (if (nil? ~r) ~on-time ~dispatch))))))
 
 ;; ---- dirty-native offload (ADR-144) -----------------------------------------

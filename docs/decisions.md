@@ -12603,3 +12603,53 @@ identical checksums, plus five distribution-chaos runs including closure-shippin
 **References.** ADR-013 (shared live code), ADR-091 (RUNTIME region aging/compaction),
 ADR-178 (the L1 local-send fast path this extends), ADR-033 (closures as data on the wire —
 unchanged), `docs/runtime-frontier.md` A3, devlog 2026-07-30.
+
+## ADR-195 — The receive-mark: a receive pinned on a fresh `ref` skips the backlog
+
+**Context.** Every synchronous call in Brood is `(let (r (ref)) (send … r) (receive ([:reply ^r v] v)))`
+— `gen-call`, the whole `proc/supervisor` client API, task await. The mailbox scan walks from
+the front, so each of those calls is O(mailbox). A process with a backlog therefore degrades
+with its own queue length, which is exactly backwards: the busier a server is, the more it
+pays per reply. Measured on a ref-pinned round trip against a tag-rejected backlog: 3 µs at
+backlog 0, **653 µs at backlog 32 000**. The BEAM does not have this problem — it emits
+`recv_mark`/`recv_set` so a receive whose patterns require a ref created after the last scan
+point starts from that point.
+
+The `latency` benchmark row found this by accident: an early draft had the load generator
+collect its own replies, and the row read **21× slower than Elixir** for reasons that had
+nothing to do with what it meant to measure.
+
+**Decision.** Give each mailbox envelope a monotonic **arrival sequence**, stamp `(ref)` with
+the sequence current at the moment it mints, and let a `receive` whose clauses *all* pin that
+ref start its scan at the first message with `seq >= mark` — a binary search on an
+already-ordered queue.
+
+Soundness rests on one fact: **a message enqueued before the ref existed cannot contain it.**
+Refs come from a global counter and are unforgeable, so no older message can match a pattern
+pinning one. Every uncertainty declines the hint and scans from the front:
+
+- the clauses do not all pin the same expression (`receive--pin` returns nil);
+- the pinned value is not a `ref`;
+- it is a ref this process did not mint, or is no longer the one it last minted.
+
+The stamp is a **single slot** on the `Heap`, which covers the idiom above exactly. A nested
+call evicts it and the outer receive scans from the front — slower, never wrong. `(ref)` reads
+the sequence from a lock-free `seq_hint` (a relaxed atomic republished after each push), so it
+costs one load and never touches the mailbox mutex; a racy read errs only toward marking
+*earlier* than necessary, and a value that races high can only cover messages already
+enqueued, which predate the ref anyway.
+
+**Result.** Per ref-pinned round trip, by backlog depth (before → after): 500 → 16/4 µs,
+2 000 → 50/4 µs, 8 000 → 175/4 µs, **32 000 → 653/4 µs**. Flat: O(backlog) becomes O(1), and
+the no-backlog case is unchanged at 3 µs. Combined with the same session's single-lock scan
+(which cut the constant 4×), a backlogged reply is ~163× cheaper than this morning.
+
+**Not done here.** The scan is only skipped *forward*. A receive that pins nothing — a server's
+main loop matching several tags — still walks its backlog, and the leading-keyword tag filter
+plus the single-lock skip are what make that walk cheap rather than free. That is the remaining
+half of the message-cost item, and it needs a different mechanism (BEAM's is the same
+`recv_mark` applied to a saved scan position per receive site, not per ref).
+
+**References.** ADR-155 (`receive` as a macro over `%receive`, which is why the pin can be
+derived at expansion time), ADR-178 (the L1 local-send fast path and the tag pre-filter this
+composes with), `docs/runtime-frontier.md` A1/A6, devlog 2026-07-30.

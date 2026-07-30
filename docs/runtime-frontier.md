@@ -314,7 +314,7 @@ Two separate Brood problems, and they want different fixes:
 
 Worth stating plainly: Node, single-threaded, had a better p99.9 than Brood on this row.
 
-**A5 — spawn placement was the tail, and the fix is one threshold (shipped 2026-07-30).**
+**A5 — spawn placement dominated p50/p99, and the fix is one threshold (shipped 2026-07-30).**
 The A4 hypothesis was right. Placement was *always* the spawner's own worker, so a dispatcher
 spawning a handler per request piled every one onto a single queue, where one slow handler
 blocked the rest; stealing rebalanced **12%** of 20,002 spawns and live migration never fired
@@ -322,11 +322,18 @@ blocked the rest; stealing rebalanced **12%** of 20,002 spawns and live migratio
 backlog (`BROOD_SPAWN_SPILL`, default 1) — one `try_lock` on our own queue, not the
 O(workers) scan `assign_worker` runs.
 
-| `latency`, median of 5 | p50 | p99 | p99.9 |
-|---|---|---|---|
-| always-local (before) | 141 µs | 674 µs | 2902 µs |
-| **spill ≥1 (now)** | **27 µs** | **232 µs** | **562 µs** |
-| always round-robin | 12 µs | 168 µs | 3864 µs |
+| `latency`, medians over 11 runs | p50 | p99 |
+|---|---|---|
+| always-local (before) | 136 µs | 735 µs |
+| **spill ≥1 (now)** | **27 µs** | **256 µs** |
+
+**Correction (same day):** the first version of this table quoted p99.9 as 2902 → 562 µs, a 5×
+win. That was a measurement error, not a result — the sweep selected the median run *by p99*
+and then printed that one run's whole triple, so the quoted p99.9 was whatever that run
+happened to score. Measured properly (per-metric medians), two 11-run samples of the *same*
+binaries disagreed on p99.9 by 3× (3574 vs 3028 for the baseline; 1139 vs 3484 for the new
+build). **p99.9 is not resolvable on this workload at this sample size**, so no claim is made
+about it in either direction. p50 and p99 are robust: every measurement taken agrees.
 
 Always-RR wins p50 and is **not** the answer: it costs `supervisor` **2.6×** (862 → 2223 ms)
 by scattering the children of a request/reply spawn across workers. The threshold keeps
@@ -351,9 +358,28 @@ one lock hold. Per ref-pinned round trip against a tag-rejected backlog:
 | 2 000 | 48 µs | **13 µs** |
 | 8 000 | 176 µs | **44 µs** |
 
-Still **O(backlog)** — 4× cheaper per step, not a different complexity class. The receive-mark
-(skip to the position the pinned `ref` was created at) is what makes it O(1), and is still the
-open item.
+Still **O(backlog)** — 4× cheaper per step, not a different complexity class.
+
+**A7 — the receive-mark: a pinned-ref receive is now O(1) in the backlog (shipped 2026-07-30,
+ADR-195).** Every synchronous call in the language is `(let (r (ref)) (send …) (receive
+([:reply ^r v] …)))`, and each one walked the mailbox from the front. Envelopes now carry a
+monotonic arrival sequence, `(ref)` stamps the sequence current when it mints, and a receive
+whose clauses *all* pin that ref binary-searches to the first message that could carry it —
+sound because a message enqueued before the ref existed cannot contain it. Per round trip
+against a tag-rejected backlog:
+
+| backlog | before today | after |
+|---|---|---|
+| 0 | 3 µs | 3 µs |
+| 500 | 16 µs | **4 µs** |
+| 2 000 | 50 µs | **4 µs** |
+| 8 000 | 175 µs | **4 µs** |
+| 32 000 | 653 µs | **4 µs** |
+
+Flat — O(backlog) → O(1), 163× at 32k. **What is left**: a receive that pins *nothing* (a
+server's main loop matching several tags) still walks its backlog; the tag filter and A6 make
+that walk cheap, not free. BEAM solves it with a saved scan position per receive *site*, which
+is a different mechanism from the per-ref mark and is the remaining piece.
 
 ### B. Process memory floor (~4.5 KB → toward ~3 KB)
 

@@ -125,3 +125,74 @@
           _ (def reload-target 50)
           _ (send h [:call me]))
       (assert= 100 (receive ([:got v] v) (after *test-wait-ms* :timeout))))))
+
+
+;; ---- receive-mark (ADR-195) -------------------------------------------------
+;; A `receive` whose every clause pins a ref THIS process minted may skip messages that
+;; predate the ref. These pin the cases where it must NOT skip, since a wrong skip loses a
+;; message rather than merely being slow.
+
+(defn echo-ref (parent r) (send parent [:reply r :pong]))
+
+(describe "receive-mark: a pinned-ref receive never loses an older message"
+  (test "a message queued BEFORE the ref is still there afterwards"
+    ;; The mark lets the pinned receive skip it; it must remain queued for the next receive.
+    (let (_ (send (self) [:early 1])
+          r (ref)
+          _ (send (self) [:reply r :pong])
+          got (receive ([:reply ^r v] v) (after *test-wait-ms* :timeout))
+          leftover (receive ([:early n] n) (after *test-wait-ms* :timeout)))
+      (assert= :pong got)
+      (assert= 1 leftover)))
+
+  (test "a ref minted by ANOTHER process scans from the front"
+    ;; The mark is keyed on the ref WE last minted. A ref minted elsewhere must not inherit
+    ;; it — here the reply tagged with the foreign ref is queued BEFORE we mint our own,
+    ;; so a receive that wrongly used our mark would skip straight past it and time out.
+    (let (me (self)
+          _ (spawn (let (theirs (ref)) (do (send me [:handoff theirs])
+                                           (send me [:reply theirs :from-elsewhere]))))
+          their-ref (receive ([:handoff x] x) (after *test-wait-ms* :timeout))
+          _ (ref)                       ; mint ours AFTER their reply is already queued
+          got (receive ([:reply ^their-ref v] v) (after *test-wait-ms* :timeout)))
+      (assert= :from-elsewhere got)))
+
+  (test "a second ref evicts the mark; the first ref still receives"
+    ;; One mark slot: minting r2 evicts r1's. A receive pinned on r1 must then scan from the
+    ;; front and still find its reply.
+    (let (r1 (ref)
+          _ (send (self) [:reply r1 :first])
+          r2 (ref)
+          _ (send (self) [:reply r2 :second])
+          got1 (receive ([:reply ^r1 v] v) (after *test-wait-ms* :timeout))
+          got2 (receive ([:reply ^r2 v] v) (after *test-wait-ms* :timeout)))
+      (assert= :first got1)
+      (assert= :second got2)))
+
+  (test "the same ref serves two receives"
+    (let (r (ref)
+          _ (send (self) [:reply r :a])
+          _ (send (self) [:reply r :b])
+          a (receive ([:reply ^r v] v) (after *test-wait-ms* :timeout))
+          b (receive ([:reply ^r v] v) (after *test-wait-ms* :timeout)))
+      (assert= :a a)
+      (assert= :b b)))
+
+  (test "a pinned receive with nothing to match still times out"
+    (let (r (ref)
+          _ (send (self) [:early 2]))
+      (assert= :timeout (receive ([:reply ^r v] v) (after 50 :timeout)))
+      (assert= 2 (receive ([:early n] n) (after *test-wait-ms* :timeout)))))
+
+  (test "a real round trip through another process, with a backlog queued first"
+    (let (me (self)
+          _ (send me [:junk :a])
+          _ (send me [:junk :b])
+          r (ref)
+          _ (spawn (echo-ref me r))
+          got (receive ([:reply ^r v] v) (after *test-wait-ms* :timeout))
+          j1 (receive ([:junk x] x) (after *test-wait-ms* :timeout))
+          j2 (receive ([:junk x] x) (after *test-wait-ms* :timeout)))
+      (assert= :pong got)
+      (assert= :a j1)
+      (assert= :b j2))))
