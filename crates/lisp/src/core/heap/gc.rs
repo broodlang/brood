@@ -380,6 +380,30 @@ impl Heap {
         self.gc_enabled && self.local_live_count() >= self.gc_threshold
     }
 
+    /// Nursery growth factor: the next collection triggers at `growth × live`. Default **2.0**,
+    /// overridable with `BROOD_GC_GROWTH` — the A/B lever this had no way to measure before.
+    ///
+    /// **Measured 2026-07-30 and it is NOT a lever — do not re-run this experiment.** The GC
+    /// review named the `2 × live` growth as the dominant term in `sort`'s ~190 MB peak. It is
+    /// not: sweeping 2.0 → 1.5 → 1.25 → 1.1 moves that row not at all (183–187 MB, inside
+    /// noise), and `bintree` likewise. The peak is structural instead — ~750 000 cons cells live
+    /// at once (the input list plus the new sorted one) at 48 bytes each, doubled by the copying
+    /// collector's to-space and again by `Vec` capacity growth — and it is shared with every
+    /// persistent-structure language (Elixir 160 MB, Clojure 124 MB on the same row).
+    ///
+    /// Kept as a knob because it made that refutation possible and costs one `OnceLock` read per
+    /// collection, not because lowering it is known to help.
+    fn gc_growth() -> f64 {
+        static G: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+        *G.get_or_init(|| {
+            std::env::var("BROOD_GC_GROWTH")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|g| *g >= 1.05 && *g <= 8.0)
+                .unwrap_or(2.0)
+        })
+    }
+
     /// LOCAL live-object count = `Σ slab.len()` over the LOCAL slabs. The metric
     /// the threshold tracks; also exposed for tests asserting reclamation in
     /// long-running loops. The collector is a moving copy collector that never
@@ -750,8 +774,10 @@ impl Heap {
         // bounds that transient buffer while staying well above real build working sets
         // (a lone process's floor is 64K; the cap is 8M ≈ a few hundred MB of nursery).
         let live_total = self.local_live_count() + self.old_live_count();
-        self.gc_threshold =
-            std::cmp::max(gc_floor(), live_total.saturating_mul(2).min(NURSERY_MAX));
+        self.gc_threshold = std::cmp::max(
+            gc_floor(),
+            ((((live_total as f64) * Self::gc_growth()) as usize).min(NURSERY_MAX)),
+        );
         // Escalate to a *major* (compact the old generation) only when it has grown
         // MAJOR_GROWTH× since the last major — so majors stay rare while minors keep
         // the nursery bounded. Grown 2×→4× (2026-07-01): during a large-structure
