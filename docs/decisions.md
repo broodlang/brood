@@ -12484,3 +12484,22 @@ flat (`json` −3.6%, `bintree` −2.0%, `fib` +0.4%, `nbody` +0.1%, with `regex
 `sieve` at baseline on solo re-runs). The trade is explicit: a staged call forgoes the JIT's
 in-IR fast link, which is keyed on an elided head symbol — acceptable because such a call
 already pays a nested activation for the argument that forced the staging.
+
+## ADR-192 — Ability bounds: a sealed ability name in a `sig` *is* `where T: Ability`
+
+**Status:** accepted (naming an existing capability — no new code).
+
+An ability name is a type (ADR-181/186), so a `sig` parameter typed with a **sealed** ability
+is exactly a bound: the argument must satisfy the ability, checked at every call site.
+`(sig draw (Shape -> string))` ≡ Rust's `T: Shape`; `(and A B)` is a multi-ability bound
+(`T: A + B`, ordinary type intersection). No separate bounds syntax exists or is needed —
+naming the sealed ability (or intersecting several) *is* the bound.
+
+An **open** ability as a bound is deliberately permissive (`any`): its impls are late and may
+cover any value, so no argument is soundly rejectable on the type (ADR-123/124), and bounding
+by an open ability like `Display` is usually vacuous (its `:default` accepts everything). The
+safety for open abilities falls to the missing-impl check at the op call site instead.
+
+**References.** ADR-181/186 (ability-name-as-a-type — the mechanism), ADR-172/168 (open
+abilities), ADR-123/124 (never reject a use valid for the current image), `docs/language.md`
+(§Polymorphism), `docs/types.md`.
