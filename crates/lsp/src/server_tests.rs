@@ -66,7 +66,7 @@ fn shutdown(client: &Connection) {
 #[test]
 fn open_then_change_publishes_then_clears_diagnostics() {
     let (server, client) = Connection::memory();
-    let handle = thread::spawn(move || main_loop(&server));
+    let handle = thread::spawn(move || main_loop(&server, true));
 
     client.sender.send(did_open("(foo")).unwrap(); // unclosed list
     let diags = next_diagnostics(&client);
@@ -106,7 +106,7 @@ fn open_then_change_publishes_then_clears_diagnostics() {
 #[test]
 fn incremental_ranged_change_splices_at_the_right_offset() {
     let (server, client) = Connection::memory();
-    let handle = thread::spawn(move || main_loop(&server));
+    let handle = thread::spawn(move || main_loop(&server, true));
 
     // Three clean literal lines → no diagnostics.
     client.sender.send(did_open("nil\nnil\nnil")).unwrap();
@@ -161,7 +161,7 @@ fn incremental_ranged_change_splices_at_the_right_offset() {
 #[test]
 fn incremental_multi_edit_batch_compounds() {
     let (server, client) = Connection::memory();
-    let handle = thread::spawn(move || main_loop(&server));
+    let handle = thread::spawn(move || main_loop(&server, true));
 
     client.sender.send(did_open("nil")).unwrap();
     assert!(next_diagnostics(&client).is_empty());
@@ -204,7 +204,7 @@ fn incremental_multi_edit_batch_compounds() {
 #[test]
 fn close_clears_diagnostics() {
     let (server, client) = Connection::memory();
-    let handle = thread::spawn(move || main_loop(&server));
+    let handle = thread::spawn(move || main_loop(&server, true));
 
     client.sender.send(did_open("(")).unwrap();
     assert!(!next_diagnostics(&client).is_empty());
@@ -227,7 +227,7 @@ fn close_clears_diagnostics() {
 #[test]
 fn malformed_notification_does_not_kill_the_server() {
     let (server, client) = Connection::memory();
-    let handle = thread::spawn(move || main_loop(&server));
+    let handle = thread::spawn(move || main_loop(&server, true));
 
     // Bogus params for didOpen: must be logged and ignored, not fatal.
     client
@@ -278,7 +278,7 @@ fn position_params(line: u32, character: u32) -> serde_json::Value {
 #[test]
 fn serves_tier1_requests_end_to_end() {
     let (server, client) = Connection::memory();
-    let handle = thread::spawn(move || main_loop(&server));
+    let handle = thread::spawn(move || main_loop(&server, true));
 
     // `f` defined, then called; `map` is a prelude global.
     client
@@ -326,7 +326,7 @@ fn serves_tier1_requests_end_to_end() {
 #[test]
 fn serves_new_features_end_to_end() {
     let (server, client) = Connection::memory();
-    let handle = thread::spawn(move || main_loop(&server));
+    let handle = thread::spawn(move || main_loop(&server, true));
 
     // A messy multi-line buffer with a typo'd call to a prelude global.
     client
@@ -449,7 +449,7 @@ fn serves_new_features_end_to_end() {
 #[test]
 fn unknown_request_gets_method_not_found() {
     let (server, client) = Connection::memory();
-    let handle = thread::spawn(move || main_loop(&server));
+    let handle = thread::spawn(move || main_loop(&server, true));
 
     client
         .sender

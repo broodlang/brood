@@ -164,14 +164,27 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         ..Default::default()
     };
 
-    // The initialize/initialized handshake. We don't read the client's params
-    // yet (no capability negotiation beyond the above).
-    let _init = connection.initialize(serde_json::to_value(capabilities)?)?;
+    // The initialize/initialized handshake. We read one client capability:
+    // whether it understands snippet syntax in completion items (`$0`, `${1:…}`),
+    // so the `(impl …)` op-completion sends a fillable skeleton only when the
+    // editor can navigate it — and a plain skeleton otherwise, never literal `$`.
+    let init = connection.initialize(serde_json::to_value(capabilities)?)?;
+    let snippet_support = serde_json::from_value::<lsp_types::InitializeParams>(init)
+        .ok()
+        .and_then(|params| {
+            params
+                .capabilities
+                .text_document?
+                .completion?
+                .completion_item?
+                .snippet_support
+        })
+        .unwrap_or(false);
     // Run the loop, then drop `connection` *before* the join: its `Sender` keeps
     // the stdout writer thread alive, so the thread only sees its channel close
     // (and exits, letting `io_threads.join()` return) once this drop happens.
     // Skipping the drop would deadlock the join.
-    main_loop(&connection)?;
+    main_loop(&connection, snippet_support)?;
     drop(connection);
 
     io_threads.join()?;
@@ -206,7 +219,10 @@ pub(crate) struct Analysis {
     pub(crate) line_index: LineIndex,
 }
 
-fn main_loop(connection: &Connection) -> Result<(), Box<dyn Error + Sync + Send>> {
+fn main_loop(
+    connection: &Connection,
+    snippet_support: bool,
+) -> Result<(), Box<dyn Error + Sync + Send>> {
     let mut docs: Documents = HashMap::new();
     // One interpreter, loaded with the prelude + builtins, answers introspection
     // queries (completion candidates, hover signatures) and runs the advisory
@@ -226,7 +242,7 @@ fn main_loop(connection: &Connection) -> Result<(), Box<dyn Error + Sync + Send>
                 if connection.handle_shutdown(&req)? {
                     return Ok(());
                 }
-                let resp = handle_request(&docs, &mut interp, req);
+                let resp = handle_request(&docs, &mut interp, snippet_support, req);
                 connection.sender.send(Message::Response(resp))?;
             }
             Message::Response(_) => {} // we issue no server→client requests yet
@@ -294,7 +310,12 @@ fn extract<P: serde::de::DeserializeOwned>(req: Request) -> Result<(RequestId, P
 /// Dispatch a client request to its Tier-1 feature handler, producing the
 /// response to send. An unknown method gets `MethodNotFound`; a request for a
 /// document we don't have gets a null result (the spec's "no information").
-fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Response {
+fn handle_request(
+    docs: &Documents,
+    interp: &mut Interp,
+    snippet_support: bool,
+    req: Request,
+) -> Response {
     match req.method.as_str() {
         HoverRequest::METHOD => {
             let (id, p) = match extract::<HoverParams>(req) {
@@ -318,7 +339,14 @@ fn handle_request(docs: &Documents, interp: &mut Interp, req: Request) -> Respon
             let result = docs.get(&pos.text_document.uri).map(|doc| {
                 let a = &doc.analysis;
                 let offset = a.line_index.offset(&doc.text, pos.position);
-                completion::completions(interp, &a.scope, &a.cst, &doc.text, offset)
+                completion::completions(
+                    interp,
+                    &a.scope,
+                    &a.cst,
+                    &doc.text,
+                    offset,
+                    snippet_support,
+                )
             });
             Response::new_ok(id, result)
         }
