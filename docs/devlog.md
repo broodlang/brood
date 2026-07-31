@@ -13118,3 +13118,38 @@ already shared, the spawn should not append a fresh entry; (b) make the reclamat
 adaptive — back off when a compaction reclaims little, instead of retrying at a fixed floor
 and thrashing. (b) is worth 45% on this workload by itself. Both touch the GC, which is where
 this repo is most careful, so they want a deliberate decision rather than a drive-by patch.
+
+## 2026-07-31 (cont.) — the formatter mangled every ratio and decimal literal
+
+Told to run `nest format` tree-wide and push it. The diff was wrong in a way that is not a
+style verdict, so it did not get pushed — the formatter had a real bug, and `nest format
+--check`'s red was partly this rather than the documented hoisting disagreement.
+
+**Every form containing a ratio or decimal literal was force-broken.**
+`(assert= (sqrt 9/4) 1.5)` came out as four lines; `(f 9/4)` became two. `(f 1.5)` was fine,
+so it was not width and not hoisting — the tell was that every mangled line held a `1/2`,
+`9/4`, `7/2`, `1.5M` or `4.0M`, while `(floor (pow 10 30))` beside it was untouched.
+
+**Cause: two hand-maintained copies of the leaf-kind list, and only one learned ADR-196.**
+`single-line` enumerated the CST leaf kinds and fell through to `else nil`, which means
+"cannot appear on one line" and forces the enclosing form to break. `render` has the *same*
+enumeration but falls through to `(node-text n)`. So when ratios and decimals were added to
+the CST, `render` kept emitting them correctly and `single-line` silently started reporting
+every form containing one as un-inlineable. Correct output, ruined layout — which is why it
+survived to a tree-wide run.
+
+**Fix:** one definition, `*verbatim-kinds*` (a set) + `verbatim-kind?`, used by both. Written
+as a set rather than the `or` chain because the `or` chain is what drifted, and because the
+formatter reflows a 9-clause `or` into something worse than the set literal.
+
+**Worth 276 lines of the tree-wide diff.** Before: 42 files, +823/−547 (net **+276** lines of
+explosion). After: 43 files, +795/−799 (net **−4**). So a meaningful part of the "26 files
+red" the roadmap treats as a style verdict was this bug. The rest genuinely is the hoisting
+question, and that still needs a human call.
+
+**Tests: four cases, verified to fail first.** One per leaf kind the reader can produce, plus
+the contract that actually protects the tree — formatting must not *grow* an already-canonical
+file. Confirmed all four fail on the unfixed formatter (7 failed assertions) and pass with it;
+a test never seen to fail is not a test.
+
+**Gates:** `nest test` 4077 passed, `nest check` clean.
