@@ -13153,3 +13153,22 @@ file. Confirmed all four fail on the unfixed formatter (7 failed assertions) and
 a test never seen to fail is not a test.
 
 **Gates:** `nest test` 4077 passed, `nest check` clean.
+
+**A second fix attempted and reverted, with the measurement.** The rest of the tree-wide diff
+is the formatter breaking a generic call after exactly one argument and then filling from a
+fresh line, so `(error "a long string " x " more " y)` puts the string alone on the head line
+and packs the remainder beneath it — a break at an arbitrary point, which is most of why the
+formatter disagrees with hand-written multi-arg `error`/`str`/`println`. Seeding the fill
+column from the head line's end fixed those two cases exactly (they came out byte-identical to
+the hand-written source), and then made everything worse: **199 files / +2085 −3222 (net −1137
+lines)** against the 42-file baseline, because filling from the head line also collapses lines
+the author deliberately broke — it fights the `had-author-newlines?` rule that is the whole
+reason the formatter is idempotent and respects line structure. The one-arg-then-fresh-line
+shape is deliberate. Reverted; the tree-wide diff is back to 42 files / +779 −796.
+
+So the residue really is the style verdict `roadmap-for-v1.md` describes, now smaller and
+better understood: **98 lines of it are comment hoisting** (a 1:1 conversion of aligned
+trailing comments to own-line comments — exactly 98 removed lines carried a trailing comment),
+and the remainder is call-breaking that reads worse than the source but cannot be improved by
+filling without losing author line structure. That still needs a human decision, and the
+formatter is not going to settle it.
