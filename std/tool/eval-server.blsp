@@ -15,13 +15,18 @@
 ;; wholesale global-table swap is unsound next to concurrent writers, which is
 ;; exactly why a live editor can never run one (see myedit's testrun preamble).
 ;;
-;; Two caveats, documented rather than fought:
-;;  - a request killed on timeout may have run some of its forms (`eval-string` is
+;; Caveats, documented rather than fought (the threat model is "isolate the PARENT
+;; image", not a security sandbox — evaluated code owns the child):
+;;  - a request killed on timeout may have run some of its forms (evaluation is
 ;;    sequential), so the session may hold partial defs — acceptable in a sandbox,
 ;;    and any client that re-sends whole units of source is self-healing;
-;;  - a process the evaluated code spawns can print AFTER its request's capture is
-;;    popped, and that text lands on raw stdout between protocol lines — so a
-;;    client must skip lines that don't decode (`evsrv-decode-reply` → nil).
+;;  - a process the evaluated code spawns inherits the request's capture, so its
+;;    LATE prints (after the capture pops) are silently swallowed, never printed;
+;;  - evaluated code CAN corrupt the channel deliberately — pop the capture with
+;;    `(%capture-take)` and print a decodable forged reply line, or steal the next
+;;    request with `(read-line)`. Clients must treat replies as advisory display
+;;    data (they are), skip lines that don't decode, and use UNIQUE, monotonic ids
+;;    per session so a late or forged line can't be mis-attributed to a live request.
 
 (defmodule eval-server
   "A line-protocol eval server for a dedicated runtime, plus the pure codec its
@@ -29,9 +34,14 @@ client shares. Run `(eval-server-run)` as the child's whole program; it prints
 `{:ready true}` and then answers one `pr-str`ed request map per stdin line —
 `{:id 7 :src \"(+ 1 2)\" :timeout-ms 2000}` — with one reply line:
 `{:id 7 :ok true :value \"3\" :output \"\" :ms 0}` (or `:ok false` with `:error`,
-or `:timeout true`). `eval-capturing` is the reusable core: evaluate a source
-string and keep BOTH halves a REPL shows — the value and what it printed.
-`(require 'eval-server)`.")
+or `:timeout true`). A request may carry `:trace [\"fn-name\" …]`: those globals
+are boundary-traced (`debug/trace-fn`) for the duration of the request — installed
+as soon as each name becomes a function, so a `defn` and its call in one request
+still trace — and the reply gains `:spy [{:kind :fn :args :value} …]` (bounded).
+`eval-capturing` is the reusable core: evaluate a source string and keep BOTH
+halves a REPL shows — the value and what it printed. `(require 'eval-server)`.")
+
+(require 'debug)  ; trace-fn / untrace-all / *spy-sink* — the :trace support
 
 ;; The deadline applied when a request doesn't carry one. Module-scoped (plain
 ;; `def`, not `defdyn`): the server honours the per-request `:timeout-ms` first,
@@ -45,18 +55,28 @@ string and keep BOTH halves a REPL shows — the value and what it printed.
 ;; only when the peer is foreign, as in LSP). Decoders return nil on any line that
 ;; isn't a well-formed message, so both sides can skip noise instead of dying.
 
-(defn evsrv-encode-request (id src timeout-ms)
+(defn evsrv-encode-request (id src timeout-ms &optional trace)
   "One request line (no trailing newline): `id` an int, `src` the Brood source to
 evaluate (may span lines — it's escaped), `timeout-ms` an int or nil for the
-server default."
-  (pr-str {:id id :src src :timeout-ms timeout-ms}))
+server default, `trace` an optional vector of fn-name strings to boundary-trace."
+  (pr-str (if (or (nil? trace) (empty? trace))
+            {:id id :src src :timeout-ms timeout-ms}
+            {:id id :src src :timeout-ms timeout-ms :trace trace})))
 
 (defn evsrv-decode-request (line)
   "The request map in `line`, or nil when the line isn't one (garbage, blank, a
-stray print). A request must carry an int `:id` and a string `:src`."
+stray print). A request must carry an int `:id` and a string `:src`; a present
+`:timeout-ms` must be an int (a malformed field is a nil, never a raise later —
+one bad line must not kill the server) and a present `:trace` a vector."
   (try
     (let (v (read-string line))
-      (if (and (map? v) (int? (get v :id)) (string? (get v :src))) v nil))
+      (if (and (map? v)
+            (int? (get v :id))
+            (string? (get v :src))
+            (let (t (get v :timeout-ms)) (or (nil? t) (int? t)))
+            (let (tr (get v :trace)) (or (nil? tr) (vector? tr))))
+        v
+        nil))
     (catch _ nil)))
 
 (defn evsrv-encode-reply (reply)
@@ -74,25 +94,94 @@ lines (see the module preamble on stray output)."
 
 ;; ---- the evaluation core ------------------------------------------------------
 
-(defn eval-capturing (src)
+;; The most captured-output characters a reply carries — the `:value` bound's
+;; rationale applies verbatim to `:output` (one println loop must not pump
+;; megabytes into a single reply line the client reads whole).
+(def *output-cap-chars* 8192)
+
+;; The most spy entries a traced request collects — a traced deep recursion emits
+;; two entries per call; past this the trace has made its pedagogical point.
+(def *spy-entry-cap* 200)
+
+(defn eval-server--bound-output (s)
+  (if (<= (string-length s) *output-cap-chars*)
+    s
+    (str (substring s 0 *output-cap-chars*) "\n…[output truncated]")))
+
+(defn eval-server--spy-entry (e)
+  ;; One collected `*spy-sink*` entry, display-bounded for the wire.
+  {:kind (name (or (get e :spy) :event))
+   :fn (when (get e :fn) (str (get e :fn)))
+   :args (when (get e :args) (pr-str-bounded (get e :args)))
+   :value (when (contains? e :value) (pr-str-bounded (get e :value)))
+   :form (when (get e :form) (pr-str-bounded (get e :form)))})
+
+(defn eval-server--try-traces (names)
+  ;; Install a boundary trace on every requested name that is a function RIGHT NOW;
+  ;; the rest stay pending (a later form may define them). `trace-fn` is idempotent,
+  ;; and re-tracing after a redefinition wraps the NEW definition — both wanted.
+  (doseq (s names) (try (debug/trace-fn (symbol s)) (catch _ nil))))
+
+(defn eval-server--eval-traced (src names)
+  ;; Evaluate `src` form by form (not `eval-string`), re-attempting the requested
+  ;; traces after each form — so `(defn fac …) (fac 5)` in ONE request still traces
+  ;; the call. Returns the last form's value; reader/eval errors propagate to the
+  ;; caller's catch.
+  (let (forms (read-all src))
+    (eval-server--try-traces names)
+    (fold (fn (_ form)
+            (let (v (eval form))
+              (eval-server--try-traces names)
+              v))
+      nil forms)))
+
+(defn eval-capturing (src &optional trace-names)
   "Evaluate source string `src` (all its forms, in order) with stdout captured;
 return `{:ok true :value <pr-str-bounded> :output <string> :ms <int>}` or
 `{:ok false :error <message> :output <string> :ms <int>}`. Never throws, and pops
 the capture buffer on every path, so a failed eval can't leave a dangling capture.
 Keeps BOTH halves a REPL shows — the value and what was printed — which
-`with-out-str` can't (it discards the value). `:value` is display-bounded
-(`*print-length*`/`*print-level*`), so a huge structure elides with `…` instead
-of flooding whatever pipe the reply crosses."
-  (let (t0 (now))
-    (do
-      (%capture-begin)
-      (try
-        (let (v (eval-string src))
-          {:ok true :value (pr-str-bounded v) :output (%capture-take)
-           :ms (- (now) t0)})
-        (catch e
-          {:ok false :error (error-message e) :output (%capture-take)
-           :ms (- (now) t0)})))))
+`with-out-str` can't (it discards the value). `:value` is display-bounded and
+`:output` capped (`*output-cap-chars*` + a truncation marker), so no reply can
+flood the pipe.
+
+With `trace-names` (fn-name strings), each name is boundary-traced for the
+duration (`debug/trace-fn`, installed as the name becomes a function, restored by
+`untrace-all` after) and the result carries `:spy` — up to `*spy-entry-cap*`
+collected entries.
+
+In-image caveat for long-lived callers: evaluated source that calls
+`(%capture-begin)` without a matching take strands OUR buffer on the calling
+process's capture stack (later prints are swallowed). Irrelevant on the server
+path — the per-request evaluator process dies — but worth knowing when embedding."
+  (let (t0 (now)
+        traced (and trace-names (not (empty? trace-names)))
+        acc (when traced (table))
+        sink (when traced
+               (fn (e)
+                 (let (n (or (table-get acc :n) 0))
+                   (when (< n *spy-entry-cap*)
+                     (table-put acc :n (inc n))
+                     (table-put acc :entries
+                       (cons (eval-server--spy-entry e)
+                         (or (table-get acc :entries) '())))))))
+        run (fn ()
+              (try
+                {:ok true
+                 :value (pr-str-bounded
+                          (if traced
+                            (eval-server--eval-traced src trace-names)
+                            (eval-string src)))}
+                (catch e {:ok false :error (error-message e)})))
+        _ (%capture-begin)
+        r (if traced (binding (*spy-sink* sink) (run)) (run))
+        out (eval-server--bound-output (or (%capture-take) ""))
+        r2 (assoc r :output out :ms (- (now) t0)))
+    (if traced
+      (do
+        (debug/untrace-all)
+        (assoc r2 :spy (reverse (or (table-get acc :entries) '()))))
+      r2)))
 
 ;; ---- per-request timeout: eval in a child process, kill on deadline ----------
 ;; The same shape as the REPL's interruptible eval (std/tool/repl.blsp): run the
@@ -103,33 +192,50 @@ of flooding whatever pipe the reply crosses."
 ;; the session survives its own timeouts.
 
 (defn eval-server--flush-stale ()
-  ;; Reap any result a killed child managed to send before the kill landed, so it
-  ;; can never be mistaken for a later request's answer (results are also matched
-  ;; by pinned id — this just keeps the mailbox from accreting corpses).
+  ;; Reap what earlier requests may have left in the mailbox: a result a killed
+  ;; child managed to send before the kill landed (results are also matched by
+  ;; pinned id — this just keeps corpses from accreting), and `[:down …]` letters
+  ;; from completed evaluators — `demonitor` here is best-effort (a DOWN already
+  ;; queued is NOT recalled), so without this every successful request would leak
+  ;; one forever and every later selective receive would scan the pile.
   (receive
     ([:evsrv-result _ _] (eval-server--flush-stale))
+    ([:down _ _ _] (eval-server--flush-stale))
     (after 0 nil)))
 
 (defn eval-server-answer (req)
-  "The reply map for request map `req` (`:id` `:src`, optional `:timeout-ms`),
-evaluating in a spawned green process: the eval's own result on completion,
-`{:id id :ok false :timeout true}` after the deadline (the evaluator is
-hard-killed; the session image survives), or `:ok false` with `:error` if the
-evaluator process died without answering."
+  "The reply map for request map `req` (`:id` `:src`, optional `:timeout-ms` and
+`:trace`), evaluating in a spawned green process: the eval's own result on
+completion, `{:id id :ok false :timeout true}` after the deadline (the evaluator
+is hard-killed; the session image survives — and any traces the killed evaluator
+installed are restored here), or `:ok false` with `:error` if the evaluator
+process died without answering."
   (let (id (get req :id)
         src (get req :src)
-        timeout (or (get req :timeout-ms) *default-timeout-ms*)
+        raw-timeout (get req :timeout-ms)
+        timeout (if (int? raw-timeout) raw-timeout *default-timeout-ms*)
+        trace (get req :trace)
         me (self)
         _ (eval-server--flush-stale)
-        child (spawn (send me [:evsrv-result id (eval-capturing src)]))
+        child (spawn (send me [:evsrv-result id (eval-capturing src trace)]))
         ref (monitor child))
     (receive
-      ([:evsrv-result ^id r] (do (demonitor ref) (assoc r :id id)))
+      ([:evsrv-result ^id r]
+        (do (demonitor ref)
+          ;; the child dies :normal right after its send, so its DOWN is usually
+          ;; already queued when we demonitor — drain it now (flush-stale is the
+          ;; belt for the delivery-mid-demonitor sliver)
+          (receive ([:down ^ref _ _] nil) (after 0 nil))
+          (assoc r :id id)))
       ([:down ^ref ^child reason]
-        {:id id :ok false :error (str "evaluator died: " (pr-str reason)) :ms 0})
+        (do (debug/untrace-all)
+          {:id id :ok false :error (str "evaluator died: " (pr-str reason)) :ms 0}))
       (after timeout
         (do (exit child :kill)
           (demonitor ref)
+          ;; a killed traced evaluator never reached its own untrace — restore
+          ;; here (the trace registry is shared globals, so the parent can)
+          (debug/untrace-all)
           {:id id :ok false :timeout true :ms timeout})))))
 
 ;; ---- the server loop ----------------------------------------------------------

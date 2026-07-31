@@ -3,7 +3,7 @@
 ;; loop itself is two lines over these and is exercised end-to-end by its clients
 ;; (myedit's sandbox); everything of substance is testable in-image here.
 
-(defmodule eval-server-test (:use eval-server) (:use test))
+(defmodule eval-server-test (:use-internals eval-server) (:use test))
 
 ;; ---- codec --------------------------------------------------------------------
 
@@ -96,3 +96,76 @@
     (let (r (eval-server-answer {:id 8 :src "(error \"deliberate\")"}))
       (assert= (get r :ok) false)
       (is (includes? (get r :error) "deliberate")))))
+
+;; ---- review fixes: mailbox hygiene, malformed timeouts, output bound, :trace ---
+
+(describe "eval-server-answer mailbox hygiene"
+  (test "successful requests leave NO dead letters (the demonitor DOWN drain)"
+    ;; demonitor is best-effort in this runtime: the child's :normal DOWN is
+    ;; usually queued before we demonitor. Without the drain + down-flush each
+    ;; request leaks one — 10 requests, then assert the mailbox is EMPTY.
+    (dotimes (i 10) (eval-server-answer {:id i :src "(+ 1 1)"}))
+    (eval-server/eval-server--flush-stale)   ; belt: what a next request would do
+    (assert= (get (process-info (self)) :mailbox) 0)))
+
+(describe "malformed requests cannot kill the server"
+  (test "a non-int :timeout-ms fails decode (one bad line = one skipped line)"
+    (assert= (evsrv-decode-request "{:id 1 :src \"1\" :timeout-ms \"abc\"}") nil))
+  (test "a non-vector :trace fails decode"
+    (assert= (evsrv-decode-request "{:id 1 :src \"1\" :trace \"fac\"}") nil))
+  (test "the answer path clamps a garbage timeout that slipped past decode"
+    (let (r (eval-server-answer {:id 3 :src "(+ 1 2)" :timeout-ms "abc"}))
+      (assert= (get r :ok) true)
+      (assert= (get r :value) "3"))))
+
+(describe "output bounding"
+  (test "a println flood is capped with a truncation marker"
+    (let (r (eval-capturing "(dotimes (i 5000) (println i))"))
+      (is (<= (string-length (get r :output)) (+ eval-server/*output-cap-chars* 64)))
+      (is (includes? (get r :output) "…[output truncated]"))))
+  (test "evaluated code stealing the capture yields \"\" output, not nil"
+    (let (r (eval-capturing "(do (%capture-take) :done)"))
+      (assert= (get r :output) "")
+      (assert= (get r :ok) true))))
+
+(describe "boundary tracing (:trace)"
+  (test "a defn and its call in ONE request still trace (install-per-form)"
+    (let (r (eval-capturing "(defn evsrv-t-fac ((0) 1) ((n) (* n (evsrv-t-fac (- n 1)))))\n(evsrv-t-fac 3)"
+              ["evsrv-t-fac"]))
+      (assert= (get r :ok) true)
+      (assert= (get r :value) "6")
+      (let (spy (get r :spy)
+            calls (filter (fn (e) (= (get e :kind) "call")) spy)
+            returns (filter (fn (e) (= (get e :kind) "return")) spy))
+        (assert= (count calls) 4)          ; fac 3, 2, 1, 0
+        (assert= (count returns) 4)
+        (assert= (get (first calls) :fn) "evsrv-t-fac")
+        (assert= (get (first calls) :args) "(3)")
+        (assert= (get (last returns) :value) "6"))))
+
+  (test "traces are restored after the request (the next untraced call emits nothing)"
+    ;; self-contained: trace in request 1, call untraced in request 2
+    (eval-capturing "(defn evsrv-t-restored (x) (* 3 x))\n(evsrv-t-restored 1)"
+      ["evsrv-t-restored"])
+    (let (r (eval-capturing "(evsrv-t-restored 2)"))   ; no :trace this time
+      (assert= (get r :value) "6")
+      (assert= (get r :spy) nil)))
+
+  (test "a runaway traced recursion collects at most the cap"
+    (let (r (eval-capturing "(defn evsrv-t-down ((0) :done) ((n) (evsrv-t-down (- n 1))))\n(evsrv-t-down 1000)"
+              ["evsrv-t-down"]))
+      (assert= (get r :ok) true)
+      (is (<= (count (get r :spy)) eval-server/*spy-entry-cap*))))
+
+  (test "tracing a name that never becomes a function is silently no trace"
+    (let (r (eval-capturing "(+ 1 2)" ["no-such-fn-xyz"]))
+      (assert= (get r :ok) true)
+      (assert= (get r :spy) ())))
+
+  (test "a traced request round-trips through the answer path"
+    (let (r (eval-server-answer {:id 42
+                                 :src "(defn evsrv-t-dbl (x) (* 2 x))\n(evsrv-t-dbl 21)"
+                                 :trace ["evsrv-t-dbl"]}))
+      (assert= (get r :id) 42)
+      (assert= (get r :value) "42")
+      (is (>= (count (get r :spy)) 2)))))
