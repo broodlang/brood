@@ -380,17 +380,19 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
 
 (defn last-nonws-comment? (kids)
   "True if the body's LAST emitted block is a comment — the case where a closing
-delimiter has to break to its own line so it isn't swallowed. The last non-ws
-child being a comment is necessary but not sufficient: a *same-line* trailing
-comment on the final form is hoisted ABOVE that form by the body walkers, so the
-form (not the comment) is emitted last and the close must NOT break. Only an
-*own-line* comment (preceded by a newline) stays last in the output."
+delimiter has to break to its own line so it isn't swallowed (`;; note)` would comment
+out the `)` and leave the file unparseable).
+
+The last non-ws child being a comment is now both necessary AND sufficient: since a
+same-line trailing comment is left in place rather than hoisted above its form, a
+comment that is last in the source is last in the output either way. That is what
+retired the `comment-on-own-line?` distinction this used to need."
   (last-nonws-comment?--at kids (dec (vector-length kids))))
 (defn last-nonws-comment?--at (kids i)
   (cond
     (< i 0) false
     (whitespace? (vector-ref kids i)) (last-nonws-comment?--at kids (dec i))
-    (comment? (vector-ref kids i)) (comment-on-own-line? kids (dec i))
+    (comment? (vector-ref kids i)) true
     else false))
 ;; Scanning backward from `i`, was the comment that follows on its own line —
 ;; i.e. NOT a same-line trailing comment that the body walker hoists above its
@@ -496,8 +498,16 @@ form (not the comment) is emitted last and the close must NOT break. Only an
       else (render--pair-break (node-children n) indent "(" ")"))))
 
 (defn render--pair-break (kids indent open close)
+  ;; The close delimiter drops to its own line when the last emitted item is a comment —
+  ;; appended directly it would land INSIDE it (`b 2 ; the b)`), commenting out the
+  ;; bindings list's `)` and leaving the file unparseable. This check was unnecessary
+  ;; while same-line trailing comments were hoisted above their pair (a comment could
+  ;; never be last); leaving them in place is what makes it load-bearing. Same rule
+  ;; `render--break` already applies to a body.
   (let (pair-ind (inc indent))
-    (str open (render--pair-walk kids 0 (vector-length kids) pair-ind 0 "") close)))
+    (str open
+      (render--pair-walk kids 0 (vector-length kids) pair-ind 0 "")
+      (if (last-nonws-comment? kids) (str "\n" (indent-of pair-ind)) "") close)))
 
 ;; The separator before the next emitted item: nothing for the very first pair
 ;; (it sits right after the `(`), else a newline (blank line preserved when the
@@ -539,15 +549,13 @@ form (not the comment) is emitted last and the close must NOT break. Only an
                      (render--pair-walk kids
                        (inc j) n pair-ind 0
                        (str acc (render--pair-sep acc nl pair-ind false) pair-body))
-                     ;; Hoist a same-line trailing comment onto its own line ABOVE the
-                     ;; pair (forced newline so it never lands right after `(`); the
-                     ;; pair then follows on its own line (nl 0).
+                     ;; Keep a same-line trailing comment after its pair, where the author
+                     ;; wrote it (see render--body--at).
                      (render--pair-walk kids
                        (inc tc) n pair-ind 0
                        (str acc
-                         (render--pair-sep acc nl pair-ind true)
-                         (comment--strip-trailing-nl (node-text (vector-ref kids tc)))
-                         (render--pair-sep "x" 0 pair-ind false) pair-body))))))))))
+                         (render--pair-sep acc nl pair-ind false) pair-body " "
+                         (comment--strip-trailing-nl (node-text (vector-ref kids tc)))))))))))))
 
 ;; ---- pair body emit (cond / case clauses) -----------------------------------
 ;; Like render--body but consumes two structural forms per emission, joined by
@@ -575,14 +583,32 @@ form (not the comment) is emitted last and the close must NOT break. Only an
         ;; line; pairing across a comment would step over and DROP it.
         else (let (j (kids--next-nonws kids (inc i) n))
                (if (or (= j n) (comment? (vector-ref kids j)))
-                 (render--body-pairs--at kids
-                   (inc i) n body-ind 0
-                   (str acc (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) (render c body-ind)))
+                 ;; No form to pair with. If what intervenes is this clause's own
+                 ;; SAME-LINE trailing comment, keep it on the clause's line rather than
+                 ;; letting the loop drop it onto its own.
+                 (let (tc (trailing-comment-at kids (inc i) n))
+                   (if (nil? tc)
+                     (render--body-pairs--at kids
+                       (inc i) n body-ind 0
+                       (str acc (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) (render c body-ind)))
+                     (render--body-pairs--at kids
+                       (inc tc) n body-ind 0
+                       (str acc
+                         (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) (render c body-ind) " "
+                         (comment--strip-trailing-nl (node-text (vector-ref kids tc)))))))
                  (let (arendr (render c body-ind)
-                       brendr (render (vector-ref kids j) (+ body-ind (string-length arendr) 1)))
-                   (render--body-pairs--at kids
-                     (inc j) n body-ind 0
-                     (str acc (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) arendr " " brendr)))))))))
+                       brendr (render (vector-ref kids j) (+ body-ind (string-length arendr) 1))
+                       tc (trailing-comment-at kids (inc j) n))
+                   (if (nil? tc)
+                     (render--body-pairs--at kids
+                       (inc j) n body-ind 0
+                       (str acc (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) arendr " " brendr))
+                     ;; Keep the pair's same-line trailing comment on the pair's line.
+                     (render--body-pairs--at kids
+                       (inc tc) n body-ind 0
+                       (str acc
+                         (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) arendr " " brendr " "
+                         (comment--strip-trailing-nl (node-text (vector-ref kids tc)))))))))))))
 
 ;; Next non-WHITESPACE child at or after `i` (comments are NOT skipped — a
 ;; comment is a meaningful boundary the pair emitter must not pair across).
@@ -652,15 +678,18 @@ form (not the comment) is emitted last and the close must NOT break. Only an
                  (nil? tc-idx) (render--body--at kids
                                  (inc i) n body-ind 0
                                  (str acc (if (>= nl 2) "\n\n" "\n") ind form-rendr) fill? next-col)
-                 ;; Hoist a same-line trailing comment onto its own line ABOVE the
-                 ;; form; the form is then the last emitted block (fresh line).
+                 ;; Keep a same-line trailing comment WHERE THE AUTHOR PUT IT — after the
+                 ;; form, on the same line. It used to be hoisted onto its own line above
+                 ;; the form, which is what made `nest format` disagree with the whole tree
+                 ;; (98 lines of the red) and destroyed the alignment that makes a column of
+                 ;; trailing comments readable. `col` is nil after one: nothing may ride a
+                 ;; line that now ends in a comment, or it would be commented out.
                  else (render--body--at kids
                         (inc tc-idx) n body-ind 0
                         (str acc
-                          (if (>= nl 2) "\n\n" "\n") ind
-                          (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx))) "\n" ind
-                          form-rendr)
-                        fill? next-col)))))))
+                          (if (>= nl 2) "\n\n" "\n") ind form-rendr " "
+                          (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx))))
+                        fill? nil)))))))
 
 ;; ---- top-level walk ---------------------------------------------------------
 ;; `format-source src` parses src, renders the root, and ensures exactly one
@@ -692,14 +721,14 @@ form (not the comment) is emitted last and the close must NOT break. Only an
                (if (nil? tc-idx)
                  (format-cst-root--walk kids
                    (inc i) n 0 (format-source--glue acc nl form-block))
-                 ;; Hoist a same-line trailing comment onto its own line ABOVE the
-                 ;; form; the form is then the last emitted block (nl 0).
+                 ;; Keep a top-level form's same-line trailing comment after it, where the
+                 ;; author wrote it (see render--body--at).
                  (format-cst-root--walk kids
                    (inc tc-idx) n 0
                    (format-source--glue acc
                      nl
-                     (str (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx)))
-                       "\n" form-block)))))))))
+                     (str form-block " "
+                       (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx))))))))))))
 
 (defn format-source--glue (acc nl block)
   (cond (= acc "") block (>= nl 2) (str acc "\n\n" block) else (str acc "\n" block)))
