@@ -137,12 +137,16 @@
       (is (includes? out "\n  x)"))))
   (test "blank lines between two top-level comments are preserved"
     (assert= (format-source ";; a\n\n;; b\n(def x 1)") ";; a\n\n;; b\n(def x 1)\n"))
-  (test "a trailing comment on a top-level form is hoisted above it"
-    (assert= (format-source "(def x 5) ;; note") ";; note\n(def x 5)\n"))
-  (test "a trailing comment on a body form is hoisted above it"
+  ;; Same-line trailing comments are left WHERE THE AUTHOR PUT THEM. They used to be
+  ;; hoisted onto their own line above the form, which is what made `nest format`
+  ;; disagree with this tree (98 lines of its red) and destroyed the alignment that
+  ;; makes a column of trailing comments readable.
+  (test "a trailing comment on a top-level form stays on its line"
+    (assert= (format-source "(def x 5) ;; note") "(def x 5) ;; note\n"))
+  (test "a trailing comment on a body form stays on its line"
     (let (out (format-source "(defn f (x)\n  (foo) ;; note\n  (bar))"))
-      (is (includes? out "  ;; note\n  (foo)"))
-      (is (not (includes? out "(foo) ;; note"))))))
+      (is (includes? out "(foo) ;; note"))
+      (is (not (includes? out ";; note\n  (foo)"))))))
 
 (describe "format: a comment just before a closing delimiter"
   ;; Regression (the bug that broke tests/adversarial_test.blsp): when the last
@@ -177,13 +181,22 @@
   ;; pairs stay together, a trailing comment is hoisted onto its own line above its
   ;; pair, an own-line comment sits on its own line at the pair indent.
   ; name never split from its value
-  (test "a trailing comment in let bindings is hoisted above its pair, kept intact"
+  (test "a trailing comment in let bindings stays on its pair's line"
     (let (out (format-source "(let (a 1\n      b 2  ; note\n      c 3)\n  body)"))
-      ; hoisted above the pair
-      (is (includes? out "; note\n      b 2"))
-      ; not inline anymore
-      (is (not (includes? out "b 2  ; note")))
+      (is (includes? out "b 2 ; note"))
+      (is (not (includes? out "; note\n      b 2")))
+      ;; a name is still never split from its value
       (is (not (includes? out "b\n")))))
+  ;; The close delimiter of the BINDINGS list has to drop to its own line when the
+  ;; list ends in a comment — appended directly it lands inside it (`b 2 ; note)`),
+  ;; commenting out the `)` and leaving the file unparseable. Only reachable now that
+  ;; a trailing comment can be the last thing emitted.
+  (test "a bindings list ending in a trailing comment still closes legally"
+    (let (out (format-source "(let (a 1 ; the a\n      b 2 ; the b\n      )\n  (+ a b))"))
+      (is (includes? out "b 2 ; the b\n"))
+      (is (not (includes? out "; the b)")))
+      ;; and it still parses
+      (is (= (format-source out) out))))
   (test "an own-line comment in let bindings stays on its own line, pairs intact"
     (let (out (format-source "(let (a 1\n      ;; mid\n      b 2)\n  body)"))
       (is (includes? out "a 1\n      ;; mid\n      b 2"))))
@@ -210,12 +223,14 @@
   (test ";;; marker (top-level banner) survives"
     (let (out (format-source ";;; banner\n(def x 1)"))
       (is (includes? out ";;; banner"))))
-  (test "a trailing comment is hoisted onto its own line above the code"
-    ;; A comment after code on the same line moves to its own line *above* that
-    ;; code (never stays trailing). The marker is preserved verbatim.
-    (assert= (format-source "(def x 1) ; trailing") "; trailing\n(def x 1)\n"))
-  (test "a trailing comment after a closing paren is hoisted above the form"
-    (assert= (format-source "(defn f () 0) ;; nullary") ";; nullary\n(defn f () 0)\n"))
+  (test "a trailing comment stays after the code, marker preserved verbatim"
+    (assert= (format-source "(def x 1) ; trailing") "(def x 1) ; trailing\n"))
+  (test "a trailing comment after a closing paren stays put"
+    (assert= (format-source "(defn f () 0) ;; nullary") "(defn f () 0) ;; nullary\n"))
+  (test "a cond clause keeps its trailing comment on the clause line"
+    (let (out (format-source "(cond\n  (p x) :yes ; when p\n  else :no)"))
+      (is (includes? out ":yes ; when p"))
+      (is (= (format-source out) out))))
   (test "comment-only input gets a single trailing newline, nothing else"
     (assert= (format-source ";; just a comment") ";; just a comment\n")))
 

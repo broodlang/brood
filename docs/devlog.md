@@ -13172,3 +13172,38 @@ trailing comments to own-line comments — exactly 98 removed lines carried a tr
 and the remainder is call-breaking that reads worse than the source but cannot be improved by
 filling without losing author line structure. That still needs a human decision, and the
 formatter is not going to settle it.
+
+## 2026-07-31 (cont.) — comment hoisting dropped: the formatter leaves a trailing comment alone
+
+Settled the `nest format --check` style question in the direction the evidence pointed: the
+formatter changes, not the tree. A same-line trailing comment now stays **where the author put
+it** instead of being hoisted onto its own line above the form. `roadmap-for-v1.md` had already
+identified hoisting as "the entire disagreement" — the tree's authors do not write that way —
+and it destroyed the alignment that makes a column of trailing comments readable.
+
+**Four emit sites, not one**, which is why the roadmap expected this to simplify things:
+`render--body--at` (body forms), `render--pair-walk` (`let`-family bindings),
+`render--body-pairs--at` (`cond`/`case`/`assoc` clauses — which had *no* same-line handling at
+all, so those comments always went to their own line), and `format-cst-root--walk` (top level).
+
+**Two consequences worth naming.** `last-nonws-comment?` got simpler exactly as predicted: a
+last comment now forces the close delimiter to its own line unconditionally, because leaving
+comments in place means a comment that is last in the source is last in the output — the
+`comment-on-own-line?` distinction it needed is retired. And the same rule became **load-bearing
+in a second place**: `render--pair-break` appended the bindings list's `)` with no such check,
+which was safe only *because* hoisting guaranteed a comment could never be last. Without it,
+`(let (a 1 ; the a` … `b 2 ; the b)` put the `)` inside the comment — an unparseable file. Found
+by the idempotency probe, fixed, and pinned by a test.
+
+**Result: hoisting is gone from the tree-wide diff — comment-only added lines 98 → 15**, and the
+sweep now *removes* 96 net lines instead of adding 17. The file count is unchanged at 42,
+because the residue is the call-breaking shape, which the earlier reverted experiment showed
+cannot be improved by filling without discarding author line structure.
+
+**Verified against the whole tree, not just unit tests.** Ran the sweep, then built and ran the
+suite on the formatted result: 43 files rewritten under the new rules — `std/prelude.blsp`
+included — **4079 tests passed**. Then reverted the sweep; this commit is the formatter change
+only. Six hand cases (body, last-form, bindings, bindings-ending-in-comment, cond pair,
+top level, own-line) all check out and all are idempotent.
+
+**Gates:** `nest test` 4079 passed, `nest check` clean, formatter suite 72 passed.
