@@ -13063,3 +13063,58 @@ Also swept while red: a `clippy::nonminimal_bool` in `hyg_renamable`
 "currently 81 warnings, this step FAILS" note now records the zero and the rule
 that keeps it there: a new warning is either a real finding or a missing justified
 opt-out.
+
+## 2026-07-31 (cont.) — thread 6 diagnosed: the sink is the append-only RUNTIME region
+
+Took the throughput decay. It is not the allocator, and it is not diffuse: it is one code
+path, with one sink, and the reclamation policy for that sink costs **45% of throughput** on
+the workload that feeds it. New harness `scripts/fuzz/stress/decay_isolate.blsp`.
+
+**Step 1 — isolate the operation.** The soak does five things per iteration, so the first
+question is *what* decays, not why. Each mode runs one operation in a tight loop and reports
+throughput per fixed-size window. Flat, over millions of ops each: `alloc` (52 M CHAMP
+assoc/count, RSS plateaus at ~70 MB and ends *lower* than it started), `cons` (74 M),
+`spawn` (55 M), `sendrecv` (50 M), `roundtrip` (11 M), `backlog` (1.4 M). So the allocator,
+the GC, plain spawning, message send/receive and the selective-receive scan are all
+**exonerated** — a useful result on its own.
+
+The one that decays is the **supervisor child cycle**: 740 k ops took RSS from 91 MB to
+1.31 GB (~1.7 KB/op) and throughput from 19 607 to 9 900 ops/s. ~1.7 KB/op matches the
+soak's ~1.0 KB/iteration, and the soak does one supervisor cycle per iteration.
+
+**Step 2 — four refuted hypotheses, each cheap.** The restart-intensity window: `:max-seconds
+1` is indistinguishable from `60` (1.37 GB vs 1.31 GB, same curve) — not it. The crash: three
+supervisor-free modes (`spawn-link` + normal exit, + `error`, + `throw`, 3–5 M ops each) are
+all flat, so `spawn-link`, exit signals and error values are clean. Closure nesting in a
+message: sending a bare fn, `{:start fn}`, `[fn]` and a fresh anonymous fn 100 k times each
+grows `:runtime-closures` by **1–2 total** — ADR-194's share path is fine, including nested.
+Who spawns: root-spawns-200k vs spawned-worker-spawns-200k both flat.
+
+**Step 3 — the sink.** Reporting `:runtime-closures` alongside RSS pinned it in one run.
+Over 390 k supervisor cycles it climbed **2 583 → 341 592**, monotonically, ~1 per cycle,
+while the supervisor's own heap oscillated (0.16–2.5 MB) and the caller's live bytes did too
+— both LOCAL heaps collecting normally. Per-call granularity: `start-child` is **+1**,
+`terminate-child` is **+0**. So each supervised child start appends a closure to the
+**append-only shared RUNTIME code region**, and terminating the child reclaims none of it.
+`supcall` (a supervisor round-trip that starts nothing) is flat at 64 over 2.25 M ops, so it
+is the child start, not the call.
+
+**Step 4 — the reclamation policy is the expensive half.** `BROOD_RT_GC_FLOOR=100000000`
+(never compact the region) does **45% more work**: 610/610/610 k ops per 30 s against
+420/420/430 k on the default floor of 4096 — three runs each, ~2% spread within a condition,
+so far outside noise. Compacting *more* often (`=256`) does not help either. The region grows
+regardless; what the default policy buys is repeated attempts to reclaim something it cannot
+reclaim, and that is where the throughput goes. This is the **KI-14 class resurfacing** — that
+was "the RUNTIME collector re-walked a deep process's whole root stack at every safepoint, so
+cost scaled with loaded code, not test size".
+
+**Why the soak's fresh processes looked fine:** the region is per-runtime, so restarting the
+OS process resets it. That is exactly why run 15 matched run 1 while a single long-lived run
+decayed — the "restart cures it" observation was this all along.
+
+**Not fixed, deliberately.** Two candidate fixes and both are ADR-091 design decisions, not
+mechanical: (a) stop promoting per `start-child` — if a supervised child's start thunk is
+already shared, the spawn should not append a fresh entry; (b) make the reclamation threshold
+adaptive — back off when a compaction reclaims little, instead of retrying at a fixed floor
+and thrashing. (b) is worth 45% on this workload by itself. Both touch the GC, which is where
+this repo is most careful, so they want a deliberate decision rather than a drive-by patch.
