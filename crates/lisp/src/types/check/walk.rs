@@ -63,7 +63,9 @@ pub(super) fn arm_arg_ty_query(line: u32, col: u32, arg_index: usize) {
 
 /// Disarm the query and return whatever type it captured.
 pub(super) fn take_arg_ty_query() -> Option<Ty> {
-    ARG_TY_QUERY.with(|q| q.borrow_mut().take()).and_then(|q| q.result)
+    ARG_TY_QUERY
+        .with(|q| q.borrow_mut().take())
+        .and_then(|q| q.result)
 }
 
 /// The capture hook — called on every list form the walk visits. When the armed

@@ -4365,8 +4365,7 @@ fn get_with_a_keyword_key_needs_a_keyed_receiver() {
 /// `needle`'s opening paren, and ask for the type of the call's item 1.
 fn arg_ty_of(src: &str, needle: &str, arg_index: usize) -> Option<Ty> {
     let mut interp = crate::Interp::new();
-    let positioned =
-        reader::read_all_positioned(&mut interp.heap, src).expect("parse");
+    let positioned = reader::read_all_positioned(&mut interp.heap, src).expect("parse");
     let forms: Vec<Value> = positioned.into_iter().map(|(f, _)| f).collect();
     let at = src.find(needle).expect("needle present");
     let line = src[..at].bytes().filter(|&b| b == b'\n').count() as u32 + 1;
@@ -4413,7 +4412,7 @@ fn arg_ty_at_misses_degrade_to_none() {
     // position matching nothing → None.
     let src = "(defn f (p) (get p :x))";
     assert!(arg_ty_of(src, "(get", 1).is_none(), "untyped param");
-    assert!(arg_ty_of(src, "(get", 9, ).is_none(), "no such item");
+    assert!(arg_ty_of(src, "(get", 9,).is_none(), "no such item");
     let mut interp = crate::Interp::new();
     let positioned = reader::read_all_positioned(&mut interp.heap, src).expect("parse");
     let forms: Vec<Value> = positioned.into_iter().map(|(f, _)| f).collect();
