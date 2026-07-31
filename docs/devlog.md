@@ -13017,3 +13017,13 @@ per run for 7% fewer iterations. Two control runs also showed `rt-threshold` off
 default (1455526, 562170) — ADR-091 shared-region reclamation engaging, visible only there.
 
 Full write-up, logs and the per-minute `rss.csv`: `~/brood-soak-2026-07-30/README.md`.
+
+**Loose end from the same run: `brood::suite` came back `FLAKY 2/2`** — the in-language suite
+failed once and passed on nextest's retry, so `make test` still exited 0 and reported "929
+passed". Three subsequent full `nest test` runs were clean (3978/3978 each), so it did not
+reproduce, and the failing assertion was **lost because the run was piped through `tail -12`**
+— nextest prints the first attempt's detail above the summary. Not chased further and not
+assumed benign. The likely shape is one of the timing-sensitive cases (the `tcp` idle-timeout
+family sleeps 500–2500 ms against `after` windows, and the cargo suite runs under far heavier
+parallel load than `nest test` does), but that is a guess, not a finding. Next time the suite
+is run, capture the whole log — a green "N passed" line can be hiding a retried failure.
