@@ -58,20 +58,24 @@ content-agnostic — the editor supplies the payload and the keybindings.")
   "The node at `path` (a list of `:a`/`:b`) under `node`."
   (if (empty? path) node (pane--get (get node (first path)) (rest path))))
 
-(defn pane--update (node path f)
-  "The tree like `node` with the node at `path` replaced by `(f node-at-path)`."
-  (if (empty? path)
-    (f node)
-    (let (k (first path))
-      (assoc node k (pane--update (get node k) (rest path) f)))))
+;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
+(check-allow :non-tail-recursion
+  (defn pane--update (node path f)
+    "The tree like `node` with the node at `path` replaced by `(f node-at-path)`."
+    (if (empty? path)
+      (f node)
+      (let (k (first path))
+        (assoc node k (pane--update (get node k) (rest path) f))))))
 
-(defn pane--paths (node prefix)
-  "All leaf paths under `node` in traversal order (a before b), each prefixed by
-the forward-order `prefix`."
-  (if (pane-leaf? node)
-    (list prefix)
-    (append (pane--paths (get node :a) (append prefix (list :a)))
-      (pane--paths (get node :b) (append prefix (list :b))))))
+;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
+(check-allow :non-tail-recursion
+  (defn pane--paths (node prefix)
+    "All leaf paths under `node` in traversal order (a before b), each prefixed by
+  the forward-order `prefix`."
+    (if (pane-leaf? node)
+      (list prefix)
+      (append (pane--paths (get node :a) (append prefix (list :a)))
+        (pane--paths (get node :b) (append prefix (list :b)))))))
 
 (defn pane-leaf-paths (tree)
   "Every leaf's path, in left-to-right / top-to-bottom traversal order."
@@ -87,11 +91,13 @@ the forward-order `prefix`."
   "The path of the selected leaf (`()` for a lone pane)."
   (find (fn (p) (get (pane--get tree p) :selected)) (pane-leaf-paths tree)))
 
-(defn pane--clear (node)
-  "The tree with the `:selected` marker cleared from every leaf."
-  (if (pane-leaf? node)
-    (assoc node :selected false)
-    (assoc node :a (pane--clear (get node :a)) :b (pane--clear (get node :b)))))
+;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
+(check-allow :non-tail-recursion
+  (defn pane--clear (node)
+    "The tree with the `:selected` marker cleared from every leaf."
+    (if (pane-leaf? node)
+      (assoc node :selected false)
+      (assoc node :a (pane--clear (get node :a)) :b (pane--clear (get node :b))))))
 
 (defn pane-select-path (tree path)
   "The tree with the leaf at `path` made the sole selected pane."
@@ -121,13 +127,15 @@ it lets an editor answer 'which pane, if any, already shows buffer N?' (the reus
 behind an Emacs-style `display-buffer`)."
   (get (pane--get tree path) :payload))
 
-(defn pane-map (tree f)
-  "The tree with `f` applied to *every* pane's payload (leaves only; splits and
-selection unchanged). For an editor re-pointing pane→buffer references after the
-buffer pool changes — e.g. decrementing indices above a killed buffer."
-  (if (pane-leaf? tree)
-    (assoc tree :payload (f (get tree :payload)))
-    (assoc tree :a (pane-map (get tree :a) f) :b (pane-map (get tree :b) f))))
+;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
+(check-allow :non-tail-recursion
+  (defn pane-map (tree f)
+    "The tree with `f` applied to *every* pane's payload (leaves only; splits and
+  selection unchanged). For an editor re-pointing pane→buffer references after the
+  buffer pool changes — e.g. decrementing indices above a killed buffer."
+    (if (pane-leaf? tree)
+      (assoc tree :payload (f (get tree :payload)))
+      (assoc tree :a (pane-map (get tree :a) f) :b (pane-map (get tree :b) f)))))
 
 (defn pane-other (tree)
   "Move selection to the next pane in traversal order, wrapping (Emacs `C-x o`)."
@@ -175,30 +183,32 @@ returned unchanged — you can't delete the only one."
   "Clamp integer `v` into `[lo hi]`."
   (max lo (min hi v)))
 
-(defn pane--layout (node path rect)
-  "Lay `node` (at `path`) into `rect`, returning `{:panes (…) :dividers (…)}`."
-  (if (pane-leaf? node)
-    {:panes (list {:path path
-                   :payload (get node :payload)
-                   :selected (= true (get node :selected))
-                   :rect rect})
-     :dividers ()}
-    (let ([x y w h] rect
-          col? (= (get node :dir) :col)
-          ;; the extent split between the two children (less the 1-cell divider),
-          ;; and child a's share of it, clamped so neither pane vanishes
-          ext (- (if col? w h) 1)
-          a-ext (pane--clampi (round (* ext (get node :ratio))) 1 (max 1 (- ext 1)))
-          arect (if col? [x y a-ext h] [x y w a-ext])
-          drect (if col? [(+ x a-ext) y 1 h] [x (+ y a-ext) w 1])
-          brect (if col?
-                  [(+ x a-ext 1) y (- w a-ext 1) h]
-                  [x (+ y a-ext 1) w (- h a-ext 1)])
-          la (pane--layout (get node :a) (append path (list :a)) arect)
-          lb (pane--layout (get node :b) (append path (list :b)) brect))
-      {:panes (append (get la :panes) (get lb :panes))
-       :dividers (cons {:path path :dir (get node :dir) :rect drect :split-rect rect}
-                   (append (get la :dividers) (get lb :dividers)))})))
+;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
+(check-allow :non-tail-recursion
+  (defn pane--layout (node path rect)
+    "Lay `node` (at `path`) into `rect`, returning `{:panes (…) :dividers (…)}`."
+    (if (pane-leaf? node)
+      {:panes (list {:path path
+                     :payload (get node :payload)
+                     :selected (= true (get node :selected))
+                     :rect rect})
+       :dividers ()}
+      (let ([x y w h] rect
+            col? (= (get node :dir) :col)
+            ;; the extent split between the two children (less the 1-cell divider),
+            ;; and child a's share of it, clamped so neither pane vanishes
+            ext (- (if col? w h) 1)
+            a-ext (pane--clampi (round (* ext (get node :ratio))) 1 (max 1 (- ext 1)))
+            arect (if col? [x y a-ext h] [x y w a-ext])
+            drect (if col? [(+ x a-ext) y 1 h] [x (+ y a-ext) w 1])
+            brect (if col?
+                    [(+ x a-ext 1) y (- w a-ext 1) h]
+                    [x (+ y a-ext 1) w (- h a-ext 1)])
+            la (pane--layout (get node :a) (append path (list :a)) arect)
+            lb (pane--layout (get node :b) (append path (list :b)) brect))
+        {:panes (append (get la :panes) (get lb :panes))
+         :dividers (cons {:path path :dir (get node :dir) :rect drect :split-rect rect}
+                     (append (get la :dividers) (get lb :dividers)))}))))
 
 (defn pane-layout (tree rect)
   "Lay `tree` out in `rect` (`[x y w h]` cells): a map `{:panes :dividers}` where

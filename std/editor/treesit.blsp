@@ -136,14 +136,16 @@ if none."
               (ts--named-kids enc)))
     (if (nil? lst) point (get lst :start))))
 
-(defn ts--chain-rest (node point)
-  "The containers strictly enclosing `point` below `node`, outermost first — each a
-container that contains the next. `()` at the leaf."
-  (let (hit (find (fn (k)
-                    (and (ts--container? k)
-                      (< (get k :start) point) (< point (get k :end))))
-              (or (get node :kids) [])))
-    (if (nil? hit) () (cons hit (ts--chain-rest hit point)))))
+;; check-allow: deliberately non-tail — depth = syntax-tree nesting at point.
+(check-allow :non-tail-recursion
+  (defn ts--chain-rest (node point)
+    "The containers strictly enclosing `point` below `node`, outermost first — each a
+  container that contains the next. `()` at the leaf."
+    (let (hit (find (fn (k)
+                      (and (ts--container? k)
+                        (< (get k :start) point) (< point (get k :end))))
+                (or (get node :kids) [])))
+      (if (nil? hit) () (cons hit (ts--chain-rest hit point))))))
 
 (def ts--def-kinds
   ;; node KINDS that are themselves definitions — most grammars (Ruby, …) name them

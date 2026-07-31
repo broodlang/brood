@@ -180,8 +180,10 @@ than being fetched into `_deps/<name>/`."
   (if (< i start) acc (project--vec-drop--acc v start (dec i) (cons (vector-ref v i) acc))))
 
 ;; The keys of a flat plist (every other element from the head).
-(defn project--plist-keys (kvs)
-  (if (empty? kvs) nil (cons (first kvs) (project--plist-keys (rest (rest kvs))))))
+;; check-allow: deliberately non-tail — depth = the manifest plist's key count.
+(check-allow :non-tail-recursion
+  (defn project--plist-keys (kvs)
+    (if (empty? kvs) nil (cons (first kvs) (project--plist-keys (rest (rest kvs)))))))
 
 ;; Reject any reserved opt key present in `opts`, naming the offending dep.
 (defn project--reject-reserved-opts (name opts)

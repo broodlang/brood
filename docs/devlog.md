@@ -13027,3 +13027,39 @@ assumed benign. The likely shape is one of the timing-sensitive cases (the `tcp`
 family sleeps 500–2500 ms against `after` windows, and the cargo suite runs under far heavier
 parallel load than `nest test` does), but that is a guess, not a finding. Next time the suite
 is run, capture the whole log — a green "N passed" line can be hiding a retried failure.
+
+## 2026-07-31 — the CI type-checker gate reaches zero: 60 warnings fixed or justified
+
+The one red step in CI was the deliberate hard gate — `nest check std/**/*.blsp
+tests/**/*.blsp` at zero warnings ("a soft gate that is permanently red is noise, and
+the point is to drive the count to zero"). It reported 60: 58 `recursive call in
+non-tail position`, 2 `gui-open` argument types. All are now fixed or carry a
+justified opt-out, and the gate is green.
+
+**Two real fixes.** `gui-open`'s Sig declared `(string int int map)` params, but the
+primitive deliberately accepts `nil` in every optional slot ("use the default") — the
+callers were right and the signature was narrow, so it now says
+`string|nil int|nil int|nil map|nil`. And the bootstrap `append--2` (the quasiquote
+builder seed that predates `defmacro` itself, so no `check-allow` can reach it)
+became genuinely tail-recursive via a double reverse-onto — the same shape as the
+full `append` that later rebinds it, so a deep append during bootstrap now costs
+O(1) stack instead of a frame per element.
+
+**56 justified opt-outs.** Every remaining site is deliberate bounded recursion, now
+wrapped in `(check-allow :non-tail-recursion …)` with a one-line justification of
+the actual bound — the first uses of the opt-out in `std/` (it had only appeared in
+tests). Three families cover most of them: the `match-*` pattern compiler (13) and
+`receive--*`/`binding--*`/threading/`for--fold` builders (11) recurse over **macro
+syntax at expansion time**, so depth is source nesting, never runtime data; the
+editor's `pane--*`/`keymap-bind`/`face--resolve`/`lineedit--*`/`ts--chain-rest`
+walk trees whose depth is screen splits / key-sequence / inheritance-chain length;
+and the genuinely-data-shaped ones state their real bound (`merge-sort--n` is
+log₂ n, `assoc-in`/`dissoc-in` are path length, `flatten--acc` is nesting depth,
+`regex--*` is pattern nesting — never subject length). The JIT effect-once torture
+fn keeps its non-tail shape on purpose and says so.
+
+Also swept while red: a `clippy::nonminimal_bool` in `hyg_renamable`
+(`eval/macros.rs`) that had newly broken the clippy step. The CI workflow's stale
+"currently 81 warnings, this step FAILS" note now records the zero and the rule
+that keeps it there: a new warning is either a real finding or a missing justified
+opt-out.

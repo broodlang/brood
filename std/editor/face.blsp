@@ -83,19 +83,21 @@ theme editor or the docs; resolve a single face with `face`."
 
 ;; ---- resolution -------------------------------------------------------------
 
-(defn face--resolve (name depth)
-  "Resolve face `name` to a flat attribute map, layering an `:inherit` parent
-underneath (local keys win). `depth` bounds the `:inherit` chain so an accidental
-cycle terminates instead of overflowing the stack (cf. `observe--tree-walk`)."
-  (let (attrs (get *faces* name))
-    (cond
-      (nil? attrs) nil
-      (>= depth 16) (dissoc attrs :inherit)
-      else (let (parent (get attrs :inherit)
-                 self (dissoc attrs :inherit))
-             (if (nil? parent)
-               self
-               (merge (or (face--resolve parent (inc depth)) {}) self))))))
+;; check-allow: deliberately non-tail — depth = the face inheritance chain — a few links.
+(check-allow :non-tail-recursion
+  (defn face--resolve (name depth)
+    "Resolve face `name` to a flat attribute map, layering an `:inherit` parent
+  underneath (local keys win). `depth` bounds the `:inherit` chain so an accidental
+  cycle terminates instead of overflowing the stack (cf. `observe--tree-walk`)."
+    (let (attrs (get *faces* name))
+      (cond
+        (nil? attrs) nil
+        (>= depth 16) (dissoc attrs :inherit)
+        else (let (parent (get attrs :inherit)
+                   self (dissoc attrs :inherit))
+               (if (nil? parent)
+                 self
+                 (merge (or (face--resolve parent (inc depth)) {}) self)))))))
 
 (defn face (name)
   "Resolve face `name` to the attribute map a render op wants (`{:fg :red …}`),

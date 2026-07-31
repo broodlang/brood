@@ -95,12 +95,12 @@ jobs:
       # it loads the project image first, so cross-module and qualified names
       # still resolve. Deliberate lints opt out in-source with `check-allow`.
       #
-      # NOTE (2026-07-25): this path currently reports 81 warnings (61 in std/,
-      # 20 in tests/) — mostly `recursive call in non-tail position`, plus
-      # `unbound symbol` and `unused :use import`. So this step FAILS until those
-      # are fixed or opted out with `(check-allow …)`. It is deliberately a hard
-      # gate, not `continue-on-error`: a soft gate that is permanently red is
-      # noise, and the point is to drive the count to zero.
+      # Reached zero 2026-07-31 (was 81 on 2026-07-25): every deliberate
+      # non-tail recursion in std/ + tests/ now carries a justified
+      # `(check-allow :non-tail-recursion …)`, the bootstrap `append--2` became
+      # tail-recursive, and `gui-open`'s Sig admits its nil-able optionals. Keep
+      # it at zero — a new warning here is either a real finding or a missing
+      # justified opt-out.
       - name: Type-checker gate (nest check — zero warnings)
         shell: bash
         run: |

@@ -94,22 +94,26 @@ backreferences yet.")
       (= q "?") [{:q :opt :a atom} (inc i2)]
       else [atom i2])))
 
-(defn regex--seq (pcs i)
-  "Parse a branch — pieces until `|`, `)`, or end; returns [pieces next]."
-  (let (c (regex--peek pcs i))
-    (if (or (nil? c) (= c "|") (= c ")"))
-      [(list) i]
-      (let ([piece i2] (regex--piece pcs i)
-            [rest i3] (regex--seq pcs i2))
-        [(cons piece rest) i3]))))
+;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
+(check-allow :non-tail-recursion
+  (defn regex--seq (pcs i)
+    "Parse a branch — pieces until `|`, `)`, or end; returns [pieces next]."
+    (let (c (regex--peek pcs i))
+      (if (or (nil? c) (= c "|") (= c ")"))
+        [(list) i]
+        (let ([piece i2] (regex--piece pcs i)
+              [rest i3] (regex--seq pcs i2))
+          [(cons piece rest) i3])))))
 
-(defn regex--alt (pcs i)
-  "Parse an alternation — branches separated by `|`; returns [branches next]."
-  (let ([branch i2] (regex--seq pcs i))
-    (if (= (regex--peek pcs i2) "|")
-      (let ([rest i3] (regex--alt pcs (inc i2)))
-        [(cons branch rest) i3])
-      [(list branch) i2])))
+;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
+(check-allow :non-tail-recursion
+  (defn regex--alt (pcs i)
+    "Parse an alternation — branches separated by `|`; returns [branches next]."
+    (let ([branch i2] (regex--seq pcs i))
+      (if (= (regex--peek pcs i2) "|")
+        (let ([rest i3] (regex--alt pcs (inc i2)))
+          [(cons branch rest) i3])
+        [(list branch) i2]))))
 
 (defn regex--parse (pattern)
   "Parse `pattern` into its list of top-level branches."
@@ -176,21 +180,25 @@ backreferences yet.")
                     [as st2])
       else (regex--nfa-atom p nx states))))
 
-(defn regex--nfa-seq (pieces nx states)
-  "Chain a branch's pieces; each piece's exit is the next piece's start. [start states']."
-  (if (empty? pieces)
-    [nx states]
-    (let ([rest-start st1] (regex--nfa-seq (rest pieces) nx states))
-      (regex--nfa-piece (first pieces) rest-start st1))))
+;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
+(check-allow :non-tail-recursion
+  (defn regex--nfa-seq (pieces nx states)
+    "Chain a branch's pieces; each piece's exit is the next piece's start. [start states']."
+    (if (empty? pieces)
+      [nx states]
+      (let ([rest-start st1] (regex--nfa-seq (rest pieces) nx states))
+        (regex--nfa-piece (first pieces) rest-start st1)))))
 
-(defn regex--nfa-alt (branches nx states)
-  "Fan out over alternation branches with `:split` states; returns [start states']."
-  (cond
-    (empty? branches) [nx states]
-    (empty? (rest branches)) (regex--nfa-seq (first branches) nx states)
-    else (let ([b-start st1] (regex--nfa-seq (first branches) nx states)
-               [rest-start st2] (regex--nfa-alt (rest branches) nx st1))
-           (regex--push st2 {:t :split :a b-start :b rest-start}))))
+;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
+(check-allow :non-tail-recursion
+  (defn regex--nfa-alt (branches nx states)
+    "Fan out over alternation branches with `:split` states; returns [start states']."
+    (cond
+      (empty? branches) [nx states]
+      (empty? (rest branches)) (regex--nfa-seq (first branches) nx states)
+      else (let ([b-start st1] (regex--nfa-seq (first branches) nx states)
+                 [rest-start st2] (regex--nfa-alt (rest branches) nx st1))
+             (regex--push st2 {:t :split :a b-start :b rest-start})))))
 
 (defn regex--nfa (branches)
   "Compile the parsed branch list into {:states vec :start idx :match idx}."
