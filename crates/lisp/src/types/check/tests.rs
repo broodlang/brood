@@ -4359,3 +4359,63 @@ fn get_with_a_keyword_key_needs_a_keyed_receiver() {
         assert!(warnings(src).is_empty(), "{src} must be silent");
     }
 }
+
+/// `arg_ty_at` — the position-keyed type query behind the LSP record-field
+/// completion. Shared harness: parse `src` positioned, find the line/col of
+/// `needle`'s opening paren, and ask for the type of the call's item 1.
+fn arg_ty_of(src: &str, needle: &str, arg_index: usize) -> Option<Ty> {
+    let mut interp = crate::Interp::new();
+    let positioned =
+        reader::read_all_positioned(&mut interp.heap, src).expect("parse");
+    let forms: Vec<Value> = positioned.into_iter().map(|(f, _)| f).collect();
+    let at = src.find(needle).expect("needle present");
+    let line = src[..at].bytes().filter(|&b| b == b'\n').count() as u32 + 1;
+    let line_start = src[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let col = src[line_start..at].chars().count() as u32 + 1;
+    arg_ty_at(&mut interp.heap, &forms, line, col, arg_index)
+}
+
+fn field_names(ty: &Ty) -> Vec<String> {
+    ty.record_fields()
+        .map(|f| f.keys().map(|&s| value::symbol_name(s)).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn arg_ty_at_types_a_direct_ctor_argument() {
+    let src = "(defrecord point (x y))\n(get (point 1 2) :x)";
+    let ty = arg_ty_of(src, "(get", 1).expect("captured");
+    let names = field_names(&ty);
+    assert!(names.contains(&"x".to_string()), "{names:?}");
+    assert!(names.contains(&"y".to_string()), "{names:?}");
+}
+
+#[test]
+fn arg_ty_at_types_a_let_bound_record_inside_a_defn() {
+    // The whole point of routing through the checker: `p` is a bare symbol
+    // whose type only the scope walk knows (the let RHS's ctor sig).
+    let src = "(defrecord point (x y))\n(defn f () (let (p (point 1 2)) (assoc p :x 3)))";
+    let ty = arg_ty_of(src, "(assoc", 1).expect("captured");
+    assert!(field_names(&ty).contains(&"x".to_string()));
+}
+
+#[test]
+fn arg_ty_at_types_a_gap_a_global() {
+    // A `(def g (ctor …))` global reaches the query via Gap A value inference.
+    let src = "(defrecord point (x y))\n(def origin (point 0 0))\n(get origin :y)";
+    let ty = arg_ty_of(src, "(get origin", 1).expect("captured");
+    assert!(field_names(&ty).contains(&"y".to_string()));
+}
+
+#[test]
+fn arg_ty_at_misses_degrade_to_none() {
+    // Unknown-typed argument → None (never a wrong type); missing item → None;
+    // position matching nothing → None.
+    let src = "(defn f (p) (get p :x))";
+    assert!(arg_ty_of(src, "(get", 1).is_none(), "untyped param");
+    assert!(arg_ty_of(src, "(get", 9, ).is_none(), "no such item");
+    let mut interp = crate::Interp::new();
+    let positioned = reader::read_all_positioned(&mut interp.heap, src).expect("parse");
+    let forms: Vec<Value> = positioned.into_iter().map(|(f, _)| f).collect();
+    assert!(arg_ty_at(&mut interp.heap, &forms, 99, 1, 1).is_none());
+}
