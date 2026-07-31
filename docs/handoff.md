@@ -4,8 +4,9 @@
 measurements live in [`devlog.md`](devlog.md); the option book lives in
 [`runtime-frontier.md`](runtime-frontier.md). Read this to pick the work back up cold.
 
-**As of 2026-07-31**, brood `6d4bbfb5`, brood-benchmarks `10d669e`. Nothing half-finished.
-The overnight soak is done (thread 5, closed) and produced a new thread 6.
+**As of 2026-07-31**, brood `ead59798`+, brood-benchmarks `10d669e`. Nothing half-finished.
+The overnight soak is done (thread 5, closed); it produced thread 6, which is now **diagnosed
+down to one code path and one region** — see below. The fix is an open ADR-091 decision.
 
 Since the perf session this document was written for, the tree also gained **automatic macro
 hygiene** and **exact rationals as a kernel type** (`Value::Ratio`, ADR-196 — `1/2` is a
@@ -76,13 +77,12 @@ From the published run (`brood-benchmarks/results/`):
    The receive-mark only helps receives that *pin a ref*; a server loop matching several tags
    still walks its backlog (BEAM solves that with a saved scan position per receive **site**,
    a different mechanism from the per-ref mark).
-3. **Allocator policy — reframed by the soak, and no longer just a decision.**
+3. **Allocator policy — and thread 6 turned out NOT to be about the allocator.**
    `MIMALLOC_PURGE_DELAY=0` returns 17% of RSS on a light workload and ~2.3× on heavy churn,
-   for ~4% throughput, and the default is the deliberate "spend memory for speed" call from
-   2026-06-15. But the overnight soak found we are **losing** 8× of throughput to retention
-   (thread 6), and purge-0 does not fix that. So the question is no longer "how much memory
-   do we spend for speed" — it is why the spend is buying negative speed. Settle thread 6
-   first; this decision probably falls out of it.
+   for ~4% throughput; the default is the deliberate "spend memory for speed" call from
+   2026-06-15. This is back to being an ordinary decision: the churn decay was traced to the
+   RUNTIME code region (thread 6), not to mimalloc, and `alloc`/`cons` are flat over 50–74 M
+   ops. Purge-0 does not fix the decay because the decay was never the allocator's.
 4. **Per-process memory floor** — 5.9 KB vs the BEAM's 3.1 KB, roughly half unattributed.
    Frontier section B. Needs an allocator size-class histogram behind a cargo feature; there
    is no heaptrack/valgrind on this box, only `perf`.
@@ -97,18 +97,29 @@ From the published run (`brood-benchmarks/results/`):
    projection by extrapolating MB/*minute* when the driver is MB/*iteration* — the long run
    actually reached 3M iterations / 3.06 GB in 7 h. A8's trap, freshly re-stepped-in.
 
-6. **Throughput decays ~8× within a churning process, and only a restart recovers it — NEW,
-   and the strongest lead the soak produced.** A soak process goes **2174 → 263 it/s** across
-   four successive 200k-iteration segments (29 minutes), tracking its own RSS; the long-lived
-   run compounds it, its three successive millions taking 2988 s / 8453 s / 13958 s
-   (335 → 118 → 72 it/s). But there is **zero cross-run degradation** — run 15 matches run 1
-   to within noise after 7 hours and ~11 M intervening iterations — so the cost is
-   **per-process and fully reversible.** That rules out a leak and rules out runtime-region
-   growth (`rt-closures` sits at ~70 on every armed run all night), and is consistent with
-   allocator/page-locality decay against a live set of tens of KB. `MIMALLOC_PURGE_DELAY=0`
-   does *not* fix it (its probe decayed 1493 → 430 it/s over 400k). Root cause unestablished —
-   don't guess; measure. For the long-lived-server target this is worse than the footprint,
-   and it subsumes thread 3. Start from `perf` on a soak process at t=0 vs t=25 min.
+6. **Throughput decay — DIAGNOSED 2026-07-31, not yet fixed. The sink is the append-only
+   RUNTIME code region, and its reclamation policy costs 45% of throughput.** Harness:
+   `scripts/fuzz/stress/decay_isolate.blsp` (run modes sequentially).
+   **What decays:** only the **supervisor child cycle**. Flat over millions of ops each:
+   `alloc` (52 M), `cons` (74 M), `spawn` (55 M), `sendrecv` (50 M), `roundtrip` (11 M),
+   `backlog` (1.4 M) — so allocator, GC, spawn, send/receive and selective receive are all
+   exonerated. The supervisor cycle costs ~1.7 KB/op, which is the soak's ~1.0 KB/iteration.
+   **The sink:** `:runtime-closures` climbs **2 583 → 341 592** over 390 k cycles,
+   monotonically, ~1 per cycle, while both LOCAL heaps GC normally. Per call: `start-child`
+   **+1**, `terminate-child` **+0**, and a supervisor round-trip that starts nothing is flat
+   at 64 over 2.25 M ops. So each supervised child start appends a closure that terminating
+   the child never reclaims.
+   **The costly half is the policy, not the growth:** `BROOD_RT_GC_FLOOR=100000000` (never
+   compact) does **45% more work** — 610/610/610 k ops/30 s vs 420/420/430 k on the default
+   4096 floor, 3 runs each, ~2% spread. Compacting more often (`=256`) does not help. The
+   region grows either way; the default buys repeated failed reclamation attempts. This is
+   **KI-14's class resurfacing** (cost scaling with loaded code, not with work).
+   Also explains the "a restart cures it" observation: the region is per-runtime.
+   **Two candidate fixes, both ADR-091 decisions rather than mechanical:** (a) don't promote
+   per `start-child` when the start thunk is already shared; (b) make the reclamation
+   threshold adaptive — back off when a compaction reclaims little instead of thrashing at a
+   fixed floor. (b) alone is worth 45% here. Both touch the GC, so they want a deliberate
+   call.
 
 **Explicitly NOT open: a memory leak.** See §5 — it was chased and does not exist. The soak
 strengthens this: 12.7 M iterations with `rt-closures` flat and every fresh process starting
@@ -129,6 +140,10 @@ All three live in `scripts/fuzz/stress/` and carry usage headers:
   floor at ~1.0–1.7 µs/chunk), because an absolute per-chunk number means nothing without
   them. That row has a ~15% run-to-run spread — don't read a small delta off it.
 - **`reload_cost.blsp`** — fixed-iteration memory harness (see the trap below).
+- **`decay_isolate.blsp`** — thread 6's harness: one operation per `MODE`, throughput per
+  fixed-size window plus RSS, the supervisor's heap, and `:runtime-closures`. It is what
+  turned "the runtime slows down" into "`start-child` appends to the RUNTIME region". Run
+  modes **sequentially** — two in parallel and each one's growth pollutes the other's curve.
 - **`scale_sweep.blsp`** — thread #1's harness, added 2026-07-30. Runs a `std/` framework op
   at N and 4N and prints the ratio (linear ~4×, quadratic ~16×). **Its header carries the
   measurement caveat and must be read first:** `proc/agent update`, `buffer insert` and

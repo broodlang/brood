@@ -1,0 +1,112 @@
+;; decay_isolate — WHICH operation's cost grows as a process churns? (handoff thread 6)
+;;
+;;   MODE=<mode> SECS=<n> WINDOW=<ops> [MAXSECS=<n>] brood scripts/fuzz/stress/decay_isolate.blsp
+;;
+;; This is the harness that found the answer on 2026-07-31: everything is flat EXCEPT the
+;; supervisor child cycle, and its sink is the append-only shared RUNTIME code region
+;; (:runtime-closures grows ~1 per `start-child`, and `terminate-child` reclaims none).
+;; Each window also prints the supervisor's own heap and the caller's live bytes, so a
+;; growing RSS can be attributed to a region rather than guessed at — both LOCAL heaps
+;; GC normally while rt_closures climbs monotonically.
+;;
+;; Run modes SEQUENTIALLY, never in parallel: two runs contend for CPU and memory
+;; bandwidth and each one's growth then pollutes the other's throughput curve.
+;;
+;; The soak does five different things per iteration, so its 8x decay could be any of
+;; them (or the allocator underneath all of them). Each mode below does exactly ONE
+;; thing in a tight loop and reports throughput per fixed-size window alongside RSS.
+;; A mode whose ops/sec falls across windows is a culprit; a mode that stays flat is
+;; exonerated. Fixed window SIZE (not duration) so the windows are comparable.
+;;
+;; modes:
+;;   alloc     - build and drop an immutable map. No processes, no messages. If THIS
+;;               decays, the cause is under everything else (allocator / GC / heap growth).
+;;   cons      - same, but tiny short-lived pairs
+;;   spawn     - (spawn :ok), the placement + process-table path
+;;   sendrecv  - send to self, receive it back. Empty mailbox, no backlog.
+;;   backlog   - queue 64 junk, drain 64. The selective-receive scan path.
+;;   roundtrip - ref-pinned request/reply to a server process (the receive-mark path)
+;;   sup       - start-child, kill it, terminate-child (supervisor + spawn-link)
+;;   reload    - eval a (def ...), i.e. RUNTIME-region churn + late binding
+
+(defmodule decay (:use proc/supervisor))
+
+(def mode (let (e (getenv "MODE")) (if e e "alloc")))
+(def secs (let (e (getenv "SECS")) (if e (string->number e) 180)))
+(def window (let (e (getenv "WINDOW")) (if e (string->number e) 20000)))
+(def maxsecs (let (e (getenv "MAXSECS")) (if e (string->number e) 60)))
+
+(defn rss-kb ()
+  (let (txt (slurp "/proc/self/status") i (index-of txt "VmRSS:"))
+    (if (< i 0) 0
+      (let (chunk (substring txt (+ i 6) (+ i 32))
+            d0 (string-span-until chunk 0 "0123456789")
+            d1 (string-span chunk d0 "0123456789"))
+        (if (>= d0 d1) 0 (string->number (substring chunk d0 d1)))))))
+
+;; ---- the units of work -------------------------------------------------------
+(def srv (spawn (fn () (letrec (loop (fn () (receive ([:ping from r] (do (send from [:reply r :pong]) (loop))))))
+                         (loop)))))
+(def sup (start-supervisor [] {:strategy :one-for-one :max-restarts 100000000 :max-seconds maxsecs}))
+(defn crashy () (receive (:die (error "decay")) (:ok :ok)))
+(defn start-crashy () (spawn-link (crashy)))
+
+(defn ok-child () :done)
+(defn idle-child () (receive (:never :ok) (after 60000 :ok)))
+(defn crash-child () (error "decay"))
+(defn throw-child () (throw :decay))
+(defn stuff (k) (if (= k 0) :ok (do (send (self) [:junk k]) (stuff (- k 1)))))
+(defn drain (k) (if (= k 0) :ok (receive ([:junk _] (drain (- k 1))) (after 2000 :ok))))
+
+(defn unit (n)
+  (cond
+    (= mode "alloc")     (count (assoc {:a 1 :b 2 :c 3} :d n))
+    (= mode "cons")      (count (cons n (cons n nil)))
+    (= mode "spawn")     (spawn :ok)
+    (= mode "sendrecv")  (do (send (self) [:x n]) (receive ([:x _] :ok)))
+    (= mode "backlog")   (do (stuff 64) (drain 64))
+    (= mode "roundtrip") (let (r (ref)) (do (send srv [:ping (self) r]) (receive ([:reply ^r v] v))))
+    (= mode "sup")       (let (pid (start-child sup {:id (mod n 8) :start start-crashy :restart :permanent}))
+                           (do (send pid :die) (terminate-child sup (mod n 8))))
+    (= mode "reload")    (eval (list 'def 'decay-target n))
+    ;; supervisor-free: separate spawn-link from the CRASH and from the error VALUE
+    ;; supervisor cycle WITHOUT a crash: start-child + terminate-child only. Separates
+    ;; "sending the spec across the boundary" from "the restart after a crash".
+    ;; pure supervisor CALL round-trip: no child, no closure, key never found
+    (= mode "supcall")   (terminate-child sup :no-such-child)
+    ;; start a child and leave it: no terminate, no crash
+    (= mode "supstart")  (start-child sup {:id n :start (fn () (spawn-link (idle-child))) :restart :temporary})
+    (= mode "supnocrash") (do (start-child sup {:id (mod n 8) :start (fn () (spawn-link (idle-child))) :restart :temporary})
+                              (terminate-child sup (mod n 8)))
+    (= mode "linkok")    (do (spawn-link (ok-child)) (receive ([:EXIT _ _] :ok) (after 2000 :ok)))
+    (= mode "linkcrash") (do (spawn-link (crash-child)) (receive ([:EXIT _ _] :ok) (after 2000 :ok)))
+    (= mode "linkthrow") (do (spawn-link (throw-child)) (receive ([:EXIT _ _] :ok) (after 2000 :ok)))
+    else                 (error (str "unknown MODE: " mode))))
+
+;; ---- the loop ----------------------------------------------------------------
+(def t-start (now))
+(def deadline (+ t-start (* secs 1000)))
+
+(defn report (w n t0)
+  (let (dt (max 1 (- (now) t0))
+        g (gc-stats))
+    (println (str "w=" w " ops=" n " ops_per_s=" (quot (* n 1000) dt)
+                  " rss_kb=" (rss-kb)
+                  " sup_heap=" (let (i (process-info sup)) (if i (get i :memory) -1))
+                  " sup_mailbox=" (let (i (process-info sup)) (if i (get i :mailbox) -1))
+                  " rt_closures=" (get g :runtime-closures)
+                  " my_live_bytes=" (get g :live-bytes)))))
+
+(defn run (n w wstart)
+  (do
+    (unit n)
+    (if (= 0 (mod (+ n 1) window))
+      (do (report w window wstart)
+          (if (> (now) deadline)
+            (println (str "done mode=" mode " total_ops=" (+ n 1) " rss_kb=" (rss-kb)))
+            (run (+ n 1) (+ w 1) (now))))
+      (run (+ n 1) w wstart))))
+
+(trap-exit true)
+(println (str "mode=" mode " window=" window " secs=" secs))
+(run 0 0 (now))
