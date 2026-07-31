@@ -141,15 +141,17 @@ face carries no colour we map (leave that span the default colour)."
     (when code
       (str "\e[" (if (get face :bold) "1;" "") code "m"))))
 
-(defn repl--paint-spans (src spans i)
-  "Emit `src` from offset `i`, wrapping each `[start end face]` span in its ANSI colour
-and leaving the gaps between spans uncoloured."
-  (if (empty? spans)
-    (substring src i)
-    (let ([s e face] (first spans)
-          painted (let (chunk (substring src s e) sgr (repl--sgr face))
-                    (if sgr (str sgr chunk repl--sgr-reset) chunk)))
-      (str (substring src i s) painted (repl--paint-spans src (rest spans) e)))))
+;; check-allow: deliberately non-tail — depth = highlight spans on one line.
+(check-allow :non-tail-recursion
+  (defn repl--paint-spans (src spans i)
+    "Emit `src` from offset `i`, wrapping each `[start end face]` span in its ANSI colour
+  and leaving the gaps between spans uncoloured."
+    (if (empty? spans)
+      (substring src i)
+      (let ([s e face] (first spans)
+            painted (let (chunk (substring src s e) sgr (repl--sgr face))
+                      (if sgr (str sgr chunk repl--sgr-reset) chunk)))
+        (str (substring src i s) painted (repl--paint-spans src (rest spans) e))))))
 
 (defn repl--colorize (src)
   "`src` with each lexical highlight span ANSI-coloured; unchanged when nothing

@@ -75,19 +75,21 @@ Pure apart from the symbol resolution; testable without a terminal."
                        [state nil])
       else [(try ((eval binding) state key) (catch e state)) nil])))
 
-(defn keymap-bind (keymap keys command)
-  "Bind a key sequence `keys` (a vector of one or more keys) to `command` (a symbol)
-in `keymap`, returning a new keymap — the ergonomic, data-only way to define a
-chord without baking any specific binding into this module. A one-key vector is a
-plain binding; a multi-key vector builds the intermediate prefix sub-keymaps (e.g.
-`[:ctrl-x :ctrl-e]`). Sibling bindings are preserved; an existing prefix sub-keymap
-is extended in place.
+;; check-allow: deliberately non-tail — depth = the bound key-sequence length — a few keys.
+(check-allow :non-tail-recursion
+  (defn keymap-bind (keymap keys command)
+    "Bind a key sequence `keys` (a vector of one or more keys) to `command` (a symbol)
+  in `keymap`, returning a new keymap — the ergonomic, data-only way to define a
+  chord without baking any specific binding into this module. A one-key vector is a
+  plain binding; a multi-key vector builds the intermediate prefix sub-keymaps (e.g.
+  `[:ctrl-x :ctrl-e]`). Sibling bindings are preserved; an existing prefix sub-keymap
+  is extended in place.
 
-    (-> {} (keymap-bind [:ctrl-x :ctrl-e] 'eval-last-sexp)
-           (keymap-bind [:ctrl-x :ctrl-s] 'save-buffer))"
-  (if (= (count keys) 1)
-    (assoc keymap (first keys) command)
-    (let (k (first keys)
-          existing (get keymap k)
-          sub (if (map? existing) existing {}))
-      (assoc keymap k (keymap-bind sub (rest keys) command)))))
+      (-> {} (keymap-bind [:ctrl-x :ctrl-e] 'eval-last-sexp)
+             (keymap-bind [:ctrl-x :ctrl-s] 'save-buffer))"
+    (if (= (count keys) 1)
+      (assoc keymap (first keys) command)
+      (let (k (first keys)
+            existing (get keymap k)
+            sub (if (map? existing) existing {}))
+        (assoc keymap k (keymap-bind sub (rest keys) command))))))

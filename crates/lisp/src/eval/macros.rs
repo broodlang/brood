@@ -287,7 +287,7 @@ fn hyg_lookup(scope: &[(value::Symbol, value::Symbol)], s: value::Symbol) -> Opt
 /// (auto-gensym owns those), not already qualified.
 fn hyg_renamable(s: value::Symbol) -> bool {
     let n = value::symbol_name_ref(s);
-    n != "_" && !n.starts_with('&') && !(n.len() > 1 && n.ends_with('#')) && !n.contains('/')
+    !(n == "_" || n.starts_with('&') || n.contains('/') || (n.len() > 1 && n.ends_with('#')))
 }
 
 /// A fresh replacement symbol for a binder named like `orig`.

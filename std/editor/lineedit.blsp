@@ -355,12 +355,14 @@ all in (and a new project's own globals, since it's the live runtime)."
 ;; redefinable global, so a session on a tall terminal can raise it.
 (def *lineedit-completion-max-rows* 6)
 
-(defn lineedit--chunk (n items)
-  "Consecutive `n`-sized chunks of `items`, **keeping** a trailing partial chunk —
-unlike `partition`, which drops it. A listing must not silently lose its last row."
-  (if (empty? items)
-    '()
-    (cons (take n items) (lineedit--chunk n (drop n items)))))
+;; check-allow: deliberately non-tail — depth = rows of the completion listing being chunked.
+(check-allow :non-tail-recursion
+  (defn lineedit--chunk (n items)
+    "Consecutive `n`-sized chunks of `items`, **keeping** a trailing partial chunk —
+  unlike `partition`, which drops it. A listing must not silently lose its last row."
+    (if (empty? items)
+      '()
+      (cons (take n items) (lineedit--chunk n (drop n items))))))
 
 (defn lineedit--completion-rows (cands width)
   "Pure: the display rows listing `cands` in a `width`-column terminal — laid out
@@ -658,17 +660,19 @@ image), or nil if it isn't a bound symbol. A bare-symbol `eval` is just a lookup
       (if (and (symbol? sym) (bound? sym)) (arglist (eval sym)) nil))
     (catch e nil)))
 
-(defn lineedit--arg-pieces (args idx argi)
-  "`[str face]` pieces for the arglist `args`, bolding the parameter at slot `argi`.
-Marker symbols (`&optional`, `&`) render dim and don't consume a slot."
-  (if (empty? args)
-    '()
-    (let (s (str (first args))
-          marker (or (= s "&optional") (= s "&"))
-          face (if (and (not marker) (= idx argi)) {:bold true} lineedit-face-hint)
-          nidx (if marker idx (inc idx)))
-      (cons [" " lineedit-face-hint]
-        (cons [s face] (lineedit--arg-pieces (rest args) nidx argi))))))
+;; check-allow: deliberately non-tail — depth = the signature hint's argument count.
+(check-allow :non-tail-recursion
+  (defn lineedit--arg-pieces (args idx argi)
+    "`[str face]` pieces for the arglist `args`, bolding the parameter at slot `argi`.
+  Marker symbols (`&optional`, `&`) render dim and don't consume a slot."
+    (if (empty? args)
+      '()
+      (let (s (str (first args))
+            marker (or (= s "&optional") (= s "&"))
+            face (if (and (not marker) (= idx argi)) {:bold true} lineedit-face-hint)
+            nidx (if marker idx (inc idx)))
+        (cons [" " lineedit-face-hint]
+          (cons [s face] (lineedit--arg-pieces (rest args) nidx argi)))))))
 
 (defn lineedit--hint-pieces (full pos)
   "`[str face]` pieces for the signature hint of the call enclosing cursor `pos`
@@ -781,21 +785,23 @@ Returns `st` with `:last-row` 0 (cursor ends on row 0)."
     (term-emit (into [] (append head tail)))
     (assoc st :last-row 0)))
 
-(defn lineedit--multi-line-ops (lines i offset base full overrides prompt cont)
-  "Render ops for the logical `lines` of a multi-line form: each line gets its prompt
-(`prompt` for the first, `cont` after) + its highlight chunks (lexed from `full`, so
-bracket-match overrides spanning lines apply), `[:nl]`-separated. `offset` tracks each
-line's start within the text (past `base`) so the lexer spans land on the right chars."
-  (if (empty? lines)
-    '()
-    (let (line (first lines)
-          pstr (if (= i 0) prompt cont)
-          chunks (highlight-chunks full (+ base offset) line overrides)
-          line-ops (cons [:print pstr] (lineedit--chunk-ops chunks))
-          here (if (= i 0) line-ops (cons [:nl] line-ops)))
-      (append here
-        (lineedit--multi-line-ops (rest lines)
-          (inc i) (+ offset (string-length line) 1) base full overrides prompt cont)))))
+;; check-allow: deliberately non-tail — depth = lines of the input being edited.
+(check-allow :non-tail-recursion
+  (defn lineedit--multi-line-ops (lines i offset base full overrides prompt cont)
+    "Render ops for the logical `lines` of a multi-line form: each line gets its prompt
+  (`prompt` for the first, `cont` after) + its highlight chunks (lexed from `full`, so
+  bracket-match overrides spanning lines apply), `[:nl]`-separated. `offset` tracks each
+  line's start within the text (past `base`) so the lexer spans land on the right chars."
+    (if (empty? lines)
+      '()
+      (let (line (first lines)
+            pstr (if (= i 0) prompt cont)
+            chunks (highlight-chunks full (+ base offset) line overrides)
+            line-ops (cons [:print pstr] (lineedit--chunk-ops chunks))
+            here (if (= i 0) line-ops (cons [:nl] line-ops)))
+        (append here
+          (lineedit--multi-line-ops (rest lines)
+            (inc i) (+ offset (string-length line) 1) base full overrides prompt cont))))))
 
 (defn lineedit--multi-ops (st)
   "The full op vector to repaint a MULTI-line form in place: up over the previous

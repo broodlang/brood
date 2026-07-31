@@ -1311,7 +1311,18 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         heap,
         "gui-open",
         Arity::range(0, 4),
-        Sig::new(vec![string, int, int, map_ty], int),
+        // Every optional arg is also nil-able in place (`(gui-open title nil nil
+        // opts)` opens at the default size), so the params say so — the runtime
+        // treats nil as "use the default" for each.
+        Sig::new(
+            vec![
+                string.union(nil_ty),
+                int.union(nil_ty),
+                int.union(nil_ty),
+                map_ty.union(nil_ty),
+            ],
+            int,
+        ),
         gui_open,
     );
     def(

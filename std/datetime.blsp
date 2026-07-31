@@ -15,13 +15,15 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
   (let (q (quot a b) r (rem a b))
     (if (< r 0) (- q 1) q)))
 
-(defn dt--zero-pad (n width)
-  ;; Render n as a decimal string of at least `width` digits. Handles negative n.
-  (if (< n 0)
-    (str "-" (dt--zero-pad (- n) (- width 1)))
-    (let (s (number->string n)
-          pad (- width (string-length s)))
-      (if (> pad 0) (str (string-repeat "0" pad) s) s))))
+;; check-allow: deliberately non-tail — depth = the pad width — single digits.
+(check-allow :non-tail-recursion
+  (defn dt--zero-pad (n width)
+    ;; Render n as a decimal string of at least `width` digits. Handles negative n.
+    (if (< n 0)
+      (str "-" (dt--zero-pad (- n) (- width 1)))
+      (let (s (number->string n)
+            pad (- width (string-length s)))
+        (if (> pad 0) (str (string-repeat "0" pad) s) s)))))
 
 ;; ---- Gregorian <-> days-since-Unix-epoch ------------------------------------
 ;; Howard Hinnant's civil_from_days / days_from_civil algorithms.
