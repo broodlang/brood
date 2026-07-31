@@ -12929,3 +12929,48 @@ late armed run's opening rate against run 1's 2041 it/s separates contention fro
 decay with no new experiment. If it is intrinsic it matters more than the RSS growth does —
 a server that slows 8× in half an hour of churn is a worse problem than one that holds a
 gigabyte.
+
+## 2026-07-31 — soak result: 12.7M iterations clean, and an 8× throughput decay a restart cures
+
+The overnight sequence finished: **16/16 runs `OK soak complete`, 12,671,363 self-checking
+iterations, zero failures** (8 armed ~819k each, 8 control ~765k each, over 8 hours).
+Handoff thread 5 is closed — the runtime stays *correct* under sustained load overnight.
+
+**First, a correction to last night's entry.** I claimed a single 9-hour run "needs ~21 GB"
+and would be OOM-killed, and restructured the night around that. The projection was wrong: it
+extrapolated linearly *in time* from the first 400k iterations (~670 it/s), but throughput
+decays ~8× within a run, so a long process does far fewer iterations than a constant-rate
+projection assumes. The long run left going all night reached **3M iterations and 3.06 GB in
+7 hours** — well under its 6 GB cap. **A single 9-hour run would have fit.** This is A8's own
+trap in fresh clothes: I reasoned in MB/*minute* when the driver is MB/*iteration*. The 21 GB
+figure should not be quoted; the sequence was still the better experiment, but not for the
+reason I gave.
+
+**RSS is ~1.0 KB per iteration and deterministic in iteration count, not in time.** Run 1
+(00:07) and run 15 (07:07) hit 354/382, 526/527, 728/690, 923/921 MB at the same four
+iteration marks, seven hours and ~11 M intervening iterations apart.
+
+**The main finding: a process degrades ~8.3× as it churns, and a fresh process is fully
+restored.** Run 1 and run 15 both went 2041/2174 → 633/673 → 362/352 → 259/263 it/s across
+successive 200k segments — the same curve, so last night's "is this just sibling contention?"
+caveat is answered: it is **intrinsic**, driven by the process's own accumulated RSS. The
+long-lived run shows it compounding — its three successive millions took 2988 s, 8453 s,
+13958 s (335 → 118 → 72 it/s). But run 15 ≡ run 1 means there is **no cross-run degradation
+at all**: nothing accumulates outside the process, and a restart recovers everything.
+
+Per-process and reversible is consistent with allocator/page-locality decay against a live
+set of tens of KB — not a leak, and not runtime-region growth (`rt-closures` stays ~70 on
+every armed run all night). `MIMALLOC_PURGE_DELAY=0` does **not** fix it (its probe decayed
+1493 → 430 it/s over 400k). Root cause is not established and is not worth guessing at; this
+is the strongest lead the soak produced. **It reframes thread 3**: the allocator question is
+no longer "how much memory do we spend for speed" but "why are we *losing* 8× of speed to
+retention, and why does only a restart give it back". For a long-lived server that is a
+bigger problem than the footprint.
+
+**ADR-194 attribution, consistent across all 8 pairs:** armed ~819k iterations / ~915 MB /
+`rt-closures` **~70**; control ~765k / ~2.05 GB / `rt-closures` **~760,000**. The control
+copies every closure across a send, so the append-only RUNTIME region grows by ~760k closures
+per run for 7% fewer iterations. Two control runs also showed `rt-threshold` off its 4096
+default (1455526, 562170) — ADR-091 shared-region reclamation engaging, visible only there.
+
+Full write-up, logs and the per-minute `rss.csv`: `~/brood-soak-2026-07-30/README.md`.
