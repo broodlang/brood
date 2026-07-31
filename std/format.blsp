@@ -175,6 +175,19 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
     (get *format-pair-body* (symbol (node-text head-node)) false)))
 
 ;; ---- the inlineability check ------------------------------------------------
+;; Every LEAF node kind that re-emits as exactly its own source text. ONE
+;; definition, because `single-line` and `render` both need this set and the two
+;; hand-maintained copies drifted: ADR-196 added `:ratio` and `:decimal` to the CST
+;; and only `render` learned them. `render`'s fallback is `(node-text n)`, so its
+;; output stayed correct — but `single-line`'s fallback is **nil**, meaning "cannot
+;; go on one line", so every form containing a `1/2` or `1.5M` was forced to break:
+;; `(assert= (sqrt 9/4) 1.5)` came out as four lines. A kind missing here is silent
+;; and disfiguring, so the set lives in one place — adding a literal kind to the
+;; reader now only needs this list touched.
+(def *verbatim-kinds*
+  #{:symbol :keyword :int :float :ratio :decimal :bool :nil :error})
+(defn verbatim-kind? (k) (contains? *verbatim-kinds* k))
+
 ;; Single-line emit: returns the string, or nil if the node cannot legally
 ;; appear on one line (it contains a comment, or a string with a literal
 ;; newline). Recursive — a list inlines only if every child does.
@@ -186,7 +199,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
       (= k :comment) nil
       ; comments always break
       (= k :str) (single-line--str (node-text n))
-      (or (= k :symbol) (= k :keyword) (= k :int) (= k :float) (= k :bool) (= k :nil) (= k :error)) (node-text n)
+      (verbatim-kind? k) (node-text n)
       (= k :quote) (single-line--wrap "'" (node-form n))
       (= k :quasi) (single-line--wrap "`" (node-form n))
       (= k :unquote) (single-line--wrap "~" (node-form n))
@@ -233,8 +246,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
 (defn render (n indent)
   (let (k (node-kind n))
     (cond
-      (or (= k :symbol)
-        (= k :keyword) (= k :int) (= k :float) (= k :bool) (= k :nil) (= k :error) (= k :str)) (node-text n)
+      (or (verbatim-kind? k) (= k :str)) (node-text n)
       (= k :quote) (render--wrap "'" (node-form n) indent)
       (= k :quasi) (render--wrap "`" (node-form n) indent)
       (= k :unquote) (render--wrap "~" (node-form n) indent)

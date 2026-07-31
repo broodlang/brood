@@ -11,6 +11,35 @@
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-fmt-safe-")
 
+(describe "format: every literal kind stays inlineable"
+  ;; Regression: `single-line` enumerated the leaf node kinds by hand and returned nil
+  ;; ("cannot go on one line") for anything unlisted. When ADR-196 added ratio and
+  ;; decimal literals to the CST, only `render` learned them — so any form containing a
+  ;; `1/2` or a `1.5M` was force-broken, and a tree-wide `nest format` exploded
+  ;; `(assert= (sqrt 9/4) 1.5)` into four lines. Both now share `verbatim-kind?`.
+  ;;
+  ;; One case per leaf kind the reader can produce, so the next literal kind added
+  ;; without teaching the formatter fails here instead of quietly disfiguring the tree.
+  (test "a ratio literal does not force a break"
+    (assert= (format-source "(sqrt 9/4)") "(sqrt 9/4)\n")
+    (assert= (format-source "(assert= (sqrt 9/4) 1.5)") "(assert= (sqrt 9/4) 1.5)\n")
+    (assert= (format-source "(list 1/2 -3/4 22/7)") "(list 1/2 -3/4 22/7)\n"))
+  (test "a decimal literal does not force a break"
+    (assert= (format-source "(floor 1.5M)") "(floor 1.5M)\n")
+    (assert= (format-source "(list 1.50M 0M -3.14M)") "(list 1.50M 0M -3.14M)\n"))
+  (test "every leaf kind inlines: symbol keyword int float ratio decimal bool nil string"
+    (assert= (format-source "(f a :k 1 1.5 1/2 1.5M true nil \"s\")")
+      "(f a :k 1 1.5 1/2 1.5M true nil \"s\")\n"))
+  ;; The contract that actually protects the tree: formatting must not GROW a file that
+  ;; is already canonical. A forced break is visible as extra lines.
+  (test "a canonical one-line form is unchanged, so re-formatting cannot grow it"
+    (dolist (src (list "(sqrt 9/4)" "(floor 1.5M)" "(list 1/2)" "(f 22/7 1.5M)"))
+      (let (out (format-source src))
+        (assert= out (str src "\n"))
+        (assert= (count-newlines out) 1)
+        ;; and idempotent
+        (assert= (format-source out) out)))))
+
 (describe "format: trivial inputs"
   (test "empty input yields empty output" (assert= (format-source "") ""))
   (test "a single form gets a trailing newline" (assert= (format-source "(+ 1 2)") "(+ 1 2)\n"))
