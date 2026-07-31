@@ -67,6 +67,14 @@ as a unit — descending through them is a deferred refinement."
   "The form (non-whitespace, non-comment) children of `anode`."
   (filter form? (or (get anode :kids) (list))))
 
+(defn top-level-forms (text)
+  "The top-level forms of `text`, in order, each a positioned node `{:kind :start
+:end …}` with half-open character offsets. Error-tolerant (the reader's CST
+recovers), so it answers over source someone is mid-typing — which form contains
+point, where each form ends — without a completeness gate; whether the text
+*evaluates* is a separate `read-all` question."
+  (forms-of (tree text)))
+
 ;; ---- narrowing: bound structural queries to the forms around point ----------
 ;; `parse-source-positioned` plus the CST walk below are O(buffer): at the bottom of a
 ;; large file a single `forward-sexp` parses every top-level form and filters the root's

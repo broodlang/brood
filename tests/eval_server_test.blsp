@@ -1,0 +1,98 @@
+;; std/tool/eval-server.blsp — the wire codec (pure), the capturing eval core,
+;; and the timed answer path (spawned evaluator + deadline kill). The stdin/stdout
+;; loop itself is two lines over these and is exercised end-to-end by its clients
+;; (myedit's sandbox); everything of substance is testable in-image here.
+
+(defmodule eval-server-test (:use eval-server) (:use test))
+
+;; ---- codec --------------------------------------------------------------------
+
+(describe "eval-server codec"
+  (test "a request round-trips through one line"
+    (let (line (evsrv-encode-request 7 "(+ 1 2)" 2000)
+          req (evsrv-decode-request line))
+      (assert= (get req :id) 7)
+      (assert= (get req :src) "(+ 1 2)")
+      (assert= (get req :timeout-ms) 2000)))
+
+  (test "multi-line source with strings and quotes stays one physical line"
+    (let (src "(defn f (x)\n  (str \"a\\\"b\" x))\n(f \"\\n\")"
+          line (evsrv-encode-request 1 src nil))
+      (is (= (index-of line "\n") -1))
+      (assert= (get (evsrv-decode-request line) :src) src)))
+
+  (test "a nil timeout-ms survives the round-trip"
+    (assert= (get (evsrv-decode-request (evsrv-encode-request 3 "1" nil)) :timeout-ms)
+      nil))
+
+  (test "garbage lines decode to nil, not an error"
+    (assert= (evsrv-decode-request "not a map") nil)
+    (assert= (evsrv-decode-request "(unclosed") nil)
+    (assert= (evsrv-decode-request "") nil)
+    (assert= (evsrv-decode-request "{:id \"seven\" :src \"1\"}") nil)  ; id not an int
+    (assert= (evsrv-decode-request "{:id 1}") nil))                    ; no :src
+
+  (test "a reply round-trips, and a non-map reply line decodes to nil"
+    (let (r (evsrv-decode-reply (evsrv-encode-reply {:id 4 :ok true :value "3"})))
+      (assert= (get r :id) 4)
+      (assert= (get r :ok) true))
+    (assert= (evsrv-decode-reply "loose print from a stray process") nil)))
+
+;; ---- eval-capturing -----------------------------------------------------------
+
+(describe "eval-capturing"
+  (test "value of the last form, no output"
+    (let (r (eval-capturing "(+ 1 2) (* 2 21)"))
+      (assert= (get r :ok) true)
+      (assert= (get r :value) "42")
+      (assert= (get r :output) "")
+      (is (int? (get r :ms)))))
+
+  (test "keeps both halves: the value AND what was printed"
+    (let (r (eval-capturing "(do (print \"hi\") 7)"))
+      (assert= (get r :value) "7")
+      (assert= (get r :output) "hi")))
+
+  (test "an error keeps the output printed before the throw"
+    (let (r (eval-capturing "(do (print \"before\") (error \"boom\"))"))
+      (assert= (get r :ok) false)
+      (is (includes? (get r :error) "boom"))
+      (assert= (get r :output) "before")))
+
+  (test "an unreadable source is an error reply, not a raise"
+    (assert= (get (eval-capturing "(unclosed") :ok) false))
+
+  (test "a failed eval leaves no dangling capture"
+    (eval-capturing "(error \"x\")")
+    (assert= (with-out-str (print "clean")) "clean"))
+
+  (test "a huge value elides instead of flooding the reply"
+    (is (includes? (get (eval-capturing "(range 10000)") :value) "…"))))
+
+;; ---- eval-server-answer: the timed path ----------------------------------------
+
+(describe "eval-server-answer"
+  (test "a normal request answers with its own id"
+    (let (r (eval-server-answer {:id 9 :src "(+ 20 22)"}))
+      (assert= (get r :id) 9)
+      (assert= (get r :ok) true)
+      (assert= (get r :value) "42")))
+
+  (test "session defs persist across requests"
+    (eval-server-answer {:id 1 :src "(defn evsrv-test-triple-x9 (n) (* 3 n))"})
+    (assert= (get (eval-server-answer {:id 2 :src "(evsrv-test-triple-x9 14)"}) :value)
+      "42"))
+
+  (test "a runaway eval times out, is killed, and the session survives"
+    (let (r (eval-server-answer
+              {:id 5 :src "(letrec (go (fn () (go))) (go))" :timeout-ms 60}))
+      (assert= (get r :ok) false)
+      (assert= (get r :timeout) true)
+      (assert= (get r :id) 5))
+    ;; the image is intact: the very next request evaluates normally
+    (assert= (get (eval-server-answer {:id 6 :src "(+ 1 1)"}) :value) "2"))
+
+  (test "an evaluated error is a reply, never a raise"
+    (let (r (eval-server-answer {:id 8 :src "(error \"deliberate\")"}))
+      (assert= (get r :ok) false)
+      (is (includes? (get r :error) "deliberate")))))

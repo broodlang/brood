@@ -12807,3 +12807,52 @@ say otherwise — runtime availability stays a `try`. The claim is narrower and 
 you can now tell "this binary lacks the feature" from "this feature failed", which is
 exactly the distinction the error-message match could not make.
 
+
+## ADR-198 — `std/tool/eval-server`: a persistent, image-isolated evaluator on a line protocol
+
+**Status:** accepted + implemented (2026-07-30).
+
+**Context.** Evaluating text a user is *currently typing* (an editor playground, a
+remote REPL pane) needs three properties at once: it must not be able to mutate the
+host image (all processes share one global table — ADR-013 — so an in-image
+`eval-string` of `(defn cmd-forward-char …)` redefines the running editor), it must
+survive a runaway form (kill one eval, keep the session), and it must answer in
+milliseconds (a debounced on-type loop can't pay a runtime start per keystroke).
+Nothing shipped covers the triple: in-image `task` eval is fast and hang-safe but
+not mutation-safe; `%isolate` is unusable next to concurrent writers (ADR-017 — its
+wholesale global-table restore, and it reaps pids); spawn-per-run subprocesses
+(myedit's testrun shape) are safe but pay full startup per request; `nest mcp`'s
+eval tool is per-session but speaks MCP JSON-RPC and has no per-eval timeout.
+
+**Decision.** A `std/tool` module that is both halves of the missing piece:
+
+- **The server** (`eval-server-run`) is the whole program of a *dedicated child
+  runtime* (`nest run` a two-line script). It prints `{:ready true}`, then answers
+  one request per stdin line until EOF. Each request evaluates in a spawned green
+  process with a `receive`/`after` deadline; on timeout the child process is
+  hard-killed (`exit :kill`, honoured at the next reduction tick) and the reply is
+  `{:timeout true}` — the session *image* survives its own runaways. Definitions
+  persist across requests (one live image; that is the feature — interactive
+  sessions build on their own defs); **reset = the client respawns the child**, no
+  in-child `%isolate`.
+- **The wire** is `pr-str`ed maps, one per physical line — both ends are Brood, so
+  `read-string` is the parser and string escaping keeps multi-line `:src` on one
+  line. No JSON dependency, no Content-Length framing (that earns its keep only
+  against a foreign peer, as in LSP). Codec fns are pure and shared by clients;
+  decoders return nil on garbage so both sides skip noise instead of dying.
+- **The core** (`eval-capturing`) pairs `%capture-begin`/`%capture-take` around
+  `eval-string` and returns `{:ok :value :output :error :ms}` — both halves a REPL
+  shows (the value *and* what was printed), which `with-out-str` can't (it discards
+  the value). `:value` is `pr-str-bounded`, so a huge result elides instead of
+  flooding the pipe. Lifted from myedit's `eval-command--capturing`, where it had
+  been editor-private despite being generic.
+
+**Consequences.** An editor playground gets REPL-grade on-type evaluation with the
+host image untouchable by construction — isolation by OS process boundary, the one
+mechanism that needs no new kernel surface and no trust in the evaluated text's
+cooperation. Known, documented trade-offs: a timeout may leave *partial* defs in
+the session (`eval-string` is sequential) — acceptable in a sandbox, and clients
+that re-send whole units of source are self-healing; and a process the evaluated
+code spawns can print between protocol lines after its capture is popped, which is
+why reply decoding is nil-on-garbage rather than strict. Dev-tools tier
+(`DEV_MODULES`): a lean release ships no arbitrary-eval server.

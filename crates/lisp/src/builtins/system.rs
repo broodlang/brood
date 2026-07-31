@@ -1127,6 +1127,12 @@ const DEV_MODULES: &[EmbeddedModule] = &[
     // binaries (`brood`, `nest repl`) just bootstrap into `(repl-run)`. A shipped
     // app runs its own `:main`, never the REPL.
     embedded_module!("repl", "std/tool/repl.blsp"),
+    // A persistent, image-isolated evaluator: a dedicated child runtime runs
+    // `(eval-server-run)` — one `pr-str`ed request map per stdin line, one reply
+    // line back — so a parent (an editor playground, a remote REPL) gets
+    // REPL-grade eval with per-request timeouts without exposing its own global
+    // table. The pure codec half is shared by clients (ADR-198).
+    embedded_module!("eval-server", "std/tool/eval-server.blsp"),
 ];
 
 /// Empty in a lean (`--no-default-features`) release runtime — the dev modules

@@ -132,6 +132,21 @@ core knows nothing about buffers."
 ;; stash both; close one → `close-context`. The view reads whatever facets it wants
 ;; off the active layers via `(layer-collect ctx :some-facet)`.
 ;;
+;; ---- 7. Facets beyond :keymap/:hooks ----------------------------------------
+;; Any key on a layer is a facet an app can collect; two vocabulary entries are
+;; worth standardising because more than one app wants the same seam:
+;;
+;;   * services — a facet holding a fn SYMBOL the app `eval`s at use (late-bound,
+;;     hot-swappable), e.g. an editor's `:fontify`/`:indent`/`:complete-at`. The
+;;     app defines the signature; layers supply implementations.
+;;   * `:post-key` — a GUARD run after key dispatch: `(fn (ctx-before ctx-after
+;;     key) -> ctx)`, applied by the app's loop for each active layer defining it
+;;     (highest precedence first, each seeing the previous one's result). Because
+;;     contexts are immutable, "this edit isn't allowed here" is simply returning
+;;     `ctx-before` — the canonical way a layer protects read-only regions (a
+;;     shell prompt, generated prose around an editable playground) without the
+;;     app hardcoding per-layer checks in its dispatch path.
+;;
 ;; ---- semantics to remember -------------------------------------------------
 ;;   * head of :layers = highest precedence (keymap merge + hook order).
 ;;   * dormant != deactivated: leaving a context never fires :deactivate.

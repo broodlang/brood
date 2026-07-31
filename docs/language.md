@@ -2847,6 +2847,9 @@ The following modules are also opt-in and live under `std/net/` and `std/tool/`:
 (require 'fuzzy)      ; fuzzy string matching
 (require 'log)        ; structured logging
 (require 'task)       ; promise-style async tasks over processes
+(require 'eval-server) ; persistent image-isolated evaluator for a dedicated child
+                      ;   runtime: eval-server-run (stdin/stdout line loop) +
+                      ;   eval-capturing + the pure wire codec its clients share (ADR-198)
 ```
 
 ### Telemetry (`require 'telemetry`)
