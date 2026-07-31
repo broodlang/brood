@@ -12856,3 +12856,16 @@ that re-send whole units of source are self-healing; and a process the evaluated
 code spawns can print between protocol lines after its capture is popped, which is
 why reply decoding is nil-on-garbage rather than strict. Dev-tools tier
 (`DEV_MODULES`): a lean release ships no arbitrary-eval server.
+
+**Amendments (2026-07-31, review fixes + tracing).** (1) `demonitor` here is
+best-effort, so the per-request evaluator's `:normal` DOWN was leaking into the
+server mailbox forever — the answer path now drains it and the stale-flush reaps
+`[:down …]` letters. (2) The decoder validates `:timeout-ms` (a malformed field is
+a skipped line, never a raise out of the loop) and the answer path clamps as a
+belt. (3) `:output` is capped (`*output-cap-chars*` + marker) — the `:value`
+bound's rationale applied to the other half. (4) A request may carry
+`:trace ["fn" …]`: names are boundary-traced (`debug/trace-fn`) with the trace
+re-attempted after each form (so a `defn` and its call in one request trace), the
+reply gains bounded `:spy` entries, and `untrace-all` restores on every path
+including a timeout kill. This is what lets an editor tutorial show *the workings*
+of an evaluation without any client-side instrumentation.

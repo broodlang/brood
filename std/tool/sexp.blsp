@@ -72,7 +72,9 @@ as a unit — descending through them is a deferred refinement."
 :end …}` with half-open character offsets. Error-tolerant (the reader's CST
 recovers), so it answers over source someone is mid-typing — which form contains
 point, where each form ends — without a completeness gate; whether the text
-*evaluates* is a separate `read-all` question."
+*evaluates* is a separate `read-all` question. Note recovery means a node may be
+`:kind :error` (e.g. an unterminated string swallowing the rest of the text) —
+fine for position queries, but don't feed the returned spans to `eval` unchecked."
   (forms-of (tree text)))
 
 ;; ---- narrowing: bound structural queries to the forms around point ----------
