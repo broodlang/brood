@@ -1,0 +1,151 @@
+;; std/tool/eval-server.blsp — a persistent, image-isolated evaluator: run this
+;; module's loop in a DEDICATED runtime (`nest run` a two-line script) and feed it
+;; eval requests over stdin, one per line; each reply comes back on stdout, one per
+;; line. The parent gets REPL-grade evaluation — value, captured output, errors,
+;; per-request timeout — without ever exposing its own global table to the code
+;; being evaluated. This is the missing middle between in-image `eval-string`
+;; (fast, but a stray `def` rewrites the live parent — unacceptable for evaluating
+;; *untrusted-by-construction* text like an editor playground) and spawn-per-run
+;; subprocesses (safe, but a full runtime start per eval).
+;;
+;; Session semantics: definitions persist across requests — the child is one live
+;; image, so `(defn f …)` in request 1 is callable in request 2. That is a feature
+;; (a tutorial lesson builds on its own defs); the RESET is the client's job:
+;; respawn the child. There is deliberately no in-child `%isolate` — ADR-017's
+;; wholesale global-table swap is unsound next to concurrent writers, which is
+;; exactly why a live editor can never run one (see myedit's testrun preamble).
+;;
+;; Two caveats, documented rather than fought:
+;;  - a request killed on timeout may have run some of its forms (`eval-string` is
+;;    sequential), so the session may hold partial defs — acceptable in a sandbox,
+;;    and any client that re-sends whole units of source is self-healing;
+;;  - a process the evaluated code spawns can print AFTER its request's capture is
+;;    popped, and that text lands on raw stdout between protocol lines — so a
+;;    client must skip lines that don't decode (`evsrv-decode-reply` → nil).
+
+(defmodule eval-server
+  "A line-protocol eval server for a dedicated runtime, plus the pure codec its
+client shares. Run `(eval-server-run)` as the child's whole program; it prints
+`{:ready true}` and then answers one `pr-str`ed request map per stdin line —
+`{:id 7 :src \"(+ 1 2)\" :timeout-ms 2000}` — with one reply line:
+`{:id 7 :ok true :value \"3\" :output \"\" :ms 0}` (or `:ok false` with `:error`,
+or `:timeout true`). `eval-capturing` is the reusable core: evaluate a source
+string and keep BOTH halves a REPL shows — the value and what it printed.
+`(require 'eval-server)`.")
+
+;; The deadline applied when a request doesn't carry one. Module-scoped (plain
+;; `def`, not `defdyn`): the server honours the per-request `:timeout-ms` first,
+;; so a client that wants a different policy sends it rather than reaching in.
+(def *default-timeout-ms* 5000)
+
+;; ---- the wire codec (pure; shared by server and client) ----------------------
+;; One `pr-str`ed map per physical line. Both ends are Brood, so the reader IS the
+;; parser and `pr-str`'s string escaping keeps any multi-line `:src` on one line —
+;; no JSON dependency, no Content-Length framing (that machinery earns its keep
+;; only when the peer is foreign, as in LSP). Decoders return nil on any line that
+;; isn't a well-formed message, so both sides can skip noise instead of dying.
+
+(defn evsrv-encode-request (id src timeout-ms)
+  "One request line (no trailing newline): `id` an int, `src` the Brood source to
+evaluate (may span lines — it's escaped), `timeout-ms` an int or nil for the
+server default."
+  (pr-str {:id id :src src :timeout-ms timeout-ms}))
+
+(defn evsrv-decode-request (line)
+  "The request map in `line`, or nil when the line isn't one (garbage, blank, a
+stray print). A request must carry an int `:id` and a string `:src`."
+  (try
+    (let (v (read-string line))
+      (if (and (map? v) (int? (get v :id)) (string? (get v :src))) v nil))
+    (catch _ nil)))
+
+(defn evsrv-encode-reply (reply)
+  "One reply line (no trailing newline) for `reply`, a map. The boot banner
+`{:ready true}` and the per-request replies all travel through here."
+  (pr-str reply))
+
+(defn evsrv-decode-reply (line)
+  "The reply map in `line`, or nil when the line isn't one — a client skips nil
+lines (see the module preamble on stray output)."
+  (try
+    (let (v (read-string line))
+      (if (map? v) v nil))
+    (catch _ nil)))
+
+;; ---- the evaluation core ------------------------------------------------------
+
+(defn eval-capturing (src)
+  "Evaluate source string `src` (all its forms, in order) with stdout captured;
+return `{:ok true :value <pr-str-bounded> :output <string> :ms <int>}` or
+`{:ok false :error <message> :output <string> :ms <int>}`. Never throws, and pops
+the capture buffer on every path, so a failed eval can't leave a dangling capture.
+Keeps BOTH halves a REPL shows — the value and what was printed — which
+`with-out-str` can't (it discards the value). `:value` is display-bounded
+(`*print-length*`/`*print-level*`), so a huge structure elides with `…` instead
+of flooding whatever pipe the reply crosses."
+  (let (t0 (now))
+    (do
+      (%capture-begin)
+      (try
+        (let (v (eval-string src))
+          {:ok true :value (pr-str-bounded v) :output (%capture-take)
+           :ms (- (now) t0)})
+        (catch e
+          {:ok false :error (error-message e) :output (%capture-take)
+           :ms (- (now) t0)})))))
+
+;; ---- per-request timeout: eval in a child process, kill on deadline ----------
+;; The same shape as the REPL's interruptible eval (std/tool/repl.blsp): run the
+;; eval in its own green process and park in `receive` with an `after` deadline;
+;; the untrappable `(exit child :kill)` lands at the child's next reduction tick
+;; (~4ms even mid-JIT-loop), so a runaway `(loop-forever)` costs one deadline, not
+;; the image. `def`s the child makes reach the shared global table (ADR-013), so
+;; the session survives its own timeouts.
+
+(defn eval-server--flush-stale ()
+  ;; Reap any result a killed child managed to send before the kill landed, so it
+  ;; can never be mistaken for a later request's answer (results are also matched
+  ;; by pinned id — this just keeps the mailbox from accreting corpses).
+  (receive
+    ([:evsrv-result _ _] (eval-server--flush-stale))
+    (after 0 nil)))
+
+(defn eval-server-answer (req)
+  "The reply map for request map `req` (`:id` `:src`, optional `:timeout-ms`),
+evaluating in a spawned green process: the eval's own result on completion,
+`{:id id :ok false :timeout true}` after the deadline (the evaluator is
+hard-killed; the session image survives), or `:ok false` with `:error` if the
+evaluator process died without answering."
+  (let (id (get req :id)
+        src (get req :src)
+        timeout (or (get req :timeout-ms) *default-timeout-ms*)
+        me (self)
+        _ (eval-server--flush-stale)
+        child (spawn (send me [:evsrv-result id (eval-capturing src)]))
+        ref (monitor child))
+    (receive
+      ([:evsrv-result ^id r] (do (demonitor ref) (assoc r :id id)))
+      ([:down ^ref ^child reason]
+        {:id id :ok false :error (str "evaluator died: " (pr-str reason)) :ms 0})
+      (after timeout
+        (do (exit child :kill)
+          (demonitor ref)
+          {:id id :ok false :timeout true :ms timeout})))))
+
+;; ---- the server loop ----------------------------------------------------------
+
+(defn eval-server--loop ()
+  (let (line (read-line))
+    (when line                       ; nil = EOF: the parent closed stdin — done
+      (let (req (evsrv-decode-request line))
+        (when req
+          (println (evsrv-encode-reply (eval-server-answer req)))))
+      (eval-server--loop))))
+
+(defn eval-server-run ()
+  "Run the eval server: print the `{:ready true}` banner, then answer one request
+per stdin line until EOF. This is the child's whole program — a client spawns
+`nest run <script>` where the script is `(require 'eval-server)`
+`(eval-server-run)`, and drives it over stdin/stdout."
+  (println (evsrv-encode-reply {:ready true}))
+  (eval-server--loop))

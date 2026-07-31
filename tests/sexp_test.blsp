@@ -139,3 +139,22 @@
     ; kill foo bar, keep the )
     (assert= (point-kill-end "(foo bar)" 1) 8)
     (assert= (point-kill-end "(foo\n bar)" 1) 4)))
+
+(describe "top-level-forms"
+  (test "each top-level form, in order, with half-open offsets"
+    (let (forms (top-level-forms "(+ 1 2)\n(defn f (x) x)"))
+      (assert= (count forms) 2)
+      (assert= (get (first forms) :start) 0)
+      (assert= (get (first forms) :end) 7)
+      (assert= (get (first (rest forms)) :start) 8)
+      (assert= (get (first (rest forms)) :end) 22)))
+  (test "comments and whitespace are not forms"
+    (assert= (count (top-level-forms ";; just a comment\n\n  (a)  ")) 1))
+  (test "empty and blank text have no forms"
+    (assert= (top-level-forms "") ())
+    (assert= (top-level-forms "  \n ;; c\n") ()))
+  (test "answers over incomplete source (mid-typing) without raising"
+    ;; the reader's CST recovers: the closed form is there with exact offsets
+    (let (forms (top-level-forms "(done 1)\n(unclosed"))
+      (is (>= (count forms) 1))
+      (assert= (get (first forms) :end) 8))))
