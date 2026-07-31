@@ -4,7 +4,8 @@
 measurements live in [`devlog.md`](devlog.md); the option book lives in
 [`runtime-frontier.md`](runtime-frontier.md). Read this to pick the work back up cold.
 
-**As of 2026-07-30**, brood `56c2501`, brood-benchmarks `10d669e`. Nothing half-finished.
+**As of 2026-07-31**, brood `6d4bbfb5`, brood-benchmarks `10d669e`. Nothing half-finished.
+The overnight soak is done (thread 5, closed) and produced a new thread 6.
 
 Since the perf session this document was written for, the tree also gained **automatic macro
 hygiene** and **exact rationals as a kernel type** (`Value::Ratio`, ADR-196 — `1/2` is a
@@ -75,33 +76,43 @@ From the published run (`brood-benchmarks/results/`):
    The receive-mark only helps receives that *pin a ref*; a server loop matching several tags
    still walks its backlog (BEAM solves that with a saved scan position per receive **site**,
    a different mechanism from the per-ref mark).
-3. **Allocator policy — a decision, not work.** `MIMALLOC_PURGE_DELAY=0` returns 17% of RSS on
-   a light workload and ~2.3× on heavy churn, for ~4% throughput. The default is the
-   deliberate "spend memory for speed" call from 2026-06-15; the runtime now targets
-   long-lived servers. Someone should decide, not discover it by accident.
+3. **Allocator policy — reframed by the soak, and no longer just a decision.**
+   `MIMALLOC_PURGE_DELAY=0` returns 17% of RSS on a light workload and ~2.3× on heavy churn,
+   for ~4% throughput, and the default is the deliberate "spend memory for speed" call from
+   2026-06-15. But the overnight soak found we are **losing** 8× of throughput to retention
+   (thread 6), and purge-0 does not fix that. So the question is no longer "how much memory
+   do we spend for speed" — it is why the spend is buying negative speed. Settle thread 6
+   first; this decision probably falls out of it.
 4. **Per-process memory floor** — 5.9 KB vs the BEAM's 3.1 KB, roughly half unattributed.
    Frontier section B. Needs an allocator size-class histogram behind a cargo feature; there
    is no heaptrack/valgrind on this box, only `perf`.
-5. **Endurance — an overnight run went 2026-07-30/31; results in `~/brood-soak-2026-07-30/`
-   (read its `README.md`, then `sequence.log`).** Against a pinned copy of the `86cd3fb3`
-   binary, so a rebuild can't change what was tested. The detector was verified to trip
-   first: draining one message fewer than queued gave `ERROR at iteration 0: backlog lost:
-   saw 63 of 64`.
-   **One 9-hour run does not fit, and that is the night's first finding: RSS under sustained
-   churn grows ~1 KB/iteration and does not plateau — with OR without
-   `MIMALLOC_PURGE_DELAY=0`** (24 → 270 → 474 MB at 0/200k/400k iterations with purge 0;
-   ~34 MB/min armed and ~73 MB/min control on the default allocator). At ~670 it/s a 9-hour
-   run needs ~21 GB, so it would be OOM-killed partway and prove nothing. **This sharpens
-   thread 3 from a preference into a constraint: no allocator configuration currently
-   available lets this workload run unbounded for a night.**
-   So the night was covered by a *sequence* of 30-minute runs (the validated duration),
-   alternating armed and control, each reaching a definite `OK` with memory released in
-   between — plus one default-config run left going deliberately to measure the growth curve
-   to its 6 GB cap. Every run is capped in its own systemd scope, so a runaway dies alone.
-   `SOAK_REPORT` is in *iterations*, so `rss_kb` is comparable at equal `iter=` — never at
-   equal `t=`, which is the time-boxed trap in §5.
+5. **Endurance — CLOSED 2026-07-31. 16/16 soak runs OK, 12,671,363 self-checking iterations,
+   zero failures** over 8 hours (8 armed ~819k each, 8 control ~765k each), against a pinned
+   copy of the `86cd3fb3` binary. Detector verified to trip first. Full write-up, logs and a
+   per-minute `rss.csv`: **`~/brood-soak-2026-07-30/README.md`**. The runtime stays *correct*
+   under sustained load overnight; what it does not stay is *fast* — see the new thread 6.
+   Two measurement notes worth keeping: RSS is **~1.0 KB per iteration and deterministic in
+   iteration count, not in time** (run 1 and run 15, 7 h apart, matched to within noise at
+   the same four iteration marks), and I published a wrong "a 9-hour run needs ~21 GB"
+   projection by extrapolating MB/*minute* when the driver is MB/*iteration* — the long run
+   actually reached 3M iterations / 3.06 GB in 7 h. A8's trap, freshly re-stepped-in.
 
-**Explicitly NOT open: a memory leak.** See §5 — it was chased and does not exist.
+6. **Throughput decays ~8× within a churning process, and only a restart recovers it — NEW,
+   and the strongest lead the soak produced.** A soak process goes **2174 → 263 it/s** across
+   four successive 200k-iteration segments (29 minutes), tracking its own RSS; the long-lived
+   run compounds it, its three successive millions taking 2988 s / 8453 s / 13958 s
+   (335 → 118 → 72 it/s). But there is **zero cross-run degradation** — run 15 matches run 1
+   to within noise after 7 hours and ~11 M intervening iterations — so the cost is
+   **per-process and fully reversible.** That rules out a leak and rules out runtime-region
+   growth (`rt-closures` sits at ~70 on every armed run all night), and is consistent with
+   allocator/page-locality decay against a live set of tens of KB. `MIMALLOC_PURGE_DELAY=0`
+   does *not* fix it (its probe decayed 1493 → 430 it/s over 400k). Root cause unestablished —
+   don't guess; measure. For the long-lived-server target this is worse than the footprint,
+   and it subsumes thread 3. Start from `perf` on a soak process at t=0 vs t=25 min.
+
+**Explicitly NOT open: a memory leak.** See §5 — it was chased and does not exist. The soak
+strengthens this: 12.7 M iterations with `rt-closures` flat and every fresh process starting
+from the same performance, which is not what a leak looks like.
 
 ## 4. Tools, and how to use them
 
