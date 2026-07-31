@@ -135,6 +135,7 @@ use crate::core::heap::Heap;
 use crate::core::keywords as kw;
 use crate::core::value::{self as value, Symbol, Value};
 use crate::error::Pos;
+use crate::types::Ty;
 
 use ctx::Ctx;
 use walk::{check_into, collect_all_syms, collect_def_names, list_items};
@@ -642,6 +643,31 @@ pub fn check_located(heap: &Heap, form: Value) -> Vec<(Option<Pos>, String)> {
 /// error later anyway, so the checker just stays quiet there.
 pub fn check_file(heap: &mut Heap, forms: &[Value]) -> Vec<(Option<Pos>, String)> {
     check_file_ext(heap, forms, &[])
+}
+
+/// The checker-inferred [`Ty`] of item `arg_index` (0 = the head) of the **call form
+/// recorded at 1-based reader position `line:col`** in `forms` — the position-keyed
+/// type query behind the LSP's record-field completion (`docs/lsp.md`). Runs the full
+/// [`check_file`] analysis with a capture hook armed and discards the diagnostics, so
+/// everything the walk knows is in force at the capture point: the ctor `sig`s a
+/// same-file `defrecord` emits, Gap A value types, same-file function returns, and the
+/// `let`/param bindings + guard narrowings of the enclosing scope.
+///
+/// Keyed by the *call form's* position (the reader records a list's `Pos` at its
+/// opening paren) rather than the argument's own, because the interesting argument is
+/// typically a bare symbol — and the form-pos table is pair-keyed, so a symbol carries
+/// no position. `None` when the form isn't found, the item is missing, or its type
+/// can't be pinned — the caller degrades to no candidates, never a wrong list.
+pub fn arg_ty_at(
+    heap: &mut Heap,
+    forms: &[Value],
+    line: u32,
+    col: u32,
+    arg_index: usize,
+) -> Option<Ty> {
+    walk::arm_arg_ty_query(line, col, arg_index);
+    let _ = check_file(heap, forms);
+    walk::take_arg_ty_query()
 }
 
 /// [`check_file`] with an explicit **KI-17 reachability set** — the file's *transitive*

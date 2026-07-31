@@ -12878,6 +12878,49 @@ correctness, precisely *because* Newton's initial guess underflowed on subnormal
 **Gates:** `make test` **919 passed, 0 failed** (was 7 failed + a panicking in-language suite),
 `nest check` clean but for the one pre-existing JIT-torture advisory, `cargo fmt --all` clean.
 
+## 2026-07-30 (cont.) — LSP: type-directed record-field completion ships
+
+The deferred ROADMAP item ("the hard part is knowing which record the value is — it
+needs the checker's inferred type threaded into the completion path") is done, in
+exactly the shape the deferral predicted: the context detection was easy CST work,
+and the wiring became one new public checker entry point.
+
+**`check::arg_ty_at(heap, forms, line, col, arg_index)`** — a position-keyed type
+query. It arms a thread-local capture (`check/walk.rs`), runs the full `check_file`
+analysis discarding the diagnostics, and returns the inferred `Ty` of item
+`arg_index` of the call form recorded at `line:col`. Running the *real* walk is the
+point: a same-file `defrecord`'s ctor `sig` (registered from the expanded
+`%register-sig` forms), `let`-bound RHS types, sig-typed params, guard narrowings,
+and Gap A global value types are all in force at the capture site, so `(let (p
+(point 1 2)) (get p :…))` resolves `p` with zero new inference machinery. The query
+is keyed by the **call form's** reader position, not the argument's own, because the
+interesting argument is typically a bare symbol and the form-pos table is
+pair-keyed — a symbol carries no position. A macro-duplicated position keeps the
+capture open until something yields a type (`rebuild_list` copies positions).
+
+**The completion side** (`crates/lsp/src/completion.rs`): `record_key_context`
+classifies the cursor's argument slot off the CST — key positions of
+`get`/`update`/`contains?` (slot 2), `assoc` (even slots ≥ 2), `dissoc` (≥ 2), and
+the keyword-accessor head `(:… m)` — and only while the slot is still
+keyword-shaped, so a computed key `(get p k)` stays with the generic candidates.
+Because completion happens mid-edit, the buffer is repaired before the strict read:
+the partial key token is blanked **in place** (byte-for-byte spaces, so every
+offset survives; a lone `:` classifies as a *symbol* and wouldn't read), and
+`close_open_delimiters` appends the missing closers, string- and comment-aware.
+Fields arrive as `:keyword` items (kind FIELD) carrying the declared field type as
+detail; `__id__` is skipped; every miss — unparseable buffer, unknown type, not a
+record — degrades to no extra candidates, never a wrong list. `:` joined the
+trigger characters so the popup fires the moment a key is started.
+
+Deliberately not offered: fields inside a bare **map literal** (the literal under
+construction has no identity to infer from; typing it from an *expected* parameter
+type needs bidirectional checking) — and the cheap "offer every defrecord's fields"
+heuristic stays rejected as noise. Tests: 4 checker-side (`arg_ty_at` on ctor
+args / let-bound / Gap A globals / miss-degradation), 6 LSP-side (mid-edit lone
+`:`, let-bound, typed detail, keyword-accessor head, wrong-slot silences, the
+delimiter closer). Also fixed while there: `docs/lsp.md` still described KI-16
+(fixed 2026-07-27) as open.
+
 ## 2026-07-31 — the overnight soak, and why nine hours does not fit
 
 Set up the unattended endurance run the handoff had been asking for (thread 5). The first

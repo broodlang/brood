@@ -30,6 +30,66 @@ use super::sigs::{
     declared_heap_value_ty, is_globally_bound, sig_of,
 };
 
+thread_local! {
+    /// The armed [`arg_ty_at`](super::arg_ty_at) query, if any — the position-keyed
+    /// type capture behind the LSP's record-field completion. Keyed by the *call
+    /// form's* reader `Pos` (not the argument's own) because the interesting
+    /// argument is typically a bare symbol, and the form-pos table is pair-keyed —
+    /// a symbol carries no position of its own. Captured in [`check_into`]'s walk,
+    /// where the scope `Ctx` (let-bound RHS types, sig-typed params, narrowings)
+    /// is in force at exactly that point.
+    static ARG_TY_QUERY: std::cell::RefCell<Option<ArgTyQuery>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(super) struct ArgTyQuery {
+    line: u32,
+    col: u32,
+    arg_index: usize,
+    result: Option<Ty>,
+}
+
+/// Arm the [`ArgTyQuery`] for the next [`check_into`] walk on this thread.
+pub(super) fn arm_arg_ty_query(line: u32, col: u32, arg_index: usize) {
+    ARG_TY_QUERY.with(|q| {
+        *q.borrow_mut() = Some(ArgTyQuery {
+            line,
+            col,
+            arg_index,
+            result: None,
+        })
+    });
+}
+
+/// Disarm the query and return whatever type it captured.
+pub(super) fn take_arg_ty_query() -> Option<Ty> {
+    ARG_TY_QUERY.with(|q| q.borrow_mut().take()).and_then(|q| q.result)
+}
+
+/// The capture hook — called on every list form the walk visits. When the armed
+/// query names this form (by reader position) and no type has been captured yet,
+/// infer the requested item's type in the scope `ctx` in force here. Macro
+/// expansion can duplicate a position (`rebuild_list` copies it), so a `None`
+/// capture stays open for a later matching form rather than pinning the miss.
+fn capture_arg_ty(heap: &Heap, form: Value, items: &[Value], ctx: &Ctx) {
+    ARG_TY_QUERY.with(|q| {
+        let mut q = q.borrow_mut();
+        let Some(query) = q.as_mut() else { return };
+        if query.result.is_some() {
+            return;
+        }
+        let matches = heap
+            .form_pos_only(form)
+            .is_some_and(|p| p.line == query.line && p.col == query.col);
+        if !matches {
+            return;
+        }
+        if let Some(&arg) = items.get(query.arg_index) {
+            query.result = expr_ty(heap, arg, ctx);
+        }
+    });
+}
+
 /// `symbol_name(s)` is a `String` allocation; we only need the spelling on
 /// the rare *error* paths (unbound / arity / type-disjoint). Wrap as a
 /// no-arg helper so the hot path (the whole `is_local` / `is_syntactic` /
@@ -731,6 +791,7 @@ fn check_into_inner(heap: &Heap, form: Value, ctx: &Ctx, out: &mut Vec<(Option<P
     let Some(items) = list_items(heap, form) else {
         return;
     };
+    capture_arg_ty(heap, form, &items, ctx);
     let Some(&head) = items.first() else { return };
 
     // `(%lint-allow :category body…)` — the expansion of the `check-allow`

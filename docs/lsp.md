@@ -109,6 +109,23 @@ one server that owns the language knowledge.
 > features + top-level `<name>.blsp` on the load-path, via
 > `introspect::loadable_modules`), instead of the generic globals that would be
 > noise there.
+> • **Type-directed record-field completion** (2026-07-30) — at a map-**key**
+> position (`(get M :…)` / `assoc` / `update` / `dissoc` / `contains?`, or the
+> keyword-accessor head `(:… M)`), `completion.rs` asks the checker what record
+> the map argument is and offers **that record's field names** as `:keyword`
+> items, each carrying its declared field type. The plumbing the roadmap said was
+> missing is `check::arg_ty_at` — a position-keyed query that runs the full
+> `check_file` walk with a capture hook armed, so everything the checker knows
+> (a same-file `defrecord`'s ctor sig, `let`-bound RHS types, sig-typed params,
+> Gap A globals) is in force at the capture point. The query is keyed by the
+> *call form's* reader position because the map argument is typically a bare
+> symbol, which the pair-keyed form-pos table records no position for. Mid-edit
+> buffers work: the partial key token is blanked in place (offset-stable) and
+> unclosed delimiters are closed (`close_open_delimiters`) before the strict
+> reader parses the buffer; any miss degrades to no extra candidates. `:` is now
+> a completion trigger character so the fields pop up as the key is started.
+> The cheap "offer every defrecord's fields" heuristic stayed rejected — only
+> the typed map argument's own fields are offered.
 > • **More code actions** — off an `unbound symbol: foo` finding, beyond
 > did-you-mean: **"Add `(require 'mod)`"** when `foo` is a qualified `mod/x` whose
 > module resolves on the load-path (inserted under any `defmodule` header), and
@@ -387,10 +404,9 @@ module/behaviour names there also bind nothing, so they're recognized
 
   > Only `defbehaviour` is relevant here: `(:implements …)` is the *module*-contract
   > seam, and an **ability** is dispatched on a value rather than claimed by a module
-  > header, so it never appears in one. `definition.rs` and `module_ref.rs` still also
-  > match the retired `defprotocol` (dead arms), and `completion.rs` still offers ops
-  > inside a `(defimpl …)` rather than an `(impl …)` — see
-  > [KI-16](known-issues.md), the LSP has not been migrated to ADR-168 yet.
+  > header, so it never appears in one. (The ADR-168 migration lag this note used to
+  > track — `completion.rs` offering ops inside a `(defimpl …)` rather than an
+  > `(impl …)` — was [KI-16](known-issues.md), fixed 2026-07-27.)
 
 **Document links** (`document_link.rs`) are the *passive* counterpart to goto:
 rather than waiting for the cursor, the server underlines **every** module name in
@@ -453,6 +469,7 @@ additive change behind the same feature handlers.
 | **2** | **cross-file** references & rename (+prepareRename), document-highlight, semantic tokens, completion resolve | `scope::references` / `references_to_global`; `project_files`; CST token classification | **done** |
 | **2+** | formatting, workspace symbol, code actions (did-you-mean, remove-unused-require), folding ranges, inlay hints | `introspect::format_source`; `defs::top_level` + `workspace::all_sources`; `global_names`/`names_in_scope` + Levenshtein; CST container/comment walk; `arglist_tokens` | **done** |
 | **2++** | document links + `defmodule`-clause goto/hover, selection range, context-aware module completion, code actions (add-require, create-defn) | `module_ref` clause classifier; `introspect::module_file`/`module_doc`/`loadable_modules`; CST node-chain | **done** |
+| **2+++** | type-directed record-field completion (`:keyword` candidates from the map argument's inferred record shape) | `check::arg_ty_at` (position-keyed checker type query); `record_key_context` CST classifier; mid-edit buffer repair (blank the key, close delimiters) | **done** |
 
 Tier 0 was reachable immediately because syntactic diagnostics need only the
 CST. Goto-definition landed early with Tier 1 (rather than Tier 2 as first
