@@ -1051,6 +1051,11 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // Reusable editor toolkit (content-agnostic); the keybindings + payload are
     // editor policy. Opt-in, never in the prelude.
     embedded_module!("editor/pane", "std/editor/pane.blsp"),
+    // FORM BUFFERS (ADR-199): generated text with editable regions in it — a shell's
+    // input line, a commit message's help block, a tutorial's code boxes, a rebase
+    // todo. Region algebra + `splice` (re-render, keep what the user typed) + the two
+    // `:post-key` guard policies (`:veto` / `:clamp`). Pure over text; opt-in.
+    embedded_module!("editor/formbuf", "std/editor/formbuf.blsp"),
     // Bare ANSI escape *strings* for simple terminal scripts (`print` them
     // directly) — the lightweight counterpart to the `display` render-op
     // protocol. Opt-in, never in the prelude.

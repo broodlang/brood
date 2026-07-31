@@ -18,6 +18,8 @@
 ;; [0, length]; `mark` is a char index or nil. Lines are 0-based; a line's text
 ;; (`buffer-line-at`) includes its trailing newline, matching `rope-line`.
 
+(require 'diff)  ; diff-lines — the change set a region undo filters
+
 (defmodule editor/buffer
   "An immutable text buffer for building editors, written in Brood over the rope
 primitives (ADR-045). A *buffer* is a **record** (so `buffer?` is an identity check, and
@@ -415,6 +417,160 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
         :undo (cons (buffer--snapshot buf) (or (get buf :undo) ()))
         :pending-undo (rest p)))))
 
+;; ---- undo in a region: undo only the lines you selected ----------------------
+;; Emacs's `undo-in-region`, and it costs almost nothing here — because of what
+;; snapshot undo already is. Emacs must maintain a change LOG to know which edits
+;; touched your selection; we keep whole previous texts instead, and the change set
+;; between two texts is exactly what a line diff computes. So selective undo needs no
+;; new undo representation at all: derive the changes on demand (`diff/diff-lines`),
+;; keep the ones that fall inside the region, and drop the rest.
+;;
+;; Reading a diff of OLD -> NEW as "what the user did":
+;;   [:keep l]    unchanged      -> keep it, whatever the region says
+;;   [:insert l]  they added l   -> inside the region, undo means DROP it
+;;   [:delete l]  they removed l -> inside the region, undo means PUT IT BACK
+;; One fold with a current-line counter, and the region test is on the CURRENT side,
+;; because that is the text the user selected in.
+;;
+;; Granularity is the LINE (that is the unit a line diff — and the user's "these
+;; lines" — speaks in); a whole-buffer region reproduces a plain undo exactly.
+
+(defn undo--common-prefix (a b i)
+  ;; how many leading chars `a` and `b` share — bounds the char diff to what changed
+  (if (or (>= i (string-length a)) (>= i (string-length b))
+        (not= (char-at a i) (char-at b i)))
+    i
+    (undo--common-prefix a b (inc i))))
+
+(defn undo--common-suffix (a b lo k)
+  ;; how many trailing chars they share, never eating into the shared prefix `lo`
+  (let (la (string-length a) lb (string-length b))
+    (if (or (>= k (- la lo)) (>= k (- lb lo))
+          (not= (char-at a (- la k 1)) (char-at b (- lb k 1))))
+      k
+      (undo--common-suffix a b lo (inc k)))))
+
+(def *undo-region-char-budget* 4000)
+;; The largest changed SPAN (in chars) a region undo will diff character-by-character.
+;; The LCS diff is O(n²) in time and space, so an unbounded char diff on a huge rewrite
+;; would hang the editor; past this the span is treated as one change (undone whole if it
+;; overlaps the region). Typical edits trim to a handful of chars, so this is never hit
+;; in practice — it exists so the pathological case degrades instead of freezing.
+
+(defn undo--hunk-chars (hunk tag)
+  (apply str (keep (fn (op) (let ([t c] op) (when (= t tag) c))) hunk)))
+
+(defn undo--flush-chunk (hunk n lo hi out)
+  ;; One CHUNK — a run of consecutive changed characters — is one change, and Emacs's
+  ;; rule is that a change is undone when it OVERLAPS the region. An insertion occupies
+  ;; `[n, n+len)` in the current text, so it overlaps when it starts before `hi` and ends
+  ;; after `lo`; a deletion occupies no current characters, so it counts when its
+  ;; position sits inside the region. Overlapping -> emit the OLD characters (undone);
+  ;; otherwise the NEW ones (the change stands). `n` always advances by the characters
+  ;; the current text really has there.
+  (let (adds (undo--hunk-chars hunk :insert)
+        dels (undo--hunk-chars hunk :delete)
+        na (string-length adds)
+        overlap (if (> na 0)
+                  (and (< n hi) (> (+ n na) lo))
+                  (and (>= n lo) (<= n hi)))
+        emit (if overlap dels adds))
+    [(+ n na) (cons emit out)]))
+
+(defn undo--region-restore (old new lo hi)
+  "The text you get by undoing, in `new`, only the changes (vs `old`) that OVERLAP the
+character range `[lo, hi]` — everything else keeps `new`'s version. Character-precise,
+like Emacs's `undo-in-region`: half of a line, or one of two edits on the same line, is
+exactly what you get.
+
+Cheap despite being character-level: the shared prefix and suffix are trimmed first, so
+the diff only ever runs over the span that actually changed."
+  (let (pre (undo--common-prefix old new 0)
+        suf (undo--common-suffix old new pre 0)
+        o-mid (substring old pre (- (string-length old) suf))
+        n-mid (substring new pre (- (string-length new) suf))
+        head (substring new 0 pre)
+        tail (substring new (- (string-length new) suf) (string-length new)))
+    (cond
+      ;; nothing changed
+      (and (= o-mid "") (= n-mid "")) new
+      ;; too large to diff character-wise: treat the whole span as one change
+      (> (max (string-length o-mid) (string-length n-mid)) *undo-region-char-budget*)
+      (if (and (< pre hi) (> (+ pre (string-length n-mid)) lo))
+        (str head o-mid tail)
+        new)
+      else
+      (let (ops (diff/diff-seq (string->list o-mid) (string->list n-mid))
+            r (fold (fn (acc op)
+                      (let ([n out hunk] acc
+                            [tag c] op)
+                        (if (= tag :keep)
+                          (let ([n2 out2] (undo--flush-chunk hunk n lo hi out))
+                            [(inc n2) (cons c out2) '()])
+                          [n out (append hunk (list op))])))
+                [pre '() '()]
+                ops)
+            [n out hunk] r
+            [_ out2] (undo--flush-chunk hunk n lo hi out))
+        (str head (apply str (reverse out2)) tail)))))
+
+(defn undo--region-candidate (buf lo hi snaps depth)
+  ;; The nearest snapshot whose changes actually touch the region: `[undone-text tail]`,
+  ;; where `tail` is the history BELOW the snapshot we used. Walking back matters because
+  ;; the most recent edit may have been somewhere else entirely and "undo my selection"
+  ;; should still find the last thing that happened *there* (Emacs skips the same way);
+  ;; returning the tail is what lets a repeat peel the NEXT change off the same lines
+  ;; instead of bouncing against the entry this undo just pushed. nil when nothing in
+  ;; reach touched the region.
+  (let (text (buffer-text buf))
+    (cond
+      (or (empty? snaps) (<= depth 0)) nil
+      ;; A snapshot a region undo itself pushed is not a candidate: it holds the text we
+      ;; just came from, so taking it would REDO the change instead of peeling the next
+      ;; one off. Skipping it is what makes repeated calls walk backwards.
+      (get (first snaps) :region-undo)
+      (undo--region-candidate buf lo hi (rest snaps) (dec depth))
+      else (let (old (rope->string (get (first snaps) :rope))
+                 undone (undo--region-restore old text lo hi))
+             (if (= undone text)
+               (undo--region-candidate buf lo hi (rest snaps) (dec depth))
+               [undone (rest snaps)])))))
+
+(def *undo-region-search-depth* 200)
+;; How far back a region undo will look for a change that touched the region. Bounded
+;; so a long history can't turn one keystroke into an unbounded scan.
+
+(defn undo-in-region (buf)
+  "Undo, restricted to the buffer's REGION (point↔mark): the most recent change that
+touched those lines is reverted and everything outside them is left exactly as it is.
+Returns `buf` unchanged when there is no region, no history, or nothing in reach
+touched the region.
+
+The region survives, so repeated calls keep peeling changes off the same lines — and
+the step itself is an ordinary undo entry, so a plain `undo` afterwards takes the
+whole thing back."
+  (let (bounds (buffer-region-bounds buf))
+    (if (or (nil? bounds) (empty? (or (get buf :undo) ())))
+      buf
+      (let ([lo hi] bounds
+            found (undo--region-candidate buf lo hi (get buf :undo)
+                    *undo-region-search-depth*))
+        (if (nil? found)
+          buf
+          ;; record the pre-state (so this is itself undoable), then swap the text.
+          ;; Point is clamped; the MARK is kept so the region stays live for a repeat.
+          (let ([undone tail] found
+                pushed (buffer--push-undo buf)
+                rope (string->rope undone))
+            (assoc pushed
+              :rope rope
+              ;; the consumed change is dropped from history and OUR pre-state sits on
+              ;; top, so a plain `undo` still takes this step back while another region
+              ;; undo continues backwards through the same lines.
+              :undo (cons (assoc (first (get pushed :undo)) :region-undo true) tail)
+              :point (min (get buf :point) (rope-length rope))
+              :mark (min (get buf :mark) (rope-length rope)))))))))
+
 (defn undo (buf)
   "A standalone single undo: begin a fresh run and take one step. The editor's repeat
 behaviour — continue a run vs. restart after a non-undo command (which is what turns a
@@ -564,6 +720,44 @@ remote participants' cursors on a shared buffer."
 (defn buffer-markers (buf)
   "The marker map `{id -> pos}` (positions clamped to the current length), or `{}` if none."
   (update-vals (or (get buf :markers) {}) (fn (pos) (buffer--clamp 0 (buffer-length buf) pos))))
+
+;; ---- annotations: derived data stamped with the text it describes -------------
+;; A tool that computes something ABOUT a buffer — per-line test verdicts, a diff
+;; gutter, breakpoints, inline eval results — has to answer two questions before it
+;; renders: is this still about the text on screen, and are the LINES still where
+;; they were? Every consumer was hand-rolling the same triple of fields (the value,
+;; the rope it was computed from, the line count at the time) and re-deriving the
+;; same two comparisons, which is how one of them silently drifted. So the pairing
+;; lives here, next to the rope and the line count it is made of.
+;;
+;; `:current?` is the positional question (the line count is unchanged, so a
+;; line-keyed annotation still points at the right lines — blank it when false);
+;; `:stale?` is the content question (the text moved at all, so the value predates
+;; your edit — dim it, don't hide it, and undoing back un-dims it).
+
+(defn annotate (buf key value)
+  "Stamp derived `value` onto `buf` under `key`, together with the rope and line
+count it describes. Read it back with `annotation`."
+  (assoc buf key {:value value
+                  :rope (buffer-rope buf)
+                  :lines (buffer-line-count buf)}))
+
+(defn annotation (buf key)
+  "The annotation stored under `key` as `{:value :current? :stale?}`, or nil when
+there is none. `:current?` — the line count still matches, so line-keyed data is
+positionally valid. `:stale?` — the text has changed since, so the value is older
+than what you see."
+  (let (a (get buf key))
+    (when (map? a)
+      {:value (get a :value)
+       :current? (= (buffer-line-count buf) (get a :lines))
+       :stale? (not= (buffer-rope buf) (get a :rope))})))
+
+(defn annotation-value (buf key)
+  "The annotated value under `key` **only while it is positionally current**, else
+nil — the common case for line-keyed data a renderer would otherwise misplace."
+  (let (a (annotation buf key))
+    (when (and a (:current? a)) (:value a))))
 
 ;; ---- line-wise region ops (the scaffold for comment / indent-region / …) -----
 

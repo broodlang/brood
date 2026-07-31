@@ -108,6 +108,19 @@ lines (see the module preamble on stray output)."
     s
     (str (substring s 0 *output-cap-chars*) "\n…[output truncated]")))
 
+(defn eval-server--process-report (before)
+  "What the evaluation LEFT BEHIND: `{:alive n}` — processes that did not exist
+before it and are still running when it returned.
+
+Deliberately not a spawn *count*: a child that finishes before the evaluation does
+is already gone from `list-processes`, so snapshots cannot see it, and guessing
+would be worse than saying nothing. What survives is the half worth showing anyway
+— concurrency is the one part of an evaluation with no return value to look at, so
+`(spawn (receive …))` that parks forever reads as `1 still running` instead of
+looking identical to a round-trip that cleaned up after itself."
+  (let (after (list-processes))
+    {:alive (count (filter (fn (p) (not (includes? before p))) after))}))
+
 (defn eval-server--spy-entry (e)
   ;; One collected `*spy-sink*` entry, display-bounded for the wire.
   {:kind (name (or (get e :spy) :event))
@@ -117,23 +130,36 @@ lines (see the module preamble on stray output)."
    :form (when (get e :form) (pr-str-bounded (get e :form)))})
 
 (defn eval-server--try-traces (names)
-  ;; Install a boundary trace on every requested name that is a function RIGHT NOW;
-  ;; the rest stay pending (a later form may define them). `trace-fn` is idempotent,
-  ;; and re-tracing after a redefinition wraps the NEW definition — both wanted.
+  ;; Install a boundary trace on every requested name that is a function right now;
+  ;; a name that isn't (yet) defined is skipped.
   (doseq (s names) (try (debug/trace-fn (symbol s)) (catch _ nil))))
 
+(defn eval-server--definition-form? (form)
+  ;; A top-level DEFINITION (as opposed to something that runs): the forms whose
+  ;; whole job is to bind a name.
+  (and (pair? form)
+    (member? (first form) ['def 'defn 'defmacro 'defdyn 'defrecord 'defability])))
+
 (defn eval-server--eval-traced (src names)
-  ;; Evaluate `src` form by form (not `eval-string`), re-attempting the requested
-  ;; traces after each form — so `(defn fac …) (fac 5)` in ONE request still traces
-  ;; the call. Returns the last form's value; reader/eval errors propagate to the
-  ;; caller's catch.
-  (let (forms (read-all src))
-    (eval-server--try-traces names)
-    (fold (fn (_ form)
-            (let (v (eval form))
-              (eval-server--try-traces names)
-              v))
-      nil forms)))
+  ;; Evaluate `src` form by form (not `eval-string`), installing the requested traces
+  ;; EXACTLY ONCE — immediately before the first form that isn't a definition, i.e.
+  ;; after `(defn fac …)` has landed and before `(fac 5)` runs.
+  ;;
+  ;; Why not per-form: `trace-fn` keeps the pre-instrumentation value in a registry so
+  ;; re-tracing can't capture its own wrapper, and `debug--original` prefers that entry.
+  ;; So tracing a name a SECOND time after the source redefined it resurrects the
+  ;; registry's older function and the wrapper calls that instead — the redefinition is
+  ;; silently discarded. In a tutorial that made a fixed exercise report the old
+  ;; answer (and a broken one report the fixed answer), depending on history.
+  ;; Why not up front: the function usually doesn't exist until its `defn` has run.
+  (let (forms (read-all src)
+        result (fold (fn (acc form)
+                       (let ([installed _] acc)
+                         (if (or installed (eval-server--definition-form? form))
+                           [installed (eval form)]
+                           (do (eval-server--try-traces names) [true (eval form)]))))
+               [false nil] forms))
+    (second result)))
 
 (defn eval-capturing (src &optional trace-names)
   "Evaluate source string `src` (all its forms, in order) with stdout captured;
@@ -146,15 +172,22 @@ Keeps BOTH halves a REPL shows — the value and what was printed — which
 flood the pipe.
 
 With `trace-names` (fn-name strings), each name is boundary-traced for the
-duration (`debug/trace-fn`, installed as the name becomes a function, restored by
-`untrace-all` after) and the result carries `:spy` — up to `*spy-entry-cap*`
-collected entries.
+duration (`debug/trace-fn`, installed once before the first non-definition form,
+restored by `untrace-all` after) and the result carries `:spy` — up to
+`*spy-entry-cap*` collected entries. Two caveats worth knowing: a traced name is
+wrapped exactly once per request, so the definition the source itself provides is
+always the one that runs; and tracing **costs tail-calls** — the wrapper returns
+after the call, so a self-call that was in tail position no longer is, and a deep
+tail recursion that ran in O(1) stack untraced can exhaust it while traced (it
+comes back as an ordinary `recursion too deep` error reply). Trace the function
+you are studying, not the loop you are driving it with.
 
 In-image caveat for long-lived callers: evaluated source that calls
 `(%capture-begin)` without a matching take strands OUR buffer on the calling
 process's capture stack (later prints are swallowed). Irrelevant on the server
 path — the per-request evaluator process dies — but worth knowing when embedding."
   (let (t0 (now)
+        pids-before (list-processes)
         traced (and trace-names (not (empty? trace-names)))
         acc (when traced (table))
         sink (when traced
@@ -176,7 +209,8 @@ path — the per-request evaluator process dies — but worth knowing when embed
         _ (%capture-begin)
         r (if traced (binding (*spy-sink* sink) (run)) (run))
         out (eval-server--bound-output (or (%capture-take) ""))
-        r2 (assoc r :output out :ms (- (now) t0)))
+        r2 (assoc r :output out :ms (- (now) t0)
+             :procs (eval-server--process-report pids-before)))
     (if traced
       (do
         (debug/untrace-all)

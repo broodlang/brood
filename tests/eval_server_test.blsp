@@ -129,6 +129,10 @@
       (assert= (get r :ok) true))))
 
 (describe "boundary tracing (:trace)"
+  ;; :isolated — tracing rebinds globals and `untrace-all` clears a SHARED registry,
+  ;; so these must not run beside each other (concurrently they flipped each other's
+  ;; wrappers in and out: a traced loop would keep or lose its tail-calls at random).
+  :isolated
   (test "a defn and its call in ONE request still trace (install-per-form)"
     (let (r (eval-capturing "(defn evsrv-t-fac ((0) 1) ((n) (* n (evsrv-t-fac (- n 1)))))\n(evsrv-t-fac 3)"
               ["evsrv-t-fac"]))
@@ -151,11 +155,25 @@
       (assert= (get r :value) "6")
       (assert= (get r :spy) nil)))
 
-  (test "a runaway traced recursion collects at most the cap"
-    (let (r (eval-capturing "(defn evsrv-t-down ((0) :done) ((n) (evsrv-t-down (- n 1))))\n(evsrv-t-down 1000)"
-              ["evsrv-t-down"]))
+  (test "a chatty traced recursion collects at most the cap"
+    ;; NON-tail recursion re-resolves the global each level, so every level is traced
+    (let (r (eval-capturing "(defn evsrv-t-chat ((0) 1) ((n) (* n (evsrv-t-chat (- n 1)))))\n(evsrv-t-chat 200)"
+              ["evsrv-t-chat"]))
       (assert= (get r :ok) true)
-      (is (<= (count (get r :spy)) eval-server/*spy-entry-cap*))))
+      (assert= (count (get r :spy)) eval-server/*spy-entry-cap*)))   ; 402 entries -> capped
+
+  (test "tracing COSTS tail-calls: a deep tail recursion reports the overflow, honestly"
+    ;; inherent to boundary tracing — the wrapper must return after the call, so the
+    ;; self-call is no longer in tail position (the same caveat Erlang/Emacs tracing
+    ;; carries). It surfaces as an ordinary error reply, never as a hung child.
+    (let (r (eval-capturing "(defn evsrv-t-loop ((0) :done) ((n) (evsrv-t-loop (- n 1))))\n(evsrv-t-loop 30000)"
+              ["evsrv-t-loop"]))
+      (assert= (get r :ok) false)
+      (is (includes? (get r :error) "recursion too deep")))
+    ;; …and UNTRACED the same loop is fine: O(1) stack, as the language promises
+    (assert= (get (eval-capturing "(defn evsrv-t-ok ((0) :done) ((n) (evsrv-t-ok (- n 1))))\n(evsrv-t-ok 200000)")
+               :value)
+      ":done"))
 
   (test "tracing a name that never becomes a function is silently no trace"
     (let (r (eval-capturing "(+ 1 2)" ["no-such-fn-xyz"]))
@@ -169,3 +187,50 @@
       (assert= (get r :id) 42)
       (assert= (get r :value) "42")
       (is (>= (count (get r :spy)) 2)))))
+
+(describe "tracing must never resurrect a stale definition (regression)"
+  :isolated
+  ;; `trace-fn` keeps the pre-instrumentation value in a registry and prefers it when
+  ;; re-tracing. Installing a trace after EVERY form therefore re-captured the older
+  ;; function once the source redefined it, and the wrapper called that — so a fixed
+  ;; exercise reported the old answer and a broken one reported the fixed answer,
+  ;; depending on history. Traces are now installed once, before the first call form.
+  (test "a traced defn+call reports the definition IN THE SOURCE, not a previous one"
+    ;; define it wrong, then right, then wrong again — each verdict must be honest
+    (assert= (get (eval-capturing "(defn evsrv-t-tri (x) (+ x 3))\n(evsrv-t-tri 14)" ["evsrv-t-tri"]) :value) "17")
+    (assert= (get (eval-capturing "(defn evsrv-t-tri (x) (* x 3))\n(evsrv-t-tri 14)" ["evsrv-t-tri"]) :value) "42")
+    (assert= (get (eval-capturing "(defn evsrv-t-tri (x) (+ x 3))\n(evsrv-t-tri 14)" ["evsrv-t-tri"]) :value) "17"))
+
+  (test "the traced call is wrapped exactly once (no double-wrapping)"
+    (let (r (eval-capturing "(defn evsrv-t-once (x) (* 2 x))\n(evsrv-t-once 5)" ["evsrv-t-once"])
+          calls (filter (fn (e) (= (get e :kind) "call")) (get r :spy)))
+      (assert= (get r :value) "10")
+      (assert= (count calls) 1)))
+
+  (test "an untraced request after a traced one sees the source's own definition"
+    (eval-capturing "(defn evsrv-t-plain (x) (* 5 x))\n(evsrv-t-plain 2)" ["evsrv-t-plain"])
+    (assert= (get (eval-capturing "(evsrv-t-plain 3)") :value) "15"))
+
+  (test "a recursive traced fn still reports every level"
+    (let (r (eval-capturing "(defn evsrv-t-f ((0) 1) ((n) (* n (evsrv-t-f (- n 1)))))\n(evsrv-t-f 4)"
+              ["evsrv-t-f"]))
+      (assert= (get r :value) "24")
+      (assert= (count (filter (fn (e) (= (get e :kind) "call")) (get r :spy))) 5))))
+
+(describe "process accounting (:procs)"
+  :isolated
+
+  (test "a plain evaluation leaves nothing running"
+    (assert= (get (eval-capturing "(+ 1 2)") :procs) {:alive 0}))
+
+  (test "a round-trip that finishes leaves nothing running"
+    ;; the child sends and dies before we look — correctly reported as 0, and
+    ;; deliberately NOT guessed at as a spawn count (see the docstring)
+    (let (r (eval-capturing "(let (me (self)) (spawn (send me :hi)) (receive (:hi :got)))"))
+      (assert= (get r :value) ":got")
+      (assert= (get-in r [:procs :alive]) 0)))
+
+  (test "a process left PARKED is reported as still running — the leak is visible"
+    (let (r (eval-capturing "(do (spawn (receive (:never nil))) :spawned-and-left)"))
+      (assert= (get r :value) ":spawned-and-left")
+      (is (>= (get-in r [:procs :alive]) 1)))))

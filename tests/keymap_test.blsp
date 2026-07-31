@@ -85,3 +85,44 @@
           km (keymap-bind {} [:ctrl-x :ctrl-e] 'keymap-test/km-cmd-e))
       (spawn (km-worker me km [:ctrl-x :ctrl-e]))
       (assert= (receive) "E"))))
+
+;; ---- keymap-where-is: the inverse of keymap-bind ------------------------------
+;; The mechanism behind help text that names a COMMAND and renders whatever key is
+;; actually bound to it (Emacs `where-is-internal`), so docs follow a rebinding.
+
+(describe "keymap-where-is"
+  (test "a flat binding answers its own key"
+    (assert= (keymap-where-is {:ctrl-f 'forward-char} 'forward-char) (list [:ctrl-f])))
+
+  (test "a chord answers the whole sequence, prefix included"
+    (let (km (keymap-bind {} [:ctrl-x :ctrl-e] 'eval-last-sexp))
+      (assert= (keymap-where-is km 'eval-last-sexp) (list [:ctrl-x :ctrl-e]))))
+
+  (test "several keys bound to one command all come back"
+    (let (km (-> {}
+                (keymap-bind [:ctrl-n] 'next-line)
+                (keymap-bind [:down] 'next-line)))
+      (assert= (count (keymap-where-is km 'next-line)) 2)
+      (is (includes? (keymap-where-is km 'next-line) [:ctrl-n]))
+      (is (includes? (keymap-where-is km 'next-line) [:down]))))
+
+  (test "an unbound command is (), not an error"
+    (assert= (keymap-where-is {:ctrl-f 'forward-char} 'no-such-command) ())
+    (assert= (keymap-where-is {} 'anything) ()))
+
+  (test "deep chords and mixed depths"
+    (let (km (-> {}
+                (keymap-bind [:ctrl-c "t" "p"] 'test-project)
+                (keymap-bind ["q"] 'quit)))
+      (assert= (keymap-where-is km 'test-project) (list [:ctrl-c "t" "p"]))
+      (assert= (keymap-where-is km 'quit) (list ["q"]))))
+
+  (test "a prefix sub-keymap is never itself reported as a binding"
+    (let (km (keymap-bind {} [:ctrl-x "b"] 'switch-buffer))
+      (assert= (keymap-where-is km (get km :ctrl-x)) ())))
+
+  (test "round-trips with keymap-bind for every bound sequence"
+    (let (seqs (list [:ctrl-a] [:ctrl-x "s"] [:ctrl-c :ctrl-n])
+          km (fold (fn (acc s) (keymap-bind acc s 'target)) {} seqs))
+      (assert= (count (keymap-where-is km 'target)) 3)
+      (doseq (s seqs) (is (includes? (keymap-where-is km 'target) s))))))

@@ -75,6 +75,26 @@ Pure apart from the symbol resolution; testable without a terminal."
                        [state nil])
       else [(try ((eval binding) state key) (catch e state)) nil])))
 
+;; check-allow: deliberately non-tail — depth = the keymap's chord nesting, a few levels.
+(check-allow :non-tail-recursion
+  (defn keymap-where-is (keymap command)
+    "Every key SEQUENCE bound to `command` in `keymap`, as a list of key vectors
+  (`([:ctrl-x :ctrl-e] …)` — prefixes included, chords walked); `()` when nothing is
+  bound to it. The inverse of `keymap-bind`, and the mechanism behind
+  \"press-whatever-you-actually-have-bound\" help text: a UI names the COMMAND and
+  asks the live keymap what key runs it, so documentation follows a rebinding
+  instead of going stale (Emacs `where-is-internal` / `substitute-command-keys`).
+  Pure over the keymap data — no dispatch, no eval."
+    ;; `map?` FIRST: a nested keymap is a prefix, never a command — so passing a
+    ;; sub-keymap as `command` finds nothing rather than matching by structural `=`.
+    (mapcat (fn (kv)
+              (let ([k v] kv)
+                (cond
+                  (map? v) (map (fn (seq) (into [k] seq)) (keymap-where-is v command))
+                  (= v command) (list [k])
+                  else '())))
+      keymap)))
+
 ;; check-allow: deliberately non-tail — depth = the bound key-sequence length — a few keys.
 (check-allow :non-tail-recursion
   (defn keymap-bind (keymap keys command)
