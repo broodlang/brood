@@ -1,0 +1,169 @@
+;; std/editor/formbuf.blsp — FORM BUFFERS: generated text with editable regions in it.
+;;
+;; A surprising number of editor buffers are neither free-form documents nor
+;; read-only reports. They are *forms*: the app writes most of the text and the user
+;; may only edit certain parts of it — a shell buffer whose prompt and output are
+;; the app's and whose input line is yours; a commit-message buffer whose `#` help
+;; block must survive; a tutorial whose prose explains and whose code boxes are
+;; yours to break; an interactive-rebase todo list. Each one otherwise hand-rolls
+;; the same four things: find the editable regions, know what the generated part
+;; was, notice when a keystroke damaged it, and re-render the generated part without
+;; throwing away what the user typed.
+;;
+;; This module is those four things over an abstract REGION LIST, so the delimiter
+;; syntax is a caller's choice rather than a hardcoded one. Regions are
+;; `{:start :end}` char spans (`:end` exclusive) in document order.
+;;
+;; The guard is a `:post-key` layer facet (docs/layers.md §7) with two policies,
+;; which is what makes this shared rather than tutorial-specific:
+;;
+;;   :veto  — the event is undone by returning the pre-event context. For generated
+;;            text that must not change at all (prose, a help block).
+;;   :clamp — the text stands but POINT is pulled back into the nearest editable
+;;            region. For a buffer whose generated part is legitimately navigable
+;;            (a shell's scrollback) where only *typing* position is constrained.
+;;
+;; Pure over (text, regions, context) — no buffer type, no model, no display. The
+;; caller supplies accessors, so this works on a `std/editor/buffer` map, an
+;; editor's own context map, or anything else with text and a point.
+
+(defmodule editor/formbuf
+  "Form buffers: generated text with editable regions. Region algebra —
+`delimited-regions` (a region per delimited block), `skeleton` (everything
+outside the regions), `region-at`, `region-index`, `splice` (re-render the
+generated text, keeping region contents by index) — plus `guard-veto` /
+`guard-clamp`, the two `:post-key` policies that keep the generated part intact.
+`(require 'editor/formbuf)`.")
+
+;; ---- region providers ---------------------------------------------------------
+
+(defn delimited-regions (text open-prefix close-prefix)
+  "The regions of `text` delimited by whole LINES: content strictly between a line
+starting with `open-prefix` and the next line starting with `close-prefix`. Returns
+`({:start :end :open-line :close-line} …)` in document order, with 0-based line
+numbers; an unclosed opener yields no region, and an empty block has
+`:start = :end`.
+
+Line-anchored on purpose: it survives any content (including delimiters *inside* a
+region's text) and keeps the delimiters visible to the reader, which is what a form
+buffer wants — the user should be able to see where they may type."
+  (letrec (go (fn (lines lineno off open acc)
+                (if (empty? lines)
+                  (reverse acc)
+                  (let (line (first lines)
+                        next-off (+ off (string-length line) 1))
+                    (cond
+                      (starts-with? line open-prefix)
+                      (go (rest lines) (inc lineno) next-off
+                        {:open-line lineno :start next-off} acc)
+                      (and open (starts-with? line close-prefix))
+                      (go (rest lines) (inc lineno) next-off nil
+                        (cons {:start (get open :start)
+                               :end (max (get open :start) (dec off))
+                               :open-line (get open :open-line)
+                               :close-line lineno}
+                          acc))
+                      else (go (rest lines) (inc lineno) next-off open acc))))))
+    (go (string-split text "\n") 0 0 nil '())))
+
+(defn tail-region (text start)
+  "The single region from `start` to the end of `text` — the shape a prompt buffer
+wants (everything after the prompt is yours). A list of one, so it composes with
+the region functions below."
+  (list {:start (min start (string-length text)) :end (string-length text)}))
+
+;; ---- region algebra -----------------------------------------------------------
+
+(defn region-at (regions pos)
+  "The region containing `pos` (boundaries inclusive, so the caret at either edge
+counts as inside), or nil."
+  (find (fn (r) (and (>= pos (get r :start)) (<= pos (get r :end)))) regions))
+
+(defn region-index (regions pos)
+  "The 0-based index of the region containing `pos`, or nil."
+  (let (r (region-at regions pos))
+    (when r (index-of regions r))))
+
+(defn region-text (text region)
+  "The text of one region."
+  (substring text (get region :start) (get region :end)))
+
+(defn region-texts (text regions)
+  "The text of every region, in order."
+  (map (fn (r) (region-text text r)) regions))
+
+(defn skeleton (text regions)
+  "Everything OUTSIDE the regions, concatenated — the generated part of the form,
+and the thing to compare against to notice damage. Independent of what the user
+typed inside the regions, so it is stable while they work."
+  (let (r (fold (fn (acc region)
+                  (let ([pos parts] acc)
+                    [(get region :end)
+                     (cons (substring text pos (get region :start)) parts)]))
+            [0 '()]
+            regions)
+        [pos parts] r)
+    (apply str (reverse (cons (substring text pos (string-length text)) parts)))))
+
+(defn splice (new-text old-text regions-fn)
+  "`new-text` (a freshly generated form) with `old-text`'s region CONTENTS carried
+over by index — how a form re-renders its generated part without discarding the
+user's work. `regions-fn` is `(text) -> regions`, applied to both. Falls back to
+`new-text` whole when the region counts differ (the old text is damaged or the form
+changed shape, and there is no honest correspondence to preserve)."
+  (let (new-regions (regions-fn new-text)
+        old-regions (regions-fn old-text))
+    (if (not= (count new-regions) (count old-regions))
+      new-text
+      (let (r (fold (fn (acc ir)
+                      (let ([pos parts] acc
+                            [i region] ir
+                            old (nth old-regions i))
+                        [(get region :end)
+                         (cons (region-text old-text old)
+                           (cons (substring new-text pos (get region :start)) parts))]))
+                [0 '()]
+                (enumerate new-regions))
+            [pos parts] r)
+        (apply str (reverse (cons (substring new-text pos (string-length new-text)) parts)))))))
+
+;; ---- the guard policies (a `:post-key` facet body) -----------------------------
+
+(defn intact? (text regions-fn expected)
+  "Whether the generated part of `text` still matches `expected` (a skeleton taken
+when the form was rendered). True when `expected` is nil — nothing was stashed, so
+there is nothing to protect."
+  (or (nil? expected) (= expected (skeleton text (regions-fn text)))))
+
+(defn guard-veto (before after read-text read-skeleton on-reject regions-fn)
+  "The `:veto` policy: if the generated part of `after` no longer matches its
+stashed skeleton **but did match in `before`**, return `(on-reject before)` — the
+event is undone, because contexts are immutable and the pre-event one is simply the
+truth from a moment ago. `read-text` / `read-skeleton` are `(ctx) -> value`
+accessors, `on-reject` is `(ctx) -> ctx` (a place to say why).
+
+The was-intact-before test is what keeps a form from BRICKING: damage that arrived
+by some other path (a mouse paste on a route the app didn't guard, a programmatic
+edit) must not make every later keystroke bounce. At worst the damage stays until
+the form is re-rendered."
+  (cond
+    (intact? (read-text after) regions-fn (read-skeleton after)) after
+    (intact? (read-text before) regions-fn (read-skeleton before)) (on-reject before)
+    else after))
+
+(defn guard-clamp (after read-text read-point set-point regions-fn)
+  "The `:clamp` policy: leave the text alone, but if point sits OUTSIDE every
+editable region pull it to the nearest region boundary — the shell-prompt rule,
+where the generated scrollback is navigable but typing belongs in the input region.
+A context with no regions is returned untouched."
+  (let (text (read-text after)
+        regions (regions-fn text)
+        p (read-point after))
+    (if (or (empty? regions) (region-at regions p))
+      after
+      (let (nearest (fold (fn (best r)
+                            (let (cand (if (< p (get r :start)) (get r :start) (get r :end))
+                                  d (abs (- p cand)))
+                              (if (or (nil? best) (< d (abs (- p best)))) cand best)))
+                      nil regions))
+        (if (nil? nearest) after (set-point after nearest))))))

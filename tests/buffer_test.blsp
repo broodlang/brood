@@ -8,7 +8,7 @@
 ;; process); the final :isolated block adds explicit spawn/send/receive coverage
 ;; of the actor shell — and proves a buffer's rope stays inside its process.
 
-(defmodule buffer-test (:use test) (:use editor/buffer))
+(defmodule buffer-test (:use test) (:use-internals editor/buffer))
 
 ; the buffer-as-log-sink integration test drives a real logger
 (require 'log)
@@ -738,3 +738,207 @@
         (assert= marks {}))
       (assert= (buffer-query bp buffer-markers) {})
       (stop-buffer bp))))
+
+;; ---- annotations: derived data stamped with the text it describes ---------------
+;; The staleness/currency pairing every gutter and overlay consumer used to hand-roll.
+
+(describe "buffer annotations"
+  (test "a fresh annotation is current and not stale"
+    (let (b (annotate (make-buffer "a\nb\nc") :marks {0 :pass})
+          a (annotation b :marks))
+      (assert= (:value a) {0 :pass})
+      (assert= (:current? a) true)
+      (assert= (:stale? a) false)))
+
+  (test "an edit that keeps the line count makes it STALE but still current"
+    ;; a verdict on edited text is older than what you see — dim it, don't hide it
+    (let (b (annotate (make-buffer "a\nb\nc") :marks {0 :pass})
+          edited (insert (goto-char b 0) "x")
+          a (annotation edited :marks))
+      (assert= (:stale? a) true)
+      (assert= (:current? a) true)))
+
+  (test "an edit that SHIFTS lines makes it not current (line-keyed data would misplace)"
+    (let (b (annotate (make-buffer "a\nb\nc") :marks {2 :fail})
+          shifted (insert (goto-char b 0) "\n")
+          a (annotation shifted :marks))
+      (assert= (:current? a) false)
+      (assert= (:stale? a) true)))
+
+  (test "undoing back to the annotated text un-stales it (the rope is the identity)"
+    (let (b (annotate (make-buffer "a\nb") :marks {0 :pass})
+          edited (insert (goto-char b 0) "x")
+          undone (undo edited))
+      (assert= (:stale? (annotation undone :marks)) false)))
+
+  (test "annotation-value gives the value only while positionally current"
+    (let (b (annotate (make-buffer "a\nb\nc") :marks {1 :pass}))
+      (assert= (annotation-value b :marks) {1 :pass})
+      (assert= (annotation-value (insert (goto-char b 0) "\n") :marks) nil)))
+
+  (test "no annotation reads as nil, and a foreign field isn't mistaken for one"
+    (assert= (annotation (make-buffer "x") :marks) nil)
+    (assert= (annotation (assoc (make-buffer "x") :marks "not-an-annotation") :marks) nil)))
+
+;; ---- undo in a region: undo only the lines you selected -------------------------
+;; Emacs's `undo-in-region`. Snapshot undo makes it cheap: the change set between two
+;; texts is what a line diff computes, so selective undo needs no new undo data — just
+;; keep the hunks that touch the region and drop the rest.
+
+(defn uir-sel (b lo hi) (assoc (goto-char b lo) :mark hi))
+(defn uir-line-start (b line) (rope-line->char (buffer-rope b) line))
+
+(describe "undo-in-region"
+  ;; two edits on two different lines, most recent last
+  (defn two-edits ()
+    (let (b0 (make-buffer "one\ntwo\nthree\nfour")
+          b1 (insert (goto-char b0 3) "!")          ; line 0 -> "one!"
+          b2 (insert (goto-char b1 8) "?"))         ; line 1 -> "two?" (5 + len "two")
+      b2))
+
+  (test "undoes the change on the selected line, leaving other lines alone"
+    (let (b (two-edits)
+          line1 (uir-line-start b 1)
+          ;; the whole of line 1, INCLUDING the "?" the edit appended (chars 5..9): a
+          ;; selection that stops at 8 merely abuts the insertion, and Emacs does not
+          ;; undo a change that only touches the region's edge
+          sel (uir-sel b line1 (+ line1 4)))
+      (assert= (buffer-text (undo-in-region sel)) "one!\ntwo\nthree\nfour")))
+
+  (test "a change OUTSIDE the region is left standing, and history is searched for one inside"
+    ;; the most recent edit is on line 1; selecting line 0 must still find line 0's edit
+    (let (b (two-edits)
+          sel (uir-sel b 0 4))          ; covers the "!" at char 3
+      (assert= (buffer-text (undo-in-region sel)) "one\ntwo?\nthree\nfour")))
+
+  (test "a whole-buffer region reproduces a plain undo exactly"
+    (let (b (two-edits))
+      (assert= (buffer-text (undo-in-region (uir-sel b 0 (buffer-length b))))
+        (buffer-text (undo b)))))
+
+  (test "it undoes a DELETION inside the region (puts the line back)"
+    (let (b0 (make-buffer "keep\ngone\ntail")
+          b1 (delete-region (assoc (goto-char b0 5) :mark 10))   ; drop "gone\n"
+          sel (uir-sel b1 0 (buffer-length b1)))
+      (assert= (buffer-text b1) "keep\ntail")
+      (assert= (buffer-text (undo-in-region sel)) "keep\ngone\ntail")))
+
+  (test "a deletion OUTSIDE the region stays deleted"
+    (let (b0 (make-buffer "a\nDROP\nb\nc")
+          b1 (delete-region (assoc (goto-char b0 2) :mark 7))    ; drop "DROP\n"
+          ;; select the LAST line only — the deletion happened above it
+          last-start (uir-line-start b1 2)
+          sel (uir-sel b1 last-start (buffer-length b1)))
+      (assert= (buffer-text (undo-in-region sel)) (buffer-text b1))))
+
+  (test "the region survives, so repeated calls peel changes off the same lines"
+    (let (b0 (make-buffer "x\ny")
+          b1 (insert (goto-char b0 1) "1")
+          b2 (insert (goto-char b1 2) "2")          ; two edits, both on line 0
+          sel (uir-sel b2 0 3)
+          once (undo-in-region sel))
+      (is (not (nil? (buffer-mark once))))          ; mark kept
+      (assert= (buffer-text once) "x1\ny")
+      (assert= (buffer-text (undo-in-region once)) "x\ny")))
+
+  (test "the region undo is itself undoable (a plain undo takes it back)"
+    (let (b (two-edits)
+          line1 (uir-line-start b 1)
+          once (undo-in-region (uir-sel b line1 (+ line1 4))))
+      (assert= (buffer-text (undo once)) (buffer-text b))))
+
+  (test "no region, no history, or nothing in reach: the buffer is returned unchanged"
+    (let (b (insert (make-buffer "a\nb") "x"))
+      (assert= (undo-in-region b) b)                          ; no mark
+      (assert= (undo-in-region (uir-sel (make-buffer "a") 0 1))
+        (uir-sel (make-buffer "a") 0 1)))                     ; no history
+    ;; a region on text nothing ever touched
+    (let (b0 (make-buffer "top\nuntouched")
+          b1 (insert (goto-char b0 3) "!")
+          start (uir-line-start b1 1)
+          sel (uir-sel b1 start (buffer-length b1)))
+      (assert= (buffer-text (undo-in-region sel)) (buffer-text b1))))
+
+  (test "point is clamped into the shortened text (no out-of-range cursor)"
+    (let (b0 (make-buffer "short")
+          b1 (insert (goto-char b0 5) " and much longer")
+          sel (assoc (goto-char b1 (buffer-length b1)) :mark 0)
+          out (undo-in-region sel))
+      (is (<= (buffer-point out) (buffer-length out)))
+      (is (<= (buffer-mark out) (buffer-length out))))))
+
+(describe "undo--region-restore (the pure core)"
+  (test "chunk-wise over CHARACTERS: the changed span is what the region is tested against"
+    ;; "old" -> "new" occupies chars 2..5; a region there undoes it, one elsewhere doesn't
+    (assert= (editor/buffer/undo--region-restore "a\nold\nz" "a\nnew\nz" 2 5) "a\nold\nz")
+    (assert= (editor/buffer/undo--region-restore "a\nold\nz" "a\nnew\nz" 0 1) "a\nnew\nz"))
+
+  (test "identical texts are unchanged whatever the region"
+    (assert= (editor/buffer/undo--region-restore "a\nb" "a\nb" 0 9) "a\nb")))
+
+;; ---- undo-in-region is CHARACTER-precise, like Emacs ------------------------------
+;; A line-granular version answered "undo that line's last change", which is a different
+;; question: with two edits on one line it undid the wrong one. These pin the Emacs rule
+;; — a change is undone exactly when it OVERLAPS the region, character-wise.
+
+(describe "undo-in-region with partial-line selections"
+  (defn two-on-one-line ()
+    ;; "aaa bbb" -> insert X at 3 -> insert Y at 8  =>  "aaaX bbbY"
+    (let (b0 (make-buffer "aaa bbb")
+          b1 (insert (goto-char b0 3) "X"))
+      (insert (goto-char b1 8) "Y")))
+
+  (test "selecting the FIRST half undoes the edit there, keeping the later one"
+    (let (b (two-on-one-line))
+      (assert= (buffer-text b) "aaaX bbbY")
+      (assert= (buffer-text (undo-in-region (uir-sel b 0 4))) "aaa bbbY")))
+
+  (test "selecting the SECOND half undoes that edit, keeping the earlier one"
+    (assert= (buffer-text (undo-in-region (uir-sel (two-on-one-line) 5 9))) "aaaX bbb"))
+
+  (test "a selection covering both undoes the most recent, then the other on a repeat"
+    (let (b (two-on-one-line)
+          once (undo-in-region (uir-sel b 0 9)))
+      (assert= (buffer-text once) "aaaX bbb")
+      (assert= (buffer-text (undo-in-region once)) "aaa bbb")))
+
+  (test "a selection touching NEITHER edit changes nothing"
+    ;; edits at 3 and 8; select chars 4..5 (the space), which no insertion overlaps
+    (let (b (two-on-one-line))
+      (assert= (buffer-text (undo-in-region (uir-sel b 4 5))) (buffer-text b))))
+
+  (test "a change that only PARTLY overlaps the selection still counts (Emacs rule)"
+    ;; insert "12345" at 3, then select just one char of it
+    (let (b0 (make-buffer "abcdef")
+          b1 (insert (goto-char b0 3) "12345"))
+      (assert= (buffer-text b1) "abc12345def")
+      (assert= (buffer-text (undo-in-region (uir-sel b1 5 6))) "abcdef")))
+
+  (test "a deletion is undone when the selection sits where it happened"
+    (let (b0 (make-buffer "keep GONE tail")
+          b1 (delete-region (assoc (goto-char b0 5) :mark 10)))
+      (assert= (buffer-text b1) "keep tail")
+      ;; select around the seam where the text was removed
+      (assert= (buffer-text (undo-in-region (uir-sel b1 4 6))) "keep GONE tail")))
+
+  (test "a deletion elsewhere stays deleted"
+    (let (b0 (make-buffer "one GONE two three")
+          b1 (delete-region (assoc (goto-char b0 4) :mark 9))
+          len (buffer-length b1))
+      ;; select the very end, far from the seam at 4
+      (assert= (buffer-text (undo-in-region (uir-sel b1 (- len 5) len))) (buffer-text b1))))
+
+  (test "mid-word edits on the same word are separable"
+    (let (b0 (make-buffer "word")
+          b1 (insert (goto-char b0 2) "-")        ; "wo-rd"
+          b2 (insert (goto-char b1 5) "!"))       ; "wo-rd!"
+      (assert= (buffer-text b2) "wo-rd!")
+      (assert= (buffer-text (undo-in-region (uir-sel b2 0 3))) "word!")
+      (assert= (buffer-text (undo-in-region (uir-sel b2 5 6))) "wo-rd")))
+
+  (test "a huge rewrite degrades to whole-span undo instead of hanging"
+    ;; past the char budget the span is treated as one change — bounded, not frozen
+    (let (big (apply str (map (fn (i) "x") (range (+ 10 *undo-region-char-budget*))))
+          b0 (make-buffer "seed")
+          b1 (insert (goto-char b0 4) big))
+      (assert= (buffer-text (undo-in-region (uir-sel b1 0 (buffer-length b1)))) "seed"))))

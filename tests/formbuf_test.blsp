@@ -1,0 +1,155 @@
+;; std/editor/formbuf.blsp — form buffers: generated text with editable regions.
+;; Pure region algebra + the two guard policies, so everything here is text in / text out.
+
+(defmodule formbuf-test (:use test) (:use editor/formbuf))
+
+(def boxed "prose\n<<< a\n(+ 1 2)\n>>>\nmore prose\n<<< b\nx\n>>>\ntail")
+(defn boxes (text) (delimited-regions text "<<<" ">>>"))
+
+(describe "delimited-regions"
+  (test "one region per delimited block, content strictly between the lines"
+    (let (rs (boxes boxed))
+      (assert= (count rs) 2)
+      (assert= (region-texts boxed rs) (list "(+ 1 2)" "x"))))
+
+  (test "line numbers come back for the renderer"
+    (let (r (first (boxes boxed)))
+      (assert= (:open-line r) 1)
+      (assert= (:close-line r) 3)))
+
+  (test "an empty block is empty, not inverted"
+    (let (r (first (boxes "<<< a\n>>>")))
+      (assert= (:start r) (:end r))))
+
+  (test "an unclosed opener yields no region"
+    (assert= (boxes "<<< a\n(+ 1 2)") ()))
+
+  (test "no delimiters, no regions"
+    (assert= (boxes "just prose") ()))
+
+  (test "a delimiter-looking line INSIDE a region is just content"
+    ;; line-anchored parsing survives content that mentions the delimiters
+    (let (text "<<< a\nnot >>> a close\n>>>\n"
+          rs (boxes text))
+      (assert= (count rs) 1)
+      (assert= (region-texts text rs) (list "not >>> a close"))))
+
+(test "tail-region is the prompt shape: everything after a point"
+    (let (text "prompt> hello")
+      (assert= (region-texts text (tail-region text 8)) (list "hello"))
+      ;; a start past the end clamps rather than inverting
+      (assert= (region-texts text (tail-region text 999)) (list "")))))
+
+(describe "region lookup"
+  (test "region-at includes both boundaries (the caret at an edge is inside)"
+    (let (rs (boxes boxed)
+          r (first rs))
+      (is (not (nil? (region-at rs (:start r)))))
+      (is (not (nil? (region-at rs (:end r)))))
+      (is (nil? (region-at rs 0)))))                    ; in the prose
+
+  (test "region-index numbers them in document order"
+    (let (rs (boxes boxed))
+      (assert= (region-index rs (:start (first rs))) 0)
+      (assert= (region-index rs (:start (second rs))) 1)
+      (assert= (region-index rs 0) nil))))
+
+(describe "skeleton (the generated part)"
+  (test "region contents never reach the skeleton"
+    (let (other (replace boxed "(+ 1 2)" "(completely different)"))
+      (assert= (skeleton boxed (boxes boxed))
+        (skeleton other (boxes other)))))
+
+  (test "prose, delimiters and region COUNT all do"
+    (let (a boxed)
+      (is (not= (skeleton a (boxes a))
+            (let (b (replace a "prose" "PROSE")) (skeleton b (boxes b)))))
+      (is (not= (skeleton a (boxes a))
+            (let (b (replace a ">>>\ntail" ">>>x\ntail")) (skeleton b (boxes b)))))))
+
+  (test "no regions: the skeleton is the whole text"
+    (assert= (skeleton "abc" ()) "abc")))
+
+(describe "splice (re-render, keep what the user typed)"
+  (test "the new generated text keeps the old region contents, by index"
+    (let (old "<<< a\nMINE-1\n>>>\n<<< b\nMINE-2\n>>>"
+          new "<<< a (renamed)\ntemplate-1\n>>>\n<<< b (renamed)\ntemplate-2\n>>>"
+          out (splice new old boxes))
+      (is (includes? out "renamed"))                    ; the new prose won
+      (assert= (region-texts out (boxes out)) (list "MINE-1" "MINE-2"))))
+
+  (test "a region-count mismatch falls back to the new text whole"
+    ;; nothing honest to correspond, so don't guess
+    (let (old "<<< a\nMINE\n>>>"
+          new "<<< a\nt1\n>>>\n<<< b\nt2\n>>>")
+      (assert= (splice new old boxes) new)))
+
+  (test "splicing is idempotent when nothing was typed"
+    (let (t "<<< a\ntemplate\n>>>")
+      (assert= (splice t t boxes) t))))
+
+;; ---- the guard policies -------------------------------------------------------
+;; Contexts here are plain maps `{:text … :skeleton … :point …}` — the module takes
+;; accessors, so a real caller passes its buffer/model shape instead.
+
+(defn ctx (text skel) {:text text :skeleton skel :echo ""})
+(defn rt (c) (:text c))
+(defn rs (c) (:skeleton c))
+(defn reject (c) (assoc c :echo "rejected"))
+
+(describe "guard-veto"
+  (test "an untouched skeleton passes"
+    (let (before (ctx boxed (skeleton boxed (boxes boxed)))
+          after (ctx (replace boxed "(+ 1 2)" "(+ 1 3)") (:skeleton before)))
+      (assert= (guard-veto before after rt rs reject boxes) after)))
+
+  (test "damage caused BY THIS EVENT is undone, and can explain itself"
+    (let (before (ctx boxed (skeleton boxed (boxes boxed)))
+          after (ctx (replace boxed "prose" "PROSE") (:skeleton before))
+          out (guard-veto before after rt rs reject boxes))
+      (assert= (:text out) boxed)                       ; reverted
+      (assert= (:echo out) "rejected")))
+
+  (test "PRE-EXISTING damage does not veto later events (a form must never brick)"
+    (let (damaged (replace boxed "prose" "PROSE")
+          skel (skeleton boxed (boxes boxed))
+          before (ctx damaged skel)
+          after (ctx (replace damaged "(+ 1 2)" "(+ 9 9)") skel)
+          out (guard-veto before after rt rs reject boxes))
+      (assert= out after)                               ; let it through
+      (assert= (:echo out) "")))
+
+  (test "no stashed skeleton means nothing to protect"
+    (let (before (ctx boxed nil) after (ctx "anything at all" nil))
+      (assert= (guard-veto before after rt rs reject boxes) after))))
+
+(describe "guard-clamp"
+  (defn cctx (text point) {:text text :point point})
+  (defn rp (c) (:point c))
+  (defn sp (c p) (assoc c :point p))
+
+  (test "point inside a region is left alone"
+    (let (r (first (boxes boxed))
+          c (cctx boxed (:start r)))
+      (assert= (guard-clamp c rt rp sp boxes) c)))
+
+  (test "point in the generated part is pulled to the nearest region edge"
+    (let (r (first (boxes boxed))
+          out (guard-clamp (cctx boxed 0) rt rp sp boxes))
+      (assert= (:point out) (:start r))))
+
+  (test "…and to the END of a region when that edge is nearer"
+    (let (r (second (boxes boxed))
+          past (+ (:end r) 2)
+          out (guard-clamp (cctx boxed past) rt rp sp boxes))
+      (assert= (:point out) (:end r))))
+
+  (test "a prompt buffer: point in the prompt lands at the input start"
+    (let (text "/tmp $ hello"
+          regions (fn (t) (tail-region t 7))
+          out (guard-clamp (cctx text 3) rt rp sp regions))
+      (assert= (:point out) 7)))
+
+  (test "no regions at all: untouched"
+    (let (c (cctx "abc" 1))
+      (assert= (guard-clamp c rt rp sp (fn (_) ())) c))))
