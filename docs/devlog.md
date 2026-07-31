@@ -13253,3 +13253,27 @@ that is not a one-liner: a LOCAL handle's slot can be reused by a minor GC *with
 `gen_version`, so a LOCAL key is unsound to cache on. Needs a sound key (or a different place to
 memoise the constant) — ADR territory, in the collector's blast radius. Worth doing: it is
 ~2× throughput and ~2× RSS on any workload that spawns per request, which is every server.
+
+## 2026-07-31 (cont.) — the suite flake, finally caught: two of them, one fixed
+
+The `brood::suite` `FLAKY` marker from yesterday recurred, and this time the full log was kept
+(the earlier run was piped through `tail`, which is what lost it — nextest prints the failing
+attempt *above* the summary). Two distinct flaky tests, not one.
+
+**Fixed: `tests/private_test.blsp` had no `:serial`.** Every test in its one `describe` block
+`%load-string`s whole **modules** into the shared module registry and global table — 16 of them
+— and the alias test reads `priv-vault`, which a *different* test registers. Run in parallel
+that is a straightforward race, and it surfaced as `require: cannot find module 'priv-vault2'`
+roughly one suite run in five. Marked `:serial`, the same reason `suite_test.blsp`'s macro and
+loop-macro blocks are, one level up: module registration, not just a `defn`. 13/13 standalone
+and clean across three full suite runs after.
+
+**Identified, NOT fixed: `tests/ability_test.blsp:158`** ("a reload is picked up even after the
+cache is warm"), which failed once in those three runs. That block is **already `:serial`**, so
+serialising within a `describe` is not enough — the test mutates the global ability registry and
+the `%dispatch` cache epoch, and sibling test *files* run concurrently with it. It needs
+isolation at a level `:serial` doesn't give. Deliberately left alone: validating a 1-in-3 flake
+takes ~10 suite runs, and a guessed fix here would mask it rather than remove it.
+
+**The process lesson, which cost two sessions:** a green `N passed` line can hide a retried
+failure, and `make test | tail` throws away the only evidence. Keep the whole log.
