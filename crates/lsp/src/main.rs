@@ -105,9 +105,12 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         position_encoding: Some(PositionEncodingKind::UTF16),
         // Completion offers locals + special forms + globals; `resolve_provider`
         // lets us fill each item's signature/docstring lazily on
-        // `completionItem/resolve`. Trigger chars stay default (identifier chars).
+        // `completionItem/resolve`. `:` triggers so the record-field candidates
+        // (`completion::record_key_context`) pop up the moment a key is started —
+        // an identifier-char default would only fire once a word char follows it.
         completion_provider: Some(CompletionOptions {
             resolve_provider: Some(true),
+            trigger_characters: Some(vec![":".to_string()]),
             ..Default::default()
         }),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
