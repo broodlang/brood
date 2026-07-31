@@ -13207,3 +13207,49 @@ only. Six hand cases (body, last-form, bindings, bindings-ending-in-comment, con
 top level, own-line) all check out and all are idempotent.
 
 **Gates:** `nest test` 4079 passed, `nest check` clean, formatter suite 72 passed.
+
+## 2026-07-31 (cont.) — thread 6 is the JIT re-promoting a capture-free closure per activation
+
+Kept going on the decay and found the mechanism. It is not the allocator, not the supervisor,
+and not the reclamation threshold — those were symptoms. **The JIT (and the tree-walker) rebuild
+and re-`promote` a capture-free closure on every evaluation, appending to the append-only
+RUNTIME region; the bytecode VM does not.** Minimal repro: 20 000 `start-child`/`terminate-child`
+cycles.
+
+| engine | `:runtime-closures` after 20 k cycles |
+|---|---|
+| default (VM + JIT) | 11 969 |
+| `BROOD_NO_JIT=1` (plain VM) | **58** |
+| `BROOD_VM=0` (tree-walker) | 15 989 |
+
+**On the real harness the difference is enormous.** `supnocrash`, 20 s, same binary:
+default does **300 k ops / 639 MB RSS** with `rt_closures` 2 191 → 10 273 and throughput decaying
+19 083 → 16 611 ops/s; `BROOD_NO_JIT=1` does **590 k ops / 318 MB RSS** with `rt_closures`
+**73 → 75** and throughput *flat* (27 777 → 28 901). So **1.97× the work, half the memory, no
+region growth, and the decay itself disappears.** That is the whole of thread 6, and it also
+explains why a restart cured it (the region is per-runtime) and why every non-supervisor mode
+measured flat (they don't create a closure per op).
+
+**Why:** `make_closure_cached` exists precisely for this — its own comment says a capture-free
+closure "is a *constant*… Re-building and re-`promote`ing an identical one every evaluation — a
+`spawn` thunk in a fan-out — piles up RUNTIME garbage". But it caches **only when `fn_rest` is a
+RUNTIME pair**; anything else falls through to `parse_closure_template` + `build_closure`, which
+promotes. Both VM engines reach it with a RUNTIME `fn_rest` (`exec_value.rs:456`,
+`exec_chunk.rs:846`) and get the fast path. The other two engines don't, and the bail is silent.
+
+**Correcting two earlier claims of mine.** (1) The 45% attributed to `BROOD_RT_GC_FLOOR` was
+real but it was treating the symptom — stop collecting a region that shouldn't be growing.
+(2) I reported "the root's `rt_threshold` pinned at 4096 proves thrashing"; the root never
+promotes, so that field is merely stale. Neither reading was right about the cause.
+
+**Also tried and reverted:** routing the tree-walker's `fn` through `make_closure_cached`
+(`eval/mod.rs:590`, the one call site using the raw builder). A **no-op** — still 15 989 —
+because the tree-walker's `fn_rest` is a LOCAL pair, so the cache bails exactly as above.
+Reverted rather than left in with a confident comment.
+
+**Not fixed, and this one genuinely needs a design decision.** The fix is to make the cache
+reachable when `fn_rest` is not RUNTIME, and `make_closure_cached`'s own comment explains why
+that is not a one-liner: a LOCAL handle's slot can be reused by a minor GC *without* bumping
+`gen_version`, so a LOCAL key is unsound to cache on. Needs a sound key (or a different place to
+memoise the constant) — ADR territory, in the collector's blast radius. Worth doing: it is
+~2× throughput and ~2× RSS on any workload that spawns per request, which is every server.
