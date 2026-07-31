@@ -15,8 +15,8 @@ use std::collections::HashSet;
 use brood::core::value;
 use brood::error::Span;
 use brood::syntax::cst::{Node, NodeKind};
-use brood::syntax::scope::{BindingKind, ScopeTree};
 use brood::syntax::reader;
+use brood::syntax::scope::{BindingKind, ScopeTree};
 use brood::types::check;
 use brood::Interp;
 use lsp_types::{
@@ -398,29 +398,27 @@ fn close_open_delimiters(source: &mut String) {
                     State::Comment
                 }
             }
-            State::Code => {
-                match c {
-                    '"' => State::Str,
-                    ';' => State::Comment,
-                    '(' => {
-                        open.push(')');
-                        State::Code
-                    }
-                    '[' => {
-                        open.push(']');
-                        State::Code
-                    }
-                    '{' => {
-                        open.push('}');
-                        State::Code
-                    }
-                    ')' | ']' | '}' => {
-                        open.pop();
-                        State::Code
-                    }
-                    _ => State::Code,
+            State::Code => match c {
+                '"' => State::Str,
+                ';' => State::Comment,
+                '(' => {
+                    open.push(')');
+                    State::Code
                 }
-            }
+                '[' => {
+                    open.push(']');
+                    State::Code
+                }
+                '{' => {
+                    open.push('}');
+                    State::Code
+                }
+                ')' | ']' | '}' => {
+                    open.pop();
+                    State::Code
+                }
+                _ => State::Code,
+            },
         };
     }
     match state {
@@ -625,8 +623,7 @@ mod tests {
     #[test]
     fn offers_record_fields_for_a_direct_ctor_argument() {
         // Mid-edit buffer: unclosed call, lone `:` — the roadmap's motivating case.
-        let labels =
-            field_labels_at_end("(defrecord point (x y))\n(get (point 1 2) :");
+        let labels = field_labels_at_end("(defrecord point (x y))\n(get (point 1 2) :");
         assert!(labels.contains(&":x".to_string()), "{labels:?}");
         assert!(labels.contains(&":y".to_string()), "{labels:?}");
         assert!(
@@ -679,10 +676,10 @@ mod tests {
         // A value position, a computed (symbol) key, an untyped map argument, and
         // a plain non-map call each offer no field items.
         for src in [
-            "(defrecord point (x y))\n(assoc (point 1 2) :x ",   // value slot
-            "(defrecord point (x y))\n(get (point 1 2) k",       // computed key
-            "(defn f (p) (get p :",                              // untyped argument
-            "(defrecord point (x y))\n(+ 1 ",                    // not a map op
+            "(defrecord point (x y))\n(assoc (point 1 2) :x ", // value slot
+            "(defrecord point (x y))\n(get (point 1 2) k",     // computed key
+            "(defn f (p) (get p :",                            // untyped argument
+            "(defrecord point (x y))\n(+ 1 ",                  // not a map op
         ] {
             let labels = field_labels_at_end(src);
             assert!(labels.is_empty(), "{src:?} leaked {labels:?}");
