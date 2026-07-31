@@ -12,8 +12,12 @@
 
 use std::collections::HashSet;
 
+use brood::core::value;
+use brood::error::Span;
 use brood::syntax::cst::{Node, NodeKind};
 use brood::syntax::scope::{BindingKind, ScopeTree};
+use brood::syntax::reader;
+use brood::types::check;
 use brood::Interp;
 use lsp_types::{
     CompletionItem, CompletionItemKind, Documentation, InsertTextFormat, MarkupContent, MarkupKind,
@@ -47,6 +51,16 @@ pub fn completions(
 
     let mut items = Vec::new();
     let mut seen = HashSet::new();
+
+    // Record-field candidates (the ROADMAP "type-directed record-field completion"):
+    // at a map-**key** position whose map argument the checker types as a record
+    // shape, offer that record's field names as `:keyword` items ahead of the
+    // generic sets. Additive — the generic candidates still follow (they don't
+    // prefix-match a `:` anyway), and any miss (unknown type, unparseable buffer)
+    // degrades to offering nothing extra, never a wrong list.
+    if let Some(context) = record_key_context(cst, offset, text) {
+        items.extend(record_field_items(interp, text, &context));
+    }
 
     // Inside `(impl Ability …)`, offer the ability's ops first (so the snippet-y
     // METHOD item shadows the generic global of the same name) — you get exactly the
@@ -234,6 +248,191 @@ fn in_module_name_position(node: &Node, offset: u32, src: &str) -> bool {
     }
 }
 
+/// A cursor position where a **record field keyword** belongs: the key slot of a
+/// `(get M …)` / `(assoc M …)` / `(update M …)` / `(dissoc M …)` / `(contains? M …)`
+/// call, or the head of a keyword-accessor call `(:key M)`. Carries what the
+/// checker query needs: the call form's opening byte offset (the reader records a
+/// list's `Pos` there), the item index of the map expression, and the span of the
+/// partially-typed key token — blanked before reading, since a lone `:` doesn't
+/// parse and the key's spelling is irrelevant to the map argument's type.
+struct RecordKeyContext {
+    call_open: u32,
+    map_arg_index: usize,
+    key_token: Option<Span>,
+}
+
+fn record_key_context(node: &Node, offset: u32, src: &str) -> Option<RecordKeyContext> {
+    let list = innermost_list(node, offset)?;
+    let forms: Vec<&Node> = list.forms().collect();
+    let head = forms.first()?;
+    // The argument slot the cursor occupies: the first form the cursor hasn't
+    // passed the end of (typing inside / at the end of it — end-inclusive, like
+    // `enclosing_impl`), or one past the last form when typing a fresh one.
+    let slot = forms
+        .iter()
+        .position(|f| offset <= f.span.end)
+        .unwrap_or(forms.len());
+    let (key_position, map_arg_index) = match head.kind {
+        NodeKind::Symbol => {
+            let at_key = match head.text(src) {
+                "get" | "update" | "contains?" => slot == 2,
+                // `(assoc m k v k v …)`: keys sit at the even slots.
+                "assoc" => slot >= 2 && slot % 2 == 0,
+                "dissoc" => slot >= 2,
+                _ => false,
+            };
+            (at_key, 1)
+        }
+        // `(:key m)` — completing the accessor keyword itself; the map must
+        // already be there to have a type. The head gets blanked below, so in
+        // the read form the map lands at item 0.
+        NodeKind::Keyword => (slot == 0 && forms.len() >= 2, 0),
+        _ => (false, 1),
+    };
+    if !key_position {
+        return None;
+    }
+    // Only offer while the key slot is still keyword-shaped: empty (about to
+    // type), a keyword token, an in-progress scrap the CST couldn't classify,
+    // or the lone `:` just typed (which classifies as a *symbol* — atom.rs:
+    // "a bare `:` is a symbol, not an empty keyword"). Any other symbol is a
+    // *computed* key (`(get p k)`) — the generic candidate paths' job — and any
+    // other complete form isn't a field key.
+    let key_token = match forms.get(slot) {
+        None => None,
+        Some(n)
+            if matches!(n.kind, NodeKind::Keyword | NodeKind::Error)
+                || (n.kind == NodeKind::Symbol && n.text(src).starts_with(':')) =>
+        {
+            Some(n.span)
+        }
+        Some(_) => return None,
+    };
+    Some(RecordKeyContext {
+        call_open: list.span.start,
+        map_arg_index,
+        key_token,
+    })
+}
+
+/// The record-field completion items for a detected key position: parse the
+/// (blanked + balanced) buffer with the strict reader, ask the checker for the
+/// map argument's inferred type at the call site, and turn a record shape's
+/// fields into `:keyword` items. Empty on any miss.
+///
+/// Wrapped in a heap checkpoint like `typecheck_diagnostics` — the parsed forms
+/// are LOCAL and reclaimed after the query, so completion doesn't grow the
+/// interpreter's heap per keystroke.
+fn record_field_items(
+    interp: &mut Interp,
+    text: &str,
+    context: &RecordKeyContext,
+) -> Vec<CompletionItem> {
+    // Blank the partial key token byte-for-byte with spaces, so every other
+    // offset in the buffer — including the call's opening paren — stays put.
+    let mut source = text.to_string();
+    if let Some(span) = context.key_token {
+        source.replace_range(
+            span.start as usize..span.end as usize,
+            &" ".repeat((span.end - span.start) as usize),
+        );
+    }
+    close_open_delimiters(&mut source);
+    // The call form's opening paren in 1-based reader coordinates (columns count
+    // *chars* within the line, matching the scanner's `pos_at`).
+    let opening = context.call_open as usize;
+    let line = source[..opening].bytes().filter(|&b| b == b'\n').count() as u32 + 1;
+    let line_start = source[..opening].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let col = source[line_start..opening].chars().count() as u32 + 1;
+
+    let checkpoint = interp.heap.checkpoint();
+    let mut items = Vec::new();
+    if let Ok(positioned) = reader::read_all_positioned(&mut interp.heap, &source) {
+        let forms: Vec<_> = positioned.into_iter().map(|(f, _)| f).collect();
+        let ty = check::arg_ty_at(&mut interp.heap, &forms, line, col, context.map_arg_index);
+        if let Some(fields) = ty.as_ref().and_then(|t| t.record_fields()) {
+            for (&sym, (field_ty, _required)) in fields {
+                let name = value::symbol_name(sym);
+                if name == "__id__" {
+                    continue; // the record's internal identity tag, not a user field
+                }
+                let mut it = item(format!(":{name}"), CompletionItemKind::FIELD);
+                it.detail = Some(field_ty.to_string());
+                items.push(it);
+            }
+        }
+    }
+    interp.heap.reset_local_to(checkpoint);
+    items
+}
+
+/// Append the closers a mid-edit buffer is missing (`(get p :` → `(get p :)`),
+/// so the strict reader can parse what the tolerant CST already navigates.
+/// Tracks strings (with escapes) and `;` line comments so a delimiter inside
+/// either doesn't count; an unterminated string is closed first, and a trailing
+/// line comment gets a newline so the closers don't land inside it. A stray
+/// close delimiter just pops whatever is open — the read will fail and the
+/// caller degrades to no candidates.
+fn close_open_delimiters(source: &mut String) {
+    #[derive(PartialEq)]
+    enum State {
+        Code,
+        Str,
+        StrEscape,
+        Comment,
+    }
+    let mut state = State::Code;
+    let mut open: Vec<char> = Vec::new();
+    for c in source.chars() {
+        state = match state {
+            State::Str => match c {
+                '\\' => State::StrEscape,
+                '"' => State::Code,
+                _ => State::Str,
+            },
+            State::StrEscape => State::Str,
+            State::Comment => {
+                if c == '\n' {
+                    State::Code
+                } else {
+                    State::Comment
+                }
+            }
+            State::Code => {
+                match c {
+                    '"' => State::Str,
+                    ';' => State::Comment,
+                    '(' => {
+                        open.push(')');
+                        State::Code
+                    }
+                    '[' => {
+                        open.push(']');
+                        State::Code
+                    }
+                    '{' => {
+                        open.push('}');
+                        State::Code
+                    }
+                    ')' | ']' | '}' => {
+                        open.pop();
+                        State::Code
+                    }
+                    _ => State::Code,
+                }
+            }
+        };
+    }
+    match state {
+        State::Str | State::StrEscape => source.push('"'),
+        State::Comment => source.push('\n'),
+        State::Code => {}
+    }
+    while let Some(close) = open.pop() {
+        source.push(close);
+    }
+}
+
 /// The innermost `List` whose span contains `offset` (end-inclusive), or `None`.
 fn innermost_list(node: &Node, offset: u32) -> Option<&Node> {
     if offset < node.span.start || offset > node.span.end {
@@ -407,6 +606,103 @@ mod tests {
         // cursor sits inside the already-typed `(`, so no wrapping parens.
         assert_eq!(enc.insert_text.as_deref(), Some("encode [${1:self}] $0"));
         assert_eq!(enc.insert_text_format, Some(InsertTextFormat::SNIPPET));
+    }
+
+    /// Full-path harness for the record-field candidates: completions at the end
+    /// of `src`, filtered to the FIELD-kind items.
+    fn field_labels_at_end(src: &str) -> Vec<String> {
+        let mut interp = Interp::new();
+        let root = cst::parse(src);
+        let tree = scope::analyze(&root, src);
+        let items = completions(&mut interp, &tree, &root, src, src.len() as u32, true);
+        items
+            .into_iter()
+            .filter(|i| i.kind == Some(CompletionItemKind::FIELD))
+            .map(|i| i.label)
+            .collect()
+    }
+
+    #[test]
+    fn offers_record_fields_for_a_direct_ctor_argument() {
+        // Mid-edit buffer: unclosed call, lone `:` — the roadmap's motivating case.
+        let labels =
+            field_labels_at_end("(defrecord point (x y))\n(get (point 1 2) :");
+        assert!(labels.contains(&":x".to_string()), "{labels:?}");
+        assert!(labels.contains(&":y".to_string()), "{labels:?}");
+        assert!(
+            !labels.iter().any(|l| l.contains("__id__")),
+            "the identity tag is not a user field: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn offers_record_fields_for_a_let_bound_record() {
+        // `p` is a bare symbol — only the checker's scope walk knows its type.
+        let labels = field_labels_at_end(
+            "(defrecord point (x y))\n(defn f () (let (p (point 1 2)) (assoc p :",
+        );
+        assert!(labels.contains(&":x".to_string()), "{labels:?}");
+    }
+
+    #[test]
+    fn record_fields_carry_their_declared_type() {
+        let mut interp = Interp::new();
+        let src = "(defrecord point ((x int) (y int)))\n(get (point 1 2) :";
+        let root = cst::parse(src);
+        let tree = scope::analyze(&root, src);
+        let items = completions(&mut interp, &tree, &root, src, src.len() as u32, true);
+        let x = items
+            .iter()
+            .find(|i| i.label == ":x")
+            .expect("field offered");
+        assert_eq!(x.detail.as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn offers_record_fields_for_the_keyword_accessor_head() {
+        // `(:x p)` — completing the accessor keyword itself.
+        let src = "(defrecord point (x y))\n(defn f () (let (p (point 1 2)) (:x p)))";
+        let mut interp = Interp::new();
+        let root = cst::parse(src);
+        let tree = scope::analyze(&root, src);
+        let at = src.rfind(":x").unwrap() as u32 + 2; // cursor right after `:x`
+        let labels: Vec<String> = completions(&mut interp, &tree, &root, src, at, true)
+            .into_iter()
+            .filter(|i| i.kind == Some(CompletionItemKind::FIELD))
+            .map(|i| i.label)
+            .collect();
+        assert!(labels.contains(&":y".to_string()), "{labels:?}");
+    }
+
+    #[test]
+    fn record_fields_stay_out_of_the_wrong_slots() {
+        // A value position, a computed (symbol) key, an untyped map argument, and
+        // a plain non-map call each offer no field items.
+        for src in [
+            "(defrecord point (x y))\n(assoc (point 1 2) :x ",   // value slot
+            "(defrecord point (x y))\n(get (point 1 2) k",       // computed key
+            "(defn f (p) (get p :",                              // untyped argument
+            "(defrecord point (x y))\n(+ 1 ",                    // not a map op
+        ] {
+            let labels = field_labels_at_end(src);
+            assert!(labels.is_empty(), "{src:?} leaked {labels:?}");
+        }
+    }
+
+    #[test]
+    fn close_open_delimiters_tracks_strings_and_comments() {
+        let case = |src: &str, want: &str| {
+            let mut s = src.to_string();
+            close_open_delimiters(&mut s);
+            assert_eq!(s, want, "for {src:?}");
+        };
+        case("(get p :", "(get p :)");
+        case("(f [1 {", "(f [1 {}])");
+        case("(f \"a ( b", "(f \"a ( b\")");
+        case("(f \"a \\\" (", "(f \"a \\\" (\")");
+        case("(f ; comment (", "(f ; comment (\n)");
+        case("(f)", "(f)");
+        case("(f))", "(f))"); // stray close: left for the reader to reject
     }
 
     #[test]

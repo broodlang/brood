@@ -1460,14 +1460,23 @@ Runtime housekeeping (both items landed):
 
 ### Tooling & errors
 
-- ⬜ **LSP: type-directed record-field completion** (deferred 2026-07-30). Completing a
-  `:keyword` inside a `get`/`assoc`/`update`/map-literal whose value is a known record
-  should offer *that record's* field names. The context detection is easy CST work; the
-  hard part is knowing which record the value is — it needs the checker's inferred type
-  threaded into the completion path (not wired today). A cheap heuristic (offer every
-  `defrecord`'s field names as keywords) was considered and rejected as too noisy to beat
-  the generic global list. Do it as the type-directed version when it's worth ~a day.
-  (The sibling `impl` op-body **snippet** completion shipped — a fillable
+- ✅ **LSP: type-directed record-field completion** — shipped 2026-07-30. Completing a
+  `:keyword` at a map-**key** position (`get`/`assoc`/`update`/`dissoc`/`contains?`,
+  or the keyword-accessor head `(:… m)`) whose map argument the checker types as a
+  record offers *that record's* field names, each with its declared field type. The
+  missing wiring became `check::arg_ty_at` — a position-keyed type query that runs the
+  full `check_file` walk with a capture hook armed (thread-local in `check/walk.rs`),
+  so `let`-bound RHS types, sig-typed params, Gap A globals, and a same-file
+  `defrecord`'s ctor sig are all in force at the capture point; keyed by the *call
+  form's* position because a bare-symbol argument carries none of its own. Mid-edit
+  buffers are repaired before the strict read (the partial key is blanked in place,
+  unclosed delimiters closed), `:` is now a completion trigger char, and every miss
+  degrades to no extra candidates. The noisy every-record heuristic stayed rejected.
+  ⬜ Still out (no concrete need): field completion inside a bare **map literal** —
+  the literal under construction has no identity to infer from (an `:__id__`-carrying
+  literal is rare hand-written form), and typing it from an *expected* parameter
+  type needs bidirectional checking the checker doesn't do.
+  (The sibling `impl` op-body **snippet** completion shipped earlier — a fillable
   `(op [self] …)` skeleton, snippet-gated on the client's `snippetSupport`.)
 - ✅ **`nest test` selection — `mix test` parity** — shipped 2026-07-24. The suite
   had **no way to run a subset by name**: 2965 tests, and the only narrowing was a
