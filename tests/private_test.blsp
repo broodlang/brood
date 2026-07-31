@@ -11,6 +11,16 @@
 (defmodule private-test (:use test))
 
 (describe "module privacy (ADR-146)"
+  ;; :serial — every test here `%load-string`s whole MODULES into the shared module
+  ;; registry and global table, and some read a module a *sibling* test registered
+  ;; (`priv-vault` is defined in the first test and re-used by the alias test below).
+  ;; Run in parallel that is a race: this block was the source of an intermittent
+  ;; `require: cannot find module 'priv-vault2'` that failed the whole in-language
+  ;; suite roughly one run in five, then passed on nextest's retry — so `make test`
+  ;; still reported "929 passed" and only a `FLAKY` marker gave it away. Same reason
+  ;; `suite_test.blsp`'s macro and loop-macro blocks are serial, one level up:
+  ;; module registration, not just a `defn`.
+  :serial
   (test "a cross-module private reference fails the module's load, catchably"
     (%load-string "(defmodule priv-vault) (defn vault--secret () 41)")
     (is (= (try
