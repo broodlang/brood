@@ -7,6 +7,12 @@
 # Editor / OS cruft
 *.swp
 .DS_Store
+# Emacs auto-save (`#file#`) and backup (`file~`) files. `#` starts a comment in a
+# gitignore, hence the escape. A `std/#csv.blsp#` auto-save reached a commit once —
+# byte-identical to its source, inert (modules are embedded from an explicit list,
+# not by globbing std/), but it showed up in tooling that walks *.blsp.
+\#*\#
+*~
 
 # Local build options written by ./configure
 /config.mk
