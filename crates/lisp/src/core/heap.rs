@@ -3694,7 +3694,15 @@ impl Heap {
                 .take(3)
                 .collect::<Vec<_>>()
                 .join(" <- ");
-            eprintln!("[promote] closure {} :: {}", nm, frame);
+            // The capture state is the diagnostic that matters: a closure promoted with
+            // `captures-frame` is one the const-closure cache could not dedupe, so it is
+            // being appended per activation rather than once.
+            let cap = if self.closure(id).env.is_some() {
+                "captures-frame"
+            } else {
+                "capture-free"
+            };
+            eprintln!("[promote] closure {} [{}] :: {}", nm, cap, frame);
         }
         let new_idx = self.runtime.cur_code().closures.push(OnceLock::new());
         // The RUNTIME closure count just grew — arm the eval safepoint's `rt_gc_due`
