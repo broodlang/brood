@@ -47,7 +47,19 @@ transient — each kept as a record with its regression test, so a recurrence is
 
 ---
 
-## KI-24 — an `eval`'d definition cannot forward-reference another `eval`'d name · **open, regression in 97d63eda**
+## KI-24 — an `eval`'d definition cannot forward-reference another `eval`'d name · **✅ RESOLVED 2026-08-01**
+
+**Fix.** `eval_builtin` reverted from `macros::compile` back to `macroexpand_all` (keeping the
+VM routing that fixed deferred.md #9, since the speed came from `compile::run`, not from
+`resolve`). So a bare reference in an `eval`'d form is again resolved lazily at runtime — both
+engines do this identically — and a forward reference across independent `eval` calls works.
+`eval_forward_ref.blsp` now returns `:ok` / 42 / 42 under both engines; guarded by
+`tests/eval_vm_test.blsp` ("an eval'd definition can forward-reference a name a LATER eval
+defines") and `tests/vm_nested_stack_guard_test.blsp` is green again. `eval-string` was never
+affected — it has always used `compile`, and its own forward-ref behaviour (a file's def-head
+pre-scan) is unchanged. The original analysis is kept below.
+
+---
 
 **Symptom.** Two definitions made by `eval`, where the first references the second:
 

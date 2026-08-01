@@ -13853,3 +13853,54 @@ tree-walks *forever* — `vm_cache_put` even caches the negative result — so i
 interpreter cost on every call regardless of promotion. If a LOCAL closure could still be
 VM-compiled, both the interpreter cost and the per-call promotion would go away even when the
 copy still happens.
+
+## 2026-08-01 (cont.) — three gaps the editor's desktop identity walked into (ADR-199/200/201)
+
+Started as "give brood-edit a real icon instead of GNOME's fallback gear" and ended in three
+language-level gaps, each found by the editor needing something the language couldn't express.
+
+**1. A window could not say who it was (ADR-200).** GNOME matches a window to its `.desktop`
+entry by application id and nothing else — and `gui-open` set none, so *every* windowed Brood
+app was unidentifiable. Not fixable client-side: a Wayland client cannot hand the compositor
+icon pixels, so `gui-icon!` is a no-op there and the app id *is* the icon mechanism. Added
+`:app-id` to the opts map (no new op) and collapsed the positional `(title, size, decorations)`
+tail into one `WindowSpec`. Verified on the wire — `WAYLAND_DEBUG=1` shows
+`xdg_toplevel.set_app_id("brood-edit")` — since `gnome-shell`'s own window list
+(`org.gnome.Shell.Introspect.GetWindows`) is `AccessDenied` to ordinary callers.
+
+**2. A shipped app could not use `debug`/`eval-server` (ADR-199).** They were `DEV_MODULES`, so
+the lean release runtime compiles them out; the editor requires both at module top level for its
+debugger and its tutorial sandbox. Because `run-bundle` loads every module an app ships, that
+was not a lost feature but a binary that **could not start** — `bedit` had been failing this way
+while `nest run` was fine. Both moved to CORE, and the rule is now written where the lists live:
+dev-only means *for developing an app*, not *tool-shaped*.
+
+**3. A refused trace left a promise it couldn't keep (ADR-201).** `trace-fn` wrote
+`*traced-fns*` before its rebind, and a rebind can be refused after every check passes (a
+reserved name, E0030). `untrace-all` then re-raised that refusal out of an unrelated caller,
+killing the evaluation. Rebind first, register second; guard each restore in `untrace-all`. This
+is what makes "offer every plausible name and let the tracer choose" safe — the shape a caller
+wants, because only the tracer knows the target image.
+
+**What the editor did with them.** Its tutorial's *Workings* pane now derives trace names from
+each box's own source and follows the cursor between boxes (cached, no re-evaluation), with
+`C-c C-w` to bring it back. Verified live over a pty, which is also how the last bug turned up:
+the new key was added to the tutorial's help-text vocabulary but never `keymap-bind`-ed, so it
+rendered as a blank hole and could not be typed. A test now asserts every command the prose can
+name is actually bound — the model tests couldn't see it, because the vocabulary and the keymap
+are two different tables.
+
+## 2026-08-01 (cont.) — KI-24: the eval-on-VM change broke an eval'd forward reference (fixed)
+
+The eval-on-VM fix (deferred.md #9) had swapped `eval_builtin`'s `macroexpand_all` for the
+full `macros::compile` pass — and `compile`'s `resolve` step qualifies a bare name only when
+its target already exists. So an `eval`'d definition forward-referencing a name a LATER `eval`
+defines (`(eval '(defn r (n) (s n)))` then `(eval '(defn s …))`) left the reference bare and
+never matched the module-qualified global — `unbound symbol: s`. The file loader gets away with
+`resolve` because it pre-scans a file's def heads into the known-names set; independent `eval`
+calls have no such lookahead. Fix: revert `eval_builtin` to `macroexpand_all` (the speed came
+from `compile::run`, not from `resolve`), so a bare reference is resolved lazily at runtime —
+both engines do this identically. `eval-string` was never affected (always used `compile`; its
+forward-ref behaviour rides the file def-head pre-scan). Perf parity held (eval 2031 vs
+compiled 2087 ms). Guarded by a new `eval_vm_test` case; `vm_nested_stack_guard_test` green
+again. KI-24 closed.

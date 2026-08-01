@@ -42,6 +42,16 @@
   (test "higher-order functions over eval'd forms"
     (assert= (list 1 4 9) (map (fn (f) (eval f)) (list '(* 1 1) '(* 2 2) '(* 3 3)))))
 
+  (test "an eval'd definition can forward-reference a name a LATER eval defines (KI-24)"
+    ;; `eval` must NOT run the compile pass's `resolve` step — it qualifies a bare
+    ;; reference only when the target already exists, so a forward reference across
+    ;; independent eval calls would be left bare and never match the module-qualified
+    ;; global. Both engines resolve the bare reference lazily at runtime, so this works.
+    (check-allow :unbound
+      (eval '(defn evm-fwd-r (n) (evm-fwd-s n)))   ; refers to evm-fwd-s, not defined yet
+      (eval '(defn evm-fwd-s (n) (+ n 1)))
+      (assert= 42 (evm-fwd-r 41))))
+
   (test "eval evaluates at the root env (a def is visible afterward)"
     ;; `evm-global` is def'd at RUNTIME via eval, so the static checker can't see it —
     ;; suppress the (correct-for-the-image-but-wrong-here) unbound lint on the bare ref.
