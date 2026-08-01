@@ -13387,3 +13387,27 @@ unchanged (single-threaded load never contends).
 **Why it matters past the suite:** `impl` is hot-reloadable by design. A registration that can
 be dropped by a concurrent one means a live reload can leave an op dispatching to `:default` —
 silently, and permanently.
+
+**And it was systemic, not one registry.** The next `make test` still came back FLAKY — a
+*third* distinct test, `modules_test`'s "provide records a feature idempotently", asserting its
+own feature was missing from `*features*` on the very next line. Same bug, different global:
+`provide` does `(def *features* (cons key *features*))`.
+
+Grepping the shape found **15 registries** built this way — `*record-ids*`, `*features*`,
+`*module-docs*`, `*deprecation-seen*`, `*abilities*`, `*ability-owner*`, `*op-ability*`,
+`*ability-derives*`, `*sealed*`, `*ability-requires*`, `*multi-algebra*`, `*methods*`,
+`*method-from*`, plus the `*impls*`/`*impl-from*` pair already fixed. Every one of them loses
+updates the same way, which means **multimethod registration had the identical bug to ability
+registration** and nobody had hit it yet.
+
+So the per-registry fix became one mechanism: `with-registry-lock`, the ticket lock lifted out
+of `register-impl` and applied at all fifteen sites. One shared lock is right here — these are
+all load-time/hot-reload writes, contention is irrelevant, and one lock cannot deadlock against
+another. One site needed care rather than a mechanical wrap: the derived-method mirror checks
+"is this key absent" and then writes, and that check has to be *inside* the lock or two derived
+mirrors both see absent — and a derived method could clobber an authored one registered in
+between.
+
+`make test` is the harsher environment (928 Rust tests in parallel against the in-language
+suite), which is why it kept finding these after ten clean `nest test` runs. Worth remembering
+as the reproduction environment for this class.
