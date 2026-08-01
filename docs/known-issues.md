@@ -17,6 +17,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-24 | `eval`'d code cannot forward-reference a name a later `eval` defines (regression, 97d63eda) | ⬜ **open** (found 2026-08-01) |
 | KI-23 | the KI-22 lost-update shape also exists in ~10 std-module registries | ⬜ **open** (found 2026-08-01) |
 | KI-22 | concurrent registration lost ~40% of registrations (15 prelude registries) | ✅ fixed 2026-08-01 |
 | KI-21 | `nest run --for` / `--watch` generated a legacy `~p` pin — failed on any file | ✅ fixed 2026-07-30 |
@@ -45,6 +46,45 @@ ADRs / topic docs.
 transient — each kept as a record with its regression test, so a recurrence is recognizable.
 
 ---
+
+## KI-24 — an `eval`'d definition cannot forward-reference another `eval`'d name · **open, regression in 97d63eda**
+
+**Symptom.** Two definitions made by `eval`, where the first references the second:
+
+```
+(defmodule m)
+(eval '(defn r (n) (s n)))
+(eval '(defn s (n) (+ n 1)))
+(r 41)          ; → unbound symbol: s
+```
+
+The hint says it all: ``s` is defined as `m/s` — add `(:use m)` … or call it qualified`. The
+*definition* side qualifies correctly (`m/s` exists); only the bare *reference* fails to.
+
+**It is order-dependent, and ordinary code is unaffected** —
+`scripts/fuzz/stress/eval_forward_ref.blsp`:
+
+| shape | result |
+|---|---|
+| normal mutual recursion (forward ref) | ✅ `:ok` |
+| eval'd, target defined **first** | ✅ 42 |
+| eval'd, target defined **second** | ❌ `unbound symbol: s` |
+
+**Confirmed a regression, not long-standing.** Rebuilt `builtins/system.rs` at `97d63eda^`
+and the third row returns **42**; restoring the commit makes it fail again.
+
+**Cause.** `97d63eda` (a good change — it took `eval` off the ~14× tree-walker) swapped
+`macroexpand_all` for `macros::compile`, which adds the **resolve** pass. That pass qualifies a
+bare name against `heap.compile_ns()`, and evidently only rewrites a reference whose target
+already exists, so a forward reference is left bare and is then not found under the module's
+qualified name.
+
+**What it breaks:** mutual recursion defined through `eval`, and any REPL / hot-reload /
+`%load-string` flow that evaluates definitions out of dependency order — which is the normal
+way people paste code into a REPL.
+
+**Caught by** `tests/vm_nested_stack_guard_test.blsp` ("a tail-recursive fn defined via eval
+still has O(1) stack"), which is currently red for this reason — not for a TCO problem.
 
 ## KI-23 — the KI-22 lost update also exists in std-module registries · **open, found 2026-08-01**
 
