@@ -3804,6 +3804,18 @@ leaves `s` unchanged."
   "Join path segments `a` and `b` with a single `/` separator."
   (if (ends-with? a "/") (str a b) (str a "/" b)))
 
+(defn temp-path (prefix)
+  "A fresh, unpredictable path under `/tmp`: `<prefix><32 hex chars>`, NOT created —
+`spit` a file there or `make-dir` a directory. The name comes from `random-token`, so
+it is unique across processes and across runs, and cannot be guessed ahead of time.
+
+Reach for this instead of writing a program-specific constant like
+`/tmp/myapp-worker.blsp`. A fixed name in a world-writable directory is two bugs: two
+copies of the program fight over one file, and anyone on the machine can create that
+path first — as a symlink to something you own — so the `spit` overwrites their choice
+of file with your privileges. Neither is possible with a name they cannot predict."
+  (path-join "/tmp" (str prefix (random-token 16))))
+
 (defn path-basename (path)
   "The final component of `path` (\"/a/b/c\" -> \"c\", \"/foo\" -> \"foo\",
 \"foo\" -> \"foo\"). The empty string returns itself; a trailing slash isn't

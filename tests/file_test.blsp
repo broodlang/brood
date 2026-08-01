@@ -282,3 +282,15 @@
       (is (%file-swap lock data "a" "ab"))
       (is (%file-swap lock data "ab" "abc"))
       (assert= (slurp data) "abc"))))
+
+(describe "temp-path"
+  (test "unpredictable and unique — never the same path twice"
+    (let (a (temp-path "x-") b (temp-path "x-"))
+      (is (starts-with? a "/tmp/x-"))
+      (is (not= a b))
+      ;; long enough that it cannot be guessed and pre-created as a symlink by
+      ;; another user on the machine — the reason a fixed /tmp name is unsafe
+      (is (>= (- (string-length a) (string-length "/tmp/x-")) 32))))
+
+  (test "it creates nothing — the caller decides file or directory"
+    (is (not (file-exists? (temp-path "unmade-"))))))
