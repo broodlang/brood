@@ -29,25 +29,15 @@
 ;; `(def *features* (cons key *features*))` — a read-modify-write of one shared global, so
 ;; two processes providing at once each read the old list and each write their own successor,
 ;; dropping one. This was a real intermittent suite failure: "provide records a feature
-;; idempotently" saw its own feature missing from `*features*` on the very next line. The
-;; write is now serialised by the load-time registry lock; this pins it.
-(defn mt-provide-spawn (i n parent)
-  (when (< i n)
-    (spawn (do (provide (symbol (str "mt-conc-feature-" i))) (send parent [:p i])))
-    (mt-provide-spawn (+ i 1) n parent)))
-(defn mt-provide-join (k) (when (> k 0) (receive ([:p _] (mt-provide-join (- k 1))) (after 30000 :timeout))))
-(defn mt-provide-lost (i n acc)
-  (if (>= i n) acc
-    (mt-provide-lost (+ i 1) n
-      (if (member? (str "mt-conc-feature-" i) *features*) acc (+ acc 1)))))
+;; idempotently" saw its own feature missing from `*features*` on the very next line.
+(defn mt-conc-feature (i) (str "mt-conc-feature-" i))
 
 (describe "modules: concurrent provide (KI-22 class)"
   :isolated
   (test "no feature is lost when many processes provide at once"
     (let (n 120)
-      (mt-provide-spawn 0 n (self))
-      (mt-provide-join n)
-      (assert= (mt-provide-lost 0 n 0) 0))))
+      (concurrently n (fn (i) (provide (symbol (mt-conc-feature i)))))
+      (assert= (count (remove (fn (i) (member? (mt-conc-feature i) *features*)) (range n))) 0))))
 
 ;; :serial — these mutate the shared *features* global, so run them one-at-a-time.
 (describe "modules: member? / provide / require"

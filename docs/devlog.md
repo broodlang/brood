@@ -13419,3 +13419,33 @@ pre-change binary and comparing registry counts at startup (4 vs 0) rather than 
 "20 s" in the earlier measurements was the timeout, not the work. The loss numbers were still
 sound (20 s was ample for the workers to finish), but the harness now passes the parent pid in
 and runs in 0.1 s.
+
+## 2026-08-01 (cont.) — `concurrently`: make a race a one-line test instead of a flake
+
+Added `concurrently` to `std/tool/test.blsp`: `(concurrently n f)` runs `(f i)` for `i` in
+0..n-1, each in its own process, blocks until all finish, and returns their results. The three
+concurrency tests written today were each eight lines of hand-rolled spawn/join/count
+scaffolding; they are now three lines apiece.
+
+**It exists to make one specific mistake impossible.** `(spawn (worker (self)))` evaluates
+`(self)` in the **child**, so every worker messages itself and the collector waits for messages
+that never arrive. That bug was written twice in this repo's own stress harnesses today —
+once in `registry_race.blsp` (where it masqueraded as a 20-second runtime cost that was really
+just the collect timeout). `concurrently` captures the parent pid in the parent, once.
+
+Results are collected on a fresh `ref` minted per call, so a stray message can never be
+mistaken for a worker's result — and pinning that ref lets the receive-mark (ADR-195) skip an
+unrelated backlog rather than walk it per result. A worker that wedges fails the test at
+`*test-timeout-ms*` instead of hanging the run.
+
+**The point is deterministic concurrency tests.** KI-22 cost three sessions as a ~1-in-5 flake
+that only appeared under machine load; the test that finally cornered it catches the same bug
+on the *first* run, at any load, because it creates the contention itself. That is the general
+lesson: don't hope the suite's own parallelism interleaves the right way.
+
+**A correction to something I said earlier in this log.** I claimed `make test` was "the
+reproduction environment for this class" and implied `nest test` was inadequate. Both wrong.
+`nest test` is the runner for Brood projects, and it already ships `--repeat-until-failure <N>`
+("for shaking out a flaky test") plus `--seed` for order randomisation. All `make test` added
+was incidental CPU contention from 928 parallel Rust tests. The right answer was never a
+different runner — it was a test that does not depend on load at all.
