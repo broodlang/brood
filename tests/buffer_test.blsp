@@ -942,3 +942,50 @@
           b0 (make-buffer "seed")
           b1 (insert (goto-char b0 4) big))
       (assert= (buffer-text (undo-in-region (uir-sel b1 0 (buffer-length b1)))) "seed"))))
+
+(describe "join-line / fixup-whitespace (Emacs M-^ / M-SPC)"
+  (defn at (text n) (goto-char (make-buffer text) n))
+  (defn joined (text n) (buffer-text (join-line (at text n))))
+
+  (test "it pulls THIS line up onto the previous one, not the next one down"
+    ;; the direction is the whole point: Vim's J joins downward, Emacs M-^ joins upward
+    (assert= (joined "foo\n    bar\nbaz" 8) "foo bar\nbaz"))
+
+  (test "the joined line's indentation collapses to a single space"
+    (assert= (joined "one\n\t\t  two" 9) "one two")
+    (assert= (joined "one\ntwo" 4) "one two"))
+
+  (test "no space is inserted before a closing delimiter"
+    ;; (foo bar\n) must not become "(foo bar )"
+    (assert= (joined "(foo bar\n)" 9) "(foo bar)")
+    (assert= (joined "(foo\n  )" 5) "(foo)"))
+
+  (test "…nor after an opening one"
+    (assert= (joined "(\n  foo bar)" 2) "(foo bar)"))
+
+  (test "point ends at the join, ahead of the space"
+    (let (b (join-line (at "foo\n    bar" 8)))
+      (assert= (buffer-point b) 3)                       ; right after "foo"
+      (assert= (buffer-char-after b) " ")))
+
+  (test "on the first line there is nothing above, so the buffer is untouched"
+    (let (b (at "foo\nbar" 1))
+      (assert= (buffer-text (join-line b)) "foo\nbar")
+      (assert= (buffer-point (join-line b)) 1)))
+
+  (test "joining an empty line just removes it"
+    (assert= (joined "foo\n\nbar" 4) "foo\nbar"))
+
+  (test "repeated joins walk a wrapped paragraph together"
+    (let (once (join-line (at "a\n  b\n  c" 6))
+          twice (join-line (goto-char once (buffer-length once))))
+      (assert= (buffer-text once) "a\n  b c")
+      (assert= (buffer-text twice) "a b c")))
+
+  (test "collapse-whitespace is just-one-space and delete-horizontal-space"
+    (assert= (buffer-text (collapse-whitespace (at "a   \t  b" 4) " ")) "a b")
+    (assert= (buffer-text (collapse-whitespace (at "a   \t  b" 4) "")) "ab"))
+
+  (test "collapse-whitespace never eats across a newline"
+    ;; it squeezes the gap point stands in; line structure is not its business
+    (assert= (buffer-text (collapse-whitespace (at "a  \n  b" 2) "")) "a\n  b")))
