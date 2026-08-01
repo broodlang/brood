@@ -384,6 +384,27 @@ urgency.
 
 ## 9. `eval` runs interpreted — a 14x cliff for every runtime-evaluated form
 
+**✅ RESOLVED 2026-08-01.** `eval_builtin` and `eval_string_inner` now take the same
+path the file loader uses (`lib::eval_forms`): the full compile pass
+(`macros::compile` — expand + resolve + static-quasiquote lowering) then
+`eval::compile::run` when `vm_enabled()`, falling back to the tree-walker per-form
+(`compile::run` already does this internally for any form outside the VM's
+vocabulary) and under `BROOD_VM=0`. So a runtime-evaluated form's top-level call now
+dispatches into the VM, where the callee's arm compiles and tail-recurses in O(1)
+stack — the cliff is gone (measured: `eval` of the million-iteration loop went from
+~14× the compiled time to parity). Correctness pinned form-by-form in
+`tests/eval_vm_test.blsp` (arithmetic, deep tail recursion, closures capturing the
+runtime env, macros/quasiquote, cross-process round-trip), green under VM /
+tree-walker / no-JIT. **One behaviour change to note:** `std/tool/eval-server`'s
+`:trace` mode — boundary tracing costs TCO (each traced call is a real frame), and the
+VM's recursion budget (~1M) is far above the tree-walker's, so a *traced* deep tail
+loop that used to overflow the interpreted eval now completes at moderate depth
+(`eval_server_test` updated to the engine-robust fact: tracing captures each self-call,
+i.e. it costs TCO, rather than the tree-walker-specific overflow depth). The original
+analysis is kept below for history.
+
+---
+
 **The bug.** `eval` (and `eval-string`, and therefore every consumer that
 evaluates source it was handed at runtime) walks the form with the tree
 evaluator, while the same code loaded from a file goes down the compiled path.

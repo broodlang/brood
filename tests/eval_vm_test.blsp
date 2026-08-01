@@ -1,0 +1,61 @@
+;; tests/eval_vm_test.blsp — `eval`/`eval-string` run on the compiling VM (deferred.md #9).
+;;
+;; `eval` used to walk every form with the tree-walker (a ~14× cliff for runtime-evaluated
+;; code); it now takes the same compile→VM path the file loader uses, falling back to the
+;; tree-walker per-form for anything outside the VM's vocabulary. A miscompile here fails
+;; SILENTLY (a wrong value, not an error), so this file pins RESULTS across the tricky
+;; shapes deferred.md named — and the whole suite also runs under `BROOD_VM=0`, so these
+;; double as a compiled-vs-tree-walked differential.
+(defmodule eval-vm-test (:use test))
+
+(describe "eval runs on the VM: results are correct"
+  (test "arithmetic and nested calls"
+    (assert= 6 (eval '(+ 1 2 3)))
+    (assert= 20 (eval '(* (+ 1 1) (+ 2 3) 2)))
+    (assert= 6 (eval-string "(* 1 2 3)")))
+
+  (test "a tail-recursive loop evaluated via eval runs in O(1) stack (the cliff case)"
+    ;; This is the shape that used to time out on the tree-walker eval. 300k iterations
+    ;; inside eval must complete — a lost TCO would overflow the green-process stack.
+    (assert= :done
+      (eval-string "(defn evm-loop ((0) :done) ((n) (evm-loop (- n 1))))\n(evm-loop 300000)")))
+
+  (test "a closure built by eval captures the runtime env and stays callable"
+    (assert= 7 ((eval '(fn (x) (+ x 1))) 6))
+    ;; a def'd closure over a value, then called later
+    (eval-string "(def evm-adder (let (base 100) (fn (x) (+ base x))))")
+    (assert= 105 (eval '(evm-adder 5))))
+
+  (test "special forms and macros expand + evaluate correctly through eval"
+    (assert= :yes (eval '(if (> 2 1) :yes :no)))
+    (assert= 15 (eval '(let (a 5 b 10) (+ a b))))
+    (assert= :b (eval '(cond (= 1 2) :a (= 1 1) :b else :c)))
+    ;; a macro (when) expands under eval
+    (assert= 42 (eval '(when true 42)))
+    ;; match (a macro lowering to nested ifs)
+    (assert= "two" (eval '(match 2 (1 "one") (2 "two") (_ "other")))))
+
+  (test "quasiquote evaluates correctly through eval"
+    (assert= [1 2 3] (eval '(let (x 2) `[1 ~x 3])))
+    (assert= (list 1 2 3) (eval '(let (xs (list 2)) `(1 ~@xs 3)))))
+
+  (test "higher-order functions over eval'd forms"
+    (assert= (list 1 4 9) (map (fn (f) (eval f)) (list '(* 1 1) '(* 2 2) '(* 3 3)))))
+
+  (test "eval evaluates at the root env (a def is visible afterward)"
+    ;; `evm-global` is def'd at RUNTIME via eval, so the static checker can't see it —
+    ;; suppress the (correct-for-the-image-but-wrong-here) unbound lint on the bare ref.
+    (check-allow :unbound
+      (eval '(def evm-global 99))
+      (assert= 99 evm-global)
+      (assert= 99 (eval 'evm-global)))))
+
+;; Cross-process: an eval'd closure is deep-copied to another process (proving the
+;; compiled-on-eval closure round-trips through to_message/from_message + promote).
+(describe "eval on the VM: cross-process"
+  :isolated
+  (test "a closure built by eval survives a send and runs on the receiver"
+    (let (f (eval '(fn (x) (* x x)))
+          w (spawn (receive ([:go g from] (send from [:r (g 9)])))))
+      (send w [:go f (self)])
+      (assert= 81 (receive ([:r v] v) (after 1000 :timeout))))))
