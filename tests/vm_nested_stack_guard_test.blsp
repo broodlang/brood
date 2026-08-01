@@ -48,3 +48,32 @@
   (test "non-tail recursion without a try still uses heap frames and goes deep"
     ;; The guard must not have narrowed the ordinary VM path.
     (assert= 200000 (nsg-plain 200000))))
+
+;; ---- `eval` in tail position is NOT a tail call -------------------------------
+;; A self-call made THROUGH `eval` looks tail-recursive and is not: `eval` is a native
+;; function, so it re-enters the evaluator on the Rust stack and each round adds a frame.
+;; Reported as "eval doesn't kick in tail optimisation" — it is the native re-entry, not a
+;; TCO bug, and every ordinary tail shape survives `eval` (the second test pins that, so a
+;; future change cannot quietly break real TCO and hide behind this note).
+(defn nsg-eval-self (n) (if (= n 0) :ok (eval (list 'nsg-eval-self (- n 1)))))
+(eval '(defn nsg-evald-if   (n acc) (if (= n 0) acc (nsg-evald-if (- n 1) (+ acc 1)))))
+(eval '(defn nsg-evald-cond (n) (cond (= n 0) :ok else (nsg-evald-cond (- n 1)))))
+(eval '(defn nsg-evald-mutA (n) (if (= n 0) :ok (nsg-evald-mutB (- n 1)))))
+(eval '(defn nsg-evald-mutB (n) (if (= n 0) :ok (nsg-evald-mutA (- n 1)))))
+
+(describe "eval and tail calls"
+  (check-allow :non-tail-recursion
+    (test "a self-call made THROUGH eval is not a tail call — it is catchable, not fatal"
+      (assert= :caught (try (nsg-eval-self 50000) (catch e :caught)))))
+  (test "the error names eval, so the cause is not mistaken for a TCO bug"
+    (let (hint (try (do (nsg-eval-self 50000) "") (catch e (get e :hint))))
+      (is (includes? hint "eval"))))
+  ;; The other half: ordinary tail recursion DEFINED through eval keeps proper tail calls.
+  ;; `:unbound` because these are defined BY `eval` at load — the static checker cannot see
+  ;; a name that only exists after a runtime `eval`, and that is the point of the test.
+  (check-allow :unbound
+    (test "a tail-recursive fn defined via eval still has O(1) stack"
+      (assert= 300000 (nsg-evald-if 300000 0))
+      (assert= :ok (nsg-evald-cond 300000))
+      (assert= :ok (nsg-evald-mutA 300000))
+      (assert= :ok (eval '(letrec (g (fn (n) (if (= n 0) :ok (g (- n 1))))) (g 300000)))))))
