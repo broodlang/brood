@@ -1673,9 +1673,21 @@ Runtime housekeeping (both items landed):
   `[:runtime :nodeup]`/`[:runtime :nodedown]` through the same `[:runtime kind]` seam as
   `watch-runtime` (polling because the kernel has no `[:nodeup]` event — it catches both
   inbound peers and outbound `connect`s). `tests/telemetry_metrics_test.blsp` now 15.
-  ⬜ Still to fold in: unifying `gc-stats`/`vm-stats`/`process-info` snapshots behind the
-  stream so `nest observe` + `nest mcp` consume it; `defevent` + checker-validated event
-  schemas; and the location-transparent remote tier over the dist link.
+  ✅ **`defevent` + checker-validated schemas — shipped 2026-08-01.** A telemetry event now
+  carries a declared shape: `(defevent name event :measurements ((f type)…) :metadata ((f
+  type)…))` registers the schema (`event-schema`/`telemetry-events`) and defines a **typed
+  emitter function** whose emitted `(sig …)` makes `(name 42 "/" 200)` a checker-validated
+  call — reusing the `sig` seam exactly as `defrecord` does for field types, so zero new
+  checker machinery (verified: a wrong arg type and a wrong arity both warn). Raw `emit`
+  still works; `(telemetry-validate! true)` enables an advisory listener-side presence-check
+  of declared events (`telemetry--check-event`, pure + tested). `tests/telemetry_metrics_test.blsp`.
+  ✅ **Snapshots unified behind the stream — shipped 2026-08-01.** `runtime-snapshot` folds
+  `gc-stats`/`sched-stats`/`vm-stats`/process-count/`metrics-snapshot` into one map (dev-tools
+  stats read only when bound, lean-safe), and `watch-vitals` samples it onto the stream as
+  `[:runtime :vitals]` events, foldable into gauges via `last-value` — one subscription
+  instead of scraping N builtins. `nest mcp` gains a `vitals` tool over it (the point-in-time
+  companion to `watch-runtime`). ⬜ Still: the location-transparent remote tier over the dist
+  link (below).
 
 ### Server / daemon (M4)
 

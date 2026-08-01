@@ -13480,6 +13480,32 @@ path-B block (locals not named at break, computed exprs, `:val` override, `break
 `,resume [N]` (resume all / the Nth parked) + `,step` (advance one) through the new registry, so
 a debug session is driven with `,`-commands instead of full `(debug/…)` forms.
 
+## 2026-08-01 (cont.) — tooling bundle 2: defevent + checker-validated schemas, snapshots behind the stream
+
+**`defevent` — events as data with a checked schema.** Erlang `:telemetry` events are bare
+atoms the emitter and handler agree on by convention. `defevent` declares the shape once and
+gets it CHECKED, reusing the exact trick `defrecord` uses for field types (ADR-130): it
+generates a *typed emitter function* whose emitted `(sig …)` carries the measurement + metadata
+types, so `(request-stop 42 "/" 200)` is an ordinary typed call the advisory checker validates —
+zero new checker machinery (a checker-mapping pass confirmed there is no `emit`-call-keyed
+validation to hook, and the sig route sidesteps needing one). Verified: a wrong argument type and
+a wrong arity both warn. The schema is also registered (`event-schema`/`telemetry-events`) for
+introspection and an opt-in listener-side presence-check (`telemetry-validate!` +
+`telemetry--check-event`, refactored pure so it's unit-testable). Two cross-module traps hit and
+fixed: the macro param `name` shadowed the prelude `name` fn (renamed to `fname`), and a
+`(def *telemetry-validate* …)` from another module creates a module-local binding the listener
+never sees — so the flag is a `def`-global toggled through a `telemetry-validate!` setter defined
+*inside* telemetry (like `*telemetry-handlers*`).
+
+**Snapshots unified behind the stream.** `runtime-snapshot` folds `gc-stats`/`sched-stats`/
+`vm-stats`/process-count/`metrics-snapshot` into one map (the dev-tools-only stats read only when
+bound, so it degrades cleanly on a lean runtime), and `watch-vitals` samples it onto the telemetry
+stream as `[:runtime :vitals]` events, foldable into gauges — one subscription instead of scraping
+N builtins. `nest mcp` gains a `vitals` tool over `runtime-snapshot` (the point-in-time companion
+to the event-streaming `watch-runtime`). Reminder banked: the std lib is embedded in each binary at
+build time, so a `.blsp` edit needs a `cargo build` of BOTH `cli` and `nest` before `nest check`
+sees it. Tests: `tests/telemetry_metrics_test.blsp` (+8); telemetry/sysmon/mcp/observer suites green.
+
 ## 2026-08-01 (cont.) — thread 6 narrowed: three mechanisms excluded, still not the supervisor's
 
 Kept after the JIT closure re-promotion. No fix, but the search space is much smaller and the
