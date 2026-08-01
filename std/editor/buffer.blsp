@@ -774,6 +774,71 @@ line's start does **not** pull that trailing line in (Emacs's line-wise conventi
             hicol (- hi (rope-line->char (buffer-rope buf) elraw)))
         [sl (if (and (> elraw sl) (= hicol 0)) (dec elraw) elraw)]))))
 
+(defn buffer--horizontal-space? (c)
+  ;; horizontal only: a newline is a line boundary, never whitespace to squeeze
+  (or (= c " ") (= c "\t")))
+
+(defn buffer--ws-run-start (txt i)
+  (if (and (> i 0) (buffer--horizontal-space? (char-at txt (dec i))))
+    (buffer--ws-run-start txt (dec i))
+    i))
+
+(defn buffer--ws-run-end (txt i n)
+  (if (and (< i n) (buffer--horizontal-space? (char-at txt i)))
+    (buffer--ws-run-end txt (inc i) n)
+    i))
+
+(defn collapse-whitespace (buf keep)
+  "The run of spaces/tabs SURROUNDING point replaced by `keep` — `\" \"` for Emacs's
+`just-one-space` (M-SPC), `\"\"` for `delete-horizontal-space` (M-\\), and the squeeze
+step of `fixup-whitespace`. Scans both directions from point but never across a
+newline, so it collapses the gap you are standing in and leaves the line structure
+alone. Point lands just after `keep`."
+  (let (txt (buffer-text buf)
+        p (buffer-point buf)
+        lo (buffer--ws-run-start txt p)
+        hi (buffer--ws-run-end txt p (string-length txt)))
+    (replace-region buf lo hi keep)))
+
+(def buffer--close-delimiters [")" "]" "}"])
+(def buffer--open-delimiters ["(" "[" "{"])
+
+(defn fixup-whitespace (buf)
+  "Emacs `fixup-whitespace`: squeeze the horizontal whitespace around point to exactly
+ONE space — or to none in the places a space would be wrong. Point does not move (it
+stays at the join, ahead of any space inserted), so this composes under `join-line`.
+
+No space is left when point is at the start or end of a line, before a closing
+delimiter, or after an opening one: joining `(foo` to `bar)` gives `(foo bar)`, but
+joining `(foo bar` to `)` gives `(foo bar)` rather than `(foo bar )`. That rule is what
+makes the operation usable on Lisp — which is to say, on Brood source."
+  (let (squeezed (collapse-whitespace buf "")
+        at (buffer-point squeezed)
+        before (buffer-char-before squeezed)
+        after (buffer-char-after squeezed))
+    (if (or (nil? before) (= before "\n")                       ; start of line
+            (nil? after) (= after "\n")                         ; end of line
+            (includes? buffer--close-delimiters after)
+            (includes? buffer--open-delimiters before))
+      squeezed
+      (goto-char (insert squeezed " ") at))))
+
+(defn join-line (buf)
+  "Emacs `delete-indentation` / `join-line` (M-^): pull THIS line up onto the previous
+one — delete the newline before it and `fixup-whitespace` at the seam, so the joined
+line's indentation collapses to a single space (or none, next to a delimiter). Point
+ends at the join. On the first line there is nothing above to join to, so the buffer
+comes back untouched.
+
+Note the direction: it joins the current line to the one ABOVE (Emacs), not the next
+line onto this one (Vim's `J`). Joining upward is what makes repeated presses walk a
+wrapped paragraph together from the bottom."
+  (let (at-bol (beginning-of-line buf)
+        bol (buffer-point at-bol))
+    (if (= bol 0)
+      buf
+      (fixup-whitespace (delete-char (goto-char at-bol (dec bol)) 1)))))
+
 (defn map-region-lines (buf f)
   "Fold `(f buf line)` over each line in `buf`'s `region-line-range`, threading the
 buffer through — the scaffold for line-wise commands (comment, indent-region, …).
