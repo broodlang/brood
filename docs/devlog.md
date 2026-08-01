@@ -13503,3 +13503,41 @@ Recording the exclusions in the handoff so the next attempt bisects
 `supervisor--start-child` itself instead of re-probing generic shapes. The standing suspicion
 is unchanged: `make_closure_cached` caches only when `fn_rest` is a RUNTIME pair and bails
 **silently** otherwise, which is exactly the shape of a JIT/VM divergence that costs 2×.
+
+## 2026-08-01 (cont.) — thread 6's cause found: a `spawn` thunk re-promoted per call
+
+Found it, with a tool rather than more bisecting. **`spawn`/`spawn-link` must promote the
+spawned thunk into the shared RUNTIME region** — a new process cannot run code out of another
+process's LOCAL heap. At ordinary call sites that is free after the first time, because the
+compiler **const-lifts** a capture-free thunk (`eval::compile::const_node`): promoted once,
+reused forever. On the supervisor path it is *not* const-lifted, so the thunk is rebuilt LOCAL
+on every call and promoted again — into a region that only ever grows.
+
+`BROOD_TRACE_PROMOTE=1` on a supervisor workload, ranked: **1382 of 1389 promotions from a
+single site, `spawn_impl <- spawn_link`.** The remaining handful are the compiler's own
+one-time const lifts. Hours of elimination bisecting had produced less than that one run.
+
+**What that trace cost to build: about ten lines.** I should have written it far earlier. The
+whole day's method on this thread was excluding mechanisms one at a time, and I excluded nine
+of them correctly — creating a capture-free closure in a hot arm; creating and **sending** one;
+receive-thunk + call + spawn; `spawn` *and* `spawn-link` in a hot loop from the root *and* from
+a spawned process; `link`; storing the spec in long-lived state; the restart window; and the
+reclamation policy (`BROOD_RT_GC_FLOOR` at 64 / default / 100000000 → 2512 / 2663 / 2661, so no
+feedback loop through compaction). Every one of those was true and none of them found the
+cause. Ask the runtime what it is doing before deducing what it must be doing.
+
+One result along the way is worth keeping because it killed an attractive theory: the closure
+**form is irrelevant**. `:start` written as an inline anonymous closure and as a plain global
+function reference promote 11 876 vs 11 877 per 20 k. It was never about anonymous closures;
+it is about whether the thunk got const-lifted.
+
+**Not fixed, and this one is a genuine design call.** Two shapes: teach the compiler to
+const-lift the thunk on this path too, or memoise the promoted form at the spawn boundary the
+way `store_const_closure` already does for const closures. Both sit on the scheduler/GC
+boundary — the part of this system with the worst history — and today has already produced two
+reverted "fixes" that looked right in isolation. It wants a deliberate pass.
+
+**`BROOD_TRACE_PROMOTE=1` is kept and documented** in CLAUDE.md's debug table: it names every
+closure entering the append-only region along with the Rust frames that put it there. Anything
+promoted *per operation* is an unbounded leak of shared code whose symptom is a slow decay
+rather than a crash, so this is the first thing to reach for next time.

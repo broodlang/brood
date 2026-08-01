@@ -97,28 +97,35 @@ From the published run (`brood-benchmarks/results/`):
    projection by extrapolating MB/*minute* when the driver is MB/*iteration* — the long run
    actually reached 3M iterations / 3.06 GB in 7 h. A8's trap, freshly re-stepped-in.
 
-6. **Throughput decay — the JIT re-promotes a capture-free closure on the supervisor path.
-   Measured, narrowed, NOT fixed.** Harness `scripts/fuzz/stress/decay_isolate.blsp`.
-   **The headline measurement** (`supnocrash`, 20 s, same binary): default does **300 k ops /
-   639 MB RSS** with `rt_closures` 2 191 → 10 273 and throughput decaying 19 083 → 16 611 ops/s;
-   `BROOD_NO_JIT=1` does **590 k ops / 318 MB** with `rt_closures` **73 → 75** and throughput
-   *flat* (27 777 → 28 901). So ~2× the work, half the memory, and the decay disappears. The
-   region is per-runtime, which is why a restart cures it.
-   **Everything else is exonerated** — `alloc` (52 M ops), `cons` (74 M), `spawn` (55 M),
-   `sendrecv` (50 M), `roundtrip` (11 M), `backlog` (1.4 M) are all flat, as are `spawn-link`
-   + normal exit / `error` / `throw` (3–5 M each).
-   **Three plausible mechanisms have now been excluded by direct probe**, each at ~0.001
-   promotions/op against the supervisor path's 0.6/op: creating a capture-free closure in a hot
-   arm (200 k, delta 1); creating one and **sending** it (100 k, delta 2 — so ADR-194's share
-   path is fine, and `BROOD_NO_SHARE_FN=1` changes nothing); and a process **receiving** a
-   thunk, **calling** it, and spawning inside it (20 k, delta 17 vs 5 — the JIT ratio is there
-   but the absolute is negligible). So it is something specific to `start-child` beyond
-   "receive a thunk and spawn it", still unidentified.
-   **Next step:** bisect `supervisor--start-child` itself (it also does `link`, an optional
-   `register`, and `(assoc spec :pid pid)` into the long-lived supervisor state) rather than
-   re-probing the generic shapes — those are now ruled out. `make_closure_cached` caches only
-   when `fn_rest` is a RUNTIME pair and bails silently otherwise, which remains the most
-   likely place for the JIT/VM divergence. perf is unusable here (`perf_event_paranoid=4`).
+6. **Throughput decay — CAUSE FOUND 2026-08-01, not yet fixed. A capture-free `spawn`
+   thunk is re-promoted per call on the supervisor path.** Worth ~2× throughput and ~2× RSS.
+   **The chain, end to end.** `spawn`/`spawn-link` must promote the spawned thunk into the
+   shared RUNTIME region — a new process cannot run code from another process's LOCAL heap.
+   At ordinary call sites that costs nothing repeatable, because the compiler **const-lifts**
+   a capture-free thunk (`eval::compile::const_node`): it is promoted **once** and reused. On
+   the supervisor path it is not const-lifted, so it is rebuilt LOCAL on every call and
+   promoted again — into a region that is append-only. `BROOD_TRACE_PROMOTE=1` on a
+   supervisor workload: **1382 of 1389 promotions come from `spawn_impl <- spawn_link`.**
+   **Measured impact** (`decay_isolate` `supnocrash`, 20 s, same binary): default **300 k ops /
+   639 MB** with throughput decaying 19 083 → 16 611 ops/s; `BROOD_NO_JIT=1` **590 k ops /
+   318 MB**, `rt_closures` 73 → 75, throughput *flat*. The region is per-runtime, which is why
+   a restart cures it.
+   **Ruled out, each by direct probe** (all ~0.001 promotions/op against the supervisor's
+   0.27–0.6): creating a capture-free closure in a hot arm; creating and **sending** one
+   (ADR-194's share path is fine; `BROOD_NO_SHARE_FN=1` changes nothing); receive-thunk +
+   call + spawn; `spawn` **and** `spawn-link` in a hot loop from the root **and** from a
+   spawned process; `link`; storing the spec in long-lived state; the restart-intensity
+   window; and the RUNTIME reclamation policy (`BROOD_RT_GC_FLOOR` at 64 / default /
+   100000000 gives 2512 / 2663 / 2661 — so no feedback loop through compaction). Also note
+   the closure FORM is irrelevant: `:start` as an inline anon closure and as a plain global
+   fn reference both promote 11 876 vs 11 877 per 20 k.
+   **The fix is a design call**, which is why it is not done: either teach the compiler to
+   const-lift the thunk on this path too, or memoise the promoted form at the spawn boundary
+   the way `store_const_closure` already does for const closures — in the scheduler/GC
+   boundary, so it wants a deliberate pass, not a rushed one.
+   **Tool:** `BROOD_TRACE_PROMOTE=1` (new) names every closure entering the region with the
+   frames that put it there. Reach for it first next time; hours of elimination bisecting
+   found less than one run of it did.
 
 **Explicitly NOT open: a memory leak.** See §5 — it was chased and does not exist. The soak
 strengthens this: 12.7 M iterations with `rt-closures` flat and every fresh process starting
