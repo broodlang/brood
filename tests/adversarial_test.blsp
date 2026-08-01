@@ -331,3 +331,29 @@
   (if (= n 0)
     (send parent :done)
     (do (adv-redef-target) (adv-redef-caller parent (- n 1)))))
+
+(describe "the non-tail-recursion diagnostic can be placed, and is said once"
+  (def NON-TAIL "(defn countdown\n  ((0) :liftoff)\n  ((n) (countdown (- n 1))))\n(countdown 10)\n(defn fac\n  ((0) 1)\n  ((n) (* n (fac (- n 1)))))\n(fac 5)")
+
+  (test "REGRESSION: it carries a line, so a consumer can point at it"
+    ;; a pattern-clause defn is lowered to `match*` before the checker sees it, and the
+    ;; lowering builds fresh forms with no source position — the diagnostic came out
+    ;; with :line nil, which the editor could only place by guessing (it guessed line 1
+    ;; and accused an unrelated function four lines above)
+    (let (ws (filter (fn (w) (includes? (:message w) "non-tail")) (check-string-structured NON-TAIL)))
+      (is (not (empty? ws)))
+      (dolist (w ws)
+        (is (not (nil? (:line w)))))
+      ;; and it points at `fac`, which is the definition on line 5
+      (assert= (:line (first ws)) 5)))
+
+  (test "REGRESSION: one fault, one diagnostic"
+    ;; the lowering repeats the body across dispatch paths, so a single non-tail
+    ;; self-call was walked and reported three times
+    (let (ws (filter (fn (w) (includes? (:message w) "non-tail")) (check-string-structured NON-TAIL)))
+      (assert= (count ws) 1)))
+
+  (test "a tail-recursive function is still not flagged"
+    (let (ws (filter (fn (w) (includes? (:message w) "non-tail"))
+               (check-string-structured "(defn cd ((0) :ok) ((n) (cd (- n 1))))\n(cd 3)")))
+      (is (empty? ws)))))
