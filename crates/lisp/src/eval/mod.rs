@@ -1645,7 +1645,11 @@ pub(crate) fn stack_depth_error(used: usize) -> LispError {
     .with_code(crate::error::error_codes::STACK_DEPTH_EXCEEDED)
     .with_hint(
         "rewrite as a tail-recursive loop (proper tail calls are O(1) stack), \
-         or raise the budget with BROOD_STACK_BUDGET",
+         or raise the budget with BROOD_STACK_BUDGET. NOTE a self-call through \
+         `eval` is NOT a tail call however it is written — `(defn go (n) (eval \
+         (list 'go (- n 1))))` looks tail-recursive but `eval` is a native \
+         function that re-enters the evaluator on the Rust stack, so each round \
+         adds a frame. Recurse directly, or drive the loop with a process",
     )
 }
 
@@ -1668,7 +1672,8 @@ pub(crate) fn native_stack_error(remaining: usize) -> LispError {
     .with_hint(
         "rewrite as a tail-recursive loop (proper tail calls are O(1) stack), or move the \
          recursion out of the `try` body — a plain VM call uses heap frames, not the \
-         native stack, and recurses far deeper",
+         native stack, and recurses far deeper. `eval` counts as a native callback here: \
+         a self-call made THROUGH `eval` is not a tail call however it is written",
     )
 }
 

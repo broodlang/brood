@@ -13567,3 +13567,35 @@ reverted "fixes" that looked right in isolation. It wants a deliberate pass.
 closure entering the append-only region along with the Rust frames that put it there. Anything
 promoted *per operation* is an unbounded leak of shared code whose symptom is a slow decay
 rather than a crash, so this is the first thing to reach for next time.
+
+## 2026-08-01 (cont.) — "eval doesn't do TCO": it does; a call *through* `eval` isn't a tail call
+
+Chased a report that `eval` loses tail-call optimisation. **Ordinary tail recursion survives
+`eval` intact** — verified across tail position in `if`, `cond`, `do`, `when`, `let`, mutual
+recursion, and `apply`-in-tail, all at 300–400 k iterations *inside a green process* (bounded
+stack, so a lost TCO would fail immediately). All fine.
+
+What does blow the stack is a self-call made **through** `eval`:
+
+```
+(defn go (n) (if (= n 0) :ok (eval (list 'go (- n 1)))))   ; → recursion too deep
+```
+
+That reads as tail-recursive and isn't. `eval` is a *native* function, so it re-enters the
+evaluator on the Rust stack; the Brood-level tail position cannot release a frame that Rust
+owns. Correct behaviour, but an easy trap — and exactly the shape someone writes when building
+an interpreter or REPL loop on top of `eval`, which is presumably how it was hit.
+
+The error already said "a native callback re-enters the VM on the Rust stack", which is true
+and unhelpful: nothing tells the reader that the `eval` they wrote *is* the native callback.
+Both stack-depth hints (the tree-walker's byte-budget guard and the VM's nested-activation
+guard) now name it, with the offending shape spelled out.
+
+Pinned by tests on **both** halves — that a call through `eval` raises catchably and that the
+message names `eval`, *and* that ordinary tail recursion defined via `eval` still runs in O(1)
+stack. The second matters more than the first: without it, a future change could break real
+TCO through `eval` and hide behind this note.
+
+**Caveat worth stating:** the original report is on another machine, so I have not confirmed
+this is the same case. If it was something else, the two tests above now bound the search — the
+ordinary shapes are proven good.
