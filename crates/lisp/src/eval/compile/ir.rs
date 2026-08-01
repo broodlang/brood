@@ -998,6 +998,12 @@ pub enum Inst {
     /// was and the interpreter never sees this opcode. Carries the line alone; the
     /// FILE comes from the executing arm's `src_file`, which `exec_chunk` already has.
     RecordLine(u32),
+    /// Record that one edge of a branch was taken, for `nest test --cover-branches`
+    /// (ADR-148 tier 2). Emitted only when coverage is armed, at each `if`'s then/else
+    /// edge — `(line, col, taken)`, keyed by the *test's* source position so nested `if`s
+    /// from one `cond`/`match` on shared lines stay distinct. A branch is fully covered
+    /// only when BOTH edges record. FILE comes from the executing arm's `src_file`.
+    RecordBranch(u32, u32, bool),
     /// Discard the top operand (a non-final `do` form's value).
     Pop,
     /// Pop the top operand into frame slot `base + i` (a `let`/`letrec` binder).
@@ -1154,6 +1160,7 @@ impl Inst {
     pub(crate) fn trace_name(&self) -> String {
         match self {
             Inst::RecordLine(line) => format!("RecordLine({line})"),
+            Inst::RecordBranch(line, col, taken) => format!("RecordBranch({line}:{col} {taken})"),
             Inst::Const(cv) => format!(
                 "Const({})",
                 match cv.load().unpack() {

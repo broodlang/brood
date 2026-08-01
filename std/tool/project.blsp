@@ -1463,9 +1463,11 @@ resolve in the advisory checker. Returns the project root."
       ;; (and after `check-project`, whose `%isolate` would roll the rebindings
       ;; back). Opt-in: `:cover` in the option plist, from `nest test --cover`.
       (when (test/opt? :cover opts) (project--coverage-begin! root))
-      ;; The line tier's pre-pass, same timing and for the same reason: it must see the
-      ;; project's functions loaded, and it must not be rolled back.
-      (when (test/opt? :cover-lines opts) (project--coverage-lines-begin! root))
+      ;; The line/branch tiers' pre-pass, same timing and for the same reason: it must
+      ;; see the project's functions loaded, and it must not be rolled back. One pass
+      ;; serves both (a precompiled arm records line AND branch denominators).
+      (when (or (test/opt? :cover-lines opts) (test/opt? :cover-branches opts))
+        (project--coverage-lines-begin! root))
       ;; Persist the `--failed` set whichever way the run goes: the interesting
       ;; case is precisely the failing one, and `run-tests-scoped` RAISES on
       ;; failure, so catch, record, then re-raise to keep the non-zero exit.
@@ -1486,8 +1488,12 @@ resolve in the advisory checker. Returns the project root."
   (let (fn-percent (if (test/opt? :cover opts) (project--coverage-finish! root) nil)
         line-percent (if (test/opt? :cover-lines opts)
                        (project--coverage-lines-finish! root)
-                       nil))
-    (or line-percent fn-percent)))
+                       nil)
+        branch-percent (if (test/opt? :cover-branches opts)
+                         (project--coverage-branches-finish! root)
+                         nil))
+    ;; `--cover-min` gates on the strictest number present: branch > line > function.
+    (or branch-percent line-percent fn-percent)))
 
 (defn project--coverage-lines-begin! (root)
   (require 'coverage)
@@ -1496,6 +1502,10 @@ resolve in the advisory checker. Returns the project root."
 (defn project--coverage-lines-finish! (root)
   (require 'coverage)
   (coverage/coverage-line-report root (project-abs-paths root *project-source-paths*)))
+
+(defn project--coverage-branches-finish! (root)
+  (require 'coverage)
+  (coverage/coverage-branch-report root (project-abs-paths root *project-source-paths*)))
 
 ;; --- coverage wiring (nest test --cover) --------------------------------------
 ;; `coverage` is required lazily, like `package`: a run without `--cover` never

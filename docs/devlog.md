@@ -13530,6 +13530,25 @@ Recording the exclusions in the handoff so the next attempt bisects
 is unchanged: `make_closure_cached` caches only when `fn_rest` is a RUNTIME pair and bails
 **silently** otherwise, which is exactly the shape of a JIT/VM divergence that costs 2×.
 
+## 2026-08-01 (cont.) — tooling bundle 3a: branch coverage (nest test --cover-branches)
+
+The third coverage tier, closing the last ⬜ on the ADR-148 line. Line coverage counts a
+line as covered the moment it runs once; branch coverage asks the sharper question — were BOTH
+edges of each `if`/`cond`/`match` decision taken? New `Inst::RecordBranch(line, col, taken)`
+emitted at each `if`'s then/else edge when coverage is armed, keyed by the TEST's source
+position so sibling `cond`/`match` arms on shared lines stay distinct (a constant test — the
+`else` tail of a `cond` — is folded away in `compile_node`, so only real decisions instrument;
+a positionless bare-variable test is skipped, line coverage still covers it). Reuses the
+`--cover-lines` seam wholesale (BROOD_COVERAGE bytecode instrumentation, JIT off, precompile
+denominator pass). A branch is fully covered only when both a true and a false edge record;
+the report lists half-covered branches with which side never fired. `--cover-min` now gates on
+the strictest tier present (branch > line > function). Primitives
+`%coverage-branches`/`%coverage-branch-instrumented`; reporting in `std/tool/coverage.blsp`;
+flag wiring in `crates/nest/src/main.rs` + `std/tool/project.blsp`. Verified end-to-end on a
+scratch project (33% with two half-covered branches correctly named) and the cover-min gate;
+`tests/coverage_test.blsp` (+6 unit tests for the edge-fold + state classification). RecordBranch
+is compile-gated, so a normal run's bytecode is byte-for-byte unchanged.
+
 ## 2026-08-01 (cont.) — thread 6's cause found: a `spawn` thunk re-promoted per call
 
 Found it, with a tool rather than more bisecting. **`spawn`/`spawn-link` must promote the

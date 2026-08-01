@@ -1593,6 +1593,15 @@ fn compile_arm(
                     _ => None,
                 }),
             );
+            // The branch denominator: each distinct `(line, col)` decision point (both
+            // edges of one `if` carry the same site, so the set dedups them).
+            crate::coverage::note_branches(
+                &file,
+                chunk.code.iter().filter_map(|inst| match inst {
+                    Inst::RecordBranch(line, col, _) => Some((*line, *col)),
+                    _ => None,
+                }),
+            );
         }
     }
     // Reserve a few extra frame slots (above the compiler's `scope.max`) when the arm

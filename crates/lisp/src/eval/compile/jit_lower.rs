@@ -274,6 +274,10 @@ pub(super) fn jit_ckpt_depth(
             // Returning false here bails the whole lowering for this arm, which is the
             // conservative answer (`--cover-lines` also disables the JIT outright).
             Inst::RecordLine(_) => false,
+            // Branch coverage recording, like RecordLine, bails the arm's JIT lowering so
+            // a hot branch isn't silently under-reported (coverage runs with the JIT off
+            // anyway; this is belt-and-braces).
+            Inst::RecordBranch(..) => false,
             Inst::Pop | Inst::SetLocal(_) => d >= 1 && merge(&mut depth, &mut work, ip + 1, d - 1),
             Inst::Prim1 { .. } => d >= 1 && merge(&mut depth, &mut work, ip + 1, d),
             Inst::Prim2 { .. } => d >= 2 && merge(&mut depth, &mut work, ip + 1, d - 1),
@@ -424,6 +428,7 @@ fn inst_opcode_name(inst: &Inst) -> &'static str {
     match inst {
         Inst::Const(_) => "Const",
         Inst::RecordLine(_) => "RecordLine",
+        Inst::RecordBranch(..) => "RecordBranch",
         Inst::Local(_) => "Local",
         Inst::Prim3 { .. } => "Prim3",
         Inst::Global(_) => "Global",

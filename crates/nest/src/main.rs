@@ -259,9 +259,17 @@ enum Cmd {
         #[arg(long)]
         cover_lines: bool,
 
+        /// Report BRANCH coverage: whether BOTH edges of each if/cond/match decision
+        /// were taken. The strictest measure — a line runs once and reads as covered
+        /// even if its else-branch never fires. Shares the `--cover-lines` machinery
+        /// (instruments the bytecode, disables the JIT).
+        #[arg(long)]
+        cover_branches: bool,
+
         /// Fail the run (exit non-zero) if coverage is below this percentage.
-        /// Implies `--cover`; gates on the LINE percentage under `--cover-lines`,
-        /// that being the stricter number.
+        /// Implies `--cover`; gates on the LINE percentage under `--cover-lines`
+        /// (or the BRANCH percentage under `--cover-branches`), that being the
+        /// stricter number.
         #[arg(long, value_name = "PCT", value_parser = clap::value_parser!(u64).range(0..=100))]
         cover_min: Option<u64>,
     },
@@ -492,20 +500,22 @@ fn arm_coverage_env(cli: &Cli) {
     let Cmd::Test {
         cover,
         cover_lines,
+        cover_branches,
         cover_min,
         ..
     } = &cli.cmd
     else {
         return;
     };
-    if *cover_lines {
+    // Line and branch coverage share the same bytecode instrumentation + JIT-off seam.
+    if *cover_lines || *cover_branches {
         // SAFETY: called from `main` before any thread or interpreter is created.
         unsafe {
             std::env::set_var("BROOD_COVERAGE", "1");
             std::env::set_var("BROOD_NO_JIT", "1");
         }
     }
-    if *cover || *cover_lines || cover_min.is_some() {
+    if *cover || *cover_lines || *cover_branches || cover_min.is_some() {
         // SAFETY: as above.
         unsafe { std::env::set_var("BROOD_NO_RELOAD_DIAG", "1") };
     }
@@ -542,6 +552,7 @@ fn run_main(cli: Cli) {
             trace,
             cover,
             cover_lines,
+            cover_branches,
             cover_min,
         } => {
             // Named FILES run standalone outside a project; project-wide
@@ -580,6 +591,7 @@ fn run_main(cli: Cli) {
                 trace,
                 cover,
                 cover_lines,
+                cover_branches,
                 cover_min,
                 lines,
             };
@@ -720,6 +732,7 @@ struct TestOpts {
     trace: bool,
     cover: bool,
     cover_lines: bool,
+    cover_branches: bool,
     cover_min: Option<u64>,
     /// `FILE:LINE` selectors peeled off the positional FILE list.
     lines: Vec<(String, u64)>,
@@ -796,12 +809,16 @@ impl TestOpts {
             parts.push(":failed".to_string());
         }
         // `--cover-min` implies `--cover`: asking for a floor without asking for
-        // measurement is never what someone means.
-        if self.cover || (self.cover_min.is_some() && !self.cover_lines) {
+        // measurement is never what someone means. A line/branch run reports its own
+        // (stricter) number, so the plain `:cover` shim isn't added for those.
+        if self.cover || (self.cover_min.is_some() && !self.cover_lines && !self.cover_branches) {
             parts.push(":cover".to_string());
         }
         if self.cover_lines {
             parts.push(":cover-lines".to_string());
+        }
+        if self.cover_branches {
+            parts.push(":cover-branches".to_string());
         }
         if let Some(n) = self.cover_min {
             parts.push(format!(":cover-min {n}"));

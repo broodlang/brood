@@ -71,6 +71,40 @@ impl Default for Face {
     }
 }
 
+/// What `gui-open` can decide about a window only while it is being *built* — as
+/// opposed to the `gui-*!` primitives, which mutate a window that already exists.
+/// One struct rather than a growing positional tail, since every one of these rides
+/// the same path: the opts map -> `open` -> the GUI thread's `Open` event (or its
+/// pre-`resumed` queue) -> `build_window`.
+#[derive(Clone)]
+pub struct WindowSpec {
+    /// OS title-bar text; `None` gives the `"Brood"` default. Changeable later with
+    /// `gui-title!`.
+    pub title: Option<String>,
+    /// Inner size in logical pixels; `None` is the 840×560 default.
+    pub size: Option<(f64, f64)>,
+    /// False for a borderless window — no OS title bar or frame, so an app that draws
+    /// its own chrome (a browser's tab strip + toolbar) owns the whole surface instead
+    /// of sitting under a redundant second title.
+    pub decorations: bool,
+    /// The desktop application id — Wayland's `app_id`, X11's `WM_CLASS`. This is how
+    /// a desktop matches the window to the installed `.desktop` entry that names it,
+    /// and therefore the only way it gets a real icon and name in a GNOME dash or
+    /// alt-tab: unset (the default), a Brood window is unmatchable and draws the
+    /// desktop's generic fallback icon. Distinct from `gui-icon!` — a Wayland client
+    /// cannot hand the compositor pixels at all, so on Wayland *this* is the icon
+    /// mechanism and `gui-icon!` does nothing.
+    pub app_id: Option<String>,
+}
+
+impl Default for WindowSpec {
+    /// The plain window: default title and size, decorated (a derived `Default` would
+    /// give a borderless one), no app id.
+    fn default() -> Self {
+        WindowSpec { title: None, size: None, decorations: true, app_id: None }
+    }
+}
+
 /// The pointer shape a cursor zone requests — frontend-neutral (mapped to a winit
 /// `CursorIcon` only inside the GUI backend). `ColResize` is the ↔ used for a
 /// side-by-side (`:col`) split's divider; `RowResize` the ↕ for a stacked (`:row`)
@@ -290,12 +324,7 @@ const NOT_COMPILED: &str = "gui backend not compiled in; rebuild with `--feature
 mod disabled {
     use super::Op;
     use super::NOT_COMPILED;
-    pub fn open(
-        _subscriber: u64,
-        _title: Option<String>,
-        _size: Option<(f64, f64)>,
-        _decorations: bool,
-    ) -> Result<u64, String> {
+    pub fn open(_subscriber: u64, _spec: super::WindowSpec) -> Result<u64, String> {
         Err(NOT_COMPILED.into())
     }
     pub fn close(_id: u64) -> Result<(), String> {
@@ -371,7 +400,7 @@ pub use backend::{
 
 #[cfg(feature = "gui")]
 pub(crate) mod backend {
-    use super::{Key, Mouse, MouseAction, MouseButton, Op};
+    use super::{Key, Mouse, MouseAction, MouseButton, Op, WindowSpec};
     use crate::core::value;
     use crate::process::{deliver, Message};
     use std::cell::RefCell;
@@ -489,12 +518,7 @@ pub(crate) mod backend {
         /// mailbox; reply with its id + shared size (or a build error).
         Open {
             subscriber: u64,
-            title: Option<String>,
-            size: Option<(f64, f64)>,
-            /// False for a borderless window — no OS title bar or frame, so an app
-            /// that draws its own chrome (a browser's tab strip + toolbar) owns the
-            /// whole surface instead of sitting under a redundant second title.
-            decorations: bool,
+            spec: WindowSpec,
             reply: Sender<Result<OpenReply, String>>,
         },
         /// Replace window `id`'s frame and repaint it.
@@ -649,12 +673,7 @@ pub(crate) mod backend {
     /// `(gui-open subscriber)` — open a new window whose key/mouse input is
     /// delivered to process `subscriber`'s mailbox; return the window id. Starts the
     /// GUI thread on the first call. Each call is an independent window.
-    pub fn open(
-        subscriber: u64,
-        title: Option<String>,
-        size: Option<(f64, f64)>,
-        decorations: bool,
-    ) -> Result<u64, String> {
+    pub fn open(subscriber: u64, spec: WindowSpec) -> Result<u64, String> {
         // Headless: register a fake window (fixed cell grid, no input) without ever
         // starting winit, so nothing pops up.
         if headless() {
@@ -662,7 +681,7 @@ pub(crate) mod backend {
             windows().lock().unwrap().insert(
                 id,
                 WinHandle {
-                    size: Arc::new(Mutex::new(headless_cells(size))),
+                    size: Arc::new(Mutex::new(headless_cells(spec.size))),
                     held_key: Arc::new(Mutex::new(None)),
                 },
             );
@@ -676,9 +695,7 @@ pub(crate) mod backend {
             .unwrap()
             .send_event(UserEvent::Open {
                 subscriber,
-                title,
-                size,
-                decorations,
+                spec,
                 reply: reply_tx,
             })
             .map_err(|_| "gui thread is gone".to_string())?;
@@ -1207,23 +1224,40 @@ pub(crate) mod backend {
     fn build_window(
         elwt: &ActiveEventLoop,
         subscriber: u64,
-        title: Option<String>,
-        size: Option<(f64, f64)>,
-        decorations: bool,
+        spec: WindowSpec,
         families: Families,
         base_px: f32,
         default_family: Option<u32>,
         default_inset: f32,
         default_bg: Option<[u8; 3]>,
     ) -> Result<Win, String> {
-        let (w, h) = size.unwrap_or((840.0, 560.0));
+        let (w, h) = spec.size.unwrap_or((840.0, 560.0));
+        let attributes = Window::default_attributes()
+            .with_title(spec.title.unwrap_or_else(|| "Brood".to_string()))
+            .with_decorations(spec.decorations)
+            .with_inner_size(LogicalSize::new(w, h));
+        // The desktop app id, on the platforms that have one. There is no protocol for
+        // changing it afterwards, which is why it belongs to the build and not to a
+        // `gui-*!` op. winit keeps ONE `platform_specific.name`, read by whichever
+        // backend is live, so the Wayland trait covers X11's `WM_CLASS` too — the
+        // `general` half is Wayland's `app_id` and X11's class, `instance` is X11's
+        // res-name (a no-op on Wayland).
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        let attributes = match spec.app_id {
+            Some(app_id) => {
+                use winit::platform::wayland::WindowAttributesExtWayland;
+                attributes.with_name(app_id.clone(), app_id)
+            }
+            None => attributes,
+        };
         let window = elwt
-            .create_window(
-                Window::default_attributes()
-                    .with_title(title.unwrap_or_else(|| "Brood".to_string()))
-                    .with_decorations(decorations)
-                    .with_inner_size(LogicalSize::new(w, h)),
-            )
+            .create_window(attributes)
             .map_err(|e| format!("window: {e}"))?;
         let window = Rc::new(window);
         // The GPU backend only when built AND opted-in via the env; everything else (the
@@ -1298,13 +1332,7 @@ pub(crate) mod backend {
         /// windows simply persist — `resumed` only ever fires once here.)
         resumed: bool,
         /// `Open` requests received before `resumed`, drained when it fires.
-        pending_open: Vec<(
-            u64,
-            Option<String>,
-            Option<(f64, f64)>,
-            bool,
-            Sender<Result<OpenReply, String>>,
-        )>,
+        pending_open: Vec<(u64, WindowSpec, Sender<Result<OpenReply, String>>)>,
     }
 
     impl GuiApp {
@@ -1315,18 +1343,14 @@ pub(crate) mod backend {
             &mut self,
             event_loop: &ActiveEventLoop,
             subscriber: u64,
-            title: Option<String>,
-            size: Option<(f64, f64)>,
-            decorations: bool,
+            spec: WindowSpec,
             reply: Sender<Result<OpenReply, String>>,
         ) {
             let id = next_id();
             match build_window(
                 event_loop,
                 subscriber,
-                title,
-                size,
-                decorations,
+                spec,
                 self.families.clone(),
                 self.default_px,
                 self.default_family,
@@ -1358,10 +1382,8 @@ pub(crate) mod backend {
         fn resumed(&mut self, event_loop: &ActiveEventLoop) {
             event_loop.set_control_flow(ControlFlow::Wait);
             self.resumed = true;
-            for (subscriber, title, size, decorations, reply) in
-                std::mem::take(&mut self.pending_open)
-            {
-                self.open_window(event_loop, subscriber, title, size, decorations, reply);
+            for (subscriber, spec, reply) in std::mem::take(&mut self.pending_open) {
+                self.open_window(event_loop, subscriber, spec, reply);
             }
         }
 
@@ -1370,16 +1392,13 @@ pub(crate) mod backend {
                 // Create now if the display is live, else queue until `resumed`.
                 UserEvent::Open {
                     subscriber,
-                    title,
-                    size,
-                    decorations,
+                    spec,
                     reply,
                 } => {
                     if self.resumed {
-                        self.open_window(event_loop, subscriber, title, size, decorations, reply);
+                        self.open_window(event_loop, subscriber, spec, reply);
                     } else {
-                        self.pending_open
-                            .push((subscriber, title, size, decorations, reply));
+                        self.pending_open.push((subscriber, spec, reply));
                     }
                 }
                 // Set a live window's OS title-bar text (behind gui-title!).
