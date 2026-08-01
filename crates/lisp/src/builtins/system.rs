@@ -19,16 +19,22 @@ macro_rules! expect {
 
 pub(super) fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let root = heap.env_root(env);
-    // Run a runtime-evaluated form through the SAME path the file loader uses
-    // (`lib::eval_forms`, `eval_string_inner`): the full compile pass — expand + resolve
-    // + static-quasiquote lowering — then the compiling VM when it's enabled, so a form
-    // handed to `eval` at runtime isn't stuck on the ~10-14× tree-walker (deferred.md #9).
-    // `compile::run` compiles what it can and falls back to the tree-walker per-form for
-    // anything outside the VM's vocabulary, so semantics are unchanged; only the top-level
-    // call (which dispatches into the VM, where a callee's arm compiles and tail-recurses
-    // in O(1) stack) stops being interpreted. `compile` (vs the old bare `macroexpand_all`)
-    // also matches `eval-string`, which has always used it — so the two agree.
-    let form = crate::eval::macros::compile(heap, arg(args, 0), root)?;
+    // Route a runtime-evaluated form through the compiling VM when it's enabled, so a form
+    // handed to `eval` isn't stuck on the ~10-14× tree-walker (deferred.md #9): `compile::run`
+    // compiles what it can and falls back to the tree-walker per-form for anything outside
+    // the VM's vocabulary, so semantics are unchanged; only the top-level call (which
+    // dispatches into the VM, where a callee's arm compiles and tail-recurses in O(1) stack)
+    // stops being interpreted.
+    //
+    // Deliberately `macroexpand_all`, NOT the full `compile` pass. `compile`'s `resolve`
+    // step qualifies a bare reference only when its target *already exists*, so an `eval`'d
+    // definition that forward-references a name a LATER `eval` defines would be left bare
+    // and never match the module-qualified global (KI-24 — a regression when this briefly
+    // used `compile`). The file loader gets away with `resolve` because it pre-scans a
+    // file's def heads (`scan_def_names`) into the known-names set; independent `eval` calls
+    // have no such lookahead, so a bare reference resolved lazily at runtime (which both
+    // engines do identically) is the correct behaviour, matching the pre-VM `eval`.
+    let form = crate::eval::macros::macroexpand_all(heap, arg(args, 0), root)?;
     if crate::eval::compile::vm_enabled() {
         crate::eval::compile::run(heap, form, root)
     } else {

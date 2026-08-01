@@ -384,15 +384,19 @@ urgency.
 
 ## 9. `eval` runs interpreted — a 14x cliff for every runtime-evaluated form
 
-**✅ RESOLVED 2026-08-01.** `eval_builtin` and `eval_string_inner` now take the same
-path the file loader uses (`lib::eval_forms`): the full compile pass
-(`macros::compile` — expand + resolve + static-quasiquote lowering) then
-`eval::compile::run` when `vm_enabled()`, falling back to the tree-walker per-form
-(`compile::run` already does this internally for any form outside the VM's
-vocabulary) and under `BROOD_VM=0`. So a runtime-evaluated form's top-level call now
-dispatches into the VM, where the callee's arm compiles and tail-recurses in O(1)
-stack — the cliff is gone (measured: `eval` of the million-iteration loop went from
-~14× the compiled time to parity). Correctness pinned form-by-form in
+**✅ RESOLVED 2026-08-01.** `eval_builtin` and `eval_string_inner` now route through
+`eval::compile::run` when `vm_enabled()` (tree-walker under `BROOD_VM=0`), so a
+runtime-evaluated form's top-level call dispatches into the compiling VM instead of the
+~14× tree-walker; `compile::run` falls back to the tree-walker per-form for anything
+outside the VM's vocabulary, so semantics are unchanged. `eval_builtin` keeps
+`macroexpand_all` (NOT the full `compile` pass): the speed comes from `compile::run`, not
+from `compile`'s `resolve` step — and `resolve` qualifies a bare name only when its target
+already exists, which broke an `eval`'d forward reference across independent `eval` calls
+(KI-24, briefly regressed then reverted). `eval_string_inner` keeps `compile` as it always
+had. So a runtime-evaluated form's top-level call now dispatches into the VM, where the
+callee's arm compiles and tail-recurses in O(1) stack — the cliff is gone (measured: `eval`
+of the million-iteration loop went from ~14× the compiled time to parity). Correctness
+pinned form-by-form in
 `tests/eval_vm_test.blsp` (arithmetic, deep tail recursion, closures capturing the
 runtime env, macros/quasiquote, cross-process round-trip), green under VM /
 tree-walker / no-JIT. **One behaviour change to note:** `std/tool/eval-server`'s
