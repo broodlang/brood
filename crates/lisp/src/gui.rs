@@ -1249,10 +1249,10 @@ pub(crate) mod backend {
             target_os = "netbsd",
             target_os = "openbsd"
         ))]
-        let attributes = match spec.app_id {
+        let attributes = match spec.app_id.as_deref() {
             Some(app_id) => {
                 use winit::platform::wayland::WindowAttributesExtWayland;
-                attributes.with_name(app_id.clone(), app_id)
+                attributes.with_name(app_id, app_id)
             }
             None => attributes,
         };
