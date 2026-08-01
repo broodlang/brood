@@ -333,6 +333,15 @@ overview, complementing per-process `processes`."
    :mem-peak (mem-peak)
    :peers (or (nodes) [])})
 
+(defn mcp-vitals-tool (args)
+  "`vitals` — the unified runtime snapshot (`telemetry/runtime-snapshot`): GC, scheduler,
+and VM stats plus the live-process count and the current telemetry metrics, all behind ONE
+call instead of scraping the individual stat builtins. Returns `{:gc :sched :vm :processes
+:metrics}`. The point-in-time companion to `watch-runtime` (which streams events); folds
+what `node`/`processes` expose behind one telemetry-fed view."
+  (require 'telemetry)
+  (telemetry/runtime-snapshot))
+
 (defn mcp--collect-runtime (acc)
   "Drain the `[:system kind pid detail]` runtime events already in this process's
 mailbox into a list of maps (chronological). Non-blocking: stops at the first empty
@@ -656,6 +665,10 @@ Brood pattern, `std/tool/explain.blsp`)."
      :description "Runtime-wide stats (the observer's header): node name, scheduler worker count, peak concurrency, total spawned, current live-process count, current/peak memory, connected peers. Returns {:node :workers :peak-threads :spawned :process-count :mem-bytes :mem-peak :peers}."
      :schema {:type "object" :properties {}}
      :handler mcp-node-tool}
+    {:name "vitals"
+     :description "The unified runtime snapshot behind ONE call (telemetry/runtime-snapshot): {:gc {…} :sched {…} :vm {…} :processes N :metrics {…}} — GC, scheduler and VM stats plus the live-process count and current telemetry metrics, instead of scraping the individual stat builtins. The point-in-time companion to `watch-runtime` (which streams events over an interval)."
+     :schema {:type "object" :properties {}}
+     :handler mcp-vitals-tool}
     {:name "watch-runtime"
      :description "Watch the kernel runtime-event STREAM (a trace, not a snapshot) for :ms milliseconds (default 500, capped 5000), then return the collected events: {:events [{:kind :pid :detail} ...] :count :ms}. Kinds: :gc (detail {:pause-us :collections :live}), :spawn (detail=parent pid), :exit (detail=exit reason), :deopt (detail=JIT fn name or nil). Use it to SEE runtime activity over an interval — GC pauses, spawn/exit churn, JIT deopts — that a point-in-time `processes`/`node` snapshot can't show. Pass :filter (e.g. {:gc true :gc-min-pause-us 1000 :exit true}) to select kinds. Events about the watcher itself are excluded."
      :schema {:type "object"
