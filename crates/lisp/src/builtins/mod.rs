@@ -2576,6 +2576,17 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![], any),
         locals,
     );
+    // `%scope` is the same intrinsic under a name that reads as "capture the lexical
+    // scope"; the VM compiles both to the scope map (see `compile_scope_map`), and this
+    // registration is the tree-walker fallback (env-frame read) shared with `%locals`.
+    #[cfg(feature = "dev-tools")]
+    def(
+        heap,
+        "%scope",
+        Arity::exact(0),
+        Sig::new(vec![], any),
+        locals,
+    );
     #[cfg(feature = "dev-tools")]
     def(
         heap,

@@ -758,9 +758,13 @@ pub(super) fn eval_string_inner(
     result
 }
 
-/// `(%locals)` — the CALLER's in-scope local bindings as a `{name → value}` map
-/// (innermost binding of each name wins; globals excluded). The debugger's `break`
-/// captures this so a paused process can be inspected / evaluated in its own scope.
+/// `(%locals)` / `(%scope)` — the CALLER's in-scope local bindings as a `{:name → value}`
+/// map (innermost binding of each name wins; globals excluded). This is the tree-walker
+/// fallback: under the VM both spellings are a compiler intrinsic that reads the
+/// lexical-scope table directly (see `compile_scope_map`), which is why a compiled arm's
+/// call never reaches here. Keyed by the name as a **keyword** to match the intrinsic and
+/// the debugger's explicit `:vals`, so a named value overrides a captured local on `merge`
+/// and `%eval-in` (which binds keyword- and symbol-keyed entries alike) resolves it.
 /// `dev-tools` only (its sole consumer is the `debug` DEV_MODULE).
 #[cfg(feature = "dev-tools")]
 pub(super) fn locals(_: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
@@ -779,7 +783,7 @@ pub(super) fn locals(_: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
         for (s, v) in frame {
             if !seen.contains(&s) {
                 seen.push(s);
-                pairs.push((Value::symbol(s), v));
+                pairs.push((Value::keyword(s), v));
             }
         }
     }

@@ -93,12 +93,35 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
     (with-trace-context {:debugger dbg :span nil} thunk)))
 
 ;; ---- break: park without a timeout, fan into the paused queue ----------------
-(defn break (label & vals)
-  "Park THIS process at a breakpoint: snapshot `label` + the named `vals` + the current causal span to the debugger in the process's trace context, then block until it sends `[:resume]` — with **no timeout** (a parked process costs nothing). Many processes hitting the same `break` each park independently and queue in the debugger. A no-op when no debugger is in context, so it's safe to leave in place. Returns nil."
+;; `break` is a MACRO (ADR-174 path B): it injects `(%scope)` at the CALL SITE so the
+;; snapshot carries EVERY in-scope local automatically — `eval-at` then evaluates in the
+;; full local scope, not just the values you named. `(%scope)` is a compiler intrinsic
+;; (a fresh `{name → value}` map straight from the lexical-scope table under the VM; the
+;; env-frame builtin under the tree-walker), and it must expand at the breakpoint's
+;; lexical site, which only a macro can do. The named `vals` still ride alongside — they
+;; override a captured local of the same name and let you snapshot a *computed* value.
+(defn debug--break* (label scope explicit)
+  "The runtime half of `break`: send the snapshot (`:scope` = the auto-captured locals,
+`:vals` = the explicitly-named ones) to the debugger in context and park until resumed.
+A no-op when no debugger is in context. `break`/`break-when` expand to a call to this."
   (let (ctx (%trace-context) dbg (get ctx :debugger))
     (when dbg
-      (send dbg [:break (self) {:label label :vals (debug--pairs->map vals) :span (get ctx :span)}])
+      (send dbg [:break (self)
+                  {:label label
+                   :vals (debug--pairs->map explicit)
+                   :scope scope
+                   :span (get ctx :span)}])
       (receive ([:resume] nil)))))
+
+(defmacro break (label & vals)
+  "Park THIS process at a breakpoint: snapshot `label`, EVERY in-scope local (captured
+automatically via `%scope`), any explicitly-named `vals`, and the current causal span to
+the debugger in the process's trace context, then block until it sends `[:resume]` — with
+**no timeout** (a parked process costs nothing). Many processes hitting the same `break`
+each park independently and queue in the debugger. A no-op when no debugger is in context,
+so it's safe to leave in place. `eval-at` evaluates against the full captured scope.
+Returns nil. (A macro so the local capture happens in YOUR lexical scope, not `break`'s.)"
+  `(debug--break* ~label (%scope) (list ~@vals)))
 
 ;; Turn a `:name value …` argument list into a `{:name value}` map — the captured
 ;; locals of a breakpoint, keyed for display AND for `%eval-in` (a keyword key `:n`
@@ -116,23 +139,30 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
 ;; locals in positional slots, not by name, so a runtime primitive can't recover the
 ;; rest — the automatic version is a compiler intrinsic, deferred; see the roadmap).
 (defn locals-of (dbg n)
-  "The captured local bindings of the Nth parked process (1-based), as the `{:name value}`
-map it passed to `break`."
+  "The in-scope bindings of the Nth parked process (1-based), as a `{:name value}` map:
+the automatically-captured lexical scope (`:scope`) overlaid with the values explicitly
+named at `break` (`:vals`, which win on a name clash). A step-park has no `:scope`, just
+the traced node's `value`."
   (let (entries (vec (get (dbg-state dbg) :paused)))
     (when (and (>= n 1) (<= n (count entries)))
-      (get (second (nth entries (dec n))) :vals))))
+      (let (snap (second (nth entries (dec n))))
+        (merge (or (get snap :scope) {}) (or (get snap :vals) {}))))))
 (defn eval-at (dbg n src)
   "Evaluate `src` (a Brood expression string) in the captured scope of the Nth parked
-process (1-based, as shown by `paused` / `debug-repl`). The values named at its `break`
-are in scope: `(debug/eval-at d 1 \"(* n n)\")`. Only those named values are captured."
+process (1-based, as shown by `paused` / `debug-repl`). EVERY local in scope at the
+breakpoint is available (auto-captured via `%scope`), plus any values explicitly named at
+`break`: `(debug/eval-at d 1 \"(* n n)\")`."
   (let (locals (locals-of dbg n))
     (if (nil? locals)
       (error "eval-at: no parked process " n)
       (%eval-in src locals))))
 
-(defn break-when (pred label & vals)
-  "A data-driven breakpoint: park (via `break`) only when `pred` is truthy, else return nil untouched — `(break-when (< x 0) \"neg\" :x x)`. Conditional breaks are just a Brood predicate, so no recompile and no cost on the false path."
-  (when pred (apply break label vals)))
+(defmacro break-when (pred label & vals)
+  "A data-driven breakpoint: `break` (auto-capturing the local scope) only when `pred` is
+truthy, else return nil untouched — `(break-when (< x 0) \"neg\" :x x)`. Conditional breaks
+are just a Brood predicate, so no recompile and no cost on the false path. (A macro, like
+`break`, so the scope capture happens at the call site.)"
+  `(when ~pred (debug--break* ~label (%scope) (list ~@vals))))
 
 ;; ---- function-boundary instrumentation (trace-fn / break-fn) -----------------
 ;; `spy` instruments a FORM in source; these instrument a FUNCTION in the live image
@@ -433,16 +463,52 @@ under `with-debugger`; advance the steps from `debug-repl` (`r`) or `debug-attac
 ;; `(debug/paused d)`, `(debug/resume-all d)`, `(debug/step …)`; Ctrl-D leaves and
 ;; continues. Runs in the process that OWNS the terminal (a script's main flow, or the
 ;; REPL) — a parked worker can't take stdin, so you pry from there and inspect the queue.
+;; The debugger `pry` is driving under `repl-run` — `,resume`/`,step` need to know WHICH
+;; debugger without you passing it each time, so `pry` binds it here for their handlers.
+(defdyn *debug-session* nil)
+
+(defn debug--repl-resume (rest)
+  "`,resume` handler: resume all parked processes in the current `*debug-session*`, or
+the Nth if a number is given (`,resume 2`). No-op note when no session is active."
+  (let (dbg *debug-session*)
+    (if (nil? dbg)
+      (println "\e[90m(no active debug session)\e[0m")
+      (let (r (trim rest))
+        (if (= r "")
+          (println (str "resumed " (resume-all dbg) " parked"))
+          (let (entries (vec (get (dbg-state dbg) :paused)))
+            (println (debug--resume-nth dbg entries (try (eval-string r) (catch _ nil))))))))))
+
+(defn debug--repl-step (rest)
+  "`,step` handler: advance a single parked process one step (resume the first parked;
+under `step`/`stepping-sink` it re-parks at the next node). Note when nothing is parked."
+  (let (dbg *debug-session*)
+    (if (nil? dbg)
+      (println "\e[90m(no active debug session)\e[0m")
+      (let (entries (vec (get (dbg-state dbg) :paused)))
+        (if (empty? entries)
+          (println "\e[90m(nothing parked)\e[0m")
+          (do (resume dbg (first (first entries)))
+            (sleep 30)
+            (println (str "stepped [" (first (first entries)) "]"))))))))
+
 (defn pry (dbg)
   "Drop into the REAL Brood REPL — fully styled (highlighting, history, `,help`, Tab) —
 to inspect this debug session interactively. Prints the paused queue + causal tree first,
-then hands you the prompt; use any expression (`(debug/paused d)`, `(debug/resume-all d)`,
-`(debug/step …)`, or any Brood). Ctrl-D leaves and continues. Reuses `repl-run` — so it's
-the real REPL, not a re-implementation."
+then hands you the prompt. Drive the session with the `,resume` / `,step` meta-commands
+(or any expression — `(debug/paused d)`, `(debug/resume-all d)`, `(debug/step …)`).
+Ctrl-D leaves and continues. Reuses `repl-run` — so it's the real REPL, not a
+re-implementation; it registers the `,resume`/`,step` commands via the REPL registry."
   (require 'repl)
+  (repl/register-repl-command
+    {:names '("resume") :usage ",resume [N]" :summary "resume all parked (or the Nth) in this debug session"
+     :handler debug--repl-resume})
+  (repl/register-repl-command
+    {:names '("step") :usage ",step" :summary "advance one parked process a single step"
+     :handler debug--repl-step})
   (doseq (line (debug--report-lines dbg)) (println line))
-  (println "── pry: the real REPL. `(debug/…)` to drive the session · Ctrl-D to continue ──")
-  (binding (*repl-prompt* "debug> ")
+  (println "── pry: the real REPL. `,resume` / `,step` to drive the session · Ctrl-D to continue ──")
+  (binding (*debug-session* dbg *repl-prompt* "debug> ")
     (repl/repl-run)))
 
 ;; ---- interactive debugger prompt (a REPL for the session) -------------------
