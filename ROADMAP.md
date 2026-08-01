@@ -1489,8 +1489,24 @@ Runtime housekeeping (both items landed):
   group→test. Selector parsing + all selection logic live in Brood
   (`std/tool/test.blsp`, `test--make-filter`); `nest` only forwards argv.
   `tests/test_selection_test.blsp` (54 cases, incl. cross-process spec round-trip).
-  ⬜ Still unmapped from `mix test`: `--stale` (needs a per-test dependency graph),
-  `--formatter`, `--breakpoints`. (`--cover` shipped — see "Test coverage" below.) A
+  ✅ **`--stale` + `--formatter` shipped 2026-08-01.** `--stale` re-runs only test files
+  whose transitive dependencies changed since they last ran — the dependency graph is the
+  KI-17 require-closure already computed for the checker (`project--require-closures`), the
+  change signal is the newest mtime across a test file + its dependency source files vs a
+  per-file record in the project cache dir (like `--failed`); whole-project runs only.
+  `--formatter NAME` emits machine output via a formatter registry (`register-test-formatter`
+  as the extension seam) — `tap` (TAP v13) and `json` built in — suppressing the progress
+  dots + human summary. Both in `std/tool/test.blsp`/`project.blsp`, wired through
+  `crates/nest/src/main.rs`; `crates/nest/tests/stale.rs` + `tests/test_selection_test.blsp`.
+  🚫 **`--breakpoints` — deferred, not declined, with a concrete reason** (assessed 2026-08-01).
+  ExUnit's pause-on-failure fights Brood's concurrent runner: a failing assertion throws and
+  unwinds inside a green **worker** process before the runner catches it, and an interactive
+  pry needs the stdin-owning **driver** — so a naive hook deadlocks (the runner blocks on
+  workers that are parked awaiting a pry that can't happen until the runner returns). The
+  debugger already delivers the capability for a *targeted* test — `(with-debugger d (fn () …
+  (break …)))` then `(pry d)`, and `eval-at` now sees every local (path B) — so a broken
+  suite-wide `--breakpoints` would be strictly worse. Revisit when the runner grows an
+  inline-pry driver (its own focused pass). (`--cover` shipped — see "Test coverage" below.) A
   **process-native tracing debugger** now exists (`std/tool/debug`, ADR-174): `break`
   parks without a timeout + a multi-process paused queue, `break-when`, `spy`-fed
   aggregate queries, a causal tree propagated transparently across **`spawn` AND `send`**
@@ -1608,8 +1624,14 @@ Runtime housekeeping (both items landed):
   stored buffer via the UTF-16 `LineIndex` (`apply_content_change`, per-edit index
   rebuild so a batch compounds correctly); the parse stays whole-document (cheap).
   2 new tests (ranged-splice offset precision; multi-edit batch compounding); 116
-  LSP tests green. ⬜ Still next: range/delta semantic tokens (deferred — the token
-  walk is already off a cached CST, marginal payoff until profiling shows it hurts).
+  LSP tests green. ✅ **Range semantic tokens shipped 2026-08-01**
+  (`textDocument/semanticTokens/range`): the capability is advertised and the handler
+  computes the whole-document token stream (cheap off the cached CST) and filters it to the
+  requested range, so a large file's editor can classify just the visible viewport
+  (`semantic_tokens::semantic_tokens_range`; test `range_returns_only_the_tokens_it_covers`).
+  ⬜ **Delta** semantic tokens stay deferred — they need result-id caching + per-edit diffing
+  for a payoff the roadmap already judged marginal (the walk is cheap), so not worth the
+  stateful machinery until profiling shows the full/range responses hurt.
 - 🟡 **Errors that teach (LLM-native)** ([`docs/llm-native.md`](docs/llm-native.md))
   — first instances landed. ✅ **reader-level hints** for the Clojure/Scheme
   syntax the reader mis-parses shipped 2026-07-23: `#{…}` (set literal),
@@ -1694,8 +1716,15 @@ Runtime housekeeping (both items landed):
   stats read only when bound, lean-safe), and `watch-vitals` samples it onto the stream as
   `[:runtime :vitals]` events, foldable into gauges via `last-value` — one subscription
   instead of scraping N builtins. `nest mcp` gains a `vitals` tool over it (the point-in-time
-  companion to `watch-runtime`). ⬜ Still: the location-transparent remote tier over the dist
-  link (below).
+  companion to `watch-runtime`). ✅ **Remote tier — shipped 2026-08-01.** `telemetry-serve`
+  registers a `:telemetry-remote` agent (opt-in, after `node-start`, like `observe-serve`);
+  a peer `(subscribe-remote node event)` streams that event's emits over the node link — the
+  target attaches a forwarder that `send`s each matching emit to the subscriber (transparent
+  cross-node `send`), which re-emits it into ITS OWN telemetry stream tagged `{:remote-event
+  …}`, so local handlers/aggregators consume a peer's events through the same attach seam.
+  No new wire format (ADR-053's observer pattern). Protocol tested single-runtime in
+  `tests/telemetry_metrics_test.blsp`; cross-node routing is transparent dist `send` (covered
+  by the dist suite).
 
 ### Server / daemon (M4)
 

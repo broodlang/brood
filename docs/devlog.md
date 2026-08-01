@@ -13618,3 +13618,49 @@ TCO through `eval` and hide behind this note.
 **Caveat worth stating:** the original report is on another machine, so I have not confirmed
 this is the same case. If it was something else, the two tests above now bound the search — the
 ordinary shapes are proven good.
+
+## 2026-08-01 (cont.) — tooling bundle 3b: nest test --stale + --formatter
+
+**`--stale`** re-runs only test files whose transitive dependencies changed since they last
+ran (mix test parity). The dependency graph is not new: it's the KI-17 require-closure the
+checker already computes (`project--require-closures`), mapped module-names → source files.
+The change signal is the newest mtime across a test file + its dependency source files (all
+epoch-ms via `file-mtime`), compared to a `{test-file -> max-dep-mtime}` record in the
+project cache dir — the same cache-dir convention as `--failed`. A file with no record, or
+whose deps' max-mtime exceeds the record, re-runs; the rest are skipped with a one-line note.
+Whole-project runs only (a named-file run already asked for those files). Verified end-to-end
+(`crates/nest/tests/stale.rs`): cold run runs it, a second run skips it, and a change to the
+*source* it requires — not the test file — re-runs it.
+
+**`--formatter NAME`** emits machine output instead of the human report, through a formatter
+registry (`*test-formatters*` + `register-test-formatter`, the same shape as the REPL command
+registry): `tap` (TAP version 13, one `ok`/`not ok N` per test + `#` failure comments) and
+`json` (one object, the `run-tests-structured` shape) ship built in. Both paths (single-file
+`run-tests` and project-scoped) converge on `test--report-pass`, so the human/formatter split
+lives there in one place; a machine formatter also suppresses the live progress dots. Raising
+on failure stays the runner's job, so exit codes are unaffected. Trap banked: the local
+holding the selected formatter cannot be named `fmt` — that's the prelude string-template
+MACRO, and a macro in call-head position beats a local binding, so `(fmt …)` expanded as the
+template and threw an arity error at load. `tests/test_selection_test.blsp` (+3, via
+`with-out-str` — which takes body forms, NOT a thunk).
+
+## 2026-08-01 (cont.) — tooling bundle 4: remote telemetry tier + LSP range tokens
+
+**Remote telemetry tier** (the last telemetry ⬜). Location-transparency for the attach seam,
+built on ADR-053's observer pattern: `telemetry-serve` registers a `:telemetry-remote` agent
+(opt-in, after `node-start`), and a peer `(subscribe-remote node event)` streams that event's
+emits over the node link. The target attaches a forwarder that `send`s each matching emit to
+the subscriber (a cross-node `send` is transparent), which re-emits it into its OWN telemetry
+stream tagged `{:remote-event …}` — so a peer's events flow through the same `attach`/aggregator
+seam with no new wire format. Split `telemetry--subscribe-to` out of `subscribe-remote` so the
+subscribe→forward→re-emit protocol is testable single-runtime (cross-node routing is dist
+`send`, already covered); `tests/telemetry_metrics_test.blsp`.
+
+**LSP range semantic tokens** (`textDocument/semanticTokens/range`). Advertised the capability
+(`range: true`) and added the handler: it runs the existing whole-document token walk — cheap,
+off the same cached CST as the full request — then filters to the requested range, so an
+editor can classify just the visible viewport of a large file. `semantic_tokens_range` in
+`crates/lsp/src/semantic_tokens.rs` + a decode-and-assert test. **Delta** tokens stay deferred:
+they need result-id caching + per-edit diffing for a payoff already judged marginal (the walk
+is cheap), and **bare-map-literal completion** stays blocked on bidirectional checking the
+checker doesn't do — both consciously left per ADR-011 rather than built speculatively.

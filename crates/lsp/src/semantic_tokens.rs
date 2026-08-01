@@ -78,6 +78,35 @@ pub fn semantic_tokens(
     }
 }
 
+/// Semantic tokens for a sub-RANGE of the document (`textDocument/semanticTokens/range`).
+/// Computes the whole-document token stream — cheap, off the same cached CST — then keeps
+/// only the tokens the range covers, so a large file's editor can classify just the
+/// visible viewport. Same legend and delta coding as [`semantic_tokens`]; the delta
+/// baseline resets within the returned slice (each range response is self-contained).
+pub fn semantic_tokens_range(
+    text: &str,
+    root: &Node,
+    tree: &ScopeTree,
+    index: &LineIndex,
+    range: lsp_types::Range,
+) -> SemanticTokens {
+    let mut raws: Vec<Raw> = Vec::new();
+    walk(root, text, tree, Role::Normal, index, &mut raws);
+    raws.sort_by_key(|r| (r.line, r.start));
+    let (s, e) = (range.start, range.end);
+    // A token is in range when its start is at/after the range start and strictly before
+    // the range end (positions ordered by line then character).
+    raws.retain(|r| {
+        let after_start = r.line > s.line || (r.line == s.line && r.start >= s.character);
+        let before_end = r.line < e.line || (r.line == e.line && r.start < e.character);
+        after_start && before_end
+    });
+    SemanticTokens {
+        result_id: None,
+        data: delta_encode(&raws),
+    }
+}
+
 /// A token before delta-encoding: absolute line + UTF-16 start column, UTF-16
 /// length, and its legend indices.
 struct Raw {
@@ -328,6 +357,60 @@ mod tests {
                 (line, col, t.length, t.token_type, t.token_modifiers_bitset)
             })
             .collect()
+    }
+
+    /// Decode a RANGE response's delta stream to absolute tuples.
+    fn tokens_range(src: &str, range: lsp_types::Range) -> Vec<(u32, u32, u32, u32, u32)> {
+        let root = cst::parse(src);
+        let tree = scope::analyze(&root, src);
+        let index = LineIndex::new(src);
+        let st = semantic_tokens_range(src, &root, &tree, &index, range);
+        let (mut line, mut col) = (0u32, 0u32);
+        st.data
+            .iter()
+            .map(|t| {
+                if t.delta_line != 0 {
+                    line += t.delta_line;
+                    col = t.delta_start;
+                } else {
+                    col += t.delta_start;
+                }
+                (line, col, t.length, t.token_type, t.token_modifiers_bitset)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn range_returns_only_the_tokens_it_covers() {
+        let src = "(defn f (x) x)\n(defn g (y) y)";
+        // The whole document classifies both lines.
+        let full = tokens(src);
+        assert!(full.iter().any(|t| t.0 == 0), "full covers line 0: {full:?}");
+        assert!(full.iter().any(|t| t.0 == 1), "full covers line 1: {full:?}");
+        // A range over line 1 alone returns only line-1 tokens…
+        let range = lsp_types::Range {
+            start: lsp_types::Position {
+                line: 1,
+                character: 0,
+            },
+            end: lsp_types::Position {
+                line: 2,
+                character: 0,
+            },
+        };
+        let ranged = tokens_range(src, range);
+        assert!(!ranged.is_empty(), "range has tokens: {ranged:?}");
+        assert!(
+            ranged.iter().all(|t| t.0 == 1),
+            "only line-1 tokens in a line-1 range: {ranged:?}"
+        );
+        // …including `g`'s definition, and NOT `f`'s (which is on line 0).
+        assert!(
+            ranged
+                .iter()
+                .any(|t| t.3 == T_FUNCTION && t.4 == M_DEFINITION),
+            "g's definition is in range: {ranged:?}"
+        );
     }
 
     #[test]
