@@ -13660,3 +13660,40 @@ biting: `repl_test`'s "re-registering a name replaces rather than duplicates" fa
 mechanically onto `%registry-update!`; two do not — `*repl-commands*` is filter-then-append
 over a list (no existing op fits), and `*units*`/`*collected*` are `defdyn`, where writing at
 `env_root` would bypass an active `binding`.
+
+## 2026-08-01 (cont.) — thread 6 traced to the exact line; two more theories killed
+
+Went hard at pinpointing rather than guessing, and the chain is now complete except for one
+narrow question.
+
+**The chain.** `spawn_impl` promotes its thunk into the append-only RUNTIME region — free when
+the thunk is already RUNTIME. On the supervisor path it is not: the tree-walker builds it from
+a **LOCAL `fn_rest`** (the `spawn-link` macro re-expanded into fresh LOCAL forms), and
+`make_closure_cached` **early-returns for a non-RUNTIME `fn_rest` before both the template
+cache and the const-closure cache**. Fresh LOCAL closure per call, promoted per call, forever.
+
+The creating site reports `fn_rest=LOCAL refs=1 colliding=[]`, 2679 times — the thunk
+references exactly one symbol and collides with nothing in the enclosing chain, so it *should*
+have been a constant. It never gets the chance, because the LOCAL key sends it down the
+uncached path first.
+
+**Two theories killed, both mine:**
+- **Deopts.** Zero. `BROOD_DEOPT_TRACE=1` on a perf-stats build reports **0 deopts** across the
+  workload, so deopt fallback is not what puts these activations in the tree-walker.
+- **Nested-closure sharing.** I asserted mid-investigation that ADR-194's share-by-handle is a
+  top-level-only match, so a closure inside the spec map is always copied. Wrong —
+  `copy_cross_heap_rec` is recursive and the share arm is inside the recursion. Checked the
+  code instead of trusting the inference, which is what caught it.
+- Also corrected: the earlier "the referenced-symbol set always collides" reading came from
+  closures on the *compiled* path. This closure's set is one symbol and collides with nothing.
+
+**What is left is one narrow question:** why does this hot path run in the tree-walker at all,
+with zero deopts — and why is it JIT-dependent (2675 tree-walker `fn` creations with the JIT
+against 26 without)? The VM path is already correct (`exec_chunk` binds a zero-capture closure
+to the global env, making it a constant the const cache promotes once), so answering that gives
+the fix rather than requiring a new mechanism.
+
+**A trap for whoever takes it:** the tempting shortcut is to promote the LOCAL `fn_rest` in
+`make_closure_cached` the way `compile_make_closure` does. That is safe there because the
+compiled chunk is cached, so it happens once per *site*; in the tree-walker there is no chunk,
+so it would happen once per *call* — the same unbounded append, wearing a different hat.
