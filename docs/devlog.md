@@ -13450,6 +13450,36 @@ reproduction environment for this class" and implied `nest test` was inadequate.
 was incidental CPU contention from 928 parallel Rust tests. The right answer was never a
 different runner — it was a test that does not depend on load at all.
 
+## 2026-08-01 (cont.) — tooling bundle 1: REPL command registry + debugger path-B locals capture
+
+Two shipped, from the "finish off tooling & telemetry" sweep.
+
+**REPL command registry.** `std/tool/repl.blsp`'s `,cmd` meta-commands were a hardcoded
+name-list (`*repl-meta-names*`) + a dispatch `cond` + per-command handlers — three coupled
+places to touch per command, no extension seam. Replaced with a registry: `*repl-commands*`
+(an ordered list of `{:names :usage :summary :handler :hidden}`), `register-repl-command` as
+the public seam, and `,help` generated from it. The built-ins re-register themselves at module
+load. `tests/repl_test.blsp` gains a registry `describe` (aliases, dispatch, replace-on-reregister,
+`:hidden`).
+
+**Debugger path-B automatic locals capture (the ROADMAP item).** `eval-at` used to see only the
+values you named at `break`; now it sees EVERY in-scope local. The mechanism is a new compiler
+intrinsic `(%scope)` / `(%locals)`: the VM compiles either 0-arg call straight into a fresh
+`{:name → value}` map from the compile-time lexical-scope table (`compile_scope_map`,
+`eval/compile/mod.rs`), keyed by the name as a **keyword** (same interned `Symbol`, so `%eval-in`
+binds it) so a named `:val` overrides a captured local of the same name on `merge`. The
+tree-walker keeps the env-frame builtin as the fallback (also switched to keyword keys, for
+engine parity). `break`/`break-when` became **macros** so `(%scope)` expands in the caller's
+lexical scope — the snapshot now carries `:scope` (auto-captured) + `:vals` (explicit, wins).
+One edge: `(%scope)` as a defn's *sole body* hits the pre-existing passthrough-alias
+optimization and resolves to the builtin — harmless, since the debugger always uses it as a
+subform. Verified across VM / tree-walker / no-JIT / GC-stress. `tests/debug_test.blsp` gains a
+path-B block (locals not named at break, computed exprs, `:val` override, `break-when`).
+
+**`,resume` / `,step` under `pry`.** `pry` binds a `*debug-session*` dynamic and registers
+`,resume [N]` (resume all / the Nth parked) + `,step` (advance one) through the new registry, so
+a debug session is driven with `,`-commands instead of full `(debug/…)` forms.
+
 ## 2026-08-01 (cont.) — thread 6 narrowed: three mechanisms excluded, still not the supervisor's
 
 Kept after the JIT closure re-promotion. No fix, but the search space is much smaller and the

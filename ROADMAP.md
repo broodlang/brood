@@ -1497,14 +1497,23 @@ Runtime housekeeping (both items landed):
   (a server handles a request in the sender's context), `step` single-step evaluation,
   `pry` (drop into the real styled REPL at a debug point), and `eval-at` (evaluate an
   expression in a breakpoint's captured scope — the *explicitly named* `break` locals).
-  ⬜ **Deferred — automatic locals capture (`eval-at` path B):** today `eval-at` sees only
-  the values you name at `break`, because the VM keeps locals in **positional slots, not by
-  name**, so a runtime primitive can't recover the rest (`%locals` works only under the
-  tree-walker). The automatic "every in-scope local by name" version is a **compiler
-  intrinsic** — teach the compiler to recognise `%scope`/`%locals` and emit, at that point,
-  a `{name → slot-value}` map from its lexical-scope table (in `eval/compile/`). Its own
-  focused, VM-careful pass. ⬜ Also deferred: an interactive `nest observe` debugger pane,
-  and `,resume`/`,step` as REPL meta-commands (needs a REPL command registry).
+  ✅ **Automatic locals capture (`eval-at` path B) — shipped 2026-08-01.** `eval-at` now
+  sees EVERY in-scope local at a breakpoint, not just the values named at `break`. The
+  mechanism is the **`(%scope)` / `(%locals)` compiler intrinsic**: the VM compiles either
+  0-arg call straight into a fresh `{:name → value}` map read from the compile-time
+  lexical-scope table (`compile_scope_map` in `eval/compile/mod.rs`, keyed by the name as a
+  keyword so a named `:val` cleanly overrides a captured local on `merge`), with the
+  env-frame builtin as the tree-walker fallback so both engines agree. `break`/`break-when`
+  became **macros** so the capture expands in YOUR lexical scope (the snapshot carries
+  `:scope` = auto-captured locals + `:vals` = explicitly-named, the latter winning); the
+  named-vals path is unchanged. Verified across VM/tree-walker/no-JIT/GC-stress
+  (`tests/debug_test.blsp` path-B block). ⬜ Still deferred: an interactive `nest observe`
+  debugger pane.
+  ✅ **`,resume` / `,step` REPL meta-commands + a REPL command registry — shipped 2026-08-01.**
+  `std/tool/repl.blsp`'s `,cmd`s moved from a hardcoded name-list + dispatch `cond` into a
+  registry (`*repl-commands*`) with `register-repl-command` as the extension seam; `pry`
+  registers `,resume [N]` (resume all / the Nth parked) and `,step` (advance one) against the
+  `*debug-session*` it binds, so you drive a debug session without typing full forms.
 - ✅ **Test coverage — both tiers** — function-level `nest test --cover` (2026-07-24)
   (ADR-148, [`docs/coverage.md`](docs/coverage.md)): which project functions the
   suite never entered, plus `--cover-min PCT` to fail the run under a floor.
