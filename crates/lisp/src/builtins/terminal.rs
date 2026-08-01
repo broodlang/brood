@@ -742,9 +742,22 @@ pub(super) fn gui_open(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
         Some(v) => crate::eval::truthy(v),
         None => true,
     };
+    // An EMPTY app id is rejected rather than passed on: the desktop would take it as
+    // an id that matches no entry, so the window would open with the generic fallback
+    // icon and nothing would say why. `nil` (or an absent key) is the honest way to
+    // say "no id" and stays allowed.
     let app_id = match opts.and_then(|id| heap.map_get(id, value::kw("app-id"))) {
         Some(Value::Nil) | None => None,
-        Some(v) => Some(expect_string(heap, "gui-open", v)?),
+        Some(v) => {
+            let name = expect_string(heap, "gui-open", v)?;
+            if name.is_empty() {
+                return Err(LispError::runtime(
+                    "gui-open: :app-id must not be empty — it names the .desktop entry \
+                     the desktop matches this window to (pass nil for no app id)",
+                ));
+            }
+            Some(name)
+        }
     };
     let spec = crate::gui::WindowSpec {
         title,
