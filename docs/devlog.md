@@ -13449,3 +13449,27 @@ reproduction environment for this class" and implied `nest test` was inadequate.
 ("for shaking out a flaky test") plus `--seed` for order randomisation. All `make test` added
 was incidental CPU contention from 928 parallel Rust tests. The right answer was never a
 different runner — it was a test that does not depend on load at all.
+
+## 2026-08-01 (cont.) — thread 6 narrowed: three mechanisms excluded, still not the supervisor's
+
+Kept after the JIT closure re-promotion. No fix, but the search space is much smaller and the
+exclusions are worth more than another guess.
+
+Direct probes, each measuring promotions per operation against the supervisor path's **0.6/op**:
+
+| shape | ops | promotions | verdict |
+|---|---|---|---|
+| create a capture-free closure in a hot arm | 200 k | 1 | clean under JIT, VM and tree-walker |
+| create one and **send** it | 100 k | 2 | clean; `BROOD_NO_SHARE_FN=1` changes nothing |
+| **receive** a thunk, **call** it, spawn inside it | 20 k | 17 (JIT) vs 5 (VM) | ratio present, absolute negligible |
+
+So ADR-194's share path is fine, `MakeClosure` in a hot JIT'd arm is fine, and even the
+receive-then-call-then-spawn shape — which is what I assumed the supervisor reduced to — is
+three orders of magnitude too small. Whatever `start-child` does beyond that is the culprit:
+it also `link`s the child, optionally `register`s a name, and `assoc`s the spec into the
+supervisor's long-lived state map.
+
+Recording the exclusions in the handoff so the next attempt bisects
+`supervisor--start-child` itself instead of re-probing generic shapes. The standing suspicion
+is unchanged: `make_closure_cached` caches only when `fn_rest` is a RUNTIME pair and bails
+**silently** otherwise, which is exactly the shape of a JIT/VM divergence that costs 2×.
