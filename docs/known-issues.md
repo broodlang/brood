@@ -17,7 +17,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-22 | an `impl` can be missed by a dispatch on the very next line under concurrency | ⬜ **open** (found 2026-08-01) |
+| KI-22 | concurrent `register-impl` lost ~40% of impls (whole-registry read-modify-write) | ✅ fixed 2026-08-01 |
 | KI-21 | `nest run --for` / `--watch` generated a legacy `~p` pin — failed on any file | ✅ fixed 2026-07-30 |
 | KI-20 | a JIT fast link ran the callee against the *caller's* IC block (cold cache) | ✅ fixed 2026-07-30 |
 | KI-19 | VM resolved a call's free-global head *after* its arguments | ✅ fixed 2026-07-30 |
@@ -45,7 +45,7 @@ transient — each kept as a record with its regression test, so a recurrence is
 
 ---
 
-## KI-22 — an `impl` can be missed by a dispatch on the very next line · **open, found 2026-08-01**
+## KI-22 — concurrent `register-impl` silently lost impls · **found + fixed 2026-08-01**
 
 **Symptom.** `tests/ability_test.blsp`'s "open extension" test registers an impl and calls the
 op immediately:
@@ -78,8 +78,24 @@ be missed by an immediately-following call while other processes register, then 
 `impl` reload can silently dispatch to the stale (or `:default`) implementation — a wrong
 answer, not a crash. The test is the messenger.
 
-**Do not** "fix" this by re-serialising the tests: that hides it. Reproduce with
-`for i in $(seq 10); do nest test; done` and keep the whole log.
+**Root cause: a lost update, not a cache bug.** `register-impl` did
+`(def *impls* (assoc *impls* …))` — a read-modify-write of ONE shared global holding the whole
+registry. Two processes registering at once each read the old map and each wrote their own
+successor, so the later write silently dropped the earlier impl. A direct probe (N processes,
+one private ability each, so no legitimate precedence contest) measured **24/50, 88/200 and
+218/500 lost — about 40%**. The dispatch cache was never at fault; there was nothing to find.
+
+**Fix.** The registry has to stay an immutable global map (`%dispatch`/`vm_dispatch` reads it on
+every call, and a `Table` deep-clones values in and out, which would put a closure copy on the
+dispatch hot path), so the *write* is serialised instead: a ticket lock built on `table-incr`,
+the one atomic read-modify-write the language has. Registration is rare — load time and hot
+reload — so the cost is irrelevant, and dispatch is untouched. The wait is **bounded**, falling
+back to an unsynchronised write, so a lock holder that dies mid-section degrades to the old
+behaviour rather than deadlocking the registry during prelude load.
+
+**Verified:** the probe goes 218/500 lost → **0 lost** at 50/200/500/1000; the suite went from
+failing on run 8 of 10 to **10/10 clean**; and the regression test (`concurrent impl
+registration (KI-22)`) was confirmed to fail (56 lost) with the lock neutered.
 
 ## KI-20 — a JIT fast link ran the callee against the **caller's** IC block · **fixed 2026-07-30**
 

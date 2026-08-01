@@ -4628,9 +4628,51 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
     ; owner already has a stronger claim). The fn is stored DIRECTLY so dispatch (`impl-for`)
     ; stays a plain map-get; provenance in *impl-from* is read only here, never on dispatch.
     (when (>= new-rank old-rank)
-      (def *impls* (assoc *impls* op-key (assoc methods key f)))
-      (def *impl-from* (assoc *impl-from* prov-key from)))
+      (register-impl--commit op-key key f prov-key from))
     nil))
+
+;; Commit one registration under a lock (KI-22).
+;;
+;; `(def *impls* (assoc *impls* …))` is a read-modify-write of ONE shared global holding the
+;; whole registry, so two processes registering at the same time each read the old map and
+;; each write their own successor — the later write silently drops the earlier one's impl.
+;; Measured before this: **218 of 500** concurrent registrations lost outright, after which
+;; the op dispatches to `:default`. A wrong answer, not a crash — and `impl` is hot-reloadable
+;; by design, so it bites a live reload, not just the parallel test suite.
+;;
+;; The registry has to STAY an immutable global map: `%dispatch`/`vm_dispatch` reads it on
+;; every call, and a `Table` deep-clones values in and out, which would put a closure copy on
+;; the dispatch hot path. So the write is serialised instead of the structure being changed.
+;;
+;; `table-incr` is the one atomic read-modify-write the language has ("concurrent increments
+;; never lose an update"), which is enough for a ticket lock: take a ticket, wait until it is
+;; being served, write, then serve the next. Registration is rare (load time and hot reload),
+;; so the cost is irrelevant; dispatch is untouched.
+;;
+;; The wait is BOUNDED and falls back to writing unsynchronised. A registry deadlock would be
+;; unrecoverable and this runs during prelude load, so the failure mode is capped at exactly
+;; today's behaviour (a possible lost update) rather than a hang — e.g. if a lock holder dies
+;; mid-section and never serves the next ticket.
+(def *impl-lock* (table))
+
+(defn register-impl--commit (op-key key f prov-key from)
+  (let (ticket (table-incr *impl-lock* :ticket 1)
+        got (register-impl--await ticket 20000))
+    (do
+      (def *impls* (assoc *impls* op-key (assoc (or (get *impls* op-key) {}) key f)))
+      (def *impl-from* (assoc *impl-from* prov-key from))
+      ;; Serve the next ticket only if we actually held the lock; bumping it after a
+      ;; timed-out wait would let two writers through at once, for good.
+      (when got (table-incr *impl-lock* :served 1))
+      nil)))
+
+;; Spin until our ticket is the one being served. Tickets start at 1 (`table-incr` returns the
+;; POST-increment value) and `:served` starts absent = 0, so ticket N runs when served = N-1.
+(defn register-impl--await (ticket spins)
+  (cond
+    (= (- ticket 1) (table-get *impl-lock* :served 0)) true
+    (<= spins 0) false
+    else (register-impl--await ticket (- spins 1))))
 
 (defn impl-for (op-key key)
   "The impl fn of op `op-key` (a `[ability op]` pair) for id `key`, falling back to a
