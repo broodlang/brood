@@ -312,3 +312,35 @@
         (and (assert= (count results) 6)
           (is (fold (fn (ok r) (and ok (= (selection--labels r) (list "math › multiplies"))))
                 true results)))))))
+
+;; --- output formatters (nest test --formatter) --------------------------------
+;; The formatters are pure `(results elapsed)` printers over the result tuple
+;; `(group name fails ms skipped where)`; here we build fake results and capture
+;; their output. The end-to-end wiring is exercised by `nest test --formatter tap`.
+(defn tsel--pass (name) (list "grp" name nil 5 false ""))
+(defn tsel--fail (name) (list "grp" name (list (list nil (list "boom"))) 3 false ""))
+(defn tsel--has? (haystack needle) (>= (index-of haystack needle) 0))
+
+(describe "test formatters: registry"
+  (test "the built-ins are registered and register-test-formatter adds more"
+    (is (not (nil? (get test/*test-formatters* "tap"))))
+    (is (not (nil? (get test/*test-formatters* "json"))))
+    (register-test-formatter "tsel-custom" (fn (r e) nil))
+    (is (not (nil? (get test/*test-formatters* "tsel-custom"))))))
+
+(describe "test formatters: TAP"
+  (test "emits a version line, a plan, and ok/not ok per test"
+    (let (out (with-out-str (test/test--fmt-tap (list (tsel--pass "a") (tsel--fail "b")) 10)))
+      (is (tsel--has? out "TAP version 13"))
+      (is (tsel--has? out "1..2"))
+      (is (tsel--has? out "ok 1 - grp › a"))
+      (is (tsel--has? out "not ok 2 - grp › b"))
+      ;; a failure's detail rides along as a # comment
+      (is (tsel--has? out "# boom")))))
+
+(describe "test formatters: JSON"
+  (test "emits one object with the run totals"
+    (let (out (with-out-str (test/test--fmt-json (list (tsel--pass "a") (tsel--fail "b")) 10)))
+      (is (tsel--has? out "\"total\":2"))
+      (is (tsel--has? out "\"passed\":1"))
+      (is (tsel--has? out "\"failed\":1")))))

@@ -768,7 +768,9 @@ the test rather than hanging the run."
 ;; Suppressed under `:trace`, which already prints a line per test: the two together
 ;; would just be noise.
 (defn progress-mark (results)
-  (unless *test-trace*
+  ;; Suppressed under `:trace` (which prints a line per test) and under a machine
+  ;; `--formatter` (whose output must stay parseable — no stray dots).
+  (unless (or *test-trace* *test-formatter*)
     (fold (fn (_ r)
             (print (cond
                      (r-skipped? r) (test--orange "○")
@@ -897,6 +899,12 @@ the test rather than hanging the run."
 ;; `nest test` passes `:trace`. Lines from parallel workers interleave (each is one
 ;; flushed `println`); they come in waves of `*parallel-batch*`.
 (defdyn *test-trace* false)
+
+;; The active output formatter name (`nest test --formatter NAME`), or nil for the
+;; default human report. A `def`-global (like `*test-trace*`) so a worker reads it to
+;; suppress the live progress dots under a machine formatter. See the formatter registry
+;; below (`*test-formatters*`).
+(def *test-formatter* nil)
 
 ;; The active filter spec (see "test selection" above) — nil runs everything.
 ;; A global rather than a threaded argument because `drain-current` is reached
@@ -1368,6 +1376,7 @@ the test rather than hanging the run."
   (def *test-timeout-ms* (opt-val :timeout opts *test-timeout-ms*))
   (def *test-slow-ms* (opt-val :slow-over opts *test-slow-ms*))
   (def *test-trace* (opt? :trace opts))
+  (def *test-formatter* (opt-val :formatter opts nil))
   (def *test-filter* (opt-val :filter opts nil))
   (def *test-max-failures* (opt-val :max-failures opts 0)))
 
@@ -1391,15 +1400,100 @@ the test rather than hanging the run."
 ;; The shared tail of a printing run: the failure blocks, the slow lists, the
 ;; one-line summary, then raise if anything failed. `extra` is appended inside the
 ;; summary parens (the isolated-unit count, for the non-scoped runner).
+;; --- output formatters (nest test --formatter NAME) --------------------------
+;; The default report is the human one below. A machine formatter — TAP for a CI that
+;; speaks it, JSON for tooling — is a named entry in this registry; `--formatter NAME`
+;; selects it. Each is a fn `(results elapsed)` that PRINTS the run; raising on failure
+;; (for the exit code) stays the runner's job. `register-test-formatter` is the seam an
+;; external tool adds its own with — same shape as the REPL command registry.
+(def *test-formatters* {})
+
+(defn register-test-formatter (name formatter)
+  "Register a named `nest test --formatter` output formatter: `name` (a string) →
+`formatter`, a fn `(results elapsed)` that prints the run. The built-ins are `tap` and
+`json`; the default (no `--formatter`) is the human report. Raising on failure is the
+runner's job, not the formatter's. Returns `name`."
+  (def *test-formatters* (assoc *test-formatters* name formatter))
+  name)
+
+(defn test--fmt-tap (results elapsed)
+  "TAP version 13: a `1..N` plan then one `ok`/`not ok N - name` line per test (a skip
+adds `# SKIP`); a failure's detail lines follow as `#` comments. Numbered in result
+order (deterministic — the results are already collected)."
+  (println "TAP version 13")
+  (println (str "1.." (count results)))
+  (fold (fn (i r)
+          (let (status (if (r-failed? r) "not ok" "ok"))
+            (println (str status " " (+ i 1) " - " (full-name r)
+                       (if (r-skipped? r) " # SKIP" "")))
+            (when (r-failed? r)
+              (fold (fn (_ rec)
+                      (fold (fn (_ line) (println (str "# " line))) nil (fail-lines-of rec)))
+                nil (r-fails r)))
+            (+ i 1)))
+    0 results)
+  nil)
+
+(defn test--result->data (r)
+  "One result as a JSON-ready map (the shape `run-tests-structured` also emits)."
+  {:group (r-group r)
+   :name (r-name r)
+   :passed (not (r-failed? r))
+   :skipped (r-skipped? r)
+   :ms (r-ms r)
+   :failures (or (map (fn (f) {:loc (first f) :details (second f)}) (r-fails r)) [])})
+
+(defn test--fmt-json (results elapsed)
+  "One JSON object for the whole run: `{:total :passed :failed :failed-assertions :ms
+:results [...]}` — the same data `run-tests-structured` returns, for a tool that consumes
+the suite programmatically. Printed once, at the end, so parallel ordering is irrelevant."
+  (require 'json)
+  (let (total (count results)
+        failed (count-failed results))
+    (println (json/json-encode
+               {:total total
+                :passed (- total failed)
+                :failed failed
+                :failed-assertions (count-failures results)
+                :ms elapsed
+                :results (or (map test--result->data results) [])})))
+  nil)
+
+(register-test-formatter "tap" test--fmt-tap)
+(register-test-formatter "json" test--fmt-json)
+
+(defn test--report-formatted (results elapsed)
+  "Emit `results` through the selected `*test-formatter*`, then raise on any failure so
+the exit code still reflects the run. An unknown formatter name is a clean error."
+  ;; NB not `fmt` — that's the prelude string-template MACRO, and a macro in call-head
+  ;; position wins over a local binding, so `(fmt …)` would expand as the template.
+  (let (formatter-fn (get *test-formatters* *test-formatter*))
+    (if (nil? formatter-fn)
+      (error (str "unknown --formatter '" *test-formatter* "' (available: "
+               (join ", " (sort (keys *test-formatters*))) ")"))
+      (do
+        (formatter-fn results elapsed)
+        (if (> (count-failed results) 0)
+          (error (str (count-failed results) " test(s) failed"))
+          :ok)))))
+
 (defn test--report-pass (results elapsed opts extra)
+  ;; `--failed` tracking happens on every path (the interesting run is the failing one).
+  (def *test-last-ran* (map full-name results))
+  (def *test-last-failed* (map full-name (filter r-failed? results)))
+  (if *test-formatter*
+    (test--report-formatted results elapsed)
+    (test--report-human results elapsed opts extra)))
+
+(defn test--report-human (results elapsed opts extra)
   (let (total (count results)
         failed (count-failed results)
         skipped (count-skipped results)
         fails (count-failures results)
         slowest (test--slowest-n opts)
         seed (if (nil? *test-filter*) nil (get *test-filter* :seed)))
-    (def *test-last-ran* (map full-name results))
-    (def *test-last-failed* (map full-name (filter r-failed? results)))
+    ;; (`*test-last-ran*`/`*test-last-failed*` are set by `test--report-pass`, before
+    ;; this human/formatter split, so `--failed` works on either path.)
     ;; A narrowing selector that matched nothing must not pass for success.
     (when (and (= total 0) (test--filter-narrows?))
       (eprintln "warning: no tests matched the given filters — 0 tests ran (check the selector, or a stale --failed record naming tests that no longer exist)"))

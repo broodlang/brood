@@ -37,7 +37,8 @@ use lsp_types::request::{
     CodeActionRequest, Completion, DocumentHighlightRequest, DocumentLinkRequest,
     DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest,
     InlayHintRequest, PrepareRenameRequest, References, Rename, Request as RequestTrait,
-    ResolveCompletionItem, SelectionRangeRequest, SemanticTokensFullRequest, SignatureHelpRequest,
+    ResolveCompletionItem, SelectionRangeRequest, SemanticTokensFullRequest,
+    SemanticTokensRangeRequest, SignatureHelpRequest,
     WorkspaceSymbolRequest,
 };
 use lsp_types::{
@@ -48,7 +49,8 @@ use lsp_types::{
     HoverProviderCapability, InlayHintParams, OneOf, Position, PositionEncodingKind,
     PrepareRenameResponse, PublishDiagnosticsParams, Range, ReferenceParams, RenameOptions,
     RenameParams, SelectionRangeParams, SelectionRangeProviderCapability,
-    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult,
     SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
     SignatureHelpParams, TextDocumentPositionParams, TextDocumentSyncCapability,
     TextDocumentSyncKind, Uri, WorkspaceSymbolParams, WorkspaceSymbolResponse,
@@ -153,7 +155,9 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
             SemanticTokensOptions {
                 legend: semantic_tokens::legend(),
                 full: Some(SemanticTokensFullOptions::Bool(true)),
-                range: Some(false),
+                // Range requests: an editor can classify just the visible viewport of a
+                // large file (the whole-doc walk is cheap off the cached CST, then filtered).
+                range: Some(true),
                 work_done_progress_options: Default::default(),
             },
         )),
@@ -552,6 +556,23 @@ fn handle_request(
                     &a.cst,
                     &a.scope,
                     &a.line_index,
+                ))
+            });
+            Response::new_ok(id, result)
+        }
+        SemanticTokensRangeRequest::METHOD => {
+            let (id, p) = match extract::<SemanticTokensRangeParams>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let result = docs.get(&p.text_document.uri).map(|doc| {
+                let a = &doc.analysis;
+                SemanticTokensRangeResult::Tokens(semantic_tokens::semantic_tokens_range(
+                    &doc.text,
+                    &a.cst,
+                    &a.scope,
+                    &a.line_index,
+                    p.range,
                 ))
             });
             Response::new_ok(id, result)

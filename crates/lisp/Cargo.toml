@@ -247,6 +247,11 @@ rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "
 # else the surface won't accept the window. (winit majors also rewrite the
 # event-loop API — the migration surface is `GuiApp` + `build_window` in gui.rs.)
 # `make clippy` lints `--all-features`, so a mismatch is caught at the gate.
+# COUPLING: winit's DEFAULT features stay on. `build_window` sets a window's desktop
+# app id through `platform::wayland::WindowAttributesExtWayland` — a module that only
+# exists with winit's `wayland` feature, and the one place winit stores the name both
+# the Wayland and X11 backends read. `default-features = false` here would not just
+# drop Wayland support, it would stop the crate compiling.
 winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
 # Audio output for the `audio-beep` builtin (feature `audio`, pulled in by `gui`).

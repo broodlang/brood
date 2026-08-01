@@ -1416,6 +1416,85 @@ resolve in the advisory checker. Returns the project root."
             merged (append kept (or failed (list))))
         (try (spit f (pr-str {:failed merged})) (catch _ nil))))))
 
+;; --- `--stale`: skip test files whose dependencies are unchanged ---------------
+;; `mix test --stale`: a test file only re-runs when it, or one of the source files it
+;; transitively requires, has changed since it last ran. The dependency graph is the KI-17
+;; require-closure already computed for the checker (`project--require-closures`); the
+;; "changed" signal is the newest mtime across a test file + its dependency source files,
+;; compared to what was recorded last run. Stored `{test-file -> max-dep-mtime}` in the
+;; project cache dir, like `--failed`. Only project files carry an mtime — a std/prelude
+;; module in the closure has no file to track and can't change under a --stale run.
+(defn project--stale-file (root)
+  (let (dir (project--cache-dir root)) (if (nil? dir) nil (path-join dir "last-run-mtimes.blsp"))))
+
+(defn project--read-stale-record (root)
+  "The previous run's `{test-file -> max-dep-mtime}` map, or `{}` when there is none."
+  (let (f (project--stale-file root))
+    (if (or (nil? f) (not (file-exists? f)))
+      {}
+      (let (form (try (read-first (slurp f)) (catch _ nil)))
+        (if (map? form) form {})))))
+
+(defn project--module-file-index (infos)
+  "`module-name -> file` from a module-infos map (`{file -> {:module :requires}}`)."
+  (fold (fn (acc kv)
+          (let ([f info] kv name (get info :module))
+            (if name (assoc acc name f) acc)))
+    {} infos))
+
+(defn project--test-dep-files (test-file closures module->file)
+  "Every project file `test-file` transitively depends on (mapping its reachable module
+names back to files), including itself. Modules with no project file (std/prelude) drop."
+  (conj (into #{} (keep (fn (m) (get module->file m)) (or (get closures test-file) [])))
+    test-file))
+
+(defn project--file-max-mtime (files)
+  "The newest mtime across `files` (0 when none exist)."
+  (fold (fn (mx f) (let (mt (or (file-mtime f) 0)) (if (> mt mx) mt mx))) 0 files))
+
+(defn project--stale-mtimes (root files)
+  "`test-file -> current max-dep-mtime` for each test file in `files`, over the whole
+project's require-closure."
+  (let (all (project--all-files root)
+        infos (project--module-infos all)
+        closures (project--require-closures all)
+        module->file (project--module-file-index infos))
+    (fold (fn (acc tf)
+            (assoc acc tf
+              (project--file-max-mtime (project--test-dep-files tf closures module->file))))
+      {} files)))
+
+(defn project--stale-filter (root files)
+  "The subset of `files` whose transitive dependencies changed since they last ran (or
+that were never recorded) — the `--stale` run set."
+  (let (prev (project--read-stale-record root)
+        current (project--stale-mtimes root files))
+    (filter (fn (tf)
+              (let (was (get prev tf) now (get current tf 0))
+                (or (nil? was) (> now was))))
+      files)))
+
+(defn project--write-stale! (root files)
+  "Record the current max-dep-mtime of each file in `files`, merged over the previous
+record so a skipped (unchanged) file keeps its stamp. Best-effort; no writable cache dir
+simply keeps no record."
+  (let (f (project--stale-file root))
+    (when (not (nil? f))
+      (let (merged (fold (fn (acc kv) (assoc acc (first kv) (second kv)))
+                     (project--read-stale-record root)
+                     (project--stale-mtimes root files)))
+        (try (spit f (pr-str merged)) (catch _ nil))))))
+
+(defn project--stale-run-set (root files)
+  "The `--stale` subset of `files` to run, with a one-line note of how many were skipped
+as unchanged (only when some were)."
+  (let (run (project--stale-filter root files)
+        skipped (- (count files) (count run)))
+    (when (> skipped 0)
+      (println (str "stale: " (count run) " of " (count files) " test files changed ("
+                 skipped " unchanged, skipped)")))
+    run))
+
 ;; Build the `:filter` spec for `--failed`. With nothing to narrow to, run
 ;; everything and say why — a command that silently runs zero tests reads as
 ;; broken, and "re-run the failures" on a green suite most usefully means "run it".
@@ -1443,7 +1522,12 @@ resolve in the advisory checker. Returns the project root."
     (test/reset-units!)
     ; drop any stale registrations from a prior run (long-lived image / hot reload)
     (let (dirs (project-abs-paths root *project-test-paths*)
-          files (fold (fn (acc d) (append acc (project--collect-tests d))) nil dirs))
+          files-all (fold (fn (acc d) (append acc (project--collect-tests d))) nil dirs)
+          ;; `--stale` drops any test file whose transitive deps are unchanged since it
+          ;; last ran; the record is refreshed after the run (below). Whole-project only.
+          files (if (test/opt? :stale opts)
+                  (project--stale-run-set root files-all)
+                  files-all))
       ;; Advisory type-check (warnings to stderr). Run it INSIDE `%isolate`: `check-project`
       ;; loads every source + test file into the image for cross-file checking, which would
       ;; otherwise leave all N test modules bound in the global table — and the scoped run
@@ -1474,6 +1558,8 @@ resolve in the advisory checker. Returns the project root."
       (let (resolved (project--resolve-test-opts root opts)
             outcome (try (project--run-suite files resolved) (catch e (list :%suite-raised e))))
         (project--write-failed! root *test-last-ran* *test-last-failed*)
+        ;; Refresh the --stale record for the files that ran (skipped files keep theirs).
+        (when (test/opt? :stale opts) (project--write-stale! root files))
         ;; Report coverage before propagating a suite failure — a red run is
         ;; exactly when you still want to see what went unexercised.
         (let (percent (project--coverage-report! root opts))
