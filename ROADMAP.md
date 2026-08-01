@@ -1541,8 +1541,16 @@ Runtime housekeeping (both items landed):
   `%load-string` now takes a name, and the embedded-module table carries each module's
   repo-relative path (same literal as its `include_str!`, so they can't drift), so
   `std/log`'s forms record as `std/log.blsp` — openable, not a marker.
-  ⬜ Still: **branch** coverage (`if`/`cond`/`match` arms taken), which needs a
-  per-branch id rather than a line, and no concrete need for it yet.
+  ✅ **branch** coverage (`nest test --cover-branches`) — shipped 2026-08-01. Whether BOTH
+  edges of each `if`/`cond`/`match` decision were taken (the strictest measure: a line reads
+  as covered the moment it runs once, even if its else-branch never fires). New
+  `Inst::RecordBranch(line, col, taken)` emitted at each `if`'s then/else edge when coverage
+  is armed — keyed by the TEST's position, so sibling `cond`/`match` arms on shared lines stay
+  distinct (a constant test is folded away, so only real decisions instrument). Shares the
+  `--cover-lines` seam (bytecode instrumentation, JIT off, precompile denominator pass);
+  reports fully-covered vs half-covered branches and gates `--cover-min` on the branch number.
+  Primitives `%coverage-branches`/`%coverage-branch-instrumented`; reporting in
+  `std/tool/coverage.blsp`; `tests/coverage_test.blsp`.
 - ✅ **`nest` correctness + UX hardening pass** — 2026-07-24/25, driven by an
   adversarial harness (~50 hostile values × every flag and positional, malformed
   manifests, malformed sources, bare directories, concurrent invocations) plus
