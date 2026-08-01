@@ -13707,6 +13707,37 @@ mechanically onto `%registry-update!`; two do not — `*repl-commands*` is filte
 over a list (no existing op fits), and `*units*`/`*collected*` are `defdyn`, where writing at
 `env_root` would bypass an active `binding`.
 
+## 2026-08-01 (cont.) — eval now runs on the VM: the 14× cliff (deferred.md #9) is gone
+
+`eval`/`eval-string` walked every runtime-evaluated form with the tree-walker while
+file-loaded code took the compiling VM — a ~14× cliff for the REPL, `nest run -e`, the MCP
+eval tool, and the editor's eval-on-type (a tutorial "million tail calls in constant stack"
+lesson timed out and rendered `✗ timed out`, discrediting its own claim). Fix: `eval_builtin`
+and `eval_string_inner` now mirror `lib::eval_forms` exactly — `macros::compile` (expand +
+resolve + static-quasiquote lowering, which `eval-string` already did) then
+`eval::compile::run` under `vm_enabled()`, tree-walker otherwise. `compile::run` already falls
+back to the tree-walker per-form for anything outside the VM's vocabulary, so a non-compilable
+form still evaluates; the win is that the top-level CALL dispatches into the VM, where the
+callee's arm compiles and tail-recurses in O(1) stack. Measured: eval of the million-iteration
+loop went from 14× the compiled time to parity (debug build: eval 2048 ms vs compiled 2084 ms).
+
+The danger here is a SILENT miscompile (a wrong value, not an error), so correctness is pinned
+form-by-form in a new `tests/eval_vm_test.blsp` (arithmetic, 300k-deep tail recursion, closures
+capturing the runtime env, macros/quasiquote/match, a def visible afterward, cross-process
+closure round-trip) — green under VM / tree-walker / no-JIT, and the whole suite runs under
+`BROOD_VM=0` so these double as a compiled-vs-interpreted differential.
+
+**One real behaviour change, surfaced by `eval_server_test`.** The eval-server's `:trace` uses
+boundary tracing (`debug/trace-fn`), which costs TCO — every traced call is a genuine frame.
+The VM's recursion budget (~1M frames) is far above the tree-walker's, so a *traced* 30k-deep
+tail loop that used to overflow the interpreted eval now completes; to overflow you'd need ~1M+
+depth. Since eval now uses whichever engine is active, a fixed-depth overflow assertion is no
+longer engine-robust, so the test was reframed to the engine-independent fact — a traced tail
+loop is captured per-iteration (each self-call is a real crossing, i.e. it costs TCO), verified
+identical (`:done`, spy capped at 200) under both engines at depth 300. Not a regression: the
+same trace-costs-TCO caveat holds; only the overflow depth moved, and it now matches how
+file-loaded traced code has always behaved on the VM.
+
 ## 2026-08-01 (cont.) — thread 6 traced to the exact line; two more theories killed
 
 Went hard at pinpointing rather than guessing, and the chain is now complete except for one

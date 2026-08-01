@@ -162,15 +162,20 @@
       (assert= (get r :ok) true)
       (assert= (count (get r :spy)) eval-server/*spy-entry-cap*)))   ; 402 entries -> capped
 
-  (test "tracing COSTS tail-calls: a deep tail recursion reports the overflow, honestly"
-    ;; inherent to boundary tracing — the wrapper must return after the call, so the
+  (test "tracing COSTS tail-calls: each traced self-call is a real boundary crossing"
+    ;; Inherent to boundary tracing — the wrapper must return after the call, so the
     ;; self-call is no longer in tail position (the same caveat Erlang/Emacs tracing
-    ;; carries). It surfaces as an ordinary error reply, never as a hung child.
-    (let (r (eval-capturing "(defn evsrv-t-loop ((0) :done) ((n) (evsrv-t-loop (- n 1))))\n(evsrv-t-loop 30000)"
+    ;; carries). So even a TAIL loop is traced per-iteration: a 300-deep traced loop
+    ;; fills the spy cap, where TCO would have shown a single crossing. It also means each
+    ;; traced call is a real frame, so a deep-enough traced loop overflows — but the depth
+    ;; is the engine's recursion budget (small on the tree-walker, ~1M on the VM), so it's
+    ;; not pinned here: `eval` now runs on whichever engine is active (deferred.md #9).
+    (let (r (eval-capturing "(defn evsrv-t-loop ((0) :done) ((n) (evsrv-t-loop (- n 1))))\n(evsrv-t-loop 300)"
               ["evsrv-t-loop"]))
-      (assert= (get r :ok) false)
-      (is (includes? (get r :error) "recursion too deep")))
-    ;; …and UNTRACED the same loop is fine: O(1) stack, as the language promises
+      (assert= (get r :ok) true)
+      (assert= (get r :value) ":done")
+      (assert= (count (get r :spy)) eval-server/*spy-entry-cap*))   ; 600 crossings -> capped
+    ;; …and UNTRACED the same loop is O(1) stack at any depth, as the language promises
     (assert= (get (eval-capturing "(defn evsrv-t-ok ((0) :done) ((n) (evsrv-t-ok (- n 1))))\n(evsrv-t-ok 200000)")
                :value)
       ":done"))

@@ -19,8 +19,21 @@ macro_rules! expect {
 
 pub(super) fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let root = heap.env_root(env);
-    let form = crate::eval::macros::macroexpand_all(heap, arg(args, 0), root)?;
-    crate::eval::eval(heap, form, root)
+    // Run a runtime-evaluated form through the SAME path the file loader uses
+    // (`lib::eval_forms`, `eval_string_inner`): the full compile pass — expand + resolve
+    // + static-quasiquote lowering — then the compiling VM when it's enabled, so a form
+    // handed to `eval` at runtime isn't stuck on the ~10-14× tree-walker (deferred.md #9).
+    // `compile::run` compiles what it can and falls back to the tree-walker per-form for
+    // anything outside the VM's vocabulary, so semantics are unchanged; only the top-level
+    // call (which dispatches into the VM, where a callee's arm compiles and tail-recurses
+    // in O(1) stack) stops being interpreted. `compile` (vs the old bare `macroexpand_all`)
+    // also matches `eval-string`, which has always used it — so the two agree.
+    let form = crate::eval::macros::compile(heap, arg(args, 0), root)?;
+    if crate::eval::compile::vm_enabled() {
+        crate::eval::compile::run(heap, form, root)
+    } else {
+        crate::eval::eval(heap, form, root)
+    }
 }
 
 pub(super) fn read_string(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
@@ -735,9 +748,16 @@ pub(super) fn eval_string_inner(
     let mut result: LispResult = Ok(Value::nil());
     for i in 0..forms.len() {
         let form = heap.root_at(base + i);
-        match crate::eval::macros::compile(heap, form, root)
-            .and_then(|f| crate::eval::eval(heap, f, root))
-        {
+        // Same as `eval_builtin`/the file loader: compile then run on the VM when enabled
+        // (deferred.md #9), tree-walker under `BROOD_VM=0`. `compile::run` falls back to the
+        // tree-walker per-form, so a form outside the VM's vocabulary still evaluates.
+        match crate::eval::macros::compile(heap, form, root).and_then(|f| {
+            if crate::eval::compile::vm_enabled() {
+                crate::eval::compile::run(heap, f, root)
+            } else {
+                crate::eval::eval(heap, f, root)
+            }
+        }) {
             Ok(v) => result = Ok(v),
             Err(e) => {
                 result = Err(e);
@@ -2814,4 +2834,47 @@ pub(super) fn coverage_precompile(args: &[Value], _: EnvId, heap: &mut Heap) -> 
 pub(super) fn coverage_reset(_: &[Value], _: EnvId, _heap: &mut Heap) -> LispResult {
     crate::coverage::reset();
     Ok(Value::nil())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CORE_MODULES, DEV_MODULES};
+
+    /// A release bundle runs on the LEAN runtime, which compiles [`DEV_MODULES`] away
+    /// entirely — and `run-bundle` loads every module the app ships, so one top-level
+    /// `(require 'x)` for a dev-only `x` means the released binary cannot boot at all.
+    /// These two are the capabilities a shipped app's own features are built from (an
+    /// editor ships a debugger and an eval playground), so they must stay in CORE.
+    /// This test is the guard: moving either back to DEV breaks `nest release`, and
+    /// the symptom is a failure to start, far from the cause.
+    #[test]
+    fn app_runtime_capabilities_stay_out_of_dev_modules() {
+        for key in ["debug", "eval-server"] {
+            assert!(
+                CORE_MODULES.iter().any(|m| m.key == key),
+                "`{key}` must be in CORE_MODULES — a lean release runtime omits DEV_MODULES, \
+                 so an app requiring it would fail to boot"
+            );
+            assert!(
+                !DEV_MODULES.iter().any(|m| m.key == key),
+                "`{key}` is in DEV_MODULES; it is a shipped-app capability, not dev tooling"
+            );
+        }
+    }
+
+    /// Every baked-in module is reachable under exactly one key, in one list. A stem
+    /// listed twice (say `debug` left in DEV while also added to CORE) would resolve by
+    /// whichever list `embedded_module` scans first — a silent split-brain.
+    #[test]
+    fn embedded_module_keys_are_unique() {
+        let mut keys: Vec<&str> = CORE_MODULES
+            .iter()
+            .chain(DEV_MODULES.iter())
+            .map(|m| m.key)
+            .collect();
+        keys.sort_unstable();
+        let before = keys.len();
+        keys.dedup();
+        assert_eq!(before, keys.len(), "a baked-in module key is listed twice");
+    }
 }
