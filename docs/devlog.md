@@ -13350,3 +13350,40 @@ Left the test un-serialised on purpose; re-serialising would hide the bug.
 **Also worth recording, because it cost three sessions:** nextest retries, so this printed
 `929 passed` with only a `FLAKY` marker, and the failing attempt is logged *above* the summary —
 `make test | tail` threw away the one thing needed. Keep the whole log.
+
+## 2026-08-01 (cont.) — KI-22 fixed: concurrent `register-impl` was losing ~40% of impls
+
+The suite flake turned out to be a **lost update**, and once measured directly it was not rare
+at all. `register-impl` did `(def *impls* (assoc *impls* …))` — a read-modify-write of ONE
+shared global holding the whole registry. Two processes registering at once each read the old
+map and each wrote their own successor, so the later write silently dropped the earlier impl.
+
+A direct probe (N processes, one *private* ability each, so no legitimate precedence contest —
+every registration must survive) measured **24/50, 88/200, 218/500 lost. About 40%.** The
+`%dispatch` cache I had been suspecting was never involved.
+
+**Fix: serialise the write, don't change the structure.** The registry has to stay an immutable
+global map — `%dispatch`/`vm_dispatch` reads it on every call, and a `Table` deep-clones values
+in and out, which would put a closure copy on the dispatch hot path. So `register-impl` takes a
+**ticket lock built on `table-incr`**, the one atomic read-modify-write the language has
+("concurrent increments never lose an update"). Registration is rare — load time and hot reload
+— so the cost is irrelevant; dispatch is untouched. The wait is **bounded** and falls back to an
+unsynchronised write: this runs during prelude load, so a holder that dies mid-section must
+degrade to the old behaviour rather than deadlock the registry.
+
+**Two intermediate attempts, both recorded because they were wrong in instructive ways.** First
+I moved the flaky test onto a private ability, on the theory that it collided with the shared
+`Size` that several non-serial blocks dispatch. It still failed on run 8 of 10 — which is what
+*ruled out* test hygiene and pointed at the registry. Then I tried optimistic retry (write,
+re-read, retry if our key vanished); it cut the loss from 44% to ~20% but could not close the
+window, and a partial fix for a wrong-answer bug is worse than none — it just makes the flake
+rarer and harder to find. Reverted in favour of the lock.
+
+**Verified three ways:** the probe goes to **0 lost** at 50/200/500/1000; the suite goes from
+failing on run 8 of 10 to **10/10 clean**; and the new regression test was confirmed to fail
+(56 lost) with the lock neutered, because a test never seen to fail is not a test. Startup is
+unchanged (single-threaded load never contends).
+
+**Why it matters past the suite:** `impl` is hot-reloadable by design. A registration that can
+be dropped by a concurrent one means a live reload can leave an op dispatching to `:default` —
+silently, and permanently.
