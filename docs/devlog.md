@@ -13322,3 +13322,31 @@ vector: O(1) nth" in their own comment), `regex`'s per-character matcher indexes
 vector and its NFA `:states` is a vec, and `telemetry`'s bucket bounds are small and fixed.
 Recording the negative so the next sweep doesn't re-walk it: **the shape to keep hunting in
 `std/` is the accumulator one, not the accessor one.**
+
+## 2026-08-01 (cont.) — the suite flake is a real dispatch race (KI-22), not test hygiene
+
+Chased the remaining `brood::suite` flake to a definite answer, and it is a runtime bug.
+
+`tests/ability_test.blsp`'s "open extension" registers an impl and calls the op on the next
+line; `(esize [1 2 3])` intermittently returns `-1`, the `:default` impl. Roughly one suite run
+in five to eight.
+
+**The obvious theory was wrong, and disproving it is the result.** The test extended the shared
+`Size` ability, which several NON-serial blocks in the same file dispatch on — and `:serial`
+only orders tests *within* a block, so a cross-block collision looked certain. I moved the test
+onto a private `Extend` ability that nothing else in the tree touches. **It still failed, on run
+8 of 10.** So this is not test hygiene: an `impl` registration is not reliably visible to a
+dispatch on the following line while other processes register unrelated impls.
+
+That points at the shared `%dispatch` inline cache / registry (ADR-172 §7) — the same invariant
+the `dispatch cache is transparent` block asserts and passes deterministically. Filed **KI-22**,
+open. It matters past the test: `impl` is hot-reloadable by design, so a live reload that can be
+missed by the next call is a *wrong answer*, not a crash.
+
+The private-ability change is kept, with its comment corrected to say it did **not** fix the
+flake and what it rules out — an isolated repro is worth more than the original tangled one.
+Left the test un-serialised on purpose; re-serialising would hide the bug.
+
+**Also worth recording, because it cost three sessions:** nextest retries, so this printed
+`929 passed` with only a `FLAKY` marker, and the failing attempt is logged *above* the summary —
+`make test | tail` threw away the one thing needed. Keep the whole log.

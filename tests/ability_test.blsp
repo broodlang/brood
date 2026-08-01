@@ -18,6 +18,23 @@
 (impl Size ability-test/rect (size [r] (* (get r :w) (get r :h))))
 (impl Size :default (size [_] -1))
 
+;; A SECOND ability, dispatched by nothing else in this file. It exists to ISOLATE the
+;; "open extension" test below, which is intermittently red (~1 suite run in 5-8):
+;; `(esize [1 2 3])` comes back `-1` — the `:default` impl — right after its `:vector`
+;; impl was registered on the line above.
+;;
+;; This did NOT fix the flake, and that is the point of keeping it: the test used to
+;; extend the shared `Size`, so the obvious theory was a collision with the several
+;; NON-serial blocks that dispatch `Size` (`:serial` only orders tests within one
+;; block). Moving to a private ability rules that out — the flake survived the move,
+;; reproduced on run 8 of 10. So an `impl` registration can be missed by a dispatch on
+;; the very next line even when no other test touches that ability, which points at the
+;; shared `%dispatch` cache / registry visibility (ADR-172 §7), not at test hygiene.
+;; See docs/known-issues.md. Do not "fix" this by re-serialising tests.
+(defability Extend (esize [self] :-> int))
+(impl Extend :int (esize [n] n))
+(impl Extend :default (esize [_] -1))
+
 (describe "value dispatch"
   (test "dispatches on a built-in's type-of kind"
     (assert= (size 7) 7)
@@ -144,8 +161,13 @@
 (describe "open extension"
   :serial
   (test "a new impl can be added for any kind after the ability is declared"
-    (impl Size :vector (size [v] (* 10 (count v))))
-    (assert= (size [1 2 3]) 30)))
+    ;; `Extend` is declared at load with no :vector impl — adding one here is the point.
+    ;; (Deliberately NOT asserting the pre-registration `-1` first: that would make the
+    ;; test depend on running once per image, which is the fragility being fixed.)
+    (impl Extend :vector (esize [v] (* 10 (count v))))
+    (assert= (esize [1 2 3]) 30)
+    ;; the pre-existing impls still dispatch
+    (assert= (esize 7) 7)))
 
 ;; ---- dispatch inline cache (ADR-172 §7): the per-op cache must stay transparent ----
 ;; The `%dispatch` cache memoises id→impl; these prove it deopts on reload and doesn't
