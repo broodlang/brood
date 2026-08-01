@@ -17,7 +17,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-24 | `eval`'d code cannot forward-reference a name a later `eval` defines (regression, 97d63eda) | ⬜ **open** (found 2026-08-01) |
+| KI-24 | `eval`'d code cannot forward-reference a name a later `eval` defines (regression, 97d63eda) | ✅ **fixed** 2026-08-01 |
 | KI-23 | the KI-22 lost-update shape also exists in ~10 std-module registries | ⬜ **open** (found 2026-08-01) |
 | KI-22 | concurrent registration lost ~40% of registrations (15 prelude registries) | ✅ fixed 2026-08-01 |
 | KI-21 | `nest run --for` / `--watch` generated a legacy `~p` pin — failed on any file | ✅ fixed 2026-07-30 |
@@ -47,9 +47,10 @@ transient — each kept as a record with its regression test, so a recurrence is
 
 ---
 
-## KI-24 — an `eval`'d definition cannot forward-reference another `eval`'d name · **open, regression in 97d63eda**
+## KI-24 — an `eval`'d definition cannot forward-reference another `eval`'d name · **fixed 2026-08-01**
 
-**Symptom.** Two definitions made by `eval`, where the first references the second:
+**Symptom.** Two definitions made by `eval` from inside a namespace, where the first
+references the second:
 
 ```
 (defmodule m)
@@ -58,33 +59,63 @@ transient — each kept as a record with its regression test, so a recurrence is
 (r 41)          ; → unbound symbol: s
 ```
 
-The hint says it all: ``s` is defined as `m/s` — add `(:use m)` … or call it qualified`. The
-*definition* side qualifies correctly (`m/s` exists); only the bare *reference* fails to.
+The hint said it all: ``s` is defined as `m/s``. The *definition* side qualified
+correctly; only the bare *reference* failed to.
 
-**It is order-dependent, and ordinary code is unaffected** —
-`scripts/fuzz/stress/eval_forward_ref.blsp`:
+**The REPL had it too** — it is simply typing a `defmodule` and then two mutually
+recursive `defn`s, since each REPL input is its own compile unit:
 
-| shape | result |
-|---|---|
-| normal mutual recursion (forward ref) | ✅ `:ok` |
-| eval'd, target defined **first** | ✅ 42 |
-| eval'd, target defined **second** | ❌ `unbound symbol: s` |
+```
+(defmodule rtest)
+(defn ra (n) (rb n))
+(defn rb (n) (+ n 1))
+(ra 41)          ; → unbound symbol: rb
+```
 
-**Confirmed a regression, not long-standing.** Rebuilt `builtins/system.rs` at `97d63eda^`
-and the third row returns **42**; restoring the commit makes it fail again.
+**Order-dependent; ordinary code unaffected** — `scripts/fuzz/stress/eval_forward_ref.blsp`:
+
+| shape | before | after |
+|---|---|---|
+| normal mutual recursion (forward ref) | ✅ `:ok` | ✅ |
+| eval'd, target defined **first** | ✅ 42 | ✅ |
+| eval'd, target defined **second** | ❌ `unbound symbol: s` | ✅ 42 |
+
+**Confirmed a regression** rather than long-standing: rebuilding `builtins/system.rs` at
+`97d63eda^` returned 42 for the failing row.
 
 **Cause.** `97d63eda` (a good change — it took `eval` off the ~14× tree-walker) swapped
-`macroexpand_all` for `macros::compile`, which adds the **resolve** pass. That pass qualifies a
-bare name against `heap.compile_ns()`, and evidently only rewrites a reference whose target
-already exists, so a forward reference is left bare and is then not found under the module's
-qualified name.
+`macroexpand_all` for `macros::compile`, which adds the **resolve** pass. Resolve qualifies
+a bare name only on *positive evidence* that the namespace owns it: the name is already a
+`ns/name` global, or it is in `ns_known_names` — the def heads a **file loader pre-scans
+before compiling any form**. That pre-scan is what makes a forward reference work inside a
+file. `eval` and the inheriting `eval-string` (REPL, inline) compile **one form at a time**
+and cannot scan the future, so the reference was left bare. A survey of every
+`macros::compile` call site confirmed those two were the only ones without a pre-scan.
 
-**What it breaks:** mutual recursion defined through `eval`, and any REPL / hot-reload /
-`%load-string` flow that evaluates definitions out of dependency order — which is the normal
-way people paste code into a REPL.
+Note the mirror image: *before* the resolve pass, an eval'd `defn` inside a module defined
+a bare **root** global — module code leaking into the global namespace. The old behaviour
+"worked" only because reference and definition were consistently wrong.
 
-**Caught by** `tests/vm_nested_stack_guard_test.blsp` ("a tail-recursive fn defined via eval
-still has O(1) stack"), which is currently red for this reason — not for a TCO problem.
+**Fix.** `Heap::set_ns_assume_own` — a compile-context flag, alongside `compile_ns` /
+`ns_known_names`, set by the two call sites that have no pre-scan behind them. With it on,
+the resolver's *last resort* flips: a bare name bound at root/prelude still falls through
+(so `+`/`map`/`count` keep working) and a `(:use …)` import still wins (checked first), but
+a name bound **nowhere** is taken to be this namespace's — the conclusion the file pre-scan
+would have reached. Deliberately not the resolver's default: over-qualifying a name that is
+really a local is a *silent* miscompile, so the general rule stays evidence-only.
+
+**The one trap, caught by the regression test.** Special forms and core-macro keywords —
+`if`, `let`, `do`, `fn`, `cond` — are bound in **no** environment, so "unbound ⇒ ours"
+rewrote `if` to `m/if` and every eval'd conditional died. `is_syntax_keyword` excludes
+`builtins::SPECIAL_FORMS`. (Macro *calls* are already gone by resolve time —
+`macroexpand_all` runs first — but a special-form head survives expansion by definition.)
+
+**Covered by** `tests/eval_vm_test.blsp` ("eval resolves names against the enclosing
+namespace"): the forward reference, mutual recursion across two evals in O(1) stack, the
+definition landing in the namespace rather than root, and one guard test each for syntax
+keywords, root/prelude names, and imports. Those evals run at **load** time on purpose —
+`compile_ns` is only set while a file loads, so an `eval` inside a `test` body is at root
+and never exercises the resolver at all.
 
 ## KI-23 — the KI-22 lost update also exists in std-module registries · **open, found 2026-08-01**
 

@@ -1,15 +1,12 @@
-;; eval_forward_ref — KI-24's reproducer. A definition made by `eval` cannot reference a
-;; name that a LATER `eval` defines, even though ordinary code can.
+;; eval_forward_ref — KI-24's reproducer: a definition made by `eval` referencing a name
+;; that a LATER `eval` defines, which ordinary code has always been able to do.
 ;;
 ;;   brood scripts/fuzz/stress/eval_forward_ref.blsp
 ;;
-;; Expected (and the behaviour at 97d63eda^):
-;;   normal mutual recursion:   :ok
-;;   eval'd, target defined 1st: 42
-;;   eval'd, target defined 2nd: 42
-;; Today the third line is `ERROR: unbound symbol: s` — the resolve pass that `eval` gained
-;; qualifies a bare reference only when its target already exists, so a forward reference is
-;; left bare and never matches the module-qualified global.
+;; All three lines must read `:ok` / `42` / `42`. Between 97d63eda and the KI-24 fix the
+;; third was `ERROR: unbound symbol: s`: the resolve pass `eval` gained qualifies a bare
+;; reference only on positive evidence its target exists, and `eval` — unlike a file loader
+;; — has no whole-file def-head pre-scan to supply that evidence for a forward reference.
 
 (defmodule fwd-test)
 ;; CONTROL: an ordinary defn referencing a sibling defined LATER (late binding)

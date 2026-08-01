@@ -28,7 +28,13 @@ pub(super) fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispR
     // call (which dispatches into the VM, where a callee's arm compiles and tail-recurses
     // in O(1) stack) stops being interpreted. `compile` (vs the old bare `macroexpand_all`)
     // also matches `eval-string`, which has always used it — so the two agree.
-    let form = crate::eval::macros::compile(heap, arg(args, 0), root)?;
+    // One form at a time, so there is no whole-file def-head pre-scan to resolve a
+    // forward reference against (KI-24) — tell the resolver to fall back to this
+    // namespace for a name bound nowhere else. A no-op at root, where resolve is.
+    let prev_assume = heap.set_ns_assume_own(true);
+    let compiled = crate::eval::macros::compile(heap, arg(args, 0), root);
+    heap.set_ns_assume_own(prev_assume);
+    let form = compiled?;
     if crate::eval::compile::vm_enabled() {
         crate::eval::compile::run(heap, form, root)
     } else {
@@ -739,6 +745,14 @@ pub(super) fn eval_string_inner(
     } else {
         (None, None, None)
     };
+    // No pre-scan on the inheriting path, so a reference to a name a LATER call will
+    // define has no evidence to qualify against and would be left bare, missing the
+    // module-qualified global (KI-24) — in the REPL that is just typing `(defmodule m)`
+    // and then two mutually recursive `defn`s. Tell the resolver to fall back to the
+    // current namespace for a name bound nowhere else; a no-op at root. The module-load
+    // path sets it *off*: it has the real pre-scan, and a nested load must not inherit
+    // an outer `eval`'s assumption.
+    let prev_assume = heap.set_ns_assume_own(!reset_ns);
     // Root the unevaluated forms across the per-form eval — a collection at any
     // depth (ADR-061) relocates the LOCAL forms this loop still holds.
     let base = heap.roots_len();
@@ -766,6 +780,7 @@ pub(super) fn eval_string_inner(
         }
     }
     heap.truncate_roots(base);
+    heap.set_ns_assume_own(prev_assume);
     if let Some(pn) = prev_ns {
         heap.set_compile_ns(pn);
     }
