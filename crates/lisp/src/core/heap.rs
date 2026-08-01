@@ -37,7 +37,7 @@ use arc_swap::{ArcSwap, Guard};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use smallvec::SmallVec;
 
@@ -1154,6 +1154,20 @@ type ClosureTemplateMap =
 /// `fn_rest` [`PairId`] → the **promoted RUNTIME closure handle** built for it once.
 type ConstClosureMap = HashMap<PairId, Value, std::hash::BuildHasherDefault<SymbolHasher>>;
 
+/// Which update [`Heap::registry_update`] performs. See that method for why the whole
+/// read-modify-write has to happen inside one kernel call (KI-22).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryOp {
+    /// Set `path` to the value, creating the intermediate map if needed.
+    Assoc,
+    /// Set `path` only if it is currently absent.
+    AssocNew,
+    /// Remove a one-key `path`.
+    Dissoc,
+    /// Prepend to a list-valued global unless already a member.
+    ConsNew,
+}
+
 pub struct RuntimeCode {
     /// The **two** code generations (ADR-091 Erlang-style 2-generation collector).
     /// New code (`def`/`promote`) lands in `gens[current_gen]`; the *other* slot
@@ -1198,6 +1212,20 @@ pub struct RuntimeCode {
     /// The global bindings (prelude + user `def`s). Read on every global lookup,
     /// written on `def` (the only mutation). The values point into PRELUDE or RUNTIME.
     globals: RwLock<SymbolMap<Value>>,
+    /// Serialises a **registry update** — the read-modify-write of a global that holds a
+    /// whole registry map (`*impls*`, `*features*`, `*abilities*`, … — see
+    /// [`Heap::registry_update`]). `def` itself is atomic, but `(def *X* (assoc *X* …))` is
+    /// three steps in the language, and two processes registering at once each read the old
+    /// map and each write their own successor, so the later write silently drops the
+    /// earlier one (KI-22: ~40% of concurrent registrations lost). This lock lets the whole
+    /// sequence happen inside ONE kernel call.
+    ///
+    /// Separate from `globals` on purpose: the update needs `&mut Heap` for the map ops
+    /// between the read and the write, which it could not do while holding a guard borrowed
+    /// from `self`. Nothing acquires this while holding the `globals` lock, so there is no
+    /// ordering hazard. Registration is a load-time/hot-reload event, so the contention is
+    /// nil and holding it briefly on the worker thread is free.
+    registry_lock: Mutex<()>,
     /// **Reserved** names — everything the language itself ships, which a user `def`
     /// may not rebind (ADR-166). Seeded with every symbol bound at runtime-seed time
     /// (the prelude's 443 definitions plus every Rust builtin), and extended with each
@@ -1416,6 +1444,7 @@ impl Default for RuntimeCode {
             runtime_tag: next_runtime_tag(),
             gen_version: AtomicU64::new(0),
             globals: RwLock::new(SymbolMap::default()),
+            registry_lock: Mutex::new(()),
             // A default (un-seeded) runtime reserves nothing — the prelude hasn't run.
             sealed: RwLock::new(std::collections::HashSet::new()),
             version: AtomicU64::new(0),
@@ -1528,6 +1557,7 @@ impl RuntimeCode {
                     .collect(),
             ),
             globals: RwLock::new(globals),
+            registry_lock: Mutex::new(()),
             version: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),
             positions: RwLock::new(HashMap::new()),
@@ -4391,6 +4421,130 @@ impl Heap {
     pub fn leave_module_load(&mut self) {
         let d = &mut self.cold_mut().module_load_depth;
         *d = d.saturating_sub(1);
+    }
+
+    /// **Atomically** update a global that holds a registry (KI-22).
+    ///
+    /// Every load-time registry — `*impls*`, `*features*`, `*abilities*`, `*methods*`,
+    /// `*record-ids*`, … — is one global holding a whole map or list, and Brood updates it
+    /// as `(def *X* (assoc *X* …))`. That reads, computes and writes as three separate
+    /// steps, so two processes registering at the same time each read the old value and each
+    /// write their own successor: the later write silently drops the earlier one. Measured
+    /// **218 of 500** concurrent registrations lost, after which the op dispatched to
+    /// `:default` — a wrong answer, not a crash, and `impl` is hot-reloadable by design.
+    ///
+    /// The whole read-modify-write happens here, under `registry_lock`, so it is atomic by
+    /// construction: no CAS (and so no ABA question), no retry loop, no spinning, and no
+    /// callback into Brood while a lock is held. Two earlier in-language attempts failed
+    /// exactly there — optimistic retry cannot close the read-write window, and a ticket lock
+    /// either burns CPU busy-waiting or desynchronises when a bounded wait times out.
+    ///
+    /// `op` selects the update; `path` is `[k]` or `[k1 k2]` (nested one level, for
+    /// `*impls*`/`*methods*`, whose shape is `ability -> id -> fn`):
+    /// - `:assoc` — set `path` to `val`, creating the intermediate map if absent.
+    /// - `:assoc-new` — the same, but only when `path` is currently **absent**. The
+    ///   presence test has to be inside the lock too: a derived method mirror that checks
+    ///   "absent?" outside it can clobber an authored impl registered in between.
+    /// - `:dissoc` — remove `path` (one key).
+    /// - `:cons-new` — prepend `val` to a list-valued global unless it is already a member
+    ///   (`provide` / `*features*`).
+    ///
+    /// Returns true when the registry was written, false when the op declined (`:assoc-new`
+    /// onto a present key, `:cons-new` of an existing member) — so Brood can still report
+    /// "already there" without a second, racy read.
+    pub fn registry_update(
+        &mut self,
+        env: EnvId,
+        sym: Symbol,
+        op: RegistryOp,
+        path: &[Value],
+        val: Value,
+    ) -> bool {
+        // Clone the Arc so the guard borrows a LOCAL, leaving `&mut self` free for the map
+        // ops between the read and the write. Recover from a poisoned lock rather than
+        // propagate: a panicking registrar leaves the registry structurally sound (values
+        // are immutable), and wedging every later registration would be worse.
+        let rt = self.runtime.clone();
+        let _guard = rt.registry_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        // `def` binds at `env_root(env)`, which is NOT always `EnvId::GLOBAL`: during prelude
+        // load the root is a bootstrap env whose bindings later seed the shared runtime. A
+        // write straight to the globals table there is silently dropped (it cost the prelude
+        // its own `Display`/`Inspect` impls). Read and write the same place `def` would.
+        let root = self.env_root(env);
+        let cur = self.env_get(env, sym).unwrap_or(Value::nil());
+        let k1 = path.first().copied().unwrap_or(Value::nil());
+
+        let next = match op {
+            RegistryOp::ConsNew => {
+                if self.list_contains(cur, val) {
+                    return false;
+                }
+                self.alloc_pair(val, cur)
+            }
+            RegistryOp::Dissoc => match cur.unpack() {
+                ValueRef::Map(id) => self.map_dissoc(id, k1),
+                _ => return false,
+            },
+            RegistryOp::Assoc | RegistryOp::AssocNew => {
+                let outer = match cur.unpack() {
+                    ValueRef::Map(id) => id,
+                    // An uninitialised registry (nil) starts as an empty map rather than
+                    // failing — the same shape `(or *X* {})` had at the call sites.
+                    _ => match self.alloc_empty_map().unpack() {
+                        ValueRef::Map(id) => id,
+                        _ => unreachable!("alloc_empty_map returns a map"),
+                    },
+                };
+                if path.len() >= 2 {
+                    let k2 = path[1];
+                    let inner_cur = self.map_get(outer, k1);
+                    let inner_id = match inner_cur.map(|v| v.unpack()) {
+                        Some(ValueRef::Map(id)) => id,
+                        _ => match self.alloc_empty_map().unpack() {
+                            ValueRef::Map(id) => id,
+                            _ => unreachable!("alloc_empty_map returns a map"),
+                        },
+                    };
+                    if op == RegistryOp::AssocNew && self.map_get(inner_id, k2).is_some() {
+                        return false;
+                    }
+                    let inner = self.map_assoc(inner_id, k2, val);
+                    // `map_assoc` can collect, so re-resolve the outer handle before using it.
+                    let outer = match self.env_get(env, sym).unwrap_or(Value::nil()).unpack() {
+                        ValueRef::Map(id) => id,
+                        _ => outer,
+                    };
+                    self.map_assoc(outer, k1, inner)
+                } else {
+                    if op == RegistryOp::AssocNew && self.map_get(outer, k1).is_some() {
+                        return false;
+                    }
+                    self.map_assoc(outer, k1, val)
+                }
+            }
+        };
+        // Reuse `env_define`'s global path: it promotes into the shared RUNTIME region and
+        // bumps the version that invalidates every process's global inline cache.
+        self.env_define(root, sym, next);
+        true
+    }
+
+    /// Structural `member?` over a proper list — the `:cons-new` presence test, kept inside
+    /// [`Self::registry_update`]'s lock so `provide` cannot double-add under a race.
+    fn list_contains(&self, list: Value, needle: Value) -> bool {
+        let mut cur = list;
+        while let ValueRef::Pair(id) = cur.unpack() {
+            let (head, tail) = {
+                let p = self.pair(id);
+                (p.0, p.1)
+            };
+            if self.equal(head, needle) {
+                return true;
+            }
+            cur = tail;
+        }
+        false
     }
 
     pub fn env_define(&mut self, env: EnvId, sym: Symbol, val: Value) {

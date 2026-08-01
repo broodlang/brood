@@ -3142,7 +3142,7 @@ record built at root and an impl for it at root must land on the same dispatch i
 (def *record-ids* {})
 (defn record-register (id nm)
   "Record that `id` (a `:module/name` keyword) is a `defrecord`'s nominal identity."
-  (def *record-ids* (assoc *record-ids* id nm))
+  (%registry-update! '*record-ids* :assoc [id] nm)
   nil)
 
 (defmacro defrecord (rec fields & opts)
@@ -4159,7 +4159,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 (defn provide (mod)
   "Mark feature `mod` (a symbol or string) as loaded (idempotent); returns its name."
   (let (key (name mod))
-    (unless (member? key *features*) (def *features* (cons key *features*)))
+    (%registry-update! '*features* :cons-new nil key)
     key))
 
 ;; A module declares itself at the top with `defmodule`: its name, an optional
@@ -4173,7 +4173,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 ;; here at root, so the `def` below targets the one real registry.
 (defn record-module-doc! (key doc)
   "Record `doc` as module `key`'s docstring (the registry `module-doc` reads); returns doc."
-  (def *module-docs* (assoc *module-docs* key doc))
+  (%registry-update! '*module-docs* :assoc [key] doc)
   doc)
 
 ;; The hot-reload `def` diagnostics switch. The kernel reads it by BARE name from
@@ -4194,7 +4194,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
   "Print `message` to stderr once per `key` (deduplicated); returns nil. The
 deprecation primitive — emit it from a macro's expansion to flag a deprecated use."
   (unless (member? key *deprecation-seen*)
-    (def *deprecation-seen* (cons key *deprecation-seen*))
+    (%registry-update! '*deprecation-seen* :cons-new nil key)
     (eprintln "deprecation: " message))
   nil)
 
@@ -4377,14 +4377,14 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       ;; every later require of it stalls the full `require--await` window
       ;; (~5s of 5ms ticks) before taking the load over.
       (do
-        (def *features-loading* (assoc *features-loading* key (self)))
+        (%registry-update! '*features-loading* :assoc [key] (self))
         (try
           (require--force key)
           (catch e
             (do
-              (def *features-loading* (dissoc *features-loading* key))
+              (%registry-update! '*features-loading* :dissoc [key] nil)
               (throw e))))
-        (def *features-loading* (dissoc *features-loading* key))
+        (%registry-update! '*features-loading* :dissoc [key] nil)
         key))))
 
 ;; (require 'a 'b …) — load each feature once, left to right. Returns the names.
@@ -4435,8 +4435,8 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   OWNER namespace (`defability`'s defining ns, ADR-172) for impl precedence. Warns if an op
   name is already owned by a DIFFERENT ability in the same ns — that op's generic function
   would otherwise be silently clobbered (only the last-defined ability's op survives)."
-  (def *abilities* (assoc *abilities* aname specs))
-  (when owner (def *ability-owner* (assoc *ability-owner* aname owner)))
+  (%registry-update! '*abilities* :assoc [aname] specs)
+  (when owner (%registry-update! '*ability-owner* :assoc [aname] owner))
   ;; Record op-name ownership and warn on a same-ns cross-ability collision. A re-declaration
   ;; of the SAME ability (hot reload) re-registers its own ops — same owner → no warning.
   (for (spec specs)
@@ -4452,7 +4452,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
           (println "warning: ability " aname " declares op `" (first spec)
             "` already owned by ability " prev
             " — its generic function will be shadowed (rename one op)"))
-        (def *op-ability* (assoc *op-ability* qsym aname)))))
+        (%registry-update! '*op-ability* :assoc [qsym] aname))))
   nil)
 
 (defn ability-owner-ns (aname)
@@ -4475,7 +4475,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 (defn register-ability-derive (aname recipe)
   "Record ability `aname`'s `:derive-record` recipe (the fn `defrecord`'s `:derives` runs to
   synthesise a structural impl). Rebindable like any registry — a later `defability` wins."
-  (def *ability-derives* (assoc *ability-derives* aname recipe))
+  (%registry-update! '*ability-derives* :assoc [aname] recipe)
   nil)
 
 (defn ability-derive-recipe (aname)
@@ -4490,7 +4490,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   "Record ability `aname`'s SEALED member ids — the closed set of identities it is meant
   to be implemented for. The checker uses this for exhaustiveness: every member must have
   an impl of every declared op. Runtime dispatch is unaffected (sealing is a contract)."
-  (def *sealed* (assoc *sealed* aname members))
+  (%registry-update! '*sealed* :assoc [aname] members)
   nil)
 
 (defn sealed-members (aname)
@@ -4505,7 +4505,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 (defn register-ability-requires (aname reqs)
   "Record that ability `aname` REQUIRES abilities `reqs` (a list of names) — an implementor of
   `aname` must also implement each of them (ADR-193). The checker enforces it."
-  (def *ability-requires* (assoc *ability-requires* aname reqs))
+  (%registry-update! '*ability-requires* :assoc [aname] reqs)
   nil)
 
 (defn ability-requires (aname)
@@ -4640,8 +4640,8 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
     ; owner already has a stronger claim). The fn is stored DIRECTLY so dispatch (`impl-for`)
     ; stays a plain map-get; provenance in *impl-from* is read only here, never on dispatch.
     (when (>= new-rank old-rank)
-      (def *impls* (assoc *impls* op-key (assoc methods key f)))
-      (def *impl-from* (assoc *impl-from* prov-key from)))
+      (%registry-update! '*impls* :assoc [op-key key] f)
+      (%registry-update! '*impl-from* :assoc [prov-key] from))
     nil))
 
 (defn impl-for (op-key key)
@@ -4907,7 +4907,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 (defn register-multi (mname algebra)
   "Declare multimethod `mname` with optional closure `algebra` (nil, :commutative, or
   :antisymmetric). Records the algebra so `register-method` can derive each mirror."
-  (def *multi-algebra* (assoc *multi-algebra* mname algebra))
+  (%registry-update! '*multi-algebra* :assoc [mname] algebra)
   nil)
 
 (defn multi-resolve (mname key)
@@ -4928,15 +4928,15 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 
 (defn register-method--store (mname key f)
   "Store method `f` at EXACT `key` for `mname` (overwrites — an authored method always wins)."
-  (def *methods* (assoc *methods* mname (assoc (get *methods* mname {}) key f)))
+  (%registry-update! '*methods* :assoc [mname key] f)
   nil)
 
 (defn register-method--derive (mname key f)
   "Fill the CLOSURE-derived mirror at `key` only if ABSENT — an explicitly authored method of
   the same key must never be clobbered by a derived one, whatever the load order."
-  (let (methods (get *methods* mname {}))
-    (when (not (contains? methods key))
-      (def *methods* (assoc *methods* mname (assoc methods key f)))))
+  ;; `:assoc-new` does the absent-check INSIDE the lock — checking out here would let a
+  ;; derived mirror clobber an authored method registered in between.
+  (%registry-update! '*methods* :assoc-new [mname key] f)
   nil)
 
 (defn register-method (mname key f from)
@@ -4957,7 +4957,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
       (println "warning: multimethod " mname " method for " key
         " — redefined from " prev-from " by " from " (last wins)"))
     (register-method--store mname key f)
-    (def *method-from* (assoc *method-from* prov from)))
+    (%registry-update! '*method-from* :assoc [prov] from))
   (let (algebra (get *multi-algebra* mname))
     ; the `:default` catch-all is a keyword sentinel, not a tuple — never a closure target.
     (when (and algebra (vector? key))
