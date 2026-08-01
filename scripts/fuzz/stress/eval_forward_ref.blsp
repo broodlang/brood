@@ -1,0 +1,26 @@
+;; eval_forward_ref — KI-24's reproducer. A definition made by `eval` cannot reference a
+;; name that a LATER `eval` defines, even though ordinary code can.
+;;
+;;   brood scripts/fuzz/stress/eval_forward_ref.blsp
+;;
+;; Expected (and the behaviour at 97d63eda^):
+;;   normal mutual recursion:   :ok
+;;   eval'd, target defined 1st: 42
+;;   eval'd, target defined 2nd: 42
+;; Today the third line is `ERROR: unbound symbol: s` — the resolve pass that `eval` gained
+;; qualifies a bare reference only when its target already exists, so a forward reference is
+;; left bare and never matches the module-qualified global.
+
+(defmodule fwd-test)
+;; CONTROL: an ordinary defn referencing a sibling defined LATER (late binding)
+(defn p (n) (if (= n 0) :ok (q (- n 1))))
+(defn q (n) (if (= n 0) :ok (p (- n 1))))
+(println (str "normal mutual recursion:   " (try (str (p 10)) (catch e (str "ERROR: " (get e :message))))))
+;; eval'd, but the TARGET already exists when the referrer is eval'd (order swapped)
+(eval '(defn y (n) (+ n 1)))
+(eval '(defn x (n) (y n)))
+(println (str "eval'd, target defined 1st: " (try (str (x 41)) (catch e (str "ERROR: " (get e :message))))))
+;; eval'd, target defined AFTER the referrer
+(eval '(defn r (n) (s n)))
+(eval '(defn s (n) (+ n 1)))
+(println (str "eval'd, target defined 2nd: " (try (str (r 41)) (catch e (str "ERROR: " (get e :message))))))
