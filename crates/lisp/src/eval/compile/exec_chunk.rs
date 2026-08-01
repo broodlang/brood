@@ -114,6 +114,13 @@ pub(crate) fn exec_chunk(
                     crate::coverage::record(file, *line);
                 }
             }
+            // Branch coverage (ADR-148 tier 2) — as RecordLine, present only in a
+            // coverage-armed chunk. Records which edge of a branch was taken.
+            Inst::RecordBranch(line, col, taken) => {
+                if let Some(file) = arm_arc.src_file.as_deref() {
+                    crate::coverage::record_branch(file, *line, *col, *taken);
+                }
+            }
             Inst::Pop => {
                 let n = heap.roots_len();
                 heap.truncate_roots(n - 1);

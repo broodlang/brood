@@ -192,9 +192,44 @@ attributed to.** A line borrowed from another file almost always lands past the 
 the file it was credited to. (`source-location` was never affected — definition sites
 are recorded separately.)
 
-## The two tiers together
+## The third tier: branch coverage (`--cover-branches`)
+
+Line coverage answers "did this line run?". Branch coverage answers the sharper question:
+**were both edges of each decision taken?** A line holding an `if` reads as covered the
+moment it runs once — even if its `else` branch never fires. Branch coverage is the
+strictest of the three.
+
+```
+nest test --cover-branches            # both edges of each if/cond/match taken?
+nest test --cover-branches --cover-min 90
+```
+
+### How it records
+
+It reuses the line tier's whole seam — the same `BROOD_COVERAGE`-armed bytecode
+instrumentation, the same JIT-off diagnostic run, the same precompile pass for the
+denominator. A second instruction, `Inst::RecordBranch(line, col, taken)`, is emitted at
+each `if`'s then-edge and else-edge (only when coverage is armed, so an ordinary chunk is
+untouched). `cond`/`match` expand to nested `if`s, so every arm becomes a branch for free.
+
+Two design points make it precise:
+
+- **A branch is keyed by its TEST's source position, not the `if`'s line.** Sibling `if`s
+  expanded from one `cond`/`match` share a line but their tests have distinct positions, so
+  they stay separate branches.
+- **A constant test is not a branch.** `(if :else …)` — the tail of a `cond` — is folded away
+  at compile time (`compile_node`), so it never instruments. Only a real decision counts. A
+  test with no position (a bare `Local`/`Global`, `(if flag …)`) is skipped too; line
+  coverage still covers it.
+
+A branch is **fully covered** only when both a `true` and a `false` edge record for its
+`(line, col)`. The report lists per-file the fully-covered percentage, then each
+*half-covered* branch (`line:col — then-branch never taken` / `else-branch never taken`).
+
+## The three tiers together
 
 They answer different questions and can be used together. Function coverage needs no
 kernel support and no special build, which is why it ships as the default tier;
-`--cover-lines` is stricter and more expensive. With both on, `--cover-min` gates on
-the **line** percentage, that being the stricter number.
+`--cover-lines` and `--cover-branches` are stricter and share the instrumentation seam
+(both set `BROOD_COVERAGE`/`BROOD_NO_JIT`). With more than one on, `--cover-min` gates on
+the strictest number present: **branch > line > function**.

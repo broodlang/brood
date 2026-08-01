@@ -1,0 +1,19 @@
+;; `gui-open`'s opts map — the window attributes that can only be set while the
+;; window is *built* (`:decorations`, `:app-id`). Only the *parsing* is testable
+;; here: it runs before any window exists, so it behaves identically on a
+;; `--features gui` runtime and on one without (where the call goes on to raise
+;; "gui backend not compiled in"). Actually opening a window is deliberately not
+;; tested — `nest test` runs on a real desktop, and a test that opened one would
+;; flash a window across the screen on every run.
+
+(defmodule gui-test (:use test))
+
+(describe "gui-open — the build-time opts map"
+  ;; A silently-ignored bad `:app-id` would be the worst outcome: the window opens
+  ;; anyway, and the only symptom is the desktop quietly falling back to its generic
+  ;; icon — exactly the bug the key exists to fix.
+  (test "a non-string :app-id is a type error, not an ignored key"
+    (assert-error (gui-open nil nil nil {:app-id 42})))
+
+  (test "the opts map is the last argument — a 5th is an arity error"
+    (assert-error (gui-open nil nil nil {} :extra))))
