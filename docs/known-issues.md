@@ -117,6 +117,25 @@ keywords, root/prelude names, and imports. Those evals run at **load** time on p
 `compile_ns` is only set while a file loads, so an `eval` inside a `test` body is at root
 and never exercises the resolver at all.
 
+**Two fixes were written for this, independently and on the same day.** The other one
+(`13706580`) reverts `eval_builtin` to `macroexpand_all`, dropping the resolve pass rather
+than feeding it the missing evidence. It fixes the reproducer, and its reasoning about the
+pre-scan is the same as above. It was measured against this one and not kept, because
+dropping resolve drops everything else resolve does for an eval'd form:
+
+| | revert to `macroexpand_all` | `compile` + `ns_assume_own` |
+|---|---|---|
+| `eval_forward_ref.blsp` | ✅ `:ok` / 42 / 42 | ✅ `:ok` / 42 / 42 |
+| REPL: `defmodule` + two mutually recursive `defn`s | ❌ `unbound symbol: rb` | ✅ 42 |
+| eval'd `defn` in a module defines `mod/name` | ❌ leaks a bare **root** global | ✅ |
+| `(:use …)` imports, `(:alias …)`, privacy, static-QQ in eval'd code | ❌ lost | ✅ |
+
+The REPL row is the load-bearing one, and it is why that commit's "`eval-string` was never
+affected" does not hold: each REPL input is its own compile unit, so `eval_string_inner`'s
+*inheriting* path (`reset_ns = false`) has no pre-scan either — its own comment says it
+"does neither" — and touching only `eval_builtin` leaves the REPL broken. Verified by
+building both and running the same two inputs.
+
 ## KI-23 — the KI-22 lost update also exists in std-module registries · **open, found 2026-08-01**
 
 KI-22 fixed the **prelude's** fifteen registries by routing them through
