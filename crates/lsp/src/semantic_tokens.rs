@@ -385,8 +385,14 @@ mod tests {
         let src = "(defn f (x) x)\n(defn g (y) y)";
         // The whole document classifies both lines.
         let full = tokens(src);
-        assert!(full.iter().any(|t| t.0 == 0), "full covers line 0: {full:?}");
-        assert!(full.iter().any(|t| t.0 == 1), "full covers line 1: {full:?}");
+        assert!(
+            full.iter().any(|t| t.0 == 0),
+            "full covers line 0: {full:?}"
+        );
+        assert!(
+            full.iter().any(|t| t.0 == 1),
+            "full covers line 1: {full:?}"
+        );
         // A range over line 1 alone returns only line-1 tokens…
         let range = lsp_types::Range {
             start: lsp_types::Position {
