@@ -13775,3 +13775,50 @@ a counter recording, per activation, whether the callee arm was compiled / `QUEU
 when the tree-walker took it will not. That distinguishes "warm-up window" from "permanently
 uncompiled", and the fix follows from which it is: the VM path is already correct, so this is
 about stopping the detour, not inventing a mechanism.
+
+## 2026-08-01 (cont.) — thread 6 solved: a busy receiver turns a shared closure into a copy
+
+Got it. The whole thing hangs off one fact: **ADR-194's share-by-handle only happens on the L1
+parked-receiver fast path.** When the receiver is busy, the send serialises instead, and the
+closure arrives as a private LOCAL copy — after which everything else follows mechanically.
+
+The chain, each step measured rather than argued:
+
+1. `start-child` sends the spec, which carries the `:start` closure.
+2. Receiver **parked** → L1 fast path → `copy_cross_heap` hands the already-shared RUNTIME
+   closure over by handle. Free and correct.
+3. Receiver **busy** → ordinary `Message` path → the closure is **deep-copied** into the
+   receiver's LOCAL heap. `BROOD_L1_STATS=1`: **73.2%** hit with the JIT (10 716 not-parked)
+   against **100%** without (11 not-parked).
+4. A LOCAL closure has no VM-eligible arm, so `dispatch` defers it to the tree-walker:
+   `tw_defer` **3936** vs **16**, and the defer names it — `b5/start-fresh [LOCAL] argc=0`,
+   2678 times.
+5. The tree-walker's `fn` builds the `spawn-link` thunk from a **LOCAL `fn_rest`**, which
+   `make_closure_cached` rejects before both its caches, so the thunk is never a constant.
+6. `spawn_impl` promotes that fresh LOCAL closure into the append-only RUNTIME region, per
+   call: 2660 of 2671 promotions are `spawn_impl <- spawn_link`.
+
+**All three puzzles fall out of step 3.** JIT-dependence: the JIT makes the *sender* faster, so
+the receiver is parked less often — the JIT was never doing anything wrong, it just changed who
+won a race. Timing-sensitivity: slowing the program with a backtrace collapsed the effect ~30×,
+because a slow sender always finds the receiver parked. Zero deopts: nothing deopts; the detour
+is a dispatch-time defer, which is why `BROOD_DEOPT_TRACE` was silent.
+
+**Method note, since this took five sessions.** Every wrong turn came from reasoning about what
+the runtime *must* be doing; every step forward came from asking it. The counter that cracked
+it (`tw_defer`) was already in the tree the whole time behind `--features perf-stats`. And one
+instrument actively lied: `Backtrace::force_capture` slowed the program enough to suppress the
+race by 30×, so measurements taken with it understated everything.
+
+**The fix and its open decision.** Share-by-handle should also apply when the message is
+serialised: an already-shared RUNTIME closure on a same-runtime **local** send should cross as
+a handle, not a `ClosureMsg`. The obstacle is that `to_message(heap, v)` takes no destination —
+it is the same serialiser as the cross-node wire, where a handle is meaningless — so either a
+locality flag is threaded through, or the local-send site substitutes handles before
+serialising. Messaging core; wants a deliberate pass, not a sixth same-day attempt.
+
+**A cheaper mitigation worth measuring first:** step 4 is independently wrong. A copied closure
+tree-walks *forever* — `vm_cache_put` even caches the negative result — so it pays the ~10×
+interpreter cost on every call regardless of promotion. If a LOCAL closure could still be
+VM-compiled, both the interpreter cost and the per-call promotion would go away even when the
+copy still happens.
