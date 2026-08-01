@@ -13312,3 +13312,13 @@ shape, but a template is small and the placeholder count doesn't scale with anyt
 files are in the hundreds: ~90 k cons copies at N=300). Noted rather than churned.
 
 **Gates:** `nest test` 4083 passed, `nest check` clean.
+
+**Second shape swept, and it came back clean.** After the accumulator grep, I swept the other
+classic quadratic: an **O(i) accessor inside a loop** — `(nth coll i)` where `coll` is a list or
+a string, since string indexing here walks to the char boundary (the same reason `format.blsp`
+warns that a per-char `substring` loop is O(n²)). Every hot candidate is already handled:
+`encoding`'s hex and base64 decode loops convert with `string->codepoints` first ("codepoint
+vector: O(1) nth" in their own comment), `regex`'s per-character matcher indexes a codepoint
+vector and its NFA `:states` is a vec, and `telemetry`'s bucket bounds are small and fixed.
+Recording the negative so the next sweep doesn't re-walk it: **the shape to keep hunting in
+`std/` is the accumulator one, not the accessor one.**
