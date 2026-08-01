@@ -2769,7 +2769,10 @@ pub(super) fn coverage_branch_instrumented(_: &[Value], _: EnvId, heap: &mut Hea
         let site_vals: Vec<Value> = sites
             .iter()
             .map(|(line, col)| {
-                heap.alloc_vector(vec![Value::int(i64::from(*line)), Value::int(i64::from(*col))])
+                heap.alloc_vector(vec![
+                    Value::int(i64::from(*line)),
+                    Value::int(i64::from(*col)),
+                ])
             })
             .collect();
         let sites_val = heap.list(site_vals);

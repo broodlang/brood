@@ -101,7 +101,12 @@ impl Default for WindowSpec {
     /// The plain window: default title and size, decorated (a derived `Default` would
     /// give a borderless one), no app id.
     fn default() -> Self {
-        WindowSpec { title: None, size: None, decorations: true, app_id: None }
+        WindowSpec {
+            title: None,
+            size: None,
+            decorations: true,
+            app_id: None,
+        }
     }
 }
 
