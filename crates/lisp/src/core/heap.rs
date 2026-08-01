@@ -3673,6 +3673,29 @@ impl Heap {
         // Reserve the RUNTIME slot *first* and register it, so a reference back to
         // this closure reached while promoting its captured scope resolves here
         // rather than recursing forever (e.g. `(let (g (fn () g)) g)`).
+        // `BROOD_TRACE_PROMOTE=1` — name every closure entering the append-only RUNTIME
+        // region, with the Rust frames that put it there. This is the tool that finally
+        // pinned KI-22's sibling (thread 6): 1382 of 1389 promotions in a supervisor
+        // workload came from one site, `spawn_impl <- spawn_link`. Elimination bisecting had
+        // failed on it for hours; one run of this answered it. Gated, so it costs a single
+        // `var_os` on the promote path when off.
+        if std::env::var_os("BROOD_TRACE_PROMOTE").is_some() {
+            let nm = self
+                .closure(id)
+                .name
+                .map(crate::core::value::symbol_name)
+                .unwrap_or_else(|| "<anon>".to_string());
+            let bt = std::backtrace::Backtrace::force_capture().to_string();
+            let frame = bt
+                .lines()
+                .filter(|l| l.contains("brood::"))
+                .map(|l| l.trim())
+                .filter(|l| !l.contains("promote"))
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" <- ");
+            eprintln!("[promote] closure {} :: {}", nm, frame);
+        }
         let new_idx = self.runtime.cur_code().closures.push(OnceLock::new());
         // The RUNTIME closure count just grew — arm the eval safepoint's `rt_gc_due`
         // probe (see `rt_dirty`). This is the one place closures enter the region.

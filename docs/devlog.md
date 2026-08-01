@@ -13548,3 +13548,73 @@ flag wiring in `crates/nest/src/main.rs` + `std/tool/project.blsp`. Verified end
 scratch project (33% with two half-covered branches correctly named) and the cover-min gate;
 `tests/coverage_test.blsp` (+6 unit tests for the edge-fold + state classification). RecordBranch
 is compile-gated, so a normal run's bytecode is byte-for-byte unchanged.
+
+## 2026-08-01 (cont.) — thread 6's cause found: a `spawn` thunk re-promoted per call
+
+Found it, with a tool rather than more bisecting. **`spawn`/`spawn-link` must promote the
+spawned thunk into the shared RUNTIME region** — a new process cannot run code out of another
+process's LOCAL heap. At ordinary call sites that is free after the first time, because the
+compiler **const-lifts** a capture-free thunk (`eval::compile::const_node`): promoted once,
+reused forever. On the supervisor path it is *not* const-lifted, so the thunk is rebuilt LOCAL
+on every call and promoted again — into a region that only ever grows.
+
+`BROOD_TRACE_PROMOTE=1` on a supervisor workload, ranked: **1382 of 1389 promotions from a
+single site, `spawn_impl <- spawn_link`.** The remaining handful are the compiler's own
+one-time const lifts. Hours of elimination bisecting had produced less than that one run.
+
+**What that trace cost to build: about ten lines.** I should have written it far earlier. The
+whole day's method on this thread was excluding mechanisms one at a time, and I excluded nine
+of them correctly — creating a capture-free closure in a hot arm; creating and **sending** one;
+receive-thunk + call + spawn; `spawn` *and* `spawn-link` in a hot loop from the root *and* from
+a spawned process; `link`; storing the spec in long-lived state; the restart window; and the
+reclamation policy (`BROOD_RT_GC_FLOOR` at 64 / default / 100000000 → 2512 / 2663 / 2661, so no
+feedback loop through compaction). Every one of those was true and none of them found the
+cause. Ask the runtime what it is doing before deducing what it must be doing.
+
+One result along the way is worth keeping because it killed an attractive theory: the closure
+**form is irrelevant**. `:start` written as an inline anonymous closure and as a plain global
+function reference promote 11 876 vs 11 877 per 20 k. It was never about anonymous closures;
+it is about whether the thunk got const-lifted.
+
+**Not fixed, and this one is a genuine design call.** Two shapes: teach the compiler to
+const-lift the thunk on this path too, or memoise the promoted form at the spawn boundary the
+way `store_const_closure` already does for const closures. Both sit on the scheduler/GC
+boundary — the part of this system with the worst history — and today has already produced two
+reverted "fixes" that looked right in isolation. It wants a deliberate pass.
+
+**`BROOD_TRACE_PROMOTE=1` is kept and documented** in CLAUDE.md's debug table: it names every
+closure entering the append-only region along with the Rust frames that put it there. Anything
+promoted *per operation* is an unbounded leak of shared code whose symptom is a slow decay
+rather than a crash, so this is the first thing to reach for next time.
+
+## 2026-08-01 (cont.) — "eval doesn't do TCO": it does; a call *through* `eval` isn't a tail call
+
+Chased a report that `eval` loses tail-call optimisation. **Ordinary tail recursion survives
+`eval` intact** — verified across tail position in `if`, `cond`, `do`, `when`, `let`, mutual
+recursion, and `apply`-in-tail, all at 300–400 k iterations *inside a green process* (bounded
+stack, so a lost TCO would fail immediately). All fine.
+
+What does blow the stack is a self-call made **through** `eval`:
+
+```
+(defn go (n) (if (= n 0) :ok (eval (list 'go (- n 1)))))   ; → recursion too deep
+```
+
+That reads as tail-recursive and isn't. `eval` is a *native* function, so it re-enters the
+evaluator on the Rust stack; the Brood-level tail position cannot release a frame that Rust
+owns. Correct behaviour, but an easy trap — and exactly the shape someone writes when building
+an interpreter or REPL loop on top of `eval`, which is presumably how it was hit.
+
+The error already said "a native callback re-enters the VM on the Rust stack", which is true
+and unhelpful: nothing tells the reader that the `eval` they wrote *is* the native callback.
+Both stack-depth hints (the tree-walker's byte-budget guard and the VM's nested-activation
+guard) now name it, with the offending shape spelled out.
+
+Pinned by tests on **both** halves — that a call through `eval` raises catchably and that the
+message names `eval`, *and* that ordinary tail recursion defined via `eval` still runs in O(1)
+stack. The second matters more than the first: without it, a future change could break real
+TCO through `eval` and hide behind this note.
+
+**Caveat worth stating:** the original report is on another machine, so I have not confirmed
+this is the same case. If it was something else, the two tests above now bound the search — the
+ordinary shapes are proven good.
