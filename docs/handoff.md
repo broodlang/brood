@@ -97,41 +97,46 @@ From the published run (`brood-benchmarks/results/`):
    projection by extrapolating MB/*minute* when the driver is MB/*iteration* — the long run
    actually reached 3M iterations / 3.06 GB in 7 h. A8's trap, freshly re-stepped-in.
 
-6. **Throughput decay — traced to the exact line; the remaining unknown is narrow and
-   TIMING-DEPENDENT.** Worth ~2× throughput and ~2× RSS (`supnocrash`: 300 k ops / 639 MB
-   decaying, vs 590 k ops / 318 MB flat under `BROOD_NO_JIT=1`).
-   **The chain.** `spawn_impl` promotes its thunk into the append-only RUNTIME region — free
-   when the thunk is already RUNTIME. On this path it is not: the **tree-walker** builds it
-   from a **LOCAL `fn_rest`**, and `make_closure_cached` early-returns for a non-RUNTIME
-   `fn_rest` *before* both the template cache and the const-closure cache. Fresh LOCAL closure
-   per call, promoted per call, forever. `BROOD_TRACE_PROMOTE=1`: 2660 of 2671 promotions are
-   `<anon> [captures-frame arity=0] :: spawn_impl <- spawn_link`; the creating site reports
-   `fn_rest=LOCAL refs=1 colliding=[]` 2679 times — one referenced symbol, colliding with
-   nothing, so it *should* have been a constant.
-   **Ruled out — do NOT re-test these:**
-   - **Deopts.** `BROOD_DEOPT_TRACE=1` on a perf-stats build: **0**.
-   - **Runtime macro re-expansion.** Plausible (the tree-walker expands per evaluation, with
-     no memo) and *wrong*: instrumenting the macro branch shows it is **never reached** during
-     the workload. A memo was implemented, measured to change nothing, and reverted.
-   - **Nested-closure sharing.** `copy_cross_heap_rec` IS recursive and its already-shared arm
-     is inside the recursion, and it accepts `Pid`/`Ref`/`Sym` atoms (`message.rs:705-714`), so
-     the spec map does not decline the fast path over them.
-   - **The JIT inliners** (`BROOD_NO_INLINE` / `BROOD_NO_LEAF_INLINE`) and the RUNTIME
-     reclamation policy (`BROOD_RT_GC_FLOOR` 64 / default / 1e8 → 2512 / 2663 / 2661).
-   **The live lead: it is timing-dependent.** Enabling a `Backtrace::force_capture` at the
-   creation site (which slows the program by orders of magnitude) collapsed the count from
-   ~536 expected to **19**. Something that a *slower* program wins the race against is putting
-   these activations on the tree-walker — which fits a warm-up / not-yet-compiled window (see
-   `jit::QUEUED` and `JIT_QUEUED_SYNC_EDGES`) far better than anything static. Note the VM
-   path is already correct (`exec_chunk`'s `MakeClosure` binds a zero-capture closure to the
-   global env → constant → promoted once), so whatever routes around it is the whole bug.
-   **Next step:** instrument *cheaply* (a counter, not a backtrace — the backtrace perturbs the
-   thing being measured) to record, per activation, whether the callee arm was compiled,
-   `QUEUED`, or absent when the tree-walker took it. That distinguishes "warm-up window" from
-   "permanently uncompiled" and picks the fix.
-   **Trap:** do not "fix" it by promoting the LOCAL `fn_rest` in `make_closure_cached` the way
-   `compile_make_closure` does — that is safe there (cached chunk, once per *site*) but would
-   run once per *call* here: the same unbounded append in a different hat.
+6. **Throughput decay — SOLVED (diagnosis), not yet fixed. A busy receiver turns a shared
+   closure into a private LOCAL copy, and everything else follows.** Worth ~2× throughput and
+   ~2× RSS (`supnocrash`: 300 k ops / 639 MB decaying, vs 590 k ops / 318 MB flat under
+   `BROOD_NO_JIT=1`).
+   **The chain, every step measured:**
+   1. `start-child` sends the spec — which carries the `:start` closure — to the supervisor.
+   2. If the supervisor is **parked**, the ADR-178 L1 fast path runs `copy_cross_heap`, which
+      hands an already-shared RUNTIME closure over **by handle** (ADR-194). Correct, free.
+   3. If the supervisor is **busy**, the send takes the ordinary `Message` path, which
+      **deep-copies** the closure into the receiver's LOCAL heap. `BROOD_L1_STATS=1`: with the
+      JIT the sender outruns the receiver and the fast path hits only **73.2%** — 10 716
+      not-parked sends; without the JIT it is **100%** (11 not-parked).
+   4. A LOCAL closure has no VM-eligible arm, so `dispatch` defers it to the **tree-walker**:
+      `tw_defer` **3936** with the JIT vs **16** without, and `BROOD_TRACE_TWDEFER=1` names it —
+      `b5/start-fresh [LOCAL] argc=0`, 2678 times.
+   5. The tree-walker's `fn` then builds the `spawn-link` thunk from a **LOCAL `fn_rest`**, and
+      `make_closure_cached` early-returns for a non-RUNTIME key *before* both the template and
+      const-closure caches — so the thunk is never a constant.
+   6. `spawn_impl` promotes that fresh LOCAL closure into the **append-only** RUNTIME region.
+      Every call. `BROOD_TRACE_PROMOTE=1`: 2660 of 2671 promotions are
+      `<anon> [captures-frame arity=0] :: spawn_impl <- spawn_link`.
+   That explains all three puzzles at once: **JIT-dependent** (the JIT makes the sender faster,
+   so the receiver is parked less often), **timing-sensitive** (slowing the program with a
+   backtrace collapsed it ~30×), and **zero deopts** (nothing deopts; the detour is a
+   dispatch-time defer).
+   **The fix, and the decision it needs.** ADR-194's share-by-handle currently exists only on
+   the L1 parked path. It should also apply when the message is serialised: an
+   already-shared RUNTIME closure on a **same-runtime local** send should cross as a handle,
+   not as a `ClosureMsg`. The obstacle is that `to_message(heap, v)` takes **no destination**
+   — it is the same serialiser used for the cross-node wire, where a handle is meaningless —
+   so either a destination/locality flag gets threaded in, or the local-send call site
+   substitutes handles before serialising. That is a messaging-core change and wants a
+   deliberate pass.
+   **Cheaper mitigation worth measuring first:** step 4 is also a bug on its own — a LOCAL
+   closure tree-walks *forever* (and `vm_cache_put` caches the negative result). If a copied
+   closure could still be VM-compiled, the 10× interpreter cost and the per-call promotion
+   both go away even when the copy happens.
+   **Tools:** `BROOD_L1_STATS=1` (parked-hit rate), `BROOD_PERF_STATS=1` + `--features
+   perf-stats` (`tw_defer`), `BROOD_TRACE_PROMOTE=1` (what enters the region, with capture
+   state). Do **not** instrument with a backtrace — it perturbs the race by ~30×.
 
 **Explicitly NOT open: a memory leak.** See §5 — it was chased and does not exist. The soak
 strengthens this: 12.7 M iterations with `rt-closures` flat and every fresh process starting
