@@ -13737,3 +13737,72 @@ loop is captured per-iteration (each self-call is a real crossing, i.e. it costs
 identical (`:done`, spy capped at 200) under both engines at depth 300. Not a regression: the
 same trace-costs-TCO caveat holds; only the overflow depth moved, and it now matches how
 file-loaded traced code has always behaved on the VM.
+
+## 2026-08-01 (cont.) — thread 6 traced to the exact line; two more theories killed
+
+Went hard at pinpointing rather than guessing, and the chain is now complete except for one
+narrow question.
+
+**The chain.** `spawn_impl` promotes its thunk into the append-only RUNTIME region — free when
+the thunk is already RUNTIME. On the supervisor path it is not: the tree-walker builds it from
+a **LOCAL `fn_rest`** (the `spawn-link` macro re-expanded into fresh LOCAL forms), and
+`make_closure_cached` **early-returns for a non-RUNTIME `fn_rest` before both the template
+cache and the const-closure cache**. Fresh LOCAL closure per call, promoted per call, forever.
+
+The creating site reports `fn_rest=LOCAL refs=1 colliding=[]`, 2679 times — the thunk
+references exactly one symbol and collides with nothing in the enclosing chain, so it *should*
+have been a constant. It never gets the chance, because the LOCAL key sends it down the
+uncached path first.
+
+**Two theories killed, both mine:**
+- **Deopts.** Zero. `BROOD_DEOPT_TRACE=1` on a perf-stats build reports **0 deopts** across the
+  workload, so deopt fallback is not what puts these activations in the tree-walker.
+- **Nested-closure sharing.** I asserted mid-investigation that ADR-194's share-by-handle is a
+  top-level-only match, so a closure inside the spec map is always copied. Wrong —
+  `copy_cross_heap_rec` is recursive and the share arm is inside the recursion. Checked the
+  code instead of trusting the inference, which is what caught it.
+- Also corrected: the earlier "the referenced-symbol set always collides" reading came from
+  closures on the *compiled* path. This closure's set is one symbol and collides with nothing.
+
+**What is left is one narrow question:** why does this hot path run in the tree-walker at all,
+with zero deopts — and why is it JIT-dependent (2675 tree-walker `fn` creations with the JIT
+against 26 without)? The VM path is already correct (`exec_chunk` binds a zero-capture closure
+to the global env, making it a constant the const cache promotes once), so answering that gives
+the fix rather than requiring a new mechanism.
+
+**A trap for whoever takes it:** the tempting shortcut is to promote the LOCAL `fn_rest` in
+`make_closure_cached` the way `compile_make_closure` does. That is safe there because the
+compiled chunk is cached, so it happens once per *site*; in the tree-walker there is no chunk,
+so it would happen once per *call* — the same unbounded append, wearing a different hat.
+
+## 2026-08-01 (cont.) — thread 6: macro-memo theory tested and killed; the lead is timing
+
+Two more candidates eliminated, and the remaining lead sharpened into something specific.
+
+**Killed: runtime macro re-expansion.** The tree-walker expands a macro on *every* evaluation
+of its call form — no memo, unlike the VM, which expands each site once at compile time. That
+is a real asymmetry and it looked like the source of the LOCAL `fn_rest`: a fresh
+`(spawn-link …)` expansion each call would produce a fresh LOCAL `(fn () …)` inside it. I built
+the memo (per-heap, keyed by the call form, invalidated on the runtime `version` so a
+redefined macro cannot be served stale, expansion promoted so the handle stays valid) and
+measured: **promotions unchanged** — 2675 vs 2671. Instrumenting the branch explained why: it
+is **never reached** during the workload. Zero expansions. Reverted the whole thing.
+
+**Killed: the message fast path declining over a pid or ref.** `copy_cross_heap_rec` accepts
+`Pid`/`Ref`/`Sym` as atoms that cross unchanged (`message.rs:705-714`), so the
+`[:start-child spec pid ref]` message does not fall back to the deep-copy path on their
+account.
+
+**The live lead is that it is timing-dependent**, which I only noticed by accident. Turning on
+a `Backtrace::force_capture` at the creation site — which slows the program by orders of
+magnitude — collapsed the count from ~536 expected to **19**. A *slower* program almost stops
+doing it. That is not the signature of a static routing decision; it is the signature of a
+race with something that completes in the background, and the obvious candidate is the
+not-yet-compiled window (`jit::QUEUED`, `JIT_QUEUED_SYNC_EDGES`). It also explains the
+JIT-dependence (2675 with, 26 without) without needing deopts, of which there are none.
+
+**So the next instrument must be cheap.** A backtrace perturbs the very thing being measured —
+a counter recording, per activation, whether the callee arm was compiled / `QUEUED` / absent
+when the tree-walker took it will not. That distinguishes "warm-up window" from "permanently
+uncompiled", and the fix follows from which it is: the VM path is already correct, so this is
+about stopping the detour, not inventing a mechanism.
