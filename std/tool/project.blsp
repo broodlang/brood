@@ -1816,15 +1816,19 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 (defdyn *config-git-init* false)
 ; nest new: run `git init` in the new project?
 
-;; The default package-registry index — a git repo of package metadata (ADR-147).
-;; `nest search`/`publish` and `:version` deps read it; override via `:registry` in
-;; the user config, or pass an explicit index to the registry functions (tests do).
-(defdyn *config-registry* "https://github.com/broodlang/registry")
+;; The default package registry — the base URL of a hosted registry (hive) speaking
+;; the JSON API `nest search`/`publish` and `:version` deps use. Override via
+;; `:registry` in the user config, or pass an explicit base URL to the registry
+;; functions (tests do). The publish auth token comes from $HIVE_TOKEN or
+;; `:registry-token` (never baked into a default).
+(defdyn *config-registry* "https://packages.broodlang.org")
+(defdyn *config-registry-token* nil)
 
 (defn config (& opts)
-  "Set user-level tooling preferences — the form the user config file (`~/.config/brood/config.blsp`) contains. Recognized keys: `:git-init` (whether `nest new` runs `git init`) and `:registry` (the package-registry index git URL). Sets only the keys given; returns nil."
+  "Set user-level tooling preferences — the form the user config file (`~/.config/brood/config.blsp`) contains. Recognized keys: `:git-init` (whether `nest new` runs `git init`), `:registry` (the package-registry base URL), and `:registry-token` (the Bearer token `nest publish` sends; $HIVE_TOKEN overrides it). Sets only the keys given; returns nil."
   (let (gi (plist-get opts :git-init)) (unless (nil? gi) (def *config-git-init* gi)))
   (let (rg (plist-get opts :registry)) (unless (nil? rg) (def *config-registry* rg)))
+  (let (tok (plist-get opts :registry-token)) (unless (nil? tok) (def *config-registry-token* tok)))
   nil)
 
 (defn config--base-dir ()

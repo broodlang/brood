@@ -377,7 +377,7 @@ place — `url/parse-url` (the full parser); a scheme-less input is treated as a
         scheme (or (get u :scheme) "http")
         path (let (p (get u :path)) (if (or (nil? p) (= p "")) "/" p))
         port (or (get u :port) (if (= scheme "https") 443 80)))
-    {:scheme scheme :host (get u :host) :port port :path path}))
+    {:scheme scheme :host (get u :host) :port port :path path :query (get u :query)}))
 
 (defn parse-response (raw)
   "Parse a raw HTTP response (`bytes`, from the transport; a string is accepted
@@ -455,8 +455,12 @@ response); the root process counts."
         body (or (get opts :body) "")
         body-bytes (bytes-concat body)
         headers (request-headers u body-bytes (get opts :headers))
+        ;; The request target is path + ?query — a query-string GET (search APIs)
+        ;; would otherwise drop everything after the `?`.
+        target (let (q (get u :query))
+                 (if (or (nil? q) (= q "")) (get u :path) (str (get u :path) "?" q)))
         head (str method
-               " " (get u :path) " HTTP/1.0\r\n" (render-headers headers) "\r\n")
+               " " target " HTTP/1.0\r\n" (render-headers headers) "\r\n")
         ;; Binary mode before the request goes out (both transports): the peer
         ;; cannot respond before it has our request, so every response chunk
         ;; arrives as byte-faithful `bytes`.

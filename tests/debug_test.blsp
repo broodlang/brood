@@ -258,6 +258,30 @@
       (assert= 5 (binding (*spy-sink* (fn (e) (send me [:spy-entry e])))
                    (tfn-add 2 3)))
       (assert= :quiet (receive ([:spy-entry e] e) (after 50 :quiet)))))
+  (test "REGRESSION: a REFUSED trace registers nothing, so teardown stays clean"
+    ;; `list` passes every check trace-fn makes (it is a function) and is still refused
+    ;; at the rebind — it is a reserved prelude name (E0030, ADR-166). The registry used
+    ;; to be written before that refusal, so the name was left listed as traced while it
+    ;; wasn't: `untrace-all` then raised the same refusal, out of a caller that had
+    ;; already handled the failed install. That is how a speculative trace list (an
+    ;; editor tracing whatever a snippet calls) killed an unrelated evaluation.
+    (do
+      (assert-error (trace-fn 'list))
+      (refute (includes? (traced-fns) 'list))
+      (assert= 0 (untrace-all))))            ; nothing to restore, and it doesn't raise
+
+  (test "untrace-all is not stopped by one stubborn entry"
+    ;; teardown must leave nothing instrumented even if a restore fails: a poisoned
+    ;; registry entry (planted here the way the old trace-fn planted one) must not
+    ;; strand the real traces after it.
+    (do
+      (trace-fn 'debug-test/tfn-square)
+      (def debug/*traced-fns* (assoc debug/*traced-fns* 'list (fn (& args) args)))
+      (untrace-all)
+      (assert= 0 (count (filter (fn (s) (= s 'debug-test/tfn-square)) (traced-fns))))
+      ;; and `list` still means what Brood says it means
+      (assert= (list 1 2) '(1 2))))
+
   (test "re-tracing is idempotent: the registry keeps the ORIGINAL, not a wrapper"
     (do
       (trace-fn 'debug-test/tfn-add)
