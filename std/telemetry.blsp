@@ -57,6 +57,10 @@ LISTENER process."
 
 (defn telemetry--run-handlers (event measurements metadata)
   "Dispatch `event` to its handlers and detach any that threw. Runs in the listener."
+  (when *telemetry-validate*
+    (doseq (problem (telemetry--check-event event measurements metadata))
+      (eprintln (str "telemetry: event " (pr-str event) " " (name (first problem))
+                  " missing key " (pr-str (second problem))))))
   (let (bucket (get *telemetry-handlers* event nil))
     (when bucket
       (let (failed (telemetry--dispatch bucket event measurements metadata))
@@ -153,6 +157,116 @@ handler logic in a process you own, off even the listener. Returns `id`."
   "The handler table as a map of event → list of `{:id :fn}` (introspection)."
   *telemetry-handlers*)
 
+;; ---- declared events (defevent) — events as data with a checked schema -------
+;; Erlang `:telemetry` events are bare atoms with no declared shape: a handler and the
+;; emitter agree on the measurement/metadata keys by convention only. `defevent` declares
+;; that shape ONCE — and, crucially, gets it CHECKED. The trick (same one `defrecord` uses
+;; for field types, ADR-130) is to reuse the `sig` seam: `defevent` generates a *typed
+;; emitter function* whose signature carries the measurement + metadata types, so calling
+;; the emitter is an ordinary typed call the advisory checker validates — no new checker
+;; machinery. The schema is also registered for introspection (`event-schema`) and optional
+;; runtime presence-checking (`*telemetry-validate*`), and raw `emit` still works for
+;; undeclared events.
+
+(def *telemetry-events* {})
+
+(defn telemetry--spec-name (spec)
+  "The field name of a `(name type)` / bare-`name` schema spec."
+  (if (pair? spec) (first spec) spec))
+(defn telemetry--spec-type (spec)
+  "The declared type of a schema spec, or `any` when it's a bare name."
+  (if (pair? spec) (second spec) 'any))
+(defn telemetry--opt (opts key)
+  "Look up `key` in a `:k v :k v …` option list (nil if absent)."
+  (cond
+    (empty? opts) nil
+    (= (first opts) key) (second opts)
+    else (telemetry--opt (rest (rest opts)) key)))
+
+(defn register-event (event schema)
+  "Register `schema` (`{:name :measurements :metadata :doc}`) for telemetry `event` — the
+introspection + runtime-validation registry `defevent` populates. Returns `event`."
+  (def *telemetry-events* (assoc *telemetry-events* event schema))
+  event)
+
+(defn event-schema (event)
+  "The declared schema for `event` (from `defevent`), or nil if undeclared."
+  (get *telemetry-events* event))
+(defn telemetry-events ()
+  "The declared-event registry: `event → {:name :measurements :metadata :doc}`."
+  *telemetry-events*)
+
+(defmacro defevent (fname event & opts)
+  "Declare telemetry `event` (the value passed to `emit`/`attach`) with a typed schema, and
+define a typed EMITTER function `name` the checker validates. `opts`:
+`:measurements ((field type) …)` and `:metadata ((field type) …)` (each field a bare symbol
+= `any`, or `(symbol type)`), plus an optional `:doc`. Expands to a schema registration
+(`*telemetry-events*`, for `event-schema` + `*telemetry-validate*`), a `(sig name …)`, and
+`(defn name (m-fields… md-fields…) (emit event {measurements} {metadata}))`. So
+`(request-stop 42 \"/\" 200)` is checked like any typed call — 'events as data with a
+declared schema', delivered through the `sig` seam (the same trick `defrecord` uses for
+field types). Raw `(emit event …)` still works; enable `*telemetry-validate*` for a
+runtime presence-check of a declared event.
+
+    (defevent request-stop [:http :request :stop]
+      :measurements ((duration int))
+      :metadata ((path string) (status int)))
+    (request-stop 42 \"/index\" 200)   ; typed; a wrong arg type is a checker warning"
+  (let (meas (telemetry--opt opts :measurements)
+        meta (telemetry--opt opts :metadata)
+        doc (telemetry--opt opts :doc)
+        m-names (map telemetry--spec-name meas)
+        md-names (map telemetry--spec-name meta)
+        m-kws (map (fn (n) (keyword (name n))) m-names)
+        md-kws (map (fn (n) (keyword (name n))) md-names)
+        all-names (append m-names md-names)
+        all-types (append (map telemetry--spec-type meas) (map telemetry--spec-type meta))
+        ;; the emitter's measurement/metadata map bodies — `{:field field}` with the field
+        ;; symbols as values (spliced as a literal, exactly like defrecord's ctor body, so
+        ;; the values evaluate as the params).
+        meas-map (zipmap m-kws m-names)
+        meta-map (zipmap md-kws md-names)
+        ;; the schema stored for introspection / runtime checks (types kept unevaluated).
+        schema {:name (list 'quote fname)
+                :measurements (zipmap m-kws (map (fn (s) (list 'quote (telemetry--spec-type s))) meas))
+                :metadata (zipmap md-kws (map (fn (s) (list 'quote (telemetry--spec-type s))) meta))
+                :doc doc})
+    `(do
+       (register-event ~event ~schema)
+       (sig ~fname (~@all-types -> any))
+       (defn ~fname (~@all-names) (emit ~event ~meas-map ~meta-map))
+       nil)))
+
+;; ---- optional runtime presence-check of a declared event --------------------
+;; The checker is the primary guard (via the typed emitter above); this is a cheap
+;; secondary net for the RAW `emit` path, off by default. It runs in the LISTENER (never
+;; the emitter), checks only key PRESENCE (types are the checker's job), and warns to
+;; stderr — it never blocks dispatch. A `def`-global (not a `binding`) because the listener
+;; is a separate process: like `*telemetry-handlers*`, it's read THERE, so enabling it must
+;; be visible across processes — set it with `(def *telemetry-validate* true)`.
+(def *telemetry-validate* false)
+
+(defn telemetry-validate! (on)
+  "Enable (`true`) or disable runtime schema presence-checking of declared events. Off by
+default. Must be a function (not a bare `def` from your module) so the rebind lands on
+telemetry's own global, which the listener process reads. Returns `on`."
+  (def *telemetry-validate* on)
+  on)
+
+(defn telemetry--missing-keys (schema-map actual)
+  "The declared keys of `schema-map` absent from `actual`."
+  (filter (fn (k) (not (contains? actual k))) (keys schema-map)))
+(defn telemetry--check-event (event measurements metadata)
+  "The declared keys missing from a declared event's payload, as `[kind key]` pairs
+(`kind` = `:measurements` / `:metadata`); empty when `event` is undeclared or complete.
+Pure — the listener turns each pair into a stderr warning. Types are the checker's job."
+  (let (schema (get *telemetry-events* event))
+    (if (nil? schema)
+      nil
+      (append
+        (map (fn (k) [:measurements k]) (telemetry--missing-keys (get schema :measurements) measurements))
+        (map (fn (k) [:metadata k]) (telemetry--missing-keys (get schema :metadata) metadata))))))
+
 ;; ---- the runtime event stream (kernel sources → telemetry) -------------------
 ;; Policy over the `system-monitor` kernel seam: a watcher process subscribes to
 ;; the runtime's own events (GC collections, spawns, exits, JIT deopts) and
@@ -241,6 +355,69 @@ at start are the baseline (no spurious `:nodeup` for them)."
 
 (defn stop-watch-nodes (watcher)
   "Stop a `watch-nodes` watcher. Returns nil."
+  (send watcher :stop)
+  nil)
+
+;; ---- unified runtime vitals (the snapshot builtins, behind one stream) -------
+;; The kernel exposes its runtime state through several point-in-time snapshot builtins —
+;; `gc-stats`, `sched-stats`, `vm-stats`, `process-info` — that tools scrape individually
+;; (`nest observe`, `nest mcp`). `runtime-snapshot` folds them into ONE map, and
+;; `watch-vitals` samples that onto the telemetry stream as `[:runtime :vitals]` events, so
+;; a consumer subscribes ONCE to the attach seam instead of polling N builtins — the same
+;; unification `watch-runtime` does for the kernel event stream. The dev-tools-only
+;; snapshot builtins (`gc-stats`/`vm-stats`) are read only when bound, so this degrades
+;; cleanly on a lean runtime (those keys are just nil).
+
+(defn telemetry--stat (sym thunk)
+  "Call `thunk` (a 0-arg snapshot reader) when `sym` is bound, else nil — so a lean build
+without the dev-tools stat builtins doesn't error."
+  (when (bound? sym) (thunk)))
+
+(defn runtime-snapshot ()
+  "A single point-in-time map of the runtime's vitals, pulled from the kernel snapshot
+builtins behind one call: `{:gc :sched :vm :processes :metrics}` (the dev-tools-only
+`:gc`/`:vm` are nil on a lean runtime). The one-call, stream-folded replacement for
+scraping the individual stat builtins — what `nest observe` / `nest mcp` can read."
+  {:gc (telemetry--stat 'gc-stats (fn () (gc-stats)))
+   :sched (telemetry--stat 'sched-stats (fn () (sched-stats)))
+   :vm (telemetry--stat 'vm-stats (fn () (vm-stats)))
+   :processes (count (or (list-processes) []))
+   :metrics (metrics-snapshot)})
+
+(defn telemetry--vitals-measurements (snap)
+  "Flatten a `runtime-snapshot` into a numeric measurements map for a `[:runtime :vitals]`
+telemetry event (gauges): live process count, GC collections / max pause / live bytes, and
+the scheduler's spawn/preempt/steal counters. Absent (lean-build) stats read as 0."
+  (let (gc (or (get snap :gc) {})
+        sched (or (get snap :sched) {}))
+    {:processes (get snap :processes 0)
+     :gc-collections (get gc :collections 0)
+     :gc-pause-max-us (get gc :pause-max-us 0)
+     :live-bytes (get gc :live-bytes 0)
+     :spawned (get sched :spawned 0)
+     :preempts (get sched :preempts 0)
+     :steals (get sched :steals 0)}))
+
+(defn telemetry--vitals-loop (interval)
+  (receive
+    (:stop nil)
+    (after interval
+      (do
+        (emit [:runtime :vitals] (telemetry--vitals-measurements (runtime-snapshot)) {})
+        (telemetry--vitals-loop interval)))))
+
+(defn watch-vitals (&optional interval-ms)
+  "Periodically sample the runtime vitals (`runtime-snapshot`) and emit them onto the
+telemetry stream as `[:runtime :vitals]` events (measurements = the numeric gauges),
+folding the kernel snapshot builtins behind the same attach seam as `watch-runtime` —
+`(last-value :procs [:runtime :vitals] :processes)` turns a vital into a gauge, or
+`forward` the stream to your own process. `interval-ms` is the sample period (default
+1000). Returns the watcher pid; `stop-watch-vitals` (or killing it) ends it."
+  (let (interval (or interval-ms 1000))
+    (spawn (telemetry--vitals-loop interval))))
+
+(defn stop-watch-vitals (watcher)
+  "Stop a `watch-vitals` watcher. Returns nil."
   (send watcher :stop)
   nil)
 
