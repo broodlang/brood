@@ -1042,6 +1042,25 @@ pub fn qualify_name(ns_name: &str, name: value::Symbol) -> value::Symbol {
     }
 }
 
+/// Is `s` a special form or core-macro keyword — syntax rather than a reference?
+///
+/// These are the names that are meaningful yet bound in **no** environment, so the
+/// "bound nowhere ⇒ it must be ours" inference in [`resolve_sym`] would happily
+/// rewrite `if` to `mod/if`. (Most of the list is prelude macros, which the root
+/// check already covers; `if`/`fn`/`let`/… are the ones that genuinely need this.
+/// Macro *calls* are gone by resolve time — `macroexpand_all` runs first — but a
+/// special-form head survives expansion by definition.)
+fn is_syntax_keyword(s: value::Symbol) -> bool {
+    static SYNTAX: std::sync::LazyLock<crate::core::heap::SymbolMap<()>> =
+        std::sync::LazyLock::new(|| {
+            crate::builtins::SPECIAL_FORMS
+                .iter()
+                .map(|n| (value::intern(n), ()))
+                .collect()
+        });
+    SYNTAX.contains_key(&s)
+}
+
 /// Resolve one free reference symbol. Qualify only with positive evidence the name
 /// belongs to this namespace (already a `ns/name` global, or pre-scanned as a def
 /// head this file will create); otherwise leave bare for root/prelude fall-through.
@@ -1080,6 +1099,17 @@ fn resolve_sym(
         qsym
     } else if let Some(imported) = heap.import_of(s) {
         imported
+    } else if heap.ns_assume_own()
+        && !is_syntax_keyword(s)
+        && heap.env_get(value::EnvId::GLOBAL, s).is_none()
+    {
+        // No pre-scan behind this form (a runtime `eval`), so "will this namespace
+        // define it?" has no positive evidence to consult — see `set_ns_assume_own`.
+        // Root/prelude still wins when it actually binds the name, so this only
+        // catches a name bound NOWHERE: either this namespace's, defined by a later
+        // `eval` (the case worth fixing), or a typo, which now reports the qualified
+        // spelling. Deliberately after the import branch, so `(:use …)` still wins.
+        qsym
     } else {
         s
     }
