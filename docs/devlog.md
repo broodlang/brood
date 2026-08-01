@@ -13351,63 +13351,38 @@ Left the test un-serialised on purpose; re-serialising would hide the bug.
 `929 passed` with only a `FLAKY` marker, and the failing attempt is logged *above* the summary —
 `make test | tail` threw away the one thing needed. Keep the whole log.
 
-## 2026-08-01 (cont.) — KI-22 fixed: concurrent `register-impl` was losing ~40% of impls
+## 2026-08-01 (cont.) — KI-22's root cause found; both fixes reverted
 
-The suite flake turned out to be a **lost update**, and once measured directly it was not rare
-at all. `register-impl` did `(def *impls* (assoc *impls* …))` — a read-modify-write of ONE
-shared global holding the whole registry. Two processes registering at once each read the old
-map and each wrote their own successor, so the later write silently dropped the earlier impl.
+Ran the flake to ground. It is **a lost update, not a dispatch-cache bug**, and it is much
+bigger than the flake suggested — but I reverted both attempted fixes, so the bug is still open.
 
-A direct probe (N processes, one *private* ability each, so no legitimate precedence contest —
-every registration must survive) measured **24/50, 88/200, 218/500 lost. About 40%.** The
-`%dispatch` cache I had been suspecting was never involved.
+**Root cause.** Every load-time registry is one global holding a whole map, written as
+`(def *X* (assoc *X* …))` — a read-modify-write. Two processes registering at once each read the
+old value and each write their own successor; the later write drops the earlier one. A direct
+probe (N processes, one *private* ability each, so no legitimate precedence contest) measures
+**24/50, 88/200, 218/500 lost — about 40%.** Preserved as
+`scripts/fuzz/stress/registry_race.blsp`: fast and deterministic, unlike the 1-in-5 suite flake.
+**Fifteen registries share the shape**, so multimethod registration has the identical bug to
+ability registration and nobody had hit it yet.
 
-**Fix: serialise the write, don't change the structure.** The registry has to stay an immutable
-global map — `%dispatch`/`vm_dispatch` reads it on every call, and a `Table` deep-clones values
-in and out, which would put a closure copy on the dispatch hot path. So `register-impl` takes a
-**ticket lock built on `table-incr`**, the one atomic read-modify-write the language has
-("concurrent increments never lose an update"). Registration is rare — load time and hot reload
-— so the cost is irrelevant; dispatch is untouched. The wait is **bounded** and falls back to an
-unsynchronised write: this runs during prelude load, so a holder that dies mid-section must
-degrade to the old behaviour rather than deadlock the registry.
+**Why both fixes came out.** Optimistic retry (write, re-read, retry) cut the loss 44% → 20% but
+cannot close the read-write window; a partial fix for a wrong-answer bug only makes it rarer and
+harder to find. A `table-incr` ticket lock did reach `LOST=0` at every size and took the suite
+from failing on run 8 of 10 to 10/10 clean under `nest test` — and then `make test` came back
+**worse than the bug**: the regression test burnt **157 s** of CPU and *still* lost one, because
+a bounded busy-spin is blown through under load and the waiter then proceeds unsynchronised.
+Sleeping between checks fixed the CPU burn and exposed the next flaw — a timed-out waiter never
+bumps `:served`, desynchronising the ticket sequence permanently, so every later registration
+pays the full timeout (a constant 20 s regardless of N).
 
-**Two intermediate attempts, both recorded because they were wrong in instructive ways.** First
-I moved the flaky test onto a private ability, on the theory that it collided with the shared
-`Size` that several non-serial blocks dispatch. It still failed on run 8 of 10 — which is what
-*ruled out* test hygiene and pointed at the registry. Then I tried optimistic retry (write,
-re-read, retry if our key vanished); it cut the loss from 44% to ~20% but could not close the
-window, and a partial fix for a wrong-answer bug is worse than none — it just makes the flake
-rarer and harder to find. Reverted in favour of the lock.
+Two lessons, both mine to keep: **`nest test` passing ten times proved nothing** — `make test`
+runs the in-language suite against 928 parallel Rust tests and is the environment this class
+shows up in; and a lock whose failure mode is "proceed unsynchronised" is not a lock, it is a
+probability adjustment.
 
-**Verified three ways:** the probe goes to **0 lost** at 50/200/500/1000; the suite goes from
-failing on run 8 of 10 to **10/10 clean**; and the new regression test was confirmed to fail
-(56 lost) with the lock neutered, because a test never seen to fail is not a test. Startup is
-unchanged (single-threaded load never contends).
-
-**Why it matters past the suite:** `impl` is hot-reloadable by design. A registration that can
-be dropped by a concurrent one means a live reload can leave an op dispatching to `:default` —
-silently, and permanently.
-
-**And it was systemic, not one registry.** The next `make test` still came back FLAKY — a
-*third* distinct test, `modules_test`'s "provide records a feature idempotently", asserting its
-own feature was missing from `*features*` on the very next line. Same bug, different global:
-`provide` does `(def *features* (cons key *features*))`.
-
-Grepping the shape found **15 registries** built this way — `*record-ids*`, `*features*`,
-`*module-docs*`, `*deprecation-seen*`, `*abilities*`, `*ability-owner*`, `*op-ability*`,
-`*ability-derives*`, `*sealed*`, `*ability-requires*`, `*multi-algebra*`, `*methods*`,
-`*method-from*`, plus the `*impls*`/`*impl-from*` pair already fixed. Every one of them loses
-updates the same way, which means **multimethod registration had the identical bug to ability
-registration** and nobody had hit it yet.
-
-So the per-registry fix became one mechanism: `with-registry-lock`, the ticket lock lifted out
-of `register-impl` and applied at all fifteen sites. One shared lock is right here — these are
-all load-time/hot-reload writes, contention is irrelevant, and one lock cannot deadlock against
-another. One site needed care rather than a mechanical wrap: the derived-method mirror checks
-"is this key absent" and then writes, and that check has to be *inside* the lock or two derived
-mirrors both see absent — and a derived method could clobber an authored one registered in
-between.
-
-`make test` is the harsher environment (928 Rust tests in parallel against the in-language
-suite), which is why it kept finding these after ten clean `nest test` runs. Worth remembering
-as the reproduction environment for this class.
+**Left open deliberately** rather than shipping a third half-validated concurrency fix into the
+most contention-sensitive part of the system at the end of a long session. KI-22 now carries the
+root cause, the reproducer, both dead ends, and the shape a real fix probably takes: a
+**registrar process** (a blocking call to one single-threaded writer — no spin, no timeout, no
+desync, zero lost updates by construction), whose one open question is bootstrap, since
+registration happens during prelude load.
