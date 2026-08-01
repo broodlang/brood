@@ -17,6 +17,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-22 | an `impl` can be missed by a dispatch on the very next line under concurrency | ⬜ **open** (found 2026-08-01) |
 | KI-21 | `nest run --for` / `--watch` generated a legacy `~p` pin — failed on any file | ✅ fixed 2026-07-30 |
 | KI-20 | a JIT fast link ran the callee against the *caller's* IC block (cold cache) | ✅ fixed 2026-07-30 |
 | KI-19 | VM resolved a call's free-global head *after* its arguments | ✅ fixed 2026-07-30 |
@@ -43,6 +44,42 @@ ADRs / topic docs.
 transient — each kept as a record with its regression test, so a recurrence is recognizable.
 
 ---
+
+## KI-22 — an `impl` can be missed by a dispatch on the very next line · **open, found 2026-08-01**
+
+**Symptom.** `tests/ability_test.blsp`'s "open extension" test registers an impl and calls the
+op immediately:
+
+```
+(impl Extend :vector (esize [v] (* 10 (count v))))
+(assert= (esize [1 2 3]) 30)          ; intermittently -1 — the :default impl
+```
+
+It fails roughly **one in five to one in eight** full in-language suite runs. Because nextest
+retries, `make test` still prints `929 passed` and only a `FLAKY` marker gives it away — and
+piping the run through `tail` discards the failing attempt, which is printed *above* the
+summary. That is why this went unexplained for three sessions.
+
+**What is ruled out.** Cross-test collision on a shared ability name. The test originally
+extended the shared `Size`, which several NON-serial blocks in the same file dispatch on, and
+`:serial` only orders tests *within* one block — so a collision was the obvious theory. Moving
+the test onto a private `Extend` ability that **nothing else in the tree touches** did not fix
+it: still reproduced, on run 8 of 10. Also ruled out: the block not being serial (it is).
+
+**So the registration itself is not reliably visible to the next dispatch** when the rest of
+the suite is running concurrently (other processes are registering unrelated impls throughout).
+That points at the shared `%dispatch` inline cache / ability registry — ADR-172 §7, the cache
+that memoises id→impl and is supposed to deopt on an epoch bump. The `dispatch cache is
+transparent` block two describes below exists to test exactly that invariant and passes; this
+is the same invariant failing under concurrency.
+
+**Why it matters beyond the test.** `impl` is hot-reloadable by design. If a registration can
+be missed by an immediately-following call while other processes register, then a live
+`impl` reload can silently dispatch to the stale (or `:default`) implementation — a wrong
+answer, not a crash. The test is the messenger.
+
+**Do not** "fix" this by re-serialising the tests: that hides it. Reproduce with
+`for i in $(seq 10); do nest test; done` and keep the whole log.
 
 ## KI-20 — a JIT fast link ran the callee against the **caller's** IC block · **fixed 2026-07-30**
 
