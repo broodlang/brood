@@ -91,7 +91,13 @@ fn is_fn_form(heap: &Heap, v: Value) -> bool {
 
 /// Analyze a `(fn …)` value: one body for a single-arity fn, or each arm's body
 /// for a multi-arity fn. The fn body's last form is in tail position.
-fn analyze_fn(heap: &Heap, name: Symbol, fnval: Value, enclosing: Option<Pos>, out: &mut Vec<(Option<Pos>, String)>) {
+fn analyze_fn(
+    heap: &Heap,
+    name: Symbol,
+    fnval: Value,
+    enclosing: Option<Pos>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
     let Some(items) = list_items(heap, fnval) else {
         return;
     };
@@ -121,7 +127,13 @@ fn first_is_list(heap: &Heap, v: Value) -> bool {
 }
 
 /// A body (implicit `do`): the last form is in tail position, the rest are not.
-fn analyze_body(heap: &Heap, name: Symbol, body: &[Value], enclosing: Option<Pos>, out: &mut Vec<(Option<Pos>, String)>) {
+fn analyze_body(
+    heap: &Heap,
+    name: Symbol,
+    body: &[Value],
+    enclosing: Option<Pos>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
     let here = enclosing;
     if body.is_empty() {
         return;
@@ -134,7 +146,14 @@ fn analyze_body(heap: &Heap, name: Symbol, body: &[Value], enclosing: Option<Pos
 
 /// Walk `form`, knowing whether it is in tail position, flagging any non-tail
 /// call to `name`.
-fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, enclosing: Option<Pos>, out: &mut Vec<(Option<Pos>, String)>) {
+fn walk(
+    heap: &Heap,
+    form: Value,
+    tail: bool,
+    name: Symbol,
+    enclosing: Option<Pos>,
+    out: &mut Vec<(Option<Pos>, String)>,
+) {
     // the nearest known source position: this form's own, else the one handed down
     let here = heap.form_pos_only(form).or(enclosing);
     let Some(items) = list_items(heap, form) else {
