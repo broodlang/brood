@@ -51,6 +51,12 @@ pub const CATCH: &str = "catch";
 pub const THROW: &str = "throw";
 pub const TRY_PRIM: &str = "%try";
 pub const EQ_PRIM: &str = "%eq";
+/// `(%scope)` / `(%locals)` — the debugger locals intrinsic (ADR-174 path B). The VM
+/// compiles a call to either into a map of every in-scope local `{name → value}` read
+/// straight from the compile-time lexical-scope table; the tree-walker falls back to the
+/// same-named builtin (which reads the env-frame chain). `dev-tools` only.
+pub const SCOPE_PRIM: &str = "%scope";
+pub const LOCALS_PRIM: &str = "%locals";
 pub const ERROR_OF: &str = "error-of";
 pub const ASSERT_ERROR: &str = "assert-error";
 pub const RECEIVE: &str = "receive";

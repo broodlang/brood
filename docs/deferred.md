@@ -379,3 +379,87 @@ churn. The ergonomic/precision gap is author-time, not a runtime footgun, so the
 urgency.
 
 **Workaround today.** Write the `(sig …)` form; it's the documented spelling and works.
+
+---
+
+## 9. `eval` runs interpreted — a 14x cliff for every runtime-evaluated form
+
+**The bug.** `eval` (and `eval-string`, and therefore every consumer that
+evaluates source it was handed at runtime) walks the form with the tree
+evaluator, while the same code loaded from a file goes down the compiled path.
+The gap is not marginal. Measured on one machine, same million-iteration
+tail-recursive loop, `nest run` in a bare image:
+
+| path | time |
+|---|---|
+| compiled (loaded from the file) | **205 ms** |
+| compiled, wrapped in `%capture-begin`/`%capture-take` | 189 ms |
+| `(eval form)` on the read form | **2962 ms** |
+| `(eval-string src)` | 3885 ms |
+
+Reproduce:
+
+```lisp
+(defn cd ((0) :liftoff) ((n) (cd (- n 1))))
+(let (t (now) _ (cd 1000000)) (println "compiled: " (- (now) t) "ms"))
+
+(def SRC "(defn cd2 ((0) :liftoff) ((n) (cd2 (- n 1))))\n(cd2 1000000)")
+(let (t (now) _ (fold (fn (_ f) (eval f)) nil (read-all SRC)))
+  (println "eval:     " (- (now) t) "ms"))
+```
+
+Note the second row: **output capture is not the cost.** It was the first
+suspect and it is innocent — 189 ms with it, 205 ms without. Anyone picking this
+up should not re-chase that.
+
+**Why it matters beyond a microbenchmark.** Everything that evaluates
+user-supplied source pays it: `std/tool/eval-server` (so every playground box in
+the editor's tutorial, and every `C-x C-e`), the REPL, `nest run -e`, the MCP
+eval tool, and any Brood program using `eval` for configuration or plugins. In
+the editor it is user-visible: a tutorial lesson demonstrating "a million tail
+calls in constant stack" exceeded its 2 s evaluation budget and rendered as
+`✗ timed out`, discrediting the exact claim it was making. The lesson had to be
+sized down to 250,000 to fit — a workaround for this entry, and it says so at
+the call site (`brood-edit`, `src/tutor-lessons.blsp`, "Recursion is the loop").
+
+**Where it is.** `crates/lisp/src/builtins/system.rs`, `eval_builtin` — three
+lines:
+
+```rust
+pub(super) fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let root = heap.env_root(env);
+    let form = crate::eval::macros::macroexpand_all(heap, arg(args, 0), root)?;
+    crate::eval::eval(heap, form, root)
+}
+```
+
+`crate::eval::eval` is the tree-walker. `eval-string` reads and then funnels into
+the same place, so there is no cheap swap at the Brood level — this has to change
+in the runtime.
+
+**Design sketch.**
+- Route `eval_builtin` through whatever entry the file loader uses to compile a
+  top-level form, falling back to the tree-walker if compilation declines the
+  form. Establish first whether that entry is safe for a form arriving at
+  runtime: the loader knows its module and file context, and `eval` may not.
+- Decide the caching story. The sandbox re-evaluates the *same* box text on every
+  debounce beat, so a compile-per-eval could hand back the win it just earned;
+  keying compiled code by form identity (or by source string, for `eval-string`)
+  is probably where the real gain is.
+- Watch the semantics that make `eval` different from `load`: the environment it
+  evaluates in (`env_root` here), macroexpansion order, and closures capturing a
+  runtime env. A miscompile here fails silently rather than loudly, so this wants
+  tests that compare tree-walked and compiled results form-by-form, not just
+  timings.
+- Worth checking whether the JIT tier is reachable at all from this path, or
+  whether "compiled" here means only the bytecode compiler.
+
+**Trigger to pick this back up.**
+- Any interactive Brood surface where evaluation latency is felt — the editor's
+  eval-on-type is the live one today.
+- Or a second lesson/benchmark that has to be shrunk to fit a timeout.
+
+**Workaround today.**
+- Put hot code in a file and `require` it rather than `eval`ing it.
+- Size interactive evaluation to the interpreted speed (~14x), which is what the
+  tutorial now does.

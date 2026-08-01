@@ -399,6 +399,28 @@ fn const_truthiness(n: &Node) -> Option<bool> {
     }
 }
 
+/// Compile `(%scope)` / `(%locals)` (ADR-174 path B): a fresh map of every in-scope
+/// local, `{:name → Local(slot)}`, read from the compile-time lexical-scope table.
+/// Shadowing follows `Scope::lookup` (newest binding of a name wins — the reversed scan
+/// keeps the first-seen, i.e. innermost, slot per symbol). Slots still mid-`letrec`
+/// (`unsafe`) are skipped — their value isn't finalized, so exposing it would read a
+/// placeholder. Keyed by the name as a **keyword** (same interned `Symbol`, so `%eval-in`
+/// binds it to the local's symbol) — matching the debugger's explicitly-named `:vals`, so
+/// a named value cleanly overrides a captured local of the same name on `merge`.
+#[cfg(feature = "dev-tools")]
+fn compile_scope_map(heap: &Heap, scope: &Scope) -> Node {
+    let mut seen: Vec<Symbol> = Vec::new();
+    let mut pairs: Vec<(Node, Node)> = Vec::new();
+    for &(sym, slot) in scope.names.iter().rev() {
+        if seen.contains(&sym) || scope.is_unsafe(slot) {
+            continue;
+        }
+        seen.push(sym);
+        pairs.push((const_node(heap, Value::keyword(sym)), Node::Local(slot)));
+    }
+    Node::Map(pairs.into_boxed_slice())
+}
+
 fn const_node(heap: &Heap, v: Value) -> Node {
     let frozen = heap.promote(v);
     debug_assert!(
@@ -858,6 +880,18 @@ fn compile_node(heap: &Heap, form: Value, scope: &mut Scope, tail: bool) -> Opti
                         return Some(node);
                     }
                     // Non-canonical shape: fall through to generic call (try_catch native handles it)
+                }
+                // `(%scope)` / `(%locals)` — the debugger locals intrinsic (ADR-174
+                // path B). Compile it straight from the live lexical-scope table into a
+                // fresh `{name → value}` map (name = the local's symbol, value read from
+                // its frame slot), so `eval-at` sees EVERY in-scope local under the VM —
+                // not just the values named at `break`. Only the 0-arg form is the
+                // intrinsic; anything else falls through to the builtin (tree-walker path).
+                #[cfg(feature = "dev-tools")]
+                if items.len() == 1
+                    && (value::symbol_is(h, kw::SCOPE_PRIM) || value::symbol_is(h, kw::LOCALS_PRIM))
+                {
+                    return Some(compile_scope_map(heap, scope));
                 }
                 // Any *other* special form (`def`/`quasiquote`/`binding`) is outside
                 // the VM's vocabulary — defer the whole closure to the tree-walker.

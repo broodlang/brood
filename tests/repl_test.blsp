@@ -63,6 +63,48 @@
     (assert= (repl/repl--history->text '()) "")
     (assert= (repl/repl--history<-text "") '())))
 
+;; The meta-command registry: `,cmd`s live in `*repl-commands*`, dispatched by name,
+;; with `register-repl-command` as the extension seam (the debugger adds `,resume`/
+;; `,step` through it). These run in-process (a fresh registration is a global rebind,
+;; so keep the block non-`:isolated` and restore nothing — the built-ins re-register on
+;; the next module load; tests here only ADD and query).
+(describe "repl/*repl-commands* — the meta-command registry"
+  (test "the built-in commands are registered, with aliases"
+    (is (not (nil? (repl/repl--command-for "help"))))
+    (is (not (nil? (repl/repl--command-for "?"))))     ; help alias
+    (is (not (nil? (repl/repl--command-for "expand1"))))
+    (is (nil? (repl/repl--command-for "no-such-cmd"))))
+
+  (test "repl--meta? recognises a registered `,cmd` and rejects a plain form"
+    (is (repl/repl--meta? ",doc foo"))
+    (is (repl/repl--meta? ",help"))
+    (is (not (repl/repl--meta? "(+ 1 2)")))
+    (is (not (repl/repl--meta? ",totally-unknown"))))
+
+  (test "register-repl-command adds a dispatchable command that receives the arg"
+    (let (box (table))
+      (repl/register-repl-command
+        {:names '("rt-echo") :usage ",rt-echo <x>" :summary "test"
+         :handler (fn (rest) (table-put box :arg rest))})
+      (is (not (nil? (repl/repl--command-for "rt-echo"))))
+      (repl/repl--run-meta ",rt-echo hello world")
+      (assert= (table-get box :arg) "hello world")))
+
+  (test "re-registering a name replaces rather than duplicates"
+    (repl/register-repl-command
+      {:names '("rt-dup") :usage ",rt-dup" :summary "one" :handler (fn (r) nil)})
+    (repl/register-repl-command
+      {:names '("rt-dup") :usage ",rt-dup" :summary "two" :handler (fn (r) nil)})
+    (assert= 1 (count (filter (fn (c) (repl/repl--has-name? (get c :names) "rt-dup"))
+                        repl/*repl-commands*)))
+    (assert= "two" (get (repl/repl--command-for "rt-dup") :summary)))
+
+  (test "a `:hidden` command is dispatchable but absent from the help table"
+    (repl/register-repl-command
+      {:names '("rt-hidden") :usage ",rt-hidden" :summary "quiet" :hidden true
+       :handler (fn (r) nil)})
+    (is (not (nil? (repl/repl--command-for "rt-hidden"))))))
+
 ;; Cross-process: the error map crosses a heap boundary (send deep-copies it)
 ;; before formatting, so this proves the structured-error path survives the
 ;; copy-on-send round-trip — not just same-heap formatting.

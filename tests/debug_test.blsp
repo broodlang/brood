@@ -3,7 +3,7 @@
 ;; workers spy/park/span concurrently and fan into one debugger process. Bodies are
 ;; tail-recursive (green-process stacks are small), and concurrent assertions settle
 ;; via a bounded `wait-until` poll rather than a fixed sleep.
-(defmodule debug-test (:use test) (:use debug))
+(defmodule debug-test (:use test) (:use debug) (:use-internals debug))
 
 ;; Poll the debugger's state until `pred` holds (or the budget runs out). Returns
 ;; whether it settled — deterministic enough for a debug-tool test, never hangs.
@@ -307,4 +307,102 @@
         (sleep 20)
         (drive 100))
       (assert= 6 (receive ([:result r] r) (after 1000 :timeout)))
+      (dbg-stop dbg))))
+
+;; The `,resume` / `,step` REPL meta-command handlers (driven by `pry` through the REPL
+;; command registry). They read the debugger from the `*debug-session*` dynamic that
+;; `pry` binds, so the tests bind it the same way and call the handlers directly —
+;; `pry` itself needs a TTY (`repl-run`), which a test can't provide.
+(describe "debugger — ,resume / ,step meta-command handlers"
+  :isolated
+
+  (test "no active session is a friendly no-op, not a crash"
+    ;; *debug-session* defaults to nil; the handler must tolerate that
+    (assert= nil (debug/debug--repl-resume ""))
+    (assert= nil (debug/debug--repl-step "")))
+
+  (test ",resume with no arg releases every parked process"
+    (let (dbg (start-debugger) me (self))
+      (spawn (with-debugger dbg (fn () (break "a" :x 1) (send me [:done :a]))))
+      (spawn (with-debugger dbg (fn () (break "b" :x 2) (send me [:done :b]))))
+      (assert= true (wait-until dbg (fn (s) (= 2 (count (get s :paused)))) 200))
+      (binding (*debug-session* dbg) (debug/debug--repl-resume ""))
+      (assert= true (wait-until dbg (fn (s) (= 0 (count (get s :paused)))) 200))
+      (dbg-stop dbg)))
+
+  (test ",resume N releases only the Nth parked process"
+    (let (dbg (start-debugger) me (self))
+      (spawn (with-debugger dbg (fn () (break "a" :x 1) (send me [:done :a]))))
+      (spawn (with-debugger dbg (fn () (break "b" :x 2) (send me [:done :b]))))
+      (assert= true (wait-until dbg (fn (s) (= 2 (count (get s :paused)))) 200))
+      (binding (*debug-session* dbg) (debug/debug--repl-resume "1"))
+      ;; exactly one released — the queue drops to a single parked process
+      (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))
+      (binding (*debug-session* dbg) (debug/debug--repl-resume ""))
+      (assert= true (wait-until dbg (fn (s) (= 0 (count (get s :paused)))) 200))
+      (dbg-stop dbg)))
+
+  (test ",step advances a single parked process"
+    (let (dbg (start-debugger) me (self))
+      (spawn (with-debugger dbg (fn () (break "a" :x 1) (send me [:done :a]))))
+      (spawn (with-debugger dbg (fn () (break "b" :x 2) (send me [:done :b]))))
+      (assert= true (wait-until dbg (fn (s) (= 2 (count (get s :paused)))) 200))
+      (binding (*debug-session* dbg) (debug/debug--repl-step ""))
+      (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))
+      (binding (*debug-session* dbg) (debug/debug--repl-resume ""))
+      (dbg-stop dbg))))
+
+;; Path B (ADR-174): `break` auto-captures EVERY in-scope local via the `%scope`
+;; compiler intrinsic, so `eval-at` evaluates against the full local scope — not just the
+;; values named at the breakpoint. This is the flagship debugger gap the roadmap named.
+(defn pb-worker (a b done)
+  ;; params a,b + a couple of lets, none named at the break — all must be reachable
+  (let (sum (+ a b) prod (* a b))
+    (break "pb")
+    (send done [:ok])))
+
+(describe "debugger — path B: automatic local capture via %scope"
+  :isolated
+
+  (test "eval-at reaches locals that were NOT named at break (params + lets)"
+    (let (dbg (start-debugger) me (self))
+      (spawn (with-debugger dbg (fn () (pb-worker 3 4 me))))
+      (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))
+      ;; none of these were passed to `break`, yet they resolve
+      (assert= 3 (eval-at dbg 1 "a"))
+      (assert= 4 (eval-at dbg 1 "b"))
+      (assert= 7 (eval-at dbg 1 "sum"))
+      (assert= 12 (eval-at dbg 1 "prod"))
+      ;; and a computed expression over several of them
+      (assert= 84 (eval-at dbg 1 "(* sum prod)"))
+      (resume-all dbg)
+      (assert= [:ok] (receive ([:ok] [:ok]) (after 1000 :timeout)))
+      (dbg-stop dbg)))
+
+  (test "an explicitly-named val overrides a captured local of the same name"
+    ;; :a is passed as 99, shadowing the local a=3 in the snapshot
+    (let (dbg (start-debugger) me (self))
+      (spawn (with-debugger dbg
+               (fn () (let (a 3) (break "ov" :a 99) (send me [:ok])))))
+      (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))
+      (assert= 99 (eval-at dbg 1 "a"))
+      (resume-all dbg)
+      (dbg-stop dbg)))
+
+  (test "break-when auto-captures scope too (only when the predicate holds)"
+    (let (dbg (start-debugger) me (self))
+      (spawn (with-debugger dbg
+               (fn () (let (x -5) (break-when (< x 0) "neg") (send me [:ok])))))
+      (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))
+      (assert= -5 (eval-at dbg 1 "x"))
+      (resume-all dbg)
+      (dbg-stop dbg)))
+
+  (test "break-when does NOT park when the predicate is false"
+    (let (dbg (start-debugger) me (self))
+      (spawn (with-debugger dbg
+               (fn () (let (x 5) (break-when (< x 0) "neg") (send me [:ok])))))
+      ;; it should reach :ok without ever parking
+      (assert= [:ok] (receive ([:ok] [:ok]) (after 1000 :timeout)))
+      (assert= 0 (count (paused dbg)))
       (dbg-stop dbg))))
