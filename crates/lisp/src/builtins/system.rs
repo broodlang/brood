@@ -19,18 +19,24 @@ macro_rules! expect {
 
 pub(super) fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     let root = heap.env_root(env);
-    // Run a runtime-evaluated form through the SAME path the file loader uses
-    // (`lib::eval_forms`, `eval_string_inner`): the full compile pass — expand + resolve
-    // + static-quasiquote lowering — then the compiling VM when it's enabled, so a form
-    // handed to `eval` at runtime isn't stuck on the ~10-14× tree-walker (deferred.md #9).
-    // `compile::run` compiles what it can and falls back to the tree-walker per-form for
-    // anything outside the VM's vocabulary, so semantics are unchanged; only the top-level
-    // call (which dispatches into the VM, where a callee's arm compiles and tail-recurses
-    // in O(1) stack) stops being interpreted. `compile` (vs the old bare `macroexpand_all`)
-    // also matches `eval-string`, which has always used it — so the two agree.
-    // One form at a time, so there is no whole-file def-head pre-scan to resolve a
-    // forward reference against (KI-24) — tell the resolver to fall back to this
-    // namespace for a name bound nowhere else. A no-op at root, where resolve is.
+    // Route a runtime-evaluated form through the compiling VM when it's enabled, so a form
+    // handed to `eval` isn't stuck on the ~10-14× tree-walker (deferred.md #9): `compile::run`
+    // compiles what it can and falls back to the tree-walker per-form for anything outside
+    // the VM's vocabulary, so semantics are unchanged; only the top-level call (which
+    // dispatches into the VM, where a callee's arm compiles and tail-recurses in O(1) stack)
+    // stops being interpreted.
+    //
+    // The full `compile` pass, matching `eval-string` and the file loader — so an eval'd
+    // form gets namespace resolution, `(:use …)` imports, `(:alias …)`, privacy enforcement
+    // and static-quasiquote lowering, and an eval'd `defn` inside a module defines
+    // `mod/name` rather than leaking a bare ROOT global.
+    //
+    // `compile`'s resolve step qualifies a bare reference only on positive evidence, which
+    // a file loader supplies by pre-scanning its def heads (`scan_def_names`) — lookahead a
+    // one-form-at-a-time `eval` does not have, so a forward reference to a name a LATER
+    // `eval` defines was left bare and missed the qualified global (KI-24). `ns_assume_own`
+    // supplies the missing conclusion instead of dropping the pass: a bare name bound
+    // nowhere is taken to be this namespace's. A no-op at root, where resolve already is.
     let prev_assume = heap.set_ns_assume_own(true);
     let compiled = crate::eval::macros::compile(heap, arg(args, 0), root);
     heap.set_ns_assume_own(prev_assume);
