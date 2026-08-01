@@ -337,23 +337,23 @@ enum Cmd {
         name: String,
     },
 
-    /// Publish this project's version to the package registry index (ADR-147).
+    /// Publish this project's release to the hosted package registry.
     ///
-    /// Appends an entry built from project.blsp's :name/:version/:description/
-    /// :repository to the index's packages/<name>.blsp and commits it (you then
-    /// `git push`). The index must be a LOCAL checkout you can push.
+    /// Builds a source tarball and POSTs it (with its sha256) to the registry's
+    /// HTTP API, authenticated with a Bearer token ($HIVE_TOKEN or the
+    /// :registry-token config). Releases are immutable — a version already
+    /// published is refused by the server.
     Publish {
-        /// The registry index — a local checkout you can push. Omit to use the
-        /// configured `:registry`.
+        /// The registry base URL. Omit to use the configured `:registry`.
         index: Option<String>,
     },
 
-    /// Search the package registry index for a term (name or description) (ADR-147).
+    /// Search the package registry for a term (name or description).
     Search {
         /// The term to match against each package's name and latest description.
         query: String,
 
-        /// The registry index to search. Omit to use the configured `:registry`.
+        /// The registry base URL to search. Omit to use the configured `:registry`.
         index: Option<String>,
     },
 
@@ -1313,8 +1313,8 @@ fn cmd_add(interp: &mut Interp, name: &str, spec: &[String]) {
 /// `nest add pkg :version 1.0.0` failed against a perfectly good local registry.
 const PACKAGE_BOOTSTRAP: &str = "(require 'project) (project/load-config) (require 'package)";
 
-/// `nest publish [INDEX]` — publish this project's version to the registry index
-/// (ADR-147). Loads the user config first so a `:registry` override applies.
+/// `nest publish [BASE-URL]` — publish this project's release to the hosted
+/// registry over HTTP. Loads the user config first so a `:registry` override applies.
 fn cmd_publish(interp: &mut Interp, index: Option<&str>) {
     let call = match index {
         Some(i) => brood::introspect::call_form("package/publish", &[i]),
@@ -1323,7 +1323,7 @@ fn cmd_publish(interp: &mut Interp, index: Option<&str>) {
     run(interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
 }
 
-/// `nest search QUERY [INDEX]` — search the registry index (ADR-147).
+/// `nest search QUERY [BASE-URL]` — search the hosted registry over HTTP.
 fn cmd_search(interp: &mut Interp, query: &str, index: Option<&str>) {
     let args: Vec<&str> = match index {
         Some(i) => vec![query, i],

@@ -88,7 +88,18 @@ bundle), and the UI/editor toolkit — `display`, `keymap`, `layers`, `ui`, `pan
 `buffer`, `sexp`, `regex`, `face`, `highlight`, **`lineedit`** (an editor's
 minibuffer reuses it), plus `tcp`/`http`/`file`/`json`/`set`/`format`/`task`/
 `hatch`/`supervisor`/`ansi`/`package` — **and the `gui` backend** (it's a single
-variant that includes windowing, so `(gui-open)`/windowed apps just work).
+variant that includes windowing, so `(gui-open)`/windowed apps just work). Also
+kept, and the line the split really turns on: **`debug`** and **`eval-server`**.
+Both look like tooling and are not — an app's own features are built on them (the
+editor ships a `C-c d` debugger and eval-on-type tutorial playgrounds), and a module
+is dev-only when it serves *developing* an app, not when the shipped app uses it.
+
+> **Getting that classification wrong doesn't degrade — it fails to boot.**
+> `run-bundle` loads *every* module the app ships, so one app module with a
+> top-level `(require 'x)` for a stripped `x` makes the released binary die on
+> start (`require: cannot find module 'x'`) even if that feature is never used.
+> Lazily-required modules are no protection. `builtins/system.rs` has a unit test
+> pinning `debug`/`eval-server` in `CORE_MODULES` for this reason.
 
 The embedded runtime is built by `make install` under the `release-fast` cargo
 profile — **stripped but not LTO'd** (parallel codegen, so the install builds in a

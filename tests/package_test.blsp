@@ -40,6 +40,7 @@
 ;; single `<wrapper>/` prefix the resolver strips). Returns [file-url sha256] — a
 ;; file:// URL keeps :tarball resolution offline, like pkg-git-init's for :git.
 (require 'hash)
+(require 'net/http)
 (defn pkg-tar-init (parent wrapper)
   (let (archive (path-join parent (str wrapper ".tar.gz")))
     (run-process "tar" (list "-czf" archive "-C" parent wrapper))
@@ -272,82 +273,104 @@
                      (catch e (error-message e)))
           "sha256"))))
 
-;; --- the registry: publish / search / :version deps (ADR-147) ---------------
-;; A git-backed metadata index. The publish/resolve helpers are arg-driven (no
-;; project-global mutation), so these run concurrently with the rest of the suite.
-(describe "package: the registry index"
-  (test "append-entry writes a version entry; a duplicate version is refused"
-    (let (index (path-join (pkg-fixture-root) "index"))
-      (make-dir index)
-      (package/registry--append-entry index
-        "greeter" "0.1.0" "friendly greetings" "https://x/greeter")
-      (is (file-exists? (path-join index "packages/greeter.blsp")))
-      (let (vs (package/registry--versions index 'greeter))
-        (assert= (count vs) 1)
-        (assert= (get (first vs) :version) "0.1.0")
-        (assert= (get (first vs) :git) "https://x/greeter")
-        (assert= (get (first vs) :ref) "v0.1.0"))
-      ;; a second version appends; the same version again is refused
-      (package/registry--append-entry index
-        "greeter" "0.2.0" "friendly greetings" "https://x/greeter")
-      (assert= (count (package/registry--versions index 'greeter)) 2)
-      (is (includes? (try
-                       (package/registry--append-entry index
-                         "greeter" "0.2.0" "d" "https://x/greeter")
-                       (catch e (error-message e)))
-            "already published"))))
-  (test "publish requires :repository and :description"
-    (let (index (path-join (pkg-fixture-root) "index"))
-      (make-dir index)
-      (is (includes? (try
-                       (package/registry--append-entry index "x" "1.0.0" "desc" nil)
-                       (catch e (error-message e)))
-            ":repository"))
-      (is (includes? (try
-                       (package/registry--append-entry index "x" "1.0.0" nil "https://x")
-                       (catch e (error-message e)))
-            ":description"))))
-  (test "search matches on name and description; find-version is exact"
-    (let (index (path-join (pkg-fixture-root) "index"))
-      (make-dir index)
-      (package/registry--append-entry index
-        "greeter" "0.1.0" "friendly greetings" "https://x/greeter")
-      (assert= (package/registry--list-packages index) (list 'greeter))
-      ; by name
-      (is (package/registry--matches? index 'greeter "greet"))
-      ; by description
-      (is (package/registry--matches? index 'greeter "friendly"))
-      (refute (package/registry--matches? index 'greeter "zzz"))
-      (assert= (get (package/registry--find-version index 'greeter "0.1.0") :version) "0.1.0")
-      (is (nil? (package/registry--find-version index 'greeter "9.9.9")))))
-  (test "a :version dep resolves the named version to its git source and pins it"
+;; --- the registry: search / publish / :version deps (hive HTTP API) ---------
+;; The registry is a hosted HTTP service. These tests run a real loopback server
+;; (std/net/http) serving canned registry responses, and drive the client against
+;; it — a genuine end-to-end round-trip (download → sha256-verify → extract), no
+;; network and no global-state mutation.
+
+;; Spawn a loopback HTTP server running `handler`; return its base URL. The server
+;; process lives for the rest of the test run (killed with the suite).
+(defn mock-registry-start (handler)
+  (let (me (self))
+    (spawn (do
+             (let (ls (net/http/http-listen 0))
+               (send me [:reg-port (tcp-local-port ls)])
+               (net/http/serve-loop ls handler))))
+    (let (port (receive ([:reg-port p] p) (after *test-wait-ms* :timeout)))
+      (str "http://127.0.0.1:" port))))
+
+;; A handler serving one published package `nm`@`version`: search, release metadata
+;; (declaring `checksum`), and the tarball `bytes`. Anything else is a 404 (so an
+;; unknown version exercises the not-found path).
+(defn mock-registry-handler (nm version desc checksum bytes)
+  (fn (req)
+    (let (path (get req :path)
+          release-path (str "/api/v1/packages/" nm "/releases/" version))
+      (cond
+        (starts-with? path "/api/v1/packages?")
+          (net/http/ok (str "{\"packages\":[{\"name\":\"" nm "\",\"latest_version\":\""
+                         version "\",\"description\":\"" desc "\"}]}"))
+        (= path (str release-path "/tarball"))
+          (net/http/response 200 {"Content-Type" "application/gzip"} bytes)
+        (= path release-path)
+          (net/http/ok (str "{\"checksum\":\"" checksum "\",\"version\":\""
+                         version "\",\"dependencies\":[]}"))
+        else (net/http/not-found)))))
+
+;; Build a root-level tarball of a fixture package (files at the archive root, the
+;; layout hive serves and the resolver extracts with strip 0). Returns [bytes sha256].
+(defn mock-package-tarball (parent nm)
+  (let (dep-dir (path-join parent nm))
+    (pkg-write-project dep-dir nm nm "(defn greet (w) w)" "")
+    (let (archive (path-join parent (str nm ".tar.gz")))
+      (run-process "tar" (list "-czf" archive "-C" dep-dir "."))
+      (let (bytes (slurp-bytes archive)) [bytes (hash/sha256-bytes bytes)]))))
+
+(describe "package: the hosted registry"
+  (test "a :version dep downloads, sha256-verifies, and extracts the tarball"
     (let (parent (pkg-fixture-root)
-          dep-dir (path-join parent "greeter")
-          index (path-join parent "index")
-          app-dir (path-join parent "app"))
-      (make-dir index)
-      (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
-      (let (url (pkg-git-init dep-dir))
-        (pkg-git-tag dep-dir "v1.0.0")
-        (package/registry--append-entry index "greeter" "1.0.0" "greetings" url)
-        (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
-        (let (dep (dep-registry 'greeter "1.0.0")
-              e (package/package--resolve-registry app-dir dep nil index))
-          (assert= (dep-kind e) :registry)
-          (assert= (get e :version) "1.0.0")
-          (assert= (get e :url) url)
-          (is (string? (get e :commit)))
-          (is (dir? (path-join (path-join app-dir "_deps") "greeter")))
-          ;; the lock row carries :registry + the version + the resolved git pin
-          (let (row (dep-lock-vec e))
-            (assert= (vector-ref row 1) :registry)
-            (assert= (vector-ref row 2) "1.0.0"))
-          ;; an unknown version errors, pointing at `nest search`
-          (is (includes? (try
-                           (package/package--resolve-registry app-dir
-                             (dep-registry 'greeter "9.9.9") nil index)
-                           (catch er (error-message er)))
-                "no registry entry"))))))
+          app-dir (path-join parent "app")
+          [bytes checksum] (mock-package-tarball parent "greeter")
+          base (mock-registry-start (mock-registry-handler "greeter" "1.0.0" "greetings" checksum bytes)))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (let (e (package/package--resolve-registry app-dir (dep-registry 'greeter "1.0.0") nil base))
+        (assert= (dep-kind e) :registry)
+        (assert= (get e :version) "1.0.0")
+        (assert= (get e :sha256) checksum)
+        (let (extracted (path-join (path-join app-dir "_deps") "greeter"))
+          (is (dir? extracted))
+          (is (file-exists? (path-join extracted "project.blsp"))))
+        ;; lock row: [greeter :registry "1.0.0" :sha256 <sha> :deps …]
+        (let (row (dep-lock-vec e))
+          (assert= (vector-ref row 1) :registry)
+          (assert= (vector-ref row 2) "1.0.0")
+          (assert= (vector-ref row 3) :sha256)
+          (assert= (vector-ref row 4) checksum)))))
+  (test "a sha256 mismatch is refused"
+    (let (parent (pkg-fixture-root)
+          app-dir (path-join parent "app")
+          [bytes _real] (mock-package-tarball parent "greeter")
+          ;; the metadata declares a checksum that does NOT match the served bytes
+          base (mock-registry-start (mock-registry-handler "greeter" "1.0.0" "d" "deadbeef" bytes)))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (is (includes? (try
+                       (package/package--resolve-registry app-dir (dep-registry 'greeter "1.0.0") nil base)
+                       (catch e (error-message e)))
+            "sha256 mismatch"))))
+  (test "an unknown version errors, pointing at `nest search`"
+    (let (app-dir (pkg-fixture-root)
+          base (mock-registry-start (mock-registry-handler "greeter" "1.0.0" "d" "x" #b"")))
+      (is (includes? (try
+                       (package/package--resolve-registry app-dir (dep-registry 'greeter "9.9.9") nil base)
+                       (catch e (error-message e)))
+            "no registry entry"))))
+  (test "registry--get-json parses a 2xx body and reports an error status"
+    (let (base (mock-registry-start (mock-registry-handler "greeter" "1.0.0" "greetings" "x" #b"")))
+      (match (package/registry--get-json (str base "/api/v1/packages?q=greet"))
+        ([:ok data] (assert= (get (first (get data :packages)) :name) "greeter")))
+      (match (package/registry--get-json (str base "/api/v1/packages/nope/releases/9.9.9"))
+        ([:error status _message] (assert= status 404)))))
+  (test "registry--search-line formats a hit"
+    (assert= (package/registry--search-line {:name "greeter" :latest_version "1.0.0" :description "greetings"})
+      "greeter  1.0.0  — greetings")
+    (assert= (package/registry--search-line {:name "x" :latest_version "" :description ""}) "x  ?"))
+  (test "publishable-deps keeps registry deps and omits local ones"
+    (binding (*project-dependencies* (list (dep-registry 'foo "1.2.0") (dep-path 'bar "../bar")))
+      (let (out (package/registry--publishable-deps))
+        (assert= (count out) 1)
+        (assert= (get (first out) :name) "foo")
+        (assert= (get (first out) :version) "1.2.0"))))
   (test ":version deps parse into a registry dep map"
     (assert= (project/project-parse-deps [['foo :version "1.2.0"]])
       (list (assoc (dep-registry 'foo "1.2.0") :optional false)))))
@@ -618,25 +641,6 @@
     (is (includes? (try (package/add "" ":path" "../x") (catch e e))
           "not a usable dependency name"))))
 
-;; A caught error arrives in one of several shapes, and `nest search` used to print
-;; whichever one it was verbatim: the raw `[:error {:kind :runtime, :message …}]`
-;; structure an `offload`ed primitive propagates, plus a Brood trace, for what is
-;; simply "the registry URL isn't reachable".
-(describe "package: extracting a readable reason from a caught error"
-  (test "a plain string passes through"
-    (assert= (package/package--error-reason "boom") "boom"))
-  (test "an error map yields its :message"
-    (assert= (package/package--error-reason {:kind :runtime :message "no such host"})
-      "no such host"))
-  (test "the [:error <map>] pair an offloaded primitive propagates yields the message"
-    (assert= (package/package--error-reason [:error {:kind :runtime :message "ls-remote failed"}])
-      "ls-remote failed"))
-  (test "a map with no :message degrades to its printed form rather than nil"
-    (is (includes? (package/package--error-reason {:kind :runtime}) "runtime")))
-  (test "an unexpected shape degrades to its printed form"
-    (assert= (package/package--error-reason 42) "42"))
-  (test "nil degrades rather than raising"
-    (is (string? (package/package--error-reason nil)))))
 
 ;; A dependency's `main` is its ENTRY POINT, not part of its library surface: `nest
 ;; run` only ever uses the ROOT project's `:main`, and nothing requires a dep's. Two
