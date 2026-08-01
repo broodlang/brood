@@ -29,10 +29,13 @@
   (do (register-impl (symbol (str "A" i)) (symbol (str "op" i)) :int (fn (x) i) nil)
       (send parent [:done i])))
 
-(defn spawn-all (i) (if (>= i n) :ok (do (spawn (worker i (self))) (spawn-all (+ i 1)))))
+;; NB `(self)` must be evaluated in the PARENT and captured — a `spawn` body runs in the
+;; child, so `(spawn (worker i (self)))` makes each worker message itself and the collect
+;; below just times out.
+(defn spawn-all (i me) (if (>= i n) :ok (do (spawn (worker i me)) (spawn-all (+ i 1) me))))
 (defn collect (k) (if (= k 0) :ok (receive ([:done _] (collect (- k 1))) (after 20000 :timeout))))
 
-(spawn-all 0)
+(spawn-all 0 (self))
 (collect n)
 
 ;; now count how many actually made it into the registry

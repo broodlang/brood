@@ -13386,3 +13386,36 @@ root cause, the reproducer, both dead ends, and the shape a real fix probably ta
 **registrar process** (a blocking call to one single-threaded writer — no spin, no timeout, no
 desync, zero lost updates by construction), whose one open question is bootstrap, since
 registration happens during prelude load.
+
+## 2026-08-01 (cont.) — KI-22 fixed properly: one kernel primitive, atomic by construction
+
+Third attempt, and this one is right. `%registry-update!` performs the whole read-modify-write
+of a registry global **inside a single kernel call**, under a per-runtime `registry_lock`.
+Atomic by construction: no CAS (so no ABA question), no retry loop, no spinning, no callback
+into Brood under a lock — every failure mode of the two reverted attempts is structurally
+absent rather than mitigated.
+
+Four ops cover all fifteen registries: `:assoc`, `:assoc-new` (the presence test is *inside*
+the lock, so a derived method mirror cannot clobber an authored impl registered in between),
+`:dissoc`, and `:cons-new` (the `member?` test inside the lock, for `provide`). Policy stays in
+Brood — the call sites still say what they mean — and only the atomicity is kernel, which is
+exactly the mechanism/policy split the repo asks for. **Reads are untouched**, which is the
+constraint that ruled out `Table`s: dispatch reads `*impls*` on every call and a table
+deep-clones values in and out, which would put a closure copy on the hot path.
+
+**Results:** `registry_race.blsp` goes from 218/500 lost to **0 lost at 50/200/500/1000, in
+0.1 s**. Suite green at 4097. Prelude registry counts back to their pre-change values.
+
+**The trap that cost a cycle, worth knowing for any future kernel primitive standing in for a
+special form:** `def` binds at `env_root(env)`, **not** unconditionally `EnvId::GLOBAL`. During
+prelude load the root is a bootstrap env whose bindings later *seed* the shared runtime, so my
+first version — writing straight to the globals table — had every prelude-time write silently
+discarded at seed time. The prelude lost its own `Display`/`Inspect` impls and `to-str` failed
+with "no impl for :string". Caught because `url_test` went red; diagnosed by building the
+pre-change binary and comparing registry counts at startup (4 vs 0) rather than reasoning.
+
+**Also fixed: the reproducer was lying about timing.** `(spawn (worker i (self)))` evaluates
+`(self)` in the CHILD, so every worker messaged itself and the collector just timed out — the
+"20 s" in the earlier measurements was the timeout, not the work. The loss numbers were still
+sound (20 s was ample for the workers to finish), but the harness now passes the parent pid in
+and runs in 0.1 s.

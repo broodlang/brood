@@ -585,6 +585,18 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         dispatch,
     );
 
+    // Atomic registry update (KI-22): the read-modify-write of a global holding a whole
+    // registry map, done in ONE kernel call so two concurrent registrations cannot each
+    // read the old map and clobber each other. Internal; `register-impl`/`provide`/
+    // `defability`/… in the prelude call it, never user code.
+    def(
+        heap,
+        "%registry-update!",
+        Arity::exact(4),
+        Sig::new(vec![any, any, any, any], any),
+        registry_update,
+    );
+
     // set (the `#{…}` kernel type; the `set` library is Brood over these)
     def(
         heap,

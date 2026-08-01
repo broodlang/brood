@@ -674,6 +674,64 @@ pub(super) fn dispatch(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
     Ok(heap.vm_dispatch(arg(args, 0), arg(args, 1), arg(args, 2)))
 }
 
+/// `(%registry-update! name op path value)` — atomically read-modify-write a global that
+/// holds a registry (KI-22). `name` is the global's symbol, `op` one of `:assoc`,
+/// `:assoc-new`, `:dissoc`, `:cons-new`, `path` a vector of one or two keys (nil for
+/// `:cons-new`). Returns true if the registry was written, false if the op declined.
+///
+/// The whole sequence runs inside [`Heap::registry_update`] under the runtime's registry
+/// lock — see there for why `(def *X* (assoc *X* …))` in Brood cannot be made safe.
+pub(super) fn registry_update(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    use crate::core::heap::RegistryOp;
+    let sym = match arg(args, 0) {
+        Value::Sym(s) => s,
+        v => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%registry-update!",
+                "symbol",
+                v,
+            ))
+        }
+    };
+    // Keywords are interned, so compare the interned ids rather than the Values.
+    let op_sym = match arg(args, 1) {
+        Value::Keyword(k) => k,
+        v => {
+            return Err(LispError::wrong_type(
+                heap,
+                "%registry-update!",
+                "keyword",
+                v,
+            ))
+        }
+    };
+    let op = if op_sym == value::intern("assoc") {
+        RegistryOp::Assoc
+    } else if op_sym == value::intern("assoc-new") {
+        RegistryOp::AssocNew
+    } else if op_sym == value::intern("dissoc") {
+        RegistryOp::Dissoc
+    } else if op_sym == value::intern("cons-new") {
+        RegistryOp::ConsNew
+    } else {
+        return Err(LispError::type_err(
+            "%registry-update!: op must be :assoc, :assoc-new, :dissoc or :cons-new",
+        ));
+    };
+    let path = match arg(args, 2).unpack() {
+        crate::core::value::ValueRef::Vector(id) => heap.vector(id).to_vec(),
+        _ => Vec::new(),
+    };
+    Ok(Value::boolean(heap.registry_update(
+        env,
+        sym,
+        op,
+        &path,
+        arg(args, 3),
+    )))
+}
+
 /// `(map-get m k [default])` — the value `k` maps to, or `default` (nil if
 /// omitted) when absent.
 pub(super) fn map_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

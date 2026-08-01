@@ -17,7 +17,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-22 | concurrent registration loses ~40% of registrations (15 registries) | ⬜ **open**, root cause found 2026-08-01 |
+| KI-22 | concurrent registration lost ~40% of registrations (15 registries) | ✅ fixed 2026-08-01 |
 | KI-21 | `nest run --for` / `--watch` generated a legacy `~p` pin — failed on any file | ✅ fixed 2026-07-30 |
 | KI-20 | a JIT fast link ran the callee against the *caller's* IC block (cold cache) | ✅ fixed 2026-07-30 |
 | KI-19 | VM resolved a call's free-global head *after* its arguments | ✅ fixed 2026-07-30 |
@@ -45,58 +45,51 @@ transient — each kept as a record with its regression test, so a recurrence is
 
 ---
 
-## KI-22 — concurrent registration silently loses registrations · **open, root cause found 2026-08-01**
+## KI-22 — concurrent registration silently lost registrations · **found + fixed 2026-08-01**
 
-**Symptom.** Intermittent failures of the whole in-language suite, ~1 run in 5. Seen so far:
-`ability_test`'s "open extension" (`(esize [1 2 3])` returns `-1`, the `:default` impl, right
-after its `:vector` impl was registered on the line above) and `modules_test`'s "provide records
-a feature idempotently" (its own feature missing from `*features*` on the next line). Because
-nextest retries, `make test` still prints `929 passed` with only a `FLAKY` marker — and
-`make test | tail` discards the failing attempt, which is printed *above* the summary.
+**Symptom.** Intermittent failure of the whole in-language suite, ~1 run in 5, in three
+different tests: `ability_test`'s "open extension" (`(esize [1 2 3])` returning `-1`, the
+`:default` impl, right after its `:vector` impl was registered on the line above),
+`modules_test`'s "provide records a feature idempotently" (its own feature missing from
+`*features*` on the next line), and `private_test` (a module registered by a sibling test not
+found). Because nextest retries, `make test` printed `929 passed` with only a `FLAKY` marker.
 
 **Root cause: a lost update.** Every load-time registry is one global holding a whole map or
-list, written as `(def *X* (assoc *X* …))` — a read-modify-write. Two processes registering at
-once each read the old value and each write their own successor; the later write silently drops
-the earlier one. Reproduce with `scripts/fuzz/stress/registry_race.blsp`: N processes, one
-**private** ability each (so nothing is a legitimate precedence contest), measured
-**24/50, 88/200, 218/500 lost — about 40%**. It is not a dispatch-cache bug; the cache was never
-involved.
+list, written as `(def *X* (assoc *X* …))` — read, compute, write, three separate steps. Two
+processes registering at once each read the old value and each write their own successor; the
+later write silently drops the earlier one. `scripts/fuzz/stress/registry_race.blsp` (N
+processes, one **private** ability each, so nothing is a legitimate precedence contest)
+measured **24/50, 88/200, 218/500 lost — about 40%.** Not a dispatch-cache bug; the cache was
+never involved. **Fifteen registries** share the shape, so multimethod registration had the
+identical bug to ability registration, unhit until now.
 
-**Fifteen registries share the shape**, so multimethod registration has the identical bug to
-ability registration: `*record-ids*`, `*features*`, `*module-docs*`, `*deprecation-seen*`,
-`*abilities*`, `*ability-owner*`, `*op-ability*`, `*ability-derives*`, `*sealed*`,
-`*ability-requires*`, `*multi-algebra*`, `*methods*`, `*method-from*`, `*impls*`, `*impl-from*`.
+**Fix: `%registry-update!`** — one kernel primitive that performs the whole read-modify-write
+inside a single call, under a per-runtime `registry_lock`. Atomic by construction: no CAS (so
+no ABA question), no retry loop, no spinning, and no callback into Brood while a lock is held.
+Four ops cover all fifteen sites — `:assoc`, `:assoc-new` (presence test *inside* the lock, so
+a derived method mirror cannot clobber an authored one registered in between), `:dissoc`,
+`:cons-new` (the `member?` test inside the lock, for `provide`). Policy stays in Brood; only
+the atomicity is kernel. Reads are completely untouched, which matters: dispatch reads
+`*impls*` on every call, and the registries cannot become `Table`s because a table deep-clones
+values in and out, putting a closure copy on the hot path.
 
-**Why it matters past the test suite.** `impl` is hot-reloadable by design, so a registration
-dropped by a concurrent one leaves an op dispatching to `:default` — silently and permanently.
+**Two earlier attempts, both reverted** — see the devlog. Optimistic retry cut the loss 44% →
+20% but cannot close the read-write window. An in-Brood ticket lock on `table-incr` reached
+`LOST=0` and then made `make test` *worse* than the bug: a bounded busy-wait burnt 157 s of CPU
+and still lost one under load, and adding `sleep` exposed that a timed-out waiter never bumps
+`:served`, desynchronising the sequence permanently.
 
-### Two fixes tried and REVERTED — read before attempting a third
+**One trap worth recording**, because it cost a debugging cycle: `def` binds at
+`env_root(env)`, which is **not** always `EnvId::GLOBAL`. During prelude load the root is a
+bootstrap env whose bindings later *seed* the shared runtime, so the first version of the
+primitive — which wrote straight to the globals table — had its writes silently discarded at
+seed time, and the prelude lost its own `Display`/`Inspect` impls (`to-str` then failed with
+"no impl for :string"). A kernel primitive that stands in for `def` must read and write the
+same place `def` does.
 
-1. **Optimistic retry** (write, re-read, retry if our key vanished). Cut the loss from ~44% to
-   ~20% but cannot close the window — every retry has the same read-write gap. A partial fix for
-   a wrong-answer bug is worse than none: it just makes the flake rarer and harder to find.
-2. **A ticket lock on `table-incr`** (the one atomic read-modify-write the language has). This
-   *did* reach `LOST=0` at 50/200/500/1000 and took the suite from failing on run 8 of 10 to
-   10/10 clean under `nest test` — and then made `make test` **worse**: the 120-process
-   regression test took **157 s** of burnt CPU and still lost one, because the wait was a bounded
-   busy-spin that heavy load blows straight through, after which the waiter proceeds
-   unsynchronised. Adding `sleep` between checks fixed the CPU burn but exposed the next flaw:
-   a waiter that times out never bumps `:served`, which desynchronises the ticket sequence
-   permanently, so every later registration pays the full timeout (20 s constant, regardless of
-   N). Reverted.
-
-**What a real fix probably looks like.** A **registrar process** — registration becomes a
-synchronous call to one process that performs the write single-threaded. No spinning (a blocking
-receive parks the caller and costs a worker nothing), no timeout, no desync, and one writer means
-zero lost updates by construction. It is the "a process holding state in its loop" option
-`CLAUDE.md` names for mutable state. The open question is **bootstrap**: registrations happen
-during prelude load, so the registrar has to exist first, and spawning it lazily is itself a
-race. Note the registries cannot simply become `Table`s — dispatch reads `*impls*` on every call
-and a table deep-clones values in and out, which would put a closure copy on the hot path.
-
-**Reproduce:** `N=500 brood scripts/fuzz/stress/registry_race.blsp` (fast, deterministic — do
-not use the suite flake, which is slow and 1-in-5). For the suite itself, `make test` is the
-harsher environment; ten clean `nest test` runs proved nothing.
+**Verified:** the probe goes 218/500 lost → **0 lost** at 50/200/500/1000, in 0.1 s; prelude
+registries are back to their pre-change counts; regression tests for concurrent `impl` and
+concurrent `provide`; suite green.
 
 ## KI-20 — a JIT fast link ran the callee against the **caller's** IC block · **fixed 2026-07-30**
 
