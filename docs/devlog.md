@@ -13743,3 +13743,35 @@ the fix rather than requiring a new mechanism.
 `make_closure_cached` the way `compile_make_closure` does. That is safe there because the
 compiled chunk is cached, so it happens once per *site*; in the tree-walker there is no chunk,
 so it would happen once per *call* — the same unbounded append, wearing a different hat.
+
+## 2026-08-01 (cont.) — thread 6: macro-memo theory tested and killed; the lead is timing
+
+Two more candidates eliminated, and the remaining lead sharpened into something specific.
+
+**Killed: runtime macro re-expansion.** The tree-walker expands a macro on *every* evaluation
+of its call form — no memo, unlike the VM, which expands each site once at compile time. That
+is a real asymmetry and it looked like the source of the LOCAL `fn_rest`: a fresh
+`(spawn-link …)` expansion each call would produce a fresh LOCAL `(fn () …)` inside it. I built
+the memo (per-heap, keyed by the call form, invalidated on the runtime `version` so a
+redefined macro cannot be served stale, expansion promoted so the handle stays valid) and
+measured: **promotions unchanged** — 2675 vs 2671. Instrumenting the branch explained why: it
+is **never reached** during the workload. Zero expansions. Reverted the whole thing.
+
+**Killed: the message fast path declining over a pid or ref.** `copy_cross_heap_rec` accepts
+`Pid`/`Ref`/`Sym` as atoms that cross unchanged (`message.rs:705-714`), so the
+`[:start-child spec pid ref]` message does not fall back to the deep-copy path on their
+account.
+
+**The live lead is that it is timing-dependent**, which I only noticed by accident. Turning on
+a `Backtrace::force_capture` at the creation site — which slows the program by orders of
+magnitude — collapsed the count from ~536 expected to **19**. A *slower* program almost stops
+doing it. That is not the signature of a static routing decision; it is the signature of a
+race with something that completes in the background, and the obvious candidate is the
+not-yet-compiled window (`jit::QUEUED`, `JIT_QUEUED_SYNC_EDGES`). It also explains the
+JIT-dependence (2675 with, 26 without) without needing deopts, of which there are none.
+
+**So the next instrument must be cheap.** A backtrace perturbs the very thing being measured —
+a counter recording, per activation, whether the callee arm was compiled / `QUEUED` / absent
+when the tree-walker took it will not. That distinguishes "warm-up window" from "permanently
+uncompiled", and the fix follows from which it is: the VM path is already correct, so this is
+about stopping the detour, not inventing a mechanism.
