@@ -13529,4 +13529,3 @@ Recording the exclusions in the handoff so the next attempt bisects
 `supervisor--start-child` itself instead of re-probing generic shapes. The standing suspicion
 is unchanged: `make_closure_cached` caches only when `fn_rest` is a RUNTIME pair and bails
 **silently** otherwise, which is exactly the shape of a JIT/VM divergence that costs 2×.
->>>>>>> dd01579fbbd9ac110a8a6cb20ea36625a4202deb
