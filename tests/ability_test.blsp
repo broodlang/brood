@@ -363,7 +363,7 @@
       (assert= (receive ([:sum v] v)) 10))))
 
 ;; ---- KI-22: concurrent registration must not lose an impl ----------------------
-;; `register-impl` writes ONE shared global holding the whole registry, so it was a
+;; `register-impl` writes ONE shared global holding the whole registry. It used to be a
 ;; read-modify-write two processes could interleave: each read the old map, each wrote its
 ;; own successor, and the later write silently dropped the earlier impl. Measured before the
 ;; fix: **218 of 500** lost, after which the op dispatched to `:default` — a wrong answer,
@@ -371,35 +371,23 @@
 ;; nextest retries, `make test` still printed "929 passed" with only a FLAKY marker.
 ;;
 ;; Each worker registers an impl for its OWN ability, so nothing here is a legitimate
-;; precedence contest — every registration must survive. Fixed with a `table-incr` ticket
-;; lock around the write (registration is rare; dispatch is untouched).
-(defn abt-reg-decl (i n)
-  (when (< i n)
-    (eval (list 'defability (symbol (str "AbtConc" i))
-            (list (symbol (str "abt-conc-op" i)) ['self] :-> 'any)))
-    (abt-reg-decl (+ i 1) n)))
-(defn abt-reg-spawn (i n parent)
-  (when (< i n)
-    (spawn (do (register-impl (symbol (str "AbtConc" i)) (symbol (str "abt-conc-op" i))
-                 :int (fn (x) i) nil)
-             (send parent [:reg i])))
-    (abt-reg-spawn (+ i 1) n parent)))
-(defn abt-reg-join (k) (when (> k 0) (receive ([:reg _] (abt-reg-join (- k 1))) (after 30000 :timeout))))
-(defn abt-reg-lost (i n acc)
-  (if (>= i n) acc
-    (abt-reg-lost (+ i 1) n
-      (if (nil? (impl-for [(symbol (str "AbtConc" i)) (symbol (str "abt-conc-op" i))] :int))
-        (+ acc 1) acc))))
+;; precedence contest — every registration must survive. Deterministic: this catches the bug
+;; on the first run rather than waiting for the machine to be loaded enough.
+(defn abt-conc-name (i) (symbol (str "AbtConc" i)))
+(defn abt-conc-op (i) (symbol (str "abt-conc-op" i)))
+(defn abt-conc-declare (i)
+  (eval (list 'defability (abt-conc-name i) (list (abt-conc-op i) ['self] :-> 'any))))
+(defn abt-conc-registered? (i)
+  (not (nil? (impl-for [(abt-conc-name i) (abt-conc-op i)] :int))))
 
 (describe "concurrent impl registration (KI-22)"
   :isolated
   (test "no impl is lost when many processes register at once"
     (let (n 120)
-      (abt-reg-decl 0 n)
-      (abt-reg-spawn 0 n (self))
-      (abt-reg-join n)
+      (dotimes (i n) (abt-conc-declare i))
+      (concurrently n (fn (i) (register-impl (abt-conc-name i) (abt-conc-op i) :int (fn (x) i) nil)))
       ;; before the fix this lost roughly 40% of them
-      (assert= (abt-reg-lost 0 n 0) 0))))
+      (assert= (count (remove abt-conc-registered? (range n))) 0))))
 
 ;; ---- typed ability ops: the checker consumes an op's `:-> RET` return type ----
 ;; A static/advisory feature, so these assert on the checker's warnings (via

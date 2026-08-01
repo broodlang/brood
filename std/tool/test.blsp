@@ -307,6 +307,48 @@ docs/testing.md for the full guide.")
            (list (str "assert: " (pr-str (quote (assert= ~actual ~expected))))
              (str "actual: " (pr-str ~a)) (str "expect: " (pr-str ~b))))))))
 
+(defn concurrently (n f)
+  "Run `(f i)` for `i` in 0..n-1, each in its OWN process, and block until all `n` have
+finished. Returns a list of their results, in completion order (NOT index order — assert on
+the set, or have `f` return a pair carrying its index).
+
+For testing anything that must hold when several processes hit it at once: a shared registry,
+a counter, a table, a supervisor. Prefer this to hoping the suite's own parallelism happens to
+interleave the right way — a deterministic N-process test catches a lost update on the first
+run, where a race that only shows under machine load is a ~1-in-5 flake nobody can debug (see
+KI-22, which cost three sessions before it was cornered by a test shaped like this).
+
+`f` runs in the child, so it may close over whatever it likes; the parent pid is captured HERE
+rather than inside the spawn body. That detail is the whole reason this exists as a helper:
+`(spawn (worker (self)))` evaluates `(self)` in the CHILD, so every worker messages itself and
+the collector silently waits for messages that never arrive — a mistake already made twice in
+this repo's own stress harnesses.
+
+Each result is collected with the suite's per-test timeout in force, so a wedged worker fails
+the test rather than hanging the run."
+  (let (parent (self)
+        tag (ref))
+    (concurrently--spawn 0 n f parent tag)
+    (concurrently--collect n tag nil)))
+
+(defn concurrently--spawn (i n f parent tag)
+  (when (< i n)
+    (spawn (send parent [:concurrently tag (f i)]))
+    (concurrently--spawn (+ i 1) n f parent tag)))
+
+;; The `tag` is a fresh `ref` minted by `concurrently`, so a stray message from an unrelated
+;; process can never be mistaken for a worker's result — and pinning it lets the receive-mark
+;; (ADR-195) skip any unrelated backlog instead of walking it per result.
+(defn concurrently--collect (k tag acc)
+  (if (= k 0)
+    acc
+    (concurrently--collect (- k 1) tag
+      (cons (receive ([:concurrently ^tag v] v)
+              (after *test-timeout-ms*
+                (test--fail nil (list (str "concurrently: a worker did not finish within "
+                                        *test-timeout-ms* "ms")))))
+        acc))))
+
 (defmacro assert-error (& body)
   "Assert that evaluating `body` raises an error; fails if it completes normally."
   ;; Quote the body for the message: the lone form if there's one, else (do …).
