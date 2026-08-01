@@ -97,29 +97,28 @@ From the published run (`brood-benchmarks/results/`):
    projection by extrapolating MB/*minute* when the driver is MB/*iteration* — the long run
    actually reached 3M iterations / 3.06 GB in 7 h. A8's trap, freshly re-stepped-in.
 
-6. **Throughput decay — DIAGNOSED 2026-07-31, not yet fixed. The sink is the append-only
-   RUNTIME code region, and its reclamation policy costs 45% of throughput.** Harness:
-   `scripts/fuzz/stress/decay_isolate.blsp` (run modes sequentially).
-   **What decays:** only the **supervisor child cycle**. Flat over millions of ops each:
-   `alloc` (52 M), `cons` (74 M), `spawn` (55 M), `sendrecv` (50 M), `roundtrip` (11 M),
-   `backlog` (1.4 M) — so allocator, GC, spawn, send/receive and selective receive are all
-   exonerated. The supervisor cycle costs ~1.7 KB/op, which is the soak's ~1.0 KB/iteration.
-   **The sink:** `:runtime-closures` climbs **2 583 → 341 592** over 390 k cycles,
-   monotonically, ~1 per cycle, while both LOCAL heaps GC normally. Per call: `start-child`
-   **+1**, `terminate-child` **+0**, and a supervisor round-trip that starts nothing is flat
-   at 64 over 2.25 M ops. So each supervised child start appends a closure that terminating
-   the child never reclaims.
-   **The costly half is the policy, not the growth:** `BROOD_RT_GC_FLOOR=100000000` (never
-   compact) does **45% more work** — 610/610/610 k ops/30 s vs 420/420/430 k on the default
-   4096 floor, 3 runs each, ~2% spread. Compacting more often (`=256`) does not help. The
-   region grows either way; the default buys repeated failed reclamation attempts. This is
-   **KI-14's class resurfacing** (cost scaling with loaded code, not with work).
-   Also explains the "a restart cures it" observation: the region is per-runtime.
-   **Two candidate fixes, both ADR-091 decisions rather than mechanical:** (a) don't promote
-   per `start-child` when the start thunk is already shared; (b) make the reclamation
-   threshold adaptive — back off when a compaction reclaims little instead of thrashing at a
-   fixed floor. (b) alone is worth 45% here. Both touch the GC, so they want a deliberate
-   call.
+6. **Throughput decay — the JIT re-promotes a capture-free closure on the supervisor path.
+   Measured, narrowed, NOT fixed.** Harness `scripts/fuzz/stress/decay_isolate.blsp`.
+   **The headline measurement** (`supnocrash`, 20 s, same binary): default does **300 k ops /
+   639 MB RSS** with `rt_closures` 2 191 → 10 273 and throughput decaying 19 083 → 16 611 ops/s;
+   `BROOD_NO_JIT=1` does **590 k ops / 318 MB** with `rt_closures` **73 → 75** and throughput
+   *flat* (27 777 → 28 901). So ~2× the work, half the memory, and the decay disappears. The
+   region is per-runtime, which is why a restart cures it.
+   **Everything else is exonerated** — `alloc` (52 M ops), `cons` (74 M), `spawn` (55 M),
+   `sendrecv` (50 M), `roundtrip` (11 M), `backlog` (1.4 M) are all flat, as are `spawn-link`
+   + normal exit / `error` / `throw` (3–5 M each).
+   **Three plausible mechanisms have now been excluded by direct probe**, each at ~0.001
+   promotions/op against the supervisor path's 0.6/op: creating a capture-free closure in a hot
+   arm (200 k, delta 1); creating one and **sending** it (100 k, delta 2 — so ADR-194's share
+   path is fine, and `BROOD_NO_SHARE_FN=1` changes nothing); and a process **receiving** a
+   thunk, **calling** it, and spawning inside it (20 k, delta 17 vs 5 — the JIT ratio is there
+   but the absolute is negligible). So it is something specific to `start-child` beyond
+   "receive a thunk and spawn it", still unidentified.
+   **Next step:** bisect `supervisor--start-child` itself (it also does `link`, an optional
+   `register`, and `(assoc spec :pid pid)` into the long-lived supervisor state) rather than
+   re-probing the generic shapes — those are now ruled out. `make_closure_cached` caches only
+   when `fn_rest` is a RUNTIME pair and bails silently otherwise, which remains the most
+   likely place for the JIT/VM divergence. perf is unusable here (`perf_event_paranoid=4`).
 
 **Explicitly NOT open: a memory leak.** See §5 — it was chased and does not exist. The soak
 strengthens this: 12.7 M iterations with `rt-closures` flat and every fresh process starting
