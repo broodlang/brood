@@ -38,8 +38,7 @@ use lsp_types::request::{
     DocumentSymbolRequest, FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest,
     InlayHintRequest, PrepareRenameRequest, References, Rename, Request as RequestTrait,
     ResolveCompletionItem, SelectionRangeRequest, SemanticTokensFullRequest,
-    SemanticTokensRangeRequest, SignatureHelpRequest,
-    WorkspaceSymbolRequest,
+    SemanticTokensRangeRequest, SignatureHelpRequest, WorkspaceSymbolRequest,
 };
 use lsp_types::{
     CodeActionParams, CodeActionProviderCapability, CompletionItem, CompletionOptions,
