@@ -97,29 +97,37 @@ From the published run (`brood-benchmarks/results/`):
    projection by extrapolating MB/*minute* when the driver is MB/*iteration* — the long run
    actually reached 3M iterations / 3.06 GB in 7 h. A8's trap, freshly re-stepped-in.
 
-6. **Throughput decay — cause found, one fix attempted and REVERTED. Worth ~2× throughput
-   and ~2× RSS.** `spawn` must promote its thunk into the shared RUNTIME region. At ordinary
-   call sites that is free after the first time, because `exec_chunk`'s `MakeClosure` binds a
-   **zero-capture closure to the global env**, which makes it a constant the const-closure
-   cache builds and promotes once. The tree-walker's `fn` passes its **frame**
-   unconditionally, so the closure is never a constant — and a JIT deopt routes activations
-   through the tree-walker. Measured: **2675** tree-walker `fn` creations with a frame env
-   under the JIT vs **26** with `BROOD_NO_JIT=1`, and the promotions match
-   (`BROOD_TRACE_PROMOTE=1` shows 2660 of 2671 as `<anon> [captures-frame arity=0] ::
-   spawn_impl <- spawn_link`).
-   **Attempted and reverted:** give `ClosureTemplate` a set of every symbol in the form and,
-   when no name bound in the enclosing chain appears in it, capture the global env instead.
-   Sound (a superset can only miss the optimisation, and `letrec` pre-binds its names so
-   recursion is caught) but **useless in practice**: the sets run 13–50 symbols and always
-   collide with something in an enclosing frame, so the downgrade never fired once in 10 000
-   cycles. Reverted.
-   **What it actually needs:** real free-variable analysis — the fn's own params and inner
-   binders excluded — which the compiler already does (`compile_make_closure` computes a
-   `referenced` set against a `Scope`). Either lift that analysis so the tree-walker can use
-   it, or stop deopts landing in the tree-walker at all (they are ~10× slower regardless, so
-   that is worth its own look — see the `eval` 14× cliff in `deferred.md`).
-   **Tool:** `BROOD_TRACE_PROMOTE=1` names every closure entering the region, now with its
-   capture state — `captures-frame` is the tell that the const cache could not dedupe it.
+6. **Throughput decay — chain now traced end to end; the fix needs one more answer.**
+   Worth ~2× throughput and ~2× RSS (`supnocrash`: 300 k ops / 639 MB decaying, vs 590 k ops /
+   318 MB flat under `BROOD_NO_JIT=1`).
+   **The chain.** `spawn_impl` promotes its thunk into the append-only RUNTIME region
+   (`heap.promote(f)`), which is free when the thunk is *already* RUNTIME. On the supervisor
+   path it is not: the tree-walker builds it from a **LOCAL `fn_rest`** — the `spawn-link`
+   macro re-expanded into fresh LOCAL forms — and `make_closure_cached` **early-returns for a
+   non-RUNTIME `fn_rest`, before both the template cache and the const-closure cache**. So a
+   fresh LOCAL closure is built per call and promoted per call, forever. Measured with
+   `BROOD_TRACE_PROMOTE=1`: 2660 of 2671 promotions are
+   `<anon> [captures-frame arity=0] :: spawn_impl <- spawn_link`, and the creating site
+   reports `fn_rest=LOCAL refs=1 colliding=[]` 2679 times — i.e. the closure references one
+   symbol, collides with nothing in the enclosing chain, and *should* have been a constant.
+   **Ruled out this round (don't re-test these):**
+   - **Not deopts.** `BROOD_DEOPT_TRACE=1` on a perf-stats build: **0 deopts**. Whatever routes
+     these activations to the tree-walker, it is not deopt fallback.
+   - **Not nested-closure sharing.** `copy_cross_heap_rec` *is* recursive and its
+     already-shared-closure arm sits inside the recursion, so a closure inside the spec map
+     does cross by handle. (I claimed otherwise mid-investigation; wrong.)
+   - **Not a symbol-superset problem.** The thunk's referenced set is a single symbol and
+     collides with nothing — the earlier "always collides" reading came from closures on the
+     *compiled* path, not this one.
+   **The open question is narrow:** why does this hot path run in the tree-walker at all, given
+   zero deopts — and it is JIT-dependent (2675 tree-walker `fn` creations with the JIT vs 26
+   without). Answer that and the fix follows, because the VM path is already correct:
+   `exec_chunk`'s `MakeClosure` binds a zero-capture closure to the global env, making it a
+   constant the const cache promotes once.
+   **Two candidate fixes once it is answered:** cache macro expansion in the tree-walker so
+   `fn_rest` is stable and promotable once (this likely also touches the `eval` 14× cliff in
+   `deferred.md`), or stop the path reaching the tree-walker. Do **not** promote per call to
+   "fix" the LOCAL key — that is the same leak wearing a different hat.
 
 **Explicitly NOT open: a memory leak.** See §5 — it was chased and does not exist. The soak
 strengthens this: 12.7 M iterations with `rt-closures` flat and every fresh process starting
