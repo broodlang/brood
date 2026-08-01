@@ -3139,48 +3139,10 @@ record built at root and an impl for it at root must land on the same dispatch i
 ;; id (`:module/circle`) is registered here, so a same-named non-record fn is never
 ;; mistaken for a record constructor. Always populated (cheap load-time metadata, like
 ;; `*impls*`); read only under the flag.
-;; ---- the load-time registry lock (KI-22) -------------------------------------
-;; Every registry below (`*record-ids*`, `*features*`, `*module-docs*`, `*abilities*`,
-;; `*impls*`, `*methods*`, …) is a single global holding a whole map or list, updated as
-;; `(def *X* (assoc *X* …))`. That is a read-modify-write: two processes registering at the
-;; same time each read the old value and each write their own successor, and the later write
-;; silently drops the earlier one. Measured on `*impls*`: **218 of 500** concurrent
-;; registrations lost, after which the op dispatched to `:default`. `*features*` lost a
-;; `provide` the same way. Wrong answers, not crashes.
-;;
-;; These registries cannot become `Table`s: dispatch reads `*impls*` on every call and a
-;; table deep-clones values in and out, which would put a closure copy on the hot path. So
-;; the WRITE is serialised instead. `table-incr` is the one atomic read-modify-write the
-;; language has ("concurrent increments never lose an update"), which is enough for a ticket
-;; lock. Registration is rare — load time and hot reload — so the cost does not matter, and
-;; every read path is untouched.
-;;
-;; The wait is BOUNDED and then proceeds anyway. This runs during prelude load, so the
-;; failure mode has to be "degrade to the old racy behaviour", never "hang the image": a
-;; holder that dies or throws mid-section never serves the next ticket, and the bound is what
-;; keeps that from wedging every later registration.
-(def *registry-lock* (table))
-
-(defn registry-lock--await (ticket spins)
-  ;; Tickets start at 1 (`table-incr` returns the POST-increment value) and `:served` starts
-  ;; absent = 0, so ticket N runs when `:served` is N-1.
-  (cond
-    (= (- ticket 1) (table-get *registry-lock* :served 0)) true
-    (<= spins 0) false
-    else (registry-lock--await ticket (- spins 1))))
-
-(defn with-registry-lock (thunk)
-  "Run `thunk` with the load-time registry lock held, so its read-modify-write of a global
-registry cannot be clobbered by a concurrent one. Returns the thunk's value."
-  (let (ticket (table-incr *registry-lock* :ticket 1)
-        got (registry-lock--await ticket 20000)
-        r (thunk))
-    (do (when got (table-incr *registry-lock* :served 1)) r)))
-
 (def *record-ids* {})
 (defn record-register (id nm)
   "Record that `id` (a `:module/name` keyword) is a `defrecord`'s nominal identity."
-  (with-registry-lock (fn () (def *record-ids* (assoc *record-ids* id nm))))
+  (def *record-ids* (assoc *record-ids* id nm))
   nil)
 
 (defmacro defrecord (rec fields & opts)
@@ -4197,8 +4159,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 (defn provide (mod)
   "Mark feature `mod` (a symbol or string) as loaded (idempotent); returns its name."
   (let (key (name mod))
-    (with-registry-lock
-      (fn () (unless (member? key *features*) (def *features* (cons key *features*)))))
+    (unless (member? key *features*) (def *features* (cons key *features*)))
     key))
 
 ;; A module declares itself at the top with `defmodule`: its name, an optional
@@ -4212,7 +4173,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 ;; here at root, so the `def` below targets the one real registry.
 (defn record-module-doc! (key doc)
   "Record `doc` as module `key`'s docstring (the registry `module-doc` reads); returns doc."
-  (with-registry-lock (fn () (def *module-docs* (assoc *module-docs* key doc))))
+  (def *module-docs* (assoc *module-docs* key doc))
   doc)
 
 ;; The hot-reload `def` diagnostics switch. The kernel reads it by BARE name from
@@ -4233,7 +4194,7 @@ degrades to a plain case-insensitive name/docstring search, e.g.
   "Print `message` to stderr once per `key` (deduplicated); returns nil. The
 deprecation primitive — emit it from a macro's expansion to flag a deprecated use."
   (unless (member? key *deprecation-seen*)
-    (with-registry-lock (fn () (def *deprecation-seen* (cons key *deprecation-seen*))))
+    (def *deprecation-seen* (cons key *deprecation-seen*))
     (eprintln "deprecation: " message))
   nil)
 
@@ -4474,9 +4435,8 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   OWNER namespace (`defability`'s defining ns, ADR-172) for impl precedence. Warns if an op
   name is already owned by a DIFFERENT ability in the same ns — that op's generic function
   would otherwise be silently clobbered (only the last-defined ability's op survives)."
-  (with-registry-lock (fn () (def *abilities* (assoc *abilities* aname specs))))
-  (when owner
-    (with-registry-lock (fn () (def *ability-owner* (assoc *ability-owner* aname owner)))))
+  (def *abilities* (assoc *abilities* aname specs))
+  (when owner (def *ability-owner* (assoc *ability-owner* aname owner)))
   ;; Record op-name ownership and warn on a same-ns cross-ability collision. A re-declaration
   ;; of the SAME ability (hot reload) re-registers its own ops — same owner → no warning.
   (for (spec specs)
@@ -4492,7 +4452,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
           (println "warning: ability " aname " declares op `" (first spec)
             "` already owned by ability " prev
             " — its generic function will be shadowed (rename one op)"))
-        (with-registry-lock (fn () (def *op-ability* (assoc *op-ability* qsym aname)))))))
+        (def *op-ability* (assoc *op-ability* qsym aname)))))
   nil)
 
 (defn ability-owner-ns (aname)
@@ -4515,7 +4475,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 (defn register-ability-derive (aname recipe)
   "Record ability `aname`'s `:derive-record` recipe (the fn `defrecord`'s `:derives` runs to
   synthesise a structural impl). Rebindable like any registry — a later `defability` wins."
-  (with-registry-lock (fn () (def *ability-derives* (assoc *ability-derives* aname recipe))))
+  (def *ability-derives* (assoc *ability-derives* aname recipe))
   nil)
 
 (defn ability-derive-recipe (aname)
@@ -4530,7 +4490,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   "Record ability `aname`'s SEALED member ids — the closed set of identities it is meant
   to be implemented for. The checker uses this for exhaustiveness: every member must have
   an impl of every declared op. Runtime dispatch is unaffected (sealing is a contract)."
-  (with-registry-lock (fn () (def *sealed* (assoc *sealed* aname members))))
+  (def *sealed* (assoc *sealed* aname members))
   nil)
 
 (defn sealed-members (aname)
@@ -4545,7 +4505,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 (defn register-ability-requires (aname reqs)
   "Record that ability `aname` REQUIRES abilities `reqs` (a list of names) — an implementor of
   `aname` must also implement each of them (ADR-193). The checker enforces it."
-  (with-registry-lock (fn () (def *ability-requires* (assoc *ability-requires* aname reqs))))
+  (def *ability-requires* (assoc *ability-requires* aname reqs))
   nil)
 
 (defn ability-requires (aname)
@@ -4680,51 +4640,9 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
     ; owner already has a stronger claim). The fn is stored DIRECTLY so dispatch (`impl-for`)
     ; stays a plain map-get; provenance in *impl-from* is read only here, never on dispatch.
     (when (>= new-rank old-rank)
-      (register-impl--commit op-key key f prov-key from))
+      (def *impls* (assoc *impls* op-key (assoc methods key f)))
+      (def *impl-from* (assoc *impl-from* prov-key from)))
     nil))
-
-;; Commit one registration under a lock (KI-22).
-;;
-;; `(def *impls* (assoc *impls* …))` is a read-modify-write of ONE shared global holding the
-;; whole registry, so two processes registering at the same time each read the old map and
-;; each write their own successor — the later write silently drops the earlier one's impl.
-;; Measured before this: **218 of 500** concurrent registrations lost outright, after which
-;; the op dispatches to `:default`. A wrong answer, not a crash — and `impl` is hot-reloadable
-;; by design, so it bites a live reload, not just the parallel test suite.
-;;
-;; The registry has to STAY an immutable global map: `%dispatch`/`vm_dispatch` reads it on
-;; every call, and a `Table` deep-clones values in and out, which would put a closure copy on
-;; the dispatch hot path. So the write is serialised instead of the structure being changed.
-;;
-;; `table-incr` is the one atomic read-modify-write the language has ("concurrent increments
-;; never lose an update"), which is enough for a ticket lock: take a ticket, wait until it is
-;; being served, write, then serve the next. Registration is rare (load time and hot reload),
-;; so the cost is irrelevant; dispatch is untouched.
-;;
-;; The wait is BOUNDED and falls back to writing unsynchronised. A registry deadlock would be
-;; unrecoverable and this runs during prelude load, so the failure mode is capped at exactly
-;; today's behaviour (a possible lost update) rather than a hang — e.g. if a lock holder dies
-;; mid-section and never serves the next ticket.
-(def *impl-lock* (table))
-
-(defn register-impl--commit (op-key key f prov-key from)
-  (let (ticket (table-incr *impl-lock* :ticket 1)
-        got (register-impl--await ticket 20000))
-    (do
-      (def *impls* (assoc *impls* op-key (assoc (or (get *impls* op-key) {}) key f)))
-      (def *impl-from* (assoc *impl-from* prov-key from))
-      ;; Serve the next ticket only if we actually held the lock; bumping it after a
-      ;; timed-out wait would let two writers through at once, for good.
-      (when got (table-incr *impl-lock* :served 1))
-      nil)))
-
-;; Spin until our ticket is the one being served. Tickets start at 1 (`table-incr` returns the
-;; POST-increment value) and `:served` starts absent = 0, so ticket N runs when served = N-1.
-(defn register-impl--await (ticket spins)
-  (cond
-    (= (- ticket 1) (table-get *impl-lock* :served 0)) true
-    (<= spins 0) false
-    else (register-impl--await ticket (- spins 1))))
 
 (defn impl-for (op-key key)
   "The impl fn of op `op-key` (a `[ability op]` pair) for id `key`, falling back to a
@@ -4989,7 +4907,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 (defn register-multi (mname algebra)
   "Declare multimethod `mname` with optional closure `algebra` (nil, :commutative, or
   :antisymmetric). Records the algebra so `register-method` can derive each mirror."
-  (with-registry-lock (fn () (def *multi-algebra* (assoc *multi-algebra* mname algebra))))
+  (def *multi-algebra* (assoc *multi-algebra* mname algebra))
   nil)
 
 (defn multi-resolve (mname key)
@@ -5010,21 +4928,15 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 
 (defn register-method--store (mname key f)
   "Store method `f` at EXACT `key` for `mname` (overwrites — an authored method always wins)."
-  (with-registry-lock
-    (fn () (def *methods* (assoc *methods* mname (assoc (get *methods* mname {}) key f)))))
+  (def *methods* (assoc *methods* mname (assoc (get *methods* mname {}) key f)))
   nil)
 
 (defn register-method--derive (mname key f)
   "Fill the CLOSURE-derived mirror at `key` only if ABSENT — an explicitly authored method of
   the same key must never be clobbered by a derived one, whatever the load order."
-  ;; The absent-check and the write must be INSIDE the lock together — checking outside it
-  ;; would let two derived mirrors both see "absent" and race, and would also let a derived
-  ;; method clobber an authored one registered in between.
-  (with-registry-lock
-    (fn ()
-      (let (methods (get *methods* mname {}))
-        (when (not (contains? methods key))
-          (def *methods* (assoc *methods* mname (assoc methods key f)))))))
+  (let (methods (get *methods* mname {}))
+    (when (not (contains? methods key))
+      (def *methods* (assoc *methods* mname (assoc methods key f)))))
   nil)
 
 (defn register-method (mname key f from)
@@ -5045,7 +4957,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
       (println "warning: multimethod " mname " method for " key
         " — redefined from " prev-from " by " from " (last wins)"))
     (register-method--store mname key f)
-    (with-registry-lock (fn () (def *method-from* (assoc *method-from* prov from)))))
+    (def *method-from* (assoc *method-from* prov from)))
   (let (algebra (get *multi-algebra* mname))
     ; the `:default` catch-all is a keyword sentinel, not a tuple — never a closure target.
     (when (and algebra (vector? key))

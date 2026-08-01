@@ -1,0 +1,46 @@
+;; registry_race — KI-22's reproducer: concurrent registration LOSES registrations.
+;;
+;;   N=500 brood scripts/fuzz/stress/registry_race.blsp
+;;
+;; Expect `LOST=0`. Today it reports roughly 40% lost (24/50, 88/200, 218/500). Every
+;; ability here is private to its own worker, so nothing is a legitimate precedence
+;; contest — every registration MUST survive.
+;;
+;; N processes each register an impl for their OWN distinct ability, then we check all N
+;; are present. `register-impl` reads `*impls*`, assocs, and `def`s the whole map back —
+;; if that read-modify-write is not atomic, concurrent registrations clobber each other
+;; and some abilities end up with no impl at all.
+;;
+;;   N=200 brood ki22.blsp
+
+(def n (let (e (getenv "N")) (if e (string->number e) 200)))
+
+;; one ability per index, declared UP FRONT and single-threaded, so the only concurrent
+;; operation under test is register-impl itself
+(defn decl (i)
+  (if (>= i n) :ok
+    (do (eval (list 'defability (symbol (str "A" i))
+                (list (symbol (str "op" i)) ['self] :-> 'any)))
+        (decl (+ i 1)))))
+(decl 0)
+
+;; each worker registers its own impl, concurrently
+(defn worker (i parent)
+  (do (register-impl (symbol (str "A" i)) (symbol (str "op" i)) :int (fn (x) i) nil)
+      (send parent [:done i])))
+
+(defn spawn-all (i) (if (>= i n) :ok (do (spawn (worker i (self))) (spawn-all (+ i 1)))))
+(defn collect (k) (if (= k 0) :ok (receive ([:done _] (collect (- k 1))) (after 20000 :timeout))))
+
+(spawn-all 0)
+(collect n)
+
+;; now count how many actually made it into the registry
+(defn missing (i acc)
+  (if (>= i n) acc
+    (missing (+ i 1)
+      (if (nil? (impl-for [(symbol (str "A" i)) (symbol (str "op" i))] :int)) (cons i acc) acc))))
+
+(let (lost (missing 0 nil))
+  (println (str "registered=" n " LOST=" (count lost)
+                (if (nil? lost) "  (all present)" (str "  e.g. " (pr-str (take 8 lost)))))))

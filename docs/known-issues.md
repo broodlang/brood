@@ -17,7 +17,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-22 | concurrent `register-impl` lost ~40% of impls (whole-registry read-modify-write) | ✅ fixed 2026-08-01 |
+| KI-22 | concurrent registration loses ~40% of registrations (15 registries) | ⬜ **open**, root cause found 2026-08-01 |
 | KI-21 | `nest run --for` / `--watch` generated a legacy `~p` pin — failed on any file | ✅ fixed 2026-07-30 |
 | KI-20 | a JIT fast link ran the callee against the *caller's* IC block (cold cache) | ✅ fixed 2026-07-30 |
 | KI-19 | VM resolved a call's free-global head *after* its arguments | ✅ fixed 2026-07-30 |
@@ -45,57 +45,58 @@ transient — each kept as a record with its regression test, so a recurrence is
 
 ---
 
-## KI-22 — concurrent `register-impl` silently lost impls · **found + fixed 2026-08-01**
+## KI-22 — concurrent registration silently loses registrations · **open, root cause found 2026-08-01**
 
-**Symptom.** `tests/ability_test.blsp`'s "open extension" test registers an impl and calls the
-op immediately:
+**Symptom.** Intermittent failures of the whole in-language suite, ~1 run in 5. Seen so far:
+`ability_test`'s "open extension" (`(esize [1 2 3])` returns `-1`, the `:default` impl, right
+after its `:vector` impl was registered on the line above) and `modules_test`'s "provide records
+a feature idempotently" (its own feature missing from `*features*` on the next line). Because
+nextest retries, `make test` still prints `929 passed` with only a `FLAKY` marker — and
+`make test | tail` discards the failing attempt, which is printed *above* the summary.
 
-```
-(impl Extend :vector (esize [v] (* 10 (count v))))
-(assert= (esize [1 2 3]) 30)          ; intermittently -1 — the :default impl
-```
+**Root cause: a lost update.** Every load-time registry is one global holding a whole map or
+list, written as `(def *X* (assoc *X* …))` — a read-modify-write. Two processes registering at
+once each read the old value and each write their own successor; the later write silently drops
+the earlier one. Reproduce with `scripts/fuzz/stress/registry_race.blsp`: N processes, one
+**private** ability each (so nothing is a legitimate precedence contest), measured
+**24/50, 88/200, 218/500 lost — about 40%**. It is not a dispatch-cache bug; the cache was never
+involved.
 
-It fails roughly **one in five to one in eight** full in-language suite runs. Because nextest
-retries, `make test` still prints `929 passed` and only a `FLAKY` marker gives it away — and
-piping the run through `tail` discards the failing attempt, which is printed *above* the
-summary. That is why this went unexplained for three sessions.
+**Fifteen registries share the shape**, so multimethod registration has the identical bug to
+ability registration: `*record-ids*`, `*features*`, `*module-docs*`, `*deprecation-seen*`,
+`*abilities*`, `*ability-owner*`, `*op-ability*`, `*ability-derives*`, `*sealed*`,
+`*ability-requires*`, `*multi-algebra*`, `*methods*`, `*method-from*`, `*impls*`, `*impl-from*`.
 
-**What is ruled out.** Cross-test collision on a shared ability name. The test originally
-extended the shared `Size`, which several NON-serial blocks in the same file dispatch on, and
-`:serial` only orders tests *within* one block — so a collision was the obvious theory. Moving
-the test onto a private `Extend` ability that **nothing else in the tree touches** did not fix
-it: still reproduced, on run 8 of 10. Also ruled out: the block not being serial (it is).
+**Why it matters past the test suite.** `impl` is hot-reloadable by design, so a registration
+dropped by a concurrent one leaves an op dispatching to `:default` — silently and permanently.
 
-**So the registration itself is not reliably visible to the next dispatch** when the rest of
-the suite is running concurrently (other processes are registering unrelated impls throughout).
-That points at the shared `%dispatch` inline cache / ability registry — ADR-172 §7, the cache
-that memoises id→impl and is supposed to deopt on an epoch bump. The `dispatch cache is
-transparent` block two describes below exists to test exactly that invariant and passes; this
-is the same invariant failing under concurrency.
+### Two fixes tried and REVERTED — read before attempting a third
 
-**Why it matters beyond the test.** `impl` is hot-reloadable by design. If a registration can
-be missed by an immediately-following call while other processes register, then a live
-`impl` reload can silently dispatch to the stale (or `:default`) implementation — a wrong
-answer, not a crash. The test is the messenger.
+1. **Optimistic retry** (write, re-read, retry if our key vanished). Cut the loss from ~44% to
+   ~20% but cannot close the window — every retry has the same read-write gap. A partial fix for
+   a wrong-answer bug is worse than none: it just makes the flake rarer and harder to find.
+2. **A ticket lock on `table-incr`** (the one atomic read-modify-write the language has). This
+   *did* reach `LOST=0` at 50/200/500/1000 and took the suite from failing on run 8 of 10 to
+   10/10 clean under `nest test` — and then made `make test` **worse**: the 120-process
+   regression test took **157 s** of burnt CPU and still lost one, because the wait was a bounded
+   busy-spin that heavy load blows straight through, after which the waiter proceeds
+   unsynchronised. Adding `sleep` between checks fixed the CPU burn but exposed the next flaw:
+   a waiter that times out never bumps `:served`, which desynchronises the ticket sequence
+   permanently, so every later registration pays the full timeout (20 s constant, regardless of
+   N). Reverted.
 
-**Root cause: a lost update, not a cache bug.** `register-impl` did
-`(def *impls* (assoc *impls* …))` — a read-modify-write of ONE shared global holding the whole
-registry. Two processes registering at once each read the old map and each wrote their own
-successor, so the later write silently dropped the earlier impl. A direct probe (N processes,
-one private ability each, so no legitimate precedence contest) measured **24/50, 88/200 and
-218/500 lost — about 40%**. The dispatch cache was never at fault; there was nothing to find.
+**What a real fix probably looks like.** A **registrar process** — registration becomes a
+synchronous call to one process that performs the write single-threaded. No spinning (a blocking
+receive parks the caller and costs a worker nothing), no timeout, no desync, and one writer means
+zero lost updates by construction. It is the "a process holding state in its loop" option
+`CLAUDE.md` names for mutable state. The open question is **bootstrap**: registrations happen
+during prelude load, so the registrar has to exist first, and spawning it lazily is itself a
+race. Note the registries cannot simply become `Table`s — dispatch reads `*impls*` on every call
+and a table deep-clones values in and out, which would put a closure copy on the hot path.
 
-**Fix.** The registry has to stay an immutable global map (`%dispatch`/`vm_dispatch` reads it on
-every call, and a `Table` deep-clones values in and out, which would put a closure copy on the
-dispatch hot path), so the *write* is serialised instead: a ticket lock built on `table-incr`,
-the one atomic read-modify-write the language has. Registration is rare — load time and hot
-reload — so the cost is irrelevant, and dispatch is untouched. The wait is **bounded**, falling
-back to an unsynchronised write, so a lock holder that dies mid-section degrades to the old
-behaviour rather than deadlocking the registry during prelude load.
-
-**Verified:** the probe goes 218/500 lost → **0 lost** at 50/200/500/1000; the suite went from
-failing on run 8 of 10 to **10/10 clean**; and the regression test (`concurrent impl
-registration (KI-22)`) was confirmed to fail (56 lost) with the lock neutered.
+**Reproduce:** `N=500 brood scripts/fuzz/stress/registry_race.blsp` (fast, deterministic — do
+not use the suite flake, which is slow and 1-in-5). For the suite itself, `make test` is the
+harsher environment; ten clean `nest test` runs proved nothing.
 
 ## KI-20 — a JIT fast link ran the callee against the **caller's** IC block · **fixed 2026-07-30**
 
