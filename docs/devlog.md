@@ -13599,3 +13599,45 @@ TCO through `eval` and hide behind this note.
 **Caveat worth stating:** the original report is on another machine, so I have not confirmed
 this is the same case. If it was something else, the two tests above now bound the search — the
 ordinary shapes are proven good.
+
+## 2026-08-01 (cont.) — thread 6: the asymmetry located, a fix attempted and reverted
+
+Found exactly where the per-call promotion comes from, tried the obvious fix, and backed it
+out when the measurement said it did nothing.
+
+**The asymmetry.** `exec_chunk`'s `MakeClosure` binds a **zero-capture closure to the global
+env** (`if ncap == 0 && self_name.is_none() { heap.global() }`), which makes it a *constant* —
+the const-closure cache then builds and promotes it once. The tree-walker's `fn` passes its
+**frame** unconditionally, so the same closure is never a constant. A JIT deopt routes
+activations through the tree-walker, which is why the JIT is implicated: **2675** tree-walker
+`fn` creations with a frame env under the JIT against **26** with `BROOD_NO_JIT=1`, matching
+the 2660-of-2671 promotions `BROOD_TRACE_PROMOTE=1` attributes to
+`spawn_impl <- spawn_link`. The trace now prints capture state, and `captures-frame` is the
+tell: it means the const cache could not dedupe that closure.
+
+**The attempt.** Give `ClosureTemplate` the set of every symbol in the `fn` form and, when no
+name bound in the enclosing chain appears in it, capture the global env instead. The reasoning
+was sound — a *superset* of the free variables can only cost the optimisation, never take a
+frame that was needed, and `letrec` pre-binds its names to nil before evaluating any RHS, so
+recursive references are already present in the frame and correctly block the downgrade.
+
+**It did nothing, and the measurement said so immediately.** The symbol sets run 13–50 entries
+(the scan keeps parameter names and operator heads), so essentially every one collides with
+*something* bound in an enclosing frame: **zero downgrades in 10 000 cycles**, promotions
+unchanged at 2669. Reverted the whole thing — `ClosureTemplate` field, chain test, and the
+tree-walker reroute.
+
+**What it needs is the real analysis**, not a superset: free variables with the fn's own params
+and inner binders excluded. The compiler already computes exactly that (`compile_make_closure`
+builds a `referenced` set against a `Scope`), so the work is lifting it somewhere the
+tree-walker can reach — or removing the reason deopts land in the tree-walker at all, which is
+worth doing on its own since that path is ~10× slower (cf. the `eval` 14× cliff).
+
+**Also found, and filed as KI-23:** the KI-22 lost-update shape survives in ~10 registries that
+live in `std/` modules rather than the prelude — `*repl-commands*`, `*traced-fns*`,
+`*protocols*`, `*telemetry-handlers*`, `*faces*`, `*type-layers*` and friends. It is already
+biting: `repl_test`'s "re-registering a name replaces rather than duplicates" fails **2 runs in
+5**, two concurrent registrations each filtering the old list and each appending. Most convert
+mechanically onto `%registry-update!`; two do not — `*repl-commands*` is filter-then-append
+over a list (no existing op fits), and `*units*`/`*collected*` are `defdyn`, where writing at
+`env_root` would bypass an active `binding`.
