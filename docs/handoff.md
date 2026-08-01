@@ -97,35 +97,29 @@ From the published run (`brood-benchmarks/results/`):
    projection by extrapolating MB/*minute* when the driver is MB/*iteration* — the long run
    actually reached 3M iterations / 3.06 GB in 7 h. A8's trap, freshly re-stepped-in.
 
-6. **Throughput decay — CAUSE FOUND 2026-08-01, not yet fixed. A capture-free `spawn`
-   thunk is re-promoted per call on the supervisor path.** Worth ~2× throughput and ~2× RSS.
-   **The chain, end to end.** `spawn`/`spawn-link` must promote the spawned thunk into the
-   shared RUNTIME region — a new process cannot run code from another process's LOCAL heap.
-   At ordinary call sites that costs nothing repeatable, because the compiler **const-lifts**
-   a capture-free thunk (`eval::compile::const_node`): it is promoted **once** and reused. On
-   the supervisor path it is not const-lifted, so it is rebuilt LOCAL on every call and
-   promoted again — into a region that is append-only. `BROOD_TRACE_PROMOTE=1` on a
-   supervisor workload: **1382 of 1389 promotions come from `spawn_impl <- spawn_link`.**
-   **Measured impact** (`decay_isolate` `supnocrash`, 20 s, same binary): default **300 k ops /
-   639 MB** with throughput decaying 19 083 → 16 611 ops/s; `BROOD_NO_JIT=1` **590 k ops /
-   318 MB**, `rt_closures` 73 → 75, throughput *flat*. The region is per-runtime, which is why
-   a restart cures it.
-   **Ruled out, each by direct probe** (all ~0.001 promotions/op against the supervisor's
-   0.27–0.6): creating a capture-free closure in a hot arm; creating and **sending** one
-   (ADR-194's share path is fine; `BROOD_NO_SHARE_FN=1` changes nothing); receive-thunk +
-   call + spawn; `spawn` **and** `spawn-link` in a hot loop from the root **and** from a
-   spawned process; `link`; storing the spec in long-lived state; the restart-intensity
-   window; and the RUNTIME reclamation policy (`BROOD_RT_GC_FLOOR` at 64 / default /
-   100000000 gives 2512 / 2663 / 2661 — so no feedback loop through compaction). Also note
-   the closure FORM is irrelevant: `:start` as an inline anon closure and as a plain global
-   fn reference both promote 11 876 vs 11 877 per 20 k.
-   **The fix is a design call**, which is why it is not done: either teach the compiler to
-   const-lift the thunk on this path too, or memoise the promoted form at the spawn boundary
-   the way `store_const_closure` already does for const closures — in the scheduler/GC
-   boundary, so it wants a deliberate pass, not a rushed one.
-   **Tool:** `BROOD_TRACE_PROMOTE=1` (new) names every closure entering the region with the
-   frames that put it there. Reach for it first next time; hours of elimination bisecting
-   found less than one run of it did.
+6. **Throughput decay — cause found, one fix attempted and REVERTED. Worth ~2× throughput
+   and ~2× RSS.** `spawn` must promote its thunk into the shared RUNTIME region. At ordinary
+   call sites that is free after the first time, because `exec_chunk`'s `MakeClosure` binds a
+   **zero-capture closure to the global env**, which makes it a constant the const-closure
+   cache builds and promotes once. The tree-walker's `fn` passes its **frame**
+   unconditionally, so the closure is never a constant — and a JIT deopt routes activations
+   through the tree-walker. Measured: **2675** tree-walker `fn` creations with a frame env
+   under the JIT vs **26** with `BROOD_NO_JIT=1`, and the promotions match
+   (`BROOD_TRACE_PROMOTE=1` shows 2660 of 2671 as `<anon> [captures-frame arity=0] ::
+   spawn_impl <- spawn_link`).
+   **Attempted and reverted:** give `ClosureTemplate` a set of every symbol in the form and,
+   when no name bound in the enclosing chain appears in it, capture the global env instead.
+   Sound (a superset can only miss the optimisation, and `letrec` pre-binds its names so
+   recursion is caught) but **useless in practice**: the sets run 13–50 symbols and always
+   collide with something in an enclosing frame, so the downgrade never fired once in 10 000
+   cycles. Reverted.
+   **What it actually needs:** real free-variable analysis — the fn's own params and inner
+   binders excluded — which the compiler already does (`compile_make_closure` computes a
+   `referenced` set against a `Scope`). Either lift that analysis so the tree-walker can use
+   it, or stop deopts landing in the tree-walker at all (they are ~10× slower regardless, so
+   that is worth its own look — see the `eval` 14× cliff in `deferred.md`).
+   **Tool:** `BROOD_TRACE_PROMOTE=1` names every closure entering the region, now with its
+   capture state — `captures-frame` is the tell that the const cache could not dedupe it.
 
 **Explicitly NOT open: a memory leak.** See §5 — it was chased and does not exist. The soak
 strengthens this: 12.7 M iterations with `rt-closures` flat and every fresh process starting

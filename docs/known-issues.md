@@ -17,7 +17,8 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-22 | concurrent registration lost ~40% of registrations (15 registries) | ✅ fixed 2026-08-01 |
+| KI-23 | the KI-22 lost-update shape also exists in ~10 std-module registries | ⬜ **open** (found 2026-08-01) |
+| KI-22 | concurrent registration lost ~40% of registrations (15 prelude registries) | ✅ fixed 2026-08-01 |
 | KI-21 | `nest run --for` / `--watch` generated a legacy `~p` pin — failed on any file | ✅ fixed 2026-07-30 |
 | KI-20 | a JIT fast link ran the callee against the *caller's* IC block (cold cache) | ✅ fixed 2026-07-30 |
 | KI-19 | VM resolved a call's free-global head *after* its arguments | ✅ fixed 2026-07-30 |
@@ -44,6 +45,37 @@ ADRs / topic docs.
 transient — each kept as a record with its regression test, so a recurrence is recognizable.
 
 ---
+
+## KI-23 — the KI-22 lost update also exists in std-module registries · **open, found 2026-08-01**
+
+KI-22 fixed the **prelude's** fifteen registries by routing them through
+`%registry-update!`. The same `(def *X* (assoc *X* …))` read-modify-write is used by at least
+ten more registries that live in `std/` modules, and they were not converted:
+
+| registry | file |
+|---|---|
+| `*repl-commands*` | `std/tool/repl.blsp` |
+| `*traced-fns*` | `std/tool/debug.blsp` |
+| `*protocols*` | `std/protocol.blsp` |
+| `*telemetry-handlers*`, `*telemetry-events*` | `std/telemetry.blsp` |
+| `*faces*` | `std/editor/face.blsp` |
+| `*type-layers*`, `*auto-type-by-file*` | `std/editor/layers.blsp` |
+| `*units*`, `*collected*` | `std/tool/test.blsp` (**`defdyn` — see the caveat**) |
+
+**It is already biting.** `tests/repl_test.blsp`'s "re-registering a name replaces rather than
+duplicates" fails **2 runs in 5**: two concurrent registrations each filter the old list and
+each append, so the duplicate the test forbids survives.
+
+**Most convert mechanically** — a plain `assoc`/`dissoc`/`cons` maps straight onto
+`%registry-update!`'s existing `:assoc` / `:dissoc` / `:cons-new`.
+
+**Two do not, and need a decision:**
+- `*repl-commands*` is *filter-then-append* over a list, not an assoc, so no existing op fits.
+  Either add an op for it, or key the registry by command name (a map, `:assoc`) and carry the
+  display order explicitly — the latter also drops the per-lookup filter scan.
+- `*units*` / `*collected*` are **`defdyn`**, not plain globals. `%registry-update!` writes at
+  `env_root(env)`, which would bypass an active `binding`, so converting them as-is would be
+  wrong. Dynamic vars need their own answer.
 
 ## KI-22 — concurrent registration silently lost registrations · **found + fixed 2026-08-01**
 
