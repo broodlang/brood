@@ -245,6 +245,18 @@ enum Cmd {
         #[arg(long)]
         trace: bool,
 
+        /// Emit machine-readable output instead of the human report: `tap` (TAP
+        /// version 13, for a CI that speaks it) or `json` (one object with the full
+        /// structured results). Suppresses the live progress dots and summary.
+        #[arg(long, value_name = "NAME")]
+        formatter: Option<String>,
+
+        /// Only run test files whose sources changed since they last ran — a test
+        /// file re-runs when it, or a source file it transitively requires, has a
+        /// newer mtime than the last recorded run. Whole-project runs only.
+        #[arg(long)]
+        stale: bool,
+
         /// Report FUNCTION-level coverage after the run: which of the project's
         /// functions the suite never called. Instrumenting rebinds every project
         /// function through a counting shim, so a `--cover` run is not a timing
@@ -550,6 +562,8 @@ fn run_main(cli: Cli) {
             partitions,
             shard,
             trace,
+            formatter,
+            stale,
             cover,
             cover_lines,
             cover_branches,
@@ -589,6 +603,8 @@ fn run_main(cli: Cli) {
                 partitions,
                 shard,
                 trace,
+                formatter,
+                stale,
                 cover,
                 cover_lines,
                 cover_branches,
@@ -730,6 +746,8 @@ struct TestOpts {
     partitions: Option<u64>,
     shard: u64,
     trace: bool,
+    formatter: Option<String>,
+    stale: bool,
     cover: bool,
     cover_lines: bool,
     cover_branches: bool,
@@ -804,6 +822,12 @@ impl TestOpts {
         // hung case, and it suppresses the dots because the two together are noise.
         if self.trace {
             parts.push(":trace".to_string());
+        }
+        if let Some(name) = &self.formatter {
+            parts.push(format!(":formatter {}", blsp_string(name)));
+        }
+        if self.stale {
+            parts.push(":stale".to_string());
         }
         if self.failed {
             parts.push(":failed".to_string());

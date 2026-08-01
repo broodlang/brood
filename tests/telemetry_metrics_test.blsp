@@ -350,3 +350,33 @@
         (is (int? (get g :value)))))
     (detach-all)
     (stop-telemetry)))
+
+;; ---- remote tier: subscribe/forward protocol (ADR-053 shape) -----------------
+;; Single-runtime protocol test: the target agent, the subscriber watcher and the local
+;; listener share one runtime here (cross-node routing is transparent dist `send`, covered
+;; by the dist suite). It exercises subscribe → attach forwarder → forward on emit →
+;; re-emit locally.
+(describe "telemetry — remote tier"
+  :isolated
+  (test "a target emit is forwarded to a subscriber and re-emitted into the local stream"
+    (reset-metrics)
+    (detach-all)
+    (start-telemetry)
+    (let (cap (table))
+      (attach :remote-cap [:remote :hits] (fn (e m md) (table-put cap :got {:m m :md md})))
+      (let (agent (spawn (telemetry/telemetry--serve-loop nil))
+            watcher (telemetry/telemetry--subscribe-to agent [:app :hit] [:remote :hits]))
+        (sleep 30)
+        ;; a target-side emit rides the forwarder to the subscriber, which re-emits locally
+        (emit [:app :hit] {:count 1} {:path "/x"})
+        (sleep 30)
+        (telemetry-sync)
+        (let (got (table-get cap :got))
+          (assert= {:count 1} (get got :m))
+          (assert= "/x" (get (get got :md) :path))
+          ;; the origin event is tagged into the re-emitted metadata
+          (assert= [:app :hit] (get (get got :md) :remote-event)))
+        (stop-subscribe-remote watcher)
+        (stop-telemetry-serve agent)))
+    (detach-all)
+    (stop-telemetry)))
