@@ -35,7 +35,14 @@ primitives. The kernel also provides the always-available file primitives
 
 (defn write-lines (path lines)
   "Write `lines` (a sequence of strings) to `path`, one per line, each terminated by a newline."
-  (spit path (fold (fn (acc l) (str acc l "\n")) "" lines)))
+  ;; One `join` pass (native `%string-join` — walks `lines` once into one buffer) plus the
+  ;; final newline. This was a `(fold (fn (acc l) (str acc l "\n")) "" lines)`, which recopies
+  ;; the whole accumulator per line, so writing a file was O(total²): 2000 lines 37 ms,
+  ;; 4000 144 ms, 8000 361 ms, 16 000 **1888 ms**. The same shape `read-lines`' sibling
+  ;; comment at `:67` already warns about for `append`.
+  ;; The empty guard matters: `(join "\n" ())` is "", and an unguarded trailing "\n" would
+  ;; write a one-byte file where the fold wrote an empty one.
+  (spit path (if (empty? lines) "" (str (join "\n" lines) "\n"))))
 ;; `lines` is `seqable`, not `(list string)` — `fold` accepts a list, vector, set or range,
 ;; so the broader domain checks the argument (a non-seqable is flagged) without false-flagging
 ;; a vector caller the way `(list string)` would.

@@ -114,7 +114,38 @@
   (test "read-lines of an empty file is nil"
     (let (p (path-join (ftmp) "empty.txt"))
       (spit p "")
-      (assert= (read-lines p) nil))))
+      (assert= (read-lines p) nil)))
+  ;; write-lines built its output with `(fold (fn (acc l) (str acc l "\n")) "" lines)`,
+  ;; recopying the whole accumulator per line — O(total²). 16 000 lines took 1888 ms;
+  ;; one `join` pass makes it 1 ms. These pin the edge cases the rewrite has to keep
+  ;; identical (the empty case especially: an unguarded trailing newline would write a
+  ;; one-byte file where the fold wrote an empty one).
+  (test "write-lines terminates every line, including a single one"
+    (let (p (path-join (ftmp) "one.txt"))
+      (write-lines p ["solo"])
+      (assert= (slurp p) "solo\n")))
+  (test "write-lines of nothing writes an empty file, not a newline"
+    (let (p (path-join (ftmp) "none.txt"))
+      (write-lines p ())
+      (assert= (slurp p) "")
+      (assert= (read-lines p) nil)))
+  (test "write-lines accepts any seqable, not just a list"
+    (let (p (path-join (ftmp) "seq.txt"))
+      (write-lines p ["a" "b"])
+      (assert= (slurp p) "a\nb\n")
+      (write-lines p (list "c" "d"))
+      (assert= (slurp p) "c\nd\n")))
+  ;; The shape guard: 8x the lines must not cost ~64x the time. Generous bound —
+  ;; this is a regression tripwire, not a benchmark (see handoff §5 on noise).
+  (test "write-lines is linear in the number of lines"
+    (let (p (path-join (ftmp) "scale.txt")
+          mk (fn (n) (map (fn (i) (str "line " i " with a little payload")) (range n)))
+          ms (fn (n) (let (ls (mk n) t0 (now-ns))
+                       (do (write-lines p ls) (quot (- (now-ns) t0) 1000000))))
+          small (ms 2000)
+          big (ms 16000))
+      ;; quadratic would be ~64x small (measured 37 -> 1888 before the fix)
+      (is (< big (+ 200 (* 12 small)))))))
 
 (describe "file: predicates"
   (test "file? is true for a regular file, false for a directory"

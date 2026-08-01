@@ -76,7 +76,11 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
                syms))
     (if (empty? defs)
       ""
-      (str "## Definitions\n\n" (fold (fn (acc s) (str acc (docs--entry s (eval s)) "\n")) "" defs)))))
+      ;; `(apply str (map …))` joins once. A `(str acc …)` fold recopies the whole
+      ;; accumulator per entry, so a module's Definitions section was O(output²) in the
+      ;; markdown it generates — the same shape that made `write-lines` take 1888 ms for
+      ;; 16 000 lines (std/file.blsp).
+      (str "## Definitions\n\n" (apply str (map (fn (s) (str (docs--entry s (eval s)) "\n")) defs))))))
 
 ;; The "Variables" section: public names the module bound to non-function values.
 (defn docs--section-vars (syms)
@@ -86,7 +90,7 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
                syms))
     (if (empty? vars)
       ""
-      (str "## Variables\n\n" (fold (fn (acc s) (str acc "- `" (name s) "`\n")) "" vars)))))
+      (str "## Variables\n\n" (apply str (map (fn (s) (str "- `" (name s) "`\n")) vars))))))
 
 ;; Assemble one module's Markdown from its title, module doc, and added names.
 (defn docs--render (title mdoc syms)
@@ -126,7 +130,9 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
     (project-setup root)
     (let (dirs (project/project-abs-paths root *project-source-paths*)
           files (fold (fn (acc d) (append acc (project/project-collect-sources d))) nil dirs))
-      (fold (fn (acc f) (str acc (document-file f) "\n")) "" files))))
+      ;; One join over the whole project, not a per-file recopy of everything emitted
+      ;; so far — this is the outermost of the three, so it was O(total-docs²).
+      (apply str (map (fn (f) (str (document-file f) "\n")) files)))))
 
 ;; --- the complete builtin/prelude reference (`nest doc --all`) ---------------
 
