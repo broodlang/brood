@@ -357,9 +357,12 @@
 ;; values named at the breakpoint. This is the flagship debugger gap the roadmap named.
 (defn pb-worker (a b done)
   ;; params a,b + a couple of lets, none named at the break — all must be reachable
+  ;; from eval-at. They're referenced after the break (a realistic breakpoint), so the
+  ;; checker sees them used while the point stands: eval-at reaches them without them
+  ;; being passed to `break`.
   (let (sum (+ a b) prod (* a b))
     (break "pb")
-    (send done [:ok])))
+    (send done [:result sum prod])))
 
 (describe "debugger — path B: automatic local capture via %scope"
   :isolated
@@ -376,14 +379,14 @@
       ;; and a computed expression over several of them
       (assert= 84 (eval-at dbg 1 "(* sum prod)"))
       (resume-all dbg)
-      (assert= [:ok] (receive ([:ok] [:ok]) (after 1000 :timeout)))
+      (assert= [:result 7 12] (receive ([:result s p] [:result s p]) (after 1000 :timeout)))
       (dbg-stop dbg)))
 
   (test "an explicitly-named val overrides a captured local of the same name"
     ;; :a is passed as 99, shadowing the local a=3 in the snapshot
     (let (dbg (start-debugger) me (self))
       (spawn (with-debugger dbg
-               (fn () (let (a 3) (break "ov" :a 99) (send me [:ok])))))
+               (fn () (let (a 3) (break "ov" :a 99) (send me [:done a])))))
       (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))
       (assert= 99 (eval-at dbg 1 "a"))
       (resume-all dbg)
