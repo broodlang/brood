@@ -33,9 +33,22 @@ use super::walk::list_items;
 pub(super) fn check_recursion(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
     // Deep-form stack safety — the same stacker remedy as walk.rs's
     // check_into/collect_def_names (host-panic hardening, 2026-07-23).
+    let before = out.len();
     stacker::maybe_grow(64 * 1024, 1024 * 1024, || {
         check_recursion_inner(heap, form, out)
-    })
+    });
+    // One fault, one diagnostic. A pattern-clause `defn` is lowered to `match*`
+    // before we see it, and the lowering repeats the body across dispatch paths, so
+    // a single non-tail self-call was walked — and reported — three times over. The
+    // duplicates are indistinguishable by position and text, which is exactly what
+    // makes them safe to collapse here rather than in every consumer.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let deduped: Vec<(Option<Pos>, String)> = out
+        .split_off(before)
+        .into_iter()
+        .filter(|d| seen.insert(format!("{:?}|{}", d.0, d.1)))
+        .collect();
+    out.extend(deduped);
 }
 
 fn check_recursion_inner(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, String)>) {
@@ -58,7 +71,7 @@ fn check_recursion_inner(heap: &Heap, form: Value, out: &mut Vec<(Option<Pos>, S
         if value::symbol_is(head, kw::DEF) {
             if let Value::Sym(name) = items[1] {
                 if is_fn_form(heap, items[2]) {
-                    analyze_fn(heap, name, items[2], out);
+                    analyze_fn(heap, name, items[2], heap.form_pos_only(form), out);
                 }
             }
         }
@@ -78,7 +91,7 @@ fn is_fn_form(heap: &Heap, v: Value) -> bool {
 
 /// Analyze a `(fn …)` value: one body for a single-arity fn, or each arm's body
 /// for a multi-arity fn. The fn body's last form is in tail position.
-fn analyze_fn(heap: &Heap, name: Symbol, fnval: Value, out: &mut Vec<(Option<Pos>, String)>) {
+fn analyze_fn(heap: &Heap, name: Symbol, fnval: Value, enclosing: Option<Pos>, out: &mut Vec<(Option<Pos>, String)>) {
     let Some(items) = list_items(heap, fnval) else {
         return;
     };
@@ -91,12 +104,12 @@ fn analyze_fn(heap: &Heap, name: Symbol, fnval: Value, out: &mut Vec<(Option<Pos
         for &arm in &items[1..] {
             // arm = (params body…): body is everything after the param list.
             if let Some(arm_items) = list_items(heap, arm) {
-                analyze_body(heap, name, &arm_items[1..], out);
+                analyze_body(heap, name, &arm_items[1..], enclosing, out);
             }
         }
     } else {
         // (fn params body…): body is everything after the param list.
-        analyze_body(heap, name, &items[2..], out);
+        analyze_body(heap, name, &items[2..], enclosing, out);
     }
 }
 
@@ -108,19 +121,22 @@ fn first_is_list(heap: &Heap, v: Value) -> bool {
 }
 
 /// A body (implicit `do`): the last form is in tail position, the rest are not.
-fn analyze_body(heap: &Heap, name: Symbol, body: &[Value], out: &mut Vec<(Option<Pos>, String)>) {
+fn analyze_body(heap: &Heap, name: Symbol, body: &[Value], enclosing: Option<Pos>, out: &mut Vec<(Option<Pos>, String)>) {
+    let here = enclosing;
     if body.is_empty() {
         return;
     }
     let last = body.len() - 1;
     for (i, &form) in body.iter().enumerate() {
-        walk(heap, form, i == last, name, out);
+        walk(heap, form, i == last, name, here, out);
     }
 }
 
 /// Walk `form`, knowing whether it is in tail position, flagging any non-tail
 /// call to `name`.
-fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, out: &mut Vec<(Option<Pos>, String)>) {
+fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, enclosing: Option<Pos>, out: &mut Vec<(Option<Pos>, String)>) {
+    // the nearest known source position: this form's own, else the one handed down
+    let here = heap.form_pos_only(form).or(enclosing);
     let Some(items) = list_items(heap, form) else {
         return; // atom — not a call
     };
@@ -140,16 +156,16 @@ fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, out: &mut Vec<(Optio
         if value::symbol_is(head, kw::IF) {
             // (if test then else?): test is non-tail; then/else inherit `tail`.
             if let Some(&t) = items.get(1) {
-                walk(heap, t, false, name, out);
+                walk(heap, t, false, name, here, out);
             }
             for &branch in items.iter().skip(2) {
-                walk(heap, branch, tail, name, out);
+                walk(heap, branch, tail, name, here, out);
             }
             return;
         }
         if value::symbol_is(head, kw::DO) {
             // do: the last form is tail; earlier forms are for effect (non-tail).
-            analyze_body(heap, name, &items[1..], out);
+            analyze_body(heap, name, &items[1..], here, out);
             return;
         }
         if value::symbol_is(head, kw::LET) || value::symbol_is(head, kw::LETREC) {
@@ -158,16 +174,16 @@ fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, out: &mut Vec<(Optio
             if let Some(binds) = items.get(1).and_then(|&b| list_items(heap, b)) {
                 // values are at odd indices (1,3,5,…) of the flat binding list.
                 for v in binds.iter().skip(1).step_by(2) {
-                    walk(heap, *v, false, name, out);
+                    walk(heap, *v, false, name, here, out);
                 }
             }
-            analyze_body(heap, name, &items[2..], out);
+            analyze_body(heap, name, &items[2..], here, out);
             return;
         }
         if value::symbol_is(head, kw::DEF) || value::symbol_is(head, kw::DEFMACRO) {
             // A nested definition: its value expression is non-tail.
             if let Some(&v) = items.get(2) {
-                walk(heap, v, false, name, out);
+                walk(heap, v, false, name, here, out);
             }
             return;
         }
@@ -176,7 +192,12 @@ fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, out: &mut Vec<(Optio
         // flag it. Either way the arguments are evaluated in non-tail position.
         if head == name && !tail {
             out.push((
-                heap.form_pos_only(form),
+                // The lowering that turns pattern clauses into `match*` builds fresh
+                // forms, and a fresh form carries no source position — so this came
+                // out as `line: nil`, which no consumer can place. Fall back to the
+                // nearest ENCLOSING form that does have one: the reader is pointed at
+                // the definition rather than at nothing.
+                heap.form_pos_only(form).or(enclosing),
                 format!(
                     "{}: recursive call in non-tail position — deep recursion overflows the \
                      stack; restructure so the self-call is the last thing evaluated \
@@ -186,12 +207,12 @@ fn walk(heap: &Heap, form: Value, tail: bool, name: Symbol, out: &mut Vec<(Optio
             ));
         }
         for &arg in items.iter().skip(1) {
-            walk(heap, arg, false, name, out);
+            walk(heap, arg, false, name, here, out);
         }
     } else {
         // Computed head (e.g. ((fn …) args)) — everything is non-tail.
         for &child in &items {
-            walk(heap, child, false, name, out);
+            walk(heap, child, false, name, here, out);
         }
     }
 }
