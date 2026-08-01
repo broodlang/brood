@@ -13277,3 +13277,38 @@ takes ~10 suite runs, and a guessed fix here would mask it rather than remove it
 
 **The process lesson, which cost two sessions:** a green `N passed` line can hide a retried
 failure, and `make test | tail` throws away the only evidence. Keep the whole log.
+
+## 2026-08-01 — std/ scale sweep: `write-lines` was O(total²), and so was `nest doc`
+
+Resumed the sweep (handoff thread 1) with the shape the net findings taught: **grep for a
+`str`/`append`/`concat` whose argument is the accumulator.** That one grep over `std/` found
+both of today's.
+
+**`file/write-lines` — a public std API, quadratic.** It built its output with
+`(fold (fn (acc l) (str acc l "\n")) "" lines)`, recopying the whole accumulator per line:
+
+| lines | before | after |
+|---|---|---|
+| 2 000 | 37 ms | 0 ms |
+| 4 000 | 144 ms | 0 ms |
+| 8 000 | 361 ms | 0 ms |
+| 16 000 | **1888 ms** | **1 ms** |
+| 64 000 | — | 5 ms |
+
+One `join` (native `%string-join`, one pass into one buffer) plus the trailing newline. The
+empty case needs a guard — `(join "\n" ())` is `""`, and an unguarded trailing newline would
+write a one-byte file where the fold wrote an empty one. Four tests pin the edge cases (single
+line, empty, vector-vs-list seqable) plus a linearity tripwire.
+
+**`nest doc` had the same shape three times over, nested.** `docs--section-defs` folded
+`(str acc (docs--entry …))` per definition, `docs--section-vars` per variable, and
+`document-project` folded `(str acc (document-file f))` per *file* — the outermost one, so
+generating a project's docs was O(total-markdown²). All three are now `(apply str (map …))`,
+joining once. `nest doc` verified end-to-end on this repo.
+
+**Checked and deliberately left:** `template--loop` (`(str acc before val)` per `{{key}}` — same
+shape, but a template is small and the placeholder count doesn't scale with anything) and
+`project.blsp:1683`'s `(append a (list …))` per source file (O(files²) but **spine only**, and
+files are in the hundreds: ~90 k cons copies at N=300). Noted rather than churned.
+
+**Gates:** `nest test` 4083 passed, `nest check` clean.
