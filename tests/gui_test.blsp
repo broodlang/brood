@@ -15,5 +15,8 @@
   (test "a non-string :app-id is a type error, not an ignored key"
     (assert-error (gui-open nil nil nil {:app-id 42})))
 
+  (test "an empty :app-id is rejected — it would match no desktop entry"
+    (assert-error (gui-open nil nil nil {:app-id ""})))
+
   (test "the opts map is the last argument — a 5th is an arity error"
     (assert-error (gui-open nil nil nil {} :extra))))

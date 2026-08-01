@@ -1103,6 +1103,27 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     embedded_module!("editor/dockerfile", "std/editor/dockerfile.blsp"),
     embedded_module!("editor/lineedit", "std/editor/lineedit.blsp"),
     embedded_module!("format", "std/format.blsp"),
+    // The process-native tracing debugger — `break` (park without timeout),
+    // `span`/`span-spawn` (cross-process causal tree), `spy` routed to a debugger
+    // process. The actor-model answer to Elixir's `dbg`.
+    //
+    // CORE, not DEV, and this is the line the split turns on: a dev module is one that
+    // serves *developing* an app (the test framework, `nest doc`, the hot-reload
+    // watcher), not one an app's own shipped features are built from. A shipped editor
+    // IS a debugger (myedit's `C-c d` session, its *Spy* trace stream), so a lean
+    // release that omitted this couldn't run it — `require` fails at boot, since
+    // `run-bundle` loads every bundled module.
+    embedded_module!("debug", "std/tool/debug.blsp"),
+    // A persistent, image-isolated evaluator: a dedicated child runtime runs
+    // `(eval-server-run)` — one `pr-str`ed request map per stdin line, one reply
+    // line back — so a parent (an editor playground, a remote REPL) gets
+    // REPL-grade eval with per-request timeouts without exposing its own global
+    // table. The pure codec half is shared by clients (ADR-198).
+    //
+    // CORE for the same reason as `debug` (which it requires): "evaluate this snippet"
+    // is a shipped app's feature — myedit's tutorial playgrounds and `C-x C-e` ride
+    // this codec — not a tool for building one.
+    embedded_module!("eval-server", "std/tool/eval-server.blsp"),
 ];
 
 /// Dev/tooling modules — baked in only under the `dev-tools` feature (the dev
@@ -1111,6 +1132,14 @@ const CORE_MODULES: &[EmbeddedModule] = &[
 /// framework, process observer, MCP/doc/hot-reload tooling, or interactive REPL
 /// (ADR-038, docs/release.md). `project` stays in CORE — it boots the bundle;
 /// `lineedit`/`highlight` stay too (reusable UI, e.g. the editor's minibuffer).
+///
+/// **The test for this list:** a module belongs here only if it serves *developing*
+/// an app. If a shipped app's own features are built on it, it belongs in
+/// [`CORE_MODULES`] however tool-shaped it looks — `debug` and `eval-server` live
+/// there for exactly that reason (an editor ships a debugger and an eval
+/// playground). Getting this wrong is not a graceful degradation: `run-bundle`
+/// eagerly loads every bundled module, so one app module with a top-level
+/// `(require 'missing)` makes the released binary fail to boot at all.
 #[cfg(feature = "dev-tools")]
 const DEV_MODULES: &[EmbeddedModule] = &[
     // The test framework — `deftest`/`describe`/`assert=`/`is`. Never shipped.
@@ -1122,10 +1151,6 @@ const DEV_MODULES: &[EmbeddedModule] = &[
     embedded_module!("grammar", "std/tool/grammar.blsp"),
     // The process viewer / debug tooling (`nest observe`, `(observe)`).
     embedded_module!("observer", "std/tool/observer.blsp"),
-    // The process-native tracing debugger — `break` (park without timeout),
-    // `span`/`span-spawn` (cross-process causal tree), `spy` routed to a debugger
-    // process. The actor-model answer to Elixir's `dbg`.
-    embedded_module!("debug", "std/tool/debug.blsp"),
     // The hot-reload file watcher — a dev-loop convenience.
     embedded_module!("reload", "std/tool/reload.blsp"),
     // The Model Context Protocol tool surface — `(mcp-tools)` returns the
@@ -1136,12 +1161,6 @@ const DEV_MODULES: &[EmbeddedModule] = &[
     // binaries (`brood`, `nest repl`) just bootstrap into `(repl-run)`. A shipped
     // app runs its own `:main`, never the REPL.
     embedded_module!("repl", "std/tool/repl.blsp"),
-    // A persistent, image-isolated evaluator: a dedicated child runtime runs
-    // `(eval-server-run)` — one `pr-str`ed request map per stdin line, one reply
-    // line back — so a parent (an editor playground, a remote REPL) gets
-    // REPL-grade eval with per-request timeouts without exposing its own global
-    // table. The pure codec half is shared by clients (ADR-198).
-    embedded_module!("eval-server", "std/tool/eval-server.blsp"),
 ];
 
 /// Empty in a lean (`--no-default-features`) release runtime — the dev modules
