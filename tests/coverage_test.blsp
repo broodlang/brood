@@ -225,3 +225,25 @@
     (refute (%coverage-precompile %add)))
   (test "the begin! pass over a dir with no project functions compiles nothing"
     (assert= (coverage/coverage-line-begin! (list "/nonexistent-coverage-dir")) 0)))
+
+;; Branch coverage (ADR-148 tier 2): the pure helpers behind coverage-branch-report.
+;; The end-to-end instrumentation is exercised by `nest test --cover-branches`; these
+;; unit-test the edge-folding and per-branch state classification.
+(describe "coverage: branch edge folding"
+  (test "edges fold into {[line col] -> {:t :f}}"
+    (let (m (coverage/coverage--branch-edges (list [4 5 true] [4 5 false] [6 5 false])))
+      (assert= {:t true :f true} (get m [4 5]))
+      (assert= {:t false :f true} (get m [6 5]))))
+  (test "a single-edge branch records only that side"
+    (let (m (coverage/coverage--branch-edges (list [10 7 true])))
+      (assert= {:t true :f false} (get m [10 7])))))
+
+(describe "coverage: branch state classification"
+  (test ":both when both edges taken"
+    (assert= :both (coverage/coverage--branch-state {[4 5] {:t true :f true}} [4 5])))
+  (test ":then when only the true edge taken"
+    (assert= :then (coverage/coverage--branch-state {[4 5] {:t true :f false}} [4 5])))
+  (test ":else when only the false edge taken"
+    (assert= :else (coverage/coverage--branch-state {[4 5] {:t false :f true}} [4 5])))
+  (test ":none when the branch was never reached"
+    (assert= :none (coverage/coverage--branch-state {} [4 5]))))

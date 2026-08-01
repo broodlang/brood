@@ -727,18 +727,32 @@ pub(super) fn gui_open(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
             expect_int(heap, "gui-open", arg(args, 2))? as f64,
         )),
     };
-    // 4th arg: an opts map. `:decorations false` gives a borderless window — for an
-    // app that draws its own chrome and would otherwise sit under a redundant OS
-    // title bar. Absent (every existing caller) means decorated, as before.
-    let decorations = match arg(args, 3) {
-        Value::Map(id) => match heap.map_get(id, value::kw("decorations")) {
-            Some(v) => crate::eval::truthy(v),
-            None => true,
-        },
-        _ => true,
+    // 4th arg: an opts map of build-time window attributes.
+    //   :decorations false — a borderless window, for an app that draws its own chrome
+    //     and would otherwise sit under a redundant OS title bar.
+    //   :app-id "name"     — the desktop application id (Wayland `app_id` / X11
+    //     `WM_CLASS`), matched against the installed `name.desktop` entry; without it
+    //     the desktop can't identify the window and paints its generic fallback icon.
+    // Absent (every pre-existing caller) means decorated, with no app id — as before.
+    let opts = match arg(args, 3) {
+        Value::Map(id) => Some(id),
+        _ => None,
     };
-    let id = crate::gui::open(crate::process::self_pid(), title, size, decorations)
-        .map_err(LispError::runtime)?;
+    let decorations = match opts.and_then(|id| heap.map_get(id, value::kw("decorations"))) {
+        Some(v) => crate::eval::truthy(v),
+        None => true,
+    };
+    let app_id = match opts.and_then(|id| heap.map_get(id, value::kw("app-id"))) {
+        Some(Value::Nil) | None => None,
+        Some(v) => Some(expect_string(heap, "gui-open", v)?),
+    };
+    let spec = crate::gui::WindowSpec {
+        title,
+        size,
+        decorations,
+        app_id,
+    };
+    let id = crate::gui::open(crate::process::self_pid(), spec).map_err(LispError::runtime)?;
     Ok(Value::int(id as i64))
 }
 

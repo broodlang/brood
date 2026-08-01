@@ -72,7 +72,10 @@ runtime built with `--features gui` (`./configure --with-gui && make install`), 
 `opts` is passed through to `gui-open`, so a frontend can ask for a window that
 suits it: `:title` names it, and `{:decorations false}` drops the OS title bar and
 frame for an app that draws its own chrome (a browser's tab strip and toolbar) and
-would otherwise sit under a redundant second title.
+would otherwise sit under a redundant second title. A shipped app should also pass
+`:app-id` — the desktop application id the installed `<app-id>.desktop` entry is
+named after, which is what earns the window its own icon and name in a GNOME dash
+or alt-tab instead of the desktop's generic fallback.
 
 **Create and poll it in the same process.** `:draw`/`:size`/`:leave` act on the
 captured window id, but `:poll` is a `receive` on the *calling* process's mailbox

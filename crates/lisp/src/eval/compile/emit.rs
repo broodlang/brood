@@ -33,13 +33,29 @@ pub(crate) fn emit_node(node: &Node, code: &mut Vec<Inst>) -> Option<()> {
             site: *site,
         }),
         Node::If(cond, then, els) => {
+            // Branch coverage (ADR-148 tier 2): key each edge by the TEST's position, so
+            // sibling `if`s expanded from one `cond`/`match` stay distinct. Only a real
+            // decision is instrumented — a constant test is already folded away in
+            // `compile_node`, and a test with no position (a bare `Local`/`Global`) is
+            // skipped (line coverage still covers it).
+            let branch_pos = if crate::coverage::enabled() {
+                node_pos(cond)
+            } else {
+                None
+            };
             emit_node(cond, code)?;
             let j_else = code.len();
             code.push(Inst::JumpIfFalse(0)); // backpatched
+            if let Some(p) = branch_pos {
+                code.push(Inst::RecordBranch(p.line, p.col, true));
+            }
             emit_node(then, code)?;
             let j_end = code.len();
             code.push(Inst::Jump(0)); // backpatched
             let else_ip = code.len();
+            if let Some(p) = branch_pos {
+                code.push(Inst::RecordBranch(p.line, p.col, false));
+            }
             emit_node(els, code)?;
             let end_ip = code.len();
             code[j_else] = Inst::JumpIfFalse(else_ip);

@@ -65,6 +65,22 @@ fn instrumented_lines() -> &'static Mutex<Hits> {
     LINES.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+/// A branch edge: `(line, col, taken)`. Keyed by the test's position so sibling `if`s
+/// from one `cond`/`match` are distinct; a branch is fully covered when both `taken`
+/// values are recorded.
+type BranchHits = BTreeMap<String, BTreeSet<(u32, u32, bool)>>;
+/// The branch denominator: `(line, col)` decision points the compiler instrumented.
+type BranchSites = BTreeMap<String, BTreeSet<(u32, u32)>>;
+
+fn branch_hits() -> &'static Mutex<BranchHits> {
+    static B: OnceLock<Mutex<BranchHits>> = OnceLock::new();
+    B.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+fn branch_sites() -> &'static Mutex<BranchSites> {
+    static B: OnceLock<Mutex<BranchSites>> = OnceLock::new();
+    B.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
 /// Is line recording armed? Read once and cached, so this is a relaxed load at
 /// compile time and nothing at all at run time.
 ///
@@ -91,6 +107,45 @@ pub fn note_instrumented(file: &str, lines: impl IntoIterator<Item = u32>) {
     if let Ok(mut map) = instrumented_lines().lock() {
         let entry = map.entry(file.to_string()).or_default();
         entry.extend(lines);
+    }
+}
+
+/// Record that one edge (`taken`) of the branch at `line:col` of `file` executed.
+pub fn record_branch(file: &str, line: u32, col: u32, taken: bool) {
+    if let Ok(mut map) = branch_hits().lock() {
+        map.entry(file.to_string())
+            .or_default()
+            .insert((line, col, taken));
+    }
+}
+
+/// Register the `(line, col)` decision points an arm was instrumented for — the branch
+/// denominator. Called once per arm compile, from `compile_arm`.
+pub fn note_branches(file: &str, sites: impl IntoIterator<Item = (u32, u32)>) {
+    if let Ok(mut map) = branch_sites().lock() {
+        map.entry(file.to_string()).or_default().extend(sites);
+    }
+}
+
+/// Every recorded branch edge, `file -> [(line, col, taken) …]` (for the reporting side).
+pub fn branch_snapshot() -> Vec<(String, Vec<(u32, u32, bool)>)> {
+    match branch_hits().lock() {
+        Ok(map) => map
+            .iter()
+            .map(|(f, edges)| (f.clone(), edges.iter().copied().collect()))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Every instrumented branch site, `file -> [(line, col) …]` — the branch denominator.
+pub fn branch_instrumented() -> Vec<(String, Vec<(u32, u32)>)> {
+    match branch_sites().lock() {
+        Ok(map) => map
+            .iter()
+            .map(|(f, sites)| (f.clone(), sites.iter().copied().collect()))
+            .collect(),
+        Err(_) => Vec::new(),
     }
 }
 
@@ -122,6 +177,9 @@ pub fn snapshot() -> Vec<(String, Vec<u32>)> {
 /// every arm recompiled.
 pub fn reset() {
     if let Ok(mut map) = hits().lock() {
+        map.clear();
+    }
+    if let Ok(mut map) = branch_hits().lock() {
         map.clear();
     }
 }

@@ -2727,6 +2727,57 @@ pub(super) fn coverage_instrumented(_: &[Value], _: EnvId, heap: &mut Heap) -> L
     coverage_pairs(crate::coverage::instrumented(), heap)
 }
 
+/// `[file ([line col taken] …)]` pairs — the shape the branch-hit readout returns.
+fn coverage_branch_pairs(
+    entries: Vec<(String, Vec<(u32, u32, bool)>)>,
+    heap: &mut Heap,
+) -> LispResult {
+    let mut out = Vec::new();
+    for (file, edges) in entries {
+        let file_val = heap.alloc_string(&file);
+        let edge_vals: Vec<Value> = edges
+            .iter()
+            .map(|(line, col, taken)| {
+                let items = vec![
+                    Value::int(i64::from(*line)),
+                    Value::int(i64::from(*col)),
+                    Value::boolean(*taken),
+                ];
+                heap.alloc_vector(items)
+            })
+            .collect();
+        let edges_val = heap.list(edge_vals);
+        out.push(heap.alloc_vector2(file_val, edges_val));
+    }
+    Ok(heap.list(out))
+}
+
+/// `(%coverage-branches)` — every branch edge recorded as taken, as
+/// `[file ([line col taken] …)]`. A branch is fully covered when both `taken` edges
+/// (`true` and `false`) appear for one `[line col]`. Empty unless `BROOD_COVERAGE=1`.
+pub(super) fn coverage_branches(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    coverage_branch_pairs(crate::coverage::branch_snapshot(), heap)
+}
+
+/// `(%coverage-branch-instrumented)` — every `[line col]` decision point the compiler
+/// instrumented, as `[file ([line col] …)]` — the branch denominator (two edges each).
+pub(super) fn coverage_branch_instrumented(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let entries = crate::coverage::branch_instrumented();
+    let mut out = Vec::new();
+    for (file, sites) in entries {
+        let file_val = heap.alloc_string(&file);
+        let site_vals: Vec<Value> = sites
+            .iter()
+            .map(|(line, col)| {
+                heap.alloc_vector(vec![Value::int(i64::from(*line)), Value::int(i64::from(*col))])
+            })
+            .collect();
+        let sites_val = heap.list(site_vals);
+        out.push(heap.alloc_vector2(file_val, sites_val));
+    }
+    Ok(heap.list(out))
+}
+
 /// `(%coverage-precompile f)` — compile `f`'s body now, without calling it, so its
 /// lines land in `%coverage-instrumented`. Returns true if a body was compiled.
 /// See `eval::compile::precompile` for why the denominator needs this.
