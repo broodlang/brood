@@ -971,7 +971,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     embedded_module!("proc/agent", "std/proc/agent.blsp"),
     // Order a flat process-info snapshot as a parent→child forest (depth-tagged, DFS
     // by id). A pure, dependency-free transform — CORE, not dev-tools: it's shared by
-    // the dev observer's tree sort *and* a shipped app's process list (myedit's
+    // the dev observer's tree sort *and* a shipped app's process list (bedit's
     // *Process List*), so a `nest release` binary needs it baked in.
     embedded_module!("proctree", "std/tool/proctree.blsp"),
     // Run a thunk off the current process with an optional timeout + cancel
@@ -1120,12 +1120,12 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     embedded_module!("editor/treesit", "std/editor/treesit.blsp"),
     // Lexical Markdown highlighter — the `highlight` analogue for `.md` buffers
     // (`markdown-spans` → `[start end face]` spans, ADR-092). Pure UI a shipped app
-    // may `require` (myedit's markdown-mode), so it stays in CORE alongside
+    // may `require` (bedit's markdown-mode), so it stays in CORE alongside
     // `highlight`/`lineedit`; opt-in, never in the prelude.
     embedded_module!("editor/markdown", "std/editor/markdown.blsp"),
     // Lexical `.env` and Dockerfile highlighters, the dotenv/Dockerfile analogues of
     // `markdown` (`env-spans` / `dockerfile-spans` → `[start end face]` spans). Pure
-    // UI a shipped app may `require` (myedit's env-/docker-mode); CORE, like markdown.
+    // UI a shipped app may `require` (bedit's env-/docker-mode); CORE, like markdown.
     embedded_module!("editor/dotenv", "std/editor/dotenv.blsp"),
     embedded_module!("editor/dockerfile", "std/editor/dockerfile.blsp"),
     embedded_module!("editor/lineedit", "std/editor/lineedit.blsp"),
@@ -1137,7 +1137,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // CORE, not DEV, and this is the line the split turns on: a dev module is one that
     // serves *developing* an app (the test framework, `nest doc`, the hot-reload
     // watcher), not one an app's own shipped features are built from. A shipped editor
-    // IS a debugger (myedit's `C-c d` session, its *Spy* trace stream), so a lean
+    // IS a debugger (bedit's `C-c d` session, its *Spy* trace stream), so a lean
     // release that omitted this couldn't run it — `require` fails at boot, since
     // `run-bundle` loads every bundled module.
     embedded_module!("debug", "std/tool/debug.blsp"),
@@ -1148,7 +1148,7 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // table. The pure codec half is shared by clients (ADR-198).
     //
     // CORE for the same reason as `debug` (which it requires): "evaluate this snippet"
-    // is a shipped app's feature — myedit's tutorial playgrounds and `C-x C-e` ride
+    // is a shipped app's feature — bedit's tutorial playgrounds and `C-x C-e` ride
     // this codec — not a tool for building one.
     embedded_module!("eval-server", "std/tool/eval-server.blsp"),
 ];

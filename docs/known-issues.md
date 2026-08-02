@@ -62,7 +62,7 @@ out ordering:
 | `vm_call_head_order_test` | 2 of 3 |
 | `vm_selfcall_reload_test` | 1 of 3 |
 
-Found by a sweep of every suite in both repos (3 iterations × 2 seeds). `brood-edit` came
+Found by a sweep of every suite in both repos (3 iterations × 2 seeds). `bedit` came
 back completely clean; these five were the only hits, and they reproduce on a working tree
 with the day's changes stashed, so they predate them.
 
@@ -972,12 +972,12 @@ manual_runtime_collect_inside_isolate_is_a_noop}`.
 each file's top-level `def`s promoted their compiled closures/chunks into the shared `RuntimeCode`
 region + global table — globally rooted, live, unbounded, unreclaimable (only same-name redefinition
 frees the old version). A 725-test suite crossed the 1 GB soft cap → `memory limit exceeded` on
-whichever workers were allocating (brood-edit: 9 spurious failures, all passing in isolation).
+whichever workers were allocating (bedit: 9 spurious failures, all passing in isolation).
 **Fix:** `test/run-tests-scoped` (+ `-structured`) runs the suite file-by-file, each file inside its
 own `%isolate` (reset → load one file → drain → rollback), so the file's `def`s roll back and the next
 safepoint reclaims the promoted code — bounding memory to ~one file (relies on the KI-6 fix so the
 mid-run rollbacks are compaction-safe). `BROOD_TEST_NO_SCOPE` reverts to the legacy load-all path.
-brood-edit: OOM → 725/725 at 199 MB. **Guarded by:**
+bedit: OOM → 725/725 at 199 MB. **Guarded by:**
 `tests/runtime_collector.rs::per_isolate_scoping_bounds_runtime_region_growth`.
 
 ## KI-4 — bitset stored as a non-UTF-8 `Value::Str` corrupts the GC on promote · **fixed 2026-06-15**

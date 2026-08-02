@@ -5,7 +5,7 @@
 ;; flat `(map process-info (list-processes))` snapshot, produce a depth-tagged forest
 ;; — roots first, each followed by its DFS descendants — for an indented tree view.
 ;; The lineage comes from each map's `:parent` (the spawner's id, nil for the root),
-;; the Erlang-`process_info` field. Shared by std/observer's tree sort and myedit's
+;; the Erlang-`process_info` field. Shared by std/observer's tree sort and bedit's
 ;; *Process List*, so neither reimplements the walk. No IO, no UI deps — just the
 ;; ordering.
 
@@ -15,7 +15,7 @@
 descendants (DFS by id), every map tagged with `:depth` (0 = root) for indentation;
 lineage is read from `:parent`. `by-id` is the plain ascending-by-id sort (the flat
 view). Pure — no IO, no UI deps — so a TUI (std/observer) and a buffer editor
-(myedit) share one implementation.
+(bedit) share one implementation.
 
     (require 'proctree)
     (tree-order [{:id 1 :parent nil} {:id 2 :parent 1}])

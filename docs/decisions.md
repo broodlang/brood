@@ -4,6 +4,11 @@ An **ADR** is an *Architecture Decision Record* — a short, dated note capturin
 one design choice and *why* we made it, so we don't accidentally relitigate
 settled questions. Newest at the bottom.
 
+> **The editor is `bedit`.** Entries up to ADR-198 call it `myedit`, and some call its repo
+> `brood-edit` — both were renamed to `bedit` (the command it always was) on 2026-08-02.
+> Entries are dated records and are not rewritten, so read either name as `bedit`; only the
+> *paths* were corrected, since a wrong path is misinformation rather than history.
+
 > **Dangling links are expected in older entries.** Entries are historical records
 > and are not rewritten, so a few cite design/audit docs that have since been
 > deleted — `concurrency-v2.md`, `supervision.md`, `memory-review.md`,
@@ -12890,7 +12895,7 @@ behind (ADR-201).
 ADR-038: a shipped app carries no test framework, observer, MCP/doc/hot-reload
 tooling, or REPL. The split was drawn by how *tool-shaped* a module looked, and two
 modules were filed wrongly by that reading: `debug` (the tracing debugger) and
-`eval-server` (ADR-198). The editor (`../brood-edit`) requires both at the top of
+`eval-server` (ADR-198). The editor (`../bedit`) requires both at the top of
 `src/debugger.blsp` and `src/sandbox.blsp`, because a `C-c d` debugger session and
 eval-on-type tutorial playgrounds are *its features*.
 
@@ -12955,7 +12960,7 @@ load-bearing, noted as a COUPLING comment where winit is pinned.
 
 **Consequences.** A shipped Brood app can present itself as itself, given three names
 that agree: the id the window declares, the `.desktop` entry named after it, and the
-icon that entry asks for (myedit ships all three and a test pinning them together).
+icon that entry asks for (bedit ships all three and a test pinning them together).
 `gui-icon!` remains for X11-only cases and is now documented as a no-op under Wayland,
 which is the honest statement of what a client can do there.
 
@@ -13034,7 +13039,7 @@ every future reader has to learn, whereas a CAS is one idea that covers all of t
 **Context.** `:on-close` (ADR's layers seam) is the async-cleanup hook: a layer kills the
 worker it spawned as its context goes away. But a mode often owns a second *context* too —
 the tutorial's `*Workings*` pane, a REPL's transcript, a debugger's queue — buffers it
-created that mean nothing without it. Leaving them behind leaves a corpse on screen (myedit
+created that mean nothing without it. Leaving them behind leaves a corpse on screen (bedit
 shipped exactly that: closing the tutorial left its workings pane open, showing the call
 tree of a buffer that no longer existed).
 
@@ -13055,7 +13060,7 @@ view says `[:text …]`, the frontend draws) and a keymap command (the layer say
   performs the closes against its own container and decides what an unknown name means.
 
 **Consequences.** A mode can own a second window without knowing what a window is. The app
-keeps full control: myedit's `cmd-kill-buffer` reads the requests, kills each companion by
+keeps full control: bedit's `cmd-kill-buffer` reads the requests, kills each companion by
 name (looked up fresh, since indices shift), fires each companion's own `:on-close` — and
 does **not** follow their requests, one level being a cycle guard against two modes naming
 each other. An unrecognised name is ignored rather than an error, because a companion may
@@ -13072,7 +13077,7 @@ rather than order-dependent. It was reversible in every way but one — there wa
 
 That is fine until something needs a known baseline. Three cases, all real: a test that must
 not leak into the next one; a REPL session undoing an experiment; a hot reload retracting an
-impl the new source no longer declares. myedit met the first as a flaky suite — a tutorial
+impl the new source no longer declares. bedit met the first as a flaky suite — a tutorial
 exercise asks the reader to `impl` an ability for their own record, the test that evaluated
 the worked ANSWER left that impl registered, and the exercise's own template (deliberately
 shipped without the impl) then "already passed". The workaround was to run the check under
