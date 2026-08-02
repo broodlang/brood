@@ -1022,25 +1022,45 @@ pub(super) fn to_keyword(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResul
 /// Errors if out of range.
 
 pub(super) fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "substring", arg(args, 0))?;
+    // The hot one: `char-at`, `starts-with?` and `ends-with?` are all Brood over this
+    // (`std/prelude.blsp`), so its per-call cost is the floor for most string code. It had
+    // three separate O(whole string) steps for what is usually a tiny result — an owned
+    // `expect_string` copy, a `chars().count()` length, and a `chars().skip()` walk. With
+    // a 216 KB haystack, `(char-at s 3)` cost ~11.5 µs and did not care that it was reading
+    // the 4th character: measured with the CALL COUNT FIXED, the cost tracked the string's
+    // size (1/6/23 ms as it grew 13.5k → 54k → 216k chars).
+    let v = arg(args, 0);
     let start = expect_int(heap, "substring", arg(args, 1))?;
-    let len = s.chars().count() as i64;
-    let end = match args.get(2) {
-        Some(_) => expect_int(heap, "substring", arg(args, 2))?,
-        None => len,
+    let sub: String = {
+        let h: &Heap = heap;
+        let s = expect_string_ref(h, "substring", v)?;
+        // Cached char count (O(1)) plus the pure-ASCII flag.
+        let (len_chars, ascii) = match v {
+            Value::Str(id) => h.str_metrics(id),
+            _ => (s.chars().count(), false),
+        };
+        let len = len_chars as i64;
+        let end = match args.get(2) {
+            Some(_) => expect_int(h, "substring", arg(args, 2))?,
+            None => len,
+        };
+        if start < 0 || end < start || end > len {
+            return Err(LispError::runtime(format!(
+                "substring: range [{}, {}) out of bounds for length {}",
+                start, end, len
+            ))
+            .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
+        }
+        if ascii {
+            // Char index == byte offset, so this is a direct slice: O(result), not O(end).
+            s[start as usize..end as usize].to_string()
+        } else {
+            s.chars()
+                .skip(start as usize)
+                .take((end - start) as usize)
+                .collect()
+        }
     };
-    if start < 0 || end < start || end > len {
-        return Err(LispError::runtime(format!(
-            "substring: range [{}, {}) out of bounds for length {}",
-            start, end, len
-        ))
-        .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
-    }
-    let sub: String = s
-        .chars()
-        .skip(start as usize)
-        .take((end - start) as usize)
-        .collect();
     Ok(heap.alloc_string(&sub))
 }
 
@@ -1055,10 +1075,20 @@ pub(super) fn string_span_impl(
     who: &str,
     in_set: bool,
 ) -> LispResult {
-    let s = expect_string(heap, who, arg(args, 0))?;
+    // A tokenizer calls this once per token over one document, so an O(whole document)
+    // step here is O(tokens x document) overall. It had three: the owned `expect_string`
+    // copy, `chars().count()` for the length, and `chars().skip(start)`. Borrow, read the
+    // cached count, and start from a byte offset (O(1) when the text is ASCII).
+    let v = arg(args, 0);
     let start = expect_int(heap, who, arg(args, 1))?;
-    let set = expect_string(heap, who, arg(args, 2))?;
-    let len = s.chars().count() as i64;
+    let h: &Heap = heap;
+    let s = expect_string_ref(h, who, v)?;
+    let set = expect_string_ref(h, who, arg(args, 2))?;
+    let (len_chars, ascii) = match v {
+        Value::Str(id) => h.str_metrics(id),
+        _ => (s.chars().count(), false),
+    };
+    let len = len_chars as i64;
     if start < 0 || start > len {
         return Err(LispError::runtime(format!(
             "{}: start {} out of bounds for length {}",
@@ -1066,8 +1096,15 @@ pub(super) fn string_span_impl(
         ))
         .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
     }
+    let byte_start = if ascii {
+        (start as usize).min(s.len())
+    } else {
+        s.char_indices()
+            .nth(start as usize)
+            .map_or(s.len(), |(b, _)| b)
+    };
     let mut idx = start as usize;
-    for c in s.chars().skip(start as usize) {
+    for c in s[byte_start..].chars() {
         if set.contains(c) == in_set {
             idx += 1;
         } else {

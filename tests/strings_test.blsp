@@ -244,6 +244,42 @@
       (spawn (send me [:len (string-length "héllo 😀 wörld")]))
       (assert= 13 (receive ([:len n] n) (after 5000 :timeout)))))
 
+  ;; `substring` takes an ASCII fast path (char index == byte offset → a direct slice)
+  ;; because `char-at`, `starts-with?` and `ends-with?` are all Brood over it, so its
+  ;; per-call cost is the floor for most string code. It used to copy the whole source
+  ;; string per call: `(char-at s 3)` on a 216 KB string cost ~11.5 µs and scaled with the
+  ;; string, not with the work. A byte offset escaping onto the non-ASCII path would split
+  ;; a character, so this checks EVERY range against a char-level reference.
+  (test "substring matches a char-level reference over every range"
+    (let (ref-sub (fn (s i j) (apply str (take (- j i) (drop i (string->list s)))))
+          chk (fn (s)
+                (let (n (string-length s))
+                  (every? (fn (i)
+                            (every? (fn (j) (= (substring s i j) (ref-sub s i j)))
+                              (range i (inc n))))
+                    (range 0 (inc n))))))
+      (is (chk "hello world"))
+      (is (chk "héllo wörld"))
+      (is (chk "a😀b😀c"))
+      (is (chk "aé😀b🎉c"))
+      (is (chk "éééééé"))
+      (is (chk ""))
+      (is (chk "😀"))))
+  (test "substring's 2-arg form and bounds are unchanged"
+    (assert= "llo" (substring "hello" 2))
+    (assert= "😀b" (substring "a😀b" 1))
+    (assert= "" (substring "abc" 3 3))
+    (is (try (do (substring "abc" 0 4) false) (catch e true)))
+    (is (try (do (substring "abc" -1 2) false) (catch e true))))
+  (test "string-span scans runs correctly on non-ASCII text"
+    ;; Same fast path, in the tokenizer inner loop: `start` is a CHAR index.
+    (assert= 3 (string-span "aaabbb" 0 "a"))
+    (assert= 6 (string-span "aaabbb" 3 "b"))
+    (assert= 3 (string-span "ééé😀" 0 "é"))
+    (assert= 4 (string-span "ééé😀" 3 "😀"))
+    (assert= 2 (string-span-until "ab|cd" 0 "|"))
+    (assert= 5 (string-span-until "éb|cd" 3 "|")))
+
   (test "search on non-ASCII text agrees with the char count"
     ;; If the ASCII flag were computed wrongly, these would return byte offsets.
     (let (s "héllo wörld héllo")

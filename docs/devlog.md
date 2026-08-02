@@ -14355,3 +14355,55 @@ string, one over `SHARED_BLOB_THRESHOLD` (the shared-blob construction path), a 
 through another process — plus non-ASCII search agreeing with the char count, since that
 field doubles as the ASCII flag. One of them caught me writing a byte count where a char
 count belonged, which is the mistake the whole change is about.
+
+## 2026-08-02 — every string builtin cost O(argument length), whatever work it did
+
+Following the `expect_string` seam found with `inc-scan`. The measurement that made the
+shape obvious: scale the *call count* and `substring`, `starts-with?` and `char-at` all cost
+**exactly the same** — 23/92/384 ms — even though `(char-at s 3)` reads the 4th character.
+Then fix the call count at 2000 and grow the string instead:
+
+| | 13.5k → 54k → 216k chars, 2000 calls |
+|---|---|
+| `(char-at s 3)` | 1 / 6 / 23 ms |
+| `(starts-with? s "lorem")` | 2 / 6 / 23 ms |
+
+Reading four characters cost 11.5 µs on a 216 KB string, and scaled with the string. That is
+the `expect_string` copy and nothing else.
+
+**`substring` is the leverage point**: `char-at`, `starts-with?` and `ends-with?` are all
+Brood over it (`std/prelude.blsp`), so its per-call cost is the floor for most string code.
+It had *three* O(whole string) steps for a usually-tiny result — the owned copy, a
+`chars().count()` length, and a `chars().skip()` walk. Now: borrowed, cached count, and for
+ASCII a direct byte slice, so it is O(result). Same treatment for `string-span`/`-until`,
+where a tokenizer calls it once per token over one document — O(tokens × document).
+
+| | before | after |
+|---|---|---|
+| `char-at` ×2000 on 216 KB | 23 ms | **0 ms** (and flat across string size: 0/0/0) |
+| `starts-with?` ×2000 | 23 ms | 1 ms, flat |
+| `substring` ×32000 | 384 ms | 3 ms |
+
+**And now the honest part: this barely moves real work here.** `nest format --check` over the
+whole repo is unchanged — 5469/5814/5990 ms before, 5541/5843/5511 after, i.e. noise. A single
+25 600-form file improved 4583 → 3932 ms, about 14%. The repo's files are a few KB each, so
+the copy was never their bottleneck. What this buys is the removal of an asymptotic hazard:
+any code that works repeatedly over **one large string** — a scanner, a log filter, an editor
+over whole buffer text — was paying the string's full length per call and no longer is. That
+is worth having, and it is not a broad speedup, and I would rather say so than quote the 100×
+synthetic number on its own.
+
+That is now three predictions in a row about where a string fix would pay off (fuzzy twice,
+the formatter once) that measurement contradicted. The pattern is that these copies only
+matter when one string is large, and most strings in this codebase are not.
+
+**~115 `expect_string` call sites remain**, each an owned copy of its argument (`io.rs` 41,
+`system.rs` 25, the rest of `sequences.rs`, …). The seam is now open and the pattern proven;
+converting the rest is mechanical, but it should be driven by a workload that shows the cost,
+not by the count.
+
+Correctness: `substring` is used everywhere and the ASCII fast path slices by BYTE offset, so
+a wrong ASCII verdict would split a character. Checked every `[i, j)` range of an ASCII,
+accented, emoji, mixed, all-non-ASCII, empty and single-char string against a char-level
+reference built from `string->list` — all match — plus the 2-arg form and both error cases.
+That differential is now a permanent test.
