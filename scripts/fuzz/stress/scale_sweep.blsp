@@ -71,7 +71,13 @@
 ;; next base up. LESSON: a ratio near 4 that RISES across bases is not linear — only a
 ;; falling one (warm-up) clears a row. Check the trend, not one triple.
 
-(defmodule scale-sweep (:use proc/agent) (:use proc/gen) (:use editor/buffer))
+;; `:only` on the two proc modules: they both export `stop` (an import clash the
+;; namespacing hardening now rejects outright), and `proc/agent` also shadows the prelude's
+;; `get`/`update`. `gen-calls` below already calls `proc/gen/stop` qualified.
+(defmodule scale-sweep
+  (:use proc/agent :only [start update stop])
+  (:use proc/gen :only [defprocess spawn-server gen-call])
+  (:use editor/buffer))
 (require 'template)
 (require 'format)
 (require 'ansi)
