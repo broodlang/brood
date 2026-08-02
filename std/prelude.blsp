@@ -3918,6 +3918,11 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
 
 (defdyn *print-length* 100)
 (defdyn *print-level* 8)
+;; The third bound, and in practice the one that saves a display: a TEXT leaf's
+;; length. Neither bound above touches a leaf, so a single 10 MB string sails past
+;; both — `*print-length*` counts a collection's items and a string is one item.
+;; 4096 matches Elixir's `Inspect` `:printable_limit`, which exists for exactly this.
+(defdyn *print-string-length* 4096)
 
 (defn pr--elide (parts over)
   "`parts` joined for display, with the `…` length marker appended when `over`."
@@ -3954,14 +3959,34 @@ faithful printing instead of losing the bound on the whole value."
         over)
       "}")))
 
+(defn pr--bounded-text (x)
+  "A text leaf — a string or a byte string — under `*print-string-length*`: at most
+that many characters (bytes) print, with the `…` marker inside the closing quote
+(`\"abc…\"`, `#b\"ab…\"`).
+
+The VALUE is cut before it is printed, never `pr-str`'s output: truncating the
+printed form could halve an escape (`\\n`) or drop the closing quote, and a byte
+string costs four output characters per byte, so cutting after the fact would still
+have built the flood this bound exists to prevent."
+  (let (limit *print-string-length*
+        bytes (= :bytes (type-of x))
+        length (if bytes (count x) (string-length x)))
+    (if (or (nil? limit) (<= length limit))
+      (pr-str x)
+      (let (printed (pr-str (if bytes (subbytes x 0 limit) (substring x 0 limit))))
+        ;; drop the closing quote, mark the elision, close again
+        (str (substring printed 0 (dec (string-length printed))) "…\"")))))
+
 (defn pr--bounded (x level)
-  "`x` printed at nesting `level`, honouring both bounds. Containers recurse;
-anything else goes to `pr-str`.
+  "`x` printed at nesting `level`, honouring every bound. Containers recurse, text
+leaves are length-bounded, anything else goes to `pr-str`.
 
 The depth bound is tested on *entering a container*, never on a leaf — so
 `*print-level*` 2 on `{:a {:b {:c 1}}}` elides the whole third map (`{:a {:b …}}`)
-rather than each of its keys and values separately (`{:a {:b {… …}}}`). A leaf always
-prints: eliding an atom would cost a character and save nothing."
+rather than each of its keys and values separately (`{:a {:b {… …}}}`). A non-text
+leaf always prints whole: eliding an atom would cost a character and save nothing,
+and the values that print unboundedly LONG are the text ones (a rope and a table
+already print as a summary handle, `#<rope :chars 11 :lines 1>`)."
   (let (t (type-of x)
         container (or (= t :pair) (= t :vector) (= t :set) (= t :map)))
     (cond
@@ -3970,13 +3995,20 @@ prints: eliding an atom would cost a character and save nothing."
       (= t :vector) (pr--safely (fn () (pr--bounded-seq x level "[" "]")) x)
       (= t :set) (pr--safely (fn () (pr--bounded-seq x level "#{" "}")) x)
       (= t :map) (pr--safely (fn () (pr--bounded-map x level)) x)
+      (or (= t :string) (= t :bytes)) (pr--safely (fn () (pr--bounded-text x)) x)
       else (pr-str x))))
 
 (defn pr-str-bounded (x)
-  "Like `pr-str`, but eliding with `…` past `*print-length*` items per collection
-and `*print-level*` levels of nesting (`nil` for either means no limit). For
-*display* — the result does not read back, so use `pr-str` when you need the whole
-value. This is what the REPL prints results with."
+  "Like `pr-str`, but eliding with `…` past `*print-length*` items per collection,
+`*print-level*` levels of nesting, and `*print-string-length*` characters of a
+string or byte string (`nil` for any of them means no limit). For *display* — the
+result does not read back, so use `pr-str` when you need the whole value.
+
+**Every display protocol should print through this**, not `pr-str`: the REPL's
+results, `spy`'s trace entries, an editor's echo area. A protocol whose job is to
+show a value to a human has no business flooding the screen (or a pipe, or a log)
+with a megabyte, and one bounded printer is how that stays true everywhere instead
+of each consumer inventing its own cap."
   (pr--bounded x 0))
 
 ;; ---- discovery / introspection ----------------------------------------------
@@ -4038,20 +4070,34 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 ;; stderr tree. Entries are maps: `{:spy :enter :form f}`,
 ;; `{:spy :node :form f :value v :depth d}`, `{:spy :exit :value v}`. Rebind it
 ;; (via `binding`) to capture a trace as data.
+;;
+;; A sink's RETURN VALUE is part of the contract, and it has exactly one meaning:
+;; **`:spy-stop` says "I have all I want — stop tracing"**. Anything else (nil,
+;; whatever `eprintln` returned) means "keep going". A bounded sink — one that keeps
+;; the first N entries, which every display sink should be — answers `:spy-stop` once
+;; it is full, and the tracer then stops paying for instrumentation it can see will be
+;; thrown away (`debug/trace-fn` reverts to a plain tail call; see its wrapper). The
+;; alternative is a sink that silently drops entries while the traced program still
+;; pays for every one of them, which is how tracing a 250 000-deep tail loop came to
+;; cost a frame per level and 11× the runtime.
 (defdyn *spy-sink* nil)
 
 (defn spy--indent (depth) (apply str (map (constantly "  ") (range depth))))
 (defn spy--default-sink (entry)
   "Default `*spy-sink*`: pretty-print one trace entry as an indented stderr line.
-`:call`/`:return` are the function-boundary entries `debug/trace-fn` emits."
+`:call`/`:return` are the function-boundary entries `debug/trace-fn` emits.
+
+Values print through `pr-str-bounded`, not `pr-str`: this is a display protocol, and
+one traced call carrying a megabyte string must not paint a megabyte to stderr. Lift
+the bound for a run with `(binding (*print-string-length* nil) …)`."
   (case (:spy entry)
-    :enter (eprintln (str "spy: " (pr-str (:form entry))))
+    :enter (eprintln (str "spy: " (pr-str-bounded (:form entry))))
     :node (eprintln (str "  "
-                      (spy--indent (:depth entry)) (pr-str (:form entry)) " => "
-                      (pr-str (:value entry))))
-    :exit (eprintln (str "=> " (pr-str (:value entry))))
-    :call (eprintln (str "trace: " (pr-str (cons (:fn entry) (:args entry)))))
-    :return (eprintln (str "trace: " (pr-str (:fn entry)) " => " (pr-str (:value entry))))
+                      (spy--indent (:depth entry)) (pr-str-bounded (:form entry)) " => "
+                      (pr-str-bounded (:value entry))))
+    :exit (eprintln (str "=> " (pr-str-bounded (:value entry))))
+    :call (eprintln (str "trace: " (pr-str-bounded (cons (:fn entry) (:args entry)))))
+    :return (eprintln (str "trace: " (pr-str (:fn entry)) " => " (pr-str-bounded (:value entry))))
     nil))
 (defn spy--emit (entry) ((or *spy-sink* spy--default-sink) entry))
 (defn spy--node (form value depth)

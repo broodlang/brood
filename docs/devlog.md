@@ -14330,3 +14330,37 @@ Docs: `docs/lsp.md` code-action section rewritten and the "more code actions" it
 This closes the reference-driven-autoload line — the ergonomics are delivered the analyzable way,
 and import-driven `(:use …)` stands unchanged. (Package-rooted namespaces, the other deferred item,
 is next and gets its own designed pass.)
+
+## 2026-08-02 (cont.) — display protocols truncate; a trace stops costing what it stops keeping (ADR-207)
+
+Came in from the editor: the tutorial's proper-tail-calls lesson counts down from a million in a
+boundary-traced box, and it died with `recursion too deep: exceeded the VM's 1048576-frame
+non-tail-call limit`. Two separate holes, fixed together as **ADR-207**.
+
+**The frame hole (the real bug).** `trace-fn`'s wrapper emits `:return` *after* the call, so a
+traced self-call is no longer in tail position — one VM frame per level. Meanwhile the consumer
+(`eval-server`, cap 200 entries) was *silently discarding* everything past its budget: the program
+paid for a quarter-million entries nobody kept, ran 11× slower, and hit the frame limit. The page
+that broke was the page teaching "a tail loop runs in constant stack, forever if it likes".
+
+Fix: **a sink's return value means something.** `:spy-stop` from a `*spy-sink*` = "I have all I
+want"; `trace-fn` then puts the original back (the rebind `untrace-fn` does) and delegates in TAIL
+position — no post-call emit, no frame. A bounded sink is now what makes tracing cheap instead of
+what hides its cost. Measured through `eval-server`: 250k traced tail calls 641 ms → **73 ms**, 1M
+2493 ms → **227 ms**, 4M `recursion too deep` → **844 ms** (= the untraced cost). Rejected a
+per-install latch `(table)`: tables live until `table-drop` (ADR-107), so that leaks one per install
+per request, and the bookkeeping buys nothing over a rebind.
+
+**The size hole.** `pr-str-bounded` bounded collections and nesting but never a *leaf* — and a
+string is one item at any depth, so a 10 MB string sailed past both. Added
+**`*print-string-length*`** (4096, Elixir `Inspect`'s `:printable_limit` default), cutting the
+value *before* printing (cutting the output halves an escape, drops the quote, and for bytes —
+four output chars each — has already built the flood). Marker inside the quote: `"abc…"`,
+`#b"ab…"`. Then routed the **display protocols** through `pr-str-bounded` instead of `pr-str`:
+`spy`'s default sink, the debugger's causal tree / paused rows / REPL echo. Identity paths keep
+`pr-str` — `debug/hits`' form-string is a KEY, and a key that elides is a key that collides.
+
+Tests: `tests/print_bounded_test.blsp` (new, 15) + the `:spy-stop` contract and a **1.2M-deep**
+traced loop in `debug_test.blsp` + the end-to-end in `eval_server_test.blsp`. The old
+"tracing COSTS tail-calls" test is rewritten — it documented the contradiction as intended.
+In-language suite green (4260).
