@@ -14543,3 +14543,71 @@ fixes ago — including the fact that `format-source` was cleared as linear and 
 wrong, since a future reader is more likely to repeat that mistake than any of the fixes.
 
 Suite 929/929, `nest check` clean, rustfmt clean.
+
+## 2026-08-02 — thread 2 profiled: the 27 µs is spawn PLACEMENT, not per-message cost
+
+`perf` is unavailable on this box (`perf_event_paranoid=4`, sudo wants interactive auth), so
+this was done by ablation instead — which turned out to be enough, and produced a decisive
+answer that contradicts how the thread was framed.
+
+**The framing was wrong.** Thread 2 is recorded as "per-message cost — Brood's `latency` p50
+is 27 µs vs Elixir's 8 µs". Measured, the per-message mechanics are nowhere near that:
+
+| | µs/op |
+|---|---|
+| `spawn` alone | 0.9 |
+| send + receive to self | 1.1 |
+| spawn + send + collect | 3.4 |
+| pingpong round trip | 4.3 |
+| ref-pinned request/reply | 4.2 |
+
+**Three hypotheses, all killed by measurement:**
+1. *Queueing under open-loop arrival.* Lowering the rate should have collapsed p50. It made
+   it **worse** — 20k rps 27 µs, 10k 45, 5k 42, 2k 41.
+2. *Wake latency on a parked worker.* Timing only the round trip with an idle gap outside the
+   clock: 5.4 µs hot → 5.7 (50 µs gap) → 5.7 (200 µs) → 7.4 (1 ms). Worth ~0.3–2 µs, not 20.
+3. *The dispatcher missing its deadlines.* Its pacing loop is near-perfect: overshoot p50, p90
+   and p99 all **0 µs** at both 20k and 2k rps.
+
+Ablating the benchmark itself: with the fat requests removed p50 stays 27 µs; with the
+handler doing **no work at all** it stays 26 µs. So the whole p50 is the interval between
+`spawn` and the handler's first instruction.
+
+**The cause is spawn placement, and one flag proves it:**
+
+| | p50 | p99 | p99.9 |
+|---|---|---|---|
+| default (`BROOD_SPAWN_SPILL=1`) | 27 µs | 191 | 799 |
+| `BROOD_SPAWN_RR=1` | **11 µs** | 111 | 332 |
+| `BROOD_SPAWN_SPILL=0` | **11 µs** | 103 | 291 |
+| `BROOD_NO_HANDOFF=1` | 39 µs | 166 | 369 |
+
+Stable across runs (27/27/28 vs 11/11/11). **2.5× on p50 and 2.7× on p99.9 from a placement
+policy**, on a row we have been reading as a messaging number.
+
+**Why the default loses here.** Placement keeps a child on the spawner's own worker while the
+spawner's queue is empty — a good bet, because a spawner usually blocks right after (the
+`supervisor` shape: spawn, then `receive` the reply, so the child runs immediately with warm
+cache). `latency`'s dispatcher instead **busy-spins** to its next scheduled instant and never
+yields, so its queue stays empty, every child is placed behind it, and each one waits for the
+spinning parent's quantum. The heuristic's assumption — "an empty queue means this worker is
+about to be free" — is exactly false for a CPU-bound spawner.
+
+**And the trade-off is real**, re-measured here rather than taken from the note: `supervisor`
+907 ms default → 2308 ms RR → 2208 ms spill=0 (~2.4×). `pingpong` (306 ms) and `ring` (807 ms)
+are unaffected by placement either way.
+
+**So the open question is no longer "why are messages slow" but "how should a child be
+placed when the parent is CPU-bound".** Two candidate answers, neither implemented:
+- *(a) A "does this parent block?" signal.* Keep local only when the spawner has parked
+  recently; a spawner that has run a full quantum without blocking gets its children spilled.
+  Cheap to track (set a flag when a process parks in `receive`).
+- *(b) Aggressive stealing of freshly-spawned children.* Keep the placement as-is, but let an
+  idle worker steal a just-enqueued child quickly. This preserves `supervisor` exactly — the
+  parent blocks immediately, so the child runs locally before anyone steals it — while fixing
+  `latency`, where the parent keeps spinning and an idle worker takes over in microseconds.
+  The handoff notes stealing currently rebalances only 12%, so it is too lazy today.
+
+(b) looks better on paper because it needs no prediction of the parent's future. Both want
+measuring against `latency`, `supervisor`, `pingpong` and `ring` together, since the whole
+point is that this is a trade-off between the first two.
