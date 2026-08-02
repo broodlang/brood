@@ -732,6 +732,28 @@ pub(super) fn registry_update(args: &[Value], env: EnvId, heap: &mut Heap) -> Li
     )))
 }
 
+/// `(%registry-cas! name old new)` — compare-and-swap a registry global (KI-23). Rebinds
+/// `name` to `new` and returns true only if its current value still equals `old`; returns
+/// false otherwise, leaving it untouched, so the caller can recompute and retry.
+///
+/// The general form of `%registry-update!`, for a registry whose update is not one map/list
+/// op — `face-set`'s merge into the existing entry, `attach`'s strip-then-cons, the REPL's
+/// filter-then-append. The transform stays an ordinary Brood function (the prelude's
+/// `registry-swap!` retries around this); only the read-decide-write is indivisible. See
+/// [`Heap::registry_cas`].
+pub(super) fn registry_cas(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
+    let sym = match arg(args, 0) {
+        Value::Sym(s) => s,
+        v => return Err(LispError::wrong_type(heap, "%registry-cas!", "symbol", v)),
+    };
+    Ok(Value::boolean(heap.registry_cas(
+        env,
+        sym,
+        arg(args, 1),
+        arg(args, 2),
+    )))
+}
+
 /// `(map-get m k [default])` — the value `k` maps to, or `default` (nil if
 /// omitted) when absent.
 pub(super) fn map_get(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {

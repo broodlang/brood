@@ -4583,6 +4583,39 @@ impl Heap {
         true
     }
 
+    /// `(%registry-cas! 'sym old new)` — compare-and-swap a registry global under the same
+    /// lock as [`Self::registry_update`]. Rebinds `sym` to `new` and returns true **only if**
+    /// its current value still equals `old`; otherwise leaves it alone and returns false, so
+    /// the caller can recompute against the value that won and retry.
+    ///
+    /// This is the general form of `registry_update`. That one has to name every shape it
+    /// supports as an op (`:assoc`, `:cons-new`, …), which covers a registry whose update is
+    /// one map/list operation and nothing else. The registries in `std/` are not all like
+    /// that: `face-set` merges into the *existing* entry, `attach` strips an id across every
+    /// bucket before consing onto one, `register-repl-command` filters by name-overlap and
+    /// appends. Expressing those as ops would mean a Rust op per shape — and the transform
+    /// itself is policy, which belongs in Brood. A CAS lets the transform stay an ordinary
+    /// Brood function (`registry-swap!` in the prelude retries around it) while the
+    /// read-decide-write stays indivisible.
+    ///
+    /// Equality is structural, so an ABA against an equal-valued registry is indistinguishable
+    /// — and harmless: the retry would recompute the same answer.
+    pub fn registry_cas(&mut self, env: EnvId, sym: Symbol, old: Value, new: Value) -> bool {
+        let rt = self.runtime.clone();
+        let _guard = rt.registry_lock.lock().unwrap_or_else(|e| e.into_inner());
+        // Read through the chain and write at the root, exactly as `def` does (see
+        // `registry_update`: the root is NOT always `EnvId::GLOBAL` during prelude load).
+        // Matching `def` is what makes a `defdyn` registry safe to convert — an active
+        // `binding` shadows the root write for both spellings identically.
+        let root = self.env_root(env);
+        let cur = self.env_get(env, sym).unwrap_or(Value::nil());
+        if !self.equal(cur, old) {
+            return false;
+        }
+        self.env_define(root, sym, new);
+        true
+    }
+
     /// Structural `member?` over a proper list — the `:cons-new` presence test, kept inside
     /// [`Self::registry_update`]'s lock so `provide` cannot double-add under a race.
     fn list_contains(&self, list: Value, needle: Value) -> bool {

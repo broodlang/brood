@@ -597,6 +597,17 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         registry_update,
     );
 
+    // The general form of the above (KI-23): compare-and-swap, for a registry whose update
+    // is not a single map/list op. Lets the transform stay a Brood function while the
+    // read-decide-write stays indivisible; `registry-swap!` in the prelude retries on it.
+    def(
+        heap,
+        "%registry-cas!",
+        Arity::exact(3),
+        Sig::new(vec![any, any, any], any),
+        registry_cas,
+    );
+
     // set (the `#{…}` kernel type; the `set` library is Brood over these)
     def(
         heap,

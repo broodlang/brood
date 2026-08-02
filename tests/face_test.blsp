@@ -6,10 +6,12 @@
 
 (defmodule face-test (:use test) (:use editor/face))
 
-;; These describes `def-face` into the shared global `*faces*`. Concurrent
-;; `def`-rebinds of one global race (lost updates) — fine for real config-style
-;; use, but the suite runs every test at once — so run them `:isolated` (alone,
-;; against a private rolled-back copy of the globals).
+;; These describes `def-face` into the shared global `*faces*`. `:isolated` (alone,
+;; against a private rolled-back copy of the globals) so one test's faces don't leak
+;; into another's assertions. It is no longer needed for *safety*: `def-face`/`face-set`
+;; used to be a `(def *faces* (assoc *faces* …))` read-modify-write that lost concurrent
+;; registrations, and now go through the atomic registry swap (KI-23). Concurrent
+;; registration is covered directly in `tests/registry_test.blsp`.
 (describe "face registry"
   :isolated
   (test "def-face registers a face and face resolves it"

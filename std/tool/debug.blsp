@@ -213,7 +213,7 @@ nor a reserved prelude/std name (ADR-166)."
         (let (value (apply orig args))
           (spy--emit {:spy :return :fn sym :value value})
           value)))
-    (def *traced-fns* (assoc *traced-fns* sym orig))
+    (swap-registry! debug/*traced-fns* (fn (m) (assoc m sym orig)))
     sym))
 
 (defn break-fn (sym)
@@ -229,7 +229,7 @@ context (`break`'s own rule), so a break-fn'd function still works un-debugged.
       (fn (& args)
         (break (str sym) :args args)
         (apply orig args)))
-    (def *traced-fns* (assoc *traced-fns* sym orig))
+    (swap-registry! debug/*traced-fns* (fn (m) (assoc m sym orig)))
     sym))
 
 (defn untrace-fn (sym)
@@ -238,7 +238,7 @@ registry. Unknown/untraced syms are a no-op (returns nil)."
   (let (orig (get *traced-fns* sym))
     (when orig
       (debug--rebind sym orig)
-      (def *traced-fns* (dissoc *traced-fns* sym))
+      (swap-registry! debug/*traced-fns* (fn (m) (dissoc m sym)))
       sym)))
 
 (defn untrace-all ()

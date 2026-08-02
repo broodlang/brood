@@ -67,13 +67,13 @@ theme change is visible to a running UI on its next frame (late binding).")
 (defn def-face (name attrs)
   "Register (or replace) face `name` with the attribute map `attrs`; returns `name`.
 `attrs` may carry an `:inherit` face name layered under it at resolution time."
-  (def *faces* (assoc *faces* name attrs))
+  (swap-registry! *faces* (fn (m) (assoc m name attrs)))
   name)
 
 (defn face-set (name attrs)
   "Merge `attrs` into face `name` (creating it if absent) — restyle a face in one
 place, keeping its other attributes. Returns `name`."
-  (def *faces* (assoc *faces* name (merge (or (get *faces* name) {}) attrs)))
+  (swap-registry! *faces* (fn (m) (assoc m name (merge (or (get m name) {}) attrs))))
   name)
 
 (defn faces ()
