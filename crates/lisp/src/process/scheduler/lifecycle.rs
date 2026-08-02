@@ -5,6 +5,7 @@
 //! queue, worker pool, pid/parent tables, counters) stays in the root and is
 //! reached here via `use super::*`, so this is a pure relocation.
 use super::*;
+use crate::process::scheduler::pool::wake_a_parked_peer;
 
 /// A human descriptor for a process in death/crash diagnostics: its registered
 /// name plus pid when it has one (`ticker (pid 6)`), else the bare pid (`6`).
@@ -241,6 +242,7 @@ fn spawn_impl(heap: &Heap, f: Value, link_parent: bool) -> Result<u64, LispError
     // round-robin; work-stealing rebalances. The O(workers) least-loaded `assign_worker`
     // scan stays only on the wake/migration path (`wake_enqueue`), not the spawn hot path.
     let worker_id = pick_spawn_worker();
+    let placed_on_self = CURRENT_WORKER.with(|c| c.get()) == Some(worker_id);
     enqueue(Box::new(Process {
         pid,
         mailbox,
@@ -250,7 +252,16 @@ fn spawn_impl(heap: &Heap, f: Value, link_parent: bool) -> Result<u64, LispError
         program: None,
         resume: None,
         capture: inherited_capture,
+        queued_at: 0,
     }));
+    // We placed the child on our OWN queue, so it will not run until we yield — a whole
+    // quantum away if we are CPU-bound. Offer it to a parked peer (see
+    // `WORKER_PARKED`): placement is unchanged and we keep first refusal, so a spawner
+    // that blocks immediately (spawn-then-`receive`) still drains it locally before a
+    // woken peer arrives.
+    if placed_on_self {
+        wake_a_parked_peer(worker_id);
+    }
     Ok(pid)
 }
 
@@ -302,6 +313,7 @@ pub fn spawn_root_program(
 
     ensure_workers();
     let worker_id = pick_spawn_worker();
+    let placed_on_self = CURRENT_WORKER.with(|c| c.get()) == Some(worker_id);
     enqueue(Box::new(Process {
         pid,
         mailbox,
@@ -311,6 +323,10 @@ pub fn spawn_root_program(
         program: Some(Box::new(prog)),
         resume: None,
         capture: Vec::new(),
+        queued_at: 0,
     }));
+    if placed_on_self {
+        wake_a_parked_peer(worker_id);
+    }
     Ok(exit)
 }
