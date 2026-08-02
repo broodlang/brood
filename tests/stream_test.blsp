@@ -196,7 +196,39 @@
       (stream/stream-to-vector (stream/stream-lines (stream/stream-from-list ["foo\nbar"])))))
   (test "empty stream"
     (assert= []
-      (stream/stream-to-vector (stream/stream-lines (stream/stream-empty))))))
+      (stream/stream-to-vector (stream/stream-lines (stream/stream-empty)))))
+
+  ;; `stream-lines` splits each chunk once and queues the complete lines, rather than
+  ;; re-`substring`ing the rest of the buffer per line (which was O(lines x buffer) inside
+  ;; one chunk — 11.5x then 13.2x per 4x when a chunk carries many lines, the normal case
+  ;; for a 64 KB socket read). These pin the boundaries that rewrite moved through.
+  (test "CR and LF split across a chunk boundary still strip together"
+    ;; The \r ends one chunk and the \n begins the next — the pair must not survive.
+    (assert= ["a" "b"]
+      (stream/stream-to-vector (stream/stream-lines (stream/stream-from-list ["a\r" "\nb\r\n"])))))
+  (test "empty lines are preserved"
+    (assert= ["a" "" "b"]
+      (stream/stream-to-vector (stream/stream-lines (stream/stream-from-list ["a\n\nb\n"]))))
+    (assert= ["" ""]
+      (stream/stream-to-vector (stream/stream-lines (stream/stream-from-list ["\r\n\r\n"])))))
+  (test "a chunk that is exactly a newline"
+    (assert= ["a" "" "b"]
+      (stream/stream-to-vector (stream/stream-lines (stream/stream-from-list ["a\n" "\n" "b"])))))
+  (test "a bare CR inside a line is kept — only one before the LF is stripped"
+    (assert= ["a\rb"]
+      (stream/stream-to-vector (stream/stream-lines (stream/stream-from-list ["a\rb\n"])))))
+  (test "many lines in ONE chunk come out in order and complete"
+    ;; The case the rewrite optimises: all lines are split out of a single chunk and then
+    ;; handed over one pull at a time, so an error in the queue would reorder or drop.
+    (let (want (into [] (map (fn (i) (str "line" i)) (range 500)))
+          blob (apply str (map (fn (i) (str "line" i "\n")) (range 500))))
+      (assert= want
+        (stream/stream-to-vector (stream/stream-lines (stream/stream-from-list [blob]))))))
+  (test "take stops mid-chunk, leaving queued lines undelivered"
+    ;; Closing while lines are still queued must not hang or leak the producer.
+    (assert= ["a" "b"]
+      (stream/stream-to-vector
+        (stream/stream-take 2 (stream/stream-lines (stream/stream-from-list ["a\nb\nc\nd\n"])))))))
 
 ;; ---- pipe -------------------------------------------------------------------
 

@@ -14205,3 +14205,41 @@ against the old algorithm before being written down as the expectation.
 **Next candidate, noted not fixed:** `stream--lines-fetch` re-`substring`s the rest of its
 buffer per line and `(str buf chunk)` recopies on refill. It is bounded by **chunk** size,
 not stream size, so it is smaller than the shape suggests — measure before touching it.
+
+## 2026-08-02 — `stream-lines` was quadratic inside a chunk (303 ms → 39 ms), and the prediction held
+
+Last entry flagged `stream--lines-fetch` as a candidate and said the shape looked bigger than
+it was, because it is bounded by **chunk** size rather than stream size — measure first. That
+prediction was worth making, because it turned out to be exactly half right, and the half it
+got wrong is the half that mattered.
+
+Two shapes, three points each:
+
+| | 200/800/3200 | ratios | |
+|---|---|---|---|
+| lines arriving as a 64-line drip | 4/18/77 ms | 4.50 / 4.27 | linear, as predicted |
+| the same lines in **one chunk** | 2/23/303 ms | 11.50 / 13.17 | quadratic |
+
+So "bounded by chunk size" was right, and irrelevant: **one big chunk is the normal case.** A
+64 KB socket read holds ~1700 short lines, and slurping a file to stream its lines is one
+chunk by construction. The per-line `(substring buf (+ i 1) (string-length buf))` copied the
+whole rest of the buffer every time.
+
+**Fix:** one `string-split` per chunk, with the complete lines queued and handed over one per
+`:next`. `string-split` always returns at least one element and its last is the fragment after
+the final separator, so that element *is* the new buffer and everything before it is a line —
+no index arithmetic at all. **303 ms → 39 ms** at 3200 lines in one chunk. `(str buf chunk)`
+still recopies on refill, but `buf` is now only the fragment after the last newline.
+
+**Reading its row correctly.** It shows ~5–8× at small N and **1.82×** from 3200→12800. A
+ratio that *falls* as the base grows is warm-up, not a quadratic — the same signature that
+cleared `proc/gen gen-call`. End to end, 800→12800 is 5→71 ms: 14× for 16× of input.
+
+Six new tests for the boundaries the rewrite moved through, since the existing five covered
+only the easy cases: a `\r` ending one chunk with the `\n` starting the next (the pair must
+still strip together), empty lines including `\r\n\r\n`, a chunk that is exactly a newline, a
+bare `\r` *inside* a line (kept — only one immediately before the LF is stripped), 500 lines
+from a single chunk arriving in order and complete, and `stream-take` abandoning the stream
+while lines are still queued.
+
+Suite 928/928, `nest check` clean.
