@@ -14170,3 +14170,38 @@ index escaping where a char index belongs. Three "failures" on the first run wer
 wrong expectations — e.g. `(index-of "abc" "" 99)` is **3**, not -1, because `from` clamps to
 the length and the empty needle matches there. Checking those against the old code's clamp
 before changing anything is what kept a correct implementation from being "fixed".
+
+## 2026-08-02 — `strip-ansi` was two stacked quadratics (1583 ms → 109 ms)
+
+Continued the sweep past accumulators to the *other* O(index) trap this codebase keeps
+hitting: char-indexed access on a UTF-8 string. Grepping `char-at` across `std/` showed
+`url.blsp` and `csv.blsp` already carry comments explaining the trap and walk a code-point
+vector instead — and `ansi.blsp` did not.
+
+`ansi--strip` read each character with `char-at` (O(i) on UTF-8) **and** called
+`(string-length s)` — which is `chars().count()`, O(n) — as its loop bound, once per
+character. Two stacked quadratics. Three points: 16/113/1583 ms at 200/800/3200 colourised
+lines, ratios **7.6 then 14.0**, holding and growing. 1.58 s to strip ~90 KB of build output.
+
+Fixed with the same idiom the two modules that hit this before used: build the code-point
+vector once (`(into [] (string->list s))`), thread the length rather than recomputing it,
+index with O(1) `nth`. **1583 ms → 109 ms**, ratios 2.30/4.73.
+
+**Two honest caveats.**
+
+*It has no in-tree callers.* Nothing in `std/`, `tests/` or `crates/` calls `strip-ansi`. So
+this was a latent bug in a public std module (its docstring offers it for subprocess pipe
+output), not a live stall — worth fixing, but not the editor-hot-path find the last one was.
+
+*It had no tests either*, which I only noticed because `ansi_test.blsp` turned out to cover
+`editor/ansi` — a different module that *builds* escape strings. So I had rewritten the
+indexing of untested code. `tests/ansi_strip_test.blsp` is new: 15 tests covering what is
+stripped, the boundary cases where the scan must not run off the end (unterminated CSI, a
+trailing bare ESC, ESC-not-followed-by-`[`), and UTF-8 specifically — accents and emoji
+around stripped sequences — since a byte index leaking in where a code-point index belongs
+is exactly what this rewrite could have broken. Each boundary case was checked by hand
+against the old algorithm before being written down as the expectation.
+
+**Next candidate, noted not fixed:** `stream--lines-fetch` re-`substring`s the rest of its
+buffer per line and `(str buf chunk)` recopies on refill. It is bounded by **chunk** size,
+not stream size, so it is smaller than the shape suggests — measure before touching it.
