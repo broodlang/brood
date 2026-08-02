@@ -5,6 +5,7 @@
 //! queue, worker pool, pid/parent tables, counters) stays in the root and is
 //! reached here via `use super::*`, so this is a pure relocation.
 use super::*;
+use crate::process::scheduler::pool::wake_a_parked_peer;
 
 /// A human descriptor for a process in death/crash diagnostics: its registered
 /// name plus pid when it has one (`ticker (pid 6)`), else the bare pid (`6`).
@@ -241,6 +242,7 @@ fn spawn_impl(heap: &Heap, f: Value, link_parent: bool) -> Result<u64, LispError
     // round-robin; work-stealing rebalances. The O(workers) least-loaded `assign_worker`
     // scan stays only on the wake/migration path (`wake_enqueue`), not the spawn hot path.
     let worker_id = pick_spawn_worker();
+    let placed_on_self = CURRENT_WORKER.with(|c| c.get()) == Some(worker_id);
     enqueue(Box::new(Process {
         pid,
         mailbox,
@@ -250,7 +252,22 @@ fn spawn_impl(heap: &Heap, f: Value, link_parent: bool) -> Result<u64, LispError
         program: None,
         resume: None,
         capture: inherited_capture,
+        queued_at: 0,
+        spawns_since_park: 0,
     }));
+    // We placed the child on our OWN queue, so it will not run until we yield. Whether
+    // that matters depends entirely on the spawner: one that blocks for a reply yields in
+    // a microsecond and should keep its child local on a warm cache; one that keeps
+    // running holds it for a whole quantum. `spawns_since_park` tells them apart by
+    // history rather than prediction — a second spawn with no block in between means this
+    // process is not about to block — so only then do we hand the child to a parked peer.
+    //
+    // Gating on this matters: waking unconditionally costs the `supervisor` row 11%
+    // (907 → 1007 ms) in futex wakes that find nothing, since its spawner drains its own
+    // child every time. Placement itself is unchanged either way.
+    if placed_on_self && spawns_since_park_bump() >= 2 {
+        wake_a_parked_peer(worker_id);
+    }
     Ok(pid)
 }
 
@@ -302,6 +319,7 @@ pub fn spawn_root_program(
 
     ensure_workers();
     let worker_id = pick_spawn_worker();
+    let placed_on_self = CURRENT_WORKER.with(|c| c.get()) == Some(worker_id);
     enqueue(Box::new(Process {
         pid,
         mailbox,
@@ -311,6 +329,11 @@ pub fn spawn_root_program(
         program: Some(Box::new(prog)),
         resume: None,
         capture: Vec::new(),
+        queued_at: 0,
+        spawns_since_park: 0,
     }));
+    if placed_on_self && spawns_since_park_bump() >= 2 {
+        wake_a_parked_peer(worker_id);
+    }
     Ok(exit)
 }

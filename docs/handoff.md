@@ -62,10 +62,30 @@ From the published run (`brood-benchmarks/results/`):
    no size cap, remotely triggerable), and `http--read-until` still O(head²) in *memcpy*
    because ADR-142 had fixed only the scan half. Both fixed with a straddle probe; flat
    ~15 µs/chunk to 64 000 chunks (`net_framed_scale.blsp`).
-   **Swept and clean:** `proc/agent update`, `buffer insert`, `buffer forward-line`
-   (`scale_sweep.blsp`). **Still open:** `proc/gen gen-call`'s ratio is unstable and needs
-   three points + medians before it means anything; `std/net/*` beyond the framed reads,
-   `editor/*` beyond buffer, and the rest of `std/tool/*` are unswept.
+   **2026-08-02 — five more found and fixed, all three-point confirmed, all with a
+   regression row in `scale_sweep.blsp`:** `template/render` 318→24 ms (it re-sliced the
+   rest of the template *and* the output per marker — fixing one of the two changed
+   nothing), `last-index-of` 540→1 ms (a Brood loop calling `index-of` per match; on an
+   editor hot path both ways), `strip-ansi` 1583→109 ms (`char-at` O(i) *and*
+   `string-length` O(n) per character — two stacked quadratics), `stream-lines` 303→39 ms
+   (quadratic *inside* one chunk, which is the normal case for a 64 KB socket read), and
+   `format-source` 3593→1988 ms — **that one I had cleared as linear on 3.80/4.12/4.64 and
+   was wrong**; pushing the base up gave 4.46 then 6.40. The lesson is in the harness
+   header now: a ratio near 4 that RISES across bases is not linear, only a falling one
+   (warm-up) clears a row.
+   Then the string kernel underneath them: a **cached char count** on the heap string slot
+   (so `string-length` is O(1) and `chars == bytes` is an O(1) pure-ASCII test) and
+   **`expect_string_ref`** — `expect_string` returns an *owned* `String`, i.e. every string
+   builtin copied its whole argument per call. `inc-scan` 1114→15 ms; `(char-at s 3)` on a
+   216 KB string 23 ms→0 ms for 2000 calls and now flat in string size.
+   **Swept and clean:** `proc/agent update`, `buffer insert`, `buffer forward-line`,
+   `proc/gen gen-call`. **Every row in the sweep is now linear.**
+   **Still open:** `std/net/*` beyond the framed reads, `editor/*` beyond buffer, and the
+   rest of `std/tool/*` are unswept; ~115 `expect_string` call sites still copy.
+   **Temper the expectations, though** — the string work barely moved real workloads:
+   `nest format --check` over the repo is unchanged, one 25 600-form file gained 14%, and
+   fuzzy ranking 116→106 ms. Three predictions in a row about where a string fix would pay
+   off were contradicted by measurement. These copies only bite when ONE string is large.
    Two lessons for whoever continues: **a comment asserting linearity is not evidence** (both
    net findings sat under one, and one of them was an ADR's claim), and the shape to grep for
    is a `concat`/`append`/`filter` whose argument is the **accumulator**. Also, a `receive`-based
