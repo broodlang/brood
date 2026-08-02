@@ -14502,3 +14502,81 @@ Tests: `tests/print_bounded_test.blsp` (new, 15) + the `:spy-stop` contract and 
 traced loop in `debug_test.blsp` + the end-to-end in `eval_server_test.blsp`. The old
 "tracing COSTS tail-calls" test is rewritten — it documented the contradiction as intended.
 In-language suite green (4260).
+
+## 2026-08-02 (cont.) — package-rooted namespaces: dependencies root under their local name (ADR-070)
+The second deferred namespace item, greenlit for a full build. ADR-070 named package-rooting
+(Rust's `crate::` model) the "future direction" behind the interim detect-and-reject check; it's
+now implemented for **dependencies**. A dep `foo` providing `b.blsp` (`(defmodule b)`) loads as the
+global namespace `foo/b`, so two deps can both provide a `parser` (`liba/parser` vs `libb/parser`)
+with **no collision** — the headline benefit, verified end-to-end.
+
+The de-risking insight ADR-070 recorded held exactly: **no source change and no *resolver* change**.
+Intra-package references (`(:use b)` inside `foo`) root through the *loader*, not the resolver, which
+kept the invasive part out of the compile pass:
+
+- **Rust kernel:** two per-process `Heap` fields, `package_prefix` + `package_modules` (the dep's
+  local name + its short module set), set while the dep's files load. `%in-ns` roots a declared
+  `(defmodule b)` → `foo/b`; a new `%root-module-name` primitive roots an intra-package module
+  *reference*, leaving std/other-dep names bare; `%set-package-context` enters/restores the context
+  (nesting when a dep requires another dep). `NsLoadScope` needed no change — it leaves the package
+  context intact across a file load.
+- **Prelude:** `defmodule` roots its provide/doc key and the `:use`/`:alias`/`:use-internals`
+  clauses root their targets, all via `%root-module-name`; `require--force` gained a package branch
+  (`require--force-package`) keyed on two registries the package manager fills —
+  `*package-module-files*` (rooted name → file) and `*package-modules-of*` (package → short modules).
+- **Package manager:** `ensure-deps` → `package--register-rooting` registers each resolved dep's
+  modules rooted. The cross-provider collision guard narrows to **within-project** duplicates only
+  (a cross-dep or dep-vs-project collision is now impossible); message + `package--collision-sources`
+  updated, and `package_test`'s collision case reframed to two of your own source dirs.
+- **Hot-reload fix** (the interaction flagged in the design review): reloading a dep file must
+  re-enter its package context or its `(defmodule b)` would drop from `foo/b` to bare `b`. Fixed in
+  Brood — `std/tool/reload.blsp` brackets the context around both its load paths (`reload-defs` and
+  the new-file `load`), leaving the Rust reload primitive package-agnostic.
+
+Tests: `crates/nest/tests/package_rooted_namespaces.rs` — two deps sharing a `parser` module
+coexist rooted, and a dep whose `api` module `(:use util)`s a sibling roots that to `libc/util`.
+Verified green before an unrelated concurrent `Cargo.toml` edit blocked the workspace build:
+the two integration tests, a real `:path`-dep `nest test`, manual collision/rooting fixtures, and
+the `namespace`/`package`/`modules`/`private`/`ability` suites.
+
+**Deferred (recorded decision): uniform root-project rooting, the Elixir model.** Deps root; the
+root project's own modules stay short (the asymmetry). The decided next step follows Elixir — root
+the root project too under its `:name`, prefix *implied* (a `(defmodule buffer)` in project
+`myeditor` becomes `myeditor/buffer`; intra-project refs stay short — the dep mechanism applied to
+the root package). Deferred from this pass because it ripples through `*project-main*`, test
+discovery, `check-files`, and the REPL — its own focused slice, not a bolt-on beside deps-rooting.
+
+## 2026-08-02 (cont.) — root-project rooting (the Elixir-uniform model) landed
+Finished the namespacing: the deferred piece above is done. The root project's own modules now root
+under its `:name` — `(defmodule buffer)` in project `myeditor` is the global `myeditor/buffer`, the
+prefix implied (intra-project `(:use buffer)` stays short, roots at load). It's the dep mechanism
+applied to the root package: `project--root-project-rooting` (in `project-setup`) scans the
+project's source dirs (via the newly-public `package-module-files`), registers each module rooted,
+and sets an **ambient** package context — not restored, since it's the project's default for the
+whole run; a dependency load nests its own context over it and restores back.
+
+The ripple I predicted was real, and each site got the same `%root-module-name` treatment:
+- **Entry** (`run-project`): the `:main` module is rooted before `require` + the `mod/fn` call.
+- **Checker**, in TWO places (the second only surfaced under test): `setup_check_imports` roots each
+  `(:use)`/`(:alias)` target so it scans `myeditor/buffer/*` for exports (not `buffer/*`); and the
+  **KI-17 require-reachability** set carries each entry's rooted form, or a resolved `myeditor/buffer`
+  reference is falsely flagged "unrequired". Without both, `nest check` on a rooted project (and the
+  scaffold-checks-clean invariant) broke.
+- **Hot-reload** brackets the context so re-loading a dep file still roots.
+
+Three bugs found and fixed while wiring it: (a) `package--module-files` was `--`-private but the
+project loader (a different module) needs it — promoted to public `package-module-files`; (b) `:name`
+is a *symbol* when written `:name demo` and a *string* when `:name "demo"` — normalized via `(name
+…)`, which had broken `nest run`'s default entry; (c) an embedded std module requested while a
+project context is active (a project with its own `json`/`set` module) would misroot the *baked-in*
+`(defmodule json)` — the embedded-load path now clears the context around `%load-module-source`.
+
+Verified: full `nest` suite (all integration tests incl. the scaffold-checks-clean and
+`--main`-override regressions), lib unit tests (451), the namespace/package/modules/private/ability/
+maps Brood suites, and 3 committed integration tests in `crates/nest/tests/package_rooted_namespaces.rs`
+(two deps sharing a `parser` coexist; intra-package `(:use)` roots; the root project roots its own
+modules + checks clean). Known follow-ups (new-scenario gaps, not regressions): LSP go-to/hover/rename
+for rooted *project* modules; `nest release` bundling of two deps sharing a module name (a bundle
+loads unrooted but self-consistently today, so simple bundles are unaffected); and REPL interaction
+(a bare project fn needs its `myeditor/mod/fn` name interactively). The FULL dependency-version
+**resolver with many tests** is next (user-sequenced, overrides the ADR-037 no-solver invariant).

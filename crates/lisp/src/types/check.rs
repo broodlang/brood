@@ -568,6 +568,13 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
     for clause in clauses {
         match clause {
             Clause::Use(mod_sym, subset) => {
+                // Package-rooted namespaces (ADR-070): an intra-package `(:use b)` — in a
+                // dependency, or in the root project under its `:name` — roots to `pkg/b`.
+                // The runtime `%refer` target roots via `%root-module-name`; the checker
+                // must root the same way here or it scans `b/*` for exports that actually
+                // live under `pkg/b/*` and flags every imported name unbound. External /
+                // std / already-qualified names are left unchanged.
+                let mod_sym = heap.root_module_name(mod_sym);
                 let mod_name = value::symbol_name(mod_sym);
                 let prefix = format!("{}/", mod_name);
                 ensure_loaded(heap, mod_sym, &prefix);
@@ -597,6 +604,7 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                 }
             }
             Clause::UseExcept(mod_sym, excluded) => {
+                let mod_sym = heap.root_module_name(mod_sym); // ADR-070, as in Clause::Use
                 let mod_name = value::symbol_name(mod_sym);
                 let prefix = format!("{}/", mod_name);
                 ensure_loaded(heap, mod_sym, &prefix);
@@ -608,10 +616,14 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                 }
             }
             Clause::UseInternals(mod_sym) => {
+                let mod_sym = heap.root_module_name(mod_sym); // ADR-070, as in Clause::Use
                 let key = crate::eval::macros::internals_grant_key(&value::symbol_name(mod_sym));
                 heap.add_import(key, mod_sym);
             }
             Clause::Alias(short, mod_sym) => {
+                // Root the alias TARGET (ADR-070) so `short/name` resolves to `pkg/mod/name`;
+                // the local `short` prefix is unchanged.
+                let mod_sym = heap.root_module_name(mod_sym);
                 let key = value::intern(&format!("{}/", value::symbol_name(short)));
                 heap.add_import(key, mod_sym);
             }
@@ -854,6 +866,17 @@ pub fn check_file_ext(
         // un-required module isn't bound at all, so the lint is naturally inert there.)
         let mut required = collect_required_modules(heap, &forms, file_ns);
         required.extend(extra_required.iter().cloned());
+        // Package-rooted namespaces (ADR-070): a `(:use b)`/`require` target roots to
+        // `pkg/b` at load, and the resolved `pkg/b/name` references this lint checks are
+        // rooted too — so the reachable set must carry each entry's ROOTED form as well,
+        // or an intra-package reference is falsely flagged "unrequired". `root_module_name`
+        // is identity for an external / std / already-rooted name, so the unrooted entries
+        // stay valid too (both forms are kept). Inert outside a package context.
+        let rooted: Vec<String> = required
+            .iter()
+            .map(|m| value::symbol_name(heap.root_module_name(value::intern(m))))
+            .collect();
+        required.extend(rooted);
         ctx.set_required_mods(required);
         ctx.set_raw_qualified(collect_raw_qualified(heap, &forms));
         for &form in &expanded {

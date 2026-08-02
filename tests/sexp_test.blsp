@@ -36,6 +36,26 @@
   (test "beginning-of-defun finds the enclosing top-level form"
     (assert= (point-defun-start src 15) 0)
     (assert= (point-defun-start src 8) 0))
+  (test "end-of-defun finds the enclosing top-level form's close"
+    (assert= (point-defun-end src 15) 22)
+    (assert= (point-defun-end src 8) 22))
+  ;; forward-list/backward-list step over the ATOM siblings and stop only at lists: from the
+  ;; start of `defn` the next list is `(x)` [8,11), then the inner `(+ x 1)` [14,21).
+  (test "forward-list / backward-list skip atoms and land on list boundaries"
+    (assert= (point-list-forward src 1) 11)
+    (assert= (point-list-forward src 11) 21)
+    ; no further list → unchanged
+    (assert= (point-list-forward src 21) 21)
+    (assert= (point-list-backward src 21) 14)
+    (assert= (point-list-backward src 14) 8)
+    (assert= (point-list-backward src 8) 8))
+  (test "up-list leaves the enclosing list forward, past its close"
+    ; inside (+ x 1) → past its `)`
+    (assert= (point-up-forward src 15) 21)
+    ; inside the outer form → past its `)`
+    (assert= (point-up-forward src 1) 22)
+    ; at top level → unchanged
+    (assert= (point-up-forward src 0) 0))
   (test "positions account for delimiters & reader-macro prefixes"
     ;; "'(a) [b]"  → quoted list [0,4), vector [5,8)
     (assert= (point-forward "'(a) [b]" 0) 4)
@@ -130,6 +150,19 @@
     (assert= (point-splice "(a (b) c)" 4) ["(a b c)" 3]))
   (test "wrap-round wraps the form at point, point landing just inside"
     (assert= (point-wrap-round "foo bar" 0) ["(foo) bar" 1]))
+  (test "transpose swaps the forms either side of point, keeping the separator in place"
+    ;; between `a` and `b` → swapped, point past both
+    (assert= (point-transpose "(a b)" 2) ["(b a)" 4])
+    ;; separator width is preserved where it was, not carried with the forms
+    (assert= (point-transpose "(a   b)" 2) ["(b   a)" 6])
+    ;; point INSIDE a form → that form is the one "after", so it swaps with its predecessor
+    (assert= (point-transpose "(a foo)" 4) ["(foo a)" 6])
+    ;; whole lists transpose as units
+    (assert= (point-transpose "((a b) (c d))" 6) ["((c d) (a b))" 12]))
+  (test "transpose is nil with nothing on one side"
+    ; only one form in the list
+    (assert= (point-transpose "(a)" 2) nil)
+    (assert= (point-transpose "(a b)" 1) nil))
   ; not inside any list
   (test "ops return nil when inapplicable (no sibling, top level)"
     ; nothing after to slurp

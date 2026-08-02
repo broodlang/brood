@@ -1,0 +1,159 @@
+;; std/version.blsp — semantic versions as data: parse, order, and test against a
+;; constraint. Small on purpose, and deliberately NOT a dependency solver.
+;;
+;; Why this exists: two consumers wrote it independently before it did. hive (the
+;; package registry) needs "which published release is the newest"; an application
+;; that hosts plugins needs "is this plugin's `:enhances {app \">= 0.3\"}` satisfied
+;; by the version I am?" Both are questions *about two versions*, and both were
+;; about to be answered by a third hand-rolled copy.
+;;
+;; The line this module does not cross: `nest`'s resolver takes **exact** versions
+;; and has no solver (ADR-037's direct-refs-only invariant). A predicate that says
+;; whether one version satisfies one constraint chooses nothing and fetches nothing,
+;; so it is not the thin end of a solver — it is what a *host* needs in order to
+;; refuse an incompatible plugin with a clear message instead of loading it.
+
+(defmodule version
+  "Semantic-version helpers: `version-core` (→ `[major minor patch]`),
+`version-valid?`, `version-compare`, `version-newer?`, and `version-satisfies?`
+(a version against a `\">= 1.2\"`-style constraint). Comparison is on the numeric
+`MAJOR.MINOR.PATCH` core; any `-prerelease` / `+build` suffix is ignored (ordering
+pre-releases is deferred until something needs it). `(require 'version)`.")
+
+;; ---- parsing ------------------------------------------------------------------
+
+(defn version-core (v)
+  "The `[major minor patch]` integers of version string `v`, ignoring any
+`-prerelease` / `+build` suffix. A missing or non-numeric segment reads as 0, so
+`\"1.2\"` is `(1 2)` and `\"1.x\"` is `(1 0)` — lenient, because this is used to
+compare what a human typed in a manifest, not to validate it (that is
+`version-valid?`)."
+  (let (core (first (string-split (first (string-split v "+")) "-")))
+    (map (fn (p) (or (string->number p) 0)) (string-split core "."))))
+
+(defn version--digit-run? (s)
+  (let (cps (string->codepoints s))
+    (and (not (empty? cps))
+      (not (any? (fn (cp) (or (< cp 48) (> cp 57))) cps)))))
+
+(defn version-valid? (v)
+  "Whether `v` is a full `MAJOR.MINOR.PATCH` version — three segments, each a run of
+ASCII digits — ignoring any `-prerelease` / `+build` suffix. The check a registry
+applies on publish; `version-satisfies?` is deliberately more forgiving, since a
+CONSTRAINT is usually written short (`\">= 0.3\"`)."
+  (and (string? v)
+    (let (core (first (string-split (first (string-split v "+")) "-"))
+          parts (string-split core "."))
+      (and (= (count parts) 3)
+        (not (any? (fn (p) (not (version--digit-run? p))) parts))))))
+
+;; ---- ordering -----------------------------------------------------------------
+
+(defn version-compare (a b)
+  "Compare two version STRINGS on their numeric core: -1, 0, or 1. Shorter is not
+smaller — `\"1.2\"` and `\"1.2.0\"` compare equal, because a constraint written
+`\">= 1.2\"` means 1.2.0, not 1.2.anything-above-nothing."
+  (version--compare-parts (version-core a) (version-core b)))
+
+(defn version--compare-parts (a b)
+  ;; Missing tail segments read as 0 (so 1.2 == 1.2.0), which is what makes a
+  ;; short constraint mean what a human means by it.
+  (cond
+    (and (empty? a) (empty? b)) 0
+    else (let (x (if (empty? a) 0 (first a))
+               y (if (empty? b) 0 (first b)))
+           (cond
+             (< x y) -1
+             (> x y) 1
+             else (version--compare-parts (if (empty? a) a (rest a))
+                    (if (empty? b) b (rest b)))))))
+
+(defn version-newer? (a b)
+  "Whether version `a` is strictly newer than `b`. The empty string is older than
+everything (the \"no release yet\" placeholder a registry starts from)."
+  (cond
+    (= b "") (not (= a ""))
+    (= a "") false
+    else (> (version-compare a b) 0)))
+
+;; ---- constraints ---------------------------------------------------------------
+;; One version, one constraint, a yes/no answer. The vocabulary is the small set a
+;; plugin manifest actually needs; anything richer (ranges with unions, caret/tilde
+;; families) waits for a caller that wants it, because every operator added here is
+;; one an ecosystem then has to understand forever.
+
+(def *version-operators* ["<=" ">=" "<" ">" "="])   ; longest first: "<=" before "<"
+
+(defn version--digit-start? (s)
+  (let (cps (string->codepoints s))
+    (and (not (empty? cps)) (>= (first cps) 48) (<= (first cps) 57))))
+
+(defn version--split-constraint (constraint)
+  ;; `">= 1.2"` -> `[">=" "1.2"]`; a bare `"1.2"` -> `["=" "1.2"]`.
+  ;;
+  ;; No operator is only legal in front of a VERSION. Treating anything else as `=`
+  ;; is how `"~> 1.0"` (a Ruby/Elixir habit this module does not implement) came out
+  ;; as a silent `false`: `version-core` read `"~> 1"` as 0, so the comparison was
+  ;; against garbage and the caller was told, confidently, "not satisfied". A
+  ;; constraint operator we do not implement has to say so.
+  (let (c (trim constraint)
+        op (find (fn (o) (starts-with? c o)) *version-operators*))
+    (cond
+      (not (nil? op)) [op (trim (substring c (string-length op) (string-length c)))]
+      (version--digit-start? c) ["=" c]
+      else (error "version-satisfies?: unknown operator in " (pr-str constraint)
+             " — use >=, >, <=, <, = or a bare version"))))
+
+(defn version-satisfies? (v constraint)
+  "Whether version string `v` satisfies `constraint` — `\">= 1.2\"`, `\"> 1.2.3\"`,
+`\"<= 2.0\"`, `\"< 2\"`, `\"= 1.2.3\"`, or a bare `\"1.2.3\"` (which means `=`).
+Whitespace around the operator is optional.
+
+The comparison is on the numeric core with missing segments read as 0, so
+`\"0.3.1\"` satisfies `\">= 0.3\"`. A constraint of nil or `\"\"` is *no
+constraint* — satisfied by anything, so a manifest that names an application
+without pinning a version is legal (`{bedit \"\"}`).
+
+An operator this module does not implement (`\"~> 1.0\"`, `\"^1.0\"`) **raises**, and
+so does an operator with no version after it. Both would otherwise answer a confident
+`false` — a plugin refused for a reason nobody wrote down, or accepted into an
+application that cannot run it."
+  (if (or (nil? constraint) (= (trim constraint) ""))
+    true
+    (let ([op wanted] (version--split-constraint constraint))
+      (when (= (trim wanted) "")
+        (error "version-satisfies?: no version in constraint " (pr-str constraint)))
+      (let (c (version-compare v wanted))
+        (case op
+          "=" (= c 0)
+          ">" (> c 0)
+          "<" (< c 0)
+          ">=" (>= c 0)
+          "<=" (<= c 0)
+          (error "version-satisfies?: unknown operator "
+            (pr-str op) " in " (pr-str constraint)))))))
+
+(defn version-satisfies-all? (versions constraints)
+  "Whether every entry of the `constraints` map (name → constraint string) is
+satisfied by the same-named entry of the `versions` map (name → version string).
+A constraint naming something absent from `versions` is NOT satisfied — that is
+the \"this plugin wants an application I am not\" case, which must fail closed.
+
+The shape a plugin manifest's `:enhances` map is checked with:
+`(version-satisfies-all? {'bedit \"0.4.0\"} {'bedit \">= 0.3\"})`."
+  (not (any? (fn (kv)
+               (let ([nm constraint] kv
+                     have (get versions nm))
+                 (or (nil? have) (not (version-satisfies? have constraint)))))
+         (map-pairs constraints))))
+
+(defn version-unsatisfied (versions constraints)
+  "The `constraints` entries `versions` does NOT satisfy, as a list of
+`[name constraint have]` (`have` is nil when absent) — what an application shows
+the user when it declines a plugin, instead of a bare false."
+  (keep (fn (kv)
+          (let ([nm constraint] kv
+                have (get versions nm))
+            (when (or (nil? have) (not (version-satisfies? have constraint)))
+              [nm constraint have])))
+    (map-pairs constraints)))

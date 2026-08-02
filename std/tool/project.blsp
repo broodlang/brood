@@ -63,6 +63,19 @@ the `nest new` scaffolder."
 ;; slots above: ambient is a `defdyn` declaration now, not an earmuff spelling.
 (defdyn *project-description* nil)
 (defdyn *project-repository* nil)
+;; `:enhances` — which APPLICATIONS this package adds functionality to, as a map of
+;; name → version constraint (`{bedit ">= 0.3"}`). Debian's `Enhances:` field: a
+;; plugin declares what it plugs into, and the *application* checks the constraint
+;; against its own version when it loads the package (`std/version`
+;; `version-satisfies-all?`). Never the resolver's business — nothing here is
+;; fetched, so ADR-037's exact-version, no-solver invariant is untouched.
+;;
+;; Kept generic on purpose: the names are DATA, so nothing in brood/nest/hive
+;; enumerates them or knows any application by name. An editor plugin says
+;; `{bedit ">= 0.3"}`, a web-framework plugin `{hatch ">= 1.0"}`, and a registry can
+;; index and filter on the key (`nest search --enhances bedit`) without learning
+;; either. Absent = an ordinary library.
+(defdyn *project-enhances* {})
 (defdyn *project-source-paths* (list "src"))
 ; conventional default
 (defdyn *project-test-paths* (list "tests"))
@@ -275,7 +288,7 @@ than being fetched into `_deps/<name>/`."
 ;; and the `:main` pair — without quoting. Manifests are static data; nothing in
 ;; them is ever evaluated.
 (defmacro project (& opts)
-  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). A dep entry may carry `:optional true` (declared but not force-installed). Arguments are literal data — write dep names and the `:main` pair as bare symbols."
+  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). A dep entry may carry `:optional true` (declared but not force-installed). `:enhances` declares the applications this package plugs into as a map of name → version constraint (`:enhances {bedit \">= 0.3\"}`) — the application checks it when it loads the package; nothing is fetched. Arguments are literal data — write dep names, `:enhances` keys and the `:main` pair as bare symbols."
   ;; quasiquote (not `(list 'project-apply …)`) so α qualifies `project-apply`
   ;; to `project/project-apply` at this macro's definition (ADR-065 §7).
   `(project-apply (quote ~opts)))
@@ -303,6 +316,30 @@ than being fetched into `_deps/<name>/`."
              key " must be a vector of path strings, got " (pr-str value) " — write it as " key " "
              example))))
 
+(defn project--parse-enhances (value)
+  "`:enhances` as a `{name-symbol -> constraint-string}` map. Absent is `{}` (an
+ordinary library). Names may be written as symbols (`{bedit \">= 0.3\"}`, matching
+how dep names are written) or strings; both normalize to symbols, so a consumer
+looks a name up one way. A constraint of `\"\"` means \"this application, any
+version\", which `version-satisfies?` accepts.
+
+Validated here rather than at load time: a manifest typo should fail when the
+manifest is read, naming the key, not later inside whoever consumes the map."
+  (cond
+    (nil? value) {}
+    (not (map? value)) (error "project: "
+                         ":enhances must be a MAP of application → version constraint, got "
+                         (pr-str value)
+                         " — write it as :enhances {bedit \">= 0.3\"}")
+    else (fold (fn (acc kv)
+                 (let ([nm constraint] kv)
+                   (when (not (string? constraint))
+                     (error "project: "
+                       ":enhances constraint for " (pr-str nm) " must be a string, got "
+                       (pr-str constraint) " — write it as {" (pr-str nm) " \">= 0.3\"}"))
+                   (assoc acc (if (symbol? nm) nm (symbol (str nm))) constraint)))
+           {} (map-pairs value))))
+
 (defn project-apply (opts)
   (def *project-name* (plist-get opts :name))
   (def *project-version* (plist-get opts :version))
@@ -310,6 +347,7 @@ than being fetched into `_deps/<name>/`."
   ;; is published from. Optional in general; `nest publish` requires both.
   (def *project-description* (plist-get opts :description))
   (def *project-repository* (plist-get opts :repository))
+  (def *project-enhances* (project--parse-enhances (plist-get opts :enhances)))
   (let (src (plist-get opts :source-paths)
         tst (plist-get opts :test-paths)
         m (plist-get opts :main))
@@ -518,6 +556,12 @@ rules merged in declaration order, then this project's own `:format-headers` on 
   ;; *format-headers-extra* below.
   (def *project-source-paths* (list "src"))
   (def *project-test-paths* (list "tests"))
+  ;; Reset `*project-name*` too, for the same reason (a manifest without `:name`, or none
+  ;; at all, must NOT inherit a prior setup's name). This matters more since package-rooting
+  ;; (ADR-070): a leaked name would make `project--root-project-rooting` wrongly root a
+  ;; nameless project's modules under the previous project's prefix. `project-apply` re-sets
+  ;; it when the manifest names it.
+  (def *project-name* nil)
   ;; Read the manifest as *data* and apply it — rather than `load`ing it, which
   ;; would need the `(project …)` macro bound bare in the (root) manifest file
   ;; (it now lives in this namespace). Manifests stay written `(project …)`.
@@ -525,11 +569,48 @@ rules merged in declaration order, then this project's own `:format-headers` on 
     (when (file-exists? mf) (project--apply-manifest mf)))
   (set-load-path! (append (project-abs-paths root *project-source-paths*) *load-path*))
   (project--ensure-deps-on-path root)
+  ;; Root-project rooting (ADR-070, Elixir-uniform model): the project's OWN modules
+  ;; root under its `:name` — `(defmodule buffer)` in project `myeditor` becomes the
+  ;; global `myeditor/buffer`, with the prefix *implied* (intra-project refs stay short:
+  ;; `(:use buffer)` roots to `myeditor/buffer`). This is the dep mechanism (above)
+  ;; applied to the root package. Set as an AMBIENT context — not restored — so every
+  ;; project source loaded after this point roots; a dependency load nests its own
+  ;; context over it and restores back to this. Skipped for a nameless/bare run.
+  (project--root-project-rooting root)
   ;; Hand the formatter this project's (+ its plugins') macro-shape rules, so
   ;; `nest format`/LSP/MCP indent framework macros correctly. Always set (resetting
   ;; any stale value from a prior setup in a long-lived tooling image).
   (def *format-headers-extra* (project--effective-format-headers root))
   root)
+
+;; Register the project's OWN modules as package-rooted under its `:name`, and set the
+;; ambient package context so every source loaded from here on roots (ADR-070). A no-op
+;; when the project is nameless (a bare `brood file.blsp`, or a manifest with no :name):
+;; then modules stay short, exactly as before rooting. `package-module-files` is the
+;; same static `(defmodule …)`-name scan the dep path uses.
+(defn project--root-project-rooting (root)
+  (if *project-name*
+    (do
+      (require 'package)
+      ;; `:name` may be written as a symbol (`:name demo`) or a string (`:name "demo"`)
+      ;; — the manifest is read as data. Normalise to a string so the registry keys
+      ;; (and `require--force-package`'s string-keyed lookup of them) always agree.
+      (let (pkg (name *project-name*)
+            dirs (project-abs-paths root *project-source-paths*)
+            module-files (apply append (map package/package-module-files dirs))
+            short-modules (map first module-files))
+        (register-package-modules! pkg short-modules)
+        (map (fn (mf)
+               (register-package-module! (str pkg "/" (name (first mf))) (second mf)))
+          module-files)
+        ;; Ambient: not restored — the project's default context for the whole run. A dep
+        ;; load nests its own context over this and restores back to it.
+        (%set-package-context (symbol pkg) short-modules)
+        nil))
+    ;; Nameless project (a bare run, or a manifest with no :name): clear any ambient
+    ;; context a *prior* project-setup left in a long-lived tooling image, so this
+    ;; project's short modules don't get wrongly rooted under the previous name.
+    (%set-package-context nil nil)))
 
 ;; Load a full project image for **tooling** (the LSP and the `nest mcp` server):
 ;; put the project's sources on *load-path* and load them (so cross-module names
@@ -1701,7 +1782,10 @@ as unchanged (only when some were)."
     ;; A `--main` override (set via `set-project-main`) wins over the manifest's
     ;; `:main`, which `project-setup` just re-applied into `*project-main*`.
     (let (entry (or *project-main-override* *project-main*)
-          modname (first entry)
+          ;; Root the entry module under the project (ADR-070): `project-setup` above
+          ;; set the ambient package context, so `main` → `myeditor/main`. A bare-file
+          ;; entry (no `(defmodule …)`, so not a registered module) is left unrooted.
+          modname (%root-module-name (first entry))
           fname (second entry))
       (require modname)
       ;; A `(defmodule …)` entry defines its fn as `modname/fname` (ADR-065); a

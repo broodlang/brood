@@ -340,6 +340,22 @@ identical whether filed under `b/` or `foo/b/`, and rooting can land later (M2
 plugin pressure) with the flat form kept working — no package-source churn. Full
 analysis in ADR-070's *Future direction*.
 
+> **Update (2026-08-02): package-rooting is now IMPLEMENTED for dependencies** — the
+> destination arrived early. A dep `foo`'s `(defmodule b)` loads as the global `foo/b`,
+> so two deps can both provide a `parser` with no collision. As predicted it was a pure
+> *loader* change (per-process `package_prefix`/`package_modules` on the `Heap`; `%in-ns`
+> and the `:use`/`:alias` clause targets root via a `%root-module-name` primitive; the
+> package manager registers each dep's modules rooted). The old cross-provider
+> detect-and-reject narrows to a **within-project** duplicate check (cross-dep collisions
+> are now impossible). The **root project's own modules root too**, under its `:name` (the
+> **Elixir-uniform model**), prefix *implied* — a `(defmodule buffer)` in project
+> `myeditor` is the global `myeditor/buffer`, and intra-project `(:use buffer)` stays
+> short. One mechanism serves both deps and the root project: an ambient package context
+> (`project-setup`) that roots `%in-ns` / `(:use)` / `(:alias)` / the `:main` entry / the
+> checker's import + require-reachability sites / hot-reload. Known follow-ups: LSP
+> nav and multi-dep-collision bundling for rooted projects. Full status in ADR-070's
+> *Update (2026-08-02)*.
+
 ## 9. Auto-require
 
 Your `(observer/observe …)` → auto-load idea has precedent: Emacs `autoload` (a
@@ -440,3 +456,42 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
   (§3 rejected alternative).
 - **No constraint solver / registry for ns names** beyond ADR-037's existing
   direct-ref model.
+
+## 13. Comparison with other languages
+
+Where Brood's namespace system sits against the field. The first table is the broad
+landscape; the second is the set of deliberate choices, each naming its closest
+sibling and the alternative it rejected. This reflects the design *as implemented*,
+including package-rooting (ADR-070) and LSP auto-import (ADR-206).
+
+| Language | Unit | Substrate | Privacy | Live-redefinable? | Cross-package collisions | Auto-load on bare ref? | Macro hygiene |
+|---|---|---|---|---|---|---|---|
+| **Brood** | module = namespace = file (`defmodule`) | **flat interned `u32` table; namespacing is an expand-time rewrite (no interner partition)** | **soft but *enforced*** (`--` names; cross-ns private ref is a load error; `:use-internals` grant) | **yes** (`def` rebinds globals; hot reload) | **impossible — package-rooted** (`foo/b`); detect-and-reject was the interim | **no** — rejected (ADR-206); LSP auto-import instead | **auto** (auto-gensym `x#` + auto-qualifying quasiquote) |
+| Clojure | namespace maps symbols→vars | var indirection per ns | soft (`^:private`; `#'ns/sym` bypasses) | yes (REPL) | convention only (reverse-domain `com.foo.parser`) | no (unloaded `foo/bar` errors) | auto (syntax-quote qualifies + `x#`) |
+| Common Lisp | package partitions the interner | interner partition (`pkg:sym`/`pkg::sym`) | soft (`::` reaches internals) | yes | no real answer (flat package names) | no | none (manual `gensym`) |
+| Racket | module, statically linked | static module system | **hard** (unexported invisible) | **no** (sealed) | collections / pkgs | no | full (`syntax-rules`/`syntax-case`) |
+| Elixir | module (`defmodule Foo.Bar`), atoms | atoms on the BEAM | `def`/`defp` (defp near-hard) | yes (OTP hot code load) | app / dotted names + Mix | ~yes (code server loads on first call) | hygienic-ish (`var!` escape) |
+| Rust | module + crate | static resolution | **hard** (`pub`) | no | **impossible — crate-rooted** (`crate::`) | no | hygienic (`macro_rules!`, `$crate`) |
+| Go | package = directory | static | hard (capitalization) | no | import paths are URLs (globally rooted) | no | (no macros) |
+| Python | module = file, package = dir | dynamic `sys.modules` objects | soft (`_name`, `__all__`) | messy (`importlib.reload`) | flat PyPI names (collision-prone) | no | (n/a) |
+| JS / ESM | module = file | static module graph | hard (unexported invisible) | no (HMR is tooling) | npm scoped (`@scope/pkg`) | no (dynamic `import()` explicit) | (n/a) |
+
+The deliberate choices, each vs its closest sibling and the rejected alternative:
+
+| Question | Brood's choice | Closest sibling | Rejected |
+|---|---|---|---|
+| Sealing vs hot reload | **Soft privacy + live redefinition** (the same trade-off from two sides) | Clojure / CL | Racket's hard sealing (kills self-editing-editor) |
+| Core representation | **Flat interned table + expand-time rewrite** | Emacs-flat, upgraded | CL interner partition (large core growth for the same surface) |
+| Import clash | **Hard error; `:only`/`:exclude`** + `/name` root escape + prelude-shadow warning | **Elixir** (`import … except:`, `Kernel.foo`) | Silent last-wins (Python/CL merge) |
+| Package collisions | **Package-rooted** (`foo/b`), collisions impossible | **Rust** (`crate::`), Go | Mandatory per-call prefixes, or convention-only (Clojure) |
+| Referenced-but-not-imported | **LSP auto-import writes the explicit `(:use …)`** | Rust-analyzer / TS | Runtime autoload (Emacs/Guile) — hides deps from tooling |
+| Macro reference transparency | **Auto-qualifying quasiquote** (defining-ns) | Clojure syntax-quote | Hand-qualify every cross-ns ref (a latent capture bug per third-party macro) |
+
+**The one-line read.** Brood is **Clojure/CL semantics** (namespaced *and*
+live-redefinable, soft privacy) on an **Emacs-flat substrate** (no interner
+partition), with **modern ergonomics layered on top** — Elixir's import-clash
+discipline, Rust's package-rooting, and Rust-analyzer-style auto-import instead of
+legacy autoload. The distinctive combination is *live-redefinable +
+collision-proof + statically-analyzable at once*: Rust has rooting + analyzability
+but no live reload; Clojure has live + soft privacy but convention-only collisions;
+no single other language gives all three.

@@ -4457,7 +4457,16 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
       ;; are allowed to bind reserved names and BECOME reserved (ADR-166). A project
       ;; file (the branch below) goes through the ordinary `load`, so a package's
       ;; names are never reserved.
-      (do (%load-module-source src (%builtin-module-file key)) (provide key))
+      ;;
+      ;; Load embedded std at ROOT: clear any ambient package context (ADR-070) around
+      ;; it and restore after. Embedded std is never a package module, so without this a
+      ;; project whose own module shares a std name (a local `json`/`set`/`format`) would
+      ;; misroot the baked-in `(defmodule json)` to `myproj/json` under that context.
+      (do
+        (let (prev (%set-package-context nil nil))
+          (%load-module-source src (%builtin-module-file key))
+          (%set-package-context (first prev) (second prev)))
+        (provide key))
       ;; A dependency module (ADR-070): `key` is a rooted name (`"foo/b"`) the package
       ;; manager mapped to a file. Load it under `foo`'s package context so its
       ;; `(defmodule b)` roots to `foo/b` and its intra-package `(:use …)` targets root.

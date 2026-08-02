@@ -549,13 +549,28 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
     (filter (fn (m) (not (nil? m)))
       (map package--module-name-of (package--blsp-files src-dir)))))
 
-;; The [label src-dir] providers to check: the project's own source dirs first
-;; (so a dep colliding with your own module is caught), then each resolved dep.
+;; `[module-symbol file-path]` for each `.blsp` file the dir provides (recursively) —
+;; `provided-modules` paired with the file each module lives in. Package-rooting
+;; (ADR-070) needs the FILE, not just the name: a dep module `foo/b` maps to that
+;; dep's `b.blsp`, and `require--force` loads it from there under `foo`'s context.
+;; PUBLIC (no `--`): the project loader (`project--root-project-rooting`) also scans
+;; its own source dirs with it to root the root project's modules, a legitimate
+;; cross-module use.
+(defn package-module-files (src-dir)
+  (if (not (dir? src-dir))
+    nil
+    (filter (fn (pair) (not (nil? (first pair))))
+      (map (fn (file) (list (package--module-name-of file) file))
+        (package--blsp-files src-dir)))))
+
+;; The [label src-dir] providers to check for a *module-name* collision. Since deps
+;; are package-rooted (ADR-070) — a dep `foo`'s `b` is the global `foo/b` — a dep can
+;; no longer collide with another dep or with your own module; the only real clash left
+;; is two of YOUR OWN source files declaring the same `(defmodule …)`. So only the
+;; project's own source dirs are checked; `entries` is kept for signature stability.
 (defn package--collision-sources (root entries)
-  (append (map (fn (d) (list "your project" d))
-            (project/project-abs-paths root *project-source-paths*))
-    (map (fn (e) (list (str "dependency '" (name (get e :name)) "'") (package--dep-src-dir e)))
-      entries)))
+  (map (fn (d) (list "your project" d))
+    (project/project-abs-paths root *project-source-paths*)))
 
 ;; `main` is a project's ENTRY POINT, not part of its library surface: `nest run` only
 ;; ever uses the ROOT project's `:main`, and nothing `require`s a dependency's. So two
@@ -577,8 +592,9 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
         (fold (fn (m mod)
                 (if (and (contains? m mod) (not (package--entry-module? mod)))
                   (error "package: module name collision — '"
-                    mod "' is provided by both " (get m mod) " and " label
-                    "; rename one (namespaces aren't package-rooted yet — ADR-070)")
+                    mod "' is declared by two of your own source files (" (get m mod)
+                    " and " label "); rename one module (a `(defmodule …)` name must be"
+                    " unique within a package)")
                   (assoc m mod label)))
           seen (package--provided-modules dir))))))
 
@@ -641,6 +657,22 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
               (fold (fn (mm mod) (assoc mm mod pkg)) m (package--provided-modules dir))))
       *ns-package* pkg-dir-pairs)))
 
+;; Register each dependency's modules as PACKAGE-ROOTED (ADR-070): a dep `foo`
+;; providing `b.blsp` (`(defmodule b)`) becomes the global namespace `foo/b`, so two
+;; deps can both provide a `parser` with no collision. `require--force` loads the file
+;; under `foo`'s package context (its `%in-ns`/`(:use …)` root); the root project's own
+;; modules are NOT registered here, so they stay short (the asymmetry ADR-070 records —
+;; the Elixir-style uniform root-project rooting is the recorded next step).
+(defn package--register-rooting (entries)
+  (map (fn (e)
+         (let (pkg (name (get e :name))
+               module-files (package-module-files (package--dep-src-dir e)))
+           (register-package-modules! pkg (map first module-files))
+           (map (fn (mf)
+                  (register-package-module! (str pkg "/" (name (first mf))) (second mf)))
+             module-files)))
+    entries))
+
 (defn ensure-deps (root deps)
   "Resolve `deps`, refresh the lock file, and return the list of source dirs to add to *load-path* (one per resolved dep). Called from `project-setup`; a no-op when there are no deps."
   (if (empty? deps)
@@ -658,6 +690,8 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
       ;; identity: each dep's modules → the dep's `:name`.
       (package-record-ns-packages (map (fn (e) (list (get e :name) (package--dep-src-dir e)))
                                     entries))
+      ;; package-rooting: each dep's modules → `depname/module`, loadable from its file.
+      (package--register-rooting entries)
       (map package--dep-src-dir entries))))
 
 ;; --- the `nest` verbs --------------------------------------------------------
@@ -991,19 +1025,36 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
       "  " (let (v (get p :latest_version)) (if (or (nil? v) (= v "")) "?" v))
       (if (and desc (not (= desc ""))) (str "  — " desc) ""))))
 
-(defn search (term & rest)
-  "Search the package registry for `term` (matched against each package's name and
-latest description), printing name / latest version / description per hit. An
-optional base URL overrides the configured `:registry`. Backs `nest search`."
+(defn registry--search-url (base term enhances)
+  "The search URL for `term`, narrowed to packages that ENHANCE `enhances` when that
+is given (a plain application name — the registry matches it against each package's
+published `:enhances` names and knows nothing else about it)."
   (require 'url)
-  (let (base (registry--base-for (if (empty? rest) nil (first rest)))
-        url (str base "/api/v1/packages?q=" (url/percent-encode term)))
+  (str base "/api/v1/packages?q=" (url/percent-encode term)
+    (if (or (nil? enhances) (= enhances ""))
+      ""
+      (str "&enhances=" (url/percent-encode enhances)))))
+
+(defn search (term & opts)
+  "Search the package registry for `term` (matched against each package's name and
+latest description), printing name / latest version / description per hit. Options
+are a plist: `:index <base-url>` overrides the configured `:registry`, and
+`:enhances <app>` narrows the results to packages that declare they plug into that
+application (`nest search --enhances bedit zig`). Backs `nest search`."
+  (let (term-string (or term "")
+        enhances (plist-get opts :enhances)
+        base (registry--base-for (plist-get opts :index))
+        url (registry--search-url base term-string enhances))
     (match (registry--get-json url)
       ([:error _status message] (error "package: " message))
       ([:ok data]
         (let (pkgs (get data :packages))
           (if (or (nil? pkgs) (empty? pkgs))
-            (println (str "No packages matching \"" term "\"."))
+            (println (str "No packages matching \"" term-string "\""
+                       (if (or (nil? enhances) (= enhances ""))
+                         ""
+                         (str " that enhance " enhances))
+                       "."))
             (dolist (p pkgs) (println (registry--search-line p)))))
         nil))))
 
@@ -1038,6 +1089,13 @@ optional base URL overrides the configured `:registry`. Backs `nest search`."
     (apply vector
       (map (fn (d) {:name (name (get d :name)) :version (get d :version)}) registry-deps))))
 
+(defn registry--publishable-enhances ()
+  "The project's `:enhances` map with STRING keys — JSON has no symbols, and the
+registry indexes these names to answer \"which packages plug into X\". `{}` for an
+ordinary library, which the server stores as \"nothing\"."
+  (fold (fn (acc kv) (let ([nm constraint] kv) (assoc acc (name nm) constraint)))
+    {} (map-pairs *project-enhances*)))
+
 (defn registry--publish-payload (checksum tarball-bytes)
   "The JSON publish envelope (docs/design.md in hive)."
   (json/json-encode
@@ -1045,6 +1103,9 @@ optional base URL overrides the configured `:registry`. Backs `nest search`."
      :version *project-version*
      :description (or *project-description* "")
      :dependencies (registry--publishable-deps)
+     ;; what this package plugs into (Debian's `Enhances:`) — the registry stores it and
+     ;; can filter on its names, without knowing what any of them are
+     :enhances (registry--publishable-enhances)
      :checksum checksum
      :tarball (encoding/base64-encode-bytes tarball-bytes)}))
 

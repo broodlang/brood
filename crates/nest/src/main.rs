@@ -355,6 +355,12 @@ enum Cmd {
 
         /// The registry base URL to search. Omit to use the configured `:registry`.
         index: Option<String>,
+
+        /// Only packages that plug into this application — matched against each
+        /// package's published `:enhances` names (e.g. `--enhances bedit`). The name
+        /// is opaque here: it is whatever package authors declared.
+        #[arg(long)]
+        enhances: Option<String>,
     },
 
     /// Start a REPL. Inside a project, every source file is pre-loaded so the
@@ -690,12 +696,16 @@ fn run_main(cli: Cli) {
             require_project("publish", None);
             cmd_publish(&mut interp, index.as_deref())
         }
-        Cmd::Search { query, index } => {
+        Cmd::Search {
+            query,
+            index,
+            enhances,
+        } => {
             // `package/search` resolves the registry through the project's config,
             // so it needs a project today. Guard it for a clean message rather than
             // the internal `package--in-project` trace.
             require_project("search", None);
-            cmd_search(&mut interp, &query, index.as_deref())
+            cmd_search(&mut interp, &query, index.as_deref(), enhances.as_deref())
         }
         Cmd::Repl => cmd_repl(&mut interp),
         Cmd::Mcp => {
@@ -1324,12 +1334,23 @@ fn cmd_publish(interp: &mut Interp, index: Option<&str>) {
 }
 
 /// `nest search QUERY [BASE-URL]` — search the hosted registry over HTTP.
-fn cmd_search(interp: &mut Interp, query: &str, index: Option<&str>) {
-    let args: Vec<&str> = match index {
-        Some(i) => vec![query, i],
-        None => vec![query],
-    };
-    let call = brood::introspect::call_form("package/search", &args);
+fn cmd_search(interp: &mut Interp, query: &str, index: Option<&str>, enhances: Option<&str>) {
+    // `package/search` takes a term plus a PLIST (`:index` / `:enhances`), so the call is
+    // built here rather than with `call_form` (which quotes every argument as a string and
+    // so cannot emit a keyword).
+    let mut call = format!(
+        "(package/search \"{}\"",
+        brood::introspect::escape_brood_string(query)
+    );
+    for (key, value) in [(":index", index), (":enhances", enhances)] {
+        if let Some(v) = value {
+            call.push_str(&format!(
+                " {key} \"{}\"",
+                brood::introspect::escape_brood_string(v)
+            ));
+        }
+    }
+    call.push(')');
     run(interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
 }
 
