@@ -14047,3 +14047,44 @@ showed 4 failures, and the conversion looked wrong. It wasn't: `std/*.blsp` is e
 binary at build time, and I had rebuilt `nest` but not `brood`. Rebuild both after touching
 `std/`, or you will spend the afternoon debugging yesterday's bytes. (Same class as the
 `-p brood` vs `--bin brood` trap already in CLAUDE.md.)
+
+## 2026-08-02 — thread 6: both cheap mitigations ruled out at code level, with a fresh baseline
+
+Took the handoff's advice to measure the cheap mitigation before committing to the messaging
+change. There isn't one — both candidate shortcuts are blocked, and the reasons are worth
+recording so nobody re-derives them.
+
+**Fresh baseline first** (`MODE=sup WINDOW=5000`, 98 windows): 19 685 → 9 523 ops/s, a
+**2.07× decay**; RSS 97 MB → 929 MB; `rt_closures` 2 698 → 412 668, linear at ~0.87 per op.
+`sup_heap` and `my_live_bytes` bounce freely across the run — both LOCAL heaps GC normally and
+only the append-only region grows. A longer run: 454 113 closures / 1.02 GB at 534 k ops.
+
+**"Let a copied closure VM-compile" — blocked.** `compile/mod.rs:1821`: `cache_key` keys a
+LOCAL closure on its first body form and requires that form to be a **non-LOCAL** `Pair` —
+i.e. code in RUNTIME, only captures LOCAL. A cross-heap copy copies the body code into LOCAL
+too, so the key is `None` and the closure is never cached, never compiled, deferred on every
+call. It cannot simply accept a LOCAL body: LOCAL handles are recycled by the collector, so
+the key would alias an unrelated closure and run the wrong code — a miscompile, not a slowdown.
+Content-addressing (hash the body AST) is sound but pays an O(body) hash per call on the hot
+path, and each message copy is a distinct handle so a handle-keyed memo does not amortise.
+
+**"Stop promote re-copying the body" — already true.** `promote_in` (`heap.rs:3533`) guards
+every arm with `if id.region() == LOCAL`; an already-shared subgraph passes through untouched.
+The body gets re-promoted *because the copy made it LOCAL*, not because promote is wasteful.
+
+Both roads end at the same instruction: do not copy the code. Which is the messaging change.
+
+**What that needs, concretely,** now that the shape is clear. `Message::StrShared(Arc<SharedBlob>)`
+is the precedent for a same-runtime by-handle payload — but its lifetime comes from an **Arc
+refcount**, and RUNTIME closures are not refcounted: they are freed per *generation*, and
+handles carry one (`ClosureId::runtime_gen(idx, gen)`). So a `Message::FnShared(bits)` needs
+(a) same-runtime detection at the `send` site, which is available — it already tests
+`dist::is_local(node)` before trying the L1 path — and (b) a lifetime guarantee: either the
+RUNTIME collector roots queued mailbox messages, or a per-generation in-flight counter stops a
+generation being freed while references are outstanding. (b) is the entire risk.
+
+Also confirmed why the L1 fast path cannot just apply more often: `try_deliver_local` takes
+`st.waiter`, which exists only while the receiver is **parked**. A runnable process has been
+handed to a worker's run queue (which owns its heap) and a running one is being mutated on
+another worker — in neither case does the sender have safe access. The 73.2% hit rate is
+structural, not a tuning knob.
