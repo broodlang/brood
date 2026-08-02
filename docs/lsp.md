@@ -81,14 +81,30 @@ one server that owns the language knowledge.
 > and a new `workspace::all_sources` that unions project files + every open
 > buffer). Case-insensitive **subsequence** matching (`fs` → `format-source`);
 > empty query lists all.
-> • **`textDocument/codeAction`** (`code_actions.rs`) — two quick-fixes. **"did
-> you mean?"** for `unbound symbol: X` — Levenshtein against locals-in-scope +
-> special forms + globals, within a length-relative threshold, top-3 nearest,
-> edited onto the diagnostic's (already token-narrowed) range; marked
-> `isPreferred`. And **"remove seemingly-unused `(require 'mod)`"** — a structural
-> fix (not tied to a diagnostic): a lone top-level require whose module is never
-> referenced by a qualified `mod/…` name anywhere in the file. Conservative — any
-> textual `mod/` keeps it (false negatives only), `(require 'a 'b)` and
+> • **`textDocument/codeAction`** (`code_actions.rs`) — quick-fixes off the
+> diagnostics we publish. **"did you mean?"** for `unbound symbol: X` — Levenshtein
+> against locals-in-scope + special forms + globals, within a length-relative
+> threshold, top-3 nearest, edited onto the diagnostic's (already token-narrowed)
+> range; marked `isPreferred`. **Auto-import** for a *bare* `unbound symbol: foo`
+> that some module exports as `mod/foo`: **"Import `foo` from `(:use mod)`"** adds a
+> `(:use mod)` clause to the `defmodule` header (grouped after any existing clauses,
+> at their indentation; inline for a clause-less header), and **"Qualify as
+> `mod/foo`"** rewrites the reference in place. Providers come from the live image's
+> global table (`global_names` — `project/setup-tooling-image` has every project
+> source loaded, ADR-031, so discovery is workspace-wide: embedded std *and* project
+> modules), filtered so the offer is never wrong (the file's own namespace, an
+> already-imported module, and private `--` providers are dropped). One import+qualify
+> pair **per provider**, so a name two modules export (`sexp`/`editor/treesit`) is a
+> choice, not a silent pick. This is the *modern, statically-analyzable* answer to
+> "referenced-but-not-imported" — the editor writes the explicit import for you (like
+> Rust-analyzer / TS auto-import), **not** a runtime autoload that would hide the
+> dependency from the very tooling that reads it (ADR-206). **"Add `(require 'mod)`"**
+> for a *qualified* `mod/x` whose module is on the load-path but unloaded; and
+> **"Create function `foo`"** — an unbound call head gets a stub `(defn foo (a …) nil)`
+> at arity, the TDD case. Plus **"remove seemingly-unused `(require 'mod)`"** — a
+> structural fix (not tied to a diagnostic): a lone top-level require whose module is
+> never referenced by a qualified `mod/…` name anywhere in the file. Conservative —
+> any textual `mod/` keeps it (false negatives only), `(require 'a 'b)` and
 > `(:use mod)` clauses are left alone, and a side-effect-only require can't be
 > detected statically, so it's a **non-preferred** suggestion, not an auto-fix.
 > • **`textDocument/foldingRange`** (`folding.rs`) — collapsible regions off the
@@ -126,11 +142,13 @@ one server that owns the language knowledge.
 > a completion trigger character so the fields pop up as the key is started.
 > The cheap "offer every defrecord's fields" heuristic stayed rejected — only
 > the typed map argument's own fields are offered.
-> • **More code actions** — off an `unbound symbol: foo` finding, beyond
-> did-you-mean: **"Add `(require 'mod)`"** when `foo` is a qualified `mod/x` whose
-> module resolves on the load-path (inserted under any `defmodule` header), and
-> **"Create function `foo`"** when `foo` is a call head — a stub `(defn foo (a b
-> …) nil)` at EOF, arity matched to the call site.
+> • **More code actions** (shipped) — off an `unbound symbol: foo` finding, beyond
+> did-you-mean: **auto-import** ("Import `foo` from `(:use mod)`" + "Qualify as
+> `mod/foo`") for a bare name a module exports (ADR-206, above); **"Add
+> `(require 'mod)`"** when `foo` is a qualified `mod/x` whose module resolves on the
+> load-path (inserted under any `defmodule` header); and **"Create function `foo`"**
+> when `foo` is a call head — a stub `(defn foo (a b …) nil)` at EOF, arity matched
+> to the call site.
 > **Incremental document sync shipped** (2026-07-24): the server advertises
 > `TextDocumentSyncKind::INCREMENTAL` and splices each `didChange` range into the
 > stored buffer via the UTF-16 `LineIndex` (`apply_content_change`); the *parse*

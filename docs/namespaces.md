@@ -351,10 +351,24 @@ reference loads the file) and Guile (module name ↔ file path). Two flavours:
   loads on first sight. Maximally convenient; couples symbol resolution to
   filesystem side effects.
 
-**Firm line either way:** auto-require **resolves + loads from the load-path; it
-never *fetches* a new package.** ADR-037 keeps deps explicit in `project.blsp` so
+**Firm line for import-driven:** auto-require **resolves + loads from the load-path;
+it never *fetches* a new package.** ADR-037 keeps deps explicit in `project.blsp` so
 the lock file stays computable. Auto-require collapses `require`+`use` for code you
-*already have* — nothing more. (Flavour choice can ride along with §8.)
+*already have* — nothing more.
+
+> **Decided ([ADR-206](decisions.md), 2026-08-02): import-driven stays; reference-driven
+> is rejected as a language feature.** Import-driven auto-require (a `(:use …)` loads its
+> module) shipped in inc-2 and is the model. **Reference-driven autoload** (a bare
+> `mod/name` autoloading on first sight) is *not* built — it couples resolution to
+> filesystem side effects, runs inside `nest check` (shared resolver), and makes a
+> module's dependency set implicit, blurring exactly the static analysis §6 says
+> namespaces exist to enable. The "referenced-but-not-imported" ergonomics are instead
+> solved the modern, analyzable way — an **LSP auto-import code action** ("Import `foo`
+> from `(:use mod)`" / "Qualify as `mod/foo`", `crates/lsp/src/code_actions.rs`) that
+> *writes the explicit import for you*, like Rust-analyzer / TypeScript. The narrow
+> live-image niche where autoload is idiomatic (Emacs) is served by the REPL's
+> unbound-name hint; a REPL-only autoload could be added there later, scoped away from
+> file loads and `nest check`, but is explicitly not the general mechanism.
 
 ## 10. Migration gradient
 

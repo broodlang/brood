@@ -2321,11 +2321,52 @@ pub(super) fn declare_dynamic(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
 
 /// `(%in-ns 'foo)` — set the namespace being compiled into (ADR-065). Emitted by
 /// the `ns` macro; the resolver pass qualifies subsequent definitions and free
-/// references to `foo/…`. Returns the namespace symbol.
+/// references to `foo/…`. Returns the (possibly rooted) namespace symbol.
+///
+/// Under an active dependency load (ADR-070), the declared name is **rooted** to the
+/// package: loading dep `foo`'s `b.blsp` — which says `(defmodule b)` → `(%in-ns 'b)`
+/// — sets `compile_ns` to `foo/b`, so the file's `def`s become `foo/b/…`. Outside a
+/// dep load (root project / std) the name is unchanged.
 pub(super) fn in_ns(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let sym = expect_symbol(heap, "%in-ns", arg(args, 0))?;
-    heap.set_compile_ns(Some(sym));
-    Ok(Value::symbol(sym))
+    let rooted = heap.root_module_name(sym);
+    heap.set_compile_ns(Some(rooted));
+    Ok(Value::symbol(rooted))
+}
+
+/// `(%root-module-name 'b)` — root a referenced module name to the active package:
+/// `foo/b` while loading dep `foo` if `b` is one of `foo`'s modules, else `b`
+/// unchanged (ADR-070). The loader emits it around `(:use …)`/`(:alias …)`/`require`
+/// targets and `defmodule`'s provide/doc key so intra-package references and the
+/// module's own registration all agree on the rooted global identity.
+pub(super) fn root_module_name(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let sym = expect_symbol(heap, "%root-module-name", arg(args, 0))?;
+    Ok(Value::symbol(heap.root_module_name(sym)))
+}
+
+/// `(%set-package-context 'foo '(a b c))` — enter dep `foo`'s load with its provided
+/// short module names, returning `[prev-prefix prev-modules]` (a tuple) so the caller
+/// restores the enclosing context after the load (dep loads nest). `(%set-package-context
+/// nil nil)` clears it. Roots every module name the load declares or references (ADR-070).
+pub(super) fn set_package_context(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let prefix = match arg(args, 0) {
+        Value::Nil => None,
+        v => Some(expect_symbol(heap, "%set-package-context", v)?),
+    };
+    let modules: std::collections::HashSet<crate::core::value::Symbol> = heap
+        .list_to_vec(arg(args, 1))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| match v {
+            Value::Sym(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    let (prev_prefix, prev_modules) = heap.set_package_context(prefix, modules);
+    let prev_mods_list: Vec<Value> = prev_modules.into_iter().map(Value::Sym).collect();
+    let list = heap.list(prev_mods_list);
+    let prefix_val = prev_prefix.map(Value::Sym).unwrap_or(Value::nil());
+    Ok(heap.alloc_vector(vec![prefix_val, list]))
 }
 
 /// `(current-ns)` — the namespace currently being compiled into (a symbol), or
