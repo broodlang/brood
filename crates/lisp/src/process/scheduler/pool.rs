@@ -11,8 +11,9 @@ use super::*;
 /// Push a ready process onto its owning worker's queue and wake that worker.
 /// Preempt re-enqueue routes here so a hot process stays on its worker (cache
 /// locality); a *woken-from-park* process may migrate instead — see [`wake_enqueue`].
-pub(crate) fn enqueue(proc: Box<Process>) {
+pub(crate) fn enqueue(mut proc: Box<Process>) {
     let wid = proc.worker_id;
+    proc.queued_at = now_nanos();
     set_status(&proc.mailbox, ST_RUNNABLE); // queued, awaiting a worker turn
                                             // Count it as stealable runnable work (the `try_steal` fast-path hint). Balanced by
                                             // the single decrement in `run_one` when it's pulled to run (by its owner or a thief).
@@ -92,13 +93,51 @@ pub(crate) fn wake_enqueue(mut proc: Box<Process>) {
     enqueue(proc);
 }
 
+/// Wake one parked worker so it can come and steal, skipping `wid` (the worker that just
+/// enqueued). Gated on `PARKED_COUNT` so a busy pool pays a single relaxed load and issues
+/// no syscall: if nobody is parked there is no one to tell, and the work will be picked up
+/// by whichever worker frees up first.
+///
+/// **Called only from the spawn path**, deliberately. It was first wired into `enqueue`
+/// itself, which also carries the *direct-handoff* wake (`send` readying a receiver, run
+/// next on this very worker). That is the hot message path, and the handoff exists
+/// precisely to avoid a cross-thread wake: adding one back cost `pingpong` 1.6×, `ring`
+/// 2.2× and `supervisor` 4.9×. A send-woken receiver must stay where the handoff put it;
+/// only a freshly *spawned* child is a candidate for an idle peer.
+pub(crate) fn wake_a_parked_peer(wid: usize) {
+    if PARKED_COUNT.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let n = WORKERS.len();
+    // Rotate the probe start so repeated spawns spread their wakes over the idle peers
+    // instead of hammering the same one (which would serialise a fan-out onto one thief).
+    let start = NEXT_WORKER.fetch_add(1, Ordering::Relaxed) % n;
+    for off in 0..n {
+        let peer = (start + off) % n;
+        if peer == wid {
+            continue;
+        }
+        if WORKER_PARKED[peer].load(Ordering::Relaxed) {
+            // One `futex_wake`. The peer re-checks its own queue, then tries a steal; if it
+            // loses the race (the owner drained it first) it simply parks again.
+            WORKERS[peer].1.notify_one();
+            return;
+        }
+    }
+}
+
 /// Steal one queued process from a backed-up peer's queue, re-assigning it to
 /// `thief_wid`. Returns `None` if nothing is stealable. Since a process has no native
 /// stack (state capture, ADR-100 §8.4), **any** process is safe to resume on the thief —
 /// the cross-thread-resume hazard (KI-1b) that once forced fresh-only stealing is gone.
 /// The queue handoff (`try_lock`) serialises ownership, so exactly one worker owns it at
 /// a time (INV-2).
-fn try_steal(thief_wid: usize) -> Option<Box<Process>> {
+/// `saw_young` is set when a victim was skipped *only* because its back entry was still
+/// inside its owner's first-refusal window. The caller uses it to re-probe after the grace
+/// instead of parking for the full `STEAL_BACKOFF` — without it a thief woken to collect a
+/// fresh child finds it too young, sleeps 10 ms, and the child waits for its owner anyway,
+/// which is exactly the behaviour the grace was added to avoid.
+fn try_steal(thief_wid: usize, saw_young: &mut bool) -> Option<Box<Process>> {
     // Fast path: nothing queued anywhere — re-park on one relaxed load.
     if STEALABLE.load(Ordering::Relaxed) == 0 {
         return None;
@@ -123,6 +162,16 @@ fn try_steal(thief_wid: usize) -> Option<Box<Process>> {
         // Take from the back (the owner pops the front): the process the owner is
         // least likely to run next. `STEALABLE` is only a hint, so an empty queue
         // is normal here.
+        // First refusal: leave a just-queued process to its owner for `STEAL_GRACE_NS`
+        // (see there). Only the BACK entry is inspected — the one we would take — so this
+        // is a single compare, and a queue whose back is too young is simply skipped this
+        // pass rather than scanned.
+        if q.back()
+            .is_some_and(|p| now_nanos().saturating_sub(p.queued_at) < steal_grace_ns())
+        {
+            *saw_young = true;
+            continue;
+        }
         if let Some(mut proc) = q.pop_back() {
             drop(q);
             proc.worker_id = thief_wid; // re-assign: the thief owns it from now on
@@ -303,7 +352,8 @@ fn worker_loop(wid: usize) {
         }
         // 2. Nothing of our own: steal any queued process from a backed-up peer
         //    (every process is migratable — no native stack). See `try_steal`.
-        if let Some(p) = try_steal(wid) {
+        let mut saw_young = false;
+        if let Some(p) = try_steal(wid, &mut saw_young) {
             run_one(p);
             continue;
         }
@@ -314,8 +364,23 @@ fn worker_loop(wid: usize) {
         //    under the lock first to close the enqueue/park lost-wakeup window.
         let (lock, cv) = &WORKERS[wid];
         let q = crate::core::sync::lock(lock);
+        if saw_young {
+            // Work exists but is inside its owner's first-refusal window. Come back when
+            // that expires rather than sleeping the full backoff: if the owner drains it
+            // (the spawn-then-block shape) we find nothing and park normally; if the owner
+            // is CPU-bound and still running, we take it a few microseconds after spawn.
+            let _ = cv.wait_timeout(q, std::time::Duration::from_nanos(steal_grace_ns().max(1)));
+            continue;
+        }
         if q.is_empty() {
+            // Publish that we are parked BEFORE releasing the queue lock in `wait_timeout`,
+            // so an enqueuer that takes the lock after us is guaranteed to see the flag and
+            // send the wake. Clearing it after we wake keeps the count honest.
+            WORKER_PARKED[wid].store(true, Ordering::Relaxed);
+            PARKED_COUNT.fetch_add(1, Ordering::Relaxed);
             let _ = cv.wait_timeout(q, STEAL_BACKOFF);
+            WORKER_PARKED[wid].store(false, Ordering::Relaxed);
+            PARKED_COUNT.fetch_sub(1, Ordering::Relaxed);
         }
     }
 }

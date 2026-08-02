@@ -14611,3 +14611,65 @@ placed when the parent is CPU-bound".** Two candidate answers, neither implement
 (b) looks better on paper because it needs no prediction of the parent's future. Both want
 measuring against `latency`, `supervisor`, `pingpong` and `ring` together, since the whole
 point is that this is a trade-off between the first two.
+
+## 2026-08-02 — option (b): wake an idle peer to steal a fresh child, with first refusal
+
+Implementing the fix the profile pointed at. Two things were wrong and both had to change:
+an idle worker never learned that a *peer's* queue had grown (it re-probed on a 10 ms
+`STEAL_BACKOFF`), and once told, it would take a child the owner was about to run anyway.
+
+**Result at the default (`STEAL_GRACE_NS = 5000`):**
+
+| | before | after |
+|---|---|---|
+| `latency` p50 | 27 µs | **19 µs** |
+| `latency` p99 | 171 µs | **83 µs** |
+| `latency` p99.9 | ~800 µs | ~250 µs |
+| `supervisor` | 907 ms | 1005 ms (+11%) |
+| `pingpong` / `ring` / `spawn` / `pfib` | 306 / 807 / 105 / — | 305 / 805 / 105 / 305 |
+
+**Two wrong attempts on the way, both caught by the throughput rows.**
+
+*First:* hook the peer-wake into `enqueue` itself. That path also carries the
+**direct-handoff** wake — a `send` readying a receiver, deliberately enqueued onto the
+current worker precisely to avoid a cross-thread futex. Adding one back cost `pingpong`
+1.6×, `ring` 2.2× and `supervisor` 4.9×. The wake belongs to the *spawn* path only; a
+send-woken receiver must stay where the handoff put it.
+
+*Second:* scope it to spawn — `latency` p50 dropped to 9 µs and `pingpong`/`spawn` returned
+to baseline, but `supervisor` stayed 2.65× worse. My assumption that "the parent blocks
+within a microsecond, so it drains the child before a woken peer arrives" was wrong: the
+thief won that race routinely.
+
+**So the race is decided explicitly.** A freshly enqueued process carries `queued_at`, and
+a thief skips a back entry younger than `STEAL_GRACE_NS`; the owner is exempt and pops its
+own queue without consulting it. That alone re-broke `latency` (back to 26 µs) because the
+woken thief found only young work, gave up, and parked for the full 10 ms — so `try_steal`
+now reports *why* it found nothing, and a thief that saw young work re-probes after the
+grace instead of backing off.
+
+**Choosing the constant.** The trade-off is a cliff, swept here:
+
+| grace | `latency` p50 | `supervisor` |
+|---|---|---|
+| 0 | 10 µs | 2607 ms |
+| 1–2 µs | 10 µs | ~2106 ms |
+| 2.5 µs | 13 µs | 1005 ms |
+| 5 µs (default) | 19 µs | 1005 ms |
+| 10 µs | 22 µs | 1006 ms |
+
+2.5 µs is the best point on this machine and is **not** the default, deliberately: the cliff
+sits between 2 and 2.5 µs because that is how long *this* benchmark's parent takes to reach
+its `receive`, which is a property of the workload, not of the runtime. The failure is
+asymmetric — too small costs 2.3× throughput, too large costs a few µs of p50 — so the
+default takes a 2× margin. `BROOD_STEAL_GRACE_NS` is the A/B lever.
+
+**The +11% on `supervisor` is real and not yet recovered.** With the grace protecting the
+child from theft, what remains is the wake syscall itself: one `futex_wake` per local spawn,
+after which the woken peer sleeps 5 µs and re-parks having found nothing. Gating the wake on
+a "this spawner is CPU-bound" signal (option (a): a per-process spawns-since-last-park
+counter) would drop it to zero for the spawn-then-block shape. Worth doing, and it wants its
+own measurement.
+
+Verified: suite 937/937, `nest check` clean, and the concurrency-sensitive files run 5/5
+each (`concurrency`, `supervisor`, `adversarial`, `agent`), plus `conc_storm` clean.
