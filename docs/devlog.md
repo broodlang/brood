@@ -13854,7 +13854,78 @@ interpreter cost on every call regardless of promotion. If a LOCAL closure could
 VM-compiled, both the interpreter cost and the per-call promotion would go away even when the
 copy still happens.
 
-## 2026-08-01 (cont.) — three gaps the editor's desktop identity walked into (ADR-199/200/201)
+## 2026-08-01 — KI-24: `eval` lost forward references (a regression in the eval-on-the-VM change)
+
+Double-checking `97d63eda` ("run `eval` on the compiling VM") turned up a regression it
+shipped with. The change itself is good and its own claim holds — I re-verified all ten
+tail-call-through-`eval` shapes, and the TCO guarantees are intact. But it broke name
+resolution for a forward reference:
+
+```
+(defmodule m)
+(eval '(defn r (n) (s n)))
+(eval '(defn s (n) (+ n 1)))
+(r 41)          ; → unbound symbol: s
+```
+
+The REPL had it too — type a `defmodule`, then two mutually recursive `defn`s, since each
+input is its own compile unit.
+
+**Proving it was a regression before diagnosing it.** Rebuilt `builtins/system.rs` at
+`97d63eda^`: the failing row returns 42. Restored the commit: it fails again. Worth the two
+minutes — the alternative was a plausible story about a long-standing namespace limitation.
+
+**Cause.** The commit swapped `macroexpand_all` for `macros::compile`, which adds the
+*resolve* pass. Resolve qualifies a bare name only on positive evidence the namespace owns
+it: it is already a `ns/name` global, or it is in `ns_known_names` — the def heads a file
+loader **pre-scans before compiling any form**. That pre-scan is exactly what makes a
+forward reference work inside a file. `eval` compiles one form at a time and cannot scan
+the future, so the reference stayed bare and missed the qualified global. Surveying every
+`macros::compile` call site showed `eval` and the inheriting `eval-string` were the only
+two without a pre-scan behind them — the fix is precisely as wide as the gap.
+
+Worth recording the mirror image: *before* the resolve pass, an eval'd `defn` inside a
+module defined a bare **root** global. The old behaviour "worked" only because reference
+and definition were consistently wrong, and it leaked module code into the global namespace.
+
+**Fix.** `Heap::set_ns_assume_own`, a compile-context flag alongside `compile_ns` and
+`ns_known_names`. With it on, the resolver's last resort flips: a bare name bound at
+root/prelude still falls through, an import still wins (checked first), but a name bound
+**nowhere** is taken to be this namespace's — the conclusion the pre-scan would have
+reached. It is deliberately *not* the resolver's default: over-qualifying a name that is
+really a local is a silent miscompile, so the general rule stays evidence-only, and only
+the two pre-scan-less call sites opt in.
+
+**The trap, and what caught it.** Special forms and core-macro keywords — `if`, `let`,
+`do`, `fn`, `cond` — are bound in no environment at all, so "unbound ⇒ ours" cheerfully
+rewrote `if` to `m/if` and every eval'd conditional died with `unbound symbol: m/if`. The
+first build after the fix failed on exactly that, in the regression test written the day
+before. `is_syntax_keyword` now excludes `builtins::SPECIAL_FORMS`; macro *calls* are
+already gone by resolve time, but a special-form head survives expansion by definition.
+
+Suite green at 928/928 (and again after the `eval-string` half). New coverage in
+`tests/eval_vm_test.blsp`, reproducer at `scripts/fuzz/stress/eval_forward_ref.blsp`.
+
+**Method note.** The bug surfaced because `tests/vm_nested_stack_guard_test.blsp` — written
+the previous day to stop a future change from breaking TCO through `eval` — went red for a
+*different* reason than it was guarding. A test aimed at one invariant caught an unrelated
+regression in the same area, which is a decent argument for pinning behaviour near a
+subsystem you have just finished arguing about.
+
+**Postscript — the same bug was fixed twice, in parallel.** `13706580` landed the other
+approach while this one was in the suite: revert `eval_builtin` to `macroexpand_all` and drop
+the resolve pass instead of supplying its missing evidence. Same diagnosis, same reproducer,
+green on it. I built both and ran them side by side, and kept this one because dropping
+resolve costs an eval'd form everything else resolve does — namespace ownership (an eval'd
+`defn` in a module goes back to leaking a bare root global), `(:use …)` imports, `(:alias …)`,
+privacy, static-quasiquote lowering — and, decisively, leaves the **REPL** broken: each input
+is its own compile unit, so `eval_string_inner`'s inheriting path has no pre-scan either, and
+touching only `eval_builtin` misses it. `(defmodule rtest)` then two mutually recursive
+`defn`s still dies with `unbound symbol: rb` on that build and returns 42 on this one. That
+commit's "eval-string was never affected" is the one claim in it that does not hold. Full
+comparison table in `docs/known-issues.md` KI-24.
+
+## 2026-08-01 (parallel attempt, superseded above) (cont.) — three gaps the editor's desktop identity walked into (ADR-199/200/201)
 
 Started as "give brood-edit a real icon instead of GNOME's fallback gear" and ended in three
 language-level gaps, each found by the editor needing something the language couldn't express.

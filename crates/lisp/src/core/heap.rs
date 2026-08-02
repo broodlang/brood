@@ -1690,6 +1690,9 @@ pub(crate) struct ColdHeap {
     pub(crate) compile_ns: Option<Symbol>,
     /// Names the current namespace defines.
     pub(crate) ns_known_names: HashSet<Symbol>,
+    /// Compiling a form that has **no** whole-file pre-scan behind it (a runtime
+    /// `eval`), so `ns_known_names` cannot answer "will this namespace define it?".
+    pub(crate) ns_assume_own: bool,
     /// `(:use …)` import map for the namespace being compiled.
     pub(crate) imports: HashMap<Symbol, Symbol>,
 }
@@ -3226,6 +3229,25 @@ impl Heap {
     /// Is `sym` (a bare name) known to be defined in the current namespace's file?
     pub fn ns_knows_name(&self, sym: Symbol) -> bool {
         self.cold().is_some_and(|c| c.ns_known_names.contains(&sym))
+    }
+
+    /// Compile the next form(s) as a namespace's **own** code with no whole-file
+    /// pre-scan available — a runtime `eval`. A file loader scans every form's def
+    /// head up front, so a forward reference inside a file has positive evidence
+    /// (`ns_known_names`) and qualifies; `eval` sees one form at a time and cannot,
+    /// so a reference to a name a *later* `eval` will define is left bare and then
+    /// misses the module-qualified global (KI-24). With this set, the resolver's
+    /// last resort flips: a bare name that is bound at root/prelude still falls
+    /// through (so `+`/`map` keep working), but one bound *nowhere* is taken to be
+    /// this namespace's, matching what the file pre-scan would have concluded.
+    /// Returns the prior value so the caller can restore it (evals nest).
+    pub fn set_ns_assume_own(&mut self, on: bool) -> bool {
+        std::mem::replace(&mut self.cold_mut().ns_assume_own, on)
+    }
+
+    /// Should an otherwise-unresolvable bare name be taken as this namespace's own?
+    pub fn ns_assume_own(&self) -> bool {
+        self.cold().is_some_and(|c| c.ns_assume_own)
     }
 
     /// Record one more bare name as defined in the current namespace's file. Used

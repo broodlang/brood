@@ -26,15 +26,21 @@ pub(super) fn eval_builtin(args: &[Value], env: EnvId, heap: &mut Heap) -> LispR
     // dispatches into the VM, where a callee's arm compiles and tail-recurses in O(1) stack)
     // stops being interpreted.
     //
-    // Deliberately `macroexpand_all`, NOT the full `compile` pass. `compile`'s `resolve`
-    // step qualifies a bare reference only when its target *already exists*, so an `eval`'d
-    // definition that forward-references a name a LATER `eval` defines would be left bare
-    // and never match the module-qualified global (KI-24 — a regression when this briefly
-    // used `compile`). The file loader gets away with `resolve` because it pre-scans a
-    // file's def heads (`scan_def_names`) into the known-names set; independent `eval` calls
-    // have no such lookahead, so a bare reference resolved lazily at runtime (which both
-    // engines do identically) is the correct behaviour, matching the pre-VM `eval`.
-    let form = crate::eval::macros::macroexpand_all(heap, arg(args, 0), root)?;
+    // The full `compile` pass, matching `eval-string` and the file loader — so an eval'd
+    // form gets namespace resolution, `(:use …)` imports, `(:alias …)`, privacy enforcement
+    // and static-quasiquote lowering, and an eval'd `defn` inside a module defines
+    // `mod/name` rather than leaking a bare ROOT global.
+    //
+    // `compile`'s resolve step qualifies a bare reference only on positive evidence, which
+    // a file loader supplies by pre-scanning its def heads (`scan_def_names`) — lookahead a
+    // one-form-at-a-time `eval` does not have, so a forward reference to a name a LATER
+    // `eval` defines was left bare and missed the qualified global (KI-24). `ns_assume_own`
+    // supplies the missing conclusion instead of dropping the pass: a bare name bound
+    // nowhere is taken to be this namespace's. A no-op at root, where resolve already is.
+    let prev_assume = heap.set_ns_assume_own(true);
+    let compiled = crate::eval::macros::compile(heap, arg(args, 0), root);
+    heap.set_ns_assume_own(prev_assume);
+    let form = compiled?;
     if crate::eval::compile::vm_enabled() {
         crate::eval::compile::run(heap, form, root)
     } else {
@@ -745,6 +751,14 @@ pub(super) fn eval_string_inner(
     } else {
         (None, None, None)
     };
+    // No pre-scan on the inheriting path, so a reference to a name a LATER call will
+    // define has no evidence to qualify against and would be left bare, missing the
+    // module-qualified global (KI-24) — in the REPL that is just typing `(defmodule m)`
+    // and then two mutually recursive `defn`s. Tell the resolver to fall back to the
+    // current namespace for a name bound nowhere else; a no-op at root. The module-load
+    // path sets it *off*: it has the real pre-scan, and a nested load must not inherit
+    // an outer `eval`'s assumption.
+    let prev_assume = heap.set_ns_assume_own(!reset_ns);
     // Root the unevaluated forms across the per-form eval — a collection at any
     // depth (ADR-061) relocates the LOCAL forms this loop still holds.
     let base = heap.roots_len();
@@ -772,6 +786,7 @@ pub(super) fn eval_string_inner(
         }
     }
     heap.truncate_roots(base);
+    heap.set_ns_assume_own(prev_assume);
     if let Some(pn) = prev_ns {
         heap.set_compile_ns(pn);
     }
