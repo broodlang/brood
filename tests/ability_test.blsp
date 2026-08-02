@@ -641,7 +641,7 @@
           "(defmodule u) (defrecord m (n)) (defability Ord :requires [NoSuchAbility] (compare-to [self other] :-> int)) (impl Ord u/m (compare-to [a b] 0))"
           "requires")))))
 
-;; ---- unimpl: an impl registry you can get back out of (ADR-203) --------------
+;; ---- unimpl: an impl registry you can get back out of (ADR-204) --------------
 ;; Registering an impl was open and reversible in every way but one: there was no way to
 ;; REMOVE it. That is the state anything needing a known baseline cares about — a test that
 ;; must not leak into the next, a REPL undoing an experiment, a hot reload retracting an impl
@@ -684,6 +684,48 @@
       (impl Retract ability-test/retractable (rsize [r] (* 10 (get r :n))))
       (assert= 40 (rsize (retractable 4)))
       (unimpl Retract ability-test/retractable)))
+
+  (test "the language's OWN fallbacks cannot be retracted"
+    ;; `(unimpl Display :default)` was one line that stopped the image printing anything —
+    ;; every value falls through to that impl, and the only symptom was a `no impl for
+    ;; :vector` out of an unrelated call. Same rule as reserved names (ADR-166): the
+    ;; language's own definitions are not yours to remove.
+    (do
+      (assert-error (unimpl Display :default))
+      (println "PROBE impl-for :vector = " (pr-str (not (nil? (impl-for ['Display 'to-str] :vector))))
+        " | :default entry = " (pr-str (not (nil? (get (get *impls* ['Display 'to-str]) :default))))
+        " | identity-of [1 2 3] = " (pr-str (identity-of [1 2 3]))
+        " | to-str on an int = " (pr-str (try (to-str 1) (catch e (str "ERR " (error-message e))))))
+      (assert-error (unregister-impl 'Display 'to-str :default))
+      (assert= "[1 2 3]" (to-str [1 2 3]))              ; …and printing still works
+      ;; an impl for YOUR OWN id is policy, and retracts normally
+      (impl Display ability-test/retractable (to-str [r] (str "R" (get r :n))))
+      (assert= "R7" (to-str (retractable 7)))
+      (assert= 1 (unimpl Display ability-test/retractable))
+      (assert= "[1 2 3]" (to-str [1 2 3]))))
+
+  (test "REGRESSION: retracting ONE id leaves every other impl of that op alone"
+    ;; The bug this exists for: `unregister-impl` dissoc'd with a two-key path, but
+    ;; `%registry-update!`'s `:dissoc` honoured only the FIRST key — so retracting one id
+    ;; removed the whole `[ability op]` method map, including the language's `:default`, and
+    ;; `(to-str [1 2 3])` started failing with "no impl for :vector". Every earlier test here
+    ;; passed through it, because "the retracted id no longer dispatches" is also true when
+    ;; everything is gone. The sibling assertion is the one that matters.
+    (do
+      (impl Retract :int (rsize [n] n))
+      (impl Retract :string (rsize [s] (count s)))
+      (impl Retract ability-test/retractable (rsize [r] (get r :n)))
+      (assert= 1 (unimpl Retract ability-test/retractable))
+      ;; the siblings survive…
+      (assert= 5 (rsize 5))
+      (assert= 3 (rsize "abc"))
+      ;; …and so does the language's own printing, which shares this registry
+      (assert= "[1 2 3]" (to-str [1 2 3]))
+      (assert= "abc" (to-str "abc"))
+      (unimpl Retract :int)
+      (unimpl Retract :string)
+      ;; retracting the last id leaves the op with no impls, not a broken registry
+      (assert= "[1 2 3]" (to-str [1 2 3]))))
 
   (test "unregister-impl is the function underneath, and reports what it did"
     (do
