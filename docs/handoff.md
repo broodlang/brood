@@ -91,12 +91,30 @@ From the published run (`brood-benchmarks/results/`):
    is a `concat`/`append`/`filter` whose argument is the **accumulator**. Also, a `receive`-based
    combinator needs no socket to test at scale: it consumes `[:tcp sock data]` from the mailbox
    and only pins `sock` by equality, so the drip is fabricated with `send` to self.
-2. **Per-message cost — the last real gap.** Brood's `latency` p50 is 27 µs vs Elixir's 8 µs,
-   and it is the same number behind `pingpong`, `ring` and most of what remains in
-   `supervisor`. A request here is spawn + send + a collector receive. See frontier A1/A3.
-   The receive-mark only helps receives that *pin a ref*; a server loop matching several tags
-   still walks its backlog (BEAM solves that with a saved scan position per receive **site**,
-   a different mechanism from the per-ref mark).
+2. **`latency` — RE-DIAGNOSED AND LARGELY FIXED 2026-08-02. It was never per-message cost.**
+   This thread used to read "per-message cost — the last real gap, p50 27 µs vs Elixir's 8 µs".
+   Profiling (by ablation; `perf` needs root here, `perf_event_paranoid=4`) says otherwise:
+   `spawn` alone 0.9 µs, send+receive **1.1 µs**, a full round trip **4.3 µs**. Nothing near
+   27. Three hypotheses died on the way — queueing (lowering the arrival rate made p50
+   *worse*: 27/45/42/41 µs at 20k/10k/5k/2k rps), wake latency on a parked worker (worth
+   0.3–2 µs), and the dispatcher missing deadlines (its pacing overshoot is p50/p90/p99 = 0).
+   With the handler doing **no work at all** p50 was still 26 µs, so the whole of it was the
+   interval between `spawn` and the handler's first instruction.
+   **Cause: spawn placement.** A child goes on the spawner's own worker; a spawner that keeps
+   running (this row's dispatcher busy-waits to each scheduled instant) holds it there for a
+   full quantum, and an idle peer only re-probed for stealable work every `STEAL_BACKOFF` =
+   **10 ms**, which made stealing a background rebalancer rather than a latency mechanism.
+   Fixed: an idle peer is told immediately when a peer queues a child, the owner keeps
+   `STEAL_GRACE_NS` (5 µs) of first refusal so a spawn-then-block parent still runs its own
+   child warm, and the wake is gated on `Process::spawns_since_park` so the spawn-then-block
+   shape issues no wake at all. **p50 27 → 19 µs, p99 124 → 78 µs, p99.9 ~800 → 658 µs**, with
+   `supervisor`/`pingpong`/`ring`/`spawn`/`pfib` all at baseline. Levers:
+   `BROOD_NO_STEAL_WAKE=1`, `BROOD_STEAL_GRACE_NS=<n>`.
+   **What is left**, and it should be re-derived rather than assumed: 19 µs against Elixir's
+   8 µs, which is still spawn-to-first-instruction, not messaging. `pingpong` (202 vs 59 ms)
+   and `ring` (794 vs 263 ms) remain genuinely message-bound — the receive-mark only helps
+   receives that *pin a ref*, and a server loop matching several tags still walks its backlog
+   (BEAM uses a saved scan position per receive **site**, a different mechanism).
 3. **Allocator policy — and thread 6 turned out NOT to be about the allocator.**
    `MIMALLOC_PURGE_DELAY=0` returns 17% of RSS on a light workload and ~2.3× on heavy churn,
    for ~4% throughput; the default is the deliberate "spend memory for speed" call from
@@ -182,6 +200,27 @@ From the published run (`brood-benchmarks/results/`):
    **Tools:** `BROOD_L1_STATS=1` (parked-hit rate), `BROOD_PERF_STATS=1` + `--features
    perf-stats` (`tw_defer`), `BROOD_TRACE_PROMOTE=1` (what enters the region, with capture
    state). Do **not** instrument with a backtrace — it perturbs the race by ~30×.
+
+7. **Leaf inlining is all-or-nothing per arm** (found 2026-08-02, not attempted).
+   `leaf_inline_derive` bails if any non-tail `Call` survives splicing — sound, because an
+   inlined native has no deopt checkpoint — so **one un-spliceable callee blocks inlining of
+   every small callee beside it**. Measured: an arm whose only non-tail call is a
+   three-instruction leaf inlines and runs 196 ms/1M; add a recursive callee and the probe
+   vanishes, tiny leaf included, at 588 ms. This is where `mandelbrot`'s `->float` cost lives
+   (`row-sum` calls it *and* the recursive `esc`), at ~85 ns a conversion where every other
+   language in the suite emits a machine cast. The lever is partial splicing while keeping the
+   arm's checkpoint — trades the checkpoint-free fast path for coverage, so measure it.
+   Full write-up in `docs/jit-optimizing-tier.md`.
+
+8. **A published benchmark port drifts silently when language semantics change under it**
+   (2026-08-02). `mandelbrot` looked like a 3.5× runtime regression bisected to kernel exact
+   rationals; it was not a runtime regression at all — with identical source the pre-rationals
+   and current binaries measure 201 ms and 200 ms. `(/ px n)` on two ints had simply stopped
+   being a float divide (ADR-196, working as designed) and started building a rational per
+   pixel. Nothing failed and the checksum never moved; the row just quietly stopped measuring
+   what it claimed. `supervisor.blsp` had the same class still latent (`(/ n 4)` feeding an
+   iteration count — exact at N=20,000, a rational otherwise). **When a numeric primitive's
+   semantics change, grep the benchmark ports.**
 
 **Explicitly NOT open: a memory leak.** See §5 — it was chased and does not exist. The soak
 strengthens this: 12.7 M iterations with `rt-closures` flat and every fresh process starting
