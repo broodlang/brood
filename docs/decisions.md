@@ -13090,6 +13090,23 @@ there now is none. Dispatch falls back to the ability's `:default` if it declare
 `no-impl` — precisely the state before anyone implemented it. Idempotent, and it raises for
 nothing (an ability, op or id that never existed is a quiet `false`/`0`).
 
+**Two things found while building it, both worth the record.**
+
+*The registry needed a nested `:dissoc`.* `register-impl` writes with a two-key path
+(`[[ability op] id]`), but `%registry-update!`'s `:dissoc` honoured only the first key — so the
+first `unregister-impl` removed the whole `[ability op]` method map, `:default` included, and
+`(to-str [1 2 3])` began failing with `no impl for :vector` from inside unrelated code. The op
+now takes a one- OR two-key path, symmetric with `:assoc`, under the same lock. The tests that
+missed it asserted only that the retracted id stopped dispatching — which is equally true when
+everything is gone; the assertion that matters is that the SIBLINGS survive.
+
+*The language's own fallbacks are not retractable.* `(unimpl Display :default)` was one line
+that stopped the image printing anything. `unregister-impl` now refuses a `:default` of an
+ability the runtime dispatches on itself (`Display`, `Inspect`, `Seqable`, `Conjable` —
+`impl--substrate?`), pointing the caller at `impl` for their own id instead. Same reasoning as
+reserved names (ADR-166): the language's own definitions are not yours to remove. An impl you
+registered for your own id retracts normally.
+
 **Consequences.** A retraction is now a local operation rather than a reason to reset the
 world. The precedence story is unchanged — nothing about *ranking* moved; this only empties a
 slot. Note what it deliberately does not do: it does not undo `defability` (an ability with no
