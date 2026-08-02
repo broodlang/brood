@@ -1121,11 +1121,101 @@ pub(super) fn scan_bar(chars: &[char], n: usize, from: usize) -> usize {
 pub(super) fn str_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let s = expect_string(heap, "%str-index-of", arg(args, 0))?;
     let needle = expect_string(heap, "%str-index-of", arg(args, 1))?;
-    let idx = match s.find(needle.as_str()) {
-        Some(byte) => s[..byte].chars().count() as i64,
+    // Optional 3rd arg: the CHAR index to start searching at. It exists so `index-of`'s
+    // `from` does not have to build `(substring coll from n)` first — that copy is what
+    // made "incremental search" over one string quadratic, the same trap the comment
+    // above `string-split`'s registration describes for splitting. Searching a suffix
+    // must not allocate one.
+    let start = match args.get(2) {
+        None | Some(Value::Nil) => 0usize,
+        Some(&v) => match v {
+            Value::Int(n) => n.max(0) as usize,
+            other => return Err(LispError::wrong_type(heap, "%str-index-of", "int", other)),
+        },
+    };
+    // Char index → byte offset. O(start) and allocation-free; `nth` past the end yields
+    // the end, so an out-of-range start simply finds nothing (matching the clamp the
+    // Brood side used to do).
+    let byte_start = if start == 0 {
+        0
+    } else {
+        s.char_indices().nth(start).map_or(s.len(), |(b, _)| b)
+    };
+    let idx = match s[byte_start..].find(needle.as_str()) {
+        // Count chars over the prefix, not the whole string — with `start == 0` this is
+        // exactly the previous behaviour.
+        Some(rel) => s[..byte_start + rel].chars().count() as i64,
         None => -1,
     };
     Ok(Value::int(idx))
+}
+
+/// `(%str-last-index-of s needle before)` — the char index of the **last** occurrence of
+/// `needle` in `s` starting strictly before char index `before`, or -1.
+///
+/// Genuinely needs Rust, for the same reason as `string-split` and the `from` offset above:
+/// the Brood version walked forward calling `(index-of s needle i)` per match, and every one
+/// of those re-derives a char offset (and, before that offset existed, allocated a copy of
+/// the suffix) — so a reverse search was O(matches x length). Measured 16.5x then 16.4x per
+/// 4x of input, where linear is 4x. This is one forward pass with an advancing cursor.
+///
+/// It is on an editor hot path in both directions: `buffer.blsp`'s reverse search runs over
+/// whole buffer text, and `lineedit.blsp` finds the current line's start (`last-index-of
+/// text "\n" p`) on every keystroke.
+pub(super) fn str_last_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let s = expect_string(heap, "%str-last-index-of", arg(args, 0))?;
+    let needle = expect_string(heap, "%str-last-index-of", arg(args, 1))?;
+    let char_len = s.chars().count();
+    let before = match args.get(2) {
+        None | Some(Value::Nil) => char_len as i64,
+        Some(&v) => match v {
+            Value::Int(n) => n,
+            other => {
+                return Err(LispError::wrong_type(
+                    heap,
+                    "%str-last-index-of",
+                    "int",
+                    other,
+                ))
+            }
+        },
+    };
+    // The empty needle matches at every position 0..=len, so the last start strictly before
+    // `before` is `before - 1` (clamped). Kept as an explicit branch, exactly as the Brood
+    // version had it: the general scan below would loop forever on a zero-width match.
+    if needle.is_empty() {
+        return Ok(Value::int(if before <= 0 {
+            -1
+        } else if before > char_len as i64 {
+            char_len as i64
+        } else {
+            before - 1
+        }));
+    }
+    if before <= 0 {
+        return Ok(Value::int(-1));
+    }
+    // Byte limit for `before` (clamped past-the-end to the whole string). A match may START
+    // before the limit and extend past it — that is still a match, so the bound is on the
+    // match's start, not on the slice searched.
+    let limit = if before as usize >= char_len {
+        s.len()
+    } else {
+        s.char_indices()
+            .nth(before as usize)
+            .map_or(s.len(), |(b, _)| b)
+    };
+    let mut best: Option<usize> = None;
+    for (b, _) in s.match_indices(needle.as_str()) {
+        if b >= limit {
+            break;
+        }
+        best = Some(b);
+    }
+    Ok(Value::int(match best {
+        Some(b) => s[..b].chars().count() as i64,
+        None => -1,
+    }))
 }
 
 /// `(%str-splice-diff old new)` — the minimal single splice `[lo hi repl]` that

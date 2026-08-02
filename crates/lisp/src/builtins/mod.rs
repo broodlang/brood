@@ -690,9 +690,21 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     def(
         heap,
         "%str-index-of",
-        Arity::exact(2),
-        Sig::new(vec![string, string], int),
+        // Optional 3rd arg: the char index to start at, so `index-of`'s `from` can search
+        // a suffix WITHOUT allocating one (see the fn's comment).
+        Arity::range(2, 3),
+        Sig::new(vec![string, string, int], int),
         str_index_of,
+    );
+    // Reverse search: one forward pass with an advancing cursor. The Brood version called
+    // `index-of` per match, and each of those re-derives a char offset, making a reverse
+    // search over one string quadratic (measured 16.5x/16.4x per 4x). Editor hot path.
+    def(
+        heap,
+        "%str-last-index-of",
+        Arity::range(2, 3),
+        Sig::new(vec![string, string, int], int),
+        str_last_index_of,
     );
     // Splitting genuinely needs Rust for the same reason as the search above: a
     // pure-Brood split re-`substring`s the tail each step, and char-indexed substring

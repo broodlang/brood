@@ -3574,14 +3574,13 @@ what incremental search rides on (formerly the separate `index-of`)."
     (cond
       ;; Strings ride on the `%str-index-of` kernel primitive — linear; a pure-Brood
       ;; scan would be O(n²) (char indexing is O(index)), which is too slow for
-      ;; whole-namespace `doc-search`/`apropos` use. With a `from`, search the suffix
-      ;; and re-offset, clamping `from` to `[0, length]`; the empty needle matches at `from`.
-      (string? coll) (if (= start 0)
-                       (%str-index-of coll x)
-                       (let (n (string-length coll)
-                             s0 (max 0 (min n start))
-                             rel (%str-index-of (substring coll s0 n) x))
-                         (if (< rel 0) -1 (+ s0 rel))))
+      ;; whole-namespace `doc-search`/`apropos` use. The `from` offset goes to the
+      ;; primitive, which searches in place. It used to be `(%str-index-of (substring
+      ;; coll s0 n) x)` — which COPIED the suffix on every call, so the incremental
+      ;; search this offset exists for was itself quadratic (`fuzzy--next` runs it per
+      ;; query char per candidate; `last-index-of` per match). The empty needle still
+      ;; matches at `from`, and a `from` past the end still finds nothing.
+      (string? coll) (%str-index-of coll x (max 0 start))
       else (index-of--seq-from coll x 0 start))))
 
 (defn index-where--from (pred coll i)
@@ -3595,25 +3594,20 @@ what incremental search rides on (formerly the separate `index-of`)."
 equality); recover the item itself with `find`."
   (index-where--from pred coll 0))
 
-(defn last-index-of--scan (s needle before i best)
-  ;; walk forward collecting match starts < `before`, keeping the greatest seen
-  (let (j (index-of s needle i))
-    (cond
-      (< j 0) best
-      (>= j before) best
-      else (last-index-of--scan s needle before (inc j) j))))
 (defn last-index-of (s needle &optional before)
   "The 0-based char index of the **last** occurrence of `needle` in string `s` whose
 start is strictly **before** `before` (default `(string-length s)`), or -1 if there is
 none. The backward counterpart of `(index-of s needle from)` — what reverse
 incremental search rides on."
-  (let (b (or before (string-length s)))
-    (cond
-      ;; the empty needle matches at every position 0..length; the last one strictly
-      ;; before `b` is `b-1` (clamped). Handled directly — the scan would loop forever
-      ;; when `b` exceeds the length (every probe returns the same index).
-      (= needle "") (cond (<= b 0) -1 (> b (string-length s)) (string-length s) else (dec b))
-      else (last-index-of--scan s needle b 0 -1))))
+  ;; One native pass. This used to walk forward in Brood calling `(index-of s needle i)`
+  ;; per match; every one of those re-derives a char offset (and, before `index-of` took a
+  ;; `from`, allocated a copy of the suffix), so a reverse search was O(matches × length) —
+  ;; measured 16.5× then 16.4× per 4× of input, where linear is 4×. It is on an editor hot
+  ;; path in both directions: `buffer`'s reverse search runs over whole buffer text, and
+  ;; `lineedit` finds the current line's start on every keystroke. The empty-needle rule
+  ;; (matches at every position, so the answer is `before - 1` clamped) lives in the
+  ;; primitive now, unchanged.
+  (%str-last-index-of s needle (or before (string-length s))))
 
 (defn includes? (coll x)
   "True if `coll` contains `x`. Works on lists, vectors, strings (substring), and maps (membership among values — use `contains?` for keys)."

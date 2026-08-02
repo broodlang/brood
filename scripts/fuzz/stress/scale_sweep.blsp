@@ -32,6 +32,19 @@
 ;; 2026-08-02: `template render` WAS a confirmed quadratic — 12.0x then 13.4x across
 ;; three points, holding and growing, which is the signature the caveat above asks for.
 ;; Fixed (one native split + one join); now 5.0x / 4.80x, and 318 ms -> 24 ms at N=3200.
+;; 2026-08-02: `last-index-of` WAS a confirmed quadratic — 16.5x then 16.4x — because it
+;; walked forward in Brood calling `index-of` per match. Now one native pass:
+;; 540 ms -> 1 ms at 6400 repeats. It is on an editor hot path both ways (buffer reverse
+;; search over whole buffer text; lineedit finding the line start per keystroke).
+;;
+;; STILL QUADRATIC, deliberately: `incremental scan` — a Brood loop calling
+;; `(index-of s needle i)` with a rising `i`. The suffix COPY is gone (the offset now goes
+;; to the primitive), but a char index still has to be converted to a byte offset, which is
+;; O(position) per call. Making it linear needs char-length/ASCII metadata cached on the
+;; heap string, so the conversion is O(1) — a heap change, not a primitive change. Until
+;; then: to visit every occurrence, use `string-split` (one native pass), which is exactly
+;; what `template/render` was rewritten to do. The row stays so the gap is visible.
+;;
 ;; `format format-source` measured 3.80x / 4.12x / 4.64x — LINEAR at realistic sizes,
 ;; despite `format-cst-root--walk` accumulating with `(str acc …)` per top-level form.
 ;; Left alone deliberately: rendering dominates at every size a real file reaches. If a
@@ -123,6 +136,15 @@
 (defn src-of (k) (apply str (repeat k "(defn f (a b) (if (> a b) (+ a 1) (- b 1)))\n\n")))
 (defn fmt-source (k) (format/format-source (src-of k)))
 
+;; ---- string search: reverse, and a forward incremental scan -----------------
+
+(defn doc-of (k) (apply str (repeat k "lorem ipsum dolor NEEDLE sit amet consectetur ")))
+(defn scan-all (s needle i n)
+  (let (j (index-of s needle i)) (if (< j 0) n (scan-all s needle (inc j) (inc n)))))
+;; Still O(n^2) — see the header. Kept visible rather than quietly dropped.
+(defn inc-scan (k) (let (d (doc-of k)) (scan-all d "NEEDLE" 0 0)))
+(defn last-idx (k) (let (d (doc-of k)) (last-index-of d "NEEDLE")))
+
 ;; ---- run -------------------------------------------------------------------
 
 (println "std/ scale sweep — linear ~4x, quadratic ~16x")
@@ -132,3 +154,5 @@
 (row "buffer      fwd-line" n buffer-nav)
 (row "template    render  " n tmpl-render)
 (row "format      fmt-src " n fmt-source)
+(row "string      last-idx" n last-idx)
+(row "string      inc-scan" n inc-scan)   ; known-quadratic, see header

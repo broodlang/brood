@@ -14128,3 +14128,45 @@ Both rows are now in `scripts/fuzz/stress/scale_sweep.blsp` so neither can regre
 Five new tests pin the boundary cases the rewrite moved through (text after an unterminated
 marker, a substituted marker before an unterminated one, a stray `}}`, and 500 markers
 rendering *correctly* — an off-by-one in the split/join would reverse or drop text).
+
+## 2026-08-02 — reverse string search was quadratic on an editor hot path (540 ms → 1 ms)
+
+Follow-up to the template finding, which turned up the real culprit on the way:
+`(index-of s needle from)` — whose own docstring says it is what incremental search rides
+on — evaluated `(%str-index-of (substring coll s0 n) x)`. It **copied the suffix on every
+call**.
+
+**Two fixes, and only one of them worked as hoped.**
+
+1. `%str-index-of` now takes the start offset and searches in place. Removes the allocation
+   — but measured on fuzzy ranking (4000 repo-style paths) it is only 116 → 111 ms for one
+   query and 28 → 22 ms for another. Candidates are short, so the copy was small. A real
+   improvement (no allocation, no GC pressure) but not the win the shape suggested.
+2. `last-index-of` is now one native pass (`%str-last-index-of`). *This* was the quadratic:
+   it walked forward in Brood calling `index-of` per match, so a reverse search cost
+   O(matches × length) — **16.5× then 16.4×** per 4× of input, where linear is 4×. Now
+   **540 ms → 1 ms** at 6400 occurrences, flat.
+
+Worth having done because of *who calls it*: `buffer.blsp`'s reverse search runs over whole
+buffer text, and `lineedit.blsp` finds the current line's start (`last-index-of text "\n" p`)
+**on every keystroke**. This was a latent editor stall on a large buffer, not a benchmark toy.
+The new primitive clears the ADR-006 bar — reverse search is a capability the language
+genuinely lacked, and it makes *any* reverse search fast rather than speeding one call site.
+
+**What is still quadratic, on purpose and now visible.** A Brood loop calling
+`(index-of s needle i)` with a rising `i` — the `inc-scan` row, 19.5×. The copy is gone, but
+a char index still has to be converted to a byte offset, which is O(position) per call.
+Making that O(1) needs char-length/ASCII metadata cached on the heap string — a heap change,
+not a primitive change, so it is not being smuggled in here. Until then the linear way to
+visit every occurrence is `string-split` (one native pass), which is exactly what
+`template/render` was rewritten to use. The row stays in the sweep so the gap stays visible
+instead of being quietly dropped.
+
+**On verifying a semantics-preserving change to a core primitive.** I wrote 37 direct checks
+before trusting the suite — offsets at/past/before matches, negative and past-the-end bounds,
+empty needle and empty haystack, multi-char needles, a match that starts before `before` but
+*ends* after it, and UTF-8 (`héllo`, emoji) since the whole risk in this change is a byte
+index escaping where a char index belongs. Three "failures" on the first run were all my own
+wrong expectations — e.g. `(index-of "abc" "" 99)` is **3**, not -1, because `from` clamps to
+the length and the empty needle matches there. Checking those against the old code's clamp
+before changing anything is what kept a correct implementation from being "fixed".

@@ -192,6 +192,35 @@
   (test "last-index-of is -1 when absent or nothing is before `before`"
     (assert= (last-index-of "hello" "z") -1)
     (assert= (last-index-of "hello" "h" 0) -1))
+
+  ;; `index-of`'s `from` and `last-index-of` both moved into the kernel: `from` no longer
+  ;; builds `(substring coll from n)` first, and `last-index-of` is one native pass instead
+  ;; of a Brood loop calling `index-of` per match (which was O(matches × length) — 16.5×
+  ;; then 16.4× per 4× of input; it is now flat, 540 ms → 1 ms at 6400 repeats). These pin
+  ;; the semantics that move touched, especially the ones a byte-vs-char slip would break.
+  (test "index-of `from` offsets are CHAR indices, not bytes"
+    (assert= (index-of "héllo héllo" "l") 2)
+    (assert= (index-of "héllo héllo" "l" 5) 8)
+    (assert= (index-of "a😀b😀c" "b" 0) 2)
+    (assert= (index-of "a😀b😀c" "😀" 2) 3))
+  (test "last-index-of `before` offsets are CHAR indices, not bytes"
+    (assert= (last-index-of "héllo héllo" "l") 9)
+    (assert= (last-index-of "héllo héllo" "l" 9) 8)
+    (assert= (last-index-of "a😀b😀c" "😀") 3))
+  (test "last-index-of keeps a match that starts before `before` but ends after it"
+    ;; The bound is on the match's START. "bc" at 4 runs to 6, yet starts before 5.
+    (assert= (last-index-of "abcabc" "bc" 5) 4))
+  (test "last-index-of clamps `before` at both ends"
+    (assert= (last-index-of "abcabc" "b" 99) 4)
+    (assert= (last-index-of "abcabc" "b" 0) -1)
+    (assert= (last-index-of "abcabc" "b" -7) -1))
+  (test "last-index-of on an empty haystack"
+    (assert= (last-index-of "" "a") -1)
+    (assert= (last-index-of "" "") -1))
+  (test "last-index-of finds the last of many, at scale"
+    ;; 4000 occurrences: the old forward-scan-per-match shape was quadratic here.
+    (let (s (apply str (repeat 4000 "xyNEEDLE")))
+      (assert= (- (* 8 4000) 6) (last-index-of s "NEEDLE"))))
   ; clamped to length, no infinite loop
   (test "last-index-of handles the empty needle without looping"
     ;; the empty needle matches at every position 0..length; the last one before
