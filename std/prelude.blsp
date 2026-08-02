@@ -3514,9 +3514,16 @@ iterating for side effects."
 ;; `string-length` / `str` and `upper` / `lower` / `string->number`. Brood has no
 ;; distinct char type, so a "character" is a 1-char string; all indices are
 ;; char-based, matching `string-length`. The helpers below are tail-recursive
-;; (stack-safe over long strings); `substring` is O(index), so a full scan is
-;; O(n²) — fine for the short strings this targets (the rope/buffer engine in M2
-;; is the home for large-text performance).
+;; (stack-safe over long strings).
+;;
+;; Cost note, corrected 2026-08-02: `substring` used to be O(index) — plus a copy of the
+;; WHOLE source string per call — so a char-by-char scan was O(n²) regardless of content.
+;; It now takes a byte-slice fast path when the string is pure ASCII (a char index is then
+;; its byte offset, tested in O(1) against the cached char count), making it O(result). So
+;; a full scan is **linear on ASCII text** and still O(n²) on text with any multi-byte
+;; character, where the `chars().skip(index)` walk remains. Measured, char-by-char over
+;; 4k/16k/64k chars: ASCII 6/7/27 ms (ratios 1.16, 3.85) vs non-ASCII 2/21/242 ms (10.50,
+;; 11.52). Either way the rope/buffer engine (M2) is still the home for large-text editing.
 
 (defn feature? (name)
   "True if this runtime was built with the optional feature `name` (a keyword —
@@ -3577,9 +3584,11 @@ what incremental search rides on (formerly the separate `index-of`)."
       ;; whole-namespace `doc-search`/`apropos` use. The `from` offset goes to the
       ;; primitive, which searches in place. It used to be `(%str-index-of (substring
       ;; coll s0 n) x)` — which COPIED the suffix on every call, so the incremental
-      ;; search this offset exists for was itself quadratic (`fuzzy--next` runs it per
-      ;; query char per candidate; `last-index-of` per match). The empty needle still
-      ;; matches at `from`, and a `from` past the end still finds nothing.
+      ;; search this offset exists for was itself quadratic. `last-index-of` is where that
+      ;; measurably mattered (540 ms → 1 ms at 6400 matches); `fuzzy--next` also calls it
+      ;; per query char per candidate, but making the scan cheap barely moved ranking —
+      ;; see the note there before assuming this is anyone's bottleneck. The empty needle
+      ;; still matches at `from`, and a `from` past the end still finds nothing.
       (string? coll) (%str-index-of coll x (max 0 start))
       else (index-of--seq-from coll x 0 start))))
 
