@@ -131,8 +131,7 @@ fn rewrite_arm_handles_rewrites_every_embedded_handle() {
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
-        #[cfg(feature = "jit")]
-        dbg_name: None,
+                dbg_name: None,
         #[cfg(feature = "jit")]
         inline_stride: 0,
         #[cfg(feature = "jit")]
@@ -267,8 +266,7 @@ fn vm_run_bc_captures_and_resumes_a_suspend() {
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
-        #[cfg(feature = "jit")]
-        dbg_name: None,
+                dbg_name: None,
         #[cfg(feature = "jit")]
         inline_stride: 0,
         #[cfg(feature = "jit")]
@@ -381,8 +379,7 @@ fn jit_lowers_and_runs_a_straight_line_int_arm() {
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
-        #[cfg(feature = "jit")]
-        dbg_name: None,
+                dbg_name: None,
         #[cfg(feature = "jit")]
         inline_stride: 0,
         #[cfg(feature = "jit")]
@@ -467,8 +464,7 @@ fn jit_lowers_and_runs_an_if_with_comparison() {
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
-        #[cfg(feature = "jit")]
-        dbg_name: None,
+                dbg_name: None,
         #[cfg(feature = "jit")]
         inline_stride: 0,
         #[cfg(feature = "jit")]
@@ -563,8 +559,7 @@ fn jit_lowers_and_runs_a_self_recursive_int_loop() {
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
-        #[cfg(feature = "jit")]
-        dbg_name: None,
+                dbg_name: None,
         #[cfg(feature = "jit")]
         inline_stride: 0,
         #[cfg(feature = "jit")]
@@ -704,8 +699,7 @@ fn jit_lowers_an_arm_ending_in_a_tail_call() {
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
-        #[cfg(feature = "jit")]
-        dbg_name: None,
+                dbg_name: None,
         #[cfg(feature = "jit")]
         inline_stride: 0,
         #[cfg(feature = "jit")]
@@ -782,8 +776,7 @@ fn jit_lowers_an_arm_ending_in_a_tail_call() {
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
-        #[cfg(feature = "jit")]
-        dbg_name: None,
+                dbg_name: None,
         #[cfg(feature = "jit")]
         inline_stride: 0,
         #[cfg(feature = "jit")]
@@ -865,8 +858,7 @@ fn jit_lowers_an_arm_ending_in_a_tail_call() {
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
-        #[cfg(feature = "jit")]
-        dbg_name: None,
+                dbg_name: None,
         #[cfg(feature = "jit")]
         inline_stride: 0,
         #[cfg(feature = "jit")]
@@ -940,8 +932,7 @@ fn jit_lowers_fused_prims_map_and_overflow() {
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
-        #[cfg(feature = "jit")]
-        dbg_name: None,
+                dbg_name: None,
         #[cfg(feature = "jit")]
         inline_stride: 0,
         #[cfg(feature = "jit")]
@@ -1106,8 +1097,7 @@ fn jit_tier_compiles_a_hot_arm_then_runs_native() {
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
-        #[cfg(feature = "jit")]
-        dbg_name: None,
+                dbg_name: None,
         #[cfg(feature = "jit")]
         inline_stride: 0,
         #[cfg(feature = "jit")]
@@ -1289,8 +1279,7 @@ fn vm_run_bc_runs_a_tiered_arm_via_the_hook() {
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
-        #[cfg(feature = "jit")]
-        dbg_name: None,
+                dbg_name: None,
         #[cfg(feature = "jit")]
         inline_stride: 0,
         #[cfg(feature = "jit")]
@@ -1408,8 +1397,7 @@ fn jit_speedup_vs_vm() {
         capture_names: Box::new([]),
         #[cfg(feature = "jit")]
         inline_name: None,
-        #[cfg(feature = "jit")]
-        dbg_name: None,
+                dbg_name: None,
         #[cfg(feature = "jit")]
         inline_stride: 0,
         #[cfg(feature = "jit")]

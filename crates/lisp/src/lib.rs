@@ -434,27 +434,26 @@ impl Interp {
         forms: Vec<(Value, Option<crate::error::Pos>)>,
     ) -> Result<Value, LispError> {
         let form_vals: Vec<Value> = forms.iter().map(|&(f, _)| f).collect();
-        let prev_ns = self.heap.set_compile_ns(None);
-        let known = if eval::macros::file_opens_ns(&self.heap, &form_vals) {
-            eval::macros::scan_def_names(&self.heap, &form_vals)
-        } else {
-            std::collections::HashSet::new()
-        };
-        let prev_known = self.heap.set_ns_known_names(known);
-        let prev_imports = self.heap.set_imports(std::collections::HashMap::new());
-        let cp = self.heap.checkpoint();
-        let gc = self.heap.gc_enabled();
+        let root = self.root;
+        // `NsLoadScope` resets compile-ns + imports + this file's forward-ref pre-scan
+        // + assume-own into the file's own namespace scope, and restores the caller's
+        // ns-state on EVERY exit path incl. a panic (ADR-065). It owns the heap for the
+        // run; reach it via `scope.heap()`.
+        let mut scope = eval::macros::NsLoadScope::enter(&mut self.heap, &form_vals);
+        let heap = scope.heap();
+        let cp = heap.checkpoint();
+        let gc = heap.gc_enabled();
         let mut result = Value::nil();
         let n = forms.len();
-        let roots_base = self.heap.roots_len();
+        let roots_base = heap.roots_len();
         for &(form, _) in &forms {
-            self.heap.push_root(form);
+            heap.push_root(form);
         }
         let mut ret: Result<(), LispError> = Ok(());
         for i in 0..n {
             // The form's current handle (relocated if an earlier form's eval
             // triggered a collection); the `forms` Vec copy may be stale.
-            let form = self.heap.root_at(roots_base + i);
+            let form = heap.root_at(roots_base + i);
             let pos = forms[i].1;
             // Record def sites (file runs only): the raw form first (preserves
             // pre-expansion spans for `defn`/`defmacro`), then the expanded form
@@ -462,21 +461,21 @@ impl Interp {
             // still get their call-site position. Both no-op off a definition or
             // with no file set.
             if let Some(pos) = pos {
-                self.heap.note_definition(form, pos);
+                heap.note_definition(form, pos);
             }
             // Compile pass: expand macros once before evaluating (form-by-form, so
             // a macro a form defines is in scope for the forms after it), then
             // route through the compiling VM (ADR-076) or, under BROOD_VM=0, the
             // tree-walker (Stage 0 defers, so the two are at parity).
-            let outcome = eval::macros::compile(&mut self.heap, form, self.root)
+            let outcome = eval::macros::compile(heap, form, root)
                 .and_then(|f| {
                     if let Some(pos) = pos {
-                        self.heap.note_definition(f, pos);
+                        heap.note_definition(f, pos);
                     }
                     if eval::compile::vm_enabled() {
-                        eval::compile::run(&mut self.heap, f, self.root)
+                        eval::compile::run(heap, f, root)
                     } else {
-                        eval::eval(&mut self.heap, f, self.root)
+                        eval::eval(heap, f, root)
                     }
                 })
                 .map_err(|e| match pos {
@@ -511,11 +510,9 @@ impl Interp {
             // not a bare high-water mark.
             let _ = (&cp, gc);
         }
-        self.heap.truncate_roots(roots_base);
-        self.heap.set_compile_ns(prev_ns);
-        self.heap.set_ns_known_names(prev_known);
-        self.heap.set_imports(prev_imports);
+        heap.truncate_roots(roots_base);
         ret.map(|()| result)
+        // `scope` drops here → the caller's ns-state is restored (also on panic).
     }
 
     /// Render a value to its readable text form.

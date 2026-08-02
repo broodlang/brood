@@ -12992,7 +12992,6 @@ instance of: *an instrumentation registry must never claim a rebind that did not
 happen* — the registry is a promise to restore, and a promise you cannot keep is worse
 than no entry.
 
-## ADR-202 — a registry compare-and-swap, not a kernel op per registry shape
 
 **Context.** A registry is a global holding a whole map or list that many processes register
 into. Written the obvious way — `(def *X* (assoc *X* k v))` — it silently loses registrations:
@@ -13029,3 +13028,71 @@ every future reader has to learn, whereas a CAS is one idea that covers all of t
   `binding` shadows the root write identically for both spellings — and it is load-bearing:
   the root is not always `EnvId::GLOBAL` during prelude load, and writing straight to the
   globals table there is silently dropped.
+## ADR-203 — A closing layer NAMES its companions; the app closes them
+**Status:** accepted + implemented (2026-08-02).
+
+**Context.** `:on-close` (ADR's layers seam) is the async-cleanup hook: a layer kills the
+worker it spawned as its context goes away. But a mode often owns a second *context* too —
+the tutorial's `*Workings*` pane, a REPL's transcript, a debugger's queue — buffers it
+created that mean nothing without it. Leaving them behind leaves a corpse on screen (myedit
+shipped exactly that: closing the tutorial left its workings pane open, showing the call
+tree of a buffer that no longer existed).
+
+A hook cannot close them itself. It is `(ctx) -> ctx`, and a "context" in `std/editor/layers`
+is whatever the app threads through — a buffer, a window, anything with a `:layers` key.
+Layers has no notion of a pool, a window list, or a kill command, and that ignorance is
+precisely why it composes with any app. Handing hooks the model instead would invert the
+dependency and make every layer app-specific.
+
+**Decision.** The hook *names*, the app *performs* — the same division as a render op (the
+view says `[:text …]`, the frontend draws) and a keymap command (the layer says
+`'cmd-forward-char`, dispatch resolves it):
+
+- `request-close ctx name` — from inside an `:on-close` hook, record a companion on the
+  closing context. Accumulating and de-duplicating, so two layers naming the same companion
+  is one request. Returns `ctx`, so hooks thread.
+- `close-requests ctx` — read the list back off `close-context`'s **result**. The app
+  performs the closes against its own container and decides what an unknown name means.
+
+**Consequences.** A mode can own a second window without knowing what a window is. The app
+keeps full control: myedit's `cmd-kill-buffer` reads the requests, kills each companion by
+name (looked up fresh, since indices shift), fires each companion's own `:on-close` — and
+does **not** follow their requests, one level being a cycle guard against two modes naming
+each other. An unrecognised name is ignored rather than an error, because a companion may
+already be gone. The seam is data, so it is testable without an app: `close-context`'s
+result carries the list.
+
+## ADR-204 — `unimpl`: the impl registry has an inverse
+
+**Status:** accepted + implemented (2026-08-02).
+
+**Context.** `impl` (ADR-168/172) is open and late: any module, any time, precedence-ranked
+rather than order-dependent. It was reversible in every way but one — there was no way to
+*remove* an impl. `*impls*` only ever grew.
+
+That is fine until something needs a known baseline. Three cases, all real: a test that must
+not leak into the next one; a REPL session undoing an experiment; a hot reload retracting an
+impl the new source no longer declares. myedit met the first as a flaky suite — a tutorial
+exercise asks the reader to `impl` an ability for their own record, the test that evaluated
+the worked ANSWER left that impl registered, and the exercise's own template (deliberately
+shipped without the impl) then "already passed". The workaround was to run the check under
+`%isolate`, which is a big hammer for a small missing operation: the registry could not be
+put back, so the whole global table had to be.
+
+**Decision.** `unregister-impl aname op key` removes one impl and returns whether there was
+one; `unimpl` is the macro sibling of `impl` — `(unimpl Size geometry/circle)` retracts every
+op the ability declares for that id, `(unimpl Shape my/rect area)` just the named ones —
+returning how many it removed.
+
+Removal leaves the slot **unclaimed**, not a tombstone and not `:default`: a later
+registration of any tier takes it, because `impl-rank` compares against an incumbent and
+there now is none. Dispatch falls back to the ability's `:default` if it declares one, else
+`no-impl` — precisely the state before anyone implemented it. Idempotent, and it raises for
+nothing (an ability, op or id that never existed is a quiet `false`/`0`).
+
+**Consequences.** A retraction is now a local operation rather than a reason to reset the
+world. The precedence story is unchanged — nothing about *ranking* moved; this only empties a
+slot. Note what it deliberately does not do: it does not undo `defability` (an ability with no
+impls is still declared), and it does not touch a `:derives`-generated impl differently from a
+hand-written one — both are entries in the same registry, which is the point of keeping
+provenance (`*impl-from*`) out of dispatch.

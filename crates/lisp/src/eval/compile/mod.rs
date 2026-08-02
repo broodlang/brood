@@ -1671,8 +1671,7 @@ fn compile_arm(
         capture_names,
         #[cfg(feature = "jit")]
         inline_name,
-        #[cfg(feature = "jit")]
-        dbg_name: defn_name,
+                dbg_name: defn_name,
         #[cfg(feature = "jit")]
         inline_stride,
         // Floored at the SMALL frame size: the VM/small-native frame is already
@@ -1933,7 +1932,11 @@ pub(crate) struct HofArm {
     id: ClosureId,
     arm: Arc<CompiledArm>,
     /// The step arm's IC block ([`Heap::vm_arm_block`]), resolved once here so the
-    /// per-element native fast-frame installs it without a registry lookup.
+    /// per-element native fast-frame installs it without a registry lookup. Only the native
+    /// (jit) fast path reads it, so a `--no-default-features` build carries neither the
+    /// field nor the lookup that fills it — the mirror of `CompiledArm::dbg_name`, which is
+    /// ungated precisely because the bytecode VM does read that one (ADR-199 build note).
+    #[cfg(feature = "jit")]
     bases: (u32, u32),
 }
 
@@ -1956,8 +1959,14 @@ pub(crate) fn hof_resolve(heap: &Heap, f: Value, argc: usize) -> Option<HofArm> 
     if arm.nrequired != argc || arm.noptional != 0 || arm.rest_slot.is_some() {
         return None;
     }
+    #[cfg(feature = "jit")]
     let bases = heap.vm_arm_block(&arm);
-    Some(HofArm { id, arm, bases })
+    Some(HofArm {
+        id,
+        arm,
+        #[cfg(feature = "jit")]
+        bases,
+    })
 }
 
 /// Call the cached step closure on `args`. `f` is the *current* (rooted, GC-relocated) closure
@@ -2372,8 +2381,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 capture_names: Box::new([]),
                 #[cfg(feature = "jit")]
                 inline_name: None,
-                #[cfg(feature = "jit")]
-                dbg_name: None,
+                                dbg_name: None,
                 #[cfg(feature = "jit")]
                 inline_stride: 0,
                 #[cfg(feature = "jit")]
@@ -2458,7 +2466,11 @@ fn jit_spill_reserve(_code: &[Inst]) -> usize {
     0
 }
 #[cfg(not(feature = "jit"))]
-fn jit_ckpt_depth(_code: &[Inst], _self_name: Option<Symbol>) -> Option<usize> {
+fn jit_ckpt_depth(
+    _code: &[Inst],
+    _self_name: Option<Symbol>,
+    _self_arity: Option<usize>,
+) -> Option<usize> {
     None
 }
 
