@@ -162,14 +162,11 @@
       (assert= (get r :ok) true)
       (assert= (count (get r :spy)) eval-server/*spy-entry-cap*)))   ; 402 entries -> capped
 
-  (test "tracing COSTS tail-calls: each traced self-call is a real boundary crossing"
-    ;; Inherent to boundary tracing — the wrapper must return after the call, so the
-    ;; self-call is no longer in tail position (the same caveat Erlang/Emacs tracing
-    ;; carries). So even a TAIL loop is traced per-iteration: a 300-deep traced loop
-    ;; fills the spy cap, where TCO would have shown a single crossing. It also means each
-    ;; traced call is a real frame, so a deep-enough traced loop overflows — but the depth
-    ;; is the engine's recursion budget (small on the tree-walker, ~1M on the VM), so it's
-    ;; not pinned here: `eval` now runs on whichever engine is active (deferred.md #9).
+  (test "tracing costs tail-calls only UP TO the cap: each traced self-call is a real crossing"
+    ;; Inherent to boundary tracing while it is recording — the wrapper must return after
+    ;; the call, so the self-call is not in tail position (the caveat Erlang/Emacs tracing
+    ;; carries too). So a TAIL loop is traced per-iteration: a 300-deep traced loop fills
+    ;; the spy cap, where TCO would have shown a single crossing.
     (let (r (eval-capturing "(defn evsrv-t-loop ((0) :done) ((n) (evsrv-t-loop (- n 1))))\n(evsrv-t-loop 300)"
               ["evsrv-t-loop"]))
       (assert= (get r :ok) true)
@@ -179,6 +176,20 @@
     (assert= (get (eval-capturing "(defn evsrv-t-ok ((0) :done) ((n) (evsrv-t-ok (- n 1))))\n(evsrv-t-ok 200000)")
                :value)
       ":done"))
+
+  (test "REGRESSION: a traced tail loop far past the frame limit reports its cap and RUNS"
+    ;; The bug this pins: the cap silently dropped entries while the traced program kept
+    ;; paying a frame per level, so the deep loop died at ~1 048 576 frames with
+    ;; `recursion too deep` — and what died was a tutorial box whose whole subject is
+    ;; "tail calls run in constant stack". Now the sink answers `:spy-stop` at the cap and
+    ;; the tracer uninstalls itself, so the rest of the loop is a real tail loop.
+    ;; 1.2M: comfortably past the VM's 1 048 576-frame limit (the thing being proved),
+    ;; and not a second more of suite time than that needs.
+    (let (r (eval-capturing "(defn evsrv-t-deep ((0) :liftoff) ((n) (evsrv-t-deep (- n 1))))\n(evsrv-t-deep 1200000)"
+              ["evsrv-t-deep"]))
+      (assert= (get r :ok) true)
+      (assert= (get r :value) ":liftoff")
+      (assert= (count (get r :spy)) eval-server/*spy-entry-cap*)))
 
   (test "tracing a name that never becomes a function is silently no trace"
     (let (r (eval-capturing "(+ 1 2)" ["no-such-fn-xyz"]))

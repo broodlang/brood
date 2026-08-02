@@ -313,6 +313,59 @@
       (untrace-fn 'debug-test/tfn-square)
       (dbg-stop dbg))))
 
+;; A tail-recursive countdown, as a GLOBAL so trace-fn has a name to rebind. The
+;; self-call is the last thing the (n) clause does, so untraced this runs in constant
+;; stack at any depth — which is exactly what the tracer must not take away.
+(defn tfn-countdown
+  ((0) :liftoff)
+  ((n) (tfn-countdown (- n 1))))
+
+;; A sink bounded to `cap` entries, answering `:spy-stop` once it is full — the
+;; bounded-sink contract from `*spy-sink*`, and what every display sink should do.
+(defn bounded-sink (acc cap)
+  (fn (e)
+    (let (n (or (table-get acc :n) 0))
+      (if (< n cap)
+        (do (table-put acc :n (inc n))
+          (table-put acc :entries (cons e (or (table-get acc :entries) '())))
+          (when (>= (inc n) cap) :spy-stop))
+        :spy-stop))))
+
+(describe "trace-fn — a sink that says when it is full stops costing the traced program"
+  :isolated
+  (test "`:spy-stop` ends the trace: the sink sees its budget and not one entry more"
+    (let (acc (table))
+      (trace-fn 'debug-test/tfn-countdown)
+      (assert= :liftoff (binding (*spy-sink* (bounded-sink acc 10))
+                          (tfn-countdown 5000)))
+      (untrace-fn 'debug-test/tfn-countdown)
+      (assert= 10 (table-get acc :n))
+      ;; every kept entry is a :call — a stopped tracer delegates in tail position, so
+      ;; there is no :return to emit (and for a tail call there never was one to see)
+      (assert= 10 (count (filter (fn (e) (= :call (:spy e))) (table-get acc :entries))))
+      (table-drop acc)))
+  (test "REGRESSION: a traced tail loop deeper than the VM's frame limit still returns"
+    ;; The wrapper emits `:return` AFTER the call, so a traced self-call is no longer a
+    ;; tail call and each level costs a frame: this loop used to die at ~1 048 576 with
+    ;; `recursion too deep`, and a tutorial box teaching "tail calls run in constant
+    ;; stack" was the thing that broke. Past the sink's budget the wrapper delegates in
+    ;; tail position, so the depth below is only bounded by patience.
+    (let (acc (table))
+      (trace-fn 'debug-test/tfn-countdown)
+      (assert= :liftoff (binding (*spy-sink* (bounded-sink acc 50))
+                          (tfn-countdown 1200000)))
+      (untrace-fn 'debug-test/tfn-countdown)
+      (assert= 50 (table-get acc :n))
+      (table-drop acc)))
+  (test "a sink that never stops still gets its :return entries (the default contract)"
+    (let (me (self))
+      (trace-fn 'debug-test/tfn-square)
+      (assert= 81 (binding (*spy-sink* (fn (e) (send me [:spy-entry e]) nil))
+                    (tfn-square 9)))
+      (untrace-fn 'debug-test/tfn-square)
+      (assert= :call (:spy (receive ([:spy-entry e] e) (after 1000 :timeout))))
+      (assert= :return (:spy (receive ([:spy-entry e] e) (after 1000 :timeout)))))))
+
 (describe "debugger — step parks carry an eval-at-able :vals map"
   :isolated
   (test "eval-at resolves `value` at a step park (the :vals shape matches break's)"

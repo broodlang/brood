@@ -26,7 +26,7 @@ clap = { version = "4", features = ["derive"] }
 [features]
 # Mirror cli's passthrough: `cargo build -p nest --features perf-stats` arms the
 # VM work-attribution counters (`(vm-stats)` / `BROOD_PERF_STATS`) for profiling a
-# real project workload (e.g. brood-edit redisplay) through `nest test`/`run`.
+# real project workload (e.g. bedit redisplay) through `nest test`/`run`.
 # Off by default — zero cost.
 perf-stats = ["brood/perf-stats"]
 # (No `jit` passthrough: nest depends on brood with default features, which now

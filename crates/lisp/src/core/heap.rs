@@ -1749,6 +1749,15 @@ pub(crate) struct ColdHeap {
     pub(crate) ns_assume_own: bool,
     /// `(:use …)` import map for the namespace being compiled.
     pub(crate) imports: HashMap<Symbol, Symbol>,
+    /// Package-rooted namespaces (ADR-070): while loading a *dependency* `foo`, its
+    /// local name is the active prefix, so a module the file declares `(defmodule b)`
+    /// roots to `foo/b` and its intra-package `(:use b)`/`(:alias b …)` targets root
+    /// too. `None` outside a dep load (the root project / std stay unrooted, short).
+    pub(crate) package_prefix: Option<Symbol>,
+    /// The short module names the active package provides — the set that decides
+    /// whether a referenced module name is *intra-package* (root it) or external
+    /// (a std/other-dep name, leave it bare). Empty when `package_prefix` is `None`.
+    pub(crate) package_modules: HashSet<Symbol>,
 }
 
 /// Checker-only heap state, lazily boxed off [`Heap`] (see [`Heap::check`]). None of it
@@ -3271,6 +3280,53 @@ impl Heap {
     /// The namespace currently being compiled into, or `None` at root.
     pub fn compile_ns(&self) -> Option<Symbol> {
         self.cold().and_then(|c| c.compile_ns)
+    }
+
+    // ----- package-rooted namespaces (ADR-070) -----
+
+    /// Enter a dependency's load: `prefix` is the dep's local name, `modules` the
+    /// short module names it provides. While set, `root_module_name` roots an
+    /// intra-package module reference to `prefix/name`. Returns the prior
+    /// `(prefix, modules)` so the caller restores it (dep loads nest — a dep may
+    /// `require` another dep). Passing `None` clears the context (root project / std).
+    pub fn set_package_context(
+        &mut self,
+        prefix: Option<Symbol>,
+        modules: HashSet<Symbol>,
+    ) -> (Option<Symbol>, HashSet<Symbol>) {
+        let cold = self.cold_mut();
+        let prev_prefix = std::mem::replace(&mut cold.package_prefix, prefix);
+        let prev_modules = std::mem::replace(&mut cold.package_modules, modules);
+        (prev_prefix, prev_modules)
+    }
+
+    /// The active package prefix (a dep's local name), or `None` outside a dep load.
+    pub fn package_prefix(&self) -> Option<Symbol> {
+        self.cold().and_then(|c| c.package_prefix)
+    }
+
+    /// Root a referenced module name to the active package: if a dep load is active
+    /// and `module` is one of that dep's provided modules, return `prefix/module`;
+    /// otherwise return `module` unchanged. This is the one place the `foo/` prefix
+    /// is applied — used by `%in-ns` (rooting a declared `(defmodule b)`) and the
+    /// loader's `%root-module-name` (rooting `(:use b)`/`(:alias b …)`/`require`
+    /// targets). An external name (std, another dep, already `foo/…`) is left alone.
+    pub fn root_module_name(&mut self, module: Symbol) -> Symbol {
+        let Some(prefix) = self.package_prefix() else {
+            return module;
+        };
+        let is_intra = self
+            .cold()
+            .is_some_and(|c| c.package_modules.contains(&module));
+        if !is_intra {
+            return module;
+        }
+        let rooted = format!(
+            "{}/{}",
+            crate::core::value::symbol_name(prefix),
+            crate::core::value::symbol_name(module)
+        );
+        crate::core::value::intern(&rooted)
     }
 
     /// Record the bare names the current-namespace file will define, so the

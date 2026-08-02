@@ -4,6 +4,11 @@ An **ADR** is an *Architecture Decision Record* — a short, dated note capturin
 one design choice and *why* we made it, so we don't accidentally relitigate
 settled questions. Newest at the bottom.
 
+> **The editor is `bedit`.** Entries up to ADR-198 call it `myedit`, and some call its repo
+> `brood-edit` — both were renamed to `bedit` (the command it always was) on 2026-08-02.
+> Entries are dated records and are not rewritten, so read either name as `bedit`; only the
+> *paths* were corrected, since a wrong path is misinformation rather than history.
+
 > **Dangling links are expected in older entries.** Entries are historical records
 > and are not rewritten, so a few cite design/audit docs that have since been
 > deleted — `concurrency-v2.md`, `supervision.md`, `memory-review.md`,
@@ -12890,7 +12895,7 @@ behind (ADR-201).
 ADR-038: a shipped app carries no test framework, observer, MCP/doc/hot-reload
 tooling, or REPL. The split was drawn by how *tool-shaped* a module looked, and two
 modules were filed wrongly by that reading: `debug` (the tracing debugger) and
-`eval-server` (ADR-198). The editor (`../brood-edit`) requires both at the top of
+`eval-server` (ADR-198). The editor (`../bedit`) requires both at the top of
 `src/debugger.blsp` and `src/sandbox.blsp`, because a `C-c d` debugger session and
 eval-on-type tutorial playgrounds are *its features*.
 
@@ -12955,7 +12960,7 @@ load-bearing, noted as a COUPLING comment where winit is pinned.
 
 **Consequences.** A shipped Brood app can present itself as itself, given three names
 that agree: the id the window declares, the `.desktop` entry named after it, and the
-icon that entry asks for (myedit ships all three and a test pinning them together).
+icon that entry asks for (bedit ships all three and a test pinning them together).
 `gui-icon!` remains for X11-only cases and is now documented as a no-op under Wayland,
 which is the honest statement of what a client can do there.
 
@@ -13034,7 +13039,7 @@ every future reader has to learn, whereas a CAS is one idea that covers all of t
 **Context.** `:on-close` (ADR's layers seam) is the async-cleanup hook: a layer kills the
 worker it spawned as its context goes away. But a mode often owns a second *context* too —
 the tutorial's `*Workings*` pane, a REPL's transcript, a debugger's queue — buffers it
-created that mean nothing without it. Leaving them behind leaves a corpse on screen (myedit
+created that mean nothing without it. Leaving them behind leaves a corpse on screen (bedit
 shipped exactly that: closing the tutorial left its workings pane open, showing the call
 tree of a buffer that no longer existed).
 
@@ -13055,7 +13060,7 @@ view says `[:text …]`, the frontend draws) and a keymap command (the layer say
   performs the closes against its own container and decides what an unknown name means.
 
 **Consequences.** A mode can own a second window without knowing what a window is. The app
-keeps full control: myedit's `cmd-kill-buffer` reads the requests, kills each companion by
+keeps full control: bedit's `cmd-kill-buffer` reads the requests, kills each companion by
 name (looked up fresh, since indices shift), fires each companion's own `:on-close` — and
 does **not** follow their requests, one level being a cycle guard against two modes naming
 each other. An unrecognised name is ignored rather than an error, because a companion may
@@ -13072,7 +13077,7 @@ rather than order-dependent. It was reversible in every way but one — there wa
 
 That is fine until something needs a known baseline. Three cases, all real: a test that must
 not leak into the next one; a REPL session undoing an experiment; a hot reload retracting an
-impl the new source no longer declares. myedit met the first as a flaky suite — a tutorial
+impl the new source no longer declares. bedit met the first as a flaky suite — a tutorial
 exercise asks the reader to `impl` an ability for their own record, the test that evaluated
 the worked ANSWER left that impl registered, and the exercise's own template (deliberately
 shipped without the impl) then "already passed". The workaround was to run the check under
@@ -13157,3 +13162,119 @@ shadowed original is always recoverable. The cost is that a pre-existing silent 
 the load — correct for greenfield (surface the problem), and the std suite had none. This is
 policy over the flat table (ADR-065's substrate is unchanged); the runtime is still one flat
 interned-symbol global table with an expand-time resolver.
+
+## ADR-206 — "referenced-but-not-imported" is solved by LSP auto-import, not runtime autoload
+
+**Status:** accepted + implemented (2026-08-02). Refines [ADR-065](decisions.md) (namespaces),
+extends the `code_actions.rs` quick-fix surface (`docs/lsp.md`).
+
+**Context.** ADR-065 §9 recorded two flavours of *auto-require* for the ergonomics of using a
+name from a module you haven't imported: **import-driven** (a `(:use …)` loads the module —
+shipped) and **reference-driven** (a bare `mod/name` reference *autoloads* the module on first
+sight, Emacs `autoload` / Guile style — deferred). The question was whether to build the
+reference-driven flavour. Surveying it against how modern languages actually solve
+"referenced-but-not-imported": they don't autoload. Rust, Go (which *errors* on unused imports),
+TypeScript/ES modules, Swift, Kotlin, Zig all chose **explicit, statically-analyzable imports**,
+because a knowable dependency set is what powers correct completion/rename/go-to-def, tree-shaking,
+reproducible lock files, and supply-chain auditing — none of which survive implicit loading. What
+the field kept from the dynamic era is **deferral** (lazy `import()`), not **implicitness**; and
+the modern answer to an unimported reference is the IDE **auto-import** code action, which *edits
+the source to insert the explicit import*, preserving static analyzability.
+
+**Decision.** Do **not** add reference-driven runtime autoload as a general language feature.
+Solve the ergonomics the modern way — an **LSP auto-import code action**. On a bare
+`unbound symbol: foo` whose providers (modules exporting `foo` as `mod/foo`, read from the live
+image's global table) are known, the editor offers:
+
+- **"Import `foo` from `(:use mod)`"** — inserts a `(:use mod)` clause into the `defmodule`
+  header (grouped with existing clauses at their indentation, inline for a clause-less header).
+  The explicit import the runtime and all tooling already understand — nothing new to analyse.
+- **"Qualify as `mod/foo`"** — rewrites the reference in place, for a one-off use.
+- One import+qualify pair **per provider**, so a name two modules export (`sexp` /
+  `editor/treesit`, ADR-205 §7b) is a *choice*, never a silent pick.
+
+Discovery is workspace-wide for free: `project/setup-tooling-image` loads every project source
+into the LSP image (ADR-031), so `introspect::global_names` already sees project modules and
+embedded std alike — no separate cross-file index. Filtered so the offer is never wrong: the
+file's own namespace, an already-imported module, and private `--` providers are dropped.
+
+**Rejected: reference-driven runtime autoload.** It would couple symbol resolution to filesystem
+side effects, run inside `nest check` (which shares the resolver), and — the deciding cost — make
+a module's dependency set *implicit*, blurring exactly the static analysis ADR-065 §6 says
+namespaces exist to enable. ADR-065's "loads-but-never-fetches" line protects the lock file but
+not analyzability. The narrow context where autoload is idiomatic — a live, self-modifying image
+(Emacs) — is served well enough by the REPL's existing unbound-name hint; if a REPL-only
+autoload is ever wanted it can be added there, scoped away from file loads and `nest check`, but
+it is explicitly *not* the general mechanism.
+
+**Consequences.** Library code stays explicit and statically analyzable (the modern default),
+the package manager's dependency graph stays computable, and the ergonomic gap closes with a
+familiar Rust-analyzer/TS-style affordance. This supersedes ADR-065 §9's "reference-driven"
+flavour as a language feature (import-driven `:use` stands unchanged). Implemented in
+`crates/lsp/src/code_actions.rs` with unit coverage for discovery, the header edit (bare and
+clause-grouped), qualify, the multi-provider choice, and the own-namespace/already-imported/private
+filters.
+
+## ADR-207 — A display protocol truncates: bounded printing, and a sink that says when it is full
+
+**Status:** accepted + implemented (2026-08-02). Extends [ADR-173](decisions.md) (`spy`) and
+[ADR-201](decisions.md) (atomic instrumentation); `pr-str-bounded` is the printer.
+
+**Context.** Two holes, found together in the editor's tutorial. Its lesson on proper tail
+calls counts down from a million in a boundary-traced box, and it (a) reported
+`recursion too deep: exceeded the VM's 1048576-frame non-tail-call limit` and (b) had already
+been walked back to 250 000 in an earlier attempt to dodge that, with a code comment
+apologising for the number.
+
+*The frame hole.* `trace-fn`'s wrapper emits its `:return` entry AFTER the call, so the
+traced self-call is not in tail position: each level costs a VM frame. A tail loop that runs
+in O(1) stack untraced runs in O(n) traced, 11× slower, and dies at the frame limit — while
+the *consumer* had a perfectly good bound in place (`eval-server`'s `*spy-entry-cap*`, 200
+entries) and was silently discarding everything past it. The program paid for a quarter of a
+million entries nobody kept. Worse, the page that broke was the page teaching that a tail
+loop can run forever: instrumentation contradicting the lesson it was there to illustrate.
+
+*The size hole.* `pr-str-bounded` bounded collections (`*print-length*`) and nesting
+(`*print-level*`) but never a leaf, and a string is one item at any depth. So a single 10 MB
+string sailed past both bounds — and `spy`'s default sink printed values with plain `pr-str`
+anyway, as did the debugger's causal tree, its paused-process rows and its REPL echo.
+
+**Decision — one: text has a bound too.** `*print-string-length*` (default 4096, matching
+Elixir `Inspect`'s `:printable_limit`, which exists for this exact reason) bounds a string or
+byte-string leaf; the marker goes inside the closing quote (`"abc…"`, `#b"ab…"`). The value is
+cut *before* printing, never `pr-str`'s output — cutting the output can halve an escape or
+drop the quote, and a byte costs four output characters, so a post-hoc cut would already have
+built the flood. `nil` lifts it, like the other two.
+
+**Decision — two: every display protocol prints through `pr-str-bounded`.** Not `pr-str`.
+Applied to `spy`'s default sink, the debugger's tree/rows/echo, and (in the editor) the *Spy*
+stream tap, the `*Debug*` locals preview, the eval-in-scope result and the `C-x C-e` echo.
+The exception is a printed form used as a KEY (`debug/hits` → `value-distribution`): a key
+that elides is a key that collides, so identity paths keep `pr-str`. Emacs draws this same
+line with `eval-expression-print-length`/`-level`.
+
+**Decision — three: a sink's return value means something.** `:spy-stop` from a `*spy-sink*`
+says *"I have all I want"*; anything else means keep going. `trace-fn`'s wrapper honours it by
+putting the original back (the same rebind `untrace-fn` does) and delegating in **tail
+position**: no post-call emit, no frame, nothing built to be discarded. So the rest of a
+traced tail loop runs at its real speed in constant stack, and a bounded sink is now the thing
+that makes tracing cheap rather than the thing that hides its cost. The registry entry stays,
+so a later `untrace-fn`/`untrace-all` is still correct and a later `trace-fn` still finds the
+true original. `eval-server`'s sink answers `:spy-stop` on the entry that fills its cap.
+
+**Rejected: a per-install latch table.** A `(table)` per wrapper reading `:stopped` avoids
+mutating the global, but a table lives until `table-drop` or exit (ADR-107) — one leak per
+install, per traced name, per request in a long-lived session — and the bookkeeping to drop it
+buys nothing over a rebind, which is the mechanism instrumentation is already made of.
+
+**Consequences.** Measured through `eval-server`'s own path, 250 000 traced tail calls went
+641 ms → 73 ms, a million 2493 ms → 227 ms (it had exceeded the editor's 2 s box budget), and
+four million from `recursion too deep` → 844 ms, i.e. the untraced cost. A trace is still not
+free while it is recording (the first N calls are real frames — inherent to boundary tracing,
+as in Erlang and Emacs), but the cost now stops where the interest does. Displays cannot be
+flooded by a value's size by default, so a consumer that forgot to think about size is still
+safe. What a bounded trace gives up is the trace past the budget, which the sink had already
+said it was throwing away — a consumer showing a capped cascade should say so (the editor's
+*Workings* pane now does). Covered by `tests/print_bounded_test.blsp` (15 cases),
+`tests/debug_test.blsp` (the `:spy-stop` contract + a 1.2M-deep traced loop) and
+`tests/eval_server_test.blsp`.

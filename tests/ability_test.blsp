@@ -32,7 +32,7 @@
 ;;
 ;; The private ability stays, for the ordinary reason rather than the dramatic one: a test
 ;; that MUTATES a registry should own what it mutates, so it cannot be read by a test that
-;; did not expect the change. (The same lesson `repl_test`'s registry block and myedit's
+;; did not expect the change. (The same lesson `repl_test`'s registry block and bedit's
 ;; tutorial suite each learned separately.)
 (defability Extend (esize [self] :-> int))
 (impl Extend :int (esize [n] n))
@@ -645,7 +645,7 @@
 ;; Registering an impl was open and reversible in every way but one: there was no way to
 ;; REMOVE it. That is the state anything needing a known baseline cares about — a test that
 ;; must not leak into the next, a REPL undoing an experiment, a hot reload retracting an impl
-;; the new source no longer declares. (myedit hit it as a flaky suite: a tutorial exercise
+;; the new source no longer declares. (bedit hit it as a flaky suite: a tutorial exercise
 ;; asks the reader to `impl` an ability, and the test that evaluated the worked ANSWER left
 ;; that impl registered, so the exercise's own template then "already passed".)
 (defability Retract (rsize [self] :-> int))
