@@ -13113,3 +13113,47 @@ slot. Note what it deliberately does not do: it does not undo `defability` (an a
 impls is still declared), and it does not touch a `:derives`-generated impl differently from a
 hand-written one — both are entries in the same registry, which is the point of keeping
 provenance (`*impl-from*`) out of dispatch.
+
+## ADR-205 — `(:use …)` import resolution follows the Elixir model, not silent last-wins
+
+**Status:** accepted + implemented (2026-08-02). Refines [ADR-065](decisions.md) (namespaces).
+
+**Context.** ADR-065 made `(:use mod)` refer a module's public names bare via a per-file
+import table. The table was a plain last-write-wins map, and the resolver consulted it after
+the current namespace and before root — which left three silent failure modes an audit
+surfaced. (1) Two `(:use a) (:use b)` clauses that both export `thing` silently resolved to
+whichever loaded last. (2) A `(:use m)` that exported a name shadowing a prelude one (`map`,
+`get`, `inc`) silently re-pointed that name across the whole file — a dependency adding a new
+public `get` could change resolution in every consumer with no diagnostic. (3) Once a module
+shadowed a prelude name (its own def, or an import), the prelude original was **unreachable** —
+the root namespace had no addressable name. All three are exactly what Clojure and Elixir
+learned to guard; Clojure `refer` throws on a clash and warns on a core shadow, and Elixir's
+auto-imported `Kernel` is reachable as `Kernel.foo` with `import Kernel, except: […]` to opt
+out.
+
+**Decision.** Adopt the Elixir model.
+
+- **Clash → error.** Referring a name already imported from a *different* module is a hard
+  error at load, naming both modules. Re-referring the same module is idempotent (reloads are
+  fine). Resolved with `:only [names]` or the new `:exclude [names]` (Elixir's `except:`) on
+  one of the uses.
+- **Prelude shadow → warning, still allowed.** An import that shadows a live root/prelude name
+  warns on stderr (a compile-time advisory, like the reload diagnostics; `BROOD_NO_SHADOW_WARN`
+  mutes it) but is honoured — the resolver still gives the import precedence over root.
+- **`/name` root escape.** An empty module prefix addresses the root/prelude namespace, so a
+  module that shadows a name reaches the original as `/map` (Elixir's `Kernel.map`). A bare `/`
+  (division) is untouched; an empty prefix can denote no real module, so it collides with
+  nothing — no reserved word needed.
+- **Ambient names are never imported.** The resolver's `is_ambient` (a `defdyn` name) check
+  short-circuits before the import table, so a dynamic knob imported by two modules is inert —
+  it can neither clash nor shadow, and refer skips it entirely.
+
+The advisory checker builds its import context by the same rules (the `%refer` `:only`
+`--`-privacy check, the `:only`/`:exclude` markers), so it never disagrees with the runtime.
+
+**Consequences.** `:use` is now safe to reach for without auditing a module's whole export set:
+a genuine clash fails loudly at the point it's introduced, a prelude shadow is visible, and the
+shadowed original is always recoverable. The cost is that a pre-existing silent clash now fails
+the load — correct for greenfield (surface the problem), and the std suite had none. This is
+policy over the flat table (ADR-065's substrate is unchanged); the runtime is still one flat
+interned-symbol global table with an expand-time resolver.
