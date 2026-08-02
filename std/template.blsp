@@ -23,21 +23,30 @@
   "Substitute all `{{key}}` markers in `tmpl` with values from map `data`.
 Keys in the template are trimmed of whitespace; both string and keyword keys are
 tried. Unknown keys render as empty string. Nested `{{` are not supported."
-  (template--loop tmpl data ""))
+  ;; One native split, then one join. This used to be a recursive scan that, per marker,
+  ;; sliced the REST of the template (`(substring s (+ open 2) …)`) and re-`str`'d the
+  ;; whole output so far — both O(remaining), so the whole render was O(n²): measured
+  ;; 12.0× then 13.4× per 4× of input across three points, where linear is 4×.
+  ;;
+  ;; Note an offset scan (`index-of s "{{" from`) would NOT have fixed it: for a string
+  ;; with a non-zero `from`, `index-of` searches `(substring coll s0 n)` — it copies the
+  ;; suffix on every call, so "incremental search" over one string is quadratic too.
+  ;; Splitting sidesteps the whole question: `string-split` is a single native pass, and
+  ;; every `substring` below is bounded by ONE piece, so the total stays O(n).
+  (let (parts (string-split tmpl "{{"))
+    (apply str (cons (first parts)
+                 (map (fn (p) (template--marker p data)) (rest parts))))))
 
-(defn template--loop (s data acc)
-  (let (open (index-of s "{{"))
-    (if (< open 0)
-      (str acc s)
-      (let (tail (substring s (+ open 2) (string-length s))
-            close (index-of tail "}}"))
-        (if (< close 0)
-          (str acc s)
-          (let (before (substring s 0 open)
-                key (trim (substring tail 0 close))
-                after (substring tail (+ close 2) (string-length tail))
-                val (template--lookup data key))
-            (template--loop after data (str acc before val))))))))
+;; One piece following a `{{`: `key}}rest` → the substituted value + `rest`. A piece with
+;; no closing `}}` is an unterminated marker, emitted verbatim (`{{` included) — the same
+;; "leave it alone" outcome the old scan produced, and `{{` nested inside a marker stays
+;; unsupported, as the docstring says.
+(defn template--marker (p data)
+  (let (close (index-of p "}}"))
+    (if (< close 0)
+      (str "{{" p)
+      (str (template--lookup data (trim (substring p 0 close)))
+        (substring p (+ close 2) (string-length p))))))
 
 (defn template--lookup (data key)
   "Look up `key` in `data`, trying string key then keyword key. Returns \"\" if absent.
