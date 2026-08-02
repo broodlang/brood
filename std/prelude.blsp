@@ -4140,6 +4140,32 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 (defn add-load-path! (& dirs)
   "Prepend `dirs` to the module search path (skipping any already present); returns the new path."
   (set-load-path! (append (remove (fn (d) (member? d *load-path*)) dirs) *load-path*)))
+
+;; Package-rooted namespaces (ADR-070): a *dependency* `foo` providing a module `b`
+;; is loaded as the rooted global namespace `foo/b`, so two deps can both provide a
+;; `parser` (`a/parser`, `b/parser`) with no collision — Rust's `crate::mod` model.
+;; The package manager populates these two registries when it resolves dependencies
+;; (`std/tool/package.blsp`); they are empty for a bare `brood file.blsp` run with no
+;; project, and the root project's OWN modules stay short (unrooted) — only deps root.
+;;   *package-module-files* : a rooted module name (string, `"foo/b"`) → the .blsp file
+;;     that provides it. `require--force` consults it before the load-path, and a hit
+;;     drives the package-context load below.
+;;   *package-modules-of*   : a package's local name (string, `"foo"`) → the list of
+;;     SHORT module-name symbols it provides — the set that tells `%root-module-name`
+;;     which references in `foo`'s files are intra-package (root them) vs external.
+(def *package-module-files* {})
+(def *package-modules-of* {})
+
+;; The rooted-key setters (root code, like `set-load-path!`): the package manager
+;; calls these to register a dependency's modules before its first `require`.
+(defn register-package-module! (rooted-key path)
+  "Record that rooted module `rooted-key` (e.g. \"foo/b\") is provided by file `path`."
+  (%registry-update! '*package-module-files* :assoc [rooted-key] path)
+  rooted-key)
+(defn register-package-modules! (prefix short-modules)
+  "Record package `prefix`'s SHORT module names (a list of symbols) — the intra-package set."
+  (%registry-update! '*package-modules-of* :assoc [prefix] short-modules)
+  prefix)
 (def *features-loading* {})
 ; feature key → loader pid for loads IN FLIGHT. Set before a load begins so (a) a
 ; CIRCULAR require inside that same load returns immediately (the contract
@@ -4244,9 +4270,15 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
         mod " " marker " …) marker — the import filters are :only and :exclude, as "
         "`(:use " mod " :only [a b])` or `(:use " mod " :exclude [a b])`"))
     (let (subset  (if (= marker :only) (second opts) nil)
-          exclude (if (= marker :exclude) (second opts) nil))
-      (list (list 'require (list 'quote mod))
-        (list '%refer (list 'quote mod) (list 'quote subset) (list 'quote exclude))))))
+          exclude (if (= marker :exclude) (second opts) nil)
+          ;; Package-rooted namespaces (ADR-070): an intra-package `(:use b)` inside a
+          ;; dependency roots to `(:use foo/b)` at load time; an external/std module is
+          ;; left unchanged. `%root-module-name` decides which, from the active package
+          ;; context. The same rooting form goes in both positions so require and refer
+          ;; agree on the target (it is idempotent — evaluating it twice is harmless).
+          rooted (list '%root-module-name (list 'quote mod)))
+      (list (list 'require rooted)
+        (list '%refer rooted (list 'quote subset) (list 'quote exclude))))))
 
 ;; All require/refer forms for the `(:use …)` clauses in a `defmodule` header
 ;; (skipping the optional docstring / any non-`:use` form), flattened for splicing.
@@ -4261,9 +4293,11 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; name, which is otherwise a compile error. For tests and tightly-coupled
 ;; tooling; loud and greppable by design.
 (defn defmodule--internals-clause (clause)
-  (let (mod (second clause))
-    (list (list 'require (list 'quote mod))
-      (list '%refer (list 'quote mod) nil) (list '%grant-internals (list 'quote mod)))))
+  (let (mod (second clause)
+        ;; Root an intra-package target to `foo/mod` under a dependency load (ADR-070).
+        rooted (list '%root-module-name (list 'quote mod)))
+    (list (list 'require rooted)
+      (list '%refer rooted nil) (list '%grant-internals rooted))))
 
 (defn defmodule--internals-forms (clauses)
   (apply append
@@ -4281,9 +4315,12 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 (defn defmodule--alias-clause (clause)
   (let (mod (second clause)
         opts (rest (rest clause))
-        short (if (= (first opts) :as) (second opts) (defmodule--last-segment mod)))
-    (list (list 'require (list 'quote mod))
-      (list '%alias (list 'quote mod) (list 'quote short)))))
+        short (if (= (first opts) :as) (second opts) (defmodule--last-segment mod))
+        ;; Root an intra-package target to `foo/mod` (ADR-070); the local `short` alias
+        ;; is unchanged — you still write `short/name` in this file.
+        rooted (list '%root-module-name (list 'quote mod)))
+    (list (list 'require rooted)
+      (list '%alias rooted (list 'quote short)))))
 
 (defn defmodule--alias-forms (clauses)
   (apply append
@@ -4333,13 +4370,17 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 definitions become `mod/name`; bare references resolve there, then through
 `(:use …)` imports, then root. Records an optional docstring and `provide`s the
 feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
-  (let (key (name mod)
-        doc (if (string? (first more)) (first more) nil)
+  (let (doc (if (string? (first more)) (first more) nil)
         clauses (if (string? (first more)) (rest more) more)
         _checked (map defmodule--check-clause clauses))
-    `(do
-       (record-module-doc! ~key ~doc)
-       (defmodule--provide ~key)
+    ;; The feature/doc key is the module's ROOTED name (ADR-070): inside a dependency
+    ;; `foo`, `(defmodule b)` provides `foo/b` and `(%in-ns 'b)` roots compile-ns to
+    ;; `foo/b`, so an outside `(require 'foo/b)` finds it and the file's defs become
+    ;; `foo/b/…`. At root (no package context) `%root-module-name` is the identity, so
+    ;; the root project and std stay short. Computed at load time, when the context is set.
+    `(let (root-key# (name (%root-module-name '~mod)))
+       (record-module-doc! root-key# ~doc)
+       (defmodule--provide root-key#)
        (%in-ns '~mod)
        ~@(defmodule--use-forms clauses)
        ~@(defmodule--internals-forms clauses)
@@ -4361,7 +4402,8 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
 ;; loading-bookkeeping — callers manage *features-loading*. Errors if not found.
 (defn require--force (key)
   (let (src (%builtin-module key))
-    (if src
+    (cond
+      src
       ;; Attribute the baked-in source to the file it was WRITTEN in, not to whichever
       ;; file happened to be mid-load when the `require` ran. The path comes from the
       ;; same literal the source was baked in from, so it can't drift.
@@ -4370,10 +4412,32 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
       ;; file (the branch below) goes through the ordinary `load`, so a package's
       ;; names are never reserved.
       (do (%load-module-source src (%builtin-module-file key)) (provide key))
+      ;; A dependency module (ADR-070): `key` is a rooted name (`"foo/b"`) the package
+      ;; manager mapped to a file. Load it under `foo`'s package context so its
+      ;; `(defmodule b)` roots to `foo/b` and its intra-package `(:use …)` targets root.
+      (contains? *package-module-files* key)
+      (require--force-package key (get *package-module-files* key))
+      else
       (let (path (require--find (str key ".blsp") *load-path*))
         (if path
           (do (load path) (provide key))
           (error "require: cannot find module '" key "'"))))
+    key))
+
+;; Load a dependency module file `path` under package `key`'s context (ADR-070): set
+;; the active prefix + intra-package module set so the file's `%in-ns`/`(:use …)`
+;; root, load it, then RESTORE the enclosing context on both the normal and error
+;; paths (a dep may be required mid-load of another dep, so contexts nest). The
+;; prefix is the rooted key's first segment (package local names are single-segment).
+(defn require--force-package (key path)
+  (let (prefix  (symbol (first (string-split key "/")))
+        modules (get *package-modules-of* (name prefix))
+        prev    (%set-package-context prefix modules))
+    (try
+      (do (load path) (provide key))
+      (catch e
+        (do (%set-package-context (first prev) (second prev)) (throw e))))
+    (%set-package-context (first prev) (second prev))
     key))
 
 ;; Wait (5ms ticks, ~`n` of them) for another process's in-flight load of `key`;

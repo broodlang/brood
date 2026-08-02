@@ -13162,3 +13162,55 @@ shadowed original is always recoverable. The cost is that a pre-existing silent 
 the load — correct for greenfield (surface the problem), and the std suite had none. This is
 policy over the flat table (ADR-065's substrate is unchanged); the runtime is still one flat
 interned-symbol global table with an expand-time resolver.
+
+## ADR-206 — "referenced-but-not-imported" is solved by LSP auto-import, not runtime autoload
+
+**Status:** accepted + implemented (2026-08-02). Refines [ADR-065](decisions.md) (namespaces),
+extends the `code_actions.rs` quick-fix surface (`docs/lsp.md`).
+
+**Context.** ADR-065 §9 recorded two flavours of *auto-require* for the ergonomics of using a
+name from a module you haven't imported: **import-driven** (a `(:use …)` loads the module —
+shipped) and **reference-driven** (a bare `mod/name` reference *autoloads* the module on first
+sight, Emacs `autoload` / Guile style — deferred). The question was whether to build the
+reference-driven flavour. Surveying it against how modern languages actually solve
+"referenced-but-not-imported": they don't autoload. Rust, Go (which *errors* on unused imports),
+TypeScript/ES modules, Swift, Kotlin, Zig all chose **explicit, statically-analyzable imports**,
+because a knowable dependency set is what powers correct completion/rename/go-to-def, tree-shaking,
+reproducible lock files, and supply-chain auditing — none of which survive implicit loading. What
+the field kept from the dynamic era is **deferral** (lazy `import()`), not **implicitness**; and
+the modern answer to an unimported reference is the IDE **auto-import** code action, which *edits
+the source to insert the explicit import*, preserving static analyzability.
+
+**Decision.** Do **not** add reference-driven runtime autoload as a general language feature.
+Solve the ergonomics the modern way — an **LSP auto-import code action**. On a bare
+`unbound symbol: foo` whose providers (modules exporting `foo` as `mod/foo`, read from the live
+image's global table) are known, the editor offers:
+
+- **"Import `foo` from `(:use mod)`"** — inserts a `(:use mod)` clause into the `defmodule`
+  header (grouped with existing clauses at their indentation, inline for a clause-less header).
+  The explicit import the runtime and all tooling already understand — nothing new to analyse.
+- **"Qualify as `mod/foo`"** — rewrites the reference in place, for a one-off use.
+- One import+qualify pair **per provider**, so a name two modules export (`sexp` /
+  `editor/treesit`, ADR-205 §7b) is a *choice*, never a silent pick.
+
+Discovery is workspace-wide for free: `project/setup-tooling-image` loads every project source
+into the LSP image (ADR-031), so `introspect::global_names` already sees project modules and
+embedded std alike — no separate cross-file index. Filtered so the offer is never wrong: the
+file's own namespace, an already-imported module, and private `--` providers are dropped.
+
+**Rejected: reference-driven runtime autoload.** It would couple symbol resolution to filesystem
+side effects, run inside `nest check` (which shares the resolver), and — the deciding cost — make
+a module's dependency set *implicit*, blurring exactly the static analysis ADR-065 §6 says
+namespaces exist to enable. ADR-065's "loads-but-never-fetches" line protects the lock file but
+not analyzability. The narrow context where autoload is idiomatic — a live, self-modifying image
+(Emacs) — is served well enough by the REPL's existing unbound-name hint; if a REPL-only
+autoload is ever wanted it can be added there, scoped away from file loads and `nest check`, but
+it is explicitly *not* the general mechanism.
+
+**Consequences.** Library code stays explicit and statically analyzable (the modern default),
+the package manager's dependency graph stays computable, and the ergonomic gap closes with a
+familiar Rust-analyzer/TS-style affordance. This supersedes ADR-065 §9's "reference-driven"
+flavour as a language feature (import-driven `:use` stands unchanged). Implemented in
+`crates/lsp/src/code_actions.rs` with unit coverage for discovery, the header edit (bare and
+clause-grouped), qualify, the multi-provider choice, and the own-namespace/already-imported/private
+filters.

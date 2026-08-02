@@ -1,10 +1,17 @@
 //! `textDocument/codeAction` — quick-fixes off the diagnostics we already
 //! publish.
 //!
-//! Off an `unbound symbol: foo` finding we offer up to three fixes:
+//! Off an `unbound symbol: foo` finding we offer these fixes:
 //! - **"did you mean?"** — replace `foo` with the closest known name (a global,
 //!   special form, or in-scope local within a small edit distance). Preferred.
-//! - **"Add `(require 'mod)`"** — when `foo` is a qualified `mod/x` whose module
+//! - **Auto-import** — when a *bare* `foo` is exported as `mod/foo` by some
+//!   module: **"Import `foo` from `mod`"** adds a `(:use mod)` clause to the
+//!   `defmodule` header (the modern, statically-analyzable way — the editor
+//!   writes the explicit import for you, no runtime autoload), and **"Qualify as
+//!   `mod/foo`"** rewrites the reference in place. One pair per providing module,
+//!   so a name two modules export (`sexp`/`editor/treesit`) offers a choice
+//!   instead of guessing.
+//! - **"Add `(require 'mod)`"** — when `foo` is a *qualified* `mod/x` whose module
 //!   resolves on the load-path: the name is unbound only for want of a `require`.
 //! - **"Create function `foo`"** — when `foo` is a call head: insert a stub
 //!   `(defn foo (a b …) nil)` with arity matched to the call site (the TDD case).
@@ -13,9 +20,12 @@
 //! The unbound-finding's range already narrows to the offending token (see
 //! `refine_diagnostic_range` in `main.rs`), so a replace edits exactly that span.
 //!
-//! Pure name/CST analysis: candidates and module resolution come from the
+//! Pure name/CST analysis: candidates and provider discovery come from the
 //! introspection surface (`global_names` / `module_file`) + the CST scope walker,
-//! never from running the buffer.
+//! never from running the buffer. `global_names` reads the LSP's live image, which
+//! `project/setup-tooling-image` has loaded every project source into (ADR-031),
+//! so a bare name's providers are found workspace-wide — embedded std *and*
+//! project modules alike — without a separate cross-file scan.
 
 use std::collections::HashMap;
 
@@ -62,8 +72,28 @@ pub fn code_actions(
             continue;
         }
         let offset = offset_of(diag.range);
-        for suggestion in suggestions(interp, scope, offset, name) {
-            actions.push(did_you_mean(uri, diag, &suggestion));
+        let suggestions = suggestions(interp, scope, offset, name);
+        for suggestion in &suggestions {
+            actions.push(did_you_mean(uri, diag, suggestion));
+        }
+        // Auto-import: a *bare* name that some module exports as `mod/name` — offer
+        // to add `(:use mod)` and/or qualify. Preferred only when there's exactly
+        // one provider and no closer typo fix (never two preferred per diagnostic).
+        if !name.contains('/') {
+            let providers = import_providers(interp, root, src, name);
+            let import_preferred = suggestions.is_empty() && providers.len() == 1;
+            for module in &providers {
+                actions.extend(add_use_actions(
+                    uri,
+                    root,
+                    src,
+                    line_index,
+                    diag,
+                    name,
+                    module,
+                    import_preferred,
+                ));
+            }
         }
         // Add `(require 'mod)` for a qualified unbound name `mod/x` whose module
         // resolves on the load-path.
@@ -111,6 +141,156 @@ fn add_require_action(
         Some(diag),
         false,
     ))
+}
+
+/// Modules that export a **public** `name` as `mod/name`, for the auto-import
+/// menu. Read from the live image's global table (`global_names`) — the LSP has
+/// every project source loaded (ADR-031), so this finds providers workspace-wide,
+/// embedded std and project modules alike. Filtered so the offer is never wrong:
+/// the file's **own** namespace is dropped (you don't import your own module), any
+/// module the header **already imports** is dropped (it wouldn't be unbound), and
+/// a **private** provider (`--` in the module path) is dropped (it never resolves
+/// bare anyway). Sorted + deduped for a stable menu.
+fn import_providers(interp: &mut Interp, root: &Node, src: &str, name: &str) -> Vec<String> {
+    let own = header_ns(root, src);
+    let imported = header_imported_modules(root, src);
+    let suffix = format!("/{name}");
+    let mut mods: Vec<String> = introspect::global_names(interp)
+        .into_iter()
+        .filter_map(|g| g.strip_suffix(&suffix).map(str::to_string))
+        // A non-empty module (not a leading `/name` root escape) that is public.
+        .filter(|m| !m.is_empty() && !m.contains("--"))
+        .filter(|m| own.as_deref() != Some(m.as_str()))
+        .filter(|m| !imported.iter().any(|i| i == m))
+        .collect();
+    mods.sort();
+    mods.dedup();
+    mods
+}
+
+/// The auto-import fixes for one provider `module` of a bare `name`:
+/// - **"Import `name` from `(:use module)`"** — add a `(:use module)` clause to
+///   the `defmodule` header (offered only when there *is* a header to edit).
+/// - **"Qualify as `module/name`"** — rewrite the reference in place (always;
+///   the only option in a header-less file).
+/// `import_preferred` marks the import as the one-keystroke default — set by the
+/// caller only when this is the sole provider and no closer typo fix competes.
+fn add_use_actions(
+    uri: &Uri,
+    root: &Node,
+    src: &str,
+    line_index: &LineIndex,
+    diag: &Diagnostic,
+    name: &str,
+    module: &str,
+    import_preferred: bool,
+) -> Vec<CodeActionOrCommand> {
+    let mut actions = Vec::new();
+    if let Some((at, text)) = insert_use_clause(root, src, module) {
+        let range = line_index.range(src, Span { start: at, end: at });
+        actions.push(quickfix(
+            uri,
+            format!("Import `{name}` from `(:use {module})`"),
+            range,
+            text,
+            Some(diag),
+            import_preferred,
+        ));
+    }
+    actions.push(quickfix(
+        uri,
+        format!("Qualify as `{module}/{name}`"),
+        diag.range,
+        format!("{module}/{name}"),
+        Some(diag),
+        false,
+    ));
+    actions
+}
+
+/// Where and what to insert to add `(:use module)` to the leading `(defmodule …)`
+/// header, or `None` when there's no header to edit. A new clause is grouped after
+/// the **last existing** `(:use …)`/`(:alias …)`/… clause, on its own line at that
+/// clause's indentation; a header with no clauses gets the use inline just before
+/// its closing paren. The layout mirrors the header's own shape, so the edit reads
+/// like hand-written code either way.
+fn insert_use_clause(root: &Node, src: &str, module: &str) -> Option<(u32, String)> {
+    let first = root.forms().next()?;
+    if !is_head(first, src, "defmodule") {
+        return None;
+    }
+    let last_clause = first
+        .forms()
+        .filter(|c| c.kind == NodeKind::List && clause_keyword(c, src).is_some())
+        .last();
+    if let Some(clause) = last_clause {
+        let indent = line_indent(src, clause.span.start);
+        return Some((clause.span.end, format!("\n{indent}(:use {module})")));
+    }
+    // No clauses: `(defmodule name)` / `(defmodule name "doc")` → insert inline
+    // before the closing paren (span.end is one past `)`).
+    let close = first.span.end.saturating_sub(1);
+    Some((close, format!(" (:use {module})")))
+}
+
+/// The namespace a leading `(defmodule ns …)` declares, or `None` (no header, or a
+/// non-symbol name).
+fn header_ns(root: &Node, src: &str) -> Option<String> {
+    let first = root.forms().next()?;
+    if !is_head(first, src, "defmodule") {
+        return None;
+    }
+    let mut forms = first.forms();
+    forms.next()?; // `defmodule`
+    let name = forms.next()?;
+    (name.kind == NodeKind::Symbol).then(|| name.text(src).to_string())
+}
+
+/// Module names the header already imports via `(:use m)` / `(:alias m …)` /
+/// `(:use-internals m)`, so an already-imported module is never re-offered.
+fn header_imported_modules(root: &Node, src: &str) -> Vec<String> {
+    let mut mods = Vec::new();
+    let Some(first) = root.forms().next() else {
+        return mods;
+    };
+    if !is_head(first, src, "defmodule") {
+        return mods;
+    }
+    for clause in first.forms() {
+        if clause.kind != NodeKind::List {
+            continue;
+        }
+        let Some(kw) = clause_keyword(clause, src) else {
+            continue;
+        };
+        if matches!(kw, ":use" | ":alias" | ":use-internals") {
+            let mut it = clause.forms();
+            it.next(); // the keyword
+            if let Some(m) = it.next() {
+                if m.kind == NodeKind::Symbol {
+                    mods.push(m.text(src).to_string());
+                }
+            }
+        }
+    }
+    mods
+}
+
+/// The keyword text (`:use`, …) of a header clause `(:kw …)`, or `None` when the
+/// list isn't keyword-led.
+fn clause_keyword<'s>(node: &Node, src: &'s str) -> Option<&'s str> {
+    let head = node.forms().next()?;
+    (head.kind == NodeKind::Keyword).then(|| head.text(src))
+}
+
+/// The leading whitespace (indentation) of the line containing byte `offset`.
+fn line_indent(src: &str, offset: u32) -> String {
+    let offset = offset as usize;
+    let line_start = src[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    src[line_start..offset]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect()
 }
 
 /// "Create function `name`" for an unbound symbol used as a **call head** — the
@@ -706,6 +886,149 @@ mod tests {
         let titles = unbound_action_titles(&mut interp, "(nope/x 1)", "nope/x", "nope/x");
         assert!(
             !titles.iter().any(|t| t.contains("require")),
+            "got: {titles:?}"
+        );
+    }
+
+    // ---- auto-import: add `(:use mod)` / qualify a bare unbound name ----------
+
+    /// An interp whose live image exports the provider defs (each a `(defmodule …)`
+    /// followed by `defn`s) — the auto-import discovery source, exactly as the LSP's
+    /// project-loaded image would carry them.
+    fn interp_with_provider(defs: &str) -> Interp {
+        let mut interp = Interp::new();
+        interp.eval_str(defs).expect("define provider(s)");
+        interp
+    }
+
+    /// Run code actions for a bare unbound `name` (first occurrence in `src`) and
+    /// return `src` with the "Import … from `(:use …)`" edit applied — the readable
+    /// way to assert the header edit. `None` if no import action was offered.
+    fn applied_import(interp: &mut Interp, src: &str, name: &str) -> Option<String> {
+        let root = brood::syntax::cst::parse(src);
+        let scope = brood::syntax::scope::analyze(&root, src);
+        let li = LineIndex::new(src);
+        let start = src.find(name)? as u32;
+        let range = li.range(
+            src,
+            Span {
+                start,
+                end: start + name.len() as u32,
+            },
+        );
+        let diag = Diagnostic {
+            range,
+            message: format!("unbound symbol: {name}"),
+            ..Default::default()
+        };
+        let offset_of = |r: Range| li.offset(src, r.start);
+        let acts = code_actions(interp, &uri(), &root, src, &scope, &li, offset_of, &[diag]);
+        let edit = acts.iter().find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) if ca.title.starts_with("Import ") => {
+                Some(ca.edit.as_ref()?.changes.as_ref()?[&uri()][0].clone())
+            }
+            _ => None,
+        })?;
+        let s = li.offset(src, edit.range.start) as usize;
+        let e = li.offset(src, edit.range.end) as usize;
+        Some(format!("{}{}{}", &src[..s], edit.new_text, &src[e..]))
+    }
+
+    #[test]
+    fn offers_import_and_qualify_for_a_bare_name_with_a_provider() {
+        let mut interp = interp_with_provider("(defmodule myprov) (defn thing (x) x)");
+        let titles =
+            unbound_action_titles(&mut interp, "(defmodule app)\n(thing 1)", "thing", "thing");
+        assert!(
+            titles
+                .iter()
+                .any(|t| t == "Import `thing` from `(:use myprov)`"),
+            "got: {titles:?}"
+        );
+        assert!(
+            titles.iter().any(|t| t == "Qualify as `myprov/thing`"),
+            "got: {titles:?}"
+        );
+    }
+
+    #[test]
+    fn import_edit_inserts_use_into_a_bare_header() {
+        let mut interp = interp_with_provider("(defmodule myprov) (defn thing (x) x)");
+        let out = applied_import(&mut interp, "(defmodule app)\n(thing 1)", "thing").unwrap();
+        assert_eq!(out, "(defmodule app (:use myprov))\n(thing 1)");
+    }
+
+    #[test]
+    fn import_edit_groups_after_an_existing_use_clause() {
+        let mut interp = interp_with_provider("(defmodule myprov) (defn thing (x) x)");
+        let src = "(defmodule app\n  (:use test))\n(thing 1)";
+        let out = applied_import(&mut interp, src, "thing").unwrap();
+        assert_eq!(
+            out,
+            "(defmodule app\n  (:use test)\n  (:use myprov))\n(thing 1)"
+        );
+    }
+
+    #[test]
+    fn no_import_without_a_header_but_qualify_is_offered() {
+        let mut interp = interp_with_provider("(defmodule myprov) (defn thing (x) x)");
+        let titles = unbound_action_titles(&mut interp, "(thing 1)", "thing", "thing");
+        assert!(
+            !titles.iter().any(|t| t.starts_with("Import ")),
+            "no header → no `:use` edit, got: {titles:?}"
+        );
+        assert!(
+            titles.iter().any(|t| t == "Qualify as `myprov/thing`"),
+            "got: {titles:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_offer_import_for_an_already_used_module() {
+        let mut interp = interp_with_provider("(defmodule myprov) (defn thing (x) x)");
+        let src = "(defmodule app (:use myprov))\n(thing 1)";
+        let titles = unbound_action_titles(&mut interp, src, "thing", "thing");
+        assert!(
+            !titles.iter().any(|t| t.contains("myprov")),
+            "already imported → not re-offered, got: {titles:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_offer_import_for_the_files_own_namespace() {
+        // Bare `thing` resolves to this file's own `myprov/thing` — not an import.
+        let mut interp = interp_with_provider("(defmodule myprov) (defn thing (x) x)");
+        let src = "(defmodule myprov)\n(defn other (x) (thing x))";
+        let titles = unbound_action_titles(&mut interp, src, "thing", "thing");
+        assert!(
+            !titles.iter().any(|t| t.contains("Import")),
+            "own namespace is not an import, got: {titles:?}"
+        );
+    }
+
+    #[test]
+    fn multiple_providers_offer_a_choice() {
+        // `shared` is exported by two modules — offer one import per provider
+        // (the `sexp`/`editor/treesit` clash shape), never a silent pick.
+        let mut interp = interp_with_provider(
+            "(defmodule mods1) (defn shared (x) x) (defmodule mods2) (defn shared (y) y)",
+        );
+        let titles = unbound_action_titles(
+            &mut interp,
+            "(defmodule app)\n(shared 1)",
+            "shared",
+            "shared",
+        );
+        assert!(
+            titles
+                .iter()
+                .any(|t| t == "Import `shared` from `(:use mods1)`"),
+            "got: {titles:?}"
+        );
+        assert!(
+            titles
+                .iter()
+                .any(|t| t == "Import `shared` from `(:use mods2)`"),
             "got: {titles:?}"
         );
     }
