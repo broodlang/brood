@@ -1671,7 +1671,7 @@ fn compile_arm(
         capture_names,
         #[cfg(feature = "jit")]
         inline_name,
-                dbg_name: defn_name,
+        dbg_name: defn_name,
         #[cfg(feature = "jit")]
         inline_stride,
         // Floored at the SMALL frame size: the VM/small-native frame is already
@@ -2381,7 +2381,7 @@ pub fn run(heap: &mut Heap, form: Value, env: EnvId) -> LispResult {
                 capture_names: Box::new([]),
                 #[cfg(feature = "jit")]
                 inline_name: None,
-                                dbg_name: None,
+                dbg_name: None,
                 #[cfg(feature = "jit")]
                 inline_stride: 0,
                 #[cfg(feature = "jit")]
