@@ -13214,3 +13214,67 @@ flavour as a language feature (import-driven `:use` stands unchanged). Implement
 `crates/lsp/src/code_actions.rs` with unit coverage for discovery, the header edit (bare and
 clause-grouped), qualify, the multi-provider choice, and the own-namespace/already-imported/private
 filters.
+
+## ADR-207 — A display protocol truncates: bounded printing, and a sink that says when it is full
+
+**Status:** accepted + implemented (2026-08-02). Extends [ADR-173](decisions.md) (`spy`) and
+[ADR-201](decisions.md) (atomic instrumentation); `pr-str-bounded` is the printer.
+
+**Context.** Two holes, found together in the editor's tutorial. Its lesson on proper tail
+calls counts down from a million in a boundary-traced box, and it (a) reported
+`recursion too deep: exceeded the VM's 1048576-frame non-tail-call limit` and (b) had already
+been walked back to 250 000 in an earlier attempt to dodge that, with a code comment
+apologising for the number.
+
+*The frame hole.* `trace-fn`'s wrapper emits its `:return` entry AFTER the call, so the
+traced self-call is not in tail position: each level costs a VM frame. A tail loop that runs
+in O(1) stack untraced runs in O(n) traced, 11× slower, and dies at the frame limit — while
+the *consumer* had a perfectly good bound in place (`eval-server`'s `*spy-entry-cap*`, 200
+entries) and was silently discarding everything past it. The program paid for a quarter of a
+million entries nobody kept. Worse, the page that broke was the page teaching that a tail
+loop can run forever: instrumentation contradicting the lesson it was there to illustrate.
+
+*The size hole.* `pr-str-bounded` bounded collections (`*print-length*`) and nesting
+(`*print-level*`) but never a leaf, and a string is one item at any depth. So a single 10 MB
+string sailed past both bounds — and `spy`'s default sink printed values with plain `pr-str`
+anyway, as did the debugger's causal tree, its paused-process rows and its REPL echo.
+
+**Decision — one: text has a bound too.** `*print-string-length*` (default 4096, matching
+Elixir `Inspect`'s `:printable_limit`, which exists for this exact reason) bounds a string or
+byte-string leaf; the marker goes inside the closing quote (`"abc…"`, `#b"ab…"`). The value is
+cut *before* printing, never `pr-str`'s output — cutting the output can halve an escape or
+drop the quote, and a byte costs four output characters, so a post-hoc cut would already have
+built the flood. `nil` lifts it, like the other two.
+
+**Decision — two: every display protocol prints through `pr-str-bounded`.** Not `pr-str`.
+Applied to `spy`'s default sink, the debugger's tree/rows/echo, and (in the editor) the *Spy*
+stream tap, the `*Debug*` locals preview, the eval-in-scope result and the `C-x C-e` echo.
+The exception is a printed form used as a KEY (`debug/hits` → `value-distribution`): a key
+that elides is a key that collides, so identity paths keep `pr-str`. Emacs draws this same
+line with `eval-expression-print-length`/`-level`.
+
+**Decision — three: a sink's return value means something.** `:spy-stop` from a `*spy-sink*`
+says *"I have all I want"*; anything else means keep going. `trace-fn`'s wrapper honours it by
+putting the original back (the same rebind `untrace-fn` does) and delegating in **tail
+position**: no post-call emit, no frame, nothing built to be discarded. So the rest of a
+traced tail loop runs at its real speed in constant stack, and a bounded sink is now the thing
+that makes tracing cheap rather than the thing that hides its cost. The registry entry stays,
+so a later `untrace-fn`/`untrace-all` is still correct and a later `trace-fn` still finds the
+true original. `eval-server`'s sink answers `:spy-stop` on the entry that fills its cap.
+
+**Rejected: a per-install latch table.** A `(table)` per wrapper reading `:stopped` avoids
+mutating the global, but a table lives until `table-drop` or exit (ADR-107) — one leak per
+install, per traced name, per request in a long-lived session — and the bookkeeping to drop it
+buys nothing over a rebind, which is the mechanism instrumentation is already made of.
+
+**Consequences.** Measured through `eval-server`'s own path, 250 000 traced tail calls went
+641 ms → 73 ms, a million 2493 ms → 227 ms (it had exceeded the editor's 2 s box budget), and
+four million from `recursion too deep` → 844 ms, i.e. the untraced cost. A trace is still not
+free while it is recording (the first N calls are real frames — inherent to boundary tracing,
+as in Erlang and Emacs), but the cost now stops where the interest does. Displays cannot be
+flooded by a value's size by default, so a consumer that forgot to think about size is still
+safe. What a bounded trace gives up is the trace past the budget, which the sink had already
+said it was throwing away — a consumer showing a capped cascade should say so (the editor's
+*Workings* pane now does). Covered by `tests/print_bounded_test.blsp` (15 cases),
+`tests/debug_test.blsp` (the `:spy-stop` contract + a 1.2M-deep traced loop) and
+`tests/eval_server_test.blsp`.
