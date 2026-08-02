@@ -378,6 +378,27 @@ Built-in kinds work the same way, with **`:default`** as the fallback:
 (size 7) (size "hello") (size 1.5)     ;=> 7, 5, -1
 ```
 
+**Retracting an impl.** `unimpl` is the inverse — the named ops, or every op the
+ability declares when none are named:
+
+```clojure
+(impl Size :int (size [n] n))
+(size 7)                    ;=> 7
+(unimpl Size :int)          ;=> 1   (impls removed)
+(size 7)                    ;=> -1  (falls back to :default; no :default → a no-impl error)
+```
+
+The slot becomes **unclaimed**, not `:default`-y: a later `impl` of any tier takes it,
+because precedence compares against an incumbent and there is none. It returns how many
+impls it removed, so a retraction is distinguishable from a no-op, and it is idempotent —
+retracting what was never there is a quiet zero. `unregister-impl` is the function
+underneath, for a caller holding names as values.
+
+Registration was open and reversible in every way but this one, and a registry with no
+inverse cannot be returned to a known state: a test that must not leak into the next, a
+REPL undoing an experiment, a hot reload retracting an impl the new source no longer
+declares (ADR-204).
+
 **Op arity.** An op dispatches on its **first** argument, so it must take at least
 one — a zero-arg op `(op [])` is a clean expansion-time error. Beyond the first, an
 op may take more fixed arguments (`(fetch [self k])`) or a `&`-rest

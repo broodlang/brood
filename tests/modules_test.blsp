@@ -127,3 +127,64 @@
     ;; `(get e :message)`.
     (let (message (try (%load-string "(defmodule impl-e (:nonsense x))") (catch e (str e))))
       (is (includes? message ":implements")))))
+
+;; `(:use …)` import policy (ADR-065, Elixir-style): an import that clashes with
+;; another `:use`'s name is a hard error (resolvable with `:only`/`:exclude`); an
+;; import that shadows a prelude/root name is allowed but WARNS. Providers are set up
+;; with `%load-string` (which `provide`s them, so a later `(:use …)` finds them).
+(describe "modules: (:use …) import clashes and shadows"
+  :isolated
+  (test "two :use imports of the same name are a hard error"
+    (%load-string "(defmodule clpa) (defn thing (x) (list :a x))")
+    (%load-string "(defmodule clpb) (defn thing (x) (list :b x))")
+    (let (msg (try (do (%load-string "(defmodule clcons (:use clpa) (:use clpb))") :no-error)
+                (catch e (error-message e))))
+      (is (includes? (str msg) "already referred"))))
+  (test ":exclude resolves a :use collision (the other module's name wins)"
+    (%load-string "(defmodule clpa2) (defn thing (x) (list :a x))")
+    (%load-string "(defmodule clpb2) (defn thing (x) (list :b x))")
+    (%load-string (str "(defmodule clcons2 (:use clpa2) (:use clpb2 :exclude [thing]))"
+                    " (defn f (x) (thing x))"))
+    (assert= (clcons2/f 5) (list :a 5)))
+  ;; Shadowing a prelude name via `:use` is ALLOWED (the import wins for a bare
+  ;; reference) but warns on stderr — the warning is a compile-time advisory printed
+  ;; directly (like the reload diagnostics), not through Brood's redirectable stream,
+  ;; so this checks the behaviour; reach the prelude original as `/inc`.
+  (test "a :use import that shadows a prelude name is allowed (the import wins)"
+    (%load-string "(defmodule shdprov) (defn inc (x) (list :shd x))")
+    (%load-string (str "(defmodule shdcons (:use shdprov))"
+                    " (defn mine (x) (inc x))"    ; imported shdprov/inc wins
+                    " (defn orig (x) (/inc x))")) ; /inc still reaches prelude
+    (assert= (shdcons/mine 5) (list :shd 5))
+    (assert= (shdcons/orig 5) 6))
+  (test "an ambient (defdyn) name is never imported, so it neither clashes nor shadows"
+    ;; Two modules each declaring `*dynknob*` would clash if imported; because the
+    ;; resolver never consults imports for a dynamic, the `:use` is inert (no error).
+    (%load-string "(defmodule dynprov) (defdyn *dynknob* 1)")
+    (%load-string "(defmodule dyncons (:use dynprov)) (defn f () :ok)")
+    (assert= (dyncons/f) :ok)))
+
+;; A genuine circular `(:use …)` refer-all can't import a complete public set (the
+;; other module is still mid-load), so it's a clear error rather than a silent
+;; partial import; `:only` (lazy) stays cycle-safe. File-based (require loads from
+;; the load-path), like the circular-require test above.
+(describe "modules: circular :use"
+  :serial
+  (test "a circular :use refer-all errors clearly; :only is cycle-safe"
+    (let (dir "/tmp"
+          a1 (str dir "/cyca.blsp") b1 (str dir "/cycb.blsp")
+          a2 (str dir "/cyca2.blsp") b2 (str dir "/cycb2.blsp")
+          saved *load-path*)
+      (spit a1 "(defmodule cyca (:use cycb))\n(defn a-one () 1)\n")
+      (spit b1 "(defmodule cycb (:use cyca))\n(defn b-one () 1)\n")
+      (spit a2 "(defmodule cyca2 (:use cycb2 :only [b-one]))\n(defn a-one () 1)\n")
+      (spit b2 "(defmodule cycb2 (:use cyca2 :only [a-one]))\n(defn b-one () (a-one))\n")
+      (set-load-path! (cons dir *load-path*))
+      (let (refer-all-err (try (do (require 'cyca) :no-error)
+                            (catch e (error-message e)))
+            only-ok (try (do (require 'cyca2) (cycb2/b-one))
+                      (catch e [:err (error-message e)])))
+        (set-load-path! saved)
+        (doseq (p (list a1 b1 a2 b2)) (delete-file p))
+        (is (includes? (str refer-all-err) "circular"))
+        (assert= only-ok 1)))))

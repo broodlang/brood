@@ -415,7 +415,35 @@
                                                                     (path-join a "src"))
                                                               (list "dependency 'b'"
                                                                 (path-join b "src"))))
-        nil))))
+        nil)))
+  ;; A hierarchical module `(defmodule gui/window)` lives in a SUBdirectory
+  ;; (`src/gui/window.blsp`), so the scan must recurse — a top-level-only listing
+  ;; would miss it and two providers of the same nested namespace would collide
+  ;; undetected (ADR-070).
+  (test "provided-modules finds a nested-directory module"
+    (let (root (pkg-fixture-root)
+          gui (path-join (path-join root "src") "gui"))
+      (make-dir gui)
+      (spit (path-join (path-join root "src") "top.blsp") "(defmodule top)\n")
+      (spit (path-join gui "window.blsp") "(defmodule gui/window)\n")
+      (assert= (sort (map name (package/package--provided-modules (path-join root "src"))))
+        (list "gui/window" "top"))))
+  (test "two providers of the same NESTED module name collide loudly"
+    (let (parent (pkg-fixture-root)
+          a (path-join parent "a")
+          b (path-join parent "b"))
+      (make-dir (path-join (path-join a "src") "gui"))
+      (make-dir (path-join (path-join b "src") "gui"))
+      (spit (path-join (path-join (path-join a "src") "gui") "window.blsp")
+        "(defmodule gui/window)\n(defn f () 1)\n")
+      (spit (path-join (path-join (path-join b "src") "gui") "window.blsp")
+        "(defmodule gui/window)\n(defn g () 2)\n")
+      (is (includes? (try
+                       (package/package--check-namespace-collisions
+                         (list (list "dependency 'a'" (path-join a "src"))
+                           (list "dependency 'b'" (path-join b "src"))))
+                       (catch e e))
+            "collision")))))
 
 (describe "package: the lock file round-trips"
   (test "write-lockfile then read-lockfile recovers the dep vector"

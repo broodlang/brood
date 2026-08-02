@@ -651,7 +651,12 @@ pub struct CompiledArm {
     /// Diagnostic only: this arm's defining-`defn` name (independent of `inline_name`,
     /// which is set only for inlinable recursive defns). Lets `jit_tier` label the arm in
     /// the staged-stale report so a use-after-GC names the arm holding the stale handle.
-    #[cfg(feature = "jit")]
+    /// NOT jit-gated, though everything around it is: the bytecode VM's `Inst::SelfCall`
+    /// hot-reload guard (ADR-013, `exec_chunk`) re-resolves this name on a global-epoch
+    /// bump to notice a `def` of the very function a loop is running. That guard is a
+    /// correctness rule, not an optimisation, so it must hold in a `--no-default-features`
+    /// runtime too — which is exactly the build that stopped compiling when the VM began
+    /// reading a field only the jit had.
     pub dbg_name: Option<Symbol>,
     /// The per-block slot stride for inlining (`m` = the original arm's slot
     /// high-water mark `scope.max`); each inlined call site occupies a disjoint

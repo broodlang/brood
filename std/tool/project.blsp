@@ -1821,7 +1821,7 @@ release` bundle. Loads the embedded manifest + modules and invokes `:main`
 ;; `:registry` in the user config, or pass an explicit base URL to the registry
 ;; functions (tests do). The publish auth token comes from $HIVE_TOKEN or
 ;; `:registry-token` (never baked into a default).
-(defdyn *config-registry* "https://packages.broodlang.org")
+(defdyn *config-registry* "https://brood.fly.dev")
 (defdyn *config-registry-token* nil)
 
 (defn config (& opts)

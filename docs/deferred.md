@@ -489,3 +489,40 @@ in the runtime.
 - Put hot code in a file and `require` it rather than `eval`ing it.
 - Size interactive evaluation to the interpreted speed (~14x), which is what the
   tutorial now does.
+
+---
+
+## 10. No pty primitive — a terminal app cannot drive another terminal app
+
+**Why it is wanted.** `proc-spawn` gives a child piped stdio, which is right for a JSON-RPC
+peer or a build tool but not for anything that needs a *terminal*: an editor over
+`*term-display*` puts its tty in raw mode, asks for the window size, and re-renders on
+SIGWINCH. Piped stdio has none of that, so a Brood program cannot start another Brood
+program's terminal UI and interact with it.
+
+That matters because it is exactly how you verify a terminal app *as a user*: press a key,
+assert on what is painted. myedit's live drivers (`tools/` in that repo) do this and have
+caught two bugs the 1200-test model suite structurally could not see — a keybinding present
+in the help vocabulary but never `keymap-bind`-ed (the vocabulary and the keymap are two
+tables; only pressing the key crosses them), and a window attribute that lives in a
+protocol message rather than in the model. They are written in **Python**, in a project whose
+rule is that everything is written in Brood — the one place that rule is broken, and only
+because of this gap.
+
+**Design sketch.** A `pty-spawn` sibling of `proc-spawn`: same handle, same
+`[:proc handle data]` mailbox delivery, but the child gets a pty as its controlling terminal.
+Then `(pty-resize handle rows cols)` (TIOCSWINSZ + SIGWINCH, which is what makes "force a
+full repaint" possible) and nothing else new — writing to the handle is the existing
+`proc-send`, and the child's output arrives as it already does. Unix-only, like much of
+`proc/*`; a `pty?` feature keyword keeps a portable program honest.
+
+**Trigger to pick this back up.**
+- A second consumer wanting it (a terminal-app test harness in std, `nest` driving an
+  interactive subcommand, a multiplexer experiment).
+- Or the moment the Python drivers need to grow: a shared assertion vocabulary in Python is
+  a second, worse test framework living next to `std/tool/test`.
+
+**Workaround today.** Python's `pty` module (`openpty` + `TIOCSCTTY` + `TIOCSWINSZ`), ~120
+lines of harness — see `../brood-edit/tools/drive.py`, which documents the three ways such a
+harness lies to you (face escapes splitting phrases, the stream being history rather than the
+screen, and slow first paint).
