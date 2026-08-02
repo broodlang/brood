@@ -125,7 +125,7 @@ behind a clean commit, and re-verify with the KI-20 discipline below.
 - **No-regression gate:** `fib`, `bintree`, `nqueens`, `pipeline` (self-recursion +
   message rows) — pinned best-of-15 with a base-vs-base control (some rows drift between
   whole `make ab` invocations; see CLAUDE.md). Re-run any tiering-affected row **unpinned**.
-- **The editor rows (the motivating workload):** `brood-edit/bench/keystrokes.blsp`
+- **The editor rows (the motivating workload):** `bedit/bench/keystrokes.blsp`
   (`nest run bench/keystrokes.blsp` in that repo) times the live per-keystroke path —
   self-insert, Enter/indent, backspace, C-n/C-p/C-f, the frame render, and the felt
   type+render cycle — over a large brood-mode buffer, with text-mode and small-buffer

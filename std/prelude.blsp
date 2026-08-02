@@ -3927,6 +3927,11 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
 
 (defdyn *print-length* 100)
 (defdyn *print-level* 8)
+;; The third bound, and in practice the one that saves a display: a TEXT leaf's
+;; length. Neither bound above touches a leaf, so a single 10 MB string sails past
+;; both — `*print-length*` counts a collection's items and a string is one item.
+;; 4096 matches Elixir's `Inspect` `:printable_limit`, which exists for exactly this.
+(defdyn *print-string-length* 4096)
 
 (defn pr--elide (parts over)
   "`parts` joined for display, with the `…` length marker appended when `over`."
@@ -3963,14 +3968,34 @@ faithful printing instead of losing the bound on the whole value."
         over)
       "}")))
 
+(defn pr--bounded-text (x)
+  "A text leaf — a string or a byte string — under `*print-string-length*`: at most
+that many characters (bytes) print, with the `…` marker inside the closing quote
+(`\"abc…\"`, `#b\"ab…\"`).
+
+The VALUE is cut before it is printed, never `pr-str`'s output: truncating the
+printed form could halve an escape (`\\n`) or drop the closing quote, and a byte
+string costs four output characters per byte, so cutting after the fact would still
+have built the flood this bound exists to prevent."
+  (let (limit *print-string-length*
+        bytes (= :bytes (type-of x))
+        length (if bytes (count x) (string-length x)))
+    (if (or (nil? limit) (<= length limit))
+      (pr-str x)
+      (let (printed (pr-str (if bytes (subbytes x 0 limit) (substring x 0 limit))))
+        ;; drop the closing quote, mark the elision, close again
+        (str (substring printed 0 (dec (string-length printed))) "…\"")))))
+
 (defn pr--bounded (x level)
-  "`x` printed at nesting `level`, honouring both bounds. Containers recurse;
-anything else goes to `pr-str`.
+  "`x` printed at nesting `level`, honouring every bound. Containers recurse, text
+leaves are length-bounded, anything else goes to `pr-str`.
 
 The depth bound is tested on *entering a container*, never on a leaf — so
 `*print-level*` 2 on `{:a {:b {:c 1}}}` elides the whole third map (`{:a {:b …}}`)
-rather than each of its keys and values separately (`{:a {:b {… …}}}`). A leaf always
-prints: eliding an atom would cost a character and save nothing."
+rather than each of its keys and values separately (`{:a {:b {… …}}}`). A non-text
+leaf always prints whole: eliding an atom would cost a character and save nothing,
+and the values that print unboundedly LONG are the text ones (a rope and a table
+already print as a summary handle, `#<rope :chars 11 :lines 1>`)."
   (let (t (type-of x)
         container (or (= t :pair) (= t :vector) (= t :set) (= t :map)))
     (cond
@@ -3979,13 +4004,20 @@ prints: eliding an atom would cost a character and save nothing."
       (= t :vector) (pr--safely (fn () (pr--bounded-seq x level "[" "]")) x)
       (= t :set) (pr--safely (fn () (pr--bounded-seq x level "#{" "}")) x)
       (= t :map) (pr--safely (fn () (pr--bounded-map x level)) x)
+      (or (= t :string) (= t :bytes)) (pr--safely (fn () (pr--bounded-text x)) x)
       else (pr-str x))))
 
 (defn pr-str-bounded (x)
-  "Like `pr-str`, but eliding with `…` past `*print-length*` items per collection
-and `*print-level*` levels of nesting (`nil` for either means no limit). For
-*display* — the result does not read back, so use `pr-str` when you need the whole
-value. This is what the REPL prints results with."
+  "Like `pr-str`, but eliding with `…` past `*print-length*` items per collection,
+`*print-level*` levels of nesting, and `*print-string-length*` characters of a
+string or byte string (`nil` for any of them means no limit). For *display* — the
+result does not read back, so use `pr-str` when you need the whole value.
+
+**Every display protocol should print through this**, not `pr-str`: the REPL's
+results, `spy`'s trace entries, an editor's echo area. A protocol whose job is to
+show a value to a human has no business flooding the screen (or a pipe, or a log)
+with a megabyte, and one bounded printer is how that stays true everywhere instead
+of each consumer inventing its own cap."
   (pr--bounded x 0))
 
 ;; ---- discovery / introspection ----------------------------------------------
@@ -4047,20 +4079,34 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 ;; stderr tree. Entries are maps: `{:spy :enter :form f}`,
 ;; `{:spy :node :form f :value v :depth d}`, `{:spy :exit :value v}`. Rebind it
 ;; (via `binding`) to capture a trace as data.
+;;
+;; A sink's RETURN VALUE is part of the contract, and it has exactly one meaning:
+;; **`:spy-stop` says "I have all I want — stop tracing"**. Anything else (nil,
+;; whatever `eprintln` returned) means "keep going". A bounded sink — one that keeps
+;; the first N entries, which every display sink should be — answers `:spy-stop` once
+;; it is full, and the tracer then stops paying for instrumentation it can see will be
+;; thrown away (`debug/trace-fn` reverts to a plain tail call; see its wrapper). The
+;; alternative is a sink that silently drops entries while the traced program still
+;; pays for every one of them, which is how tracing a 250 000-deep tail loop came to
+;; cost a frame per level and 11× the runtime.
 (defdyn *spy-sink* nil)
 
 (defn spy--indent (depth) (apply str (map (constantly "  ") (range depth))))
 (defn spy--default-sink (entry)
   "Default `*spy-sink*`: pretty-print one trace entry as an indented stderr line.
-`:call`/`:return` are the function-boundary entries `debug/trace-fn` emits."
+`:call`/`:return` are the function-boundary entries `debug/trace-fn` emits.
+
+Values print through `pr-str-bounded`, not `pr-str`: this is a display protocol, and
+one traced call carrying a megabyte string must not paint a megabyte to stderr. Lift
+the bound for a run with `(binding (*print-string-length* nil) …)`."
   (case (:spy entry)
-    :enter (eprintln (str "spy: " (pr-str (:form entry))))
+    :enter (eprintln (str "spy: " (pr-str-bounded (:form entry))))
     :node (eprintln (str "  "
-                      (spy--indent (:depth entry)) (pr-str (:form entry)) " => "
-                      (pr-str (:value entry))))
-    :exit (eprintln (str "=> " (pr-str (:value entry))))
-    :call (eprintln (str "trace: " (pr-str (cons (:fn entry) (:args entry)))))
-    :return (eprintln (str "trace: " (pr-str (:fn entry)) " => " (pr-str (:value entry))))
+                      (spy--indent (:depth entry)) (pr-str-bounded (:form entry)) " => "
+                      (pr-str-bounded (:value entry))))
+    :exit (eprintln (str "=> " (pr-str-bounded (:value entry))))
+    :call (eprintln (str "trace: " (pr-str-bounded (cons (:fn entry) (:args entry)))))
+    :return (eprintln (str "trace: " (pr-str (:fn entry)) " => " (pr-str-bounded (:value entry))))
     nil))
 (defn spy--emit (entry) ((or *spy-sink* spy--default-sink) entry))
 (defn spy--node (form value depth)
@@ -4149,6 +4195,32 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 (defn add-load-path! (& dirs)
   "Prepend `dirs` to the module search path (skipping any already present); returns the new path."
   (set-load-path! (append (remove (fn (d) (member? d *load-path*)) dirs) *load-path*)))
+
+;; Package-rooted namespaces (ADR-070): a *dependency* `foo` providing a module `b`
+;; is loaded as the rooted global namespace `foo/b`, so two deps can both provide a
+;; `parser` (`a/parser`, `b/parser`) with no collision — Rust's `crate::mod` model.
+;; The package manager populates these two registries when it resolves dependencies
+;; (`std/tool/package.blsp`); they are empty for a bare `brood file.blsp` run with no
+;; project, and the root project's OWN modules stay short (unrooted) — only deps root.
+;;   *package-module-files* : a rooted module name (string, `"foo/b"`) → the .blsp file
+;;     that provides it. `require--force` consults it before the load-path, and a hit
+;;     drives the package-context load below.
+;;   *package-modules-of*   : a package's local name (string, `"foo"`) → the list of
+;;     SHORT module-name symbols it provides — the set that tells `%root-module-name`
+;;     which references in `foo`'s files are intra-package (root them) vs external.
+(def *package-module-files* {})
+(def *package-modules-of* {})
+
+;; The rooted-key setters (root code, like `set-load-path!`): the package manager
+;; calls these to register a dependency's modules before its first `require`.
+(defn register-package-module! (rooted-key path)
+  "Record that rooted module `rooted-key` (e.g. \"foo/b\") is provided by file `path`."
+  (%registry-update! '*package-module-files* :assoc [rooted-key] path)
+  rooted-key)
+(defn register-package-modules! (prefix short-modules)
+  "Record package `prefix`'s SHORT module names (a list of symbols) — the intra-package set."
+  (%registry-update! '*package-modules-of* :assoc [prefix] short-modules)
+  prefix)
 (def *features-loading* {})
 ; feature key → loader pid for loads IN FLIGHT. Set before a load begins so (a) a
 ; CIRCULAR require inside that same load returns immediately (the contract
@@ -4253,9 +4325,15 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
         mod " " marker " …) marker — the import filters are :only and :exclude, as "
         "`(:use " mod " :only [a b])` or `(:use " mod " :exclude [a b])`"))
     (let (subset  (if (= marker :only) (second opts) nil)
-          exclude (if (= marker :exclude) (second opts) nil))
-      (list (list 'require (list 'quote mod))
-        (list '%refer (list 'quote mod) (list 'quote subset) (list 'quote exclude))))))
+          exclude (if (= marker :exclude) (second opts) nil)
+          ;; Package-rooted namespaces (ADR-070): an intra-package `(:use b)` inside a
+          ;; dependency roots to `(:use foo/b)` at load time; an external/std module is
+          ;; left unchanged. `%root-module-name` decides which, from the active package
+          ;; context. The same rooting form goes in both positions so require and refer
+          ;; agree on the target (it is idempotent — evaluating it twice is harmless).
+          rooted (list '%root-module-name (list 'quote mod)))
+      (list (list 'require rooted)
+        (list '%refer rooted (list 'quote subset) (list 'quote exclude))))))
 
 ;; All require/refer forms for the `(:use …)` clauses in a `defmodule` header
 ;; (skipping the optional docstring / any non-`:use` form), flattened for splicing.
@@ -4270,9 +4348,11 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; name, which is otherwise a compile error. For tests and tightly-coupled
 ;; tooling; loud and greppable by design.
 (defn defmodule--internals-clause (clause)
-  (let (mod (second clause))
-    (list (list 'require (list 'quote mod))
-      (list '%refer (list 'quote mod) nil) (list '%grant-internals (list 'quote mod)))))
+  (let (mod (second clause)
+        ;; Root an intra-package target to `foo/mod` under a dependency load (ADR-070).
+        rooted (list '%root-module-name (list 'quote mod)))
+    (list (list 'require rooted)
+      (list '%refer rooted nil) (list '%grant-internals rooted))))
 
 (defn defmodule--internals-forms (clauses)
   (apply append
@@ -4290,9 +4370,12 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 (defn defmodule--alias-clause (clause)
   (let (mod (second clause)
         opts (rest (rest clause))
-        short (if (= (first opts) :as) (second opts) (defmodule--last-segment mod)))
-    (list (list 'require (list 'quote mod))
-      (list '%alias (list 'quote mod) (list 'quote short)))))
+        short (if (= (first opts) :as) (second opts) (defmodule--last-segment mod))
+        ;; Root an intra-package target to `foo/mod` (ADR-070); the local `short` alias
+        ;; is unchanged — you still write `short/name` in this file.
+        rooted (list '%root-module-name (list 'quote mod)))
+    (list (list 'require rooted)
+      (list '%alias rooted (list 'quote short)))))
 
 (defn defmodule--alias-forms (clauses)
   (apply append
@@ -4342,13 +4425,17 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 definitions become `mod/name`; bare references resolve there, then through
 `(:use …)` imports, then root. Records an optional docstring and `provide`s the
 feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
-  (let (key (name mod)
-        doc (if (string? (first more)) (first more) nil)
+  (let (doc (if (string? (first more)) (first more) nil)
         clauses (if (string? (first more)) (rest more) more)
         _checked (map defmodule--check-clause clauses))
-    `(do
-       (record-module-doc! ~key ~doc)
-       (defmodule--provide ~key)
+    ;; The feature/doc key is the module's ROOTED name (ADR-070): inside a dependency
+    ;; `foo`, `(defmodule b)` provides `foo/b` and `(%in-ns 'b)` roots compile-ns to
+    ;; `foo/b`, so an outside `(require 'foo/b)` finds it and the file's defs become
+    ;; `foo/b/…`. At root (no package context) `%root-module-name` is the identity, so
+    ;; the root project and std stay short. Computed at load time, when the context is set.
+    `(let (root-key# (name (%root-module-name '~mod)))
+       (record-module-doc! root-key# ~doc)
+       (defmodule--provide root-key#)
        (%in-ns '~mod)
        ~@(defmodule--use-forms clauses)
        ~@(defmodule--internals-forms clauses)
@@ -4370,7 +4457,8 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
 ;; loading-bookkeeping — callers manage *features-loading*. Errors if not found.
 (defn require--force (key)
   (let (src (%builtin-module key))
-    (if src
+    (cond
+      src
       ;; Attribute the baked-in source to the file it was WRITTEN in, not to whichever
       ;; file happened to be mid-load when the `require` ran. The path comes from the
       ;; same literal the source was baked in from, so it can't drift.
@@ -4379,10 +4467,32 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
       ;; file (the branch below) goes through the ordinary `load`, so a package's
       ;; names are never reserved.
       (do (%load-module-source src (%builtin-module-file key)) (provide key))
+      ;; A dependency module (ADR-070): `key` is a rooted name (`"foo/b"`) the package
+      ;; manager mapped to a file. Load it under `foo`'s package context so its
+      ;; `(defmodule b)` roots to `foo/b` and its intra-package `(:use …)` targets root.
+      (contains? *package-module-files* key)
+      (require--force-package key (get *package-module-files* key))
+      else
       (let (path (require--find (str key ".blsp") *load-path*))
         (if path
           (do (load path) (provide key))
           (error "require: cannot find module '" key "'"))))
+    key))
+
+;; Load a dependency module file `path` under package `key`'s context (ADR-070): set
+;; the active prefix + intra-package module set so the file's `%in-ns`/`(:use …)`
+;; root, load it, then RESTORE the enclosing context on both the normal and error
+;; paths (a dep may be required mid-load of another dep, so contexts nest). The
+;; prefix is the rooted key's first segment (package local names are single-segment).
+(defn require--force-package (key path)
+  (let (prefix  (symbol (first (string-split key "/")))
+        modules (get *package-modules-of* (name prefix))
+        prev    (%set-package-context prefix modules))
+    (try
+      (do (load path) (provide key))
+      (catch e
+        (do (%set-package-context (first prev) (second prev)) (throw e))))
+    (%set-package-context (first prev) (second prev))
     key))
 
 ;; Wait (5ms ticks, ~`n` of them) for another process's in-flight load of `key`;

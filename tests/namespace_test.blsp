@@ -184,7 +184,7 @@
 ;;
 ;; Earmuffs hid this until ADR-151: `*knob*` was ambient, so the common
 ;; `(&optional (n *knob*))` happened to work while a plain `(&optional (n limit))` was
-;; already broken. Found by a downstream project (brood-edit) failing 25 tests on it.
+;; already broken. Found by a downstream project (bedit) failing 25 tests on it.
 (describe "namespaces: &optional defaults resolve in the DEFINING module"
   (test "a default reading the module's own plain global"
     (%load-string "(defmodule nsopt1) (def lim 7) (defn f (x &optional (n lim)) (list x n))")

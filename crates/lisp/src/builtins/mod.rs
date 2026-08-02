@@ -2545,6 +2545,23 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![], sym),
         current_ns,
     );
+    // Package-rooted namespaces (ADR-070): `%root-module-name` roots an intra-package
+    // module reference to `prefix/name` under a dep load; `%set-package-context`
+    // enters/clears a dep's load context. Emitted by the prelude loader + `defmodule`.
+    def(
+        heap,
+        "%root-module-name",
+        Arity::exact(1),
+        Sig::new(vec![sym], sym),
+        root_module_name,
+    );
+    def(
+        heap,
+        "%set-package-context",
+        Arity::exact(2),
+        Sig::new(vec![any, any], any),
+        set_package_context,
+    );
     // `(%refer 'mod subset exclude)` — populate the current file's import table from a
     // `(:use …)` clause. `subset` is nil (refer all public names) or a seq of bare
     // symbols (`:only`); `exclude` is nil or a seq of bare names to drop from a

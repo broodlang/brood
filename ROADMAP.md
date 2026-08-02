@@ -136,9 +136,16 @@ Shipped as ADRs:
     - 🚫 *won't* — **Open-ability bounds** — declined, not deferred: an open ability accepts
       late impls, so no argument is soundly rejectable on the type (ADR-123/124). Safety lives
       at the op call site instead.
-  - ⬜ **Checker gap:** a `:use`d ability op from a *loose disk* module (not embedded,
-    not in a project) is flagged `unbound symbol` though it runs; embedded/same-module
-    use resolves. Surfaced by the `show` cross-module test. **[kernel/checker]**
+  - ✅ **Checker gap (resolved, note was stale):** a `:use`d ability op from a *loose
+    disk* module used to be flagged `unbound symbol` though it ran. No longer reproduces
+    on any current checker entry point — `brood --check <file>`, `nest check <file>`, or
+    an in-project `nest check` all resolve the imported op cleanly. Closed by the
+    combination of `check_file` evaluating the `(defmodule … (:use …))` header (so the
+    checker `require`s the provider and sees `mod/op` as a real global, exactly the
+    runtime's view), the checker reading the live ability registries (ADR-186), and the
+    KI-24 resolver hardening. Guarded by `crates/cli/tests/checker_cross_module_ability.rs`
+    (a faithful reconstruction of the `show` cross-module shape: loose-disk provider +
+    `:use` consumer + op call). **[kernel/checker]**
   - 🟡 **Abilities v2** ([ADR-172](docs/decisions.md), design decided 2026-07-28,
     **amended 2026-07-28**) — makes ADR-168's open runtime model **deterministic and
     app-sovereign** without closing it. **Amendment: the orphan rule and the `bridge`

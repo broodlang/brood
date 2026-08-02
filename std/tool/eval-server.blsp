@@ -100,7 +100,10 @@ lines (see the module preamble on stray output)."
 (def *output-cap-chars* 8192)
 
 ;; The most spy entries a traced request collects — a traced deep recursion emits
-;; two entries per call; past this the trace has made its pedagogical point.
+;; two entries per call; past this the trace has made its pedagogical point. The
+;; sink answers `:spy-stop` when it is reached, which is how the *traced program*
+;; stops paying too (`debug/trace-fn` reverts to a plain tail call) rather than
+;; running instrumented for another quarter-million calls we would only discard.
 (def *spy-entry-cap* 200)
 
 (defn eval-server--bound-output (s)
@@ -174,13 +177,14 @@ flood the pipe.
 With `trace-names` (fn-name strings), each name is boundary-traced for the
 duration (`debug/trace-fn`, installed once before the first non-definition form,
 restored by `untrace-all` after) and the result carries `:spy` — up to
-`*spy-entry-cap*` collected entries. Two caveats worth knowing: a traced name is
-wrapped exactly once per request, so the definition the source itself provides is
-always the one that runs; and tracing **costs tail-calls** — the wrapper returns
-after the call, so a self-call that was in tail position no longer is, and a deep
-tail recursion that ran in O(1) stack untraced can exhaust it while traced (it
-comes back as an ordinary `recursion too deep` error reply). Trace the function
-you are studying, not the loop you are driving it with.
+`*spy-entry-cap*` collected entries, after which the sink answers `:spy-stop` and
+the tracer gets out of the way: the rest of the run is uninstrumented, in constant
+stack, at full speed. So a traced tail loop of any depth is safe here — it reports
+its first `*spy-entry-cap*` entries and then simply runs. (Before that contract
+existed, tracing a 250 000-deep tail loop cost a frame per level and 11× the
+runtime, and a 4-million-deep one came back as `recursion too deep`.) One caveat
+remains: a traced name is wrapped exactly once per request, so the definition the
+source itself provides is always the one that runs.
 
 In-image caveat for long-lived callers: evaluated source that calls
 `(%capture-begin)` without a matching take strands OUR buffer on the calling
@@ -193,11 +197,16 @@ path — the per-request evaluator process dies — but worth knowing when embed
         sink (when traced
                (fn (e)
                  (let (n (or (table-get acc :n) 0))
-                   (when (< n *spy-entry-cap*)
-                     (table-put acc :n (inc n))
-                     (table-put acc :entries
-                       (cons (eval-server--spy-entry e)
-                         (or (table-get acc :entries) '())))))))
+                   (if (< n *spy-entry-cap*)
+                     (do
+                       (table-put acc :n (inc n))
+                       (table-put acc :entries
+                         (cons (eval-server--spy-entry e)
+                           (or (table-get acc :entries) '())))
+                       ;; the entry that FILLS the budget already answers stop: nothing
+                       ;; after it would be kept, so nothing after it should be paid for
+                       (when (>= (inc n) *spy-entry-cap*) :spy-stop))
+                     :spy-stop))))
         run (fn ()
               (try
                 {:ok true

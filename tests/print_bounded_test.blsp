@@ -1,0 +1,63 @@
+;; Tests for `pr-str-bounded` — the DISPLAY printer, and the three bounds it honours:
+;; `*print-length*` (items per collection), `*print-level*` (nesting), and
+;; `*print-string-length*` (characters of a text leaf). Every display protocol prints
+;; through this — the REPL's results, `spy`'s trace entries, an editor's echo area — so
+;; "showing a value to a human" can never mean painting a megabyte.
+;;
+;; The string bound is the one that earns its keep: neither collection bound touches a
+;; leaf, so before it existed a single 10 MB string sailed past both of them.
+(defmodule print-bounded-test (:use test))
+
+(defn long-string (n) (apply str (map (constantly "x") (range n))))
+
+(describe "pr-str-bounded — collection length"
+  (test "a collection past *print-length* elides with … and is not walked further"
+    (assert= "(1 2 3 …)" (binding (*print-length* 3) (pr-str-bounded '(1 2 3 4 5))))
+    (assert= "[1 2 …]" (binding (*print-length* 2) (pr-str-bounded [1 2 3]))))
+  (test "a collection within the bound prints whole, with no marker"
+    (assert= "[1 2 3]" (binding (*print-length* 3) (pr-str-bounded [1 2 3]))))
+  (test "nil lifts the bound"
+    (assert= "[1 2 3 4 5]" (binding (*print-length* nil) (pr-str-bounded [1 2 3 4 5])))))
+
+(describe "pr-str-bounded — nesting level"
+  (test "a container at the depth bound elides whole, not element by element"
+    (assert= "{:a {:b …}}" (binding (*print-level* 2) (pr-str-bounded {:a {:b {:c 1}}}))))
+  (test "leaves at the bound still print — eliding an atom saves nothing"
+    (assert= "{:a 1}" (binding (*print-level* 2) (pr-str-bounded {:a 1})))))
+
+(describe "pr-str-bounded — text length (*print-string-length*)"
+  (test "a string past the bound keeps the bound's worth of characters"
+    (assert= "\"xxxx…\"" (binding (*print-string-length* 4) (pr-str-bounded (long-string 100)))))
+  (test "the elision marker sits INSIDE the quotes, so the form is still closed"
+    (let (s (binding (*print-string-length* 8) (pr-str-bounded (long-string 50))))
+      (assert= "\"" (substring s (dec (string-length s)) (string-length s)))
+      (assert= 11 (string-length s))))      ; 2 quotes + 8 chars + the marker
+  (test "a string within the bound prints exactly as pr-str does"
+    (assert= (pr-str "hello") (binding (*print-string-length* 10) (pr-str-bounded "hello"))))
+  (test "nil lifts the bound"
+    (assert= 102 (string-length (binding (*print-string-length* nil)
+                                  (pr-str-bounded (long-string 100))))))
+  (test "the VALUE is cut before printing, so an escape is never halved"
+    ;; cutting `pr-str`'s output at 3 would leave `"a\` — a dangling escape and an
+    ;; unterminated string. Cutting the value first can only ever end on a whole char.
+    (let (s (binding (*print-string-length* 2) (pr-str-bounded "a\nb\nc")))
+      (assert= "\"a\\n…\"" s)))
+  (test "a huge string is bounded by DEFAULT — no binding needed"
+    ;; the point of the whole exercise: a display protocol that forgot to think about
+    ;; size still cannot flood, because the printer already did the thinking
+    (is (< (string-length (pr-str-bounded (long-string 100000))) 5000)))
+  (test "a bounded string leaf INSIDE a collection is bounded too"
+    (assert= "[\"xx…\" 1]" (binding (*print-string-length* 2)
+                             (pr-str-bounded [(long-string 9) 1]))))
+  (test "a byte string is bounded the same way, and stays a #b\"…\" form"
+    ;; bytes cost up to four output characters each (`\\xHH`), so this is the leaf where
+    ;; truncating after printing would already have built the flood
+    (let (s (binding (*print-string-length* 3) (pr-str-bounded (bytes 65 66 67 68 69))))
+      (assert= "#b\"ABC…\"" s))))
+
+(describe "pr-str-bounded — what it does NOT touch"
+  (test "a rope prints as its summary handle, already bounded by the kernel"
+    (is (includes? (pr-str-bounded (string->rope (long-string 5000))) "#<rope")))
+  (test "an improper pair degrades to faithful printing instead of losing the bound"
+    ;; pr--safely's job: one odd subtree must not take the whole value's bound with it
+    (assert= (pr-str (cons 1 2)) (pr-str-bounded (cons 1 2)))))

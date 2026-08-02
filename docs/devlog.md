@@ -14407,6 +14407,101 @@ a wrong ASCII verdict would split a character. Checked every `[i, j)` range of a
 accented, emoji, mixed, all-non-ASCII, empty and single-char string against a char-level
 reference built from `string->list` — all match — plus the 2-arg form and both error cases.
 That differential is now a permanent test.
+## 2026-08-02 (cont.) — the last open namespace item: the loose-disk ability-op checker gap is gone
+Chasing "100% complete the namespace system" down to its one remaining ⬜ roadmap bullet: the
+checker gap filed on the 2026-07-28 `show`/protocol work — *"a `:use`d ability op from a loose
+disk module is flagged `unbound symbol` though it runs; embedded/same-module use resolves."*
+
+**It no longer reproduces.** A faithful reconstruction (a loose-disk provider `greet` defining
+`(defability Greeter (to-line …))` + a `person` record + an `impl`, and a `(defmodule main
+(:use greet))` consumer calling `(to-line (person …))`) checks **clean** on every entry point:
+`brood --check main.blsp`, `nest check main.blsp` (loose, outside a project), and an in-project
+`nest check` with both modules under `src/`. Confirmed by building the tree at `6d2ff13^` and
+`8a77f15` too — the gap was already closed by then, so it was fixed as a side effect of the
+type/checker/resolver flurry between the filing date and now, not by a single targeted commit.
+
+**Why it's fixed.** `check_file` evaluates the `(defmodule … (:use greet))` header, so its
+`(require 'greet)` loads the provider and registers `greet/to-line` as a real global — the
+checker's binding view is now the same image the runtime resolves against. Layered on top: the
+checker reads the live ability registries (ADR-186), and KI-24 hardened the resolver's
+positive-evidence rule. An imported ability op is an ordinary qualified global to all three.
+
+The archaeology couldn't reproduce the *original* failure on any commit tested, so rather than
+leave the item as an unverifiable ⬜, it's closed with a **regression guard** that pins the
+correct behavior: `crates/cli/tests/checker_cross_module_ability.rs` writes the two-file fixture
+to a temp dir, proves it *runs* (`hi ada`), then asserts `--check` emits no `unbound symbol` for
+the imported op or the imported record constructor. Roadmap bullet flipped to ✅. With every
+planned ADR-065 increment (1–3 + α + LSP + package policy) long done and this the only open
+bullet, the namespace *system* is complete; the remaining namespace-adjacent lines
+(package-rooted namespaces, reference-driven auto-require) are ADR-011 *deliberate deferrals*,
+not unfinished work.
+
+## 2026-08-02 (cont.) — the modern "referenced-but-not-imported" fix: LSP auto-import (ADR-206)
+Turning to the deferred namespace-adjacent items. ADR-065 §9 left **reference-driven auto-require**
+(bare `mod/name` autoloads the module on first sight, Emacs-style) as an open flavour. Weighed it
+against how modern languages actually solve "you referenced a name you didn't import" — and they
+categorically *don't* autoload: Rust/Go/TS/Swift/Zig all chose explicit, statically-analyzable
+imports, because a knowable dependency set is what powers rename/completion/tree-shaking/lockfiles/
+audit. What the field kept from the dynamic era is *deferral* (lazy `import()`), not *implicitness*;
+the modern answer to an unimported reference is the IDE **auto-import** action that *writes the
+explicit import for you*. Recorded that reasoning as **ADR-206** (reject runtime autoload as a
+language feature) and built the modern thing instead.
+
+**Shipped: LSP auto-import.** On a bare `unbound symbol: foo` whose providers are known (modules
+exporting `foo` as `mod/foo`), `code_actions.rs` now offers **"Import `foo` from `(:use mod)`"**
+(inserts a `(:use mod)` clause into the `defmodule` header — grouped after existing clauses at
+their indentation, inline for a clause-less `(defmodule app)`) and **"Qualify as `mod/foo`"** (a
+one-off in-place rewrite). One import+qualify pair **per provider**, so a name two modules export
+(`sexp`/`editor/treesit`, ADR-205 §7b) is a choice, never a silent pick. Discovery is workspace-wide
+*for free*: the LSP image already has every project source loaded (`project/setup-tooling-image`,
+ADR-031), so `introspect::global_names` sees project modules and embedded std alike — no separate
+cross-file index. Filtered so it's never wrong: the file's own namespace, an already-imported
+module, and private `--` providers are dropped; import is `isPreferred` only when it's the sole
+provider and no closer typo fix competes (never two preferred per diagnostic).
+
+Extends the existing quick-fix surface (did-you-mean / add-require / create-defn / unused-require)
+rather than a new subsystem. Seven unit tests in `code_actions.rs` cover discovery, both header-edit
+shapes (bare → inline, existing-clause → grouped), qualify, the header-less/qualify-only path, the
+multi-provider choice, and the own-ns/already-used/private filters; full LSP suite green (141 tests,
+24 in `code_actions`).
+Docs: `docs/lsp.md` code-action section rewritten and the "more code actions" item marked shipped.
+This closes the reference-driven-autoload line — the ergonomics are delivered the analyzable way,
+and import-driven `(:use …)` stands unchanged. (Package-rooted namespaces, the other deferred item,
+is next and gets its own designed pass.)
+
+## 2026-08-02 (cont.) — display protocols truncate; a trace stops costing what it stops keeping (ADR-207)
+
+Came in from the editor: the tutorial's proper-tail-calls lesson counts down from a million in a
+boundary-traced box, and it died with `recursion too deep: exceeded the VM's 1048576-frame
+non-tail-call limit`. Two separate holes, fixed together as **ADR-207**.
+
+**The frame hole (the real bug).** `trace-fn`'s wrapper emits `:return` *after* the call, so a
+traced self-call is no longer in tail position — one VM frame per level. Meanwhile the consumer
+(`eval-server`, cap 200 entries) was *silently discarding* everything past its budget: the program
+paid for a quarter-million entries nobody kept, ran 11× slower, and hit the frame limit. The page
+that broke was the page teaching "a tail loop runs in constant stack, forever if it likes".
+
+Fix: **a sink's return value means something.** `:spy-stop` from a `*spy-sink*` = "I have all I
+want"; `trace-fn` then puts the original back (the rebind `untrace-fn` does) and delegates in TAIL
+position — no post-call emit, no frame. A bounded sink is now what makes tracing cheap instead of
+what hides its cost. Measured through `eval-server`: 250k traced tail calls 641 ms → **73 ms**, 1M
+2493 ms → **227 ms**, 4M `recursion too deep` → **844 ms** (= the untraced cost). Rejected a
+per-install latch `(table)`: tables live until `table-drop` (ADR-107), so that leaks one per install
+per request, and the bookkeeping buys nothing over a rebind.
+
+**The size hole.** `pr-str-bounded` bounded collections and nesting but never a *leaf* — and a
+string is one item at any depth, so a 10 MB string sailed past both. Added
+**`*print-string-length*`** (4096, Elixir `Inspect`'s `:printable_limit` default), cutting the
+value *before* printing (cutting the output halves an escape, drops the quote, and for bytes —
+four output chars each — has already built the flood). Marker inside the quote: `"abc…"`,
+`#b"ab…"`. Then routed the **display protocols** through `pr-str-bounded` instead of `pr-str`:
+`spy`'s default sink, the debugger's causal tree / paused rows / REPL echo. Identity paths keep
+`pr-str` — `debug/hits`' form-string is a KEY, and a key that elides is a key that collides.
+
+Tests: `tests/print_bounded_test.blsp` (new, 15) + the `:spy-stop` contract and a **1.2M-deep**
+traced loop in `debug_test.blsp` + the end-to-end in `eval_server_test.blsp`. The old
+"tracing COSTS tail-calls" test is rewritten — it documented the contradiction as intended.
+In-language suite green (4260).
 
 ## 2026-08-02 — correcting the claims the measurements contradicted
 
