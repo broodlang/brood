@@ -30,7 +30,29 @@
       (template/render "{{oops" {"oops" "x"})))
   (test "adjacent markers"
     (assert= "ab"
-      (template/render "{{a}}{{b}}" {"a" "a" "b" "b"}))))
+      (template/render "{{a}}{{b}}" {"a" "a" "b" "b"})))
+
+  ;; `render` splits on `{{` and joins once, rather than re-slicing the rest of the
+  ;; template per marker (which made it O(n²) — 12x per 4x of input). These pin the
+  ;; boundary cases that rewrite moved through: text on either side of an unterminated
+  ;; marker, a stray `}}`, and correctness at a size where the old shape was visible.
+  (test "an unclosed {{ keeps the text after it"
+    (assert= "a {{oops rest"
+      (template/render "a {{oops rest" {"oops" "x"})))
+  (test "a substituted marker before an unclosed one still substitutes"
+    (assert= "X then {{oops"
+      (template/render "{{a}} then {{oops" {"a" "X"})))
+  (test "a stray }} with no marker is literal"
+    (assert= "a }} b" (template/render "a }} b" {})))
+  (test "text before, between and after markers is preserved"
+    (assert= "<1|2>" (template/render "<{{a}}|{{b}}>" {"a" 1 "b" 2})))
+  (test "many markers render correctly, not just quickly"
+    ;; 500 markers: the old implementation got this right but quadratically. Guards the
+    ;; rewrite's chunk ordering — an off-by-one in the split/join reverses or drops text.
+    (let (tmpl (apply str (repeat 500 "x{{a}}"))
+          out (template/render tmpl {"a" "-"}))
+      (assert= 1000 (string-length out))
+      (assert= (apply str (repeat 500 "x-")) out))))
 
 (describe "render-all"
   (test "maps template over a list of rows"

@@ -14088,3 +14088,43 @@ Also confirmed why the L1 fast path cannot just apply more often: `try_deliver_l
 handed to a worker's run queue (which owns its heap) and a running one is being mutated on
 another worker — in neither case does the sender have safe access. The 73.2% hit rate is
 structural, not a tuning knob.
+
+## 2026-08-02 — scale sweep: `template/render` was a real quadratic (318 ms → 24 ms)
+
+Continued thread 1 by grepping for the shape the handoff says to look for — a
+`concat`/`append`/`str` whose argument is the **accumulator** — rather than guessing rows.
+That turned up `std/template.blsp` and a dozen sites in `std/format.blsp`.
+
+**`template/render`: confirmed quadratic, and it earns the label.** Three points inside one
+invocation, per the harness caveat: 2/24/318 ms at 200/800/3200 markers — ratios **12.0 then
+13.4**, where linear is 4. It holds and grows, which is the signature; `proc/gen gen-call`'s
+old 10.21× *fell* as the base grew, which is why that one was never a quadratic.
+
+**The first fix was wrong, and measuring caught it.** The obvious read is the output
+accumulator (`(str acc before val)` per marker), so I replaced it with cons-and-join-once.
+Tests passed, ratio unchanged at 11.0/14.45. The output side was only half of it: each
+iteration also did `(substring s (+ open 2) …)` — re-slicing **the rest of the template** per
+marker. Fixing one of two O(remaining) operations changes nothing.
+
+**Worth knowing: an offset scan would not have fixed it either.** `(index-of s needle from)`
+looks like the incremental-search answer, and its own docstring says so — but for a string
+with non-zero `from` it evaluates `(%str-index-of (substring coll s0 n) x)`. It *copies the
+suffix* on every call. The comment directly above `string-split` in `builtins/mod.rs` spells
+out this exact trap for splitting ("a pure-Brood split re-`substring`s the tail each step …
+O(n²)"), and `index-of`'s `from` walked into it.
+
+**Fix:** one native `string-split` on `{{`, then substitute per piece and `apply str` once.
+Every `substring` is now bounded by a single piece, so the total is O(n). Result:
+1/5/24 ms — ratios 5.0 / 4.80, and at base 800 it reads 4.80 / **3.12** (a falling ratio is
+fixed overhead amortising, the opposite of a quadratic). **13× faster at N=3200.**
+
+**`format format-source` measured LINEAR and was left alone** — 3.80 / 4.12 / 4.64 across
+three points — even though `format-cst-root--walk` accumulates with `(str acc …)` per
+top-level form. Rendering dominates at every size a real file reaches. Noted in the harness
+as the first place to look if a very large generated file ever shows up. A comment asserting
+a shape is not evidence, and neither is a suspicious shape without a measurement.
+
+Both rows are now in `scripts/fuzz/stress/scale_sweep.blsp` so neither can regress silently.
+Five new tests pin the boundary cases the rewrite moved through (text after an unterminated
+marker, a substituted marker before an unterminated one, a stray `}}`, and 500 markers
+rendering *correctly* — an off-by-one in the split/join would reverse or drop text).
