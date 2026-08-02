@@ -14797,3 +14797,49 @@ the handoff's own warning about believing a few-percent delta without a same-ses
 Verified: suite 937/937, `nest check` clean, `conc_storm` clean, and the
 concurrency-sensitive files 5/5 each (`concurrency`, `supervisor`, `adversarial`, `agent`,
 `proctree`).
+
+## 2026-08-02 — published the cross-language run, and the regression that wasn't
+
+Re-ran the seven-language suite (`brood-benchmarks`, harness defaults, guard clean) after
+today's work and published it. Headline: **`latency` p99 124 → 78 µs, p50 27 → 19 µs** — second
+only to the BEAM (58 µs) at the percentile that row is ranked by, and 5.9× ahead of the next
+runtime. That is the scheduler peer-wake + first-refusal change earlier today.
+
+**A 3.5× `mandelbrot` regression turned up, and chasing it to the end was the whole value.**
+The bisect was clean — `8377de9a` 192 ms, `e91effca` (kernel exact rationals) 668 ms — and the
+obvious conclusion, that exact rationals had slowed float math, was **wrong**. Three steps:
+
+1. `(/ px n)` on two ints stopped being a float divide and became an exact `Ratio` (ADR-196,
+   working as designed). The benchmark built and discarded 291,600 of them per run, then
+   converted each to float anyway. Every other port divides in floats — Clojure `(double py)`,
+   .NET `(double)py`, Ruby `.to_f` — so Brood's port was doing strictly more work for an
+   identical checksum. Fixing the port: 668 → 246 ms.
+2. A 28% residual remained and looked like a genuine runtime regression. It was not.
+   Micro-benchmarking each float op (`+ - * <= <`) showed the two binaries **identical**, which
+   is what ruled out the numeric tower. The residual was two `->float` calls per *pixel*,
+   because our port recomputed `y0` per pixel where every other port hoists it per row.
+3. Decisive control: identical source on both binaries (`(* 1.0 px)`, which exists in both) —
+   **201 ms pre-rationals, 200 ms now**. No runtime regression at any point.
+
+Hoisting `y0` restored the row to 192 ms, its pre-rationals figure, and the aggregate to 2.9×.
+I had already published the intermediate number as "a genuine runtime regression, under
+investigation"; that is corrected in place in `BENCHMARKS.md` rather than dropped.
+
+**Two things worth keeping from it.**
+
+*A published benchmark port silently drifts when language semantics change under it.* Nothing
+failed — the checksum never moved — the row just quietly stopped measuring what it claimed to.
+`(/ n 4)` in `supervisor.blsp` was the same class, still latent: exact at the default N=20,000
+and a rational for any N that is not a multiple of 4, feeding an iteration count. Now `quot`.
+
+*`->float` is a Brood function call where every other language has a machine cast.* 583,200 of
+them cost ~50 ms here, ~85 ns each. That is ordinary call overhead rather than anything wrong,
+but it is a real gap for numeric code, and the interesting question is why the JIT's leaf
+inliner does not swallow a three-instruction arm (`Const Local Prim2`). Worth a look; it would
+pay for every small prelude helper, not just this one.
+
+Also fixed while publishing: `BENCHMARKS.md`'s tables were mixing runs — the previous publish
+had refreshed Brood's column and left the other six from an earlier one (.NET `fib` read 45 ms
+where its own `results.json` said 39.2 ms). Every column is now regenerated from a single run
+by a script, which I validated by reproducing the *old* tables from the old JSON before
+trusting it.
