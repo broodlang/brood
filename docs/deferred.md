@@ -446,7 +446,7 @@ the editor it is user-visible: a tutorial lesson demonstrating "a million tail
 calls in constant stack" exceeded its 2 s evaluation budget and rendered as
 `✗ timed out`, discrediting the exact claim it was making. The lesson had to be
 sized down to 250,000 to fit — a workaround for this entry, and it says so at
-the call site (`brood-edit`, `src/tutor-lessons.blsp`, "Recursion is the loop").
+the call site (`bedit`, `src/tutor-lessons.blsp`, "Recursion is the loop").
 
 **Where it is.** `crates/lisp/src/builtins/system.rs`, `eval_builtin` — three
 lines:
@@ -501,7 +501,7 @@ SIGWINCH. Piped stdio has none of that, so a Brood program cannot start another 
 program's terminal UI and interact with it.
 
 That matters because it is exactly how you verify a terminal app *as a user*: press a key,
-assert on what is painted. myedit's live drivers (`tools/` in that repo) do this and have
+assert on what is painted. bedit's live drivers (`tools/` in that repo) do this and have
 caught two bugs the 1200-test model suite structurally could not see — a keybinding present
 in the help vocabulary but never `keymap-bind`-ed (the vocabulary and the keymap are two
 tables; only pressing the key crosses them), and a window attribute that lives in a
@@ -523,6 +523,6 @@ full repaint" possible) and nothing else new — writing to the handle is the ex
   a second, worse test framework living next to `std/tool/test`.
 
 **Workaround today.** Python's `pty` module (`openpty` + `TIOCSCTTY` + `TIOCSWINSZ`), ~120
-lines of harness — see `../brood-edit/tools/drive.py`, which documents the three ways such a
+lines of harness — see `../bedit/tools/drive.py`, which documents the three ways such a
 harness lies to you (face escapes splitting phrases, the stream being history rather than the
 screen, and slow first paint).
