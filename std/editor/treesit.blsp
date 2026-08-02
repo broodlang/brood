@@ -10,9 +10,11 @@
 ;;    colour spans, colouring a whole node (and not descending) when a per-language
 ;;    kind→face table assigns it one — tree-sitter highlight semantics, so a
 ;;    `(string)`/`(comment)` span covers its delimiters and content as one.
-;;  - `point-forward` / `-backward` / `-up` / `-down` / `-defun-start` — pure
+;;  - `point-forward` / `-backward` / `-list-forward` / `-list-backward` / `-up` /
+;;    `-up-forward` / `-down` / `-defun-start` / `-defun-end` — pure
 ;;    `(text lang point) -> point` structural motions, the foreign-language
-;;    analogue of `std/tool/sexp`'s, navigating named nodes of the tree.
+;;    analogue of `std/tool/sexp`'s, navigating named nodes of the tree. The
+;;    `-list-*` pair stops only at containers, so it steps over leaf siblings.
 ;;
 ;; Mechanism is the builtin; the per-language kind→face tables and keymaps are
 ;; policy in the editor's modes (`src/modes.blsp`). A new tree-sitter language is a
@@ -23,8 +25,10 @@
   "Generic tree-sitter language services over `tree-sitter-parse`'s positioned
 CST (`{:kind :start :end :named :kids/:text}`): `(fontify text lang face-of)` →
 `[start end face]` spans, and pure structural motions `(text lang point) ->
-point` — `point-forward` / `point-backward` / `point-up` / `point-down` /
-`point-defun-start`. `face-of` is built with `(face-of-kinds {kind face-name})`.
+point` — `point-forward` / `point-backward` (every named node),
+`point-list-forward` / `point-list-backward` (containers only),
+`point-up` / `point-up-forward` / `point-down`, and `point-defun-start` /
+`point-defun-end`. `face-of` is built with `(face-of-kinds {kind face-name})`.
 Per-language face tables + keymaps are policy in the editor. `(require
 'editor/treesit)`."
   (:use editor/face))
@@ -121,11 +125,36 @@ unchanged if none (the Emacs `forward-sexp`, over a tree-sitter tree)."
         prev (last (filter (fn (f) (<= (get f :end) point)) (ts--named-kids enc))))
     (if (nil? prev) point (get prev :start))))
 
+(defn point-list-forward (text lang point)
+  "End of the next child CONTAINER at or after `point` — leaf nodes are stepped over, not
+stopped at (Emacs `forward-list`); unchanged if none."
+  (let (root (tree-sitter-parse text lang)
+        enc (ts--enclosing root point)
+        nxt (find (fn (f) (and (ts--container? f) (>= (get f :start) point)))
+              (ts--named-kids enc)))
+    (if (nil? nxt) point (get nxt :end))))
+
+(defn point-list-backward (text lang point)
+  "Start of the previous child CONTAINER ending at or before `point` — leaves stepped over
+(Emacs `backward-list`); unchanged if none."
+  (let (root (tree-sitter-parse text lang)
+        enc (ts--enclosing root point)
+        prev (last (filter (fn (f) (and (ts--container? f) (<= (get f :end) point)))
+                     (ts--named-kids enc))))
+    (if (nil? prev) point (get prev :start))))
+
 (defn point-up (text lang point)
   "Start of the enclosing node (`backward-up-list`); unchanged at top level."
   (let (root (tree-sitter-parse text lang)
         enc (ts--enclosing root point))
     (if (ts--root? enc root) point (get enc :start))))
+
+(defn point-up-forward (text lang point)
+  "End of the enclosing node — the forward counterpart of `point-up` (Emacs `up-list`);
+unchanged at top level."
+  (let (root (tree-sitter-parse text lang)
+        enc (ts--enclosing root point))
+    (if (ts--root? enc root) point (get enc :end))))
 
 (defn point-down (text lang point)
   "Start of the next child container at or after `point` (`down-list`); unchanged
@@ -168,14 +197,25 @@ where `def`/`defmodule`/… are calls, not distinct node kinds)."
           (and (not (nil? head))
             (includes? ts--def-macros (substring text (get head :start) (get head :end)))))))))
 
-(defn point-defun-start (text lang point)
-  "Start of the enclosing **definition** (`beginning-of-defun`): the deepest `def` / `class`
-/ `module` / … containing `point` — so a `def` inside an Elixir `defmodule` or a Ruby `class`,
-not the whole enclosing module. Falls back to the top-level form, then `point`."
+(defn ts--defun-edge (text lang point edge)
+  "The `edge` (`:start` / `:end`) of the enclosing **definition**: the deepest `def` /
+`class` / `module` / … containing `point`, falling back to the top-level form, then `point`.
+The shared body of `point-defun-start` / `point-defun-end`."
   (let (root (tree-sitter-parse text lang)
         chain (ts--chain-rest root point)
         defuns (filter (fn (n) (ts--defun? text n)) chain))
     (cond
-      (not (empty? defuns)) (get (last defuns) :start)
-      (not (empty? chain)) (get (first chain) :start)
+      (not (empty? defuns)) (get (last defuns) edge)
+      (not (empty? chain)) (get (first chain) edge)
       else point)))
+
+(defn point-defun-start (text lang point)
+  "Start of the enclosing **definition** (`beginning-of-defun`): the deepest `def` / `class`
+/ `module` / … containing `point` — so a `def` inside an Elixir `defmodule` or a Ruby `class`,
+not the whole enclosing module. Falls back to the top-level form, then `point`."
+  (ts--defun-edge text lang point :start))
+
+(defn point-defun-end (text lang point)
+  "End of the enclosing **definition** (`end-of-defun`, C-M-e) — the close of the same node
+`point-defun-start` finds, so the pair brackets one `def` / `class` / `module`."
+  (ts--defun-edge text lang point :end))

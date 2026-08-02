@@ -4233,6 +4233,55 @@ added later, when M2 editor-plugins create real multi-author pressure, with the
 loader keeping the flat form working — no package-source churn. The cheap check is
 the interim; rooting is the destination.
 
+**Update (2026-08-02): package-rooting is now IMPLEMENTED for dependencies.** The
+destination landed — a dependency `foo` providing `b.blsp` (`(defmodule b)`) is loaded
+as the global namespace `foo/b`, so two deps can both provide a `parser` (`liba/parser`
+vs `libb/parser`) with no collision. The de-risking insight held: **no source change and
+no resolver change** — intra-package references root through the loader, not the
+resolver. Mechanism:
+
+- **Loader (Rust):** two per-process `Heap` fields — `package_prefix` + `package_modules`
+  (the dep's local name + its short module set) — set while a dep's files load.
+  `%in-ns` roots a declared `(defmodule b)` to `foo/b`; a new `%root-module-name`
+  primitive roots an intra-package module *reference* (`(:use b)`/`(:alias b)`), leaving
+  external/std names bare. `%set-package-context` enters/restores the context (nesting
+  for a dep that requires another dep).
+- **Prelude:** `defmodule` and the `:use`/`:alias`/`:use-internals` clauses root their
+  targets via `%root-module-name`; `require--force` gained a package branch keyed on the
+  registries `*package-module-files*` (rooted-name → file) and `*package-modules-of*`
+  (package → short modules), which `require--force-package` uses to bracket the context
+  around the load. Hot-reload (`std/tool/reload.blsp`) brackets the same context, so
+  re-loading a dep file still roots.
+- **Package manager:** `ensure-deps` registers each resolved dep's modules rooted
+  (`package--register-rooting`). The old cross-provider collision *guard* is now narrowed
+  to **within-project** collisions only (two of your own files declaring the same module)
+  — a cross-dep or dep-vs-project collision is impossible once rooted, so detect-and-reject
+  is no longer needed there. Dep-local-name uniqueness (ADR-037) and the dep-shares-your-
+  package-name check (ADR-172) still stand.
+- **Tests:** `crates/nest/tests/package_rooted_namespaces.rs` (two deps sharing a
+  `parser` module coexist; intra-package `(:use util)` roots to `libc/util`).
+
+**Uniform root-project rooting (the Elixir model) — also IMPLEMENTED (2026-08-02).** The
+root project's own modules now root under its `:name` too: a `(defmodule buffer)` in
+project `myeditor` becomes `myeditor/buffer`, with the prefix *implied* — intra-project
+refs stay short (`(:use buffer)` roots to `myeditor/buffer`), exactly the dep mechanism
+applied to the root package. `project--root-project-rooting` (in `project-setup`)
+registers the project's modules and sets an **ambient** package context (deps nest their
+own context over it and restore back); `run-project`/`run-bundle` root the entry module;
+the checker roots the same way in **both** its module-name sites — `setup_check_imports`
+(import resolution) and the KI-17 require-reachability set — so `nest check` stays clean;
+and hot-reload brackets the context. Bugs found + fixed folding this in: (a)
+`package--module-files` was `--`-private but the project loader needs it → promoted to a
+public `package-module-files`; (b) `:name` may be a symbol *or* a string in the manifest
+→ normalized with `(name …)`; (c) an embedded std module requested while a project
+context is active (a project whose own module shares a std name, e.g. a local `json`)
+would have misrooted the *baked-in* `(defmodule json)` → the embedded-load path now clears
+the context around `%load-module-source`. **Known follow-ups (non-regressions):** LSP
+go-to/hover/rename resolution for rooted *project* modules, and `nest release` bundling of
+two dependencies that share a module name (a bundle currently loads unrooted but
+self-consistently, so simple bundles are unaffected) — both are new-scenario gaps, not
+breakage of existing behaviour, tracked for a later pass.
+
 **References.** ADR-065 (`namespaces.md` §8), ADR-037 (`packages.md`, the dep
 local-name model + the lock/resolution step that enforces this), ADR-011 (defer the
 powerful form), ADR-068/071 (the *other* ADR-071 — native extensions — is unrelated;

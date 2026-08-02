@@ -1,0 +1,92 @@
+;; Tests for `std/version` — semantic versions as data. The module exists because two
+;; consumers had each hand-rolled it (a registry ordering releases, an application
+;; checking a plugin's declared constraint), so the cases here are theirs: which release
+;; is newest, and is this constraint satisfied by the version I am.
+;;
+;; The deliberate design choice these pin: comparison reads a MISSING segment as 0, so
+;; `">= 1.2"` means 1.2.0 — what a human writing a short constraint means by it.
+(defmodule version-test (:use test) (:use version))
+
+(describe "version-core / version-valid?"
+  (test "the numeric core, ignoring any prerelease or build suffix"
+    (assert= (list 1 2 3) (version-core "1.2.3"))
+    (assert= (list 1 2 3) (version-core "1.2.3-rc.1"))
+    (assert= (list 1 2 3) (version-core "1.2.3+build.7"))
+    (assert= (list 1 2) (version-core "1.2")))
+  (test "a non-numeric segment reads as 0 rather than raising"
+    ;; lenient on purpose: this parses what a human typed in a manifest
+    (assert= (list 1 0) (version-core "1.x")))
+  (test "valid? wants three digit segments"
+    (is (version-valid? "0.1.0"))
+    (is (version-valid? "10.20.30"))
+    (is (version-valid? "1.2.3-rc.1"))
+    (refute (version-valid? "1.2"))
+    (refute (version-valid? "1.2.x"))
+    (refute (version-valid? ""))
+    (refute (version-valid? 123))))
+
+(describe "version-compare / version-newer?"
+  (test "orders on major, then minor, then patch"
+    (assert= -1 (version-compare "1.0.0" "2.0.0"))
+    (assert= 1 (version-compare "1.3.0" "1.2.9"))
+    (assert= 1 (version-compare "1.2.10" "1.2.9"))       ; numeric, not lexicographic
+    (assert= 0 (version-compare "1.2.3" "1.2.3")))
+  (test "a missing segment is 0, so 1.2 and 1.2.0 are the same version"
+    (assert= 0 (version-compare "1.2" "1.2.0"))
+    (assert= -1 (version-compare "1.2" "1.2.1")))
+  (test "newer? treats the empty string as older than everything"
+    (is (version-newer? "0.0.1" ""))
+    (refute (version-newer? "" "0.0.1"))
+    (refute (version-newer? "" ""))
+    (refute (version-newer? "1.0.0" "1.0.0"))))
+
+(describe "version-satisfies?"
+  (test "every operator, with and without a space"
+    (is (version-satisfies? "1.2.3" ">= 1.2.0"))
+    (is (version-satisfies? "1.2.3" ">=1.2.0"))
+    (is (version-satisfies? "1.2.3" "> 1.2.2"))
+    (is (version-satisfies? "1.2.3" "<= 1.2.3"))
+    (is (version-satisfies? "1.2.3" "< 2"))
+    (is (version-satisfies? "1.2.3" "= 1.2.3"))
+    (refute (version-satisfies? "1.2.3" ">= 1.3"))
+    (refute (version-satisfies? "1.2.3" "> 1.2.3"))
+    (refute (version-satisfies? "2.0.0" "< 2")))
+  (test "a bare version means ="
+    (is (version-satisfies? "1.2.3" "1.2.3"))
+    (refute (version-satisfies? "1.2.4" "1.2.3")))
+  (test "a short constraint compares on the core, so 0.3.1 satisfies >= 0.3"
+    ;; the case a plugin manifest actually writes
+    (is (version-satisfies? "0.3.1" ">= 0.3"))
+    (is (version-satisfies? "0.3.0" ">= 0.3"))
+    (refute (version-satisfies? "0.2.9" ">= 0.3")))
+  (test "no constraint is satisfied by anything"
+    (is (version-satisfies? "0.1.0" ""))
+    (is (version-satisfies? "0.1.0" "   "))
+    (is (version-satisfies? "0.1.0" nil)))
+  (test "a malformed constraint raises instead of silently passing"
+    ;; a typo'd constraint must not load a plugin into an application that can't run it
+    (is (includes? (try (version-satisfies? "1.0.0" ">=") (catch e (error-message e)))
+          "no version in constraint"))
+    (is (includes? (try (version-satisfies? "1.0.0" "~> 1.0") (catch e (error-message e)))
+          "unknown operator"))))
+
+(describe "version-satisfies-all? / version-unsatisfied — the :enhances shape"
+  (test "every named constraint met"
+    (is (version-satisfies-all? {'bedit "0.4.0"} {'bedit ">= 0.3"}))
+    (is (version-satisfies-all? {'bedit "0.4.0" 'waggle "1.0.0"}
+          {'bedit ">= 0.3" 'waggle ">= 1"})))
+  (test "an empty constraint map is satisfied by anything — an ordinary library"
+    (is (version-satisfies-all? {} {}))
+    (is (version-satisfies-all? {'bedit "0.4.0"} {})))
+  (test "a constraint naming something absent FAILS CLOSED"
+    ;; \"this plugin wants an application I am not\" — the safety case
+    (refute (version-satisfies-all? {'bedit "0.4.0"} {'hatch ">= 1.0"}))
+    (refute (version-satisfies-all? {} {'bedit ">= 0.1"})))
+  (test "a version below the constraint fails"
+    (refute (version-satisfies-all? {'bedit "0.2.0"} {'bedit ">= 0.3"})))
+  (test "unsatisfied reports what to tell the user: name, constraint, and what we have"
+    (assert= (list ['bedit ">= 0.3" "0.2.0"])
+      (version-unsatisfied {'bedit "0.2.0"} {'bedit ">= 0.3"}))
+    (assert= (list ['hatch ">= 1.0" nil])
+      (version-unsatisfied {'bedit "0.4.0"} {'hatch ">= 1.0"}))
+    (assert= '() (version-unsatisfied {'bedit "0.4.0"} {'bedit ">= 0.3"}))))

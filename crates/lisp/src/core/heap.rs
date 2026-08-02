@@ -1957,6 +1957,15 @@ pub struct Heap {
     /// survives a local GC untouched and needs no rooting. `RefCell` because
     /// `env_get` is `&self`; per-process, so never shared across threads.
     global_ic: RefCell<SymbolMap<(u64, Value)>>,
+    /// Memoized `mod/name` → `prefix/mod/name` rooting for intra-package *qualified
+    /// references* (ADR-070). A miss in the global table falls back to the rooted name
+    /// (see [`rooted_ref`](Self::rooted_ref)); this caches the symbol→symbol answer —
+    /// including the negative one (`None` = not intra-package, don't retry) — so the
+    /// fallback costs one hash lookup rather than a `format!` + intern per reference.
+    /// Keyed only by symbol, which is safe because [`set_package_context`] clears it:
+    /// the mapping is a property of the *active* package context, and that's the one
+    /// place the context changes. `RefCell` because `env_get` is `&self`; per-process.
+    rooted_ref_ic: RefCell<SymbolMap<Option<Symbol>>>,
     /// Cached `mod/` prefix → that module's public exports (`(bare, qualified)` pairs).
     /// Used ONLY by the advisory whole-project checker's direct import setup
     /// (`types::check::setup_check_imports`): a whole-project check resolves every file's
@@ -2574,6 +2583,7 @@ impl Heap {
             #[cfg(feature = "dev-tools")]
             trace_context_own: false,
             global_ic: RefCell::new(SymbolMap::default()),
+            rooted_ref_ic: RefCell::new(SymbolMap::default()),
             msg_roots: None,
             cold: None,
             check: RefCell::new(None),
@@ -2651,6 +2661,7 @@ impl Heap {
             #[cfg(feature = "dev-tools")]
             trace_context_own: false,
             global_ic: RefCell::new(SymbolMap::default()),
+            rooted_ref_ic: RefCell::new(SymbolMap::default()),
             msg_roots: None,
             cold: None,
             check: RefCell::new(None),
@@ -3297,6 +3308,10 @@ impl Heap {
         let cold = self.cold_mut();
         let prev_prefix = std::mem::replace(&mut cold.package_prefix, prefix);
         let prev_modules = std::mem::replace(&mut cold.package_modules, modules);
+        // The qualified-reference rooting memo is a property of the context we just
+        // replaced — drop it so a nested dep load doesn't inherit the outer package's
+        // answers (see `rooted_ref_ic`).
+        self.rooted_ref_ic.borrow_mut().clear();
         (prev_prefix, prev_modules)
     }
 
@@ -3327,6 +3342,49 @@ impl Heap {
             crate::core::value::symbol_name(module)
         );
         crate::core::value::intern(&rooted)
+    }
+
+    /// Root an intra-package **qualified reference** — the counterpart of
+    /// [`root_module_name`](Self::root_module_name) for a `mod/name` symbol appearing in
+    /// *code*, rather than a module name in a `(:use …)`/`(:alias …)` clause. Inside
+    /// project `bedit`, `commands/cmd-open` roots to `bedit/commands/cmd-open`.
+    ///
+    /// Without this the rooted model is asymmetric: `(:use commands)` roots its target, so
+    /// the bare names import fine, but every explicit `commands/cmd-open` — and every
+    /// `(eval 'commands/cmd-open)` behind a late-bound keymap — goes unbound. Rooting is
+    /// meant to be *implied* (ADR-070), which has to include the qualified spelling.
+    ///
+    /// The module part is everything before the **last** `/` (a global's own name never
+    /// contains one), so a nested module splits correctly: `editor/treesit/point-forward`
+    /// asks about module `editor/treesit`, which no project provides, and is left bare.
+    /// An already-rooted `bedit/commands/cmd-open` asks about `bedit/commands` — also not
+    /// in the short-name set — so rooting is idempotent. `None` = nothing to root.
+    fn rooted_ref(&self, sym: Symbol) -> Option<Symbol> {
+        if let Some(&cached) = self.rooted_ref_ic.borrow().get(&sym) {
+            return cached;
+        }
+        let answer = self.rooted_ref_uncached(sym);
+        self.rooted_ref_ic.borrow_mut().insert(sym, answer);
+        answer
+    }
+
+    /// [`rooted_ref`](Self::rooted_ref) without the memo — the actual rule.
+    fn rooted_ref_uncached(&self, sym: Symbol) -> Option<Symbol> {
+        let prefix = self.package_prefix()?;
+        let name = crate::core::value::symbol_name_ref(sym);
+        let split = name.rfind('/')?;
+        let module = crate::core::value::intern(&name[..split]);
+        if !self
+            .cold()
+            .is_some_and(|c| c.package_modules.contains(&module))
+        {
+            return None;
+        }
+        Some(crate::core::value::intern(&format!(
+            "{}/{}",
+            crate::core::value::symbol_name_ref(prefix),
+            name
+        )))
     }
 
     /// Record the bare names the current-namespace file will define, so the
@@ -4492,7 +4550,17 @@ impl Heap {
                 return Some(val);
             }
         }
-        let val = self.runtime.globals_read().get(&sym).copied();
+        if let Some(val) = self.runtime.globals_read().get(&sym).copied() {
+            self.global_ic.borrow_mut().insert(sym, (cur, val));
+            return Some(val);
+        }
+        // ADR-070: an intra-package qualified reference resolves through its rooted name
+        // (`commands/cmd-open` → `bedit/commands/cmd-open`). Only on the MISS path, so an
+        // ordinary hit pays nothing; `rooted_ref` memoizes the symbol→symbol answer, and
+        // the resolved value is cached under the ORIGINAL symbol, so a hot reference costs
+        // the same as any other after the first lookup.
+        let rooted = self.rooted_ref(sym)?;
+        let val = self.runtime.globals_read().get(&rooted).copied();
         if let Some(val) = val {
             self.global_ic.borrow_mut().insert(sym, (cur, val));
         }

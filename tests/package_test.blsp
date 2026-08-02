@@ -6,7 +6,11 @@
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test).
 
-(defmodule package-test (:use-internals package) (:use test) (:use package) (:use project))
+;; `:use-internals project` as well as `package`: the `:enhances` tests reach
+;; `project--parse-enhances`, the manifest-validation helper, the same way the rest of
+;; this suite tests `package`'s cwd-free helpers directly rather than through a verb.
+(defmodule package-test
+  (:use-internals package) (:use-internals project) (:use test) (:use package) (:use project))
 
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-pkg-")
@@ -375,6 +379,59 @@
     (assert= (project/project-parse-deps [['foo :version "1.2.0"]])
       (list (assoc (dep-registry 'foo "1.2.0") :optional false)))))
 
+;; `:enhances` — what a package plugs into (Debian's `Enhances:`). The whole point is
+;; that NOTHING here knows any application by name: the manifest parses a map, publish
+;; carries it, search passes it through as a query parameter. `bedit` below is just a
+;; symbol a package author typed, and these tests would read identically for `hatch`.
+(describe "package: :enhances (a plugin declares the application it extends)"
+  (test "the manifest parses a map of application → constraint, symbol-keyed"
+    (assert= {'bedit ">= 0.3"} (project/project--parse-enhances {'bedit ">= 0.3"}))
+    ;; string keys normalize to symbols, so a consumer looks a name up ONE way
+    (assert= {'bedit ">= 0.3"} (project/project--parse-enhances {"bedit" ">= 0.3"}))
+    (assert= {'bedit "" 'hatch ">= 1.0"}
+      (project/project--parse-enhances {'bedit "" 'hatch ">= 1.0"})))
+  (test "absent is an ordinary library, not an error"
+    (assert= {} (project/project--parse-enhances nil)))
+  (test "a manifest typo fails when the MANIFEST is read, naming the key"
+    (is (includes? (try (project/project--parse-enhances [['bedit ">= 0.3"]])
+                     (catch e (error-message e)))
+          ":enhances must be a MAP"))
+    (is (includes? (try (project/project--parse-enhances {'bedit 0.3})
+                     (catch e (error-message e)))
+          "must be a string")))
+  (test "a real manifest carries it through project-apply"
+    ;; NOT wrapped in `binding`: `project-apply` `def`s the dynvar's global ROOT (that is
+    ;; how a manifest configures the image), and a `binding` in front of it would shadow
+    ;; the write with the bound value — masking exactly what this checks. So save and
+    ;; restore the root instead, the way a manifest-reading tool would leave it.
+    (let (root (pkg-fixture-root)
+          saved *project-enhances*)
+      (make-dir (path-join root "src"))
+      (spit (path-join root "project.blsp")
+        (str "(project :name \"bedit-zig\" :version \"0.1.0\""
+          " :enhances {bedit \">= 0.1\"})\n"))
+      ;; `rest`: the `project` MACRO passes only the opts plist to `project-apply`, so
+      ;; handing it the whole `(project …)` form would shift every key by one and find
+      ;; nothing — the same mistake as reading a manifest with `plist-get` on the form.
+      (project/project-apply (rest (read-string (slurp (path-join root "project.blsp")))))
+      (assert= ">= 0.1" (get *project-enhances* 'bedit))
+      (def *project-enhances* saved)))
+  (test "the publish envelope carries it with STRING keys (JSON has no symbols)"
+    (binding (*project-enhances* {'bedit ">= 0.1"})
+      (assert= {"bedit" ">= 0.1"} (package/registry--publishable-enhances)))
+    (binding (*project-enhances* {})
+      (assert= {} (package/registry--publishable-enhances))))
+  (test "search narrows by it through a query parameter, url-encoded"
+    (assert= "http://h/api/v1/packages?q=zig"
+      (package/registry--search-url "http://h" "zig" nil))
+    (assert= "http://h/api/v1/packages?q=zig"
+      (package/registry--search-url "http://h" "zig" ""))
+    (assert= "http://h/api/v1/packages?q=zig&enhances=bedit"
+      (package/registry--search-url "http://h" "zig" "bedit"))
+    ;; the application name is opaque data — whatever it is, it is encoded, not parsed
+    (assert= "http://h/api/v1/packages?q=&enhances=my%20app"
+      (package/registry--search-url "http://h" "" "my app"))))
+
 ;; Namespace-collision detection (ADR-070). We test the cwd-free helpers
 ;; (`package--provided-modules` / `package--check-namespace-collisions`) directly,
 ;; the way slice 1 tests the verbs' helpers rather than the cwd-driven verbs.
@@ -391,17 +448,23 @@
       (spit (path-join (path-join root "src") "helpers.blsp")
         "(defmodule json \"x\")\n(defn p () 1)\n")
       (assert= (package/package--provided-modules (path-join root "src")) (list 'json))))
-  (test "two providers of the same module name collide loudly"
+  ;; Post-package-rooting (ADR-070): two *dependencies* providing the same module
+  ;; name no longer collide (they root to `a/util` vs `b/util`); the collision guard
+  ;; now only checks a project's OWN source dirs against each other. The helper is
+  ;; generic — it flags a duplicate in whatever source list it is given — so we test
+  ;; it with two of the project's own dirs, the sources `package--collision-sources`
+  ;; actually feeds it now.
+  (test "two of your own source dirs declaring the same module collide loudly"
     (let (parent (pkg-fixture-root)
           a (path-join parent "a")
           b (path-join parent "b"))
       (pkg-write-project a "a" "util" "(defn f () 1)" "")
       (pkg-write-project b "b" "util" "(defn g () 2)" "")
       (is (includes? (try
-                       (package/package--check-namespace-collisions (list (list "dependency 'a'"
+                       (package/package--check-namespace-collisions (list (list "your project"
                                                                             (path-join a
                                                                               "src"))
-                                                                      (list "dependency 'b'"
+                                                                      (list "your project"
                                                                         (path-join b "src"))))
                        (catch e e))
             "collision"))))

@@ -65,6 +65,33 @@ trigger, docs/type-soundness-reload.md).")
 ;;     after a failed one — the failure is already reported, and its own
 ;;     globals didn't change). Its errors are caught separately so a broken
 ;;     callback (e.g. a checker hiccup) can't take the watcher down either.
+;; ── package-rooted reload (ADR-070) ──────────────────────────────────────────
+;; Re-loading a DEPENDENCY file must re-establish its package context, or its
+;; `(defmodule b)` would drop from the rooted `foo/b` to a bare `b` on every reload
+;; (the flat model had no such hazard; rooting introduces it). We bracket the context
+;; in Brood here — the same pattern the loader's `require--force-package` uses — so the
+;; Rust reload primitive stays package-agnostic. A root-project / std / loose file has
+;; no registered key and reloads exactly as before.
+(defn reload--package-key (path)
+  ;; The rooted key (`"foo/b"`) whose file is `path`, or nil — reverse of
+  ;; `*package-module-files*` (a root registry the package manager fills).
+  (fold (fn (found kv) (if found found (if (= (second kv) path) (first kv) nil)))
+    nil *package-module-files*))
+
+(defn reload--in-package-context (path thunk)
+  ;; Run `thunk` under `path`'s package context if it is a dep module, restoring the
+  ;; enclosing context on both the normal and error paths; else run it as-is.
+  (let (key (reload--package-key path))
+    (if (nil? key)
+      (thunk)
+      (let (prefix  (symbol (first (string-split key "/")))
+            modules (get *package-modules-of* (name prefix))
+            prev    (%set-package-context prefix modules)
+            restore (fn () (%set-package-context (first prev) (second prev))))
+        (try
+          (let (result (thunk)) (restore) result)
+          (catch e (do (restore) (throw e))))))))
+
 (defn reload--loop (path last &optional on-reload)
   (let (now (file-mtime path))
     (cond
@@ -78,7 +105,7 @@ trigger, docs/type-soundness-reload.md).")
       else (do
              (try
                (do
-                 (reload-defs path)
+                 (reload--in-package-context path (fn () (reload-defs path)))
                  (println "[reload]" path)
                  (when on-reload
                    (try
@@ -125,7 +152,7 @@ trigger, docs/type-soundness-reload.md).")
         (println "[reload] +" p)
         (try
           (do
-            (load p)
+            (reload--in-package-context p (fn () (load p)))
             (when on-reload
               (try
                 (on-reload p)

@@ -151,6 +151,49 @@
   (test "backward-paragraph at buffer start stays at 0"
     (assert= (buffer-point (backward-paragraph (make-buffer "a\nb\n\nc"))) 0)))
 
+(describe "buffer sentence motion (M-a / M-e)"
+  ;; "One. Two? Three!" — terminators at 3, 8, 15; sentence starts at 0, 5, 10.
+  (def sentences "One. Two? Three!")
+  (defn fwd-sentence-at (point) (buffer-point (forward-sentence (goto-char (make-buffer sentences) point))))
+  (defn bwd-sentence-at (point) (buffer-point (backward-sentence (goto-char (make-buffer sentences) point))))
+  (test "forward-sentence lands just past each terminator, then at the buffer's end"
+    (assert= (fwd-sentence-at 0) 4)
+    (assert= (fwd-sentence-at 4) 9)
+    ; no further terminator → paragraph end
+    (assert= (fwd-sentence-at 9) 16)
+    (assert= (fwd-sentence-at 16) 16))
+  (test "backward-sentence goes to the current sentence's start, then the previous one's"
+    ; start of "Three!"
+    (assert= (bwd-sentence-at 16) 10)
+    ; at a start → the previous start
+    (assert= (bwd-sentence-at 12) 10)
+    (assert= (bwd-sentence-at 10) 5)
+    (assert= (bwd-sentence-at 5) 0)
+    (assert= (bwd-sentence-at 0) 0))
+  (test "a closing quote after the terminator is part of the sentence end"
+    ;; `He said "stop." Then left.` — the `.` is at 13, its closing `"` at 14
+    (let (txt "He said \"stop.\" Then left.")
+      (assert= (buffer-point (forward-sentence (make-buffer txt))) 15)))
+  (test "sentence motion is bounded by the paragraph — it never crosses a blank line"
+    ;; "One. Two.\n\nThree." — the blank line starts at 10
+    (let (txt "One. Two.\n\nThree.")
+      (assert= (buffer-point (forward-sentence (goto-char (make-buffer txt) 5))) 9)
+      ; stops at the paragraph boundary, not in "Three."
+      (assert= (buffer-point (forward-sentence (goto-char (make-buffer txt) 9))) 10)
+      ; floors at its own paragraph's start
+      (assert= (buffer-point (backward-sentence (goto-char (make-buffer txt) 14))) 11))))
+
+(describe "back-to-indentation (M-m)"
+  (test "point lands on the line's first non-whitespace character"
+    (let (b (make-buffer "  hi\nthere"))
+      (assert= (buffer-point (back-to-indentation b)) 2)
+      ; from anywhere on the line
+      (assert= (buffer-point (back-to-indentation (goto-char b 4))) 2)))
+  (test "an all-whitespace line lands at its end"
+    (assert= (buffer-point (back-to-indentation (make-buffer "   \nx"))) 3))
+  (test "an unindented line is a no-op at the line's start"
+    (assert= (buffer-point (back-to-indentation (goto-char (make-buffer "hi\nthere") 1))) 0)))
+
 (describe "buffer editing is immutable"
   (test "insert advances point; the original is untouched"
     (let (b (goto-char (make-buffer "hello world") 5))

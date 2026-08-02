@@ -244,6 +244,19 @@ line editor's M-f/M-b notion of a word."
         i (buffer--scan-bwd text (get buf :point) (fn (c) (not (buffer--word-char? c)))))
     (goto-char buf (buffer--scan-bwd text i buffer--word-char?))))
 
+;; ---- indentation motion (M-m) -----------------------------------------------
+;; Lives here rather than with the line motions above because it shares the word
+;; section's `buffer--scan-fwd` walk — it's `beginning-of-line` with the indent skipped.
+
+(defn back-to-indentation (buf)
+  "Point moved to the first non-whitespace character of its current line — the
+indentation skipped (Emacs `back-to-indentation`, M-m). Lands at the line's end when
+the line is blank or all whitespace."
+  (let (bol (beginning-of-line buf)
+        eol (get (end-of-line bol) :point))
+    (goto-char bol
+      (buffer--scan-fwd (buffer-text bol) (get bol :point) eol buffer--horizontal-space?))))
+
 ;; ---- paragraph motion (M-{ / M-}) -------------------------------------------
 ;; A paragraph is a run of non-blank lines bounded by blank (empty / whitespace-only)
 ;; lines. Forward motion skips any blank lines then the paragraph, landing at the next
@@ -283,6 +296,66 @@ buffer if none) — Emacs `forward-paragraph` (M-})."
         afterblank (buffer--scan-lines buf (dec line) n -1 true)
         start (buffer--scan-lines buf afterblank n -1 false))
     (goto-char buf (rope-line->char rope (max 0 (if (< start 0) 0 (inc start)))))))
+
+;; ---- sentence motion (M-a / M-e) --------------------------------------------
+;; A sentence ends at `.`/`?`/`!`, any closing quotes/brackets, then whitespace or the
+;; end of the text — ONE space is enough (Emacs' `sentence-end-double-space` off, which
+;; is what people set it to). Both motions are bounded by the enclosing paragraph, so
+;; they never run past a blank line — the same containment Emacs gives them.
+
+(def buffer--sentence-enders (list "." "?" "!"))
+(def buffer--sentence-closers (list "\"" "'" ")" "]" "}"))
+
+(defn buffer--sentence-space? (c) (or (= c " ") (= c "\t") (= c "\n")))
+
+(defn buffer--sentence-closers-end (text i n)
+  "Index past the run of closing quotes/brackets at `i` — what may sit between a
+sentence's terminator and the whitespace after it (`he said \"stop.\"`)."
+  (if (or (>= i n) (not (includes? buffer--sentence-closers (char-at text i))))
+    i
+    (buffer--sentence-closers-end text (inc i) n)))
+
+(defn buffer--sentence-end-at (text i n)
+  "Index just past a sentence ending AT `i` — a terminator, its closing quotes/brackets,
+then whitespace or `n` — or nil when `i` doesn't end a sentence."
+  (if (not (includes? buffer--sentence-enders (char-at text i)))
+    nil
+    (let (j (buffer--sentence-closers-end text (inc i) n))
+      (if (or (>= j n) (buffer--sentence-space? (char-at text j))) j nil))))
+
+(defn buffer--scan-sentence-fwd (text i limit)
+  "Index just past the first sentence end at or after `i`, capped at `limit` (the
+paragraph's end); `limit` when the paragraph holds no further sentence end."
+  (if (>= i limit)
+    limit
+    (let (e (buffer--sentence-end-at text i limit))
+      (if (nil? e) (buffer--scan-sentence-fwd text (inc i) limit) (min e limit)))))
+
+(defn buffer--sentence-start-before (text i limit best)
+  "The greatest sentence start `< limit`, scanning forward from `i` and carrying `best`
+(seeded with the paragraph start). A sentence start is the paragraph start, or the index
+just past a sentence end with the whitespace after it skipped."
+  (let (e (if (>= i limit) nil (buffer--sentence-end-at text i limit)))
+    (cond
+      (>= i limit) best
+      (nil? e) (buffer--sentence-start-before text (inc i) limit best)
+      else (let (s (buffer--scan-fwd text e limit buffer--sentence-space?))
+             (if (>= s limit) best (buffer--sentence-start-before text s limit s))))))
+
+(defn forward-sentence (buf)
+  "Point moved just past the end of the current sentence — the paragraph's end when it
+holds no further sentence terminator (Emacs `forward-sentence`, M-e)."
+  (let (point (get buf :point)
+        limit (max point (get (forward-paragraph buf) :point)))
+    (goto-char buf (buffer--scan-sentence-fwd (buffer-text buf) point limit))))
+
+(defn backward-sentence (buf)
+  "Point moved to the start of the current sentence — the previous sentence's start when
+point already sits at one, the paragraph's start when there is no earlier sentence
+(Emacs `backward-sentence`, M-a)."
+  (let (point (get buf :point)
+        floor (min point (get (backward-paragraph buf) :point)))
+    (goto-char buf (buffer--sentence-start-before (buffer-text buf) floor point floor))))
 
 ;; ---- mark -------------------------------------------------------------------
 
