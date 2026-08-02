@@ -6,7 +6,7 @@ records, not open bugs. **KI-17** (the checker reachability gap) is now **FIXED*
 **KI-18** (effect duplication on a deopt) and **KI-19** (call-head evaluation order) are
 both now **FIXED**, as is **KI-20** (a fast link ran the callee against the caller's IC
 block — a cold cache, never a wrong answer), as is **KI-21** (`nest run --for` /
-`--watch` emitted a pre-ADR-150 `~p` pin and failed on every file). **No open issues.**
+`--watch` emitted a pre-ADR-150 `~p` pin and failed on every file). **KI-25** (five JIT/VM suites cannot be re-run in one image) is **open**.
 This file is the condensed record — what each was, how it was fixed, and the regression
 test that guards it — so a recurrence is recognizable. For the narrative discovery
 writeup of the scheduler race, see
@@ -17,6 +17,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-25 | five JIT/VM suites cannot be re-run in one image (`--repeat-until-failure` fails on iteration 2) | ⬜ **open** (found 2026-08-02) |
 | KI-24 | `eval`'d code cannot forward-reference a name a later `eval` defines (regression, 97d63eda) | ✅ **fixed** 2026-08-01 |
 | KI-23 | the KI-22 lost-update shape also exists in ~10 std-module registries | ✅ **fixed** 2026-08-02 |
 | KI-22 | concurrent registration lost ~40% of registrations (15 prelude registries) | ✅ fixed 2026-08-01 |
@@ -46,6 +47,46 @@ ADRs / topic docs.
 transient — each kept as a record with its regression test, so a recurrence is recognizable.
 
 ---
+
+## KI-25 — five JIT/VM suites cannot be re-run in one image · **open, found 2026-08-02**
+
+**Symptom.** Five suites pass on the first run and fail on the second *within the same
+image* — that is, under `--repeat-until-failure`, at every seed tried (0 and 5), which rules
+out ordering:
+
+| suite | shape |
+|---|---|
+| `jit_self_rebind_test` | 1 of 2 fails on iteration 2 |
+| `jit_shared_spawn_test` | 1 of 4 |
+| `pid_identity_test` | its single test — and it is ALREADY `:isolated` |
+| `vm_call_head_order_test` | 2 of 3 |
+| `vm_selfcall_reload_test` | 1 of 3 |
+
+Found by a sweep of every suite in both repos (3 iterations × 2 seeds). `brood-edit` came
+back completely clean; these five were the only hits, and they reproduce on a working tree
+with the day's changes stashed, so they predate them.
+
+**Why it matters more than "who re-runs a suite twice".** `--repeat-until-failure` is *the*
+tool for finding flakes, and `nest test --failed` re-runs in one image too. While these
+five fail on a second iteration, the tool cannot be used across brood's suite — a real flake
+somewhere else is invisible behind them. (That is how it was found: hunting flakes elsewhere.)
+
+**What is known.** These are hot-reload / self-call / tiering tests: they redefine globals
+and assert on how the VM or JIT re-links afterwards, so the natural theory is "iteration 2
+starts from iteration 1's redefined state". That explains four of them, and `:isolated`
+(which runs a unit alone against the clean post-load baseline and rolls back its `def`s) is
+the ordinary fix. It does **not** explain `pid_identity_test`, which is already isolated and
+still fails — so something outside the global table persists across iterations: a JIT tier
+election, an IC block, a pid counter, or an arm-keyed cache.
+
+**Deliberately not fixed here.** Diagnosing what survives an isolated re-run is JIT-internal
+work, and this is the area under active development elsewhere; marking suites `:isolated`
+without understanding `pid_identity_test` would paper over the one case that is informative.
+Left for whoever holds the JIT work, with the sweep recipe above to reproduce in one command:
+
+```bash
+nest test tests/pid_identity_test.blsp --repeat-until-failure 3 --seed 0
+```
 
 ## KI-24 — an `eval`'d definition cannot forward-reference another `eval`'d name · **fixed 2026-08-01**
 
