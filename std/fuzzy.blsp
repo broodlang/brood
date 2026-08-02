@@ -23,9 +23,17 @@ candidate, then lexicographic); an empty query returns the candidates unchanged.
 
 (defn fuzzy--next (cand c i n)
   "The index ≥ `i` of the next `c` (a 1-char string) in `cand`, or -1. Uses the native
-`index-of` rather than a per-char Brood recursion — this scan is the dominant cost
-of ranking, so the native search is a large speedup over thousands of candidates. (`n`,
-the length, is now implicit in `index-of`.)"
+`index-of` rather than a per-char Brood recursion. (`n`, the length, is now implicit in
+`index-of`.)
+
+This used to claim the scan was \"the dominant cost of ranking\". It is not, and the claim
+cost real time: three separate fixes made the scan much cheaper (`index-of`'s `from` stopped
+copying the suffix, char↔byte conversion became O(1) via a cached char count, and
+`%str-index-of` stopped copying its haystack), and ranking 4000 repo-style paths moved only
+116 → 106 ms. Measured per phase over those same 4000 candidates: `fuzzy-match` 78 ms of a
+112 ms total, against ~1 ms each for `lower` and `string-length` across the whole list. So
+the cost is the **interpreted per-candidate work** — the subsequence walk and the scoring
+recursion — not the native search underneath it. Optimise there, and measure first."
   (if (>= i n) -1 (index-of cand c i)))
 
 (defn fuzzy--positions (qlow clow qi qn ci cn acc)

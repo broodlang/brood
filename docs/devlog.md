@@ -14407,3 +14407,44 @@ a wrong ASCII verdict would split a character. Checked every `[i, j)` range of a
 accented, emoji, mixed, all-non-ASCII, empty and single-char string against a char-level
 reference built from `string->list` — all match — plus the 2-arg form and both error cases.
 That differential is now a permanent test.
+
+## 2026-08-02 — correcting the claims the measurements contradicted
+
+Housekeeping pass over statements in the tree that this session's measurements proved wrong.
+Three of them, all comments asserting a cost without evidence — the exact failure mode the
+sweep's own lesson names ("a comment asserting linearity is not evidence").
+
+**1. `fuzzy--next`: "this scan is the dominant cost of ranking."** It is not, and that claim
+cost real time — I twice predicted a string fix would pay off in fuzzy ranking *because of
+it*. Three separate fixes made the scan much cheaper (`from` stopped copying the suffix,
+char↔byte conversion became O(1), `%str-index-of` stopped copying its haystack) and ranking
+4000 repo-style paths moved only **116 → 106 ms**. So I measured the phases instead of
+guessing again:
+
+| over the same 4000 candidates | |
+|---|---|
+| full `fuzzy-filter` | 112 ms |
+| `map fuzzy-match` | **78 ms** |
+| `map lower` | 1 ms |
+| `map string-length` | 1 ms |
+| `map identity` (loop floor) | 2 ms |
+
+The cost is the interpreted per-candidate work — the subsequence walk and the scoring
+recursion — not the native search underneath. The docstring now says that, with the numbers.
+
+**2. The prelude's string-library header: "`substring` is O(index), so a full scan is O(n²)."**
+True when written, wrong now: `substring` takes a byte-slice fast path on pure-ASCII text, so
+a scan is linear there and quadratic only when a multi-byte character is present. Rather than
+assert the new claim, I measured it — char-by-char over 4k/16k/64k chars: **ASCII 6/7/27 ms
+(ratios 1.16, 3.85)** vs **non-ASCII 2/21/242 ms (10.50, 11.52)**. Both numbers are in the
+comment now.
+
+**3. My own `index-of` comment** implied the suffix copy mattered for `fuzzy--next`. Reworded
+to say where it *measurably* mattered (`last-index-of`, 540 → 1 ms) and to point at the fuzzy
+note before anyone assumes it is a bottleneck.
+
+Also refreshed `docs/handoff.md` §3 thread 1, which still described the sweep as it stood five
+fixes ago — including the fact that `format-source` was cleared as linear and that call was
+wrong, since a future reader is more likely to repeat that mistake than any of the fixes.
+
+Suite 929/929, `nest check` clean, rustfmt clean.
