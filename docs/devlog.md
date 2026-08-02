@@ -14306,3 +14306,52 @@ documented contract — re-checked across 265 files: 0 failures.
 (An initial comparison against the *installed* Jul-30 binary showed 3 diffs and briefly looked
 alarming. That binary predates deliberate formatter changes since then, including the
 comment-hoisting removal. The right control is HEAD, not whatever is on `PATH`.)
+
+## 2026-08-02 — the last quadratic row: a cached char count, and `expect_string`'s hidden copy
+
+Went after `inc-scan`, the one row I had left superlinear (19×) with a note saying it needed
+char-length metadata cached on heap strings. That diagnosis was right and insufficient — the
+fix took two changes, and the one I had *not* predicted was the one that mattered.
+
+**(a) The predicted fix: cache the char count on the string slot.** Brood indexes strings by
+code point but stores UTF-8, so every char index needs a byte offset. `LocalString` now
+carries `chars`, computed at construction (which already walks the bytes to copy them). It
+buys two things: `string-length` becomes O(1) instead of `chars().count()`, and
+`chars == as_str().len()` **is** the pure-ASCII test — for an ASCII string a char index *is*
+its byte offset, so conversion in both directions is O(1). The same struct now backs all
+three regions (LOCAL, PRELUDE, and RUNTIME, which was a bare `boxcar::Vec<String>`), so the
+count rides along through GC promotion, `def` into the shared region, and cross-process copy.
+
+That alone took `inc-scan` from 540 ms to 38 ms — but pushing the base up showed ratios of
+**12.33 then 30.10**. Still quadratic. Something else was O(n) per call.
+
+**(b) The real one: `expect_string` copies.** It is `heap.string(id).to_string()` — an owned
+`String`, i.e. **the whole argument is copied on every builtin call**. Invisible on a short
+string; on a big haystack it re-copied the entire text per search probe, dwarfing everything
+else. There was already a precedent for the fix sitting in the same file: `expect_rope_ref`,
+borrowed, with a comment explaining this exact reasoning for the editor's hot path. Added
+`expect_string_ref` and used it in the two search primitives:
+
+| | 1600 / 6400 / 25600 | ratios |
+|---|---|---|
+| before | 3 / 37 / 1114 ms | 12.33 / 30.10 |
+| after | 1 / 7 / 15 ms | 7.0 / **2.14** |
+
+**1114 ms → 15 ms, 74×**, and the ratio now falls — the warm-up signature, i.e. linear. Every
+row in the sweep is linear; the `SUPERLINEAR` marker is gone from the harness output.
+
+**`expect_string` is used ~120 times across the builtins.** Every one of those is a per-call
+copy of a string argument. Only the two search primitives were converted here — the rest is a
+real open seam, and probably the highest-value string work left.
+
+**Two predictions of mine were wrong, both about fuzzy ranking.** I expected the offset fix to
+pay off there (its own comment calls that scan "the dominant cost of ranking"), then expected
+the same of this one. Measured: 116 → 111 → 112 ms. Unchanged. Candidates are ~55 chars, so
+neither the conversion nor the copy dominates; whatever fuzzy's cost is, it is not string
+search, and I should stop asserting it is without profiling.
+
+New tests pin the cache across every way a string can move — GC promotion, a `str`-built
+string, one over `SHARED_BLOB_THRESHOLD` (the shared-blob construction path), a round-trip
+through another process — plus non-ASCII search agreeing with the char count, since that
+field doubles as the ASCII flag. One of them caught me writing a byte count where a char
+count belonged, which is the mistake the whole change is about.

@@ -217,6 +217,41 @@
   (test "last-index-of on an empty haystack"
     (assert= (last-index-of "" "a") -1)
     (assert= (last-index-of "" "") -1))
+  ;; `string-length` reads a char count cached on the heap slot (it used to be a full
+  ;; `chars().count()` scan). The cache is written at construction and must survive every
+  ;; way a string can move: GC promotion to the old generation, `def` into the shared
+  ;; RUNTIME region, and a deep copy across a process boundary. A stale or missing count
+  ;; would show as a wrong length or a wrong index — and, because the same field doubles
+  ;; as the "is this pure ASCII" test for char↔byte conversion, as wrong SEARCH results on
+  ;; non-ASCII text specifically.
+  (test "string-length counts code points, not bytes"
+    (assert= 5 (string-length "hello"))
+    (assert= 5 (string-length "héllo"))
+    (assert= 3 (string-length "a😀b"))
+    (assert= 0 (string-length ""))
+    (assert= 2 (string-length "😀😀")))
+  (test "the length is right for a freshly built string, not just a literal"
+    (assert= 11 (string-length (str "héllo" " " "wörld")))
+    (assert= 4 (string-length (substring "héllo wörld" 0 4)))
+    (assert= 3 (string-length (apply str (repeat 3 "é"))))
+    ;; 1300 chars / 2600 BYTES, and over SHARED_BLOB_THRESHOLD — so this also covers the
+    ;; shared-blob construction path, where the count is measured through the blob rather
+    ;; than an inline String.
+    (assert= 1300 (string-length (apply str (repeat 1300 "é")))))
+  (test "the length survives a round-trip through another process"
+    ;; A send deep-copies into the receiver's heap, rebuilding the slot — and so its count.
+    (let (me (self))
+      (spawn (send me [:len (string-length "héllo 😀 wörld")]))
+      (assert= 13 (receive ([:len n] n) (after 5000 :timeout)))))
+
+  (test "search on non-ASCII text agrees with the char count"
+    ;; If the ASCII flag were computed wrongly, these would return byte offsets.
+    (let (s "héllo wörld héllo")
+      (assert= 17 (string-length s))
+      (assert= 12 (index-of s "héllo" 1))
+      (assert= 12 (last-index-of s "héllo"))
+      (assert= 7 (index-of s "ö"))))
+
   (test "last-index-of finds the last of many, at scale"
     ;; 4000 occurrences: the old forward-scan-per-match shape was quadratic here.
     (let (s (apply str (repeat 4000 "xyNEEDLE")))

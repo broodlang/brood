@@ -68,6 +68,24 @@ pub(super) fn expect_rope(heap: &Heap, who: &str, v: Value) -> Result<ropey::Rop
     )
 }
 
+/// Require a string, returned **borrowed** — no copy. The string sibling of
+/// [`expect_rope_ref`], and for the same reason: [`expect_string`] hands back an owned
+/// `String`, i.e. it **copies the whole string on every call**. That is invisible on a
+/// short argument and quadratic on a long one — an incremental search over one big string
+/// re-copied the haystack per probe, which dominated even after the char↔byte conversion
+/// was made O(1). Use this for any builtin that only *reads* its string argument; reach
+/// for `expect_string` only when an owned value is genuinely needed (because the heap is
+/// mutated afterwards, or the value is moved into a fresh allocation).
+pub(super) fn expect_string_ref<'h>(
+    heap: &'h Heap,
+    who: &str,
+    v: Value,
+) -> Result<crate::core::heap::SlabRef<'h, str>, LispError> {
+    expect!(heap, who, v, "string",
+        Value::Str(id) => heap.string(id),
+    )
+}
+
 /// Require a rope, returned **borrowed** — no clone. For the read-only query
 /// builtins (length/line/slice/…), all of ropey's queries take `&self`, so the
 /// heap borrow can be held for the duration. Use this instead of `expect_rope`
