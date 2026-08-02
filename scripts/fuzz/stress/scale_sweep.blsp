@@ -51,9 +51,16 @@
 ;; code-point vector with a threaded length, like `url.blsp` / `csv.blsp`. 1583 ms -> 109 ms
 ;; at 3200 lines. NOTE it has no in-tree callers — a latent bug in a public std module.
 ;;
-;; Next candidate, unmeasured: `stream--lines-fetch` (std/stream.blsp) re-`substring`s the
-;; rest of its buffer per line, and `(str buf chunk)` recopies on refill. Bounded by CHUNK
-;; size rather than stream size, so it is smaller than it looks — measure before fixing.
+;; 2026-08-02: `stream-lines` WAS quadratic INSIDE a chunk — it re-`substring`ed the rest of
+;; the buffer per line. The prediction that it is bounded by chunk size held exactly: a
+;; 64-line drip measured 4.50/4.27 (linear) while one chunk holding k lines measured
+;; 11.50/13.17. That matters because one big chunk is the normal case — a 64 KB socket read
+;; is ~1700 short lines. Now one `string-split` per chunk with the complete lines queued:
+;; 303 ms -> 39 ms at 3200 lines in one chunk.
+;;
+;; Its row reads ~5-8x at small N and 1.82x from 3200->12800 — a ratio that FALLS as the
+;; base grows is warm-up, not a quadratic (the same signature that cleared `proc/gen
+;; gen-call`). 800 -> 12800 is 5 -> 71 ms, i.e. 14x for 16x of input.
 ;;
 ;; `format format-source` measured 3.80x / 4.12x / 4.64x — LINEAR at realistic sizes,
 ;; despite `format-cst-root--walk` accumulating with `(str acc …)` per top-level form.
@@ -64,6 +71,7 @@
 (require 'template)
 (require 'format)
 (require 'ansi)
+(require 'stream)
 
 (def n (let (e (getenv "N")) (if e (string->number e) 2000)))
 
@@ -152,6 +160,13 @@
 (defn colored-of (k) (apply str (repeat k "\e[32mok\e[0m  some test name here\r\n")))
 (defn ansi-strip (k) (ansi/strip-ansi (colored-of k)))
 
+;; ---- stream-lines: k lines arriving in ONE chunk ----------------------------
+;; The drip case (many small chunks) was always linear; this is the shape that was not.
+
+(defn stream-lines-1chunk (k)
+  (let (blob (apply str (repeat k "some log line of moderate length here\n")))
+    (count (stream/stream-to-list (stream/stream-lines (stream/stream-from-list (list blob)))))))
+
 ;; ---- string search: reverse, and a forward incremental scan -----------------
 
 (defn doc-of (k) (apply str (repeat k "lorem ipsum dolor NEEDLE sit amet consectetur ")))
@@ -171,5 +186,6 @@
 (row "template    render  " n tmpl-render)
 (row "format      fmt-src " n fmt-source)
 (row "ansi        strip   " n ansi-strip)
+(row "stream      lines-1c" n stream-lines-1chunk)
 (row "string      last-idx" n last-idx)
 (row "string      inc-scan" n inc-scan)   ; known-quadratic, see header

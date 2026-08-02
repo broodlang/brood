@@ -317,35 +317,62 @@ The last vector may be shorter if the source isn't a multiple of `n`."
   "A stream that takes string chunks from `s` and emits complete lines
 (trailing `\\r\\n` or `\\n` stripped). The final non-empty buffer fragment
 after EOF is emitted as a last line (for streams without a trailing newline)."
-  (spawn (stream--lines-outer s "")))
+  (spawn (stream--lines-outer s "" ())))
 
-(defn stream--lines-outer (up buf)
+;; `buf` is the incomplete trailing fragment; `pending` the complete lines already split
+;; out of the last chunk, waiting to be pulled one per `:next`.
+;;
+;; It used to hold only `buf` and, per line, `index-of` + two `substring`s — the second of
+;; which copied the WHOLE REST of the buffer. That is O(lines × buffer) *within one chunk*:
+;; harmless on a line-at-a-time drip (measured 4.50/4.27, linear), but 11.50 then 13.17 per
+;; 4× when one chunk carries many lines — which is the normal case for a 64 KB socket read
+;; (~1700 short lines) or a file slurped and streamed. Splitting the chunk once instead
+;; makes both shapes linear.
+(defn stream--lines-outer (up buf pending)
   (receive
-    ([:next r] (stream--lines-fetch up buf r))
+    ([:next r] (stream--lines-fetch up buf pending r))
     (:stream-close (stream-close up))))
 
-(defn stream--lines-fetch (up buf r)
-  ;; Scan buf for a newline; if found emit the line and recurse with the rest.
-  ;; If not found, ask upstream for more data.
-  (let (i (index-of buf "\n"))
-    (if (>= i 0)
-      (let (end (if (and (> i 0) (= (char-at buf (- i 1)) "\r")) (- i 1) i)
-            line (substring buf 0 end)
-            rest (substring buf (+ i 1) (string-length buf)))
-        (send r [:stream-val line])
-        (stream--lines-outer up rest))
+(defn stream--lines-fetch (up buf pending r)
+  (if (empty? pending)
+    ;; Nothing split out yet — pull upstream. `(str buf chunk)` still recopies, but `buf`
+    ;; is only the fragment after the last newline, not the whole unconsumed buffer.
+    (do
+      (send up [:next (self)])
+      (receive
+        ([:stream-val chunk] (stream--lines-split up (str buf chunk) r))
+        (:stream-done
+          ;; Flush remaining buffer as the last line if non-empty.
+          (if (= buf "")
+            (send r :stream-done)
+            (do
+              (send r [:stream-val buf])
+              (stream--done-loop))))
+        ([:stream-err m] (send r [:stream-err m]))))
+    (do
+      (send r [:stream-val (first pending)])
+      (stream--lines-outer up buf (rest pending)))))
+
+;; One `string-split` per chunk. `string-split` always returns at least one element and its
+;; LAST element is the fragment after the final separator ("" when the chunk ended on one),
+;; so that element is the new `buf` and everything before it is a complete line.
+(defn stream--lines-split (up all r)
+  (let (parts (string-split all "\n")
+        n (count parts)
+        tail (nth parts (dec n))
+        lines (map stream--strip-cr (take (dec n) parts)))
+    (if (empty? lines)
+      ;; No newline in the chunk — keep buffering and ask again.
+      (stream--lines-fetch up tail () r)
       (do
-        (send up [:next (self)])
-        (receive
-          ([:stream-val chunk] (stream--lines-fetch up (str buf chunk) r))
-          (:stream-done
-            ;; Flush remaining buffer as the last line if non-empty.
-            (if (= buf "")
-              (send r :stream-done)
-              (do
-                (send r [:stream-val buf])
-                (stream--done-loop))))
-          ([:stream-err m] (send r [:stream-err m])))))))
+        (send r [:stream-val (first lines)])
+        (stream--lines-outer up tail (rest lines))))))
+
+(defn stream--strip-cr (line)
+  "Drop one trailing `\\r`, so `\\r\\n` and `\\n` line endings both yield the bare line."
+  (if (ends-with? line "\r")
+    (substring line 0 (dec (string-length line)))
+    line))
 
 ;; ---- terminals --------------------------------------------------------------
 ;; These consume the stream in the calling process (no extra spawn).
