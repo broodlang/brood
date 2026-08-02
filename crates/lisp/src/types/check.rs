@@ -459,7 +459,8 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
     // eval, so nothing LOCAL is held across the `require` eval in pass B (which can collect
     // and relocate handles). Holding a parsed `Value` across that eval was a use-after-GC.
     enum Clause {
-        Use(Symbol, Option<Vec<Symbol>>), // (module, Some(only-subset) | None = all public)
+        Use(Symbol, Option<Vec<Symbol>>), // (module, Some(:only subset) | None = all public)
+        UseExcept(Symbol, Vec<Symbol>),   // (:use mod :exclude [names]) — all public minus names
         Alias(Symbol, Symbol),            // (short-prefix-name, module)
         UseInternals(Symbol),             // (:use-internals mod) — ADR-146 grant
     }
@@ -485,16 +486,24 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                 let Some(&Value::Sym(mod_sym)) = citems.get(1) else {
                     continue;
                 };
-                // `:only`/`:refer` marker → refer just the listed names; else all public.
-                let subset = match (citems.get(2), citems.get(3)) {
-                    (Some(Value::Keyword(m)), Some(sub))
-                        if value::symbol_is(*m, "only") || value::symbol_is(*m, "refer") =>
-                    {
-                        // `:only [a b]` uses a VECTOR literal (also accepts a list), so read it
-                        // with `seq_items` (vector + list) — NOT `list_items` (cons-only), which
-                        // would miss a vector and silently fall through to "import all". Read-only,
-                        // no alloc → no GC, so holding `items`/`citems` across it is safe.
-                        heap.seq_items(*sub).ok().map(|ns| {
+                // `:only [a b]` → refer just those; `:exclude [a b]` → all public minus
+                // those; no marker → all public. Mirrors the runtime `defmodule--use-clause`
+                // vocabulary exactly (`:refer` is not a marker — the runtime rejects it, and
+                // the checker's compile pass surfaces that as a "does not compile" diagnostic).
+                let marker = citems.get(2);
+                let is_only =
+                    matches!(marker, Some(Value::Keyword(m)) if value::symbol_is(*m, "only"));
+                let is_exclude =
+                    matches!(marker, Some(Value::Keyword(m)) if value::symbol_is(*m, "exclude"));
+                if is_only || is_exclude {
+                    // `:only`/`:exclude [a b]` uses a VECTOR literal (also accepts a list), so
+                    // read it with `seq_items` (vector + list) — NOT `list_items` (cons-only),
+                    // which would miss a vector. Read-only, no alloc → no GC, so holding
+                    // `items`/`citems` across it is safe.
+                    let names: Vec<Symbol> = citems
+                        .get(3)
+                        .and_then(|sub| heap.seq_items(*sub).ok())
+                        .map(|ns| {
                             ns.iter()
                                 .filter_map(|n| match n {
                                     Value::Sym(s) => Some(*s),
@@ -502,10 +511,15 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                                 })
                                 .collect()
                         })
+                        .unwrap_or_default();
+                    if is_only {
+                        clauses.push(Clause::Use(mod_sym, Some(names)));
+                    } else {
+                        clauses.push(Clause::UseExcept(mod_sym, names));
                     }
-                    _ => None,
-                };
-                clauses.push(Clause::Use(mod_sym, subset));
+                } else {
+                    clauses.push(Clause::Use(mod_sym, None));
+                }
             } else if value::symbol_is(*kw_sym, "use-internals") {
                 let Some(&Value::Sym(mod_sym)) = citems.get(1) else {
                     continue;
@@ -537,30 +551,41 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
     // PASS B — apply. Only `Symbol`s (Copy, GC-stable) are held, so the `require` eval below
     // (standalone-file path) can safely collect. `module_public_exports` re-reads globals
     // fresh; `add_import` takes `Symbol`s.
+    // Load `mod_sym` if absent (no `mod/*` globals) — the standalone path; in a
+    // whole-project check it's already loaded, so this is a no-op. Advisory: any
+    // load error is swallowed (the checker never gates on a missing module).
+    fn ensure_loaded(heap: &mut Heap, mod_sym: Symbol, prefix: &str) {
+        if deps::obs_module_exports(heap, prefix).is_empty() {
+            let quoted = heap.list(vec![
+                Value::Sym(value::intern("quote")),
+                Value::Sym(mod_sym),
+            ]);
+            let form = heap.list(vec![Value::Sym(value::intern("require")), quoted]);
+            let root = heap.global();
+            let _ = crate::eval::eval(heap, form, root);
+        }
+    }
     for clause in clauses {
         match clause {
             Clause::Use(mod_sym, subset) => {
                 let mod_name = value::symbol_name(mod_sym);
                 let prefix = format!("{}/", mod_name);
-                // Load the module if absent (no `mod/*` globals) — the standalone path; in a
-                // whole-project check it's already loaded, so this is skipped.
-                if deps::obs_module_exports(heap, &prefix).is_empty() {
-                    let quoted = heap.list(vec![
-                        Value::Sym(value::intern("quote")),
-                        Value::Sym(mod_sym),
-                    ]);
-                    let form = heap.list(vec![Value::Sym(value::intern("require")), quoted]);
-                    let root = heap.global();
-                    let _ = crate::eval::eval(heap, form, root); // advisory: swallow load errors
-                }
+                ensure_loaded(heap, mod_sym, &prefix);
                 match subset {
                     Some(names) => {
+                        // Mirror the runtime `%refer`: a `--` private name in `:only`
+                        // needs an internals grant, else the runtime refuses the load —
+                        // so the checker must NOT treat it as a bound import either
+                        // (otherwise it resolves-as-bound a name whose file won't load).
+                        let granted = heap
+                            .import_of(crate::eval::macros::internals_grant_key(&mod_name))
+                            .is_some();
                         for bare in names {
-                            let qual = value::intern(&format!(
-                                "{}/{}",
-                                mod_name,
-                                value::symbol_name(bare)
-                            ));
+                            let bare_name = value::symbol_name(bare);
+                            if bare_name.contains("--") && !granted {
+                                continue;
+                            }
+                            let qual = value::intern(&format!("{}/{}", mod_name, bare_name));
                             heap.add_import(bare, qual);
                         }
                     }
@@ -568,6 +593,17 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                         for (bare, qual) in deps::obs_module_exports(heap, &prefix) {
                             heap.add_import(bare, qual);
                         }
+                    }
+                }
+            }
+            Clause::UseExcept(mod_sym, excluded) => {
+                let mod_name = value::symbol_name(mod_sym);
+                let prefix = format!("{}/", mod_name);
+                ensure_loaded(heap, mod_sym, &prefix);
+                let excluded: std::collections::HashSet<Symbol> = excluded.into_iter().collect();
+                for (bare, qual) in deps::obs_module_exports(heap, &prefix) {
+                    if !excluded.contains(&bare) {
+                        heap.add_import(bare, qual);
                     }
                 }
             }

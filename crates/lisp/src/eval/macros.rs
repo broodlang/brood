@@ -659,6 +659,68 @@ fn param_list_has_renamable(heap: &Heap, params: Value) -> bool {
 // Data is inviolate: `quote`/`quasiquote` are skipped wholesale (a quoted symbol is
 // a message tag / map key that travels by name across processes — ADR-034).
 
+/// RAII scope for the per-file namespace-compilation state on the `Heap` — the four
+/// fields that together decide how a bare reference resolves: `compile_ns`,
+/// `ns_known_names`, `imports`, and `ns_assume_own`. A file loader (`load`,
+/// `reload`, the file runner, `%load-string`) creates one before evaluating a file's
+/// forms; **dropping it restores all four to the caller's values on every exit path —
+/// normal return, an early `?`, or a panic unwinding through the loader** — so
+/// namespace state can never leak across a file boundary and the four fields can never
+/// fall out of sync (the hand-written save/restore this replaces bracketed only three,
+/// leaking `ns_assume_own` out of `load`/`reload`/the file runner — a nested load then
+/// wrongly inherited an interactive `eval`'s assume-own). It **owns** the `&mut Heap`
+/// for its lifetime, so it is sound with no `unsafe`; reach the heap through
+/// [`heap`](NsLoadScope::heap).
+pub struct NsLoadScope<'a> {
+    heap: &'a mut Heap,
+    compile_ns: Option<Symbol>,
+    known: HashSet<Symbol>,
+    imports: std::collections::HashMap<Symbol, Symbol>,
+    assume_own: bool,
+}
+
+impl<'a> NsLoadScope<'a> {
+    /// Save the caller's ns-state, then reset into a freshly-`load`ed file's scope: the
+    /// ROOT namespace, an empty import table, this file's forward-reference pre-scan
+    /// (only when the file opens a namespace — cheap otherwise), and `ns_assume_own`
+    /// **off** (a loaded file carries a real pre-scan; a nested load must not inherit an
+    /// interactive `eval`'s assume-own fallback). The saved state is restored on drop.
+    pub fn enter(heap: &'a mut Heap, forms: &[Value]) -> Self {
+        let known_new = if file_opens_ns(heap, forms) {
+            scan_def_names(heap, forms)
+        } else {
+            HashSet::new()
+        };
+        let compile_ns = heap.set_compile_ns(None);
+        let known = heap.set_ns_known_names(known_new);
+        let imports = heap.set_imports(std::collections::HashMap::new());
+        let assume_own = heap.set_ns_assume_own(false);
+        Self {
+            heap,
+            compile_ns,
+            known,
+            imports,
+            assume_own,
+        }
+    }
+
+    /// The heap this scope owns for the duration of the load.
+    #[inline]
+    pub fn heap(&mut self) -> &mut Heap {
+        self.heap
+    }
+}
+
+impl Drop for NsLoadScope<'_> {
+    fn drop(&mut self) {
+        self.heap.set_compile_ns(self.compile_ns);
+        self.heap
+            .set_ns_known_names(std::mem::take(&mut self.known));
+        self.heap.set_imports(std::mem::take(&mut self.imports));
+        self.heap.set_ns_assume_own(self.assume_own);
+    }
+}
+
 /// The compile pass for one top-level form: expand macros, then resolve
 /// namespaces. Every loader/driver runs forms through here before `eval` so the
 /// runtime evaluator never sees an unexpanded macro or an unqualified namespaced
@@ -1075,6 +1137,15 @@ fn resolve_sym(
     }
     let name = value::symbol_name_ref(s);
     if let Some(slash) = name.find('/') {
+        // `/name` — the addressable ROOT/prelude namespace: an EMPTY module prefix
+        // (leading `/`) resolves to the bare root binding, so a module that shadows a
+        // prelude name (`(defn map …)` → `mod/map`) can still reach the original as
+        // `/map` (Elixir's `Kernel.foo`). A bare `/` — the division operator, empty
+        // `rest` — is left alone. An empty prefix can never denote a real module (no
+        // module has an empty name), so this collides with nothing.
+        if slash == 0 && name.len() > 1 {
+            return value::intern(&name[1..]);
+        }
         // A qualified `prefix/rest`. If `prefix` is a module alias from `(:alias …)`
         // — stored in the import table under the slash-suffixed key `prefix/` so it
         // rides the same per-file lifecycle — rewrite to the real module path:
