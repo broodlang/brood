@@ -692,10 +692,6 @@
     ;; language's own definitions are not yours to remove.
     (do
       (assert-error (unimpl Display :default))
-      (println "PROBE impl-for :vector = " (pr-str (not (nil? (impl-for ['Display 'to-str] :vector))))
-        " | :default entry = " (pr-str (not (nil? (get (get *impls* ['Display 'to-str]) :default))))
-        " | identity-of [1 2 3] = " (pr-str (identity-of [1 2 3]))
-        " | to-str on an int = " (pr-str (try (to-str 1) (catch e (str "ERR " (error-message e))))))
       (assert-error (unregister-impl 'Display 'to-str :default))
       (assert= "[1 2 3]" (to-str [1 2 3]))              ; …and printing still works
       ;; an impl for YOUR OWN id is policy, and retracts normally

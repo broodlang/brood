@@ -394,6 +394,12 @@ impls it removed, so a retraction is distinguishable from a no-op, and it is ide
 retracting what was never there is a quiet zero. `unregister-impl` is the function
 underneath, for a caller holding names as values.
 
+Two things `unimpl` will not do: retract the language's own `:default` for an ability the
+runtime dispatches on itself (`Display`, `Inspect`, `Seqable`, `Conjable` — that one line
+would leave every value unprintable, so it errors and points at `impl` for your own id), and
+touch any impl but the one named (retracting one id leaves its siblings, including `:default`,
+in place).
+
 Registration was open and reversible in every way but this one, and a registry with no
 inverse cannot be returned to a known state: a test that must not leak into the next, a
 REPL undoing an experiment, a hot reload retracting an impl the new source no longer
