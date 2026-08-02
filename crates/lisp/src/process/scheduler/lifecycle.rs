@@ -253,13 +253,19 @@ fn spawn_impl(heap: &Heap, f: Value, link_parent: bool) -> Result<u64, LispError
         resume: None,
         capture: inherited_capture,
         queued_at: 0,
+        spawns_since_park: 0,
     }));
-    // We placed the child on our OWN queue, so it will not run until we yield — a whole
-    // quantum away if we are CPU-bound. Offer it to a parked peer (see
-    // `WORKER_PARKED`): placement is unchanged and we keep first refusal, so a spawner
-    // that blocks immediately (spawn-then-`receive`) still drains it locally before a
-    // woken peer arrives.
-    if placed_on_self {
+    // We placed the child on our OWN queue, so it will not run until we yield. Whether
+    // that matters depends entirely on the spawner: one that blocks for a reply yields in
+    // a microsecond and should keep its child local on a warm cache; one that keeps
+    // running holds it for a whole quantum. `spawns_since_park` tells them apart by
+    // history rather than prediction — a second spawn with no block in between means this
+    // process is not about to block — so only then do we hand the child to a parked peer.
+    //
+    // Gating on this matters: waking unconditionally costs the `supervisor` row 11%
+    // (907 → 1007 ms) in futex wakes that find nothing, since its spawner drains its own
+    // child every time. Placement itself is unchanged either way.
+    if placed_on_self && spawns_since_park_bump() >= 2 {
         wake_a_parked_peer(worker_id);
     }
     Ok(pid)
@@ -324,8 +330,9 @@ pub fn spawn_root_program(
         resume: None,
         capture: Vec::new(),
         queued_at: 0,
+        spawns_since_park: 0,
     }));
-    if placed_on_self {
+    if placed_on_self && spawns_since_park_bump() >= 2 {
         wake_a_parked_peer(worker_id);
     }
     Ok(exit)

@@ -100,8 +100,13 @@ pub(super) struct Process {
     capture: Vec<Arc<Mutex<String>>>,
     /// Monotonic nanos at which this process was last enqueued, or 0 if never. Read only
     /// by `try_steal`, to give the owning worker a brief **first refusal** on freshly
-    /// queued work (see `STEAL_GRACE`).
+    /// queued work (see `steal_grace_ns`).
     queued_at: u64,
+    /// How many children this process has spawned since it last **parked** in `receive`.
+    /// Preemption does not reset it — only actually blocking does — so it answers exactly
+    /// one question at spawn time: *is this spawner going to yield soon?* See
+    /// `SPAWNS_SINCE_PARK`.
+    spawns_since_park: u32,
 }
 
 /// What a running process needs to find from deep inside `eval` (for
@@ -632,6 +637,29 @@ fn steal_grace_ns() -> u64 {
             .and_then(|v| v.parse().ok())
             .unwrap_or(5_000)
     })
+}
+
+/// The running process's `spawns_since_park`, held in a thread-local for the duration of a
+/// quantum — the same install-and-read-back shape `Ctx`/the capture stack use, because the
+/// worker multiplexes processes and the spawn site (deep inside `eval`) cannot reach the
+/// `Process` box it is running inside.
+///
+/// It exists to tell the two spawner shapes apart, which is the whole difficulty in placing
+/// a child. A supervisor spawns one child and immediately blocks for the reply, so its child
+/// should stay local on a warm cache; a dispatcher spawns and keeps running, so its child
+/// should go to an idle peer. Both look identical at the moment of the spawn. The counter
+/// distinguishes them by *history* instead of prediction: a process that has spawned again
+/// without ever blocking in between is, demonstrably, not about to block.
+pub(super) fn spawns_since_park_bump() -> u32 {
+    SPAWNS_SINCE_PARK.with(|c| {
+        let n = c.get().saturating_add(1);
+        c.set(n);
+        n
+    })
+}
+
+thread_local! {
+    static SPAWNS_SINCE_PARK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// Monotonic nanoseconds since the first call — a cheap `u64` clock for `queued_at`, so a
