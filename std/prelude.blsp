@@ -4155,6 +4155,42 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 ; called `mod/fn`, unbound. (Surfaced as a once-in-several-runs editor test flake
 ; the moment two test processes raced an inline `(require 'proctree)`.)
 
+;; ---- the general registry update: compare-and-swap + retry (KI-23) ------------
+;;
+;; `%registry-update!` names each shape it supports as a kernel op (`:assoc`,
+;; `:cons-new`, …), which fits a registry whose update is one map/list operation. Several
+;; registries are not like that — `face-set` merges into the *existing* entry, `attach`
+;; strips an id from every bucket before consing onto one, `register-repl-command` filters
+;; by name overlap and appends. Adding a Rust op per shape would push policy into the
+;; kernel; instead `%registry-cas!` makes the read-decide-write indivisible and the
+;; transform stays an ordinary Brood function, retried here until it lands.
+;;
+;; Why a plain `(def *X* (f *X*))` cannot be made safe: two processes each read the old
+;; registry, each compute their own new one, and the second `def` wins — the first
+;; registration is silently gone (KI-22 lost ~40% of them under load).
+
+(defn registry-swap! (sym read f)
+  "Atomically set registry global `sym` to `(f current)`, retrying if another process
+wrote in between; returns the value that landed. `read` is a thunk re-reading the global,
+so each retry recomputes against the value that won. `f` must be pure — it can run more
+than once. Prefer the `swap-registry!` macro, which writes both arguments for you."
+  (let (old (read)
+        new (f old))
+    (if (%registry-cas! sym old new)
+      new
+      (registry-swap! sym read f))))
+
+(defmacro swap-registry! (registry f)
+  "Atomically update registry global `registry` by `(f current)` — e.g.
+`(swap-registry! debug/*traced-fns* (fn (m) (assoc m sym orig)))`.
+
+`registry` must be the name the global is actually bound under: **fully qualified**
+(`debug/*traced-fns*`) for a module-level `def`, bare for a root or `defdyn` one. It is
+quoted for the kernel *and* spliced as a live reference for the re-read, and a quoted
+symbol is data the namespace resolver never rewrites — so a bare name inside a module
+would name a registry that does not exist."
+  `(registry-swap! '~registry (fn () ~registry) ~f))
+
 ;; (provide 'foo) — mark a feature loaded (idempotent). Returns its name.
 (defn provide (mod)
   "Mark feature `mod` (a symbol or string) as loaded (idempotent); returns its name."

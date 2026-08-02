@@ -12991,3 +12991,41 @@ nothing; a poisoned entry does not strand the rest). The general rule this is an
 instance of: *an instrumentation registry must never claim a rebind that did not
 happen* — the registry is a promise to restore, and a promise you cannot keep is worse
 than no entry.
+
+## ADR-202 — a registry compare-and-swap, not a kernel op per registry shape
+
+**Context.** A registry is a global holding a whole map or list that many processes register
+into. Written the obvious way — `(def *X* (assoc *X* k v))` — it silently loses registrations:
+each process reads the old registry, computes its own new one, and the last `def` wins.
+Measured at 200 concurrent writers, ~125 of 402 entries survive. KI-22 fixed the prelude's
+registries with `%registry-update!`, a kernel primitive that performs **one named map/list
+operation** (`:assoc`, `:assoc-new`, `:dissoc`, `:cons-new`) under a lock. KI-23 found the same
+shape in ten more registries in `std/` modules — and half of them do not fit any of those ops:
+`face-set` merges into the *existing* entry, `attach` strips an id from every bucket before
+consing onto one, `register-repl-command` filters by name overlap and appends,
+`register-system-layer` is append-if-absent.
+
+**Decision.** Add one general primitive, `%registry-cas!` — rebind the global only if its
+current value still equals the expected one, under the same registry lock — and put the retry
+loop (`registry-swap!`, plus a `swap-registry!` macro) in the **prelude, in Brood**. The
+transform stays an ordinary Brood function; only the read-decide-write is indivisible.
+
+**Rejected: four more kernel ops** (`:merge`, `:cons`, `:append-new`, a filter-then-append).
+Each would encode one std module's policy in Rust, and the list would keep growing with every
+new registry — the exact "Rust provides mechanism, Brood provides policy" line this repo is
+organised around. It also fails the "keep the core small" test: an op is a vocabulary item
+every future reader has to learn, whereas a CAS is one idea that covers all of them.
+
+**Consequences.**
+- The transform must be **pure** — a retry runs it again. All current ones build an immutable
+  value, which is the only thing they *can* do (ADR-026), so this is free.
+- Equality is structural, so an ABA against an equal-valued registry is indistinguishable —
+  and harmless, since the retry would recompute the same answer.
+- `%registry-update!`'s four ops are all expressible on top of the CAS, so it could be
+  subsumed later. Not done here: it was written the day before, and re-touching a just-fixed
+  concurrency bug to save one primitive is a bad trade.
+- The read/write locations match `def` exactly (`env_get` through the chain, `env_define` at
+  `env_root(env)`). That is what makes a `defdyn` registry safe to convert — an active
+  `binding` shadows the root write identically for both spellings — and it is load-bearing:
+  the root is not always `EnvId::GLOBAL` during prelude load, and writing straight to the
+  globals table there is silently dropped.

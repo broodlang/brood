@@ -14002,3 +14002,48 @@ Two supporting fixes:
 
 `brood`'s regex engine has no character-range support (`[a-z]`/`[0-9]`) — noted while writing
 hive's validators (used codepoint predicates instead); a candidate future improvement.
+
+## 2026-08-02 — KI-23: the lost-update shape in `std/`, fixed with a CAS instead of more ops
+
+KI-22 fixed the prelude's registries; the same `(def *X* (assoc *X* …))` read-modify-write
+survived in ten more living in `std/` modules. Measured rather than assumed — 200 concurrent
+writers into one map keep **~125 of 402** entries (128 / 122 / 125 across three runs). The
+rest vanish with no error.
+
+**The design question was how many kernel ops to add.** `%registry-update!` names each shape
+it supports (`:assoc`, `:assoc-new`, `:dissoc`, `:cons-new`), which fits a registry whose
+update is one map/list operation. Half of these are not: `face-set` merges into the
+*existing* entry, `attach` strips an id from every bucket before consing onto one,
+`register-repl-command` filters by name overlap and appends, `register-system-layer` is
+append-if-absent. That is four more Rust ops, each encoding a policy decision belonging to
+one std module.
+
+So instead, one general primitive: `%registry-cas!` rebinds a global only if its current
+value still equals the expected one, under the same lock. The retry loop (`registry-swap!`,
+and a `swap-registry!` macro) lives in the **prelude, in Brood**, and every transform stays
+an ordinary Brood function. Kernel provides the indivisible read-decide-write; Brood provides
+what to write. `%registry-update!`'s four ops are all expressible on top of it, so it could
+be subsumed later — deliberately not done here, to avoid re-touching a bug fixed yesterday.
+
+**The `defdyn` caveat in the KI turned out not to exist.** It worried that the registry lock
+writes at `env_root(env)` and would bypass an active `binding`. Reading the evaluator settles
+it: `def` computes `let root = heap.env_root(env)` and writes there too, and both read through
+the chain. The lock matches `def` exactly, so `*faces*` converts without a semantic change.
+Worth the ten minutes of reading — the alternative was inventing a mechanism for dynamic vars
+that nothing needed.
+
+**Also not a bug: `std/tool/test.blsp`'s `*units*`/`*collected*`.** They were on the list, and
+they are fine. Registration is load-time and test files load **sequentially**, each in its own
+`%isolate` — the file says so itself. `*collecting*`/`*collected*` are not even a registry but
+a sequential accumulator protocol a CAS would not make correct. Left alone, documented why.
+
+**Results.** `repl_test`'s duplicate-command flake (2 failures in 5) is **32/32**.
+`tests/registry_test.blsp` is new: it carries its own **control** — a plain `def` rebind in
+the same test, asserted to lose entries — so the suite cannot go green on a regressed
+mechanism. Suite 928/928, `nest check` clean.
+
+**One process note.** The first 12-run flake check after converting the std modules still
+showed 4 failures, and the conversion looked wrong. It wasn't: `std/*.blsp` is embedded in the
+binary at build time, and I had rebuilt `nest` but not `brood`. Rebuild both after touching
+`std/`, or you will spend the afternoon debugging yesterday's bytes. (Same class as the
+`-p brood` vs `--bin brood` trap already in CLAUDE.md.)

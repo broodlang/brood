@@ -18,7 +18,7 @@ ADRs / topic docs.
 | # | What | Status |
 |---|---|---|
 | KI-24 | `eval`'d code cannot forward-reference a name a later `eval` defines (regression, 97d63eda) | ✅ **fixed** 2026-08-01 |
-| KI-23 | the KI-22 lost-update shape also exists in ~10 std-module registries | ⬜ **open** (found 2026-08-01) |
+| KI-23 | the KI-22 lost-update shape also exists in ~10 std-module registries | ✅ **fixed** 2026-08-02 |
 | KI-22 | concurrent registration lost ~40% of registrations (15 prelude registries) | ✅ fixed 2026-08-01 |
 | KI-21 | `nest run --for` / `--watch` generated a legacy `~p` pin — failed on any file | ✅ fixed 2026-07-30 |
 | KI-20 | a JIT fast link ran the callee against the *caller's* IC block (cold cache) | ✅ fixed 2026-07-30 |
@@ -136,36 +136,53 @@ affected" does not hold: each REPL input is its own compile unit, so `eval_strin
 "does neither" — and touching only `eval_builtin` leaves the REPL broken. Verified by
 building both and running the same two inputs.
 
-## KI-23 — the KI-22 lost update also exists in std-module registries · **open, found 2026-08-01**
+## KI-23 — the KI-22 lost update also exists in std-module registries · **fixed 2026-08-02**
 
-KI-22 fixed the **prelude's** fifteen registries by routing them through
-`%registry-update!`. The same `(def *X* (assoc *X* …))` read-modify-write is used by at least
-ten more registries that live in `std/` modules, and they were not converted:
+KI-22 fixed the **prelude's** registries by routing them through `%registry-update!`. The
+same `(def *X* (assoc *X* …))` read-modify-write survived in registries that live in `std/`
+modules. Measured directly, at 200 concurrent writers into one map: the plain `def` rebind
+keeps **~125 of 402** entries (three runs: 128 / 122 / 125). The rest are silently gone.
 
-| registry | file |
-|---|---|
-| `*repl-commands*` | `std/tool/repl.blsp` |
-| `*traced-fns*` | `std/tool/debug.blsp` |
-| `*protocols*` | `std/protocol.blsp` |
-| `*telemetry-handlers*`, `*telemetry-events*` | `std/telemetry.blsp` |
-| `*faces*` | `std/editor/face.blsp` |
-| `*type-layers*`, `*auto-type-by-file*` | `std/editor/layers.blsp` |
-| `*units*`, `*collected*` | `std/tool/test.blsp` (**`defdyn` — see the caveat**) |
+It was already biting: `tests/repl_test.blsp`'s "re-registering a name replaces rather than
+duplicates" failed **2 runs in 5** — two concurrent registrations each filtered the old list
+and each appended, so the duplicate the API forbids survived. It is **32/32** now.
 
-**It is already biting.** `tests/repl_test.blsp`'s "re-registering a name replaces rather than
-duplicates" fails **2 runs in 5**: two concurrent registrations each filter the old list and
-each append, so the duplicate the test forbids survives.
+**The mechanism: compare-and-swap, not more ops.** `%registry-update!` names each shape it
+supports as a kernel op (`:assoc`, `:cons-new`, …), which fits a registry whose update is one
+map/list operation. Several of these are not like that — `face-set` merges into the *existing*
+entry, `attach` strips an id from every bucket before consing onto one,
+`register-repl-command` filters by name overlap and appends, `register-system-layer` is
+append-if-absent. A Rust op per shape would have pushed policy into the kernel. Instead:
 
-**Most convert mechanically** — a plain `assoc`/`dissoc`/`cons` maps straight onto
-`%registry-update!`'s existing `:assoc` / `:dissoc` / `:cons-new`.
+- `%registry-cas!` (`Heap::registry_cas`) — rebinds the global only if its current value still
+  equals the expected one, under the same registry lock.
+- `registry-swap!` / the `swap-registry!` macro (**prelude, Brood**) — retry around it, so the
+  transform is an ordinary Brood function and only the read-decide-write is indivisible.
 
-**Two do not, and need a decision:**
-- `*repl-commands*` is *filter-then-append* over a list, not an assoc, so no existing op fits.
-  Either add an op for it, or key the registry by command name (a map, `:assoc`) and carry the
-  display order explicitly — the latter also drops the per-lookup filter scan.
-- `*units*` / `*collected*` are **`defdyn`**, not plain globals. `%registry-update!` writes at
-  `env_root(env)`, which would bypass an active `binding`, so converting them as-is would be
-  wrong. Dynamic vars need their own answer.
+**The `defdyn` caveat dissolved.** The original note worried that `%registry-update!` writes at
+`env_root(env)` and would bypass an active `binding`. Reading the evaluator settles it: `def`
+computes `let root = heap.env_root(env)` and writes *there* too, and both spellings read
+through the chain. The lock matches `def` exactly, so converting a `defdyn` registry (`*faces*`)
+is semantics-preserving — an active `binding` shadows the root write identically either way.
+
+**Converted** (13 sites): `debug/*traced-fns*`, `protocol/*protocols*`,
+`telemetry/*telemetry-handlers*` (attach, detach, and the auto-detach of handlers that threw),
+`telemetry/*telemetry-events*`, `*faces*` (`def-face` + `face-set`),
+`editor/layers/*system-layers*`, `editor/layers/*type-layers*`,
+`editor/layers/*auto-type-by-file*`, `repl/*repl-commands*`.
+
+**Deliberately not converted: `std/tool/test.blsp`'s `*units*` / `*collected*` /
+`*collecting*` — they are not racy.** Registration happens at *load* time and test files load
+**sequentially**, each inside its own `%isolate` (`test.blsp`: "Files run sequentially (each
+`%isolate` blocks to …)"). There is no concurrent writer to lose an update to. `*collecting*`
+/`*collected*` are also not registries but a sequential accumulator protocol — `describe` sets
+a flag, the body conses, the flag clears — which a CAS would not make correct anyway.
+
+**Covered by** `tests/registry_test.blsp`: the mechanism with its own **control** (a plain
+`def` rebind in the same test, asserted to lose entries, so a regression cannot hide behind a
+test that would pass with the bug), a concurrent counter (proving each retry recomputes
+against the value that won), and one concurrent-registration test per converted registry —
+including the repl duplicate-name shape and `register-system-layer`'s idempotence.
 
 ## KI-22 — concurrent registration silently lost registrations · **found + fixed 2026-08-01**
 
