@@ -105,7 +105,7 @@ pub(crate) fn wake_enqueue(mut proc: Box<Process>) {
 /// 2.2× and `supervisor` 4.9×. A send-woken receiver must stay where the handoff put it;
 /// only a freshly *spawned* child is a candidate for an idle peer.
 pub(crate) fn wake_a_parked_peer(wid: usize) {
-    if PARKED_COUNT.load(Ordering::Relaxed) == 0 {
+    if steal_wake_disabled() || PARKED_COUNT.load(Ordering::Relaxed) == 0 {
         return;
     }
     let n = WORKERS.len();
@@ -124,6 +124,15 @@ pub(crate) fn wake_a_parked_peer(wid: usize) {
             return;
         }
     }
+}
+
+/// `BROOD_NO_STEAL_WAKE=1` disables the spawn-time peer wake, leaving idle workers to
+/// discover stealable work on their own `STEAL_BACKOFF` re-probe (the pre-2026-08-02
+/// behaviour). The A/B lever for attributing a latency or throughput change to the wake
+/// itself rather than to the first-refusal grace. Read once.
+fn steal_wake_disabled() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("BROOD_NO_STEAL_WAKE").is_some())
 }
 
 /// Steal one queued process from a backed-up peer's queue, re-assigning it to
@@ -412,6 +421,7 @@ fn run_one(mut proc: Box<Process>) {
     // the `Ctx`, so the worker installs it for the quantum (rebuilt each resume — the
     // worker multiplexes processes) and reads any capture-stack changes back afterwards.
     proc.install_ctx();
+    SPAWNS_SINCE_PARK.with(|c| c.set(proc.spawns_since_park));
     set_capture_run(true);
     // Stall trace (BROOD_STALL_MS): a green-process quantum is bounded by the reduction
     // budget, so it should be quick — if one runs ≥ n ms, the time went into a blocking
@@ -425,6 +435,9 @@ fn run_one(mut proc: Box<Process>) {
     drop(_sg);
     set_capture_run(false);
     proc.save_ctx();
+    // Read back before `handle_capture_outcome`, which routes a parking process into
+    // `park_on_receive` — the one place that resets this.
+    proc.spawns_since_park = SPAWNS_SINCE_PARK.with(|c| c.get());
     finish_quantum(&mailbox, wid);
     handle_capture_outcome(proc, &mailbox, outcome);
 }
@@ -560,6 +573,9 @@ fn park_on_receive(proc: Box<Process>, mailbox: &Arc<Mailbox>) {
         // (no worker is running it), so the collection cannot race.
         let mut proc = proc;
         proc.trim_on_park();
+        // It blocked, so whatever it spawned before now was a spawn-then-block: forget the
+        // history that would have marked it CPU-bound (see `SPAWNS_SINCE_PARK`).
+        proc.spawns_since_park = 0;
         st.waiter = Some(proc);
     }
 }

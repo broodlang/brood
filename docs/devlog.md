@@ -14673,3 +14673,49 @@ own measurement.
 
 Verified: suite 937/937, `nest check` clean, and the concurrency-sensitive files run 5/5
 each (`concurrency`, `supervisor`, `adversarial`, `agent`), plus `conc_storm` clean.
+
+## 2026-08-02 — recovering the `supervisor` 11%: tell the two spawner shapes apart by history
+
+The peer-wake added earlier bought `latency` p50 27 → 19 µs and p99 171 → 83 µs, but cost
+`supervisor` 11% (907 → 1007 ms). Cleaning up after myself.
+
+**Confirmed the cause before fixing it**, with a new off-switch rather than by reasoning:
+
+| | `supervisor` | `latency` p50 |
+|---|---|---|
+| wake on | 1007 ms | 18 µs |
+| `BROOD_NO_STEAL_WAKE=1` | **907 ms** | 27 µs |
+
+Exact attribution: the wake syscall *is* the 11%, and it is also exactly what buys the
+latency win. So the fix is not to make the wake cheaper but to stop issuing it where it
+cannot pay — a spawner whose child it will run itself in a microsecond.
+
+**The signal is history, not prediction.** A supervisor (spawn, then block for the reply) and
+a dispatcher (spawn, then keep running) are indistinguishable *at* the spawn. But a process
+that has spawned **again without ever blocking in between** is demonstrably not about to
+block. `Process::spawns_since_park` counts exactly that: bumped at each spawn, reset only in
+`park_on_receive`'s genuine-park branch — **not** on preemption, since being preempted is not
+yielding. It rides the quantum in a thread-local, the same install-and-read-back shape `Ctx`
+and the capture stack use, because the spawn site is deep inside `eval` and cannot reach the
+`Process` box it is running inside. The wake now fires only from the second such spawn on.
+
+**Result — the trade-off is gone:**
+
+| | baseline | after | |
+|---|---|---|---|
+| `latency` p50 | 27 µs | **19 µs** | |
+| `latency` p99 | 171 µs | **82 µs** | |
+| `latency` p99.9 | ~800 µs | ~240 µs | |
+| `supervisor` | 907 ms | **905 ms** | recovered |
+| `pingpong` / `spawn` / `pfib` | 306 / 105 / 305 | 305 / 105 / 305 | |
+
+**One near-miss worth recording.** `ring` read 906 ms against a 807 ms baseline and looked
+like a fresh regression. It is not: with the wake disabled it is 907, and with *both* new
+mechanisms disabled (`BROOD_NO_STEAL_WAKE=1 BROOD_STEAL_GRACE_NS=0`, the closest thing to
+pre-change behaviour) it is 905–906. The baseline was taken hours earlier at load average
+3.21; the machine now sits at 1.16. The row drifted, the change did not move it — which is
+the handoff's own warning about believing a few-percent delta without a same-session control.
+
+Verified: suite 937/937, `nest check` clean, `conc_storm` clean, and the
+concurrency-sensitive files 5/5 each (`concurrency`, `supervisor`, `adversarial`, `agent`,
+`proctree`).
