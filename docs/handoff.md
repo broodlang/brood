@@ -130,10 +130,35 @@ From the published run (`brood-benchmarks/results/`):
    so either a destination/locality flag gets threaded in, or the local-send call site
    substitutes handles before serialising. That is a messaging-core change and wants a
    deliberate pass.
-   **Cheaper mitigation worth measuring first:** step 4 is also a bug on its own — a LOCAL
-   closure tree-walks *forever* (and `vm_cache_put` caches the negative result). If a copied
-   closure could still be VM-compiled, the 10× interpreter cost and the per-call promotion
-   both go away even when the copy happens.
+   **The cheaper mitigation was investigated on 2026-08-02 and does not exist. Both candidate
+   shortcuts are blocked at code level; the messaging change is the only real fix.**
+   - *"Let a copied closure VM-compile."* `compile/mod.rs:1821` — `cache_key` keys a LOCAL
+     closure on its first body form and requires that form to be a **non-LOCAL** `Pair`
+     (code in RUNTIME, only captures LOCAL). A cross-heap copy copies the body code into
+     LOCAL too, so the key is `None`: never cached, never compiled, deferred every call. The
+     comment there gives the reason it cannot simply accept a LOCAL body — LOCAL handles are
+     recycled by the collector, so the key would alias an unrelated closure and run the wrong
+     code. Content-addressing it (hash the body AST) would work but costs an O(body) hash on
+     every call, on the hot path.
+   - *"Stop `promote` re-copying the body."* Already the case: `promote_in`
+     (`heap.rs:3533`) guards every arm with `if id.region() == LOCAL`, so an already-shared
+     subgraph passes through untouched. The body is re-promoted **because the copy made it
+     LOCAL**, not because promote is wasteful. Nothing to fix here.
+   Both roads lead back to the same place: do not copy the code.
+   **Fresh baseline (2026-08-02, `MODE=sup WINDOW=5000`)** so any fix is measurable:
+   19 685 → 9 523 ops/s (**2.07× decay**) across 98 windows, RSS 97 MB → 929 MB,
+   `rt_closures` 2 698 → 412 668 — linear at **~0.87 per op** — while `sup_heap` and
+   `my_live_bytes` bounce around freely, i.e. both LOCAL heaps GC normally and only the
+   append-only region grows. A longer run reached 454 113 closures / 1.02 GB at 534 k ops.
+   **What the real fix needs, concretely.** `Message::StrShared(Arc<SharedBlob>)` is the
+   precedent for a same-runtime by-handle payload — but it is kept alive by an **Arc
+   refcount**, and RUNTIME closures are not refcounted; they are freed per *generation*
+   (handles carry one: `ClosureId::runtime_gen(idx, gen)`). So a `Message::FnShared(bits)`
+   needs (a) same-runtime detection at the `send` site — available there, it already tests
+   `dist::is_local(node)` — and (b) a lifetime guarantee: either the RUNTIME collector treats
+   queued mailbox messages as roots, or a per-generation in-flight counter blocks freeing a
+   generation with outstanding references. (b) is the whole risk, and it is why this wants a
+   deliberate pass rather than a squeeze into another session.
    **Tools:** `BROOD_L1_STATS=1` (parked-hit rate), `BROOD_PERF_STATS=1` + `--features
    perf-stats` (`tw_defer`), `BROOD_TRACE_PROMOTE=1` (what enters the region, with capture
    state). Do **not** instrument with a backtrace — it perturbs the race by ~30×.
