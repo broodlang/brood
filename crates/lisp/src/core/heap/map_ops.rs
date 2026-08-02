@@ -778,9 +778,9 @@ impl Heap {
     /// second allocator that bypasses the threshold.
     pub fn alloc_string(&mut self, s: &str) -> Value {
         let entry = if s.len() >= SHARED_BLOB_THRESHOLD {
-            LocalString::Shared(SharedBlob::new(s.as_bytes()))
+            LocalString::shared(SharedBlob::new(s.as_bytes()))
         } else {
-            LocalString::Inline(s.to_string())
+            LocalString::inline(s.to_string())
         };
         let idx = self.local.strings.len();
         self.local.strings.push(entry);
@@ -1020,7 +1020,7 @@ impl Heap {
     /// `Message`, so installing it here is just slot bookkeeping — no copy.
     pub(crate) fn alloc_string_from_shared(&mut self, blob: Arc<SharedBlob>) -> Value {
         let idx = self.local.strings.len();
-        self.local.strings.push(LocalString::Shared(blob));
+        self.local.strings.push(LocalString::shared(blob));
         Value::str_(StrId::local_gen(idx, self.local_epoch))
     }
 
@@ -1053,9 +1053,9 @@ impl Heap {
             "local_shared_blob_ptr",
             id.0,
         );
-        match self.string_slot(id) {
-            LocalString::Shared(arc) => Some(Arc::as_ptr(arc)),
-            LocalString::Inline(_) => None,
+        match &self.string_slot(id).data {
+            StrData::Shared(arc) => Some(Arc::as_ptr(arc)),
+            StrData::Inline(_) => None,
         }
     }
 
@@ -1076,9 +1076,9 @@ impl Heap {
             "local_shared_blob_strong_count",
             id.0,
         );
-        match self.string_slot(id) {
-            LocalString::Shared(arc) => Some(Arc::strong_count(arc)),
-            LocalString::Inline(_) => None,
+        match &self.string_slot(id).data {
+            StrData::Shared(arc) => Some(Arc::strong_count(arc)),
+            StrData::Inline(_) => None,
         }
     }
 
@@ -1099,9 +1099,9 @@ impl Heap {
             "local_shared_blob",
             id.0,
         );
-        match self.string_slot(id) {
-            LocalString::Shared(arc) => Some(Arc::clone(arc)),
-            LocalString::Inline(_) => None,
+        match &self.string_slot(id).data {
+            StrData::Shared(arc) => Some(Arc::clone(arc)),
+            StrData::Inline(_) => None,
         }
     }
 

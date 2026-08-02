@@ -60,21 +60,75 @@ use crate::error::LispError;
 /// inline-extracts any builder-time Shared blobs into `Inline(String)` before
 /// freezing, keeping the cross-runtime PRELUDE region independent of any
 /// runtime-scoped `Arc<SharedBlob>`.
-enum LocalString {
+/// A stored string plus its cached **char** length.
+///
+/// Brood indexes strings by Unicode scalar, but they are stored as UTF-8, so every
+/// char index has to be converted to a byte offset. Done on demand that is O(index)
+/// — `chars().count()` for the length, `char_indices().nth(k)` for the offset — which
+/// silently makes any per-character or incremental-search loop quadratic. It has cost
+/// real time here more than once: `url.blsp` and `csv.blsp` both had to switch to
+/// code-point vectors, `ansi.blsp` was 1.58 s on 90 KB, and `index-of`'s `from` offset
+/// stayed quadratic even after its suffix copy was removed.
+///
+/// Caching the count fixes the class rather than the instances. It is free to compute
+/// (construction already walks the bytes to copy them) and it buys two things:
+///   * `string-length` becomes O(1) instead of a full scan;
+///   * `chars == as_str().len()` **is** the pure-ASCII test, and for an ASCII string a
+///     char index *is* its byte offset — so the conversion in both directions is O(1).
+///     Non-ASCII still walks, which is correct and now the uncommon path.
+#[derive(Clone)]
+struct LocalString {
+    data: StrData,
+    chars: usize,
+}
+
+#[derive(Clone)]
+enum StrData {
     Inline(String),
     Shared(Arc<SharedBlob>),
 }
 
 impl Default for LocalString {
     fn default() -> Self {
-        LocalString::Inline(String::new())
+        LocalString::inline(String::new())
     }
 }
 
 impl LocalString {
+    fn inline(s: String) -> Self {
+        let chars = s.chars().count();
+        LocalString {
+            data: StrData::Inline(s),
+            chars,
+        }
+    }
+
+    fn shared(b: Arc<SharedBlob>) -> Self {
+        // Build first, then measure through `as_str` so the UTF-8 handling (and its
+        // debug-only validation) lives in exactly one place.
+        let mut me = LocalString {
+            data: StrData::Shared(b),
+            chars: 0,
+        };
+        me.chars = me.as_str().chars().count();
+        me
+    }
+
+    /// The cached number of Unicode scalars — O(1).
+    #[inline]
+    fn char_len(&self) -> usize {
+        self.chars
+    }
+
+    /// Is this string pure ASCII, i.e. is a char index also a byte offset? O(1).
+    #[inline]
+    fn is_ascii(&self) -> bool {
+        self.chars == self.as_str().len()
+    }
+
     fn as_str(&self) -> &str {
-        match self {
-            LocalString::Inline(s) => s.as_str(),
+        match &self.data {
+            StrData::Inline(s) => s.as_str(),
             // SAFETY: `SharedBlob::new` is the only constructor and takes
             // `&[u8]` from a `&str`'s `as_bytes()` (see [`Heap::alloc_string`]).
             // Blobs are immutable after construction. The wire decoder
@@ -84,9 +138,9 @@ impl LocalString {
             // a missed entry-point — the unchecked read only ships in
             // release.
             #[cfg(not(debug_assertions))]
-            LocalString::Shared(b) => unsafe { std::str::from_utf8_unchecked(b.as_bytes()) },
+            StrData::Shared(b) => unsafe { std::str::from_utf8_unchecked(b.as_bytes()) },
             #[cfg(debug_assertions)]
-            LocalString::Shared(b) => {
+            StrData::Shared(b) => {
                 std::str::from_utf8(b.as_bytes()).expect("shared blob bytes are valid UTF-8")
             }
         }
@@ -932,7 +986,7 @@ struct CodeSlabs {
     pairs: boxcar::Vec<(Value, Value)>,
     vectors: boxcar::Vec<VecStore>,
     maps: boxcar::Vec<MapNode>,
-    strings: boxcar::Vec<String>,
+    strings: boxcar::Vec<LocalString>,
     /// Bignums `def`'d into a global / baked as a literal into shared RUNTIME
     /// code (mirrors `strings`). Immutable, holds no handles; append-only.
     bigints: boxcar::Vec<num_bigint::BigInt>,
@@ -1489,7 +1543,7 @@ impl RuntimeCode {
     #[inline]
     fn push_str(&self, v: String) -> StrId {
         let g = self.cur_gen();
-        StrId::runtime_gen(self.gens[g].load().strings.push(v), g)
+        StrId::runtime_gen(self.gens[g].load().strings.push(LocalString::inline(v)), g)
     }
     #[inline]
     fn push_bigint(&self, v: num_bigint::BigInt) -> BigIntId {
@@ -2985,9 +3039,9 @@ impl Heap {
         // `LocalString::Shared` is overwritten — freeing the blob if no other
         // handle remains (none does, at freeze time).
         for entry in slabs.strings.iter_mut() {
-            if let LocalString::Shared(arc) = entry {
+            if let StrData::Shared(arc) = &entry.data {
                 let bytes: Vec<u8> = arc.as_bytes().to_vec();
-                *entry = LocalString::Inline(
+                *entry = LocalString::inline(
                     String::from_utf8(bytes).expect("prelude blob is valid UTF-8"),
                 );
             }
@@ -4085,6 +4139,35 @@ impl Heap {
     /// variants that need a match to extract their bytes, while PRELUDE and
     /// RUNTIME store plain `String` (PRELUDE is inline-extracted at freeze;
     /// RUNTIME is append-only via `boxcar::Vec<String>` for stable refs).
+    /// The **char** length of string `id`, and whether it is pure ASCII — both O(1),
+    /// read from the count cached at construction (see [`LocalString`]). The pair is
+    /// returned together because every caller that converts a char index to a byte
+    /// offset needs both, and resolving the slot twice would cost more than the work.
+    pub fn str_metrics(&self, id: StrId) -> (usize, bool) {
+        let f = |e: &LocalString| (e.char_len(), e.is_ascii());
+        match id.region() {
+            LOCAL if id.is_old() => {
+                local_gc_check!(old, self, id, "string");
+                f(&self.old().strings[id.index()])
+            }
+            LOCAL => {
+                local_gc_check!(nursery, self, id, "string");
+                f(&self.local.strings[id.index()])
+            }
+            PRELUDE => f(&self.prelude.slabs.strings[id.index()]),
+            RUNTIME => {
+                let c = self
+                    .runtime
+                    .gens
+                    .get(id.code_gen())
+                    .expect("runtime string generation")
+                    .load();
+                f(c.strings.get(id.index()).expect("runtime string handle"))
+            }
+            _ => unreachable!("invalid handle region"),
+        }
+    }
+
     pub fn string(&self, id: StrId) -> SlabRef<'_, str> {
         match id.region() {
             LOCAL if id.is_old() => {

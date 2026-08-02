@@ -4,7 +4,8 @@ use crate::error::{LispError, LispResult};
 use crate::syntax::printer;
 
 use super::numeric::{
-    arg, expect_int, expect_rope, expect_rope_ref, expect_string, num_to_f64, two,
+    arg, expect_int, expect_rope, expect_rope_ref, expect_string, expect_string_ref, num_to_f64,
+    two,
 };
 use super::realize_seqview;
 use crate::eval::apply;
@@ -853,7 +854,10 @@ pub(super) fn set_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
 pub(super) fn string_length(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let v = arg(args, 0);
     match v {
-        Value::Str(id) => Ok(Value::int(heap.string(id).chars().count() as i64)),
+        // O(1): the char count is cached on the slot. It used to be `chars().count()`
+        // here — a full scan on every call, which is why a loop bounded by
+        // `(string-length s)` was quadratic before it did anything else.
+        Value::Str(id) => Ok(Value::int(heap.str_metrics(id).0 as i64)),
         _ => Err(LispError::wrong_type(heap, "string-length", "string", v)),
     }
 }
@@ -1119,8 +1123,11 @@ pub(super) fn scan_bar(chars: &[char], n: usize, from: usize) -> usize {
 /// primitive the Brood `index-of`/`includes?` ride on; see the
 
 pub(super) fn str_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "%str-index-of", arg(args, 0))?;
-    let needle = expect_string(heap, "%str-index-of", arg(args, 1))?;
+    // Borrowed, not owned: `expect_string` would copy the whole haystack per call, which
+    // is the difference between a linear incremental search and a quadratic one.
+    let h: &Heap = heap;
+    let s = expect_string_ref(h, "%str-index-of", arg(args, 0))?;
+    let needle = expect_string_ref(h, "%str-index-of", arg(args, 1))?;
     // Optional 3rd arg: the CHAR index to start searching at. It exists so `index-of`'s
     // `from` does not have to build `(substring coll from n)` first — that copy is what
     // made "incremental search" over one string quadratic, the same trap the comment
@@ -1133,15 +1140,24 @@ pub(super) fn str_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
             other => return Err(LispError::wrong_type(heap, "%str-index-of", "int", other)),
         },
     };
-    // Char index → byte offset. O(start) and allocation-free; `nth` past the end yields
-    // the end, so an out-of-range start simply finds nothing (matching the clamp the
-    // Brood side used to do).
+    // Char index → byte offset. For a pure-ASCII string the two are the same number, so
+    // both conversions below are O(1) — that is what makes an incremental search over one
+    // string linear rather than O(position) per call. Non-ASCII walks, as it must.
+    let ascii = match arg(args, 0) {
+        Value::Str(id) => h.str_metrics(id).1,
+        _ => false,
+    };
+    // `nth` past the end yields the end, so an out-of-range start simply finds nothing
+    // (matching the clamp the Brood side used to do).
     let byte_start = if start == 0 {
         0
+    } else if ascii {
+        start.min(s.len())
     } else {
         s.char_indices().nth(start).map_or(s.len(), |(b, _)| b)
     };
-    let idx = match s[byte_start..].find(needle.as_str()) {
+    let idx = match s[byte_start..].find(&*needle) {
+        Some(rel) if ascii => (byte_start + rel) as i64,
         // Count chars over the prefix, not the whole string — with `start == 0` this is
         // exactly the previous behaviour.
         Some(rel) => s[..byte_start + rel].chars().count() as i64,
@@ -1163,9 +1179,15 @@ pub(super) fn str_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 /// whole buffer text, and `lineedit.blsp` finds the current line's start (`last-index-of
 /// text "\n" p`) on every keystroke.
 pub(super) fn str_last_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "%str-last-index-of", arg(args, 0))?;
-    let needle = expect_string(heap, "%str-last-index-of", arg(args, 1))?;
-    let char_len = s.chars().count();
+    // Borrowed, not owned — see `%str-index-of`.
+    let h: &Heap = heap;
+    let s = expect_string_ref(h, "%str-last-index-of", arg(args, 0))?;
+    let needle = expect_string_ref(h, "%str-last-index-of", arg(args, 1))?;
+    // Cached char count + the ASCII flag, both O(1); `char_len` used to be a full scan.
+    let (char_len, ascii) = match arg(args, 0) {
+        Value::Str(id) => h.str_metrics(id),
+        _ => (s.chars().count(), false),
+    };
     let before = match args.get(2) {
         None | Some(Value::Nil) => char_len as i64,
         Some(&v) => match v {
@@ -1200,19 +1222,22 @@ pub(super) fn str_last_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     // match's start, not on the slice searched.
     let limit = if before as usize >= char_len {
         s.len()
+    } else if ascii {
+        (before as usize).min(s.len())
     } else {
         s.char_indices()
             .nth(before as usize)
             .map_or(s.len(), |(b, _)| b)
     };
     let mut best: Option<usize> = None;
-    for (b, _) in s.match_indices(needle.as_str()) {
+    for (b, _) in s.match_indices(&*needle) {
         if b >= limit {
             break;
         }
         best = Some(b);
     }
     Ok(Value::int(match best {
+        Some(b) if ascii => b as i64,
         Some(b) => s[..b].chars().count() as i64,
         None => -1,
     }))

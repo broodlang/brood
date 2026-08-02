@@ -37,13 +37,17 @@
 ;; 540 ms -> 1 ms at 6400 repeats. It is on an editor hot path both ways (buffer reverse
 ;; search over whole buffer text; lineedit finding the line start per keystroke).
 ;;
-;; STILL QUADRATIC, deliberately: `incremental scan` — a Brood loop calling
-;; `(index-of s needle i)` with a rising `i`. The suffix COPY is gone (the offset now goes
-;; to the primitive), but a char index still has to be converted to a byte offset, which is
-;; O(position) per call. Making it linear needs char-length/ASCII metadata cached on the
-;; heap string, so the conversion is O(1) — a heap change, not a primitive change. Until
-;; then: to visit every occurrence, use `string-split` (one native pass), which is exactly
-;; what `template/render` was rewritten to do. The row stays so the gap is visible.
+;; 2026-08-02: `incremental scan` — a Brood loop calling `(index-of s needle i)` with a
+;; rising `i` — is now LINEAR too, and it took two fixes, only one of which was the one
+;; predicted. (a) the heap string slot caches its CHAR count, so `string-length` is O(1)
+;; and `chars == bytes` is an O(1) pure-ASCII test, making char<->byte conversion O(1);
+;; (b) the far bigger one, `expect_string` returns an OWNED String — it copied the whole
+;; haystack on every call. Borrowing instead (`expect_string_ref`, the sibling of the
+;; existing `expect_rope_ref`) is what actually moved it: 1114 ms -> 15 ms at 25 600
+;; repeats, ratios 12.33/30.10 -> 7.0/2.14 (a falling ratio is warm-up, i.e. linear).
+;; NOTE `expect_string` is used ~120 times across the builtins and every one of those is a
+;; per-call copy of its string argument. Only the two search primitives were converted
+;; here; the rest is an open seam.
 ;;
 ;; 2026-08-02: `strip-ansi` WAS a confirmed quadratic — 7.6x then 14.0x, 1.58 s for ~90 KB
 ;; of colourised output. It read each char with `char-at` (O(i) on UTF-8) AND called
