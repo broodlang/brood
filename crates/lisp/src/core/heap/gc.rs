@@ -1940,10 +1940,9 @@ fn flush_string(old: &Slabs, new: &mut Slabs, fwd: &mut FlushForward, id: StrId)
     // `SharedBlob` identity (no byte copy); non-surviving Shared slots
     // simply drop their old `Arc` and free the blob if they were the last
     // reference.
-    let entry = match &old.strings[flush_bound!(old.strings, id, fwd, "string")] {
-        LocalString::Inline(s) => LocalString::Inline(s.clone()),
-        LocalString::Shared(arc) => LocalString::Shared(Arc::clone(arc)),
-    };
+    // `Clone` keeps the cached char length with the entry — an Inline clones its
+    // `String`, a Shared just bumps the blob's `Arc` (no byte copy), as before.
+    let entry = old.strings[flush_bound!(old.strings, id, fwd, "string")].clone();
     let new_idx = new.strings.len();
     new.strings.push(entry);
     fwd.strings.set(key, new_idx as u32);

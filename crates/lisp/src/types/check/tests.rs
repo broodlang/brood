@@ -3784,7 +3784,8 @@ fn unknown_module_qualified_name_is_not_unbound() {
     // the test about the checker instead of about the build's feature set.
     let w = file_warnings("(require 'io) (io/no-such-fn 1)");
     assert!(
-        w.iter().any(|m| m.contains("unbound symbol: io/no-such-fn")),
+        w.iter()
+            .any(|m| m.contains("unbound symbol: io/no-such-fn")),
         "a typo in a known module must still be flagged: {w:?}"
     );
 }

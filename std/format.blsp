@@ -700,7 +700,14 @@ retired the `comment-on-own-line?` distinction this used to need."
   (let (root (parse-source src)) (format-cst-root (node-children root))))
 
 (defn format-cst-root (kids)
-  (let (out (format-cst-root--walk kids 0 (vector-length kids) 0 ""))
+  ;; The walk accumulates the top-level blocks as a REVERSED chunk list, joined once here.
+  ;; It used to accumulate the output string itself — `(str acc "\n" block)` per top-level
+  ;; form — which recopies everything emitted so far, i.e. O(forms × file). That reads as
+  ;; linear at small sizes (the per-form render dominates) and only shows up as the file
+  ;; grows: ratios 3.80 / 4.12 / 4.64 / 4.46 / 6.40 across bases, and 3.6 s for 12 800
+  ;; forms. A shape that creeps *up* across bases is the opposite of the warm-up signature
+  ;; that clears a row, and it was mistakenly cleared once on the small-N numbers alone.
+  (let (out (apply str (reverse (format-cst-root--walk kids 0 (vector-length kids) 0 ()))))
     (cond (= out "") "" (ends-with? out "\n") out else (str out "\n"))))
 
 ;; The walker threads `nl-since-last`: the newline count between the last
@@ -730,8 +737,16 @@ retired the `comment-on-own-line?` distinction this used to need."
                      (str form-block " "
                        (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx))))))))))))
 
+;; `acc` is the reversed chunk list, so gluing is two `cons`es instead of a full recopy.
+;; The empty case is deliberately `(if (= block "") acc …)` rather than a plain `(list
+;; block)`: the old string version tested `(= acc "")`, which stays true while every block
+;; so far has been empty, and only then omits the separator. Consing an empty first block
+;; would make the list non-empty and emit a leading separator the old code never produced.
 (defn format-source--glue (acc nl block)
-  (cond (= acc "") block (>= nl 2) (str acc "\n\n" block) else (str acc "\n" block)))
+  (cond
+    (empty? acc) (if (= block "") acc (list block))
+    (>= nl 2) (cons block (cons "\n\n" acc))
+    else (cons block (cons "\n" acc))))
 
 ;; ---- driving the project ----------------------------------------------------
 ;; `nest format` walks every .blsp under the project ROOT — wider than `nest
