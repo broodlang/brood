@@ -988,4 +988,15 @@
 
   (test "collapse-whitespace never eats across a newline"
     ;; it squeezes the gap point stands in; line structure is not its business
-    (assert= (buffer-text (collapse-whitespace (at "a  \n  b" 2) "")) "a\n  b")))
+    (assert= (buffer-text (collapse-whitespace (at "a  \n  b" 2) "")) "a\n  b"))
+
+  (test "whitespace-run-at is the span collapse replaces — the gap point stands in"
+    ;; the span is public because reading the ORIGINAL text out of it is what a cycling
+    ;; command (Emacs 29's cycle-spacing: one space → none → what was there) needs
+    (assert= (whitespace-run-at (at "a   \t  b" 4)) [1 7])
+    (assert= (whitespace-run-at (at "a b" 1)) [1 2])          ; beside a single space
+    (assert= (whitespace-run-at (at "ab" 1)) [1 1]))           ; no whitespace: empty span
+
+  (test "whitespace-run-at stops at a newline, in both directions"
+    (assert= (whitespace-run-at (at "a  \n  b" 2)) [1 3])      ; before the newline
+    (assert= (whitespace-run-at (at "a  \n  b" 4)) [4 6])))    ; after it
