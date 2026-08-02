@@ -53,8 +53,8 @@ pub fn install_crash_dump() {
         prior(info);
         use std::io::Write;
         let bt = std::backtrace::Backtrace::force_capture();
-        let when = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let when = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
         let thread = std::thread::current();

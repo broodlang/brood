@@ -1,0 +1,21 @@
+[package]
+name = "brood-playground"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "wasm-bindgen shim exposing a Brood eval() to the browser (the in-browser playground)."
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+# The interpreter, built for wasm32 with no native subsystems (see crates/lisp's
+# wasm target sections). default-features drops dev-tools/jit/treesit/wasmtime.
+brood = { path = "../lisp", default-features = false }
+# Pinned to the installed wasm-bindgen CLI — the crate and CLI versions must match.
+wasm-bindgen = "=0.2.100"
+
+[profile.release]
+opt-level = "s"
+lto = true

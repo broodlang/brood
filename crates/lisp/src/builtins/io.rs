@@ -212,8 +212,8 @@ pub(super) fn stdin_tty(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// `(now)` — wall-clock milliseconds since the Unix epoch, as an integer.
 /// Subtract two readings to measure elapsed time (see `std/tool/test.blsp`).
 pub(super) fn now(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let ms = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     Ok(Value::int(ms))
@@ -224,8 +224,8 @@ pub(super) fn now(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
 /// millisecond work that `now`'s resolution would round to zero. (i64
 /// nanoseconds since 1970 stays in range until the year 2262.)
 pub(super) fn now_ns(_: &[Value], _: EnvId, _: &mut Heap) -> LispResult {
-    let ns = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let ns = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as i64)
         .unwrap_or(0);
     Ok(Value::int(ns))

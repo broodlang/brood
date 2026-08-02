@@ -63,7 +63,11 @@ pub mod gui_gpu; // optional GPU (OpenGL) render backend for `gui` — feature "
 pub mod introspect; // tooling-facing queries on a live Interp (LSP today, MCP next)
 #[cfg(feature = "jit")]
 pub mod jit; // tier-1 template JIT via Cranelift (feature "jit") — ADR-101, docs/value-repr.md
+#[cfg(not(target_arch = "wasm32"))]
 pub mod net; // thin non-blocking TCP socket mechanism (ADR-062); policy lives in bundled std/net/* (ADR-097)
+#[cfg(target_arch = "wasm32")]
+#[path = "net_wasm.rs"]
+pub mod net; // wasm has no sockets — stub with the same API (fails at runtime)
 pub mod perf; // VM work-attribution counters (feature "perf-stats") — docs/benchmarking.md
 pub mod process; // the green-process scheduler // the primitive kernel (Rust mechanism; policy lives in std/*.blsp)
 pub mod profile; // sampling CPU profiler over the VM's reified frames (observability timing tier)
@@ -176,7 +180,7 @@ fn boot_cache_header_prefix() -> String {
 /// stdlib navigation is identical on both paths; only the ~27 ms compile pass
 /// is skipped.
 fn boot_from_cache() -> Option<SharedBundle> {
-    let t_start = std::time::Instant::now();
+    let t_start = web_time::Instant::now();
     let path = boot_cache_path()?;
     let text = std::fs::read_to_string(&path).ok()?;
     let (header, body) = text.split_once('\n')?;
@@ -230,7 +234,7 @@ fn boot_from_cache() -> Option<SharedBundle> {
 /// The full source boot: parse + macro-expand + eval + freeze the prelude,
 /// then (best-effort) write the expanded-prelude cache for the next boot.
 fn boot_from_source() -> SharedBundle {
-    let t_start = std::time::Instant::now();
+    let t_start = web_time::Instant::now();
     // Build the prelude + builtins in a throwaway builder heap, then relocate it
     // all into the shared region. Done once for the whole process.
     let mut heap = Heap::new();
@@ -246,11 +250,11 @@ fn boot_from_source() -> SharedBundle {
     // unavailable (everything else is unaffected). See `prelude_source_path`.
     let prelude_file = prelude_source_path();
     heap.set_current_file(prelude_file);
-    let t_mark = std::time::Instant::now();
+    let t_mark = web_time::Instant::now();
     // Positioned read so each def carries the line/col goto-definition lands on.
     let forms = syntax::reader::read_all_positioned(&mut heap, PRELUDE).expect("read prelude");
     let t_read = t_mark.elapsed();
-    let t_mark = std::time::Instant::now();
+    let t_mark = web_time::Instant::now();
     let mut t_expand = std::time::Duration::ZERO;
     // The boot cache's payload: each compiled form, printed. A form whose
     // print→read→print round-trip isn't a fixpoint poisons the whole cache
@@ -269,7 +273,7 @@ fn boot_from_source() -> SharedBundle {
         // Compile pass (expand macros, then namespace-resolve — a no-op here since
         // the prelude is the root namespace), then evaluate. Form-by-form so a
         // macro defined by one form is visible to the next.
-        let t_e = std::time::Instant::now();
+        let t_e = web_time::Instant::now();
         let form = eval::macros::compile(&mut heap, form, root)
             .unwrap_or_else(|e| panic!("prelude expand: {}", e));
         let d = t_e.elapsed();
@@ -291,7 +295,7 @@ fn boot_from_source() -> SharedBundle {
     }
     heap.set_current_file(None);
     let t_eval = t_mark.elapsed();
-    let t_mark = std::time::Instant::now();
+    let t_mark = web_time::Instant::now();
     let (code, bindings) = heap.freeze_as_shared_code(root);
     let t_freeze = t_mark.elapsed();
     if cache_ok {

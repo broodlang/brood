@@ -1345,7 +1345,7 @@ fn vm_run_bc_runs_a_tiered_arm_via_the_hook() {
 #[test]
 #[ignore = "benchmark — cargo test -p brood --features jit --lib jit_speedup -- --ignored --nocapture"]
 fn jit_speedup_vs_vm() {
-    use std::time::Instant;
+    use web_time::Instant;
     let prim2 = |op: PrimOp, head: &str| Inst::Prim2 {
         op,
         map: [0, 1],
