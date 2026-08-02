@@ -45,6 +45,16 @@
 ;; then: to visit every occurrence, use `string-split` (one native pass), which is exactly
 ;; what `template/render` was rewritten to do. The row stays so the gap is visible.
 ;;
+;; 2026-08-02: `strip-ansi` WAS a confirmed quadratic — 7.6x then 14.0x, 1.58 s for ~90 KB
+;; of colourised output. It read each char with `char-at` (O(i) on UTF-8) AND called
+;; `string-length` (`chars().count()`, O(n)) per character: two stacked quadratics. Now a
+;; code-point vector with a threaded length, like `url.blsp` / `csv.blsp`. 1583 ms -> 109 ms
+;; at 3200 lines. NOTE it has no in-tree callers — a latent bug in a public std module.
+;;
+;; Next candidate, unmeasured: `stream--lines-fetch` (std/stream.blsp) re-`substring`s the
+;; rest of its buffer per line, and `(str buf chunk)` recopies on refill. Bounded by CHUNK
+;; size rather than stream size, so it is smaller than it looks — measure before fixing.
+;;
 ;; `format format-source` measured 3.80x / 4.12x / 4.64x — LINEAR at realistic sizes,
 ;; despite `format-cst-root--walk` accumulating with `(str acc …)` per top-level form.
 ;; Left alone deliberately: rendering dominates at every size a real file reaches. If a
@@ -53,6 +63,7 @@
 (defmodule scale-sweep (:use proc/agent) (:use proc/gen) (:use editor/buffer))
 (require 'template)
 (require 'format)
+(require 'ansi)
 
 (def n (let (e (getenv "N")) (if e (string->number e) 2000)))
 
@@ -136,6 +147,11 @@
 (defn src-of (k) (apply str (repeat k "(defn f (a b) (if (> a b) (+ a 1) (- b 1)))\n\n")))
 (defn fmt-source (k) (format/format-source (src-of k)))
 
+;; ---- ansi: strip escapes from colourised subprocess output ------------------
+
+(defn colored-of (k) (apply str (repeat k "\e[32mok\e[0m  some test name here\r\n")))
+(defn ansi-strip (k) (ansi/strip-ansi (colored-of k)))
+
 ;; ---- string search: reverse, and a forward incremental scan -----------------
 
 (defn doc-of (k) (apply str (repeat k "lorem ipsum dolor NEEDLE sit amet consectetur ")))
@@ -154,5 +170,6 @@
 (row "buffer      fwd-line" n buffer-nav)
 (row "template    render  " n tmpl-render)
 (row "format      fmt-src " n fmt-source)
+(row "ansi        strip   " n ansi-strip)
 (row "string      last-idx" n last-idx)
 (row "string      inc-scan" n inc-scan)   ; known-quadratic, see header
