@@ -13904,3 +13904,30 @@ both engines do this identically. `eval-string` was never affected (always used 
 forward-ref behaviour rides the file def-head pre-scan). Perf parity held (eval 2031 vs
 compiled 2087 ms). Guarded by a new `eval_vm_test` case; `vm_nested_stack_guard_test` green
 again. KI-24 closed.
+
+## 2026-08-01 (cont.) — package registry moves from a git index to a hosted HTTP registry (hive)
+
+Built **hive**, a hosted package registry (a Hatch + Postgres app, separate downstream repo),
+and switched `nest`'s registry client from the ADR-147 git-metadata-index model to hive's HTTP
+JSON API. `*config-registry*` is now a base URL (not a git URL); `nest search` GETs
+`/api/v1/packages?q=`, a `[name :version "x"]` dep GETs the release metadata and downloads the
+immutable source tarball (sha256-verified, extracted with strip 0 — hive tarballs are
+root-level), and `nest publish` builds a source tarball (`run-process tar`, so no new builtin)
+and POSTs it with a per-user Bearer token. The registry dep's lock row is now
+`[name :registry V :sha256 SUM :deps …]` (was the resolved git commit). Removed the git-index
+helpers (`registry--read-dir`/`--versions`/`--append-entry`/…) and the `crates/nest/tests/registry.rs`
+integration test; the HTTP flow is covered by a new loopback-server test in `package_test.blsp`
+(a real download→verify→extract round-trip) and end-to-end against a running hive.
+
+Two supporting fixes:
+- **`std/net/http` dropped the query string.** `parse-url` discarded `:query` and `http-request`
+  built the target from `:path` alone, so any query-string GET (a search API) silently lost
+  everything after `?`. Now `parse-url` carries `:query` and the request target is `path?query`.
+- **Scaffold template bugs** (`std/tool/scaffold.blsp`, so every `nest new --template hatch`/`web-api`
+  inherited them): the endpoint's `receive` used `~h` where a pin is `^h` (wouldn't compile), and
+  the generated `web/errors/themed` re-skinned *every* ≥400 response as HTML — clobbering a JSON
+  API's error bodies. `themed` now passes through responses that already declare a JSON
+  content-type (`api-response?`).
+
+`brood`'s regex engine has no character-range support (`[a-z]`/`[0-9]`) — noted while writing
+hive's validators (used codepoint predicates instead); a candidate future improvement.

@@ -788,16 +788,26 @@ line's start does **not** pull that trailing line in (Emacs's line-wise conventi
     (buffer--ws-run-end txt (inc i) n)
     i))
 
+(defn whitespace-run-at (buf)
+  "The span of spaces/tabs SURROUNDING point, as `[lo hi]` (`hi` exclusive; `[p p]` when
+point is not in or beside one). Scans both directions but never across a newline, so it
+is the gap you are standing in — line structure is somebody else's business.
+
+Public because the span, not just its collapse, is what callers need: `collapse-whitespace`
+replaces it, `fixup-whitespace` decides what to leave in it, and a cycling command
+(Emacs 29's `cycle-spacing`, which walks one-space → none → *what was there*) has to read
+the original text out of it before touching anything."
+  (let (txt (buffer-text buf)
+        p (buffer-point buf))
+    [(buffer--ws-run-start txt p) (buffer--ws-run-end txt p (string-length txt))]))
+
 (defn collapse-whitespace (buf keep)
   "The run of spaces/tabs SURROUNDING point replaced by `keep` — `\" \"` for Emacs's
 `just-one-space` (M-SPC), `\"\"` for `delete-horizontal-space` (M-\\), and the squeeze
 step of `fixup-whitespace`. Scans both directions from point but never across a
 newline, so it collapses the gap you are standing in and leaves the line structure
 alone. Point lands just after `keep`."
-  (let (txt (buffer-text buf)
-        p (buffer-point buf)
-        lo (buffer--ws-run-start txt p)
-        hi (buffer--ws-run-end txt p (string-length txt)))
+  (let ([lo hi] (whitespace-run-at buf))
     (replace-region buf lo hi keep)))
 
 (def buffer--close-delimiters [")" "]" "}"])

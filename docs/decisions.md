@@ -12854,8 +12854,9 @@ cooperation. Known, documented trade-offs: a timeout may leave *partial* defs in
 the session (`eval-string` is sequential) — acceptable in a sandbox, and clients
 that re-send whole units of source are self-healing; and a process the evaluated
 code spawns can print between protocol lines after its capture is popped, which is
-why reply decoding is nil-on-garbage rather than strict. Dev-tools tier
-(`DEV_MODULES`): a lean release ships no arbitrary-eval server.
+why reply decoding is nil-on-garbage rather than strict. ~~Dev-tools tier
+(`DEV_MODULES`): a lean release ships no arbitrary-eval server.~~ — **reversed by
+ADR-199** (see the amendment below).
 
 **Amendments (2026-07-31, review fixes + tracing).** (1) `demonitor` here is
 best-effort, so the per-request evaluator's `:normal` DOWN was leaking into the
@@ -12869,3 +12870,124 @@ re-attempted after each form (so a `defn` and its call in one request trace), th
 reply gains bounded `:spy` entries, and `untrace-all` restores on every path
 including a timeout kill. This is what lets an editor tutorial show *the workings*
 of an evaluation without any client-side instrumentation.
+
+**Amendment (2026-08-01, the tier was wrong).** This module is **CORE, not dev-tools**
+— the original "a lean release ships no arbitrary-eval server" reasoned about the
+module's shape, not about who uses it, and an app whose own feature is "evaluate this
+snippet" needs it in production. Filed as dev-only, it made a *released* editor fail
+to boot rather than merely lose a feature (`run-bundle` loads every shipped module):
+see ADR-199 for the rule that replaces the shape reading. Related: the `:trace`
+support above is only safe for a caller that derives names from source — rather than
+naming them by hand — because a refused instrumentation now leaves no registry entry
+behind (ADR-201).
+
+## ADR-199 — What a lean release runtime omits: `DEV_MODULES` means "for *developing* an app"
+
+**Status:** accepted + implemented (2026-08-01).
+
+**Context.** `nest release` appends an app to the **lean** runtime
+(`--no-default-features`), which compiles `DEV_MODULES` away entirely — the point of
+ADR-038: a shipped app carries no test framework, observer, MCP/doc/hot-reload
+tooling, or REPL. The split was drawn by how *tool-shaped* a module looked, and two
+modules were filed wrongly by that reading: `debug` (the tracing debugger) and
+`eval-server` (ADR-198). The editor (`../brood-edit`) requires both at the top of
+`src/debugger.blsp` and `src/sandbox.blsp`, because a `C-c d` debugger session and
+eval-on-type tutorial playgrounds are *its features*.
+
+The failure was not a missing feature at runtime. **`run-bundle` loads every module
+the app ships** (order-independent, one pass), so one top-level `(require 'debug)`
+against a stripped module made the released binary die on startup —
+`require: cannot find module 'eval-server'` — with the debugger and the tutorial
+never even entered. `bedit` had been unlaunchable this way, while `nest run` (the dev
+runtime, dev-tools on) worked perfectly: the classic ship-only bug.
+
+**Decision.** The list is defined by *whose* development a module serves, not by its
+shape:
+
+> A module belongs in `DEV_MODULES` only if it serves **developing an app**. If a
+> shipped app's own features are built on it, it belongs in `CORE_MODULES` however
+> tool-shaped it looks.
+
+`debug` and `eval-server` move to CORE by that rule, joining the precedent already
+there for the same reason — `highlight`/`lineedit` ("an editor's minibuffer reuses
+it"), `treesit`, `markdown`, `dotenv`. `test`, `docs`, `grammar`, `observer`,
+`reload`, `mcp`, `repl` stay: an app does not run its own test framework.
+
+**Consequences.** The lean runtime carries ~46 KB more source (two `include_str!`s)
+and any app may now `require` tracing or a sandboxed evaluator — which is what makes
+a *shipped* editor able to debug and to run a playground, on a machine with no Brood
+toolchain. Two unit tests in `builtins/system.rs` pin the classification (and that no
+key is listed twice, since a stem in both lists would resolve by scan order). The
+deeper lesson is recorded in the `DEV_MODULES` doc comment: because `run-bundle` is
+eager, a misfiling is never a graceful degradation — it is a binary that cannot
+start, diagnosed far from its cause. Lazily requiring a module is no protection.
+
+## ADR-200 — A window declares its desktop app id; build-time attributes ride one `WindowSpec`
+
+**Status:** accepted + implemented (2026-08-01).
+
+**Context.** A desktop cannot guess which application a window belongs to. It matches
+the window's **application id** — Wayland's `app_id`, X11's `WM_CLASS` — against an
+installed `<app-id>.desktop` entry, and everything the user sees about the app's
+identity (its icon and name in a GNOME dash, alt-tab, "Open with") comes from that
+entry. `gui-open` set no id, so **every** windowed Brood app was unmatchable and drew
+the desktop's generic fallback icon. `gui-icon!` is not an answer: a Wayland client
+cannot hand the compositor icon pixels at all, so there the app id *is* the icon
+mechanism.
+
+An id can only be set while the window is being built — there is no protocol for
+changing it afterwards — which is the same constraint `:decorations` has, and it was
+already a positional tail on `open`.
+
+**Decision.** `gui-open`'s opts map gains `:app-id` (a non-empty string; an empty one
+is refused rather than silently producing an unmatchable window). No new op: this is
+a window *attribute*, and the ops surface stays as it is (the standing rule for the
+GUI backend — add capability as `std/editor` abstractions over existing ops, not as
+new frontend/kernel surface). The positional tail `(title, size, decorations)` becomes
+one `WindowSpec { title, size, decorations, app_id }` threaded from the builtin
+through the GUI thread's `Open` event (and its pre-`resumed` queue) to `build_window`,
+so the next build-time attribute is a field rather than another argument.
+
+Applied through winit's `platform::wayland::WindowAttributesExtWayland::with_name` —
+winit keeps ONE `platform_specific.name` read by whichever backend is live, so the
+Wayland trait covers X11's `WM_CLASS` too. This makes winit's default features
+load-bearing, noted as a COUPLING comment where winit is pinned.
+
+**Consequences.** A shipped Brood app can present itself as itself, given three names
+that agree: the id the window declares, the `.desktop` entry named after it, and the
+icon that entry asks for (myedit ships all three and a test pinning them together).
+`gui-icon!` remains for X11-only cases and is now documented as a no-op under Wayland,
+which is the honest statement of what a client can do there.
+
+## ADR-201 — Instrumentation installs atomically: a refused `trace-fn` registers nothing
+
+**Status:** accepted + implemented (2026-08-01).
+
+**Context.** `trace-fn`/`break-fn` save the pre-instrumentation function in
+`*traced-fns*` and rebind the global to a wrapper. They checked the obvious refusals
+first (unbound, not a function) — but a rebind can still be refused *after* every
+check passes: a reserved prelude/std name raises E0030 (ADR-166). The registry was
+written before the rebind, so that refusal left a name listed as traced while it was
+not. `untrace-fn`/`untrace-all` then tried to restore it and raised the *same*
+refusal, out of a caller that had long since handled the failed install — in practice
+`eval-server`'s teardown, which killed an unrelated evaluation outright.
+
+This surfaced when the editor's tutorial began deriving trace names from a snippet's
+own source (what it defines, what it calls) instead of a hand-written list per lesson.
+That is the shape any such caller wants: **offer everything plausible and let the
+tracer choose**, since only the tracer knows the target image's global table. It is
+only safe if a refused install is a no-op.
+
+**Decision.** Rebind first, register second, in both `trace-fn` and `break-fn`; a
+refused install leaves nothing behind, so speculative offers are safe to `try`. And
+`untrace-all` guards each restore: teardown must leave nothing instrumented even if
+one entry is stubborn, since it runs after every traced request.
+
+**Consequences.** A caller may pass any list of candidate names — builtins, macros,
+reserved names, names not defined yet — and get traces for exactly the traceable ones,
+which is what lets a tutorial show the workings of a box nobody annotated. Two
+regression tests in `tests/debug_test.blsp` cover both halves (refused registers
+nothing; a poisoned entry does not strand the rest). The general rule this is an
+instance of: *an instrumentation registry must never claim a rebind that did not
+happen* — the registry is a promise to restore, and a promise you cannot keep is worse
+than no entry.
