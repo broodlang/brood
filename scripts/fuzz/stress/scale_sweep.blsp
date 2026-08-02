@@ -62,10 +62,14 @@
 ;; base grows is warm-up, not a quadratic (the same signature that cleared `proc/gen
 ;; gen-call`). 800 -> 12800 is 5 -> 71 ms, i.e. 14x for 16x of input.
 ;;
-;; `format format-source` measured 3.80x / 4.12x / 4.64x — LINEAR at realistic sizes,
-;; despite `format-cst-root--walk` accumulating with `(str acc …)` per top-level form.
-;; Left alone deliberately: rendering dominates at every size a real file reaches. If a
-;; very large generated file ever shows up, that accumulator is where to look first.
+;; `format format-source` was cleared as LINEAR on 3.80x / 4.12x / 4.64x and that call was
+;; WRONG — a cautionary row. Those ratios creep UP, and pushing the base further gave 4.46
+;; then 6.40, with 12 800 forms taking 3.6 s: `format-cst-root--walk` really was recopying
+;; the whole output per top-level form, exactly as its `(str acc …)` shape suggested. The
+;; per-form render dominates at small N and hides it. Fixed 2026-08-02 (reversed chunk list,
+;; joined once): 3593 ms -> 1988 ms at 12 800, ratios 3.79 / 4.22, and 4.26 / 4.16 at the
+;; next base up. LESSON: a ratio near 4 that RISES across bases is not linear — only a
+;; falling one (warm-up) clears a row. Check the trend, not one triple.
 
 (defmodule scale-sweep (:use proc/agent) (:use proc/gen) (:use editor/buffer))
 (require 'template)

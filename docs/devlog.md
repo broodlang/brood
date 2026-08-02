@@ -14243,3 +14243,41 @@ from a single chunk arriving in order and complete, and `stream-take` abandoning
 while lines are still queued.
 
 Suite 928/928, `nest check` clean.
+
+## 2026-08-02 — correcting myself: `format-source` WAS superlinear (3.6 s → 2.0 s)
+
+Earlier today I measured `format format-source` at 3.80 / 4.12 / 4.64 across three points,
+called it linear, and deliberately left it alone despite `format-cst-root--walk` having the
+textbook `(str acc …)` accumulator shape — reasoning that the per-form render dominates at
+any size a real file reaches. Asked why it was untouched, I re-checked at a larger base
+instead of restating the argument. **The call was wrong.**
+
+| base | ratios |
+|---|---|
+| 200 → 800 → 3200 | 3.80 / 4.12 / 4.64 |
+| 800 → 3200 → 12800 | 4.46 / **6.40** |
+
+12 800 forms took **3593 ms**. The ratios *creep up*, which is the tell I had already written
+into the harness header in the opposite direction: a ratio that **falls** as the base grows is
+warm-up (that is what cleared `proc/gen gen-call` and `stream-lines`), so a ratio that **rises**
+is the real thing arriving late. I read the first triple as "near 4, therefore linear" without
+looking at the trend across triples. The per-form render is genuinely the bigger term until the
+file gets large — which is exactly how an O(n²) with a small constant hides.
+
+**Fix:** the walk accumulates a reversed chunk list, joined once. `format-source--glue` becomes
+two `cons`es. **3593 ms → 1988 ms** at 12 800 forms, ratios 3.79 / 4.22, and 4.26 / 4.16 at the
+next base up — flat across bases now, not just low at one.
+
+One subtlety the rewrite had to preserve: the old glue tested `(= acc "")` to decide whether to
+emit a separator, and that stays true while *every block so far has been empty*. A naive
+`(list block)` would make the accumulator non-empty on an empty first block and emit a leading
+separator the old code never produced, so the empty case is `(if (= block "") acc (list block))`.
+
+**Verified byte-for-byte, not by argument.** I built the formatter at HEAD, captured its output
+for all 255 `std/` + `tests/` files, rebuilt with the change, and diffed: **254 identical**. The
+single difference is `std/format.blsp` itself, whose input I had just edited. Idempotency — a
+documented contract — re-checked across 265 files: 0 failures.
+
+(An initial comparison against the *installed* Jul-30 binary showed 3 diffs and briefly looked
+alarming. That binary predates deliberate formatter changes since then, including the
+comment-hoisting removal. The right control is HEAD, not whatever is on `PATH`.)
