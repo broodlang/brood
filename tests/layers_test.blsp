@@ -236,6 +236,34 @@
       (assert= (get closed :log) "CD")
       (is (not (layer-active? closed 'cl))))))
 
+;; ---- taking companions with you ---------------------------------------------
+;; A mode that owns a second buffer (a tutorial's workings pane, a REPL transcript) can
+;; ask for it to be closed too. It cannot close it itself — a hook is `(ctx) -> ctx` and
+;; layers does not know what container the app keeps contexts in — so it NAMES it and the
+;; app performs it, the way a layer names a command and the keymap dispatches it.
+(defn companion-close (ctx) (request-close (request-close ctx "*Workings*") "*Spy*"))
+(def layer-companions {:name 'comp :hooks {:on-close '(layers-test/companion-close)}})
+
+(describe "close-requests — a closing context names its companions"
+  (test "nothing is requested by default"
+    (assert= (close-requests {}) '())
+    (assert= (close-requests (close-context (activate-layer {:log ""} 'layers-test/layer-close))) '()))
+
+  (test "an :on-close hook's requests survive on the closed context, in order"
+    (let (closed (close-context (activate-layer {} 'layers-test/layer-companions)))
+      (assert= (close-requests closed) (list "*Workings*" "*Spy*"))))
+
+  (test "a request is recorded once, however many layers ask"
+    ;; two layers owning the same companion is one close, not two
+    (let (ctx (activate-layer (activate-layer {} 'layers-test/layer-companions)
+                'layers-test/layer-companions))
+      (assert= (close-requests (close-context ctx)) (list "*Workings*" "*Spy*"))))
+
+  (test "request-close returns the context, so a hook can thread it"
+    (let (ctx (request-close {:keep true} "*X*"))
+      (is (:keep ctx))
+      (assert= (close-requests ctx) (list "*X*")))))
+
 ;; ---- Phase 3: async cleanup (the reason :on-close exists) -------------------
 ;; A layer that spawns a worker on focus must be able to kill it on close. The
 ;; worker is one-shot: on :stop it acks its parent and exits.

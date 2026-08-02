@@ -105,6 +105,32 @@ GUI passes just the window. The app fires `:on-blur`/`:on-focus` on focus change
 and `:on-close` (+ deactivate all) on close. `:on-close` is the async-cleanup hook
 (kill a worker a layer spawned).
 
+### Taking companions with you (`:on-close` + `request-close`)
+
+A mode often owns more than its own context: the tutorial's `*Workings*` pane, a
+REPL's transcript, a debugger's queue — buffers it created that mean nothing once
+it is gone. An `:on-close` hook cannot close them, and deliberately so: a hook is
+`(ctx) -> ctx`, and a "context" here is whatever the app threads through (a buffer,
+a window), so layers has no idea what container they live in. That ignorance is why
+it composes with any app.
+
+So a hook does not reach — it **names**:
+
+```
+(defn my-on-close (buf) (request-close buf "*Workings*"))   ; in the layer's :hooks
+…
+(let (closed (close-context buf))                           ; the app, on kill
+  (doseq (nm (close-requests closed)) …kill nm…))
+```
+
+`request-close` records a companion on the closing context (accumulating,
+de-duplicated); `close-requests` reads the list back off `close-context`'s result;
+the app — which does know its own pool — performs the closes and decides what an
+unrecognised name means (myedit ignores it: the mode may have been unloaded, or the
+companion already closed). The same shape as a render op or a keymap command: the
+layer says *what*, the app does it. myedit follows one level only, so two modes
+naming each other cannot loop.
+
 ## API (Phase 1 — the buffer-free core)
 
 ```
@@ -114,6 +140,9 @@ activate-layer (ctx layer)           -> push + run that layer's :activate
 deactivate-layer (ctx name)          -> run that layer's :deactivate + remove
 replace-base-layer (ctx layer)       -> deactivate old base, activate new (major-swap)
 run-event (ctx event)                -> fan event hooks across active layers (focus/blur/close)
+close-context (ctx)                  -> :on-close fan + deactivate-all (the full close path)
+request-close (ctx name)             -> from an :on-close hook: ask the app to close companion `name`
+close-requests (ctx)                 -> the companions a closed context asked to take with it
 active-keymap (ctx)                  -> merge active layers' :keymap (head wins)
 layer-dispatch (ctx pending key fb)  -> active-keymap + keymap-step → [ctx' pending']
 ```

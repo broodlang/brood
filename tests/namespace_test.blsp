@@ -211,3 +211,88 @@
   (test "a defdyn knob keeps working from a default (it is ambient, never namespaced)"
     (%load-string "(defmodule nsopt8) (defdyn *dlim* 9) (defn f (&optional (n *dlim*)) n)")
     (assert= (nsopt8/f) 9)))
+
+;;; The `/name` root escape (ADR-065): an empty module prefix addresses the ROOT /
+;;; prelude namespace, so a module that shadows a prelude name can still reach the
+;;; original — `/map` is prelude's `map` even where the module defined its own.
+(describe "namespaces: the /name root escape"
+  :isolated
+  (test "a module shadowing a prelude name reaches the original via /name"
+    (%load-string (str "(defmodule nsroot1)"
+                    " (defn map (x) (list :mine x))"
+                    " (defn mine (x) (map x))"
+                    " (defn orig () (/map (fn (x) (* x x)) (list 1 2 3)))"))
+    ;; the module's own `map` wins for a bare reference…
+    (assert= (nsroot1/mine 5) (list :mine 5))
+    ;; …and `/map` still reaches the prelude's `map`.
+    (assert= (nsroot1/orig) (list 1 4 9)))
+  (test "the bare division operator is untouched by the /name escape"
+    (%load-string "(defmodule nsroot2) (defn half (x) (/ x 2))")
+    (assert= (nsroot2/half 10) 5)))
+
+;; ---- std's own cross-module name overlaps, enumerated ------------------------
+;; Namespacing means two modules MAY export the same short name; `(:use A) (:use B)` then
+;; raises E0099 and the consumer resolves it (`:only`/`:exclude`, or `require` + qualified
+;; calls). That is by design — but the SET of overlaps should be known rather than
+;; discovered by a consumer whose editor stopped loading, which is how this list was found:
+;; `sexp` and `editor/treesit` both grew structural motions (`point-forward`, …), and myedit
+;; `:use`d both.
+;;
+;; So the set is pinned here. A NEW overlap fails this test, which is the point: adding one
+;; is a decision (the modules are unlikely to be used together; the name is genuinely the
+;; best one for both) rather than an accident nobody notices until a `:use` breaks.
+(def ns--known-overlaps
+  ;; name -> the modules that export it, sorted. Modules unlikely to be `:use`d together
+  ;; (`package` + `proc/agent`) are as legitimate here as the pair that prompted the audit.
+  ;; (an earlier audit also listed `bytes-`; that was a prefix match on `bytes->hex`, not an
+  ;; export — hence this test reads the flat table rather than trusting a source scan.)
+  {"attach" ["editor/serve" "telemetry"]
+   "forward" ["sexp" "telemetry"]
+   "parse-url" ["net/http" "url"]
+   "point-backward" ["editor/treesit" "sexp"]
+   "point-defun-start" ["editor/treesit" "sexp"]
+   "point-down" ["editor/treesit" "sexp"]
+   "point-forward" ["editor/treesit" "sexp"]
+   "point-up" ["editor/treesit" "sexp"]
+   "render" ["format" "template"]
+   "serve" ["editor/serve" "net/http"]
+   "span" ["debug" "telemetry"]
+   "splice" ["editor/formbuf" "sexp"]
+   "stop" ["proc/agent" "proc/gen"]
+   "tree" ["package" "sexp"]
+   "update" ["package" "proc/agent"]})
+
+(defn ns--exports-of (module)
+  "The public names `module` contributes to the flat table — read from `global-names`, so it
+is what a `:use` would actually import, not what the source looks like."
+  (let (prefix (str module "/")
+        plen (string-length prefix))
+    (into #{}
+      (map (fn (n) (substring n plen (string-length n)))
+        (filter (fn (n) (and (starts-with? n prefix)
+                          ;; a nested module (`editor/x` under `editor`) is not an export
+                          (not (includes? (substring n plen (string-length n)) "/"))
+                          (not (includes? n "--"))))          ; module-private
+          (map name (global-names)))))))
+
+(describe "std cross-module name overlaps are known, not surprising"
+  :serial
+  (test "each recorded overlap is still real — both modules export the name"
+    ;; loading them is what puts their names in the flat table
+    (doseq (kv ns--known-overlaps)
+      (let ([nm mods] kv)
+        (doseq (mod mods) (try (require (symbol mod)) (catch e nil)))
+        (doseq (mod mods)
+          (is (includes? (ns--exports-of mod) nm))))))
+
+  (test "the pair that prompted this: sexp and editor/treesit overlap on five motions"
+    (do
+      (require 'sexp)
+      (require 'editor/treesit)
+      (let (shared (filter (fn (n) (includes? (ns--exports-of "editor/treesit") n))
+                    (into [] (ns--exports-of "sexp"))))
+        (assert= (sort shared)
+          (list "point-backward" "point-defun-start" "point-down" "point-forward" "point-up"))
+        ;; and they are DIFFERENT operations, not duplicates: treesit's take a `lang`
+        (assert= 3 (count (arglist editor/treesit/point-forward)))
+        (assert= 2 (count (arglist sexp/point-forward)))))))
