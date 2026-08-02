@@ -4691,9 +4691,25 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   (let (methods (get *impls* op-key))
     (or (get methods key) (get methods :default))))
 
+(def *substrate-abilities* ['Display 'Inspect 'Seqable 'Conjable])
+;; The abilities the LANGUAGE ITSELF dispatches on. Their `:default` impls are the fallback
+;; every value relies on — `Display`'s is what `print`/`println`/`str` reach for — so they are
+;; substrate, not policy, and `unregister-impl` refuses to retract them: `(unimpl Display
+;; :default)` is one line that stops the image printing anything, and the only clue is a
+;; `no impl for :vector` from deep inside an unrelated call. Same reasoning as reserved names
+;; (ADR-166): the language's own definitions are not yours to remove. An `impl` you wrote for
+;; YOUR OWN id (`(impl Display my/rec …)`) is policy, and retracts normally.
+
+(defn impl--substrate? (aname key)
+  "Whether `[aname key]` names one of the language's own fallback impls — the `:default` of an
+  ability the runtime dispatches on itself."
+  (and (= key :default) (member? aname *substrate-abilities*)))
+
 (defn unregister-impl (aname op key)
   "Remove `key`'s impl of `aname`'s `op` — the inverse of `register-impl`. Returns true when
-  an impl was there, false when there was nothing to remove (idempotent, never raises).
+  an impl was there, false when there was nothing to remove (idempotent, never raises) — and
+  errors for one case only: a `:default` of an ability the language dispatches on itself
+  (`impl--substrate?`), because removing that leaves every value unprintable.
 
   The slot becomes UNCLAIMED, not `:default`: a later `register-impl` of any tier takes it,
   because precedence compares against an incumbent and there is none. Dispatch falls back to
@@ -4704,6 +4720,9 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   inverse cannot be returned to a known state, which bites anything that has to: a test that
   must not leak into the next one, a REPL session undoing an experiment, a hot reload
   retracting an impl the new source no longer declares."
+  (when (impl--substrate? aname key)
+    (error "unregister-impl: " aname "/" op " :default is part of the language — removing it "
+      "would leave every value unprintable. Override it with `impl` for your own id instead."))
   (let (op-key [aname op]
         prov-key [aname op key]
         had (contains? (or (get *impls* op-key) {}) key))

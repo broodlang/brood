@@ -397,7 +397,7 @@ underneath, for a caller holding names as values.
 Registration was open and reversible in every way but this one, and a registry with no
 inverse cannot be returned to a known state: a test that must not leak into the next, a
 REPL undoing an experiment, a hot reload retracting an impl the new source no longer
-declares (ADR-203).
+declares (ADR-204).
 
 **Op arity.** An op dispatches on its **first** argument, so it must take at least
 one — a zero-arg op `(op [])` is a clean expansion-time error. Beyond the first, an

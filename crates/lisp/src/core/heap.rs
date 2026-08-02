@@ -4536,7 +4536,27 @@ impl Heap {
                 self.alloc_pair(val, cur)
             }
             RegistryOp::Dissoc => match cur.unpack() {
-                ValueRef::Map(id) => self.map_dissoc(id, k1),
+                ValueRef::Map(id) => {
+                    if path.len() >= 2 {
+                        // NESTED dissoc, symmetric with `:assoc`'s two-key path: remove `k2`
+                        // from the inner map at `k1`, leaving that map (and every sibling
+                        // key) in place. Without this, a two-key `:dissoc` silently used
+                        // only `k1` and removed the WHOLE inner map — which is how
+                        // `unregister-impl`, retracting one id of `[ability op]`, destroyed
+                        // every impl of that op including the language's `:default`.
+                        let k2 = path[1];
+                        match self.map_get(id, k1).map(|v| v.unpack()) {
+                            Some(ValueRef::Map(inner)) => {
+                                let inner_next = self.map_dissoc(inner, k2);
+                                self.map_assoc(id, k1, inner_next)
+                            }
+                            // no inner map at `k1`: nothing to remove
+                            _ => return false,
+                        }
+                    } else {
+                        self.map_dissoc(id, k1)
+                    }
+                }
                 _ => return false,
             },
             RegistryOp::Assoc | RegistryOp::AssocNew => {
