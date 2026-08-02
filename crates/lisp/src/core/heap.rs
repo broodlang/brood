@@ -3308,10 +3308,13 @@ impl Heap {
         let cold = self.cold_mut();
         let prev_prefix = std::mem::replace(&mut cold.package_prefix, prefix);
         let prev_modules = std::mem::replace(&mut cold.package_modules, modules);
-        // The qualified-reference rooting memo is a property of the context we just
-        // replaced — drop it so a nested dep load doesn't inherit the outer package's
-        // answers (see `rooted_ref_ic`).
+        // Both memos are properties of the context we just replaced — drop them so a
+        // nested dep load doesn't inherit the outer package's answers: `rooted_ref_ic`
+        // holds `mod/name` → rooted spellings, and `global_ic` may hold a value cached
+        // under an unrooted key that resolved through one (see `global_lookup_cached`).
+        // Context switches are load-time and rare, so clearing costs nothing at run time.
         self.rooted_ref_ic.borrow_mut().clear();
+        self.global_ic.borrow_mut().clear();
         (prev_prefix, prev_modules)
     }
 

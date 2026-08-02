@@ -14580,3 +14580,220 @@ for rooted *project* modules; `nest release` bundling of two deps sharing a modu
 loads unrooted but self-consistently today, so simple bundles are unaffected); and REPL interaction
 (a bare project fn needs its `myeditor/mod/fn` name interactively). The FULL dependency-version
 **resolver with many tests** is next (user-sequenced, overrides the ADR-037 no-solver invariant).
+
+## 2026-08-02 — correcting the claims the measurements contradicted
+
+Housekeeping pass over statements in the tree that this session's measurements proved wrong.
+Three of them, all comments asserting a cost without evidence — the exact failure mode the
+sweep's own lesson names ("a comment asserting linearity is not evidence").
+
+**1. `fuzzy--next`: "this scan is the dominant cost of ranking."** It is not, and that claim
+cost real time — I twice predicted a string fix would pay off in fuzzy ranking *because of
+it*. Three separate fixes made the scan much cheaper (`from` stopped copying the suffix,
+char↔byte conversion became O(1), `%str-index-of` stopped copying its haystack) and ranking
+4000 repo-style paths moved only **116 → 106 ms**. So I measured the phases instead of
+guessing again:
+
+| over the same 4000 candidates | |
+|---|---|
+| full `fuzzy-filter` | 112 ms |
+| `map fuzzy-match` | **78 ms** |
+| `map lower` | 1 ms |
+| `map string-length` | 1 ms |
+| `map identity` (loop floor) | 2 ms |
+
+The cost is the interpreted per-candidate work — the subsequence walk and the scoring
+recursion — not the native search underneath. The docstring now says that, with the numbers.
+
+**2. The prelude's string-library header: "`substring` is O(index), so a full scan is O(n²)."**
+True when written, wrong now: `substring` takes a byte-slice fast path on pure-ASCII text, so
+a scan is linear there and quadratic only when a multi-byte character is present. Rather than
+assert the new claim, I measured it — char-by-char over 4k/16k/64k chars: **ASCII 6/7/27 ms
+(ratios 1.16, 3.85)** vs **non-ASCII 2/21/242 ms (10.50, 11.52)**. Both numbers are in the
+comment now.
+
+**3. My own `index-of` comment** implied the suffix copy mattered for `fuzzy--next`. Reworded
+to say where it *measurably* mattered (`last-index-of`, 540 → 1 ms) and to point at the fuzzy
+note before anyone assumes it is a bottleneck.
+
+Also refreshed `docs/handoff.md` §3 thread 1, which still described the sweep as it stood five
+fixes ago — including the fact that `format-source` was cleared as linear and that call was
+wrong, since a future reader is more likely to repeat that mistake than any of the fixes.
+
+Suite 929/929, `nest check` clean, rustfmt clean.
+
+## 2026-08-02 — thread 2 profiled: the 27 µs is spawn PLACEMENT, not per-message cost
+
+`perf` is unavailable on this box (`perf_event_paranoid=4`, sudo wants interactive auth), so
+this was done by ablation instead — which turned out to be enough, and produced a decisive
+answer that contradicts how the thread was framed.
+
+**The framing was wrong.** Thread 2 is recorded as "per-message cost — Brood's `latency` p50
+is 27 µs vs Elixir's 8 µs". Measured, the per-message mechanics are nowhere near that:
+
+| | µs/op |
+|---|---|
+| `spawn` alone | 0.9 |
+| send + receive to self | 1.1 |
+| spawn + send + collect | 3.4 |
+| pingpong round trip | 4.3 |
+| ref-pinned request/reply | 4.2 |
+
+**Three hypotheses, all killed by measurement:**
+1. *Queueing under open-loop arrival.* Lowering the rate should have collapsed p50. It made
+   it **worse** — 20k rps 27 µs, 10k 45, 5k 42, 2k 41.
+2. *Wake latency on a parked worker.* Timing only the round trip with an idle gap outside the
+   clock: 5.4 µs hot → 5.7 (50 µs gap) → 5.7 (200 µs) → 7.4 (1 ms). Worth ~0.3–2 µs, not 20.
+3. *The dispatcher missing its deadlines.* Its pacing loop is near-perfect: overshoot p50, p90
+   and p99 all **0 µs** at both 20k and 2k rps.
+
+Ablating the benchmark itself: with the fat requests removed p50 stays 27 µs; with the
+handler doing **no work at all** it stays 26 µs. So the whole p50 is the interval between
+`spawn` and the handler's first instruction.
+
+**The cause is spawn placement, and one flag proves it:**
+
+| | p50 | p99 | p99.9 |
+|---|---|---|---|
+| default (`BROOD_SPAWN_SPILL=1`) | 27 µs | 191 | 799 |
+| `BROOD_SPAWN_RR=1` | **11 µs** | 111 | 332 |
+| `BROOD_SPAWN_SPILL=0` | **11 µs** | 103 | 291 |
+| `BROOD_NO_HANDOFF=1` | 39 µs | 166 | 369 |
+
+Stable across runs (27/27/28 vs 11/11/11). **2.5× on p50 and 2.7× on p99.9 from a placement
+policy**, on a row we have been reading as a messaging number.
+
+**Why the default loses here.** Placement keeps a child on the spawner's own worker while the
+spawner's queue is empty — a good bet, because a spawner usually blocks right after (the
+`supervisor` shape: spawn, then `receive` the reply, so the child runs immediately with warm
+cache). `latency`'s dispatcher instead **busy-spins** to its next scheduled instant and never
+yields, so its queue stays empty, every child is placed behind it, and each one waits for the
+spinning parent's quantum. The heuristic's assumption — "an empty queue means this worker is
+about to be free" — is exactly false for a CPU-bound spawner.
+
+**And the trade-off is real**, re-measured here rather than taken from the note: `supervisor`
+907 ms default → 2308 ms RR → 2208 ms spill=0 (~2.4×). `pingpong` (306 ms) and `ring` (807 ms)
+are unaffected by placement either way.
+
+**So the open question is no longer "why are messages slow" but "how should a child be
+placed when the parent is CPU-bound".** Two candidate answers, neither implemented:
+- *(a) A "does this parent block?" signal.* Keep local only when the spawner has parked
+  recently; a spawner that has run a full quantum without blocking gets its children spilled.
+  Cheap to track (set a flag when a process parks in `receive`).
+- *(b) Aggressive stealing of freshly-spawned children.* Keep the placement as-is, but let an
+  idle worker steal a just-enqueued child quickly. This preserves `supervisor` exactly — the
+  parent blocks immediately, so the child runs locally before anyone steals it — while fixing
+  `latency`, where the parent keeps spinning and an idle worker takes over in microseconds.
+  The handoff notes stealing currently rebalances only 12%, so it is too lazy today.
+
+(b) looks better on paper because it needs no prediction of the parent's future. Both want
+measuring against `latency`, `supervisor`, `pingpong` and `ring` together, since the whole
+point is that this is a trade-off between the first two.
+
+## 2026-08-02 — option (b): wake an idle peer to steal a fresh child, with first refusal
+
+Implementing the fix the profile pointed at. Two things were wrong and both had to change:
+an idle worker never learned that a *peer's* queue had grown (it re-probed on a 10 ms
+`STEAL_BACKOFF`), and once told, it would take a child the owner was about to run anyway.
+
+**Result at the default (`STEAL_GRACE_NS = 5000`):**
+
+| | before | after |
+|---|---|---|
+| `latency` p50 | 27 µs | **19 µs** |
+| `latency` p99 | 171 µs | **83 µs** |
+| `latency` p99.9 | ~800 µs | ~250 µs |
+| `supervisor` | 907 ms | 1005 ms (+11%) |
+| `pingpong` / `ring` / `spawn` / `pfib` | 306 / 807 / 105 / — | 305 / 805 / 105 / 305 |
+
+**Two wrong attempts on the way, both caught by the throughput rows.**
+
+*First:* hook the peer-wake into `enqueue` itself. That path also carries the
+**direct-handoff** wake — a `send` readying a receiver, deliberately enqueued onto the
+current worker precisely to avoid a cross-thread futex. Adding one back cost `pingpong`
+1.6×, `ring` 2.2× and `supervisor` 4.9×. The wake belongs to the *spawn* path only; a
+send-woken receiver must stay where the handoff put it.
+
+*Second:* scope it to spawn — `latency` p50 dropped to 9 µs and `pingpong`/`spawn` returned
+to baseline, but `supervisor` stayed 2.65× worse. My assumption that "the parent blocks
+within a microsecond, so it drains the child before a woken peer arrives" was wrong: the
+thief won that race routinely.
+
+**So the race is decided explicitly.** A freshly enqueued process carries `queued_at`, and
+a thief skips a back entry younger than `STEAL_GRACE_NS`; the owner is exempt and pops its
+own queue without consulting it. That alone re-broke `latency` (back to 26 µs) because the
+woken thief found only young work, gave up, and parked for the full 10 ms — so `try_steal`
+now reports *why* it found nothing, and a thief that saw young work re-probes after the
+grace instead of backing off.
+
+**Choosing the constant.** The trade-off is a cliff, swept here:
+
+| grace | `latency` p50 | `supervisor` |
+|---|---|---|
+| 0 | 10 µs | 2607 ms |
+| 1–2 µs | 10 µs | ~2106 ms |
+| 2.5 µs | 13 µs | 1005 ms |
+| 5 µs (default) | 19 µs | 1005 ms |
+| 10 µs | 22 µs | 1006 ms |
+
+2.5 µs is the best point on this machine and is **not** the default, deliberately: the cliff
+sits between 2 and 2.5 µs because that is how long *this* benchmark's parent takes to reach
+its `receive`, which is a property of the workload, not of the runtime. The failure is
+asymmetric — too small costs 2.3× throughput, too large costs a few µs of p50 — so the
+default takes a 2× margin. `BROOD_STEAL_GRACE_NS` is the A/B lever.
+
+**The +11% on `supervisor` is real and not yet recovered.** With the grace protecting the
+child from theft, what remains is the wake syscall itself: one `futex_wake` per local spawn,
+after which the woken peer sleeps 5 µs and re-parks having found nothing. Gating the wake on
+a "this spawner is CPU-bound" signal (option (a): a per-process spawns-since-last-park
+counter) would drop it to zero for the spawn-then-block shape. Worth doing, and it wants its
+own measurement.
+
+Verified: suite 937/937, `nest check` clean, and the concurrency-sensitive files run 5/5
+each (`concurrency`, `supervisor`, `adversarial`, `agent`), plus `conc_storm` clean.
+
+## 2026-08-02 — recovering the `supervisor` 11%: tell the two spawner shapes apart by history
+
+The peer-wake added earlier bought `latency` p50 27 → 19 µs and p99 171 → 83 µs, but cost
+`supervisor` 11% (907 → 1007 ms). Cleaning up after myself.
+
+**Confirmed the cause before fixing it**, with a new off-switch rather than by reasoning:
+
+| | `supervisor` | `latency` p50 |
+|---|---|---|
+| wake on | 1007 ms | 18 µs |
+| `BROOD_NO_STEAL_WAKE=1` | **907 ms** | 27 µs |
+
+Exact attribution: the wake syscall *is* the 11%, and it is also exactly what buys the
+latency win. So the fix is not to make the wake cheaper but to stop issuing it where it
+cannot pay — a spawner whose child it will run itself in a microsecond.
+
+**The signal is history, not prediction.** A supervisor (spawn, then block for the reply) and
+a dispatcher (spawn, then keep running) are indistinguishable *at* the spawn. But a process
+that has spawned **again without ever blocking in between** is demonstrably not about to
+block. `Process::spawns_since_park` counts exactly that: bumped at each spawn, reset only in
+`park_on_receive`'s genuine-park branch — **not** on preemption, since being preempted is not
+yielding. It rides the quantum in a thread-local, the same install-and-read-back shape `Ctx`
+and the capture stack use, because the spawn site is deep inside `eval` and cannot reach the
+`Process` box it is running inside. The wake now fires only from the second such spawn on.
+
+**Result — the trade-off is gone:**
+
+| | baseline | after | |
+|---|---|---|---|
+| `latency` p50 | 27 µs | **19 µs** | |
+| `latency` p99 | 171 µs | **82 µs** | |
+| `latency` p99.9 | ~800 µs | ~240 µs | |
+| `supervisor` | 907 ms | **905 ms** | recovered |
+| `pingpong` / `spawn` / `pfib` | 306 / 105 / 305 | 305 / 105 / 305 | |
+
+**One near-miss worth recording.** `ring` read 906 ms against a 807 ms baseline and looked
+like a fresh regression. It is not: with the wake disabled it is 907, and with *both* new
+mechanisms disabled (`BROOD_NO_STEAL_WAKE=1 BROOD_STEAL_GRACE_NS=0`, the closest thing to
+pre-change behaviour) it is 905–906. The baseline was taken hours earlier at load average
+3.21; the machine now sits at 1.16. The row drifted, the change did not move it — which is
+the handoff's own warning about believing a few-percent delta without a same-session control.
+
+Verified: suite 937/937, `nest check` clean, `conc_storm` clean, and the
+concurrency-sensitive files 5/5 each (`concurrency`, `supervisor`, `adversarial`, `agent`,
+`proctree`).

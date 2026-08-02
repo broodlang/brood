@@ -98,6 +98,15 @@ pub(super) struct Process {
     /// `Ctx`). `run_one` installs it into `CURRENT` per quantum and reads it back after,
     /// so `begin_capture`/`take_capture` persist across `receive` suspends.
     capture: Vec<Arc<Mutex<String>>>,
+    /// Monotonic nanos at which this process was last enqueued, or 0 if never. Read only
+    /// by `try_steal`, to give the owning worker a brief **first refusal** on freshly
+    /// queued work (see `steal_grace_ns`).
+    queued_at: u64,
+    /// How many children this process has spawned since it last **parked** in `receive`.
+    /// Preemption does not reset it — only actually blocking does — so it answers exactly
+    /// one question at spawn time: *is this spawner going to yield soon?* See
+    /// `SPAWNS_SINCE_PARK`.
+    spawns_since_park: u32,
 }
 
 /// What a running process needs to find from deep inside `eval` (for
@@ -605,6 +614,61 @@ static STEALABLE: AtomicUsize = AtomicUsize::new(0);
 /// nothing is stealable). Tunable.
 const STEAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
 
+/// How long a newly enqueued process is left for its **owning** worker before a thief may
+/// take it. The owner is exempt — it pops its own queue without consulting this — so the
+/// window costs nothing when the owner is about to drain anyway.
+///
+/// It exists because the two workloads want opposite things from a spawn, and the
+/// difference between them is *time*. A spawner that blocks right after spawning (the
+/// `supervisor` shape: spawn, then `receive` the reply) yields within a microsecond or two,
+/// and its child should run right there on a warm cache — stealing it costs that row 2.6×.
+/// A spawner that keeps running (the `latency` dispatcher, busy-waiting to its next
+/// scheduled instant) will not yield for a whole quantum, and its child should go to an idle
+/// peer — leaving it local costs p50 27 µs against 9 µs. A few microseconds of first refusal
+/// separates the two without having to predict which kind of spawner we have.
+/// `BROOD_STEAL_GRACE_NS=<n>` overrides it (0 disables first refusal entirely) — the A/B
+/// lever, since this constant is precisely the knob that trades the two rows against each
+/// other. Read once.
+fn steal_grace_ns() -> u64 {
+    static G: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *G.get_or_init(|| {
+        std::env::var("BROOD_STEAL_GRACE_NS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5_000)
+    })
+}
+
+/// The running process's `spawns_since_park`, held in a thread-local for the duration of a
+/// quantum — the same install-and-read-back shape `Ctx`/the capture stack use, because the
+/// worker multiplexes processes and the spawn site (deep inside `eval`) cannot reach the
+/// `Process` box it is running inside.
+///
+/// It exists to tell the two spawner shapes apart, which is the whole difficulty in placing
+/// a child. A supervisor spawns one child and immediately blocks for the reply, so its child
+/// should stay local on a warm cache; a dispatcher spawns and keeps running, so its child
+/// should go to an idle peer. Both look identical at the moment of the spawn. The counter
+/// distinguishes them by *history* instead of prediction: a process that has spawned again
+/// without ever blocking in between is, demonstrably, not about to block.
+pub(super) fn spawns_since_park_bump() -> u32 {
+    SPAWNS_SINCE_PARK.with(|c| {
+        let n = c.get().saturating_add(1);
+        c.set(n);
+        n
+    })
+}
+
+thread_local! {
+    static SPAWNS_SINCE_PARK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Monotonic nanoseconds since the first call — a cheap `u64` clock for `queued_at`, so a
+/// `Process` carries a plain integer rather than an `Instant`.
+fn now_nanos() -> u64 {
+    static EPOCH: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
+    EPOCH.elapsed().as_nanos() as u64
+}
+
 /// Per-worker "is currently running a process" flag. Index = `worker_id`, sized
 /// to match `WORKERS`. A worker runs at most one process at a time, so this is a
 /// 0/1 gauge of in-flight work. `assign_worker` folds it into a worker's load:
@@ -613,6 +677,24 @@ const STEAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
 /// `resume` in `run_one`; read (lock-free) at spawn placement.
 static WORKER_BUSY: LazyLock<Vec<AtomicBool>> =
     LazyLock::new(|| (0..WORKERS.len()).map(|_| AtomicBool::new(false)).collect());
+
+/// Per-worker "is parked on its condvar" flag, and a count of how many are. Together they
+/// let [`enqueue`](crate::process::scheduler::pool::enqueue) hand a *steal opportunity* to
+/// an idle peer instead of leaving it to the `STEAL_BACKOFF` timer.
+///
+/// Why this exists: a worker is woken when work lands on **its own** queue, never when a
+/// peer's queue grows, so an idle peer could only discover stealable work on its 10 ms
+/// re-probe. That is far too slow to matter, which made stealing a background rebalancer
+/// rather than a latency mechanism — and left a child enqueued behind a **CPU-bound**
+/// spawner waiting a full quantum. Measured on the `latency` row: p50 27 µs, of which
+/// essentially all was spawn→first-instruction (with the handler doing no work at all it
+/// was still 26 µs), against 11 µs when placement was forced round-robin.
+///
+/// The count is the cheap gate — one relaxed load on the enqueue path — so a saturated
+/// pool (no one parked) pays nothing and never issues a wake.
+static WORKER_PARKED: LazyLock<Vec<AtomicBool>> =
+    LazyLock::new(|| (0..WORKERS.len()).map(|_| AtomicBool::new(false)).collect());
+static PARKED_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Rotating start point for `assign_worker`'s least-loaded scan. Read +
 /// incremented under relaxed ordering — the only requirement is approximate
