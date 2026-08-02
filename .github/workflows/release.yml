@@ -1,0 +1,85 @@
+name: Release
+
+# Build the Brood toolchain (brood + nest + brood-lsp) for each supported platform
+# and attach the tarballs to a GitHub Release. Triggered by pushing a version tag
+# (`v1.2.3`), or manually via workflow_dispatch with a tag name.
+#
+# The `install.sh` script (scripts/install.sh, also served at brood.fly.dev/install.sh)
+# downloads the tarball matching the user's OS/arch from the release these jobs create.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release (e.g. v0.1.0)"
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config git
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      # Lean default build (no gui/audio; jit + treesit + dev-tools) — the same set
+      # `make install` ships. Produces target/release-fast/{brood,nest,brood-lsp}.
+      - name: Build
+        run: make release
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          name="brood-${tag}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp target/release-fast/brood target/release-fast/nest target/release-fast/brood-lsp "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          ( cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.package.outputs.tag }}
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          fail_on_unmatched_files: true

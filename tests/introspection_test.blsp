@@ -190,6 +190,24 @@
 
   (test "the list is stable within a build" (assert= (features) (features))))
 
+(describe "exe-path — where this binary lives"
+  (test "it answers an absolute path, or nil when the platform won't say"
+    ;; nil is a legitimate answer (a sandbox with no /proc/self/exe), so accept either —
+    ;; what must NOT happen is a raise, since callers ask opportunistically
+    (let (p (exe-path))
+      (is (or (nil? p) (and (string? p) (starts-with? p "/"))))))
+
+  (test "and it points at something that exists — the sibling lookup depends on that"
+    ;; the point of the primitive: `(path-join (parent-dir (exe-path)) "nest")` has to be a
+    ;; real place to look
+    (let (p (exe-path))
+      (when (string? p)
+        (is (file-exists? p))
+        (is (dir? (parent-dir p))))))
+
+  (test "it is stable within a process"
+    (assert= (exe-path) (exe-path))))
+
 (describe "feature?"
   (test "true for a feature this build has" (is (feature? :jit)))
   (test "false for one it does not have, rather than an error"

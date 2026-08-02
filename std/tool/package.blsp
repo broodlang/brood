@@ -526,14 +526,28 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
   (let (form (read-first (slurp file)))
     (if (and (pair? form) (= (first form) 'defmodule)) (second form) nil)))
 
+;; Every `.blsp` file at or under `dir`, recursively (full paths). A hierarchical
+;; module `(defmodule gui/window)` lives at `gui/window.blsp` in a SUBdirectory
+;; (that's how `require--find` locates it), so the collision scan must recurse —
+;; a top-level-only listing would never open it and two providers of the same
+;; nested namespace would collide undetected (ADR-070).
+(defn package--blsp-files (dir)
+  (apply append
+    (map (fn (entry)
+           (let (full (path-join dir entry))
+             (cond
+               (dir? full) (package--blsp-files full)
+               (ends-with? entry ".blsp") (list full)
+               else nil)))
+      (list-dir dir))))
+
 ;; The module names a source dir provides: the (defmodule …) name of each
-;; top-level *.blsp file in it.
+;; `.blsp` file in it, recursively (so nested `gui/window` is included).
 (defn package--provided-modules (src-dir)
   (if (not (dir? src-dir))
     nil
     (filter (fn (m) (not (nil? m)))
-      (map (fn (f) (package--module-name-of (path-join src-dir f)))
-        (filter (fn (f) (ends-with? f ".blsp")) (list-dir src-dir))))))
+      (map package--module-name-of (package--blsp-files src-dir)))))
 
 ;; The [label src-dir] providers to check: the project's own source dirs first
 ;; (so a dep colliding with your own module is caught), then each resolved dep.
@@ -687,6 +701,11 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
                            (let (lock (package--lock-without (read-lockfile root)
                                         (map symbol names))
                                  entries (resolve-deps root *project-dependencies* lock))
+                             ;; Reject a namespace collision before writing the lock —
+                             ;; same guard `fetch`/`add` run (ADR-070). Without it,
+                             ;; `nest update` would write a lock for a colliding dep set
+                             ;; and only surface it at the next run.
+                             (package--guard-collisions root entries)
                              (write-lockfile root entries)
                              (println (str "package: updated "
                                         (if (empty? names) "all dependencies" (join ", " names))

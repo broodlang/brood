@@ -18,19 +18,22 @@
 (impl Size ability-test/rect (size [r] (* (get r :w) (get r :h))))
 (impl Size :default (size [_] -1))
 
-;; A SECOND ability, dispatched by nothing else in this file. It exists to ISOLATE the
-;; "open extension" test below, which is intermittently red (~1 suite run in 5-8):
-;; `(esize [1 2 3])` comes back `-1` — the `:default` impl — right after its `:vector`
-;; impl was registered on the line above.
+;; A SECOND ability, dispatched by nothing else in this file, so the "open extension" test
+;; below registers an impl into a registry no other test reads.
 ;;
-;; This did NOT fix the flake, and that is the point of keeping it: the test used to
-;; extend the shared `Size`, so the obvious theory was a collision with the several
-;; NON-serial blocks that dispatch `Size` (`:serial` only orders tests within one
-;; block). Moving to a private ability rules that out — the flake survived the move,
-;; reproduced on run 8 of 10. So an `impl` registration can be missed by a dispatch on
-;; the very next line even when no other test touches that ability, which points at the
-;; shared `%dispatch` cache / registry visibility (ADR-172 §7), not at test hygiene.
-;; See docs/known-issues.md. Do not "fix" this by re-serialising tests.
+;; It was added while chasing an intermittent `(esize [1 2 3])` → `-1` (the `:default` impl,
+;; right after its `:vector` impl was registered on the line above), and the comment here
+;; used to record that isolating the ability had NOT fixed it, and that the cause looked like
+;; the dispatch cache. Both halves are now wrong: the cause was **KI-22**, a lost update in
+;; every load-time registry (`(def *X* (assoc *X* …))` is read-compute-write, and two
+;; processes registering at once each dropped the other), fixed 2026-08-01 by
+;; `%registry-update!` doing the whole read-modify-write under a per-runtime lock. The
+;; dispatch cache was never involved — see docs/known-issues.md KI-22.
+;;
+;; The private ability stays, for the ordinary reason rather than the dramatic one: a test
+;; that MUTATES a registry should own what it mutates, so it cannot be read by a test that
+;; did not expect the change. (The same lesson `repl_test`'s registry block and myedit's
+;; tutorial suite each learned separately.)
 (defability Extend (esize [self] :-> int))
 (impl Extend :int (esize [n] n))
 (impl Extend :default (esize [_] -1))
@@ -637,3 +640,55 @@
     (is (not (abt-warns-about?
           "(defmodule u) (defrecord m (n)) (defability Ord :requires [NoSuchAbility] (compare-to [self other] :-> int)) (impl Ord u/m (compare-to [a b] 0))"
           "requires")))))
+
+;; ---- unimpl: an impl registry you can get back out of (ADR-203) --------------
+;; Registering an impl was open and reversible in every way but one: there was no way to
+;; REMOVE it. That is the state anything needing a known baseline cares about — a test that
+;; must not leak into the next, a REPL undoing an experiment, a hot reload retracting an impl
+;; the new source no longer declares. (myedit hit it as a flaky suite: a tutorial exercise
+;; asks the reader to `impl` an ability, and the test that evaluated the worked ANSWER left
+;; that impl registered, so the exercise's own template then "already passed".)
+(defability Retract (rsize [self] :-> int))
+(defrecord retractable (n))
+
+(describe "unimpl — retracting an implementation"
+  :serial
+  (test "an impl dispatches, and after unimpl it is gone again"
+    (do
+      (impl Retract ability-test/retractable (rsize [r] (get r :n)))
+      (assert= 7 (rsize (retractable 7)))
+      (assert= 1 (unimpl Retract ability-test/retractable))        ; one op removed
+      (let (e (try (rsize (retractable 7)) (catch e e)))
+        (assert= (get e :kind) :no-impl)                           ; back to unimplemented
+        (assert= (get e :op) 'rsize))))
+
+  (test "unimpl is idempotent and says how much it removed"
+    (do
+      (assert= 0 (unimpl Retract ability-test/retractable))         ; nothing left to remove
+      (impl Retract ability-test/retractable (rsize [r] (get r :n)))
+      (assert= 1 (unimpl Retract ability-test/retractable))
+      (assert= 0 (unimpl Retract ability-test/retractable))))
+
+  (test "a named op retracts just that one"
+    (do
+      (impl Retract :int (rsize [n] n))
+      (assert= 3 (rsize 3))
+      (assert= 1 (unimpl Retract :int rsize))
+      (is (not (nil? (try (rsize 3) (catch e e)))))))
+
+  (test "the slot is UNCLAIMED afterwards, so any tier may take it again"
+    ;; not `:default`, not a tombstone — the same state as before anyone implemented it
+    (do
+      (impl Retract ability-test/retractable (rsize [r] (get r :n)))
+      (unimpl Retract ability-test/retractable)
+      (impl Retract ability-test/retractable (rsize [r] (* 10 (get r :n))))
+      (assert= 40 (rsize (retractable 4)))
+      (unimpl Retract ability-test/retractable)))
+
+  (test "unregister-impl is the function underneath, and reports what it did"
+    (do
+      (impl Retract ability-test/retractable (rsize [r] (get r :n)))
+      (is (unregister-impl 'Retract 'rsize :ability-test/retractable))    ; removed
+      (refute (unregister-impl 'Retract 'rsize :ability-test/retractable))  ; nothing left
+      ;; and it never raises for an ability/op/id that was never registered at all
+      (refute (unregister-impl 'NoSuchAbility 'nope :nothing)))))

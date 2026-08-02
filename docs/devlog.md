@@ -14003,7 +14003,6 @@ Two supporting fixes:
 `brood`'s regex engine has no character-range support (`[a-z]`/`[0-9]`) — noted while writing
 hive's validators (used codepoint predicates instead); a candidate future improvement.
 
-## 2026-08-02 — KI-23: the lost-update shape in `std/`, fixed with a CAS instead of more ops
 
 KI-22 fixed the prelude's registries; the same `(def *X* (assoc *X* …))` read-modify-write
 survived in ten more living in `std/` modules. Measured rather than assumed — 200 concurrent
@@ -14243,3 +14242,29 @@ from a single chunk arriving in order and complete, and `stream-take` abandoning
 while lines are still queued.
 
 Suite 928/928, `nest check` clean.
+## 2026-08-02 — Namespacing hardening (audit follow-up)
+An audit of the namespace/module system (ADR-065) surfaced a cluster of soundness gaps, all
+now fixed:
+
+- **`require-one` double-load race.** The `contains? *features-loading*` check and the `:assoc`
+  claim weren't atomic, so two simultaneous first-requirers could both load a module (body +
+  `provide` run twice — the double-load ADR-136 forbids). Now claims the load with the atomic
+  `:assoc-new` CAS (the same test-and-set-under-lock `register-impl` already uses) and falls back
+  to the wait path on a lost race.
+- **Silent import shadowing (Elixir model).** A `(:use m)` that referred a name clashing with
+  another `:use`'s name silently last-wins; one shadowing a prelude name was silent too. Now a
+  clash is a hard error (resolvable with `:only`/the new `:exclude`, Elixir's `except:`), and a
+  prelude shadow **warns** — while the import is still allowed. Ambient (`defdyn`) names are never
+  imported (the resolver ignores imports for them), so they neither clash nor warn.
+- **`/name` root escape.** A module that shadows a prelude name can now reach the original as
+  `/name` (empty module prefix = root, Elixir's `Kernel.foo`); a bare `/` (division) is untouched.
+- **Circular `(:use …)` refer-all** now errors clearly (its export set is incomplete mid-cycle)
+  instead of silently under-importing; `:only` stays cycle-safe (lazy).
+- **Hierarchical-module collision detection.** `package--provided-modules` now recurses into
+  subdirectories, so two providers of a nested namespace (`gui/window` at `src/gui/window.blsp`)
+  collide loudly (ADR-070) instead of going undetected; `nest update` now runs the guard too.
+- **Checker import parity.** `setup_check_imports` now mirrors the runtime `%refer` rules (the
+  `:only` `--`-privacy check; `:only`/`:exclude` markers), closing a checker↔runtime drift.
+- **RAII namespace scope for loaders.** `load`/`reload`/the file runner replaced their hand-written
+  save/restore (which bracketed only three of the four ns fields — `ns_assume_own` leaked) with
+  `NsLoadScope`, an owning guard that restores all four on every exit path incl. a panic.
