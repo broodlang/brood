@@ -19,7 +19,7 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::{Condvar, LazyLock, Mutex, Once};
-use std::time::Instant;
+use web_time::Instant;
 
 /// Min-heap of `(deadline, pid, gen)`: `Reverse` turns the max-heap into
 /// earliest-first. `gen` is the parking process's [`Mailbox::timer_gen`] at arm

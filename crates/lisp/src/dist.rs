@@ -45,11 +45,13 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, LazyLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 use crate::core::value::{self, Symbol};
 use crate::process::keywords as pk;
@@ -150,6 +152,7 @@ fn now_millis() -> u64 {
 /// the handshake runs over `&mut Stream` before the link goes steady-state.
 enum Stream {
     Tcp(TcpStream),
+    #[cfg(unix)]
     Unix(UnixStream),
 }
 
@@ -157,18 +160,21 @@ impl Stream {
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         match self {
             Stream::Tcp(s) => s.shutdown(how),
+            #[cfg(unix)]
             Stream::Unix(s) => s.shutdown(how),
         }
     }
     fn set_read_timeout(&self, d: Option<Duration>) -> io::Result<()> {
         match self {
             Stream::Tcp(s) => s.set_read_timeout(d),
+            #[cfg(unix)]
             Stream::Unix(s) => s.set_read_timeout(d),
         }
     }
     fn set_write_timeout(&self, d: Option<Duration>) -> io::Result<()> {
         match self {
             Stream::Tcp(s) => s.set_write_timeout(d),
+            #[cfg(unix)]
             Stream::Unix(s) => s.set_write_timeout(d),
         }
     }
@@ -180,6 +186,7 @@ impl Read for Stream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Stream::Tcp(s) => s.read(buf),
+            #[cfg(unix)]
             Stream::Unix(s) => s.read(buf),
         }
     }
@@ -188,12 +195,14 @@ impl Write for Stream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             Stream::Tcp(s) => s.write(buf),
+            #[cfg(unix)]
             Stream::Unix(s) => s.write(buf),
         }
     }
     fn flush(&mut self) -> io::Result<()> {
         match self {
             Stream::Tcp(s) => s.flush(),
+            #[cfg(unix)]
             Stream::Unix(s) => s.flush(),
         }
     }
@@ -205,6 +214,7 @@ impl Read for &Stream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match **self {
             Stream::Tcp(ref s) => (&*s).read(buf),
+            #[cfg(unix)]
             Stream::Unix(ref s) => (&*s).read(buf),
         }
     }
@@ -213,12 +223,14 @@ impl Write for &Stream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match **self {
             Stream::Tcp(ref s) => (&*s).write(buf),
+            #[cfg(unix)]
             Stream::Unix(ref s) => (&*s).write(buf),
         }
     }
     fn flush(&mut self) -> io::Result<()> {
         match **self {
             Stream::Tcp(ref s) => (&*s).flush(),
+            #[cfg(unix)]
             Stream::Unix(ref s) => (&*s).flush(),
         }
     }
@@ -842,10 +854,7 @@ pub(crate) fn node_also_listen(addr: &str) -> io::Result<()> {
 /// first listener (`node_listen`) and any added later (`node_also_listen`).
 fn start_listener(addr: &str) -> io::Result<()> {
     if let Some(path) = addr.strip_prefix("unix:") {
-        let path = path.to_string();
-        prepare_unix_path(&path)?;
-        let listener = UnixListener::bind(&path)?;
-        spawn_acceptor(move || listener.accept().map(|(s, _)| Stream::Unix(s)));
+        bind_unix_listener(path)?;
     } else if let Some(hostport) = addr.strip_prefix("tcp:") {
         let listener = TcpListener::bind(hostport)?;
         spawn_acceptor(move || listener.accept().map(|(s, _)| Stream::Tcp(s)));
@@ -941,12 +950,44 @@ fn spawn_acceptor(accept: impl FnMut() -> io::Result<Stream> + Send + 'static) {
     });
 }
 
+/// Bind a Unix-domain listener and spawn its accept loop (the `unix:` transport).
+/// wasm and other non-unix targets have no Unix sockets, so it reports unsupported.
+#[cfg(unix)]
+fn bind_unix_listener(path: &str) -> io::Result<()> {
+    let path = path.to_string();
+    prepare_unix_path(&path)?;
+    let listener = UnixListener::bind(&path)?;
+    spawn_acceptor(move || listener.accept().map(|(s, _)| Stream::Unix(s)));
+    Ok(())
+}
+#[cfg(not(unix))]
+fn bind_unix_listener(_path: &str) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "unix-socket nodes are not available on this target",
+    ))
+}
+
+/// Dial a Unix-domain peer (the `unix:` transport); unsupported off unix.
+#[cfg(unix)]
+fn dial_unix(path: &str) -> io::Result<Stream> {
+    Ok(Stream::Unix(UnixStream::connect(path)?))
+}
+#[cfg(not(unix))]
+fn dial_unix(_path: &str) -> io::Result<Stream> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "unix-socket nodes are not available on this target",
+    ))
+}
+
 /// Ready a Unix-socket path for `bind`: create the parent directory (`0700`) and
 /// clear a **stale** socket left by a crashed node. A path that still has a live
 /// listener is refused (another node owns that name); a path that refuses a
 /// connection is stale and gets unlinked so we can rebind. Best-effort against a
 /// concurrent same-name start — a same-user dev footgun, not a security boundary
 /// (the `0700` dir already gates other users).
+#[cfg(unix)]
 fn prepare_unix_path(path: &str) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let p = std::path::Path::new(path);
@@ -1025,7 +1066,7 @@ pub(crate) fn node_connect(peer: Symbol, addr: &str) -> io::Result<Symbol> {
 /// a silently-dropping peer can't wedge the dialer at the kernel SYN timeout.
 fn dial(addr: &str) -> io::Result<Stream> {
     if let Some(path) = addr.strip_prefix("unix:") {
-        Ok(Stream::Unix(UnixStream::connect(path)?))
+        dial_unix(path)
     } else if let Some(hostport) = addr.strip_prefix("tcp:") {
         // `connect_timeout` requires a `SocketAddr`, so resolve here and try each
         // address in turn — same multi-A-record behaviour as `TcpStream::connect`

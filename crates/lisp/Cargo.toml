@@ -102,13 +102,9 @@ treesit-grammars = ["treesit-ruby", "treesit-elixir"]
 wasm = ["dep:wasmtime"]
 
 [dependencies]
-# Allocator backend for the counting global allocator (core/alloc.rs). Brood is a
-# long-running runtime (editors, web servers) whose immutable data path-copies on
-# every update, so allocation throughput is load-bearing; mimalloc's per-thread
-# heaps cut that churn ~15-28% on alloc-heavy workloads (it holds freed pages for
-# reuse — a deliberate memory-for-speed trade, fine for a long-running app). The
-# byte-counting wrapper (ADR-043) still tallies requested sizes around it.
-mimalloc = { version = "0.1", default-features = false }
+# Cross-platform time: std::time on native, the JS clock on wasm (Instant/SystemTime
+# have no wasm32-unknown-unknown backend). Drop-in, so native behaviour is unchanged.
+web-time = "1"
 # The tree-sitter runtime + the Ruby/Elixir grammars (feature `treesit`). All
 # three are pulled in only with `--features treesit`; a build without it links no
 # parser. The grammar crates expose a `tree_sitter_language::LanguageFn` (`LANGUAGE`)
@@ -213,30 +209,19 @@ ropey = "1.6"
 # platforms — the irreducible "drawing, I/O" mechanism architecture.md groups
 # with the rope. The display *protocol* is Brood data (a vector of render ops);
 # the `term-*` primitives are just the in-process frontend that paints it, so a
-# remote frontend can implement the identical protocol later.
-crossterm = "0.29"
+# remote frontend can implement the identical protocol later. Non-wasm only (see the
+# target section) — crossterm has no wasm TTY backend; the wasm terminal stub needs none.
 # The socket reactor (ADR-143): one epoll/kqueue thread multiplexes every
 # socket — plaintext, TLS, listeners — replacing the thread-per-socket model
 # (a reader thread per stream, an accept thread per listener, an actor thread
 # per TLS connection). Runtime substrate, exactly the boxcar-class bar: mio is
 # the thin, zero-dependency readiness layer under tokio, not Lisp-callable
-# behaviour.
-mio = { version = "1", features = ["net", "os-poll"] }
-# TLS for `https` (ADR-062): rustls is pure-Rust (no system OpenSSL). webpki-roots
-# bundles the Mozilla CA set, so no system trust store is needed. The socket layer
-# (crate::net) wraps a rustls client connection behind the same `Value::Socket`
-# handle, so the Brood code above the transport is unchanged. Default (aws-lc-rs)
-# crypto provider — builds with cc + cmake.
-rustls = "0.23"
-webpki-roots = "1"
-# Server-side TLS (tls-listen): parse PEM cert/key the app provides, and rcgen
-# generates a self-signed cert for zero-config dev TLS (tls-self-signed).
-rustls-pemfile = "2"
-# `default-features = false` + `aws_lc_rs` drops rcgen's default `ring` backend, so
-# the binary links ONE crypto provider (aws-lc-rs, already pulled by rustls) instead
-# of both — smaller tree, one C-toolchain dep, and no rustls provider ambiguity.
-# `pem` keeps `serialize_pem` for tls-self-signed.
-rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+# behaviour. Non-wasm only (see the target section below) — mio's epoll/kqueue
+# reactor has no wasm backend, and the wasm net stub needs none.
+# TLS for `https` (ADR-062) — rustls/webpki-roots/rustls-pemfile/rcgen. Used only by
+# the socket layer (crate::net), so they live in the non-wasm target section below:
+# their aws-lc-rs crypto provider is a C toolchain build that has no wasm target, and
+# the wasm net stub does no TLS.
 
 # The optional `gui` frontend's stack (see the [features] note above). All three
 # are pulled in only with `--features gui`; a default build links none of them.
@@ -295,6 +280,31 @@ wasmtime = { version = "47.0.2", default-features = false, features = ["runtime"
 # (getpwuid/getgrgid). Unix-only; already in the dependency tree (transitive).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Non-wasm substrate: mimalloc (its C build + per-thread heaps don't cross to wasm,
+# where core/alloc.rs BACKEND falls back to the system allocator) and mio (its
+# epoll/kqueue socket reactor has no wasm backend; the wasm net stub needs none).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+mio = { version = "1", features = ["net", "os-poll"] }
+crossterm = "0.29"
+# TLS stack (crate::net only) — see the comment where these were declared. The
+# aws-lc-rs crypto provider is a C build with no wasm target.
+rustls = "0.23"
+webpki-roots = "1"
+rustls-pemfile = "2"
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+
+# WASM (browser playground) entropy: enable getrandom's browser backends so
+# transitive users build for wasm32. Renamed, unused deps that only turn on the
+# feature via unification — 0.2 uses `js`, 0.3 uses `wasm_js` (paired with the cfg
+# in .cargo/config.toml). Native builds never see these.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# 0.4 is the direct dep (line ~180); adding the feature here merges for wasm only.
+getrandom = { version = "0.4", features = ["wasm_js"] }
+# 0.2/0.3 arrive transitively; renamed, unused deps flip their features via unification.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 loom = "0.7"

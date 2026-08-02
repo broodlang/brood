@@ -260,7 +260,7 @@ pub(crate) static JIT_COMPILER: std::sync::LazyLock<JitCompiler> = std::sync::La
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 #[cfg(feature = "perf-stats")]
-                let t0 = std::time::Instant::now();
+                let t0 = web_time::Instant::now();
                 let lowered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if inlined {
                         jit_lower_inlined_arm(&mut jit, arm, slot_tags)

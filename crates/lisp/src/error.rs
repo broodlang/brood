@@ -126,7 +126,7 @@ pub enum Control {
     /// time for a `(receive … (after ms …))`, so the scheduler arms a timer; `None`
     /// waits indefinitely.
     Suspend {
-        deadline: Option<std::time::Instant>,
+        deadline: Option<web_time::Instant>,
     },
     /// An `(exit pid reason)` reached a process **blocked** in a native-nested
     /// `receive` (one behind a `try`/`%isolate`/HOF native frame, which blocks the
@@ -314,7 +314,7 @@ impl LispError {
     }
 
     /// The `receive`-on-empty suspend control signal (ADR-100 §7). See [`Control`].
-    pub fn suspend(deadline: Option<std::time::Instant>) -> Self {
+    pub fn suspend(deadline: Option<web_time::Instant>) -> Self {
         LispError::control(Control::Suspend { deadline })
     }
 

@@ -671,7 +671,7 @@ impl Heap {
         // moved) — a gated no-op call isn't a pause. Two `Instant` reads per
         // collection: noise against the collection itself.
         let runs_before = self.gc_runs;
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
         self.collect_inner(extra_roots, extra_envs);
         if self.gc_runs != runs_before {
             let ns = t0.elapsed().as_nanos().min(u64::MAX as u128) as u64;
@@ -1753,7 +1753,7 @@ pub(crate) fn stall_threshold_ms() -> Option<u128> {
 pub(crate) struct StallGuard {
     label: &'static str,
     pid: Option<u64>,
-    t0: std::time::Instant,
+    t0: web_time::Instant,
     ms: u128,
 }
 impl Drop for StallGuard {
@@ -1774,7 +1774,7 @@ pub(crate) fn stall_guard(label: &'static str) -> Option<StallGuard> {
     stall_threshold_ms().map(|ms| StallGuard {
         label,
         pid: None,
-        t0: std::time::Instant::now(),
+        t0: web_time::Instant::now(),
         ms,
     })
 }
@@ -1782,7 +1782,7 @@ pub(crate) fn stall_guard_pid(label: &'static str, pid: u64) -> Option<StallGuar
     stall_threshold_ms().map(|ms| StallGuard {
         label,
         pid: Some(pid),
-        t0: std::time::Instant::now(),
+        t0: web_time::Instant::now(),
         ms,
     })
 }

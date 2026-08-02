@@ -1360,7 +1360,7 @@ fn call_native(heap: &mut Heap, id: NativeId, argv: &[Value], env: EnvId) -> Lis
     // is only fixed by the M4 dirty-CPU offload pool. When the tracer is off
     // (the default), this is one TLS bool + one cached-env load.
     if crate::core::heap::stall_threshold_ms().is_some() && crate::process::in_capture_run() {
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
         let r = func(argv, env, heap);
         if let Some(ms) = crate::process::charge_native(t0) {
             eprintln!("[stall] native {} took {}ms", heap.native(id).name, ms);

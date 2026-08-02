@@ -142,7 +142,7 @@ thread_local! {
     /// error / panic / output-capture handling is untouched; a *native* blocking
     /// call still can't be interrupted (it never reaches the check — the same limit
     /// `(exit … :kill)` has).
-    static DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    static DEADLINE: std::cell::Cell<Option<web_time::Instant>> = const { std::cell::Cell::new(None) };
     /// Call counter so [`deadline_exceeded`] reads the clock only every ~1024 ticks;
     /// the no-deadline fast path is a single `Cell` get, so eval's loop pays ~nothing.
     static DEADLINE_TICK: Cell<u32> = const { Cell::new(0) };
@@ -193,7 +193,7 @@ pub fn tick() {
 /// `BROOD_STALL_MS` tracer is armed and tripped, so the caller — which knows the
 /// builtin's *name* — can log it (the missing half of the stall tracer: "which
 /// native stalled the worker").
-pub(crate) fn charge_native(t0: std::time::Instant) -> Option<u128> {
+pub(crate) fn charge_native(t0: web_time::Instant) -> Option<u128> {
     let elapsed = t0.elapsed();
     let us = elapsed.as_micros().min(u32::MAX as u128) as u32;
     // Below ~50 µs the call is quantum-noise — skip the TLS write.
@@ -210,7 +210,7 @@ pub(crate) fn charge_native(t0: std::time::Instant) -> Option<u128> {
 /// Set (or clear with `None`) this thread's eval deadline. Paired set/clear by the
 /// `nest mcp` dispatcher around a guarded `eval`/`load`. Thread-local: only the
 /// thread running the guarded eval is affected.
-pub fn set_deadline(at: Option<std::time::Instant>) {
+pub fn set_deadline(at: Option<web_time::Instant>) {
     DEADLINE.with(|d| d.set(at));
     DEADLINE_TICK.with(|c| c.set(0));
 }
@@ -224,7 +224,7 @@ pub fn deadline_exceeded() -> bool {
         Some(at) => DEADLINE_TICK.with(|c| {
             let n = c.get().wrapping_add(1);
             c.set(n);
-            n % 1024 == 0 && std::time::Instant::now() >= at
+            n % 1024 == 0 && web_time::Instant::now() >= at
         }),
     })
 }
@@ -1204,7 +1204,7 @@ mod charge_tests {
     fn charge_native_drains_reductions_proportionally() {
         // ~1 ms of native work at 2 red/µs ≥ the whole 2000-reduction budget.
         REDUCTIONS.with(|r| r.set(reduction_budget()));
-        let long_ago = std::time::Instant::now() - std::time::Duration::from_millis(2);
+        let long_ago = web_time::Instant::now() - std::time::Duration::from_millis(2);
         charge_native(long_ago);
         assert_eq!(
             REDUCTIONS.with(|r| r.get()),
@@ -1214,7 +1214,7 @@ mod charge_tests {
 
         // ~100 µs charges ~200 reductions — proportional, not all-or-nothing.
         REDUCTIONS.with(|r| r.set(2000));
-        let recent = std::time::Instant::now() - std::time::Duration::from_micros(100);
+        let recent = web_time::Instant::now() - std::time::Duration::from_micros(100);
         charge_native(recent);
         let left = REDUCTIONS.with(|r| r.get());
         assert!(
@@ -1224,7 +1224,7 @@ mod charge_tests {
 
         // Below the 50 µs floor: budget untouched.
         REDUCTIONS.with(|r| r.set(2000));
-        charge_native(std::time::Instant::now());
+        charge_native(web_time::Instant::now());
         assert_eq!(REDUCTIONS.with(|r| r.get()), 2000);
     }
 }

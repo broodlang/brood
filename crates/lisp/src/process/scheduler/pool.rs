@@ -475,7 +475,7 @@ fn park_on_receive(proc: Box<Process>, mailbox: &Arc<Mailbox>) {
         wake_enqueue(proc);
     } else if st
         .recv_deadline
-        .is_some_and(|d| std::time::Instant::now() >= d)
+        .is_some_and(|d| web_time::Instant::now() >= d)
     {
         // The receive deadline elapsed inside the suspend→park window: the timer fired
         // before we got here, found no `waiter`, and consumed its (current-gen) entry, so

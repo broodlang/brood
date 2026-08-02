@@ -23,6 +23,10 @@ mod selfhost_macros;
 mod sequences;
 mod syntax_scan;
 mod system;
+#[cfg(not(target_arch = "wasm32"))]
+mod terminal;
+#[cfg(target_arch = "wasm32")]
+#[path = "terminal_wasm.rs"]
 mod terminal;
 mod tooling;
 

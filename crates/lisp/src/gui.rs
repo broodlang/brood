@@ -416,7 +416,7 @@ pub(crate) mod backend {
     use std::sync::mpsc::{self, Sender};
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::Duration;
-    use std::time::Instant;
+    use web_time::Instant;
 
     // Paint-breakdown diagnostics (BROOD_STALL_MS): single GUI thread, so Relaxed is
     // fine. Reset at each `paint` entry; when the paint runs >= the threshold, the

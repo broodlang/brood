@@ -1096,6 +1096,12 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // adds `set`/`conj`/`disj`/`union`/`intersection`/`difference`/`subset?`.
     // Opt-in, never in the prelude (no `#{…}` literal / distinct type yet).
     embedded_module!("set", "std/set.blsp"),
+    // Semantic versions as data: parse / order / test against a `">= 1.2"` constraint.
+    // Written because two consumers (the registry deciding which release is newest, an
+    // application deciding whether a plugin's declared `:enhances` constraint is met)
+    // had each hand-rolled it. Explicitly NOT a dependency solver — the resolver still
+    // takes exact versions only (ADR-037).
+    embedded_module!("version", "std/version.blsp"),
     // Behaviour contracts — `defbehaviour` declares the ops a MODULE must define to
     // satisfy a named contract (`(:implements B)`), verified by the checker/LSP pass
     // (`types/check/protocol.rs`). Value dispatch (`defprotocol`/`defimpl`) was RETIRED
@@ -1791,7 +1797,6 @@ pub(super) fn random_token(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 /// policy that uses it is Brood (`node-cookie`, ADR-068).
 pub(super) fn spit_private(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use std::io::Write as _;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let path = expect_string(heap, "spit-private", arg(args, 0))?;
     let content = expect_string(heap, "spit-private", arg(args, 1))?;
     let err = |e: std::io::Error| {
@@ -1801,16 +1806,27 @@ pub(super) fn spit_private(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     if let Some(parent) = std::path::Path::new(&path).parent() {
         std::fs::create_dir_all(parent).map_err(err)?;
     }
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(err)?;
-    // `.mode` only applies on *create*; enforce 0600 on a pre-existing file too.
-    let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
-    f.write_all(content.as_bytes()).map_err(err)?;
+    // Owner-only 0600 permissions are a Unix concept; wasm has no filesystem perms,
+    // so it falls back to a plain private-intent write.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(err)?;
+        // `.mode` only applies on *create*; enforce 0600 on a pre-existing file too.
+        let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+        f.write_all(content.as_bytes()).map_err(err)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut f = std::fs::File::create(&path).map_err(err)?;
+        f.write_all(content.as_bytes()).map_err(err)?;
+    }
     Ok(Value::nil())
 }
 
