@@ -888,6 +888,23 @@ pub(super) fn string_to_number(args: &[Value], _: EnvId, heap: &mut Heap) -> Lis
 // manipulation and all policy live in Brood (`std/prelude.blsp`, `std/tool/project.blsp`).
 
 /// `(cwd)` — the process's current working directory as a string.
+/// `(exe-path)` — the absolute path of the RUNNING executable, or nil when the platform
+/// won't say (a sandbox with no `/proc/self/exe`-equivalent). Nil rather than an error: a
+/// program asking where it lives is asking opportunistically, and the answer is allowed to
+/// be "cannot tell".
+///
+/// What it is for: locating something installed ALONGSIDE this binary. A shipped app cannot
+/// assume `PATH` — a desktop launch inherits the session's, which routinely lacks
+/// `~/.local/bin` — so "the runtime that installed me is my sibling" is the reliable lookup,
+/// and it needs this. (myedit's eval sandbox spawns a Brood runtime for its child; from a
+/// dash-launched editor, PATH alone finds nothing.)
+pub(super) fn exe_path(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    match std::env::current_exe() {
+        Ok(p) => Ok(heap.alloc_string(&p.to_string_lossy())),
+        Err(_) => Ok(Value::nil()),
+    }
+}
+
 pub(super) fn cwd(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     match std::env::current_dir() {
         Ok(p) => Ok(heap.alloc_string(&p.to_string_lossy())),

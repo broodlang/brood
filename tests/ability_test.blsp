@@ -637,3 +637,55 @@
     (is (not (abt-warns-about?
           "(defmodule u) (defrecord m (n)) (defability Ord :requires [NoSuchAbility] (compare-to [self other] :-> int)) (impl Ord u/m (compare-to [a b] 0))"
           "requires")))))
+
+;; ---- unimpl: an impl registry you can get back out of (ADR-203) --------------
+;; Registering an impl was open and reversible in every way but one: there was no way to
+;; REMOVE it. That is the state anything needing a known baseline cares about — a test that
+;; must not leak into the next, a REPL undoing an experiment, a hot reload retracting an impl
+;; the new source no longer declares. (myedit hit it as a flaky suite: a tutorial exercise
+;; asks the reader to `impl` an ability, and the test that evaluated the worked ANSWER left
+;; that impl registered, so the exercise's own template then "already passed".)
+(defability Retract (rsize [self] :-> int))
+(defrecord retractable (n))
+
+(describe "unimpl — retracting an implementation"
+  :serial
+  (test "an impl dispatches, and after unimpl it is gone again"
+    (do
+      (impl Retract ability-test/retractable (rsize [r] (get r :n)))
+      (assert= 7 (rsize (retractable 7)))
+      (assert= 1 (unimpl Retract ability-test/retractable))        ; one op removed
+      (let (e (try (rsize (retractable 7)) (catch e e)))
+        (assert= (get e :kind) :no-impl)                           ; back to unimplemented
+        (assert= (get e :op) 'rsize))))
+
+  (test "unimpl is idempotent and says how much it removed"
+    (do
+      (assert= 0 (unimpl Retract ability-test/retractable))         ; nothing left to remove
+      (impl Retract ability-test/retractable (rsize [r] (get r :n)))
+      (assert= 1 (unimpl Retract ability-test/retractable))
+      (assert= 0 (unimpl Retract ability-test/retractable))))
+
+  (test "a named op retracts just that one"
+    (do
+      (impl Retract :int (rsize [n] n))
+      (assert= 3 (rsize 3))
+      (assert= 1 (unimpl Retract :int rsize))
+      (is (not (nil? (try (rsize 3) (catch e e)))))))
+
+  (test "the slot is UNCLAIMED afterwards, so any tier may take it again"
+    ;; not `:default`, not a tombstone — the same state as before anyone implemented it
+    (do
+      (impl Retract ability-test/retractable (rsize [r] (get r :n)))
+      (unimpl Retract ability-test/retractable)
+      (impl Retract ability-test/retractable (rsize [r] (* 10 (get r :n))))
+      (assert= 40 (rsize (retractable 4)))
+      (unimpl Retract ability-test/retractable)))
+
+  (test "unregister-impl is the function underneath, and reports what it did"
+    (do
+      (impl Retract ability-test/retractable (rsize [r] (get r :n)))
+      (is (unregister-impl 'Retract 'rsize :ability-test/retractable))    ; removed
+      (refute (unregister-impl 'Retract 'rsize :ability-test/retractable))  ; nothing left
+      ;; and it never raises for an ability/op/id that was never registered at all
+      (refute (unregister-impl 'NoSuchAbility 'nope :nothing)))))

@@ -4661,6 +4661,27 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   (let (methods (get *impls* op-key))
     (or (get methods key) (get methods :default))))
 
+(defn unregister-impl (aname op key)
+  "Remove `key`'s impl of `aname`'s `op` — the inverse of `register-impl`. Returns true when
+  an impl was there, false when there was nothing to remove (idempotent, never raises).
+
+  The slot becomes UNCLAIMED, not `:default`: a later `register-impl` of any tier takes it,
+  because precedence compares against an incumbent and there is none. Dispatch falls back to
+  the ability's `:default` impl if it declares one, else `no-impl` — the same state as before
+  anyone implemented it.
+
+  Registering an impl was open and reversible in every way but this one. A registry with no
+  inverse cannot be returned to a known state, which bites anything that has to: a test that
+  must not leak into the next one, a REPL session undoing an experiment, a hot reload
+  retracting an impl the new source no longer declares."
+  (let (op-key [aname op]
+        prov-key [aname op key]
+        had (contains? (or (get *impls* op-key) {}) key))
+    (when had
+      (%registry-update! '*impls* :dissoc [op-key key] nil)
+      (%registry-update! '*impl-from* :dissoc [prov-key] nil))
+    had))
+
 (defn derive-into (aname id fields from)
   "Load-time worker for `defrecord`'s `:derives` (ADR-185): register ability `aname`'s derived
   impl for record id `id` (field-name symbols `fields`), tagged with ns `from`. Calls the
@@ -4902,6 +4923,28 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
               (list 'quote aname) (list 'quote op-name) id-kw (cons 'fn (cons arg-syms body))
               (list 'quote (current-ns)))))
         methods))))
+
+(defmacro unimpl (aname key & ops)
+  "Retract ability `aname`'s implementations for dispatch id `key` — the named `ops`, or
+  EVERY op the ability declares when none are named. The inverse of `impl`, and the same
+  shape: `(unimpl Size geometry/circle)` undoes `(impl Size geometry/circle …)`.
+
+    (unimpl Size geometry/circle)          ; every op
+    (unimpl Shape my/rect area)            ; just `area`
+
+  Returns the number of impls actually removed, so a caller can tell a retraction from a
+  no-op. A `key` that never had an impl is a quiet zero."
+  (let (id-kw (ability--id-kw key))
+    (list 'unimpl--do (list 'quote aname) id-kw
+      (if (empty? ops)
+        (list 'map 'first (list 'or (list 'ability-ops (list 'quote aname)) (list)))
+        (list 'quote ops)))))
+
+(defn unimpl--do (aname key ops)
+  "Runtime worker for `unimpl`: retract each of `ops` for `key`, returning how many were
+  there. Separate from the macro so the op list can come from the ability's own declaration
+  at expansion time or from a caller's list at runtime."
+  (fold (fn (n op) (if (unregister-impl aname op key) (inc n) n)) 0 ops))
 
 ;; ── Multiple dispatch: `defmulti` / `defmethod` (ADR-179) ──────────────────────
 ;; Dispatch on the IDENTITY-TUPLE of the arguments, resolved by EXACT match, then a declared
