@@ -4198,22 +4198,25 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
     (eprintln "deprecation: " message))
   nil)
 
-;; The `(require …)`+`(%refer …)` forms for one `(:use mod [:only [a b]])` clause:
-;; load the module, then import its names. `:only [a b]` imports just those; with no
-;; marker, all of `mod`'s public (non-`--`) names. `:only` is the *sole* import
-;; filter — any other marker is a clean error (ADR-152: name the fix, don't
+;; The `(require …)`+`(%refer …)` forms for one `(:use mod [:only|:exclude [a b]])`
+;; clause: load the module, then import its names. `:only [a b]` imports just those;
+;; `:exclude [a b]` imports all public names *except* those (Elixir's `except:` — the
+;; escape for a name that would clash with another `:use` or shadow the prelude); with
+;; no marker, all of `mod`'s public (non-`--`) names. `:only`/`:exclude` are the sole
+;; import filters — any other marker is a clean error (ADR-152: name the fix, don't
 ;; silently import everything). Used at `defmodule` expand time.
 (defn defmodule--use-clause (clause)
   (let (mod (second clause)
         opts (rest (rest clause))
         marker (first opts))
-    (when (and marker (not (= marker :only)))
+    (when (and marker (not (= marker :only)) (not (= marker :exclude)))
       (error "defmodule: unknown (:use "
-        mod " " marker " …) marker — the only import " "filter is :only, as `(:use " mod
-        " :only [a b])`"))
-    (let (subset (if (= marker :only) (second opts) nil))
+        mod " " marker " …) marker — the import filters are :only and :exclude, as "
+        "`(:use " mod " :only [a b])` or `(:use " mod " :exclude [a b])`"))
+    (let (subset  (if (= marker :only) (second opts) nil)
+          exclude (if (= marker :exclude) (second opts) nil))
       (list (list 'require (list 'quote mod))
-        (list '%refer (list 'quote mod) (list 'quote subset))))))
+        (list '%refer (list 'quote mod) (list 'quote subset) (list 'quote exclude))))))
 
 ;; All require/refer forms for the `(:use …)` clauses in a `defmodule` header
 ;; (skipping the optional docstring / any non-`:use` form), flattened for splicing.
@@ -4371,13 +4374,21 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       (= (get *features-loading* key) (self)) key
       ;; someone else is mid-load: wait for their provide (never see a partial module)
       (contains? *features-loading* key) (require--await key 1000)
+      ;; Claim the load atomically. `:assoc-new` sets the marker only if `key` is
+      ;; still absent — the test-and-set runs INSIDE the registry lock — and returns
+      ;; false if another process claimed it between the `contains?` read above and
+      ;; here. Without this CAS two simultaneous first-requirers both see
+      ;; `contains? = false`, both `:assoc`, and both run `require--force`: the module
+      ;; body is evaluated twice and `provide`d twice (the double-load ADR-136 forbids).
+      ;; Losing the race means someone else now owns the load — wait for their provide.
+      (not (%registry-update! '*features-loading* :assoc-new [key] (self)))
+      (require--await key 1000)
       else
-      ;; Clear the in-flight marker on BOTH exits: a load that throws (module not
-      ;; found, or an error inside its source) must not leave `key` marked, or
-      ;; every later require of it stalls the full `require--await` window
+      ;; We won the claim (the marker is now set). Clear it on BOTH exits: a load that
+      ;; throws (module not found, or an error inside its source) must not leave `key`
+      ;; marked, or every later require of it stalls the full `require--await` window
       ;; (~5s of 5ms ticks) before taking the load over.
       (do
-        (%registry-update! '*features-loading* :assoc [key] (self))
         (try
           (require--force key)
           (catch e

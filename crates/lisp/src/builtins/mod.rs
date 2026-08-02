@@ -2513,14 +2513,16 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![], sym),
         current_ns,
     );
-    // `(%refer 'mod subset)` — populate the current file's import table from a
-    // `(:use …)` clause. `subset` is nil (refer all public names) or a seq of
-    // bare symbols. The `ns` macro emits it after `(require 'mod)`.
+    // `(%refer 'mod subset exclude)` — populate the current file's import table from a
+    // `(:use …)` clause. `subset` is nil (refer all public names) or a seq of bare
+    // symbols (`:only`); `exclude` is nil or a seq of bare names to drop from a
+    // refer-all (`:exclude`). The `defmodule` macro emits it after `(require 'mod)`.
+    // `:use-internals` still emits the 2-arg form (exclude defaults to nil).
     def(
         heap,
         "%refer",
-        Arity::exact(2),
-        Sig::new(vec![sym, any], nil_ty),
+        Arity::range(2, 3),
+        Sig::new(vec![sym, any, any], nil_ty),
         refer,
     );
     // `(%register-sig 'name 'type)` — record a user-declared `(sig …)` for the

@@ -461,18 +461,13 @@ pub(super) fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispRe
     let forms = reader::read_all_positioned(heap, &src).map_err(|e| e.or_file(path.clone()))?;
     let root = heap.env_root(env);
     let prev = heap.set_current_file(Some(path.clone()));
-    // Namespace bracketing + forward-ref pre-scan, like `load` (ADR-065): a
-    // reloaded namespaced file re-establishes its own namespace (its `(ns …)` form
-    // is re-evaluated below) so its re-saved defs are qualified correctly.
-    let prev_ns = heap.set_compile_ns(None);
+    // Namespace bracketing + forward-ref pre-scan, like `load` (ADR-065): a reloaded
+    // namespaced file re-establishes its own namespace (its `(defmodule …)` form is
+    // re-evaluated below) so its re-saved defs are qualified correctly. `NsLoadScope`
+    // restores the caller's ns-state on every exit path (incl. panic).
     let form_vals: Vec<Value> = forms.iter().map(|(f, _)| *f).collect();
-    let known = if crate::eval::macros::file_opens_ns(heap, &form_vals) {
-        crate::eval::macros::scan_def_names(heap, &form_vals)
-    } else {
-        std::collections::HashSet::new()
-    };
-    let prev_known = heap.set_ns_known_names(known);
-    let prev_imports = heap.set_imports(std::collections::HashMap::new());
+    let mut scope = crate::eval::macros::NsLoadScope::enter(heap, &form_vals);
+    let heap = scope.heap();
     let mut result = Ok(Value::nil());
     // Root the unevaluated forms across the per-form eval — a collection at any
     // depth (ADR-061) relocates the LOCAL forms this loop still holds; re-fetch
@@ -551,10 +546,8 @@ pub(super) fn reload_defs(args: &[Value], env: EnvId, heap: &mut Heap) -> LispRe
     }
     heap.truncate_roots(base);
     heap.set_current_file(prev);
-    heap.set_compile_ns(prev_ns);
-    heap.set_ns_known_names(prev_known);
-    heap.set_imports(prev_imports);
     result.map(|_| Value::Nil)
+    // `scope` drops here → the caller's ns-state is restored (also on panic).
 }
 
 pub(super) fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
@@ -571,21 +564,15 @@ pub(super) fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     // so the test macros can record each test's source location; restore the
     // previous file afterward since loads nest.
     let prev = heap.set_current_file(Some(path.clone()));
-    // A loaded file starts at the root namespace and its own `(ns …)` form sets the
-    // current namespace for the rest of the file (ADR-065); restore the caller's
-    // namespace afterward so loads nest and ns state never leaks out of a file.
-    let prev_ns = heap.set_compile_ns(None);
-    // Forward-reference pre-scan (ADR-065): if the file opens a namespace, record
-    // the bare names it will define so a reference to a later definition resolves.
-    // Cheap (read-only, no GC), gated on the file actually using `(ns …)`.
+    // A loaded file starts at the ROOT namespace; its own `(defmodule …)` sets the
+    // namespace for the rest of the file (ADR-065). `NsLoadScope` resets compile-ns +
+    // imports + this file's forward-ref pre-scan + assume-own, and restores the
+    // caller's ns-state on EVERY exit path (normal return, `?`, or a panic unwinding
+    // through the load) — so ns state never leaks out of a file and the four ns fields
+    // stay in sync. It owns the heap for the load; reach it via `scope.heap()`.
     let form_vals: Vec<Value> = forms.iter().map(|(f, _)| *f).collect();
-    let known = if crate::eval::macros::file_opens_ns(heap, &form_vals) {
-        crate::eval::macros::scan_def_names(heap, &form_vals)
-    } else {
-        std::collections::HashSet::new()
-    };
-    let prev_known = heap.set_ns_known_names(known);
-    let prev_imports = heap.set_imports(std::collections::HashMap::new());
+    let mut scope = crate::eval::macros::NsLoadScope::enter(heap, &form_vals);
+    let heap = scope.heap();
 
     // **Bounded loading — the core memory guarantee (docs/memory-review.md).**
     // The collector now reclaims at ANY eval depth (ADR-061), so a file loaded
@@ -621,10 +608,9 @@ pub(super) fn load(args: &[Value], env: EnvId, heap: &mut Heap) -> LispResult {
     }
     heap.truncate_roots(base);
     heap.set_current_file(prev);
-    heap.set_compile_ns(prev_ns);
-    heap.set_ns_known_names(prev_known);
-    heap.set_imports(prev_imports);
     result
+    // `scope` drops here → the caller's compile-ns / known-names / imports / assume-own
+    // are restored (also on a panic unwinding through the load).
 }
 
 /// `(%run-program-file "path")` — run a program **file** as its own green process
@@ -2370,25 +2356,121 @@ pub(super) fn register_sig(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     Ok(Value::symbol(qualified))
 }
 
-/// `(%refer 'mod subset)` — add `(:use …)` imports to the current file's import
-/// table (ADR-065 inc-2). `mod` must already be loaded (the `ns` macro emits a
-/// `(require 'mod)` first). `subset` nil → refer every *public* `mod/name` (no
-/// `--` private marker, not itself nested); else a seq of bare symbols → refer
-/// just those as `mod/name`. Each becomes a bare → qualified entry the resolver
-/// consults after the current namespace and before root.
+/// Add one `(:use …)` import (bare → qualified) to the current file's table,
+/// enforcing the two Elixir-style import rules:
+///
+/// - **Clash (error).** If `bare` is already imported from a *different* module, it's
+///   a hard error naming both — resolvable with `:only`/`:exclude` on one of the uses.
+///   Re-importing the *same* qualified name (a re-`:use` of the same module) is a
+///   no-op, so idempotent reloads are fine.
+/// - **Shadow (warning).** If `bare` already names a live root/prelude/builtin global,
+///   the import shadows it — allowed (the resolver gives an import precedence over
+///   root), but warned, exactly as Elixir warns when an import shadows an
+///   auto-imported `Kernel` name. Reach the original with the `/name` root escape, or
+///   silence per-name with `:exclude`. `BROOD_NO_SHADOW_WARN` mutes the class.
+fn refer_add(
+    heap: &mut Heap,
+    bare: value::Symbol,
+    qualified: value::Symbol,
+    mod_name: &str,
+) -> Result<(), LispError> {
+    // An ambient (`defdyn`) name always resolves bare/root — the resolver's `is_ambient`
+    // check short-circuits before it ever consults the import table — so an import for
+    // one is inert, and it can neither clash nor shadow. Skip it: no entry, no error, no
+    // warning (a dynamic knob like `*width*` shared by two modules must not read as one).
+    if value::is_dynamic(bare) {
+        return Ok(());
+    }
+    if let Some(existing) = heap.import_of(bare) {
+        if existing == qualified {
+            return Ok(()); // idempotent — same module referred again (e.g. reload)
+        }
+        return Err(LispError::runtime(format!(
+            "(:use {mod_name}) refers `{}`, but it is already referred as `{}` from another \
+             module — resolve the clash with `:only [...]` or `:exclude [...]` on one of the uses",
+            value::symbol_name(bare),
+            value::symbol_name(existing),
+        )));
+    }
+    if heap.env_get(value::EnvId::GLOBAL, bare).is_some()
+        && std::env::var_os("BROOD_NO_SHADOW_WARN").is_none()
+    {
+        let b = value::symbol_name(bare);
+        eprintln!(
+            "warning: (:use {mod_name}) refers `{b}`, which shadows the prelude/root `{b}`; \
+             reach the original as `/{b}`, or drop it with `:exclude [{b}]`"
+        );
+    }
+    heap.add_import(bare, qualified);
+    Ok(())
+}
+
+/// Is `mod_name` currently mid-load — present in the `*features-loading*` in-flight
+/// table (ADR-136)? Outside a cycle this is always false at `%refer` time: a normal
+/// `(:use m)` fully loads and `provide`s `m` (clearing the marker) *before* its
+/// `%refer` runs. A module still loading here therefore means the current file is
+/// being referred from *inside* `m`'s own load — a `(:use)` cycle, whose refer-all
+/// would silently import only the names defined so far.
+fn module_is_loading(heap: &mut Heap, mod_name: &str) -> bool {
+    let map_id = match heap
+        .env_get(value::EnvId::GLOBAL, value::intern("*features-loading*"))
+        .map(|v| v.unpack())
+    {
+        Some(crate::core::value::ValueRef::Map(id)) => id,
+        _ => return false,
+    };
+    let key = heap.alloc_string(mod_name);
+    heap.map_get(map_id, key).is_some()
+}
+
+/// `(%refer 'mod subset exclude)` — add `(:use …)` imports to the current file's
+/// import table (ADR-065 inc-2). `mod` must already be loaded (the `defmodule` macro
+/// emits a `(require 'mod)` first). `subset` nil → refer every *public* `mod/name`
+/// (no `--` private marker, not itself nested); else a seq of bare symbols → refer
+/// just those as `mod/name`. `exclude` (a seq of bare names, or nil) drops those from
+/// a refer-all — Elixir's `except:`. Each import becomes a bare → qualified entry the
+/// resolver consults after the current namespace and before root; clashes and
+/// prelude shadows are policed by [`refer_add`].
 pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let mod_sym = expect_symbol(heap, "%refer", arg(args, 0))?;
     let mod_name = value::symbol_name(mod_sym);
     let prefix = format!("{}/", mod_name);
+    // The `:exclude` set (bare symbols to skip in a refer-all).
+    let excluded: std::collections::HashSet<value::Symbol> = match arg(args, 2) {
+        Value::Nil => std::collections::HashSet::new(),
+        ex => heap
+            .seq_items(ex)?
+            .into_iter()
+            .filter_map(|v| match v {
+                Value::Sym(s) => Some(s),
+                _ => None,
+            })
+            .collect(),
+    };
     match arg(args, 1) {
         Value::Nil => {
+            // A refer-all against a module still mid-load is a circular `(:use …)`:
+            // its public set is incomplete, so importing "all" of it would silently
+            // miss the names defined after the cycle point. Fail clearly instead —
+            // `:only` (lazy, resolved at reference time) is the cycle-safe escape.
+            if module_is_loading(heap, &mod_name) {
+                return Err(LispError::runtime(format!(
+                    "circular `(:use {mod_name})`: `{mod_name}` is still loading (a cycle back \
+                     into this module), so a refer-all would import only the names defined so \
+                     far. Break the cycle, or import just what you need with \
+                     `(:use {mod_name} :only [...])`, which resolves lazily and is cycle-safe."
+                )));
+            }
             // Refer all public names: enumerate the live globals under `mod/`.
             for g in heap.global_symbols() {
                 let name = value::symbol_name(g);
                 if let Some(bare) = name.strip_prefix(&prefix) {
                     if !bare.is_empty() && !bare.contains('/') && !bare.contains("--") {
                         let bare_sym = value::intern(bare);
-                        heap.add_import(bare_sym, g);
+                        if excluded.contains(&bare_sym) {
+                            continue;
+                        }
+                        refer_add(heap, bare_sym, g, &mod_name)?;
                     }
                 }
             }
@@ -2413,7 +2495,7 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                     )));
                 }
                 let qualified = value::intern(&format!("{}/{}", mod_name, bare_name));
-                heap.add_import(bare, qualified);
+                refer_add(heap, bare, qualified, &mod_name)?;
             }
         }
     }

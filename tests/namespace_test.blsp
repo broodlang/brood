@@ -211,3 +211,21 @@
   (test "a defdyn knob keeps working from a default (it is ambient, never namespaced)"
     (%load-string "(defmodule nsopt8) (defdyn *dlim* 9) (defn f (&optional (n *dlim*)) n)")
     (assert= (nsopt8/f) 9)))
+
+;;; The `/name` root escape (ADR-065): an empty module prefix addresses the ROOT /
+;;; prelude namespace, so a module that shadows a prelude name can still reach the
+;;; original — `/map` is prelude's `map` even where the module defined its own.
+(describe "namespaces: the /name root escape"
+  :isolated
+  (test "a module shadowing a prelude name reaches the original via /name"
+    (%load-string (str "(defmodule nsroot1)"
+                    " (defn map (x) (list :mine x))"
+                    " (defn mine (x) (map x))"
+                    " (defn orig () (/map (fn (x) (* x x)) (list 1 2 3)))"))
+    ;; the module's own `map` wins for a bare reference…
+    (assert= (nsroot1/mine 5) (list :mine 5))
+    ;; …and `/map` still reaches the prelude's `map`.
+    (assert= (nsroot1/orig) (list 1 4 9)))
+  (test "the bare division operator is untouched by the /name escape"
+    (%load-string "(defmodule nsroot2) (defn half (x) (/ x 2))")
+    (assert= (nsroot2/half 10) 5)))
