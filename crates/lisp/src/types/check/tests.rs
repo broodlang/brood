@@ -3778,11 +3778,13 @@ fn unknown_module_qualified_name_is_not_unbound() {
         );
     }
     // But a typo in a *known* module (some `mod/*` is loaded) is still flagged:
-    // requiring `test` makes `test/` a known prefix.
-    let w = file_warnings("(require 'test) (test/no-such-fn 1)");
+    // requiring `io` makes `io/` a known prefix. `io` and not `test`, deliberately — a
+    // lean (`--no-default-features`) runtime embeds no dev modules, so `(require 'test)`
+    // resolves to nothing there and the assertion vanished with it. A CORE module keeps
+    // the test about the checker instead of about the build's feature set.
+    let w = file_warnings("(require 'io) (io/no-such-fn 1)");
     assert!(
-        w.iter()
-            .any(|m| m.contains("unbound symbol: test/no-such-fn")),
+        w.iter().any(|m| m.contains("unbound symbol: io/no-such-fn")),
         "a typo in a known module must still be flagged: {w:?}"
     );
 }

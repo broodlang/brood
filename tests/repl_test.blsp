@@ -69,6 +69,13 @@
 ;; so keep the block non-`:isolated` and restore nothing — the built-ins re-register on
 ;; the next module load; tests here only ADD and query).
 (describe "repl/*repl-commands* — the meta-command registry"
+  :isolated
+  ;; These REGISTER into `*repl-commands*`, a shared mutable global, which the framework
+  ;; explicitly warns against doing from a parallel test: the registry is a
+  ;; read-modify-write, so a concurrent registration in another unit can lose this one's
+  ;; update, and "re-registering replaces rather than duplicates" then sees two entries.
+  ;; That was a ~1-in-3 flake. Isolated units run alone against a private copy of the
+  ;; globals, which is what a registry-mutating test needs.
   (test "the built-in commands are registered, with aliases"
     (is (not (nil? (repl/repl--command-for "help"))))
     (is (not (nil? (repl/repl--command-for "?"))))     ; help alias

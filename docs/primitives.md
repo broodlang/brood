@@ -55,7 +55,7 @@ arg silently becoming `nil`.
 | | `subbytes` | 2–3 | the byte slice `[start, end)` (`end` defaults to the length) as a fresh bytes value |
 | | `bytes-index-of` | 2–3 | the first index of the `needle` bytes in `haystack` at or after `from` (default 0), or -1 if not present — the byte-protocol workhorse (find a `\r\n\r\n`, a frame delimiter, …) |
 | | `byte-length` | 1 | The number of bytes in b. O(1). |
-| | `bytes-concat` | 2 | One bytes value joining all arguments, each an iolist (ADR-139): a string (UTF-8), a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those. The in-memory materialiser of the iolist model. |
+| | `bytes-concat` | any | One bytes value joining all arguments, each an iolist (ADR-139): a string (UTF-8), a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those. The in-memory materialiser of the iolist model. |
 | | `bytes->list` | 1 | The bytes b as a list of integers 0–255. |
 | **Table** (Brood's ETS — the one identity-mutable structure; shared by identity, deep-clones in/out) | `table` | 0 | create a new empty in-memory table: a shared, mutable key→value store behind an opaque handle — mutated in place and shared by identity (the handle can be sent to other processes, which all see the same store); keys/values are deep-cloned in and out, so no two processes alias stored data. Local to this runtime; returns the handle |
 | | `table-put` | 3 | store `v` under key `k` (overwriting; structural key equality); returns `t` for threading |
@@ -89,10 +89,10 @@ arg silently becoming `nil`.
 | | `list-processes` | 0 | Every currently-live pid on this runtime (one per registered mailbox). Order is unspecified — sort if you need stability. For agents/tools enumerating spawned processes. |
 | **Type reflection** | `type-of` | 1 | the runtime type tag as a keyword (`:int` `:string` …); the one irreducible reflective primitive. The tag predicates (`nil?` `pair?` `int?` `float?` `bool?` `string?` `symbol?` `keyword?` `vector?` `map?` `fn?`) are Brood wrappers over it, as are the in-language type checks |
 | **Type checking** (advisory; see [types.md](types.md)) | `check` | 1 | run the advisory type checker over a *quoted* form: macro-expand it (like the real compile pass), then return a **list of warning strings** for provably-wrong primitive arguments (e.g. `(first 5)` → `"first: argument 1 expects nil \| pair \| vector, got int (5)"`), or `nil` when nothing is wrong. Advisory: never raises |
-| | `check-file` | 1 | check every top-level form in the file at `path`, returning pre-formatted `"path:line:col: warning: …"` strings (or `nil` if clean). Reads but does **not** evaluate. Used by `(check-project)` for the `nest test` / `nest run` / `nest check` pre-flight |
-| | `check-file-structured` | 1 | Like check-file but returns a list of `{:file :line :col :message}` maps instead of GNU-format strings — for tools (the `nest mcp` `check` tool, editor diagnostics). |
+| | `check-file` | 1–2 | check every top-level form in the file at `path`, returning pre-formatted `"path:line:col: warning: …"` strings (or `nil` if clean). Reads but does **not** evaluate. Used by `(check-project)` for the `nest test` / `nest run` / `nest check` pre-flight |
+| | `check-file-structured` | 1–2 | Like check-file but returns a list of `{:file :line :col :message}` maps instead of GNU-format strings — for tools (the `nest mcp` `check` tool, editor diagnostics). |
 | | `check-string-structured` | 1 | Advisory type-check the source string `src`, returning a list of `{:line :col :message}` maps (1-based positions), or `()` when `src` doesn't parse (e.g. incomplete input) — the string-source counterpart of check-file-structured, for live editor-buffer diagnostics. |
-| | `check-file-deps` | 1 | Incremental-cache check (ADR-119): returns [warnings dep-keys fingerprint] — the GNU warning strings, the set of global observations the check made, and a fingerprint of them against the current image. Store dep-keys+fingerprint; |
+| | `check-file-deps` | 1–2 | Incremental-cache check (ADR-119): returns [warnings dep-keys fingerprint] — the GNU warning strings, the set of global observations the check made, and a fingerprint of them against the current image. Store dep-keys+fingerprint; |
 | | `check-deps-fp` | 1 | Recompute the fingerprint of a file's dep-keys (from check-file-deps) against the current global image. The incremental check cache reuses a file's warnings iff this equals the stored fingerprint. |
 | **Value ↔ text & I/O** | `str` | n | concatenate the *display* forms of args → string |
 | | `pr-str` | 1 | *readable* form of a value → string |
@@ -100,7 +100,7 @@ arg silently becoming `nil`.
 | | `eprint` | n | write display forms to **stderr** → nil (mirrors `print`; `eprintln` is the Brood newline-adding wrapper) |
 | | `stdout-tty?` | 0 | true when stdout is an interactive terminal (false when piped/captured) — gates colour output |
 | | `stdin-tty?` | 0 | true when stdin is an interactive terminal (false when redirected from a pipe/file) — the REPL gates raw-mode line editing on this |
-| | `%render` | 2 | The space-joined display forms of the arguments as one string (no output). The rendering half of `print`; Brood's print/println route the result through the dynamic `*out*` port. |
+| | `%render` | any | The space-joined display forms of the arguments as one string (no output). The rendering half of `print`; Brood's print/println route the result through the dynamic `*out*` port. |
 | | `%write-out` | 1 | Write the ready string `s` to the current stdout sink — the active capture buffer (`with-out-str`) if set, else real stdout. The default `*out*` port. |
 | | `%write-err` | 1 | Write the ready string `s` to real stderr (never captured). The default `*err*` port. |
 | | `read-line` | 0 | Read one line from stdin; returns the line as a string (trailing newline stripped) or nil at end of input. |
@@ -147,7 +147,7 @@ arg silently becoming `nil`.
 | | `%env-all` | 0 | All environment variables as a map of string→string. |
 | | `%argv` | 0 | Command-line arguments as a vector of strings (including argv[0]). |
 | | `%os-type` | 0 | The host OS as a keyword: :linux, :macos, or :windows. |
-| | `%os-cmd` | 3 | Run prog (with optional args list) capturing stdout/stderr; returns {:stdout s :stderr s :exit n}. |
+| | `%os-cmd` | 1+ | Run prog (with optional args list) capturing stdout/stderr; returns {:stdout s :stderr s :exit n}. |
 | | `%halt` | 1 | Terminate the process with exit code. Never returns. |
 | | `image-thumb` | 3 | Decode an encoded image (PNG/JPEG/GIF/WebP/BMP) from a byte sequence and downscale it to fit within max-w×max-h pixels (aspect ratio preserved), returning {:width :height :rgba} where :rgba is a width*height*4 bytes value (row-major RGBA8). |
 | **Macro support** | `macroexpand-1` `macroexpand` | 1 | expand a form (one step / fully) |
@@ -163,7 +163,7 @@ arg silently becoming `nil`.
 | | `scan-tokens` | 1 | Lexically tokenize Brood source s into a vector of [start end kind text] tokens (char offsets, end-exclusive; whitespace skipped). kind is :comment, :string, :number, :keyword, :symbol, :open, or :close. |
 | | `scan-form-start` | 2 | The greatest char offset <= pos of a column-0 open bracket in s lying OUTSIDE any string or ; comment, else 0 — the string/comment-aware beginning-of-defun behind highlight/safe-restart and tool/sexp narrowing. |
 | | `scan-source-extract` | 1 | Native per-file scan for the whole-project check (ADR-119): parse src and return [counts privs def-names] — a map of --containing symbol counts, this file's --private defs as [bare qual], and every top-level def's qualified name. The fast path replacing the interpreted CST walk. |
-| | `span-runs` | 4 | Tile text (first char at offset base) into a list of [substring face] runs from ascending, non-overlapping [start end face] spans: gaps are nil-faced, each span its text in its face. |
+| | `span-runs` | 3–4 | Tile text (first char at offset base) into a list of [substring face] runs from ascending, non-overlapping [start end face] spans: gaps are nil-faced, each span its text in its face. |
 | **Introspection** (editor tooling) | `doc` | 1 | a function/macro's docstring, or nil |
 | | `arglist` | 1 | a function/macro's parameter list (required, `&optional`, `& rest`), or nil |
 | | `global-names` | 0 | every globally bound symbol, sorted by spelling (completion / doc generation) |
@@ -247,7 +247,7 @@ literal — no constructor call.
 | **Ratio** (exact rational — the `1/2` literal; `/` on integers is exact, ADR-196) | `numerator` | 1 | The numerator of a ratio (`(numerator 3/4)` → 3), or an integer itself. |
 |  | `denominator` | 1 | The positive denominator of a ratio (`(denominator 3/4)` → 4), or 1 for an integer. |
 |  | `->decimal` | 1 | A number as an exact base-10 decimal — exact for an integer or terminating ratio (`1/2` → `0.5M`); a non-terminating ratio rounds to the default precision. (`->float`, `ratio?`, and `rational` are prelude functions.) |
-| **Set** (`#{…}`; CHAMP-backed. `%`-internal — `std/set.blsp` is the library) | `%set` | 2 | Build a set from the element args (the programmatic form of the `#{ }` literal). Dedups by structural equality. The `set` library's constructor is Brood over this. |
+| **Set** (`#{…}`; CHAMP-backed. `%`-internal — `std/set.blsp` is the library) | `%set` | any | Build a set from the element args (the programmatic form of the `#{ }` literal). Dedups by structural equality. The `set` library's constructor is Brood over this. |
 |  | `%set-add` | 2 | A fresh set like s with element x added (a set already holding x is returned unchanged). O(log n). |
 |  | `%set-remove` | 2 | A fresh set like s with element x removed (absent → unchanged). O(log n). |
 |  | `%set-has?` | 2 | Is x an element of set s? O(log n). |
@@ -267,9 +267,9 @@ literal — no constructor call.
 |  | `tcp-set-idle-timeout` | 2 | Arm (or, with ms 0, disarm) an idle timeout on an established stream: the reactor drops the connection if no bytes move in EITHER direction for ms milliseconds, delivering [:tcp-closed] (or [:tcp-error] for a one-shot TLS client). |
 |  | `tcp-controlling-process` | 2 | Make pid the owner of sock's inbound data: starts reading a just-accepted (passive) socket, or retargets an active one. Returns nil. |
 |  | `tls-listen` | 4 | Bind a TLS listening socket on host:port using the PEM certificate chain cert-pem and private key key-pem (port 0 = OS-assigned). Like tcp-listen, connections arrive as [:tcp-accept lsock client]; |
-|  | `tls-request` | 4 | Make one HTTPS request to host:port (TLS): the response arrives at the calling process as [:tcp sock data] … [:tcp-closed sock] messages (or [:tcp-error sock msg]). request is any iolist (a string, bytes, or nested tree — ADR-141); the socket honors tcp-set-binary for the response. |
+|  | `tls-request` | 3–4 | Make one HTTPS request to host:port (TLS): the response arrives at the calling process as [:tcp sock data] … [:tcp-closed sock] messages (or [:tcp-error sock msg]). request is any iolist (a string, bytes, or nested tree — ADR-141); the socket honors tcp-set-binary for the response. |
 |  | `tls-self-signed` | 1 | Generate a self-signed TLS certificate + private key for host (a DNS name like "localhost"), for zero-config dev TLS. Returns [cert-pem key-pem] — pass them to tls-listen. Not for production (clients reject a self-signed cert unless told to trust it). |
-| **Subprocess** (a persistent child OS process, ADR-104 — distinct from green processes) | `proc-spawn` | 3 | Spawn prog (a string) with args (a list/vector of strings) as a persistent child process with piped stdio. An optional opts map tunes the child: :cwd (a string) sets its working directory, :env (a map of string->string) adds environment variables on top of the inherited environment. |
+| **Subprocess** (a persistent child OS process, ADR-104 — distinct from green processes) | `proc-spawn` | 2–3 | Spawn prog (a string) with args (a list/vector of strings) as a persistent child process with piped stdio. An optional opts map tunes the child: :cwd (a string) sets its working directory, :env (a map of string->string) adds environment variables on top of the inherited environment. |
 |  | `proc-send` | 2 | Write data to subprocess p's stdin (blocking) and flush. data is any iolist — a string, a bytes value, a byte int 0–255, or an arbitrarily nested list/vector of those, flattened once at the write (ADR-139); a string leaf is always its UTF-8 bytes, whatever the child's mode (ADR-141). Returns nil; |
 |  | `proc-set-binary` | 2 | Switch subprocess p's INBOUND decode between text mode (default) and binary mode (mirrors tcp-set-binary; outbound proc-send is unaffected, ADR-141). |
 |  | `proc-close` | 1 | Terminate subprocess p: kill it if still running and close its stdin. Idempotent; returns nil. The final [:proc-closed handle code] still arrives at the owner. |
@@ -304,15 +304,15 @@ literal — no constructor call.
 |  | `gui-maximize!` | 2 | Maximise window id while `on` is truthy (fill the screen's work area, KEEPING the title bar / decorations), or restore it to its previous size otherwise — e.g. an editor's init file opening big without going true-fullscreen. |
 |  | `gui-grab-cursor` | 2 | Confine the pointer to window id while `on` is truthy, release it otherwise — for mouse-look that shouldn't let the cursor slip out of the window and click another app. |
 |  | `gui-held-key` | 1 | The key window id currently sees as physically held — the same value its press delivered (a 1-char string, or a keyword like :ctrl-n / :up) — or nil when none is held. |
-| **Audio** (needs `--features audio`) | `audio-beep` | 3 | Play a short tone of freq-hz for ms milliseconds, optionally at peak amplitude vol (0..1, default ~0.18 — pass a small vol for quiet/ambient sounds). Fire-and-forget — it never blocks the caller, and overlapping beeps mix — so a game can blip from its frame loop. |
+| **Audio** (needs `--features audio`) | `audio-beep` | 2–3 | Play a short tone of freq-hz for ms milliseconds, optionally at peak amplitude vol (0..1, default ~0.18 — pass a small vol for quiet/ambient sounds). Fire-and-forget — it never blocks the caller, and overlapping beeps mix — so a game can blip from its frame loop. |
 | **Clipboard** | `clipboard-get` | 0 | The OS clipboard's text, or nil when empty / non-text / unavailable (no display server, or a build without the clipboard feature). |
 |  | `clipboard-set!` | 1 | Copy string s to the OS clipboard so other apps can paste it; returns s. A no-op (still returns s) when no clipboard is available or the clipboard feature is off. |
 | **Scheduler / signals** | `sched-stats` | 0 | A snapshot map of the scheduler's cumulative counters: {:spawned :exited :preempts :steals :migrations :workers :peak-threads}. :spawned - :exited is the live-process figure; :preempts counts reduction-budget quantum exhaustions; :steals/:migrations count work-stealing activity. |
 |  | `steal-count` | 0 | How many fresh processes the scheduler work-stole across worker threads since program start; 0 means placement-at-spawn kept the pool even. |
-|  | `profile-start` | 2 | Arm the sampling CPU profiler at hz samples/sec (default 99, clamped 1..10000), resetting the histogram. Sampling walks each process's reified call stack (named frames) at its next VM frame boundary after every tick — no signals, near-zero cost when off (one relaxed load per frame boundary). |
+|  | `profile-start` | 0–1 | Arm the sampling CPU profiler at hz samples/sec (default 99, clamped 1..10000), resetting the histogram. Sampling walks each process's reified call stack (named frames) at its next VM frame boundary after every tick — no signals, near-zero cost when off (one relaxed load per frame boundary). |
 |  | `profile-stop` | 0 | Disarm the sampling profiler and return the histogram: a list of {:stack (fn-names... innermost-first) :count n} maps, most-sampled first. Empty list if never armed. A sample whose frames were all anonymous appears with :stack ("<anonymous>"). |
-|  | `system-monitor` | 3 | Read, arm, or clear the kernel system monitor — runtime events pushed to ONE subscriber process as [:system kind subject-pid detail] mailbox messages (Erlang system_monitor/2 shape; the observability event stream's kernel sources). |
-|  | `process-flag` | 3 | Read or set a per-process runtime flag on the current process (Erlang process_flag/2); returns the previous (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in bytes (BEAM max_heap_size analogue; positive int sets, nil clears, absent reads). |
+|  | `system-monitor` | 0–2 | Read, arm, or clear the kernel system monitor — runtime events pushed to ONE subscriber process as [:system kind subject-pid detail] mailbox messages (Erlang system_monitor/2 shape; the observability event stream's kernel sources). |
+|  | `process-flag` | 1–2 | Read or set a per-process runtime flag on the current process (Erlang process_flag/2); returns the previous (or, with no value, current) setting. Flags: :max-heap — this process's heap limit in bytes (BEAM max_heap_size analogue; positive int sets, nil clears, absent reads). |
 |  | `trap-exit` | 1 | Set the current process's trap_exit flag (Erlang process_flag(trap_exit, …)); returns the previous value. When on, a linked peer's death arrives as a trappable [:EXIT pid reason] message instead of killing this process. |
 | **GC / VM stats** | `gc-stats` | 0 | A snapshot map of GC activity: :collections, :copied, :reclaimed (cumulative object counts), :live, :live-bytes, :threshold (next-collection trigger), and the pause-duration trio :pause-total-us/:pause-max-us/:pause-last-us (cumulative wall time in collections, worst single pause, most recent — the |
 |  | `gc-collect` | 0 | Force a collection of this process's LOCAL heap now, returning the post-collection gc-stats map. An observability/test aid, not a load-bearing trigger — automatic collection at the eval safepoint already keeps memory bounded. |

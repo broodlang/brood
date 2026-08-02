@@ -1978,6 +1978,15 @@ pub fn register(heap: &mut Heap, root: EnvId) {
 
     // filesystem — mechanism for the Brood module system + project test runner
     def(heap, "cwd", Arity::exact(0), Sig::nullary(string), cwd);
+    // Where this binary lives — for finding what was installed beside it (a shipped app
+    // cannot trust PATH; a desktop launch's PATH often lacks ~/.local/bin).
+    def(
+        heap,
+        "exe-path",
+        Arity::exact(0),
+        Sig::nullary(string.union(nil_ty)),
+        exe_path,
+    );
     def(
         heap,
         "file-exists?",
@@ -3193,6 +3202,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("symbol", &["x"], "Coerce a string, symbol, or keyword to the matching symbol (interning if needed)."),
     ("keyword", &["x"], "Coerce a string, symbol, or keyword to the matching keyword (interning if needed)."),
     ("cwd", &[], "The current working directory."),
+    ("exe-path", &[], "The absolute path of the running executable, or nil when the platform won't say (a sandbox with no /proc/self/exe equivalent). For locating something installed ALONGSIDE this binary: a shipped app cannot assume PATH — a desktop launch inherits the session's, which routinely lacks ~/.local/bin — so \"the runtime that installed me is my sibling\" is the reliable lookup. Nil rather than an error, because asking where you live is opportunistic."),
     ("file-exists?", &["path"], "Whether path exists."),
     ("canonicalize", &["path"], "The real absolute path of `path` with symlinks and ./.. resolved. Works for a not-yet-existing target (the longest existing ancestor is resolved, then the remaining components appended). Relative paths are taken against the cwd. nil only if the cwd itself can't be read. Use it to make path sandboxing symlink-escape-proof."),
     ("dir?", &["path"], "Whether path is a directory."),
@@ -3352,6 +3362,78 @@ mod primitive_docs_tests {
     use crate::core::heap::Heap;
     use std::collections::HashSet;
 
+    /// Every primitive's registered arity, rendered the way `docs/primitives.md` writes it:
+    /// `"2"`, `"1–2"` (en dash, as the table uses), `"1+"`, `"any"`.
+    fn registered_arities() -> std::collections::HashMap<String, String> {
+        let mut heap = Heap::new();
+        let root = heap.new_env(None);
+        register(&mut heap, root);
+        let mut out = std::collections::HashMap::new();
+        for sym in heap.env_chain_names(root) {
+            if let Some(Value::Native(id)) = heap.env_get(root, sym) {
+                let a = heap.native(id).arity;
+                let rendered = match (a.min, a.max) {
+                    (0, None) => "any".to_string(),
+                    (min, None) => format!("{min}+"),
+                    (min, Some(max)) if min == max => format!("{min}"),
+                    (min, Some(max)) => format!("{min}\u{2013}{max}"),
+                };
+                out.insert(value::symbol_name(sym), rendered);
+            }
+        }
+        out
+    }
+
+    /// The Arity column of `docs/primitives.md`, by primitive name. The table is prose we
+    /// maintain by hand; this reads it back so the test below can compare.
+    fn documented_arities() -> Vec<(String, String)> {
+        let doc = include_str!("../../../../docs/primitives.md");
+        let mut out = Vec::new();
+        for line in doc.lines() {
+            // `| … | `name` | 1–2 | purpose… |` — the primitive is the first backticked
+            // cell, the arity the cell after it.
+            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+            for w in cells.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                if a.starts_with('`') && a.ends_with('`') && a.len() > 2 {
+                    let name = a.trim_matches('`');
+                    let arity = b.replace('-', "\u{2013}");
+                    let looks_like_arity = !arity.is_empty()
+                        && arity.chars().next().is_some_and(|c| c.is_ascii_digit())
+                        || arity == "any";
+                    if looks_like_arity && !name.contains(' ') {
+                        out.push((name.to_string(), arity));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The doc's own claim is that this column is machine-enforced — it says so at the top
+    /// of the file. It was not: the *runtime* checks each `Arity`, but nothing compared the
+    /// table against it, and 14 rows had drifted (mostly documenting a range's max as if it
+    /// were exact, so `proc-spawn` read as "3" when 2 is legal). A reader trusts this table
+    /// precisely because it looks generated.
+    #[test]
+    fn documented_arities_match_the_registered_ones() {
+        let registered = registered_arities();
+        let mismatched: Vec<String> = documented_arities()
+            .into_iter()
+            .filter_map(|(name, doc_arity)| {
+                registered.get(&name).and_then(|real| {
+                    (*real != doc_arity)
+                        .then(|| format!("{name}: doc says {doc_arity}, registered {real}"))
+                })
+            })
+            .collect();
+        assert!(
+            mismatched.is_empty(),
+            "docs/primitives.md arity column has drifted from the registrations:\n  {}",
+            mismatched.join("\n  ")
+        );
+    }
+
     // Register every primitive into a fresh LOCAL env (not the global one, so
     // `env_chain_names` can enumerate it) and return the names bound to a native.
     fn registered_primitive_names() -> Vec<String> {
@@ -3394,6 +3476,21 @@ mod primitive_docs_tests {
             .filter(|n| !reg_names.contains(n))
             .collect();
         orphan.sort();
+
+        // A lean runtime registers no dev-tools primitives (ADR-038), while PRIMITIVE_DOCS
+        // is one list for every build — so their entries are EXPECTED orphans there. The
+        // check stays strict in the default build, which is where a rename or removal
+        // actually needs catching.
+        #[cfg(not(feature = "dev-tools"))]
+        let orphan: Vec<&str> = orphan
+            .into_iter()
+            .filter(|n| {
+                !matches!(
+                    *n,
+                    "gc-collect" | "gc-stats" | "gc-trace" | "runtime-collect" | "vm-stats"
+                )
+            })
+            .collect();
 
         assert!(
             undocumented.is_empty(),

@@ -400,5 +400,36 @@ not teardown; its layers simply stop being consulted."
 (defn close-context (ctx)
   "Tear a context down: fan `:on-close` across its active layers — the async-cleanup
 hook, where a layer kills a worker it `spawn`ed — then `deactivate-all` (firing each
-`:deactivate`). The full close path for a buffer or window going away."
+`:deactivate`). The full close path for a buffer or window going away.
+
+Read `close-requests` off the RESULT: a closing context may name companions that should
+go with it (see `request-close`)."
   (deactivate-all (run-event ctx :on-close)))
+
+;; ---- taking companions with you ---------------------------------------------
+;; A mode often owns more than its own context: the tutorial's *Workings* pane, a REPL's
+;; transcript, a debugger's queue — buffers it created and that mean nothing once it is
+;; gone. An `:on-close` hook cannot close them itself, and deliberately so: a hook is
+;; `(ctx) -> ctx`, and a "context" here is whatever the app threads through (a buffer, a
+;; window) — layers has no idea what container those live in, which is exactly why it
+;; composes with any app.
+;;
+;; So a hook doesn't reach; it NAMES. `request-close` records a companion on the closing
+;; context, `close-requests` reads the list back, and the app — which does know its own
+;; pool — decides what to do with it. The same shape as a render op: the layer says what
+;; it wants, the frontend performs it.
+
+(defn request-close (ctx name)
+  "From an `:on-close` hook: ask the app to close companion `name` as well. Names
+accumulate and de-duplicate, so two layers asking for the same companion is one request.
+Returns `ctx`, so a hook can thread it: `(fn (buf) (request-close buf \"*Workings*\"))`."
+  (let (seen (close-requests ctx))
+    (if (member? name seen)
+      ctx
+      (assoc ctx :close-requests (append seen (list name))))))
+
+(defn close-requests (ctx)
+  "The companions a closing context asked to take with it, in the order requested — `()`
+when none. The app reads this off `close-context`'s result; a name it does not recognise
+is simply ignored (a mode may have been unloaded, or its companion already closed)."
+  (or (get ctx :close-requests) (list)))

@@ -279,6 +279,32 @@ namespaced macros like `test/describe` emitting bare helper calls broke in consu
 namespaces (the β-interim wall). β (hand-qualify every cross-ns ref) was rejected:
 with packages shipping third-party macros, it makes every macro a latent capture bug.
 
+## 7b. Two modules, one short name (`:use` of both is an error)
+
+Namespacing means two modules may legitimately export the same *short* name — `sexp` and
+`editor/treesit` both offer `point-forward` (over a Brood form, and over a tree-sitter tree
+with a `lang`); `format` and `template` both `render`. Importing both bare is refused with
+**E0099**, naming the two providers, rather than letting one silently win:
+
+```
+(:use editor/treesit) refers `point-forward`, but it is already referred as
+`sexp/point-forward` from another module — resolve the clash with `:only [...]`
+or `:exclude [...]` on one of the uses
+```
+
+Three resolutions, in the order usually wanted:
+
+1. **`require` + qualified calls** — the module is loaded, nothing is imported, no name can
+   clash. Best when the call sites want to *say* which one they mean anyway (myedit's
+   structural commands call `sexp/…` for Brood source and `editor/treesit/…` for a foreign
+   language, one line apart).
+2. **`:only [...]`** on one use — import just the names wanted.
+3. **`:exclude [...]`** on one use — import everything except the clashing names.
+
+Reach for a rename only when the two names mean the *same* thing; the pairs in std do not.
+The full set of std overlaps is enumerated and pinned in `tests/namespace_test.blsp`, so a
+new one is a decision at review time rather than a consumer's editor failing to load.
+
 ## 8. OPEN — namespace-name collision moves up a level
 
 Namespacing solves *symbol* collision but creates a *new* one: two packages can
