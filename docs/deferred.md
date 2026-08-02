@@ -388,12 +388,13 @@ urgency.
 `eval::compile::run` when `vm_enabled()` (tree-walker under `BROOD_VM=0`), so a
 runtime-evaluated form's top-level call dispatches into the compiling VM instead of the
 ~14× tree-walker; `compile::run` falls back to the tree-walker per-form for anything
-outside the VM's vocabulary, so semantics are unchanged. `eval_builtin` keeps
-`macroexpand_all` (NOT the full `compile` pass): the speed comes from `compile::run`, not
-from `compile`'s `resolve` step — and `resolve` qualifies a bare name only when its target
-already exists, which broke an `eval`'d forward reference across independent `eval` calls
-(KI-24, briefly regressed then reverted). `eval_string_inner` keeps `compile` as it always
-had. So a runtime-evaluated form's top-level call now dispatches into the VM, where the
+outside the VM's vocabulary, so semantics are unchanged. Both keep the full `compile` pass, so an eval'd
+form still gets namespace resolution, imports, aliases, privacy and static-quasiquote
+lowering. `compile`'s `resolve` step qualifies a bare name only on positive evidence, which
+a file loader supplies by pre-scanning its def heads — lookahead a one-form-at-a-time `eval`
+lacks, so a forward reference across independent `eval` calls broke (KI-24); the two
+pre-scan-less call sites now set `ns_assume_own`, which supplies that conclusion instead of
+dropping the pass. So a runtime-evaluated form's top-level call now dispatches into the VM, where the
 callee's arm compiles and tail-recurses in O(1) stack — the cliff is gone (measured: `eval`
 of the million-iteration loop went from ~14× the compiled time to parity). Correctness
 pinned form-by-form in
