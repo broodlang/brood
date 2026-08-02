@@ -344,3 +344,40 @@ borrow flag, `Vec`/`Option` niche, `Cell`. So increment 1 must add an **IR-reada
 **Risk note:** this is dispatch-critical codegen (a desync or bad guard = silent wrong answer). It is
 the single riskiest change in the runtime and must be implemented incrementally with the full gate
 run per step — a focused effort, not a tail-of-session burst.
+
+## Leaf inlining is all-or-nothing per arm — measured 2026-08-02
+
+The leaf inliner (Phase 2, default ON) derives an inlined native only if **every** non-tail
+call in the arm is spliced away. `leaf_inline_derive` bails when the spliced chunk still
+contains an `Inst::Call { tail: false }`:
+
+```rust
+if chunk.code.iter().any(|i| matches!(i, Inst::Call { tail: false, .. })) {
+    return None;
+}
+```
+
+The reason is sound and is documented at the site: an inlined native carries no deopt
+checkpoint, so a deopt re-runs the arm from ip 0, which is only effect-free if nothing before
+the deopt point completed a call.
+
+**The consequence is worth knowing before reaching for a small helper in a hot arm: one
+un-spliceable callee blocks inlining of every small callee beside it.** Demonstrated with
+`BROOD_INLINE_DBG=1` — an arm whose only non-tail call is a three-instruction leaf gets its
+probe (`leaf probe conv-only2 sites=1 m=2 leaf_nslots=3`); add a *recursive* callee next to it
+and the probe disappears entirely, the tiny leaf included:
+
+| arm | non-tail callees | probe? | 1M iterations |
+|---|---|---|---|
+| `conv-only2` | `->float` | yes | 196 ms |
+| `conv-plus-rec` | `->float` **+ a recursive fn** | **no** | 588 ms |
+
+This is where `mandelbrot`'s `->float` cost comes from. `row-sum` calls `->float` (a
+three-instruction arm: `Const Local Prim2`) and `esc`, which is recursive and cannot be
+spliced — so the conversion stays a real call, at ~85 ns each. Every other language in the
+benchmark suite spells that conversion as a machine cast.
+
+**The lever, if it is ever worth taking:** allow *partial* splicing — inline what can be
+inlined and keep the arm's deopt checkpoint so the residual call remains safe. That trades the
+inlined native's checkpoint-free fast path for coverage, so it wants measuring on a row where a
+small helper sits beside a large callee (this one) rather than assumed. Not attempted.
