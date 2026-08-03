@@ -15000,3 +15000,30 @@ is a mechanism with an off-switch, run it with the switch off before believing i
 
 Validation: suite **941/941**, `nest check` clean, and a paired soak (armed vs
 `BROOD_NO_SHARE_FN_MSG=1`) clean past 500k iterations each and still running at commit time.
+
+## 2026-08-03 — thread 6 validated, and where its win does *not* show
+
+**Soak clean: 890,415 + 890,044 = 1.78 M iterations across armed and control, zero invariant
+violations in either.** Armed finished holding 68 RUNTIME closures against the control's 196 —
+the right direction even on this workload, which churns differently from the harness that found
+the bug. (The `gc-stats` guard added this morning also earned itself: both runs printed their
+summary instead of dying on the last line.)
+
+**The published `supervisor` row does not move, and that is expected rather than
+disappointing.** Pinned, best of 7 on a quiet machine: **820 ms shared vs 831 ms copied,
+1.013×** — neutral. The fix removes an *unbounded* cost, and this benchmark is too short to
+accumulate it: it does ~25,000 operations, where the decay harness needs 175,000 before the
+curve is obvious. So the win is real and it is a **sustained-load** win; a burst benchmark
+cannot see it. Worth stating plainly so nobody goes looking for it in the published table.
+
+**An 8% "regression" on that row was load noise, and I nearly acted on it.** The first
+measurement read 0.92× — taken while two soaks were running. It sent me looking for a cause,
+which did turn up one real redundancy (below), but the number itself evaporated on a quiet
+machine. Third time this session that a few-percent delta measured under load was worthless.
+
+**One real thing that search found.** `send` was consulting the process registry **twice** on
+the serialised path: once inside `try_deliver_local`, and again for the destination runtime tag
+that ADR-208 needs — a duplicated hash lookup on exactly the path ADR-208 made hot. The L1
+attempt now returns `LocalDelivery::Declined { runtime_tag }`, so one lookup serves both. That
+is cleanup justified by redundancy, not by the phantom 8%: it measures within noise, and is
+committed as a simplification rather than a speedup.

@@ -565,16 +565,30 @@ pub mod l1_stats {
     }
 }
 
-fn try_deliver_local(src: &Heap, pid: u64, v: Value) -> bool {
+/// Outcome of the L1 attempt. When it declines, it hands back the target's runtime tag so the
+/// caller does not have to look the registry up a *second* time to decide whether a shared
+/// closure handle may cross (ADR-208). That duplicate lookup sat on the serialised send path —
+/// precisely the path a busy receiver takes, and the one ADR-208 made hot.
+enum LocalDelivery {
+    /// Delivered into the parked receiver's heap; nothing further to do.
+    Delivered,
+    /// Not delivered. `runtime_tag` is the target's, or `None` if there is no such process.
+    Declined { runtime_tag: Option<u64> },
+}
+
+fn try_deliver_local(src: &Heap, pid: u64, v: Value) -> LocalDelivery {
     let Some(mb) = REGISTRY.get(pid) else {
         l1_stats::bump(&l1_stats::NO_PROC);
-        return false;
+        return LocalDelivery::Declined { runtime_tag: None };
     };
+    let tag = mb.runtime_tag();
     let mut st = crate::core::sync::lock(&mb.state);
     // Not parked → we have no safe access to its heap.
     let Some(mut proc) = st.waiter.take() else {
         l1_stats::bump(&l1_stats::NO_WAITER);
-        return false;
+        return LocalDelivery::Declined {
+            runtime_tag: Some(tag),
+        };
     };
     let copied = crate::process::message::copy_cross_heap(src, proc.heap_mut(), v);
     let Some(copied) = copied else {
@@ -582,7 +596,9 @@ fn try_deliver_local(src: &Heap, pid: u64, v: Value) -> bool {
         // deliver through `Message`. Nothing observable happened.
         st.waiter = Some(proc);
         l1_stats::bump(&l1_stats::DECLINED);
-        return false;
+        return LocalDelivery::Declined {
+            runtime_tag: Some(tag),
+        };
     };
     let tag = if no_msg_tag() {
         None
@@ -599,7 +615,7 @@ fn try_deliver_local(src: &Heap, pid: u64, v: Value) -> bool {
     drop(st);
     wake_enqueue(proc);
     l1_stats::bump(&l1_stats::HIT);
-    true
+    LocalDelivery::Delivered
 }
 
 fn deliver_envelope(pid: u64, env: Envelope) {
@@ -640,24 +656,22 @@ pub fn send(heap: &Heap, target_val: Value, msg_val: Value) -> Result<(), LispEr
     let has_trace = heap.trace_context().is_some();
     #[cfg(not(feature = "dev-tools"))]
     let has_trace = false;
+    // Reused below as the shared-handle destination (ADR-208) when L1 declines, so the
+    // registry is consulted once for both purposes.
+    let mut dest_runtime: Option<u64> = None;
     if !has_trace {
         if let Value::Pid { node, id } = target_val {
-            if crate::dist::is_local(node) && try_deliver_local(heap, id, msg_val) {
-                return Ok(());
+            if crate::dist::is_local(node) {
+                match try_deliver_local(heap, id, msg_val) {
+                    LocalDelivery::Delivered => return Ok(()),
+                    LocalDelivery::Declined { runtime_tag } => dest_runtime = runtime_tag,
+                }
             }
         }
     }
-    // Tell the serialiser where this is going. For a LOCAL pid on this runtime, an
-    // already-shared closure crosses as a handle instead of being deep-copied into the
-    // receiver's LOCAL heap — which is what left the receiver tree-walking it and
-    // re-promoting a copy per call (handoff thread 6). Every other destination (a remote
-    // node, a name address, an unknown pid) passes `None` and serialises exactly as before.
-    let dest_runtime = match target_val {
-        Value::Pid { node, id } if crate::dist::is_local(node) => {
-            REGISTRY.get(id).map(|mb| mb.runtime_tag())
-        }
-        _ => None,
-    };
+    // `dest_runtime` was filled in by the declining L1 attempt above (one registry lookup for
+    // both jobs). It stays `None` for every other destination — a remote node, a name address,
+    // an unknown pid, or a traced send — which serialises exactly as it did before ADR-208.
     let msg = to_message_to_runtime(heap, msg_val, dest_runtime)?;
     // (dev-tools) Send-level causality (ADR-174): if the sender carries a debugger
     // trace context and the target is a LOCAL pid, ship the context alongside so the
