@@ -780,17 +780,22 @@ fn jit_i64_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("BROOD_NO_I64").is_none())
 }
 
-/// Keeps the **inlined** body's `Node` + `Chunk` alive for the process lifetime. The
+/// Keeps the **self-inlined** body's `Node` + `Chunk` alive for the process lifetime. The
 /// inlined native code bakes the raw addresses of the spliced chunk's `ConstVal`s into
 /// itself (`brood_rt_const_load(cv_ptr, …)`, see `jit_lower_arm_inner`), exactly as the
-/// small-native path does for `arm.chunk` — but the inlined body lives in an *ephemeral*
-/// chunk re-derived here, NOT in `arm.chunk`. The arm-level `JIT_ARM_KEEPALIVE` retains
-/// `arm` (hence `arm.chunk`, the small body), so it does NOT cover this spliced chunk.
-/// Without retaining it, the chunk drops the instant `jit_lower_inlined_arm` returns, and
-/// every baked `cv` pointer dangles → `const_load` reads freed memory → garbage constants
-/// fed into still-installed native code (the JIT-inlined-throw corruption: `(error
-/// "bottom")` whose "bottom" const came out as a raw stack pointer). Process-lifetime, like
-/// the native code in `GLOBAL_JIT`; appended only on a successful inlined lowering.
+/// small-native path does for `arm.chunk` — but the self-inlined body lives in an
+/// *ephemeral* chunk re-derived here, NOT in `arm.chunk`. The arm-level
+/// `JIT_ARM_KEEPALIVE` retains `arm` (hence `arm.chunk`, the small body), so it does NOT
+/// cover this spliced chunk. Without retaining it, the chunk drops the instant
+/// `jit_lower_inlined_arm` returns, and every baked `cv` pointer dangles → `const_load`
+/// reads freed memory → garbage constants fed into still-installed native code (the
+/// JIT-inlined-throw corruption: `(error "bottom")` whose "bottom" const came out as a raw
+/// stack pointer). Process-lifetime, like the native code in `GLOBAL_JIT`.
+///
+/// The **leaf** path needs no entry here (ADR-210): its spliced chunk lives on the
+/// derivation's resume arm, which `arm` owns, and `JIT_ARM_KEEPALIVE` already retains `arm`
+/// on every successful lowering — so the same guarantee falls out of the existing contract,
+/// and the chunk is compiled once instead of at every lowering.
 #[cfg(feature = "jit")]
 static JIT_INLINE_CHUNK_KEEPALIVE: std::sync::Mutex<Vec<(Box<Node>, Box<Chunk>)>> =
     std::sync::Mutex::new(Vec::new());
@@ -809,10 +814,7 @@ pub(crate) fn jit_lower_inlined_arm(
     arm: &CompiledArm,
     slot_tags: &[u8],
 ) -> Option<*const u8> {
-    // Box the spliced body + chunk so their heap addresses (and the `ConstVal`s inside the
-    // chunk) are stable once stored in the keepalive below — `jit_lower_arm_inner` bakes
-    // those addresses into the native code, so they must not move after lowering.
-    let spliced: Box<Node> = if let Some(leaf) = &arm.leaf {
+    if let Some(leaf) = &arm.leaf {
         // Leaf-callee upgrade: the stored derivation is valid ONLY at the epoch it was
         // derived at — a `def`/compaction since then may have rebound a spliced callee
         // (or a prim its body uses), and the derivation can't be re-checked here (no
@@ -821,22 +823,47 @@ pub(crate) fn jit_lower_inlined_arm(
         if arm.compile_epoch.load(std::sync::atomic::Ordering::Acquire) != leaf.epoch {
             return None;
         }
-        Box::new(super::shift_slots(&leaf.body, 0))
-    } else {
-        let name = arm.inline_name?;
-        Box::new(rederive_inlined_body(
-            &arm.body,
-            name,
-            arm.nrequired,
-            arm.inline_stride,
-        )?)
-    };
+        // The spliced body + chunk live on the resume arm, which `arm` owns and
+        // `JIT_ARM_KEEPALIVE` retains for the process lifetime — so the `ConstVal`
+        // addresses baked in below can never dangle, and this path needs no
+        // `JIT_INLINE_CHUNK_KEEPALIVE` entry of its own. Lowering journals against the
+        // resume arm's `ckpt_slot` (the spliced layout's own), which is what lets the
+        // derivation keep a residual non-tail call.
+        let r = &leaf.resume;
+        // The lowering's frame size MUST be the size the frame is actually built to
+        // (`active_nslots()` → `inline_nslots`): the native stages a tail call above its
+        // own frame top and the dispatcher reads it at `base + active_nslots()`, so a
+        // disagreement writes and reads different offsets. `compile_arm` floors both to
+        // the same value.
+        debug_assert_eq!(
+            r.nslots, arm.inline_nslots,
+            "leaf resume arm frame size must equal the arm's inline_nslots"
+        );
+        return jit_lower_arm_inner(
+            jit,
+            arm,
+            slot_tags,
+            Some((&r.body, r.chunk.as_ref()?, arm.inline_nslots, r.ckpt_slot)),
+        );
+    }
+    // Self-inlining: the body is re-derived fresh here, so box it — its heap address
+    // (and the `ConstVal`s inside the chunk) must stay stable once baked into the native
+    // code, which the keepalive below guarantees. This layout never journals: its ips
+    // don't match any chunk the VM holds, so a deopt re-runs the small body from ip 0
+    // (effect-free — the self-inline gate admits only pure-arith bodies).
+    let name = arm.inline_name?;
+    let spliced: Box<Node> = Box::new(rederive_inlined_body(
+        &arm.body,
+        name,
+        arm.nrequired,
+        arm.inline_stride,
+    )?);
     let chunk: Box<Chunk> = Box::new(compile_chunk(&spliced)?);
     let ptr = jit_lower_arm_inner(
         jit,
         arm,
         slot_tags,
-        Some((&spliced, &chunk, arm.inline_nslots)),
+        Some((&spliced, &chunk, arm.inline_nslots, u32::MAX)),
     )?;
     // Lowering succeeded and baked raw `cv` pointers into the chunk — retain it forever.
     JIT_INLINE_CHUNK_KEEPALIVE
@@ -846,14 +873,19 @@ pub(crate) fn jit_lower_inlined_arm(
     Some(ptr)
 }
 
-/// Shared lowering core. `inline` overrides the body/chunk/nslots when lowering the
-/// re-derived inlined body; `None` lowers the arm's own (original) body — the small native.
+/// Shared lowering core. `inline` overrides the body/chunk/nslots **and the checkpoint
+/// slot** when lowering an inlined body; `None` lowers the arm's own (original) body — the
+/// small native, which journals against `arm.ckpt_slot`.
+///
+/// The checkpoint override is what separates the two inlined engines: the leaf splice
+/// passes its own slot (above the spliced blocks) and so journals, while the self-splice
+/// passes `u32::MAX` and so does not — see [`jit_lower_inlined_arm`].
 #[cfg(feature = "jit")]
 fn jit_lower_arm_inner(
     jit: &mut crate::jit::Jit,
     arm: &CompiledArm,
     slot_tags: &[u8],
-    inline: Option<(&Node, &Chunk, usize)>,
+    inline: Option<(&Node, &Chunk, usize, u32)>,
 ) -> Option<*const u8> {
     use crate::core::value::jit_layout::{PAYLOAD_OFFSET, TAG_FLOAT, TAG_INT};
     use cranelift_codegen::ir::{
@@ -867,9 +899,9 @@ fn jit_lower_arm_inner(
     // The body/chunk/frame-size this lowering runs against: either the arm's own
     // (original, small — the small native) or a re-derived inlined body (deferred upgrade).
     // `nrequired` is identical for both (inlining doesn't change the param count).
-    let (lower_body, chunk, nslots): (&Node, &Chunk, usize) = match inline {
-        Some((b, c, ns)) => (b, c, ns),
-        None => (&arm.body, arm.chunk.as_ref()?, arm.nslots),
+    let (lower_body, chunk, nslots, ckpt_slot): (&Node, &Chunk, usize, u32) = match inline {
+        Some((b, c, ns, cs)) => (b, c, ns, cs),
+        None => (&arm.body, arm.chunk.as_ref()?, arm.nslots, arm.ckpt_slot),
     };
     let nrequired = arm.nrequired;
     let code = &chunk.code;
@@ -1008,12 +1040,12 @@ fn jit_lower_arm_inner(
     // Frame layout: [locals | spill slots | ckpt slot + journal]. The checkpoint
     // area (deopt-resume, `CompiledArm::ckpt_slot`) sits ABOVE the spills, so the
     // spill base is measured from the checkpoint start when one is reserved.
-    let frame_top_for_spills = if inline.is_none() && arm.ckpt_slot != u32::MAX {
-        arm.ckpt_slot as usize
+    // Measured from THIS lowering's checkpoint start (`ckpt_slot`), not the arm's: a
+    // leaf-spliced layout has its own checkpoint area at its own frame top, while a
+    // self-spliced one has none (`u32::MAX`) and so measures from the full frame top.
+    let frame_top_for_spills = if ckpt_slot != u32::MAX {
+        ckpt_slot as usize
     } else {
-        // Inlined upgrade: its own (larger) layout has no checkpoint area — the
-        // small layout's `ckpt_slot` points into its locals, so spills measure
-        // from the full frame top exactly as before.
         nslots
     };
     let spill_base = frame_top_for_spills - reserve;
@@ -1861,21 +1893,26 @@ fn jit_lower_arm_inner(
         let init = b.ins().iconst(types::I64, emit::TICK_BATCH);
         b.def_var(tick_budget, init);
     }
-    // Deopt-resume checkpointing (see `CompiledArm::ckpt_slot`) is active for the
-    // ORIGINAL body only: an inlined upgrade's chunk ips don't match the
-    // interpreter's chunk, so its journal would mislead a resume — it keeps the
-    // legacy from-ip-0 re-run (its inline gate excludes self-tail loops, the shape
-    // the duplication bug needs in practice).
-    let ckpt_active = inline.is_none() && arm.ckpt_slot != u32::MAX;
-    // The entry RESET must also run for an inlined upgrade (whose ips don't match
-    // the interpreter chunk, so it never journals): a stale journal left by an
-    // earlier small-body native run would otherwise mislead a later resume.
-    if arm.ckpt_slot != u32::MAX {
-        // Entry reset: clear any stale journal from a previous native run of this
-        // frame (an interpreted stretch between native runs never maintains it).
-        // Packed 0 = "resume at ip 0 with an empty operand stack" — the legacy
-        // (and here effect-free) re-run.
-        let idx = b.ins().iadd_imm(base, arm.ckpt_slot as i64);
+    // Deopt-resume checkpointing (see `CompiledArm::ckpt_slot`) is active whenever THIS
+    // lowering has a journal slot: the small native (`arm.ckpt_slot`) and the
+    // leaf-spliced native (its own slot, above the spliced blocks — a deopt out of it
+    // resumes in the spliced chunk via `ir::LeafInline::resume`, so its ips are
+    // meaningful). The self-spliced native passes `u32::MAX` and keeps the legacy
+    // from-ip-0 re-run: its ips match no chunk the VM holds, and its gate admits only
+    // pure-arith bodies, so re-running is effect-free.
+    let ckpt_active = ckpt_slot != u32::MAX;
+    // Entry reset. BOTH journals in this frame are cleared, not just this lowering's:
+    // the small and the leaf-spliced layouts occupy disjoint slots and take turns
+    // running the same frame, so a journal left by the *other* engine's earlier run
+    // would otherwise be read as live by a later resume. Packed 0 = "resume at ip 0
+    // with an empty operand stack" — i.e. no journal.
+    let mut reset: Option<u32> = None;
+    for slot in [ckpt_slot, arm.ckpt_slot] {
+        if slot == u32::MAX || reset == Some(slot) {
+            continue; // absent, or already reset (the small native, where the two agree)
+        }
+        reset = Some(slot);
+        let idx = b.ins().iadd_imm(base, slot as i64);
         let off = b.ins().imul_imm(idx, STRIDE);
         let rb = b.use_var(rb_var);
         let addr = b.ins().iadd(rb, off);
@@ -2288,7 +2325,7 @@ fn jit_lower_arm_inner(
                         epoch_ptr,
                         has_cons,
                         ckpt_active,
-                        arm.ckpt_slot,
+                        ckpt_slot,
                         frame,
                         funcs,
                     )?;
@@ -2324,13 +2361,13 @@ fn jit_lower_arm_inner(
                         }
                 )
             {
-                let ckpt_base = arm.ckpt_slot as i64 + 1;
+                let ckpt_base = ckpt_slot as i64 + 1;
                 for (k, &op) in stack.iter().enumerate() {
                     store_op(&mut b, ckpt_base + k as i64, op);
                 }
                 let packed = (((j as i64) + 1) << 16) | stack.len() as i64;
                 let pv = b.ins().iconst(types::I64, packed);
-                store_int(&mut b, arm.ckpt_slot as i64, pv, frame);
+                store_int(&mut b, ckpt_slot as i64, pv, frame);
             }
             j += 1;
             if j == len {
@@ -2407,7 +2444,7 @@ fn jit_lower_arm_inner(
                 arm.dbg_name
                     .map(crate::core::value::symbol_name_ref)
                     .unwrap_or("<closure>"),
-                arm.ckpt_slot,
+                ckpt_slot,
                 ops.join(" ")
             );
             // Per-Call (site, head) so the CLIF can be correlated to a source arm.

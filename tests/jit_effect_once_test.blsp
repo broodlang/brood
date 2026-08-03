@@ -70,6 +70,40 @@
 (defn eo-drive4 (i v)
   (if (= i 0) nil (do (eo-multi v) (eo-drive4 (- i 1) v))))
 
+;; --- 5. PARTIAL leaf splicing: a spliceable leaf BESIDE a residual non-tail call that
+;; carries the effect. Splicing used to be all-or-nothing precisely because the inlined
+;; engine could not journal, so a deopt after the residual call re-ran it. Now the
+;; leaf-spliced layout carries its own checkpoint and a deopt resumes in the spliced chunk
+;; (`ir::LeafInline::resume`), which is what makes keeping that call sound.
+;;
+;; `eo-leaf5` splices (small, calls-free); `eo-eff5` cannot (a `table-put` is excluded, and
+;; it is a call besides), so it survives as the residual call. The overflow after it deopts
+;; every activation, AFTER the effect has happened exactly once.
+(def eo-t5 (table))
+(defn eo-leaf5 (x) (+ x 1))
+(defn eo-eff5 (t) (do (table-put t 0 (+ 1 (table-get t 0))) 1))
+(defn eo-caller5 (t big)
+  (+ (+ (eo-leaf5 1) (eo-eff5 t)) (* big big)))
+(defn eo-drive5 (t i big last)
+  (if (= i 0) last (eo-drive5 t (- i 1) big (eo-caller5 t big))))
+
+;; --- 6. the same, inside a self-tail LOOP — mandelbrot's shape, and the one where the
+;; journal is reset on every back-edge. The effect sits in a residual call and the deopt
+;; fires after it, so a from-ip-0 resume would re-put once per iteration. `acc` is kept an
+;; int (the overflow's value is discarded) so the loop stays in the JIT's subset.
+(def eo-t6 (table))
+(defn eo-leaf6 (x) (* x 2))
+(defn eo-eff6 (t) (do (table-put t 0 (+ 1 (table-get t 0))) 1))
+;; check-allow: deliberately non-tail — the discarded overflow is the deopt trigger.
+(check-allow :non-tail-recursion
+  (defn eo-loop6 (t i acc big)
+    (if (= i 0)
+      acc
+      (do
+        (eo-eff6 t)
+        (* big big)
+        (eo-loop6 t (- i 1) (+ acc (eo-leaf6 i)) big)))))
+
 (describe "a JIT deopt never re-runs a table-put"
   (test "effectful arm with no non-tail call"
     (table-put eo-t1 0 0)
@@ -93,4 +127,21 @@
     ;; BOTH arms must be entered exactly once per iteration: the caller's re-run
     ;; duplicated the sibling call, so each over-counted by the same 16.
     (assert= eo-n (table-get eo-u4 0))
-    (assert= eo-n (table-get eo-t4 0))))
+    (assert= eo-n (table-get eo-t4 0)))
+
+  (test "effect in a residual call beside a spliced leaf (partial splicing)"
+    (table-put eo-t5 0 0)
+    (let (big 4000000000
+          got (eo-drive5 eo-t5 eo-n big nil))
+      (assert= eo-n (table-get eo-t5 0))
+      ;; The resumed operand stack must still hold the spliced leaf's value and the
+      ;; residual call's result: (+ (+ 2 1) big*big). A wrong journal depth or a wrong
+      ;; resume ip shows up here as a wrong number rather than a wrong count.
+      (assert= (+ 3 (* big big)) got)))
+
+  (test "effect in a residual call inside a self-tail loop (partial splicing)"
+    (table-put eo-t6 0 0)
+    (let (got (eo-loop6 eo-t6 eo-n 0 4000000000))
+      (assert= eo-n (table-get eo-t6 0))
+      ;; sum of 2*i for i in 1..eo-n
+      (assert= (* eo-n (+ eo-n 1)) got))))

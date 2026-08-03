@@ -4,13 +4,18 @@
 measurements live in [`devlog.md`](devlog.md); the option book lives in
 [`runtime-frontier.md`](runtime-frontier.md). Read this to pick the work back up cold.
 
-**As of 2026-08-03**, brood `9e0d1f4b`, brood-benchmarks `71c21a9`. Nothing half-finished.
-Suite **942/942**, `nest check` clean, `nest format --check` clean, rustfmt clean.
+**As of 2026-08-03**, brood at ADR-210, brood-benchmarks `71c21a9`. Nothing half-finished.
+Rust suite **943/943**, in-language suite **4350/4350** (with the new mechanism on *and* off),
+`nest check` clean, rustfmt clean. `nest format --check` reports **8 pre-existing `.blsp` files**
+needing formatting (`std/prelude`, `std/resolver`, `std/version`, `std/tool/{package,project}`,
+`tests/{package,resolver,shared_closure_msg}_test`) — drift from the ADR-209 resolver work, not
+from ADR-210; a `nest format` run clears them.
 
 **There are no open correctness bugs.** KI-22, KI-23 and KI-24 all closed. Every `std/` scale
-sweep row is linear. The four perf threads this document used to carry are resolved: two were
-fixed, one dissolved when another was fixed, and one turned out to be measuring the wrong
-thing. **One item is genuinely open** (§3), and it is deliberately gated rather than started.
+sweep row is linear. **The item §3 used to carry as the one genuinely open thread — partial leaf
+splicing — shipped as ADR-210**; §3 item 1 now records what it actually took, including two
+rules that are easy to re-break. The remaining §3 entries are the memory floor, the unfinished
+`std/` sweep, `spawn-live`, and one easy test-hygiene fix.
 
 ---
 
@@ -61,24 +66,33 @@ From the published run (`brood-benchmarks/results/`, 2026-08-02):
 
 ## 3. Open threads, in the order I'd take them
 
-**1. Partial leaf splicing in the JIT — the only genuinely open perf item, and deliberately
-not started.** `leaf_inline_derive` bails if *any* non-tail `Call` survives splicing, so **one
-un-spliceable callee blocks inlining of every small callee beside it**. Measured with
-`BROOD_INLINE_DBG=1`: an arm whose only non-tail call is a three-instruction leaf inlines and
-runs 196 ms/1M; add a recursive callee and the probe vanishes entirely, at 588 ms. That is where
-`mandelbrot`'s `->float` cost lives (~85 ns a conversion, where every other language in the
-suite emits a machine cast).
+**1. ~~Partial leaf splicing~~ — DONE 2026-08-03 (ADR-210), default ON,
+`BROOD_NO_PARTIAL_LEAF=1` off-switch.** A derivation may now keep a residual non-tail call, so
+one un-spliceable callee no longer blocks inlining of every small callee beside it. **Measured
+2.4×** on the shape it targets (a lowering self-tail caller, one spliceable leaf beside one
+residual call: 562 → 237 ms / 2M), **every published benchmark row flat**. The documented blocker
+(checkpoint-area layout) was the easy half — the real one was the inlined body's own **bytecode ip
+space**, fixed with a resume arm (`ir::LeafInline::resume`).
 
-Why it is gated rather than queued: the bail is *sound*. `jit_ckpt_read` documents that the
-inlined layout's `ckpt_slot` **points into the spliced slot range**, where a spliced callee's
-Int param would fake a journal and produce a garbage resume ip — so an inlined native must
-resume from ip 0, which is only effect-free when no call completed. Allowing partial splicing
-means re-laying-out the checkpoint area and enabling journaling in the inlined lowering, i.e.
-changing **deopt-resume correctness**. That is the one place in this tree where the failure mode
-is a *silent miscompile* rather than a crash or a leak (bug #2, KI-11, KI-18, KI-20), and the
-validation story is weaker than elsewhere — no self-checking soak, only the four-config
-differential fuzzer. **Make that fuzzer the explicit gate before starting.** Write-up in
-[`jit-optimizing-tier.md`](jit-optimizing-tier.md).
+**`mandelbrot` was the wrong motivating example and the correction is worth more than the row:
+`row-sum` never lowers to native at all**, with the flag on or off, so no splice can help it —
+leaf inlining is JIT-only and the VM always runs the small body. A derivation firing in
+`BROOD_INLINE_DBG` proves only that it was derived; a bailed arm never reaches `[jit-ir]`.
+**Check `BROOD_JIT_DUMP_IR=1 … | grep '^\[jit-ir\] ====='` for the arm's name before assuming any
+inlining change can move it.** Getting `row-sum` onto the native path is a separate, unstarted
+question — and the honest next step if `mandelbrot` is the goal.
+
+Three more things a later reader should know, because two of them cost real time:
+
+- **A probe used to poison the callee's cache.** Resolving a callee during a leaf probe
+  compiles it under the reentrancy guard that suppresses the nested probe, and that arm was
+  then *cached and published* — permanently denying the callee its own derivation. The
+  feature did nothing for mid-level functions until `probe_arm_for` (caches nothing) fixed it.
+  Any future probe that resolves through the heap has this hazard.
+- **`jit_tier` itself flips `inline_installed`**, so nothing after it may re-derive "which
+  engine ran this frame" from that flag. Decide from the size the frame was *built* to.
+- **Read the deopt journal once.** Reading it to size the frame and again to resume gave an
+  out-of-bounds `root_at` (the second read came from an already-truncated frame).
 
 **2. Per-process memory floor — measured, two experiments named.** The idle floor is
 **4.19 KB** (slope of RSS against process count: 4389 / 4186 / 4195 at N = 10k/40k/80k). It is
@@ -102,6 +116,15 @@ convert only when a workload shows the cost, since it bites only on large string
 
 **4. `spawn-live`** — the worst published row, untouched. Its own noise floor is **20.6%**, so
 nothing smaller is resolvable there; it has produced phantom results repeatedly.
+
+**5. `live_migration`'s deep-receive liveness flake — pre-existing, small, and worth an easy
+fix.** `deep_receive_continuations_resume_correctly_across_workers` fails its *liveness* assert
+("no live migration observed across 40 bursts") in **3/12** full-suite runs at HEAD, and it is
+**not** in `.config/nextest.toml`'s retry list even though it is the same "blown deadline under a
+loaded runner" class as `distribution` / `serve_attach` / `observe_attach` / `suite`. Either add
+it to that list or make the assertion bounded-but-patient. Left alone in the ADR-210 change to
+keep that change about the JIT — but it will keep costing whoever next reads a red suite, and it
+already cost one session's attribution work (see §5).
 
 **Explicitly NOT open:** a memory leak (chased, does not exist), endurance (16/16 soak,
 12.7 M iterations), thread 6's throughput decay (fixed, ADR-208), the RUNTIME reclamation
@@ -154,12 +177,48 @@ All in `scripts/fuzz/stress/`, each with a usage header:
   *falling* ratio (warm-up) clears a row. Check the trend across triples, not one triple.
 - **Never difference time-boxed runs** — RSS tracks iterations, so the comparison measures the
   iteration count. This produced two wrong versions of frontier A8.
-- **Establish the noise floor before believing a delta.** Base-vs-base first.
+- **Establish the noise floor before believing a delta.** Base-vs-base first — but note the
+  floor you measure *inside* one invocation does not bound the drift *across* invocations.
+  `nqueens` read −5.0% against a 0.2% base-vs-base floor while the same new binary measured
+  104.6 and 107.6 ms in two best-of-15 runs (~3% apart).
+- **For a mechanism with an off-switch, the switch IS the attribution — a two-binary delta is
+  only a hint.** One binary, one invocation, `MECHANISM=off` vs on: that disposed of the
+  `nqueens` −5% in seconds (the switch is worth 0.3% there, so the mechanism cannot be worth 5%).
+  Reach for this *before* building a fixed-baseline harness; it is cheaper and it answers the
+  question the harness only approximates.
+- **Hand-measuring against a `make ab` baseline requires `target/release-fast/brood`, not
+  `target/release/brood`.** `make ab` builds both sides with `make release-brood` (profile
+  `release-fast`); comparing its baseline against a `cargo build --release` binary compares two
+  profiles and produces confident nonsense (it gave me `nqueens` −4.3% and `startup` −5.6%, both
+  fictional). This is footgun #1 in `ab-bench.sh`'s own header — read it before hand-rolling.
+- **A short row needs a mean, not a best-of.** `startup` is ~17 ms and `make ab` reports whole
+  milliseconds, so it reads ±6% from quantisation alone; a 40-run mean gives +0.4% against a
+  0.4% floor.
 - **`RSS is not a proxy for live bytes`** here — but check before blaming the allocator: for the
   per-process floor, `MIMALLOC_PURGE_DELAY=0` moved the slope by 2%.
 
 **Testing**
 
+- **Build the concurrent reproducer before arguing about a flake rate — and compare failure
+  *modes*, not counts.** `live_migration deep_receive_continuations_resume_correctly_across_workers`
+  failed inside a full `cargo nextest` run and never in isolation (0/65), which reads exactly
+  like a flake. Two different failures were being conflated: HEAD fails it **3/12** full runs
+  on its *liveness* assert ("no live migration observed"), while the change under test failed it
+  with an **out-of-bounds `root_at`** — a real GC bug. Running 16 copies of that one test
+  concurrently separated them in seconds: **8/16 against 0/16 at HEAD**, where the full suite
+  gave a 1-in-8 murmur that six baseline runs had failed to contradict. A liveness assert and a
+  corrupted read are not the same bug wearing different hats.
+- **`live_migration` is not in `.config/nextest.toml`'s retry list** (unlike `distribution` /
+  `serve_attach` / `observe_attach` / `suite`), though its liveness assertion is the same
+  "blown deadline under a loaded runner" class those retries exist for. It flakes ~25% under
+  full-suite load **at HEAD**. Don't attribute it to your change without a baseline run.
+- **A derivation firing is not an optimisation landing.** `BROOD_INLINE_DBG` said `row-sum` got a
+  partially-spliced derivation; `BROOD_JIT_DUMP_IR` said it never lowered, in either
+  configuration — so the splice could not possibly have helped, because leaf inlining is JIT-only
+  and the VM always runs the small body. A bailed arm never reaches the `[jit-ir]` dump, so
+  *absence* there is the signal. Confirm the arm is in the dump before attributing anything to an
+  inlining change; the 2026-08-02 write-up named `mandelbrot` as the payoff row on exactly this
+  mistake.
 - **A green test proves nothing until you run it with the mechanism off.** Twice in one session.
   The shared-closure test passed *identically* with `BROOD_NO_SHARE_FN_MSG=1`, because the
   closure it sent merely computed — growth requires the sent closure to itself `spawn`. An

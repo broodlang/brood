@@ -1033,7 +1033,7 @@ pub(crate) fn leaf_resolve_callee(
         _ => return None,
     };
     LEAF_RESOLVING.with(|g| g.set(true));
-    let arm = compiled_arm_for(heap, id, argc);
+    let arm = probe_arm_for(heap, id, argc);
     LEAF_RESOLVING.with(|g| g.set(false));
     let arm = arm?;
     if arm.nrequired != argc
@@ -1165,19 +1165,63 @@ pub(crate) fn leaf_inline_splice(
     count
 }
 
-/// Probe + derive leaf-callee inlining for a caller arm: returns the spliced body and
-/// its frame size (`inline_nslots`), or `None` if nothing qualifies. The spliced
-/// chunk's ops are validated against the CURRENT globals here (`chunk_ops_native`) —
-/// equivalent to the tier-time validation the small chunk gets, because lowering is
-/// gated to this exact epoch (any intervening `def` bumps it and the derivation is
-/// refused).
+/// Is **partial** leaf splicing enabled — i.e. may a derivation keep a residual
+/// non-tail call (an unresolvable or oversized callee) beside the spliced ones?
+/// **Default ON**; `BROOD_NO_PARTIAL_LEAF=1` reverts to all-or-nothing splicing, where
+/// one un-spliceable callee blocks inlining of every small callee beside it.
+///
+/// The switch exists because partial splicing is what makes the inlined engine journal
+/// for deopt-resume (see [`leaf_inline_probe`]) — the one mechanism here whose failure
+/// mode is a silently *repeated effect* rather than a crash. Set it to A/B, to bisect,
+/// or as the stopgap if a duplicated effect is ever suspected.
+#[cfg(feature = "jit")]
+pub(crate) fn partial_leaf_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BROOD_NO_PARTIAL_LEAF").is_none())
+}
+
+/// A successful leaf-inline derivation: the spliced body, its compiled chunk, the frame
+/// it runs against, and that frame's own checkpoint slot. Assembled into the resume arm
+/// stored on [`ir::LeafInline`].
+#[cfg(feature = "jit")]
+pub(crate) struct LeafDerivation {
+    pub body: Node,
+    pub chunk: Chunk,
+    /// The spliced frame's high-water mark: `[locals+reserves | callee blocks | spill |
+    /// ckpt + journal]`.
+    pub nslots: usize,
+    /// This layout's own journal slot, or `u32::MAX` when the spliced chunk needs none.
+    pub ckpt_slot: u32,
+}
+
+/// Probe + derive leaf-callee inlining for a caller arm, or `None` if nothing qualifies.
+/// The spliced chunk's ops are validated against the CURRENT globals here
+/// (`chunk_ops_native`) — equivalent to the tier-time validation the small chunk gets,
+/// because lowering is gated to this exact epoch (any intervening `def` bumps it and the
+/// derivation is refused).
+///
+/// **Residual non-tail calls are allowed** (partial splicing) as long as the spliced
+/// chunk can be journalled: an inlined native that completed a call must resume *at* its
+/// checkpoint, never re-run from ip 0, or the call's effects repeat. `jit_ckpt_depth`
+/// sizes that journal; if it declines (its chicken switch, or a chunk whose operand
+/// depths don't reconcile) the derivation is refused rather than run unjournalled. A
+/// chunk with no checkpoint site at all needs no journal — a from-ip-0 re-run of it is
+/// effect-free, which is the case the all-or-nothing bail used to be the only way to get.
+///
+/// A journalled derivation is spliced a second time, from `full_nslots` (the caller's
+/// whole small frame) rather than `locals_max` (just its locals), so its callee blocks
+/// sit above the small layout's spill and checkpoint areas and **the two layouts'
+/// journals cannot alias** — the two engines take turns running one frame. The unjournalled
+/// case keeps the tight layout, so the common derivation costs no extra slots.
 #[cfg(feature = "jit")]
 pub(crate) fn leaf_inline_probe(
     heap: &Heap,
     body: &Node,
-    m: usize,
+    locals_max: usize,
+    full_nslots: usize,
     self_name: Option<Symbol>,
-) -> Option<(Node, usize)> {
+    self_arity: Option<usize>,
+) -> Option<LeafDerivation> {
     if !leaf_inline_enabled() {
         return None;
     }
@@ -1190,41 +1234,97 @@ pub(crate) fn leaf_inline_probe(
     if node_count(body) > SELF_INLINE_MAX_BODY {
         return None;
     }
-    let mut spliced = shift_slots(body, 0);
-    let mut next_base = m;
-    let mut blocks = 0usize;
-    let n = leaf_inline_splice(heap, &mut spliced, &mut next_base, &mut blocks, self_name);
-    if n == 0 {
+    // No RUNTIME-handle consts in the caller either, for the reason
+    // [`leaf_body_qualifies`] excludes them from the callees: the derivation is a stored
+    // COPY of those consts, and `runtime_collect` rewrites only the originals. Epoch
+    // gating already covers a compaction between derivation and lowering, but the spliced
+    // chunk is now *interpreted* on the deopt-resume path — a resume can therefore be
+    // reached from inside a native run whose own residual call did the `def` — so keeping
+    // the stored bits handle-free is what makes that path inert rather than merely gated.
+    if node_has_rt_handles(body) {
         return None;
     }
-    let chunk = compile_chunk(&spliced)?;
-    // Foreign prims arrived with the callee bodies — validate them now (see doc above).
-    if !chunk_ops_native(heap, &chunk) {
-        return None;
-    }
-    // Every non-tail call must have been spliced away: the inlined native has no
-    // deopt checkpoint (see `jit_ckpt_read`), so a deopt re-runs from ip 0 — only
-    // effect-free when nothing before the deopt point completed a call. A residual
-    // non-tail call (an unresolvable/large callee next to a spliced one) fails the
-    // derivation; the arm keeps its small native + checkpointing.
-    if chunk
-        .code
-        .iter()
-        .any(|i| matches!(i, Inst::Call { tail: false, .. }))
-    {
-        return None;
-    }
-    let nslots = next_base + jit_spill_reserve(&chunk.code);
+    // Splice once from the tight base to find out whether a journal is needed at all.
+    let splice = |base: usize| -> Option<(Node, Chunk, usize, usize)> {
+        let mut spliced = shift_slots(body, 0);
+        let mut next_base = base;
+        let mut blocks = 0usize;
+        let n = leaf_inline_splice(heap, &mut spliced, &mut next_base, &mut blocks, self_name);
+        if n == 0 {
+            return None;
+        }
+        let chunk = compile_chunk(&spliced)?;
+        // Foreign prims arrived with the callee bodies — validate them now (see doc above).
+        if !chunk_ops_native(heap, &chunk) {
+            return None;
+        }
+        Some((spliced, chunk, next_base, n))
+    };
+    let (mut spliced, mut chunk, mut next_base, n) = splice(locals_max)?;
+    // Does anything in the spliced chunk have an effect a from-ip-0 re-run would
+    // repeat? A completed non-tail call and a `table-put` are the two (the callee
+    // bodies contribute neither — `leaf_body_qualifies` rejects both — so these are
+    // the caller's own).
+    let needs_journal = |chunk: &Chunk| {
+        chunk.code.iter().any(|i| {
+            matches!(
+                i,
+                Inst::Call { tail: false, .. }
+                    | Inst::Prim3 {
+                        op: PrimOp3::TablePut,
+                        ..
+                    }
+            )
+        })
+    };
+    let needs_journal = if needs_journal(&chunk) {
+        if !partial_leaf_enabled() {
+            return None;
+        }
+        // Re-splice clear of the small layout's own reserves (see doc above).
+        let (s2, c2, nb2, _) = splice(full_nslots)?;
+        spliced = s2;
+        chunk = c2;
+        next_base = nb2;
+        true
+    } else {
+        false
+    };
+    let spill = jit_spill_reserve(&chunk.code);
+    let (ckpt_slot, ckpt_reserve) = if needs_journal {
+        // `None` here is either the `BROOD_NO_DEOPT_RESUME` chicken switch or a chunk
+        // whose operand depths don't reconcile — in both cases we cannot journal, and
+        // an unjournalled residual effect is exactly the bug this gate prevents. It
+        // also covers the pure-self exemption, where declining costs nothing (a
+        // self-recursive arm takes the self-inliner's path, which is tried first).
+        let d = jit_ckpt_depth(&chunk.code, self_name, self_arity)?;
+        ((next_base + spill) as u32, 1 + d)
+    } else {
+        (u32::MAX, 0)
+    };
+    let nslots = next_base + spill + ckpt_reserve;
     if std::env::var("BROOD_INLINE_DBG").is_ok() {
         eprintln!(
-            "[inline-dbg] leaf probe {} sites={} m={} leaf_nslots={}",
+            "[inline-dbg] leaf probe {} sites={} base={} leaf_nslots={} ckpt_slot={} \
+             journalled={}",
             self_name
                 .map(crate::core::value::symbol_name)
                 .unwrap_or_else(|| "<anon>".into()),
             n,
-            m,
-            nslots
+            if needs_journal {
+                full_nslots
+            } else {
+                locals_max
+            },
+            nslots,
+            ckpt_slot as i64,
+            needs_journal
         );
     }
-    Some((spliced, nslots))
+    Some(LeafDerivation {
+        body: spliced,
+        chunk,
+        nslots,
+        ckpt_slot,
+    })
 }

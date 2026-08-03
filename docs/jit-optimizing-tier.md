@@ -345,39 +345,72 @@ borrow flag, `Vec`/`Option` niche, `Cell`. So increment 1 must add an **IR-reada
 the single riskiest change in the runtime and must be implemented incrementally with the full gate
 run per step — a focused effort, not a tail-of-session burst.
 
-## Leaf inlining is all-or-nothing per arm — measured 2026-08-02
+## Leaf inlining used to be all-or-nothing per arm — fixed 2026-08-03 (ADR-210)
 
-The leaf inliner (Phase 2, default ON) derives an inlined native only if **every** non-tail
-call in the arm is spliced away. `leaf_inline_derive` bails when the spliced chunk still
-contains an `Inst::Call { tail: false }`:
+**Was:** the leaf inliner derived an inlined native only if **every** non-tail call in the arm
+was spliced away, bailing when the spliced chunk still contained an `Inst::Call { tail: false }`.
+The reason was sound — an inlined native carried no deopt checkpoint, so a deopt re-ran the arm
+from ip 0, which is only effect-free if nothing before the deopt point completed a call — but
+the consequence was structural: **one un-spliceable callee blocked inlining of every small
+callee beside it.** `mandelbrot`'s `row-sum` calls `->float` (a three-instruction arm:
+`Const Local Prim2`) and `esc`, which is recursive and cannot be spliced, so the conversion
+stayed a real call at ~85 ns where every other language in the suite emits a machine cast.
 
-```rust
-if chunk.code.iter().any(|i| matches!(i, Inst::Call { tail: false, .. })) {
-    return None;
-}
+**Now:** partial splicing, default ON (`BROOD_NO_PARTIAL_LEAF=1` opts out). The derivation may
+keep a residual non-tail call, because the leaf-spliced layout carries **its own checkpoint** and
+a deopt out of it resumes in the spliced chunk. Measured **2.4× on the shape it targets** — a
+lowering self-tail caller with one spliceable leaf beside one residual call
+(`(+ acc (+ (sq i) (rec 2 0)))`, 2M iterations: 562 → 237 ms).
+
+**But `mandelbrot` was the wrong example, and the reason matters more than the row.** The
+paragraph above (written 2026-08-02) said "this is where `mandelbrot`'s `->float` cost comes
+from", and the cost is real — but **`row-sum` never lowers to native at all**, in either
+configuration. Check it before assuming an inlining change can help an arm:
+
+```
+BROOD_JIT_DUMP_IR=1 brood mandelbrot.blsp 2>&1 | grep '^\[jit-ir\] =====' 
+# → esc lowers. row-sum and grid-sum do not, with the flag on OR off.
 ```
 
-The reason is sound and is documented at the site: an inlined native carries no deopt
-checkpoint, so a deopt re-runs the arm from ip 0, which is only effect-free if nothing before
-the deopt point completed a call.
+**Leaf inlining is a JIT-only optimisation: the VM always runs the small body.** So an arm whose
+native bails gets *nothing* from any splice, however good the derivation looks in
+`BROOD_INLINE_DBG`. A derivation firing (`journalled=true`) proves only that the derivation
+happened, not that it lowered — a bailed arm never reaches the `[jit-ir]` dump. `row-sum` and the
+synthetic `mix` shape both derive and both bail; `hot` above derives and lowers **twice** (small
+native + the partially-spliced upgrade), which is what the 2.4× is. Getting `row-sum` itself onto
+the native path is a separate, unstarted question.
 
-**The consequence is worth knowing before reaching for a small helper in a hot arm: one
-un-spliceable callee blocks inlining of every small callee beside it.** Demonstrated with
-`BROOD_INLINE_DBG=1` — an arm whose only non-tail call is a three-instruction leaf gets its
-probe (`leaf probe conv-only2 sites=1 m=2 leaf_nslots=3`); add a *recursive* callee next to it
-and the probe disappears entirely, the tiny leaf included:
+The thing that actually blocked this was not the frame layout — it was the **bytecode ip space**.
+A journal records a resume ip into the *inlined* chunk, and `vm_resume_deopt` drove `arm.chunk`,
+the small body, so the ip meant nothing there. The fix is `ir::LeafInline::resume`: a full
+`CompiledArm` over the spliced body (spliced chunk, `nslots = inline_nslots`, its own
+`ckpt_slot`), so a resume continues in the chunk that wrote the journal. Journalling in the
+inlined lowering then becomes ordinary — same `jit_ckpt_depth`, same emission site, the slot
+taken from the lowering rather than the arm.
 
-| arm | non-tail callees | probe? | 1M iterations |
-|---|---|---|---|
-| `conv-only2` | `->float` | yes | 196 ms |
-| `conv-plus-rec` | `->float` **+ a recursive fn** | **no** | 588 ms |
+Read ADR-210 before changing any of it. The three properties to preserve:
 
-This is where `mandelbrot`'s `->float` cost comes from. `row-sum` calls `->float` (a
-three-instruction arm: `Const Local Prim2`) and `esc`, which is recursive and cannot be
-spliced — so the conversion stays a real call, at ~85 ns each. Every other language in the
-benchmark suite spells that conversion as a machine cast.
+- **A journalled derivation splices from the caller's FULL small frame** (`nslots`, reserves
+  included), not its `scope.max`, so its callee blocks clear the small layout's spill and
+  checkpoint areas — the two engines take turns running one frame and their journals must not
+  alias. An unjournalled derivation keeps the tight layout, so the common case costs no extra
+  slots.
+- **If `jit_ckpt_depth` declines, the derivation is refused**, never run unjournalled. The
+  failure direction is losing an optimisation, not repeating an effect.
+- **The resume arm shares the caller's `uid`** (hence its IC block), sound only because a
+  spliced callee body contributes no call or global sites — `leaf_body_qualifies` rejects both.
 
-**The lever, if it is ever worth taking:** allow *partial* splicing — inline what can be
-inlined and keep the arm's deopt checkpoint so the residual call remains safe. That trades the
-inlined native's checkpoint-free fast path for coverage, so it wants measuring on a row where a
-small helper sits beside a large callee (this one) rather than assumed. Not attempted.
+**The bigger blocker was elsewhere, and is the part to remember.** Partial splicing fired for
+`work`-shaped arms and never for `mix`-shaped ones — the mid-level functions it exists to help.
+Resolving a callee during a probe *compiles* it under the `LEAF_RESOLVING` guard that suppresses
+the nested probe, and `compiled_arm_for` cached **and published** that arm; every later call to
+the callee then got the metadata-less copy. So any function reachable from another function's
+probe was permanently denied its own derivation. The old comment called this a "wart: metadata
+only, body/frame identical" — true, and far more expensive than it reads. Probes now resolve
+through `probe_arm_for`, which caches nothing.
+
+Diagnosing it: `BROOD_INLINE_DBG=1` prints one line per derivation —
+`leaf probe row-sum sites=1 base=12 leaf_nslots=19 ckpt_slot=13 journalled=true`. `journalled`
+distinguishes a partial derivation from an all-spliced one; no line at all means the probe
+declined, and the first thing to check is whether the arm is being compiled from inside another
+arm's probe.

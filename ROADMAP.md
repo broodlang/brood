@@ -1439,6 +1439,8 @@ Runtime housekeeping (both items landed):
   (the small layout's ckpt slot lies inside the spliced range — a real Int there
   faked a journal). `inline_nslots` is floored at the small frame (spill+ckpt
   reserves made it possible for the "grow" to be an underflowing shrink).
+  **The zero-residual-call restriction was lifted 2026-08-03 — see
+  ✅ Partial leaf splicing below (ADR-210).**
   **Measured: ~30% on the scalar-helper loop shape** (`(+ acc (sq (add1 i)))`
   1.65 → 1.2 s); benchmark-suite rows flat (they're recursive/HOF/alloc-bound —
   the remaining shapes need closure-arm support (defn-gate today) + Phase 3/4).
@@ -1446,6 +1448,35 @@ Runtime housekeeping (both items landed):
   VM≡TW differential, 3 dedicated tests incl. hot-reload + residual-call gate.
   ⬜ Next: closure arms (needs a fast-link invalidation story without a defn
   name) — the expansion/`require` measurement + default-flip are done.
+- ✅ **Partial leaf splicing** — **implemented 2026-08-03, DEFAULT ON**
+  (`BROOD_NO_PARTIAL_LEAF=1` opts out); ADR-210. Lifts the zero-residual-call
+  restriction above, so **one un-spliceable callee no longer blocks inlining of every
+  small callee beside it** — `mandelbrot`'s `row-sum` splices `->float` with the
+  recursive `esc` still a real call. The blocker was not the checkpoint *layout* (the
+  previous write-up's framing) but the inlined body's own **bytecode ip space**: a
+  journalled resume ip meant nothing to `vm_resume_deopt`, which drove the small chunk.
+  Fixed with a **resume arm** (`ir::LeafInline::resume`) — a full `CompiledArm` over the
+  spliced body, so a deopt resumes in the chunk that wrote the journal, and journalling
+  reuses `jit_ckpt_depth` unchanged. A journalled derivation splices above the caller's
+  *full* small frame so the two layouts' journals cannot alias; if `jit_ckpt_depth`
+  declines, the derivation is refused rather than run unjournalled. Also removed the
+  leaf path's `JIT_INLINE_CHUNK_KEEPALIVE` entry + per-lowering recompile, and fixed a
+  pre-existing hazard where a probe's callee resolution *cached and published* an arm
+  compiled under the reentrancy guard, permanently denying that callee its own
+  derivation (`probe_arm_for` now caches nothing). Gates: 5 fuzz generators × 4 engine
+  configs, 40/40 `tests/jit.rs` under GC_STRESS+VERIFY, 4350/4350 in-language suite with
+  the mechanism on and off, and an effect-duplication guard **verified by sabotage**
+  (`tests/jit_effect_once_test.blsp` cases 5–6).
+  **Measured 2.4×** on the shape it targets (a lowering self-tail caller, one spliceable
+  leaf beside one residual call: 562 → 237 ms / 2M; the arm lowers twice with the flag on,
+  once with it off). **Every published benchmark row is flat** — attributed with the on/off
+  switch on a single binary, which is what disposed of an apparent `nqueens` −5% (the switch
+  is worth 0.3% there, and that row drifts ~3% between invocations). ⚠️ **`mandelbrot` — the
+  row that motivated this — gets nothing: `row-sum` never lowers to native at all**, flag on
+  or off, and leaf inlining is JIT-only (the VM runs the small body). Check
+  `BROOD_JIT_DUMP_IR=1 … | grep '^\[jit-ir\] ====='` for an arm before assuming any inlining
+  change can move it. ⬜ Getting `row-sum` onto the native path is the real `mandelbrot`
+  lever and is unstarted.
 - ⬜ **Layer-2 computed-goto dispatch** (`std::arch::asm!`, x86-64, `#[cfg]`-gated,
   pure-Rust fallback) — only if profiling still shows dispatch overhead. Additive.
 - ⬜ **Allocation / GC frontier — `bintree` + `nqueens`** (the two worst compute
