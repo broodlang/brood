@@ -58,9 +58,13 @@
       (cond
         l (cy--sha-scan algo (rest lines) (string->number l) msg ran bad)
         m (cy--sha-scan algo (rest lines) len m ran bad)
-        d (let (got (cy--sha-digest algo (cy--msg-bytes len msg)))
+        d
+          (let (got (cy--sha-digest algo (cy--msg-bytes len msg)))
             (cy--sha-scan algo
-              (rest lines) len msg (inc ran)
+              (rest lines)
+              len
+              msg
+              (inc ran)
               (if (= got (lower d)) bad (cons [algo len (lower d) got] bad))))
         else (cy--sha-scan algo (rest lines) len msg ran bad)))))
 
@@ -97,14 +101,22 @@
         t (cy--hmac-scan (rest lines) algo (string->number t) key msg ran skipped bad)
         k (cy--hmac-scan (rest lines) algo tlen k msg ran skipped bad)
         m (cy--hmac-scan (rest lines) algo tlen key m ran skipped bad)
-        mac (if (nil? algo)
-              ;; an [L=28] (SHA-224) section — no target in Brood
-              (cy--hmac-scan (rest lines) algo tlen key msg ran (inc skipped) bad)
-              (let (got (cy--hmac-mac algo
-                          (encoding/hex-decode-bytes key) (encoding/hex-decode-bytes msg) tlen))
-                (cy--hmac-scan (rest lines)
-                  algo tlen key msg (inc ran) skipped
-                  (if (= got (lower mac)) bad (cons [algo tlen (lower mac) got] bad)))))
+        mac
+          (if (nil? algo)
+            ;; an [L=28] (SHA-224) section — no target in Brood
+            (cy--hmac-scan (rest lines) algo tlen key msg ran (inc skipped) bad)
+            (let (got (cy--hmac-mac algo
+                        (encoding/hex-decode-bytes key)
+                        (encoding/hex-decode-bytes msg)
+                        tlen))
+              (cy--hmac-scan (rest lines)
+                algo
+                tlen
+                key
+                msg
+                (inc ran)
+                skipped
+                (if (= got (lower mac)) bad (cons [algo tlen (lower mac) got] bad)))))
         else (cy--hmac-scan (rest lines) algo tlen key msg ran skipped bad)))))
 
 (describe "NIST CAVP: SHA byte vectors"

@@ -93,11 +93,12 @@ theme editor or the docs; resolve a single face with `face`."
       (cond
         (nil? attrs) nil
         (>= depth 16) (dissoc attrs :inherit)
-        else (let (parent (get attrs :inherit)
-                   self (dissoc attrs :inherit))
-               (if (nil? parent)
-                 self
-                 (merge (or (face--resolve parent (inc depth)) {}) self)))))))
+        else
+          (let (parent (get attrs :inherit)
+                self (dissoc attrs :inherit))
+            (if (nil? parent)
+              self
+              (merge (or (face--resolve parent (inc depth)) {}) self)))))))
 
 (defn face (name)
   "Resolve face `name` to the attribute map a render op wants (`{:fg :red …}`),

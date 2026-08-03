@@ -70,7 +70,8 @@ one bad line must not kill the server) and a present `:trace` a vector."
   (try
     (let (v (read-string line))
       (if (and (map? v)
-            (int? (get v :id)) (string? (get v :src))
+            (int? (get v :id))
+            (string? (get v :src))
             (let (t (get v :timeout-ms)) (or (nil? t) (int? t)))
             (let (tr (get v :trace)) (or (nil? tr) (vector? tr))))
         v
@@ -159,7 +160,8 @@ looking identical to a round-trip that cleaned up after itself."
                          (if (or installed (eval-server--definition-form? form))
                            [installed (eval form)]
                            (do (eval-server--try-traces names) [true (eval form)]))))
-                 [false nil] forms))
+                 [false nil]
+                 forms))
     (second result)))
 
 (defn eval-capturing (src &optional trace-names)

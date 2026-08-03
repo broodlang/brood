@@ -6,7 +6,8 @@
 (defmodule behaviour-test (:use test) (:use protocol))
 
 (defbehaviour Renderable
-  (render-it [model]) (mount-it [params]))
+  (render-it [model])
+  (mount-it [params]))
 
 (describe "behaviours record their ops for the checker"
   (test "a behaviour registers ops without defining dispatching fns"

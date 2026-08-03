@@ -55,7 +55,8 @@
     (let (me (self))
       ; nil ⇒ :tick
       (ui-run {:done false}
-        (fn (m c r) []) (fn (m input c r) (do (send me [:saw input]) (assoc m :done true)))
+        (fn (m c r) [])
+        (fn (m input c r) (do (send me [:saw input]) (assoc m :done true)))
         {:enter (fn () nil)
          :leave (fn () nil)
          :size (fn () [80 24])
@@ -185,7 +186,8 @@
         (try
           (ui-run {}
             ; first render throws, no last-good yet
-            (fn (m c r) (throw :startup-boom)) (fn (m input c r) m)
+            (fn (m c r) (throw :startup-boom))
+            (fn (m input c r) m)
             {:enter (fn () nil)
              ; teardown must still happen
              :leave (fn () (send me [:left]))
@@ -253,10 +255,14 @@
 (describe "overlay-route — Overlay ability records"
   (defrecord ov-mini ()) ; capture-all: only active?/handle implemented
   (impl Overlay
-    ov-mini (overlay-active? [_ m] (get m :mini)) (overlay-handle [_ m k] (assoc m :typed k)))
+    ov-mini
+    (overlay-active? [_ m] (get m :mini))
+    (overlay-handle [_ m k] (assoc m :typed k)))
   (defrecord ov-pop ()) ; discriminating: all four ops
   (impl Overlay
-    ov-pop (overlay-active? [_ m] (get m :pop)) (overlay-owns? [_ m k] (= k "x"))
+    ov-pop
+    (overlay-active? [_ m] (get m :pop))
+    (overlay-owns? [_ m k] (= k "x"))
     (overlay-handle [_ m k] (assoc m :popped k))
     (overlay-exit [_ m] (assoc m :pop nil :exited true)))
   (def rec-overlays (list (ov-mini) (ov-pop)))
@@ -414,32 +420,38 @@
   (test "preserves existing arm/fire/last-input and GCs removed timers"
     (let (c (editor/ui/ui--clock-init {:last-input 100 :armed {:a 50 :b 60} :fired {:a 70}}
               ; :b is gone
-              {:a {:every 100}} 5000))
+              {:a {:every 100}}
+              5000))
       (assert= (get c :last-input) 100)
       ; :a kept at its original arm, :b dropped
       (assert= (get c :armed) {:a 50})
       (assert= (get c :fired) {:a 70})))
   (test "a newly-appeared timer is armed at now; established ones keep their arm"
     (let (c (editor/ui/ui--clock-init {:last-input 100 :armed {:a 50} :fired {}}
-              {:a {:every 100} :c {:after 10}} 5000))
+              {:a {:every 100} :c {:after 10}}
+              5000))
       (assert= (get c :armed) {:a 50 :c 5000}))))
 
 (describe "ui--poll-ms — how long to park"
   ; overdue → 1
   (test "the soonest live deadline minus now, at least 1ms"
     (assert= (editor/ui/ui--poll-ms {:a {:every 100}}
-               {:last-input 1000 :armed {:a 1000} :fired {}} 1000)
+               {:last-input 1000 :armed {:a 1000} :fired {}}
+               1000)
       100)
     (assert= (editor/ui/ui--poll-ms {:a {:every 100}}
-               {:last-input 1000 :armed {:a 1000} :fired {}} 1200)
+               {:last-input 1000 :armed {:a 1000} :fired {}}
+               1200)
       1))
   (test "the earliest of several timers wins"
     (assert= (editor/ui/ui--poll-ms {:a {:every 100} :b {:every 50}}
-               {:last-input 1000 :armed {:a 1000 :b 1000} :fired {}} 1000)
+               {:last-input 1000 :armed {:a 1000 :b 1000} :fired {}}
+               1000)
       50))
   (test "no live timer (a fired one-shot, or no timers) → the idle cap (60000)"
     (assert= (editor/ui/ui--poll-ms {:a {:after 100}}
-               {:last-input 1000 :armed {:a 1000} :fired {:a 1100}} 1200)
+               {:last-input 1000 :armed {:a 1000} :fired {:a 1100}}
+               1200)
       60000)
     (assert= (editor/ui/ui--poll-ms {} {:last-input 1000 :armed {} :fired {}} 1200)
       60000)))
@@ -448,7 +460,8 @@
 (describe "ui--fire — service the due timer"
   (test "a due timer fires [:timer name] and records the firing"
     (let (fr (editor/ui/ui--fire {:a {:every 100}}
-               {:last-input 1000 :armed {:a 1000} :fired {}} 1200))
+               {:last-input 1000 :armed {:a 1000} :fired {}}
+               1200))
       (assert= (first fr) [:timer :a])
       (assert= (get (get (second fr) :fired) :a) 1200)))
   (test "nothing due → [nil clock-unchanged]"
@@ -459,16 +472,19 @@
   ; deadline (arm+ms=1100) not past the recorded fire (1100)
   (test "a one-shot fires once — after firing it's done until re-armed"
     (let (fr (editor/ui/ui--fire {:a {:after 100}}
-               {:last-input 1000 :armed {:a 1000} :fired {:a 1100}} 1300))
+               {:last-input 1000 :armed {:a 1000} :fired {:a 1100}}
+               1300))
       (is (nil? (first fr)))))
   ; deadline = max(1000,1300)+100 = 1400 > fire 1200
   (test "an idle one-shot re-arms once new input pushes its deadline past the last fire"
     (let (fr (editor/ui/ui--fire {:a {:after 100 :idle? true}}
-               {:last-input 1300 :armed {:a 1000} :fired {:a 1200}} 1500))
+               {:last-input 1300 :armed {:a 1000} :fired {:a 1200}}
+               1500))
       (assert= (first fr) [:timer :a])))
   (test "the earliest due timer fires when several are overdue"
     (let (fr (editor/ui/ui--fire {:a {:every 100} :b {:every 50}}
-               {:last-input 1000 :armed {:a 1000 :b 1000} :fired {}} 2000))
+               {:last-input 1000 :armed {:a 1000 :b 1000} :fired {}}
+               2000))
       (assert= (first fr) [:timer :b]))))
 (describe "ui-run — timers drive the loop"
   (test "a due timer is folded into update as [:timer name] (clock injected via :now-fn)"
@@ -477,7 +493,8 @@
       ;; update quits on the first firing so the loop can't spin.
       ; nil ⇒ timeout ⇒ ui--fire
       (ui-run {:done false :timers {:beat {:after 0}} :now-fn (fn () 1000)}
-        (fn (m c r) []) (fn (m input c r) (do (send me [:saw input]) (assoc m :done true)))
+        (fn (m c r) [])
+        (fn (m input c r) (do (send me [:saw input]) (assoc m :done true)))
         {:enter (fn () nil)
          :leave (fn () nil)
          :size (fn () [80 24])
@@ -489,7 +506,8 @@
     (let (me (self))
       (send me [:input "z"])
       (ui-run {:done false :timers {:beat {:every 100000}} :now-fn (fn () 1000)}
-        (fn (m c r) []) (fn (m input c r) (do (send me [:saw input]) (assoc m :done true)))
+        (fn (m c r) [])
+        (fn (m input c r) (do (send me [:saw input]) (assoc m :done true)))
         {:enter (fn () nil)
          :leave (fn () nil)
          :size (fn () [80 24])

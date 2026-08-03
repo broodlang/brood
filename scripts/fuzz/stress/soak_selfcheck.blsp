@@ -98,8 +98,15 @@
     ;; heartbeat
     (when (= 0 (mod n report-every))
       (println (str "t="
-                 (quot (- (now) t-start) 1000) "s iter=" n " reloads=" reloads " rss_kb=" (rss-kb)
-                 " children=" (count-children sup))))
+                 (quot (- (now) t-start) 1000)
+                 "s iter="
+                 n
+                 " reloads="
+                 reloads
+                 " rss_kb="
+                 (rss-kb)
+                 " children="
+                 (count-children sup))))
     (if (> (now) deadline)
       ;; `gc-stats` is a dev-tools builtin and is ABSENT from the lean runtime — which is
       ;; exactly the build you soak (`make install INSTALL_FEATURES='$(RUN_FEATURES)'`, what
@@ -107,10 +114,13 @@
       ;; die on its very last line with `unbound symbol: gc-stats`, throwing away the summary
       ;; after a clean two-hour run. Report what this build can see.
       (println (str "OK soak complete: "
-                 n " iterations, rss_kb=" (rss-kb)
+                 n
+                 " iterations, rss_kb="
+                 (rss-kb)
                  (if (bound? 'gc-stats)
                    (str " rt-closures="
-                     (get (gc-stats) :runtime-closures) " rt-threshold="
+                     (get (gc-stats) :runtime-closures)
+                     " rt-threshold="
                      (get (gc-stats) :runtime-threshold))
                    " (rt-closures unavailable: lean build, no gc-stats)")))
       (loop-once (+ n 1) (if (= 0 (mod n 97)) (+ reloads 1) reloads)))))

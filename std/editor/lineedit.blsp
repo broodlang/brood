@@ -72,7 +72,15 @@ newline while the form is incomplete instead of submitting)."
 (defn lineedit--word-char? (c)
   "True if `c` is part of a word for M-f/M-b/C-w (i.e. not whitespace or a delimiter)."
   (not (or (= c " ")
-         (= c "\t") (= c "(") (= c ")") (= c "[") (= c "]") (= c "{") (= c "}") (= c "\"") (= c ";")
+         (= c "\t")
+         (= c "(")
+         (= c ")")
+         (= c "[")
+         (= c "]")
+         (= c "{")
+         (= c "}")
+         (= c "\"")
+         (= c ";")
          (= c ","))))
 
 (defn lineedit--path-word-char? (c)
@@ -264,10 +272,12 @@ observer's eval minibuffer (the `:hist` list `lineedit-init` is seeded with)."
   (let (idx (get state :hist-idx))
     (cond
       (< idx 0) state
-      (= idx 0) (let (s (get state :saved))
-                  (assoc state :hist-idx -1 :text s :point (string-length s)))
-      else (let (ni (dec idx) entry (nth (get state :hist) ni))
-             (assoc state :hist-idx ni :text entry :point (string-length entry))))))
+      (= idx 0)
+        (let (s (get state :saved))
+          (assoc state :hist-idx -1 :text s :point (string-length s)))
+      else
+        (let (ni (dec idx) entry (nth (get state :hist) ni))
+          (assoc state :hist-idx ni :text entry :point (string-length entry))))))
 
 ;; ---- reverse incremental history search (C-r) -------------------------------
 ;; A modal sub-state on `:search` = `{:query :idx :orig-text :orig-point}`. While
@@ -314,11 +324,12 @@ as a substring, or -1. An empty query matches the newest entry."
       ; next older match
       (or (= key :ctrl-g) (= key :escape)) (lineedit--search-cancel state)
       (= key :enter) (lineedit--search-accept state)
-      (or (= key :backspace) (= key :ctrl-h)) (lineedit--search-step state
-                                                (if (= q "")
-                                                  ""
-                                                  (substring q 0 (dec (string-length q))))
-                                                0)
+      (or (= key :backspace) (= key :ctrl-h))
+        (lineedit--search-step state
+          (if (= q "")
+            ""
+            (substring q 0 (dec (string-length q))))
+          0)
       (and (string? key) (= (string-length key) 1)) (lineedit--search-step state (str q key) idx)
       ; extend; keep current match if it still matches
       else (lineedit-handle (lineedit--search-accept state) key))))
@@ -327,10 +338,11 @@ as a substring, or -1. An empty query matches the newest entry."
   "Enter reverse incremental history search (C-r), saving the current line so C-g
 can restore it, and selecting the newest match (empty query → newest entry)."
   (lineedit--search-step (assoc state
-                           :search {:query ""
-                                    :idx 0
-                                    :orig-text (get state :text)
-                                    :orig-point (get state :point)})
+                           :search
+                             {:query ""
+                              :idx 0
+                              :orig-text (get state :text)
+                              :orig-point (get state :point)})
     "" 0))
 
 ;; ---- completion -------------------------------------------------------------
@@ -554,7 +566,8 @@ boot (or into a lean bundle) for a key most sessions never press."
                         (if (= out "") nil out)))
                     (catch _ nil)))
     (if (or (nil? formatted)
-          (= formatted text) (not (lineedit--same-forms? text formatted)))
+          (= formatted text)
+          (not (lineedit--same-forms? text formatted)))
       state
       (assoc state :text formatted :point (string-length formatted) :hist-idx -1))))
 
@@ -801,7 +814,13 @@ Returns `st` with `:last-row` 0 (cursor ends on row 0)."
             here (if (= i 0) line-ops (cons [:nl] line-ops)))
         (append here
           (lineedit--multi-line-ops (rest lines)
-            (inc i) (+ offset (string-length line) 1) base full overrides prompt cont))))))
+            (inc i)
+            (+ offset (string-length line) 1)
+            base
+            full
+            overrides
+            prompt
+            cont))))))
 
 (defn lineedit--multi-ops (st)
   "The full op vector to repaint a MULTI-line form in place: up over the previous
@@ -830,7 +849,8 @@ tested in isolation."
     (append (if (> prev-row 0) (list [:up prev-row]) '())
       (list [:cr] [:clear-below])
       (lineedit--multi-line-ops lines 0 0 base full overrides prompt cont)
-      (lineedit--completion-ops cand-rows) (if (> up-to-cursor 0) (list [:up up-to-cursor]) '())
+      (lineedit--completion-ops cand-rows)
+      (if (> up-to-cursor 0) (list [:up up-to-cursor]) '())
       (list [:cr] [:col col]))))
 
 (defn lineedit--render-multi (st)
@@ -865,7 +885,8 @@ lines; moves up over any leftover render block first."
     (term-emit (into []
                  (append (if (> prev-row 0) (list [:up prev-row]) '())
                    (list [:cr] [:clear-below])
-                   (lineedit--multi-line-ops lines 0 0 base full '() prompt cont) (list [:nl]))))))
+                   (lineedit--multi-line-ops lines 0 0 base full '() prompt cont)
+                   (list [:nl]))))))
 
 ;; ---- the event loop (IO) ----------------------------------------------------
 

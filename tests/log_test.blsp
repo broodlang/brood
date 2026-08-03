@@ -76,15 +76,16 @@
       ;; two category backends on ONE logger: each writes only its own records.
       (start-logger {:level :debug
                      :backends [(backend (fn-port (fn (s) (send me [:line :lsp s])))
-                                  {:filter (fn (r) (= (get (get r :meta) :category) :lsp))}) (backend (fn-port (fn (s)
-                                                                                                                                                                                                      (send me
-                                                                                                                                                                                                        [:line :other
-                                                                                                                                                                                                          s])))
-                                                                                                                                                                                    {:filter (fn (r)
-                                                                                                                                                                                               (not (= (get (get r
-                                                                                                                                                                                                              :meta)
-                                                                                                                                                                                                         :category)
-                                                                                                                                                                                                      :lsp)))})]})
+                                  {:filter (fn (r) (= (get (get r :meta) :category) :lsp))})
+                                 (backend (fn-port (fn (s)
+                                                     (send me
+                                                       [:line
+                                                         :other s])))
+                                   {:filter (fn (r)
+                                              (not (= (get (get r
+                                                             :meta)
+                                                        :category)
+                                                     :lsp)))})]})
       (log-info "to-lsp" {:category :lsp})
       (log-info "to-other")
       ;; collect the two delivered lines, tagged by which backend sent them

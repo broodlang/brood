@@ -121,14 +121,14 @@ the `nest mcp` tools of the same names.")
          :example "(defn count-up (i n acc) (if (= i n) acc (count-up (+ i 1) n (+ acc i))))"
          :see "docs/language.md §Recursion is the loop"}
     {:intent "mutable state / a variable I can change"
-     :keywords ["mutable" "mutate"
-                 "set!" "var" "state" "counter" "assign" "change" "update variable"]
+     :keywords ["mutable"
+                 "mutate" "set!" "var" "state" "counter" "assign" "change" "update variable"]
      :idiom "No `set!`/mutable variables. Carry state in a recursive function's argument, in a process loop's state, or (when genuinely shared+mutable) a `Table` (Brood's ETS)."
      :example "(defn account (bal) (receive ([:dep amt] (account (+ bal amt))) ([:bal from] (send from bal) (account bal))))"
      :see "docs/language.md §Immutability"}
     {:intent "build a string / concatenate in a loop"
-     :keywords ["string" "concat"
-                 "concatenate" "build string" "join" "stringbuilder" "accumulate string"]
+     :keywords ["string"
+                 "concat" "concatenate" "build string" "join" "stringbuilder" "accumulate string"]
      :idiom "Don't `(str acc x)` in a loop (O(n²)). Cons parts onto a list and `(join \"\" (reverse parts))` once — or hand an iolist (nested list of strings/bytes) to the write boundary (ADR-139)."
      :example "(join \"\" (map str (range 0 5)))"
      :see "docs/decisions.md ADR-139 (iolists)"}

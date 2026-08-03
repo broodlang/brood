@@ -104,7 +104,8 @@
 ;; ---- Ord: a record defines its own sort order ----
 (defrecord ver (major minor))
 (defmethod compare-to
-  [ver ver] (a b)
+  [ver ver]
+  (a b)
   (let (c (compare (get a :major) (get b :major)))
     (if (= c 0) (compare (get a :minor) (get b :minor)) c)))
 

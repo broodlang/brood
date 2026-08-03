@@ -43,7 +43,10 @@
   (test "all hex digits present"
     (assert= "0a0b0c0d0e0f"
       (encoding/hex-encode (str (int->char 10)
-                             (int->char 11) (int->char 12) (int->char 13) (int->char 14)
+                             (int->char 11)
+                             (int->char 12)
+                             (int->char 13)
+                             (int->char 14)
                              (int->char 15))))))
 
 (describe "hex-encode-upper"

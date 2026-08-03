@@ -31,9 +31,17 @@
 ;; Show that the parsed request is just data.
 (defn echo (req)
   (text-response (str "you asked for: "
-                   (get req :path) "\n\n" "method: " (get req :method) "\n" "host:   "
-                   (get (get req :headers) "host" "(none)") "\n" "agent:  "
-                   (get (get req :headers) "user-agent" "(none)") "\n")))
+                   (get req :path)
+                   "\n\n"
+                   "method: "
+                   (get req :method)
+                   "\n"
+                   "host:   "
+                   (get (get req :headers) "host" "(none)")
+                   "\n"
+                   "agent:  "
+                   (get (get req :headers) "user-agent" "(none)")
+                   "\n")))
 
 ;; The application: a router (a closure capturing a map of handler closures),
 ;; bound at top level. `def` promotes it into the shared code region — sound now

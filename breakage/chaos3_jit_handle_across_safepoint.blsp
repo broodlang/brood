@@ -37,7 +37,11 @@
   (if (= n 0)
     acc
     (let (r (combine6 (mk n)
-              (mk (+ n 1)) (mk (+ n 2)) (mk (+ n 3)) (mk (+ n 4)) (mk (+ n 5))))
+              (mk (+ n 1))
+              (mk (+ n 2))
+              (mk (+ n 3))
+              (mk (+ n 4))
+              (mk (+ n 5))))
       (pressure (- n 1) (str acc (substring r 0 1))))))
 
 ;; diff--at shape: vector/map handle operands held across nth/assoc sub-calls.
@@ -45,7 +49,9 @@
   (if (>= i n)
     acc
     (vdiff old
-      new (+ i 1) n
+      new
+      (+ i 1)
+      n
       (if (= (nth old i) (nth new i))
         acc
         (assoc acc i (nth new i))))))

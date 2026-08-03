@@ -5,7 +5,8 @@
 
 (defrecord usd (cents))
 (impl Display
-  show-test/usd (to-str [m] (str "$" (to-fixed (/ (get m :cents) 100.0) 2))))
+  show-test/usd
+  (to-str [m] (str "$" (to-fixed (/ (get m :cents) 100.0) 2))))
 
 ; a record WITHOUT a custom Display impl
 (defrecord plain (a))

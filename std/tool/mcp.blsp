@@ -115,7 +115,9 @@ string, not absolute (`/…`) or home-anchored (`~…`), with no `..` segment. T
 first (cheap) of two gates; the second is the symlink-resolving check in
 `mcp--project-path`."
   (and (string? rel)
-    (> (string-length rel) 0) (not (starts-with? rel "/")) (not (starts-with? rel "~"))
+    (> (string-length rel) 0)
+    (not (starts-with? rel "/"))
+    (not (starts-with? rel "~"))
     (not (includes? (string-split rel "/") ".."))))
 
 (defn mcp--under-root? (abs)
@@ -127,7 +129,8 @@ the tree through a symlink)."
   (let (real (canonicalize abs)
         root (canonicalize *project-root*))
     (and (string? real)
-      (string? root) (or (= real root) (starts-with? real (str root "/"))))))
+      (string? root)
+      (or (= real root) (starts-with? real (str root "/"))))))
 
 (defn mcp--project-path (rel)
   "Resolve project-relative `rel` to an absolute path under `*project-root*`, or
@@ -141,7 +144,8 @@ sandbox boundary the `write`/`edit` tools share."
   (let (abs (path-join *project-root* rel))
     (when (not (mcp--under-root? abs))
       (throw (str "path escapes the project sandbox — its real target (following symlinks) "
-               "is outside the project root: " (pr-str rel))))
+               "is outside the project root: "
+               (pr-str rel))))
     abs))
 
 (defn mcp--write-result (rel abs)
@@ -200,9 +204,10 @@ image stays in sync with disk."
                 hits (- (count (string-split text old)) 1))
             (cond
               (= hits 0) {:ok false :error (str "edit: :old not found in " rel)}
-              (> hits 1) {:ok false
-                          :error (str "edit: :old occurs "
-                                   hits " times in " rel " — make it unique")}
+              (> hits 1)
+                {:ok false
+                 :error (str "edit: :old occurs "
+                          hits " times in " rel " — make it unique")}
               else (let (_w (spit abs (replace text old new)))
                      (mcp--write-result rel abs))))))
       (catch e
@@ -496,7 +501,8 @@ across its ops via the `*impls*` registry."
         type-keys (fold (fn (acc op)
                           (let (methods (get *impls* [aname op]))
                             (if methods (into acc (keys methods)) acc)))
-                    #{} op-names))
+                    #{}
+                    op-names))
     (sort (map name (vec type-keys)))))
 
 (defn mcp-abilities-tool (args)

@@ -98,7 +98,8 @@
 (println "P32: new impl after hot-swap:" (first p32-new-result))
 (println "P32-correct (both 500500):"
   (and (= 500500 (second p32-old-result))
-    (= 500500 (second p32-new-result)) (= :new (first p32-new-result))))
+    (= 500500 (second p32-new-result))
+    (= :new (first p32-new-result))))
 
 ;;; ---- P33: defdyn per-process isolation ----
 (println "=== P33: defdyn per-process isolation ===")

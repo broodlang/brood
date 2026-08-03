@@ -104,8 +104,17 @@
         t4 (ms (fn () (f (* 4 base))))
         ratio (if (= t1 0) 0 (quot (* 100 t4) t1)))
     (println (str label
-               " N=" base ": " t1 " ms   4N: " t4 " ms   ratio " (quot ratio 100) "."
-               (rem ratio 100) (if (> ratio 800) "   <-- SUPERLINEAR" "")))))
+               " N="
+               base
+               ": "
+               t1
+               " ms   4N: "
+               t4
+               " ms   ratio "
+               (quot ratio 100)
+               "."
+               (rem ratio 100)
+               (if (> ratio 800) "   <-- SUPERLINEAR" "")))))
 
 ;; ---- proc/agent: N sequential updates against one agent ---------------------
 
@@ -124,7 +133,8 @@
 ;; ---- proc/gen: N synchronous calls against one server -----------------------
 
 (defprocess counter-server
-  (state) (call :bump [(+ state 1) (+ state 1)]))
+  (state)
+  (call :bump [(+ state 1) (+ state 1)]))
 
 (defn loop-calls (pid k)
   (if (= k 0)

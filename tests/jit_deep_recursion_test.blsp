@@ -113,7 +113,9 @@
   (if (nil? xs)
     (reverse acc)
     (jdr--every-nth--go (rest xs)
-      n (inc i) (if (= (rem i n) 0) (cons (first xs) acc) acc))))
+      n
+      (inc i)
+      (if (= (rem i n) 0) (cons (first xs) acc) acc))))
 
 (defn jdr--scan (fs n)
   (if (nil? fs) n (do (jdr--parse (first fs)) (jdr--scan (rest fs) (inc n)))))

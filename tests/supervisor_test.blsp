@@ -154,7 +154,8 @@
   (test "restarts the crashed child and those started after it, not before"
     (let (me (self)
           sup (start-supervisor (list (tagged-spec me :a :permanent)
-                                  (tagged-spec me :b :permanent) (tagged-spec me :c :permanent))
+                                  (tagged-spec me :b :permanent)
+                                  (tagged-spec me :c :permanent))
                 {:strategy :rest-for-one})
           gen1 (collect-ups 3 {}))
       ; crash b → restart b and c, leave a
@@ -241,7 +242,8 @@
   (test "stop-supervisor terminates children in reverse start order"
     (let (me (self)
           sup (start-supervisor (list (stop-announce-spec me :a)
-                                  (stop-announce-spec me :b) (stop-announce-spec me :c)))
+                                  (stop-announce-spec me :b)
+                                  (stop-announce-spec me :c)))
           _ (collect-ups 3 {}))
       ; wait until all three are up
       (stop-supervisor sup)

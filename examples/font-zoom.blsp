@@ -20,7 +20,8 @@ Run (the GUI backend is behind a cargo feature):
 (defn render (win px)
   "Paint the instructions + the current font height."
   (gui-draw win
-    [[:clear] [:text 1 2 "Ctrl + mouse-wheel to zoom this window's font." {:fg :cyan}]
+    [[:clear]
+      [:text 1 2 "Ctrl + mouse-wheel to zoom this window's font." {:fg :cyan}]
       [:text 3 2 (str "height: " px " px") {:fg :white :bold true}]
       [:text 5 2 "plain wheel does nothing · q / close-box to quit" {:fg :dark-grey}]]))
 
@@ -48,10 +49,11 @@ grows/shrinks within [*min-px* *max-px*]; anything else leaves `px` unchanged."
                 (let (ev (receive (m m)))
                   (cond
                     (or (= ev :close) (= ev "q")) (gui-close win)
-                    (and (vector? ev) (= (first ev) :mouse)) (let (px* (ctrl-wheel-px ev px))
-                                                               ; retune just THIS window
-                                                               (when (not (= px* px))
-                                                                 (gui-font! win {:height px*}))
-                                                               (go px*))
+                    (and (vector? ev) (= (first ev) :mouse))
+                      (let (px* (ctrl-wheel-px ev px))
+                        ; retune just THIS window
+                        (when (not (= px* px))
+                          (gui-font! win {:height px*}))
+                        (go px*))
                     else (go px)))))
     (go px0)))

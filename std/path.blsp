@@ -146,8 +146,10 @@ redundant slashes. An absolute path starts with the `\"/\"` component."
     (let (p (first parts))
       (cond
         ;; `..` pops a resolved segment off the stack
-        (and (= p "..") (not (nil? stack)) (not (= (first stack) ".."))) (normalize--reduce (rest parts)
-                                                                           (rest stack) absolute)
+        (and (= p "..") (not (nil? stack)) (not (= (first stack) "..")))
+          (normalize--reduce (rest parts)
+            (rest stack)
+            absolute)
         ;; `..` that would climb above an absolute root is discarded — there is no
         ;; parent of `/`. (For a relative path it is kept, so `a/../..` → `..`.)
         (and (= p "..") absolute (nil? stack)) (normalize--reduce (rest parts) stack absolute)
@@ -175,8 +177,9 @@ divergent pair still yields a valid relative path (`/x/y` from `/a/b` → `../..
     ;; common prefix: keep stripping
     (= (first p-parts) (first base-parts)) (relative--strip (rest p-parts) (rest base-parts))
     ;; diverged: one `..` per remaining base component, then p
-    else (let (ups (map (fn (_) "..") base-parts))
-           (path--glue (first ups) (append (rest ups) p-parts)))))
+    else
+      (let (ups (map (fn (_) "..") base-parts))
+        (path--glue (first ups) (append (rest ups) p-parts)))))
 
 ;; ---- predicates -------------------------------------------------------------
 

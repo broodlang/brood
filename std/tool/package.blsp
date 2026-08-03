@@ -52,7 +52,8 @@ land in a later slice."
           (if (dir? full)
             (append-two (package--tree-files--walk full rel) acc)
             (cons rel acc)))))
-    nil (list-dir dir)))
+    nil
+    (list-dir dir)))
 
 ;; Hash the file's raw bytes, not a UTF-8 string: `slurp` throws on a binary
 ;; asset (image, font, …), so the old `(hash/sha256 (slurp path))` couldn't hash a
@@ -90,29 +91,42 @@ land in a later slice."
   ;; dep is resolved before any transitive one (the loop appends sub-deps to the
   ;; queue's tail). That ordering is what makes "direct wins" a simple lookup.
   (package--resolve-loop root
-    deps {} nil (package--lock-index lock) (map :name deps)))
+    deps
+    {}
+    nil
+    (package--lock-index lock)
+    (map :name deps)))
 
 (defn package--resolve-loop (root queue resolved order lock-index direct)
   (cond
     (empty? queue) (map (fn (nm) (get resolved nm)) (reverse order))
-    (contains? resolved (get (first queue) :name)) (do
-                                                     ;; A name already resolved: if it's a direct dep, the root's pin wins and we
-                                                     ;; ignore the transitive re-request silently; otherwise the two requesters
-                                                     ;; must agree on the source (else a loud, pin-it-yourself error).
-                                                     (when (not (includes? direct
-                                                                  (get (first queue) :name)))
-                                                       (package--check-compatible (get resolved
-                                                                                    (get (first queue)
-                                                                                      :name))
-                                                         (first queue)))
-                                                     (package--resolve-loop root
-                                                       (rest queue) resolved order lock-index direct))
-    else (let (dep (first queue)
-               nm (get dep :name)
-               entry (package--resolve-one root dep lock-index))
-           (package--resolve-loop root
-             (append (rest queue) (get entry :deps)) (assoc resolved nm entry) (cons nm order)
-             lock-index direct))))
+    (contains? resolved (get (first queue) :name))
+      (do
+        ;; A name already resolved: if it's a direct dep, the root's pin wins and we
+        ;; ignore the transitive re-request silently; otherwise the two requesters
+        ;; must agree on the source (else a loud, pin-it-yourself error).
+        (when (not (includes? direct
+                     (get (first queue) :name)))
+          (package--check-compatible (get resolved
+                                       (get (first queue)
+                                         :name))
+            (first queue)))
+        (package--resolve-loop root
+          (rest queue)
+          resolved
+          order
+          lock-index
+          direct))
+    else
+      (let (dep (first queue)
+            nm (get dep :name)
+            entry (package--resolve-one root dep lock-index))
+        (package--resolve-loop root
+          (append (rest queue) (get entry :deps))
+          (assoc resolved nm entry)
+          (cons nm order)
+          lock-index
+          direct))))
 
 ;; --- the Dependency ability (ADR-172) ---------------------------------------
 ;; A dependency's KIND is its record identity (`project/dep-path` / `-git` / `-tarball`
@@ -133,12 +147,18 @@ land in a later slice."
   "A project dependency: where its source comes from, and how it is resolved, locked,
   written back to the manifest, and reconciled with another request for the same name.
   Sealed over the four manifest kinds."
-  :sealed [project/dep-path project/dep-git project/dep-tarball project/dep-registry]
-  (dep-kind [self] :-> keyword) (dep-resolve [self root locked]) (dep-check-compatible [self other])
-  (dep-lock-vec [self] :-> vector) (dep-entry-node [self] :-> vector))
+  :sealed
+  [project/dep-path project/dep-git project/dep-tarball project/dep-registry]
+  (dep-kind [self] :-> keyword)
+  (dep-resolve [self root locked])
+  (dep-check-compatible [self other])
+  (dep-lock-vec [self] :-> vector)
+  (dep-entry-node [self] :-> vector))
 
 (impl Dependency
-  project/dep-path (dep-kind [d] :path) (dep-resolve [d root locked] (package--resolve-path root d))
+  project/dep-path
+  (dep-kind [d] :path)
+  (dep-resolve [d root locked] (package--resolve-path root d))
   (dep-check-compatible [d other]
     (when (not (= (get d :path) (get other :path)))
       (package--conflict other
@@ -146,31 +166,57 @@ land in a later slice."
   (dep-lock-vec [e]
     (apply vector
       (list (get e :name)
-        :path (get e :path) :sha256 (get e :sha256) :deps (package--dep-names-vec (get e :deps)))))
+        :path
+        (get e :path)
+        :sha256
+        (get e :sha256)
+        :deps
+        (package--dep-names-vec (get e :deps)))))
   (dep-entry-node [d]
-    [:vector (vector [:symbol (name (get d :name))]
-               [:keyword ":path"] [:str (package--str-lit (get d :path))])]))
+    [:vector
+      (vector [:symbol (name (get d :name))]
+        [:keyword ":path"]
+        [:str (package--str-lit (get d :path))])]))
 
 (impl Dependency
-  project/dep-git (dep-kind [d] :git)
+  project/dep-git
+  (dep-kind [d] :git)
   (dep-resolve [d root locked] (package--resolve-git root d locked))
   (dep-check-compatible [d other]
     (when (not (and (= (get d :url) (get other :url)) (= (get d :ref) (get other :ref))))
       (package--conflict other
         (str "required at both "
-          (get d :url) " @ " (get d :ref) " and " (get other :url) " @ " (get other :ref)))))
+          (get d :url)
+          " @ "
+          (get d :ref)
+          " and "
+          (get other :url)
+          " @ "
+          (get other :ref)))))
   (dep-lock-vec [e]
     (apply vector
       (list (get e :name)
-        :git (get e :url) :ref (get e :ref) :commit (get e :commit) :sha256 (get e :sha256) :deps
+        :git
+        (get e :url)
+        :ref
+        (get e :ref)
+        :commit
+        (get e :commit)
+        :sha256
+        (get e :sha256)
+        :deps
         (package--dep-names-vec (get e :deps)))))
   (dep-entry-node [d]
-    [:vector (vector [:symbol (name (get d :name))]
-               [:keyword ":git"] [:str (package--str-lit (get d :url))] [:keyword ":ref"]
-               [:str (package--str-lit (get d :ref))])]))
+    [:vector
+      (vector [:symbol (name (get d :name))]
+        [:keyword ":git"]
+        [:str (package--str-lit (get d :url))]
+        [:keyword ":ref"]
+        [:str (package--str-lit (get d :ref))])]))
 
 (impl Dependency
-  project/dep-tarball (dep-kind [d] :tarball)
+  project/dep-tarball
+  (dep-kind [d] :tarball)
   (dep-resolve [d root locked] (package--resolve-tarball root d))
   (dep-check-compatible [d other]
     (when (not (and (= (get d :url) (get other :url)) (= (get d :sha256) (get other :sha256))))
@@ -179,30 +225,48 @@ land in a later slice."
   (dep-lock-vec [e]
     (apply vector
       (list (get e :name)
-        :tarball (get e :url) :sha256 (get e :sha256) :deps (package--dep-names-vec (get e :deps)))))
+        :tarball
+        (get e :url)
+        :sha256
+        (get e :sha256)
+        :deps
+        (package--dep-names-vec (get e :deps)))))
   (dep-entry-node [d]
-    [:vector (vector [:symbol (name (get d :name))]
-               [:keyword ":tarball"] [:str (package--str-lit (get d :url))] [:keyword ":sha256"]
-               [:str (package--str-lit (get d :sha256))])]))
+    [:vector
+      (vector [:symbol (name (get d :name))]
+        [:keyword ":tarball"]
+        [:str (package--str-lit (get d :url))]
+        [:keyword ":sha256"]
+        [:str (package--str-lit (get d :sha256))])]))
 
 (impl Dependency
-  project/dep-registry (dep-kind [d] :registry)
+  project/dep-registry
+  (dep-kind [d] :registry)
   (dep-resolve [d root locked] (package--resolve-registry root d locked nil))
   (dep-check-compatible [d other]
     (when (not (= (get d :version) (get other :version)))
       (package--conflict other
         (str "required at two registry versions ("
-          (get d :version) " and " (get other :version) ")"))))
+          (get d :version)
+          " and "
+          (get other :version)
+          ")"))))
   (dep-lock-vec [e]
     (apply vector
       (list (get e :name)
-        :registry (get e :version) :sha256 (get e :sha256) :deps
+        :registry
+        (get e :version)
+        :sha256
+        (get e :sha256)
+        :deps
         (package--dep-names-vec (get e :deps)))))
   ;; The manifest spells a registry dep `:version` (the kind keyword is `:registry`
   ;; only inside the lock, which also records the tarball's sha256 integrity pin).
   (dep-entry-node [d]
-    [:vector (vector [:symbol (name (get d :name))]
-               [:keyword ":version"] [:str (package--str-lit (get d :version))])]))
+    [:vector
+      (vector [:symbol (name (get d :name))]
+        [:keyword ":version"]
+        [:str (package--str-lit (get d :version))])]))
 
 (defn package--resolve-one (root dep lock-index)
   (dep-resolve dep root (get lock-index (get dep :name))))
@@ -211,7 +275,8 @@ land in a later slice."
 ;; :commit/… key-values), for reuse during resolution. nil lock → empty index.
 (defn package--lock-index (lock)
   (fold (fn (m v) (let (lst (vec->list v)) (assoc m (first lst) (rest lst))))
-    {} (if (nil? lock) nil (vec->list lock))))
+    {}
+    (if (nil? lock) nil (vec->list lock))))
 
 ;; A resolved entry is the DEP RECORD with the resolution fields assoc'd on — same
 ;; identity, so it dispatches through the same `Dependency` impls (that is what lets one
@@ -239,14 +304,19 @@ land in a later slice."
 ;; url+ref (avoids a network round-trip); otherwise resolve via ls-remote.
 (defn package--git-commit-for (dep locked)
   (if (and locked
-        (= (plist-get locked :git) (get dep :url)) (= (plist-get locked :ref) (get dep :ref))
+        (= (plist-get locked :git) (get dep :url))
+        (= (plist-get locked :ref) (get dep :ref))
         (plist-get locked :commit))
     (plist-get locked :commit)
     ;; Network-bound (git ls-remote) → the offload pool, so a fetch doesn't
     ;; pin a scheduler worker (ADR-144).
     (or (offload %git-resolve-ref (get dep :url) (get dep :ref))
       (error "package: cannot resolve git ref \""
-        (get dep :ref) "\" for " (get dep :name) " at " (get dep :url)
+        (get dep :ref)
+        "\" for "
+        (get dep :name)
+        " at "
+        (get dep :url)
         " (no such tag/branch/commit on the remote?)"))))
 
 ;; .brood-pkg.blsp is the cache's source of truth: a clone is current when it
@@ -258,12 +328,14 @@ land in a later slice."
       (file-exists? meta)
       (let (form (read-first (slurp meta)))
         (and (pair? form)
-          (= (first form) 'brood-pkg) (= commit (plist-get (rest form) :commit)))))))
+          (= (first form) 'brood-pkg)
+          (= commit (plist-get (rest form) :commit)))))))
 
 (defn package--write-pkg-meta (target url ref commit sha)
   (spit (package--pkg-meta-path target)
     (str ";; .brood-pkg.blsp — written by the package manager. Do not edit by hand.\n"
-      (pr-str (list 'brood-pkg :git url :ref ref :commit commit :sha256 sha :fetched-at (now))) "\n")))
+      (pr-str (list 'brood-pkg :git url :ref ref :commit commit :sha256 sha :fetched-at (now)))
+      "\n")))
 
 (defn package--resolve-git (root dep locked)
   (let (nm (get dep :name)
@@ -319,14 +391,14 @@ land in a later slice."
         status (get resp :status))
     (cond
       (and (>= status 200) (< status 300)) (get resp :body)
-      (and (>= status 300) (< status 400) (> redirects-left 0)) (let (loc (get (get resp :headers)
-                                                                            "location"))
-                                                                  (if (nil? loc)
-                                                                    (error "package: "
-                                                                      url " returned HTTP " status
-                                                                      " with no Location header")
-                                                                    (package--http-fetch loc
-                                                                      (dec redirects-left))))
+      (and (>= status 300) (< status 400) (> redirects-left 0))
+        (let (loc (get (get resp :headers)
+                    "location"))
+          (if (nil? loc)
+            (error "package: "
+              url " returned HTTP " status " with no Location header")
+            (package--http-fetch loc
+              (dec redirects-left))))
       (= status 0) (error "package: cannot fetch " url ": " (get resp :error))
       else (error "package: fetching " url " returned HTTP " status))))
 
@@ -344,12 +416,14 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
       (file-exists? meta)
       (let (form (read-first (slurp meta)))
         (and (pair? form)
-          (= (first form) 'brood-pkg) (= sha (plist-get (rest form) :sha256)))))))
+          (= (first form) 'brood-pkg)
+          (= sha (plist-get (rest form) :sha256)))))))
 
 (defn package--write-tarball-meta (target url sha)
   (spit (package--pkg-meta-path target)
     (str ";; .brood-pkg.blsp — written by the package manager. Do not edit by hand.\n"
-      (pr-str (list 'brood-pkg :tarball url :sha256 sha :fetched-at (now))) "\n")))
+      (pr-str (list 'brood-pkg :tarball url :sha256 sha :fetched-at (now)))
+      "\n")))
 
 (defn package--resolve-tarball (root dep)
   (let (nm (get dep :name)
@@ -439,7 +513,8 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
         version (get dep :version)
         target (package--git-target root nm)
         locked-sha (and locked
-                     (= (plist-get locked :registry) version) (plist-get locked :sha256)))
+                     (= (plist-get locked :registry) version)
+                     (plist-get locked :sha256)))
     (if (and locked-sha (package--tarball-cache-current? target locked-sha))
       (registry--resolved dep target version locked-sha)
       (registry--fetch-release root dep (registry--base-for index) target nm version))))
@@ -455,7 +530,11 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
 (defn registry--fetch-release (root dep base target nm version)
   (match (registry--get-json (registry--release-url base nm version))
     ([:error 404 _message] (error "package: no registry entry for "
-                             nm " " version " (run `nest search " (name nm)
+                             nm
+                             " "
+                             version
+                             " (run `nest search "
+                             (name nm)
                              "` to see what's published)"))
     ([:error _status message] (error "package: " message))
     ([:ok meta] (let (checksum (get meta :checksum))
@@ -490,7 +569,15 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
   (spit (package--pkg-meta-path target)
     (str ";; .brood-pkg.blsp — written by the package manager. Do not edit by hand.\n"
       (pr-str (list 'brood-pkg
-                :registry (name nm) :version version :sha256 checksum :registry-url base :fetched-at
+                :registry
+                (name nm)
+                :version
+                version
+                :sha256
+                checksum
+                :registry-url
+                base
+                :fetched-at
                 (now)))
       "\n")))
 
@@ -500,7 +587,10 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
 ;; kind states what "the same source" means for it.
 (defn package--conflict (dep detail)
   (error "package: conflicting dependency "
-    (get dep :name) " " detail " — pin it explicitly in your root manifest"))
+    (get dep :name)
+    " "
+    detail
+    " — pin it explicitly in your root manifest"))
 
 (defn package--check-compatible (existing dep)
   (if (not (= (record-id existing) (record-id dep)))
@@ -590,11 +680,16 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
         (fold (fn (m mod)
                 (if (and (contains? m mod) (not (package--entry-module? mod)))
                   (error "package: module name collision — '"
-                    mod "' is declared by two of your own source files (" (get m mod) " and " label
+                    mod
+                    "' is declared by two of your own source files ("
+                    (get m mod)
+                    " and "
+                    label
                     "); rename one module (a `(defmodule …)` name must be"
                     " unique within a package)")
                   (assoc m mod label)))
-          seen (package--provided-modules dir))))))
+          seen
+          (package--provided-modules dir))))))
 
 ;; The guard the verbs share: reject any cross-provider module-name collision.
 (defn package--guard-collisions (root entries)
@@ -610,7 +705,10 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
 (defn package--lockfile-content (entries)
   (str ";; project.lock.blsp — generated by `nest fetch`. Do not edit by hand.\n"
     (pr-str (list 'lock
-              :version 1 :dependencies (apply vector (map dep-lock-vec entries))))
+              :version
+              1
+              :dependencies
+              (apply vector (map dep-lock-vec entries))))
     "\n"))
 
 (defn package--lockfile-path (root) (path-join root "project.lock.blsp"))
@@ -718,11 +816,13 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
                          (if (empty? *project-dependencies*)
                            (do (println "package: no dependencies declared") nil)
                            (let (entries (resolve-deps root
-                                           *project-dependencies* (read-lockfile root)))
+                                           *project-dependencies*
+                                           (read-lockfile root)))
                              (package--guard-collisions root entries)
                              (write-lockfile root entries)
                              (println (str "package: locked "
-                                        (count entries) " dependencies in project.lock.blsp"))
+                                        (count entries)
+                                        " dependencies in project.lock.blsp"))
                              entries)))))
 
 (defn update (& names)
@@ -741,7 +841,9 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
           (package--guard-collisions root entries)
           (write-lockfile root entries)
           (println (str "package: updated "
-                     (if (empty? names) "all dependencies" (join ", " names)) " (" (count entries)
+                     (if (empty? names) "all dependencies" (join ", " names))
+                     " ("
+                     (count entries)
                      " locked)"))
           entries)))))
 
@@ -780,8 +882,10 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
                            (println "  (no dependencies)")
                            (package--print-tree *project-dependencies*
                              (package--index-by-name (resolve-deps root
-                                                       *project-dependencies* (read-lockfile root)))
-                             "  " nil))
+                                                       *project-dependencies*
+                                                       (read-lockfile root)))
+                             "  "
+                             nil))
                          nil)))
 
 ;; --- editing the manifest: `nest add` / `nest remove` -----------------------
@@ -803,7 +907,8 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
   (and (= (node-kind n) :list)
     (let (forms (filter (fn (c) (not (trivia? c))) (vec->list (node-children n))))
       (and (not (empty? forms))
-        (= (node-kind (first forms)) :symbol) (= (node-text (first forms)) "project")))))
+        (= (node-kind (first forms)) :symbol)
+        (= (node-text (first forms)) "project")))))
 
 ;; The list index of the node *following* the :dependencies keyword (its value
 ;; vector), or nil if the manifest has no :dependencies clause.
@@ -812,12 +917,14 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
 (defn package--deps-value-index--scan (children i after-kw)
   (cond
     (empty? children) nil
-    after-kw (if (trivia? (first children))
-               (package--deps-value-index--scan (rest children) (inc i) true)
-               i)
-    (and (= (node-kind (first children)) :keyword) (= (node-text (first children)) ":dependencies")) (package--deps-value-index--scan (rest children)
-                                                                                                       (inc i)
-                                                                                                       true)
+    after-kw
+      (if (trivia? (first children))
+        (package--deps-value-index--scan (rest children) (inc i) true)
+        i)
+    (and (= (node-kind (first children)) :keyword) (= (node-text (first children)) ":dependencies"))
+      (package--deps-value-index--scan (rest children)
+        (inc i)
+        true)
     else (package--deps-value-index--scan (rest children) (inc i) false)))
 
 ;; Functional list update: `lst` with element `i` replaced by `(f element)`.
@@ -826,7 +933,10 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
   (if (empty? lst)
     (reverse acc)
     (package--list-update--acc (rest lst)
-      i f (inc j) (cons (if (= j i) (f (first lst)) (first lst)) acc))))
+      i
+      f
+      (inc j)
+      (cons (if (= j i) (f (first lst)) (first lst)) acc))))
 
 ;; The dep name (symbol) of an entry node `[:vector [[:symbol "name"] …]]`, or nil.
 (defn package--entry-name (entry-node)
@@ -842,7 +952,9 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
     (if (nil? didx)
       (append children
         (list [:whitespace " "]
-          [:keyword ":dependencies"] [:whitespace " "] [:vector (vector entry-node)]))
+          [:keyword ":dependencies"]
+          [:whitespace " "]
+          [:vector (vector entry-node)]))
       (package--list-update children
         didx
         (fn (vecnode)
@@ -856,10 +968,11 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
       (package--list-update children
         didx
         (fn (vecnode)
-          [:vector (apply vector
-                     (filter (fn (c)
-                               (not (and (= (node-kind c) :vector) (= (package--entry-name c) nm))))
-                       (vec->list (node-children vecnode))))])))))
+          [:vector
+            (apply vector
+              (filter (fn (c)
+                        (not (and (= (node-kind c) :vector) (= (package--entry-name c) nm))))
+                (vec->list (node-children vecnode))))])))))
 
 ;; Re-render `src` after applying `f` to its (project …) node. Comments survive.
 (defn package--manifest-transform (src f)
@@ -898,7 +1011,8 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
 ;; ("5" reads as an int, not a symbol) without a hand-maintained character list.
 (defn package--valid-dep-name? (nm)
   (and (string? nm)
-    (not (= nm "")) (= (try (read-first nm) (catch _ nil)) (symbol nm))))
+    (not (= nm ""))
+    (= (try (read-first nm) (catch _ nil)) (symbol nm))))
 
 ;; --- editing project.blsp safely --------------------------------------------
 ;; The manifest edit is a read-modify-write: read the source, splice an entry in or
@@ -930,7 +1044,9 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
 (defn package--edit-manifest! (root transform)
   "Apply `transform` (old manifest source -> new source) to project.blsp atomically, retrying if a concurrent edit lands in between. Returns `[old new]` so the caller can roll its own edit back. Raises if it cannot win within `*package--manifest-edit-attempts*` tries."
   (package--edit-manifest--try (path-join root "project.blsp")
-    (package--manifest-lock root) transform *package--manifest-edit-attempts*))
+    (package--manifest-lock root)
+    transform
+    *package--manifest-edit-attempts*))
 
 (defn package--edit-manifest--try (manifest lock transform attempts)
   (if (<= attempts 0)
@@ -985,7 +1101,8 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
                           (do
                             (package--load-manifest manifest)
                             (let (entries (resolve-deps root
-                                            *project-dependencies* (read-lockfile root)))
+                                            *project-dependencies*
+                                            (read-lockfile root)))
                               (package--guard-collisions root entries)
                               (write-lockfile root entries))
                             :%added)
@@ -1021,7 +1138,8 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
   "One search hit: `name  version  — description`."
   (let (desc (get p :description))
     (str (get p :name)
-      "  " (let (v (get p :latest_version)) (if (or (nil? v) (= v "")) "?" v))
+      "  "
+      (let (v (get p :latest_version)) (if (or (nil? v) (= v "")) "?" v))
       (if (and desc (not (= desc ""))) (str "  — " desc) ""))))
 
 (defn registry--search-url (base term enhances)
@@ -1030,7 +1148,8 @@ is given (a plain application name — the registry matches it against each pack
 published `:enhances` names and knows nothing else about it)."
   (require 'url)
   (str base
-    "/api/v1/packages?q=" (url/percent-encode term)
+    "/api/v1/packages?q="
+    (url/percent-encode term)
     (if (or (nil? enhances) (= enhances ""))
       ""
       (str "&enhances=" (url/percent-encode enhances)))))
@@ -1050,7 +1169,8 @@ application (`nest search --enhances bedit zig`). Backs `nest search`."
       ([:ok data] (let (pkgs (get data :packages))
                     (if (or (nil? pkgs) (empty? pkgs))
                       (println (str "No packages matching \""
-                                 term-string "\""
+                                 term-string
+                                 "\""
                                  (if (or (nil? enhances) (= enhances ""))
                                    ""
                                    (str " that enhance " enhances))
@@ -1084,7 +1204,10 @@ application (`nest search --enhances bedit zig`). Backs `nest search`."
         other (filter (fn (d) (not (= (dep-kind d) :registry))) *project-dependencies*))
     (dolist (d other)
       (println (str "package: warning — omitting non-registry dependency "
-                 (name (get d :name)) " (" (dep-kind d) ") from the published metadata")))
+                 (name (get d :name))
+                 " ("
+                 (dep-kind d)
+                 ") from the published metadata")))
     (apply vector
       (map (fn (d) {:name (name (get d :name)) :version (get d :version)}) registry-deps))))
 
@@ -1093,7 +1216,8 @@ application (`nest search --enhances bedit zig`). Backs `nest search`."
 registry indexes these names to answer \"which packages plug into X\". `{}` for an
 ordinary library, which the server stores as \"nothing\"."
   (fold (fn (acc kv) (let ([nm constraint] kv) (assoc acc (name nm) constraint)))
-    {} (map-pairs *project-enhances*)))
+    {}
+    (map-pairs *project-enhances*)))
 
 (defn registry--publish-metadata (checksum)
   "The publish metadata envelope, base64-encoded for the `X-Brood-Publish` header. The
@@ -1140,11 +1264,16 @@ configured `:registry`. Backs `nest publish`."
                                                      "Authorization" (str "Bearer " token)}})
                                    status (get resp :status))
                                (cond
-                                 (= status 0) (error "package: cannot reach the registry at "
-                                                base ": " (get resp :error))
-                                 (and (>= status 200) (< status 300)) (println (str "package: published "
-                                                                                 *project-name* " "
-                                                                                 *project-version*
-                                                                                 "."))
-                                 else (error "package: publish failed (HTTP "
-                                        status "): " (registry--error-text resp)))))))))
+                                 (= status 0)
+                                   (error "package: cannot reach the registry at "
+                                     base
+                                     ": "
+                                     (get resp :error))
+                                 (and (>= status 200) (< status 300))
+                                   (println (str "package: published "
+                                              *project-name* " " *project-version* "."))
+                                 else
+                                   (error "package: publish failed (HTTP "
+                                     status
+                                     "): "
+                                     (registry--error-text resp)))))))))

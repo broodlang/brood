@@ -23,7 +23,9 @@
   (test "text after a closed fence is back to inline rules"
     (assert= (markdown-spans "```\nx\n```\n# H")
       (list [0 3 md-face-code]
-        [4 5 md-face-code] [6 9 md-face-code] [10 13 md-face-heading])))
+        [4 5 md-face-code]
+        [6 9 md-face-code]
+        [10 13 md-face-heading])))
   (test "an unordered bullet marks just the bullet char"
     (assert= (markdown-spans "- item")
       (list [0 1 md-face-list])))
@@ -63,6 +65,7 @@
   (cond
     (empty? spans) true
     (empty? (rest spans)) true
-    else (let ([s1 e1 f1] (first spans)
-               [s2 e2 f2] (second spans))
-           (and (<= e1 s2) (md-test--non-overlapping? (rest spans))))))
+    else
+      (let ([s1 e1 f1] (first spans)
+            [s2 e2 f2] (second spans))
+        (and (<= e1 s2) (md-test--non-overlapping? (rest spans))))))

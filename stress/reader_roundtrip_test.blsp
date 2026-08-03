@@ -24,9 +24,10 @@
       (= c 7) nil
       (= c 8) (let (s2 (lcg s)) [(gen s2 (- depth 1)) (gen (lcg s2) (- depth 1))])
       (= c 9) (let (s2 (lcg s)) (list (gen s2 (- depth 1)) (gen (lcg s2) (- depth 1))))
-      else (let (s2 (lcg s))
-             {(keyword (str "a" (rem s2 20))) (gen s2 (- depth 1))
-              (rem s2 64) (gen (lcg s2) (- depth 1))}))))
+      else
+        (let (s2 (lcg s))
+          {(keyword (str "a" (rem s2 20))) (gen s2 (- depth 1))
+           (rem s2 64) (gen (lcg s2) (- depth 1))}))))
 
 (defn prop (s n)
   (if (= n 0)

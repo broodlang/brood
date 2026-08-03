@@ -55,7 +55,9 @@
                      (tcp-close c))))))
       (let (port-cert (receive ([:ready p ct] [p ct]) (after *test-wait-ms* :timeout))
             s (tls-request "localhost"
-                (first port-cert) ["HEAD " (bytes 1 254) " TAIL"] (second port-cert)))
+                (first port-cert)
+                ["HEAD " (bytes 1 254) " TAIL"]
+                (second port-cert)))
         (let (resp (utf8-bytes->string (tcp-drain s)))
           ;; "HEAD " = 72 69 65 68 32, then 1 254, then " TAIL" = 32 84 65 73 76
           (assert= resp "[72 69 65 68 32 1 254 32 84 65 73 76]")))))

@@ -84,10 +84,11 @@ the presence triple `[text markers names]` (closure edits and the seed), a DELTA
 `buffer-marker-move` / `[:io-write]` ops — O(change), the document never ships), or a
 bare text string (plain projections, tests)."
   (cond
-    (map? view) {:text nil
-                 :splice (get view :splice)
-                 :cursors (or (get view :markers) {})
-                 :names (or (get view :participants) {})}
+    (map? view)
+      {:text nil
+       :splice (get view :splice)
+       :cursors (or (get view :markers) {})
+       :names (or (get view :participants) {})}
     (vector? view) {:text (nth view 0) :splice nil :cursors (nth view 1) :names (nth view 2)}
     else {:text view :splice nil :cursors {} :names {}}))
 
@@ -154,18 +155,22 @@ seed) is handed back as `[:text s]`; a cursor-only delta is `:noop`."
                                   [nlo nhi _] (splice-transform [plo phi ""]
                                                 [flo fhi (string-length frepl)]))
                               [nlo nhi plen]))
-                       pending) (and splice
-                                                                                                                                                                                                                                                                                                                                                                                              (not own?))
+                       pending)
+                       (and splice
+                         (not own?))
                      ()
                      ; ambiguous → resync resets
                      else pending)
           nlink (assoc link :version version :pending npending))
       (cond
         own? [nlink :noop]
-        (and splice mergeable?) [nlink [:splice (splice-transform-all splice
-                                                  (map (fn (p)
-                                                         (let ([plo phi plen] p) [plo phi plen]))
-                                                    pending))]]
+        (and splice mergeable?)
+          [nlink
+            [:splice
+              (splice-transform-all splice
+                (map (fn (p)
+                       (let ([plo phi plen] p) [plo phi plen]))
+                  pending))]]
         splice [nlink :resync]
         (nil? text) [nlink :noop]
         else [nlink [:text text]]))))

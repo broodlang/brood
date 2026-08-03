@@ -89,10 +89,11 @@
     ;; The four keys are deliberately *misaligned* (no two rankings coincide,
     ;; and none matches id order) so a bug that sorts on the wrong field can't
     ;; pass; the input is also pre-scrambled so the id sort genuinely reorders.
-    (let (ps [{:id 2 :mailbox 9 :memory 10 :reds-rate 50} {:id 3
-                                                           :mailbox 1
-                                                           :memory 30
-                                                           :reds-rate 99}
+    (let (ps [{:id 2 :mailbox 9 :memory 10 :reds-rate 50}
+               {:id 3
+                :mailbox 1
+                :memory 30
+                :reds-rate 99}
                {:id 1 :mailbox 5 :memory 20 :reds-rate 0}])
       (assert= (map (fn (p) (get p :id)) (observer/observe--sort ps :id)) '(1 2 3))
       ; mbox 9,5,1
@@ -128,8 +129,11 @@
       (assert= (get (nth rated 1) :reds-rate) 0)
       (assert= (get (nth rated 2) :reds-rate) nil)))
   (test "observer/observe--tree-order builds a parent→child forest with depths"
-    (let (ps [{:id 1 :parent nil} {:id 4 :parent 2}
-               {:id 2 :parent 1} {:id 5 :parent 3} {:id 3 :parent 1}]
+    (let (ps [{:id 1 :parent nil}
+               {:id 4 :parent 2}
+               {:id 2 :parent 1}
+               {:id 5 :parent 3}
+               {:id 3 :parent 1}]
           ordered (observer/observe--tree-order ps))
       ;; DFS: 1, then 2 and its child 4, then 3 and its child 5
       (assert= (map (fn (p) (get p :id)) ordered) '(1 2 4 3 5))
@@ -198,7 +202,8 @@
     (assert= (observer/observe--mouse-row->sel 3 10 5 20) 8)
     (assert= (observer/observe--mouse-row->sel 7 10 5 20) 12))
   (test "observer/observe--apply-mouse: left-press selects the clicked row + clears :msg"
-    (let (st {:procs [(pinfo 10 :a :running 0 0) (pinfo 11 :b :running 0 0)
+    (let (st {:procs [(pinfo 10 :a :running 0 0)
+                       (pinfo 11 :b :running 0 0)
                        (pinfo 12 :c :running 0 0)]
               :n 3
               :sel 0
@@ -209,7 +214,8 @@
       (assert= (get clicked :sel-id) 12)
       (assert= (get clicked :msg) nil)))
   (test "observer/observe--apply-mouse: the wheel scrolls the selection one row, clamped"
-    (let (st {:procs [(pinfo 10 :a :running 0 0) (pinfo 11 :b :running 0 0)
+    (let (st {:procs [(pinfo 10 :a :running 0 0)
+                       (pinfo 11 :b :running 0 0)
                        (pinfo 12 :c :running 0 0)]
               :n 3
               :sel 1
@@ -218,11 +224,13 @@
       (assert= (get (observer/observe--apply-mouse st [:mouse :scroll-down nil 0 0] 10) :sel-id) 12)
       ;; clamps at the ends
       (assert= (get (observer/observe--apply-mouse (assoc st :sel 0 :sel-id 10)
-                      [:mouse :scroll-up nil 0 0] 10)
+                      [:mouse :scroll-up nil 0 0]
+                      10)
                  :sel-id)
         10)
       (assert= (get (observer/observe--apply-mouse (assoc st :sel 2 :sel-id 12)
-                      [:mouse :scroll-down nil 0 0] 10)
+                      [:mouse :scroll-down nil 0 0]
+                      10)
                  :sel-id)
         12)))
   (test "observer/observe--apply-mouse: anything but left-click / wheel is a no-op (state kept)"
@@ -241,7 +249,8 @@
   (test "observer/observe--apply-mouse: tolerates the trailing mods element (6-vector)"
     ;; The real event grew a [:mouse … mods] tail (ADR-077); apply-mouse reads fields
     ;; positionally, so a 6-element event with held modifiers still selects/scrolls.
-    (let (st {:procs [(pinfo 10 :a :running 0 0) (pinfo 11 :b :running 0 0)
+    (let (st {:procs [(pinfo 10 :a :running 0 0)
+                       (pinfo 11 :b :running 0 0)
                        (pinfo 12 :c :running 0 0)]
               :n 3
               :sel 0
@@ -318,18 +327,34 @@
     ;; the input is coloured by the same `highlight-chunks` the REPL line editor uses
     (let (edit (assoc (editor/lineedit/lineedit-init "λ " "" []) :text "(+ 1 2)" :point 7)
           f (observe-frame sample-node
-              [(pinfo 1 :a :running 0 0)] 0 60 12 false :id :ok {:mode :command :edit edit :msg nil})
+              [(pinfo 1 :a :running 0 0)]
+              0
+              60
+              12
+              false
+              :id
+              :ok
+              {:mode :command :edit edit :msg nil})
           ;; text ops on the minibuffer row (rows-1 = 11) carrying an :fg face — the
           ;; coloured tokens (e.g. the numbers / the operator)
           coloured (filter (fn (op)
                              (and (= (first op) :text)
-                               (= (nth op 1) 11) (>= (count op) 5) (map? (nth op 4))
+                               (= (nth op 1) 11)
+                               (>= (count op) 5)
+                               (map? (nth op 4))
                                (contains? (nth op 4) :fg)))
                      f))
       (is (> (count coloured) 0))))
   (test "a :msg replaces the detail line"
     (let (f (observe-frame sample-node
-              [(pinfo 1 :a :running 0 0)] 0 60 12 false :id :ok {:msg "=> 42"}))
+              [(pinfo 1 :a :running 0 0)]
+              0
+              60
+              12
+              false
+              :id
+              :ok
+              {:msg "=> 42"}))
       (is (includes? (nth (nth f (- (count f) 2)) 3) "=> 42")))))
 
 ; cancel too
@@ -353,8 +378,10 @@
           ; insert a char → still editing
           typed (observer/observe--command-key s back "x")
           submitted (observer/observe--command-key (assoc s
-                                                     :edit (editor/lineedit/lineedit-init "λ "
-                                                             "" []))
+                                                     :edit
+                                                       (editor/lineedit/lineedit-init "λ "
+                                                         ""
+                                                         []))
                       back :enter))
       ; empty submit
       (assert= (get typed :mode) :command)
@@ -404,7 +431,14 @@
       (assert= (get (get r :confirm) :id) 5)))
   (test "observe-frame renders the kill-confirm prompt in the footer"
     (let (f (observe-frame sample-node
-              [(pinfo 1 :a :running 0 0)] 0 60 12 false :id :ok {:confirm {:id 1 :name :a}}))
+              [(pinfo 1 :a :running 0 0)]
+              0
+              60
+              12
+              false
+              :id
+              :ok
+              {:confirm {:id 1 :name :a}}))
       (is (includes? (nth (last f) 3) "kill pid 1"))
       (is (includes? (nth (last f) 3) "y/n"))
       (assert= (nth (last f) 4) {:fg :red :bold true}))))

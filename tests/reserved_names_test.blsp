@@ -112,14 +112,16 @@
     ;; the set lives in the runtime's shared code region, like the globals table
     (let (me (self))
       (spawn (send me
-               [:result (try
-                          (do (eval-string "(def get (fn (a b) :x))") :allowed)
-                          (catch e :refused))]))
+               [:result
+                 (try
+                   (do (eval-string "(def get (fn (a b) :x))") :allowed)
+                   (catch e :refused))]))
       (assert= :refused (receive ([:result r] r)))))
   (test "and a spawned process can still redefine its own names"
     (let (me (self))
       (spawn (send me
-               [:result (try
-                          (do (eval-string "(def rn-child (fn () 1))") :allowed)
-                          (catch e :refused))]))
+               [:result
+                 (try
+                   (do (eval-string "(def rn-child (fn () 1))") :allowed)
+                   (catch e :refused))]))
       (assert= :allowed (receive ([:result r] r))))))

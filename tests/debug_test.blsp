@@ -176,10 +176,11 @@
       (letrec (drive (fn (tries)
                        (cond
                          (= tries 0) :gave-up
-                         (> (count (paused dbg)) 0) (do
-                                                      (resume-all dbg)
-                                                      (sleep 20)
-                                                      (drive (dec tries)))
+                         (> (count (paused dbg)) 0)
+                           (do
+                             (resume-all dbg)
+                             (sleep 20)
+                             (drive (dec tries)))
                          else :done)))
         (sleep 40)
         (drive 50))
@@ -383,10 +384,11 @@
       (letrec (drive (fn (tries)
                        (cond
                          (= tries 0) :gave-up
-                         (> (count (paused dbg)) 0) (do
-                                                      (resume-all dbg)
-                                                      (sleep 10)
-                                                      (drive (dec tries)))
+                         (> (count (paused dbg)) 0)
+                           (do
+                             (resume-all dbg)
+                             (sleep 10)
+                             (drive (dec tries)))
                          else :done)))
         (sleep 20)
         (drive 100))

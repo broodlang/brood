@@ -53,19 +53,25 @@ buffer wants — the user should be able to see where they may type."
                   (let (line (first lines)
                         next-off (+ off (string-length line) 1))
                     (cond
-                      (starts-with? line open-prefix) (go (rest lines)
-                                                        (inc lineno) next-off
-                                                        {:open-line lineno :start next-off} acc)
-                      (and open (starts-with? line close-prefix)) (go (rest lines)
-                                                                    (inc lineno) next-off nil
-                                                                    (cons {:start (get open :start)
-                                                                           :end (max (get open
-                                                                                       :start)
-                                                                                  (dec off))
-                                                                           :open-line (get open
-                                                                                        :open-line)
-                                                                           :close-line lineno}
-                                                                      acc))
+                      (starts-with? line open-prefix)
+                        (go (rest lines)
+                          (inc lineno)
+                          next-off
+                          {:open-line lineno :start next-off}
+                          acc)
+                      (and open (starts-with? line close-prefix))
+                        (go (rest lines)
+                          (inc lineno)
+                          next-off
+                          nil
+                          (cons {:start (get open :start)
+                                 :end (max (get open
+                                             :start)
+                                        (dec off))
+                                 :open-line (get open
+                                              :open-line)
+                                 :close-line lineno}
+                            acc))
                       else (go (rest lines) (inc lineno) next-off open acc))))))
     (go (string-split text "\n") 0 0 nil '())))
 
@@ -102,7 +108,8 @@ typed inside the regions, so it is stable while they work."
   (let (r (fold (fn (acc region)
                   (let ([pos parts] acc)
                     [(get region :end) (cons (substring text pos (get region :start)) parts)]))
-            [0 '()] regions)
+            [0 '()]
+            regions)
         [pos parts] r)
     (apply str (reverse (cons (substring text pos (string-length text)) parts)))))
 
@@ -120,10 +127,12 @@ changed shape, and there is no honest correspondence to preserve)."
                       (let ([pos parts] acc
                             [i region] ir
                             old (nth old-regions i))
-                        [(get region :end) (cons (region-text old-text old)
-                                             (cons (substring new-text pos (get region :start))
-                                               parts))]))
-                [0 '()] (enumerate new-regions))
+                        [(get region :end)
+                          (cons (region-text old-text old)
+                            (cons (substring new-text pos (get region :start))
+                              parts))]))
+                [0 '()]
+                (enumerate new-regions))
             [pos parts] r)
         (apply str (reverse (cons (substring new-text pos (string-length new-text)) parts)))))))
 

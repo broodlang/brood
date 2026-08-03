@@ -105,7 +105,10 @@ plus any surplus already read past it. Policy is Brood; only the syscalls are Ru
                 cut (+ (- have (byte-length tail)) i (byte-length sep)))
             [(subbytes buf 0 cut) (subbytes buf cut (byte-length buf))])
           (tcp--read-until sock
-            sep (cons d acc) (+ have (byte-length d)) (tcp--straddle probe (byte-length sep))))))
+            sep
+            (cons d acc)
+            (+ have (byte-length d))
+            (tcp--straddle probe (byte-length sep))))))
     ([:tcp-closed ^sock] [:closed (bytes-concat (reverse acc))])))
 
 ;; The last (|sep|-1) bytes of `probe` — everything a delimiter spanning the next

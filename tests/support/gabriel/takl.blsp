@@ -33,4 +33,5 @@ The oracle is upstream's own expected output in `tests/corpus/gabriel/data/takl.
     (if (not (shorterp y x))
       z
       (mas (mas (rest x) y z)
-        (mas (rest y) z x) (mas (rest z) x y)))))
+        (mas (rest y) z x)
+        (mas (rest z) x y)))))

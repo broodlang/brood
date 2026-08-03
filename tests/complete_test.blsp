@@ -143,7 +143,8 @@
   (test "an empty name is rejected" (refute (complete/complete--tag-name? "")))
   (test "ordinary tag names are accepted"
     (and (is (complete/complete--tag-name? "slow"))
-      (is (complete/complete--tag-name? "needs-db")) (is (complete/complete--tag-name? "db2"))))
+      (is (complete/complete--tag-name? "needs-db"))
+      (is (complete/complete--tag-name? "db2"))))
   (test "a malformed keyword in a fragment is dropped, not offered"
     (assert= (complete/complete--keywords ":ok :bad\"") (list "ok")))
   (test "a :tags whose bracket closes on a LATER line is not harvested"

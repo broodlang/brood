@@ -30,12 +30,14 @@
 ;; open to third-party types (a Date, a Number, another lib's struct each impl it).
 (defability Localize (localize [self locale] :-> string))
 (impl Localize
-  show-localize-test/money (localize [m locale] (money--render m locale)))
+  show-localize-test/money
+  (localize [m locale] (money--render m locale)))
 
 ;; `Display` reads the AMBIENT locale, so plain `(println money)` localizes — the op
 ;; stays 1-arg; the locale flows through the dynamic var, not an extra parameter.
 (impl Display
-  show-localize-test/money (to-str [m] (localize m *locale*)))
+  show-localize-test/money
+  (to-str [m] (localize m *locale*)))
 
 ;; `Inspect` — the debug form is locale-independent and self-describing.
 (impl Inspect

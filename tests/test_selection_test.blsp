@@ -27,7 +27,8 @@
           (list (selection--test "adds" [:fast] "tests/demo_test.blsp" 4)
             (selection--test "multiplies" [:fast :slow] "tests/demo_test.blsp" 5)))
     (selection--unit :parallel
-      "strings" (list (selection--test "joins" [] "tests/demo_test.blsp" 9)))))
+      "strings"
+      (list (selection--test "joins" [] "tests/demo_test.blsp" 9)))))
 
 ;; The full labels a selection produces, in order — what every assertion compares.
 (defn selection--labels (units)
@@ -147,7 +148,8 @@
   (test "a shuffled run still contains each label"
     (let (shuffled (selection--select {:seed 12345}))
       (and (is (includes? shuffled "math › adds"))
-        (is (includes? shuffled "math › multiplies")) (is (includes? shuffled "strings › joins"))))))
+        (is (includes? shuffled "math › multiplies"))
+        (is (includes? shuffled "strings › joins"))))))
 
 (describe "test selection: --partitions sharding"
   ;; The contract CI depends on: the shards must PARTITION the suite — together
@@ -178,7 +180,8 @@
     (let (counts (fold (fn (acc i)
                          (let (k (rem (test/test--label-hash (str "group " i " › case " i)) 2))
                            (assoc acc k (+ 1 (or (get acc k) 0)))))
-                   {} (range 0 200)))
+                   {}
+                   (range 0 200)))
       (and (is (> (or (get counts 0) 0) 50)) (is (> (or (get counts 1) 0) 50))))))
 
 (describe "test selection: the filter-spec constructor"
@@ -188,13 +191,15 @@
   (test "absent lists become empty, not nil-holes"
     (let (spec (test/test--make-filter nil nil nil nil nil nil nil nil))
       (and (assert= (get spec :only) nil)
-        (assert= (get spec :exclude) nil) (assert= (get spec :include) nil))))
+        (assert= (get spec :exclude) nil)
+        (assert= (get spec :include) nil))))
   (test "shard defaults to 0 when unspecified"
     (assert= (get (test/test--make-filter nil nil nil nil nil nil 4 nil) :shard) 0))
   (test "seed and shard values pass through"
     (let (spec (test/test--make-filter nil nil nil nil nil 42 8 3))
       (and (assert= (get spec :seed) 42)
-        (assert= (get spec :shards) 8) (assert= (get spec :shard) 3))))
+        (assert= (get spec :shards) 8)
+        (assert= (get spec :shard) 3))))
   (test "a constructed spec drives selection end-to-end"
     (assert= (selection--select (test/test--make-filter (list "slow") nil nil nil nil nil nil nil))
       (list "math › multiplies"))))

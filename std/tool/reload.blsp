@@ -95,26 +95,28 @@ trigger, docs/type-soundness-reload.md).")
 (defn reload--loop (path last &optional on-reload)
   (let (now (file-mtime path))
     (cond
-      (nil? now) (do
-                   (println "[reload] missing:" path)
-                   (sleep *reload-poll-ms*)
-                   (reload--loop path last on-reload))
+      (nil? now)
+        (do
+          (println "[reload] missing:" path)
+          (sleep *reload-poll-ms*)
+          (reload--loop path last on-reload))
       (= now last) (do
                      (sleep *reload-poll-ms*)
                      (reload--loop path last on-reload))
-      else (do
-             (try
-               (do
-                 (reload--in-package-context path (fn () (reload-defs path)))
-                 (println "[reload]" path)
-                 (when on-reload
-                   (try
-                     (on-reload path)
-                     (catch e (println "[reload] on-reload failed:" path "—" e)))))
-               (catch e
-                 (println "[reload] failed:" path "—" e)))
-             (sleep *reload-poll-ms*)
-             (reload--loop path now on-reload)))))
+      else
+        (do
+          (try
+            (do
+              (reload--in-package-context path (fn () (reload-defs path)))
+              (println "[reload]" path)
+              (when on-reload
+                (try
+                  (on-reload path)
+                  (catch e (println "[reload] on-reload failed:" path "—" e)))))
+            (catch e
+              (println "[reload] failed:" path "—" e)))
+          (sleep *reload-poll-ms*)
+          (reload--loop path now on-reload)))))
 
 ;; Recursive .blsp collector. Returns a flat list of paths (relative to the
 ;; original `dir` argument). Mirrors the walk in std/project.blsp; lives here
@@ -130,7 +132,8 @@ trigger, docs/type-soundness-reload.md).")
             (dir? p) (append-two (reload--collect-blsp p) acc)
             (ends-with? entry ".blsp") (cons p acc)
             else acc)))
-      nil (list-dir dir))
+      nil
+      (list-dir dir))
     nil))
 
 ;; The directory watcher loop. Holds the set of files we've already noticed.
@@ -195,5 +198,6 @@ use yet)."
       (dolist (p initial)
         (spawn (reload--loop p (file-mtime p) on-reload)))
       (spawn (reload--dir-loop path initial on-reload))
-      nil) else
+      nil)
+      else
     (do (spawn (reload--loop path (file-mtime path) on-reload)) nil)))

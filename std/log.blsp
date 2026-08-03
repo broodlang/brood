@@ -58,7 +58,12 @@ and `impl LogBackend` for it; reuse `backend-passes?` for the standard gate."
 (defn log--default-format (rec)
   "The default line for a record: `[LEVEL ts] msg` plus a newline."
   (str "["
-    (or (get log--labels (get rec :level)) "?") " " (get rec :ts) "] " (get rec :msg) "\n"))
+    (or (get log--labels (get rec :level)) "?")
+    " "
+    (get rec :ts)
+    "] "
+    (get rec :msg)
+    "\n"))
 
 ;; ---- the LogBackend ability -------------------------------------------------
 
@@ -92,7 +97,11 @@ backend's policy — a custom `LogBackend` should call this so it honours the sa
   log/line-backend
   (to-str [b]
     (str "#<log-backend "
-      (to-str (get b :sink)) " min=" (get b :min-level) (if (get b :filter) " filtered" "") ">")))
+      (to-str (get b :sink))
+      " min="
+      (get b :min-level)
+      (if (get b :filter) " filtered" "")
+      ">")))
 
 (defn backend (sink & opts)
   "A logger backend over `sink` (an `io` port) — a `line-backend`, which writes one
@@ -110,7 +119,8 @@ For a backend that does something other than write one line, `defrecord` your ow
     (line-backend sink
       (or (get o :min-level) :debug)
       ; nil = accept all
-      (get o :filter) (or (get o :format) log--default-format))))
+      (get o :filter)
+      (or (get o :format) log--default-format))))
 
 (defn stdout-backend (& opts)
   "A backend writing to stdout (`opts` as for `backend`)."
@@ -152,7 +162,8 @@ each decides for itself whether and how to write it. Uses `fold` so it walks eit
         (log--dispatch (get cfg :backends) rec))
       cfg))
   (cast [:add-backend b] (assoc cfg :backends (cons b (apply list (get cfg :backends)))))
-  (cast [:set-level level] (assoc cfg :level level)) (query :config cfg))
+  (cast [:set-level level] (assoc cfg :level level))
+  (query :config cfg))
 
 ;; ---- lifecycle --------------------------------------------------------------
 (defn start-logger (& opts)

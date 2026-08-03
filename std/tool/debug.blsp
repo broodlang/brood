@@ -107,7 +107,8 @@ A no-op when no debugger is in context. `break`/`break-when` expand to a call to
   (let (ctx (%trace-context) dbg (get ctx :debugger))
     (when dbg
       (send dbg
-        [:break (self)
+        [:break
+          (self)
           {:label label
            :vals (debug--pairs->map explicit)
            :scope scope
@@ -387,7 +388,10 @@ running shows `:value :running`."
   "The causal tree as a flat list of indented, pid-tagged strings (one per span)."
   (mapcat (fn (node)
             (cons (str (apply str (map (constantly "  ") (range depth)))
-                    (get node :label) " [" (get node :pid) "] => "
+                    (get node :label)
+                    " ["
+                    (get node :pid)
+                    "] => "
                     (pr-str-bounded (get node :value)))
               (causal--lines (get node :children) (inc depth))))
     nodes))
@@ -405,7 +409,10 @@ cross-process causal tree, and the hottest traced forms. Rendered by both the
     (append (cons "── parked processes ──"
               (map (fn (entry)
                      (str "  "
-                       (first entry) "  " (get (second entry) :label) "  "
+                       (first entry)
+                       "  "
+                       (get (second entry) :label)
+                       "  "
                        (pr-str-bounded (get (second entry) :vals))))
                 (get state :paused)))
       (cons "── causal tree ──" (causal--lines (causal-tree dbg) 0))
@@ -478,7 +485,8 @@ subexpression). Non-node entries (`:enter`/`:exit`) pass through."
       (let (dbg (tc-debugger))
         (when dbg
           (send dbg
-            [:break (self)
+            [:break
+              (self)
               ;; :vals is a MAP, same as `break`'s (`debug--pairs->map`) — so
               ;; `locals-of` / `eval-at` work on a step-park too: the traced node's
               ;; value is in scope as `value` (`(eval-at d 1 "value")`).
@@ -563,7 +571,12 @@ re-implementation; it registers the `,resume`/`,step` commands via the REPL regi
                   (go (rest es)
                     (inc i)
                     (cons (str "  ["
-                            i "] " (first (first es)) "  " (get (second (first es)) :label) " "
+                            i
+                            "] "
+                            (first (first es))
+                            "  "
+                            (get (second (first es)) :label)
+                            " "
                             (pr-str-bounded (get (second (first es)) :vals)))
                       acc)))))
     (go entries 1 ())))
@@ -588,16 +601,19 @@ no raw-terminal setup and works when piped."
           (cond
             (= line "q") :done
             (or (= line "") (= line "p")) (debug-repl dbg)
-            (= cmd "r") (do
-                          (if (> (count parts) 1)
-                            (println (debug--resume-nth dbg
-                                       entries (try (eval-string (second parts)) (catch _ nil))))
-                            (do (resume-all dbg) (println "resumed all")))
-                          ; let a resumed process reach its next break before redraw
-                          (sleep 30)
-                          (debug-repl dbg))
-            else (do
-                   (try
-                     (println (str "=> " (pr-str-bounded (eval-string line))))
-                     (catch e (println (str "! " (pr-str-bounded e)))))
-                   (debug-repl dbg))))))))
+            (= cmd "r")
+              (do
+                (if (> (count parts) 1)
+                  (println (debug--resume-nth dbg
+                             entries
+                             (try (eval-string (second parts)) (catch _ nil))))
+                  (do (resume-all dbg) (println "resumed all")))
+                ; let a resumed process reach its next break before redraw
+                (sleep 30)
+                (debug-repl dbg))
+            else
+              (do
+                (try
+                  (println (str "=> " (pr-str-bounded (eval-string line))))
+                  (catch e (println (str "! " (pr-str-bounded e)))))
+                (debug-repl dbg))))))))

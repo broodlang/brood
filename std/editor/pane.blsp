@@ -111,7 +111,8 @@ content-agnostic — the editor supplies the payload and the keybindings.")
   "The tree with the selected pane's payload replaced by `(f payload)` — how an
 editor applies an edit to whatever the active pane shows."
   (pane--update tree
-    (pane-selected-path tree) (fn (leaf) (assoc leaf :payload (f (get leaf :payload))))))
+    (pane-selected-path tree)
+    (fn (leaf) (assoc leaf :payload (f (get leaf :payload))))))
 
 (defn pane-update-path (tree path f)
   "The tree with the payload of the pane at `path` replaced by `(f payload)` — the
@@ -259,4 +260,5 @@ i.e. dragging the divider to the pointer. Feed the result to `pane-set-ratio`."
   "Set the `:ratio` of the split at `path` (clamped to `[0.1 0.9]` so neither pane
 vanishes), returning the re-proportioned tree — one step of a divider drag."
   (pane--update tree
-    path (fn (split) (assoc split :ratio (max 0.1 (min 0.9 ratio))))))
+    path
+    (fn (split) (assoc split :ratio (max 0.1 (min 0.9 ratio))))))

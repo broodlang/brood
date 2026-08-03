@@ -147,8 +147,10 @@
     (is (= (match (bytes 0 5 0 6) ((bytes (a :u16) (a :u16)) :equal) (_ :diff)) :diff)))
   (test "mixes with literals, one-byte binders, and & rest — a mini frame header"
     (is (= (match (bytes-concat [(bytes 127 2) (int->bytes 5 2) #b"hello" #b"!"])
-             ((bytes 127 kind (len :u16) (payload len) & more) [kind len
-                                                                 (utf8-bytes->string payload) more])
+             ((bytes 127 kind (len :u16) (payload len) & more) [kind
+                                                                 len
+                                                                 (utf8-bytes->string payload)
+                                                                 more])
              (_ :no))
           [2 5 "hello" (bytes 33)])))
   (test "an unknown spec keyword is a clean expand-time error"

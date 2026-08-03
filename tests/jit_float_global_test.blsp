@@ -24,8 +24,12 @@
 ;; supplied by a global, result rebuilt into a fresh vector. The unboxed `Op::Float`
 ;; has to re-box correctly on the way into `MakeVector`.
 (defn fg-step (v i)
-  [(+ (nth v 0) (* fg-dt (nth v 3))) (+ (nth v 1) (* fg-dt (nth v 4)))
-    (nth v 2) (nth v 3) (nth v 4) (nth v 5)])
+  [(+ (nth v 0) (* fg-dt (nth v 3)))
+    (+ (nth v 1) (* fg-dt (nth v 4)))
+    (nth v 2)
+    (nth v 3)
+    (nth v 4)
+    (nth v 5)])
 
 (defn fg-run (k v)
   (if (>= k 2000) v (fg-run (+ k 1) (fg-step v 0))))

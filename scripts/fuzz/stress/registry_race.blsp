@@ -22,7 +22,8 @@
     :ok
     (do
       (eval (list 'defability
-              (symbol (str "A" i)) (list (symbol (str "op" i)) ['self] :-> 'any)))
+              (symbol (str "A" i))
+              (list (symbol (str "op" i)) ['self] :-> 'any)))
       (decl (+ i 1)))))
 (decl 0)
 
@@ -50,5 +51,7 @@
 
 (let (lost (missing 0 nil))
   (println (str "registered="
-             n " LOST=" (count lost)
+             n
+             " LOST="
+             (count lost)
              (if (nil? lost) "  (all present)" (str "  e.g. " (pr-str (take 8 lost)))))))

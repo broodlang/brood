@@ -110,7 +110,8 @@ look-alike, and each prints as itself (`inspect` shows the contents).")
       (str "#<queue " (get q :size) " front=" (to-str (queue-peek q)) ">"))))
 
 (impl Inspect
-  queue/queue (inspect [q] (str "#<queue " (pr-str (queue-to-list q)) ">")))
+  queue/queue
+  (inspect [q] (str "#<queue " (pr-str (queue-to-list q)) ">")))
 
 ;; ============================================================================
 ;; Min-priority queue — a `pq` RECORD wrapping a sorted list of [priority value]
@@ -194,4 +195,5 @@ Stable: among equal priorities, earlier inserts pop first (FIFO)."
       (str "#<pq " (pq-size q) " min=" (to-str (pq-peek-priority q)) ">"))))
 
 (impl Inspect
-  queue/pq (inspect [q] (str "#<pq " (pr-str (get q :entries)) ">")))
+  queue/pq
+  (inspect [q] (str "#<pq " (pr-str (get q :entries)) ">")))

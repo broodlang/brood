@@ -149,7 +149,9 @@
         (println "P22: r1=" (pr-str r1) "r2=" (pr-str r2))
         (println "P22-correct (both fired):"
           (and r1
-            r2 (not (= r1 r2)) (or (= (first r1) :link) (= (first r1) :monitor))
+            r2
+            (not (= r1 r2))
+            (or (= (first r1) :link) (= (first r1) :monitor))
             (or (= (first r2) :link) (= (first r2) :monitor)))))))
   (trap-exit false))
 

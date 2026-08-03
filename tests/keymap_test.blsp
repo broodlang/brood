@@ -100,7 +100,8 @@
 
   (test "several keys bound to one command all come back"
     (let (km (-> {}
-               (keymap-bind [:ctrl-n] 'next-line) (keymap-bind [:down] 'next-line)))
+               (keymap-bind [:ctrl-n] 'next-line)
+               (keymap-bind [:down] 'next-line)))
       (assert= (count (keymap-where-is km 'next-line)) 2)
       (is (includes? (keymap-where-is km 'next-line) [:ctrl-n]))
       (is (includes? (keymap-where-is km 'next-line) [:down]))))
@@ -111,7 +112,8 @@
 
   (test "deep chords and mixed depths"
     (let (km (-> {}
-               (keymap-bind [:ctrl-c "t" "p"] 'test-project) (keymap-bind ["q"] 'quit)))
+               (keymap-bind [:ctrl-c "t" "p"] 'test-project)
+               (keymap-bind ["q"] 'quit)))
       (assert= (keymap-where-is km 'test-project) (list [:ctrl-c "t" "p"]))
       (assert= (keymap-where-is km 'quit) (list ["q"]))))
 

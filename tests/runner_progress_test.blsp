@@ -23,20 +23,23 @@
     (assert= (with-out-str (test/progress-mark (list (progress-test--fail "t")))) "F"))
   (test "several results mark in order"
     (assert= (with-out-str (test/progress-mark (list (progress-test--pass "a")
-                                                 (progress-test--fail "b") (progress-test--pass "c"))))
+                                                 (progress-test--fail "b")
+                                                 (progress-test--pass "c"))))
       ".F."))
   (test "a skipped result marks an orange circle, not a dot"
     (assert= (with-out-str (test/progress-mark (list (progress-test--skip "t")))) "○"))
   (test "the three outcomes mark distinctly, in order"
     (assert= (with-out-str (test/progress-mark (list (progress-test--pass "a")
-                                                 (progress-test--skip "b") (progress-test--fail "c"))))
+                                                 (progress-test--skip "b")
+                                                 (progress-test--fail "c"))))
       ".○F"))
   (test "no results marks nothing" (assert= (with-out-str (test/progress-mark nil)) ""))
   (test "colour is off when stdout is captured, so output stays parseable"
     ;; The gate is what keeps a piped run, a CI log, or an LLM reading the output
     ;; free of escape codes.
     (and (assert= (test/test--green ".") ".")
-      (assert= (test/test--red "F") "F") (assert= (test/test--orange "○") "○")
+      (assert= (test/test--red "F") "F")
+      (assert= (test/test--orange "○") "○")
       (assert= (test/test--dim "x") "x"))))
 
 ;; A skipped test still counts and still reports — that is the difference between
@@ -46,7 +49,8 @@
     (assert= (test/count-failed (list (progress-test--skip "t"))) 0))
   (test "skips are counted"
     (assert= (test/count-skipped (list (progress-test--pass "a")
-                                   (progress-test--skip "b") (progress-test--skip "c")))
+                                   (progress-test--skip "b")
+                                   (progress-test--skip "c")))
       2))
   (test "a 4-element result (a dead or timed-out worker) is never a skip"
     ;; Those are synthesised elsewhere without the flag, so the accessor must not
@@ -76,7 +80,8 @@
     (def *test-trace* true)
     (let (line (with-out-str (test/trace-result (progress-test--pass "adds"))))
       (and (is (includes? line "✓"))
-        (is (includes? line "adds")) (is (includes? line "1ms")))))
+        (is (includes? line "adds"))
+        (is (includes? line "1ms")))))
   (test "a traced failure shows a cross and how many assertions failed"
     (def *test-trace* true)
     (let (line (with-out-str (test/trace-result (progress-test--fail "divides"))))
@@ -85,7 +90,8 @@
     (def *test-trace* true)
     (let (line (with-out-str (test/trace-result (progress-test--skip "needs db"))))
       (and (is (includes? line "○"))
-        (is (includes? line "skipped")) (refute (includes? line "0ms")))))
+        (is (includes? line "skipped"))
+        (refute (includes? line "0ms")))))
   (test "a traced test shows where it is declared"
     (def *test-trace* true)
     (let (line (with-out-str (test/trace-result (progress-test--at "x" "tests/a_test.blsp:12"))))
@@ -105,7 +111,8 @@
                                              :col 3
                                              :message "unbound symbol: nope"}))
       (and (is (includes? (test/r-group r) "x_test.blsp"))
-        (assert= (test/r-name r) "failed to load") (is (test/r-failed? r)))))
+        (assert= (test/r-name r) "failed to load")
+        (is (test/r-failed? r)))))
   (test "the message says what went wrong"
     (let (r (test/test--load-failure-result {:file "/nope/x.blsp"
                                              :line 1

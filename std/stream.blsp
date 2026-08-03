@@ -425,9 +425,10 @@ then `:stream-eof` when done (or `[:stream-err msg]` + `:stream-eof` on error)."
   (let (item (stream-next src))
     (cond
       (= item :done) (send sink :stream-eof)
-      (= (first item) :ok) (do
-                             (send sink [:stream-data (second item)])
-                             (stream--pipe-loop src sink))
+      (= (first item) :ok)
+        (do
+          (send sink [:stream-data (second item)])
+          (stream--pipe-loop src sink))
       else (do
              (send sink [:stream-err (second item)])
              (send sink :stream-eof)))))

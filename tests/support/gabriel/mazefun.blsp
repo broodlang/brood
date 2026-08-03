@@ -128,13 +128,16 @@ port. The oracle is upstream's own expected output in
       (if (= cavity-id old-cavity-id)
         (fold (fn (c nc)
                 (mazefun--change-cavity--from c nc new-cavity-id old-cavity-id))
-          (mazefun--matrix-write cave i j new-cavity-id) (mazefun--neighboring-cavities pos cave))
+          (mazefun--matrix-write cave i j new-cavity-id)
+          (mazefun--neighboring-cavities pos cave))
         cave))))
 
 (defn mazefun--change-cavity (cave pos new-cavity-id)
   (let ([i j] pos)
     (mazefun--change-cavity--from cave
-      pos new-cavity-id (mazefun--matrix-read cave i j))))
+      pos
+      new-cavity-id
+      (mazefun--matrix-read cave i j))))
 
 (defn mazefun--pierce (pos cave)
   (let ([i j] pos)

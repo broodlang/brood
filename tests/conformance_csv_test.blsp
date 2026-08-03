@@ -49,11 +49,13 @@
   (cond
     (nil? files) [checked (reverse bad)]
     (= (csv--stem (first files)) csv--broken-upstream) (csv--scan (rest files) checked bad)
-    else (let (stem (csv--stem (first files))
-               want (csv--expected stem)
-               got (csv--actual (first files)))
-           (csv--scan (rest files)
-             (inc checked) (if (= got want) bad (cons [stem want got] bad))))))
+    else
+      (let (stem (csv--stem (first files))
+            want (csv--expected stem)
+            got (csv--actual (first files)))
+        (csv--scan (rest files)
+          (inc checked)
+          (if (= got want) bad (cons [stem want got] bad))))))
 
 (describe "csv-spectrum: RFC 4180 edge cases"
   :tags
@@ -106,7 +108,9 @@
     (assert= (csv/csv-parse "a,b,c\n1,,\n") (list ["a" "b" "c"] ["1" "" ""])))
 
   (test "round-trip: emit then parse is identity on the rows"
-    (dolist (rows [(list ["a" "b"] ["1" "2"]) (list ["a"] ["x,y"])
-                    (list ["a"] ["he said \"hi\""]) (list ["a"] ["line1\nline2"])
+    (dolist (rows [(list ["a" "b"] ["1" "2"])
+                    (list ["a"] ["x,y"])
+                    (list ["a"] ["he said \"hi\""])
+                    (list ["a"] ["line1\nline2"])
                     (list ["a" "b"] ["" ""])])
       (assert= (csv/csv-parse (csv/csv-emit rows)) rows))))

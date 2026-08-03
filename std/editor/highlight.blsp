@@ -161,14 +161,16 @@ else uncoloured. Accumulates in reverse."
         (= kind :close) (hl--spans rest false acc)
         (= kind :comment) (hl--spans rest after (cons [s e (face :syntax/comment)] acc))
         ; keeps `after`
-        (= kind :symbol) (let (f (cond
-                                   (and after (special-form? text)) (face :syntax/special)
-                                   after (face :syntax/function)
-                                   else nil))
-                           (hl--spans rest false (if (nil? f) acc (cons [s e f] acc))))
-        else (let (f (face (get hl--kind->face-name kind)))
-               ; :string / :number / :keyword
-               (hl--spans rest false (if (nil? f) acc (cons [s e f] acc))))))))
+        (= kind :symbol)
+          (let (f (cond
+                    (and after (special-form? text)) (face :syntax/special)
+                    after (face :syntax/function)
+                    else nil))
+            (hl--spans rest false (if (nil? f) acc (cons [s e f] acc))))
+        else
+          (let (f (face (get hl--kind->face-name kind)))
+            ; :string / :number / :keyword
+            (hl--spans rest false (if (nil? f) acc (cons [s e f] acc))))))))
 
 (defn highlight-spans (src)
   "Lexically tokenize Brood `src` into a list of `[start end face]` colour spans
@@ -254,7 +256,9 @@ Adjacent chars of equal face coalesce into one chunk; feed each to a `[:print st
 face]` op. A thin shell over `fontify-runs`: each `[pos face]` override is the
 one-char range `[pos (inc pos) face]`."
   (fontify-runs line
-    base (highlight-spans full) (map (fn ([p f]) [p (inc p) f]) overrides)))
+    base
+    (highlight-spans full)
+    (map (fn ([p f]) [p (inc p) f]) overrides)))
 
 ;; ---- bracket matching -------------------------------------------------------
 
@@ -281,9 +285,10 @@ return the matching opener (top of stack) or -1. Skips strings/comments."
         (= c "\"") (hl--opener-scan full (hl--string-end full (inc i) n) n cp stack)
         (= c ";") (hl--opener-scan full (hl--to-eol full (inc i) n) n cp stack)
         (hl--open? c) (hl--opener-scan full (inc i) n cp (cons i stack))
-        (hl--close? c) (if (= i cp)
-                         (if (empty? stack) -1 (first stack))
-                         (hl--opener-scan full (inc i) n cp (rest stack)))
+        (hl--close? c)
+          (if (= i cp)
+            (if (empty? stack) -1 (first stack))
+            (hl--opener-scan full (inc i) n cp (rest stack)))
         else (hl--opener-scan full (inc i) n cp stack)))))
 
 (defn bracket-match (full pos)
@@ -342,8 +347,9 @@ level — atoms, strings, and whole bracketed forms each count once."
         (hl--ws? c) (hl--datum-starts full (inc i) end n acc)
         (= c ";") (hl--datum-starts full (hl--to-eol full (inc i) n) end n acc)
         (= c "\"") (hl--datum-starts full (hl--string-end full (inc i) n) end n (cons i acc))
-        (hl--open? c) (let (m (hl--fwd-match full (inc i) n 0))
-                        (hl--datum-starts full (if (< m 0) end (inc m)) end n (cons i acc)))
+        (hl--open? c)
+          (let (m (hl--fwd-match full (inc i) n 0))
+            (hl--datum-starts full (if (< m 0) end (inc m)) end n (cons i acc)))
         (hl--close? c) (hl--datum-starts full (inc i) end n acc)
         else (hl--datum-starts full (hl--atom-end full (inc i) n) end n (cons i acc))))))
 

@@ -72,10 +72,12 @@ always dropped (and a late `[:down]` flushed) before returning."
     (receive
       ([:reply ^r v] (demonitor m)
         ; flush a late down, don't leak it
-        (receive ([:down ^m _ _] :ok) (after 0 :ok)) v)
+        (receive ([:down ^m _ _] :ok) (after 0 :ok))
+        v)
       ([:down ^m _ reason] (error "gen-call: server " (pr-str pid) " died: " (pr-str reason)))
       (after ms
-        (demonitor m) (error "gen-call: timed out after " ms " ms")))))
+        (demonitor m)
+        (error "gen-call: timed out after " ms " ms")))))
 
 (defn stop (pid)
   "Tell a server process to exit its receive loop cleanly (running its
@@ -115,18 +117,21 @@ and `info` can tail-recurse with it unchanged)."
     (cond
       (= kind 'cast) `([:$cast ~pat] (~loop (do ~@body)))
       ; body => next state
-      (= kind 'call) `([:$call ~from ~rf ~pat] (let (~res (do ~@body))
-                                                 (send ~from [:reply ~rf (nth ~res 0)])
-                                                 (~loop (nth ~res 1))))
+      (= kind 'call)
+        `([:$call ~from ~rf ~pat] (let (~res (do ~@body))
+                                    (send ~from [:reply ~rf (nth ~res 0)])
+                                    (~loop (nth ~res 1))))
       ; query — like call but the body is just the reply; state is untouched.
       ; Removes the [x s] boilerplate from the common "read a field" case.
-      (= kind 'query) `([:$call ~from ~rf ~pat] (send ~from [:reply ~rf (do ~@body)])
-                         (~loop ~state-sym))
+      (= kind 'query)
+        `([:$call ~from ~rf ~pat] (send ~from [:reply ~rf (do ~@body)])
+           (~loop ~state-sym))
       ; info — a raw message (no envelope): a monitor [:down …], a link [:EXIT …],
       ; a timer tick, a plain send. Body => next state, like a cast.
       (= kind 'info) `(~pat (~loop (do ~@body)))
-      else (error "defprocess: a message clause must start with `cast`, `call`, `query`, or `info`, got "
-             (pr-str kind)))))
+      else
+        (error "defprocess: a message clause must start with `cast`, `call`, `query`, or `info`, got "
+          (pr-str kind)))))
 
 (defmacro defprocess (name params & clauses)
   "Define a server `name` over a single `params` state, as a tail-recursive
