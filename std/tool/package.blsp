@@ -1096,18 +1096,20 @@ ordinary library, which the server stores as \"nothing\"."
   (fold (fn (acc kv) (let ([nm constraint] kv) (assoc acc (name nm) constraint)))
     {} (map-pairs *project-enhances*)))
 
-(defn registry--publish-payload (checksum tarball-bytes)
-  "The JSON publish envelope (docs/design.md in hive)."
-  (json/json-encode
-    {:name *project-name*
-     :version *project-version*
-     :description (or *project-description* "")
-     :dependencies (registry--publishable-deps)
-     ;; what this package plugs into (Debian's `Enhances:`) — the registry stores it and
-     ;; can filter on its names, without knowing what any of them are
-     :enhances (registry--publishable-enhances)
-     :checksum checksum
-     :tarball (encoding/base64-encode-bytes tarball-bytes)}))
+(defn registry--publish-metadata (checksum)
+  "The publish metadata envelope, base64-encoded for the `X-Brood-Publish` header. The
+tarball is NOT in here — it rides as the raw request body, so neither client nor server
+builds a base64/JSON copy of the whole upload (streaming publish; docs/design.md in hive)."
+  (encoding/base64-encode
+    (json/json-encode
+      {:name *project-name*
+       :version *project-version*
+       :description (or *project-description* "")
+       :dependencies (registry--publishable-deps)
+       ;; what this package plugs into (Debian's `Enhances:`) — the registry stores it and
+       ;; can filter on its names, without knowing what any of them are
+       :enhances (registry--publishable-enhances)
+       :checksum checksum})))
 
 (defn publish (& rest)
   "Publish the current project's release to the registry: build a source tarball, then
@@ -1129,11 +1131,12 @@ configured `:registry`. Backs `nest publish`."
         (let (archive (registry--build-tarball root)
               bytes (slurp-bytes archive)
               checksum (hash/sha256-bytes bytes)
-              payload (registry--publish-payload checksum bytes))
+              meta-header (registry--publish-metadata checksum))
           (delete-file archive)
           (println (str "package: publishing " *project-name* " " *project-version* " to " base " …"))
-          (let (resp (net/http/http-post (str base "/api/v1/publish") payload
-                       {:headers {"Content-Type" "application/json"
+          (let (resp (net/http/http-post (str base "/api/v1/publish") bytes
+                       {:headers {"Content-Type" "application/gzip"
+                                  "X-Brood-Publish" meta-header
                                   "Authorization" (str "Bearer " token)}})
                 status (get resp :status))
             (cond

@@ -471,6 +471,16 @@ fn eval_tail_loop(
                             .copied()
                             .ok_or_else(|| LispError::runtime("def: missing name"))?,
                     )?;
+                    // ADR-070: root a qualified def TARGET exactly as a qualified
+                    // *reference* roots. During a module load this is a no-op — the expand
+                    // pass already rewrote the target to its rooted spelling. It matters for
+                    // a `def` built as DATA and eval'd with no compile-ns in scope, which is
+                    // how instrumentation rebinds a function: `std/tool/debug`'s
+                    // `(eval (list 'def 'main/greet wrapper))`. Unrooted, that writes a NEW
+                    // global `main/greet` and leaves the real `brk/main/greet` — the one every
+                    // compiled call site resolves — untouched, so the "traced" function is
+                    // never the one that runs. Idempotent on an already-rooted name.
+                    let name = heap.root_qualified_ref(name).unwrap_or(name);
                     let val = if args.len() > 1 {
                         // The value eval can collect at any depth (ADR-061); root
                         // `env` across it (the result is fresh post-collection, and
