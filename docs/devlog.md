@@ -15092,3 +15092,20 @@ that ADR-208 needs — a duplicated hash lookup on exactly the path ADR-208 made
 attempt now returns `LocalDelivery::Declined { runtime_tag }`, so one lookup serves both. That
 is cleanup justified by redundancy, not by the phantom 8%: it measures within noise, and is
 committed as a simplification rather than a speedup.
+
+## 2026-08-03 — thread 6b closed by thread 6, not deferred
+
+Checked whether the reclamation-threshold thread still exists now that the region stops
+growing. It does not. `BROOD_RT_GC_FLOOR` is **inert**: 24038 / 24154 / 24390 ops/s on the
+churn harness across a **128× range** of the threshold (512 / 4096 / 65536).
+
+The premise was that RUNTIME reclamation policy cost throughput — recorded at one point as 45%.
+That was a *consequence* of the region growing ~0.87 closures per operation: the threshold was
+being crossed constantly, so how it was set mattered a great deal. With growth removed the
+threshold is never reached, and there is no policy left to tune.
+
+Worth noting as a pattern: two of the four "threads" carried into today turned out not to be
+independent problems. Thread 2 was not per-message cost (it was spawn placement), and thread 6b
+was not a reclamation-policy question (it was thread 6's growth). Both had been described in
+terms of the mechanism nearest the symptom. Fifteen minutes of measurement closed 6b; it had
+been carrying an implementation plan.
