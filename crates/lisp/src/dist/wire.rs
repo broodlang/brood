@@ -552,6 +552,17 @@ fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
                 "cannot send a table across nodes; it is local to its runtime",
             ));
         }
+        Message::FnShared { .. } => {
+            // A RUNTIME handle names a slot in *this* runtime's shared code region. Another
+            // node has its own region, so the handle is meaningless there — and would silently
+            // resolve to whatever unrelated code occupies that index. Refuse. `send` only ever
+            // produces this variant for a same-runtime local target, so reaching here means a
+            // routing bug rather than user error, but it is cheap to make unreachable-by-type.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot send a shared closure handle across nodes; it is local to its runtime",
+            ));
+        }
         Message::Bytes(_) => {
             // A raw-bytes `Arc<SharedBlob>` is runtime-local and not
             // UTF-8, so it can't ride the `M_STR` path. Refuse across nodes for now.

@@ -199,6 +199,8 @@ fn spawn_impl(heap: &Heap, f: Value, link_parent: bool) -> Result<u64, LispError
     // GC ceiling. Balanced by the `live_process_dec` in `deregister`.
     crate::core::heap::live_process_inc();
     let mailbox = Mailbox::new_with_parent(parent);
+    // So `send` can tell this process shares our runtime without touching its heap.
+    mailbox.set_runtime_tag(heap.runtime_tag());
     REGISTRY.insert(pid, Arc::clone(&mailbox));
 
     // Atomic link (`spawn_linked`): register the symmetric parent↔child link NOW — while
@@ -325,6 +327,7 @@ pub fn spawn_root_program(
     SPAWNED.fetch_add(1, Ordering::SeqCst);
     crate::core::heap::live_process_inc();
     let mailbox = Mailbox::new();
+    mailbox.set_runtime_tag(heap.runtime_tag());
     REGISTRY.insert(pid, Arc::clone(&mailbox));
 
     ensure_workers();

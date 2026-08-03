@@ -29,7 +29,7 @@ use crate::error::{LispError, LispResult};
 use crate::eval;
 use crate::process::keywords as pk;
 
-use super::message::{from_message, to_message, Message};
+use super::message::{from_message, to_message, to_message_to_runtime, Message};
 use super::scheduler::{ensure_ctx, wake_enqueue, Ctx, Process};
 use super::timer::arm_timer;
 
@@ -91,6 +91,8 @@ pub(super) fn clear_parked(mb: &Mailbox) {
 /// A process's mailbox. Guarded by one mutex so the "check empty → park" and
 /// "deliver → wake" handshakes stay race-free (see `receive_match`/`send`/`run_one`).
 pub(super) struct Mailbox {
+    /// Which runtime this process belongs to — see [`Mailbox::set_runtime_tag`]. 0 = unset.
+    pub(super) runtime_tag: AtomicU64,
     pub(super) state: Mutex<MailboxState>,
     /// Wakes a *root* process blocked in `receive` (greens are woken by being
     /// re-queued instead).
@@ -260,6 +262,21 @@ impl Mailbox {
     /// registry-reachable, and the map cost two locked operations on every spawn and every
     /// exit — pure contention under fan-out, for a value read in exactly one place
     /// (`process-info`'s `:parent`).
+    /// Record which runtime this process belongs to, so `send` can tell whether a RUNTIME
+    /// handle is meaningful in the target without touching its heap (which, for a *busy*
+    /// receiver, the sender cannot reach). The process REGISTRY is global, so a second
+    /// `Interp` in the same OS process has different regions and must not receive handles.
+    /// Written before the mailbox is published to the registry, like `parent`.
+    pub(super) fn set_runtime_tag(&self, tag: u64) {
+        self.runtime_tag.store(tag, Ordering::Relaxed);
+    }
+
+    /// This process's runtime tag, or 0 if never set (which never matches a real tag, so an
+    /// unset mailbox simply declines to receive shared handles).
+    pub(super) fn runtime_tag(&self) -> u64 {
+        self.runtime_tag.load(Ordering::Relaxed)
+    }
+
     pub(super) fn new_with_parent(parent: u64) -> Arc<Mailbox> {
         let mb = Mailbox::new();
         // Safe: the mailbox is not published to the registry until after this returns, so
@@ -270,6 +287,7 @@ impl Mailbox {
 
     pub(super) fn new() -> Arc<Mailbox> {
         Arc::new(Mailbox {
+            runtime_tag: AtomicU64::new(0),
             state: Mutex::new(MailboxState {
                 queue: VecDeque::new(),
                 next_seq: 0,
@@ -629,7 +647,18 @@ pub fn send(heap: &Heap, target_val: Value, msg_val: Value) -> Result<(), LispEr
             }
         }
     }
-    let msg = to_message(heap, msg_val)?;
+    // Tell the serialiser where this is going. For a LOCAL pid on this runtime, an
+    // already-shared closure crosses as a handle instead of being deep-copied into the
+    // receiver's LOCAL heap — which is what left the receiver tree-walking it and
+    // re-promoting a copy per call (handoff thread 6). Every other destination (a remote
+    // node, a name address, an unknown pid) passes `None` and serialises exactly as before.
+    let dest_runtime = match target_val {
+        Value::Pid { node, id } if crate::dist::is_local(node) => {
+            REGISTRY.get(id).map(|mb| mb.runtime_tag())
+        }
+        _ => None,
+    };
+    let msg = to_message_to_runtime(heap, msg_val, dest_runtime)?;
     // (dev-tools) Send-level causality (ADR-174): if the sender carries a debugger
     // trace context and the target is a LOCAL pid, ship the context alongside so the
     // receiver adopts it on pop. Context is per-runtime, so it never crosses nodes;
