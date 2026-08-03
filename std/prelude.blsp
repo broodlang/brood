@@ -4508,18 +4508,30 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
     (map defmodule--use-clause
       (filter (fn (c) (and (pair? c) (= (first c) :use))) clauses))))
 
-;; The forms for one `(:use-internals mod)` clause — module privacy's @testable
-;; seam (ADR-146): like `(:use mod)` (load + refer publics), PLUS a grant that
-;; lets this file reference `mod`'s module-private `--` names by qualified
-;; name, which is otherwise a compile error. For tests and tightly-coupled
-;; tooling; loud and greppable by design.
+;; The forms for one `(:use-internals mod [:only [a b]])` clause — module privacy's
+;; @testable seam (ADR-146): like `(:use mod)` (load + refer publics), PLUS a grant
+;; that lets this file reference `mod`'s module-private `--` names, which is otherwise
+;; a compile error. `:only [a b]` refers just those names (which may be `--` privates,
+;; since the grant is in scope) instead of a refer-all — the cycle-safe form when `mod`
+;; and this module are mutually dependent, because a subset refer resolves lazily and
+;; skips the "refer-all into a still-loading module" error a plain `(:use-internals mod)`
+;; hits mid-cycle. For tests and tightly-coupled tooling; loud and greppable by design.
 (defn defmodule--internals-clause (clause)
   (let (mod (second clause)
-        ;; Root an intra-package target to `foo/mod` under a dependency load (ADR-070).
-        rooted (list '%root-module-name (list 'quote mod)))
-    (list (list 'require rooted)
-      (list '%refer rooted nil)
-      (list '%grant-internals rooted))))
+        opts (rest (rest clause))
+        marker (first opts))
+    (when (and marker (not (= marker :only)))
+      (error "defmodule: unknown (:use-internals "
+        mod " " marker " …) marker — the only import filter is :only, as "
+        "`(:use-internals " mod " :only [a b])`"))
+    (let (subset (if (= marker :only) (second opts) nil)
+          ;; Root an intra-package target to `foo/mod` under a dependency load (ADR-070).
+          rooted (list '%root-module-name (list 'quote mod)))
+      ;; Grant BEFORE refer: a `--` name in the `:only` subset is a privacy breach
+      ;; unless the internals grant is already recorded when `%refer` checks it.
+      (list (list 'require rooted)
+        (list '%grant-internals rooted)
+        (list '%refer rooted (list 'quote subset))))))
 
 (defn defmodule--internals-forms (clauses)
   (apply append
