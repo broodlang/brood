@@ -86,12 +86,10 @@ const OUT_CAP: usize = 16 * 1024 * 1024;
 /// `tcp-send` to a slow peer.
 const LINGER: Duration = Duration::from_secs(5);
 
-/// The reactor's poll timeout — the housekeeping/reaper cadence when no IO is
-/// happening, and the recovery cadence for the one-shot-client read-edge pass (a
-/// dropped edge is re-checked at most this often, so keep it well under a human
-/// timeout). IO readiness wakes the poll immediately; commands wake it via the
-/// `Waker`. 200 ms idle wakeups are negligible CPU.
-const TICK: Duration = Duration::from_millis(200);
+/// The reactor's poll timeout — the cadence of reaper/linger housekeeping when
+/// no IO is happening. Purely a housekeeping tick: IO readiness wakes the poll
+/// immediately, commands wake it via the `Waker`.
+const TICK: Duration = Duration::from_millis(1000);
 
 const WAKER_TOKEN: Token = Token(0);
 
@@ -346,11 +344,6 @@ struct TlsConn {
     idle: Option<Duration>,
     /// Last time bytes moved (inbound plaintext or outbound `Send`).
     last_activity: Instant,
-    /// The interest set last handed to mio for this stream. Used to skip a
-    /// redundant `reregister` (an `epoll_ctl(MOD)` on an edge-triggered fd can
-    /// drop a readiness edge that arrived just before it — which lost the
-    /// response's readable edge for uploads larger than the socket send buffer).
-    last_interest: Option<Interest>,
 }
 
 /// A passive accepted TLS connection: raw materials until claimed.
@@ -410,10 +403,6 @@ fn reactor_loop(mut poll: Poll, rx: Receiver<Cmd>) {
             return;
         }
 
-        let net_trace = std::env::var("BROOD_NET_TRACE").is_ok();
-        if net_trace && events.is_empty() {
-            eprintln!("[net] poll TICK timeout (no events)");
-        }
         for event in events.iter() {
             let token = event.token();
             if token == WAKER_TOKEN {
@@ -422,10 +411,6 @@ fn reactor_loop(mut poll: Poll, rx: Receiver<Cmd>) {
             let id = token.0 as u64;
             let readable = event.is_readable();
             let writable = event.is_writable();
-            if net_trace {
-                eprintln!("[net] EVENT id={id} readable={readable} writable={writable} r_closed={} w_closed={}",
-                    event.is_read_closed(), event.is_write_closed());
-            }
             let remove = match conns.get_mut(&id) {
                 Some(rx) => drive(id, rx, readable, writable, &registry, &mut accepted),
                 None => false,
@@ -444,35 +429,6 @@ fn reactor_loop(mut poll: Poll, rx: Receiver<Cmd>) {
         // Commands (registrations, sends, claims, closes).
         while let Ok(cmd) = rx.try_recv() {
             handle_cmd(cmd, &mut conns, &registry);
-        }
-
-        // Read-edge recovery for one-shot clients (`tls-request`). After a client
-        // finishes writing its request and its interest set shrinks WRITABLE→READABLE,
-        // edge-triggered epoll can permanently drop the response's readable edge — the
-        // response bytes then sit unread in the socket buffer and no event ever fires
-        // (observed: uploads past the socket send buffer stalled to the 30s timeout).
-        // These clients are transient and few, so each wakeup we force one read attempt
-        // on any that are past handshake and still awaiting their response; a real
-        // event-driven read makes this a cheap WouldBlock no-op in the common case.
-        let mut recover: Vec<u64> = Vec::new();
-        for (cid, rx) in conns.iter() {
-            if let Rx::Tls(c) = rx {
-                if c.one_shot && !c.read_done && !c.conn.is_handshaking() {
-                    recover.push(*cid);
-                }
-            }
-        }
-        for cid in recover {
-            if net_trace {
-                eprintln!("[net] recover force-read id={cid}");
-            }
-            let remove = match conns.get_mut(&cid) {
-                Some(rx) => drive(cid, rx, true, false, &registry, &mut accepted),
-                None => false,
-            };
-            if remove {
-                teardown(cid, &mut conns, &registry);
-            }
         }
 
         // Housekeeping: reap unclaimed accepts, expire lingering closes.
@@ -709,7 +665,6 @@ fn tls_interests(c: &TlsConn) -> Option<Interest> {
 }
 
 fn sync_tls_registration(id: u64, c: &mut TlsConn, registry: &mio::Registry) {
-    let _ = &c.last_interest;
     match tls_interests(c) {
         Some(interests) => {
             let res = if c.registered {
@@ -765,32 +720,14 @@ fn drive_tls(
     registry: &mio::Registry,
 ) -> bool {
     // Outbound: flush pending TLS records (handshake output + app data).
-    let trace = std::env::var("BROOD_NET_TRACE").is_ok();
-    if trace {
-        eprintln!("[net] drive_tls id={id} readable={readable} writable={writable} wants_write={} handshaking={}",
-            c.conn.wants_write(), c.conn.is_handshaking());
-    }
     if writable || c.conn.wants_write() {
         while c.conn.wants_write() {
             match c.conn.write_tls(&mut c.stream) {
                 Ok(0) => return tls_finish(id, c, Some("tls: connection closed".into())),
                 // Bytes left for the peer — outbound progress counts as activity so
                 // a large response draining to a slow reader isn't idle-reaped.
-                Ok(n) => {
-                    c.last_activity = Instant::now();
-                    if trace {
-                        eprintln!("[net] id={id} write_tls Ok({n})");
-                    }
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if trace {
-                        eprintln!(
-                            "[net] id={id} write_tls WouldBlock wants_write={}",
-                            c.conn.wants_write()
-                        );
-                    }
-                    break;
-                }
+                Ok(_) => c.last_activity = Instant::now(),
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => return tls_finish(id, c, Some(format!("tls: {e}"))),
             }
@@ -804,16 +741,10 @@ fn drive_tls(
             return tls_finish(id, c, None);
         }
     }
-    if trace && readable && !c.read_done {
-        eprintln!("[net] id={id} read-loop enter");
-    }
     if readable && !c.read_done {
         loop {
             match c.conn.read_tls(&mut c.stream) {
                 Ok(0) => {
-                    if trace {
-                        eprintln!("[net] id={id} read_tls Ok(0) → peer TCP close");
-                    }
                     // Peer closed the TCP connection. One-shot clients tolerate
                     // a missing close_notify (many servers just drop).
                     return tls_finish(id, c, None);
@@ -821,12 +752,6 @@ fn drive_tls(
                 Ok(_) => match c.conn.process_new_packets() {
                     Ok(io) => {
                         let n = io.plaintext_bytes_to_read();
-                        if trace {
-                            eprintln!(
-                                "[net] id={id} plaintext n={n} peer_has_closed={}",
-                                io.peer_has_closed()
-                            );
-                        }
                         if n > 0 {
                             let mut buf = vec![0u8; n];
                             let mut got = 0;
@@ -851,17 +776,9 @@ fn drive_tls(
                     }
                     Err(e) => return tls_finish(id, c, Some(format!("tls: {e}"))),
                 },
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if trace {
-                        eprintln!("[net] id={id} read_tls WouldBlock (drained)");
-                    }
-                    break;
-                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof && c.one_shot => {
-                    if trace {
-                        eprintln!("[net] id={id} read_tls UnexpectedEof → finish");
-                    }
                     return tls_finish(id, c, None);
                 }
                 Err(e) => return tls_finish(id, c, Some(format!("tls: {e}"))),
@@ -957,8 +874,14 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
         } => {
             match ClientConnection::new(config, server_name) {
                 Ok(mut conn) => {
-                    // The request is buffered as plaintext now; rustls emits it
-                    // once the handshake completes.
+                    // Buffer the whole request as plaintext now; rustls emits it once the
+                    // handshake completes. rustls's writer defaults to a 64 KiB buffer cap,
+                    // so without lifting it `write_all` silently buffers only the first
+                    // ~64 KiB of a larger request and drops the rest (the result is ignored)
+                    // — the peer then waits forever for a body that never fully arrives. The
+                    // request is already fully in memory, so `None` (no cap) just holds one
+                    // copy of it.
+                    conn.set_buffer_limit(None);
                     let _ = conn.writer().write_all(&request);
                     let mut c = TlsConn {
                         stream,
@@ -974,7 +897,6 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
                         handshake_deadline: Some(Instant::now() + HANDSHAKE_TIMEOUT),
                         idle: None,
                         last_activity: Instant::now(),
-                        last_interest: None,
                     };
                     sync_tls_registration(id, &mut c, registry);
                     conns.insert(id, Rx::Tls(c));
@@ -1013,7 +935,6 @@ fn handle_cmd(cmd: Cmd, conns: &mut HashMap<u64, Rx>, registry: &mio::Registry) 
                             handshake_deadline: Some(Instant::now() + HANDSHAKE_TIMEOUT),
                             idle: None,
                             last_activity: Instant::now(),
-                            last_interest: None,
                         };
                         sync_tls_registration(id, &mut c, registry);
                         conns.insert(id, Rx::Tls(c));
@@ -1539,21 +1460,8 @@ pub fn tls_request(
                     // whole request then reads. With Nagle on, the tail of a multi-record
                     // upload stalls waiting on the peer's delayed ACK, so a large body's
                     // records go out one delayed-ACK apart — O(size) round-trips, seconds
-                    // for a few hundred KB (measured 34 KB=18s, 217 KB=timeout).
+                    // for a few hundred KB.
                     let _ = std_stream.set_nodelay(true);
-                    // EXPERIMENT: enlarge the send buffer so the whole request fits in one
-                    // non-blocking write (no WouldBlock→resume across writable events).
-                    unsafe {
-                        use std::os::unix::io::AsRawFd;
-                        let sz: libc::c_int = 8 * 1024 * 1024;
-                        libc::setsockopt(
-                            std_stream.as_raw_fd(),
-                            libc::SOL_SOCKET,
-                            libc::SO_SNDBUF,
-                            &sz as *const _ as *const libc::c_void,
-                            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                        );
-                    }
                     let stream = MioStream::from_std(std_stream);
                     reactor().cmd(Cmd::TlsClient {
                         id,

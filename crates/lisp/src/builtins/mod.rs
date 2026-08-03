@@ -2907,6 +2907,13 @@ pub fn register(heap: &mut Heap, root: EnvId) {
     );
     def(
         heap,
+        "brood-version",
+        Arity::exact(0),
+        Sig::nullary(string),
+        brood_version,
+    );
+    def(
+        heap,
         "steal-count",
         Arity::exact(0),
         Sig::nullary(int),
@@ -3367,6 +3374,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("worker-threads", &[], "The size of the scheduler's worker-thread pool (about nproc)."),
     ("features", &[], "The optional build features this runtime was compiled with, as a vector of keywords (e.g. [:jit :treesit :gui]). A *bound* builtin does not imply a working one — with the `gui` feature off, `gui-open` is still bound and raises at call time — so an app that degrades rather than fails must ask the build, not `bound?`. `feature?` is the predicate over this."),
     ("build-id", &[], "This brood build's identity as \"<version>+<git-sha>+<binary-stamp>\" (e.g. \"0.1.0+dcab7ca+18f2e1a9b3c4d5e6\") — the correct staleness stamp for an on-disk cache of anything the kernel computes. Changes on any rebuild, committed or not: the binary-stamp half is this executable's own mtime, read at runtime, so it can't go stale the way a git-sha-only stamp would across an uncommitted local rebuild."),
+    ("brood-version", &[], "This runtime's semantic version as a string (e.g. \"0.1.0\") — just the semver, without the git-sha/binary-stamp that `build-id` carries. What a project's `:brood` manifest constraint is checked against (a project can require `:brood \">= 0.2\"` and `nest` refuses an older runtime with a clear message)."),
     ("steal-count", &[], "How many fresh processes the scheduler work-stole across worker threads since program start; 0 means placement-at-spawn kept the pool even."),
     ("register", &["name", "pid"], "Bind a local name so peers can address this process via {:name name :node this-node}. Returns the pid."),
     ("whereis", &["name"], "The local pid registered under `name`, or nil. Strictly local — does not query other nodes."),

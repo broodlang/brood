@@ -1779,9 +1779,17 @@ Runtime housekeeping (both items landed):
   `tar` on the offload pool) and a **git-backed registry** — the index is just a git
   repo of `packages/<name>.blsp` metadata (no hosted server), with `nest publish`
   (append the project's entry, no auto-commit), `nest search`, and `[name :version
-  "X"]` deps resolving an exact version to its git source. ⬜ Remaining (ADR-011):
-  semver ranges, tarball sources *inside* registry entries, signed packages, cloned-
-  index auto-refresh.
+  "X"]` deps resolving an exact version to its git source. ✅ **semver-range
+  resolution shipped (ADR-209):** the version grammar (`^`/`~>`/conjunctions in
+  `std/version.blsp`), a **pure backtracking, newest-compatible solver**
+  (`std/resolver.blsp`, driven by an injected provider so it is exhaustively testable
+  offline), the registry wiring (a `:version` manifest entry is a range, resolved from
+  live published metadata into the lock, with a network-free fast path when the lock
+  fully covers), and a `:brood "<constraint>"` runtime gate (checked at setup against
+  the `(brood-version)` primitive), and a lock-**preference** seed so adding one dep keeps
+  the rest pinned instead of re-solving the closure to newest. ⬜ Remaining (ADR-011):
+  tarball sources *inside* registry entries, signed packages, cloned-index auto-refresh,
+  semver ranges over `:git` tags, PubGrub-grade conflict derivation.
 - ⬜ **Single-binary bundling** (ADR-038) — `nest bundle` appends a zip of
   project + `_deps/` to a pre-built `brood`; deferred until the editor needs end-user
   distribution.
