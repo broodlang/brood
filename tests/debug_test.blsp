@@ -255,8 +255,9 @@
     (let (me (self))
       (trace-fn 'debug-test/tfn-add)
       (untrace-fn 'debug-test/tfn-add)
-      (assert= 5 (binding (*spy-sink* (fn (e) (send me [:spy-entry e])))
-                   (tfn-add 2 3)))
+      (assert= 5
+        (binding (*spy-sink* (fn (e) (send me [:spy-entry e])))
+          (tfn-add 2 3)))
       (assert= :quiet (receive ([:spy-entry e] e) (after 50 :quiet)))))
   (test "REGRESSION: a REFUSED trace registers nothing, so teardown stays clean"
     ;; `list` passes every check trace-fn makes (it is a function) and is still refused
@@ -268,8 +269,7 @@
     (do
       (assert-error (trace-fn 'list))
       (refute (includes? (traced-fns) 'list))
-      (assert= 0 (untrace-all))))            ; nothing to restore, and it doesn't raise
-
+      (assert= 0 (untrace-all)))) ; nothing to restore, and it doesn't raise
   (test "untrace-all is not stopped by one stubborn entry"
     ;; teardown must leave nothing instrumented even if a restore fails: a poisoned
     ;; registry entry (planted here the way the old trace-fn planted one) must not
@@ -285,11 +285,12 @@
   (test "re-tracing is idempotent: the registry keeps the ORIGINAL, not a wrapper"
     (do
       (trace-fn 'debug-test/tfn-add)
-      (trace-fn 'debug-test/tfn-add)   ; twice — must not stack wrappers
+      (trace-fn 'debug-test/tfn-add) ; twice — must not stack wrappers
       (untrace-fn 'debug-test/tfn-add)
       (let (me (self))
-        (assert= 5 (binding (*spy-sink* (fn (e) (send me [:spy-entry e])))
-                     (tfn-add 2 3)))
+        (assert= 5
+          (binding (*spy-sink* (fn (e) (send me [:spy-entry e])))
+            (tfn-add 2 3)))
         (assert= :quiet (receive ([:spy-entry e] e) (after 50 :quiet))))))
   (test "traced-fns lists the instrumented names; untrace-all clears them"
     (do
@@ -316,8 +317,7 @@
 ;; A tail-recursive countdown, as a GLOBAL so trace-fn has a name to rebind. The
 ;; self-call is the last thing the (n) clause does, so untraced this runs in constant
 ;; stack at any depth — which is exactly what the tracer must not take away.
-(defn tfn-countdown
-  ((0) :liftoff)
+(defn tfn-countdown ((0) :liftoff)
   ((n) (tfn-countdown (- n 1))))
 
 ;; A sink bounded to `cap` entries, answering `:spy-stop` once it is full — the
@@ -326,7 +326,8 @@
   (fn (e)
     (let (n (or (table-get acc :n) 0))
       (if (< n cap)
-        (do (table-put acc :n (inc n))
+        (do
+          (table-put acc :n (inc n))
           (table-put acc :entries (cons e (or (table-get acc :entries) '())))
           (when (>= (inc n) cap) :spy-stop))
         :spy-stop))))
@@ -336,8 +337,9 @@
   (test "`:spy-stop` ends the trace: the sink sees its budget and not one entry more"
     (let (acc (table))
       (trace-fn 'debug-test/tfn-countdown)
-      (assert= :liftoff (binding (*spy-sink* (bounded-sink acc 10))
-                          (tfn-countdown 5000)))
+      (assert= :liftoff
+        (binding (*spy-sink* (bounded-sink acc 10))
+          (tfn-countdown 5000)))
       (untrace-fn 'debug-test/tfn-countdown)
       (assert= 10 (table-get acc :n))
       ;; every kept entry is a :call — a stopped tracer delegates in tail position, so
@@ -352,16 +354,18 @@
     ;; tail position, so the depth below is only bounded by patience.
     (let (acc (table))
       (trace-fn 'debug-test/tfn-countdown)
-      (assert= :liftoff (binding (*spy-sink* (bounded-sink acc 50))
-                          (tfn-countdown 1200000)))
+      (assert= :liftoff
+        (binding (*spy-sink* (bounded-sink acc 50))
+          (tfn-countdown 1200000)))
       (untrace-fn 'debug-test/tfn-countdown)
       (assert= 50 (table-get acc :n))
       (table-drop acc)))
   (test "a sink that never stops still gets its :return entries (the default contract)"
     (let (me (self))
       (trace-fn 'debug-test/tfn-square)
-      (assert= 81 (binding (*spy-sink* (fn (e) (send me [:spy-entry e]) nil))
-                    (tfn-square 9)))
+      (assert= 81
+        (binding (*spy-sink* (fn (e) (send me [:spy-entry e]) nil))
+          (tfn-square 9)))
       (untrace-fn 'debug-test/tfn-square)
       (assert= :call (:spy (receive ([:spy-entry e] e) (after 1000 :timeout))))
       (assert= :return (:spy (receive ([:spy-entry e] e) (after 1000 :timeout)))))))
@@ -379,7 +383,10 @@
       (letrec (drive (fn (tries)
                        (cond
                          (= tries 0) :gave-up
-                         (> (count (paused dbg)) 0) (do (resume-all dbg) (sleep 10) (drive (dec tries)))
+                         (> (count (paused dbg)) 0) (do
+                                                      (resume-all dbg)
+                                                      (sleep 10)
+                                                      (drive (dec tries)))
                          else :done)))
         (sleep 20)
         (drive 100))

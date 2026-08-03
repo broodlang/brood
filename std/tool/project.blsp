@@ -333,8 +333,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
     (nil? value) {}
     (not (map? value)) (error "project: "
                          ":enhances must be a MAP of application → version constraint, got "
-                         (pr-str value)
-                         " — write it as :enhances {bedit \">= 0.3\"}")
+                         (pr-str value) " — write it as :enhances {bedit \">= 0.3\"}")
     else (fold (fn (acc kv)
                  (let ([nm constraint] kv)
                    (when (not (string? constraint))
@@ -689,8 +688,8 @@ resolve in the advisory checker. Returns the project root."
 ;; {file -> {:module name :requires [dep …]}} for every file — one native parse each.
 (defn project--module-infos (files)
   (fold (fn (acc f)
-          (map-assoc acc f
-            (try (%module-direct-requires f) (catch e {:module nil :requires []}))))
+          (map-assoc acc
+            f (try (%module-direct-requires f) (catch e {:module nil :requires []}))))
     {} files))
 
 ;; The transitive set of module names reachable from `seeds` (a list/vector of module
@@ -1002,8 +1001,8 @@ resolve in the advisory checker. Returns the project root."
       (cond
         ;; No cache when it's disabled, there's no project root, or the project is over
         ;; the file cap (the manifest read would rival re-checking) — parallel fresh path.
-        (or (project--cache-off?) (nil? root) (>= (count files) (project--cache-max-files)))
-          (project--check-files-fresh files closures)
+        (or (project--cache-off?) (nil? root) (>= (count files) (project--cache-max-files))) (project--check-files-fresh files
+                                                                                               closures)
         else (project--check-files-cached files root closures)))))
 
 ;; Make sure the project is set up and all its sources are loaded — the
@@ -1554,8 +1553,8 @@ project's require-closure."
         closures (project--require-closures all)
         module->file (project--module-file-index infos))
     (fold (fn (acc tf)
-            (assoc acc tf
-              (project--file-max-mtime (project--test-dep-files tf closures module->file))))
+            (assoc acc
+              tf (project--file-max-mtime (project--test-dep-files tf closures module->file))))
       {} files)))
 
 (defn project--stale-filter (root files)
@@ -1575,8 +1574,7 @@ simply keeps no record."
   (let (f (project--stale-file root))
     (when (not (nil? f))
       (let (merged (fold (fn (acc kv) (assoc acc (first kv) (second kv)))
-                     (project--read-stale-record root)
-                     (project--stale-mtimes root files)))
+                     (project--read-stale-record root) (project--stale-mtimes root files)))
         (try (spit f (pr-str merged)) (catch _ nil))))))
 
 (defn project--stale-run-set (root files)
@@ -1585,8 +1583,9 @@ as unchanged (only when some were)."
   (let (run (project--stale-filter root files)
         skipped (- (count files) (count run)))
     (when (> skipped 0)
-      (println (str "stale: " (count run) " of " (count files) " test files changed ("
-                 skipped " unchanged, skipped)")))
+      (println (str "stale: "
+                 (count run) " of " (count files) " test files changed (" skipped
+                 " unchanged, skipped)")))
     run))
 
 ;; Build the `:filter` spec for `--failed`. With nothing to narrow to, run

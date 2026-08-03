@@ -25,8 +25,9 @@
 (defn scr-loop (n acc)
   (if (= n 0)
     acc
-    (do (if (= n 5) (scr-swap) nil)
-        (scr-loop (- n 1) (+ acc 1)))))
+    (do
+      (if (= n 5) (scr-swap) nil)
+      (scr-loop (- n 1) (+ acc 1)))))
 
 ;; A loop that is never redefined — it must keep looping at full speed and stay correct.
 (defn scr-plain (n acc) (if (= n 0) acc (scr-plain (- n 1) (+ acc 1))))

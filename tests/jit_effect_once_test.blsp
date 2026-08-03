@@ -29,25 +29,28 @@
 ;; --- 1. effectful arm, NO non-tail call, deopt via i64 overflow ---
 (def eo-t1 (table))
 (defn eo-bump1 (t k big)
-  (do (table-put t k (+ 1 (table-get t k)))
-      (* big big)))                       ; overflows i64 -> deopt, every call
+  (do
+    (table-put t k (+ 1 (table-get t k)))
+    (* big big))) ; overflows i64 -> deopt, every call
 (defn eo-drive1 (t i big)
   (if (= i 0) nil (do (eo-bump1 t 0 big) (eo-drive1 t (- i 1) big))))
 
 ;; --- 2. same shape, deopt via an out-of-range `nth` instead of overflow ---
 (def eo-t2 (table))
 (defn eo-bump2 (t v)
-  (do (table-put t 0 (+ 1 (table-get t 0)))
-      (nth v 9)))                         ; out of range -> deopt
+  (do
+    (table-put t 0 (+ 1 (table-get t 0)))
+    (nth v 9))) ; out of range -> deopt
 (defn eo-drive2 (t i v)
   (if (= i 0) nil (do (try (eo-bump2 t v) (catch e nil)) (eo-drive2 t (- i 1) v))))
 
 ;; --- 3. a small calls-free callee holding the effect: the leaf-inline candidate ---
 (def eo-t3 (table))
-(defn eo-leaf (t x)                        ; small, calls-free -> would be spliced
+(defn eo-leaf (t x)
+  ; small, calls-free -> would be spliced
   (do (table-put t 0 (+ 1 (table-get t 0))) x))
 (defn eo-caller (t big)
-  (* (eo-leaf t 1) big big))               ; overflow after the splice -> deopt
+  (* (eo-leaf t 1) big big)) ; overflow after the splice -> deopt
 (defn eo-drive3 (t i big)
   (if (= i 0) nil (do (eo-caller t big) (eo-drive3 t (- i 1) big))))
 
@@ -60,8 +63,9 @@
 (def eo-u4 (table))
 ;; check-allow: deliberately non-tail — the deopt/effect-once shape under test.
 (check-allow :non-tail-recursion
-  (defn eo-multi
-    ((v)     (do (table-put eo-u4 0 (+ 1 (table-get eo-u4 0))) (+ (eo-multi v 0) (nth v 0))))
+  (defn eo-multi ((v) (do
+                        (table-put eo-u4 0 (+ 1 (table-get eo-u4 0)))
+                        (+ (eo-multi v 0) (nth v 0))))
     ((v acc) (do (table-put eo-t4 0 (+ 1 (table-get eo-t4 0))) 1.5))))
 (defn eo-drive4 (i v)
   (if (= i 0) nil (do (eo-multi v) (eo-drive4 (- i 1) v))))

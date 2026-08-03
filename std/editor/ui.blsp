@@ -301,9 +301,9 @@ exactly as before."
     [model nil]
     (let (raw ((get display :poll) 0))
       (cond
-        (nil? raw) [model nil]                 ; queue empty — render the settled model
-        (quit-request? raw) [model raw]        ; a close/focus control message: hand it back
-        (focus-request? raw) [model raw]       ; (the loop, not update, owns these)
+        (nil? raw) [model nil] ; queue empty — render the settled model
+        (quit-request? raw) [model raw] ; a close/focus control message: hand it back
+        (focus-request? raw) [model raw] ; (the loop, not update, owns these)
         else (let (next (try
                           (update model raw cols rows)
                           (catch e (do (ui--log-error "update" e) model))))
@@ -493,12 +493,12 @@ while open, captures input. Implement it for a record per overlay — only the o
 overlay needs: a record that skips `overlay-owns?` captures every key, and one that
 skips `overlay-exit` needs no dismiss step (the `:default` impl supplies both, and
 also accepts the legacy map vtable `{:active? :owns? :handle :exit}` unchanged)."
-  (overlay-active? [self model] :-> any)      ; truthy while the overlay is open
-  (overlay-owns? [self model input] :-> any)  ; truthy when `input` is the overlay's to handle
+  (overlay-active? [self model] :-> any) ; truthy while the overlay is open
+  (overlay-owns? [self model input] :-> any) ; truthy when `input` is the overlay's to handle
   (overlay-handle [self model input] :-> any) ; fold an owned key into the model
-  (overlay-exit [self model] :-> any))        ; dismiss before a non-owned key falls through
-
-(impl Overlay :default
+  (overlay-exit [self model] :-> any)) ; dismiss before a non-owned key falls through
+(impl Overlay
+  :default
   ;; The legacy map vtable — and the fallback for a record implementing a subset of
   ;; the ops: a record has no `:owns?`/`:exit` slot, so those fall back to the same
   ;; nil policy the vtable had (capture-all / leave the model as-is).

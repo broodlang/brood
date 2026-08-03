@@ -439,8 +439,7 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
         version (get dep :version)
         target (package--git-target root nm)
         locked-sha (and locked
-                     (= (plist-get locked :registry) version)
-                     (plist-get locked :sha256)))
+                     (= (plist-get locked :registry) version) (plist-get locked :sha256)))
     (if (and locked-sha (package--tarball-cache-current? target locked-sha))
       (registry--resolved dep target version locked-sha)
       (registry--fetch-release root dep (registry--base-for index) target nm version))))
@@ -456,14 +455,13 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
 (defn registry--fetch-release (root dep base target nm version)
   (match (registry--get-json (registry--release-url base nm version))
     ([:error 404 _message] (error "package: no registry entry for "
-                             nm " " version
-                             " (run `nest search " (name nm) "` to see what's published)"))
+                             nm " " version " (run `nest search " (name nm)
+                             "` to see what's published)"))
     ([:error _status message] (error "package: " message))
-    ([:ok meta]
-      (let (checksum (get meta :checksum))
-        (when (nil? checksum)
-          (error "package: registry release " nm " " version " has no checksum"))
-        (registry--download-extract root dep base target nm version checksum)))))
+    ([:ok meta] (let (checksum (get meta :checksum))
+                  (when (nil? checksum)
+                    (error "package: registry release " nm " " version " has no checksum"))
+                  (registry--download-extract root dep base target nm version checksum)))))
 
 (defn registry--download-extract (root dep base target nm version checksum)
   (require 'net/http)
@@ -492,8 +490,8 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
   (spit (package--pkg-meta-path target)
     (str ";; .brood-pkg.blsp — written by the package manager. Do not edit by hand.\n"
       (pr-str (list 'brood-pkg
-                :registry (name nm) :version version :sha256 checksum
-                :registry-url base :fetched-at (now)))
+                :registry (name nm) :version version :sha256 checksum :registry-url base :fetched-at
+                (now)))
       "\n")))
 
 ;; Two resolutions of the same name must agree on their source. Different kinds can
@@ -592,8 +590,8 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
         (fold (fn (m mod)
                 (if (and (contains? m mod) (not (package--entry-module? mod)))
                   (error "package: module name collision — '"
-                    mod "' is declared by two of your own source files (" (get m mod)
-                    " and " label "); rename one module (a `(defmodule …)` name must be"
+                    mod "' is declared by two of your own source files (" (get m mod) " and " label
+                    "); rename one module (a `(defmodule …)` name must be"
                     " unique within a package)")
                   (assoc m mod label)))
           seen (package--provided-modules dir))))))
@@ -729,22 +727,23 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
 
 (defn update (& names)
   "Re-resolve dependency refs and re-lock, ignoring the locked commits so moving refs (a branch or floating tag) advance. With no NAMES, re-resolves every dep; with NAMES, only those (others keep their locked pins). Re-clones any :git dep whose commit changed. Backs `nest update`."
-  (package--in-project (fn (root)
-                         (if (empty? *project-dependencies*)
-                           (do (println "package: no dependencies declared") nil)
-                           (let (lock (package--lock-without (read-lockfile root)
-                                        (map symbol names))
-                                 entries (resolve-deps root *project-dependencies* lock))
-                             ;; Reject a namespace collision before writing the lock —
-                             ;; same guard `fetch`/`add` run (ADR-070). Without it,
-                             ;; `nest update` would write a lock for a colliding dep set
-                             ;; and only surface it at the next run.
-                             (package--guard-collisions root entries)
-                             (write-lockfile root entries)
-                             (println (str "package: updated "
-                                        (if (empty? names) "all dependencies" (join ", " names))
-                                        " (" (count entries) " locked)"))
-                             entries)))))
+  (package--in-project
+    (fn (root)
+      (if (empty? *project-dependencies*)
+        (do (println "package: no dependencies declared") nil)
+        (let (lock (package--lock-without (read-lockfile root)
+                     (map symbol names))
+              entries (resolve-deps root *project-dependencies* lock))
+          ;; Reject a namespace collision before writing the lock —
+          ;; same guard `fetch`/`add` run (ADR-070). Without it,
+          ;; `nest update` would write a lock for a colliding dep set
+          ;; and only surface it at the next run.
+          (package--guard-collisions root entries)
+          (write-lockfile root entries)
+          (println (str "package: updated "
+                     (if (empty? names) "all dependencies" (join ", " names)) " (" (count entries)
+                     " locked)"))
+          entries)))))
 
 ;; The lock's :dependencies with `names` (symbols) dropped, so they re-resolve.
 ;; Empty `names` drops everything → a full update.
@@ -1030,7 +1029,8 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
 is given (a plain application name — the registry matches it against each package's
 published `:enhances` names and knows nothing else about it)."
   (require 'url)
-  (str base "/api/v1/packages?q=" (url/percent-encode term)
+  (str base
+    "/api/v1/packages?q=" (url/percent-encode term)
     (if (or (nil? enhances) (= enhances ""))
       ""
       (str "&enhances=" (url/percent-encode enhances)))))
@@ -1047,15 +1047,15 @@ application (`nest search --enhances bedit zig`). Backs `nest search`."
         url (registry--search-url base term-string enhances))
     (match (registry--get-json url)
       ([:error _status message] (error "package: " message))
-      ([:ok data]
-        (let (pkgs (get data :packages))
-          (if (or (nil? pkgs) (empty? pkgs))
-            (println (str "No packages matching \"" term-string "\""
-                       (if (or (nil? enhances) (= enhances ""))
-                         ""
-                         (str " that enhance " enhances))
-                       "."))
-            (dolist (p pkgs) (println (registry--search-line p)))))
+      ([:ok data] (let (pkgs (get data :packages))
+                    (if (or (nil? pkgs) (empty? pkgs))
+                      (println (str "No packages matching \""
+                                 term-string "\""
+                                 (if (or (nil? enhances) (= enhances ""))
+                                   ""
+                                   (str " that enhance " enhances))
+                                 "."))
+                      (dolist (p pkgs) (println (registry--search-line p)))))
         nil))))
 
 ;; --- publish: build a source tarball, then POST it (Bearer-token authed) -----
@@ -1069,10 +1069,9 @@ application (`nest search --enhances bedit zig`). Backs `nest search`."
     (make-dir (package--deps-dir root))
     (when (file-exists? out) (delete-file out))
     (let (code (run-process "tar"
-                 (list "-czf" out "-C" root
-                   "--exclude=./_deps" "--exclude=./_build" "--exclude=./.git"
-                   "--exclude=./tests" "--exclude=./project.lock.blsp" "--exclude=*.tar.gz"
-                   ".")))
+                 (list "-czf"
+                   out "-C" root "--exclude=./_deps" "--exclude=./_build" "--exclude=./.git"
+                   "--exclude=./tests" "--exclude=./project.lock.blsp" "--exclude=*.tar.gz" ".")))
       (when (not (= code 0))
         (error "package: building the source tarball failed (tar exit " code ")"))
       out)))
@@ -1119,28 +1118,33 @@ version already published is refused by the server. An optional base URL overrid
 configured `:registry`. Backs `nest publish`."
   (require 'net/http)
   (require 'encoding)
-  (package--in-project
-    (fn (root)
-      (let (base (registry--base-for (if (empty? rest) nil (first rest)))
-            token (registry--token))
-        (when (nil? *project-name*) (error "package: project has no :name"))
-        (when (nil? *project-version*)
-          (error "package: nothing to publish — the project has no :version"))
-        (when (or (nil? token) (= token ""))
-          (error "package: publishing needs an auth token — set $HIVE_TOKEN (or :registry-token in your config)"))
-        (let (archive (registry--build-tarball root)
-              bytes (slurp-bytes archive)
-              checksum (hash/sha256-bytes bytes)
-              meta-header (registry--publish-metadata checksum))
-          (delete-file archive)
-          (println (str "package: publishing " *project-name* " " *project-version* " to " base " …"))
-          (let (resp (net/http/http-post (str base "/api/v1/publish") bytes
-                       {:headers {"Content-Type" "application/gzip"
-                                  "X-Brood-Publish" meta-header
-                                  "Authorization" (str "Bearer " token)}})
-                status (get resp :status))
-            (cond
-              (= status 0) (error "package: cannot reach the registry at " base ": " (get resp :error))
-              (and (>= status 200) (< status 300))
-                (println (str "package: published " *project-name* " " *project-version* "."))
-              else (error "package: publish failed (HTTP " status "): " (registry--error-text resp)))))))))
+  (package--in-project (fn (root)
+                         (let (base (registry--base-for (if (empty? rest) nil (first rest)))
+                               token (registry--token))
+                           (when (nil? *project-name*) (error "package: project has no :name"))
+                           (when (nil? *project-version*)
+                             (error "package: nothing to publish — the project has no :version"))
+                           (when (or (nil? token) (= token ""))
+                             (error "package: publishing needs an auth token — set $HIVE_TOKEN (or :registry-token in your config)"))
+                           (let (archive (registry--build-tarball root)
+                                 bytes (slurp-bytes archive)
+                                 checksum (hash/sha256-bytes bytes)
+                                 meta-header (registry--publish-metadata checksum))
+                             (delete-file archive)
+                             (println (str "package: publishing "
+                                        *project-name* " " *project-version* " to " base " …"))
+                             (let (resp (net/http/http-post (str base "/api/v1/publish")
+                                          bytes
+                                          {:headers {"Content-Type" "application/gzip"
+                                                     "X-Brood-Publish" meta-header
+                                                     "Authorization" (str "Bearer " token)}})
+                                   status (get resp :status))
+                               (cond
+                                 (= status 0) (error "package: cannot reach the registry at "
+                                                base ": " (get resp :error))
+                                 (and (>= status 200) (< status 300)) (println (str "package: published "
+                                                                                 *project-name* " "
+                                                                                 *project-version*
+                                                                                 "."))
+                                 else (error "package: publish failed (HTTP "
+                                        status "): " (registry--error-text resp)))))))))

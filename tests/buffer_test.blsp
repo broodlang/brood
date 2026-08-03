@@ -154,8 +154,10 @@
 (describe "buffer sentence motion (M-a / M-e)"
   ;; "One. Two? Three!" — terminators at 3, 8, 15; sentence starts at 0, 5, 10.
   (def sentences "One. Two? Three!")
-  (defn fwd-sentence-at (point) (buffer-point (forward-sentence (goto-char (make-buffer sentences) point))))
-  (defn bwd-sentence-at (point) (buffer-point (backward-sentence (goto-char (make-buffer sentences) point))))
+  (defn fwd-sentence-at (point)
+    (buffer-point (forward-sentence (goto-char (make-buffer sentences) point))))
+  (defn bwd-sentence-at (point)
+    (buffer-point (backward-sentence (goto-char (make-buffer sentences) point))))
   (test "forward-sentence lands just past each terminator, then at the buffer's end"
     (assert= (fwd-sentence-at 0) 4)
     (assert= (fwd-sentence-at 4) 9)
@@ -835,8 +837,9 @@
   ;; two edits on two different lines, most recent last
   (defn two-edits ()
     (let (b0 (make-buffer "one\ntwo\nthree\nfour")
-          b1 (insert (goto-char b0 3) "!")          ; line 0 -> "one!"
-          b2 (insert (goto-char b1 8) "?"))         ; line 1 -> "two?" (5 + len "two")
+          b1 (insert (goto-char b0 3) "!") ; line 0 -> "one!"
+          b2 (insert (goto-char b1 8) "?"))
+      ; line 1 -> "two?" (5 + len "two")
       b2))
 
   (test "undoes the change on the selected line, leaving other lines alone"
@@ -851,7 +854,8 @@
   (test "a change OUTSIDE the region is left standing, and history is searched for one inside"
     ;; the most recent edit is on line 1; selecting line 0 must still find line 0's edit
     (let (b (two-edits)
-          sel (uir-sel b 0 4))          ; covers the "!" at char 3
+          sel (uir-sel b 0 4))
+      ; covers the "!" at char 3
       (assert= (buffer-text (undo-in-region sel)) "one\ntwo?\nthree\nfour")))
 
   (test "a whole-buffer region reproduces a plain undo exactly"
@@ -861,14 +865,14 @@
 
   (test "it undoes a DELETION inside the region (puts the line back)"
     (let (b0 (make-buffer "keep\ngone\ntail")
-          b1 (delete-region (assoc (goto-char b0 5) :mark 10))   ; drop "gone\n"
+          b1 (delete-region (assoc (goto-char b0 5) :mark 10)) ; drop "gone\n"
           sel (uir-sel b1 0 (buffer-length b1)))
       (assert= (buffer-text b1) "keep\ntail")
       (assert= (buffer-text (undo-in-region sel)) "keep\ngone\ntail")))
 
   (test "a deletion OUTSIDE the region stays deleted"
     (let (b0 (make-buffer "a\nDROP\nb\nc")
-          b1 (delete-region (assoc (goto-char b0 2) :mark 7))    ; drop "DROP\n"
+          b1 (delete-region (assoc (goto-char b0 2) :mark 7)) ; drop "DROP\n"
           ;; select the LAST line only — the deletion happened above it
           last-start (uir-line-start b1 2)
           sel (uir-sel b1 last-start (buffer-length b1)))
@@ -877,10 +881,10 @@
   (test "the region survives, so repeated calls peel changes off the same lines"
     (let (b0 (make-buffer "x\ny")
           b1 (insert (goto-char b0 1) "1")
-          b2 (insert (goto-char b1 2) "2")          ; two edits, both on line 0
+          b2 (insert (goto-char b1 2) "2") ; two edits, both on line 0
           sel (uir-sel b2 0 3)
           once (undo-in-region sel))
-      (is (not (nil? (buffer-mark once))))          ; mark kept
+      (is (not (nil? (buffer-mark once)))) ; mark kept
       (assert= (buffer-text once) "x1\ny")
       (assert= (buffer-text (undo-in-region once)) "x\ny")))
 
@@ -892,9 +896,9 @@
 
   (test "no region, no history, or nothing in reach: the buffer is returned unchanged"
     (let (b (insert (make-buffer "a\nb") "x"))
-      (assert= (undo-in-region b) b)                          ; no mark
+      (assert= (undo-in-region b) b) ; no mark
       (assert= (undo-in-region (uir-sel (make-buffer "a") 0 1))
-        (uir-sel (make-buffer "a") 0 1)))                     ; no history
+        (uir-sel (make-buffer "a") 0 1))) ; no history
     ;; a region on text nothing ever touched
     (let (b0 (make-buffer "top\nuntouched")
           b1 (insert (goto-char b0 3) "!")
@@ -973,8 +977,9 @@
 
   (test "mid-word edits on the same word are separable"
     (let (b0 (make-buffer "word")
-          b1 (insert (goto-char b0 2) "-")        ; "wo-rd"
-          b2 (insert (goto-char b1 5) "!"))       ; "wo-rd!"
+          b1 (insert (goto-char b0 2) "-") ; "wo-rd"
+          b2 (insert (goto-char b1 5) "!"))
+      ; "wo-rd!"
       (assert= (buffer-text b2) "wo-rd!")
       (assert= (buffer-text (undo-in-region (uir-sel b2 0 3))) "word!")
       (assert= (buffer-text (undo-in-region (uir-sel b2 5 6))) "wo-rd")))
@@ -1008,7 +1013,7 @@
 
   (test "point ends at the join, ahead of the space"
     (let (b (join-line (at "foo\n    bar" 8)))
-      (assert= (buffer-point b) 3)                       ; right after "foo"
+      (assert= (buffer-point b) 3) ; right after "foo"
       (assert= (buffer-char-after b) " ")))
 
   (test "on the first line there is nothing above, so the buffer is untouched"
@@ -1037,9 +1042,8 @@
     ;; the span is public because reading the ORIGINAL text out of it is what a cycling
     ;; command (Emacs 29's cycle-spacing: one space → none → what was there) needs
     (assert= (whitespace-run-at (at "a   \t  b" 4)) [1 7])
-    (assert= (whitespace-run-at (at "a b" 1)) [1 2])          ; beside a single space
-    (assert= (whitespace-run-at (at "ab" 1)) [1 1]))           ; no whitespace: empty span
-
+    (assert= (whitespace-run-at (at "a b" 1)) [1 2]) ; beside a single space
+    (assert= (whitespace-run-at (at "ab" 1)) [1 1])) ; no whitespace: empty span
   (test "whitespace-run-at stops at a newline, in both directions"
-    (assert= (whitespace-run-at (at "a  \n  b" 2)) [1 3])      ; before the newline
-    (assert= (whitespace-run-at (at "a  \n  b" 4)) [4 6])))    ; after it
+    (assert= (whitespace-run-at (at "a  \n  b" 2)) [1 3]) ; before the newline
+    (assert= (whitespace-run-at (at "a  \n  b" 4)) [4 6]))) ; after it

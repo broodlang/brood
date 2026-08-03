@@ -59,8 +59,9 @@ LISTENER process."
   "Dispatch `event` to its handlers and detach any that threw. Runs in the listener."
   (when *telemetry-validate*
     (doseq (problem (telemetry--check-event event measurements metadata))
-      (eprintln (str "telemetry: event " (pr-str event) " " (name (first problem))
-                  " missing key " (pr-str (second problem))))))
+      (eprintln (str "telemetry: event "
+                  (pr-str event) " " (name (first problem)) " missing key "
+                  (pr-str (second problem))))))
   (let (bucket (get *telemetry-handlers* event nil))
     (when bucket
       (let (failed (telemetry--dispatch bucket event measurements metadata))
@@ -234,7 +235,8 @@ runtime presence-check of a declared event.
         meta-map (zipmap md-kws md-names)
         ;; the schema stored for introspection / runtime checks (types kept unevaluated).
         schema {:name (list 'quote fname)
-                :measurements (zipmap m-kws (map (fn (s) (list 'quote (telemetry--spec-type s))) meas))
+                :measurements (zipmap m-kws
+                                (map (fn (s) (list 'quote (telemetry--spec-type s))) meas))
                 :metadata (zipmap md-kws (map (fn (s) (list 'quote (telemetry--spec-type s))) meta))
                 :doc doc})
     `(do
@@ -269,8 +271,8 @@ Pure — the listener turns each pair into a stderr warning. Types are the check
   (let (schema (get *telemetry-events* event))
     (if (nil? schema)
       nil
-      (append
-        (map (fn (k) [:measurements k]) (telemetry--missing-keys (get schema :measurements) measurements))
+      (append (map (fn (k) [:measurements k])
+                (telemetry--missing-keys (get schema :measurements) measurements))
         (map (fn (k) [:metadata k]) (telemetry--missing-keys (get schema :metadata) metadata))))))
 
 ;; ---- the runtime event stream (kernel sources → telemetry) -------------------
@@ -441,13 +443,14 @@ folding the kernel snapshot builtins behind the same attach seam as `watch-runti
 that ships each emit of `event` to `subscriber`, tagged with `ref`; on `[:unsubscribe ref]`
 detach it. `subs` tracks the attached ids so a `:stop` cleans them all up."
   (receive
-    ([:subscribe event subscriber ref]
-      (let (id [:remote ref])
-        (attach id event (fn (e m md) (send subscriber [:remote-telemetry ref e m md])))
-        (send subscriber [:subscribed ref])
-        (telemetry--serve-loop (cons id subs))))
-    ([:unsubscribe ref]
-      (detach [:remote ref])
+    ([:subscribe event subscriber ref] (let (id [:remote ref])
+                                         (attach id
+                                           event
+                                           (fn (e m md)
+                                             (send subscriber [:remote-telemetry ref e m md])))
+                                         (send subscriber [:subscribed ref])
+                                         (telemetry--serve-loop (cons id subs))))
+    ([:unsubscribe ref] (detach [:remote ref])
       (telemetry--serve-loop (filter (fn (id) (not (= id [:remote ref]))) subs)))
     (:stop (do (doseq (id subs) (detach id)) nil))
     (_ (telemetry--serve-loop subs))))
@@ -474,8 +477,7 @@ pid; `stop-telemetry-serve` (or killing it) tears down every remote subscription
 THIS runtime's stream as `local-event` (with `{:remote-event e}` merged into the metadata);
 `:stop` unsubscribes from the target and exits."
   (receive
-    ([:remote-telemetry ^ref e m md]
-      (emit local-event m (assoc md :remote-event e))
+    ([:remote-telemetry ^ref e m md] (emit local-event m (assoc md :remote-event e))
       (telemetry--remote-loop target event ref local-event))
     (:stop (do (send target [:unsubscribe ref]) nil))
     (_ (telemetry--remote-loop target event ref local-event))))
@@ -497,7 +499,8 @@ into THIS runtime's telemetry stream as `local-event` (default `[:remote event]`
 events through the same attach seam (location-transparent). The peer must have called
 `(telemetry-serve)`. Returns the watcher pid; `stop-subscribe-remote` (or killing it)
 unsubscribes and exits."
-  (telemetry--subscribe-to {:name :telemetry-remote :node peer} event (or local-event [:remote event])))
+  (telemetry--subscribe-to {:name :telemetry-remote :node peer}
+    event (or local-event [:remote event])))
 
 (defn stop-subscribe-remote (watcher)
   "Stop a `subscribe-remote` watcher: unsubscribe from the peer and exit. Returns nil."

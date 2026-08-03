@@ -29,9 +29,8 @@
     (assert= (evsrv-decode-request "not a map") nil)
     (assert= (evsrv-decode-request "(unclosed") nil)
     (assert= (evsrv-decode-request "") nil)
-    (assert= (evsrv-decode-request "{:id \"seven\" :src \"1\"}") nil)  ; id not an int
-    (assert= (evsrv-decode-request "{:id 1}") nil))                    ; no :src
-
+    (assert= (evsrv-decode-request "{:id \"seven\" :src \"1\"}") nil) ; id not an int
+    (assert= (evsrv-decode-request "{:id 1}") nil)) ; no :src
   (test "a reply round-trips, and a non-map reply line decodes to nil"
     (let (r (evsrv-decode-reply (evsrv-encode-reply {:id 4 :ok true :value "3"})))
       (assert= (get r :id) 4)
@@ -84,8 +83,7 @@
       "42"))
 
   (test "a runaway eval times out, is killed, and the session survives"
-    (let (r (eval-server-answer
-              {:id 5 :src "(letrec (go (fn () (go))) (go))" :timeout-ms 60}))
+    (let (r (eval-server-answer {:id 5 :src "(letrec (go (fn () (go))) (go))" :timeout-ms 60}))
       (assert= (get r :ok) false)
       (assert= (get r :timeout) true)
       (assert= (get r :id) 5))
@@ -105,7 +103,7 @@
     ;; usually queued before we demonitor. Without the drain + down-flush each
     ;; request leaks one — 10 requests, then assert the mailbox is EMPTY.
     (dotimes (i 10) (eval-server-answer {:id i :src "(+ 1 1)"}))
-    (eval-server/eval-server--flush-stale)   ; belt: what a next request would do
+    (eval-server/eval-server--flush-stale) ; belt: what a next request would do
     (assert= (get (process-info (self)) :mailbox) 0)))
 
 (describe "malformed requests cannot kill the server"
@@ -141,7 +139,7 @@
       (let (spy (get r :spy)
             calls (filter (fn (e) (= (get e :kind) "call")) spy)
             returns (filter (fn (e) (= (get e :kind) "return")) spy))
-        (assert= (count calls) 4)          ; fac 3, 2, 1, 0
+        (assert= (count calls) 4) ; fac 3, 2, 1, 0
         (assert= (count returns) 4)
         (assert= (get (first calls) :fn) "evsrv-t-fac")
         (assert= (get (first calls) :args) "(3)")
@@ -151,7 +149,8 @@
     ;; self-contained: trace in request 1, call untraced in request 2
     (eval-capturing "(defn evsrv-t-restored (x) (* 3 x))\n(evsrv-t-restored 1)"
       ["evsrv-t-restored"])
-    (let (r (eval-capturing "(evsrv-t-restored 2)"))   ; no :trace this time
+    (let (r (eval-capturing "(evsrv-t-restored 2)"))
+      ; no :trace this time
       (assert= (get r :value) "6")
       (assert= (get r :spy) nil)))
 
@@ -160,8 +159,7 @@
     (let (r (eval-capturing "(defn evsrv-t-chat ((0) 1) ((n) (* n (evsrv-t-chat (- n 1)))))\n(evsrv-t-chat 200)"
               ["evsrv-t-chat"]))
       (assert= (get r :ok) true)
-      (assert= (count (get r :spy)) eval-server/*spy-entry-cap*)))   ; 402 entries -> capped
-
+      (assert= (count (get r :spy)) eval-server/*spy-entry-cap*))) ; 402 entries -> capped
   (test "tracing costs tail-calls only UP TO the cap: each traced self-call is a real crossing"
     ;; Inherent to boundary tracing while it is recording — the wrapper must return after
     ;; the call, so the self-call is not in tail position (the caveat Erlang/Emacs tracing
@@ -171,7 +169,7 @@
               ["evsrv-t-loop"]))
       (assert= (get r :ok) true)
       (assert= (get r :value) ":done")
-      (assert= (count (get r :spy)) eval-server/*spy-entry-cap*))   ; 600 crossings -> capped
+      (assert= (count (get r :spy)) eval-server/*spy-entry-cap*)) ; 600 crossings -> capped
     ;; …and UNTRACED the same loop is O(1) stack at any depth, as the language promises
     (assert= (get (eval-capturing "(defn evsrv-t-ok ((0) :done) ((n) (evsrv-t-ok (- n 1))))\n(evsrv-t-ok 200000)")
                :value)
@@ -213,9 +211,18 @@
   ;; depending on history. Traces are now installed once, before the first call form.
   (test "a traced defn+call reports the definition IN THE SOURCE, not a previous one"
     ;; define it wrong, then right, then wrong again — each verdict must be honest
-    (assert= (get (eval-capturing "(defn evsrv-t-tri (x) (+ x 3))\n(evsrv-t-tri 14)" ["evsrv-t-tri"]) :value) "17")
-    (assert= (get (eval-capturing "(defn evsrv-t-tri (x) (* x 3))\n(evsrv-t-tri 14)" ["evsrv-t-tri"]) :value) "42")
-    (assert= (get (eval-capturing "(defn evsrv-t-tri (x) (+ x 3))\n(evsrv-t-tri 14)" ["evsrv-t-tri"]) :value) "17"))
+    (assert= (get (eval-capturing "(defn evsrv-t-tri (x) (+ x 3))\n(evsrv-t-tri 14)"
+                    ["evsrv-t-tri"])
+               :value)
+      "17")
+    (assert= (get (eval-capturing "(defn evsrv-t-tri (x) (* x 3))\n(evsrv-t-tri 14)"
+                    ["evsrv-t-tri"])
+               :value)
+      "42")
+    (assert= (get (eval-capturing "(defn evsrv-t-tri (x) (+ x 3))\n(evsrv-t-tri 14)"
+                    ["evsrv-t-tri"])
+               :value)
+      "17"))
 
   (test "the traced call is wrapped exactly once (no double-wrapping)"
     (let (r (eval-capturing "(defn evsrv-t-once (x) (* 2 x))\n(evsrv-t-once 5)" ["evsrv-t-once"])

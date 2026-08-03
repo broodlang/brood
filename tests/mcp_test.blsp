@@ -71,8 +71,7 @@
   (test "abilities lists the core abilities"
     (is (includes? (get (mcp/mcp-abilities-tool {}) :abilities) "Display")))
   (test "ability describes ops, sealed members, requires, and impls"
-    (mcp/mcp-eval-tool
-      {:source "(defrecord mcpt-circle (r)) (defability McptShape :sealed [mcpt-circle] (mcpt-area [self] :-> float) (mcpt-big? [self o] :-> bool (> (mcpt-area self) 0))) (impl McptShape mcpt-circle (mcpt-area [c] 1.0))"})
+    (mcp/mcp-eval-tool {:source "(defrecord mcpt-circle (r)) (defability McptShape :sealed [mcpt-circle] (mcpt-area [self] :-> float) (mcpt-big? [self o] :-> bool (> (mcpt-area self) 0))) (impl McptShape mcpt-circle (mcpt-area [c] 1.0))"})
     (let (r (mcp/mcp-ability-tool {:name "McptShape"}))
       (assert= (get r :sealed) true)
       (is (includes? (get r :members) "mcpt-circle"))
@@ -86,7 +85,8 @@
 
 (describe "mcp check-source tool"
   (test "flags a type error in a snippet"
-    (is (not (empty? (get (mcp/mcp-check-source-tool {:source "(defn f (x) (string-length 5))"}) :diagnostics)))))
+    (is (not (empty? (get (mcp/mcp-check-source-tool {:source "(defn f (x) (string-length 5))"})
+                       :diagnostics)))))
   (test "is clean for well-typed code"
     (assert= {:diagnostics []} (mcp/mcp-check-source-tool {:source "(+ 1 2)"})))
   (test "a non-string :source is rejected"

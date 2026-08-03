@@ -18,8 +18,8 @@
   (test "literals reduce, carry a positive denominator, and demote when integral"
     (assert= 2/4 1/2)
     (assert= 6/4 3/2)
-    (assert= (/ 1 -2) -1/2)  ; sign normalized onto the numerator
-    (assert= 4/2 2)          ; denominator 1 → an integer
+    (assert= (/ 1 -2) -1/2) ; sign normalized onto the numerator
+    (assert= 4/2 2) ; denominator 1 → an integer
     (is (int? 4/2))
     (is (ratio? 1/2)))
   (test "type-of and number?"
@@ -32,7 +32,7 @@
   (test "/ on integers is exact — a ratio, not a float"
     (assert= (/ 1 2) 1/2)
     (assert= (type-of (/ 1 2)) :ratio)
-    (assert= (/ 6 3) 2)          ; divides evenly → int
+    (assert= (/ 6 3) 2) ; divides evenly → int
     (assert= (type-of (/ 6 3)) :int)
     (assert= (/ 100 3) 100/3)
     (assert= (/ 3 6) 1/2))
@@ -43,11 +43,11 @@
 (describe "ratio: arithmetic tower + contagion"
   (test "ratio ∘ ratio stays exact, reducing"
     (assert= (+ 1/2 1/3) 5/6)
-    (assert= (+ 1/2 1/2) 1)              ; reduces to an int
+    (assert= (+ 1/2 1/2) 1) ; reduces to an int
     (assert= (- 3/4 1/4) 1/2)
     (assert= (* 2/3 3/4) 1/2)
     (assert= (/ 1/2 3/4) 2/3)
-    (assert= (+ 1/2 1/3 1/6) 1))        ; variadic
+    (assert= (+ 1/2 1/3 1/6) 1)) ; variadic
   (test "ratio + int stays a ratio (both directions)"
     (assert= (+ 1/2 2) 5/2)
     (assert= (+ 2 1/2) 5/2)
@@ -94,5 +94,5 @@
       (let (r (receive))
         (is (ratio? r))
         (assert= r 5/6)
-        (assert= (* r 6) 5)          ; arithmetic still works after the round-trip
+        (assert= (* r 6) 5) ; arithmetic still works after the round-trip
         (is (< r 1))))))

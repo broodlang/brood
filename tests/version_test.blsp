@@ -29,7 +29,7 @@
   (test "orders on major, then minor, then patch"
     (assert= -1 (version-compare "1.0.0" "2.0.0"))
     (assert= 1 (version-compare "1.3.0" "1.2.9"))
-    (assert= 1 (version-compare "1.2.10" "1.2.9"))       ; numeric, not lexicographic
+    (assert= 1 (version-compare "1.2.10" "1.2.9")) ; numeric, not lexicographic
     (assert= 0 (version-compare "1.2.3" "1.2.3")))
   (test "a missing segment is 0, so 1.2 and 1.2.0 are the same version"
     (assert= 0 (version-compare "1.2" "1.2.0"))

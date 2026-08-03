@@ -197,12 +197,11 @@ registration order, the new one last). The extension seam tools use to add comma
 — e.g. the debugger registers `,resume`/`,step` under `pry`. Returns the primary name."
   (let (names (get spec :names))
     ;; Filter-then-append as ONE transform: two concurrent registrations of the same
-  ;; name each used to filter the old list and each append, so the duplicate this
-  ;; promises to replace survived (KI-23 — it failed `repl_test` 2 runs in 5).
+    ;; name each used to filter the old list and each append, so the duplicate this
+    ;; promises to replace survived (KI-23 — it failed `repl_test` 2 runs in 5).
     (swap-registry! repl/*repl-commands*
       (fn (l)
-        (append
-          (filter (fn (c) (not (any? (fn (n) (repl--has-name? names n)) (get c :names)))) l)
+        (append (filter (fn (c) (not (any? (fn (n) (repl--has-name? names n)) (get c :names)))) l)
           (list spec))))
     (first names)))
 
@@ -228,10 +227,9 @@ entries) plus the static Tab / `*1 *2 *3` footer."
   (println (str "\e[90m"
              (join "\n"
                (map repl--command-help-line (filter (fn (c) (not (get c :hidden))) *repl-commands*)))
-             "\n"
-             "  " (repl--pad "Tab" 15) " complete the name under the cursor; again to list matches\n"
-             "  " (repl--pad "*1 *2 *3" 15) " the last three result values;  *e  the last error"
-             "\e[0m")))
+             "\n" "  " (repl--pad "Tab" 15)
+             " complete the name under the cursor; again to list matches\n" "  "
+             (repl--pad "*1 *2 *3" 15) " the last three result values;  *e  the last error" "\e[0m")))
 
 (defn repl--meta-doc (name)
   "Print the docstring + arglist for `name` (a function/macro/primitive), or a note.
@@ -333,33 +331,43 @@ Returns nil; the loop just continues to the next prompt."
 ;; ---- register the built-in meta-commands (in display order) -----------------
 ;; Registered at module load, after their handlers are defined. A tool adds more with
 ;; `register-repl-command` (the debugger does, under `pry`).
-(register-repl-command
-  {:names '("help" "?") :usage ",help ,?" :summary "this list"
-   :handler (fn (rest) (repl--meta-help rest))})
-(register-repl-command
-  {:names '("doc") :usage ",doc <name>" :summary "docstring + arglist of a function/macro/primitive"
-   :handler (fn (rest) (repl--meta-doc rest))})
-(register-repl-command
-  {:names '("type") :usage ",type <expr>" :summary "evaluate <expr> and show its runtime type"
-   :handler (fn (rest) (repl--meta-type rest))})
-(register-repl-command
-  {:names '("time") :usage ",time <expr>" :summary "evaluate <expr> and show elapsed time"
-   :handler (fn (rest) (repl--meta-time rest))})
-(register-repl-command
-  {:names '("clear") :usage ",clear" :summary "clear the screen"
-   :handler (fn (rest) (print "\e[2J\e[H"))})
-(register-repl-command
-  {:names '("apropos") :usage ",apropos <pat>" :summary "globals whose NAME contains <pat>"
-   :handler (fn (rest) (repl--meta-apropos rest))})
-(register-repl-command
-  {:names '("search") :usage ",search <words>" :summary "globals whose name or DOC matches <words>, best first"
-   :handler (fn (rest) (repl--meta-search rest))})
-(register-repl-command
-  {:names '("expand") :usage ",expand <form>" :summary "fully macroexpand <form> (once: ,expand1)"
-   :handler (fn (rest) (repl--meta-expand rest true))})
-(register-repl-command
-  {:names '("expand1") :usage ",expand1 <form>" :summary "macroexpand <form> one step" :hidden true
-   :handler (fn (rest) (repl--meta-expand rest false))})
+(register-repl-command {:names '("help" "?")
+                        :usage ",help ,?"
+                        :summary "this list"
+                        :handler (fn (rest) (repl--meta-help rest))})
+(register-repl-command {:names '("doc")
+                        :usage ",doc <name>"
+                        :summary "docstring + arglist of a function/macro/primitive"
+                        :handler (fn (rest) (repl--meta-doc rest))})
+(register-repl-command {:names '("type")
+                        :usage ",type <expr>"
+                        :summary "evaluate <expr> and show its runtime type"
+                        :handler (fn (rest) (repl--meta-type rest))})
+(register-repl-command {:names '("time")
+                        :usage ",time <expr>"
+                        :summary "evaluate <expr> and show elapsed time"
+                        :handler (fn (rest) (repl--meta-time rest))})
+(register-repl-command {:names '("clear")
+                        :usage ",clear"
+                        :summary "clear the screen"
+                        :handler (fn (rest) (print "\e[2J\e[H"))})
+(register-repl-command {:names '("apropos")
+                        :usage ",apropos <pat>"
+                        :summary "globals whose NAME contains <pat>"
+                        :handler (fn (rest) (repl--meta-apropos rest))})
+(register-repl-command {:names '("search")
+                        :usage ",search <words>"
+                        :summary "globals whose name or DOC matches <words>, best first"
+                        :handler (fn (rest) (repl--meta-search rest))})
+(register-repl-command {:names '("expand")
+                        :usage ",expand <form>"
+                        :summary "fully macroexpand <form> (once: ,expand1)"
+                        :handler (fn (rest) (repl--meta-expand rest true))})
+(register-repl-command {:names '("expand1")
+                        :usage ",expand1 <form>"
+                        :summary "macroexpand <form> one step"
+                        :hidden true
+                        :handler (fn (rest) (repl--meta-expand rest false))})
 
 ;; ---- whitespace / comment skip ----------------------------------------------
 

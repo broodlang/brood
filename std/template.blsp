@@ -34,8 +34,9 @@ tried. Unknown keys render as empty string. Nested `{{` are not supported."
   ;; Splitting sidesteps the whole question: `string-split` is a single native pass, and
   ;; every `substring` below is bounded by ONE piece, so the total stays O(n).
   (let (parts (string-split tmpl "{{"))
-    (apply str (cons (first parts)
-                 (map (fn (p) (template--marker p data)) (rest parts))))))
+    (apply str
+      (cons (first parts)
+        (map (fn (p) (template--marker p data)) (rest parts))))))
 
 ;; One piece following a `{{`: `key}}rest` → the substituted value + `rest`. A piece with
 ;; no closing `}}` is an unterminated marker, emitted verbatim (`{{` included) — the same

@@ -82,8 +82,7 @@ everything (the \"no release yet\" placeholder a registry starts from)."
 ;; families) waits for a caller that wants it, because every operator added here is
 ;; one an ecosystem then has to understand forever.
 
-(def *version-operators* ["<=" ">=" "<" ">" "="])   ; longest first: "<=" before "<"
-
+(def *version-operators* ["<=" ">=" "<" ">" "="]) ; longest first: "<=" before "<"
 (defn version--digit-start? (s)
   (let (cps (string->codepoints s))
     (and (not (empty? cps)) (>= (first cps) 48) (<= (first cps) 57))))
@@ -101,8 +100,8 @@ everything (the \"no release yet\" placeholder a registry starts from)."
     (cond
       (not (nil? op)) [op (trim (substring c (string-length op) (string-length c)))]
       (version--digit-start? c) ["=" c]
-      else (error "version-satisfies?: unknown operator in " (pr-str constraint)
-             " — use >=, >, <=, <, = or a bare version"))))
+      else (error "version-satisfies?: unknown operator in "
+             (pr-str constraint) " — use >=, >, <=, <, = or a bare version"))))
 
 (defn version-satisfies? (v constraint)
   "Whether version string `v` satisfies `constraint` — `\">= 1.2\"`, `\"> 1.2.3\"`,

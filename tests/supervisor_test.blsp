@@ -376,14 +376,18 @@
   ;; child reports last, and a restart keeps the child in its original place
   ;; (its pid changes, its position must not).
   (test "which-children reports start order, including children added dynamically"
-    (let (sup (start-supervisor (list {:id :a :start (fn () (spawn-link (parked))) :restart :permanent}
+    (let (sup (start-supervisor (list {:id :a
+                                       :start (fn () (spawn-link (parked)))
+                                       :restart :permanent}
                                   {:id :b :start (fn () (spawn-link (parked))) :restart :permanent})))
       (start-child sup {:id :c :start (fn () (spawn-link (parked))) :restart :permanent})
       (assert= (list :a :b :c) (map (fn (k) (get k :id)) (which-children sup)))
       (stop-supervisor sup)))
 
   (test "a restarted child keeps its position in start order"
-    (let (sup (start-supervisor (list {:id :a :start (fn () (spawn-link (parked))) :restart :permanent}
+    (let (sup (start-supervisor (list {:id :a
+                                       :start (fn () (spawn-link (parked)))
+                                       :restart :permanent}
                                   {:id :b :start (fn () (spawn-link (parked))) :restart :permanent}
                                   {:id :c :start (fn () (spawn-link (parked))) :restart :permanent}))
           before (get (second (which-children sup)) :pid)

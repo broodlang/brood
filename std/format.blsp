@@ -386,7 +386,8 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
                    ;; (`(error "a: " x " b: " y …)`), the case it exists for.
                    body-text (if pair-bd
                                (render--body-pairs kids first-body-idx body-ind)
-                               (render--body kids first-body-idx body-ind
+                               (render--body kids
+                                 first-body-idx body-ind
                                  (and (< hdr-count 0)
                                    (not (body-has-container? kids first-body-idx))))))
                ;; If the body ends in a comment, the close delimiter must drop to
@@ -630,8 +631,8 @@ retired the `comment-on-own-line?` distinction this used to need."
                                      (format-width)))
                        value-ind (+ body-ind 2)
                        pair-str (if pair-fits
-                                  (str arendr " "
-                                    (render vnode (+ body-ind (string-length arendr) 1)))
+                                  (str arendr
+                                    " " (render vnode (+ body-ind (string-length arendr) 1)))
                                   (str arendr "\n" (indent-of value-ind) (render vnode value-ind)))
                        tc (trailing-comment-at kids (inc j) n))
                    (if (nil? tc)
@@ -779,8 +780,8 @@ retired the `comment-on-own-line?` distinction this used to need."
                    (inc tc-idx) n 0
                    (format-source--glue acc
                      nl
-                     (str form-block " "
-                       (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx))))))))))))
+                     (str form-block
+                       " " (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx))))))))))))
 
 ;; `acc` is the reversed chunk list, so gluing is two `cons`es instead of a full recopy.
 ;; The empty case is deliberately `(if (= block "") acc …)` rather than a plain `(list

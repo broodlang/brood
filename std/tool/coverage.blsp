@@ -365,31 +365,35 @@ files under `source-dirs` are measured; files with no branches are omitted."
                    taken (or (get taken-by-file path) {})
                    states (map (fn (s) [s (coverage--branch-state taken s)]) sites)
                    covered (filter (fn (st) (= (second st) :both)) states)
-                   partial (filter (fn (st) (or (= (second st) :then) (= (second st) :else))) states)
+                   partial (filter (fn (st) (or (= (second st) :then) (= (second st) :else)))
+                             states)
                    missing (filter (fn (st) (= (second st) :none)) states))
                {:file path
                 :total (count sites)
                 :covered (count covered)
-                :partial (map (fn (st) [(first (first st)) (second (first st)) (second st)]) partial)
+                :partial (map (fn (st) [(first (first st)) (second (first st)) (second st)])
+                           partial)
                 :missing (map (fn (st) (first st)) missing)}))
         files))))
 
 (defn coverage--branch-line (root r)
   (println (str "  "
              (pad-right (coverage--relative (get r :file) root) 44)
-             (pad-left (str (coverage--percent (get r :covered) (get r :total))) 4)
-             "%  (" (get r :covered) "/" (get r :total) ")")))
+             (pad-left (str (coverage--percent (get r :covered) (get r :total))) 4) "%  ("
+             (get r :covered) "/" (get r :total) ")")))
 
 (defn coverage--branch-detail (root r)
   (let (partial (get r :partial))
     (unless (empty? partial)
       (println "")
-      (println (str "Half-covered branches in " (coverage--relative (get r :file) root)
-                 " (one edge never taken):"))
-      (fold (fn (_ p)
-              ;; p = [line col state]; state :then means the ELSE edge never fired
-              (println (str "  " (first p) ":" (second p) "  "
-                         (if (= (nth p 2) :then) "else-branch never taken" "then-branch never taken"))))
+      (println (str "Half-covered branches in "
+                 (coverage--relative (get r :file) root) " (one edge never taken):"))
+      (fold
+        (fn (_ p)
+          ;; p = [line col state]; state :then means the ELSE edge never fired
+          (println (str "  "
+                     (first p) ":" (second p) "  "
+                     (if (= (nth p 2) :then) "else-branch never taken" "then-branch never taken"))))
         nil (take 24 partial)))))
 
 (defn coverage-branch-report (root source-dirs)

@@ -78,7 +78,7 @@
   ;; globals, which is what a registry-mutating test needs.
   (test "the built-in commands are registered, with aliases"
     (is (not (nil? (repl/repl--command-for "help"))))
-    (is (not (nil? (repl/repl--command-for "?"))))     ; help alias
+    (is (not (nil? (repl/repl--command-for "?")))) ; help alias
     (is (not (nil? (repl/repl--command-for "expand1"))))
     (is (nil? (repl/repl--command-for "no-such-cmd"))))
 
@@ -90,26 +90,34 @@
 
   (test "register-repl-command adds a dispatchable command that receives the arg"
     (let (box (table))
-      (repl/register-repl-command
-        {:names '("rt-echo") :usage ",rt-echo <x>" :summary "test"
-         :handler (fn (rest) (table-put box :arg rest))})
+      (repl/register-repl-command {:names '("rt-echo")
+                                   :usage ",rt-echo <x>"
+                                   :summary "test"
+                                   :handler (fn (rest) (table-put box :arg rest))})
       (is (not (nil? (repl/repl--command-for "rt-echo"))))
       (repl/repl--run-meta ",rt-echo hello world")
       (assert= (table-get box :arg) "hello world")))
 
   (test "re-registering a name replaces rather than duplicates"
-    (repl/register-repl-command
-      {:names '("rt-dup") :usage ",rt-dup" :summary "one" :handler (fn (r) nil)})
-    (repl/register-repl-command
-      {:names '("rt-dup") :usage ",rt-dup" :summary "two" :handler (fn (r) nil)})
-    (assert= 1 (count (filter (fn (c) (repl/repl--has-name? (get c :names) "rt-dup"))
-                        repl/*repl-commands*)))
+    (repl/register-repl-command {:names '("rt-dup")
+                                 :usage ",rt-dup"
+                                 :summary "one"
+                                 :handler (fn (r) nil)})
+    (repl/register-repl-command {:names '("rt-dup")
+                                 :usage ",rt-dup"
+                                 :summary "two"
+                                 :handler (fn (r) nil)})
+    (assert= 1
+      (count (filter (fn (c) (repl/repl--has-name? (get c :names) "rt-dup"))
+               repl/*repl-commands*)))
     (assert= "two" (get (repl/repl--command-for "rt-dup") :summary)))
 
   (test "a `:hidden` command is dispatchable but absent from the help table"
-    (repl/register-repl-command
-      {:names '("rt-hidden") :usage ",rt-hidden" :summary "quiet" :hidden true
-       :handler (fn (r) nil)})
+    (repl/register-repl-command {:names '("rt-hidden")
+                                 :usage ",rt-hidden"
+                                 :summary "quiet"
+                                 :hidden true
+                                 :handler (fn (r) nil)})
     (is (not (nil? (repl/repl--command-for "rt-hidden"))))))
 
 ;; Cross-process: the error map crosses a heap boundary (send deep-copies it)
