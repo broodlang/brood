@@ -160,6 +160,33 @@ From the published run (`brood-benchmarks/results/`):
    so the receiver is parked less often), **timing-sensitive** (slowing the program with a
    backtrace collapsed it ~30×), and **zero deopts** (nothing deopts; the detour is a
    dispatch-time defer).
+   **NEW 2026-08-03 — the lifetime problem is bigger than "root the queued messages".**
+   Before writing any of this, read `report_gen_liveness` in `core/heap/gc_runtime.rs`. The
+   drain protocol caches a process's "clean" ack for the whole epoch, and its stated
+   justification is precisely the property `Message::FnShared` would remove:
+
+   > *an old-gen handle can never arrive by message (messages deep-copy, promoting closures
+   > into the receiver's current generation). So a clean ack needn't be re-earned each
+   > safepoint*
+
+   With shared handles in messages that is false: a process can ack clean, then be delivered a
+   queued handle into the draining generation, and the collector frees it underneath. So the
+   work is not just "seed the liveness probe from mailboxes" — it is also **re-arming the ack**
+   when such a message is delivered during an active drain. That ack caching is not
+   incidental: the same comment records it as the fix for a fan-out drain regression, where a
+   contended `drain_acks` read lock on every safepoint of every pinning process dominated the
+   run. Undoing it casually re-introduces that.
+   Realistic scope: `to_message` (+ a destination/locality signal), `from_message`, the `send`
+   path, mailbox delivery, and the drain ack + reachability probe — five places, in the two
+   riskiest subsystems here. Budget for it accordingly; it is not an afternoon.
+   **A narrower alternative, unmeasured:** intern the *body* on `promote`. The per-call
+   promotion appends the whole closure graph; the body AST is identical every time (only the
+   captured env differs), so content-addressing just the body would cut region growth to one
+   env frame + one closure cell per call. That mitigates rather than fixes — growth stays
+   unbounded, just far slower — and it needs the intern table invalidated on compaction, for
+   which `shared_closures_clear` is the precedent. Measure what fraction of the 2× it buys
+   before choosing between the two routes.
+
    **The fix, and the decision it needs.** ADR-194's share-by-handle currently exists only on
    the L1 parked path. It should also apply when the message is serialised: an
    already-shared RUNTIME closure on a **same-runtime local** send should cross as a handle,
