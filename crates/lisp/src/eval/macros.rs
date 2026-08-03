@@ -807,10 +807,23 @@ fn enforce_private_refs(
                 // rule keys on the REAL module, matching how the reference
                 // will resolve.
                 let alias_key = value::intern(&format!("{m}/"));
-                let real_m: String = heap
-                    .import_of(alias_key)
-                    .map(value::symbol_name)
-                    .unwrap_or_else(|| m.to_string());
+                let real_m: String = match heap.import_of(alias_key) {
+                    Some(target) => value::symbol_name(target),
+                    // Not an alias: root it (ADR-070). `cur_ns` is the ROOTED namespace
+                    // (`%in-ns` roots what `(defmodule tutor)` declares, so inside project
+                    // `bedit` it is `bedit/tutor`), so an intra-project reference must root
+                    // before the comparison — otherwise `tutor/tutor--line-face`, a module
+                    // reaching its OWN helper, reads as a foreign private access. Alias
+                    // resolution stays first, mirroring `namespace_symbol`'s order; this
+                    // walk sees the pre-rewrite form, hence the rooting here as well.
+                    None => match heap.root_qualified_ref(s) {
+                        Some(rooted) => {
+                            let rooted = value::symbol_name(rooted);
+                            rooted[..rooted.rfind('/').unwrap_or(rooted.len())].to_string()
+                        }
+                        None => m.to_string(),
+                    },
+                };
                 let m = real_m.as_str();
                 if !m.is_empty() && m != cur_ns && heap.import_of(internals_grant_key(m)).is_none()
                 {
@@ -1157,6 +1170,18 @@ fn resolve_sym(
                 value::symbol_name_ref(target),
                 &name[slash + 1..]
             ));
+        }
+        // ADR-070: an intra-package qualified reference roots to the active package, just
+        // as `%in-ns` roots the `(defmodule …)` it declares and `%refer` roots a `(:use …)`
+        // target — `commands/cmd-open` inside project `bedit` becomes
+        // `bedit/commands/cmd-open`. Rooting is *implied*, so the qualified spelling has to
+        // root too: otherwise the bare names import fine while every explicit `mod/name`
+        // goes unbound, and the `--` privacy rule below compares a rooted `cur_ns` against
+        // an unrooted `m` and rejects a module's reference to its OWN helper. Rooting here,
+        // in the expand pass, bakes the rooted spelling into the compiled code — a std or
+        // other-package name is left bare, and an already-rooted one is unchanged.
+        if let Some(rooted) = heap.root_qualified_ref(s) {
+            return rooted;
         }
         return s; // already qualified, no alias
     }

@@ -764,7 +764,11 @@ pub fn check_file_ext(
     // compile namespace + forward-ref pre-scan so pass 1's resolve qualifies both
     // definition heads and references to `foo/…` — otherwise every qualified
     // reference would look unbound. Restored before returning.
-    let file_ns = crate::eval::macros::file_ns(heap, forms);
+    // ROOTED (ADR-070): `%in-ns` roots what `(defmodule tutor)` declares, so at run time the
+    // namespace is `bedit/tutor`. The checker has to set the SAME rooted namespace, or every
+    // comparison against it disagrees with the runtime — most visibly the `--` privacy rule,
+    // which then reads a module's reference to its own helper as a foreign private access.
+    let file_ns = crate::eval::macros::file_ns(heap, forms).map(|ns| heap.root_module_name(ns));
     let prev_ns = heap.set_compile_ns(file_ns);
     let prev_known = if file_ns.is_some() {
         heap.set_ns_known_names(crate::eval::macros::scan_def_names(heap, forms))
