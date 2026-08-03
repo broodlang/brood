@@ -129,6 +129,30 @@
   (test "surrounding and trailing whitespace/empty terms are ignored"
     (is (version-satisfies? "1.5.0" " >= 1.2 , < 2.0 ,"))))
 
+(describe "version-satisfies? — range edge cases"
+  (test "an all-zero caret pins the last written component (^0.0.0 = >=0.0.0, <0.0.1)"
+    (is (version-satisfies? "0.0.0" "^0.0.0"))
+    (refute (version-satisfies? "0.0.1" "^0.0.0"))
+    ;; ^0.0 keeps the last written (minor): >= 0.0.0, < 0.1.0
+    (is (version-satisfies? "0.0.9" "^0.0"))
+    (refute (version-satisfies? "0.1.0" "^0.0")))
+  (test "a single-segment tilde still pins the major (~> 1 = >=1.0.0, <2.0.0)"
+    (is (version-satisfies? "1.9.9" "~> 1"))
+    (refute (version-satisfies? "2.0.0" "~> 1"))
+    (refute (version-satisfies? "0.9.9" "~> 1")))
+  (test "a prerelease/build suffix on either side is ignored (core comparison)"
+    (is (version-satisfies? "1.2.3-rc.1" "^1.2.0"))
+    (is (version-satisfies? "1.5.0+build.9" "~> 1.2"))
+    (is (version-satisfies? "1.2.3" "^1.2.3-rc.1")))
+  (test "^ or ~> with no version after it raises, not a silent false"
+    (is (includes? (try (version-satisfies? "1.0.0" "^") (catch e (error-message e)))
+          "no version in constraint"))
+    (is (includes? (try (version-satisfies? "1.0.0" "~>") (catch e (error-message e)))
+          "no version in constraint")))
+  (test "a bare zero version means = 0.0.0"
+    (is (version-satisfies? "0.0.0" "0"))
+    (refute (version-satisfies? "0.0.1" "0"))))
+
 (describe "version-satisfies-all? / version-unsatisfied — the :enhances shape"
   (test "every named constraint met"
     (is (version-satisfies-all? {'bedit "0.4.0"} {'bedit ">= 0.3"}))
