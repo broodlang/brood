@@ -714,6 +714,35 @@ mod tests {
         );
     }
 
+    /// Package-rooted namespaces (ADR-070): with a package context active — as the LSP's
+    /// tooling image has after `project-setup` roots the project under its `:name` — a
+    /// file's `(defmodule main)` roots to `myproj/main`, so a bare project fn resolves to
+    /// the rooted global. This is the property LSP goto/hover/references/rename depend on,
+    /// and it holds *for free* because `resolve_in_source` does a real header eval (whose
+    /// `%in-ns` roots via the context), unlike the checker's static import setup.
+    #[test]
+    fn resolve_in_source_roots_under_a_package_context() {
+        use std::collections::HashSet;
+        let mut interp = Interp::new();
+        let modules: HashSet<value::Symbol> = [value::intern("main"), value::intern("util")]
+            .into_iter()
+            .collect();
+        interp
+            .heap
+            .set_package_context(Some(value::intern("myproj")), modules);
+
+        let src = "(defmodule main)\n(defn go (x) x)\n";
+        // own-namespace def roots under the project name
+        assert_eq!(resolve_in_source(&mut interp, src, "go"), "myproj/main/go");
+        // a prelude/root name still falls through to root, unrooted
+        assert_eq!(resolve_in_source(&mut interp, src, "map"), "map");
+        // an already-qualified reference is untouched
+        assert_eq!(
+            resolve_in_source(&mut interp, src, "other/thing"),
+            "other/thing"
+        );
+    }
+
     /// Resolving a never-seen identifier must not grow the interner (kernel
     /// audit, perf #4). The LSP feeds arbitrary hovered / half-typed names
     /// through here on every keystroke, and the interner never frees — interning

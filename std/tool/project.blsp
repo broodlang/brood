@@ -413,10 +413,18 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; on `*features*`) without running it. A parse error yields nil → the file is loaded,
 ;; and the load surfaces the real error.
 (defn project--file-feature (path)
+  ;; ROOTED (ADR-070): the key `defmodule` will `provide` is the rooted name when the
+  ;; project is rooted (`(defmodule interactive)` in project `bedit` provides
+  ;; `bedit/interactive`), and `*features*` is what `project--should-load?` compares
+  ;; against. Returning the short name would never match, so every file would re-load —
+  ;; and a module an earlier file already `require`d would be evaluated TWICE, resetting
+  ;; any registry it builds by rebinding a global (`(def *commands* (assoc *commands* …))`
+  ;; starts over, silently emptying it). `%root-module-name` is a no-op for a nameless
+  ;; project, so the short name is still the answer there.
   (try
     (fold (fn (acc f)
             (if (and (nil? acc) (pair? f) (= (first f) 'defmodule) (symbol? (second f)))
-              (name (second f))
+              (name (%root-module-name (second f)))
               acc))
       nil (read-all (slurp path)))
     (catch e nil)))
@@ -1858,11 +1866,33 @@ std. Errors if `root` is nil (not in a project)."
       ;; (relative to that dir) keeps any namespace — `src/main.blsp` → `main`,
       ;; `src/net/sse.blsp` → `net/sse`. Dir order (project dirs first)
       ;; is preserved, so a project module still wins a name clash with a dep.
-      (cons manifest
-        (fold (fn (acc d)
-                (fold (fn (a f) (append a (list (project--bundle-name d f) (slurp f))))
-                  acc (project-collect-sources d)))
-          nil all-dirs)))))
+      (let (pairs (fold (fn (acc d)
+                          (fold (fn (a f) (cons (list (project--bundle-name d f) (slurp f)) a))
+                            acc (project-collect-sources d)))
+                    nil all-dirs))
+        ;; Reject a module-name collision in the bundle. At DEV time package-rooting keeps
+        ;; two deps' same-named modules apart (`a/parser` vs `b/parser`, ADR-070), but a
+        ;; release bundle is UNROOTED — its embedded table is keyed by require-name — so two
+        ;; providers of one name would silently clobber (the last embedded wins). Since the
+        ;; rooting made `ensure-deps` stop rejecting cross-dep collisions, the bundle path
+        ;; guards it here instead. (Rooting the bundle itself, for full dev/release parity,
+        ;; is the deeper follow-up; this keeps the bundle SAFE meanwhile.)
+        (bundle--reject-duplicate-names (map first pairs))
+        (cons manifest
+          (fold (fn (acc p) (cons (first p) (cons (second p) acc))) nil pairs))))))
+
+;; Error on the first require-name two bundled files share (see `bundle-collect`);
+;; returns nil when all are distinct (a guard, called for effect).
+(defn bundle--reject-duplicate-names (names)
+  (fold (fn (seen nm)
+          (if (includes? seen nm)
+            (error "bundle: two source files would embed under the same module name '"
+              nm "' — a release bundle keys modules by name and cannot hold both. Rename one"
+              " module (two dependencies sharing a module name work at dev time via"
+              " package-rooting, but a bundle is flat — ADR-070).")
+            (cons nm seen)))
+    nil names)
+  nil)
 
 ;; (run-bundle args) — boot an embedded release bundle. The `brood` binary,
 ;; detecting its appended archive, calls this instead of starting a REPL. No
