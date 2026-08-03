@@ -15166,3 +15166,49 @@ independent problems. Thread 2 was not per-message cost (it was spawn placement)
 was not a reclamation-policy question (it was thread 6's growth). Both had been described in
 terms of the mechanism nearest the symptom. Fifteen minutes of measurement closed 6b; it had
 been carrying an implementation plan.
+
+## 2026-08-03 — the per-process floor, attributed (it was "roughly half unattributed")
+
+Measured as the **slope** of RSS against process count, not RSS/N — the latter folds in the
+runtime's ~24 MB base and is what produced the older 5.9 KB figure. An idle process parked in
+`receive` costs **4.19 KB**, and the slope is flat: 4389 / 4186 / 4195 bytes at N = 10k / 40k /
+80k.
+
+That is also lower than the 5.9 KB the handoff carried, because that number came from
+`spawn-live`, where every process additionally holds a **copied message payload**. Two different
+quantities were being compared to the BEAM's 3.1 KB; the idle floor is 4.19 KB and the payload
+adds ~1.9 KB on that row.
+
+**It is not allocator retention.** A8 warns that RSS is not a proxy for live bytes here, so the
+first thing to rule out was mimalloc holding pages. `MIMALLOC_PURGE_DELAY=0` gives 4230 / 4120
+against the default's 4259 / 4192 — the slope does not move. (Base RSS *does* drop 23.9 →
+20.6 MB, the documented ~17%, which is exactly why measuring the slope rather than the ratio
+mattered.) So these are live bytes.
+
+**Structural attribution** (new test `per_process_floor_is_attributed`, which prints the
+breakdown and asserts ceilings so accidental growth is caught here rather than in a benchmark
+six weeks later):
+
+| | bytes |
+|---|---|
+| `Process` — of which `Heap` **1200, embedded by value** | 1304 |
+| `Mailbox` | 184 |
+| `Suspended` (a parked process holds one) | 136 |
+| structural total | **1624** |
+| remainder | **~2566** |
+
+The remainder is *not* process data: `process-info`'s `:memory` for an idle process is **64
+bytes**. It is per-allocation overhead spread across the ~25–30 distinct heap blocks a process
+owns — every `Vec` inside `Heap` that has been touched holds a rounded-up capacity, and
+`Box<Process>` at 1304 bytes lands in a size class well above it.
+
+**Two experiments, named but not run.** (1) Box the `Heap` inside `Process` — `Process` drops to
+~112 bytes and `Heap` becomes its own block; if rounding dominates, the floor falls, and if the
+extra indirection costs more than it saves, that is worth knowing too. (2) The allocator
+size-class histogram the handoff asks for, which would settle the block count directly instead
+of inferring it. Do (1) first: it is mechanical, and its result tells you whether (2) is worth
+building.
+
+Worth noting for whoever picks this up: `Heap` being inline in `Process` means **any new `Heap`
+field is paid once per live process**. That is the kind of change that passes review and shows
+up as a memory row later, which is why the ceiling assertions now exist.
