@@ -14843,3 +14843,29 @@ had refreshed Brood's column and left the other six from an earlier one (.NET `f
 where its own `results.json` said 39.2 ms). Every column is now regenerated from a single run
 by a script, which I validated by reproducing the *old* tables from the old JSON before
 trusting it.
+
+## 2026-08-03 — soak on the scheduler change: 3.18M iterations, zero violations
+
+Paired soak over the paths 2026-08-02's scheduler work touched (placement, spawn-link,
+supervisor restart, closures crossing sends, hot-reload churn), armed against a control that
+reverts exactly the new mechanisms (`BROOD_NO_STEAL_WAKE=1 BROOD_STEAL_GRACE_NS=0`), run in
+parallel so both see the same machine.
+
+**1,590,000 iterations each — 3.18 M total — over ~2 hours, zero invariant violations in
+either arm.** That matters more than "it didn't crash": the failure this harness hunts is
+silent (a wrongly-applied receive-mark does not fault, it just fails to deliver), so every
+iteration asserts a reply arrived, the backlog drained with nothing skipped, and a supervised
+child came back.
+
+RSS tracked between the two arms the whole way (armed/control 0.92–1.06 at matched iteration
+counts, i.e. noise), so the change moves neither correctness nor memory behaviour. Growth was
+~1.07 KB/iteration, which is the A8 allocator-retention figure re-confirmed — deterministic in
+iteration *count*, not a leak, and identical with the mechanisms off.
+
+**One real defect, in the harness rather than the runtime.** It ended with
+`unbound symbol: gc-stats` — on its *final* line, discarding the summary after two clean
+hours. `gc-stats` is a dev-tools builtin and is absent from the **lean** runtime, which is
+exactly the build worth soaking (`make install INSTALL_FEATURES='$(RUN_FEATURES)'` — what the
+benchmarks and `nest release` use). Now guarded with `bound?`: lean prints the iteration count
+and RSS and says why the region stats are missing; a dev-tools build still prints them. Both
+paths verified.
