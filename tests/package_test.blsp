@@ -405,6 +405,159 @@
     (assert= (project/project-parse-deps [['foo :version "1.2.0"]])
       (list (assoc (dep-registry 'foo "1.2.0") :optional false)))))
 
+;; ---- version-range resolution (ADR-209) --------------------------------------
+;; A `:version` dep now names a RANGE, resolved to a concrete version by the backtracking
+;; resolver over the live registry. These drive the whole path against a loopback server
+;; serving a multi-package, multi-version registry: list-releases, per-release metadata
+;; (with its own `:dependencies` as ranges), and real tarballs — so a range flows through
+;; the solver, gets downloaded + sha-verified + extracted, and is locked at its concrete
+;; version. The registry SPEC is `{name -> {version -> {:deps [[dep-name range]...]
+;; :checksum sha :bytes b}}}`.
+
+(defn rr-releases-json (versions)
+  (str "{\"releases\":[" (join "," (map (fn (v) (str "{\"version\":\"" v "\"}")) versions)) "]}"))
+
+(defn rr-release-json (version checksum deps)
+  (str "{\"checksum\":\"" checksum "\",\"version\":\"" version "\",\"dependencies\":["
+    (join "," (map (fn (d) (str "{\"name\":\"" (first d) "\",\"version\":\"" (second d) "\"}")) deps))
+    "]}"))
+
+;; Build one release tarball whose manifest declares `deps-line` (so the extracted
+;; package's own project.blsp matches what the registry advertises). Returns [bytes sha].
+(defn rr-build (parent nm version deps-line)
+  (let (dir (path-join parent (str nm "-" version)))
+    (pkg-write-project dir nm nm "(defn f () 1)" deps-line)
+    (let (archive (path-join parent (str nm "-" version ".tar.gz")))
+      (run-process "tar" (list "-czf" archive "-C" dir "."))
+      (let (bytes (slurp-bytes archive)) [bytes (hash/sha256-bytes bytes)]))))
+
+;; A handler serving `spec`. Path shapes: …/packages/<n>/releases (list),
+;; …/releases/<v> (metadata), …/releases/<v>/tarball (bytes).
+(defn rr-handler (spec)
+  (fn (req)
+    (let (parts (string-split (get req :path) "/")
+          n (count parts))
+      (let (nm (nth parts 4)
+            releases (get spec nm))
+        (cond
+          (nil? releases) (net/http/not-found)
+          (and (= n 6) (= (nth parts 5) "releases"))
+            (net/http/ok (rr-releases-json (keys releases)))
+          (and (= n 7) (= (nth parts 5) "releases"))
+            (let (rel (get releases (nth parts 6)))
+              (if (nil? rel) (net/http/not-found)
+                (net/http/ok (rr-release-json (nth parts 6) (get rel :checksum) (get rel :deps)))))
+          (and (= n 8) (= (nth parts 7) "tarball"))
+            (let (rel (get releases (nth parts 6)))
+              (if (nil? rel) (net/http/not-found)
+                (net/http/response 200 {"Content-Type" "application/gzip"} (get rel :bytes))))
+          else (net/http/not-found))))))
+
+(describe "package: version-range resolution (ADR-209)"
+  (test "the registry provider lists versions and reads a release's dep ranges"
+    (let (parent (pkg-fixture-root)
+          [b1 s1] (rr-build parent "foo" "1.0.0" "")
+          [b2 s2] (rr-build parent "foo" "1.5.0" " :dependencies [[bar :version \"^2.0\"]]")
+          spec {"foo" {"1.0.0" {:deps [] :checksum s1 :bytes b1}
+                       "1.5.0" {:deps [["bar" "^2.0"]] :checksum s2 :bytes b2}}}
+          base (mock-registry-start (rr-handler spec)))
+      (let (versions (package/registry--list-versions base 'foo))
+        (is (includes? versions "1.0.0"))
+        (is (includes? versions "1.5.0")))
+      (assert= (list ['bar "^2.0"]) (package/registry--release-deps base 'foo "1.5.0"))
+      (assert= '() (package/registry--release-deps base 'foo "1.0.0"))
+      ;; an unknown package has no versions (so the resolver reports it, not a crash)
+      (assert= nil (package/registry--list-versions base 'nope))))
+
+  (test "a range resolves to the newest compatible version, transitively, and locks it"
+    (let (parent (pkg-fixture-root)
+          app-dir (path-join parent "app")
+          [foo15 fs] (rr-build parent "foo" "1.5.0" " :dependencies [[bar :version \"^2.0\"]]")
+          [bar20 b20s] (rr-build parent "bar" "2.0.0" "")
+          [bar21 b21s] (rr-build parent "bar" "2.1.0" "")
+          spec {"foo" {"1.0.0" {:deps [] :checksum "x" :bytes #b""}
+                       "1.5.0" {:deps [["bar" "^2.0"]] :checksum fs :bytes foo15}}
+                "bar" {"2.0.0" {:deps [] :checksum b20s :bytes bar20}
+                       "2.1.0" {:deps [] :checksum b21s :bytes bar21}}}
+          base (mock-registry-start (rr-handler spec)))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (binding (*config-registry* base)
+        (let (entries (package/resolve-deps app-dir (list (dep-registry 'foo "^1.0")) nil)
+              by-name (fold (fn (m e) (assoc m (get e :name) e)) {} entries))
+          (assert= 2 (count entries))
+          ;; foo: newest satisfying ^1.0 is 1.5.0
+          (assert= "1.5.0" (get (get by-name 'foo) :version))
+          ;; bar: pulled in transitively by foo 1.5.0's ^2.0, newest is 2.1.0
+          (assert= "2.1.0" (get (get by-name 'bar) :version))
+          ;; both are on disk under _deps/
+          (is (dir? (path-join (path-join app-dir "_deps") "foo")))
+          (is (dir? (path-join (path-join app-dir "_deps") "bar")))
+          ;; the lock rows carry the CONCRETE resolved versions
+          (let (foo-row (dep-lock-vec (get by-name 'foo)))
+            (assert= :registry (vector-ref foo-row 1))
+            (assert= "1.5.0" (vector-ref foo-row 2)))))))
+
+  (test "a fully-covering lock reuses the solution network-free (the fast path)"
+    (let (parent (pkg-fixture-root)
+          app-dir (path-join parent "app")
+          [foo10 fs] (rr-build parent "foo" "1.0.0" "")
+          spec {"foo" {"1.0.0" {:deps [] :checksum fs :bytes foo10}}}
+          base (mock-registry-start (rr-handler spec)))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (binding (*config-registry* base)
+        ;; first resolve pins foo = 1.0.0 and builds a lock row
+        (let (entries (package/resolve-deps app-dir (list (dep-registry 'foo "^1.0")) nil)
+              lock (apply vector (map dep-lock-vec entries)))
+          (assert= "1.0.0" (get (first entries) :version))
+          ;; now point the registry at a server that 404s EVERYTHING — a re-solve would
+          ;; fail, so success proves the locked solution was reused without querying it
+          (binding (*config-registry* (mock-registry-start (rr-handler {})))
+            (let (again (package/resolve-deps app-dir (list (dep-registry 'foo "^1.0")) lock))
+              (assert= "1.0.0" (get (first again) :version))))))))
+
+  (test "adding a dep re-solves but keeps the already-locked dep at its pinned version"
+    ;; foo is locked at 1.0.0 though 1.1.0 exists; adding bar forces a fresh solve —
+    ;; foo must STAY 1.0.0 (the lock preference), only bar resolves newest.
+    (let (parent (pkg-fixture-root)
+          app-dir (path-join parent "app")
+          [foo10 f10] (rr-build parent "foo" "1.0.0" "")
+          [foo11 f11] (rr-build parent "foo" "1.1.0" "")
+          [bar20 b20] (rr-build parent "bar" "2.0.0" "")
+          spec {"foo" {"1.0.0" {:deps [] :checksum f10 :bytes foo10}
+                       "1.1.0" {:deps [] :checksum f11 :bytes foo11}}
+                "bar" {"2.0.0" {:deps [] :checksum b20 :bytes bar20}}}
+          base (mock-registry-start (rr-handler spec))
+          ;; a prior lock pinning foo = 1.0.0 (bar not yet present)
+          prior-lock [['foo :registry "1.0.0" :sha256 f10 :deps []]])
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (binding (*config-registry* base)
+        (let (entries (package/resolve-deps app-dir
+                        (list (dep-registry 'foo "^1.0") (dep-registry 'bar "^2.0"))
+                        prior-lock)
+              by-name (fold (fn (m e) (assoc m (get e :name) e)) {} entries))
+          (assert= 2 (count entries))
+          (assert= "1.0.0" (get (get by-name 'foo) :version)) ; kept, NOT upgraded to 1.1.0
+          (assert= "2.0.0" (get (get by-name 'bar) :version))))))
+
+  (test "an unsatisfiable range set errors, naming the package"
+    (let (parent (pkg-fixture-root)
+          app-dir (path-join parent "app")
+          [foo10 fs] (rr-build parent "foo" "1.0.0" " :dependencies [[shared :version \"^1.0\"]]")
+          [baz10 bs] (rr-build parent "baz" "1.0.0" " :dependencies [[shared :version \"^2.0\"]]")
+          spec {"foo" {"1.0.0" {:deps [["shared" "^1.0"]] :checksum fs :bytes foo10}}
+                "baz" {"1.0.0" {:deps [["shared" "^2.0"]] :checksum bs :bytes baz10}}
+                "shared" {"1.0.0" {:deps [] :checksum "x" :bytes #b""}
+                          "2.0.0" {:deps [] :checksum "y" :bytes #b""}}}
+          base (mock-registry-start (rr-handler spec)))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (binding (*config-registry* base)
+        (is (includes? (try
+                         (package/resolve-deps app-dir
+                           (list (dep-registry 'foo "^1.0") (dep-registry 'baz "^1.0"))
+                           nil)
+                         (catch e (error-message e)))
+              "shared"))))))
+
 ;; `:enhances` — what a package plugs into (Debian's `Enhances:`). The whole point is
 ;; that NOTHING here knows any application by name: the manifest parses a map, publish
 ;; carries it, search passes it through as a query parameter. `bedit` below is just a

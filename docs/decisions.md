@@ -13379,3 +13379,108 @@ So both ends are closed:
 - A capturing closure is still copied — it is LOCAL, so there is nothing to share. Only the
   capture-free top-level shape (`:start (fn () (spawn-link (worker)))`, the idiom the
   supervisor framework uses) takes the new path.
+## ADR-209 — A real dependency version resolver: backtracking, newest-compatible
+
+**Status:** implemented (2026-08-03) — the version grammar (`^`/`~>`/conjunctions), the
+pure backtracking solver, the registry wiring (a `:version` manifest entry is now a
+range, resolved from live published metadata into the lock), and the `:brood` runtime
+gate all ship and are tested.
+**Supersedes ADR-037's "no constraint solver — direct refs only" invariant**,
+deliberately, the way ADR-070's package-rooting superseded its own "detect-and-reject"
+interim. The user asked for "a full resolver with many many tests," a considered reversal
+of the ship-the-simple-form deferral (ADR-011) now that a real ecosystem (the hive
+registry, ADR-147) exists to resolve against.
+
+**Context.** ADR-037 shipped git-deps + a lock file and explicitly declined a solver:
+each dep pinned an exact ref, and two deps wanting different versions of the same package
+was a loud error the user fixed by hand. That was the right first cut, and it held while
+"a dependency" meant "a git URL at a tag." The registry (ADR-147) changed the shape of the
+problem: packages now have *many published versions* and declare ranges against each other,
+so "resolve the newest set that satisfies everyone" is a question that finally has data
+behind it — and hand-pinning a transitive diamond is exactly the recurring pain ADR-037
+named as the cost of deferring.
+
+**Decision.** A backtracking, **newest-compatible** resolver (the Cargo/npm/pub family),
+split across two pure modules with the registry as a seam:
+
+- **`std/version.blsp` — the predicate half.** Extended from `>=/>/<=/</=`/bare to add
+  `^` (compatible-with: `^1.2.3` = `>=1.2.3, <2.0.0`, but `^0.2.3` = `>=0.2.3, <0.3.0`,
+  because a 0.x major makes minor the breaking axis) and `~>` (pessimistic: `~> 1.2.3`
+  = `>=1.2.3, <1.3.0`, `~> 1.2` = `>=1.2.0, <2.0.0`), plus **conjunctions**
+  (`">= 1.2, < 2.0"` — every comma-separated term must hold). Caret/tilde expand to a
+  `>=`-plus-exclusive-`<` range on the numeric part-lists, so they add a spelling, not a
+  new comparison. This module still *chooses nothing* — it answers "does this one version
+  satisfy this one constraint?", the question the registry and plugin-hosts already asked.
+
+- **`std/resolver.blsp` — the selection half, PURE.** `(resolve roots provider)` →
+  `[:ok {name → version}]` | `[:error message]`. The search is backtracking DFS: decide
+  packages one at a time; try each at its **newest** version satisfying every constraint
+  accumulated so far; when a later decision would violate an already-fixed one, that
+  candidate is dead and the search falls back to an older version — across the whole
+  decision stack, so a deep conflict can force a shallow package to a different version.
+  The universe is reached only through a `provider` (two closures: `versions name` and
+  `deps name version`), so the entire algorithm is a function of injected data — **no
+  network, no filesystem, no registry**. That is the load-bearing design choice: it makes
+  the solver exhaustively testable offline (`tests/resolver_test.blsp`, 23 cases incl.
+  two-level backtracking, diamonds, cycles, and conflict-message content), and it keeps
+  the registry's fetch/cache logic out of the search. A conflict names the unsatisfiable
+  package, every requirer, and the available versions — the "because A needs X, B needs Y"
+  shape, without full PubGrub derivation (deferred until a caller wants better than a
+  single honest conflict line).
+
+- **MVS was declined.** Go's Minimal Version Selection is simpler (no backtracking) and
+  fits the project's grain, but it only models `>=` cleanly — `^`/`~>` mean "newest that
+  fits," the opposite of MVS's "oldest that fits." Choosing newest-compatible is choosing
+  the range vocabulary an ecosystem with a registry expects.
+
+**Scope / deferred.** Ranges apply to **`:registry` deps only** in this pass; `:git`,
+`:path`, and `:tarball` keep their exact ref/path pins (git-tag semver could come later).
+Pre-release ordering stays deferred (the numeric core is compared; a `-rc`/`+build` suffix
+is ignored), as does PubGrub-grade error derivation.
+
+**Sibling shipped — the `:brood` runtime gate.** A project may declare `:brood
+"<constraint>"` in its manifest (any `std/version` string — `">= 0.2"`, `"^0.1"`, a
+conjunction), checked at `project-setup` against a new `(brood-version)` primitive (the
+kernel's `CARGO_PKG_VERSION`, e.g. `"0.1.0"`). An unmet requirement is a **hard error**
+naming the constraint and the running version — the way `mix.exs`'s `elixir:` field
+refuses an incompatible Elixir — rather than failing obscurely deeper in on whatever newer
+feature the project assumed. It reuses `version-satisfies?` (so it is one line of policy
+in `std/tool/project.blsp`, the primitive its only kernel input); absent means "runs on
+any runtime." This is deliberately a *gate*, not a resolver input: it constrains the
+single running binary, not a version to select.
+
+**Consequences.** `std/resolver.blsp` is a new embedded module; `std/version.blsp` grows
+the caret/tilde/conjunction vocabulary (its old "explicitly not a solver / exact only"
+comments were updated — the module is still pure predicates, but the resolver is now a
+real third consumer). `tests/version_test.blsp` gains caret/tilde/conjunction blocks;
+`tests/resolver_test.blsp` is new. In `std/tool/package.blsp`, `resolve-deps` is now
+**two-phase**: the depth-first walk resolves `:path`/`:git`/`:tarball` deps to exact
+sources and *collects* every `:version` requirement it meets (root + each non-registry
+manifest), then the solver — driven by a registry provider (`registry--list-versions` +
+each release's `:dependencies` as ranges) — picks a concrete version per registry package
+across the closure, and those are fetched/extracted exactly like a pinned `:version` dep.
+`nest publish` already carries a dep's declared `:version` string, so published metadata
+now advertises ranges with no code change. `tests/package_test.blsp` gains an end-to-end
+range block (provider, transitive resolve+lock, conflict).
+
+**Refinement taken at build (2026-08-03): a fully-covering lock is reused network-free.**
+`resolve-deps` runs on every project-aware `nest` subcommand, so re-querying the registry
+each time would be unacceptable. Before solving, if the prior lock pins a `:registry`
+version for every collected requirement AND each still satisfies its range, the locked
+solution is reused and each dep is fetched from the `_deps/` cache — no `/releases` call.
+A changed manifest (or a `nest update` that drops the name from the lock) fails the cover
+check and forces a fresh solve.
+
+**Second refinement (2026-08-03): a fresh solve prefers the locked versions.** Without
+this, a fresh solve picks newest-compatible for *everything*, so adding one dep re-solves
+the whole closure to newest and bumps unrelated deps — the opposite of what a lock is for.
+`resolve` now takes an optional `preferred` map (name → version); for each package the
+solver tries the preferred version FIRST when it still satisfies every constraint, then
+newest-first. `package--solve-registry` passes the still-locked versions as preferences, so
+adding a dep keeps every unchanged dep pinned and only the new one (and its subtree) moves;
+`nest update <name>` drops that name from the lock, so it (and nothing else) re-solves to
+newest. Preference is provably safe: a preferred version is only ever tried if it is already
+a valid candidate, and the search still backtracks off it, so it changes *which* valid
+solution is reached, never *whether* one is found (a test pins a version that dead-ends and
+confirms the solver still finds the answer). Still deferred: PubGrub-grade conflict
+derivation, pre-release ordering, and semver ranges over `:git` tags.

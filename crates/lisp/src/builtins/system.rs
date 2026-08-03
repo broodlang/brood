@@ -1096,12 +1096,17 @@ const CORE_MODULES: &[EmbeddedModule] = &[
     // adds `set`/`conj`/`disj`/`union`/`intersection`/`difference`/`subset?`.
     // Opt-in, never in the prelude (no `#{…}` literal / distinct type yet).
     embedded_module!("set", "std/set.blsp"),
-    // Semantic versions as data: parse / order / test against a `">= 1.2"` constraint.
-    // Written because two consumers (the registry deciding which release is newest, an
-    // application deciding whether a plugin's declared `:enhances` constraint is met)
-    // had each hand-rolled it. Explicitly NOT a dependency solver — the resolver still
-    // takes exact versions only (ADR-037).
+    // Semantic versions as data: parse / order / test against a `">= 1.2"`,
+    // `"^1.2"`, `"~> 1.3"`, or `">= 1.2, < 2.0"` constraint. Written because two
+    // consumers (the registry deciding which release is newest, an application
+    // deciding whether a plugin's declared `:enhances` constraint is met) had each
+    // hand-rolled it. Pure predicates; the version SELECTION algorithm is `resolver`.
     embedded_module!("version", "std/version.blsp"),
+    // The dependency version resolver (ADR-209): a pure backtracking, newest-compatible
+    // solver over an injected `provider` (what versions exist, what each requires). The
+    // registry provider that fetches for real lives in `std/tool/package`; keeping the
+    // search pure here is what makes it exhaustively testable offline.
+    embedded_module!("resolver", "std/resolver.blsp"),
     // Behaviour contracts — `defbehaviour` declares the ops a MODULE must define to
     // satisfy a named contract (`(:implements B)`), verified by the checker/LSP pass
     // (`types/check/protocol.rs`). Value dispatch (`defprotocol`/`defimpl`) was RETIRED
@@ -2153,6 +2158,16 @@ pub(super) fn system_monitor(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
 pub(super) fn build_id(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let id = build_id_string();
     Ok(heap.alloc_string(&id))
+}
+
+/// `(brood-version)` — this runtime's semantic version (`CARGO_PKG_VERSION`,
+/// e.g. `"0.1.0"`): the string a project's `:brood` manifest constraint is
+/// checked against (ADR-209). Just the semver — the git-sha and binary-stamp
+/// live in `build-id`. The kernel is the only place this value exists, so it is
+/// a primitive; the policy that reads a `:brood` constraint and refuses an
+/// incompatible runtime is Brood (`std/tool/project.blsp`).
+pub(super) fn brood_version(_: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    Ok(heap.alloc_string(env!("CARGO_PKG_VERSION")))
 }
 
 /// The `(build-id)` string as plain Rust — shared with the boot cache
