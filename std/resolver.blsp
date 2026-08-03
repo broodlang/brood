@@ -1,0 +1,175 @@
+;; std/resolver.blsp — the dependency version resolver (ADR-209). Given the direct
+;; dependencies a project declares and a way to ask "what versions of X exist?" and
+;; "what does X@v depend on?", pick ONE concrete version for every package in the
+;; transitive graph so that every version constraint holds — or explain why none can.
+;;
+;; The whole module is a PURE function of its inputs. It never touches the network,
+;; the filesystem, or a registry: those live behind a `provider` (two closures —
+;; `versions` and `deps`), so the search is driven entirely by data the caller
+;; supplies. That is what makes it exhaustively testable offline
+;; (tests/resolver_test.blsp), and it is why the version *predicates* live in
+;; std/version.blsp while version *selection* lives here — the split keeps each side
+;; small and separately checkable.
+;;
+;; Strategy: backtracking, newest-compatible (the Cargo/npm/pub family, ADR-209).
+;; Packages are decided one at a time; each is tried at its NEWEST version that
+;; satisfies every constraint accumulated so far, and on a dead end the search
+;; backtracks to an older choice. Minimal Version Selection was the alternative and
+;; was declined: `^`/`~>` ranges mean "newest that fits", not "oldest that fits".
+
+(defmodule resolver
+  "The dependency version resolver (ADR-209). `(resolve roots provider)` picks one
+version per package across the transitive graph, or reports the conflict. `roots` is a
+list of `[name constraint]` (constraint a `std/version` string, or nil/\"\" = any);
+`provider` (see `make-provider`) answers what versions exist and what each release
+requires. Pure — no I/O; the registry provider that fetches for real lives in
+`std/tool/package`. `(require 'resolver)`.")
+
+(require 'version)
+
+;; --- the provider: the resolver's only window onto the package universe ----------
+;; Two closures. `versions-fn`: name → the list of version strings that exist for it.
+;; `deps-fn`: name, version → the `[dep-name constraint]` requirements of that release.
+;; Both are pure from the resolver's view; a real one hits a registry (and caches),
+;; a test one is a literal table.
+
+(defn make-provider (versions-fn deps-fn)
+  "A provider the resolver queries: `versions-fn` maps a package name to the list of
+version strings that exist for it; `deps-fn` maps a name + a version to that release's
+`[dep-name constraint]` requirements."
+  {:versions versions-fn :deps deps-fn})
+
+(defn provider-versions (provider name)
+  "The version strings `provider` knows for `name` (possibly empty/nil)."
+  ((get provider :versions) name))
+
+(defn provider-deps (provider name version)
+  "The `[dep-name constraint]` requirements of `name` at `version`, per `provider`."
+  ((get provider :deps) name version))
+
+;; --- constraints ----------------------------------------------------------------
+;; A REQUIREMENT is `[requirer constraint]`: who asked (a package name, or `:root` for
+;; the project's own manifest) and the version string they asked for. The `constraints`
+;; map is name → list of requirements — everything demanded of a package so far. A
+;; package is chosen only against the CONJUNCTION of its requirements, and the requirer
+;; is kept so a conflict can name who wanted what.
+
+(defn resolver--add (constraints name requirer constraint)
+  (assoc constraints name (cons [requirer constraint] (get constraints name))))
+
+(defn resolver--seed (roots)
+  (fold (fn (cs r) (resolver--add cs (nth r 0) :root (nth r 1))) {} roots))
+
+;; The names required but not yet decided, in a deterministic (sorted) order — sorting
+;; only fixes which conflict a failure reports first, never whether one is found.
+(defn resolver--pending (constraints assignment)
+  (sort (keep (fn (kv) (when (not (contains? assignment (first kv))) (first kv)))
+          (map-pairs constraints))))
+
+;; The versions of `nm` that satisfy every one of its requirements, newest first (so
+;; the search tries the newest compatible release before falling back to older ones) —
+;; EXCEPT a `preferred` version (typically the one already in the lock) is tried first
+;; when it still satisfies every constraint. That is what keeps a re-solve stable: an
+;; existing pin is kept rather than eagerly upgraded, so adding one dependency doesn't
+;; bump the rest of the graph to newest. Preference never widens the candidate set (a
+;; preferred version that no longer fits simply isn't among them) and never changes
+;; *whether* a solution is found — only which of the valid ones the search reaches first.
+(defn resolver--candidates (provider nm reqs preferred)
+  (let (constraints (map (fn (r) (nth r 1)) reqs)
+        newest-first (sort (fn (a b) (> (version/version-compare a b) 0))
+                       (filter (fn (v) (every? (fn (c) (version/version-satisfies? v c)) constraints))
+                         (or (provider-versions provider nm) nil)))
+        pin (get preferred nm))
+    (if (and pin (includes? newest-first pin))
+      (cons pin (filter (fn (v) (not (= v pin))) newest-first))
+      newest-first)))
+
+;; --- the search -----------------------------------------------------------------
+
+(defn resolve (roots provider &optional preferred)
+  "Resolve `roots` (a list of `[name constraint]`) against `provider` into a concrete
+version per package. Returns `[:ok solution]` — `solution` a map of name → version
+string covering every package in the transitive graph — or `[:error message]` naming
+the unsatisfiable package and who required what. Pure: all fetching is the provider's.
+`preferred` (optional, a name → version map, e.g. the prior lock) is tried first for each
+package when it still satisfies the constraints, so a re-solve keeps existing pins instead
+of upgrading the whole graph to newest — it changes *which* valid solution is reached,
+never *whether* one is."
+  (resolver--solve provider {} (resolver--seed roots) (or preferred {})))
+
+(defn resolver--solve (provider assignment constraints preferred)
+  (let (pending (resolver--pending constraints assignment))
+    (if (empty? pending)
+      [:ok assignment]
+      (let (nm (first pending)
+            reqs (get constraints nm)
+            candidates (resolver--candidates provider nm reqs preferred))
+        (if (empty? candidates)
+          [:error (resolver--no-candidate-msg provider nm reqs)]
+          (resolver--try provider assignment constraints nm candidates preferred nil))))))
+
+;; Try `nm`'s candidate versions in order (preferred-then-newest); the first that leads to
+;; a full solution wins. `last-error` carries the most recent failure so an exhausted list
+;; reports a real reason (the deep conflict, not a bland "nothing worked").
+(defn resolver--try (provider assignment constraints nm candidates preferred last-error)
+  (if (empty? candidates)
+    [:error (or last-error (str "no version of " (name nm) " led to a solution"))]
+    (let (version (first candidates))
+      (match (resolver--assign provider assignment constraints nm version)
+        ([:conflict message]
+          (resolver--try provider assignment constraints nm (rest candidates) preferred message))
+        ([:ok assignment2 constraints2]
+          (match (resolver--solve provider assignment2 constraints2 preferred)
+            ([:ok solution] [:ok solution])
+            ([:error message]
+              (resolver--try provider assignment constraints nm (rest candidates) preferred message))))))))
+
+;; Decide `nm` at `version`: record the choice, then fold that release's own deps into
+;; the constraint set. A dep on an ALREADY-decided package whose chosen version the new
+;; constraint rejects is an immediate `:conflict` (this candidate is dead) — that check
+;; is what forces every later decision to respect the earlier ones, and drives the
+;; backtracking when it can't.
+(defn resolver--assign (provider assignment constraints nm version)
+  (resolver--fold-deps (assoc assignment nm version)
+    constraints
+    nm
+    (or (provider-deps provider nm version) nil)))
+
+(defn resolver--fold-deps (assignment constraints nm deps)
+  (cond
+    (empty? deps) [:ok assignment constraints]
+    else
+      (let (d (first deps)
+            dn (nth d 0)
+            dc (nth d 1)
+            decided (get assignment dn))
+        (if (and decided (not (version/version-satisfies? decided dc)))
+          [:conflict (str "cannot use "
+                       (name nm) " " (get assignment nm)
+                       ": it needs " (name dn) " " (resolver--constraint-str dc)
+                       " but " (name dn) " is already fixed at " decided)]
+          (resolver--fold-deps assignment
+            (resolver--add constraints dn nm dc)
+            nm
+            (rest deps))))))
+
+;; --- error text -----------------------------------------------------------------
+
+(defn resolver--constraint-str (c)
+  (if (or (nil? c) (= c "")) "(any version)" c))
+
+(defn resolver--who (requirer)
+  (if (= requirer :root) "your project" (name requirer)))
+
+(defn resolver--reqs-str (reqs)
+  ;; "'>= 2.0' (foo), '(any version)' (your project)" — every requirement and who made it.
+  (join ", "
+    (map (fn (r) (str (resolver--constraint-str (nth r 1)) " (" (resolver--who (nth r 0)) ")"))
+      reqs)))
+
+(defn resolver--no-candidate-msg (provider nm reqs)
+  (let (available (or (provider-versions provider nm) nil))
+    (if (empty? available)
+      (str "no versions of " (name nm) " are available (required by " (resolver--reqs-str reqs) ")")
+      (str "no version of " (name nm) " satisfies all of " (resolver--reqs-str reqs)
+        " — available: " (join ", " (sort available))))))

@@ -26,6 +26,9 @@ land in a later slice."
 
 ; tree hashing over hash/sha256 + hash/sha256-bytes
 (require 'hash)
+; version-range predicates + the backtracking version resolver (ADR-209)
+(require 'version)
+(require 'resolver)
 ;; --- canonical directory content hash (ADR-037 reproducibility) --------------
 ;; A directory's hash is Brood over the `hash/sha256` digest: walk files in
 ;; sorted order, and for each emit "<rel-path>\0<file-hash>\n", then hash the lot.
@@ -81,25 +84,45 @@ land in a later slice."
         nil))))
 
 ;; --- resolution --------------------------------------------------------------
-;; Resolve the transitive dep set into a flat list of resolved entries
-;; (depth-first; direct deps first, then their deps). A name required twice at
-;; different sources is a loud error — the user pins it in the root manifest.
+;; Resolve the transitive dep set into a flat list of resolved entries. Two phases,
+;; because the two dep families answer "which version?" differently (ADR-209):
+;;
+;;   1. `:path`/`:git`/`:tarball` deps pin an EXACT source, so they resolve in a lazy
+;;      depth-first walk — resolve one, read its manifest, queue its sub-deps. A name
+;;      required twice at different exact sources is a loud, pin-it-yourself error.
+;;
+;;   2. `:registry` deps name a version RANGE, so they can't be fetched until a version
+;;      is chosen. The walk COLLECTS every registry requirement it meets (from the root
+;;      and from each resolved path/git manifest) instead of resolving it inline; the
+;;      backtracking resolver (`std/resolver`) then picks one concrete version per
+;;      registry package across the whole closure, and those get fetched + locked.
+;;
+;; A published package's own deps are registry-only (`nest publish` omits local kinds),
+;; so the registry sub-graph is closed under the registry and the resolver's provider
+;; can walk all of it from the API — the phase-1 walk never descends into a registry dep.
 
 (defn resolve-deps (root deps lock)
-  "Resolve `deps` (dep records from the manifest) and everything they transitively pull in, into a flat list of resolved entries — each its dep record with `:resolved-path`/`:sha256`/`:deps` (and `:commit`) assoc'd on, so it keeps the dep's identity and dispatches through the same `Dependency` impls. `lock` is the prior project.lock.blsp :dependencies (or nil) — a matching git entry reuses its pinned commit instead of re-running `git ls-remote`; pass nil to force re-resolution (`nest update`). A root (direct) dep wins over a transitive one at a different ref (Go-style MVS-without-the-solver); two *transitive* deps at differing refs are a loud error the user pins explicitly."
-  ;; `deps` is the direct (root-manifest) set; it's queued first, so every direct
-  ;; dep is resolved before any transitive one (the loop appends sub-deps to the
-  ;; queue's tail). That ordering is what makes "direct wins" a simple lookup.
-  (package--resolve-loop root
-    deps
-    {}
-    nil
-    (package--lock-index lock)
-    (map :name deps)))
+  "Resolve `deps` (dep records from the manifest) and everything they transitively pull in, into a flat list of resolved entries — each its dep record with `:resolved-path`/`:sha256`/`:deps` (and `:commit`/`:version`) assoc'd on, so it keeps the dep's identity and dispatches through the same `Dependency` impls. `lock` is the prior project.lock.blsp :dependencies (or nil). `:path`/`:git`/`:tarball` deps resolve to their exact source (a matching lock entry reuses the pinned commit/sha, network-free); `:registry` deps carry a version RANGE resolved to a concrete version by the backtracking resolver (ADR-209) — a fully-covering lock reuses the prior solution network-free, so pass nil (or drop names via `nest update`) to force a re-solve."
+  (let (lock-index (package--lock-index lock)
+        walked (package--resolve-loop root deps {} nil lock-index (map :name deps) nil)
+        non-registry (first walked)
+        registry-reqs (second walked)
+        registry-entries (package--resolve-registry-closure root registry-reqs lock-index lock))
+    (append non-registry registry-entries)))
 
-(defn package--resolve-loop (root queue resolved order lock-index direct)
+;; Returns `[non-registry-entries registry-reqs]`: the resolved path/git/tarball entries
+;; in resolution order, and the (unresolved) registry dep records to hand to the solver.
+(defn package--resolve-loop (root queue resolved order lock-index direct registry-reqs)
   (cond
-    (empty? queue) (map (fn (nm) (get resolved nm)) (reverse order))
+    (empty? queue) [(map (fn (nm) (get resolved nm)) (reverse order)) registry-reqs]
+    ;; A registry dep is collected, not resolved here — its version is a range the
+    ;; solver picks over the whole registry closure (phase 2), so fetching it now
+    ;; would mean fetching a version nobody has chosen yet. (The `dep-kind` ability op
+    ;; is reached through a `defn` so this forward reference resolves — an ability op
+    ;; used bare before its `defability` does not pre-scan, a `defn` does.)
+    (package--registry-dep? (first queue))
+      (package--resolve-loop root (rest queue) resolved order lock-index direct
+        (cons (first queue) registry-reqs))
     (contains? resolved (get (first queue) :name))
       (do
         ;; A name already resolved: if it's a direct dep, the root's pin wins and we
@@ -116,7 +139,8 @@ land in a later slice."
           resolved
           order
           lock-index
-          direct))
+          direct
+          registry-reqs))
     else
       (let (dep (first queue)
             nm (get dep :name)
@@ -126,7 +150,75 @@ land in a later slice."
           (assoc resolved nm entry)
           (cons nm order)
           lock-index
-          direct))))
+          direct
+          registry-reqs))))
+
+;; --- phase 2: solve the registry closure (ADR-209) --------------------------------
+;; The collected registry requirements are the solver's roots (a name may appear more
+;; than once with different ranges — the solver intersects them). The result is one
+;; concrete version per registry package across the transitive closure; each is then
+;; fetched + extracted exactly like a pinned `:version` dep was before.
+
+(defn package--resolve-registry-closure (root registry-reqs lock-index lock)
+  (if (empty? registry-reqs)
+    nil
+    (let (locked (package--lock-registry-solution lock))
+      (if (package--lock-covers-reqs? locked registry-reqs)
+        ;; The lock already pins a solution that still satisfies the manifest's ranges —
+        ;; reuse it network-free (each fetch hits the `_deps/` cache), the fast path that
+        ;; keeps a plain `nest run`/`test` from re-querying the registry every time.
+        (map (fn (kv)
+               (package--resolve-registry root
+                 (project/dep-registry (first kv) (second kv))
+                 (get lock-index (first kv))
+                 nil))
+          (map-pairs locked))
+        ;; Not fully covered (a dep was added/changed, or `nest update` dropped names) →
+        ;; solve fresh, but hand the solver the still-locked versions as PREFERENCES so
+        ;; the deps that didn't change keep their pins instead of jumping to newest.
+        (package--solve-registry root registry-reqs lock-index locked)))))
+
+(defn package--solve-registry (root registry-reqs lock-index preferred)
+  (let (base (registry--base-for nil)
+        roots (map (fn (d) [(get d :name) (get d :version)]) registry-reqs)
+        provider (package--registry-provider base))
+    (match (resolver/resolve roots provider preferred)
+      ([:error message] (error "package: could not resolve dependency versions — " message))
+      ([:ok solution]
+        (map (fn (kv)
+               (package--resolve-registry root
+                 (project/dep-registry (first kv) (second kv))
+                 (get lock-index (first kv))
+                 base))
+          (map-pairs solution))))))
+
+;; The provider the resolver queries: a package's published versions, and each release's
+;; declared registry requirements — both straight off the hive HTTP API.
+(defn package--registry-provider (base)
+  (resolver/make-provider
+    (fn (nm) (registry--list-versions base nm))
+    (fn (nm version) (registry--release-deps base nm version))))
+
+;; {name → locked concrete version} for every `:registry` row of the prior lock — the
+;; previously-computed solution, reused when it still satisfies the manifest.
+(defn package--lock-registry-solution (lock)
+  (fold (fn (m v)
+          (let (row (vec->list v)
+                plist (rest row))
+            (if (plist-get plist :registry)
+              (assoc m (first row) (plist-get plist :registry))
+              m)))
+    {}
+    (if (nil? lock) nil (vec->list lock))))
+
+;; Whether the locked solution still satisfies every collected registry requirement —
+;; the manifest hasn't asked for a range the pinned version misses. (Transitive
+;; constraints are not re-checked: the lock is authoritative until `nest update`.)
+(defn package--lock-covers-reqs? (locked registry-reqs)
+  (every? (fn (d)
+            (let (pinned (get locked (get d :name)))
+              (and pinned (version/version-satisfies? pinned (get d :version)))))
+    registry-reqs))
 
 ;; --- the Dependency ability (ADR-172) ---------------------------------------
 ;; A dependency's KIND is its record identity (`project/dep-path` / `-git` / `-tarball`
@@ -270,6 +362,12 @@ land in a later slice."
 
 (defn package--resolve-one (root dep lock-index)
   (dep-resolve dep root (get lock-index (get dep :name))))
+
+;; Whether `d` is a registry dep — the phase-1 walk collects these for the solver rather
+;; than resolving them inline. Wrapping the `dep-kind` ability op in a `defn` lets the
+;; earlier `package--resolve-loop` reach it (a `defn` forward reference pre-scans; a bare
+;; ability op does not).
+(defn package--registry-dep? (d) (= (dep-kind d) :registry))
 
 ;; Index a lock's :dependencies vector by dep name → its plist (the :git/:ref/
 ;; :commit/… key-values), for reuse during resolution. nil lock → empty index.
@@ -503,7 +601,36 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
       (and (>= status 200) (< status 300)) [:ok (json/json-parse (net/http/body-text resp))]
       else [:error status (registry--error-text resp)])))
 
-;; A registry dep names a package + an EXACT version. Resolution: reuse the cached
+;; --- the resolver's registry provider (ADR-209) ---------------------------------
+;; Two questions the backtracking resolver asks: what versions of a package exist, and
+;; what does one release require. Both are one GET each against the hive API. Names cross
+;; as symbols (the resolver keys on them); the URL wants the string, so `(name nm)`.
+
+(defn registry--releases-url (base nm)
+  (str base "/api/v1/packages/" (name nm) "/releases"))
+
+(defn registry--list-versions (base nm)
+  "The published version strings of `nm` at `base` (any order — the resolver sorts). An
+unknown package (404) is nil, so the resolver reports it as having no versions available
+rather than raising mid-search."
+  (match (registry--get-json (registry--releases-url base nm))
+    ([:ok data] (map (fn (r) (get r :version)) (or (get data :releases) nil)))
+    ([:error 404 _message] nil)
+    ([:error _status message]
+      (error "package: listing published versions of " (name nm) " failed: " message))))
+
+(defn registry--release-deps (base nm version)
+  "The registry requirements of `nm`@`version` as `[dep-name constraint]` pairs, read
+from the release metadata's `:dependencies` (each `{:name :version}`, the `:version` now
+a range). A release with no dependencies — or one the registry cannot serve — is empty."
+  (match (registry--get-json (registry--release-url base nm version))
+    ([:ok meta] (map (fn (d) [(symbol (get d :name)) (get d :version)])
+                  (or (get meta :dependencies) nil)))
+    ([:error _status _message] nil)))
+
+;; A registry dep names a package + a version RANGE, resolved to a concrete version by
+;; the backtracking resolver (ADR-209). Resolution here fetches that concrete version:
+;; reuse the cached
 ;; extraction when the lock's sha still stamps _deps/<name>/ (network-free), else GET
 ;; the release metadata for its checksum, download the tarball, verify the sha256, and
 ;; extract it. The lock records the version + the checksum (the integrity pin, standing

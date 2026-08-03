@@ -1,24 +1,29 @@
 ;; std/version.blsp — semantic versions as data: parse, order, and test against a
-;; constraint. Small on purpose, and deliberately NOT a dependency solver.
+;; constraint. Pure predicates over versions; the SELECTION algorithm (which version
+;; to pick from a candidate set) lives one layer up in `std/resolver.blsp`.
 ;;
 ;; Why this exists: two consumers wrote it independently before it did. hive (the
 ;; package registry) needs "which published release is the newest"; an application
 ;; that hosts plugins needs "is this plugin's `:enhances {app \">= 0.3\"}` satisfied
 ;; by the version I am?" Both are questions *about two versions*, and both were
-;; about to be answered by a third hand-rolled copy.
+;; about to be answered by a third hand-rolled copy. Since then the dependency
+;; resolver (ADR-209) became a third consumer: it asks the same "does this version
+;; satisfy this range?" question millions of times while searching.
 ;;
-;; The line this module does not cross: `nest`'s resolver takes **exact** versions
-;; and has no solver (ADR-037's direct-refs-only invariant). A predicate that says
-;; whether one version satisfies one constraint chooses nothing and fetches nothing,
-;; so it is not the thin end of a solver — it is what a *host* needs in order to
-;; refuse an incompatible plugin with a clear message instead of loading it.
+;; What this module does and does not do: it answers whether ONE version satisfies
+;; ONE constraint — a single term (`>= 1.2`, `^1.2`, `~> 1.3`) or a comma-separated
+;; conjunction of them (`>= 1.2, < 2.0`). It chooses nothing and fetches nothing; the
+;; backtracking search that picks a concrete version out of what a registry publishes
+;; is the resolver's job. Keeping the predicate here and the search there is what lets
+;; the resolver be a pure function tested offline (ADR-209).
 
 (defmodule version
   "Semantic-version helpers: `version-core` (→ `[major minor patch]`),
 `version-valid?`, `version-compare`, `version-newer?`, and `version-satisfies?`
-(a version against a `\">= 1.2\"`-style constraint). Comparison is on the numeric
-`MAJOR.MINOR.PATCH` core; any `-prerelease` / `+build` suffix is ignored (ordering
-pre-releases is deferred until something needs it). `(require 'version)`.")
+(a version against a `\">= 1.2\"`-, `\"^1.2\"`-, `\"~> 1.3\"`-, or `\">= 1.2, < 2.0\"`-style
+constraint). Comparison is on the numeric `MAJOR.MINOR.PATCH` core; any
+`-prerelease` / `+build` suffix is ignored (ordering pre-releases is deferred until
+something needs it). `(require 'version)`.")
 
 ;; ---- parsing ------------------------------------------------------------------
 
@@ -78,24 +83,26 @@ everything (the \"no release yet\" placeholder a registry starts from)."
     else (> (version-compare a b) 0)))
 
 ;; ---- constraints ---------------------------------------------------------------
-;; One version, one constraint, a yes/no answer. The vocabulary is the small set a
-;; plugin manifest actually needs; anything richer (ranges with unions, caret/tilde
-;; families) waits for a caller that wants it, because every operator added here is
-;; one an ecosystem then has to understand forever.
+;; One version, one constraint, a yes/no answer. A constraint is a single term
+;; (`>= 1.2`, `> 1.2.3`, `<= 2.0`, `< 2`, `= 1.2.3`, a bare `1.2.3`, `^1.2`, or
+;; `~> 1.3`) or a comma-separated CONJUNCTION of terms (`>= 1.2, < 2.0`) — every
+;; term must hold. The caret/tilde families expand to a `>=`-plus-exclusive-`<`
+;; range, so they add no new comparison, only a new spelling. This is the whole
+;; vocabulary the resolver (ADR-209) matches candidate versions against.
 
-(def *version-operators* ["<=" ">=" "<" ">" "="]) ; longest first: "<=" before "<"
+(def *version-operators* ["~>" "<=" ">=" "<" ">" "=" "^"]) ; longest first: "<=" before "<"
 (defn version--digit-start? (s)
   (let (cps (string->codepoints s))
     (and (not (empty? cps)) (>= (first cps) 48) (<= (first cps) 57))))
 
 (defn version--split-constraint (constraint)
-  ;; `">= 1.2"` -> `[">=" "1.2"]`; a bare `"1.2"` -> `["=" "1.2"]`.
+  ;; `">= 1.2"` -> `[">=" "1.2"]`; a bare `"1.2"` -> `["=" "1.2"]`; `"^1.2"` ->
+  ;; `["^" "1.2"]`; `"~> 1.3"` -> `["~>" "1.3"]`.
   ;;
   ;; No operator is only legal in front of a VERSION. Treating anything else as `=`
-  ;; is how `"~> 1.0"` (a Ruby/Elixir habit this module does not implement) came out
-  ;; as a silent `false`: `version-core` read `"~> 1"` as 0, so the comparison was
-  ;; against garbage and the caller was told, confidently, "not satisfied". A
-  ;; constraint operator we do not implement has to say so.
+  ;; is how `"~> 1.0"` once came out as a silent `false`: `version-core` read `"~> 1"`
+  ;; as 0, so the comparison was against garbage and the caller was told, confidently,
+  ;; "not satisfied". An operator with no meaning has to say so.
   (let (c (trim constraint)
         op (find (fn (o) (starts-with? c o)) *version-operators*))
     (cond
@@ -104,27 +111,69 @@ everything (the \"no release yet\" placeholder a registry starts from)."
       else
         (error "version-satisfies?: unknown operator in "
           (pr-str constraint)
-          " — use >=, >, <=, <, = or a bare version"))))
+          " — use >=, >, <=, <, =, ^, ~> or a bare version"))))
 
-(defn version-satisfies? (v constraint)
-  "Whether version string `v` satisfies `constraint` — `\">= 1.2\"`, `\"> 1.2.3\"`,
-`\"<= 2.0\"`, `\"< 2\"`, `\"= 1.2.3\"`, or a bare `\"1.2.3\"` (which means `=`).
-Whitespace around the operator is optional.
+;; --- caret/tilde ranges ---------------------------------------------------------
+;; `^` and `~>` are shorthand for a `>= lo, < hi` range whose bounds come from where
+;; the *written* version has its first significant digit. `^` (Cargo/npm "compatible")
+;; keeps the left-most non-zero component fixed: `^1.2.3` = `>=1.2.3, <2.0.0`, but
+;; `^0.2.3` = `>=0.2.3, <0.3.0` (a 0.x major means minor is the breaking axis). `~>`
+;; (Elixir/Ruby "pessimistic") pins one level shallower than what was written:
+;; `~> 1.2.3` = `>=1.2.3, <1.3.0` (patch may move), `~> 1.2` = `>=1.2.0, <2.0.0`
+;; (minor may move). Both bounds compare on part-lists, so no string is built.
 
-The comparison is on the numeric core with missing segments read as 0, so
-`\"0.3.1\"` satisfies `\">= 0.3\"`. A constraint of nil or `\"\"` is *no
-constraint* — satisfied by anything, so a manifest that names an application
-without pinning a version is legal (`{bedit \"\"}`).
+(defn version--nth0 (parts i)
+  "The `i`-th element of the int list `parts`, or 0 when out of range — the same
+'missing segment reads as 0' rule the comparisons use."
+  (cond
+    (empty? parts) 0
+    (= i 0) (first parts)
+    else (version--nth0 (rest parts) (dec i))))
 
-An operator this module does not implement (`\"~> 1.0\"`, `\"^1.0\"`) **raises**, and
-so does an operator with no version after it. Both would otherwise answer a confident
-`false` — a plugin refused for a reason nobody wrote down, or accepted into an
-application that cannot run it."
-  (if (or (nil? constraint) (= (trim constraint) ""))
-    true
-    (let ([op wanted] (version--split-constraint constraint))
-      (when (= (trim wanted) "")
-        (error "version-satisfies?: no version in constraint " (pr-str constraint)))
+(defn version--first-nonzero-index (parts)
+  (version--first-nonzero-index--go parts 0))
+(defn version--first-nonzero-index--go (parts i)
+  (cond
+    (empty? parts) nil
+    (not (= (first parts) 0)) i
+    else (version--first-nonzero-index--go (rest parts) (inc i))))
+
+(defn version--bump-index (op parts)
+  ;; The 0-based component the exclusive upper bound increments.
+  ;;   `^`  : the first non-zero component (so 1.x.y bumps major, 0.2.y bumps minor);
+  ;;          if every written component is zero, the last one written.
+  ;;   `~>` : one shallower than written — index (written-count - 2), floored at 0.
+  (if (= op "^")
+    (or (version--first-nonzero-index parts) (max 0 (dec (count parts))))
+    (max 0 (- (count parts) 2))))
+
+(defn version--upper-bound (parts bump-index)
+  ;; A 3-int list: components before `bump-index` copied, the one at it incremented,
+  ;; everything after zeroed — the exclusive top of the range.
+  (map (fn (i)
+         (cond
+           (< i bump-index) (version--nth0 parts i)
+           (= i bump-index) (inc (version--nth0 parts i))
+           else 0))
+    (list 0 1 2)))
+
+(defn version--range-satisfied? (v op wanted)
+  ;; `>= wanted, < (upper-bound wanted)` on part-lists.
+  (let (parts (version-core wanted)
+        vc (version-core v)
+        hi (version--upper-bound parts (version--bump-index op parts)))
+    (and (>= (version--compare-parts vc parts) 0)
+      (< (version--compare-parts vc hi) 0))))
+
+(defn version--term-satisfied? (v term constraint)
+  ;; One term of a (possibly comma-separated) constraint. `constraint` is the whole
+  ;; original string, carried only so an error names what the user actually wrote.
+  (let ([op wanted] (version--split-constraint term))
+    (when (= (trim wanted) "")
+      (error "version-satisfies?: no version in constraint " (pr-str constraint)))
+    (case op
+      "^" (version--range-satisfied? v "^" wanted)
+      "~>" (version--range-satisfied? v "~>" wanted)
       (let (c (version-compare v wanted))
         (case op
           "=" (= c 0)
@@ -136,6 +185,27 @@ application that cannot run it."
             (pr-str op)
             " in "
             (pr-str constraint)))))))
+
+(defn version-satisfies? (v constraint)
+  "Whether version string `v` satisfies `constraint`. A constraint is one term —
+`\">= 1.2\"`, `\"> 1.2.3\"`, `\"<= 2.0\"`, `\"< 2\"`, `\"= 1.2.3\"`, a bare `\"1.2.3\"`
+(which means `=`), `\"^1.2\"` (compatible-with), or `\"~> 1.3\"` (pessimistic) — or a
+comma-separated CONJUNCTION of terms (`\">= 1.2, < 2.0\"`), all of which must hold.
+Whitespace around each operator is optional.
+
+The comparison is on the numeric core with missing segments read as 0, so
+`\"0.3.1\"` satisfies `\">= 0.3\"`. A constraint of nil or `\"\"` is *no
+constraint* — satisfied by anything, so a manifest that names an application
+without pinning a version is legal (`{bedit \"\"}`).
+
+An operator this module does not implement, or a term with no version after it,
+**raises** rather than answering a confident `false` — a dependency refused for a
+reason nobody wrote down is worse than a loud one."
+  (if (or (nil? constraint) (= (trim constraint) ""))
+    true
+    (every? (fn (term) (version--term-satisfied? v term constraint))
+      (keep (fn (t) (let (tt (trim t)) (when (not (= tt "")) tt)))
+        (string-split constraint ",")))))
 
 (defn version-satisfies-all? (versions constraints)
   "Whether every entry of the `constraints` map (name → constraint string) is

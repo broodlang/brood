@@ -63,12 +63,18 @@ the `nest new` scaffolder."
 ;; slots above: ambient is a `defdyn` declaration now, not an earmuff spelling.
 (defdyn *project-description* nil)
 (defdyn *project-repository* nil)
+;; `:brood` — the runtime-version constraint this project needs (a `std/version` string,
+;; e.g. `">= 0.2"`, `"^0.1"`). Checked at `project-setup` against `(brood-version)`; an
+;; unmet constraint is a hard, clear error (ADR-209), the way `mix.exs`'s `elixir:`
+;; requirement refuses an incompatible Elixir. Absent = runs on any runtime.
+(defdyn *project-brood* nil)
 ;; `:enhances` — which APPLICATIONS this package adds functionality to, as a map of
 ;; name → version constraint (`{bedit ">= 0.3"}`). Debian's `Enhances:` field: a
 ;; plugin declares what it plugs into, and the *application* checks the constraint
 ;; against its own version when it loads the package (`std/version`
-;; `version-satisfies-all?`). Never the resolver's business — nothing here is
-;; fetched, so ADR-037's exact-version, no-solver invariant is untouched.
+;; `version-satisfies-all?`). Distinct from dependency resolution (ADR-209): `:enhances`
+;; is a load-time compatibility check a host runs against a plugin it already has —
+;; nothing here is fetched or version-selected.
 ;;
 ;; Kept generic on purpose: the names are DATA, so nothing in brood/nest/hive
 ;; enumerates them or knows any application by name. An editor plugin says
@@ -301,7 +307,7 @@ than being fetched into `_deps/<name>/`."
 ;; and the `:main` pair — without quoting. Manifests are static data; nothing in
 ;; them is ever evaluated.
 (defmacro project (& opts)
-  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). A dep entry may carry `:optional true` (declared but not force-installed). `:enhances` declares the applications this package plugs into as a map of name → version constraint (`:enhances {bedit \">= 0.3\"}`) — the application checks it when it loads the package; nothing is fetched. Arguments are literal data — write dep names, `:enhances` keys and the `:main` pair as bare symbols."
+  "Declare the project manifest (ADR-020/037): `:name` `:version` `:description` `:repository` `:source-paths` `:test-paths` `:main`, `:dependencies` and `:dev-dependencies` (test/dev-only, excluded from a release bundle — ADR-172). A dep entry may carry `:optional true` (declared but not force-installed). `:brood` names the runtime-version constraint this project needs (`:brood \">= 0.2\"`), checked against `(brood-version)` at setup — an unmet requirement stops with a clear error (ADR-209). `:enhances` declares the applications this package plugs into as a map of name → version constraint (`:enhances {bedit \">= 0.3\"}`) — the application checks it when it loads the package; nothing is fetched. Arguments are literal data — write dep names, `:enhances` keys and the `:main` pair as bare symbols."
   ;; quasiquote (not `(list 'project-apply …)`) so α qualifies `project-apply`
   ;; to `project/project-apply` at this macro's definition (ADR-065 §7).
   `(project-apply (quote ~opts)))
@@ -380,6 +386,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   ;; is published from. Optional in general; `nest publish` requires both.
   (def *project-description* (plist-get opts :description))
   (def *project-repository* (plist-get opts :repository))
+  (def *project-brood* (plist-get opts :brood))
   (def *project-enhances* (project--parse-enhances (plist-get opts :enhances)))
   (let (src (plist-get opts :source-paths)
         tst (plist-get opts :test-paths)
@@ -600,6 +607,21 @@ rules merged in declaration order, then this project's own `:format-headers` on 
           (pr-str (if (pair? form) (first form) form))
           " — every setting in it is being ignored"))))
 
+;; The `:brood` runtime gate (ADR-209): if the manifest names a constraint and this
+;; runtime doesn't satisfy it, stop with a clear error rather than failing obscurely
+;; deeper in on whatever newer feature the project assumed. Policy in Brood; the only
+;; kernel input is the `(brood-version)` primitive.
+(defn project--check-brood-version ()
+  (when *project-brood*
+    (when (not (string? *project-brood*))
+      (error "project: :brood must be a version-constraint string (e.g. \">= 0.2\"), got "
+        (pr-str *project-brood*)))
+    (require 'version)
+    (when (not (version/version-satisfies? (brood-version) *project-brood*))
+      (error "project: this project requires Brood " (pr-str *project-brood*)
+        " but you are running " (brood-version)
+        " — upgrade brood, or relax the :brood constraint in project.blsp"))))
+
 (defn project-setup (root)
   (def *project-root* root)
   ;; Restore the path conventions BEFORE applying the manifest. `project-apply`
@@ -617,11 +639,17 @@ rules merged in declaration order, then this project's own `:format-headers` on 
   ;; nameless project's modules under the previous project's prefix. `project-apply` re-sets
   ;; it when the manifest names it.
   (def *project-name* nil)
+  ;; Reset the runtime-version gate too: a manifest with no `:brood` must not inherit a
+  ;; prior setup's constraint in a long-lived tooling image (`project-apply` re-sets it,
+  ;; but only when a manifest is applied — a bare/manifest-less setup skips that).
+  (def *project-brood* nil)
   ;; Read the manifest as *data* and apply it — rather than `load`ing it, which
   ;; would need the `(project …)` macro bound bare in the (root) manifest file
   ;; (it now lives in this namespace). Manifests stay written `(project …)`.
   (let (mf (path-join root "project.blsp"))
     (when (file-exists? mf) (project--apply-manifest mf)))
+  ;; Refuse an incompatible runtime BEFORE doing any project work (ADR-209).
+  (project--check-brood-version)
   (set-load-path! (append (project-abs-paths root *project-source-paths*) *load-path*))
   (project--ensure-deps-on-path root)
   ;; Root-project rooting (ADR-070, Elixir-uniform model): the project's OWN modules
