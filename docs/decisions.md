@@ -13484,3 +13484,58 @@ a valid candidate, and the search still backtracks off it, so it changes *which*
 solution is reached, never *whether* one is found (a test pins a version that dead-ends and
 confirms the solver still finds the answer). Still deferred: PubGrub-grade conflict
 derivation, pre-release ordering, and semver ranges over `:git` tags.
+
+**Third refinement (2026-08-03): the solve is made PURE by a bounded pre-fetch.** The
+first cut had the registry provider hit the network per question (`versions`, `deps`),
+so a backtracking-heavy solve re-fetched the same release metadata on every revisit —
+wasteful and rude to the registry. Now `package--prefetch-registry` walks the registry
+closure once (breadth-first, each package fetched a single time) into an immutable
+`{name → [{:version :dependencies} …]}` map, and `package--prefetched-provider` serves
+the solver *purely* from it: zero network during the search, no matter how much it
+backtracks. This mirrors the resolver's own design — network confined to one phase, the
+selection a pure function — and made the DRY `package--fetch-registry-solution` (shared by
+the lock-reuse and fresh-solve paths) fall out naturally.
+
+**Testing refinement — a generative oracle.** Beyond the unit cases, `tests/resolver_test.blsp`
+now fuzzes the solver against an independent brute-force ORACLE over 800 seeded random
+universes: the oracle enumerates every one-version-per-package assignment and asks whether
+the closure reachable from the roots is consistent, and the test asserts the solver's yes/no
+matches it (and that every returned solution actually holds). The two share no code, so
+agreement across a wide, balanced sample (~195 solvable / ~205 not, per 400) is strong
+evidence of both **soundness** (never a bogus or invalid solution) and **completeness**
+(never gives up when a solution exists); a disagreement surfaces as a self-describing
+counterexample (the exact universe + roots). `nest check` stays at zero warnings.
+
+**Performance — made to scale to 300+ packages (2026-08-03).** A benchmark of a 300-package
+graph against a loopback registry exposed two walls, both fixed:
+
+- *Network was the killer.* The first cut fetched a package's version list and then each
+  release's deps in a separate request, sequentially: **1800 requests, ~46 s** on loopback
+  (minutes on a real network). Two changes cut it to **300 requests, ~2.2 s** (20×): the
+  `/releases` endpoint now carries each release's deps, so one request per package covers
+  everything (the registry-index model — Cargo's index, npm's packument); and the pre-fetch
+  walks the dependency closure **breadth-first with each level fetched concurrently** — Brood's
+  non-blocking sockets (ADR-062) let a spawned fetcher park on I/O rather than pin a worker,
+  so a level's requests overlap instead of summing. The lock fast path still makes a repeat
+  resolve network-free.
+
+- *The solve was O(n²) then string-bound.* Deriving the work-list from the whole constraint
+  set each step was O(n²); it is now an incrementally-maintained **functional FIFO queue**
+  (amortized O(1), breadth-first so conflict messages still name every requirer). And
+  `version-satisfies?` — ~355 µs per call, re-parsing the constraint string every time — was
+  the dominant per-step cost; `std/version` gained a **compile-once / match-many** API
+  (`version-compile` → `version-match-parts?`), and the resolver compiles each constraint and
+  parses each candidate version exactly once. Net: the 300-package solve went **1.9 s → 0.66 s**
+  (~3×), and scales with the graph rather than its square.
+
+- *Bounded search, so a tangled graph fails fast instead of hanging.* Naive backtracking is
+  worst-case exponential (confirmed: an adversarially-ordered graph hangs). The search now
+  carries a call-local step counter with a **wall-clock budget** (`*resolver-time-budget-ms*`,
+  default 10 s) and a deterministic **step budget** (`*resolver-max-steps*`) — past either it
+  aborts with a clear, actionable error ("the version constraints are too tangled … pin the
+  conflicting dependencies") rather than spinning. A well-formed graph is decided in ~one step
+  per package and never approaches either bound; this is the honest floor until conflict-driven
+  learning (PubGrub) replaces the guard with a real fix. The counter is the resolver's only
+  mutable state, call-local and unobservable, so `resolve` stays a deterministic function of
+  its inputs. Covered by a bounded-search test (over-constrained → clear error; small → still
+  resolves) and a 120-package scale test.

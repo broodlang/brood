@@ -15093,6 +15093,63 @@ attempt now returns `LocalDelivery::Declined { runtime_tag }`, so one lookup ser
 is cleanup justified by redundancy, not by the phantom 8%: it measures within noise, and is
 committed as a simplification rather than a speedup.
 
+## 2026-08-03 (cont.) — resolver hardening: pure-solve prefetch + a generative oracle (ADR-209)
+
+Post-commit refinement pass on the dependency resolver. Two substantive changes plus tests.
+
+**Pure solve via a bounded pre-fetch.** The registry provider used to hit the network per
+question, so a backtracking-heavy solve re-fetched the same release metadata on every revisit.
+`package--prefetch-registry` now walks the registry closure once (BFS, each package fetched a
+single time) into an immutable `{name → [{:version :dependencies} …]}` map, and the provider
+serves the solver *purely* from it — zero network during the search. Mirrors the resolver's own
+"network in one phase, selection is a pure function" shape, and let the two fetch branches
+(lock-reuse / fresh-solve) collapse into one `package--fetch-registry-solution`.
+
+**Generative oracle test.** `tests/resolver_test.blsp` fuzzes the solver against an independent
+brute-force oracle over 800 seeded random universes (the oracle enumerates every
+one-version-per-package assignment and checks the root-reachable closure for consistency). The
+test asserts the solver's yes/no matches the oracle and that every returned solution actually
+holds; a disagreement prints the exact universe + roots. The sample is balanced (~195 solvable /
+~205 not per 400), so it exercises both soundness and completeness — no shared code with the
+solver, so agreement is real evidence, not tautology.
+
+Also: version-grammar edge cases (all-zero caret, single-segment tilde, prerelease suffixes,
+bare-zero, `^`/`~>` with no version), a backtracking end-to-end package test through the real
+prefetch+download path, and a naming cleanup in `std/resolver.blsp` (dep locals, `requirements`).
+Affected suites 234 green; `nest check` zero warnings.
+
+## 2026-08-03 (cont.) — resolver made to scale: parallel prefetch, compiled constraints, bounded search (ADR-209)
+
+Answered "be sure it's well optimised for 300+ packages" with a benchmark (300-package loopback
+registry) and three fixes; measured, not assumed.
+
+**Network (the killer): ~46 s → ~2.2 s, 1800 → 300 requests.** The first cut fetched a version
+list plus one request per release's deps, sequentially. Now `/releases` carries each release's
+deps (one request per package — the Cargo-index / npm-packument model), and the prefetch walks
+the closure breadth-first with **each level fetched concurrently** (spawned fetchers; Brood's
+non-blocking sockets, ADR-062, let hundreds park on I/O instead of pinning workers). 20× on
+loopback; on a real network the win is larger (latency × parallelism).
+
+**Solve: O(n²) → O(n), then 1.9 s → 0.66 s.** The work-list was re-derived from the whole
+constraint set each step (O(n²)); it's now an incremental **functional FIFO queue** (amortized
+O(1), BFS-order so conflicts still name every requirer). Profiling then showed `version-satisfies?`
+at **355 µs/call** — re-parsing the constraint string every time — as the dominant per-step cost.
+Added a **compile-once/match-many** API to `std/version` (`version-compile` → `version-match-parts?`,
+`version-compare-cores`); the resolver compiles each constraint and parses each version once. ~3×.
+
+**Bounded search.** Confirmed naive backtracking hangs on an adversarially-ordered graph (each
+`b_i` two versions, a `check` that needs `b1=1.0.0` decided last → exponential). The search now
+carries a call-local step counter with a wall-clock budget (`*resolver-time-budget-ms*`, 10 s) and
+a step budget (`*resolver-max-steps*`); past either it aborts with a clear "constraints too
+tangled — pin them" error. Well-formed graphs never approach it (~1 step/package). Honest floor
+until PubGrub. The counter is call-local + unobservable, so `resolve` stays deterministic.
+
+Tests: version compile/match kept the 63 version+resolver cases green (incl. the 800-universe
+oracle); +bounded-search (tangled→error, small→resolves) and a 120-package scale test; the
+package mock updated to the one-request `/releases` contract. 237 across the four suites; `nest
+check` zero warnings. Traps banked: `nest` is a separate binary (rebuild `-p nest`); a resolver
+benchmark must use SYMBOL dep-names (string vs symbol silently no-ops the constraint — it hid the
+exponential blowup until I fixed the bench).
 ## 2026-08-03 — thread 6b closed by thread 6, not deferred
 
 Checked whether the reclamation-threshold thread still exists now that the region stops
