@@ -56,7 +56,7 @@
 ;; TCO bug, and every ordinary tail shape survives `eval` (the second test pins that, so a
 ;; future change cannot quietly break real TCO and hide behind this note).
 (defn nsg-eval-self (n) (if (= n 0) :ok (eval (list 'nsg-eval-self (- n 1)))))
-(eval '(defn nsg-evald-if   (n acc) (if (= n 0) acc (nsg-evald-if (- n 1) (+ acc 1)))))
+(eval '(defn nsg-evald-if (n acc) (if (= n 0) acc (nsg-evald-if (- n 1) (+ acc 1)))))
 (eval '(defn nsg-evald-cond (n) (cond (= n 0) :ok else (nsg-evald-cond (- n 1)))))
 (eval '(defn nsg-evald-mutA (n) (if (= n 0) :ok (nsg-evald-mutB (- n 1)))))
 (eval '(defn nsg-evald-mutB (n) (if (= n 0) :ok (nsg-evald-mutA (- n 1)))))

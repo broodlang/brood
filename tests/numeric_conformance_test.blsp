@@ -75,17 +75,14 @@
 (describe "ordering coerces across the tower, but = does NOT"
   (test "ordering compares numeric value across types"
     (is (< 1 1.5))
-    (is
-      (<
-        1M 2))
+    (is (< 1M
+          2))
     (is (<= 2 2.0))
     (is (< 2 100000000000000000000)))
   (test "= is structural: numerically-equal-but-different-type is not ="
     (is (not (= 1 1.0)))
-    (is
-      (not
-        (= 1
-          1M)))
+    (is (not (= 1
+               1M)))
     (is (not (= 2.0 2)))
     (is (= 2 2))
     (is (= 2.0 2.0))))

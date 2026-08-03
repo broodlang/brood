@@ -18,16 +18,19 @@
 ;; one ability per index, declared UP FRONT and single-threaded, so the only concurrent
 ;; operation under test is register-impl itself
 (defn decl (i)
-  (if (>= i n) :ok
-    (do (eval (list 'defability (symbol (str "A" i))
-                (list (symbol (str "op" i)) ['self] :-> 'any)))
-        (decl (+ i 1)))))
+  (if (>= i n)
+    :ok
+    (do
+      (eval (list 'defability
+              (symbol (str "A" i)) (list (symbol (str "op" i)) ['self] :-> 'any)))
+      (decl (+ i 1)))))
 (decl 0)
 
 ;; each worker registers its own impl, concurrently
 (defn worker (i parent)
-  (do (register-impl (symbol (str "A" i)) (symbol (str "op" i)) :int (fn (x) i) nil)
-      (send parent [:done i])))
+  (do
+    (register-impl (symbol (str "A" i)) (symbol (str "op" i)) :int (fn (x) i) nil)
+    (send parent [:done i])))
 
 ;; NB `(self)` must be evaluated in the PARENT and captured — a `spawn` body runs in the
 ;; child, so `(spawn (worker i (self)))` makes each worker message itself and the collect
@@ -40,10 +43,12 @@
 
 ;; now count how many actually made it into the registry
 (defn missing (i acc)
-  (if (>= i n) acc
+  (if (>= i n)
+    acc
     (missing (+ i 1)
       (if (nil? (impl-for [(symbol (str "A" i)) (symbol (str "op" i))] :int)) (cons i acc) acc))))
 
 (let (lost (missing 0 nil))
-  (println (str "registered=" n " LOST=" (count lost)
-                (if (nil? lost) "  (all present)" (str "  e.g. " (pr-str (take 8 lost)))))))
+  (println (str "registered="
+             n " LOST=" (count lost)
+             (if (nil? lost) "  (all present)" (str "  e.g. " (pr-str (take 8 lost)))))))

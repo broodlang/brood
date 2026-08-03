@@ -78,7 +78,9 @@
   ;; run that finishes fine given room. `:slow` buys the `*test-slow-timeout-ms*` (900 s)
   ;; batch budget — the same lever the conformance corpora use for work that is long, not
   ;; stuck. The underlying drain cost is left for an ADR-gated collector-perf pass.
-  :serial :tags [:slow]
+  :serial
+  :tags
+  [:slow]
   (test "a 100k-deep document parses in a spawned process after warming"
     (require 'json)
     (let (p "tests/corpus/json/data/n_structure_100000_opening_arrays.json")

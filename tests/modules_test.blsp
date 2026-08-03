@@ -137,7 +137,8 @@
   (test "two :use imports of the same name are a hard error"
     (%load-string "(defmodule clpa) (defn thing (x) (list :a x))")
     (%load-string "(defmodule clpb) (defn thing (x) (list :b x))")
-    (let (msg (try (do (%load-string "(defmodule clcons (:use clpa) (:use clpb))") :no-error)
+    (let (msg (try
+                (do (%load-string "(defmodule clcons (:use clpa) (:use clpb))") :no-error)
                 (catch e (error-message e))))
       (is (includes? (str msg) "already referred"))))
   (test ":exclude resolves a :use collision (the other module's name wins)"
@@ -152,9 +153,10 @@
   ;; so this checks the behaviour; reach the prelude original as `/inc`.
   (test "a :use import that shadows a prelude name is allowed (the import wins)"
     (%load-string "(defmodule shdprov) (defn inc (x) (list :shd x))")
-    (%load-string (str "(defmodule shdcons (:use shdprov))"
-                    " (defn mine (x) (inc x))"    ; imported shdprov/inc wins
-                    " (defn orig (x) (/inc x))")) ; /inc still reaches prelude
+    (%load-string
+      (str "(defmodule shdcons (:use shdprov))"
+        " (defn mine (x) (inc x))" ; imported shdprov/inc wins
+        " (defn orig (x) (/inc x))")) ; /inc still reaches prelude
     (assert= (shdcons/mine 5) (list :shd 5))
     (assert= (shdcons/orig 5) 6))
   (test "an ambient (defdyn) name is never imported, so it neither clashes nor shadows"
@@ -172,17 +174,21 @@
   :serial
   (test "a circular :use refer-all errors clearly; :only is cycle-safe"
     (let (dir "/tmp"
-          a1 (str dir "/cyca.blsp") b1 (str dir "/cycb.blsp")
-          a2 (str dir "/cyca2.blsp") b2 (str dir "/cycb2.blsp")
+          a1 (str dir "/cyca.blsp")
+          b1 (str dir "/cycb.blsp")
+          a2 (str dir "/cyca2.blsp")
+          b2 (str dir "/cycb2.blsp")
           saved *load-path*)
       (spit a1 "(defmodule cyca (:use cycb))\n(defn a-one () 1)\n")
       (spit b1 "(defmodule cycb (:use cyca))\n(defn b-one () 1)\n")
       (spit a2 "(defmodule cyca2 (:use cycb2 :only [b-one]))\n(defn a-one () 1)\n")
       (spit b2 "(defmodule cycb2 (:use cyca2 :only [a-one]))\n(defn b-one () (a-one))\n")
       (set-load-path! (cons dir *load-path*))
-      (let (refer-all-err (try (do (require 'cyca) :no-error)
+      (let (refer-all-err (try
+                            (do (require 'cyca) :no-error)
                             (catch e (error-message e)))
-            only-ok (try (do (require 'cyca2) (cycb2/b-one))
+            only-ok (try
+                      (do (require 'cyca2) (cycb2/b-one))
                       (catch e [:err (error-message e)])))
         (set-load-path! saved)
         (doseq (p (list a1 b1 a2 b2)) (delete-file p))

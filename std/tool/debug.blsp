@@ -106,11 +106,12 @@ pause with `break`, and correlate with `span` (`span-spawn` is now just
 A no-op when no debugger is in context. `break`/`break-when` expand to a call to this."
   (let (ctx (%trace-context) dbg (get ctx :debugger))
     (when dbg
-      (send dbg [:break (self)
-                  {:label label
-                   :vals (debug--pairs->map explicit)
-                   :scope scope
-                   :span (get ctx :span)}])
+      (send dbg
+        [:break (self)
+          {:label label
+           :vals (debug--pairs->map explicit)
+           :scope scope
+           :span (get ctx :span)}])
       (receive ([:resume] nil)))))
 
 (defmacro break (label & vals)
@@ -176,8 +177,7 @@ are just a Brood predicate, so no recompile and no cost on the false path. (A ma
 ;; YOUR functions. The wrapper is variadic, so every arity of a multi-clause fn goes
 ;; through it; its `arglist` reads `(& args)` while traced.
 
-(def *traced-fns* {})  ; sym -> the original fn value (`untrace-fn` restores it)
-
+(def *traced-fns* {}) ; sym -> the original fn value (`untrace-fn` restores it)
 (defn debug--original (sym)
   ;; The pre-instrumentation fn for `sym`: the registry entry when already traced
   ;; (re-tracing must not capture a wrapper as the original), else the live value.
@@ -387,7 +387,8 @@ running shows `:value :running`."
   "The causal tree as a flat list of indented, pid-tagged strings (one per span)."
   (mapcat (fn (node)
             (cons (str (apply str (map (constantly "  ") (range depth)))
-                    (get node :label) " [" (get node :pid) "] => " (pr-str-bounded (get node :value)))
+                    (get node :label) " [" (get node :pid) "] => "
+                    (pr-str-bounded (get node :value)))
               (causal--lines (get node :children) (inc depth))))
     nodes))
 (defn print-causal (dbg)
@@ -524,7 +525,8 @@ under `step`/`stepping-sink` it re-parks at the next node). Note when nothing is
       (let (entries (vec (get (dbg-state dbg) :paused)))
         (if (empty? entries)
           (println "\e[90m(nothing parked)\e[0m")
-          (do (resume dbg (first (first entries)))
+          (do
+            (resume dbg (first (first entries)))
             (sleep 30)
             (println (str "stepped [" (first (first entries)) "]"))))))))
 
@@ -536,12 +538,14 @@ then hands you the prompt. Drive the session with the `,resume` / `,step` meta-c
 Ctrl-D leaves and continues. Reuses `repl-run` — so it's the real REPL, not a
 re-implementation; it registers the `,resume`/`,step` commands via the REPL registry."
   (require 'repl)
-  (repl/register-repl-command
-    {:names '("resume") :usage ",resume [N]" :summary "resume all parked (or the Nth) in this debug session"
-     :handler debug--repl-resume})
-  (repl/register-repl-command
-    {:names '("step") :usage ",step" :summary "advance one parked process a single step"
-     :handler debug--repl-step})
+  (repl/register-repl-command {:names '("resume")
+                               :usage ",resume [N]"
+                               :summary "resume all parked (or the Nth) in this debug session"
+                               :handler debug--repl-resume})
+  (repl/register-repl-command {:names '("step")
+                               :usage ",step"
+                               :summary "advance one parked process a single step"
+                               :handler debug--repl-step})
   (doseq (line (debug--report-lines dbg)) (println line))
   (println "── pry: the real REPL. `,resume` / `,step` to drive the session · Ctrl-D to continue ──")
   (binding (*debug-session* dbg *repl-prompt* "debug> ")

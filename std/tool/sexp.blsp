@@ -376,14 +376,15 @@ at `next.end` (the whitespace between the two forms is preserved in place)."
                (last (filter (fn (f) (<= (get f :end) (get next :start))) sibs))))
     (if (or (nil? prev) (nil? next))
       nil
-      (let (ps (get prev :start) pe (get prev :end)
-            ns (get next :start) ne (get next :end))
+      (let (ps (get prev :start)
+            pe (get prev :end)
+            ns (get next :start)
+            ne (get next :end))
         [(str (substring text 0 ps)
-           (substring text ns ne)      ; the later form, moved before …
-           (substring text pe ns)      ; … the separator between them, kept as-is …
-           (substring text ps pe)      ; … then the earlier form
-           (substring text ne))
-         ne]))))
+           (substring text ns ne) ; the later form, moved before …
+           (substring text pe ns) ; … the separator between them, kept as-is …
+           (substring text ps pe) ; … then the earlier form
+           (substring text ne)) ne]))))
 
 ;; ---- structure-aware kill bound ---------------------------------------------
 

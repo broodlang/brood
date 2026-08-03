@@ -1985,10 +1985,11 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
   (let (name (second pat)
         mappat (first (rest (rest pat))))
     (when (not (symbol? name))
-      (error (str "match: (record name …) needs a record NAME symbol, got " (pr-str name)
-               " — e.g. (record circle {:r r}) or (record geometry/circle {:r r}).")))
+      (error (str "match: (record name …) needs a record NAME symbol, got "
+               (pr-str name) " — e.g. (record circle {:r r}) or (record geometry/circle {:r r}).")))
     (when (and mappat (not (map? mappat)))
-      (error (str "match: (record " (pr-str name) " …) — the field pattern must be a map"
+      (error (str "match: (record "
+               (pr-str name) " …) — the field pattern must be a map"
                " pattern like {:field p} or {:keys [f]}, got " (pr-str mappat))))
     (let (id (ability--id-kw name))
       `(if (%eq (record-id ~target) ~id)
@@ -2623,10 +2624,10 @@ message already sent stays sent."
                   (first pat)
                   nil))
         (if (nil? tag)
-          nil                              ; one un-taggable clause disables the filter
+          nil ; one un-taggable clause disables the filter
           (let (rest-tags (receive--tags (rest clauses)))
             (if (and (nil? rest-tags) (not (empty? (rest clauses))))
-              nil                          ; a later clause disabled it
+              nil ; a later clause disabled it
               (cons tag rest-tags))))))))
 
 ;; The receive-mark hint (ADR-195): the expression EVERY clause pins, when they all pin the
@@ -2934,7 +2935,8 @@ string, keyword, vector, and record keys all work."
                   (cond
                     (map? x) (merge coll x)
                     (and (vector? x) (= (count x) 2)) (assoc coll (nth x 0) (nth x 1))
-                    else (error "conj: adding to a map takes a [k v] pair or a map, got " (pr-str x))))
+                    else (error "conj: adding to a map takes a [k v] pair or a map, got "
+                           (pr-str x))))
     (pair? coll) (cons x coll)
     else (error "conj: not a collection: " (pr-str coll))))
 
@@ -3213,8 +3215,8 @@ and it must be loaded before this `defrecord`.
         derives (defrecord--derives opts)
         derive-calls (if derives
                        (map (fn (a)
-                              (list 'derive-into (list 'quote a) id
-                                (list 'quote fnames) (list 'current-ns)))
+                              (list 'derive-into
+                                (list 'quote a) id (list 'quote fnames) (list 'current-ns)))
                          derives)
                        nil))
     `(do ~ctor-sig ~ctor ~@accs ~@acc-sigs ~@derive-calls (record-register ~id '~rec) nil)))
@@ -4322,9 +4324,9 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
         marker (first opts))
     (when (and marker (not (= marker :only)) (not (= marker :exclude)))
       (error "defmodule: unknown (:use "
-        mod " " marker " …) marker — the import filters are :only and :exclude, as "
-        "`(:use " mod " :only [a b])` or `(:use " mod " :exclude [a b])`"))
-    (let (subset  (if (= marker :only) (second opts) nil)
+        mod " " marker " …) marker — the import filters are :only and :exclude, as " "`(:use " mod
+        " :only [a b])` or `(:use " mod " :exclude [a b])`"))
+    (let (subset (if (= marker :only) (second opts) nil)
           exclude (if (= marker :exclude) (second opts) nil)
           ;; Package-rooted namespaces (ADR-070): an intra-package `(:use b)` inside a
           ;; dependency roots to `(:use foo/b)` at load time; an external/std module is
@@ -4479,13 +4481,12 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
       ;; A dependency module (ADR-070): `key` is a rooted name (`"foo/b"`) the package
       ;; manager mapped to a file. Load it under `foo`'s package context so its
       ;; `(defmodule b)` roots to `foo/b` and its intra-package `(:use …)` targets root.
-      (contains? *package-module-files* key)
-      (require--force-package key (get *package-module-files* key))
-      else
-      (let (path (require--find (str key ".blsp") *load-path*))
-        (if path
-          (do (load path) (provide key))
-          (error "require: cannot find module '" key "'"))))
+      (contains? *package-module-files* key) (require--force-package key
+                                               (get *package-module-files* key))
+      else (let (path (require--find (str key ".blsp") *load-path*))
+             (if path
+               (do (load path) (provide key))
+               (error "require: cannot find module '" key "'"))))
     key))
 
 ;; Load a dependency module file `path` under package `key`'s context (ADR-070): set
@@ -4494,9 +4495,9 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
 ;; paths (a dep may be required mid-load of another dep, so contexts nest). The
 ;; prefix is the rooted key's first segment (package local names are single-segment).
 (defn require--force-package (key path)
-  (let (prefix  (symbol (first (string-split key "/")))
+  (let (prefix (symbol (first (string-split key "/")))
         modules (get *package-modules-of* (name prefix))
-        prev    (%set-package-context prefix modules))
+        prev (%set-package-context prefix modules))
     (try
       (do (load path) (provide key))
       (catch e
@@ -4539,8 +4540,8 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       ;; `contains? = false`, both `:assoc`, and both run `require--force`: the module
       ;; body is evaluated twice and `provide`d twice (the double-load ADR-136 forbids).
       ;; Losing the race means someone else now owns the load — wait for their provide.
-      (not (%registry-update! '*features-loading* :assoc-new [key] (self)))
-      (require--await key 1000)
+      (not (%registry-update! '*features-loading* :assoc-new [key] (self))) (require--await key
+                                                                              1000)
       else
       ;; We won the claim (the marker is now set). Clear it on BOTH exits: a load that
       ;; throws (module not found, or an error inside its source) must not leave `key`
@@ -4618,8 +4619,8 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
         ; `register-ability` that never defines a generic fn (crafted precedence fixtures) is
         ; harmless and stays quiet.
         (when (and prev (not (= prev aname)) (bound? qsym))
-          (println "warning: ability " aname " declares op `" (first spec)
-            "` already owned by ability " prev
+          (println "warning: ability "
+            aname " declares op `" (first spec) "` already owned by ability " prev
             " — its generic function will be shadowed (rename one op)"))
         (%registry-update! '*op-ability* :assoc [qsym] aname))))
   nil)
@@ -4777,8 +4778,9 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
             fixed (nth shape 0)
             variadic (nth shape 1))
         (when (if variadic (> fixed op-arity) (not (= fixed op-arity)))
-          (println "warning: ability " aname "/" op " expects " op-arity
-            " arg(s), but this impl takes " (if variadic (str fixed "+") fixed)))))))
+          (println "warning: ability "
+            aname "/" op " expects " op-arity " arg(s), but this impl takes "
+            (if variadic (str fixed "+") fixed)))))))
 
 (defn register-impl (aname op key f from)
   "Register impl `f` of `aname`'s `op` for dispatch id `key`, tagged with the registering
@@ -4849,7 +4851,8 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   must not leak into the next one, a REPL session undoing an experiment, a hot reload
   retracting an impl the new source no longer declares."
   (when (impl--substrate? aname key)
-    (error "unregister-impl: " aname "/" op " :default is part of the language — removing it "
+    (error "unregister-impl: "
+      aname "/" op " :default is part of the language — removing it "
       "would leave every value unprintable. Override it with `impl` for your own id instead."))
   (let (op-key [aname op]
         prov-key [aname op key]
@@ -4868,13 +4871,13 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   record's construction — not its macro-expansion."
   (let (recipe (ability-derive-recipe aname))
     (when (not recipe)
-      (error "defrecord :derives — ability " aname " is not derivable "
-        "(its defability declares no :derive-record recipe)"))
+      (error "defrecord :derives — ability "
+        aname " is not derivable " "(its defability declares no :derive-record recipe)"))
     (doseq (m (recipe fields))
       ;; a method form is `(op [args] body…)` (impl syntax — a `[args]` VECTOR); `fn` wants a
       ;; LIST param, so convert the vector to a list, exactly as the `impl` macro does.
-      (register-impl aname (first m) id
-        (eval (cons 'fn (cons (map (fn (s) s) (second m)) (rest (rest m))))) from))))
+      (register-impl aname
+        (first m) id (eval (cons 'fn (cons (map (fn (s) s) (second m)) (rest (rest m))))) from))))
 
 (defn no-impl (op-key key)
   "The loud, located error an op raises when no impl (and no `:default`) covers id
@@ -4946,8 +4949,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
       (if (< cut 0)
         (defrecord--qualify nm)
         (keyword (str (name (%root-module-name (symbol (substring nm 0 cut))))
-                   "/"
-                   (substring nm (inc cut) (string-length nm))))))
+                   "/" (substring nm (inc cut) (string-length nm))))))
     m))
 
 (defn defability--op-call (impl-sym arg-syms)
@@ -4969,9 +4971,10 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   `:default` impl, so an `impl` that omits the op still gets it (Rust/Haskell provided
   methods, Elixir `Protocol`'s derived defaults). The body typically calls the ability's
   *required* ops on `self`, so it works for any id that supplies those."
-  (let (tail (rest (rest op)))          ; forms after `(op-name [args])`
+  (let (tail (rest (rest op)))
+    ; forms after `(op-name [args])`
     (if (= (first tail) :->)
-      (rest (rest tail))                 ; skip the `:-> ret` pair
+      (rest (rest tail)) ; skip the `:-> ret` pair
       tail)))
 
 (defmacro defability (aname & specs)
@@ -5015,13 +5018,12 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
         ; The specs are stored WITH their bodies so the checker can tell a provided op from
         ; a required one (a body ⇒ provided ⇒ not demanded of a sealed member).
         reg (append
-              (append
-                (cons (list 'register-ability
-                        (list 'quote aname) (list 'quote ops) (list 'current-ns))
-                  (if sealed-ids
-                    (list (list 'register-sealed
-                            (list 'quote aname) (cons 'list sealed-ids)))
-                    nil))
+              (append (cons (list 'register-ability
+                              (list 'quote aname) (list 'quote ops) (list 'current-ns))
+                        (if sealed-ids
+                          (list (list 'register-sealed
+                                  (list 'quote aname) (cons 'list sealed-ids)))
+                          nil))
                 ; the `:derive-record` recipe is emitted UNQUOTED — evaluated to a closure at
                 ; load, so `defrecord`'s `:derives` can call it at expansion (ADR-185).
                 (if derive-fn
@@ -5031,24 +5033,22 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
               ; (super-abilities, ADR-193). The names are emitted quoted so the list is the
               ; ability-name symbols, not their (unbound) values.
               (if requires-vec
-                (list (list 'register-ability-requires (list 'quote aname)
-                        (cons 'list (map (fn (r) (list 'quote r)) requires-vec))))
+                (list (list 'register-ability-requires
+                        (list 'quote aname) (cons 'list (map (fn (r) (list 'quote r)) requires-vec))))
                 nil))
         ; A provided op (one with a default body) becomes a `:default` impl, registered from
         ; the declaring ns (ability-owner tier) so an app/type impl can still override it. Its
         ; body runs through ordinary dispatch, calling sibling ops on `self` by late binding.
-        provided-defs (fold
-                        (fn (acc op)
-                          (let (body (defability--op-body op))
-                            (if (empty? body)
-                              acc
-                              (let (arg-syms (map (fn (s) (if (pair? s) (first s) s))
-                                               (second op)))
-                                (append acc
-                                  (list (list 'register-impl
-                                          (list 'quote aname) (list 'quote (first op))
-                                          :default (cons 'fn (cons arg-syms body))
-                                          (list 'current-ns))))))))
+        provided-defs (fold (fn (acc op)
+                              (let (body (defability--op-body op))
+                                (if (empty? body)
+                                  acc
+                                  (let (arg-syms (map (fn (s) (if (pair? s) (first s) s))
+                                                   (second op)))
+                                    (append acc
+                                      (list (list 'register-impl
+                                              (list 'quote aname) (list 'quote (first op)) :default
+                                              (cons 'fn (cons arg-syms body)) (list 'current-ns))))))))
                         nil ops)
         op-defs (map
                   (fn (op)
@@ -5068,7 +5068,8 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
                       ; nothing to dispatch on — every value would route to the `:nil` impl.
                       ; Reject it at expansion rather than silently degrade.
                       (when (empty? arg-syms)
-                        (error "defability " aname ": op `" op-name
+                        (error "defability "
+                          aname ": op `" op-name
                           "` takes no arguments — a generic op must have at least one "
                           "argument (it dispatches on the first)"))
                       (list 'defn
@@ -5084,8 +5085,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
                             impl-sym
                             ; the resolved call — direct for a fixed arity, `apply` for a
                             ; variadic op (`defability--op-call`)
-                            (defability--op-call impl-sym arg-syms)
-                            (list 'no-impl op-key id-sym))))))
+                            (defability--op-call impl-sym arg-syms) (list 'no-impl op-key id-sym))))))
                   ops))
     (cons 'do (append reg (append op-defs provided-defs)))))
 
@@ -5123,7 +5123,8 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   Returns the number of impls actually removed, so a caller can tell a retraction from a
   no-op. A `key` that never had an impl is a quiet zero."
   (let (id-kw (ability--id-kw key))
-    (list 'unimpl--do (list 'quote aname) id-kw
+    (list 'unimpl--do
+      (list 'quote aname) id-kw
       (if (empty? ops)
         (list 'map 'first (list 'or (list 'ability-ops (list 'quote aname)) (list)))
         (list 'quote ops)))))
@@ -5142,10 +5143,9 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 ;; method's mirror, so a binary operator is authored as the upper triangle of its type matrix.
 ;; The single-dispatch seam is still `defability`/`impl`; this is its multi-arg sibling.
 
-(def *methods* {})        ; multimethod name → { [id …] → fn, :default → fn }
-(def *multi-algebra* {})  ; multimethod name → :commutative | :antisymmetric | nil (declared)
-(def *method-from* {})    ; [mname key] → registering ns, for cross-module conflict detection
-
+(def *methods* {}) ; multimethod name → { [id …] → fn, :default → fn }
+(def *multi-algebra* {}) ; multimethod name → :commutative | :antisymmetric | nil (declared)
+(def *method-from* {}) ; [mname key] → registering ns, for cross-module conflict detection
 (defn register-multi (mname algebra)
   "Declare multimethod `mname` with optional closure `algebra` (nil, :commutative, or
   :antisymmetric). Records the algebra so `register-method` can derive each mirror."
@@ -5190,14 +5190,15 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   ; The multimethod must be declared (so its algebra/shape is known). Unclear otherwise —
   ; fail at load, not silently at a later dispatch.
   (when (not (contains? *multi-algebra* mname))
-    (error "defmethod " mname " " key ": no `(defmulti " mname " …)` is in scope — "
+    (error "defmethod "
+      mname " " key ": no `(defmulti " mname " …)` is in scope — "
       "declare the multimethod before adding methods"))
   (let (prov [mname key]
         has-prev (contains? *method-from* prov)
         prev-from (get *method-from* prov))
     (when (and has-prev (not (= prev-from from)))
-      (println "warning: multimethod " mname " method for " key
-        " — redefined from " prev-from " by " from " (last wins)"))
+      (println "warning: multimethod "
+        mname " method for " key " — redefined from " prev-from " by " from " (last wins)"))
     (register-method--store mname key f)
     (%registry-update! '*method-from* :assoc [prov] from))
   (let (algebra (get *multi-algebra* mname))
@@ -5205,20 +5206,20 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
     (when (and algebra (vector? key))
       ; a closure encodes a BINARY-operator law; refuse to derive on a non-binary key.
       (when (not (= (count key) 2))
-        (error "defmethod " mname " " key ": a " algebra " closure needs a binary (2-arg) "
+        (error "defmethod "
+          mname " " key ": a " algebra " closure needs a binary (2-arg) "
           "method, but this key has " (count key) " position(s)"))
       (let (left (nth key 0) right (nth key 1))
         ; skip the diagonal (key = its own mirror — it would wrap itself)
         (when (not (= left right))
           (let (mirror [right left])
             (cond
-              (= algebra :commutative)
-                (register-method--derive mname mirror (fn (x y) (f y x)))
-              (= algebra :antisymmetric)
-                (register-method--derive mname mirror (fn (x y) (- 0 (f y x))))
-              else
-                (error "defmulti " mname ": unknown algebra " algebra
-                  " (expected :commutative, :antisymmetric, or none)")))))))
+              (= algebra :commutative) (register-method--derive mname mirror (fn (x y) (f y x)))
+              (= algebra :antisymmetric) (register-method--derive mname
+                                           mirror (fn (x y) (- 0 (f y x))))
+              else (error "defmulti "
+                     mname ": unknown algebra " algebra
+                     " (expected :commutative, :antisymmetric, or none)")))))))
   nil)
 
 (defmacro defmulti (mname & opts)
@@ -5234,16 +5235,17 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   (let (algebra (if (empty? opts) nil (first opts)))
     ; STRICT: an unknown algebra keyword is a clear declaration error — fail at expansion.
     (when (and algebra (not (member? algebra (list :commutative :antisymmetric))))
-      (error "defmulti " mname ": unknown algebra " algebra
-        " (expected :commutative, :antisymmetric, or none)"))
+      (error "defmulti "
+        mname ": unknown algebra " algebra " (expected :commutative, :antisymmetric, or none)"))
     (list 'do
       (list 'register-multi (list 'quote mname) algebra)
-      (list 'defn mname '(& args)
-        (list 'let (list 'key (list 'mapv 'identity-of 'args)
-                    'f (list 'multi-resolve (list 'quote mname) 'key))
-          (list 'if 'f
-            (list 'apply 'f 'args)
-            (list 'no-method (list 'quote mname) 'key)))))))
+      (list 'defn
+        mname '(& args)
+        (list 'let
+          (list 'key
+            (list 'mapv 'identity-of 'args) 'f (list 'multi-resolve (list 'quote mname) 'key))
+          (list 'if
+            'f (list 'apply 'f 'args) (list 'no-method (list 'quote mname) 'key)))))))
 
 (defmacro defmethod (mname pattern arglist & body)
   "Register a method of multimethod `mname` for identity `pattern` — a vector whose positions
@@ -5257,31 +5259,30 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   (cond
     ; the catch-all: consulted only when no exact identity-tuple matches. A keyword sentinel,
     ; not a tuple — so it is arity-agnostic and never a closure target.
-    (= pattern :default)
-      (list 'register-method (list 'quote mname) :default
-        (cons 'fn (cons arglist body)) (list 'current-ns))
-    (vector? pattern)
-      (do
-        (when (not (every? (fn (p) (or (symbol? p) (keyword? p))) pattern))
-          (error "defmethod " mname " " pattern ": each position must be a record name or a "
-            "built-in id keyword"))
-        ; `:default` is the whole-pattern catch-all, never a single position — reject the mix.
-        (when (any? (fn (p) (= p :default)) pattern)
-          (error "defmethod " mname " " pattern ": `:default` is the catch-all, not a dispatch "
-            "position — write `(defmethod " mname " :default …)`"))
-        (when (not (= (count pattern) (count arglist)))
-          (error "defmethod " mname " " pattern ": the method takes " (count arglist)
-            " arg(s) but the pattern has " (count pattern) " position(s)"))
-        ; resolve each position to the id keyword a value presents (records qualified, `impl`).
-        (let (key (mapv ability--id-kw pattern))
-          (list 'register-method
-            (list 'quote mname)
-            (list 'quote key)
-            (cons 'fn (cons arglist body))
-            (list 'current-ns))))
-    else
-      (error "defmethod " mname ": the dispatch pattern must be a vector of ids or "
-        "`:default`, got " pattern)))
+    (= pattern :default) (list 'register-method
+                           (list 'quote mname) :default (cons 'fn (cons arglist body))
+                           (list 'current-ns))
+    (vector? pattern) (do
+                        (when (not (every? (fn (p) (or (symbol? p) (keyword? p))) pattern))
+                          (error "defmethod "
+                            mname " " pattern ": each position must be a record name or a "
+                            "built-in id keyword"))
+                        ; `:default` is the whole-pattern catch-all, never a single position — reject the mix.
+                        (when (any? (fn (p) (= p :default)) pattern)
+                          (error "defmethod "
+                            mname " " pattern ": `:default` is the catch-all, not a dispatch "
+                            "position — write `(defmethod " mname " :default …)`"))
+                        (when (not (= (count pattern) (count arglist)))
+                          (error "defmethod "
+                            mname " " pattern ": the method takes " (count arglist)
+                            " arg(s) but the pattern has " (count pattern) " position(s)"))
+                        ; resolve each position to the id keyword a value presents (records qualified, `impl`).
+                        (let (key (mapv ability--id-kw pattern))
+                          (list 'register-method
+                            (list 'quote mname) (list 'quote key) (cons 'fn (cons arglist body))
+                            (list 'current-ns))))
+    else (error "defmethod "
+           mname ": the dispatch pattern must be a vector of ids or " "`:default`, got " pattern)))
 
 ;; ── Display / Inspect: the print protocol (always on) ──────────────────────────
 (defability Display
@@ -5328,9 +5329,9 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 ;; its own insertion (a queue pushes, a stack prepends, …). Built-ins keep their native
 ;; `conj--one` path — this fires only for a record.
 (defability Conjable
-  "Add element `x` to collection `self`, returning a fresh collection."
-  (-conj [self x] :-> any))
-(impl Conjable :default
+  "Add element `x` to collection `self`, returning a fresh collection." (-conj [self x] :-> any))
+(impl Conjable
+  :default
   (-conj [coll x]
     (cond
       (map? x) (merge coll x)

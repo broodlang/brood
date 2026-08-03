@@ -247,7 +247,8 @@
 (describe "close-requests — a closing context names its companions"
   (test "nothing is requested by default"
     (assert= (close-requests {}) '())
-    (assert= (close-requests (close-context (activate-layer {:log ""} 'layers-test/layer-close))) '()))
+    (assert= (close-requests (close-context (activate-layer {:log ""} 'layers-test/layer-close)))
+      '()))
 
   (test "an :on-close hook's requests survive on the closed context, in order"
     (let (closed (close-context (activate-layer {} 'layers-test/layer-companions)))

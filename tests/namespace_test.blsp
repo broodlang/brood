@@ -219,8 +219,7 @@
   :isolated
   (test "a module shadowing a prelude name reaches the original via /name"
     (%load-string (str "(defmodule nsroot1)"
-                    " (defn map (x) (list :mine x))"
-                    " (defn mine (x) (map x))"
+                    " (defn map (x) (list :mine x))" " (defn mine (x) (map x))"
                     " (defn orig () (/map (fn (x) (* x x)) (list 1 2 3)))"))
     ;; the module's own `map` wins for a bare reference…
     (assert= (nsroot1/mine 5) (list :mine 5))
@@ -269,10 +268,11 @@ is what a `:use` would actually import, not what the source looks like."
         plen (string-length prefix))
     (into #{}
       (map (fn (n) (substring n plen (string-length n)))
-        (filter (fn (n) (and (starts-with? n prefix)
-                          ;; a nested module (`editor/x` under `editor`) is not an export
-                          (not (includes? (substring n plen (string-length n)) "/"))
-                          (not (includes? n "--"))))          ; module-private
+        (filter
+          (fn (n)
+            (and (starts-with? n prefix)
+              ;; a nested module (`editor/x` under `editor`) is not an export
+              (not (includes? (substring n plen (string-length n)) "/")) (not (includes? n "--")))) ; module-private
           (map name (global-names)))))))
 
 (describe "std cross-module name overlaps are known, not surprising"
@@ -290,15 +290,15 @@ is what a `:use` would actually import, not what the source looks like."
       (require 'sexp)
       (require 'editor/treesit)
       (let (shared (filter (fn (n) (includes? (ns--exports-of "editor/treesit") n))
-                    (into [] (ns--exports-of "sexp"))))
+                     (into [] (ns--exports-of "sexp"))))
         ;; The structural-motion set both provide — sexp over a Brood form, treesit over a
         ;; foreign-language tree (ADR-205 §7b). Grew from five to nine as parallel motions
         ;; (`point-list-*`, `point-up-forward`, `point-defun-end`) were added to both; a
         ;; deliberate mirror, pinned so a *new* overlap is a review decision, not a surprise.
         (assert= (sort shared)
-          (list "point-backward" "point-defun-end" "point-defun-start" "point-down"
-            "point-forward" "point-list-backward" "point-list-forward" "point-up"
-            "point-up-forward"))
+          (list "point-backward"
+            "point-defun-end" "point-defun-start" "point-down" "point-forward" "point-list-backward"
+            "point-list-forward" "point-up" "point-up-forward"))
         ;; and they are DIFFERENT operations, not duplicates: treesit's take a `lang`
         (assert= 3 (count (arglist editor/treesit/point-forward)))
         (assert= 2 (count (arglist sexp/point-forward)))))))

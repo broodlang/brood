@@ -342,11 +342,14 @@ the test rather than hanging the run."
 (defn concurrently--collect (k tag acc)
   (if (= k 0)
     acc
-    (concurrently--collect (- k 1) tag
-      (cons (receive ([:concurrently ^tag v] v)
+    (concurrently--collect (- k 1)
+      tag
+      (cons (receive
+              ([:concurrently ^tag v] v)
               (after *test-timeout-ms*
-                (test--fail nil (list (str "concurrently: a worker did not finish within "
-                                        *test-timeout-ms* "ms")))))
+                (test--fail nil
+                  (list (str "concurrently: a worker did not finish within "
+                          *test-timeout-ms* "ms")))))
         acc))))
 
 (defmacro assert-error (& body)
@@ -1424,8 +1427,8 @@ order (deterministic — the results are already collected)."
   (println (str "1.." (count results)))
   (fold (fn (i r)
           (let (status (if (r-failed? r) "not ok" "ok"))
-            (println (str status " " (+ i 1) " - " (full-name r)
-                       (if (r-skipped? r) " # SKIP" "")))
+            (println (str status
+                       " " (+ i 1) " - " (full-name r) (if (r-skipped? r) " # SKIP" "")))
             (when (r-failed? r)
               (fold (fn (_ rec)
                       (fold (fn (_ line) (println (str "# " line))) nil (fail-lines-of rec)))
@@ -1450,13 +1453,12 @@ the suite programmatically. Printed once, at the end, so parallel ordering is ir
   (require 'json)
   (let (total (count results)
         failed (count-failed results))
-    (println (json/json-encode
-               {:total total
-                :passed (- total failed)
-                :failed failed
-                :failed-assertions (count-failures results)
-                :ms elapsed
-                :results (or (map test--result->data results) [])})))
+    (println (json/json-encode {:total total
+                                :passed (- total failed)
+                                :failed failed
+                                :failed-assertions (count-failures results)
+                                :ms elapsed
+                                :results (or (map test--result->data results) [])})))
   nil)
 
 (register-test-formatter "tap" test--fmt-tap)
@@ -1469,8 +1471,8 @@ the exit code still reflects the run. An unknown formatter name is a clean error
   ;; position wins over a local binding, so `(fmt …)` would expand as the template.
   (let (formatter-fn (get *test-formatters* *test-formatter*))
     (if (nil? formatter-fn)
-      (error (str "unknown --formatter '" *test-formatter* "' (available: "
-               (join ", " (sort (keys *test-formatters*))) ")"))
+      (error (str "unknown --formatter '"
+               *test-formatter* "' (available: " (join ", " (sort (keys *test-formatters*))) ")"))
       (do
         (formatter-fn results elapsed)
         (if (> (count-failed results) 0)

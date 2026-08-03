@@ -34,7 +34,7 @@
       (assert= (count rs) 1)
       (assert= (region-texts text rs) (list "not >>> a close"))))
 
-(test "tail-region is the prompt shape: everything after a point"
+  (test "tail-region is the prompt shape: everything after a point"
     (let (text "prompt> hello")
       (assert= (region-texts text (tail-region text 8)) (list "hello"))
       ;; a start past the end clamps rather than inverting
@@ -46,8 +46,7 @@
           r (first rs))
       (is (not (nil? (region-at rs (:start r)))))
       (is (not (nil? (region-at rs (:end r)))))
-      (is (nil? (region-at rs 0)))))                    ; in the prose
-
+      (is (nil? (region-at rs 0))))) ; in the prose
   (test "region-index numbers them in document order"
     (let (rs (boxes boxed))
       (assert= (region-index rs (:start (first rs))) 0)
@@ -75,7 +74,7 @@
     (let (old "<<< a\nMINE-1\n>>>\n<<< b\nMINE-2\n>>>"
           new "<<< a (renamed)\ntemplate-1\n>>>\n<<< b (renamed)\ntemplate-2\n>>>"
           out (splice new old boxes))
-      (is (includes? out "renamed"))                    ; the new prose won
+      (is (includes? out "renamed")) ; the new prose won
       (assert= (region-texts out (boxes out)) (list "MINE-1" "MINE-2"))))
 
   (test "a region-count mismatch falls back to the new text whole"
@@ -107,7 +106,7 @@
     (let (before (ctx boxed (skeleton boxed (boxes boxed)))
           after (ctx (replace boxed "prose" "PROSE") (:skeleton before))
           out (guard-veto before after rt rs reject boxes))
-      (assert= (:text out) boxed)                       ; reverted
+      (assert= (:text out) boxed) ; reverted
       (assert= (:echo out) "rejected")))
 
   (test "PRE-EXISTING damage does not veto later events (a form must never brick)"
@@ -116,7 +115,7 @@
           before (ctx damaged skel)
           after (ctx (replace damaged "(+ 1 2)" "(+ 9 9)") skel)
           out (guard-veto before after rt rs reject boxes))
-      (assert= out after)                               ; let it through
+      (assert= out after) ; let it through
       (assert= (:echo out) "")))
 
   (test "no stashed skeleton means nothing to protect"

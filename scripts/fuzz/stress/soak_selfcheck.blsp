@@ -28,7 +28,7 @@
 (def report-every (let (e (getenv "SOAK_REPORT")) (if e (string->number e) 30000)))
 
 (def reload-target 2)
-(defn shared-thunk () (* reload-target 21))     ; no captures -> shared handle
+(defn shared-thunk () (* reload-target 21)) ; no captures -> shared handle
 (defn echo-server () (receive ([:ping from r] (do (send from [:reply r :pong]) (echo-server)))))
 (def srv (spawn (echo-server)))
 
@@ -50,14 +50,16 @@
 (defn drain-junk (k seen)
   (if (= k 0)
     seen
-    (receive ([:junk _] (drain-junk (- k 1) (+ seen 1)))
-             (after 2000 seen))))
+    (receive
+      ([:junk _] (drain-junk (- k 1) (+ seen 1)))
+      (after 2000 seen))))
 
 ;; One ref-pinned round trip with `backlog` junk messages queued in front of the reply.
 (defn round-trip ()
   (let (r (ref))
-    (do (send srv [:ping (self) r])
-        (receive ([:reply ^r v] v) (after 5000 :TIMEOUT)))))
+    (do
+      (send srv [:ping (self) r])
+      (receive ([:reply ^r v] v) (after 5000 :TIMEOUT)))))
 
 (defn crashy () (receive (:die (error "soak")) (:ok :ok)))
 (defn start-crashy () (spawn-link (crashy)))
@@ -82,10 +84,12 @@
       (when (not (= seen backlog)) (fail (str "backlog lost: saw " seen " of " backlog) n)))
     ;; 2. supervised crash + restart
     (let (pid (start-child sup {:id (mod n 8) :start start-crashy :restart :permanent}))
-      (do (send pid :die)
-          (terminate-child sup (mod n 8))))
+      (do
+        (send pid :die)
+        (terminate-child sup (mod n 8))))
     ;; 3. closures across a send, shared and captured, against a hot-reloaded global
-    (let (got (round-trip))                        ; keeps the server warm
+    (let (got (round-trip))
+      ; keeps the server warm
       (when (not (= got :pong)) (fail "server stopped replying" n)))
     (when (= 0 (mod n 97))
       (eval (list 'def 'reload-target (+ 2 (mod n 5)))))
@@ -93,20 +97,22 @@
     (burst 32)
     ;; heartbeat
     (when (= 0 (mod n report-every))
-      (println (str "t=" (quot (- (now) t-start) 1000) "s iter=" n
-                    " reloads=" reloads " rss_kb=" (rss-kb)
-                    " children=" (count-children sup))))
+      (println (str "t="
+                 (quot (- (now) t-start) 1000) "s iter=" n " reloads=" reloads " rss_kb=" (rss-kb)
+                 " children=" (count-children sup))))
     (if (> (now) deadline)
       ;; `gc-stats` is a dev-tools builtin and is ABSENT from the lean runtime — which is
       ;; exactly the build you soak (`make install INSTALL_FEATURES='$(RUN_FEATURES)'`, what
       ;; the benchmarks and `nest release` use). Reaching for it unguarded made the harness
       ;; die on its very last line with `unbound symbol: gc-stats`, throwing away the summary
       ;; after a clean two-hour run. Report what this build can see.
-      (println (str "OK soak complete: " n " iterations, rss_kb=" (rss-kb)
-                    (if (bound? 'gc-stats)
-                      (str " rt-closures=" (get (gc-stats) :runtime-closures)
-                           " rt-threshold=" (get (gc-stats) :runtime-threshold))
-                      " (rt-closures unavailable: lean build, no gc-stats)")))
+      (println (str "OK soak complete: "
+                 n " iterations, rss_kb=" (rss-kb)
+                 (if (bound? 'gc-stats)
+                   (str " rt-closures="
+                     (get (gc-stats) :runtime-closures) " rt-threshold="
+                     (get (gc-stats) :runtime-threshold))
+                   " (rt-closures unavailable: lean build, no gc-stats)")))
       (loop-once (+ n 1) (if (= 0 (mod n 97)) (+ reloads 1) reloads)))))
 
 (loop-once 0 0)

@@ -74,7 +74,8 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
                             pn (byte-length probe))
                         (if (>= (bytes-index-of probe marker) 0)
                           (apply bytes-concat (reverse (cons d chunks)))
-                          (http--read-until sock (cons d chunks) (+ have (byte-length d))
+                          (http--read-until sock
+                            (cons d chunks) (+ have (byte-length d))
                             (if (<= pn k) probe (subbytes probe (- pn k) pn)) marker))))
       ([:tcp-closed ^sock] (if (= have 0) nil (apply bytes-concat (reverse chunks))))
       (after *http-read-timeout-ms* (if (= have 0) nil (apply bytes-concat (reverse chunks)))))))

@@ -347,7 +347,8 @@
     (spawn (send parent [:r (kindly (first xs))]))
     (abt-spawn-workers parent (rest xs))))
 (defn abt-collect (got total acc)
-  (if (= got total) acc
+  (if (= got total)
+    acc
     (abt-collect (+ got 1) total (receive ([:r v] (cons v acc))))))
 
 (describe "abilities across processes"
@@ -388,7 +389,8 @@
   (test "no impl is lost when many processes register at once"
     (let (n 120)
       (dotimes (i n) (abt-conc-declare i))
-      (concurrently n (fn (i) (register-impl (abt-conc-name i) (abt-conc-op i) :int (fn (x) i) nil)))
+      (concurrently n
+        (fn (i) (register-impl (abt-conc-name i) (abt-conc-op i) :int (fn (x) i) nil)))
       ;; before the fix this lost roughly 40% of them
       (assert= (count (remove abt-conc-registered? (range n))) 0))))
 
@@ -405,36 +407,29 @@
   (test "an op's declared return type flows into inference at the call site"
     ;; `size :-> int`, so `(size 5)` is an int; feeding it to `string-length` (wants a
     ;; string) is a provable mismatch — the declared return reached the call site.
-    (is (abt-warns-about?
-          "(defability S (sz [self] :-> int)) (impl S :int (sz [n] n)) (defn f () (string-length (sz 5)))"
+    (is (abt-warns-about? "(defability S (sz [self] :-> int)) (impl S :int (sz [n] n)) (defn f () (string-length (sz 5)))"
           "int")))
   (test "an impl body that disagrees with the declared return is flagged"
-    (is (abt-warns-about?
-          "(defability S (sz [self] :-> int)) (impl S :int (sz [n] \"hi\"))"
+    (is (abt-warns-about? "(defability S (sz [self] :-> int)) (impl S :int (sz [n] \"hi\"))"
           "declared return type int")))
   (test "a conforming or unknown impl body stays silent"
-    (is (not (abt-warns-about?
-          "(defability S (sz [self] :-> int)) (impl S :int (sz [n] 5)) (impl S :float (sz [n] n))"
-          "declared return type"))))
+    (is (not (abt-warns-about? "(defability S (sz [self] :-> int)) (impl S :int (sz [n] 5)) (impl S :float (sz [n] n))"
+               "declared return type"))))
   (test "a `:-> any` op imposes no return constraint"
-    (is (not (abt-warns-about?
-          "(defability B (bl [self] :-> any)) (impl B :int (bl [n] \"whatever\"))"
-          "declared return type")))))
+    (is (not (abt-warns-about? "(defability B (bl [self] :-> any)) (impl B :int (bl [n] \"whatever\"))"
+               "declared return type")))))
 
 (describe "ability-name-as-a-type: a sealed ability is a finite union (ADR-181)"
   (test "a sealed ability name resolves as a type in a sig param"
     ;; Shape = (or circle rect); an int where Shape is wanted is a provable mismatch.
-    (is (abt-warns-about?
-          "(defmodule u) (defrecord circle (r)) (defrecord rect (w h)) (defability Shape :sealed [circle rect] (area [self] :-> float)) (sig total (Shape -> float)) (defn total (s) 1.0) (defn bad () (total 5))"
+    (is (abt-warns-about? "(defmodule u) (defrecord circle (r)) (defrecord rect (w h)) (defability Shape :sealed [circle rect] (area [self] :-> float)) (sig total (Shape -> float)) (defn total (s) 1.0) (defn bad () (total 5))"
           "argument 1")))
   (test "a member record satisfies the ability type (no false positive)"
-    (is (not (abt-warns-about?
-          "(defmodule u) (defrecord circle (r)) (defrecord rect (w h)) (defability Shape :sealed [circle rect] (area [self] :-> float)) (sig total (Shape -> float)) (defn total (s) 1.0) (defn ok () (total (circle 2)))"
-          "argument 1"))))
+    (is (not (abt-warns-about? "(defmodule u) (defrecord circle (r)) (defrecord rect (w h)) (defability Shape :sealed [circle rect] (area [self] :-> float)) (sig total (Shape -> float)) (defn total (s) 1.0) (defn ok () (total (circle 2)))"
+               "argument 1"))))
   (test "an open ability name is NOT a type (sig dropped, no spurious warning)"
-    (is (not (abt-warns-about?
-          "(defmodule u) (defability Open (op [self] :-> int)) (sig f (Open -> int)) (defn f (s) 1) (defn g () (f 5))"
-          "argument 1")))))
+    (is (not (abt-warns-about? "(defmodule u) (defability Open (op [self] :-> int)) (sig f (Open -> int)) (defn f (s) 1) (defn g () (f 5))"
+               "argument 1")))))
 
 (describe "direct-constructor ability calls (the BROOD_MONO Tier-1 devirt target)"
   ;; `Size` (above) has circle/rect impls. Calling an op with a DIRECT constructor arg
@@ -442,29 +437,25 @@
   ;; the RESULT must be identical whether or not mono is on (verified byte-identical), and
   ;; a non-record `(op (some-fn …))` arg must dispatch on the fn's result identity, unchanged.
   (test "an op on a direct record constructor dispatches to that record's impl"
-    (assert= (size (circle 5)) 5)          ; circle impl: (get c :r)
-    (assert= (size (rect 3 4)) 12))        ; rect impl: (* w h)
+    (assert= (size (circle 5)) 5) ; circle impl: (get c :r)
+    (assert= (size (rect 3 4)) 12)) ; rect impl: (* w h)
   (test "an op on a non-record call dispatches on its result identity, not the fn name"
     ;; `(str …)` yields a string → :string impl (count), NOT any record path.
     (assert= (size (str "ab" "cd")) 4)))
 
 (describe "typed ability op parameters: (name T) in an op spec (ADR-180)"
   (test "a bad argument to a typed op param is flagged"
-    (is (abt-warns-about?
-          "(defability Sc (sc [self (factor float)] :-> int)) (impl Sc :int (sc [n f] n)) (defn bad () (sc 5 \"x\"))"
+    (is (abt-warns-about? "(defability Sc (sc [self (factor float)] :-> int)) (impl Sc :int (sc [n f] n)) (defn bad () (sc 5 \"x\"))"
           "argument 2 expects float")))
   (test "a correct argument, and an untyped position, stay silent"
-    (is (not (abt-warns-about?
-          "(defability Sc (sc [self (factor float)] :-> int)) (impl Sc :int (sc [n f] n)) (defn ok () (sc 5 2.5))"
-          "argument")))
-    (is (not (abt-warns-about?
-          "(defability Pl (pl [self k] :-> int)) (impl Pl :int (pl [n k] n)) (defn ok () (pl 5 \"anything\"))"
-          "argument"))))
+    (is (not (abt-warns-about? "(defability Sc (sc [self (factor float)] :-> int)) (impl Sc :int (sc [n f] n)) (defn ok () (sc 5 2.5))"
+               "argument")))
+    (is (not (abt-warns-about? "(defability Pl (pl [self k] :-> int)) (impl Pl :int (pl [n k] n)) (defn ok () (pl 5 \"anything\"))"
+               "argument"))))
   (test "an unknown-typed argument DEFERS — soundness (no false positive)"
     ;; `(sc 5 x)` where x is an untyped param is dynamic → the ∩ relation never over-warns.
-    (is (not (abt-warns-about?
-          "(defability Sc (sc [self (factor float)] :-> int)) (impl Sc :int (sc [n f] n)) (defn f (x) (sc 5 x))"
-          "argument")))))
+    (is (not (abt-warns-about? "(defability Sc (sc [self (factor float)] :-> int)) (impl Sc :int (sc [n f] n)) (defn f (x) (sc 5 x))"
+               "argument")))))
 
 ;; ---- provided (default-body) ops: implement the required op, inherit the rest (ADR-185) ----
 ;; An op whose spec carries a body — `(op [args] :-> ret? body…)` — is PROVIDED: `defability`
@@ -472,16 +463,16 @@
 ;; ops (bodyless specs) inherits every provided op; an id-keyed impl of a provided op
 ;; overrides its default. `circle`/`rect` (declared above) are ordered here by radius/area.
 (defability Ranked
-  (rcmp [self other] :-> int)                          ; required
-  (rlt [self other] :-> bool (< (rcmp self other) 0))  ; provided
-  (rgt [self other] :-> bool (> (rcmp self other) 0))  ; provided
+  (rcmp [self other] :-> int) ; required
+  (rlt [self other] :-> bool (< (rcmp self other) 0)) ; provided
+  (rgt [self other] :-> bool (> (rcmp self other) 0)) ; provided
   (rle [self other] :-> bool (<= (rcmp self other) 0))) ; provided
 ;; circle: ONLY the required op is written — rlt/rgt/rle come free
-(impl Ranked ability-test/circle
-  (rcmp [a b] (- (get a :r) (get b :r))))
+(impl Ranked
+  ability-test/circle (rcmp [a b] (- (get a :r) (get b :r))))
 ;; rect: overrides rgt (always false) IN THE SAME impl form; inherits rlt/rle
-(impl Ranked ability-test/rect
-  (rcmp [a b] (- (* (get a :w) (get a :h)) (* (get b :w) (get b :h))))
+(impl Ranked
+  ability-test/rect (rcmp [a b] (- (* (get a :w) (get a :h)) (* (get b :w) (get b :h))))
   (rgt [a b] false))
 
 (describe "provided (default-body) ops"
@@ -491,9 +482,9 @@
     (assert= (rle (circle 4) (circle 4)) true))
   (test "an id-keyed impl of a provided op overrides its default (same impl form)"
     ;; rect areas: (rect 4 3)=12, (rect 2 2)=4 — default rgt would be true, override is false
-    (assert= (rgt (rect 4 3) (rect 2 2)) false)   ; overridden
-    (assert= (rlt (rect 2 2) (rect 4 3)) true)    ; default rlt still applies
-    (assert= (rle (rect 4 3) (rect 4 3)) true))   ; default rle still applies
+    (assert= (rgt (rect 4 3) (rect 2 2)) false) ; overridden
+    (assert= (rlt (rect 2 2) (rect 4 3)) true) ; default rlt still applies
+    (assert= (rle (rect 4 3) (rect 4 3)) true)) ; default rle still applies
   (test "a provided op on an unimplemented id falls through to the required op's no-impl"
     ;; :int has no Ranked impl; the default rlt body calls the REQUIRED rcmp, which raises.
     (let (e (try (rlt 1 2) (catch e e)))
@@ -503,20 +494,16 @@
 
 (describe "provided ops: the checker treats them as satisfied"
   (test "implementing only the required op does not warn that provided ops are missing"
-    (is (not (abt-warns-about?
-          "(defability R (rq [self] :-> int) (rp [self] :-> int (rq self))) (impl R :int (rq [n] n))"
-          "missing op"))))
+    (is (not (abt-warns-about? "(defability R (rq [self] :-> int) (rp [self] :-> int (rq self))) (impl R :int (rq [n] n))"
+               "missing op"))))
   (test "a required op is still demanded of an impl"
-    (is (abt-warns-about?
-          "(defability R (rq [self] :-> int) (rp [self] :-> int (rq self))) (impl R :int (rp [n] 0))"
+    (is (abt-warns-about? "(defability R (rq [self] :-> int) (rp [self] :-> int (rq self))) (impl R :int (rp [n] 0))"
           "missing op `rq`")))
   (test "a sealed member need not implement a provided op"
-    (is (not (abt-warns-about?
-          "(defmodule u) (defrecord c (x)) (defability R :sealed [c] (rq [self] :-> int) (rp [self] :-> int (rq self))) (impl R u/c (rq [v] 0))"
-          "no impl of"))))
+    (is (not (abt-warns-about? "(defmodule u) (defrecord c (x)) (defability R :sealed [c] (rq [self] :-> int) (rp [self] :-> int (rq self))) (impl R u/c (rq [v] 0))"
+               "no impl of"))))
   (test "a sealed member must still implement a required op"
-    (is (abt-warns-about?
-          "(defmodule u) (defrecord c (x)) (defability R :sealed [c] (rq [self] :-> int) (rp [self] :-> int (rq self)))"
+    (is (abt-warns-about? "(defmodule u) (defrecord c (x)) (defability R :sealed [c] (rq [self] :-> int) (rp [self] :-> int (rq self)))"
           "no impl of `rq`"))))
 
 ;; ---- across processes: a provided op's default body dispatches on the worker's own heap ----
@@ -524,13 +511,17 @@
   :isolated
   (test "a provided op runs in a spawned worker, resolving its default in that process"
     (let (parent (self))
-      (spawn (send parent [:r (list (rlt (circle 1) (circle 2))     ; true (default)
-                                    (rgt (circle 1) (circle 2))      ; false (default)
-                                    (rle (circle 2) (circle 2)))]))  ; true (default)
+      (spawn
+        (send parent
+          [:r
+            (list (rlt (circle 1) (circle 2))
+              ; true (default)
+              (rgt (circle 1) (circle 2)) ; false (default)
+              (rle (circle 2) (circle 2)))])) ; true (default)
       (assert= (receive ([:r v] v)) (list true false true))))
   (test "an overriding impl still wins inside a spawned worker"
     (let (parent (self))
-      (spawn (send parent [:g (rgt (rect 4 3) (rect 2 2))]))         ; false (override)
+      (spawn (send parent [:g (rgt (rect 4 3) (rect 2 2))])) ; false (override)
       (assert= (receive ([:g v] v)) false))))
 
 ;; ---- derive: `:derives` runs an ability's `:derive-record` recipe (ADR-185) ----
@@ -539,8 +530,8 @@
 ;; LOAD (via `derive-into`) and registers the impl. Provided ops compose — derive the one
 ;; required op, inherit the rest.
 (defability Columns
-  (columns [self] :-> vector)                        ; required (derived)
-  (ncols [self] :-> int (count (columns self)))      ; provided
+  (columns [self] :-> vector) ; required (derived)
+  (ncols [self] :-> int (count (columns self))) ; provided
   :derive-record
   (fn (flds)
     ;; a list of `impl` method forms: derive `columns` as the field values, in field order
@@ -556,20 +547,20 @@
     (assert= (ncols (cpoint 3 4)) 2)
     (assert= (ncols (crgb 1 2 3)) 3))
   (test "deriving a non-derivable ability (no :derive-record) is a loud error"
-    (let (e (try (eval '(do (defability NoRecipe (nr [self] :-> int))
-                            (defrecord derr (q) :derives [NoRecipe])))
+    (let (e (try
+              (eval '(do
+                       (defability NoRecipe (nr [self] :-> int))
+                       (defrecord derr (q) :derives [NoRecipe])))
               (catch e (error-message e))))
       (is (includes? e "not derivable")))))
 
 (describe "derive: a derived impl satisfies the checker"
   (test "a call site on a derived record does not warn about a missing impl"
-    (is (not (abt-warns-about?
-          "(defmodule u) (defability C (cols [self] :-> vector) :derive-record (fn (fs) (list `(cols [r] [])))) (defrecord p (x) :derives [C]) (defn f () (cols (p 1)))"
-          "no impl"))))
+    (is (not (abt-warns-about? "(defmodule u) (defability C (cols [self] :-> vector) :derive-record (fn (fs) (list `(cols [r] [])))) (defrecord p (x) :derives [C]) (defn f () (cols (p 1)))"
+               "no impl"))))
   (test "a derived record satisfies :sealed exhaustiveness"
-    (is (not (abt-warns-about?
-          "(defmodule u) (defability C :sealed [p] (cols [self] :-> vector) :derive-record (fn (fs) (list `(cols [r] [])))) (defrecord p (x) :derives [C])"
-          "no impl of")))))
+    (is (not (abt-warns-about? "(defmodule u) (defability C :sealed [p] (cols [self] :-> vector) :derive-record (fn (fs) (list `(cols [r] [])))) (defrecord p (x) :derives [C])"
+               "no impl of")))))
 
 (describe "derive across processes"
   :isolated
@@ -590,56 +581,44 @@
 
 (describe "sealed-match exhaustiveness"
   (test "a match on a sealed-typed param missing a member warns"
-    (is (abt-warns-about?
-          (abt-exh-src "(sig f (S -> int)) (defn f (s) (match s ((record c {:x x}) 1)))")
+    (is (abt-warns-about? (abt-exh-src "(sig f (S -> int)) (defn f (s) (match s ((record c {:x x}) 1)))")
           "no clause handles")))
   (test "an exhaustive match (every member covered) is silent"
-    (is (not (abt-warns-about?
-          (abt-exh-src "(sig f (S -> int)) (defn f (s) (match s ((record c {:x x}) 1) ((record r {}) 2)))")
-          "no clause handles"))))
+    (is (not (abt-warns-about? (abt-exh-src "(sig f (S -> int)) (defn f (s) (match s ((record c {:x x}) 1) ((record r {}) 2)))")
+               "no clause handles"))))
   (test "a `_` catch-all makes it exhaustive"
-    (is (not (abt-warns-about?
-          (abt-exh-src "(sig f (S -> int)) (defn f (s) (match s ((record c {:x x}) 1) (_ 2)))")
-          "no clause handles"))))
+    (is (not (abt-warns-about? (abt-exh-src "(sig f (S -> int)) (defn f (s) (match s ((record c {:x x}) 1) (_ 2)))")
+               "no clause handles"))))
   (test "an UNtyped scrutinee defers — unknown type, no warning (sound)"
-    (is (not (abt-warns-about?
-          (abt-exh-src "(defn f (s) (match s ((record c {:x x}) 1)))")
-          "no clause handles"))))
+    (is (not (abt-warns-about? (abt-exh-src "(defn f (s) (match s ((record c {:x x}) 1)))")
+               "no clause handles"))))
   (test "a `:when` guard defers the whole match (sound — a guard may not fire)"
-    (is (not (abt-warns-about?
-          (abt-exh-src "(sig f (S -> int)) (defn f (s) (match s ((record c {:x x}) :when true 1) ((record r {}) 2)))")
-          "no clause handles"))))
+    (is (not (abt-warns-about? (abt-exh-src "(sig f (S -> int)) (defn f (s) (match s ((record c {:x x}) :when true 1) ((record r {}) 2)))")
+               "no clause handles"))))
   (test "a let binding threads the sealed type to the scrutinee"
-    (is (abt-warns-about?
-          (abt-exh-src "(sig f (S -> int)) (defn f (a) (let (s a) (match s ((record c {:x x}) 1))))")
+    (is (abt-warns-about? (abt-exh-src "(sig f (S -> int)) (defn f (a) (let (s a) (match s ((record c {:x x}) 1))))")
           "no clause handles")))
   (test "the warning names the specific missing member id"
-    (is (abt-warns-about?
-          (abt-exh-src "(sig f (S -> int)) (defn f (s) (match s ((record c {:x x}) 1)))")
+    (is (abt-warns-about? (abt-exh-src "(sig f (S -> int)) (defn f (s) (match s ((record c {:x x}) 1)))")
           ":u/r"))))
 
 ;; ---- super-abilities: :requires — an implementor must also implement the prerequisite (ADR-193) ----
 (describe "super-abilities (:requires)"
   (test "an id implementing an ability but not its required ability is flagged"
-    (is (abt-warns-about?
-          "(defmodule u) (defrecord m (n)) (defability Eq (eqv [self other] :-> bool)) (defability Ord :requires [Eq] (compare-to [self other] :-> int)) (impl Ord u/m (compare-to [a b] 0))"
+    (is (abt-warns-about? "(defmodule u) (defrecord m (n)) (defability Eq (eqv [self other] :-> bool)) (defability Ord :requires [Eq] (compare-to [self other] :-> int)) (impl Ord u/m (compare-to [a b] 0))"
           "requires Eq")))
   (test "implementing the required ability too is silent"
-    (is (not (abt-warns-about?
-          "(defmodule u) (defrecord m (n)) (defability Eq (eqv [self other] :-> bool)) (defability Ord :requires [Eq] (compare-to [self other] :-> int)) (impl Eq u/m (eqv [a b] true)) (impl Ord u/m (compare-to [a b] 0))"
-          "requires"))))
+    (is (not (abt-warns-about? "(defmodule u) (defrecord m (n)) (defability Eq (eqv [self other] :-> bool)) (defability Ord :requires [Eq] (compare-to [self other] :-> int)) (impl Eq u/m (eqv [a b] true)) (impl Ord u/m (compare-to [a b] 0))"
+               "requires"))))
   (test "a provided op of the required ability is satisfied by its default"
-    (is (not (abt-warns-about?
-          "(defmodule u) (defrecord m (n)) (defability Eq (eqv [self other] :-> bool (= self other))) (defability Ord :requires [Eq] (compare-to [self other] :-> int)) (impl Ord u/m (compare-to [a b] 0))"
-          "requires"))))
+    (is (not (abt-warns-about? "(defmodule u) (defrecord m (n)) (defability Eq (eqv [self other] :-> bool (= self other))) (defability Ord :requires [Eq] (compare-to [self other] :-> int)) (impl Ord u/m (compare-to [a b] 0))"
+               "requires"))))
   (test "a sealed ability's member must satisfy the requirement too"
-    (is (abt-warns-about?
-          "(defmodule u) (defrecord m (n)) (defability Eq (eqv [self other] :-> bool)) (defability Ord :sealed [m] :requires [Eq] (compare-to [self other] :-> int)) (impl Ord u/m (compare-to [a b] 0))"
+    (is (abt-warns-about? "(defmodule u) (defrecord m (n)) (defability Eq (eqv [self other] :-> bool)) (defability Ord :sealed [m] :requires [Eq] (compare-to [self other] :-> int)) (impl Ord u/m (compare-to [a b] 0))"
           "requires Eq")))
   (test "an unknown required ability defers — no false positive"
-    (is (not (abt-warns-about?
-          "(defmodule u) (defrecord m (n)) (defability Ord :requires [NoSuchAbility] (compare-to [self other] :-> int)) (impl Ord u/m (compare-to [a b] 0))"
-          "requires")))))
+    (is (not (abt-warns-about? "(defmodule u) (defrecord m (n)) (defability Ord :requires [NoSuchAbility] (compare-to [self other] :-> int)) (impl Ord u/m (compare-to [a b] 0))"
+               "requires")))))
 
 ;; ---- unimpl: an impl registry you can get back out of (ADR-204) --------------
 ;; Registering an impl was open and reversible in every way but one: there was no way to
@@ -657,14 +636,14 @@
     (do
       (impl Retract ability-test/retractable (rsize [r] (get r :n)))
       (assert= 7 (rsize (retractable 7)))
-      (assert= 1 (unimpl Retract ability-test/retractable))        ; one op removed
+      (assert= 1 (unimpl Retract ability-test/retractable)) ; one op removed
       (let (e (try (rsize (retractable 7)) (catch e e)))
-        (assert= (get e :kind) :no-impl)                           ; back to unimplemented
+        (assert= (get e :kind) :no-impl) ; back to unimplemented
         (assert= (get e :op) 'rsize))))
 
   (test "unimpl is idempotent and says how much it removed"
     (do
-      (assert= 0 (unimpl Retract ability-test/retractable))         ; nothing left to remove
+      (assert= 0 (unimpl Retract ability-test/retractable)) ; nothing left to remove
       (impl Retract ability-test/retractable (rsize [r] (get r :n)))
       (assert= 1 (unimpl Retract ability-test/retractable))
       (assert= 0 (unimpl Retract ability-test/retractable))))
@@ -693,7 +672,7 @@
     (do
       (assert-error (unimpl Display :default))
       (assert-error (unregister-impl 'Display 'to-str :default))
-      (assert= "[1 2 3]" (to-str [1 2 3]))              ; …and printing still works
+      (assert= "[1 2 3]" (to-str [1 2 3])) ; …and printing still works
       ;; an impl for YOUR OWN id is policy, and retracts normally
       (impl Display ability-test/retractable (to-str [r] (str "R" (get r :n))))
       (assert= "R7" (to-str (retractable 7)))
@@ -726,7 +705,7 @@
   (test "unregister-impl is the function underneath, and reports what it did"
     (do
       (impl Retract ability-test/retractable (rsize [r] (get r :n)))
-      (is (unregister-impl 'Retract 'rsize :ability-test/retractable))    ; removed
-      (refute (unregister-impl 'Retract 'rsize :ability-test/retractable))  ; nothing left
+      (is (unregister-impl 'Retract 'rsize :ability-test/retractable)) ; removed
+      (refute (unregister-impl 'Retract 'rsize :ability-test/retractable)) ; nothing left
       ;; and it never raises for an ability/op/id that was never registered at all
       (refute (unregister-impl 'NoSuchAbility 'nope :nothing)))))

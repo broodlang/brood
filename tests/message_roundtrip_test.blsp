@@ -69,16 +69,16 @@
 ;; free globals, same behaviour after the closure is retained across a `def` reload.
 (def reload-probe 10)
 
-(defn free-thunk () (* reload-probe 2))       ; captures nothing -> already shared
-
+(defn free-thunk () (* reload-probe 2)) ; captures nothing -> already shared
 (defn holder (parent)
   (receive ([:hold f] (receive ([:call from] (do (send from [:got (f)]) (holder parent)))))))
 
 (defn hold-then-call (f)
   (let (me (self) h (spawn (holder me)))
-    (do (send h [:hold f])
-        (send h [:call me])
-        (receive ([:got v] v) (after *test-wait-ms* :timeout)))))
+    (do
+      (send h [:hold f])
+      (send h [:call me])
+      (receive ([:got v] v) (after *test-wait-ms* :timeout)))))
 
 (describe "closures survive a send by either route (shared handle or copy)"
   (test "a closure capturing no locals runs correctly on the receiver"
@@ -96,8 +96,7 @@
   (test "the shared-handle route and the copy route agree"
     (let (n 10)
       (assert= [20 20]
-        [(hold-then-call (fn () (* reload-probe 2)))
-          (hold-then-call (fn () (* n 2)))])))
+        [(hold-then-call (fn () (* reload-probe 2))) (hold-then-call (fn () (* n 2)))])))
 
   ;; A local binding shadows the global lexically, so this closure captures the LOCAL
   ;; and takes the copy route — pinned here because it is the boundary the rule turns on.
@@ -126,7 +125,6 @@
           _ (send h [:call me]))
       (assert= 100 (receive ([:got v] v) (after *test-wait-ms* :timeout))))))
 
-
 ;; ---- receive-mark (ADR-195) -------------------------------------------------
 ;; A `receive` whose every clause pins a ref THIS process minted may skip messages that
 ;; predate the ref. These pin the cases where it must NOT skip, since a wrong skip loses a
@@ -150,10 +148,12 @@
     ;; it — here the reply tagged with the foreign ref is queued BEFORE we mint our own,
     ;; so a receive that wrongly used our mark would skip straight past it and time out.
     (let (me (self)
-          _ (spawn (let (theirs (ref)) (do (send me [:handoff theirs])
-                                           (send me [:reply theirs :from-elsewhere]))))
+          _ (spawn (let (theirs (ref))
+                     (do
+                       (send me [:handoff theirs])
+                       (send me [:reply theirs :from-elsewhere]))))
           their-ref (receive ([:handoff x] x) (after *test-wait-ms* :timeout))
-          _ (ref)                       ; mint ours AFTER their reply is already queued
+          _ (ref) ; mint ours AFTER their reply is already queued
           got (receive ([:reply ^their-ref v] v) (after *test-wait-ms* :timeout)))
       (assert= :from-elsewhere got)))
 

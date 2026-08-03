@@ -84,7 +84,8 @@ look-alike, and each prints as itself (`inspect` shows the contents).")
 ;; `seq`/`count`/`map`/`filter`/`fold`/`for` and `into`-from-a-queue; `Conjable` gives it
 ;; `conj` and `into`-into-a-queue. So a queue is a first-class collection — the `queue-*`
 ;; helpers below are now thin aliases over the protocol, not a parallel API.
-(impl Seqable queue/queue
+(impl Seqable
+  queue/queue
   (to-seq [q]
     (if (= (get q :size) 0) nil (append (get q :front) (reverse (get q :back))))))
 (impl Conjable queue/queue (-conj [q v] (queue-push q v)))

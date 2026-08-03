@@ -100,7 +100,8 @@ If no values remain under `k`, the key is dropped."
 ;; flattened `[k v]` associations (insertion order), so `count`/`map`/`filter`/`fold`/
 ;; `for`/`into`-from work over the associations directly. (No `Conjable`: an association
 ;; needs a key, which `conj`'s single element can't carry — use `multimap-assoc`.)
-(impl Seqable multimap/multimap
+(impl Seqable
+  multimap/multimap
   (to-seq [mm]
     (mapcat (fn (pair) (map (fn (v) [(first pair) v]) (reverse (second pair))))
       (map-pairs (get mm :entries)))))

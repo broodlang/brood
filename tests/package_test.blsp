@@ -10,7 +10,11 @@
 ;; `project--parse-enhances`, the manifest-validation helper, the same way the rest of
 ;; this suite tests `package`'s cwd-free helpers directly rather than through a verb.
 (defmodule package-test
-  (:use-internals package) (:use-internals project) (:use test) (:use package) (:use project))
+  (:use-internals package)
+  (:use-internals project)
+  (:use test)
+  (:use package)
+  (:use project))
 
 ;; Drop any fixtures a prior run left in /tmp (at load, before any test runs).
 (purge-stale-temp "brood-pkg-")
@@ -302,14 +306,14 @@
     (let (path (get req :path)
           release-path (str "/api/v1/packages/" nm "/releases/" version))
       (cond
-        (starts-with? path "/api/v1/packages?")
-          (net/http/ok (str "{\"packages\":[{\"name\":\"" nm "\",\"latest_version\":\""
-                         version "\",\"description\":\"" desc "\"}]}"))
-        (= path (str release-path "/tarball"))
-          (net/http/response 200 {"Content-Type" "application/gzip"} bytes)
-        (= path release-path)
-          (net/http/ok (str "{\"checksum\":\"" checksum "\",\"version\":\""
-                         version "\",\"dependencies\":[]}"))
+        (starts-with? path "/api/v1/packages?") (net/http/ok (str "{\"packages\":[{\"name\":\""
+                                                               nm "\",\"latest_version\":\"" version
+                                                               "\",\"description\":\"" desc "\"}]}"))
+        (= path (str release-path "/tarball")) (net/http/response 200
+                                                 {"Content-Type" "application/gzip"} bytes)
+        (= path release-path) (net/http/ok (str "{\"checksum\":\""
+                                             checksum "\",\"version\":\"" version
+                                             "\",\"dependencies\":[]}"))
         else (net/http/not-found)))))
 
 ;; Build a root-level tarball of a fixture package (files at the archive root, the
@@ -326,7 +330,8 @@
     (let (parent (pkg-fixture-root)
           app-dir (path-join parent "app")
           [bytes checksum] (mock-package-tarball parent "greeter")
-          base (mock-registry-start (mock-registry-handler "greeter" "1.0.0" "greetings" checksum bytes)))
+          base (mock-registry-start (mock-registry-handler "greeter"
+                                      "1.0.0" "greetings" checksum bytes)))
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       (let (e (package/package--resolve-registry app-dir (dep-registry 'greeter "1.0.0") nil base))
         (assert= (dep-kind e) :registry)
@@ -349,14 +354,16 @@
           base (mock-registry-start (mock-registry-handler "greeter" "1.0.0" "d" "deadbeef" bytes)))
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       (is (includes? (try
-                       (package/package--resolve-registry app-dir (dep-registry 'greeter "1.0.0") nil base)
+                       (package/package--resolve-registry app-dir
+                         (dep-registry 'greeter "1.0.0") nil base)
                        (catch e (error-message e)))
             "sha256 mismatch"))))
   (test "an unknown version errors, pointing at `nest search`"
     (let (app-dir (pkg-fixture-root)
           base (mock-registry-start (mock-registry-handler "greeter" "1.0.0" "d" "x" #b"")))
       (is (includes? (try
-                       (package/package--resolve-registry app-dir (dep-registry 'greeter "9.9.9") nil base)
+                       (package/package--resolve-registry app-dir
+                         (dep-registry 'greeter "9.9.9") nil base)
                        (catch e (error-message e)))
             "no registry entry"))))
   (test "registry--get-json parses a 2xx body and reports an error status"
@@ -366,7 +373,9 @@
       (match (package/registry--get-json (str base "/api/v1/packages/nope/releases/9.9.9"))
         ([:error status _message] (assert= status 404)))))
   (test "registry--search-line formats a hit"
-    (assert= (package/registry--search-line {:name "greeter" :latest_version "1.0.0" :description "greetings"})
+    (assert= (package/registry--search-line {:name "greeter"
+                                             :latest_version "1.0.0"
+                                             :description "greetings"})
       "greeter  1.0.0  — greetings")
     (assert= (package/registry--search-line {:name "x" :latest_version "" :description ""}) "x  ?"))
   (test "publishable-deps keeps registry deps and omits local ones"
@@ -393,10 +402,12 @@
   (test "absent is an ordinary library, not an error"
     (assert= {} (project/project--parse-enhances nil)))
   (test "a manifest typo fails when the MANIFEST is read, naming the key"
-    (is (includes? (try (project/project--parse-enhances [['bedit ">= 0.3"]])
+    (is (includes? (try
+                     (project/project--parse-enhances [['bedit ">= 0.3"]])
                      (catch e (error-message e)))
           ":enhances must be a MAP"))
-    (is (includes? (try (project/project--parse-enhances {'bedit 0.3})
+    (is (includes? (try
+                     (project/project--parse-enhances {'bedit 0.3})
                      (catch e (error-message e)))
           "must be a string")))
   (test "a real manifest carries it through project-apply"
@@ -502,9 +513,10 @@
       (spit (path-join (path-join (path-join b "src") "gui") "window.blsp")
         "(defmodule gui/window)\n(defn g () 2)\n")
       (is (includes? (try
-                       (package/package--check-namespace-collisions
-                         (list (list "dependency 'a'" (path-join a "src"))
-                           (list "dependency 'b'" (path-join b "src"))))
+                       (package/package--check-namespace-collisions (list (list "dependency 'a'"
+                                                                            (path-join a "src"))
+                                                                      (list "dependency 'b'"
+                                                                        (path-join b "src"))))
                        (catch e e))
             "collision")))))
 
@@ -731,7 +743,6 @@
   (test "add refuses a corrupting name before touching the manifest"
     (is (includes? (try (package/add "" ":path" "../x") (catch e e))
           "not a usable dependency name"))))
-
 
 ;; A dependency's `main` is its ENTRY POINT, not part of its library surface: `nest
 ;; run` only ever uses the ROOT project's `:main`, and nothing requires a dep's. Two

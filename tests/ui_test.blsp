@@ -251,14 +251,12 @@
 ;; a record that skips `overlay-owns?` is capture-all and one that skips
 ;; `overlay-exit` needs no dismiss step — the same nil policy the map vtable had.
 (describe "overlay-route — Overlay ability records"
-  (defrecord ov-mini ())  ; capture-all: only active?/handle implemented
-  (impl Overlay ov-mini
-    (overlay-active? [_ m] (get m :mini))
-    (overlay-handle [_ m k] (assoc m :typed k)))
-  (defrecord ov-pop ())   ; discriminating: all four ops
-  (impl Overlay ov-pop
-    (overlay-active? [_ m] (get m :pop))
-    (overlay-owns? [_ m k] (= k "x"))
+  (defrecord ov-mini ()) ; capture-all: only active?/handle implemented
+  (impl Overlay
+    ov-mini (overlay-active? [_ m] (get m :mini)) (overlay-handle [_ m k] (assoc m :typed k)))
+  (defrecord ov-pop ()) ; discriminating: all four ops
+  (impl Overlay
+    ov-pop (overlay-active? [_ m] (get m :pop)) (overlay-owns? [_ m k] (= k "x"))
     (overlay-handle [_ m k] (assoc m :popped k))
     (overlay-exit [_ m] (assoc m :pop nil :exited true)))
   (def rec-overlays (list (ov-mini) (ov-pop)))
@@ -317,8 +315,8 @@
     (let (me (self)
           _ (do (send me [:input :a]) (send me [:input :b]) (send me [:input :c]))
           result (editor/ui/ui--drain-input {:acc []} di--count (di--display me) 80 24 1024))
-      (assert= (:acc (first result)) [[:input :a] [:input :b] [:input :c]])  ; all three folded
-      (is (nil? (second result)))))                                          ; queue drained clean
+      (assert= (:acc (first result)) [[:input :a] [:input :b] [:input :c]]) ; all three folded
+      (is (nil? (second result))))) ; queue drained clean
   (test "an empty queue folds nothing — the model passes through unchanged"
     (let (me (self))
       (assert= (editor/ui/ui--drain-input {:acc [:x]} di--count (di--display me) 80 24 1024)
@@ -327,47 +325,58 @@
     (let (me (self)
           _ (do (send me [:input :a]) (send me :close) (send me [:input :b]))
           result (editor/ui/ui--drain-input {:acc []} di--count (di--display me) 80 24 1024))
-      (assert= (:acc (first result)) [[:input :a]])  ; folded :a, then stopped at :close
-      (assert= (second result) :close)))             ; handed back (":b" stays queued)
+      (assert= (:acc (first result)) [[:input :a]]) ; folded :a, then stopped at :close
+      (assert= (second result) :close))) ; handed back (":b" stays queued)
   (test "fuel bounds a single batch — the rest drains on the next turn"
     (let (me (self)
           _ (do (send me [:input :a]) (send me [:input :b]) (send me [:input :c]))
           result (editor/ui/ui--drain-input {:acc []} di--count (di--display me) 80 24 2))
-      (assert= (:acc (first result)) [[:input :a] [:input :b]])  ; only 2 folded (fuel = 2)
+      (assert= (:acc (first result)) [[:input :a] [:input :b]]) ; only 2 folded (fuel = 2)
       (is (nil? (second result))))))
 
 ;; The loop-level behaviour: with :coalesce-input? a queued burst renders ONCE; without it,
 ;; the legacy once-per-input frames are untouched (the opt-in is inert by default).
 (defn ci--display (me)
-  {:enter (fn () nil) :leave (fn () :left) :size (fn () [80 24]) :draw (fn (f) nil)
+  {:enter (fn () nil)
+   :leave (fn () :left)
+   :size (fn () [80 24])
+   :draw (fn (f) nil)
    ; selective on [:input] so the view's [:saw] / update's [:folded] echoes survive to drain
    :poll (fn (ms) (receive ([:input i] i) (after 0 nil)))})
 
 (describe "ui-run — input coalescing (:coalesce-input?)"
   (test "a queued burst folds into ONE render, but every input is still processed"
     (let (me (self))
-      (send me [:input :inc]) (send me [:input :inc]) (send me [:input :inc]) (send me [:input :quit])
+      (send me [:input :inc])
+      (send me [:input :inc])
+      (send me [:input :inc])
+      (send me [:input :quit])
       (ui-run {:n 0 :coalesce-input? true}
         (fn (m c r) (do (send me [:saw (get m :n)]) []))
         (fn (m input c r)
-          (do (send me [:folded input])
-            (cond (= input :inc) (assoc m :n (+ (get m :n) 1))
+          (do
+            (send me [:folded input])
+            (cond
+              (= input :inc) (assoc m :n (+ (get m :n) 1))
               (= input :quit) (assoc m :done true)
               else m)))
         (ci--display me))
-      (assert= (drain-saw []) (list 0))                            ; one frame — the burst coalesced
-      (assert= (drain-folded []) (list :inc :inc :inc :quit))))    ; yet all four inputs folded
+      (assert= (drain-saw []) (list 0)) ; one frame — the burst coalesced
+      (assert= (drain-folded []) (list :inc :inc :inc :quit)))) ; yet all four inputs folded
   (test "without the flag the same burst renders once per input (opt-in only)"
     (let (me (self))
-      (send me [:input :inc]) (send me [:input :inc]) (send me [:input :quit])
+      (send me [:input :inc])
+      (send me [:input :inc])
+      (send me [:input :quit])
       (ui-run {:n 0}
         (fn (m c r) (do (send me [:saw (get m :n)]) []))
         (fn (m input c r)
-          (cond (= input :inc) (assoc m :n (+ (get m :n) 1))
+          (cond
+            (= input :inc) (assoc m :n (+ (get m :n) 1))
             (= input :quit) (assoc m :done true)
             else m))
         (ci--display me))
-      (assert= (drain-saw []) (list 0 1 2)))))  ; per-input frames: 0, 1, 2
+      (assert= (drain-saw []) (list 0 1 2))))) ; per-input frames: 0, 1, 2
 ;; ---- named timers (ADR-102) ------------------------------------------------
 ;; The firing logic is pure (deadline math over a clock map + the timer specs), so it
 ;; tests deterministically with hand-supplied `now`/`clock` — no wall-clock, no loop.

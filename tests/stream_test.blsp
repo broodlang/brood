@@ -227,8 +227,8 @@
   (test "take stops mid-chunk, leaving queued lines undelivered"
     ;; Closing while lines are still queued must not hang or leak the producer.
     (assert= ["a" "b"]
-      (stream/stream-to-vector
-        (stream/stream-take 2 (stream/stream-lines (stream/stream-from-list ["a\nb\nc\nd\n"])))))))
+      (stream/stream-to-vector (stream/stream-take 2
+                                 (stream/stream-lines (stream/stream-from-list ["a\nb\nc\nd\n"])))))))
 
 ;; ---- pipe -------------------------------------------------------------------
 

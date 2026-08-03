@@ -41,8 +41,7 @@ still trace — and the reply gains `:spy [{:kind :fn :args :value} …]` (bound
 `eval-capturing` is the reusable core: evaluate a source string and keep BOTH
 halves a REPL shows — the value and what it printed. `(require 'eval-server)`.")
 
-(require 'debug)  ; trace-fn / untrace-all / *spy-sink* — the :trace support
-
+(require 'debug) ; trace-fn / untrace-all / *spy-sink* — the :trace support
 ;; The deadline applied when a request doesn't carry one. Module-scoped (plain
 ;; `def`, not `defdyn`): the server honours the per-request `:timeout-ms` first,
 ;; so a client that wants a different policy sends it rather than reaching in.
@@ -71,8 +70,7 @@ one bad line must not kill the server) and a present `:trace` a vector."
   (try
     (let (v (read-string line))
       (if (and (map? v)
-            (int? (get v :id))
-            (string? (get v :src))
+            (int? (get v :id)) (string? (get v :src))
             (let (t (get v :timeout-ms)) (or (nil? t) (int? t)))
             (let (tr (get v :trace)) (or (nil? tr) (vector? tr))))
         v
@@ -161,7 +159,7 @@ looking identical to a round-trip that cleaned up after itself."
                          (if (or installed (eval-server--definition-form? form))
                            [installed (eval form)]
                            (do (eval-server--try-traces names) [true (eval form)]))))
-               [false nil] forms))
+                 [false nil] forms))
     (second result)))
 
 (defn eval-capturing (src &optional trace-names)
@@ -200,7 +198,8 @@ path — the per-request evaluator process dies — but worth knowing when embed
                    (if (< n *spy-entry-cap*)
                      (do
                        (table-put acc :n (inc n))
-                       (table-put acc :entries
+                       (table-put acc
+                         :entries
                          (cons (eval-server--spy-entry e)
                            (or (table-get acc :entries) '())))
                        ;; the entry that FILLS the budget already answers stop: nothing
@@ -210,15 +209,16 @@ path — the per-request evaluator process dies — but worth knowing when embed
         run (fn ()
               (try
                 {:ok true
-                 :value (pr-str-bounded
-                          (if traced
-                            (eval-server--eval-traced src trace-names)
-                            (eval-string src)))}
+                 :value (pr-str-bounded (if traced
+                                          (eval-server--eval-traced src trace-names)
+                                          (eval-string src)))}
                 (catch e {:ok false :error (error-message e)})))
         _ (%capture-begin)
         r (if traced (binding (*spy-sink* sink) (run)) (run))
         out (eval-server--bound-output (or (%capture-take) ""))
-        r2 (assoc r :output out :ms (- (now) t0)
+        r2 (assoc r
+             :output out
+             :ms (- (now) t0)
              :procs (eval-server--process-report pids-before)))
     (if traced
       (do
@@ -264,17 +264,22 @@ process died without answering."
         ref (monitor child))
     (receive
       ([:evsrv-result ^id r]
-        (do (demonitor ref)
+        (do
+          (demonitor ref)
           ;; the child dies :normal right after its send, so its DOWN is usually
           ;; already queued when we demonitor — drain it now (flush-stale is the
           ;; belt for the delivery-mid-demonitor sliver)
           (receive ([:down ^ref _ _] nil) (after 0 nil))
           (assoc r :id id)))
-      ([:down ^ref ^child reason]
-        (do (debug/untrace-all)
-          {:id id :ok false :error (str "evaluator died: " (pr-str reason)) :ms 0}))
+      ([:down ^ref ^child reason] (do
+                                    (debug/untrace-all)
+                                    {:id id
+                                     :ok false
+                                     :error (str "evaluator died: " (pr-str reason))
+                                     :ms 0}))
       (after timeout
-        (do (exit child :kill)
+        (do
+          (exit child :kill)
           (demonitor ref)
           ;; a killed traced evaluator never reached its own untrace — restore
           ;; here (the trace registry is shared globals, so the parent can)
@@ -285,7 +290,8 @@ process died without answering."
 
 (defn eval-server--loop ()
   (let (line (read-line))
-    (when line                       ; nil = EOF: the parent closed stdin — done
+    (when line
+      ; nil = EOF: the parent closed stdin — done
       (let (req (evsrv-decode-request line))
         (when req
           (println (evsrv-encode-reply (eval-server-answer req)))))

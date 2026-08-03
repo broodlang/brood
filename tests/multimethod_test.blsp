@@ -6,14 +6,13 @@
 
 (defmulti mm-combine :commutative)
 (defmethod mm-combine [:int :string] (n s) (str n s))
-(defmethod mm-combine [:int :int]    (a b) (+ a b))
+(defmethod mm-combine [:int :int] (a b) (+ a b))
 
 (defmulti mm-cmp :antisymmetric)
-(defmethod mm-cmp [:int :string] (n s) 1)          ; an int sorts after a string, say
-
-(defmulti mm-desc)                                  ; no algebra
+(defmethod mm-cmp [:int :string] (n s) 1) ; an int sorts after a string, say
+(defmulti mm-desc) ; no algebra
 (defmethod mm-desc :default (x) :other)
-(defmethod mm-desc [:int]   (n) :int)
+(defmethod mm-desc [:int] (n) :int)
 
 (describe "multiple dispatch"
   (test "an exact identity-tuple dispatches to its method"
@@ -52,13 +51,15 @@
     (mm-spawn-workers parent (rest pairs))))
 
 (defn mm-collect (got total acc)
-  (if (= got total) acc
+  (if (= got total)
+    acc
     (mm-collect (+ got 1) total (receive ([:r v] (cons v acc))))))
 
 (describe "multiple dispatch across processes"
   :isolated
   (test "spawned processes resolve methods (incl. derived mirrors) and send results back"
-    (let (pairs [[2 3] [1 "x"] ["y" 4]])   ; exact, exact, and a commutative-mirror hit
+    (let (pairs [[2 3] [1 "x"] ["y" 4]])
+      ; exact, exact, and a commutative-mirror hit
       (mm-spawn-workers (self) pairs)
       (let (got (mm-collect 0 (count pairs) nil))
         ;; order-independent: each worker returns its own result

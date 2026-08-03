@@ -259,8 +259,8 @@ from the reversed `:back` when it empties. Tail-recursive."
                          (supervisor--window-prune (assoc w :front (reverse b) :back ())
                            now-ms window-ms)))
       (> (- now-ms (first front)) window-ms) (supervisor--window-prune (assoc w
-                                                                        :front (rest front)
-                                                                        :count (- (get w :count) 1))
+                                                                         :front (rest front)
+                                                                         :count (- (get w :count) 1))
                                                now-ms window-ms)
       else w)))
 
@@ -342,7 +342,7 @@ abnormal (`:killed`) — leaving unaffected children running. Bounded by intensi
     (if over?
       (supervisor--giveup state (supervisor--ordered (dissoc (get state :children) trig-pid)))
       (let ([unaffected affected] (supervisor--split-affected (supervisor--ordered (get state
-                                                                                    :children))
+                                                                                     :children))
                                     trig-pid (get state :strategy))
             survivors (remove (fn (c) (= (get c :pid) trig-pid)) affected)
             _ (supervisor--terminate-many survivors)
@@ -365,13 +365,13 @@ abnormal (`:killed`) — leaving unaffected children running. Bounded by intensi
   - otherwise: ignore (a stale `[:EXIT]` for a child already removed)."
   (cond
     (= pid (get state :parent)) (supervisor--terminate-many (supervisor--ordered (get state
-                                                                                  :children)))
+                                                                                   :children)))
     ; returns nil → we exit :normal
     else (let (child (supervisor--find (get state :children) pid))
            (cond
              (nil? child) (supervisor--loop state)
              (not (supervisor--restartable? (get child :restart :permanent) reason)) (supervisor--loop (supervisor--remove state
-                                                                                                        pid))
+                                                                                                         pid))
              (= (get state :strategy) :one-for-one) (supervisor--restart state child)
              else (supervisor--group-restart state child reason)))))
 
@@ -453,8 +453,8 @@ position `:seq` (tail-recursive, so children start left-to-right and `acc`
 preserves that order on reverse)."
   (if (empty? specs)
     (reverse acc)
-    (supervisor--start-each (rest specs) (+ i 1)
-      (cons (assoc (supervisor--start-child (first specs)) :seq i) acc))))
+    (supervisor--start-each (rest specs)
+      (+ i 1) (cons (assoc (supervisor--start-child (first specs)) :seq i) acc))))
 
 ;; ---- public client API ------------------------------------------------------
 

@@ -202,4 +202,4 @@
 (row "ansi        strip   " n ansi-strip)
 (row "stream      lines-1c" n stream-lines-1chunk)
 (row "string      last-idx" n last-idx)
-(row "string      inc-scan" n inc-scan)   ; known-quadratic, see header
+(row "string      inc-scan" n inc-scan) ; known-quadratic, see header

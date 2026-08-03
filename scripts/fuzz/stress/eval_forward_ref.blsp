@@ -12,12 +12,15 @@
 ;; CONTROL: an ordinary defn referencing a sibling defined LATER (late binding)
 (defn p (n) (if (= n 0) :ok (q (- n 1))))
 (defn q (n) (if (= n 0) :ok (p (- n 1))))
-(println (str "normal mutual recursion:   " (try (str (p 10)) (catch e (str "ERROR: " (get e :message))))))
+(println (str "normal mutual recursion:   "
+           (try (str (p 10)) (catch e (str "ERROR: " (get e :message))))))
 ;; eval'd, but the TARGET already exists when the referrer is eval'd (order swapped)
 (eval '(defn y (n) (+ n 1)))
 (eval '(defn x (n) (y n)))
-(println (str "eval'd, target defined 1st: " (try (str (x 41)) (catch e (str "ERROR: " (get e :message))))))
+(println (str "eval'd, target defined 1st: "
+           (try (str (x 41)) (catch e (str "ERROR: " (get e :message))))))
 ;; eval'd, target defined AFTER the referrer
 (eval '(defn r (n) (s n)))
 (eval '(defn s (n) (+ n 1)))
-(println (str "eval'd, target defined 2nd: " (try (str (r 41)) (catch e (str "ERROR: " (get e :message))))))
+(println (str "eval'd, target defined 2nd: "
+           (try (str (r 41)) (catch e (str "ERROR: " (get e :message))))))

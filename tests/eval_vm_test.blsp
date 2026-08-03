@@ -48,17 +48,14 @@
     ;; independent eval calls would be left bare and never match the module-qualified
     ;; global. Both engines resolve the bare reference lazily at runtime, so this works.
     (check-allow :unbound
-      (eval '(defn evm-fwd-r (n) (evm-fwd-s n)))   ; refers to evm-fwd-s, not defined yet
-      (eval '(defn evm-fwd-s (n) (+ n 1)))
-      (assert= 42 (evm-fwd-r 41))))
+      (eval '(defn evm-fwd-r (n) (evm-fwd-s n))) ; refers to evm-fwd-s, not defined yet
+      (eval '(defn evm-fwd-s (n) (+ n 1))) (assert= 42 (evm-fwd-r 41))))
 
   (test "eval evaluates at the root env (a def is visible afterward)"
     ;; `evm-global` is def'd at RUNTIME via eval, so the static checker can't see it —
     ;; suppress the (correct-for-the-image-but-wrong-here) unbound lint on the bare ref.
     (check-allow :unbound
-      (eval '(def evm-global 99))
-      (assert= 99 evm-global)
-      (assert= 99 (eval 'evm-global)))))
+      (eval '(def evm-global 99)) (assert= 99 evm-global) (assert= 99 (eval 'evm-global)))))
 
 ;; Cross-process: an eval'd closure is deep-copied to another process (proving the
 ;; compiled-on-eval closure round-trips through to_message/from_message + promote).
@@ -96,11 +93,8 @@
 ;; `eval-vm-test/if` and every eval'd conditional dies with an unbound error.
 (def evm-syntax
   (list (eval '(if true :yes :no))
-        (eval '(let (a 1 b 2) (+ a b)))
-        (eval '(do 1 7))
-        (eval '((fn (x) x) 5))
-        (eval '(cond false :a else :b))
-        (eval '(match 2 (x (* x 2))))))
+    (eval '(let (a 1 b 2) (+ a b))) (eval '(do 1 7)) (eval '((fn (x) x) 5))
+    (eval '(cond false :a else :b)) (eval '(match 2 (x (* x 2))))))
 (def evm-prelude (list (eval '(count (list 1 2 3))) (eval '(map (fn (x) (* x 2)) (list 1 2)))))
 ;; `is` arrives from `(:use test)`; the fallback must not turn it into `eval-vm-test/is`.
 (def evm-import-ok (try (do (eval '(is true)) :ok) (catch e (get e :message))))

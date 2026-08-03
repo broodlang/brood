@@ -148,37 +148,25 @@
   [:conformance]
 
   (test "multiply adds the operand exponents"
-    (assert=
-      (decimal->string
-        (*
-          1.50M 2.25M))
+    (assert= (decimal->string (* 1.50M
+                                2.25M))
       "3.3750")
-    (assert=
-      (decimal->string
-        (*
-          1.20M 2M))
+    (assert= (decimal->string (* 1.20M
+                                2M))
       "2.40")
-    (assert=
-      (decimal->string
-        (*
-          0.10M 0.10M))
+    (assert= (decimal->string (* 0.10M
+                                0.10M))
       "0.0100"))
 
   (test "add and subtract take the smaller operand exponent"
-    (assert=
-      (decimal->string
-        (+
-          1.25M 1.25M))
+    (assert= (decimal->string (+ 1.25M
+                                1.25M))
       "2.50")
-    (assert=
-      (decimal->string
-        (+
-          0.7M 0.3M))
+    (assert= (decimal->string (+ 0.7M
+                                0.3M))
       "1.0")
-    (assert=
-      (decimal->string
-        (+
-          1.00M 2M))
+    (assert= (decimal->string (+ 1.00M
+                                2M))
       "3.00"))
 
   ;; Regression cases for the two `bigdecimal` short-circuits the corpus caught
@@ -188,47 +176,31 @@
   ;; the standard's ideal exponent, so these hold. Significance is the whole point
   ;; of a decimal: money scaled by `1.00M` has to stay in cents.
   (test "a zero operand still aligns exponents (subtract)"
-    (assert=
-      (decimal->string
-        (-
-          1M (decimal "0.0")))
+    (assert= (decimal->string (- 1M
+                                (decimal "0.0")))
       "1.0")
-    (assert=
-      (decimal->string
-        (-
-          1M (decimal "0.00")))
+    (assert= (decimal->string (- 1M
+                                (decimal "0.00")))
       "1.00")
-    (assert=
-      (decimal->string
-        (- (decimal "0.0")
-          1M))
+    (assert= (decimal->string (- (decimal "0.0")
+                                1M))
       "-1.0")
-    (assert=
-      (decimal->string
-        (+
-          1M (decimal "0.0")))
+    (assert= (decimal->string (+ 1M
+                                (decimal "0.0")))
       "1.0"))
 
   (test "a one-valued operand still contributes its scale (multiply)"
-    (assert=
-      (decimal->string
-        (* (decimal "-1")
-          1.00M))
+    (assert= (decimal->string (* (decimal "-1")
+                                1.00M))
       "-1.00")
-    (assert=
-      (decimal->string
-        (*
-          1.00M (decimal "-1")))
+    (assert= (decimal->string (* 1.00M
+                                (decimal "-1")))
       "-1.00")
-    (assert=
-      (decimal->string
-        (* (decimal "-2")
-          1.00M))
+    (assert= (decimal->string (* (decimal "-2")
+                                1.00M))
       "-2.00")
-    (assert=
-      (decimal->string
-        (*
-          1M 1.00M))
+    (assert= (decimal->string (* 1M
+                                1.00M))
       "1.00"))
 
   ;; The remaining departure from dectest, on the record rather than left as a
@@ -239,22 +211,16 @@
   ;; canonicalises both sides, so dectest's `0.00` normalises to `0` too. Revisit if
   ;; decimals ever grow scale-significant equality.
   (test "a zero result prints scale-less (deviation from dectest)"
-    (assert=
-      (decimal->string
-        (-
-          1.50M 1.50M))
+    (assert= (decimal->string (- 1.50M
+                                1.50M))
       "0")
-    (assert=
-      (decimal->string
-        (*
-          0M 1.50M))
+    (assert= (decimal->string (* 0M
+                                1.50M))
       "0")
     (assert= (decimal->string (decimal "0.00")) "0")
     ;; non-zero results keep their scale, which is the property that matters
-    (assert=
-      (decimal->string
-        (-
-          1.50M 1.25M))
+    (assert= (decimal->string (- 1.50M
+                                1.25M))
       "0.25"))
 
   (test "exponent alignment across a wide gap is exact"
@@ -263,8 +229,7 @@
       "0.99999999999999999999"))
 
   (test "a decimal is exact where a float is not"
-    (assert=
-      (+
-        0.1M 0.2M)
+    (assert= (+ 0.1M
+               0.2M)
       0.3M)
     (refute (= (+ 0.1 0.2) 0.3))))

@@ -496,7 +496,7 @@ across its ops via the `*impls*` registry."
         type-keys (fold (fn (acc op)
                           (let (methods (get *impls* [aname op]))
                             (if methods (into acc (keys methods)) acc)))
-                        #{} op-names))
+                    #{} op-names))
     (sort (map name (vec type-keys)))))
 
 (defn mcp-abilities-tool (args)

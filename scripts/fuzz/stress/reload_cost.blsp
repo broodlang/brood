@@ -7,32 +7,34 @@
 ;; FIXED iteration count (not duration), reloads interleaved at a chosen rate, RSS at the end.
 ;; Run it repeatedly and compare medians — a single sample of this is noise.
 (def iters (let (e (getenv "ITERS")) (if e (string->number e) 40000)))
-(def every (let (e (getenv "EVERY")) (if e (string->number e) 0)))   ; 0 = never reload
+(def every (let (e (getenv "EVERY")) (if e (string->number e) 0))) ; 0 = never reload
 (def g 2)
 (defn rss-kb ()
   (let (txt (slurp "/proc/self/status") i (index-of txt "VmRSS:"))
-    (if (< i 0) 0
+    (if (< i 0)
+      0
       (let (chunk (substring txt (+ i 6) (+ i 32))
             d0 (string-span-until chunk 0 "0123456789")
             d1 (string-span chunk d0 "0123456789"))
         (if (>= d0 d1) 0 (string->number (substring chunk d0 d1)))))))
-(defn hot (x) (* g x))                       ; a function the reload invalidates
+(defn hot (x) (* g x)) ; a function the reload invalidates
 (defn srv () (receive ([:p from r] (do (send from [:r r (hot 3)]) (srv)))))
 (def s (spawn (srv)))
 (defn call1 () (let (r (ref)) (do (send s [:p (self) r]) (receive ([:r ^r v] v)))))
 (defn churn (i acc)
   (if (>= i iters)
     acc
-    (do (call1)
-        (spawn (hot i))
-        (when (and (> every 0) (= 0 (mod i every)))
-          (eval (list 'def 'g (+ 2 (mod i 3)))))
-        (churn (+ i 1) acc))))
+    (do
+      (call1)
+      (spawn (hot i))
+      (when (and (> every 0) (= 0 (mod i every)))
+        (eval (list 'def 'g (+ 2 (mod i 3)))))
+      (churn (+ i 1) acc))))
 (gc-collect)
 (def r0 (rss-kb))
 (churn 0 0)
 (gc-collect)
 (sleep 300)
-(println (str "iters=" iters " every=" every
-              " reloads=" (if (= every 0) 0 (quot iters every))
-              " rss " r0 " -> " (rss-kb) " delta_kb=" (- (rss-kb) r0)))
+(println (str "iters="
+           iters " every=" every " reloads=" (if (= every 0) 0 (quot iters every)) " rss " r0 " -> "
+           (rss-kb) " delta_kb=" (- (rss-kb) r0)))

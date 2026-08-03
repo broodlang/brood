@@ -75,10 +75,9 @@
       us)))
 
 (defn report (what us)
-  (println (str (pad-right what 16) " chunks=" chunks " size=" size
-                " total-bytes=" (* size (+ chunks 1))
-                " us=" us
-                " ns/chunk=" (quot (* us 1000) chunks))))
+  (println (str (pad-right what 16)
+             " chunks=" chunks " size=" size " total-bytes=" (* size (+ chunks 1)) " us=" us
+             " ns/chunk=" (quot (* us 1000) chunks))))
 
 (report "floor" (bench-floor :sock-floor))
 (report "tcp-read-n" (bench-tcp-read-n :sock-n))

@@ -18,8 +18,7 @@
 ;; [0, length]; `mark` is a char index or nil. Lines are 0-based; a line's text
 ;; (`buffer-line-at`) includes its trailing newline, matching `rope-line`.
 
-(require 'diff)  ; diff-lines — the change set a region undo filters
-
+(require 'diff) ; diff-lines — the change set a region undo filters
 (defmodule editor/buffer
   "An immutable text buffer for building editors, written in Brood over the rope
 primitives (ADR-045). A *buffer* is a **record** (so `buffer?` is an identity check, and
@@ -510,16 +509,16 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
 
 (defn undo--common-prefix (a b i)
   ;; how many leading chars `a` and `b` share — bounds the char diff to what changed
-  (if (or (>= i (string-length a)) (>= i (string-length b))
-        (not= (char-at a i) (char-at b i)))
+  (if (or (>= i (string-length a))
+        (>= i (string-length b)) (not= (char-at a i) (char-at b i)))
     i
     (undo--common-prefix a b (inc i))))
 
 (defn undo--common-suffix (a b lo k)
   ;; how many trailing chars they share, never eating into the shared prefix `lo`
   (let (la (string-length a) lb (string-length b))
-    (if (or (>= k (- la lo)) (>= k (- lb lo))
-          (not= (char-at a (- la k 1)) (char-at b (- lb k 1))))
+    (if (or (>= k (- la lo))
+          (>= k (- lb lo)) (not= (char-at a (- la k 1)) (char-at b (- lb k 1))))
       k
       (undo--common-suffix a b lo (inc k)))))
 
@@ -568,24 +567,26 @@ the diff only ever runs over the span that actually changed."
       ;; nothing changed
       (and (= o-mid "") (= n-mid "")) new
       ;; too large to diff character-wise: treat the whole span as one change
-      (> (max (string-length o-mid) (string-length n-mid)) *undo-region-char-budget*)
-      (if (and (< pre hi) (> (+ pre (string-length n-mid)) lo))
-        (str head o-mid tail)
-        new)
-      else
-      (let (ops (diff/diff-seq (string->list o-mid) (string->list n-mid))
-            r (fold (fn (acc op)
-                      (let ([n out hunk] acc
-                            [tag c] op)
-                        (if (= tag :keep)
-                          (let ([n2 out2] (undo--flush-chunk hunk n lo hi out))
-                            [(inc n2) (cons c out2) '()])
-                          [n out (append hunk (list op))])))
-                [pre '() '()]
-                ops)
-            [n out hunk] r
-            [_ out2] (undo--flush-chunk hunk n lo hi out))
-        (str head (apply str (reverse out2)) tail)))))
+      (> (max (string-length o-mid) (string-length n-mid)) *undo-region-char-budget*) (if (and (< pre
+                                                                                                 hi)
+                                                                                            (> (+ pre
+                                                                                                 (string-length n-mid))
+                                                                                              lo))
+                                                                                        (str head
+                                                                                          o-mid tail)
+                                                                                        new)
+      else (let (ops (diff/diff-seq (string->list o-mid) (string->list n-mid))
+                 r (fold (fn (acc op)
+                           (let ([n out hunk] acc
+                                 [tag c] op)
+                             (if (= tag :keep)
+                               (let ([n2 out2] (undo--flush-chunk hunk n lo hi out))
+                                 [(inc n2) (cons c out2) '()])
+                               [n out (append hunk (list op))])))
+                     [pre '() '()] ops)
+                 [n out hunk] r
+                 [_ out2] (undo--flush-chunk hunk n lo hi out))
+             (str head (apply str (reverse out2)) tail)))))
 
 (defn undo--region-candidate (buf lo hi snaps depth)
   ;; The nearest snapshot whose changes actually touch the region: `[undone-text tail]`,
@@ -601,8 +602,7 @@ the diff only ever runs over the span that actually changed."
       ;; A snapshot a region undo itself pushed is not a candidate: it holds the text we
       ;; just came from, so taking it would REDO the change instead of peeling the next
       ;; one off. Skipping it is what makes repeated calls walk backwards.
-      (get (first snaps) :region-undo)
-      (undo--region-candidate buf lo hi (rest snaps) (dec depth))
+      (get (first snaps) :region-undo) (undo--region-candidate buf lo hi (rest snaps) (dec depth))
       else (let (old (rope->string (get (first snaps) :rope))
                  undone (undo--region-restore old text lo hi))
              (if (= undone text)
@@ -626,8 +626,8 @@ whole thing back."
     (if (or (nil? bounds) (empty? (or (get buf :undo) ())))
       buf
       (let ([lo hi] bounds
-            found (undo--region-candidate buf lo hi (get buf :undo)
-                    *undo-region-search-depth*))
+            found (undo--region-candidate buf
+                    lo hi (get buf :undo) *undo-region-search-depth*))
         (if (nil? found)
           buf
           ;; record the pre-state (so this is itself undoable), then swap the text.
@@ -811,9 +811,10 @@ remote participants' cursors on a shared buffer."
 (defn annotate (buf key value)
   "Stamp derived `value` onto `buf` under `key`, together with the rope and line
 count it describes. Read it back with `annotation`."
-  (assoc buf key {:value value
-                  :rope (buffer-rope buf)
-                  :lines (buffer-line-count buf)}))
+  (assoc buf
+    key {:value value
+         :rope (buffer-rope buf)
+         :lines (buffer-line-count buf)}))
 
 (defn annotation (buf key)
   "The annotation stored under `key` as `{:value :current? :stale?}`, or nil when
@@ -899,10 +900,11 @@ makes the operation usable on Lisp — which is to say, on Brood source."
         at (buffer-point squeezed)
         before (buffer-char-before squeezed)
         after (buffer-char-after squeezed))
-    (if (or (nil? before) (= before "\n")                       ; start of line
-            (nil? after) (= after "\n")                         ; end of line
-            (includes? buffer--close-delimiters after)
-            (includes? buffer--open-delimiters before))
+    (if (or (nil? before)
+          (= before "\n") ; start of line
+          (nil? after)
+          (= after "\n") ; end of line
+          (includes? buffer--close-delimiters after) (includes? buffer--open-delimiters before))
       squeezed
       (goto-char (insert squeezed " ") at))))
 

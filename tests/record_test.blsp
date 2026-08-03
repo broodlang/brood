@@ -75,14 +75,13 @@
 
 ;; ---- the collection protocol: a custom record joins iteration (Seqable) + build (Conjable) ----
 (defrecord stack (items))
-(impl Seqable stack (to-seq [s] (get s :items)))         ; iterate the items, not the fields
-(impl Conjable stack (-conj [s x] (stack (cons x (get s :items)))))  ; prepend on conj
-
+(impl Seqable stack (to-seq [s] (get s :items))) ; iterate the items, not the fields
+(impl Conjable stack (-conj [s x] (stack (cons x (get s :items))))) ; prepend on conj
 (describe "defrecord: custom collection (Seqable + Conjable)"
   (test "Seqable — a custom record iterates its own way"
     (let (s (stack (list 10 20 30)))
       (assert= (seq s) (list 10 20 30))
-      (assert= (count s) 3)                              ; not 1 (the one `items` field)
+      (assert= (count s) 3) ; not 1 (the one `items` field)
       (assert= (fold + 0 s) 60)
       (assert= (map inc s) (list 11 21 31))
       (assert= (filter even? s) (list 10 20 30))))
@@ -95,16 +94,17 @@
       (is (empty? (stack (list))))))
   (test "Conjable — conj/into build the custom collection its own way"
     (assert= (seq (conj (stack (list)) 1)) (list 1))
-    (assert= (seq (fold conj (stack (list)) (list 1 2 3))) (list 3 2 1))  ; prepend
+    (assert= (seq (fold conj (stack (list)) (list 1 2 3))) (list 3 2 1)) ; prepend
     (assert= (seq (into (stack (list)) (list :a :b :c))) (list :c :b :a)))
   (test "a record WITHOUT impls still iterates/conj's as its fields (map behaviour)"
-    (assert= (into {} (seq (point 1 2))) {:x 1 :y 2})   ; as a map — hash-order-independent
+    (assert= (into {} (seq (point 1 2))) {:x 1 :y 2}) ; as a map — hash-order-independent
     (assert= (count (point 1 2)) 2)
     (assert= (fields (conj (point 1 2) [:z 3])) {:x 1 :y 2 :z 3})))
 
 ;; ---- Ord: a record defines its own sort order ----
 (defrecord ver (major minor))
-(defmethod compare-to [ver ver] (a b)
+(defmethod compare-to
+  [ver ver] (a b)
   (let (c (compare (get a :major) (get b :major)))
     (if (= c 0) (compare (get a :minor) (get b :minor)) c)))
 
@@ -125,7 +125,7 @@
 (defrecord usd (cents))
 (defmethod num-add [usd usd] (a b) (usd (+ (get a :cents) (get b :cents))))
 (defmethod num-sub [usd usd] (a b) (usd (- (get a :cents) (get b :cents))))
-(defmethod num-mul [usd :int] (m n) (usd (* (get m :cents) n)))       ; scale by a scalar
+(defmethod num-mul [usd :int] (m n) (usd (* (get m :cents) n))) ; scale by a scalar
 (defmethod num-div [usd :int] (m n) (usd (quot (get m :cents) n)))
 
 (describe "defrecord: custom Num"
@@ -133,7 +133,7 @@
     (assert= (get (+ (usd 500) (usd 250)) :cents) 750)
     (assert= (get (- (usd 500) (usd 250)) :cents) 250)
     (assert= (get (* (usd 500) 3) :cents) 1500)
-    (assert= (get (* 3 (usd 500)) :cents) 1500)   ; commutative: the [:int usd] mirror is derived
+    (assert= (get (* 3 (usd 500)) :cents) 1500) ; commutative: the [:int usd] mirror is derived
     (assert= (get (/ (usd 900) 3) :cents) 300)
     ;; variadic + folds through the same dispatch
     (assert= (get (+ (usd 100) (usd 200) (usd 300)) :cents) 600))
