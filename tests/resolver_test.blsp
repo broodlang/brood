@@ -1,0 +1,212 @@
+;; Tests for `std/resolver` — the dependency version resolver (ADR-209). The resolver
+;; is a pure backtracking, newest-compatible solver over an injected `provider`, so the
+;; whole thing is exercised offline: each test builds a literal package universe (what
+;; versions exist, what each requires) and asserts the picked solution — or the conflict
+;; message when none exists. No network, no registry, no filesystem.
+;;
+;; The design choices these pin: NEWEST compatible wins; a later decision must respect an
+;; earlier one (which is what forces backtracking); a dead end reports the real conflict
+;; and who required what, not a bland failure.
+
+(defmodule resolver-test (:use test) (:use resolver))
+
+;; ---- file-local helpers (defined once at load; survive :isolated rollback) ----
+;; A provider from two literal tables: `versions` is {name -> [version ...]}; `deps` is
+;; {name -> {version -> [[dep-name constraint] ...]}}. A missing entry is nil (no
+;; versions / no deps), which is exactly what the resolver must tolerate.
+(defn rt-prov (versions deps)
+  (make-provider
+    (fn (nm) (get versions nm))
+    (fn (nm v) (get (get deps nm) v))))
+
+(defn rt-ok (roots p)
+  (match (resolve roots p)
+    ([:ok solution] solution)
+    ([:error message] (error (str "expected a solution, got error: " message)))))
+
+(defn rt-err (roots p)
+  (match (resolve roots p)
+    ([:error message] message)
+    ([:ok solution] (error (str "expected a conflict, got solution: " (pr-str solution))))))
+
+(defn rt-ok-pref (roots p preferred)
+  (match (resolve roots p preferred)
+    ([:ok solution] solution)
+    ([:error message] (error (str "expected a solution, got error: " message)))))
+
+;; A provider with no deps anywhere — every release requires nothing.
+(defn rt-leaf-prov (versions) (rt-prov versions {}))
+
+(describe "resolver: the provider"
+  (test "versions and deps are read straight through the two closures"
+    (let (p (rt-prov {'foo ["1.0.0" "2.0.0"]} {'foo {"2.0.0" [['bar ">= 1.0"]]}}))
+      (assert= ["1.0.0" "2.0.0"] (provider-versions p 'foo))
+      (assert= [['bar ">= 1.0"]] (provider-deps p 'foo "2.0.0"))))
+  (test "an unknown package yields nil versions, not a crash"
+    (let (p (rt-leaf-prov {'foo ["1.0.0"]}))
+      (assert= nil (provider-versions p 'missing)))))
+
+(describe "resolver: a single root"
+  (test "picks the only version"
+    (assert= {'foo "1.0.0"}
+      (rt-ok [['foo nil]] (rt-leaf-prov {'foo ["1.0.0"]}))))
+  (test "a nil constraint means any version — newest wins"
+    (assert= {'foo "2.3.0"}
+      (rt-ok [['foo nil]] (rt-leaf-prov {'foo ["1.0.0" "2.3.0" "2.0.0"]}))))
+  (test "an empty-string constraint also means any version"
+    (assert= {'foo "2.0.0"}
+      (rt-ok [['foo ""]] (rt-leaf-prov {'foo ["1.0.0" "2.0.0"]}))))
+  (test "a range constraint narrows to the newest that fits"
+    (assert= {'foo "1.9.0"}
+      (rt-ok [['foo "^1.2"]] (rt-leaf-prov {'foo ["1.1.0" "1.9.0" "2.0.0"]}))))
+  (test "an exact constraint pins that version even when newer exist"
+    (assert= {'foo "1.2.0"}
+      (rt-ok [['foo "= 1.2.0"]] (rt-leaf-prov {'foo ["1.2.0" "1.3.0" "2.0.0"]}))))
+  (test "a conjunction range constraint is honoured"
+    (assert= {'foo "1.5.0"}
+      (rt-ok [['foo ">= 1.2, < 2.0"]] (rt-leaf-prov {'foo ["1.1.0" "1.5.0" "2.0.0"]})))))
+
+(describe "resolver: transitive dependencies"
+  (test "a dep is fetched and pinned to its newest compatible version"
+    (let (p (rt-prov {'foo ["1.5.0"] 'bar ["2.0.0" "2.1.0" "3.0.0"]}
+                     {'foo {"1.5.0" [['bar ">= 2.0"]]}}))
+      (assert= {'foo "1.5.0" 'bar "3.0.0"} (rt-ok [['foo "^1.2"]] p))))
+  (test "a chain a -> b -> c resolves all three"
+    (let (p (rt-prov {'a ["1.0.0"] 'b ["1.0.0"] 'c ["1.0.0"]}
+                     {'a {"1.0.0" [['b nil]]} 'b {"1.0.0" [['c nil]]}}))
+      (assert= {'a "1.0.0" 'b "1.0.0" 'c "1.0.0"} (rt-ok [['a nil]] p))))
+  (test "a caret on a transitive dep caps its major"
+    (let (p (rt-prov {'a ["1.0.0"] 'd ["1.0.0" "1.4.0" "2.0.0"]}
+                     {'a {"1.0.0" [['d "^1.0.0"]]}}))
+      (assert= {'a "1.0.0" 'd "1.4.0"} (rt-ok [['a nil]] p)))))
+
+(describe "resolver: shared (diamond) dependencies"
+  (test "two paths onto the same package intersect their constraints"
+    ;; a wants d ^1.0.0 (so < 2.0), b wants d >= 1.1.0 -> newest in [1.1.0, 2.0.0) = 1.1.0
+    (let (p (rt-prov {'a ["1.0.0"] 'b ["1.0.0"] 'd ["1.0.0" "1.1.0" "2.0.0"]}
+                     {'a {"1.0.0" [['d "^1.0.0"]]} 'b {"1.0.0" [['d ">= 1.1.0"]]}}))
+      (assert= {'a "1.0.0" 'b "1.0.0" 'd "1.1.0"} (rt-ok [['a nil] ['b nil]] p))))
+  (test "a root pin and a transitive range agree on one version"
+    (let (p (rt-prov {'a ["1.0.0"] 'd ["1.0.0" "1.1.0" "1.2.0"]}
+                     {'a {"1.0.0" [['d ">= 1.0.0"]]}}))
+      ;; root pins d = 1.1.0 directly; a is happy with anything >= 1.0.0
+      (assert= {'a "1.0.0" 'd "1.1.0"} (rt-ok [['a nil] ['d "= 1.1.0"]] p)))))
+
+(describe "resolver: backtracking"
+  (test "falls back to an older version of a package when the newest dead-ends"
+    ;; a@2.0.0 needs c = 1.0.0, but b forces c = 2.0.0 -> a@2.0.0 is impossible,
+    ;; so the search must fall back to a@1.0.0 (which needs c = 2.0.0, and agrees).
+    (let (p (rt-prov {'a ["1.0.0" "2.0.0"] 'b ["1.0.0"] 'c ["1.0.0" "2.0.0"]}
+                     {'a {"2.0.0" [['c "= 1.0.0"]] "1.0.0" [['c "= 2.0.0"]]}
+                      'b {"1.0.0" [['c "= 2.0.0"]]}}))
+      (assert= {'a "1.0.0" 'b "1.0.0" 'c "2.0.0"} (rt-ok [['a nil] ['b nil]] p))))
+  (test "backtracks across two levels to satisfy a deep constraint"
+    ;; top@2 -> mid ^2 ; top@1 -> mid ^1 ; leaf forces mid = 1.5.0
+    (let (p (rt-prov {'top ["1.0.0" "2.0.0"] 'mid ["1.5.0" "2.5.0"] 'leaf ["1.0.0"]}
+                     {'top {"2.0.0" [['mid "^2.0.0"]] "1.0.0" [['mid "^1.0.0"]]}
+                      'leaf {"1.0.0" [['mid "= 1.5.0"]]}}))
+      (assert= {'top "1.0.0" 'mid "1.5.0" 'leaf "1.0.0"}
+        (rt-ok [['top nil] ['leaf nil]] p)))))
+
+(describe "resolver: cycles"
+  (test "a mutual dependency resolves when the versions agree"
+    (let (p (rt-prov {'a ["1.0.0"] 'b ["1.0.0"]}
+                     {'a {"1.0.0" [['b nil]]} 'b {"1.0.0" [['a nil]]}}))
+      (assert= {'a "1.0.0" 'b "1.0.0"} (rt-ok [['a nil]] p))))
+  (test "a self-dependency at a compatible version is fine"
+    (let (p (rt-prov {'a ["1.0.0"]} {'a {"1.0.0" [['a ">= 1.0.0"]]}}))
+      (assert= {'a "1.0.0"} (rt-ok [['a nil]] p)))))
+
+(describe "resolver: conflicts and error messages"
+  (test "an unsatisfiable diamond names both requirers and the available versions"
+    (let (p (rt-prov {'foo ["1.0.0"] 'baz ["1.0.0"] 'shared ["1.0.0" "1.5.0" "2.0.0"]}
+                     {'foo {"1.0.0" [['shared "^1.0.0"]]}
+                      'baz {"1.0.0" [['shared "^2.0.0"]]}})
+          message (rt-err [['foo nil] ['baz nil]] p))
+      (is (includes? message "shared"))
+      (is (includes? message "foo"))
+      (is (includes? message "baz"))
+      (is (includes? message "available"))))
+  (test "a required package the provider does not know is a clear error"
+    (let (p (rt-prov {'foo ["1.0.0"]} {'foo {"1.0.0" [['ghost ">= 1.0"]]}})
+          message (rt-err [['foo nil]] p))
+      (is (includes? message "ghost"))
+      (is (includes? message "no versions"))))
+  (test "a root whose constraint matches nothing reports the available set"
+    (let (p (rt-leaf-prov {'foo ["1.0.0" "1.1.0"]})
+          message (rt-err [['foo ">= 2.0"]] p))
+      (is (includes? message "foo"))
+      (is (includes? message "your project"))
+      (is (includes? message "1.0.0"))))
+  (test "a package with zero published versions fails closed"
+    (let (p (rt-prov {'foo []} {})
+          message (rt-err [['foo nil]] p))
+      (is (includes? message "no versions")))))
+
+(describe "resolver: preferred versions (lock stability)"
+  (test "a preferred version is kept even when a newer one also satisfies"
+    (let (p (rt-leaf-prov {'foo ["1.0.0" "1.1.0" "1.2.0"]}))
+      ;; no preference: newest compatible
+      (assert= {'foo "1.2.0"} (rt-ok [['foo "^1.0"]] p))
+      ;; foo pinned to 1.0.0: kept, not upgraded
+      (assert= {'foo "1.0.0"} (rt-ok-pref [['foo "^1.0"]] p {'foo "1.0.0"}))))
+  (test "a preferred version that no longer satisfies is ignored (newest that fits wins)"
+    (let (p (rt-leaf-prov {'foo ["1.0.0" "2.0.0" "2.1.0"]}))
+      ;; pinned 1.0.0, but the constraint is now ^2.0 — the stale pin is dropped
+      (assert= {'foo "2.1.0"} (rt-ok-pref [['foo "^2.0"]] p {'foo "1.0.0"}))))
+  (test "adding a new dep keeps the existing dep at its preferred version"
+    ;; the whole point: a lock pins foo=1.0.0; adding bar must not drag foo to 1.1.0
+    (let (p (rt-leaf-prov {'foo ["1.0.0" "1.1.0"] 'bar ["1.0.0" "2.0.0"]}))
+      (assert= {'foo "1.0.0" 'bar "2.0.0"}
+        (rt-ok-pref [['foo "^1.0"] ['bar nil]] p {'foo "1.0.0"}))))
+  (test "preference does not lose completeness — it still backtracks off a dead-end pin"
+    ;; a pinned at 2.0.0 needs c=1.0.0, but b forces c=2.0.0, so the pin can't hold;
+    ;; the search must still reach the valid a=1.0.0 / c=2.0.0 solution
+    (let (p (rt-prov {'a ["1.0.0" "2.0.0"] 'b ["1.0.0"] 'c ["1.0.0" "2.0.0"]}
+                     {'a {"2.0.0" [['c "= 1.0.0"]] "1.0.0" [['c "= 2.0.0"]]}
+                      'b {"1.0.0" [['c "= 2.0.0"]]}}))
+      (assert= {'a "1.0.0" 'b "1.0.0" 'c "2.0.0"}
+        (rt-ok-pref [['a nil] ['b nil]] p {'a "2.0.0"}))))
+  (test "a preference for a package not in the graph is harmless"
+    (let (p (rt-leaf-prov {'foo ["1.0.0" "1.1.0"]}))
+      (assert= {'foo "1.1.0"} (rt-ok-pref [['foo "^1.0"]] p {'ghost "9.9.9"})))))
+
+(describe "resolver: determinism"
+  (test "the same universe resolves to the same solution every time"
+    (let (p (rt-prov {'a ["1.0.0" "2.0.0"] 'b ["1.0.0"] 'c ["1.0.0" "2.0.0"]}
+                     {'a {"2.0.0" [['c "= 1.0.0"]] "1.0.0" [['c "= 2.0.0"]]}
+                      'b {"1.0.0" [['c "= 2.0.0"]]}}))
+      (assert= (rt-ok [['a nil] ['b nil]] p) (rt-ok [['a nil] ['b nil]] p))
+      (assert= (rt-ok [['a nil] ['b nil]] p) (rt-ok [['b nil] ['a nil]] p)))))
+
+;; ---- explicit concurrency: a solution is a plain value that crosses heaps --------
+;; The resolver produces a map; per the repo's convention every value-carrying feature
+;; is exercised across processes too. Each worker resolves the same universe in its own
+;; green process (its own heap) and sends the solution back; the parent asserts they all
+;; deep-copy across unchanged and agree — proving both determinism and message round-trip.
+
+(defn rt-worker (parent versions deps roots)
+  (send parent [:sol (resolve roots (rt-prov versions deps))]))
+
+(defn rt-spawn (parent n versions deps roots)
+  (when (> n 0)
+    (spawn (rt-worker parent versions deps roots))
+    (rt-spawn parent (- n 1) versions deps roots)))
+
+(defn rt-collect (got total acc)
+  (if (= got total)
+    acc
+    (rt-collect (+ got 1) total (receive ([:sol s] (cons s acc))))))
+
+(describe "resolver across processes"
+  :isolated
+  (test "many workers resolve the same graph to the same solution"
+    (let (versions {'a ["1.0.0" "2.0.0"] 'b ["1.0.0"] 'c ["1.0.0" "2.0.0"]}
+          deps {'a {"2.0.0" [['c "= 1.0.0"]] "1.0.0" [['c "= 2.0.0"]]}
+                'b {"1.0.0" [['c "= 2.0.0"]]}}
+          roots [['a nil] ['b nil]]
+          expected [:ok {'a "1.0.0" 'b "1.0.0" 'c "2.0.0"}])
+      (rt-spawn (self) 16 versions deps roots)
+      (let (results (rt-collect 0 16 nil))
+        (assert= 16 (count results))
+        (is (every? (fn (r) (= r expected)) results))))))

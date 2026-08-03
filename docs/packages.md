@@ -31,13 +31,12 @@
 >   `_deps/` by the new `%untar-gz` primitive; and a **git-backed registry** — the
 >   index is just a git repo of `packages/<name>.blsp` metadata (no hosted server,
 >   keeping ADR-037's "no central infrastructure"). `nest publish` appends the
->   project's version entry; `nest search` greps the index; a `[name :version "x"]`
->   dep resolves the named version (EXACT match, no semver solver) to its git source
->   and pins it. See *The registry (v2)* below.
+>   project's version entry; `nest search` greps the index; a `[name :version "^1.2"]`
+>   dep names a **semver range**, resolved to a concrete published version by the
+>   backtracking resolver (ADR-209, added after v2). See *The registry (v2)* below.
 >
-> Still deferred by design (ADR-011): semver + a constraint solver, tarball sources
-> *in* registry entries (registry entries point to git today), and signed packages.
-> See *Future work* below.
+> Still deferred by design (ADR-011): tarball sources *in* registry entries (registry
+> entries point to git today) and signed packages. See *Future work* below.
 >
 > Four decisions refined the original sketch when implementation began — they
 > are folded into the relevant sections below and summarised in ADR-037's
@@ -119,7 +118,7 @@ Four source kinds:
 | `:git`     | `[name :git URL :ref REF]`               | `REF` is a tag or commit. Branches are accepted but advisory — `:ref "main"` re-resolves on every `nest update`. |
 | `:path`    | `[name :path PATH]`                      | Filesystem path, relative to the manifest. Local dev/mirror; SHA-256'd at fetch time. |
 | `:tarball` | `[name :tarball URL :sha256 HEX]`        | A `.tar.gz` artifact (http/https, or `file://` for a local/offline one). `:sha256` is **mandatory** — the integrity pin standing in for git's commit; a mismatch is a loud error. Extracted into `_deps/<name>/`, stripping the single wrapper directory. (v2, ADR-147.) |
-| `:version` | `[name :version "X.Y.Z"]`                | A **registry** dep: `name` is looked up in the configured index and its **exact** version resolved to the underlying git source + pinned. No semver ranges. (v2, ADR-147.) |
+| `:version` | `[name :version "^1.2"]`                 | A **registry** dep naming a **semver range** (`^1.2`, `~> 1.3`, `>= 1.2, < 2.0`, `= 1.2.3`, or a bare `1.2.3` = exact). The backtracking resolver picks the newest published version satisfying it (and every transitive range), downloads + sha-verifies + extracts it, and locks the concrete version. (Ranges: ADR-209; registry: v2, ADR-147.) |
 
 `name` is the **local symbol** the dep will be available as inside
 `(require …)`. It need not match the package's own `:name` — the manifest
@@ -382,10 +381,12 @@ written) in place — the dev / self-hosted / offline path.
   review, commit, `git push`). A version already published is refused; publishing to
   a URL is refused (clone it first).
 - **`nest search <term>`** greps every package's name and latest description.
-- **A `[name :version "X.Y.Z"]` dep** looks the exact version up in the index,
-  resolves it to the entry's git source, and pins the commit — reusing the entire
-  `:git` cache/lock machinery. **No semver ranges** (ADR-037's direct-refs-only
-  invariant); a missing version is a loud error pointing at `nest search`.
+- **A `[name :version "^1.2"]` dep** names a **semver range** (ADR-209). The
+  backtracking resolver asks the registry which versions exist and what each
+  release requires, picks the newest that satisfies every constraint across the
+  transitive closure, then downloads + sha-verifies + extracts it and locks the
+  concrete version. A fully-covering lock is reused network-free; a range nothing
+  satisfies is a loud conflict naming the package and every requirer.
 
 To publish, a package sets two manifest fields: `:repository` (its git URL) and
 `:description`. The published `:ref` is `v<version>` by convention.
@@ -527,9 +528,13 @@ out-of-scope for v1.
 - **Tarball / HTTP source kind** — `[name :tarball URL :sha256 HASH]`.
   The `%http-get` primitive lands now so the Rust kernel doesn't have to
   change later; the source-kind dispatch is gated until a real use case.
-- **Semver + constraint solver** — `:ref "^1.2.0"` and a resolver. Real
-  pain has to materialise first; pinning by commit/tag works fine for a
-  pre-1.0 ecosystem.
+- **Semver + constraint solver** — ✅ shipped for registry deps (ADR-209):
+  `[name :version "^1.2"]` names a range, resolved to a concrete published
+  version by a backtracking, newest-compatible solver (`std/resolver.blsp`)
+  that prefers the locked versions (adding one dep keeps the rest pinned). A
+  `:brood "<constraint>"` gate refuses an incompatible runtime. Still open:
+  semver ranges over `:git` tags (registry-only for now), and PubGrub-grade
+  conflict-error derivation.
 - **Signed packages** — a `:sig` opt with a Brood-flavoured key registry
   (akin to Maven's PGP or sigstore). Needs trust infrastructure that
   isn't this project's problem until packages are exchanged at scale.

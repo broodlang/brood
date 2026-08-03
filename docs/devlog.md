@@ -15000,3 +15000,68 @@ is a mechanism with an off-switch, run it with the switch off before believing i
 
 Validation: suite **941/941**, `nest check` clean, and a paired soak (armed vs
 `BROOD_NO_SHARE_FN_MSG=1`) clean past 500k iterations each and still running at commit time.
+## 2026-08-03 (cont.) — the dependency resolver: version grammar + a pure backtracking solver (ADR-209)
+
+Started the resolver the namespacing follow-ups were sequenced ahead of. Two slices landed,
+the hard core; the registry wiring is next. Decision recorded as [ADR-209](decisions.md) —
+backtracking + newest-compatible (Cargo/npm family), reversing ADR-037's "no solver, exact refs
+only" now that the hive registry gives real versions to resolve against; MVS was weighed and
+declined (it models `>=` cleanly but not `^`/`~>`, which mean *newest* that fits).
+
+**Slice A — the version grammar (`std/version.blsp`).** Added `^` (compatible-with, with the
+0.x-shifts-the-breaking-axis rule: `^0.2.3` = `>=0.2.3, <0.3.0`), `~>` (pessimistic), and
+comma-separated **conjunctions**. Both range operators expand to a `>=`/exclusive-`<` bound on
+the numeric part-lists, reusing the existing comparison — a spelling, not a new comparator. The
+module's old "explicitly NOT a solver / exact versions only" comments were corrected: it is still
+pure predicates, but it now has a third consumer (the resolver) and a fuller vocabulary. The
+stale test that asserted `~> 1.0` *raises* "unknown operator" was flipped to a genuinely-unknown
+operator. `tests/version_test.blsp`: +caret/tilde/conjunction blocks (27 tests green).
+
+**Slice B — the pure solver (`std/resolver.blsp`, new embedded module).** `(resolve roots
+provider)` → `[:ok {name → version}]` | `[:error message]`. Backtracking DFS, newest-first, with
+the crucial "a later decision must respect an already-fixed one" check that both forces and
+drives the backtracking (verified it falls back across two levels). The package universe is
+reached only through an injected `provider` (two closures — `versions`, `deps`), so the whole
+search is a function of literal data: no network, no registry, no fs. That is what makes it
+exhaustively testable offline — `tests/resolver_test.blsp` (23 tests: single/transitive/diamond,
+two-level backtracking, cycles, self-dep, unsatisfiable-with-message-content, missing package,
+root no-match, determinism, and a 16-worker cross-process block proving the solution value
+deep-copies across heaps unchanged). Conflict messages name the package, every requirer, and the
+available versions.
+
+**Slice C — registry wiring (`std/tool/package.blsp`).** `resolve-deps` is now two-phase: the
+existing depth-first walk resolves `:path`/`:git`/`:tarball` deps to exact sources and *collects*
+every `:version` requirement it meets (root + each non-registry manifest) instead of resolving it
+inline (you can't fetch a range); then the solver — behind a registry provider
+(`registry--list-versions` over a new `/releases` list, plus each release's `:dependencies` as
+ranges) — picks a concrete version per registry package across the closure, and each is
+fetched/extracted exactly like a pinned `:version` was. Published metadata already carries a dep's
+`:version` string, so it now advertises ranges with zero publish-side change. Gotcha found +
+fixed: an ability op (`dep-kind`) referenced *before* its `defability` doesn't pre-scan (a `defn`
+does), so the registry-vs-not test in the walk goes through a one-line `package--registry-dep?`
+wrapper. Refinement: a lock that fully covers the manifest's ranges is reused **network-free**
+(fetch from `_deps/` cache, no `/releases` call) — essential since `resolve-deps` runs on every
+subcommand; a changed manifest or `nest update` forces a fresh solve. `tests/package_test.blsp`:
++an end-to-end range block over a multi-package/multi-version loopback registry (provider,
+transitive resolve+lock, network-free lock reuse, unsatisfiable conflict) — 84 green.
+
+**Slice D — the `:brood` runtime gate.** A new `(brood-version)` primitive (the kernel's
+`CARGO_PKG_VERSION`, e.g. `"0.1.0"` — sibling to `build-id`, just the semver) plus a manifest
+`:brood "<constraint>"` field parsed in `project-apply` and checked at `project-setup` against it.
+Unmet = a hard, clear error naming the constraint and the running version (like `mix.exs`'s
+`elixir:`), reusing `version-satisfies?` so it's one line of policy in `std/tool/project.blsp`;
+absent = runs on any runtime. It's a *gate* on the one running binary, not a resolver input.
+Verified end-to-end through `nest test` (unmet aborts setup, met proceeds) — and note the trap:
+`nest` is a separate binary, so a std-only change needs `cargo build -p nest`, not just `-p cli`,
+or you test a stale gate. `tests/project_test.blsp`: +a `(brood-version)` block and a gate block
+(met/unmet/nil/caret/bad-type) — 85 green.
+
+**Refinement — lock preference (`resolve`'s `preferred` arg).** A fresh solve used to pick
+newest-compatible for everything, so adding one dep bumped the whole closure. `resolve` now takes
+an optional `preferred` map and tries each package's preferred (locked) version first when it
+still fits, else newest; `package--solve-registry` feeds it the still-locked versions. Result:
+adding a dep keeps unchanged deps pinned (only the new one + its subtree move); `nest update
+<name>` drops that name so it alone re-solves to newest. Safe by construction — a preferred version
+is only tried if already a valid candidate and the search still backtracks off it (a test pins a
+dead-end version and confirms the answer is still found). +6 tests (5 resolver, 1 end-to-end
+package: adding `bar` keeps `foo` at its locked 1.0.0, not the published 1.1.0).
