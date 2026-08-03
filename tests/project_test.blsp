@@ -534,3 +534,16 @@
     (binding (*ns-package* {'widget 'myapp})
       (assert= (trace-with-packages (list {:fn "widget/w"} {:file "x" :line 2}))
         (list {:fn "widget/w" :package 'myapp} {:file "x" :line 2 :package nil})))))
+
+;; Package-rooted namespaces (ADR-070): a release bundle is flat (keyed by require-name),
+;; so two source files that would embed under one name are rejected at bundle time — the
+;; safety guard that replaces the cross-dep collision check dropped once dev-time rooting
+;; made cross-dep collisions impossible. Tested on the cwd-free helper directly.
+(describe "bundle: duplicate module names are rejected"
+  (test "two providers of one require-name error loudly"
+    (is (includes? (try
+                     (project/bundle--reject-duplicate-names (list "app" "parser" "lib" "parser"))
+                     (catch e e))
+          "same module name")))
+  (test "distinct require-names pass"
+    (assert= (project/bundle--reject-duplicate-names (list "app" "net/sse" "lib")) nil)))

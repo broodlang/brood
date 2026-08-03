@@ -14798,6 +14798,67 @@ Verified: suite 937/937, `nest check` clean, `conc_storm` clean, and the
 concurrency-sensitive files 5/5 each (`concurrency`, `supervisor`, `adversarial`, `agent`,
 `proctree`).
 
+## 2026-08-02 (cont.) — package-rooting: the *reference* side, found by pointing bedit at it
+Rooting landed (ADR-070, previous entry) with the claim "no source change and no resolver
+change". Loading the bedit editor under it disproved the first half loudly: bedit wouldn't
+load at all (`unbound symbol: keymaps/emacs-keymap`), and rewriting its **1,992** qualified
+intra-project references across 63 files to say `bedit/…` was the alternative — which would
+have baked the project name into every keymap symbol, the opposite of "the prefix is
+*implied*". Six sites were rooting only half the pair. All six are now symmetric:
+
+- **Qualified references resolve rooted** (`heap.root_qualified_ref` + the miss-path fallback
+  in `global_lookup_cached`, and the expand-pass rewrite in `namespace_symbol`). `(:use b)`
+  rooted its target, so bare names imported fine — while every explicit `b/name`, and every
+  `(eval 'b/name)` behind a late-bound keymap, went unbound. The module part is everything
+  before the LAST `/`, so `editor/treesit/point-forward` stays bare and an already-rooted
+  name is unchanged (idempotent). Memoized symbol→symbol, cleared on a context switch.
+- **A spawned process inherits the package context.** It's per-process `Cold` state, so a
+  `spawn`ed worker lost it — meaning a test body, a buffer server or a stream worker resolved
+  its own project's qualified names as unbound. "Which package is this code from?" is a
+  property of the code, not the process running it; propagated in `spawn_impl` next to the
+  debugger trace context, which is inherited for the same reason.
+- **`def` roots its TARGET.** A `def` built as data and eval'd with no compile-ns in scope —
+  how instrumentation rebinds a function (`std/tool/debug`'s
+  `(eval (list 'def 'main/greet wrapper))`) — wrote a *new* unrooted global and left the real
+  `brk/main/greet` untouched, so a traced function was never the one that ran.
+- **The `--` privacy rule compares rooted names.** `cur_ns` is rooted (`bedit/tutor`), so an
+  unrooted `m` made a module's reference to *its own* helper read as a foreign private access.
+- **The checker sets the rooted namespace** (`file_ns` → `root_module_name`), so `nest check`
+  agrees with the runtime instead of reporting that privacy violation as a warning.
+- **`project--file-feature` returns the rooted feature key.** `defmodule` provides
+  `bedit/interactive`; the load-once guard compared the short `interactive`, never matched, and
+  re-loaded every module — so a registry built by rebinding a global
+  (`(def *commands* (assoc *commands* …))`) started over and silently emptied. This is the one
+  that made bedit's M-x registry come up with 3 entries instead of 200.
+- **`ability--id-kw` roots an already-qualified id.** `defrecord` bakes `:__id__` off the
+  *rooted* ns, so an impl written against the record's short module path registered under
+  `:lsp-requests/lsp-hover` while every value presented `:bedit/lsp-requests/lsp-hover` —
+  dispatch found no impl. (The bare-symbol case already agreed; the qualified one didn't.)
+
+The two `project_test` failures the previous entry shipped with (`unbound symbol:
+brood/zzz/*zzz-loads*`) were the first symptom of the same asymmetry and are green now.
+
+Verified: brood 4303/4303 + `nest check` clean; bedit 1222/1222 + `nest check` clean (it was
+un-loadable before). **A downstream project is the test this feature didn't have** — every
+one of these six is invisible to a suite whose fixtures are single-module temp projects.
+
+## 2026-08-02 (cont.) — the editor toolkit gains the rest of Emacs' navigation vocabulary
+`std/tool/sexp.blsp` had five structural motions; Emacs has more, and bedit was missing the
+keys. Added as pure primitives next to the ones they join, so the editor side is one
+`ed-apply` each: `point-list-forward` / `point-list-backward` (Emacs `forward-list` /
+`backward-list` — step over atom siblings, stop only at whole lists), `point-up-forward`
+(`up-list`, the forward mirror of `point-up`), `point-defun-end`, and the pure edit
+`point-transpose` (`transpose-sexps`). `std/editor/treesit.blsp` mirrors the four motions over
+its node maps, so a tree-sitter language mode inherits them unchanged. `std/editor/buffer.blsp`
+gains `back-to-indentation` and `forward-sentence` / `backward-sentence` (paragraph-bounded,
+single-space terminator) beside `forward-word` / `forward-paragraph`.
+
+The forward/backward walks folded into one shape parameterised by which siblings count
+(`sexp--sibling-forward/-backward` + a `keep?` predicate), and `point-defun-start/-end` into
+one `edge`-parameterised body — so the sexp/list pair can't drift apart. Same in treesit
+(`ts--defun-edge`). `kill-sexp` needed no new primitive: it's `ed-kill-span` over the existing
+forward motion. Tests: sexp +33, buffer +43.
+
 ## 2026-08-02 — published the cross-language run, and the regression that wasn't
 
 Re-ran the seven-language suite (`brood-benchmarks`, harness defaults, guard clean) after

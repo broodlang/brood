@@ -218,6 +218,16 @@ fn spawn_impl(heap: &Heap, f: Value, link_parent: bool) -> Result<u64, LispError
     let mut child = Heap::with_regions(prelude, runtime);
     child.set_global(EnvId::GLOBAL);
 
+    // Package-rooted namespaces (ADR-070): the child inherits the spawner's package
+    // context. "Which package is this code from?" is a property of the CODE, not of the
+    // process running it — a worker spawned inside project `bedit` is still running
+    // bedit's code, so its qualified intra-project references (`commands/cmd-open`) must
+    // root exactly as they do on the parent. Without this, every spawned process (a test
+    // body, a buffer server, a stream worker) resolves them as unbound the moment the
+    // project is rooted. Empty pair outside a package, so this is free in that case.
+    let (package_prefix, package_modules) = heap.package_context();
+    child.set_package_context(package_prefix, package_modules);
+
     // Transparent causal-context propagation (opt-in, zero cost when unused): if the
     // spawner has a debugger trace context set (the debugger sets it inside a
     // `span`/`with-debugger`), promote it into the shared runtime — valid in the child,
