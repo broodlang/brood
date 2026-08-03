@@ -10,6 +10,9 @@
 
 (defmodule resolver-test (:use test) (:use resolver))
 
+;; the oracle (below) checks constraints directly, so it names `version` explicitly
+(require 'version)
+
 ;; ---- file-local helpers (defined once at load; survive :isolated rollback) ----
 ;; A provider from two literal tables: `versions` is {name -> [version ...]}; `deps` is
 ;; {name -> {version -> [[dep-name constraint] ...]}}. A missing entry is nil (no
@@ -171,6 +174,59 @@
     (let (p (rt-leaf-prov {'foo ["1.0.0" "1.1.0"]}))
       (assert= {'foo "1.1.0"} (rt-ok-pref [['foo "^1.0"]] p {'ghost "9.9.9"})))))
 
+(describe "resolver: bounded search (an over-constrained graph fails fast, never hangs)"
+  ;; b1..b12 each have two versions; `check` needs b1 = 1.0.0 but is decided LAST, so
+  ;; newest-first picks b1 = 2.0.0 early and only discovers the conflict at the end —
+  ;; the shape that makes naive backtracking exponential. The search is bounded, so this
+  ;; ends in a clear error instead of a hang (until conflict-driven learning lands).
+  (defn rt-tangled (n)
+    (let (bs (map (fn (i) (str "b" i)) (range 1 (+ n 1))))
+      [(fold (fn (m nm) (assoc m nm ["1.0.0" "2.0.0"])) {"check" ["1.0.0"]} bs)
+       (assoc (fold (fn (m nm) (assoc m nm {"1.0.0" [] "2.0.0" []})) {} bs)
+         "check" {"1.0.0" [['b1 "= 1.0.0"]]})
+       (append (map (fn (nm) [(symbol nm) ">= 1.0"]) bs) (list ['check nil]))]))
+  (defn rt-tangled-provider (versions deps)
+    (make-provider (fn (nm) (get versions (if (symbol? nm) (name nm) nm)))
+      (fn (nm v) (get (get deps (if (symbol? nm) (name nm) nm)) v))))
+  (test "the step budget stops the search with a clear, actionable error"
+    (let ([versions deps roots] (rt-tangled 12)
+          p (rt-tangled-provider versions deps))
+      (binding (*resolver-max-steps* 3000)
+        (let (message (rt-err roots p))
+          (is (includes? message "too tangled"))
+          (is (includes? message "Pin"))))))
+  (test "the same shape, small enough to resolve inside the budget, still succeeds"
+    ;; only 2 b's: the exponential fan is tiny, so it finds b1 = 1.0.0 well within budget
+    (let ([versions deps roots] (rt-tangled 2)
+          p (rt-tangled-provider versions deps)
+          solution (rt-ok roots p))
+      (assert= "1.0.0" (get solution 'b1))
+      (assert= "1.0.0" (get solution 'check)))))
+
+(describe "resolver: scale"
+  (test "a 120-package transitive graph resolves completely"
+    ;; a realistic DAG — each package depends on a few lower-indexed ones with loose ranges,
+    ;; so there is essentially no backtracking. Guards the incremental work-list and the
+    ;; compiled-constraint fast path against an O(n²) or re-parse-every-check regression:
+    ;; if either returned, a 120-package solve would crawl and eventually trip the suite cap.
+    (let (n 120
+          nm (fn (i) (symbol (str "p" i)))
+          versions (fold (fn (m i) (assoc m (nm i) ["1.0.0" "1.1.0" "2.0.0"])) {} (range 0 n))
+          deps (fold (fn (m i)
+                       (let (ds (if (= i 0)
+                                  []
+                                  (distinct (keep (fn (j) (when (and (>= j 0) (< j i)) [(nm j) ">= 1.0"]))
+                                              (list (- i 1) (quot i 2) (- i 3))))))
+                         (assoc m (nm i) {"1.0.0" ds "1.1.0" ds "2.0.0" ds})))
+                     {}
+                     (range 0 n))
+          p (make-provider (fn (name) (get versions name)) (fn (name v) (get (get deps name) v)))
+          solution (rt-ok [[(nm (- n 1)) ">= 1.0"]] p))
+      ;; the root reaches the whole chain (each p_i links to p_{i-1}), so all N resolve,
+      ;; each to the newest that fits (2.0.0)
+      (assert= n (count (keys solution)))
+      (is (every? (fn (kv) (= (nth kv 1) "2.0.0")) (map-pairs solution))))))
+
 (describe "resolver: determinism"
   (test "the same universe resolves to the same solution every time"
     (let (p (rt-prov {'a ["1.0.0" "2.0.0"] 'b ["1.0.0"] 'c ["1.0.0" "2.0.0"]}
@@ -210,3 +266,152 @@
       (let (results (rt-collect 0 16 nil))
         (assert= 16 (count results))
         (is (every? (fn (r) (= r expected)) results))))))
+
+;; ---- generative oracle: the solver vs brute-force enumeration (ADR-209) -------
+;; The strongest check here: over hundreds of SEEDED random universes, the backtracking
+;; solver's yes/no must match an independent brute-force ORACLE, and every solution it
+;; returns must actually satisfy the graph. The oracle shares no code with the solver — it
+;; enumerates every one-version-per-package assignment and asks "is the closure reachable
+;; from the roots consistent?" — so agreement across a wide sample is strong evidence the
+;; solver is both SOUND (never claims a solution that doesn't hold, never a solvable graph
+;; unsolvable) and COMPLETE (never gives up when a solution exists). A disagreement is
+;; returned as a self-describing counterexample (the universe + roots), not a bare failure.
+
+;; -- universe: {name -> {version -> [[dep-name constraint] ...]}} --
+(defn rt-o-versions (universe nm) (keys (get universe nm)))
+(defn rt-o-deps (universe nm version) (get (get universe nm) version))
+
+(defn rt-o-provider (universe)
+  (make-provider
+    (fn (nm) (rt-o-versions universe nm))
+    (fn (nm version) (rt-o-deps universe nm version))))
+
+;; Every full assignment {name -> chosen version}, one per package that HAS a version
+;; (a versionless package is simply absent — treated as "missing/unsatisfiable" downstream).
+(defn rt-o-assignments (universe)
+  (fold (fn (acc nm)
+          (let (versions (rt-o-versions universe nm))
+            (if (empty? versions)
+              acc
+              (apply append
+                (map (fn (assignment) (map (fn (v) (assoc assignment nm v)) versions)) acc)))))
+    (list {})
+    (keys universe)))
+
+;; Walk the closure reachable from `queue` under `assignment`; true iff every reachable
+;; package is assigned AND every dependency constraint it names is satisfied by the
+;; assignment (a reachable but unassigned/versionless package fails the closure).
+(defn rt-o-closure-ok? (queue universe assignment visited)
+  (cond
+    (empty? queue) true
+    (contains? visited (first queue)) (rt-o-closure-ok? (rest queue) universe assignment visited)
+    else
+      (let (nm (first queue)
+            chosen (get assignment nm))
+        (if (nil? chosen)
+          false
+          (let (deps (rt-o-deps universe nm chosen))
+            (if (every? (fn (d) (let (dep-version (get assignment (nth d 0)))
+                                  (and dep-version (version/version-satisfies? dep-version (nth d 1)))))
+                  deps)
+              (rt-o-closure-ok? (append (rest queue) (map (fn (d) (nth d 0)) deps))
+                universe assignment (assoc visited nm true))
+              false))))))
+
+;; An assignment resolves the roots iff every root is assigned + satisfies its constraint
+;; AND the closure it reaches is consistent.
+(defn rt-o-resolves? (roots universe assignment)
+  (and (every? (fn (r) (let (v (get assignment (nth r 0))) (and v (version/version-satisfies? v (nth r 1))))) roots)
+    (rt-o-closure-ok? (map (fn (r) (nth r 0)) roots) universe assignment {})))
+
+;; The oracle: is there ANY assignment that resolves the roots?
+(defn rt-o-solvable? (roots universe)
+  (any? (fn (assignment) (rt-o-resolves? roots universe assignment)) (rt-o-assignments universe)))
+
+;; -- random universe generator (seeded; every gen returns [value next-seed]) --
+(def rt-g-versions ["1.0.0" "1.1.0" "2.0.0"])
+(def rt-g-constraints ["^1.0" "^2.0" ">= 1.0" "< 2.0" "= 1.0.0" "= 2.0.0" nil])
+(def rt-g-packages ['a 'b 'c])
+
+(defn rt-g-version-set (seed)
+  ;; 1..3 versions (a prefix of the pool, so they stay ordered)
+  (let ([k s1] (rand-int seed 3)) [(take (+ k 1) rt-g-versions) s1]))
+
+(defn rt-g-deps (seed pkg others acc)
+  (if (empty? others)
+    [acc seed]
+    (let ([include s1] (rand-int seed 2))
+      (if (= include 1)
+        (let ([c s2] (sample s1 rt-g-constraints))
+          (rt-g-deps s2 pkg (rest others) (cons [(first others) c] acc)))
+        (rt-g-deps s1 pkg (rest others) acc)))))
+
+(defn rt-g-version-map (seed pkg versions acc)
+  (if (empty? versions)
+    [acc seed]
+    (let ([deps s1] (rt-g-deps seed pkg (filter (fn (p) (not (= p pkg))) rt-g-packages) nil))
+      (rt-g-version-map s1 pkg (rest versions) (assoc acc (first versions) deps)))))
+
+(defn rt-g-package (seed pkg)
+  (let ([versions s1] (rt-g-version-set seed))
+    (rt-g-version-map s1 pkg versions {})))
+
+(defn rt-g-universe-map (seed packages acc)
+  (if (empty? packages)
+    [acc seed]
+    (let ([pkgmap s1] (rt-g-package seed (first packages)))
+      (rt-g-universe-map s1 (rest packages) (assoc acc (first packages) pkgmap)))))
+
+(defn rt-g-roots (seed packages acc)
+  (if (empty? packages)
+    [acc seed]
+    (let ([include s1] (rand-int seed 2))
+      (if (= include 1)
+        (let ([c s2] (sample s1 rt-g-constraints))
+          (rt-g-roots s2 (rest packages) (cons [(first packages) c] acc)))
+        (rt-g-roots s1 (rest packages) acc)))))
+
+(defn rt-g-universe (seed)
+  ;; [universe roots next-seed] — roots forced non-empty so there's always something to solve
+  (let ([universe s1] (rt-g-universe-map seed rt-g-packages {})
+        [roots s2] (rt-g-roots s1 rt-g-packages nil))
+    (if (empty? roots)
+      (let ([c s3] (sample s2 rt-g-constraints)) [universe (list ['a c]) s3])
+      [universe roots s2])))
+
+;; Compare the solver against the oracle for one universe. nil = agreement; otherwise a
+;; self-describing counterexample map naming the kind of disagreement.
+(defn rt-o-check (universe roots)
+  (let (result (resolve roots (rt-o-provider universe))
+        solvable (rt-o-solvable? roots universe))
+    (match result
+      ([:ok solution]
+        (cond
+          (not solvable) {:kind :unsound-claimed-ok :universe universe :roots roots :solution solution}
+          (not (rt-o-resolves? roots universe solution))
+            {:kind :invalid-solution :universe universe :roots roots :solution solution}
+          else nil))
+      ([:error message]
+        (if solvable {:kind :incomplete-gave-up :universe universe :roots roots :message message} nil)))))
+
+(defn rt-o-scan (n seed)
+  ;; the first counterexample across `n` seeded universes, or nil if all agree
+  (if (= n 0)
+    nil
+    (let ([universe roots next] (rt-g-universe seed)
+          problem (rt-o-check universe roots))
+      (if problem problem (rt-o-scan (dec n) next)))))
+
+(describe "resolver: fuzz vs a brute-force oracle"
+  (test "the solver's decision matches enumeration over 400 random universes"
+    ;; a counterexample surfaces as the asserted value, so a failure prints the exact
+    ;; universe + roots that disagreed rather than a bare 'false'
+    (assert= nil (rt-o-scan 400 1)))
+  (test "a second, disjoint seed range also agrees"
+    (assert= nil (rt-o-scan 400 987654321)))
+  (test "the oracle itself is wired correctly on known cases"
+    ;; a sanity check on the oracle so a broken oracle can't hide a broken solver
+    (is (rt-o-solvable? [['a "^1.0"]] {'a {"1.0.0" []}}))
+    (refute (rt-o-solvable? [['a "^2.0"]] {'a {"1.0.0" []}}))
+    (is (rt-o-solvable? [['a nil]] {'a {"1.0.0" [['b "^1.0"]]} 'b {"1.0.0" []}}))
+    (refute (rt-o-solvable? [['a nil]] {'a {"1.0.0" [['b "^2.0"]]} 'b {"1.0.0" []}}))))

@@ -21,7 +21,9 @@
   "Semantic-version helpers: `version-core` (→ `[major minor patch]`),
 `version-valid?`, `version-compare`, `version-newer?`, and `version-satisfies?`
 (a version against a `\">= 1.2\"`-, `\"^1.2\"`-, `\"~> 1.3\"`-, or `\">= 1.2, < 2.0\"`-style
-constraint). Comparison is on the numeric `MAJOR.MINOR.PATCH` core; any
+constraint). For repeated checks against one constraint, `version-compile` it once and
+match many versions with `version-match?` / `version-match-parts?` — that is the fast path
+the resolver runs. Comparison is on the numeric `MAJOR.MINOR.PATCH` core; any
 `-prerelease` / `+build` suffix is ignored (ordering pre-releases is deferred until
 something needs it). `(require 'version)`.")
 
@@ -73,6 +75,12 @@ smaller — `\"1.2\"` and `\"1.2.0\"` compare equal, because a constraint writte
           (> x y) 1
           else (version--compare-parts (if (empty? a) a (rest a))
                  (if (empty? b) b (rest b)))))))
+
+(defn version-compare-cores (a b)
+  "Compare two numeric cores (integer part-lists, as returned by `version-core`): -1, 0, or
+1. For callers that have already parsed both versions and want to avoid re-parsing — the
+resolver sorts and filters thousands of candidates this way."
+  (version--compare-parts a b))
 
 (defn version-newer? (a b)
   "Whether version `a` is strictly newer than `b`. The empty string is older than
@@ -157,34 +165,59 @@ everything (the \"no release yet\" placeholder a registry starts from)."
            else 0))
     (list 0 1 2)))
 
-(defn version--range-satisfied? (v op wanted)
-  ;; `>= wanted, < (upper-bound wanted)` on part-lists.
-  (let (parts (version-core wanted)
-        vc (version-core v)
-        hi (version--upper-bound parts (version--bump-index op parts)))
-    (and (>= (version--compare-parts vc parts) 0)
-      (< (version--compare-parts vc hi) 0))))
+;; --- compiled constraints ------------------------------------------------------
+;; Parsing a constraint STRING (`">= 1.2, < 2.0"`) into terms is the expensive part of a
+;; check — string-splitting, operator-finding, `->number`. A resolver checks one constraint
+;; against many versions (and re-checks across backtracking), so it compiles once with
+;; `version-compile` and then matches versions cheaply with `version-match?` — pure integer
+;; part-list comparisons, no string work. `version-satisfies?` is the string-in convenience
+;; over the same machinery (compile, then match). A COMPILED constraint is a list of terms,
+;; each `[:lo-hi lo hi]` (a `^`/`~>` range, hi exclusive) or `[:cmp op wanted]`; nil = "no
+;; constraint", matched by anything.
 
-(defn version--term-satisfied? (v term constraint)
-  ;; One term of a (possibly comma-separated) constraint. `constraint` is the whole
-  ;; original string, carried only so an error names what the user actually wrote.
+(defn version-compile (constraint)
+  "Compile a constraint STRING into a form `version-match?` checks quickly (see this
+module's overview). nil / \"\" compile to nil (no constraint). Raises on a malformed term,
+the same as `version-satisfies?` — compiling is where a bad constraint is caught."
+  (if (or (nil? constraint) (= (trim constraint) ""))
+    nil
+    (map (fn (term) (version--compile-term term constraint))
+      (keep (fn (t) (let (tt (trim t)) (when (not (= tt "")) tt)))
+        (string-split constraint ",")))))
+
+(defn version--compile-term (term constraint)
+  ;; `constraint` is the whole original string, carried only so an error names what the
+  ;; user actually wrote.
   (let ([op wanted] (version--split-constraint term))
     (when (= (trim wanted) "")
       (error "version-satisfies?: no version in constraint " (pr-str constraint)))
-    (case op
-      "^" (version--range-satisfied? v "^" wanted)
-      "~>" (version--range-satisfied? v "~>" wanted)
-      (let (c (version-compare v wanted))
+    (let (parts (version-core wanted))
+      (if (or (= op "^") (= op "~>"))
+        [:lo-hi parts (version--upper-bound parts (version--bump-index op parts))]
+        [:cmp op parts]))))
+
+(defn version-match-parts? (compiled parsed)
+  "Whether a version whose numeric core is `parsed` (from `version-core`) satisfies the
+`compiled` constraint. The hot path — every term is an integer part-list comparison."
+  (every? (fn (term) (version--match-term? term parsed)) (or compiled nil)))
+
+(defn version--match-term? (term parsed)
+  (match term
+    ([:lo-hi lo hi] (and (>= (version--compare-parts parsed lo) 0)
+                      (< (version--compare-parts parsed hi) 0)))
+    ([:cmp op wanted]
+      (let (c (version--compare-parts parsed wanted))
         (case op
           "=" (= c 0)
           ">" (> c 0)
           "<" (< c 0)
           ">=" (>= c 0)
           "<=" (<= c 0)
-          (error "version-satisfies?: unknown operator "
-            (pr-str op)
-            " in "
-            (pr-str constraint)))))))
+          (error "version-satisfies?: unknown operator " (pr-str op)))))))
+
+(defn version-match? (compiled v)
+  "Whether version STRING `v` satisfies an already-`version-compile`d constraint."
+  (version-match-parts? compiled (version-core v)))
 
 (defn version-satisfies? (v constraint)
   "Whether version string `v` satisfies `constraint`. A constraint is one term —
@@ -200,12 +233,9 @@ without pinning a version is legal (`{bedit \"\"}`).
 
 An operator this module does not implement, or a term with no version after it,
 **raises** rather than answering a confident `false` — a dependency refused for a
-reason nobody wrote down is worse than a loud one."
-  (if (or (nil? constraint) (= (trim constraint) ""))
-    true
-    (every? (fn (term) (version--term-satisfied? v term constraint))
-      (keep (fn (t) (let (tt (trim t)) (when (not (= tt "")) tt)))
-        (string-split constraint ",")))))
+reason nobody wrote down is worse than a loud one. (For repeated checks against one
+constraint, `version-compile` it once and use `version-match?`.)"
+  (version-match? (version-compile constraint) v))
 
 (defn version-satisfies-all? (versions constraints)
   "Whether every entry of the `constraints` map (name → constraint string) is

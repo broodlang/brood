@@ -158,6 +158,11 @@ land in a later slice."
 ;; than once with different ranges — the solver intersects them). The result is one
 ;; concrete version per registry package across the transitive closure; each is then
 ;; fetched + extracted exactly like a pinned `:version` dep was before.
+;;
+;; Network is confined to a bounded PRE-FETCH: before solving, the registry closure is
+;; walked once (each package fetched a single time) into an immutable map, and the solve
+;; then runs as a PURE function over it — the very injected-provider shape the resolver is
+;; built around. So backtracking never re-hits the registry, however many versions it tries.
 
 (defn package--resolve-registry-closure (root registry-reqs lock-index lock)
   (if (empty? registry-reqs)
@@ -167,12 +172,7 @@ land in a later slice."
         ;; The lock already pins a solution that still satisfies the manifest's ranges —
         ;; reuse it network-free (each fetch hits the `_deps/` cache), the fast path that
         ;; keeps a plain `nest run`/`test` from re-querying the registry every time.
-        (map (fn (kv)
-               (package--resolve-registry root
-                 (project/dep-registry (first kv) (second kv))
-                 (get lock-index (first kv))
-                 nil))
-          (map-pairs locked))
+        (package--fetch-registry-solution root locked lock-index nil)
         ;; Not fully covered (a dep was added/changed, or `nest update` dropped names) →
         ;; solve fresh, but hand the solver the still-locked versions as PREFERENCES so
         ;; the deps that didn't change keep their pins instead of jumping to newest.
@@ -181,23 +181,78 @@ land in a later slice."
 (defn package--solve-registry (root registry-reqs lock-index preferred)
   (let (base (registry--base-for nil)
         roots (map (fn (d) [(get d :name) (get d :version)]) registry-reqs)
-        provider (package--registry-provider base))
+        prefetched (package--prefetch-registry base (map (fn (d) (get d :name)) registry-reqs))
+        provider (package--prefetched-provider prefetched))
     (match (resolver/resolve roots provider preferred)
       ([:error message] (error "package: could not resolve dependency versions — " message))
-      ([:ok solution]
-        (map (fn (kv)
-               (package--resolve-registry root
-                 (project/dep-registry (first kv) (second kv))
-                 (get lock-index (first kv))
-                 base))
-          (map-pairs solution))))))
+      ([:ok solution] (package--fetch-registry-solution root solution lock-index base)))))
 
-;; The provider the resolver queries: a package's published versions, and each release's
-;; declared registry requirements — both straight off the hive HTTP API.
-(defn package--registry-provider (base)
+;; Fetch + extract every package of a resolved `{name → version}` solution into entries.
+;; `base` is nil on the lock-reuse path (each fetch is served from the `_deps/` cache, and
+;; only falls back to the configured registry when the cache is cold) and the resolved base
+;; on a fresh solve. The one place a chosen concrete version becomes an on-disk dependency.
+(defn package--fetch-registry-solution (root solution lock-index base)
+  (map (fn (kv)
+         (package--resolve-registry root
+           (project/dep-registry (first kv) (second kv))
+           (get lock-index (first kv))
+           base))
+    (map-pairs solution)))
+
+;; --- the registry pre-fetch (ADR-209) -------------------------------------------
+;; Walk the registry closure from `names` into `{name → [{:version V :dependencies
+;; [[dep-name range]...]} ...]}`, each package fetched exactly once. This is the ONLY
+;; network resolution does, and at scale (300+ packages) it is the whole cost — so it is
+;; parallelised: each breadth-first LEVEL is fetched CONCURRENTLY. Brood's HTTP is
+;; non-blocking (ADR-062), so a spawned fetcher parks on socket I/O rather than pinning a
+;; worker, and a level's fetches overlap end-to-end instead of summing. A 300-package
+;; closure resolves in a handful of round-trip-bounded rounds, not 300 sequential GETs.
+(defn package--prefetch-registry (base names)
+  (package--prefetch-bfs base (distinct names) {}))
+
+(defn package--prefetch-bfs (base frontier fetched)
+  (if (empty? frontier)
+    fetched
+    (let (results (package--fetch-frontier base frontier)
+          fetched2 (fold (fn (m pair) (assoc m (first pair) (second pair))) fetched results)
+          discovered (distinct (apply append
+                                 (map (fn (pair) (package--release-dep-names (second pair))) results)))
+          next-frontier (filter (fn (nm) (not (contains? fetched2 nm))) discovered))
+      (package--prefetch-bfs base next-frontier fetched2))))
+
+;; Fetch every package in `frontier` CONCURRENTLY — one spawned process each, results
+;; gathered by mailbox. A failed fetch comes back tagged so a dead worker can't hang the
+;; gather; the first failure raises with the package named. Returns `[[name releases]...]`.
+(defn package--fetch-frontier (base frontier)
+  (let (me (self))
+    (dolist (nm frontier)
+      (spawn (send me [:fetched nm (try [:ok (registry--fetch-releases base nm)]
+                                     (catch e [:error (error-message e)]))])))
+    (package--gather-frontier me (count frontier) nil)))
+
+(defn package--gather-frontier (me remaining acc)
+  (if (= remaining 0)
+    acc
+    (receive
+      ([:fetched nm result]
+        (match result
+          ([:ok releases] (package--gather-frontier me (- remaining 1) (cons [nm releases] acc)))
+          ([:error message]
+            (error "package: fetching " (name nm) " from the registry failed: " message)))))))
+
+;; The distinct dep-name symbols across a package's releases — the frontier to prefetch next.
+(defn package--release-dep-names (releases)
+  (distinct (apply append
+              (map (fn (release) (map first (get release :dependencies))) releases))))
+
+;; A PURE provider over the prefetched map (no I/O), so the resolver's backtracking is free:
+;; `versions` reads the release list; `deps` finds the matching release's declared deps.
+(defn package--prefetched-provider (fetched)
   (resolver/make-provider
-    (fn (nm) (registry--list-versions base nm))
-    (fn (nm version) (registry--release-deps base nm version))))
+    (fn (nm) (map (fn (release) (get release :version)) (or (get fetched nm) nil)))
+    (fn (nm version)
+      (let (release (find (fn (r) (= (get r :version) version)) (or (get fetched nm) nil)))
+        (if (nil? release) nil (get release :dependencies))))))
 
 ;; {name → locked concrete version} for every `:registry` row of the prior lock — the
 ;; previously-computed solution, reused when it still satisfies the manifest.
@@ -602,31 +657,39 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
       else [:error status (registry--error-text resp)])))
 
 ;; --- the resolver's registry provider (ADR-209) ---------------------------------
-;; Two questions the backtracking resolver asks: what versions of a package exist, and
-;; what does one release require. Both are one GET each against the hive API. Names cross
-;; as symbols (the resolver keys on them); the URL wants the string, so `(name nm)`.
+;; The resolver needs, per package, its versions AND each release's deps. That is ONE
+;; request: the `/releases` list carries each release's `:dependencies` (the registry-index
+;; model — Cargo's index, npm's packument — so resolving N packages is N requests, not
+;; N×versions). Names cross as symbols; the URL wants the string, so `(name nm)`.
 
 (defn registry--releases-url (base nm)
   (str base "/api/v1/packages/" (name nm) "/releases"))
 
-(defn registry--list-versions (base nm)
-  "The published version strings of `nm` at `base` (any order — the resolver sorts). An
-unknown package (404) is nil, so the resolver reports it as having no versions available
-rather than raising mid-search."
+(defn registry--fetch-releases (base nm)
+  "Every published release of `nm` at `base` as `[{:version V :dependencies [[dep-name
+range]...]} ...]`, in ONE request. An unknown package (404) is nil (the resolver reports it
+as having no versions rather than raising mid-search); any other error raises."
   (match (registry--get-json (registry--releases-url base nm))
-    ([:ok data] (map (fn (r) (get r :version)) (or (get data :releases) nil)))
+    ([:ok data]
+      (map (fn (release)
+             {:version (get release :version)
+              :dependencies (map (fn (d) [(symbol (get d :name)) (get d :version)])
+                              (or (get release :dependencies) nil))})
+        (or (get data :releases) nil)))
     ([:error 404 _message] nil)
     ([:error _status message]
-      (error "package: listing published versions of " (name nm) " failed: " message))))
+      (error "package: listing releases of " (name nm) " failed: " message))))
+
+;; Thin views over the one-request release list, for callers that want just one slice.
+(defn registry--list-versions (base nm)
+  "The published version strings of `nm` (any order — the resolver sorts)."
+  (map (fn (release) (get release :version)) (or (registry--fetch-releases base nm) nil)))
 
 (defn registry--release-deps (base nm version)
-  "The registry requirements of `nm`@`version` as `[dep-name constraint]` pairs, read
-from the release metadata's `:dependencies` (each `{:name :version}`, the `:version` now
-a range). A release with no dependencies — or one the registry cannot serve — is empty."
-  (match (registry--get-json (registry--release-url base nm version))
-    ([:ok meta] (map (fn (d) [(symbol (get d :name)) (get d :version)])
-                  (or (get meta :dependencies) nil)))
-    ([:error _status _message] nil)))
+  "The `[dep-name constraint]` requirements of `nm`@`version`; empty when absent."
+  (let (release (find (fn (r) (= (get r :version) version))
+                  (or (registry--fetch-releases base nm) nil)))
+    (if (nil? release) nil (get release :dependencies))))
 
 ;; A registry dep names a package + a version RANGE, resolved to a concrete version by
 ;; the backtracking resolver (ADR-209). Resolution here fetches that concrete version:

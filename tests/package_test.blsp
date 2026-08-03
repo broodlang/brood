@@ -414,8 +414,18 @@
 ;; version. The registry SPEC is `{name -> {version -> {:deps [[dep-name range]...]
 ;; :checksum sha :bytes b}}}`.
 
-(defn rr-releases-json (versions)
-  (str "{\"releases\":[" (join "," (map (fn (v) (str "{\"version\":\"" v "\"}")) versions)) "]}"))
+;; The `/releases` list now carries each release's deps (the one-request contract the
+;; resolver's prefetch relies on): `{:releases [{:version V :dependencies [...]} ...]}`.
+(defn rr-releases-json (releases)
+  (str "{\"releases\":["
+    (join ","
+      (map (fn (kv)
+             (str "{\"version\":\"" (first kv) "\",\"dependencies\":["
+               (join "," (map (fn (d) (str "{\"name\":\"" (first d) "\",\"version\":\"" (second d) "\"}"))
+                           (get (second kv) :deps)))
+               "]}"))
+        (map-pairs releases)))
+    "]}"))
 
 (defn rr-release-json (version checksum deps)
   (str "{\"checksum\":\"" checksum "\",\"version\":\"" version "\",\"dependencies\":["
@@ -442,7 +452,7 @@
         (cond
           (nil? releases) (net/http/not-found)
           (and (= n 6) (= (nth parts 5) "releases"))
-            (net/http/ok (rr-releases-json (keys releases)))
+            (net/http/ok (rr-releases-json releases))
           (and (= n 7) (= (nth parts 5) "releases"))
             (let (rel (get releases (nth parts 6)))
               (if (nil? rel) (net/http/not-found)
@@ -538,6 +548,35 @@
           (assert= 2 (count entries))
           (assert= "1.0.0" (get (get by-name 'foo) :version)) ; kept, NOT upgraded to 1.1.0
           (assert= "2.0.0" (get (get by-name 'bar) :version))))))
+
+  (test "backtracking end-to-end: a dead-end newest version falls back, then downloads"
+    ;; a@2.0.0 needs c=1.0.0, a@1.0.0 needs c=2.0.0, and b forces c=2.0.0 — so the newest
+    ;; a (2.0.0) dead-ends and the resolver must fall back to a@1.0.0. Only the SOLUTION
+    ;; versions (a 1.0.0, b 1.0.0, c 2.0.0) are downloaded; a@2.0.0 / c@1.0.0 are consulted
+    ;; during the pre-fetch but never fetched as tarballs. Proves prefetch + pure solve +
+    ;; download all hang together on a graph that actually backtracks.
+    (let (parent (pkg-fixture-root)
+          app-dir (path-join parent "app")
+          [a10 a10s] (rr-build parent "a" "1.0.0" "")
+          [b10 b10s] (rr-build parent "b" "1.0.0" "")
+          [c20 c20s] (rr-build parent "c" "2.0.0" "")
+          spec {"a" {"1.0.0" {:deps [["c" "= 2.0.0"]] :checksum a10s :bytes a10}
+                     "2.0.0" {:deps [["c" "= 1.0.0"]] :checksum "x" :bytes #b""}}
+                "b" {"1.0.0" {:deps [["c" "= 2.0.0"]] :checksum b10s :bytes b10}}
+                "c" {"1.0.0" {:deps [] :checksum "x" :bytes #b""}
+                     "2.0.0" {:deps [] :checksum c20s :bytes c20}}}
+          base (mock-registry-start (rr-handler spec)))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (binding (*config-registry* base)
+        (let (entries (package/resolve-deps app-dir
+                        (list (dep-registry 'a ">= 1.0") (dep-registry 'b ">= 1.0"))
+                        nil)
+              by-name (fold (fn (m e) (assoc m (get e :name) e)) {} entries))
+          (assert= 3 (count entries))
+          (assert= "1.0.0" (get (get by-name 'a) :version)) ; fell back from 2.0.0
+          (assert= "1.0.0" (get (get by-name 'b) :version))
+          (assert= "2.0.0" (get (get by-name 'c) :version))
+          (is (dir? (path-join (path-join app-dir "_deps") "c")))))))
 
   (test "an unsatisfiable range set errors, naming the package"
     (let (parent (pkg-fixture-root)

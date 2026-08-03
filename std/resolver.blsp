@@ -60,12 +60,6 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
 (defn resolver--seed (roots)
   (fold (fn (cs r) (resolver--add cs (nth r 0) :root (nth r 1))) {} roots))
 
-;; The names required but not yet decided, in a deterministic (sorted) order — sorting
-;; only fixes which conflict a failure reports first, never whether one is found.
-(defn resolver--pending (constraints assignment)
-  (sort (keep (fn (kv) (when (not (contains? assignment (first kv))) (first kv)))
-          (map-pairs constraints))))
-
 ;; The versions of `nm` that satisfy every one of its requirements, newest first (so
 ;; the search tries the newest compatible release before falling back to older ones) —
 ;; EXCEPT a `preferred` version (typically the one already in the lock) is tried first
@@ -74,11 +68,19 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
 ;; bump the rest of the graph to newest. Preference never widens the candidate set (a
 ;; preferred version that no longer fits simply isn't among them) and never changes
 ;; *whether* a solution is found — only which of the valid ones the search reaches first.
-(defn resolver--candidates (provider nm reqs preferred)
-  (let (constraints (map (fn (r) (nth r 1)) reqs)
-        newest-first (sort (fn (a b) (> (version/version-compare a b) 0))
-                       (filter (fn (v) (every? (fn (c) (version/version-satisfies? v c)) constraints))
-                         (or (provider-versions provider nm) nil)))
+(defn resolver--candidates (provider nm requirements preferred)
+  ;; Compile each requirement's constraint ONCE and parse each candidate version ONCE, then
+  ;; match on integer part-lists — instead of re-parsing every (version, constraint) string
+  ;; pair. On a large graph this is the difference between a fast solve and a slow one:
+  ;; `version-satisfies?` string-parsing was the dominant per-step cost.
+  (let (compiled (map (fn (requirement) (version/version-compile (nth requirement 1))) requirements)
+        ;; parse each candidate version ONCE into [string parsed-core], then filter and sort
+        ;; on the parsed core — no version string is parsed more than once.
+        parsed (map (fn (v) [v (version/version-core v)]) (or (provider-versions provider nm) nil))
+        matching (filter (fn (pv) (every? (fn (cc) (version/version-match-parts? cc (nth pv 1))) compiled))
+                   parsed)
+        newest-first (map (fn (pv) (nth pv 0))
+                       (sort (fn (a b) (> (version/version-compare-cores (nth a 1) (nth b 1)) 0)) matching))
         pin (get preferred nm))
     (if (and pin (includes? newest-first pin))
       (cons pin (filter (fn (v) (not (= v pin))) newest-first))
@@ -95,63 +97,140 @@ the unsatisfiable package and who required what. Pure: all fetching is the provi
 package when it still satisfies the constraints, so a re-solve keeps existing pins instead
 of upgrading the whole graph to newest — it changes *which* valid solution is reached,
 never *whether* one is."
-  (resolver--solve provider {} (resolver--seed roots) (or preferred {})))
+  ;; `pending` is the work-list of undecided packages, carried explicitly and updated
+  ;; incrementally (drop the one we decide, enqueue any packages its deps newly introduce)
+  ;; rather than re-derived from the whole constraint set each step — the difference between
+  ;; O(n) and O(n²) on a large graph. It is a functional FIFO QUEUE (see below): breadth-first
+  ;; order, so a shared package is decided only after every requirer that constrains it,
+  ;; which is what lets a conflict on it name them all — and every operation is amortized
+  ;; O(1), so the work-list never becomes the bottleneck. Immutable, so backtracking restores
+  ;; the right work-list for free; order only fixes which conflict surfaces first.
+  ;;
+  ;; `steps` is a call-local step counter (a `table`, created and dropped here, never
+  ;; escaping): it bounds the search so a pathological, adversarially-constrained graph —
+  ;; which naive backtracking explores exponentially — fails FAST with a clear error instead
+  ;; of hanging. It does not affect the result (a solvable graph is decided in ~one step per
+  ;; package); it only caps the worst case, the honest floor until conflict-driven learning
+  ;; (PubGrub) lands. The counter is the resolver's only mutable state and it is not
+  ;; observable, so `resolve` stays a deterministic function of its inputs.
+  (let (steps (table))
+    (table-put steps :start (now))
+    (try
+      (let (result (resolver--solve provider {} (resolver--seed roots)
+                     (resolver--queue (distinct (map (fn (r) (nth r 0)) roots)))
+                     (or preferred {}) steps))
+        (table-drop steps)
+        result)
+      (catch e
+        (table-drop steps)
+        (if (and (map? e) (get e :resolver-budget-exceeded))
+          [:error (get e :message)]
+          (throw e))))))
 
-(defn resolver--solve (provider assignment constraints preferred)
-  (let (pending (resolver--pending constraints assignment))
-    (if (empty? pending)
-      [:ok assignment]
-      (let (nm (first pending)
-            reqs (get constraints nm)
-            candidates (resolver--candidates provider nm reqs preferred))
-        (if (empty? candidates)
-          [:error (resolver--no-candidate-msg provider nm reqs)]
-          (resolver--try provider assignment constraints nm candidates preferred nil))))))
+;; Two ceilings on the search, so an over-constrained graph fails fast instead of hanging.
+;; The WALL-CLOCK budget is the real bound a user feels — it caps the worst-case wait no
+;; matter how cheap or dear each step is. The STEP budget is a deterministic secondary guard
+;; (and what a test pins). Both are dynvars so a genuinely huge, tractable workspace can raise
+;; them. A well-formed graph is decided in ~one step per package and never approaches either.
+(defdyn *resolver-time-budget-ms* 10000)
+(defdyn *resolver-max-steps* 2000000)
+
+;; Count one search step; past a ceiling, abort the whole recursion by throwing (caught in
+;; `resolve`) — cheaper than threading a fuel value through every return. The clock is read
+;; only every 256 steps, so the check is nearly free on the hot path while keeping the
+;; wall-clock overshoot past the budget small.
+(defn resolver--tick (steps)
+  (let (n (+ 1 (table-get steps :n 0)))
+    (table-put steps :n n)
+    (when (and (= 0 (rem n 256))
+            (> (- (now) (table-get steps :start 0)) *resolver-time-budget-ms*))
+      (resolver--budget-exceeded
+        (str "did not finish within " *resolver-time-budget-ms* " ms")))
+    (when (> n *resolver-max-steps*)
+      (resolver--budget-exceeded (str "exceeded " *resolver-max-steps* " search steps")))))
+
+(defn resolver--budget-exceeded (why)
+  (throw {:resolver-budget-exceeded true
+          :message (str "dependency resolution " why
+                     " — the version constraints are too tangled to resolve within the budget."
+                     " Pin the conflicting dependencies explicitly, or relax a range.")}))
+
+;; A two-list functional queue [front back]: pop from `front`, enqueue onto `back` (held
+;; reversed), and flip `back` onto `front` when `front` drains — amortized O(1) per op,
+;; FIFO order preserved. Enough queue for the work-list; nothing fancier is warranted.
+(defn resolver--queue (items) [items nil])
+(defn resolver--queue-empty? (q) (and (empty? (nth q 0)) (empty? (nth q 1))))
+(defn resolver--queue-pop (q)
+  (if (empty? (nth q 0))
+    (let (flipped (reverse (nth q 1))) [(first flipped) [(rest flipped) nil]])
+    [(first (nth q 0)) [(rest (nth q 0)) (nth q 1)]]))
+(defn resolver--queue-push-all (q items)
+  ;; enqueue `items` in order onto the back (which is stored reversed), O(count items)
+  [(nth q 0) (fold (fn (back item) (cons item back)) (nth q 1) items)])
+
+(defn resolver--solve (provider assignment constraints pending preferred steps)
+  (resolver--tick steps)
+  (if (resolver--queue-empty? pending)
+    [:ok assignment]
+    (let ([nm rest-pending] (resolver--queue-pop pending)
+          requirements (get constraints nm)
+          candidates (resolver--candidates provider nm requirements preferred))
+      (if (empty? candidates)
+        [:error (resolver--no-candidate-msg provider nm requirements)]
+        (resolver--try provider assignment constraints rest-pending nm candidates preferred nil steps)))))
 
 ;; Try `nm`'s candidate versions in order (preferred-then-newest); the first that leads to
-;; a full solution wins. `last-error` carries the most recent failure so an exhausted list
-;; reports a real reason (the deep conflict, not a bland "nothing worked").
-(defn resolver--try (provider assignment constraints nm candidates preferred last-error)
+;; a full solution wins. `pending` here is the work-list with `nm` already popped; a
+;; successful assignment enqueues the newly-discovered dep names. `last-error` carries the
+;; most recent failure so an exhausted list reports a real reason, not a bland one.
+(defn resolver--try (provider assignment constraints pending nm candidates preferred last-error steps)
   (if (empty? candidates)
     [:error (or last-error (str "no version of " (name nm) " led to a solution"))]
     (let (version (first candidates))
       (match (resolver--assign provider assignment constraints nm version)
         ([:conflict message]
-          (resolver--try provider assignment constraints nm (rest candidates) preferred message))
-        ([:ok assignment2 constraints2]
-          (match (resolver--solve provider assignment2 constraints2 preferred)
+          (resolver--try provider assignment constraints pending nm (rest candidates) preferred message steps))
+        ([:ok assignment2 constraints2 discovered]
+          (match (resolver--solve provider assignment2 constraints2
+                   (resolver--queue-push-all pending discovered) preferred steps)
             ([:ok solution] [:ok solution])
             ([:error message]
-              (resolver--try provider assignment constraints nm (rest candidates) preferred message))))))))
+              (resolver--try provider assignment constraints pending nm (rest candidates) preferred message steps))))))))
 
 ;; Decide `nm` at `version`: record the choice, then fold that release's own deps into
 ;; the constraint set. A dep on an ALREADY-decided package whose chosen version the new
 ;; constraint rejects is an immediate `:conflict` (this candidate is dead) — that check
 ;; is what forces every later decision to respect the earlier ones, and drives the
-;; backtracking when it can't.
+;; backtracking when it can't. On success returns the packages this release DISCOVERED
+;; (dep names not previously seen), which the caller appends to the work-list.
 (defn resolver--assign (provider assignment constraints nm version)
   (resolver--fold-deps (assoc assignment nm version)
     constraints
     nm
-    (or (provider-deps provider nm version) nil)))
+    (or (provider-deps provider nm version) nil)
+    nil))
 
-(defn resolver--fold-deps (assignment constraints nm deps)
+(defn resolver--fold-deps (assignment constraints nm deps discovered)
   (cond
-    (empty? deps) [:ok assignment constraints]
+    (empty? deps) [:ok assignment constraints discovered]
     else
-      (let (d (first deps)
-            dn (nth d 0)
-            dc (nth d 1)
-            decided (get assignment dn))
-        (if (and decided (not (version/version-satisfies? decided dc)))
+      (let (dep (first deps)
+            dep-name (nth dep 0)
+            dep-constraint (nth dep 1)
+            decided (get assignment dep-name)
+            newly-seen (not (contains? constraints dep-name)))
+        (if (and decided (not (version/version-satisfies? decided dep-constraint)))
           [:conflict (str "cannot use "
                        (name nm) " " (get assignment nm)
-                       ": it needs " (name dn) " " (resolver--constraint-str dc)
-                       " but " (name dn) " is already fixed at " decided)]
+                       ": it needs " (name dep-name) " " (resolver--constraint-str dep-constraint)
+                       " but " (name dep-name) " is already fixed at " decided)]
           (resolver--fold-deps assignment
-            (resolver--add constraints dn nm dc)
+            (resolver--add constraints dep-name nm dep-constraint)
             nm
-            (rest deps))))))
+            (rest deps)
+            ;; a name first seen here joins the work-list; already-known names (pending or
+            ;; decided) are already accounted for, so they are not re-queued.
+            (if newly-seen (cons dep-name discovered) discovered))))))
 
 ;; --- error text -----------------------------------------------------------------
 
@@ -161,15 +240,15 @@ never *whether* one is."
 (defn resolver--who (requirer)
   (if (= requirer :root) "your project" (name requirer)))
 
-(defn resolver--reqs-str (reqs)
+(defn resolver--requirements-str (requirements)
   ;; "'>= 2.0' (foo), '(any version)' (your project)" — every requirement and who made it.
   (join ", "
     (map (fn (r) (str (resolver--constraint-str (nth r 1)) " (" (resolver--who (nth r 0)) ")"))
-      reqs)))
+      requirements)))
 
-(defn resolver--no-candidate-msg (provider nm reqs)
+(defn resolver--no-candidate-msg (provider nm requirements)
   (let (available (or (provider-versions provider nm) nil))
     (if (empty? available)
-      (str "no versions of " (name nm) " are available (required by " (resolver--reqs-str reqs) ")")
-      (str "no version of " (name nm) " satisfies all of " (resolver--reqs-str reqs)
+      (str "no versions of " (name nm) " are available (required by " (resolver--requirements-str requirements) ")")
+      (str "no version of " (name nm) " satisfies all of " (resolver--requirements-str requirements)
         " — available: " (join ", " (sort available))))))
