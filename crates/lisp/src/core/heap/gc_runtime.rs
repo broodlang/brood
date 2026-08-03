@@ -380,9 +380,16 @@ impl Heap {
         let owns_drain = drain_armed
             && self.runtime.drain_epoch.load(Ordering::Relaxed) == epoch
             && self.runtime.drain_gen.load(Ordering::Relaxed) == old_gen;
+        // A queued `Message::FnShared` holds a handle into `old_gen` that is in NO heap and
+        // no process's roots, so neither liveness proof above can see it — and the drain's
+        // cached clean ack explicitly assumes such a handle cannot exist ("messages
+        // deep-copy"). The in-flight pin is that assumption's replacement: refuse while any
+        // shared-closure message is outstanding against this generation. Released by
+        // `GenPin::drop`, so a discarded message cannot strand the veto.
         let ok = (owns_drain || !drain_armed)
             && old_gen != self.runtime.cur_gen()
-            && !self.runtime.gens[old_gen].load().is_empty();
+            && !self.runtime.gens[old_gen].load().is_empty()
+            && self.runtime.gen_inflight[old_gen].load(Ordering::Acquire) == 0;
         if !ok {
             self.end_aging();
             return false;

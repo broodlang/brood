@@ -1252,6 +1252,21 @@ pub struct RuntimeCode {
     /// so the struct layout and construction don't fork on the feature.)
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     runtime_tag: u64,
+    /// Per-generation count of **in-flight shared-closure messages** — a queued
+    /// `Message::FnShared` holding a RUNTIME handle into that generation.
+    ///
+    /// Why a counter rather than the reachability probe. A shared handle that has *landed*
+    /// in a receiver's LOCAL heap is already sound: the drain's Phase 2 walks the whole
+    /// local heap, so `runtime_gen_referenced` sees it (this is ADR-194's argument for the
+    /// L1 path). A handle **still queued** is in no heap and no process's roots, so nothing
+    /// walks it — and it cannot be found by extending the probe either, because
+    /// `report_gen_liveness` caches a process's clean ack for the whole epoch on the
+    /// explicit grounds that *"an old-gen handle can never arrive by message (messages
+    /// deep-copy)"*. This counter restores that guarantee from the other side: while a
+    /// generation has messages in flight against it, `free_runtime_gen` refuses. The pin is
+    /// released by `GenPin`'s `Drop`, so every path that discards a message — a dead target,
+    /// a dropped mailbox, a routing failure — releases it without a manual decrement.
+    gen_inflight: [AtomicUsize; 2],
     /// Monotonic version of the `gens` **`Arc` identities**, bumped only when a slot's
     /// `Arc<CodeSlabs>` is *replaced* — a Stage-4 free or a compaction store, both rare
     /// (never on the `def`/`promote`/append hot path, which mutates a loaded slab's
@@ -1481,6 +1496,76 @@ pub struct GlobalsSnapshot {
     block_depth: u32,
 }
 
+/// An RAII pin on one RUNTIME generation, held by an in-flight `Message::FnShared` so the
+/// generation cannot be freed while a shared handle into it is queued but not yet landed in
+/// any heap (see [`RuntimeCode::gen_inflight`]).
+///
+/// Deliberately RAII rather than a manual increment/decrement pair. A message is dropped on
+/// several paths that are easy to miss — an unknown or dead target, a mailbox torn down, a
+/// routing failure — and a *leaked* pin is the worst possible failure here: the generation is
+/// never reclaimed, so the region grows without bound, silently, which is the very class of
+/// bug this whole change exists to fix. Making the release structural means the compiler
+/// enforces it instead of a reviewer.
+pub struct GenPin {
+    runtime: Arc<RuntimeCode>,
+    gen: usize,
+}
+
+impl GenPin {
+    fn new(runtime: Arc<RuntimeCode>, gen: usize) -> Self {
+        runtime.gen_inflight[gen].fetch_add(1, Ordering::AcqRel);
+        GenPin { runtime, gen }
+    }
+}
+
+impl Clone for GenPin {
+    fn clone(&self) -> Self {
+        GenPin::new(Arc::clone(&self.runtime), self.gen)
+    }
+}
+
+impl Drop for GenPin {
+    fn drop(&mut self) {
+        self.runtime.gen_inflight[self.gen].fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl std::fmt::Debug for GenPin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GenPin(gen={})", self.gen)
+    }
+}
+
+impl Heap {
+    /// Pin the generation `id` lives in, for as long as the returned guard is held. Returns
+    /// `None` for a non-RUNTIME handle (PRELUDE is never freed; LOCAL is not shareable).
+    pub fn pin_gen_of(&self, id: crate::core::value::ClosureId) -> Option<GenPin> {
+        if id.region() != RUNTIME {
+            return None;
+        }
+        Some(GenPin::new(Arc::clone(&self.runtime), id.code_gen()))
+    }
+
+    /// Are there shared-closure messages in flight against generation `gen`?
+    pub fn gen_has_inflight(&self, gen: usize) -> bool {
+        self.runtime.gen_inflight[gen].load(Ordering::Acquire) != 0
+    }
+
+    /// Forget this process's cached "clean" drain ack, forcing it to re-walk on its next
+    /// safepoint.
+    ///
+    /// `report_gen_liveness` caches the ack for a whole epoch, justified by "an old-gen
+    /// handle can never arrive by message (messages deep-copy)". Materialising a
+    /// `Message::FnShared` breaks exactly that: this heap may now hold a handle into the
+    /// draining generation, and a stale clean ack would let the collector free it. Called
+    /// only on that path, so the fan-out drain cost the caching was introduced to fix is
+    /// unchanged for every other message.
+    pub fn rearm_drain_ack(&self) {
+        // `0` is the "never acked" sentinel the constructors use; a real epoch is >= 1.
+        self.acked_drain_epoch.set(0);
+    }
+}
+
 /// The next [`RuntimeCode::runtime_tag`] — a process-wide monotonic counter.
 fn next_runtime_tag() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -1496,6 +1581,7 @@ impl Default for RuntimeCode {
             ],
             current_gen: AtomicUsize::new(0),
             runtime_tag: next_runtime_tag(),
+            gen_inflight: [AtomicUsize::new(0), AtomicUsize::new(0)],
             gen_version: AtomicU64::new(0),
             globals: RwLock::new(SymbolMap::default()),
             registry_lock: Mutex::new(()),
@@ -1590,6 +1676,7 @@ impl RuntimeCode {
             ],
             current_gen: AtomicUsize::new(0),
             runtime_tag: next_runtime_tag(),
+            gen_inflight: [AtomicUsize::new(0), AtomicUsize::new(0)],
             gen_version: AtomicU64::new(0),
             // Reserved at seed time: every shipped **function**, macro and builtin.
             // Deliberately NOT the prelude's data globals — `*features*`,
@@ -2724,8 +2811,9 @@ impl Heap {
 
     /// Clone the Arc to this runtime's shared code region (for spawning a child
     /// that shares this runtime's live globals).
-    /// This heap's runtime-instance tag — see [`RuntimeCode::runtime_tag`].
-    #[cfg(feature = "jit")]
+    /// This heap's runtime-instance tag — see [`RuntimeCode::runtime_tag`]. Unconditional
+    /// (it was `jit`-only) because the messaging path needs it to decide whether a target
+    /// process shares this runtime, and therefore whether a RUNTIME handle may cross to it.
     pub(crate) fn runtime_tag(&self) -> u64 {
         self.runtime.runtime_tag
     }

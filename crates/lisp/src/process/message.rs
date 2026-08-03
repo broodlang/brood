@@ -62,6 +62,26 @@ pub enum Message {
     Bytes(Arc<SharedBlob>),
     Sym(Symbol),
     Keyword(Symbol),
+    /// A closure sent **by shared handle** rather than by deep copy — the serialised
+    /// counterpart of ADR-194's L1 fast path, and the fix for the throughput/RSS decay in
+    /// `docs/handoff.md` thread 6.
+    ///
+    /// Only ever produced when the closure already lives in the shared RUNTIME region and
+    /// the target process is on the **same runtime** (`Mailbox::runtime_tag`), so the handle
+    /// means the same thing on both sides. Deep-copying it instead is what made the receiver
+    /// hold a LOCAL closure, which has no VM-eligible arm (`cache_key` requires a non-LOCAL
+    /// body), so it tree-walked every call and `spawn_impl` re-promoted a fresh copy into the
+    /// append-only region per call — ~0.87 RUNTIME closures per operation, unbounded.
+    ///
+    /// `pin` keeps the handle's generation alive for exactly as long as this message exists.
+    /// A queued message is in no heap and no process's roots, so the drain's reachability
+    /// probe cannot see it — and the drain's cached clean ack explicitly assumes it cannot
+    /// exist. See [`crate::core::heap::GenPin`]. The dist wire encoder must reject this
+    /// variant: a handle is meaningless to another runtime (separate regions).
+    FnShared {
+        bits: u64,
+        pin: crate::core::heap::GenPin,
+    },
     /// A cons-list value, plus the **source position** of the original pair
     /// (if known). Carrying the `Pos` here lets a remote-shipped closure's
     /// body forms keep their source coordinates through `(send …)` and across
@@ -152,7 +172,27 @@ pub(crate) const MAX_MESSAGE_DEPTH: u32 = 256;
 /// Deep-copy a value out of `heap` into a `Send` message. A closure is sent as
 /// data (see [`ClosureMsg`]); builtins and macros can't be.
 pub fn to_message(heap: &Heap, v: Value) -> Result<Message, LispError> {
-    to_message_rec(heap, v, &mut Vec::new(), 0)
+    to_message_rec(heap, v, &mut Vec::new(), 0, None)
+}
+
+/// [`to_message`], but told which runtime the message is destined for. When that is *this*
+/// runtime, an already-shared RUNTIME closure crosses as a handle ([`Message::FnShared`])
+/// instead of being deep-copied. `None` — every other caller, including the whole dist wire
+/// path — behaves exactly as before.
+pub fn to_message_to_runtime(
+    heap: &Heap,
+    v: Value,
+    dest_runtime: Option<u64>,
+) -> Result<Message, LispError> {
+    to_message_rec(heap, v, &mut Vec::new(), 0, dest_runtime)
+}
+
+/// `BROOD_NO_SHARE_FN_MSG=1` reverts a serialised same-runtime send to deep-copying the
+/// closure — the A/B lever and the stopgap if a shared handle is implicated in a fault. The
+/// sibling of `BROOD_NO_SHARE_FN`, which covers the L1 (parked-receiver) path.
+fn share_fn_msg_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("BROOD_NO_SHARE_FN_MSG").is_none())
 }
 
 /// The death reason for a process killed by an uncaught error: `[:error {…}]`,
@@ -213,6 +253,7 @@ fn to_message_rec(
     v: Value,
     visited: &mut Vec<ClosureId>,
     depth: u32,
+    dest_runtime: Option<u64>,
 ) -> Result<Message, LispError> {
     if depth >= MAX_MESSAGE_DEPTH {
         return Err(LispError::runtime(format!(
@@ -251,7 +292,13 @@ fn to_message_rec(
             let items = heap.list_to_vec(v)?;
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(to_message_rec(heap, item, visited, depth + 1)?);
+                out.push(to_message_rec(
+                    heap,
+                    item,
+                    visited,
+                    depth + 1,
+                    dest_runtime,
+                )?);
             }
             Message::List(out, pos)
         }
@@ -259,7 +306,13 @@ fn to_message_rec(
             let items = heap.vector(id).to_vec();
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(to_message_rec(heap, item, visited, depth + 1)?);
+                out.push(to_message_rec(
+                    heap,
+                    item,
+                    visited,
+                    depth + 1,
+                    dest_runtime,
+                )?);
             }
             Message::Vector(out)
         }
@@ -270,7 +323,13 @@ fn to_message_rec(
             let items = heap.range_to_vec(id);
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(to_message_rec(heap, item, visited, depth + 1)?);
+                out.push(to_message_rec(
+                    heap,
+                    item,
+                    visited,
+                    depth + 1,
+                    dest_runtime,
+                )?);
             }
             Message::List(out, pos)
         }
@@ -290,8 +349,8 @@ fn to_message_rec(
             let mut out = Vec::with_capacity(entries.len());
             for (k, v) in entries {
                 out.push((
-                    to_message_rec(heap, k, visited, depth + 1)?,
-                    to_message_rec(heap, v, visited, depth + 1)?,
+                    to_message_rec(heap, k, visited, depth + 1, dest_runtime)?,
+                    to_message_rec(heap, v, visited, depth + 1, dest_runtime)?,
                 ));
             }
             Message::Map(out)
@@ -300,14 +359,37 @@ fn to_message_rec(
             let elems = heap.set_elems(id);
             let mut out = Vec::with_capacity(elems.len());
             for e in elems {
-                out.push(to_message_rec(heap, e, visited, depth + 1)?);
+                out.push(to_message_rec(heap, e, visited, depth + 1, dest_runtime)?);
             }
             Message::Set(out)
         }
         Value::Ref(n) => Message::Ref(n),
         Value::Pid { node, id } => Message::Pid { node, id },
         Value::Fn(id) => {
-            Message::Closure(Box::new(closure_to_message(heap, id, visited, depth + 1)?))
+            // Share by handle when the destination is THIS runtime and the closure already
+            // lives in the shared region — the serialised twin of ADR-194's L1 path, and the
+            // guards mirror it exactly. RUNTIME only: never promote to make something
+            // shareable, which grows the append-only region per send (measured 541 MB vs
+            // 150 MB over 800k transient sends). Same runtime only: the process registry is
+            // global, so a second `Interp`'s handles must not cross. Plus an off-switch.
+            // `pin_gen_of` holds the handle's generation for the message's whole life.
+            if let Some(tag) = dest_runtime {
+                if share_fn_msg_enabled()
+                    && id.region() == crate::core::value::RUNTIME
+                    && tag == heap.runtime_tag()
+                {
+                    if let Some(pin) = heap.pin_gen_of(id) {
+                        return Ok(Message::FnShared { bits: id.0, pin });
+                    }
+                }
+            }
+            Message::Closure(Box::new(closure_to_message(
+                heap,
+                id,
+                visited,
+                depth + 1,
+                dest_runtime,
+            )?))
         }
         Value::Macro(_) => return Err(LispError::type_err("cannot send a macro in a message")),
         Value::Native(_) => {
@@ -356,6 +438,7 @@ fn closure_to_message(
     id: ClosureId,
     visited: &mut Vec<ClosureId>,
     depth: u32,
+    dest_runtime: Option<u64>,
 ) -> Result<ClosureMsg, LispError> {
     if visited.contains(&id) {
         // The free-variable walk re-entered this same closure: a local closure that
@@ -386,7 +469,10 @@ fn closure_to_message(
         }
         for sym in mentioned {
             if let Some(val) = local_lookup(heap, env, sym) {
-                captured.push((sym, to_message_rec(heap, val, visited, depth)?));
+                captured.push((
+                    sym,
+                    to_message_rec(heap, val, visited, depth, dest_runtime)?,
+                ));
             }
         }
     }
@@ -397,12 +483,12 @@ fn closure_to_message(
         let optionals = arm
             .optionals
             .iter()
-            .map(|&(s, d)| Ok((s, to_message_rec(heap, d, visited, depth)?)))
+            .map(|&(s, d)| Ok((s, to_message_rec(heap, d, visited, depth, dest_runtime)?)))
             .collect::<Result<Vec<_>, LispError>>()?;
         let body = arm
             .body
             .iter()
-            .map(|&f| to_message_rec(heap, f, visited, depth))
+            .map(|&f| to_message_rec(heap, f, visited, depth, dest_runtime))
             .collect::<Result<Vec<_>, LispError>>()?;
         arms.push(ClosureArmMsg {
             params: arm.params.clone(),
@@ -481,6 +567,19 @@ fn local_lookup(heap: &Heap, env: EnvId, sym: Symbol) -> Option<Value> {
 /// Rebuild a message into `heap`.
 pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
     match m {
+        // A closure handed over by handle (same runtime, already-shared region). No rebuild,
+        // no allocation — the point of the whole exercise.
+        //
+        // `rearm_drain_ack` is the other half of the lifetime argument. Until now this heap
+        // may have acked a RUNTIME drain "clean", and `report_gen_liveness` caches that for
+        // the whole epoch because "an old-gen handle can never arrive by message (messages
+        // deep-copy)". It just did. Forgetting the ack makes this process re-walk on its next
+        // safepoint, where Phase 2 finds the handle in its local heap and pins the generation
+        // the ordinary way. The message's `GenPin` covers the window before that walk.
+        Message::FnShared { bits, .. } => {
+            heap.rearm_drain_ack();
+            Value::Fn(crate::core::value::ClosureId(*bits))
+        }
         Message::Nil => Value::nil(),
         Message::Bool(b) => Value::boolean(*b),
         Message::Int(n) => Value::int(*n),

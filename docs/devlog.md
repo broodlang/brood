@@ -14961,3 +14961,42 @@ cranelift, so a few hundred MB × many targets × many builds adds up. **That is
 to reclaim if the disk bites again** — it is regenerable, but a `cargo clean` costs a full
 rebuild, so it is the user's call rather than something to do silently. Worth remembering:
 `make ab` leaves ~1.1 GB per baseline behind, and `make ab-clean` is not automatic.
+
+## 2026-08-03 — thread 6 fixed: a shared closure crosses a serialised send by handle
+
+The decay is gone. `rt_closures` on the supervisor churn harness is **66 and constant** where
+it was 143,752 and climbing; throughput sits flat at ~24,000 ops/s against a decaying ~13,800,
+and RSS at 213 MB against 502 MB. Design in ADR-208.
+
+**What made this tractable was reading the existing argument rather than inventing one.**
+ADR-194's comment on the L1 path spells out why a shared handle is safe there — *"a shared
+handle retained in `dst`'s LOCAL data pins its RUNTIME generation … the drain's Phase 2 walks
+the whole local heap"*. That told me precisely what my path lacked: the **queued** window,
+where the handle is in no heap at all. And `report_gen_liveness` told me why extending the
+probe would not be enough on its own — it caches a clean ack for the epoch *because* messages
+deep-copy. Two mechanisms, each closing one end: a `GenPin` held by the in-flight message, and
+an ack re-arm when one is materialised.
+
+**The compiler enforced the two obligations I had identified.** Adding the variant produced
+exactly two non-exhaustive-match errors: the dist wire encoder (which must refuse a handle
+another runtime cannot interpret) and `from_message` (which must materialise it and re-arm the
+ack). Pleasant confirmation that the two places I had reasoned about were the two that existed.
+
+**My first test was worthless twice over, and the second failure was the instructive one.**
+
+1. It spawned a worker per send, and `(spawn (busy-worker me))` captures `me` — a LOCAL
+   closure, which `spawn` promotes into the shared region every time. The test measured its own
+   harness growing the region.
+2. Fixed to one long-lived worker, it passed — and **also passed with the mechanism disabled**.
+   The sent closure was `(fn () (* reload-target 21))`, which promotes nothing on either path.
+   Growth requires the sent closure to itself `spawn`, because that is the actual chain: copied
+   → LOCAL → tree-walked → the tree-walker builds the `spawn` thunk from LOCAL code →
+   `spawn_impl` promotes it per call. With a spawning thunk the test now **passes with the
+   mechanism on and fails with it off**, which is the only version worth committing.
+
+That is the second time this session a green test proved nothing until a control was run
+against it (the registry work was the first). Worth making a habit: for any test whose subject
+is a mechanism with an off-switch, run it with the switch off before believing it.
+
+Validation: suite **941/941**, `nest check` clean, and a paired soak (armed vs
+`BROOD_NO_SHARE_FN_MSG=1`) clean past 500k iterations each and still running at commit time.

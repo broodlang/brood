@@ -13327,3 +13327,55 @@ said it was throwing away — a consumer showing a capped cascade should say so 
 *Workings* pane now does). Covered by `tests/print_bounded_test.blsp` (15 cases),
 `tests/debug_test.blsp` (the `:spy-stop` contract + a 1.2M-deep traced loop) and
 `tests/eval_server_test.blsp`.
+
+## ADR-208 — a shared closure crosses a serialised send by handle, pinned by generation
+
+**Context.** ADR-194 hands an already-shared RUNTIME closure across a *local* send by handle
+when the receiver is **parked** (the L1 fast path). When the receiver is **busy** the send
+serialises through `Message`, which deep-copies the closure into the receiver's LOCAL heap —
+and that copy is where handoff thread 6's throughput decay came from. A LOCAL closure has no
+VM-eligible arm (`cache_key` requires a non-LOCAL body, because a LOCAL handle is recycled by
+the collector and would alias unrelated code), so it tree-walks on every call; the tree-walker
+then builds its `spawn` thunk from LOCAL code, and `spawn_impl` promotes that thunk into the
+**append-only** shared region once per call. Measured on the supervisor churn harness:
+~0.87 RUNTIME closures per operation, unbounded — 143,752 of them, throughput decaying 1.8×
+and RSS 2.4× over 35 windows.
+
+**Decision.** `send` tells the serialiser where the message is going
+(`to_message_to_runtime`). For a **local pid on the same runtime**, an already-RUNTIME closure
+crosses as `Message::FnShared { bits, pin }` instead of being copied. Guards mirror ADR-194's
+exactly: RUNTIME region only (never promote to make something shareable — measured at 541 MB
+vs 150 MB over 800k transient sends), same runtime only (the process registry is global, so a
+second `Interp`'s handles must not cross), and an off-switch (`BROOD_NO_SHARE_FN_MSG=1`). The
+dist wire encoder **refuses** the variant: a handle names a slot in *this* region and would
+silently resolve to unrelated code on another node.
+
+**The lifetime problem, and why it needed two mechanisms rather than one.** ADR-194's argument
+is that a shared handle retained in the receiver's LOCAL heap is sound because the drain's
+Phase 2 walks the whole local heap. A **queued** message is in no heap and no process's roots,
+so nothing walks it — and extending the reachability probe is not sufficient either, because
+`report_gen_liveness` caches a process's clean ack for the whole epoch on the explicit grounds
+that *"an old-gen handle can never arrive by message (messages deep-copy)"*. That caching is
+load-bearing: the same comment records it as the fix for a fan-out drain regression where a
+contended `drain_acks` read lock on every safepoint dominated the run.
+
+So both ends are closed:
+- **`GenPin`** — an RAII pin on the handle's generation, held by the message. While a
+  generation has messages in flight, `free_runtime_gen` refuses. Deliberately RAII, not a
+  manual increment/decrement: a message is dropped on several easy-to-miss paths (dead target,
+  torn-down mailbox, routing failure), and a *leaked* pin means the generation is never
+  reclaimed — silently, which is the exact bug class this ADR exists to remove. The compiler
+  enforces release instead of a reviewer.
+- **`rearm_drain_ack`** — materialising a `FnShared` forgets this heap's cached clean ack, so
+  it re-walks on its next safepoint and pins the generation the ordinary way. Called *only* on
+  that path, so the fan-out drain cost stays fixed for every other message.
+
+**Consequences.**
+- `rt_closures` on the churn harness: **66, constant** (was 143,752 and climbing). Throughput
+  flat at ~24,000 ops/s against a decaying ~13,800; RSS 213 MB against 502 MB.
+- Reclamation latency can be delayed by an unreceived message pinning a superseded generation.
+  Bounded by that message's lifetime, and the same trade ADR-194 already accepted for a
+  retained handle.
+- A capturing closure is still copied — it is LOCAL, so there is nothing to share. Only the
+  capture-free top-level shape (`:start (fn () (spawn-link (worker)))`, the idiom the
+  supervisor framework uses) takes the new path.

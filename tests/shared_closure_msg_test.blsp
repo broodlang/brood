@@ -1,0 +1,141 @@
+;; A closure sent to a BUSY receiver crosses as a shared handle, not a deep copy
+;; (handoff thread 6; the serialised twin of ADR-194's parked-receiver fast path).
+;;
+;; Why this matters, and why the assertions are shaped the way they are. A closure that was
+;; deep-copied into the receiver's LOCAL heap has no VM-eligible arm — `cache_key` requires a
+;; non-LOCAL body — so it tree-walks on every call, and `spawn_impl` re-promotes a fresh copy
+;; into the *append-only* shared region per call. Measured on the supervisor churn harness
+;; that was ~0.87 RUNTIME closures per operation, unbounded: 143,752 of them where the fixed
+;; runtime holds 66, with throughput decaying 1.8× and RSS growing 2.4×.
+;;
+;; So the interesting property is not just "the closure still runs" — a deep copy runs fine —
+;; it is "the shared region did not grow". `runtime-closures` is therefore an assertion here,
+;; not a diagnostic. `BROOD_NO_SHARE_FN_MSG=1` reverts to the copy.
+;;
+;; The lifetime half of the change (a queued handle pins its RUNTIME generation, and
+;; materialising one re-arms the receiver's drain ack) is exercised rather than asserted
+;; directly: the reload loop below churns the shared region while sends are in flight, which
+;; is what arms a drain. A wrong answer there is a use-after-free, so the invariant is
+;; "everything still computes correctly under churn".
+
+(defmodule shared-closure-msg-test (:use test))
+
+;; A capture-free top-level fn is already a shared RUNTIME closure, so sending it is the case
+;; that can cross by handle. `reload-target` is read late-bound, so a hot reload changes what
+;; the *same* shared closure computes — proving the receiver really runs the shared code and
+;; not a snapshot taken at send time.
+(def reload-target 2)
+(defn shared-thunk () (* reload-target 21))
+
+;; A worker that is deliberately BUSY when the message arrives: it spins briefly before its
+;; first `receive`, so the L1 parked-receiver path cannot apply and the send must serialise —
+;; which is the path under test.
+(defn spin-until (t) (if (>= (now-ns) t) :ok (spin-until t)))
+
+(defn busy-worker (parent)
+  (spin-until (+ (now-ns) 2000000))
+  (receive
+    ([:call f from] (send from [:result (f)]))
+    (after 30000 (send parent [:result :timeout]))))
+
+;; A long-lived worker that stays BUSY between requests (it spins before each receive), so a
+;; send to it cannot take the L1 parked-receiver path and must serialise — the path under test.
+(defn echo-loop ()
+  (spin-until (+ (now-ns) 300000))
+  (receive
+    ([:call f from] (send from [:result (f)]) (echo-loop))
+    (:stop :ok)
+    (after 30000 :ok)))
+
+(defn call-through (srv f)
+  (send srv [:call f (self)])
+  (receive
+    ([:result v] v)
+    (after 30000 :timeout)))
+
+(defn call-many (srv k f)
+  (if (= k 0) :ok (do (call-through srv f) (call-many srv (- k 1) f))))
+
+(defn call-through-busy (f)
+  (let (me (self)
+        w (spawn (busy-worker me)))
+    (send w [:call f me])
+    (receive
+      ([:result v] v)
+      (after 30000 :timeout))))
+
+;; The growth case needs the sent closure to SPAWN, because that is the actual chain: a
+;; copied closure is LOCAL, a LOCAL closure has no VM-eligible arm so it tree-walks, and the
+;; tree-walker builds the `spawn` thunk from LOCAL code — which `spawn_impl` then promotes into
+;; the append-only region on every single call. A closure that merely computes (like
+;; `shared-thunk`) promotes nothing either way, so it cannot tell the two paths apart; the
+;; first version of this test used one and passed identically with the mechanism disabled.
+;; Capture-free and top-level, so it is a shared RUNTIME closure and eligible to cross by handle.
+(defn spawn-child-noop () :done)
+(defn spawner-thunk () (spawn (spawn-child-noop)) :spawned)
+
+(defn rt-closures ()
+  (if (bound? 'gc-stats) (get (gc-stats) :runtime-closures) nil))
+
+(defn send-n (k f)
+  (if (= k 0) :ok (do (call-through-busy f) (send-n (- k 1) f))))
+
+(describe "a shared closure crossing a serialised send"
+  :isolated
+
+  (test "the receiver runs it and gets the right answer"
+    (assert= 42 (call-through-busy shared-thunk)))
+
+  (test "a capturing closure still crosses and still works"
+    ;; This one is LOCAL (it captures), so it is copied, not shared — the fallback path must
+    ;; keep working unchanged.
+    (let (n 7)
+      (assert= 21 (call-through-busy (fn () (* n 3))))))
+
+  (test "repeated sends do not grow the shared code region"
+    ;; The actual regression this change fixes: copying made every send promote a fresh
+    ;; closure into the append-only region, sharing appends nothing.
+    ;;
+    ;; ONE long-lived worker, reused for every send. The first shape of this test spawned a
+    ;; worker per send, and `(spawn (busy-worker me))` captures `me` — a LOCAL closure, which
+    ;; `spawn` promotes into the shared region every time. It measured its own harness
+    ;; growing the region and reported ~60 either way. Only the send may vary here.
+    (let (srv (spawn (echo-loop))
+          _warm (call-through srv spawner-thunk)
+          before (rt-closures)
+          _ (call-many srv 60 spawner-thunk)
+          after (rt-closures))
+      (send srv :stop)
+      (if (nil? before)
+        (is true) ; lean build without gc-stats — the functional tests above still ran
+        ;; The copying path adds one promoted closure per send. Sharing adds none; allow a
+        ;; small constant for unrelated promotion in the same window.
+        (is (< (- after before) 10)))))
+
+  (test "the receiver sees a hot reload of a global the shared closure reads"
+    ;; Late binding through the shared handle: same closure, new answer. A deep copy would
+    ;; also see this (globals are looked up per call), so this guards that sharing did not
+    ;; accidentally freeze the code — not that sharing happened.
+    (assert= 42 (call-through-busy shared-thunk))
+    (def reload-target 3)
+    (assert= 63 (call-through-busy shared-thunk))
+    (def reload-target 2)
+    (assert= 42 (call-through-busy shared-thunk)))
+
+  (test "correct under shared-region churn, which is what arms a drain"
+    ;; Interleave RUNTIME churn (each `def` promotes fresh code) with shared sends. If a
+    ;; queued handle's generation were freed underneath it, this is where it surfaces — as a
+    ;; wrong answer or a fault, not as a clean failure.
+    ;;
+    ;; The churn deliberately does NOT rebind what the sent closure reads: an earlier version
+    ;; asserted against `reload-target` while the reload test in this same block was also
+    ;; moving it, which raced on a shared global rather than testing anything. Churn a
+    ;; throwaway name instead and keep the expected answer fixed.
+    (let (srv (spawn (echo-loop)))
+      (assert= :ok
+        (fold (fn (_ i)
+                (do (eval (list 'def (symbol (str "scm-churn-" i)) (fn () i)))
+                    (assert= 42 (call-through srv shared-thunk))
+                    :ok))
+          :ok (range 40)))
+      (send srv :stop))))
