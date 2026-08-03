@@ -776,8 +776,21 @@ fn drive_tls(
                 Ok(0) => return tls_finish(id, c, Some("tls: connection closed".into())),
                 // Bytes left for the peer — outbound progress counts as activity so
                 // a large response draining to a slow reader isn't idle-reaped.
-                Ok(n) => { c.last_activity = Instant::now(); if trace { eprintln!("[net] id={id} write_tls Ok({n})"); } }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => { if trace { eprintln!("[net] id={id} write_tls WouldBlock wants_write={}", c.conn.wants_write()); } break; }
+                Ok(n) => {
+                    c.last_activity = Instant::now();
+                    if trace {
+                        eprintln!("[net] id={id} write_tls Ok({n})");
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if trace {
+                        eprintln!(
+                            "[net] id={id} write_tls WouldBlock wants_write={}",
+                            c.conn.wants_write()
+                        );
+                    }
+                    break;
+                }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => return tls_finish(id, c, Some(format!("tls: {e}"))),
             }
@@ -798,7 +811,9 @@ fn drive_tls(
         loop {
             match c.conn.read_tls(&mut c.stream) {
                 Ok(0) => {
-                    if trace { eprintln!("[net] id={id} read_tls Ok(0) → peer TCP close"); }
+                    if trace {
+                        eprintln!("[net] id={id} read_tls Ok(0) → peer TCP close");
+                    }
                     // Peer closed the TCP connection. One-shot clients tolerate
                     // a missing close_notify (many servers just drop).
                     return tls_finish(id, c, None);
@@ -806,7 +821,12 @@ fn drive_tls(
                 Ok(_) => match c.conn.process_new_packets() {
                     Ok(io) => {
                         let n = io.plaintext_bytes_to_read();
-                        if trace { eprintln!("[net] id={id} plaintext n={n} peer_has_closed={}", io.peer_has_closed()); }
+                        if trace {
+                            eprintln!(
+                                "[net] id={id} plaintext n={n} peer_has_closed={}",
+                                io.peer_has_closed()
+                            );
+                        }
                         if n > 0 {
                             let mut buf = vec![0u8; n];
                             let mut got = 0;
@@ -831,10 +851,17 @@ fn drive_tls(
                     }
                     Err(e) => return tls_finish(id, c, Some(format!("tls: {e}"))),
                 },
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => { if trace { eprintln!("[net] id={id} read_tls WouldBlock (drained)"); } break; }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if trace {
+                        eprintln!("[net] id={id} read_tls WouldBlock (drained)");
+                    }
+                    break;
+                }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof && c.one_shot => {
-                    if trace { eprintln!("[net] id={id} read_tls UnexpectedEof → finish"); }
+                    if trace {
+                        eprintln!("[net] id={id} read_tls UnexpectedEof → finish");
+                    }
                     return tls_finish(id, c, None);
                 }
                 Err(e) => return tls_finish(id, c, Some(format!("tls: {e}"))),
