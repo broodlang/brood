@@ -14930,3 +14930,34 @@ exactly the build worth soaking (`make install INSTALL_FEATURES='$(RUN_FEATURES)
 benchmarks and `nest release` use). Now guarded with `bound?`: lean prints the iteration count
 and RSS and says why the region stats are missing; a dev-tools build still prints them. Both
 paths verified.
+
+## 2026-08-03 — verification pass on the reformatted tree (and a full disk)
+
+The whole-project reformat plus the width-aware break-layout change were verified end to end
+before starting new work.
+
+**Suite 941/941**, `nest check` clean, and `nest format --check` reports 335 files clean — so
+the new layout is idempotent on its own output, which is the contract that matters for a
+formatter that just rewrote every file in the repo.
+
+**Benchmarks: performance-neutral.** Full seven-language run, guard clean, **0 of 31 rows more
+than 6% off the published run**; `latency` reads p50 16 µs / p99 72 µs against the published
+17/74. The run artifacts were *not* republished — with nothing moving beyond noise, updating
+`BENCHMARKS.md`'s tables would be churn, and mixing a fresh run into published prose for
+noise-level deltas is how the tables drifted out of sync in the first place. The published run
+stays canonical; this was a check, not a publish.
+
+**The build failed three times before any of that, and it was not the code.** `make test` died
+with `collect2: fatal error: ld terminated with signal 7 [Bus error], core dumped` while
+linking test binaries. The disk was **100% full — 27 MB free of 231 GB**, and `target/` alone
+was 108 GB. A Bus error from `ld` is what a full filesystem looks like from inside the linker;
+it reads like a toolchain crash and sent me to the LLVM stack dump before `df`.
+
+Freed 21 GB without touching anything unregenerable: `make ab-clean` (7.7 GB of `target/ab`
+baseline worktrees, left behind by the mandelbrot bisect) and `target/debug/incremental`
+(13 GB, pure rebuild-speed cache — it can never affect correctness). `target/debug/deps` is
+still **81 GB** of accumulated stale test binaries; each links the whole lib plus wasmtime and
+cranelift, so a few hundred MB × many targets × many builds adds up. **That is the next thing
+to reclaim if the disk bites again** — it is regenerable, but a `cargo clean` costs a full
+rebuild, so it is the user's call rather than something to do silently. Worth remembering:
+`make ab` leaves ~1.1 GB per baseline behind, and `make ab-clean` is not automatic.
