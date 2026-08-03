@@ -135,7 +135,22 @@ From the published run (`brood-benchmarks/results/`):
    projection by extrapolating MB/*minute* when the driver is MB/*iteration* — the long run
    actually reached 3M iterations / 3.06 GB in 7 h. A8's trap, freshly re-stepped-in.
 
-6. **Throughput decay — SOLVED (diagnosis), not yet fixed. A busy receiver turns a shared
+6. **Throughput decay — FIXED 2026-08-03 (ADR-208). Kept below for the diagnosis trail.**
+   `rt_closures` on the churn harness is now **66 and constant** (was 143,752 and climbing);
+   throughput flat at ~24,000 ops/s against a decaying ~13,800; RSS 213 MB against 502 MB.
+   A serialised same-runtime send now hands an already-shared closure over **by handle**
+   (`Message::FnShared`), with a `GenPin` holding its generation while queued and a drain-ack
+   re-arm when it lands. Lever: `BROOD_NO_SHARE_FN_MSG=1`. Validated by a 1.78 M-iteration
+   paired soak, 941/941, and a test that fails with the mechanism off.
+   **Thread 6b (adaptive RUNTIME reclamation threshold) is closed with it, not deferred.**
+   Its premise was reclamation pressure from a region growing ~0.87 closures/op. With the
+   region flat, `BROOD_RT_GC_FLOOR` is inert: 24038 / 24154 / 24390 ops/s across a 128x range
+   (512 / 4096 / 65536). There is no policy left to tune — re-measure before reopening it.
+   **Note where the win does NOT appear:** the published `supervisor` row is neutral (820 vs
+   831 ms, 1.013x) because it runs ~25,000 operations and the decay needs ~175,000 to show.
+   This is a sustained-load win; no burst benchmark will see it.
+
+   *Original diagnosis, retained:* **Throughput decay — SOLVED (diagnosis), not yet fixed.** A busy receiver turns a shared
    closure into a private LOCAL copy, and everything else follows.** Worth ~2× throughput and
    ~2× RSS (`supnocrash`: 300 k ops / 639 MB decaying, vs 590 k ops / 318 MB flat under
    `BROOD_NO_JIT=1`).
