@@ -280,17 +280,21 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
   ;; pairs up like a `let` bindings list — `{:a 1\n :b 2}` instead of every
   ;; element on its own line. The pair walker is comment-aware, so a map with
   ;; comments still pairs up (with the comments preserved in place).
-  (let (one (single-line n)
-        ;; Respect the author's line structure: if the source had newlines
-        ;; *inside this form's own children*, keep it broken even if the
-        ;; collapsed form would fit. Standard Lisp formatter behaviour
-        ;; (matches Clojure/Racket/Emacs-lisp), and idempotent — a form
-        ;; already on one line stays on one line, a form already broken
-        ;; stays broken. Maps follow the same rule but get the pair-break
-        ;; layout below.
-        keep-broken (had-author-newlines? n))
+  ;; Respect the author's line structure: if the source had newlines *inside this
+  ;; form's own children*, keep it broken even if the collapsed form would fit.
+  ;; Standard Lisp formatter behaviour (matches Clojure/Racket/Emacs-lisp), and
+  ;; idempotent — a form already on one line stays on one line, a form already
+  ;; broken stays broken. Maps follow the same rule but get the pair-break layout.
+  ;;
+  ;; Perf: compute `keep-broken` FIRST and build the flat `single-line` only when
+  ;; the form is NOT already broken. An already-formatted file is mostly broken
+  ;; forms, and their flat string would just be discarded — building it was the
+  ;; formatter's dominant cost (each nested breaking form rebuilt the full flat of
+  ;; its whole subtree). Skipping it is the same output, far less work.
+  (let (keep-broken (had-author-newlines? n)
+        one (if keep-broken nil (single-line n)))
     (cond
-      (and one (not keep-broken) (<= (+ indent (string-length one)) (format-width))) one
+      (and one (<= (+ indent (string-length one)) (format-width))) one
       (= (node-kind n) :map) (render--pair-break (node-children n) indent "{" "}")
       else (render--break (node-children n) indent open close))))
 
@@ -511,10 +515,11 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; hoisted onto its own line *above* its pair, an own-line comment sits on its own
 ;; line at the pair indent (the walker pairs name+value but never *across* a comment).
 (defn render-pair-list (n indent)
-  (let (one (single-line n)
-        keep-broken (had-author-newlines? n))
+  ;; Skip the flat `single-line` when already broken — same perf fix as `render--seq`.
+  (let (keep-broken (had-author-newlines? n)
+        one (if keep-broken nil (single-line n)))
     (cond
-      (and one (not keep-broken) (<= (+ indent (string-length one)) (format-width))) one
+      (and one (<= (+ indent (string-length one)) (format-width))) one
       else (render--pair-break (node-children n) indent "(" ")"))))
 
 (defn render--pair-break (kids indent open close)
