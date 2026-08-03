@@ -21,7 +21,14 @@ for every well-formed input. Hand-checked across the brood repo's std/ and tests
 
 ;; ---- knobs ------------------------------------------------------------------
 (def *format-width* 100)
-; column budget for the single-line attempt
+; column budget for the single-line attempt (the built-in default)
+
+;; The effective column budget: a project's manifest `:format-width` (ambient
+;; `*project-format-width*`, set by `project-setup`) when present, else the built-in
+;; default. So `nest format` / the LSP / `nest mcp` all honour a project that pins,
+;; say, `:format-width 80`, and a bare `brood`-run format uses the default.
+(defn format-width ()
+  (or *project-format-width* *format-width*))
 
 ;; ---- CST node accessors -----------------------------------------------------
 ;; Every node is a vector [kind payload]. For leaves payload is the raw source
@@ -283,7 +290,7 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
         ;; layout below.
         keep-broken (had-author-newlines? n))
     (cond
-      (and one (not keep-broken) (<= (+ indent (string-length one)) *format-width*)) one
+      (and one (not keep-broken) (<= (+ indent (string-length one)) (format-width))) one
       (= (node-kind n) :map) (render--pair-break (node-children n) indent "{" "}")
       else (render--break (node-children n) indent open close))))
 
@@ -350,6 +357,12 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
                  ;; counts (>= 0) override the default; for generic calls
                  ;; (-1) we ride exactly one arg when it's single-line.
                  eff-hdr (cond
+                           ;; A DATA collection (`[…]`/`#{…}`) has no "head": its first
+                           ;; element mustn't ride a sibling up onto its line. Break one
+                           ;; element per line (the first sits after the open bracket).
+                           ;; Riding is a *call* affordance — `(head arg)` — only. (Maps
+                           ;; are pair-broken elsewhere and never reach here.)
+                           (not (= open "(")) 0
                            (>= hdr-count 0) (min hdr-count (count args))
                            (nil? args) 0
                            (nil? (single-line (first args))) 0
@@ -366,10 +379,16 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
                    ;; Fill (pack args per line) only for a *generic call* — a head
                    ;; with no header entry (`hdr-count` -1). A known body/special
                    ;; form (`defn`/`do`/`let`/`when`…) keeps its statements one per
-                   ;; line, so it must NOT fill.
+                   ;; line, so it must NOT fill. Nor a body whose args are themselves
+                   ;; collections (a vector/list of `[…]`/`(…)`): those read best one
+                   ;; per line (CL `:linear`), so filling `[[a][b][c]]` onto packed
+                   ;; lines is wrong — break linearly. Fill stays for atom sequences
+                   ;; (`(error "a: " x " b: " y …)`), the case it exists for.
                    body-text (if pair-bd
                                (render--body-pairs kids first-body-idx body-ind)
-                               (render--body kids first-body-idx body-ind (< hdr-count 0))))
+                               (render--body kids first-body-idx body-ind
+                                 (and (< hdr-count 0)
+                                   (not (body-has-container? kids first-body-idx))))))
                ;; If the body ends in a comment, the close delimiter must drop to
                ;; its own line at the opening indent — appended directly it would
                ;; land *inside* the comment (`;; note)`), commenting out the `)`
@@ -494,7 +513,7 @@ retired the `comment-on-own-line?` distinction this used to need."
   (let (one (single-line n)
         keep-broken (had-author-newlines? n))
     (cond
-      (and one (not keep-broken) (<= (+ indent (string-length one)) *format-width*)) one
+      (and one (not keep-broken) (<= (+ indent (string-length one)) (format-width))) one
       else (render--pair-break (node-children n) indent "(" ")"))))
 
 (defn render--pair-break (kids indent open close)
@@ -597,17 +616,33 @@ retired the `comment-on-own-line?` distinction this used to need."
                          (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) (render c body-ind) " "
                          (comment--strip-trailing-nl (node-text (vector-ref kids tc)))))))
                  (let (arendr (render c body-ind)
-                       brendr (render (vector-ref kids j) (+ body-ind (string-length arendr) 1))
+                       vnode (vector-ref kids j)
+                       ;; Miser drop (CL miser mode): if `key value` won't fit on one
+                       ;; line at the width, put the value on the NEXT line at a block
+                       ;; indent rather than starting it deep after the key — this
+                       ;; avoids far-right drift AND gives the value's own contents the
+                       ;; full width (so e.g. each `:dependencies` entry gets room).
+                       ;; The trigger is content-based (does the flat pair fit?), so it
+                       ;; is idempotent. `value-ind` is +2 from the key's indent.
+                       vflat (single-line vnode)
+                       pair-fits (and vflat
+                                   (<= (+ body-ind (string-length arendr) 1 (string-length vflat))
+                                     (format-width)))
+                       value-ind (+ body-ind 2)
+                       pair-str (if pair-fits
+                                  (str arendr " "
+                                    (render vnode (+ body-ind (string-length arendr) 1)))
+                                  (str arendr "\n" (indent-of value-ind) (render vnode value-ind)))
                        tc (trailing-comment-at kids (inc j) n))
                    (if (nil? tc)
                      (render--body-pairs--at kids
                        (inc j) n body-ind 0
-                       (str acc (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) arendr " " brendr))
+                       (str acc (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) pair-str))
                      ;; Keep the pair's same-line trailing comment on the pair's line.
                      (render--body-pairs--at kids
                        (inc tc) n body-ind 0
                        (str acc
-                         (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) arendr " " brendr " "
+                         (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) pair-str " "
                          (comment--strip-trailing-nl (node-text (vector-ref kids tc)))))))))))))
 
 ;; Next non-WHITESPACE child at or after `i` (comments are NOT skipped — a
@@ -630,6 +665,16 @@ retired the `comment-on-own-line?` distinction this used to need."
                                         (trailing-comment-at--scan kids (inc i) n))
     (comment? (vector-ref kids i)) i
     else nil))
+
+;; True if any structural body arg (from start-idx) is itself a container — then
+;; fill is the wrong layout (containers read best one per line, CL `:linear`).
+(defn body-has-container? (kids start-idx)
+  (body-has-container?--at kids start-idx (vector-length kids)))
+(defn body-has-container?--at (kids i n)
+  (cond
+    (= i n) false
+    (and (not (trivia? (vector-ref kids i))) (container? (vector-ref kids i))) true
+    else (body-has-container?--at kids (inc i) n)))
 
 (defn render--body (kids start-idx body-ind fill?)
   ;; Walk kids from start-idx, emitting each structural form (and each comment) at
@@ -668,7 +713,7 @@ retired the `comment-on-own-line?` distinction this used to need."
                    ;; previous item left a fillable column, this arg is single-line,
                    ;; no blank line or trailing comment forces a break, and it fits.
                    can-fill (and fill?
-                              col single (nil? tc-idx) (< nl 2) (<= (+ col 1 w) *format-width*))
+                              col single (nil? tc-idx) (< nl 2) (<= (+ col 1 w) (format-width)))
                    ;; The column a following arg would fill to: end of this arg on
                    ;; its line, or nil when it is multi-line (can't fill after it).
                    next-col (if single (+ body-ind w) nil))

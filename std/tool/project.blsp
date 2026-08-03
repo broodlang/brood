@@ -100,6 +100,10 @@ the `nest new` scaffolder."
 (def *project-format-plugins* nil)
 ; the manifest's :format-plugins vector ([dep-name …]) — deps whose own
 ; :format-headers this project pulls in (so a framework ships its macro shapes)
+(defdyn *project-format-width* nil)
+; the manifest's :format-width (an integer column budget for `nest format`, e.g. 80);
+; nil = use the formatter's built-in default. Ambient so `std/format.blsp` reads it
+; directly, like the other project knobs the formatter consults.
 
 ;; (plist-get '(:a 1 :b 2) :b) => 2 — the value after key k in a flat kv list, or nil.
 (defn plist-get (kvs k)
@@ -363,6 +367,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
       (project-parse-deps (plist-get opts :dev-dependencies))))
   (def *project-format-headers* (plist-get opts :format-headers))
   (def *project-format-plugins* (plist-get opts :format-plugins))
+  (def *project-format-width* (plist-get opts :format-width))
   *project-name*)
 
 ;; --- finding the project + discovering tests ---------------------------------
