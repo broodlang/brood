@@ -1524,51 +1524,6 @@ fn compile_arm(
     // `(nth p K)` to direct reads. Bumps `scope.max` for the element slots; makes the arm
     // simpler (fewer allocs, no `nth`), so it JITs better. No-op for arms without the pattern.
     ea_scalar_replace(&mut body, &mut scope.max);
-    // Recursive self-inlining (Phase B, §6b — two-stage tiering, devlog 2026-06-17):
-    // PROBE depth-1 inlining of a top-level no-capture recursive `defn`'s body WITHOUT
-    // mutating the original. The VM keeps the original small `body`/`chunk`/`nslots`;
-    // the inlined body is re-derived fresh in `jit_lower_arm` and compiled as a deferred
-    // upgrade. Here we only record whether the arm qualifies + the inlined frame
-    // high-water mark (`inline_nslots`), by running the inliner on a CLONE (then
-    // discarding it). Gated to a clean fixed-arity layout (no `&optional`/`&` rest —
-    // `M = scope.max` must be the whole frame so shifted blocks don't collide), with a
-    // `defn_name` (top-level recursive, set only when the closure doesn't capture). The
-    // probe enforces the rest of the gate (no `SelfCall`/`MakeClosure`, body-size bound,
-    // ≥1 qualifying call). Deterministic: same arm → same shifted IR.
-    #[cfg(feature = "jit")]
-    let (inline_name, inline_stride, inline_nslots, leaf): (
-        Option<Symbol>,
-        usize,
-        usize,
-        Option<Box<ir::LeafInline>>,
-    ) = {
-        let m = scope.max;
-        match defn_name {
-            Some(name) if noptional == 0 && rest.is_none() => {
-                match self_inline_probe(&body, name, nrequired, m) {
-                    Some(inline_max) => (Some(name), m, inline_max, None),
-                    // Mutually exclusive with self-inlining: the leaf derivation is
-                    // stored (not re-derived), stamped with the current epoch, and
-                    // rides the same deferred-upgrade channel (`inline_name` set so
-                    // the swap invalidates this caller's fast links; `inline_stride`
-                    // unused — the lowerer branches on `leaf` first).
-                    None => match leaf_inline_probe(heap, &body, m, Some(name)) {
-                        Some((spliced, leaf_nslots)) => (
-                            Some(name),
-                            0,
-                            leaf_nslots,
-                            Some(Box::new(ir::LeafInline {
-                                body: spliced,
-                                epoch: heap.global_epoch(),
-                            })),
-                        ),
-                        None => (None, 0, 0, None),
-                    },
-                }
-            }
-            _ => (None, 0, 0, None),
-        }
-    };
     let optional_defaults = optional_defaults.into_boxed_slice();
     let has_runtime_handles =
         node_has_rt_handles(&body) || optional_defaults.iter().flatten().any(node_has_rt_handles);
@@ -1638,6 +1593,150 @@ fn compile_arm(
             && !c.code.iter().any(|i| matches!(i, Inst::SelfCall { .. }))
     });
     let nslots_total = scope.max + spill_reserve + ckpt_reserve;
+    let uid = next_arm_uid();
+    let site_pos = std::mem::take(&mut scope.site_pos).into_boxed_slice();
+    let src_file = body_first_form
+        .and_then(|f| heap.form_pos(f))
+        .and_then(|(_, file)| file);
+    // Recursive self-inlining (Phase B, §6b — two-stage tiering, devlog 2026-06-17):
+    // PROBE depth-1 inlining of a top-level no-capture recursive `defn`'s body WITHOUT
+    // mutating the original. The VM keeps the original small `body`/`chunk`/`nslots`;
+    // the inlined body is re-derived fresh in `jit_lower_arm` and compiled as a deferred
+    // upgrade. Here we only record whether the arm qualifies + the inlined frame
+    // high-water mark (`inline_nslots`), by running the inliner on a CLONE (then
+    // discarding it). Gated to a clean fixed-arity layout (no `&optional`/`&` rest —
+    // `M = scope.max` must be the whole frame so shifted blocks don't collide), with a
+    // `defn_name` (top-level recursive, set only when the closure doesn't capture). The
+    // probe enforces the rest of the gate (no `SelfCall`/`MakeClosure`, body-size bound,
+    // ≥1 qualifying call). Deterministic: same arm → same shifted IR.
+    //
+    // Runs HERE, after `nslots_total`, because the leaf splice needs the caller's full
+    // small frame size as its base — see `leaf_inline_probe`.
+    #[cfg(feature = "jit")]
+    let (inline_name, inline_stride, inline_nslots, leaf): (
+        Option<Symbol>,
+        usize,
+        usize,
+        Option<Box<ir::LeafInline>>,
+    ) = {
+        let m = scope.max;
+        match defn_name {
+            Some(name) if noptional == 0 && rest.is_none() => {
+                match self_inline_probe(&body, name, nrequired, m) {
+                    Some(inline_max) => (Some(name), m, inline_max, None),
+                    // Mutually exclusive with self-inlining: the leaf derivation is
+                    // stored (not re-derived), stamped with the current epoch, and
+                    // rides the same deferred-upgrade channel (`inline_name` set so
+                    // the swap invalidates this caller's fast links; `inline_stride`
+                    // unused — the lowerer branches on `leaf` first).
+                    None => {
+                        match leaf_inline_probe(
+                            heap,
+                            &body,
+                            m,
+                            nslots_total,
+                            Some(name),
+                            self_arity,
+                        ) {
+                            Some(d) => {
+                                // Apply the small-frame floor HERE, before the resume arm
+                                // is built, so `resume.nslots` is the value the frame is
+                                // actually sized to (`arm.inline_nslots`, floored below).
+                                // The lowering reads the frame size off the resume arm and
+                                // stages a tail call above `active_nslots()`; if the two
+                                // disagreed, the staged area would be written at one offset
+                                // and read at another.
+                                let leaf_nslots = d.nslots.max(nslots_total);
+                                // The resume arm (see `ir::LeafInline::resume`): the same
+                                // function over the spliced body, so a deopt out of the
+                                // inlined native can be resumed in the ip space it
+                                // journalled against. It shares this arm's `uid` (hence
+                                // its inline-cache block) and its identity/diagnostic
+                                // fields; only body, chunk, frame and checkpoint differ.
+                                let resume = CompiledArm {
+                                    nrequired,
+                                    noptional: 0,
+                                    optional_defaults: Box::new([]),
+                                    rest_slot: None,
+                                    nslots: leaf_nslots,
+                                    nsites: scope.sites,
+                                    ngsites: scope.gsites,
+                                    uid,
+                                    site_pos: site_pos.clone(),
+                                    body: d.body,
+                                    chunk: Some(d.chunk),
+                                    has_runtime_handles,
+                                    jit_code: AtomicPtr::new(std::ptr::null_mut()),
+                                    jit_calls: AtomicU32::new(0),
+                                    deopt_watch: false,
+                                    jit_deopts: AtomicU32::new(0),
+                                    float_globals: std::sync::OnceLock::new(),
+                                    self_global_ok: std::sync::atomic::AtomicBool::new(false),
+                                    ckpt_slot: d.ckpt_slot,
+                                    compile_epoch: AtomicU64::new(0),
+                                    // Never published to the cross-process cache: this arm
+                                    // is reachable only through its caller's derivation.
+                                    share_key: None,
+                                    shared_published: std::sync::atomic::AtomicBool::new(false),
+                                    fn_name: trace_name,
+                                    src_file: src_file.clone(),
+                                    capture_names: capture_names.clone(),
+                                    dbg_name: defn_name,
+                                    // The resume arm is the spliced body; it must not
+                                    // itself splice again.
+                                    #[cfg(feature = "jit")]
+                                    inline_name: None,
+                                    #[cfg(feature = "jit")]
+                                    inline_stride: 0,
+                                    #[cfg(feature = "jit")]
+                                    inline_nslots: leaf_nslots,
+                                    #[cfg(feature = "jit")]
+                                    inline_code: AtomicPtr::new(std::ptr::null_mut()),
+                                    #[cfg(feature = "jit")]
+                                    inline_queued: std::sync::atomic::AtomicBool::new(false),
+                                    #[cfg(feature = "jit")]
+                                    inline_installed: std::sync::atomic::AtomicBool::new(false),
+                                    #[cfg(feature = "jit")]
+                                    leaf: None,
+                                };
+                                // Load-bearing for the deopt-resume swap in `vm_run_bc`,
+                                // which replaces the frame's arm with `resume` mid-run:
+                                // the frame's `live_arm_push` registration and its IC-base
+                                // window were both established from the ORIGINAL arm, so
+                                // the swap is only transparent while (a) the arm needs no
+                                // RUNTIME-handle registration and (b) the two share a
+                                // `uid`, hence one `vm_arm_block`. Both are guaranteed
+                                // above — `leaf_inline_probe` rejects a body with RUNTIME
+                                // handles, and `uid` is copied — so assert rather than
+                                // leave them as reasoning a later edit could break.
+                                debug_assert!(
+                                    !has_runtime_handles,
+                                    "a leaf derivation must not carry RUNTIME handles: the \
+                                     deopt-resume arm swap bypasses live_arm registration"
+                                );
+                                debug_assert_eq!(
+                                    resume.uid, uid,
+                                    "the resume arm must share the caller's uid so both \
+                                     index the same IC block"
+                                );
+                                (
+                                    Some(name),
+                                    0,
+                                    leaf_nslots,
+                                    Some(Box::new(ir::LeafInline {
+                                        resume: Arc::new(resume),
+                                        epoch: heap.global_epoch(),
+                                    })),
+                                )
+                            }
+                            None => (None, 0, 0, None),
+                        }
+                    }
+                }
+            }
+            _ => (None, 0, 0, None),
+        }
+    };
     Some(CompiledArm {
         nrequired,
         noptional,
@@ -1646,8 +1745,8 @@ fn compile_arm(
         nslots: nslots_total,
         nsites: scope.sites,
         ngsites: scope.gsites,
-        uid: next_arm_uid(),
-        site_pos: std::mem::take(&mut scope.site_pos).into_boxed_slice(),
+        uid,
+        site_pos,
         body,
         chunk,
         has_runtime_handles,
@@ -1665,9 +1764,7 @@ fn compile_arm(
         // The file the body was read from — trace entries name it as the call
         // site's file (a fn's calls are in its own source). Cold: once per arm
         // compile.
-        src_file: body_first_form
-            .and_then(|f| heap.form_pos(f))
-            .and_then(|(_, file)| file),
+        src_file,
         capture_names,
         #[cfg(feature = "jit")]
         inline_name,
@@ -1679,8 +1776,12 @@ fn compile_arm(
         // hook grows a live frame to `inline_nslots` on a post-swap entry — a smaller
         // value would make that "grow" an underflowing shrink (hit by the leaf
         // inliner, whose spliced layout can be smaller than the small layout's
-        // reserves; the spliced blocks overlap the small spill/ckpt area by design —
-        // each engine owns its layout exclusively per activation).
+        // reserves). An UNJOURNALLED leaf splice overlaps the small spill/ckpt area by
+        // design — each engine owns its layout exclusively per activation. A journalled
+        // one (ADR-210) deliberately does not: it splices above `nslots_total` so the two
+        // layouts' journals cannot alias while they take turns running one frame.
+        // The leaf path has already applied this floor (its resume arm must agree with
+        // the frame size), so `max` is idempotent there.
         #[cfg(feature = "jit")]
         inline_nslots: if inline_name.is_some() {
             inline_nslots.max(nslots_total)
@@ -1836,6 +1937,37 @@ fn cache_key(heap: &Heap, id: ClosureId) -> Option<VmCacheKey> {
 /// single `vm_cache_arm` lookup + one arm clone. A miss compiles + caches the
 /// closure once, then resolves the arm. `None` = no VM arm for `argc` (defer to
 /// the tree-walker), identical to `compiled_for(..).and_then(|c| c.arm_for(argc))`.
+/// Resolve `id`/`argc` to a compiled arm for **inspection during a leaf probe**, caching
+/// nothing. A cache hit is used as-is; a miss compiles a throwaway copy that is then
+/// dropped.
+///
+/// It must not cache, because a compile reached from inside a probe runs under the
+/// [`LEAF_RESOLVING`](inline) reentrancy guard and therefore never gets its OWN leaf
+/// probe. Installing that arm would hand it to every later call of the callee, silently
+/// denying the callee its derivation for the rest of the process — and the callees reached
+/// this way are mid-level functions like `(defn mix (i) (+ (sq (add1 i)) (rec 3 0)))`,
+/// exactly the shape partial splicing exists to speed up. The throwaway costs one extra
+/// (cold, microsecond-scale) arm compile per caller→callee edge during warm-up; in steady
+/// state every callee is already cached and this is a lookup.
+#[cfg(feature = "jit")]
+fn probe_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<CompiledArm>> {
+    let key = cache_key(heap, id)?;
+    if let Some(hit) = heap.vm_cache_arm(key, argc) {
+        return hit;
+    }
+    // Read-only peek at the cross-process cache — an entry there was compiled by a real
+    // call, so it carries its own metadata and is safe to use (and not ours to install).
+    if !crate::core::heap::Heap::shared_arms_disabled()
+        && matches!(id.region(), value::PRELUDE | value::RUNTIME)
+        && matches!(key, VmCacheKey::Runtime(_))
+    {
+        if let Some(cc) = heap.shared_closure_lookup(id.0) {
+            return cc.arm_for(argc).cloned();
+        }
+    }
+    compile_closure(heap, id).and_then(|cc| cc.arm_for(argc).cloned())
+}
+
 fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<CompiledArm>> {
     let key = cache_key(heap, id)?;
     if let Some(hit) = heap.vm_cache_arm(key, argc) {
@@ -2145,15 +2277,8 @@ fn hof_apply_native(
             // Deopt-resume (see `CompiledArm::ckpt_slot`): resume AT the checkpoint,
             // frame intact — never re-running side effects.
             if outcome == 1 {
-                if let Some((rip, depth)) = jit_ckpt_read(heap, arm, base) {
-                    return Some(vm_resume_deopt(
-                        heap,
-                        arm.clone(),
-                        base,
-                        cenv_live,
-                        rip,
-                        depth,
-                    ));
+                if let Some((resume, rip, depth)) = jit_ckpt_resume(heap, arm, base, nslots) {
+                    return Some(vm_resume_deopt(heap, resume, base, cenv_live, rip, depth));
                 }
             }
             let mut argv2: SmallVec<[Value; 4]> = SmallVec::with_capacity(argc);

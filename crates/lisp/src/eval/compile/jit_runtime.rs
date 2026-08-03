@@ -798,9 +798,9 @@ pub(crate) fn jit_run_fast_link(
                 // than the one whose native ran; a mismatched frame shape can't
                 // be resumed and takes the legacy re-run instead.
                 if outcome == 1 && arm.active_nslots() == nslots {
-                    if let Some((rip, depth)) = jit_ckpt_read(heap, &arm, base) {
+                    if let Some((resume, rip, depth)) = jit_ckpt_resume(heap, &arm, base, nslots) {
                         return match jit_native_reenter(heap, native_depth, |h| {
-                            vm_resume_deopt(h, arm, base, cenv, rip, depth)
+                            vm_resume_deopt(h, resume, base, cenv, rip, depth)
                         }) {
                             Ok(v) => FastLinkOutcome::Done(v),
                             Err(e) => {
@@ -1246,9 +1246,11 @@ pub(crate) fn jit_dispatch_call(
                         // Deopt-resume (see `CompiledArm::ckpt_slot`): resume AT the
                         // checkpoint, frame intact — never re-running side effects.
                         if outcome == 1 {
-                            if let Some((rip, depth)) = jit_ckpt_read(heap, &arm, base) {
+                            if let Some((resume, rip, depth)) =
+                                jit_ckpt_resume(heap, &arm, base, frame_nslots)
+                            {
                                 return match vm_resume_deopt(
-                                    heap, arm, base, callee_env, rip, depth,
+                                    heap, resume, base, callee_env, rip, depth,
                                 ) {
                                     Ok(v) => Some(v),
                                     Err(e) => {
@@ -1441,34 +1443,96 @@ pub(crate) fn jit_dispatch_tail(
 /// occasional deopts never reaches 16 consecutive and keeps its native code.
 /// `BAILED` is sticky until the next epoch invalidation, which resets the
 /// counter so the recompiled arm gets a fresh trial.
-/// Deopt-resume checkpoint (see `CompiledArm::ckpt_slot`): decode the live
-/// frame's journal — `Some((resume_ip, operand_depth))` when a completed
-/// non-tail call checkpointed this activation, meaning the VM must resume THERE
-/// (the side effects before it already happened, exactly once). `None` ⇒ resume
-/// from ip 0, which is then effect-free by construction (everything the boxed
-/// subset executes besides calls is pure or idempotent).
+/// Deopt-resume checkpoint (see `CompiledArm::ckpt_slot`): decode the live frame's
+/// journal — `Some((resume_arm, resume_ip, operand_depth))` when a completed non-tail
+/// call (or `table-put`) checkpointed this activation, meaning the VM must resume THERE
+/// (the side effects before it already happened, exactly once). `None` ⇒ resume from ip 0,
+/// which is then effect-free by construction (everything the boxed subset executes
+/// besides calls and `table-put` is pure or idempotent).
+///
+/// **`resume_arm` is the arm whose chunk the journal's ip indexes**, which is not always
+/// the arm that was called. A journal is written by whichever engine ran the frame, and
+/// each engine has its own bytecode:
+///
+/// - small native → `arm` itself.
+/// - **leaf-spliced** native → the derivation's [`resume`](ir::LeafInline::resume) arm,
+///   which carries the spliced chunk and the matching frame layout. Resuming in `arm`
+///   here would interpret a *different* chunk from the journalled ip — which is exactly
+///   why the inlined engine could not journal at all before, and so could not keep a
+///   residual non-tail call.
+/// - **self-spliced** native → never journals (`u32::MAX` at lowering), so its frame's
+///   slot still reads the entry reset's 0 and this returns `None`.
+///
+/// `frame_nslots` is **the size the caller built this frame to**, and every caller must pass
+/// its own — that is what selects the layout (see [`jit_frame_is_leaf_spliced`] for why the
+/// `inline_installed` flag cannot be used instead) and what makes the slot read in bounds.
+/// Call this at most once per deopt: the decision must be taken before anything resizes the
+/// frame, because a second read would come from the resized one.
 #[cfg(feature = "jit")]
-pub(crate) fn jit_ckpt_read(heap: &Heap, arm: &CompiledArm, base: usize) -> Option<(usize, usize)> {
-    if arm.ckpt_slot == u32::MAX {
-        return None;
+pub(crate) fn jit_ckpt_resume(
+    heap: &Heap,
+    arm: &Arc<CompiledArm>,
+    base: usize,
+    frame_nslots: usize,
+) -> Option<(Arc<CompiledArm>, usize, usize)> {
+    let inlined = jit_frame_is_leaf_spliced(arm, frame_nslots);
+    let slot = jit_ckpt_slot(arm, inlined)?;
+    let p = match heap.root_at(base + slot as usize) {
+        Value::Int(p) if p > 0 => p,
+        _ => return None,
+    };
+    // Continue in whichever layout wrote that journal.
+    let resume = if inlined {
+        arm.leaf.as_ref()?.resume.clone()
+    } else {
+        arm.clone()
+    };
+    Some((resume, (p >> 16) as usize, (p & 0xFFFF) as usize))
+}
+
+/// Was the frame at `base` built for the **leaf-spliced** layout (so its journal is the
+/// derivation's, at the derivation's slot) rather than the small one?
+///
+/// Decided by the size the frame was actually built to — **not** by reading
+/// `inline_installed`. That flag is flipped by `jit_tier` itself, i.e. exactly between the
+/// frame being sized and the deopt being handled, so on the activation where the inlined
+/// upgrade installs, reading it afterwards claims the inlined layout for a frame built to
+/// the small one: `base + <inlined ckpt slot>` then indexes past the root stack, which
+/// surfaced as an out-of-bounds `root_at` inside a later GC walk. Only a *journalled* leaf
+/// derivation matters here, and such a derivation's frame is strictly larger than the small
+/// one (it splices above `nslots` and then reserves blocks + journal), so the size
+/// comparison is unambiguous — asserted below.
+#[cfg(feature = "jit")]
+fn jit_frame_is_leaf_spliced(arm: &CompiledArm, frame_nslots: usize) -> bool {
+    let Some(leaf) = arm.leaf.as_ref() else {
+        return false;
+    };
+    if leaf.resume.ckpt_slot == u32::MAX {
+        return false; // unjournalled: nothing of ours to resume into
     }
-    // The INLINED native (self- or leaf-spliced) has no checkpoint area — its lowering
-    // never journals (`ckpt_active = inline.is_none()`), and the small layout's
-    // `ckpt_slot` points INTO the spliced slot range, where an ordinary value (a spliced
-    // callee's Int param) would fake a journal → a garbage resume ip. A deopt from the
-    // inlined engine must resume from ip 0 (the leaf probe keeps that effect-free by
-    // refusing derivations with residual non-tail calls; self-splices re-run only their
-    // pure-arith bodies).
-    if arm
-        .inline_installed
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        return None;
-    }
-    match heap.root_at(base + arm.ckpt_slot as usize) {
-        Value::Int(p) if p > 0 => Some(((p >> 16) as usize, (p & 0xFFFF) as usize)),
-        _ => None,
-    }
+    debug_assert!(
+        arm.inline_nslots > arm.nslots,
+        "a journalled leaf layout must be strictly larger than the small one, else the \
+         frame-size test below cannot tell them apart"
+    );
+    frame_nslots == arm.inline_nslots
+}
+
+/// The journal slot for the layout live in `arm`'s frame, or `None` when it writes none.
+/// Its `inlined` argument comes from [`jit_frame_is_leaf_spliced`], so the slot always
+/// belongs to the layout the frame was actually built to.
+#[cfg(feature = "jit")]
+fn jit_ckpt_slot(arm: &CompiledArm, inlined: bool) -> Option<u32> {
+    // A self-spliced native writes no journal, and the small layout's `ckpt_slot` points
+    // INTO its spliced slot range, where an ordinary value (a spliced callee's Int param)
+    // would fake a journal → a garbage resume ip. `jit_frame_is_leaf_spliced` returns
+    // false for it, so this reads the small slot, which its entry reset zeroed.
+    let slot = if inlined {
+        arm.leaf.as_ref()?.resume.ckpt_slot
+    } else {
+        arm.ckpt_slot
+    };
+    (slot != u32::MAX).then_some(slot)
 }
 
 /// Resume a deopted JIT frame at its checkpoint on the VM: push the journaled
