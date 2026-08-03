@@ -121,9 +121,25 @@ From the published run (`brood-benchmarks/results/`):
    2026-06-15. This is back to being an ordinary decision: the churn decay was traced to the
    RUNTIME code region (thread 6), not to mimalloc, and `alloc`/`cons` are flat over 50–74 M
    ops. Purge-0 does not fix the decay because the decay was never the allocator's.
-4. **Per-process memory floor** — 5.9 KB vs the BEAM's 3.1 KB, roughly half unattributed.
-   Frontier section B. Needs an allocator size-class histogram behind a cargo feature; there
-   is no heaptrack/valgrind on this box, only `perf`.
+4. **Per-process memory floor — MEASURED AND ATTRIBUTED 2026-08-03.** The idle floor is
+   **4.19 KB**, not 5.9 KB: measure the *slope* of RSS against process count (4389 / 4186 /
+   4195 bytes at N = 10k / 40k / 80k), because RSS/N folds in the ~24 MB runtime base. The old
+   5.9 KB came from `spawn-live`, where each process *also* holds a copied message payload — so
+   two different quantities were being compared against the BEAM's 3.1 KB.
+   **Not allocator retention:** `MIMALLOC_PURGE_DELAY=0` leaves the slope at 4230 / 4120 (base
+   RSS does drop 23.9 → 20.6 MB, which is why the slope and not the ratio is the measurement).
+   Attribution — `Process` 1304 B (of which **`Heap` 1200 B, embedded by value**), `Mailbox`
+   184 B, `Suspended` 136 B = **1624 B structural**, leaving ~2566 B. That remainder is not
+   data (`process-info :memory` for an idle process is **64 bytes**) but per-allocation
+   overhead across the ~25–30 distinct blocks a process owns: touched `Vec` capacities plus
+   size-class rounding, with `Box<Process>` at 1304 B landing in a class well above it.
+   Printed and ceiling-asserted by `per_process_floor_is_attributed`, because `Heap` being
+   inline means **any new `Heap` field costs one per live process**.
+   **Next, in order:** (a) box the `Heap` inside `Process` — `Process` drops to ~112 B and
+   `Heap` becomes its own block; if rounding dominates the floor falls, and if the indirection
+   costs more than it saves that is also worth knowing. (b) Only then build the allocator
+   size-class histogram, which settles the block count directly. (a) is mechanical and tells
+   you whether (b) is worth the effort.
 5. **Endurance — CLOSED 2026-07-31. 16/16 soak runs OK, 12,671,363 self-checking iterations,
    zero failures** over 8 hours (8 armed ~819k each, 8 control ~765k each), against a pinned
    copy of the `86cd3fb3` binary. Detector verified to trip first. Full write-up, logs and a

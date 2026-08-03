@@ -1309,4 +1309,49 @@ mod charge_tests {
         charge_native(web_time::Instant::now());
         assert_eq!(REDUCTIONS.with(|r| r.get()), 2000);
     }
+
+    /// The per-process memory **floor**, structurally attributed.
+    ///
+    /// A live idle process costs ~4.19 KB of RSS (measured as the *slope* of RSS against
+    /// process count: 4389 / 4186 / 4195 bytes at N = 10k / 40k / 80k — RSS/N would instead
+    /// fold in the runtime's ~24 MB base). Against the BEAM's ~3.1 KB that is the standing gap
+    /// in `docs/handoff.md`, and the bytes were recorded as "roughly half unattributed".
+    ///
+    /// This prints the breakdown so the attribution is reproducible rather than folklore, and
+    /// asserts a ceiling so accidental growth is caught here instead of showing up as a
+    /// benchmark row six weeks later. `Heap` is embedded *by value* in `Process`, so a new
+    /// field on `Heap` is paid once per live process — which is exactly the kind of change
+    /// that slips through review.
+    #[test]
+    fn per_process_floor_is_attributed() {
+        use std::mem::size_of;
+        let proc_sz = size_of::<Process>();
+        let heap_sz = size_of::<crate::core::heap::Heap>();
+        let mailbox_sz = size_of::<Mailbox>();
+        let state_sz = size_of::<crate::process::mailbox::MailboxState>();
+        eprintln!("[floor] size_of::<Process>()      = {proc_sz}");
+        eprintln!("[floor]   of which Heap (by value) = {heap_sz}");
+        eprintln!("[floor] size_of::<Mailbox>()      = {mailbox_sz}");
+        eprintln!("[floor]   of which MailboxState    = {state_sz}");
+        // The parked continuation: an idle process is parked in `receive`, so it holds one.
+        let susp_sz = size_of::<crate::eval::compile::Suspended>();
+        eprintln!("[floor] size_of::<Suspended>()    = {susp_sz} (a parked process holds one)");
+        eprintln!(
+            "[floor] structural total            = {} bytes (measured floor ~4190)",
+            proc_sz + mailbox_sz + susp_sz
+        );
+        eprintln!(
+            "[floor] unattributed                = {} bytes (Vec/Box capacity + size-class rounding)",
+            4190i64 - (proc_sz + mailbox_sz + susp_sz) as i64
+        );
+        // Generous ceilings: these are here to catch a doubling, not to pin a byte count.
+        assert!(
+            proc_sz < 8192,
+            "Process grew to {proc_sz} bytes; it is paid per live process (Heap is inline)"
+        );
+        assert!(
+            mailbox_sz < 4096,
+            "Mailbox grew to {mailbox_sz} bytes; paid per live process"
+        );
+    }
 }
