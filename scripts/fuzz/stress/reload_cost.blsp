@@ -36,5 +36,14 @@
 (gc-collect)
 (sleep 300)
 (println (str "iters="
-           iters " every=" every " reloads=" (if (= every 0) 0 (quot iters every)) " rss " r0 " -> "
-           (rss-kb) " delta_kb=" (- (rss-kb) r0)))
+           iters
+           " every="
+           every
+           " reloads="
+           (if (= every 0) 0 (quot iters every))
+           " rss "
+           r0
+           " -> "
+           (rss-kb)
+           " delta_kb="
+           (- (rss-kb) r0)))

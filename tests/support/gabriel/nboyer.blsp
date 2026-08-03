@@ -110,7 +110,8 @@ oracle is the rewrite count published in upstream's own source header; see
          (nil)))
      (equal (prime x)
        (and (not (zerop x))
-         (not (equal x (add1 (zero)))) (prime1 x (_1- x))))
+         (not (equal x (add1 (zero))))
+         (prime1 x (_1- x))))
      (equal (and p q)
        (if p
          (if q
@@ -194,7 +195,8 @@ oracle is the rewrite count published in upstream's own source header; see
      (equal (exec (append x y)
               pds envrn)
        (exec y
-         (exec x pds envrn) envrn))
+         (exec x pds envrn)
+         envrn))
      (equal (mc-flatten x y)
        (append (flatten x)
          y))
@@ -255,12 +257,15 @@ oracle is the rewrite count published in upstream's own source header; see
      (equal (lessp (remainder x y)
               x)
        (and (not (zerop y))
-         (not (zerop x)) (not (lessp x y))))
+         (not (zerop x))
+         (not (lessp x y))))
      (equal (power-eval (power-rep i base)
               base)
        (fix i))
      (equal (power-eval (big-plus (power-rep i base)
-                          (power-rep j base) (zero) base)
+                          (power-rep j base)
+                          (zero)
+                          base)
               base)
        (plus i j))
      (equal (gcd x y)
@@ -348,7 +353,9 @@ oracle is the rewrite count published in upstream's own source header; see
      (equal (equal (times a b)
               1)
        (and (not (equal a (zero)))
-         (not (equal b (zero))) (numberp a) (numberp b)
+         (not (equal b (zero)))
+         (numberp a)
+         (numberp b)
          (equal (_1- a)
            (zero))
          (equal (_1- b)
@@ -456,9 +463,11 @@ oracle is the rewrite count published in upstream's own source header; see
        (reverse (append (append a b)
                   (nil))))
      (u equal
-       (plus a b) (difference x y))
+       (plus a b)
+       (difference x y))
      (w lessp
-       (remainder a b) (member a (length b)))))
+       (remainder a b)
+       (member a (length b)))))
 
 (def nboyer-term
   '(implies (and (implies x y)
@@ -531,10 +540,11 @@ oracle is the rewrite count published in upstream's own source header; see
     (cond
       (nil? lst1) (if (nil? lst2) subst :fail)
       (nil? lst2) :fail
-      else (let (extended (nboyer--unify1 (first lst1) (first lst2) subst))
-             (if (= extended :fail)
-               :fail
-               (nboyer--unify1-lst (rest lst1) (rest lst2) extended))))))
+      else
+        (let (extended (nboyer--unify1 (first lst1) (first lst2) subst))
+          (if (= extended :fail)
+            :fail
+            (nboyer--unify1-lst (rest lst1) (rest lst2) extended))))))
 
 ;; ---- rewriting ---------------------------------------------------------------
 ;; Each of these returns `[value rewrite-count]`. The count is bumped on ENTRY to
@@ -547,7 +557,9 @@ oracle is the rewrite count published in upstream's own source header; see
         [term count]
         (let ([args count2] (nboyer--rewrite-args (rest term) db count))
           (nboyer--rewrite-with-lemmas (cons (first term) args)
-            (get db (first term)) db count2))))))
+            (get db (first term))
+            db
+            count2))))))
 
 (check-allow :non-tail-recursion
   (defn nboyer--rewrite-args (lst db count)
@@ -584,16 +596,19 @@ oracle is the rewrite count published in upstream's own source header; see
       (nboyer--truep x true-lst) true
       (nboyer--falsep x false-lst) false
       (not (pair? x)) false
-      (= (first x) 'if) (cond
-                          (nboyer--truep (second x) true-lst) (nboyer--tautologyp (third x)
-                                                                true-lst false-lst)
+      (= (first x) 'if)
+        (cond
+          (nboyer--truep (second x) true-lst) (nboyer--tautologyp (third x)
+                                                true-lst false-lst)
 
-                          (nboyer--falsep (second x) false-lst) (nboyer--tautologyp (nth x 3)
-                                                                  true-lst false-lst)
+          (nboyer--falsep (second x) false-lst) (nboyer--tautologyp (nth x 3)
+                                                  true-lst false-lst)
 
-                          else (and (nboyer--tautologyp (third x)
-                                      (cons (second x) true-lst) false-lst)
-                                 (nboyer--tautologyp (nth x 3) true-lst (cons (second x) false-lst))))
+          else
+            (and (nboyer--tautologyp (third x)
+                   (cons (second x) true-lst)
+                   false-lst)
+              (nboyer--tautologyp (nth x 3) true-lst (cons (second x) false-lst))))
       else false)))
 
 ;; ---- the driver --------------------------------------------------------------

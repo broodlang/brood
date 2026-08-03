@@ -29,7 +29,11 @@
 (defn url--unreserved? (cp)
   "True if codepoint `cp` is an RFC 3986 unreserved character."
   (or (and (>= cp 65) (<= cp 90))
-    (and (>= cp 97) (<= cp 122)) (and (>= cp 48) (<= cp 57)) (= cp 45) (= cp 95) (= cp 46)
+    (and (>= cp 97) (<= cp 122))
+    (and (>= cp 48) (<= cp 57))
+    (= cp 45)
+    (= cp 95)
+    (= cp 46)
     (= cp 126)))
 
 (defn url--byte->pct (b)
@@ -98,7 +102,9 @@ that is not an RFC 3986 unreserved character (A-Z a-z 0-9 - _ . ~) is encoded as
               (url--pct-decode-loop s (+ i 1) n (cons (char->int c) acc)))))
         ;; Normal char: encode its UTF-8 bytes into the accumulator
         (url--pct-decode-loop s
-          (+ i 1) n (reverse-onto (string->utf8-bytes c) acc))))))
+          (+ i 1)
+          n
+          (reverse-onto (string->utf8-bytes c) acc))))))
 
 (defn percent-decode (s)
   "Decode percent-encoded sequences in `s`, returning the original string.
@@ -170,9 +176,10 @@ defines rather than as its field map."
           (assoc acc (url--qdecode-str part) ""))
         (url--parse-query-pairs (rest parts)
           (assoc acc
-            (url--qdecode-str (substring part 0 eq)) (url--qdecode-str (substring part
-                                                                         (+ eq 1)
-                                                                         (string-length part)))))))))
+            (url--qdecode-str (substring part 0 eq))
+              (url--qdecode-str (substring part
+                                  (+ eq 1)
+                                  (string-length part)))))))))
 
 (defn query-decode (s)
   "Parse a query string `key=value&key=value` into a string→string map,
@@ -252,4 +259,7 @@ have nil `:scheme`, `:host`, and `:port`."
                     ""
                     (str host (if (nil? port) "" (str ":" port)))))
     (str (if (nil? scheme) "" (str scheme "://"))
-      authority path (if (nil? query) "" (str "?" query)) (if (nil? fragment) "" (str "#" fragment)))))
+      authority
+      path
+      (if (nil? query) "" (str "?" query))
+      (if (nil? fragment) "" (str "#" fragment)))))

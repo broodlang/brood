@@ -83,7 +83,8 @@
   (if (= got total)
     all-ok
     (scram-test--collect (+ got 1)
-      total (receive ([_ hexkey] (and all-ok (= hexkey scram-test--expected-stored)))))))
+      total
+      (receive ([_ hexkey] (and all-ok (= hexkey scram-test--expected-stored)))))))
 
 (describe "SCRAM chain across processes"
   :isolated

@@ -131,7 +131,8 @@
 (impl Response
   http-test/probe-response
   (send-response [resp sock]
-    (send (get resp :target) [:sent sock]) nil))
+    (send (get resp :target) [:sent sock])
+    nil))
 
 (describe "http: responses are records with a Response impl"
   (test "the two stock kinds have distinct identities"
@@ -184,9 +185,9 @@
       (is (bytes? (get r :body)))
       (assert= (body-text r) "hi there")))
   (test "parse-response takes wire bytes and keeps a binary body byte-faithful"
-    (let (r (parse-response (bytes-concat ["HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n" (bytes 255
-                                                                                                                 0
-                                                                                                                 128)])))
+    (let (r (parse-response (bytes-concat ["HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n"
+                                            (bytes 255
+                                              0 128)])))
       (assert= (get r :status) 200)
       (assert= (get r :body) (bytes 255 0 128)))))
 
@@ -248,7 +249,8 @@
           ;; raw body bytes 0xFF 0x80 0x41 ride as a `bytes` leaf in the request
           ;; iolist — no mode games; sends are mode-independent (ADR-141)
           (tcp-send c
-            ["POST /echo HTTP/1.0\r\nHost: localhost\r\n" "Content-Length: 3\r\n\r\n"
+            ["POST /echo HTTP/1.0\r\nHost: localhost\r\n"
+              "Content-Length: 3\r\n\r\n"
               (bytes 255 128 65)])
           (let (resp (utf8-bytes->string (tcp-drain c)))
             (tcp-close c)
@@ -306,11 +308,14 @@
                  (serve-loop ls
                    (fn (req)
                      (ok (str (get req :method)
-                           "|" (utf8-bytes->string (get req :body)) "|"
+                           "|"
+                           (utf8-bytes->string (get req :body))
+                           "|"
                            (get (get req :headers) "x-token"))))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (resp (http-post (str "http://127.0.0.1:" port "/act")
-                     "{\"a\":1}" {:headers {"X-Token" "secret" "Content-Type" "application/json"}}))
+                     "{\"a\":1}"
+                     {:headers {"X-Token" "secret" "Content-Type" "application/json"}}))
           (assert= (get resp :status) 200)
           ;; method echoed as POST, the JSON body intact, the custom header received
           (assert= (body-text resp) "POST|{\"a\":1}|secret")))))
@@ -350,7 +355,8 @@
                  (serve-loop ls
                    (fn (req)
                      (response 200
-                       {"Content-Type" "application/octet-stream"} (bytes 255 128 0 7)))))))
+                       {"Content-Type" "application/octet-stream"}
+                       (bytes 255 128 0 7)))))))
       (let (pc (receive ([:ready p ct] [p ct]) (after *test-wait-ms* :timeout)))
         (let (resp (http-get (str "https://localhost:" (first pc) "/blob")
                      {:ca (second pc)}))
@@ -404,7 +410,8 @@
                  (serve-loop ls
                    (fn (req)
                      (response 200
-                       {"Content-Type" "application/octet-stream"} (bytes 255 128 65 0 7)))))))
+                       {"Content-Type" "application/octet-stream"}
+                       (bytes 255 128 65 0 7)))))))
       (let (port (receive ([:port p] p) (after *test-wait-ms* :timeout)))
         (let (resp (http-get (str "http://127.0.0.1:" port "/blob")))
           (assert= (get resp :status) 200)

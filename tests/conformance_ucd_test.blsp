@@ -55,8 +55,10 @@
     (reverse clusters)
     (let (t (first tokens))
       (cond
-        (= t "÷") (gb--fold (rest tokens)
-                    nil (if (nil? cur) clusters (cons (ucd--codes->string (reverse cur)) clusters)))
+        (= t "÷")
+          (gb--fold (rest tokens)
+            nil
+            (if (nil? cur) clusters (cons (ucd--codes->string (reverse cur)) clusters)))
         (= t "×") (gb--fold (rest tokens) cur clusters)
         else (gb--fold (rest tokens) (cons (hex->int t) cur) clusters)))))
 
@@ -75,10 +77,12 @@
       (cond
         (nil? c) (gb--scan (rest lines) ran bad)
         (= (first c) gb--upstream-gap) (gb--scan (rest lines) ran bad)
-        else (let ([input want] c
-                   got (string->graphemes input))
-               (gb--scan (rest lines)
-                 (inc ran) (if (= got want) bad (cons [(pr-str input) want got] bad))))))))
+        else
+          (let ([input want] c
+                got (string->graphemes input))
+            (gb--scan (rest lines)
+              (inc ran)
+              (if (= got want) bad (cons [(pr-str input) want got] bad))))))))
 
 (def gb--lines (corpus-lines (ucd--file "GraphemeBreakTest.txt")))
 
@@ -121,8 +125,10 @@
                  (first (remove (fn (s) (= (string-normalize s form) want)) sources)))
         fails (remove nil?
                 (list (expect :nfc (list c1 c2 c3) c2)
-                  (expect :nfc (list c4 c5) c4) (expect :nfd (list c1 c2 c3) c3)
-                  (expect :nfd (list c4 c5) c5) (expect :nfkc (list c1 c2 c3 c4 c5) c4)
+                  (expect :nfc (list c4 c5) c4)
+                  (expect :nfd (list c1 c2 c3) c3)
+                  (expect :nfd (list c4 c5) c5)
+                  (expect :nfkc (list c1 c2 c3 c4 c5) c4)
                   (expect :nfkd (list c1 c2 c3 c4 c5) c5))))
     (if (nil? fails) nil [(pr-str c1) (pr-str (first fails))])))
 
@@ -136,12 +142,16 @@
       (cond
         p (nt--scan-part want (rest lines) p ran bad)
         (not (= here want)) (nt--scan-part want (rest lines) here ran bad)
-        else (let (cols (nt--case line))
-               (if (nil? cols)
-                 (nt--scan-part want (rest lines) here ran bad)
-                 (let (w (nt--wrong cols))
-                   (nt--scan-part want
-                     (rest lines) here (inc ran) (if w (cons w bad) bad)))))))))
+        else
+          (let (cols (nt--case line))
+            (if (nil? cols)
+              (nt--scan-part want (rest lines) here ran bad)
+              (let (w (nt--wrong cols))
+                (nt--scan-part want
+                  (rest lines)
+                  here
+                  (inc ran)
+                  (if w (cons w bad) bad)))))))))
 
 ;; Read and split the ~20,000-line file ONCE at load, not once per part. Six re-reads cost
 ;; ~40 s of a debug build's suite budget for nothing — the parts differ in which lines they
@@ -162,7 +172,8 @@
 ;; real parsing, on the lines a slice actually tests.
 (defn nt--case-line? (line)
   (and (not (blank? line))
-    (not (starts-with? (trim line) "@")) (not (starts-with? (trim line) "#"))
+    (not (starts-with? (trim line) "@"))
+    (not (starts-with? (trim line) "#"))
     (>= (count (string-split line ";")) 5)))
 
 (defn nt--collect (want lines here acc)
@@ -196,9 +207,16 @@
         ;; the same as the full sweep — the whole point of sampling was lost.
         ;; `idx` advances over test lines only, so the slices stay balanced.
         (not (= (rem idx n) k)) (nt--scan-chunk want k n (rest lines) here (inc idx) ran bad)
-        else (let (w (nt--wrong (nt--case line)))
-               (nt--scan-chunk want
-                 k n (rest lines) here (inc idx) (inc ran) (if w (cons w bad) bad)))))))
+        else
+          (let (w (nt--wrong (nt--case line)))
+            (nt--scan-chunk want
+              k
+              n
+              (rest lines)
+              here
+              (inc idx)
+              (inc ran)
+              (if w (cons w bad) bad)))))))
 
 ;; Part1 runs in FULL by default (`BROOD_UCD_PART1_OF` unset) — every one of its ~16,000 cases.
 ;;

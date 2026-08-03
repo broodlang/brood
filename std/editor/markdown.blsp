@@ -105,7 +105,8 @@ followed by a space or end-of-line — or nil if it isn't a heading."
         lead (md--lead-ws line)
         h (md--count-char line lead n "#"))
     (if (and (>= h 1)
-          (<= h 6) (or (= (+ lead h) n) (= (char-at line (+ lead h)) " ")))
+          (<= h 6)
+          (or (= (+ lead h) n) (= (char-at line (+ lead h)) " ")))
       h
       nil)))
 
@@ -116,7 +117,8 @@ followed by a space or end-of-line — or nil if it isn't a heading."
     (if (= d i)
       -1
       (if (and (< d n)
-            (or (= (char-at line d) ".") (= (char-at line d) ")")) (md--space-after? line (inc d) n))
+            (or (= (char-at line d) ".") (= (char-at line d) ")"))
+            (md--space-after? line (inc d) n))
         (inc d)
         -1))))
 (defn md--digits-end (line i n)
@@ -133,13 +135,17 @@ and `col` the column where inline content begins (past the marker, or `lead`)."
     (let (c (char-at line lead))
       (cond
         (= c ">") [(list [(+ base lead) (+ base (inc lead)) md-face-quote]) (inc lead)]
-        (and (md--bullet? c) (md--space-after? line (inc lead) n)) [(list [(+ base lead) (+ base
-                                                                                           (inc lead))
-                                                                            md-face-list]) (inc lead)]
-        (md--digit? c) (let (oe (md--ordered-end line lead n))
-                         (if (< oe 0)
-                           [() lead]
-                           [(list [(+ base lead) (+ base oe) md-face-list]) oe]))
+        (and (md--bullet? c) (md--space-after? line (inc lead) n))
+          [(list [(+ base lead)
+                   (+ base
+                     (inc lead))
+                   md-face-list])
+            (inc lead)]
+        (md--digit? c)
+          (let (oe (md--ordered-end line lead n))
+            (if (< oe 0)
+              [() lead]
+              [(list [(+ base lead) (+ base oe) md-face-list]) oe]))
         else [() lead]))))
 
 ;; ---- the inline scanner: code / bold / italic / links -----------------------
@@ -169,7 +175,10 @@ delimiter (or skip the char if unclosed), then continue the inline scan."
     (if (< j 0)
       (md--inline line base (inc i) n acc)
       (md--inline line
-        base (inc j) n (cons [(+ base i) (+ base (inc j)) md-face-italic] acc)))))
+        base
+        (inc j)
+        n
+        (cons [(+ base i) (+ base (inc j)) md-face-italic] acc)))))
 
 (defn md--inline (line base i n acc)
   "Tail-recursive inline scanner over `[i, n)` of `line` (offsets shifted by `base`),
@@ -180,26 +189,34 @@ reverse. Each matched region is consumed whole, so spans stay non-overlapping."
     (let (c (char-at line i))
       (cond
         ;; inline code: `…`
-        (= c "`") (let (j (md--find-char line (inc i) n "`"))
-                    (if (< j 0)
-                      (md--inline line base (inc i) n acc)
-                      (md--inline line
-                        base (inc j) n (cons [(+ base i) (+ base (inc j)) md-face-code] acc))))
+        (= c "`")
+          (let (j (md--find-char line (inc i) n "`"))
+            (if (< j 0)
+              (md--inline line base (inc i) n acc)
+              (md--inline line
+                base
+                (inc j)
+                n
+                (cons [(+ base i) (+ base (inc j)) md-face-code] acc))))
         ;; bold: **…** or __…__ (fall back to italic when unclosed)
-        (md--delim2? line i n) (let (a (char-at line i)
-                                     j (md--find-2 line (+ i 2) n a a))
-                                 (if (< j 0)
-                                   (md--inline-emph line base i n acc)
-                                   (md--inline line
-                                     base (+ j 2) n
-                                     (cons [(+ base i) (+ base (+ j 2)) md-face-bold] acc))))
+        (md--delim2? line i n)
+          (let (a (char-at line i)
+                j (md--find-2 line (+ i 2) n a a))
+            (if (< j 0)
+              (md--inline-emph line base i n acc)
+              (md--inline line
+                base
+                (+ j 2)
+                n
+                (cons [(+ base i) (+ base (+ j 2)) md-face-bold] acc))))
         ;; italic: *…* or _…_
         (or (= c "*") (= c "_")) (md--inline-emph line base i n acc)
         ;; link: [text](url)
-        (= c "[") (let (span (md--link-span line base i n))
-                    (if (nil? span)
-                      (md--inline line base (inc i) n acc)
-                      (md--inline line base (- (second span) base) n (cons span acc))))
+        (= c "[")
+          (let (span (md--link-span line base i n))
+            (if (nil? span)
+              (md--inline line base (inc i) n acc)
+              (md--inline line base (- (second span) base) n (cons span acc))))
         else (md--inline line base (inc i) n acc)))))
 
 ;; ---- a line's spans + the document walker -----------------------------------
@@ -214,9 +231,10 @@ otherwise a leading block marker plus an inline scan of the rest."
       fence [(not (md--fence? line)) (list [base (+ base n) md-face-code])]
       (md--fence? line) [true (list [base (+ base n) md-face-code])]
       (md--heading-level line) [false (list [base (+ base n) md-face-heading])]
-      else (let (lead (md--lead-ws line)
-                 [marker mstart] (md--block line base lead n))
-             [false (append marker (md--inline line base mstart n '()))]))))
+      else
+        (let (lead (md--lead-ws line)
+              [marker mstart] (md--block line base lead n))
+          [false (append marker (md--inline line base mstart n '()))]))))
 
 (defn md--lex (src i n fence acc)
   "Tail-recursive line walker: classify each line (`md--line-spans`), threading the

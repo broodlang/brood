@@ -98,4 +98,5 @@ For an even-length sequence, returns the mean of the two middle values."
   (let (freq (frequencies xs))
     (fold (fn (best x)
             (if (> (get freq x) (get freq best)) x best))
-      (first xs) (rest xs))))
+      (first xs)
+      (rest xs))))

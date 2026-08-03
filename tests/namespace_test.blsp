@@ -272,7 +272,8 @@ is what a `:use` would actually import, not what the source looks like."
           (fn (n)
             (and (starts-with? n prefix)
               ;; a nested module (`editor/x` under `editor`) is not an export
-              (not (includes? (substring n plen (string-length n)) "/")) (not (includes? n "--")))) ; module-private
+              (not (includes? (substring n plen (string-length n)) "/"))
+              (not (includes? n "--")))) ; module-private
           (map name (global-names)))))))
 
 (describe "std cross-module name overlaps are known, not surprising"

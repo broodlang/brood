@@ -75,7 +75,8 @@
       (println "P58: [499]=" (get r 2) "expected:" (+ big-base 499))
       (println "P58-correct:"
         (and (= (+ big-base 0) (get r 0))
-          (= (+ big-base 250) (get r 1)) (= (+ big-base 499) (get r 2)))))))
+          (= (+ big-base 250) (get r 1))
+          (= (+ big-base 499) (get r 2)))))))
 
 ;;; ---- P59: allocation storm while sending ----
 (println "=== P59: alloc storm during concurrent sends ===")

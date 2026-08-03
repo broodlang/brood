@@ -41,7 +41,8 @@
     [checked bad]
     (let (m (pn--mismatch (first lines)))
       (pn--scan-lines (rest lines)
-        (if (< (string-length (first lines)) 32) checked (inc checked)) (if m (cons m bad) bad)))))
+        (if (< (string-length (first lines)) 32) checked (inc checked))
+        (if m (cons m bad) bad)))))
 
 (defn pn--scan-files (files checked bad)
   (if (nil? files)

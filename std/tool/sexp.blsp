@@ -62,7 +62,8 @@ list/vector/map children); the root if none. Reader-macro wrappers are navigated
 as a unit — descending through them is a deferred refinement."
   (let (hit (find (fn (k)
                     (and (container-kind? (get k :kind))
-                      (< (get k :start) point) (< point (get k :end))))
+                      (< (get k :start) point)
+                      (< point (get k :end))))
               (or (get anode :kids) (list))))
     (if (nil? hit) anode (enclosing hit point))))
 
@@ -126,8 +127,9 @@ offset once `left` top-level forms have completed (depth returns to 0 after an o
         (= c "\"") (sexp--scan text (sexp--str-end text (inc i) n) n depth left)
         (= c ";") (sexp--scan text (sexp--eol text (inc i) n) n depth left)
         (sexp--open? c) (sexp--scan text (inc i) n (inc depth) left)
-        (sexp--close? c) (let (d (max 0 (dec depth)))
-                           (sexp--scan text (inc i) n d (if (= d 0) (dec left) left)))
+        (sexp--close? c)
+          (let (d (max 0 (dec depth)))
+            (sexp--scan text (inc i) n d (if (= d 0) (dec left) left)))
         else (sexp--scan text (inc i) n depth left)))))
 
 (defn narrow (text point)
@@ -263,7 +265,10 @@ delimiter past that form (Emacs/paredit `forward-slurp-sexp`)."
           nil
           (let (ne (get nxt :end))
             [(str (substring text 0 (dec ee))
-               (substring text ee ne) (char-at text (dec ee)) (substring text ne)) point]))))))
+               (substring text ee ne)
+               (char-at text (dec ee))
+               (substring text ne))
+              point]))))))
 
 (defn point-barf-forward (text point)
   "Expel the last form of the enclosing list — move the close delimiter in past the
@@ -280,8 +285,11 @@ form before it (paredit `forward-barf-sexp`); point stays inside the list."
           (let (n (count fs)
                 new-close (if (>= n 2) (get (nth fs (- n 2)) :end) (inc es)))
             [(str (substring text 0 new-close)
-               (char-at text (dec ee)) (substring text new-close (dec ee)) (substring text ee)) (min point
-                                                                                                                                                 new-close)]))))))
+               (char-at text (dec ee))
+               (substring text new-close (dec ee))
+               (substring text ee))
+              (min point
+                new-close)]))))))
 
 (defn point-slurp-backward (text point)
   "Pull the sibling form *before* the enclosing list inside it — move the open
@@ -297,7 +305,10 @@ delimiter back over that form (paredit `backward-slurp-sexp`)."
           nil
           (let (ps (get prev :start))
             [(str (substring text 0 ps)
-               (char-at text es) (substring text ps es) (substring text (inc es))) point]))))))
+               (char-at text es)
+               (substring text ps es)
+               (substring text (inc es)))
+              point]))))))
 
 (defn point-barf-backward (text point)
   "Expel the first form of the enclosing list — move the open delimiter in past the
@@ -313,10 +324,13 @@ form after it (paredit `backward-barf-sexp`); point stays inside the list."
           nil
           (let (new-open (if (>= (count fs) 2) (get (second fs) :start) (dec ee)))
             [(str (substring text 0 es)
-               (substring text (inc es) new-open) (char-at text es) (substring text new-open)) (if (< point
-                                                                                                                                             new-open)
-                                                                                                                                         new-open
-                                                                                                                                         point)]))))))
+               (substring text (inc es) new-open)
+               (char-at text es)
+               (substring text new-open))
+              (if (< point
+                    new-open)
+                new-open
+                point)]))))))
 
 (defn point-raise (text point)
   "Replace the enclosing list with the child form point is in/on, deleting that
@@ -331,10 +345,12 @@ form's siblings (paredit `raise-sexp`)."
           nil
           (let (cs (get cur :start) ce (get cur :end))
             [(str (substring text 0 (get enc :start))
-               (substring text cs ce) (substring text (get enc :end))) (+ (get enc
-                                                                                                                                  :start)
-                                                                                                                               (- point
-                                                                                                                                 cs))]))))))
+               (substring text cs ce)
+               (substring text (get enc :end)))
+              (+ (get enc
+                   :start)
+                (- point
+                  cs))]))))))
 
 (defn point-splice (text point)
   "Remove the enclosing list's delimiters, keeping its contents (paredit
@@ -346,8 +362,10 @@ form's siblings (paredit `raise-sexp`)."
             es (get enc :start)
             ee (get enc :end))
         [(str (substring text 0 es)
-           (substring text (inc es) (dec ee)) (substring text ee)) (max es
-                                                                                                         (dec point))]))))
+           (substring text (inc es) (dec ee))
+           (substring text ee))
+          (max es
+            (dec point))]))))
 
 (defn point-wrap-round (text point)
   "Wrap the form at or after `point` in a fresh `( … )`, point landing just inside the
@@ -384,7 +402,8 @@ at `next.end` (the whitespace between the two forms is preserved in place)."
            (substring text ns ne) ; the later form, moved before …
            (substring text pe ns) ; … the separator between them, kept as-is …
            (substring text ps pe) ; … then the earlier form
-           (substring text ne)) ne]))))
+           (substring text ne))
+          ne]))))
 
 ;; ---- structure-aware kill bound ---------------------------------------------
 

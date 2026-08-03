@@ -311,7 +311,11 @@
   ; ring cycles
   (test "pop-mark moves point to the newest ring entry, rotating it to the back"
     (let (b (-> (make-buffer "abcdef")
-              (goto-char 2) push-mark (goto-char 5) push-mark (goto-char 0))
+              (goto-char 2)
+              push-mark
+              (goto-char 5)
+              push-mark
+              (goto-char 0))
           p1 (pop-mark b))
       ; newest mark first
       (assert= (buffer-point p1) 5)

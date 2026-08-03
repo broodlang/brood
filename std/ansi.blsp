@@ -35,10 +35,11 @@ escape sequences and carriage returns."
     (apply str (reverse out))
     (let (c (nth v i))
       (cond
-        (= c "\e") (if (and (< (+ i 1) n) (= (nth v (+ i 1)) "["))
-                     ; CSI: skip to final byte
-                     (ansi--strip v (ansi--csi-end v (+ i 2) n) n out)
-                     (ansi--strip v (+ i 2) n out))
+        (= c "\e")
+          (if (and (< (+ i 1) n) (= (nth v (+ i 1)) "["))
+            ; CSI: skip to final byte
+            (ansi--strip v (ansi--csi-end v (+ i 2) n) n out)
+            (ansi--strip v (+ i 2) n out))
         ; other ESC X: drop both
         (= c "\r") (ansi--strip v (+ i 1) n out)
         ; bare CR: drop

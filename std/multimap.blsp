@@ -117,13 +117,15 @@ associations (its `Seqable` view)."
                     (let (k (first pair)
                           vs (second pair))
                       (assoc m k (f k vs))))
-              {} (map-pairs (get mm :entries)))))
+              {}
+              (map-pairs (get mm :entries)))))
 
 (defn multimap->map (mm)
   "Flatten the multimap to a plain map from key → list-of-values (insertion order)."
   (fold (fn (m pair)
           (assoc m (first pair) (reverse (second pair))))
-    {} (map-pairs (get mm :entries))))
+    {}
+    (map-pairs (get mm :entries))))
 
 ;; `Display` is the O(1) summary (how many keys, how many pairs); `Inspect` shows the
 ;; whole thing — the plain-map view, so a log line reads as data rather than a wrapper.
@@ -131,7 +133,11 @@ associations (its `Seqable` view)."
   multimap/multimap
   (to-str [mm]
     (str "#<multimap "
-      (count (multimap-keys mm)) " keys, " (multimap-size mm) " pairs>")))
+      (count (multimap-keys mm))
+      " keys, "
+      (multimap-size mm)
+      " pairs>")))
 
 (impl Inspect
-  multimap/multimap (inspect [mm] (str "#<multimap " (pr-str (multimap->map mm)) ">")))
+  multimap/multimap
+  (inspect [mm] (str "#<multimap " (pr-str (multimap->map mm)) ">")))

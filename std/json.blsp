@@ -171,7 +171,9 @@ leading zeros)."
 (defn json--hex4 (s i)
   "The int value of the four hex digits at `i` (a `\\uXXXX` body)."
   (+ (* 4096 (json--hex1 s i))
-    (* 256 (json--hex1 s (+ i 1))) (* 16 (json--hex1 s (+ i 2))) (json--hex1 s (+ i 3))))
+    (* 256 (json--hex1 s (+ i 1)))
+    (* 16 (json--hex1 s (+ i 2)))
+    (json--hex1 s (+ i 3))))
 
 (defn json--unicode (s i n)
   "A `\\uXXXX` escape body starting at `i` (after the `u`): decode one BMP code
@@ -225,8 +227,9 @@ point, or combine a high+low surrogate pair into one astral code point. Returns
       ;; or tab in a string body is malformed JSON, not content — accepting it made
       ;; `{"a": "x<TAB>y"}` parse where every conforming parser rejects it.
       ;; (JSONTestSuite n_string_unescaped_{ctrl_char,newline,tab}.)
-      (< c 32) (error "json: unescaped control character in string: U+"
-                 (pad-left (upper (json--int->hex c)) 4 "0"))
+      (< c 32)
+        (error "json: unescaped control character in string: U+"
+          (pad-left (upper (json--int->hex c)) 4 "0"))
       else (json--string--acc s (+ i 1) n (cons c acc)))))
 
 (defn json--string (s i n)
@@ -357,8 +360,13 @@ the named escapes + every C0 control) that would each find nothing."
     s
     (fold (fn (acc [raw esc]) (replace acc raw esc))
       (-> s
-        (replace "\\" "\\\\") (replace "\"" "\\\"") (replace "\n" "\\n") (replace "\r" "\\r")
-        (replace "\t" "\\t") (replace "\u{8}" "\\b") (replace "\u{c}" "\\f"))
+        (replace "\\" "\\\\")
+        (replace "\"" "\\\"")
+        (replace "\n" "\\n")
+        (replace "\r" "\\r")
+        (replace "\t" "\\t")
+        (replace "\u{8}" "\\b")
+        (replace "\u{c}" "\\f"))
       json--control-escapes)))
 
 (defn json--enc-string (s) (str "\"" (json--enc-escapes s) "\""))
@@ -384,13 +392,16 @@ the named escapes + every C0 control) that would each find nothing."
   (if (>= i n)
     acc
     (json--emit-items xs
-      (+ i 1) n (json--emit (nth xs i) (if (= i 0) acc (cons "," acc))))))
+      (+ i 1)
+      n
+      (json--emit (nth xs i) (if (= i 0) acc (cons "," acc))))))
 
 (defn json--emit-list (xs acc first?)
   (if (empty? xs)
     acc
     (json--emit-list (rest xs)
-      (json--emit (first xs) (if first? acc (cons "," acc))) false)))
+      (json--emit (first xs) (if first? acc (cons "," acc)))
+      false)))
 
 ;; ---- JsonEncode: the extension seam for values JSON has no rule for ----------
 ;;
@@ -439,11 +450,15 @@ default is its FIELDS — the internal `:__id__` identity must never reach the w
     (map? v) (cons "}" (json--emit-pairs (map-pairs v) (cons "{" acc) true))
     (vector? v) (cons "]" (json--emit-items v 0 (count v) (cons "[" acc)))
     (list? v) (cons "]" (json--emit-list v (cons "[" acc) true))
-    else (let (custom (json--custom v))
-           (if custom
-             (json--emit (custom v) acc)
-             (error "json: cannot encode "
-               v " (a " (type-of v) ") — give its type a JsonEncode impl to encode it")))))
+    else
+      (let (custom (json--custom v))
+        (if custom
+          (json--emit (custom v) acc)
+          (error "json: cannot encode "
+            v
+            " (a "
+            (type-of v)
+            ") — give its type a JsonEncode impl to encode it")))))
 
 (defn json-encode (v)
   "Encode Brood value `v` as JSON text: nil → null, true/false → bool, a number → a

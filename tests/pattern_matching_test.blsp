@@ -514,9 +514,10 @@
 ;; ---- record patterns across processes: a record survives send (deep copy) and matches ----
 (defn pm-shape-worker (parent s)
   (spawn (send parent
-           [:s (match s
-                 ((record pm-circle {:r r}) [:circle r])
-                 ((record pm-rect {:w w :h h}) [:rect (* w h)]))])))
+           [:s
+             (match s
+               ((record pm-circle {:r r}) [:circle r])
+               ((record pm-rect {:w w :h h}) [:rect (* w h)]))])))
 (describe "record patterns across processes"
   :isolated
   (test "a record pattern matches a value received from another process"

@@ -75,8 +75,10 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
                         (if (>= (bytes-index-of probe marker) 0)
                           (apply bytes-concat (reverse (cons d chunks)))
                           (http--read-until sock
-                            (cons d chunks) (+ have (byte-length d))
-                            (if (<= pn k) probe (subbytes probe (- pn k) pn)) marker))))
+                            (cons d chunks)
+                            (+ have (byte-length d))
+                            (if (<= pn k) probe (subbytes probe (- pn k) pn))
+                            marker))))
       ([:tcp-closed ^sock] (if (= have 0) nil (apply bytes-concat (reverse chunks))))
       (after *http-read-timeout-ms* (if (= have 0) nil (apply bytes-concat (reverse chunks)))))))
 
@@ -139,9 +141,12 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
             (if (< i 0)
               m
               (assoc m
-                (lower (trim (substring line 0 i))) (trim (substring line
-                                                            (+ i 1) (string-length line)))))))
-    {} lines))
+                (lower (trim (substring line 0 i)))
+                  (trim (substring line
+                          (+ i 1)
+                          (string-length line)))))))
+    {}
+    lines))
 
 (defn http--declared-length (head)
   ;; A well-formed Content-Length is a non-negative *integer* byte count. A
@@ -216,7 +221,9 @@ exactly. There is no mode flip-back — outbound writes are mode-independent
 (impl Response
   net/http/response
   (send-response [resp sock]
-    (tcp-send sock (render-response resp)) (tcp-close sock) nil))
+    (tcp-send sock (render-response resp))
+    (tcp-close sock)
+    nil))
 
 (defn ok (body)
   "A 200 text/html response with `body`."
@@ -249,8 +256,14 @@ bytes can never disagree."
         headers (assoc (or (get resp :headers) {})
                   "Content-Length" (str (count body-bytes))
                   "Connection" "close"))
-    ["HTTP/1.0 " (str status)
-      " " (get *http-status-text* status "OK") "\r\n" (render-headers headers) "\r\n" body-bytes]))
+    ["HTTP/1.0 "
+      (str status)
+      " "
+      (get *http-status-text* status "OK")
+      "\r\n"
+      (render-headers headers)
+      "\r\n"
+      body-bytes]))
 
 ;; ---- streaming responses (the connection-handoff seam) ----------------------
 ;; A handler that returns `(stream-response …)` keeps the connection open: the
@@ -263,8 +276,13 @@ bytes can never disagree."
 **iolist** (ADR-139) — no body and no Content-Length. For a streaming response
 whose body is written incrementally over the socket afterwards (see
 `stream-response`). `(bytes-concat …)` materialises it for inspection."
-  ["HTTP/1.0 " (str status)
-    " " (get *http-status-text* status "OK") "\r\n" (render-headers headers) "\r\n"])
+  ["HTTP/1.0 "
+    (str status)
+    " "
+    (get *http-status-text* status "OK")
+    "\r\n"
+    (render-headers headers)
+    "\r\n"])
 
 (defrecord stream-response (status headers stream))
 
@@ -274,7 +292,8 @@ whose body is written incrementally over the socket afterwards (see
   net/http/stream-response
   (send-response [resp sock]
     (tcp-send sock (render-head (get resp :status 200) (or (get resp :headers) {})))
-    ((get resp :stream) sock) nil))
+    ((get resp :stream) sock)
+    nil))
 
 (defn streaming? (resp)
   "True if `resp` is a `stream-response` — the connection is handed to its `:stream` fn
@@ -393,7 +412,8 @@ keys lower-cased); `:body` stays a `bytes` value, byte-faithful — use
         lines (string-split head "\r\n")
         status (string-split (first lines) " "))
     (response (let (n (string->number (nth status 1 "0"))) (if (nil? n) 0 n))
-      (http--parse-headers (rest lines)) body)))
+      (http--parse-headers (rest lines))
+      body)))
 
 (defn body-text (resp)
   "The `:body` of a response (or parsed request) decoded as UTF-8 text. A string
@@ -461,13 +481,19 @@ response); the root process counts."
         target (let (q (get u :query))
                  (if (or (nil? q) (= q "")) (get u :path) (str (get u :path) "?" q)))
         head (str method
-               " " target " HTTP/1.0\r\n" (render-headers headers) "\r\n")
+               " "
+               target
+               " HTTP/1.0\r\n"
+               (render-headers headers)
+               "\r\n")
         ;; Binary mode before the request goes out (both transports): the peer
         ;; cannot respond before it has our request, so every response chunk
         ;; arrives as byte-faithful `bytes`.
         sock (if (= (get u :scheme) "https")
                (let (s (tls-request (get u :host)
-                         (get u :port) [head body-bytes] (get opts :ca)))
+                         (get u :port)
+                         [head body-bytes]
+                         (get opts :ca)))
                  (tcp-set-binary s true)
                  s)
                (let (s (tcp-connect (get u :host) (get u :port)))

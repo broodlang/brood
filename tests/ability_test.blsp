@@ -469,10 +469,12 @@
   (rle [self other] :-> bool (<= (rcmp self other) 0))) ; provided
 ;; circle: ONLY the required op is written — rlt/rgt/rle come free
 (impl Ranked
-  ability-test/circle (rcmp [a b] (- (get a :r) (get b :r))))
+  ability-test/circle
+  (rcmp [a b] (- (get a :r) (get b :r))))
 ;; rect: overrides rgt (always false) IN THE SAME impl form; inherits rlt/rle
 (impl Ranked
-  ability-test/rect (rcmp [a b] (- (* (get a :w) (get a :h)) (* (get b :w) (get b :h))))
+  ability-test/rect
+  (rcmp [a b] (- (* (get a :w) (get a :h)) (* (get b :w) (get b :h))))
   (rgt [a b] false))
 
 (describe "provided (default-body) ops"

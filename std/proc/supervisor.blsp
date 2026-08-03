@@ -253,15 +253,17 @@ recursively — before the next, so a whole tree shuts down depth-first."
 from the reversed `:back` when it empties. Tail-recursive."
   (let (front (get w :front))
     (cond
-      (empty? front) (let (b (get w :back))
-                       (if (empty? b)
-                         w
-                         (supervisor--window-prune (assoc w :front (reverse b) :back ())
-                           now-ms window-ms)))
-      (> (- now-ms (first front)) window-ms) (supervisor--window-prune (assoc w
-                                                                         :front (rest front)
-                                                                         :count (- (get w :count) 1))
-                                               now-ms window-ms)
+      (empty? front)
+        (let (b (get w :back))
+          (if (empty? b)
+            w
+            (supervisor--window-prune (assoc w :front (reverse b) :back ())
+              now-ms window-ms)))
+      (> (- now-ms (first front)) window-ms)
+        (supervisor--window-prune (assoc w
+                                    :front (rest front)
+                                    :count (- (get w :count) 1))
+          now-ms window-ms)
       else w)))
 
 (defn supervisor--window-add (w t window-ms)
@@ -295,7 +297,10 @@ so the failure propagates — anyone monitoring the supervisor sees `[:down …
 restarts this whole sub-tree (escalation). Erlang terminates children on shutdown."
   (supervisor--terminate-many survivors)
   (error "supervisor: restart intensity exceeded ("
-    (get state :max-restarts) " restarts in " (get state :max-seconds) "s)"))
+    (get state :max-restarts)
+    " restarts in "
+    (get state :max-seconds)
+    "s)"))
 
 (defn supervisor--restart (state child)
   "Restart `child` (`:one-for-one`): record the restart in the intensity window;
@@ -318,10 +323,11 @@ the child with `:pid` `pid`. `:one-for-all` → everything is affected;
 the earlier-started prefix left untouched. (`children` is an ordered *sequence* of
 records here — callers pass `supervisor--ordered`.)"
   (if (= strategy :rest-for-one)
-    [(take-while (fn (c) (not (= (get c :pid) pid))) children) (drop-while (fn (c)
-                                                                             (not (= (get c :pid)
-                                                                                    pid)))
-                                                                 children)]
+    [(take-while (fn (c) (not (= (get c :pid) pid))) children)
+      (drop-while (fn (c)
+                    (not (= (get c :pid)
+                           pid)))
+        children)]
     [() children]))
 (defn supervisor--maybe-restart (child reason)
   "After a group termination, restart `child` if its `:restart` type permits given
@@ -343,7 +349,8 @@ abnormal (`:killed`) — leaving unaffected children running. Bounded by intensi
       (supervisor--giveup state (supervisor--ordered (dissoc (get state :children) trig-pid)))
       (let ([unaffected affected] (supervisor--split-affected (supervisor--ordered (get state
                                                                                      :children))
-                                    trig-pid (get state :strategy))
+                                    trig-pid
+                                    (get state :strategy))
             survivors (remove (fn (c) (= (get c :pid) trig-pid)) affected)
             _ (supervisor--terminate-many survivors)
             restarted (remove nil?
@@ -364,16 +371,19 @@ abnormal (`:killed`) — leaving unaffected children running. Bounded by intensi
     when the trigger actually restarts).
   - otherwise: ignore (a stale `[:EXIT]` for a child already removed)."
   (cond
-    (= pid (get state :parent)) (supervisor--terminate-many (supervisor--ordered (get state
-                                                                                   :children)))
+    (= pid (get state :parent))
+      (supervisor--terminate-many (supervisor--ordered (get state
+                                                         :children)))
     ; returns nil → we exit :normal
-    else (let (child (supervisor--find (get state :children) pid))
-           (cond
-             (nil? child) (supervisor--loop state)
-             (not (supervisor--restartable? (get child :restart :permanent) reason)) (supervisor--loop (supervisor--remove state
-                                                                                                         pid))
-             (= (get state :strategy) :one-for-one) (supervisor--restart state child)
-             else (supervisor--group-restart state child reason)))))
+    else
+      (let (child (supervisor--find (get state :children) pid))
+        (cond
+          (nil? child) (supervisor--loop state)
+          (not (supervisor--restartable? (get child :restart :permanent) reason))
+            (supervisor--loop (supervisor--remove state
+                                pid))
+          (= (get state :strategy) :one-for-one) (supervisor--restart state child)
+          else (supervisor--group-restart state child reason)))))
 
 ;; ---- runtime child management (Elixir's DynamicSupervisor / OTP's
 ;; start_child / terminate_child / restart_child / count_children) -------------
@@ -454,7 +464,8 @@ preserves that order on reverse)."
   (if (empty? specs)
     (reverse acc)
     (supervisor--start-each (rest specs)
-      (+ i 1) (cons (assoc (supervisor--start-child (first specs)) :seq i) acc))))
+      (+ i 1)
+      (cons (assoc (supervisor--start-child (first specs)) :seq i) acc))))
 
 ;; ---- public client API ------------------------------------------------------
 
@@ -482,9 +493,9 @@ another, the parent links it, so the parent's death tears this sub-tree down too
         parent (self)
         name (get opts :name))
     (cond
-      (not (supervisor--known-strategy? strategy)) (error "start-supervisor: unknown :strategy "
-                                                     strategy
-                                                     " (expected :one-for-one, :one-for-all, or :rest-for-one)")
+      (not (supervisor--known-strategy? strategy))
+        (error "start-supervisor: unknown :strategy "
+          strategy " (expected :one-for-one, :one-for-all, or :rest-for-one)")
       name (spawn name (supervisor--init children opts parent))
       ; named & idempotent
       else (spawn (supervisor--init children opts parent)))))

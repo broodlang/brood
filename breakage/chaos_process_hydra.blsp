@@ -53,7 +53,8 @@
         seed (get config :seed)
         ;; compute a pseudo-random sum (poor man's hash chain)
         total (fold (fn (acc i) (rem (+ (* acc 1103515245) i seed) 2147483647))
-                1 (range n)))
+                1
+                (range n)))
     (send parent {:id id :result total :config config})))
 
 (let (me (self)

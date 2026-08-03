@@ -317,8 +317,10 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
 (defn had-author-newlines? (n)
   (let (k (node-kind n))
     (cond
-      (or (= k :list) (= k :vector) (= k :map) (= k :set)) (had-author-newlines--scan (node-children n)
-                                                             0 (vector-length (node-children n)))
+      (or (= k :list) (= k :vector) (= k :map) (= k :set))
+        (had-author-newlines--scan (node-children n)
+          0
+          (vector-length (node-children n)))
       (wrapper? n) (had-author-newlines? (node-form n))
       else false)))
 
@@ -327,7 +329,8 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
     (= i n) false
     (let (c (vector-ref kids i))
       (or (and (whitespace? c) (includes? (node-text c) "\n"))
-        (and (not (trivia? c)) (had-author-newlines? c)))) true
+        (and (not (trivia? c)) (had-author-newlines? c))))
+      true
     else (had-author-newlines--scan kids (inc i) n)))
 
 (defn render--break (kids indent open close)
@@ -351,56 +354,60 @@ project/plugin table (`*format-headers-extra*`) first, then the built-ins."
   (let (forms (filter (fn (c) (not (trivia? c))) (vec->list kids)))
     (cond
       (nil? forms) (str open close)
-      else (let (head (first forms)
-                 args (rest forms)
-                 hdr-count (head-header-count head)
-                 pair-bind (pair-bindings? head)
-                 pair-bd (pair-body? head)
-                 body-ind (+ indent 2)
-                 ;; eff-hdr: how many args ride on the head line. Body-form
-                 ;; counts (>= 0) override the default; for generic calls
-                 ;; (-1) we ride exactly one arg when it's single-line.
-                 eff-hdr (cond
-                           ;; A DATA collection (`[…]`/`#{…}`) has no "head": its first
-                           ;; element mustn't ride a sibling up onto its line. Break one
-                           ;; element per line (the first sits after the open bracket).
-                           ;; Riding is a *call* affordance — `(head arg)` — only. (Maps
-                           ;; are pair-broken elsewhere and never reach here.)
-                           (not (= open "(")) 0
-                           (>= hdr-count 0) (min hdr-count (count args))
-                           (nil? args) 0
-                           (nil? (single-line (first args))) 0
-                           ;; A comment sitting between the head and its first
-                           ;; arg must stay visible: riding the arg up would skip
-                           ;; over the comment's `kids` slot (it precedes the
-                           ;; first body index) and silently drop it. Break
-                           ;; instead so the body walker emits the comment.
-                           (comment-before-first-arg? kids) 0
-                           else 1))
-             (let (header-args (take eff-hdr args)
-                   first-body-idx (kids--index-after-form kids eff-hdr)
-                   header-line (render--head-line head header-args pair-bind (inc indent))
-                   ;; Fill (pack args per line) only for a *generic call* — a head
-                   ;; with no header entry (`hdr-count` -1). A known body/special
-                   ;; form (`defn`/`do`/`let`/`when`…) keeps its statements one per
-                   ;; line, so it must NOT fill. Nor a body whose args are themselves
-                   ;; collections (a vector/list of `[…]`/`(…)`): those read best one
-                   ;; per line (CL `:linear`), so filling `[[a][b][c]]` onto packed
-                   ;; lines is wrong — break linearly. Fill stays for atom sequences
-                   ;; (`(error "a: " x " b: " y …)`), the case it exists for.
-                   body-text (if pair-bd
-                               (render--body-pairs kids first-body-idx body-ind)
-                               (render--body kids
-                                 first-body-idx body-ind
-                                 (and (< hdr-count 0)
-                                   (not (body-has-container? kids first-body-idx))))))
-               ;; If the body ends in a comment, the close delimiter must drop to
-               ;; its own line at the opening indent — appended directly it would
-               ;; land *inside* the comment (`;; note)`), commenting out the `)`
-               ;; and leaving the list unclosed (an unparseable file).
-               (str open
-                 header-line body-text
-                 (if (last-nonws-comment? kids) (str "\n" (indent-of indent)) "") close))))))
+      else
+        (let (head (first forms)
+              args (rest forms)
+              hdr-count (head-header-count head)
+              pair-bind (pair-bindings? head)
+              pair-bd (pair-body? head)
+              body-ind (+ indent 2)
+              ;; eff-hdr: how many args ride on the head line. Body-form
+              ;; counts (>= 0) override the default; for generic calls
+              ;; (-1) we ride exactly one arg when it's single-line.
+              eff-hdr (cond
+                        ;; A DATA collection (`[…]`/`#{…}`) has no "head": its first
+                        ;; element mustn't ride a sibling up onto its line. Break one
+                        ;; element per line (the first sits after the open bracket).
+                        ;; Riding is a *call* affordance — `(head arg)` — only. (Maps
+                        ;; are pair-broken elsewhere and never reach here.)
+                        (not (= open "(")) 0
+                        (>= hdr-count 0) (min hdr-count (count args))
+                        (nil? args) 0
+                        (nil? (single-line (first args))) 0
+                        ;; A comment sitting between the head and its first
+                        ;; arg must stay visible: riding the arg up would skip
+                        ;; over the comment's `kids` slot (it precedes the
+                        ;; first body index) and silently drop it. Break
+                        ;; instead so the body walker emits the comment.
+                        (comment-before-first-arg? kids) 0
+                        else 1))
+          (let (header-args (take eff-hdr args)
+                first-body-idx (kids--index-after-form kids eff-hdr)
+                header-line (render--head-line head header-args pair-bind (inc indent))
+                ;; Fill (pack args per line) only for a *generic call* — a head
+                ;; with no header entry (`hdr-count` -1). A known body/special
+                ;; form (`defn`/`do`/`let`/`when`…) keeps its statements one per
+                ;; line, so it must NOT fill. Nor a body whose args are themselves
+                ;; collections (a vector/list of `[…]`/`(…)`): those read best one
+                ;; per line (CL `:linear`), so filling `[[a][b][c]]` onto packed
+                ;; lines is wrong — break linearly. Fill stays for atom sequences
+                ;; (`(error "a: " x " b: " y …)`), the case it exists for.
+                body-text (if pair-bd
+                            (render--body-pairs kids first-body-idx body-ind)
+                            (render--body kids
+                              first-body-idx
+                              body-ind
+                              (and (< hdr-count 0)
+                                (not (body-has-container? kids first-body-idx))))))
+            ;; If the body ends in a comment, the close delimiter must drop to
+            ;; its own line at the opening indent — appended directly it would
+            ;; land *inside* the comment (`;; note)`), commenting out the `)`
+            ;; and leaving the list unclosed (an unparseable file).
+            (str open
+              header-line
+              body-text
+              (if (last-nonws-comment? kids) (str "\n" (indent-of indent)) "")
+              close))))))
 
 (defn last-nonws-comment? (kids)
   "True if the body's LAST emitted block is a comment — the case where a closing
@@ -496,16 +503,21 @@ retired the `comment-on-own-line?` distinction this used to need."
 (defn render--head-line--build (items pair-bind-first? indent acc)
   (cond
     (nil? items) acc
-    (= acc "") (render--head-line--build (rest items)
-                 pair-bind-first? indent (render (first items) indent))
-    pair-bind-first? (let (item (first items)
-                           col (+ indent (string-length acc) 1)
-                           part (if (= (node-kind item) :list)
-                                  (render-pair-list item col)
-                                  (render item col)))
-                       (render--head-line--build (rest items) false indent (str acc " " part)))
-    else (let (part (render (first items) (+ indent (string-length acc) 1)))
-           (render--head-line--build (rest items) false indent (str acc " " part)))))
+    (= acc "")
+      (render--head-line--build (rest items)
+        pair-bind-first?
+        indent
+        (render (first items) indent))
+    pair-bind-first?
+      (let (item (first items)
+            col (+ indent (string-length acc) 1)
+            part (if (= (node-kind item) :list)
+                   (render-pair-list item col)
+                   (render item col)))
+        (render--head-line--build (rest items) false indent (str acc " " part)))
+    else
+      (let (part (render (first items) (+ indent (string-length acc) 1)))
+        (render--head-line--build (rest items) false indent (str acc " " part)))))
 
 ;; ---- pair-list emit (let / letrec / binding / ... bindings) -----------------
 ;; Renders a list node `n` whose children are alternating name/value, breaking
@@ -532,7 +544,8 @@ retired the `comment-on-own-line?` distinction this used to need."
   (let (pair-ind (inc indent))
     (str open
       (render--pair-walk kids 0 (vector-length kids) pair-ind 0 "")
-      (if (last-nonws-comment? kids) (str "\n" (indent-of pair-ind)) "") close)))
+      (if (last-nonws-comment? kids) (str "\n" (indent-of pair-ind)) "")
+      close)))
 
 ;; The separator before the next emitted item: nothing for the very first pair
 ;; (it sits right after the `(`), else a newline (blank line preserved when the
@@ -553,34 +566,56 @@ retired the `comment-on-own-line?` distinction this used to need."
     acc
     (let (c (vector-ref kids i))
       (cond
-        (whitespace? c) (render--pair-walk kids
-                          (inc i) n pair-ind (+ nl (count-newlines (node-text c))) acc)
-        (comment? c) (render--pair-walk kids
-                       (inc i) n pair-ind 1
-                       (str acc
-                         (render--pair-sep acc nl pair-ind true)
-                         (comment--strip-trailing-nl (node-text c))))
+        (whitespace? c)
+          (render--pair-walk kids
+            (inc i)
+            n
+            pair-ind
+            (+ nl (count-newlines (node-text c)))
+            acc)
+        (comment? c)
+          (render--pair-walk kids
+            (inc i)
+            n
+            pair-ind
+            1
+            (str acc
+              (render--pair-sep acc nl pair-ind true)
+              (comment--strip-trailing-nl (node-text c))))
         ;; a name; pair it with the next form unless a comment (or the end)
         ;; intervenes first — pairing across a comment would step over and drop it.
-        else (let (j (kids--next-nonws kids (inc i) n)
-                   arendr (render c pair-ind))
-               (if (or (= j n) (comment? (vector-ref kids j)))
-                 (render--pair-walk kids
-                   (inc i) n pair-ind 0 (str acc (render--pair-sep acc nl pair-ind false) arendr))
-                 (let (brendr (render (vector-ref kids j) (+ pair-ind (string-length arendr) 1))
-                       pair-body (str arendr " " brendr)
-                       tc (trailing-comment-at kids (inc j) n))
-                   (if (nil? tc)
-                     (render--pair-walk kids
-                       (inc j) n pair-ind 0
-                       (str acc (render--pair-sep acc nl pair-ind false) pair-body))
-                     ;; Keep a same-line trailing comment after its pair, where the author
-                     ;; wrote it (see render--body--at).
-                     (render--pair-walk kids
-                       (inc tc) n pair-ind 0
-                       (str acc
-                         (render--pair-sep acc nl pair-ind false) pair-body " "
-                         (comment--strip-trailing-nl (node-text (vector-ref kids tc)))))))))))))
+        else
+          (let (j (kids--next-nonws kids (inc i) n)
+                arendr (render c pair-ind))
+            (if (or (= j n) (comment? (vector-ref kids j)))
+              (render--pair-walk kids
+                (inc i)
+                n
+                pair-ind
+                0
+                (str acc (render--pair-sep acc nl pair-ind false) arendr))
+              (let (brendr (render (vector-ref kids j) (+ pair-ind (string-length arendr) 1))
+                    pair-body (str arendr " " brendr)
+                    tc (trailing-comment-at kids (inc j) n))
+                (if (nil? tc)
+                  (render--pair-walk kids
+                    (inc j)
+                    n
+                    pair-ind
+                    0
+                    (str acc (render--pair-sep acc nl pair-ind false) pair-body))
+                  ;; Keep a same-line trailing comment after its pair, where the author
+                  ;; wrote it (see render--body--at).
+                  (render--pair-walk kids
+                    (inc tc)
+                    n
+                    pair-ind
+                    0
+                    (str acc
+                      (render--pair-sep acc nl pair-ind false)
+                      pair-body
+                      " "
+                      (comment--strip-trailing-nl (node-text (vector-ref kids tc)))))))))))))
 
 ;; ---- pair body emit (cond / case clauses) -----------------------------------
 ;; Like render--body but consumes two structural forms per emission, joined by
@@ -595,61 +630,91 @@ retired the `comment-on-own-line?` distinction this used to need."
     acc
     (let (c (vector-ref kids i))
       (cond
-        (whitespace? c) (render--body-pairs--at kids
-                          (inc i) n body-ind (+ nl (count-newlines (node-text c))) acc)
-        (comment? c) (render--body-pairs--at kids
-                       (inc i) n body-ind 1
-                       (str acc
-                         (if (>= nl 2) "\n\n" "\n") (indent-of body-ind)
-                         (comment--strip-trailing-nl (node-text c))))
+        (whitespace? c)
+          (render--body-pairs--at kids
+            (inc i)
+            n
+            body-ind
+            (+ nl (count-newlines (node-text c)))
+            acc)
+        (comment? c)
+          (render--body-pairs--at kids
+            (inc i)
+            n
+            body-ind
+            1
+            (str acc
+              (if (>= nl 2) "\n\n" "\n")
+              (indent-of body-ind)
+              (comment--strip-trailing-nl (node-text c))))
         ;; A structural clause. Pair it with the *next* form — but only if a form
         ;; is what comes next. If a comment intervenes first (or we're at the end),
         ;; emit this clause alone and let the loop handle the comment on its own
         ;; line; pairing across a comment would step over and DROP it.
-        else (let (j (kids--next-nonws kids (inc i) n))
-               (if (or (= j n) (comment? (vector-ref kids j)))
-                 ;; No form to pair with. If what intervenes is this clause's own
-                 ;; SAME-LINE trailing comment, keep it on the clause's line rather than
-                 ;; letting the loop drop it onto its own.
-                 (let (tc (trailing-comment-at kids (inc i) n))
-                   (if (nil? tc)
-                     (render--body-pairs--at kids
-                       (inc i) n body-ind 0
-                       (str acc (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) (render c body-ind)))
-                     (render--body-pairs--at kids
-                       (inc tc) n body-ind 0
-                       (str acc
-                         (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) (render c body-ind) " "
-                         (comment--strip-trailing-nl (node-text (vector-ref kids tc)))))))
-                 (let (arendr (render c body-ind)
-                       vnode (vector-ref kids j)
-                       ;; Miser drop (CL miser mode): if `key value` won't fit on one
-                       ;; line at the width, put the value on the NEXT line at a block
-                       ;; indent rather than starting it deep after the key — this
-                       ;; avoids far-right drift AND gives the value's own contents the
-                       ;; full width (so e.g. each `:dependencies` entry gets room).
-                       ;; The trigger is content-based (does the flat pair fit?), so it
-                       ;; is idempotent. `value-ind` is +2 from the key's indent.
-                       vflat (single-line vnode)
-                       pair-fits (and vflat
-                                   (<= (+ body-ind (string-length arendr) 1 (string-length vflat))
-                                     (format-width)))
-                       value-ind (+ body-ind 2)
-                       pair-str (if pair-fits
-                                  (str arendr
-                                    " " (render vnode (+ body-ind (string-length arendr) 1)))
-                                  (str arendr "\n" (indent-of value-ind) (render vnode value-ind)))
-                       tc (trailing-comment-at kids (inc j) n))
-                   (if (nil? tc)
-                     (render--body-pairs--at kids
-                       (inc j) n body-ind 0
-                       (str acc (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) pair-str))
-                     ;; Keep the pair's same-line trailing comment on the pair's line.
-                     (render--body-pairs--at kids
-                       (inc tc) n body-ind 0
-                       (str acc
-                         (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) pair-str " "
-                         (comment--strip-trailing-nl (node-text (vector-ref kids tc)))))))))))))
+        else
+          (let (j (kids--next-nonws kids (inc i) n))
+            (if (or (= j n) (comment? (vector-ref kids j)))
+              ;; No form to pair with. If what intervenes is this clause's own
+              ;; SAME-LINE trailing comment, keep it on the clause's line rather than
+              ;; letting the loop drop it onto its own.
+              (let (tc (trailing-comment-at kids (inc i) n))
+                (if (nil? tc)
+                  (render--body-pairs--at kids
+                    (inc i)
+                    n
+                    body-ind
+                    0
+                    (str acc (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) (render c body-ind)))
+                  (render--body-pairs--at kids
+                    (inc tc)
+                    n
+                    body-ind
+                    0
+                    (str acc
+                      (if (>= nl 2) "\n\n" "\n")
+                      (indent-of body-ind)
+                      (render c body-ind)
+                      " "
+                      (comment--strip-trailing-nl (node-text (vector-ref kids tc)))))))
+              (let (arendr (render c body-ind)
+                    vnode (vector-ref kids j)
+                    ;; Miser drop (CL miser mode): if `key value` won't fit on one
+                    ;; line at the width, put the value on the NEXT line at a block
+                    ;; indent rather than starting it deep after the key — this
+                    ;; avoids far-right drift AND gives the value's own contents the
+                    ;; full width (so e.g. each `:dependencies` entry gets room).
+                    ;; The trigger is content-based (does the flat pair fit?), so it
+                    ;; is idempotent. `value-ind` is +2 from the key's indent.
+                    vflat (single-line vnode)
+                    pair-fits (and vflat
+                                (<= (+ body-ind (string-length arendr) 1 (string-length vflat))
+                                  (format-width)))
+                    value-ind (+ body-ind 2)
+                    pair-str (if pair-fits
+                               (str arendr
+                                 " "
+                                 (render vnode (+ body-ind (string-length arendr) 1)))
+                               (str arendr "\n" (indent-of value-ind) (render vnode value-ind)))
+                    tc (trailing-comment-at kids (inc j) n))
+                (if (nil? tc)
+                  (render--body-pairs--at kids
+                    (inc j)
+                    n
+                    body-ind
+                    0
+                    (str acc (if (>= nl 2) "\n\n" "\n") (indent-of body-ind) pair-str))
+                  ;; Keep the pair's same-line trailing comment on the pair's line.
+                  (render--body-pairs--at kids
+                    (inc tc)
+                    n
+                    body-ind
+                    0
+                    (str acc
+                      (if (>= nl 2) "\n\n" "\n")
+                      (indent-of body-ind)
+                      pair-str
+                      " "
+                      (comment--strip-trailing-nl (node-text (vector-ref kids tc)))))))))))))
 
 ;; Next non-WHITESPACE child at or after `i` (comments are NOT skipped — a
 ;; comment is a meaningful boundary the pair emitter must not pair across).
@@ -666,9 +731,10 @@ retired the `comment-on-own-line?` distinction this used to need."
 (defn trailing-comment-at--scan (kids i n)
   (cond
     (= i n) nil
-    (whitespace? (vector-ref kids i)) (if (> (count-newlines (node-text (vector-ref kids i))) 0)
-                                        nil
-                                        (trailing-comment-at--scan kids (inc i) n))
+    (whitespace? (vector-ref kids i))
+      (if (> (count-newlines (node-text (vector-ref kids i))) 0)
+        nil
+        (trailing-comment-at--scan kids (inc i) n))
     (comment? (vector-ref kids i)) i
     else nil))
 
@@ -702,45 +768,84 @@ retired the `comment-on-own-line?` distinction this used to need."
     acc
     (let (c (vector-ref kids i))
       (cond
-        (whitespace? c) (render--body--at kids
-                          (inc i) n body-ind (+ nl (count-newlines (node-text c))) acc fill? col)
-        (comment? c) (render--body--at kids
-                       (inc i) n body-ind 1
-                       (str acc
-                         (if (>= nl 2) "\n\n" "\n") (indent-of body-ind)
-                         (comment--strip-trailing-nl (node-text c)))
-                       fill? nil)
-        else (let (ind (indent-of body-ind)
-                   form-rendr (render c body-ind)
-                   tc-idx (trailing-comment-at kids (inc i) n)
-                   single (not (includes? form-rendr "\n"))
-                   w (string-length form-rendr)
-                   ;; Ride onto the current line when: filling is allowed, the
-                   ;; previous item left a fillable column, this arg is single-line,
-                   ;; no blank line or trailing comment forces a break, and it fits.
-                   can-fill (and fill?
-                              col single (nil? tc-idx) (< nl 2) (<= (+ col 1 w) (format-width)))
-                   ;; The column a following arg would fill to: end of this arg on
-                   ;; its line, or nil when it is multi-line (can't fill after it).
-                   next-col (if single (+ body-ind w) nil))
-               (cond
-                 can-fill (render--body--at kids
-                            (inc i) n body-ind 0 (str acc " " form-rendr) fill? (+ col 1 w))
-                 (nil? tc-idx) (render--body--at kids
-                                 (inc i) n body-ind 0
-                                 (str acc (if (>= nl 2) "\n\n" "\n") ind form-rendr) fill? next-col)
-                 ;; Keep a same-line trailing comment WHERE THE AUTHOR PUT IT — after the
-                 ;; form, on the same line. It used to be hoisted onto its own line above
-                 ;; the form, which is what made `nest format` disagree with the whole tree
-                 ;; (98 lines of the red) and destroyed the alignment that makes a column of
-                 ;; trailing comments readable. `col` is nil after one: nothing may ride a
-                 ;; line that now ends in a comment, or it would be commented out.
-                 else (render--body--at kids
-                        (inc tc-idx) n body-ind 0
-                        (str acc
-                          (if (>= nl 2) "\n\n" "\n") ind form-rendr " "
-                          (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx))))
-                        fill? nil)))))))
+        (whitespace? c)
+          (render--body--at kids
+            (inc i)
+            n
+            body-ind
+            (+ nl (count-newlines (node-text c)))
+            acc
+            fill?
+            col)
+        (comment? c)
+          (render--body--at kids
+            (inc i)
+            n
+            body-ind
+            1
+            (str acc
+              (if (>= nl 2) "\n\n" "\n")
+              (indent-of body-ind)
+              (comment--strip-trailing-nl (node-text c)))
+            fill?
+            nil)
+        else
+          (let (ind (indent-of body-ind)
+                form-rendr (render c body-ind)
+                tc-idx (trailing-comment-at kids (inc i) n)
+                single (not (includes? form-rendr "\n"))
+                w (string-length form-rendr)
+                ;; Ride onto the current line when: filling is allowed, the
+                ;; previous item left a fillable column, this arg is single-line,
+                ;; no blank line or trailing comment forces a break, and it fits.
+                can-fill (and fill?
+                           col
+                           single
+                           (nil? tc-idx)
+                           (< nl 2)
+                           (<= (+ col 1 w) (format-width)))
+                ;; The column a following arg would fill to: end of this arg on
+                ;; its line, or nil when it is multi-line (can't fill after it).
+                next-col (if single (+ body-ind w) nil))
+            (cond
+              can-fill
+                (render--body--at kids
+                  (inc i)
+                  n
+                  body-ind
+                  0
+                  (str acc " " form-rendr)
+                  fill?
+                  (+ col 1 w))
+              (nil? tc-idx)
+                (render--body--at kids
+                  (inc i)
+                  n
+                  body-ind
+                  0
+                  (str acc (if (>= nl 2) "\n\n" "\n") ind form-rendr)
+                  fill?
+                  next-col)
+              ;; Keep a same-line trailing comment WHERE THE AUTHOR PUT IT — after the
+              ;; form, on the same line. It used to be hoisted onto its own line above
+              ;; the form, which is what made `nest format` disagree with the whole tree
+              ;; (98 lines of the red) and destroyed the alignment that makes a column of
+              ;; trailing comments readable. `col` is nil after one: nothing may ride a
+              ;; line that now ends in a comment, or it would be commented out.
+              else
+                (render--body--at kids
+                  (inc tc-idx)
+                  n
+                  body-ind
+                  0
+                  (str acc
+                    (if (>= nl 2) "\n\n" "\n")
+                    ind
+                    form-rendr
+                    " "
+                    (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx))))
+                  fill?
+                  nil)))))))
 
 ;; ---- top-level walk ---------------------------------------------------------
 ;; `format-source src` parses src, renders the root, and ensures exactly one
@@ -770,23 +875,37 @@ retired the `comment-on-own-line?` distinction this used to need."
     acc
     (let (c (vector-ref kids i))
       (cond
-        (whitespace? c) (format-cst-root--walk kids
-                          (inc i) n (+ nl (count-newlines (node-text c))) acc)
-        (comment? c) (format-cst-root--walk kids
-                       (inc i) n 1
-                       (format-source--glue acc nl (comment--strip-trailing-nl (node-text c))))
-        else (let (form-block (render c 0) tc-idx (trailing-comment-at kids (inc i) n))
-               (if (nil? tc-idx)
-                 (format-cst-root--walk kids
-                   (inc i) n 0 (format-source--glue acc nl form-block))
-                 ;; Keep a top-level form's same-line trailing comment after it, where the
-                 ;; author wrote it (see render--body--at).
-                 (format-cst-root--walk kids
-                   (inc tc-idx) n 0
-                   (format-source--glue acc
-                     nl
-                     (str form-block
-                       " " (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx))))))))))))
+        (whitespace? c)
+          (format-cst-root--walk kids
+            (inc i)
+            n
+            (+ nl (count-newlines (node-text c)))
+            acc)
+        (comment? c)
+          (format-cst-root--walk kids
+            (inc i)
+            n
+            1
+            (format-source--glue acc nl (comment--strip-trailing-nl (node-text c))))
+        else
+          (let (form-block (render c 0) tc-idx (trailing-comment-at kids (inc i) n))
+            (if (nil? tc-idx)
+              (format-cst-root--walk kids
+                (inc i)
+                n
+                0
+                (format-source--glue acc nl form-block))
+              ;; Keep a top-level form's same-line trailing comment after it, where the
+              ;; author wrote it (see render--body--at).
+              (format-cst-root--walk kids
+                (inc tc-idx)
+                n
+                0
+                (format-source--glue acc
+                  nl
+                  (str form-block
+                    " "
+                    (comment--strip-trailing-nl (node-text (vector-ref kids tc-idx))))))))))))
 
 ;; `acc` is the reversed chunk list, so gluing is two `cons`es instead of a full recopy.
 ;; The empty case is deliberately `(if (= block "") acc …)` rather than a plain `(list
@@ -810,7 +929,8 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; (never authored), and dot-dirs (`.git`, `.claude`, …) are external state.
 (defn format--ignored-dir? (name)
   (or (= name "target")
-    (= name "node_modules") (and (> (string-length name) 0) (= (substring name 0 1) "."))))
+    (= name "node_modules")
+    (and (> (string-length name) 0) (= (substring name 0 1) "."))))
 
 (defn format--collect-blsp (dir)
   ;; Every .blsp file beneath `dir` (recursive), sorted by `list-dir`'s order.
@@ -831,7 +951,8 @@ retired the `comment-on-own-line?` distinction this used to need."
             (ends-with? entry ".lock.blsp") acc
             (ends-with? entry ".blsp") (cons p acc)
             else acc)))
-      nil (list-dir dir))
+      nil
+      (list-dir dir))
     nil))
 
 (defn format--every-blsp (root)
@@ -877,8 +998,13 @@ that does not parse is reported and skipped, never rewritten."
           rewrote (first counts)
           skipped (second counts))
       (println (str "format: "
-                 (count files) " file" (if (= (count files) 1) "" "s") " considered, " rewrote
-                 " rewritten" (if (> skipped 0) (str ", " skipped " skipped (does not parse)") "")
+                 (count files)
+                 " file"
+                 (if (= (count files) 1) "" "s")
+                 " considered, "
+                 rewrote
+                 " rewritten"
+                 (if (> skipped 0) (str ", " skipped " skipped (does not parse)") "")
                  "."))
       rewrote)))
 
@@ -893,7 +1019,8 @@ that does not parse is reported and skipped, never rewritten."
       (when (= r :rewrote) (println (str "  rewrote " path)))
       (when (= r :unparseable) (println (str "  skipped (does not parse): " path)))
       (format--apply (rest files)
-        (if (= r :rewrote) (inc rewrote) rewrote) (if (= r :unparseable) (inc skipped) skipped)))))
+        (if (= r :rewrote) (inc rewrote) rewrote)
+        (if (= r :unparseable) (inc skipped) skipped)))))
 
 ;; A tiny local set (a map to true) — avoids requiring `set` just for membership.
 (defn format--set-of (coll)
@@ -926,9 +1053,14 @@ number of files rewritten."
             rewrote (first counts)
             skipped (second counts))
         (println (str "format: "
-                   (count changed) " changed file" (if (= (count changed) 1) "" "s") " considered, "
-                   rewrote " rewritten"
-                   (if (> skipped 0) (str ", " skipped " skipped (does not parse)") "") "."))
+                   (count changed)
+                   " changed file"
+                   (if (= (count changed) 1) "" "s")
+                   " considered, "
+                   rewrote
+                   " rewritten"
+                   (if (> skipped 0) (str ", " skipped " skipped (does not parse)") "")
+                   "."))
         rewrote))))
 
 (defn format-project-check ()
@@ -937,23 +1069,30 @@ number of files rewritten."
   (let (root (format--require-root) files (format--every-blsp root))
     (let (changed (format--check files nil))
       (cond
-        (nil? changed) (do
-                         (println (str "format: "
-                                    (count files) " file" (if (= (count files) 1) "" "s")
-                                    " checked, all clean."))
-                         0)
-        else (do
-               (fold (fn (_ entry)
-                       (println (if (= (vector-ref entry 1) :unparseable)
-                                  (str "  does not parse: " (vector-ref entry 0))
-                                  (str "  needs formatting: " (vector-ref entry 0)))))
-                 nil changed)
-               (let (unparseable (count (filter (fn (e) (= (vector-ref e 1) :unparseable))
-                                          changed))
-                     dirty (- (count changed) unparseable))
-                 (error "format: "
-                   dirty (if (= dirty 1) " file needs" " files need") " formatting"
-                   (if (> unparseable 0) (str ", " unparseable " do(es) not parse") "") ".")))))))
+        (nil? changed)
+          (do
+            (println (str "format: "
+                       (count files)
+                       " file"
+                       (if (= (count files) 1) "" "s")
+                       " checked, all clean."))
+            0)
+        else
+          (do
+            (fold (fn (_ entry)
+                    (println (if (= (vector-ref entry 1) :unparseable)
+                               (str "  does not parse: " (vector-ref entry 0))
+                               (str "  needs formatting: " (vector-ref entry 0)))))
+              nil changed)
+            (let (unparseable (count (filter (fn (e) (= (vector-ref e 1) :unparseable))
+                                       changed))
+                  dirty (- (count changed) unparseable))
+              (error "format: "
+                dirty
+                (if (= dirty 1) " file needs" " files need")
+                " formatting"
+                (if (> unparseable 0) (str ", " unparseable " do(es) not parse") "")
+                ".")))))))
 
 ;; An unparseable file is reported as `[path :unparseable]` rather than as "needs
 ;; formatting": `nest format` will NOT rewrite it (see `format-file`), so calling

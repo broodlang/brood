@@ -44,13 +44,17 @@
   (cond
     (nil? files) [oks rejects (reverse wrong)]
     (not (= (js--kind (first files)) kind)) (js--scan (rest files) kind want oks rejects wrong)
-    else (let (v (js--verdict (first files))
-               ok (= v :ok))
-           (js--scan (rest files)
-             kind want (if ok (inc oks) oks) (if ok rejects (inc rejects))
-             (if (or (nil? want) (= v want))
-               wrong
-               (cons (path-basename (first files)) wrong))))))
+    else
+      (let (v (js--verdict (first files))
+            ok (= v :ok))
+        (js--scan (rest files)
+          kind
+          want
+          (if ok (inc oks) oks)
+          (if ok rejects (inc rejects))
+          (if (or (nil? want) (= v want))
+            wrong
+            (cons (path-basename (first files)) wrong))))))
 
 (describe "JSONTestSuite: RFC 8259 accept/reject"
   :tags

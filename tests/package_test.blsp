@@ -104,7 +104,8 @@
       (pkg-write-project app-dir
         "app" "main" "(defn main () 1)" " :dependencies [[greeter :path \"../greeter\"]]")
       (let (entries (resolve-deps app-dir
-                      (list (dep-path 'greeter "../greeter")) nil))
+                      (list (dep-path 'greeter "../greeter"))
+                      nil))
         (assert= (count entries) 1)
         (let (e (first entries))
           (assert= (get e :name) 'greeter)
@@ -127,7 +128,8 @@
       (pkg-write-project app "app" "main" "(defn main () 1)" "")
       (is (includes? (try
                        (resolve-deps app
-                         (list (dep-path 'gone "../gone")) nil)
+                         (list (dep-path 'gone "../gone"))
+                         nil)
                        (catch e e))
             "not found")))))
 
@@ -145,7 +147,8 @@
         (pkg-git-tag dep-dir "v1.0.0")
         (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
         (let (entries (resolve-deps app-dir
-                        (list (dep-git 'greeter url "v1.0.0")) nil))
+                        (list (dep-git 'greeter url "v1.0.0"))
+                        nil))
           (assert= (count entries) 1)
           (let (e (first entries))
             (assert= (dep-kind e) :git)
@@ -182,7 +185,9 @@
         (pkg-git-tag ansi "v2.0.0")
         ;; greeter (transitively) wants ansi v1.0.0
         (pkg-write-project greeter
-          "greeter" "greeter" "(defn g () 1)"
+          "greeter"
+          "greeter"
+          "(defn g () 1)"
           (str " :dependencies [[ansi :git \"" ansi-url "\" :ref \"v1.0.0\"]]"))
         (let (greeter-url (pkg-git-init greeter))
           (pkg-git-tag greeter "v1.0.0")
@@ -206,10 +211,14 @@
         (pkg-git-tag ansi "v1.0.0")
         (pkg-git-tag ansi "v2.0.0")
         (pkg-write-project greeter
-          "greeter" "greeter" "(defn g () 1)"
+          "greeter"
+          "greeter"
+          "(defn g () 1)"
           (str " :dependencies [[ansi :git \"" ansi-url "\" :ref \"v1.0.0\"]]"))
         (pkg-write-project pretty
-          "pretty" "pretty" "(defn p () 1)"
+          "pretty"
+          "pretty"
+          "(defn p () 1)"
           (str " :dependencies [[ansi :git \"" ansi-url "\" :ref \"v2.0.0\"]]"))
         (let (greeter-url (pkg-git-init greeter)
               pretty-url (pkg-git-init pretty))
@@ -236,7 +245,8 @@
             sha (second ts))
         (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
         (let (entries (resolve-deps app-dir
-                        (list (dep-tarball 'greeter url sha)) nil))
+                        (list (dep-tarball 'greeter url sha))
+                        nil))
           (assert= (count entries) 1)
           (let (e (first entries)
                 target (path-join (path-join app-dir "_deps") "greeter"))
@@ -257,7 +267,8 @@
         (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
         (is (includes? (try
                          (resolve-deps app-dir
-                           (list (dep-tarball 'greeter url "deadbeef")) nil)
+                           (list (dep-tarball 'greeter url "deadbeef"))
+                           nil)
                          (catch e (error-message e)))
               "sha256 mismatch")))))
   (test "a second resolve is a cache hit (locked sha), no re-extract"
@@ -306,14 +317,16 @@
     (let (path (get req :path)
           release-path (str "/api/v1/packages/" nm "/releases/" version))
       (cond
-        (starts-with? path "/api/v1/packages?") (net/http/ok (str "{\"packages\":[{\"name\":\""
-                                                               nm "\",\"latest_version\":\"" version
-                                                               "\",\"description\":\"" desc "\"}]}"))
-        (= path (str release-path "/tarball")) (net/http/response 200
-                                                 {"Content-Type" "application/gzip"} bytes)
-        (= path release-path) (net/http/ok (str "{\"checksum\":\""
-                                             checksum "\",\"version\":\"" version
-                                             "\",\"dependencies\":[]}"))
+        (starts-with? path "/api/v1/packages?")
+          (net/http/ok (str "{\"packages\":[{\"name\":\""
+                         nm "\",\"latest_version\":\"" version "\",\"description\":\"" desc "\"}]}"))
+        (= path (str release-path "/tarball"))
+          (net/http/response 200
+            {"Content-Type" "application/gzip"}
+            bytes)
+        (= path release-path)
+          (net/http/ok (str "{\"checksum\":\""
+                         checksum "\",\"version\":\"" version "\",\"dependencies\":[]}"))
         else (net/http/not-found)))))
 
 ;; Build a root-level tarball of a fixture package (files at the archive root, the
@@ -355,7 +368,9 @@
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       (is (includes? (try
                        (package/package--resolve-registry app-dir
-                         (dep-registry 'greeter "1.0.0") nil base)
+                         (dep-registry 'greeter "1.0.0")
+                         nil
+                         base)
                        (catch e (error-message e)))
             "sha256 mismatch"))))
   (test "an unknown version errors, pointing at `nest search`"
@@ -363,7 +378,9 @@
           base (mock-registry-start (mock-registry-handler "greeter" "1.0.0" "d" "x" #b"")))
       (is (includes? (try
                        (package/package--resolve-registry app-dir
-                         (dep-registry 'greeter "9.9.9") nil base)
+                         (dep-registry 'greeter "9.9.9")
+                         nil
+                         base)
                        (catch e (error-message e)))
             "no registry entry"))))
   (test "registry--get-json parses a 2xx body and reports an error status"
@@ -529,7 +546,8 @@
       (pkg-write-project app-dir
         "app" "main" "(defn main () 1)" " :dependencies [[greeter :path \"../greeter\"]]")
       (let (entries (resolve-deps app-dir
-                      (list (dep-path 'greeter "../greeter")) nil))
+                      (list (dep-path 'greeter "../greeter"))
+                      nil))
         (write-lockfile app-dir entries)
         (let (locked (read-lockfile app-dir))
           (is (vector? locked))
@@ -609,7 +627,9 @@
   (test "every declared op resolves for every sealed member"
     (is (every? (fn (d) (satisfies? 'Dependency d))
           (list (dep-path 'a "p")
-            (dep-git 'b "u" "r") (dep-tarball 'c "u" "s") (dep-registry 'd "1.0.0")))))
+            (dep-git 'b "u" "r")
+            (dep-tarball 'c "u" "s")
+            (dep-registry 'd "1.0.0")))))
   (test "the ability declares the five ops the package manager dispatches"
     (assert= (sort (map first (ability-ops 'Dependency)))
       (sort (list 'dep-kind

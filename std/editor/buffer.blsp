@@ -88,9 +88,15 @@ Where `end-of-line` lands and the rightmost column point can hold on that line."
   editor/buffer/buffer
   (inspect [b]
     (str "#<buffer "
-      (get b :name) " " (rope-length (get b :rope)) " chars" " point=" (get b :point)
+      (get b :name)
+      " "
+      (rope-length (get b :rope))
+      " chars"
+      " point="
+      (get b :point)
       (if (get b :mark) (str " mark=" (get b :mark)) "")
-      (if (get b :file) (str " file=" (get b :file)) "") ">")))
+      (if (get b :file) (str " file=" (get b :file)) "")
+      ">")))
 
 (defn buffer-from-file (path)
   "Read the file at `path` into a fresh buffer, with `:file` set to `path` so
@@ -197,7 +203,8 @@ the target line is long enough. Clamps to the buffer's line range."
   (let (rope (get buf :rope)
         col (buffer-column buf)
         target (buffer--clamp 0
-                 (dec (rope-line-count rope)) (+ (rope-char->line rope (get buf :point)) n))
+                 (dec (rope-line-count rope))
+                 (+ (rope-char->line rope (get buf :point)) n))
         line-start (rope-line->char rope target))
     (goto-char buf (+ line-start (min col (buffer--line-end-col buf target))))))
 
@@ -219,8 +226,17 @@ the target line is long enough. Clamps to the buffer's line range."
   "True if `c` is part of a word (not whitespace or a delimiter) — matches the
 line editor's M-f/M-b notion of a word."
   (not (or (= c " ")
-         (= c "\t") (= c "\n") (= c "(") (= c ")") (= c "[") (= c "]") (= c "{") (= c "}")
-         (= c "\"") (= c ";") (= c ","))))
+         (= c "\t")
+         (= c "\n")
+         (= c "(")
+         (= c ")")
+         (= c "[")
+         (= c "]")
+         (= c "{")
+         (= c "}")
+         (= c "\"")
+         (= c ";")
+         (= c ","))))
 
 (defn buffer--scan-fwd (text i n pred)
   "Smallest index ≥ `i` (up to `n`) whose char fails `pred` — advance while `pred`."
@@ -338,8 +354,9 @@ just past a sentence end with the whitespace after it skipped."
     (cond
       (>= i limit) best
       (nil? e) (buffer--sentence-start-before text (inc i) limit best)
-      else (let (s (buffer--scan-fwd text e limit buffer--sentence-space?))
-             (if (>= s limit) best (buffer--sentence-start-before text s limit s))))))
+      else
+        (let (s (buffer--scan-fwd text e limit buffer--sentence-space?))
+          (if (>= s limit) best (buffer--sentence-start-before text s limit s))))))
 
 (defn forward-sentence (buf)
   "Point moved just past the end of the current sentence — the paragraph's end when it
@@ -448,11 +465,13 @@ into) it drops this op's snapshot so the run undoes as one. A no-op when undo is
 the editor restarts it whenever the previous command wasn't an undo.)"
   (cond
     (get buf :undo-disabled) buf
-    (and (get buf :undo-amalgamate) (not (empty? (get buf :undo)))) (assoc buf
-                                                                      :undo-amalgamate false)
-    else (assoc buf
-           :undo (cons (buffer--snapshot buf) (or (get buf :undo) ()))
-           :undo-amalgamate false)))
+    (and (get buf :undo-amalgamate) (not (empty? (get buf :undo))))
+      (assoc buf
+        :undo-amalgamate false)
+    else
+      (assoc buf
+        :undo (cons (buffer--snapshot buf) (or (get buf :undo) ()))
+        :undo-amalgamate false)))
 
 (defn disable-undo (buf)
   "Turn off undo recording for `buf` and drop any existing history. For a log / output
@@ -510,7 +529,8 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
 (defn undo--common-prefix (a b i)
   ;; how many leading chars `a` and `b` share — bounds the char diff to what changed
   (if (or (>= i (string-length a))
-        (>= i (string-length b)) (not= (char-at a i) (char-at b i)))
+        (>= i (string-length b))
+        (not= (char-at a i) (char-at b i)))
     i
     (undo--common-prefix a b (inc i))))
 
@@ -518,7 +538,8 @@ advancing `:pending-undo`. A no-op (returns `buf`) when the run is exhausted."
   ;; how many trailing chars they share, never eating into the shared prefix `lo`
   (let (la (string-length a) lb (string-length b))
     (if (or (>= k (- la lo))
-          (>= k (- lb lo)) (not= (char-at a (- la k 1)) (char-at b (- lb k 1))))
+          (>= k (- lb lo))
+          (not= (char-at a (- la k 1)) (char-at b (- lb k 1))))
       k
       (undo--common-suffix a b lo (inc k)))))
 
@@ -567,26 +588,29 @@ the diff only ever runs over the span that actually changed."
       ;; nothing changed
       (and (= o-mid "") (= n-mid "")) new
       ;; too large to diff character-wise: treat the whole span as one change
-      (> (max (string-length o-mid) (string-length n-mid)) *undo-region-char-budget*) (if (and (< pre
-                                                                                                 hi)
-                                                                                            (> (+ pre
-                                                                                                 (string-length n-mid))
-                                                                                              lo))
-                                                                                        (str head
-                                                                                          o-mid tail)
-                                                                                        new)
-      else (let (ops (diff/diff-seq (string->list o-mid) (string->list n-mid))
-                 r (fold (fn (acc op)
-                           (let ([n out hunk] acc
-                                 [tag c] op)
-                             (if (= tag :keep)
-                               (let ([n2 out2] (undo--flush-chunk hunk n lo hi out))
-                                 [(inc n2) (cons c out2) '()])
-                               [n out (append hunk (list op))])))
-                     [pre '() '()] ops)
-                 [n out hunk] r
-                 [_ out2] (undo--flush-chunk hunk n lo hi out))
-             (str head (apply str (reverse out2)) tail)))))
+      (> (max (string-length o-mid) (string-length n-mid)) *undo-region-char-budget*)
+        (if (and (< pre
+                   hi)
+              (> (+ pre
+                   (string-length n-mid))
+                lo))
+          (str head
+            o-mid tail)
+          new)
+      else
+        (let (ops (diff/diff-seq (string->list o-mid) (string->list n-mid))
+              r (fold (fn (acc op)
+                        (let ([n out hunk] acc
+                              [tag c] op)
+                          (if (= tag :keep)
+                            (let ([n2 out2] (undo--flush-chunk hunk n lo hi out))
+                              [(inc n2) (cons c out2) '()])
+                            [n out (append hunk (list op))])))
+                  [pre '() '()]
+                  ops)
+              [n out hunk] r
+              [_ out2] (undo--flush-chunk hunk n lo hi out))
+          (str head (apply str (reverse out2)) tail)))))
 
 (defn undo--region-candidate (buf lo hi snaps depth)
   ;; The nearest snapshot whose changes actually touch the region: `[undone-text tail]`,
@@ -603,11 +627,12 @@ the diff only ever runs over the span that actually changed."
       ;; just came from, so taking it would REDO the change instead of peeling the next
       ;; one off. Skipping it is what makes repeated calls walk backwards.
       (get (first snaps) :region-undo) (undo--region-candidate buf lo hi (rest snaps) (dec depth))
-      else (let (old (rope->string (get (first snaps) :rope))
-                 undone (undo--region-restore old text lo hi))
-             (if (= undone text)
-               (undo--region-candidate buf lo hi (rest snaps) (dec depth))
-               [undone (rest snaps)])))))
+      else
+        (let (old (rope->string (get (first snaps) :rope))
+              undone (undo--region-restore old text lo hi))
+          (if (= undone text)
+            (undo--region-candidate buf lo hi (rest snaps) (dec depth))
+            [undone (rest snaps)])))))
 
 (def *undo-region-search-depth* 200)
 ;; How far back a region undo will look for a change that touched the region. Bounded
@@ -627,7 +652,10 @@ whole thing back."
       buf
       (let ([lo hi] bounds
             found (undo--region-candidate buf
-                    lo hi (get buf :undo) *undo-region-search-depth*))
+                    lo
+                    hi
+                    (get buf :undo)
+                    *undo-region-search-depth*))
         (if (nil? found)
           buf
           ;; record the pre-state (so this is itself undoable), then swap the text.
@@ -715,7 +743,9 @@ insertion point shift with the text. Throws if `buf` is read-only."
                                 :rope (rope-insert (get buf :rope) p s)
                                 :point (+ p (string-length s))
                                 :mark nil)
-        :insert p (string-length s)))))
+        :insert
+        p
+        (string-length s)))))
 
 (defn delete-char (buf &optional (n 1))
   "Delete `n` characters *after* point; point stays put. Recorded for undo (a
@@ -904,7 +934,8 @@ makes the operation usable on Lisp — which is to say, on Brood source."
           (= before "\n") ; start of line
           (nil? after)
           (= after "\n") ; end of line
-          (includes? buffer--close-delimiters after) (includes? buffer--open-delimiters before))
+          (includes? buffer--close-delimiters after)
+          (includes? buffer--open-delimiters before))
       squeezed
       (goto-char (insert squeezed " ") at))))
 
@@ -957,8 +988,11 @@ fast typing never flickers under its round-trip. Runs in the buffer process, so 
 is the buffer pid the subscriber keys on."
   (doseq (s subs)
     (send (get s :pid)
-      [:buffer-updated (self)
-        version (let (proj (get s :proj)) (if (nil? proj) nil (proj buf))) origin])))
+      [:buffer-updated
+        (self)
+        version
+        (let (proj (get s :proj)) (if (nil? proj) nil (proj buf)))
+        origin])))
 
 (defn buffer--push-view (subs version view origin)
   "Push a ready-made `view` (a delta — see the `:splice` / `:marker-set` arms) to every
@@ -1027,7 +1061,8 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                                           :participants (get nb :participants {})}
                                          origin)
                                        (buffer--serve nb
-                                         subs v
+                                         subs
+                                         v
                                          (take 64 (cons [v lo hi (string-length repl) origin] rec))))))
       ;; A BASED splice: computed against `base`, so first TRANSFORM it over every
       ;; splice applied since (the `rec` ring, oldest-first over the window) — two
@@ -1044,7 +1079,8 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                                                         since)
                                               [tlo thi trepl] (splice-transform-all [lo hi repl]
                                                                 (map (fn (e)
-                                                                       [(nth e 1) (nth e 2)
+                                                                       [(nth e 1)
+                                                                         (nth e 2)
                                                                          (nth e 3)])
                                                                   foreign))
                                               nb (replace-region buf tlo thi trepl)
@@ -1057,7 +1093,8 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                                                :participants (get nb :participants {})}
                                               origin)
                                             (buffer--serve nb
-                                              subs v
+                                              subs
+                                              v
                                               (take 64
                                                 (cons [v tlo thi (string-length trepl) origin] rec))))))
       ;; A cursor move as data: no text change at all — the push carries markers + names
@@ -1085,7 +1122,9 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
                             :participants (get nb :participants {})}
                            nil)
                          (buffer--serve nb
-                           subs v (take 64 (cons [v n n (string-length s) nil] rec))))))
+                           subs
+                           v
+                           (take 64 (cons [v n n (string-length s) nil] rec))))))
       ([:get f from r] (do (send from [:reply r (f buf)]) (buffer--serve buf subs version rec)))
       ;; An atomic [version view] snapshot — the RESYNC primitive: a client rebuilding
       ;; its copy after an ambiguous collision needs the text AND the version it
@@ -1098,11 +1137,16 @@ changed the buffer, survivors get a push (they see the cursor vanish)."
       ([:subscribe pid proj] (do
                                (monitor pid)
                                (send pid
-                                 [:buffer-updated (self)
-                                   version (if (nil? proj) nil (proj buf)) nil])
+                                 [:buffer-updated
+                                   (self)
+                                   version
+                                   (if (nil? proj) nil (proj buf))
+                                   nil])
                                (buffer--serve buf (cons {:pid pid :proj proj} subs) version rec)))
       ([:unsubscribe pid] (buffer--serve buf
-                            (remove (fn (s) (= (get s :pid) pid)) subs) version rec))
+                            (remove (fn (s) (= (get s :pid) pid)) subs)
+                            version
+                            rec))
       ([:down _ pid _]
         (let (ns (remove (fn (s) (= (get s :pid) pid)) subs)
               ;; the dead subscriber's transient markers: keyed BY its pid (its cursor)

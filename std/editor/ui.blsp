@@ -143,9 +143,10 @@ an `[:sse ev]` in like any other input. The other display ops pass through uncha
 A flood of events can starve the keyboard poll; fine for occasional pushes (a daemon's
 event feed). Requires `(require 'sse)` on the producing side."
   (assoc display
-    :poll (fn (ms)
-            (let (ev (receive ([:sse e] [:sse e]) ([:sse-closed r] [:sse-closed r]) (after 0 nil)))
-              (if (nil? ev) ((get display :poll) ms) ev)))))
+    :poll
+      (fn (ms)
+        (let (ev (receive ([:sse e] [:sse e]) ([:sse-closed r] [:sse-closed r]) (after 0 nil)))
+          (if (nil? ev) ((get display :poll) ms) ev)))))
 
 ;; ---- the app loop (TEA: model + view + update) ------------------------------
 
@@ -304,10 +305,11 @@ exactly as before."
         (nil? raw) [model nil] ; queue empty — render the settled model
         (quit-request? raw) [model raw] ; a close/focus control message: hand it back
         (focus-request? raw) [model raw] ; (the loop, not update, owns these)
-        else (let (next (try
-                          (update model raw cols rows)
-                          (catch e (do (ui--log-error "update" e) model))))
-               (ui--drain-input next update display cols rows (dec fuel)))))))
+        else
+          (let (next (try
+                       (update model raw cols rows)
+                       (catch e (do (ui--log-error "update" e) model))))
+            (ui--drain-input next update display cols rows (dec fuel)))))))
 
 (defn ui--loop (model last-good clock view update display)
   "The inner recursion of `ui-run` (own function so each turn is a proper tail call —
@@ -369,51 +371,55 @@ re-raises, surfacing a genuine startup bug instead of spinning."
               ;; raise-to-front request: act on the display, keep the model untouched and
               ;; do NOT advance `:last-input` (a focus message from another process is
               ;; not user input — it must not reset idle timers).
-              (focus-request? raw) (let (f (get display :focus))
-                                     (do
-                                       (when f (f))
-                                       (ui--loop model model clock1 view update display)))
+              (focus-request? raw)
+                (let (f (get display :focus))
+                  (do
+                    (when f (f))
+                    (ui--loop model model clock1 view update display)))
               ;; poll timed out (nil). Legacy: deliver the bare `:tick`. Timers: fire the
               ;; earliest due timer (if any), else re-park without folding.
-              (nil? raw) (if (nil? timers)
-                           (let (next (try
-                                        (update model :tick cols rows)
-                                        (catch e (do (ui--log-error "update" e) model))))
-                             (ui--loop next model clock1 view update display))
-                           (let (fr (ui--fire timers clock1 (ui--now model))
-                                 event (first fr)
-                                 clock2 (second fr))
-                             (if (nil? event)
-                               (ui--loop model model clock2 view update display)
-                               (let (next (try
-                                            (update model event cols rows)
-                                            (catch e (do (ui--log-error "update" e) model))))
-                                 (ui--loop next model clock2 view update display)))))
+              (nil? raw)
+                (if (nil? timers)
+                  (let (next (try
+                               (update model :tick cols rows)
+                               (catch e (do (ui--log-error "update" e) model))))
+                    (ui--loop next model clock1 view update display))
+                  (let (fr (ui--fire timers clock1 (ui--now model))
+                        event (first fr)
+                        clock2 (second fr))
+                    (if (nil? event)
+                      (ui--loop model model clock2 view update display)
+                      (let (next (try
+                                   (update model event cols rows)
+                                   (catch e (do (ui--log-error "update" e) model))))
+                        (ui--loop next model clock2 view update display)))))
               ;; a real key/mouse/system event: with timers, stamp `:last-input` (resets
               ;; idle timers); then fold it. A throwing `update` drops this input.
-              else (let (clock2 (if (nil? timers)
-                                  clock1
-                                  (assoc clock1 :last-input (ui--now model)))
-                         next0 (try
-                                 (update model raw cols rows)
-                                 (catch e (do (ui--log-error "update" e) model)))
-                         ;; a `:coalesce-input?` app also drains any inputs ALREADY queued
-                         ;; into this same fold, so a burst renders once instead of once
-                         ;; per event (`ui--drain-input`); a control message pulled mid-drain
-                         ;; comes back as `pending` for the loop to act on. Default apps skip
-                         ;; the drain and render per input exactly as before.
-                         drained (if (get model :coalesce-input?)
-                                   (ui--drain-input next0 update display cols rows *ui-input-batch*)
-                                   [next0 nil])
-                         next (first drained)
-                         pending (second drained))
-                     (cond
-                       (quit-request? pending) nil
-                       (focus-request? pending) (let (f (get display :focus))
-                                                  (do
-                                                    (when f (f))
-                                                    (ui--loop next next clock2 view update display)))
-                       else (ui--loop next model clock2 view update display))))))))))
+              else
+                (let (clock2 (if (nil? timers)
+                               clock1
+                               (assoc clock1 :last-input (ui--now model)))
+                      next0 (try
+                              (update model raw cols rows)
+                              (catch e (do (ui--log-error "update" e) model)))
+                      ;; a `:coalesce-input?` app also drains any inputs ALREADY queued
+                      ;; into this same fold, so a burst renders once instead of once
+                      ;; per event (`ui--drain-input`); a control message pulled mid-drain
+                      ;; comes back as `pending` for the loop to act on. Default apps skip
+                      ;; the drain and render per input exactly as before.
+                      drained (if (get model :coalesce-input?)
+                                (ui--drain-input next0 update display cols rows *ui-input-batch*)
+                                [next0 nil])
+                      next (first drained)
+                      pending (second drained))
+                  (cond
+                    (quit-request? pending) nil
+                    (focus-request? pending)
+                      (let (f (get display :focus))
+                        (do
+                          (when f (f))
+                          (ui--loop next next clock2 view update display)))
+                    else (ui--loop next model clock2 view update display))))))))))
 
 (defn ui-run (model view update display)
   "Run a UI app over `display` (a frontend map): enter it, then loop —
@@ -475,7 +481,8 @@ non-blocking window. The shared loop behind the observer (and the editor)."
         ((get display :leave)))
       (catch e
         ; restore the terminal even on a frontend/startup error
-        ((get display :leave)) (throw e)))))
+        ((get display :leave))
+        (throw e)))))
 
 ;; ---- modal input overlays (the dispatch-fallthrough policy) -----------------
 ;; A `ui-run` app's `update` usually has a few *transient* modes that sit beside its

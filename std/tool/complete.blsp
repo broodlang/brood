@@ -114,8 +114,10 @@ suggestions\", never to an error on the user's command line."
           (and (>= newline 0) (< newline close)) (complete--tags-in text acc (+ i 5))
           ;; Inside a string literal — prose or a test fixture, not a declaration.
           (complete--in-string? text i) (complete--tags-in text acc (+ i 5))
-          else (complete--tags-in text
-                 (append acc (complete--keywords (substring text (+ open 1) close))) (+ close 1)))))))
+          else
+            (complete--tags-in text
+              (append acc (complete--keywords (substring text (+ open 1) close)))
+              (+ close 1)))))))
 
 ;; `index-of` has no start offset, so scan a suffix and re-base the result.
 (defn index-of--from (text needle from)
@@ -151,7 +153,8 @@ suggestions\", never to an error on the user's command line."
             (let (name (substring token 1 (string-length token)))
               (if (complete--tag-name? name) (append acc (list name)) acc))
             acc))
-    nil (filter (fn (s) (not (= s ""))) (string-split (trim fragment) " "))))
+    nil
+    (filter (fn (s) (not (= s ""))) (string-split (trim fragment) " "))))
 
 ;; Could `name` be a keyword's name? A tag is written `:name`, so anything holding a
 ;; quote, bracket, paren or backslash came from surrounding syntax rather than from a
@@ -162,7 +165,8 @@ suggestions\", never to an error on the user's command line."
 (defn complete--tag-name? (name)
   (and (not (= name ""))
     (fold (fn (ok ch) (and ok (not (includes? *complete--tag-reject* ch))))
-      true (string-split name ""))))
+      true
+      (string-split name ""))))
 
 (defn complete-tags ()
   "Every tag name declared with `:tags [...]` anywhere in the project's test files, de-duplicated and sorted. Textual scan — see the file header on why."

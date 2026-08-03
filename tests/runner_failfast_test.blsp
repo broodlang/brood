@@ -16,7 +16,8 @@
 ;; A one-test unit `(mode group tests)` whose worker dies in `run-unit`.
 (def %crashing-unit
   (list :parallel
-    "crash-grp" (list (list "boom" (fn () (error "kaboom"))))))
+    "crash-grp"
+    (list (list "boom" (fn () (error "kaboom"))))))
 
 ; and it carries a failure record
 (describe "runner reaps a dead worker"

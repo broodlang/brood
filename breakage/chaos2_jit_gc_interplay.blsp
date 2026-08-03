@@ -103,7 +103,8 @@
   (if (= n 0)
     {:pairs (count pairs) :vecs (count vecs)}
     (p5-build (- n 1)
-      (cons n pairs) (into vecs [(into [] (list n (* n 2)))]))))
+      (cons n pairs)
+      (into vecs [(into [] (list n (* n 2)))]))))
 
 (def p5-result (p5-build 5000 nil []))
 (println "p5-pairs:" (get p5-result :pairs))

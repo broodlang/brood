@@ -279,7 +279,11 @@
 ;; A declared event (module level, so the emitter fn exists). The checker validates
 ;; `(tmm-req-stop …)` calls via the emitted `sig`; these tests cover the runtime half.
 (defevent tmm-req-stop
-  [:tmm :req :stop] :measurements ((duration int)) :metadata ((path string)))
+  [:tmm :req :stop]
+  :measurements
+  ((duration int))
+  :metadata
+  ((path string)))
 
 (describe "defevent — the typed emitter"
   :isolated

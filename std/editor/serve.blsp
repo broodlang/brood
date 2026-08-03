@@ -112,7 +112,12 @@ its monitor fire and closes cleanly. Tail-recursive."
   (let (ss (or sessions ()))
     (receive
       ([:attach client cols rows] (let (s (spawn (serve--session client
-                                                   cols rows {} make-model view update)))
+                                                   cols
+                                                   rows
+                                                   {}
+                                                   make-model
+                                                   view
+                                                   update)))
                                     (monitor s)
                                     (serve--manager make-model view update (cons s ss))))
       ([:attach client cols rows opts] (let (s (spawn (serve--session client

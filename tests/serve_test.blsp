@@ -20,7 +20,8 @@
   [(text 0
      0
      (str "n="
-       (get m :n) (if (get m :who) (str " who=" (get m :who)) "")))])
+       (get m :n)
+       (if (get m :who) (str " who=" (get m :who)) "")))])
 (defn up (m input c r)
   (cond
     (= input "+") (assoc m :n (+ (get m :n) 1))

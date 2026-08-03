@@ -53,7 +53,8 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
         m+ (if (> month 2) (- month 3) (+ month 9))
         doy (+ (dt--fdiv (+ (* 153 m+) 2) 5) (- day 1))
         doe (+ (* yoe 365)
-              (- (dt--fdiv yoe 4) (dt--fdiv yoe 100)) doy))
+              (- (dt--fdiv yoe 4) (dt--fdiv yoe 100))
+              doy))
     (- (+ (* era 146097) doe) 719468)))
 
 ;; ---- the three temporal types ------------------------------------------------
@@ -100,7 +101,8 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
 milliseconds."
   (let (days (dt--ymd->days (get dt :year) (get dt :month) (get dt :day))
         time-s (+ (* (get dt :hour 0) 3600)
-                 (* (get dt :minute 0) 60) (get dt :second 0))
+                 (* (get dt :minute 0) 60)
+                 (get dt :second 0))
         ms-val (get dt :ms 0))
     (+ (* (+ (* days 86400) time-s) 1000) ms-val)))
 
@@ -137,7 +139,12 @@ milliseconds."
 (defn date+time (d t)
   "Combine a date and a time-of-day into a datetime."
   (datetime (get d :year)
-    (get d :month) (get d :day) (get t :hour 0) (get t :minute 0) (get t :second 0) (get t :ms 0)))
+    (get d :month)
+    (get d :day)
+    (get t :hour 0)
+    (get t :minute 0)
+    (get t :second 0)
+    (get t :ms 0)))
 
 ;; ---- formatting: the Temporal ability ----------------------------------------
 ;;
@@ -148,23 +155,33 @@ milliseconds."
 ;; ability is `:sealed` so `nest check` flags a temporal type that forgets it.
 
 (defability Temporal
-  "A calendar value that renders as ISO 8601." :sealed [datetime date time-of-day]
+  "A calendar value that renders as ISO 8601."
+  :sealed
+  [datetime date time-of-day]
   (to-iso [self] :-> string))
 
 ;; The two halves, shared by the three impls (a datetime is date + \"T\" + time + \"Z\").
 (defn dt--iso-date (d)
   (str (dt--zero-pad (get d :year) 4)
-    "-" (dt--zero-pad (get d :month) 2) "-" (dt--zero-pad (get d :day) 2)))
+    "-"
+    (dt--zero-pad (get d :month) 2)
+    "-"
+    (dt--zero-pad (get d :day) 2)))
 
 (defn dt--iso-time (t)
   (str (dt--zero-pad (get t :hour 0) 2)
-    ":" (dt--zero-pad (get t :minute 0) 2) ":" (dt--zero-pad (get t :second 0) 2) "."
+    ":"
+    (dt--zero-pad (get t :minute 0) 2)
+    ":"
+    (dt--zero-pad (get t :second 0) 2)
+    "."
     (dt--zero-pad (get t :ms 0) 3)))
 
 (impl Temporal datetime/date (to-iso [d] (dt--iso-date d)))
 (impl Temporal datetime/time-of-day (to-iso [t] (dt--iso-time t)))
 (impl Temporal
-  datetime/datetime (to-iso [dt] (str (dt--iso-date dt) "T" (dt--iso-time dt) "Z")))
+  datetime/datetime
+  (to-iso [dt] (str (dt--iso-date dt) "T" (dt--iso-time dt) "Z")))
 
 ;; A temporal value's display form is its ISO string — so `(println (utc-now))` shows
 ;; `2026-07-28T14:03:11.000Z`, not the field map. `str`/`pr-str` stay native (ADR-171),
@@ -191,7 +208,10 @@ milliseconds."
     (let (c (char-at fmt i))
       (if (and (= c "%") (< (+ i 1) n))
         (dt--fmt-loop dt
-          fmt (+ i 2) n (str acc (dt--fmt-code dt (char-at fmt (+ i 1)))))
+          fmt
+          (+ i 2)
+          n
+          (str acc (dt--fmt-code dt (char-at fmt (+ i 1)))))
         (dt--fmt-loop dt fmt (+ i 1) n (str acc c))))))
 
 (defn dt-format (dt fmt)

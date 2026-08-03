@@ -96,7 +96,8 @@
     ;; two lines, widest 5 chars → w = 7, n = 2; anchored above row 10 → top row 8.
     (assert= (tooltip 10 4 ["main" "clean"] {:bg :blue} {:fg :white} 80 24)
       (list [:rect 8 4 7 2 {:bg :blue}]
-        [:text 8 4 " main  " {:fg :white}] [:text 9 4 " clean " {:fg :white}]))))
+        [:text 8 4 " main  " {:fg :white}]
+        [:text 9 4 " clean " {:fg :white}]))))
 
 ;; A rounded `rect` is one op that degrades on its own: the GUI rounds the fill,
 ;; the terminal ignores the radius and space-fills as always. Before this, rounded

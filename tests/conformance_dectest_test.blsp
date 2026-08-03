@@ -97,9 +97,12 @@
             binary (get dt--ops-binary op))
         (if (or (> conditions 0)
               ; the context altered the result
-              (not (or unary binary)) (and unary (not (= (count args) 1)))
-              (and binary (not (= (count args) 2))) (not (dt--numeric? want))
-              (not (dt--in-range? want)) (first (remove dt--numeric? args))
+              (not (or unary binary))
+              (and unary (not (= (count args) 1)))
+              (and binary (not (= (count args) 2)))
+              (not (dt--numeric? want))
+              (not (dt--in-range? want))
+              (first (remove dt--numeric? args))
               (first (remove dt--in-range? args)))
           nil
           (let (a (decimal (first args))
@@ -113,7 +116,8 @@
     [ran bad]
     (let (c (dt--case (dt--words (first lines))))
       (dt--scan-lines (rest lines)
-        (if c (inc ran) ran) (if (and c (not (= c [:ok]))) (cons c bad) bad)))))
+        (if c (inc ran) ran)
+        (if (and c (not (= c [:ok]))) (cons c bad) bad)))))
 
 (defn dt--scan-files (files ran bad)
   (if (nil? files)

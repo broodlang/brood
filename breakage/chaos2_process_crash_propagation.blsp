@@ -165,7 +165,8 @@
           ;; Outer process is still alive
           (println "P67-outer-alive:" true))))
     (catch e
-      (println "P67: UNEXPECTED outer catch:" (error-message e)) (def p67-outer-survived false)))
+      (println "P67: UNEXPECTED outer catch:" (error-message e))
+      (def p67-outer-survived false)))
   (println "P67-correct (outer survived):" p67-outer-survived))
 
 (println "=== chaos2_process_crash_propagation DONE ===")

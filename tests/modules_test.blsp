@@ -70,9 +70,10 @@
       (set-load-path! (cons "/tmp" *load-path*))
       (doseq (k (range 8))
         (spawn (send me
-                 [:req-race (try
-                              (do (require 'reqrace-mod) (reqrace-mod/ready))
-                              (catch e [:err (error-message e)]))])))
+                 [:req-race
+                   (try
+                     (do (require 'reqrace-mod) (reqrace-mod/ready))
+                     (catch e [:err (error-message e)]))])))
       (let (results (map (fn (_) (receive ([:req-race r] r) (after *test-wait-ms* :timeout)))
                       (range 8)))
         (set-load-path! saved-path)

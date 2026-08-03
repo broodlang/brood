@@ -37,9 +37,10 @@
 
 (defn via-oracle (v)
   (cond
-    (and (vector? v) (= (count v) 2) (= (nth v 0) :a)) (if (> (nth v 1) 50)
-                                                         [:guarded (nth v 1)]
-                                                         [:plain (nth v 1)])
+    (and (vector? v) (= (count v) 2) (= (nth v 0) :a))
+      (if (> (nth v 1) 50)
+        [:guarded (nth v 1)]
+        [:plain (nth v 1)])
     (and (vector? v) (= (count v) 3) (= (nth v 0) :a)) [:pair (nth v 1) (nth v 2)]
     (and (vector? v) (= (count v) 3) (= (nth v 0) :b)) (+ (nth v 1) (nth v 2))
     (and (pair? v) (= (first v) :c)) [(first (rest v)) (rest (rest v))]

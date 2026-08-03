@@ -51,14 +51,18 @@ case-insensitively), and quoted-string arguments. Pure, so independently testabl
 each consumed whole so spans stay non-overlapping; returns them ascending."
   (cond
     (>= i n) (reverse acc)
-    (or (= (char-at line i) "\"") (= (char-at line i) "'")) (let (q (char-at line i)
-                                                                  close (dk--find line (inc i) n q)
-                                                                  e (if (< close 0) n (inc close)))
-                                                              (dk--strings line
-                                                                base e n
-                                                                (cons [(+ base i) (+ base e)
-                                                                        dk-face-string]
-                                                                  acc)))
+    (or (= (char-at line i) "\"") (= (char-at line i) "'"))
+      (let (q (char-at line i)
+            close (dk--find line (inc i) n q)
+            e (if (< close 0) n (inc close)))
+        (dk--strings line
+          base
+          e
+          n
+          (cons [(+ base i)
+                  (+ base e)
+                  dk-face-string]
+            acc)))
     else (dk--strings line base (inc i) n acc)))
 
 ;; ---- per-line spans + the document walker -----------------------------------
@@ -70,12 +74,13 @@ leading instruction keyword (when the first word is one) plus quoted-string args
     (cond
       (>= lead n) '()
       (= (char-at line lead) "#") (list [(+ base lead) (+ base n) dk-face-comment])
-      else (let (we (dk--word-end line lead n)
-                 word (substring line lead we))
-             (if (member? (upper word) dk--instructions)
-               (cons [(+ base lead) (+ base we) dk-face-instruction]
-                 (dk--strings line base we n '()))
-               (dk--strings line base lead n '()))))))
+      else
+        (let (we (dk--word-end line lead n)
+              word (substring line lead we))
+          (if (member? (upper word) dk--instructions)
+            (cons [(+ base lead) (+ base we) dk-face-instruction]
+              (dk--strings line base we n '()))
+            (dk--strings line base lead n '()))))))
 
 (defn dk--lex (src i n acc)
   (if (>= i n)

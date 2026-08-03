@@ -79,7 +79,8 @@
 (try
   (p52-work 10)
   (catch e
-    (println "P52: caught:" (error-message e)) (println "P52: *p52-x* after catch:" *p52-x*)
+    (println "P52: caught:" (error-message e))
+    (println "P52: *p52-x* after catch:" *p52-x*)
     (println "P52-correct (restored to 0):" (= 0 *p52-x*))))
 
 ;;; ---- P53: many distinct dynvars, no cross-contamination ----
@@ -130,19 +131,49 @@
 
   (def p53-checks
     (and (= :b0 *dv-0*)
-      (= :b1 *dv-1*) (= :b2 *dv-2*) (= :b3 *dv-3*) (= :b4 *dv-4*) (= :b5 *dv-5*) (= :b6 *dv-6*)
-      (= :b7 *dv-7*) (= :b8 *dv-8*) (= :b9 *dv-9*) (= :b10 *dv-10*) (= :b11 *dv-11*)
-      (= :b12 *dv-12*) (= :b13 *dv-13*) (= :b14 *dv-14*) (= :b15 *dv-15*) (= :b16 *dv-16*)
-      (= :b17 *dv-17*) (= :b18 *dv-18*) (= :b19 *dv-19*)))
+      (= :b1 *dv-1*)
+      (= :b2 *dv-2*)
+      (= :b3 *dv-3*)
+      (= :b4 *dv-4*)
+      (= :b5 *dv-5*)
+      (= :b6 *dv-6*)
+      (= :b7 *dv-7*)
+      (= :b8 *dv-8*)
+      (= :b9 *dv-9*)
+      (= :b10 *dv-10*)
+      (= :b11 *dv-11*)
+      (= :b12 *dv-12*)
+      (= :b13 *dv-13*)
+      (= :b14 *dv-14*)
+      (= :b15 *dv-15*)
+      (= :b16 *dv-16*)
+      (= :b17 *dv-17*)
+      (= :b18 *dv-18*)
+      (= :b19 *dv-19*)))
   (println "P53: all bound correctly:" p53-checks))
 
 ;; After binding exits, all should be restored to defaults
 (def p53-restored
   (and (= :d0 *dv-0*)
-    (= :d1 *dv-1*) (= :d2 *dv-2*) (= :d3 *dv-3*) (= :d4 *dv-4*) (= :d5 *dv-5*) (= :d6 *dv-6*)
-    (= :d7 *dv-7*) (= :d8 *dv-8*) (= :d9 *dv-9*) (= :d10 *dv-10*) (= :d11 *dv-11*) (= :d12 *dv-12*)
-    (= :d13 *dv-13*) (= :d14 *dv-14*) (= :d15 *dv-15*) (= :d16 *dv-16*) (= :d17 *dv-17*)
-    (= :d18 *dv-18*) (= :d19 *dv-19*)))
+    (= :d1 *dv-1*)
+    (= :d2 *dv-2*)
+    (= :d3 *dv-3*)
+    (= :d4 *dv-4*)
+    (= :d5 *dv-5*)
+    (= :d6 *dv-6*)
+    (= :d7 *dv-7*)
+    (= :d8 *dv-8*)
+    (= :d9 *dv-9*)
+    (= :d10 *dv-10*)
+    (= :d11 *dv-11*)
+    (= :d12 *dv-12*)
+    (= :d13 *dv-13*)
+    (= :d14 *dv-14*)
+    (= :d15 *dv-15*)
+    (= :d16 *dv-16*)
+    (= :d17 *dv-17*)
+    (= :d18 *dv-18*)
+    (= :d19 *dv-19*)))
 (println "P53: all restored to defaults:" p53-restored)
 
 ;;; ---- P54: binding inside a spawned closure ----
@@ -172,6 +203,7 @@
 (println "P55: dynamic? unbound-sym:" (dynamic? 'totally-unbound-xyz))
 (println "P55-correct:"
   (and (= true (dynamic? '*p55-declared*))
-    (= false (dynamic? 'p55-not-dynamic)) (= false (dynamic? 'totally-unbound-xyz))))
+    (= false (dynamic? 'p55-not-dynamic))
+    (= false (dynamic? 'totally-unbound-xyz))))
 
 (println "=== chaos2_dynamic_vars DONE ===")

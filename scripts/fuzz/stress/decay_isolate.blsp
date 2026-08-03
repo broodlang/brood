@@ -69,11 +69,13 @@
     (= mode "spawn") (spawn :ok)
     (= mode "sendrecv") (do (send (self) [:x n]) (receive ([:x _] :ok)))
     (= mode "backlog") (do (stuff 64) (drain 64))
-    (= mode "roundtrip") (let (r (ref))
-                           (do (send srv [:ping (self) r]) (receive ([:reply ^r v] v))))
-    (= mode "sup") (let (pid (start-child sup
-                               {:id (mod n 8) :start start-crashy :restart :permanent}))
-                     (do (send pid :die) (terminate-child sup (mod n 8))))
+    (= mode "roundtrip")
+      (let (r (ref))
+        (do (send srv [:ping (self) r]) (receive ([:reply ^r v] v))))
+    (= mode "sup")
+      (let (pid (start-child sup
+                  {:id (mod n 8) :start start-crashy :restart :permanent}))
+        (do (send pid :die) (terminate-child sup (mod n 8))))
     (= mode "reload") (eval (list 'def 'decay-target n))
     ;; supervisor-free: separate spawn-link from the CRASH and from the error VALUE
     ;; supervisor cycle WITHOUT a crash: start-child + terminate-child only. Separates
@@ -81,21 +83,25 @@
     ;; pure supervisor CALL round-trip: no child, no closure, key never found
     (= mode "supcall") (terminate-child sup :no-such-child)
     ;; start a child and leave it: no terminate, no crash
-    (= mode "supstart") (start-child sup
-                          {:id n :start (fn () (spawn-link (idle-child))) :restart :temporary})
-    (= mode "supnocrash") (do
-                            (start-child sup
-                              {:id (mod n 8)
-                               :start (fn () (spawn-link (idle-child)))
-                               :restart :temporary})
-                            (terminate-child sup (mod n 8)))
+    (= mode "supstart")
+      (start-child sup
+        {:id n :start (fn () (spawn-link (idle-child))) :restart :temporary})
+    (= mode "supnocrash")
+      (do
+        (start-child sup
+          {:id (mod n 8)
+           :start (fn () (spawn-link (idle-child)))
+           :restart :temporary})
+        (terminate-child sup (mod n 8)))
     (= mode "linkok") (do (spawn-link (ok-child)) (receive ([:EXIT _ _] :ok) (after 2000 :ok)))
-    (= mode "linkcrash") (do
-                           (spawn-link (crash-child))
-                           (receive ([:EXIT _ _] :ok) (after 2000 :ok)))
-    (= mode "linkthrow") (do
-                           (spawn-link (throw-child))
-                           (receive ([:EXIT _ _] :ok) (after 2000 :ok)))
+    (= mode "linkcrash")
+      (do
+        (spawn-link (crash-child))
+        (receive ([:EXIT _ _] :ok) (after 2000 :ok)))
+    (= mode "linkthrow")
+      (do
+        (spawn-link (throw-child))
+        (receive ([:EXIT _ _] :ok) (after 2000 :ok)))
     else (error (str "unknown MODE: " mode))))
 
 ;; ---- the loop ----------------------------------------------------------------
@@ -106,10 +112,21 @@
   (let (dt (max 1 (- (now) t0))
         g (gc-stats))
     (println (str "w="
-               w " ops=" n " ops_per_s=" (quot (* n 1000) dt) " rss_kb=" (rss-kb) " sup_heap="
-               (let (i (process-info sup)) (if i (get i :memory) -1)) " sup_mailbox="
-               (let (i (process-info sup)) (if i (get i :mailbox) -1)) " rt_closures="
-               (get g :runtime-closures) " my_live_bytes=" (get g :live-bytes)))))
+               w
+               " ops="
+               n
+               " ops_per_s="
+               (quot (* n 1000) dt)
+               " rss_kb="
+               (rss-kb)
+               " sup_heap="
+               (let (i (process-info sup)) (if i (get i :memory) -1))
+               " sup_mailbox="
+               (let (i (process-info sup)) (if i (get i :mailbox) -1))
+               " rt_closures="
+               (get g :runtime-closures)
+               " my_live_bytes="
+               (get g :live-bytes)))))
 
 (defn run (n w wstart)
   (do
