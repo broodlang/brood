@@ -229,8 +229,9 @@ code is lists; vectors are data) and support `&optional` (with defaults) and
 enforced privacy — a `foo--internal` name is module-private. **Dynamic
 variables** (`defdyn`/
 `binding`) give per-process special vars; an advisory, set-theoretic **type
-checker** flags type/arity/unbound-symbol mistakes without ever rejecting a
-runnable program; and a per-process tracing **GC** keeps long-running loops flat.
+checker** flags type/arity/unbound-symbol mistakes without ever gating the live
+image (see [The type system](#the-type-system) below); and a per-process tracing
+**GC** keeps long-running loops flat.
 `defn`, the operators (`+`, `<`, …), the sequence library, and the `->`/`->>`
 threading macros are all defined in Brood itself (`std/prelude.blsp`) on top of a
 small Rust kernel.
@@ -261,6 +262,66 @@ key→value store for when you genuinely need mutable state; every other value i
 immutable, and per-process state lives in a process loop's arguments instead.
 
 See [`docs/language.md`](docs/language.md) for the full reference.
+
+### The type system
+
+**Dynamically typed at runtime, strongly typed in what it refuses, and
+set-theoretic + gradual in what it checks statically.** The static layer follows the
+**Elixir model** (Castagna, Duboc, Valim — semantic subtyping), not TypeScript's
+pragmatic-but-unsound one.
+
+*Dynamic.* Every value carries a runtime tag that `type-of` observes
+(`:int`, `:string`, `:vector`, `:pid`, `:decimal`, …); nothing is erased, and
+dispatch happens on real values.
+
+*Strong — no implicit coercions.* The language would rather raise than guess:
+
+```clojure
+(+ 1 "2")          ;=> error: +: expected number, got string ("2")
+(= [1 2] '(1 2))   ;=> false      — a vector is not a list
+(= 1 1.0)          ;=> false
+(/ 3 4)            ;=> 3/4        — exact, not 0.75
+(if 0 :t :f)       ;=> :t         — only nil and false are falsy
+```
+
+`->float` is a function call, not a cast. The one implicit widening is numeric
+promotion inside arithmetic (`(+ 1 2.5)` → `3.5`).
+
+*Set-theoretic.* A type **is a set of values**: union, intersection and negation are
+the actual set operations, and subtyping is set **inclusion** — semantic, with no
+syntactic subtyping rules. The atoms are the runtime tags, so the type language and
+the runtime agree by construction.
+
+*Gradual.* What cannot be pinned down is `dynamic()` — a bounded type living *inside*
+the same algebra, with consistent subtyping derived from ordinary set inclusion — and
+never `Any`. A redefinable global under hot reload is exactly that case, and this is
+the valve that lets typing coexist with live redefinition.
+
+*Inferred first; annotations are optional refinements.* The checker infers a signature
+for a plain closure, flows element types through `map`/`filter`/`reduce`/`fold`, and
+derives body and return types; primitive signatures come from the kernel rather than a
+hand-kept table. No annotation is needed to catch this:
+
+```clojure
+(check '(defn g (x) (string-length (+ 1 2))))
+;=> ("string-length: argument 1 expects string, got int ((+ 1 2))")
+```
+
+Where you want more, `(sig …)` adds function **arrows** (`(sig area (number -> number))`),
+`(map K V)` key/value contracts, intersections, **literal/singleton** types
+(`(or :ok 404)`), and `?A` **type variables** resolved per call site.
+
+*Advisory — the checker never gates the live image.* A `def`/reload always wins, and the
+checker re-derives on every reload; it warns rather than blocks, and it does not warn on a
+use that is valid for the image's current state. The hard reject is **batch/CI only**:
+`nest check` exits nonzero on any warning (`std/` and `tests/` sit at zero). If you want
+the same discipline at runtime, `BROOD_CONTRACTS=1` turns `sig` declarations into checking
+shims — implemented in Brood, not Rust.
+
+Full detail: [`docs/types.md`](docs/types.md) (the model and its compatibility contract),
+[`docs/type-annotations.md`](docs/type-annotations.md) (`sig`), and
+[`docs/type-soundness-reload.md`](docs/type-soundness-reload.md) (why checking and hot
+reload coexist).
 
 ### Performance & benchmarks
 

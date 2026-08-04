@@ -43,10 +43,11 @@ A `Ty` **is a set of values**, and the type operations *are* set operations:
 | negation ("not nil") | `¬` | `Ty::negate` (complement) |
 | **subtyping** | `⊆` inclusion | `Ty::is_subtype` — *semantic*, no syntactic rules |
 
-- **Atoms** are the 17 runtime [`Tag`](../crates/lisp/src/core/value.rs)s
-  (`int float string symbol keyword bool nil pair vector fn macro native map ref
-  pid rope socket`). The type universe is built from these; `type-of` observes one
-  at runtime. Function members can additionally carry a structured *arrow*
+- **Atoms** are the runtime [`Tag`](../crates/lisp/src/core/value.rs)s — 23 today
+  (`nil bool int float symbol keyword string pair vector fn macro native map ref
+  pid rope socket subprocess table bytes decimal set ratio`); the list has grown
+  since this doc was written, so treat `Tag` itself as the authority. The type
+  universe is built from these; `type-of` observes one at runtime. Function members can additionally carry a structured *arrow*
   refinement (Step 5+, ADR-078).
 - `Ty::NEVER` = `⊥` (empty set, subtype of everything); `Ty::ANY` = `⊤` (all
   tags); the named unions `Ty::NUMBER` (`int∪float∪decimal∪ratio`), `Ty::LIST`

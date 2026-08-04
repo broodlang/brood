@@ -30,6 +30,10 @@
 (def sr-alias sr-h)
 
 (describe "register-worker self-link respects late binding"
+  :isolated
+  ;; `:isolated` because these tests redefine globals they also assert on. Without the
+  ;; `%isolate` rollback it buys, a SECOND run in the same image — `--repeat-until-failure`,
+  ;; or `nest test --failed` — starts from the redefined state and fails (KI-25). Keep it.
   (test "rebinding the name is seen by an aliased closure's recursive call"
     ;; Drive it hot enough to tier and take the direct self-link.
     (sr-warm 2000)
