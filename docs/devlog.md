@@ -15402,3 +15402,41 @@ guards.** A retry is safe only for a test whose sole failure mode is a missed de
 project formatter. Re-verified after rebuilding **both** binaries, because `std/*.blsp` is
 embedded at build time and a stale `nest` would have been checking yesterday's bytes: 4350/4350
 in-language, 944/944 Rust, `nest check` clean.
+
+## 2026-08-04 (cont.) — KI-26 fixed, and the detector was the wrong instrument
+
+Audited the ADR-210 changes for more of the same root cause and found a third site:
+`jit_run_fast_link` gated its deopt-resume on `arm.active_nslots() == nslots`, which **re-reads
+`inline_installed`**. When that guard declines, the fallthrough is `vm_apply` — a re-run from ip
+0, repeating any journaled effect. It looked reachable for a reason worth knowing: the inline
+swap in `jit_tier` deliberately does **not** bump the global epoch (its own comment records that
+a bump cascaded under `pfib` and cost ~2×) and invalidates only the *installing* process's fast
+links, while `share_key` arms are shared across processes — so a peer can hold a link whose
+recorded `nslots` predates the swap while the flag now reads true.
+
+**The detector was the right instinct and the wrong instrument.** I built the obvious one — fire
+whenever the guard declines while `jit_ckpt_resume` reports a live journal — and it stayed silent
+across the 4350-test suite, all six effect-once cases, `pfib` ×3, and a purpose-built 24-process
+race (one shared arm with a `table-put`, a spliceable leaf so it gets an inlined upgrade, an
+overflow deopting every call; all 24 counts exactly 4000, five runs). A runtime detector can only
+fire if you *win the race*, and I could not.
+
+So I stopped trying to win it. The hazard is a **predicate**, not a timing window, so I extracted
+the predicate — `jit_frame_shape_matches(arm, frame_nslots)` — and tested it directly and
+deterministically. `ki26_frame_shape_check_is_independent_of_inline_installed` asserts that for an
+arm with layouts (6, 9) both frames stay resumable in both flag states and a foreign frame is
+refused in both; it **fails against the old flag form** (verified by temporarily restoring it) and
+passes with the fix. A second test sweeps four layout pairs — including the degenerate `(4, 4)` an
+unjournalled derivation produces — × both flag states × 40 frame sizes, asserting the new form
+never refuses what the flag form accepted, so the fix can't have traded one silent wrong-resume
+for another.
+
+That is the reusable bit: **"a fix for a bug you cannot make fire is a fix you cannot verify" is
+right, but "make it fire" does not have to mean "reproduce it end to end."** Extracting the
+predicate converted an unwinnable race into a table-driven unit test, and the test is stronger
+than the race would have been — it covers both flag states and every nearby frame size, which no
+amount of hammering `pfib` would have.
+
+Gate: 40/40 `tests/jit.rs` under GC_STRESS+GC_VERIFY, 946/946 Rust, 4350/4350 in-language with
+`BROOD_NO_PARTIAL_LEAF` both ways, 4 fuzz generators × 4 engine configs, `--no-default-features`
+clean.
