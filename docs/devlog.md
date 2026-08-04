@@ -15656,6 +15656,29 @@ chain-derivation test and the minimality test. 39/39 resolver + 40/40 version gr
 still 100%, `nest check` clean, formatted. Deferred now down to one algorithm-adjacent item: semver
 ranges over `:git` tags (the rest is registry plumbing).
 
+## 2026-08-04 (cont.) — resolver derivation: two polish items, one done and one measured away
+
+Two cosmetic follow-ups to the structured proof.
+
+**Trimmed "(any version)".** An unconstrained requirement rendered "your project requires foo (any
+version)"; the suffix is noise. `pg-explain-leaf` now appends a constraint suffix only when there
+IS a constraint (`resolver--constraint-suffix` returns "" for nil/""), so it reads "requires foo".
+Guarded by a test asserting the message contains "your project requires foo" and NOT "(any
+version)".
+
+**Line-numbering: measured, then declined.** Pub numbers incompatibilities because its derivation
+is a shared-node DAG; the open question was whether OUR by-value tree ever duplicates a sub-proof
+(a learned incompatibility reused as a satisfier cause at two steps would emit its lines twice).
+Rather than guess, I built a detector — 5000 random unsatisfiable universes over up to 8 packages ×
+6 versions, scanning each error for a repeated `Because`/`And because`/`Thus` line. **Zero
+duplicates**, deepest derivation ~8 lines. So the duplication line-numbering would fix does not
+occur — post-order over a by-value tree with inlined external leaves visits each derived node's
+line once and they come out distinct. Declined per ADR-011: adding numbering would be dead
+complexity for a case that doesn't arise. (The deep examples do show *repetitive consequence
+phrasing* — "the requirements on c and f and e and g and a cannot all hold" across a chain — but
+that is not duplication and not what numbering addresses; it is inherent to a deep accumulated
+conflict, and pub has it too.)
+
 ## 2026-08-04 (cont.) — markdown was quadratic in UTF-8 and linear in ASCII
 
 Continued the sweep into `editor/markdown`, which I had triaged as low-risk ("21 `char-at`, but
