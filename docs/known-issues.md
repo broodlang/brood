@@ -6,7 +6,9 @@ records, not open bugs. **KI-17** (the checker reachability gap) is now **FIXED*
 **KI-18** (effect duplication on a deopt) and **KI-19** (call-head evaluation order) are
 both now **FIXED**, as is **KI-20** (a fast link ran the callee against the caller's IC
 block — a cold cache, never a wrong answer), as is **KI-21** (`nest run --for` /
-`--watch` emitted a pre-ADR-150 `~p` pin and failed on every file). **KI-25** (five JIT/VM suites cannot be re-run in one image) is **open**.
+`--watch` emitted a pre-ADR-150 `~p` pin and failed on every file). **KI-25** (five JIT/VM suites could not be re-run in one image, blocking
+`--repeat-until-failure`) is **FIXED** — see its entry for the two fixes and why its original
+diagnosis was wrong.
 This file is the condensed record — what each was, how it was fixed, and the regression
 test that guards it — so a recurrence is recognizable. For the narrative discovery
 writeup of the scheduler race, see
@@ -17,7 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-25 | five JIT/VM suites cannot be re-run in one image (`--repeat-until-failure` fails on iteration 2) | ⬜ **open** (found 2026-08-02) |
+| KI-25 | five JIT/VM suites cannot be re-run in one image (`--repeat-until-failure` fails on iteration 2) | ✅ **fixed** 2026-08-04 |
 | KI-24 | `eval`'d code cannot forward-reference a name a later `eval` defines (regression, 97d63eda) | ✅ **fixed** 2026-08-01 |
 | KI-23 | the KI-22 lost-update shape also exists in ~10 std-module registries | ✅ **fixed** 2026-08-02 |
 | KI-22 | concurrent registration lost ~40% of registrations (15 prelude registries) | ✅ fixed 2026-08-01 |
@@ -43,13 +45,12 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**One open issue: KI-25** (re-running certain suites in one image). Every other KI above is
-fixed, incidentally fixed, or a non-reproducing transient — each kept as a record with its
-regression test, so a recurrence is recognizable.
+**No open issues.** Every KI above is fixed, incidentally fixed, or a non-reproducing
+transient — each kept as a record with its regression test, so a recurrence is recognizable.
 
 ---
 
-## KI-25 — five JIT/VM suites cannot be re-run in one image · **open, found 2026-08-02**
+## KI-25 — five JIT/VM suites cannot be re-run in one image · **fixed 2026-08-04**
 
 **Symptom.** Five suites pass on the first run and fail on the second *within the same
 image* — that is, under `--repeat-until-failure`, at every seed tried (0 and 5), which rules
@@ -93,11 +94,22 @@ back `def`s; it cannot roll back the runtime's node state, and no test-level iso
 this is not "something survives an isolated re-run" in the mysterious sense — it is a test whose
 precondition (`(node-name)` is `:nonode`) is consumed by running it once.
 
-**Which makes the fix small, and different per case.** For `pid_identity_test`: gate on
-`(node-name)` — skip, or assert against the already-started node — rather than calling
-`node-start` unconditionally. For the other four: `:isolated`, then verify under
-`--repeat-until-failure`. Still open only because nobody has done it; the JIT-internals reason
-for leaving it alone has been withdrawn. Reproduce in one command:
+**Fixed 2026-08-04, and it was small once the premise was right.** Two different fixes, as the
+diagnosis implies:
+
+- **The four rebinding suites** (`jit_self_rebind`, `jit_shared_spawn`, `vm_call_head_order`,
+  `vm_selfcall_reload`) are marked **`:isolated`**, so `%isolate` rolls their `def`s back to the
+  post-load baseline and iteration 2 starts where iteration 1 did. `jit_shared_spawn` moved from
+  `:serial` to `:isolated` — it already ran alone; what it lacked was the rollback.
+- **`pid_identity_test`** now calls `node-start` only when `(node-name)` is `:nonode`. Nothing at
+  the test level can undo a started node, so the re-run keeps the equality / hashing /
+  receive-pattern assertions and skips re-taking the one-shot transition. Every ordinary
+  `nest test` is a fresh image, so the real nonode→node case still runs there.
+
+**Verified**: each of the five clean over 3 iterations at seeds 0 and 5, and — the point of the
+issue — the **whole in-language suite now survives a re-run in one image**: `nest test
+--repeat-until-failure 2` gives 4390/4390 twice. The failure detector was checked against the
+pre-fix file first, so a green result means something. Reproduce in one command:
 
 ```bash
 nest test tests/pid_identity_test.blsp --repeat-until-failure 3 --seed 0

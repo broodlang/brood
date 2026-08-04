@@ -15918,3 +15918,51 @@ A knock-on worth noting: the code-point-vector rewrites this bug class forced (`
 `csv.blsp`, `ansi.blsp`) are no longer *required* for correctness of performance. They stay as
 they are; the point is that new `std/` code no longer has to choose between char indexing and
 linearity.
+
+## 2026-08-04 (cont.) — KI-25 closed: two fixes, and a diagnosis that had guessed wrong
+
+Five suites passed on the first run and failed when re-run *inside one image*, which blocked
+`--repeat-until-failure` (and `nest test --failed`) across brood's whole suite — so a real flake
+anywhere else was invisible behind them. The entry had been left open on the grounds that
+`pid_identity_test` was the informative case: it is already `:isolated`, so "something outside the
+global table survives an isolated re-run — a JIT tier election, an IC block, a pid counter, or an
+arm-keyed cache", and diagnosing that was JIT-internals work.
+
+**Running the recipe prints the answer, and it is not a JIT cache:**
+
+```
+uncaught error: … :message node-start: this runtime is already a node (node-start called twice)
+```
+
+`node-start` is deliberately one-shot per runtime (a second listener would need a second port), and
+`%isolate` rolls back **bindings** — it cannot roll back runtime node state, and nothing at the test
+level can. The test consumes its own precondition. So the "mystery" was a mundane one-shot resource,
+and the reason for leaving the whole issue alone evaporated with it.
+
+Fixes, two kinds because the causes are two kinds:
+
+- the four rebinding suites (`jit_self_rebind`, `jit_shared_spawn`, `vm_call_head_order`,
+  `vm_selfcall_reload`) are `:isolated`, so their `def`s roll back to the post-load baseline;
+  `jit_shared_spawn` went from `:serial` to `:isolated` — it already ran alone, what it lacked was
+  the rollback;
+- `pid_identity_test` takes the transition only when `(node-name)` is `:nonode`, keeping the
+  equality / hashing / receive-pattern assertions on a re-run. Every ordinary `nest test` is a fresh
+  image, so the real nonode→node case still runs there.
+
+Verified: each of the five clean over 3 iterations at seeds 0 and 5, and the whole in-language suite
+now survives a re-run in one image — `nest test --repeat-until-failure 2` gives **4390/4390 twice**.
+I checked the failure detector against the pre-fix file before trusting any green result, per the
+standing rule that a test which cannot fail is not a gate.
+
+**The lesson is about the write-up, not the bug.** The original entry reasoned forward from a guess
+("a JIT tier election, an IC block, …") and that guess set the priority: JIT-internal, therefore
+expensive, therefore deferred. The actual cause was in the error message the repro prints. **Run the
+repro before ranking the cost of a fix** — an unread error message is the cheapest evidence there is,
+and a plausible mechanism written into a doc outlives the ten seconds it would have taken to check.
+
+Also this session: the README gained a **type system** section — dynamic at runtime, strong in what
+it refuses (`(+ 1 "2")` raises, `(= [1 2] '(1 2))` is false, `(/ 3 4)` is exact), set-theoretic and
+gradual in what it checks, inferred first with `(sig …)` as optional refinement, and advisory (the
+checker never gates the live image; `nest check` is the CI gate). It also corrected the README's
+"without ever rejecting a runnable program", which ADR-123–126 superseded, and `types.md`'s stale
+"17 runtime Tags" (23 today, and `Tag` is the authority).

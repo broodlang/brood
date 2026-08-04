@@ -10,10 +10,12 @@ package-signing work. Nothing half-finished. Rust
 suite **952/952** (nextest), in-language **4378/4378** — also green under
 `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` — `nest check` clean, `nest format --check` clean, rustfmt and
 clippy clean, both default and `--no-default-features` builds warning-clean, metamorphic
-differential clean across 4 engine configs. No open correctness bugs; **one open issue, KI-25** —
-five suites fail when re-run inside one image, which blocks `--repeat-until-failure` across the
-suite (its diagnosis was corrected on 2026-08-04: `pid_identity_test`'s cause is `node-start`
-being one-shot per runtime, not a JIT cache, so the fix is small).
+differential clean across 4 engine configs. **No open issues** — KI-25 (five suites failing when
+re-run inside one image, which blocked `--repeat-until-failure` across the suite) was fixed
+2026-08-04: four suites marked `:isolated` for the `%isolate` rollback, and `pid_identity_test`
+now takes the one-shot `node-start` only when `(node-name)` is `:nonode`. The whole suite
+re-runs clean in one image (4390/4390 twice), so `--repeat-until-failure` is usable for flake
+hunting again.
 
 ---
 
