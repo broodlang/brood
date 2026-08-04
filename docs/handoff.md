@@ -145,12 +145,55 @@ into one arena would attack it; shuffling bytes between existing blocks will not
 scoped that, and note it pulls against `spawn` throughput in exactly the way (a) did, so it needs
 the `spawn`/`spawn-live` pair measured alongside the floor from the start.
 
-**3. Finish the `std/` sweep.** Unswept: the rest of `std/tool/*`, `editor/*` beyond buffer,
-`std/net/*` beyond the framed reads. The method that worked: grep for the shape (an
-`append`/`concat`/`str` whose argument is the **accumulator**, or char-indexed access on a UTF-8
-string), then confirm on **three points** before believing it. Hit rate was five for five, but
-the obvious shapes are now gone. ~115 `expect_string` call sites still copy their argument —
-convert only when a workload shows the cost, since it bites only on large strings.
+**3. `std/` sweep — one confirmed quadratic found, and it is NOT fixed.**
+
+**Found: a SEQUENCE of `std/tool/sexp` structural motions over one buffer is O(n²).** Three
+rising points, which is the signature `scale_sweep.blsp`'s header demands: ASCII **5.68× then
+9.40×**; with a single non-ASCII character **8.84× then 12.30×**. At 6400 forms (~530 KB) that is
+**9.9 s** for the walk, i.e. ~1.55 ms per motion — and per-motion cost grows with buffer size, so
+a 60k-line file is ~15 ms *per keypress*. Row added: `sexp motions` in `scale_sweep.blsp`.
+
+Root cause is by design and documented at the primitive: each motion calls `sexp/narrow`, which
+calls the native `scan-form-start` **twice**, and that is a forward lexical pass from offset 0
+because a backward scan cannot know whether a bracket sits inside a string without the lexer
+state a forward pass carries. So per motion is O(point). `narrow`'s own docstring claims motions
+cost "~three forms, not the whole buffer" — that is true of the CST work it wraps and false of
+finding the window, which is where the whole cost is.
+
+**Partially fixed (constant factor only): `scan_form_start` no longer copies the whole buffer.**
+It took `expect_string` (an owned `String`, i.e. a copy of the entire text per call — the seam the
+handoff said to convert "when a workload shows the cost"; this is that workload) and then
+`chars().collect()`'d the *whole* text including everything past `pos`. Now `expect_string_ref` +
+`take(pos + 1)`, which is semantically identical (the outer loop stops at `i > pos`, and the only
+thing reading past `pos` is the string-skip inner loop, which cannot touch `best`). Worth
+**−18% ASCII**, −3% multi-byte. **The asymptote is untouched**, which is the honest headline.
+
+**The asymptote needs a design decision, so it was left.** Two options, neither scoped: cache
+lexer state keyed by buffer version (fast, but the pure `(text point) -> point` API deliberately
+has nowhere to put it), or bound the restart — `highlight/safe-restart` already exists and may
+supply the notion. Whoever takes it should measure the *sequence*, not one motion; one motion
+looks fine at any size.
+
+**Cleared by measurement, so don't re-grep these:**
+
+- **`editor/highlight` `highlight-spans` is linear** — 800→12800 lines is 16× input for 14.6×
+  time, and the multi-byte ratio *falls* (4.49 → 3.42). The `char-at`-over-whole-text shape is
+  present and is *not* quadratic here, so that shape alone is not evidence.
+- **Every remaining `(append acc …)` fold in `std/tool/*` / `editor/*` is quadratic in a SMALL
+  N** — folds over source *directories* (`project`, `docs`, `complete`, `coverage`), the tokens of
+  one whitespace fragment (`complete--keywords`), or files in a one-shot report
+  (`coverage`). `test--all-tests` (the O(units×tests) flatten) runs only for explicit `FILE:LINE`
+  selectors. Shape present, workload absent — the handoff's own "convert only when a workload
+  shows the cost" applies.
+- **`std/net/http` is already hardened** — its own comments record the old `(str acc …)` being
+  fixed, it searches with `bytes-index-of` on bytes rather than char indices, and header parsing
+  is per-line.
+
+**Still unswept:** `editor/markdown` (21 `char-at`, but per-*line* so bounded), `editor/lineedit`
+(39, bounded by one input line), `std/net/sse` + `reconnect`, and the rest of `std/tool/*` beyond
+the modules above. ~115 `expect_string` call sites still copy their argument; two more sit in
+`syntax_scan.rs` itself (`scan-tokens`, `span-runs`) and were left because they allocate on the
+heap after reading, so the borrow needs restructuring rather than a one-line swap.
 
 **4. `spawn-live`** — the worst published row, untouched. Its own noise floor is **20.6%**, so
 nothing smaller is resolvable there; it has produced phantom results repeatedly.
