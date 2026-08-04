@@ -177,6 +177,45 @@ affected" does not hold: each REPL input is its own compile unit, so `eval_strin
 "does neither" — and touching only `eval_builtin` leaves the REPL broken. Verified by
 building both and running the same two inputs.
 
+## KI-26 — a fast-link deopt guard re-reads `inline_installed`, and its fallthrough re-runs · **latent, unproven, 2026-08-04**
+
+**Severity: unknown — structurally reachable, never observed.** Recorded because the root cause
+is the same anti-pattern behind two real ADR-210 bugs, and because the failure mode would be a
+silently *repeated effect* rather than a crash.
+
+**The shape.** In `jit_run_fast_link` (`eval/compile/jit_runtime.rs`), a deopt takes the
+resume path only if `arm.active_nslots() == nslots`, where `nslots` is the frame size recorded
+in the fast-link table and `active_nslots()` **re-reads `inline_installed`**. When the guard
+declines, control falls through to `vm_apply` — a re-run from ip 0, which repeats any effect the
+native had already journaled (a completed non-tail call, or a `table-put`).
+
+**Why it looks reachable.** The inline swap in `jit_tier` deliberately does **not** bump the
+global epoch — its own comment explains that a bump cascaded under `pfib` and cost ~2× — and it
+invalidates only the *installing* process's fast links. Arms with a `share_key` are shared
+across processes via `shared_closure_lookup`, so a peer can hold a link whose recorded `nslots`
+predates the swap while `inline_installed` now reads true. Guard declines → re-run → duplicate.
+
+**Why it is not fixed.** It could not be demonstrated. A purpose-built detector — fire whenever
+the guard declines *while `jit_ckpt_resume` reports a live journal* — stayed silent across:
+
+- the 4350-test in-language suite,
+- `tests/jit_effect_once_test.blsp` (all six cases),
+- `pfib` ×3, the parallel shared-arm workload the no-epoch-bump comment is about,
+- a targeted 24-process race: one shared arm with a `table-put`, a spliceable leaf (so it gets
+  an inlined upgrade), and an i64 overflow forcing a deopt on *every* call. All 24 effect
+  counts came out exactly 4000, five runs in a row.
+
+Most likely the per-call epoch check on the fast link re-validates the entry before the mismatch
+can be observed. Not proven either way.
+
+**The fix, when someone wants it.** Make the shape check flag-free —
+`nslots == arm.nslots || nslots == arm.inline_nslots` — which is a strict superset of the current
+condition (`active_nslots()` returns one of exactly those two), so it only *admits* more resumes,
+and every admitted resume is still validated by `jit_ckpt_resume` (positive journal, in-bounds
+slot). Re-run the ADR-210 gate: 8 fuzz generators × 4 configs, `tests/jit.rs` under
+GC_STRESS+GC_VERIFY, and the suite with `BROOD_NO_PARTIAL_LEAF` both ways. **Reinstate the
+detector first** — a fix for a bug you cannot make fire is a fix you cannot verify.
+
 ## KI-23 — the KI-22 lost update also exists in std-module registries · **fixed 2026-08-02**
 
 KI-22 fixed the **prelude's** registries by routing them through `%registry-update!`. The
