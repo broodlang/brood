@@ -119,52 +119,210 @@ pub(super) fn scan_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// The sequence of motions is still O(n^2) overall — see `scan_form_start`'s note on why the
 /// forward pass from the top is required. This makes the constant twice as good; it does not
 /// change the shape. The real fix is resumable lexer state, which needs somewhere to live.
+// ---- the column-0 form-start lexer, and its safepoint table -----------------
+//
+// `scan-form-start` / `-2` answer "where does the top-level form containing `pos` begin"
+// — the beginning-of-defun primitive under `tool/sexp`'s narrowing and
+// `editor/highlight`'s `safe-restart`. Correctness requires a FORWARD lexical pass from
+// offset 0: a backward scan cannot know whether a `(` sits inside a string or a comment.
+// That makes one call O(pos) and a SEQUENCE of motions over one buffer O(n^2), which is
+// exactly what `scale_sweep.blsp`'s `sexp motions` row measured (2.3 s at 3200 forms,
+// 18.9 s at 12800).
+//
+// Two things fix it, and only the second changes the shape:
+//
+//  1. The pass runs over BYTES, not a `Vec<char>`. It used to materialise `pos + 1`
+//     `char`s — 4 bytes each — per call, so a motion near the bottom of a 1 MB file
+//     allocated 4 MB before scanning it. Every character this lexer cares about (`"`,
+//     `\`, `;`, `\n`, the brackets) is ASCII, so byte matching is exact; the char index
+//     the language speaks is carried alongside, incremented per char boundary.
+//
+//  2. A **safepoint table** cached against the string value ([`Heap::str_scan_table`]),
+//     holding the lexer's answer every `SCAN_POINT_STRIDE` bytes. A query then resumes
+//     from the last safepoint at or before `pos` instead of from 0, so a motion costs
+//     O(stride) and a sequence over ONE text value is linear. Safepoints are only placed
+//     where the lexer is between tokens, so the resumed state is always "in code" — a
+//     string or comment is skipped atomically within one step, and one inside a long
+//     literal simply gets no safepoint of its own.
+//
+// What this does NOT fix, deliberately recorded because it looks like it should: the
+// buffer-command path (`sexp/forward` and friends) calls `(buffer-text buf)`, which is
+// `rope->string` — a FRESH string per motion, so the table can never hit there. Those
+// motions are O(n) in the stringify before any scanning happens; making them cheap needs
+// rope-native motion, which is a different piece of work. The shapes this does fix are
+// the ones that hold one text value across many queries: the sweep row, `nest check`-style
+// tooling, and an LSP/eldoc pass over an unchanged document.
+
+/// Bytes between safepoints. A 1 MB source gets ~256 of them (~5 KB of table), and a
+/// query's residual scan is bounded by one stride rather than by `pos`.
+const SCAN_POINT_STRIDE: usize = 4096;
+
+/// Below this many bytes a query just scans from 0: the whole pass is already short, and
+/// a table (plus its allocation) would cost more than it saves.
+const SCAN_TABLE_MIN_BYTES: usize = 4096;
+
+/// The lexer's state at a point it can resume from. `at_bol` is what decides whether a
+/// bracket is in column 0; `best`/`prev` are the answer so far, so a resume needs no
+/// history before this point.
+#[derive(Clone, Copy)]
+struct ScanPoint {
+    byte: u32,
+    ch: u32,
+    at_bol: bool,
+    best: u32,
+    prev: u32,
+}
+
+impl ScanPoint {
+    /// The state at the start of any text: offset 0 is column 0, and "no form start seen"
+    /// reports as 0 — which is also what a form start *at* char 0 reports, exactly as the
+    /// pre-table implementation did.
+    fn start() -> ScanPoint {
+        ScanPoint {
+            byte: 0,
+            ch: 0,
+            at_bol: true,
+            best: 0,
+            prev: 0,
+        }
+    }
+}
+
+/// Safepoints for one string value, ascending in both `byte` and `ch`. Cached through
+/// [`Heap::str_scan_table`], so it travels with the string (including across a GC copy)
+/// and is shared by every process that reads the same RUNTIME/PRELUDE string.
+struct FormScanIndex {
+    points: Vec<ScanPoint>,
+}
+
+/// Width in bytes of the UTF-8 character whose lead byte is `b`.
+#[inline]
+fn utf8_width(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b >= 0xF0 {
+        4
+    } else if b >= 0xE0 {
+        3
+    } else {
+        2
+    }
+}
+
+/// The lexical pass, resumed from `from` and stopped once the char index passes `upto`.
+/// `emit` is called at each safepoint-eligible position (between tokens) so one pass can
+/// both answer a query and build the table. Returns the state reached.
+///
+/// The rules are the pre-existing ones, unchanged: `"` opens a string body in which `\`
+/// escapes the next character and which an unterminated literal runs to the end of; `;`
+/// runs to end-of-line; and `(`/`[`/`{` in column 0 outside both is a form start, where
+/// the previous `best` becomes `prev`.
+fn form_scan(s: &str, from: ScanPoint, upto: usize, mut emit: impl FnMut(ScanPoint)) -> ScanPoint {
+    let b = s.as_bytes();
+    let len = b.len();
+    let mut st = from;
+    // Advance one whole character, keeping the byte and char cursors in step.
+    macro_rules! step {
+        () => {{
+            st.byte += utf8_width(b[st.byte as usize]) as u32;
+            st.ch += 1;
+        }};
+    }
+    while (st.byte as usize) < len && (st.ch as usize) <= upto {
+        emit(st);
+        match b[st.byte as usize] {
+            b'"' => {
+                step!();
+                while (st.byte as usize) < len && (st.ch as usize) <= upto {
+                    match b[st.byte as usize] {
+                        b'\\' => {
+                            step!();
+                            if (st.byte as usize) < len {
+                                step!();
+                            }
+                        }
+                        b'"' => {
+                            step!();
+                            break;
+                        }
+                        _ => step!(),
+                    }
+                }
+                st.at_bol = false;
+            }
+            b';' => {
+                while (st.byte as usize) < len && b[st.byte as usize] != b'\n' {
+                    step!();
+                }
+                st.at_bol = false;
+            }
+            b'(' | b'[' | b'{' if st.at_bol => {
+                if st.ch > 0 {
+                    st.prev = st.best;
+                }
+                st.best = st.ch;
+                step!();
+                st.at_bol = false;
+            }
+            c => {
+                st.at_bol = c == b'\n';
+                step!();
+            }
+        }
+    }
+    st
+}
+
+/// `(best, prev)` for char index `pos` in `s`, resuming from `table`'s last safepoint at
+/// or before `pos` when there is one.
+fn form_start_pair(s: &str, table: Option<&FormScanIndex>, pos: usize) -> (usize, usize) {
+    let from = match table {
+        Some(t) => {
+            let k = t.points.partition_point(|p| (p.ch as usize) <= pos);
+            if k == 0 {
+                ScanPoint::start()
+            } else {
+                t.points[k - 1]
+            }
+        }
+        None => ScanPoint::start(),
+    };
+    let end = form_scan(s, from, pos, |_| {});
+    (end.best as usize, end.prev as usize)
+}
+
+/// The safepoint table for string `id`, or `None` for a text short enough to rescan. Built
+/// once per string value and cached on it.
+fn form_scan_table(heap: &Heap, v: Value, len: usize) -> Option<std::sync::Arc<FormScanIndex>> {
+    if len < SCAN_TABLE_MIN_BYTES {
+        return None;
+    }
+    let Value::Str(id) = v else { return None };
+    let any = heap.str_scan_table(id, |s| {
+        let mut points: Vec<ScanPoint> = Vec::with_capacity(s.len() / SCAN_POINT_STRIDE + 1);
+        let mut next_at = 0usize;
+        form_scan(s, ScanPoint::start(), usize::MAX, |p| {
+            if (p.byte as usize) >= next_at {
+                points.push(p);
+                next_at = p.byte as usize + SCAN_POINT_STRIDE;
+            }
+        });
+        std::sync::Arc::new(FormScanIndex { points })
+    });
+    any.downcast::<FormScanIndex>().ok()
+}
+
 pub(super) fn scan_form_start_2(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let pos = expect_int(heap, "scan-form-start-2", arg(args, 1))?;
     let (best, prev) = {
-        let s = expect_string_ref(heap, "scan-form-start-2", arg(args, 0))?;
-        let chars: Vec<char> = s.chars().take(pos.max(0) as usize + 1).collect();
-        let n = chars.len();
-        if n == 0 {
-            (0usize, 0usize)
+        let h: &Heap = heap;
+        let v = arg(args, 0);
+        let s = expect_string_ref(h, "scan-form-start-2", v)?;
+        if s.is_empty() || pos < 0 {
+            (0, 0)
         } else {
-            let pos = pos.clamp(0, (n - 1) as i64) as usize;
-            let mut best = 0usize;
-            let mut prev = 0usize;
-            let mut i = 0usize;
-            while i < n && i <= pos {
-                match chars[i] {
-                    '"' => {
-                        let mut j = i + 1;
-                        while j < n {
-                            match chars[j] {
-                                '\\' => j += 2,
-                                '"' => {
-                                    j += 1;
-                                    break;
-                                }
-                                _ => j += 1,
-                            }
-                        }
-                        i = j.min(n);
-                    }
-                    ';' => {
-                        while i < n && chars[i] != '\n' {
-                            i += 1;
-                        }
-                    }
-                    '(' | '[' | '{' if i == 0 || chars[i - 1] == '\n' => {
-                        // A new form start: the old `best` becomes the previous one.
-                        if i > 0 {
-                            prev = best;
-                        }
-                        best = i;
-                        i += 1;
-                    }
-                    _ => i += 1,
-                }
-            }
-            (best, prev)
+            let table = form_scan_table(h, v, s.len());
+            form_start_pair(&s, table.as_deref(), pos as usize)
         }
     };
     let items = vec![Value::int(prev as i64), Value::int(best as i64)];
@@ -173,58 +331,14 @@ pub(super) fn scan_form_start_2(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
 
 pub(super) fn scan_form_start(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let pos = expect_int(heap, "scan-form-start", arg(args, 1))?;
-    // Two whole-text costs used to sit here, and on this call site they matter more than the
-    // O(pos) scan the doc above already owns: `expect_string` returns an OWNED String (a copy
-    // of the entire buffer per call — the seam `expect_string_ref` exists to close), and
-    // `chars().collect()` then materialised a `Vec<char>` of the *whole* text, 4 bytes a char,
-    // including everything after `pos` that this function can never look at.
-    //
-    // Borrowing fixes the first. `take(pos + 1)` fixes the second and is semantically
-    // identical, not merely close: the outer loop already stops at `i > pos`, and the only
-    // thing that reads past `pos` is the string-skipping inner loop, which cannot touch
-    // `best` — it only decides where `i` lands, and either way `i` ends up `> pos` and the
-    // loop exits. So truncating the char vector at `pos + 1` changes no result, and turns the
-    // allocation from O(text) into O(pos). That is the difference between a motion near the
-    // top of a large file paying for the whole file and paying for what precedes it.
-    let s = expect_string_ref(heap, "scan-form-start", arg(args, 0))?;
-    let chars: Vec<char> = s.chars().take(pos.max(0) as usize + 1).collect();
-    let n = chars.len();
-    if n == 0 {
+    let h: &Heap = heap;
+    let v = arg(args, 0);
+    let s = expect_string_ref(h, "scan-form-start", v)?;
+    if s.is_empty() || pos < 0 {
         return Ok(Value::int(0));
     }
-    let pos = pos.clamp(0, (n - 1) as i64) as usize;
-    let mut best = 0usize;
-    let mut i = 0usize;
-    while i < n && i <= pos {
-        match chars[i] {
-            '"' => {
-                // skip the string body: \ escapes the next char; an unterminated
-                // string swallows the rest (nothing below it can be a form start)
-                let mut j = i + 1;
-                while j < n {
-                    match chars[j] {
-                        '\\' => j += 2,
-                        '"' => {
-                            j += 1;
-                            break;
-                        }
-                        _ => j += 1,
-                    }
-                }
-                i = j.min(n);
-            }
-            ';' => {
-                while i < n && chars[i] != '\n' {
-                    i += 1;
-                }
-            }
-            '(' | '[' | '{' if i == 0 || chars[i - 1] == '\n' => {
-                best = i;
-                i += 1;
-            }
-            _ => i += 1,
-        }
-    }
+    let table = form_scan_table(h, v, s.len());
+    let (best, _) = form_start_pair(&s, table.as_deref(), pos as usize);
     Ok(Value::int(best as i64))
 }
 
@@ -456,4 +570,151 @@ pub(super) fn clipboard_set(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRe
     #[cfg(not(feature = "clipboard"))]
     let _ = &s;
     Ok(arg(args, 0))
+}
+
+#[cfg(test)]
+mod form_scan_tests {
+    use super::*;
+
+    /// The pre-table implementation, kept verbatim as the oracle: a `Vec<char>` walk
+    /// truncated at `pos + 1`. Every case below asserts the byte-level scan and its
+    /// safepoint resume agree with THIS at every position — the definition of the
+    /// primitive is what it used to answer, not what the new code thinks it should.
+    fn oracle(text: &str, pos: usize) -> (usize, usize) {
+        let chars: Vec<char> = text.chars().take(pos + 1).collect();
+        let n = chars.len();
+        if n == 0 {
+            return (0, 0);
+        }
+        let pos = pos.min(n - 1);
+        let (mut best, mut prev) = (0usize, 0usize);
+        let mut i = 0usize;
+        while i < n && i <= pos {
+            match chars[i] {
+                '"' => {
+                    let mut j = i + 1;
+                    while j < n {
+                        match chars[j] {
+                            '\\' => j += 2,
+                            '"' => {
+                                j += 1;
+                                break;
+                            }
+                            _ => j += 1,
+                        }
+                    }
+                    i = j.min(n);
+                }
+                ';' => {
+                    while i < n && chars[i] != '\n' {
+                        i += 1;
+                    }
+                }
+                '(' | '[' | '{' if i == 0 || chars[i - 1] == '\n' => {
+                    if i > 0 {
+                        prev = best;
+                    }
+                    best = i;
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+        }
+        (best, prev)
+    }
+
+    /// Both engines at every char index of `text`: no table (the short-text path), and
+    /// with a table built at a deliberately tiny stride so a resume happens between
+    /// almost every pair of positions — the case a 4 KB stride would never reach in a
+    /// test-sized fixture.
+    fn agrees_everywhere(text: &str) {
+        let nchars = text.chars().count();
+        let mut points: Vec<ScanPoint> = Vec::new();
+        let mut next_at = 0usize;
+        form_scan(text, ScanPoint::start(), usize::MAX, |p| {
+            if (p.byte as usize) >= next_at {
+                points.push(p);
+                next_at = p.byte as usize + 3; // 3-byte stride: resume constantly
+            }
+        });
+        let table = FormScanIndex { points };
+        for pos in 0..=nchars + 1 {
+            let want = oracle(text, pos);
+            assert_eq!(
+                form_start_pair(text, None, pos),
+                want,
+                "no table, pos {} of {:?}",
+                pos,
+                text
+            );
+            assert_eq!(
+                form_start_pair(text, Some(&table), pos),
+                want,
+                "resumed from a safepoint, pos {} of {:?}",
+                pos,
+                text
+            );
+        }
+    }
+
+    /// The shapes that make this lexer non-trivial: a column-0 bracket inside a string or
+    /// a comment must NOT count, escapes must not end a string early, an unterminated
+    /// string swallows the rest, and multi-byte text must not shift the char indices the
+    /// language sees.
+    #[test]
+    fn agrees_with_the_pre_table_scan() {
+        for text in [
+            "",
+            "(",
+            "(a)\n(b)\n(c)\n",
+            "(a)\n  (b)\n(c)",
+            "[v]\n{m}\n(l)\n",
+            "(a \"\n(not-a-form)\n\")\n(b)\n",
+            "(a \";\n\")\n(b)\n",
+            "; (not-a-form)\n(b)\n",
+            "(a) ; trailing (comment)\n(b)\n",
+            "(a \"\\\"\n(b)\n",             // escaped quote keeps the string open
+            "(a \"\\\\\")\n(b)\n",          // escaped backslash closes it
+            "(a \"unterminated\n(b)\n",     // runs to the end
+            "(café)\n(naïve \"é\")\n(b)\n", // multi-byte, incl. inside a string
+            "(a \"\\é\")\n(b)\n",           // escaped MULTI-BYTE char: 1 char, 2 bytes
+            "🙂\n(a)\n🙂(b)\n",
+            "\n\n(a)\n\n(b)\n\n",
+            ";;\n;;\n(a)\n",
+        ] {
+            agrees_everywhere(text);
+        }
+    }
+
+    /// A fixture past the real stride, so the production table (not just the 3-byte test
+    /// one) is exercised, including a form start that lands exactly on a stride boundary.
+    #[test]
+    fn agrees_across_a_real_stride() {
+        let mut text = String::new();
+        while text.len() < SCAN_POINT_STRIDE * 3 {
+            text.push_str(
+                "(defn f (a b)\n  \"doc with a (bracket) and a ; semicolon\"\n  (+ a b))\n\n",
+            );
+        }
+        let nchars = text.chars().count();
+        let mut points: Vec<ScanPoint> = Vec::new();
+        let mut next_at = 0usize;
+        form_scan(&text, ScanPoint::start(), usize::MAX, |p| {
+            if (p.byte as usize) >= next_at {
+                points.push(p);
+                next_at = p.byte as usize + SCAN_POINT_STRIDE;
+            }
+        });
+        assert!(points.len() >= 3, "the fixture spans several strides");
+        let table = FormScanIndex { points };
+        // Every 7th position (an exhaustive sweep of 4 K chars x the oracle is needless).
+        for pos in (0..nchars).step_by(7) {
+            assert_eq!(
+                form_start_pair(&text, Some(&table), pos),
+                oracle(&text, pos),
+                "pos {}",
+                pos
+            );
+        }
+    }
 }

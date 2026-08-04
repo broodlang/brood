@@ -15966,3 +15966,67 @@ gradual in what it checks, inferred first with `(sig …)` as optional refinemen
 checker never gates the live image; `nest check` is the CI gate). It also corrected the README's
 "without ever rejecting a runnable program", which ADR-123–126 superseded, and `types.md`'s stale
 "17 runtime Tags" (23 today, and `Tag` is the authority).
+
+## 2026-08-04 (cont.) — the last quadratic: a safepoint table for form-start scanning (ADR-214), and the `expect_string` seam triaged
+
+Took `handoff.md` §1 and §2 in one pass.
+
+**§1 — `sexp motions` is linear.** The scan now resumes from a safepoint table cached against
+the string value instead of re-lexing from offset 0, and runs over bytes instead of a
+`Vec<char>` it allocated per call. Same profile both sides, base 3200: ratio **7.97 → 3.88**
+(ASCII) and 7.87 → 3.89 (UTF-8), 12800 forms **18570 → 6146 ms**, and linearity confirmed on
+four rising bases (4.04 / 3.99 / 3.85 / 3.94). ADR-214 has the design; two things about it are
+worth carrying forward.
+
+*The layering answer was already on the slot.* ADR-213 put a `StrAux` cell on the string slot
+for the char→byte index; the safepoint table hangs off the same cell as an
+`OnceLock<Arc<dyn Any + Send + Sync>>` the heap owns and never interprets. So a **higher layer
+gets a per-string-value cache without the core depending on it**, and it cost zero extra
+per-string memory. Keying by *value* rather than by handle is the load-bearing part: a `StrId`
+is unique only within a GC epoch, so a map keyed by handle needs clearing at every collection
+and is silently wrong if it doesn't — a cell that travels with the bytes has no such window.
+That is a pattern to reach for again, not a one-off.
+
+*The safepoints only exist between tokens*, which deleted the state I expected to have to
+store. A string or comment is consumed atomically inside one step, so the resumed state is
+always "in code" — no in-string/in-comment flag to save, restore, or get wrong. The design got
+simpler when I stopped trying to make safepoints uniform.
+
+**Two findings I'd have got wrong by reasoning.** First: the editor's own motion path gains
+**nothing**. `sexp/forward` calls `(buffer-text buf)` = `rope->string`, a fresh string per
+motion, so the cache can never hit and each motion is O(n) in the stringify before any scanning
+happens. The row I fixed is the *tooling* shape (one text value, many queries), and rope-native
+motion is the successor item. Second: `editor/lineedit`, which the handoff flagged as needing a
+look, is fine — `lineedit--cursor-rc` copies the prefix twice per keystroke, but measured it is
+2.5 ns/char: **28 µs at 10 K chars, 248 µs at 100 K, 2452 µs at 1 M**, i.e. under a frame even
+on a 1 MB pasted line. Declined with numbers rather than "low risk".
+
+**§2 — one real quadratic left in `std/`, and it was `sse--frames`.** It re-`substring`ed the
+rest of the buffer per event, so one socket read holding k events cost O(k · chunk) — the
+`stream-lines` bug in another module, and a 64 KB read of short events is the normal case, not
+the pathological one. One native `string-split` whose last piece *is* the remainder:
+**5671 → 15 ms at 25600 events** (8.25× / 20.33× / 18.47× across three rising bases → 5.0),
+with a `sse frames-1c` sweep row so it cannot come back. Everything else in the unswept modules
+(`net/reconnect`, and `docs`/`explain`/`grammar`/`mcp`/`observer`/`proctree`/`scaffold`/`reload`/
+`package`) has no reachable accumulator shape: the two `(append acc …)` hits fold over *source
+directories*, a handful of items. That is the reachability filter working as intended.
+
+**The `expect_string` copy seam: its worth is conditional, and now there is a rule.** Eight
+sites converted to a borrow (`%str-splice-diff`, `string->codepoints`, `grapheme-count`,
+`grapheme-at`, `substring-graphemes`, `upper`, `lower`). Measured:
+
+- where the call's own work is **O(1)** and the argument is a whole buffer — the editor reading
+  the cluster under the cursor, `(grapheme-at txt 0)` on 212 KB, 20 000 calls — **100 → 26 ms,
+  −74%**;
+- where the body is **per-char** (`grapheme-count`/`string->codepoints` over the whole string)
+  — **−0.6%**, inside the drift floor. The UAX #29 segmentation dwarfs the memcpy.
+
+So the remaining ~105 sites should be triaged by **what the body costs**, not converted by
+count — and two of them can't be converted at all by this pattern: `string-split` and
+`scan-tokens` allocate per piece *while* scanning, so the borrow can't be held, and
+`string-split` gains nothing anyway (its copies are the parts, not the input). That is worth
+knowing before someone budgets a sweep of all 113.
+
+Gates: 954 Rust tests + the in-language suite green, `nest check` / `format --check` clean,
+clippy clean, `--no-default-features` builds, every sweep row linear in **both** encoding
+regimes.

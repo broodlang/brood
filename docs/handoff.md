@@ -5,9 +5,9 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**As of 2026-08-04**, brood at the ADR-213 char→byte index merged with the ADR-211/212 registry +
-package-signing work. Nothing half-finished. Rust
-suite **952/952** (nextest), in-language **4378/4378** — also green under
+**As of 2026-08-04**, brood with ADR-213 (char→byte index) + ADR-214 (form-start safepoints) on
+top of the ADR-211/212 registry + package-signing work. Nothing half-finished. Rust
+suite **954/954** (nextest), in-language **4390/4390** — also green under
 `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` — `nest check` clean, `nest format --check` clean, rustfmt and
 clippy clean, both default and `--no-default-features` builds warning-clean, metamorphic
 differential clean across 4 engine configs. **No open issues** — KI-25 (five suites failing when
@@ -19,87 +19,74 @@ hunting again.
 
 ---
 
-## 1. START HERE — the next lever, and the decision it needs
+## 1. START HERE — `spawn-live`, and the measurement discipline it demands
 
-**`sexp motions` is the largest quadratic left on the board, and it is now the *only* one.** A
-sequence of structural motions over one buffer costs **2.3 s at 3200 forms and 18.9 s at 12800**
-(`scale_sweep.blsp`, ratio 8.13 across a rising base — confirmed on three points, and the same in
-both encoding regimes since ADR-213). Every other sweep row is linear.
+**Every quadratic in `std/` is gone** (§4), so the next lever is the worst *published* row.
+`spawn-live` is **2.8× slower and 1.9× heavier than the BEAM** and has never been worked on.
 
-The shape, and why it is not a bug: each motion's `sexp/narrow` needs the start of the enclosing
-top-level form, and finding it requires a **forward lexical pass from offset 0** — a backward scan
-cannot know whether a bracket sits inside a string or a comment without the lexer state a forward
-pass carries. So one motion is O(point) and a sequence is O(n²). Two constant-factor fixes have
-landed (the native stopped copying the whole buffer; `scan-form-start-2` returns both offsets from
-one pass instead of two), together 2.0× — the constant, not the shape.
+Its own noise floor is **20.6%**, which is the whole difficulty: nothing smaller than that is
+resolvable on it, and it has produced phantom results repeatedly. Before believing anything
+here, read §5's measurement traps — in particular, measure a **control row that cannot be
+affected** by the change (a ~2% whole-binary drift is normal between two builds), and prefer a
+mechanism switch on ONE binary over a two-binary delta.
 
-**The fix is resumable lexer state, and ADR-213 just settled where it can live.** The blocker has
-always been recorded as "somewhere to put it": the API is pure (`(text point) -> point`), so there
-is no session object to hang state on. The char→byte index is the precedent — a **lazily-built
-table on the string slot, published through a `OnceLock`** — and a lexer-safepoint table has
-exactly the same properties: it is a pure function of immutable bytes, so a race between two
-builders is benign, and it is *shaped* like the char index (a mark every STRIDE chars).
+Related and already measured: boxing the `Heap` inside `Process` shrinks the per-process floor
+3.5% but costs `spawn-live` **+6.4%** (§4) — so the direction is cutting the *number* of
+allocations per process, not their sizes, and the `spawn`/`spawn-live` pair must be measured
+together with the floor from the start.
 
-A safepoint needs to answer "what is the lexer state here", which for these rules is small: in
-code / in a string / in a line comment, plus the last column-0 form start at or before that point.
-`scan-form-start(s, pos)` then jumps to the last safepoint ≤ `pos` and scans forward from there —
-O(stride) per motion, O(n) once per string.
+## 2. Then: rope-native structural motion, the editor half of the `sexp` story
 
-**The decisions to make before writing it:**
+ADR-214 made a *sequence* of structural motions linear when the caller holds one text value —
+the tooling/LSP shape. The **editor** shape is untouched and cannot be fixed by that cache:
+`sexp/forward` and friends call `(buffer-text buf)`, which is `rope->string`, so every motion
+allocates a fresh O(n) string before any scanning happens, and the safepoint table can never
+hit. A keystroke-driven motion is therefore O(buffer) no matter how fast the scan is.
 
-- **Where the table lives.** On the string slot beside the char index (kernel mechanism, reuses the
-  `OnceLock` argument wholesale) versus a Brood-side `Table` memo in `std/tool/sexp.blsp` (policy,
-  and closer to "write the language in the language" — but it needs a key for text identity, which
-  Brood has no way to express for an immutable string, and it would not help
-  `highlight/safe-restart`, which sits on the same native).
-- **Whether the amortisation matches the editor, not just the benchmark.** The sweep runs many
-  motions over an *unchanged* buffer, which is the best case for a per-string table. A keystroke
-  produces a *new* string, so the table rebuilds: O(n) per keystroke against today's O(point) per
-  motion. That is not a regression (one pass either way) but it means **the win is in motion
-  sequences, not in typing** — check the real editor path (`std/editor/*` calls this per
-  fontify-restart and per eldoc) before claiming a keystroke number.
-- **Whether the rope, not the string, is the right home.** The editor's real text is
-  `Value::Rope`; `std/tool/sexp.blsp` takes a string. If the answer is "index the rope", this
-  becomes a different and larger piece of work — decide before starting, not halfway.
+The options, in the order I would try them:
 
-`scan_form_start` / `scan_form_start_2` are in `crates/lisp/src/builtins/syntax_scan.rs`; both
-still allocate a `Vec<char>` of `pos + 1` chars per call, so the allocation is quadratic in the
-sequence too — a safepoint table removes both terms at once.
+- **Motions over the rope.** `std/tool/sexp.blsp` is written against `(text point) -> point`
+  with `text` a string; `parse-source-positioned` and `scan-form-start` both take strings. A
+  rope-native path needs at least a rope-shaped form-start scan (ropey exposes chunk iteration,
+  so the same safepoint idea applies) and a decision about whether the CST walk slices a rope
+  or a string.
+- **Or: let the caller hold the string.** A command loop that keeps one `text` value across a
+  run of motions gets ADR-214's cache for free. Cheap, and it only helps a *sequence* of
+  motions between edits — worth checking against how the downstream editor actually drives it
+  before building anything in the kernel.
 
-## 2. Then: finish the `std/` sweep, and the `expect_string` copy seam
+Measure `(buffer-text buf)` first: if the stringify dominates a single motion at realistic
+buffer sizes, that number decides which of the two above is worth the work.
 
-Unswept, in the order I would take them. **Measure both regimes** (`UTF8=1`). ADR-213 removed the
-*encoding* multiplier, so a row that is quadratic now is quadratic in both regimes — but the knob
-stays the right habit, and it is how the last two multi-byte-only rows were found.
+## 3. Then: the `expect_string` copy seam, by body cost
 
-- `editor/lineedit` — 39 `char-at`, each bounded by one input line, so low risk; but it runs per
-  keystroke, and a long pasted line is the case to check.
-- `std/net/sse`, `std/net/reconnect` — stream accumulation, the shape `stream-lines` had.
-- The rest of `std/tool/*` beyond `project`/`test`/`complete`/`coverage`/`repl`/`sexp`.
+`expect_string` returns an **owned** `String` at ~105 remaining call sites — one copy of the
+argument per call. Eight were converted on 2026-08-04, and the measurement gives the rule:
 
-The method that keeps working: grep for the shape (an `append`/`concat`/`str` whose argument is the
-**accumulator**; a `substring`/`char-at` with a loop-carried index), then **filter by reachability
-before measuring** — most hits are quadratic in a genuinely small N (source dirs, tokens of one
-fragment, files in a one-shot report) and are not worth touching. Confirm a real one on **three
-rising points**, not two.
+- the copy is worth removing where the call's own work is **O(1)** and the argument is a whole
+  buffer — `(grapheme-at txt 0)` on 212 KB measured **−74%**;
+- it is **noise** where the body is per-char — `grapheme-count` / `string->codepoints` over the
+  whole string measured −0.6%, inside the drift floor, because UAX #29 segmentation dwarfs a
+  memcpy.
 
-**Separately: `expect_string` returns an OWNED `String` at ~113 call sites** — one copy of the
-argument per call. Only the two search primitives were converted (`expect_string_ref`, and now
-`StrArg`/`expect_str_arg` for the char-indexed four). That copy is what actually moved `inc-scan` on
-2026-08-02 — 1114 → 15 ms, far more than the conversion fix predicted alongside it — so the
-remaining sites are a known, mechanical seam with a measured precedent. Convert the ones on hot
-paths (the scanners in `syntax_scan.rs`, `str_splice_diff`) rather than all 113 blindly.
-
-## 3. Then: `spawn-live`
-
-The worst published row — 2.8× slower and 1.9× heavier than the BEAM — and untouched. Its own noise
-floor is **20.6%**, so nothing smaller is resolvable on it; it has produced phantom results
-repeatedly. Related and measured: boxing the `Heap` costs it **+6.4%** (§4).
+So triage by what the body costs. Two sites **cannot** take the borrow at all: `string-split`
+and `scan-tokens` allocate per piece *while* scanning, and `string-split` would gain nothing
+anyway (its copies are the parts, not the input). `scan-tokens` would need a two-pass rewrite
+(collect ranges, then allocate) — worth it only if the fontifier shows up in a measurement.
 
 ## 4. Closed — do NOT re-attempt these
 
 Each was measured to a conclusion. Re-deriving them costs a session each.
 
+- **`sexp motions`, the last quadratic in the sweep** — **fixed** (ADR-214): the form-start scan
+  resumes from a safepoint table cached against the string value, and runs over bytes instead of
+  a per-call `Vec<char>`. Ratio 7.97 → 3.88, 18570 → 6146 ms at 12800 forms, linear on four
+  rising bases. Do not re-attempt it as a *constant-factor* fix: two of those landed first and
+  left the shape untouched. What is left is the **editor** path (§2), which this cannot reach.
+- **`sse--frames`** — **fixed**: one `string-split` instead of a `substring` of the rest per
+  event, 5671 → 15 ms at 25600 events, with its own sweep row.
+- **`editor/lineedit`'s per-keystroke geometry** — measured and **declined**: 2.5 ns/char, so
+  28 µs at 10 K chars and 2452 µs at 1 M. Under a frame even on a 1 MB pasted line.
 - **Char→byte conversion for non-ASCII strings** — **fixed** (ADR-213): a sparse char→byte index on
   the string slot, so a char index costs a lookup plus a walk bounded by 32 chars in either
   encoding regime. `inc-scan` 16.85× → linear; `sexp motions` lost its 9.80× → 5.42× encoding
@@ -130,6 +117,7 @@ mechanism with a switch, the switch on ONE binary is the attribution (§6).
 
 | Change | Off-switch | Worth |
 |---|---|---|
+| Form-start safepoint table on the string value (ADR-214) | — (a cache that changes no answer; gated by equality with the pre-table scan at every position) | `sexp motions` 7.97× → 3.88×, 3.0× at 12800 forms |
 | Sparse char→byte index on the string slot (ADR-213) | — (a cache that changes no result; its gate is that its answers equal the walk's) | multi-byte char indexing **96×** on a micro (60.2 s → 0.62 s); `inc-scan` 16.85× → linear; `sexp motions` 9.80× → 5.42×; ASCII flat |
 | Partial leaf splicing (ADR-210) | `BROOD_NO_PARTIAL_LEAF=1` | 2.4× on a lowering caller with a leaf beside a residual call; every published row flat |
 | Shared closure crosses a **serialised** send by handle (ADR-208) | `BROOD_NO_SHARE_FN_MSG=1` | `rt_closures` 143,752 → 66 constant; RSS 213 vs 502 MB |
@@ -144,9 +132,12 @@ mechanism with a switch, the switch on ONE binary is the attribution (§6).
 **`std/` quadratics fixed** (each with a `scale_sweep.blsp` row so it cannot come back):
 `template/render` 318→24 ms · `last-index-of` 540→1 ms · `strip-ansi` 1583→109 ms ·
 `stream-lines` 303→39 ms · `format-source` 3593→1988 ms · **`sexp` motions 12061→6037 ms (2.0×)** ·
-**`markdown-spans` multi-byte 1287→559 ms (2.3×)** · **`inc-scan` multi-byte 118→3 ms (ADR-213)**.
+**`markdown-spans` multi-byte 1287→559 ms (2.3×)** · **`inc-scan` multi-byte 118→3 ms (ADR-213)** ·
+**`sexp motions` 18570→6146 ms, quadratic→linear (ADR-214)** · **`sse frames-1c` 5671→15 ms**.
 
-`sexp motions` is still a confirmed quadratic in *shape* — see §1, which is now the whole item.
+**Every row in the sweep is now linear in both encoding regimes.** Its job from here is
+regression detection, which means running it **both** ways (`UTF8=1`) and checking the ratio
+*trend* across bases, not one triple.
 
 ## 6. Traps — every one of these cost real time
 
@@ -259,6 +250,13 @@ mechanism with a switch, the switch on ONE binary is the attribution (§6).
   lookup plus a walk bounded by 32 chars. So `substring` is O(result), and a `char-at` loop or an
   `index-of` scan with a rising `from` is linear on any text. The code-point-vector rewrites this
   class of bug once forced (`url`, `csv`, `ansi`) are no longer required — they are left alone.
+- **A cache keyed to a string VALUE goes on the slot's `StrAux` cell, not in a map keyed by
+  `StrId`.** A handle is unique only within a GC epoch; the cell travels with the bytes. The heap
+  owns the cell as `dyn Any` and never interprets it, so a higher layer can cache its own table
+  (ADR-214's lexer safepoints) without the core depending on it.
+- **`(buffer-text buf)` is `rope->string` — a fresh O(n) string per call.** Anything that calls it
+  per keystroke is O(buffer) per keystroke before it does any work of its own. This is why the
+  editor gets nothing from ADR-214 (§2).
 - **Hot reload does not reach a self-recursive loop.** A tail self-call compiles to
   `Node::SelfCall`, which re-runs the arm without resolving the callee. Redefining any *other* global
   the loop calls does reach it. Erlang's local-vs-remote rule; see `live-editing.md`.
@@ -277,7 +275,8 @@ All in `scripts/fuzz/stress/`, each with a usage header worth reading first.
 
 - **`scale_sweep.blsp`** — a `std/` op at N and 4N, ratio printed (linear ~4×, quadratic ~16×).
   **`UTF8=1` re-runs every row in the multi-byte regime.** Its header records which rows are
-  cleared, which were cleared *wrongly*, and why.
+  cleared, which were cleared *wrongly*, and why. **Every row is linear today**, so a
+  superlinear reading is a regression, not a known gap.
 - **`leaf_splice.blsp`** — partial leaf splicing's benchmark (ADR-210); ~220 ms vs ~520 ms with
   `BROOD_NO_PARTIAL_LEAF=1`. Its header carries the derivation-vs-lowering trap.
 - **`process_floor.blsp`** — the per-process idle floor; ~4.27 KB, flat across N. Read the slope,

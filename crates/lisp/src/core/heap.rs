@@ -80,21 +80,37 @@ use crate::error::LispError;
 /// pure-ASCII test: off that path every conversion still walked from the start, so a
 /// scan carrying a rising index stayed quadratic (`inc-scan` in `scale_sweep.blsp` read
 /// 16.85× per 4× of input under `UTF8=1`, against an unmeasurable ASCII row). Hence
-/// [`CharIndex`]: a sparse char→byte table built on first conversion, which bounds the
-/// walk by [`CHAR_INDEX_STRIDE`] in both directions.
+/// [`StrAux`]: lazily-built side tables keyed to this exact string value — the sparse
+/// char→byte index, and an opaque slot a higher layer can use for its own table.
 #[derive(Clone)]
 struct LocalString {
     data: StrData,
     chars: usize,
-    /// Built on the first char↔byte conversion of a long non-ASCII string; never set
-    /// otherwise. `OnceLock` rather than a `Cell`/`RefCell` because a slot can live in
-    /// the **RUNTIME** region, which every process of a runtime reads concurrently — a
-    /// lazily-populated cache there has to be synchronised. Sound with no more than that
-    /// because the table is a pure function of immutable bytes: two racing builders
-    /// produce identical tables and `get_or_init` publishes one. The index is boxed so
-    /// the payload is one word (this struct is every string slab entry, so its size is
-    /// per-string memory in every heap — 40 → 56 bytes, pinned by a test).
-    index: OnceLock<Box<CharIndex>>,
+    /// Side tables for this string value, built on first use and never otherwise — see
+    /// [`StrAux`]. One cell, because this struct is every string slab entry and its size
+    /// is per-string memory in every heap (40 → 56 bytes, pinned by a test); a second
+    /// cell for the second table would have cost every string another 16.
+    aux: OnceLock<Box<StrAux>>,
+}
+
+/// Lazily-built, immutable side tables for one string value. Both are pure functions of
+/// the string's (immutable) bytes, which is what makes `OnceLock` — rather than a
+/// `Cell`/`RefCell` — the right cell: a slot can live in the **RUNTIME** region, which
+/// every process of a runtime reads concurrently, so a lazily-populated cache there has
+/// to be synchronised, and two racing builders produce identical tables of which
+/// `get_or_init` publishes one.
+#[derive(Clone)]
+struct StrAux {
+    /// The sparse char→byte index (see [`CharIndex`]), built on the first char↔byte
+    /// conversion of a long non-ASCII string.
+    index: OnceLock<CharIndex>,
+    /// A table belonging to some **other layer**, attached to this exact string value.
+    /// The heap owns the cell and never interprets the contents: it is `dyn Any` so that
+    /// a per-string cache can exist for a higher layer's own type without the core
+    /// depending on it (today the Lisp lexical scanners in `builtins/syntax_scan.rs`
+    /// keep their form-start safepoint table here). `Arc` so a slot clone — what the GC
+    /// does when it tenures a survivor — shares the table instead of rebuilding it.
+    scan: OnceLock<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 /// One [`CharIndex`] mark per `STRIDE` chars, so an index costs `4 * chars / STRIDE`
@@ -172,7 +188,7 @@ impl LocalString {
         LocalString {
             data: StrData::Inline(s),
             chars,
-            index: OnceLock::new(),
+            aux: OnceLock::new(),
         }
     }
 
@@ -182,7 +198,7 @@ impl LocalString {
         let mut me = LocalString {
             data: StrData::Shared(b),
             chars: 0,
-            index: OnceLock::new(),
+            aux: OnceLock::new(),
         };
         me.chars = me.as_str().chars().count();
         me
@@ -198,6 +214,17 @@ impl LocalString {
     #[inline]
     fn is_ascii(&self) -> bool {
         self.chars == self.as_str().len()
+    }
+
+    /// This string's side-table block, allocated on the first table that needs it.
+    #[inline]
+    fn aux(&self) -> &StrAux {
+        self.aux.get_or_init(|| {
+            Box::new(StrAux {
+                index: OnceLock::new(),
+                scan: OnceLock::new(),
+            })
+        })
     }
 
     /// This string's sparse char→byte index, built on first use; `None` for a string
@@ -216,8 +243,9 @@ impl LocalString {
         // Two threads racing here both build; `get_or_init` publishes one and drops the
         // other. Identical tables, so which one wins does not matter.
         Some(
-            self.index
-                .get_or_init(|| Box::new(CharIndex::build(s, self.chars))),
+            self.aux()
+                .index
+                .get_or_init(|| CharIndex::build(s, self.chars)),
         )
     }
 
@@ -4520,6 +4548,22 @@ impl Heap {
         self.with_string_slot(id, |e| e.byte_to_char(b))
     }
 
+    /// The higher-layer table cached against string `id`, built by `build` on first use
+    /// and shared thereafter (including with the slot's GC copies). The heap does not
+    /// interpret it — see [`StrAux::scan`]; the caller downcasts to its own type. Callers
+    /// that key a cache by string *value* belong here rather than in a map keyed by
+    /// handle: a handle is only unique within a GC epoch, while this cell travels with
+    /// the bytes it describes.
+    pub fn str_scan_table(
+        &self,
+        id: StrId,
+        build: impl FnOnce(&str) -> Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Arc<dyn std::any::Any + Send + Sync> {
+        self.with_string_slot(id, |e| {
+            Arc::clone(e.aux().scan.get_or_init(|| build(e.as_str())))
+        })
+    }
+
     /// Resolve a string handle to its slab entry and hand it to `f`. The
     /// region dispatch the string-metric accessors share; separate from
     /// [`string`](Self::string) because these need the `LocalString` itself (its cached
@@ -5645,6 +5689,13 @@ mod char_index_tests {
     fn the_slot_stays_small() {
         let n = std::mem::size_of::<LocalString>();
         assert!(n <= 56, "LocalString grew to {} bytes", n);
+        // Both side tables share the one cell — a second cell would cost every string
+        // another word plus its `Once` state.
+        assert_eq!(
+            std::mem::size_of::<OnceLock<Box<StrAux>>>(),
+            16,
+            "the aux cell is one boxed pointer"
+        );
     }
 
     /// A `Shared` slot (a string past `SHARED_BLOB_THRESHOLD`, so exactly the long ones
