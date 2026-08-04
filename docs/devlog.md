@@ -15440,3 +15440,47 @@ amount of hammering `pfib` would have.
 Gate: 40/40 `tests/jit.rs` under GC_STRESS+GC_VERIFY, 946/946 Rust, 4350/4350 in-language with
 `BROOD_NO_PARTIAL_LEAF` both ways, 4 fuzz generators × 4 engine configs, `--no-default-features`
 clean.
+
+## 2026-08-04 (cont.) — `row-sum` native is a dead end (measured), and a benchmark for the mechanism
+
+Two follow-ups to ADR-210: the `mandelbrot` "next step" I had named, and the fact that the 2.4×
+sat on a shape nothing in the tree measured.
+
+**1. Forcing `row-sum` native does not help. Closing this as measured, not deferred.** I had
+recorded "getting `row-sum` onto the native path is the honest next step if `mandelbrot` is the
+goal". It isn't. Tracing the bail (three candidate sites instrumented: the subset pre-bail,
+`chunk_ops_all_native`, and the lowering itself) put it in none of them — `row-sum` is refused by
+the **call-mediated profitability gate** at the top of `jit_lower_arm`: `dbg_name` set, ≥1 non-tail
+call, no vector op, and a `Float` in the tier-time slot profile (`y0`). That gate exists because
+tiering exactly this shape once regressed `nbody` 15–20%.
+
+Partial splicing looked like a legitimate reason to revisit it: the gate's premise is that every op
+pays a box/unbox around a call, and splicing removes some of those calls. So I exempted arms
+carrying a derivation and A/B'd it on one binary (the switch-on-one-binary method, which is what I
+now reach for first):
+
+| row | gate on | arm forced native | floor | delta |
+|---|---|---|---|---|
+| `mandelbrot` | 191.7 ms | 193.0 ms | 0.3% | **+0.7%** |
+| `matmul` | 154.1 ms | 161.9 ms | 0.3% | **+5.1%** |
+
+`row-sum` *does* lower under the exemption — twice, small native plus the partially-spliced
+upgrade, exactly as designed — so the mechanism is fine. It is simply **not faster**. The gate's
+premise survives partial splicing intact, and the experiment was reverted.
+
+Worth writing down because it is easy to mistake for a bug: the gate is also *why* `row-sum`'s
+derivation sat unused. Two-stage tiering enqueues the inlined upgrade only after the **small**
+native installs, so an arm the gate refuses never reaches its own upgrade. A derivation that never
+lowers looks identical, from `BROOD_INLINE_DBG`, to one that does.
+
+So the `mandelbrot` lever is not an inlining or tiering change at all — it is removing the
+**boxing** (unboxed floats across call boundaries). Larger, and unstarted.
+
+**2. `scripts/fuzz/stress/leaf_splice.blsp`** — the mechanism now has a benchmark, in the same
+carries-its-own-control style as `receive_backlog` / `net_framed_scale`: ~220 ms against ~520 ms
+with `BROOD_NO_PARTIAL_LEAF=1` at N=2M, identical results both ways. Deliberately **not** added to
+`brood-benchmarks`: a leaf-splice microbenchmark is a Brood-internal JIT shape, not a
+cross-language capability question, and a brood-only row would distort the published aggregate for
+no gain. The header carries the trap this session cost me — *a derivation firing is not the arm
+lowering* — with both greps side by side (`leaf probe hot` for the derivation, `(hot)` in the
+`[jit-ir]` dump, which must appear **twice**), and says which one to check first.

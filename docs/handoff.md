@@ -78,8 +78,25 @@ space**, fixed with a resume arm (`ir::LeafInline::resume`).
 leaf inlining is JIT-only and the VM always runs the small body. A derivation firing in
 `BROOD_INLINE_DBG` proves only that it was derived; a bailed arm never reaches `[jit-ir]`.
 **Check `BROOD_JIT_DUMP_IR=1 … | grep '^\[jit-ir\] ====='` for the arm's name before assuming any
-inlining change can move it.** Getting `row-sum` onto the native path is a separate, unstarted
-question — and the honest next step if `mandelbrot` is the goal.
+inlining change can move it.**
+
+**And "get `row-sum` onto the native path" is NOT the mandelbrot lever — measured 2026-08-04,
+don't re-attempt it.** `row-sum` is refused by the **call-mediated profitability gate** in
+`jit_lower_arm` (`dbg_name` set · ≥1 non-tail call · no vector op · a `Float` in the slot
+profile), which exists because tiering that shape regressed `nbody` 15–20%. Partial splicing
+looked like a reason to revisit it — the gate assumes every op pays a box/unbox around a call,
+and splicing removes some of those calls — so the exemption was tried and measured on one binary:
+
+| row | gate on (default) | arm forced native | floor | delta |
+|---|---|---|---|---|
+| `mandelbrot` | 191.7 ms | 193.0 ms | 0.3% | **+0.7%** |
+| `matmul` | 154.1 ms | 161.9 ms | 0.3% | **+5.1%** |
+
+`row-sum` does lower with the exemption (twice — small native plus the partially-spliced
+upgrade), so the mechanism works; it simply **is not faster**. The gate's premise survives
+partial splicing intact. Making `mandelbrot` move needs the *boxing* removed — unboxed floats
+across call boundaries — which is a different and much larger piece of work, not an inlining
+tweak.
 
 Three more things a later reader should know, because two of them cost real time:
 
@@ -148,6 +165,9 @@ All in `scripts/fuzz/stress/`, each with a usage header:
 - **`scale_sweep.blsp`** — a `std/` op at N and 4N, ratio printed (linear ~4×, quadratic ~16×).
   **Read its header first**; it records which rows are cleared and why, including the one that
   was cleared *wrongly*.
+- **`leaf_splice.blsp`** — partial leaf splicing's benchmark (ADR-210); ~220 ms against ~520 ms
+  with `BROOD_NO_PARTIAL_LEAF=1`, i.e. ~2.4×. Its header carries the trap: a derivation firing
+  is not the same as the arm lowering, and the two must be checked separately.
 - **`receive_backlog.blsp`** — the receive-mark's benchmark; ~4 µs at any backlog.
 - **`net_framed_scale.blsp`** — framed reads; ns/chunk must be flat, carries its own controls.
 - **`tests/registry_test.blsp`** — carries its own control (a plain `def` rebind, asserted to

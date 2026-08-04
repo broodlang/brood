@@ -1475,8 +1475,13 @@ Runtime housekeeping (both items landed):
   row that motivated this — gets nothing: `row-sum` never lowers to native at all**, flag on
   or off, and leaf inlining is JIT-only (the VM runs the small body). Check
   `BROOD_JIT_DUMP_IR=1 … | grep '^\[jit-ir\] ====='` for an arm before assuming any inlining
-  change can move it. ⬜ Getting `row-sum` onto the native path is the real `mandelbrot`
-  lever and is unstarted.
+  change can move it. ✅ **And forcing `row-sum` native is NOT the lever** — measured
+  2026-08-04: it is refused by the call-mediated profitability gate (the one added because
+  tiering that shape regressed `nbody` 15–20%), and exempting it makes `mandelbrot` **+0.7%**
+  and `matmul` **+5.1%** against 0.3% floors. The arm does lower with the exemption, so the
+  mechanism works — it simply is not faster. ⬜ The real `mandelbrot` lever is removing the
+  **boxing** (unboxed floats across call boundaries), which is a much larger piece of work.
+  Benchmark for the mechanism itself: `scripts/fuzz/stress/leaf_splice.blsp`.
 - ⬜ **Layer-2 computed-goto dispatch** (`std::arch::asm!`, x86-64, `#[cfg]`-gated,
   pure-Rust fallback) — only if profiling still shows dispatch overhead. Additive.
 - ⬜ **Allocation / GC frontier — `bintree` + `nqueens`** (the two worst compute

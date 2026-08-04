@@ -1,0 +1,42 @@
+;; leaf_splice — partial leaf splicing's benchmark (ADR-210).
+;; N=<iterations> brood scripts/fuzz/stress/leaf_splice.blsp
+;; Run it twice and compare:
+;;   brood scripts/fuzz/stress/leaf_splice.blsp                         # ~220 ms at N=2M
+;;   BROOD_NO_PARTIAL_LEAF=1 brood scripts/fuzz/stress/leaf_splice.blsp  # ~520 ms
+;; Expect the mechanism to be worth ~2.4x. If that collapses to ~1x, partial splicing
+;; stopped applying to this shape — and the FIRST thing to check is not the derivation but
+;; whether the arm still lowers:
+;;   BROOD_INLINE_DBG=1 … | grep 'leaf probe hot'   # journalled=true — derivation happened
+;;   BROOD_JIT_DUMP_IR=1 … | grep '(hot)'           # must appear TWICE: small + spliced
+;; Those two are independent, and that is the trap this file exists to guard. A derivation
+;; can fire while the arm never lowers, in which case the splice is worth exactly nothing —
+;; that is precisely what `mandelbrot`'s `row-sum` does (it derives, and is then refused by
+;; the call-mediated profitability gate in `jit_lower_arm`), which is why the published
+;; suite shows no movement from this mechanism at all.
+;;
+;; The shape: a self-tail caller whose native lowers, carrying ONE spliceable leaf (`sq` —
+;; small, calls-free) beside ONE residual non-tail call (`rec` — recursive, so it can never
+;; be spliced). Before ADR-210 the residual call blocked the derivation entirely, so the
+;; tiny leaf stayed a real call too; now the leaf splices and the residual call survives
+;; behind the spliced layout's own deopt checkpoint.
+;;
+;; Keep `rec`'s work small: it is the control, not the payload. Making it expensive buries
+;; the thing being measured (the leaf's call protocol) under the residual call's own cost,
+;; which is how you accidentally measure nothing and conclude the mechanism is dead.
+
+(def n (let (e (getenv "N")) (if e (string->number e) 2000000)))
+
+;; spliceable: small, calls-free, non-capturing, fixed arity
+(defn sq (x) (* x x))
+
+;; NOT spliceable: self-recursive, so `leaf_body_qualifies` rejects it (its body holds a
+;; call). This is the residual non-tail call the derivation must now tolerate.
+(defn rec (k acc) (if (< k 1) acc (rec (- k 1) (+ acc 1))))
+
+(defn hot (i acc)
+  (if (>= i n) acc (hot (+ i 1) (+ acc (+ (sq i) (rec 2 0))))))
+
+(def t0 (now-ns))
+(def result (hot 0 0))
+(def ms (quot (- (now-ns) t0) 1000000))
+(println (str "n=" n " ms=" ms " result=" result))
