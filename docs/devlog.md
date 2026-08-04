@@ -15656,7 +15656,56 @@ chain-derivation test and the minimality test. 39/39 resolver + 40/40 version gr
 still 100%, `nest check` clean, formatted. Deferred now down to one algorithm-adjacent item: semver
 ranges over `:git` tags (the rest is registry plumbing).
 
-## 2026-08-04 (cont.) — markdown was quadratic in UTF-8 and linear in ASCII
+## 2026-08-04 (cont.) — resolver derivation: two polish items, one done and one measured away
+
+Two cosmetic follow-ups to the structured proof.
+
+**Trimmed "(any version)".** An unconstrained requirement rendered "your project requires foo (any
+version)"; the suffix is noise. `pg-explain-leaf` now appends a constraint suffix only when there
+IS a constraint (`resolver--constraint-suffix` returns "" for nil/""), so it reads "requires foo".
+Guarded by a test asserting the message contains "your project requires foo" and NOT "(any
+version)".
+
+**Line-numbering: measured, then declined.** Pub numbers incompatibilities because its derivation
+is a shared-node DAG; the open question was whether OUR by-value tree ever duplicates a sub-proof
+(a learned incompatibility reused as a satisfier cause at two steps would emit its lines twice).
+Rather than guess, I built a detector — 5000 random unsatisfiable universes over up to 8 packages ×
+6 versions, scanning each error for a repeated `Because`/`And because`/`Thus` line. **Zero
+duplicates**, deepest derivation ~8 lines. So the duplication line-numbering would fix does not
+occur — post-order over a by-value tree with inlined external leaves visits each derived node's
+line once and they come out distinct. Declined per ADR-011: adding numbering would be dead
+complexity for a case that doesn't arise. (The deep examples do show *repetitive consequence
+phrasing* — "the requirements on c and f and e and g and a cannot all hold" across a chain — but
+that is not duplication and not what numbering addresses; it is inherent to a deep accumulated
+conflict, and pub has it too.)
+
+## 2026-08-04 (cont.) — the registry is hive, not a git index: recording a shipped pivot (ADR-211)
+
+Scoping the "registry plumbing" the roadmap deferred, the interesting finding was that the code
+had outrun the ADR. ADR-147 decided the registry would be "**just a git repo** … **not a hosted
+service**"; what actually shipped is a **hosted HTTP/tarball service** (the sibling `hive` app),
+queried live per-resolve. Verified directly, not just from a survey: the client speaks
+`/api/v1/packages/:name/releases` + `POST /api/v1/publish` with a Bearer token
+(`std/tool/package.blsp`, default base `https://brood.fly.dev`), and hive has the matching routes +
+a Postgres `releases` table storing tarball bytes + a sha256 checksum. `hive` appears **nowhere**
+in `decisions.md` — the pivot landed without an ADR.
+
+Wrote **ADR-211** to record it: the two forces that pulled away from a git index (ADR-209's
+resolver needs a live "versions + deps" query a hosted `/releases` answers in one request; releases
+now store their own immutable tarball + checksum + download counts behind a token-authed publish),
+what's kept (the **mandatory sha256** is the supply-chain guarantee — hive is *not* trusted to
+serve the right bytes; no install scripts; the `:tarball` dep kind + `%untar-gz` unchanged), and
+what's genuinely lost (central infra to host/pay for — the git index's whole point; self-hosting
+keeps it from being a single point of *control*, not of *availability*).
+
+Corrected the record everywhere it was wrong: ADR-147's status + deferred list, the ROADMAP
+packaging bullet, and `docs/packages.md` (intro, the whole *registry* section, the command table,
+the stale *future-work* list). The **deferred list re-scoped**: semver ranges and tarball-backed
+entries are done; cloned-index TTL is moot (no clone exists — freshness is the lock + `_deps` cache);
+**signed packages** is now the one real supply-chain gap (sha256 = integrity, not authorship), plus
+**external tarball URLs** and an optional response cache remain. This ADR is the prerequisite for
+scoping those honestly — leaving ADR-147 describing a retired model made the first scoping attempt
+start from a false premise.
 
 Continued the sweep into `editor/markdown`, which I had triaged as low-risk ("21 `char-at`, but
 per-*line* so bounded"). That triage was right about the `char-at`s and wrong about the module:
@@ -15725,6 +15774,79 @@ That also sharpens the next lever from "substring is O(index)" to something meas
 is char→byte conversion for non-ASCII strings, and there are now two rows that move when it lands
 (`inc-scan` 16.85× → linear, `sexp motions` 9.80× → 5.48×) plus whatever `expect_string`'s
 remaining ~113 copy sites contribute.
+
+## 2026-08-04 (cont.) — external tarball URLs: a registry release that hive doesn't hold (ADR-211)
+
+Second of the re-scoped registry items. A release may now point at an EXTERNAL tarball
+(`:source_url` — a GitHub/S3/CDN asset) instead of hive storing the bytes. Two halves, both shipped;
+hive deployed to production and verified.
+
+**Security model, kept intact.** The sha256 checksum is still the guarantee, and it moves to the
+client entirely for an external release: the publishing client (`nest publish --source-url URL`)
+fetches the URL *once* to hash its bytes into `:checksum` (also proving it is reachable now), then
+POSTs metadata only. hive stores the URL + declared checksum, nil tarball, and — the point —
+**does not fetch the URL itself** (no SSRF surface, no publish-time latency). Every downloader
+re-verifies the bytes it pulls from `:source_url` before extraction, exactly as it already did for
+hosted bytes, so `registry--download-extract`'s mismatch guard is the real boundary either way. A
+dead URL therefore fails loudly at install, not at publish — the one fragility external hosting
+adds, and it is contained to the installing client.
+
+**Client (`std/tool/package.blsp`).** `registry--download-extract` branches on `:source_url`:
+present → `package--fetch-bytes` (the `:tarball` dep kind's http(s)+redirects+`file://` path,
+strip-1 for the wrapper-dir convention); absent → hive's `/tarball` (strip-0). `publish` became a
+plist (`:index`/`:source-url`) split into hosted/external paths sharing one POST helper;
+`nest publish --source-url` threads through a Rust plist call like `cmd_search`.
+
+**hive.** A nullable `source_url` column added by an explicit idempotent `ALTER TABLE … ADD COLUMN
+IF NOT EXISTS` in `ensure-constraints` (not trusting the schema migrator to alter an existing
+table); `tarball` was already nullable (the S3 path stores nil). Publish gained a URL-only shape
+that skips the byte size/gzip/checksum checks (there are no bytes) and skips the doc build (hive has
+no source to parse). `/tarball` 302-redirects to the source for a stray request.
+
+**Verification.** Client: an external release (metadata with `:source_url`, serving NO `/tarball`)
+is fetched from a `file://` wrapped tarball, sha-verified, strip-1 extracted; a wrong checksum is
+still refused; the publish envelope carries `:source_url`. 89/89 package + 948/948 full suite green.
+hive: `valid-source-url?` + the external-publish validation path (bad URL / missing checksum /
+auth-first), 20/20 registry + 8/8 api. Deployed (`fly deploy`); `/health` ok, and hatch's live
+release metadata now shows `"source_url": null` — the migration took and hosted releases are
+unaffected.
+
+## 2026-08-04 (cont.) — package signing: TOFU, advisory, ed25519 (ADR-212)
+
+The last supply-chain item. Integrity was sha256 (the bytes weren't tampered); this adds
+AUTHORSHIP (the *owner* produced them), closing the "a stolen publish token published under my
+name" gap. Shipped end-to-end across both repos + a production deploy.
+
+**The one new primitive.** `%ed25519-keygen` / `%ed25519-sign` / `%ed25519-verify` (crypto.rs,
+`ed25519-dalek` — the sibling of the `x25519-dalek` already vetted in for the handshake, so the
+"don't roll your own crypto" bar was already met). Raw bytes in/out like `%digest`; verify never
+errors (a bad/malformed signature is `false`, a predicate). Everything above it is Brood:
+`crypto/keypair|sign|verify`, then the package-manager policy.
+
+**TOFU, advisory (ADR-212).** `nest key gen` writes an ed25519 keypair (`spit-private`, 0600) and
+prints the public key. `nest publish` signs the release's **checksum** (its utf8 bytes — the
+checksum already binds the tarball, so this transitively signs the bytes cheaply) when a key is
+present, attaching `signature` + `pubkey` (hex) to the publish envelope. On install the client
+verifies the signature over the checksum and **pins the pubkey in the lock**; a later release
+signed by a *different* key WARNS (the pin is sticky — first-seen wins, it does not silently adopt
+the new key), an unverifiable signature warns, a dropped signature warns. It **never gates** — the
+type-checker stance (ADR-123). The registry only **relays** the signature+pubkey (nullable columns,
+another idempotent `ADD COLUMN` migration); hive is not a keyserver and never verifies, so it stays
+a dumb index/CDN and the guarantee degrades gracefully to "unsigned".
+
+**What I checked.** Rust/crypto round-trip (sign/verify/tamper/wrong-key/malformed, + a
+cross-process send). Client: a signed release verifies and pins the key in the lock; a bad
+signature warns but still installs (advisory — watched the WARNING fire in the suite); an unsigned
+release pins nothing; the publish envelope carries sig+pubkey only when signed. `nest key gen`
+writes 0600, refuses to overwrite without `--force`. hive: registry 20/20. Deployed
+(`fly deploy` — clean, no smoke-check warning this time); `/health` ok and hatch's live metadata
+now shows `signature: null, pubkey: null` (migration took, unsigned releases unaffected).
+
+One deliberate non-test: an end-to-end *signed publish* against production would pollute the real
+registry with a throwaway package + needs a token, so the round-trip is proven by the layered tests
+(client TOFU test drives a mocked signed release) + the live migration check, not a prod publish.
+
+Deferred now down to a single resolver-adjacent item: semver ranges over `:git` tags.
 
 ## 2026-08-04 (cont.) — the char→byte index: multi-byte string indexing goes O(1) (ADR-213)
 

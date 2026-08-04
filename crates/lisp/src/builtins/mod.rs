@@ -2970,6 +2970,29 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![int], bytes_ty),
         random_bytes,
     );
+    // ed25519 signing (ADR-212): the one new primitive for package signing. Raw bytes
+    // in/out; key storage, the publish/verify flow, and the TOFU pin are Brood policy.
+    def(
+        heap,
+        "%ed25519-keygen",
+        Arity::exact(0),
+        Sig::new(vec![], Ty::of(Tag::Vector)),
+        ed25519_keygen,
+    );
+    def(
+        heap,
+        "%ed25519-sign",
+        Arity::exact(2),
+        Sig::new(vec![any, any], bytes_ty),
+        ed25519_sign,
+    );
+    def(
+        heap,
+        "%ed25519-verify",
+        Arity::exact(3),
+        Sig::new(vec![any, any, any], Ty::of(Tag::Bool)),
+        ed25519_verify,
+    );
     def(
         heap,
         "%chacha20-encrypt",
@@ -3305,6 +3328,9 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("%os-cmd", &["prog", "&", "args"], "Run prog (with optional args list) capturing stdout/stderr; returns {:stdout s :stderr s :exit n}."),
     ("%halt", &["code"], "Terminate the process with exit code. Never returns."),
     ("%random-bytes", &["n"], "n cryptographically-strong random bytes as a bytes value."),
+    ("%ed25519-keygen", &[], "A fresh ed25519 keypair as a [public private] vector — public the 32-byte verifying key, private the 32-byte signing seed, both bytes values (ADR-212). The one key-generation primitive; storage + the publish/verify flow are Brood policy."),
+    ("%ed25519-sign", &["private-bytes", "message-bytes"], "The 64-byte ed25519 signature of message-bytes under the 32-byte private-bytes signing seed, as a bytes value. Errors only when the key is not 32 bytes."),
+    ("%ed25519-verify", &["public-bytes", "message-bytes", "signature-bytes"], "true when signature-bytes (64 bytes) is a valid ed25519 signature of message-bytes under the 32-byte public-bytes key, else false. Never errors — a malformed or bad signature is simply false."),
     ("%chacha20-encrypt", &["key-bytes", "nonce-bytes", "plaintext-bytes"], "Encrypt plaintext-bytes with ChaCha20-Poly1305 (AEAD). key-bytes must be 32 bytes; nonce-bytes must be 12 bytes. Returns ciphertext bytes (plaintext + 16-byte auth tag). NEVER reuse a (key, nonce) pair — use a fresh nonce per message (see crypto/random-nonce)."),
     ("%chacha20-decrypt", &["key-bytes", "nonce-bytes", "ciphertext-bytes"], "Decrypt ciphertext-bytes with ChaCha20-Poly1305. Returns plaintext bytes, or :error if authentication fails."),
     ("%pbkdf2-sha256-bytes", &["password-bytes", "salt-bytes", "iterations", "key-len"], "PBKDF2-HMAC-SHA256 key derivation over byte-sequence password and salt (raw bytes, not UTF-8 strings — a binary salt round-trips faithfully). Returns a key-len-byte bytes value. Use iterations >= 600000 for password storage."),

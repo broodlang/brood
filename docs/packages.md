@@ -28,15 +28,17 @@
 > - **v2 — done (2026-07-24, ADR-147):** **`:tarball` deps** — a `.tar.gz`
 >   artifact + a **mandatory `:sha256`**, downloaded (via `std/net`'s byte-faithful
 >   `http-get`, or read from a `file://` path), verified, and strip-extracted into
->   `_deps/` by the new `%untar-gz` primitive; and a **git-backed registry** — the
->   index is just a git repo of `packages/<name>.blsp` metadata (no hosted server,
->   keeping ADR-037's "no central infrastructure"). `nest publish` appends the
->   project's version entry; `nest search` greps the index; a `[name :version "^1.2"]`
->   dep names a **semver range**, resolved to a concrete published version by the
->   PubGrub resolver (ADR-209, added after v2). See *The registry (v2)* below.
+>   `_deps/` by the new `%untar-gz` primitive; and a **registry**. NOTE (ADR-211): the
+>   registry shipped as a **hosted HTTP/tarball service** (the **hive** app), *not* the
+>   git-backed index ADR-147 first sketched — a release stores an immutable, sha256-pinned
+>   tarball + dependency metadata behind a JSON API. `nest publish` POSTs a token-authed
+>   upload; `nest search` queries the API; a `[name :version "^1.2"]` dep names a **semver
+>   range**, resolved to a concrete published version by the PubGrub resolver (ADR-209).
+>   See *The registry* below.
 >
-> Still deferred by design (ADR-011): tarball sources *in* registry entries (registry
-> entries point to git today) and signed packages. See *Future work* below.
+> Still deferred by design (ADR-011, re-scoped by ADR-211): **signed packages** (integrity
+> is sha256; authorship signing is the open gap), **external tarball URLs** for a release,
+> and an optional registry response cache. See *Future work* below.
 >
 > Four decisions refined the original sketch when implementation began — they
 > are folded into the relevant sections below and summarised in ADR-037's
@@ -350,46 +352,57 @@ Each is a one-liner from the Rust shell into Brood policy:
 | `nest add <name> :tarball URL :sha256 HEX` | Tarball-dep variant of `add` (v2). |
 | `nest remove <name>`                     | Strip from `:dependencies`, drop `_deps/<name>/`, re-resolve the lock. |
 | `nest tree`                              | Print the resolved dep tree (root → direct → transitive). |
-| `nest publish [<index>]`                 | Append this project's version entry to the registry index (v2, ADR-147). |
-| `nest search <term> [<index>]`           | Search the registry index by name/description (v2, ADR-147). |
+| `nest publish [<base-url>]`              | Build a source tarball and POST it (token-authed) to the hosted registry; releases are immutable (ADR-147/211). |
+| `nest search <term> [<base-url>]`        | Search the registry by name/description via its JSON API (ADR-147/211). |
 | `nest test` / `run` / `check` / `format` / `mcp` | Auto-fetch missing deps on first run (a no-op on the second). |
 
 `nest fetch` is idempotent and side-effect-free when the cache is current.
 
-## The registry (v2, ADR-147)
+## The registry (ADR-147, superseded by ADR-211)
 
-The registry is deliberately **not** a hosted service — it is **a git repository of
-metadata**, keeping ADR-037's "no central infrastructure to host or pay for" while
-adding discovery and named/versioned resolution (the crates.io-index / Go-proxy
-model). Layout: one file per package, `packages/<name>.blsp`, holding a vector of
-published version entries (newest last):
+> **Shape change (ADR-211).** ADR-147 first specified a git-backed *index* (a git repo
+> of metadata, no hosted server). That is **not** what shipped. The registry is a
+> **hosted HTTP/tarball service** — the sibling **hive** app (Brood/Hatch/Postgres) —
+> because ADR-209's version resolver needs a live "what versions exist and what does
+> each require?" query, and because a release now stores its own immutable tarball. The
+> section below describes the hosted design as implemented.
 
-```lisp
-[{:version "1.0.0" :git "https://github.com/you/foo" :ref "v1.0.0" :description "…"}
- {:version "1.1.0" :git "https://github.com/you/foo" :ref "v1.1.0" :description "…"}]
-```
+The registry is a small JSON API. The base URL is the user config's `:registry`
+(`~/.config/brood/config.blsp`), default **`https://brood.fly.dev`**, overridable per
+command by passing a base URL (tests point it at a loopback server). A team can
+self-host hive and point `:registry` at it — the base URL is the only coupling.
 
-The index location is the user config's `:registry`
-(`~/.config/brood/config.blsp`), default `https://github.com/broodlang/registry`,
-overridable per command by passing an index path/URL. A **URL** index is cloned into
-`_deps/.registry-<hash>/`; a **local path** index is read (and, for `publish`,
-written) in place — the dev / self-hosted / offline path.
+A published **release** carries its own immutable **source tarball**, a mandatory
+**sha256 checksum**, and its dependency metadata (each dep a `[name range]`). The API:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET`  | `/api/v1/packages?q=<term>`               | search by name/description |
+| `GET`  | `/api/v1/packages/:name`                  | package show |
+| `GET`  | `/api/v1/packages/:name/releases`         | every release + its deps, in ONE request (the resolver's per-package query) |
+| `GET`  | `/api/v1/packages/:name/releases/:version`| one release's metadata (`:version`/`:checksum`/`:dependencies`) |
+| `GET`  | `/api/v1/packages/:name/releases/:version/tarball` | the source tarball bytes |
+| `POST` | `/api/v1/publish`                          | token-authed upload of a new release |
 
 - **`nest publish`** reads `:name`/`:version`/`:description`/`:repository` from
-  `project.blsp`, appends the entry to `packages/<name>.blsp` in a **local** index
-  checkout, and stops there — it does **not** auto-commit (you own the index repo:
-  review, commit, `git push`). A version already published is refused; publishing to
-  a URL is refused (clone it first).
-- **`nest search <term>`** greps every package's name and latest description.
-- **A `[name :version "^1.2"]` dep** names a **semver range** (ADR-209). The
-  PubGrub resolver asks the registry which versions exist and what each
-  release requires, picks the newest that satisfies every constraint across the
-  transitive closure, then downloads + sha-verifies + extracts it and locks the
-  concrete version. A fully-covering lock is reused network-free; a range nothing
-  satisfies is a loud conflict naming the package and every requirer.
+  `project.blsp`, builds a source tarball, computes its sha256, and **POSTs the bytes**
+  to `<registry>/api/v1/publish` with `Authorization: Bearer <token>` (from `$HIVE_TOKEN`
+  or the `:registry-token` config) and an `X-Brood-Publish` metadata header. **Releases
+  are immutable** — the server refuses a re-publish of an existing version.
+- **`nest search <term>`** GETs `/api/v1/packages?q=<term>`.
+- **A `[name :version "^1.2"]` dep** names a **semver range** (ADR-209). The PubGrub
+  resolver GETs each package's `/releases` (versions + deps in one request), picks the
+  newest that satisfies every constraint across the transitive closure, then downloads
+  the chosen release's tarball, **verifies its sha256 against the release's checksum**,
+  and extracts it into `_deps/<name>/`, locking the concrete version + checksum. A
+  fully-covering lock is reused network-free; a range nothing satisfies is a loud conflict
+  rendered as a structured derivation (ADR-209).
 
-To publish, a package sets two manifest fields: `:repository` (its git URL) and
-`:description`. The published `:ref` is `v<version>` by convention.
+The **sha256 verification is the supply-chain guarantee**: hive is not trusted to serve
+the right bytes — the client re-verifies against the checksum before anything is extracted
+or `require`d, so ADR-037's "no unverified code runs" property survives the hosted shape.
+Integrity is covered; *authorship* (cryptographic signing) is the one open gap — see
+ADR-211's corrected deferred list.
 
 ## Concurrent manifest edits are safe
 
@@ -521,10 +534,14 @@ out-of-scope for v1.
 
 ## Future work (explicitly deferred)
 
-- **Registry** — a brood-hex or brood-archive equivalent. Adds discovery
-  (`nest search`), human-readable names independent of URLs, and curated
-  metadata. None of this is needed before there are enough packages to
-  curate.
+> **Mostly shipped since this was written.** The registry (hosted, ADR-147/211), the
+> `:tarball` source kind (ADR-147), and the semver constraint solver (ADR-209) have all
+> landed — the comparison above and the first three items below are historical framing.
+> Genuinely open, re-scoped by ADR-211: **signed packages**, **external tarball URLs**,
+> and an optional **registry response cache**.
+
+- **Registry** — ✅ shipped as the hosted **hive** service (ADR-211): discovery
+  (`nest search`), human-readable names independent of URLs, and per-release metadata.
 - **Tarball / HTTP source kind** — `[name :tarball URL :sha256 HASH]`.
   The `%http-get` primitive lands now so the Rust kernel doesn't have to
   change later; the source-kind dispatch is gated until a real use case.

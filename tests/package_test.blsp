@@ -49,6 +49,8 @@
 ;; file:// URL keeps :tarball resolution offline, like pkg-git-init's for :git.
 (require 'hash)
 (require 'net/http)
+(require 'encoding)
+(require 'crypto)
 (defn pkg-tar-init (parent wrapper)
   (let (archive (path-join parent (str wrapper ".tar.gz")))
     (run-process "tar" (list "-czf" archive "-C" parent wrapper))
@@ -338,6 +340,50 @@
       (run-process "tar" (list "-czf" archive "-C" dep-dir "."))
       (let (bytes (slurp-bytes archive)) [bytes (hash/sha256-bytes bytes)]))))
 
+;; A handler whose release points at an EXTERNAL tarball (`source_url`): the metadata
+;; carries the URL + checksum and the registry serves NO `/tarball` (a 404 there proves
+;; the client fetched from the external URL, not from hive).
+(defn mock-registry-handler-external (nm version checksum source-url)
+  (fn (req)
+    (let (path (get req :path))
+      (if (= path (str "/api/v1/packages/" nm "/releases/" version))
+        (net/http/ok (str "{\"checksum\":\""
+                       checksum "\",\"version\":\"" version "\",\"source_url\":\"" source-url
+                       "\",\"dependencies\":[]}"))
+        (net/http/not-found)))))
+
+;; Build a WRAPPED tarball — files under a single `nm/` dir, the `tar czf pkg/` / GitHub
+;; layout an external source uses (extracted with strip 1). Returns [file-url sha256].
+(defn mock-package-tarball-wrapped (parent nm)
+  (let (dep-dir (path-join parent nm))
+    (pkg-write-project dep-dir nm nm "(defn greet (w) w)" "")
+    (let (archive (path-join parent (str nm "-wrapped.tar.gz")))
+      (run-process "tar" (list "-czf" archive "-C" parent nm))
+      [(str "file://" archive) (hash/sha256-bytes (slurp-bytes archive))])))
+
+;; A handler serving a SIGNED hosted release (ADR-212): its metadata carries `:signature` +
+;; `:pubkey` (hex) alongside the checksum, and the tarball at `/tarball`.
+(defn mock-registry-handler-signed (nm version checksum bytes signature pubkey)
+  (fn (req)
+    (let (path (get req :path)
+          release-path (str "/api/v1/packages/" nm "/releases/" version))
+      (cond
+        (= path (str release-path "/tarball"))
+          (net/http/response 200
+            {"Content-Type" "application/gzip"}
+            bytes)
+        (= path release-path)
+          (net/http/ok (str "{\"checksum\":\""
+                         checksum "\",\"version\":\"" version "\",\"signature\":\"" signature
+                         "\",\"pubkey\":\"" pubkey "\",\"dependencies\":[]}"))
+        else (net/http/not-found)))))
+
+;; A valid [signature-hex pubkey-hex] over `checksum` from a fresh keypair.
+(defn mock-sign (checksum)
+  (let (kp (crypto/keypair))
+    [(encoding/hex-encode-bytes (crypto/sign (get kp :private) (string->utf8-bytes checksum)))
+      (encoding/hex-encode-bytes (get kp :public))]))
+
 (describe "package: the hosted registry"
   (test "a :version dep downloads, sha256-verifies, and extracts the tarball"
     (let (parent (pkg-fixture-root)
@@ -359,6 +405,77 @@
           (assert= (vector-ref row 2) "1.0.0")
           (assert= (vector-ref row 3) :sha256)
           (assert= (vector-ref row 4) checksum)))))
+  (test "a release pointing at an external tarball URL is fetched, sha-verified, strip-1 extracted"
+    ;; the registry serves ONLY metadata (with :source_url); the bytes live at the external
+    ;; URL (a file:// wrapped tarball here) — proving hive need not hold the tarball
+    (let (parent (pkg-fixture-root)
+          app-dir (path-join parent "app")
+          [source-url checksum] (mock-package-tarball-wrapped parent "extdep")
+          base (mock-registry-start (mock-registry-handler-external "extdep"
+                                      "1.0.0" checksum source-url)))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (let (e (package/package--resolve-registry app-dir (dep-registry 'extdep "1.0.0") nil base))
+        (assert= (dep-kind e) :registry)
+        (assert= (get e :version) "1.0.0")
+        (assert= (get e :sha256) checksum)
+        (let (extracted (path-join (path-join app-dir "_deps") "extdep"))
+          (is (dir? extracted))
+          ;; strip-1 put the wrapped package's project.blsp at the package root
+          (is (file-exists? (path-join extracted "project.blsp")))))))
+  (test "an external-URL release still refuses a sha256 mismatch"
+    ;; the checksum is verified regardless of source — the registry is never trusted for bytes
+    (let (parent (pkg-fixture-root)
+          app-dir (path-join parent "app")
+          [source-url _real] (mock-package-tarball-wrapped parent "extbad")
+          base (mock-registry-start (mock-registry-handler-external "extbad"
+                                      "1.0.0" "deadbeef" source-url)))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (is (includes? (try
+                       (package/package--resolve-registry app-dir
+                         (dep-registry 'extbad "1.0.0")
+                         nil
+                         base)
+                       (catch e (error-message e)))
+            "sha256 mismatch"))))
+  (test "a signed release verifies and pins the signer's public key (TOFU, ADR-212)"
+    (let (parent (pkg-fixture-root)
+          app-dir (path-join parent "app")
+          [bytes checksum] (mock-package-tarball parent "signdep")
+          [signature pubkey] (mock-sign checksum)
+          base (mock-registry-start (mock-registry-handler-signed "signdep"
+                                      "1.0.0" checksum bytes signature pubkey)))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (let (e (package/package--resolve-registry app-dir (dep-registry 'signdep "1.0.0") nil base))
+        (assert= (dep-kind e) :registry)
+        ;; the verified signer's key is pinned on the entry and written into the lock row
+        ;; (both the :pubkey keyword and its value appear in the lock vector)
+        (assert= (get e :pubkey) pubkey)
+        (is (includes? (seq (dep-lock-vec e)) :pubkey))
+        (is (includes? (seq (dep-lock-vec e)) pubkey)))))
+  (test "signature checking is advisory — a bad signature warns but still installs"
+    (let (parent (pkg-fixture-root)
+          app-dir (path-join parent "app")
+          [bytes checksum] (mock-package-tarball parent "sigbad")
+          ;; a syntactically-valid but WRONG signature (a fresh key over the wrong message)
+          [_sig pubkey] (mock-sign checksum)
+          bad-sig (encoding/hex-encode-bytes (crypto/sign (get (crypto/keypair) :private)
+                                               (string->utf8-bytes "not the checksum")))
+          base (mock-registry-start (mock-registry-handler-signed "sigbad"
+                                      "1.0.0" checksum bytes bad-sig pubkey)))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      ;; resolves anyway (advisory never blocks), and the extraction lands
+      (let (e (package/package--resolve-registry app-dir (dep-registry 'sigbad "1.0.0") nil base))
+        (assert= (get e :version) "1.0.0")
+        (is (dir? (path-join (path-join app-dir "_deps") "sigbad"))))))
+  (test "an unsigned release pins no key and leaves the lock uncluttered"
+    (let (parent (pkg-fixture-root)
+          app-dir (path-join parent "app")
+          [bytes checksum] (mock-package-tarball parent "plaindep")
+          base (mock-registry-start (mock-registry-handler "plaindep" "1.0.0" "d" checksum bytes)))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (let (e (package/package--resolve-registry app-dir (dep-registry 'plaindep "1.0.0") nil base))
+        (assert= nil (get e :pubkey))
+        (is (not (includes? (seq (dep-lock-vec e)) :pubkey))))))
   (test "a sha256 mismatch is refused"
     (let (parent (pkg-fixture-root)
           app-dir (path-join parent "app")
@@ -403,7 +520,27 @@
         (assert= (get (first out) :version) "1.2.0"))))
   (test ":version deps parse into a registry dep map"
     (assert= (project/project-parse-deps [['foo :version "1.2.0"]])
-      (list (assoc (dep-registry 'foo "1.2.0") :optional false)))))
+      (list (assoc (dep-registry 'foo "1.2.0") :optional false))))
+  (test "an external publish's metadata envelope carries :source_url; a hosted one omits it"
+    (binding (*project-name* "foo"
+              *project-version* "1.0.0"
+              *project-description* ""
+              *project-dependencies* nil
+              *project-enhances* {})
+      (let (ext (encoding/base64-decode (package/registry--publish-metadata "abc"
+                                          "https://ex/f.tgz" nil nil)))
+        (is (includes? ext "\"source_url\":\"https://ex/f.tgz\""))
+        (is (includes? ext "\"checksum\":\"abc\"")))
+      (let (hosted (encoding/base64-decode (package/registry--publish-metadata "abc" nil nil nil)))
+        (is (not (includes? hosted "source_url"))))
+      ;; a signed publish carries :signature + :pubkey; an unsigned one omits both
+      (let (signed (encoding/base64-decode (package/registry--publish-metadata "abc"
+                                             nil "sighex" "pubhex")))
+        (is (includes? signed "\"signature\":\"sighex\""))
+        (is (includes? signed "\"pubkey\":\"pubhex\"")))
+      (let (unsigned (encoding/base64-decode (package/registry--publish-metadata "abc" nil nil nil)))
+        (is (not (includes? unsigned "signature")))
+        (is (not (includes? unsigned "pubkey")))))))
 
 ;; ---- version-range resolution (ADR-209) --------------------------------------
 ;; A `:version` dep now names a RANGE, resolved to a concrete version by the backtracking
