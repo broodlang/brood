@@ -23,9 +23,11 @@
 (a version against a `\">= 1.2\"`-, `\"^1.2\"`-, `\"~> 1.3\"`-, or `\">= 1.2, < 2.0\"`-style
 constraint). For repeated checks against one constraint, `version-compile` it once and
 match many versions with `version-match?` / `version-match-parts?` — that is the fast path
-the resolver runs. Comparison is on the numeric `MAJOR.MINOR.PATCH` core; any
-`-prerelease` / `+build` suffix is ignored (ordering pre-releases is deferred until
-something needs it). `(require 'version)`.")
+the resolver runs. Comparison is on the numeric `MAJOR.MINOR.PATCH` core, then on
+PRE-RELEASE precedence when the cores tie (`1.0.0-rc.1 < 1.0.0`; `version-prerelease` reads
+the identifiers). A plain range excludes pre-releases; one that names a pre-release admits
+them at that core (npm/Cargo rule). `+build` metadata never affects order or matching.
+`(require 'version)`.")
 
 ;; ---- parsing ------------------------------------------------------------------
 
@@ -57,10 +59,56 @@ CONSTRAINT is usually written short (`\">= 0.3\"`)."
 ;; ---- ordering -----------------------------------------------------------------
 
 (defn version-compare (a b)
-  "Compare two version STRINGS on their numeric core: -1, 0, or 1. Shorter is not
-smaller — `\"1.2\"` and `\"1.2.0\"` compare equal, because a constraint written
-`\">= 1.2\"` means 1.2.0, not 1.2.anything-above-nothing."
-  (version--compare-parts (version-core a) (version-core b)))
+  "Compare two version STRINGS: -1, 0, or 1. On the numeric core first (shorter is not
+smaller — `\"1.2\"` and `\"1.2.0\"` compare equal). When the cores tie, PRE-RELEASE precedence
+decides (semver §11): a pre-release is LESS than its release (`1.0.0-rc.1 < 1.0.0`), and two
+pre-releases compare identifier-by-identifier (numeric numerically and below alphanumeric;
+more identifiers outrank a prefix). `+build` metadata never affects order."
+  (let (c (version--compare-parts (version-core a) (version-core b)))
+    (if (= c 0)
+      (version--compare-prerelease (version-prerelease a) (version-prerelease b))
+      c)))
+
+(defn version-prerelease (v)
+  "The pre-release identifiers of version string `v` (`\"1.0.0-rc.1\"` → `(\"rc\" \"1\")`), or
+nil when there is none. Everything after the first `-` (and before any `+build`), split on
+`.`. A `+build` suffix is dropped first — build metadata is not part of precedence."
+  (let (no-build (first (string-split v "+"))
+        dash (index-of--str no-build "-"))
+    (if (nil? dash)
+      nil
+      (string-split (substring no-build (+ dash 1) (string-length no-build)) "."))))
+
+(defn index-of--str (s sub)
+  (let (i (index-of s sub)) (if (< i 0) nil i)))
+
+(defn version--compare-prerelease (a b)
+  ;; a, b are identifier lists or nil. A release (nil) outranks any pre-release.
+  (cond
+    (and (nil? a) (nil? b)) 0
+    (nil? a) 1
+    (nil? b) -1
+    else (version--compare-ids a b)))
+
+(defn version--compare-ids (a b)
+  ;; identifier-by-identifier; a longer list outranks a prefix of it (semver §11.4.4).
+  (cond
+    (and (empty? a) (empty? b)) 0
+    (empty? a) -1
+    (empty? b) 1
+    else (let (c (version--compare-id (first a) (first b)))
+           (if (= c 0) (version--compare-ids (rest a) (rest b)) c))))
+
+(defn version--compare-id (x y)
+  ;; numeric identifiers compare numerically and rank BELOW alphanumeric ones; two
+  ;; alphanumeric identifiers compare in ASCII order.
+  (let (nx (string->number x)
+        ny (string->number y))
+    (cond
+      (and nx ny) (cond (< nx ny) -1 (> nx ny) 1 else 0)
+      nx -1
+      ny 1
+      else (compare x y))))
 
 (defn version--compare-parts (a b)
   ;; Missing tail segments read as 0 (so 1.2 == 1.2.0), which is what makes a
@@ -169,11 +217,15 @@ everything (the \"no release yet\" placeholder a registry starts from)."
 ;; Parsing a constraint STRING (`">= 1.2, < 2.0"`) into terms is the expensive part of a
 ;; check — string-splitting, operator-finding, `->number`. A resolver checks one constraint
 ;; against many versions (and re-checks across backtracking), so it compiles once with
-;; `version-compile` and then matches versions cheaply with `version-match?` — pure integer
-;; part-list comparisons, no string work. `version-satisfies?` is the string-in convenience
-;; over the same machinery (compile, then match). A COMPILED constraint is a list of terms,
-;; each `[:lo-hi lo hi]` (a `^`/`~>` range, hi exclusive) or `[:cmp op wanted]`; nil = "no
-;; constraint", matched by anything.
+;; `version-compile` and then matches versions cheaply with `version-match?`. A COMPILED
+;; constraint is `{:terms [<term>…] :pre-cores [<core>…]}`; a <term> is a map
+;; `{:kind :cmp :op OP :core PARTS :pre PRE}` or `{:kind :lo-hi :lo PARTS :lo-pre PRE :hi PARTS}`
+;; (PARTS a `[maj min pat]` core, PRE the wanted's pre-release identifiers or nil). `:pre-cores`
+;; are the cores of terms that NAME a pre-release. nil compiled = no constraint, matches anything.
+;;
+;; PRE-RELEASE rule (npm/Cargo): a pre-release candidate is EXCLUDED unless some term names a
+;; pre-release at the same core — so `^1.0.0` skips `1.0.0-rc.1`, but `>= 1.0.0-rc` (or a bare
+;; `1.0.0-rc.1`) admits pre-releases at `1.0.0`. Release candidates match as before.
 
 (defn version-compile (constraint)
   "Compile a constraint STRING into a form `version-match?` checks quickly (see this
@@ -181,9 +233,11 @@ module's overview). nil / \"\" compile to nil (no constraint). Raises on a malfo
 the same as `version-satisfies?` — compiling is where a bad constraint is caught."
   (if (or (nil? constraint) (= (trim constraint) ""))
     nil
-    (map (fn (term) (version--compile-term term constraint))
-      (keep (fn (t) (let (tt (trim t)) (when (not (= tt "")) tt)))
-        (string-split constraint ",")))))
+    (let (terms (map (fn (term) (version--compile-term term constraint))
+                  (keep (fn (t) (let (tt (trim t)) (when (not (= tt "")) tt)))
+                    (string-split constraint ","))))
+      {:terms terms
+       :pre-cores (keep (fn (t) (get t :pre-core)) terms)})))
 
 (defn version--compile-term (term constraint)
   ;; `constraint` is the whole original string, carried only so an error names what the
@@ -191,32 +245,53 @@ the same as `version-satisfies?` — compiling is where a bad constraint is caug
   (let ([op wanted] (version--split-constraint term))
     (when (= (trim wanted) "")
       (error "version-satisfies?: no version in constraint " (pr-str constraint)))
-    (let (parts (version-core wanted))
+    (let (core (version-core wanted)
+          pre (version-prerelease wanted))
       (if (or (= op "^") (= op "~>"))
-        [:lo-hi parts (version--upper-bound parts (version--bump-index op parts))]
-        [:cmp op parts]))))
+        {:kind :lo-hi :lo core :lo-pre pre
+         :hi (version--upper-bound core (version--bump-index op core))
+         :pre-core (when pre core)}
+        {:kind :cmp :op op :core core :pre pre :pre-core (when pre core)}))))
 
 (defn version-match-parts? (compiled parsed)
   "Whether a version whose numeric core is `parsed` (from `version-core`) satisfies the
-`compiled` constraint. The hot path — every term is an integer part-list comparison."
-  (every? (fn (term) (version--match-term? term parsed)) (or compiled nil)))
+`compiled` constraint, treating it as a RELEASE (no pre-release). The integer-only hot path;
+for pre-release-aware matching use `version-match?`, which has the version string."
+  (if (nil? compiled)
+    true
+    (every? (fn (term) (version--match-term? term parsed nil)) (get compiled :terms))))
 
-(defn version--match-term? (term parsed)
-  (match term
-    ([:lo-hi lo hi] (and (>= (version--compare-parts parsed lo) 0)
-                      (< (version--compare-parts parsed hi) 0)))
-    ([:cmp op wanted] (let (c (version--compare-parts parsed wanted))
-                        (case op
-                          "=" (= c 0)
-                          ">" (> c 0)
-                          "<" (< c 0)
-                          ">=" (>= c 0)
-                          "<=" (<= c 0)
-                          (error "version-satisfies?: unknown operator " (pr-str op)))))))
+;; Compare a candidate `(core, pre)` against a term bound `(core, pre)` — core first, then
+;; pre-release precedence when the cores tie.
+(defn version--compare-cp (core-a pre-a core-b pre-b)
+  (let (c (version--compare-parts core-a core-b))
+    (if (= c 0) (version--compare-prerelease pre-a pre-b) c)))
+
+(defn version--match-term? (term core pre)
+  (case (get term :kind)
+    :lo-hi (and (>= (version--compare-cp core pre (get term :lo) (get term :lo-pre)) 0)
+             (< (version--compare-cp core pre (get term :hi) nil) 0))
+    :cmp (let (c (version--compare-cp core pre (get term :core) (get term :pre)))
+           (case (get term :op)
+             "=" (= c 0)
+             ">" (> c 0)
+             "<" (< c 0)
+             ">=" (>= c 0)
+             "<=" (<= c 0)
+             (error "version-satisfies?: unknown operator " (pr-str (get term :op)))))))
 
 (defn version-match? (compiled v)
-  "Whether version STRING `v` satisfies an already-`version-compile`d constraint."
-  (version-match-parts? compiled (version-core v)))
+  "Whether version STRING `v` satisfies an already-`version-compile`d constraint (pre-release
+aware — see the compile overview)."
+  (if (nil? compiled)
+    true
+    (let (core (version-core v)
+          pre (version-prerelease v))
+      (and
+        ;; a pre-release candidate is admissible only where a term names a pre-release at its core
+        (or (nil? pre)
+          (any? (fn (pc) (= (version--compare-parts pc core) 0)) (get compiled :pre-cores)))
+        (every? (fn (term) (version--match-term? term core pre)) (get compiled :terms))))))
 
 (defn version-satisfies? (v constraint)
   "Whether version string `v` satisfies `constraint`. A constraint is one term —

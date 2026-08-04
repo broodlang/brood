@@ -140,10 +140,10 @@
     (is (version-satisfies? "1.9.9" "~> 1"))
     (refute (version-satisfies? "2.0.0" "~> 1"))
     (refute (version-satisfies? "0.9.9" "~> 1")))
-  (test "a prerelease/build suffix on either side is ignored (core comparison)"
-    (is (version-satisfies? "1.2.3-rc.1" "^1.2.0"))
-    (is (version-satisfies? "1.5.0+build.9" "~> 1.2"))
-    (is (version-satisfies? "1.2.3" "^1.2.3-rc.1")))
+  (test "+build metadata is ignored; a plain range still excludes pre-releases"
+    (is (version-satisfies? "1.5.0+build.9" "~> 1.2"))     ; build metadata never affects matching
+    (refute (version-satisfies? "1.2.3-rc.1" "^1.2.0"))    ; ^1.2.0 names no pre-release → excludes rc
+    (is (version-satisfies? "1.2.3" "^1.2.3-rc.1")))       ; a RELEASE always matches (even a pre-naming range)
   (test "^ or ~> with no version after it raises, not a silent false"
     (is (includes? (try (version-satisfies? "1.0.0" "^") (catch e (error-message e)))
           "no version in constraint"))
@@ -152,6 +152,45 @@
   (test "a bare zero version means = 0.0.0"
     (is (version-satisfies? "0.0.0" "0"))
     (refute (version-satisfies? "0.0.1" "0"))))
+
+(describe "version: pre-release ordering (semver §11)"
+  (test "version-prerelease parses the identifiers"
+    (assert= (list "rc" "1") (version-prerelease "1.0.0-rc.1"))
+    (assert= (list "alpha") (version-prerelease "2.3.4-alpha"))
+    (assert= nil (version-prerelease "1.0.0"))
+    (assert= nil (version-prerelease "1.0.0+build.7"))          ; build metadata is not pre-release
+    (assert= (list "rc" "1") (version-prerelease "1.0.0-rc.1+build.7")))
+  (test "a pre-release is LESS than its release"
+    (assert= -1 (version-compare "1.0.0-rc.1" "1.0.0"))
+    (assert= 1 (version-compare "1.0.0" "1.0.0-rc.1")))
+  (test "pre-releases order identifier by identifier"
+    (assert= -1 (version-compare "1.0.0-rc.1" "1.0.0-rc.2"))
+    (assert= -1 (version-compare "1.0.0-alpha" "1.0.0-beta"))
+    (assert= -1 (version-compare "1.0.0-rc" "1.0.0-rc.0"))       ; fewer identifiers < more
+    (assert= -1 (version-compare "1.0.0-1" "1.0.0-alpha"))       ; numeric < alphanumeric
+    (assert= 0 (version-compare "1.0.0-rc.1" "1.0.0-rc.1")))
+  (test "the core still dominates the pre-release"
+    (assert= -1 (version-compare "1.0.0" "1.0.1-rc.1"))          ; 1.0.0 < 1.0.1-rc even though rc
+    (assert= 1 (version-compare "2.0.0-rc.1" "1.9.9"))))
+
+(describe "version-satisfies? — pre-release matching (npm/Cargo rule)"
+  (test "a plain range excludes pre-releases"
+    (refute (version-satisfies? "1.0.0-rc.1" "^1.0.0"))
+    (refute (version-satisfies? "1.0.0-rc.1" ">= 1.0.0"))
+    (refute (version-satisfies? "2.0.0-rc.1" "^1.0.0"))
+    (is (version-satisfies? "1.2.0" "^1.0.0")))                  ; releases unaffected
+  (test "a range that NAMES a pre-release admits pre-releases at that core"
+    (is (version-satisfies? "1.0.0-rc.2" ">= 1.0.0-rc"))
+    (is (version-satisfies? "1.0.0-rc.1" "^1.0.0-rc.1"))         ; caret on a pre-release
+    (is (version-satisfies? "1.0.0-rc.1" "= 1.0.0-rc.1"))
+    (refute (version-satisfies? "1.0.0-rc.1" "= 1.0.0-rc.2")))
+  (test "a pre-release at a DIFFERENT core is still excluded"
+    ;; >= 1.0.0-rc names a pre-release at 1.0.0, not at 1.5.0
+    (refute (version-satisfies? "1.5.0-rc.1" ">= 1.0.0-rc"))
+    (is (version-satisfies? "1.5.0" ">= 1.0.0-rc")))            ; the release is fine
+  (test "a release always satisfies a pre-release-naming range within bounds"
+    (is (version-satisfies? "1.0.0" "^1.0.0-rc.1"))
+    (is (version-satisfies? "1.0.0" ">= 1.0.0-rc.1"))))
 
 (describe "version-satisfies-all? / version-unsatisfied — the :enhances shape"
   (test "every named constraint met"

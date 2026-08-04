@@ -15402,3 +15402,28 @@ guards.** A retry is safe only for a test whose sole failure mode is a missed de
 project formatter. Re-verified after rebuilding **both** binaries, because `std/*.blsp` is
 embedded at build time and a stale `nest` would have been checking yesterday's bytes: 4350/4350
 in-language, 944/944 Rust, `nest check` clean.
+
+## 2026-08-04 — resolver: full multi-requirer derivations + pre-release ordering (ADR-209)
+
+Two of the deferred resolver refinements landed.
+
+**Multi-requirer derivations.** A conflict named only ONE requirer because failure fired the
+moment a single incompatibility was satisfied at level 0. It now keeps resolving until the
+incompatibility reduces to just the virtual-root term, so the failing one carries the whole
+cause tree; the renderer walks the DISTINCT leaves into "foo 1.0.0 requires shared ^1.0.0 AND
+baz 1.0.0 requires shared ^2.0.0", plus what each named package offers. The oracle fuzz (now
+3400+ universes over several seeds, still 100%) confirmed the changed failure condition kept
+soundness + completeness.
+
+**Pre-release ordering.** `std/version` parses/orders pre-releases (semver §11: `1.0.0-rc.1 <
+1.0.0-rc.2 < 1.0.0`; numeric identifiers below alphanumeric; `+build` ignored). Matching follows
+npm/Cargo: a plain range EXCLUDES pre-releases, one that NAMES a pre-release admits them at that
+core (`^1.0.0` skips `1.0.0-rc.1`; `>= 1.0.0-rc` / `= 1.0.0-rc.1` do not). The compiled form
+carries the pre-release-naming cores; the resolver sorts + filters through the pre-release-aware
+`version-compare` / `version-match?`, so it prefers a release over a newer pre-release and only
+picks a pre-release when asked. `version-match-parts?` stays the release-only integer fast path.
+
+Tests: +pre-release ordering/matching blocks in version_test (updated the one stale
+"suffix ignored" case), +resolver pre-release cases, strengthened the diamond test to assert
+BOTH requirers. 248 across resolver/version/package/project green; nest check clean. Deferred
+still: git-tag semver ranges, and minimizing the derivation (it lists every contributor).

@@ -1819,10 +1819,13 @@ Runtime housekeeping (both items landed):
   fully covers), and a `:brood "<constraint>"` runtime gate (checked at setup against
   the `(brood-version)` primitive), and a lock-**preference** seed so adding one dep keeps
   the rest pinned instead of re-solving the closure to newest. The solver is validated by
-  a generative oracle fuzz against brute-force enumeration (3400 random universes, 100%
-  agreement). ⬜ Remaining (ADR-011): tarball sources *inside* registry entries, signed
-  packages, cloned-index auto-refresh, semver ranges over `:git` tags, multi-requirer
-  derivation trees (a conflict names one requirer + availability today), pre-release ordering.
+  a generative oracle fuzz against brute-force enumeration (3400+ random universes, 100%
+  agreement). Conflicts render a **full multi-requirer derivation** (every contributing
+  requirement + what each package offers), and **pre-releases** are ordered and matched per
+  the npm/Cargo rule (a plain range excludes them; one that names a pre-release admits it).
+  ⬜ Remaining (ADR-011): tarball sources *inside* registry entries, signed packages,
+  cloned-index auto-refresh, semver ranges over `:git` tags, minimizing a conflict's
+  derivation (it lists every contributor today).
 - ⬜ **Single-binary bundling** (ADR-038) — `nest bundle` appends a zip of
   project + `_deps/` to a pre-built `brood`; deferred until the editor needs end-user
   distribution.
