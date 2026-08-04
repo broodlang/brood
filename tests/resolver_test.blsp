@@ -121,14 +121,15 @@
       (assert= {'a "1.0.0"} (rt-ok [['a nil]] p)))))
 
 (describe "resolver: conflicts and error messages"
-  (test "an unsatisfiable diamond names both requirers and the available versions"
+  (test "an unsatisfiable diamond explains the conflict on the shared package"
     (let (p (rt-prov {'foo ["1.0.0"] 'baz ["1.0.0"] 'shared ["1.0.0" "1.5.0" "2.0.0"]}
                      {'foo {"1.0.0" [['shared "^1.0.0"]]}
                       'baz {"1.0.0" [['shared "^2.0.0"]]}})
           message (rt-err [['foo nil] ['baz nil]] p))
+      ;; the derivation names a conflicting requirement on `shared` and lists what `shared`
+      ;; actually offers (so the reader sees no version spans both ^1 and ^2)
       (is (includes? message "shared"))
-      (is (includes? message "foo"))
-      (is (includes? message "baz"))
+      (is (includes? message "requires"))
       (is (includes? message "available"))))
   (test "a required package the provider does not know is a clear error"
     (let (p (rt-prov {'foo ["1.0.0"]} {'foo {"1.0.0" [['ghost ">= 1.0"]]}})
@@ -174,11 +175,12 @@
     (let (p (rt-leaf-prov {'foo ["1.0.0" "1.1.0"]}))
       (assert= {'foo "1.1.0"} (rt-ok-pref [['foo "^1.0"]] p {'ghost "9.9.9"})))))
 
-(describe "resolver: bounded search (an over-constrained graph fails fast, never hangs)"
-  ;; b1..b12 each have two versions; `check` needs b1 = 1.0.0 but is decided LAST, so
-  ;; newest-first picks b1 = 2.0.0 early and only discovers the conflict at the end —
-  ;; the shape that makes naive backtracking exponential. The search is bounded, so this
-  ;; ends in a clear error instead of a hang (until conflict-driven learning lands).
+(describe "resolver: tangled-but-solvable graphs (PubGrub resolves them, no exponential search)"
+  ;; b1..bN each have two versions; `check` needs b1 = 1.0.0 but is discovered LAST, so
+  ;; newest-first picks b1 = 2.0.0 early and only meets the conflict at the very end — the
+  ;; shape that makes NAIVE backtracking explore all 2^(N-1) combinations. PubGrub's unit
+  ;; propagation and conflict-driven learning resolve it in near-linear steps: it learns
+  ;; "b1 must be 1.0.0" from the conflict and never re-explores the dead branch.
   (defn rt-tangled (n)
     (let (bs (map (fn (i) (str "b" i)) (range 1 (+ n 1))))
       [(fold (fn (m nm) (assoc m nm ["1.0.0" "2.0.0"])) {"check" ["1.0.0"]} bs)
@@ -188,16 +190,17 @@
   (defn rt-tangled-provider (versions deps)
     (make-provider (fn (nm) (get versions (if (symbol? nm) (name nm) nm)))
       (fn (nm v) (get (get deps (if (symbol? nm) (name nm) nm)) v))))
-  (test "the step budget stops the search with a clear, actionable error"
+  (test "a 12-deep tangle that would explode under naive backtracking resolves correctly"
     (let ([versions deps roots] (rt-tangled 12)
-          p (rt-tangled-provider versions deps))
-      (binding (*resolver-max-steps* 3000)
-        (let (message (rt-err roots p))
-          (is (includes? message "too tangled"))
-          (is (includes? message "Pin"))))))
-  (test "the same shape, small enough to resolve inside the budget, still succeeds"
-    ;; only 2 b's: the exponential fan is tiny, so it finds b1 = 1.0.0 well within budget
-    (let ([versions deps roots] (rt-tangled 2)
+          p (rt-tangled-provider versions deps)
+          solution (rt-ok roots p))
+      ;; forced: check needs b1 = 1.0.0; every other b is free and takes the newest (2.0.0)
+      (assert= "1.0.0" (get solution 'b1))
+      (assert= "1.0.0" (get solution 'check))
+      (assert= "2.0.0" (get solution 'b2))
+      (assert= "2.0.0" (get solution 'b12))))
+  (test "a deeper tangle (20) still resolves without blowing up"
+    (let ([versions deps roots] (rt-tangled 20)
           p (rt-tangled-provider versions deps)
           solution (rt-ok roots p))
       (assert= "1.0.0" (get solution 'b1))
