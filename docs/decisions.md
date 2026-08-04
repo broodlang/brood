@@ -13786,15 +13786,23 @@ without recording an ADR — this one closes that gap:
 model and are now inaccurate. Re-stated against the hosted design:
 
 - ~~semver ranges~~ — **done** (ADR-209).
-- ~~tarball sources inside registry entries~~ — **done**: registry releases *are* tarballs. The
-  remaining sub-feature is an **external** tarball URL (a release pointing at a GitHub/S3/CDN asset
-  instead of hive holding the bytes), still checksum-pinned — a `:source_url` field, tracked
-  separately.
+- ~~tarball sources inside registry entries~~ — **done**: registry releases *are* tarballs, and a
+  release may now point at an **external** tarball (a `:source_url` — a GitHub/S3/CDN asset) instead
+  of hive holding the bytes (2026-08-04). Still checksum-pinned: the publishing client fetches the
+  URL once to hash its bytes into `:checksum`, and every downloader re-verifies it, so hive is never
+  trusted for an external release's bytes. hive stores the URL + checksum (nil tarball), the
+  client's `registry--download-extract` fetches from `:source_url` when present (strip-1) else from
+  `/tarball` (strip-0), `nest publish --source-url URL` creates such a release, and `/tarball`
+  302-redirects to the source for a stray request. hive does NOT fetch the URL at publish (no SSRF
+  surface); a dead URL fails loudly at install, not at publish.
 - ~~auto-refresh/TTL for the *cloned index*~~ — **not applicable**: there is no local clone. The
   registry is fetched live each resolve, and freshness is governed by the lock fast-path
   (`package--lock-covers-reqs?`) + the `_deps/` extraction cache, so nothing goes stale by
-  construction. An optional client-side **HTTP-response TTL cache** (fewer network hits on repeated
-  `nest search`/resolve) is a speed nicety, not a correctness need.
+  construction. A client-side **HTTP-response TTL cache** was considered and **declined** (2026-08-04):
+  the prefetch (`package--prefetch-registry`) already fetches each package's `/releases` exactly once
+  per resolve, so there is no within-run duplication to cache; a *cross-run* cache would only trade
+  resolve freshness (a newly-published version unseen until the TTL expired) for a few GETs the lock
+  fast-path already avoids. Not worth the staleness hazard.
 - **signed packages** — still open, and now the *only* genuine supply-chain gap: integrity is
   sha256 (tamper-in-transit) but not authorship. It needs public-key signing (a new Rust primitive)
   and a trust model; its own ADR precedes any code.
