@@ -13572,9 +13572,28 @@ budget stays only as a safety net, never approached on a well-formed graph.
   is incremental** (no O(n) scan per decision). A 300-package solve lands ~1.7 s (vs a solver
   that would otherwise go quadratic and blow the time budget). Newest-compatible selection and
   lock-`preferred` stability are unchanged.
-- *Deferred.* Multi-requirer derivation trees (today a conflict names one requirer + the
-  package's availability, not every contributor) and pre-release ordering remain future
-  refinements.
+- *Deferred.* Semver ranges over `:git` tags; a conflict's derivation is not yet minimized
+  (it lists every contributing requirement, which for a deep graph can be long).
+
+**Fifth refinement (2026-08-04): full derivations + pre-release ordering.** Two of the
+deferred items landed.
+
+- *Multi-requirer derivations.* The failure previously fired the moment a single
+  incompatibility was satisfied at level 0, so it named one requirer. It now keeps resolving
+  until the incompatibility reduces to just the (virtual) root term, so the FAILING one carries
+  the whole cause tree; the renderer walks that tree into the distinct requirements —
+  "foo 1.0.0 requires shared ^1.0.0" AND "baz 1.0.0 requires shared ^2.0.0" — plus what each
+  named package offers. The oracle fuzz (now 3400+ universes across several seeds) confirmed the
+  changed failure condition kept soundness and completeness.
+- *Pre-release ordering.* `std/version` now parses and orders pre-releases (semver §11:
+  `1.0.0-rc.1 < 1.0.0-rc.2 < 1.0.0`, numeric identifiers below alphanumeric, `+build` metadata
+  ignored). Matching follows the npm/Cargo rule: a plain range EXCLUDES pre-releases, while a
+  range that NAMES a pre-release admits them at that core (`^1.0.0` skips `1.0.0-rc.1`, but
+  `>= 1.0.0-rc` and `= 1.0.0-rc.1` do not). The compiled constraint carries the cores at which a
+  pre-release is named; the resolver's version sort and candidate filter go through the
+  pre-release-aware `version-compare` / `version-match?`, so it prefers a release over a
+  newer pre-release and only picks a pre-release when a range asks for one.
+
 ## ADR-210 — Partial leaf splicing: the inlined engine gets its own checkpoint and resume arm
 
 **Status:** implemented (2026-08-03), **default ON**; `BROOD_NO_PARTIAL_LEAF=1` reverts to
