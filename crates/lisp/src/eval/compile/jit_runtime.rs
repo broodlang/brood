@@ -794,23 +794,11 @@ pub(crate) fn jit_run_fast_link(
                 }
                 // Deopt-resume (see `CompiledArm::ckpt_slot`): resume AT the
                 // checkpoint, frame intact — never re-running its side effects.
-                // Guard nslots: the IC could have re-resolved to a different arm
-                // than the one whose native ran; a mismatched frame shape can't
-                // be resumed and takes the legacy re-run instead.
-                //
-                // KI-26: `active_nslots()` re-reads `inline_installed`, which is the
-                // anti-pattern behind two ADR-210 bugs — and unlike the swap in `jit_tier`,
-                // this one deliberately does NOT bump the global epoch (see the comment
-                // there: a bump cascaded under `pfib`). So a peer process sharing this arm
-                // can hold a fast link whose recorded `nslots` predates the inline swap, the
-                // guard then declines, and the fallthrough re-runs from ip 0 — repeating a
-                // journaled effect. The flag-free form of the same shape check would be
-                // `nslots == arm.nslots || nslots == arm.inline_nslots`. NOT changed here
-                // because it is unproven: a purpose-built detector (fire when the guard
-                // declines while a journal is live) stayed silent across the 4350-test suite,
-                // `pfib`, and a 24-process shared-effectful-arm race with exact effect
-                // counts. See `docs/known-issues.md` KI-26 for the detector recipe.
-                if outcome == 1 && arm.active_nslots() == nslots {
+                // The shape check exists because the IC could have re-resolved to a
+                // different arm than the one whose native ran; a mismatched frame can't be
+                // resumed and takes the legacy re-run instead. It must be **flag-free** —
+                // see [`jit_frame_shape_matches`] (KI-26).
+                if outcome == 1 && jit_frame_shape_matches(&arm, nslots) {
                     if let Some((resume, rip, depth)) = jit_ckpt_resume(heap, &arm, base, nslots) {
                         return match jit_native_reenter(heap, native_depth, |h| {
                             vm_resume_deopt(h, resume, base, cenv, rip, depth)
@@ -1456,6 +1444,30 @@ pub(crate) fn jit_dispatch_tail(
 /// occasional deopts never reaches 16 consecutive and keeps its native code.
 /// `BAILED` is sticky until the next epoch invalidation, which resets the
 /// counter so the recompiled arm gets a fresh trial.
+/// Could the frame of size `frame_nslots` at this call site belong to `arm`? A deopt may only
+/// be resumed when it can: the inline cache might have re-resolved the site to a *different*
+/// arm than the one whose native actually ran, and reading a foreign arm's `ckpt_slot` out of
+/// this frame yields a garbage resume ip (or an out-of-bounds root read).
+///
+/// **Deliberately flag-free** (KI-26). The obvious spelling is `arm.active_nslots() ==
+/// frame_nslots`, but `active_nslots()` re-reads `inline_installed` — the anti-pattern behind
+/// two ADR-210 bugs — and the inline swap in [`jit_tier`] deliberately does *not* bump the
+/// global epoch (a bump cascaded under `pfib`; see the comment at the swap) and invalidates
+/// only the installing process's fast links. A `share_key` arm is shared across processes, so
+/// a peer can hold a link whose recorded `frame_nslots` predates the swap while the flag now
+/// reads true. The flag form then declines, and the caller's fallthrough re-runs the arm from
+/// ip 0 — repeating whatever effect the native had already journaled.
+///
+/// Testing both of the arm's possible frame sizes is a strict superset of the flag form
+/// (`active_nslots()` returns exactly one of them), so this only ever *admits* more resumes —
+/// and resuming is the effect-preserving direction. Every admitted resume is still validated
+/// by [`jit_ckpt_resume`], which requires a positive journal and reads only in-bounds slots.
+/// A genuinely foreign arm still fails, which is the out-of-bounds protection this exists for.
+#[cfg(feature = "jit")]
+pub(crate) fn jit_frame_shape_matches(arm: &CompiledArm, frame_nslots: usize) -> bool {
+    frame_nslots == arm.nslots || frame_nslots == arm.inline_nslots
+}
+
 /// Deopt-resume checkpoint (see `CompiledArm::ckpt_slot`): decode the live frame's
 /// journal — `Some((resume_arm, resume_ip, operand_depth))` when a completed non-tail
 /// call (or `table-put`) checkpointed this activation, meaning the VM must resume THERE
