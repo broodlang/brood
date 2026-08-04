@@ -329,7 +329,9 @@ all). NONE never matches — a version constraint is about a selected version."
       (or (get satisfier :dec) (< previous-level (get satisfier :level)))
         [:backjump (pg-backtrack state previous-level) ic]
       else
-        (pg-conflict-resolution state ctx ics
+        (pg-conflict-resolution state
+          ctx
+          ics
           (pg-resolvent ctx ic (get satisfier :cause) (get satisfier :pkg) (get satisfier :set))))))
 
 ;; The earliest assignment (index into oldest-first `chrono`) after which `ic` is satisfied.
@@ -530,18 +532,24 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
           more (rest stack))
       (match cause
         ;; push the left cause on top so its leaves are visited before the right's.
-        ([:derived a b] (pg-cause-leaves--loop
-                          (cons (get a :cause) (cons (get b :cause) more)) acc))
+        ([:derived a b] (pg-cause-leaves--loop (cons (get a :cause) (cons (get b :cause) more))
+                          acc))
         (leaf (pg-cause-leaves--loop more
                 (if (includes? acc leaf) acc (append acc (list leaf)))))))))
 
 (defn pg-explain-leaf (leaf)
   (match leaf
-    ([:root pkg constraint]
-      (str "your project requires " (name pkg) " " (resolver--constraint-str constraint)))
-    ([:dep pkg version dep-name dep-constraint]
-      (str (name pkg) " " version " requires " (name dep-name) " "
-        (resolver--constraint-str dep-constraint)))))
+    ([:root pkg constraint] (str "your project requires "
+                              (name pkg)
+                              " "
+                              (resolver--constraint-str constraint)))
+    ([:dep pkg version dep-name dep-constraint] (str (name pkg)
+                                                  " "
+                                                  version
+                                                  " requires "
+                                                  (name dep-name)
+                                                  " "
+                                                  (resolver--constraint-str dep-constraint)))))
 
 (defn pg-leaf-packages (leaf)
   (match leaf
