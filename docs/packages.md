@@ -33,7 +33,7 @@
 >   keeping ADR-037's "no central infrastructure"). `nest publish` appends the
 >   project's version entry; `nest search` greps the index; a `[name :version "^1.2"]`
 >   dep names a **semver range**, resolved to a concrete published version by the
->   backtracking resolver (ADR-209, added after v2). See *The registry (v2)* below.
+>   PubGrub resolver (ADR-209, added after v2). See *The registry (v2)* below.
 >
 > Still deferred by design (ADR-011): tarball sources *in* registry entries (registry
 > entries point to git today) and signed packages. See *Future work* below.
@@ -118,7 +118,7 @@ Four source kinds:
 | `:git`     | `[name :git URL :ref REF]`               | `REF` is a tag or commit. Branches are accepted but advisory — `:ref "main"` re-resolves on every `nest update`. |
 | `:path`    | `[name :path PATH]`                      | Filesystem path, relative to the manifest. Local dev/mirror; SHA-256'd at fetch time. |
 | `:tarball` | `[name :tarball URL :sha256 HEX]`        | A `.tar.gz` artifact (http/https, or `file://` for a local/offline one). `:sha256` is **mandatory** — the integrity pin standing in for git's commit; a mismatch is a loud error. Extracted into `_deps/<name>/`, stripping the single wrapper directory. (v2, ADR-147.) |
-| `:version` | `[name :version "^1.2"]`                 | A **registry** dep naming a **semver range** (`^1.2`, `~> 1.3`, `>= 1.2, < 2.0`, `= 1.2.3`, or a bare `1.2.3` = exact). The backtracking resolver picks the newest published version satisfying it (and every transitive range), downloads + sha-verifies + extracts it, and locks the concrete version. (Ranges: ADR-209; registry: v2, ADR-147.) |
+| `:version` | `[name :version "^1.2"]`                 | A **registry** dep naming a **semver range** (`^1.2`, `~> 1.3`, `>= 1.2, < 2.0`, `= 1.2.3`, or a bare `1.2.3` = exact). The PubGrub resolver picks the newest published version satisfying it (and every transitive range), downloads + sha-verifies + extracts it, and locks the concrete version. (Ranges: ADR-209; registry: v2, ADR-147.) |
 
 `name` is the **local symbol** the dep will be available as inside
 `(require …)`. It need not match the package's own `:name` — the manifest
@@ -382,7 +382,7 @@ written) in place — the dev / self-hosted / offline path.
   a URL is refused (clone it first).
 - **`nest search <term>`** greps every package's name and latest description.
 - **A `[name :version "^1.2"]` dep** names a **semver range** (ADR-209). The
-  backtracking resolver asks the registry which versions exist and what each
+  PubGrub resolver asks the registry which versions exist and what each
   release requires, picks the newest that satisfies every constraint across the
   transitive closure, then downloads + sha-verifies + extracts it and locks the
   concrete version. A fully-covering lock is reused network-free; a range nothing
@@ -530,7 +530,7 @@ out-of-scope for v1.
   change later; the source-kind dispatch is gated until a real use case.
 - **Semver + constraint solver** — ✅ shipped for registry deps (ADR-209):
   `[name :version "^1.2"]` names a range, resolved to a concrete published
-  version by a backtracking, newest-compatible solver (`std/resolver.blsp`)
+  version by a PubGrub (CDCL) newest-compatible solver (`std/resolver.blsp`)
   that prefers the locked versions (adding one dep keeps the rest pinned). A
   `:brood "<constraint>"` gate refuses an incompatible runtime. Still open:
   semver ranges over `:git` tags (registry-only for now), and PubGrub-grade
