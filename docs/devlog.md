@@ -15555,3 +15555,48 @@ either. It is spread thin across the ~25–30 blocks a process owns, no single o
 of allocations per process, not their sizes — consolidate several of a process's blocks into one
 arena. Note that (a) failed by moving that number the wrong way, so any such attempt has to carry
 the `spawn`/`spawn-live` pair alongside the floor from the first measurement, not at the end.
+
+## 2026-08-04 (cont.) — std/ sweep: one confirmed quadratic, and the grep is not the evidence
+
+Picked up handoff §3 item 3. The method it records — grep for the shape, then confirm on three
+points — worked, but the informative part was how often the shape was present and the quadratic
+was not.
+
+**Found: a sequence of `std/tool/sexp` structural motions over one buffer is O(n²).** Three rising
+points, the signature `scale_sweep.blsp`'s header asks for: ASCII **5.68× then 9.40×**, and with a
+single non-ASCII character **8.84× then 12.30×**. At 6400 forms (~530 KB) the walk takes **9.9 s**,
+~1.55 ms per motion, and per-motion cost grows with buffer size — ~15 ms per keypress on a 60k-line
+file. Added as the `sexp motions` row.
+
+The cause is by design and documented at the primitive: each motion calls `sexp/narrow`, which
+calls the native `scan-form-start` **twice**, and that is a forward lexical pass from offset 0
+because a backward scan cannot know whether a bracket sits inside a string. What is misleading is
+`narrow`'s own docstring — "at a cost of ~three forms, not the whole buffer" — which is true of the
+CST work it wraps and false of *finding* the window, which is the whole cost. A docstring that
+describes the intent of a bound rather than its achievement is worse than none.
+
+**Fixed the constant, not the asymptote, and I want that distinction on the record.**
+`scan_form_start` took `expect_string` — an owned `String`, i.e. a copy of the entire buffer per
+call, exactly the seam the handoff said to convert once a workload justified it — and then
+`chars().collect()`'d the *whole* text, including everything past `pos` that it can never read.
+Now `expect_string_ref` + `take(pos + 1)`; identical semantics, because the outer loop stops at
+`i > pos` and the only thing reading past `pos` is the string-skip inner loop, which cannot touch
+`best`. Worth **−18% ASCII**, −3% multi-byte: real, and much less than I expected, which is itself
+the finding — the O(pos) scan dominates, not the allocation. The asymptote wants cached lexer state
+(nowhere to put it in a pure `(text point) -> point` API) or a bounded safe-restart, so it is left
+as a design decision rather than half-done.
+
+**Two clearings worth more than the find, because they stop the next person re-greping:**
+
+- **`highlight-spans` is linear even on multi-byte** — 16× input for 14.6× time, and the multi-byte
+  ratio *falls* (4.49 → 3.42). It has the same `char-at`-over-whole-text shape as `sexp`, on the
+  same kind of input, and it is fine. **The shape is a filter, not evidence.** I went in expecting
+  one non-ASCII character to flip it quadratic and it simply doesn't.
+- **Every remaining `(append acc …)` fold in the unswept modules is quadratic in a small N** —
+  source directories, the tokens of one whitespace fragment, files in a one-shot report. The one
+  with genuinely large N, `test--all-tests` (O(units × tests)), runs only for explicit `FILE:LINE`
+  selectors. Shape present, workload absent; triaged by *reachability* rather than measured, which
+  is the cheaper filter and should come first.
+
+`std/net/http` needed nothing — its comments already record the old `(str acc …)` being fixed, and
+it searches bytes with `bytes-index-of` rather than char indices.

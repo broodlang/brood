@@ -29,6 +29,18 @@
 ;; Rows measured linear on 2026-07-30: proc/agent update, buffer insert,
 ;; buffer forward-line. proc/gen gen-call is unresolved, per the above.
 ;;
+;; 2026-08-04: `sexp motions` is a CONFIRMED quadratic and is NOT fixed — three rising
+;; points, ASCII 5.68x then 9.40x, one-non-ASCII 8.84x then 12.30x. Each motion calls
+;; `narrow` -> `scan-form-start` twice, which is O(point) by design. A constant-factor fix
+;; landed (the native no longer copies the whole buffer nor over-allocates past `pos`:
+;; -18% ASCII); the asymptote needs cached lexer state or a bounded safe-restart. Measure
+;; the SEQUENCE — one motion looks fine at any buffer size.
+;;
+;; 2026-08-04, cleared: `editor/highlight` highlight-spans is LINEAR even on multi-byte
+;; (16x input for 14.6x time; the multi-byte ratio FALLS 4.49 -> 3.42). The
+;; char-at-over-whole-text shape is present there and is not quadratic, so that shape by
+;; itself is not evidence — measure before believing a grep.
+;;
 ;; 2026-08-02: `template render` WAS a confirmed quadratic — 12.0x then 13.4x across
 ;; three points, holding and growing, which is the signature the caveat above asks for.
 ;; Fixed (one native split + one join); now 5.0x / 4.80x, and 318 ms -> 24 ms at N=3200.
@@ -81,7 +93,8 @@
 (defmodule scale-sweep
   (:use proc/agent :only [start update stop])
   (:use proc/gen :only [defprocess spawn-server gen-call])
-  (:use editor/buffer))
+  (:use editor/buffer)
+  (:use sexp :only [point-forward]))
 (require 'template)
 (require 'format)
 (require 'ansi)
@@ -203,6 +216,23 @@
 ;; ---- run -------------------------------------------------------------------
 
 (println "std/ scale sweep — linear ~4x, quadratic ~16x")
+(def sweep--src-line
+  "(defn compute-thing (alpha beta) (if (< alpha beta) (+ alpha 1) (str \"x\" beta)))\n")
+(defn sweep--src (k acc) (if (= k 0) acc (sweep--src (- k 1) (cons sweep--src-line acc))))
+;; A SEQUENCE of structural motions across one buffer — the editor's repeated
+;; `forward-sexp`, not one motion. Each motion calls `sexp/narrow`, which calls the native
+;; `scan-form-start` TWICE, and that is a forward lexical pass from offset 0 by design (a
+;; backward scan cannot know whether a bracket sits inside a string). So per motion is
+;; O(point) and the sequence is O(n^2). Confirmed 2026-08-04 on three rising points:
+;; ASCII 5.68x then 9.40x; with ONE non-ASCII char 8.84x then 12.30x. Not fixed — the
+;; asymptote needs cached lexer state or a bounded safe-restart, which the pure
+;; `(text point) -> point` API forecloses. See docs/handoff.md.
+(defn sexp-motions (k)
+  (let (text (join "" (sweep--src k nil)))
+    (fold (fn (p _) (let (np (point-forward text p)) (if (or (nil? np) (= np p)) p np)))
+      0
+      (range 0 k))))
+
 (row "proc/agent  update  " n agent-updates)
 (row "proc/gen    gen-call" n gen-calls)
 (row "buffer      insert  " n buffer-inserts)
@@ -213,3 +243,4 @@
 (row "stream      lines-1c" n stream-lines-1chunk)
 (row "string      last-idx" n last-idx)
 (row "string      inc-scan" n inc-scan) ; known-quadratic, see header
+(row "sexp        motions " n sexp-motions) ; CONFIRMED quadratic, unfixed — see header

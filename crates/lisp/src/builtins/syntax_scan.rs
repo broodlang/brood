@@ -1,7 +1,7 @@
 // Editor syntax-scanning / span / highlight / clipboard builtins — extracted from
 // sequences.rs (these are editor tooling, not string ops).
 #![allow(unused_imports)]
-use super::numeric::{arg, expect_int, expect_string};
+use super::numeric::{arg, expect_int, expect_string, expect_string_ref};
 use super::sequences::*;
 use super::*;
 use crate::core::heap::Heap;
@@ -106,9 +106,22 @@ pub(super) fn scan_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// motion all sit on it), trivial here. Strings honour `\\` escapes; a comment runs to
 /// end-of-line — the same lexical rules as `scan-tokens`.
 pub(super) fn scan_form_start(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "scan-form-start", arg(args, 0))?;
     let pos = expect_int(heap, "scan-form-start", arg(args, 1))?;
-    let chars: Vec<char> = s.chars().collect();
+    // Two whole-text costs used to sit here, and on this call site they matter more than the
+    // O(pos) scan the doc above already owns: `expect_string` returns an OWNED String (a copy
+    // of the entire buffer per call — the seam `expect_string_ref` exists to close), and
+    // `chars().collect()` then materialised a `Vec<char>` of the *whole* text, 4 bytes a char,
+    // including everything after `pos` that this function can never look at.
+    //
+    // Borrowing fixes the first. `take(pos + 1)` fixes the second and is semantically
+    // identical, not merely close: the outer loop already stops at `i > pos`, and the only
+    // thing that reads past `pos` is the string-skipping inner loop, which cannot touch
+    // `best` — it only decides where `i` lands, and either way `i` ends up `> pos` and the
+    // loop exits. So truncating the char vector at `pos + 1` changes no result, and turns the
+    // allocation from O(text) into O(pos). That is the difference between a motion near the
+    // top of a large file paying for the whole file and paying for what precedes it.
+    let s = expect_string_ref(heap, "scan-form-start", arg(args, 0))?;
+    let chars: Vec<char> = s.chars().take(pos.max(0) as usize + 1).collect();
     let n = chars.len();
     if n == 0 {
         return Ok(Value::int(0));
