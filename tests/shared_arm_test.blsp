@@ -1,0 +1,67 @@
+;;; Compiled code is shared across a runtime's processes, keyed by the closure's AST
+;;; (ADR-175 as refined by ADR-215) — so what a closure INSTANCE carries must stay
+;;; per-instance while its compiled body is reused. These cases pin exactly that split,
+;;; because the failure mode of getting it wrong is not a crash: it is one process
+;;; running another's captured values, or a stale body after a reload.
+;;;
+;;; Every case must also pass with `BROOD_NO_SHARED_ARMS=1` (the mechanism's off-switch),
+;;; which is how the suite proves the sharing is an optimisation and not a semantic.
+
+(defmodule shared-arm-test (:use test))
+
+;; One `fn` form, many instances with different captures. The compiled arm is shared;
+;; the captured `n` is not.
+(defn sa-adder (n) (fn (x) (+ x n)))
+
+;; A closure created fresh on every call — the shape whose compiled form used to be
+;; recompiled per process (a `receive` matcher, a `spawn` thunk).
+(defn sa-apply-fresh (x) ((fn (y) (* y 3)) x))
+
+(defn sa-reloadable (x) (+ x 1))
+(defn sa-call-reloadable (x) (sa-reloadable x))
+
+(describe "compiled arms are shared, captured values are not"
+  (test "instances of one fn form keep their own captures"
+    (let (add2 (sa-adder 2)
+          add40 (sa-adder 40))
+      (assert= (add2 1) 3)
+      (assert= (add40 1) 41)
+      ;; and again, in the other order — a shared arm must be re-entrant
+      (assert= (add2 100) 102)
+      (assert= (add40 100) 140)))
+
+  (test "a closure built fresh per call is correct every time"
+    (assert= (map sa-apply-fresh [1 2 3]) '(3 6 9)))
+
+  (test "across processes: each process's instance keeps its own capture"
+    ;; The publish/lookup race lives here — every worker resolves the same AST key at
+    ;; once, and one of them publishes. Whichever wins, the answers must be per-capture.
+    (let (me (self))
+      (doseq (k (range 1 25))
+        (spawn (send me [:r (let (f (sa-adder k)) (f 1000))])))
+      (assert= (fold + 0 (map (fn (_) (receive ([:r v] v))) (range 1 25)))
+        ;; sum of (1000 + k) for k in 1..24
+        (+ (* 24 1000) (fold + 0 (range 1 25))))))
+
+  (test "a reload is observed through a shared arm"
+    ;; The shared entry is keyed by the AST of `sa-reloadable`'s body; redefining the
+    ;; global must still be seen by its caller (late binding, ADR-013) rather than the
+    ;; caller keeping a stale compiled callee.
+    (assert= (sa-call-reloadable 1) 2)
+    (def sa-reloadable (fn (x) (+ x 100)))
+    (assert= (sa-call-reloadable 1) 101)
+    (def sa-reloadable (fn (x) (+ x 1)))
+    (assert= (sa-call-reloadable 1) 2))
+
+  (test "a closure whose body is built at runtime still runs"
+    ;; `eval` of a constructed form gives a closure whose body may be LOCAL — unkeyable,
+    ;; so it takes the no-cache path. It must simply work.
+    (let (f (eval (read-string "(fn (x) (* x 7))")))
+      (assert= (f 6) 42)))
+
+  (test "across processes: a fresh closure per process, run concurrently"
+    (let (me (self))
+      (doseq (_ (range 0 24))
+        (spawn (send me [:r (sa-apply-fresh 5)])))
+      (assert= (fold + 0 (map (fn (_) (receive ([:r v] v))) (range 0 24)))
+        (* 24 15)))))

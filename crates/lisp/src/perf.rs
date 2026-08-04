@@ -104,6 +104,36 @@ mod imp {
         jit_fast_deopt,
         /// JIT fast-path outcome 4 (staged tail): dispatched the staged call.
         jit_fast_tail4,
+        // ---- TIMING counters (nanoseconds), armed by `perf_time!` ----------
+        // A counting build perturbs timing, so these are for *attribution between
+        // regions within one run*, not for absolute latency: read the shares, then
+        // confirm the winner with a counter-free A/B. `ns_quantum` NESTS the others
+        // (it is the whole scheduler slice), so shares are of it, not of a sum.
+        /// Nanos inside `spawn_impl` — process creation, registry insert, enqueue.
+        ns_spawn,
+        /// Nanos inside `mailbox::deliver` — target lookup, queue push, wake.
+        ns_deliver,
+        /// Nanos deep-copying a value INTO a `Message` (`to_message`).
+        ns_msg_out,
+        /// Nanos deep-copying a `Message` into the receiver's heap (`from_message`).
+        ns_msg_in,
+        /// Nanos inside `receive_match` — the selective-receive scan and match.
+        ns_receive,
+        /// Nanos inside `deregister` — process teardown (registry/links/monitors).
+        ns_teardown,
+        /// Calls to `compile_closure` — a cold bytecode compile of a closure body. Should
+        /// be ~one per distinct arm for a whole run; one per PROCESS means the compiled
+        /// form is not being shared across processes (ADR-175's gate).
+        n_compile,
+        /// Nanos inside `compile_closure`.
+        ns_compile,
+        /// Nanos resolving the receive matcher to its compiled arm (`hof_resolve`).
+        ns_match_resolve,
+        /// Nanos running the matcher on one candidate — NESTED inside `ns_receive`, and
+        /// note it runs the matched clause's BODY too, so it is not pure matching.
+        ns_match_run,
+        /// Nanos inside one scheduler quantum (`run_one`) — NESTS the above.
+        ns_quantum
     );
 }
 
@@ -166,6 +196,34 @@ macro_rules! perf_bump {
             .$field
             .fetch_add($n as u64, ::std::sync::atomic::Ordering::Relaxed)
     };
+}
+
+/// Time a region into an `ns_*` [`perf`](self) counter: `perf_time!(ns_spawn, { … })`
+/// evaluates the block and adds its elapsed nanoseconds. Expands to just the block
+/// without the `perf-stats` feature, so a normal build pays nothing — and note the
+/// clock call itself costs ~20 ns, which is why these attribute *shares between
+/// regions* rather than absolute latency.
+#[cfg(feature = "perf-stats")]
+#[macro_export]
+macro_rules! perf_time {
+    ($field:ident, $body:block) => {{
+        let __perf_t0 = ::std::time::Instant::now();
+        let __perf_r = $body;
+        $crate::perf::C.$field.fetch_add(
+            __perf_t0.elapsed().as_nanos() as u64,
+            ::std::sync::atomic::Ordering::Relaxed,
+        );
+        __perf_r
+    }};
+}
+
+/// No-op form without the feature — the block runs, nothing is timed.
+#[cfg(not(feature = "perf-stats"))]
+#[macro_export]
+macro_rules! perf_time {
+    ($field:ident, $body:block) => {{
+        $body
+    }};
 }
 
 /// No-op form without the feature (drops its arguments unevaluated — callers pass

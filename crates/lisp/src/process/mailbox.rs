@@ -623,6 +623,10 @@ fn try_deliver_local(src: &Heap, pid: u64, v: Value) -> LocalDelivery {
 }
 
 fn deliver_envelope(pid: u64, env: Envelope) {
+    crate::perf_time!(ns_deliver, { deliver_envelope_timed(pid, env) })
+}
+
+fn deliver_envelope_timed(pid: u64, env: Envelope) {
     let mailbox = REGISTRY.get(pid);
     if let Some(mb) = mailbox {
         let mut st = crate::core::sync::lock(&mb.state);
@@ -832,6 +836,18 @@ fn tag_rejects(tagset: &[u32], msg: &Message) -> bool {
 }
 
 pub fn receive_match(
+    heap: &mut Heap,
+    matcher: Value,
+    timeout: Value,
+    tags: Value,
+    pin: Value,
+) -> LispResult {
+    crate::perf_time!(ns_receive, {
+        receive_match_timed(heap, matcher, timeout, tags, pin)
+    })
+}
+
+fn receive_match_timed(
     heap: &mut Heap,
     matcher: Value,
     timeout: Value,
@@ -1142,20 +1158,24 @@ fn scan_mailbox(
         };
         let matcher = heap.root_at(rbase);
         if hof.is_none() {
-            hof = Some(crate::eval::compile::hof_resolve(heap, matcher, 1));
+            hof = Some(crate::perf_time!(ns_match_resolve, {
+                crate::eval::compile::hof_resolve(heap, matcher, 1)
+            }));
         }
         // Apply the matcher via the VM / JIT fast-frame when it resolved to a plain
         // arm, falling back to the tree-walking `eval::apply` otherwise (or when
         // `hof_apply_step` deopts on an identity miss — e.g. a mid-scan GC relocated
         // the matcher). Same semantics either way: returns the clause body thunk on
         // a match, a non-`Fn` value on no-match.
-        let applied = match hof.as_ref().unwrap() {
-            Some(h) => match crate::eval::compile::hof_apply_step(heap, h, matcher, &[v]) {
-                Some(r) => r,
+        let applied = crate::perf_time!(ns_match_run, {
+            match hof.as_ref().unwrap() {
+                Some(h) => match crate::eval::compile::hof_apply_step(heap, h, matcher, &[v]) {
+                    Some(r) => r,
+                    None => eval::apply(heap, matcher, &[v], EnvId::GLOBAL),
+                },
                 None => eval::apply(heap, matcher, &[v], EnvId::GLOBAL),
-            },
-            None => eval::apply(heap, matcher, &[v], EnvId::GLOBAL),
-        };
+            }
+        });
         let answer = match applied {
             Ok(t) => t,
             Err(e) => {

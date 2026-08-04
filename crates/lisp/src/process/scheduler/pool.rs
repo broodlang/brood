@@ -396,7 +396,11 @@ fn worker_loop(wid: usize) {
 
 /// Resume a process once, then either retire it (it finished) or, if it suspended
 /// at `receive`, park it on its mailbox (or re-queue it if a message raced in).
-fn run_one(mut proc: Box<Process>) {
+fn run_one(proc: Box<Process>) {
+    crate::perf_time!(ns_quantum, { run_one_timed(proc) })
+}
+
+fn run_one_timed(mut proc: Box<Process>) {
     let mailbox = Arc::clone(&proc.mailbox);
     let wid = proc.worker_id;
     // Pulled to run: the single `STEALABLE` decrement site, paired with the increment in
