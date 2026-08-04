@@ -437,12 +437,16 @@ pub(crate) fn dispatch(
                             // Deopt-resume (see `CompiledArm::ckpt_slot`): a deopt after
                             // a completed non-tail call keeps the frame and resumes AT
                             // the checkpoint — never re-running its side effects.
+                            // This path is gated on `!inline_installed` above, so the
+                            // resume arm is always `arm` itself here.
                             if matches!(jit_outcome, Some(1)) {
-                                if let Some((rip, depth)) = jit_ckpt_read(heap, &arm, base) {
+                                if let Some((resume, rip, depth)) =
+                                    jit_ckpt_resume(heap, &arm, base, arm.nslots)
+                                {
                                     heap.truncate_env_roots(env_base);
                                     return Ok(Step::Done(vm_resume_deopt(
                                         heap,
-                                        arm,
+                                        resume,
                                         base,
                                         callee_env2,
                                         rip,

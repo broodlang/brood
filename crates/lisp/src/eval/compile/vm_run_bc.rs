@@ -559,193 +559,224 @@ pub(crate) fn vm_run_bc(
 
         // Either run the arm natively (if it's flagged for a tier check) or interpret it.
         // Both yield a `Result<ChunkExit, _>` handled uniformly below.
-        let exit = {
-            #[cfg(feature = "jit")]
+        let exit =
             {
-                if try_jit {
-                    try_jit = false;
-                    // Spinning-loop escape hatch (see JIT_QUEUED_SYNC_EDGES): a
-                    // self-tail loop that exited here after spinning ~2k edges
-                    // against a still-QUEUED arm compiles it right now, on this
-                    // thread, instead of interpreting until the background
-                    // compiler gets to it.
-                    if cur_back_edges != 0
-                        && cur_back_edges.is_multiple_of(JIT_QUEUED_SYNC_EDGES)
-                        && cur_arm.jit_code.load(std::sync::atomic::Ordering::Acquire)
-                            == crate::jit::QUEUED
-                    {
-                        jit_compile_now(heap, &cur_arm, cur_base);
-                    }
-                    // Per-engine frame sizing (two-stage tiering, devlog 2026-06-17): the VM
-                    // built the frame to the ORIGINAL `nslots` (small). ONLY when this arm's
-                    // *installed* native version is the deferred inlined upgrade does the
-                    // native entry need the larger `inline_nslots` frame (the spliced blocks'
-                    // shifted slot ranges). `inline_installed` is false for every arm that
-                    // doesn't inline (the overwhelming common case — fib is the exception),
-                    // so the hot path pays nothing: it calls `jit_tier` exactly as before.
-                    // Only the inlined arm grows `roots` and restores the small top on a
-                    // non-`Done` outcome (deopt re-runs the ORIGINAL small body from params).
-                    let inlined_active = cur_arm
-                        .inline_installed
-                        .load(std::sync::atomic::Ordering::Acquire);
-                    let small_top = cur_base + cur_arm.nslots;
-                    if inlined_active {
-                        heap.extend_roots_to_nil(cur_base + cur_arm.inline_nslots);
-                    }
-                    // Clean frame state `jit_tier` runs against: slots set up, operand
-                    // stack empty. A deopt/preempt re-run (`exec_chunk` from ip 0) below
-                    // assumes roots return to exactly here.
-                    let pre_roots = heap.roots_len();
-                    let jit_outcome = jit_tier(&cur_arm, heap, cur_base, cur_env);
-                    // Restore the small frame top on every non-Done path so the `exec_chunk`
-                    // re-run sees the original layout (Done retires the whole frame anyway).
-                    // The inlined native keeps operands in registers, so it leaves `roots`
-                    // exactly at the frame top it was entered with (`cur_base+inline_nslots`).
-                    // A Some(4) tail outcome stages callee+args ABOVE that top, read by
-                    // `jit_dispatch_tail` relative to `active_nslots` — don't disturb those.
-                    if inlined_active
-                        && matches!(jit_outcome, Some(1) | Some(2) | None)
-                        && heap.roots_len() == cur_base + cur_arm.inline_nslots
-                    {
-                        heap.truncate_roots(small_top);
-                    }
-                    // Work-attribution (perf-stats): native completion (0/4) vs a
-                    // mid-run deopt (1) vs preemption (2). A hot arm with high
-                    // `jit_deopt` vs `jit_native` compiles but keeps falling off the
-                    // native path — the matmul-class signal.
-                    match jit_outcome {
-                        Some(0) | Some(4) => {
-                            crate::perf_bump!(jit_native);
+                #[cfg(feature = "jit")]
+                {
+                    if try_jit {
+                        try_jit = false;
+                        // Spinning-loop escape hatch (see JIT_QUEUED_SYNC_EDGES): a
+                        // self-tail loop that exited here after spinning ~2k edges
+                        // against a still-QUEUED arm compiles it right now, on this
+                        // thread, instead of interpreting until the background
+                        // compiler gets to it.
+                        if cur_back_edges != 0
+                            && cur_back_edges.is_multiple_of(JIT_QUEUED_SYNC_EDGES)
+                            && cur_arm.jit_code.load(std::sync::atomic::Ordering::Acquire)
+                                == crate::jit::QUEUED
+                        {
+                            jit_compile_now(heap, &cur_arm, cur_base);
                         }
-                        Some(1) => {
-                            crate::perf_bump!(jit_deopt);
-                            // System-monitor deopt event (observability stream):
-                            // deopts are rare, so the armed() check runs only on
-                            // this already-cold branch.
-                            if crate::process::sysmon::armed() {
-                                if let Some(pid) = crate::process::current_pid() {
-                                    crate::process::sysmon::emit_deopt(pid, cur_arm.dbg_name);
-                                }
+                        // Per-engine frame sizing (two-stage tiering, devlog 2026-06-17): the VM
+                        // built the frame to the ORIGINAL `nslots` (small). ONLY when this arm's
+                        // *installed* native version is the deferred inlined upgrade does the
+                        // native entry need the larger `inline_nslots` frame (the spliced blocks'
+                        // shifted slot ranges). `inline_installed` is false for every arm that
+                        // doesn't inline (the overwhelming common case — fib is the exception),
+                        // so the hot path pays nothing: it calls `jit_tier` exactly as before.
+                        // Only the inlined arm grows `roots` and restores the small top on a
+                        // non-`Done` outcome (deopt re-runs the ORIGINAL small body from params).
+                        let inlined_active = cur_arm
+                            .inline_installed
+                            .load(std::sync::atomic::Ordering::Acquire);
+                        let small_top = cur_base + cur_arm.nslots;
+                        if inlined_active {
+                            heap.extend_roots_to_nil(cur_base + cur_arm.inline_nslots);
+                        }
+                        // The size this frame is BUILT to, captured here. The deopt-resume
+                        // helpers must be told it rather than re-deriving it from
+                        // `inline_installed`, which `jit_tier` flips below — see
+                        // `jit_frame_is_leaf_spliced`.
+                        let frame_nslots = if inlined_active {
+                            cur_arm.inline_nslots
+                        } else {
+                            cur_arm.nslots
+                        };
+                        // Clean frame state `jit_tier` runs against: slots set up, operand
+                        // stack empty. A deopt/preempt re-run (`exec_chunk` from ip 0) below
+                        // assumes roots return to exactly here.
+                        let pre_roots = heap.roots_len();
+                        let jit_outcome = jit_tier(&cur_arm, heap, cur_base, cur_env);
+                        // The deopt-resume decision, taken ONCE and taken HERE, before the
+                        // frame is resized below. Reading the journal twice — once to decide
+                        // the resize, once to resume — is wrong two ways: the second read
+                        // comes from an already-truncated frame and indexes past the root
+                        // stack, and the two reads can disagree about which engine ran the
+                        // frame. (That was a real out-of-bounds `root_at`, found by
+                        // `live_migration` under contention.) The `roots_len` test is purely
+                        // the bounds condition: every slot this reads — the journal slot and
+                        // the operand journal above it — lies below `frame_nslots`. It is
+                        // `>=`, not `==`, so a native that left the stack dirty still resumes
+                        // exactly as it did before.
+                        let resume = if matches!(jit_outcome, Some(1) | Some(2))
+                            && heap.roots_len() >= cur_base + frame_nslots
+                        {
+                            jit_ckpt_resume(heap, &cur_arm, cur_base, frame_nslots)
+                        } else {
+                            None
+                        };
+                        // Restore the small frame top on every non-Done path so the `exec_chunk`
+                        // re-run sees the original layout (Done retires the whole frame anyway).
+                        // The inlined native keeps operands in registers, so it leaves `roots`
+                        // exactly at the frame top it was entered with (`cur_base+inline_nslots`).
+                        // A Some(4) tail outcome stages callee+args ABOVE that top, read by
+                        // `jit_dispatch_tail` relative to `active_nslots` — don't disturb those.
+                        // A frame that will RESUME keeps its larger top: it continues in the
+                        // layout that wrote the journal.
+                        if inlined_active
+                            && resume.is_none()
+                            && matches!(jit_outcome, Some(1) | Some(2) | None)
+                            && heap.roots_len() == cur_base + cur_arm.inline_nslots
+                        {
+                            heap.truncate_roots(small_top);
+                        }
+                        // Work-attribution (perf-stats): native completion (0/4) vs a
+                        // mid-run deopt (1) vs preemption (2). A hot arm with high
+                        // `jit_deopt` vs `jit_native` compiles but keeps falling off the
+                        // native path — the matmul-class signal.
+                        match jit_outcome {
+                            Some(0) | Some(4) => {
+                                crate::perf_bump!(jit_native);
                             }
-                            #[cfg(feature = "perf-stats")]
-                            if std::env::var_os("BROOD_DEOPT_TRACE").is_some() {
-                                // The checkpoint journal (ckpt_slot) packs
-                                // (resume_ip << 16 | operand-depth) — print it so a
-                                // deopt-storm's SITE is identifiable, not just its arm.
-                                let ckpt = if cur_arm.ckpt_slot != u32::MAX {
-                                    match heap.root_at(cur_base + cur_arm.ckpt_slot as usize) {
-                                        Value::Int(p) => p,
-                                        _ => -1,
+                            Some(1) => {
+                                crate::perf_bump!(jit_deopt);
+                                // System-monitor deopt event (observability stream):
+                                // deopts are rare, so the armed() check runs only on
+                                // this already-cold branch.
+                                if crate::process::sysmon::armed() {
+                                    if let Some(pid) = crate::process::current_pid() {
+                                        crate::process::sysmon::emit_deopt(pid, cur_arm.dbg_name);
                                     }
-                                } else {
-                                    -1
-                                };
-                                eprintln!(
-                                    "[deopt] arm={} watch={} resume_ip={} depth={}",
-                                    cur_arm
-                                        .dbg_name
-                                        .map(crate::core::value::symbol_name_ref)
-                                        .unwrap_or("<closure>"),
-                                    cur_arm.deopt_watch,
-                                    ckpt >> 16,
-                                    ckpt & 0xffff
-                                );
-                            }
-                        }
-                        Some(2) => {
-                            crate::perf_bump!(jit_preempt);
-                        }
-                        _ => {}
-                    }
-                    // Dirty-stack-on-deopt check: a native arm that deopts (1) or is
-                    // preempted (2) must leave `roots` as `jit_tier` found them; if it
-                    // grew, the `exec_chunk` re-run starts on a corrupt operand stack.
-                    if matches!(jit_outcome, Some(1) | Some(2)) {
-                        let now = heap.roots_len();
-                        if now != pre_roots {
-                            crate::perf_bump!(jit_deopt_dirty);
-                            #[cfg(feature = "perf-stats")]
-                            {
-                                static SHOWN: std::sync::atomic::AtomicBool =
-                                    std::sync::atomic::AtomicBool::new(false);
-                                if !SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                }
+                                #[cfg(feature = "perf-stats")]
+                                if std::env::var_os("BROOD_DEOPT_TRACE").is_some() {
+                                    // The checkpoint journal (ckpt_slot) packs
+                                    // (resume_ip << 16 | operand-depth) — print it so a
+                                    // deopt-storm's SITE is identifiable, not just its arm.
+                                    let ckpt = if cur_arm.ckpt_slot != u32::MAX {
+                                        match heap.root_at(cur_base + cur_arm.ckpt_slot as usize) {
+                                            Value::Int(p) => p,
+                                            _ => -1,
+                                        }
+                                    } else {
+                                        -1
+                                    };
                                     eprintln!(
-                                        "[jit-dirty] deopt/preempt left roots_len={now} \
-                                         (jit_tier found {pre_roots}) — dirty operand stack \
-                                         before the VM re-run"
+                                        "[deopt] arm={} watch={} resume_ip={} depth={}",
+                                        cur_arm
+                                            .dbg_name
+                                            .map(crate::core::value::symbol_name_ref)
+                                            .unwrap_or("<closure>"),
+                                        cur_arm.deopt_watch,
+                                        ckpt >> 16,
+                                        ckpt & 0xffff
                                     );
                                 }
                             }
+                            Some(2) => {
+                                crate::perf_bump!(jit_preempt);
+                            }
+                            _ => {}
                         }
-                    }
-                    match jit_outcome {
-                        // Done: result in `roots[cur_base]` → the `Done` arm retires it.
-                        Some(0) => Ok(ChunkExit::Done(heap.root_at(cur_base))),
-                        // A JIT'd call/global errored — propagate the parked error.
-                        Some(3) => {
-                            Err(jit_take_error(heap)
-                                .expect("JIT error outcome without a parked error"))
-                        }
-                        // A JIT'd tail call: dispatch the staged callee+args → reuse the
-                        // frame (`Tail`) or a finished native callee (`Done`).
-                        Some(4) => jit_dispatch_tail(heap, cur_base, &cur_arm, cur_env),
-                        // 1 (deopt) / 2 (preempt) / None (not hot / out of subset): run the
-                        // arm on the VM with the frame intact (`cur_ip` is still 0).
-                        _ => {
-                            // Deopt-resume (see `CompiledArm::ckpt_slot`): a deopt
-                            // in an activation that completed a non-tail call
-                            // resumes AT the checkpoint (operands re-pushed from
-                            // the journal slots) — never re-running, and so never
-                            // re-effecting, the code before it. A preempt / cold
-                            // arm keeps the ip-0 entry (checkpoint reads 0 there).
-                            // Outcome 2 (preempt) takes this too. A preempt normally lands on
-                            // a back edge, where the journal was just reset to 0 and
-                            // `jit_ckpt_read` returns `None` — so this is a no-op there, and
-                            // the ip-0 entry is kept exactly as before. But if a preempt ever
-                            // lands *after* a completed call or a `table-put`, re-running from
-                            // ip 0 would repeat that effect, and the journal is precisely the
-                            // record of what must not be redone. Honouring it costs nothing
-                            // and removes a whole class of "is preemption safe here?".
-                            if matches!(jit_outcome, Some(1) | Some(2)) {
-                                if let Some((rip, depth)) = jit_ckpt_read(heap, &cur_arm, cur_base)
+                        // Dirty-stack-on-deopt check: a native arm that deopts (1) or is
+                        // preempted (2) must leave `roots` as `jit_tier` found them; if it
+                        // grew, the `exec_chunk` re-run starts on a corrupt operand stack.
+                        if matches!(jit_outcome, Some(1) | Some(2)) {
+                            let now = heap.roots_len();
+                            if now != pre_roots {
+                                crate::perf_bump!(jit_deopt_dirty);
+                                #[cfg(feature = "perf-stats")]
                                 {
-                                    let cb = cur_base + cur_arm.ckpt_slot as usize + 1;
+                                    static SHOWN: std::sync::atomic::AtomicBool =
+                                        std::sync::atomic::AtomicBool::new(false);
+                                    if !SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                        eprintln!(
+                                            "[jit-dirty] deopt/preempt left roots_len={now} \
+                                         (jit_tier found {pre_roots}) — dirty operand stack \
+                                         before the VM re-run"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        match jit_outcome {
+                            // Done: result in `roots[cur_base]` → the `Done` arm retires it.
+                            Some(0) => Ok(ChunkExit::Done(heap.root_at(cur_base))),
+                            // A JIT'd call/global errored — propagate the parked error.
+                            Some(3) => Err(jit_take_error(heap)
+                                .expect("JIT error outcome without a parked error")),
+                            // A JIT'd tail call: dispatch the staged callee+args → reuse the
+                            // frame (`Tail`) or a finished native callee (`Done`).
+                            Some(4) => jit_dispatch_tail(heap, cur_base, &cur_arm, cur_env),
+                            // 1 (deopt) / 2 (preempt) / None (not hot / out of subset): run the
+                            // arm on the VM with the frame intact (`cur_ip` is still 0).
+                            _ => {
+                                // Deopt-resume (see `CompiledArm::ckpt_slot`): a deopt
+                                // in an activation that completed a non-tail call
+                                // resumes AT the checkpoint (operands re-pushed from
+                                // the journal slots) — never re-running, and so never
+                                // re-effecting, the code before it. A preempt / cold
+                                // arm keeps the ip-0 entry (checkpoint reads 0 there).
+                                // Outcome 2 (preempt) takes this too. A preempt normally lands on
+                                // a back edge, where the journal was just reset to 0 and
+                                // `jit_ckpt_read` returns `None` — so this is a no-op there, and
+                                // the ip-0 entry is kept exactly as before. But if a preempt ever
+                                // lands *after* a completed call or a `table-put`, re-running from
+                                // ip 0 would repeat that effect, and the journal is precisely the
+                                // record of what must not be redone. Honouring it costs nothing
+                                // and removes a whole class of "is preemption safe here?".
+                                if let Some((ra, rip, depth)) = resume {
+                                    let cb = cur_base + ra.ckpt_slot as usize + 1;
                                     for k in 0..depth {
                                         let v = heap.root_at(cb + k);
                                         heap.push_root(v);
                                     }
                                     cur_ip = rip;
+                                    // Continue in the chunk the journal's ip indexes: for the
+                                    // small native that is `cur_arm` itself, for a
+                                    // leaf-spliced native the derivation's resume arm, whose
+                                    // chunk and frame layout are the spliced ones.
+                                    cur_arm = ra;
                                 }
+                                exec_chunk(
+                                    heap,
+                                    &cur_arm,
+                                    &mut cur_ip,
+                                    cur_base,
+                                    cur_env,
+                                    capture,
+                                    &mut cur_back_edges,
+                                )
                             }
-                            exec_chunk(
-                                heap,
-                                &cur_arm,
-                                &mut cur_ip,
-                                cur_base,
-                                cur_env,
-                                capture,
-                                &mut cur_back_edges,
-                            )
                         }
+                    } else {
+                        exec_chunk(
+                            heap,
+                            &cur_arm,
+                            &mut cur_ip,
+                            cur_base,
+                            cur_env,
+                            capture,
+                            #[cfg(feature = "jit")]
+                            &mut cur_back_edges,
+                        )
                     }
-                } else {
-                    exec_chunk(
-                        heap,
-                        &cur_arm,
-                        &mut cur_ip,
-                        cur_base,
-                        cur_env,
-                        capture,
-                        #[cfg(feature = "jit")]
-                        &mut cur_back_edges,
-                    )
                 }
-            }
-            #[cfg(not(feature = "jit"))]
-            {
-                exec_chunk(heap, &cur_arm, &mut cur_ip, cur_base, cur_env, capture)
-            }
-        };
+                #[cfg(not(feature = "jit"))]
+                {
+                    exec_chunk(heap, &cur_arm, &mut cur_ip, cur_base, cur_env, capture)
+                }
+            };
         match exit {
             Ok(ChunkExit::Done(v)) => {
                 // Retire the current frame, then either finish or hand `v` to the caller.

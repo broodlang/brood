@@ -706,10 +706,24 @@ pub struct CompiledArm {
 /// The stored leaf-inline derivation: see [`CompiledArm::leaf`].
 #[cfg(feature = "jit")]
 pub struct LeafInline {
-    /// The caller's body with callee bodies spliced (args → shifted callee param
+    /// The **resume arm** — a full [`CompiledArm`] over the spliced body (the caller's
+    /// body with each qualifying leaf callee's body inlined: args → shifted callee param
     /// slots via `LetBind`, callee body `shift_slots`-relocated above the caller's
-    /// frame). Cloned (via `shift_slots(_, 0)`) for lowering; the VM never runs it.
-    pub body: Node,
+    /// frame). It carries the spliced `body`, its compiled `chunk`, `nslots =
+    /// inline_nslots`, and **its own `ckpt_slot`** in the spliced layout.
+    ///
+    /// It exists because the inlined native's bytecode ip space is its own: a deopt
+    /// journals a resume ip into the *spliced* chunk, which the caller's small chunk
+    /// cannot interpret. Resuming against this arm makes ip space and frame layout
+    /// agree, which is what lets a partial splice keep a residual non-tail call (see
+    /// [`super::leaf_inline_probe`]). It shares the caller's `uid`, so it indexes the
+    /// same inline-cache block — sound because a spliced callee body contributes no
+    /// call/global sites of its own (`leaf_body_qualifies` rejects both).
+    ///
+    /// Holding the chunk here also retains it: the inlined native bakes the raw
+    /// addresses of this chunk's `ConstVal`s into itself, and `JIT_ARM_KEEPALIVE`
+    /// retains the caller arm (hence this `Arc`) for the process lifetime.
+    pub resume: Arc<CompiledArm>,
     /// `heap.global_epoch()` at derivation. Lowering requires `compile_epoch ==`
     /// this — i.e. no `def`/compaction between derivation and lowering.
     pub epoch: u64,
