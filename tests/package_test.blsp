@@ -420,16 +420,24 @@
   (str "{\"releases\":["
     (join ","
       (map (fn (kv)
-             (str "{\"version\":\"" (first kv) "\",\"dependencies\":["
-               (join "," (map (fn (d) (str "{\"name\":\"" (first d) "\",\"version\":\"" (second d) "\"}"))
-                           (get (second kv) :deps)))
+             (str "{\"version\":\""
+               (first kv)
+               "\",\"dependencies\":["
+               (join ","
+                 (map (fn (d) (str "{\"name\":\"" (first d) "\",\"version\":\"" (second d) "\"}"))
+                   (get (second kv) :deps)))
                "]}"))
         (map-pairs releases)))
     "]}"))
 
 (defn rr-release-json (version checksum deps)
-  (str "{\"checksum\":\"" checksum "\",\"version\":\"" version "\",\"dependencies\":["
-    (join "," (map (fn (d) (str "{\"name\":\"" (first d) "\",\"version\":\"" (second d) "\"}")) deps))
+  (str "{\"checksum\":\""
+    checksum
+    "\",\"version\":\""
+    version
+    "\",\"dependencies\":["
+    (join ","
+      (map (fn (d) (str "{\"name\":\"" (first d) "\",\"version\":\"" (second d) "\"}")) deps))
     "]}"))
 
 ;; Build one release tarball whose manifest declares `deps-line` (so the extracted
@@ -451,15 +459,16 @@
             releases (get spec nm))
         (cond
           (nil? releases) (net/http/not-found)
-          (and (= n 6) (= (nth parts 5) "releases"))
-            (net/http/ok (rr-releases-json releases))
+          (and (= n 6) (= (nth parts 5) "releases")) (net/http/ok (rr-releases-json releases))
           (and (= n 7) (= (nth parts 5) "releases"))
             (let (rel (get releases (nth parts 6)))
-              (if (nil? rel) (net/http/not-found)
+              (if (nil? rel)
+                (net/http/not-found)
                 (net/http/ok (rr-release-json (nth parts 6) (get rel :checksum) (get rel :deps)))))
           (and (= n 8) (= (nth parts 7) "tarball"))
             (let (rel (get releases (nth parts 6)))
-              (if (nil? rel) (net/http/not-found)
+              (if (nil? rel)
+                (net/http/not-found)
                 (net/http/response 200 {"Content-Type" "application/gzip"} (get rel :bytes))))
           else (net/http/not-found))))))
 

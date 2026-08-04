@@ -121,7 +121,12 @@ land in a later slice."
     ;; is reached through a `defn` so this forward reference resolves — an ability op
     ;; used bare before its `defability` does not pre-scan, a `defn` does.)
     (package--registry-dep? (first queue))
-      (package--resolve-loop root (rest queue) resolved order lock-index direct
+      (package--resolve-loop root
+        (rest queue)
+        resolved
+        order
+        lock-index
+        direct
         (cons (first queue) registry-reqs))
     (contains? resolved (get (first queue) :name))
       (do
@@ -216,7 +221,8 @@ land in a later slice."
     (let (results (package--fetch-frontier base frontier)
           fetched2 (fold (fn (m pair) (assoc m (first pair) (second pair))) fetched results)
           discovered (distinct (apply append
-                                 (map (fn (pair) (package--release-dep-names (second pair))) results)))
+                                 (map (fn (pair) (package--release-dep-names (second pair)))
+                                   results)))
           next-frontier (filter (fn (nm) (not (contains? fetched2 nm))) discovered))
       (package--prefetch-bfs base next-frontier fetched2))))
 
@@ -226,19 +232,26 @@ land in a later slice."
 (defn package--fetch-frontier (base frontier)
   (let (me (self))
     (dolist (nm frontier)
-      (spawn (send me [:fetched nm (try [:ok (registry--fetch-releases base nm)]
-                                     (catch e [:error (error-message e)]))])))
+      (spawn (send me
+               [:fetched
+                 nm
+                 (try
+                   [:ok (registry--fetch-releases base nm)]
+                   (catch e [:error (error-message e)]))])))
     (package--gather-frontier me (count frontier) nil)))
 
 (defn package--gather-frontier (me remaining acc)
   (if (= remaining 0)
     acc
     (receive
-      ([:fetched nm result]
-        (match result
-          ([:ok releases] (package--gather-frontier me (- remaining 1) (cons [nm releases] acc)))
-          ([:error message]
-            (error "package: fetching " (name nm) " from the registry failed: " message)))))))
+      ([:fetched nm result] (match result
+                              ([:ok releases] (package--gather-frontier me
+                                                (- remaining 1)
+                                                (cons [nm releases] acc)))
+                              ([:error message] (error "package: fetching "
+                                                  (name nm)
+                                                  " from the registry failed: "
+                                                  message)))))))
 
 ;; The distinct dep-name symbols across a package's releases — the frontier to prefetch next.
 (defn package--release-dep-names (releases)
@@ -248,8 +261,8 @@ land in a later slice."
 ;; A PURE provider over the prefetched map (no I/O), so the resolver's backtracking is free:
 ;; `versions` reads the release list; `deps` finds the matching release's declared deps.
 (defn package--prefetched-provider (fetched)
-  (resolver/make-provider
-    (fn (nm) (map (fn (release) (get release :version)) (or (get fetched nm) nil)))
+  (resolver/make-provider (fn (nm)
+                            (map (fn (release) (get release :version)) (or (get fetched nm) nil)))
     (fn (nm version)
       (let (release (find (fn (r) (= (get r :version) version)) (or (get fetched nm) nil)))
         (if (nil? release) nil (get release :dependencies))))))
@@ -670,15 +683,13 @@ an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and
 range]...]} ...]`, in ONE request. An unknown package (404) is nil (the resolver reports it
 as having no versions rather than raising mid-search); any other error raises."
   (match (registry--get-json (registry--releases-url base nm))
-    ([:ok data]
-      (map (fn (release)
-             {:version (get release :version)
-              :dependencies (map (fn (d) [(symbol (get d :name)) (get d :version)])
-                              (or (get release :dependencies) nil))})
-        (or (get data :releases) nil)))
+    ([:ok data] (map (fn (release)
+                       {:version (get release :version)
+                        :dependencies (map (fn (d) [(symbol (get d :name)) (get d :version)])
+                                        (or (get release :dependencies) nil))})
+                  (or (get data :releases) nil)))
     ([:error 404 _message] nil)
-    ([:error _status message]
-      (error "package: listing releases of " (name nm) " failed: " message))))
+    ([:error _status message] (error "package: listing releases of " (name nm) " failed: " message))))
 
 ;; Thin views over the one-request release list, for callers that want just one slice.
 (defn registry--list-versions (base nm)

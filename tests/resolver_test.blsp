@@ -18,8 +18,7 @@
 ;; {name -> {version -> [[dep-name constraint] ...]}}. A missing entry is nil (no
 ;; versions / no deps), which is exactly what the resolver must tolerate.
 (defn rt-prov (versions deps)
-  (make-provider
-    (fn (nm) (get versions nm))
+  (make-provider (fn (nm) (get versions nm))
     (fn (nm v) (get (get deps nm) v))))
 
 (defn rt-ok (roots p)
@@ -72,26 +71,26 @@
 (describe "resolver: transitive dependencies"
   (test "a dep is fetched and pinned to its newest compatible version"
     (let (p (rt-prov {'foo ["1.5.0"] 'bar ["2.0.0" "2.1.0" "3.0.0"]}
-                     {'foo {"1.5.0" [['bar ">= 2.0"]]}}))
+              {'foo {"1.5.0" [['bar ">= 2.0"]]}}))
       (assert= {'foo "1.5.0" 'bar "3.0.0"} (rt-ok [['foo "^1.2"]] p))))
   (test "a chain a -> b -> c resolves all three"
     (let (p (rt-prov {'a ["1.0.0"] 'b ["1.0.0"] 'c ["1.0.0"]}
-                     {'a {"1.0.0" [['b nil]]} 'b {"1.0.0" [['c nil]]}}))
+              {'a {"1.0.0" [['b nil]]} 'b {"1.0.0" [['c nil]]}}))
       (assert= {'a "1.0.0" 'b "1.0.0" 'c "1.0.0"} (rt-ok [['a nil]] p))))
   (test "a caret on a transitive dep caps its major"
     (let (p (rt-prov {'a ["1.0.0"] 'd ["1.0.0" "1.4.0" "2.0.0"]}
-                     {'a {"1.0.0" [['d "^1.0.0"]]}}))
+              {'a {"1.0.0" [['d "^1.0.0"]]}}))
       (assert= {'a "1.0.0" 'd "1.4.0"} (rt-ok [['a nil]] p)))))
 
 (describe "resolver: shared (diamond) dependencies"
   (test "two paths onto the same package intersect their constraints"
     ;; a wants d ^1.0.0 (so < 2.0), b wants d >= 1.1.0 -> newest in [1.1.0, 2.0.0) = 1.1.0
     (let (p (rt-prov {'a ["1.0.0"] 'b ["1.0.0"] 'd ["1.0.0" "1.1.0" "2.0.0"]}
-                     {'a {"1.0.0" [['d "^1.0.0"]]} 'b {"1.0.0" [['d ">= 1.1.0"]]}}))
+              {'a {"1.0.0" [['d "^1.0.0"]]} 'b {"1.0.0" [['d ">= 1.1.0"]]}}))
       (assert= {'a "1.0.0" 'b "1.0.0" 'd "1.1.0"} (rt-ok [['a nil] ['b nil]] p))))
   (test "a root pin and a transitive range agree on one version"
     (let (p (rt-prov {'a ["1.0.0"] 'd ["1.0.0" "1.1.0" "1.2.0"]}
-                     {'a {"1.0.0" [['d ">= 1.0.0"]]}}))
+              {'a {"1.0.0" [['d ">= 1.0.0"]]}}))
       ;; root pins d = 1.1.0 directly; a is happy with anything >= 1.0.0
       (assert= {'a "1.0.0" 'd "1.1.0"} (rt-ok [['a nil] ['d "= 1.1.0"]] p)))))
 
@@ -100,21 +99,21 @@
     ;; a@2.0.0 needs c = 1.0.0, but b forces c = 2.0.0 -> a@2.0.0 is impossible,
     ;; so the search must fall back to a@1.0.0 (which needs c = 2.0.0, and agrees).
     (let (p (rt-prov {'a ["1.0.0" "2.0.0"] 'b ["1.0.0"] 'c ["1.0.0" "2.0.0"]}
-                     {'a {"2.0.0" [['c "= 1.0.0"]] "1.0.0" [['c "= 2.0.0"]]}
-                      'b {"1.0.0" [['c "= 2.0.0"]]}}))
+              {'a {"2.0.0" [['c "= 1.0.0"]] "1.0.0" [['c "= 2.0.0"]]}
+               'b {"1.0.0" [['c "= 2.0.0"]]}}))
       (assert= {'a "1.0.0" 'b "1.0.0" 'c "2.0.0"} (rt-ok [['a nil] ['b nil]] p))))
   (test "backtracks across two levels to satisfy a deep constraint"
     ;; top@2 -> mid ^2 ; top@1 -> mid ^1 ; leaf forces mid = 1.5.0
     (let (p (rt-prov {'top ["1.0.0" "2.0.0"] 'mid ["1.5.0" "2.5.0"] 'leaf ["1.0.0"]}
-                     {'top {"2.0.0" [['mid "^2.0.0"]] "1.0.0" [['mid "^1.0.0"]]}
-                      'leaf {"1.0.0" [['mid "= 1.5.0"]]}}))
+              {'top {"2.0.0" [['mid "^2.0.0"]] "1.0.0" [['mid "^1.0.0"]]}
+               'leaf {"1.0.0" [['mid "= 1.5.0"]]}}))
       (assert= {'top "1.0.0" 'mid "1.5.0" 'leaf "1.0.0"}
         (rt-ok [['top nil] ['leaf nil]] p)))))
 
 (describe "resolver: cycles"
   (test "a mutual dependency resolves when the versions agree"
     (let (p (rt-prov {'a ["1.0.0"] 'b ["1.0.0"]}
-                     {'a {"1.0.0" [['b nil]]} 'b {"1.0.0" [['a nil]]}}))
+              {'a {"1.0.0" [['b nil]]} 'b {"1.0.0" [['a nil]]}}))
       (assert= {'a "1.0.0" 'b "1.0.0"} (rt-ok [['a nil]] p))))
   (test "a self-dependency at a compatible version is fine"
     (let (p (rt-prov {'a ["1.0.0"]} {'a {"1.0.0" [['a ">= 1.0.0"]]}}))
@@ -123,8 +122,8 @@
 (describe "resolver: conflicts and error messages"
   (test "an unsatisfiable diamond names both requirers and the available versions"
     (let (p (rt-prov {'foo ["1.0.0"] 'baz ["1.0.0"] 'shared ["1.0.0" "1.5.0" "2.0.0"]}
-                     {'foo {"1.0.0" [['shared "^1.0.0"]]}
-                      'baz {"1.0.0" [['shared "^2.0.0"]]}})
+              {'foo {"1.0.0" [['shared "^1.0.0"]]}
+               'baz {"1.0.0" [['shared "^2.0.0"]]}})
           message (rt-err [['foo nil] ['baz nil]] p))
       (is (includes? message "shared"))
       (is (includes? message "foo"))
@@ -166,8 +165,8 @@
     ;; a pinned at 2.0.0 needs c=1.0.0, but b forces c=2.0.0, so the pin can't hold;
     ;; the search must still reach the valid a=1.0.0 / c=2.0.0 solution
     (let (p (rt-prov {'a ["1.0.0" "2.0.0"] 'b ["1.0.0"] 'c ["1.0.0" "2.0.0"]}
-                     {'a {"2.0.0" [['c "= 1.0.0"]] "1.0.0" [['c "= 2.0.0"]]}
-                      'b {"1.0.0" [['c "= 2.0.0"]]}}))
+              {'a {"2.0.0" [['c "= 1.0.0"]] "1.0.0" [['c "= 2.0.0"]]}
+               'b {"1.0.0" [['c "= 2.0.0"]]}}))
       (assert= {'a "1.0.0" 'b "1.0.0" 'c "2.0.0"}
         (rt-ok-pref [['a nil] ['b nil]] p {'a "2.0.0"}))))
   (test "a preference for a package not in the graph is harmless"
@@ -182,9 +181,9 @@
   (defn rt-tangled (n)
     (let (bs (map (fn (i) (str "b" i)) (range 1 (+ n 1))))
       [(fold (fn (m nm) (assoc m nm ["1.0.0" "2.0.0"])) {"check" ["1.0.0"]} bs)
-       (assoc (fold (fn (m nm) (assoc m nm {"1.0.0" [] "2.0.0" []})) {} bs)
-         "check" {"1.0.0" [['b1 "= 1.0.0"]]})
-       (append (map (fn (nm) [(symbol nm) ">= 1.0"]) bs) (list ['check nil]))]))
+        (assoc (fold (fn (m nm) (assoc m nm {"1.0.0" [] "2.0.0" []})) {} bs)
+          "check" {"1.0.0" [['b1 "= 1.0.0"]]})
+        (append (map (fn (nm) [(symbol nm) ">= 1.0"]) bs) (list ['check nil]))]))
   (defn rt-tangled-provider (versions deps)
     (make-provider (fn (nm) (get versions (if (symbol? nm) (name nm) nm)))
       (fn (nm v) (get (get deps (if (symbol? nm) (name nm) nm)) v))))
@@ -215,11 +214,12 @@
           deps (fold (fn (m i)
                        (let (ds (if (= i 0)
                                   []
-                                  (distinct (keep (fn (j) (when (and (>= j 0) (< j i)) [(nm j) ">= 1.0"]))
+                                  (distinct (keep (fn (j)
+                                                    (when (and (>= j 0) (< j i)) [(nm j) ">= 1.0"]))
                                               (list (- i 1) (quot i 2) (- i 3))))))
                          (assoc m (nm i) {"1.0.0" ds "1.1.0" ds "2.0.0" ds})))
-                     {}
-                     (range 0 n))
+                 {}
+                 (range 0 n))
           p (make-provider (fn (name) (get versions name)) (fn (name v) (get (get deps name) v)))
           solution (rt-ok [[(nm (- n 1)) ">= 1.0"]] p))
       ;; the root reaches the whole chain (each p_i links to p_{i-1}), so all N resolve,
@@ -230,8 +230,8 @@
 (describe "resolver: determinism"
   (test "the same universe resolves to the same solution every time"
     (let (p (rt-prov {'a ["1.0.0" "2.0.0"] 'b ["1.0.0"] 'c ["1.0.0" "2.0.0"]}
-                     {'a {"2.0.0" [['c "= 1.0.0"]] "1.0.0" [['c "= 2.0.0"]]}
-                      'b {"1.0.0" [['c "= 2.0.0"]]}}))
+              {'a {"2.0.0" [['c "= 1.0.0"]] "1.0.0" [['c "= 2.0.0"]]}
+               'b {"1.0.0" [['c "= 2.0.0"]]}}))
       (assert= (rt-ok [['a nil] ['b nil]] p) (rt-ok [['a nil] ['b nil]] p))
       (assert= (rt-ok [['a nil] ['b nil]] p) (rt-ok [['b nil] ['a nil]] p)))))
 
@@ -282,8 +282,7 @@
 (defn rt-o-deps (universe nm version) (get (get universe nm) version))
 
 (defn rt-o-provider (universe)
-  (make-provider
-    (fn (nm) (rt-o-versions universe nm))
+  (make-provider (fn (nm) (rt-o-versions universe nm))
     (fn (nm version) (rt-o-deps universe nm version))))
 
 ;; Every full assignment {name -> chosen version}, one per package that HAS a version
@@ -311,17 +310,23 @@
         (if (nil? chosen)
           false
           (let (deps (rt-o-deps universe nm chosen))
-            (if (every? (fn (d) (let (dep-version (get assignment (nth d 0)))
-                                  (and dep-version (version/version-satisfies? dep-version (nth d 1)))))
+            (if (every? (fn (d)
+                          (let (dep-version (get assignment (nth d 0)))
+                            (and dep-version (version/version-satisfies? dep-version (nth d 1)))))
                   deps)
               (rt-o-closure-ok? (append (rest queue) (map (fn (d) (nth d 0)) deps))
-                universe assignment (assoc visited nm true))
+                universe
+                assignment
+                (assoc visited nm true))
               false))))))
 
 ;; An assignment resolves the roots iff every root is assigned + satisfies its constraint
 ;; AND the closure it reaches is consistent.
 (defn rt-o-resolves? (roots universe assignment)
-  (and (every? (fn (r) (let (v (get assignment (nth r 0))) (and v (version/version-satisfies? v (nth r 1))))) roots)
+  (and (every? (fn (r)
+                 (let (v (get assignment (nth r 0)))
+                   (and v (version/version-satisfies? v (nth r 1)))))
+         roots)
     (rt-o-closure-ok? (map (fn (r) (nth r 0)) roots) universe assignment {})))
 
 ;; The oracle: is there ANY assignment that resolves the roots?
@@ -385,14 +390,24 @@
   (let (result (resolve roots (rt-o-provider universe))
         solvable (rt-o-solvable? roots universe))
     (match result
-      ([:ok solution]
-        (cond
-          (not solvable) {:kind :unsound-claimed-ok :universe universe :roots roots :solution solution}
-          (not (rt-o-resolves? roots universe solution))
-            {:kind :invalid-solution :universe universe :roots roots :solution solution}
-          else nil))
-      ([:error message]
-        (if solvable {:kind :incomplete-gave-up :universe universe :roots roots :message message} nil)))))
+      ([:ok solution] (cond
+                        (not solvable)
+                          {:kind :unsound-claimed-ok
+                           :universe universe
+                           :roots roots
+                           :solution solution}
+                        (not (rt-o-resolves? roots universe solution))
+                          {:kind :invalid-solution
+                           :universe universe
+                           :roots roots
+                           :solution solution}
+                        else nil))
+      ([:error message] (if solvable
+                          {:kind :incomplete-gave-up
+                           :universe universe
+                           :roots roots
+                           :message message}
+                          nil)))))
 
 (defn rt-o-scan (n seed)
   ;; the first counterexample across `n` seeded universes, or nil if all agree
