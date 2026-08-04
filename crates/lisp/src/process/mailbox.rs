@@ -29,7 +29,11 @@ use crate::error::{LispError, LispResult};
 use crate::eval;
 use crate::process::keywords as pk;
 
-use super::message::{from_message, to_message, to_message_to_runtime, Message};
+use super::message::{from_message, to_message_to_runtime, Message};
+// Only the `dev-tools` trace path converts a whole trace to a message; importing it
+// unconditionally makes a `--no-default-features` build warn.
+#[cfg(feature = "dev-tools")]
+use super::message::to_message;
 use super::scheduler::{ensure_ctx, wake_enqueue, Ctx, Process};
 use super::timer::arm_timer;
 
