@@ -15150,6 +15150,40 @@ package mock updated to the one-request `/releases` contract. 237 across the fou
 check` zero warnings. Traps banked: `nest` is a separate binary (rebuild `-p nest`); a resolver
 benchmark must use SYMBOL dep-names (string vs symbol silently no-ops the constraint — it hid the
 exponential blowup until I fixed the bench).
+
+## 2026-08-03 (cont.) — the resolver becomes full PubGrub (CDCL), replacing bounded backtracking (ADR-209)
+
+The bounded-backtracking solver resolved common cases but *errored* on tangled-but-solvable
+graphs. `std/resolver.blsp` is now the Dart-pub **PubGrub** algorithm over a finite version
+domain: incompatibilities, unit propagation, conflict-driven clause learning, and backjumping.
+Tangled-but-solvable graphs (a 12/20-deep tangle that would explode under naive backtracking)
+now resolve in near-linear steps, and an unsolvable graph yields a derivation ("baz 1.0.0
+requires shared ^2.0.0; shared available: 2.0.0, 1.5.0, 1.0.0") instead of a bare failure. The
+budget survives only as a safety net.
+
+**Finite-domain trick.** Each package's universe is its versions + a `NONE` ("not selected")
+sentinel; a dependency forbids `NONE`, which is what forces selection even for a permissive
+requirement. A virtual always-decided root turns the project's requirements into ordinary root
+dependencies.
+
+**Getting it right was the work.** Two mechanics bugs the generative **oracle fuzz** caught
+(agreement against brute-force enumeration went 399/400 → **3400/3400**): conflict resolution
+must replay the state AT the conflict (with the derivations that caused it), not the
+pre-propagation state — that single wrong argument was the whole "no satisfier" failure; and a
+self-dependency's two terms on one package must be intersected, not silently dropped by a map
+key. The fuzz is the reason this shipped correct — a subtle CDCL resolvent is unshippable
+without an oracle.
+
+**Performance.** PubGrub is heavier per step, so: incompatibilities are indexed by package
+(propagation scans only what touches the changed package), and the undecided work-list is an
+incremental queue (no O(n) scan per decision). 300-package solve: naive PubGrub timed out
+(>10 s) → indexed 3.2 s → +single-pass 2.2 s → +incremental work-list **1.7 s**. Slower than
+the 0.66 s backtracker but correct on tangled graphs, which the backtracker was not.
+
+Tests: resolver_test rewritten — the "tangled → error" cases become "tangled → resolves"; error
+messages match the derivation format; +self-dependency and deeper-tangle cases. 34 resolver +
+203 dependent (version/package/project) green; nest check zero warnings. Deferred:
+multi-requirer derivation trees, pre-release ordering.
 ## 2026-08-03 — thread 6b closed by thread 6, not deferred
 
 Checked whether the reclamation-threshold thread still exists now that the region stops
