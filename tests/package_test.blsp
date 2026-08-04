@@ -338,6 +338,27 @@
       (run-process "tar" (list "-czf" archive "-C" dep-dir "."))
       (let (bytes (slurp-bytes archive)) [bytes (hash/sha256-bytes bytes)]))))
 
+;; A handler whose release points at an EXTERNAL tarball (`source_url`): the metadata
+;; carries the URL + checksum and the registry serves NO `/tarball` (a 404 there proves
+;; the client fetched from the external URL, not from hive).
+(defn mock-registry-handler-external (nm version checksum source-url)
+  (fn (req)
+    (let (path (get req :path))
+      (if (= path (str "/api/v1/packages/" nm "/releases/" version))
+        (net/http/ok (str "{\"checksum\":\""
+                       checksum "\",\"version\":\"" version "\",\"source_url\":\"" source-url
+                       "\",\"dependencies\":[]}"))
+        (net/http/not-found)))))
+
+;; Build a WRAPPED tarball — files under a single `nm/` dir, the `tar czf pkg/` / GitHub
+;; layout an external source uses (extracted with strip 1). Returns [file-url sha256].
+(defn mock-package-tarball-wrapped (parent nm)
+  (let (dep-dir (path-join parent nm))
+    (pkg-write-project dep-dir nm nm "(defn greet (w) w)" "")
+    (let (archive (path-join parent (str nm "-wrapped.tar.gz")))
+      (run-process "tar" (list "-czf" archive "-C" parent nm))
+      [(str "file://" archive) (hash/sha256-bytes (slurp-bytes archive))])))
+
 (describe "package: the hosted registry"
   (test "a :version dep downloads, sha256-verifies, and extracts the tarball"
     (let (parent (pkg-fixture-root)
@@ -359,6 +380,38 @@
           (assert= (vector-ref row 2) "1.0.0")
           (assert= (vector-ref row 3) :sha256)
           (assert= (vector-ref row 4) checksum)))))
+  (test "a release pointing at an external tarball URL is fetched, sha-verified, strip-1 extracted"
+    ;; the registry serves ONLY metadata (with :source_url); the bytes live at the external
+    ;; URL (a file:// wrapped tarball here) — proving hive need not hold the tarball
+    (let (parent (pkg-fixture-root)
+          app-dir (path-join parent "app")
+          [source-url checksum] (mock-package-tarball-wrapped parent "extdep")
+          base (mock-registry-start (mock-registry-handler-external "extdep"
+                                      "1.0.0" checksum source-url)))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (let (e (package/package--resolve-registry app-dir (dep-registry 'extdep "1.0.0") nil base))
+        (assert= (dep-kind e) :registry)
+        (assert= (get e :version) "1.0.0")
+        (assert= (get e :sha256) checksum)
+        (let (extracted (path-join (path-join app-dir "_deps") "extdep"))
+          (is (dir? extracted))
+          ;; strip-1 put the wrapped package's project.blsp at the package root
+          (is (file-exists? (path-join extracted "project.blsp")))))))
+  (test "an external-URL release still refuses a sha256 mismatch"
+    ;; the checksum is verified regardless of source — the registry is never trusted for bytes
+    (let (parent (pkg-fixture-root)
+          app-dir (path-join parent "app")
+          [source-url _real] (mock-package-tarball-wrapped parent "extbad")
+          base (mock-registry-start (mock-registry-handler-external "extbad"
+                                      "1.0.0" "deadbeef" source-url)))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (is (includes? (try
+                       (package/package--resolve-registry app-dir
+                         (dep-registry 'extbad "1.0.0")
+                         nil
+                         base)
+                       (catch e (error-message e)))
+            "sha256 mismatch"))))
   (test "a sha256 mismatch is refused"
     (let (parent (pkg-fixture-root)
           app-dir (path-join parent "app")

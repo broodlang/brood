@@ -741,30 +741,50 @@ as having no versions rather than raising mid-search); any other error raises."
     ([:ok meta] (let (checksum (get meta :checksum))
                   (when (nil? checksum)
                     (error "package: registry release " nm " " version " has no checksum"))
-                  (registry--download-extract root dep base target nm version checksum)))))
+                  (registry--download-extract root
+                    dep
+                    base
+                    target
+                    nm
+                    version
+                    checksum
+                    (get meta :source_url))))))
 
-(defn registry--download-extract (root dep base target nm version checksum)
+;; The hive-hosted tarball bytes for a release (root-level layout), erroring on a non-2xx.
+(defn registry--download-hosted (base nm version)
   (require 'net/http)
-  (when (dir? target) (%rm-rf target))
   (let (resp (net/http/http-get (registry--tarball-url base nm version))
         status (get resp :status))
     (when (not (and (>= status 200) (< status 300)))
       (error "package: downloading " nm " " version " failed (HTTP " status ")"))
-    (let (bytes (get resp :body)
-          got (hash/sha256-bytes bytes))
-      (when (not (= got checksum))
-        (error "package: "
-          nm " " version " sha256 mismatch — the registry declares " checksum
-          " but the download hashed to " got " (tampered or corrupted — do not trust it)"))
-      (let (archive (path-join (package--deps-dir root) (str (name nm) ".tar.gz")))
-        (make-dir (package--deps-dir root))
-        (spit-bytes archive bytes)
-        ;; hive tarballs are root-level (no wrapper dir), so strip 0. Extraction of a
-        ;; large archive runs on the offload pool, like a clone.
-        (offload %untar-gz archive target 0)
-        (delete-file archive)
-        (registry--write-meta target base nm version checksum)
-        (registry--resolved dep target version checksum)))))
+    (get resp :body)))
+
+(defn registry--download-extract (root dep base target nm version checksum source-url)
+  (require 'net/http)
+  (when (dir? target) (%rm-rf target))
+  ;; A release may host its bytes EXTERNALLY — a `:source_url` (a GitHub/S3/CDN tarball),
+  ;; in which case the registry holds only metadata + the checksum and the bytes are
+  ;; fetched from there. An external archive follows the `tar czf pkg-x.y.z/` / GitHub
+  ;; convention (one wrapper dir → strip 1); a hive-hosted tarball is root-level (strip 0).
+  ;; EITHER WAY the sha256 is verified before anything is extracted — the registry is never
+  ;; trusted for the bytes, so an external URL is exactly as safe as a hosted one.
+  (let (external (and source-url (not (= source-url "")))
+        bytes (if external
+                (package--fetch-bytes source-url)
+                (registry--download-hosted base nm version))
+        got (hash/sha256-bytes bytes))
+    (when (not (= got checksum))
+      (error "package: "
+        nm " " version " sha256 mismatch — the registry declares " checksum
+        " but the download hashed to " got " (tampered or corrupted — do not trust it)"))
+    (let (archive (path-join (package--deps-dir root) (str (name nm) ".tar.gz")))
+      (make-dir (package--deps-dir root))
+      (spit-bytes archive bytes)
+      ;; Extraction of a large archive runs on the offload pool, like a clone.
+      (offload %untar-gz archive target (if external 1 0))
+      (delete-file archive)
+      (registry--write-meta target base nm version checksum)
+      (registry--resolved dep target version checksum))))
 
 (defn registry--write-meta (target base nm version checksum)
   (spit (package--pkg-meta-path target)
