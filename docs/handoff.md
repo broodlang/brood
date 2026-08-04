@@ -6,10 +6,8 @@ measurements live in [`devlog.md`](devlog.md); the option book lives in
 
 **As of 2026-08-03**, brood at ADR-210, brood-benchmarks `71c21a9`. Nothing half-finished.
 Rust suite **943/943**, in-language suite **4350/4350** (with the new mechanism on *and* off),
-`nest check` clean, rustfmt clean. `nest format --check` reports **8 pre-existing `.blsp` files**
-needing formatting (`std/prelude`, `std/resolver`, `std/version`, `std/tool/{package,project}`,
-`tests/{package,resolver,shared_closure_msg}_test`) — drift from the ADR-209 resolver work, not
-from ADR-210; a `nest format` run clears them.
+`nest check` clean, rustfmt clean, `nest format --check` clean, and both `--no-default-features`
+and default builds warning-clean.
 
 **There are no open correctness bugs.** KI-22, KI-23 and KI-24 all closed. Every `std/` scale
 sweep row is linear. **The item §3 used to carry as the one genuinely open thread — partial leaf
@@ -117,14 +115,17 @@ convert only when a workload shows the cost, since it bites only on large string
 **4. `spawn-live`** — the worst published row, untouched. Its own noise floor is **20.6%**, so
 nothing smaller is resolvable there; it has produced phantom results repeatedly.
 
-**5. `live_migration`'s deep-receive liveness flake — pre-existing, small, and worth an easy
-fix.** `deep_receive_continuations_resume_correctly_across_workers` fails its *liveness* assert
-("no live migration observed across 40 bursts") in **3/12** full-suite runs at HEAD, and it is
-**not** in `.config/nextest.toml`'s retry list even though it is the same "blown deadline under a
-loaded runner" class as `distribution` / `serve_attach` / `observe_attach` / `suite`. Either add
-it to that list or make the assertion bounded-but-patient. Left alone in the ADR-210 change to
-keep that change about the JIT — but it will keep costing whoever next reads a red suite, and it
-already cost one session's attribution work (see §5).
+**5. ~~`live_migration`'s deep-receive liveness flake~~ — FIXED 2026-08-04.** It failed its
+*liveness* assert in 3/12 full-suite runs (8/60 with 20 concurrent copies), never on correctness:
+under an oversubscribed machine a burst can finish without any process being stolen, so the
+40-burst budget was too small. Raised to 400 — **0/60 after**, and free on a normal run (0.025 s,
+it exits on the first burst that migrates).
+
+Fixed by budget, **not** by adding `retries = 1` to `.config/nextest.toml`, and that choice is
+the point worth keeping: this test's *other* assertion catches intermittent continuation
+corruption — it is what caught the ADR-210 deopt-resume bug — and a retry would let exactly that
+class pass on attempt two and be dismissed as FLAKY. Before reaching for a retry on any test, ask
+what else that test guards.
 
 **Explicitly NOT open:** a memory leak (chased, does not exist), endurance (16/16 soak,
 12.7 M iterations), thread 6's throughput decay (fixed, ADR-208), the RUNTIME reclamation
