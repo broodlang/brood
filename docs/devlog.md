@@ -16030,3 +16030,74 @@ knowing before someone budgets a sweep of all 113.
 Gates: 954 Rust tests + the in-language suite green, `nest check` / `format --check` clean,
 clippy clean, `--no-default-features` builds, every sweep row linear in **both** encoding
 regimes.
+
+## 2026-08-04 (cont.) — `spawn-live`: every process was recompiling the same code (ADR-215)
+
+Took `handoff.md` §1, the worst published row (2.8× slower and 1.9× heavier than the BEAM),
+and the discipline it demands paid off before any code changed.
+
+**The ladder.** Rather than guess, I decomposed the row into variants that each add one
+thing, and measured **CPU** per unit (not wall — the row runs on 3.3 cores, so wall hides
+where the work is), N=100 000:
+
+| variant | CPU/unit |
+|---|---|
+| spawn + one send + exit | 7.2 µs |
+| + a `receive` that never parks | 20.9 µs |
+| + every unit held alive, so each parks and resumes | 28.9 µs |
+| + the payload copy and the fold (the published row) | 45.4 µs |
+
+Two facts fell out immediately. Per-unit cost is **flat** from 25k to 200k units, so nothing
+scales with the live set — it is a fixed per-unit price. And the `spawn` row, where units
+complete immediately, costs *less CPU per unit than Elixir's* — so spawning is not the
+problem; the problem is a process that **receives**.
+
+**What it wasn't.** None of the nine mechanism switches moved it (`BROOD_NO_HANDOFF`,
+`NO_STEAL_WAKE`, `SPAWN_RR`, `SPAWN_SPILL`, `NO_RECV_MARK`, `NO_JIT`, `PURGE_DELAY=0`,
+`NO_SHARE_FN`) — all within 21–23 µs. And a control that sends the same N messages to **one**
+target instead of N distinct ones costs **1.5 µs/op** against 21 µs, which said the cost is
+per-*distinct-target*, i.e. in what a fresh process does, not in send/receive throughput.
+
+**The tool that was missing.** `perf-stats` counts events; it cannot say where time goes, and
+this cost was in no counter. So I added `perf_time!(ns_*, { … })` — nanosecond accumulators
+around spawn, deliver, message copy each way, receive, matcher resolve, teardown, and one
+scheduler quantum — and `BROOD_TRACE_COMPILE=1`, which names every closure that compiles. The
+first run said `ns_receive` was 12 µs of a 24 µs quantum; the split inside it said
+`ns_match_resolve` was 8.4 of that 12; and `n_compile` said why: **100 154 bytecode compiles
+for 100 000 units — one per process, 8.1 µs each.**
+
+**The cause, and it is a key, not a mechanism.** ADR-175 already moved compiled arms into a
+per-runtime cache. It keyed them by the **closure handle**, and two things defeat that: a
+local-capturing closure was excluded by an explicit region test, and — the one I did not
+expect — a closure that captures no locals is *promoted afresh on every creation* (ADR-194),
+so it gets a **new RUNTIME handle each time**. A `spawn` thunk and a `receive` matcher are
+both that shape, so the lookup missed on every creation and every process recompiled.
+
+Keying instead by the closure's **AST identity** (its first body form, when non-LOCAL — the
+identity `make_closure_cached` already uses for the parsed template) fixes both holes at
+once. Compiles per run: **100 154 → 163**.
+
+**Measured on the real row** (N=300 000, same profile, three interleaved runs): wall
+2.40 → 2.10 s (**−12.5%**), CPU 15.9 → 11.9 CPU·s (**−25%**), peak RSS 1925 → 1648 MB
+(**−14%**). The ladder: non-parking receive 23.9 → 12.2, the full held-alive shape
+30.9 → 17.7, the published row 49.2 → 35.7 µs/unit. Nothing else regressed — compute rows
+within ±1.9% best-of-9, and `spawn`/`pingpong`/`ring`/`supervisor` flat-to-better on CPU with
+lower RSS.
+
+**Two lessons worth keeping.**
+
+*The 20.6% noise floor recorded for this row is a property of how it was measured, not of the
+row.* Measuring **CPU time** over a fixed unit count, with the two binaries interleaved, gave
+a spread under 2% across runs — small enough to resolve a 12% change confidently. When a row
+is "unmeasurable", check whether the metric is the problem before accepting the floor.
+
+*A cache that cannot be observed missing looks like a cache that works.* ADR-175 shipped with
+the mechanism correct and the key wrong, and nothing in the suite or the benchmarks could tell
+the difference — the row was simply slow. The counter that would have caught it (`n_compile`
+should be ~one per arm per *run*, not per *process*) took ten lines and now exists.
+
+**What's left on the row.** At 35.7 µs/unit the remainder is the child's own work running
+**cold**: the same 16-element fold costs ~16 µs in a fresh process against 3.7 µs warm,
+because **inline caches are still per-process**. ADR-175 named that obstacle precisely (dense
+per-process call-site ids baked into shared `Node::Call`s), so it is the successor item, not a
+loose end.

@@ -5,9 +5,10 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**As of 2026-08-04**, brood with ADR-213 (char→byte index) + ADR-214 (form-start safepoints) on
+**As of 2026-08-04**, brood with ADR-213 (char→byte index), ADR-214 (form-start safepoints) and
+ADR-215 (AST-keyed shared compiled code) on
 top of the ADR-211/212 registry + package-signing work. Nothing half-finished. Rust
-suite **954/954** (nextest), in-language **4390/4390** — also green under
+suite **954/954** (nextest), in-language **4401/4401** — also green under
 `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` — `nest check` clean, `nest format --check` clean, rustfmt and
 clippy clean, both default and `--no-default-features` builds warning-clean, metamorphic
 differential clean across 4 engine configs. **No open issues** — KI-25 (five suites failing when
@@ -19,21 +20,45 @@ hunting again.
 
 ---
 
-## 1. START HERE — `spawn-live`, and the measurement discipline it demands
+## 1. START HERE — `spawn-live`'s remainder: per-process inline caches
 
-**Every quadratic in `std/` is gone** (§4), so the next lever is the worst *published* row.
-`spawn-live` is **2.8× slower and 1.9× heavier than the BEAM** and has never been worked on.
+**ADR-215 took the first bite** (compiled code is now keyed by the closure's AST, so a
+`spawn` thunk and a `receive` matcher are compiled once per *runtime* instead of once per
+*process*): `spawn-live` wall −12.5%, CPU −25%, RSS −14%. What is left is measured and it
+points at one thing.
 
-Its own noise floor is **20.6%**, which is the whole difficulty: nothing smaller than that is
-resolvable on it, and it has produced phantom results repeatedly. Before believing anything
-here, read §5's measurement traps — in particular, measure a **control row that cannot be
-affected** by the change (a ~2% whole-binary drift is normal between two builds), and prefer a
-mechanism switch on ONE binary over a two-binary delta.
+At **35.7 µs of CPU per unit**, the remainder is the child's own tiny computation running
+**cold**. The same 16-element fold costs **~16 µs in a fresh process against 3.7 µs in a warm
+one**, and the reason is that **inline caches are still per-process**: a spawned unit that
+performs a handful of calls misses on ~half of them (counted: ~4 call-IC and 1 global-IC miss
+per unit).
 
-Related and already measured: boxing the `Heap` inside `Process` shrinks the per-process floor
-3.5% but costs `spawn-live` **+6.4%** (§4) — so the direction is cutting the *number* of
-allocations per process, not their sizes, and the `spawn`/`spawn-live` pair must be measured
-together with the floor from the start.
+ADR-175 named the obstacle precisely, and it has not moved: `vm_site_alloc` returns a **dense
+per-process index** baked into each compiled `Node::Call`, so a shared arm's site ids come
+from whichever process compiled it, and every process's IC vectors must then be dense up to
+the global maximum. Measured then: a unit process uses 21 sites (4.3 KB), the root 251
+(33.4 KB) — so naive IC sharing pushes every process toward the root's figure and can lose
+more memory than it saves. **A site-id scheme is the prerequisite, not the IC sharing itself.**
+
+The options, none yet measured:
+
+- **Sparse per-process IC storage** (a small map, or a per-arm block allocated on first use)
+  — removes the density requirement, costs a lookup on the hot path.
+- **Per-arm site numbering** (ids local to the arm, so a shared arm carries its own dense
+  range and each process allocates one block per arm it runs) — keeps the array indexing;
+  needs a per-process arm→block table, which is what `vm_arm_block` already is under `jit`.
+- **Share the IC block itself**, epoch-validated like the arms. Entries cache immovable
+  callees + an epoch, so this may be sound as-is — but it is a write-shared structure on the
+  hottest path, so it needs a race design (seqlock or atomic slots), not just a move.
+
+**Measure it the way the row was measured** (§5): CPU time over a fixed unit count with the
+two binaries interleaved gives a <2% spread on this row. The 20.6% "noise floor" this row was
+credited with is an artefact of measuring *wall* on a 3.3-core workload — do not inherit it.
+Tools: `BROOD_PERF_STATS=1` on a `--features perf-stats` build now reports `ns_*` timing
+shares (`ns_quantum` nests the rest), `BROOD_TRACE_COMPILE=1` names every compile, and
+`scripts/fuzz/stress/` has no row for this shape yet — the decomposition ladder used in the
+devlog entry (spawn+send+exit / non-parking receive / held-alive / full row) is worth
+committing as one if you continue here.
 
 ## 2. Then: rope-native structural motion, the editor half of the `sexp` story
 
@@ -78,6 +103,14 @@ anyway (its copies are the parts, not the input). `scan-tokens` would need a two
 
 Each was measured to a conclusion. Re-deriving them costs a session each.
 
+- **`spawn-live`'s per-process recompilation** — **fixed** (ADR-215): the compiled-code cache
+  was keyed by the closure *handle*, and a no-capture closure is promoted afresh per creation
+  (ADR-194), so every `spawn` thunk and `receive` matcher missed and every process recompiled —
+  100 154 compiles per 100 000 units at 8.1 µs. Keyed by AST now. Do not re-attempt the
+  *mechanism* (ADR-175 shipped it correctly); the bug was the key.
+- **Nine scheduler/messaging switches as an explanation for `spawn-live`** — all measured
+  neutral on it (`NO_HANDOFF`, `NO_STEAL_WAKE`, `SPAWN_RR`, `SPAWN_SPILL`, `NO_RECV_MARK`,
+  `NO_JIT`, `MIMALLOC_PURGE_DELAY=0`, `NO_SHARE_FN`). The row is not a scheduling problem.
 - **`sexp motions`, the last quadratic in the sweep** — **fixed** (ADR-214): the form-start scan
   resumes from a safepoint table cached against the string value, and runs over bytes instead of
   a per-call `Vec<char>`. Ratio 7.97 → 3.88, 18570 → 6146 ms at 12800 forms, linear on four
@@ -117,6 +150,7 @@ mechanism with a switch, the switch on ONE binary is the attribution (§6).
 
 | Change | Off-switch | Worth |
 |---|---|---|
+| Compiled code keyed by the closure's AST, shared per runtime (ADR-215) | `BROOD_NO_SHARED_ARMS=1` | `spawn-live` wall −12.5%, CPU −25%, RSS −14%; bytecode compiles 100 154 → 163 per 100k processes |
 | Form-start safepoint table on the string value (ADR-214) | — (a cache that changes no answer; gated by equality with the pre-table scan at every position) | `sexp motions` 7.97× → 3.88×, 3.0× at 12800 forms |
 | Sparse char→byte index on the string slot (ADR-213) | — (a cache that changes no result; its gate is that its answers equal the walk's) | multi-byte char indexing **96×** on a micro (60.2 s → 0.62 s); `inc-scan` 16.85× → linear; `sexp motions` 9.80× → 5.42×; ASCII flat |
 | Partial leaf splicing (ADR-210) | `BROOD_NO_PARTIAL_LEAF=1` | 2.4× on a lowering caller with a leaf beside a residual call; every published row flat |
@@ -158,6 +192,17 @@ regression detection, which means running it **both** ways (`UTF8=1`) and checki
 - **A ratio near 4× that RISES across bases is not linear.** `format-source` read 3.80/4.12/4.64 and
   was cleared as linear; pushing the base gave 4.46 then 6.40. Only a *falling* ratio (warm-up)
   clears a row. Check the trend across triples, not one triple.
+- **A row's "noise floor" can be an artefact of the metric.** `spawn-live` was credited with a
+  20.6% floor and treated as unmeasurable for weeks; that was **wall** time on a 3.3-core
+  workload. Measuring **CPU** time over a fixed unit count, with the two binaries interleaved,
+  gives a <2% spread on the same row — enough to resolve a 12% change. Before accepting that a
+  row cannot be measured, try measuring something else about it.
+- **A cache that cannot be observed missing looks like a cache that works.** ADR-175's shared
+  compiled-code cache shipped with the right mechanism and the wrong key; nothing in the suite
+  or the benchmarks could tell, because the only symptom was slowness. The counter that catches
+  it — compiles should be ~one per arm per *run*, never per *process* — is now `n_compile`, and
+  `BROOD_TRACE_COMPILE=1` names the offender. Ask of any cache: what would I measure to see it
+  missing?
 - **Before believing a small two-binary delta, measure a row that CANNOT be affected by the
   change.** ADR-213's ASCII micro read `char-at` +2.1% and `last-index-of` +2.4% against 0.0%
   floors, and I spent two builds reshaping hot paths to chase it — the reshapes made it *worse*
@@ -292,6 +337,10 @@ All in `scripts/fuzz/stress/`, each with a usage header worth reading first.
 - **`tests/collection_identities_test.blsp`** — seeded-random laws over maps/vectors/strings,
   including the multi-byte char-index laws (each op against the code-point vector). The place to add
   a property that every engine would agree on, which the engine-differential is therefore blind to.
+- **`BROOD_PERF_STATS=1` on a `--features perf-stats` build** — counts *and* (new) `ns_*`
+  timing shares: spawn / deliver / message copy each way / receive / matcher resolve /
+  teardown / one scheduler quantum (which nests the rest). This is what attributes a
+  *process-shaped* cost; the counters alone could not. Pair with `BROOD_TRACE_COMPILE=1`.
 - `scripts/fuzz/run.sh <generator>` — differential across 4 engine configs (tree-walker, VM-no-JIT,
   VM+JIT, GC-stress+verify). `make ab BASE=<ref>` for brood-vs-brood rows; `bench/harness.py` in
   brood-benchmarks for the published cross-language numbers.

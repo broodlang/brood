@@ -26,6 +26,10 @@ pub(super) fn proc_descr(pid: u64) -> String {
 /// routes over the link). Same `[:down …]` shape in both cases — the
 /// receiver code on the wire side is unchanged from local.
 pub(super) fn deregister(pid: u64, reason: Message, heap: &Heap) {
+    crate::perf_time!(ns_teardown, { deregister_timed(pid, reason, heap) })
+}
+
+fn deregister_timed(pid: u64, reason: Message, heap: &Heap) {
     EXITED.fetch_add(1, Ordering::Relaxed);
     if crate::process::sysmon::armed() {
         // Exit event first, then the death-disarm check — so a monitor watching
@@ -166,6 +170,10 @@ pub fn spawn_linked(heap: &Heap, f: Value) -> Result<u64, LispError> {
 }
 
 fn spawn_impl(heap: &Heap, f: Value, link_parent: bool) -> Result<u64, LispError> {
+    crate::perf_time!(ns_spawn, { spawn_impl_timed(heap, f, link_parent) })
+}
+
+fn spawn_impl_timed(heap: &Heap, f: Value, link_parent: bool) -> Result<u64, LispError> {
     // The spawner is the parent. Captured before minting the child pid so the
     // root (whose ctx/pid is lazily minted here on its first spawn) gets the
     // lower id. `ensure_ctx` needs no heap.
