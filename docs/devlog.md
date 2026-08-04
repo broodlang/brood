@@ -15679,7 +15679,33 @@ phrasing* — "the requirements on c and f and e and g and a cannot all hold" ac
 that is not duplication and not what numbering addresses; it is inherent to a deep accumulated
 conflict, and pub has it too.)
 
-## 2026-08-04 (cont.) — markdown was quadratic in UTF-8 and linear in ASCII
+## 2026-08-04 (cont.) — the registry is hive, not a git index: recording a shipped pivot (ADR-211)
+
+Scoping the "registry plumbing" the roadmap deferred, the interesting finding was that the code
+had outrun the ADR. ADR-147 decided the registry would be "**just a git repo** … **not a hosted
+service**"; what actually shipped is a **hosted HTTP/tarball service** (the sibling `hive` app),
+queried live per-resolve. Verified directly, not just from a survey: the client speaks
+`/api/v1/packages/:name/releases` + `POST /api/v1/publish` with a Bearer token
+(`std/tool/package.blsp`, default base `https://brood.fly.dev`), and hive has the matching routes +
+a Postgres `releases` table storing tarball bytes + a sha256 checksum. `hive` appears **nowhere**
+in `decisions.md` — the pivot landed without an ADR.
+
+Wrote **ADR-211** to record it: the two forces that pulled away from a git index (ADR-209's
+resolver needs a live "versions + deps" query a hosted `/releases` answers in one request; releases
+now store their own immutable tarball + checksum + download counts behind a token-authed publish),
+what's kept (the **mandatory sha256** is the supply-chain guarantee — hive is *not* trusted to
+serve the right bytes; no install scripts; the `:tarball` dep kind + `%untar-gz` unchanged), and
+what's genuinely lost (central infra to host/pay for — the git index's whole point; self-hosting
+keeps it from being a single point of *control*, not of *availability*).
+
+Corrected the record everywhere it was wrong: ADR-147's status + deferred list, the ROADMAP
+packaging bullet, and `docs/packages.md` (intro, the whole *registry* section, the command table,
+the stale *future-work* list). The **deferred list re-scoped**: semver ranges and tarball-backed
+entries are done; cloned-index TTL is moot (no clone exists — freshness is the lock + `_deps` cache);
+**signed packages** is now the one real supply-chain gap (sha256 = integrity, not authorship), plus
+**external tarball URLs** and an optional response cache remain. This ADR is the prerequisite for
+scoping those honestly — leaving ADR-147 describing a retired model made the first scoping attempt
+start from a false premise.
 
 Continued the sweep into `editor/markdown`, which I had triaged as low-risk ("21 `char-at`, but
 per-*line* so bounded"). That triage was right about the `char-at`s and wrong about the module:

@@ -1812,10 +1812,13 @@ Runtime housekeeping (both items landed):
   `std/tool/package.blsp`). ✅ **v2 shipped 2026-07-24 (ADR-147):** **`:tarball`
   deps** (`[name :tarball URL :sha256 HEX]` — download via `std/net` `http-get` or
   `file://`, mandatory sha256 verify, strip-extract via the new `%untar-gz` shell to
-  `tar` on the offload pool) and a **git-backed registry** — the index is just a git
-  repo of `packages/<name>.blsp` metadata (no hosted server), with `nest publish`
-  (append the project's entry, no auto-commit), `nest search`, and `[name :version
-  "X"]` deps resolving an exact version to its git source. ✅ **semver-range
+  `tar` on the offload pool) and a **registry**. NOTE (ADR-211): the registry shipped
+  as a **hosted HTTP/tarball service** — the sibling **hive** app (Brood/Hatch/Postgres) —
+  **not** the git-backed index ADR-147 first described; a release carries an immutable,
+  sha256-pinned **tarball** + dependency metadata, `nest publish` POSTs a token-authed
+  upload, `nest search`/resolve hit a JSON API (`/api/v1/packages/:name/releases` answers
+  the resolver's per-package query in one request), and `[name :version "X"]` resolves a
+  range from live metadata. ✅ **semver-range
   resolution shipped (ADR-209):** the version grammar (`^`/`~>`/conjunctions in
   `std/version.blsp`), a **PubGrub (CDCL), newest-compatible solver**
   (`std/resolver.blsp`, driven by an injected provider so it is exhaustively testable
@@ -1829,8 +1832,13 @@ Runtime housekeeping (both items landed):
   <consequence>" chain over the incompatibilities PubGrub actually resolved, naming only the
   requirers that truly clash — and **pre-releases** are ordered and matched per the npm/Cargo
   rule (a plain range excludes them; one that names a pre-release admits it).
-  ⬜ Remaining (ADR-011): tarball sources *inside* registry entries, signed packages,
-  cloned-index auto-refresh, semver ranges over `:git` tags.
+  ⬜ Remaining (ADR-011, re-scoped by ADR-211): **signed packages** (the one open
+  supply-chain gap — sha256 proves integrity, not authorship; needs public-key signing +
+  a trust model), **external tarball URLs** (a release pointing at a GitHub/S3/CDN asset
+  instead of hive holding the bytes, still checksum-pinned), an optional client-side
+  **registry response TTL cache**, and semver ranges over `:git` tags. *(Tarball-backed
+  registry entries and cloned-index auto-refresh from the old list are done / moot under
+  the hosted design — see ADR-211.)*
 - ⬜ **Single-binary bundling** (ADR-038) — `nest bundle` appends a zip of
   project + `_deps/` to a pre-built `brood`; deferred until the editor needs end-user
   distribution.
