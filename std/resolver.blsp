@@ -535,7 +535,12 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
 ;; if what remains pins a single package we say what it must — or cannot — be, and an empty
 ;; remainder is the final contradiction ("version solving failed").
 (defn pg-consequence-str (ctx ic)
-  (let (reals (filter (fn (kv) (not (= (nth kv 0) pg-root-pkg))) (map-pairs (get ic :terms))))
+  ;; Keep only the terms that actually CONSTRAIN: not the always-true root, and not a vacuous
+  ;; empty-set term (`P → {}` forbids nothing, so its complement is the whole universe — rendering
+  ;; it as "P must be <every version>" is both wrong and unbounded; such a term can arise as an
+  ;; empty-intersection resolvent on the spine).
+  (let (reals (filter (fn (kv) (and (not (= (nth kv 0) pg-root-pkg)) (not (empty? (nth kv 1)))))
+                (map-pairs (get ic :terms))))
     (cond
       (empty? reals) "version solving failed"
       (= 1 (count reals))

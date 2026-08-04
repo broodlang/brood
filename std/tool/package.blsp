@@ -776,56 +776,88 @@ TOFU-pinned signing key, nil for an unsigned package)."
   ;; convention (one wrapper dir → strip 1); a hive-hosted tarball is root-level (strip 0).
   ;; EITHER WAY the sha256 is verified before anything is extracted — the registry is never
   ;; trusted for the bytes, so an external URL is exactly as safe as a hosted one.
-  (let (external (and source-url (not (= source-url "")))
-        bytes (if external
-                (package--fetch-bytes source-url)
-                (registry--download-hosted base nm version))
-        got (hash/sha256-bytes bytes))
-    (when (not (= got checksum))
+  (let (external (and source-url (not (= source-url ""))))
+    ;; A registry-supplied external URL must be http(s). Unlike a `:tarball` MANIFEST dep (where
+    ;; the user typed the URL and `file://` is a legitimate offline/local source), this URL comes
+    ;; from the registry's JSON — a compromised or MITM'd (plain-http) registry must NOT be able to
+    ;; point the client at a `file://` (or other) local resource to read + extract (the sha256 pin
+    ;; is no defence, since the same party supplies the checksum). Refuse it (ADR-211).
+    (when (and external
+            (not (starts-with? source-url "https://"))
+            (not (starts-with? source-url "http://")))
       (error "package: "
-        nm " " version " sha256 mismatch — the registry declares " checksum
-        " but the download hashed to " got " (tampered or corrupted — do not trust it)"))
-    ;; Signature (ADR-212): advisory TOFU check over the verified checksum. Returns the pubkey
-    ;; to PIN in the lock (the pinned one wins — TOFU is sticky, first-seen).
-    (let (pinned (package--verify-signature nm version checksum signature pubkey locked-pubkey)
-          archive (path-join (package--deps-dir root) (str (name nm) ".tar.gz")))
-      (make-dir (package--deps-dir root))
-      (spit-bytes archive bytes)
-      ;; Extraction of a large archive runs on the offload pool, like a clone.
-      (offload %untar-gz archive target (if external 1 0))
-      (delete-file archive)
-      (registry--write-meta target base nm version checksum)
-      (registry--resolved dep target version checksum pinned))))
+        (name nm)
+        " "
+        version
+        " declares a non-http(s) source URL — refusing (a registry release's external bytes must"
+        " come from http(s), got: "
+        source-url
+        ")"))
+    (let (bytes (if external
+                  (package--fetch-bytes source-url)
+                  (registry--download-hosted base nm version))
+          got (hash/sha256-bytes bytes))
+      (when (not (= got checksum))
+        (error "package: "
+          nm " " version " sha256 mismatch — the registry declares " checksum
+          " but the download hashed to " got " (tampered or corrupted — do not trust it)"))
+      ;; Signature (ADR-212): advisory TOFU check over the verified checksum. Returns the pubkey
+      ;; to PIN in the lock (the pinned one wins — TOFU is sticky, first-seen).
+      (let (pinned (package--verify-signature nm version checksum signature pubkey locked-pubkey)
+            archive (path-join (package--deps-dir root) (str (name nm) ".tar.gz")))
+        (make-dir (package--deps-dir root))
+        (spit-bytes archive bytes)
+        ;; Extraction of a large archive runs on the offload pool, like a clone.
+        (offload %untar-gz archive target (if external 1 0))
+        (delete-file archive)
+        (registry--write-meta target base nm version checksum)
+        (registry--resolved dep target version checksum pinned)))))
 
 ;; Advisory signature + TOFU check (ADR-212). NEVER errors — every problem is a warning, so a
 ;; signing issue can't block an install (the type-checker stance). Returns the pubkey to pin in
 ;; the lock: the already-pinned key when there is one (TOFU keeps the first-seen key and only
-;; WARNS on a change — it does not silently adopt a new one), else the release's key.
+;; WARNS on a change — it does not silently adopt a new one), else the release's key IF its
+;; signature verified (never pin a key that hasn't proven control by producing a valid signature).
 (defn package--verify-signature (nm version checksum signature pubkey locked-pubkey)
   (require 'crypto)
   (require 'encoding)
-  (let (signed (and signature pubkey (not (= signature "")) (not (= pubkey "")))
-        had-pin (and locked-pubkey (not (= locked-pubkey ""))))
+  ;; `signature`/`pubkey`/`locked-pubkey` are attacker-controlled (registry JSON / the lock), so
+  ;; type-guard to STRINGS before touching hex-decode — a non-string (a JSON number/array) would
+  ;; otherwise throw out of hex-decode and turn this advisory check into a hard install block. The
+  ;; verify itself is wrapped in a `try` as belt-and-suspenders: nothing may escape this function.
+  (let (signed (and (string? signature) (string? pubkey) (not (= signature "")) (not (= pubkey "")))
+        had-pin (and (string? locked-pubkey) (not (= locked-pubkey "")))
+        verified (and signed
+                   (try
+                     (crypto/verify (encoding/hex-decode-bytes pubkey)
+                       (package--signing-payload (name nm) version checksum)
+                       (encoding/hex-decode-bytes signature))
+                     (catch _ false))))
     (cond
       signed
         (do
-          (when (not (crypto/verify (encoding/hex-decode-bytes pubkey)
-                       (string->utf8-bytes checksum)
-                       (encoding/hex-decode-bytes signature)))
+          (when (not verified)
             (println "package: WARNING — "
               (name nm)
               " "
               version
               " carries a signature that does NOT verify against its key (possible tampering)."))
-          (when (and had-pin (not (= locked-pubkey pubkey)))
+          ;; a genuine key change is only meaningful when the new signature actually verifies;
+          ;; otherwise the "does not verify" warning already covers it.
+          (when (and verified had-pin (not (= locked-pubkey pubkey)))
             (println "package: WARNING — "
               (name nm)
               " "
               version
               " is signed by a DIFFERENT key than the one pinned in your lock"
               " — a legitimate key rotation, or a compromise. Delete the lock entry to re-pin."))
-          ;; keep the pinned key (sticky TOFU); pin the release's key on first sight.
-          (if had-pin locked-pubkey pubkey))
+          ;; Pin ONLY a verified key: keep the existing pin when there is one (sticky TOFU), pin
+          ;; the release's key on a first VERIFIED sighting, and on a failed verify establish no
+          ;; new trust — keep the old pin (nil when there was none) so a later good install pins it.
+          (cond
+            (and verified had-pin) locked-pubkey
+            verified pubkey
+            else locked-pubkey))
       ;; unsigned now, but a prior release was signed → a dropped signature (downgrade).
       had-pin
         (do
@@ -1536,9 +1568,16 @@ to overwrite an existing key unless `:force true`. Backs `nest key gen`."
       (println "package: public key (share this so others can pin it): " public-hex)
       public-hex)))
 
-;; Sign a checksum string with the stored private key → `[signature-hex public-hex]`, or nil
-;; when there is no key (an unsigned publish). Signs the checksum's utf8 bytes; a verifier
-;; recomputes those same bytes from the checksum it already holds (ADR-212).
+;; The canonical bytes a release signature covers (ADR-212): the package NAME, VERSION, and
+;; checksum bound together (newline-separated), so a valid `(signature, pubkey)` can't be lifted
+;; onto a different package or version — only the exact release it was made for verifies. The
+;; checksum still binds the tarball bytes (the downloader verifies bytes→checksum first), so the
+;; chain is signature → (name, version, checksum) → bytes.
+(defn package--signing-payload (name-str version checksum)
+  (string->utf8-bytes (str name-str "\n" version "\n" checksum)))
+
+;; Sign the current release with the stored private key → `[signature-hex public-hex]`, or nil
+;; when there is no key (an unsigned publish).
 (defn package--sign-checksum (checksum)
   (require 'crypto)
   (require 'encoding)
@@ -1546,7 +1585,8 @@ to overwrite an existing key unless `:force true`. Backs `nest key gen`."
     (if (nil? key)
       nil
       [(encoding/hex-encode-bytes (crypto/sign (encoding/hex-decode-bytes (get key :private))
-                                    (string->utf8-bytes checksum)))
+                                    (package--signing-payload *project-name*
+                                      *project-version* checksum)))
         (get key :public)])))
 
 (defn registry--publish-metadata (checksum source-url signature pubkey)
