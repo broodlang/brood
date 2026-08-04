@@ -43,8 +43,9 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**No open issues.** Every KI above is fixed, incidentally fixed, or a non-reproducing
-transient — each kept as a record with its regression test, so a recurrence is recognizable.
+**One open issue: KI-25** (re-running certain suites in one image). Every other KI above is
+fixed, incidentally fixed, or a non-reproducing transient — each kept as a record with its
+regression test, so a recurrence is recognizable.
 
 ---
 
@@ -75,14 +76,28 @@ somewhere else is invisible behind them. (That is how it was found: hunting flak
 and assert on how the VM or JIT re-links afterwards, so the natural theory is "iteration 2
 starts from iteration 1's redefined state". That explains four of them, and `:isolated`
 (which runs a unit alone against the clean post-load baseline and rolls back its `def`s) is
-the ordinary fix. It does **not** explain `pid_identity_test`, which is already isolated and
-still fails — so something outside the global table persists across iterations: a JIT tier
-election, an IC block, a pid counter, or an arm-keyed cache.
+the ordinary fix.
 
-**Deliberately not fixed here.** Diagnosing what survives an isolated re-run is JIT-internal
-work, and this is the area under active development elsewhere; marking suites `:isolated`
-without understanding `pid_identity_test` would paper over the one case that is informative.
-Left for whoever holds the JIT work, with the sweep recipe above to reproduce in one command:
+**`pid_identity_test` is explained too, and NOT by a JIT cache** (correction 2026-08-04 — the
+original entry guessed "a JIT tier election, an IC block, a pid counter, or an arm-keyed cache"
+and reasoned from there that the case was informative about JIT internals; it is not). Running
+the recipe below prints the cause outright:
+
+```
+uncaught error: … :message node-start: this runtime is already a node (node-start called twice)
+```
+
+The test calls `node-start`, which is **deliberately one-shot per runtime** (`dist.rs`: a second
+listener would need a second port, so the second call is an error by design). `:isolated` rolls
+back `def`s; it cannot roll back the runtime's node state, and no test-level isolation can. So
+this is not "something survives an isolated re-run" in the mysterious sense — it is a test whose
+precondition (`(node-name)` is `:nonode`) is consumed by running it once.
+
+**Which makes the fix small, and different per case.** For `pid_identity_test`: gate on
+`(node-name)` — skip, or assert against the already-started node — rather than calling
+`node-start` unconditionally. For the other four: `:isolated`, then verify under
+`--repeat-until-failure`. Still open only because nobody has done it; the JIT-internals reason
+for leaving it alone has been withdrawn. Reproduce in one command:
 
 ```bash
 nest test tests/pid_identity_test.blsp --repeat-until-failure 3 --seed 0

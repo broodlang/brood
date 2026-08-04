@@ -13873,3 +13873,93 @@ value with zero new trust infrastructure — the registry stays a relay, the gua
 gracefully (advisory), and the mechanism is one small vetted primitive with all policy in Brood. The
 deferred-until-needed bar (ADR-011) is met by a concrete pull: a public registry with token auth is
 exactly where "a stolen token published under my name" becomes a real risk.
+
+## ADR-213 — A sparse char→byte index on the string slot: char indexing is O(1) in both encoding regimes
+
+**Status:** implemented (2026-08-04), unconditional (no off-switch — it is a cache that changes
+no result; the correctness gate is that its answers equal the walk's). Closes the lever
+`handoff.md` §1 carried as the biggest measured item in `std/`.
+
+**Context.** Brood indexes strings by Unicode scalar and stores them as UTF-8, so every char
+index has to be converted to a byte offset. For pure-ASCII text the two numbers are equal; off
+that path the conversion walked from the start of the string (`char_indices().nth(k)`), which
+made every per-character or incremental-search loop quadratic. It cost real time repeatedly:
+`url.blsp` and `csv.blsp` were rewritten onto code-point vectors, `ansi.blsp` was 1.58 s on
+90 KB, and `editor/markdown` was linear on ASCII and quadratic with **one** non-ASCII character
+in the document.
+
+The 2026-08-02 char-count cache (`LocalString::chars`) did **not** fix this, and the reason is
+structural rather than incidental: its mechanism *is* the fast-path test. `chars ==
+as_str().len()` is how a slot answers "is a char index also a byte offset", so the O(1)
+conversion it buys exists only where the answer is yes. The sweep row measured 16.85× per 4× of
+input under `UTF8=1` while reading as unmeasurable in ASCII.
+
+**Decision.** Give each string slot a **sparse char→byte index**, built on its first conversion:
+`marks[k]` is the byte offset of char `(k + 1) * 32`. A conversion is then a lookup plus a walk
+bounded by the stride — O(1) with a small constant — in both directions (`floor_char` for
+char→byte, a binary search `floor_byte` for byte→char, which is the direction a `find` result
+needs). Both live on `LocalString` in `core/heap.rs`, next to the count they complete, and the
+four char-indexed builtins (`substring`, `string-span`/`-until`, `%str-index-of`,
+`%str-last-index-of`) reach them through `Heap::str_char_to_byte` / `str_byte_to_char`, via a
+`StrArg` that resolves the slot once for the bytes, the cached char count and the ASCII flag
+together (all three are needed by all four).
+
+**The decision that actually had to be made: how to populate it.** A string slot can live in the
+**RUNTIME** region, which every process of a runtime reads concurrently, so a lazily-built cache
+is a data race on exactly the long shared strings most worth indexing. `handoff.md` framed three
+options — eager at construction, lazy + synchronised, or LOCAL-only — and recommended LOCAL-only
+first, as the smallest sound change. **Lazy + synchronised won, via `OnceLock`**, because it is
+*also* the smallest: the racing case is two threads building identical tables and `get_or_init`
+publishing one, so there is nothing to reconcile, no new synchronisation primitive, and no region
+split in the accessor. Eager was rejected for making every string pay a build and an allocation
+it usually cannot use; LOCAL-only for leaving the prelude's and every `def`'d string on the slow
+path for no simplification in return.
+
+Two thresholds keep the cache honest rather than universal: an index is declined for a
+**pure-ASCII** string (conversion is arithmetic there) and for one under **256 chars** (the walk
+is already bounded, and an allocation per short string is the wrong trade). The cell is a boxed
+`OnceLock`, one pointer plus its `Once` state, because this struct is every string slab entry —
+`LocalString` went 40 → 56 bytes.
+
+**Measured on the two rows `handoff.md` named as the scoreboard** (`scale_sweep.blsp`, `UTF8=1`):
+
+| row | before | after |
+|---|---|---|
+| `string inc-scan` (`index-of` with a rising `from`) | 7 → 118 ms, **16.85×** | 0 → 3 ms; at N=3200, 3 → 8 ms (**2.66×**, i.e. warm-up) |
+| `sexp motions` | **9.80×** (ASCII 5.48×) | **5.12–5.42×** — the encoding penalty is gone |
+
+`sexp motions` is still quadratic in *shape* (each motion's `narrow` needs an O(point) form-start
+scan by design) and that is unchanged: what this removes is the multi-byte *multiplier* on top of
+it, which is why the row now reads its ASCII ratio in both regimes.
+
+A direct micro-benchmark of the four primitives (`char-at` per char, an incremental `index-of`
+scan, `string-span-until` tokenizing, `last-index-of`) over a 920k-char document with **one**
+non-ASCII character: **60.2 s → 0.62 s, 96×**, best-of-3 against a 0.4% floor.
+
+**The ASCII path is flat, and proving that needed a drift control.** The same micro-benchmark in
+pure ASCII read `char-at` +2.1% and `last-index-of` +2.4% (`index-of` and `string-span` +0.0%),
+which looked like a small real cost — until `wordcount`, a row that calls **none** of the changed
+code, read **+2.2%** on the same binary pair. So this pair carries ~2% of whole-binary
+codegen/layout drift and the string rows are inside it. Two reshapes aimed at the "regression"
+(open-coding the ASCII arm of `substring`, hoisting the `&str` out of `last-index-of`'s scan) made
+the numbers *worse* — +5.5% where the simpler code read +2.4% — which is what chasing drift looks
+like; both were reverted. The published rows agree: `strings`, `json`, `regex` +0.0%, `base64`
+−2.4% measured solo. The deduction that settled it: `last-index-of`'s delta scaled with a
+`match_indices` byte scan costing ~90 µs per call, and no per-call change of a few instructions can
+account for 2.4 µs of it.
+
+**Validation, because a wrong offset is a silent wrong substring, not a crash.** The Rust test
+compares both directions against the walk at **every** char index of seven string shapes at three
+sizes — multi-byte leading, trailing, one per stride boundary, all-wide, and a `Shared` blob slot
+— which is the definition the index has to match. `collection_identities_test.blsp` gained
+seeded-random laws over a 600-char mixed-width string (each op against the code-point vector), and
+`strings_test.blsp` a block of end-to-end cases including a cross-process one (the receiver builds
+its own index). All three fail on a one-character sabotage of `floor_char`. Gates: 952 Rust tests
+and 4378 in-language tests green, the latter also under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`;
+`--no-default-features` builds; the metamorphic differential clean across 4 engine configs.
+
+**What this changes about writing Brood.** A per-character loop (`char-at`, `substring`) and an
+incremental `index-of` scan are now linear on any text, so the code-point-vector rewrites this
+class of bug forced (`url`, `csv`, `ansi`) are no longer *required* — they remain correct and are
+left alone. The remaining string-path seam is unrelated and still open: `expect_string` returns an
+owned `String` at ~113 call sites, one copy of the argument per call.
