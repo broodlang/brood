@@ -108,10 +108,7 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
   (let (cache (get ctx :universes)
         hit (table-get cache pkg :miss))
     (if (= hit :miss)
-      (let (versions (append (sort (fn (a b)
-                                     (> (version/version-compare-cores (version/version-core a)
-                                          (version/version-core b))
-                                       0))
+      (let (versions (append (sort (fn (a b) (> (version/version-compare a b) 0))
                                (or (provider-versions (get ctx :provider) pkg) nil))
                        (list pg-none)))
         (table-put cache pkg versions)
@@ -320,24 +317,20 @@ all). NONE never matches — a version constraint is about a selected version."
 
 (defn pg-conflict-resolution (state ctx ics ic)
   (resolver--tick ctx)
-  (if (pg-ic-satisfied-at-level0? state ctx ic)
-    [:fail ic]
-    (let (chrono (reverse (get state :assigns)) ; oldest-first
-          satisfier-idx (pg-satisfier-index state ctx ic chrono)
-          satisfier (nth chrono satisfier-idx)
-          previous-level (pg-previous-satisfier-level state ctx ic chrono satisfier-idx satisfier))
-      (if (or (get satisfier :dec) (< previous-level (get satisfier :level)))
+  (let (chrono (reverse (get state :assigns)) ; oldest-first
+        satisfier-idx (pg-satisfier-index state ctx ic chrono)
+        satisfier (nth chrono satisfier-idx)
+        previous-level (pg-previous-satisfier-level state ctx ic chrono satisfier-idx satisfier))
+    (cond
+      ;; The conflict traces all the way back to the always-decided root: no solution. We keep
+      ;; resolving until the incompatibility reduces to just the root term, so the FAILING one
+      ;; carries the full derivation (every requirer that contributed), not a single leaf.
+      (= (get satisfier :pkg) pg-root-pkg) [:fail ic]
+      (or (get satisfier :dec) (< previous-level (get satisfier :level)))
         [:backjump (pg-backtrack state previous-level) ic]
-        (pg-conflict-resolution state
-          ctx
-          ics
-          (pg-resolvent ctx ic (get satisfier :cause) (get satisfier :pkg) (get satisfier :set)))))))
-
-;; The incompatibility is a proof of no-solution if it already holds using only level-0
-;; assignments (the root requirements) — no decision is to blame.
-(defn pg-ic-satisfied-at-level0? (state ctx ic)
-  (let (level0 (pg-backtrack state 0))
-    (= :satisfied (pg-ic-rel level0 ctx ic))))
+      else
+        (pg-conflict-resolution state ctx ics
+          (pg-resolvent ctx ic (get satisfier :cause) (get satisfier :pkg) (get satisfier :set))))))
 
 ;; The earliest assignment (index into oldest-first `chrono`) after which `ic` is satisfied.
 ;; The full partial solution satisfies `ic` (it was a conflict), so a satisfier always
@@ -514,50 +507,47 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
 ;; Walk the failing incompatibility's cause tree into a human explanation. A `:derived` node
 ;; is a conjunction of its two causes; a `:root`/`:dep` node is a leaf fact.
 
+;; The terminal incompatibility's CAUSE is a tree of resolution steps whose LEAVES are the
+;; original facts (a root requirement, a package's dependency). Rendering the distinct leaves
+;; gives the full "because X requires this AND Y requires that" derivation; the packages they
+;; name, listed with what they actually offer, show why nothing fits.
 (defn pg-error (ctx ic)
-  (str "dependency resolution failed:\n"
-    (pg-explain ic "  ")
-    (pg-error-availability ctx ic)))
+  (let (leaves (pg-cause-leaves (get ic :cause) nil))
+    (str "dependency resolution failed:\n"
+      (join "\n" (map (fn (leaf) (str "  " (pg-explain-leaf leaf))) leaves))
+      (pg-availability-lines ctx leaves))))
 
-;; After the derivation, list what each package in the terminal incompatibility actually
-;; offers — so a reader can see, e.g., that `shared` has only `1.0.0, 1.5.0, 2.0.0` and none
-;; span both requirements, or that a package has no published versions at all.
-(defn pg-error-availability (ctx ic)
-  (apply str
-    (map (fn (pkg)
-           (let (real (filter (fn (v) (not (= v pg-none))) (pg-universe ctx pkg)))
-             (str "\n  "
-               (name pkg)
-               (if (empty? real)
-                 " has no versions available"
-                 (str " available: " (join ", " real))))))
-      (filter (fn (p) (not (= p pg-root-pkg))) (keys (get ic :terms))))))
+(defn pg-cause-leaves (cause acc)
+  ;; distinct leaves of the derivation tree, in first-seen order.
+  (match cause
+    ([:derived a b] (pg-cause-leaves (get b :cause)
+                      (pg-cause-leaves (get a :cause) acc)))
+    (leaf (if (includes? acc leaf) acc (append acc (list leaf))))))
 
-(defn pg-explain (ic indent)
-  (match (get ic :cause)
-    ([:root pkg constraint] (str indent
-                              "your project requires "
-                              (name pkg)
-                              " "
-                              (resolver--constraint-str constraint)))
-    ([:dep pkg version dep-name dep-constraint] (str indent
-                                                  (name pkg)
-                                                  " "
-                                                  version
-                                                  " requires "
-                                                  (name dep-name)
-                                                  " "
-                                                  (resolver--constraint-str dep-constraint)))
-    ([:derived a b] (str (pg-explain a indent)
-                      "\n"
-                      indent
-                      "and "
-                      (string-trim-left (pg-explain b indent))))))
+(defn pg-explain-leaf (leaf)
+  (match leaf
+    ([:root pkg constraint]
+      (str "your project requires " (name pkg) " " (resolver--constraint-str constraint)))
+    ([:dep pkg version dep-name dep-constraint]
+      (str (name pkg) " " version " requires " (name dep-name) " "
+        (resolver--constraint-str dep-constraint)))))
 
-(defn string-trim-left (s)
-  (if (and (> (string-length s) 0) (= (substring s 0 1) " "))
-    (string-trim-left (substring s 1 (string-length s)))
-    s))
+(defn pg-leaf-packages (leaf)
+  (match leaf
+    ([:root pkg _] (list pkg))
+    ([:dep pkg _ dep-name _] (list pkg dep-name))))
+
+(defn pg-availability-lines (ctx leaves)
+  (let (pkgs (distinct (apply append (map pg-leaf-packages leaves))))
+    (apply str
+      (map (fn (pkg)
+             (let (real (filter (fn (v) (not (= v pg-none))) (pg-universe ctx pkg)))
+               (str "\n  "
+                 (name pkg)
+                 (if (empty? real)
+                   " has no versions available"
+                   (str " available: " (join ", " real))))))
+        pkgs))))
 
 (defn pg-no-versions-msg (state ctx ics pkg)
   (let (universe (pg-universe ctx pkg))
