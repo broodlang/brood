@@ -13540,6 +13540,41 @@ graph against a loopback registry exposed two walls, both fixed:
   its inputs. Covered by a bounded-search test (over-constrained → clear error; small → still
   resolves) and a 120-package scale test.
 
+**Fourth refinement (2026-08-03): the backtracking search is replaced by full PubGrub
+(CDCL).** The bounded search resolved the common cases but *errored* on tangled-but-solvable
+graphs (a package a later requirer pins, decided too early, would need exponential
+backtracking). `std/resolver.blsp` is now the Dart-pub **PubGrub** algorithm over a FINITE
+version domain: it reasons with **incompatibilities** (sets of package terms that cannot all
+hold), drives forced choices by **unit propagation**, and on a conflict derives the ROOT
+CAUSE by resolution and **backjumps** straight to the decision that caused it, **learning**
+that cause so the dead end never recurs. Effect: tangled-but-solvable graphs resolve without
+exponential search (a 12- and 20-deep tangle that explodes under naive backtracking resolves
+in near-linear steps), and an unsolvable graph yields a **derivation** — the conflicting
+requirement plus what the package actually offers — instead of a bare failure. The step/time
+budget stays only as a safety net, never approached on a well-formed graph.
+
+- *Finite domain.* Each package's universe is its available versions plus a `NONE` sentinel
+  ("not selected"); a version set is a subset of that list, so the set algebra is plain list
+  ops — no interval/successor math. `NONE` is what lets a dependency FORCE selection (it is in
+  the complement of any real requirement), so a permissive requirement still selects the
+  package rather than complementing to the empty set. A virtual, always-decided root package
+  turns the project's own requirements into ordinary dependencies of the root.
+- *Correctness.* Validated by a generative **oracle fuzz** (tests/resolver_test.blsp) against
+  brute-force enumeration over **3400** seeded random universes — 100% agreement, both
+  soundness (never a bogus/invalid solution) and completeness (never gives up when a solution
+  exists). Two mechanics bugs the fuzz caught and pinned: conflict resolution must run against
+  the state AT the conflict (with the derivations that caused it), not the pre-propagation
+  state; and a self-dependency's two terms on one package must be intersected, not dropped by
+  a map key.
+- *Performance.* PubGrub is heavier per step than the streamlined backtracker, so two things
+  keep it fast at scale: incompatibilities are **indexed by package** (propagation scans only
+  what touches the changed package, not the whole growing set), and the undecided **work-list
+  is incremental** (no O(n) scan per decision). A 300-package solve lands ~1.7 s (vs a solver
+  that would otherwise go quadratic and blow the time budget). Newest-compatible selection and
+  lock-`preferred` stability are unchanged.
+- *Deferred.* Multi-requirer derivation trees (today a conflict names one requirer + the
+  package's availability, not every contributor) and pre-release ordering remain future
+  refinements.
 ## ADR-210 — Partial leaf splicing: the inlined engine gets its own checkpoint and resume arm
 
 **Status:** implemented (2026-08-03), **default ON**; `BROOD_NO_PARTIAL_LEAF=1` reverts to
