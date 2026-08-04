@@ -43,6 +43,13 @@
 ;; `substring` being O(index) rather than O(result) off the ASCII fast path (a documented
 ;; kernel property), so it is the next lever for a buffer containing any non-ASCII character.
 ;;
+;; 2026-08-04: `editor/markdown` markdown-spans WAS quadratic on MULTI-BYTE ONLY — linear in
+;; ASCII (3.81x/3.88x) and 5.03x then 6.92x rising with one non-ASCII char, because the
+;; per-line `(substring src i e)` and newline scan are O(i) off the ASCII fast path. Fixed
+;; with one `string-split` + a running offset (the `stream-lines` fix again): 6400 lines
+;; 1287 -> 559 ms, and multi-byte now EQUALS ASCII (559 vs 556). Lesson: a row can be linear
+;; in ASCII and quadratic in UTF-8, so sweep BOTH — a pure-ASCII corpus hides this entirely.
+;;
 ;; 2026-08-04, cleared: `editor/highlight` highlight-spans is LINEAR even on multi-byte
 ;; (16x input for 14.6x time; the multi-byte ratio FALLS 4.49 -> 3.42). The
 ;; char-at-over-whole-text shape is present there and is not quadratic, so that shape by

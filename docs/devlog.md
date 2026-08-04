@@ -15616,3 +15616,37 @@ than the asymptote.
 
 `std/net/http` needed nothing — its comments already record the old `(str acc …)` being fixed, and
 it searches bytes with `bytes-index-of` rather than char indices.
+
+## 2026-08-04 (cont.) — markdown was quadratic in UTF-8 and linear in ASCII
+
+Continued the sweep into `editor/markdown`, which I had triaged as low-risk ("21 `char-at`, but
+per-*line* so bounded"). That triage was right about the `char-at`s and wrong about the module:
+the quadratic was in the line *walker*, and it only exists off the ASCII fast path.
+
+`markdown-spans` cut each line with `(substring src i e)` at a rising `i`, after finding the line
+end with a `string-span-until` scan from `i`. Both convert a CHAR index to a byte offset, which is
+O(1) only when the string is pure ASCII (then a char index *is* the byte offset) and O(i)
+otherwise. So:
+
+| corpus | N→4N | 4N→16N |
+|---|---|---|
+| ASCII | 3.81× | 3.88× |
+| identical text + **one** non-ASCII char | 5.03× | **6.92×** |
+
+Fixed with one `string-split` and a running offset — the same fix `stream-lines` needed on
+2026-08-02, for the same reason. **6400 lines: 1287 → 559 ms (2.3×), and multi-byte now measures
+the same as ASCII (559 vs 556)** — the encoding penalty is gone, not merely smaller.
+
+**The generalisable lesson: a row can be linear in ASCII and quadratic in UTF-8, so a pure-ASCII
+corpus hides this class completely.** Every earlier sweep row used ASCII fixtures. That is why I
+now measure both, and why `highlight-spans` clearing on *both* corpora is a stronger result than
+it first looked. Anything indexing a string by character has two complexity regimes.
+
+Two process notes. The equivalence check came before the swap, as with `scan-form-start-2`: 13
+sources covering every newline edge case (`""`, `"a"`, `"a\n"`, `"a\nb\n"`, `"\n"`, blank
+interiors), fences closed and unclosed, and multi-byte — zero mismatches. And the durable test
+pins what the rewrite actually risks: absolute span offsets (an offset computed per-line rather
+than per-document reads 5 where the answer is 22), that a trailing newline changes nothing
+(`string-split` yields a trailing `""` where the old `(>= i n)` loop just stopped), and that
+`café` and `cafe` produce identical offsets because Brood indexes by character. Dead `md--lex` /
+`md--line-end` removed.

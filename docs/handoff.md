@@ -203,9 +203,19 @@ looks fine at any size.
   fixed, it searches with `bytes-index-of` on bytes rather than char indices, and header parsing
   is per-line.
 
-**Still unswept:** `editor/markdown` (21 `char-at`, but per-*line* so bounded), `editor/lineedit`
-(39, bounded by one input line), `std/net/sse` + `reconnect`, and the rest of `std/tool/*` beyond
-the modules above. ~115 `expect_string` call sites still copy their argument; two more sit in
+**Fixed: `editor/markdown` was quadratic on multi-byte text only.** `markdown-spans` walked lines
+with `(substring src i e)` at a rising `i`, plus a `string-span-until` newline scan — both O(1)
+only on pure ASCII, O(i) off it. So the document scan was linear on ASCII (3.81×/3.88×) and
+**superlinear on any text containing one non-ASCII character (5.03× then 6.92×, rising)**. Now one
+`string-split` and a running offset — the same fix `stream-lines` needed, for the same reason.
+**6400 lines: 1287 → 559 ms (2.3×), and multi-byte is now identical to ASCII (559 vs 556)**, i.e.
+the encoding penalty is gone rather than reduced. Equivalence checked against the old walker over
+13 sources (every newline edge case, fences, multi-byte) before the swap; the durable guard is 5
+offset/edge tests in `tests/markdown_test.blsp`, since the risk the rewrite carries is the offset
+arithmetic and `string-split`'s trailing empty. Dead `md--lex` / `md--line-end` removed.
+
+**Still unswept:** `editor/lineedit` (39 `char-at`, bounded by one input line), `std/net/sse` +
+`reconnect`, and the rest of `std/tool/*` beyond the modules above. ~115 `expect_string` call sites still copy their argument; two more sit in
 `syntax_scan.rs` itself (`scan-tokens`, `span-runs`) and were left because they allocate on the
 heap after reading, so the borrow needs restructuring rather than a one-line swap.
 
