@@ -13594,6 +13594,33 @@ deferred items landed.
   pre-release-aware `version-compare` / `version-match?`, so it prefers a release over a
   newer pre-release and only picks a pre-release when a range asks for one.
 
+**Sixth refinement (2026-08-04): the conflict derivation is minimized — rendered as pub's
+structured proof.** The failure explanation previously flattened the terminal incompatibility's
+cause tree to *every* distinct leaf (a `pg-cause-leaves` dump), which on a deep/tangled graph
+listed a long, flat conjunction of requirements. It now renders the derivation the way pub's
+error reporter does — a **structured proof**. The terminal incompatibility's cause is a
+left-leaning tree of resolution steps (`[:derived accumulated satisfier-cause]`); the renderer
+walks it in **post-order** (a step's supporting lines precede the line that uses them), inlining
+each external (`[:root …]`/`[:dep …]`) leaf into its parent's line and stating every step's
+*consequence*, so the reader follows a chain:
+
+```
+Because foo 1.0.0 requires shared ^1.0.0 and baz 1.0.0 requires shared ^2.0.0,
+        the requirements on foo and baz cannot all hold.
+And because your project requires foo, no version of baz satisfies every requirement on it.
+And because your project requires baz, version solving failed.
+  shared available: 2.0.0, 1.5.0, 1.0.0
+```
+
+Because the derivation only contains the incompatibilities PubGrub actually resolved to reach
+the conflict, the proof is *minimal* in the requirers it names: three requirers of one contested
+package, only two of which clash, yields a proof naming just the clashing pair — the third is
+never mentioned. The walk is driven by an explicit worklist (tail-recursive), so an arbitrarily
+deep spine can't overflow. Line numbering for a shared sub-derivation (pub's device for a
+derivation *DAG*) is not needed: our tree embeds each cause by value, and external leaves are
+inlined, so the post-order visits each derived node once. *Still deferred:* semver ranges over
+`:git` tags.
+
 ## ADR-210 — Partial leaf splicing: the inlined engine gets its own checkpoint and resume arm
 
 **Status:** implemented (2026-08-03), **default ON**; `BROOD_NO_PARTIAL_LEAF=1` reverts to

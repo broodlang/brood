@@ -15617,6 +15617,45 @@ than the asymptote.
 `std/net/http` needed nothing — its comments already record the old `(str acc …)` being fixed, and
 it searches bytes with `bytes-index-of` rather than char indices.
 
+## 2026-08-04 (cont.) — resolver: the conflict derivation is minimized (pub-style proof)
+
+The last resolver-algorithm gap on ADR-209's deferred list. The failure explanation flattened the
+terminal incompatibility's whole cause tree to *every* distinct leaf, so a deep/tangled graph got a
+long flat conjunction. It now renders the derivation the way pub's error reporter does — a
+structured proof.
+
+**What it produces.** The terminal incompatibility's cause is a left-leaning tree of resolution
+steps (`[:derived accumulated satisfier-cause]`, deepest-left the original conflict). `pg-report`
+walks it in **post-order** — a step's supporting lines before the line that uses them — inlining
+each external (`[:root]`/`[:dep]`) leaf into its parent's line and stating each step's *consequence*:
+
+```
+dependency resolution failed:
+  Because foo 1.0.0 requires shared ^1.0.0 and baz 1.0.0 requires shared ^2.0.0,
+          the requirements on foo and baz cannot all hold.
+  And because your project requires foo, no version of baz satisfies every requirement on it.
+  And because your project requires baz, version solving failed.
+  shared available: 2.0.0, 1.5.0, 1.0.0
+```
+
+**Why it is minimal, for free.** The derivation only holds the incompatibilities PubGrub actually
+resolved to reach the conflict, so the proof names only the requirers that truly clash. Three
+requirers of one contested package where only two are disjoint yields a proof naming just the two —
+the third never appears. A new test pins exactly that (`count … = 2` of three candidate requirers).
+
+**Two things worth recording.** (1) The walk is driven by an **explicit worklist** (`[:visit]`/
+`[:emit]` items), so it is tail-recursive and an arbitrarily deep spine can't overflow — the same
+discipline `pg-cause-leaves` got earlier; a natural recursion here would also have tripped the
+non-tail-recursion checker. (2) **No line numbering.** Pub numbers incompatibilities because its
+derivation is a DAG with shared nodes; ours embeds each cause *by value* and inlines external
+leaves, so post-order visits each derived node exactly once and a straight chain suffices.
+
+Kept the availability lines (they answer "what could the contested package have been") and the
+existing `requires`/`available:` wording, so the diamond test's substrings still hold; added a
+chain-derivation test and the minimality test. 39/39 resolver + 40/40 version green, oracle fuzz
+still 100%, `nest check` clean, formatted. Deferred now down to one algorithm-adjacent item: semver
+ranges over `:git` tags (the rest is registry plumbing).
+
 ## 2026-08-04 (cont.) — markdown was quadratic in UTF-8 and linear in ASCII
 
 Continued the sweep into `editor/markdown`, which I had triaged as low-risk ("21 `char-at`, but
