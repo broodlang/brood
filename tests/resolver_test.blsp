@@ -120,16 +120,16 @@
       (assert= {'a "1.0.0"} (rt-ok [['a nil]] p)))))
 
 (describe "resolver: conflicts and error messages"
-  (test "an unsatisfiable diamond explains the conflict on the shared package"
+  (test "an unsatisfiable diamond names BOTH conflicting requirers and what shared offers"
     (let (p (rt-prov {'foo ["1.0.0"] 'baz ["1.0.0"] 'shared ["1.0.0" "1.5.0" "2.0.0"]}
               {'foo {"1.0.0" [['shared "^1.0.0"]]}
                'baz {"1.0.0" [['shared "^2.0.0"]]}})
           message (rt-err [['foo nil] ['baz nil]] p))
-      ;; the derivation names a conflicting requirement on `shared` and lists what `shared`
-      ;; actually offers (so the reader sees no version spans both ^1 and ^2)
-      (is (includes? message "shared"))
-      (is (includes? message "requires"))
-      (is (includes? message "available"))))
+      ;; the full derivation: BOTH requirements on `shared` (foo wants ^1, baz wants ^2), plus
+      ;; what `shared` actually offers — so the reader sees no version spans both
+      (is (includes? message "foo 1.0.0 requires shared ^1.0.0"))
+      (is (includes? message "baz 1.0.0 requires shared ^2.0.0"))
+      (is (includes? message "shared available: 2.0.0, 1.5.0, 1.0.0"))))
   (test "a required package the provider does not know is a clear error"
     (let (p (rt-prov {'foo ["1.0.0"]} {'foo {"1.0.0" [['ghost ">= 1.0"]]}})
           message (rt-err [['foo nil]] p))
@@ -204,6 +204,17 @@
           solution (rt-ok roots p))
       (assert= "1.0.0" (get solution 'b1))
       (assert= "1.0.0" (get solution 'check)))))
+
+(describe "resolver: pre-releases"
+  (test "a plain range picks the newest RELEASE, skipping a newer pre-release"
+    (assert= {'foo "1.1.0"}
+      (rt-ok [['foo "^1.0"]] (rt-leaf-prov {'foo ["1.0.0" "1.1.0-rc.1" "1.1.0"]}))))
+  (test "a range that names a pre-release resolves to it"
+    (assert= {'foo "1.1.0-rc.1"}
+      (rt-ok [['foo ">= 1.1.0-rc"]] (rt-leaf-prov {'foo ["1.1.0-rc.1"]}))))
+  (test "only a pre-release under a plain range is unsatisfiable"
+    (is (includes? (rt-err [['foo "^1.0"]] (rt-leaf-prov {'foo ["1.1.0-rc.1"]}))
+          "foo"))))
 
 (describe "resolver: scale"
   (test "a 120-package transitive graph resolves completely"
