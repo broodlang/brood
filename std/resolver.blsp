@@ -505,19 +505,103 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
 (defn pg-min-by (f items)
   (fold (fn (best x) (if (< (f x) (f best)) x best)) (first items) (rest items)))
 
-;; --- error rendering: the derivation --------------------------------------------
-;; Walk the failing incompatibility's cause tree into a human explanation. A `:derived` node
-;; is a conjunction of its two causes; a `:root`/`:dep` node is a leaf fact.
-
-;; The terminal incompatibility's CAUSE is a tree of resolution steps whose LEAVES are the
-;; original facts (a root requirement, a package's dependency). Rendering the distinct leaves
-;; gives the full "because X requires this AND Y requires that" derivation; the packages they
-;; name, listed with what they actually offer, show why nothing fits.
+;; --- error rendering: the derivation (pub-style structured proof) ----------------
+;; The failing incompatibility's CAUSE is a left-leaning tree of resolution steps —
+;; `[:derived accumulated satisfier-cause]`, deepest-left being the original conflict — whose
+;; LEAVES are the original facts (`[:root …]`, `[:dep …]`). Rather than dump every leaf flat,
+;; we render the tree as pub's derivation report: a chain of "Because <premise> and <premise>,
+;; <consequence>." lines that expands a derived premise on its own line(s) first and states
+;; each step's consequence, so the reader follows the reasoning down to "version solving
+;; failed". The packages named are then listed with what they actually offer.
 (defn pg-error (ctx ic)
-  (let (leaves (pg-cause-leaves (get ic :cause) nil))
+  (let (lines (pg-report ctx ic)
+        leaves (pg-cause-leaves (get ic :cause) nil))
     (str "dependency resolution failed:\n"
-      (join "\n" (map (fn (leaf) (str "  " (pg-explain-leaf leaf))) leaves))
+      (join "\n" (map (fn (l) (str "  " l)) lines))
       (pg-availability-lines ctx leaves))))
+
+;; Whether a cause / incompatibility is an original fact (a leaf) rather than a [:derived …]
+;; resolution step.
+(defn pg-cause-external? (cause) (match cause ([:derived _ _] false) (_ true)))
+(defn pg-ic-external? (ic) (pg-cause-external? (get ic :cause)))
+
+;; A package's REAL versions (never NONE) an incompatibility term ALLOWS — the complement of
+;; its forbidden set — for phrasing a step's consequence.
+(defn pg-term-allows (ctx pkg forbidden)
+  (filter (fn (v) (not (= v pg-none))) (pg-complement ctx pkg forbidden)))
+
+;; The fact a derived incompatibility establishes going forward, phrased for prose. An
+;; incompatibility forbids all its terms holding at once; dropping the (always-true) root term,
+;; if what remains pins a single package we say what it must — or cannot — be, and an empty
+;; remainder is the final contradiction ("version solving failed").
+(defn pg-consequence-str (ctx ic)
+  (let (reals (filter (fn (kv) (not (= (nth kv 0) pg-root-pkg))) (map-pairs (get ic :terms))))
+    (cond
+      (empty? reals) "version solving failed"
+      (= 1 (count reals))
+        (let (kv (first reals)
+              pkg (nth kv 0)
+              allowed (pg-term-allows ctx pkg (nth kv 1)))
+          (if (empty? allowed)
+            (str "no version of " (name pkg) " satisfies every requirement on it")
+            (str (name pkg) " must be " (join " or " allowed))))
+      else
+        (str "the requirements on "
+          (join " and " (map (fn (kv) (name (nth kv 0))) reals))
+          " cannot all hold"))))
+
+;; One premise's rendering: an external cause is its plain fact; a derived cause is stated by
+;; its consequence (its own supporting lines are emitted before it is referenced).
+(defn pg-premise-str (ctx ic)
+  (if (pg-ic-external? ic) (pg-explain-leaf (get ic :cause)) (pg-consequence-str ctx ic)))
+
+;; Walk the derivation into ordered lines: a post-order over the `[:derived]` nodes so a step's
+;; supporting lines precede the line that uses them. An external premise is inlined into its
+;; parent's line and never gets a line of its own, so only derived nodes emit. An explicit
+;; worklist keeps the walk tail-recursive — the spine can be as deep as the resolution-step
+;; count, so plain recursion could overflow on a large tangled graph. The deepest
+;; (both-premises-external) step opens with "Because"; steps layered on it continue "And
+;; because", and a step over two derived premises reads "Thus".
+(defn pg-report (ctx ic) (pg-report--drive ctx (list [:visit ic]) nil))
+
+(defn pg-report--drive (ctx work acc)
+  (if (empty? work)
+    (reverse acc)
+    (let (item (first work)
+          more (rest work))
+      (match item
+        ([:emit ic] (pg-report--drive ctx more (cons (pg-report--line ctx ic) acc)))
+        ([:visit ic]
+          (match (get ic :cause)
+            ;; push the emit last so it pops after both premises' lines; visit the
+            ;; left (deep) spine before the right, and only descend derived premises.
+            ([:derived a b] (pg-report--drive ctx
+                              (append (if (pg-ic-external? a) nil (list [:visit a]))
+                                (append (if (pg-ic-external? b) nil (list [:visit b]))
+                                  (cons [:emit ic] more)))
+                              acc))
+            ;; a bare leaf as the whole "derivation" (degenerate): emit its fact.
+            (leaf (pg-report--drive ctx more (cons (pg-explain-leaf leaf) acc)))))))))
+
+;; The one line a derived step contributes, inlining any external premise as its plain fact.
+(defn pg-report--line (ctx ic)
+  (match (get ic :cause)
+    ([:derived a b] (let (a-ext (pg-ic-external? a)
+                          b-ext (pg-ic-external? b)
+                          conseq (pg-consequence-str ctx ic))
+                      (cond
+                        (and a-ext b-ext)
+                          (str "Because "
+                            (pg-premise-str ctx a)
+                            " and "
+                            (pg-premise-str ctx b)
+                            ", "
+                            conseq
+                            ".")
+                        a-ext (str "And because " (pg-premise-str ctx a) ", " conseq ".")
+                        b-ext (str "And because " (pg-premise-str ctx b) ", " conseq ".")
+                        else (str "Thus, " conseq "."))))
+    (_ "")))
 
 (defn pg-cause-leaves (cause acc)
   ;; distinct leaves of the derivation tree, in first-seen (left-to-right) order.
