@@ -15725,3 +15725,74 @@ That also sharpens the next lever from "substring is O(index)" to something meas
 is char→byte conversion for non-ASCII strings, and there are now two rows that move when it lands
 (`inc-scan` 16.85× → linear, `sexp motions` 9.80× → 5.48×) plus whatever `expect_string`'s
 remaining ~113 copy sites contribute.
+
+## 2026-08-04 (cont.) — the char→byte index: multi-byte string indexing goes O(1) (ADR-213)
+
+Took the lever the previous entry sharpened. A string slot now carries a **sparse char→byte
+index** — `marks[k]` = the byte offset of char `k · 32`, built on the slot's first conversion — so
+converting a char index to a byte offset is a lookup plus a walk bounded by the stride instead of
+a walk from the start of the string. Both directions are covered; the byte→char direction (what a
+`find` result needs) is a binary search over the marks plus the same bounded count.
+
+Result on the two rows `handoff.md` §1 named as the scoreboard, `UTF8=1`:
+
+| row | before | after |
+|---|---|---|
+| `string inc-scan` | 7 → 118 ms, **16.85×** | 0 → 3 ms; at N=3200 3 → 8 ms (**2.66×** — falling, i.e. warm-up) |
+| `sexp motions` | **9.80×** (ASCII 5.48×) | **5.12–5.42×**, its ASCII ratio |
+
+`sexp motions` keeps its by-design O(point) form-start scan; what went away is the multi-byte
+multiplier stacked on top of it. Both regimes now read the same ratio, which is the shape you want
+when the remaining cost is genuinely encoding-independent. A direct micro-benchmark of the four
+primitives over a 920k-char document with one non-ASCII character: **60.2 s → 0.62 s (96×)**.
+
+**And a trap I walked straight into on the way out: the ASCII path "regressed" and it was drift.**
+The same micro in pure ASCII read `char-at` +2.1% and `last-index-of` +2.4% against 0.0% floors, so
+I spent two builds reshaping the hot paths (open-coding `substring`'s ASCII arm, hoisting the `&str`
+out of the `match_indices` loop) — and the numbers got *worse*, +5.5% where the simple code read
++2.4%. What settled it was a **control row**: `wordcount` calls none of the changed code and read
+**+2.2%** on the same binary pair, i.e. this pair carries ~2% of whole-binary codegen/layout drift.
+Both reshapes were reverted. The clincher was a size argument rather than a measurement:
+`last-index-of`'s delta scaled with a `match_indices` scan costing ~90 µs per call, and no per-call
+change of a few instructions can account for 2.4 µs of that — so the delta was never in the code I
+wrote. **Generalising: before believing a small two-binary delta on a row, measure a row that
+CANNOT be affected by the change.** The published rows agreed all along (`strings`/`json`/`regex`
++0.0%, `base64` −2.4% solo).
+
+**The interesting part was the population strategy, and the handoff's recommendation lost to a
+simpler option.** A slot can live in the RUNTIME region, which every process of a runtime reads
+concurrently, so a lazily-built cache races on exactly the long shared strings most worth
+indexing. I had written up three options and recommended **LOCAL-only** as the smallest sound
+change. Writing it, `OnceLock` turned out to be smaller still: the racing case is two threads
+building *identical* tables and `get_or_init` publishing one, so there is nothing to reconcile and
+no region split in the accessor — and it covers the prelude and every `def`'d string as well.
+Worth remembering as a general point: **"restrict the scope" is not automatically simpler than
+"synchronise" when the value being cached is a pure function of immutable data.** Immutability is
+what makes the race benign, and this kernel has that invariant everywhere (ADR-026).
+
+Two thresholds keep it a cache rather than a tax: no index for a pure-ASCII string (conversion is
+arithmetic) and none under 256 chars (the walk is already bounded, and an allocation per short
+string is the wrong trade). `LocalString` grew 40 → 56 bytes for the boxed cell, pinned by a test
+since that struct is every string slab entry.
+
+The four char-indexed builtins now take their string argument as a `StrArg` (handle, bytes, cached
+char count, ASCII flag — one slot resolution) rather than a bare `&str`, because the conversion
+lives on the slot. That also
+deleted four dead `_ => (s.chars().count(), false)` fallbacks — `expect_string_ref` only ever
+returns for a `Value::Str`, so those arms were unreachable defensive code that quietly documented
+a second, slower path that could not be taken.
+
+**Validation, because the failure mode here is a silent wrong substring rather than a crash.** The
+Rust test checks both directions against the walk at *every* char index of seven shapes at three
+sizes (multi-byte leading / trailing / one per stride boundary / all-wide, plus a `Shared` blob
+slot); `collection_identities_test.blsp` gained seeded-random laws comparing each op against the
+code-point vector on a 600-char mixed-width string; `strings_test.blsp` gained end-to-end cases
+including a cross-process one. **All three fail on a one-character sabotage** of `floor_char`
+(`k * STRIDE + 1`) — checked, because a test that cannot fail is not a gate. 952 Rust tests and
+4378 in-language tests green, the latter also under `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`;
+`--no-default-features` clean; metamorphic differential clean over 4 engine configs.
+
+A knock-on worth noting: the code-point-vector rewrites this bug class forced (`url.blsp`,
+`csv.blsp`, `ansi.blsp`) are no longer *required* for correctness of performance. They stay as
+they are; the point is that new `std/` code no longer has to choose between char indexing and
+linearity.

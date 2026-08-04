@@ -1,5 +1,5 @@
-use crate::core::heap::Heap;
-use crate::core::value::{self, EnvId, Value};
+use crate::core::heap::{Heap, SlabRef};
+use crate::core::value::{self, EnvId, StrId, Value};
 use crate::error::{LispError, LispResult};
 use crate::syntax::printer;
 
@@ -16,6 +16,60 @@ macro_rules! expect {
             __other => Err(LispError::wrong_type($heap, $who, $expected, __other)),
         }
     };
+}
+
+/// A string argument to a **char-indexed** builtin: its bytes, its cached char count, and
+/// whether a char index is also a byte offset. All three come from one slot resolution
+/// because every one of these builtins needs all three, and the text is **borrowed** —
+/// an owned copy of the haystack per call is what made incremental search quadratic once
+/// already (`expect_string` still does that at ~113 other sites).
+struct StrArg<'h> {
+    id: StrId,
+    s: SlabRef<'h, str>,
+    chars: usize,
+    ascii: bool,
+}
+
+impl StrArg<'_> {
+    /// Byte offset of char `ci`, clamped to the end. Arithmetic when a char index *is* a
+    /// byte offset; otherwise through the slot's sparse char→byte index (ADR-213), which
+    /// is a lookup plus a bounded walk rather than a walk from the start.
+    #[inline]
+    fn char_to_byte(&self, heap: &Heap, ci: usize) -> usize {
+        if self.ascii {
+            ci.min(self.s.len())
+        } else {
+            heap.str_char_to_byte(self.id, ci)
+        }
+    }
+
+    /// The return direction: a byte-level `find`/`match_indices` result as the char index
+    /// the language speaks. `b` must be a char boundary.
+    #[inline]
+    fn byte_to_char(&self, heap: &Heap, b: usize) -> usize {
+        if self.ascii {
+            b
+        } else {
+            heap.str_byte_to_char(self.id, b)
+        }
+    }
+}
+
+/// Require a string, as the [`StrArg`] the char-indexed builtins work through.
+#[inline]
+fn expect_str_arg<'h>(heap: &'h Heap, who: &str, v: Value) -> Result<StrArg<'h>, LispError> {
+    match v {
+        Value::Str(id) => {
+            let (chars, ascii) = heap.str_metrics(id);
+            Ok(StrArg {
+                id,
+                s: heap.string(id),
+                chars,
+                ascii,
+            })
+        }
+        other => Err(LispError::wrong_type(heap, who, "string", other)),
+    }
 }
 
 // ---------- pair / sequence ----------
@@ -1033,13 +1087,9 @@ pub(super) fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
     let start = expect_int(heap, "substring", arg(args, 1))?;
     let sub: String = {
         let h: &Heap = heap;
-        let s = expect_string_ref(h, "substring", v)?;
-        // Cached char count (O(1)) plus the pure-ASCII flag.
-        let (len_chars, ascii) = match v {
-            Value::Str(id) => h.str_metrics(id),
-            _ => (s.chars().count(), false),
-        };
-        let len = len_chars as i64;
+        let a = expect_str_arg(h, "substring", v)?;
+        // The cached char count, O(1) — it used to be a `chars().count()` per call.
+        let len = a.chars as i64;
         let end = match args.get(2) {
             Some(_) => expect_int(h, "substring", arg(args, 2))?,
             None => len,
@@ -1051,15 +1101,12 @@ pub(super) fn substring(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult
             ))
             .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
         }
-        if ascii {
-            // Char index == byte offset, so this is a direct slice: O(result), not O(end).
-            s[start as usize..end as usize].to_string()
-        } else {
-            s.chars()
-                .skip(start as usize)
-                .take((end - start) as usize)
-                .collect()
-        }
+        // Both ends converted, so this is a direct slice — O(result) rather than O(end),
+        // on multi-byte text as well. `chars().skip(start)` used to walk from byte 0 on
+        // every call, which is what made a per-character scan quadratic off the ASCII path.
+        let lo = a.char_to_byte(h, start as usize);
+        let hi = a.char_to_byte(h, end as usize);
+        a.s[lo..hi].to_string()
     };
     Ok(heap.alloc_string(&sub))
 }
@@ -1078,17 +1125,14 @@ pub(super) fn string_span_impl(
     // A tokenizer calls this once per token over one document, so an O(whole document)
     // step here is O(tokens x document) overall. It had three: the owned `expect_string`
     // copy, `chars().count()` for the length, and `chars().skip(start)`. Borrow, read the
-    // cached count, and start from a byte offset (O(1) when the text is ASCII).
+    // cached count, and start from a byte offset the slot converts in O(1) (ASCII) or a
+    // one-stride walk (multi-byte).
     let v = arg(args, 0);
     let start = expect_int(heap, who, arg(args, 1))?;
     let h: &Heap = heap;
-    let s = expect_string_ref(h, who, v)?;
+    let a = expect_str_arg(h, who, v)?;
     let set = expect_string_ref(h, who, arg(args, 2))?;
-    let (len_chars, ascii) = match v {
-        Value::Str(id) => h.str_metrics(id),
-        _ => (s.chars().count(), false),
-    };
-    let len = len_chars as i64;
+    let len = a.chars as i64;
     if start < 0 || start > len {
         return Err(LispError::runtime(format!(
             "{}: start {} out of bounds for length {}",
@@ -1096,15 +1140,9 @@ pub(super) fn string_span_impl(
         ))
         .with_code(crate::error::error_codes::INDEX_OUT_OF_RANGE));
     }
-    let byte_start = if ascii {
-        (start as usize).min(s.len())
-    } else {
-        s.char_indices()
-            .nth(start as usize)
-            .map_or(s.len(), |(b, _)| b)
-    };
+    let byte_start = a.char_to_byte(h, start as usize);
     let mut idx = start as usize;
-    for c in s[byte_start..].chars() {
+    for c in a.s[byte_start..].chars() {
         if set.contains(c) == in_set {
             idx += 1;
         } else {
@@ -1163,7 +1201,7 @@ pub(super) fn str_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     // Borrowed, not owned: `expect_string` would copy the whole haystack per call, which
     // is the difference between a linear incremental search and a quadratic one.
     let h: &Heap = heap;
-    let s = expect_string_ref(h, "%str-index-of", arg(args, 0))?;
+    let a = expect_str_arg(h, "%str-index-of", arg(args, 0))?;
     let needle = expect_string_ref(h, "%str-index-of", arg(args, 1))?;
     // Optional 3rd arg: the CHAR index to start searching at. It exists so `index-of`'s
     // `from` does not have to build `(substring coll from n)` first — that copy is what
@@ -1177,27 +1215,21 @@ pub(super) fn str_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
             other => return Err(LispError::wrong_type(heap, "%str-index-of", "int", other)),
         },
     };
-    // Char index → byte offset. For a pure-ASCII string the two are the same number, so
-    // both conversions below are O(1) — that is what makes an incremental search over one
-    // string linear rather than O(position) per call. Non-ASCII walks, as it must.
-    let ascii = match arg(args, 0) {
-        Value::Str(id) => h.str_metrics(id).1,
-        _ => false,
-    };
-    // `nth` past the end yields the end, so an out-of-range start simply finds nothing
-    // (matching the clamp the Brood side used to do).
+    // Char index → byte offset and back, both through the slot: O(1) for a pure-ASCII
+    // string (where the two numbers are equal) and an indexed lookup plus a bounded walk
+    // otherwise. That is what makes an incremental search over one string linear rather
+    // than O(position) per call **in both encoding regimes** — a char-count cache alone
+    // could only do it for ASCII, because its mechanism is the ASCII test itself.
+    //
+    // A start past the end converts to the end, so an out-of-range start simply finds
+    // nothing (matching the clamp the Brood side used to do).
     let byte_start = if start == 0 {
         0
-    } else if ascii {
-        start.min(s.len())
     } else {
-        s.char_indices().nth(start).map_or(s.len(), |(b, _)| b)
+        a.char_to_byte(h, start)
     };
-    let idx = match s[byte_start..].find(&*needle) {
-        Some(rel) if ascii => (byte_start + rel) as i64,
-        // Count chars over the prefix, not the whole string — with `start == 0` this is
-        // exactly the previous behaviour.
-        Some(rel) => s[..byte_start + rel].chars().count() as i64,
+    let idx = match a.s[byte_start..].find(&*needle) {
+        Some(rel) => a.byte_to_char(h, byte_start + rel) as i64,
         None => -1,
     };
     Ok(Value::int(idx))
@@ -1218,13 +1250,10 @@ pub(super) fn str_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 pub(super) fn str_last_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     // Borrowed, not owned — see `%str-index-of`.
     let h: &Heap = heap;
-    let s = expect_string_ref(h, "%str-last-index-of", arg(args, 0))?;
+    let a = expect_str_arg(h, "%str-last-index-of", arg(args, 0))?;
     let needle = expect_string_ref(h, "%str-last-index-of", arg(args, 1))?;
-    // Cached char count + the ASCII flag, both O(1); `char_len` used to be a full scan.
-    let (char_len, ascii) = match arg(args, 0) {
-        Value::Str(id) => h.str_metrics(id),
-        _ => (s.chars().count(), false),
-    };
+    // Cached char count, O(1); `char_len` used to be a full scan.
+    let char_len = a.chars;
     let before = match args.get(2) {
         None | Some(Value::Nil) => char_len as i64,
         Some(&v) => match v {
@@ -1258,24 +1287,19 @@ pub(super) fn str_last_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
     // before the limit and extend past it — that is still a match, so the bound is on the
     // match's start, not on the slice searched.
     let limit = if before as usize >= char_len {
-        s.len()
-    } else if ascii {
-        (before as usize).min(s.len())
+        a.s.len()
     } else {
-        s.char_indices()
-            .nth(before as usize)
-            .map_or(s.len(), |(b, _)| b)
+        a.char_to_byte(h, before as usize)
     };
     let mut best: Option<usize> = None;
-    for (b, _) in s.match_indices(&*needle) {
+    for (b, _) in a.s.match_indices(&*needle) {
         if b >= limit {
             break;
         }
         best = Some(b);
     }
     Ok(Value::int(match best {
-        Some(b) if ascii => b as i64,
-        Some(b) => s[..b].chars().count() as i64,
+        Some(b) => a.byte_to_char(h, b) as i64,
         None => -1,
     }))
 }

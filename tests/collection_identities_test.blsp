@@ -87,7 +87,42 @@
           b (str "y" (rem (lcg s) 100000)))
       (if (str-laws a b) (check-strs (lcg (lcg s)) (- n 1)) false))))
 
+;; A char index is a byte offset only for pure-ASCII text, so every char-indexed string
+;; op has a second path on multi-byte text: the kernel converts through the string slot's
+;; sparse char→byte index (ADR-213) instead of walking from the start. A wrong offset
+;; there is a silent wrong substring rather than a crash, so these laws compare each op
+;; against the code-point vector — on a string long enough to be indexed (> 256 chars),
+;; built from 1-, 2-, 3- and 4-byte characters in seeded-random order so the multi-byte
+;; chars land in every position relative to the index's stride.
+(def mb--alphabet ["a" "é" "漢" "🙂" "z" "ß" "€"])
+(defn mb--build (s n acc)
+  (if (= n 0)
+    (apply str acc)
+    (mb--build (lcg s) (- n 1) (cons (nth mb--alphabet (rem s 7)) acc))))
+(def mb--text (mb--build 8675309 600 nil))
+(def mb--cps (into [] (string->list mb--text)))
+(def mb--len (string-length mb--text))
+
+(defn mb--laws (i j)
+  (and (= (char-at mb--text i) (nth mb--cps i))
+    ; the char index the language speaks
+    (= (substring mb--text i j) (apply str (subvec mb--cps i j)))
+    (= (string-length (substring mb--text i j)) (- j i))
+    ; forward search from i lands on i, since the char at i is the needle
+    (= (index-of mb--text (char-at mb--text i) i) i)
+    ; and the last occurrence strictly before i+1 is i
+    (= (last-index-of mb--text (char-at mb--text i) (+ i 1)) i)
+    (if (< i j) (= (index-of mb--text (substring mb--text i j) i) i) true)))
+
+(defn check-mb (s n)
+  (if (= n 0)
+    true
+    (let (i (rem s mb--len)
+          j (+ i (rem (lcg s) (- mb--len i))))
+      (if (mb--laws i j) (check-mb (lcg (lcg s)) (- n 1)) false))))
+
 (describe "collection identities hold over random values"
   (test "map laws over 1200 cases" (is (check-maps 24680 1200)))
   (test "vector + HOF laws over 1200 cases" (is (check-vecs 13579 1200)))
-  (test "string laws over 800 cases" (is (check-strs 99991 800))))
+  (test "string laws over 800 cases" (is (check-strs 99991 800)))
+  (test "multi-byte char-index laws over 600 cases" (is (check-mb 1234567 600))))
