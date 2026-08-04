@@ -4985,7 +4985,6 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   slot). Read-modify-write of `*impls*` — register at load time, as top-level `impl` does."
   (register-impl--check-arity aname op f)
   (let (op-key [aname op]
-        methods (or (get *impls* op-key) {})
         prov-key [aname op key]
         ; presence, not truthiness: a root/REPL/app incumbent records `from` = nil, so a
         ; nil `prev-from` is ambiguous between "no incumbent" and "incumbent was the app".
