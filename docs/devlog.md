@@ -15335,3 +15335,36 @@ build. The effect-duplication guard is **verified by sabotage**: keeping partial
 while writing no journal makes `tests/jit_effect_once_test.blsp` case 6 count 50 179 of
 50 000. Case 5 (straight-line) does *not* trip under sabotage — the self-tail loop is the
 sensitive shape, which is itself worth knowing before trusting a green effect-once test.
+
+## 2026-08-04 — three loose ends from ADR-210, and why the flake fix is not a retry
+
+Cleanup pass. None of these is ADR-210's doing; all three were pre-existing and each was
+recorded rather than fixed at the time, to keep that diff about the JIT.
+
+**1. `--no-default-features` warned.** `to_message` is imported unconditionally in
+`process/mailbox.rs` but only used on the `dev-tools` trace path. Gated the import. One line;
+noticed while checking that ADR-210 still builds without default features.
+
+**2. The `live_migration` deep-receive flake — fixed by budget, deliberately not by a retry.**
+`deep_receive_continuations_resume_correctly_across_workers` failed **3/12** full `cargo nextest`
+runs, and **8/60** with 20 concurrent copies of just that test. Always the *liveness* assertion
+("no live migration observed across 40 bursts"), never correctness: under an oversubscribed
+machine — a full run puts ~nproc test processes alongside it, each with its own 2-worker pool — a
+burst can complete without any process being stolen. Raised the budget 40 → 400: **0/60 after**,
+and free on a normal run (0.025 s either way, since the loop exits on the first burst that
+migrates, usually the first).
+
+The interesting part is what I did *not* do. `.config/nextest.toml` already carries a
+well-argued `retries = 1` for the real-TCP suites, and this test looks like the same class, so a
+retry is the obvious move. It is the wrong one here: **this test's other assertion — the
+per-burst total — catches intermittent continuation corruption, and it is what caught ADR-210's
+deopt-resume bug.** That bug failed roughly 1 full run in 8. With a retry it would have passed on
+attempt two and been reported as FLAKY, which is exactly what I would have shrugged at. Raising
+the budget keeps a failure meaningful and, if anything, sharpens corruption detection — more
+bursts is more chances to hit it. Generalisable: **before adding a retry, ask what else that test
+guards.** A retry is safe only for a test whose sole failure mode is a missed deadline.
+
+**3. `nest format --check` was red on 8 files** (drift from the ADR-209 resolver work). Ran the
+project formatter. Re-verified after rebuilding **both** binaries, because `std/*.blsp` is
+embedded at build time and a stale `nest` would have been checking yesterday's bytes: 4350/4350
+in-language, 944/944 Rust, `nest check` clean.
