@@ -49,6 +49,7 @@
 ;; file:// URL keeps :tarball resolution offline, like pkg-git-init's for :git.
 (require 'hash)
 (require 'net/http)
+(require 'encoding)
 (defn pkg-tar-init (parent wrapper)
   (let (archive (path-join parent (str wrapper ".tar.gz")))
     (run-process "tar" (list "-czf" archive "-C" parent wrapper))
@@ -456,7 +457,18 @@
         (assert= (get (first out) :version) "1.2.0"))))
   (test ":version deps parse into a registry dep map"
     (assert= (project/project-parse-deps [['foo :version "1.2.0"]])
-      (list (assoc (dep-registry 'foo "1.2.0") :optional false)))))
+      (list (assoc (dep-registry 'foo "1.2.0") :optional false))))
+  (test "an external publish's metadata envelope carries :source_url; a hosted one omits it"
+    (binding (*project-name* "foo"
+              *project-version* "1.0.0"
+              *project-description* ""
+              *project-dependencies* nil
+              *project-enhances* {})
+      (let (ext (encoding/base64-decode (package/registry--publish-metadata "abc" "https://ex/f.tgz")))
+        (is (includes? ext "\"source_url\":\"https://ex/f.tgz\""))
+        (is (includes? ext "\"checksum\":\"abc\"")))
+      (let (hosted (encoding/base64-decode (package/registry--publish-metadata "abc" nil)))
+        (is (not (includes? hosted "source_url")))))))
 
 ;; ---- version-range resolution (ADR-209) --------------------------------------
 ;; A `:version` dep now names a RANGE, resolved to a concrete version by the backtracking

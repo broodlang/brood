@@ -15774,3 +15774,39 @@ That also sharpens the next lever from "substring is O(index)" to something meas
 is char→byte conversion for non-ASCII strings, and there are now two rows that move when it lands
 (`inc-scan` 16.85× → linear, `sexp motions` 9.80× → 5.48×) plus whatever `expect_string`'s
 remaining ~113 copy sites contribute.
+
+## 2026-08-04 (cont.) — external tarball URLs: a registry release that hive doesn't hold (ADR-211)
+
+Second of the re-scoped registry items. A release may now point at an EXTERNAL tarball
+(`:source_url` — a GitHub/S3/CDN asset) instead of hive storing the bytes. Two halves, both shipped;
+hive deployed to production and verified.
+
+**Security model, kept intact.** The sha256 checksum is still the guarantee, and it moves to the
+client entirely for an external release: the publishing client (`nest publish --source-url URL`)
+fetches the URL *once* to hash its bytes into `:checksum` (also proving it is reachable now), then
+POSTs metadata only. hive stores the URL + declared checksum, nil tarball, and — the point —
+**does not fetch the URL itself** (no SSRF surface, no publish-time latency). Every downloader
+re-verifies the bytes it pulls from `:source_url` before extraction, exactly as it already did for
+hosted bytes, so `registry--download-extract`'s mismatch guard is the real boundary either way. A
+dead URL therefore fails loudly at install, not at publish — the one fragility external hosting
+adds, and it is contained to the installing client.
+
+**Client (`std/tool/package.blsp`).** `registry--download-extract` branches on `:source_url`:
+present → `package--fetch-bytes` (the `:tarball` dep kind's http(s)+redirects+`file://` path,
+strip-1 for the wrapper-dir convention); absent → hive's `/tarball` (strip-0). `publish` became a
+plist (`:index`/`:source-url`) split into hosted/external paths sharing one POST helper;
+`nest publish --source-url` threads through a Rust plist call like `cmd_search`.
+
+**hive.** A nullable `source_url` column added by an explicit idempotent `ALTER TABLE … ADD COLUMN
+IF NOT EXISTS` in `ensure-constraints` (not trusting the schema migrator to alter an existing
+table); `tarball` was already nullable (the S3 path stores nil). Publish gained a URL-only shape
+that skips the byte size/gzip/checksum checks (there are no bytes) and skips the doc build (hive has
+no source to parse). `/tarball` 302-redirects to the source for a stray request.
+
+**Verification.** Client: an external release (metadata with `:source_url`, serving NO `/tarball`)
+is fetched from a `file://` wrapped tarball, sha-verified, strip-1 extracted; a wrong checksum is
+still refused; the publish envelope carries `:source_url`. 89/89 package + 948/948 full suite green.
+hive: `valid-source-url?` + the external-publish validation path (bad URL / missing checksum /
+auth-first), 20/20 registry + 8/8 api. Deployed (`fly deploy`); `/health` ok, and hatch's live
+release metadata now shows `"source_url": null` — the migration took and hosted releases are
+unaffected.

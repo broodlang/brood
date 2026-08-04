@@ -343,9 +343,20 @@ enum Cmd {
     /// HTTP API, authenticated with a Bearer token ($HIVE_TOKEN or the
     /// :registry-token config). Releases are immutable — a version already
     /// published is refused by the server.
+    ///
+    /// With `--source-url`, publishes an EXTERNAL release instead: the client
+    /// fetches that URL to hash its bytes into the checksum, then POSTs metadata
+    /// only — the registry records the URL and every downloader verifies the bytes
+    /// it fetches from there (the registry never holds them).
     Publish {
         /// The registry base URL. Omit to use the configured `:registry`.
         index: Option<String>,
+
+        /// Publish an external release pointing at this tarball URL (a GitHub/S3/CDN
+        /// asset) instead of uploading the bytes. The URL is fetched once to compute
+        /// its checksum; downloaders re-verify it.
+        #[arg(long)]
+        source_url: Option<String>,
     },
 
     /// Search the package registry for a term (name or description).
@@ -692,9 +703,9 @@ fn run_main(cli: Cli) {
             let call = brood::introspect::call_form("package/remove-dep", &[&name]);
             run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
         }
-        Cmd::Publish { index } => {
+        Cmd::Publish { index, source_url } => {
             require_project("publish", None);
-            cmd_publish(&mut interp, index.as_deref())
+            cmd_publish(&mut interp, index.as_deref(), source_url.as_deref())
         }
         Cmd::Search {
             query,
@@ -1323,13 +1334,23 @@ fn cmd_add(interp: &mut Interp, name: &str, spec: &[String]) {
 /// `nest add pkg :version 1.0.0` failed against a perfectly good local registry.
 const PACKAGE_BOOTSTRAP: &str = "(require 'project) (project/load-config) (require 'package)";
 
-/// `nest publish [BASE-URL]` — publish this project's release to the hosted
-/// registry over HTTP. Loads the user config first so a `:registry` override applies.
-fn cmd_publish(interp: &mut Interp, index: Option<&str>) {
-    let call = match index {
-        Some(i) => brood::introspect::call_form("package/publish", &[i]),
-        None => "(package/publish)".to_string(),
-    };
+/// `nest publish [BASE-URL] [--source-url URL]` — publish this project's release to
+/// the hosted registry over HTTP. Loads the user config first so a `:registry` override
+/// applies.
+fn cmd_publish(interp: &mut Interp, index: Option<&str>, source_url: Option<&str>) {
+    // `package/publish` takes a PLIST (`:index` / `:source-url`), so the call is built
+    // here rather than with `call_form` (which quotes every argument as a string and so
+    // cannot emit a keyword) — the same shape as `cmd_search`.
+    let mut call = String::from("(package/publish");
+    for (key, value) in [(":index", index), (":source-url", source_url)] {
+        if let Some(v) = value {
+            call.push_str(&format!(
+                " {key} \"{}\"",
+                brood::introspect::escape_brood_string(v)
+            ));
+        }
+    }
+    call.push(')');
     run(interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
 }
 

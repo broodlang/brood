@@ -1440,61 +1440,76 @@ ordinary library, which the server stores as \"nothing\"."
     {}
     (map-pairs *project-enhances*)))
 
-(defn registry--publish-metadata (checksum)
+(defn registry--publish-metadata (checksum source-url)
   "The publish metadata envelope, base64-encoded for the `X-Brood-Publish` header. The
-tarball is NOT in here — it rides as the raw request body, so neither client nor server
-builds a base64/JSON copy of the whole upload (streaming publish; docs/design.md in hive)."
-  (encoding/base64-encode
-    (json/json-encode
-      {:name *project-name*
-       :version *project-version*
-       :description (or *project-description* "")
-       :dependencies (registry--publishable-deps)
-       ;; what this package plugs into (Debian's `Enhances:`) — the registry stores it and
-       ;; can filter on its names, without knowing what any of them are
-       :enhances (registry--publishable-enhances)
-       :checksum checksum})))
+tarball is NOT in here — for a hosted publish it rides as the raw request body, so neither
+client nor server builds a base64/JSON copy of the whole upload (streaming publish;
+docs/design.md in hive). For an EXTERNAL publish there is no body and `source-url` names where
+the bytes live (ADR-211); pass nil for a hosted publish."
+  (let (meta {:name *project-name*
+              :version *project-version*
+              :description (or *project-description* "")
+              :dependencies (registry--publishable-deps)
+              ;; what this package plugs into (Debian's `Enhances:`) — the registry stores it
+              ;; and can filter on its names, without knowing what any of them are
+              :enhances (registry--publishable-enhances)
+              :checksum checksum})
+    (encoding/base64-encode
+      (json/json-encode (if (and source-url (not (= source-url "")))
+                          (assoc meta :source_url source-url)
+                          meta)))))
 
-(defn publish (& rest)
-  "Publish the current project's release to the registry: build a source tarball, then
-POST it (with its sha256) to `<registry>/api/v1/publish`, authenticated with a Bearer
-token ($HIVE_TOKEN or the `:registry-token` config). Releases are immutable — a
-version already published is refused by the server. An optional base URL overrides the
-configured `:registry`. Backs `nest publish`."
+(defn publish (& opts)
+  "Publish the current project's release to the registry. Two shapes, chosen by `opts` (a
+plist): with no `:source-url`, build a source tarball and POST it (with its sha256) — the
+registry hosts the bytes. With `:source-url URL`, publish an EXTERNAL release — fetch the URL
+once (to hash its bytes into the checksum and prove it is reachable), then POST metadata only;
+the registry records the URL and every downloader verifies the bytes it fetches from there
+(ADR-211). `:index` overrides the configured `:registry` base URL. Auth: a Bearer token
+($HIVE_TOKEN or the `:registry-token` config). Releases are immutable — a version already
+published is refused. Backs `nest publish`."
   (require 'net/http)
   (require 'encoding)
-  (package--in-project (fn (root)
-                         (let (base (registry--base-for (if (empty? rest) nil (first rest)))
-                               token (registry--token))
-                           (when (nil? *project-name*) (error "package: project has no :name"))
-                           (when (nil? *project-version*)
-                             (error "package: nothing to publish — the project has no :version"))
-                           (when (or (nil? token) (= token ""))
-                             (error "package: publishing needs an auth token — set $HIVE_TOKEN (or :registry-token in your config)"))
-                           (let (archive (registry--build-tarball root)
-                                 bytes (slurp-bytes archive)
-                                 checksum (hash/sha256-bytes bytes)
-                                 meta-header (registry--publish-metadata checksum))
-                             (delete-file archive)
-                             (println (str "package: publishing "
-                                        *project-name* " " *project-version* " to " base " …"))
-                             (let (resp (net/http/http-post (str base "/api/v1/publish")
-                                          bytes
-                                          {:headers {"Content-Type" "application/gzip"
-                                                     "X-Brood-Publish" meta-header
-                                                     "Authorization" (str "Bearer " token)}})
-                                   status (get resp :status))
-                               (cond
-                                 (= status 0)
-                                   (error "package: cannot reach the registry at "
-                                     base
-                                     ": "
-                                     (get resp :error))
-                                 (and (>= status 200) (< status 300))
-                                   (println (str "package: published "
-                                              *project-name* " " *project-version* "."))
-                                 else
-                                   (error "package: publish failed (HTTP "
-                                     status
-                                     "): "
-                                     (registry--error-text resp)))))))))
+  (let (index (plist-get opts :index)
+        source-url (plist-get opts :source-url))
+    (package--in-project (fn (root)
+                           (let (base (registry--base-for index)
+                                 token (registry--token))
+                             (when (nil? *project-name*) (error "package: project has no :name"))
+                             (when (nil? *project-version*)
+                               (error "package: nothing to publish — the project has no :version"))
+                             (when (or (nil? token) (= token ""))
+                               (error "package: publishing needs an auth token — set $HIVE_TOKEN (or :registry-token in your config)"))
+                             (if (and source-url (not (= source-url "")))
+                               (registry--publish-external base token source-url)
+                               (registry--publish-hosted root base token)))))))
+
+(defn registry--publish-hosted (root base token)
+  (let (archive (registry--build-tarball root)
+        bytes (slurp-bytes archive)
+        checksum (hash/sha256-bytes bytes))
+    (delete-file archive)
+    (println (str "package: publishing " *project-name* " " *project-version* " to " base " …"))
+    (registry--post-publish base token bytes (registry--publish-metadata checksum nil))))
+
+(defn registry--publish-external (base token source-url)
+  ;; Fetch the external tarball ONCE — to hash its bytes into the checksum and prove the URL
+  ;; is reachable now — then POST metadata only; no bytes cross to the registry.
+  (let (bytes (package--fetch-bytes source-url)
+        checksum (hash/sha256-bytes bytes))
+    (println (str "package: publishing "
+               *project-name* " " *project-version* " to " base " (external source " source-url ") …"))
+    (registry--post-publish base token #b"" (registry--publish-metadata checksum source-url))))
+
+(defn registry--post-publish (base token body meta-header)
+  (let (resp (net/http/http-post (str base "/api/v1/publish")
+               body
+               {:headers {"Content-Type" "application/gzip"
+                          "X-Brood-Publish" meta-header
+                          "Authorization" (str "Bearer " token)}})
+        status (get resp :status))
+    (cond
+      (= status 0) (error "package: cannot reach the registry at " base ": " (get resp :error))
+      (and (>= status 200) (< status 300)) (println (str "package: published "
+                                                      *project-name* " " *project-version* "."))
+      else (error "package: publish failed (HTTP " status "): " (registry--error-text resp)))))
