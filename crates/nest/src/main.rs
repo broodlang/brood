@@ -489,6 +489,29 @@ enum Cmd {
         #[arg(long = "target", value_name = "TRIPLE")]
         targets: Vec<String>,
     },
+
+    /// Manage the package signing key (ADR-212).
+    ///
+    /// Signing is optional and advisory: a signed release lets installers verify its
+    /// authorship (TOFU — the key is pinned on first install), but nothing is gated.
+    Key {
+        #[command(subcommand)]
+        action: KeyCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum KeyCmd {
+    /// Generate an ed25519 signing key and print its public key.
+    ///
+    /// The private key is written 0600 under the config dir
+    /// (`~/.config/brood/signing-key.blsp`); share the printed public key so others
+    /// can pin it. `nest publish` signs a release's checksum with it automatically.
+    Gen {
+        /// Replace an existing key (this invalidates signatures made with the old one).
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() {
@@ -706,6 +729,18 @@ fn run_main(cli: Cli) {
         Cmd::Publish { index, source_url } => {
             require_project("publish", None);
             cmd_publish(&mut interp, index.as_deref(), source_url.as_deref())
+        }
+        // `nest key gen` is a user-level operation (a signing key in the config dir), not a
+        // project one — no `require_project`.
+        Cmd::Key {
+            action: KeyCmd::Gen { force },
+        } => {
+            let call = if force {
+                "(package/key-gen :force true)"
+            } else {
+                "(package/key-gen)"
+            };
+            run(&mut interp, &format!("{PACKAGE_BOOTSTRAP} {call}"));
         }
         Cmd::Search {
             query,

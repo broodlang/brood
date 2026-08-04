@@ -50,6 +50,7 @@
 (require 'hash)
 (require 'net/http)
 (require 'encoding)
+(require 'crypto)
 (defn pkg-tar-init (parent wrapper)
   (let (archive (path-join parent (str wrapper ".tar.gz")))
     (run-process "tar" (list "-czf" archive "-C" parent wrapper))
@@ -360,6 +361,29 @@
       (run-process "tar" (list "-czf" archive "-C" parent nm))
       [(str "file://" archive) (hash/sha256-bytes (slurp-bytes archive))])))
 
+;; A handler serving a SIGNED hosted release (ADR-212): its metadata carries `:signature` +
+;; `:pubkey` (hex) alongside the checksum, and the tarball at `/tarball`.
+(defn mock-registry-handler-signed (nm version checksum bytes signature pubkey)
+  (fn (req)
+    (let (path (get req :path)
+          release-path (str "/api/v1/packages/" nm "/releases/" version))
+      (cond
+        (= path (str release-path "/tarball"))
+          (net/http/response 200
+            {"Content-Type" "application/gzip"}
+            bytes)
+        (= path release-path)
+          (net/http/ok (str "{\"checksum\":\""
+                         checksum "\",\"version\":\"" version "\",\"signature\":\"" signature
+                         "\",\"pubkey\":\"" pubkey "\",\"dependencies\":[]}"))
+        else (net/http/not-found)))))
+
+;; A valid [signature-hex pubkey-hex] over `checksum` from a fresh keypair.
+(defn mock-sign (checksum)
+  (let (kp (crypto/keypair))
+    [(encoding/hex-encode-bytes (crypto/sign (get kp :private) (string->utf8-bytes checksum)))
+      (encoding/hex-encode-bytes (get kp :public))]))
+
 (describe "package: the hosted registry"
   (test "a :version dep downloads, sha256-verifies, and extracts the tarball"
     (let (parent (pkg-fixture-root)
@@ -413,6 +437,45 @@
                          base)
                        (catch e (error-message e)))
             "sha256 mismatch"))))
+  (test "a signed release verifies and pins the signer's public key (TOFU, ADR-212)"
+    (let (parent (pkg-fixture-root)
+          app-dir (path-join parent "app")
+          [bytes checksum] (mock-package-tarball parent "signdep")
+          [signature pubkey] (mock-sign checksum)
+          base (mock-registry-start (mock-registry-handler-signed "signdep"
+                                      "1.0.0" checksum bytes signature pubkey)))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (let (e (package/package--resolve-registry app-dir (dep-registry 'signdep "1.0.0") nil base))
+        (assert= (dep-kind e) :registry)
+        ;; the verified signer's key is pinned on the entry and written into the lock row
+        ;; (both the :pubkey keyword and its value appear in the lock vector)
+        (assert= (get e :pubkey) pubkey)
+        (is (includes? (seq (dep-lock-vec e)) :pubkey))
+        (is (includes? (seq (dep-lock-vec e)) pubkey)))))
+  (test "signature checking is advisory — a bad signature warns but still installs"
+    (let (parent (pkg-fixture-root)
+          app-dir (path-join parent "app")
+          [bytes checksum] (mock-package-tarball parent "sigbad")
+          ;; a syntactically-valid but WRONG signature (a fresh key over the wrong message)
+          [_sig pubkey] (mock-sign checksum)
+          bad-sig (encoding/hex-encode-bytes (crypto/sign (get (crypto/keypair) :private)
+                                               (string->utf8-bytes "not the checksum")))
+          base (mock-registry-start (mock-registry-handler-signed "sigbad"
+                                      "1.0.0" checksum bytes bad-sig pubkey)))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      ;; resolves anyway (advisory never blocks), and the extraction lands
+      (let (e (package/package--resolve-registry app-dir (dep-registry 'sigbad "1.0.0") nil base))
+        (assert= (get e :version) "1.0.0")
+        (is (dir? (path-join (path-join app-dir "_deps") "sigbad"))))))
+  (test "an unsigned release pins no key and leaves the lock uncluttered"
+    (let (parent (pkg-fixture-root)
+          app-dir (path-join parent "app")
+          [bytes checksum] (mock-package-tarball parent "plaindep")
+          base (mock-registry-start (mock-registry-handler "plaindep" "1.0.0" "d" checksum bytes)))
+      (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+      (let (e (package/package--resolve-registry app-dir (dep-registry 'plaindep "1.0.0") nil base))
+        (assert= nil (get e :pubkey))
+        (is (not (includes? (seq (dep-lock-vec e)) :pubkey))))))
   (test "a sha256 mismatch is refused"
     (let (parent (pkg-fixture-root)
           app-dir (path-join parent "app")
@@ -464,11 +527,20 @@
               *project-description* ""
               *project-dependencies* nil
               *project-enhances* {})
-      (let (ext (encoding/base64-decode (package/registry--publish-metadata "abc" "https://ex/f.tgz")))
+      (let (ext (encoding/base64-decode (package/registry--publish-metadata "abc"
+                                          "https://ex/f.tgz" nil nil)))
         (is (includes? ext "\"source_url\":\"https://ex/f.tgz\""))
         (is (includes? ext "\"checksum\":\"abc\"")))
-      (let (hosted (encoding/base64-decode (package/registry--publish-metadata "abc" nil)))
-        (is (not (includes? hosted "source_url")))))))
+      (let (hosted (encoding/base64-decode (package/registry--publish-metadata "abc" nil nil nil)))
+        (is (not (includes? hosted "source_url"))))
+      ;; a signed publish carries :signature + :pubkey; an unsigned one omits both
+      (let (signed (encoding/base64-decode (package/registry--publish-metadata "abc"
+                                             nil "sighex" "pubhex")))
+        (is (includes? signed "\"signature\":\"sighex\""))
+        (is (includes? signed "\"pubkey\":\"pubhex\"")))
+      (let (unsigned (encoding/base64-decode (package/registry--publish-metadata "abc" nil nil nil)))
+        (is (not (includes? unsigned "signature")))
+        (is (not (includes? unsigned "pubkey")))))))
 
 ;; ---- version-range resolution (ADR-209) --------------------------------------
 ;; A `:version` dep now names a RANGE, resolved to a concrete version by the backtracking
