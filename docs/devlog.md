@@ -15509,3 +15509,49 @@ cross-language capability question, and a brood-only row would distort the publi
 no gain. The header carries the trap this session cost me — *a derivation firing is not the arm
 lowering* — with both greps side by side (`leaf probe hot` for the derivation, `(hot)` in the
 `[jit-ir]` dump, which must appear **twice**), and says which one to check first.
+
+## 2026-08-04 (cont.) — the per-process floor: both named experiments done, both negative
+
+Picked up handoff §3 item 2. It named two experiments, (a) box the `Heap` inside `Process` and
+(b) build an allocator size-class histogram, with "(a) is mechanical and tells you whether (b) is
+worth building". That turned out to be exactly right, just not in the hoped-for direction: (a) is
+a measured loss, and its *shape* retires (b) without building it.
+
+**First, the measurement didn't exist.** The 4389/4186/4195 figures in the handoff were produced
+ad-hoc last session — there was no harness. So `scripts/fuzz/stress/process_floor.blsp` now
+exists: N idle processes parked in `receive`, printing `base_kb` and `(rss − base)/n`. Two things
+it encodes, both of which bit me while writing it:
+
+- **Holding the pids is a confound.** My first version accumulated the spawned pids into a list;
+  at 80k that list is 80k cons cells of *per-process* cost, landing squarely in the slope being
+  measured. It read 4470 B/proc; dropping the list gave 4271. So the harness deliberately keeps
+  only a count.
+- **Discard the first run after a fresh build.** Three-for-three, the first run of a newly built
+  binary reports `base_kb` ≈ 44 MB instead of ≈ 24 MB (cold build-id-keyed boot cache), which
+  corrupts the base subtraction and reads ~150 B/proc *low* — the same size as the effect I was
+  trying to measure. `base_kb` is printed so this is visible rather than silently believed.
+
+**(a) does what it claims and is still a loss.** `Process` 1304 → **112 bytes**, and the floor
+genuinely fell: **4273 → 4124 B/process (−3.5%)**, −11.4 MB at 80k processes, tight on both sides
+(±0.1%). But `Heap` becoming its own block means a **second allocation per spawn**:
+
+| | delta | base-vs-base floor |
+|---|---|---|
+| idle floor | **−3.5%** | ±0.1% |
+| `spawn` | **+3.2%** | 1.0% |
+| `spawn-live` | **+6.4%** | 1.3% |
+
+Both throughput rows are several times their floors, both in the same direction, with an obvious
+mechanism. `spawn-live` is already the worst published row at 2.8× the BEAM, so paying 6% there to
+save 3.5% of idle memory is plainly the wrong trade. Reverted, with the numbers recorded at the
+`heap` field so the next person doesn't re-derive them.
+
+**(b) is retired by (a)'s shape, which is the genuinely useful part.** `Process` shrank by **1192
+bytes of struct** and the floor moved **149**. Size-class rounding of the `Process` block is
+therefore *not* the dominant term — so a size-class histogram would not find the missing ~2.6 KB
+either. It is spread thin across the ~25–30 blocks a process owns, no single one dominating.
+
+**Which leaves a different direction than the one the handoff was pointing at:** cut the *number*
+of allocations per process, not their sizes — consolidate several of a process's blocks into one
+arena. Note that (a) failed by moving that number the wrong way, so any such attempt has to carry
+the `spawn`/`spawn-live` pair alongside the floor from the first measurement, not at the end.

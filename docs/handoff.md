@@ -110,18 +110,40 @@ Three more things a later reader should know, because two of them cost real time
 - **Read the deopt journal once.** Reading it to size the frame and again to resume gave an
   out-of-bounds `root_at` (the second read came from an already-truncated frame).
 
-**2. Per-process memory floor — measured, two experiments named.** The idle floor is
-**4.19 KB** (slope of RSS against process count: 4389 / 4186 / 4195 at N = 10k/40k/80k). It is
-**not** allocator retention — `MIMALLOC_PURGE_DELAY=0` leaves the slope at 4230 / 4120.
-Attribution: `Process` 1304 B (of which **`Heap` 1200 B, embedded by value**), `Mailbox` 184 B,
-`Suspended` 136 B = 1624 B structural; the remaining ~2566 B is not data (`process-info
-:memory` for an idle process is **64 bytes**) but per-allocation overhead across the ~25–30
-distinct blocks a process owns. Next: **(a)** box the `Heap` inside `Process` — `Process` drops
-to ~112 B and `Heap` becomes its own block; if size-class rounding dominates the floor falls,
-and if the indirection costs more that is also a result. **(b)** Only then the allocator
-size-class histogram. (a) is mechanical and tells you whether (b) is worth building. Guarded by
-`per_process_floor_is_attributed`, which exists because `Heap` being inline means **any new
-`Heap` field costs one per live process**.
+**2. ~~Per-process memory floor~~ — both named experiments are now DONE, both negative.** The
+idle floor is **~4.27 KB** (`scripts/fuzz/stress/process_floor.blsp`, slope at N = 10k/40k/80k:
+4731 / 4343 / 4271 — read the slope, never `rss/n`). It is **not** allocator retention
+(`MIMALLOC_PURGE_DELAY=0` moves it ~2%). Attribution: `Process` 1304 B (of which **`Heap`
+1200 B, inline**), `Mailbox` 184 B, `Suspended` 136 B = 1624 B structural; the remaining ~2.6 KB
+is not process *data* (`process-info :memory` for an idle process is **64 bytes**) but
+per-allocation overhead across the ~25–30 distinct blocks a process owns.
+
+**(a) Boxing the `Heap` inside `Process`: tried, measured, reverted (2026-08-04).** It does what
+it says — `Process` 1304 → **112 bytes** — and the floor did fall, **4273 → 4124 B/process
+(−3.5%**, −11.4 MB at 80k). But it adds a **second allocation per spawn**, and that costs more
+than it saves:
+
+| | value | base-vs-base floor |
+|---|---|---|
+| idle floor | 4273 → 4124 B/proc (**−3.5%**) | ±0.1% |
+| `spawn` | **+3.2%** | 1.0% |
+| `spawn-live` | **+6.4%** | 1.3% |
+
+`spawn-live` is already the worst published row (2.8× the BEAM), so trading 6% there for 3.5% of
+idle memory is the wrong direction. Reverted; the reasoning is recorded at the `heap` field so it
+is not re-attempted blind.
+
+**(b) The allocator size-class histogram: retired WITHOUT building it, and (a) is why.** `Process`
+shrank by **1192 bytes of struct** and the floor fell only **149**. So size-class rounding of the
+`Process` block is *not* the dominant term, and a histogram would not locate the missing ~2.6 KB
+either — it is spread thin across ~25–30 blocks with no single one dominating.
+
+**The remaining direction, if anyone wants this row: cut the NUMBER of allocations per process,
+not their sizes.** That is what (a) got backwards — it added one. Everything measured so far says
+per-allocation overhead × block count is the floor, so consolidating several of a process's blocks
+into one arena would attack it; shuffling bytes between existing blocks will not. Nobody has
+scoped that, and note it pulls against `spawn` throughput in exactly the way (a) did, so it needs
+the `spawn`/`spawn-live` pair measured alongside the floor from the start.
 
 **3. Finish the `std/` sweep.** Unswept: the rest of `std/tool/*`, `editor/*` beyond buffer,
 `std/net/*` beyond the framed reads. The method that worked: grep for the shape (an
@@ -165,6 +187,10 @@ All in `scripts/fuzz/stress/`, each with a usage header:
 - **`scale_sweep.blsp`** — a `std/` op at N and 4N, ratio printed (linear ~4×, quadratic ~16×).
   **Read its header first**; it records which rows are cleared and why, including the one that
   was cleared *wrongly*.
+- **`process_floor.blsp`** — the per-process idle memory floor; ~4.27 KB, flat across N. Prints
+  `base_kb` so you can see the one artifact that corrupts it: **discard the first run after a
+  fresh build** (cold boot cache reports a ~44 MB base instead of ~24 MB and reads ~150 B/proc
+  low). Read the slope across N, never `rss/n`.
 - **`leaf_splice.blsp`** — partial leaf splicing's benchmark (ADR-210); ~220 ms against ~520 ms
   with `BROOD_NO_PARTIAL_LEAF=1`, i.e. ~2.4×. Its header carries the trap: a derivation firing
   is not the same as the arm lowering, and the two must be checked separately.

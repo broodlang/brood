@@ -83,6 +83,14 @@ pub(super) struct Process {
     /// or steal — safe because a process has no native stack to migrate (§7).
     pub(super) worker_id: usize,
     /// This process's LOCAL data heap — travels with it across workers.
+    ///
+    /// **Inline by value, and boxing it was tried and rejected** (2026-08-04). `Heap` is ~1200
+    /// of `Process`'s ~1304 bytes, so `Box`ing it shrinks `Process` to 112 — but it adds a
+    /// *second allocation per spawn*, and that costs more than the memory it saves: the idle
+    /// floor fell 4273 → 4124 B/process (−3.5%) while `spawn` went +3.2% and `spawn-live`
+    /// +6.4%, each several times its own base-vs-base noise floor. `spawn-live` is already the
+    /// worst published row, so that is the wrong direction. Don't re-attempt it without a plan
+    /// that avoids the extra allocation. Measure with `scripts/fuzz/stress/process_floor.blsp`.
     heap: Heap,
     /// The 0-arg body thunk (a shared-runtime `Fn` handle, valid in `heap`). Unused
     /// (`nil`) when `program` is set — a whole-program root process (ADR-135).
