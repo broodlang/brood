@@ -1,0 +1,68 @@
+;; process_floor — the per-process idle memory floor (handoff §3 item 2).
+;; N=<count> brood scripts/fuzz/stress/process_floor.blsp
+;; Run it at several N and read the SLOPE, never the ratio:
+;;   for n in 10000 40000 80000; do N=$n brood scripts/fuzz/stress/process_floor.blsp; done
+;; Each line prints `base_kb` (RSS before any spawn) and `per_proc_b`, which is
+;; (rss - base) / n. **`rss/n` is the wrong number** — it folds the runtime's ~20 MB base
+;; into the per-process figure, and that is exactly how the floor was once recorded as
+;; 5.9 KB when it is ~4.2 KB. The slope across N is the measurement; a single N is not.
+;;
+;; Expect ~4200 B/process and, more importantly, a figure that is FLAT across N. A rising
+;; per_proc_b means something scales worse than per-process (a shared table growing with
+;; process count); a falling one means the base is still being amortised, so N is too small.
+;;
+;; The processes park in `receive` with an empty mailbox and never wake, so this measures a
+;; genuinely *idle* process: `Process` + `Mailbox` + the parked `Suspended` continuation,
+;; plus whatever per-allocation overhead the allocator adds across the ~25-30 distinct
+;; blocks each one owns. `process-info :memory` for one of these is ~64 bytes, so almost
+;; none of the floor is process *data*.
+;;
+;; **Discard the first run after a fresh build.** Three-for-three across configurations, the
+;; first run of a newly built binary reports `base_kb` around 44 MB instead of ~24 MB (the
+;; build-id-keyed boot cache is cold), which corrupts the base subtraction and reads ~150 B/proc
+;; low. Run it twice and use the second; `base_kb` is printed precisely so you can see when this
+;; has happened rather than silently believing the number.
+;;
+;; MIMALLOC_PURGE_DELAY=0 is worth a control run: the allocator holds freed pages, so it can
+;; flatter or flatten a memory curve. For THIS measurement it was ~2% (the floor is not
+;; allocator retention) — but check rather than assume, because on churny workloads the same
+;; flag is worth 2.3x.
+
+(def n (let (e (getenv "N")) (if e (string->number e) 20000)))
+
+(defn rss-kb ()
+  (let (txt (slurp "/proc/self/status") i (index-of txt "VmRSS:"))
+    (if (< i 0)
+      0
+      (let (chunk (substring txt (+ i 6) (+ i 32))
+            d0 (string-span-until chunk 0 "0123456789")
+            d1 (string-span chunk d0 "0123456789"))
+        (if (>= d0 d1) 0 (string->number (substring chunk d0 d1)))))))
+
+;; Parks forever with an empty mailbox — no clause can match, so it never wakes. This is
+;; the idle shape; it holds a `Suspended` exactly as a real blocked process does.
+(defn idler () (receive ([:never-sent x] x)))
+
+;; Deliberately does NOT retain the pids: a list of N pids is itself N cons cells of
+;; per-process cost, which lands in the very slope being measured. Returns the count.
+(defn spawn-n (k acc) (if (= k 0) acc (do (spawn (idler)) (spawn-n (- k 1) (+ acc 1)))))
+
+(def base-kb (rss-kb))
+(def live (spawn-n n 0))
+;; Let every child actually reach its `receive` (and so allocate its `Suspended`) before
+;; sampling — otherwise a fast sample measures processes that have not parked yet and the
+;; floor reads low.
+(defn settle (k) (if (= k 0) :ok (do (sleep 20) (settle (- k 1)))))
+(settle 25)
+(def rss (rss-kb))
+
+(println (str "n="
+           n
+           " base_kb="
+           base-kb
+           " rss_kb="
+           rss
+           " per_proc_b="
+           (quot (* (- rss base-kb) 1024) n)
+           " live="
+           live))
