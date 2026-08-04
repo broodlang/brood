@@ -797,6 +797,19 @@ pub(crate) fn jit_run_fast_link(
                 // Guard nslots: the IC could have re-resolved to a different arm
                 // than the one whose native ran; a mismatched frame shape can't
                 // be resumed and takes the legacy re-run instead.
+                //
+                // KI-26: `active_nslots()` re-reads `inline_installed`, which is the
+                // anti-pattern behind two ADR-210 bugs — and unlike the swap in `jit_tier`,
+                // this one deliberately does NOT bump the global epoch (see the comment
+                // there: a bump cascaded under `pfib`). So a peer process sharing this arm
+                // can hold a fast link whose recorded `nslots` predates the inline swap, the
+                // guard then declines, and the fallthrough re-runs from ip 0 — repeating a
+                // journaled effect. The flag-free form of the same shape check would be
+                // `nslots == arm.nslots || nslots == arm.inline_nslots`. NOT changed here
+                // because it is unproven: a purpose-built detector (fire when the guard
+                // declines while a journal is live) stayed silent across the 4350-test suite,
+                // `pfib`, and a 24-process shared-effectful-arm race with exact effect
+                // counts. See `docs/known-issues.md` KI-26 for the detector recipe.
                 if outcome == 1 && arm.active_nslots() == nslots {
                     if let Some((resume, rip, depth)) = jit_ckpt_resume(heap, &arm, base, nslots) {
                         return match jit_native_reenter(heap, native_depth, |h| {
