@@ -1483,3 +1483,119 @@ fn jit_speedup_vs_vm() {
         vm.as_secs_f64() / jit.as_secs_f64().max(1e-9)
     );
 }
+
+// ===== KI-26: the fast-link deopt shape check must be flag-free =====
+
+/// A minimal arm carrying just the two frame sizes the shape check reads.
+#[cfg(feature = "jit")]
+fn ki26_arm(nslots: usize, inline_nslots: usize) -> CompiledArm {
+    CompiledArm {
+        nrequired: 1,
+        noptional: 0,
+        optional_defaults: Box::new([]),
+        rest_slot: None,
+        nslots,
+        nsites: 0,
+        ngsites: 0,
+        uid: 0,
+        site_pos: Box::new([]),
+        body: Node::Const(ConstVal::new(Value::int(0))),
+        chunk: None,
+        has_runtime_handles: false,
+        jit_code: AtomicPtr::new(std::ptr::null_mut()),
+        jit_calls: AtomicU32::new(0),
+        deopt_watch: false,
+        jit_deopts: AtomicU32::new(0),
+        float_globals: std::sync::OnceLock::new(),
+        self_global_ok: std::sync::atomic::AtomicBool::new(false),
+        ckpt_slot: u32::MAX,
+        compile_epoch: AtomicU64::new(0),
+        share_key: None,
+        shared_published: std::sync::atomic::AtomicBool::new(false),
+        fn_name: None,
+        src_file: None,
+        capture_names: Box::new([]),
+        dbg_name: None,
+        inline_name: None,
+        inline_stride: 0,
+        inline_nslots,
+        inline_code: AtomicPtr::new(std::ptr::null_mut()),
+        inline_queued: std::sync::atomic::AtomicBool::new(false),
+        inline_installed: std::sync::atomic::AtomicBool::new(false),
+        leaf: None,
+    }
+}
+
+#[test]
+#[cfg(feature = "jit")]
+fn ki26_frame_shape_check_is_independent_of_inline_installed() {
+    use std::sync::atomic::Ordering::Release;
+    // Small frame 6, leaf-spliced frame 9 — the layout pair a journalled leaf derivation
+    // produces (the spliced one is strictly larger; see `leaf_inline_probe`).
+    let arm = ki26_arm(6, 9);
+
+    // Either of the arm's own frame sizes is resumable, in BOTH flag states. This is the
+    // property the flag form lacked: with the frame built to the small 6 and the flag flipped
+    // to true by another process's inline swap, `active_nslots()` returns 9, the old guard
+    // declined, and the caller's fallthrough re-ran the arm from ip 0 — repeating whatever
+    // effect the native had already journaled.
+    for installed in [false, true] {
+        arm.inline_installed.store(installed, Release);
+        assert!(
+            jit_frame_shape_matches(&arm, 6),
+            "the small frame must stay resumable with inline_installed={installed}"
+        );
+        assert!(
+            jit_frame_shape_matches(&arm, 9),
+            "the spliced frame must stay resumable with inline_installed={installed}"
+        );
+        // The flag form disagrees with the shape form in exactly one of these states, which
+        // is the bug: assert the divergence explicitly so nobody "simplifies" it back.
+        if installed {
+            assert_ne!(
+                arm.active_nslots(),
+                6,
+                "with the flag set, active_nslots() no longer matches a small frame — the \
+                 flag form would decline a resumable frame here"
+            );
+        }
+    }
+
+    // A genuinely foreign arm (the IC re-resolved the site) must still be refused, in both
+    // flag states — that is the out-of-bounds protection the check exists for.
+    for installed in [false, true] {
+        arm.inline_installed.store(installed, Release);
+        for foreign in [0, 5, 7, 8, 10, 100] {
+            assert!(
+                !jit_frame_shape_matches(&arm, foreign),
+                "a frame of {foreign} slots belongs to no layout of this arm \
+                 (inline_installed={installed})"
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "jit")]
+fn ki26_shape_check_admits_everything_the_flag_form_did() {
+    use std::sync::atomic::Ordering::Release;
+    // The new form must be a strict SUPERSET of the old one — never refusing a frame the
+    // flag form accepted — or the fix would trade one silent wrong-resume for another.
+    // Includes the degenerate case where the two layouts coincide (an unjournalled leaf
+    // derivation, whose `inline_nslots` is floored to the small frame).
+    for (n, inl) in [(6usize, 9usize), (4, 4), (1, 32), (12, 19)] {
+        let arm = ki26_arm(n, inl);
+        for installed in [false, true] {
+            arm.inline_installed.store(installed, Release);
+            for frame in 0..40usize {
+                if arm.active_nslots() == frame {
+                    assert!(
+                        jit_frame_shape_matches(&arm, frame),
+                        "flag form accepted frame {frame} for ({n},{inl}) \
+                         installed={installed} but the shape form refused it"
+                    );
+                }
+            }
+        }
+    }
+}

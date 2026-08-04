@@ -177,7 +177,7 @@ affected" does not hold: each REPL input is its own compile unit, so `eval_strin
 "does neither" — and touching only `eval_builtin` leaves the REPL broken. Verified by
 building both and running the same two inputs.
 
-## KI-26 — a fast-link deopt guard re-reads `inline_installed`, and its fallthrough re-runs · **latent, unproven, 2026-08-04**
+## KI-26 — a fast-link deopt guard re-read `inline_installed`, and its fallthrough re-ran · **fixed 2026-08-04**
 
 **Severity: unknown — structurally reachable, never observed.** Recorded because the root cause
 is the same anti-pattern behind two real ADR-210 bugs, and because the failure mode would be a
@@ -208,13 +208,32 @@ the guard declines *while `jit_ckpt_resume` reports a live journal* — stayed s
 Most likely the per-call epoch check on the fast link re-validates the entry before the mismatch
 can be observed. Not proven either way.
 
-**The fix, when someone wants it.** Make the shape check flag-free —
-`nslots == arm.nslots || nslots == arm.inline_nslots` — which is a strict superset of the current
-condition (`active_nslots()` returns one of exactly those two), so it only *admits* more resumes,
-and every admitted resume is still validated by `jit_ckpt_resume` (positive journal, in-bounds
-slot). Re-run the ADR-210 gate: 8 fuzz generators × 4 configs, `tests/jit.rs` under
-GC_STRESS+GC_VERIFY, and the suite with `BROOD_NO_PARTIAL_LEAF` both ways. **Reinstate the
-detector first** — a fix for a bug you cannot make fire is a fix you cannot verify.
+**Fixed** by extracting the check as a flag-free predicate, `jit_frame_shape_matches(arm,
+frame_nslots)` = `frame_nslots == arm.nslots || frame_nslots == arm.inline_nslots`. That is a
+strict superset of the flag form (`active_nslots()` returns exactly one of those two), so it only
+*admits* more resumes — the effect-preserving direction — and every admitted resume is still
+validated by `jit_ckpt_resume` (positive journal, in-bounds slot). A genuinely foreign arm is
+still refused, which is the out-of-bounds protection the check exists for.
+
+**How it was verified, given the runtime detector never fired.** The race could not be won, so
+the behaviour difference was pinned at the unit level instead — which turned out to be the better
+tool anyway, because it is deterministic. `ki26_frame_shape_check_is_independent_of_inline_installed`
+asserts that for an arm with layouts (6, 9), *both* frames stay resumable in *both* flag states,
+and that a foreign frame is refused in both; it **fails against the old flag form** (checked by
+temporarily restoring it: "the small frame must stay resumable with inline_installed=true") and
+passes with the fix. `ki26_shape_check_admits_everything_the_flag_form_did` sweeps four layout
+pairs — including the degenerate `(4, 4)` an unjournalled derivation produces — × both flag
+states × 40 frame sizes, asserting the new form never refuses what the flag form accepted, so the
+fix cannot have traded one silent wrong-resume for another.
+
+Gate re-run: 40/40 `tests/jit.rs` under GC_STRESS+GC_VERIFY, 946/946 Rust, 4350/4350 in-language
+with `BROOD_NO_PARTIAL_LEAF` both ways, 4 fuzz generators × 4 engine configs, `--no-default-features`
+clean.
+
+**The lesson worth keeping.** The runtime detector was the right instinct and the wrong
+instrument: it can only fire if you win a race. When a hazard is a *predicate* rather than a
+timing window, extract the predicate and test it directly — a fix for a bug you cannot make fire
+is a fix you cannot verify, but "make it fire" does not have to mean "reproduce it end to end."
 
 ## KI-23 — the KI-22 lost update also exists in std-module registries · **fixed 2026-08-02**
 

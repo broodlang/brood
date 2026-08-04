@@ -32,6 +32,7 @@ behaviour. If something misbehaves, bisect with these **before** bisecting commi
 | Receive-mark (ADR-195) | `BROOD_NO_RECV_MARK=1` | backlogged reply O(backlog) → **O(1)**, 653 → 4 µs at 32k |
 | Registry updates are atomic (KI-22/23, ADR-202) | — (correctness) | ~40% of concurrent registrations were being lost |
 | Framed reads use a straddle probe (ADR-142 correction) | — (bug fix) | drip-fed frame O(total²) → O(total) |
+| Fast-link deopt shape check is flag-free (KI-26) | — (correctness) | a peer's stale link no longer re-runs a journaled effect from ip 0 |
 
 **The `STEAL_GRACE_NS` cliff, because it is the one tuned constant here.** Swept on `latency`
 p50 / `supervisor`: grace 0 → 10 µs / 2607 ms · 1–2 µs → 10 µs / ~2106 ms · **2.5 µs → 13 µs /
