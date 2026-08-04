@@ -716,3 +716,87 @@ fn type_mixed_join_edges_stay_exact() {
         "180000", // 30000×1 + 30000×5 — verified against BROOD_VM=0
     );
 }
+
+// ===== partial leaf splicing (ADR-210; BROOD_NO_PARTIAL_LEAF opts out) =====
+//
+// A derivation may now keep a residual non-tail call beside the spliced leaves, because
+// the leaf-spliced layout carries its own deopt checkpoint and a deopt resumes in the
+// SPLICED chunk. Before this, one un-spliceable callee blocked inlining of every small
+// callee beside it. `tests/jit_effect_once_test.blsp` cases 5–6 guard exactly-once
+// effects; these guard the values.
+
+#[test]
+fn partially_spliced_arm_matches_vm() {
+    // The shape: `mix` calls `add1` (small, calls-free → spliced) and `rec` (recursive →
+    // never spliceable, so it survives as the residual call). Warmed hard so the deferred
+    // leaf upgrade installs and the partially-spliced native runs the bulk of the loop.
+    // mix(i) = (i+1) + 3, summed over i in 0..200000.
+    is(
+        "(defn add1 (n) (+ n 1))
+         (defn rec (n acc) (if (< n 1) acc (rec (- n 1) (+ acc 1))))
+         (defn mix (i) (+ (add1 i) (rec 3 0)))
+         (defn work (i acc) (if (>= i 200000) acc (work (+ i 1) (+ acc (mix i)))))
+         (work 0 0)",
+        "20000700000", // sum(i+4, i=0..199999) — verified against BROOD_VM=0
+    );
+}
+
+#[test]
+fn partially_spliced_residual_callee_redef_is_honored() {
+    // Hot reload through the RESIDUAL call, not the spliced one: warm `mix` so its
+    // partially-spliced native installs (with `rec` still a real call), then `def` a new
+    // `rec`. The epoch bump invalidates the installed native and the stale derivation, so
+    // the post-def call must see the new `rec` — late binding exact, as for a spliced
+    // callee (`leaf_inlined_helper_redef_takes_effect`).
+    is(
+        "(defn add1 (n) (+ n 1))
+         (defn rec (n acc) (if (< n 1) acc (rec (- n 1) (+ acc 1))))
+         (defn mix (i) (+ (add1 i) (rec 3 0)))
+         (defn warm (k last) (if (< k 1) last (warm (- k 1) (mix 5))))
+         (warm 200000 0)
+         (def rec (fn (n acc) 100))
+         (mix 5)",
+        "106", // add1(5) = 6, plus the NEW rec = 100
+    );
+}
+
+#[test]
+fn partially_spliced_arm_deopting_every_activation_matches_vm() {
+    // The stress case for the resume path: the arm deopts on EVERY activation (an i64
+    // overflow after the residual call has completed), so nearly every iteration exercises
+    // journal-write → deopt → resume-in-the-spliced-chunk. The overflow promotes to a
+    // bignum, so the result also proves the resumed operand stack was intact.
+    is(
+        "(defn add1 (n) (+ n 1))
+         (defn rec (n acc) (if (< n 1) acc (rec (- n 1) (+ acc 1))))
+         (defn mix (i big) (+ (+ (add1 i) (rec 3 0)) (* big big)))
+         (defn work (i acc big)
+           (if (>= i 20000) acc (work (+ i 1) (+ acc (mix i big)) big)))
+         (work 0 0 4000000000)",
+        // sum(i+4) for i in 0..19999 = 200070000, plus 20000 * 4000000000^2 = 3.2e23.
+        // Verified identical across all five configs: tree-walker, VM-no-JIT, VM+JIT,
+        // BROOD_NO_PARTIAL_LEAF=1, and GC-stress+verify.
+        "320000000000000200070000",
+    );
+}
+
+#[test]
+fn partially_spliced_spliced_callee_redef_is_honored() {
+    // The other half of hot reload through a PARTIAL derivation: redefine the callee that
+    // was *spliced* (`add1`), not the residual one. Its old body is baked into the
+    // partially-spliced native and copied into the stored derivation, so both must be
+    // invalidated — the epoch bump drops the native, and `leaf.epoch` no longer matches so
+    // the re-lower refuses the stale derivation. Distinct path from
+    // `leaf_inlined_helper_redef_takes_effect`, which has no residual call and therefore
+    // no journal.
+    is(
+        "(defn add1 (n) (+ n 1))
+         (defn rec (n acc) (if (< n 1) acc (rec (- n 1) (+ acc 1))))
+         (defn mix (i) (+ (add1 i) (rec 3 0)))
+         (defn warm (k last) (if (< k 1) last (warm (- k 1) (mix 5))))
+         (warm 200000 0)
+         (def add1 (fn (n) (* n 1000)))
+         (mix 5)",
+        "5003", // NEW add1: 5*1000 = 5000, plus rec 3 0 = 3
+    );
+}

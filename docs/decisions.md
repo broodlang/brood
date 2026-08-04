@@ -13575,3 +13575,118 @@ budget stays only as a safety net, never approached on a well-formed graph.
 - *Deferred.* Multi-requirer derivation trees (today a conflict names one requirer + the
   package's availability, not every contributor) and pre-release ordering remain future
   refinements.
+## ADR-210 — Partial leaf splicing: the inlined engine gets its own checkpoint and resume arm
+
+**Status:** implemented (2026-08-03), **default ON**; `BROOD_NO_PARTIAL_LEAF=1` reverts to
+all-or-nothing splicing. Closes the one item `handoff.md` §3 carried as genuinely open.
+
+**Context.** Leaf-callee inlining (Phase 2, 2026-07-19) spliced small calls-free callees into
+a hot caller, but `leaf_inline_derive` refused any derivation whose spliced chunk still held a
+non-tail `Call`. The consequence was structural, not incidental: **one un-spliceable callee
+blocked inlining of every small callee beside it.** `mandelbrot`'s `row-sum` calls `->float`
+(a three-instruction arm) and `esc` (recursive, unspliceable), so the conversion stayed a real
+call at ~85 ns where every other language in the suite emits a machine cast.
+
+The bail was *sound*, and for a specific reason worth restating: an inlined native carried **no
+deopt checkpoint**, so a deopt re-ran the arm from ip 0 — safe only when nothing before the
+deopt point had completed a call. The reason it carried none was **not** the frame layout (which
+is easy to move) but the **bytecode ip space**: the inlined body is a different chunk from the
+one the VM holds, so a journalled resume ip meant nothing to `vm_resume_deopt`, which drove
+`arm.chunk` — the small body.
+
+**Decision.** Give the leaf derivation a **resume arm**: a full `CompiledArm` over the spliced
+body, carrying the spliced chunk, `nslots = inline_nslots`, and its own `ckpt_slot`. A deopt out
+of the inlined native then resumes *in the chunk that wrote the journal*, and journalling in the
+inlined lowering becomes ordinary rather than novel. Four consequences fall out:
+
+- **The journal mechanism is reused, not reinvented.** `jit_ckpt_depth` sizes the journal for
+  the spliced chunk exactly as it does for a small one; the emission site is unchanged apart
+  from taking the slot from the lowering instead of the arm. If it declines (its chicken switch,
+  or a chunk whose operand depths don't reconcile) the **derivation is refused** rather than run
+  unjournalled — the failure direction is losing an optimisation, never repeating an effect.
+- **The two layouts' journals are disjoint by construction.** A journalled derivation splices
+  from the caller's *full* small frame (`nslots`, reserves included) rather than its
+  `scope.max`, so callee blocks sit above the small layout's spill and checkpoint areas — the
+  two engines take turns running one frame. An unjournalled derivation keeps the tight layout,
+  so the common case costs no extra slots (measured: `leaf_nslots` 4, unchanged).
+- **The resume arm shares the caller's `uid`**, hence its inline-cache block. Sound because a
+  spliced callee body contributes no call or global sites of its own — `leaf_body_qualifies`
+  rejects both — so the spliced chunk's site ids are exactly the caller's.
+- **It also fixes the retention story.** The inlined native bakes the raw addresses of its
+  chunk's `ConstVal`s into itself; holding the chunk on an `Arc<CompiledArm>` that the caller
+  arm owns means `JIT_ARM_KEEPALIVE` already retains it, so the leaf path no longer needs
+  `JIT_INLINE_CHUNK_KEEPALIVE` and no longer recompiles the spliced chunk at every lowering.
+
+**A second, larger blocker found on the way, and worth its own note.** The derivation fired for
+`work`-shaped arms and never for `mix`-shaped ones — the mid-level functions partial splicing
+exists to help. Cause: resolving a callee during a probe *compiles* it, under the
+`LEAF_RESOLVING` reentrancy guard that suppresses the nested probe, and `compiled_arm_for` then
+**cached and published** that arm. Every later call to the callee got the metadata-less copy, so
+a function referenced by any other function's probe was permanently denied its own derivation.
+The old code documented this as a "wart: metadata only, body/frame identical" — accurate, and
+much more expensive than it reads. A probe now resolves through `probe_arm_for`, which caches
+nothing: a hit is used, a miss compiles a throwaway. The cost is one extra cold arm compile per
+caller→callee edge during warm-up.
+
+**Why the RUNTIME-handle gate tightened.** `leaf_body_qualifies` already excluded RUNTIME-handle
+consts from callees because a stored derivation is a *copy* that `runtime_collect` never
+rewrites. The caller is now excluded too: the spliced chunk is **interpreted** on the resume
+path, and a resume is reachable from inside a native run whose own residual call did the `def`
+— so keeping the stored bits handle-free makes that path inert rather than merely epoch-gated.
+This narrows coverage slightly versus the old derivation, deliberately.
+
+**Measured: 2.4× on the shape it targets, and the whole benchmark suite flat.** On a lowering
+self-tail caller with one spliceable leaf beside one residual call
+(`(+ acc (+ (sq i) (rec 2 0)))`, 2M iterations): **562 → 237 ms**. The arm lowers **twice** with
+the flag on (small native + the partially-spliced upgrade) and once with it off — the mechanism
+visibly working. Every published row is neutral: `fib` +0.3%/0.4% floor, `matmul` +0.0%,
+`mandelbrot` +0.2%, `bintree` −0.5%, `collatz` +0.7%, `sieve`/`primes`/`sort`/`nbody` all inside
+their own floors, `startup` +0.4%/0.4% floor (measured as a 40-run mean, since 1 ms quantisation
+on a 17 ms row otherwise reads ±6%).
+
+`nqueens` looked like a −5.0% win and **is not one**: on the *same* binary
+`BROOD_NO_PARTIAL_LEAF=1` costs 0.3% and `BROOD_NO_LEAF_INLINE=1` costs 0.5%, so the mechanism
+cannot be worth 5% there — and the row drifts ~3% between whole invocations (the same new binary
+measured 104.6 and 107.6 ms in two best-of-15 runs). The switch test on one binary is the
+attribution that settles it; a two-binary delta cannot.
+
+**And `mandelbrot`, the row that motivated the whole item, gets nothing** — not because partial
+splicing fails there but because **`row-sum` never lowers to native at all**, with the flag on or
+off. Leaf inlining is a JIT-only optimisation and the VM always runs the small body, so an arm
+whose native bails cannot benefit from any derivation, however good it looks in
+`BROOD_INLINE_DBG`. The 2026-08-02 write-up that named `mandelbrot` as the payoff row was wrong on
+that point, and the check it skipped is one line:
+`BROOD_JIT_DUMP_IR=1 … | grep '^\[jit-ir\] ====='` — a bailed arm never appears. Getting `row-sum`
+onto the native path is a separate, unstarted question; this ADR does not close it.
+
+**Two rules the implementation had to learn, both from bugs the gate caught.** Neither is
+obvious from the design above, and both are the kind of thing a later edit re-breaks:
+
+- **Which engine ran a frame is decided by the size the frame was BUILT to, never by reading
+  `inline_installed`** (`jit_frame_is_leaf_spliced`). `jit_tier` *itself* flips that flag, so on
+  the activation where the inlined upgrade installs, reading it afterwards claims the inlined
+  layout for a frame built to the small one — and `base + <inlined ckpt slot>` then indexes past
+  the root stack. A journalled leaf layout is strictly larger than the small one, so the size
+  comparison is unambiguous (asserted).
+- **Read the journal once.** The first cut read it twice — once to decide whether to keep the
+  larger frame, once to resume — and the second read came from an already-truncated frame. One
+  read, one decision, taken before the resize; the `roots_len >= base + frame_nslots` test is
+  purely the bounds condition, and is `>=` so a native that left the stack dirty still resumes
+  exactly as before.
+
+**Validation, because this is the silent-miscompile zone.** The gate `handoff.md` §3 demanded
+was run on the baseline first (5 generators × 4 engine configs, clean) and again after. The new
+part is a **verified detector**: `tests/jit_effect_once_test.blsp` cases 5 and 6 put an effect
+in a residual call beside a spliced leaf, straight-line and inside a self-tail loop, and assert
+the effect count *and* the arithmetic result. Verified by sabotage — keeping partial splicing
+while writing no journal makes case 6 over-count (50 179 against 50 000), the same shape as the
+three historical duplication bugs that file already guards. Case 5 does not trip under sabotage;
+the loop is the sensitive shape, which is itself worth knowing.
+
+The bug that mattered was found by neither, though: `live_migration`'s deep-receive test, run as
+**16 concurrent copies of that one case** — 8/16 against 0/16 at HEAD, where the full suite gave
+only a 1-in-8 murmur that six baseline runs had failed to contradict. Worth internalising: the
+in-language and differential suites cover *semantics*, and this was a frame-lifetime bug that
+only a contended scheduler reaches. `tests/jit.rs` gained four cases for the values (a
+partial-splice differential, hot reload through the residual callee, hot reload through the
+spliced callee, and an arm deopting on every activation).

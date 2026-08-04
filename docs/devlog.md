@@ -15184,3 +15184,188 @@ Tests: resolver_test rewritten — the "tangled → error" cases become "tangled
 messages match the derivation format; +self-dependency and deeper-tangle cases. 34 resolver +
 203 dependent (version/package/project) green; nest check zero warnings. Deferred:
 multi-requirer derivation trees, pre-release ordering.
+## 2026-08-03 — thread 6b closed by thread 6, not deferred
+
+Checked whether the reclamation-threshold thread still exists now that the region stops
+growing. It does not. `BROOD_RT_GC_FLOOR` is **inert**: 24038 / 24154 / 24390 ops/s on the
+churn harness across a **128× range** of the threshold (512 / 4096 / 65536).
+
+The premise was that RUNTIME reclamation policy cost throughput — recorded at one point as 45%.
+That was a *consequence* of the region growing ~0.87 closures per operation: the threshold was
+being crossed constantly, so how it was set mattered a great deal. With growth removed the
+threshold is never reached, and there is no policy left to tune.
+
+Worth noting as a pattern: two of the four "threads" carried into today turned out not to be
+independent problems. Thread 2 was not per-message cost (it was spawn placement), and thread 6b
+was not a reclamation-policy question (it was thread 6's growth). Both had been described in
+terms of the mechanism nearest the symptom. Fifteen minutes of measurement closed 6b; it had
+been carrying an implementation plan.
+
+## 2026-08-03 — the per-process floor, attributed (it was "roughly half unattributed")
+
+Measured as the **slope** of RSS against process count, not RSS/N — the latter folds in the
+runtime's ~24 MB base and is what produced the older 5.9 KB figure. An idle process parked in
+`receive` costs **4.19 KB**, and the slope is flat: 4389 / 4186 / 4195 bytes at N = 10k / 40k /
+80k.
+
+That is also lower than the 5.9 KB the handoff carried, because that number came from
+`spawn-live`, where every process additionally holds a **copied message payload**. Two different
+quantities were being compared to the BEAM's 3.1 KB; the idle floor is 4.19 KB and the payload
+adds ~1.9 KB on that row.
+
+**It is not allocator retention.** A8 warns that RSS is not a proxy for live bytes here, so the
+first thing to rule out was mimalloc holding pages. `MIMALLOC_PURGE_DELAY=0` gives 4230 / 4120
+against the default's 4259 / 4192 — the slope does not move. (Base RSS *does* drop 23.9 →
+20.6 MB, the documented ~17%, which is exactly why measuring the slope rather than the ratio
+mattered.) So these are live bytes.
+
+**Structural attribution** (new test `per_process_floor_is_attributed`, which prints the
+breakdown and asserts ceilings so accidental growth is caught here rather than in a benchmark
+six weeks later):
+
+| | bytes |
+|---|---|
+| `Process` — of which `Heap` **1200, embedded by value** | 1304 |
+| `Mailbox` | 184 |
+| `Suspended` (a parked process holds one) | 136 |
+| structural total | **1624** |
+| remainder | **~2566** |
+
+The remainder is *not* process data: `process-info`'s `:memory` for an idle process is **64
+bytes**. It is per-allocation overhead spread across the ~25–30 distinct heap blocks a process
+owns — every `Vec` inside `Heap` that has been touched holds a rounded-up capacity, and
+`Box<Process>` at 1304 bytes lands in a size class well above it.
+
+**Two experiments, named but not run.** (1) Box the `Heap` inside `Process` — `Process` drops to
+~112 bytes and `Heap` becomes its own block; if rounding dominates, the floor falls, and if the
+extra indirection costs more than it saves, that is worth knowing too. (2) The allocator
+size-class histogram the handoff asks for, which would settle the block count directly instead
+of inferring it. Do (1) first: it is mechanical, and its result tells you whether (2) is worth
+building.
+
+Worth noting for whoever picks this up: `Heap` being inline in `Process` means **any new `Heap`
+field is paid once per live process**. That is the kind of change that passes review and shows
+up as a memory row later, which is why the ceiling assertions now exist.
+
+## 2026-08-03 (cont.) — partial leaf splicing: the ip space was the blocker, and the gate found two bugs (ADR-210)
+
+Took the one item `handoff.md` §3 carried as open. It shipped, default ON, with
+`BROOD_NO_PARTIAL_LEAF=1` as the off-switch. `mandelbrot`'s `row-sum` now splices `->float`
+with the recursive `esc` still a real call beside it — the derivation the previous write-up
+recorded as impossible:
+
+```
+[inline-dbg] leaf probe row-sum sites=1 base=12 leaf_nslots=19 ckpt_slot=13 journalled=true
+```
+
+**The documented blocker was the wrong one.** §3 framed it as re-laying-out the checkpoint
+area. That is the easy half. The real obstacle is that the inlined body is its own **chunk**:
+a journal records a resume ip into *that* bytecode, and `vm_resume_deopt` drove `arm.chunk` —
+the small body. So the ip was meaningless, which is why the inlined engine could not journal
+and therefore could not keep a residual call. The fix is a **resume arm**
+(`ir::LeafInline::resume`): a full `CompiledArm` over the spliced body, so a deopt resumes in
+the chunk that wrote the journal. Journalling then reuses `jit_ckpt_depth` and the existing
+emission site unchanged — extending a proven mechanism instead of arguing a new one. It also
+removed the leaf path's `JIT_INLINE_CHUNK_KEEPALIVE` entry and its per-lowering recompile,
+because the chunk now lives on an `Arc` the caller arm owns and `JIT_ARM_KEEPALIVE` retains.
+
+**A second blocker was hiding behind the first, and it is the part worth remembering.** The
+derivation fired for `work`-shaped arms and never for `mix`-shaped ones — i.e. never for the
+mid-level functions the feature exists to help. Resolving a callee during a probe *compiles*
+it under the `LEAF_RESOLVING` reentrancy guard that suppresses the nested probe, and
+`compiled_arm_for` then **cached and published** that arm. Every later call to the callee got
+the metadata-less copy, so any function reachable from another function's probe was
+permanently denied its own derivation. The existing comment called this a "wart: metadata
+only, body/frame identical" — accurate, and much more expensive than it reads. Probes now go
+through `probe_arm_for`, which caches nothing.
+
+**The gate found two bugs, both mine, neither by reasoning.**
+
+1. `arm.inline_nslots` is floored to `nslots_total`, and I set `resume.nslots` to the
+   *unfloored* value. The lowering reads the frame size off the resume arm and stages a tail
+   call above `active_nslots()`, so the two would have written and read different offsets.
+   Caught re-reading my own diff; now floored before the resume arm is built, with a
+   `debug_assert_eq!` at the lowering.
+2. An **out-of-bounds GC root read** — `index out of bounds: the len is 14 but the index is
+   15` at `root_at`. I read the journal twice: once to decide whether to keep the larger frame,
+   once to resume. The second read came from an already-truncated frame. The diagnostic that
+   pinned it printed the whole frame state at the bad read:
+   `arm=notify base=8 slot=7 roots_len=14 frame_nslots=9 nslots=6 inline_nslots=9 inlined=true`
+   — a frame truncated to 6 slots being read at slot 7. Now one read, one decision, taken
+   before the resize, guarded by `roots_len >= base + frame_nslots` (`>=`, not `==`, so a
+   native that left the stack dirty still resumes exactly as before).
+
+   En route to it I also removed a real hazard I had introduced by re-deriving "which engine
+   ran this frame" from `inline_installed`: **`jit_tier` itself flips that flag**, so on the
+   activation where the inlined upgrade installs, reading it afterwards claims the inlined
+   layout for a frame built to the small one. The layout is now decided by the size the frame
+   was actually built to (`jit_frame_is_leaf_spliced`).
+
+**Attribution discipline paid off twice.** Bug 2 surfaced as
+`live_migration deep_receive_continuations_resume_correctly_across_workers` failing inside a
+full `cargo nextest` run but never in isolation (0/65). The tempting conclusion was "flake" —
+and it *is* partly a flake. Two distinct failures were being conflated:
+
+| | failure mode | rate |
+|---|---|---|
+| HEAD | `no live migration observed` (liveness/timing) | **3/12** full-suite runs |
+| mine, pre-fix | **`index out of bounds`** (GC root read) | 8/16 isolated reproducer, vs **0/16** at HEAD |
+| mine, post-fix | none | 0/64 reproducer |
+
+The isolated 16-concurrent reproducer is what separated them: it gave a fast, high-signal
+0-vs-8 comparison where the full suite gave a 1-in-8 murmur. **Build the concurrent
+reproducer before arguing about a flake rate** — and note the failure *mode*, not just the
+count, because a liveness assert and a corrupted read are not the same bug wearing different
+hats.
+
+**Worth fixing separately:** `live_migration` is **not** in `.config/nextest.toml`'s retry
+list, unlike `distribution` / `serve_attach` / `observe_attach` / `suite`, even though its
+liveness assertion is exactly the "blown deadline under a loaded runner" class those entries
+exist for. It flakes ~25% under full-suite load at HEAD. Left alone here to keep this change
+about the JIT.
+
+**Measured: 2.4× on the shape it targets, benchmark suite flat, motivating row unmoved.** On a
+lowering self-tail caller with one spliceable leaf beside one residual call — 2M iterations of
+`(+ acc (+ (sq i) (rec 2 0)))` — **562 → 237 ms**. The arm lowers **twice** with the flag on
+(small native + partially-spliced upgrade) and once with it off. Every published row is inside its
+own noise floor.
+
+Three measurement traps caught me in one sitting, all of them already written down somewhere:
+
+1. **Profile drift.** I compared `make ab`'s baseline (`release-fast`) against my own
+   `cargo build --release` binary and got a table of confident nonsense (`nqueens` −4.3%,
+   `startup` −5.6%). That is footgun #1 in `ab-bench.sh`'s own header. Both sides must come from
+   `make release-brood`; the working-tree binary to hand-measure against is
+   `target/release-fast/brood`, not `target/release/brood`.
+2. **Quantisation on a short row.** `startup` read +5.9% because 17 ms and 18 ms are adjacent
+   integers. Measured as a 40-run mean it is +0.4% against a 0.4% floor.
+3. **Between-invocation drift beats within-invocation floor.** `nqueens` read −5.0% against a
+   0.2% base-vs-base floor — and the *same* new binary measured 104.6 and 107.6 ms in two
+   best-of-15 runs, ~3% apart. The floor was measured inside one invocation; the drift is across
+   them, exactly as `handoff.md` §5 warns.
+
+What settled `nqueens` was **the on/off switch on a single binary**: `BROOD_NO_PARTIAL_LEAF=1`
+costs 0.3% there and `BROOD_NO_LEAF_INLINE=1` costs 0.5%, so the mechanism cannot be worth 5%
+whatever two binaries say. **For a mechanism with a switch, the switch is the attribution; a
+two-binary delta is only a hint.** That is a cheaper and stronger tool than anything I reached for
+first, and it is worth reaching for before building a fixed-baseline harness.
+
+`mandelbrot` gets nothing, and this is the part worth carrying forward: **`row-sum` never lowers
+to native at all**, with the flag on or off. Leaf inlining is JIT-only — the VM always runs the
+small body — so an arm whose native bails cannot benefit from any derivation. `BROOD_INLINE_DBG`
+happily reports `journalled=true` for it; `BROOD_JIT_DUMP_IR` shows only `esc`, and a bailed arm
+never reaches that dump, so *absence* is the signal. The 2026-08-02 note that put `mandelbrot`'s
+`->float` cost forward as this lever's payoff row was wrong about the payoff (the cost is real;
+the lever cannot reach it). Getting `row-sum` onto the native path is the actual `mandelbrot`
+lever and is unstarted.
+
+**Validation.** The gate `handoff.md` §3 demanded, run on the baseline first and again after:
+5 generators × 4 engine configs (tree-walker / VM-no-JIT / VM+JIT / GC-stress+verify), 0
+divergences either side. Plus 39/39 `tests/jit.rs` under `BROOD_GC_STRESS=1
+BROOD_GC_VERIFY=1` (3 new: a partial-splice differential, hot reload through the *residual*
+callee, and an arm deopting on every activation), 4350/4350 in-language suite with the
+mechanism on **and** off, `nest check` clean, rustfmt clean, and a `--no-default-features`
+build. The effect-duplication guard is **verified by sabotage**: keeping partial splicing
+while writing no journal makes `tests/jit_effect_once_test.blsp` case 6 count 50 179 of
+50 000. Case 5 (straight-line) does *not* trip under sabotage — the self-tail loop is the
+sensitive shape, which is itself worth knowing before trusting a green effect-once test.
