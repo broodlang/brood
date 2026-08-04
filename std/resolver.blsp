@@ -625,15 +625,13 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
   (match leaf
     ([:root pkg constraint] (str "your project requires "
                               (name pkg)
-                              " "
-                              (resolver--constraint-str constraint)))
+                              (resolver--constraint-suffix constraint)))
     ([:dep pkg version dep-name dep-constraint] (str (name pkg)
                                                   " "
                                                   version
                                                   " requires "
                                                   (name dep-name)
-                                                  " "
-                                                  (resolver--constraint-str dep-constraint)))))
+                                                  (resolver--constraint-suffix dep-constraint)))))
 
 (defn pg-leaf-packages (leaf)
   (match leaf
@@ -662,5 +660,8 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
         (join ", " universe)
         ")"))))
 
-(defn resolver--constraint-str (c)
-  (if (or (nil? c) (= c "")) "(any version)" c))
+;; A requirement's constraint rendered as a trailing suffix — " <constraint>" for a real range,
+;; or "" when it is unconstrained, so an unconstrained requirement reads "requires foo" rather
+;; than the noisier "requires foo (any version)".
+(defn resolver--constraint-suffix (c)
+  (if (or (nil? c) (= c "")) "" (str " " c)))
