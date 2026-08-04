@@ -412,14 +412,12 @@ land in a later slice."
           (get other :version)
           ")"))))
   (dep-lock-vec [e]
+    ;; `:pubkey` is recorded only for a SIGNED package (ADR-212) — the TOFU pin a later
+    ;; install checks against; an unsigned package omits it, so the lock stays uncluttered.
     (apply vector
-      (list (get e :name)
-        :registry
-        (get e :version)
-        :sha256
-        (get e :sha256)
-        :deps
-        (package--dep-names-vec (get e :deps)))))
+      (append (list (get e :name) :registry (get e :version) :sha256 (get e :sha256))
+        (append (if (get e :pubkey) (list :pubkey (get e :pubkey)) nil)
+          (list :deps (package--dep-names-vec (get e :deps)))))))
   ;; The manifest spells a registry dep `:version` (the kind keyword is `:registry`
   ;; only inside the lock, which also records the tarball's sha256 integrity pin).
   (dep-entry-node [d]
@@ -715,20 +713,25 @@ as having no versions rather than raising mid-search); any other error raises."
         target (package--git-target root nm)
         locked-sha (and locked
                      (= (plist-get locked :registry) version)
-                     (plist-get locked :sha256)))
+                     (plist-get locked :sha256))
+        ;; the pubkey TOFU-pinned by a prior install (nil if the package was unsigned then).
+        locked-pubkey (and locked (plist-get locked :pubkey)))
     (if (and locked-sha (package--tarball-cache-current? target locked-sha))
-      (registry--resolved dep target version locked-sha)
-      (registry--fetch-release root dep (registry--base-for index) target nm version))))
+      ;; cache hit: reuse the pinned sha + carry the pinned key forward into the lock.
+      (registry--resolved dep target version locked-sha locked-pubkey)
+      (registry--fetch-release root dep (registry--base-for index) target nm version locked-pubkey))))
 
-(defn registry--resolved (dep target version checksum)
-  "A resolved registry entry: the dep with its resolution fields assoc'd on."
+(defn registry--resolved (dep target version checksum pubkey)
+  "A resolved registry entry: the dep with its resolution fields assoc'd on (`:pubkey` the
+TOFU-pinned signing key, nil for an unsigned package)."
   (assoc dep
     :resolved-path target
     :version version
     :sha256 checksum
+    :pubkey pubkey
     :deps (package--manifest-deps (path-join target "project.blsp"))))
 
-(defn registry--fetch-release (root dep base target nm version)
+(defn registry--fetch-release (root dep base target nm version locked-pubkey)
   (match (registry--get-json (registry--release-url base nm version))
     ([:error 404 _message] (error "package: no registry entry for "
                              nm
@@ -748,7 +751,10 @@ as having no versions rather than raising mid-search); any other error raises."
                     nm
                     version
                     checksum
-                    (get meta :source_url))))))
+                    (get meta :source_url)
+                    (get meta :signature)
+                    (get meta :pubkey)
+                    locked-pubkey)))))
 
 ;; The hive-hosted tarball bytes for a release (root-level layout), erroring on a non-2xx.
 (defn registry--download-hosted (base nm version)
@@ -759,7 +765,9 @@ as having no versions rather than raising mid-search); any other error raises."
       (error "package: downloading " nm " " version " failed (HTTP " status ")"))
     (get resp :body)))
 
-(defn registry--download-extract (root dep base target nm version checksum source-url)
+(defn registry--download-extract (root dep
+                                   base target nm version checksum source-url signature pubkey
+                                   locked-pubkey)
   (require 'net/http)
   (when (dir? target) (%rm-rf target))
   ;; A release may host its bytes EXTERNALLY — a `:source_url` (a GitHub/S3/CDN tarball),
@@ -777,14 +785,58 @@ as having no versions rather than raising mid-search); any other error raises."
       (error "package: "
         nm " " version " sha256 mismatch — the registry declares " checksum
         " but the download hashed to " got " (tampered or corrupted — do not trust it)"))
-    (let (archive (path-join (package--deps-dir root) (str (name nm) ".tar.gz")))
+    ;; Signature (ADR-212): advisory TOFU check over the verified checksum. Returns the pubkey
+    ;; to PIN in the lock (the pinned one wins — TOFU is sticky, first-seen).
+    (let (pinned (package--verify-signature nm version checksum signature pubkey locked-pubkey)
+          archive (path-join (package--deps-dir root) (str (name nm) ".tar.gz")))
       (make-dir (package--deps-dir root))
       (spit-bytes archive bytes)
       ;; Extraction of a large archive runs on the offload pool, like a clone.
       (offload %untar-gz archive target (if external 1 0))
       (delete-file archive)
       (registry--write-meta target base nm version checksum)
-      (registry--resolved dep target version checksum))))
+      (registry--resolved dep target version checksum pinned))))
+
+;; Advisory signature + TOFU check (ADR-212). NEVER errors — every problem is a warning, so a
+;; signing issue can't block an install (the type-checker stance). Returns the pubkey to pin in
+;; the lock: the already-pinned key when there is one (TOFU keeps the first-seen key and only
+;; WARNS on a change — it does not silently adopt a new one), else the release's key.
+(defn package--verify-signature (nm version checksum signature pubkey locked-pubkey)
+  (require 'crypto)
+  (require 'encoding)
+  (let (signed (and signature pubkey (not (= signature "")) (not (= pubkey "")))
+        had-pin (and locked-pubkey (not (= locked-pubkey ""))))
+    (cond
+      signed
+        (do
+          (when (not (crypto/verify (encoding/hex-decode-bytes pubkey)
+                       (string->utf8-bytes checksum)
+                       (encoding/hex-decode-bytes signature)))
+            (println "package: WARNING — "
+              (name nm)
+              " "
+              version
+              " carries a signature that does NOT verify against its key (possible tampering)."))
+          (when (and had-pin (not (= locked-pubkey pubkey)))
+            (println "package: WARNING — "
+              (name nm)
+              " "
+              version
+              " is signed by a DIFFERENT key than the one pinned in your lock"
+              " — a legitimate key rotation, or a compromise. Delete the lock entry to re-pin."))
+          ;; keep the pinned key (sticky TOFU); pin the release's key on first sight.
+          (if had-pin locked-pubkey pubkey))
+      ;; unsigned now, but a prior release was signed → a dropped signature (downgrade).
+      had-pin
+        (do
+          (println "package: WARNING — "
+            (name nm)
+            " "
+            version
+            " is unsigned, but a previous release was signed (a dropped signature).")
+          locked-pubkey)
+      ;; unsigned, never pinned — the common case in a mostly-unsigned ecosystem; stay quiet.
+      else nil)))
 
 (defn registry--write-meta (target base nm version checksum)
   (spit (package--pkg-meta-path target)
@@ -1440,12 +1492,70 @@ ordinary library, which the server stores as \"nothing\"."
     {}
     (map-pairs *project-enhances*)))
 
-(defn registry--publish-metadata (checksum source-url)
+;; --- package signing (ADR-212): sign a release's checksum, TOFU-verify on install ------
+;; The publisher's ed25519 key lives at `<config>/brood/signing-key.blsp` (private stored 0600).
+;; Signing is OPTIONAL — a publisher without a key publishes unsigned. A signed release carries
+;; the signature + public key (hex) in its metadata; the client verifies the signature over the
+;; checksum and PINS the key in the lock (TOFU), warning on a key change. Advisory: never gates.
+
+(defn package--config-dir ()
+  (let (xdg (getenv "XDG_CONFIG_HOME"))
+    (path-join (if (nil? xdg) (path-join (getenv "HOME") ".config") xdg) "brood")))
+
+(defn package--signing-key-path () (path-join (package--config-dir) "signing-key.blsp"))
+
+(defn package--load-signing-key ()
+  "The publisher's stored keypair as `{:public <hex> :private <hex>}`, or nil if none exists."
+  (let (p (package--signing-key-path))
+    (if (file-exists? p)
+      (let (form (read-first (slurp p)))
+        (if (and (pair? form) (= (first form) 'signing-key))
+          {:public (plist-get (rest form) :public) :private (plist-get (rest form) :private)}
+          nil))
+      nil)))
+
+(defn key-gen (& opts)
+  "Generate an ed25519 signing keypair, store it at `<config>/brood/signing-key.blsp` (private
+written 0600), and print the public key to share so others can pin it (TOFU, ADR-212). Refuses
+to overwrite an existing key unless `:force true`. Backs `nest key gen`."
+  (require 'crypto)
+  (require 'encoding)
+  (let (p (package--signing-key-path))
+    (when (and (file-exists? p) (not (plist-get opts :force)))
+      (error "package: a signing key already exists at "
+        p " — `nest key gen --force` replaces it (invalidating signatures made with the old key)"))
+    (let (kp (crypto/keypair)
+          public-hex (encoding/hex-encode-bytes (get kp :public))
+          private-hex (encoding/hex-encode-bytes (get kp :private)))
+      (make-dir (package--config-dir))
+      (spit-private p
+        (str ";; Brood package signing key (ADR-212). KEEP :private SECRET — never commit or share it.\n"
+          (pr-str (list 'signing-key :public public-hex :private private-hex))
+          "\n"))
+      (println "package: wrote signing key to " p)
+      (println "package: public key (share this so others can pin it): " public-hex)
+      public-hex)))
+
+;; Sign a checksum string with the stored private key → `[signature-hex public-hex]`, or nil
+;; when there is no key (an unsigned publish). Signs the checksum's utf8 bytes; a verifier
+;; recomputes those same bytes from the checksum it already holds (ADR-212).
+(defn package--sign-checksum (checksum)
+  (require 'crypto)
+  (require 'encoding)
+  (let (key (package--load-signing-key))
+    (if (nil? key)
+      nil
+      [(encoding/hex-encode-bytes (crypto/sign (encoding/hex-decode-bytes (get key :private))
+                                    (string->utf8-bytes checksum)))
+        (get key :public)])))
+
+(defn registry--publish-metadata (checksum source-url signature pubkey)
   "The publish metadata envelope, base64-encoded for the `X-Brood-Publish` header. The
 tarball is NOT in here — for a hosted publish it rides as the raw request body, so neither
 client nor server builds a base64/JSON copy of the whole upload (streaming publish;
 docs/design.md in hive). For an EXTERNAL publish there is no body and `source-url` names where
-the bytes live (ADR-211); pass nil for a hosted publish."
+the bytes live (ADR-211); pass nil for a hosted publish. When the release is signed, `signature`
++ `pubkey` (hex) travel here too (ADR-212); pass nil for both when unsigned."
   (let (meta {:name *project-name*
               :version *project-version*
               :description (or *project-description* "")
@@ -1453,11 +1563,14 @@ the bytes live (ADR-211); pass nil for a hosted publish."
               ;; what this package plugs into (Debian's `Enhances:`) — the registry stores it
               ;; and can filter on its names, without knowing what any of them are
               :enhances (registry--publishable-enhances)
-              :checksum checksum})
-    (encoding/base64-encode
-      (json/json-encode (if (and source-url (not (= source-url "")))
-                          (assoc meta :source_url source-url)
-                          meta)))))
+              :checksum checksum}
+        with-source (if (and source-url (not (= source-url "")))
+                      (assoc meta :source_url source-url)
+                      meta)
+        with-sig (if (and signature pubkey)
+                   (assoc with-source :signature signature :pubkey pubkey)
+                   with-source))
+    (encoding/base64-encode (json/json-encode with-sig))))
 
 (defn publish (& opts)
   "Publish the current project's release to the registry. Two shapes, chosen by `opts` (a
@@ -1487,19 +1600,43 @@ published is refused. Backs `nest publish`."
 (defn registry--publish-hosted (root base token)
   (let (archive (registry--build-tarball root)
         bytes (slurp-bytes archive)
-        checksum (hash/sha256-bytes bytes))
+        checksum (hash/sha256-bytes bytes)
+        sig (package--sign-checksum checksum))
     (delete-file archive)
-    (println (str "package: publishing " *project-name* " " *project-version* " to " base " …"))
-    (registry--post-publish base token bytes (registry--publish-metadata checksum nil))))
+    (println (str "package: publishing "
+               *project-name*
+               " "
+               *project-version*
+               " to "
+               base
+               (if sig " (signed)" "")
+               " …"))
+    (registry--post-publish base
+      token
+      bytes
+      (registry--publish-metadata checksum nil (and sig (first sig)) (and sig (second sig))))))
 
 (defn registry--publish-external (base token source-url)
   ;; Fetch the external tarball ONCE — to hash its bytes into the checksum and prove the URL
   ;; is reachable now — then POST metadata only; no bytes cross to the registry.
   (let (bytes (package--fetch-bytes source-url)
-        checksum (hash/sha256-bytes bytes))
+        checksum (hash/sha256-bytes bytes)
+        sig (package--sign-checksum checksum))
     (println (str "package: publishing "
-               *project-name* " " *project-version* " to " base " (external source " source-url ") …"))
-    (registry--post-publish base token #b"" (registry--publish-metadata checksum source-url))))
+               *project-name*
+               " "
+               *project-version*
+               " to "
+               base
+               " (external source "
+               source-url
+               ")"
+               (if sig " (signed)" "")
+               " …"))
+    (registry--post-publish base
+      token
+      #b""
+      (registry--publish-metadata checksum source-url (and sig (first sig)) (and sig (second sig))))))
 
 (defn registry--post-publish (base token body meta-header)
   (let (resp (net/http/http-post (str base "/api/v1/publish")
@@ -1510,6 +1647,7 @@ published is refused. Backs `nest publish`."
         status (get resp :status))
     (cond
       (= status 0) (error "package: cannot reach the registry at " base ": " (get resp :error))
-      (and (>= status 200) (< status 300)) (println (str "package: published "
-                                                      *project-name* " " *project-version* "."))
+      (and (>= status 200) (< status 300))
+        (println (str "package: published "
+                   *project-name* " " *project-version* "."))
       else (error "package: publish failed (HTTP " status "): " (registry--error-text resp)))))
