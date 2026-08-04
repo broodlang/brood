@@ -377,8 +377,22 @@ native bails gets *nothing* from any splice, however good the derivation looks i
 `BROOD_INLINE_DBG`. A derivation firing (`journalled=true`) proves only that the derivation
 happened, not that it lowered — a bailed arm never reaches the `[jit-ir]` dump. `row-sum` and the
 synthetic `mix` shape both derive and both bail; `hot` above derives and lowers **twice** (small
-native + the partially-spliced upgrade), which is what the 2.4× is. Getting `row-sum` itself onto
-the native path is a separate, unstarted question.
+native + the partially-spliced upgrade), which is what the 2.4× is.
+
+**Why `row-sum` bails, and why forcing it through is not the answer (measured 2026-08-04).** It is
+refused by the **call-mediated profitability gate** at the top of `jit_lower_arm`: `dbg_name` set,
+≥1 non-tail call, no vector op, and a `Float` in the tier-time slot profile (`y0`). That gate
+exists because tiering exactly this shape regressed `nbody` 15–20%. Partial splicing looked like a
+reason to revisit it — the gate's premise is that every op pays a box/unbox around a call, and
+splicing removes some of those calls — so an exemption for arms carrying a derivation was tried
+and A/B'd on one binary: `mandelbrot` **+0.7%**, `matmul` **+5.1%**, both against 0.3% floors.
+`row-sum` *does* lower under the exemption (twice, as designed); it is simply not faster. The
+gate's premise survives partial splicing intact.
+
+So the `mandelbrot` lever is **not** an inlining or tiering change — it is removing the boxing
+itself (unboxed floats across call boundaries). Note the gate is also what makes the two-stage
+path unreachable for such an arm: the *small* native bails, so the deferred inlined upgrade is
+never enqueued, which is why `row-sum`'s derivation sat unused.
 
 The thing that actually blocked this was not the frame layout — it was the **bytecode ip space**.
 A journal records a resume ip into the *inlined* chunk, and `vm_resume_deopt` drove `arm.chunk`,
