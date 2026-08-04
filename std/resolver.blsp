@@ -77,10 +77,12 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
         ;; parse each candidate version ONCE into [string parsed-core], then filter and sort
         ;; on the parsed core — no version string is parsed more than once.
         parsed (map (fn (v) [v (version/version-core v)]) (or (provider-versions provider nm) nil))
-        matching (filter (fn (pv) (every? (fn (cc) (version/version-match-parts? cc (nth pv 1))) compiled))
+        matching (filter (fn (pv)
+                           (every? (fn (cc) (version/version-match-parts? cc (nth pv 1))) compiled))
                    parsed)
         newest-first (map (fn (pv) (nth pv 0))
-                       (sort (fn (a b) (> (version/version-compare-cores (nth a 1) (nth b 1)) 0)) matching))
+                       (sort (fn (a b) (> (version/version-compare-cores (nth a 1) (nth b 1)) 0))
+                         matching))
         pin (get preferred nm))
     (if (and pin (includes? newest-first pin))
       (cons pin (filter (fn (v) (not (= v pin))) newest-first))
@@ -116,9 +118,12 @@ never *whether* one is."
   (let (steps (table))
     (table-put steps :start (now))
     (try
-      (let (result (resolver--solve provider {} (resolver--seed roots)
+      (let (result (resolver--solve provider
+                     {}
+                     (resolver--seed roots)
                      (resolver--queue (distinct (map (fn (r) (nth r 0)) roots)))
-                     (or preferred {}) steps))
+                     (or preferred {})
+                     steps))
         (table-drop steps)
         result)
       (catch e
@@ -144,15 +149,14 @@ never *whether* one is."
     (table-put steps :n n)
     (when (and (= 0 (rem n 256))
             (> (- (now) (table-get steps :start 0)) *resolver-time-budget-ms*))
-      (resolver--budget-exceeded
-        (str "did not finish within " *resolver-time-budget-ms* " ms")))
+      (resolver--budget-exceeded (str "did not finish within " *resolver-time-budget-ms* " ms")))
     (when (> n *resolver-max-steps*)
       (resolver--budget-exceeded (str "exceeded " *resolver-max-steps* " search steps")))))
 
 (defn resolver--budget-exceeded (why)
   (throw {:resolver-budget-exceeded true
-          :message (str "dependency resolution " why
-                     " — the version constraints are too tangled to resolve within the budget."
+          :message (str "dependency resolution "
+                     why " — the version constraints are too tangled to resolve within the budget."
                      " Pin the conflicting dependencies explicitly, or relax a range.")}))
 
 ;; A two-list functional queue [front back]: pop from `front`, enqueue onto `back` (held
@@ -177,25 +181,45 @@ never *whether* one is."
           candidates (resolver--candidates provider nm requirements preferred))
       (if (empty? candidates)
         [:error (resolver--no-candidate-msg provider nm requirements)]
-        (resolver--try provider assignment constraints rest-pending nm candidates preferred nil steps)))))
+        (resolver--try provider
+          assignment constraints rest-pending nm candidates preferred nil steps)))))
 
 ;; Try `nm`'s candidate versions in order (preferred-then-newest); the first that leads to
 ;; a full solution wins. `pending` here is the work-list with `nm` already popped; a
 ;; successful assignment enqueues the newly-discovered dep names. `last-error` carries the
 ;; most recent failure so an exhausted list reports a real reason, not a bland one.
-(defn resolver--try (provider assignment constraints pending nm candidates preferred last-error steps)
+(defn resolver--try (provider assignment
+                      constraints pending nm candidates preferred last-error steps)
   (if (empty? candidates)
     [:error (or last-error (str "no version of " (name nm) " led to a solution"))]
     (let (version (first candidates))
       (match (resolver--assign provider assignment constraints nm version)
-        ([:conflict message]
-          (resolver--try provider assignment constraints pending nm (rest candidates) preferred message steps))
-        ([:ok assignment2 constraints2 discovered]
-          (match (resolver--solve provider assignment2 constraints2
-                   (resolver--queue-push-all pending discovered) preferred steps)
-            ([:ok solution] [:ok solution])
-            ([:error message]
-              (resolver--try provider assignment constraints pending nm (rest candidates) preferred message steps))))))))
+        ([:conflict message] (resolver--try provider
+                               assignment
+                               constraints
+                               pending
+                               nm
+                               (rest candidates)
+                               preferred
+                               message
+                               steps))
+        ([:ok assignment2 constraints2 discovered] (match (resolver--solve provider
+                                                            assignment2
+                                                            constraints2
+                                                            (resolver--queue-push-all pending
+                                                              discovered)
+                                                            preferred
+                                                            steps)
+                                                     ([:ok solution] [:ok solution])
+                                                     ([:error message] (resolver--try provider
+                                                                         assignment
+                                                                         constraints
+                                                                         pending
+                                                                         nm
+                                                                         (rest candidates)
+                                                                         preferred
+                                                                         message
+                                                                         steps))))))))
 
 ;; Decide `nm` at `version`: record the choice, then fold that release's own deps into
 ;; the constraint set. A dep on an ALREADY-decided package whose chosen version the new
@@ -220,10 +244,19 @@ never *whether* one is."
             decided (get assignment dep-name)
             newly-seen (not (contains? constraints dep-name)))
         (if (and decided (not (version/version-satisfies? decided dep-constraint)))
-          [:conflict (str "cannot use "
-                       (name nm) " " (get assignment nm)
-                       ": it needs " (name dep-name) " " (resolver--constraint-str dep-constraint)
-                       " but " (name dep-name) " is already fixed at " decided)]
+          [:conflict
+            (str "cannot use "
+              (name nm)
+              " "
+              (get assignment nm)
+              ": it needs "
+              (name dep-name)
+              " "
+              (resolver--constraint-str dep-constraint)
+              " but "
+              (name dep-name)
+              " is already fixed at "
+              decided)]
           (resolver--fold-deps assignment
             (resolver--add constraints dep-name nm dep-constraint)
             nm
@@ -249,6 +282,14 @@ never *whether* one is."
 (defn resolver--no-candidate-msg (provider nm requirements)
   (let (available (or (provider-versions provider nm) nil))
     (if (empty? available)
-      (str "no versions of " (name nm) " are available (required by " (resolver--requirements-str requirements) ")")
-      (str "no version of " (name nm) " satisfies all of " (resolver--requirements-str requirements)
-        " — available: " (join ", " (sort available))))))
+      (str "no versions of "
+        (name nm)
+        " are available (required by "
+        (resolver--requirements-str requirements)
+        ")")
+      (str "no version of "
+        (name nm)
+        " satisfies all of "
+        (resolver--requirements-str requirements)
+        " — available: "
+        (join ", " (sort available))))))

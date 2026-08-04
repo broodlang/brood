@@ -4522,8 +4522,8 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
         marker (first opts))
     (when (and marker (not (= marker :only)))
       (error "defmodule: unknown (:use-internals "
-        mod " " marker " …) marker — the only import filter is :only, as "
-        "`(:use-internals " mod " :only [a b])`"))
+        mod " " marker " …) marker — the only import filter is :only, as " "`(:use-internals " mod
+        " :only [a b])`"))
     (let (subset (if (= marker :only) (second opts) nil)
           ;; Root an intra-package target to `foo/mod` under a dependency load (ADR-070).
           rooted (list '%root-module-name (list 'quote mod)))

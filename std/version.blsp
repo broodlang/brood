@@ -205,15 +205,14 @@ the same as `version-satisfies?` — compiling is where a bad constraint is caug
   (match term
     ([:lo-hi lo hi] (and (>= (version--compare-parts parsed lo) 0)
                       (< (version--compare-parts parsed hi) 0)))
-    ([:cmp op wanted]
-      (let (c (version--compare-parts parsed wanted))
-        (case op
-          "=" (= c 0)
-          ">" (> c 0)
-          "<" (< c 0)
-          ">=" (>= c 0)
-          "<=" (<= c 0)
-          (error "version-satisfies?: unknown operator " (pr-str op)))))))
+    ([:cmp op wanted] (let (c (version--compare-parts parsed wanted))
+                        (case op
+                          "=" (= c 0)
+                          ">" (> c 0)
+                          "<" (< c 0)
+                          ">=" (>= c 0)
+                          "<=" (<= c 0)
+                          (error "version-satisfies?: unknown operator " (pr-str op)))))))
 
 (defn version-match? (compiled v)
   "Whether version STRING `v` satisfies an already-`version-compile`d constraint."

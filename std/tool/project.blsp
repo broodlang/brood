@@ -618,8 +618,10 @@ rules merged in declaration order, then this project's own `:format-headers` on 
         (pr-str *project-brood*)))
     (require 'version)
     (when (not (version/version-satisfies? (brood-version) *project-brood*))
-      (error "project: this project requires Brood " (pr-str *project-brood*)
-        " but you are running " (brood-version)
+      (error "project: this project requires Brood "
+        (pr-str *project-brood*)
+        " but you are running "
+        (brood-version)
         " — upgrade brood, or relax the :brood constraint in project.blsp"))))
 
 (defn project-setup (root)
