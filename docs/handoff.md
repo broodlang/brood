@@ -5,63 +5,69 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**As of 2026-08-04**, brood `46f8790a`. Nothing half-finished. Rust suite **946/946** (nextest),
-in-language **4367/4367**, `nest check` clean, `nest format --check` clean, rustfmt clean, both
-default and `--no-default-features` builds warning-clean. No open correctness bugs.
+**As of 2026-08-04**, brood `8b877cf3` + the ADR-213 char→byte index. Nothing half-finished. Rust
+suite **952/952** (nextest), in-language **4378/4378** — also green under
+`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` — `nest check` clean, `nest format --check` clean, rustfmt and
+clippy clean, both default and `--no-default-features` builds warning-clean, metamorphic
+differential clean across 4 engine configs. No open correctness bugs; **one open issue, KI-25** —
+five suites fail when re-run inside one image, which blocks `--repeat-until-failure` across the
+suite (its diagnosis was corrected on 2026-08-04: `pid_identity_test`'s cause is `node-start`
+being one-shot per runtime, not a JIT cache, so the fix is small).
 
 ---
 
 ## 1. START HERE — the next lever, and the decision it needs
 
-**Char→byte conversion for NON-ASCII strings is O(index), and it is now the biggest measured
-lever in `std/`.** Brood indexes strings by Unicode scalar; they are stored as UTF-8. A char index
-*is* a byte offset only for pure-ASCII text, so every conversion is O(1) on that fast path and a
-walk-from-the-start off it. Two sweep rows are quadratic **only** in the multi-byte regime:
+**`sexp motions` is the largest quadratic left on the board, and it is now the *only* one.** A
+sequence of structural motions over one buffer costs **2.3 s at 3200 forms and 18.9 s at 12800**
+(`scale_sweep.blsp`, ratio 8.13 across a rising base — confirmed on three points, and the same in
+both encoding regimes since ADR-213). Every other sweep row is linear.
 
-| row (`scripts/fuzz/stress/scale_sweep.blsp`) | ASCII | `UTF8=1` |
-|---|---|---|
-| `string inc-scan` (`index-of` with a rising `from`) | 0/2 ms, unmeasurable | **16.85×** (7 → 118 ms, N=800) |
-| `sexp motions` | 5.48× | **9.80×** |
+The shape, and why it is not a bug: each motion's `sexp/narrow` needs the start of the enclosing
+top-level form, and finding it requires a **forward lexical pass from offset 0** — a backward scan
+cannot know whether a bracket sits inside a string or a comment without the lexer state a forward
+pass carries. So one motion is O(point) and a sequence is O(n²). Two constant-factor fixes have
+landed (the native stopped copying the whole buffer; `scan-form-start-2` returns both offsets from
+one pass instead of two), together 2.0× — the constant, not the shape.
 
-Reproduce with `UTF8=1 N=800 brood scripts/fuzz/stress/scale_sweep.blsp`, and compare against the
-same command without `UTF8=1`. Those two rows are the scoreboard: the fix lands when `inc-scan`
-goes linear and `sexp motions` drops to its ASCII ratio.
+**The fix is resumable lexer state, and ADR-213 just settled where it can live.** The blocker has
+always been recorded as "somewhere to put it": the API is pure (`(text point) -> point`), so there
+is no session object to hang state on. The char→byte index is the precedent — a **lazily-built
+table on the string slot, published through a `OnceLock`** — and a lexer-safepoint table has
+exactly the same properties: it is a pure function of immutable bytes, so a race between two
+builders is benign, and it is *shaped* like the char index (a mark every STRIDE chars).
 
-**Read this before starting — the 2026-08-02 char-count cache did NOT fix this, and the reason is
-structural.** That change cached each string slot's char count so `string-length` is O(1) and
-`chars == as_str().len()` is an O(1) pure-ASCII test. It was written up as making `inc-scan`
-"LINEAR too", which is true and only on ASCII: **the mechanism of that fix *is* the fast-path
-test**, so it cannot reach the slow path. Don't re-apply the same idea expecting a different result.
+A safepoint needs to answer "what is the lexer state here", which for these rules is small: in
+code / in a string / in a line comment, plus the last column-0 form start at or before that point.
+`scan-form-start(s, pos)` then jumps to the last safepoint ≤ `pos` and scans forward from there —
+O(stride) per motion, O(n) once per string.
 
-**The shape of the real fix** is a sparse char→byte index on the string slot — `marks[k]` = the byte
-offset of char `k * STRIDE` — making conversion an O(1) lookup plus a walk bounded by STRIDE.
-`LocalString` in `crates/lisp/src/core/heap.rs` (~line 63) already caches `chars` and is the natural
-home; its doc comment lays out the existing reasoning and names "non-ASCII still walks" as the
-accepted cost.
+**The decisions to make before writing it:**
 
-**The decision that blocks it, and why you cannot just write the obvious version.** A string slot
-can hold `StrData::Shared(Arc<SharedBlob>)` — PRELUDE/RUNTIME strings, reachable from **multiple
-processes concurrently**. So a lazily-populated index (`OnceCell`/`RefCell` on the slot, built on
-first conversion) is a data race on exactly the long shared strings most worth indexing. Pick one:
+- **Where the table lives.** On the string slot beside the char index (kernel mechanism, reuses the
+  `OnceLock` argument wholesale) versus a Brood-side `Table` memo in `std/tool/sexp.blsp` (policy,
+  and closer to "write the language in the language" — but it needs a key for text identity, which
+  Brood has no way to express for an immutable string, and it would not help
+  `highlight/safe-restart`, which sits on the same native).
+- **Whether the amortisation matches the editor, not just the benchmark.** The sweep runs many
+  motions over an *unchanged* buffer, which is the best case for a per-string table. A keystroke
+  produces a *new* string, so the table rebuilds: O(n) per keystroke against today's O(point) per
+  motion. That is not a regression (one pass either way) but it means **the win is in motion
+  sequences, not in typing** — check the real editor path (`std/editor/*` calls this per
+  fontify-restart and per eldoc) before claiming a keystroke number.
+- **Whether the rope, not the string, is the right home.** The editor's real text is
+  `Value::Rope`; `std/tool/sexp.blsp` takes a string. If the answer is "index the rope", this
+  becomes a different and larger piece of work — decide before starting, not halfway.
 
-- **eager at construction** — simple and race-free, but every string pays the build and the memory,
-  including the ASCII ones that need no index at all;
-- **lazy + synchronised** — an atomic/lock per slot, paid on the read path;
-- **LOCAL slots only** — race-free by construction, and covers the editor/buffer case (per-process
-  text) while leaving shared strings on the slow path.
+`scan_form_start` / `scan_form_start_2` are in `crates/lisp/src/builtins/syntax_scan.rs`; both
+still allocate a `Vec<char>` of `pos + 1` chars per call, so the allocation is quadratic in the
+sequence too — a safepoint table removes both terms at once.
 
-I would try the third first: smallest change, sound without new synchronisation, and the measured
-rows are LOCAL text. **Verify that assumption before building** — check which region the sweep's
-fixtures actually land in.
+## 2. Then: finish the `std/` sweep, and the `expect_string` copy seam
 
-**Gate it as a kernel change**: `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` on the suite, the
-`--no-default-features` build, and the differential fuzzer — a wrong byte offset is a silent
-wrong-substring, not a crash.
-
-## 2. Then: finish the `std/` sweep
-
-Unswept, in the order I would take them. **Measure both regimes** (`UTF8=1`) — a pure-ASCII corpus
-hides this entire class, which is how `markdown` stayed quadratic through an earlier pass.
+Unswept, in the order I would take them. **Measure both regimes** (`UTF8=1`). ADR-213 removed the
+*encoding* multiplier, so a row that is quadratic now is quadratic in both regimes — but the knob
+stays the right habit, and it is how the last two multi-byte-only rows were found.
 
 - `editor/lineedit` — 39 `char-at`, each bounded by one input line, so low risk; but it runs per
   keystroke, and a long pasted line is the case to check.
@@ -74,6 +80,13 @@ before measuring** — most hits are quadratic in a genuinely small N (source di
 fragment, files in a one-shot report) and are not worth touching. Confirm a real one on **three
 rising points**, not two.
 
+**Separately: `expect_string` returns an OWNED `String` at ~113 call sites** — one copy of the
+argument per call. Only the two search primitives were converted (`expect_string_ref`, and now
+`StrArg`/`expect_str_arg` for the char-indexed four). That copy is what actually moved `inc-scan` on
+2026-08-02 — 1114 → 15 ms, far more than the conversion fix predicted alongside it — so the
+remaining sites are a known, mechanical seam with a measured precedent. Convert the ones on hot
+paths (the scanners in `syntax_scan.rs`, `str_splice_diff`) rather than all 113 blindly.
+
 ## 3. Then: `spawn-live`
 
 The worst published row — 2.8× slower and 1.9× heavier than the BEAM — and untouched. Its own noise
@@ -84,6 +97,11 @@ repeatedly. Related and measured: boxing the `Heap` costs it **+6.4%** (§4).
 
 Each was measured to a conclusion. Re-deriving them costs a session each.
 
+- **Char→byte conversion for non-ASCII strings** — **fixed** (ADR-213): a sparse char→byte index on
+  the string slot, so a char index costs a lookup plus a walk bounded by 32 chars in either
+  encoding regime. `inc-scan` 16.85× → linear; `sexp motions` lost its 9.80× → 5.42× encoding
+  penalty. Do not re-apply the *char-count cache* idea expecting more: its mechanism is the ASCII
+  test itself, which is why it never reached the slow path.
 - **Forcing `mandelbrot`'s `row-sum` onto the native path.** Refused by the call-mediated
   profitability gate in `jit_lower_arm`; exempting it makes `mandelbrot` **+0.7%** and `matmul`
   **+5.1%** (0.3% floors). The arm *does* lower under the exemption — it simply is not faster. The
@@ -109,6 +127,7 @@ mechanism with a switch, the switch on ONE binary is the attribution (§6).
 
 | Change | Off-switch | Worth |
 |---|---|---|
+| Sparse char→byte index on the string slot (ADR-213) | — (a cache that changes no result; its gate is that its answers equal the walk's) | multi-byte char indexing **96×** on a micro (60.2 s → 0.62 s); `inc-scan` 16.85× → linear; `sexp motions` 9.80× → 5.42×; ASCII flat |
 | Partial leaf splicing (ADR-210) | `BROOD_NO_PARTIAL_LEAF=1` | 2.4× on a lowering caller with a leaf beside a residual call; every published row flat |
 | Shared closure crosses a **serialised** send by handle (ADR-208) | `BROOD_NO_SHARE_FN_MSG=1` | `rt_closures` 143,752 → 66 constant; RSS 213 vs 502 MB |
 | Idle peer told at once that a peer queued a child | `BROOD_NO_STEAL_WAKE=1` | `latency` p50 27 → 19 µs, p99 124 → 78 µs |
@@ -122,13 +141,9 @@ mechanism with a switch, the switch on ONE binary is the attribution (§6).
 **`std/` quadratics fixed** (each with a `scale_sweep.blsp` row so it cannot come back):
 `template/render` 318→24 ms · `last-index-of` 540→1 ms · `strip-ansi` 1583→109 ms ·
 `stream-lines` 303→39 ms · `format-source` 3593→1988 ms · **`sexp` motions 12061→6037 ms (2.0×)** ·
-**`markdown-spans` multi-byte 1287→559 ms (2.3×, encoding penalty gone)**.
+**`markdown-spans` multi-byte 1287→559 ms (2.3×)** · **`inc-scan` multi-byte 118→3 ms (ADR-213)**.
 
-`sexp motions` is still a confirmed quadratic in *shape* — each motion's `narrow` needs a form-start
-scan that is O(point) by design (a backward scan cannot know whether a bracket sits inside a
-string). Two constant-factor fixes landed; the asymptote needs resumable lexer state, and
-`highlight/safe-restart` is the same O(pos) native rather than an existing bound, so there is
-nothing to reuse.
+`sexp motions` is still a confirmed quadratic in *shape* — see §1, which is now the whole item.
 
 ## 6. Traps — every one of these cost real time
 
@@ -144,11 +159,18 @@ nothing to reuse.
   profiles and yields confident nonsense — it gave me `nqueens` −4.3% and `startup` −5.6%, both
   fictional. Footgun #1 in `ab-bench.sh`'s own header.
 - **An optimisation whose mechanism is a fast-path test cannot clear the slow path, and a corpus
-  that only exercises the fast path will report that it did.** The char-count cache is exactly that
-  shape; so is anything gated on `is_ascii`. Sweep **both** encoding regimes.
+  that only exercises the fast path will report that it did.** The char-count cache was exactly
+  that shape; so is anything gated on `is_ascii`. Sweep **both** encoding regimes.
 - **A ratio near 4× that RISES across bases is not linear.** `format-source` read 3.80/4.12/4.64 and
   was cleared as linear; pushing the base gave 4.46 then 6.40. Only a *falling* ratio (warm-up)
   clears a row. Check the trend across triples, not one triple.
+- **Before believing a small two-binary delta, measure a row that CANNOT be affected by the
+  change.** ADR-213's ASCII micro read `char-at` +2.1% and `last-index-of` +2.4% against 0.0%
+  floors, and I spent two builds reshaping hot paths to chase it — the reshapes made it *worse*
+  (+5.5%). `wordcount` calls none of the changed code and read **+2.2%** on the same binary pair:
+  ~2% of whole-binary codegen/layout drift, and every string row was inside it. A size argument
+  works too, and faster: `last-index-of`'s delta scaled with a byte scan costing ~90 µs per call,
+  and no per-call change of a few instructions accounts for 2.4 µs.
 - **Establish the noise floor first — and the floor measured *inside* one invocation does not bound
   the drift *across* invocations.** `nqueens` read −5.0% against a 0.2% base-vs-base floor while the
   same binary measured 104.6 and 107.6 ms in two best-of-15 runs.
@@ -178,7 +200,9 @@ nothing to reuse.
   concurrent copies of that one test separated them in seconds: **8/16 vs 0/16 at HEAD**, where the
   full suite gave a 1-in-8 murmur that six baseline runs had failed to contradict.
 - **A green test proves nothing until you run it with the mechanism off.** For any mechanism with an
-  off-switch, run the test with the switch off before committing it.
+  off-switch, run the test with the switch off before committing it. For a mechanism with **no**
+  switch (a pure cache, like ADR-213's index), the equivalent is **sabotage**: break it by one
+  character and confirm every new test fails. If they don't, they are not gates.
 - **Verify a detector before trusting it — but "make it fire" need not mean "reproduce it end to
   end".** KI-26's runtime detector could only fire by winning a race, and never did across the
   suite, `pfib`, and a 24-process purpose-built race. The hazard was a *predicate*, so extracting
@@ -194,12 +218,21 @@ nothing to reuse.
   arm never reaches the `[jit-ir]` dump, so *absence* there is the signal.
 - **`std/*.blsp` is embedded at build time.** Rebuild `brood` **and** `nest` after touching `std/`,
   or you will debug yesterday's bytes. Same class as `-p brood` vs `--bin brood`.
+- **The conformance tests need `nest test`, not `--test`** — they `(:use corpus)`, which only
+  resolves through the project's module path. `brood --test tests/conformance_utf8_test.blsp` fails
+  with "cannot find module 'corpus'", which is a harness error, not a failure.
 - **`pkill -f <pattern>` matches your own shell** — it killed my own command twice in one session.
   Use `pgrep -f "[h]arness.py"` and kill by PID.
 - **Process death reports go to stdout** — `2>/dev/null` will not filter them.
 
 **Diagnosis**
 
+- **"Restrict the scope" is not automatically simpler than "synchronise".** I had written up
+  LOCAL-slots-only as the smallest sound way to populate ADR-213's index, because the shared regions
+  race; a `OnceLock` turned out to be *smaller* (no region split in the accessor) and broader. When
+  the cached value is a pure function of immutable data, a race between builders is benign — and
+  this kernel has immutability everywhere (ADR-026), so reach for that argument before narrowing a
+  feature's reach.
 - **When a fix underdelivers against a mechanism you were confident about, that gap is evidence
   about where the cost actually is.** The `sexp` allocation fix I predicted was worth −18%; being
   disappointed by it sent me back and found the real one (two O(point) passes where one suffices,
@@ -218,9 +251,11 @@ nothing to reuse.
 
 ## 7. Semantics worth knowing (documented, not bugs)
 
-- **A char index is a byte offset only for pure-ASCII strings.** Everything indexing a string by
-  character therefore has **two complexity regimes**: `substring` is O(result) on ASCII and O(index)
-  otherwise, so a char-by-char scan is linear on ASCII and quadratic on multi-byte. This is §1.
+- **Char indexing costs O(1) in both encoding regimes** (ADR-213). A char index *is* a byte offset
+  for pure-ASCII text; off that path the string slot's sparse char→byte index makes the conversion a
+  lookup plus a walk bounded by 32 chars. So `substring` is O(result), and a `char-at` loop or an
+  `index-of` scan with a rising `from` is linear on any text. The code-point-vector rewrites this
+  class of bug once forced (`url`, `csv`, `ansi`) are no longer required — they are left alone.
 - **Hot reload does not reach a self-recursive loop.** A tail self-call compiles to
   `Node::SelfCall`, which re-runs the arm without resolving the callee. Redefining any *other* global
   the loop calls does reach it. Erlang's local-vs-remote rule; see `live-editing.md`.
@@ -238,8 +273,8 @@ nothing to reuse.
 All in `scripts/fuzz/stress/`, each with a usage header worth reading first.
 
 - **`scale_sweep.blsp`** — a `std/` op at N and 4N, ratio printed (linear ~4×, quadratic ~16×).
-  **`UTF8=1` re-runs every row in the multi-byte regime**; a row cleared without it is half-cleared.
-  Its header records which rows are cleared, which were cleared *wrongly*, and why.
+  **`UTF8=1` re-runs every row in the multi-byte regime.** Its header records which rows are
+  cleared, which were cleared *wrongly*, and why.
 - **`leaf_splice.blsp`** — partial leaf splicing's benchmark (ADR-210); ~220 ms vs ~520 ms with
   `BROOD_NO_PARTIAL_LEAF=1`. Its header carries the derivation-vs-lowering trap.
 - **`process_floor.blsp`** — the per-process idle floor; ~4.27 KB, flat across N. Read the slope,
@@ -252,6 +287,9 @@ All in `scripts/fuzz/stress/`, each with a usage header worth reading first.
   benchmarks, each carrying its own controls.
 - **`tests/registry_test.blsp`** / **`tests/shared_closure_msg_test.blsp`** — each carries a control
   that fails with its mechanism off, which is the only version worth having.
+- **`tests/collection_identities_test.blsp`** — seeded-random laws over maps/vectors/strings,
+  including the multi-byte char-index laws (each op against the code-point vector). The place to add
+  a property that every engine would agree on, which the engine-differential is therefore blind to.
 - `scripts/fuzz/run.sh <generator>` — differential across 4 engine configs (tree-walker, VM-no-JIT,
   VM+JIT, GC-stress+verify). `make ab BASE=<ref>` for brood-vs-brood rows; `bench/harness.py` in
   brood-benchmarks for the published cross-language numbers.

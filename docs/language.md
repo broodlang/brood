@@ -2511,10 +2511,20 @@ The function combinators build the callbacks those ops take:
 Only `upper`/`lower` (Unicode tables), `string->number` (strict parse-or-nil),
 `to-fixed` (float formatting), and the O(n) char-access mechanisms
 (`string-split`, `string->codepoints`, `string-span`/`string-span-until`,
-`%str-index-of` — char indexing into UTF-8 is O(index), so a pure-Brood scan is
-unavoidably O(n²)) are Rust primitives; the rest of the library is Brood over
+`%str-index-of` — one native pass each, where the pure-Brood equivalent is a
+per-character loop) are Rust primitives; the rest of the library is Brood over
 `substring`/`str` (`std/prelude.blsp`) — the "write the language in the
 language" principle.
+
+**Char indexing costs O(1), in both encoding regimes.** Strings are indexed by
+Unicode scalar and stored as UTF-8, so every index has to be converted to a byte
+offset. For pure-ASCII text the two numbers are equal. For multi-byte text the
+conversion used to walk from the start of the string — which quietly made every
+per-character or incremental-search loop O(n²) — and now goes through a sparse
+char→byte index built on the string's first conversion (ADR-213), so it is a
+lookup plus a bounded walk. `substring` is therefore O(result) rather than
+O(index), and a `char-at` loop or an `index-of` scan with a rising `from` is
+linear on any text.
 
 ### I/O
 `print`  `println`  `eprint`  `eprintln`  `with-out-str`  `with-err-str`
