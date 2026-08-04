@@ -173,6 +173,7 @@ fn import_providers(interp: &mut Interp, root: &Node, src: &str, name: &str) -> 
 ///   the `defmodule` header (offered only when there *is* a header to edit).
 /// - **"Qualify as `module/name`"** — rewrite the reference in place (always;
 ///   the only option in a header-less file).
+///
 /// `import_preferred` marks the import as the one-keystroke default — set by the
 /// caller only when this is the sole provider and no closer typo fix competes.
 fn add_use_actions(
