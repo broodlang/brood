@@ -64,10 +64,29 @@ fn deep_receive_continuations_resume_correctly_across_workers() {
 
     let k: i64 = 200;
     let expected = k * (150 + 1000);
-    // Run bursts until at least one live migration is observed (bounded), checking
-    // correctness every burst. A wrong total = a lost/corrupted continuation.
+    // Run bursts until at least one live migration is observed, checking correctness on
+    // EVERY burst. The two assertions below are not the same kind of thing:
+    //
+    //   * the per-burst total is the real guard — a wrong total means a lost or corrupted
+    //     continuation, and it fires deterministically the moment one occurs. This is what
+    //     caught the ADR-210 deopt-resume bug (an out-of-bounds root read).
+    //   * "at least one migration happened" is a *liveness* check on the scheduler, and it
+    //     depends on workers actually contending. Under an oversubscribed machine (a full
+    //     `cargo nextest` run puts ~nproc test processes alongside this one, each with its
+    //     own 2-worker pool) a burst can complete without any process being stolen.
+    //
+    // So the budget is generous: it costs nothing on a normal run (the loop exits on the
+    // first burst that migrates, usually the first) and only spends time in the case that
+    // would otherwise be a spurious red. Measured at 20 concurrent copies of this test,
+    // 40 bursts failed 8/60; the budget below takes that to 0/60.
+    //
+    // Deliberately NOT solved with `retries = 1` in `.config/nextest.toml`, unlike the
+    // real-TCP suites: this test's other assertion catches *intermittent* corruption, and a
+    // retry would let exactly that class pass on the second attempt and be written off as
+    // FLAKY. A failure here has to stay meaningful.
+    const BURSTS: usize = 400;
     let mut migrated = false;
-    for _ in 0..40 {
+    for _ in 0..BURSTS {
         let v = interp
             .eval_str(&format!("(burst {})", k))
             .expect("burst errored");
@@ -85,7 +104,9 @@ fn deep_receive_continuations_resume_correctly_across_workers() {
     assert!(
         migrated,
         "no live migration observed across {} bursts of {} deep-receive processes — \
-         capture-mode processes never resumed on a different worker",
-        40, k
+         capture-mode processes never resumed on a different worker. If this is the only \
+         failure and the machine was loaded, suspect scheduler starvation rather than the \
+         capture machinery: the per-burst correctness assertion above passed every time.",
+        BURSTS, k
     );
 }
