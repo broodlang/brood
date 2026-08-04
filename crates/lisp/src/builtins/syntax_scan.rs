@@ -105,6 +105,72 @@ pub(super) fn scan_tokens(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// keystroke in interpreted Brood on a large file (eldoc / fontify-restart / structural
 /// motion all sit on it), trivial here. Strings honour `\\` escapes; a comment runs to
 /// end-of-line — the same lexical rules as `scan-tokens`.
+/// `(scan-form-start-2 s pos)` — `[prev start]`: the greatest column-0 form-start offset
+/// `<= pos` (`start`, as [`scan_form_start`]) **and** the one before it (`prev`, i.e. the
+/// greatest such offset `< start`), both from a SINGLE forward pass.
+///
+/// Exists because `tool/sexp`'s `narrow` wants exactly this pair, and computing it as two
+/// `scan-form-start` calls runs the O(pos) lexical pass twice over the same prefix — the
+/// second call re-walking ground the first already covered. One pass halves the dominant
+/// cost of every structural motion. `prev` is 0 when there is no earlier form start, which
+/// matches what the second call returned in that case (`scan-form-start` of a position
+/// before any form start is 0), so the pair is a drop-in for the two calls.
+///
+/// The sequence of motions is still O(n^2) overall — see `scan_form_start`'s note on why the
+/// forward pass from the top is required. This makes the constant twice as good; it does not
+/// change the shape. The real fix is resumable lexer state, which needs somewhere to live.
+pub(super) fn scan_form_start_2(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let pos = expect_int(heap, "scan-form-start-2", arg(args, 1))?;
+    let (best, prev) = {
+        let s = expect_string_ref(heap, "scan-form-start-2", arg(args, 0))?;
+        let chars: Vec<char> = s.chars().take(pos.max(0) as usize + 1).collect();
+        let n = chars.len();
+        if n == 0 {
+            (0usize, 0usize)
+        } else {
+            let pos = pos.clamp(0, (n - 1) as i64) as usize;
+            let mut best = 0usize;
+            let mut prev = 0usize;
+            let mut i = 0usize;
+            while i < n && i <= pos {
+                match chars[i] {
+                    '"' => {
+                        let mut j = i + 1;
+                        while j < n {
+                            match chars[j] {
+                                '\\' => j += 2,
+                                '"' => {
+                                    j += 1;
+                                    break;
+                                }
+                                _ => j += 1,
+                            }
+                        }
+                        i = j.min(n);
+                    }
+                    ';' => {
+                        while i < n && chars[i] != '\n' {
+                            i += 1;
+                        }
+                    }
+                    '(' | '[' | '{' if i == 0 || chars[i - 1] == '\n' => {
+                        // A new form start: the old `best` becomes the previous one.
+                        if i > 0 {
+                            prev = best;
+                        }
+                        best = i;
+                        i += 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+            (best, prev)
+        }
+    };
+    let items = vec![Value::int(prev as i64), Value::int(best as i64)];
+    Ok(heap.alloc_vector(items))
+}
+
 pub(super) fn scan_form_start(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let pos = expect_int(heap, "scan-form-start", arg(args, 1))?;
     // Two whole-text costs used to sit here, and on this call site they matter more than the

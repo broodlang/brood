@@ -15575,16 +15575,32 @@ because a backward scan cannot know whether a bracket sits inside a string. What
 CST work it wraps and false of *finding* the window, which is the whole cost. A docstring that
 describes the intent of a bound rather than its achievement is worse than none.
 
-**Fixed the constant, not the asymptote, and I want that distinction on the record.**
-`scan_form_start` took `expect_string` — an owned `String`, i.e. a copy of the entire buffer per
-call, exactly the seam the handoff said to convert once a workload justified it — and then
-`chars().collect()`'d the *whole* text, including everything past `pos` that it can never read.
-Now `expect_string_ref` + `take(pos + 1)`; identical semantics, because the outer loop stops at
-`i > pos` and the only thing reading past `pos` is the string-skip inner loop, which cannot touch
-`best`. Worth **−18% ASCII**, −3% multi-byte: real, and much less than I expected, which is itself
-the finding — the O(pos) scan dominates, not the allocation. The asymptote wants cached lexer state
-(nowhere to put it in a pure `(text point) -> point` API) or a bounded safe-restart, so it is left
-as a design decision rather than half-done.
+**Fixed 2.0× of constant factor, not the asymptote, and I want that distinction on the record.**
+Two independent costs, and the *order* I found them in is the lesson:
+
+1. `scan_form_start` took `expect_string` — an owned `String`, a copy of the entire buffer per
+   call, exactly the seam the handoff said to convert once a workload justified it — and then
+   `chars().collect()`'d the *whole* text, including everything past `pos` it can never read. Now
+   `expect_string_ref` + `take(pos + 1)`. **−18% ASCII**: real, and far less than I expected.
+2. That shortfall is what sent me back to the code, and the bigger cost was sitting in plain
+   sight: `narrow` made the O(point) pass **twice**, because it wants the enclosing form start
+   *and* the one before it, and asked for them with two calls — the second re-walking the prefix
+   the first had just covered. One native returning both (`scan-form-start-2`) is **−39% more**.
+
+Together 6400 forms ASCII **12061 → 6037 ms**. So the fix I predicted was worth a fifth of the fix
+I found by being disappointed with it. **When a fix underdelivers against a mechanism you were
+confident about, that gap is evidence about where the cost actually is** — I'd have stopped at
+−18% and written up "the O(pos) scan dominates" as the whole story, which was true and incomplete.
+
+The asymptote still wants resumable lexer state (nowhere to put it in a pure
+`(text point) -> point` API) or a bounded safe-restart — `highlight/safe-restart` turned out to be
+the same O(pos) native, not an existing bound, so there is nothing to reuse. Left as a design
+decision rather than half-done.
+
+**And a new lever surfaced**: the multi-byte gap is now 27571 vs 6037 ms at 6400 forms, **4.6×**,
+because `substring` is O(index) rather than O(result) off the ASCII fast path. For a buffer with
+one non-ASCII character that now dwarfs everything else here, and it is probably cheaper to attack
+than the asymptote.
 
 **Two clearings worth more than the find, because they stop the next person re-greping:**
 
@@ -15639,3 +15655,73 @@ existing `requires`/`available:` wording, so the diamond test's substrings still
 chain-derivation test and the minimality test. 39/39 resolver + 40/40 version green, oracle fuzz
 still 100%, `nest check` clean, formatted. Deferred now down to one algorithm-adjacent item: semver
 ranges over `:git` tags (the rest is registry plumbing).
+
+## 2026-08-04 (cont.) — markdown was quadratic in UTF-8 and linear in ASCII
+
+Continued the sweep into `editor/markdown`, which I had triaged as low-risk ("21 `char-at`, but
+per-*line* so bounded"). That triage was right about the `char-at`s and wrong about the module:
+the quadratic was in the line *walker*, and it only exists off the ASCII fast path.
+
+`markdown-spans` cut each line with `(substring src i e)` at a rising `i`, after finding the line
+end with a `string-span-until` scan from `i`. Both convert a CHAR index to a byte offset, which is
+O(1) only when the string is pure ASCII (then a char index *is* the byte offset) and O(i)
+otherwise. So:
+
+| corpus | N→4N | 4N→16N |
+|---|---|---|
+| ASCII | 3.81× | 3.88× |
+| identical text + **one** non-ASCII char | 5.03× | **6.92×** |
+
+Fixed with one `string-split` and a running offset — the same fix `stream-lines` needed on
+2026-08-02, for the same reason. **6400 lines: 1287 → 559 ms (2.3×), and multi-byte now measures
+the same as ASCII (559 vs 556)** — the encoding penalty is gone, not merely smaller.
+
+**The generalisable lesson: a row can be linear in ASCII and quadratic in UTF-8, so a pure-ASCII
+corpus hides this class completely.** Every earlier sweep row used ASCII fixtures. That is why I
+now measure both, and why `highlight-spans` clearing on *both* corpora is a stronger result than
+it first looked. Anything indexing a string by character has two complexity regimes.
+
+Two process notes. The equivalence check came before the swap, as with `scan-form-start-2`: 13
+sources covering every newline edge case (`""`, `"a"`, `"a\n"`, `"a\nb\n"`, `"\n"`, blank
+interiors), fences closed and unclosed, and multi-byte — zero mismatches. And the durable test
+pins what the rewrite actually risks: absolute span offsets (an offset computed per-line rather
+than per-document reads 5 where the answer is 22), that a trailing newline changes nothing
+(`string-split` yields a trailing `""` where the old `(>= i n)` loop just stopped), and that
+`café` and `cafe` produce identical offsets because Brood indexes by character. Dead `md--lex` /
+`md--line-end` removed.
+
+## 2026-08-04 (cont.) — every sweep row re-checked in UTF-8; one "fixed" row wasn't
+
+Markdown's lesson (linear in ASCII, quadratic in UTF-8) implied something about all the earlier
+work: **every sweep row had been cleared on pure-ASCII fixtures.** So `scale_sweep.blsp` gained a
+`UTF8=1` knob that leads each fixture with a non-ASCII character — one is enough, since what is
+lost is the string's ASCII-ness, not anything about the character's position — and I re-ran the
+whole sweep in both regimes.
+
+The reassuring part: the previously-cleared rows hold up. `format fmt-src` 3.98/4.00, `ansi strip`
+3.70/3.41, `template render` 4.20/2.62, `stream lines-1c` 1.54/4.25, both `buffer` rows flat. Those
+fixes were real fixes, not ASCII artefacts.
+
+The part worth landing: **two rows are multi-byte-only quadratics**, and one of them is recorded in
+the header as fixed.
+
+| row | ASCII | UTF-8 |
+|---|---|---|
+| `string inc-scan` | 0/2 ms — unmeasurable | **16.85×** (7 → 118 ms at N=800) |
+| `sexp motions` | 5.48× | **9.80×** |
+
+`inc-scan` was written up on 2026-08-02 as "now LINEAR too", on the strength of the char-count
+cache — and the reason that claim is wrong is the reason it looked right: **the fix's mechanism
+*is* the pure-ASCII test.** `chars == bytes` is how the slot answers "is a char index also a byte
+offset", so the O(1) conversion it buys exists only on that path; off it, the conversion still
+walks. The row's own in-code comment said "Still O(n²)" and disagreed with the header the whole
+time; the code was right.
+
+Generalising, because this will recur: **an optimisation whose mechanism is a fast-path test cannot
+clear the slow path, and a corpus that only exercises the fast path will report that it did.** The
+char-count cache is exactly that shape. So is anything gated on `is_ascii`.
+
+That also sharpens the next lever from "substring is O(index)" to something measurable: the target
+is char→byte conversion for non-ASCII strings, and there are now two rows that move when it lands
+(`inc-scan` 16.85× → linear, `sexp motions` 9.80× → 5.48×) plus whatever `expect_string`'s
+remaining ~113 copy sites contribute.

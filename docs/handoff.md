@@ -160,13 +160,27 @@ state a forward pass carries. So per motion is O(point). `narrow`'s own docstrin
 cost "~three forms, not the whole buffer" — that is true of the CST work it wraps and false of
 finding the window, which is where the whole cost is.
 
-**Partially fixed (constant factor only): `scan_form_start` no longer copies the whole buffer.**
-It took `expect_string` (an owned `String`, i.e. a copy of the entire text per call — the seam the
-handoff said to convert "when a workload shows the cost"; this is that workload) and then
-`chars().collect()`'d the *whole* text including everything past `pos`. Now `expect_string_ref` +
-`take(pos + 1)`, which is semantically identical (the outer loop stops at `i > pos`, and the only
-thing reading past `pos` is the string-skip inner loop, which cannot touch `best`). Worth
-**−18% ASCII**, −3% multi-byte. **The asymptote is untouched**, which is the honest headline.
+**Fixed 2.0× of constant factor; the asymptote is untouched, which is the honest headline.**
+Two independent costs, both real:
+
+1. `scan_form_start` took `expect_string` (an owned `String` — a copy of the entire text per call,
+   the seam the handoff said to convert "when a workload shows the cost"; this was that workload)
+   and then `chars().collect()`'d the *whole* text including everything past `pos`. Now
+   `expect_string_ref` + `take(pos + 1)`, semantically identical (the outer loop stops at
+   `i > pos`, and the only thing reading past `pos` is the string-skip inner loop, which cannot
+   touch `best`). **−18% ASCII.**
+2. `narrow` made the O(point) pass **twice** — the second call re-walking the prefix the first had
+   already covered — to get the enclosing form start *and* the one before it. New native
+   `scan-form-start-2` returns both from one pass. **−39% more.**
+
+Together: 6400 forms ASCII **12061 → 6037 ms (2.0×)**. Guarded by an equivalence test over every
+position of eight texts including a bracket inside a comment, a string spanning a newline, and an
+unterminated string (`tests/sexp_test.blsp`). The now-dead `sexp--defun-start` wrapper was removed.
+
+**The multi-byte gap is now the striking part**: 27571 vs 6037 ms at 6400 forms, **4.6×**. That is
+`substring` being O(index) rather than O(result) off the ASCII fast path — a documented kernel
+property — so it is the next lever for any buffer containing a non-ASCII character, and probably
+cheaper to attack than the asymptote.
 
 **The asymptote needs a design decision, so it was left.** Two options, neither scoped: cache
 lexer state keyed by buffer version (fast, but the pure `(text point) -> point` API deliberately
@@ -189,9 +203,37 @@ looks fine at any size.
   fixed, it searches with `bytes-index-of` on bytes rather than char indices, and header parsing
   is per-line.
 
-**Still unswept:** `editor/markdown` (21 `char-at`, but per-*line* so bounded), `editor/lineedit`
-(39, bounded by one input line), `std/net/sse` + `reconnect`, and the rest of `std/tool/*` beyond
-the modules above. ~115 `expect_string` call sites still copy their argument; two more sit in
+**Fixed: `editor/markdown` was quadratic on multi-byte text only.** `markdown-spans` walked lines
+with `(substring src i e)` at a rising `i`, plus a `string-span-until` newline scan — both O(1)
+only on pure ASCII, O(i) off it. So the document scan was linear on ASCII (3.81×/3.88×) and
+**superlinear on any text containing one non-ASCII character (5.03× then 6.92×, rising)**. Now one
+`string-split` and a running offset — the same fix `stream-lines` needed, for the same reason.
+**6400 lines: 1287 → 559 ms (2.3×), and multi-byte is now identical to ASCII (559 vs 556)**, i.e.
+the encoding penalty is gone rather than reduced. Equivalence checked against the old walker over
+13 sources (every newline edge case, fences, multi-byte) before the swap; the durable guard is 5
+offset/edge tests in `tests/markdown_test.blsp`, since the risk the rewrite carries is the offset
+arithmetic and `string-split`'s trailing empty. Dead `md--lex` / `md--line-end` removed.
+
+**Systematic re-check: every sweep row now runs in BOTH encoding regimes (`UTF8=1`).** Every row
+had been cleared on pure-ASCII fixtures, and after markdown that is only half a clearing. Result at
+N=800 — the previously-cleared rows hold up (`format` 3.98/4.00, `ansi` 3.70/3.41, `template`
+4.20/2.62, `stream` 1.54/4.25, both `buffer` rows flat), and **two rows are multi-byte-only
+quadratics**:
+
+| row | ASCII | UTF-8 |
+|---|---|---|
+| `string inc-scan` | 0/2 ms, unmeasurable | **16.85×** (7 → 118 ms) |
+| `sexp motions` | 5.48× | **9.80×** |
+
+**This corrects a claim in the harness header.** `inc-scan` was recorded on 2026-08-02 as "now
+LINEAR too" after the char-count cache landed — but that fix's *mechanism* is the pure-ASCII test
+(`chars == bytes`), so the O(1) char↔byte conversion it buys exists only on that fast path. The
+row's in-code comment ("Still O(n²)") was right and the header was over-broad. Lesson worth
+keeping: **an optimisation whose mechanism is a fast-path test cannot clear the slow path, and
+measuring only the fast path will tell you it did.**
+
+**Still unswept:** `editor/lineedit` (39 `char-at`, bounded by one input line), `std/net/sse` +
+`reconnect`, and the rest of `std/tool/*` beyond the modules above. ~115 `expect_string` call sites still copy their argument; two more sit in
 `syntax_scan.rs` itself (`scan-tokens`, `span-runs`) and were left because they allocate on the
 heap after reading, so the borrow needs restructuring rather than a one-line swap.
 
