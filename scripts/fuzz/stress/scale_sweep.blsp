@@ -29,12 +29,19 @@
 ;; Rows measured linear on 2026-07-30: proc/agent update, buffer insert,
 ;; buffer forward-line. proc/gen gen-call is unresolved, per the above.
 ;;
-;; 2026-08-04: `sexp motions` is a CONFIRMED quadratic and is NOT fixed — three rising
-;; points, ASCII 5.68x then 9.40x, one-non-ASCII 8.84x then 12.30x. Each motion calls
-;; `narrow` -> `scan-form-start` twice, which is O(point) by design. A constant-factor fix
-;; landed (the native no longer copies the whole buffer nor over-allocates past `pos`:
-;; -18% ASCII); the asymptote needs cached lexer state or a bounded safe-restart. Measure
-;; the SEQUENCE — one motion looks fine at any buffer size.
+;; 2026-08-04: `sexp motions` is a CONFIRMED quadratic — three rising points, ASCII 5.68x
+;; then 9.40x, one-non-ASCII 8.84x then 12.30x. Each motion's cost is `narrow`'s call to the
+;; native form-start scan, which is O(point) by design (a backward scan cannot know string
+;; state). TWO constant-factor fixes landed, together **2.0x** on this row (6400 forms ASCII
+;; 12061 -> 6037 ms): the native stopped copying the whole buffer and over-allocating past
+;; `pos` (-18%), and `narrow` stopped making the O(point) pass TWICE — `scan-form-start-2`
+;; returns both offsets from one pass (-39% more). The ASYMPTOTE IS UNCHANGED and needs
+;; resumable lexer state, which the pure `(text point) -> point` API has nowhere to put.
+;; Measure the SEQUENCE — one motion looks fine at any buffer size.
+;;
+;; The multi-byte gap is now the striking part: 27571 vs 6037 ms at 6400 forms, 4.6x. That is
+;; `substring` being O(index) rather than O(result) off the ASCII fast path (a documented
+;; kernel property), so it is the next lever for a buffer containing any non-ASCII character.
 ;;
 ;; 2026-08-04, cleared: `editor/highlight` highlight-spans is LINEAR even on multi-byte
 ;; (16x input for 14.6x time; the multi-byte ratio FALLS 4.49 -> 3.42). The

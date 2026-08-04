@@ -15575,16 +15575,32 @@ because a backward scan cannot know whether a bracket sits inside a string. What
 CST work it wraps and false of *finding* the window, which is the whole cost. A docstring that
 describes the intent of a bound rather than its achievement is worse than none.
 
-**Fixed the constant, not the asymptote, and I want that distinction on the record.**
-`scan_form_start` took `expect_string` — an owned `String`, i.e. a copy of the entire buffer per
-call, exactly the seam the handoff said to convert once a workload justified it — and then
-`chars().collect()`'d the *whole* text, including everything past `pos` that it can never read.
-Now `expect_string_ref` + `take(pos + 1)`; identical semantics, because the outer loop stops at
-`i > pos` and the only thing reading past `pos` is the string-skip inner loop, which cannot touch
-`best`. Worth **−18% ASCII**, −3% multi-byte: real, and much less than I expected, which is itself
-the finding — the O(pos) scan dominates, not the allocation. The asymptote wants cached lexer state
-(nowhere to put it in a pure `(text point) -> point` API) or a bounded safe-restart, so it is left
-as a design decision rather than half-done.
+**Fixed 2.0× of constant factor, not the asymptote, and I want that distinction on the record.**
+Two independent costs, and the *order* I found them in is the lesson:
+
+1. `scan_form_start` took `expect_string` — an owned `String`, a copy of the entire buffer per
+   call, exactly the seam the handoff said to convert once a workload justified it — and then
+   `chars().collect()`'d the *whole* text, including everything past `pos` it can never read. Now
+   `expect_string_ref` + `take(pos + 1)`. **−18% ASCII**: real, and far less than I expected.
+2. That shortfall is what sent me back to the code, and the bigger cost was sitting in plain
+   sight: `narrow` made the O(point) pass **twice**, because it wants the enclosing form start
+   *and* the one before it, and asked for them with two calls — the second re-walking the prefix
+   the first had just covered. One native returning both (`scan-form-start-2`) is **−39% more**.
+
+Together 6400 forms ASCII **12061 → 6037 ms**. So the fix I predicted was worth a fifth of the fix
+I found by being disappointed with it. **When a fix underdelivers against a mechanism you were
+confident about, that gap is evidence about where the cost actually is** — I'd have stopped at
+−18% and written up "the O(pos) scan dominates" as the whole story, which was true and incomplete.
+
+The asymptote still wants resumable lexer state (nowhere to put it in a pure
+`(text point) -> point` API) or a bounded safe-restart — `highlight/safe-restart` turned out to be
+the same O(pos) native, not an existing bound, so there is nothing to reuse. Left as a design
+decision rather than half-done.
+
+**And a new lever surfaced**: the multi-byte gap is now 27571 vs 6037 ms at 6400 forms, **4.6×**,
+because `substring` is O(index) rather than O(result) off the ASCII fast path. For a buffer with
+one non-ASCII character that now dwarfs everything else here, and it is probably cheaper to attack
+than the asymptote.
 
 **Two clearings worth more than the find, because they stop the next person re-greping:**
 

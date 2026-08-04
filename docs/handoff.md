@@ -160,13 +160,27 @@ state a forward pass carries. So per motion is O(point). `narrow`'s own docstrin
 cost "~three forms, not the whole buffer" — that is true of the CST work it wraps and false of
 finding the window, which is where the whole cost is.
 
-**Partially fixed (constant factor only): `scan_form_start` no longer copies the whole buffer.**
-It took `expect_string` (an owned `String`, i.e. a copy of the entire text per call — the seam the
-handoff said to convert "when a workload shows the cost"; this is that workload) and then
-`chars().collect()`'d the *whole* text including everything past `pos`. Now `expect_string_ref` +
-`take(pos + 1)`, which is semantically identical (the outer loop stops at `i > pos`, and the only
-thing reading past `pos` is the string-skip inner loop, which cannot touch `best`). Worth
-**−18% ASCII**, −3% multi-byte. **The asymptote is untouched**, which is the honest headline.
+**Fixed 2.0× of constant factor; the asymptote is untouched, which is the honest headline.**
+Two independent costs, both real:
+
+1. `scan_form_start` took `expect_string` (an owned `String` — a copy of the entire text per call,
+   the seam the handoff said to convert "when a workload shows the cost"; this was that workload)
+   and then `chars().collect()`'d the *whole* text including everything past `pos`. Now
+   `expect_string_ref` + `take(pos + 1)`, semantically identical (the outer loop stops at
+   `i > pos`, and the only thing reading past `pos` is the string-skip inner loop, which cannot
+   touch `best`). **−18% ASCII.**
+2. `narrow` made the O(point) pass **twice** — the second call re-walking the prefix the first had
+   already covered — to get the enclosing form start *and* the one before it. New native
+   `scan-form-start-2` returns both from one pass. **−39% more.**
+
+Together: 6400 forms ASCII **12061 → 6037 ms (2.0×)**. Guarded by an equivalence test over every
+position of eight texts including a bracket inside a comment, a string spanning a newline, and an
+unterminated string (`tests/sexp_test.blsp`). The now-dead `sexp--defun-start` wrapper was removed.
+
+**The multi-byte gap is now the striking part**: 27571 vs 6037 ms at 6400 forms, **4.6×**. That is
+`substring` being O(index) rather than O(result) off the ASCII fast path — a documented kernel
+property — so it is the next lever for any buffer containing a non-ASCII character, and probably
+cheaper to attack than the asymptote.
 
 **The asymptote needs a design decision, so it was left.** Two options, neither scoped: cache
 lexer state keyed by buffer version (fast, but the pure `(text point) -> point` API deliberately
