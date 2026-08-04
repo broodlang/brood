@@ -518,11 +518,22 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
       (pg-availability-lines ctx leaves))))
 
 (defn pg-cause-leaves (cause acc)
-  ;; distinct leaves of the derivation tree, in first-seen order.
-  (match cause
-    ([:derived a b] (pg-cause-leaves (get b :cause)
-                      (pg-cause-leaves (get a :cause) acc)))
-    (leaf (if (includes? acc leaf) acc (append acc (list leaf))))))
+  ;; distinct leaves of the derivation tree, in first-seen (left-to-right) order.
+  ;; An explicit worklist keeps this tail-recursive, so a deep derivation (up to
+  ;; one level per resolution step on a large tangled graph) can't overflow.
+  (pg-cause-leaves--loop (list cause) acc))
+
+(defn pg-cause-leaves--loop (stack acc)
+  (if (empty? stack)
+    acc
+    (let (cause (first stack)
+          more (rest stack))
+      (match cause
+        ;; push the left cause on top so its leaves are visited before the right's.
+        ([:derived a b] (pg-cause-leaves--loop
+                          (cons (get a :cause) (cons (get b :cause) more)) acc))
+        (leaf (pg-cause-leaves--loop more
+                (if (includes? acc leaf) acc (append acc (list leaf)))))))))
 
 (defn pg-explain-leaf (leaf)
   (match leaf
