@@ -15650,3 +15650,39 @@ than per-document reads 5 where the answer is 22), that a trailing newline chang
 (`string-split` yields a trailing `""` where the old `(>= i n)` loop just stopped), and that
 `café` and `cafe` produce identical offsets because Brood indexes by character. Dead `md--lex` /
 `md--line-end` removed.
+
+## 2026-08-04 (cont.) — every sweep row re-checked in UTF-8; one "fixed" row wasn't
+
+Markdown's lesson (linear in ASCII, quadratic in UTF-8) implied something about all the earlier
+work: **every sweep row had been cleared on pure-ASCII fixtures.** So `scale_sweep.blsp` gained a
+`UTF8=1` knob that leads each fixture with a non-ASCII character — one is enough, since what is
+lost is the string's ASCII-ness, not anything about the character's position — and I re-ran the
+whole sweep in both regimes.
+
+The reassuring part: the previously-cleared rows hold up. `format fmt-src` 3.98/4.00, `ansi strip`
+3.70/3.41, `template render` 4.20/2.62, `stream lines-1c` 1.54/4.25, both `buffer` rows flat. Those
+fixes were real fixes, not ASCII artefacts.
+
+The part worth landing: **two rows are multi-byte-only quadratics**, and one of them is recorded in
+the header as fixed.
+
+| row | ASCII | UTF-8 |
+|---|---|---|
+| `string inc-scan` | 0/2 ms — unmeasurable | **16.85×** (7 → 118 ms at N=800) |
+| `sexp motions` | 5.48× | **9.80×** |
+
+`inc-scan` was written up on 2026-08-02 as "now LINEAR too", on the strength of the char-count
+cache — and the reason that claim is wrong is the reason it looked right: **the fix's mechanism
+*is* the pure-ASCII test.** `chars == bytes` is how the slot answers "is a char index also a byte
+offset", so the O(1) conversion it buys exists only on that path; off it, the conversion still
+walks. The row's own in-code comment said "Still O(n²)" and disagreed with the header the whole
+time; the code was right.
+
+Generalising, because this will recur: **an optimisation whose mechanism is a fast-path test cannot
+clear the slow path, and a corpus that only exercises the fast path will report that it did.** The
+char-count cache is exactly that shape. So is anything gated on `is_ascii`.
+
+That also sharpens the next lever from "substring is O(index)" to something measurable: the target
+is char→byte conversion for non-ASCII strings, and there are now two rows that move when it lands
+(`inc-scan` 16.85× → linear, `sexp motions` 9.80× → 5.48×) plus whatever `expect_string`'s
+remaining ~113 copy sites contribute.

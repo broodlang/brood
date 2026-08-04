@@ -75,6 +75,14 @@
 ;; per-call copy of its string argument. Only the two search primitives were converted
 ;; here; the rest is an open seam.
 ;;
+;; CORRECTION 2026-08-04: "is now LINEAR too" above is true ONLY FOR ASCII, and the fix's
+;; own mechanism is why — `chars == bytes` *is* the pure-ASCII test, so the O(1) char<->byte
+;; conversion it buys exists only on that fast path. Re-measured with `UTF8=1`: inc-scan is
+;; 7 -> 118 ms, ratio **16.85** at N=800, a textbook quadratic, while the same row in ASCII
+;; is 0/2 ms and unmeasurable. The in-code comment on the row ("Still O(n^2)") was right and
+;; the header's claim was over-broad. This is the kernel lever, not a std/ fix: char->byte
+;; conversion needs an index for non-ASCII strings.
+;;
 ;; 2026-08-02: `strip-ansi` WAS a confirmed quadratic — 7.6x then 14.0x, 1.58 s for ~90 KB
 ;; of colourised output. It read each char with `char-at` (O(i) on UTF-8) AND called
 ;; `string-length` (`chars().count()`, O(n)) per character: two stacked quadratics. Now a
@@ -115,6 +123,18 @@
 (require 'stream)
 
 (def n (let (e (getenv "N")) (if e (string->number e) 2000)))
+
+;; UTF8=1 re-runs every string row with a NON-ASCII lead, which is a different complexity
+;; regime, not a cosmetic variation: a char index is a byte offset only for pure-ASCII text,
+;; so every char->byte conversion is O(1) on ASCII and O(index) off it. `editor/markdown` was
+;; linear on ASCII (3.81x/3.88x) and 5.03x/6.92x rising with ONE non-ASCII character
+;; (2026-08-04). Every row here was originally cleared on ASCII fixtures, so a row cleared
+;; without this knob is only half-cleared. One lead char is enough — it is the string's
+;; ASCII-ness that is lost, not the position of the character.
+(def utf8? (not (nil? (getenv "UTF8"))))
+(def utf8-lead (if utf8? "café — " ""))
+;; Source-shaped fixtures must stay parseable, so lead them with a comment instead.
+(def utf8-src-lead (if utf8? ";; café — em dash\n" ""))
 
 (defn ms (f)
   (let (t0 (now-ns)
@@ -198,32 +218,36 @@
 ;; Was O(n^2): the scan re-sliced the REST of the template per marker AND re-`str`'d the
 ;; whole output so far. Both are gone; keep the row so it cannot come back.
 
-(defn tmpl-of (k) (apply str (repeat k "xxxxxxxxxx {{a}} ")))
+(defn tmpl-of (k) (str utf8-lead (apply str (repeat k "xxxxxxxxxx {{a}} "))))
 (defn tmpl-render (k) (template/render (tmpl-of k) {"a" "VALUE"}))
 
 ;; ---- format: N small top-level forms through the formatter ------------------
 
-(defn src-of (k) (apply str (repeat k "(defn f (a b) (if (> a b) (+ a 1) (- b 1)))\n\n")))
+(defn src-of (k)
+  (str utf8-src-lead (apply str (repeat k "(defn f (a b) (if (> a b) (+ a 1) (- b 1)))\n\n"))))
 (defn fmt-source (k) (format/format-source (src-of k)))
 
 ;; ---- ansi: strip escapes from colourised subprocess output ------------------
 
-(defn colored-of (k) (apply str (repeat k "\e[32mok\e[0m  some test name here\r\n")))
+(defn colored-of (k)
+  (str utf8-lead (apply str (repeat k "\e[32mok\e[0m  some test name here\r\n"))))
 (defn ansi-strip (k) (ansi/strip-ansi (colored-of k)))
 
 ;; ---- stream-lines: k lines arriving in ONE chunk ----------------------------
 ;; The drip case (many small chunks) was always linear; this is the shape that was not.
 
 (defn stream-lines-1chunk (k)
-  (let (blob (apply str (repeat k "some log line of moderate length here\n")))
+  (let (blob (str utf8-lead (apply str (repeat k "some log line of moderate length here\n"))))
     (count (stream/stream-to-list (stream/stream-lines (stream/stream-from-list (list blob)))))))
 
 ;; ---- string search: reverse, and a forward incremental scan -----------------
 
-(defn doc-of (k) (apply str (repeat k "lorem ipsum dolor NEEDLE sit amet consectetur ")))
+(defn doc-of (k)
+  (str utf8-lead (apply str (repeat k "lorem ipsum dolor NEEDLE sit amet consectetur "))))
 (defn scan-all (s needle i n)
   (let (j (index-of s needle i)) (if (< j 0) n (scan-all s needle (inc j) (inc n)))))
-;; Still O(n^2) — see the header. Kept visible rather than quietly dropped.
+;; Still O(n^2) on NON-ASCII text (16.85x under UTF8=1); effectively free in ASCII. Kept
+;; visible rather than quietly dropped — see the 2026-08-04 correction in the header.
 (defn inc-scan (k) (let (d (doc-of k)) (scan-all d "NEEDLE" 0 0)))
 (defn last-idx (k) (let (d (doc-of k)) (last-index-of d "NEEDLE")))
 
@@ -232,7 +256,8 @@
 (println "std/ scale sweep — linear ~4x, quadratic ~16x")
 (def sweep--src-line
   "(defn compute-thing (alpha beta) (if (< alpha beta) (+ alpha 1) (str \"x\" beta)))\n")
-(defn sweep--src (k acc) (if (= k 0) acc (sweep--src (- k 1) (cons sweep--src-line acc))))
+(defn sweep--src (k acc)
+  (if (= k 0) (cons utf8-src-lead acc) (sweep--src (- k 1) (cons sweep--src-line acc))))
 ;; A SEQUENCE of structural motions across one buffer — the editor's repeated
 ;; `forward-sexp`, not one motion. Each motion calls `sexp/narrow`, which calls the native
 ;; `scan-form-start` TWICE, and that is a forward lexical pass from offset 0 by design (a

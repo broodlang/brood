@@ -214,6 +214,24 @@ the encoding penalty is gone rather than reduced. Equivalence checked against th
 offset/edge tests in `tests/markdown_test.blsp`, since the risk the rewrite carries is the offset
 arithmetic and `string-split`'s trailing empty. Dead `md--lex` / `md--line-end` removed.
 
+**Systematic re-check: every sweep row now runs in BOTH encoding regimes (`UTF8=1`).** Every row
+had been cleared on pure-ASCII fixtures, and after markdown that is only half a clearing. Result at
+N=800 — the previously-cleared rows hold up (`format` 3.98/4.00, `ansi` 3.70/3.41, `template`
+4.20/2.62, `stream` 1.54/4.25, both `buffer` rows flat), and **two rows are multi-byte-only
+quadratics**:
+
+| row | ASCII | UTF-8 |
+|---|---|---|
+| `string inc-scan` | 0/2 ms, unmeasurable | **16.85×** (7 → 118 ms) |
+| `sexp motions` | 5.48× | **9.80×** |
+
+**This corrects a claim in the harness header.** `inc-scan` was recorded on 2026-08-02 as "now
+LINEAR too" after the char-count cache landed — but that fix's *mechanism* is the pure-ASCII test
+(`chars == bytes`), so the O(1) char↔byte conversion it buys exists only on that fast path. The
+row's in-code comment ("Still O(n²)") was right and the header was over-broad. Lesson worth
+keeping: **an optimisation whose mechanism is a fast-path test cannot clear the slow path, and
+measuring only the fast path will tell you it did.**
+
 **Still unswept:** `editor/lineedit` (39 `char-at`, bounded by one input line), `std/net/sse` +
 `reconnect`, and the rest of `std/tool/*` beyond the modules above. ~115 `expect_string` call sites still copy their argument; two more sit in
 `syntax_scan.rs` itself (`scan-tokens`, `span-runs`) and were left because they allocate on the
