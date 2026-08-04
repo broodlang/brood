@@ -117,3 +117,24 @@ Returns true if `a` and `b` are identical, false otherwise."
               (bit-or acc (bit-xor (first pair) (second pair))))
         0
         (zip (seq a) (seq b))))))
+
+;; --- ed25519 signatures (ADR-212) ------------------------------------------
+;; Public-key signatures: a private seed signs a message, the matching public key verifies
+;; it. Package signing (std/tool/package) signs a release's sha256 checksum with the
+;; publisher's key and TOFU-verifies it on install. Serialise keys/signatures with
+;; `encoding/hex-encode` for on-disk storage or transport.
+
+(defn keypair ()
+  "A fresh ed25519 keypair as `{:public <bytes> :private <bytes>}` — `:public` the 32-byte
+verifying key (safe to publish), `:private` the 32-byte signing seed (keep secret)."
+  (let (kp (%ed25519-keygen)) {:public (vector-ref kp 0) :private (vector-ref kp 1)}))
+
+(defn sign (private message)
+  "The 64-byte ed25519 signature of `message` (bytes) under the 32-byte `private` seed."
+  (%ed25519-sign private message))
+
+(defn verify (public message signature)
+  "True when `signature` (64 bytes) is a valid ed25519 signature of `message` under the
+32-byte `public` key. Never errors — a malformed or wrong signature is simply false, so it
+reads as a plain predicate."
+  (%ed25519-verify public message signature))
