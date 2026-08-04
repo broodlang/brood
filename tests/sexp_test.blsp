@@ -191,3 +191,32 @@
     (let (forms (top-level-forms "(done 1)\n(unclosed"))
       (is (>= (count forms) 1))
       (assert= (get (first forms) :end) 8))))
+
+;; `scan-form-start-2` replaced the two `scan-form-start` calls `narrow` used to make, and it
+;; must return exactly what that pair returned — including for the awkward inputs the lexical
+;; pass exists to handle (a bracket inside a comment, a string spanning a newline, an
+;; unterminated string swallowing the rest). Checked over EVERY position of each text, because
+;; an off-by-one at one offset is precisely how a structural motion goes subtly wrong.
+(describe "scan-form-start-2 is equivalent to the two calls it replaced"
+  (test "matches (scan-form-start p) + (scan-form-start (dec start)) at every position"
+    (let (pair-old (fn (text p)
+                     (let (start (scan-form-start text p)
+                           base (if (> start 0) (scan-form-start text (- start 1)) 0))
+                       [base start]))
+          texts (list "(a)\n(b)\n(c)\n"
+                  ; plain
+                  "(a)\n; (b)\n(c)\n" ; a form start inside a comment
+                  "(a \"str\n(b)\" x)\n(c)\n" ; a form start inside a multi-line string
+                  "(a)\n(b \"unterminated\n(c)\n" ; unterminated string swallows the rest
+                  "  (indented)\n(top)\n" ; only column 0 counts
+                  "no-forms-here\n" ; none at all
+                  "(only)\n" "")
+          bad (fold (fn (acc text)
+                      (fold (fn (a p)
+                              (if (= (pair-old text p) (scan-form-start-2 text p))
+                                a
+                                (cons [text p] a)))
+                        acc
+                        (range 0 (+ 2 (string-length text)))))
+                nil texts))
+      (assert= 0 (count bad)))))

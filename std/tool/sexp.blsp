@@ -97,12 +97,6 @@ fine for position queries, but don't feed the returned spans to `eval` unchecked
 (defn sexp--open? (c) (or (= c "(") (= c "[") (= c "{")))
 (defn sexp--close? (c) (or (= c ")") (= c "]") (= c "}")))
 
-(defn sexp--defun-start (text i)
-  "Greatest offset ≤ `i` that starts a top-level form — a column-0 open bracket lying
-OUTSIDE any string or comment; 0 if none. The raw-text `beginning-of-defun` the narrowing
-window hangs off (the native `scan-form-start`, string/comment-aware)."
-  (scan-form-start text i))
-
 (defn sexp--str-end (text i n)
   "Index just past the closing `\"` of a string whose first content char is at `i`
 (escapes via `\\` skipped), or `n` if it runs to the end."
@@ -140,8 +134,10 @@ shifted by `base`, the result shifted back) matches running them on all of `text
 cost of ~three forms, not the whole buffer."
   (let (n (string-length text)
         p (max 0 (min point n))
-        start (sexp--defun-start text (min p (max 0 (dec n))))
-        base (if (> start 0) (sexp--defun-start text (dec start)) 0)
+        ;; ONE lexical pass for both offsets. The pair used to be two `scan-form-start`
+        ;; calls, and the second re-walked the prefix the first had already covered — the
+        ;; dominant cost of every structural motion, paid twice (2026-08-04).
+        [base start] (scan-form-start-2 text (min p (max 0 (dec n))))
         end (sexp--scan text base n 0 3))
     [base (substring text base end)]))
 
