@@ -96,8 +96,9 @@ nil when there is none. Everything after the first `-` (and before any `+build`)
     (and (empty? a) (empty? b)) 0
     (empty? a) -1
     (empty? b) 1
-    else (let (c (version--compare-id (first a) (first b)))
-           (if (= c 0) (version--compare-ids (rest a) (rest b)) c))))
+    else
+      (let (c (version--compare-id (first a) (first b)))
+        (if (= c 0) (version--compare-ids (rest a) (rest b)) c))))
 
 (defn version--compare-id (x y)
   ;; numeric identifiers compare numerically and rank BELOW alphanumeric ones; two
@@ -248,7 +249,9 @@ the same as `version-satisfies?` — compiling is where a bad constraint is caug
     (let (core (version-core wanted)
           pre (version-prerelease wanted))
       (if (or (= op "^") (= op "~>"))
-        {:kind :lo-hi :lo core :lo-pre pre
+        {:kind :lo-hi
+         :lo core
+         :lo-pre pre
          :hi (version--upper-bound core (version--bump-index op core))
          :pre-core (when pre core)}
         {:kind :cmp :op op :core core :pre pre :pre-core (when pre core)}))))
@@ -269,16 +272,18 @@ for pre-release-aware matching use `version-match?`, which has the version strin
 
 (defn version--match-term? (term core pre)
   (case (get term :kind)
-    :lo-hi (and (>= (version--compare-cp core pre (get term :lo) (get term :lo-pre)) 0)
-             (< (version--compare-cp core pre (get term :hi) nil) 0))
-    :cmp (let (c (version--compare-cp core pre (get term :core) (get term :pre)))
-           (case (get term :op)
-             "=" (= c 0)
-             ">" (> c 0)
-             "<" (< c 0)
-             ">=" (>= c 0)
-             "<=" (<= c 0)
-             (error "version-satisfies?: unknown operator " (pr-str (get term :op)))))))
+    :lo-hi
+      (and (>= (version--compare-cp core pre (get term :lo) (get term :lo-pre)) 0)
+        (< (version--compare-cp core pre (get term :hi) nil) 0))
+    :cmp
+      (let (c (version--compare-cp core pre (get term :core) (get term :pre)))
+        (case (get term :op)
+          "=" (= c 0)
+          ">" (> c 0)
+          "<" (< c 0)
+          ">=" (>= c 0)
+          "<=" (<= c 0)
+          (error "version-satisfies?: unknown operator " (pr-str (get term :op)))))))
 
 (defn version-match? (compiled v)
   "Whether version STRING `v` satisfies an already-`version-compile`d constraint (pre-release
