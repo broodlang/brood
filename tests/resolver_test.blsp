@@ -125,11 +125,37 @@
               {'foo {"1.0.0" [['shared "^1.0.0"]]}
                'baz {"1.0.0" [['shared "^2.0.0"]]}})
           message (rt-err [['foo nil] ['baz nil]] p))
-      ;; the full derivation: BOTH requirements on `shared` (foo wants ^1, baz wants ^2), plus
-      ;; what `shared` actually offers — so the reader sees no version spans both
+      ;; a pub-style structured proof: BOTH requirements on `shared` (foo wants ^1, baz wants ^2)
+      ;; combined into a "Because … and …" chain that ends in "version solving failed", plus what
+      ;; `shared` actually offers — so the reader follows why no version spans both
+      (is (includes? message "Because"))
       (is (includes? message "foo 1.0.0 requires shared ^1.0.0"))
       (is (includes? message "baz 1.0.0 requires shared ^2.0.0"))
+      (is (includes? message "version solving failed"))
       (is (includes? message "shared available: 2.0.0, 1.5.0, 1.0.0"))))
+  (test "a dependency chain that dead-ends renders a structured, minimal derivation"
+    (let (p (rt-prov {'a ["1.0.0"] 'b ["1.0.0"] 'c ["1.0.0"]}
+              {'a {"1.0.0" [['b "^1.0.0"]]}
+               'b {"1.0.0" [['c "^2.0.0"]]}})
+          message (rt-err [['a nil]] p))
+      ;; each real link in the chain appears once, joined by the derivation
+      (is (includes? message "a 1.0.0 requires b ^1.0.0"))
+      (is (includes? message "b 1.0.0 requires c ^2.0.0"))
+      (is (includes? message "Because"))
+      (is (includes? message "c available: 1.0.0"))))
+  (test "only the packages that actually clash are named, not every requirer"
+    ;; x wants s ^1, y wants s ^2, z wants s ^3 — PubGrub finds ONE clashing pair and the
+    ;; derivation names just those two, leaving the irrelevant third requirer out.
+    (let (p (rt-prov {'x ["1.0.0"] 'y ["1.0.0"] 'z ["1.0.0"] 's ["1.0.0" "2.0.0" "3.0.0"]}
+              {'x {"1.0.0" [['s "^1.0.0"]]}
+               'y {"1.0.0" [['s "^2.0.0"]]}
+               'z {"1.0.0" [['s "^3.0.0"]]}})
+          message (rt-err [['x nil] ['y nil] ['z nil]] p))
+      (is (includes? message "Because"))
+      ;; exactly two of the three requirers are named in the proof
+      (is (= 2
+            (count (filter (fn (pkg) (includes? message (str pkg " 1.0.0 requires s")))
+                     ["x" "y" "z"]))))))
   (test "a required package the provider does not know is a clear error"
     (let (p (rt-prov {'foo ["1.0.0"]} {'foo {"1.0.0" [['ghost ">= 1.0"]]}})
           message (rt-err [['foo nil]] p))
