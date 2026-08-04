@@ -1835,9 +1835,12 @@ Runtime housekeeping (both items landed):
   ✅ **external tarball URLs shipped (ADR-211, 2026-08-04):** a release may point at a
   GitHub/S3/CDN asset (`:source_url`) instead of hive holding the bytes — still checksum-pinned
   (the publisher hashes the URL, every downloader re-verifies), created with `nest publish
-  --source-url URL`. ⬜ Remaining (ADR-011, re-scoped by ADR-211): **signed packages** (the one
-  open supply-chain gap — sha256 proves integrity, not authorship; needs public-key signing +
-  a trust model) and semver ranges over `:git` tags. *(Tarball-backed registry entries and
+  --source-url URL`. ✅ **package signing shipped (ADR-212, 2026-08-04):** ed25519 signatures
+  (`%ed25519-*` primitive), **TOFU + advisory** — `nest key gen` makes a keypair, `nest publish`
+  signs the checksum, and the client verifies + pins the signer's key in the lock on first
+  install, warning on a change; the registry only relays the signature (not a keyserver). The
+  one open supply-chain gap (sha256 proves integrity, not authorship) is now closed.
+  ⬜ Remaining (ADR-011): semver ranges over `:git` tags. *(Tarball-backed registry entries and
   cloned-index auto-refresh from the old list are done / moot under the hosted design; a
   client-side response TTL cache was investigated and declined — see ADR-211.)*
 - ⬜ **Single-binary bundling** (ADR-038) — `nest bundle` appends a zip of

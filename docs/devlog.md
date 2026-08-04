@@ -15810,3 +15810,40 @@ hive: `valid-source-url?` + the external-publish validation path (bad URL / miss
 auth-first), 20/20 registry + 8/8 api. Deployed (`fly deploy`); `/health` ok, and hatch's live
 release metadata now shows `"source_url": null` — the migration took and hosted releases are
 unaffected.
+
+## 2026-08-04 (cont.) — package signing: TOFU, advisory, ed25519 (ADR-212)
+
+The last supply-chain item. Integrity was sha256 (the bytes weren't tampered); this adds
+AUTHORSHIP (the *owner* produced them), closing the "a stolen publish token published under my
+name" gap. Shipped end-to-end across both repos + a production deploy.
+
+**The one new primitive.** `%ed25519-keygen` / `%ed25519-sign` / `%ed25519-verify` (crypto.rs,
+`ed25519-dalek` — the sibling of the `x25519-dalek` already vetted in for the handshake, so the
+"don't roll your own crypto" bar was already met). Raw bytes in/out like `%digest`; verify never
+errors (a bad/malformed signature is `false`, a predicate). Everything above it is Brood:
+`crypto/keypair|sign|verify`, then the package-manager policy.
+
+**TOFU, advisory (ADR-212).** `nest key gen` writes an ed25519 keypair (`spit-private`, 0600) and
+prints the public key. `nest publish` signs the release's **checksum** (its utf8 bytes — the
+checksum already binds the tarball, so this transitively signs the bytes cheaply) when a key is
+present, attaching `signature` + `pubkey` (hex) to the publish envelope. On install the client
+verifies the signature over the checksum and **pins the pubkey in the lock**; a later release
+signed by a *different* key WARNS (the pin is sticky — first-seen wins, it does not silently adopt
+the new key), an unverifiable signature warns, a dropped signature warns. It **never gates** — the
+type-checker stance (ADR-123). The registry only **relays** the signature+pubkey (nullable columns,
+another idempotent `ADD COLUMN` migration); hive is not a keyserver and never verifies, so it stays
+a dumb index/CDN and the guarantee degrades gracefully to "unsigned".
+
+**What I checked.** Rust/crypto round-trip (sign/verify/tamper/wrong-key/malformed, + a
+cross-process send). Client: a signed release verifies and pins the key in the lock; a bad
+signature warns but still installs (advisory — watched the WARNING fire in the suite); an unsigned
+release pins nothing; the publish envelope carries sig+pubkey only when signed. `nest key gen`
+writes 0600, refuses to overwrite without `--force`. hive: registry 20/20. Deployed
+(`fly deploy` — clean, no smoke-check warning this time); `/health` ok and hatch's live metadata
+now shows `signature: null, pubkey: null` (migration took, unsigned releases unaffected).
+
+One deliberate non-test: an end-to-end *signed publish* against production would pollute the real
+registry with a throwaway package + needs a token, so the round-trip is proven by the layered tests
+(client TOFU test drives a mocked signed release) + the live migration check, not a prod publish.
+
+Deferred now down to a single resolver-adjacent item: semver ranges over `:git` tags.
