@@ -9256,9 +9256,11 @@ format's `format-cst-root`), and eleven test files declare
 
 ## ADR-147 — Package manager v2: tarball deps + a git-backed registry
 
-**Status:** accepted / implemented (2026-07-24). Extends ADR-037. Design in
-[`packages.md`](packages.md) (*The registry (v2)* + the manifest/subcommand tables);
-tests in `tests/package_test.blsp` (tarball + registry blocks).
+**Status:** accepted / implemented (2026-07-24); **the git-backed-registry half is SUPERSEDED by
+ADR-211** — the registry shipped as a hosted HTTP/tarball service (hive), not a git index. The `:tarball` dep kind, the
+`%untar-gz` primitive, and the ADR-037 invariants below are unchanged and still current. Extends
+ADR-037. Design in [`packages.md`](packages.md) (*The registry (v2)* + the manifest/subcommand
+tables); tests in `tests/package_test.blsp` (tarball + registry blocks).
 
 **Context.** ADR-037 shipped a git-/path-deps package manager and *deferred* three
 things to v2 "until a concrete pain shows up" (ADR-011): tarball/HTTP source kinds, a
@@ -9305,9 +9307,10 @@ keeping every ADR-037 invariant.
 back" is answered without reversing it: a git-backed index *is* decentralized. The
 one new Rust primitive (`%untar-gz`) is mechanism the language genuinely can't
 bootstrap (a gzip+tar decoder); download, verify, index format, resolution, publish,
-and search are all Brood policy (ADR-006). Deferred still (ADR-011): semver ranges,
-tarball sources inside registry entries (entries point to git today), signed
-packages, and auto-refresh/TTL for the cloned index.
+and search are all Brood policy (ADR-006). *(This deferred list is superseded — see
+ADR-211's "deferred list, corrected": semver ranges and tarball-backed entries shipped;
+the cloned-index TTL is moot under the hosted design; signed packages remain the one open
+supply-chain item.)*
 
 ## ADR-148 — Test coverage is function-level, instrumented by hot reload
 
@@ -13736,6 +13739,140 @@ in-language and differential suites cover *semantics*, and this was a frame-life
 only a contended scheduler reaches. `tests/jit.rs` gained four cases for the values (a
 partial-splice differential, hot reload through the residual callee, hot reload through the
 spliced callee, and an arm deopting on every activation).
+
+## ADR-211 — The registry is a hosted service (hive), not a git-backed index
+
+**Status:** accepted / documenting shipped reality (2026-08-04). **Supersedes the registry half
+of ADR-147** (the `:tarball` dep kind and the ADR-037 invariants it kept are unchanged). Client in
+`std/tool/package.blsp`
+(the `registry--*` functions); server is the sibling **hive** app (`../hive`, a Brood/Hatch/
+Postgres service on Fly.io).
+
+**Context — the code outran the ADR.** ADR-147 decided the registry would be "**just a git repo**
+of metadata … **not a hosted service**", to keep ADR-037's "no central infrastructure to host or
+pay for" property. That is not what shipped. Two forces pulled the other way and were acted on
+without recording an ADR — this one closes that gap:
+
+1. **ADR-209's version resolver needs a live query API.** PubGrub resolves against "what versions
+   of X exist, and what does each require?" — one cheap request per package (Cargo's index / npm's
+   packument shape). A git index answers that only by cloning the *whole* index and reading it
+   locally; a hosted `/releases` endpoint answers it in one HTTP round-trip per package, which is
+   what `registry--fetch-releases` does (`{:version :dependencies}` per release, in one GET). The
+   resolver's live provider is the concrete pull the git-index model could not serve cleanly.
+2. **Tarball *storage*, discovery, and publish ergonomics.** A registry release now carries its
+   own immutable **tarball** (hive stores the bytes, or an S3 object), a **sha256 checksum**,
+   dependency metadata, and download counts, behind a token-authed `POST /publish`. Search is a
+   query endpoint, not a `grep` over a clone.
+
+**Decision — record the hosted design as the registry of record.**
+
+- **Wire model.** The client speaks a small JSON API: `GET /api/v1/packages` (search),
+  `/packages/:name` (show), `/packages/:name/releases` (the resolver's per-package list),
+  `/releases/:version` / `/releases/:version/tarball` (metadata + bytes), and a token-authed
+  `POST /api/v1/publish`. The base URL is configurable (`*config-registry*` / `HIVE_TOKEN`), so a
+  team can self-host hive; there is still no requirement that *we* are the only host.
+- **What ADR-147's invariants become.** The **sha256 pin stays mandatory and load-bearing** — the
+  client re-verifies the downloaded tarball against the release's checksum before extraction, so
+  "no unverified code runs" survives the shape change (a hosted service is *not* trusted to ship
+  the right bytes; the checksum is). **No install scripts**; a registry package is the same pure
+  Brood source a git dep is. The **`:tarball` dep kind and `%untar-gz`** primitive from ADR-147
+  are unchanged and still in use — the registry download path reuses them.
+- **What is genuinely lost vs the git-index vision.** Central infrastructure now exists (hive must
+  be hosted and paid for). That was ADR-147's decisive reason for the git index; the tradeoff was
+  made in favour of a real resolver API and publish/search ergonomics. Self-hosting keeps it from
+  being a single point of control, but not a single point of *availability*.
+
+**The deferred list, corrected.** ADR-147's deferred items were written against the git-index
+model and are now inaccurate. Re-stated against the hosted design:
+
+- ~~semver ranges~~ — **done** (ADR-209).
+- ~~tarball sources inside registry entries~~ — **done**: registry releases *are* tarballs, and a
+  release may now point at an **external** tarball (a `:source_url` — a GitHub/S3/CDN asset) instead
+  of hive holding the bytes (2026-08-04). Still checksum-pinned: the publishing client fetches the
+  URL once to hash its bytes into `:checksum`, and every downloader re-verifies it, so hive is never
+  trusted for an external release's bytes. hive stores the URL + checksum (nil tarball), the
+  client's `registry--download-extract` fetches from `:source_url` when present (strip-1) else from
+  `/tarball` (strip-0), `nest publish --source-url URL` creates such a release, and `/tarball`
+  302-redirects to the source for a stray request. hive does NOT fetch the URL at publish (no SSRF
+  surface); a dead URL fails loudly at install, not at publish.
+- ~~auto-refresh/TTL for the *cloned index*~~ — **not applicable**: there is no local clone. The
+  registry is fetched live each resolve, and freshness is governed by the lock fast-path
+  (`package--lock-covers-reqs?`) + the `_deps/` extraction cache, so nothing goes stale by
+  construction. A client-side **HTTP-response TTL cache** was considered and **declined** (2026-08-04):
+  the prefetch (`package--prefetch-registry`) already fetches each package's `/releases` exactly once
+  per resolve, so there is no within-run duplication to cache; a *cross-run* cache would only trade
+  resolve freshness (a newly-published version unseen until the TTL expired) for a few GETs the lock
+  fast-path already avoids. Not worth the staleness hazard.
+- **signed packages** — still open, and now the *only* genuine supply-chain gap: integrity is
+  sha256 (tamper-in-transit) but not authorship. It needs public-key signing (a new Rust primitive)
+  and a trust model; its own ADR precedes any code.
+
+**Why record it now.** ADR-147 is cited by ADR-209 and the ROADMAP as the registry's design; leaving
+it describing a retired model makes every downstream scoping decision start from a false premise
+(as it just did). The `:tarball` dep kind and the "no unverified code" property from ADR-147 remain
+correct and are explicitly retained — only the *registry shape* is superseded.
+
+## ADR-212 — Package signing: TOFU, advisory, ed25519
+
+**Status:** accepted (2026-08-04). The last open supply-chain item on ADR-211's list. Mechanism in
+`crates/lisp/src/builtins/crypto.rs` (a new `%ed25519-*` primitive trio); policy in
+`std/tool/package.blsp` + a signing-key module; hive stores + relays the signature. Extends the
+hosted registry (ADR-211).
+
+**Context.** Integrity is sha256 (ADR-147/211): the client verifies the bytes it downloads against
+the release's checksum, so a corrupted or tampered-in-transit tarball is caught. That proves nothing
+about **authorship** — hive (or a stolen per-user publish token) can publish anything under a name,
+and the checksum just certifies "these are the bytes hive recorded", not "the owner produced them".
+Signing closes that gap: a release carries a signature over its checksum, made with the publisher's
+private key, that a client can verify against the publisher's public key.
+
+**Decision — TOFU, advisory, ed25519.** Three choices, each the smaller/simpler option (ADR-011):
+
+- **Trust model: TOFU (trust-on-first-use), NOT a keyserver.** The client PINS a package's public
+  key in the lock on first install; a later release of that package signed by a *different* key is
+  flagged. hive is **not** a trust root — it only *relays* the signature + pubkey a publisher
+  attached; it neither holds publisher keys nor binds identity. This keeps the registry a dumb
+  index/CDN (the ADR-211 spirit) and defends the realistic threat — a stolen token, or a hive
+  compromise, publishing a new version under an existing name — because the key changes and TOFU
+  notices. The cost is that the *first* install of a package is unverified (the SSH `known_hosts`
+  model); a keyserver would centralise trust back into hive, which already serves the bytes, so it
+  would add authorship-binding while leaving hive able to swap the key — a weaker guarantee for more
+  infrastructure. Rejected. Out-of-band key distribution (most secure) is premature (ADR-011).
+
+- **Enforcement: advisory, not gating.** Verification NEVER blocks an install — a missing signature,
+  an unverifiable one, or a changed key is a **warning**, exactly as the type checker never gates the
+  live image (ADR-123). A young ecosystem is mostly unsigned; gating would make signing a barrier
+  instead of a signal. A future `enforced` mode (refuse unsigned/mismatch) is a config flag, additive.
+
+- **Algorithm: ed25519** (`ed25519-dalek`, the sibling of the `x25519-dalek` already vetted-in for
+  the ADR-034 handshake — the "don't roll your own crypto" bar ADR-005/dependency policy already
+  meets). The **new Rust primitive** is the trio `%ed25519-keygen` / `%ed25519-sign` /
+  `%ed25519-verify` (raw bytes in/out, like `%digest`) — mechanism the language genuinely can't
+  bootstrap; key generation, storage, the publish/verify flow, and the TOFU pin are all Brood policy
+  (ADR-006).
+
+**Shape.**
+- **What is signed:** the release's **sha256 checksum bytes** (32 bytes). The checksum already binds
+  the exact tarball (bytes→checksum verified first), so signing the checksum transitively signs the
+  bytes, cheaply — no second pass over a large archive.
+- **Keys:** `nest key gen` creates an ed25519 keypair, stores the private key locally (0600, under
+  the user config dir), and prints the public key. Signing is opt-in — a publisher without a key
+  publishes unsigned (advisory).
+- **Publish:** when a signing key is present, `nest publish` signs the checksum and attaches
+  `signature` + `pubkey` to the `X-Brood-Publish` envelope. hive stores both (nullable columns) and
+  serves them in the release metadata — it does not verify or interpret them.
+- **Verify (client, TOFU):** on install, if a release carries a signature, verify it against its
+  pubkey over the checksum (a mismatch → advisory: the relay tampered). The lock records the package's
+  pubkey; a subsequent install whose release pubkey differs from the locked one → advisory ("key
+  changed — a rotation, or a compromise"). First install pins whatever key is present; unsigned stays
+  silent (or a single quiet note) to avoid drowning the signal in a mostly-unsigned ecosystem.
+- **Lock:** registry rows gain `:pubkey` beside `:sha256`.
+
+**Why.** Signing is the one thing sha256 can't give (authorship), and TOFU delivers the bulk of the
+value with zero new trust infrastructure — the registry stays a relay, the guarantee degrades
+gracefully (advisory), and the mechanism is one small vetted primitive with all policy in Brood. The
+deferred-until-needed bar (ADR-011) is met by a concrete pull: a public registry with token auth is
+exactly where "a stolen token published under my name" becomes a real risk.
 
 ## ADR-213 — A sparse char→byte index on the string slot: char indexing is O(1) in both encoding regimes
 

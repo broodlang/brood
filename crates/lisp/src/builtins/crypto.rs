@@ -142,6 +142,64 @@ pub(super) fn random_bytes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     Ok(bytes_to_value(&bytes, heap))
 }
 
+/// `(%ed25519-keygen)` — a fresh ed25519 keypair as a two-element vector
+/// `[public private]`: `public` the 32-byte verifying key, `private` the 32-byte
+/// signing seed, both `bytes` values. The single key-generation primitive for
+/// package signing (ADR-212); hex encoding, on-disk storage, and the publish/verify
+/// flow are Brood policy in `std/tool/package.blsp`.
+pub(super) fn ed25519_keygen(_args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use ed25519_dalek::SigningKey;
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed)
+        .map_err(|e| LispError::runtime(format!("%ed25519-keygen: OS RNG unavailable: {e}")))?;
+    let signing = SigningKey::from_bytes(&seed);
+    let public = signing.verifying_key().to_bytes();
+    let public_value = bytes_to_value(public, heap);
+    let private_value = bytes_to_value(seed, heap);
+    Ok(heap.alloc_vector(vec![public_value, private_value]))
+}
+
+/// `(%ed25519-sign private-bytes message-bytes)` — the 64-byte ed25519 signature of
+/// `message-bytes` under the 32-byte `private-bytes` signing seed, as a `bytes`
+/// value. Errors only when the key is not 32 bytes (a programming error); the
+/// signature itself never fails.
+pub(super) fn ed25519_sign(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use ed25519_dalek::{Signer, SigningKey};
+    let seed_bytes = collect_bytes("%ed25519-sign", arg(args, 0), heap)?;
+    let message = collect_bytes("%ed25519-sign", arg(args, 1), heap)?;
+    let seed: [u8; 32] = seed_bytes.as_slice().try_into().map_err(|_| {
+        LispError::runtime(format!(
+            "%ed25519-sign: private key must be 32 bytes, got {}",
+            seed_bytes.len()
+        ))
+    })?;
+    let signing = SigningKey::from_bytes(&seed);
+    let signature = signing.sign(&message);
+    Ok(bytes_to_value(signature.to_bytes(), heap))
+}
+
+/// `(%ed25519-verify public-bytes message-bytes signature-bytes)` — `true` when
+/// `signature-bytes` (64 bytes) is a valid ed25519 signature of `message-bytes` under
+/// the 32-byte `public-bytes` key, else `false`. Verification never errors: a
+/// malformed key/signature or a bad signature is simply `false`, so a caller treats
+/// it as a plain predicate.
+pub(super) fn ed25519_verify(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let public = collect_bytes("%ed25519-verify", arg(args, 0), heap)?;
+    let message = collect_bytes("%ed25519-verify", arg(args, 1), heap)?;
+    let signature = collect_bytes("%ed25519-verify", arg(args, 2), heap)?;
+    let ok = (|| {
+        let public: [u8; 32] = public.as_slice().try_into().ok()?;
+        let signature: [u8; 64] = signature.as_slice().try_into().ok()?;
+        let verifying = VerifyingKey::from_bytes(&public).ok()?;
+        verifying
+            .verify(&message, &Signature::from_bytes(&signature))
+            .ok()
+    })()
+    .is_some();
+    Ok(Value::Bool(ok))
+}
+
 /// `(%chacha20-encrypt key-bytes nonce-bytes plaintext-bytes)` — authenticated
 /// encryption (ChaCha20-Poly1305). `key-bytes` must be exactly 32 bytes;
 /// `nonce-bytes` must be exactly 12 bytes. Returns the ciphertext (plaintext

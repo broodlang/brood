@@ -132,6 +132,9 @@
       (is (includes? message "foo 1.0.0 requires shared ^1.0.0"))
       (is (includes? message "baz 1.0.0 requires shared ^2.0.0"))
       (is (includes? message "version solving failed"))
+      ;; an unconstrained root requirement reads "requires foo", not "requires foo (any version)"
+      (is (includes? message "your project requires foo"))
+      (is (not (includes? message "(any version)")))
       (is (includes? message "shared available: 2.0.0, 1.5.0, 1.0.0"))))
   (test "a dependency chain that dead-ends renders a structured, minimal derivation"
     (let (p (rt-prov {'a ["1.0.0"] 'b ["1.0.0"] 'c ["1.0.0"]}

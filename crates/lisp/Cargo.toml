@@ -190,6 +190,11 @@ getrandom = "0.4"
 # Vetted RustCrypto/dalek crates — the "don't roll your own crypto" case the
 # dependency rule allows. See docs/distribution.md + ADR-089.
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+# ed25519 signatures for package signing (ADR-212): a release's sha256 checksum is
+# signed by the publisher's private key and TOFU-verified by the client. Same vetted
+# dalek family as x25519 above — the `%ed25519-*` primitives are the one new mechanism;
+# key management + the publish/verify/TOFU flow are Brood policy (std/tool/package.blsp).
+ed25519-dalek = "2"
 chacha20poly1305 = "0.10"
 # Constant-time byte comparison for the handshake MAC check — prevents a
 # timing side-channel from leaking information about the shared cookie.

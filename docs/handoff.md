@@ -5,7 +5,8 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**As of 2026-08-04**, brood `8b877cf3` + the ADR-213 char→byte index. Nothing half-finished. Rust
+**As of 2026-08-04**, brood at the ADR-213 char→byte index merged with the ADR-211/212 registry +
+package-signing work. Nothing half-finished. Rust
 suite **952/952** (nextest), in-language **4378/4378** — also green under
 `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` — `nest check` clean, `nest format --check` clean, rustfmt and
 clippy clean, both default and `--no-default-features` builds warning-clean, metamorphic
