@@ -39,9 +39,11 @@
 ;; resumable lexer state, which the pure `(text point) -> point` API has nowhere to put.
 ;; Measure the SEQUENCE — one motion looks fine at any buffer size.
 ;;
-;; The multi-byte gap is now the striking part: 27571 vs 6037 ms at 6400 forms, 4.6x. That is
-;; `substring` being O(index) rather than O(result) off the ASCII fast path (a documented
-;; kernel property), so it is the next lever for a buffer containing any non-ASCII character.
+;; The multi-byte gap WAS the striking part: 27571 vs 6037 ms at 6400 forms, 4.6x — `substring`
+;; being O(index) rather than O(result) off the ASCII fast path. **Gone since ADR-213** (the
+;; string slot's sparse char->byte index): the row now reads the SAME ratio in both regimes
+;; (5.42 vs 5.31 at base 800, 8.13 multi-byte at base 3200 against 9.40 ASCII previously). What
+;; is left is the O(point) scan above, which is encoding-independent by construction.
 ;;
 ;; 2026-08-04: `editor/markdown` markdown-spans WAS quadratic on MULTI-BYTE ONLY — linear in
 ;; ASCII (3.81x/3.88x) and 5.03x then 6.92x rising with one non-ASCII char, because the
@@ -82,6 +84,13 @@
 ;; is 0/2 ms and unmeasurable. The in-code comment on the row ("Still O(n^2)") was right and
 ;; the header's claim was over-broad. This is the kernel lever, not a std/ fix: char->byte
 ;; conversion needs an index for non-ASCII strings.
+;;
+;; FIXED 2026-08-04 (ADR-213): each string slot builds a sparse char->byte index on its first
+;; conversion, so a char index costs a lookup plus a walk bounded by 32 chars in EITHER
+;; encoding. inc-scan under `UTF8=1`: 7 -> 118 ms (16.85x) becomes 0 -> 3 ms, and 3 -> 8 ms
+;; (2.66x, falling = warm-up) at base 3200. Both string rows are now regime-independent, so
+;; this row's job from here is to catch a regression in EITHER regime — keep running it both
+;; ways.
 ;;
 ;; 2026-08-02: `strip-ansi` WAS a confirmed quadratic — 7.6x then 14.0x, 1.58 s for ~90 KB
 ;; of colourised output. It read each char with `char-at` (O(i) on UTF-8) AND called
@@ -246,8 +255,8 @@
   (str utf8-lead (apply str (repeat k "lorem ipsum dolor NEEDLE sit amet consectetur "))))
 (defn scan-all (s needle i n)
   (let (j (index-of s needle i)) (if (< j 0) n (scan-all s needle (inc j) (inc n)))))
-;; Still O(n^2) on NON-ASCII text (16.85x under UTF8=1); effectively free in ASCII. Kept
-;; visible rather than quietly dropped — see the 2026-08-04 correction in the header.
+;; Linear in BOTH encoding regimes since ADR-213 (was 16.85x under UTF8=1, and effectively
+;; free in ASCII the whole time — see the header's correction and its FIXED note).
 (defn inc-scan (k) (let (d (doc-of k)) (scan-all d "NEEDLE" 0 0)))
 (defn last-idx (k) (let (d (doc-of k)) (last-index-of d "NEEDLE")))
 
@@ -281,5 +290,5 @@
 (row "ansi        strip   " n ansi-strip)
 (row "stream      lines-1c" n stream-lines-1chunk)
 (row "string      last-idx" n last-idx)
-(row "string      inc-scan" n inc-scan) ; known-quadratic, see header
+(row "string      inc-scan" n inc-scan) ; was multi-byte-quadratic, fixed — see header
 (row "sexp        motions " n sexp-motions) ; CONFIRMED quadratic, unfixed — see header
