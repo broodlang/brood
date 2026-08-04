@@ -13963,3 +13963,75 @@ incremental `index-of` scan are now linear on any text, so the code-point-vector
 class of bug forced (`url`, `csv`, `ansi`) are no longer *required* — they remain correct and are
 left alone. The remaining string-path seam is unrelated and still open: `expect_string` returns an
 owned `String` at ~113 call sites, one copy of the argument per call.
+
+## ADR-214 — A lexer safepoint table cached against the string value: form-start scanning goes linear
+
+**Status:** implemented (2026-08-04), unconditional (a cache that changes no answer; its gate
+is that its answers equal the pre-table scan's at every position). Closes the lever
+`handoff.md` §1 carried as the last quadratic in the sweep.
+
+**Context.** `scan-form-start` / `-2` answer "where does the top-level form containing `pos`
+begin" — the beginning-of-defun primitive under `tool/sexp`'s narrowing and
+`editor/highlight`'s `safe-restart`. Correctness requires a **forward** lexical pass from
+offset 0, because a backward scan cannot know whether a `(` sits inside a string or a comment.
+So one call is O(pos) and a *sequence* of motions over one buffer is O(n²): the `sexp motions`
+row read 7.97× per 4× of input at base 3200, 18.6 s for 12800 forms. Two constant-factor fixes
+had already landed (2026-08-04) and left the shape alone; the entry recorded the real fix as
+"resumable lexer state, which needs somewhere to live".
+
+**Decision.** Cache a **safepoint table** against the *string value*: every
+`SCAN_POINT_STRIDE` (4096) bytes, record the lexer's state — `at_bol`, plus the answer so far
+(`best`/`prev`) — at a position where the lexer is *between tokens*. A query binary-searches
+for the last safepoint at or before `pos` and resumes there, so a motion costs O(stride) and a
+sequence over one text value is linear. Two properties make it simple rather than subtle:
+
+- **Safepoints only exist between tokens**, so the resumed state is always "in code" — a
+  string or comment is consumed atomically inside one step, and one that spans a stride simply
+  gets no safepoint of its own. There is no in-string/in-comment state to store, restore, or
+  get wrong.
+- **The pass runs over bytes, not `char`s.** It used to materialise `pos + 1` `char`s (4 bytes
+  each) per call — a motion near the bottom of a 1 MB file allocated 4 MB before scanning it.
+  Every character this lexer cares about is ASCII, so byte matching is exact; the char index
+  the language speaks rides along, incremented per char boundary.
+
+**Where the table lives, which is the part worth recording.** It hangs off the string slot's
+`StrAux` cell (introduced by ADR-213 for the char→byte index) as an
+`OnceLock<Arc<dyn Any + Send + Sync>>`: **the heap owns the cell and never interprets it**, and
+the syntax layer downcasts to its own type. Three consequences:
+
+- The core does not depend on a higher layer to host a higher layer's cache — the alternative
+  (a `FormScanIndex` field in `core/heap.rs`) would have put Lisp lexer rules in the substrate.
+- Keying by string **value** rather than by handle is what makes it sound. A `StrId` is unique
+  only within a GC epoch, so a map keyed by handle would need clearing at every collection (and
+  would be wrong if it didn't); a cell that travels *with the bytes* has no such window. The
+  `Arc` means a slot clone — what the collector does when it tenures a survivor — shares the
+  table instead of rebuilding it.
+- `StrAux` already existed, so this cost **zero** additional per-string memory: `LocalString`
+  stays 56 bytes, pinned by a test.
+
+**Measured** (same `release-fast` profile both sides, `sexp motions`, base 3200):
+
+| | ASCII | UTF-8 |
+|---|---|---|
+| before | 2329 → 18570 ms, **7.97×** | 2350 → 18499 ms, **7.87×** |
+| after | 1586 → 6146 ms, **3.88×** | 1617 → 6294 ms, **3.89×** |
+
+3.0× at 12800 forms, and **linear**: four rising bases give 4.04 / 3.99 / 3.85 / 3.94, the
+non-rising trend the sweep's own header demands before clearing a row.
+
+**What this deliberately does not fix.** The buffer-command path (`sexp/forward` on a buffer)
+calls `(buffer-text buf)` = `rope->string` — a **fresh** string per motion, which the table can
+never hit. Those motions are O(n) in the stringify before any scanning happens, so the editor
+keystroke path is unchanged; making *it* cheap needs rope-native motion, which is a different
+piece of work and now the successor item. The shapes this does fix are the ones that hold one
+text value across many queries: the sweep row, `nest check`-style tooling, and an LSP/eldoc pass
+over an unchanged document.
+
+**Validation.** The pre-table implementation is kept verbatim as a test oracle, and both the
+direct scan and the resumed scan must equal it at **every** char index of 17 fixtures — a
+column-0 bracket inside a string and inside a comment, an escaped quote, an escaped
+*multi-byte* char, an unterminated string, multi-byte text, and blank/comment-only lines —
+with a deliberately tiny 3-byte stride so a resume happens between almost every pair of
+positions, plus a fixture spanning three real strides. Verified by sabotage: letting a
+safepoint land inside a string literal, and resuming from the safepoint *after* `pos`, each
+fail the suite.

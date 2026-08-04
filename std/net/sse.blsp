@@ -61,18 +61,17 @@ data) …))` from an `http` handler to push events to a browser `EventSource`."
   "Normalise line terminators to `\\n` (SSE allows `\\r\\n`, `\\r`, or `\\n`)."
   (replace (replace s "\r\n" "\n") "\r" "\n"))
 
-(defn sse--drain (buf acc)
-  "Split `buf` into `[complete-blocks remainder]` on blank lines (`\\n\\n`).
-Tail-recursive; each block is one event's field lines (no trailing blank)."
-  (let (i (index-of buf "\n\n"))
-    (if (< i 0)
-      [(reverse acc) buf]
-      (sse--drain (substring buf (+ i 2) (string-length buf))
-        (cons (substring buf 0 i) acc)))))
-
 (defn sse--frames (buf)
   "`[complete-event-blocks remainder]` extracted from accumulated stream text `buf`."
-  (sse--drain buf nil))
+  ;; ONE native split, not a `substring` of the rest per block. The drain this replaced
+  ;; re-copied the remainder of the buffer for every event, so a single socket read holding
+  ;; k events cost O(k * chunk) — the `stream-lines` quadratic (2026-08-02) in another
+  ;; module, and one 64 KB read is the normal case, not the pathological one.
+  ;; `string-split` keeps a trailing empty piece, so the LAST piece is exactly the
+  ;; remainder (`""` when the buffer ended on a blank line); an empty buffer splits to no
+  ;; pieces at all, hence the guard. Covered by the `sse frames-1c` sweep row.
+  (let (parts (string-split buf "\n\n"))
+    (if (empty? parts) [nil ""] [(drop-last 1 parts) (last parts)])))
 
 (defn sse--field (ev line)
   "Fold one SSE field `line` into event map `ev`. `data` lines accumulate (joined by

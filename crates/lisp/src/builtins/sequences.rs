@@ -1313,8 +1313,14 @@ pub(super) fn str_last_index_of(args: &[Value], _: EnvId, heap: &mut Heap) -> Li
 /// flip), where the pure-Brood per-char scan (fn call + `char-at` per char) cost
 /// ~40 ms/keystroke on a 300-line buffer — ~100× this pass.
 pub(super) fn str_splice_diff(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let old = expect_string(heap, "%str-splice-diff", arg(args, 0))?;
-    let new = expect_string(heap, "%str-splice-diff", arg(args, 1))?;
+    // Borrowed, not owned: this runs per keystroke over the WHOLE buffer text (twice),
+    // and `expect_string` copied both. The result is three small values, so the borrows
+    // end before the allocation below — the pattern every convertible `expect_string`
+    // site takes (`seam`: the ones that allocate per piece *while* scanning, like
+    // `string-split` and `scan-tokens`, cannot use it).
+    let h: &Heap = heap;
+    let old = expect_string_ref(h, "%str-splice-diff", arg(args, 0))?;
+    let new = expect_string_ref(h, "%str-splice-diff", arg(args, 1))?;
     let ob = old.as_bytes();
     let nb = new.as_bytes();
     // Common byte prefix, snapped BACK to a char boundary in both (a boundary in
@@ -1338,7 +1344,9 @@ pub(super) fn str_splice_diff(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
     }
     let lo = old[..p].chars().count() as i64;
     let hi = lo + old[p..ob.len() - s].chars().count() as i64;
-    let repl = heap.alloc_string(&new[p..nb.len() - s]);
+    let repl_str = new[p..nb.len() - s].to_string();
+    drop((old, new));
+    let repl = heap.alloc_string(&repl_str);
     Ok(heap.alloc_vector(vec![Value::int(lo), Value::int(hi), repl]))
 }
 
@@ -1370,8 +1378,12 @@ pub(super) fn string_split(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
 /// whole regex benchmark. Like `string-split`/`string-span`, this is text-access
 /// *mechanism*; the parsers themselves stay in Brood.
 pub(super) fn string_to_codepoints(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "string->codepoints", arg(args, 0))?;
-    let codes: Vec<Value> = s.chars().map(|c| Value::int(c as i64)).collect();
+    // Borrowed: the codepoints are ints, so nothing is allocated while the borrow is
+    // live — one copy of the string saved per call, on the parsers' hot path.
+    let codes: Vec<Value> = {
+        let s = expect_string_ref(heap, "string->codepoints", arg(args, 0))?;
+        s.chars().map(|c| Value::int(c as i64)).collect()
+    };
     Ok(heap.alloc_vector(codes))
 }
 
@@ -1399,7 +1411,7 @@ pub(super) fn string_to_graphemes(args: &[Value], _: EnvId, heap: &mut Heap) -> 
 /// vector of n strings just to be counted).
 pub(super) fn grapheme_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use unicode_segmentation::UnicodeSegmentation;
-    let s = expect_string(heap, "grapheme-count", arg(args, 0))?;
+    let s = expect_string_ref(heap, "grapheme-count", arg(args, 0))?;
     Ok(Value::int(s.graphemes(true).count() as i64))
 }
 
@@ -1414,17 +1426,19 @@ pub(super) fn grapheme_count(args: &[Value], _: EnvId, heap: &mut Heap) -> LispR
 /// hottest path stops being O(n) in the buffer line's length.
 pub(super) fn grapheme_at(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use unicode_segmentation::UnicodeSegmentation;
-    let s = expect_string(heap, "grapheme-at", arg(args, 0))?;
     let i = expect_int(heap, "grapheme-at", arg(args, 1))?;
     let default = args.get(2).copied().unwrap_or(Value::nil());
     if i < 0 {
         return Ok(default);
     }
-    match s.graphemes(true).nth(i as usize) {
-        Some(g) => {
-            let g = g.to_string();
-            Ok(heap.alloc_string(&g))
-        }
+    // Borrowed — the editor reads a cluster per keystroke, so a copy of the line (or the
+    // buffer) per call is exactly what this path cannot afford.
+    let found = {
+        let s = expect_string_ref(heap, "grapheme-at", arg(args, 0))?;
+        s.graphemes(true).nth(i as usize).map(|g| g.to_string())
+    };
+    match found {
+        Some(g) => Ok(heap.alloc_string(&g)),
         None => Ok(default),
     }
 }
@@ -1436,16 +1450,18 @@ pub(super) fn grapheme_at(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResu
 /// (e + U+0301) into a bare `e` and an orphan combining mark.
 pub(super) fn substring_graphemes(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     use unicode_segmentation::UnicodeSegmentation;
-    let s = expect_string(heap, "substring-graphemes", arg(args, 0))?;
     let start = expect_int(heap, "substring-graphemes", arg(args, 1))?.max(0) as usize;
     let end = match args.get(2) {
         None | Some(Value::Nil) => None,
         Some(_) => Some(expect_int(heap, "substring-graphemes", arg(args, 2))?.max(0) as usize),
     };
-    let out: String = match end {
-        Some(e) if e <= start => String::new(),
-        Some(e) => s.graphemes(true).skip(start).take(e - start).collect(),
-        None => s.graphemes(true).skip(start).collect(),
+    let out: String = {
+        let s = expect_string_ref(heap, "substring-graphemes", arg(args, 0))?;
+        match end {
+            Some(e) if e <= start => String::new(),
+            Some(e) => s.graphemes(true).skip(start).take(e - start).collect(),
+            None => s.graphemes(true).skip(start).collect(),
+        }
     };
     Ok(heap.alloc_string(&out))
 }
@@ -1523,13 +1539,13 @@ pub(super) fn to_fixed(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 /// Unicode-aware (e.g. `ß` → `SS`), so it leans on the standard library's tables
 /// rather than being expressible in Brood.
 pub(super) fn upper(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "upper", arg(args, 0))?;
+    let s = expect_string_ref(heap, "upper", arg(args, 0))?;
     Ok(heap.alloc_string(&s.to_uppercase()))
 }
 
 /// `(lower s)` — `s` with every character lower-cased (Unicode-aware, like `upper`).
 pub(super) fn lower(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
-    let s = expect_string(heap, "lower", arg(args, 0))?;
+    let s = expect_string_ref(heap, "lower", arg(args, 0))?;
     Ok(heap.alloc_string(&s.to_lowercase()))
 }
 
