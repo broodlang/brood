@@ -13811,3 +13811,65 @@ model and are now inaccurate. Re-stated against the hosted design:
 it describing a retired model makes every downstream scoping decision start from a false premise
 (as it just did). The `:tarball` dep kind and the "no unverified code" property from ADR-147 remain
 correct and are explicitly retained — only the *registry shape* is superseded.
+
+## ADR-212 — Package signing: TOFU, advisory, ed25519
+
+**Status:** accepted (2026-08-04). The last open supply-chain item on ADR-211's list. Mechanism in
+`crates/lisp/src/builtins/crypto.rs` (a new `%ed25519-*` primitive trio); policy in
+`std/tool/package.blsp` + a signing-key module; hive stores + relays the signature. Extends the
+hosted registry (ADR-211).
+
+**Context.** Integrity is sha256 (ADR-147/211): the client verifies the bytes it downloads against
+the release's checksum, so a corrupted or tampered-in-transit tarball is caught. That proves nothing
+about **authorship** — hive (or a stolen per-user publish token) can publish anything under a name,
+and the checksum just certifies "these are the bytes hive recorded", not "the owner produced them".
+Signing closes that gap: a release carries a signature over its checksum, made with the publisher's
+private key, that a client can verify against the publisher's public key.
+
+**Decision — TOFU, advisory, ed25519.** Three choices, each the smaller/simpler option (ADR-011):
+
+- **Trust model: TOFU (trust-on-first-use), NOT a keyserver.** The client PINS a package's public
+  key in the lock on first install; a later release of that package signed by a *different* key is
+  flagged. hive is **not** a trust root — it only *relays* the signature + pubkey a publisher
+  attached; it neither holds publisher keys nor binds identity. This keeps the registry a dumb
+  index/CDN (the ADR-211 spirit) and defends the realistic threat — a stolen token, or a hive
+  compromise, publishing a new version under an existing name — because the key changes and TOFU
+  notices. The cost is that the *first* install of a package is unverified (the SSH `known_hosts`
+  model); a keyserver would centralise trust back into hive, which already serves the bytes, so it
+  would add authorship-binding while leaving hive able to swap the key — a weaker guarantee for more
+  infrastructure. Rejected. Out-of-band key distribution (most secure) is premature (ADR-011).
+
+- **Enforcement: advisory, not gating.** Verification NEVER blocks an install — a missing signature,
+  an unverifiable one, or a changed key is a **warning**, exactly as the type checker never gates the
+  live image (ADR-123). A young ecosystem is mostly unsigned; gating would make signing a barrier
+  instead of a signal. A future `enforced` mode (refuse unsigned/mismatch) is a config flag, additive.
+
+- **Algorithm: ed25519** (`ed25519-dalek`, the sibling of the `x25519-dalek` already vetted-in for
+  the ADR-034 handshake — the "don't roll your own crypto" bar ADR-005/dependency policy already
+  meets). The **new Rust primitive** is the trio `%ed25519-keygen` / `%ed25519-sign` /
+  `%ed25519-verify` (raw bytes in/out, like `%digest`) — mechanism the language genuinely can't
+  bootstrap; key generation, storage, the publish/verify flow, and the TOFU pin are all Brood policy
+  (ADR-006).
+
+**Shape.**
+- **What is signed:** the release's **sha256 checksum bytes** (32 bytes). The checksum already binds
+  the exact tarball (bytes→checksum verified first), so signing the checksum transitively signs the
+  bytes, cheaply — no second pass over a large archive.
+- **Keys:** `nest key gen` creates an ed25519 keypair, stores the private key locally (0600, under
+  the user config dir), and prints the public key. Signing is opt-in — a publisher without a key
+  publishes unsigned (advisory).
+- **Publish:** when a signing key is present, `nest publish` signs the checksum and attaches
+  `signature` + `pubkey` to the `X-Brood-Publish` envelope. hive stores both (nullable columns) and
+  serves them in the release metadata — it does not verify or interpret them.
+- **Verify (client, TOFU):** on install, if a release carries a signature, verify it against its
+  pubkey over the checksum (a mismatch → advisory: the relay tampered). The lock records the package's
+  pubkey; a subsequent install whose release pubkey differs from the locked one → advisory ("key
+  changed — a rotation, or a compromise"). First install pins whatever key is present; unsigned stays
+  silent (or a single quiet note) to avoid drowning the signal in a mostly-unsigned ecosystem.
+- **Lock:** registry rows gain `:pubkey` beside `:sha256`.
+
+**Why.** Signing is the one thing sha256 can't give (authorship), and TOFU delivers the bulk of the
+value with zero new trust infrastructure — the registry stays a relay, the guarantee degrades
+gracefully (advisory), and the mechanism is one small vetted primitive with all policy in Brood. The
+deferred-until-needed bar (ADR-011) is met by a concrete pull: a public registry with token auth is
+exactly where "a stolen token published under my name" becomes a real risk.
