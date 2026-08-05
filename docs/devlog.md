@@ -16455,3 +16455,65 @@ edits.
 
 Gate: `cargo nextest run -p cli` 46/46, the new suite 2/2 plus both sabotage runs, rustfmt and
 clippy clean.
+
+## 2026-08-05 (cont.) — both of `spawn-live`'s "next levers" measured to a conclusion, and neither is one
+
+Picked up handoff §1's ranked list and measured items 1 and 2 before implementing either.
+**Both premises are wrong**, in the same way: each named the mechanism *nearest the symptom*
+rather than the one carrying the cost — the failure mode §6 already warns about, which had
+already misnamed this section's item once (2026-08-05, "cold inline caches").
+
+**Item 1 — an identity-keyed call-site IC for a computed callee. Declined; not built.** The
+premise is real: `compile_node` allocates an IC id only for a free-global head, so a HOF's
+step call re-resolves per element. The cost is not. `scripts/fuzz/stress/hof_call.blsp` calls
+the same non-inlinable callee 3M times, reached as a global vs as a parameter, at the same
+arity:
+
+|  | JIT on | JIT off |
+|---|---|---|
+| global head (IC + fast-link) | 242 · 227 · 245 ns | 247 · 246 · 276 ns |
+| computed head (no IC) | 263 · 248 · 267 ns | **237 · 239 · 266 ns** |
+
+On the VM the computed callee is *faster*, three runs each way, because the global path pays
+an IC probe and validation where the computed path reads a slot. What the IC would cache
+costs ~nothing to recompute; the ~21 ns (8%) that appears under the JIT is the native
+fast-link, not the cache, and capturing that means an identity-keyed `FastLink` slot — KI-20
+territory for 8%.
+
+**The trap that nearly sold it.** The first version of that benchmark used
+`(defn step (acc x) (%add acc x))` and measured the global head at **1 ns/call against the
+computed head's 160** — an apparent 160× that reads as an overwhelming case for the IC. That
+shape is a passthrough to a `%`-native, which `resolve_prim` inlines to a `Prim2` at the call
+site, so the row was timing a *deleted call*. Two lessons, both now in the file's header: a
+callee only measures a call if it cannot be inlined, and **a row reporting ~1 ns/call is
+reporting that its work is gone** — which is why it now prints total ms and the accumulator
+beside every figure.
+
+**Item 2 — park/resume, "5.5 µs/unit". Suspend/resume actually costs ~0; the item was a
+confound.** The rung that produced 5.5 µs changes two things at once, as its own wording
+admits ("+ every unit held alive, *so* each parks"): units suspend, *and* all N coexist.
+`spawn_live_ladder.blsp`'s new `park-batched` mode holds the parking and drops the
+coexistence — verified, not assumed, via `BROOD_L1_STATS`, whose fast path fires only on a
+parked receiver and so counts parks directly (one per unit). At `BATCH=1000`, five
+interleaved runs each: `nopark` median 1599 ms vs `park-batched` **1560** — parking is 2.5%
+*cheaper*, which is what ADR-178 predicts, since suspending is what puts the wake on the
+fast path. The delta is entirely coexistence: 22.2 µs/unit at 100k alive, 17.6 at 100, 15.8
+never parking.
+
+So the lever is **the cost of a live idle process** — the ~4.27 KB floor and the GC/cache
+pressure of 100k live heaps — not the parking mechanism. §4 already records that boxing
+`Heap` in `Process` is the wrong trade there.
+
+**Two measurement traps, recorded because either would have "confirmed" a wrong story.** The
+batch curve is **U-shaped**, not monotonic (10 → 19.9 µs, 100 → 17.7, 1000 → 15.7, 10000 →
+17.7, all → 22.5): a small batch serialises on the parent and reads as a high per-unit cost
+having nothing to do with coexistence. And the ladder must run **one rung per process** — in
+one process the later rungs inherit the earlier ones' tiering, which put `payload` *below*
+`park`; a monotonicity violation in a ladder is the signal that the run is contaminated, and
+it is worth building the ladder so that violation is visible.
+
+**What the row is actually made of**, one rung per process, CPU, N=100k: spawn+exit 6.9 →
++unread send 7.1 → +receive 15.8 (**+8.7**) → +suspend 17.6 (+1.8) → +coexistence 22.2
+(**+4.6**) → +payload copy and fold 31.5 (**+9.3**). The three real targets are the receive
+machinery, the payload copy/fold, and coexistence. Both items on the old list were among the
+small terms.

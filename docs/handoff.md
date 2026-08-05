@@ -55,16 +55,23 @@ both halves were wrong:
 directly (`fold--vec`). Per unit: allocations **27.7 → 15.0**, one-arg dispatches **48 → 1.1**,
 the shape **32.7 → 28.6 µs** CPU, the published row **11.44 → 10.40 CPU·s** (−9%).
 
-**Where the row now stands** (CPU µs per unit, N=100k, measured with `scripts/…/sl_one.blsp`'s
-modes — commit that ladder as a stress row if you continue):
+**Where the row now stands.** The ladder is now committed as
+`scripts/fuzz/stress/spawn_live_ladder.blsp` (it was `sl_one.blsp`, uncommitted, so these
+figures could not be re-derived). Run **one rung per process** and read CPU, not wall:
 
-| | µs/unit |
-|---|---|
-| spawn + send + exit, no `receive` | 8.6 |
-| + a `receive` that never parks | 12.2 |
-| + every unit held alive, so each parks | 17.7 |
-| + payload copy and fold (the published row) | **28.6** |
-| the same row with the sum as a hand-rolled indexed loop | 17.9 |
+| rung | µs/unit (CPU, N=100k) | adds |
+|---|---|---|
+| `spawn` — spawn + exit | 6.9 | — |
+| `send` — + an unread message | 7.1 | +0.2 |
+| `nopark` — + a `receive` that never suspends | 15.8 | **+8.7** |
+| `park-batched` — + every unit suspends (100 coexist) | 17.6 | +1.8 |
+| `park` — + all N coexist | 22.2 | **+4.6** |
+| `payload` — + the 16-cell copy and fold | 31.5 | **+9.3** |
+
+The three big steps are the **receive machinery** (+8.7), the **payload copy and fold**
+(+9.3), and **coexistence** (+4.6). Suspending is not one of them (item 2 below). The
+earlier version of this table read 8.6 / 12.2 / 17.7 / 28.6 for the comparable rungs;
+absolutes drift ~10% between invocations, so read the steps, not the levels.
 
 So the next candidates, in the order the numbers support them:
 
@@ -83,13 +90,42 @@ So the next candidates, in the order the numbers support them:
    identity-guarded speculative inline of a HOF's step closure. Note the groundwork is
    further along than FRONTIER's "true call inlining" bullet suggests — ADR-210 already
    splices *statically known* leaf callees with a deopt checkpoint, and the missing piece is
-   a guard on the step's closure identity. Also relevant: a computed (local) callee gets
-   **no call-site IC at all** today (`compile_node`: "a local/computed callee can resolve to
-   a different function per call, so it keeps the generic path"), so an identity-keyed IC for
-   that case is the smaller intermediate step — cache the arm when the observed callee is
-   immovable (PRELUDE/RUNTIME), which is exactly the `fold + …` / `map inc …` shape.
-2. **Park/resume (5.5 µs/unit)** — the A−E step above. Untouched, and no measurement has
-   attributed it further than "suspend + wake".
+   a guard on the step's closure identity.
+
+   **The identity-keyed IC this item used to recommend as the "smaller intermediate step"
+   is measured and DECLINED — see §4.** It is true that a computed callee gets no
+   call-site IC; it is not true that this costs anything.
+2. ~~**Park/resume (5.5 µs/unit)**~~ — **measured 2026-08-05: suspend/resume costs ~0, and
+   this item was a confound.** The rung that produced 5.5 µs changes **two** things against
+   the one below it, which its own wording admits ("+ every unit held alive, *so* each
+   parks"): every unit suspends, *and* all N are alive simultaneously. Separating them with
+   `scripts/fuzz/stress/spawn_live_ladder.blsp`'s `park-batched` mode — units still park, but
+   only `BATCH` coexist, verified by `BROOD_L1_STATS` showing one parked-receiver hit per
+   unit — at `BATCH=1000`, five interleaved runs each, best CPU ms per run:
+
+   | | runs | median |
+   |---|---|---|
+   | `nopark` (never suspends) | 1589 · 1710 · 1599 · 1589 · 1609 | 1599 |
+   | `park-batched` (every unit suspends) | 1560 · 1560 · 1560 · 1540 · 1589 | **1560** |
+
+   Parking is **2.5% cheaper**, not 5.5 µs dearer — consistent with ADR-178, whose local-send
+   fast path fires *only* on a parked receiver, so suspending puts the wake on the fast path.
+   The whole delta is **coexistence**: `park` (100k alive) 22.2 µs/unit vs `park-batched`
+   (100 alive) 17.6 vs `nopark` 15.8.
+
+   **So the lever is the cost of a live idle process, not the parking mechanism** — the
+   ~4.27 KB floor and the GC/cache pressure of 100k live heaps. §4 already records that
+   attacking the floor by boxing `Heap` in `Process` is the wrong trade, and that the
+   direction is cutting the *number* of allocations per process.
+
+   **Two traps this measurement walked into, both worth keeping.** The batch curve is
+   **U-shaped**, not monotonic (BATCH 10 → 19.9 µs, 100 → 17.7, 1000 → 15.7, 10000 → 17.7,
+   all → 22.5): a small batch serialises on the parent (spawn K, release K, collect K, ×N/K)
+   and reads as a *high* per-unit cost that has nothing to do with coexistence, so picking
+   the endpoints of that curve would have "confirmed" either story. And the ladder must be
+   run **one rung per process**: in a single process the later rungs inherit the earlier
+   ones' JIT tiering, which put `payload` *below* `park` and `send` below `spawn` — a
+   monotonicity violation that is the signal the run is contaminated.
 3. **Per-process inline caches (~2 µs)** — real but small, and now correctly sized. If you do it,
    the site-id work is already done; what is left is the race design for a shared block.
 
@@ -140,6 +176,34 @@ anyway (its copies are the parts, not the input). `scan-tokens` would need a two
 ## 4. Closed — do NOT re-attempt these
 
 Each was measured to a conclusion. Re-deriving them costs a session each.
+
+- **An identity-keyed call-site IC for a computed (local) callee** — measured and
+  **declined 2026-08-05**, before being built. §1 recommended it because `compile_node`
+  allocates an IC id only for a free-global head, so a HOF's step call re-resolves per
+  element. The premise is real and the *cost* is not: with `scripts/fuzz/stress/hof_call.blsp`
+  (3M calls, callee reached as a global vs as a parameter, same callee, **same arity**, a
+  non-inlinable body so the comparison is a call and not a splice) —
+
+  | | JIT on | JIT off |
+  |---|---|---|
+  | global head (IC + fast-link) | 242 · 227 · 245 ns | 247 · 246 · 276 ns |
+  | computed head (no IC) | 263 · 248 · 267 ns | **237 · 239 · 266 ns** |
+
+  On the VM the computed callee is *faster* — three runs each way — because the global path
+  pays an IC probe and validation while the computed path just reads a slot. So the thing
+  the IC would cache (`passthrough_arm` probe + `compiled_arm_for`) costs about nothing to
+  recompute, and the ~21 ns (8%) gap that does appear under the JIT is the **native
+  fast-link**, not the cache; capturing that needs an identity-keyed `FastLink` slot, which
+  is KI-20 territory, for 8%.
+
+  **The trap that nearly sold it, worth keeping:** the first version of that benchmark used
+  `(defn step (acc x) (%add acc x))` as the callee and measured the global head at **1
+  ns/call against the computed head's 160** — an apparent 160× that reads as a screaming
+  case for the IC. That shape is a *passthrough to a `%`-native*, which `resolve_prim`
+  (`compile/mod.rs:668`) inlines to a `Prim2` at the call site, so the row was measuring a
+  deleted call. A callee is only measuring a *call* if it cannot be inlined — and a row
+  reporting ~1 ns/call is reporting that its work is gone, which is why the committed
+  version prints total ms and the accumulator beside every figure.
 
 - **`spawn-live`'s per-process recompilation** — **fixed** (ADR-215): the compiled-code cache
   was keyed by the closure *handle*, and a no-capture closure is promoted afresh per creation
@@ -389,6 +453,18 @@ All in `scripts/fuzz/stress/`, each with a usage header worth reading first.
   superlinear reading is a regression, not a known gap.
 - **`leaf_splice.blsp`** — partial leaf splicing's benchmark (ADR-210); ~220 ms vs ~520 ms with
   `BROOD_NO_PARTIAL_LEAF=1`. Its header carries the derivation-vs-lowering trap.
+- **`spawn_live_ladder.blsp`** — decomposes the worst published row into rungs
+  (`spawn`/`send`/`nopark`/`park`/`park-batched`/`payload`). **One rung per process** (a shared
+  process leaks JIT tiering into later rungs and breaks monotonicity — which is the tell) and
+  **CPU, not wall**. `park-batched` with `BATCH` separates suspending from coexisting, the
+  confound that made item 2 look like a 5.5 µs lever. Verify any rung's parking claim with
+  `BROOD_L1_STATS=1`: the fast path fires only on a parked receiver, so it counts parks
+  directly.
+- **`hof_call.blsp`** — per-call cost of a HOF step function, global vs computed head. Its
+  header carries the trap that makes this measurement easy to get 160× wrong: a callee of the
+  form `(defn f (a b) (%prim a b))` is a passthrough that `resolve_prim` **inlines**, so such
+  a row measures a deleted call, not a call. Prints total ms and the accumulator beside every
+  figure so a vanished loop is visible.
 - **`process_floor.blsp`** — the per-process idle floor; ~4.27 KB, flat across N. Read the slope,
   never `rss/n`; discard the first run after a fresh build.
 - **`soak_selfcheck.blsp`** — sustained load with an invariant checked every iteration. **Always pair
