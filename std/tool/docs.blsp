@@ -59,11 +59,10 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 ;; A value worth a full entry (signature + docstring): a function or a macro.
 (defn- docs-documentable? (v) (or (fn? v) (= (type-of v) :macro)))
 
-;; Private by convention: names containing "--" (double-dash prefix).
-;; These are skipped by (:use) refer-all and omitted from generated docs.
-(defn- docs-private?
-  (sym)
-  (includes? (name sym) "--"))
+;; Module-private, as the image recorded it at the def form (`defn-`/`def-`,
+;; ADR-146). These are skipped by (:use) refer-all and omitted from generated docs.
+;; `sym` is already the qualified name, which is what `private?` keys on.
+(defn- docs-private? (sym) (private? sym))
 
 ;; One definition's Markdown: a `### (name args…)` heading (with a *(macro)* tag
 ;; for macros) followed by its docstring, or a placeholder when undocumented.

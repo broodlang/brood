@@ -1121,7 +1121,7 @@ pub fn check_file_ext(
                 }
                 // Module prefixes referenced via a *qualified* `mod/name` symbol anywhere
                 // in the file — so a file that reaches a module only by qualified reference
-                // (including to its private `--` names, which aren't imported at all) still
+                // (including to its module-private names, which aren't imported at all) still
                 // counts the `:use` as load-bearing.
                 let mut qualified_mods: HashSet<String> = HashSet::new();
                 for &s in &all_refs {

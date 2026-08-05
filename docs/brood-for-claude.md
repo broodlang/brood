@@ -60,7 +60,7 @@ def  fn  quote  quasiquote  if  do  let  letrec
 ```
 
 Common macros (expanded once at the compile pass — runtime-free): `defmacro`
-(lowers to `(def name (%make-macro (fn …)))`), `defn`, `defdyn`, `binding`,
+(lowers to `(def name (%make-macro (fn …)))`), `defn`, `defn-` / `def-`, `defdyn`, `binding`,
 `cond`, `when`, `unless`, `and`, `or`, `match`, `try` / `catch`, `->` / `->>` /
 `as->`, `some->` / `some->>` / `cond->` / `cond->>` / `doto`, `if-let` / `when-let`,
 `fmt` (string interpolation), `receive`, `spawn`.
@@ -71,6 +71,8 @@ Common macros (expanded once at the compile pass — runtime-free): `defmacro`
 (defn greet (name) (str "hello, " name))            ; defn = (def greet (fn (name) ...))
 (defn add (& xs) (fold %add 0 xs))                  ; variadic via & rest
 (defn opt-arg (x &optional (y 10)) (+ x y))         ; optionals with defaults
+(defn- helper (x) …)                                ; MODULE-PRIVATE (ADR-146) — same as
+(def- *table* {})                                   ;   defn/def, plus (%mark-private 'name)
 
 (defmacro when (test & body) `(if ~test (do ~@body) nil))
 (defmacro my-or (a b) `(let (r# ~a) (if r# r# ~b)))  ; `r#` = auto-gensym: a fresh,
@@ -219,10 +221,14 @@ foo->bar      ; conversion (number->string, vec->list)
 ```
 
 **Privacy is a def form, not a spelling** (ADR-146): `(defn- helper …)` and
-`(def- x …)` define a MODULE-PRIVATE name — a *clean* name, no marker in it. A
-hand-written cross-module qualified reference to a private is a compile error
-without `(:use-internals mod)`; call it bare (same module) or `mod/name` (granted).
-The name never carries a sigil, at the definition or any call site.
+`(def- x …)` define a MODULE-PRIVATE name — a *clean* name, no marker in it, at the
+definition or any call site. A hand-written cross-module qualified reference to a
+private is a compile error without `(:use-internals mod)`; call it bare (same module)
+or `mod/name` (granted). There is no marker to spell and none to read, so ask the
+image: `(private? 'mod/name)`. The old `--`-in-name convention (`append--onto`) was
+**deleted** in favour of this — if you meet it in older code or a stale doc, it no
+longer means anything. There is no `defmacro-`/`defprocess-`: private macros and
+processes were rare enough that they simply stay public.
 
 A trailing `!` is **rare and not a mutation warning** — nothing mutates, so the
 Scheme/Clojure reading is vacuous here and `!` is per-context by decision (ADR-163):
@@ -254,14 +260,15 @@ recursion with an accumulator:
 ```lisp
 (defn reverse (coll) "The items of `coll` in reverse order." (fold flip-cons nil coll))
 
-;; longer recursions split into a public shell + a private helper
-(defn- count-newlines-at (s i acc) …)              ; private worker (defn-)
+;; longer recursions split into a public shell + a private -at helper
+(defn- count-newlines-at (s i acc) …)              ; private worker
 (defn count-newlines (s) "Number of \\n in `s`." (count-newlines-at s 0 0))
 ```
 
 **Docstrings** go on every public `defn` / `defmacro`. First line is a complete
 one-sentence summary (it's what `(doc 'name)` and the LSP show on hover);
-backtick code, **bold**, and `-` bullet lists are rendered, so use them. Private (`defn-`) helpers usually skip the docstring and use a `;;` comment instead.
+backtick code, **bold**, and `-` bullet lists are rendered, so use them. `defn-`
+privates usually skip the docstring and use a `;;` comment instead.
 
 ```lisp
 (defn format-source (src)
