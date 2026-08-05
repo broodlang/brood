@@ -424,7 +424,7 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
 2. ✅ **Imports + auto-require (inc-2)** — `(:use mod)` / `(:use mod :only [a b])`
    in the `ns` header; a per-file `imports` table on the `Heap` (bare → qualified)
    the resolver consults after the current namespace, before root; `%refer`
-   enumerates a module's public (non-`--`) names or a subset; `:use` emits a
+   enumerates a module's public (non-private) names or a subset; `:use` emits a
    `(require …)` so it auto-loads (loads-but-never-fetches, §9). Own-namespace defs
    shadow imports. Tested: refer-all, subset, private excluded, own-ns precedence,
    cross-process.

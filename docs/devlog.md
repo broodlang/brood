@@ -16298,6 +16298,18 @@ the ephemeral-range collision is the only mechanism that fits every one of those
 earlier `SO_REUSEADDR` hypothesis had been tested and correctly ruled out — and it is consistent
 with the real cause: the port was lost to another process, not to `TIME_WAIT`.
 
+## 2026-08-05 (cont.) — `nest update-tooling`: re-sync the AI-assistant files from the current binary
+
+`nest new` drops two AI-assistant files into every project — `docs/brood-for-claude.md`
+(the language reference) and `.claude/skills/writing-brood/SKILL.md` — both baked into the
+binary via `%builtin-doc`. They drift as the language evolves: the ADR-146 step-2 migration
+left every scaffolded project (and the brood repo's own copy) still teaching the removed `--`
+privacy convention, and nothing re-synced them. `nest update-tooling` (a new subcommand;
+`scaffold/update-tooling` over `%builtin-doc`) rewrites exactly those two files from the
+installed `brood` build — code, manifest, and `CLAUDE.md` untouched. Run it after upgrading
+Brood. Tested end-to-end in `crates/nest/tests/update_tooling.rs` (stale + refresh; and the
+no-project error path).
+
 ## 2026-08-05 (cont.) — docs-currency pass on the week's work, and `nest doc` was leaking privates
 
 A sweep of the reference docs against what actually shipped this week. The per-change record
@@ -16320,7 +16332,10 @@ files that *teach* the conventions, one of them baked into every scaffolded proj
 taught `foo--bar` as the way to mark a private. Also `lsp.md`, `namespaces.md`, `deferred.md`,
 the E0010 text in `std/tool/explain.blsp`, and comments in `heap.rs` / `tooling.rs` / `system.rs`
 / `eval/mod.rs` / `check.rs`, two of which described a lock-free `--` fast-negative that the step-2
-commit had removed.
+commit had removed. (Four of those — `brood-for-claude`, `writing-brood-skill`, `lsp`,
+`namespaces` — were being fixed *concurrently* in `f00c63d2`, which landed while this pass was
+running; the merge keeps the union. Two people finding the same stale docs independently is its
+own signal about how far a name-convention migration reaches.)
 
 **And one real regression, found by the doc pass rather than by the suite.** `std/tool/docs.blsp`'s
 `docs-private?` was still `(includes? (name sym) "--")`. With privacy now a def-form fact and
