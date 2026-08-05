@@ -1558,11 +1558,15 @@ fn unbound_namespace_hint(heap: &Heap, sym: Symbol) -> Option<String> {
     let mut mods: Vec<String> = heap
         .global_symbols()
         .iter()
+        // A private target (`mod/name--x`) can't be referred bare by `(:use)`, so
+        // never suggest one — consult the recorded privacy fact (ADR-146), not the
+        // name. (This is name-privacy; the `!m.contains("--")` below is the separate
+        // private-*module*-path heuristic.)
+        .filter(|&&g| !heap.is_private(g))
         .filter_map(|&g| {
             let spelling = value::symbol_name(g);
             spelling.strip_suffix(&suffix).map(str::to_string)
         })
-        // a `--` name is private and wouldn't be referred by `(:use)` anyway.
         // A hierarchical module (`gui/window`, ADR-085) keeps its `/`: the
         // suffix strip removed only the final `/name`, so whatever remains is
         // the module path to suggest verbatim.

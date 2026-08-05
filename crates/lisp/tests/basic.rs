@@ -413,6 +413,47 @@ fn interp_eval(interp: &mut Interp, src: &str) -> brood::core::value::Value {
 }
 
 #[test]
+fn is_private_records_the_marker_at_both_populate_paths() {
+    // ADR-146 step 1: module privacy is a recorded per-module fact
+    // (`Heap::is_private`), populated from the `--` marker where the binding is
+    // made. Two distinct populate paths must both be covered:
+    //   1. the prelude — inserted by `RuntimeCode::seeded`, not re-`eval`ed, so the
+    //      private-set is derived from the bindings there;
+    //   2. runtime defs — recorded in `env_define`.
+    use brood::core::value::intern;
+    let mut interp = Interp::new();
+
+    // (1) Prelude private via the seeded derivation; a public prelude name is not.
+    assert!(
+        interp.heap.is_private(intern("fold--loop")),
+        "a prelude `--` name must be recorded private (seeded path)"
+    );
+    assert!(
+        !interp.heap.is_private(intern("map")),
+        "a public prelude name must not be private"
+    );
+
+    // (2) Runtime defs via env_define: the def name is qualified to `m/…`.
+    interp
+        .eval_str("(defmodule m) (defn h--x () 1) (defn pub () 2)")
+        .expect("module load");
+    assert!(
+        interp.heap.is_private(intern("m/h--x")),
+        "a `--` def must be recorded private (env_define path)"
+    );
+    assert!(
+        !interp.heap.is_private(intern("m/pub")),
+        "a plain def must not be private"
+    );
+    // The recorded set — not name-derivation — is authoritative: an undefined `--`
+    // name is not private even though its spelling carries the marker.
+    assert!(
+        !interp.heap.is_private(intern("m/ghost--y")),
+        "an undefined `--` name must not be recorded private"
+    );
+}
+
+#[test]
 fn slurp_of_a_missing_file_errors() {
     Interp::new()
         .eval_str("(slurp \"/no/such/brood/file.blsp\")")

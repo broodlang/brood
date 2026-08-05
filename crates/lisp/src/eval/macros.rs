@@ -797,9 +797,18 @@ fn enforce_private_refs(
             let name = value::symbol_name_ref(s);
             if let Some(slash) = name.rfind('/') {
                 let (m, bare) = (&name[..slash], &name[slash + 1..]);
-                // Only `--` names can ever be private, so short-circuit the common
-                // public qualified reference (`http/get`) BEFORE the alias-lookup
-                // allocation — this walk runs on every compiled form in a module.
+                // Enforcement is deliberately **name-authoritative**, not a lookup in
+                // the recorded private-set (`Heap::is_private`, ADR-146): privacy
+                // governs what an author may *type*, so a `--` reference to a module
+                // that is not even loaded must still be rejected (see the
+                // `never-loaded/nope--thing` case in tests/private_test.blsp) — a
+                // recorded set can't answer for an unloaded module. The recorded set
+                // is consulted at the *loaded* sites (`%refer`, the checker,
+                // reflection); here the typed `--` is the fact. `bare.contains("--")`
+                // is the same rule `name_marks_private` records, kept inline as the
+                // hot fast-negative (this walk runs on every compiled form): only `--`
+                // names can be private, so short-circuit the common public qualified
+                // reference (`http/get`) BEFORE the alias-lookup allocation.
                 if !bare.contains("--") {
                     return Ok(());
                 }

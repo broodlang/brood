@@ -2761,7 +2761,23 @@ Three deliberate doors stay open:
 
 Reflection (`eval`, `global-names`, `bound?`) still sees the flat table —
 privacy governs what a module's source may reference, not what the live image
-contains. The advisory checker additionally warns on private names that are
+contains. `(private? 'mod/name)` reports whether a global is private.
+
+Privacy is a **recorded per-module fact**: the `--` marker is read once, where the
+binding is made, into a per-runtime private-set that a single kernel predicate
+(`Heap::is_private`, exposed as `private?`) consults. The `--` marker stays the
+*populator*. Two kinds of check split cleanly:
+
+- Checks that ask *"is this existing/loaded name private?"* read the **record** —
+  importing a module's public names (`:use` refer-all), the checker's export
+  index, and `private?` reflection.
+- Checks that govern *"what may an author type?"* stay **name-authoritative** —
+  cross-module enforcement and `(:use … :only […])`. Both can name a symbol that
+  isn't defined yet (an unloaded module; `:only` is lazy), and a recorded set can't
+  answer for a name it hasn't seen — so privacy there is a property of the typed
+  `--` name, independent of load state.
+
+The advisory checker additionally warns on private names that are
 defined but never called within the file — see
 [Advisory lints](#advisory-lints-non-type-warnings).
 At the REPL the namespace tracks the last `defmodule`; `(current-ns)` reports it.

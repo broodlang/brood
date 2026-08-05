@@ -2537,7 +2537,9 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             for g in heap.global_symbols() {
                 let name = value::symbol_name(g);
                 if let Some(bare) = name.strip_prefix(&prefix) {
-                    if !bare.is_empty() && !bare.contains('/') && !bare.contains("--") {
+                    // `g` is a live enumerated global under `mod/`, so `is_private`
+                    // (the recorded fact) is exact — the module is loaded here.
+                    if !bare.is_empty() && !bare.contains('/') && !heap.is_private(g) {
                         let bare_sym = value::intern(bare);
                         if excluded.contains(&bare_sym) {
                             continue;
@@ -2553,10 +2555,16 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
             for item in heap.seq_items(subset)? {
                 let bare = expect_symbol(heap, "%refer", item)?;
                 let bare_name = value::symbol_name(bare);
+                let qualified = value::intern(&format!("{}/{}", mod_name, bare_name));
                 // A `--` name in an explicit :only list is a privacy breach
                 // unless this file holds an internals grant for the module
                 // (ADR-146) — same rule the resolver enforces for qualified
-                // references.
+                // references. This is **name-authoritative**, like enforcement and
+                // for the same reason: `:only` is lazy (existence isn't required —
+                // the name may not be defined yet), so the recorded private-set
+                // (`Heap::is_private`) can't answer here; the typed `--` marker is
+                // the fact. `bare_name.contains("--")` is the same rule
+                // `name_marks_private` records. Do NOT replace it with `is_private`.
                 if bare_name.contains("--")
                     && heap
                         .import_of(crate::eval::macros::internals_grant_key(&mod_name))
@@ -2566,7 +2574,6 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                         "(:use {mod_name} :only [... {bare_name} ...]): `{bare_name}` is module-private (ADR-146); grant access with (:use-internals {mod_name}) or use the public API"
                     )));
                 }
-                let qualified = value::intern(&format!("{}/{}", mod_name, bare_name));
                 refer_add(heap, bare, qualified, &mod_name)?;
             }
         }
