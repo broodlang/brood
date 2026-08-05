@@ -10,17 +10,19 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
 
 ;; ---- internal helpers -------------------------------------------------------
 
-(defn dt--fdiv (a b)
+(defn- dt-fdiv
+  (a b)
   ;; Integer division toward negative infinity (floor division).
   (let (q (quot a b) r (rem a b))
     (if (< r 0) (- q 1) q)))
 
 ;; check-allow: deliberately non-tail — depth = the pad width — single digits.
 (check-allow :non-tail-recursion
-  (defn dt--zero-pad (n width)
+  (defn- dt-zero-pad
+    (n width)
     ;; Render n as a decimal string of at least `width` digits. Handles negative n.
     (if (< n 0)
-      (str "-" (dt--zero-pad (- n) (- width 1)))
+      (str "-" (dt-zero-pad (- n) (- width 1)))
       (let (s (number->string n)
             pad (- width (string-length s)))
         (if (> pad 0) (str (string-repeat "0" pad) s) s)))))
@@ -29,31 +31,33 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
 ;; Howard Hinnant's civil_from_days / days_from_civil algorithms.
 ;; Reference: https://howardhinnant.github.io/date_algorithms.html
 
-(defn dt--days->ymd (z)
+(defn- dt-days->ymd
+  (z)
   ;; Days since 1970-01-01 → {:year :month :day}
   (let (z (+ z 719468)
-        era (dt--fdiv z 146097)
+        era (dt-fdiv z 146097)
         doe (- z (* era 146097))
-        yoe (dt--fdiv (+ (- doe (dt--fdiv doe 1460))
-                        (- (dt--fdiv doe 36524) (dt--fdiv doe 146096)))
+        yoe (dt-fdiv (+ (- doe (dt-fdiv doe 1460))
+                       (- (dt-fdiv doe 36524) (dt-fdiv doe 146096)))
               365)
         y (+ yoe (* era 400))
-        doy (- doe (+ (- (* 365 yoe) (dt--fdiv yoe 100)) (dt--fdiv yoe 4)))
-        mp (dt--fdiv (+ (* 5 doy) 2) 153)
-        d (+ (- doy (dt--fdiv (+ (* 153 mp) 2) 5)) 1)
+        doy (- doe (+ (- (* 365 yoe) (dt-fdiv yoe 100)) (dt-fdiv yoe 4)))
+        mp (dt-fdiv (+ (* 5 doy) 2) 153)
+        d (+ (- doy (dt-fdiv (+ (* 153 mp) 2) 5)) 1)
         m (if (< mp 10) (+ mp 3) (- mp 9))
         y (if (<= m 2) (+ y 1) y))
     {:year y :month m :day d}))
 
-(defn dt--ymd->days (year month day)
+(defn- dt-ymd->days
+  (year month day)
   ;; Date → days since 1970-01-01
   (let (y (if (<= month 2) (- year 1) year)
-        era (dt--fdiv y 400)
+        era (dt-fdiv y 400)
         yoe (- y (* era 400))
         m+ (if (> month 2) (- month 3) (+ month 9))
-        doy (+ (dt--fdiv (+ (* 153 m+) 2) 5) (- day 1))
+        doy (+ (dt-fdiv (+ (* 153 m+) 2) 5) (- day 1))
         doe (+ (* yoe 365)
-              (- (dt--fdiv yoe 4) (dt--fdiv yoe 100))
+              (- (dt-fdiv yoe 4) (dt-fdiv yoe 100))
               doy))
     (- (+ (* era 146097) doe) 719468)))
 
@@ -86,20 +90,20 @@ All values are UTC. The epoch is Unix time (1970-01-01T00:00:00Z).")
 
 (defn epoch-ms->dt (ms)
   "Convert Unix epoch milliseconds to a UTC datetime."
-  (let (total-s (dt--fdiv ms 1000)
+  (let (total-s (dt-fdiv ms 1000)
         ms-part (- ms (* total-s 1000))
-        days (dt--fdiv total-s 86400)
+        days (dt-fdiv total-s 86400)
         time-s (- total-s (* days 86400))
-        hour (dt--fdiv time-s 3600)
-        minute (dt--fdiv (rem time-s 3600) 60)
+        hour (dt-fdiv time-s 3600)
+        minute (dt-fdiv (rem time-s 3600) 60)
         second (rem time-s 60)
-        ymd (dt--days->ymd days))
+        ymd (dt-days->ymd days))
     (datetime (get ymd :year) (get ymd :month) (get ymd :day) hour minute second ms-part)))
 
 (defn dt->epoch-ms (dt)
   "Convert a UTC datetime (or date — its time is taken as midnight) to Unix epoch
 milliseconds."
-  (let (days (dt--ymd->days (get dt :year) (get dt :month) (get dt :day))
+  (let (days (dt-ymd->days (get dt :year) (get dt :month) (get dt :day))
         time-s (+ (* (get dt :hour 0) 3600)
                  (* (get dt :minute 0) 60)
                  (get dt :second 0))
@@ -161,27 +165,29 @@ milliseconds."
   (to-iso [self] :-> string))
 
 ;; The two halves, shared by the three impls (a datetime is date + \"T\" + time + \"Z\").
-(defn dt--iso-date (d)
-  (str (dt--zero-pad (get d :year) 4)
+(defn- dt-iso-date
+  (d)
+  (str (dt-zero-pad (get d :year) 4)
     "-"
-    (dt--zero-pad (get d :month) 2)
+    (dt-zero-pad (get d :month) 2)
     "-"
-    (dt--zero-pad (get d :day) 2)))
+    (dt-zero-pad (get d :day) 2)))
 
-(defn dt--iso-time (t)
-  (str (dt--zero-pad (get t :hour 0) 2)
+(defn- dt-iso-time
+  (t)
+  (str (dt-zero-pad (get t :hour 0) 2)
     ":"
-    (dt--zero-pad (get t :minute 0) 2)
+    (dt-zero-pad (get t :minute 0) 2)
     ":"
-    (dt--zero-pad (get t :second 0) 2)
+    (dt-zero-pad (get t :second 0) 2)
     "."
-    (dt--zero-pad (get t :ms 0) 3)))
+    (dt-zero-pad (get t :ms 0) 3)))
 
-(impl Temporal datetime/date (to-iso [d] (dt--iso-date d)))
-(impl Temporal datetime/time-of-day (to-iso [t] (dt--iso-time t)))
+(impl Temporal datetime/date (to-iso [d] (dt-iso-date d)))
+(impl Temporal datetime/time-of-day (to-iso [t] (dt-iso-time t)))
 (impl Temporal
   datetime/datetime
-  (to-iso [dt] (str (dt--iso-date dt) "T" (dt--iso-time dt) "Z")))
+  (to-iso [dt] (str (dt-iso-date dt) "T" (dt-iso-time dt) "Z")))
 
 ;; A temporal value's display form is its ISO string — so `(println (utc-now))` shows
 ;; `2026-07-28T14:03:11.000Z`, not the field map. `str`/`pr-str` stay native (ADR-171),
@@ -190,59 +196,64 @@ milliseconds."
 (impl Display datetime/date (to-str [d] (to-iso d)))
 (impl Display datetime/time-of-day (to-str [t] (to-iso t)))
 
-(defn dt--fmt-code (dt code)
+(defn- dt-fmt-code
+  (dt code)
   (cond
-    (= code "Y") (dt--zero-pad (dt-year dt) 4)
-    (= code "m") (dt--zero-pad (dt-month dt) 2)
-    (= code "d") (dt--zero-pad (dt-day dt) 2)
-    (= code "H") (dt--zero-pad (dt-hour dt) 2)
-    (= code "M") (dt--zero-pad (dt-minute dt) 2)
-    (= code "S") (dt--zero-pad (dt-second dt) 2)
-    (= code "f") (dt--zero-pad (dt-ms dt) 3)
+    (= code "Y") (dt-zero-pad (dt-year dt) 4)
+    (= code "m") (dt-zero-pad (dt-month dt) 2)
+    (= code "d") (dt-zero-pad (dt-day dt) 2)
+    (= code "H") (dt-zero-pad (dt-hour dt) 2)
+    (= code "M") (dt-zero-pad (dt-minute dt) 2)
+    (= code "S") (dt-zero-pad (dt-second dt) 2)
+    (= code "f") (dt-zero-pad (dt-ms dt) 3)
     (= code "%") "%"
     else (str "%" code)))
 
-(defn dt--fmt-loop (dt fmt i n acc)
+(defn- dt-fmt-loop
+  (dt fmt i n acc)
   (if (>= i n)
     acc
     (let (c (char-at fmt i))
       (if (and (= c "%") (< (+ i 1) n))
-        (dt--fmt-loop dt
+        (dt-fmt-loop dt
           fmt
           (+ i 2)
           n
-          (str acc (dt--fmt-code dt (char-at fmt (+ i 1)))))
-        (dt--fmt-loop dt fmt (+ i 1) n (str acc c))))))
+          (str acc (dt-fmt-code dt (char-at fmt (+ i 1)))))
+        (dt-fmt-loop dt fmt (+ i 1) n (str acc c))))))
 
 (defn dt-format (dt fmt)
   "Format `dt` with %-codes: %Y year, %m month (01-12), %d day (01-31),
 %H hour (00-23), %M minute (00-59), %S second (00-59), %f ms (000-999), %% literal %."
-  (dt--fmt-loop dt fmt 0 (string-length fmt) ""))
+  (dt-fmt-loop dt fmt 0 (string-length fmt) ""))
 
 ;; ---- parsing ----------------------------------------------------------------
 
-(defn dt--parse-int (s)
+(defn- dt-parse-int
+  (s)
   (let (n (string->number s))
     (if (int? n) n nil)))
 
-(defn dt--frac->ms (frac)
+(defn- dt-frac->ms
+  (frac)
   ;; Right-pad the fractional-second digits to 3 and parse as milliseconds.
   ;; "" → 0, "5" → 500, "05" → 50, "005" → 5, "123" → 123.
   (let (padded (str frac "000"))
-    (or (dt--parse-int (str (char-at padded 0) (char-at padded 1) (char-at padded 2)))
+    (or (dt-parse-int (str (char-at padded 0) (char-at padded 1) (char-at padded 2)))
       0)))
 
-(defn dt--parse-time-str (s)
+(defn- dt-parse-time-str
+  (s)
   ;; Parse "HH:MM:SS" or "HH:MM:SS.mmm" → a time-of-day, or nil.
   (let (dot-parts (string-split s ".")
         hms-str (first dot-parts)
         frac-str (if (> (count dot-parts) 1) (nth dot-parts 1) "")
-        ms-val (dt--frac->ms frac-str)
+        ms-val (dt-frac->ms frac-str)
         parts (string-split hms-str ":"))
     (when (= (count parts) 3)
-      (let (h (dt--parse-int (nth parts 0))
-            mn (dt--parse-int (nth parts 1))
-            sc (dt--parse-int (nth parts 2)))
+      (let (h (dt-parse-int (nth parts 0))
+            mn (dt-parse-int (nth parts 1))
+            sc (dt-parse-int (nth parts 2)))
         (when (and h mn sc)
           (time-of-day h mn sc ms-val))))))
 
@@ -250,15 +261,15 @@ milliseconds."
   "Parse an ISO 8601 date string \"YYYY-MM-DD\" → a `date`, or nil on failure."
   (let (parts (string-split s "-"))
     (when (= (count parts) 3)
-      (let (y (dt--parse-int (nth parts 0))
-            m (dt--parse-int (nth parts 1))
-            d (dt--parse-int (nth parts 2)))
+      (let (y (dt-parse-int (nth parts 0))
+            m (dt-parse-int (nth parts 1))
+            d (dt-parse-int (nth parts 2)))
         (when (and y m d)
           (date y m d))))))
 
 (defn parse-time (s)
   "Parse \"HH:MM:SS\" or \"HH:MM:SS.mmm\" (optional trailing Z) → a `time-of-day`, or nil."
-  (dt--parse-time-str (first (string-split s "Z"))))
+  (dt-parse-time-str (first (string-split s "Z"))))
 
 (defn parse-iso8601 (s)
   "Parse an ISO 8601 datetime string \"YYYY-MM-DDTHH:MM:SS[.mmm][Z]\" → a `datetime`, or nil."
@@ -312,11 +323,11 @@ milliseconds."
 
 (defn day-of-week (dt)
   "Day of week as a keyword: :monday … :sunday. Based on UTC date."
-  (let (w (mod (+ (dt--ymd->days (get dt :year) (get dt :month) (get dt :day)) 3) 7))
+  (let (w (mod (+ (dt-ymd->days (get dt :year) (get dt :month) (get dt :day)) 3) 7))
     (nth [:monday :tuesday :wednesday :thursday :friday :saturday :sunday] w)))
 
 (defn day-of-year (dt)
   "Day within the year (1–366)."
-  (+ (- (dt--ymd->days (get dt :year) (get dt :month) (get dt :day))
-       (dt--ymd->days (get dt :year) 1 1))
+  (+ (- (dt-ymd->days (get dt :year) (get dt :month) (get dt :day))
+       (dt-ymd->days (get dt :year) 1 1))
     1))

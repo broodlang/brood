@@ -54,32 +54,35 @@ content-agnostic — the editor supplies the payload and the keybindings.")
 ;; restructuring can't leave a stale one behind. Selection itself is a `:selected`
 ;; marker on the leaf, not a path.
 
-(defn pane--get (node path)
+(defn- pane-get
+  (node path)
   "The node at `path` (a list of `:a`/`:b`) under `node`."
-  (if (empty? path) node (pane--get (get node (first path)) (rest path))))
+  (if (empty? path) node (pane-get (get node (first path)) (rest path))))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion
-  (defn pane--update (node path f)
+  (defn- pane-update
+    (node path f)
     "The tree like `node` with the node at `path` replaced by `(f node-at-path)`."
     (if (empty? path)
       (f node)
       (let (k (first path))
-        (assoc node k (pane--update (get node k) (rest path) f))))))
+        (assoc node k (pane-update (get node k) (rest path) f))))))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion
-  (defn pane--paths (node prefix)
+  (defn- pane-paths
+    (node prefix)
     "All leaf paths under `node` in traversal order (a before b), each prefixed by
   the forward-order `prefix`."
     (if (pane-leaf? node)
       (list prefix)
-      (append (pane--paths (get node :a) (append prefix (list :a)))
-        (pane--paths (get node :b) (append prefix (list :b)))))))
+      (append (pane-paths (get node :a) (append prefix (list :a)))
+        (pane-paths (get node :b) (append prefix (list :b)))))))
 
 (defn pane-leaf-paths (tree)
   "Every leaf's path, in left-to-right / top-to-bottom traversal order."
-  (pane--paths tree ()))
+  (pane-paths tree ()))
 
 (defn pane-count (tree)
   "How many panes (leaves) the layout holds."
@@ -89,28 +92,29 @@ content-agnostic — the editor supplies the payload and the keybindings.")
 
 (defn pane-selected-path (tree)
   "The path of the selected leaf (`()` for a lone pane)."
-  (find (fn (p) (get (pane--get tree p) :selected)) (pane-leaf-paths tree)))
+  (find (fn (p) (get (pane-get tree p) :selected)) (pane-leaf-paths tree)))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion
-  (defn pane--clear (node)
+  (defn- pane-clear
+    (node)
     "The tree with the `:selected` marker cleared from every leaf."
     (if (pane-leaf? node)
       (assoc node :selected false)
-      (assoc node :a (pane--clear (get node :a)) :b (pane--clear (get node :b))))))
+      (assoc node :a (pane-clear (get node :a)) :b (pane-clear (get node :b))))))
 
 (defn pane-select-path (tree path)
   "The tree with the leaf at `path` made the sole selected pane."
-  (pane--update (pane--clear tree) path (fn (leaf) (assoc leaf :selected true))))
+  (pane-update (pane-clear tree) path (fn (leaf) (assoc leaf :selected true))))
 
 (defn pane-selected-payload (tree)
   "The payload of the selected pane."
-  (get (pane--get tree (pane-selected-path tree)) :payload))
+  (get (pane-get tree (pane-selected-path tree)) :payload))
 
 (defn pane-update-selected (tree f)
   "The tree with the selected pane's payload replaced by `(f payload)` — how an
 editor applies an edit to whatever the active pane shows."
-  (pane--update tree
+  (pane-update tree
     (pane-selected-path tree)
     (fn (leaf) (assoc leaf :payload (f (get leaf :payload))))))
 
@@ -119,14 +123,14 @@ editor applies an edit to whatever the active pane shows."
 position-targeted sibling of `pane-update-selected`. Lets an editor act on the pane
 *under the pointer* (via `pane-at`'s `:path`) — e.g. wheel zoom / scroll — without
 disturbing which pane is selected."
-  (pane--update tree path (fn (leaf) (assoc leaf :payload (f (get leaf :payload))))))
+  (pane-update tree path (fn (leaf) (assoc leaf :payload (f (get leaf :payload))))))
 
 (defn pane-payload-at (tree path)
   "The payload of the pane at `path` — the read half of `pane-update-path`, and the
 position-targeted sibling of `pane-selected-payload`. Combined with `pane-leaf-paths`
 it lets an editor answer 'which pane, if any, already shows buffer N?' (the reuse rule
 behind an Emacs-style `display-buffer`)."
-  (get (pane--get tree path) :payload))
+  (get (pane-get tree path) :payload))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion
@@ -150,7 +154,7 @@ behind an Emacs-style `display-buffer`)."
   "Split the selected pane in `dir` (`:row` stacked, `:col` side by side) into two
 even panes: the original (still selected) becomes child `a`, a new pane showing
 `new-payload` becomes child `b` (Emacs `C-x 2` / `C-x 3` — point stays put)."
-  (pane--update tree
+  (pane-update tree
     (pane-selected-path tree)
     (fn (leaf)
       {:split true
@@ -168,7 +172,7 @@ returned unchanged — you can't delete the only one."
       tree
       (let (parent (drop-last 1 p)
             sib (if (= (last p) :a) :b :a)
-            pruned (pane--update tree parent (fn (split) (get split sib))))
+            pruned (pane-update tree parent (fn (split) (get split sib))))
         (pane-select-path pruned (first (pane-leaf-paths pruned)))))))
 
 (defn pane-delete-others (tree)
@@ -180,13 +184,15 @@ returned unchanged — you can't delete the only one."
 ;; A rect is `[x y w h]` in cells (x = column origin, y = row origin). A point (from
 ;; a `[:mouse … row col]` event) is `[row col]`.
 
-(defn pane--clampi (v lo hi)
+(defn- pane-clampi
+  (v lo hi)
   "Clamp integer `v` into `[lo hi]`."
   (max lo (min hi v)))
 
 ;; check-allow: deliberately non-tail — depth = the pane tree's split nesting — single digits on any screen.
 (check-allow :non-tail-recursion
-  (defn pane--layout (node path rect)
+  (defn- pane-layout-go
+    (node path rect)
     "Lay `node` (at `path`) into `rect`, returning `{:panes (…) :dividers (…)}`."
     (if (pane-leaf? node)
       {:panes (list {:path path
@@ -199,14 +205,14 @@ returned unchanged — you can't delete the only one."
             ;; the extent split between the two children (less the 1-cell divider),
             ;; and child a's share of it, clamped so neither pane vanishes
             ext (- (if col? w h) 1)
-            a-ext (pane--clampi (round (* ext (get node :ratio))) 1 (max 1 (- ext 1)))
+            a-ext (pane-clampi (round (* ext (get node :ratio))) 1 (max 1 (- ext 1)))
             arect (if col? [x y a-ext h] [x y w a-ext])
             drect (if col? [(+ x a-ext) y 1 h] [x (+ y a-ext) w 1])
             brect (if col?
                     [(+ x a-ext 1) y (- w a-ext 1) h]
                     [x (+ y a-ext 1) w (- h a-ext 1)])
-            la (pane--layout (get node :a) (append path (list :a)) arect)
-            lb (pane--layout (get node :b) (append path (list :b)) brect))
+            la (pane-layout-go (get node :a) (append path (list :a)) arect)
+            lb (pane-layout-go (get node :b) (append path (list :b)) brect))
         {:panes (append (get la :panes) (get lb :panes))
          :dividers (cons {:path path :dir (get node :dir) :rect drect :split-rect rect}
                      (append (get la :dividers) (get lb :dividers)))}))))
@@ -217,30 +223,32 @@ each pane is `{:path :payload :selected :rect}` and each divider is `{:path :dir
 :rect :split-rect}` (`:rect` the 1-cell divider line, `:split-rect` the whole rect
 that split feeds `pane-ratio-for`). Pure — the frontend paints each pane's payload
 into its rect and the dividers between them."
-  (pane--layout tree () rect))
+  (pane-layout-go tree () rect))
 
 ;; ---- hit-testing + resize (drag-to-resize over :drag mouse events) ----------
 
-(defn pane--in-rect? (rect point)
+(defn- pane-in-rect?
+  (rect point)
   "Whether `point` (`[row col]`) falls inside `rect` (`[x y w h]`)."
   (let ([x y w h] rect [row col] point)
     (and (>= col x) (< col (+ x w)) (>= row y) (< row (+ y h)))))
 
-(defn pane--find (items point)
+(defn- pane-find
+  (items point)
   "The first `{:rect …}` in `items` whose rect contains `point`, or nil."
   (cond
     (empty? items) nil
-    (pane--in-rect? (get (first items) :rect) point) (first items)
-    else (pane--find (rest items) point)))
+    (pane-in-rect? (get (first items) :rect) point) (first items)
+    else (pane-find (rest items) point)))
 
 (defn pane-at (layout point)
   "The pane (`{:path :payload :selected :rect}`) under `point`, or nil."
-  (pane--find (get layout :panes) point))
+  (pane-find (get layout :panes) point))
 
 (defn divider-at (layout point)
   "The divider (`{:path :dir :rect :split-rect}`) under `point`, or nil — what a
 frontend stashes on a left-press to begin a drag-resize."
-  (pane--find (get layout :dividers) point))
+  (pane-find (get layout :dividers) point))
 
 (defn pane-select-at (tree layout point)
   "Move selection to the pane under `point` (a click selects it); unchanged if the
@@ -259,6 +267,6 @@ i.e. dragging the divider to the pointer. Feed the result to `pane-set-ratio`."
 (defn pane-set-ratio (tree path ratio)
   "Set the `:ratio` of the split at `path` (clamped to `[0.1 0.9]` so neither pane
 vanishes), returning the re-proportioned tree — one step of a divider drag."
-  (pane--update tree
+  (pane-update tree
     path
     (fn (split) (assoc split :ratio (max 0.1 (min 0.9 ratio))))))

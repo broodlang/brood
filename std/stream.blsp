@@ -50,49 +50,53 @@ Returns `[:ok v]` for a value, `:done` when exhausted, or `[:err msg]` on error.
 
 (defn stream-empty ()
   "A stream that is immediately done."
-  (spawn (stream--done-loop)))
+  (spawn (stream-done-loop)))
 
 (defn stream-singleton (x)
   "A stream that yields exactly one value `x`, then ends."
-  (spawn (stream--singleton-loop x)))
+  (spawn (stream-singleton-loop x)))
 
-(defn stream--singleton-loop (x)
+(defn- stream-singleton-loop
+  (x)
   (receive
     ([:next r] (send r [:stream-val x])
-      (stream--done-loop))
+      (stream-done-loop))
     (:stream-close nil)))
 
-(defn stream--done-loop ()
+(defn- stream-done-loop
+  ()
   (receive
-    ([:next r] (send r :stream-done) (stream--done-loop))
+    ([:next r] (send r :stream-done) (stream-done-loop))
     (:stream-close nil)))
 
 (defn stream-from-list (xs)
   "A stream over the items of list or vector `xs`. Evaluated eagerly once."
-  (spawn (stream--list-loop (seq xs))))
+  (spawn (stream-list-loop (seq xs))))
 
-(defn stream--list-loop (xs)
+(defn- stream-list-loop
+  (xs)
   (receive
     ([:next r] (if (empty? xs)
                  (do (send r :stream-done))
                  (do
                    (send r [:stream-val (first xs)])
-                   (stream--list-loop (rest xs)))))
+                   (stream-list-loop (rest xs)))))
     (:stream-close nil)))
 
 (defn stream-from-fn (f init)
   "A stream driven by generator `f`. Each call `(f state)` returns
 `[:yield v new-state]` to emit `v` and continue, or `:done` to end the stream."
-  (spawn (stream--fn-loop f init)))
+  (spawn (stream-fn-loop f init)))
 
-(defn stream--fn-loop (f state)
+(defn- stream-fn-loop
+  (f state)
   (receive
     ([:next r] (let (result (f state))
                  (if (= result :done)
                    (send r :stream-done)
                    (do
                      (send r [:stream-val (second result)])
-                     (stream--fn-loop f (third result))))))
+                     (stream-fn-loop f (third result))))))
     (:stream-close nil)))
 
 (defn stream-range (start stop)
@@ -114,17 +118,19 @@ Returns `[:ok v]` for a value, `:done` when exhausted, or `[:err msg]` on error.
 to the stream process — the caller must not `receive` from `sock` afterwards.
 Call immediately after accept or connect, before any data has been read."
   (let (me (self)
-        s (spawn (stream--sock-init sock me)))
+        s (spawn (stream-sock-init sock me)))
     (receive
       ([:stream-socket-ready ^s] s)
       ([:stream-err msg] (error "stream-from-socket: " msg)))))
 
-(defn stream--sock-init (sock parent)
+(defn- stream-sock-init
+  (sock parent)
   (tcp-controlling-process sock (self))
   (send parent [:stream-socket-ready (self)])
-  (stream--sock-loop sock nil ""))
+  (stream-sock-loop sock nil ""))
 
-(defn stream--sock-loop (sock pending buf)
+(defn- stream-sock-loop
+  (sock pending buf)
   ;; pending: a requester PID waiting for data, or nil.
   ;; buf: data that arrived before a requester; "" when empty.
   (receive
@@ -132,8 +138,8 @@ Call immediately after accept or connect, before any data has been read."
     ([:tcp ^sock data] (if pending
                          (do
                            (send pending [:stream-val data])
-                           (stream--sock-loop sock nil ""))
-                         (stream--sock-loop sock nil (str buf data))))
+                           (stream-sock-loop sock nil ""))
+                         (stream-sock-loop sock nil (str buf data))))
     ;; Socket closed / EOF
     ([:tcp-closed ^sock]
       (cond
@@ -143,26 +149,27 @@ Call immediately after accept or connect, before any data has been read."
         ;; Returning `nil` here when `buf` is "" was a race: if EOF was processed while
         ;; the consumer was between requests, the process died and the consumer's final
         ;; `[:next]` blocked forever (the stream hung).
-        else (stream--sock-eof-loop buf)))
+        else (stream-sock-eof-loop buf)))
     ;; Socket error
     ([:tcp-error ^sock msg] (when pending (send pending [:stream-err msg])))
     ;; Consumer requests next chunk
     ([:next r] (cond
                  (not= buf "") (do
                                  (send r [:stream-val buf])
-                                 (stream--sock-loop sock nil ""))
-                 else (stream--sock-loop sock r "")))
+                                 (stream-sock-loop sock nil ""))
+                 else (stream-sock-loop sock r "")))
     ;; Graceful cancel
     (:stream-close (tcp-close sock))))
 
-(defn stream--sock-eof-loop (remaining)
+(defn- stream-sock-eof-loop
+  (remaining)
   ;; Closed but still have buffered bytes to deliver.
   (receive
     ([:next r] (if (= remaining "")
                  (send r :stream-done)
                  (do
                    (send r [:stream-val remaining])
-                   (stream--sock-eof-loop ""))))
+                   (stream-sock-eof-loop ""))))
     (:stream-close nil)))
 
 ;; ---- transformers -----------------------------------------------------------
@@ -172,41 +179,45 @@ Call immediately after accept or connect, before any data has been read."
 
 (defn stream-map (f s)
   "A stream applying `f` to each element of `s`."
-  (spawn (stream--map-loop f s)))
+  (spawn (stream-map-loop f s)))
 
-(defn stream--map-loop (f up)
+(defn- stream-map-loop
+  (f up)
   (receive
     ([:next r] (send up [:next (self)])
       (receive
-        ([:stream-val v] (send r [:stream-val (f v)]) (stream--map-loop f up))
+        ([:stream-val v] (send r [:stream-val (f v)]) (stream-map-loop f up))
         (:stream-done (send r :stream-done))
         ([:stream-err m] (send r [:stream-err m]))))
     (:stream-close (stream-close up))))
 
 (defn stream-filter (pred s)
   "A stream yielding only elements of `s` for which `(pred element)` is true."
-  (spawn (stream--filter-outer pred s)))
+  (spawn (stream-filter-outer pred s)))
 
-(defn stream--filter-outer (pred up)
+(defn- stream-filter-outer
+  (pred up)
   (receive
-    ([:next r] (stream--filter-fetch pred up r))
+    ([:next r] (stream-filter-fetch pred up r))
     (:stream-close (stream-close up))))
 
-(defn stream--filter-fetch (pred up r)
+(defn- stream-filter-fetch
+  (pred up r)
   ;; Keep asking upstream until a matching element is found.
   (send up [:next (self)])
   (receive
     ([:stream-val v] (if (pred v)
-                       (do (send r [:stream-val v]) (stream--filter-outer pred up))
-                       (stream--filter-fetch pred up r)))
+                       (do (send r [:stream-val v]) (stream-filter-outer pred up))
+                       (stream-filter-fetch pred up r)))
     (:stream-done (send r :stream-done))
     ([:stream-err m] (send r [:stream-err m]))))
 
 (defn stream-take (n s)
   "A stream yielding at most the first `n` elements of `s`."
-  (spawn (stream--take-loop n s)))
+  (spawn (stream-take-loop n s)))
 
-(defn stream--take-loop (n up)
+(defn- stream-take-loop
+  (n up)
   (receive
     ([:next r] (if (= n 0)
                  (do (send r :stream-done) (stream-close up))
@@ -214,21 +225,22 @@ Call immediately after accept or connect, before any data has been read."
                    (send up [:next (self)])
                    (receive
                      ([:stream-val v] (send r [:stream-val v])
-                       (stream--take-loop (- n 1) up))
+                       (stream-take-loop (- n 1) up))
                      (:stream-done (send r :stream-done))
                      ([:stream-err m] (send r [:stream-err m]))))))
     (:stream-close (stream-close up))))
 
 (defn stream-take-while (pred s)
   "A stream yielding elements from `s` while `(pred element)` is true."
-  (spawn (stream--take-while-loop pred s)))
+  (spawn (stream-take-while-loop pred s)))
 
-(defn stream--take-while-loop (pred up)
+(defn- stream-take-while-loop
+  (pred up)
   (receive
     ([:next r] (send up [:next (self)])
       (receive
         ([:stream-val v] (if (pred v)
-                           (do (send r [:stream-val v]) (stream--take-while-loop pred up))
+                           (do (send r [:stream-val v]) (stream-take-while-loop pred up))
                            (do (send r :stream-done) (stream-close up))))
         (:stream-done (send r :stream-done))
         ([:stream-err m] (send r [:stream-err m]))))
@@ -236,77 +248,83 @@ Call immediately after accept or connect, before any data has been read."
 
 (defn stream-drop (n s)
   "A stream skipping the first `n` elements of `s`."
-  (spawn (stream--drop-init n s)))
+  (spawn (stream-drop-init n s)))
 
-(defn stream--drop-init (n up)
+(defn- stream-drop-init
+  (n up)
   ;; Eagerly skip n items before the first request arrives.
   (if (= n 0)
-    (stream--passthrough-loop up)
+    (stream-passthrough-loop up)
     (do
       (send up [:next (self)])
       (receive
-        ([:stream-val _] (stream--drop-init (- n 1) up))
-        (:stream-done (stream--done-loop))
-        ([:stream-err m] (stream--err-loop m))))))
+        ([:stream-val _] (stream-drop-init (- n 1) up))
+        (:stream-done (stream-done-loop))
+        ([:stream-err m] (stream-err-loop m))))))
 
-(defn stream--passthrough-loop (up)
+(defn- stream-passthrough-loop
+  (up)
   (receive
     ([:next r] (send up [:next (self)])
       (receive
-        ([:stream-val v] (send r [:stream-val v]) (stream--passthrough-loop up))
+        ([:stream-val v] (send r [:stream-val v]) (stream-passthrough-loop up))
         (:stream-done (send r :stream-done))
         ([:stream-err m] (send r [:stream-err m]))))
     (:stream-close (stream-close up))))
 
-(defn stream--err-loop (m)
+(defn- stream-err-loop
+  (m)
   (receive
-    ([:next r] (send r [:stream-err m]) (stream--err-loop m))
+    ([:next r] (send r [:stream-err m]) (stream-err-loop m))
     (:stream-close nil)))
 
 (defn stream-chunk (n s)
   "A stream of vectors, each holding `n` consecutive elements of `s`.
 The last vector may be shorter if the source isn't a multiple of `n`."
   (when (<= n 0) (error "stream-chunk: n must be > 0"))
-  (spawn (stream--chunk-outer n s)))
+  (spawn (stream-chunk-outer n s)))
 
-(defn stream--chunk-outer (n up)
+(defn- stream-chunk-outer
+  (n up)
   (receive
-    ([:next r] (stream--chunk-fetch n up r nil 0))
+    ([:next r] (stream-chunk-fetch n up r nil 0))
     (:stream-close (stream-close up))))
 
-(defn stream--chunk-fetch (n up r acc k)
+(defn- stream-chunk-fetch
+  (n up r acc k)
   ;; Collect k items (in reverse in acc), emit when k=n or upstream done.
   (if (= k n)
     (do
       (send r [:stream-val (into [] (reverse acc))])
-      (stream--chunk-outer n up))
+      (stream-chunk-outer n up))
     (do
       (send up [:next (self)])
       (receive
-        ([:stream-val v] (stream--chunk-fetch n up r (cons v acc) (+ k 1)))
+        ([:stream-val v] (stream-chunk-fetch n up r (cons v acc) (+ k 1)))
         (:stream-done (if (nil? acc)
                         (send r :stream-done)
                         (do
                           (send r [:stream-val (into [] (reverse acc))])
-                          (stream--done-loop))))
+                          (stream-done-loop))))
         ([:stream-err m] (send r [:stream-err m]))))))
 
 (defn stream-concat (s1 s2)
   "A stream yielding all elements of `s1` then all elements of `s2`."
-  (spawn (stream--concat-loop s1 s2)))
+  (spawn (stream-concat-loop s1 s2)))
 
-(defn stream--concat-loop (s1 s2)
+(defn- stream-concat-loop
+  (s1 s2)
   (receive
     ([:next r] (send s1 [:next (self)])
       (receive
         ([:stream-val v] (send r [:stream-val v])
-          (stream--concat-loop s1 s2))
+          (stream-concat-loop s1 s2))
         (:stream-done
           ;; s1 exhausted — serve pending r from s2, then passthrough s2
           (send s2 [:next (self)])
           (receive
             ([:stream-val v] (send r [:stream-val v])
-              (stream--passthrough-loop s2))
+              (stream-passthrough-loop s2))
             (:stream-done (send r :stream-done))
             ([:stream-err m] (send r [:stream-err m]))))
         ([:stream-err m] (send r [:stream-err m]))))
@@ -317,7 +335,7 @@ The last vector may be shorter if the source isn't a multiple of `n`."
   "A stream that takes string chunks from `s` and emits complete lines
 (trailing `\\r\\n` or `\\n` stripped). The final non-empty buffer fragment
 after EOF is emitted as a last line (for streams without a trailing newline)."
-  (spawn (stream--lines-outer s "" ())))
+  (spawn (stream-lines-outer s "" ())))
 
 ;; `buf` is the incomplete trailing fragment; `pending` the complete lines already split
 ;; out of the last chunk, waiting to be pulled one per `:next`.
@@ -328,47 +346,51 @@ after EOF is emitted as a last line (for streams without a trailing newline)."
 ;; 4× when one chunk carries many lines — which is the normal case for a 64 KB socket read
 ;; (~1700 short lines) or a file slurped and streamed. Splitting the chunk once instead
 ;; makes both shapes linear.
-(defn stream--lines-outer (up buf pending)
+(defn- stream-lines-outer
+  (up buf pending)
   (receive
-    ([:next r] (stream--lines-fetch up buf pending r))
+    ([:next r] (stream-lines-fetch up buf pending r))
     (:stream-close (stream-close up))))
 
-(defn stream--lines-fetch (up buf pending r)
+(defn- stream-lines-fetch
+  (up buf pending r)
   (if (empty? pending)
     ;; Nothing split out yet — pull upstream. `(str buf chunk)` still recopies, but `buf`
     ;; is only the fragment after the last newline, not the whole unconsumed buffer.
     (do
       (send up [:next (self)])
       (receive
-        ([:stream-val chunk] (stream--lines-split up (str buf chunk) r))
+        ([:stream-val chunk] (stream-lines-split up (str buf chunk) r))
         (:stream-done
           ;; Flush remaining buffer as the last line if non-empty.
           (if (= buf "")
             (send r :stream-done)
             (do
               (send r [:stream-val buf])
-              (stream--done-loop))))
+              (stream-done-loop))))
         ([:stream-err m] (send r [:stream-err m]))))
     (do
       (send r [:stream-val (first pending)])
-      (stream--lines-outer up buf (rest pending)))))
+      (stream-lines-outer up buf (rest pending)))))
 
 ;; One `string-split` per chunk. `string-split` always returns at least one element and its
 ;; LAST element is the fragment after the final separator ("" when the chunk ended on one),
 ;; so that element is the new `buf` and everything before it is a complete line.
-(defn stream--lines-split (up all r)
+(defn- stream-lines-split
+  (up all r)
   (let (parts (string-split all "\n")
         n (count parts)
         tail (nth parts (dec n))
-        lines (map stream--strip-cr (take (dec n) parts)))
+        lines (map stream-strip-cr (take (dec n) parts)))
     (if (empty? lines)
       ;; No newline in the chunk — keep buffering and ask again.
-      (stream--lines-fetch up tail () r)
+      (stream-lines-fetch up tail () r)
       (do
         (send r [:stream-val (first lines)])
-        (stream--lines-outer up tail (rest lines))))))
+        (stream-lines-outer up tail (rest lines))))))
 
-(defn stream--strip-cr (line)
+(defn- stream-strip-cr
+  (line)
   "Drop one trailing `\\r`, so `\\r\\n` and `\\n` line endings both yield the bare line."
   (if (ends-with? line "\r")
     (substring line 0 (dec (string-length line)))
@@ -380,24 +402,26 @@ after EOF is emitted as a last line (for streams without a trailing newline)."
 (defn stream-fold (f init s)
   "Reduce stream `s` with `f` (a `(fn (acc v) → new-acc)`) starting from `init`.
 Raises on a stream error."
-  (stream--fold-loop f init s))
+  (stream-fold-loop f init s))
 
-(defn stream--fold-loop (f acc s)
+(defn- stream-fold-loop
+  (f acc s)
   (let (item (stream-next s))
     (cond
       (= item :done) acc
-      (= (first item) :ok) (stream--fold-loop f (f acc (second item)) s)
+      (= (first item) :ok) (stream-fold-loop f (f acc (second item)) s)
       else (error "stream-fold: " (second item)))))
 
 (defn stream-to-list (s)
   "Collect all elements of `s` into a list."
-  (reverse (stream--collect-loop s nil)))
+  (reverse (stream-collect-loop s nil)))
 
-(defn stream--collect-loop (s acc)
+(defn- stream-collect-loop
+  (s acc)
   (let (item (stream-next s))
     (cond
       (= item :done) acc
-      (= (first item) :ok) (stream--collect-loop s (cons (second item) acc))
+      (= (first item) :ok) (stream-collect-loop s (cons (second item) acc))
       else (error "stream-to-list: " (second item)))))
 
 (defn stream-to-vector (s)
@@ -419,16 +443,16 @@ Raises on a stream error."
 (defn stream-pipe (src sink)
   "Drain stream `src`, sending each value as `[:stream-data v]` to process `sink`,
 then `:stream-eof` when done (or `[:stream-err msg]` + `:stream-eof` on error)."
-  (stream--pipe-loop src sink))
+  (stream-pipe-loop src sink))
 
-(defn stream--pipe-loop (src sink)
+(defn- stream-pipe-loop
+  (src sink)
   (let (item (stream-next src))
     (cond
       (= item :done) (send sink :stream-eof)
-      (= (first item) :ok)
-        (do
-          (send sink [:stream-data (second item)])
-          (stream--pipe-loop src sink))
+      (= (first item) :ok) (do
+                             (send sink [:stream-data (second item)])
+                             (stream-pipe-loop src sink))
       else (do
              (send sink [:stream-err (second item)])
              (send sink :stream-eof)))))

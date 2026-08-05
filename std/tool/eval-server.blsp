@@ -105,12 +105,14 @@ lines (see the module preamble on stray output)."
 ;; running instrumented for another quarter-million calls we would only discard.
 (def *spy-entry-cap* 200)
 
-(defn eval-server--bound-output (s)
+(defn- eval-server-bound-output
+  (s)
   (if (<= (string-length s) *output-cap-chars*)
     s
     (str (substring s 0 *output-cap-chars*) "\n…[output truncated]")))
 
-(defn eval-server--process-report (before)
+(defn- eval-server-process-report
+  (before)
   "What the evaluation LEFT BEHIND: `{:alive n}` — processes that did not exist
 before it and are still running when it returned.
 
@@ -123,7 +125,8 @@ looking identical to a round-trip that cleaned up after itself."
   (let (after (list-processes))
     {:alive (count (filter (fn (p) (not (includes? before p))) after))}))
 
-(defn eval-server--spy-entry (e)
+(defn- eval-server-spy-entry
+  (e)
   ;; One collected `*spy-sink*` entry, display-bounded for the wire.
   {:kind (name (or (get e :spy) :event))
    :fn (when (get e :fn) (str (get e :fn)))
@@ -131,18 +134,21 @@ looking identical to a round-trip that cleaned up after itself."
    :value (when (contains? e :value) (pr-str-bounded (get e :value)))
    :form (when (get e :form) (pr-str-bounded (get e :form)))})
 
-(defn eval-server--try-traces (names)
+(defn- eval-server-try-traces
+  (names)
   ;; Install a boundary trace on every requested name that is a function right now;
   ;; a name that isn't (yet) defined is skipped.
   (doseq (s names) (try (debug/trace-fn (symbol s)) (catch _ nil))))
 
-(defn eval-server--definition-form? (form)
+(defn- eval-server-definition-form?
+  (form)
   ;; A top-level DEFINITION (as opposed to something that runs): the forms whose
   ;; whole job is to bind a name.
   (and (pair? form)
     (member? (first form) ['def 'defn 'defmacro 'defdyn 'defrecord 'defability])))
 
-(defn eval-server--eval-traced (src names)
+(defn- eval-server-eval-traced
+  (src names)
   ;; Evaluate `src` form by form (not `eval-string`), installing the requested traces
   ;; EXACTLY ONCE — immediately before the first form that isn't a definition, i.e.
   ;; after `(defn fac …)` has landed and before `(fac 5)` runs.
@@ -157,9 +163,9 @@ looking identical to a round-trip that cleaned up after itself."
   (let (forms (read-all src)
         result (fold (fn (acc form)
                        (let ([installed _] acc)
-                         (if (or installed (eval-server--definition-form? form))
+                         (if (or installed (eval-server-definition-form? form))
                            [installed (eval form)]
-                           (do (eval-server--try-traces names) [true (eval form)]))))
+                           (do (eval-server-try-traces names) [true (eval form)]))))
                  [false nil]
                  forms))
     (second result)))
@@ -202,7 +208,7 @@ path — the per-request evaluator process dies — but worth knowing when embed
                        (table-put acc :n (inc n))
                        (table-put acc
                          :entries
-                         (cons (eval-server--spy-entry e)
+                         (cons (eval-server-spy-entry e)
                            (or (table-get acc :entries) '())))
                        ;; the entry that FILLS the budget already answers stop: nothing
                        ;; after it would be kept, so nothing after it should be paid for
@@ -212,16 +218,16 @@ path — the per-request evaluator process dies — but worth knowing when embed
               (try
                 {:ok true
                  :value (pr-str-bounded (if traced
-                                          (eval-server--eval-traced src trace-names)
+                                          (eval-server-eval-traced src trace-names)
                                           (eval-string src)))}
                 (catch e {:ok false :error (error-message e)})))
         _ (%capture-begin)
         r (if traced (binding (*spy-sink* sink) (run)) (run))
-        out (eval-server--bound-output (or (%capture-take) ""))
+        out (eval-server-bound-output (or (%capture-take) ""))
         r2 (assoc r
              :output out
              :ms (- (now) t0)
-             :procs (eval-server--process-report pids-before)))
+             :procs (eval-server-process-report pids-before)))
     (if traced
       (do
         (debug/untrace-all)
@@ -236,7 +242,8 @@ path — the per-request evaluator process dies — but worth knowing when embed
 ;; the image. `def`s the child makes reach the shared global table (ADR-013), so
 ;; the session survives its own timeouts.
 
-(defn eval-server--flush-stale ()
+(defn- eval-server-flush-stale
+  ()
   ;; Reap what earlier requests may have left in the mailbox: a result a killed
   ;; child managed to send before the kill landed (results are also matched by
   ;; pinned id — this just keeps corpses from accreting), and `[:down …]` letters
@@ -244,8 +251,8 @@ path — the per-request evaluator process dies — but worth knowing when embed
   ;; queued is NOT recalled), so without this every successful request would leak
   ;; one forever and every later selective receive would scan the pile.
   (receive
-    ([:evsrv-result _ _] (eval-server--flush-stale))
-    ([:down _ _ _] (eval-server--flush-stale))
+    ([:evsrv-result _ _] (eval-server-flush-stale))
+    ([:down _ _ _] (eval-server-flush-stale))
     (after 0 nil)))
 
 (defn eval-server-answer (req)
@@ -261,7 +268,7 @@ process died without answering."
         timeout (if (int? raw-timeout) raw-timeout *default-timeout-ms*)
         trace (get req :trace)
         me (self)
-        _ (eval-server--flush-stale)
+        _ (eval-server-flush-stale)
         child (spawn (send me [:evsrv-result id (eval-capturing src trace)]))
         ref (monitor child))
     (receive
@@ -290,14 +297,15 @@ process died without answering."
 
 ;; ---- the server loop ----------------------------------------------------------
 
-(defn eval-server--loop ()
+(defn- eval-server-loop
+  ()
   (let (line (read-line))
     (when line
       ; nil = EOF: the parent closed stdin — done
       (let (req (evsrv-decode-request line))
         (when req
           (println (evsrv-encode-reply (eval-server-answer req)))))
-      (eval-server--loop))))
+      (eval-server-loop))))
 
 (defn eval-server-run ()
   "Run the eval server: print the `{:ready true}` banner, then answer one request
@@ -305,4 +313,4 @@ per stdin line until EOF. This is the child's whole program — a client spawns
 `nest run <script>` where the script is `(require 'eval-server)`
 `(eval-server-run)`, and drives it over stdin/stdout."
   (println (evsrv-encode-reply {:ready true}))
-  (eval-server--loop))
+  (eval-server-loop))

@@ -14,54 +14,54 @@
 
 (describe "repl/repl--content? — ignore blank / comment-only input"
   (test "whitespace-only input has no datum"
-    (refute (repl/repl--content? "" 0 0 false))
-    (refute (repl/repl--content? "   \n\t" 0 5 false)))
+    (refute (repl/repl-content? "" 0 0 false))
+    (refute (repl/repl-content? "   \n\t" 0 5 false)))
   (test "comment-only input has no datum"
-    (refute (repl/repl--content? "; just a comment\n" 0 17 false)))
+    (refute (repl/repl-content? "; just a comment\n" 0 17 false)))
   (test "real content is detected, even after leading space / comments"
-    (is (repl/repl--content? "  (+ 1 1)" 0 9 false))
-    (is (repl/repl--content? "; note\n(+ 1 1)" 0 14 false))))
+    (is (repl/repl-content? "  (+ 1 1)" 0 9 false))
+    (is (repl/repl-content? "; note\n(+ 1 1)" 0 14 false))))
 
 (describe "repl/repl--incomplete? — the read-another-line signal"
   (test "the reader's E0002 (incomplete input) error is incomplete"
-    (is (repl/repl--incomplete? {:code "E0002" :kind :parse :message "unexpected end of input"})))
+    (is (repl/repl-incomplete? {:code "E0002" :kind :parse :message "unexpected end of input"})))
   (test "a real error (different code) is not incomplete"
-    (refute (repl/repl--incomplete? {:code "E0010" :kind :unbound :message "x"}))
-    (refute (repl/repl--incomplete? {:kind :type :message "bad"})))
+    (refute (repl/repl-incomplete? {:code "E0010" :kind :unbound :message "x"}))
+    (refute (repl/repl-incomplete? {:kind :type :message "bad"})))
   (test "a non-map (user throw) is not incomplete"
-    (refute (repl/repl--incomplete? "boom"))
-    (refute (repl/repl--incomplete? 42))))
+    (refute (repl/repl-incomplete? "boom"))
+    (refute (repl/repl-incomplete? 42))))
 
 (describe "repl/repl--eval-print — completeness reporting"
   (test "a partial form reports :more (so the loop reads another line)"
     ;; eval-string reads all forms before evaluating any, so an unclosed form
     ;; raises E0002 at read time with nothing evaluated — silent, no output.
-    (assert= (repl/repl--eval-print "(+ 1") :more)
-    (assert= (repl/repl--eval-print "(str \"open") :more)))
+    (assert= (repl/repl-eval-print "(+ 1") :more)
+    (assert= (repl/repl-eval-print "(str \"open") :more)))
 
 (describe "repl/repl--error-message — rendering caught values"
   (test "a built-in error map renders kind + message"
-    (assert= (repl/repl--error-message {:kind :type :message "bad arg"})
+    (assert= (repl/repl-error-message {:kind :type :message "bad arg"})
       "type error: bad arg")
-    (assert= (repl/repl--error-message {:kind :unbound :message "x"})
+    (assert= (repl/repl-error-message {:kind :unbound :message "x"})
       "unbound error: x"))
   (test "a located error appends line + col"
-    (assert= (repl/repl--error-message {:kind :unbound :message "x" :line 3 :col 5})
+    (assert= (repl/repl-error-message {:kind :unbound :message "x" :line 3 :col 5})
       "unbound error: x (line 3, col 5)"))
   (test "a user-thrown string renders without quotes"
-    (assert= (repl/repl--error-message "boom") "error: boom"))
+    (assert= (repl/repl-error-message "boom") "error: boom"))
   (test "a user-thrown non-string renders readably"
-    (assert= (repl/repl--error-message 42) "error: 42")
-    (assert= (repl/repl--error-message [:tag 1]) "error: [:tag 1]")))
+    (assert= (repl/repl-error-message 42) "error: 42")
+    (assert= (repl/repl-error-message [:tag 1]) "error: [:tag 1]")))
 
 (describe "persistent history — serialize / parse round-trip"
   (test "history serializes oldest-first and parses back newest-first"
-    (assert= (repl/repl--history->text (list "(c)" "(b)" "(a)")) "(a)\n(b)\n(c)")
-    (assert= (repl/repl--history<-text "(a)\n(b)\n(c)") (list "(c)" "(b)" "(a)")))
+    (assert= (repl/repl-history->text (list "(c)" "(b)" "(a)")) "(a)\n(b)\n(c)")
+    (assert= (repl/repl-history<-text "(a)\n(b)\n(c)") (list "(c)" "(b)" "(a)")))
   (test "blank lines are dropped on parse; empty history is empty text"
-    (assert= (repl/repl--history<-text "(a)\n\n(b)\n") (list "(b)" "(a)"))
-    (assert= (repl/repl--history->text '()) "")
-    (assert= (repl/repl--history<-text "") '())))
+    (assert= (repl/repl-history<-text "(a)\n\n(b)\n") (list "(b)" "(a)"))
+    (assert= (repl/repl-history->text '()) "")
+    (assert= (repl/repl-history<-text "") '())))
 
 ;; The meta-command registry: `,cmd`s live in `*repl-commands*`, dispatched by name,
 ;; with `register-repl-command` as the extension seam (the debugger adds `,resume`/
@@ -77,16 +77,16 @@
   ;; That was a ~1-in-3 flake. Isolated units run alone against a private copy of the
   ;; globals, which is what a registry-mutating test needs.
   (test "the built-in commands are registered, with aliases"
-    (is (not (nil? (repl/repl--command-for "help"))))
-    (is (not (nil? (repl/repl--command-for "?")))) ; help alias
-    (is (not (nil? (repl/repl--command-for "expand1"))))
-    (is (nil? (repl/repl--command-for "no-such-cmd"))))
+    (is (not (nil? (repl/repl-command-for "help"))))
+    (is (not (nil? (repl/repl-command-for "?")))) ; help alias
+    (is (not (nil? (repl/repl-command-for "expand1"))))
+    (is (nil? (repl/repl-command-for "no-such-cmd"))))
 
   (test "repl--meta? recognises a registered `,cmd` and rejects a plain form"
-    (is (repl/repl--meta? ",doc foo"))
-    (is (repl/repl--meta? ",help"))
-    (is (not (repl/repl--meta? "(+ 1 2)")))
-    (is (not (repl/repl--meta? ",totally-unknown"))))
+    (is (repl/repl-meta? ",doc foo"))
+    (is (repl/repl-meta? ",help"))
+    (is (not (repl/repl-meta? "(+ 1 2)")))
+    (is (not (repl/repl-meta? ",totally-unknown"))))
 
   (test "register-repl-command adds a dispatchable command that receives the arg"
     (let (box (table))
@@ -94,8 +94,8 @@
                                    :usage ",rt-echo <x>"
                                    :summary "test"
                                    :handler (fn (rest) (table-put box :arg rest))})
-      (is (not (nil? (repl/repl--command-for "rt-echo"))))
-      (repl/repl--run-meta ",rt-echo hello world")
+      (is (not (nil? (repl/repl-command-for "rt-echo"))))
+      (repl/repl-run-meta ",rt-echo hello world")
       (assert= (table-get box :arg) "hello world")))
 
   (test "re-registering a name replaces rather than duplicates"
@@ -108,9 +108,9 @@
                                  :summary "two"
                                  :handler (fn (r) nil)})
     (assert= 1
-      (count (filter (fn (c) (repl/repl--has-name? (get c :names) "rt-dup"))
+      (count (filter (fn (c) (repl/repl-has-name? (get c :names) "rt-dup"))
                repl/*repl-commands*)))
-    (assert= "two" (get (repl/repl--command-for "rt-dup") :summary)))
+    (assert= "two" (get (repl/repl-command-for "rt-dup") :summary)))
 
   (test "a `:hidden` command is dispatchable but absent from the help table"
     (repl/register-repl-command {:names '("rt-hidden")
@@ -118,7 +118,7 @@
                                  :summary "quiet"
                                  :hidden true
                                  :handler (fn (r) nil)})
-    (is (not (nil? (repl/repl--command-for "rt-hidden"))))))
+    (is (not (nil? (repl/repl-command-for "rt-hidden"))))))
 
 ;; Cross-process: the error map crosses a heap boundary (send deep-copies it)
 ;; before formatting, so this proves the structured-error path survives the
@@ -127,6 +127,6 @@
   :isolated
 
   (test "an error map sent between processes still formats correctly"
-    (let (w (spawn (receive ([:fmt e from] (send from (repl/repl--error-message e))))))
+    (let (w (spawn (receive ([:fmt e from] (send from (repl/repl-error-message e))))))
       (send w [:fmt {:kind :type :message "across"} (self)])
       (assert= (receive (r r)) "type error: across"))))

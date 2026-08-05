@@ -90,7 +90,8 @@ or tampered ciphertext). Inputs may be bytes values or vectors/lists of ints."
 ;; stored alongside the derived key (it's not secret). Use iterations ≥ 600,000
 ;; for password storage (NIST SP 800-132 2023 recommendation).
 
-(defn crypto--as-bytes (x)
+(defn- crypto-as-bytes
+  (x)
   "Coerce `x` to bytes: a string → its UTF-8 bytes value; bytes / a byte
 vector/list → itself. Lets the raw-byte crypto primitives accept either shape."
   (if (string? x) (str->bytes x) x))
@@ -101,8 +102,8 @@ byte sequence) using PBKDF2-HMAC-SHA256, returned as a bytes value. A byte salt
 is used as raw bytes — so a base64-decoded binary salt (e.g. Postgres SCRAM)
 round-trips faithfully rather than being UTF-8-decoded. Higher `iterations` =
 slower brute force; use ≥ 600,000 for password storage."
-  (%pbkdf2-sha256-bytes (crypto--as-bytes password)
-    (crypto--as-bytes salt)
+  (%pbkdf2-sha256-bytes (crypto-as-bytes password)
+    (crypto-as-bytes salt)
     iterations
     key-len))
 

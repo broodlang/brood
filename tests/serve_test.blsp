@@ -68,7 +68,7 @@
   (receive
     ([:attached session] (do
                            (send ready [:ready (self) session])
-                           (editor/serve/attach--display-loop nil session (gui-mock-display ready))))
+                           (editor/serve/attach-display-loop nil session (gui-mock-display ready))))
     (after 2000 (send ready [:ready :no-attach :no-attach]))))
 
 ;; A shared-session client played in-process: attach, announce our pid, then loop —
@@ -116,7 +116,7 @@
 
 (describe "editor/serve — serving a ui-run app to a remote frontend"
   (test "an attached client gets a session pid, the initial frame, then key-driven frames"
-    (let (mgr (spawn (editor/serve/serve--manager mk vw up)))
+    (let (mgr (spawn (editor/serve/serve-manager mk vw up)))
       ; the daemon's session manager
       (send mgr [:attach (self) 80 24])
       (let (session (receive ([:attached s] s) (after 2000 :no-attach)))
@@ -134,7 +134,7 @@
 
   (test "each client gets an independent session with its own model"
     (let (me (self)
-          mgr (spawn (editor/serve/serve--manager mk vw up)))
+          mgr (spawn (editor/serve/serve-manager mk vw up)))
       ;; two clients attach to the same manager and each press "+" once
       (spawn (probe mgr me))
       (spawn (probe mgr me))
@@ -147,7 +147,7 @@
     ;; `:leave`/`[:bye]` can fire. The client monitors the session pid (as attach--session
     ;; does), so it learns via `[:down …]` instead of hanging — the robustness fix.
     (let (bad-mk (fn () (error "boom in make-model"))
-          mgr (spawn (editor/serve/serve--manager bad-mk vw up)))
+          mgr (spawn (editor/serve/serve-manager bad-mk vw up)))
       (send mgr [:attach (self) 80 24])
       ;; [:attached] is sent before make-model runs, so we still get the session pid
       (let (session (receive ([:attached s] s) (after 2000 :no-attach)))
@@ -167,7 +167,7 @@
     ;; in one receive. This drives that loop with a scripted display and in-process pids —
     ;; the full frame → key → frame → detach protocol, no node or window.
     (let (me (self)
-          mgr (spawn (editor/serve/serve--manager mk vw up)))
+          mgr (spawn (editor/serve/serve-manager mk vw up)))
       (spawn (gui-probe mgr me))
       (let ([client session] (receive ([:ready c s] [c s]) (after 2000 [nil nil])))
         (is (not (nil? client)))
@@ -190,9 +190,9 @@
     ;; fans it to all clients while merging their input. Two in-process clients attach to the
     ;; SAME session; a "+" from one increments the shared model and BOTH see the new frame.
     (let (me (self)
-          hub (spawn (editor/serve/shared--hub () nil [80 24]))
-          session (spawn (ui-run (mk) vw up (editor/serve/shared--display hub)))
-          mgr (spawn (editor/serve/serve-shared--manager session hub)))
+          hub (spawn (editor/serve/shared-hub () nil [80 24]))
+          session (spawn (ui-run (mk) vw up (editor/serve/shared-display hub)))
+          mgr (spawn (editor/serve/serve-shared-manager session hub)))
       (let (_a (spawn (shared-client mgr me))
             aid (receive ([:cready c] c) (after 2000 :none)))
         (is (not (= aid :none)))
@@ -211,7 +211,7 @@
             (assert= t2 "n=1"))))))
 
   (test "serve-stop ends every live session — the client's monitor fires"
-    (let (mgr (spawn (editor/serve/serve--manager mk vw up)))
+    (let (mgr (spawn (editor/serve/serve-manager mk vw up)))
       (send mgr [:attach (self) 80 24])
       (let (session (receive ([:attached s] s) (after 2000 :no-attach)))
         (is (not (= session :no-attach)))
@@ -245,7 +245,7 @@
     ;; The editor pattern: a spawned task / buffer process sends `[:tag …]` straight to the
     ;; ui-run process's mailbox and update folds it. On a served session those messages land
     ;; in the SESSION's mailbox; remote-display's :poll must deliver them (not strand them).
-    (let (mgr (spawn (editor/serve/serve--manager mk vw up)))
+    (let (mgr (spawn (editor/serve/serve-manager mk vw up)))
       (send mgr [:attach (self) 80 24])
       (let (session (receive ([:attached s] s) (after 2000 :no-attach)))
         (is (not (= session :no-attach)))
@@ -259,7 +259,7 @@
     ;; to its own mailbox before ui-run starts, so the FIRST event the app folds is its
     ;; participant identity — the seam a collaborative app reads a name from. A plain
     ;; 4-element attach (every other test here) still works: opts default to {}.
-    (let (mgr (spawn (editor/serve/serve--manager mk vw up)))
+    (let (mgr (spawn (editor/serve/serve-manager mk vw up)))
       (send mgr [:attach (self) 80 24 {:name "alice"}])
       (let (session (receive ([:attached s] s) (after 2000 :no-attach)))
         (is (not (= session :no-attach)))
@@ -272,9 +272,9 @@
 
   (test "an async mailbox message reaches a SHARED session's update too"
     (let (me (self)
-          hub (spawn (editor/serve/shared--hub () nil [80 24]))
-          session (spawn (ui-run (mk) vw up (editor/serve/shared--display hub)))
-          mgr (spawn (editor/serve/serve-shared--manager session hub)))
+          hub (spawn (editor/serve/shared-hub () nil [80 24]))
+          session (spawn (ui-run (mk) vw up (editor/serve/shared-display hub)))
+          mgr (spawn (editor/serve/serve-shared-manager session hub)))
       (let (_a (spawn (shared-client mgr me))
             aid (receive ([:cready c] c) (after 2000 :none)))
         (is (not (= aid :none)))

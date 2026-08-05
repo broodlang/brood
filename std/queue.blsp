@@ -57,7 +57,8 @@ look-alike, and each prints as itself (`inspect` shows the contents).")
   "Number of elements in the queue."
   (get q :size))
 
-(defn queue--balance (front back size)
+(defn- queue-balance
+  (front back size)
   "Rebalance: if front is nil, reverse back to front."
   (if (nil? front)
     (queue (reverse back) nil size)
@@ -65,14 +66,14 @@ look-alike, and each prints as itself (`inspect` shows the contents).")
 
 (defn queue-push (q v)
   "Return a queue with `v` added at the back."
-  (queue--balance (get q :front) (cons v (get q :back)) (+ (get q :size) 1)))
+  (queue-balance (get q :front) (cons v (get q :back)) (+ (get q :size) 1)))
 
 (defn queue-pop (q)
   "Return `[front-value new-queue]`, or `:empty` if the queue is empty."
   (if (queue-empty? q)
     :empty
     (let (front (get q :front))
-      [(first front) (queue--balance (rest front) (get q :back) (- (get q :size) 1))])))
+      [(first front) (queue-balance (rest front) (get q :back) (- (get q :size) 1))])))
 
 (defn queue-peek (q)
   "Return the front value without removing it, or `:empty` if empty."
@@ -145,9 +146,10 @@ look-alike, and each prints as itself (`inspect` shows the contents).")
 (defn pq-insert (q priority value)
   "Return a priority queue with `[priority value]` inserted (min priority at front).
 Stable: among equal priorities, earlier inserts pop first (FIFO)."
-  (pq (pq--sorted-insert (get q :entries) priority value)))
+  (pq (pq-sorted-insert (get q :entries) priority value)))
 
-(defn pq--sorted-insert (entries pri val)
+(defn- pq-sorted-insert
+  (entries pri val)
   ;; Tail-recursive: accumulate the (reversed) higher-priority prefix and splice
   ;; the new entry once, so a large queue can't overflow the stack on insert.
   ;; Strict `<` so a new item stops *after* existing equal-priority items —

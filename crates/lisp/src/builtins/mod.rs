@@ -2595,6 +2595,14 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![sym, any], sym),
         register_sig,
     );
+    // `defn-`/`def-` emit it to record the defined name as module-private (ADR-146).
+    def(
+        heap,
+        "%mark-private",
+        Arity::exact(1),
+        Sig::new(vec![sym], sym),
+        mark_private,
+    );
     // `(:alias mod [:as short])` lowers to this — register a module alias so a later
     // `short/name` reference resolves to `mod/name`.
     def(
@@ -3347,7 +3355,7 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("form-pos", &["form"], "A form's [line col] source position, or nil."),
     ("current-file", &[], "The path of the file currently being loaded, or nil."),
     ("source-location", &["name"], "Where global name was defined, as [file line col], or nil. Quote it: (source-location 'foo)."),
-    ("private?", &["name"], "Whether the global `name` is module-private (ADR-146). Quote the qualified symbol: (private? 'mod/helper--x)."),
+    ("private?", &["name"], "Whether the global `name` is module-private (ADR-146). Quote the qualified symbol: (private? 'mod/helper)."),
     ("type-signature", &["name"], "The checker's type signature for global `name` (declared/curated/inferred) as an arrow string like \"(int -> int)\", or nil if it can't be pinned. Symbol or string arg: (type-signature 'map)."),
     ("references-in-source", &["name", "source"], "Occurrences of the global `name` in `source`, as a list of [line col] (1-based); locals that shadow it are excluded."),
     ("doc", &["f"], "The docstring of a function, macro, or primitive, or nil."),

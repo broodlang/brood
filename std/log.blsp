@@ -48,17 +48,19 @@ and `impl LogBackend` for it; reuse `backend-passes?` for the standard gate."
   (:use proc/gen)
   (:use io))
 ;; ---- levels -----------------------------------------------------------------
-(def log--ranks {:debug 0 :info 1 :warn 2 :error 3})
-(def log--labels {:debug "DEBUG" :info "INFO" :warn "WARN" :error "ERROR"})
+(def- log-ranks {:debug 0 :info 1 :warn 2 :error 3})
+(def- log-labels {:debug "DEBUG" :info "INFO" :warn "WARN" :error "ERROR"})
 
-(defn log--rank (level)
+(defn- log-rank
+  (level)
   "The numeric severity of `level` (unknown levels rank as :info)."
-  (or (get log--ranks level) 1))
+  (or (get log-ranks level) 1))
 
-(defn log--default-format (rec)
+(defn- log-default-format
+  (rec)
   "The default line for a record: `[LEVEL ts] msg` plus a newline."
   (str "["
-    (or (get log--labels (get rec :level)) "?")
+    (or (get log-labels (get rec :level)) "?")
     " "
     (get rec :ts)
     "] "
@@ -78,7 +80,7 @@ and `impl LogBackend` for it; reuse `backend-passes?` for the standard gate."
 backend's policy — a custom `LogBackend` should call this so it honours the same
 `:min-level`/`:filter` options every other backend does."
   (let (predicate (get b :filter))
-    (and (>= (log--rank (get record :level)) (log--rank (get b :min-level)))
+    (and (>= (log-rank (get record :level)) (log-rank (get b :min-level)))
       (or (nil? predicate) (predicate record)))))
 
 ;; ---- backends ---------------------------------------------------------------
@@ -120,7 +122,7 @@ For a backend that does something other than write one line, `defrecord` your ow
       (or (get o :min-level) :debug)
       ; nil = accept all
       (get o :filter)
-      (or (get o :format) log--default-format))))
+      (or (get o :format) log-default-format))))
 
 (defn stdout-backend (& opts)
   "A backend writing to stdout (`opts` as for `backend`)."
@@ -145,21 +147,22 @@ e.g. an editor appending to its `*Messages*` buffer. Async and share-nothing."
   (apply backend (file-port path) opts))
 
 ;; ---- the logger process -----------------------------------------------------
-(defn log--dispatch (backends rec)
+(defn- log-dispatch
+  (backends rec)
   "Hand `rec` to every backend in `backends` (a list or vector) via `backend-emit`, so
 each decides for itself whether and how to write it. Uses `fold` so it walks either —
 `:backends` defaults to a vector but `add-backend` conses."
   (fold (fn (acc b) (backend-emit b rec) acc) nil backends)
   nil)
 
-(defprocess log--server
+(defprocess log-server
   (cfg)
   "The logger process: carries `{:level :backends}` and dispatches each
 `[:log rec]` cast to every backend that passes the global and per-backend levels."
   (cast [:log rec]
     (do
-      (when (>= (log--rank (get rec :level)) (log--rank (get cfg :level)))
-        (log--dispatch (get cfg :backends) rec))
+      (when (>= (log-rank (get rec :level)) (log-rank (get cfg :level)))
+        (log-dispatch (get cfg :backends) rec))
       cfg))
   (cast [:add-backend b] (assoc cfg :backends (cons b (apply list (get cfg :backends)))))
   (cast [:set-level level] (assoc cfg :level level))
@@ -173,7 +176,7 @@ each decides for itself whether and how to write it. Uses `fold` so it walks eit
   (let (o (if (empty? opts) {} (first opts))
         level (or (get o :level) :info)
         backends (or (get o :backends) [(stdout-backend)])
-        pid (spawn-server log--server {:level level :backends backends}))
+        pid (spawn-server log-server {:level level :backends backends}))
     (register :logger pid)
     pid))
 
@@ -200,7 +203,8 @@ each decides for itself whether and how to write it. Uses `fold` so it walks eit
   nil)
 
 ;; ---- the log call -----------------------------------------------------------
-(defn log--record (level msg meta)
+(defn- log-record
+  (level msg meta)
   "Build a log record map, stamping `:ts` (now, ms) and `:from` (the caller's pid)."
   {:level level :msg msg :meta meta :ts (now) :from (self)})
 
@@ -210,11 +214,11 @@ asynchronously (a cast — never blocks the caller). `meta`, if given, is a map 
 structured fields carried on the record. If no logger is running, the formatted
 line falls back to stderr so a log is never lost. Returns nil."
   (let (m (if (empty? meta) {} (first meta))
-        rec (log--record level msg m)
+        rec (log-record level msg m)
         pid (logger))
     (if pid
       (! pid [:log rec])
-      (eprint (log--default-format rec))))
+      (eprint (log-default-format rec))))
   nil)
 
 (defn log-debug (msg & meta) "Log `msg` at `:debug`." (apply log :debug msg meta))

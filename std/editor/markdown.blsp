@@ -40,88 +40,102 @@ incomplete input; feeds the editor's `:fontify` mode service and the shared
 
 ;; ---- character / scanning helpers -------------------------------------------
 
-(defn md--digit? (c)
+(defn- md-digit?
+  (c)
   "True if single-char string `c` is an ASCII digit."
   (includes? "0123456789" c))
 
-(defn md--bullet? (c)
+(defn- md-bullet?
+  (c)
   "True if `c` is an unordered-list bullet marker (`-`, `*`, or `+`)."
   (or (= c "-") (= c "*") (= c "+")))
 
-(defn md--lead-ws (line)
+(defn- md-lead-ws
+  (line)
   "The column where `line`'s leading whitespace (spaces / tabs) ends."
-  (md--lead-ws--at line 0 (string-length line)))
-(defn md--lead-ws--at (line i n)
+  (md-lead-ws-at line 0 (string-length line)))
+(defn- md-lead-ws-at
+  (line i n)
   (if (and (< i n) (or (= (char-at line i) " ") (= (char-at line i) "\t")))
-    (md--lead-ws--at line (inc i) n)
+    (md-lead-ws-at line (inc i) n)
     i))
 
-(defn md--count-char (line i n ch)
+(defn- md-count-char
+  (line i n ch)
   "How many copies of single-char `ch` run consecutively starting at offset `i`."
-  (md--count-char--at line i n ch 0))
-(defn md--count-char--at (line i n ch k)
+  (md-count-char-at line i n ch 0))
+(defn- md-count-char-at
+  (line i n ch k)
   (if (and (< i n) (= (char-at line i) ch))
-    (md--count-char--at line (inc i) n ch (inc k))
+    (md-count-char-at line (inc i) n ch (inc k))
     k))
 
-(defn md--find-char (line i n ch)
+(defn- md-find-char
+  (line i n ch)
   "The offset of the next single-char `ch` at or after `i` in `line`, or -1."
   (cond
     (>= i n) -1
     (= (char-at line i) ch) i
-    else (md--find-char line (inc i) n ch)))
+    else (md-find-char line (inc i) n ch)))
 
-(defn md--find-2 (line i n a b)
+(defn- md-find-2
+  (line i n a b)
   "The offset of the next two-char run `a b` at or after `i` in `line`, or -1."
   (cond
     (>= i n) -1
     (and (= (char-at line i) a) (< (inc i) n) (= (char-at line (inc i)) b)) i
-    else (md--find-2 line (inc i) n a b)))
+    else (md-find-2 line (inc i) n a b)))
 
-(defn md--space-after? (line i n)
+(defn- md-space-after?
+  (line i n)
   "True if offset `i` is end-of-line or a space — the separator a list marker needs."
   (or (>= i n) (= (char-at line i) " ")))
 
 ;; ---- line-shape classifiers -------------------------------------------------
 
-(defn md--fence? (line)
+(defn- md-fence?
+  (line)
   "True if `line` is a fenced-code delimiter — three or more `` ` `` or `~`, after up
 to its leading whitespace."
-  (let (lead (md--lead-ws line)
+  (let (lead (md-lead-ws line)
         n (string-length line)
         c (if (< lead n) (char-at line lead) ""))
     (and (or (= c "`") (= c "~"))
-      (>= (md--count-char line lead n c) 3))))
+      (>= (md-count-char line lead n c) 3))))
 
-(defn md--heading-level (line)
+(defn- md-heading-level
+  (line)
   "The ATX heading level (1–6) of `line` — its run of leading `#`s, which must be
 followed by a space or end-of-line — or nil if it isn't a heading."
   (let (n (string-length line)
-        lead (md--lead-ws line)
-        h (md--count-char line lead n "#"))
+        lead (md-lead-ws line)
+        h (md-count-char line lead n "#"))
     (if (and (>= h 1)
           (<= h 6)
           (or (= (+ lead h) n) (= (char-at line (+ lead h)) " ")))
       h
       nil)))
 
-(defn md--ordered-end (line i n)
+(defn- md-ordered-end
+  (line i n)
   "Given digits start at `i`, the offset just past an ordered-list marker
 (`1.`/`1)` followed by a space or EOL), or -1 if `line` has no such marker there."
-  (let (d (md--digits-end line i n))
+  (let (d (md-digits-end line i n))
     (if (= d i)
       -1
       (if (and (< d n)
             (or (= (char-at line d) ".") (= (char-at line d) ")"))
-            (md--space-after? line (inc d) n))
+            (md-space-after? line (inc d) n))
         (inc d)
         -1))))
-(defn md--digits-end (line i n)
-  (if (and (< i n) (md--digit? (char-at line i))) (md--digits-end line (inc i) n) i))
+(defn- md-digits-end
+  (line i n)
+  (if (and (< i n) (md-digit? (char-at line i))) (md-digits-end line (inc i) n) i))
 
 ;; ---- block markers (the leading `>` / bullet a line may carry) --------------
 
-(defn md--block (line base lead n)
+(defn- md-block
+  (line base lead n)
   "The leading block marker of `line` (offsets shifted by `base`): a `[spans col]`
 pair — `spans` a one-element list for a `>` blockquote or a list bullet (else `()`),
 and `col` the column where inline content begins (past the marker, or `lead`)."
@@ -130,14 +144,14 @@ and `col` the column where inline content begins (past the marker, or `lead`)."
     (let (c (char-at line lead))
       (cond
         (= c ">") [(list [(+ base lead) (+ base (inc lead)) md-face-quote]) (inc lead)]
-        (and (md--bullet? c) (md--space-after? line (inc lead) n))
+        (and (md-bullet? c) (md-space-after? line (inc lead) n))
           [(list [(+ base lead)
                    (+ base
                      (inc lead))
                    md-face-list])
             (inc lead)]
-        (md--digit? c)
-          (let (oe (md--ordered-end line lead n))
+        (md-digit? c)
+          (let (oe (md-ordered-end line lead n))
             (if (< oe 0)
               [() lead]
               [(list [(+ base lead) (+ base oe) md-face-list]) oe]))
@@ -145,37 +159,41 @@ and `col` the column where inline content begins (past the marker, or `lead`)."
 
 ;; ---- the inline scanner: code / bold / italic / links -----------------------
 
-(defn md--delim2? (line i n)
+(defn- md-delim2?
+  (line i n)
   "True if offsets `i` and `i+1` are a matching pair of `*` or `_` — a bold delimiter."
   (and (< (inc i) n)
     (let (c (char-at line i))
       (and (or (= c "*") (= c "_")) (= (char-at line (inc i)) c)))))
 
-(defn md--link-span (line base i n)
+(defn- md-link-span
+  (line base i n)
   "A `[start end face]` link span for `[text](url)` starting at `i` (offsets shifted
 by `base`), or nil when the text isn't immediately followed by a closed `(url)`."
-  (let (close (md--find-char line (inc i) n "]"))
+  (let (close (md-find-char line (inc i) n "]"))
     (if (or (< close 0) (>= (inc close) n) (not (= (char-at line (inc close)) "(")))
       nil
-      (let (pclose (md--find-char line (+ close 2) n ")"))
+      (let (pclose (md-find-char line (+ close 2) n ")"))
         (if (< pclose 0)
           nil
           [(+ base i) (+ base (inc pclose)) md-face-link])))))
 
-(defn md--inline-emph (line base i n acc)
+(defn- md-inline-emph
+  (line base i n acc)
   "Scan a single-char emphasis (`*`/`_`) at `i`: emit an italic span to its closing
 delimiter (or skip the char if unclosed), then continue the inline scan."
   (let (a (char-at line i)
-        j (md--find-char line (inc i) n a))
+        j (md-find-char line (inc i) n a))
     (if (< j 0)
-      (md--inline line base (inc i) n acc)
-      (md--inline line
+      (md-inline line base (inc i) n acc)
+      (md-inline line
         base
         (inc j)
         n
         (cons [(+ base i) (+ base (inc j)) md-face-italic] acc)))))
 
-(defn md--inline (line base i n acc)
+(defn- md-inline
+  (line base i n acc)
   "Tail-recursive inline scanner over `[i, n)` of `line` (offsets shifted by `base`),
 accumulating spans for `` `code` ``, `**bold**`, `*italic*`, and `[text](url)` in
 reverse. Each matched region is consumed whole, so spans stay non-overlapping."
@@ -185,51 +203,52 @@ reverse. Each matched region is consumed whole, so spans stay non-overlapping."
       (cond
         ;; inline code: `…`
         (= c "`")
-          (let (j (md--find-char line (inc i) n "`"))
+          (let (j (md-find-char line (inc i) n "`"))
             (if (< j 0)
-              (md--inline line base (inc i) n acc)
-              (md--inline line
+              (md-inline line base (inc i) n acc)
+              (md-inline line
                 base
                 (inc j)
                 n
                 (cons [(+ base i) (+ base (inc j)) md-face-code] acc))))
         ;; bold: **…** or __…__ (fall back to italic when unclosed)
-        (md--delim2? line i n)
+        (md-delim2? line i n)
           (let (a (char-at line i)
-                j (md--find-2 line (+ i 2) n a a))
+                j (md-find-2 line (+ i 2) n a a))
             (if (< j 0)
-              (md--inline-emph line base i n acc)
-              (md--inline line
+              (md-inline-emph line base i n acc)
+              (md-inline line
                 base
                 (+ j 2)
                 n
                 (cons [(+ base i) (+ base (+ j 2)) md-face-bold] acc))))
         ;; italic: *…* or _…_
-        (or (= c "*") (= c "_")) (md--inline-emph line base i n acc)
+        (or (= c "*") (= c "_")) (md-inline-emph line base i n acc)
         ;; link: [text](url)
         (= c "[")
-          (let (span (md--link-span line base i n))
+          (let (span (md-link-span line base i n))
             (if (nil? span)
-              (md--inline line base (inc i) n acc)
-              (md--inline line base (- (second span) base) n (cons span acc))))
-        else (md--inline line base (inc i) n acc)))))
+              (md-inline line base (inc i) n acc)
+              (md-inline line base (- (second span) base) n (cons span acc))))
+        else (md-inline line base (inc i) n acc)))))
 
 ;; ---- a line's spans + the document walker -----------------------------------
 
-(defn md--line-spans (line base fence)
+(defn- md-line-spans
+  (line base fence)
   "The `[new-fence spans]` for one `line` starting at offset `base`, given whether we
 are currently inside a fenced code block (`fence`). A fence delimiter or any line
 inside a block colours whole as code (and toggles `fence`); a heading colours whole;
 otherwise a leading block marker plus an inline scan of the rest."
   (let (n (string-length line))
     (cond
-      fence [(not (md--fence? line)) (list [base (+ base n) md-face-code])]
-      (md--fence? line) [true (list [base (+ base n) md-face-code])]
-      (md--heading-level line) [false (list [base (+ base n) md-face-heading])]
+      fence [(not (md-fence? line)) (list [base (+ base n) md-face-code])]
+      (md-fence? line) [true (list [base (+ base n) md-face-code])]
+      (md-heading-level line) [false (list [base (+ base n) md-face-heading])]
       else
-        (let (lead (md--lead-ws line)
-              [marker mstart] (md--block line base lead n))
-          [false (append marker (md--inline line base mstart n '()))]))))
+        (let (lead (md-lead-ws line)
+              [marker mstart] (md-block line base lead n))
+          [false (append marker (md-inline line base mstart n '()))]))))
 
 ;; One `string-split` for the whole source, then walk the lines with a running offset —
 ;; instead of `(substring src i e)` per line with a rising `i`. Both of the old per-line
@@ -246,18 +265,20 @@ otherwise a leading block marker plus an inline scan of the rest."
 ;; element reproduces the old line set exactly for every case — "", "a", "a\n", "a\nb",
 ;; "a\nb\n", "\n", "a\n\nb" — which the equivalence test in `tests/markdown_test.blsp`
 ;; pins rather than leaving to this comment.
-(defn md--drop-trailing-empty (lines)
+(defn- md-drop-trailing-empty
+  (lines)
   (let (r (reverse lines))
     (if (and (not (empty? r)) (= (first r) "")) (reverse (rest r)) lines)))
 
-(defn md--lex-lines (lines i fence acc)
+(defn- md-lex-lines
+  (lines i fence acc)
   "Tail-recursive walker over pre-split lines, threading the fenced-code `fence` state and
 accumulating spans in reverse. `i` is the char offset of `line` in the original source."
   (if (empty? lines)
     (reverse acc)
     (let (line (first lines)
-          [fence2 spans] (md--line-spans line i fence))
-      (md--lex-lines (rest lines)
+          [fence2 spans] (md-line-spans line i fence))
+      (md-lex-lines (rest lines)
         (+ i (string-length line) 1)
         fence2
         (fold (fn (a s) (cons s a)) acc spans)))))
@@ -269,4 +290,4 @@ editor's `:fontify` service and the shared `fontify-runs` tiler unchanged. Cover
 headings, fenced code blocks, list bullets and blockquotes (line shapes), and inline
 code / bold / italic / links. Spans are ascending and non-overlapping; text carrying
 no markup carries no span (the default face)."
-  (md--lex-lines (md--drop-trailing-empty (string-split src "\n")) 0 false '()))
+  (md-lex-lines (md-drop-trailing-empty (string-split src "\n")) 0 false '()))

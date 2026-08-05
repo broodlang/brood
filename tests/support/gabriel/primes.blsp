@@ -28,11 +28,12 @@ upstream's own expected output in `tests/corpus/gabriel/data/primes.input`.")
       (cons m (interval-list (+ 1 m) n)))))
 
 (check-allow :non-tail-recursion
-  (defn primes--remove-multiples (n l)
+  (defn- primes-remove-multiples
+    (n l)
     (cond
       (nil? l) nil
-      (= (rem (first l) n) 0) (primes--remove-multiples n (rest l))
-      else (cons (first l) (primes--remove-multiples n (rest l))))))
+      (= (rem (first l) n) 0) (primes-remove-multiples n (rest l))
+      else (cons (first l) (primes-remove-multiples n (rest l))))))
 
 (check-allow :non-tail-recursion
   (defn sieve (l)
@@ -40,7 +41,7 @@ upstream's own expected output in `tests/corpus/gabriel/data/primes.input`.")
     (if (nil? l)
       nil
       (cons (first l)
-        (sieve (primes--remove-multiples (first l) (rest l)))))))
+        (sieve (primes-remove-multiples (first l) (rest l)))))))
 
 (defn primes<= (n)
   "The list of primes up to and including `n`."

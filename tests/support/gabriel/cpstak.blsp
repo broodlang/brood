@@ -17,23 +17,24 @@ oracle is upstream's own expected output in `tests/corpus/gabriel/data/cpstak.in
 
 ;; Every call here is a tail call, so this needs no `check-allow` — proper tail calls
 ;; make the whole cascade O(1) stack, which is the property under test.
-(defn cpstak--tak (x y z k)
+(defn- cpstak-tak
+  (x y z k)
   (if (not (< y x))
     (k z)
-    (cpstak--tak (- x 1)
+    (cpstak-tak (- x 1)
       y
       z
       (fn (v1)
-        (cpstak--tak (- y 1)
+        (cpstak-tak (- y 1)
           z
           x
           (fn (v2)
-            (cpstak--tak (- z 1)
+            (cpstak-tak (- z 1)
               x
               y
               (fn (v3)
-                (cpstak--tak v1 v2 v3 k)))))))))
+                (cpstak-tak v1 v2 v3 k)))))))))
 
 (defn cpstak (x y z)
   "The Takeuchi function computed in continuation-passing style."
-  (cpstak--tak x y z (fn (a) a)))
+  (cpstak-tak x y z (fn (a) a)))

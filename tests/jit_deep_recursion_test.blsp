@@ -31,17 +31,19 @@
 ;; Read from the ENVIRONMENT at the point of use, not from a global the wrapper defines
 ;; first: the wrapper's `def` would run before this file loads (the mistake the UCD knob's
 ;; comment records).
-(def jdr--of (max 1 (or (string->number (or (getenv "BROOD_JDR_OF") "")) 1)))
+(def- jdr-of (max 1 (or (string->number (or (getenv "BROOD_JDR_OF") "")) 1)))
 
-(defn jdr--parse (path)
+(defn- jdr-parse
+  (path)
   (try (do (json/json-parse (slurp path)) :ok) (catch e :rejected)))
 
 ;; Warm in THIS process so the parser arms tier to native before the spawned run.
 ;; One pass already tiers the arms; extra passes only buy confidence, so they are the
 ;; first thing the knob drops.
-(defn jdr--warm (path k)
-  (if (= k 0) :warmed (do (jdr--parse path) (jdr--warm path (- k 1)))))
-(defn jdr--warm-count (k) (max 1 (/ k jdr--of)))
+(defn- jdr-warm
+  (path k)
+  (if (= k 0) :warmed (do (jdr-parse path) (jdr-warm path (- k 1)))))
+(defn- jdr-warm-count (k) (max 1 (/ k jdr-of)))
 
 ;; Parse in a spawned green process — on a scheduler worker, which is where the
 ;; guard-page abort happened.
@@ -55,9 +57,10 @@
 ;; (`:serial` serialises only within this group; all units still run together). At 850 s it
 ;; clears any realistic contended run yet still sits under the `:slow` batch ceiling, so a
 ;; genuinely stuck worker is caught with a clean `:TIMED-OUT` rather than the hard kill.
-(defn jdr--in-spawn (path)
+(defn- jdr-in-spawn
+  (path)
   (let (me (self))
-    (spawn (send me [:r (jdr--parse path)]))
+    (spawn (send me [:r (jdr-parse path)]))
     (receive ([:r r] r) (after 850000 :TIMED-OUT))))
 
 (describe "KI-14: deep JIT'd recursion drains instead of overflowing"
@@ -84,16 +87,16 @@
   (test "a 100k-deep document parses in a spawned process after warming"
     (require 'json)
     (let (p "tests/corpus/json/data/n_structure_100000_opening_arrays.json")
-      (jdr--warm p (jdr--warm-count 3))
-      (assert= (jdr--in-spawn p) :rejected)))
+      (jdr-warm p (jdr-warm-count 3))
+      (assert= (jdr-in-spawn p) :rejected)))
   (test "the alternating array/object document too"
     ;; This one survived the FIRST cut of the fix: the stamp encoded "already inside the
     ;; margin" as limit 0, which the prologue read as *guard disabled* — switching the
     ;; check off at exactly the moment it was needed.
     (require 'json)
     (let (p "tests/corpus/json/data/n_structure_open_array_object.json")
-      (jdr--warm p (jdr--warm-count 2))
-      (assert= (jdr--in-spawn p) :rejected)))
+      (jdr-warm p (jdr-warm-count 2))
+      (assert= (jdr-in-spawn p) :rejected)))
   (test "the whole n_ corpus scans in a spawned process after warming"
     ;; The scan the suite actually runs: 188 documents, warm parent then spawned child.
     (require 'json)
@@ -102,26 +105,30 @@
           ;; Discovery is asserted in full regardless of the knob; only the re-scan is
           ;; sampled. `index mod n` so the slice spreads across the corpus (and so keeps
           ;; the deep documents) rather than taking a prefix — deterministic either way.
-          files (jdr--every-nth all jdr--of))
+          files (jdr-every-nth all jdr-of))
       (assert= 188 (count all))
-      (jdr--scan-warm files)
-      (assert= (jdr--scan-in-spawn files) (count files)))))
+      (jdr-scan-warm files)
+      (assert= (jdr-scan-in-spawn files) (count files)))))
 
-(defn jdr--every-nth (xs n)
-  (if (= n 1) xs (jdr--every-nth--go xs n 0 nil)))
-(defn jdr--every-nth--go (xs n i acc)
+(defn- jdr-every-nth
+  (xs n)
+  (if (= n 1) xs (jdr-every-nth-go xs n 0 nil)))
+(defn- jdr-every-nth-go
+  (xs n i acc)
   (if (nil? xs)
     (reverse acc)
-    (jdr--every-nth--go (rest xs)
+    (jdr-every-nth-go (rest xs)
       n
       (inc i)
       (if (= (rem i n) 0) (cons (first xs) acc) acc))))
 
-(defn jdr--scan (fs n)
-  (if (nil? fs) n (do (jdr--parse (first fs)) (jdr--scan (rest fs) (inc n)))))
-(defn jdr--scan-warm (files) (jdr--scan files 0))
-(defn jdr--scan-in-spawn (files)
+(defn- jdr-scan
+  (fs n)
+  (if (nil? fs) n (do (jdr-parse (first fs)) (jdr-scan (rest fs) (inc n)))))
+(defn- jdr-scan-warm (files) (jdr-scan files 0))
+(defn- jdr-scan-in-spawn
+  (files)
   (let (me (self))
-    (spawn (send me [:r (jdr--scan files 0)]))
+    (spawn (send me [:r (jdr-scan files 0)]))
     ;; 850 s liveness net, as in `jdr--in-spawn` — generous headroom under the `:slow` ceiling.
     (receive ([:r r] r) (after 850000 :TIMED-OUT))))

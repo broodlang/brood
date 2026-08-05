@@ -2,10 +2,10 @@
 //! follow-on): a project-relative, `..`-free path that resolves OUT of the tree
 //! through a symlinked directory is rejected, not just the lexical
 //! absolute/`~`/`..` cases. Enforced by `canonicalize` (real-path resolution)
-//! in `mcp--project-path`.
+//! in `mcp-project-path`.
 //!
 //! Unix-only (creates a symlink). Top-level `eval_str` may reference the
-//! `mcp--project-path` private — the live-hacking hatch (ADR-146).
+//! `mcp-project-path` private — the live-hacking hatch (ADR-146).
 
 #![cfg(unix)]
 
@@ -49,7 +49,7 @@ fn write_sandbox_rejects_a_symlink_escape() {
 
     // A genuine in-project path resolves fine.
     let ok = interp
-        .eval_str("(try (do (mcp/mcp--project-path \"src/real.txt\") :ok) (catch e :blocked))")
+        .eval_str("(try (do (mcp/mcp-project-path \"src/real.txt\") :ok) (catch e :blocked))")
         .unwrap();
     assert_eq!(
         interp.print(ok),
@@ -59,7 +59,7 @@ fn write_sandbox_rejects_a_symlink_escape() {
 
     // A new (not-yet-existing) in-project path is also fine.
     let ok2 = interp
-        .eval_str("(try (do (mcp/mcp--project-path \"src/new.blsp\") :ok) (catch e :blocked))")
+        .eval_str("(try (do (mcp/mcp-project-path \"src/new.blsp\") :ok) (catch e :blocked))")
         .unwrap();
     assert_eq!(
         interp.print(ok2),
@@ -69,7 +69,7 @@ fn write_sandbox_rejects_a_symlink_escape() {
 
     // The symlink escape must be blocked — its real target is outside the root.
     let blocked = interp
-        .eval_str("(try (do (mcp/mcp--project-path \"evil/passwd\") :ok) (catch e :blocked))")
+        .eval_str("(try (do (mcp/mcp-project-path \"evil/passwd\") :ok) (catch e :blocked))")
         .unwrap();
     assert_eq!(
         interp.print(blocked),

@@ -56,11 +56,12 @@
   (test "spans are ascending and non-overlapping"
     (let (spans (markdown-spans "# H\n- `a` **b** [t](u)\n> q"))
       (is (= spans (sort spans)))
-      (is (md-test--non-overlapping? spans))))
+      (is (md-test-non-overlapping? spans))))
   (test "empty input yields no spans"
     (assert= (markdown-spans "") '())))
 
-(defn md-test--non-overlapping? (spans)
+(defn- md-test-non-overlapping?
+  (spans)
   "True if every span ends at or before the next span starts."
   (cond
     (empty? spans) true
@@ -68,7 +69,7 @@
     else
       (let ([s1 e1 f1] (first spans)
             [s2 e2 f2] (second spans))
-        (and (<= e1 s2) (md-test--non-overlapping? (rest spans))))))
+        (and (<= e1 s2) (md-test-non-overlapping? (rest spans))))))
 
 ;; `markdown-spans` walks PRE-SPLIT lines with a running offset rather than
 ;; `(substring src i e)` per line, because that substring is O(i) off the ASCII fast path and

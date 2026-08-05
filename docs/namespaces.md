@@ -83,19 +83,22 @@ that's exactly the one with *hard* privacy (truly invisible unexported names).
 worry that "namespaces fight open redefinition" is true *only* of the Racket end.
 
 So Brood takes the **Clojure/CL position: namespaced, with *soft* privacy.**
-"Private" means *not auto-imported + `--` convention* — **not** *erased from the
-runtime*. `observer/observe--internal` stays addressable by its full name (like CL's
-`::`), so any code can still reach and live-redefine it. That preserves the property the
-editor is built on; we never add Racket-style sealing.
+"Private" means *declared private at the definition + not auto-imported* — **not**
+*erased from the runtime*. `observer/observe-internal` (defined with `defn-`) stays
+addressable by its full name (like CL's `::`), so any code can still reach and
+live-redefine it. That preserves the property the editor is built on; we never add
+Racket-style sealing.
 
-> **Superseded (ADR-146, 2026-07-23): privacy is now *enforced*, not lint-only.** The
-> original plan (below, and §12) was "advisory lint, never block." In practice that was
-> too weak, so a hand-written cross-namespace qualified reference to another module's
-> `--` name is now a **compile error at load** (`enforce_private_refs` in
-> `eval/macros.rs`), with `(:use-internals mod)` as the explicit grant (the `@testable`
-> seam) and top-level/REPL code exempt (the live-hacking hatch). The name is still
-> *reachable at runtime by full qualified name* from a granted or same-module site, so
-> this is a stronger form of *soft* privacy — no Racket-style erasure — not hard sealing.
+> **Superseded (ADR-146): privacy is *enforced*, and declared with `defn-`/`def-`.**
+> The original plan (below, and §12) was "advisory lint, never block"; step 1
+> (2026-07-23) made it enforced; **step 2 (2026-08-05) moved the marker off the name
+> onto the def form** — `defn-`/`def-` define a clean private name (the old `--`-in-name
+> convention is gone). A hand-written cross-namespace qualified reference to another
+> module's private is a **compile error at load** (`enforce_private_refs` in
+> `eval/macros.rs`, judged against the recorded `is_private`), with `(:use-internals
+> mod)` as the explicit grant (the `@testable` seam) and top-level/REPL code exempt (the
+> live-hacking hatch). The name is still *reachable at runtime by full qualified name*
+> from a granted or same-module site — stronger *soft* privacy, no Racket-style erasure.
 > The "auto-imported + `--` + lint" wording in this section and §12 is the old model.
 
 ## 3. The substrate: expand-time resolution over the flat table

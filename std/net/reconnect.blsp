@@ -25,60 +25,65 @@ delivers `[:nodeup name]` / `[:nodedown name]` to your mailbox; `unwatch` stops.
 Pure Brood policy over connect/monitor-node/nodes. Pair with
 `(process-flag :send-errors true)` for queue-and-retry senders.")
 
-(defn reconnect--proc-name (spec)
+(defn- reconnect-proc-name
+  (spec)
   "The watcher's registered name for `spec` — one watcher per spec."
   (keyword (str "net/reconnect:" spec)))
 
-(defn reconnect--notify (subs event)
+(defn- reconnect-notify
+  (subs event)
   (dolist (p subs) (send p event)))
 
-(defn reconnect--up (spec peer opts subs)
+(defn- reconnect-up
+  (spec peer opts subs)
   "Connected state: wait for the link to fall (or control messages)."
   (receive
     ([:nodedown ^peer]
       (if (member? peer (nodes))
         ;; stale/duplicate down (e.g. arming while already down delivers one
         ;; immediately) — still linked, ignore
-        (reconnect--up spec peer opts subs)
+        (reconnect-up spec peer opts subs)
         (do
-          (reconnect--notify subs [:nodedown peer])
-          (reconnect--down spec peer opts subs (get opts :min-ms 500)))))
-    ([:reconnect-subscribe p] (reconnect--up spec peer opts (cons p subs)))
+          (reconnect-notify subs [:nodedown peer])
+          (reconnect-down spec peer opts subs (get opts :min-ms 500)))))
+    ([:reconnect-subscribe p] (reconnect-up spec peer opts (cons p subs)))
     ([:reconnect-stop] :stopped)
     ;; drop anything else — the watcher has a registered name, so arbitrary
     ;; messages can reach it; without this they'd pile up in the mailbox forever
-    (_ (reconnect--up spec peer opts subs))))
+    (_ (reconnect-up spec peer opts subs))))
 
-(defn reconnect--down (spec peer opts subs delay)
+(defn- reconnect-down
+  (spec peer opts subs delay)
   "Disconnected state: retry `(connect spec)` on an exponential-backoff timer,
 still answering control messages between attempts."
   (let (up (try (connect spec) (catch _ nil)))
     (if up
       (do
         (monitor-node up)
-        (reconnect--notify subs [:nodeup up])
-        (reconnect--up spec up opts subs))
+        (reconnect-notify subs [:nodeup up])
+        (reconnect-up spec up opts subs))
       (receive
-        ([:reconnect-subscribe p] (reconnect--down spec peer opts (cons p subs) delay))
+        ([:reconnect-subscribe p] (reconnect-down spec peer opts (cons p subs) delay))
         ([:reconnect-stop] :stopped)
         ;; drop unrelated messages (incl. stale [:nodedown]s) without resetting
         ;; the backoff timer's growth
-        (_ (reconnect--down spec peer opts subs delay))
+        (_ (reconnect-down spec peer opts subs delay))
         (after delay
-          (reconnect--down spec
+          (reconnect-down spec
             peer
             opts
             subs
             (min (* delay 2) (get opts :max-ms 30000))))))))
 
-(defn reconnect--boot (spec opts)
+(defn- reconnect-boot
+  (spec opts)
   "Watcher body: connect (or start retrying immediately) and run the state loop."
   (let (up (try (connect spec) (catch _ nil)))
     (if up
       (do
         (monitor-node up)
-        (reconnect--up spec up opts nil))
-      (reconnect--down spec nil opts nil (get opts :min-ms 500)))))
+        (reconnect-up spec up opts nil))
+      (reconnect-down spec nil opts nil (get opts :min-ms 500)))))
 
 (defn watch (spec &optional opts)
   "Keep the link to the node at `spec` (a `connect` spec — `\"name\"` local or
@@ -87,13 +92,13 @@ exponential backoff (`opts` `{:min-ms 500 :max-ms 30000}`) until it's back.
 Idempotent per spec (a named watcher process); returns the watcher's pid. This
 runtime must already be a node (`node-start`)."
   (let (o (or opts {}))
-    (spawn (reconnect--proc-name spec) (reconnect--boot spec o))))
+    (spawn (reconnect-proc-name spec) (reconnect-boot spec o))))
 
 (defn subscribe (spec)
   "Register the current process with `spec`'s watcher (start it with `watch`
 first): you'll receive `[:nodeup name]` when a reconnect lands and
 `[:nodedown name]` when the link falls. Returns the caller's pid."
-  (let (pid (whereis (reconnect--proc-name spec)))
+  (let (pid (whereis (reconnect-proc-name spec)))
     (when (nil? pid)
       (error "net/reconnect: no watcher for " spec " — call watch first"))
     (send pid [:reconnect-subscribe (self)])
@@ -102,6 +107,6 @@ first): you'll receive `[:nodeup name]` when a reconnect lands and
 (defn unwatch (spec)
   "Stop watching `spec` (the watcher process exits; subscribers get nothing
 further). Returns nil."
-  (let (pid (whereis (reconnect--proc-name spec)))
+  (let (pid (whereis (reconnect-proc-name spec)))
     (when pid (send pid [:reconnect-stop]))
     nil))

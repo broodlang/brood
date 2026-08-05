@@ -103,18 +103,18 @@
     ;; not to ilibB/skip-me — confirm only the qualified one exists.
     (is (bound? 'ilibB/skip-me)))
 
-  (test "a `--` private name is not referred by (:use), and privacy is ENFORCED (ADR-146)"
-    (%load-string "(defmodule ilibC) (defn shown () :shown) (defn hidden--impl () :hidden)")
+  (test "a `defn-` private name is not referred by (:use), and privacy is ENFORCED (ADR-146)"
+    (%load-string "(defmodule ilibC) (defn shown () :shown) (defn- hidden () :hidden)")
     (%load-string "(defmodule iappC (:use ilibC)) (defn run () (shown))")
     (is (= (iappC/run) :shown))
-    ;; hard privacy: a module hand-writing another module's qualified private
-    ;; fails to COMPILE at load (it used to be reachable — "soft privacy")
+    ;; hard privacy: a module hand-writing another (loaded) module's qualified
+    ;; private fails to COMPILE at load (it used to be reachable — "soft privacy")
     (is (= (try
-             (%load-string "(defmodule iappC2 (:use ilibC)) (defn peek () (ilibC/hidden--impl))")
+             (%load-string "(defmodule iappC2 (:use ilibC)) (defn peek () (ilibC/hidden))")
              (catch e :blocked))
           :blocked))
     ;; …unless it declares the grant — the explicit @testable seam
-    (%load-string "(defmodule iappC3 (:use-internals ilibC)) (defn peek () (ilibC/hidden--impl))")
+    (%load-string "(defmodule iappC3 (:use-internals ilibC)) (defn peek () (ilibC/hidden))")
     (is (= (iappC3/peek) :hidden)))
 
   (test "an own-namespace definition shadows an imported name"
@@ -240,7 +240,7 @@
 ;; So the set is pinned here. A NEW overlap fails this test, which is the point: adding one
 ;; is a decision (the modules are unlikely to be used together; the name is genuinely the
 ;; best one for both) rather than an accident nobody notices until a `:use` breaks.
-(def ns--known-overlaps
+(def- ns-known-overlaps
   ;; name -> the modules that export it, sorted. Modules unlikely to be `:use`d together
   ;; (`package` + `proc/agent`) are as legitimate here as the pair that prompted the audit.
   ;; (an earlier audit also listed `bytes-`; that was a prefix match on `bytes->hex`, not an
@@ -261,7 +261,8 @@
    "tree" ["package" "sexp"]
    "update" ["package" "proc/agent"]})
 
-(defn ns--exports-of (module)
+(defn- ns-exports-of
+  (module)
   "The public names `module` contributes to the flat table — read from `global-names`, so it
 is what a `:use` would actually import, not what the source looks like."
   (let (prefix (str module "/")
@@ -273,25 +274,25 @@ is what a `:use` would actually import, not what the source looks like."
             (and (starts-with? n prefix)
               ;; a nested module (`editor/x` under `editor`) is not an export
               (not (includes? (substring n plen (string-length n)) "/"))
-              (not (includes? n "--")))) ; module-private
+              (not (private? (symbol n))))) ; module-private (ADR-146, recorded fact)
           (map name (global-names)))))))
 
 (describe "std cross-module name overlaps are known, not surprising"
   :serial
   (test "each recorded overlap is still real — both modules export the name"
     ;; loading them is what puts their names in the flat table
-    (doseq (kv ns--known-overlaps)
+    (doseq (kv ns-known-overlaps)
       (let ([nm mods] kv)
         (doseq (mod mods) (try (require (symbol mod)) (catch e nil)))
         (doseq (mod mods)
-          (is (includes? (ns--exports-of mod) nm))))))
+          (is (includes? (ns-exports-of mod) nm))))))
 
   (test "the pair that prompted this: sexp and editor/treesit overlap on nine motions"
     (do
       (require 'sexp)
       (require 'editor/treesit)
-      (let (shared (filter (fn (n) (includes? (ns--exports-of "editor/treesit") n))
-                     (into [] (ns--exports-of "sexp"))))
+      (let (shared (filter (fn (n) (includes? (ns-exports-of "editor/treesit") n))
+                     (into [] (ns-exports-of "sexp"))))
         ;; The structural-motion set both provide — sexp over a Brood form, treesit over a
         ;; foreign-language tree (ADR-205 §7b). Grew from five to nine as parallel motions
         ;; (`point-list-*`, `point-up-forward`, `point-defun-end`) were added to both; a
