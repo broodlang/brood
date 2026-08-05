@@ -16604,3 +16604,30 @@ ladder. That is consistent with `ns_match_run` costing ~2.9 µs/unit and `ns_mat
 ~0.7–1.1 µs to match a one-clause `[:go]` pattern, and it makes the receive rung (+8.7 µs/unit,
 the largest step in the row) look like a *caching* problem — an ADR-215-shaped one, keyed on the
 receive site's clause AST — rather than a tuning problem. Not investigated further yet.
+
+**Session close, 2026-08-05.** Landed: KI-29 (orphaned test children), KI-30 (unpurged `/tmp`
+prefixes), the short-vs-long measurement rule in `CLAUDE.md`, and four measured refutations on
+`spawn-live`. Two committed benchmarks are new — `spawn_live_ladder.blsp` (the row decomposed into
+rungs; the ladder handoff §1 had costed but never committed) and `hof_call.blsp` (per-call HOF cost,
+global vs computed head). Suites: Rust 960/960, in-language 4410/4410, `nest check` and
+`nest format --check` clean. **Five commits unpushed at close.**
+
+**The through-line of the day, and it is the thing worth carrying forward.** Six items were
+investigated and *five* had a wrong premise recorded in the docs:
+
+| item | filed as | actually |
+|---|---|---|
+| KI-29 fix direction | put children in a process group | wrong lever — a group *removes* them from any group an outer tool kills; `PR_SET_PDEATHSIG` is the fix |
+| KI-29 cause 2 | observe path leaks on a normal run | no mechanism; inferred from a child's *age*, and age is not provenance |
+| KI-30 fix direction | a `with-temp-dir` helper, 45 edits | the convention already existed; seven missing lines |
+| §1 item 1 | identity-keyed IC is the small intermediate step | the cached thing costs ~nothing; computed is *faster* on the VM |
+| §1 item 2 | park/resume costs 5.5 µs | suspending is 2.5% *cheaper*; the rung conflated parking with coexistence |
+| new item 1 | short-lived processes never reach native | they do; native is no faster for a HOF call |
+
+Every one was disposed of by a single measurement or by *reading the existing code*, each far
+cheaper than the implementation it prevented. The recurring failure is naming the mechanism
+**nearest the symptom** and then reasoning forward from it — which §6 already warned about, and
+which still caught this session four times. The practical rule: a filed fix direction is a
+hypothesis with no measurement behind it, so re-derive the premise before implementing against it,
+and prefer reading the mechanism's own code and comments first (KI-30's convention was documented
+on the very function that implements it).
