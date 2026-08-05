@@ -315,6 +315,15 @@ enum Cmd {
         names: Vec<String>,
     },
 
+    /// Refresh the AI-assistant tooling from this `brood` build.
+    ///
+    /// Rewrites the two files `nest new` drops into a project — the language
+    /// reference `docs/brood-for-claude.md` and the `.claude/skills/writing-brood`
+    /// skill — from the installed `brood` binary (they are baked in, so they drift
+    /// as the language evolves). Run it after upgrading Brood. Your code, manifest,
+    /// and `CLAUDE.md` are left untouched.
+    UpdateTooling,
+
     /// Print the project's resolved dependency tree (root → direct → transitive).
     Tree,
 
@@ -712,6 +721,13 @@ fn run_main(cli: Cli) {
         Cmd::Update { names } => {
             require_project("update", None);
             cmd_update(&mut interp, &names)
+        }
+        Cmd::UpdateTooling => {
+            require_project("update-tooling", None);
+            run(
+                &mut interp,
+                "(require 'project) (project/load-config) (require 'scaffold) (scaffold/update-tooling)",
+            );
         }
         Cmd::Tree => {
             require_project("tree", None);
