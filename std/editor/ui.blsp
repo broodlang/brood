@@ -337,7 +337,7 @@ control message (from another process) raises the window via the display's `:foc
 and is NOT folded into `update`.
 
 **Named timers (ADR-102).** The poll timeout is `ui-poll-ms` — the soonest live
-timer in `(ui--timers model)`. A timed-out poll (nil) fires the earliest due timer via
+timer in `(ui-timers model)`. A timed-out poll (nil) fires the earliest due timer via
 `ui-fire`, folding `[:timer name]` (or the bare `:tick` legacy beat). A real input
 stamps `:last-input` on the `clock` (so idle timers reset). The `clock` is threaded
 alongside `model`/`last-good` and is wall-clock bookkeeping, NOT model state: it does

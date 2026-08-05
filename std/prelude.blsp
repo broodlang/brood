@@ -125,7 +125,7 @@
     (%range-reduce f acc coll)
     (if (seqview? coll)
       ;; Fuse: `(xform f)` is the wrapped reducer; fold it over the source (a
-      ;; range → counted loop, a list → fold--loop, a nested view → fuses again).
+      ;; range → counted loop, a list → fold-loop, a nested view → fuses again).
       ;; Raw kernel ops (`if`/`let`/`vector-ref`) only — `fold` is defined before
       ;; `cond`/`second`.
       (let (parts (%seqview-parts coll))
@@ -4706,7 +4706,7 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; Put it first; one per file. e.g. (defmodule observer "process viewer" (:use display)).
 ;; defmodule's top-of-file provide — but ONLY when no `require` is driving the load.
 ;; Under require, the feature is provided when the WHOLE file has evaluated
-;; (require--force); providing here, before the module's defs exist, is exactly the
+;; (require-force); providing here, before the module's defs exist, is exactly the
 ;; window a concurrent requirer used to slip through. A direct `(load "x.blsp")`
 ;; (no require in flight) keeps the immediate provide it always had.
 (defn- defmodule-provide

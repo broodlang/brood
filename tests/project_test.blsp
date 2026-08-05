@@ -235,7 +235,7 @@
   ;; A release bundle keys modules by require-name, not bare stem, so a namespaced
   ;; module (net/sse) keeps its namespace and resolves through %builtin-module — the
   ;; bug behind `./app: require: cannot find module 'net/sse'` after `nest release`.
-  (test "project--bundle-name keeps the namespace relative to the source dir"
+  (test "project-bundle-name keeps the namespace relative to the source dir"
     (assert= (project/project-bundle-name "/p/src" "/p/src/main.blsp") "main")
     (assert= (project/project-bundle-name "/p/src" "/p/src/net/sse.blsp") "net/sse")
     (assert= (project/project-bundle-name "/p/src/" "/p/src/a/b/c.blsp") "a/b/c"))
@@ -243,7 +243,7 @@
     (assert= (project/project-bundle-name "/other" "/p/src/x.blsp") "x")))
 
 (describe "project: namespace-aware duplicate global detection (ADR-065)"
-  (test "project/project--file-def-names resolves names to ns/name (ambient earmuffs stay root; defmodule skipped)"
+  (test "project/project-file-def-names resolves names to ns/name (ambient earmuffs stay root; defmodule skipped)"
     (let (dir (temp-dir "brood-dup-"))
       (make-dir dir)
       (let (f (path-join dir "a.blsp"))
@@ -361,7 +361,7 @@
 ;; the globals, so the walk sees its own freshly-`spit` project. (KI-2 class.)
 (describe "project: source load-once"
   :isolated
-  (test "project--file-feature reads a file's (defmodule NAME) as a string"
+  (test "project-file-feature reads a file's (defmodule NAME) as a string"
     (let (dir (temp-dir "brood-feat-"))
       (make-dir dir)
       (let (f (path-join dir "m.blsp"))
@@ -557,7 +557,7 @@
 ;; ---- the :brood runtime-version gate (ADR-209) -------------------------------
 ;; A project may require a minimum/compatible runtime with `:brood "<constraint>"`,
 ;; checked against `(brood-version)` at setup. Met = silent; unmet = a hard, clear
-;; error naming the constraint and the running version. We drive `project--check-brood-
+;; error naming the constraint and the running version. We drive `project-check-brood-
 ;; version` directly by binding the dynvar it reads, so no fixture project or cwd
 ;; change is needed.
 

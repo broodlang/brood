@@ -312,7 +312,7 @@
     (assert= nil (event-schema [:not :declared]))))
 
 (describe "defevent — runtime presence-check (pure)"
-  (test "telemetry--check-event reports each missing declared key by kind"
+  (test "telemetry-check-event reports each missing declared key by kind"
     ;; complete payload → no problems
     (assert= nil (telemetry/telemetry-check-event [:tmm :req :stop] {:duration 1} {:path "/"}))
     ;; missing measurement key

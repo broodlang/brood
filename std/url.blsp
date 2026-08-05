@@ -121,7 +121,7 @@ Invalid or incomplete %XX sequences are passed through as-is."
 ;; application/x-www-form-urlencoded: space → +, rest percent-encoded (same
 ;; unreserved set). Keys and values are percent-encoded individually.
 
-;; Reversed piece list, joined once by `url-query-encode-str` (see url--encode-bytes).
+;; Reversed piece list, joined once by `url-query-encode-str` (see url-encode-bytes).
 (defn- url-qenc-bytes
   (bytes acc)
   (if (empty? bytes)

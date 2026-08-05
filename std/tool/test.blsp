@@ -132,7 +132,7 @@ docs/testing.md for the full guide.")
 ;; state — Brood data is immutable (no accumulator to push onto). The tag is a
 ;; `%`-internal keyword the body is exceedingly unlikely to throw itself. `loc` is
 ;; (file line col) or nil; `details` is a list of "label: value" strings.
-;; test--record turns a caught throw back into the (loc detail-lines) record the
+;; test-record turns a caught throw back into the (loc detail-lines) record the
 ;; runner expects.
 (defn- test-fail (loc details) (throw (list :%test-fail loc details)))
 (defn- test-failure? (e) (and (pair? e) (= (first e) :%test-fail)))

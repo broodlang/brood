@@ -918,7 +918,7 @@
       (is (<= (buffer-point out) (buffer-length out)))
       (is (<= (buffer-mark out) (buffer-length out))))))
 
-(describe "undo--region-restore (the pure core)"
+(describe "undo-region-restore (the pure core)"
   (test "chunk-wise over CHARACTERS: the changed span is what the region is tested against"
     ;; "old" -> "new" occupies chars 2..5; a region there undoes it, one elsewhere doesn't
     (assert= (editor/buffer/undo-region-restore "a\nold\nz" "a\nnew\nz" 2 5) "a\nold\nz")

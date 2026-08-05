@@ -84,3 +84,25 @@ fn update_tooling_outside_a_project_errors() {
         "expected a no-project message, got: {out}"
     );
 }
+
+#[test]
+fn update_tooling_works_from_a_subdirectory() {
+    // Both the CLI's `require_project` and Brood's `project-find-root` walk up from
+    // cwd, so the command must resolve the project root when run from a nested dir
+    // (e.g. `cd src && nest update-tooling`), writing to the ROOT's docs/.claude.
+    let tmp = tempdir();
+    let (out, ok) = nest(&tmp.path, &["new", "demo"]);
+    assert!(ok, "nest new failed: {out}");
+    let proj = tmp.path.join("demo");
+    let reference = proj.join("docs/brood-for-claude.md");
+    std::fs::write(&reference, "STALE").unwrap();
+
+    let (out, ok) = nest(&proj.join("src"), &["update-tooling"]); // run from src/
+    assert!(ok, "nest update-tooling from a subdir failed: {out}");
+    assert!(
+        std::fs::read_to_string(&reference)
+            .unwrap()
+            .starts_with("# Brood"),
+        "the project ROOT's reference was not refreshed from a subdir"
+    );
+}

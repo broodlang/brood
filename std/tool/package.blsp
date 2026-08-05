@@ -592,7 +592,7 @@ land in a later slice."
 (defn- package-fetch-bytes
   (url)
   "The bytes at `url`: a `file://` path is read directly (offline / local artifact);
-an http(s) URL is GET'd (following up to *package--max-redirects* redirects) and its
+an http(s) URL is GET'd (following up to *package-max-redirects* redirects) and its
 2xx body returned. Throws on a non-2xx status or a transport error."
   (if (starts-with? url "file://")
     (slurp-bytes (substring url 7))
@@ -1472,7 +1472,7 @@ TOFU-pinned signing key, nil for an unsigned package)."
         ;; add foo :path ../nonexistent` left an unresolvable dep
         ;; in project.blsp and EVERY later command failed on it —
         ;; the project needed hand-repair after one typo.
-        ;; The edit is a locked compare-and-swap (see package--edit-manifest!), so a
+        ;; The edit is a locked compare-and-swap (see package-edit-manifest!), so a
         ;; concurrent `nest add` can no longer erase this one.
         (let (manifest (path-join root "project.blsp")
               edit (package-edit-manifest! root

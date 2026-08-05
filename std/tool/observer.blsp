@@ -584,7 +584,7 @@ process is selected."
   (row sel cap n)
   "The process index a click on frame `row` selects, or nil if `row` isn't on a
 process line. The body occupies frame rows 3..(3+`cap`) over a window starting at
-`(observe--window-start sel cap n)` — matching `observe-frame`'s layout."
+`(observe-window-start sel cap n)` — matching `observe-frame`'s layout."
   (let (start (observe-window-start sel cap n)
         i (- row 3))
     (if (and (>= i 0) (< i cap) (< (+ start i) n))
@@ -840,7 +840,7 @@ name, string, number — is stringified and interned to that one keyword."
 and return immediately with the window process's pid. **Idempotent per `key`**
 (default `:self`): calling `(observe)` again while that window is open returns the
 SAME pid — no duplicate window — because the work process is spawned under the
-per-key name `(observe--window-key key)` and named `spawn` returns the live pid
+per-key name `(observe-window-key key)` and named `spawn` returns the live pid
 instead of re-running. The name is auto-reaped when the window closes (`q`/Esc/
 Ctrl-C or the X), so a later `(observe)` opens a fresh one. The work happens in that
 spawned process, so the caller (e.g. the REPL) isn't blocked.
@@ -873,7 +873,7 @@ For a modal terminal observer instead, call `(observe-attach *term-display*)`."
 ;; The observer is the SAME loop with a different source: instead of reading this
 ;; runtime's processes, it requests a snapshot from a peer's `:observe` agent over
 ;; the dist node link. `process-info` maps are send-able, so the agent ships
-;; `(observe--local-snapshot)` verbatim — no kernel changes, no new wire format.
+;; `(observe-local-snapshot)` verbatim — no kernel changes, no new wire format.
 
 ; ms to wait for a remote snapshot before :stale
 (defdyn *observe-timeout* 800)

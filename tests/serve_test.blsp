@@ -27,7 +27,7 @@
     (= input "+") (assoc m :n (+ (get m :n) 1))
     (= input "q") (assoc m :done true)
     (and (vector? input) (= (first input) :note)) (assoc m :n (nth input 1))
-    ;; the identity event a named attach delivers before any key (serve--session)
+    ;; the identity event a named attach delivers before any key (serve-session)
     (and (vector? input) (= (first input) :client-opts)) (assoc m :who (get (nth input 1) :name))
     else m))
 
@@ -144,7 +144,7 @@
 
   (test "a session that dies without a clean :bye still notifies the client (monitor)"
     ;; `make-model` runs *before* ui-run, so a throw there kills the session before
-    ;; `:leave`/`[:bye]` can fire. The client monitors the session pid (as attach--session
+    ;; `:leave`/`[:bye]` can fire. The client monitors the session pid (as attach-session
     ;; does), so it learns via `[:down …]` instead of hanging — the robustness fix.
     (let (bad-mk (fn () (error "boom in make-model"))
           mgr (spawn (editor/serve/serve-manager bad-mk vw up)))

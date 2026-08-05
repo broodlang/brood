@@ -48,7 +48,7 @@
 ;; Two sentinels are load-bearing. Unification returns `:fail` rather than a falsy value
 ;; because a *successful* unification can legitimately produce an EMPTY substitution, and
 ;; Brood's empty list is `nil`, which is falsy — `(if subst …)` would read success as
-;; failure. `nboyer--lookup` returns `:none` for the same reason: a variable can be bound
+;; failure. `nboyer-lookup` returns `:none` for the same reason: a variable can be bound
 ;; to a term that is itself nil-shaped. Keywords can never appear in a term, so neither
 ;; sentinel can collide with real data.
 
