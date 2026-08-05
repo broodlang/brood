@@ -958,6 +958,24 @@ test discovery, lints, release, config)."
       (scaffold-print-next-steps tmpl nm in-place)
       nm)))
 
+;; `nest update-tooling` — rewrite the AI-assistant files `nest new` drops into a
+;; project (the language reference + the writing-brood skill) from THIS `brood`
+;; binary. They are baked in via `%builtin-doc`, so they drift as the language
+;; evolves; this re-syncs them to the installed version. Everything else the project
+;; owns (its code, manifest, CLAUDE.md) is left alone.
+(defn update-tooling ()
+  "Rewrite this project's AI-assistant tooling — `docs/brood-for-claude.md` and the `.claude/skills/writing-brood` skill — from THIS `brood` binary, so the shipped language reference matches the installed language. Run it after upgrading Brood. Backs `nest update-tooling`."
+  (let (root (project-find-root (cwd))
+        docs-dir (path-join root "docs")
+        skill-dir (path-join root ".claude/skills/writing-brood"))
+    (make-dir docs-dir)
+    (make-dir skill-dir)
+    (spit (path-join docs-dir "brood-for-claude.md") (%builtin-doc 'brood-for-claude))
+    (spit (path-join skill-dir "SKILL.md") (%builtin-doc 'writing-brood-skill))
+    (println "Refreshed AI tooling from this brood build:")
+    (println (str "  " (path-join docs-dir "brood-for-claude.md")))
+    (println (str "  " (path-join skill-dir "SKILL.md")))))
+
 ;; Templates whose manifest declares `:path` dependencies on SIBLING checkouts,
 ;; mapped to what has to be present for the project to resolve.
 (def- *scaffold-sibling-deps* {"hatch" ["hatch" "store-postgres"] "web-api" ["hatch"]})

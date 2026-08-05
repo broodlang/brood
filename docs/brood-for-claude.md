@@ -220,13 +220,15 @@ foo?         ; predicate — returns a boolean (int? empty? starts-with?)
 foo->bar      ; conversion (number->string, vec->list)
 ```
 
-**Privacy is on the def form, not in the name** (ADR-146): `defn-` / `def-` define a
-module-private name — `(defn- fold-loop (…) …)`. The name itself stays clean, at the
-definition and at every call site. There is no marker to spell and none to read; ask
-the image with `(private? 'mod/name)`. The old `--`-in-name convention
-(`append--onto`) was **deleted** in favour of this — if you see it in older code or a
-stale doc, it is no longer meaningful. There is no `defmacro-`/`defprocess-`: private
-macros and processes were rare enough that they simply stay public.
+**Privacy is a def form, not a spelling** (ADR-146): `(defn- helper …)` and
+`(def- x …)` define a MODULE-PRIVATE name — a *clean* name, no marker in it, at the
+definition or any call site. A hand-written cross-module qualified reference to a
+private is a compile error without `(:use-internals mod)`; call it bare (same module)
+or `mod/name` (granted). There is no marker to spell and none to read, so ask the
+image: `(private? 'mod/name)`. The old `--`-in-name convention (`append--onto`) was
+**deleted** in favour of this — if you meet it in older code or a stale doc, it no
+longer means anything. There is no `defmacro-`/`defprocess-`: private macros and
+processes were rare enough that they simply stay public.
 
 A trailing `!` is **rare and not a mutation warning** — nothing mutates, so the
 Scheme/Clojure reading is vacuous here and `!` is per-context by decision (ADR-163):
@@ -251,8 +253,9 @@ outcome to branch on (parsing user input, a lookup that may miss, a timeout).
 Symbols are kebab-case (`out-of-range?`, not `outOfRange`/`out_of_range`).
 
 **Tail-recursive helpers get a suffix naming what they accumulate or do** —
-`-acc`, `-at`, `-loop`, `-onto`, `-scan`. The public function is a thin shell; the
-suffixed helper is a `defn-` private that does the real recursion with an accumulator:
+`-acc`, `-at`, `-loop`, `-onto`, `-scan` — and are defined **private** with
+`defn-`. The public function is a thin shell; the private helper does the real
+recursion with an accumulator:
 
 ```lisp
 (defn reverse (coll) "The items of `coll` in reverse order." (fold flip-cons nil coll))
