@@ -16139,3 +16139,63 @@ a prelude private true, proving the `seeded` path) plus **cross-process** covera
 reports `private?` back, proving the set is visible through the shared runtime `Arc`); `basic.rs`
 asserts both populate paths at the Rust boundary and that an undefined `--` name is *not* recorded
 (the record, not the name, is authoritative). Full `make test` + `nest check` green.
+
+## 2026-08-05 — `spawn-live` again: the lever was `fold` over a vector, and my §1 premise was wrong
+
+`handoff.md` §1 said the remainder of `spawn-live` was **per-process inline caches**, on the
+strength of counted IC misses plus a ladder delta. Both halves of that were wrong, and the
+first thing this session produced was the correction.
+
+**The premise, re-derived.** §1 claimed "the same 16-element fold costs ~16 µs in a fresh
+process against 3.7 µs in a warm one". Measured properly — one child at a time, each timing its
+own first ten folds, averaged over 40 children — the curve is **5.7 µs, then 3.8, 3.7, 3.7, …**:
+about **2 µs** of one-time per-process cost, not 16. And a child's steady state (3.6 µs) matches
+the root's (3.8 µs), so nothing is permanently colder about a spawned process. The 16 µs came
+from attributing a whole ladder step (payload copy + fold) to "the fold running cold", and from
+a measurement where 20 probe processes contended for 12 cores. IC misses are ~10 per unit ≈
+**2 µs, about 5% of the row** — worth having, not the lever.
+
+Also worth recording: **the prerequisite §1 describes as missing already exists.** It says a
+site-id scheme must come before IC sharing, because ids are "dense per-process indices"; ADR-175
+Phase A already made sites *arm-relative* with lazily-allocated per-process blocks
+(`vm_arm_block`, `cur_ic_base`). The obstacle was real when it was written and had been removed
+since.
+
+**What the lever actually was.** The ladder said the payload+fold step costs ~18 µs/unit. Writing
+the same sum as a hand-rolled indexed tail loop instead of `(fold + 0 p)` cost **2.2 µs** — an 8×
+difference for identical arithmetic, and more than half the row. The counters said why:
+per unit, the fold spent **+47 one-arg primitive dispatches, +27 env lookups and +15
+allocations** to add 16 numbers.
+
+The cause is one line of the sequence library: `fold` coerces with `seq` (which passes a vector
+through) and then walks with `first`/`rest` — and **`(rest v)` on a vector materialises a list of
+the tail.** So folding a 16-element vector allocated 15 cons cells and paid `empty?`/`first`/`rest`
+per element. `fold` now takes an indexed path for a vector (`fold--vec`, `vector-ref` by index),
+which is the same walk without the intermediate list.
+
+Measured, same profile both sides: per unit **27.7 → 15.0 allocations**, one-arg dispatches
+**48.1 → 1.1**, the `spawn-live` shape **32.7 → 28.6 µs of CPU** (−12.5%), and the published row
+at N=300k **11.44 → 10.40 CPU·s** (−9%) with wall and RSS flat. No regression anywhere:
+`reduce`/`persistent-map`/`wordcount`/`json`/`fib`/`sort`/`nqueens`/`pipeline` all within ±1%
+best-of-9 (`reduce` read +4.8% on a 21 ms row and is identical at 20× N — it folds a *range*,
+which this does not touch).
+
+This is the CLAUDE.md bar for an optimisation, met in the intended direction: it stays in Brood,
+and it makes *every* fold over a vector cheaper rather than speeding up one call site.
+
+**Three lessons, one of them a repeat.**
+
+*A counter is not a timing.* IC-miss counts were high (58% of call sites), which is true and cost
+~2 µs. The `ns_*` timers and a per-call curve are what sized it. High miss *rates* on a workload
+that performs five calls per process are unavoidable and mostly harmless.
+
+*I named the thread after the mechanism nearest the symptom — again.* The traps list already says
+this, and I still did it: "cold inline caches" was the nearest plausible mechanism to "a fresh
+process is slow", so it became the item, and the ladder delta was read as confirmation. The
+correction cost one measurement (the warm-up curve) that I should have made before writing §1.
+
+*The remaining gap between `fold` and a hand loop is now 28.6 vs 17.9 µs/unit*, and it is **not**
+the step function: warm, `(fold + 0 v)` is *faster* than folding a plain 2-arg closure (2.8 vs
+3.9 µs), so `+`'s passthrough is not being penalised. What is left is `fold--vec` threading five
+parameters where the hand loop threads four, plus ~2 allocations per unit — a smaller, still-open
+follow-up, not a rewrite.
