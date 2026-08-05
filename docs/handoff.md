@@ -51,10 +51,26 @@ modes — commit that ladder as a stress row if you continue):
 
 So the next candidates, in the order the numbers support them:
 
-1. **The remaining `fold`-vs-hand-loop gap (28.6 vs 17.9).** Not the step function: warm,
-   `(fold + 0 v)` beats folding a plain 2-arg closure (2.8 vs 3.9 µs), so `+`'s passthrough is
-   fine. What is left is `fold--vec` threading five parameters and ~2 allocations per unit.
-   Smallest remaining piece with a measured size.
+1. **The remaining `fold`-vs-hand-loop gap (28.6 vs 17.9), and it is not one lever.** Measured
+   warm, per element: **hand loop 10 ns · `fold %add` 78 · `fold +` 163 · `fold myadd` 231**. So
+   even the best HOF case is ~7× an inlined op, and the wrapper adds ~85 ns on top of that.
+   Where the wrapper's 85 ns goes: `passthrough_arm` (closure deref + `select_arm` + a
+   `SmallVec` **clone** of the arg map), two thread-local ticks in
+   `passthrough_redirect_ok`, a fresh argv `SmallVec`, then `call_native`'s own checks —
+   about five small costs, no single one dominant.
+   **Measured and reverted:** memoising the redirect target on the arm (so `%add` is not
+   re-resolved through the env chain per element) is worth **2%** — 167 → 163 ns. The env
+   lookup was not the cost. Don't re-try it; the field it adds to `Passthrough` is not
+   worth that.
+   The lever that would actually close it is **not calling per element**: an
+   identity-guarded speculative inline of a HOF's step closure. Note the groundwork is
+   further along than FRONTIER's "true call inlining" bullet suggests — ADR-210 already
+   splices *statically known* leaf callees with a deopt checkpoint, and the missing piece is
+   a guard on the step's closure identity. Also relevant: a computed (local) callee gets
+   **no call-site IC at all** today (`compile_node`: "a local/computed callee can resolve to
+   a different function per call, so it keeps the generic path"), so an identity-keyed IC for
+   that case is the smaller intermediate step — cache the arm when the observed callee is
+   immovable (PRELUDE/RUNTIME), which is exactly the `fold + …` / `map inc …` shape.
 2. **Park/resume (5.5 µs/unit)** — the A−E step above. Untouched, and no measurement has
    attributed it further than "suspend + wake".
 3. **Per-process inline caches (~2 µs)** — real but small, and now correctly sized. If you do it,
