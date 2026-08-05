@@ -93,7 +93,7 @@ one server that owns the language knowledge.
 > global table (`global_names` — `project/setup-tooling-image` has every project
 > source loaded, ADR-031, so discovery is workspace-wide: embedded std *and* project
 > modules), filtered so the offer is never wrong (the file's own namespace, an
-> already-imported module, and private `--` providers are dropped). One import+qualify
+> already-imported module, and private providers are dropped). One import+qualify
 > pair **per provider**, so a name two modules export (`sexp`/`editor/treesit`) is a
 > choice, not a silent pick. This is the *modern, statically-analyzable* answer to
 > "referenced-but-not-imported" — the editor writes the explicit import for you (like

@@ -215,10 +215,14 @@ your code will read like the standard library.
 ```
 foo?         ; predicate — returns a boolean (int? empty? starts-with?)
 *foo*         ; dynamic var or module-level config/state (defdyn *log-level*)
-foo--bar      ; PRIVATE helper — the double-dash infix marks "implementation
-              ;   detail, not public API" (append--onto, cmp--gt, reload--loop)
 foo->bar      ; conversion (number->string, vec->list)
 ```
+
+**Privacy is a def form, not a spelling** (ADR-146): `(defn- helper …)` and
+`(def- x …)` define a MODULE-PRIVATE name — a *clean* name, no marker in it. A
+hand-written cross-module qualified reference to a private is a compile error
+without `(:use-internals mod)`; call it bare (same module) or `mod/name` (granted).
+The name never carries a sigil, at the definition or any call site.
 
 A trailing `!` is **rare and not a mutation warning** — nothing mutates, so the
 Scheme/Clojure reading is vacuous here and `!` is per-context by decision (ADR-163):
@@ -243,21 +247,21 @@ outcome to branch on (parsing user input, a lookup that may miss, a timeout).
 Symbols are kebab-case (`out-of-range?`, not `outOfRange`/`out_of_range`).
 
 **Tail-recursive helpers get a suffix naming what they accumulate or do** —
-`--acc`, `--at`, `--loop`, `--onto`, `--scan`. The public function is a thin
-shell; the `--`-suffixed helper does the real recursion with an accumulator:
+`-acc`, `-at`, `-loop`, `-onto`, `-scan` — and are defined **private** with
+`defn-`. The public function is a thin shell; the private helper does the real
+recursion with an accumulator:
 
 ```lisp
 (defn reverse (coll) "The items of `coll` in reverse order." (fold flip-cons nil coll))
 
-;; longer recursions split into a public shell + a private --acc helper
-(defn count-newlines--at (s i acc) …)              ; private worker
-(defn count-newlines (s) "Number of \\n in `s`." (count-newlines--at s 0 0))
+;; longer recursions split into a public shell + a private helper
+(defn- count-newlines-at (s i acc) …)              ; private worker (defn-)
+(defn count-newlines (s) "Number of \\n in `s`." (count-newlines-at s 0 0))
 ```
 
 **Docstrings** go on every public `defn` / `defmacro`. First line is a complete
 one-sentence summary (it's what `(doc 'name)` and the LSP show on hover);
-backtick code, **bold**, and `-` bullet lists are rendered, so use them. Private
-`--` helpers usually skip the docstring and use a `;;` comment instead.
+backtick code, **bold**, and `-` bullet lists are rendered, so use them. Private (`defn-`) helpers usually skip the docstring and use a `;;` comment instead.
 
 ```lisp
 (defn format-source (src)
