@@ -16517,3 +16517,22 @@ it is worth building the ladder so that violation is visible.
 (**+4.6**) → +payload copy and fold 31.5 (**+9.3**). The three real targets are the receive
 machinery, the payload copy/fold, and coexistence. Both items on the old list were among the
 small terms.
+
+**Follow-up the same day: the item-1 verdict re-checked short AND long, on the point that a
+tiered runtime has two steady states.** The original measurement was warm-only (one warm-up
+pass, best of two at 3M calls), which is a verdict about one call count, not about the
+mechanism. Swept over four orders of magnitude, gap = computed − global:
+
+| N | 10k | 100k | 1M | 10M |
+|---|---|---|---|---|
+| warm | +18 ns | +23 | +19 | +23 |
+| cold (single pass) | **−63 ns** | +17 | +18 | +22 |
+
+The warm gap is flat at 7–8% throughout, and `BROOD_JIT_DUMP_IR` reports the **same 28 arms
+lowered** at 10k as at 1M with zero deopts — so tiering completes within ten thousand calls
+and the warm figure was the real steady state. The cold column is the new information and it
+cuts the same way: on a single short pass the **global** arm is 63 ns/call *worse*, since it
+is the arm paying IC install and tier-up. So the declined IC is worth ~0 warm and negative
+cold. Rule added to `CLAUDE.md`: sweep the call count and check whether the **gap** moves,
+not just whether each arm gets faster, and treat the short run as a real case (a `nest check`,
+a one-shot script, a handler on a fresh process) rather than as noise to discard.

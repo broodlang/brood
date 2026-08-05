@@ -243,6 +243,28 @@ base, base again, then new, and read the base-vs-base spread as that row's noise
 The same change then measured +0.9% against a +0.5% floor — neutral. Don't report a
 regression whose size is within a couple of multiples of the floor you haven't measured.
 
+**Measure BOTH a short and a long run — a tiered runtime has two different steady
+states, and a micro-benchmark only ever reports one of them.** The JIT tiers up in the
+background, so the same code path can be interpreted, natively compiled, natively
+*inlined*, or deopted-and-bailed depending only on how many times it has run. A verdict
+from one call count is a verdict about that call count:
+
+- **Short** (thousands of calls): the interpreted / not-yet-tiered path. This is what
+  real short-lived work actually pays — a `nest check`, a one-shot script, a request
+  handler on a freshly spawned process — so it is not merely the "unwarmed" case to be
+  discarded.
+- **Long** (millions of calls): the fully-tiered path, including the deferred inlined
+  upgrade (two-stage tiering means the *second* body arrives later than the first).
+
+Sweep the call count across at least two orders of magnitude and check whether the
+**gap between the two arms moves**, not just whether each arm gets faster. A mechanism
+can be neutral warm and a win cold (or the reverse), and either way reporting one number
+hides it. Brood's tiering is fast — the crossover is usually well under a million calls —
+so this is cheap to check and there is no excuse for skipping it. Cross-check with
+`BROOD_JIT_DUMP_IR=1 … | grep -c '^\[jit-ir\]'` (did the arm ever lower?) and
+`BROOD_DEOPT_TRACE=1` (did it lower and then fall back?), and remember that a bailed arm
+never reaches the IR dump, so *absence* there is the signal.
+
 Cargo is the source of truth; a thin **`Makefile`** wraps the common commands as
 shortcuts (`make help` lists them): `make build`, `make test`, `make suite`,
 `make repl`, and `make benchmark`. **`make test` runs the suite via
