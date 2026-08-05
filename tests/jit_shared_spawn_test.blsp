@@ -29,7 +29,10 @@
 
 ;; 500 * (10*10+2)
 (describe "shared JIT code across spawned processes (regression)"
-  :serial
+  ;; `:isolated` rather than `:serial`: it still runs alone, and it adds the `%isolate`
+  ;; rollback the second test needs — it redefines `calc`, which the first test asserts
+  ;; the original of, so a re-run in one image failed without it (KI-25).
+  :isolated
   ;; 500 * (10*10+1)
   (test "fan-out over a shared JIT'd fn returns the correct checksum"
     ;; NB: `(self)` is captured per worker via ss-fan's arg, so the parent collects.
