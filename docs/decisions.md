@@ -9254,6 +9254,28 @@ format's `format-cst-root`), and eleven test files declare
 **Supersedes** the "privacy is soft" clause of ADR-019/065 and the
 "link-checked `--private`" hatch-findings item (this is the stronger form).
 
+**Update (2026-08-04) — privacy is now a recorded mechanism, not a name
+re-parsed everywhere (step 1).** The `--` rule was re-derived by
+`name.contains("--")` in ~9 places (a checker↔runtime drift hazard). It is now a
+**recorded per-module fact**: the marker is read once, where the binding is made,
+into a per-runtime private-set (`RuntimeCode::private`, mirroring `sealed`),
+consulted by one predicate (`Heap::is_private`) and exposed as the `private?`
+builtin. Populate is two-pronged — derived from bindings in `RuntimeCode::seeded`
+for the prelude (which is inserted, not re-`eval`ed) and recorded in `env_define`
+for runtime defs. The checks split by what they ask: those asking *"is this
+existing/loaded name private?"* read the record (`%refer` refer-all,
+`module_public_exports`, the `private?`/suggestion reflection); those governing
+*"what may an author type?"* stay **name-authoritative** — cross-module enforcement
+AND `(:use … :only …)` (runtime + checker) — because each can name a symbol not
+defined yet (an unloaded module; `:only` is lazy) and a recorded set cannot answer
+for a name it hasn't seen. (An adversarial review corrected an earlier draft that
+gated `:only` on `is_private(qual) || name` and called the name a "fallback": the
+disjunct is provably dead and the name is the load-bearing check there, so removing
+it — the tempting "step 2 cleanup" — would silently admit an undefined `--`-looking
+`:only` name.) The `--` marker is unchanged and remains the *populator* — behaviour
+is identical. Deferred **step 2**: whether to swap the marker itself. See devlog
+2026-08-04.
+
 ## ADR-147 — Package manager v2: tarball deps + a git-backed registry
 
 **Status:** accepted / implemented (2026-07-24); **the git-backed-registry half is SUPERSEDED by
