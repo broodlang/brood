@@ -16349,3 +16349,39 @@ stops filtering. Grep for the retired marker in predicates, not just in prose �
 
 Suite green throughout: Rust lib 461/461, in-language 4408/4408, `nest check` clean,
 `nest format --check` clean.
+
+## 2026-08-05 (cont.) — release 0.2.0, cross-repo migration wrap-up, and a fly.io outage
+
+**0.2.0 tagged and released.** The ADR-146 step-2 privacy migration (`defn-`/`def-`, the `--`
+convention deleted) plus the week's runtime work (ADR-213/214/215) shipped as **v0.2.0** — the
+workspace version bumped in the root `Cargo.toml` `[workspace.package]`, tagged `v0.2.0`. hive's
+install page (`hive/src/web/views/install.blsp`) advertises `BROOD_VERSION=v0.2.0`, and its docs
++ baked `brood-for-claude.md` were synced to the def-site privacy. The point of the hive bump was
+operational: its CI rebuilds the registry packages against the tagged language, so the published
+packages carry the migrated names.
+
+**The migration reached the last vendored consumer.** `hatch-demo` pinned pre-migration commits of
+`hatch`/`store-postgres`/`store`, so its vendored `_deps` still carried `--` names and the app
+failed to load (circular `:use`). `nest update` re-resolved `:ref "main"` to the migrated upstreams
+and re-vendored — 89/89 tests pass, lockfile relock committed (`_deps` is gitignored). This closes
+the cross-repo sweep: every sibling under `/home/wilhelm/src/broodlang/` is migrated and green.
+
+**A fly.io outage, diagnosed but not root-caused.** `brood.fly.dev` (the hive registry app, fly app
+`brood`, region lhr) was **down for ~a day** — the machine's process was alive (`started`) but not
+serving: the proxy reported "could not find a good candidate," the HTTP health check was CRITICAL
+("context deadline exceeded" on `/health`), and there were **no app logs and no restart events**.
+The Postgres DB (`hive-db`) was healthy throughout (3/3 passing). A `flyctl machine restart`
+recovered it immediately — health 1/1, `/health` → `{"status":"ok"}`, HTTP 200 in ~0.25 s.
+
+Diagnosis: **not memory.** No swap is configured, so a real OOM would have been an OOM-kill →
+process death → a restart event; none of that happened, and the post-restart baseline is healthy
+(127 MB / 459 MB used, load ~0.1). A live-but-unresponsive process with `/health`'s `SELECT 1`
+timing out *while the DB itself is healthy* points at a **CPU-spin / deadlock / stuck-resource**
+hang — most plausibly an **exhausted DB connection pool** (every request blocking on a free
+connection). Not confirmed: the historical CPU/mem curve is on the Grafana dashboard
+(`fly.io/apps/brood/metrics`), not the CLI, and the app logged nothing before hanging.
+
+**Open thread (ops, not the runtime):** fly only auto-restarts on a *crash*, so a silent hang sits
+until noticed — this one sat ~a day. The gap the outage exposed is that the health check went
+CRITICAL and nothing acted on it. Candidate fixes: an external uptime ping, or an
+auto-restart-on-unhealthy policy so a hung machine self-heals. Deferred pending the user's call.
