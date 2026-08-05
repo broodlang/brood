@@ -64,7 +64,7 @@
     (let (h (net/sse/sse-headers))
       (assert= (get h "Content-Type") "text/event-stream")
       (assert= (get h "Cache-Control") "no-cache")))
-  (test "sse-frame is the inverse of sse--parse-event (round-trip)"
+  (test "sse-frame is the inverse of sse-parse-event (round-trip)"
     (let ([blocks _] (net/sse/sse-frames (net/sse/sse-frame "a\nb" "tick"))
           ev (net/sse/sse-parse-event (first blocks)))
       (assert= (get ev :event) "tick")

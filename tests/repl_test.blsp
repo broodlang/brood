@@ -12,7 +12,7 @@
 
 (defmodule repl-test (:use-internals repl) (:use test) (:use repl))
 
-(describe "repl/repl--content? — ignore blank / comment-only input"
+(describe "repl/repl-content? — ignore blank / comment-only input"
   (test "whitespace-only input has no datum"
     (refute (repl/repl-content? "" 0 0 false))
     (refute (repl/repl-content? "   \n\t" 0 5 false)))
@@ -22,7 +22,7 @@
     (is (repl/repl-content? "  (+ 1 1)" 0 9 false))
     (is (repl/repl-content? "; note\n(+ 1 1)" 0 14 false))))
 
-(describe "repl/repl--incomplete? — the read-another-line signal"
+(describe "repl/repl-incomplete? — the read-another-line signal"
   (test "the reader's E0002 (incomplete input) error is incomplete"
     (is (repl/repl-incomplete? {:code "E0002" :kind :parse :message "unexpected end of input"})))
   (test "a real error (different code) is not incomplete"
@@ -32,14 +32,14 @@
     (refute (repl/repl-incomplete? "boom"))
     (refute (repl/repl-incomplete? 42))))
 
-(describe "repl/repl--eval-print — completeness reporting"
+(describe "repl/repl-eval-print — completeness reporting"
   (test "a partial form reports :more (so the loop reads another line)"
     ;; eval-string reads all forms before evaluating any, so an unclosed form
     ;; raises E0002 at read time with nothing evaluated — silent, no output.
     (assert= (repl/repl-eval-print "(+ 1") :more)
     (assert= (repl/repl-eval-print "(str \"open") :more)))
 
-(describe "repl/repl--error-message — rendering caught values"
+(describe "repl/repl-error-message — rendering caught values"
   (test "a built-in error map renders kind + message"
     (assert= (repl/repl-error-message {:kind :type :message "bad arg"})
       "type error: bad arg")
@@ -82,7 +82,7 @@
     (is (not (nil? (repl/repl-command-for "expand1"))))
     (is (nil? (repl/repl-command-for "no-such-cmd"))))
 
-  (test "repl--meta? recognises a registered `,cmd` and rejects a plain form"
+  (test "repl-meta? recognises a registered `,cmd` and rejects a plain form"
     (is (repl/repl-meta? ",doc foo"))
     (is (repl/repl-meta? ",help"))
     (is (not (repl/repl-meta? "(+ 1 2)")))
@@ -123,7 +123,7 @@
 ;; Cross-process: the error map crosses a heap boundary (send deep-copies it)
 ;; before formatting, so this proves the structured-error path survives the
 ;; copy-on-send round-trip — not just same-heap formatting.
-(describe "repl/repl--error-message across processes"
+(describe "repl/repl-error-message across processes"
   :isolated
 
   (test "an error map sent between processes still formats correctly"

@@ -13,7 +13,7 @@
 ;; big-integer side, with an independent reference.
 ;;
 ;; Transcription notes. Upstream's `exact-integer-sqrt` has no Brood equivalent — `sqrt`
-;; is f64, which would be catastrophically wrong here — so `chudnovsky--isqrt` is a
+;; is f64, which would be catastrophically wrong here — so `chudnovsky-isqrt` is a
 ;; Newton iteration on exact integers, which is what a Scheme's `exact-integer-sqrt`
 ;; is anyway. It is the only code in this file that is not upstream's. `expt` -> `pow`
 ;; (exact for integer arguments, including the alternating `(pow -1 b)`), `quotient` ->

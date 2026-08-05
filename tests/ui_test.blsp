@@ -288,10 +288,10 @@
           r (overlay-route mixed {:mini true} "q" rec-fallback))
       (assert= (get r :typed) "q"))))
 
-;; ui--coalesce-drag — collapse a flood of per-cell mouse :drag events to the latest,
+;; ui-coalesce-drag — collapse a flood of per-cell mouse :drag events to the latest,
 ;; so a fast drag renders once at the final position instead of once per cell crossed.
 ; the key is still there
-(describe "ui--coalesce-drag"
+(describe "ui-coalesce-drag"
   (test "non-drag messages pass through untouched (incl. nil on timeout)"
     (assert= (editor/ui/ui-coalesce-drag "x") "x")
     (assert= (editor/ui/ui-coalesce-drag :tick) :tick)
@@ -309,10 +309,10 @@
         [:mouse :drag :left 7 7 []])
       (assert= (receive (m m) (after 200 :none)) "k"))))
 
-;; ui--drain-input — fold every input ALREADY queued into one turn (one render), so an
+;; ui-drain-input — fold every input ALREADY queued into one turn (one render), so an
 ;; app that streams async events into its own mailbox (a test/run feed, collab deltas)
 ;; doesn't pay one full frame per event. Opt-in per app via `:coalesce-input?`.
-(describe "ui--drain-input"
+(describe "ui-drain-input"
   ; a display whose :poll(0) returns the next queued message (any shape), nil when empty —
   ; like a real frontend at timeout, so the drain terminates on the empty queue.
   (defn- di-display
@@ -392,7 +392,7 @@
 ;; The one integration test drives `ui-run` with a `:now-fn` (the injected clock) and a
 ;; nil-returning poll, so a due timer fires without any real sleeping.
 
-(describe "ui--deadline — when a timer next wants to fire"
+(describe "ui-deadline — when a timer next wants to fire"
   ; fired → fire+ms
   (test "repeating: counts from the last fire, or from arm before the first fire"
     ; never fired → arm+ms
@@ -407,14 +407,14 @@
     (assert= (editor/ui/ui-deadline {:every 100 :idle? true} 1000 1200 1500) 1600)))
 
 ; repeating: deadline moved past fire
-(describe "ui--timer-live? — can the timer still fire"
+(describe "ui-timer-live? — can the timer still fire"
   (test "never-fired is live; a fired one-shot (deadline at-or-before fire) is done"
     ; never fired
     (is (editor/ui/ui-timer-live? nil 1100))
     ; one-shot: deadline == fire → done
     (is (not (editor/ui/ui-timer-live? 1100 1100)))
     (is (editor/ui/ui-timer-live? 1000 1100))))
-(describe "ui--clock-init — per-iteration clock bookkeeping"
+(describe "ui-clock-init — per-iteration clock bookkeeping"
   (test "first pass seeds last-input=now and arms each timer at now"
     (let (c (editor/ui/ui-clock-init {} {:a {:every 100}} 5000))
       (assert= (get c :last-input) 5000)
@@ -435,7 +435,7 @@
               5000))
       (assert= (get c :armed) {:a 50 :c 5000}))))
 
-(describe "ui--poll-ms — how long to park"
+(describe "ui-poll-ms — how long to park"
   ; overdue → 1
   (test "the soonest live deadline minus now, at least 1ms"
     (assert= (editor/ui/ui-poll-ms {:a {:every 100}}
@@ -460,7 +460,7 @@
       60000)))
 
 ; b's deadline (1050) is earlier than a's (1100)
-(describe "ui--fire — service the due timer"
+(describe "ui-fire — service the due timer"
   (test "a due timer fires [:timer name] and records the firing"
     (let (fr (editor/ui/ui-fire {:a {:every 100}}
                {:last-input 1000 :armed {:a 1000} :fired {}}
@@ -494,7 +494,7 @@
     (let (me (self))
       ;; an :after-0 timer is due immediately at the injected clock (constant 1000);
       ;; update quits on the first firing so the loop can't spin.
-      ; nil ⇒ timeout ⇒ ui--fire
+      ; nil ⇒ timeout ⇒ ui-fire
       (ui-run {:done false :timers {:beat {:after 0}} :now-fn (fn () 1000)}
         (fn (m c r) [])
         (fn (m input c r) (do (send me [:saw input]) (assoc m :done true)))

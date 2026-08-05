@@ -386,7 +386,7 @@
         else (net/http/not-found)))))
 
 ;; A valid [signature-hex pubkey-hex] over the release's canonical payload (name, version,
-;; checksum — the same bytes package--signing-payload builds), from a fresh keypair.
+;; checksum — the same bytes package-signing-payload builds), from a fresh keypair.
 (defn mock-sign (nm version checksum)
   (let (kp (crypto/keypair)
         payload (string->utf8-bytes (str nm "\n" version "\n" checksum)))
@@ -565,13 +565,13 @@
                          base)
                        (catch e (error-message e)))
             "no registry entry"))))
-  (test "registry--get-json parses a 2xx body and reports an error status"
+  (test "registry-get-json parses a 2xx body and reports an error status"
     (let (base (mock-registry-start (mock-registry-handler "greeter" "1.0.0" "greetings" "x" #b"")))
       (match (package/registry-get-json (str base "/api/v1/packages?q=greet"))
         ([:ok data] (assert= (get (first (get data :packages)) :name) "greeter")))
       (match (package/registry-get-json (str base "/api/v1/packages/nope/releases/9.9.9"))
         ([:error status _message] (assert= status 404)))))
-  (test "registry--search-line formats a hit"
+  (test "registry-search-line formats a hit"
     (assert= (package/registry-search-line {:name "greeter"
                                             :latest_version "1.0.0"
                                             :description "greetings"})

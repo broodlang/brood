@@ -8,7 +8,7 @@
 ;; mis-stages captured slots or drops a frame.
 ;;
 ;; A direct transcription of upstream `cpstak.scm`. Brood has no internal `define`, so
-;; the inner `tak` becomes a module-level private `cpstak--tak`; nothing else changes
+;; the inner `tak` becomes a module-level private `cpstak-tak`; nothing else changes
 ;; (the continuations stay `fn`s, the arithmetic stays integer).
 
 (defmodule gabriel/cpstak

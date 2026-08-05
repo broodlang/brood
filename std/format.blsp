@@ -582,7 +582,7 @@ retired the `comment-on-own-line?` distinction this used to need."
   (kids i n pair-ind nl acc)
   ;; Walk kids, emitting one name+value pair per line and each comment in place.
   ;; `nl` tracks newlines since the last emitted item (so a blank line between
-  ;; bindings survives). Mirrors render--body-pairs, but with no head, the pair
+  ;; bindings survives). Mirrors render-body-pairs, but with no head, the pair
   ;; indent for continuation lines, and same-line trailing comments hoisted above.
   (if (= i n)
     acc
@@ -627,7 +627,7 @@ retired the `comment-on-own-line?` distinction this used to need."
                     0
                     (str acc (render-pair-sep acc nl pair-ind false) pair-body))
                   ;; Keep a same-line trailing comment after its pair, where the author
-                  ;; wrote it (see render--body--at).
+                  ;; wrote it (see render-body-at).
                   (render-pair-walk kids
                     (inc tc)
                     n
@@ -640,7 +640,7 @@ retired the `comment-on-own-line?` distinction this used to need."
                       (comment-strip-trailing-nl (node-text (vector-ref kids tc)))))))))))))
 
 ;; ---- pair body emit (cond / case clauses) -----------------------------------
-;; Like render--body but consumes two structural forms per emission, joined by
+;; Like render-body but consumes two structural forms per emission, joined by
 ;; one space, one pair per line. Comments preserved on their own lines (a
 ;; comment between the two members of a pair is rare and won't render ideally;
 ;; the common case — a comment above a clause — works correctly).
@@ -926,7 +926,7 @@ retired the `comment-on-own-line?` distinction this used to need."
                 0
                 (format-source-glue acc nl form-block))
               ;; Keep a top-level form's same-line trailing comment after it, where the
-              ;; author wrote it (see render--body--at).
+              ;; author wrote it (see render-body-at).
               (format-cst-root-walk kids
                 (inc tc-idx)
                 n

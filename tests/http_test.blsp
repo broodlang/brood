@@ -208,7 +208,7 @@
             (is (includes? resp "200 OK"))
             (is (includes? resp "<h1>brood</h1>")))))))
   (test "a truncated request head (no blank line, peer drops) doesn't kill the server"
-    ;; Regression: http--read-raw did (subbytes head 0 -1) on a head with no
+    ;; Regression: http-read-raw did (subbytes head 0 -1) on a head with no
     ;; terminator, which threw and killed the connection's worker process
     ;; (leaking the fd) — a remotely-triggerable crash. Now the malformed
     ;; request is closed cleanly and the server keeps serving.

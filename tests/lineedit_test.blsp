@@ -209,7 +209,7 @@
       (assert= (get a :search) nil)
       (assert= (get a :point) 0))))
 
-(describe "lineedit/lineedit--apply-completion — pure (candidates injected)"
+(describe "lineedit/lineedit-apply-completion — pure (candidates injected)"
   (test "a unique candidate is inserted in full"
     (let (s (editor/lineedit/lineedit-move (le-keys (le-fresh) (list "r" "e" "d" "u")) 4))
       (assert= (get (editor/lineedit/lineedit-apply-completion s 0 "redu" (list "reduce")) :text)
@@ -252,7 +252,7 @@
       (is (any? (fn (c) (= c "str")) cands))
       (is (every? (fn (c) (starts-with? c "str")) cands)))))
 
-(describe "lineedit/lineedit--completion-rows — pure listing layout"
+(describe "lineedit/lineedit-completion-rows — pure listing layout"
   (test "candidates lay out across in equal columns, one row when they fit"
     ;; widest is 6 ("mapcat") -> colw 8; room 39 -> 4 columns, so all three on one row.
     (let (rows (editor/lineedit/lineedit-completion-rows (list "map" "max" "mapcat") 40))
@@ -312,7 +312,7 @@
       (assert= (get (editor/lineedit/lineedit-handle s :enter) :done) :submit)
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-c) :done) :cancel))))
 
-(describe "lineedit/lineedit--hint-pieces / overrides — analysis -> render data"
+(describe "lineedit/lineedit-hint-pieces / overrides — analysis -> render data"
   (test "a call in progress yields signature pieces headed by its name"
     (let (pieces (editor/lineedit/lineedit-hint-pieces "(map f " 7))
       (is (not (nil? pieces)))

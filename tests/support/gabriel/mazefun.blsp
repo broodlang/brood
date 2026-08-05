@@ -15,8 +15,8 @@
 ;; behaviour differs, and inside a module a local `def` shadows the prelude for the whole
 ;; file, so each is renamed rather than redefined:
 ;;
-;;   upstream `for`     -> `mazefun--tabulate`   (prelude `for` is the comprehension MACRO)
-;;   upstream `shuffle` -> `mazefun--shuffle`    (prelude `shuffle` is seeded differently)
+;;   upstream `for`     -> `mazefun-tabulate`   (prelude `for` is the comprehension MACRO)
+;;   upstream `shuffle` -> `mazefun-shuffle`    (prelude `shuffle` is seeded differently)
 ;;   upstream `foldl`   -> prelude `fold`        (same argument order, (acc x))
 ;;
 ;; `list-read` is prelude `nth`; `list-write` and `list-remove-pos` have no list-level
