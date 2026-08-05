@@ -15,11 +15,12 @@ writeup of the scheduler race, see
 [claude-demo-findings.md](claude-demo-findings.md); deeper rationale is in the cited
 ADRs / topic docs.
 
-## Index — all resolved (⌘F the `KI-N` to jump)
+## Index — status per issue (⌘F the `KI-N` to jump)
 
 | # | What | Status |
 |---|---|---|
-| KI-29 | node/observe tests orphan `brood` children — one found alive **9 days** later, ~15% CPU each | ⬜ **open** (recorded 2026-07-27, evidenced 2026-08-05) |
+| KI-30 | in-language tests never delete their `temp-dir`s — 4601 dirs / 168 MB of `/tmp` litter | ⬜ **open** (measured 2026-08-05) |
+| KI-29 | node/observe tests orphan `brood` children — one found alive **9 days** later, ~15% CPU each | ✅ **fixed** 2026-08-05 |
 | KI-28 | `clean_peer_exit_fires_nodedown_promptly` failed once, then passed on retry; output not captured | ⚠️ **watching** (seen once 2026-08-05) |
 | KI-27 | node tests drew their port from the OS **ephemeral** range, so an unrelated process could take it | ✅ **fixed** 2026-08-05 |
 | KI-25 | five JIT/VM suites cannot be re-run in one image (`--repeat-until-failure` fails on iteration 2) | ✅ **fixed** 2026-08-04 |
@@ -48,18 +49,46 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**One open issue (KI-29, a test-harness process leak) and one watch item (KI-28).** No open bug in
-the language, runtime or toolchain itself. Every other KI above is fixed, incidentally fixed, or a
-non-reproducing transient — each kept as a record with its regression test, so a recurrence is
-recognizable.
+**One open issue (KI-30, `/tmp` litter from the in-language suite) and one watch item (KI-28).** No
+open bug in the language, runtime or toolchain itself. Every other KI above is fixed, incidentally
+fixed, or a non-reproducing transient — each kept as a record with its regression test, so a
+recurrence is recognizable.
 
 ---
 
-## KI-29 — the node/observe tests orphan `brood` children · **open, recorded 2026-07-27, evidenced 2026-08-05**
+## KI-30 — the in-language tests never delete their `temp-dir`s · **open, measured 2026-08-05**
 
-**Why this is its own entry now.** It was written down as an "adjacent finding" inside KI-14, which
+**Filed as its own entry deliberately.** Found while fixing KI-29, and KI-29's lesson is that an
+adjacent finding recorded inside another entry is invisible. It is a *different* bug: litter on
+disk, not a process burning CPU and holding a port.
+
+**Measured.** 4601 `/tmp/brood-*` directories, **168 MB**, on an ordinary dev box:
+
+| prefix | dirs | from |
+|---|---|---|
+| `brood-feat-` | 1392 | `tests/project_test.blsp` |
+| `brood-reload-` | 926 | `tests/reload_watch_test.blsp` |
+| `brood-walk-` / `brood-skip-` / `brood-p2-` | 464 each | `tests/file_test.blsp`, `project_test.blsp` |
+| `brood-ambient-` / `brood-ambient2-` | 387 each | `tests/syntax_finalization_test.blsp` |
+
+**Cause.** 45 `(temp-dir …)` calls across 8 in-language test files and **zero** `delete-dir` calls —
+no test cleans up, so every suite run adds its whole set. Unlike KI-29 this happens on a completely
+green run; the count is simply how many times the suite has been run.
+
+**Fix direction.** `delete-dir` is recursive and idempotent, so it is one call per site. The design
+question worth settling first is whether a *failing* test should keep its directory for debugging —
+if so, cleanup belongs in a helper that only fires on success, not blindly at the end of the body.
+A `with-temp-dir` macro in `std/tool/test.blsp` taking a body would put it in one place instead of
+45; that is probably the right shape and is why this is not a two-minute fix.
+
+**Not a correctness risk** — nothing reads a stale dir (each name is freshly randomised). It is
+disk, and noise when reading `/tmp`.
+
+## KI-29 — the node/observe tests orphan `brood` children · **fixed 2026-08-05**
+
+**Why this became its own entry.** It was written down as an "adjacent finding" inside KI-14, which
 is *fixed* — so it read as closed, was counted as closed, and sat for nine days. A live bug filed
-under a fixed one is invisible.
+under a fixed one is invisible. (KI-30 is filed separately for exactly this reason.)
 
 **Evidence, 2026-08-05.** Three stray `brood` nodes were alive on this box at once:
 
@@ -70,23 +99,67 @@ under a fixed one is invisible.
 | `/tmp/brood-dist-nodedown-*/quitter.blsp` | 32 m | 15.6% |
 
 Together ~35% of a core, indefinitely, on a machine whose benchmark numbers are measured pinned to
-one core. Each is also a **live node**, listening, with the same `secret-test-cookie-16+` and the same
-`:a`/`:b` names every dist test uses — so the leak is a plausible source of exactly the
-once-in-a-hundred node-test flake KI-28 records.
+one core. Each is also a **live node**, listening, with the same `secret-test-cookie-16+` and the
+same `:a`/`:b` names every dist test uses — which is why it was KI-28's leading suspect.
 
-**Two distinct causes, only one of them a test bug.**
-1. A test binary that is killed rather than allowed to finish — nextest fail-fast, a `timeout`, a
-   `^C` — orphans the `brood` children it spawned, because they are not in a killed process group
-   and `Child` has no drop-kill. Two of the three above are from my own aborted runs.
-2. The 9-day-old observe child is from an ordinary run, so the observe/attach path leaks even when
-   its test completes normally. That one is a real test bug.
+**The cause: a test binary that is killed rather than allowed to finish** — nextest fail-fast, a
+`timeout`, a `^C`. `std::process::Child` has no drop-kill, so every `brood` child the binary had
+spawned is reparented and runs forever. Nothing fails when this happens, which is why it went
+unnoticed: a leak leaves no red test behind.
 
-**Fix direction** (not done): put spawned children in their own process group and kill the group
-from a guard object dropped at test end, so cause 1 cannot happen either. `crates/cli/tests/support/mod.rs`
-now exists as the one place to do it.
+**Fixed** in `crates/cli/tests/support/mod.rs` with `BroodChild`, a guard returned by
+`spawn_brood`/`spawn_brood_env` in place of a bare `Child`. Two *independent* nets, because neither
+covers the other's case:
 
-**Check for it with** `pgrep -af 'brood /tmp/brood-'`, and prefer that over trusting a green run —
-a leak leaves no test failure behind.
+1. **`Drop`** kills and reaps whatever is still running — for the test that panics between the
+   spawn and its `kill`, or returns early past it.
+2. **`PR_SET_PDEATHSIG(SIGKILL)`** in `pre_exec`, so the *kernel* kills the child when the thread
+   that spawned it terminates, however it terminates. This is the net that fixes the filed bug: a
+   SIGKILLed test binary runs no destructors, so net 1 is worth nothing there. It closes its own
+   race too — if the parent died in the window between the fork and the `prctl`, the signal was
+   already missed, so the child compares `getppid()` against the pid captured before the fork and
+   `_exit`s if it changed.
+
+Net 2 is exposed on its own as `dies_with_parent(&mut Command)` and applied to the four test files
+that merely `.output()` a one-shot `brood`/bundled-app run as well (`error_format_parity`,
+`checker_cross_module_ability`, `std_attribution`, `release_bundle`). Those cannot orphan on the
+happy path — `output()` blocks until the child exits — but a program that *hangs* while the binary
+is killed is the same leak, and this bug's lesson is that nothing reports it. The invariant is now
+uniform: every child a `cli` test starts dies with the test.
+
+**Two things the original entry got wrong**, both worth keeping:
+
+- **Cause 2 — "the observe/attach path leaks even when its test completes normally" — has no
+  mechanism, and is withdrawn.** It was inferred from the 9-day-old child being "from an ordinary
+  run", which was itself inferred from its age; age is not provenance. Read the test: all three
+  harnesses kill the target *before* asserting, so a run that completes cannot leak, and the only
+  non-killing exits are panics — i.e. cause 1 again. Verified: `cargo nextest run -p cli` is 46/46
+  with zero strays. (The fix covers this either way — PDEATHSIG does not care why.)
+- **The filed fix direction, a process group, is the wrong lever for cause 1** and was not taken.
+  Moving the child into its *own* group **removes** it from any group an outer tool might kill, and
+  nothing runs our group-kill when we are the one being SIGKILLed. A group buys only grandchildren,
+  which no test here creates (these programs are green processes, no `run-process`), and it costs a
+  pid-recycling hazard: `killpg` on a reaped leader's recycled pgid can signal an unrelated group.
+  `Child::kill` cannot — std caches the exit status, so a kill after a `wait` is a no-op rather
+  than a signal to a stranger's pid.
+
+**Covered by** `crates/cli/tests/child_cleanup.rs`. "Nothing leaked" is not observable from inside
+a passing test, so each test drives **one** net with the other defeated and asserts the child
+actually died: the `Drop` test spawns on the test's own thread (where the parent-death signal
+cannot have fired yet), and the PDEATHSIG test `mem::forget`s the guard so no destructor runs.
+Both were **verified by sabotage** — breaking each mechanism fails its own test at the 10 s
+deadline and leaves the other passing, and the PDEATHSIG sabotage reproduced the original leak
+live (a child outliving its dead test binary).
+
+**Also verified against the filed scenario itself**, since the unit tests stand in for it rather
+than perform it: `cargo nextest run -p cli --test distribution` was started, a test binary holding a
+live `brood` child was **SIGKILLed** mid-run, and three seconds later `pgrep -af 'brood /tmp/brood-'`
+was empty. Do this with a **bracketed** pattern (`'deps/[d]istribution-'`) — the unbracketed form
+matches the shell running it, which is the trap `CLAUDE.md` records, and it cost a run here by
+SIGKILLing the very shell doing the killing.
+
+**Check for a recurrence with** `pgrep -af 'brood /tmp/brood-'` — still the right instrument, since
+the class of bug is one that no test failure reports.
 
 ## KI-28 — a single unexplained `nodedown` flake · **watching, seen once 2026-08-05**
 
@@ -109,14 +182,14 @@ failed); and it did **not** recur in the next full `make test` (956/956, no flak
 KI-27 mechanism — under nextest this test's process asks for two ports and cannot wrap its slice,
 and concurrent test processes have near-consecutive pids and therefore disjoint slices.
 
-**One live suspect, worth checking first.** Orphaned test children (the leak recorded under KI-14)
-are real and confirmed 2026-08-05: three stray `brood` nodes were alive on this box, one for **9
+**Its one live suspect is now gone, which matters for reading a recurrence.** Orphaned test children
+(KI-29) were real and confirmed 2026-08-05: three stray `brood` nodes alive at once, one for **9
 days**, together burning ~35% of a core. A leaked node still *listening* on a port, with the same
 `secret-test-cookie-16+` and the same `:a`/`:b` names every dist test uses, is exactly the kind of
-thing that makes a node test fail once in a hundred runs. The new port band makes the simple
-collision impossible (a held port fails the bindability probe and is skipped), so this is a
-suspect, not a mechanism — but check `pgrep -af 'brood /tmp/brood-'` before chasing anything
-subtler.
+thing that makes a node test fail once in a hundred runs. **KI-29 is fixed as of 2026-08-05**, so a
+run since then starts from a box with no stray nodes on it — meaning a recurrence *after* that date
+can no longer be explained away by the leak, and is a stronger signal than the original sighting.
+Still worth confirming with `pgrep -af 'brood /tmp/brood-'` before chasing anything subtler.
 
 **If it recurs**, the printed B stderr should immediately separate "B never bound its port" from
 "A could not connect to a listening B"; a `connect` failure would then be a real runtime question
@@ -789,9 +862,10 @@ both distinct from the hang (each aborts rather than hangs, and neither is the r
   (`gc::flush_value`) already had the `stacker::maybe_grow` guard; the RUNTIME one was
   simply missed.
 
-**Adjacent finding, still open:** `nest observe`/attach tests leak a `brood` child — one was
-found alive 2h22m after its run (`/tmp/brood-observe-<pid>/target.blsp`, ~2.7% CPU).
-Independent of this bug, but a long session accumulates stray processes.
+**Adjacent finding, now its own entry and fixed:** `nest observe`/attach tests leaked a `brood`
+child — one found alive 2h22m after its run (`/tmp/brood-observe-<pid>/target.blsp`, ~2.7% CPU).
+Independent of this bug. Recording it *here*, inside a fixed entry, is what made it read as closed
+for nine days; it is **KI-29** now, and fixed 2026-08-05.
 
 ## KI-13 — cross-module return-type inference blows up exponentially in branch count · **FIXED 2026-07-27**
 

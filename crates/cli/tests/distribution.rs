@@ -1936,7 +1936,7 @@ fn cluster_mesh_simultaneous_joins_converge() {
     let mut hub = spawn_brood(&dir, "h.blsp", &hub_src);
     wait_until_listening(hub_port);
     // four spokes started back-to-back, all dialing the hub
-    let mut spokes: Vec<std::process::Child> = Vec::new();
+    let mut spokes: Vec<BroodChild> = Vec::new();
     for (i, &p) in spoke_ports.iter().enumerate() {
         let name = format!("s{i}");
         let src = format!(

@@ -16385,3 +16385,73 @@ connection). Not confirmed: the historical CPU/mem curve is on the Grafana dashb
 until noticed — this one sat ~a day. The gap the outage exposed is that the health check went
 CRITICAL and nothing acted on it. Candidate fixes: an external uptime ping, or an
 auto-restart-on-unhealthy policy so a hung machine self-heals. Deferred pending the user's call.
+
+## 2026-08-05 (cont.) — KI-29: a killed test binary orphaned its `brood` children, forever
+
+**The bug was invisible by construction, and that is the interesting part.** A leaked child
+produces no failing test, so the only way to notice is to go looking: `pgrep -af 'brood /tmp/brood-'`
+found a target node from the observe test **9 days 18 hours old**, still listening, still burning
+4% of a core on the machine whose benchmark rows are measured pinned to one core. It had been
+recorded on 2026-07-27 as an "adjacent finding" *inside KI-14* — a fixed entry — so it read as
+closed and sat.
+
+**Cause: `std::process::Child` has no drop-kill.** A test binary that is killed rather than allowed
+to finish — nextest fail-fast, a `timeout`, a `^C` — reparents every `brood` child it had spawned,
+and a parked node runs until the box reboots.
+
+**Fixed with two independent nets** in `crates/cli/tests/support/mod.rs`, because neither covers the
+other's case: a `BroodChild` guard whose `Drop` kills and reaps (the test that panics between the
+spawn and its `kill`), and `PR_SET_PDEATHSIG(SIGKILL)` in `pre_exec` so the *kernel* does it when
+the spawning thread dies (the SIGKILLed binary, where no destructor runs at all). The `prctl`'s own
+race is closed by comparing `getppid()` against the pid captured before the fork. `Deref`/`DerefMut`
+to `Child` meant ~90 existing call sites across the three harnesses compiled unchanged; only the
+`Vec<Child>` annotation in the mesh test and one `wait_with_output` (it consumes the `Child`, so it
+cannot come through `Deref`) needed touching.
+
+**Two claims in the filed issue were wrong, and both are worth keeping as corrections.**
+
+- **Its fix direction — a process group — is the wrong lever, and was not taken.** Moving the child
+  into its *own* group **removes** it from any group an outer tool might kill, and nothing runs our
+  group-kill when we are the process being SIGKILLed. A group buys only grandchildren, which no test
+  here creates, and it costs a pid-recycling hazard (`killpg` on a reaped leader's recycled pgid can
+  signal a stranger). `Child::kill` cannot: std caches the exit status, so a kill after a `wait` is
+  a no-op rather than a signal to someone else's pid. The plausible-sounding structural fix was
+  strictly worse than the boring one.
+- **"The observe path leaks even on a normal run" is withdrawn — it had no mechanism.** It was
+  inferred from the 9-day-old child being "from an ordinary run", which was itself inferred from its
+  age. *Age is not provenance.* Reading the test settles it: all three harnesses kill the target
+  before asserting, so a completed run cannot leak; the only non-killing exits are panics, i.e. the
+  same cause. Confirmed by `cargo nextest run -p cli` 46/46 with zero strays.
+
+**Extended to the four `.output()` sites** (`error_format_parity`, `checker_cross_module_ability`,
+`std_attribution`, `release_bundle`) via a standalone `dies_with_parent(&mut Command)`. They cannot
+orphan on the happy path — `output()` blocks until the child exits — but a *hung* program plus a
+killed binary is the same leak, and the whole lesson here is that nothing reports it. Uniform
+invariant beats a residual I would otherwise have to document forever.
+
+**Verified by sabotage, which is the only version of this test worth having.** "Nothing leaked" is
+not observable from inside a passing test, so `crates/cli/tests/child_cleanup.rs` drives *one* net
+per test with the other defeated — the `Drop` test spawns on the test's own thread (where the
+parent-death signal cannot have fired yet), the PDEATHSIG test `mem::forget`s the guard. Breaking
+each mechanism fails its own test at the 10 s deadline and leaves the other green, and the PDEATHSIG
+sabotage **reproduced the original bug live**: a child outliving its dead test binary, which I then
+had to kill by hand. Death is detected by reading `/proc/<pid>/stat` state rather than `kill(pid, 0)`,
+because an unreaped child is a zombie and would answer "alive" to a signal probe.
+
+**And once against the filed scenario itself**, because the unit tests *stand in for* it rather than
+perform it: a real `nextest` run was started, a test binary holding a live `brood` child was
+SIGKILLed mid-run, and three seconds later `pgrep -af 'brood /tmp/brood-'` was empty. That attempt
+cost one run to `CLAUDE.md`'s own recorded trap — `pgrep -f 'deps/distribution-'` matches the shell
+whose command line contains the pattern, so the kill list included my own shell and killed it
+mid-script. Bracket it (`'deps/[d]istribution-'`). Knowing the trap and walking into it anyway is
+apparently the normal outcome; the bracket habit is the only reliable defence.
+
+**One adjacent finding, filed as KI-30 rather than mentioned here** — which is the whole lesson of
+KI-29. The in-language suite has 45 `(temp-dir …)` calls across 8 test files and **zero**
+`delete-dir` calls: 4601 `/tmp/brood-*` directories, **168 MB**, all from green runs. Unlike KI-29
+it is disk, not CPU, and the fix wants a `with-temp-dir` helper in `std/tool/test.blsp` (one place,
+and a decision about whether a *failing* test should keep its dir for debugging) rather than 45
+edits.
+
+Gate: `cargo nextest run -p cli` 46/46, the new suite 2/2 plus both sabotage runs, rustfmt and
+clippy clean.

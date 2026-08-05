@@ -18,6 +18,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod support;
+
 fn repo_root() -> PathBuf {
     // .../crates/cli -> repo root
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -62,8 +64,8 @@ fn instrumented_lines() -> (BTreeMap<String, Vec<u32>>, TempFile) {
     )
     .unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_brood"))
-        .arg(&script.path)
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
+    cmd.arg(&script.path)
         .env("BROOD_COVERAGE", "1")
         .env("BROOD_NO_JIT", "1")
         // Line-coverage instrumentation is a VM-compiler pass (the `RecordLine`
@@ -72,9 +74,9 @@ fn instrumented_lines() -> (BTreeMap<String, Vec<u32>>, TempFile) {
         // the script on the tree-walker, where no lines get instrumented and the
         // attribution this test checks never happens.
         .env("BROOD_VM", "1")
-        .current_dir(repo_root())
-        .output()
-        .expect("run brood");
+        .current_dir(repo_root());
+    support::dies_with_parent(&mut cmd);
+    let out = cmd.output().expect("run brood");
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),

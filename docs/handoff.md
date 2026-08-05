@@ -13,14 +13,18 @@ suite **956/956** (nextest), in-language **4401/4401** — also green under
 clippy clean, both default and `--no-default-features` builds warning-clean, metamorphic
 differential clean across 4 engine configs. **Flake baseline** (2026-08-05): the in-language
 suite is clean over 3 iterations × 3 seeds in one image, and `live_migration` is 16/16 under
-self-contention. **One open issue and one watch item, neither in the runtime** — KI-29: the node and
-observe tests **orphan `brood` children** (one found alive 9 days later; ~35% of a core across three
-strays), which had been recorded since 2026-07-27 as an aside inside a *fixed* entry and so read as
-closed. Check `pgrep -af 'brood /tmp/brood-'`; the fix direction is a process-group kill from a drop
-guard in `crates/cli/tests/support/mod.rs`. And KI-28, a single unexplained `nodedown` flake
-seen once in a full run and not since (0/40 solo, 33/33 × 3 under nextest, absent from the next
-956/956 run); its diagnostic is armed, so a recurrence will explain itself. KI-27 was fixed
-2026-08-05: the three node-test harnesses
+self-contention. **One open issue and one watch item, neither in the runtime** — KI-30: the
+in-language tests never delete their `temp-dir`s (4601 dirs / 168 MB of `/tmp` litter, 45 `temp-dir`
+calls and zero `delete-dir`), which wants a `with-temp-dir` helper rather than 45 edits. And KI-28,
+a single unexplained `nodedown` flake seen once in a full run and not since (0/40 solo, 33/33 × 3
+under nextest, absent from the next 956/956 run); its diagnostic is armed, so a recurrence will
+explain itself — and now that KI-29 is fixed, a recurrence can no longer be blamed on a stray node.
+**KI-29 was fixed 2026-08-05**: the node/observe tests orphaned `brood` children (one found alive 9
+days later, ~35% of a core across three strays) because a *killed* test binary runs no destructors.
+`spawn_brood` now returns a `BroodChild` guard carrying two independent nets — `Drop` for a panicking
+test, `PR_SET_PDEATHSIG(SIGKILL)` for a SIGKILLed binary — each verified by sabotage. Its filed
+fix direction (a process group) was measured to be the *wrong* lever and not taken; see its entry.
+KI-27 was fixed 2026-08-05: the three node-test harnesses
 picked their ports out of the kernel's *ephemeral* range (32768–60999), so an unrelated process's
 client socket could take the port a test node was about to bind. They now share
 `crates/cli/tests/support/mod.rs` and allocate from a pid-sliced band below the ephemeral floor.

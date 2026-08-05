@@ -10,6 +10,8 @@
 
 use std::process::Command;
 
+mod support;
+
 static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Run the program at `path` under the given engine env, returning stderr. All
@@ -21,6 +23,7 @@ fn run_stderr(path: &std::path::Path, engine_env: &[(&str, &str)]) -> String {
     for (k, v) in engine_env {
         cmd.env(k, v);
     }
+    support::dies_with_parent(&mut cmd);
     let out = cmd.output().expect("run brood");
     String::from_utf8_lossy(&out.stderr).into_owned()
 }

@@ -32,3 +32,9 @@ brood = { path = "../lisp", default-features = false }
 # typo suggestions and uniform `--foo=bar`/`--foo bar` handling pay for
 # themselves. derive feature is the ergonomic path.
 clap = { version = "4", features = ["derive"] }
+
+# `PR_SET_PDEATHSIG` for the tests that run real `brood` children over loopback, so a child
+# cannot outlive the test binary that spawned it (KI-29 — one was found still listening nine
+# days later). Tests only, and already in the tree via the brood lib.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
