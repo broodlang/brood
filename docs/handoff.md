@@ -356,7 +356,7 @@ ADR-213/214/215 work):
   from ADR-215, i.e. from removing compilation off the *arrival* path. **An open-loop tail is
   where one-off per-process setup shows up**; a throughput row amortises it away.
 - **`spawn-live`** — still the worst row, but it moved for the first time provably: 2.56 → **2.13
-  s**, 8.40 → **6.24 CPU·s**, 1.75 → **1.61 GB**. Now **2.9× slower and 1.75× heavier** than the
+  s**, 8.40 → **6.24 CPU·s**, 1.75 → **1.58 GB**. Now **2.9× slower and 1.75× heavier** than the
   BEAM (was 3.4× / 1.9×). §1 has what's next.
 - **`supervisor`** — Brood 878 ms vs Elixir 449 ms, unchanged.
 - **Compute aggregate** — 2.9× the fastest, 3rd of seven, ahead of Elixir.
