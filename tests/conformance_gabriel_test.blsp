@@ -43,7 +43,8 @@
   (:use gabriel/nboyer)
   (:use gabriel/chudnovsky))
 
-(defn gb--forms (name)
+(defn- gb-forms
+  (name)
   "The s-expressions of the vendored `<name>.input`, in upstream's `(read)` order."
   ;; the prelude's bootstrap `path-join` is 2-arg (`path/join` is the variadic one)
   (corpus-forms (path-join (path-join (corpus-dir "gabriel") "data") (str name ".input"))))
@@ -55,10 +56,10 @@
 
 ;; nboyer.scm's header: "The correct number of rewrites is | n rewrites | 0 95024 |
 ;; 1 591777 | 2 1813975 | 3 5375678 | 4 16445406 | 5 51507739".
-(def gb--nboyer-rewrites {0 95024 1 591777 2 1813975})
+(def- gb-nboyer-rewrites {0 95024 1 591777 2 1813975})
 
 ;; OEIS A000170, the number of solutions to the n-queens problem, n = 1..10.
-(def gb--nqueens-solutions [1 0 0 2 10 4 40 92 352 724])
+(def- gb-nqueens-solutions [1 0 0 2 10 4 40 92 352 724])
 
 (describe "Gabriel benchmarks: whole programs with known answers"
   :tags
@@ -73,23 +74,23 @@
   (test "deriv — the whole derivative tree, not a number"
     ;; The result is a ~90-node s-expression, so this compares structure: a `cons` that
     ;; built the wrong shape fails even when every leaf is right.
-    (let (f (gb--forms "deriv"))
+    (let (f (gb-forms "deriv"))
       (assert= (deriv (nth f 1)) (nth f 2))))
 
   (test "mazefun — all 121 cells of a deterministically generated maze"
     ;; Purely functional generation from a fixed LCG seed, so the grid is fully
     ;; determined. One mis-flooded cavity changes one cell and fails.
-    (let (f (gb--forms "mazefun"))
+    (let (f (gb-forms "mazefun"))
       (assert= (make-maze (nth f 1) (nth f 2)) (nth f 3))))
 
   (test "primes — the list sieve up to 1000, every element in order"
-    (let (f (gb--forms "primes"))
+    (let (f (gb-forms "primes"))
       (assert= (primes<= (nth f 1)) (nth f 2))))
 
   (test "chudnovsky — ten exact big-integer values of π, 50 to 500 digits"
     ;; The big-integer oracle: ~1000-digit exact arithmetic throughout, and the answer
     ;; is checked digit for digit against upstream's.
-    (let (f (gb--forms "chudnovsky"))
+    (let (f (gb-forms "chudnovsky"))
       (assert= (pies (nth f 1) (nth f 2) (nth f 3)) (nth f 4))))
 
   ;; ---- (b) an older upstream stanza -------------------------------------------
@@ -99,7 +100,7 @@
     ;; only the prose between them is commented. The third — count 1700, then 18 12 6,
     ;; then 7 — is the classic Gabriel size and the only one that fits a test budget:
     ;; the current stanza (40 20 11) takes 3.5 s in Chez for ONE iteration.
-    (let (f (gb--forms "cpstak"))
+    (let (f (gb-forms "cpstak"))
       ; the stanza is where we think
       (assert= (take 5 (drop 10 f)) '(1700 18 12 6 7))
       (assert= (cpstak (nth f 11) (nth f 12) (nth f 13)) (nth f 14))))
@@ -131,13 +132,13 @@
       ; 58 symbols carry lemmas
       (assert= (count db) 58)
       (assert= (test-boyer nboyer-alist nboyer-term 0 db)
-        (get gb--nboyer-rewrites 0))))
+        (get gb-nboyer-rewrites 0))))
 
   (test "nqueens — solution counts for n = 1..10 (OEIS A000170)"
     ;; Upstream's own stanza is n=13 -> 73712, excluded at ~40 s here (see the README).
     ;; The published sequence prefix is a stronger oracle anyway: ten independent
     ;; answers, including the two n with no solutions at all.
-    (dolist (p (enumerate gb--nqueens-solutions))
+    (dolist (p (enumerate gb-nqueens-solutions))
       (let ([i want] p)
         (assert= (nqueens (+ i 1)) want)))))
 
@@ -156,7 +157,7 @@
     (let (db (setup-boyer))
       (dolist (n [1 2])
         (assert= (test-boyer nboyer-alist nboyer-term n db)
-          (get gb--nboyer-rewrites n)))))
+          (get gb-nboyer-rewrites n)))))
 
   (test "nqueens — n=11, 2680 solutions"
     ;; One size past the fast block: ~1.3 s, where n=12 is ~7 s and n=13 ~40 s.

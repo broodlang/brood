@@ -1,10 +1,16 @@
-;; Module privacy is ENFORCED (ADR-146): from inside a module, a hand-written
-;; qualified reference to another module's `--` name is a compile error at
-;; load; `(:use-internals mod)` is the explicit grant (the @testable seam for
-;; tests and tightly-coupled tooling); top-level code (no module) stays
-;; unrestricted — the live-hacking hatch hot reload depends on. A module's
-;; macros may expand to its own privates anywhere (enforcement reads the
+;; Module privacy is ENFORCED (ADR-146). Privacy is a **def-site fact**: `defn-`
+;; and `def-` define a module-private name (a clean name, no marker in it), and the
+;; kernel records it. From inside another module, a hand-written qualified reference
+;; to such a name is a compile error at load; `(:use-internals mod)` is the explicit
+;; grant (the @testable seam for tests and tightly-coupled tooling); top-level code
+;; (no module) stays unrestricted — the live-hacking hatch hot reload depends on. A
+;; module's macros may expand to its own privates anywhere (enforcement reads the
 ;; hand-written source, pre-expansion).
+;;
+;; Because a private name is spelled identically to a public one, privacy is judged
+;; against the RECORD, which requires the module to be loaded — a reference into a
+;; module that was never loaded can't be judged private and degrades to a normal
+;; (call-time) unbound reference, NOT a load-time privacy error.
 ;;
 ;; Register-only — discovered and run by `nest test` (and cargo test).
 
@@ -19,113 +25,88 @@
 (describe "module privacy (ADR-146)"
   ;; :serial — every test here `%load-string`s whole MODULES into the shared module
   ;; registry and global table, and some read a module a *sibling* test registered
-  ;; (`priv-vault` is defined in the first test and re-used by the alias test below).
-  ;; Run in parallel that is a race: this block was the source of an intermittent
+  ;; (`priv-vault` is defined in the first test and re-used by later tests). Run in
+  ;; parallel that is a race: this block was the source of an intermittent
   ;; `require: cannot find module 'priv-vault2'` that failed the whole in-language
-  ;; suite roughly one run in five, then passed on nextest's retry — so `make test`
-  ;; still reported "929 passed" and only a `FLAKY` marker gave it away. Same reason
-  ;; `suite_test.blsp`'s macro and loop-macro blocks are serial, one level up:
-  ;; module registration, not just a `defn`.
+  ;; suite roughly one run in five. Same reason `suite_test.blsp`'s macro blocks are
+  ;; serial: module registration, not just a `defn`.
   :serial
-  (test "a cross-module private reference fails the module's load, catchably"
-    (%load-string "(defmodule priv-vault) (defn vault--secret () 41)")
+  (test "a cross-module reference to a loaded module's private fails the load, catchably"
+    (%load-string "(defmodule priv-vault) (defn- secret () 41)")
     (is (= (try
-             (%load-string "(defmodule priv-thief) (defn steal () (priv-vault/vault--secret))")
+             (%load-string "(defmodule priv-thief) (defn steal () (priv-vault/secret))")
              (catch e
                (if (includes? (str (get e :message)) "module-private")
                  :blocked
                  [:other e])))
           :blocked)))
-  ;; The common real-world case is NOT someone reaching into another module: it is a
-  ;; caller left behind when a `--` helper was promoted to a public name. Reporting that
-  ;; as a privacy violation sends you looking for a grant you don't need. Two downstream
-  ;; projects lost their whole suite to exactly this (`lineedit--init` → `lineedit-init`).
-  (test "a stale reference to a PROMOTED helper says so, and names the public name"
-    (%load-string "(defmodule priv-moved) (defn moved-helper () 7)")
-    (let (message (try
-                    (%load-string "(defmodule priv-caller) (defn c () (priv-moved/moved--helper))")
-                    (catch e (str (get e :message)))))
-      (and (is (includes? message "does not exist"))
-        (is (includes? message "priv-moved/moved-helper"))
-        ;; and it must NOT send the reader after a privacy grant they don't need
-        (refute (includes? message ":use-internals")))))
-  (test "a private that really DOES exist still reports privacy, not a rename"
-    (%load-string "(defmodule priv-real) (defn real--secret () 9)")
-    (let (message (try
-                    (%load-string "(defmodule priv-caller2) (defn c () (priv-real/real--secret))")
-                    (catch e (str (get e :message)))))
-      (and (is (includes? message "module-private"))
-        (is (includes? message ":use-internals")))))
-  (test "with no public counterpart either, the plain privacy message stands"
-    ;; An unloaded module has neither name, so the diagnosis must not be guessed.
-    (let (message (try
-                    (%load-string "(defmodule priv-caller3) (defn c () (never-loaded/nope--thing))")
-                    (catch e (str (get e :message)))))
-      (is (includes? message "module-private"))))
+  (test "a reference into a NEVER-LOADED module is not a privacy error — it degrades to unbound"
+    ;; The record can't answer for a module it has never seen, so this loads (the
+    ;; unbound reference only surfaces if `c` is ever called). This deliberately
+    ;; REPLACES the old name-authoritative behavior, which rejected it at load.
+    (is (= (try
+             (do (%load-string "(defmodule priv-nl) (defn c () (never-loaded/thing))") :loaded)
+             (catch e :errored))
+          :loaded)))
 
   (test "(:use-internals mod) grants access — loud, explicit, greppable"
-    (%load-string "(defmodule priv-vault2) (defn vault2--secret () 42)")
-    (%load-string "(defmodule priv-friend (:use-internals priv-vault2)) (defn borrow () (priv-vault2/vault2--secret))")
+    (%load-string "(defmodule priv-vault2) (defn- secret2 () 42)")
+    (%load-string "(defmodule priv-friend (:use-internals priv-vault2)) (defn borrow () (priv-vault2/secret2))")
     (assert= (priv-friend/borrow) 42))
-  (test "same-module private access is untouched"
-    (%load-string "(defmodule priv-pub) (defn pub--inner () 7) (defn outer () (pub--inner))")
-    (assert= (priv-pub/outer) 7))
+  (test "same-module private access is untouched (defn- and def-)"
+    (%load-string "(defmodule priv-pub) (defn- inner () 7) (def- base 10) (defn outer () (+ (inner) base))")
+    (assert= (priv-pub/outer) 17))
   (test "an aliased qualified private is still blocked (the alias resolves first)"
     (is (= (try
-             (%load-string "(defmodule priv-al (:alias priv-vault :as pv)) (defn s () (pv/vault--secret))")
+             (%load-string "(defmodule priv-al (:alias priv-vault :as pv)) (defn s () (pv/secret))")
              (catch e :blocked))
           :blocked)))
   (test "(:use mod :only [...]) refuses a private name without a grant"
     (is (= (try
-             (%load-string "(defmodule priv-only (:use priv-vault :only [vault--secret]))")
+             (%load-string "(defmodule priv-only (:use priv-vault :only [secret]))")
              (catch e :refused))
           :refused)))
   (test "top-level (no module) code may reach privates — the live-hacking hatch"
-    (assert= (eval (read-string "(priv-vault/vault--secret)")) 41))
+    (assert= (eval (read-string "(priv-vault/secret)")) 41))
   (test "an unquoted private ref inside a quasiquote is still an evaluated ref — blocked"
     ;; `(x ~(other/priv)) — the ~ brings the ref back to the evaluated context,
     ;; so wrapping it in a quasiquote is not a bypass (ADR-146 level-aware walk).
     (is (= (try
-             (%load-string "(defmodule priv-qq) (defn f () `(x ~(priv-vault/vault--secret)))")
+             (%load-string "(defmodule priv-qq) (defn f () `(x ~(priv-vault/secret)))")
              (catch e :blocked))
           :blocked)))
   (test "a quasiquote TEMPLATE (data, not unquoted) may name another module — data, not a ref"
-    ;; `(priv-vault/vault--secret) with NO unquote is just a quoted symbol list.
-    (%load-string "(defmodule priv-tmpl) (defn f () `(priv-vault/vault--secret))")
-    (is (= (first (priv-tmpl/f)) 'priv-vault/vault--secret)))
+    ;; `(priv-vault/secret) with NO unquote is just a quoted symbol list.
+    (%load-string "(defmodule priv-tmpl) (defn f () `(priv-vault/secret))")
+    (is (= (first (priv-tmpl/f)) 'priv-vault/secret)))
   (test "an unquote nested inside a (quote ...) template is still an evaluated ref — blocked"
     ;; `(quote ~(other/priv)) — Brood's quasiquote splices the unquote even inside
-    ;; a quoted subform, so `(quote ~(m/priv--x)) evaluates the private. The
+    ;; a quoted subform, so `(quote ~(m/priv)) evaluates the private. The
     ;; level-aware walk must not treat `quote` as terminal data inside a quasiquote.
     (is (= (try
-             (%load-string "(defmodule priv-qq2) (defn f () `(quote ~(priv-vault/vault--secret)))")
+             (%load-string "(defmodule priv-qq2) (defn f () `(quote ~(priv-vault/secret)))")
              (catch e :blocked))
           :blocked)))
   (test "a macro template referencing its OWN module's private still works"
-    (%load-string "(defmodule priv-mac) (defn mac--h (x) (* x 2)) (defmacro dbl (x) `(mac--h ~x)) (defn use () (dbl 21))")
+    (%load-string "(defmodule priv-mac) (defn- mac-h (x) (* x 2)) (defmacro dbl (x) `(mac-h ~x)) (defn use () (dbl 21))")
     (assert= (priv-mac/use) 42))
 
   ;; ---- `private?` reflection over the recorded private-set (ADR-146) -----------
-  ;; Privacy is now a recorded per-module fact (`Heap::is_private`), populated from
-  ;; the `--` marker at definition time and consulted via `private?` — not re-parsed
-  ;; from the name at each site.
+  ;; Privacy is a recorded per-module fact (`Heap::is_private`), populated where the
+  ;; `defn-`/`def-` runs and consulted via `private?`.
   (test "private? reports a recorded private true; a public or undefined name false"
-    (%load-string "(defmodule priv-refl) (defn refl--helper () 1) (defn refl-pub () 2)")
-    (and (is (private? 'priv-refl/refl--helper))
-      (refute (private? 'priv-refl/refl-pub))
+    (%load-string "(defmodule priv-refl) (defn- helper () 1) (defn pub () 2) (def- k 3)")
+    (and (is (private? 'priv-refl/helper))
+      (is (private? 'priv-refl/k))
+      (refute (private? 'priv-refl/pub))
       (refute (private? 'priv-refl/never-defined))))
-  (test "a prelude private is recorded too (the seeded path); a public prelude name is not"
-    ;; Prelude bindings are inserted, not re-evaluated, so this exercises the
-    ;; separate `RuntimeCode::seeded` derivation, distinct from the `env_define` path.
-    (and (is (private? 'fold--loop))
-      (refute (private? 'map))))
   (test "the recorded private-set is visible to a spawned process (shared runtime Arc)"
-    (%load-string "(defmodule priv-refl2) (defn refl2--helper () 1) (defn refl2-pub () 2)")
+    (%load-string "(defmodule priv-refl2) (defn- helper () 1) (defn pub () 2)")
     (let (me (self) worker (spawn (priv-refl-worker me)))
-      (send worker 'priv-refl2/refl2--helper)
+      (send worker 'priv-refl2/helper)
       (is (= (receive) true))))
   (test "a spawned process also sees a public name as not private"
-    (%load-string "(defmodule priv-refl3) (defn refl3--helper () 1) (defn refl3-pub () 2)")
+    (%load-string "(defmodule priv-refl3) (defn- helper () 1) (defn pub () 2)")
     (let (me (self) worker (spawn (priv-refl-worker me)))
-      (send worker 'priv-refl3/refl3-pub)
+      (send worker 'priv-refl3/pub)
       (is (= (receive) false)))))

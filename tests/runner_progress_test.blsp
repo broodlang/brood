@@ -10,95 +10,95 @@
 
 (defmodule runner-progress-test (:use-internals test) (:use test))
 
-(defn progress-test--pass (name) (list "g" name nil 1))
-(defn progress-test--fail (name) (list "g" name (list (list nil (list "boom"))) 1))
-(defn progress-test--skip (name) (list "g" name nil 0 true))
+(defn- progress-test-pass (name) (list "g" name nil 1))
+(defn- progress-test-fail (name) (list "g" name (list (list nil (list "boom"))) 1))
+(defn- progress-test-skip (name) (list "g" name nil 0 true))
 ;; A result carrying a declaration site, as the runner now builds them.
-(defn progress-test--at (name where) (list "g" name nil 1 false where))
+(defn- progress-test-at (name where) (list "g" name nil 1 false where))
 
 (describe "test runner: progress marks"
   (test "a passing result marks a dot"
-    (assert= (with-out-str (test/progress-mark (list (progress-test--pass "t")))) "."))
+    (assert= (with-out-str (test/progress-mark (list (progress-test-pass "t")))) "."))
   (test "a failing result marks an F"
-    (assert= (with-out-str (test/progress-mark (list (progress-test--fail "t")))) "F"))
+    (assert= (with-out-str (test/progress-mark (list (progress-test-fail "t")))) "F"))
   (test "several results mark in order"
-    (assert= (with-out-str (test/progress-mark (list (progress-test--pass "a")
-                                                 (progress-test--fail "b")
-                                                 (progress-test--pass "c"))))
+    (assert= (with-out-str (test/progress-mark (list (progress-test-pass "a")
+                                                 (progress-test-fail "b")
+                                                 (progress-test-pass "c"))))
       ".F."))
   (test "a skipped result marks an orange circle, not a dot"
-    (assert= (with-out-str (test/progress-mark (list (progress-test--skip "t")))) "○"))
+    (assert= (with-out-str (test/progress-mark (list (progress-test-skip "t")))) "○"))
   (test "the three outcomes mark distinctly, in order"
-    (assert= (with-out-str (test/progress-mark (list (progress-test--pass "a")
-                                                 (progress-test--skip "b")
-                                                 (progress-test--fail "c"))))
+    (assert= (with-out-str (test/progress-mark (list (progress-test-pass "a")
+                                                 (progress-test-skip "b")
+                                                 (progress-test-fail "c"))))
       ".○F"))
   (test "no results marks nothing" (assert= (with-out-str (test/progress-mark nil)) ""))
   (test "colour is off when stdout is captured, so output stays parseable"
     ;; The gate is what keeps a piped run, a CI log, or an LLM reading the output
     ;; free of escape codes.
-    (and (assert= (test/test--green ".") ".")
-      (assert= (test/test--red "F") "F")
-      (assert= (test/test--orange "○") "○")
-      (assert= (test/test--dim "x") "x"))))
+    (and (assert= (test/test-green ".") ".")
+      (assert= (test/test-red "F") "F")
+      (assert= (test/test-orange "○") "○")
+      (assert= (test/test-dim "x") "x"))))
 
 ;; A skipped test still counts and still reports — that is the difference between
 ;; skipping it and deleting it — but it is not a pass.
 (describe "test runner: skipped tests are counted separately"
   (test "a skip is not counted as a failure"
-    (assert= (test/count-failed (list (progress-test--skip "t"))) 0))
+    (assert= (test/count-failed (list (progress-test-skip "t"))) 0))
   (test "skips are counted"
-    (assert= (test/count-skipped (list (progress-test--pass "a")
-                                   (progress-test--skip "b")
-                                   (progress-test--skip "c")))
+    (assert= (test/count-skipped (list (progress-test-pass "a")
+                                   (progress-test-skip "b")
+                                   (progress-test-skip "c")))
       2))
   (test "a 4-element result (a dead or timed-out worker) is never a skip"
     ;; Those are synthesised elsewhere without the flag, so the accessor must not
     ;; index past the end.
     (refute (test/r-skipped? (list "g" "t" nil 0))))
   (test "a failure is not a skip"
-    (refute (test/r-skipped? (progress-test--fail "t")))))
+    (refute (test/r-skipped? (progress-test-fail "t")))))
 
 (describe "test runner: --trace replaces the dots"
   :isolated
   (test "tracing suppresses the progress marks"
     (def *test-trace* true)
-    (assert= (with-out-str (test/progress-mark (list (progress-test--pass "t")))) ""))
+    (assert= (with-out-str (test/progress-mark (list (progress-test-pass "t")))) ""))
   (test "an ungrouped test traces just its name, with no group prefix"
     (def *test-trace* true)
     (let (line (with-out-str (test/trace-result (list "" "lonely" nil 1))))
       (and (is (includes? line "lonely")) (refute (includes? line "›")))))
   (test "trace prints nothing when off"
     (def *test-trace* false)
-    (assert= (with-out-str (test/trace-result (progress-test--pass "t"))) ""))
+    (assert= (with-out-str (test/trace-result (progress-test-pass "t"))) ""))
   (test "the dots come back once tracing is off"
     (def *test-trace* false)
-    (assert= (with-out-str (test/progress-mark (list (progress-test--pass "t")))) "."))
+    (assert= (with-out-str (test/progress-mark (list (progress-test-pass "t")))) "."))
   ;; A trace exists to tell you more than a dot: the outcome, how long it took, and
   ;; where the test lives.
   (test "a traced pass shows a tick, the label and the duration"
     (def *test-trace* true)
-    (let (line (with-out-str (test/trace-result (progress-test--pass "adds"))))
+    (let (line (with-out-str (test/trace-result (progress-test-pass "adds"))))
       (and (is (includes? line "✓"))
         (is (includes? line "adds"))
         (is (includes? line "1ms")))))
   (test "a traced failure shows a cross and how many assertions failed"
     (def *test-trace* true)
-    (let (line (with-out-str (test/trace-result (progress-test--fail "divides"))))
+    (let (line (with-out-str (test/trace-result (progress-test-fail "divides"))))
       (and (is (includes? line "✗")) (is (includes? line "1 failure")))))
   (test "a traced skip shows a circle and says skipped, with no duration"
     (def *test-trace* true)
-    (let (line (with-out-str (test/trace-result (progress-test--skip "needs db"))))
+    (let (line (with-out-str (test/trace-result (progress-test-skip "needs db"))))
       (and (is (includes? line "○"))
         (is (includes? line "skipped"))
         (refute (includes? line "0ms")))))
   (test "a traced test shows where it is declared"
     (def *test-trace* true)
-    (let (line (with-out-str (test/trace-result (progress-test--at "x" "tests/a_test.blsp:12"))))
+    (let (line (with-out-str (test/trace-result (progress-test-at "x" "tests/a_test.blsp:12"))))
       (is (includes? line "tests/a_test.blsp:12"))))
   (test "trace-result returns its result, so it can wrap the call site"
     (def *test-trace* false)
-    (let (r (progress-test--pass "t")) (assert= (test/trace-result r) r))))
+    (let (r (progress-test-pass "t")) (assert= (test/trace-result r) r))))
 
 ;; A test FILE that fails to load is reported as one clearly-located failure rather
 ;; than aborting the run with a printed error map. The everyday case: you are editing
@@ -106,30 +106,30 @@
 ;; being handed a `{:trace (…) :kind :unbound …}` dump) is the wrong answer.
 (describe "test runner: a test file that fails to load"
   (test "a structured load error becomes a located failure"
-    (let (r (test/test--load-failure-result {:file "/nope/tests/x_test.blsp"
-                                             :line 7
-                                             :col 3
-                                             :message "unbound symbol: nope"}))
+    (let (r (test/test-load-failure-result {:file "/nope/tests/x_test.blsp"
+                                            :line 7
+                                            :col 3
+                                            :message "unbound symbol: nope"}))
       (and (is (includes? (test/r-group r) "x_test.blsp"))
         (assert= (test/r-name r) "failed to load")
         (is (test/r-failed? r)))))
   (test "the message says what went wrong"
-    (let (r (test/test--load-failure-result {:file "/nope/x.blsp"
-                                             :line 1
-                                             :col 1
-                                             :message "unbound symbol: nope"}))
+    (let (r (test/test-load-failure-result {:file "/nope/x.blsp"
+                                            :line 1
+                                            :col 1
+                                            :message "unbound symbol: nope"}))
       (is (includes? (first (second (first (test/r-fails r)))) "unbound symbol: nope"))))
   (test "it carries the file and line for the anchor"
-    (let (r (test/test--load-failure-result {:file "/nope/x.blsp" :line 9 :col 1 :message "boom"}))
+    (let (r (test/test-load-failure-result {:file "/nope/x.blsp" :line 9 :col 1 :message "boom"}))
       (is (includes? (test/r-where r) ":9"))))
   (test "a plain-string error still produces a usable failure"
     ;; Not every raise is a structured map.
-    (let (r (test/test--load-failure-result "just a string"))
+    (let (r (test/test-load-failure-result "just a string"))
       (and (assert= (test/r-group r) "a test file")
         (is (test/r-failed? r))
         (is (includes? (first (second (first (test/r-fails r)))) "just a string")))))
   (test "a load failure counts as a failure, not a skip"
-    (let (r (test/test--load-failure-result "boom"))
+    (let (r (test/test-load-failure-result "boom"))
       (and (is (test/r-failed? r)) (refute (test/r-skipped? r))))))
 
 ;; The anchor line is the part of a failure you act on, so it must always be present
@@ -159,6 +159,6 @@
       (is (includes? (test/fail-anchor r rec) "grp › case"))))
   (test "a detail line's label is dimmed but its value is untouched"
     ;; Captured output has no colour, so the line must come back unchanged.
-    (assert= (test/test--dim-label "actual: 3") "actual: 3"))
+    (assert= (test/test-dim-label "actual: 3") "actual: 3"))
   (test "a detail line with no label is left alone"
-    (assert= (test/test--dim-label "no colon here") "no colon here")))
+    (assert= (test/test-dim-label "no colon here") "no colon here")))

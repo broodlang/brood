@@ -81,16 +81,17 @@ primitives. The kernel also provides the always-available file primitives
 (sig walk-files (string -> (list string)))
 
 ;; --- path helpers (complement prelude path-join / path-basename / parent-dir)
-(defn file--last-dot (s i)
+(defn- file-last-dot
+  (s i)
   (cond
     (< i 0) -1
     (= (substring s i (+ i 1)) ".") i
-    else (file--last-dot s (dec i))))
+    else (file-last-dot s (dec i))))
 
 (defn path-extension (path)
   "The extension of `path` including the leading dot (\"a/b.txt\" -> \".txt\"), or \"\" if there is none. A leading-dot name (\".bashrc\") has no extension."
   (let (base (path-basename path)
-        i (file--last-dot base (dec (string-length base))))
+        i (file-last-dot base (dec (string-length base))))
     (if (<= i 0) "" (substring base i (string-length base)))))
 (sig path-extension (string -> string))
 

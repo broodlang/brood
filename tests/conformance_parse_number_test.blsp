@@ -20,15 +20,16 @@
 
 ;; The f64 bit pattern the corpus expects for a line, and the input it expects it
 ;; from. Columns are fixed-width — see the corpus README.
-(defn pn--expected (line) (hex->int (substring line 14 30)))
-(defn pn--input (line) (substring line 31))
+(defn- pn-expected (line) (hex->int (substring line 14 30)))
+(defn- pn-input (line) (substring line 31))
 
 ;; nil when the line round-trips, else [input expected-hex actual-hex] for the report.
-(defn pn--mismatch (line)
+(defn- pn-mismatch
+  (line)
   (if (< (string-length line) 32)
     nil
-    (let (input (pn--input line)
-          want (pn--expected line)
+    (let (input (pn-input line)
+          want (pn-expected line)
           n (string->number input))
       (cond
         (nil? n) [input (substring line 14 30) "unparseable"]
@@ -36,23 +37,26 @@
         else [input (substring line 14 30) (float->bits n)]))))
 
 ;; Fold one file into [checked mismatches]; mismatches accumulate in reverse.
-(defn pn--scan-lines (lines checked bad)
+(defn- pn-scan-lines
+  (lines checked bad)
   (if (nil? lines)
     [checked bad]
-    (let (m (pn--mismatch (first lines)))
-      (pn--scan-lines (rest lines)
+    (let (m (pn-mismatch (first lines)))
+      (pn-scan-lines (rest lines)
         (if (< (string-length (first lines)) 32) checked (inc checked))
         (if m (cons m bad) bad)))))
 
-(defn pn--scan-files (files checked bad)
+(defn- pn-scan-files
+  (files checked bad)
   (if (nil? files)
     [checked (reverse bad)]
-    (let ([c b] (pn--scan-lines (corpus-lines (first files)) checked bad))
-      (pn--scan-files (rest files) c b))))
+    (let ([c b] (pn-scan-lines (corpus-lines (first files)) checked bad))
+      (pn-scan-files (rest files) c b))))
 
-(defn pn--scan ()
+(defn- pn-scan
+  ()
   "Every vendored case as [cases-checked mismatches]."
-  (pn--scan-files (corpus-files "parse-number") 0 nil))
+  (pn-scan-files (corpus-files "parse-number") 0 nil))
 
 (describe "parse-number-fxx: decimal text -> binary64 is bit-exact"
   :tags
@@ -64,7 +68,7 @@
     (is (> (count (corpus-files "parse-number")) 0)))
 
   (test "every vendored case parses to the exact expected bits"
-    (let ([checked bad] (pn--scan))
+    (let ([checked bad] (pn-scan))
       ;; The committed subset is 33,552 cases; `fetch-corpus.sh --full` raises it
       ;; into the millions. Either way, a truncated corpus should fail loudly.
       (is (> checked 30000))

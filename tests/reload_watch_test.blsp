@@ -10,11 +10,12 @@
 ;; Poll `reload-watch-test--wait` (bounded) instead of a selective `receive`:
 ;; a test-framework worker process may already carry other pending mailbox
 ;; traffic, and this keeps the assertion independent of message ordering.
-(defn reload-watch-test--wait (pred budget-ms)
+(defn- reload-watch-test-wait
+  (pred budget-ms)
   (cond
     (pred) true
     (<= budget-ms 0) false
-    else (do (sleep 100) (reload-watch-test--wait pred (- budget-ms 100)))))
+    else (do (sleep 100) (reload-watch-test-wait pred (- budget-ms 100)))))
 
 (describe "reload-on-change: on-reload callback"
   (test "fires after a successful reload, with the reloaded path"
@@ -33,7 +34,7 @@
           ;; sees no change at all (not a watcher bug — a race in the test).
           (sleep 100)
           (spit f "(def rwt-val 2)\n")
-          (is (reload-watch-test--wait (fn () (= (eval 'rwt-val) 2)) 3000))
+          (is (reload-watch-test-wait (fn () (= (eval 'rwt-val) 2)) 3000))
           (assert= (eval 'rwt-val) 2)))))
 
   (test "on-reload's own errors are caught, never propagated to the watcher"
@@ -55,9 +56,9 @@
           (reload-on-change f (fn (_p) (throw "boom")))
           (sleep 100)
           (spit f "(def rwt-val2 2)\n")
-          (is (reload-watch-test--wait (fn () (= (eval 'rwt-val2) 2)) 3000))
+          (is (reload-watch-test-wait (fn () (= (eval 'rwt-val2) 2)) 3000))
           (assert= (eval 'rwt-val2) 2)
           (sleep 100)
           (spit f "(def rwt-val2 3)\n")
-          (is (reload-watch-test--wait (fn () (= (eval 'rwt-val2) 3)) 3000))
+          (is (reload-watch-test-wait (fn () (= (eval 'rwt-val2) 3)) 3000))
           (assert= (eval 'rwt-val2) 3))))))

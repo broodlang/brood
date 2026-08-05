@@ -72,16 +72,18 @@ trigger, docs/type-soundness-reload.md).")
 ;; in Brood here — the same pattern the loader's `require--force-package` uses — so the
 ;; Rust reload primitive stays package-agnostic. A root-project / std / loose file has
 ;; no registered key and reloads exactly as before.
-(defn reload--package-key (path)
+(defn- reload-package-key
+  (path)
   ;; The rooted key (`"foo/b"`) whose file is `path`, or nil — reverse of
   ;; `*package-module-files*` (a root registry the package manager fills).
   (fold (fn (found kv) (if found found (if (= (second kv) path) (first kv) nil)))
     nil *package-module-files*))
 
-(defn reload--in-package-context (path thunk)
+(defn- reload-in-package-context
+  (path thunk)
   ;; Run `thunk` under `path`'s package context if it is a dep module, restoring the
   ;; enclosing context on both the normal and error paths; else run it as-is.
-  (let (key (reload--package-key path))
+  (let (key (reload-package-key path))
     (if (nil? key)
       (thunk)
       (let (prefix (symbol (first (string-split key "/")))
@@ -92,22 +94,23 @@ trigger, docs/type-soundness-reload.md).")
           (let (result (thunk)) (restore) result)
           (catch e (do (restore) (throw e))))))))
 
-(defn reload--loop (path last &optional on-reload)
+(defn- reload-loop
+  (path last &optional on-reload)
   (let (now (file-mtime path))
     (cond
       (nil? now)
         (do
           (println "[reload] missing:" path)
           (sleep *reload-poll-ms*)
-          (reload--loop path last on-reload))
+          (reload-loop path last on-reload))
       (= now last) (do
                      (sleep *reload-poll-ms*)
-                     (reload--loop path last on-reload))
+                     (reload-loop path last on-reload))
       else
         (do
           (try
             (do
-              (reload--in-package-context path (fn () (reload-defs path)))
+              (reload-in-package-context path (fn () (reload-defs path)))
               (println "[reload]" path)
               (when on-reload
                 (try
@@ -116,12 +119,13 @@ trigger, docs/type-soundness-reload.md).")
             (catch e
               (println "[reload] failed:" path "—" e)))
           (sleep *reload-poll-ms*)
-          (reload--loop path now on-reload)))))
+          (reload-loop path now on-reload)))))
 
 ;; Recursive .blsp collector. Returns a flat list of paths (relative to the
 ;; original `dir` argument). Mirrors the walk in std/project.blsp; lives here
 ;; too so std/reload stays prelude-only and require-able without project.
-(defn reload--collect-blsp (dir)
+(defn- reload-collect-blsp
+  (dir)
   (if (dir? dir)
     (fold
       (fn (acc entry)
@@ -129,7 +133,7 @@ trigger, docs/type-soundness-reload.md).")
           (cond
             ;; `cons`/`append-two` (share the accumulator tail) not `(append acc …)`
             ;; (recopies the growing accumulator per entry → O(files²) on a large tree).
-            (dir? p) (append-two (reload--collect-blsp p) acc)
+            (dir? p) (append-two (reload-collect-blsp p) acc)
             (ends-with? entry ".blsp") (cons p acc)
             else acc)))
       nil
@@ -148,22 +152,23 @@ trigger, docs/type-soundness-reload.md).")
 ;; File *deletions* aren't reaped here — the orphaned per-file watcher just
 ;; logs "[reload] missing:" on its own poll, which is a useful signal during
 ;; rename storms. A periodic prune could come later if it becomes annoying.
-(defn reload--dir-loop (dir known &optional on-reload)
-  (let (current (reload--collect-blsp dir))
+(defn- reload-dir-loop
+  (dir known &optional on-reload)
+  (let (current (reload-collect-blsp dir))
     (dolist (p current)
       (unless (member? p known)
         (println "[reload] +" p)
         (try
           (do
-            (reload--in-package-context p (fn () (load p)))
+            (reload-in-package-context p (fn () (load p)))
             (when on-reload
               (try
                 (on-reload p)
                 (catch e (println "[reload] on-reload failed:" p "—" e)))))
           (catch e (println "[reload] +load failed:" p "—" e)))
-        (spawn (reload--loop p (file-mtime p) on-reload))))
+        (spawn (reload-loop p (file-mtime p) on-reload))))
     (sleep *reload-scan-ms*)
-    (reload--dir-loop dir current on-reload)))
+    (reload-dir-loop dir current on-reload)))
 
 (defn reload-on-change (path &optional on-reload)
   "Watch `path` for changes and `load` it on every modification. Dispatches:
@@ -194,10 +199,10 @@ use yet)."
     ;;   2. spawn the dir watcher with `known` pre-seeded to that set, so
     ;;      it only fires on files that appear *after* startup, and does
     ;;      `load` + per-file watcher for each.
-    (let (initial (reload--collect-blsp path))
+    (let (initial (reload-collect-blsp path))
       (dolist (p initial)
-        (spawn (reload--loop p (file-mtime p) on-reload)))
-      (spawn (reload--dir-loop path initial on-reload))
+        (spawn (reload-loop p (file-mtime p) on-reload)))
+      (spawn (reload-dir-loop path initial on-reload))
       nil)
       else
-    (do (spawn (reload--loop path (file-mtime path) on-reload)) nil)))
+    (do (spawn (reload-loop path (file-mtime path) on-reload)) nil)))

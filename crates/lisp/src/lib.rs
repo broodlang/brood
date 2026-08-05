@@ -88,6 +88,11 @@ use error::LispError;
 struct SharedBundle {
     code: Arc<SharedCode>,
     bindings: Vec<(Symbol, Value)>,
+    /// The prelude's module-private names (ADR-146), captured from the builder heap
+    /// where `%mark-private` recorded them. Seeds each live runtime's private set,
+    /// since the prelude is inserted (not re-evaluated) and clean names can't be
+    /// re-derived. Parallel to `bindings`.
+    private: Vec<Symbol>,
 }
 
 static SHARED: LazyLock<SharedBundle> = LazyLock::new(|| {
@@ -214,10 +219,12 @@ fn boot_from_cache() -> Option<SharedBundle> {
             eval::eval(&mut heap, form, root).ok()?;
         }
         heap.set_current_file(None);
+        let private = heap.private_names_snapshot();
         let (code, bindings) = heap.freeze_as_shared_code(root);
         Some(SharedBundle {
             code: Arc::new(code),
             bindings,
+            private,
         })
     };
     let bundle = run();
@@ -296,6 +303,7 @@ fn boot_from_source() -> SharedBundle {
     heap.set_current_file(None);
     let t_eval = t_mark.elapsed();
     let t_mark = web_time::Instant::now();
+    let private = heap.private_names_snapshot();
     let (code, bindings) = heap.freeze_as_shared_code(root);
     let t_freeze = t_mark.elapsed();
     if cache_ok {
@@ -335,6 +343,7 @@ fn boot_from_source() -> SharedBundle {
     SharedBundle {
         code: Arc::new(code),
         bindings,
+        private,
     }
 }
 
@@ -370,7 +379,7 @@ impl Interp {
         // prelude reload). Inner processes spawned from this runtime share that
         // region (see `process::spawn`), so a `def` reaches them — while
         // separate runtimes (nodes) stay independent, each with its own.
-        let runtime = Arc::new(RuntimeCode::seeded(&SHARED.bindings));
+        let runtime = Arc::new(RuntimeCode::seeded(&SHARED.bindings, &SHARED.private));
         let mut heap = Heap::with_regions(Arc::clone(&SHARED.code), runtime);
         heap.set_global(EnvId::GLOBAL);
         // Abilities + the Display protocol are core — defined in the shared prelude

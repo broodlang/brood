@@ -61,17 +61,19 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
 (defdyn *resolver-time-budget-ms* 10000)
 (defdyn *resolver-max-steps* 2000000)
 
-(defn resolver--tick (ctx)
+(defn- resolver-tick
+  (ctx)
   (let (steps (get ctx :steps)
         n (+ 1 (table-get steps :n 0)))
     (table-put steps :n n)
     (when (and (= 0 (rem n 256))
             (> (- (now) (table-get steps :start 0)) *resolver-time-budget-ms*))
-      (resolver--budget-exceeded (str "did not finish within " *resolver-time-budget-ms* " ms")))
+      (resolver-budget-exceeded (str "did not finish within " *resolver-time-budget-ms* " ms")))
     (when (> n *resolver-max-steps*)
-      (resolver--budget-exceeded (str "exceeded " *resolver-max-steps* " search steps")))))
+      (resolver-budget-exceeded (str "exceeded " *resolver-max-steps* " search steps")))))
 
-(defn resolver--budget-exceeded (why)
+(defn- resolver-budget-exceeded
+  (why)
   (throw {:resolver-budget-exceeded true
           :message (str "dependency resolution "
                      why " — the version constraints are too tangled to resolve within the budget."
@@ -102,9 +104,10 @@ version strings that exist for it; `deps-fn` maps a name + a version to that rel
   "The package's available versions newest-first, plus the NONE sentinel; memoized."
   (if (= pkg pg-root-pkg)
     (list pg-root-version)
-    (pg-universe--fetch ctx pkg)))
+    (pg-universe-fetch ctx pkg)))
 
-(defn pg-universe--fetch (ctx pkg)
+(defn- pg-universe-fetch
+  (ctx pkg)
   (let (cache (get ctx :universes)
         hit (table-get cache pkg :miss))
     (if (= hit :miss)
@@ -236,9 +239,10 @@ all). NONE never matches — a version constraint is about a selected version."
 (defn pg-ic-rel (state ctx ic)
   ;; :satisfied (all terms hold → conflict), :contradicted (some term can't hold → moot),
   ;; [:almost pkg] (all but one hold; that one is the unit), or :inconclusive.
-  (pg-ic-rel--go state ctx (map-pairs (get ic :terms)) :none))
+  (pg-ic-rel-go state ctx (map-pairs (get ic :terms)) :none))
 
-(defn pg-ic-rel--go (state ctx terms unresolved)
+(defn- pg-ic-rel-go
+  (state ctx terms unresolved)
   (cond
     (empty? terms) (if (= unresolved :none) :satisfied [:almost unresolved])
     else
@@ -246,9 +250,9 @@ all). NONE never matches — a version constraint is about a selected version."
             rel (pg-term-rel state ctx (nth kv 0) (nth kv 1)))
         (cond
           (= rel :contradicted) :contradicted
-          (= rel :satisfied) (pg-ic-rel--go state ctx (rest terms) unresolved)
+          (= rel :satisfied) (pg-ic-rel-go state ctx (rest terms) unresolved)
           ;; inconclusive: the first is the unit candidate; a second makes it inconclusive
-          (= unresolved :none) (pg-ic-rel--go state ctx (rest terms) (nth kv 0))
+          (= unresolved :none) (pg-ic-rel-go state ctx (rest terms) (nth kv 0))
           else :inconclusive))))
 
 ;; The incompatibilities are held INDEXED by package (name → list of ics mentioning it), so
@@ -268,19 +272,21 @@ all). NONE never matches — a version constraint is about a selected version."
 ;; unit — the loose term's package must AVOID that term, so we derive its complement.
 
 (defn pg-propagate (state ctx index changed)
-  (pg-propagate--changed state ctx index (list changed)))
+  (pg-propagate-changed state ctx index (list changed)))
 
-(defn pg-propagate--changed (state ctx index changed)
+(defn- pg-propagate-changed
+  (state ctx index changed)
   (if (empty? changed)
     [:ok state]
     (let (pkg (first changed))
-      (match (pg-propagate--pkg state ctx index pkg (rest changed))
+      (match (pg-propagate-pkg state ctx index pkg (rest changed))
         ;; carry the state AT the conflict — it holds the derivations that made the
         ;; incompatibility satisfied, which conflict resolution must replay.
         ([:conflict ic conflict-state] [:conflict ic conflict-state])
-        ([:ok state2 changed2] (pg-propagate--changed state2 ctx index changed2))))))
+        ([:ok state2 changed2] (pg-propagate-changed state2 ctx index changed2))))))
 
-(defn pg-propagate--pkg (state ctx index pkg changed)
+(defn- pg-propagate-pkg
+  (state ctx index pkg changed)
   ;; scan only the incompatibilities that mention `pkg`; derive units, surface a conflict.
   (fold-until (fn (acc ic)
                 (let (state2 (nth acc 0) changed2 (nth acc 1))
@@ -316,7 +322,7 @@ all). NONE never matches — a version constraint is about a selected version."
 ;; Terminates in a solvable-from-here backjump, or in a proof of no-solution.
 
 (defn pg-conflict-resolution (state ctx ics ic)
-  (resolver--tick ctx)
+  (resolver-tick ctx)
   (let (chrono (reverse (get state :assigns)) ; oldest-first
         satisfier-idx (pg-satisfier-index state ctx ic chrono)
         satisfier (nth chrono satisfier-idx)
@@ -353,16 +359,17 @@ all). NONE never matches — a version constraint is about a selected version."
 ;; that prefix PLUS the satisfier already satisfies `ic` (1 — the root floor — if the
 ;; satisfier alone does it). This is the level where the conflict became inevitable.
 (defn pg-previous-satisfier-level (state ctx ic chrono satisfier-idx satisfier)
-  (pg-prev-level--go ctx ic chrono satisfier-idx satisfier 0 (pg-state)))
+  (pg-prev-level-go ctx ic chrono satisfier-idx satisfier 0 (pg-state)))
 
-(defn pg-prev-level--go (ctx ic chrono satisfier-idx satisfier j acc)
+(defn- pg-prev-level-go
+  (ctx ic chrono satisfier-idx satisfier j acc)
   (if (>= j satisfier-idx)
     0 ; only the satisfier matters → root floor (level 0)
     (let (acc2 (pg-apply ctx acc (nth chrono j))
           with-satisfier (pg-apply ctx acc2 satisfier))
       (if (= :satisfied (pg-ic-rel with-satisfier ctx ic))
         (max 0 (get (nth chrono j) :level))
-        (pg-prev-level--go ctx ic chrono satisfier-idx satisfier (+ j 1) acc2)))))
+        (pg-prev-level-go ctx ic chrono satisfier-idx satisfier (+ j 1) acc2)))))
 
 ;; Replay one assignment onto a scratch state (for the satisfier search) — like pg-derive/
 ;; pg-decide but without recording history, just updating `pos`.
@@ -442,7 +449,7 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
 ;; last-changed package; on a conflict, resolve+backjump and learn the cause; when quiet,
 ;; make the next decision (whose deps add incompatibilities and reveal new packages).
 (defn pg-solve (ctx index state changed-list)
-  (resolver--tick ctx)
+  (resolver-tick ctx)
   (match (pg-propagate-list state ctx index changed-list)
     ([:conflict ic conflict-state]
       ;; resolve against the state AT the conflict (with the derivations that caused it),
@@ -567,29 +574,31 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
 ;; count, so plain recursion could overflow on a large tangled graph. The deepest
 ;; (both-premises-external) step opens with "Because"; steps layered on it continue "And
 ;; because", and a step over two derived premises reads "Thus".
-(defn pg-report (ctx ic) (pg-report--drive ctx (list [:visit ic]) nil))
+(defn pg-report (ctx ic) (pg-report-drive ctx (list [:visit ic]) nil))
 
-(defn pg-report--drive (ctx work acc)
+(defn- pg-report-drive
+  (ctx work acc)
   (if (empty? work)
     (reverse acc)
     (let (item (first work)
           more (rest work))
       (match item
-        ([:emit ic] (pg-report--drive ctx more (cons (pg-report--line ctx ic) acc)))
+        ([:emit ic] (pg-report-drive ctx more (cons (pg-report-line ctx ic) acc)))
         ([:visit ic]
           (match (get ic :cause)
             ;; push the emit last so it pops after both premises' lines; visit the
             ;; left (deep) spine before the right, and only descend derived premises.
-            ([:derived a b] (pg-report--drive ctx
+            ([:derived a b] (pg-report-drive ctx
                               (append (if (pg-ic-external? a) nil (list [:visit a]))
                                 (append (if (pg-ic-external? b) nil (list [:visit b]))
                                   (cons [:emit ic] more)))
                               acc))
             ;; a bare leaf as the whole "derivation" (degenerate): emit its fact.
-            (leaf (pg-report--drive ctx more (cons (pg-explain-leaf leaf) acc)))))))))
+            (leaf (pg-report-drive ctx more (cons (pg-explain-leaf leaf) acc)))))))))
 
 ;; The one line a derived step contributes, inlining any external premise as its plain fact.
-(defn pg-report--line (ctx ic)
+(defn- pg-report-line
+  (ctx ic)
   (match (get ic :cause)
     ([:derived a b] (let (a-ext (pg-ic-external? a)
                           b-ext (pg-ic-external? b)
@@ -612,31 +621,32 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
   ;; distinct leaves of the derivation tree, in first-seen (left-to-right) order.
   ;; An explicit worklist keeps this tail-recursive, so a deep derivation (up to
   ;; one level per resolution step on a large tangled graph) can't overflow.
-  (pg-cause-leaves--loop (list cause) acc))
+  (pg-cause-leaves-loop (list cause) acc))
 
-(defn pg-cause-leaves--loop (stack acc)
+(defn- pg-cause-leaves-loop
+  (stack acc)
   (if (empty? stack)
     acc
     (let (cause (first stack)
           more (rest stack))
       (match cause
         ;; push the left cause on top so its leaves are visited before the right's.
-        ([:derived a b] (pg-cause-leaves--loop (cons (get a :cause) (cons (get b :cause) more))
+        ([:derived a b] (pg-cause-leaves-loop (cons (get a :cause) (cons (get b :cause) more))
                           acc))
-        (leaf (pg-cause-leaves--loop more
+        (leaf (pg-cause-leaves-loop more
                 (if (includes? acc leaf) acc (append acc (list leaf)))))))))
 
 (defn pg-explain-leaf (leaf)
   (match leaf
     ([:root pkg constraint] (str "your project requires "
                               (name pkg)
-                              (resolver--constraint-suffix constraint)))
+                              (resolver-constraint-suffix constraint)))
     ([:dep pkg version dep-name dep-constraint] (str (name pkg)
                                                   " "
                                                   version
                                                   " requires "
                                                   (name dep-name)
-                                                  (resolver--constraint-suffix dep-constraint)))))
+                                                  (resolver-constraint-suffix dep-constraint)))))
 
 (defn pg-leaf-packages (leaf)
   (match leaf
@@ -668,5 +678,6 @@ re-solve keeps existing pins instead of upgrading the whole graph to newest."
 ;; A requirement's constraint rendered as a trailing suffix — " <constraint>" for a real range,
 ;; or "" when it is unconstrained, so an unconstrained requirement reads "requires foo" rather
 ;; than the noisier "requires foo (any version)".
-(defn resolver--constraint-suffix (c)
+(defn- resolver-constraint-suffix
+  (c)
   (if (or (nil? c) (= c "")) "" (str " " c)))

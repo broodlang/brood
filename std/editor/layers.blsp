@@ -158,79 +158,88 @@ core knows nothing about buffers."
 
 ;; ---- resolution -------------------------------------------------------------
 
-(defn layers--list (ctx)
+(defn- layers-list
+  (ctx)
   "The context's layer list (highest precedence first), or () when it has none."
   (or (get ctx :layers) (list)))
 
-(defn layers--resolve (layer)
+(defn- layers-resolve
+  (layer)
   "A layer reference → its map. A map is itself; a symbol is resolved (late-bound,
 so redefining the layer hot-swaps it), like a keymap command."
   (if (map? layer) layer (eval layer)))
 
-(defn layers--name-of (layer)
+(defn- layers-name-of
+  (layer)
   "The `:name` of a layer reference (resolving it first)."
-  (get (layers--resolve layer) :name))
+  (get (layers-resolve layer) :name))
 
-(defn layers--find (ctx name)
+(defn- layers-find
+  (ctx name)
   "The first active layer reference named `name`, or nil."
-  (find (fn (l) (= name (layers--name-of l))) (layers--list ctx)))
+  (find (fn (l) (= name (layers-name-of l))) (layers-list ctx)))
 
 (defn layer-collect (ctx facet)
   "The `facet` value of every active layer that defines it, highest-precedence
 first (head of `:layers`); layers lacking the facet are dropped. The one generic
 resolver — keymaps and hooks are just facets over it."
   (remove nil?
-    (map (fn (l) (get (layers--resolve l) facet)) (layers--list ctx))))
+    (map (fn (l) (get (layers-resolve l) facet)) (layers-list ctx))))
 
 (defn active-layers (ctx)
   "The active layers of `ctx` as **resolved maps**, highest-precedence first — for
 inspecting whole layers (e.g. to skip `:system` ones when naming the mode), where
 `layer-collect` (which projects a single facet) isn't enough."
-  (map layers--resolve (layers--list ctx)))
+  (map layers-resolve (layers-list ctx)))
 
 ;; ---- stack ops (pure; fire no hooks) ----------------------------------------
 
 (defn push-layer (ctx layer)
   "Add `layer` (a reference) at highest precedence (the head). The low-level
 primitive — `activate-layer` is the hook-firing version."
-  (assoc ctx :layers (cons layer (layers--list ctx))))
+  (assoc ctx :layers (cons layer (layers-list ctx))))
 
 (defn remove-layer (ctx name)
   "Remove every active layer whose `:name` is `name`."
-  (assoc ctx :layers (remove (fn (l) (= name (layers--name-of l))) (layers--list ctx))))
+  (assoc ctx :layers (remove (fn (l) (= name (layers-name-of l))) (layers-list ctx))))
 
 (defn layer-active? (ctx name)
   "True if an active layer is named `name`."
-  (any? (fn (l) (= name (layers--name-of l))) (layers--list ctx)))
+  (any? (fn (l) (= name (layers-name-of l))) (layers-list ctx)))
 
-(defn layers--replace-base-list (lst layer)
+(defn- layers-replace-base-list
+  (lst layer)
   "Replace the base (last) element of `lst` with `layer`, or add it if `lst` empty."
   (if (empty? lst) (list layer) (append (but-last lst) (list layer))))
 
 ;; ---- hooks ------------------------------------------------------------------
 
-(defn layers--run-hook (hook ctx)
+(defn- layers-run-hook
+  (hook ctx)
   "Run one hook — a fn symbol resolved late and applied as `(ctx) -> ctx`. A throw
 leaves `ctx` unchanged, so a bad hook can't crash the loop."
   (try ((eval hook) ctx) (catch e ctx)))
 
-(defn layers--run-hooks (ctx hooks)
+(defn- layers-run-hooks
+  (ctx hooks)
   "Thread `ctx` through a list of hooks (each `(ctx) -> ctx`)."
-  (fold (fn (acc h) (layers--run-hook h acc)) ctx hooks))
+  (fold (fn (acc h) (layers-run-hook h acc)) ctx hooks))
 
-(defn layers--layer-event-hooks (layer event)
+(defn- layers-layer-event-hooks
+  (layer event)
   "The `event` hook list of a single layer reference, or ()."
-  (or (get-in (layers--resolve layer) [:hooks event]) (list)))
+  (or (get-in (layers-resolve layer) [:hooks event]) (list)))
 
-(defn layers--run-one (ctx layer event)
+(defn- layers-run-one
+  (ctx layer event)
   "Run just `layer`'s `event` hooks (the lifecycle path: `:activate`/`:deactivate`)."
-  (layers--run-hooks ctx (layers--layer-event-hooks layer event)))
+  (layers-run-hooks ctx (layers-layer-event-hooks layer event)))
 
 (defn run-event (ctx event)
   "Fan `event` across ALL active layers, highest precedence first, threading `ctx`
 through every hook. For broadcast events — `:on-focus`/`:on-blur`/`:on-close` and
 app-defined ones — *not* the lifecycle `:activate`/`:deactivate`."
-  (layers--run-hooks ctx
+  (layers-run-hooks ctx
     (mapcat (fn (hk) (or (get hk event) (list))) (layer-collect ctx :hooks))))
 
 ;; ---- lifecycle toggles ------------------------------------------------------
@@ -238,24 +247,24 @@ app-defined ones — *not* the lifecycle `:activate`/`:deactivate`."
 (defn activate-layer (ctx layer)
   "Turn a layer on: push `layer` at highest precedence, then run *its* `:activate`
 hooks. (Raw `push-layer` fires no hooks.)"
-  (layers--run-one (push-layer ctx layer) layer :activate))
+  (layers-run-one (push-layer ctx layer) layer :activate))
 
 (defn deactivate-layer (ctx name)
   "Turn off the layer named `name`: run its `:deactivate` hooks, then remove it. A
 no-op if no such layer is active."
-  (let (layer (layers--find ctx name))
+  (let (layer (layers-find ctx name))
     (if (nil? layer)
       ctx
-      (remove-layer (layers--run-one ctx layer :deactivate) name))))
+      (remove-layer (layers-run-one ctx layer :deactivate) name))))
 
 (defn replace-base-layer (ctx layer)
   "Swap the base (lowest-precedence, the 'major') layer for `layer`: deactivate the
 old base, set the new base, activate it. Layers stacked above are untouched — like
 changing major mode while minor modes stay on."
-  (let (old (last (layers--list ctx))
-        ctx1 (if (nil? old) ctx (layers--run-one ctx old :deactivate))
-        ctx2 (assoc ctx1 :layers (layers--replace-base-list (layers--list ctx1) layer)))
-    (layers--run-one ctx2 layer :activate)))
+  (let (old (last (layers-list ctx))
+        ctx1 (if (nil? old) ctx (layers-run-one ctx old :deactivate))
+        ctx2 (assoc ctx1 :layers (layers-replace-base-list (layers-list ctx1) layer)))
+    (layers-run-one ctx2 layer :activate)))
 
 ;; ---- keymap consumer (bridge to keymap) -------------------------------------
 
@@ -316,18 +325,20 @@ rule wins — a project can override a default."
   "The layer refs bound to `type`, or () if none."
   (or (get *type-layers* type) ()))
 
-(defn layers--file-matches? (file spec)
+(defn- layers-file-matches?
+  (file spec)
   "Does `file` satisfy a `:match` spec — a suffix string, or a predicate fn?"
   (if (string? spec) (ends-with? file spec) (spec file)))
 
-(defn layers--match-file (file rules)
+(defn- layers-match-file
+  (file rules)
   "Walk `rules` (newest-first); return the `:type` of the first whose `:match` fits
 `file`, else nil."
   (if (empty? rules)
     nil
-    (if (layers--file-matches? file (get (first rules) :match))
+    (if (layers-file-matches? file (get (first rules) :match))
       (get (first rules) :type)
-      (layers--match-file file (rest rules)))))
+      (layers-match-file file (rest rules)))))
 
 (defn buffer-type-for (buf)
   "The type of `buf`. An explicitly-set `:type` wins — it was either stamped by a
@@ -337,7 +348,7 @@ switch, and both should stick. When `:type` is nil (a freshly-created buffer), m
 `:fundamental`."
   (let (explicit (get buf :type)
         file (get buf :file)
-        matched (if (nil? file) nil (layers--match-file file *auto-type-by-file*)))
+        matched (if (nil? file) nil (layers-match-file file *auto-type-by-file*)))
     (or explicit matched :fundamental)))
 
 (defn set-buffer-type (buf type)
@@ -373,7 +384,7 @@ highest precedence); system layers come last."
 (defn compose-layers (ctxs)
   "Concatenate the `:layers` of `ctxs` in precedence order (first scope = highest) —
 the composite layer list for multi-scope dispatch, e.g. (focused-buffer app-model)."
-  (mapcat layers--list ctxs))
+  (mapcat layers-list ctxs))
 
 (defn scope-keymap (ctxs)
   "The merged active keymap across several scopes `ctxs` (first = highest
@@ -396,7 +407,7 @@ not teardown; its layers simply stop being consulted."
 
 (defn deactivate-all (ctx)
   "Deactivate every active layer (head-first), firing each `:deactivate`."
-  (fold (fn (c nm) (deactivate-layer c nm)) ctx (map layers--name-of (layers--list ctx))))
+  (fold (fn (c nm) (deactivate-layer c nm)) ctx (map layers-name-of (layers-list ctx))))
 
 (defn close-context (ctx)
   "Tear a context down: fan `:on-close` across its active layers — the async-cleanup

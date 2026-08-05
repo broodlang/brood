@@ -77,27 +77,30 @@ Used by `std/lineedit.blsp` (the REPL editor); pure, so independently testable."
 ;; The names that highlight as a *keyword* (special forms + core macros). Read once
 ;; from the `(special-forms)` primitive — the canonical Rust `SPECIAL_FORMS`, shared
 ;; with the LSP — so this can't drift from the runtime / tooling (ADR-052).
-(def hl--special-forms (special-forms))
+(def- hl-special-forms (special-forms))
 ;; As a SET (map → true) so `special-form?` is an O(1) hash lookup, not an O(n) list
 ;; scan: it runs on every head-position atom on the fontify hot path.
-(def hl--special-set (fold (fn (m s) (assoc m s true)) {} hl--special-forms))
+(def- hl-special-set (fold (fn (m s) (assoc m s true)) {} hl-special-forms))
 
 (defn special-form? (s)
   "True if string `s` names a Brood special form / core macro that should highlight
 as a keyword. Mirrors the LSP's SPECIAL_FORMS list."
-  (= true (get hl--special-set s)))
+  (= true (get hl-special-set s)))
 
 ;; ---- character classes ------------------------------------------------------
 
-(defn hl--ws? (c)
+(defn- hl-ws?
+  (c)
   (or (= c " ") (= c "\t") (= c "\n") (= c "\r") (= c ",")))
-(defn hl--open? (c) (or (= c "(") (= c "[") (= c "{")))
-(defn hl--close? (c) (or (= c ")") (= c "]") (= c "}")))
-(defn hl--bracket? (c) (or (hl--open? c) (hl--close? c)))
-(defn hl--delim? (c)
-  (or (hl--ws? c) (hl--bracket? c) (= c "\"") (= c ";")))
+(defn- hl-open? (c) (or (= c "(") (= c "[") (= c "{")))
+(defn- hl-close? (c) (or (= c ")") (= c "]") (= c "}")))
+(defn- hl-bracket? (c) (or (hl-open? c) (hl-close? c)))
+(defn- hl-delim?
+  (c)
+  (or (hl-ws? c) (hl-bracket? c) (= c "\"") (= c ";")))
 
-(defn hl--number? (tok)
+(defn- hl-number?
+  (tok)
   "True if `tok` reads as a number (so it colours as one rather than a symbol). A cheap
 first-char gate skips the `string->number` parse for the common case — an identifier
 that can't begin a number — since this runs on every atom on the fontify hot path."
@@ -109,14 +112,16 @@ that can't begin a number — since this runs on every atom on the fontify hot p
 ;; The inner scans run on the native `string-span-until` char-class scanner (O(run) in
 ;; Rust) rather than per-char Brood recursion — these feed the bracket/call matchers,
 ;; which are on the render hot path. The delimiter set mirrors `hl--delim?`.
-(def hl--delim-chars " \t\n\r,()[]{}\";")
+(def- hl-delim-chars " \t\n\r,()[]{}\";")
 
-(defn hl--to-eol (src i n)
+(defn- hl-to-eol
+  (src i n)
   "Index of the newline ending the line containing `i` (or `n` at end of input)."
   (min n (string-span-until src i "\n")))
 
 ; backslash: skip it and the escaped char
-(defn hl--string-end (src i n)
+(defn- hl-string-end
+  (src i n)
   "Index just past the closing quote of a string whose body starts at `i` (one past
 the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
   (let (j (string-span-until src i "\\\""))
@@ -124,10 +129,11 @@ the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
     (cond
       (>= j n) n
       (= (char-at src j) "\"") (inc j)
-      else (hl--string-end src (+ j 2) n))))
-(defn hl--atom-end (src i n)
+      else (hl-string-end src (+ j 2) n))))
+(defn- hl-atom-end
+  (src i n)
   "Index of the first delimiter at or after `i` — the end of an atom token."
-  (min n (string-span-until src i hl--delim-chars)))
+  (min n (string-span-until src i hl-delim-chars)))
 
 ;; ---- the lexer: source -> colour spans --------------------------------------
 
@@ -140,13 +146,14 @@ the opening quote), honouring `\\` escapes; `n` if the string is unterminated."
 ;; position decides special-form vs call vs plain), and `:open`/`:close` carry no
 ;; colour. The name is resolved to a face via `(face …)` at span time, so a live
 ;; restyle of `:syntax/*` takes effect on the next frame.
-(def hl--kind->face-name
+(def- hl-kind->face-name
   {:comment :syntax/comment
    :string :syntax/string
    :number :syntax/number
    :keyword :syntax/keyword})
 
-(defn hl--spans (toks after acc)
+(defn- hl-spans
+  (toks after acc)
   "Walk the `scan-tokens` stream into `[start end face]` colour spans, tracking head
 position (`after` — true just inside a `(`, carried across comments like the reader).
 Only `:symbol` needs position: head + special form → keyword face, head → call face,
@@ -156,21 +163,21 @@ else uncoloured. Accumulates in reverse."
     (let ([s e kind text] (first toks)
           rest (rest toks))
       (cond
-        (= kind :open) (hl--spans rest (= text "(") acc)
+        (= kind :open) (hl-spans rest (= text "(") acc)
         ; only `(` opens head position
-        (= kind :close) (hl--spans rest false acc)
-        (= kind :comment) (hl--spans rest after (cons [s e (face :syntax/comment)] acc))
+        (= kind :close) (hl-spans rest false acc)
+        (= kind :comment) (hl-spans rest after (cons [s e (face :syntax/comment)] acc))
         ; keeps `after`
         (= kind :symbol)
           (let (f (cond
                     (and after (special-form? text)) (face :syntax/special)
                     after (face :syntax/function)
                     else nil))
-            (hl--spans rest false (if (nil? f) acc (cons [s e f] acc))))
+            (hl-spans rest false (if (nil? f) acc (cons [s e f] acc))))
         else
-          (let (f (face (get hl--kind->face-name kind)))
+          (let (f (face (get hl-kind->face-name kind)))
             ; :string / :number / :keyword
-            (hl--spans rest false (if (nil? f) acc (cons [s e f] acc))))))))
+            (hl-spans rest false (if (nil? f) acc (cons [s e f] acc))))))))
 
 (defn highlight-spans (src)
   "Lexically tokenize Brood `src` into a list of `[start end face]` colour spans
@@ -179,7 +186,7 @@ strings, numbers, keywords, and head-position symbols (special forms vs calls).
 Whitespace and plain variable references carry no span (the default colour). The
 per-character scan is the native `scan-tokens`; this only assigns faces over the token
 stream (O(tokens)), so it stays fast enough for per-frame fontification."
-  (hl--spans (scan-tokens src) false '()))
+  (hl-spans (scan-tokens src) false '()))
 
 ;; ---- windowed highlighting (fontify just a viewport) ------------------------
 ;; A large buffer is too costly to lex whole every frame. The editor instead lexes
@@ -262,34 +269,36 @@ one-char range `[pos (inc pos) face]`."
 
 ;; ---- bracket matching -------------------------------------------------------
 
-(defn hl--fwd-match (full i n depth)
+(defn- hl-fwd-match
+  (full i n depth)
   "Scanning forward from `i` (just past an opener), the offset of the closer at
 `depth` 0, or -1. Skips strings/comments so their brackets don't count."
   (if (>= i n)
     -1
     (let (c (char-at full i))
       (cond
-        (= c "\"") (hl--fwd-match full (hl--string-end full (inc i) n) n depth)
-        (= c ";") (hl--fwd-match full (hl--to-eol full (inc i) n) n depth)
-        (hl--open? c) (hl--fwd-match full (inc i) n (inc depth))
-        (hl--close? c) (if (= depth 0) i (hl--fwd-match full (inc i) n (dec depth)))
-        else (hl--fwd-match full (inc i) n depth)))))
+        (= c "\"") (hl-fwd-match full (hl-string-end full (inc i) n) n depth)
+        (= c ";") (hl-fwd-match full (hl-to-eol full (inc i) n) n depth)
+        (hl-open? c) (hl-fwd-match full (inc i) n (inc depth))
+        (hl-close? c) (if (= depth 0) i (hl-fwd-match full (inc i) n (dec depth)))
+        else (hl-fwd-match full (inc i) n depth)))))
 
-(defn hl--opener-scan (full i n cp stack)
+(defn- hl-opener-scan
+  (full i n cp stack)
   "Forward scan maintaining a `stack` of opener offsets; on reaching closer `cp`,
 return the matching opener (top of stack) or -1. Skips strings/comments."
   (if (>= i n)
     -1
     (let (c (char-at full i))
       (cond
-        (= c "\"") (hl--opener-scan full (hl--string-end full (inc i) n) n cp stack)
-        (= c ";") (hl--opener-scan full (hl--to-eol full (inc i) n) n cp stack)
-        (hl--open? c) (hl--opener-scan full (inc i) n cp (cons i stack))
-        (hl--close? c)
+        (= c "\"") (hl-opener-scan full (hl-string-end full (inc i) n) n cp stack)
+        (= c ";") (hl-opener-scan full (hl-to-eol full (inc i) n) n cp stack)
+        (hl-open? c) (hl-opener-scan full (inc i) n cp (cons i stack))
+        (hl-close? c)
           (if (= i cp)
             (if (empty? stack) -1 (first stack))
-            (hl--opener-scan full (inc i) n cp (rest stack)))
-        else (hl--opener-scan full (inc i) n cp stack)))))
+            (hl-opener-scan full (inc i) n cp (rest stack)))
+        else (hl-opener-scan full (inc i) n cp stack)))))
 
 (defn bracket-match (full pos)
   "Given source `full` and cursor offset `pos`, return `[a b]` (the offsets of the
@@ -299,16 +308,16 @@ has none, or nil when the cursor isn't next to a bracket. Brackets inside string
 and comments are ignored."
   (let (n (string-length full)
         bi (cond
-             (and (> pos 0) (hl--bracket? (char-at full (dec pos)))) (dec pos)
-             (and (< pos n) (hl--bracket? (char-at full pos))) pos
+             (and (> pos 0) (hl-bracket? (char-at full (dec pos)))) (dec pos)
+             (and (< pos n) (hl-bracket? (char-at full pos))) pos
              else -1))
     (if (< bi 0)
       nil
       (let (c (char-at full bi))
-        (if (hl--open? c)
-          (let (m (hl--fwd-match full (inc bi) n 0))
+        (if (hl-open? c)
+          (let (m (hl-fwd-match full (inc bi) n 0))
             (if (< m 0) [bi :unmatched] [bi m]))
-          (let (m (hl--opener-scan full 0 n bi '()))
+          (let (m (hl-opener-scan full 0 n bi '()))
             (if (< m 0) [bi :unmatched] [m bi])))))))
 
 (defn enclosing-open (full pos)
@@ -319,11 +328,12 @@ doesn't count as nesting.
 Public because it is the one fact an auto-indenter needs — which form am I inside,
 and where does it start — and `enclosing-call` (right below) already computes it for
 signature hints; exposing it beats a second, subtly-different scan in the editor."
-  (hl--enc-scan full 0 pos (string-length full) '()))
+  (hl-enc-scan full 0 pos (string-length full) '()))
 
 ;; ---- enclosing call (for signature hints) -----------------------------------
 
-(defn hl--enc-scan (full i pos n stack)
+(defn- hl-enc-scan
+  (full i pos n stack)
   "Forward scan to `pos` maintaining a stack of open-bracket offsets; returns the
 innermost open bracket enclosing `pos`, or -1. Skips strings/comments (clamped at
 `pos`)."
@@ -331,27 +341,28 @@ innermost open bracket enclosing `pos`, or -1. Skips strings/comments (clamped a
     (if (empty? stack) -1 (first stack))
     (let (c (char-at full i))
       (cond
-        (= c "\"") (hl--enc-scan full (min pos (hl--string-end full (inc i) n)) pos n stack)
-        (= c ";") (hl--enc-scan full (min pos (hl--to-eol full (inc i) n)) pos n stack)
-        (hl--open? c) (hl--enc-scan full (inc i) pos n (cons i stack))
-        (hl--close? c) (hl--enc-scan full (inc i) pos n (rest stack))
-        else (hl--enc-scan full (inc i) pos n stack)))))
+        (= c "\"") (hl-enc-scan full (min pos (hl-string-end full (inc i) n)) pos n stack)
+        (= c ";") (hl-enc-scan full (min pos (hl-to-eol full (inc i) n)) pos n stack)
+        (hl-open? c) (hl-enc-scan full (inc i) pos n (cons i stack))
+        (hl-close? c) (hl-enc-scan full (inc i) pos n (rest stack))
+        else (hl-enc-scan full (inc i) pos n stack)))))
 
-(defn hl--datum-starts (full i end n acc)
+(defn- hl-datum-starts
+  (full i end n acc)
   "Start offsets (reverse order) of the complete datums in `[i, end)` at one nesting
 level — atoms, strings, and whole bracketed forms each count once."
   (if (>= i end)
     acc
     (let (c (char-at full i))
       (cond
-        (hl--ws? c) (hl--datum-starts full (inc i) end n acc)
-        (= c ";") (hl--datum-starts full (hl--to-eol full (inc i) n) end n acc)
-        (= c "\"") (hl--datum-starts full (hl--string-end full (inc i) n) end n (cons i acc))
-        (hl--open? c)
-          (let (m (hl--fwd-match full (inc i) n 0))
-            (hl--datum-starts full (if (< m 0) end (inc m)) end n (cons i acc)))
-        (hl--close? c) (hl--datum-starts full (inc i) end n acc)
-        else (hl--datum-starts full (hl--atom-end full (inc i) n) end n (cons i acc))))))
+        (hl-ws? c) (hl-datum-starts full (inc i) end n acc)
+        (= c ";") (hl-datum-starts full (hl-to-eol full (inc i) n) end n acc)
+        (= c "\"") (hl-datum-starts full (hl-string-end full (inc i) n) end n (cons i acc))
+        (hl-open? c)
+          (let (m (hl-fwd-match full (inc i) n 0))
+            (hl-datum-starts full (if (< m 0) end (inc m)) end n (cons i acc)))
+        (hl-close? c) (hl-datum-starts full (inc i) end n acc)
+        else (hl-datum-starts full (hl-atom-end full (inc i) n) end n (cons i acc))))))
 
 (defn enclosing-call (full pos)
   "Return `[callee arg-index]` for the innermost call `(…` enclosing cursor offset
@@ -365,48 +376,51 @@ the scan walks only the *current* defun, not every character above `pos`. This m
 eldoc O(enclosing-form) instead of O(pos) — instant versus a multi-second stall when the
 cursor sits deep in a large file."
   (let (n (string-length full)
-        op (hl--enc-scan full (safe-restart full pos) pos n '()))
+        op (hl-enc-scan full (safe-restart full pos) pos n '()))
     (if (or (< op 0) (not (= (char-at full op) "(")))
       nil
       (let (end (min pos n)
-            starts (reverse (hl--datum-starts full (inc op) end n '())))
+            starts (reverse (hl-datum-starts full (inc op) end n '())))
         (if (empty? starts)
           nil
           (let (cstart (first starts)
                 cchar (char-at full cstart))
-            (if (or (hl--open? cchar) (= cchar "\"") (= cchar ":"))
+            (if (or (hl-open? cchar) (= cchar "\"") (= cchar ":"))
               nil
-              (let (callee (substring full cstart (hl--atom-end full (inc cstart) n)))
-                (if (hl--number? callee)
+              (let (callee (substring full cstart (hl-atom-end full (inc cstart) n)))
+                (if (hl-number? callee)
                   nil
                   (let (afterc (dec (count starts))
-                        in-datum (and (> pos 0) (not (hl--delim? (char-at full (dec pos)))))
+                        in-datum (and (> pos 0) (not (hl-delim? (char-at full (dec pos)))))
                         argi (if in-datum (max 0 (dec afterc)) afterc))
                     [callee argi]))))))))))
 
 ;; ---- completion helpers (pure; candidates supplied by the caller) -----------
 
-(defn hl--sym-start (full i)
+(defn- hl-sym-start
+  (full i)
   "The offset where the symbol token ending at `i` begins."
-  (if (or (<= i 0) (hl--delim? (char-at full (dec i)))) i (hl--sym-start full (dec i))))
+  (if (or (<= i 0) (hl-delim? (char-at full (dec i)))) i (hl-sym-start full (dec i))))
 
 (defn symbol-prefix-at (full pos)
   "Return `[start prefix]` for the symbol token ending at cursor offset `pos` —
 `start` its offset, `prefix` its text — or `[pos \"\"]` when the cursor isn't on a
 symbol."
-  (let (s (hl--sym-start full pos)) [s (substring full s pos)]))
+  (let (s (hl-sym-start full pos)) [s (substring full s pos)]))
 
-(defn hl--cp2 (a b)
+(defn- hl-cp2
+  (a b)
   "The longest common prefix of two strings."
-  (hl--cp2--at a b 0 (min (string-length a) (string-length b))))
-(defn hl--cp2--at (a b i n)
+  (hl-cp2-at a b 0 (min (string-length a) (string-length b))))
+(defn- hl-cp2-at
+  (a b i n)
   (if (or (>= i n) (not (= (char-at a i) (char-at b i))))
     (substring a 0 i)
-    (hl--cp2--at a b (inc i) n)))
+    (hl-cp2-at a b (inc i) n)))
 
 (defn common-prefix (strs)
   "The longest common string prefix shared by every string in `strs` (\"\" when
 `strs` is empty or shares nothing)."
   (if (empty? strs)
     ""
-    (fold hl--cp2 (first strs) (rest strs))))
+    (fold hl-cp2 (first strs) (rest strs))))

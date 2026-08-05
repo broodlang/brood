@@ -48,7 +48,7 @@
           ;; Timestamp in positions 0-7 (p0) and 9-12 (p1), skipping dash at 8
           ts (str (substring u 0 8) (substring u 9 13)))
       (assert= 12 (string-length ts))
-      (is (uuid/uuid--all-hex? ts 0 12))))
+      (is (uuid/uuid-all-hex? ts 0 12))))
   (test "generates unique values"
     (let (a (uuid/uuid-v7) b (uuid/uuid-v7))
       (is (not= a b)))))

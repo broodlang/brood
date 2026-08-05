@@ -404,15 +404,15 @@
 
   (test "no active session is a friendly no-op, not a crash"
     ;; *debug-session* defaults to nil; the handler must tolerate that
-    (assert= nil (debug/debug--repl-resume ""))
-    (assert= nil (debug/debug--repl-step "")))
+    (assert= nil (debug/debug-repl-resume ""))
+    (assert= nil (debug/debug-repl-step "")))
 
   (test ",resume with no arg releases every parked process"
     (let (dbg (start-debugger) me (self))
       (spawn (with-debugger dbg (fn () (break "a" :x 1) (send me [:done :a]))))
       (spawn (with-debugger dbg (fn () (break "b" :x 2) (send me [:done :b]))))
       (assert= true (wait-until dbg (fn (s) (= 2 (count (get s :paused)))) 200))
-      (binding (*debug-session* dbg) (debug/debug--repl-resume ""))
+      (binding (*debug-session* dbg) (debug/debug-repl-resume ""))
       (assert= true (wait-until dbg (fn (s) (= 0 (count (get s :paused)))) 200))
       (dbg-stop dbg)))
 
@@ -421,10 +421,10 @@
       (spawn (with-debugger dbg (fn () (break "a" :x 1) (send me [:done :a]))))
       (spawn (with-debugger dbg (fn () (break "b" :x 2) (send me [:done :b]))))
       (assert= true (wait-until dbg (fn (s) (= 2 (count (get s :paused)))) 200))
-      (binding (*debug-session* dbg) (debug/debug--repl-resume "1"))
+      (binding (*debug-session* dbg) (debug/debug-repl-resume "1"))
       ;; exactly one released — the queue drops to a single parked process
       (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))
-      (binding (*debug-session* dbg) (debug/debug--repl-resume ""))
+      (binding (*debug-session* dbg) (debug/debug-repl-resume ""))
       (assert= true (wait-until dbg (fn (s) (= 0 (count (get s :paused)))) 200))
       (dbg-stop dbg)))
 
@@ -433,9 +433,9 @@
       (spawn (with-debugger dbg (fn () (break "a" :x 1) (send me [:done :a]))))
       (spawn (with-debugger dbg (fn () (break "b" :x 2) (send me [:done :b]))))
       (assert= true (wait-until dbg (fn (s) (= 2 (count (get s :paused)))) 200))
-      (binding (*debug-session* dbg) (debug/debug--repl-step ""))
+      (binding (*debug-session* dbg) (debug/debug-repl-step ""))
       (assert= true (wait-until dbg (fn (s) (= 1 (count (get s :paused)))) 200))
-      (binding (*debug-session* dbg) (debug/debug--repl-resume ""))
+      (binding (*debug-session* dbg) (debug/debug-repl-resume ""))
       (dbg-stop dbg))))
 
 ;; Path B (ADR-174): `break` auto-captures EVERY in-scope local via the `%scope`

@@ -19,17 +19,19 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 
 ;; The source text of module `key` (a string): a baked-in module if there is one,
 ;; else the first <key>.blsp found on *load-path*, else nil.
-(defn docs--source (key)
+(defn- docs-source
+  (key)
   (let (embedded (%builtin-module key))
     (if embedded
       embedded
-      (let (path (require--find (str key ".blsp") *load-path*)) (when path (slurp path))))))
+      (let (path (require-find (str key ".blsp") *load-path*)) (when path (slurp path))))))
 
 ;; The module docstring: a module's first top-level form, when it is a string
 ;; literal (mirrors the function-docstring rule). nil if there's no leading
 ;; string. The form is discarded when the module is *loaded*, so it is read here
 ;; from source.
-(defn docs--leading-doc (src)
+(defn- docs-leading-doc
+  (src)
   (let (form (read-first src))
     (cond
       (string? form) form
@@ -40,8 +42,9 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
       else nil)))
 
 ;; The bare module title from a file path: "a/b/foo.blsp" -> "foo".
-(defn docs--basename (path)
-  (let (i (path--last-slash path (dec (string-length path)))
+(defn- docs-basename
+  (path)
+  (let (i (path-last-slash path (dec (string-length path)))
         file (if (< i 0) path (substring path (inc i) (string-length path))))
     (if (ends-with? file ".blsp") (substring file 0 (- (string-length file) 5)) file)))
 
@@ -49,31 +52,34 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 
 ;; Names present in `after` but not `before` — the bindings a module introduced
 ;; between two (global-names) snapshots. global-names is sorted, so this is too.
-(defn docs--added (before after) (filter (fn (s) (not (member? s before))) after))
+(defn- docs-added (before after) (filter (fn (s) (not (member? s before))) after))
 
 ;; --- rendering ---------------------------------------------------------------
 
 ;; A value worth a full entry (signature + docstring): a function or a macro.
-(defn docs--documentable? (v) (or (fn? v) (= (type-of v) :macro)))
+(defn- docs-documentable? (v) (or (fn? v) (= (type-of v) :macro)))
 
 ;; Private by convention: names containing "--" (double-dash prefix).
 ;; These are skipped by (:use) refer-all and omitted from generated docs.
-(defn docs--private? (sym)
+(defn- docs-private?
+  (sym)
   (includes? (name sym) "--"))
 
 ;; One definition's Markdown: a `### (name args…)` heading (with a *(macro)* tag
 ;; for macros) followed by its docstring, or a placeholder when undocumented.
-(defn docs--entry (sym v)
+(defn- docs-entry
+  (sym v)
   (let (sig (pr-str (cons sym (arglist v)))
         d (doc v)
         suffix (if (= (type-of v) :macro) "  *(macro)*" ""))
     (str "### `" sig "`" suffix "\n\n" (if (nil? d) "_Undocumented._\n" (str d "\n")))))
 
 ;; The "Definitions" section: every public function/macro the module added.
-(defn docs--section-defs (syms)
+(defn- docs-section-defs
+  (syms)
   (let (defs (filter (fn (s)
-                       (and (docs--documentable? (eval s))
-                         (not (docs--private? s))))
+                       (and (docs-documentable? (eval s))
+                         (not (docs-private? s))))
                syms))
     (if (empty? defs)
       ""
@@ -81,26 +87,28 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
       ;; accumulator per entry, so a module's Definitions section was O(output²) in the
       ;; markdown it generates — the same shape that made `write-lines` take 1888 ms for
       ;; 16 000 lines (std/file.blsp).
-      (str "## Definitions\n\n" (apply str (map (fn (s) (str (docs--entry s (eval s)) "\n")) defs))))))
+      (str "## Definitions\n\n" (apply str (map (fn (s) (str (docs-entry s (eval s)) "\n")) defs))))))
 
 ;; The "Variables" section: public names the module bound to non-function values.
-(defn docs--section-vars (syms)
+(defn- docs-section-vars
+  (syms)
   (let (vars (filter (fn (s)
-                       (and (not (docs--documentable? (eval s)))
-                         (not (docs--private? s))))
+                       (and (not (docs-documentable? (eval s)))
+                         (not (docs-private? s))))
                syms))
     (if (empty? vars)
       ""
       (str "## Variables\n\n" (apply str (map (fn (s) (str "- `" (name s) "`\n")) vars))))))
 
 ;; Assemble one module's Markdown from its title, module doc, and added names.
-(defn docs--render (title mdoc syms)
+(defn- docs-render
+  (title mdoc syms)
   (str "# module "
     title
     "\n\n"
     (if (nil? mdoc) "" (str mdoc "\n\n"))
-    (docs--section-defs syms)
-    (docs--section-vars syms)))
+    (docs-section-defs syms)
+    (docs-section-vars syms)))
 
 ;; --- public entry points -----------------------------------------------------
 
@@ -110,18 +118,18 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
   "The Markdown documentation for the module in the file at `path`: load it and document every global it newly binds (each with its arglist and docstring)."
   (let (src (slurp path) before (global-names))
     (load path)
-    (docs--render (docs--basename path) (docs--leading-doc src) (docs--added before (global-names)))))
+    (docs-render (docs-basename path) (docs-leading-doc src) (docs-added before (global-names)))))
 
 ;; Markdown for a module named `modname` (symbol or string): resolve its source
 ;; (baked-in or on *load-path*), snapshot the globals, `require` it, and document
 ;; the names it added.
 (defn document-module (modname)
   "The Markdown documentation for the module named `modname` (a symbol or string), resolved baked-in or on `*load-path*`. Errors if it can't be found."
-  (let (key (name modname) src (docs--source key))
+  (let (key (name modname) src (docs-source key))
     (when (nil? src) (error "doc: cannot find module '" key "'"))
     (let (before (global-names))
       (require modname)
-      (docs--render key (docs--leading-doc src) (docs--added before (global-names))))))
+      (docs-render key (docs-leading-doc src) (docs-added before (global-names))))))
 
 ;; Markdown for the whole project: find it from the cwd, put its sources on the
 ;; load-path, and document each source file in turn.
@@ -144,21 +152,22 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 ;; reference? Drops private `foo--bar` helpers and raw `%primitive`s (the
 ;; bootstrap layer the prelude builds variadic ops on top of) — what's left is
 ;; what a user/agent actually calls.
-(defn docs--public? (sym)
+(defn- docs-public?
+  (sym)
   (let (nm (name sym))
     (and (not (includes? nm "--")) (not (starts-with? nm "%")))))
 
 (defn document-all ()
   "The Markdown reference for every *public* global currently bound in the image — each builtin and prelude function/macro with its signature and one-line summary. The complete primitive reference (`nest doc --all`); read this once instead of probing names one at a time. Opt-in std modules (`display`, `buffer`, `ansi`, …) aren't loaded here — `nest doc <module>` documents those."
-  (let (syms (filter docs--public? (global-names)))
+  (let (syms (filter docs-public? (global-names)))
     (str "# Brood — global reference\n\n"
       "Every public global bound in a fresh image: the Rust builtins plus the "
       "`std/prelude` functions and macros — i.e. everything callable without a "
       "`(require …)`. Generated from the live image (`nest doc --all`), so it is "
       "always in sync. Use `apropos`/`doc-search` to search it interactively; use "
       "`nest doc <module>` for an opt-in module (`display`, `buffer`, `ansi`, …).\n\n"
-      (docs--section-defs syms)
-      (docs--section-vars syms))))
+      (docs-section-defs syms)
+      (docs-section-vars syms))))
 
 (defn generate-docs (& args)
   "Print Markdown documentation to stdout: the whole project with no args, or a single module given its name. The policy behind `nest doc`."

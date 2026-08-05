@@ -274,7 +274,7 @@
 ;; single buffer rather than dripped.
 (defn sse-frames-1chunk (k)
   (let (blob (str utf8-lead (apply str (repeat k "event: tick\ndata: some payload here\n\n"))))
-    (count (first (net/sse/sse--frames blob)))))
+    (count (first (net/sse/sse-frames blob)))))
 
 ;; ---- string search: reverse, and a forward incremental scan -----------------
 
@@ -290,10 +290,11 @@
 ;; ---- run -------------------------------------------------------------------
 
 (println "std/ scale sweep — linear ~4x, quadratic ~16x")
-(def sweep--src-line
+(def- sweep-src-line
   "(defn compute-thing (alpha beta) (if (< alpha beta) (+ alpha 1) (str \"x\" beta)))\n")
-(defn sweep--src (k acc)
-  (if (= k 0) (cons utf8-src-lead acc) (sweep--src (- k 1) (cons sweep--src-line acc))))
+(defn- sweep-src
+  (k acc)
+  (if (= k 0) (cons utf8-src-lead acc) (sweep-src (- k 1) (cons sweep-src-line acc))))
 ;; A SEQUENCE of structural motions across one buffer — the editor's repeated
 ;; `forward-sexp`, not one motion. Each motion calls `sexp/narrow`, which calls the native
 ;; `scan-form-start` TWICE, and that is a forward lexical pass from offset 0 by design (a
@@ -303,7 +304,7 @@
 ;; asymptote needs cached lexer state or a bounded safe-restart, which the pure
 ;; `(text point) -> point` API forecloses. See docs/handoff.md.
 (defn sexp-motions (k)
-  (let (text (join "" (sweep--src k nil)))
+  (let (text (join "" (sweep-src k nil)))
     (fold (fn (p _) (let (np (point-forward text p)) (if (or (nil? np) (= np p)) p np)))
       0
       (range 0 k))))

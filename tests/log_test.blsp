@@ -26,8 +26,8 @@
       (after 5000 (reverse (cons :timeout acc))))))
 
 ;; Tail-recursive [0, n).
-(defn lt-upto (n) (lt-upto--down (- n 1) nil))
-(defn lt-upto--down (i acc) (if (< i 0) acc (lt-upto--down (- i 1) (cons i acc))))
+(defn lt-upto (n) (lt-upto-down (- n 1) nil))
+(defn- lt-upto-down (i acc) (if (< i 0) acc (lt-upto-down (- i 1) (cons i acc))))
 
 ;; ---- delivery + formatting --------------------------------------------------
 (describe "log: delivery and levels"

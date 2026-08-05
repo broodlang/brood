@@ -1739,19 +1739,17 @@ one name (so a failed `require` or an empty module is silent).
 ; warning: unused :use import: io — io-write, stdout-port, etc. never used
 ```
 
-**Unused module-private defns** — a `defn` whose bare name contains `--` (the
-private-by-convention marker, same gate as `(:use …)` refer-all skipping) but
-which is never referenced anywhere in the project — neither as a same-module
-unqualified call nor a cross-module / test `mod/name` reference. Checked at the
-*whole-project* layer (`nest check`), not by a single-file check: a `--` name is
-a convention, not enforced privacy, so it is legitimately reached from another
-module or a test by its qualified name, which a per-file scan can't see. Public
-names are never checked.
+**Unused module-private defns** — a `defn-`/`def-` private that is never referenced
+anywhere in the project — neither as a same-module unqualified call nor a
+cross-module / test `mod/name` reference. Checked at the *whole-project* layer
+(`nest check`), not by a single-file check: a private is legitimately reached from a
+test by its qualified name (with `(:use-internals …)`), which a per-file scan can't
+see. Public names are never checked.
 
 ```clojure
 (defmodule my/mod)
-(defn helper--parse (s) …)   ; warning: unused private function: helper--parse
-(defn run (s) s)              ; (helper--parse is defined but never called)
+(defn- parse-helper (s) …)   ; warning: unused private function: parse-helper
+(defn run (s) s)             ; (parse-helper is defined but never called)
 ```
 
 All three lints share the "zero false positives" contract: they are conservative
@@ -2742,11 +2740,13 @@ Two consequences worth knowing:
   `*module-docs*`. Writing `(def *load-path* …)` inside a module would define
   `mod/*load-path*` and the loader would never see it.
 
-**Privacy is enforced** (ADR-146): a `foo--internal` name (any bare segment
-containing `--`) is module-private. From inside *another* module, a
-hand-written qualified reference to it — plain or via an `(:alias …)` — is a
-**compile error at load**, and `(:use mod :only […])` refuses to import one.
-Three deliberate doors stay open:
+**Privacy is enforced** (ADR-146): **`defn-`** and **`def-`** define a
+module-private name — identical to `defn`/`def` except the name is not exported.
+The name itself is clean (`(defn- parse-line …)`, called `(parse-line …)`); privacy
+is a property the def form declares, not a marker in the name. From inside *another*
+module, a hand-written qualified reference to a private — plain or via an
+`(:alias …)` — is a **compile error at load**, and `(:use mod :only […])` refuses to
+import one. Three deliberate doors stay open:
 
 - **`(:use-internals mod)`** in a module header is the explicit grant (the
   `@testable import` seam) — tests and tightly-coupled tooling declare their
@@ -2763,19 +2763,16 @@ Reflection (`eval`, `global-names`, `bound?`) still sees the flat table —
 privacy governs what a module's source may reference, not what the live image
 contains. `(private? 'mod/name)` reports whether a global is private.
 
-Privacy is a **recorded per-module fact**: the `--` marker is read once, where the
-binding is made, into a per-runtime private-set that a single kernel predicate
-(`Heap::is_private`, exposed as `private?`) consults. The `--` marker stays the
-*populator*. Two kinds of check split cleanly:
-
-- Checks that ask *"is this existing/loaded name private?"* read the **record** —
-  importing a module's public names (`:use` refer-all), the checker's export
-  index, and `private?` reflection.
-- Checks that govern *"what may an author type?"* stay **name-authoritative** —
-  cross-module enforcement and `(:use … :only […])`. Both can name a symbol that
-  isn't defined yet (an unloaded module; `:only` is lazy), and a recorded set can't
-  answer for a name it hasn't seen — so privacy there is a property of the typed
-  `--` name, independent of load state.
+Privacy is a **recorded per-module fact**: a `defn-`/`def-` records the qualified
+name in a per-runtime private-set (via the `%mark-private` primitive it emits) that a
+single kernel predicate (`Heap::is_private`, exposed as `private?`) consults. Because
+a private name is spelled identically to a public one, **every** privacy check reads
+the record — which means the defining module must be **loaded** to be judged. One
+consequence: a qualified reference into a module that was *never loaded* can't be
+judged private, so it degrades to a normal (call-time) **unbound reference** rather
+than a load-time privacy error. That is deliberate — you can't assert privacy about
+code the image has never seen. The prelude's own privates are seeded at build time
+(the prelude is inserted, not re-evaluated).
 
 The advisory checker additionally warns on private names that are
 defined but never called within the file — see

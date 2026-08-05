@@ -12,13 +12,14 @@
 ;; A top-level 0-arg worker: the one shape that can't capture its parent lexically
 ;; (a bare global name carries no closure), so it resolves the parent by registered
 ;; name. Reports that it actually ran.
-(defn spawn-forms--report-bare ()
+(defn- spawn-forms-report-bare
+  ()
   (send (whereis :spawn-forms-bare-parent) :ran-bare))
 
 (describe "spawn: every body shape runs its body (no silent no-op)"
   (test "(spawn fn-name) — a bare function name is CALLED, not yielded-and-discarded"
     (register :spawn-forms-bare-parent (self))
-    (spawn spawn-forms--report-bare)
+    (spawn spawn-forms-report-bare)
     (assert= (receive (m m) (after *test-wait-ms* :NEVER-RAN)) :ran-bare))
 
   (test "(spawn (expr)) — a call expression runs"
@@ -33,10 +34,11 @@
 
   (test "(spawn name fn-name) — the named form also calls a bare function name"
     (register :spawn-forms-named-parent (self))
-    (spawn :spawn-forms-worker spawn-forms--report-named)
+    (spawn :spawn-forms-worker spawn-forms-report-named)
     (assert= (receive (m m) (after *test-wait-ms* :NEVER-RAN)) :ran-named)))
 
 ;; Worker for the named-form test (defined after its first textual use is fine — a
 ;; global resolves at call time).
-(defn spawn-forms--report-named ()
+(defn- spawn-forms-report-named
+  ()
   (send (whereis :spawn-forms-named-parent) :ran-named))

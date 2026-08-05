@@ -786,7 +786,7 @@ fn run_main(cli: Cli) {
 /// sources pre-loaded if we're inside a project, so cross-module names work.
 /// The `nest test` selection / execution flags, lowered to the Brood option
 /// plist that `run-tests` and friends already accept. Selector *parsing* stays in
-/// Brood (`test--make-filter`) so the grammar has one definition; this only
+/// Brood (`test-make-filter`) so the grammar has one definition; this only
 /// forwards argv.
 #[derive(Default)]
 struct TestOpts {
@@ -817,7 +817,7 @@ fn blsp_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// `(list "a" "b")`, or `nil` when empty — the shape `test--make-filter` expects.
+/// `(list "a" "b")`, or `nil` when empty — the shape `test-make-filter` expects.
 fn blsp_string_list(items: &[String]) -> String {
     if items.is_empty() {
         "nil".to_string()
@@ -858,7 +858,7 @@ impl TestOpts {
             format!("(list {})", entries.join(" "))
         };
         format!(
-            "(test/test--make-filter {} {} {} {} nil {} {} {})",
+            "(test/test-make-filter {} {} {} {} nil {} {} {})",
             blsp_string_list(&self.only),
             blsp_string_list(&self.exclude),
             blsp_string_list(&self.include),
@@ -979,7 +979,7 @@ fn cmd_test(interp: &mut Interp, files: &[String], opts: &TestOpts) {
         // Whole-project discovery via std/tool/project.blsp. Raises on failure,
         // so a non-zero exit falls out of the eval error.
         // `test` is required up front, not left to `run-project-tests`: the option
-        // plist can contain a `(test/test--make-filter …)` call, and arguments are
+        // plist can contain a `(test/test-make-filter …)` call, and arguments are
         // evaluated before the callee runs its own `require`.
         run_expecting_failure_signal(
             interp,

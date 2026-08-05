@@ -7,12 +7,13 @@
 (defmodule dotenv-test (:use test) (:use editor/dotenv))
 
 ;; A span-list is well-formed for the tiler iff each start >= the previous end.
-(defn ascending? (spans) (ascending--go spans -1))
-(defn ascending--go (spans prev-end)
+(defn ascending? (spans) (ascending-go spans -1))
+(defn- ascending-go
+  (spans prev-end)
   (if (empty? spans)
     true
     (let (s (first spans))
-      (and (>= (first s) prev-end) (ascending--go (rest spans) (second s))))))
+      (and (>= (first s) prev-end) (ascending-go (rest spans) (second s))))))
 
 (describe "env-spans — line shapes"
   (test "a # comment colours the whole line"

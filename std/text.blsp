@@ -9,7 +9,8 @@ IO dependency. The first is `fill`: greedy word-wrap to a column width — the e
 an editor's fill-paragraph (Emacs `M-q`), and equally useful for wrapping help text,
 comments, or terminal output to a column.")
 
-(defn fill--pack (acc word width)
+(defn- fill-pack
+  (acc word width)
   "Greedy line-accumulator step. `acc` is `[cur done]`: the current (in-progress) line and
 the completed lines, newest first. Extend `cur` with `word` when the result still fits in
 `width` columns; otherwise flush `cur` onto `done` and start a fresh line at `word`.
@@ -28,5 +29,5 @@ can be without exceeding `width`. A single word longer than `width` keeps its ow
 `\\n`; the empty string for blank input."
   (let (flat (replace (replace s "\n" " ") "\t" " ")
         words (filter (fn (w) (not (= w ""))) (string-split flat " "))
-        [cur done] (fold (fn (acc w) (fill--pack acc w width)) ["" ()] words))
+        [cur done] (fold (fn (acc w) (fill-pack acc w width)) ["" ()] words))
     (join "\n" (reverse (if (= cur "") done (cons cur done))))))

@@ -19,14 +19,15 @@
   "Receive a string, send back [:ptr <its-blob-ptr>] to `parent`."
   (receive (s (send parent [:ptr (%blob-ptr s)]))))
 
-(defn bs-spawn-workers--acc (parent n acc)
+(defn- bs-spawn-workers-acc
+  (parent n acc)
   (if (= n 0)
     acc
-    (bs-spawn-workers--acc parent (- n 1) (cons (spawn (bs-blob-worker parent)) acc))))
+    (bs-spawn-workers-acc parent (- n 1) (cons (spawn (bs-blob-worker parent)) acc))))
 
 (defn bs-spawn-workers (parent n)
   "Spawn `n` workers; return a list of their pids."
-  (bs-spawn-workers--acc parent n '()))
+  (bs-spawn-workers-acc parent n '()))
 
 (defn bs-send-all (workers msg)
   "Send `msg` to every worker. Tail recursive (deep lists are fine)."
@@ -34,11 +35,12 @@
     (send (first workers) msg)
     (bs-send-all (rest workers) msg)))
 
-(defn bs-collect-ptrs--check (got total expected)
+(defn- bs-collect-ptrs-check
+  (got total expected)
   "Receive `total` [:ptr p] replies; assert every p equals `expected`."
   (if (= got total)
     nil
-    (receive ([:ptr p] (do (assert= expected p) (bs-collect-ptrs--check (+ got 1) total expected))))))
+    (receive ([:ptr p] (do (assert= expected p) (bs-collect-ptrs-check (+ got 1) total expected))))))
 
 ;; A def-bound big string: its right-hand-side is a LOCAL Shared string, but
 ;; `def` promotes it to RUNTIME (a `boxcar::Vec<String>`), so %blob-ptr should
@@ -103,7 +105,7 @@
             workers (bs-spawn-workers me n))
         (is (not (nil? parent-ptr)))
         (bs-send-all workers big)
-        (bs-collect-ptrs--check 0 n parent-ptr))))
+        (bs-collect-ptrs-check 0 n parent-ptr))))
 
   (test "RUNTIME strings (def'd globals) return nil from %blob-ptr"
     ;; A def-bound string is promoted into the RUNTIME region (a

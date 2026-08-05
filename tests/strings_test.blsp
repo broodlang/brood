@@ -517,60 +517,61 @@
 ;; index's 32-char stride.
 
 ;; 1-, 2-, 3- and 4-byte chars in every stride position; 500 chars / 1000 bytes.
-(def mb--unit "aé漢🙂x")
-(def mb--text (apply str (repeat 100 mb--unit)))
-(def mb--chars (into [] (string->list mb--text)))
+(def- mb-unit "aé漢🙂x")
+(def- mb-text (apply str (repeat 100 mb-unit)))
+(def- mb-chars (into [] (string->list mb-text)))
 ;; The other shape that matters: an ASCII run whose string is non-ASCII only at the end,
 ;; so a conversion inside the run cannot take either fast path.
-(def mb--tail (str (apply str (repeat 400 "x")) "é"))
+(def- mb-tail (str (apply str (repeat 400 "x")) "é"))
 
 ;; Every occurrence of `needle`, by char index — one `index-of` per hit with a rising
 ;; `from`, which is the shape whose conversion cost the index removes.
-(defn mb--scan (s needle i acc)
+(defn- mb-scan
+  (s needle i acc)
   (let (j (index-of s needle i))
-    (if (< j 0) (reverse acc) (mb--scan s needle (inc j) (cons j acc)))))
+    (if (< j 0) (reverse acc) (mb-scan s needle (inc j) (cons j acc)))))
 
 (describe "long multi-byte strings (indexed char<->byte conversion)"
   (test "every char index agrees with the code-point reference"
-    (assert= (into [] (map (fn (i) (char-at mb--text i)) (range 0 (string-length mb--text))))
-      mb--chars))
+    (assert= (into [] (map (fn (i) (char-at mb-text i)) (range 0 (string-length mb-text))))
+      mb-chars))
   (test "substring from a rising start is the reference tail"
-    (assert= (into [] (map (fn (i) (substring mb--text i (+ i 5))) [0 1 31 32 33 100 495]))
-      (into [] (map (fn (i) (apply str (subvec mb--chars i (+ i 5)))) [0 1 31 32 33 100 495]))))
+    (assert= (into [] (map (fn (i) (substring mb-text i (+ i 5))) [0 1 31 32 33 100 495]))
+      (into [] (map (fn (i) (apply str (subvec mb-chars i (+ i 5)))) [0 1 31 32 33 100 495]))))
   (test "substring to the end, and the whole string"
-    (assert= (substring mb--text 497) "漢🙂x")
-    (assert= (substring mb--text 0 (string-length mb--text)) mb--text))
+    (assert= (substring mb-text 497) "漢🙂x")
+    (assert= (substring mb-text 0 (string-length mb-text)) mb-text))
   (test "an incremental scan finds every occurrence at its char index"
     ;; `🙂` is char 3 of each 5-char unit. This is the `inc-scan` sweep row's shape.
-    (assert= (into [] (mb--scan mb--text "🙂" 0 nil))
+    (assert= (into [] (mb-scan mb-text "🙂" 0 nil))
       (into [] (map (fn (k) (+ 3 (* 5 k))) (range 0 100)))))
   (test "reverse search, with and without a bound"
-    (assert= (last-index-of mb--text "🙂") 498)
-    (assert= (last-index-of mb--text "🙂" 498) 493)
-    (assert= (last-index-of mb--text "漢" 3) 2)
-    (assert= (last-index-of mb--text "zz") -1))
+    (assert= (last-index-of mb-text "🙂") 498)
+    (assert= (last-index-of mb-text "🙂" 498) 493)
+    (assert= (last-index-of mb-text "漢" 3) 2)
+    (assert= (last-index-of mb-text "zz") -1))
   (test "char-class scans start from a converted offset"
-    (assert= (string-span-until mb--text 100 "🙂") 103)
-    (assert= (string-span mb--tail 0 "x") 400)
-    (assert= (string-span-until mb--tail 32 "é") 400))
+    (assert= (string-span-until mb-text 100 "🙂") 103)
+    (assert= (string-span mb-tail 0 "x") 400)
+    (assert= (string-span-until mb-tail 32 "é") 400))
   (test "a non-ASCII string with an ASCII interior converts inside the run"
-    (assert= (char-at mb--tail 399) "x")
-    (assert= (char-at mb--tail 400) "é")
-    (assert= (index-of mb--tail "é" 100) 400)
-    (assert= (substring mb--tail 398 401) "xxé"))
+    (assert= (char-at mb-tail 399) "x")
+    (assert= (char-at mb-tail 400) "é")
+    (assert= (index-of mb-tail "é" 100) 400)
+    (assert= (substring mb-tail 398 401) "xxé"))
   (test "across processes: the receiver's own slot converts the same way"
     ;; The string crosses as a deep copy into a fresh slot, so the receiver builds its
     ;; own index — the send path must not carry a stale one.
     (let (me (self))
       (spawn (send me
                [:idx
-                 (index-of mb--text "🙂" 400)
+                 (index-of mb-text "🙂" 400)
                  :sub
-                 (substring mb--text 400 405)
+                 (substring mb-text 400 405)
                  :last
-                 (last-index-of mb--text "漢")]))
+                 (last-index-of mb-text "漢")]))
       (receive
         ([:idx i :sub s :last l] (do
                                    (assert= i 403)
-                                   (assert= s mb--unit)
+                                   (assert= s mb-unit)
                                    (assert= l 497)))))))

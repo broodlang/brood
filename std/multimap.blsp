@@ -73,12 +73,13 @@ If no values remain under `k`, the key is dropped."
         vs (get entries k nil))
     (if (nil? vs)
       mm
-      (let (new-vs (multimap--remove-first vs v))
+      (let (new-vs (multimap-remove-first vs v))
         (if (nil? new-vs)
           (multimap (dissoc entries k))
           (multimap (assoc entries k new-vs)))))))
 
-(defn multimap--remove-first (lst v)
+(defn- multimap-remove-first
+  (lst v)
   ;; Tail-recursive: accumulate the (reversed) skipped prefix and splice once at
   ;; the match, so removing from a long value list can't overflow the stack.
   (letrec (go (fn (acc xs)

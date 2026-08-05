@@ -54,7 +54,8 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 
 ;; Is `path` inside one of `dirs`? Compared by prefix on a path-component
 ;; boundary, so a `src` source path doesn't also claim a sibling `src-extra/`.
-(defn coverage--under? (path dirs)
+(defn- coverage-under?
+  (path dirs)
   (fold (fn (found dir)
           (or found
             (and (not (nil? path))
@@ -69,11 +70,12 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;; native primitives, and non-callable data. `source-location` is what ties a
 ;; global back to a file, so anything the kernel didn't record a location for is
 ;; skipped rather than guessed at.
-(defn coverage--targets (source-dirs)
+(defn- coverage-targets
+  (source-dirs)
   (fold (fn (acc sym)
           (let (location (source-location sym))
             (if (and (not (nil? location))
-                  (coverage--under? (vector-ref location 0) source-dirs)
+                  (coverage-under? (vector-ref location 0) source-dirs)
                   (= (type-of (eval sym)) :fn))
               (cons {:name sym :file (vector-ref location 0) :line (vector-ref location 1)} acc)
               acc)))
@@ -86,7 +88,8 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;; because the name is computed: `def` takes a literal symbol, so the rebinding
 ;; form is constructed and evaluated. The shim closes over the ORIGINAL value, so
 ;; forwarding can't recurse into itself.
-(defn coverage--instrument! (sym hits)
+(defn- coverage-instrument!
+  (sym hits)
   (let (original (eval sym))
     (eval (list 'def
             sym
@@ -102,11 +105,11 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   ;; NOT enough to free it — a long-lived image (`nest mcp`) instrumenting more
   ;; than once would otherwise strand one store per run.
   (when (not (nil? *coverage-hits*)) (table-drop *coverage-hits*))
-  (let (targets (coverage--targets source-dirs)
+  (let (targets (coverage-targets source-dirs)
         hits (table))
     (def *coverage-hits* hits)
     (def *coverage-targets* targets)
-    (fold (fn (_ target) (coverage--instrument! (get target :name) hits)) nil targets)
+    (fold (fn (_ target) (coverage-instrument! (get target :name) hits)) nil targets)
     hits))
 
 ;; --- reporting ----------------------------------------------------------------
@@ -123,29 +126,33 @@ suite, then reports which functions were never entered. Backs `nest test --cover
              (assoc target :hits (or (get snapshot (name (get target :name))) 0)))
         *coverage-targets*))))
 
-(defn coverage--covered (results) (filter (fn (r) (> (get r :hits) 0)) results))
+(defn- coverage-covered (results) (filter (fn (r) (> (get r :hits) 0)) results))
 
 ;; Uncovered functions in SOURCE order. The underlying target list comes from
 ;; `global-names` (sorted by spelling), so without this the report reads 7, 15, 9 —
 ;; sorting by line is what makes it walk the file top-to-bottom.
-(defn coverage--uncovered (results)
+(defn- coverage-uncovered
+  (results)
   (sort-by :line (filter (fn (r) (= (get r :hits) 0)) results)))
 
 ;; Percentage as a whole number, rounded to nearest. An empty denominator is 100%
 ;; (nothing to cover is not a failure), which keeps a source-less project from
 ;; reporting 0% and failing a `--cover-min` gate.
-(defn coverage--percent (covered total)
+(defn- coverage-percent
+  (covered total)
   (if (= total 0) 100 (quot (+ (* covered 200) total) (* total 2))))
 
 ;; Group results by file, as a list of `[file file-results]`, in stable
 ;; (alphabetical) file order so the report is diffable between runs.
-(defn coverage--by-file (results)
+(defn- coverage-by-file
+  (results)
   (let (files (sort (fold (fn (acc r) (if (member? (get r :file) acc) acc (cons (get r :file) acc)))
                       nil results)))
     (map (fn (f) [f (filter (fn (r) (= (get r :file) f)) results)]) files)))
 
 ;; Shorten an absolute path to a project-relative one for display.
-(defn coverage--relative (path root)
+(defn- coverage-relative
+  (path root)
   (if (and (not (nil? root)) (starts-with? path root))
     (let (cut (+ (string-length root) 1))
       (if (> (string-length path) cut) (substring path cut (string-length path)) path))
@@ -160,31 +167,31 @@ suite, then reports which functions were never entered. Backs `nest test --cover
         (println "coverage: no functions were instrumented")
         100)
       (let (total (count results)
-            covered (count (coverage--covered results))
-            percent (coverage--percent covered total))
+            covered (count (coverage-covered results))
+            percent (coverage-percent covered total))
         (println "")
         (println "Coverage (functions entered at least once):")
         (fold (fn (_ entry)
                 (let (file-results (second entry)
                       file-total (count file-results)
-                      file-covered (count (coverage--covered file-results)))
+                      file-covered (count (coverage-covered file-results)))
                   (println (str "  "
-                             (pad-right (coverage--relative (first entry) root) 44)
-                             (pad-left (str (coverage--percent file-covered file-total)) 4)
+                             (pad-right (coverage-relative (first entry) root) 44)
+                             (pad-left (str (coverage-percent file-covered file-total)) 4)
                              "%  ("
                              file-covered
                              "/"
                              file-total
                              ")"))))
           nil
-          (coverage--by-file results))
-        (let (missed (coverage--uncovered results))
+          (coverage-by-file results))
+        (let (missed (coverage-uncovered results))
           (unless (empty? missed)
             (println "")
             (println (str "Never called (" (count missed) "):"))
             (fold (fn (_ r)
                     (println (str "  "
-                               (coverage--relative (get r :file) root)
+                               (coverage-relative (get r :file) root)
                                ":"
                                (get r :line)
                                ": "
@@ -192,9 +199,9 @@ suite, then reports which functions were never entered. Backs `nest test --cover
               nil
               ;; Report in source order within a file, files alphabetical — the
               ;; same order as the table above, so the two read together.
-              (fold (fn (acc entry) (append acc (coverage--uncovered (second entry))))
+              (fold (fn (acc entry) (append acc (coverage-uncovered (second entry))))
                 nil
-                (coverage--by-file results)))))
+                (coverage-by-file results)))))
         (println "")
         (println (str "coverage: " percent "% of " total " functions (" covered " covered)"))
         percent))))
@@ -227,10 +234,11 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;; (it is omitted rather than reported as 0%).
 
 ;; Local safety net: a missing readout costs a measurement, not the report.
-(defn coverage--safely (thunk) (try (thunk) (catch _ nil)))
+(defn- coverage-safely (thunk) (try (thunk) (catch _ nil)))
 
 ;; A `[file (line …)]` readout as `file -> {line -> true}`, for O(1) membership.
-(defn coverage--line-index (entries)
+(defn- coverage-line-index
+  (entries)
   (fold (fn (index entry)
           (assoc index
             (vector-ref entry 0) (fold (fn (lines l) (assoc lines l true)) {} (vector-ref entry 1))))
@@ -238,15 +246,17 @@ suite, then reports which functions were never entered. Backs `nest test --cover
     (or entries nil)))
 
 ;; Which lines RAN.
-(defn coverage--hit-index ()
-  (coverage--line-index (coverage--safely (fn () (%coverage-lines)))))
+(defn- coverage-hit-index
+  ()
+  (coverage-line-index (coverage-safely (fn () (%coverage-lines)))))
 
 ;; Which lines COULD run, keyed by file — the kernel's own record of what it
 ;; instrumented. Values stay lists: they arrive sorted and are only iterated.
-(defn coverage--instrumented-index ()
+(defn- coverage-instrumented-index
+  ()
   (fold (fn (index entry) (assoc index (vector-ref entry 0) (vector-ref entry 1)))
     {}
-    (or (coverage--safely (fn () (%coverage-instrumented))) nil)))
+    (or (coverage-safely (fn () (%coverage-instrumented))) nil)))
 
 (defn coverage-line-begin! (source-dirs)
   "Force every project function under `source-dirs` to compile, so the lines of a function the suite never calls still count as measurable. Call once, after the sources are loaded and BEFORE the suite runs. Returns how many bodies compiled."
@@ -254,11 +264,11 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   ;; from the denominator as well as the numerator and the ratio flatters itself: the
   ;; fixture with one deliberately-dead function reported 100%.
   (fold (fn (compiled target)
-          (if (coverage--safely (fn () (%coverage-precompile (eval (get target :name)))))
+          (if (coverage-safely (fn () (%coverage-precompile (eval (get target :name)))))
             (+ compiled 1)
             compiled))
     0
-    (or (coverage--targets source-dirs) nil)))
+    (or (coverage-targets source-dirs) nil)))
 
 (defn coverage-line-results (source-dirs)
   "Per-file line coverage as a list of `{:file :total :covered :missing}`, `missing` being the instrumented lines that never ran. Only files under `source-dirs` are measured, so std and the prelude — which the recorder also sees — can't dilute the number; files with nothing instrumented are omitted rather than counted as 0%."
@@ -267,12 +277,12 @@ suite, then reports which functions were never entered. Backs `nest test --cover
   ;; circular. This runtime require is idempotent (project is already loaded whenever
   ;; coverage runs from `nest`) and makes the `project/…` reference self-sufficient.
   (require 'project)
-  (let (hits (coverage--hit-index)
-        instrumented (coverage--instrumented-index)
-        files (or (coverage--safely (fn ()
-                                      (fold (fn (acc dir)
-                                              (append acc (project/project-collect-sources dir)))
-                                        nil source-dirs)))
+  (let (hits (coverage-hit-index)
+        instrumented (coverage-instrumented-index)
+        files (or (coverage-safely (fn ()
+                                     (fold (fn (acc dir)
+                                             (append acc (project/project-collect-sources dir)))
+                                       nil source-dirs)))
                 nil))
     (filter (fn (result) (> (get result :total) 0))
       (map (fn (path)
@@ -300,8 +310,8 @@ suite, then reports which functions were never entered. Backs `nest test --cover
         (println "Line coverage (executable lines that ran):")
         (fold (fn (_ r)
                 (println (str "  "
-                           (pad-right (coverage--relative (get r :file) root) 44)
-                           (pad-left (str (coverage--percent (get r :covered) (get r :total))) 4)
+                           (pad-right (coverage-relative (get r :file) root) 44)
+                           (pad-left (str (coverage-percent (get r :covered) (get r :total))) 4)
                            "%  ("
                            (get r :covered)
                            "/"
@@ -313,7 +323,7 @@ suite, then reports which functions were never entered. Backs `nest test --cover
             (unless (empty? (get r :missing))
               (println "")
               (println (str "Never ran in "
-                         (coverage--relative (get r :file) root)
+                         (coverage-relative (get r :file) root)
                          " ("
                          (count (get r :missing))
                          " line"
@@ -328,13 +338,13 @@ suite, then reports which functions were never entered. Backs `nest test --cover
           results)
         (println "")
         (println (str "coverage: "
-                   (coverage--percent covered total)
+                   (coverage-percent covered total)
                    "% of "
                    total
                    " executable lines ("
                    covered
                    " ran)"))
-        (coverage--percent covered total)))))
+        (coverage-percent covered total)))))
 
 ;; ---- branch coverage (ADR-148 tier 2, the third measure) --------------------
 ;; Line coverage answers "did this line run?"; branch coverage answers the sharper
@@ -344,7 +354,8 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 ;; `cond`/`match` arms on shared lines stay distinct); a branch is fully covered only
 ;; when both a `true` and a `false` edge appear for one `[line col]`.
 
-(defn coverage--branch-edges (edges)
+(defn- coverage-branch-edges
+  (edges)
   "Fold a file's `[line col taken]` edge list into `{[line col] -> {:t bool :f bool}}`."
   (fold (fn (m edge)
           (let (key [(vector-ref edge 0) (vector-ref edge 1)]
@@ -353,20 +364,23 @@ suite, then reports which functions were never entered. Backs `nest test --cover
     {}
     edges))
 
-(defn coverage--branch-taken-index ()
+(defn- coverage-branch-taken-index
+  ()
   "`file -> {[line col] -> {:t :f}}` — which edges of each branch ran."
   (fold (fn (index entry)
-          (assoc index (vector-ref entry 0) (coverage--branch-edges (vector-ref entry 1))))
+          (assoc index (vector-ref entry 0) (coverage-branch-edges (vector-ref entry 1))))
     {}
-    (or (coverage--safely (fn () (%coverage-branches))) nil)))
+    (or (coverage-safely (fn () (%coverage-branches))) nil)))
 
-(defn coverage--branch-sites-index ()
+(defn- coverage-branch-sites-index
+  ()
   "`file -> ([line col] …)` — every instrumented branch point (the denominator)."
   (fold (fn (index entry) (assoc index (vector-ref entry 0) (vector-ref entry 1)))
     {}
-    (or (coverage--safely (fn () (%coverage-branch-instrumented))) nil)))
+    (or (coverage-safely (fn () (%coverage-branch-instrumented))) nil)))
 
-(defn coverage--branch-state (taken site)
+(defn- coverage-branch-state
+  (taken site)
   "For branch point `site` (`[line col]`), given the file's taken-edge map, return
 `:both` (fully covered), `:then` / `:else` (one edge), or `:none` (never reached)."
   (let (e (get taken site {:t false :f false}))
@@ -382,18 +396,18 @@ suite, then reports which functions were never entered. Backs `nest test --cover
 with exactly one edge taken, `missing` = the `[line col]` points never reached. Only
 files under `source-dirs` are measured; files with no branches are omitted."
   (require 'project)
-  (let (taken-by-file (coverage--branch-taken-index)
-        sites-by-file (coverage--branch-sites-index)
-        files (or (coverage--safely (fn ()
-                                      (fold (fn (acc dir)
-                                              (append acc (project/project-collect-sources dir)))
-                                        nil source-dirs)))
+  (let (taken-by-file (coverage-branch-taken-index)
+        sites-by-file (coverage-branch-sites-index)
+        files (or (coverage-safely (fn ()
+                                     (fold (fn (acc dir)
+                                             (append acc (project/project-collect-sources dir)))
+                                       nil source-dirs)))
                 nil))
     (filter (fn (result) (> (get result :total) 0))
       (map (fn (path)
              (let (sites (or (get sites-by-file path) nil)
                    taken (or (get taken-by-file path) {})
-                   states (map (fn (s) [s (coverage--branch-state taken s)]) sites)
+                   states (map (fn (s) [s (coverage-branch-state taken s)]) sites)
                    covered (filter (fn (st) (= (second st) :both)) states)
                    partial (filter (fn (st) (or (= (second st) :then) (= (second st) :else)))
                              states)
@@ -406,22 +420,24 @@ files under `source-dirs` are measured; files with no branches are omitted."
                 :missing (map (fn (st) (first st)) missing)}))
         files))))
 
-(defn coverage--branch-line (root r)
+(defn- coverage-branch-line
+  (root r)
   (println (str "  "
-             (pad-right (coverage--relative (get r :file) root) 44)
-             (pad-left (str (coverage--percent (get r :covered) (get r :total))) 4)
+             (pad-right (coverage-relative (get r :file) root) 44)
+             (pad-left (str (coverage-percent (get r :covered) (get r :total))) 4)
              "%  ("
              (get r :covered)
              "/"
              (get r :total)
              ")")))
 
-(defn coverage--branch-detail (root r)
+(defn- coverage-branch-detail
+  (root r)
   (let (partial (get r :partial))
     (unless (empty? partial)
       (println "")
       (println (str "Half-covered branches in "
-                 (coverage--relative (get r :file) root)
+                 (coverage-relative (get r :file) root)
                  " (one edge never taken):"))
       (fold
         (fn (_ p)
@@ -450,14 +466,14 @@ percentage (an int 0-100)."
       (do
         (println "")
         (println "Branch coverage (both edges of each if/cond/match taken):")
-        (fold (fn (_ r) (coverage--branch-line root r)) nil results)
-        (fold (fn (_ r) (coverage--branch-detail root r)) nil results)
+        (fold (fn (_ r) (coverage-branch-line root r)) nil results)
+        (fold (fn (_ r) (coverage-branch-detail root r)) nil results)
         (println "")
         (println (str "branch coverage: "
-                   (coverage--percent covered total)
+                   (coverage-percent covered total)
                    "% of "
                    total
                    " branches fully covered ("
                    covered
                    " both-edges)"))
-        (coverage--percent covered total)))))
+        (coverage-percent covered total)))))

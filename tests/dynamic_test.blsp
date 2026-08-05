@@ -24,8 +24,8 @@
 (defn dt-read () *dt*)
 
 ;; Tail-recursive [lo, hi) (the coroutine stack a `test` runs on is small).
-(defn dt-range (lo hi) (dt-range--down (- hi 1) lo nil))
-(defn dt-range--down (i lo acc) (if (< i lo) acc (dt-range--down (- i 1) lo (cons i acc))))
+(defn dt-range (lo hi) (dt-range-down (- hi 1) lo nil))
+(defn- dt-range-down (i lo acc) (if (< i lo) acc (dt-range-down (- i 1) lo (cons i acc))))
 
 ;; Each worker binds *dt* to its own value and reports what it sees — so a sum of
 ;; the reports proves no two processes clobbered each other's binding.

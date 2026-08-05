@@ -19,19 +19,20 @@
 (defmodule conformance-utf8-test (:use test) (:use corpus))
 (require 'encoding)
 
-(defn u8--bytes (hex) (encoding/hex-decode-bytes hex))
+(defn- u8-bytes (hex) (encoding/hex-decode-bytes hex))
 
-(defn u8--decodes? (hex)
+(defn- u8-decodes?
+  (hex)
   "true if `hex` decodes as UTF-8, false if it is rejected."
-  (try (do (utf8-bytes->string (u8--bytes hex)) true) (catch e false)))
+  (try (do (utf8-bytes->string (u8-bytes hex)) true) (catch e false)))
 
 ;; Every sequence in `hexes` must be rejected; returns the offenders.
-(defn u8--accepted (hexes) (filter u8--decodes? hexes))
+(defn- u8-accepted (hexes) (filter u8-decodes? hexes))
 
 ;; Every sequence in `hexes` must decode; returns the offenders.
-(defn u8--rejected (hexes) (remove u8--decodes? hexes))
+(defn- u8-rejected (hexes) (remove u8-decodes? hexes))
 
-(defn u8--file () (first (corpus-files "utf8")))
+(defn- u8-file () (first (corpus-files "utf8")))
 
 (describe "UTF-8 stress: the corpus file itself"
   :tags
@@ -39,16 +40,16 @@
 
   (test "the corpus is present"
     (is (corpus-present? "utf8"))
-    (is (not (nil? (u8--file)))))
+    (is (not (nil? (u8-file)))))
 
   ;; The single most valuable assertion in this file. The document is not valid UTF-8,
   ;; so `slurp` — which promises a Brood string — must refuse it outright rather than
   ;; lossily substituting U+FFFD.
   (test "slurp refuses a malformed file instead of substituting U+FFFD"
-    (assert-error (slurp (u8--file))))
+    (assert-error (slurp (u8-file))))
 
   (test "slurp-bytes reads it byte-for-byte"
-    (let (bs (slurp-bytes (u8--file)))
+    (let (bs (slurp-bytes (u8-file)))
       (is (bytes? bs))
       ;; Kuhn's 2015-08-28 revision, as pinned in the corpus README.
       (assert= (count bs) 22781))))
@@ -62,7 +63,7 @@
   (test "2.1/2.2 first and last of each sequence length decode"
     (assert=
       ; U+10FFFF, the last code point
-      (u8--rejected
+      (u8-rejected
         (list "00"
           ; U+0000, 1 byte
           ; U+0080, 2 bytes
@@ -84,7 +85,7 @@
   (test "2.3 the code points bracketing the surrogate block decode"
     (assert=
       ; U+FFFD REPLACEMENT CHARACTER
-      (u8--rejected
+      (u8-rejected
         (list "ED9FBF"
           ; U+D7FF, last before the block
           ; U+E000, first after it
@@ -93,40 +94,40 @@
 
   ;; §3.1 — a continuation byte with no lead byte.
   (test "3.1 unexpected continuation bytes are rejected"
-    (assert= (u8--accepted (list "80" "BF" "80BF" "80BF80" "80BF80BF")) ()))
+    (assert= (u8-accepted (list "80" "BF" "80BF" "80BF80" "80BF80BF")) ()))
 
   ;; §3.2 — a lead byte followed by a space instead of a continuation.
   (test "3.2 lonely start characters are rejected"
-    (assert= (u8--accepted (list "C020"
-                             "DF20" "E020" "EF20" "F020" "F720" "F820" "FB20" "FC20" "FD20"))
+    (assert= (u8-accepted (list "C020"
+                            "DF20" "E020" "EF20" "F020" "F720" "F820" "FB20" "FC20" "FD20"))
       ()))
 
   ;; §3.3/3.4 — truncation, the bug a streaming decoder writes.
   (test "3.3 sequences with the last byte missing are rejected"
-    (assert= (u8--accepted (list "C2" "E0A0" "F09080" "DF" "EFBF" "F48FBF")) ()))
+    (assert= (u8-accepted (list "C2" "E0A0" "F09080" "DF" "EFBF" "F48FBF")) ()))
 
   (test "3.4 a concatenation of incomplete sequences is rejected"
-    (assert= (u8--accepted (list "C2E0A0F09080")) ()))
+    (assert= (u8-accepted (list "C2E0A0F09080")) ()))
 
   ;; §3.5 — bytes that cannot appear in UTF-8 at all.
   (test "3.5 impossible bytes are rejected"
-    (assert= (u8--accepted (list "FE" "FF" "FEFEFFFF")) ()))
+    (assert= (u8-accepted (list "FE" "FF" "FEFEFFFF")) ()))
 
   ;; §4 — overlong forms. The security-critical class: an overlong "/" (C0 AF) slips a
   ;; path separator past a naive filter that only looks for the one-byte 2F.
   (test "4.1 overlong ASCII is rejected"
-    (assert= (u8--accepted (list "C0AF"
-                             "E080AF" "F08080AF" "F8808080AF" "FC80808080AF"))
+    (assert= (u8-accepted (list "C0AF"
+                            "E080AF" "F08080AF" "F8808080AF" "FC80808080AF"))
       ()))
 
   (test "4.2 maximum overlong forms are rejected"
-    (assert= (u8--accepted (list "C1BF"
-                             "E09FBF" "F08FBFBF" "F887BFBFBF" "FC83BFBFBFBF"))
+    (assert= (u8-accepted (list "C1BF"
+                            "E09FBF" "F08FBFBF" "F887BFBFBF" "FC83BFBFBFBF"))
       ()))
 
   (test "4.3 overlong NUL is rejected (the C0 80 trick)"
-    (assert= (u8--accepted (list "C080"
-                             "E08080" "F0808080" "F880808080" "FC8080808080"))
+    (assert= (u8-accepted (list "C080"
+                            "E08080" "F0808080" "F880808080" "FC8080808080"))
       ()))
 
   ;; §5.1/5.2 — UTF-16 surrogates have no UTF-8 encoding. CESU-8 / "modified UTF-8"
@@ -134,7 +135,7 @@
   (test "5.1 single surrogates are rejected"
     (assert=
       ; U+DFFF
-      (u8--accepted
+      (u8-accepted
         (list "EDA080"
           ; U+D800
           ; U+DB7F
@@ -150,8 +151,8 @@
       ()))
 
   (test "5.2 paired surrogates are rejected"
-    (assert= (u8--accepted (list "EDA080EDB080"
-                             "EDA080EDBFBF" "EDAFBFEDB080" "EDAFBFEDBFBF"))
+    (assert= (u8-accepted (list "EDA080EDB080"
+                            "EDA080EDBFBF" "EDAFBFEDB080" "EDAFBFEDBFBF"))
       ()))
 
   ;; §5.3 — noncharacters ARE valid UTF-8. Rejecting them is as wrong as accepting a
@@ -159,7 +160,7 @@
   (test "5.3 noncharacters are valid UTF-8 and must decode"
     (assert=
       ; U+10FFFE
-      (u8--rejected
+      (u8-rejected
         (list "EFBFBE"
           ; U+FFFE
           ; U+FFFF
@@ -172,5 +173,5 @@
   (test "round-trip: decode then encode is identity on the bytes"
     (dolist (hex (list "00"
                    "7F" "C280" "DFBF" "E0A080" "EFBFBF" "F0908080" "F48FBFBF" "EFBFBE"))
-      (assert= (string->utf8-bytes (utf8-bytes->string (u8--bytes hex)))
-        (u8--bytes hex)))))
+      (assert= (string->utf8-bytes (utf8-bytes->string (u8-bytes hex)))
+        (u8-bytes hex)))))

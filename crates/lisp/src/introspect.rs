@@ -368,14 +368,14 @@ pub fn source_location(interp: &mut Interp, name: &str) -> Option<SourceLoc> {
 }
 
 /// Every `.blsp` file the bootstrapped project owns — its sources plus its
-/// tests — by asking the Brood side `(project/project--all-files *project-root*)` (the
+/// tests — by asking the Brood side `(project/project-all-files *project-root*)` (the
 /// same set `check-project` walks). Empty when no project has been set up (e.g.
 /// a bare buffer outside a project, where `*project-root*` is unbound). Feeds
 /// the cross-file reference / rename sweep (ADR-031 §Cross-file): under the flat
 /// module model these files are the whole search space for a global.
 pub fn project_files(interp: &mut Interp) -> Vec<String> {
     let cp = interp.heap.checkpoint();
-    let out = match interp.eval_str("(project/project--all-files *project-root*)") {
+    let out = match interp.eval_str("(project/project-all-files *project-root*)") {
         Ok(v) => interp
             .heap
             .list_to_vec(v)
@@ -404,7 +404,7 @@ pub fn project_files(interp: &mut Interp) -> Vec<String> {
 pub fn module_file(interp: &mut Interp, feature: &str) -> Option<String> {
     let cp = interp.heap.checkpoint();
     let expr = format!(
-        "(require--find \"{}.blsp\" *load-path*)",
+        "(require-find \"{}.blsp\" *load-path*)",
         escape_brood_string(feature)
     );
     let out = match interp.eval_str(&expr) {
