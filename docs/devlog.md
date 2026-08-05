@@ -15918,3 +15918,42 @@ A knock-on worth noting: the code-point-vector rewrites this bug class forced (`
 `csv.blsp`, `ansi.blsp`) are no longer *required* for correctness of performance. They stay as
 they are; the point is that new `std/` code no longer has to choose between char indexing and
 linearity.
+
+## 2026-08-04 (cont.) — module privacy becomes a recorded fact, not a name re-parsed everywhere (ADR-146 step 1)
+
+Module privacy (ADR-146) was a naming convention re-derived by `name.contains("--")` in ~9
+independent places — the resolver's `enforce_private_refs`, `%refer` refer-all + `:only`, the
+checker's `:only` and `module_public_exports`, and the unbound-symbol suggestion. That scattering
+is a standing checker↔runtime drift hazard, there was no first-class "is this private?" query, and
+the marker was welded into every site so it couldn't be changed without touching all of them.
+
+Now privacy is a **recorded per-module fact**: the `--` marker is read once, where the binding is
+made, into a per-runtime `private: RwLock<HashSet<Symbol>>` on `RuntimeCode` (mirrors `sealed`),
+consulted by a single predicate `Heap::is_private` (lock-free `--` fast-negative, then the recorded
+lookup) and exposed as the `private?` builtin. Populate is **two-pronged** — the crux the design
+turned on: prelude bindings are *inserted* by `RuntimeCode::seeded`, not re-`eval`ed, so
+`env_define` never fires for a prelude name; the set is derived from the bindings in `seeded` for
+the prelude, and recorded in `env_define` for every runtime def.
+
+The `--` marker is unchanged and stays the *populator* — this is deliberately step 1; behaviour is
+identical. The sites split by **what they ask**, not by class. Sites that ask *"is this
+existing/loaded name private?"* read the record: `%refer` refer-all, `module_public_exports`, and the
+unbound-symbol suggestion filter enumerate a *loaded* module's live globals, so `is_private` is exact
+— they swap the string test outright. Sites that govern *"what may an author type?"* stay
+**name-authoritative**: cross-module enforcement AND `(:use … :only …)` (runtime `%refer` + the
+checker) can name a symbol that isn't defined yet — an unloaded module, or a lazy `:only` name — and
+a recorded set can't answer for a name it hasn't seen, so the typed `--` is the fact. (An adversarial
+review caught the subtlety: an earlier draft gated the `:only` sites on
+`is_private(qual) || bare.contains("--")` and called the name a "fallback" — but that disjunct is
+provably dead, `is_private` adds nothing there, and calling it a fallback invited a future "cleanup"
+that would drop the load-bearing name check and silently admit an undefined-but-`--`-looking `:only`
+name. So `:only` is now plainly name-authoritative, like enforcement. The `never-loaded/nope--thing`
+test pins the enforcement half.) Left name-based on purpose: the *syntactic* unused-private counters
+(`scan_count_dd`, `scan_source_extract`, `project--unused-private` counts), which count textual `--`
+occurrences, not semantic privacy.
+
+Tests: `private_test.blsp` gains `private?` cases (recorded private true; public/undefined false;
+a prelude private true, proving the `seeded` path) plus **cross-process** coverage (a spawned worker
+reports `private?` back, proving the set is visible through the shared runtime `Arc`); `basic.rs`
+asserts both populate paths at the Rust boundary and that an undefined `--` name is *not* recorded
+(the record, not the name, is authoritative). Full `make test` + `nest check` green.
