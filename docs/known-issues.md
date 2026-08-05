@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-27 | `reconnect_watcher_heals_a_fallen_link` times out waiting for `[:nodeup]` under full-suite load | ⬜ **open** (found 2026-08-05) |
 | KI-25 | five JIT/VM suites cannot be re-run in one image (`--repeat-until-failure` fails on iteration 2) | ✅ **fixed** 2026-08-04 |
 | KI-24 | `eval`'d code cannot forward-reference a name a later `eval` defines (regression, 97d63eda) | ✅ **fixed** 2026-08-01 |
 | KI-23 | the KI-22 lost-update shape also exists in ~10 std-module registries | ✅ **fixed** 2026-08-02 |
@@ -45,10 +46,35 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**No open issues.** Every KI above is fixed, incidentally fixed, or a non-reproducing
+**One open issue: KI-27.** Every other KI above is fixed, incidentally fixed, or a non-reproducing
 transient — each kept as a record with its regression test, so a recurrence is recognizable.
 
 ---
+
+## KI-27 — `reconnect_watcher_heals_a_fallen_link` times out under full-suite load · **open, found 2026-08-05**
+
+**Symptom.** In a full `make test`, this `cli::distribution` test failed twice (nextest retried
+once) after **20.06 s** — its `(after 20000 …)` guard on `[:nodeup]`, so the watcher never saw
+node B come back. It is fast and reliable on its own: **7/7 solo** at ~1.3 s, and **16/16** as 16
+concurrent copies of the same test binary. Only the full suite reproduces it, which is the
+`live_migration` pattern (fails inside the run, never in isolation).
+
+**Found by** the repeat-until-failure flake baseline (see `handoff.md`), which is what made it
+visible at all — it had been passing in earlier runs today.
+
+**Ruled out.** The obvious mechanism is a failed port rebind: B1 closes its listener, the harness
+restarts B2 on the same port, and none of the three `TcpListener::bind` sites
+(`net.rs:1208`, `net.rs:1528`, `dist.rs:859`) sets `SO_REUSEADDR`. **Tested directly and it is
+not the cause** — after a linked peer exits, an immediate rebind on the same port succeeds 3/3.
+(Worth knowing anyway: the absence of `SO_REUSEADDR` is real, just not this.)
+
+**What is known.** The watcher retries `(connect spec)` forever (`reconnect--down` has no attempt
+cap), so it cannot have given up; `[:nodeup]` requires a `connect` to succeed, so B2 was
+unreachable for 20 s. The test never checks that B2 *started* — if B2 died on startup the test
+would look exactly like this. That is the first thing to instrument.
+
+**Repro.** `make test` (full), and read the `TRY n FAIL` line. For a faster loop, run the whole
+suite while something else saturates the machine.
 
 ## KI-25 — five JIT/VM suites cannot be re-run in one image · **fixed 2026-08-04**
 

@@ -130,7 +130,20 @@
       ;; `cond`/`second`.
       (let (parts (%seqview-parts coll))
         (fold ((vector-ref parts 1) f) acc (vector-ref parts 0)))
-      (fold-loop f acc (seq coll)))))
+      ;; A VECTOR folds by index. The generic path walks with `first`/`rest`, and
+      ;; `(rest v)` on a vector *materialises a list of the tail* — so folding a
+      ;; 16-element vector allocated 15 cons cells and paid ~48 one-arg primitive
+      ;; dispatches (`empty?`/`first`/`rest` per element) to add 16 numbers.
+      ;; Measured on `spawn-live`, where each of 300k units folds a 16-cell payload:
+      ;; 18.2 µs of the row's 33.9 µs per unit, against 2.2 µs for the same sum written
+      ;; as an indexed loop. Indexing is O(1) on a vector, so this is the same walk
+      ;; without the intermediate list.
+      (if (%eq (type-of coll) :vector)
+        (fold-vec f acc coll 0 (vector-length coll))
+        (fold-loop f acc (seq coll))))))
+(defn- fold-vec
+  (f acc v i n)
+  (if (%eq i n) acc (fold-vec f (f acc (vector-ref v i)) v (%add i 1) n)))
 (defn- fold-loop
   (f acc coll)
   (if (empty? coll) acc (fold-loop f (f acc (first coll)) (rest coll))))
