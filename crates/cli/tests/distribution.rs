@@ -9,65 +9,10 @@
 
 use std::io::Read;
 use std::net::TcpStream;
-use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-/// Serialises the *bind→spawn* window across the (parallel-by-default) tests in
-/// this file. Two tests racing through [`free_port`] can both pick the same
-/// just-freed kernel port; the loser's child then fails to bind, the winner's
-/// listener is what `wait_until_listening` happens to find, and the loser's
-/// client times out with `ECONNREFUSED`. Holding this lock across each test's
-/// port allocation + child spawn closes that window — the tests run end-to-end
-/// concurrently with everything *else* in the workspace; only with each other
-/// do they queue.
-static PORTS: Mutex<()> = Mutex::new(());
-
-/// Acquire the cross-test bind lock. Released when the returned guard drops.
-/// (`PoisonError` is recovered into the inner unit; a panicked sibling test
-/// shouldn't wedge the rest of the suite.)
-fn port_lock() -> MutexGuard<'static, ()> {
-    PORTS.lock().unwrap_or_else(|p| p.into_inner())
-}
-
-/// Grab a currently-free localhost port by binding to :0 and releasing it.
-/// Best paired with the [`port_lock`] guard around the spawn that re-binds it
-/// — otherwise a sibling test can grab the same just-freed port first.
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-/// Run a `.blsp` program in a fresh `brood` subprocess.
-fn spawn_brood(dir: &std::path::Path, name: &str, src: &str) -> Child {
-    let path = dir.join(name);
-    std::fs::write(&path, src).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_brood"))
-        .arg(&path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn brood")
-}
-
-/// Wait until `port` accepts a TCP connection (the peer's listener is up), or
-/// panic after ~20s.
-fn wait_until_listening(port: u16) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
-        }
-        if Instant::now() >= deadline {
-            panic!("server never started listening on port {port}");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
+mod support;
+use support::*;
 
 #[test]
 fn two_nodes_connect_and_message() {
@@ -186,14 +131,20 @@ fn clean_peer_exit_fires_nodedown_promptly() {
 
     let out = a.wait_with_output().expect("watcher finished");
     let _ = b.kill(); // already exited cleanly; reap defensively
-    let _ = b.wait();
+                      // B's own output on the failure path: A exiting early (rather than on its 5 s guard) means
+                      // `connect` or `node-start` failed, and whether B was healthy is then the first question.
+    let b_err = b
+        .wait_with_output()
+        .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
+        .unwrap_or_default();
     let _ = std::fs::remove_dir_all(&dir);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success() && stdout.contains("NODEDOWN-OK"),
-        "expected prompt nodedown + pruned (nodes) on a clean peer exit.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+        "expected prompt nodedown + pruned (nodes) on a clean peer exit.\n\
+         --- A stdout ---\n{stdout}\n--- A stderr ---\n{stderr}\n--- B stderr ---\n{b_err}"
     );
 }
 
@@ -267,24 +218,6 @@ fn disconnect_drops_a_peer_link_while_both_nodes_stay_up() {
         b_stdout.contains("B-NODEDOWN"),
         "the still-running peer must see its own nodedown via socket EOF.\n--- b stdout ---\n{b_stdout}"
     );
-}
-
-/// Run a `.blsp` program in a fresh `brood` subprocess with extra env vars —
-/// used by the Unix-socket tests to sandbox `$HOME`/`$XDG_*` (so the cookie file
-/// lands in the test's temp dir, never the runner's real `~/.config`) and to set
-/// `$BROOD_COOKIE` for the wrong-cookie case.
-fn spawn_brood_env(dir: &std::path::Path, name: &str, src: &str, env: &[(&str, &str)]) -> Child {
-    let path = dir.join(name);
-    std::fs::write(&path, src).unwrap();
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
-    cmd.arg(&path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    cmd.spawn().expect("spawn brood")
 }
 
 /// Wait until a Unix socket file appears (the peer's listener is bound), or panic
@@ -2120,8 +2053,14 @@ fn reconnect_watcher_heals_a_fallen_link() {
     (send {{:name :echo :node up}} [:ping (self)])
     (receive
       ([:pong] (println "PONG-OK"))
-      (after 5000 (println "TIMEOUT-no-pong"))))
-  (after 20000 (println "TIMEOUT-no-nodeup")))
+      (after 20000 (println "TIMEOUT-no-pong"))))
+  ;; Liveness deadlines, not latency assertions: what this test proves is that the watcher
+  ;; heals the link at all. It runs under `make test`, i.e. on a machine saturated by dozens
+  ;; of other test processes, where B's restart and A's next backoff attempt can both slip.
+  ;; 20 s was not enough there (KI-27) while being ample solo — an unhelpful combination.
+  ;; Kept so nodeup + pong together stay well inside nextest's 2 min per-test cap: past that
+  ;; the process is killed and you lose the diagnostic these branches exist to print.
+  (after 45000 (println "TIMEOUT-no-nodeup")))
 "#
     );
 
@@ -2136,18 +2075,65 @@ fn reconnect_watcher_heals_a_fallen_link() {
     // returns (the backoff retries tolerate any gap here).
     std::thread::sleep(Duration::from_millis(400));
     let mut b2 = spawn_brood(&dir, "b2.blsp", &b_round2);
+    // Assert B2 is actually listening rather than assuming it. Without this the test could
+    // not tell "the watcher failed to heal" (the thing under test) from "B never came back"
+    // (a harness problem): both surfaced only as A's `[:nodeup]` deadline expiring 20 s
+    // later, which is exactly how KI-27 presented.
+    wait_until_listening(port_b);
 
     let out = a.wait_with_output().expect("watcher finished");
     let _ = b2.kill();
-    let _ = b2.wait();
+    let b2_out = b2.wait_with_output().ok();
     let _ = std::fs::remove_dir_all(&dir);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
+    // B2's own output on the failure path: if the healed link never formed, whether B2 was
+    // healthy is the first question, and it used to be unanswerable after the fact.
+    let b2_err = b2_out
+        .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
+        .unwrap_or_default();
     for expect in ["NODEDOWN-OK", "NOCONNECTION-OK", "NODEUP-OK", "PONG-OK"] {
         assert!(
             out.status.success() && stdout.contains(expect),
-            "reconnect healing: missing {expect}.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+            "reconnect healing: missing {expect}.\n--- A stdout ---\n{stdout}\n\
+             --- A stderr ---\n{stderr}\n--- B2 stderr ---\n{b2_err}"
         );
+    }
+}
+
+/// KI-27 regression: a test node's port must never come from the kernel's **ephemeral** range.
+///
+/// The old `free_port` used `bind("127.0.0.1:0")`-and-drop, which draws from exactly the range
+/// outbound connections are assigned from — so an unrelated process could be handed the port a
+/// node was about to bind, and the node's bind failed with `EADDRINUSE`. That reproduced only
+/// under a full `make test` and presented as a 20 s `[:nodeup]` timeout in the reconnect test.
+///
+/// This asserts the property that makes the collision impossible rather than trying to race it:
+/// every allocated port sits below `ip_local_port_range`'s floor, so the kernel never hands it
+/// out on its own.
+#[test]
+fn allocated_ports_are_outside_the_kernel_ephemeral_range() {
+    let floor: u16 = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+        .ok()
+        .and_then(|s| s.split_whitespace().next()?.parse().ok())
+        .unwrap_or(32768);
+
+    // Deliberately modest: this test shares its process (and so its port slice) with every
+    // other test in the file under plain `cargo test`, and draining the slice would push them
+    // into reusing ports.
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..40 {
+        let port = free_port();
+        assert!(
+            port < floor,
+            "free_port() returned {port}, inside the ephemeral range (floor {floor}) — an \
+             unrelated process's client socket can take it before the node binds (KI-27)"
+        );
+        assert!(
+            port >= 1024,
+            "free_port() returned a privileged port {port}"
+        );
+        assert!(seen.insert(port), "free_port() handed out {port} twice");
     }
 }
