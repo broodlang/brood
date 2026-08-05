@@ -1,0 +1,88 @@
+;; Per-call cost of a HOF step function — sizing the identity-keyed call-site IC.
+;;
+;;   N=3000000 brood scripts/fuzz/stress/hof_call.blsp
+;;   BROOD_NO_JIT=1 N=3000000 brood scripts/fuzz/stress/hof_call.blsp
+;;
+;; WHAT THIS ANSWERS. `compile_node` allocates a call-site inline-cache id only for a
+;; **free-global** callee; a local/computed callee (`site = NO_SITE`) keeps the generic
+;; path, so every HOF's step call re-resolves per element. handoff.md §1 proposes an
+;; identity-keyed IC for that case. Before building it, this bounds what it could buy.
+;;
+;; The bound: `computed` and `global` call the SAME function the same number of times and
+;; differ only in how the callee is reached — a parameter (no IC) vs a free global (IC, and
+;; under the JIT a native fast-link too). So `computed - global` is an UPPER bound on the
+;; identity IC's value: everything the IC could recover, plus fast-linking it cannot.
+;; If that gap is small, the IC is not worth building — which is the point of measuring
+;; first rather than implementing and then A/B-ing.
+;;
+;; Raw primitives (`%add`/`%sub`/`%eq`) throughout: `+`/`-`/`=` are variadic Brood defns
+;; over `fold`, ~40x a direct call, and would bury the effect under passthrough cost.
+;; Every loop is tail-recursive (O(1) stack) and returns a value that depends on every
+;; iteration, so nothing can be folded away.
+
+(def N (let (e (getenv "N")) (if e (string->number e) 3000000)))
+
+(defn ns-per (f k)
+  (let (t0 (now-ns) _ (f))
+    (quot (- (now-ns) t0) k)))
+
+;; The step function under test: a plain 2-arg user closure, NOT a passthrough, so a
+;; cached `(arm, env)` is exactly what an IC would hold for it.
+(defn step (acc x) (%add acc x))
+
+;; A step whose body is NOT a single primitive, so it cannot be spliced into its caller.
+;; Needed because a leaf step lets the JIT delete the call entirely, which measures the
+;; inliner rather than the call — the trap that made the first version of this file report
+;; 1 ns/call for a global head.
+(defn step-hop (acc x) (step acc x))
+(defn step-deep (acc x) (step-hop acc x))
+
+;; ---- the two shapes -------------------------------------------------------------
+
+;; Callee in a LOCAL slot (a parameter) — what every HOF does. `site = NO_SITE`.
+(defn loop-computed (f n acc)
+  (if (%eq n 0) acc (loop-computed f (%sub n 1) (f acc n))))
+
+;; The same callee as a FREE GLOBAL — gets the call-site IC (and a JIT fast-link).
+(defn loop-global (n acc)
+  (if (%eq n 0) acc (loop-global (%sub n 1) (step acc n))))
+
+;; Global head, but a callee that cannot be spliced — the honest fast-link measurement.
+(defn loop-global-hop (n acc)
+  (if (%eq n 0) acc (loop-global-hop (%sub n 1) (step-deep acc n))))
+
+;; The SAME as `loop-global-hop` but carrying the unused `f` parameter, so the global and
+;; computed rows differ in one thing only: how the callee is reached. Without this control
+;; the comparison also charges the computed row for threading an extra argument through
+;; every iteration, which is not what the IC would fix.
+(defn loop-global-hop3 (f n acc)
+  (if (%eq n 0) acc (loop-global-hop3 f (%sub n 1) (step-deep acc n))))
+
+;; Floor: the operation inlined, no call at all.
+(defn loop-inline (n acc)
+  (if (%eq n 0) acc (loop-inline (%sub n 1) (%add acc n))))
+
+;; A native builtin as the computed callee — no arm to cache, so an IC can do nothing
+;; here. Included to separate "call overhead" from "callee resolution".
+(defn loop-native (f n acc)
+  (if (%eq n 0) acc (loop-native f (%sub n 1) (f acc n))))
+
+;; ---- run ------------------------------------------------------------------------
+;; Warm first (tier up / fill caches), then measure. Report the second reading only.
+
+;; Reports total ms as well as ns/call: a row whose total does not scale with N has had
+;; its work optimised away, and the ns/call figure is then measuring nothing. Also prints
+;; the accumulator, so a loop cannot be dead-code-eliminated unobserved.
+(defn row (label f)
+  (let (v (f) a (ns-per f N) b (ns-per f N) best (min a b))
+    (println (str label " " best " ns/call   (" (quot (* best N) 1000000) " ms total, acc=" v ")"))))
+
+(println (str "N=" N " jit=" (if (nil? (getenv "BROOD_NO_JIT")) "on" "off")))
+(row "inline    (no call)     " (fn () (loop-inline N 0)))
+(row "global    leaf step     " (fn () (loop-global N 0)))
+(row "computed  leaf step     " (fn () (loop-computed step N 0)))
+;; THE DECIDING PAIR — same callee, same arity, differing only in global vs computed head.
+(row "global    non-leaf 3arg " (fn () (loop-global-hop3 step-deep N 0)))
+(row "computed  non-leaf 3arg " (fn () (loop-computed step-deep N 0)))
+(row "global    non-leaf 2arg " (fn () (loop-global-hop N 0)))
+(row "native    computed prim " (fn () (loop-native %add N 0)))

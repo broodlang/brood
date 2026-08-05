@@ -1,0 +1,124 @@
+;; `spawn-live` decomposed into rungs — what the worst published row is actually made of.
+;;
+;;   MODE=<rung> N=100000 brood scripts/fuzz/stress/spawn_live_ladder.blsp
+;;   MODE=all N=100000 brood scripts/fuzz/stress/spawn_live_ladder.blsp
+;;
+;; handoff.md §1 costed this ladder but never committed it, so the figures could not be
+;; re-derived. This is that ladder, plus the verification the original lacked.
+;;
+;; RUNGS (each adds ONE thing to the one above):
+;;   spawn    — spawn + exit. No mailbox traffic at all.
+;;   send     — + the parent sends each unit a message it never reads.
+;;   nopark   — + the unit receives, but its message is ALREADY in the mailbox, so the
+;;              receive returns without suspending.
+;;   park     — + the parent sends only after every unit is spawned, so every unit runs
+;;              its receive on an EMPTY mailbox, suspends, and is resumed by the send.
+;;              NOTE this rung adds TWO things, not one — see `park-batched` below.
+;;   park-batched — parks like `park`, but only BATCH units coexist. The rung that
+;;              separates suspending from coexisting.
+;;   payload  — + the 16-cell vector copy and fold of the published row.
+;;
+;; `park` − `nopark` is NOT the cost of suspend + resume, though handoff §1 read it that
+;; way. Measured 2026-08-05: suspending is ~2.5% *cheaper* than not suspending (ADR-178's
+;; fast path fires only on a parked receiver, so parking is what puts the wake on it), and
+;; the whole delta is the cost of N processes being alive at once. Use `park-batched` to
+;; see it: 22.2 µs/unit at 100k alive, 17.6 at 100, 15.8 never parking.
+;;
+;; VERIFY THE RUNGS BEFORE READING THE DELTA. Whether a receive parks is a race, not a
+;; fact of the source, so a mode named `nopark` proves nothing on its own. Run under
+;; `BROOD_L1_STATS=1`: ADR-178's local-send fast path fires ONLY when the receiver is
+;; parked, so it reports exactly this — `park` should be ~100% hit, `nopark` should be
+;; dominated by `not-parked`. If they are not, the delta is measuring something else.
+;;
+;; `nopark` gets its message in before the receive by having the unit **send to itself**
+;; first. That is deterministic where "spawn then immediately send from the parent" is
+;; not (the child may reach its receive first, and does, often). The cost of that self
+;; send is why `send` is a separate rung: `nopark` − `send` isolates the receive-match,
+;; and `park` − `nopark` the suspend/resume, with one send each either way.
+;;
+;; Report CPU, not wall: this row runs ~3 cores, and measuring wall is what once credited
+;; `spawn-live` with a 20.6% noise floor (handoff.md §6). Use:
+;;   /usr/bin/time -f '%U user %S sys %e wall' brood … ladder.blsp
+
+(def n (let (e (getenv "N")) (if e (string->number e) 100000)))
+(def mode (let (e (getenv "MODE")) (if e e "all")))
+(def payload (into [] (range 16)))
+(def me (self))
+
+;; ---- the units ------------------------------------------------------------------
+
+(defn unit-spawn () nil)
+(defn unit-send () nil) ; never reads its mailbox
+(defn unit-nopark ()
+  (do (send (self) [:go]) (receive ([:go] (send me [:r 1])))))
+(defn unit-park ()
+  (receive ([:go] (send me [:r 1]))))
+(defn unit-payload ()
+  (receive ([:go p] (send me [:r (+ (fold + 0 p) 1)]))))
+
+;; ---- drivers --------------------------------------------------------------------
+
+(defn spawn-n (f i acc) (if (%eq i n) acc (spawn-n f (%add i 1) (cons (spawn (f)) acc))))
+(defn release (l msg) (if (empty? l) nil (do (send (first l) msg) (release (rest l) msg))))
+(defn collect (got acc) (if (%eq got n) acc (collect (%add got 1) (receive ([:r v] (%add acc v))))))
+
+;; A unit that never replies cannot be collected, so these rungs settle by draining the
+;; spawned pids instead — the row still pays every spawn and every send.
+(defn drain (l) (if (empty? l) nil (drain (rest l))))
+
+;; ---- separating "it parked" from "they all coexist" ------------------------------
+;;
+;; The `park` rung above changes TWO things against `nopark`, not one: every unit
+;; suspends, AND all N are alive at the same time (the parent spawns them all before
+;; sending anything). So `park − nopark` is not the cost of suspend/resume alone — it
+;; also carries whatever N coexisting processes cost in heap growth, GC and cache
+;; pressure. handoff.md §1 attributed the whole delta to "suspend + wake".
+;;
+;; `park-batched` holds the parking and drops the coexistence: units are spawned,
+;; released and collected BATCH at a time, so every unit still runs its receive on an
+;; empty mailbox and suspends (verify with `BROOD_L1_STATS=1` — hits should stay at one
+;; per unit), but only `BATCH` of them are ever alive. Then:
+;;
+;;   park − park-batched  = what coexistence costs
+;;   park-batched − nopark = what suspend/resume costs
+(def batch (let (e (getenv "BATCH")) (if e (string->number e) 100)))
+
+(defn spawn-k (f i k acc) (if (%eq i k) acc (spawn-k f (%add i 1) k (cons (spawn (f)) acc))))
+(defn collect-k (got k acc)
+  (if (%eq got k) acc (collect-k (%add got 1) k (receive ([:r v] (%add acc v))))))
+
+(defn park-batched (remaining)
+  (if (%eq remaining 0)
+    nil
+    (let (k (if (%lt remaining batch) remaining batch)
+          l (spawn-k unit-park 0 k nil)
+          _ (release l [:go])
+          _ (collect-k 0 k 0))
+      (park-batched (%sub remaining k)))))
+
+(defn ms (f)
+  (let (t0 (now-ns) _ (f)) (quot (- (now-ns) t0) 1000000)))
+
+;; ns/unit as a plain integer — a hand-rolled fixed-point µs print silently dropped the
+;; leading zero of its fraction (5.050 rendered as "5.50", i.e. 10x wrong).
+(defn rung (label f)
+  (let (t (ms f))
+    (println (str label "  " t " ms   " (quot (* t 1000000) n) " ns/unit"))))
+
+(defn run-spawn () (drain (spawn-n unit-spawn 0 nil)))
+(defn run-send () (release (spawn-n unit-send 0 nil) [:go]))
+(defn run-nopark () (do (spawn-n unit-nopark 0 nil) (collect 0 0)))
+(defn run-park () (do (release (spawn-n unit-park 0 nil) [:go]) (collect 0 0)))
+(defn run-payload () (do (release (spawn-n unit-payload 0 nil) [:go payload]) (collect 0 0)))
+
+(defn want (m) (or (%eq mode "all") (%eq mode m)))
+
+(println (str "N=" n " mode=" mode))
+(if (want "spawn") (rung "spawn   (spawn + exit)      " run-spawn) nil)
+(if (want "send") (rung "send    (+ unread message)  " run-send) nil)
+(if (want "nopark") (rung "nopark  (+ receive, no park)" run-nopark) nil)
+(if (want "park") (rung "park    (+ suspend/resume)  " run-park) nil)
+(if (want "park-batched")
+  (rung (str "park-b  (parks, " batch " coexist)  ") (fn () (park-batched n)))
+  nil)
+(if (want "payload") (rung "payload (+ copy 16 + fold)  " run-payload) nil)
