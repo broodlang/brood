@@ -15919,6 +15919,188 @@ A knock-on worth noting: the code-point-vector rewrites this bug class forced (`
 they are; the point is that new `std/` code no longer has to choose between char indexing and
 linearity.
 
+## 2026-08-04 (cont.) — KI-25 closed: two fixes, and a diagnosis that had guessed wrong
+
+Five suites passed on the first run and failed when re-run *inside one image*, which blocked
+`--repeat-until-failure` (and `nest test --failed`) across brood's whole suite — so a real flake
+anywhere else was invisible behind them. The entry had been left open on the grounds that
+`pid_identity_test` was the informative case: it is already `:isolated`, so "something outside the
+global table survives an isolated re-run — a JIT tier election, an IC block, a pid counter, or an
+arm-keyed cache", and diagnosing that was JIT-internals work.
+
+**Running the recipe prints the answer, and it is not a JIT cache:**
+
+```
+uncaught error: … :message node-start: this runtime is already a node (node-start called twice)
+```
+
+`node-start` is deliberately one-shot per runtime (a second listener would need a second port), and
+`%isolate` rolls back **bindings** — it cannot roll back runtime node state, and nothing at the test
+level can. The test consumes its own precondition. So the "mystery" was a mundane one-shot resource,
+and the reason for leaving the whole issue alone evaporated with it.
+
+Fixes, two kinds because the causes are two kinds:
+
+- the four rebinding suites (`jit_self_rebind`, `jit_shared_spawn`, `vm_call_head_order`,
+  `vm_selfcall_reload`) are `:isolated`, so their `def`s roll back to the post-load baseline;
+  `jit_shared_spawn` went from `:serial` to `:isolated` — it already ran alone, what it lacked was
+  the rollback;
+- `pid_identity_test` takes the transition only when `(node-name)` is `:nonode`, keeping the
+  equality / hashing / receive-pattern assertions on a re-run. Every ordinary `nest test` is a fresh
+  image, so the real nonode→node case still runs there.
+
+Verified: each of the five clean over 3 iterations at seeds 0 and 5, and the whole in-language suite
+now survives a re-run in one image — `nest test --repeat-until-failure 2` gives **4390/4390 twice**.
+I checked the failure detector against the pre-fix file before trusting any green result, per the
+standing rule that a test which cannot fail is not a gate.
+
+**The lesson is about the write-up, not the bug.** The original entry reasoned forward from a guess
+("a JIT tier election, an IC block, …") and that guess set the priority: JIT-internal, therefore
+expensive, therefore deferred. The actual cause was in the error message the repro prints. **Run the
+repro before ranking the cost of a fix** — an unread error message is the cheapest evidence there is,
+and a plausible mechanism written into a doc outlives the ten seconds it would have taken to check.
+
+Also this session: the README gained a **type system** section — dynamic at runtime, strong in what
+it refuses (`(+ 1 "2")` raises, `(= [1 2] '(1 2))` is false, `(/ 3 4)` is exact), set-theoretic and
+gradual in what it checks, inferred first with `(sig …)` as optional refinement, and advisory (the
+checker never gates the live image; `nest check` is the CI gate). It also corrected the README's
+"without ever rejecting a runnable program", which ADR-123–126 superseded, and `types.md`'s stale
+"17 runtime Tags" (23 today, and `Tag` is the authority).
+
+## 2026-08-04 (cont.) — the last quadratic: a safepoint table for form-start scanning (ADR-214), and the `expect_string` seam triaged
+
+Took `handoff.md` §1 and §2 in one pass.
+
+**§1 — `sexp motions` is linear.** The scan now resumes from a safepoint table cached against
+the string value instead of re-lexing from offset 0, and runs over bytes instead of a
+`Vec<char>` it allocated per call. Same profile both sides, base 3200: ratio **7.97 → 3.88**
+(ASCII) and 7.87 → 3.89 (UTF-8), 12800 forms **18570 → 6146 ms**, and linearity confirmed on
+four rising bases (4.04 / 3.99 / 3.85 / 3.94). ADR-214 has the design; two things about it are
+worth carrying forward.
+
+*The layering answer was already on the slot.* ADR-213 put a `StrAux` cell on the string slot
+for the char→byte index; the safepoint table hangs off the same cell as an
+`OnceLock<Arc<dyn Any + Send + Sync>>` the heap owns and never interprets. So a **higher layer
+gets a per-string-value cache without the core depending on it**, and it cost zero extra
+per-string memory. Keying by *value* rather than by handle is the load-bearing part: a `StrId`
+is unique only within a GC epoch, so a map keyed by handle needs clearing at every collection
+and is silently wrong if it doesn't — a cell that travels with the bytes has no such window.
+That is a pattern to reach for again, not a one-off.
+
+*The safepoints only exist between tokens*, which deleted the state I expected to have to
+store. A string or comment is consumed atomically inside one step, so the resumed state is
+always "in code" — no in-string/in-comment flag to save, restore, or get wrong. The design got
+simpler when I stopped trying to make safepoints uniform.
+
+**Two findings I'd have got wrong by reasoning.** First: the editor's own motion path gains
+**nothing**. `sexp/forward` calls `(buffer-text buf)` = `rope->string`, a fresh string per
+motion, so the cache can never hit and each motion is O(n) in the stringify before any scanning
+happens. The row I fixed is the *tooling* shape (one text value, many queries), and rope-native
+motion is the successor item. Second: `editor/lineedit`, which the handoff flagged as needing a
+look, is fine — `lineedit--cursor-rc` copies the prefix twice per keystroke, but measured it is
+2.5 ns/char: **28 µs at 10 K chars, 248 µs at 100 K, 2452 µs at 1 M**, i.e. under a frame even
+on a 1 MB pasted line. Declined with numbers rather than "low risk".
+
+**§2 — one real quadratic left in `std/`, and it was `sse--frames`.** It re-`substring`ed the
+rest of the buffer per event, so one socket read holding k events cost O(k · chunk) — the
+`stream-lines` bug in another module, and a 64 KB read of short events is the normal case, not
+the pathological one. One native `string-split` whose last piece *is* the remainder:
+**5671 → 15 ms at 25600 events** (8.25× / 20.33× / 18.47× across three rising bases → 5.0),
+with a `sse frames-1c` sweep row so it cannot come back. Everything else in the unswept modules
+(`net/reconnect`, and `docs`/`explain`/`grammar`/`mcp`/`observer`/`proctree`/`scaffold`/`reload`/
+`package`) has no reachable accumulator shape: the two `(append acc …)` hits fold over *source
+directories*, a handful of items. That is the reachability filter working as intended.
+
+**The `expect_string` copy seam: its worth is conditional, and now there is a rule.** Eight
+sites converted to a borrow (`%str-splice-diff`, `string->codepoints`, `grapheme-count`,
+`grapheme-at`, `substring-graphemes`, `upper`, `lower`). Measured:
+
+- where the call's own work is **O(1)** and the argument is a whole buffer — the editor reading
+  the cluster under the cursor, `(grapheme-at txt 0)` on 212 KB, 20 000 calls — **100 → 26 ms,
+  −74%**;
+- where the body is **per-char** (`grapheme-count`/`string->codepoints` over the whole string)
+  — **−0.6%**, inside the drift floor. The UAX #29 segmentation dwarfs the memcpy.
+
+So the remaining ~105 sites should be triaged by **what the body costs**, not converted by
+count — and two of them can't be converted at all by this pattern: `string-split` and
+`scan-tokens` allocate per piece *while* scanning, so the borrow can't be held, and
+`string-split` gains nothing anyway (its copies are the parts, not the input). That is worth
+knowing before someone budgets a sweep of all 113.
+
+Gates: 954 Rust tests + the in-language suite green, `nest check` / `format --check` clean,
+clippy clean, `--no-default-features` builds, every sweep row linear in **both** encoding
+regimes.
+
+## 2026-08-04 (cont.) — `spawn-live`: every process was recompiling the same code (ADR-215)
+
+Took `handoff.md` §1, the worst published row (2.8× slower and 1.9× heavier than the BEAM),
+and the discipline it demands paid off before any code changed.
+
+**The ladder.** Rather than guess, I decomposed the row into variants that each add one
+thing, and measured **CPU** per unit (not wall — the row runs on 3.3 cores, so wall hides
+where the work is), N=100 000:
+
+| variant | CPU/unit |
+|---|---|
+| spawn + one send + exit | 7.2 µs |
+| + a `receive` that never parks | 20.9 µs |
+| + every unit held alive, so each parks and resumes | 28.9 µs |
+| + the payload copy and the fold (the published row) | 45.4 µs |
+
+Two facts fell out immediately. Per-unit cost is **flat** from 25k to 200k units, so nothing
+scales with the live set — it is a fixed per-unit price. And the `spawn` row, where units
+complete immediately, costs *less CPU per unit than Elixir's* — so spawning is not the
+problem; the problem is a process that **receives**.
+
+**What it wasn't.** None of the nine mechanism switches moved it (`BROOD_NO_HANDOFF`,
+`NO_STEAL_WAKE`, `SPAWN_RR`, `SPAWN_SPILL`, `NO_RECV_MARK`, `NO_JIT`, `PURGE_DELAY=0`,
+`NO_SHARE_FN`) — all within 21–23 µs. And a control that sends the same N messages to **one**
+target instead of N distinct ones costs **1.5 µs/op** against 21 µs, which said the cost is
+per-*distinct-target*, i.e. in what a fresh process does, not in send/receive throughput.
+
+**The tool that was missing.** `perf-stats` counts events; it cannot say where time goes, and
+this cost was in no counter. So I added `perf_time!(ns_*, { … })` — nanosecond accumulators
+around spawn, deliver, message copy each way, receive, matcher resolve, teardown, and one
+scheduler quantum — and `BROOD_TRACE_COMPILE=1`, which names every closure that compiles. The
+first run said `ns_receive` was 12 µs of a 24 µs quantum; the split inside it said
+`ns_match_resolve` was 8.4 of that 12; and `n_compile` said why: **100 154 bytecode compiles
+for 100 000 units — one per process, 8.1 µs each.**
+
+**The cause, and it is a key, not a mechanism.** ADR-175 already moved compiled arms into a
+per-runtime cache. It keyed them by the **closure handle**, and two things defeat that: a
+local-capturing closure was excluded by an explicit region test, and — the one I did not
+expect — a closure that captures no locals is *promoted afresh on every creation* (ADR-194),
+so it gets a **new RUNTIME handle each time**. A `spawn` thunk and a `receive` matcher are
+both that shape, so the lookup missed on every creation and every process recompiled.
+
+Keying instead by the closure's **AST identity** (its first body form, when non-LOCAL — the
+identity `make_closure_cached` already uses for the parsed template) fixes both holes at
+once. Compiles per run: **100 154 → 163**.
+
+**Measured on the real row** (N=300 000, same profile, three interleaved runs): wall
+2.40 → 2.10 s (**−12.5%**), CPU 15.9 → 11.9 CPU·s (**−25%**), peak RSS 1925 → 1648 MB
+(**−14%**). The ladder: non-parking receive 23.9 → 12.2, the full held-alive shape
+30.9 → 17.7, the published row 49.2 → 35.7 µs/unit. Nothing else regressed — compute rows
+within ±1.9% best-of-9, and `spawn`/`pingpong`/`ring`/`supervisor` flat-to-better on CPU with
+lower RSS.
+
+**Two lessons worth keeping.**
+
+*The 20.6% noise floor recorded for this row is a property of how it was measured, not of the
+row.* Measuring **CPU time** over a fixed unit count, with the two binaries interleaved, gave
+a spread under 2% across runs — small enough to resolve a 12% change confidently. When a row
+is "unmeasurable", check whether the metric is the problem before accepting the floor.
+
+*A cache that cannot be observed missing looks like a cache that works.* ADR-175 shipped with
+the mechanism correct and the key wrong, and nothing in the suite or the benchmarks could tell
+the difference — the row was simply slow. The counter that would have caught it (`n_compile`
+should be ~one per arm per *run*, not per *process*) took ten lines and now exists.
+
+**What's left on the row.** At 35.7 µs/unit the remainder is the child's own work running
+**cold**: the same 16-element fold costs ~16 µs in a fresh process against 3.7 µs warm,
+because **inline caches are still per-process**. ADR-175 named that obstacle precisely (dense
+per-process call-site ids baked into shared `Node::Call`s), so it is the successor item, not a
+loose end.
 ## 2026-08-04 (cont.) — module privacy becomes a recorded fact, not a name re-parsed everywhere (ADR-146 step 1)
 
 Module privacy (ADR-146) was a naming convention re-derived by `name.contains("--")` in ~9

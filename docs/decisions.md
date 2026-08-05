@@ -13985,3 +13985,170 @@ incremental `index-of` scan are now linear on any text, so the code-point-vector
 class of bug forced (`url`, `csv`, `ansi`) are no longer *required* — they remain correct and are
 left alone. The remaining string-path seam is unrelated and still open: `expect_string` returns an
 owned `String` at ~113 call sites, one copy of the argument per call.
+
+## ADR-214 — A lexer safepoint table cached against the string value: form-start scanning goes linear
+
+**Status:** implemented (2026-08-04), unconditional (a cache that changes no answer; its gate
+is that its answers equal the pre-table scan's at every position). Closes the lever
+`handoff.md` §1 carried as the last quadratic in the sweep.
+
+**Context.** `scan-form-start` / `-2` answer "where does the top-level form containing `pos`
+begin" — the beginning-of-defun primitive under `tool/sexp`'s narrowing and
+`editor/highlight`'s `safe-restart`. Correctness requires a **forward** lexical pass from
+offset 0, because a backward scan cannot know whether a `(` sits inside a string or a comment.
+So one call is O(pos) and a *sequence* of motions over one buffer is O(n²): the `sexp motions`
+row read 7.97× per 4× of input at base 3200, 18.6 s for 12800 forms. Two constant-factor fixes
+had already landed (2026-08-04) and left the shape alone; the entry recorded the real fix as
+"resumable lexer state, which needs somewhere to live".
+
+**Decision.** Cache a **safepoint table** against the *string value*: every
+`SCAN_POINT_STRIDE` (4096) bytes, record the lexer's state — `at_bol`, plus the answer so far
+(`best`/`prev`) — at a position where the lexer is *between tokens*. A query binary-searches
+for the last safepoint at or before `pos` and resumes there, so a motion costs O(stride) and a
+sequence over one text value is linear. Two properties make it simple rather than subtle:
+
+- **Safepoints only exist between tokens**, so the resumed state is always "in code" — a
+  string or comment is consumed atomically inside one step, and one that spans a stride simply
+  gets no safepoint of its own. There is no in-string/in-comment state to store, restore, or
+  get wrong.
+- **The pass runs over bytes, not `char`s.** It used to materialise `pos + 1` `char`s (4 bytes
+  each) per call — a motion near the bottom of a 1 MB file allocated 4 MB before scanning it.
+  Every character this lexer cares about is ASCII, so byte matching is exact; the char index
+  the language speaks rides along, incremented per char boundary.
+
+**Where the table lives, which is the part worth recording.** It hangs off the string slot's
+`StrAux` cell (introduced by ADR-213 for the char→byte index) as an
+`OnceLock<Arc<dyn Any + Send + Sync>>`: **the heap owns the cell and never interprets it**, and
+the syntax layer downcasts to its own type. Three consequences:
+
+- The core does not depend on a higher layer to host a higher layer's cache — the alternative
+  (a `FormScanIndex` field in `core/heap.rs`) would have put Lisp lexer rules in the substrate.
+- Keying by string **value** rather than by handle is what makes it sound. A `StrId` is unique
+  only within a GC epoch, so a map keyed by handle would need clearing at every collection (and
+  would be wrong if it didn't); a cell that travels *with the bytes* has no such window. The
+  `Arc` means a slot clone — what the collector does when it tenures a survivor — shares the
+  table instead of rebuilding it.
+- `StrAux` already existed, so this cost **zero** additional per-string memory: `LocalString`
+  stays 56 bytes, pinned by a test.
+
+**Measured** (same `release-fast` profile both sides, `sexp motions`, base 3200):
+
+| | ASCII | UTF-8 |
+|---|---|---|
+| before | 2329 → 18570 ms, **7.97×** | 2350 → 18499 ms, **7.87×** |
+| after | 1586 → 6146 ms, **3.88×** | 1617 → 6294 ms, **3.89×** |
+
+3.0× at 12800 forms, and **linear**: four rising bases give 4.04 / 3.99 / 3.85 / 3.94, the
+non-rising trend the sweep's own header demands before clearing a row.
+
+**What this deliberately does not fix.** The buffer-command path (`sexp/forward` on a buffer)
+calls `(buffer-text buf)` = `rope->string` — a **fresh** string per motion, which the table can
+never hit. Those motions are O(n) in the stringify before any scanning happens, so the editor
+keystroke path is unchanged; making *it* cheap needs rope-native motion, which is a different
+piece of work and now the successor item. The shapes this does fix are the ones that hold one
+text value across many queries: the sweep row, `nest check`-style tooling, and an LSP/eldoc pass
+over an unchanged document.
+
+**Validation.** The pre-table implementation is kept verbatim as a test oracle, and both the
+direct scan and the resumed scan must equal it at **every** char index of 17 fixtures — a
+column-0 bracket inside a string and inside a comment, an escaped quote, an escaped
+*multi-byte* char, an unterminated string, multi-byte text, and blank/comment-only lines —
+with a deliberately tiny 3-byte stride so a resume happens between almost every pair of
+positions, plus a fixture spanning three real strides. Verified by sabotage: letting a
+safepoint land inside a string literal, and resuming from the safepoint *after* `pos`, each
+fail the suite.
+
+## ADR-215 — Key compiled code by the closure's AST, not its instance (so ADR-175's sharing actually hits)
+
+**Status:** implemented (2026-08-04), on by default; `BROOD_NO_SHARED_ARMS=1` (ADR-175's
+existing switch) now turns this off too. Attacks `handoff.md` §1, `spawn-live`.
+
+**Context.** ADR-175 moved compiled arms off the process and into a per-runtime cache —
+the BEAM's module-area model — keyed by the **closure handle**. That key has two holes,
+and together they meant the sharing almost never fired for the shape it was built for:
+
+1. **A local-capturing closure was excluded outright** (`matches!(key, Runtime(_))`), on the
+   grounds that its handle is recycled by the LOCAL collector and its arm might embed
+   movable handles.
+2. **A closure that captures no locals is promoted afresh on every creation** (ADR-194), so
+   it gets a *new* RUNTIME handle each time. `(spawn (unit i))`'s thunk and every `receive`
+   matcher are exactly that shape — so a handle-keyed lookup missed on every single
+   creation.
+
+Measured, with timing counters added for the purpose (below): a `spawn-live`-shaped
+workload of 100 000 units ran **100 154 bytecode compiles — one per process — at 8.1 µs
+each**, a third of the per-unit scheduler time. The compiled form was being shared with
+nobody.
+
+**Decision.** Key the compiled body by the closure's **AST identity**: the first arm's
+first body form, when that is an allocated **non-LOCAL** pair. Fall back to the closure
+handle when it is not. `VmCacheKey::LocalBody` becomes `VmCacheKey::Body` and applies to
+every region, and the shared publish/lookup gate drops its region test — every keyable
+closure participates.
+
+This is the identity the evaluator *already* uses one layer up: `make_closure_cached`
+memoises the parsed `ClosureTemplate` per `MakeClosure` site keyed by the same `fn` form,
+which is why every instance of a per-creation closure shares one `Arc<[ClosureArm]>`. The
+compiled form now follows the same rule as the parse.
+
+**Why sharing a local-capturing closure's arm is sound** — the objection in ADR-175's
+comment, answered in three parts rather than argued away:
+
+- **No LOCAL handle can be in a compiled arm.** `const_node` routes every literal through
+  `heap.promote` and debug-asserts `value_is_immovable`; `MakeClosure` defers (declines to
+  compile) rather than embed an unstable `fn_rest`. The arm is off the GC root graph, which
+  is *why* that invariant already exists — a LOCAL const would be a use-after-GC with or
+  without sharing.
+- **Captured values are not in the arm.** They are read from the closure's env at call time
+  (`hof_apply_step` reads `heap.closure(id).env`); the arm holds slot *indices*, which are a
+  property of the AST.
+- **RUNTIME relocation is unchanged.** An entry still carries the `free_epoch` its publisher
+  observed before compiling, so a generation freed mid-compile leaves it uninstallable, and
+  the compactor still rewrites handles through `live_vm_arms`.
+
+**Measured on `spawn-live` (N=300 000, same `release-fast` profile both sides, three
+interleaved runs):**
+
+| | wall | CPU | peak RSS |
+|---|---|---|---|
+| before | 2.39–2.42 s | 15.9 CPU·s | 1918–1935 MB |
+| after | 2.08–2.18 s | 11.9 CPU·s | 1640–1656 MB |
+| | **−12.5%** | **−25%** | **−14%** |
+
+The decomposition ladder that located it (CPU µs per unit, N=100 000): spawn+send+exit
+8.2 → 8.6 (unchanged — this shape never paid the cost); + a non-parking `receive`
+23.9 → **12.2**; + holding every unit alive so each parks 30.9 → **17.7**; + the payload
+copy and fold (the published row) 49.2 → **35.7**.
+
+**No regressions.** `make ab` best-of-9: `fib` +0.0%, `regex` −0.8%, `json` +0.4%,
+`matmul` +0.6%, `nqueens` +0.9%, `bintree` +0.8%, `sieve` +1.9% (1 ms of quantisation on a
+52 ms row). CPU-attributed on all cores: `spawn` 0.30 → 0.29, `pingpong` 0.24 → 0.23,
+`ring` 0.82 → 0.78, `supervisor` 1.29 → 1.28 CPU·s — flat to slightly better, with lower
+RSS on each.
+
+**The diagnosis needed a tool the repo did not have, which is now part of it.** The
+`perf-stats` counters could say *how many* IC misses and allocations happened but not
+*where the time went*, and this cost was in neither. So `perf_time!(ns_*, { … })` was added
+alongside `perf_bump!` — nanosecond accumulators for `spawn` / `deliver` / message copy in
+and out / `receive` / matcher resolve / teardown / one scheduler quantum — plus
+`BROOD_TRACE_COMPILE=1`, which names every closure that compiles. Those two turned "the row
+is 3.4× the BEAM" into "8.1 µs × one compile per process, in `hof_resolve`" in about ten
+minutes. `ns_quantum` nests the others, so read shares of it rather than a sum; and because
+the atomics perturb timing, confirm any winner with a counter-free A/B (which is what the
+table above is).
+
+**Validation.** `tests/shared_arm_test.blsp` pins the split the change turns on: instances
+of one `fn` form keep their own captures (in one process and across 24 concurrent ones — the
+publish race), a closure built fresh per call is right every time, a `def` is observed
+through a shared arm (late binding, ADR-013), and a closure whose body is built by `eval`
+(unkeyable, no cache) still runs. Every case passes with `BROOD_NO_SHARED_ARMS=1` as well,
+which is what makes it an optimisation rather than a semantic. A sabotage that collides keys
+(`p.0 & !0xffff`) fails the *boot*, so the gate is sensitive.
+
+**What is left on the row, and why it is a different piece of work.** At 35.7 µs/unit the
+remainder is the child's own tiny computation running **cold**: the same 16-element fold
+costs ~16 µs in a fresh process against 3.7 µs in a warm one, because **inline caches are
+still per-process** — ADR-175 identified the obstacle (call-site ids are dense per-process
+indices baked into shared `Node::Call`s, so naive IC sharing pushes every process's IC
+vectors toward the root's size and loses more memory than it saves). That is the successor
+item; this ADR deliberately does not touch it.

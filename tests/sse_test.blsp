@@ -29,6 +29,24 @@
     (let ([blocks rest] (net/sse/sse--frames "partial data"))
       (assert= blocks '())
       (assert= rest "partial data")))
+  ;; The edges of the one-split extraction (2026-08-04): a buffer that ends exactly on a
+  ;; blank line leaves an EMPTY remainder rather than dropping the last event, and an empty
+  ;; buffer splits to no pieces at all — the case the guard in `sse--frames` exists for.
+  (test "a buffer ending on a blank line has an empty remainder"
+    (let ([blocks rest] (net/sse/sse--frames "x: 1\n\ny: 2\n\n"))
+      (assert= blocks (list "x: 1" "y: 2"))
+      (assert= rest "")))
+  (test "an empty buffer yields no blocks and an empty remainder"
+    (let ([blocks rest] (net/sse/sse--frames ""))
+      (assert= blocks '())
+      (assert= rest "")))
+  (test "many events in ONE chunk all come out, in order"
+    ;; The shape the `sse frames-1c` sweep row measures: one socket read holding k events.
+    (let (blob (apply str (repeat 500 "data: tick\n\n"))
+          [blocks rest] (net/sse/sse--frames blob))
+      (assert= (count blocks) 500)
+      (assert= (first blocks) "data: tick")
+      (assert= rest "")))
   (test "normalise turns \\r\\n and \\r into \\n"
     (assert= (net/sse/sse--normalize "a\r\nb\rc\nd") "a\nb\nc\nd"))
   (test "status reads the numeric code from a response head"

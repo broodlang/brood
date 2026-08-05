@@ -118,11 +118,30 @@ impl FastLink {
 /// the immovable **body-code handle** its (recycled LOCAL) `ClosureId` points at.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum VmCacheKey {
-    /// A top-level / promoted RUNTIME closure, keyed by its closure-handle `.0`.
+    /// A closure keyed by its closure-handle `.0` — the fallback, for a closure whose
+    /// body has no stable handle to key on.
     Runtime(u64),
-    /// A local-capturing closure, keyed by the `.0` of its first body form's
-    /// (RUNTIME-stable) handle — the closure handle itself is unstable across GC.
-    LocalBody(u64),
+    /// A closure keyed by the `.0` of its first arm's first body form, which must be a
+    /// **non-LOCAL** (PRELUDE/RUNTIME) pair. This is the *AST* identity, and it is the
+    /// preferred key for every region (ADR-215): a closure INSTANCE handle is not stable
+    /// — a `spawn` thunk, or any no-capture closure, is promoted afresh on every creation
+    /// and so gets a new RUNTIME handle each time — while its `fn` form is one cell in
+    /// shared code, identical in every process of the runtime. Keying on it is what lets
+    /// the compiled form be reused across creations *and* shared across processes.
+    Body(u64),
+}
+
+impl VmCacheKey {
+    /// The key's identity as one `u64`, for the **runtime-shared** compiled-closure map
+    /// (whose key space must distinguish the two variants; the same fold as [`Hash`]).
+    #[inline]
+    pub fn shared_bits(self) -> u64 {
+        let (tag, v) = match self {
+            VmCacheKey::Runtime(x) => (0u64, x),
+            VmCacheKey::Body(x) => (1u64, x),
+        };
+        v.rotate_left(1) ^ tag
+    }
 }
 
 impl std::hash::Hash for VmCacheKey {
@@ -134,7 +153,7 @@ impl std::hash::Hash for VmCacheKey {
     fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
         let (tag, v) = match *self {
             VmCacheKey::Runtime(x) => (0u64, x),
-            VmCacheKey::LocalBody(x) => (1u64, x),
+            VmCacheKey::Body(x) => (1u64, x),
         };
         h.write_u64(v.rotate_left(1) ^ tag);
     }

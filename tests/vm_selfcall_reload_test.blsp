@@ -38,6 +38,10 @@
 (defn scr-serve (n acc) (if (= n 0) acc (scr-serve (- n 1) (+ acc 2))))
 
 (describe "SelfCall observes a redefinition of its own function"
+  :isolated
+  ;; `:isolated` because these tests redefine globals they also assert on. Without the
+  ;; `%isolate` rollback it buys, a SECOND run in the same image — `--repeat-until-failure`,
+  ;; or `nest test --failed` — starts from the redefined state and fails (KI-25). Keep it.
   (test "a loop that redefines itself mid-run picks up the new body"
     ;; Redefinition fires at n = 5, so the remaining iterations run the NEW body.
     (assert= :replaced (scr-loop 8 0))

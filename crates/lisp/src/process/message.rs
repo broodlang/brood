@@ -172,6 +172,10 @@ pub(crate) const MAX_MESSAGE_DEPTH: u32 = 256;
 /// Deep-copy a value out of `heap` into a `Send` message. A closure is sent as
 /// data (see [`ClosureMsg`]); builtins and macros can't be.
 pub fn to_message(heap: &Heap, v: Value) -> Result<Message, LispError> {
+    crate::perf_time!(ns_msg_out, { to_message_timed(heap, v) })
+}
+
+fn to_message_timed(heap: &Heap, v: Value) -> Result<Message, LispError> {
     to_message_rec(heap, v, &mut Vec::new(), 0, None)
 }
 
@@ -566,6 +570,10 @@ fn local_lookup(heap: &Heap, env: EnvId, sym: Symbol) -> Option<Value> {
 
 /// Rebuild a message into `heap`.
 pub fn from_message(heap: &mut Heap, m: &Message) -> Value {
+    crate::perf_time!(ns_msg_in, { from_message_timed(heap, m) })
+}
+
+fn from_message_timed(heap: &mut Heap, m: &Message) -> Value {
     match m {
         // A closure handed over by handle (same runtime, already-shared region). No rebuild,
         // no allocation — the point of the whole exercise.

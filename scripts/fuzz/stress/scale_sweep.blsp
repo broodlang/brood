@@ -29,14 +29,21 @@
 ;; Rows measured linear on 2026-07-30: proc/agent update, buffer insert,
 ;; buffer forward-line. proc/gen gen-call is unresolved, per the above.
 ;;
-;; 2026-08-04: `sexp motions` is a CONFIRMED quadratic — three rising points, ASCII 5.68x
+;; 2026-08-04: `sexp motions` WAS a confirmed quadratic — three rising points, ASCII 5.68x
 ;; then 9.40x, one-non-ASCII 8.84x then 12.30x. Each motion's cost is `narrow`'s call to the
 ;; native form-start scan, which is O(point) by design (a backward scan cannot know string
-;; state). TWO constant-factor fixes landed, together **2.0x** on this row (6400 forms ASCII
-;; 12061 -> 6037 ms): the native stopped copying the whole buffer and over-allocating past
-;; `pos` (-18%), and `narrow` stopped making the O(point) pass TWICE — `scan-form-start-2`
-;; returns both offsets from one pass (-39% more). The ASYMPTOTE IS UNCHANGED and needs
-;; resumable lexer state, which the pure `(text point) -> point` API has nowhere to put.
+;; state). Two constant-factor fixes landed first (the native stopped copying the whole
+;; buffer, -18%; `narrow` stopped making the O(point) pass twice, -39% more) and did NOT
+;; change the shape.
+;;
+;; FIXED 2026-08-04 (ADR-214), and now LINEAR: the scan resumes from a safepoint table
+;; cached against the string value, so a motion costs O(stride) instead of O(point). Same
+;; profile both sides, base 3200: ratio 7.97 -> 3.88 (ASCII) and 7.87 -> 3.89 (UTF-8), with
+;; 12800 forms 18570 -> 6146 ms (3.0x). Linearity confirmed on FOUR rising bases
+;; (4.04 / 3.99 / 3.85 / 3.94), which is the non-rising trend this header demands.
+;; NOTE the buffer-command path (`sexp/forward` on a buffer) still pays O(n) per motion in
+;; `(buffer-text buf)` = `rope->string`, a fresh string the table can never hit; this row
+;; measures the shape that holds ONE text value, which is the tooling/LSP shape.
 ;; Measure the SEQUENCE — one motion looks fine at any buffer size.
 ;;
 ;; The multi-byte gap WAS the striking part: 27571 vs 6037 ms at 6400 forms, 4.6x — `substring`
@@ -98,6 +105,12 @@
 ;; code-point vector with a threaded length, like `url.blsp` / `csv.blsp`. 1583 ms -> 109 ms
 ;; at 3200 lines. NOTE it has no in-tree callers — a latent bug in a public std module.
 ;;
+;; 2026-08-04: `sse frames-1c` WAS a confirmed quadratic — 8.25x / 20.33x / 18.47x across
+;; three rising bases — the `stream-lines` bug in another module: `sse--frames` re-`substring`ed
+;; the REST of the buffer per event, so ONE socket read holding k events cost O(k * chunk), and
+;; a 64 KB read of short events is the normal case. Now one native `string-split` whose last
+;; piece IS the remainder: 25600 events 5671 -> 15 ms, ratio 5.0 at the top base.
+;;
 ;; 2026-08-02: `stream-lines` WAS quadratic INSIDE a chunk — it re-`substring`ed the rest of
 ;; the buffer per line. The prediction that it is bounded by chunk size held exactly: a
 ;; 64-line drip measured 4.50/4.27 (linear) while one chunk holding k lines measured
@@ -122,6 +135,9 @@
 ;; namespacing hardening now rejects outright), and `proc/agent` also shadows the prelude's
 ;; `get`/`update`. `gen-calls` below already calls `proc/gen/stop` qualified.
 (defmodule scale-sweep
+  ;; `sse--frames` is module-private (ADR-146); a stress harness measuring an internal is
+  ;; exactly the `:use-internals` case, as `tests/sse_test.blsp` does.
+  (:use-internals net/sse)
   (:use proc/agent :only [start update stop])
   (:use proc/gen :only [defprocess spawn-server gen-call])
   (:use editor/buffer)
@@ -130,6 +146,7 @@
 (require 'format)
 (require 'ansi)
 (require 'stream)
+(require 'net/sse)
 
 (def n (let (e (getenv "N")) (if e (string->number e) 2000)))
 
@@ -249,6 +266,16 @@
   (let (blob (str utf8-lead (apply str (repeat k "some log line of moderate length here\n"))))
     (count (stream/stream-to-list (stream/stream-lines (stream/stream-from-list (list blob)))))))
 
+;; ---- SSE frame extraction from one accumulated chunk ------------------------
+
+;; The `stream-lines` shape in another module: `sse--frames` used to `substring` the REST of
+;; the buffer per event, so ONE socket read holding k events cost O(k * chunk). A 64 KB read
+;; of short events is the normal case, which is why this is measured with all k events in a
+;; single buffer rather than dripped.
+(defn sse-frames-1chunk (k)
+  (let (blob (str utf8-lead (apply str (repeat k "event: tick\ndata: some payload here\n\n"))))
+    (count (first (net/sse/sse--frames blob)))))
+
 ;; ---- string search: reverse, and a forward incremental scan -----------------
 
 (defn doc-of (k)
@@ -289,6 +316,7 @@
 (row "format      fmt-src " n fmt-source)
 (row "ansi        strip   " n ansi-strip)
 (row "stream      lines-1c" n stream-lines-1chunk)
+(row "sse         frames-1c" n sse-frames-1chunk)
 (row "string      last-idx" n last-idx)
 (row "string      inc-scan" n inc-scan) ; was multi-byte-quadratic, fixed — see header
-(row "sexp        motions " n sexp-motions) ; CONFIRMED quadratic, unfixed — see header
+(row "sexp        motions " n sexp-motions) ; was quadratic, fixed (ADR-214) — see header

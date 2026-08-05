@@ -39,6 +39,10 @@
   (if (= i 0) acc (cho-loop (- i 1) (cho-add acc (cho-id 1)))))
 
 (describe "a call's operator is resolved before its arguments"
+  :isolated
+  ;; `:isolated` because these tests redefine globals they also assert on. Without the
+  ;; `%isolate` rollback it buys, a SECOND run in the same image — `--repeat-until-failure`,
+  ;; or `nest test --failed` — starts from the redefined state and fails (KI-25). Keep it.
   (test "an argument that rebinds the head does not affect this call"
     ;; The operator was resolved first, so this call runs the ORIGINAL `cho-f`.
     (assert= :old (cho-g))

@@ -1800,6 +1800,32 @@ fn compile_arm(
 }
 
 fn compile_closure(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
+    crate::perf_bump!(n_compile);
+    // TEMP diagnostic: which closures compile, and how often.
+    if std::env::var_os("BROOD_TRACE_COMPILE").is_some() {
+        let c = heap.closure(id);
+        let body_region = c
+            .arms
+            .first()
+            .and_then(|a| a.body.first())
+            .map(|b| format!("{:?}", b.unpack()))
+            .unwrap_or_default();
+        let key = match cache_key(heap, id) {
+            Some(VmCacheKey::Runtime(x)) => format!("Runtime({x})"),
+            Some(VmCacheKey::Body(x)) => format!("Body({x})"),
+            None => "none".to_string(),
+        };
+        eprintln!(
+            "[compile] id_region={} key={} body={}",
+            id.region(),
+            key,
+            body_region
+        );
+    }
+    crate::perf_time!(ns_compile, { compile_closure_timed(heap, id) })
+}
+
+fn compile_closure_timed(heap: &Heap, id: ClosureId) -> Option<CompiledClosure> {
     let cl = heap.closure(id);
     // The lexical names this closure inherits from outer closures (Stage 2c) —
     // empty for a global-capturing (top-level) closure. A nested `(fn …)` in the
@@ -1910,19 +1936,33 @@ pub(crate) fn cached_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<
 }
 
 fn cache_key(heap: &Heap, id: ClosureId) -> Option<VmCacheKey> {
-    match id.region() {
-        value::RUNTIME | value::PRELUDE => Some(VmCacheKey::Runtime(id.0)),
-        value::LOCAL => {
-            // Key on the first arm's first body form. Require an allocated RUNTIME
-            // handle so the key is both stable and collision-free (immediates and
-            // interned symbols are shared, so they'd alias unrelated closures).
-            let first = heap.closure(id).arms.first()?.body.first().copied()?;
-            match first.unpack() {
-                ValueRef::Pair(p) if p.region() != value::LOCAL => Some(VmCacheKey::LocalBody(p.0)),
-                _ => None,
+    // Prefer the closure's **AST identity** — its first arm's first body form — over its
+    // instance handle, in every region (ADR-215). Require an allocated non-LOCAL pair so
+    // the key is stable and collision-free (immediates and interned symbols are shared, so
+    // they would alias unrelated closures; a LOCAL cell's slot is recycled by the
+    // collector).
+    //
+    // Why the AST and not the handle: a closure that captures no locals is *promoted on
+    // every creation* (ADR-194), so `(spawn (worker))`'s thunk gets a FRESH RUNTIME handle
+    // per spawn while reusing one template (`make_closure_cached` already keys that by the
+    // same `fn` form). Keying the compiled body by handle therefore missed on every
+    // creation — measured as one full bytecode compile per spawned process.
+    if let Some(first) = heap
+        .closure(id)
+        .arms
+        .first()
+        .and_then(|a| a.body.first())
+        .copied()
+    {
+        if let ValueRef::Pair(p) = first.unpack() {
+            if p.region() != value::LOCAL {
+                return Some(VmCacheKey::Body(p.0));
             }
         }
-        _ => None, // any other region (e.g. a blob/shared handle) — not VM-cached.
+    }
+    match id.region() {
+        value::RUNTIME | value::PRELUDE => Some(VmCacheKey::Runtime(id.0)),
+        _ => None, // LOCAL with an unkeyable body, or any other region — not VM-cached.
     }
 }
 
@@ -1957,11 +1997,8 @@ fn probe_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<Compiled
     }
     // Read-only peek at the cross-process cache — an entry there was compiled by a real
     // call, so it carries its own metadata and is safe to use (and not ours to install).
-    if !crate::core::heap::Heap::shared_arms_disabled()
-        && matches!(id.region(), value::PRELUDE | value::RUNTIME)
-        && matches!(key, VmCacheKey::Runtime(_))
-    {
-        if let Some(cc) = heap.shared_closure_lookup(id.0) {
+    if !crate::core::heap::Heap::shared_arms_disabled() {
+        if let Some(cc) = heap.shared_closure_lookup(key.shared_bits()) {
             return cc.arm_for(argc).cloned();
         }
     }
@@ -1982,13 +2019,20 @@ fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<Compi
     //     *cached* arm is on no execution stack, so its handles are never rewritten), and
     //     an entry carries the `free_epoch` its publisher observed BEFORE compiling, so a
     //     generation freed mid-compile leaves the entry stale and uninstallable.
-    // A LOCAL closure is keyed by its body (`LocalBody`) and is not shared: the handle
-    // is recycled by the LOCAL collector and the arm can embed movable handles.
-    let shareable = !crate::core::heap::Heap::shared_arms_disabled()
-        && matches!(id.region(), value::PRELUDE | value::RUNTIME)
-        && matches!(key, VmCacheKey::Runtime(_));
+    // Every keyable closure's compiled form is shared across the runtime's processes
+    // (ADR-215), including a local-capturing one: [`cache_key`] names the closure by its
+    // AST (a non-LOCAL body cell), so the key means the same code in every process.
+    // Sharing is sound for the
+    // same reason as a top-level one: a compiled arm embeds no LOCAL handle by
+    // construction (`const_node` promotes every literal and asserts immovability;
+    // `MakeClosure` defers rather than embed an unstable `fn_rest`), the captured
+    // *values* are read from the closure's env at call time rather than baked in, and
+    // slot layout is a property of the AST. Without this, a process that runs a fresh
+    // closure once — every `receive` matcher, every spawned handler — recompiled it:
+    // measured one compile per process at 8.1 µs, a third of `spawn-live`'s per-unit time.
+    let shareable = !crate::core::heap::Heap::shared_arms_disabled();
     if shareable {
-        if let Some(cc) = heap.shared_closure_lookup(id.0) {
+        if let Some(cc) = heap.shared_closure_lookup(key.shared_bits()) {
             let cc = Some(cc);
             heap.vm_cache_put(key, cc.clone());
             return cc.and_then(|cc| cc.arm_for(argc).cloned());
@@ -2003,7 +2047,7 @@ fn compiled_arm_for(heap: &Heap, id: ClosureId, argc: usize) -> Option<Arc<Compi
     heap.vm_cache_put(key, compiled.clone());
     if shareable {
         if let Some(cc) = &compiled {
-            heap.shared_closure_publish(id.0, fe, cc.clone());
+            heap.shared_closure_publish(key.shared_bits(), fe, cc.clone());
         }
     }
     compiled.and_then(|cc| cc.arm_for(argc).cloned())
