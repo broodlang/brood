@@ -20,45 +20,50 @@ hunting again.
 
 ---
 
-## 1. START HERE — `spawn-live`'s remainder: per-process inline caches
+## 1. START HERE — `spawn-live`: what is left, and the premise this section got wrong
 
-**ADR-215 took the first bite** (compiled code is now keyed by the closure's AST, so a
-`spawn` thunk and a `receive` matcher are compiled once per *runtime* instead of once per
-*process*): `spawn-live` wall −12.5%, CPU −25%, RSS −14%. What is left is measured and it
-points at one thing.
+**Read this before touching inline caches.** The previous version of §1 named per-process inline
+caches as the lever, on counted IC misses plus a ladder delta. Measured properly (2026-08-05),
+both halves were wrong:
 
-At **35.7 µs of CPU per unit**, the remainder is the child's own tiny computation running
-**cold**. The same 16-element fold costs **~16 µs in a fresh process against 3.7 µs in a warm
-one**, and the reason is that **inline caches are still per-process**: a spawned unit that
-performs a handful of calls misses on ~half of them (counted: ~4 call-IC and 1 global-IC miss
-per unit).
+- A fresh process's **first** fold costs 5.7 µs against 3.7 warm — **~2 µs** of one-time cost,
+  not the 16 µs claimed. A child's steady state (3.6 µs) equals the root's (3.8 µs).
+- IC misses are ~10 per unit ≈ **2 µs, ~5% of the row**. Worth having eventually; not the lever.
+- The **site-id scheme §1 called a prerequisite already exists** — ADR-175 Phase A made sites
+  arm-relative with lazily-allocated per-process blocks (`vm_arm_block`, `cur_ic_base`).
 
-ADR-175 named the obstacle precisely, and it has not moved: `vm_site_alloc` returns a **dense
-per-process index** baked into each compiled `Node::Call`, so a shared arm's site ids come
-from whichever process compiled it, and every process's IC vectors must then be dense up to
-the global maximum. Measured then: a unit process uses 21 sites (4.3 KB), the root 251
-(33.4 KB) — so naive IC sharing pushes every process toward the root's figure and can lose
-more memory than it saves. **A site-id scheme is the prerequisite, not the IC sharing itself.**
+**What the lever was, and it is now taken.** `fold` coerced with `seq` and walked with
+`first`/`rest`, and `(rest v)` on a vector *materialises a list of the tail* — 15 cons cells and
+~48 one-arg primitive dispatches to sum a 16-element payload. `fold` now indexes a vector
+directly (`fold--vec`). Per unit: allocations **27.7 → 15.0**, one-arg dispatches **48 → 1.1**,
+the shape **32.7 → 28.6 µs** CPU, the published row **11.44 → 10.40 CPU·s** (−9%).
 
-The options, none yet measured:
+**Where the row now stands** (CPU µs per unit, N=100k, measured with `scripts/…/sl_one.blsp`'s
+modes — commit that ladder as a stress row if you continue):
 
-- **Sparse per-process IC storage** (a small map, or a per-arm block allocated on first use)
-  — removes the density requirement, costs a lookup on the hot path.
-- **Per-arm site numbering** (ids local to the arm, so a shared arm carries its own dense
-  range and each process allocates one block per arm it runs) — keeps the array indexing;
-  needs a per-process arm→block table, which is what `vm_arm_block` already is under `jit`.
-- **Share the IC block itself**, epoch-validated like the arms. Entries cache immovable
-  callees + an epoch, so this may be sound as-is — but it is a write-shared structure on the
-  hottest path, so it needs a race design (seqlock or atomic slots), not just a move.
+| | µs/unit |
+|---|---|
+| spawn + send + exit, no `receive` | 8.6 |
+| + a `receive` that never parks | 12.2 |
+| + every unit held alive, so each parks | 17.7 |
+| + payload copy and fold (the published row) | **28.6** |
+| the same row with the sum as a hand-rolled indexed loop | 17.9 |
 
-**Measure it the way the row was measured** (§5): CPU time over a fixed unit count with the
-two binaries interleaved gives a <2% spread on this row. The 20.6% "noise floor" this row was
-credited with is an artefact of measuring *wall* on a 3.3-core workload — do not inherit it.
-Tools: `BROOD_PERF_STATS=1` on a `--features perf-stats` build now reports `ns_*` timing
-shares (`ns_quantum` nests the rest), `BROOD_TRACE_COMPILE=1` names every compile, and
-`scripts/fuzz/stress/` has no row for this shape yet — the decomposition ladder used in the
-devlog entry (spawn+send+exit / non-parking receive / held-alive / full row) is worth
-committing as one if you continue here.
+So the next candidates, in the order the numbers support them:
+
+1. **The remaining `fold`-vs-hand-loop gap (28.6 vs 17.9).** Not the step function: warm,
+   `(fold + 0 v)` beats folding a plain 2-arg closure (2.8 vs 3.9 µs), so `+`'s passthrough is
+   fine. What is left is `fold--vec` threading five parameters and ~2 allocations per unit.
+   Smallest remaining piece with a measured size.
+2. **Park/resume (5.5 µs/unit)** — the A−E step above. Untouched, and no measurement has
+   attributed it further than "suspend + wake".
+3. **Per-process inline caches (~2 µs)** — real but small, and now correctly sized. If you do it,
+   the site-id work is already done; what is left is the race design for a shared block.
+
+Measure with **CPU time over a fixed unit count, binaries interleaved** (<2% spread). The 20.6%
+"noise floor" this row was once credited with is an artefact of measuring *wall* on a 3.3-core
+workload. `BROOD_PERF_STATS=1` on a `--features perf-stats` build gives `ns_*` timing shares
+(`ns_quantum` nests the rest) and per-unit counters; `BROOD_TRACE_COMPILE=1` names every compile.
 
 ## 2. Then: rope-native structural motion, the editor half of the `sexp` story
 
@@ -277,7 +282,13 @@ regression detection, which means running it **both** ways (`UTF8=1`) and checki
   disappointed by it sent me back and found the real one (two O(point) passes where one suffices,
   −39% more). I would otherwise have written up a true and incomplete story.
 - **Threads get named after the mechanism nearest the symptom, not the cause.** Two of four were
-  misnamed. Re-derive a thread's premise before implementing against it.
+  misnamed — and §1 was misnamed *again* on 2026-08-05: "cold inline caches" was the nearest
+  plausible mechanism to "a fresh process is slow", so it became the item, and a ladder delta was
+  read as confirming it. One measurement (a per-call warm-up curve) disproved it. Re-derive a
+  thread's premise before implementing against it, and prefer a curve to a counter.
+- **A counter is not a timing.** IC misses ran at 58% of call sites, which was true and cost ~2 µs
+  of a 33 µs row. A high miss *rate* is unavoidable on a process that makes five calls; only the
+  `ns_*` timers and a per-call curve sized it.
 - **A comment asserting a cost is not evidence** — and a docstring can describe a bound's *intent*
   rather than its achievement. `sexp/narrow` says motions cost "~three forms, not the whole buffer";
   true of the CST work it wraps, false of finding the window, which was the whole cost.

@@ -475,3 +475,38 @@
     (assert= [1 2 3] (mapv inc (range 3)))
     (assert= [0 2 4] (filterv even? (range 6)))
     (assert= [10 20] (mapv (fn (x) (* x 10)) [1 2]))))
+
+;; `fold` over a VECTOR takes an indexed fast path (`fold--vec`) rather than the generic
+;; `first`/`rest` walk, because `(rest v)` on a vector materialises a list of the tail —
+;; 15 cons cells and ~48 one-arg primitive dispatches to sum 16 numbers. The fast path must
+;; be indistinguishable from the generic one, including for the awkward cases: an
+;; order-sensitive `f`, a non-commutative one, an empty vector, and a nested vector whose
+;; elements are themselves collections.
+(describe "fold over a vector matches the generic walk"
+  (test "same result as the equivalent list, order preserved"
+    (doseq (v [[] [1] [1 2 3 4 5] [10 -3 7]])
+      (assert= (fold + 0 v) (fold + 0 (seq (into (list) (reverse v)))))
+      ;; `-` is order-sensitive: a reversed or reordered walk shows up here
+      (assert= (fold - 100 v) (fold - 100 (apply list v)))
+      ;; and so does a builder, which records the visit order outright
+      (assert= (fold flip-cons nil v) (fold flip-cons nil (apply list v)))))
+  (test "the initial accumulator is returned untouched for an empty vector"
+    (assert= (fold + 7 []) 7)
+    (assert= (fold str "seed" []) "seed"))
+  (test "elements that are themselves collections are passed through, not walked"
+    (assert= (fold (fn (a x) (conj a (count x))) [] [[1 2] [3] []]) [2 1 0])
+    (assert= (fold (fn (a p) (+ a (second p))) 0 [[:a 1] [:b 2]]) 3))
+  (test "reduce (which funnels through fold) agrees on vectors and lists"
+    (assert= (reduce + [1 2 3 4]) (reduce + (list 1 2 3 4)))
+    (assert= (reduce max [3 9 2]) 9)
+    (assert= (reduce + 10 [1 2 3]) 16))
+  (test "a large vector folds without materialising a list"
+    ;; 50k elements: the generic walk would allocate 50k cons cells here.
+    (let (v (into [] (range 50000)))
+      (assert= (fold + 0 v) (quot (* 49999 50000) 2))))
+  (test "across processes: each folds its own copy of a vector"
+    (let (me (self))
+      (doseq (k (range 1 9))
+        (spawn (send me [:r (fold + 0 (into [] (range k)))])))
+      (assert= (fold + 0 (map (fn (_) (receive ([:r v] v))) (range 1 9)))
+        (fold + 0 (map (fn (k) (quot (* (- k 1) k) 2)) (range 1 9)))))))
