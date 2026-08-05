@@ -305,7 +305,7 @@
       (make-dir dir)
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
         (spit fa
-          "(defmodule shared)\n(defn main () 1)\n(defn shared--helper () 1)\n(defn shared--dead () 1)\n(defn use-it () (shared--helper))\n")
+          "(defmodule shared)\n(defn main () 1)\n(defn- shared-helper () 1)\n(defn- shared-dead () 1)\n(defn use-it () (shared-helper))\n")
         (spit fb "(defmodule shared)\n(defn main () 2)\n")
         (let (files [fa fb]
               extracts (fold (fn (m p)
@@ -317,11 +317,11 @@
           ;; duplicate-defs: extract path == sequential path
           (assert= (sort (project/project-duplicate-def-warnings extracts source-set))
             (sort (project/project-duplicate-def-warnings-seq files)))
-          ;; unused-private: shared--dead is unreferenced (warn), shared--helper is used
+          ;; unused-private: shared-dead is unreferenced (warn), shared-helper is used
           (let (warns (project/project-unused-private-warnings extracts))
             (assert= (count warns) 1)
-            (is (includes? (first warns) "shared--dead"))
-            (refute (any? (fn (w) (includes? w "shared--helper")) warns))))))))
+            (is (includes? (first warns) "shared-dead"))
+            (refute (any? (fn (w) (includes? w "shared-helper")) warns))))))))
 
 ;; The Phase-2 check-result cache primitives (ADR-119): `check-file-deps` returns
 ;; `[warnings dep-keys fingerprint]`, and `check-deps-fp` recomputed on those
@@ -491,7 +491,7 @@
 ;; With a fixed name, no two scaffolded projects could ever depend on each other —
 ;; both provided `hello`, and `nest add` refused with a module-name collision
 ;; (namespaces aren't package-rooted yet, ADR-070). The name must also be safe to
-;; write as a bare symbol and as a filename, and `project--valid-name?` permits
+;; write as a bare symbol and as a filename, and `project-valid-name?` permits
 ;; punctuation that a symbol shouldn't carry.
 (describe "project: the scaffolded library module's name"
   (test "an ordinary name is used as-is"

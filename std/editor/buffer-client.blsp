@@ -1,7 +1,7 @@
 ;; std/editor/buffer-client.blsp — the CLIENT half of the buffer-process protocol.
 ;;
 ;; Design notes (the *why*; the *what* is in the docstrings below):
-;;  - `editor/buffer`'s actor shell (`spawn-buffer` / `buffer--serve`) is the SERVER
+;;  - `editor/buffer`'s actor shell (`spawn-buffer` / `buffer-serve`) is the SERVER
 ;;    half of a two-party protocol: it owns the authoritative text, serializes edits,
 ;;    and pushes `[:buffer-updated pid version view origin]` to subscribers. This
 ;;    module is the OTHER half — the state a subscriber keeps about one hosted
@@ -20,7 +20,7 @@
 ;;    buffer pool, a registry's text mirror, a test's string). Sending (`link-
 ;;    propagate`) is the one side-effecting entry point.
 ;;  - Content crosses as positional SPLICES, never ropes and never closures — closure
-;;    edits are invisible to the server's transform ring (see `buffer--serve`), so a
+;;    edits are invisible to the server's transform ring (see `buffer-serve`), so a
 ;;    transform-collaborated document must keep content changes structured.
 
 ; buffer-splice, splice-disjoint?, splice-transform(-all)

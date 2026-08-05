@@ -50,7 +50,7 @@
           (after 2000 (send report [:probed :no-frame])))))
     (after 2000 (send report [:probed :no-attach]))))
 
-;; A scripted GUI-style display for the any-display client (`attach--display-loop`):
+;; A scripted GUI-style display for the any-display client (`attach-display-loop`):
 ;; `:draw` reports the frame's text to `report`. Input is NOT read via `:poll` — the
 ;; unified client loop reads the mailbox directly (as a real gui-display's input does),
 ;; so the test injects keys by `send`ing them to the client process.
@@ -163,7 +163,7 @@
 
   (test "attach-display (GUI client): frames paint to the display, input ships back, :close tears down"
     ;; The terminal client reads input from the TTY; a GUI client reads window input from
-    ;; the SAME mailbox the daemon pushes frames to, so `attach--display-loop` unifies both
+    ;; the SAME mailbox the daemon pushes frames to, so `attach-display-loop` unifies both
     ;; in one receive. This drives that loop with a scripted display and in-process pids —
     ;; the full frame → key → frame → detach protocol, no node or window.
     (let (me (self)

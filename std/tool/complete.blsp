@@ -28,10 +28,10 @@
 names, module names, test files. Every function returns a (possibly empty) list
 and never raises: it runs on each TAB press, so a failure must degrade to \"no
 suggestions\", never to an error on the user's command line."
-  ;; `project--collect-tests` is module-private (ADR-146). Completion is tooling
+  ;; `project-collect-tests` is module-private (ADR-146). Completion is tooling
   ;; over the project, which is exactly what the internals grant is for — and note
   ;; the privacy error fires at REQUIRE time, so without this the whole module
-  ;; fails to load and every `complete--safely` net below is bypassed.
+  ;; fails to load and every `complete-safely` net below is bypassed.
   (:use-internals project))
 
 (require 'project)

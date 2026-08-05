@@ -20,7 +20,7 @@ source on *load-path*. Slice 1 handles `:path` (local/sibling) deps; `:git` deps
 land in a later slice."
   (:use format)
   (:use project)
-  ;; `project--cache-dir` is module-private (ADR-146); the manifest lock lives there
+  ;; `project-cache-dir` is module-private (ADR-146); the manifest lock lives there
   ;; (beside the project's other derived state) rather than in the project tree.
   (:use-internals project))
 
@@ -446,7 +446,7 @@ land in a later slice."
 
 ;; Whether `d` is a registry dep — the phase-1 walk collects these for the solver rather
 ;; than resolving them inline. Wrapping the `dep-kind` ability op in a `defn` lets the
-;; earlier `package--resolve-loop` reach it (a `defn` forward reference pre-scans; a bare
+;; earlier `package-resolve-loop` reach it (a `defn` forward reference pre-scans; a bare
 ;; ability op does not).
 (defn- package-registry-dep? (d) (= (dep-kind d) :registry))
 
@@ -968,7 +968,7 @@ TOFU-pinned signing key, nil for an unsigned package)."
 
 ;; Every `.blsp` file at or under `dir`, recursively (full paths). A hierarchical
 ;; module `(defmodule gui/window)` lives at `gui/window.blsp` in a SUBdirectory
-;; (that's how `require--find` locates it), so the collision scan must recurse —
+;; (that's how `require-find` locates it), so the collision scan must recurse —
 ;; a top-level-only listing would never open it and two providers of the same
 ;; nested namespace would collide undetected (ADR-070).
 (defn- package-blsp-files
@@ -994,8 +994,8 @@ TOFU-pinned signing key, nil for an unsigned package)."
 ;; `[module-symbol file-path]` for each `.blsp` file the dir provides (recursively) —
 ;; `provided-modules` paired with the file each module lives in. Package-rooting
 ;; (ADR-070) needs the FILE, not just the name: a dep module `foo/b` maps to that
-;; dep's `b.blsp`, and `require--force` loads it from there under `foo`'s context.
-;; PUBLIC (no `--`): the project loader (`project--root-project-rooting`) also scans
+;; dep's `b.blsp`, and `require-force` loads it from there under `foo`'s context.
+;; PUBLIC (no `--`): the project loader (`project-root-project-rooting`) also scans
 ;; its own source dirs with it to root the root project's modules, a legitimate
 ;; cross-module use.
 (defn package-module-files (src-dir)
@@ -1115,7 +1115,7 @@ TOFU-pinned signing key, nil for an unsigned package)."
 
 ;; Register each dependency's modules as PACKAGE-ROOTED (ADR-070): a dep `foo`
 ;; providing `b.blsp` (`(defmodule b)`) becomes the global namespace `foo/b`, so two
-;; deps can both provide a `parser` with no collision. `require--force` loads the file
+;; deps can both provide a `parser` with no collision. `require-force` loads the file
 ;; under `foo`'s package context (its `%in-ns`/`(:use …)` root); the root project's own
 ;; modules are NOT registered here, so they stay short (the asymmetry ADR-070 records —
 ;; the Elixir-style uniform root-project rooting is the recorded next step).
@@ -1260,7 +1260,7 @@ TOFU-pinned signing key, nil for an unsigned package)."
 ;; + std/format.blsp): parse → splice an entry node in/out of the :dependencies
 ;; vector → re-render with `format/format-cst-root` (which keeps comments). The
 ;; manifest is reformatted in the process, which is fine for a tool-managed file.
-;; The pure text transforms (`package--manifest-add`/`-remove`) take a manifest
+;; The pure text transforms (`package-manifest-add`/`-remove`) take a manifest
 ;; string and return a new one, so they unit-test without touching the filesystem.
 
 ;; Build a CST entry node from a dep record — `[name :path "p"]` /

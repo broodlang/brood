@@ -8,7 +8,7 @@
 ;; tail-recursive (small green-process stack). Register-only — `nest test` finds it.
 
 ;; `:use-internals telemetry` grants the node-liveness tests access to the private
-;; diff helpers (`telemetry--absent`) — the ADR-146 @testable seam.
+;; diff helpers (`telemetry-absent`) — the ADR-146 @testable seam.
 (defmodule telemetry-metrics-test (:use test) (:use telemetry) (:use-internals telemetry))
 
 (defn tmm-emit-n (event m n)

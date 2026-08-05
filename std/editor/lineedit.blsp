@@ -8,7 +8,7 @@
 ;;    — keymap, kill-ring, history, completion, layout — lives here, redefinable.
 ;;  - Pure core + thin IO (the `observe-frame` discipline): `lineedit-handle`
 ;;    maps `(state, key) -> state` with no IO, so the whole keymap is unit-tested
-;;    without a terminal (tests/lineedit_test.blsp). `lineedit--loop` is the only
+;;    without a terminal (tests/lineedit_test.blsp). `lineedit-loop` is the only
 ;;    part that polls keys and paints — exercised manually, like `repl`/`observe`.
 ;;  - Immutable state, no loops: the editor state is a map threaded through a
 ;;    tail-recursive loop; every keystroke returns a fresh state.
@@ -86,7 +86,7 @@ newline while the form is incomplete instead of submitting)."
 
 (defn- lineedit-path-word-char?
   (c)
-  "Word constituent for **path mode** — like `lineedit--word-char?` but `/` is also a
+  "Word constituent for **path mode** — like `lineedit-word-char?` but `/` is also a
 boundary, so M-f/M-b/C-w move and kill one path component (folder) at a time."
   (and (lineedit-word-char? c) (not (= c "/"))))
 
@@ -110,7 +110,7 @@ lineedit state to pick — a tiny per-prompt 'mode' for path navigation."
 (defn- lineedit-fwd-word
   (text p word?)
   "Point after the next word forward from `p` (skip non-word, then word), where `word?`
-is the word-constituent predicate (`lineedit--word-pred` picks it per mode)."
+is the word-constituent predicate (`lineedit-word-pred` picks it per mode)."
   (let (n (string-length text)
         i (lineedit-fwd text p n (fn (c) (not (word? c)))))
     (lineedit-fwd text i n word?)))
@@ -430,7 +430,7 @@ would desync the `[:up n]` cursor restore)."
 (defn- lineedit-completion-lines
   (st)
   "The listing rows to paint below the input for `st` — empty unless the last key was a
-Tab that couldn't make progress (see `lineedit--apply-completion`). `st` must be
+Tab that couldn't make progress (see `lineedit-apply-completion`). `st` must be
 reflowed (`:width` set)."
   (let (cands (get st :completions))
     (if (or (nil? cands) (empty? cands))
@@ -694,10 +694,10 @@ shared `keymap-dispatch`): a global `(fn (state key) -> state)` resolved by symb
 so redefining the command or rebinding the key hot-swaps behaviour. An unbound key
 self-inserts (a 1-char string) or is a no-op; a command that throws is caught so a
 bad binding can't crash the read. In reverse-search mode (`:search` set) keys route
-to `lineedit--search-key` instead. Pure apart from symbol resolution; testable.
+to `lineedit-search-key` instead. Pure apart from symbol resolution; testable.
 
 Any pending completion listing is dropped *before* dispatch, so it survives exactly one
-keystroke: a Tab that can't make progress re-attaches it (`lineedit--apply-completion`),
+keystroke: a Tab that can't make progress re-attaches it (`lineedit-apply-completion`),
 and typing the next character clears it. Clearing up front rather than per-command means
 a rebound key or a user's own command can't leave a stale listing on screen."
   (let (st (if (nil? (get state :completions)) state (assoc state :completions nil)))
@@ -907,7 +907,7 @@ tested in isolation."
 
 (defn- lineedit-render-multi
   (st)
-  "Repaint a multi-line form (emit `lineedit--multi-ops`), and record the cursor row in
+  "Repaint a multi-line form (emit `lineedit-multi-ops`), and record the cursor row in
 `:last-row` so the next render moves back up to the block top before clearing."
   (do
     (term-emit (into [] (lineedit-multi-ops st)))
@@ -919,7 +919,7 @@ tested in isolation."
   "Repaint the input in place, returning `st` with an updated `:last-row`. Dispatches to
 the single-line path (with horizontal scroll + signature hint, the common case) unless
 the text spans multiple lines, in which case every line is repainted so a bracket's
-partner highlights in place. `st` must already be reflowed by `lineedit--loop`."
+partner highlights in place. `st` must already be reflowed by `lineedit-loop`."
   (if (includes? (get st :text) "\n")
     (lineedit-render-multi st)
     (lineedit-render-single st)))
@@ -957,7 +957,7 @@ once. Stops as soon as the read is `:done`."
 (defn- lineedit-finish
   (state)
   "End the read: repaint the final line, drop to a new line, and return the result
-map for `repl--read-eval` — `{:line <str|nil> :eof :cancel}`."
+map for `repl-read-eval` — `{:line <str|nil> :eof :cancel}`."
   (do
     (lineedit-render-final state)
     (let (done (get state :done))

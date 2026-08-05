@@ -266,7 +266,7 @@ line editor's M-f/M-b notion of a word."
 
 ;; ---- indentation motion (M-m) -----------------------------------------------
 ;; Lives here rather than with the line motions above because it shares the word
-;; section's `buffer--scan-fwd` walk — it's `beginning-of-line` with the indent skipped.
+;; section's `buffer-scan-fwd` walk — it's `beginning-of-line` with the indent skipped.
 
 (defn back-to-indentation (buf)
   "Point moved to the first non-whitespace character of its current line — the
@@ -1207,7 +1207,7 @@ name/file/point/mark) and rebuilds the rope inside the new process. Drive it wit
   "Apply pure transform `f` (a `buffer -> buffer` fn) inside buffer process `bp`.
 With `origin` (any value — conventionally the sender's pid), the resulting push is
 tagged with it, so subscribers can recognise their own edit coming back (see
-`buffer--push` — the echo-suppression seam). Asynchronous — returns nil."
+`buffer-push` — the echo-suppression seam). Asynchronous — returns nil."
   (send bp [:edit f origin]))
 
 (defn buffer-edit-reply (bp f &optional origin)

@@ -70,7 +70,7 @@
     (assert= (pow 10 3) 1000)
     (assert= (type-of (pow 2 3)) :int))
   ;; Since ADR-196 an exact base's reciprocal is a RATIO, not a float — better, and
-  ;; immune to the underflow `pow--reciprocal`'s halving machinery exists to dodge:
+  ;; immune to the underflow `pow-reciprocal`'s halving machinery exists to dodge:
   ;; `(pow 2 -2000)` is exactly 1/2^2000 where a float reciprocal is 0.0.
   (test "a negative exponent gives an exact reciprocal for an exact base"
     (assert= (pow 2 -1) 1/2)

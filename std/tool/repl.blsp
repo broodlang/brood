@@ -7,7 +7,7 @@
 ;;    loop itself — prompts, multi-line reads, error formatting — lives here so
 ;;    it can be redefined at runtime like everything else (the project's reason
 ;;    for existing). Replaces the old Rust `crates/repl`.
-;;  - No mutation, no loop construct: `repl--loop` is tail-recursive, so it runs
+;;  - No mutation, no loop construct: `repl-loop` is tail-recursive, so it runs
 ;;    forever in O(1) stack. Memory is bounded by **Stage B's automatic copying
 ;;    GC** (ADR-055): the loop is a depth-1 spawned-process body, so each command's
 ;;    transients are reclaimed at the eval safepoint between iterations, keeping
@@ -94,7 +94,7 @@ are the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
 ;; plain `(def *1 …)` inside `(defmodule repl …)` would define `repl/*1`, while the
 ;; user typing `*1` at the prompt means the bare root name. `defdyn` marks it never-
 ;; namespaced, and — per its own docstring — a `def` of it from any module then
-;; rebinds that one root binding, which is what `repl--remember-*` below do. We `def`
+;; rebinds that one root binding, which is what `repl-remember-*` below do. We `def`
 ;; rather than `binding` on purpose: the value has to outlive the form that produced
 ;; it, and a dynamic binding would unwind at the end of the very eval that set it.
 (defdyn *1 nil)
@@ -265,7 +265,7 @@ forms into the eval rather than fail cleanly."
           (println (if d (str "\e[90m" d "\e[0m") "\e[90m(no documentation)\e[0m")))
         (catch e (println (str "\e[90m(no such name: " name ")\e[0m")))))))
 
-;; `,type` and `,time` EVALUATE user code, so they run through `repl--call` — the same
+;; `,type` and `,time` EVALUATE user code, so they run through `repl-call` — the same
 ;; interruptible runner as ordinary forms. `,time` exists precisely for expressions
 ;; slow enough to wonder about, which makes an uninterruptible one a trap: Ctrl-C
 ;; during the timing would set a flag nobody polls. Their output goes through the
@@ -347,7 +347,7 @@ form that is unreadable on one line."
 
 (defn- repl-run-meta
   (line)
-  "Dispatch a `,cmd` meta-command line (verified by `repl--meta?`) through the registry.
+  "Dispatch a `,cmd` meta-command line (verified by `repl-meta?`) through the registry.
 Returns nil; the loop just continues to the next prompt."
   (let ([cmd rest] (repl-meta-parts (substring line 1))
         c (repl-command-for cmd))
@@ -667,7 +667,7 @@ TTY), else inline. The seam the loop calls."
 (defn- repl-call
   (thunk)
   "Run `thunk` — a meta-command body that evaluates user code — interruptibly when the
-session is armed, else inline. The meta-command counterpart of `repl--eval`."
+session is armed, else inline. The meta-command counterpart of `repl-eval`."
   (if *repl-interruptible*
     (repl-call-interruptible thunk)
     (do (thunk) :ok)))
@@ -687,13 +687,13 @@ session is armed, else inline. The meta-command counterpart of `repl--eval`."
   (history)
   "Serialize `history` (newest first) to file text: the most recent
 `*repl-history-max*` entries, oldest first, one per line. (Pure — the testable core
-of `repl--save-history`.)"
+of `repl-save-history`.)"
   (join "\n" (reverse (take *repl-history-max* history))))
 
 (defn- repl-history<-text
   (text)
   "Parse history-file `text` into a history list (newest first), dropping blank
-lines. (Pure — the testable core of `repl--load-history`.)"
+lines. (Pure — the testable core of `repl-load-history`.)"
   (reverse (filter (fn (l) (not (= l ""))) (string-split text "\n"))))
 
 (defn- repl-load-history

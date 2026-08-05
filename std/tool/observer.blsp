@@ -10,7 +10,7 @@
 ;;    as absent, so the observer grows richer as the kernel does, with no rework.
 ;;  - PURE core / thin IO loop. `observe-frame` turns plain data (a node-stats map
 ;;    + a list of process-info maps + which row is selected) into a render frame,
-;;    with no IO — so it is unit-testable without a terminal. `observe--loop` /
+;;    with no IO — so it is unit-testable without a terminal. `observe-loop` /
 ;;    `observe-run` are the only parts that touch `term-*` and the live runtime.
 ;;  - Interactivity with no mutation: the UI state (selection, sort key, freeze) is
 ;;    a plain map threaded through the tail-recursive loop — each keypress recurses
@@ -20,7 +20,7 @@
 ;;    so it blocks only that thread — never a scheduler worker.
 ;;  - Pluggable **data source** (the seam that scales to remote attach): the loop
 ;;    takes a 0-arg `source` fn returning `process-info` maps. `observe-attach`
-;;    passes `observe--local-source` (this runtime's own processes — the inline
+;;    passes `observe-local-source` (this runtime's own processes — the inline
 ;;    case). Remote attach (next) passes a source that requests a peer node's
 ;;    snapshot over the dist link; the loop and `observe-frame` are unchanged.
 ;;  - Opt-in (`require`), never in the prelude; pure Brood over `display` + the
@@ -49,7 +49,7 @@ a GUI window (`(observe)`) or the terminal (`(observe-attach *term-display*)`).
     (observe-attach)   ; observe THIS runtime in the terminal, inline
 
 Keys: ↑/↓ select · s sort · space pause · r refresh · q quit. `observe-frame` is
-the pure core (node + process data → a render frame); `observe--loop` is the IO
+the pure core (node + process data → a render frame); `observe-loop` is the IO
 loop over a pluggable data **source**, so the *same* loop observes the local
 runtime (`observe-attach`) or, later, a peer runtime over a node link (remote
 attach). Drive the standalone app from the shell with `nest observe`."
@@ -191,7 +191,7 @@ the colours live in one place (`:observer/*`)."
 (defn- observe-node-lines
   (node nprocs link)
   "The two node-summary header strings from a node-stats map (see
-`observe--node-info`), the live process count, and the `link` status indicator
+`observe-node-info`), the live process count, and the `link` status indicator
 (`:ok` shows nothing; `:stale`/`:down` flag a slow/dropped remote link)."
   [(str " brood observer · node "
      (name (get node :name))
@@ -264,7 +264,7 @@ input text with the **same** live syntax highlighting + bracket matching the REP
 line editor uses (`highlight-chunks` / `lineedit/lineedit-overrides` over
 `std/highlight.blsp`), then the cursor at point. Returns a list of render ops —
 pure, so it shares the REPL's colouring rather than re-implementing it. (Tab
-completion already works via `lineedit/lineedit-handle`'s keymap in `observe--command-key`.)"
+completion already works via `lineedit/lineedit-handle`'s keymap in `observe-command-key`.)"
   (let (prompt (observe-fit (get edit :prompt) cols)
         promptw (string-length prompt)
         input (get edit :text)
@@ -299,7 +299,7 @@ selected/highlighted, a detail line, and a footer. `ui` (a map, or nil) carries 
 command-line overlay: when `(:mode ui)` is `:command` the footer becomes the
 minibuffer (the `:edit` line-editor state's prompt+text, with the cursor placed),
 and `(:msg ui)` — the last command's result — replaces the detail line. No IO —
-the observer's testable core; `observe--loop` feeds it live data."
+the observer's testable core; `observe-loop` feeds it live data."
   (let (nprocs (count procs)
         lines (observe-node-lines node nprocs link)
         cap (max 1 (- rows 5))
@@ -393,7 +393,7 @@ descendants, `:depth`-tagged) — the depth-indented tree view. Delegates to the
 (defn- observe-order
   (procs sort)
   "Order `procs` for display by `sort`: `:tree` builds the parent→child forest,
-anything else is `observe--sort` (id / mailbox / memory)."
+anything else is `observe-sort` (id / mailbox / memory)."
   (if (= sort :tree)
     (observe-tree-order procs)
     (observe-sort procs sort)))
@@ -451,7 +451,7 @@ before ordering."
   "The inline data **source**: a `process-info` map for every live process in
 *this* runtime (dropping any pid that died mid-scan), unsorted. A source is just a
 0-arg fn returning process-info maps — the remote-attach source (future) has the
-same shape (it requests a peer's snapshot over the node link), so `observe--loop`
+same shape (it requests a peer's snapshot over the node link), so `observe-loop`
 is source-agnostic: inline and remote are one loop with a swapped thunk."
   (filter (fn (p) (not (nil? p))) (map process-info (list-processes))))
 
@@ -462,7 +462,7 @@ is source-agnostic: inline and remote are one loop with a swapped thunk."
 rate is computed against a consistent clock for both inline and remote sources)
 — the inline data **source**, and the payload the remote agent (`observe-serve`)
 ships back. A source is a 0-arg fn returning such a snapshot (or, for a stalled /
-dropped remote link, a status keyword `:timeout` / `:down`); `observe--loop` is
+dropped remote link, a status keyword `:timeout` / `:down`); `observe-loop` is
 source-agnostic, so inline and remote are one loop with a swapped source."
   {:node (observe-node-info) :procs (observe-local-source) :at (now)})
 
@@ -535,7 +535,7 @@ their spawner) — on and off (back to id order). The view is also one stop of t
 
 (defn observe-cmd-kill (state _)
   "Ask to kill the selected process: stash a pending confirmation (`:confirm`); the
-actual `(exit … :kill)` waits for `y` (see `observe--confirm-key`). No-op when no
+actual `(exit … :kill)` waits for `y` (see `observe-confirm-key`). No-op when no
 process is selected."
   (let (procs (get state :procs) sel (get state :sel))
     (if (empty? procs)
@@ -571,7 +571,7 @@ process is selected."
 ;; modifier keywords like `[:ctrl]`, which the observer ignores). The observer acts on
 ;; two — left-press selects the clicked process row, the wheel scrolls the
 ;; selection — and ignores anything else (a right/middle click, or any action a
-;; future frontend adds). `observe--loop` routes mouse events here before
+;; future frontend adds). `observe-loop` routes mouse events here before
 ;; key/command dispatch, since a mouse value is never a keymap key. All pure, so
 ;; the mapping is unit-testable without a window.
 
@@ -623,7 +623,7 @@ body height (`(max 1 (- rows 5))`, as in `observe-frame`)."
 ;; `*term-display*`, `(gui-display)`, `display-broadcast`, and the `ui-run` loop
 ;; were extracted into the reusable `ui` module so a new project (the editor) can
 ;; build on the same seam. `(require 'ui)` above pulls them in; the observer is now
-;; just a `ui-run` client — see `observe--view` / `observe--update` below.
+;; just a `ui-run` client — see `observe-view` / `observe-update` below.
 
 ;; ---- the eval minibuffer (a REPL inside the observer) ------------------------
 
@@ -685,7 +685,7 @@ the backend's `:kill` and reports the result; any other key cancels. Clears
 (defn- observe-display-procs
   (model)
   "The process list as currently displayed: this snapshot's procs tagged with the
-reductions-per-second rate (`observe--rated-procs`), ordered by the model's sort
+reductions-per-second rate (`observe-rated-procs`), ordered by the model's sort
 key. Shared by `view` (renders it) and `derived` (threads selection through it),
 so both agree on row order and identity. Pure."
   (observe-order (observe-rated-procs model) (get model :sort)))
@@ -880,7 +880,7 @@ For a modal terminal observer instead, call `(observe-attach *term-display*)`."
 (defn- observe-agent-loop
   ()
   "The target-side agent's receive loop: reply to `[:snapshot from _]` with this
-runtime's `observe--local-snapshot`, to `[:eval src from _]` with the result of
+runtime's `observe-local-snapshot`, to `[:eval src from _]` with the result of
 evaluating `src` HERE (the remote eval minibuffer), and to `[:kill pid id from _]`
 by killing `pid` HERE and replying with the result — all sent back to the
 requester's pid (which routes over the link). Ignores anything else."

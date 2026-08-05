@@ -450,7 +450,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; Recursively collect every .blsp under `dir` (the project's source files).
 (defn project-collect-sources (dir)
   (if (dir? dir)
-    ;; Same O(files²)→O(files) fix as `project--collect-tests`: `cons` files, `append-two`
+    ;; Same O(files²)→O(files) fix as `project-collect-tests`: `cons` files, `append-two`
     ;; subdir lists (copies the small list, shares `acc`) instead of `(append acc …)`.
     (fold (fn (acc entry)
             (let (p (path-join dir entry))
@@ -471,7 +471,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
   (path)
   ;; ROOTED (ADR-070): the key `defmodule` will `provide` is the rooted name when the
   ;; project is rooted (`(defmodule interactive)` in project `bedit` provides
-  ;; `bedit/interactive`), and `*features*` is what `project--should-load?` compares
+  ;; `bedit/interactive`), and `*features*` is what `project-should-load?` compares
   ;; against. Returning the short name would never match, so every file would re-load —
   ;; and a module an earlier file already `require`d would be evaluated TWICE, resetting
   ;; any registry it builds by rebinding a global (`(def *commands* (assoc *commands* …))`
@@ -506,7 +506,7 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; Load every source file under the project's source paths, so tests and other
 ;; code can use the project's definitions directly — no per-file `require`. Within
 ;; one walk each module loads once even when an earlier file `require`d it (its
-;; `defmodule` `provide` is the load-once key — see `project--should-load?`); across
+;; `defmodule` `provide` is the load-once key — see `project-should-load?`); across
 ;; separate walks a file is re-loaded, so a re-run in a long-lived image picks up
 ;; edits (the hot-reload contract; the file watcher in std/reload uses `reload-defs`).
 ;; With `:skip-loaded`, any module already on `*features*` is skipped (the check
@@ -657,7 +657,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
   (def *project-test-paths* (list "tests"))
   ;; Reset `*project-name*` too, for the same reason (a manifest without `:name`, or none
   ;; at all, must NOT inherit a prior setup's name). This matters more since package-rooting
-  ;; (ADR-070): a leaked name would make `project--root-project-rooting` wrongly root a
+  ;; (ADR-070): a leaked name would make `project-root-project-rooting` wrongly root a
   ;; nameless project's modules under the previous project's prefix. `project-apply` re-sets
   ;; it when the manifest names it.
   (def *project-name* nil)
@@ -700,7 +700,7 @@ rules merged in declaration order, then this project's own `:format-headers` on 
       (require 'package)
       ;; `:name` may be written as a symbol (`:name demo`) or a string (`:name "demo"`)
       ;; — the manifest is read as data. Normalise to a string so the registry keys
-      ;; (and `require--force-package`'s string-keyed lookup of them) always agree.
+      ;; (and `require-force-package`'s string-keyed lookup of them) always agree.
       (let (pkg (name *project-name*)
             dirs (project-abs-paths root *project-source-paths*)
             module-files (apply append (map package/package-module-files dirs))
@@ -857,7 +857,7 @@ resolve in the advisory checker. Returns the project root."
 ;; ── bounded parallel fan-out over a file list ────────────────────────────────
 ;; `check-file` and the CST parse passes below are embarrassingly parallel: each
 ;; only READS the shared globals / parses text — all sources are loaded first, in
-;; the caller (`project--ensure-loaded`), and none of these passes `def`s — so N
+;; the caller (`project-ensure-loaded`), and none of these passes `def`s — so N
 ;; worker processes can each handle a slice of the files against the *same* shared
 ;; image with no races (the cross-process global visibility that backs hot reload,
 ;; docs/shared-code.md). The single-threaded folds these drivers replaced left all
@@ -865,7 +865,7 @@ resolve in the advisory checker. Returns the project root."
 ;; single core (a 100K-file project: ~17s in `check-files` + ~17s in the
 ;; unused-private parse pass, all serial).
 ;;
-;; `project--pfold-files` slices `files` into a SMALL number of big chunks —
+;; `project-pfold-files` slices `files` into a SMALL number of big chunks —
 ;; `cores * *check-oversample*` of them — and runs the chunks across the pool.
 ;;
 ;; Why few big chunks and not many small ones: `check-file`'s first call on a
@@ -1017,7 +1017,7 @@ resolve in the advisory checker. Returns the project root."
 
 ;; Internal: run `check-file` over every file, print each warning to stderr (GNU
 ;; FILE:LINE:COL format), return the total count. Fanned across the worker pool
-;; (see `project--pfold-files`). Each worker PRINTS its own chunk's warnings and
+;; (see `project-pfold-files`). Each worker PRINTS its own chunk's warnings and
 ;; ships back only the integer count — NOT the warning list: a list would be
 ;; deep-copied across process heaps (message passing), which on a warning-heavy
 ;; project costs more than the check itself. `eprintln` writes one line per call,
@@ -1203,7 +1203,7 @@ resolve in the advisory checker. Returns the project root."
 
 ;; Top-level heads that bind a global (each expands to `def`). `defmodule` is
 ;; excluded — it registers a module feature, not a clashing value binding.
-(def- *project-def-heads* ["def" "defn" "defmacro" "defdyn" "defonce"])
+(def- *project-def-heads* ["def" "def-" "defn" "defn-" "defmacro" "defdyn" "defonce"])
 
 ;; `[head name]` for a recognised def-style form (both strings), else nil. The head
 ;; is what says whether the name is ambient, so the two travel together.
@@ -1227,7 +1227,7 @@ resolve in the advisory checker. Returns the project root."
   (or (= head "defdyn") (dynamic? (symbol name))))
 
 ;; The namespace a top-level `(defmodule ns …)` node declares (a string), or nil
-;; if the node isn't a `defmodule`. The file-level shape of `project--def-entry`.
+;; if the node isn't a `defmodule`. The file-level shape of `project-def-entry`.
 (defn- project-module-name
   (list-node)
   (let (kids (filter (fn (c) (not (includes? [:whitespace :comment] (project-node-kind c))))
@@ -1252,7 +1252,7 @@ resolve in the advisory checker. Returns the project root."
     (str ns "/" name)))
 
 ;; Every global *key* defined at top level in the file at `path` — each a fully
-;; resolved `ns/name` (or bare, per `project--qualify`), in source order.
+;; resolved `ns/name` (or bare, per `project-qualify`), in source order.
 ;; `parse-source` never raises — malformed input just yields fewer recognised
 ;; defs — so a syntax error in one file can't abort the scan.
 (defn- project-file-def-names
@@ -1271,7 +1271,7 @@ resolve in the advisory checker. Returns the project root."
     (project-abs-paths root *project-source-paths*)))
 
 ;; Warning strings for a *qualified* global key (`ns/name`, per
-;; `project--file-def-names`) defined across more than one source file. Under
+;; `project-file-def-names`) defined across more than one source file. Under
 ;; namespaces (ADR-065) this fires only on a genuine collision — two files in
 ;; the *same* namespace binding the same name, or an ambient `*earmuff*` / root
 ;; name bound twice — not on a short name reused across distinct namespaces.
@@ -1336,26 +1336,24 @@ resolve in the advisory checker. Returns the project root."
                   ") — same namespace; the last loaded wins (ADR-065)"))))
       by-name)))
 
-;; --- unused module-private defns (whole-project, ADR-065 `--` convention) -----
-;; A `--` name is private *by convention*, not enforced: the editor legitimately
-;; references it from another module or a test by its qualified `mod/name`. So
-;; "is it used?" can only be answered across the *whole* project — a single-file
-;; check (the kind `check-file` runs) false-flags every cross-module-referenced
-;; private name. This pass parses every source + test file's CST (no eval), counts
-;; each symbol reference project-wide, and warns for a private def whose name is
-;; never referenced beyond its own definition — neither as a same-module bare call
-;; nor a cross-module / test `mod/name` reference. Comments don't count (the CST
-;; tags them `:comment`, not `:symbol`).
+;; --- unused module-private defns (whole-project, ADR-146 def-site privacy) ----
+;; A `defn-`/`def-` name is private, but a grant (`:use-internals`) or a test can
+;; reference it by its qualified `mod/name`. So "is it used?" can only be answered
+;; across the *whole* project — a single-file check (the kind `check-file` runs)
+;; false-flags every cross-module-referenced private name. This pass parses every
+;; source + test file's CST (no eval), counts each symbol reference project-wide, and
+;; warns for a `defn-`/`def-` private whose name is never referenced beyond its own
+;; definition — neither as a same-module bare call nor a cross-module / test
+;; `mod/name` reference. Comments don't count (the CST tags them `:comment`).
 
-;; Fold every `:symbol` node value that CONTAINS "--" in CST `node` into `acc`
-;; (name→count, keyed by the symbol's *string* — node values may be symbols, but
-;; qualified names are built with `str`, so both sides normalise the same way).
-;; Only `--` names are counted because that is all the unused-private decision ever
-;; looks up: a private def's bare name is `--` by convention, and its qualified
-;; `mod/name` therefore contains `--` too, so a reference counts toward "used" only
-;; if it is a `--` name. Skipping the rest shrinks the count map from every symbol
-;; in the project to just the private-related ones — far less to build, ship back
-;; from a scan worker, and merge (was O(all symbols) ≈ O(files)). Recurses
+;; Fold every `:symbol` node value in CST `node` into `acc` (name→count, keyed by the
+;; symbol's *string* — node values may be symbols, but qualified names are built with
+;; `str`, so both sides normalise the same way). Since privacy is now a def-site fact
+;; with a CLEAN name (ADR-146 step 2), the count can no longer be restricted to `--`
+;; names: the verdict looks up each private's bare and qualified name, both ordinary
+;; symbols. The bare count is project-global — a name shared across modules reads as
+;; "used" (a false negative, never a false positive — safe for the advisory
+;; zero-false-positive contract). Recurses
 ;; through a node's value, which is one of: raw text (a leaf — nothing to do), a
 ;; single child node (a wrapper like `:quote`, whose value is itself a `[:kind …]`
 ;; node-vector), or a vector of child nodes (`:list`/`:vector`/`:map`/`:root`).
@@ -1375,7 +1373,7 @@ resolve in the advisory checker. Returns the project root."
   (node acc)
   (if (= (project-node-kind node) :symbol)
     (let (nm (str (project-node-val node)))
-      (if (includes? nm "--") (map-assoc acc nm (inc (map-get acc nm 0))) acc))
+      (map-assoc acc nm (inc (map-get acc nm 0))))
     (project-walk-val (project-node-val node) acc)))
 
 ;; Merge symbol-count map `b` into `a` (name→count), summing counts. The reduce
@@ -1386,17 +1384,17 @@ resolve in the advisory checker. Returns the project root."
   (fold (fn (m entry) (let ([k v] entry) (map-assoc m k (+ (map-get m k 0) v)))) a b))
 
 ;; Parse `path` ONCE and return its extract `[counts privs def-names]`:
-;;   - `counts`   : name→count of every `--`-containing `:symbol` reference (the
-;;                  only names the unused-private verdict looks up).
-;;   - `privs`    : this file's `--`-private defs as `[bare qual]` (qualified via its
-;;                  `defmodule` namespace).
+;;   - `counts`   : name→count of every `:symbol` reference (the unused-private
+;;                  verdict looks up each private's bare and qualified name).
+;;   - `privs`    : this file's `defn-`/`def-` private defs as `[bare qual]`
+;;                  (qualified via its `defmodule` namespace).
 ;;   - `def-names`: every top-level def's qualified global key (for duplicate-defs).
 ;; One parse feeds BOTH whole-project passes (unused-private + duplicate-defs) and
 ;; is what the on-disk cache stores per file. Delegates to the native
 ;; `scan-source-extract` — the interpreted-Brood CST walk this replaced was ~120ms
 ;; on a 1000-line file (the dominant cost of a cold whole-project check), vs a few
-;; ms in Rust. `project--node-syms--acc`/`--def-name`/`--qualify` (below) remain the
-;; reference the native path mirrors, and still back `mcp--shadows-for`.
+;; ms in Rust. `project-node-syms-acc`/`--def-name`/`--qualify` (below) remain the
+;; reference the native path mirrors, and still back `mcp-shadows-for`.
 (defn- project-scan-file-entry
   (path)
   (scan-source-extract (slurp path)))
@@ -1569,15 +1567,15 @@ resolve in the advisory checker. Returns the project root."
 ;; the bare name appears ≥2× (its own def, plus a same-module call) OR — when a
 ;; module qualifies it — the qualified `mod/name` appears at all (a cross-module /
 ;; test reference). The parse + per-file scan is fanned across the worker pool
-;; upstream (`project--gather-extracts`, `:scan-entries`), producing the `extracts`
-;; map this consumes; here the driver `project--merge-counts`s the per-file counts
+;; upstream (`project-gather-extracts`, `:scan-entries`), producing the `extracts`
+;; map this consumes; here the driver `project-merge-counts`s the per-file counts
 ;; into a GLOBAL merged count that decides each private def's fate (so cross-module
 ;; references are seen). A scan
 ;; worker that dies leaves the counts under-complete for its slice — which could
 ;; only suppress a real warning or add a false one — so it is surfaced rather than
 ;; dropped silently.
 ;; `extracts` is `{path -> [mtime counts privs def-names]}` (from
-;; `project--gather-extracts`). The GLOBAL merged counts decide each private def's
+;; `project-gather-extracts`). The GLOBAL merged counts decide each private def's
 ;; fate (so cross-module references are seen), then each file's `privs` are judged.
 (defn- project-unused-private-warnings
   (extracts)
@@ -1613,7 +1611,7 @@ resolve in the advisory checker. Returns the project root."
     (project-ensure-loaded root)
     (let (files (project-all-files root)
           ;; Phase 1 (unused-private + duplicate-defs): native parallel scan every
-          ;; run — cheaper than any disk cache (see `project--gather-extracts`).
+          ;; run — cheaper than any disk cache (see `project-gather-extracts`).
           extracts (project-gather-extracts files)
           source-set (fold (fn (m p) (map-assoc m p true)) {} (project-source-files root)))
       (project-check-duplicate-defs extracts source-set)
@@ -1624,11 +1622,11 @@ resolve in the advisory checker. Returns the project root."
 
 ;; (check-files paths) — advisory-check a specific list of files, the entry
 ;; behind `nest check FILE…`. Loads the project image *first* (same
-;; `project--ensure-loaded` as `check-project`) so cross-module / namespace
+;; `project-ensure-loaded` as `check-project`) so cross-module / namespace
 ;; imports resolve through the heap's globals exactly as in a whole-project
 ;; check — without it a single-file check of a namespaced file false-flags every
 ;; `:use`d / qualified name as unbound. Then runs the *same* per-file walk
-;; (`project--check-files`: GNU stderr lines + BROOD_NO_CHECK opt-out + count),
+;; (`project-check-files`: GNU stderr lines + BROOD_NO_CHECK opt-out + count),
 ;; so both `nest check` forms share one checker, not two divergent paths.
 ;; Outside a project (no project.blsp) it skips loading and checks each file
 ;; against the prelude alone — the standalone-file behaviour.
@@ -1699,7 +1697,7 @@ resolve in the advisory checker. Returns the project root."
 ;; --- `--stale`: skip test files whose dependencies are unchanged ---------------
 ;; `mix test --stale`: a test file only re-runs when it, or one of the source files it
 ;; transitively requires, has changed since it last ran. The dependency graph is the KI-17
-;; require-closure already computed for the checker (`project--require-closures`); the
+;; require-closure already computed for the checker (`project-require-closures`); the
 ;; "changed" signal is the newest mtime across a test file + its dependency source files,
 ;; compared to what was recorded last run. Stored `{test-file -> max-dep-mtime}` in the
 ;; project cache dir, like `--failed`. Only project files carry an mtime — a std/prelude

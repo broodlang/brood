@@ -62,7 +62,7 @@ Used by `std/lineedit.blsp` (the REPL editor); pure, so independently testable."
 ;; Resolved snapshots of the defaults, kept under the original `hl-face-*` names for
 ;; consumers that read a face directly rather than re-resolving each frame: the REPL
 ;; line editor's bracket match/error (`std/lineedit.blsp`) and the highlighter's own
-;; tests. The live fontify path (`hl--spans`) instead calls `(face :syntax/…)` per
+;; tests. The live fontify path (`hl-spans`) instead calls `(face :syntax/…)` per
 ;; span, so an app's `face-set :syntax/…` restyles the editor on its next frame while
 ;; these snapshots (and so the default REPL look) stay put.
 (def hl-face-comment (face :syntax/comment))
@@ -111,7 +111,7 @@ that can't begin a number — since this runs on every atom on the fontify hot p
 
 ;; The inner scans run on the native `string-span-until` char-class scanner (O(run) in
 ;; Rust) rather than per-char Brood recursion — these feed the bracket/call matchers,
-;; which are on the render hot path. The delimiter set mirrors `hl--delim?`.
+;; which are on the render hot path. The delimiter set mirrors `hl-delim?`.
 (def- hl-delim-chars " \t\n\r,()[]{}\";")
 
 (defn- hl-to-eol

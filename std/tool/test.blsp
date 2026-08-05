@@ -57,7 +57,7 @@
 ;; failed assertion (the one format for humans, LLMs and editors — see
 ;; docs/tooling.md), then a one-line summary with timing and memory. It raises an
 ;; error if anything failed (non-zero exit — how `cargo test` notices). Flags are
-;; documented on `test--apply-opts` below (`:slow`/`:slowest`, `:timeout`,
+;; documented on `test-apply-opts` below (`:slow`/`:slowest`, `:timeout`,
 ;; `:trace`, `:filter`, `:max-failures`, `:repeat`).
 
 ;; --- registry ----------------------------------------------------------------
@@ -272,7 +272,7 @@ docs/testing.md for the full guide.")
          nil))))
 
 ;; (test "name" [:isolated] body...) — register one test. Each top-level body form
-;; becomes its own thunk; `test--run` runs them in order, each in its own `try`,
+;; becomes its own thunk; `test-run` runs them in order, each in its own `try`,
 ;; collecting a failure record from every form whose assertion fails (so a test
 ;; can report several failures). A non-assertion error is recorded and stops the
 ;; test, so a crashing test can't hang the runner (a dead worker never sends, and
@@ -298,8 +298,8 @@ docs/testing.md for the full guide.")
 
 ;; --- assertions --------------------------------------------------------------
 ;; Macros, not functions: on failure each THROWS a tagged failure record (via
-;; `test--fail`); on success they do nothing. They evaluate their operands once.
-;; A throw ends the *body form* it's in, not the whole test — `test--run` runs each
+;; `test-fail`); on success they do nothing. They evaluate their operands once.
+;; A throw ends the *body form* it's in, not the whole test — `test-run` runs each
 ;; top-level form separately, so a test collects a failure from every form that
 ;; fails (several failures per test). Multiple assertions nested inside ONE form
 ;; stop at the first. Each failure carries its own source location.
@@ -1617,7 +1617,7 @@ the exit code still reflects the run. An unknown formatter name is a clean error
         fails (count-failures results)
         slowest (test-slowest-n opts)
         seed (if (nil? *test-filter*) nil (get *test-filter* :seed)))
-    ;; (`*test-last-ran*`/`*test-last-failed*` are set by `test--report-pass`, before
+    ;; (`*test-last-ran*`/`*test-last-failed*` are set by `test-report-pass`, before
     ;; this human/formatter split, so `--failed` works on either path.)
     ;; A narrowing selector that matched nothing must not pass for success.
     (when (and (= total 0) (test-filter-narrows?))

@@ -85,7 +85,7 @@ assignment spans (key / export / quoted value), else none."
 
 (defn- env-lex
   (src i n acc)
-  "Tail-recursive line walker: classify each line (`env--line-spans`), accumulating
+  "Tail-recursive line walker: classify each line (`env-line-spans`), accumulating
 spans in reverse."
   (if (>= i n)
     (reverse acc)

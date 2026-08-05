@@ -264,7 +264,7 @@ else is a key/mouse input shipped to the daemon `session` as `[:key …]`. Tail-
 of `attach` (which is terminal-only): the daemon runs the app, this client paints the
 frames it pushes to `display` and ships back its input, until the app quits or the link
 drops. Because window input and daemon frames share this process's mailbox, one receive
-loop (`attach--display-loop`) serves both. Connects *before* entering the display, so a
+loop (`attach-display-loop`) serves both. Connects *before* entering the display, so a
 refused / wrong-cookie / bad-spec error surfaces without stranding a window; the display
 is always torn down (`:leave`) on exit. `cookie` defaults to `(node-cookie)`; `opts` is
 the optional identity map (see `attach`)."
@@ -285,7 +285,7 @@ the optional identity map (see `attach`)."
 SAME runtime — the daemon operator's *own* window, so a host can watch and drive the app it
 serves instead of running blind and headless. No node link is needed (the session manager and
 session pids are in-process): handshake directly with the local manager registered under
-`serve-name`, then run the same unified frame/input loop (`attach--display-loop`, with a nil
+`serve-name`, then run the same unified frame/input loop (`attach-display-loop`, with a nil
 peer — there is no node to go down) until the window closes (`:close`) or the app quits
 (`[:bye]`). Blocks. Precondition: `(serve …)` or `(serve-shared …)` already ran in this runtime.
 Composes with both: under `serve` the host gets its own session; under `serve-shared` it joins
@@ -355,7 +355,7 @@ every client); `:poll` returns the next `[:key k]` any client shipped (all clien
 merges through the session's one mailbox, so edits serialize with no conflict); `:size`
 asks the hub; `:leave` shuts the hub (and thus every client) down. As with
 `remote-display`, any other mailbox message is returned as async app input (the event
-bus) — except a stale `[:hub-size …]` reply that outlived its `shared--hub-size` window,
+bus) — except a stale `[:hub-size …]` reply that outlived its `shared-hub-size` window,
 which is dropped (a nil ⇒ tick) rather than leaked to the app."
   {:enter (fn () nil)
    :leave (fn () (send hub [:shutdown]))
@@ -400,7 +400,7 @@ it from the hub. Tail-recursive."
   "Serve a SINGLE shared `ui-run` session to many frontends — collaborative editing: all
 clients attach to ONE `model` and see each other's edits live (contrast `serve`, a fresh
 independent model per client). Spawns the hub, the shared session (`ui-run` over
-`shared--display`), and the manager, and registers the manager under `serve-name`. Clients
+`shared-display`), and the manager, and registers the manager under `serve-name`. Clients
 attach with the same `attach` / `attach-display` (the client side is identical — it just
 ships keys and paints frames; whether the daemon is per-client or shared is transparent).
 All clients share ONE cursor this slice; see the module note for the per-participant-cursor

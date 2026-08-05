@@ -5,7 +5,7 @@
 ;; are exercised by `nest observe`.
 ;;
 ;; The closing :isolated block adds cross-process coverage: it drives the
-;; `process-info` primitive + `observer/observe--snapshot` against a live runtime, proving
+;; `process-info` primitive + `observer/observe-snapshot` against a live runtime, proving
 ;; the kernel introspection works under the scheduler.
 
 (defmodule observer-test
@@ -453,7 +453,7 @@
         ;; submit pushes the new command onto history, newest first
         (assert= (get submitted :history) '("(* 3 4)" "(+ 1 2)"))))))
 
-;; Cross-process coverage: drive `process-info` + `observer/observe--snapshot` against a
+;; Cross-process coverage: drive `process-info` + `observer/observe-snapshot` against a
 ;; live runtime (each :isolated test runs alone).
 (describe "process-info over live processes"
   :isolated

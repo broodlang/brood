@@ -116,7 +116,7 @@
           (if (%eq t :bytes) (bytes->list coll) coll))))))
 
 ;; ---- folding (the workhorse; tail-recursive, so it is stack-safe) ----
-;; The public entry coerces once via `seq`; the inner `fold--loop` then stays in
+;; The public entry coerces once via `seq`; the inner `fold-loop` then stays in
 ;; list form for the recursion, so a map costs one extra `map-pairs` pass total
 ;; rather than O(n) per step.
 (defn fold (f acc coll)
@@ -178,7 +178,7 @@ splice it back in front of the remainder."
   ;; the idiom gets a name and one pass. Measured, 20k splices of a 500-element
   ;; prefix: `(append (reverse acc) tail)` 2739 ms, `(fold flip-cons tail acc)`
   ;; 1674 ms, this 601 ms (4.6x). The `fold` form loses because of the per-element
-  ;; `flip-cons` apply frame, which is exactly why `reverse--acc` is a dedicated loop.
+  ;; `flip-cons` apply frame, which is exactly why `reverse-acc` is a dedicated loop.
   (reverse-acc (seq coll) tail))
 
 ;; Realise a lazy seq-view to a concrete list by running its transducer. Folding
@@ -714,7 +714,7 @@ of 1 gives an integer). Same as `(/ n d)` for integers; errors when `d` is 0."
 ;; then reverse once. `defseq` encodes the pattern as a single `defn` whose body
 ;; holds a tail-recursive `letrec` loop. This keeps the source location visible to
 ;; `note_definition` (which only recognises `def`/`defn` as outer heads) and
-;; removes the need for separate `name--acc` globals. Each loop calls the user fn
+;; removes the need for separate `name-acc` globals. Each loop calls the user fn
 ;; directly — no extra `apply` frame per element. Inside `step`: `item` is bound to
 ;; the current element and `acc` is the current accumulator.
 ;; `item` and `acc` are *intentional* anaphora: a `defseq` step-expr is documented
@@ -905,7 +905,7 @@ a wrong-typed one."
   ;; Branch order is load-bearing, not stylistic: map (much the most common), then
   ;; set, then the two cheap `nil?`/`string?` prim checks, then ONE fallthrough to
   ;; `nth` for every integer-indexed kind — the shape the pre-2026-07-26 version had.
-  ;; Factoring the kind test into a `get--indexed?` helper (four type checks behind a
+  ;; Factoring the kind test into a `get-indexed?` helper (four type checks behind a
   ;; call) measured a ~1.8x slowdown on `(get v i)`: 1130ms → 2050ms per 2M.
   ;;
   ;; MEASURED COST of the diagnostics (2M calls, release+JIT): `(get m :k)` 735 → 739ms
@@ -1239,7 +1239,7 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
 (def *err* %write-err)
 ;; `*show*` — a late-bound per-argument display transform for the SCREEN printers
 ;; (`print`/`println`/`eprint`/`eprintln`). Declared here; the Display protocol (core,
-;; defined at the end of this prelude) sets it to `show--print-hook`, which routes a
+;; defined at the end of this prelude) sets it to `show-print-hook`, which routes a
 ;; *record* through the `Display` ability's `to-str` op so a record can define how it
 ;; prints (Elixir's `String.Chars` model) while built-ins keep the fast native render.
 ;; An ordinary dynamic var, so `(binding (*show* nil) …)` disables the transform for a
@@ -1618,7 +1618,7 @@ its printed form."
 ;; whose nominal id is `name` (a bare symbol qualified to the current ns, or a `mod/name`),
 ;; then matches the optional map pattern against its fields. A record is a map, so this is an
 ;; id assertion plus an ordinary map pattern — `:keys`/`:or`/nested `{:k p}` all compose. The
-;; id is derived SYNTACTICALLY from `name` (via `ability--id-kw`), so no registry lookup is
+;; id is derived SYNTACTICALLY from `name` (via `ability-id-kw`), so no registry lookup is
 ;; needed at expansion (unlike a positional pattern, which would need the definition's field
 ;; order — deferred). Named, like `and`/`or`/`bytes`, so a plain list pattern isn't stolen.
 (defn match-record-pattern? (p) (and (pair? p) (= (first p) 'record)))
@@ -2364,7 +2364,7 @@ match raises `[:match-error :case value patterns]`, exactly as `match` does."
 ;; discard it — a silent no-op. So pass such a form through unwrapped:
 ;; `(spawn (fn () body))` and `(spawn body)` then mean the same. (The dual footgun —
 ;; a bare function *name* like `(spawn worker)`, which used to yield the closure and
-;; exit — is handled by `spawn--body-thunk` below, which wraps a symbol as a *call*.)
+;; exit — is handled by `spawn-body-thunk` below, which wraps a symbol as a *call*.)
 (defn- spawn-thunk-form?
   (form)
   (and (list? form)
@@ -2831,7 +2831,7 @@ message already sent stays sent."
 
 ;; The receive-mark hint (ADR-195): the expression EVERY clause pins, when they all pin the
 ;; same one — `([:reply ^r v] …)` yields `r`. Any clause that pins nothing, or pins something
-;; different, disables it (nil), exactly like `receive--tags`. The kernel only acts on it when
+;; different, disables it (nil), exactly like `receive-tags`. The kernel only acts on it when
 ;; the value turns out to be a `ref` this process minted, so a false positive here costs
 ;; nothing but a wasted comparison.
 (defn- receive-pinned-in
@@ -2891,7 +2891,7 @@ message already sent stays sent."
                     `(fn (~msg)
                        ~(match-build-from (map receive-result-clause preps) msg nil)))
           dispatch (if (empty? real) `(nth ~r 1) (receive-dispatch preps r))
-          ;; nil when the filter can't apply (see `receive--tags`). Built as a vector
+          ;; nil when the filter can't apply (see `receive-tags`). Built as a vector
           ;; FORM (`[~@tags]`), not by calling a function: a plain list would expand to
           ;; `(:tag …)`, which evaluates as a keyword accessor call (ADR-165) rather
           ;; than data — and calling `vec` here would run at macro-expansion time
@@ -2899,7 +2899,7 @@ message already sent stays sent."
           ;; ~2000 lines later) does not exist yet.
           tag-list (if (empty? real) nil (receive-tags real))
           tags (if (nil? tag-list) nil `[~@tag-list])
-          ;; The receive-mark hint — see `receive--pin`. Emitted as the pinned FORM, so it
+          ;; The receive-mark hint — see `receive-pin`. Emitted as the pinned FORM, so it
           ;; evaluates at the call site to the same value the pattern compares against.
           pin (if (empty? real) nil (receive-pin real)))
       ;; `%receive` returns the matcher's result vector, or nil on timeout (only
@@ -3096,7 +3096,7 @@ string, keyword, vector, and record keys all work."
     (less? (first b) (first a)) (merge-acc less? a (rest b) (cons (first b) acc))
     else (merge-acc less? (rest a) b (cons (first a) acc))))
 
-;; `mapcat` uses `append--onto` instead of `cons` to splice each sublist straight
+;; `mapcat` uses `append-onto` instead of `cons` to splice each sublist straight
 ;; onto the reversed accumulator, then reverse once — so we never materialise the
 ;; intermediate list-of-sublists nor spread it through `apply append`.
 (defseq mapcat
@@ -3354,7 +3354,7 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
   (nm)
   "Qualify bare name `nm` (a string) against the current ns → a `:<ns>/nm` keyword; at
 root/REPL (no ns) there is no prefix, so it is a bare `:nm`. Shared by `defrecord` (which
-bakes a record's `:__id__`) and `ability--id-kw` (an impl's bare id) so the two AGREE — a
+bakes a record's `:__id__`) and `ability-id-kw` (an impl's bare id) so the two AGREE — a
 record built at root and an impl for it at root must land on the same dispatch id."
   (let (ns (current-ns))
     (if ns (keyword (str (name ns) "/" nm)) (keyword nm))))
@@ -3829,7 +3829,7 @@ what incremental search rides on (formerly the separate `index-of`)."
       ;; primitive, which searches in place. It used to be `(%str-index-of (substring
       ;; coll s0 n) x)` — which COPIED the suffix on every call, so the incremental
       ;; search this offset exists for was itself quadratic. `last-index-of` is where that
-      ;; measurably mattered (540 ms → 1 ms at 6400 matches); `fuzzy--next` also calls it
+      ;; measurably mattered (540 ms → 1 ms at 6400 matches); `fuzzy-next` also calls it
       ;; per query char per candidate, but making the scan cheap barely moved ranking —
       ;; see the note there before assuming this is anyone's bottleneck. The empty needle
       ;; still matches at `from`, and a `from` past the end still finds nothing.
@@ -4498,7 +4498,7 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
 ;; (`std/tool/package.blsp`); they are empty for a bare `brood file.blsp` run with no
 ;; project, and the root project's OWN modules stay short (unrooted) — only deps root.
 ;;   *package-module-files* : a rooted module name (string, `"foo/b"`) → the .blsp file
-;;     that provides it. `require--force` consults it before the load-path, and a hit
+;;     that provides it. `require-force` consults it before the load-path, and a hit
 ;;     drives the package-context load below.
 ;;   *package-modules-of*   : a package's local name (string, `"foo"`) → the list of
 ;;     SHORT module-name symbols it provides — the set that tells `%root-module-name`
@@ -4860,7 +4860,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       ;; still absent — the test-and-set runs INSIDE the registry lock — and returns
       ;; false if another process claimed it between the `contains?` read above and
       ;; here. Without this CAS two simultaneous first-requirers both see
-      ;; `contains? = false`, both `:assoc`, and both run `require--force`: the module
+      ;; `contains? = false`, both `:assoc`, and both run `require-force`: the module
       ;; body is evaluated twice and `provide`d twice (the double-load ADR-136 forbids).
       ;; Losing the race means someone else now owns the load — wait for their provide.
       (not (%registry-update! '*features-loading* :assoc-new [key] (self))) (require-await key
@@ -4868,7 +4868,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       else
       ;; We won the claim (the marker is now set). Clear it on BOTH exits: a load that
       ;; throws (module not found, or an error inside its source) must not leave `key`
-      ;; marked, or every later require of it stalls the full `require--await` window
+      ;; marked, or every later require of it stalls the full `require-await` window
       ;; (~5s of 5ms ticks) before taking the load over.
       (do
         (try
@@ -5178,7 +5178,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   "Remove `key`'s impl of `aname`'s `op` — the inverse of `register-impl`. Returns true when
   an impl was there, false when there was nothing to remove (idempotent, never raises) — and
   errors for one case only: a `:default` of an ability the language dispatches on itself
-  (`impl--substrate?`), because removing that leaves every value unprintable.
+  (`impl-substrate?`), because removing that leaves every value unprintable.
 
   The slot becomes UNCLAIMED, not `:default`: a later `register-impl` of any tier takes it,
   because precedence compares against an incumbent and there is none. Dispatch falls back to
@@ -5442,7 +5442,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
                           (list 'if
                             impl-sym
                             ; the resolved call — direct for a fixed arity, `apply` for a
-                            ; variadic op (`defability--op-call`)
+                            ; variadic op (`defability-op-call`)
                             (defability-op-call impl-sym arg-syms)
                             (list 'no-impl op-key id-sym))))))
                   ops))
@@ -5721,7 +5721,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 ;; is the map behaviour (a record is a map: assoc a `[k v]` pair, or merge a map), so a
 ;; plain record conj's like a map; a custom-collection record overrides `-conj` to define
 ;; its own insertion (a queue pushes, a stack prepends, …). Built-ins keep their native
-;; `conj--one` path — this fires only for a record.
+;; `conj-one` path — this fires only for a record.
 (defability Conjable
   "Add element `x` to collection `self`, returning a fresh collection."
   (-conj [self x] :-> any))

@@ -2,7 +2,7 @@
 ;;
 ;; The pure reporting helpers are tested directly. The INSTRUMENTATION is tested
 ;; against synthetic globals defined in this file rather than against a real
-;; project: `coverage--instrument!` rebinds a global, so those tests live in
+;; project: `coverage-instrument!` rebinds a global, so those tests live in
 ;; `:isolated` blocks whose `def`s roll back — otherwise a shim would leak into the
 ;; rest of the suite and stay wrapped for every later test.
 ;;
