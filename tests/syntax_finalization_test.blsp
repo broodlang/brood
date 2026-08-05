@@ -9,6 +9,11 @@
 
 (defmodule syntax-finalization-test (:use test))
 
+;; Drop any fixtures a prior run left in /tmp (at load, before any test runs). Missing
+;; until 2026-08-05 (KI-30) — 387 directories per prefix.
+(purge-stale-temp "brood-ambient-")
+(purge-stale-temp "brood-ambient2-")
+
 (defn err-of (src)
   "The message of the error raised by reading+evaluating `src`, or nil if it ran."
   (try (do (eval (read-string src)) nil) (catch e (error-message e))))

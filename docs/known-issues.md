@@ -19,7 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-30 | in-language tests never delete their `temp-dir`s — 4601 dirs / 168 MB of `/tmp` litter | ⬜ **open** (measured 2026-08-05) |
+| KI-30 | seven `temp-dir` prefixes were never purged — 4484 dirs / 168 MB of `/tmp` litter | ✅ **fixed** 2026-08-05 |
 | KI-29 | node/observe tests orphan `brood` children — one found alive **9 days** later, ~15% CPU each | ✅ **fixed** 2026-08-05 |
 | KI-28 | `clean_peer_exit_fires_nodedown_promptly` failed once, then passed on retry; output not captured | ⚠️ **watching** (seen once 2026-08-05) |
 | KI-27 | node tests drew their port from the OS **ephemeral** range, so an unrelated process could take it | ✅ **fixed** 2026-08-05 |
@@ -49,40 +49,59 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**One open issue (KI-30, `/tmp` litter from the in-language suite) and one watch item (KI-28).** No
-open bug in the language, runtime or toolchain itself. Every other KI above is fixed, incidentally
-fixed, or a non-reproducing transient — each kept as a record with its regression test, so a
-recurrence is recognizable.
+**No open issues; one watch item (KI-28).** No open bug in the language, runtime or toolchain
+itself. Every KI above is fixed, incidentally fixed, or a non-reproducing transient — each kept as
+a record with its regression test, so a recurrence is recognizable.
 
 ---
 
-## KI-30 — the in-language tests never delete their `temp-dir`s · **open, measured 2026-08-05**
+## KI-30 — seven `temp-dir` prefixes were never purged · **fixed 2026-08-05**
 
 **Filed as its own entry deliberately.** Found while fixing KI-29, and KI-29's lesson is that an
 adjacent finding recorded inside another entry is invisible. It is a *different* bug: litter on
 disk, not a process burning CPU and holding a port.
 
-**Measured.** 4601 `/tmp/brood-*` directories, **168 MB**, on an ordinary dev box:
+**Measured.** 4622 `/tmp/brood-*` directories, **168 MB**, on an ordinary dev box.
 
-| prefix | dirs | from |
+**The mechanism already existed — the coverage did not.** My filed fix direction (a
+`with-temp-dir` macro, and a decision about whether a failing test keeps its directory) was
+wrong, because `purge-stale-temp` already implements the convention and documents it: name
+fixtures with a unique prefix, and at file **load** drop the previous run's leftovers, which
+bounds `/tmp` to one run and recovers from a crashed run. Nine prefixes did this. Seven did not,
+and the census is a clean 1:1 with no inference required:
+
+| prefix | dirs | purged? |
 |---|---|---|
-| `brood-feat-` | 1392 | `tests/project_test.blsp` |
-| `brood-reload-` | 926 | `tests/reload_watch_test.blsp` |
-| `brood-walk-` / `brood-skip-` / `brood-p2-` | 464 each | `tests/file_test.blsp`, `project_test.blsp` |
-| `brood-ambient-` / `brood-ambient2-` | 387 each | `tests/syntax_finalization_test.blsp` |
+| `brood-feat-` | 1392 | ❌ |
+| `brood-reload-` | 926 | ❌ |
+| `brood-walk-` · `brood-skip-` · `brood-p2-` | 464 each | ❌ |
+| `brood-ambient-` · `brood-ambient2-` | 387 each | ❌ |
+| `brood-pkg-` | 42 | ✅ |
+| `brood-file-`, `brood-slurpb-`, `brood-dup-`, `brood-manifest-`, `brood-fmt-*`, `brood-buf-` | ≤20 each | ✅ |
 
-**Cause.** 45 `(temp-dir …)` calls across 8 in-language test files and **zero** `delete-dir` calls —
-no test cleans up, so every suite run adds its whole set. Unlike KI-29 this happens on a completely
-green run; the count is simply how many times the suite has been run.
+Every unpurged prefix is in the hundreds; every purged one is one run's worth. 4484 of the 4622
+directories (97%) come from the seven missing lines.
 
-**Fix direction.** `delete-dir` is recursive and idempotent, so it is one call per site. The design
-question worth settling first is whether a *failing* test should keep its directory for debugging —
-if so, cleanup belongs in a helper that only fires on success, not blindly at the end of the body.
-A `with-temp-dir` macro in `std/tool/test.blsp` taking a body would put it in one place instead of
-45; that is probably the right shape and is why this is not a two-minute fix.
+**Fix.** The seven missing `(purge-stale-temp …)` calls, in `project_test.blsp` (4),
+`reload_watch_test.blsp` (1) and `syntax_finalization_test.blsp` (2). Verified by running the
+whole suite three times: **128 directories after each run** (110 of them the suite's, 3.7 MB),
+flat, where before each run added ~110 permanently.
 
-**Not a correctness risk** — nothing reads a stale dir (each name is freshly randomised). It is
-disk, and noise when reading `/tmp`.
+**Covered by** `tests/temp_purge_coverage_test.blsp`, which scans each test file's own source and
+fails if a prefix passed to `temp-dir` is never passed to `purge-stale-temp` — reporting
+`[file prefix]` pairs, so a failure names the file to edit and the line to add. A purge covers a
+prefix it is a `starts-with?` prefix of, since that is how the purge itself matches
+(`brood-file-` legitimately covers `brood-file-swap-`). **Verified by sabotage**: deleting one
+purge line fails it with `(["reload_watch_test.blsp" "brood-reload-"] …)`. It carries a second
+test asserting the scanner still finds ≥20 uses, so a renamed primitive or a reformat that breaks
+the `(temp-dir "` spelling cannot make the first test pass vacuously forever.
+
+**Why a source scan rather than a `/tmp` check:** a `/tmp` check could only fail *after* litter
+exists, would depend on what earlier runs left behind, and would not reproduce on a clean machine.
+The property is static and local — a file's own text either has the line or it does not.
+
+**Not a correctness risk** — nothing reads a stale dir (each name is freshly randomised), and the
+purge runs at load, before any fixture exists. It was disk, and noise when reading `/tmp`.
 
 ## KI-29 — the node/observe tests orphan `brood` children · **fixed 2026-08-05**
 

@@ -1,0 +1,80 @@
+;; KI-30 — every `temp-dir` prefix a test file uses must also be purged by that file.
+;;
+;; The convention already existed and is documented on `purge-stale-temp`: name fixtures
+;; with a unique prefix, and drop the *previous* run's leftovers at file LOAD, which bounds
+;; /tmp to one run's worth and recovers from a crashed run. What it lacked was any way to
+;; notice a file that forgot. Seven prefixes across three files had, and the arithmetic is
+;; the whole argument for this test being here:
+;;
+;;   brood-feat- 1392 · brood-reload- 926 · brood-walk- 464 · brood-skip- 464
+;;   brood-p2- 464 · brood-ambient- 387 · brood-ambient2- 387   = 4484 directories
+;;
+;; against ≤42 for every prefix that *was* purged. 168 MB, accumulated over months of
+;; entirely green runs — because a missing purge produces no failure, no warning and no
+;; slow test. Same shape as KI-29's leaked processes: the bug is invisible unless something
+;; goes looking, so this is the thing that looks.
+;;
+;; Scanning source text rather than inspecting /tmp is deliberate: a /tmp check could only
+;; fail *after* litter exists, would depend on what previous runs left behind, and would be
+;; unreproducible on a clean machine. The property here is static and local — this file's
+;; own text either has the line or it doesn't.
+
+(defmodule temp-purge-coverage-test (:use test))
+
+;; `(current-file)` minus its basename — the directory holding the test corpus. Derived
+;; rather than hardcoded as "tests" so this does not depend on the cwd of the runner
+;; (`nest test`, `cargo test` via suite.rs, and a bare `--test` all differ).
+(def tests-dir
+  (let (f (current-file) b (path-basename f))
+    (substring f 0 (- (string-length f) (string-length b)))))
+
+;; This file quotes the two markers below as string literals, so scanning it would find
+;; them in its own source and report a phantom prefix. Skip it by name.
+(def self-name (path-basename (current-file)))
+
+(defn- test-files
+  ()
+  (filter (fn (e) (and (ends-with? e "_test.blsp") (not (= e self-name))))
+    (list-dir tests-dir)))
+
+;; Every string literal appearing immediately after `marker`. Hand-rolled rather than
+;; regex because std/regex is a deliberate subset with no capture groups: split on the
+;; marker, then take each piece up to its closing quote.
+(defn- quoted-args
+  (text marker)
+  (map (fn (p) (first (string-split p "\"")))
+    (rest (string-split text marker))))
+
+;; The prefixes `file` passes to `temp-dir` and never purges. A purge line covers a prefix
+;; it is a *prefix of* — `(purge-stale-temp "brood-file-")` legitimately covers
+;; `brood-file-swap-` fixtures too, since the purge itself matches by `starts-with?`.
+(defn- unpurged-prefixes
+  (text)
+  (let (used (quoted-args text "(temp-dir \"")
+        purged (quoted-args text "(purge-stale-temp \""))
+    (filter (fn (u) (not (any? (fn (p) (starts-with? u p)) purged))) used)))
+
+(describe "temp fixtures: every prefix used is purged at load (KI-30)"
+
+  (test "no test file uses a `temp-dir` prefix it never purges"
+    ;; Reported as `[file prefix]` pairs so a failure names the file to edit and the exact
+    ;; line to add, rather than only asserting that some count is zero.
+    (let (offenders (fold (fn (acc f)
+                            (append acc
+                              (map (fn (p) [f p])
+                                (unpurged-prefixes (slurp (str tests-dir f))))))
+                      (list)
+                      (test-files)))
+      (assert= offenders (list))))
+
+  ;; Guards the guard: if the scanner silently stopped finding anything — a renamed
+  ;; primitive, a reformat that broke the `(temp-dir "` spelling it matches on — the test
+  ;; above would pass vacuously and forever. It found 45 uses across 8 files when written.
+  (test "the scanner actually finds the corpus's temp-dir uses"
+    (let (total (fold (fn (acc f)
+                        (+ acc
+                          (count (quoted-args (slurp (str tests-dir f))
+                                   "(temp-dir \""))))
+                  0
+                  (test-files)))
+      (is (>= total 20)))))
