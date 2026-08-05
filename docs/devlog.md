@@ -16536,3 +16536,43 @@ is the arm paying IC install and tier-up. So the declined IC is worth ~0 warm an
 cold. Rule added to `CLAUDE.md`: sweep the call count and check whether the **gap** moves,
 not just whether each arm gets faster, and treat the short run as a real case (a `nest check`,
 a one-shot script, a handler on a fresh process) rather than as noise to discard.
+
+## 2026-08-05 (cont.) — KI-30: the /tmp purge convention existed; seven files just didn't follow it
+
+168 MB and 4622 directories of `/tmp` litter, accumulated over months of **entirely green** runs.
+My filed fix direction was a `with-temp-dir` macro plus a policy decision about whether a failing
+test keeps its fixtures — and it was the wrong shape, which reading the code settled in a minute:
+`purge-stale-temp` already implements the convention and its docstring already explains it. Name
+fixtures with a unique prefix; at file **load**, drop the previous run's leftovers. That bounds
+`/tmp` to one run's worth *and* recovers from a crashed run, which a cleanup-at-end-of-body helper
+would not.
+
+**The census needed no inference.** Nine prefixes purged, seven not, and the split is exactly the
+litter: `brood-feat-` 1392 · `brood-reload-` 926 · `brood-walk-`/`brood-skip-`/`brood-p2-` 464 each
+· `brood-ambient-`/`brood-ambient2-` 387 each — against ≤42 for every prefix that *was* purged.
+4484 of 4622 directories (97%) from seven missing lines. The mechanism worked perfectly wherever it
+was called; nothing was wrong with it.
+
+**Fix: the seven lines.** Verified by running the whole suite three times — 128 directories after
+each, flat, where before each run added ~110 permanently. Suite 4410/4410.
+
+**Guard: `tests/temp_purge_coverage_test.blsp`.** A missing purge produces no failure, no warning
+and no slow test, which is why five files could drift for months; so the guard scans each test
+file's own source and fails when a prefix passed to `temp-dir` is never passed to
+`purge-stale-temp`, reporting `[file prefix]` pairs so the failure names the file and the line to
+add. A purge covers any prefix it is a `starts-with?` prefix of, matching how the purge itself
+matches (`brood-file-` legitimately covers `brood-file-swap-`). **Verified by sabotage** — removing
+one purge line fails it by name — and it carries a second test asserting the scanner still finds
+≥20 uses, so a renamed primitive or a reformat that breaks the `(temp-dir "` spelling cannot make
+the first test pass vacuously forever.
+
+Scanning source rather than inspecting `/tmp` is deliberate: a `/tmp` check could only fail *after*
+litter exists, would depend on what earlier runs left, and would not reproduce on a clean machine.
+The property is static and local.
+
+**The generalisable bit, and it is the third instance this session.** KI-29 (leaked processes),
+KI-30 (leaked directories), and the `--` privacy predicate from the morning are all the same shape:
+a convention enforced by *discipline at each call site*, where a site that forgets produces no
+signal at all. Each was found by going to look, not by a failure. Where a convention has N call
+sites and no checker, assume some fraction of N is already wrong — and the cheap fix is usually a
+test that reads the source, not a redesign of the mechanism.

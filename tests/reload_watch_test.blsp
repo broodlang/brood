@@ -7,6 +7,11 @@
 ;; contract directly, independent of `nest`/the checker.
 (defmodule reload-watch-test (:use test) (:use reload))
 
+;; Drop any fixtures a prior run left in /tmp (at load, before any test runs). Missing
+;; until 2026-08-05 (KI-30): this file's 926 leftover directories were the second-largest
+;; pile in /tmp.
+(purge-stale-temp "brood-reload-")
+
 ;; Poll `reload-watch-test-wait` (bounded) instead of a selective `receive`:
 ;; a test-framework worker process may already carry other pending mailbox
 ;; traffic, and this keeps the assertion independent of message ordering.

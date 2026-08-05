@@ -13,12 +13,16 @@ suite **956/956** (nextest), in-language **4401/4401** — also green under
 clippy clean, both default and `--no-default-features` builds warning-clean, metamorphic
 differential clean across 4 engine configs. **Flake baseline** (2026-08-05): the in-language
 suite is clean over 3 iterations × 3 seeds in one image, and `live_migration` is 16/16 under
-self-contention. **One open issue and one watch item, neither in the runtime** — KI-30: the
-in-language tests never delete their `temp-dir`s (4601 dirs / 168 MB of `/tmp` litter, 45 `temp-dir`
-calls and zero `delete-dir`), which wants a `with-temp-dir` helper rather than 45 edits. And KI-28,
-a single unexplained `nodedown` flake seen once in a full run and not since (0/40 solo, 33/33 × 3
-under nextest, absent from the next 956/956 run); its diagnostic is armed, so a recurrence will
-explain itself — and now that KI-29 is fixed, a recurrence can no longer be blamed on a stray node.
+self-contention. **No open issues; one watch item, not in the runtime** — KI-28, a single
+unexplained `nodedown` flake seen once in a full run and not since (0/40 solo, 33/33 × 3 under
+nextest, absent from the next 956/956 run); its diagnostic is armed, so a recurrence will explain
+itself — and now that KI-29 is fixed, a recurrence can no longer be blamed on a stray node.
+**KI-30 was fixed 2026-08-05**: seven `temp-dir` prefixes were never passed to `purge-stale-temp`,
+which had left 4484 of 4622 `/tmp` directories (168 MB) across months of green runs. The mechanism
+already existed and was documented — only seven lines were missing — and my filed fix direction (a
+`with-temp-dir` helper) was the wrong shape. `tests/temp_purge_coverage_test.blsp` now scans each
+file's source and fails on an unpurged prefix; the suite is flat at 128 directories over three
+consecutive runs.
 **KI-29 was fixed 2026-08-05**: the node/observe tests orphaned `brood` children (one found alive 9
 days later, ~35% of a core across three strays) because a *killed* test binary runs no destructors.
 `spawn_brood` now returns a `BroodChild` guard carrying two independent nets — `Drop` for a panicking
