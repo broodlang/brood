@@ -148,17 +148,22 @@ fn add_require_action(
 /// every project source loaded (ADR-031), so this finds providers workspace-wide,
 /// embedded std and project modules alike. Filtered so the offer is never wrong:
 /// the file's **own** namespace is dropped (you don't import your own module), any
-/// module the header **already imports** is dropped (it wouldn't be unbound), and
-/// a **private** provider (`--` in the module path) is dropped (it never resolves
-/// bare anyway). Sorted + deduped for a stable menu.
+/// module the header **already imports** is dropped (it wouldn't be unbound), and a
+/// **private** provider (a `defn-`/`def-` name, judged by `is_private`, ADR-146) is
+/// dropped — `(:use mod)` never refers it, so it would still be unbound. Sorted +
+/// deduped for a stable menu.
 fn import_providers(interp: &mut Interp, root: &Node, src: &str, name: &str) -> Vec<String> {
     let own = header_ns(root, src);
     let imported = header_imported_modules(root, src);
     let suffix = format!("/{name}");
-    let mut mods: Vec<String> = introspect::global_names(interp)
+    let names = introspect::global_names(interp);
+    let mut mods: Vec<String> = names
         .into_iter()
+        // A private target can't be referred bare by `(:use)`, so never suggest it.
+        .filter(|g| !interp.heap.is_private(brood::core::value::intern(g)))
         .filter_map(|g| g.strip_suffix(&suffix).map(str::to_string))
-        // A non-empty module (not a leading `/name` root escape) that is public.
+        // A non-empty module (not a leading `/name` root escape). The `--` module-path
+        // guard is the separate private-*module* heuristic, kept as in `eval/mod.rs`.
         .filter(|m| !m.is_empty() && !m.contains("--"))
         .filter(|m| own.as_deref() != Some(m.as_str()))
         .filter(|m| !imported.iter().any(|i| i == m))

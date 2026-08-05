@@ -4261,7 +4261,7 @@ fn module_with_no_use_clauses_is_silent() {
 }
 
 // (The unused-module-private-`defn` lint moved to a whole-project Brood pass —
-// `std/tool/project.blsp` `project--unused-private-warnings` — because a `--`
+// `std/tool/project.blsp` `project-unused-private-warnings` — because a `--`
 // name is referenced cross-module/by tests, which a single-file check can't see.
 // Its coverage lives with the project tooling tests.)
 

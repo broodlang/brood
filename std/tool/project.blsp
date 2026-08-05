@@ -1393,8 +1393,9 @@ resolve in the advisory checker. Returns the project root."
 ;; is what the on-disk cache stores per file. Delegates to the native
 ;; `scan-source-extract` — the interpreted-Brood CST walk this replaced was ~120ms
 ;; on a 1000-line file (the dominant cost of a cold whole-project check), vs a few
-;; ms in Rust. `project-node-syms-acc`/`--def-name`/`--qualify` (below) remain the
-;; reference the native path mirrors, and still back `mcp-shadows-for`.
+;; ms in Rust. `project-node-syms-acc`/`project-def-name`/`project-qualify` (below)
+;; remain as the interpreted reference the native path mirrors — dead in the live
+;; check path (only the native `scan-source-extract` runs), kept for documentation.
 (defn- project-scan-file-entry
   (path)
   (scan-source-extract (slurp path)))

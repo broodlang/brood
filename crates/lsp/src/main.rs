@@ -412,7 +412,7 @@ fn handle_request(
                 Err(resp) => return resp,
             };
             // Like goto-definition, this needs `&mut interp` (module resolution runs
-            // `require--find`) alongside the `docs` borrow — inline the lookup.
+            // `require-find`) alongside the `docs` borrow — inline the lookup.
             let result = match docs.get(&p.text_document.uri) {
                 Some(doc) => {
                     let a = &doc.analysis;

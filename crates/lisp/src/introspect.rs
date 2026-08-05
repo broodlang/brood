@@ -396,7 +396,7 @@ pub fn project_files(interp: &mut Interp) -> Vec<String> {
 }
 
 /// The on-disk file a `require`able feature resolves to, found the same way
-/// `require` itself does: `require--find` over the live `*load-path*` (which
+/// `require` itself does: `require-find` over the live `*load-path*` (which
 /// `bootstrap_project` extends with the project's source dirs). Powers
 /// goto-definition on the module name in `(require 'foo)`. `None` for a baked-in
 /// std module (it has no file — it's `%builtin-module` source) or a feature not

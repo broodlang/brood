@@ -2025,7 +2025,7 @@ fn positional_possible_values(subcommand: &str) -> Option<Vec<String>> {
 /// `nest test: cannot read x.blsp: No such file or directory`. `check` and `run`
 /// did not — they handed the path to Brood, which surfaced the failure from
 /// whichever internal function happened to read it first
-/// (`check-file-deps: cannot read …`, plus a trace through `project--pfold-files`).
+/// (`check-file-deps: cannot read …`, plus a trace through `project-pfold-files`).
 /// Same mistake, same message, wherever it is made.
 fn require_readable_files(command: &str, files: &[String]) {
     for path in files {

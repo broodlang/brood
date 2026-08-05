@@ -1144,7 +1144,7 @@ pub fn check_file_ext(
             }
         }
         // (Unused module-private `defn`s are checked at the *whole-project* layer
-        // — `std/tool/project.blsp` `project--unused-private-warnings` — not here: a
+        // — `std/tool/project.blsp` `project-unused-private-warnings` — not here: a
         // `--` name is a convention, not enforced privacy, so the editor legitimately
         // references it from other modules and tests by its qualified name, which a
         // single-file pass can't see. A per-file check produced false positives.)
