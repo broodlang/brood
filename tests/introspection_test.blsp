@@ -105,7 +105,12 @@
   (test "apropos of a nonsense pattern is empty"
     (assert= (apropos "zzz-no-such-thing-zzz") nil))
   ; it's an alias
+  ;; `:isolated` — the last assertion requires two reads of the global table to agree, and
+  ;; the suite runs tests in parallel against ONE runtime table, so another test's `def`
+  ;; landing between them fails it. Found by a repeat-until-failure baseline (2026-08-05):
+  ;; it failed on iteration 2 at two seeds, which is the timing shift, not a re-run bug.
   (test "all-globals lists every global and includes the prelude"
+    :isolated
     (let (g (global-names))
       (is (> (count g) 100))
       (is (includes? g 'map))

@@ -213,17 +213,34 @@ docs/testing.md for the full guide.")
 ;; one, otherwise emitted as its own standalone unit (:isolated if flagged).
 (defn register-test! (name thunk isolated? meta)
   (if *collecting*
-    (def *collected* (cons (list name thunk meta) *collected*))
+    ;; Inside a `describe`, a test-level `:isolated` used to be DROPPED here — the group's
+    ;; mode decided and the marker did nothing, silently. That is worse than not supporting
+    ;; it: you mark a test isolated, the suite reports `0 isolated`, and you believe the test
+    ;; is protected. It rides in the meta now, and `emit-describe!` gives such a test its own
+    ;; isolated unit. (Found 2026-08-05 while fixing a concurrency flake with the marker.)
+    (def *collected* (cons (list name thunk (assoc (or meta {}) :isolated isolated?))
+                       *collected*))
     (add-unit! (if isolated? :isolated :parallel) "" (list (list name thunk meta)))))
+
+;; Was this test marked `:isolated` individually (inside a `describe`)?
+(defn test--isolated? (t) (let (m (third t)) (and (not (nil? m)) (= (get m :isolated) true))))
 
 ;; Turn a finished describe's collected tests into units according to its mode:
 ;; default spreads them across one :parallel unit each; :serial/:isolated keep
 ;; them together in a single unit.
 (defn emit-describe! (mode group tests group-tags group-skip)
-  (let (tagged (map (fn (t) (test--mark-skip (test--add-tags t group-tags) group-skip)) tests))
-    (if (= mode :parallel)
-      (fold (fn (_ t) (add-unit! :parallel group (list t))) nil tagged)
-      (add-unit! mode group tagged))))
+  (let (tagged (map (fn (t) (test--mark-skip (test--add-tags t group-tags) group-skip)) tests)
+        ;; A test marked `:isolated` on its own gets its own isolated unit even in a
+        ;; parallel group — that is what the marker says, and honouring it per test avoids
+        ;; serialising the other N-1 tests of the group to protect one.
+        solo (filter test--isolated? tagged)
+        rest (filter (fn (t) (not (test--isolated? t))) tagged))
+    (fold (fn (_ t) (add-unit! :isolated group (list t))) nil solo)
+    (if (empty? rest)
+      nil
+      (if (= mode :parallel)
+        (fold (fn (_ t) (add-unit! :parallel group (list t))) nil rest)
+        (add-unit! mode group rest)))))
 
 (defmacro describe (group & forms)
   "Register a group of tests: `(describe \"name\" [:serial | :isolated] [:tags [kw …]] body...)`. Tests run in parallel by default; `:serial` runs them sequentially in one process, `:isolated` each against a private copy of the globals. `:tags` attaches tags to every test in the group, which `nest test --only/--exclude/--include` select on."
