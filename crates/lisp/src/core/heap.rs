@@ -1956,8 +1956,8 @@ impl RuntimeCode {
             .unwrap_or_else(|e| e.into_inner())
             .insert(sym);
     }
-    /// Is `sym` recorded module-private? The authoritative half of
-    /// [`Heap::is_private`], consulted only after the lock-free `--` fast-negative.
+    /// Is `sym` recorded module-private? The authoritative (and, since ADR-146 step 2,
+    /// the *only*) half of [`Heap::is_private`].
     fn is_private_recorded(&self, sym: Symbol) -> bool {
         self.private
             .read()
@@ -3863,11 +3863,12 @@ impl Heap {
     }
 
     /// Is the global `sym` module-private (ADR-146)? The single predicate every
-    /// semantic privacy check consults, so the `--` rule lives in exactly one place
-    /// (see [`RuntimeCode::private`]). A name without the `--` marker can never be
-    /// private — the recorded set holds only `--` names — so that answer is returned
-    /// **without taking the RwLock**, keeping the hot public-reference path lock-free;
-    /// only a genuine `--` name reaches the recorded lookup.
+    /// semantic privacy check consults (see [`RuntimeCode::private`]). Since step 2
+    /// moved the marker off the name onto the def form, a private is spelled exactly
+    /// like a public, so there is no name-shaped fast-negative to take first: every
+    /// query is the recorded-set lookup. That is O(1) regardless of how many privates
+    /// exist, and the callers pre-filter (intra-module refs and granted modules never
+    /// reach here), which is why dropping the old `--` fast path measured within noise.
     pub fn is_private(&self, sym: Symbol) -> bool {
         self.runtime.is_private_recorded(sym)
     }

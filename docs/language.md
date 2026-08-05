@@ -2751,6 +2751,12 @@ import one. Three deliberate doors stay open:
 - **`(:use-internals mod)`** in a module header is the explicit grant (the
   `@testable import` seam) — tests and tightly-coupled tooling declare their
   privileged access loudly; it also refers `mod`'s public names like `(:use)`.
+  **`(:use-internals mod :only [a b])`** grants the same access but refers just
+  the named symbols (which may be privates) instead of a refer-all. That is the
+  **cycle-safe** form for two mutually dependent modules: a plain refer-all into a
+  still-loading module mid-cycle is rejected by the loader, while a subset refer
+  resolves lazily. The grant is emitted before the refer, so a private in the
+  `:only` list passes the privacy check.
 - **Top-level / REPL code** (no `defmodule`) is unrestricted — the
   live-hacking hatch: hot-reloading or advising a private from the REPL keeps
   working (`def` of a qualified private still rebinds it).

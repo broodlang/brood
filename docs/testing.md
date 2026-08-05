@@ -111,6 +111,17 @@ hung test still surfaces, because the runner hard-kills it at `*test-timeout-ms*
 reports it as a timed-out failure. Lines from parallel workers interleave, in waves
 of `*parallel-batch*`.
 
+**`--formatter <name>`** emits machine-readable output instead of the human report:
+`tap` (TAP version 13, for a CI that speaks it) or `json` (one object carrying the
+full structured results). It suppresses the live progress and the summary, so the
+stream is parseable end to end.
+
+**`--stale`** runs only the test files whose sources changed since they last ran — a
+file re-runs when it, or a source file it transitively `require`s, has a newer mtime
+than the last recorded run. Whole-project runs only (it has no meaning for an
+explicit file list). The complement of `--failed`: `--failed` re-runs what *broke*,
+`--stale` re-runs what *changed*.
+
 ### Skipping a test
 
 `:skip` on a `test` or a `describe` registers the case but never runs its body:
@@ -317,9 +328,11 @@ Two tiers, both opt-in, and `--cover-min PCT` fails the run below a floor:
 | --- | --- | --- |
 | `--cover` | **function**-level — which of the project's functions the suite never *entered* | no kernel support; hot reload is the seam |
 | `--cover-lines` | **line**-level — which executable lines actually ran | instruments the bytecode and turns the JIT off |
+| `--cover-branches` | **branch**-level — did each `if`/`cond`/`match` test take *both* edges | the same bytecode seam as `--cover-lines` |
 
-Both may be on at once; they answer different questions. With both, `--cover-min`
-gates on the LINE percentage, being the stricter number. Neither is a timing run.
+Any combination may be on at once; they answer different questions. `--cover-min`
+gates on the strictest percentage present — **branch > line > function**. None of
+them is a timing run.
 
 An "executable line" is one carrying an instrumented node (a call or an inlined prim),
 so a literal-bodied function has no measurable lines and is left out of the report

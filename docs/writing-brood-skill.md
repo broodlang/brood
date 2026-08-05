@@ -93,13 +93,15 @@ will get wrong if you write Brood like Clojure, Scheme, or Common Lisp.
 
 ## Naming & shape (match std/)
 
-- `foo?` predicate · `*foo*` dynamic/module var · `foo--bar` **private** helper
-  · `foo->bar` conversion. Kebab-case. **Don't add a trailing `!`** — nothing
-  mutates, so it warns of nothing (the few in-tree `!` names mean unrelated
-  things: `sig!` = enforced, `set-load-path!` = a root setter, `(! pid msg)` = a
-  `proc/gen` cast).
-- Tail-recursive helpers: public shell delegates to a private `name--acc`/
-  `--loop` worker that carries the accumulator.
+- `foo?` predicate · `*foo*` dynamic/module var · `foo->bar` conversion.
+  Kebab-case. **Don't add a trailing `!`** — nothing mutates, so it warns of
+  nothing (the few in-tree `!` names mean unrelated things: `sig!` = enforced,
+  `set-load-path!` = a root setter, `(! pid msg)` = a `proc/gen` cast).
+- **Private = `defn-` / `def-`**, not a marker in the name (ADR-146). The name
+  stays clean at the def and every call site; `(private? 'mod/name)` asks the
+  image. The retired `--`-in-name convention still appears in old code — ignore it.
+- Tail-recursive helpers: public shell delegates to a `defn-` private
+  `name-acc`/`-loop` worker that carries the accumulator.
 - Docstring (one-sentence summary, first line) on every public `defn`/`defmacro`;
   backticks/**bold**/`-` bullets render. Each module opens with `(defmodule name "…")`.
 - Errors: `(error "fn-name: what went wrong: " value)` — lowercase, value appended.
