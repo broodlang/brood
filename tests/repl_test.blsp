@@ -2,10 +2,10 @@
 ;;
 ;; The REPL itself is an IO loop over `read-line`/`eval-string` (driven by the
 ;; `brood` / `nest repl` binaries, exercised manually), so these tests cover the
-;; pure decisions it's built from: datum detection (`repl/repl--content?`), the
-;; incomplete-input signal that drives multi-line reads (`repl/repl--incomplete?`, off
-;; the reader's E0002 code — ADR-049), and error rendering (`repl/repl--error-message`).
-;; One integration test confirms `repl/repl--eval-print` reports `:more` for a partial
+;; pure decisions it's built from: datum detection (`repl/repl-content?`), the
+;; incomplete-input signal that drives multi-line reads (`repl/repl-incomplete?`, off
+;; the reader's E0002 code — ADR-049), and error rendering (`repl/repl-error-message`).
+;; One integration test confirms `repl/repl-eval-print` reports `:more` for a partial
 ;; form. The closing :isolated block sends an error *map* through a process
 ;; boundary (a deep copy across per-process heaps) before formatting it, proving
 ;; the structured-error path round-trips under the scheduler.

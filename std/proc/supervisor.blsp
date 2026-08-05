@@ -241,7 +241,7 @@ a harmless no-op and the selective drain consumes the `[:EXIT]` already queued.
   "Terminate every child in `children` (each assumed alive / not-yet-drained) per
 its `:shutdown` policy, draining each one's `[:EXIT]`. **Reverse start order**
 (`children` is an ordered *sequence* of records — callers pass
-`supervisor--ordered` — so we tear down last-started-first) — matching
+`supervisor-ordered` — so we tear down last-started-first) — matching
 OTP, so a child that depends on an earlier-started sibling is stopped first.
 Sequential: a child marked `:infinity` (a sub-supervisor) is fully torn down —
 recursively — before the next, so a whole tree shuts down depth-first."
@@ -340,7 +340,7 @@ terminates only the *other* children."
 the child with `:pid` `pid`. `:one-for-all` → everything is affected;
 `:rest-for-one` → the trigger and everything started *after* it (the suffix), with
 the earlier-started prefix left untouched. (`children` is an ordered *sequence* of
-records here — callers pass `supervisor--ordered`.)"
+records here — callers pass `supervisor-ordered`.)"
   (if (= strategy :rest-for-one)
     [(take-while (fn (c) (not (= (get c :pid) pid))) children)
       (drop-while (fn (c)

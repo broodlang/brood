@@ -7,7 +7,7 @@
 ;; Register-only — discovered and run by `nest test` (and cargo test).
 
 ;; `:use-internals project` as well as `package`: the `:enhances` tests reach
-;; `project--parse-enhances`, the manifest-validation helper, the same way the rest of
+;; `project-parse-enhances`, the manifest-validation helper, the same way the rest of
 ;; this suite tests `package`'s cwd-free helpers directly rather than through a verb.
 (defmodule package-test
   (:use-internals package)
@@ -864,7 +864,7 @@
       (package/registry-search-url "http://h" "" "my app"))))
 
 ;; Namespace-collision detection (ADR-070). We test the cwd-free helpers
-;; (`package--provided-modules` / `package--check-namespace-collisions`) directly,
+;; (`package-provided-modules` / `package-check-namespace-collisions`) directly,
 ;; the way slice 1 tests the verbs' helpers rather than the cwd-driven verbs.
 (describe "package: namespace-collision detection (ADR-070)"
   (test "provided-modules reports each file's (defmodule …) name"
@@ -883,7 +883,7 @@
   ;; name no longer collide (they root to `a/util` vs `b/util`); the collision guard
   ;; now only checks a project's OWN source dirs against each other. The helper is
   ;; generic — it flags a duplicate in whatever source list it is given — so we test
-  ;; it with two of the project's own dirs, the sources `package--collision-sources`
+  ;; it with two of the project's own dirs, the sources `package-collision-sources`
   ;; actually feeds it now.
   (test "two of your own source dirs declaring the same module collide loudly"
     (let (parent (pkg-fixture-root)

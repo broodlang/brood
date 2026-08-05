@@ -172,13 +172,13 @@
 
 ;; The case lines of one section, collected ONCE. The predicate is deliberately crude —
 ;; "not blank, not an `@` header, has at least four `;`" — because it runs on all ~20,000
-;; lines, and the precise version (`nt--test-line?`, which folds tabs with `replace` and
+;; lines, and the precise version (`nt-test-line?`, which folds tabs with `replace` and
 ;; then `string-split`s) costs over 120 s in a DEBUG build all by itself.
 ;;
 ;; That cost is why sampling looked useless: it was paid per test regardless of how few
 ;; cases the sample tested, so 16x sampling changed nothing measurable. Provable by
 ;; running a slice with the modulus set so high that no case is tested at all — still
-;; >120 s. With the walk done once, a 1-in-16 slice is ~42 s. `nt--case` still does the
+;; >120 s. With the walk done once, a 1-in-16 slice is ~42 s. `nt-case` still does the
 ;; real parsing, on the lines a slice actually tests.
 (defn- nt-case-line?
   (line)
@@ -215,7 +215,7 @@
         p (nt-scan-chunk want k n (rest lines) p idx ran bad)
         (not (= here want)) (nt-scan-chunk want k n (rest lines) here idx ran bad)
         (not (nt-test-line? line)) (nt-scan-chunk want k n (rest lines) here idx ran bad)
-        ;; Decide BEFORE parsing. `nt--case` hex-decodes five fields and builds five
+        ;; Decide BEFORE parsing. `nt-case` hex-decodes five fields and builds five
         ;; strings, so parsing every case and then discarding 15 of 16 made the sample cost
         ;; the same as the full sweep — the whole point of sampling was lost.
         ;; `idx` advances over test lines only, so the slices stay balanced.
@@ -242,7 +242,7 @@
 ;;
 ;; An earlier attempt at sampling was abandoned because it "measurably didn't" help — and
 ;; it didn't, because the per-test cost was the 20,000-line WALK, not the cases (see
-;; `nt--case-line?`). With the walk collected once, the sample is what it was meant to be.
+;; `nt-case-line?`). With the walk collected once, the sample is what it was meant to be.
 ;;
 ;; `index mod n` sampling, so the slice is spread across the whole section rather than
 ;; being a prefix, and it is deterministic. The slicing machinery is kept because it is
@@ -377,7 +377,7 @@
   ;; The single case excluded from the sweep above, asserted as it CURRENTLY behaves
   ;; rather than as UAX #29 requires — so the day `unicode-segmentation` adds U+2701
   ;; to its Extended_Pictographic table, this test fails and tells us to drop the
-  ;; exclusion. See the comment on `gb--upstream-gap`.
+  ;; exclusion. See the comment on `gb-upstream-gap`.
   (test "the one upstream gap: U+2701 is missing from Extended_Pictographic"
     ;; UAX #29 GB11 says one cluster; the crate gives two.
     (assert= (count (string->graphemes "\u{2701}\u{200D}\u{2701}")) 2)

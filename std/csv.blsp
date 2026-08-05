@@ -30,9 +30,9 @@ Both \\n and \\r\\n line endings are accepted on input; \\n is emitted.")
 ;;
 ;; Result: a list of rows; each row is a vector of strings.
 ;; `s` is a CODE-POINT VECTOR (built once in `csv-parse` via `string->list`), so
-;; `csv--at` indexes with O(1) `nth` — `char-at` on a raw UTF-8 string is O(i), which
+;; `csv-at` indexes with O(1) `nth` — `char-at` on a raw UTF-8 string is O(i), which
 ;; made the whole scan O(n^2). A field is a REVERSED LIST of chars, materialised once
-;; via `csv--field` at each field boundary — `(str acc c)` per char was O(field^2).
+;; via `csv-field` at each field boundary — `(str acc c)` per char was O(field^2).
 
 (defn- csv-at
   (s i n)

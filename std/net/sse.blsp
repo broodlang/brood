@@ -12,8 +12,8 @@
 ;;  - **Pure frame parsing** (the `observe-frame` discipline): the wire grammar
 ;;    (`event:`/`data:`/`id:` field lines, blank-line frame boundaries, comment
 ;;    lines, `\n`/`\r\n`/`\r` terminators) is parsed by pure functions
-;;    (`sse--parse-event`, `sse--frames`) that are unit-testable without a socket;
-;;    only `sse-connect`/`sse--stream` touch IO.
+;;    (`sse-parse-event`, `sse-frames`) that are unit-testable without a socket;
+;;    only `sse-connect`/`sse-stream` touch IO.
 ;;  - **Integrates with `ui-run` via `with-events`** (in `std/ui.blsp`): wrap a
 ;;    display so its `:poll` surfaces queued `[:sse …]` messages as loop input — so
 ;;    pushed events drive the UI on the terminal *and* the GUI.
@@ -125,7 +125,7 @@ the `headers` of a `stream-response` so a browser `EventSource` reads the open s
 (defn sse-frame (data &optional (event nil))
   "One SSE frame for `data`: every line prefixed `data: ` (so multi-line payloads
 round-trip), an optional `event:` type line first, terminated by the blank line.
-The exact inverse of `sse--parse-event`."
+The exact inverse of `sse-parse-event`."
   (str (if (nil? event) "" (str "event: " event "\n"))
     (join "\n" (map (fn (l) (str "data: " l)) (string-split data "\n")))
     "\n\n"))
@@ -156,7 +156,7 @@ with `[:sse-closed reason]` when the socket closes or errors. Tail-recursive."
 (defn- sse-read-head
   (sock subscriber buf)
   "Read until the HTTP response head's blank line, check the status, then hand the
-leftover bytes to `sse--stream`. A non-200 status closes the connection."
+leftover bytes to `sse-stream`. A non-200 status closes the connection."
   (receive
     ([:tcp ^sock d] (let (buf2 (str buf (sse-normalize d))
                           i (index-of buf2 "\n\n"))

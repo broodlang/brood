@@ -13,7 +13,7 @@
 ;;
 ;; The two sides disagree only on key spelling: `json-parse` maps a JSON object to a
 ;; Brood map with *keyword* keys (idiomatic Brood), while `csv-parse-maps` keys rows
-;; by their header *strings*. `csv--stringify-keys` reconciles that, and nothing else
+;; by their header *strings*. `csv-stringify-keys` reconciles that, and nothing else
 ;; is normalised — the field values are compared exactly.
 
 (defmodule conformance-csv-test (:use test) (:use corpus))

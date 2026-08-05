@@ -493,7 +493,7 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; (notably comments) sitting between the last head-line form and the first body
 ;; form is still visited rather than skipped. Counts `form-i + 1` structural
 ;; forms and returns the index one past the last of them; if there are fewer,
-;; returns the end. (`kids--index-of-form kids (inc form-i)` jumps to the *next*
+;; returns the end. (`kids-index-of-form kids (inc form-i)` jumps to the *next*
 ;; structural form, stepping over — and dropping — an intervening comment.)
 (defn- kids-index-after-form
   (kids form-i)
@@ -546,7 +546,7 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; hoisted onto its own line *above* its pair, an own-line comment sits on its own
 ;; line at the pair indent (the walker pairs name+value but never *across* a comment).
 (defn render-pair-list (n indent)
-  ;; Skip the flat `single-line` when already broken — same perf fix as `render--seq`.
+  ;; Skip the flat `single-line` when already broken — same perf fix as `render-seq`.
   (let (keep-broken (had-author-newlines? n)
         one (if keep-broken nil (single-line n)))
     (cond
@@ -560,7 +560,7 @@ retired the `comment-on-own-line?` distinction this used to need."
   ;; bindings list's `)` and leaving the file unparseable. This check was unnecessary
   ;; while same-line trailing comments were hoisted above their pair (a comment could
   ;; never be last); leaving them in place is what makes it load-bearing. Same rule
-  ;; `render--break` already applies to a body.
+  ;; `render-break` already applies to a body.
   (let (pair-ind (inc indent))
     (str open
       (render-pair-walk kids 0 (vector-length kids) pair-ind 0 "")

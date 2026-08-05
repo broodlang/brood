@@ -136,30 +136,33 @@ fn scan_head2(heap: &Heap, f: Value) -> Option<(Value, Value)> {
     None
 }
 
-/// Count every `--`-containing symbol occurrence anywhere in `v` (recursively).
-fn scan_count_dd(heap: &Heap, v: Value, counts: &mut std::collections::HashMap<String, i64>) {
+/// Count every symbol occurrence anywhere in `v` (recursively). Privacy is now a
+/// def-site fact with a CLEAN name (ADR-146 step 2), so the unused-private verdict
+/// can no longer restrict counting to `--` names — it looks up each private's bare
+/// and qualified name, both ordinary symbols. The bare count is project-global, so a
+/// name shared across modules reads as "used" (a false negative, never a false
+/// positive — safe for the zero-false-positive advisory contract).
+fn scan_count_syms(heap: &Heap, v: Value, counts: &mut std::collections::HashMap<String, i64>) {
     match v {
         Value::Sym(s) => {
             if let Some(n) = crate::core::value::symbol_name_opt(s) {
-                if n.contains("--") {
-                    *counts.entry(n.to_string()).or_insert(0) += 1;
-                }
+                *counts.entry(n.to_string()).or_insert(0) += 1;
             }
         }
         Value::Pair(id) => {
             let (car, cdr) = heap.pair(id);
-            scan_count_dd(heap, car, counts);
-            scan_count_dd(heap, cdr, counts);
+            scan_count_syms(heap, car, counts);
+            scan_count_syms(heap, cdr, counts);
         }
         Value::Vector(vid) => {
             for it in heap.vector(vid).to_vec() {
-                scan_count_dd(heap, it, counts);
+                scan_count_syms(heap, it, counts);
             }
         }
         Value::Map(mid) => {
             for (k, val) in heap.map_entries(mid) {
-                scan_count_dd(heap, k, counts);
-                scan_count_dd(heap, val, counts);
+                scan_count_syms(heap, k, counts);
+                scan_count_syms(heap, val, counts);
             }
         }
         _ => {}
@@ -167,10 +170,10 @@ fn scan_count_dd(heap: &Heap, v: Value, counts: &mut std::collections::HashMap<S
 }
 
 /// `(scan-source-extract src)` → `[counts privs def-names]` for the whole-project
-/// check's per-file scan (ADR-119): `counts` a map of each `--`-containing symbol
-/// name → occurrence count, `privs` this file's `--`-private top-level defs as
-/// `[bare qual]`, `def-names` every top-level def's qualified global key. Malformed
-/// input yields an empty extract (parse-tolerant — advisory).
+/// check's per-file scan (ADR-119): `counts` a map of each symbol name → occurrence
+/// count, `privs` this file's `defn-`/`def-` private top-level defs as `[bare qual]`,
+/// `def-names` every top-level def's qualified global key. Malformed input yields an
+/// empty extract (parse-tolerant — advisory).
 pub(super) fn scan_source_extract(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let src = expect_string(heap, "scan-source-extract", arg(args, 0))?;
     let forms = reader::read_all(heap, &src).unwrap_or_default();
@@ -183,14 +186,16 @@ pub(super) fn scan_source_extract(args: &[Value], _: EnvId, heap: &mut Heap) -> 
     let mut def_names: Vec<Value> = Vec::new();
     let mut privs: Vec<Value> = Vec::new();
     for &f in &forms {
-        scan_count_dd(heap, f, &mut counts);
+        scan_count_syms(heap, f, &mut counts);
         if let Some((h, n)) = scan_head2(heap, f) {
             if let (Some(head), Some(name)) = (scan_sym_name(h), scan_sym_name(n)) {
                 if SCAN_DEF_HEADS.contains(&head) {
                     let qual = scan_qualify(ns.as_deref(), head, name);
                     let qv = heap.alloc_string(&qual);
                     def_names.push(qv);
-                    if name.contains("--") {
+                    // A `defn-`/`def-` head marks a module-private (ADR-146); the name
+                    // itself is clean, so privacy is read from the def form, not the name.
+                    if head == "defn-" || head == "def-" {
                         let bv = heap.alloc_string(name);
                         privs.push(heap.alloc_vector(vec![bv, qv]));
                     }

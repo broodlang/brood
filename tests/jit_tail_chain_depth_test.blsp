@@ -19,12 +19,12 @@
 ;; deeply nested value — all stayed under the cap and ran fine to 200,000.
 ;;
 ;; Found by JSONTestSuite's 20k-deep documents; `std/json`'s
-;; `json--value` -> `json--array` -> `json--array--acc` -> `json--value` is exactly this
-;; cycle, with `json--array` as the delegator.
+;; `json-value` -> `json-array` -> `json-array-acc` -> `json-value` is exactly this
+;; cycle, with `json-array` as the delegator.
 
 (defmodule jit-tail-chain-depth-test (:use test))
 
-;; The minimal repro. `tc--delegate` is a pure tail-call delegator; `tc--step` enters the
+;; The minimal repro. `tc-delegate` is a pure tail-call delegator; `tc-step` enters the
 ;; cycle from a non-tail position (the result is destructured, so the call cannot be a
 ;; tail call). Non-tail by construction, so the checker's warning is expected and correct.
 (check-allow :non-tail-recursion

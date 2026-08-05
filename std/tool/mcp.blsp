@@ -58,7 +58,7 @@ error inside the user expression surfaces here as the `:error` branch."
         {:error (mcp-error-shape e)}))))
 
 ;; Cross-file shadow warnings involving `file`: the *qualified* names
-;; (`ns/name`, per `project--file-def-names`) this file defines that another
+;; (`ns/name`, per `project-file-def-names`) this file defines that another
 ;; project source file also defines. Namespace-sound (ADR-065) — a short name
 ;; reused across distinct namespaces is not a collision, only a same-namespace
 ;; (or ambient/root) rebinding is. Empty (and silent) outside a project.
@@ -107,7 +107,7 @@ defines (the silent flat-namespace collision). On a load error:
     (mcp-load-checked file)))
 
 ;; ---- the project sandbox for write/edit -----------------------------------
-;; Every file the MCP server writes goes through `mcp--project-path`, which
+;; Every file the MCP server writes goes through `mcp-project-path`, which
 ;; refuses to resolve anything outside `*project-root*`. That's the whole
 ;; guarantee the `write`/`edit` tools rest on: an agent driving nest mcp can only
 ;; touch files **inside the project it serves**, never the wider filesystem.
@@ -117,7 +117,7 @@ defines (the silent flat-namespace collision). On a load error:
   "Whether `rel` passes the LEXICAL bar for a project-relative path: a non-empty
 string, not absolute (`/…`) or home-anchored (`~…`), with no `..` segment. The
 first (cheap) of two gates; the second is the symlink-resolving check in
-`mcp--project-path`."
+`mcp-project-path`."
   (and (string? rel)
     (> (string-length rel) 0)
     (not (starts-with? rel "/"))

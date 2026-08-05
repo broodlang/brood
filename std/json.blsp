@@ -63,7 +63,7 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 
 ;; ---- parse ------------------------------------------------------------------
 ;;
-;; Each `json--X (s i n)` reads from char index `i` of source `s` (count `n`) and
+;; Each `json-X (s i n)` reads from char index `i` of source `s` (count `n`) and
 ;; returns `[value next-index]`. Whitespace is skipped between tokens. Tail
 ;; recursion + accumulators throughout; `error` on anything malformed.
 
@@ -105,7 +105,7 @@ escape (the codepoint→char mechanism pure Brood otherwise lacks)."
 
 ;; Strict JSON number validation (RFC 8259): `string->number` is lenient (it accepts
 ;; a leading `+` and leading zeros — `+5`, `01`), which JSON forbids. We munch the
-;; token loosely with `json--num-end`, then validate it against the grammar
+;; token loosely with `json-num-end`, then validate it against the grammar
 ;;   number = [-] int [frac] [exp],  int = 0 | [1-9] digit*
 ;;   frac = . digit+,  exp = [eE] [+-]? digit+
 ;; before handing it to `string->number`. The validators walk the same code vector
@@ -378,7 +378,7 @@ on malformed input or trailing content. Pure."
   (s)
   "True if `s` contains any char JSON must escape: `\"` (34), `\\` (92), or a control
 char (< 0x20). The common case is a clean ASCII string, so this one O(n) codepoint
-scan lets `json--enc-escapes` skip ~27 whole-string `replace` passes (backslash/quote/
+scan lets `json-enc-escapes` skip ~27 whole-string `replace` passes (backslash/quote/
 the named escapes + every C0 control) that would each find nothing."
   (any? (fn (c) (or (< c 32) (= c 34) (= c 92))) (string->codepoints s)))
 
@@ -442,14 +442,14 @@ the named escapes + every C0 control) that would each find nothing."
 ;; The built-in rules below are CLOSED — the JSON data model is fixed, so nil/bool/
 ;; number/string/keyword/symbol/map/vector/list stay a plain `cond` (no dispatch cost
 ;; on the hot path). What is open is everything *else*: a `defrecord` that wants a wire
-;; shape other than its fields, and the kinds `json--emit` can only `error` on today (a
+;; shape other than its fields, and the kinds `json-emit` can only `error` on today (a
 ;; pid, a fn, a datetime record, a queue). `JsonEncode` is that seam — Brood's
 ;; `Jason.Encoder`: one op returning a value the built-in rules DO cover, which
-;; `json--emit` then encodes normally.
+;; `json-emit` then encodes normally.
 ;;
 ;; **No `:default` is registered, deliberately.** A `:default` would make every value
 ;; "encodable" and turn the loud error into an infinite recursion (a pid's default would
-;; hand back the pid). With no `:default`, `json--custom` returning nil means exactly
+;; hand back the pid). With no `:default`, `json-custom` returning nil means exactly
 ;; "no rule for this identity", which is the question both call sites below ask.
 (defability JsonEncode
   "How a value converts to a JSON-encodable Brood value (nil / bool / number / string /

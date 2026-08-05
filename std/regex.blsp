@@ -139,7 +139,7 @@ backreferences yet.")
 ;; {:kind :lit :c c}, {:kind :set :neg b :chars "…"}, {:kind :class :k :digit}.
 ;;
 ;; Construction is the classic Thompson build, threaded functionally: each
-;; `regex--nfa-*` takes the state vector plus `nx` (the index to jump to once this
+;; `regex-nfa-*` takes the state vector plus `nx` (the index to jump to once this
 ;; fragment matches) and returns `[start states']`. Quantifiers with a back-edge
 ;; (`*`/`+`) reserve their split slot first (a placeholder appended so the index is
 ;; live), compile the body pointing back at it, then `assoc` the real split in.
@@ -259,7 +259,7 @@ is a flat copy (a CHAMP map rebuilds nodes), and the entry glue reads it with
   3 startmid   the split-only closure of {start} (the search loop's injection);
   4 memo       the lazy DFA — (state-set, char) -> next set, filled on demand;
   5 exitmemo   accept-closure memo — final set -> boolean.
-The state vector itself is cached separately (`regex--states-cache`) so this
+The state vector itself is cached separately (`regex-states-cache`) so this
 object's per-call clone-out stays a few words — see the cache note above."
   (let (hit (table-get regex-cache pattern))
     (if (nil? hit)
@@ -347,7 +347,7 @@ object's per-call clone-out stays a few words — see the cache note above."
 
 ;; -- middle transition: split-only closure (position-independent, memoisable) --
 ;; Anchors (`^`/`$`) are excluded here — they fire only at the string boundaries
-;; (handled once by the full `regex--eps-close` at start/accept), so the per-char
+;; (handled once by the full `regex-eps-close` at start/accept), so the per-char
 ;; transition depends only on (state-set, char) and can be cached in the DFA memo.
 
 (defn- regex-eps-step-mid
@@ -417,10 +417,10 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table-get
 ;; anchored (matches?): the whole string must be consumed ending in `:match`.
 ;; Per char: one memo lookup (+ the rare miss computing it). Everything
 ;; pattern-constant (start closure, match bit) arrives precomputed from
-;; `regex--compile`; the exit closure comes from `exitmemo`. The loop body is
+;; `regex-compile`; the exit closure comes from `exitmemo`. The loop body is
 ;; pure prims (vector-ref, int arith, table-get) + the self tail call. The
 ;; loops thread the PATTERN, not the state vector: states are fetched from
-;; `regex--states-cache` only on a memo miss / exit-first-sight (once per
+;; `regex-states-cache` only on a memo miss / exit-first-sight (once per
 ;; distinct (set, char) ever), keeping the per-call table clone small.
 (defn- regex-exit
   (pattern exitmemo m matchbit set)

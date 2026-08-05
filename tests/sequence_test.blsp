@@ -476,7 +476,7 @@
     (assert= [0 2 4] (filterv even? (range 6)))
     (assert= [10 20] (mapv (fn (x) (* x 10)) [1 2]))))
 
-;; `fold` over a VECTOR takes an indexed fast path (`fold--vec`) rather than the generic
+;; `fold` over a VECTOR takes an indexed fast path (`fold-vec`) rather than the generic
 ;; `first`/`rest` walk, because `(rest v)` on a vector materialises a list of the tail —
 ;; 15 cons cells and ~48 one-arg primitive dispatches to sum 16 numbers. The fast path must
 ;; be indistinguishable from the generic one, including for the awkward cases: an

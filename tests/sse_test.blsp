@@ -31,7 +31,7 @@
       (assert= rest "partial data")))
   ;; The edges of the one-split extraction (2026-08-04): a buffer that ends exactly on a
   ;; blank line leaves an EMPTY remainder rather than dropping the last event, and an empty
-  ;; buffer splits to no pieces at all — the case the guard in `sse--frames` exists for.
+  ;; buffer splits to no pieces at all — the case the guard in `sse-frames` exists for.
   (test "a buffer ending on a blank line has an empty remainder"
     (let ([blocks rest] (net/sse/sse-frames "x: 1\n\ny: 2\n\n"))
       (assert= blocks (list "x: 1" "y: 2"))

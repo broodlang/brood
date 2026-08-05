@@ -99,7 +99,7 @@ seam SSE / long-poll / chunked downloads build on). Plaintext only; pure Brood."
 
 (defn- http-read-raw
   (sock)
-  ;; `http--read-until` returns whatever it accumulated on EOF/timeout even
+  ;; `http-read-until` returns whatever it accumulated on EOF/timeout even
   ;; without the terminator (a peer that half-sends a head then drops), so the
   ;; marker can be absent (-1) here. Treat a missing terminator as a malformed /
   ;; incomplete request → nil, so the caller closes the socket cleanly — NOT

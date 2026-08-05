@@ -154,7 +154,7 @@ looking identical to a round-trip that cleaned up after itself."
   ;; after `(defn fac …)` has landed and before `(fac 5)` runs.
   ;;
   ;; Why not per-form: `trace-fn` keeps the pre-instrumentation value in a registry so
-  ;; re-tracing can't capture its own wrapper, and `debug--original` prefers that entry.
+  ;; re-tracing can't capture its own wrapper, and `debug-original` prefers that entry.
   ;; So tracing a name a SECOND time after the source redefined it resurrects the
   ;; registry's older function and the wrapper calls that instead — the redefinition is
   ;; silently discarded. In a tutorial that made a fixed exercise report the old

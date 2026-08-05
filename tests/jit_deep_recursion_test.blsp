@@ -51,7 +51,7 @@
 ;; The `after` deadline is a **liveness net**, not a performance bound: its job is to turn
 ;; "the worker died and will never reply" into a value rather than hanging. The guard-page
 ;; fix means deep recursion now DEOPTS to the VM and raises the catchable `MAX_BC_FRAMES`
-;; error (→ `jdr--parse` returns `:rejected`) instead of aborting, so the worker is *slow*,
+;; error (→ `jdr-parse` returns `:rejected`) instead of aborting, so the worker is *slow*,
 ;; never dead — it just needs a generous net. The parse costs ~36 s of CPU at
 ;; `BROOD_RT_GC_FLOOR=1` and far more under the whole suite's drain + core contention
 ;; (`:serial` serialises only within this group; all units still run together). At 850 s it
@@ -130,5 +130,5 @@
   (files)
   (let (me (self))
     (spawn (send me [:r (jdr-scan files 0)]))
-    ;; 850 s liveness net, as in `jdr--in-spawn` — generous headroom under the `:slow` ceiling.
+    ;; 850 s liveness net, as in `jdr-in-spawn` — generous headroom under the `:slow` ceiling.
     (receive ([:r r] r) (after 850000 :TIMED-OUT))))

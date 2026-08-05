@@ -69,7 +69,7 @@ trigger, docs/type-soundness-reload.md).")
 ;; Re-loading a DEPENDENCY file must re-establish its package context, or its
 ;; `(defmodule b)` would drop from the rooted `foo/b` to a bare `b` on every reload
 ;; (the flat model had no such hazard; rooting introduces it). We bracket the context
-;; in Brood here — the same pattern the loader's `require--force-package` uses — so the
+;; in Brood here — the same pattern the loader's `require-force-package` uses — so the
 ;; Rust reload primitive stays package-agnostic. A root-project / std / loose file has
 ;; no registered key and reloads exactly as before.
 (defn- reload-package-key

@@ -30,7 +30,7 @@ test discovery, lints, release, config)."
 ;; library module after the package is both collision-free and the more idiomatic
 ;; shape: a dependency called `greeter` provides `greeter`.
 ;;
-;; `project--valid-name?` only rejects path separators, whitespace and a leading dot,
+;; `project-valid-name?` only rejects path separators, whitespace and a leading dot,
 ;; so a legal project name can still hold punctuation a symbol shouldn't; anything
 ;; outside [a-z A-Z 0-9 - _] becomes `-`. A leading digit gets a `p-` prefix (a symbol
 ;; must not read as a number), and the reserved `main` becomes `main-lib` so the

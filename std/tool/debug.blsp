@@ -498,7 +498,7 @@ subexpression). Non-node entries (`:enter`/`:exit`) pass through."
           (send dbg
             [:break
               (self)
-              ;; :vals is a MAP, same as `break`'s (`debug--pairs->map`) — so
+              ;; :vals is a MAP, same as `break`'s (`debug-pairs->map`) — so
               ;; `locals-of` / `eval-at` work on a step-park too: the traced node's
               ;; value is in scope as `value` (`(eval-at d 1 "value")`).
               {:label (str "step " (pr-str-bounded (get entry :form)))

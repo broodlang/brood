@@ -149,7 +149,7 @@ at the top — keeping it out of the snapshot when it is itself the doc target."
 ;; --- the complete builtin/prelude reference (`nest doc --all`) ---------------
 
 ;; Is `sym` part of the public surface worth listing in the all-globals
-;; reference? Drops private `foo--bar` helpers and raw `%primitive`s (the
+;; reference? Drops private `foo-bar` helpers and raw `%primitive`s (the
 ;; bootstrap layer the prelude builds variadic ops on top of) — what's left is
 ;; what a user/agent actually calls.
 (defn- docs-public?

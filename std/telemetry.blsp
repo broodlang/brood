@@ -83,7 +83,7 @@ LISTENER process."
 (defn- telemetry-listen
   ()
   "The listener loop: dispatch emits, answer a sync ping, stop on :stop. Tail-recursive
-(O(1) stack). A throwing handler is caught in `telemetry--dispatch`; an uncatchable
+(O(1) stack). A throwing handler is caught in `telemetry-dispatch`; an uncatchable
 handler fault kills only this process."
   (receive
     ([:emit event measurements metadata] (do

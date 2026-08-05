@@ -173,7 +173,7 @@ synthesized back-compat timer below and any app that hasn't moved to named timer
 ;; poll → the bare keyword `:tick`, the `:tick-ms` beat) — so the observer and any
 ;; pre-timers app are untouched; with the key, the clock-driven path below. The
 ;; per-timer bookkeeping — when each timer appeared, when it last fired, and the
-;; last-input time — lives in a `clock` map threaded through `ui--loop`, NOT in the
+;; last-input time — lives in a `clock` map threaded through `ui-loop`, NOT in the
 ;; model: it's wall-clock reality, so it never rolls back when a view/update crash
 ;; rolls the model back.
 
@@ -183,7 +183,7 @@ synthesized back-compat timer below and any app that hasn't moved to named timer
 ;; the loop oversleep. Input still wakes it immediately; this only bounds the idle wait.
 
 (def *ui-input-batch* 1024)
-;; The most inputs `ui--drain-input` folds into ONE render when a `:coalesce-input?`
+;; The most inputs `ui-drain-input` folds into ONE render when a `:coalesce-input?`
 ;; app has a backlog (see below) — a ceiling so a self-feeding source (an `update`
 ;; that re-enqueues to itself) can't starve the render forever; hitting it just renders
 ;; and the next iteration drains the rest.
@@ -336,9 +336,9 @@ wiring it into `update` — independent of how the app binds the Escape key. A `
 control message (from another process) raises the window via the display's `:focus`
 and is NOT folded into `update`.
 
-**Named timers (ADR-102).** The poll timeout is `ui--poll-ms` — the soonest live
+**Named timers (ADR-102).** The poll timeout is `ui-poll-ms` — the soonest live
 timer in `(ui--timers model)`. A timed-out poll (nil) fires the earliest due timer via
-`ui--fire`, folding `[:timer name]` (or the bare `:tick` legacy beat). A real input
+`ui-fire`, folding `[:timer name]` (or the bare `:tick` legacy beat). A real input
 stamps `:last-input` on the `clock` (so idle timers reset). The `clock` is threaded
 alongside `model`/`last-good` and is wall-clock bookkeeping, NOT model state: it does
 **not** roll back on a crash (a key the user pressed stays pressed), and the `:focus`
@@ -346,7 +346,7 @@ branch passes it through without advancing `:last-input` (a focus message isn't 
 
 **Let-it-crash at the render loop** (the editor's application of userland
 supervision, M4 — see `docs/supervision.md`). A throw from `view` or `update` is
-caught, logged to stderr (`ui--log-error`), and the loop keeps going rather than
+caught, logged to stderr (`ui-log-error`), and the loop keeps going rather than
 dying: a throwing `view` rolls the model back to `last-good` (the last model that
 rendered cleanly) and re-renders it; a throwing `update` drops that one bad input
 and keeps the current model. `last-good` is threaded alongside `model` and starts
@@ -374,7 +374,7 @@ re-raises, surfacing a genuine startup bug instead of spinning."
           ;; Named timers are opt-in via the `:timers` key — `timers` is nil for a
           ;; pre-timers app (the legacy `:tick-ms`/`:tick` path) and the clock is just
           ;; passed through untouched; with timers, the poll parks until the soonest is
-          ;; due and `ui--fire` decides what (if anything) fired.
+          ;; due and `ui-fire` decides what (if anything) fired.
           (let (timers (get model :timers)
                 now1 (ui-now model)
                 clock1 (if (nil? timers) clock (ui-clock-init clock timers now1))
@@ -419,7 +419,7 @@ re-raises, surfacing a genuine startup bug instead of spinning."
                               (catch e (do (ui-log-error "update" e) model)))
                       ;; a `:coalesce-input?` app also drains any inputs ALREADY queued
                       ;; into this same fold, so a burst renders once instead of once
-                      ;; per event (`ui--drain-input`); a control message pulled mid-drain
+                      ;; per event (`ui-drain-input`); a control message pulled mid-drain
                       ;; comes back as `pending` for the loop to act on. Default apps skip
                       ;; the drain and render per input exactly as before.
                       drained (if (get model :coalesce-input?)
@@ -449,13 +449,13 @@ model and sets `:done` to quit.
 poll until the soonest is due and folds `[:timer name]` when it fires — so a steady
 animation timer and several idle one-shots coexist, each on its own clock. A model
 with no `:timers` key keeps the legacy single beat (`:tick-ms`, default 1000 ms),
-delivered as the bare keyword `:tick`. See `ui--loop` and the named-timers section.
+delivered as the bare keyword `:tick`. See `ui-loop` and the named-timers section.
 
 **Input coalescing (`:coalesce-input? true`).** By default the loop renders once per
 input. An app that streams async events into its own mailbox — a test/run feed, collab
 deltas, an SSE push — can flip this flag so the loop, after folding one input, folds any
 inputs ALREADY queued into the same turn and renders once at the settled model
-(`ui--drain-input`). Since rendering, not folding, is the per-event cost, this turns a
+(`ui-drain-input`). Since rendering, not folding, is the per-event cost, this turns a
 burst of N events from N full frames into one — a 900-test run streams in as it finishes
 instead of over seconds of frames. Intermediate frames within a burst are never seen
 anyway; a throwing `update` still drops just its one input, and a `:close`/`:focus` pulled
@@ -474,7 +474,7 @@ loop). A throw from `view` or `update` is caught and logged to stderr, and the l
 recovers: a bad `view` rolls the model back to the last frame that rendered cleanly;
 a bad `update` drops that one input. So a single buggy command can't kill the app or
 wedge it on a frame it can't redraw — only the *first* render throwing (no good frame
-yet) is fatal, surfacing a genuine startup bug. See `ui--loop`.
+yet) is fatal, surfacing a genuine startup bug. See `ui-loop`.
 
 **Teardown is guaranteed.** `:leave` runs on a normal quit *and* if the frontend
 mechanism itself (`:size`/`:draw`/`:poll`) throws, or the first render fails (the
