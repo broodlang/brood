@@ -880,70 +880,9 @@ retired the `comment-on-own-line?` distinction this used to need."
 ;; `format-source src` parses src, renders the root, and ensures exactly one
 ;; trailing newline. Top-level forms are joined by a single `\n`, with a blank
 ;; line preserved between any pair the author separated with one.
-;; ---- TEMPORARY: `--` → def-site privacy migration (ADR-146 step 2) ----------
-;; A one-shot CST transform, armed by `BROOD_MIGRATE_PRIVACY=1 nest format`.
-;; It collapses the `--` in every SYMBOL name (`foo--bar` → `foo-bar`) and, where
-;; that symbol is the name of a `(defn …)`/`(def …)`, flips the head to
-;; `defn-`/`def-` so the now-clean name stays module-private. Keywords, strings and
-;; comments are untouched (so `:task--result` tags and MIME `--` boundaries survive).
-;; REMOVE this block once the tree is migrated.
-(defdyn *migrate-privacy* false)
-(defn- migrate-active?
-  ()
-  (or *migrate-privacy* (not (nil? (getenv "BROOD_MIGRATE_PRIVACY")))))
-(defn- migrate-dashed? (t) (and (includes? t "--") (not (= t "--"))))
-(defn- migrate-collapse
-  (t)
-  (reduce (fn (acc p) (if (nil? acc) p (str acc "-" p))) nil (string-split t "--")))
-(defn- migrate-def-head?
-  (n)
-  (and (= (node-kind n) :symbol)
-    (let (t (node-text n)) (or (= t "defn") (= t "def")))))
-;; Map over a container's children, flipping the FIRST structural child's head text
-;; (`defn` → `defn-`) when `flip-head?`, and migrating every child.
-(defn- migrate-map-kids
-  (kids i n flip-head? acc)
-  (if (= i n)
-    acc
-    (let (c (vector-ref kids i))
-      (if (and flip-head? (not (trivia? c)))
-        (migrate-map-kids kids
-          (inc i)
-          n
-          false
-          (conj acc [(node-kind c) (str (node-text c) "-")]))
-        (migrate-map-kids kids
-          (inc i)
-          n
-          flip-head?
-          (conj acc (migrate-node c)))))))
-(defn- migrate-node
-  (n)
-  (let (k (node-kind n))
-    (cond
-      (= k :symbol)
-        (let (t (node-text n)) (if (migrate-dashed? t) [:symbol (migrate-collapse t)] n))
-      (= k :list)
-        (let (kids (node-children n)
-              structural (filter (fn (c) (not (trivia? c))) (vec->list kids))
-              head (first structural)
-              nm (second structural)
-              flip? (and head
-                      nm
-                      (migrate-def-head? head)
-                      (= (node-kind nm) :symbol)
-                      (migrate-dashed? (node-text nm))))
-          [:list (migrate-map-kids kids 0 (vector-length kids) flip? [])])
-      (container? n)
-        [k (migrate-map-kids (node-children n) 0 (vector-length (node-children n)) false [])]
-      (wrapper? n) [k (migrate-node (node-form n))]
-      else n)))
-
 (defn format-source (src)
   "Format `src` as a Brood source string. Idempotent."
-  (let (root (parse-source src)
-        root2 (if (migrate-active?) (migrate-node root) root))
-    (format-cst-root (node-children root2))))
+  (let (root (parse-source src)) (format-cst-root (node-children root))))
 
 (defn format-cst-root (kids)
   ;; The walk accumulates the top-level blocks as a REVERSED chunk list, joined once here.
