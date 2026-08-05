@@ -17,7 +17,13 @@ Generates `count` programs and runs each under the tree-walker (reference),
 VM-no-JIT (`BROOD_NO_JIT=1`), VM+JIT (default), and GC-stress
 (`BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1`); flags any output **divergence** between
 engines, any `BAD` line (oracle generators self-check), or any **crash** (a
-crashing input is copied next to this README). Generators (`scripts/fuzz/generators/`):
+crashing input is copied next to this README).
+
+**An engine differential cannot see a bug in a heap-level cache** — the string slot's
+char→byte index (ADR-213) and the form-start safepoint table (ADR-214) are shared by every
+engine config, so all four agree on a wrong answer. That is why `strings` is an *oracle*
+generator: it checks each result against a code-point-vector reference or an invariant.
+Reach for an oracle whenever the thing under test is memoised below the engine. Generators (`scripts/fuzz/generators/`):
 
 | generator | what it stresses |
 |-----------|------------------|
@@ -30,6 +36,7 @@ crashing input is copied next to this README). Generators (`scripts/fuzz/generat
 | `rope` | rope edits vs a string oracle (unicode, newlines) |
 | `syntax` | malformed source — the reader must never crash (only clean errors) |
 | `checker` | random/malformed `(sig …)` — the checker must never panic/hang |
+| `strings` | char-indexed string ops + the form-start scanner vs a code-point oracle |
 
 Each generator is `python3 generators/<g>.py <count> <base-seed> <outdir>`.
 
