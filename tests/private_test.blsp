@@ -109,4 +109,14 @@
     (%load-string "(defmodule priv-refl3) (defn- helper () 1) (defn pub () 2)")
     (let (me (self) worker (spawn (priv-refl-worker me)))
       (send worker 'priv-refl3/pub)
-      (is (= (receive) false)))))
+      (is (= (receive) false))))
+  (test "privacy tracks the latest def form across redefinition (hot reload)"
+    ;; Editing `defn-` → `defn` and reloading makes the name public again, and
+    ;; back: `env_define` clears the mark on every def, `%mark-private` re-adds it
+    ;; only for `defn-`/`def-`.
+    (%load-string "(defmodule priv-flip) (defn- x () 1)")
+    (is (private? 'priv-flip/x))
+    (%load-string "(defmodule priv-flip) (defn x () 2)")   ; redefine PUBLIC
+    (refute (private? 'priv-flip/x))
+    (%load-string "(defmodule priv-flip) (defn- x () 3)")  ; redefine PRIVATE
+    (is (private? 'priv-flip/x))))

@@ -1476,15 +1476,16 @@ pub struct RuntimeCode {
     /// one reserved set.
     sealed: RwLock<std::collections::HashSet<Symbol>>,
     /// Module-private globals (ADR-146): the qualified [`Symbol`] of every global
-    /// whose bare tail carries the `--` privacy marker. This makes privacy a
-    /// **recorded fact** rather than a name re-parsed at each consultation site:
-    /// the `--` marker is read once, where the binding is made (`env_define`, and
-    /// derived from bindings in `seeded` for the prelude, which is inserted rather
-    /// than re-`eval`ed), and every semantic privacy check reads this set via
-    /// [`Heap::is_private`] instead of scanning the name string. The marker stays
-    /// the *populator*; changing it later is a change to the populate sites only.
-    /// Shared through the runtime `Arc`, so every inner process sees one set. Only
-    /// `--` names are ever inserted, so a name without `--` needs no lock to answer.
+    /// defined with `defn-`/`def-`. Privacy is a **recorded fact** declared by the
+    /// def FORM, not derived from the name — the name is clean (no `--` marker), so
+    /// this set is the ONLY authority and `is_private` MUST consult it for every
+    /// name (there is no "name without `--`" fast-negative; adding one would silently
+    /// make every clean private public). Populated by the `%mark-private` primitive a
+    /// `defn-`/`def-` emits (and `unmark_private` on any plain def, so privacy tracks
+    /// the latest def form across hot reload); the prelude's privates are seeded from
+    /// the builder heap in [`RuntimeCode::seeded`] (the prelude is inserted, not
+    /// re-`eval`ed). Shared through the runtime `Arc`, so every inner process sees one
+    /// set.
     private: RwLock<std::collections::HashSet<Symbol>>,
     /// Monotonic version of `globals`, bumped on every binding change (`def`
     /// rebind, `restore_globals`). Per-process global **inline caches**
@@ -1947,17 +1948,27 @@ impl RuntimeCode {
             .insert(sym);
     }
 
-    /// Record `sym` (a qualified global name) as module-private — called from
-    /// `env_define` when the name carries the `--` marker. Idempotent insert. See
-    /// [`RuntimeCode::private`].
+    /// Record `sym` (a qualified global name) as module-private — called by the
+    /// `%mark-private` primitive that a `defn-`/`def-` emits (after its `def`).
+    /// Idempotent insert. See [`RuntimeCode::private`].
     fn mark_private(&self, sym: Symbol) {
         self.private
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(sym);
     }
-    /// Is `sym` recorded module-private? The authoritative half of
-    /// [`Heap::is_private`], consulted only after the lock-free `--` fast-negative.
+    /// Clear any private mark on `sym` — called from `env_define` on EVERY global
+    /// definition, so a name redefined public (an author editing `defn-` → `defn`
+    /// and hot-reloading) stops being private. A `defn-`/`def-` re-marks immediately
+    /// via `%mark-private`, which runs after the `def`; a plain `defn`/`def` does
+    /// not, leaving the name public. So privacy always tracks the latest def form.
+    fn unmark_private(&self, sym: Symbol) {
+        self.private
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&sym);
+    }
+    /// Is `sym` recorded module-private? The whole of [`Heap::is_private`].
     fn is_private_recorded(&self, sym: Symbol) -> bool {
         self.private
             .read()
@@ -3863,11 +3874,11 @@ impl Heap {
     }
 
     /// Is the global `sym` module-private (ADR-146)? The single predicate every
-    /// semantic privacy check consults, so the `--` rule lives in exactly one place
-    /// (see [`RuntimeCode::private`]). A name without the `--` marker can never be
-    /// private — the recorded set holds only `--` names — so that answer is returned
-    /// **without taking the RwLock**, keeping the hot public-reference path lock-free;
-    /// only a genuine `--` name reaches the recorded lookup.
+    /// semantic privacy check consults. Privacy is declared by the def form
+    /// (`defn-`/`def-`) and recorded in [`RuntimeCode::private`]; the name itself is
+    /// clean, so this is a straight recorded-set lookup (a read lock) for EVERY name
+    /// — there is no name-based fast-negative to take (a clean private has nothing in
+    /// its spelling to short-circuit on).
     pub fn is_private(&self, sym: Symbol) -> bool {
         self.runtime.is_private_recorded(sym)
     }
@@ -5245,9 +5256,13 @@ impl Heap {
 
     pub fn env_define(&mut self, env: EnvId, sym: Symbol, val: Value) {
         if env == EnvId::GLOBAL {
-            // Privacy (ADR-146) is no longer derived from the name here — a
-            // `defn-`/`def-` records it explicitly through the `%mark-private`
-            // primitive, and the prelude's privates are seeded in `seeded`.
+            // Privacy (ADR-146) is declared by the def FORM, not the name: clear any
+            // prior private mark on every global def (before the dedup early-return,
+            // so it fires even on an identical-closure reload). A `defn-`/`def-`
+            // re-marks right after via `%mark-private`; a plain `defn`/`def` leaves it
+            // public — so editing `defn-` → `defn` and hot-reloading makes the name
+            // public. The prelude's privates are seeded in `seeded`, not here.
+            self.runtime.unmark_private(sym);
             // Dedup an unchanged hot-reload redefinition (Stage 5): if `sym` is
             // already bound to a closure structurally identical to `val`, keep the
             // existing (already-promoted) binding rather than append a duplicate
@@ -5382,7 +5397,7 @@ impl Heap {
 
     /// The public exports of module `prefix` (a `mod/` segment, trailing slash included) as
     /// `(bare, qualified)` symbol pairs — the set `(:use mod)` refers. Public = a *direct*
-    /// `mod/name` global whose bare tail is non-empty and carries no `--` private marker
+    /// `mod/name` global whose bare tail is non-empty and is not private
     /// (matching `%refer`'s scan). Cached + count-keyed (see
     /// [`module_exports_cache`](Self::module_exports_cache)) so the checker's per-file
     /// `(:use …)` resolution builds the index by ONE pass over the globals instead of

@@ -60,8 +60,8 @@ pub(super) fn source_location(args: &[Value], _env: EnvId, heap: &mut Heap) -> L
 /// (ADR-146). Reads the recorded privacy fact (`Heap::is_private`), the single
 /// source of truth every enforcement/import site now consults, rather than
 /// re-deriving from the `--` marker in the name. Takes the qualified symbol as
-/// given, so quote it: `(private? 'mod/helper--x)` → true, `(private? 'mod/pub)` →
-/// false. An undefined or non-`--` name is not private.
+/// given, so quote it: `(private? 'mod/helper)` → true, `(private? 'mod/pub)` →
+/// false. An undefined name is not private.
 pub(super) fn private_p(args: &[Value], _env: EnvId, heap: &mut Heap) -> LispResult {
     match arg(args, 0) {
         Value::Sym(s) => Ok(Value::boolean(heap.is_private(s))),
