@@ -173,8 +173,10 @@ app — ADR-090), `completions` (emit a shell TAB-completion script; `complete` 
 candidate engine behind it), `grammar` (emit an editor syntax grammar — VS Code TextMate or
 Emacs — generated from `(special-forms)`, ADR-092), the package-manager commands
 `fetch`/`update`/`tree`/`add`/`remove` (ADR-037) plus `publish`/`search` against a
-git-backed registry index (ADR-147), and `release` (single-binary
-bundling, ADR-038).
+git-backed registry index (ADR-147), `release` (single-binary bundling, ADR-038),
+and `update-tooling` (re-drop the AI-assistant files `nest new` scaffolds — the
+`docs/brood-for-claude.md` reference and the `writing-brood` skill — from the
+current binary, so they don't drift as the language evolves).
 
 ## Commands
 

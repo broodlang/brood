@@ -16297,3 +16297,15 @@ runs all passing narrowed the cause to something only a full heterogeneous suite
 the ephemeral-range collision is the only mechanism that fits every one of those observations. The
 earlier `SO_REUSEADDR` hypothesis had been tested and correctly ruled out — and it is consistent
 with the real cause: the port was lost to another process, not to `TIME_WAIT`.
+
+## 2026-08-05 (cont.) — `nest update-tooling`: re-sync the AI-assistant files from the current binary
+
+`nest new` drops two AI-assistant files into every project — `docs/brood-for-claude.md`
+(the language reference) and `.claude/skills/writing-brood/SKILL.md` — both baked into the
+binary via `%builtin-doc`. They drift as the language evolves: the ADR-146 step-2 migration
+left every scaffolded project (and the brood repo's own copy) still teaching the removed `--`
+privacy convention, and nothing re-synced them. `nest update-tooling` (a new subcommand;
+`scaffold/update-tooling` over `%builtin-doc`) rewrites exactly those two files from the
+installed `brood` build — code, manifest, and `CLAUDE.md` untouched. Run it after upgrading
+Brood. Tested end-to-end in `crates/nest/tests/update_tooling.rs` (stale + refresh; and the
+no-project error path).
