@@ -8,10 +8,12 @@ option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 **As of 2026-08-05**, brood with ADR-213 (char→byte index), ADR-214 (form-start safepoints) and
 ADR-215 (AST-keyed shared compiled code) on
 top of the ADR-211/212 registry + package-signing work. Nothing half-finished. Rust
-suite **956/956** (nextest), in-language **4401/4401** — also green under
+suite **960/960** (nextest), in-language **4410/4410** — also green under
 `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` — `nest check` clean, `nest format --check` clean, rustfmt and
 clippy clean, both default and `--no-default-features` builds warning-clean, metamorphic
-differential clean across 4 engine configs. **Flake baseline** (2026-08-05): the in-language
+differential clean across 4 engine configs. **Five commits sit unpushed** (KI-29, KI-30, the
+short-vs-long measurement rule, and two rounds of `spawn-live` refutations) — nothing is
+half-finished, but `git push` has not been run. **Flake baseline** (2026-08-05): the in-language
 suite is clean over 3 iterations × 3 seeds in one image, and `live_migration` is 16/16 under
 self-contention. **No open issues; one watch item, not in the runtime** — KI-28, a single
 unexplained `nodedown` flake seen once in a full run and not since (0/40 solo, 33/33 × 3 under
@@ -41,23 +43,22 @@ hunting again.
 
 ---
 
-## 1. START HERE — `spawn-live`: what is left, and the premise this section got wrong
+## 1. START HERE — `spawn-live`: measure the candidate before you build it
 
-**Read this before touching inline caches.** The previous version of §1 named per-process inline
-caches as the lever, on counted IC misses plus a ladder delta. Measured properly (2026-08-05),
-both halves were wrong:
+**This section has now named the wrong lever three sessions running, and each time the mechanism
+it named was the one *nearest the symptom* rather than the one carrying the cost.** Per-process
+inline caches, then park/resume, then an identity-keyed IC, then "reach native code" — four
+candidates, four refutations, each disposed of by one measurement that cost far less than the
+implementation would have. §4 has them all. **So: before implementing anything below, measure
+that its premise still holds.** Everything here is an argument, not a fact, until re-measured;
+the facts are the ladder table and §4.
 
-- A fresh process's **first** fold costs 5.7 µs against 3.7 warm — **~2 µs** of one-time cost,
-  not the 16 µs claimed. A child's steady state (3.6 µs) equals the root's (3.8 µs).
-- IC misses are ~10 per unit ≈ **2 µs, ~5% of the row**. Worth having eventually; not the lever.
-- The **site-id scheme §1 called a prerequisite already exists** — ADR-175 Phase A made sites
-  arm-relative with lazily-allocated per-process blocks (`vm_arm_block`, `cur_ic_base`).
-
-**What the lever was, and it is now taken.** `fold` coerced with `seq` and walked with
+**What has actually been fixed on this row.** `fold` coerced with `seq` and walked with
 `first`/`rest`, and `(rest v)` on a vector *materialises a list of the tail* — 15 cons cells and
 ~48 one-arg primitive dispatches to sum a 16-element payload. `fold` now indexes a vector
 directly (`fold--vec`). Per unit: allocations **27.7 → 15.0**, one-arg dispatches **48 → 1.1**,
-the shape **32.7 → 28.6 µs** CPU, the published row **11.44 → 10.40 CPU·s** (−9%).
+the shape **32.7 → 28.6 µs** CPU, the published row **11.44 → 10.40 CPU·s** (−9%). And ADR-215
+fixed per-process recompilation (compiles 100 154 → 163 per 100k processes).
 
 **Where the row now stands.** The ladder is now committed as
 `scripts/fuzz/stress/spawn_live_ladder.blsp` (it was `sl_one.blsp`, uncommitted, so these
@@ -73,33 +74,58 @@ figures could not be re-derived). Run **one rung per process** and read CPU, not
 | `payload` — + the 16-cell copy and fold | 31.5 | **+9.3** |
 
 The three big steps are the **receive machinery** (+8.7), the **payload copy and fold**
-(+9.3), and **coexistence** (+4.6). Suspending is not one of them (item 2 below). The
+(+9.3), and **coexistence** (+4.6). Suspending is not one of them (item 4 below). The
 earlier version of this table read 8.6 / 12.2 / 17.7 / 28.6 for the comparable rungs;
 absolutes drift ~10% between invocations, so read the steps, not the levels.
 
 So the next candidates, in the order the numbers support them:
 
-1. **The remaining `fold`-vs-hand-loop gap (28.6 vs 17.9), and it is not one lever.** Measured
-   warm, per element: **hand loop 10 ns · `fold %add` 78 · `fold +` 163 · `fold myadd` 231**. So
-   even the best HOF case is ~7× an inlined op, and the wrapper adds ~85 ns on top of that.
-   Where the wrapper's 85 ns goes: `passthrough_arm` (closure deref + `select_arm` + a
-   `SmallVec` **clone** of the arg map), two thread-local ticks in
-   `passthrough_redirect_ok`, a fresh argv `SmallVec`, then `call_native`'s own checks —
-   about five small costs, no single one dominant.
-   **Measured and reverted:** memoising the redirect target on the arm (so `%add` is not
-   re-resolved through the env chain per element) is worth **2%** — 167 → 163 ns. The env
-   lookup was not the cost. Don't re-try it; the field it adds to `Passthrough` is not
-   worth that.
-   The lever that would actually close it is **not calling per element**: an
-   identity-guarded speculative inline of a HOF's step closure. Note the groundwork is
-   further along than FRONTIER's "true call inlining" bullet suggests — ADR-210 already
-   splices *statically known* leaf callees with a deopt checkpoint, and the missing piece is
-   a guard on the step's closure identity.
+1. **The receive machinery (+8.7 µs/unit) — the largest step, and it looks like a *caching*
+   problem rather than a tuning one. RECOMMENDED, and not yet investigated.** The evidence is
+   incidental and came from reading a JIT dump: during the ladder, ~20 `match-*` arms tier up —
+   `match-parse-clause`, `match-compile-clause`, `match-check-reachable`, `receive-prep`,
+   `receive-dispatch`, `receive-dedupe`, `receive-body-code`, `pattern-vars` and more. The
+   `receive` pattern matcher is **Brood code running per message**. That fits the timers:
+   `ns_match_run` ≈ 2.9 µs/unit and `ns_match_resolve` ≈ 0.7–1.1 µs/unit to match a *one-clause*
+   `[:go]` pattern, which is wildly disproportionate to the work the pattern describes.
 
-   **The identity-keyed IC this item used to recommend as the "smaller intermediate step"
-   is measured and DECLINED — see §4.** It is true that a computed callee gets no
-   call-site IC; it is not true that this costs anything.
-2. ~~**Park/resume (5.5 µs/unit)**~~ — **measured 2026-08-05: suspend/resume costs ~0, and
+   If a receive's clauses are re-parsed/re-compiled per execution rather than once per site, this
+   is ADR-215's shape again — cache keyed on the receive site's clause AST — and ADR-215 is the
+   precedent that actually paid on this row (wall −12.5%, CPU −25%). **First measurement, before
+   any code:** count `match-compile-clause` executions against receive executions. If it is ~1
+   per receive, the cache is the fix; if it is ~1 per *site*, the cost is in `match_run` and this
+   becomes a matcher-representation question instead.
+
+   It also has the widest reach of anything on this list — every message-passing row pays it
+   (`latency`, `pingpong`, `supervisor`), not just HOF loops.
+2. **The payload step (+9.3 µs/unit) — and the copy is NOT the cost.** `ns_msg_in` *fell* (216 →
+   180 ns/unit) when the message grew from `[:go]` to a 16-element vector, so the deep copy this
+   row was built to measure costs ~0.2 µs of a 31 µs row. Of the +12.5 µs the rung adds under
+   perf-stats, only ~1.3 µs (10%) lands in any runtime timer; the rest is Brood-level `fold`
+   work, which corroborates the older finding that hand-rolling the sum as an indexed loop
+   recovers ~10.7 µs.
+
+   Per element, warm: **hand loop 10 ns · `fold %add` 78 · `fold +` 163 · `fold myadd` 231**. Even
+   the best HOF case is ~7× an inlined op. The wrapper's ~85 ns goes to `passthrough_arm` (closure
+   deref + `select_arm` + a `SmallVec` **clone** of the arg map), two thread-local ticks in
+   `passthrough_redirect_ok`, a fresh argv `SmallVec`, then `call_native`'s checks — five small
+   costs, none dominant. **Measured and reverted:** memoising the redirect target on the arm is
+   worth **2%** (167 → 163 ns); don't re-try it.
+
+   **The only lever left for this shape is not calling per element** — an identity-guarded
+   speculative inline of the HOF's step closure. Groundwork is further along than FRONTIER's
+   "true call inlining" bullet suggests: ADR-210 already splices *statically known* leaf callees
+   with a deopt checkpoint, and the missing piece is a guard on the step closure's identity. This
+   is the one candidate in the neighbourhood that changes the *shape* rather than a constant —
+   and note that the JIT gives this shape nothing today (a lowered `loop-computed` measures 274
+   ns/call with the JIT and 271 without), so inlining is the whole prize.
+3. **Coexistence (+4.6 µs/unit) — the cost of a live *idle* process.** 22.2 µs/unit with 100k
+   alive vs 17.6 with 100, same parking either way. This is the ~4.27 KB floor plus the GC/cache
+   pressure of 100k live heaps. §4 records that attacking the floor by boxing `Heap` in `Process`
+   is the wrong trade (`spawn` +3.2%, `spawn-live` +6.4%) and that the direction is cutting the
+   *number* of allocations per process, measuring the `spawn`/`spawn-live` pair alongside the
+   floor from the start.
+4. ~~**Park/resume (5.5 µs/unit)**~~ — **measured 2026-08-05: suspend/resume costs ~0, and
    this item was a confound.** The rung that produced 5.5 µs changes **two** things against
    the one below it, which its own wording admits ("+ every unit held alive, *so* each
    parks"): every unit suspends, *and* all N are alive simultaneously. Separating them with
@@ -130,8 +156,10 @@ So the next candidates, in the order the numbers support them:
    run **one rung per process**: in a single process the later rungs inherit the earlier
    ones' JIT tiering, which put `payload` *below* `park` and `send` below `spawn` — a
    monotonicity violation that is the signal the run is contaminated.
-3. **Per-process inline caches (~2 µs)** — real but small, and now correctly sized. If you do it,
-   the site-id work is already done; what is left is the race design for a shared block.
+5. **Per-process inline caches (~2 µs)** — real but small, and now correctly sized. If you do it,
+   the site-id work is already done; what is left is the race design for a shared block. Note the
+   identity-IC result in §4 before assuming an IC buys anything here: on the VM, a cached callee
+   measured *slower* than resolving one.
 
 Measure with **CPU time over a fixed unit count, binaries interleaved** (<2% spread). The 20.6%
 "noise floor" this row was once credited with is an artefact of measuring *wall* on a 3.3-core
