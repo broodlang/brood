@@ -35,10 +35,16 @@
 >   upload; `nest search` queries the API; a `[name :version "^1.2"]` dep names a **semver
 >   range**, resolved to a concrete published version by the PubGrub resolver (ADR-209).
 >   See *The registry* below.
+> - **v2.1 — done (2026-08-04):** ADR-211's remaining supply-chain list closed.
+>   **External tarball URLs** — `nest publish --source-url URL` publishes a *metadata-only*
+>   release pointing at a GitHub/S3/CDN asset the registry never holds. **Package signing**
+>   (ADR-212) — `nest key gen`, an ed25519 signature over the release checksum, and
+>   **TOFU** verification pinning the publisher's pubkey in the lock. Both are described
+>   below (*The registry*, *Trust / security model*).
 >
-> Still deferred by design (ADR-011, re-scoped by ADR-211): **signed packages** (integrity
-> is sha256; authorship signing is the open gap), **external tarball URLs** for a release,
-> and an optional registry response cache. See *Future work* below.
+> Still deferred by design (ADR-011): an optional registry response cache, and an
+> `enforced` signing mode that refuses an unsigned or key-changed release. See
+> *Future work* below.
 >
 > Four decisions refined the original sketch when implementation began — they
 > are folded into the relevant sections below and summarised in ADR-037's
@@ -164,6 +170,13 @@ language uses — so a diff in a PR is human-reviewable:
     :path   "../shared"
     :sha256 "..."                         ; tree hash at fetch time
     :deps   []]
+   ;; A registry dep: the range resolved to a concrete version, plus the
+   ;; publisher's pinned pubkey when the release was signed (ADR-212).
+   [json
+    :version "1.4.2"
+    :sha256  "..."
+    :pubkey  "..."                        ; TOFU pin — omitted for an unsigned release
+    :deps    []]
    ;; Transitive — depth-first; resolved at root, not nested.
    [ansi
     :git    "https://github.com/quux/brood-ansi.git"
@@ -352,8 +365,10 @@ Each is a one-liner from the Rust shell into Brood policy:
 | `nest add <name> :tarball URL :sha256 HEX` | Tarball-dep variant of `add` (v2). |
 | `nest remove <name>`                     | Strip from `:dependencies`, drop `_deps/<name>/`, re-resolve the lock. |
 | `nest tree`                              | Print the resolved dep tree (root → direct → transitive). |
-| `nest publish [<base-url>]`              | Build a source tarball and POST it (token-authed) to the hosted registry; releases are immutable (ADR-147/211). |
+| `nest publish [<base-url>]`              | Build a source tarball and POST it (token-authed) to the hosted registry; releases are immutable (ADR-147/211). Signs the checksum when a signing key exists (ADR-212). |
+| `nest publish --source-url URL`          | Publish an **external** release instead: fetch URL once to compute its checksum, then POST metadata only. The registry records the URL; downloaders re-verify the bytes they fetch from it (ADR-211). |
 | `nest search <term> [<base-url>]`        | Search the registry by name/description via its JSON API (ADR-147/211). |
+| `nest key gen [--force]`                 | Generate an ed25519 signing keypair, write the private key 0600 to `~/.config/brood/signing-key.blsp`, print the public key. `--force` replaces an existing key (invalidating signatures made with the old one). Signing is opt-in (ADR-212). |
 | `nest test` / `run` / `check` / `format` / `mcp` | Auto-fetch missing deps on first run (a no-op on the second). |
 
 `nest fetch` is idempotent and side-effect-free when the cache is current.
@@ -372,8 +387,10 @@ The registry is a small JSON API. The base URL is the user config's `:registry`
 command by passing a base URL (tests point it at a loopback server). A team can
 self-host hive and point `:registry` at it — the base URL is the only coupling.
 
-A published **release** carries its own immutable **source tarball**, a mandatory
-**sha256 checksum**, and its dependency metadata (each dep a `[name range]`). The API:
+A published **release** carries a mandatory **sha256 checksum**, its dependency metadata
+(each dep a `[name range]`), an optional **signature + pubkey** (ADR-212), and either its
+own immutable **source tarball** or an **external `:source_url`** the registry does not
+hold (ADR-211). The API:
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -388,7 +405,13 @@ A published **release** carries its own immutable **source tarball**, a mandator
   `project.blsp`, builds a source tarball, computes its sha256, and **POSTs the bytes**
   to `<registry>/api/v1/publish` with `Authorization: Bearer <token>` (from `$HIVE_TOKEN`
   or the `:registry-token` config) and an `X-Brood-Publish` metadata header. **Releases
-  are immutable** — the server refuses a re-publish of an existing version.
+  are immutable** — the server refuses a re-publish of an existing version. When a signing
+  key exists, the envelope also carries `signature` + `pubkey` (ADR-212, below).
+- **`nest publish --source-url URL`** publishes an **external** release: the client fetches
+  the URL once to hash its bytes into the checksum, then POSTs **metadata only**. The
+  registry records the URL and never holds the bytes; every downloader fetches from there
+  and re-verifies against the recorded checksum, so the integrity guarantee is unchanged.
+  For a project that already ships release assets on GitHub/S3/a CDN (ADR-211).
 - **`nest search <term>`** GETs `/api/v1/packages?q=<term>`.
 - **A `[name :version "^1.2"]` dep** names a **semver range** (ADR-209). The PubGrub
   resolver GETs each package's `/releases` (versions + deps in one request), picks the
@@ -400,9 +423,42 @@ A published **release** carries its own immutable **source tarball**, a mandator
 
 The **sha256 verification is the supply-chain guarantee**: hive is not trusted to serve
 the right bytes — the client re-verifies against the checksum before anything is extracted
-or `require`d, so ADR-037's "no unverified code runs" property survives the hosted shape.
-Integrity is covered; *authorship* (cryptographic signing) is the one open gap — see
-ADR-211's corrected deferred list.
+or `require`d, so ADR-037's "no unverified code runs" property survives the hosted shape
+(and survives an external `:source_url`, where the bytes never touch hive at all).
+
+### Signing: TOFU, advisory, ed25519 (ADR-212)
+
+sha256 proves *integrity* — "these are the bytes the registry recorded" — but says nothing
+about **authorship**. A stolen publish token, or a compromised hive, can publish anything
+under an existing name and the checksum will happily certify it. Signing closes that gap,
+with three deliberately small choices:
+
+- **TOFU, not a keyserver.** The client pins a package's public key in the lock
+  (`:pubkey`, beside `:sha256`) on first install. A later release of that package signed by
+  a *different* key is flagged. hive only **relays** the signature and pubkey a publisher
+  attached — it holds no publisher keys and binds no identity, so it stays a dumb
+  index/CDN. The cost is that the *first* install is unverified (the SSH `known_hosts`
+  model); a keyserver would centralise trust back into the party that already serves the
+  bytes, which is a weaker guarantee for more infrastructure.
+- **Advisory, never gating.** A missing signature, an unverifiable one, or a changed key is
+  a **warning** — installation always proceeds, exactly as the type checker never gates the
+  live image (ADR-123). A young ecosystem is mostly unsigned; gating would make signing a
+  barrier rather than a signal. An `enforced` mode is a future config flag, additive.
+- **ed25519** (`ed25519-dalek`, sibling of the `x25519-dalek` already vetted in for the
+  ADR-034 handshake). The only new Rust is the primitive trio `%ed25519-keygen` /
+  `%ed25519-sign` / `%ed25519-verify` (raw bytes in and out, like `%digest`); key storage,
+  the publish flow, and the TOFU pin are all Brood policy in `std/tool/package.blsp`
+  (ADR-006).
+
+**What is signed** is the release's 32-byte **sha256 checksum**, not the tarball. The
+checksum already binds the exact bytes (they are verified against it first), so signing the
+checksum transitively signs the archive without a second pass over it.
+
+The flow: `nest key gen` writes a keypair (private key 0600 under the config dir) and prints
+the public key to share; `nest publish` signs the checksum with it automatically; on install
+the client verifies signature-against-pubkey-over-checksum, warns on a mismatch, pins the key
+if the lock has none, and warns if the release's key differs from the pinned one ("a rotation,
+or a compromise"). Publishing without a key is fine and silent.
 
 ## Concurrent manifest edits are safe
 
@@ -501,11 +557,12 @@ they would in any Rust project.
 Re-running `nest fetch` against the same lock file produces a
 byte-identical `_deps/` tree.
 
-**Provenance.** Trust flows from the URL. `nest tree --remotes` (future)
-could list each dep's origin URL prominently for review. Signed
-packages are deferred; Git commit hashes are pseudo-signatures over the
-content (matches Go's stance: if you trust the URL, the lock file pins
-the content).
+**Provenance.** For `:git` / `:path` / `:tarball` deps, trust flows from the URL, and a
+Git commit hash is a pseudo-signature over the content (matches Go's stance: if you trust
+the URL, the lock file pins the content). For **registry** deps, authorship is covered by
+**ed25519 signing under TOFU** (ADR-212, *Signing* above): the publisher's pubkey is pinned
+in the lock on first install and a key change is flagged. Verification is **advisory** —
+it warns, it never blocks an install.
 
 **Eval still runs `require`d code.** A malicious package, once
 `(require)`d, can do anything Brood can — `run-process`, `spit`, network
@@ -535,10 +592,11 @@ out-of-scope for v1.
 ## Future work (explicitly deferred)
 
 > **Mostly shipped since this was written.** The registry (hosted, ADR-147/211), the
-> `:tarball` source kind (ADR-147), and the semver constraint solver (ADR-209) have all
-> landed — the comparison above and the first three items below are historical framing.
-> Genuinely open, re-scoped by ADR-211: **signed packages**, **external tarball URLs**,
-> and an optional **registry response cache**.
+> `:tarball` source kind (ADR-147), the semver constraint solver (ADR-209), **external
+> tarball URLs** (ADR-211) and **signed packages** (ADR-212) have all landed — the
+> comparison above and the first four items below are historical framing. Genuinely open:
+> an optional **registry response cache**, and an **`enforced` signing mode** that refuses
+> an unsigned or key-changed release instead of warning.
 
 - **Registry** — ✅ shipped as the hosted **hive** service (ADR-211): discovery
   (`nest search`), human-readable names independent of URLs, and per-release metadata.
@@ -552,9 +610,14 @@ out-of-scope for v1.
   `:brood "<constraint>"` gate refuses an incompatible runtime. Still open:
   semver ranges over `:git` tags (registry-only for now), and PubGrub-grade
   conflict-error derivation.
-- **Signed packages** — a `:sig` opt with a Brood-flavoured key registry
-  (akin to Maven's PGP or sigstore). Needs trust infrastructure that
-  isn't this project's problem until packages are exchanged at scale.
+- **Signed packages** — ✅ shipped (ADR-212), and *without* the key registry this entry
+  assumed was the prerequisite: **TOFU** pins the publisher's pubkey in the lock on first
+  install, so the registry stays a relay and no trust infrastructure was needed.
+  `nest key gen` + an ed25519 signature over the release checksum; advisory, never gating.
+  Still open: an `enforced` mode, and out-of-band key distribution.
+- **External tarball URLs** — ✅ shipped (ADR-211): `nest publish --source-url URL`
+  registers a release whose bytes live on GitHub/S3/a CDN. Downloaders re-verify against
+  the recorded checksum, so the registry holds metadata only.
 - **Per-dep build / load-path overrides** — Cargo's `[patch]` /
   `[replace]` shape. Solved for now by `:path` sources.
 - **MCP `packages.list` tool surface** — exposes the resolved dep tree to

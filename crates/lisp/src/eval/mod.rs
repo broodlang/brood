@@ -1558,7 +1558,7 @@ fn unbound_namespace_hint(heap: &Heap, sym: Symbol) -> Option<String> {
     let mut mods: Vec<String> = heap
         .global_symbols()
         .iter()
-        // A private target (`mod/name--x`) can't be referred bare by `(:use)`, so
+        // A private target (`mod` defined it with `defn-`/`def-`) can't be referred bare by `(:use)`, so
         // never suggest one — consult the recorded privacy fact (ADR-146), not the
         // name. (This is name-privacy; the `!m.contains("--")` below is the separate
         // private-*module*-path heuristic.)

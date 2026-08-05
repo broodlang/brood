@@ -178,8 +178,8 @@ Without a clear opt-out the warning becomes noise, not signal.
 - *Or* `nest new` starts scaffolding multi-module projects by default.
 
 **Workaround today.**
-- `foo--private` for module-internal helpers (the existing convention —
-  `--` is the privacy marker).
+- `defn-` / `def-` for module-internal helpers (ADR-146 def-site privacy;
+  when this was written the marker was `--` in the name, since retired).
 - For public names: self-prefix (the report's `life-row` for what was
   originally `render-row`). Manual discipline, fragile across modules.
 - The `[reload] arity changed for foo: N -> M` line on load is a partial

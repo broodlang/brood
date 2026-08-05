@@ -16309,3 +16309,43 @@ privacy convention, and nothing re-synced them. `nest update-tooling` (a new sub
 installed `brood` build — code, manifest, and `CLAUDE.md` untouched. Run it after upgrading
 Brood. Tested end-to-end in `crates/nest/tests/update_tooling.rs` (stale + refresh; and the
 no-project error path).
+
+## 2026-08-05 (cont.) — docs-currency pass on the week's work, and `nest doc` was leaking privates
+
+A sweep of the reference docs against what actually shipped this week. The per-change record
+(devlog entries, ADRs, `handoff.md`) was current — the gaps were all in the *reference* layer,
+where a feature lands in an ADR and the doc that describes the surface never catches up.
+
+**Two features were documented as deferred after they shipped.** `docs/packages.md` still read
+"still deferred by design: signed packages … external tarball URLs" — both landed 2026-08-04
+(ADR-212, ADR-211). The manifest/subcommand/registry/trust sections now carry `nest key gen`,
+`nest publish --source-url`, the `:pubkey` lock field, and the TOFU signing model; the genuinely
+open list shrinks to a registry response cache and an `enforced` signing mode. The ed25519
+primitive trio was missing from `docs/primitives.md` entirely (the arity-column gate in
+`builtins/mod.rs` only catches primitives the table *does* list, not ones it omits — worth
+knowing about that test's reach).
+
+**The `--` privacy convention outlived its deletion in eight places.** ADR-146 step 2 landed this
+morning and its own commit collapsed ~136 stale references across `std/` + `tests/`, but not
+`docs/` or the Rust doc comments. `brood-for-claude.md` and `writing-brood-skill.md` — the two
+files that *teach* the conventions, one of them baked into every scaffolded project — still
+taught `foo--bar` as the way to mark a private. Also `lsp.md`, `namespaces.md`, `deferred.md`,
+the E0010 text in `std/tool/explain.blsp`, and comments in `heap.rs` / `tooling.rs` / `system.rs`
+/ `eval/mod.rs` / `check.rs`, two of which described a lock-free `--` fast-negative that the step-2
+commit had removed. (Four of those — `brood-for-claude`, `writing-brood-skill`, `lsp`,
+`namespaces` — were being fixed *concurrently* in `f00c63d2`, which landed while this pass was
+running; the merge keeps the union. Two people finding the same stale docs independently is its
+own signal about how far a name-convention migration reaches.)
+
+**And one real regression, found by the doc pass rather than by the suite.** `std/tool/docs.blsp`'s
+`docs-private?` was still `(includes? (name sym) "--")`. With privacy now a def-form fact and
+private names spelled clean, that predicate answers `false` for every `defn-` private — so
+`nest doc` published module-internal helpers as public API. One line, `(private? sym)`, and the
+scratch repro drops from documenting `docbug/private-thing` to not. **The generalisable bit:** the
+step-2 migration flipped every *enforcement* site from name to record and the suite proved those
+right, but a filter that only decides what to *print* has no test that fails when it silently
+stops filtering. Grep for the retired marker in predicates, not just in prose — a stale
+`contains("--")` is a behaviour change wherever it survived, and it will not announce itself.
+
+Suite green throughout: Rust lib 461/461, in-language 4408/4408, `nest check` clean,
+`nest format --check` clean.

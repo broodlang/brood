@@ -223,16 +223,33 @@ primitive, which returns the lossless CST as nested vectors so the walker can
 see whitespace and comments.
 
 The layout, in one paragraph: every form is emitted on a single line if it fits
-within the width budget (`*format-width*`, 100 cols); otherwise it breaks across
-lines with each body argument on its own line at +2 indent. A small table of
-*header counts* (`*format-headers*`) keeps a fixed prefix of args on the first
-line of certain forms — `defn` keeps `name params`, `let` keeps the bindings
+within the width budget (`*format-width*`, 100 cols by default); otherwise it
+breaks across lines with each body argument on its own line at +2 indent. A small
+table of *header counts* (`*format-headers*`) keeps a fixed prefix of args on the
+first line of certain forms — `defn` keeps `name params`, `let` keeps the bindings
 list, `if`/`when`/`unless` keep the predicate, etc. — so the body indents under
 a recognisable header. Comments inside a list force the multi-line shape; they
 re-emit on their own line at the surrounding indent, with their original text
 preserved verbatim. Blank lines between top-level forms (or top-level comments)
 are preserved when the author left one; runs of 3+ blanks collapse to a single
 blank.
+
+**Width-driven break layout (2026-08-03).** The break rules were reworked toward a
+proper width-driven pretty-printer, informed by Oppen (1980), Wadler's *A prettier
+printer*, and CL's XP (Waters). Four changes to the canonical layout:
+
+- **Configurable width.** A manifest `:format-width` (e.g. `80`) overrides the
+  built-in 100, read via `format-width` and applied by `project-setup`
+  (`*project-format-width*`). `nest format`, the LSP and the MCP server all honour it.
+- **Linear break for collections-of-collections.** A vector or list whose args are
+  *themselves* collections breaks one-per-line (CL `:linear`) instead of fill-packing.
+  Fill stays for sequences of atoms, which is the case it exists for.
+- **No head-riding for data collections.** A `[…]` / `#{…}` no longer rides a sibling
+  onto the open-bracket line — riding is a *call* affordance (`(head arg)`).
+- **Miser drop.** A `:key value` pair whose flat form exceeds the width puts the value
+  on the next line at a block indent (CL miser mode), avoiding far-right drift and
+  giving the value's own contents the full width. The trigger is content-based, so it
+  stays idempotent.
 
 ### Idempotency is a contract
 
@@ -252,8 +269,9 @@ like a top-level block: it gets its own line, and blank lines around it survive.
 
 ### What is *not* in scope (yet)
 
-- **Width is not configurable** at the CLI. Set `*format-width*` from a
-  `project.blsp` hook if you need a different budget.
+- **Width is not settable per invocation.** It is configurable per *project* —
+  `:format-width` in `project.blsp` — but there is no CLI flag to override it for
+  one run.
 - **No "align after head"** for generic calls — every overflow arg goes to
   `+2`, never to `(head)`-column. Simpler, idempotent under rename of the head.
 - **No `if`-cascade recognition.** A hand-aligned `(if a 1 (if b 2 (if c 3)))`
