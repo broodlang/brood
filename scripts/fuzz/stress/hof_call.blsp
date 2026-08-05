@@ -77,11 +77,23 @@
   (let (v (f) a (ns-per f N) b (ns-per f N) best (min a b))
     (println (str label " " best " ns/call   (" (quot (* best N) 1000000) " ms total, acc=" v ")"))))
 
+;; COLD variant: no warm-up pass and a single reading, so the figure includes whatever
+;; tiering happens during it. A tiered runtime has two steady states and a micro-benchmark
+;; reports only one; run this alongside `row` across a sweep of N and watch whether the
+;; GAP between the arms moves, not just whether each arm gets faster.
+(defn row-cold (label f)
+  (let (t0 (now-ns) v (f) ns (quot (- (now-ns) t0) N))
+    (println (str label " " ns " ns/call   (cold, single pass, acc=" v ")"))))
+
 (println (str "N=" N " jit=" (if (nil? (getenv "BROOD_NO_JIT")) "on" "off")))
 (row "inline    (no call)     " (fn () (loop-inline N 0)))
 (row "global    leaf step     " (fn () (loop-global N 0)))
 (row "computed  leaf step     " (fn () (loop-computed step N 0)))
 ;; THE DECIDING PAIR — same callee, same arity, differing only in global vs computed head.
+;; COLD first (each arm's first and only pass), then warm, so a sweep over N shows whether
+;; the gap is a property of the mechanism or of how far tiering has got.
+(row-cold "COLD global   non-leaf 3arg " (fn () (loop-global-hop3 step-deep N 0)))
+(row-cold "COLD computed non-leaf 3arg " (fn () (loop-computed step-deep N 0)))
 (row "global    non-leaf 3arg " (fn () (loop-global-hop3 step-deep N 0)))
 (row "computed  non-leaf 3arg " (fn () (loop-computed step-deep N 0)))
 (row "global    non-leaf 2arg " (fn () (loop-global-hop N 0)))

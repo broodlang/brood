@@ -196,6 +196,22 @@ Each was measured to a conclusion. Re-deriving them costs a session each.
   fast-link**, not the cache; capturing that needs an identity-keyed `FastLink` slot, which
   is KI-20 territory, for 8%.
 
+  **Checked short AND long, because a tiered runtime has two steady states** (the rule is
+  now in `CLAUDE.md`). Sweeping the call count over four orders of magnitude, gap =
+  computed − global:
+
+  | N | 10k | 100k | 1M | 10M |
+  |---|---|---|---|---|
+  | warm gap | +18 ns | +23 | +19 | +23 |
+  | cold gap (single pass, no warm-up) | **−63 ns** | +17 | +18 | +22 |
+
+  The warm gap is flat at 7–8% from 10k to 10M, so the verdict is not an artefact of a
+  half-tiered arm — and `BROOD_JIT_DUMP_IR` counts the **same 28 arms lowered** at 10k and
+  1M with zero deopts, i.e. tiering is already complete by ten thousand calls. The cold
+  column makes the case *against* the IC stronger, not weaker: on a short run the **global**
+  arm is 63 ns/call worse, because it is the one paying IC install and tiering cost. An IC
+  would be worth ~0 for long-lived work and negative for the short-lived kind.
+
   **The trap that nearly sold it, worth keeping:** the first version of that benchmark used
   `(defn step (acc x) (%add acc x))` as the callee and measured the global head at **1
   ns/call against the computed head's 160** — an apparent 160× that reads as a screaming
