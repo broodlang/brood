@@ -589,6 +589,11 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                             .is_some();
                         for bare in names {
                             let bare_name = value::symbol_name(bare);
+                            // Name-authoritative, mirroring the runtime `%refer :only`
+                            // (ADR-146): `:only` is lazy, so the recorded private-set
+                            // can't answer for a name the module hasn't defined yet —
+                            // the typed `--` marker is the fact here. Keep this the
+                            // same rule as the runtime; do NOT swap in `is_private`.
                             if bare_name.contains("--") && !granted {
                                 continue;
                             }

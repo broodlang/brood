@@ -10,6 +10,12 @@
 
 (defmodule private-test (:use test))
 
+;; A worker that reports `(private? sym)` for a symbol it is sent — used to prove
+;; the recorded private-set (ADR-146) is visible to a *spawned* process through the
+;; shared runtime `Arc`, not just the process that made the definitions.
+(defn priv-refl-worker (parent)
+  (receive (sym (send parent (private? sym)))))
+
 (describe "module privacy (ADR-146)"
   ;; :serial — every test here `%load-string`s whole MODULES into the shared module
   ;; registry and global table, and some read a module a *sibling* test registered
@@ -97,4 +103,29 @@
           :blocked)))
   (test "a macro template referencing its OWN module's private still works"
     (%load-string "(defmodule priv-mac) (defn mac--h (x) (* x 2)) (defmacro dbl (x) `(mac--h ~x)) (defn use () (dbl 21))")
-    (assert= (priv-mac/use) 42)))
+    (assert= (priv-mac/use) 42))
+
+  ;; ---- `private?` reflection over the recorded private-set (ADR-146) -----------
+  ;; Privacy is now a recorded per-module fact (`Heap::is_private`), populated from
+  ;; the `--` marker at definition time and consulted via `private?` — not re-parsed
+  ;; from the name at each site.
+  (test "private? reports a recorded private true; a public or undefined name false"
+    (%load-string "(defmodule priv-refl) (defn refl--helper () 1) (defn refl-pub () 2)")
+    (and (is (private? 'priv-refl/refl--helper))
+      (refute (private? 'priv-refl/refl-pub))
+      (refute (private? 'priv-refl/never-defined))))
+  (test "a prelude private is recorded too (the seeded path); a public prelude name is not"
+    ;; Prelude bindings are inserted, not re-evaluated, so this exercises the
+    ;; separate `RuntimeCode::seeded` derivation, distinct from the `env_define` path.
+    (and (is (private? 'fold--loop))
+      (refute (private? 'map))))
+  (test "the recorded private-set is visible to a spawned process (shared runtime Arc)"
+    (%load-string "(defmodule priv-refl2) (defn refl2--helper () 1) (defn refl2-pub () 2)")
+    (let (me (self) worker (spawn (priv-refl-worker me)))
+      (send worker 'priv-refl2/refl2--helper)
+      (is (= (receive) true))))
+  (test "a spawned process also sees a public name as not private"
+    (%load-string "(defmodule priv-refl3) (defn refl3--helper () 1) (defn refl3-pub () 2)")
+    (let (me (self) worker (spawn (priv-refl-worker me)))
+      (send worker 'priv-refl3/refl3-pub)
+      (is (= (receive) false)))))

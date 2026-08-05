@@ -1447,6 +1447,17 @@ pub struct RuntimeCode {
     /// on any hot path. Shared through the runtime `Arc`, so every inner process sees
     /// one reserved set.
     sealed: RwLock<std::collections::HashSet<Symbol>>,
+    /// Module-private globals (ADR-146): the qualified [`Symbol`] of every global
+    /// whose bare tail carries the `--` privacy marker. This makes privacy a
+    /// **recorded fact** rather than a name re-parsed at each consultation site:
+    /// the `--` marker is read once, where the binding is made (`env_define`, and
+    /// derived from bindings in `seeded` for the prelude, which is inserted rather
+    /// than re-`eval`ed), and every semantic privacy check reads this set via
+    /// [`Heap::is_private`] instead of scanning the name string. The marker stays
+    /// the *populator*; changing it later is a change to the populate sites only.
+    /// Shared through the runtime `Arc`, so every inner process sees one set. Only
+    /// `--` names are ever inserted, so a name without `--` needs no lock to answer.
+    private: RwLock<std::collections::HashSet<Symbol>>,
     /// Monotonic version of `globals`, bumped on every binding change (`def`
     /// rebind, `restore_globals`). Per-process global **inline caches**
     /// (`Heap::global_ic`) stamp the version they resolved at and re-resolve only
@@ -1712,6 +1723,18 @@ fn next_runtime_tag() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// The single definition of "a `--` module-private name" (ADR-146): the global's
+/// bare tail — the segment after the last `/` — carries the `--` marker. This is
+/// the rule that *populates* [`RuntimeCode::private`] (at `env_define` and in
+/// `seeded`) and the lock-free fast-negative in [`Heap::is_private`]; keeping it in
+/// one place is the point of the recorded-mechanism refactor. Non-allocating — the
+/// interner hands back a `&'static str`.
+fn name_marks_private(sym: Symbol) -> bool {
+    let name = crate::core::value::symbol_name_ref(sym);
+    let bare = name.rsplit('/').next().unwrap_or(name);
+    bare.contains("--")
+}
+
 impl Default for RuntimeCode {
     fn default() -> Self {
         RuntimeCode {
@@ -1727,6 +1750,8 @@ impl Default for RuntimeCode {
             registry_lock: Mutex::new(()),
             // A default (un-seeded) runtime reserves nothing — the prelude hasn't run.
             sealed: RwLock::new(std::collections::HashSet::new()),
+            // Likewise no private names until the prelude has been seeded.
+            private: RwLock::new(std::collections::HashSet::new()),
             version: AtomicU64::new(0),
             def_sites: RwLock::new(HashMap::new()),
             positions: RwLock::new(HashMap::new()),
@@ -1837,6 +1862,17 @@ impl RuntimeCode {
                     .map(|&(s, _)| s)
                     .collect(),
             ),
+            // The prelude's own `--` privates, recorded here because `seeded`
+            // *inserts* the bindings (it does not re-`eval` them, so `env_define`
+            // never fires for a prelude name in the live runtime). Same derive-from-
+            // bindings shape as `sealed` above.
+            private: RwLock::new(
+                bindings
+                    .iter()
+                    .filter(|&&(s, _)| name_marks_private(s))
+                    .map(|&(s, _)| s)
+                    .collect(),
+            ),
             globals: RwLock::new(globals),
             registry_lock: Mutex::new(()),
             version: AtomicU64::new(0),
@@ -1896,6 +1932,24 @@ impl RuntimeCode {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(sym);
+    }
+
+    /// Record `sym` (a qualified global name) as module-private — called from
+    /// `env_define` when the name carries the `--` marker. Idempotent insert. See
+    /// [`RuntimeCode::private`].
+    fn mark_private(&self, sym: Symbol) {
+        self.private
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(sym);
+    }
+    /// Is `sym` recorded module-private? The authoritative half of
+    /// [`Heap::is_private`], consulted only after the lock-free `--` fast-negative.
+    fn is_private_recorded(&self, sym: Symbol) -> bool {
+        self.private
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&sym)
     }
 
     /// As `globals_read`/`globals_write`, for the def-site table (same
@@ -3793,6 +3847,16 @@ impl Heap {
             .or_else(|| self.prelude.def_sites.get(&name).cloned())
     }
 
+    /// Is the global `sym` module-private (ADR-146)? The single predicate every
+    /// semantic privacy check consults, so the `--` rule lives in exactly one place
+    /// (see [`RuntimeCode::private`]). A name without the `--` marker can never be
+    /// private — the recorded set holds only `--` names — so that answer is returned
+    /// **without taking the RwLock**, keeping the hot public-reference path lock-free;
+    /// only a genuine `--` name reaches the recorded lookup.
+    pub fn is_private(&self, sym: Symbol) -> bool {
+        name_marks_private(sym) && self.runtime.is_private_recorded(sym)
+    }
+
     // ===== Allocation — LOCAL slab =============================================
     //
     // Every allocator bump-appends to its LOCAL slab (the [`alloc_slot!`]
@@ -5128,6 +5192,13 @@ impl Heap {
 
     pub fn env_define(&mut self, env: EnvId, sym: Symbol, val: Value) {
         if env == EnvId::GLOBAL {
+            // Record a `--` name as module-private (ADR-146) before anything else,
+            // so it fires on the first-ever def regardless of the dedup early-return
+            // below. Idempotent; only `--` names take the write lock (rare). The
+            // prelude's privates are recorded in `seeded`, not here.
+            if name_marks_private(sym) {
+                self.runtime.mark_private(sym);
+            }
             // Dedup an unchanged hot-reload redefinition (Stage 5): if `sym` is
             // already bound to a closure structurally identical to `val`, keep the
             // existing (already-promoted) binding rather than append a duplicate
@@ -5279,7 +5350,9 @@ impl Heap {
                 let name = crate::core::value::symbol_name(g);
                 if let Some(slash) = name.rfind('/') {
                     let bare = &name[slash + 1..];
-                    if !bare.is_empty() && !bare.contains("--") {
+                    // `g` is a live enumerated global, so `is_private` (the recorded
+                    // fact) is exact here; the module is definitionally loaded.
+                    if !bare.is_empty() && !self.is_private(g) {
                         let bare_sym = crate::core::value::intern(bare);
                         map.entry(name[..=slash].to_string())
                             .or_default()
