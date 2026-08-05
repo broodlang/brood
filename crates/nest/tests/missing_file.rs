@@ -4,7 +4,7 @@
 //! `nest test FILE` always did this properly (`nest test: cannot read x.blsp: …`).
 //! `check` and `run` did not — they handed the path to Brood, which surfaced the
 //! failure from whichever internal function read it first, so the user saw
-//! `check-file-deps: cannot read …` plus a trace through `project--pfold-files`
+//! `check-file-deps: cannot read …` plus a trace through `project-pfold-files`
 //! for what is simply a mistyped filename. Same mistake, same message.
 //!
 //! Also pins the one path that must NOT be validated: `nest run <doc>` hands a

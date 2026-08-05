@@ -16199,6 +16199,49 @@ the step function: warm, `(fold + 0 v)` is *faster* than folding a plain 2-arg c
 3.9 µs), so `+`'s passthrough is not being penalised. What is left is `fold--vec` threading five
 parameters where the hand loop threads four, plus ~2 allocations per unit — a smaller, still-open
 follow-up, not a rewrite.
+## 2026-08-05 — privacy moves off the name onto the def form: `defn-`/`def-` (ADR-146 step 2)
+
+The long syntax question resolved. Step 1 made privacy a recorded fact but kept `--` in the name.
+The debate: could a *prettier* name marker replace infix `--`? Answer, empirically — no. Brood's
+sigil space is full. Every glyph that means "private" elsewhere is taken or wrong here: `_` is the
+wildcard ("unused" — the opposite of private), `#` is reader dispatch, `%` is kernel primitives,
+`^` is the pin operator, `*…*` is dynamic vars, `?` is predicates; `$` is already in use; `@` reads
+as deref/decorator, not private; leading `-` collides with subtraction and the kebab separator (a
+single space flips `(-balance x)` into `(- balance x)`) and `-<digit>` is a number; `/` is division
+AND the namespace separator AND an internal sentinel; `\` is a reserved reader error. Tested each in
+the reader. And any name marker is call-site noise besides. So the marker had to leave the name —
+the same convention→mechanism leap namespacing already made (`pkg-` prefixes → `defmodule` + `/`).
+
+Landed **`defn-`/`def-`**: define a *clean* module-private name (no marker in it, at the def or any
+call site). They expand to `(do (def name …) (%mark-private 'name))`; `%mark-private` qualifies the
+name via `resolve_reference` and records it — modeled exactly on `%register-sig`. The `--`-in-name
+convention is deleted (`name_marks_private`, the `env_define` auto-record, and the "promoted helper"
+diagnostic all gone). Since a private is now spelled like a public, every check consults the record,
+so step 1's name-authoritative sites (enforcement, `:only`, checker `:only`) flip to `is_private`.
+
+**The one behavior change** (accepted): a qualified reference into a **never-loaded** module can't be
+judged private — the record has never seen it — so it degrades from a load-time "module-private"
+error to a normal **unbound reference** at call time. More principled: you can't assert privacy about
+code the image hasn't loaded. `tests/private_test.blsp`'s `never-loaded` and `stale-promoted` cases
+lost their guarantee and were rewritten; the rest convert to clean names + `defn-`/`def-`.
+
+**Prelude seed** — the fiddly bit. The prelude is *inserted* by `RuntimeCode::seeded`, not
+re-evaluated, so `%mark-private` fires only in the throwaway builder heap. The builder's private set
+is now captured (`Heap::private_names_snapshot`) into `SharedBundle` and threaded into `seeded`
+alongside the bindings — the same shape as `sealed`. Both boot paths (source + expanded-cache) eval
+in a builder, so both populate it; the cache is build-id-keyed, so the binary change invalidates it.
+
+**Perf** — measured, not assumed. Losing the `!bare.contains("--")` lock-free fast-negative means
+enforcement now resolves the alias/root and consults `is_private` for every *foreign* qualified ref.
+A/B on `nest check` over all of std/ (warm, interleaved, 3×): 8.33s active vs 8.27s bypassed — 0.7%,
+within noise (`is_private` is O(1) regardless of how many privates are recorded, and the intra-module
++ grant pre-filters run before any lookup). The planned per-compile snapshot was unnecessary.
+
+`defmacro-`/`defprocess-` were judged unnecessary — only 2 private macros and 2 private processes
+existed tree-wide; they collapse to public. A ~2,500-name sweep across the brood repo + 15 sibling
+projects migrated the tree, driven by a temporary `nest format --migrate-privacy` CST pass (removed
+after). Follow-up tracked: the unused-private lint still keys on `--` and needs reworking to detect
+`defn-`. See ADR-146 step 2.
 
 ## 2026-08-05 (cont.) — KI-27: the test harness was picking its ports out of the kernel's ephemeral range
 
@@ -16239,8 +16282,9 @@ Two things fixed alongside it, both about diagnosability rather than the bug:
 *The test asserted the healing but assumed the peer.* It never checked that B2 came up, so
 "the watcher failed to heal" (the thing under test) and "B never came back" (a harness problem)
 were the same 20 s timeout. It now calls `wait_until_listening` on B2 and prints B2's stderr on
-failure. Its deadlines were raised to 60 s/30 s — liveness ceilings on a saturated machine, not
-latency assertions; the healthy path still finishes in 1.3 s.
+failure. Its deadlines were raised to 45 s/20 s — liveness ceilings on a saturated machine, not
+latency assertions, sized so nodeup + pong together stay inside nextest's 2 min per-test cap; the
+healthy path still finishes in 1.3 s.
 
 *One helper, three copies.* `distribution.rs`, `serve_attach.rs` and `observe_attach.rs` each had
 their own `free_port`/`port_lock`/`spawn_brood`/`wait_until_listening`. I fixed the allocator in one

@@ -19,43 +19,45 @@ For pure ASCII input the string and byte forms agree.")
 ;; points into a list (O(1) cons per byte) and UTF-8-decodes the whole list once at the
 ;; end. Building the string with `str` per byte instead is O(n²) — each append recopies
 ;; the entire growing accumulator, which is unusably slow for large payloads.
-(def encoding--hex-lower-codes [48 49 50 51 52 53 54 55 56 57 97 98 99 100 101 102])
-(def encoding--hex-upper-codes [48 49 50 51 52 53 54 55 56 57 65 66 67 68 69 70])
+(def- encoding-hex-lower-codes [48 49 50 51 52 53 54 55 56 57 97 98 99 100 101 102])
+(def- encoding-hex-upper-codes [48 49 50 51 52 53 54 55 56 57 65 66 67 68 69 70])
 
-(defn encoding--hex-encode-loop (bs codes acc)
+(defn- encoding-hex-encode-loop
+  (bs codes acc)
   (if (empty? bs)
     (reverse acc)
     (let (b (first bs)
           hi (quot b 16)
           lo (rem b 16))
-      (encoding--hex-encode-loop (rest bs)
+      (encoding-hex-encode-loop (rest bs)
         codes
         (cons (nth codes lo) (cons (nth codes hi) acc))))))
 
-(defn encoding--hex-encode-codes (bs codes)
-  (utf8-bytes->string (encoding--hex-encode-loop (seq bs) codes nil)))
+(defn- encoding-hex-encode-codes
+  (bs codes)
+  (utf8-bytes->string (encoding-hex-encode-loop (seq bs) codes nil)))
 
 (defn hex-encode (s)
   "Encode string `s` as lowercase hexadecimal (each UTF-8 byte → 2 hex chars)."
-  (encoding--hex-encode-codes (string->utf8-bytes s) encoding--hex-lower-codes))
+  (encoding-hex-encode-codes (string->utf8-bytes s) encoding-hex-lower-codes))
 
 (defn hex-encode-upper (s)
   "Encode string `s` as uppercase hexadecimal (each UTF-8 byte → 2 hex chars)."
-  (encoding--hex-encode-codes (string->utf8-bytes s) encoding--hex-upper-codes))
+  (encoding-hex-encode-codes (string->utf8-bytes s) encoding-hex-upper-codes))
 
 (defn hex-encode-bytes (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as
 lowercase hexadecimal. The byte-faithful counterpart of `hex-encode`, which first
 UTF-8-encodes a string."
-  (encoding--hex-encode-codes bytes encoding--hex-lower-codes))
+  (encoding-hex-encode-codes bytes encoding-hex-lower-codes))
 
 (defn hex-encode-bytes-upper (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as uppercase hexadecimal."
-  (encoding--hex-encode-codes bytes encoding--hex-upper-codes))
+  (encoding-hex-encode-codes bytes encoding-hex-upper-codes))
 
 ;; Codepoint → nibble value (int keys — the decode loop walks a `string->codepoints`
 ;; vector, so lookups hash an int, not a fresh 1-char string per char).
-(def encoding--hex-val
+(def- encoding-hex-val
   (let (lower (string->codepoints "0123456789abcdef")
         upper (string->codepoints "0123456789ABCDEF"))
     (fold (fn (m i) (assoc (assoc m (nth lower i) i) (nth upper i) i))
@@ -66,78 +68,82 @@ UTF-8-encodes a string."
 ;; in order), or the `:invalid` sentinel on a bad/odd input. `:invalid` rather
 ;; than nil so an empty (valid) input is distinguishable from a failure — nil is
 ;; the empty list here, so the public wrappers map `:invalid` → nil themselves.
-(defn encoding--hex-decode-loop (s i n acc)
+(defn- encoding-hex-decode-loop
+  (s i n acc)
   (if (>= i n)
     (reverse acc)
-    (let (hi (get encoding--hex-val (nth s i))
-          lo (get encoding--hex-val (nth s (+ i 1))))
+    (let (hi (get encoding-hex-val (nth s i))
+          lo (get encoding-hex-val (nth s (+ i 1))))
       (if (and hi lo)
-        (encoding--hex-decode-loop s
+        (encoding-hex-decode-loop s
           (+ i 2)
           n
           (cons (+ (* hi 16) lo) acc))
         :invalid))))
 
-(defn encoding--hex-decode-bytelist (s)
+(defn- encoding-hex-decode-bytelist
+  (s)
   (let (
         ; codepoint vector: O(1) nth, int lookups
         s (string->codepoints s)
         n (count s))
     (if (= (rem n 2) 0)
-      (encoding--hex-decode-loop s 0 n nil)
+      (encoding-hex-decode-loop s 0 n nil)
       :invalid)))
 
 (defn hex-decode (s)
   "Decode a hexadecimal string → original string, or nil if the input is invalid."
-  (let (bs (encoding--hex-decode-bytelist s))
+  (let (bs (encoding-hex-decode-bytelist s))
     (if (= bs :invalid) nil (utf8-bytes->string bs))))
 
 (defn hex-decode-bytes (s)
   "Decode a hexadecimal string → a `bytes` value, or nil if invalid.
 Byte-faithful: unlike `hex-decode` it never UTF-8-decodes, so it round-trips any
 binary payload (digests, salts, wire bytes)."
-  (let (bs (encoding--hex-decode-bytelist s))
+  (let (bs (encoding-hex-decode-bytelist s))
     (if (= bs :invalid) nil (bytes bs))))
 
 ;; ---- base64 -----------------------------------------------------------------
 
-(def encoding--b64-std "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
-(def encoding--b64-url "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+(def- encoding-b64-std "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+(def- encoding-b64-url "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
 ;; Code-point vectors for the two alphabets (all ASCII), so the encoder conses
 ;; ASCII byte codes and builds the string ONCE with utf8-bytes->string — like
 ;; hex-encode. The old `(str acc …)` per 3-byte group was O(n^2) (each str copies
 ;; the whole accumulator) and spiked peak RSS on large inputs.
-(def encoding--b64-std-codes (string->codepoints encoding--b64-std))
-(def encoding--b64-url-codes (string->codepoints encoding--b64-url))
+(def- encoding-b64-std-codes (string->codepoints encoding-b64-std))
+(def- encoding-b64-url-codes (string->codepoints encoding-b64-url))
 ; the code point of "="
-(def encoding--b64-pad 61)
+(def- encoding-b64-pad 61)
 ;; Encode a byte sequence to base64 using the given 64-entry code-point vector.
-(defn encoding--b64-encode (bytes codes)
-  (utf8-bytes->string (encoding--b64-enc-loop (seq bytes) codes nil)))
+(defn- encoding-b64-encode
+  (bytes codes)
+  (utf8-bytes->string (encoding-b64-enc-loop (seq bytes) codes nil)))
 
-(defn encoding--b64-enc-loop (bytes codes acc)
+(defn- encoding-b64-enc-loop
+  (bytes codes acc)
   (if (empty? bytes)
     (reverse acc)
     (let (b1 (first bytes)
           rest1 (rest bytes))
       (if (empty? rest1)
         ;; 1-byte tail: 2 chars + "=="
-        (reverse (cons encoding--b64-pad
-                   (cons encoding--b64-pad
+        (reverse (cons encoding-b64-pad
+                   (cons encoding-b64-pad
                      (cons (nth codes (* (rem b1 4) 16))
                        (cons (nth codes (quot b1 4)) acc)))))
         (let (b2 (first rest1)
               rest2 (rest rest1))
           (if (empty? rest2)
             ;; 2-byte tail: 3 chars + "="
-            (reverse (cons encoding--b64-pad
+            (reverse (cons encoding-b64-pad
                        (cons (nth codes (* (rem b2 16) 4))
                          (cons (nth codes (+ (* (rem b1 4) 16) (quot b2 16)))
                            (cons (nth codes (quot b1 4)) acc)))))
             ;; full 3-byte group → 4 chars
             (let (b3 (first rest2))
-              (encoding--b64-enc-loop (rest rest2)
+              (encoding-b64-enc-loop (rest rest2)
                 codes
                 (cons (nth codes (rem b3 64))
                   (cons (nth codes (+ (* (rem b2 16) 4) (quot b3 64)))
@@ -146,39 +152,41 @@ binary payload (digests, salts, wire bytes)."
 
 (defn base64-encode (s)
   "Encode string `s` as standard Base64 (RFC 4648, `+/` alphabet, `=` padding)."
-  (encoding--b64-encode (string->utf8-bytes s) encoding--b64-std-codes))
+  (encoding-b64-encode (string->utf8-bytes s) encoding-b64-std-codes))
 
 (defn base64-url-encode (s)
   "Encode string `s` as URL-safe Base64 (RFC 4648 §5, `-_` alphabet, `=` padding)."
-  (encoding--b64-encode (string->utf8-bytes s) encoding--b64-url-codes))
+  (encoding-b64-encode (string->utf8-bytes s) encoding-b64-url-codes))
 
 (defn base64-encode-bytes (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as
 standard Base64. The byte-faithful counterpart of `base64-encode`, which first
 UTF-8-encodes a string — so a byte ≥ 0x80 encodes as one byte, not its two-byte
 UTF-8 form."
-  (encoding--b64-encode bytes encoding--b64-std-codes))
+  (encoding-b64-encode bytes encoding-b64-std-codes))
 
 (defn base64-url-encode-bytes (bytes)
   "Encode a byte sequence (a `bytes` value, vector, or list of ints 0–255) as URL-safe Base64."
-  (encoding--b64-encode bytes encoding--b64-url-codes))
+  (encoding-b64-encode bytes encoding-b64-url-codes))
 
 ;; Reverse lookup map: base64 char CODEPOINT → 6-bit value (int keys — the
 ;; decode loop walks a `string->codepoints` vector, so each lookup hashes an int,
 ;; not a fresh 1-char string per char).
-(defn encoding--b64-val-map (alpha)
+(defn- encoding-b64-val-map
+  (alpha)
   (let (cs (string->codepoints alpha))
     (fold (fn (m i) (assoc m (nth cs i) i))
       {}
       (range 64))))
 
-(def encoding--b64-std-vals (encoding--b64-val-map encoding--b64-std))
-(def encoding--b64-url-vals (encoding--b64-val-map encoding--b64-url))
+(def- encoding-b64-std-vals (encoding-b64-val-map encoding-b64-std))
+(def- encoding-b64-url-vals (encoding-b64-val-map encoding-b64-url))
 
 ;; Decode base64 `s` to a list of byte ints, or the `:invalid` sentinel on bad
 ;; input. As with hex, `:invalid` (not nil) keeps an empty valid input distinct
 ;; from a failure; the public wrappers map `:invalid` → nil.
-(defn encoding--b64-decode (s vals)
+(defn- encoding-b64-decode
+  (s vals)
   (let (
         ; codepoint vector: O(1) nth, int lookups
         s (string->codepoints (replace s "=" ""))
@@ -187,9 +195,10 @@ UTF-8 form."
     (if (= tail 1)
       ; 1 leftover char is always invalid
       :invalid
-      (encoding--b64-dec-loop s 0 n vals nil))))
+      (encoding-b64-dec-loop s 0 n vals nil))))
 
-(defn encoding--b64-dec-loop (s i n vals acc)
+(defn- encoding-b64-dec-loop
+  (s i n vals acc)
   (if (>= i n)
     (reverse acc)
     (let (remaining (- n i)
@@ -210,26 +219,26 @@ UTF-8 form."
                       (if (not v4)
                         :invalid
                         (let (acc (cons (+ (* (rem v3 4) 64) v4) acc))
-                          (encoding--b64-dec-loop s (+ i 4) n vals acc))))))))))))))
+                          (encoding-b64-dec-loop s (+ i 4) n vals acc))))))))))))))
 
 (defn base64-decode (s)
   "Decode a standard Base64 string → original string, or nil on invalid input."
-  (let (bs (encoding--b64-decode s encoding--b64-std-vals))
+  (let (bs (encoding-b64-decode s encoding-b64-std-vals))
     (if (= bs :invalid) nil (utf8-bytes->string bs))))
 
 (defn base64-url-decode (s)
   "Decode a URL-safe Base64 string → original string, or nil on invalid input."
-  (let (bs (encoding--b64-decode s encoding--b64-url-vals))
+  (let (bs (encoding-b64-decode s encoding-b64-url-vals))
     (if (= bs :invalid) nil (utf8-bytes->string bs))))
 
 (defn base64-decode-bytes (s)
   "Decode a standard Base64 string → a `bytes` value, or nil on invalid input.
 Byte-faithful: unlike `base64-decode` it never UTF-8-decodes, so it round-trips
 any binary payload (a SCRAM salt, a key, wire bytes)."
-  (let (bs (encoding--b64-decode s encoding--b64-std-vals))
+  (let (bs (encoding-b64-decode s encoding-b64-std-vals))
     (if (= bs :invalid) nil (bytes bs))))
 
 (defn base64-url-decode-bytes (s)
   "Decode a URL-safe Base64 string → a `bytes` value, or nil on invalid input."
-  (let (bs (encoding--b64-decode s encoding--b64-url-vals))
+  (let (bs (encoding-b64-decode s encoding-b64-url-vals))
     (if (= bs :invalid) nil (bytes bs))))

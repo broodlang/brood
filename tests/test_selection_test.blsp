@@ -14,139 +14,141 @@
 ;; --- synthetic fixtures -------------------------------------------------------
 ;; A test tuple with explicit tags/file/line. The thunk is never called here (the
 ;; selectors only read names and metadata), so a trivial one suffices.
-(defn selection--test (name tags file line)
+(defn- selection-test
+  (name tags file line)
   (list name (fn () nil) {:tags tags :file file :line line}))
 
-(defn selection--unit (mode group tests) (list mode group tests))
+(defn- selection-unit (mode group tests) (list mode group tests))
 
 ;; Two groups: "math" tagged :fast at the group level with one :slow member, and
 ;; "strings" untagged. Lines mimic a real file's layout.
-(def selection--units
-  (list (selection--unit :parallel
+(def- selection-units
+  (list (selection-unit :parallel
           "math"
-          (list (selection--test "adds" [:fast] "tests/demo_test.blsp" 4)
-            (selection--test "multiplies" [:fast :slow] "tests/demo_test.blsp" 5)))
-    (selection--unit :parallel
+          (list (selection-test "adds" [:fast] "tests/demo_test.blsp" 4)
+            (selection-test "multiplies" [:fast :slow] "tests/demo_test.blsp" 5)))
+    (selection-unit :parallel
       "strings"
-      (list (selection--test "joins" [] "tests/demo_test.blsp" 9)))))
+      (list (selection-test "joins" [] "tests/demo_test.blsp" 9)))))
 
 ;; The full labels a selection produces, in order — what every assertion compares.
-(defn selection--labels (units)
+(defn- selection-labels
+  (units)
   (fold (fn (acc unit)
           (append acc (map (fn (t) (label (second unit) (first t))) (third unit))))
     nil units))
 
-(defn selection--select (spec) (selection--labels (test/test--select-units selection--units spec)))
+(defn- selection-select (spec) (selection-labels (test/test-select-units selection-units spec)))
 
 (describe "test selection: selector parsing"
   (test "a bare word is a tag selector with an empty value"
-    (assert= (test/test--parse-selector "db") ["db" ""]))
+    (assert= (test/test-parse-selector "db") ["db" ""]))
   (test "key:value splits on the FIRST colon"
-    (assert= (test/test--parse-selector "test:adds two") ["test" "adds two"]))
+    (assert= (test/test-parse-selector "test:adds two") ["test" "adds two"]))
   (test "a value may itself contain a colon"
-    (assert= (test/test--parse-selector "describe:a:b") ["describe" "a:b"]))
+    (assert= (test/test-parse-selector "describe:a:b") ["describe" "a:b"]))
   (test "an empty value is preserved"
-    (assert= (test/test--parse-selector "test:") ["test" ""])))
+    (assert= (test/test-parse-selector "test:") ["test" ""])))
 
 (describe "test selection: tag matching"
   (test "a tag present on the test matches"
-    (is (test/test--has-tag? [:fast :slow] "slow")))
+    (is (test/test-has-tag? [:fast :slow] "slow")))
   (test "an absent tag does not match"
-    (refute (test/test--has-tag? [:fast] "slow")))
+    (refute (test/test-has-tag? [:fast] "slow")))
   (test "no tags matches nothing"
-    (refute (test/test--has-tag? [] "fast")))
+    (refute (test/test-has-tag? [] "fast")))
   (test "group-level tags are merged into a test's own"
-    (let (merged (test/test--add-tags (selection--test "t" [:own] "f.blsp" 1) [:group]))
-      (assert= (into [] (test/test--tags merged)) [:group :own])))
+    (let (merged (test/test-add-tags (selection-test "t" [:own] "f.blsp" 1) [:group]))
+      (assert= (into [] (test/test-tags merged)) [:group :own])))
   (test "merging with no group tags leaves the test untouched"
-    (let (t (selection--test "t" [:own] "f.blsp" 1))
-      (assert= (test/test--add-tags t []) t))))
+    (let (t (selection-test "t" [:own] "f.blsp" 1))
+      (assert= (test/test-add-tags t []) t))))
 
 (describe "test selection: --only / --exclude / --include"
   (test "no spec runs everything"
-    (assert= (selection--select nil) (list "math › adds" "math › multiplies" "strings › joins")))
+    (assert= (selection-select nil) (list "math › adds" "math › multiplies" "strings › joins")))
   (test "--only on a group-level tag picks up every test in the group"
-    (assert= (selection--select {:only (list ["fast" ""])})
+    (assert= (selection-select {:only (list ["fast" ""])})
       (list "math › adds" "math › multiplies")))
   (test "--only on a test-level tag picks out just that test"
-    (assert= (selection--select {:only (list ["slow" ""])}) (list "math › multiplies")))
+    (assert= (selection-select {:only (list ["slow" ""])}) (list "math › multiplies")))
   (test "--exclude drops matching tests"
-    (assert= (selection--select {:exclude (list ["slow" ""])})
+    (assert= (selection-select {:exclude (list ["slow" ""])})
       (list "math › adds" "strings › joins")))
   (test "--include re-admits what --exclude dropped"
-    (assert= (selection--select {:exclude (list ["slow" ""]) :include (list ["slow" ""])})
+    (assert= (selection-select {:exclude (list ["slow" ""]) :include (list ["slow" ""])})
       (list "math › adds" "math › multiplies" "strings › joins")))
   (test "test: matches a substring of the test name"
-    (assert= (selection--select {:only (list ["test" "add"])}) (list "math › adds")))
+    (assert= (selection-select {:only (list ["test" "add"])}) (list "math › adds")))
   (test "describe: matches a substring of the group label"
-    (assert= (selection--select {:only (list ["describe" "string"])}) (list "strings › joins")))
+    (assert= (selection-select {:only (list ["describe" "string"])}) (list "strings › joins")))
   (test "several --only selectors union rather than intersect"
-    (assert= (selection--select {:only (list ["describe" "string"] ["test" "add"])})
+    (assert= (selection-select {:only (list ["describe" "string"] ["test" "add"])})
       (list "math › adds" "strings › joins")))
   (test "an unmatched selector selects nothing"
-    (assert= (selection--select {:only (list ["nope" ""])}) nil))
+    (assert= (selection-select {:only (list ["nope" ""])}) nil))
   (test "a unit left with no tests is dropped entirely"
-    (assert= (count (test/test--select-units selection--units {:only (list ["describe" "string"])}))
+    (assert= (count (test/test-select-units selection-units {:only (list ["describe" "string"])}))
       1)))
 
 (describe "test selection: FILE:LINE"
   (test "a line landing exactly on a test's first body form selects it"
-    (assert= (selection--select {:lines (list ["tests/demo_test.blsp" 4])})
+    (assert= (selection-select {:lines (list ["tests/demo_test.blsp" 4])})
       (list "math › adds")))
   (test "a line INSIDE a test's body selects that test, not the next one"
     ;; 7 is past "multiplies" (line 5) and before "joins" (line 9)
-    (assert= (selection--select {:lines (list ["tests/demo_test.blsp" 7])})
+    (assert= (selection-select {:lines (list ["tests/demo_test.blsp" 7])})
       (list "math › multiplies")))
   (test "a line before the first test selects nothing, and WARNS"
     ;; Captured so the expected warning stays out of the suite output — and so the
     ;; message itself is pinned, since a silent zero-test run is the bug this
     ;; warning exists to prevent.
-    (let (warning (with-err-str (assert= (selection--select {:lines (list ["tests/demo_test.blsp" 1])})
+    (let (warning (with-err-str (assert= (selection-select {:lines (list ["tests/demo_test.blsp" 1])})
                                   nil)))
       (is (includes? warning "no test found at"))))
   (test "a path suffix matches, so a relative path finds an absolute record"
-    (assert= (selection--select {:lines (list ["demo_test.blsp" 4])}) (list "math › adds")))
+    (assert= (selection-select {:lines (list ["demo_test.blsp" 4])}) (list "math › adds")))
   (test "an unknown file selects nothing"
-    (with-err-str (assert= (selection--select {:lines (list ["tests/other_test.blsp" 4])}) nil)))
+    (with-err-str (assert= (selection-select {:lines (list ["tests/other_test.blsp" 4])}) nil)))
   ;; Regression: matching paths with a bare `ends-with?` made "a_test.blsp" a
   ;; suffix of "extra_test.blsp" (the last 11 chars are literally "a_test.blsp"),
   ;; so a line selector could pick a test out of an unrelated file. The match must
   ;; land on a path-component boundary.
   (test "a suffix that isn't on a path boundary does NOT match"
-    (refute (test/test--same-file? "tests/extra_test.blsp" "a_test.blsp")))
+    (refute (test/test-same-file? "tests/extra_test.blsp" "a_test.blsp")))
   (test "a suffix on a path boundary does match"
-    (is (test/test--same-file? "tests/a_test.blsp" "a_test.blsp")))
+    (is (test/test-same-file? "tests/a_test.blsp" "a_test.blsp")))
   (test "a whole-path match still works"
-    (is (test/test--same-file? "tests/a_test.blsp" "tests/a_test.blsp")))
+    (is (test/test-same-file? "tests/a_test.blsp" "tests/a_test.blsp")))
   (test "a multi-component suffix matches on its boundary"
-    (is (test/test--same-file? "/abs/proj/tests/a_test.blsp" "tests/a_test.blsp")))
+    (is (test/test-same-file? "/abs/proj/tests/a_test.blsp" "tests/a_test.blsp")))
   (test "a near-miss directory does not match"
-    (refute (test/test--same-file? "/abs/proj/mytests/a_test.blsp" "tests/a_test.blsp")))
+    (refute (test/test-same-file? "/abs/proj/mytests/a_test.blsp" "tests/a_test.blsp")))
   (test "a line selector combines with --only as a union"
-    (assert= (selection--select {:only (list ["describe" "string"])
-                                 :lines (list ["tests/demo_test.blsp" 4])})
+    (assert= (selection-select {:only (list ["describe" "string"])
+                                :lines (list ["tests/demo_test.blsp" 4])})
       (list "math › adds" "strings › joins"))))
 
 (describe "test selection: exact names (--failed)"
   (test "a name selector matches the full label"
-    (assert= (selection--select {:names (list "strings › joins")}) (list "strings › joins")))
+    (assert= (selection-select {:names (list "strings › joins")}) (list "strings › joins")))
   (test "several names select several tests"
-    (assert= (selection--select {:names (list "math › adds" "strings › joins")})
+    (assert= (selection-select {:names (list "math › adds" "strings › joins")})
       (list "math › adds" "strings › joins")))
   (test "a name that matches nothing selects nothing"
-    (assert= (selection--select {:names (list "math › nonexistent")}) nil))
+    (assert= (selection-select {:names (list "math › nonexistent")}) nil))
   (test "a name selector is exact, not a substring"
-    (assert= (selection--select {:names (list "adds")}) nil)))
+    (assert= (selection-select {:names (list "adds")}) nil)))
 
 (describe "test selection: --seed ordering"
   (test "no seed preserves declaration order"
-    (assert= (selection--select nil) (list "math › adds" "math › multiplies" "strings › joins")))
+    (assert= (selection-select nil) (list "math › adds" "math › multiplies" "strings › joins")))
   (test "the same seed always produces the same order"
-    (assert= (selection--select {:seed 99}) (selection--select {:seed 99})))
+    (assert= (selection-select {:seed 99}) (selection-select {:seed 99})))
   (test "shuffling keeps every test — it reorders, never drops"
-    (assert= (count (selection--select {:seed 7})) 3))
+    (assert= (count (selection-select {:seed 7})) 3))
   (test "a shuffled run still contains each label"
-    (let (shuffled (selection--select {:seed 12345}))
+    (let (shuffled (selection-select {:seed 12345}))
       (and (is (includes? shuffled "math › adds"))
         (is (includes? shuffled "math › multiplies"))
         (is (includes? shuffled "strings › joins"))))))
@@ -155,30 +157,30 @@
   ;; The contract CI depends on: the shards must PARTITION the suite — together
   ;; they cover every test, and no test appears in two of them.
   (test "two shards together cover every test exactly once"
-    (let (a (selection--select {:shards 2 :shard 0})
-          b (selection--select {:shards 2 :shard 1}))
+    (let (a (selection-select {:shards 2 :shard 0})
+          b (selection-select {:shards 2 :shard 1}))
       (assert= (+ (count a) (count b)) 3)))
   (test "no test appears in both shards"
-    (let (a (selection--select {:shards 2 :shard 0})
-          b (selection--select {:shards 2 :shard 1}))
+    (let (a (selection-select {:shards 2 :shard 0})
+          b (selection-select {:shards 2 :shard 1}))
       (refute (fold (fn (found l) (or found (includes? b l))) false a))))
   (test "three shards also partition the suite"
-    (assert= (+ (count (selection--select {:shards 3 :shard 0}))
-               (+ (count (selection--select {:shards 3 :shard 1}))
-                 (count (selection--select {:shards 3 :shard 2}))))
+    (assert= (+ (count (selection-select {:shards 3 :shard 0}))
+               (+ (count (selection-select {:shards 3 :shard 1}))
+                 (count (selection-select {:shards 3 :shard 2}))))
       3))
   (test "a shard count below 2 is a no-op"
-    (assert= (selection--select {:shards 1 :shard 0}) (selection--select nil)))
+    (assert= (selection-select {:shards 1 :shard 0}) (selection-select nil)))
   (test "the label hash is stable across calls"
-    (assert= (test/test--label-hash "math › adds") (test/test--label-hash "math › adds")))
+    (assert= (test/test-label-hash "math › adds") (test/test-label-hash "math › adds")))
   (test "different labels hash differently"
-    (refute (= (test/test--label-hash "math › adds") (test/test--label-hash "math › multiplies"))))
+    (refute (= (test/test-label-hash "math › adds") (test/test-label-hash "math › multiplies"))))
   ;; Regression: a plain polynomial hash left the LOW bits unmixed (its parity was
   ;; just the character-sum parity), so `(rem h 2)` sent a whole small suite to one
   ;; shard and left the other empty. The finalizer fixes that; assert the spread.
   (test "the hash spreads across 2 shards rather than collapsing into one"
     (let (counts (fold (fn (acc i)
-                         (let (k (rem (test/test--label-hash (str "group " i " › case " i)) 2))
+                         (let (k (rem (test/test-label-hash (str "group " i " › case " i)) 2))
                            (assoc acc k (+ 1 (or (get acc k) 0)))))
                    {}
                    (range 0 200)))
@@ -186,22 +188,22 @@
 
 (describe "test selection: the filter-spec constructor"
   (test "raw selector strings are parsed into key/value pairs"
-    (let (spec (test/test--make-filter (list "db" "test:adds") nil nil nil nil nil nil nil))
+    (let (spec (test/test-make-filter (list "db" "test:adds") nil nil nil nil nil nil nil))
       (assert= (get spec :only) (list ["db" ""] ["test" "adds"]))))
   (test "absent lists become empty, not nil-holes"
-    (let (spec (test/test--make-filter nil nil nil nil nil nil nil nil))
+    (let (spec (test/test-make-filter nil nil nil nil nil nil nil nil))
       (and (assert= (get spec :only) nil)
         (assert= (get spec :exclude) nil)
         (assert= (get spec :include) nil))))
   (test "shard defaults to 0 when unspecified"
-    (assert= (get (test/test--make-filter nil nil nil nil nil nil 4 nil) :shard) 0))
+    (assert= (get (test/test-make-filter nil nil nil nil nil nil 4 nil) :shard) 0))
   (test "seed and shard values pass through"
-    (let (spec (test/test--make-filter nil nil nil nil nil 42 8 3))
+    (let (spec (test/test-make-filter nil nil nil nil nil 42 8 3))
       (and (assert= (get spec :seed) 42)
         (assert= (get spec :shards) 8)
         (assert= (get spec :shard) 3))))
   (test "a constructed spec drives selection end-to-end"
-    (assert= (selection--select (test/test--make-filter (list "slow") nil nil nil nil nil nil nil))
+    (assert= (selection-select (test/test-make-filter (list "slow") nil nil nil nil nil nil nil))
       (list "math › multiplies"))))
 
 ;; A narrowing selector that matches nothing must be reported, not pass silently:
@@ -212,60 +214,60 @@
   :isolated
   (test "no filter at all does not count as narrowing"
     (def *test-filter* nil)
-    (refute (test/test--filter-narrows?)))
+    (refute (test/test-filter-narrows?)))
   (test "an empty spec does not count as narrowing"
     (def *test-filter* {})
-    (refute (test/test--filter-narrows?)))
+    (refute (test/test-filter-narrows?)))
   (test "--only counts as narrowing"
     (def *test-filter* {:only (list ["slow" ""])})
-    (is (test/test--filter-narrows?)))
+    (is (test/test-filter-narrows?)))
   (test "FILE:LINE counts as narrowing"
     (def *test-filter* {:lines (list ["a.blsp" 4])})
-    (is (test/test--filter-narrows?)))
+    (is (test/test-filter-narrows?)))
   (test "exact names (--failed) count as narrowing"
     (def *test-filter* {:names (list "g › t")})
-    (is (test/test--filter-narrows?)))
+    (is (test/test-filter-narrows?)))
   ;; An empty shard is normal when a small suite fans across many CI machines,
   ;; so sharding alone must NOT trip the warning.
   (test "sharding alone does NOT count as narrowing"
     (def *test-filter* {:shards 8 :shard 7})
-    (refute (test/test--filter-narrows?)))
+    (refute (test/test-filter-narrows?)))
   (test "a seed alone does not count as narrowing"
     (def *test-filter* {:seed 42})
-    (refute (test/test--filter-narrows?)))
+    (refute (test/test-filter-narrows?)))
   (test "--exclude alone does not count as narrowing"
     ;; Excluding everything is a deliberate act, not a probable typo.
     (def *test-filter* {:exclude (list ["slow" ""])})
-    (refute (test/test--filter-narrows?)))
+    (refute (test/test-filter-narrows?)))
   (test "the filter global is restored for the rest of the suite"
     (def *test-filter* nil)
     (assert= *test-filter* nil)))
 
 (describe "test selection: --slowest guard"
-  (test "a positive count is kept" (assert= (test/test--slowest-n (list :slowest 3)) 3))
+  (test "a positive count is kept" (assert= (test/test-slowest-n (list :slowest 3)) 3))
   ;; 0 used to print a "Slowest 0 tests:" heading with nothing under it.
   (test "zero reports nothing rather than an empty heading"
-    (assert= (test/test--slowest-n (list :slowest 0)) nil))
+    (assert= (test/test-slowest-n (list :slowest 0)) nil))
   (test "a negative count reports nothing"
-    (assert= (test/test--slowest-n (list :slowest -1)) nil))
-  (test "the legacy :slow flag still means 5" (assert= (test/test--slowest-n (list :slow)) 5))
-  (test "absent means nothing" (assert= (test/test--slowest-n nil) nil)))
+    (assert= (test/test-slowest-n (list :slowest -1)) nil))
+  (test "the legacy :slow flag still means 5" (assert= (test/test-slowest-n (list :slow)) 5))
+  (test "absent means nothing" (assert= (test/test-slowest-n nil) nil)))
 
 (describe "test selection: --max-failures budget"
   :isolated
   ;; A result is (group name fails ms); a non-empty `fails` marks a failed test.
   (test "the budget is off by default"
     (def *test-max-failures* 0)
-    (refute (test/test--max-failures-hit? (list (list "g" "a" (list (list nil (list "boom"))) 1)))))
+    (refute (test/test-max-failures-hit? (list (list "g" "a" (list (list nil (list "boom"))) 1)))))
   (test "the budget is not hit below the threshold"
     (def *test-max-failures* 2)
-    (refute (test/test--max-failures-hit? (list (list "g" "a" (list (list nil (list "boom"))) 1)))))
+    (refute (test/test-max-failures-hit? (list (list "g" "a" (list (list nil (list "boom"))) 1)))))
   (test "the budget is hit at the threshold"
     (def *test-max-failures* 1)
-    (is (test/test--max-failures-hit? (list (list "g" "a" (list (list nil (list "boom"))) 1)))))
+    (is (test/test-max-failures-hit? (list (list "g" "a" (list (list nil (list "boom"))) 1)))))
   (test "passing tests never consume the budget"
     (def *test-max-failures* 1)
-    (refute (test/test--max-failures-hit? (list (list "g" "a" nil 1) (list "g" "b" nil 1)))))
+    (refute (test/test-max-failures-hit? (list (list "g" "a" nil 1) (list "g" "b" nil 1)))))
   (test "the budget global is restored for the rest of the suite"
     (def *test-max-failures* 0)
     (assert= *test-max-failures* 0)))
@@ -275,7 +277,7 @@
 ;; boundary. Prove they survive a `send` deep-copy intact (which also exercises
 ;; to_message/from_message + promote/freeze), that a worker's update can't touch
 ;; the sender's copy, and that many workers can read one shared spec at once.
-(def selection--shared-spec
+(def- selection-shared-spec
   {:only (list ["fast" ""] ["test" "adds"])
    :exclude (list ["slow" ""])
    :lines (list ["tests/demo_test.blsp" 4])
@@ -284,47 +286,49 @@
    :shards 4
    :shard 1})
 
-(defn selection--echo ()
+(defn- selection-echo
+  ()
   (receive ([:spec from spec] (send from [:echo spec]))))
 
-(defn selection--collect (pending acc)
-  (if (= pending 0) acc (receive ([:echo spec] (selection--collect (- pending 1) (cons spec acc))))))
+(defn- selection-collect
+  (pending acc)
+  (if (= pending 0) acc (receive ([:echo spec] (selection-collect (- pending 1) (cons spec acc))))))
 
 ;; Each worker selects against the shared spec and reports the labels it got.
-(defn selection--worker (from spec units) (send from [:echo (test/test--select-units units spec)]))
+(defn- selection-worker (from spec units) (send from [:echo (test/test-select-units units spec)]))
 
 (describe "test selection: specs across processes"
   :isolated
   (test "a filter spec round-trips through a worker unchanged"
-    (let (worker (spawn (selection--echo)))
-      (send worker [:spec (self) selection--shared-spec])
-      (assert= (first (selection--collect 1 nil)) selection--shared-spec)))
+    (let (worker (spawn (selection-echo)))
+      (send worker [:spec (self) selection-shared-spec])
+      (assert= (first (selection-collect 1 nil)) selection-shared-spec)))
   (test "a worker's update of the spec does not affect the sender's copy"
     (let (worker (spawn (receive ([:spec from spec] (send from [:echo (assoc spec :seed 999)])))))
-      (send worker [:spec (self) selection--shared-spec])
-      (let (returned (first (selection--collect 1 nil)))
+      (send worker [:spec (self) selection-shared-spec])
+      (let (returned (first (selection-collect 1 nil)))
         (and (assert= (get returned :seed) 999)
-          (assert= (get selection--shared-spec :seed) 42)))))
+          (assert= (get selection-shared-spec :seed) 42)))))
   (test "tag vectors survive the heap boundary"
-    (let (worker (spawn (selection--echo)))
+    (let (worker (spawn (selection-echo)))
       (send worker [:spec (self) [:fast :slow]])
-      (assert= (first (selection--collect 1 nil)) [:fast :slow])))
+      (assert= (first (selection-collect 1 nil)) [:fast :slow])))
   (test "many workers select against the same shared global and agree"
     (let (me (self)
           spec {:only (list ["slow" ""])})
-      (fold (fn (_ _i) (spawn (selection--worker me spec selection--units))) nil (range 0 6))
-      (let (results (selection--collect 6 nil))
+      (fold (fn (_ _i) (spawn (selection-worker me spec selection-units))) nil (range 0 6))
+      (let (results (selection-collect 6 nil))
         (and (assert= (count results) 6)
-          (is (fold (fn (ok r) (and ok (= (selection--labels r) (list "math › multiplies"))))
+          (is (fold (fn (ok r) (and ok (= (selection-labels r) (list "math › multiplies"))))
                 true results)))))))
 
 ;; --- output formatters (nest test --formatter) --------------------------------
 ;; The formatters are pure `(results elapsed)` printers over the result tuple
 ;; `(group name fails ms skipped where)`; here we build fake results and capture
 ;; their output. The end-to-end wiring is exercised by `nest test --formatter tap`.
-(defn tsel--pass (name) (list "grp" name nil 5 false ""))
-(defn tsel--fail (name) (list "grp" name (list (list nil (list "boom"))) 3 false ""))
-(defn tsel--has? (haystack needle) (>= (index-of haystack needle) 0))
+(defn- tsel-pass (name) (list "grp" name nil 5 false ""))
+(defn- tsel-fail (name) (list "grp" name (list (list nil (list "boom"))) 3 false ""))
+(defn- tsel-has? (haystack needle) (>= (index-of haystack needle) 0))
 
 (describe "test formatters: registry"
   (test "the built-ins are registered and register-test-formatter adds more"
@@ -335,17 +339,17 @@
 
 (describe "test formatters: TAP"
   (test "emits a version line, a plan, and ok/not ok per test"
-    (let (out (with-out-str (test/test--fmt-tap (list (tsel--pass "a") (tsel--fail "b")) 10)))
-      (is (tsel--has? out "TAP version 13"))
-      (is (tsel--has? out "1..2"))
-      (is (tsel--has? out "ok 1 - grp › a"))
-      (is (tsel--has? out "not ok 2 - grp › b"))
+    (let (out (with-out-str (test/test-fmt-tap (list (tsel-pass "a") (tsel-fail "b")) 10)))
+      (is (tsel-has? out "TAP version 13"))
+      (is (tsel-has? out "1..2"))
+      (is (tsel-has? out "ok 1 - grp › a"))
+      (is (tsel-has? out "not ok 2 - grp › b"))
       ;; a failure's detail rides along as a # comment
-      (is (tsel--has? out "# boom")))))
+      (is (tsel-has? out "# boom")))))
 
 (describe "test formatters: JSON"
   (test "emits one object with the run totals"
-    (let (out (with-out-str (test/test--fmt-json (list (tsel--pass "a") (tsel--fail "b")) 10)))
-      (is (tsel--has? out "\"total\":2"))
-      (is (tsel--has? out "\"passed\":1"))
-      (is (tsel--has? out "\"failed\":1")))))
+    (let (out (with-out-str (test/test-fmt-json (list (tsel-pass "a") (tsel-fail "b")) 10)))
+      (is (tsel-has? out "\"total\":2"))
+      (is (tsel-has? out "\"passed\":1"))
+      (is (tsel-has? out "\"failed\":1")))))

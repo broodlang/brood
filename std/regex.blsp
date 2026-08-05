@@ -38,12 +38,13 @@ backreferences yet.")
 ;; :a atom}`. Atoms are tagged maps: {:t :lit :c c} {:t :any} {:t :bol} {:t :eol}
 ;; {:t :set :neg b :chars (…)} {:t :class :k :digit/:word/:space} {:t :group :alt …}.
 
-(defn regex--peek (pcs i) (if (< i (count pcs)) (nth pcs i) nil))
+(defn- regex-peek (pcs i) (if (< i (count pcs)) (nth pcs i) nil))
 
 ; \. \* \\ … → that char, literal
-(defn regex--escape (pcs i)
+(defn- regex-escape
+  (pcs i)
   "Parse the atom after a backslash at `i`; returns [atom next]."
-  (let (c (regex--peek pcs i))
+  (let (c (regex-peek pcs i))
     (cond
       (= c "d") [{:t :class :k :digit} (inc i)]
       (= c "w") [{:t :class :k :word} (inc i)]
@@ -51,43 +52,47 @@ backreferences yet.")
       (nil? c) [{:t :lit :c "\\"} i]
       ; trailing backslash → literal
       else [{:t :lit :c c} (inc i)])))
-(defn regex--set-chars (pcs i acc)
+(defn- regex-set-chars
+  (pcs i acc)
   "Collect set members until the closing `]`; returns [chars next]."
-  (let (c (regex--peek pcs i))
+  (let (c (regex-peek pcs i))
     (cond
       (nil? c) [acc i]
       ; unterminated set → take what we have
       (= c "]") [acc (inc i)]
       ; consume the ]
-      else (regex--set-chars pcs (inc i) (cons c acc)))))
+      else (regex-set-chars pcs (inc i) (cons c acc)))))
 
-(defn regex--set (pcs i)
+(defn- regex-set
+  (pcs i)
   "Parse a `[...]` set whose body starts at `i` (just past `[`); returns [atom next]."
-  (let (neg (= (regex--peek pcs i) "^")
+  (let (neg (= (regex-peek pcs i) "^")
         start (if neg (inc i) i)
-        [chars nxt] (regex--set-chars pcs start (list)))
+        [chars nxt] (regex-set-chars pcs start (list)))
     ;; Store members as a STRING so membership is a native `includes?` (one
     ;; Rust scan) instead of `any?` walking a list of 1-char strings per input char.
     [{:t :set :neg neg :chars (apply str chars)} nxt]))
 
-(defn regex--atom (pcs i)
+(defn- regex-atom
+  (pcs i)
   "Parse one atom at `i`; returns [atom next]."
-  (let (c (regex--peek pcs i))
+  (let (c (regex-peek pcs i))
     (cond
-      (= c "(") (let ([alt nxt] (regex--alt pcs (inc i)))
+      (= c "(") (let ([alt nxt] (regex-alt pcs (inc i)))
                   [{:t :group :alt alt} (inc nxt)])
       ; (inc nxt) skips the ')'
-      (= c "[") (regex--set pcs (inc i))
+      (= c "[") (regex-set pcs (inc i))
       (= c ".") [{:t :any} (inc i)]
       (= c "^") [{:t :bol} (inc i)]
       (= c "$") [{:t :eol} (inc i)]
-      (= c "\\") (regex--escape pcs (inc i))
+      (= c "\\") (regex-escape pcs (inc i))
       else [{:t :lit :c c} (inc i)])))
 
-(defn regex--piece (pcs i)
+(defn- regex-piece
+  (pcs i)
   "Parse an atom plus an optional quantifier; returns [piece next]."
-  (let ([atom i2] (regex--atom pcs i)
-        q (regex--peek pcs i2))
+  (let ([atom i2] (regex-atom pcs i)
+        q (regex-peek pcs i2))
     (cond
       (= q "*") [{:q :star :a atom} (inc i2)]
       (= q "+") [{:q :plus :a atom} (inc i2)]
@@ -96,28 +101,31 @@ backreferences yet.")
 
 ;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
 (check-allow :non-tail-recursion
-  (defn regex--seq (pcs i)
+  (defn- regex-seq
+    (pcs i)
     "Parse a branch — pieces until `|`, `)`, or end; returns [pieces next]."
-    (let (c (regex--peek pcs i))
+    (let (c (regex-peek pcs i))
       (if (or (nil? c) (= c "|") (= c ")"))
         [(list) i]
-        (let ([piece i2] (regex--piece pcs i)
-              [rest i3] (regex--seq pcs i2))
+        (let ([piece i2] (regex-piece pcs i)
+              [rest i3] (regex-seq pcs i2))
           [(cons piece rest) i3])))))
 
 ;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
 (check-allow :non-tail-recursion
-  (defn regex--alt (pcs i)
+  (defn- regex-alt
+    (pcs i)
     "Parse an alternation — branches separated by `|`; returns [branches next]."
-    (let ([branch i2] (regex--seq pcs i))
-      (if (= (regex--peek pcs i2) "|")
-        (let ([rest i3] (regex--alt pcs (inc i2)))
+    (let ([branch i2] (regex-seq pcs i))
+      (if (= (regex-peek pcs i2) "|")
+        (let ([rest i3] (regex-alt pcs (inc i2)))
           [(cons branch rest) i3])
         [(list branch) i2]))))
 
-(defn regex--parse (pattern)
+(defn- regex-parse
+  (pattern)
   "Parse `pattern` into its list of top-level branches."
-  (first (regex--alt (apply vector (string->list pattern)) 0)))
+  (first (regex-alt (apply vector (string->list pattern)) 0)))
 
 ;; ---- compile: AST -> Thompson NFA -------------------------------------------
 ;; The NFA is a flat vector of STATES; index 0 is always the accepting `:match`
@@ -136,11 +144,13 @@ backreferences yet.")
 ;; (`*`/`+`) reserve their split slot first (a placeholder appended so the index is
 ;; live), compile the body pointing back at it, then `assoc` the real split in.
 
-(defn regex--push (states st)
+(defn- regex-push
+  (states st)
   "Append state `st`; return [its-index states']."
   [(count states) (into states [st])])
 
-(defn regex--atom->test (a)
+(defn- regex-atom->test
+  (a)
   "The char-predicate `test` for a consuming atom (lit/any/set/class)."
   (let (t (get a :t))
     (cond
@@ -150,64 +160,69 @@ backreferences yet.")
       (= t :class) {:kind :class :k (get a :k)}
       else {:kind :any})))
 
-(defn regex--nfa-atom (a nx states)
+(defn- regex-nfa-atom
+  (a nx states)
   "Compile one atom into states leading to `nx`; returns [start states']."
   (let (t (get a :t))
     (cond
-      (= t :group) (regex--nfa-alt (get a :alt) nx states)
-      (= t :bol) (regex--push states {:t :bol :next nx})
-      (= t :eol) (regex--push states {:t :eol :next nx})
-      else (regex--push states {:t :char :test (regex--atom->test a) :next nx}))))
+      (= t :group) (regex-nfa-alt (get a :alt) nx states)
+      (= t :bol) (regex-push states {:t :bol :next nx})
+      (= t :eol) (regex-push states {:t :eol :next nx})
+      else (regex-push states {:t :char :test (regex-atom->test a) :next nx}))))
 
-(defn regex--nfa-piece (p nx states)
+(defn- regex-nfa-piece
+  (p nx states)
   "Compile a piece (atom + optional quantifier) leading to `nx`; [start states']."
   (let (q (get p :q))
     (cond
-      (nil? q) (regex--nfa-atom p nx states)
+      (nil? q) (regex-nfa-atom p nx states)
       (= q :opt)
-        (let ([as st1] (regex--nfa-atom (get p :a) nx states))
-          (regex--push st1 {:t :split :a as :b nx}))
+        (let ([as st1] (regex-nfa-atom (get p :a) nx states))
+          (regex-push st1 {:t :split :a as :b nx}))
       ;; `*`: L = split(body, nx); body loops back to L; enter at L (zero-or-more).
       (= q :star)
         (let (li (count states)
               st0 (into states [{:t :split :a 0 :b 0}])
-              [as st1] (regex--nfa-atom (get p :a) li st0)
+              [as st1] (regex-nfa-atom (get p :a) li st0)
               st2 (assoc st1 li {:t :split :a as :b nx}))
           [li st2])
       ;; `+`: same wiring, but enter at the body (one required), then L loops.
       (= q :plus)
         (let (li (count states)
               st0 (into states [{:t :split :a 0 :b 0}])
-              [as st1] (regex--nfa-atom (get p :a) li st0)
+              [as st1] (regex-nfa-atom (get p :a) li st0)
               st2 (assoc st1 li {:t :split :a as :b nx}))
           [as st2])
-      else (regex--nfa-atom p nx states))))
+      else (regex-nfa-atom p nx states))))
 
 ;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
 (check-allow :non-tail-recursion
-  (defn regex--nfa-seq (pieces nx states)
+  (defn- regex-nfa-seq
+    (pieces nx states)
     "Chain a branch's pieces; each piece's exit is the next piece's start. [start states']."
     (if (empty? pieces)
       [nx states]
-      (let ([rest-start st1] (regex--nfa-seq (rest pieces) nx states))
-        (regex--nfa-piece (first pieces) rest-start st1)))))
+      (let ([rest-start st1] (regex-nfa-seq (rest pieces) nx states))
+        (regex-nfa-piece (first pieces) rest-start st1)))))
 
 ;; check-allow: deliberately non-tail — depth = pattern nesting, not subject length.
 (check-allow :non-tail-recursion
-  (defn regex--nfa-alt (branches nx states)
+  (defn- regex-nfa-alt
+    (branches nx states)
     "Fan out over alternation branches with `:split` states; returns [start states']."
     (cond
       (empty? branches) [nx states]
-      (empty? (rest branches)) (regex--nfa-seq (first branches) nx states)
+      (empty? (rest branches)) (regex-nfa-seq (first branches) nx states)
       else
-        (let ([b-start st1] (regex--nfa-seq (first branches) nx states)
-              [rest-start st2] (regex--nfa-alt (rest branches) nx st1))
-          (regex--push st2 {:t :split :a b-start :b rest-start})))))
+        (let ([b-start st1] (regex-nfa-seq (first branches) nx states)
+              [rest-start st2] (regex-nfa-alt (rest branches) nx st1))
+          (regex-push st2 {:t :split :a b-start :b rest-start})))))
 
-(defn regex--nfa (branches)
+(defn- regex-nfa
+  (branches)
   "Compile the parsed branch list into {:states vec :start idx :match idx}."
   (let (states0 [{:t :match}]
-        [start st] (regex--nfa-alt branches 0 states0))
+        [start st] (regex-nfa-alt branches 0 states0))
     {:states st :start start :match 0}))
 
 ;; A pattern is almost always a literal reused across many match calls (a loop, a
@@ -223,13 +238,15 @@ backreferences yet.")
 ;; (set, char) ever) and the n = 0 edge. Splitting it out cut the per-call
 ;; overhead ~5 µs → the benchmark's 20k short-string calls by ~two-thirds.
 ; pattern -> the small hot object
-(def regex--cache (table))
+(def- regex-cache (table))
 ; pattern -> {:states vec :start idx}
-(def regex--states-cache (table))
-(defn regex--states-of (pattern)
+(def- regex-states-cache (table))
+(defn- regex-states-of
+  (pattern)
   "The compiled state vector for an already-compiled `pattern` (slow paths only)."
-  (get (table-get regex--states-cache pattern) :states))
-(defn regex--compile (pattern)
+  (get (table-get regex-states-cache pattern) :states))
+(defn- regex-compile
+  (pattern)
   "Everything pattern-constant the HOT path needs, memoised across calls (the
 Erlang `re:compile` discipline: pay it once per pattern, never per match call).
 A 6-slot VECTOR, not a map — the per-call `table-get` clone of a small vector
@@ -244,21 +261,21 @@ is a flat copy (a CHAMP map rebuilds nodes), and the entry glue reads it with
   5 exitmemo   accept-closure memo — final set -> boolean.
 The state vector itself is cached separately (`regex--states-cache`) so this
 object's per-call clone-out stays a few words — see the cache note above."
-  (let (hit (table-get regex--cache pattern))
+  (let (hit (table-get regex-cache pattern))
     (if (nil? hit)
-      (let (nfa (regex--nfa (regex--parse pattern))
+      (let (nfa (regex-nfa (regex-parse pattern))
             states (get nfa :states)
             start (get nfa :start)
             m (count states)
             startbit (bit-shift-left 1 start)
             obj [m
                   (bit-shift-left 1 (get nfa :match))
-                  (regex--eps-close states startbit 0 1 m)
-                  (regex--eps-close-mid states startbit m)
+                  (regex-eps-close states startbit 0 1 m)
+                  (regex-eps-close-mid states startbit m)
                   (table)
                   (table)])
-        (table-put regex--states-cache pattern {:states states :start start})
-        (table-put regex--cache pattern obj)
+        (table-put regex-states-cache pattern {:states states :start start})
+        (table-put regex-cache pattern obj)
         obj)
       hit)))
 
@@ -267,18 +284,21 @@ object's per-call clone-out stays a few words — see the cache note above."
 ;; live. `bit-or` unions, `bit-shift-left` makes a singleton, `bit-positions` lists
 ;; the live states. No per-step allocation beyond the bitset ints.
 
-(defn regex--letter? (c)
+(defn- regex-letter?
+  (c)
   "ASCII/Unicode cased letter: upper-case ≠ lower-case."
   (not (= (upper c) (lower c))))
 
-(defn regex--class-match? (k c)
+(defn- regex-class-match?
+  (k c)
   (cond
     (= k :digit) (includes? "0123456789" c)
     (= k :space) (includes? " \t\n\r" c)
-    (= k :word) (or (regex--letter? c) (includes? "0123456789" c) (= c "_"))
+    (= k :word) (or (regex-letter? c) (includes? "0123456789" c) (= c "_"))
     else false))
 
-(defn regex--char-test? (test c)
+(defn- regex-char-test?
+  (test c)
   "Does the single char `c` satisfy a compiled `:char` state's `test`?"
   (let (k (get test :kind))
     (cond
@@ -286,12 +306,13 @@ object's per-call clone-out stays a few words — see the cache note above."
       (= k :lit) (= c (get test :c))
       (= k :set) (let (m (includes? (get test :chars) c))
                    (if (get test :neg) (not m) m))
-      (= k :class) (regex--class-match? (get test :k) c)
+      (= k :class) (regex-class-match? (get test :k) c)
       else false)))
 
-(defn regex--bit? (s i) (not (= 0 (bit-and s (bit-shift-left 1 i)))))
+(defn- regex-bit? (s i) (not (= 0 (bit-and s (bit-shift-left 1 i)))))
 
-(defn regex--eps-targets (states s i n)
+(defn- regex-eps-targets
+  (states s i n)
   "Epsilon successors of state `s` valid at position `i` (a bitset; 0 for none)."
   (let (st (nth states s) t (get st :t))
     (cond
@@ -305,59 +326,64 @@ object's per-call clone-out stays a few words — see the cache note above."
 ;; positions vector on every character. A `defn` helper is a global (no per-call
 ;; closure), so the whole per-char simulation allocates nothing but the bitset ints.
 
-(defn regex--eps-step (states set i n j m acc)
+(defn- regex-eps-step
+  (states set i n j m acc)
   "One epsilon-expansion pass over states j..m; returns the grown set."
   (if (>= j m)
     acc
-    (regex--eps-step states
+    (regex-eps-step states
       set
       i
       n
       (inc j)
       m
-      (if (regex--bit? set j) (bit-or acc (regex--eps-targets states j i n)) acc))))
+      (if (regex-bit? set j) (bit-or acc (regex-eps-targets states j i n)) acc))))
 
-(defn regex--eps-close (states set i n m)
+(defn- regex-eps-close
+  (states set i n m)
   "Expand epsilon moves (split/anchors) to a fixpoint at position `i`."
-  (let (grown (regex--eps-step states set i n 0 m set))
-    (if (= grown set) set (regex--eps-close states grown i n m))))
+  (let (grown (regex-eps-step states set i n 0 m set))
+    (if (= grown set) set (regex-eps-close states grown i n m))))
 
 ;; -- middle transition: split-only closure (position-independent, memoisable) --
 ;; Anchors (`^`/`$`) are excluded here — they fire only at the string boundaries
 ;; (handled once by the full `regex--eps-close` at start/accept), so the per-char
 ;; transition depends only on (state-set, char) and can be cached in the DFA memo.
 
-(defn regex--eps-step-mid (states set j m acc)
+(defn- regex-eps-step-mid
+  (states set j m acc)
   (if (>= j m)
     acc
-    (regex--eps-step-mid states
+    (regex-eps-step-mid states
       set
       (inc j)
       m
-      (if (regex--bit? set j)
+      (if (regex-bit? set j)
         (let (st (nth states j))
           (if (= (get st :t) :split)
             (bit-or acc (bit-or (bit-shift-left 1 (get st :a)) (bit-shift-left 1 (get st :b))))
             acc))
         acc))))
 
-(defn regex--eps-close-mid (states set m)
+(defn- regex-eps-close-mid
+  (states set m)
   "Split-only epsilon-closure fixpoint (no anchors)."
-  (let (grown (regex--eps-step-mid states set 0 m set))
-    (if (= grown set) set (regex--eps-close-mid states grown m))))
+  (let (grown (regex-eps-step-mid states set 0 m set))
+    (if (= grown set) set (regex-eps-close-mid states grown m))))
 
-(defn regex--step (states set c j m acc)
+(defn- regex-step
+  (states set c j m acc)
   "Consume char `c`: the (unclosed) successor set of every live `:char` state matching."
   (if (>= j m)
     acc
-    (regex--step states
+    (regex-step states
       set
       c
       (inc j)
       m
-      (if (regex--bit? set j)
+      (if (regex-bit? set j)
         (let (st (nth states j))
-          (if (if (= (get st :t) :char) (regex--char-test? (get st :test) c) false)
+          (if (if (= (get st :t) :char) (regex-char-test? (get st :test) c) false)
             (bit-or acc (bit-shift-left 1 (get st :next)))
             acc))
         acc))))
@@ -367,12 +393,13 @@ object's per-call clone-out stays a few words — see the cache note above."
 ;; vector-ref prim), the packed memo key `(+ (* set 2097152) code)` (int arith),
 ;; `table-get` (a table prim), and the self tail call. No per-char Brood→Brood
 ;; call and no `char->int` call — which is what lets the whole loop JIT-tier.
-(defn regex--delta-slow (states memo m set code)
+(defn- regex-delta-slow
+  (states memo m set code)
   "The DFA-transition MISS path: compute the split-closed successor of `set` on
 char-code `code` (an NFA step + closure over the char), memoise it, return it.
 Runs once per distinct (set, char) — every repeat is the loop's one `table-get`."
   (let (c (int->char code)
-        nxt (regex--eps-close-mid states (regex--step states set c 0 m 0) m))
+        nxt (regex-eps-close-mid states (regex-step states set c 0 m 0) m))
     (table-put memo (+ (* set 2097152) code) nxt)
     nxt))
 
@@ -381,8 +408,9 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table-get
 ;; `exitmemo`, so after warmup the loop's exit is one `table-get`. The closure is
 ;; computed with the (1, 1) position sentinel: for ANY n > 0, `i == n` makes `:eol`
 ;; fire and `:bol` not — exactly what (i=1, n=1) reproduces.
-(defn regex--exit-slow (states exitmemo m matchbit set)
-  (let (r (not (= 0 (bit-and (regex--eps-close states set 1 1 m) matchbit))))
+(defn- regex-exit-slow
+  (states exitmemo m matchbit set)
+  (let (r (not (= 0 (bit-and (regex-eps-close states set 1 1 m) matchbit))))
     (table-put exitmemo set r)
     r))
 
@@ -394,11 +422,12 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table-get
 ;; loops thread the PATTERN, not the state vector: states are fetched from
 ;; `regex--states-cache` only on a memo miss / exit-first-sight (once per
 ;; distinct (set, char) ever), keeping the per-call table clone small.
-(defn regex--exit (pattern exitmemo m matchbit set)
+(defn- regex-exit
+  (pattern exitmemo m matchbit set)
   "End-of-input accept test: the memoised exit closure, computing on first sight."
   (let (r (table-get exitmemo set))
     (if (nil? r)
-      (regex--exit-slow (regex--states-of pattern) exitmemo m matchbit set)
+      (regex-exit-slow (regex-states-of pattern) exitmemo m matchbit set)
       r)))
 
 ;; NOTE the `nxt2` let-hoist in both loops: computing the `if` INSIDE the
@@ -411,30 +440,32 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table-get
 ;; slot read and the loop runs native. (Engine follow-up: per-leader slot
 ;; passthrough across block boundaries would make the natural style equally
 ;; fast — see docs/devlog.md 2026-07-17.)
-(defn regex--run-anchored-loop (pattern exitmemo memo m matchbit codes n i set)
+(defn- regex-run-anchored-loop
+  (pattern exitmemo memo m matchbit codes n i set)
   (if (= i n)
-    (regex--exit pattern exitmemo m matchbit set)
+    (regex-exit pattern exitmemo m matchbit set)
     (if (= set 0)
       false
       (let (nxt (table-get memo (+ (* set 2097152) (nth codes i)))
             nxt2 (if (nil? nxt)
-                   (regex--delta-slow (regex--states-of pattern) memo m set (nth codes i))
+                   (regex-delta-slow (regex-states-of pattern) memo m set (nth codes i))
                    nxt))
-        (regex--run-anchored-loop pattern exitmemo memo m matchbit codes n (+ i 1) nxt2)))))
+        (regex-run-anchored-loop pattern exitmemo memo m matchbit codes n (+ i 1) nxt2)))))
 
 ;; unanchored search (match?): inject the (split-closed) start state at every
 ;; position so a match may begin anywhere; `^` fires only in the start closure
 ;; (position 0), `$` only in the exit closure at position n.
-(defn regex--run-search-loop (pattern exitmemo memo m startmid matchbit codes n i set)
+(defn- regex-run-search-loop
+  (pattern exitmemo memo m startmid matchbit codes n i set)
   (if (not (= 0 (bit-and set matchbit)))
     true
     (if (>= i n)
-      (regex--exit pattern exitmemo m matchbit set)
+      (regex-exit pattern exitmemo m matchbit set)
       (let (nxt (table-get memo (+ (* set 2097152) (nth codes i)))
             nxt2 (if (nil? nxt)
-                   (regex--delta-slow (regex--states-of pattern) memo m set (nth codes i))
+                   (regex-delta-slow (regex-states-of pattern) memo m set (nth codes i))
                    nxt))
-        (regex--run-search-loop pattern
+        (regex-run-search-loop pattern
           exitmemo
           memo
           m
@@ -449,23 +480,24 @@ Runs once per distinct (set, char) — every repeat is the loop's one `table-get
 ;; The n == 0 edge (empty input) is the one case where the precomputed closures
 ;; are wrong (`$` fires at position 0 too), so it recomputes both closures live.
 
-(defn regex--empty-input? (pattern matchbit)
+(defn- regex-empty-input?
+  (pattern matchbit)
   "Does the pattern match the empty string? (Both anchors fire at position 0.)"
-  (let (sobj (table-get regex--states-cache pattern)
+  (let (sobj (table-get regex-states-cache pattern)
         states (get sobj :states)
         m (count states)
-        set (regex--eps-close states (bit-shift-left 1 (get sobj :start)) 0 0 m))
+        set (regex-eps-close states (bit-shift-left 1 (get sobj :start)) 0 0 m))
     (not (= 0 (bit-and set matchbit)))))
 
 (defn match? (pattern s)
   "True if `pattern` matches anywhere in `s` (a search). `^`/`$` anchor to the
 start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a suffix."
-  (let (obj (regex--compile pattern)
+  (let (obj (regex-compile pattern)
         codes (string->codepoints s)
         n (count codes))
     (if (= n 0)
-      (regex--empty-input? pattern (nth obj 1))
-      (regex--run-search-loop pattern
+      (regex-empty-input? pattern (nth obj 1))
+      (regex-run-search-loop pattern
         (nth obj 5)
         (nth obj 4)
         (nth obj 0)
@@ -478,12 +510,12 @@ start/end of the whole string, so e.g. `(match? \"\\\\.blsp$\" name)` tests a su
 
 (defn matches? (pattern s)
   "True if `pattern` matches the **entire** string `s` (anchored both ends)."
-  (let (obj (regex--compile pattern)
+  (let (obj (regex-compile pattern)
         codes (string->codepoints s)
         n (count codes))
     (if (= n 0)
-      (regex--empty-input? pattern (nth obj 1))
-      (regex--run-anchored-loop pattern
+      (regex-empty-input? pattern (nth obj 1))
+      (regex-run-anchored-loop pattern
         (nth obj 5)
         (nth obj 4)
         (nth obj 0)

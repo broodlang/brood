@@ -77,18 +77,20 @@
     ;; and nothing in the default-mode suite would notice.
     (dolist (m (list "path" "json" "set"))
       (let (lines (string-split (or (%builtin-module m) "") "\n"))
-        (assert= (sig--misplaced lines) nil)))))
+        (assert= (sig-misplaced lines) nil)))))
 
 ;; Does line `b` define the name `(sig NAME …)` line `a` declares? That adjacency is
 ;; the placement that breaks under contracts mode.
-(defn sig--above-def? (a b)
+(defn- sig-above-def?
+  (a b)
   (and (starts-with? a "(sig ")
     (let (nm (second (string-split a " ")))
       (or (starts-with? b (str "(defn " nm " ")) (starts-with? b (str "(def " nm " "))))))
 
 ;; Every misplaced `(sig …)` line in `lines` (empty when the invariant holds).
-(defn sig--misplaced (lines)
-  (keep (fn (pair) (let ([a b] pair) (when (sig--above-def? a b) a)))
+(defn- sig-misplaced
+  (lines)
+  (keep (fn (pair) (let ([a b] pair) (when (sig-above-def? a b) a)))
     (zip lines (rest lines))))
 
 ;; ---- occurrence typing: inferred params check callers, zero annotations (ADR-190) ----

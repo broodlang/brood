@@ -94,23 +94,26 @@ fine for position queries, but don't feed the returned spans to `eval` unchecked
 ;; whether a `(` sits inside an unterminated string), and interpreted that pass made every
 ;; structural query O(pos) at char-recursion cost.
 
-(defn sexp--open? (c) (or (= c "(") (= c "[") (= c "{")))
-(defn sexp--close? (c) (or (= c ")") (= c "]") (= c "}")))
+(defn- sexp-open? (c) (or (= c "(") (= c "[") (= c "{")))
+(defn- sexp-close? (c) (or (= c ")") (= c "]") (= c "}")))
 
-(defn sexp--str-end (text i n)
+(defn- sexp-str-end
+  (text i n)
   "Index just past the closing `\"` of a string whose first content char is at `i`
 (escapes via `\\` skipped), or `n` if it runs to the end."
   (cond
     (>= i n) n
-    (= (char-at text i) "\\") (sexp--str-end text (+ i 2) n)
+    (= (char-at text i) "\\") (sexp-str-end text (+ i 2) n)
     (= (char-at text i) "\"") (inc i)
-    else (sexp--str-end text (inc i) n)))
+    else (sexp-str-end text (inc i) n)))
 
-(defn sexp--eol (text i n)
+(defn- sexp-eol
+  (text i n)
   "Index just past the next newline at or after `i`, or `n` — skips a `;` comment tail."
-  (cond (>= i n) n (= (char-at text i) "\n") (inc i) else (sexp--eol text (inc i) n)))
+  (cond (>= i n) n (= (char-at text i) "\n") (inc i) else (sexp-eol text (inc i) n)))
 
-(defn sexp--scan (text i n depth left)
+(defn- sexp-scan
+  (text i n depth left)
   "Forward from `i`, skipping strings/comments and tracking bracket `depth`; returns the
 offset once `left` top-level forms have completed (depth returns to 0 after an open) or
 `n`. Finds a window end that covers the enclosing form and the one after it."
@@ -118,13 +121,13 @@ offset once `left` top-level forms have completed (depth returns to 0 after an o
     i
     (let (c (char-at text i))
       (cond
-        (= c "\"") (sexp--scan text (sexp--str-end text (inc i) n) n depth left)
-        (= c ";") (sexp--scan text (sexp--eol text (inc i) n) n depth left)
-        (sexp--open? c) (sexp--scan text (inc i) n (inc depth) left)
-        (sexp--close? c)
+        (= c "\"") (sexp-scan text (sexp-str-end text (inc i) n) n depth left)
+        (= c ";") (sexp-scan text (sexp-eol text (inc i) n) n depth left)
+        (sexp-open? c) (sexp-scan text (inc i) n (inc depth) left)
+        (sexp-close? c)
           (let (d (max 0 (dec depth)))
-            (sexp--scan text (inc i) n d (if (= d 0) (dec left) left)))
-        else (sexp--scan text (inc i) n depth left)))))
+            (sexp-scan text (inc i) n d (if (= d 0) (dec left) left)))
+        else (sexp-scan text (inc i) n depth left)))))
 
 (defn narrow (text point)
   "`[base sub]` — `text` sliced to the top-level forms around `point` (the previous,
@@ -138,7 +141,7 @@ cost of ~three forms, not the whole buffer."
         ;; calls, and the second re-walked the prefix the first had already covered — the
         ;; dominant cost of every structural motion, paid twice (2026-08-04).
         [base start] (scan-form-start-2 text (min p (max 0 (dec n))))
-        end (sexp--scan text base n 0 3))
+        end (sexp-scan text base n 0 3))
     [base (substring text base end)]))
 
 ;; ---- pure navigation: (text point) -> point ---------------------------------
@@ -146,12 +149,14 @@ cost of ~three forms, not the whole buffer."
 ;; The sibling walk is one shape parameterised by which siblings count: `forward-sexp`
 ;; steps over every form, `forward-list` over the containers only (Emacs' sexp/list pair).
 
-(defn sexp--anything? (anode) "Every form counts — the `forward-sexp` sibling filter." true)
-(defn sexp--list? (anode)
+(defn- sexp-anything? (anode) "Every form counts — the `forward-sexp` sibling filter." true)
+(defn- sexp-list?
+  (anode)
   "A container form — the `forward-list` sibling filter (and what `down-list` descends)."
   (container-kind? (get anode :kind)))
 
-(defn sexp--sibling-forward (text point keep?)
+(defn- sexp-sibling-forward
+  (text point keep?)
   "End of the next sibling form satisfying `keep?` starting at or after `point`, within the
 enclosing list; `point` when there is none. The shared body of the forward motions."
   (let ([base sub] (narrow text point)
@@ -160,7 +165,8 @@ enclosing list; `point` when there is none. The shared body of the forward motio
         nxt (find (fn (f) (and (>= (get f :start) rp) (keep? f))) (forms-of enc)))
     (if (nil? nxt) point (+ base (get nxt :end)))))
 
-(defn sexp--sibling-backward (text point keep?)
+(defn- sexp-sibling-backward
+  (text point keep?)
   "Start of the previous sibling form satisfying `keep?` ending at or before `point`, within
 the enclosing list; `point` when there is none. The shared body of the backward motions."
   (let ([base sub] (narrow text point)
@@ -172,21 +178,21 @@ the enclosing list; `point` when there is none. The shared body of the backward 
 (defn point-forward (text point)
   "End of the next sexp at or after `point` within the enclosing list; unchanged if
 there is none (the Emacs `forward-sexp`)."
-  (sexp--sibling-forward text point sexp--anything?))
+  (sexp-sibling-forward text point sexp-anything?))
 
 (defn point-backward (text point)
   "Start of the previous sexp ending at or before `point` (Emacs `backward-sexp`)."
-  (sexp--sibling-backward text point sexp--anything?))
+  (sexp-sibling-backward text point sexp-anything?))
 
 (defn point-list-forward (text point)
   "End of the next LIST at or after `point` within the enclosing list — atoms are stepped
 over, not stopped at (Emacs `forward-list`, C-M-n); unchanged if there is none."
-  (sexp--sibling-forward text point sexp--list?))
+  (sexp-sibling-forward text point sexp-list?))
 
 (defn point-list-backward (text point)
   "Start of the previous LIST ending at or before `point` — atoms stepped over (Emacs
 `backward-list`, C-M-p); unchanged if there is none."
-  (sexp--sibling-backward text point sexp--list?))
+  (sexp-sibling-backward text point sexp-list?))
 
 (defn point-up (text point)
   "Start of the enclosing list — before its opening delimiter (Emacs
@@ -208,10 +214,11 @@ none."
   (let ([base sub] (narrow text point)
         rp (- point base)
         enc (enclosing (tree sub) rp)
-        lst (find (fn (f) (and (sexp--list? f) (>= (get f :start) rp))) (forms-of enc)))
+        lst (find (fn (f) (and (sexp-list? f) (>= (get f :start) rp))) (forms-of enc)))
     (if (nil? lst) point (+ base (get lst :start) 1))))
 
-(defn sexp--defun-edge (text point edge)
+(defn- sexp-defun-edge
+  (text point edge)
   "The `edge` (`:start` / `:end`) of the top-level form containing `point`; `point` when
 `point` isn't within one. The shared body of `point-defun-start` / `point-defun-end`."
   (let ([base sub] (narrow text point)
@@ -223,12 +230,12 @@ none."
 (defn point-defun-start (text point)
   "Start of the top-level form containing `point` (Emacs `beginning-of-defun`);
 unchanged if `point` isn't within one."
-  (sexp--defun-edge text point :start))
+  (sexp-defun-edge text point :start))
 
 (defn point-defun-end (text point)
   "End of the top-level form containing `point` (Emacs `end-of-defun`, C-M-e);
 unchanged if `point` isn't within one."
-  (sexp--defun-edge text point :end))
+  (sexp-defun-edge text point :end))
 
 ;; ---- pure structural edits: (text point) -> [new-text new-point] ------------
 ;; The paredit family. Each computes the whole new text plus where point should land,
@@ -240,7 +247,8 @@ unchanged if `point` isn't within one."
 ;; `parent` is found with the same `(enclosing tr (get enc :start))` idiom the indenter
 ;; uses — a top-level form's parent is the root, so slurp/barf reach the next top form.
 
-(defn sexp--enc-of (text point)
+(defn- sexp-enc-of
+  (text point)
   "The deepest container enclosing `point`, or nil when that's the root (no list to
 edit). Wrapped in `[tr enc]` so callers reuse the one tree for parent/child lookups."
   (let (tr (tree text)
@@ -250,7 +258,7 @@ edit). Wrapped in `[tr enc]` so callers reuse the one tree for parent/child look
 (defn point-slurp-forward (text point)
   "Pull the sibling form *after* the enclosing list inside it — move the close
 delimiter past that form (Emacs/paredit `forward-slurp-sexp`)."
-  (let (ctx (sexp--enc-of text point))
+  (let (ctx (sexp-enc-of text point))
     (if (nil? ctx)
       nil
       (let ([tr enc] ctx
@@ -269,7 +277,7 @@ delimiter past that form (Emacs/paredit `forward-slurp-sexp`)."
 (defn point-barf-forward (text point)
   "Expel the last form of the enclosing list — move the close delimiter in past the
 form before it (paredit `forward-barf-sexp`); point stays inside the list."
-  (let (ctx (sexp--enc-of text point))
+  (let (ctx (sexp-enc-of text point))
     (if (nil? ctx)
       nil
       (let ([tr enc] ctx
@@ -290,7 +298,7 @@ form before it (paredit `forward-barf-sexp`); point stays inside the list."
 (defn point-slurp-backward (text point)
   "Pull the sibling form *before* the enclosing list inside it — move the open
 delimiter back over that form (paredit `backward-slurp-sexp`)."
-  (let (ctx (sexp--enc-of text point))
+  (let (ctx (sexp-enc-of text point))
     (if (nil? ctx)
       nil
       (let ([tr enc] ctx
@@ -309,7 +317,7 @@ delimiter back over that form (paredit `backward-slurp-sexp`)."
 (defn point-barf-backward (text point)
   "Expel the first form of the enclosing list — move the open delimiter in past the
 form after it (paredit `backward-barf-sexp`); point stays inside the list."
-  (let (ctx (sexp--enc-of text point))
+  (let (ctx (sexp-enc-of text point))
     (if (nil? ctx)
       nil
       (let ([tr enc] ctx
@@ -331,7 +339,7 @@ form after it (paredit `backward-barf-sexp`); point stays inside the list."
 (defn point-raise (text point)
   "Replace the enclosing list with the child form point is in/on, deleting that
 form's siblings (paredit `raise-sexp`)."
-  (let (ctx (sexp--enc-of text point))
+  (let (ctx (sexp-enc-of text point))
     (if (nil? ctx)
       nil
       (let ([tr enc] ctx
@@ -351,7 +359,7 @@ form's siblings (paredit `raise-sexp`)."
 (defn point-splice (text point)
   "Remove the enclosing list's delimiters, keeping its contents (paredit
 `splice-sexp`)."
-  (let (ctx (sexp--enc-of text point))
+  (let (ctx (sexp-enc-of text point))
     (if (nil? ctx)
       nil
       (let ([tr enc] ctx
@@ -403,9 +411,10 @@ at `next.end` (the whitespace between the two forms is preserved in place)."
 
 ;; ---- structure-aware kill bound ---------------------------------------------
 
-(defn sexp--line-end (text i n)
+(defn- sexp-line-end
+  (text i n)
   "Offset of the next newline at or after `i`, or `n` (end of text)."
-  (cond (>= i n) n (= (char-at text i) "\n") i else (sexp--line-end text (inc i) n)))
+  (cond (>= i n) n (= (char-at text i) "\n") i else (sexp-line-end text (inc i) n)))
 
 ; list spans lines → kill to end of line
 (defn point-kill-end (text point)
@@ -413,7 +422,7 @@ at `next.end` (the whitespace between the two forms is preserved in place)."
 but never past the enclosing list's closing delimiter — so a kill never breaks the
 parens. At end of line, kills the newline. At least `point` (a no-op at the close)."
   (let (n (string-length text)
-        le (sexp--line-end text point n)
+        le (sexp-line-end text point n)
         enc (enclosing (tree text) point))
     (if (= (get enc :kind) :root)
       (if (= point le) (min n (inc point)) le)
@@ -426,7 +435,8 @@ parens. At end of line, kills the newline. At least `point` (a no-op at the clos
           else le)))))
 ;; ---- buffer commands: (buf key) -> buf (bind these in a keymap) -------------
 
-(defn sexp--apply-edit (buf result)
+(defn- sexp-apply-edit
+  (buf result)
   "Apply a pure edit `[new-text new-point]` to `buf` as one whole-buffer splice (a
 single undo unit), leaving point at `new-point`; `buf` unchanged when `result` is nil."
   (if (nil? result)
@@ -450,18 +460,18 @@ single undo unit), leaving point at `new-point`; `buf` unchanged when `result` i
   (goto-char buf (point-defun-end (buffer-text buf) (get buf :point))))
 
 (defn slurp-forward (buf key)
-  (sexp--apply-edit buf (point-slurp-forward (buffer-text buf) (get buf :point))))
+  (sexp-apply-edit buf (point-slurp-forward (buffer-text buf) (get buf :point))))
 (defn barf-forward (buf key)
-  (sexp--apply-edit buf (point-barf-forward (buffer-text buf) (get buf :point))))
+  (sexp-apply-edit buf (point-barf-forward (buffer-text buf) (get buf :point))))
 (defn slurp-backward (buf key)
-  (sexp--apply-edit buf (point-slurp-backward (buffer-text buf) (get buf :point))))
+  (sexp-apply-edit buf (point-slurp-backward (buffer-text buf) (get buf :point))))
 (defn barf-backward (buf key)
-  (sexp--apply-edit buf (point-barf-backward (buffer-text buf) (get buf :point))))
+  (sexp-apply-edit buf (point-barf-backward (buffer-text buf) (get buf :point))))
 (defn raise (buf key)
-  (sexp--apply-edit buf (point-raise (buffer-text buf) (get buf :point))))
+  (sexp-apply-edit buf (point-raise (buffer-text buf) (get buf :point))))
 (defn splice (buf key)
-  (sexp--apply-edit buf (point-splice (buffer-text buf) (get buf :point))))
+  (sexp-apply-edit buf (point-splice (buffer-text buf) (get buf :point))))
 (defn wrap-round (buf key)
-  (sexp--apply-edit buf (point-wrap-round (buffer-text buf) (get buf :point))))
+  (sexp-apply-edit buf (point-wrap-round (buffer-text buf) (get buf :point))))
 (defn transpose (buf key)
-  (sexp--apply-edit buf (point-transpose (buffer-text buf) (get buf :point))))
+  (sexp-apply-edit buf (point-transpose (buffer-text buf) (get buf :point))))

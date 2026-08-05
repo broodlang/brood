@@ -31,23 +31,25 @@
 (defmodule conformance-json-test (:use test) (:use corpus))
 (require 'json)
 
-(defn js--verdict (path)
+(defn- js-verdict
+  (path)
   "`:ok` if `path` parses as JSON, `:rejected` if anything refuses it."
   (try
     (do (json/json-parse (slurp path)) :ok)
     (catch e :rejected)))
 
-(defn js--kind (path) (substring (path-basename path) 0 1))
+(defn- js-kind (path) (substring (path-basename path) 0 1))
 
 ;; [oks rejects wrongs] for one class, where `wrongs` lists the offending basenames.
-(defn js--scan (files kind want oks rejects wrong)
+(defn- js-scan
+  (files kind want oks rejects wrong)
   (cond
     (nil? files) [oks rejects (reverse wrong)]
-    (not (= (js--kind (first files)) kind)) (js--scan (rest files) kind want oks rejects wrong)
+    (not (= (js-kind (first files)) kind)) (js-scan (rest files) kind want oks rejects wrong)
     else
-      (let (v (js--verdict (first files))
+      (let (v (js-verdict (first files))
             ok (= v :ok))
-        (js--scan (rest files)
+        (js-scan (rest files)
           kind
           want
           (if ok (inc oks) oks)
@@ -65,13 +67,13 @@
     (is (> (count (corpus-files "json")) 300)))
 
   (test "every y_ document parses"
-    (let ([oks _ wrong] (js--scan (corpus-files "json") "y" :ok 0 0 nil))
+    (let ([oks _ wrong] (js-scan (corpus-files "json") "y" :ok 0 0 nil))
       (is (> oks 80))
       (assert= (take 5 wrong) ())
       (assert= (count wrong) 0)))
 
   (test "every n_ document is rejected"
-    (let ([_ rejects wrong] (js--scan (corpus-files "json") "n" :rejected 0 0 nil))
+    (let ([_ rejects wrong] (js-scan (corpus-files "json") "n" :rejected 0 0 nil))
       (is (> rejects 150))
       (assert= (take 5 wrong) ())
       (assert= (count wrong) 0)))
@@ -79,7 +81,7 @@
   ;; No assertion on the verdict — the point is that an implementation-defined
   ;; document produces *a* verdict rather than hanging or killing the process.
   (test "every i_ document terminates with a verdict"
-    (let ([oks rejects wrong] (js--scan (corpus-files "json") "i" nil 0 0 nil))
+    (let ([oks rejects wrong] (js-scan (corpus-files "json") "i" nil 0 0 nil))
       (assert= wrong ())
       (is (> (+ oks rejects) 30)))))
 

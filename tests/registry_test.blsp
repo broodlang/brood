@@ -28,7 +28,8 @@
 (def *reg-writers* 200)
 
 ;; Fan `n` processes out over `f` (called with its index) and wait for all of them.
-(defn reg--fan (n f)
+(defn- reg-fan
+  (n f)
   (let (me (self))
     (dotimes (i n) (spawn (do (f i) (send me [:reg-done]))))
     (dotimes (_ n) (receive ([:reg-done] :ok) (after 30000 :timeout)))))
@@ -42,8 +43,8 @@
   ;; The mechanism itself, with its own control — so a regression cannot hide behind a
   ;; test that would pass even with the bug.
   (test "swap-registry! loses no updates where a plain def rebind does"
-    (reg--fan *reg-writers* (fn (i) (def *reg-plain* (assoc *reg-plain* i i))))
-    (reg--fan *reg-writers*
+    (reg-fan *reg-writers* (fn (i) (def *reg-plain* (assoc *reg-plain* i i))))
+    (reg-fan *reg-writers*
       (fn (i)
         (swap-registry! registry-test/*reg-swapped*
           (fn (m) (assoc m i i)))))
@@ -57,7 +58,7 @@
     ;; A counter is the sharpest form of this: every increment must survive, which is
     ;; only true if each retry recomputes from the current value.
     (def *reg-count* 0)
-    (reg--fan *reg-writers* (fn (_) (swap-registry! registry-test/*reg-count* (fn (n) (+ n 1)))))
+    (reg-fan *reg-writers* (fn (_) (swap-registry! registry-test/*reg-count* (fn (n) (+ n 1)))))
     (assert= *reg-writers* *reg-count*)))
 
 ;; ---- the converted std registries (KI-23), each under concurrent registration ------
@@ -66,7 +67,7 @@
   :isolated
 
   (test "def-face — every concurrently registered face is present"
-    (reg--fan *reg-writers* (fn (i) (def-face (keyword (str "rt/f" i)) {:fg :red})))
+    (reg-fan *reg-writers* (fn (i) (def-face (keyword (str "rt/f" i)) {:fg :red})))
     (assert= *reg-writers*
       (count (filter (fn (i) (map? (face (keyword (str "rt/f" i))))) (range *reg-writers*)))))
 
@@ -74,7 +75,7 @@
     ;; The read-modify-write is on the entry, not just the registry: each writer merges
     ;; one key into one shared face, so a lost update is a missing key.
     (def-face :rt/merged {:fg :red})
-    (reg--fan 64 (fn (i) (face-set :rt/merged {(keyword (str "k" i)) i})))
+    (reg-fan 64 (fn (i) (face-set :rt/merged {(keyword (str "k" i)) i})))
     (let (f (face :rt/merged))
       (assert= :red (get f :fg))
       (assert= 64 (count (filter (fn (i) (= i (get f (keyword (str "k" i))))) (range 64))))))
@@ -83,7 +84,7 @@
     ;; This is the shape that was failing repl_test 2 runs in 5: two concurrent
     ;; registrations of the same name each filtered the old list and each appended, so
     ;; the duplicate the API forbids survived.
-    (reg--fan 64
+    (reg-fan 64
       (fn (_)
         (register-repl-command {:names (list "rt-dup")
                                 :usage "u"
@@ -91,7 +92,7 @@
                                 :handler (fn (_) nil)})))
     (assert= 1 (count (filter (fn (c) (member? "rt-dup" (get c :names))) *repl-commands*)))
     ;; …while distinct names all survive.
-    (reg--fan 64
+    (reg-fan 64
       (fn (i)
         (register-repl-command {:names (list (str "rt-c" i))
                                 :usage "u"
@@ -104,7 +105,7 @@
                (range 64)))))
 
   (test "telemetry attach — concurrent attaches to one event all survive"
-    (reg--fan 64 (fn (i) (attach (str "rt-h" i) :rt/evt (fn (_e _m _md) nil))))
+    (reg-fan 64 (fn (i) (attach (str "rt-h" i) :rt/evt (fn (_e _m _md) nil))))
     (assert= 64 (count (get *telemetry-handlers* :rt/evt))))
 
   (test "telemetry attach — re-attaching an id replaces it across every bucket"
@@ -118,11 +119,11 @@
   (test "register-system-layer — idempotent even when two processes race the same ref"
     ;; The membership test has to be inside the transform: outside it, both processes
     ;; see the ref absent and both append.
-    (reg--fan 64 (fn (_) (register-system-layer :rt/sys)))
+    (reg-fan 64 (fn (_) (register-system-layer :rt/sys)))
     (assert= 1 (count (filter (fn (r) (= r :rt/sys)) *system-layers*))))
 
   (test "register-file-type — every concurrently registered rule is kept"
-    (reg--fan 64 (fn (i) (register-file-type (str ".rt" i) (keyword (str "rt/t" i)))))
+    (reg-fan 64 (fn (i) (register-file-type (str ".rt" i) (keyword (str "rt/t" i)))))
     (assert= 64
       (count (filter (fn (i)
                        (any? (fn (r) (= (get r :match) (str ".rt" i)))
@@ -130,7 +131,7 @@
                (range 64)))))
 
   (test "register-type-layers — every concurrently bound type is kept"
-    (reg--fan 64 (fn (i) (register-type-layers (keyword (str "rt/ty" i)) (list :rt/l))))
+    (reg-fan 64 (fn (i) (register-type-layers (keyword (str "rt/ty" i)) (list :rt/l))))
     (assert= 64
       (count (filter (fn (i) (= (list :rt/l) (layers-for-type (keyword (str "rt/ty" i)))))
                (range 64))))))

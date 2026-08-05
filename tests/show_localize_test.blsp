@@ -14,14 +14,16 @@
 ;; A money value — the struct a `money` library would export.
 (defrecord money (amount currency))
 
-(defn money--symbol (currency)
+(defn- money-symbol
+  (currency)
   (case currency :usd "$" :eur "€" :gbp "£" "?"))
 
 ;; Locale-aware rendering: en → "$10.50", de → "10,50 $" (comma decimal, trailing
 ;; symbol). Deliberately tiny — a real one would use a CLDR table.
-(defn money--render (m locale)
+(defn- money-render
+  (m locale)
   (let (n (to-fixed (get m :amount) 2)
-        symbol (money--symbol (get m :currency)))
+        symbol (money-symbol (get m :currency)))
     (case locale
       :de (str (replace n "." ",") " " symbol)
       (str symbol n))))
@@ -31,7 +33,7 @@
 (defability Localize (localize [self locale] :-> string))
 (impl Localize
   show-localize-test/money
-  (localize [m locale] (money--render m locale)))
+  (localize [m locale] (money-render m locale)))
 
 ;; `Display` reads the AMBIENT locale, so plain `(println money)` localizes — the op
 ;; stays 1-arg; the locale flows through the dynamic var, not an extra parameter.

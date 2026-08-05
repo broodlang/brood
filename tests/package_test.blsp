@@ -89,14 +89,14 @@
     (let (root (pkg-fixture-root))
       (pkg-write-project root
         "a" "a" "(defn f () 1)" " :dependencies [[b :path \"../b\"]]")
-      (assert= (package/package--manifest-deps (path-join root "project.blsp"))
+      (assert= (package/package-manifest-deps (path-join root "project.blsp"))
         (list (assoc (dep-path 'b "../b") :optional false)))))
   (test "a manifest without :dependencies yields nil"
     (let (root (pkg-fixture-root))
       (pkg-write-project root "a" "a" "(defn f () 1)" "")
-      (assert= (package/package--manifest-deps (path-join root "project.blsp")) nil)))
+      (assert= (package/package-manifest-deps (path-join root "project.blsp")) nil)))
   (test "a missing manifest yields nil"
-    (assert= (package/package--manifest-deps "/tmp/does-not-exist-xyz/project.blsp") nil)))
+    (assert= (package/package-manifest-deps "/tmp/does-not-exist-xyz/project.blsp") nil)))
 
 (describe "package: resolving :path deps"
   (test "a single path dep resolves to an entry with name/kind/path/sha/deps"
@@ -200,7 +200,7 @@
                           (list (dep-git 'ansi ansi-url "v2.0.0")
                             (dep-git 'greeter greeter-url "v1.0.0"))
                           nil)
-                idx (package/package--index-by-name entries))
+                idx (package/package-index-by-name entries))
             (assert= (sort (map (fn (e) (get e :name)) entries)) (list 'ansi 'greeter))
             (assert= (get (get idx 'ansi) :ref) "v2.0.0"))))))
   (test "two transitive :git deps at different refs, with no direct pin, error loudly"
@@ -401,7 +401,7 @@
           base (mock-registry-start (mock-registry-handler "greeter"
                                       "1.0.0" "greetings" checksum bytes)))
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
-      (let (e (package/package--resolve-registry app-dir (dep-registry 'greeter "1.0.0") nil base))
+      (let (e (package/package-resolve-registry app-dir (dep-registry 'greeter "1.0.0") nil base))
         (assert= (dep-kind e) :registry)
         (assert= (get e :version) "1.0.0")
         (assert= (get e :sha256) checksum)
@@ -425,7 +425,7 @@
                                       "extdep" "1.0.0" checksum wrapped-bytes)))
       (table-put cfg :base base)
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
-      (let (e (package/package--resolve-registry app-dir (dep-registry 'extdep "1.0.0") nil base))
+      (let (e (package/package-resolve-registry app-dir (dep-registry 'extdep "1.0.0") nil base))
         (assert= (dep-kind e) :registry)
         (assert= (get e :version) "1.0.0")
         (assert= (get e :sha256) checksum)
@@ -444,7 +444,7 @@
       (table-put cfg :base base)
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       (is (includes? (try
-                       (package/package--resolve-registry app-dir
+                       (package/package-resolve-registry app-dir
                          (dep-registry 'extbad "1.0.0")
                          nil
                          base)
@@ -471,7 +471,7 @@
                                         (net/http/not-found)))))
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       (is (includes? (try
-                       (package/package--resolve-registry app-dir
+                       (package/package-resolve-registry app-dir
                          (dep-registry 'evil "1.0.0")
                          nil
                          base)
@@ -485,7 +485,7 @@
           base (mock-registry-start (mock-registry-handler-signed "signdep"
                                       "1.0.0" checksum bytes signature pubkey)))
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
-      (let (e (package/package--resolve-registry app-dir (dep-registry 'signdep "1.0.0") nil base))
+      (let (e (package/package-resolve-registry app-dir (dep-registry 'signdep "1.0.0") nil base))
         (assert= (dep-kind e) :registry)
         ;; the verified signer's key is pinned on the entry and written into the lock row
         ;; (both the :pubkey keyword and its value appear in the lock vector)
@@ -504,7 +504,7 @@
                                       "1.0.0" checksum bytes bad-sig pubkey)))
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       ;; resolves anyway (advisory never blocks), and the extraction lands
-      (let (e (package/package--resolve-registry app-dir (dep-registry 'sigbad "1.0.0") nil base))
+      (let (e (package/package-resolve-registry app-dir (dep-registry 'sigbad "1.0.0") nil base))
         (assert= (get e :version) "1.0.0")
         (is (dir? (path-join (path-join app-dir "_deps") "sigbad"))))))
   (test "an unsigned release pins no key and leaves the lock uncluttered"
@@ -513,7 +513,7 @@
           [bytes checksum] (mock-package-tarball parent "plaindep")
           base (mock-registry-start (mock-registry-handler "plaindep" "1.0.0" "d" checksum bytes)))
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
-      (let (e (package/package--resolve-registry app-dir (dep-registry 'plaindep "1.0.0") nil base))
+      (let (e (package/package-resolve-registry app-dir (dep-registry 'plaindep "1.0.0") nil base))
         (assert= nil (get e :pubkey))
         (is (not (includes? (seq (dep-lock-vec e)) :pubkey))))))
   (test "a non-string signature/pubkey from the registry can't crash the install (advisory)"
@@ -538,7 +538,7 @@
                                                                             :dependencies []}))
                                           else (net/http/not-found))))))
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
-      (let (e (package/package--resolve-registry app-dir (dep-registry 'weird "1.0.0") nil base))
+      (let (e (package/package-resolve-registry app-dir (dep-registry 'weird "1.0.0") nil base))
         (assert= (get e :version) "1.0.0")
         (assert= nil (get e :pubkey)))))
   (test "a sha256 mismatch is refused"
@@ -549,7 +549,7 @@
           base (mock-registry-start (mock-registry-handler "greeter" "1.0.0" "d" "deadbeef" bytes)))
       (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
       (is (includes? (try
-                       (package/package--resolve-registry app-dir
+                       (package/package-resolve-registry app-dir
                          (dep-registry 'greeter "1.0.0")
                          nil
                          base)
@@ -559,7 +559,7 @@
     (let (app-dir (pkg-fixture-root)
           base (mock-registry-start (mock-registry-handler "greeter" "1.0.0" "d" "x" #b"")))
       (is (includes? (try
-                       (package/package--resolve-registry app-dir
+                       (package/package-resolve-registry app-dir
                          (dep-registry 'greeter "9.9.9")
                          nil
                          base)
@@ -567,19 +567,19 @@
             "no registry entry"))))
   (test "registry--get-json parses a 2xx body and reports an error status"
     (let (base (mock-registry-start (mock-registry-handler "greeter" "1.0.0" "greetings" "x" #b"")))
-      (match (package/registry--get-json (str base "/api/v1/packages?q=greet"))
+      (match (package/registry-get-json (str base "/api/v1/packages?q=greet"))
         ([:ok data] (assert= (get (first (get data :packages)) :name) "greeter")))
-      (match (package/registry--get-json (str base "/api/v1/packages/nope/releases/9.9.9"))
+      (match (package/registry-get-json (str base "/api/v1/packages/nope/releases/9.9.9"))
         ([:error status _message] (assert= status 404)))))
   (test "registry--search-line formats a hit"
-    (assert= (package/registry--search-line {:name "greeter"
-                                             :latest_version "1.0.0"
-                                             :description "greetings"})
+    (assert= (package/registry-search-line {:name "greeter"
+                                            :latest_version "1.0.0"
+                                            :description "greetings"})
       "greeter  1.0.0  — greetings")
-    (assert= (package/registry--search-line {:name "x" :latest_version "" :description ""}) "x  ?"))
+    (assert= (package/registry-search-line {:name "x" :latest_version "" :description ""}) "x  ?"))
   (test "publishable-deps keeps registry deps and omits local ones"
     (binding (*project-dependencies* (list (dep-registry 'foo "1.2.0") (dep-path 'bar "../bar")))
-      (let (out (package/registry--publishable-deps))
+      (let (out (package/registry-publishable-deps))
         (assert= (count out) 1)
         (assert= (get (first out) :name) "foo")
         (assert= (get (first out) :version) "1.2.0"))))
@@ -592,18 +592,18 @@
               *project-description* ""
               *project-dependencies* nil
               *project-enhances* {})
-      (let (ext (encoding/base64-decode (package/registry--publish-metadata "abc"
+      (let (ext (encoding/base64-decode (package/registry-publish-metadata "abc"
                                           "https://ex/f.tgz" nil nil)))
         (is (includes? ext "\"source_url\":\"https://ex/f.tgz\""))
         (is (includes? ext "\"checksum\":\"abc\"")))
-      (let (hosted (encoding/base64-decode (package/registry--publish-metadata "abc" nil nil nil)))
+      (let (hosted (encoding/base64-decode (package/registry-publish-metadata "abc" nil nil nil)))
         (is (not (includes? hosted "source_url"))))
       ;; a signed publish carries :signature + :pubkey; an unsigned one omits both
-      (let (signed (encoding/base64-decode (package/registry--publish-metadata "abc"
+      (let (signed (encoding/base64-decode (package/registry-publish-metadata "abc"
                                              nil "sighex" "pubhex")))
         (is (includes? signed "\"signature\":\"sighex\""))
         (is (includes? signed "\"pubkey\":\"pubhex\"")))
-      (let (unsigned (encoding/base64-decode (package/registry--publish-metadata "abc" nil nil nil)))
+      (let (unsigned (encoding/base64-decode (package/registry-publish-metadata "abc" nil nil nil)))
         (is (not (includes? unsigned "signature")))
         (is (not (includes? unsigned "pubkey")))))))
 
@@ -682,13 +682,13 @@
           spec {"foo" {"1.0.0" {:deps [] :checksum s1 :bytes b1}
                        "1.5.0" {:deps [["bar" "^2.0"]] :checksum s2 :bytes b2}}}
           base (mock-registry-start (rr-handler spec)))
-      (let (versions (package/registry--list-versions base 'foo))
+      (let (versions (package/registry-list-versions base 'foo))
         (is (includes? versions "1.0.0"))
         (is (includes? versions "1.5.0")))
-      (assert= (list ['bar "^2.0"]) (package/registry--release-deps base 'foo "1.5.0"))
-      (assert= '() (package/registry--release-deps base 'foo "1.0.0"))
+      (assert= (list ['bar "^2.0"]) (package/registry-release-deps base 'foo "1.5.0"))
+      (assert= '() (package/registry-release-deps base 'foo "1.0.0"))
       ;; an unknown package has no versions (so the resolver reports it, not a crash)
-      (assert= nil (package/registry--list-versions base 'nope))))
+      (assert= nil (package/registry-list-versions base 'nope))))
 
   (test "a range resolves to the newest compatible version, transitively, and locks it"
     (let (parent (pkg-fixture-root)
@@ -814,20 +814,20 @@
 ;; symbol a package author typed, and these tests would read identically for `hatch`.
 (describe "package: :enhances (a plugin declares the application it extends)"
   (test "the manifest parses a map of application → constraint, symbol-keyed"
-    (assert= {'bedit ">= 0.3"} (project/project--parse-enhances {'bedit ">= 0.3"}))
+    (assert= {'bedit ">= 0.3"} (project/project-parse-enhances {'bedit ">= 0.3"}))
     ;; string keys normalize to symbols, so a consumer looks a name up ONE way
-    (assert= {'bedit ">= 0.3"} (project/project--parse-enhances {"bedit" ">= 0.3"}))
+    (assert= {'bedit ">= 0.3"} (project/project-parse-enhances {"bedit" ">= 0.3"}))
     (assert= {'bedit "" 'hatch ">= 1.0"}
-      (project/project--parse-enhances {'bedit "" 'hatch ">= 1.0"})))
+      (project/project-parse-enhances {'bedit "" 'hatch ">= 1.0"})))
   (test "absent is an ordinary library, not an error"
-    (assert= {} (project/project--parse-enhances nil)))
+    (assert= {} (project/project-parse-enhances nil)))
   (test "a manifest typo fails when the MANIFEST is read, naming the key"
     (is (includes? (try
-                     (project/project--parse-enhances [['bedit ">= 0.3"]])
+                     (project/project-parse-enhances [['bedit ">= 0.3"]])
                      (catch e (error-message e)))
           ":enhances must be a MAP"))
     (is (includes? (try
-                     (project/project--parse-enhances {'bedit 0.3})
+                     (project/project-parse-enhances {'bedit 0.3})
                      (catch e (error-message e)))
           "must be a string")))
   (test "a real manifest carries it through project-apply"
@@ -849,19 +849,19 @@
       (def *project-enhances* saved)))
   (test "the publish envelope carries it with STRING keys (JSON has no symbols)"
     (binding (*project-enhances* {'bedit ">= 0.1"})
-      (assert= {"bedit" ">= 0.1"} (package/registry--publishable-enhances)))
+      (assert= {"bedit" ">= 0.1"} (package/registry-publishable-enhances)))
     (binding (*project-enhances* {})
-      (assert= {} (package/registry--publishable-enhances))))
+      (assert= {} (package/registry-publishable-enhances))))
   (test "search narrows by it through a query parameter, url-encoded"
     (assert= "http://h/api/v1/packages?q=zig"
-      (package/registry--search-url "http://h" "zig" nil))
+      (package/registry-search-url "http://h" "zig" nil))
     (assert= "http://h/api/v1/packages?q=zig"
-      (package/registry--search-url "http://h" "zig" ""))
+      (package/registry-search-url "http://h" "zig" ""))
     (assert= "http://h/api/v1/packages?q=zig&enhances=bedit"
-      (package/registry--search-url "http://h" "zig" "bedit"))
+      (package/registry-search-url "http://h" "zig" "bedit"))
     ;; the application name is opaque data — whatever it is, it is encoded, not parsed
     (assert= "http://h/api/v1/packages?q=&enhances=my%20app"
-      (package/registry--search-url "http://h" "" "my app"))))
+      (package/registry-search-url "http://h" "" "my app"))))
 
 ;; Namespace-collision detection (ADR-070). We test the cwd-free helpers
 ;; (`package--provided-modules` / `package--check-namespace-collisions`) directly,
@@ -870,7 +870,7 @@
   (test "provided-modules reports each file's (defmodule …) name"
     (let (root (pkg-fixture-root))
       (pkg-write-project root "x" "alpha" "(defn f () 1)" "")
-      (assert= (package/package--provided-modules (path-join root "src")) (list 'alpha))))
+      (assert= (package/package-provided-modules (path-join root "src")) (list 'alpha))))
   (test "provided-modules reads the defmodule name, not the filename"
     (let (root (pkg-fixture-root))
       (make-dir (path-join root "src"))
@@ -878,7 +878,7 @@
       ;; namespace that would clobber, so that's what we must report.
       (spit (path-join (path-join root "src") "helpers.blsp")
         "(defmodule json \"x\")\n(defn p () 1)\n")
-      (assert= (package/package--provided-modules (path-join root "src")) (list 'json))))
+      (assert= (package/package-provided-modules (path-join root "src")) (list 'json))))
   ;; Post-package-rooting (ADR-070): two *dependencies* providing the same module
   ;; name no longer collide (they root to `a/util` vs `b/util`); the collision guard
   ;; now only checks a project's OWN source dirs against each other. The helper is
@@ -892,11 +892,11 @@
       (pkg-write-project a "a" "util" "(defn f () 1)" "")
       (pkg-write-project b "b" "util" "(defn g () 2)" "")
       (is (includes? (try
-                       (package/package--check-namespace-collisions (list (list "your project"
-                                                                            (path-join a
-                                                                              "src"))
-                                                                      (list "your project"
-                                                                        (path-join b "src"))))
+                       (package/package-check-namespace-collisions (list (list "your project"
+                                                                           (path-join a
+                                                                             "src"))
+                                                                     (list "your project"
+                                                                       (path-join b "src"))))
                        (catch e e))
             "collision"))))
   (test "distinct module names across providers are fine"
@@ -905,10 +905,10 @@
           b (path-join parent "b"))
       (pkg-write-project a "a" "alpha" "(defn f () 1)" "")
       (pkg-write-project b "b" "beta" "(defn g () 2)" "")
-      (assert= (package/package--check-namespace-collisions (list (list "dependency 'a'"
-                                                                    (path-join a "src"))
-                                                              (list "dependency 'b'"
-                                                                (path-join b "src"))))
+      (assert= (package/package-check-namespace-collisions (list (list "dependency 'a'"
+                                                                   (path-join a "src"))
+                                                             (list "dependency 'b'"
+                                                               (path-join b "src"))))
         nil)))
   ;; A hierarchical module `(defmodule gui/window)` lives in a SUBdirectory
   ;; (`src/gui/window.blsp`), so the scan must recurse — a top-level-only listing
@@ -920,7 +920,7 @@
       (make-dir gui)
       (spit (path-join (path-join root "src") "top.blsp") "(defmodule top)\n")
       (spit (path-join gui "window.blsp") "(defmodule gui/window)\n")
-      (assert= (sort (map name (package/package--provided-modules (path-join root "src"))))
+      (assert= (sort (map name (package/package-provided-modules (path-join root "src"))))
         (list "gui/window" "top"))))
   (test "two providers of the same NESTED module name collide loudly"
     (let (parent (pkg-fixture-root)
@@ -933,10 +933,10 @@
       (spit (path-join (path-join (path-join b "src") "gui") "window.blsp")
         "(defmodule gui/window)\n(defn g () 2)\n")
       (is (includes? (try
-                       (package/package--check-namespace-collisions (list (list "dependency 'a'"
-                                                                            (path-join a "src"))
-                                                                      (list "dependency 'b'"
-                                                                        (path-join b "src"))))
+                       (package/package-check-namespace-collisions (list (list "dependency 'a'"
+                                                                           (path-join a "src"))
+                                                                     (list "dependency 'b'"
+                                                                       (path-join b "src"))))
                        (catch e e))
             "collision")))))
 
@@ -989,7 +989,7 @@
 (describe "package: editing the manifest"
   (test "add creates a :dependencies clause and preserves comments"
     (let (src "(project :name \"app\" :version \"0.1.0\")\n\n;; a keeper comment\n"
-          out (package/package--manifest-add src
+          out (package/package-manifest-add src
                 (dep-entry-node (dep-path 'greeter "../greeter"))))
       (is (includes? out "a keeper comment"))
       (let (form (read-string out))
@@ -997,7 +997,7 @@
           (list (assoc (dep-path 'greeter "../greeter") :optional false))))))
   (test "add appends to an existing :dependencies"
     (let (src "(project :name \"app\" :dependencies [[a :path \"../a\"]])\n"
-          out (package/package--manifest-add src
+          out (package/package-manifest-add src
                 (dep-entry-node (dep-path 'b "../b"))))
       (let (form (read-string out))
         (assert= (map (fn (d) (get d :name))
@@ -1005,7 +1005,7 @@
           (list 'a 'b)))))
   (test "remove drops the named dep, keeps the rest and comments"
     (let (src "(project :name \"app\"\n  :dependencies [[a :path \"../a\"] [b :path \"../b\"]])\n;; keep me\n"
-          out (package/package--manifest-remove src 'a))
+          out (package/package-manifest-remove src 'a))
       (is (includes? out "keep me"))
       (let (form (read-string out))
         (assert= (map (fn (d) (get d :name))
@@ -1013,7 +1013,7 @@
           (list 'b)))))
   (test "remove of the only dep leaves an empty :dependencies"
     (let (src "(project :name \"app\" :dependencies [[a :path \"../a\"]])\n"
-          out (package/package--manifest-remove src 'a))
+          out (package/package-manifest-remove src 'a))
       (assert= (project/project-parse-deps (plist-get (rest (read-string out)) :dependencies)) nil))))
 
 ;; ---- the Dependency ability -------------------------------------------------
@@ -1053,17 +1053,17 @@
 
 (describe "package: dependency compatibility is per-kind"
   (test "two requests for one name at the same source agree"
-    (is (nil? (package/package--check-compatible (dep-path 'a "../a") (dep-path 'a "../a"))))
-    (is (nil? (package/package--check-compatible (dep-git 'a "u" "v1") (dep-git 'a "u" "v1")))))
+    (is (nil? (package/package-check-compatible (dep-path 'a "../a") (dep-path 'a "../a"))))
+    (is (nil? (package/package-check-compatible (dep-git 'a "u" "v1") (dep-git 'a "u" "v1")))))
   (test "the same name at two paths is a loud, pin-it error"
     (is (includes? (try
-                     (package/package--check-compatible (dep-path 'a "../a")
+                     (package/package-check-compatible (dep-path 'a "../a")
                        (dep-path 'a "../b"))
                      (catch e e))
           "conflicting dependency")))
   (test "the same name at two git refs is a loud error naming both"
     (let (message (try
-                    (package/package--check-compatible (dep-git 'a "u" "v1")
+                    (package/package-check-compatible (dep-git 'a "u" "v1")
                       (dep-git 'a "u" "v2"))
                     (catch e e)))
       (is (includes? message "conflicting dependency"))
@@ -1071,13 +1071,13 @@
       (is (includes? message "v2"))))
   (test "two registry versions of one name conflict"
     (is (includes? (try
-                     (package/package--check-compatible (dep-registry 'a "1.0.0")
+                     (package/package-check-compatible (dep-registry 'a "1.0.0")
                        (dep-registry 'a "2.0.0"))
                      (catch e e))
           "two registry versions")))
   (test "two DIFFERENT kinds for one name can never agree"
     (let (message (try
-                    (package/package--check-compatible (dep-path 'a "../a")
+                    (package/package-check-compatible (dep-path 'a "../a")
                       (dep-git 'a "u" "v1"))
                     (catch e e)))
       (is (includes? message "required as both :path and :git")))))
@@ -1094,8 +1094,8 @@
     (assert= (to-str (dep-git 'p "https://x.git" "v1"))
       "p  (git https://x.git @ v1)"))
   (test "index-by-name keys resolved entries by their name"
-    (let (idx (package/package--index-by-name (list (assoc (dep-path 'a "../a") :deps nil)
-                                                (assoc (dep-path 'b "../b") :deps nil))))
+    (let (idx (package/package-index-by-name (list (assoc (dep-path 'a "../a") :deps nil)
+                                               (assoc (dep-path 'b "../b") :deps nil))))
       (assert= (get (get idx 'a) :path) "../a")
       (assert= (get (get idx 'b) :path) "../b"))))
 
@@ -1145,24 +1145,24 @@
 ;; Any name with a space, quote, bracket or paren did the same.
 (describe "package: dependency-name validation (manifest safety)"
   (test "a plain symbol name is accepted"
-    (is (package/package--valid-dep-name? "parser")))
-  (test "kebab-case is accepted" (is (package/package--valid-dep-name? "my-dep")))
-  (test "a namespaced name is accepted" (is (package/package--valid-dep-name? "net/http")))
-  (test "a non-ASCII identifier is accepted" (is (package/package--valid-dep-name? "日本語")))
-  (test "the empty string is rejected" (refute (package/package--valid-dep-name? "")))
-  (test "a space-only name is rejected" (refute (package/package--valid-dep-name? " ")))
+    (is (package/package-valid-dep-name? "parser")))
+  (test "kebab-case is accepted" (is (package/package-valid-dep-name? "my-dep")))
+  (test "a namespaced name is accepted" (is (package/package-valid-dep-name? "net/http")))
+  (test "a non-ASCII identifier is accepted" (is (package/package-valid-dep-name? "日本語")))
+  (test "the empty string is rejected" (refute (package/package-valid-dep-name? "")))
+  (test "a space-only name is rejected" (refute (package/package-valid-dep-name? " ")))
   (test "a name with an inner space is rejected"
-    (refute (package/package--valid-dep-name? "a b")))
-  (test "an open paren is rejected" (refute (package/package--valid-dep-name? "(")))
-  (test "a close paren is rejected" (refute (package/package--valid-dep-name? ")")))
-  (test "a quote character is rejected" (refute (package/package--valid-dep-name? "\"")))
-  (test "a bracket is rejected" (refute (package/package--valid-dep-name? "[x]")))
+    (refute (package/package-valid-dep-name? "a b")))
+  (test "an open paren is rejected" (refute (package/package-valid-dep-name? "(")))
+  (test "a close paren is rejected" (refute (package/package-valid-dep-name? ")")))
+  (test "a quote character is rejected" (refute (package/package-valid-dep-name? "\"")))
+  (test "a bracket is rejected" (refute (package/package-valid-dep-name? "[x]")))
   (test "a number is rejected (it reads as an int, not a symbol)"
-    (refute (package/package--valid-dep-name? "5")))
-  (test "a keyword is rejected" (refute (package/package--valid-dep-name? ":kw")))
-  (test "a non-string is rejected" (refute (package/package--valid-dep-name? 5)))
+    (refute (package/package-valid-dep-name? "5")))
+  (test "a keyword is rejected" (refute (package/package-valid-dep-name? ":kw")))
+  (test "a non-string is rejected" (refute (package/package-valid-dep-name? 5)))
   (test "a trailing-newline name is rejected"
-    (refute (package/package--valid-dep-name? "a\n")))
+    (refute (package/package-valid-dep-name? "a\n")))
   (test "add refuses a corrupting name before touching the manifest"
     (is (includes? (try (package/add "" ":path" "../x") (catch e e))
           "not a usable dependency name"))))
@@ -1174,12 +1174,12 @@
 ;; (it provides `main`, and so does whoever depends on it).
 (describe "package: `main` is exempt from module-collision checking"
   (test "main is recognised as an entry module"
-    (is (package/package--entry-module? 'main)))
+    (is (package/package-entry-module? 'main)))
   (test "a string spelling is recognised too"
     ;; The provider walk yields whatever `defmodule` recorded.
-    (is (package/package--entry-module? "main")))
+    (is (package/package-entry-module? "main")))
   (test "an ordinary module is not exempt"
-    (refute (package/package--entry-module? 'greeter)))
+    (refute (package/package-entry-module? 'greeter)))
   (test "a name merely containing main is not exempt"
-    (and (refute (package/package--entry-module? 'main-lib))
-      (refute (package/package--entry-module? 'domain)))))
+    (and (refute (package/package-entry-module? 'main-lib))
+      (refute (package/package-entry-module? 'domain)))))

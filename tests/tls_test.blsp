@@ -8,7 +8,8 @@
 
 (defmodule tls-test (:use test) (:use net/tcp))
 
-(defn tls--serve-one (reply)
+(defn- tls-serve-one
+  (reply)
   "Spawn a TLS echo-ish server: accept ONE connection, read one chunk, send
 `reply`, close. Returns [port cert] to the caller."
   (let (me (self))
@@ -28,14 +29,14 @@
 (describe "tls: loopback round trip (self-signed + ca-pem trust)"
   :isolated
   (test "handshake, request, response, close — full exchange"
-    (let (pc (tls--serve-one "secret reply")
+    (let (pc (tls-serve-one "secret reply")
           port (first pc)
           cert (second pc))
       (let (s (tls-request "localhost" port "hello over tls" cert))
         (let (resp (utf8-bytes->string (tcp-drain s)))
           (assert= resp "secret reply")))))
   (test "a binary-mode TLS response is byte-faithful bytes"
-    (let (pc (tls--serve-one (bytes 0 255 128 65))
+    (let (pc (tls-serve-one (bytes 0 255 128 65))
           port (first pc)
           cert (second pc))
       (let (s (tls-request "localhost" port "gimme bytes" cert))
@@ -62,7 +63,7 @@
           ;; "HEAD " = 72 69 65 68 32, then 1 254, then " TAIL" = 32 84 65 73 76
           (assert= resp "[72 69 65 68 32 1 254 32 84 65 73 76]")))))
   (test "an untrusted cert is a clean [:tcp-error …], not a hang"
-    (let (pc (tls--serve-one "unreachable")
+    (let (pc (tls-serve-one "unreachable")
           port (first pc))
       ;; no ca-pem → the self-signed cert is rejected against the Mozilla roots
       (let (s (tls-request "localhost" port "x"))

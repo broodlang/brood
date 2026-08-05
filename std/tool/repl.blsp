@@ -102,7 +102,8 @@ are the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
 (defdyn *3 nil)
 (defdyn *e nil)
 
-(defn repl--remember-value (v)
+(defn- repl-remember-value
+  (v)
   "Shift `v` into the result history (`*1` newest, `*3` oldest). Returns `v`."
   (do
     (def *3 *2)
@@ -110,7 +111,8 @@ are the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
     (def *1 v)
     v))
 
-(defn repl--remember-error (e)
+(defn- repl-remember-error
+  (e)
   "Record caught value `e` as `*e` so the prompt can inspect the last failure."
   (do (def *e e) e))
 
@@ -120,7 +122,7 @@ are the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
 ;; returned list/map/keyword reads with the syntax colours, not as flat text. Plain
 ;; (uncoloured) on a non-TTY so a piped/redirected session stays clean.
 
-(def repl--ansi-fg
+(def- repl-ansi-fg
   ;; the named highlight colours (highlight.blsp's faces) -> ANSI SGR foreground code
   {:red 31
    :green 32
@@ -132,32 +134,35 @@ are the dynamic vars `*repl-prompt*` / `*repl-cont-prompt*`; rebind them with
    :grey 90
    :dark-grey 90})
 
-(def repl--sgr-reset "\e[0m")
+(def- repl-sgr-reset "\e[0m")
 
-(defn repl--sgr (face)
+(defn- repl-sgr
+  (face)
   "The opening ANSI escape for a `{:fg <named-colour> :bold ?}` face, or nil when the
 face carries no colour we map (leave that span the default colour)."
-  (let (code (get repl--ansi-fg (get face :fg)))
+  (let (code (get repl-ansi-fg (get face :fg)))
     (when code
       (str "\e[" (if (get face :bold) "1;" "") code "m"))))
 
 ;; check-allow: deliberately non-tail — depth = highlight spans on one line.
 (check-allow :non-tail-recursion
-  (defn repl--paint-spans (src spans i)
+  (defn- repl-paint-spans
+    (src spans i)
     "Emit `src` from offset `i`, wrapping each `[start end face]` span in its ANSI colour
   and leaving the gaps between spans uncoloured."
     (if (empty? spans)
       (substring src i)
       (let ([s e face] (first spans)
-            painted (let (chunk (substring src s e) sgr (repl--sgr face))
-                      (if sgr (str sgr chunk repl--sgr-reset) chunk)))
-        (str (substring src i s) painted (repl--paint-spans src (rest spans) e))))))
+            painted (let (chunk (substring src s e) sgr (repl-sgr face))
+                      (if sgr (str sgr chunk repl-sgr-reset) chunk)))
+        (str (substring src i s) painted (repl-paint-spans src (rest spans) e))))))
 
-(defn repl--colorize (src)
+(defn- repl-colorize
+  (src)
   "`src` with each lexical highlight span ANSI-coloured; unchanged when nothing
 highlights. Used to colour a printed result on an interactive TTY."
   (let (spans (highlight-spans src))
-    (if (empty? spans) src (repl--paint-spans src spans 0))))
+    (if (empty? spans) src (repl-paint-spans src spans 0))))
 
 ;; ---- meta-commands (`,cmd` at a fresh prompt) -------------------------------
 ;; Guile-style `,` commands for things that aren't expressions: docs, the type of a
@@ -173,7 +178,8 @@ highlights. Used to colour a printed result on an interactive TTY."
 ;; but not listed). The debugger uses this seam to add `,resume`/`,step` under `pry`.
 (def *repl-commands* (list))
 
-(defn repl--meta-parts (line)
+(defn- repl-meta-parts
+  (line)
   "Split a `,cmd arg…` line (sans the leading `,`) into `[cmd rest]`, `rest` trimmed."
   (let (t (trim line)
         sp (index-of t " "))
@@ -181,13 +187,15 @@ highlights. Used to colour a printed result on an interactive TTY."
       [t ""]
       [(substring t 0 sp) (trim (substring t sp))])))
 
-(defn repl--has-name? (names x)
+(defn- repl-has-name?
+  (names x)
   "True when command-name list `names` contains `x`."
   (any? (fn (n) (= n x)) names))
 
-(defn repl--command-for (cmd)
+(defn- repl-command-for
+  (cmd)
   "The registered command whose `:names` include `cmd`, or nil."
-  (first (filter (fn (c) (repl--has-name? (get c :names) cmd)) *repl-commands*)))
+  (first (filter (fn (c) (repl-has-name? (get c :names) cmd)) *repl-commands*)))
 
 (defn register-repl-command (spec)
   "Register a `,cmd` meta-command. `spec` is `{:names (name alias…) :usage str
@@ -201,42 +209,47 @@ registration order, the new one last). The extension seam tools use to add comma
     ;; promises to replace survived (KI-23 — it failed `repl_test` 2 runs in 5).
     (swap-registry! repl/*repl-commands*
       (fn (l)
-        (append (filter (fn (c) (not (any? (fn (n) (repl--has-name? names n)) (get c :names)))) l)
+        (append (filter (fn (c) (not (any? (fn (n) (repl-has-name? names n)) (get c :names)))) l)
           (list spec))))
     (first names)))
 
-(defn repl--meta? (line)
+(defn- repl-meta?
+  (line)
   "True when `line` is a recognised `,cmd` meta-command (a leading `,` + a registered name)."
   (and (> (string-length line) 0)
     (= (char-at line 0) ",")
-    (let ([cmd _] (repl--meta-parts (substring line 1)))
-      (not (nil? (repl--command-for cmd))))))
+    (let ([cmd _] (repl-meta-parts (substring line 1)))
+      (not (nil? (repl-command-for cmd))))))
 
-(defn repl--pad (s n)
+(defn- repl-pad
+  (s n)
   "Right-pad string `s` with spaces to at least width `n`."
   (let (gap (- n (string-length s)))
     (if (<= gap 0) s (str s (apply str (map (constantly " ") (range gap)))))))
 
-(defn repl--command-help-line (c)
+(defn- repl-command-help-line
+  (c)
   "One aligned `  ,usage   summary` line for a registered command."
-  (str "  " (repl--pad (get c :usage) 15) " " (get c :summary)))
+  (str "  " (repl-pad (get c :usage) 15) " " (get c :summary)))
 
-(defn repl--meta-help (rest)
+(defn- repl-meta-help
+  (rest)
   "Print the `,help` table — generated from the command registry (skipping `:hidden`
 entries) plus the static Tab / `*1 *2 *3` footer."
   (println (str "\e[90m"
              (join "\n"
-               (map repl--command-help-line (filter (fn (c) (not (get c :hidden))) *repl-commands*)))
+               (map repl-command-help-line (filter (fn (c) (not (get c :hidden))) *repl-commands*)))
              "\n"
              "  "
-             (repl--pad "Tab" 15)
+             (repl-pad "Tab" 15)
              " complete the name under the cursor; again to list matches\n"
              "  "
-             (repl--pad "*1 *2 *3" 15)
+             (repl-pad "*1 *2 *3" 15)
              " the last three result values;  *e  the last error"
              "\e[0m")))
 
-(defn repl--meta-doc (name)
+(defn- repl-meta-doc
+  (name)
   "Print the docstring + arglist for `name` (a function/macro/primitive), or a note.
 The argument must read as exactly one symbol — it is spliced into code text, so
 anything else (`,doc foo)`, `,doc (fn …)`, `,doc foo) (extra) (`) would splice extra
@@ -258,14 +271,16 @@ forms into the eval rather than fail cleanly."
 ;; during the timing would set a flag nobody polls. Their output goes through the
 ;; bounded printer for the same reason results do.
 
-(defn repl--meta-type (expr)
-  (repl--call (fn ()
-                (try
-                  (println (str "\e[33m" (type-of (eval-string expr)) "\e[0m"))
-                  (catch e (eprint (str (repl--error-message e) "\n")))))))
+(defn- repl-meta-type
+  (expr)
+  (repl-call (fn ()
+               (try
+                 (println (str "\e[33m" (type-of (eval-string expr)) "\e[0m"))
+                 (catch e (eprint (str (repl-error-message e) "\n")))))))
 
-(defn repl--meta-time (expr)
-  (repl--call
+(defn- repl-meta-time
+  (expr)
+  (repl-call
     (fn ()
       (try
         (let (t0 (now)
@@ -273,16 +288,17 @@ forms into the eval rather than fail cleanly."
               ms (- (now) t0))
           ; value shown only interactively (piped ,time reports just the
           ; timing, as before) — and bounded, like any printed result
-          (when (stdout-tty?) (println (repl--colorize (pr-str-bounded v))))
+          (when (stdout-tty?) (println (repl-colorize (pr-str-bounded v))))
           (println (str "\e[90m; " ms " ms\e[0m")))
-        (catch e (eprint (str (repl--error-message e) "\n")))))))
+        (catch e (eprint (str (repl-error-message e) "\n")))))))
 
 ;; `apropos` / `doc-search` have been in the prelude all along; the only thing missing
 ;; was a way to reach them without breaking your typing rhythm. `,apropos` searches
 ;; NAMES, `,search` searches DOCSTRINGS too and ranks — the two halves of "I know what
 ;; I want but not what it's called".
 
-(defn repl--meta-apropos (pattern)
+(defn- repl-meta-apropos
+  (pattern)
   "Print every global whose name contains `pattern`, one per line (dim), or a note."
   (if (= pattern "")
     (println "\e[90m(usage: ,apropos <pattern>)\e[0m")
@@ -291,7 +307,8 @@ forms into the eval rather than fail cleanly."
         (println (str "\e[90m(nothing matching " pattern ")\e[0m"))
         (fold (fn (_ s) (println (str "\e[36m" s "\e[0m"))) nil hits)))))
 
-(defn repl--meta-search (query)
+(defn- repl-meta-search
+  (query)
   "Print `doc-search` hits for `query` — `name` then a dim one-line doc summary."
   (if (= query "")
     (println "\e[90m(usage: ,search <words>)\e[0m")
@@ -299,17 +316,19 @@ forms into the eval rather than fail cleanly."
       (if (empty? hits)
         (println (str "\e[90m(nothing matching " query ")\e[0m"))
         (fold (fn (_ [name doc])
-                (println (str "\e[36m" name "\e[0m  \e[90m" (repl--first-line doc) "\e[0m")))
+                (println (str "\e[36m" name "\e[0m  \e[90m" (repl-first-line doc) "\e[0m")))
           nil hits)))))
 
-(defn repl--first-line (s)
+(defn- repl-first-line
+  (s)
   "The first line of `s`, truncated to a terminal-ish width — a docstring's summary
 line, so a multi-paragraph doc doesn't turn one search hit into a screenful."
   (let (line (first (string-split (or s "") "\n"))
         max 96)
     (if (> (string-length line) max) (str (substring line 0 max) "…") line)))
 
-(defn repl--meta-expand (expr all)
+(defn- repl-meta-expand
+  (expr all)
   "Print `expr` macroexpanded — fully when `all`, one step otherwise — syntax-coloured
 and run through the formatter, since an expansion is exactly the kind of dense nested
 form that is unreadable on one line."
@@ -323,14 +342,15 @@ form that is unreadable on one line."
             text (try
                    (do (require 'format) (trim (format/format-source (pr-str out))))
                    (catch _ (pr-str out))))
-        (println (if (stdout-tty?) (repl--colorize text) text)))
-      (catch e (eprint (str (repl--error-message e) "\n"))))))
+        (println (if (stdout-tty?) (repl-colorize text) text)))
+      (catch e (eprint (str (repl-error-message e) "\n"))))))
 
-(defn repl--run-meta (line)
+(defn- repl-run-meta
+  (line)
   "Dispatch a `,cmd` meta-command line (verified by `repl--meta?`) through the registry.
 Returns nil; the loop just continues to the next prompt."
-  (let ([cmd rest] (repl--meta-parts (substring line 1))
-        c (repl--command-for cmd))
+  (let ([cmd rest] (repl-meta-parts (substring line 1))
+        c (repl-command-for cmd))
     (when c ((get c :handler) rest))))
 
 ;; ---- register the built-in meta-commands (in display order) -----------------
@@ -339,19 +359,19 @@ Returns nil; the loop just continues to the next prompt."
 (register-repl-command {:names '("help" "?")
                         :usage ",help ,?"
                         :summary "this list"
-                        :handler (fn (rest) (repl--meta-help rest))})
+                        :handler (fn (rest) (repl-meta-help rest))})
 (register-repl-command {:names '("doc")
                         :usage ",doc <name>"
                         :summary "docstring + arglist of a function/macro/primitive"
-                        :handler (fn (rest) (repl--meta-doc rest))})
+                        :handler (fn (rest) (repl-meta-doc rest))})
 (register-repl-command {:names '("type")
                         :usage ",type <expr>"
                         :summary "evaluate <expr> and show its runtime type"
-                        :handler (fn (rest) (repl--meta-type rest))})
+                        :handler (fn (rest) (repl-meta-type rest))})
 (register-repl-command {:names '("time")
                         :usage ",time <expr>"
                         :summary "evaluate <expr> and show elapsed time"
-                        :handler (fn (rest) (repl--meta-time rest))})
+                        :handler (fn (rest) (repl-meta-time rest))})
 (register-repl-command {:names '("clear")
                         :usage ",clear"
                         :summary "clear the screen"
@@ -359,24 +379,25 @@ Returns nil; the loop just continues to the next prompt."
 (register-repl-command {:names '("apropos")
                         :usage ",apropos <pat>"
                         :summary "globals whose NAME contains <pat>"
-                        :handler (fn (rest) (repl--meta-apropos rest))})
+                        :handler (fn (rest) (repl-meta-apropos rest))})
 (register-repl-command {:names '("search")
                         :usage ",search <words>"
                         :summary "globals whose name or DOC matches <words>, best first"
-                        :handler (fn (rest) (repl--meta-search rest))})
+                        :handler (fn (rest) (repl-meta-search rest))})
 (register-repl-command {:names '("expand")
                         :usage ",expand <form>"
                         :summary "fully macroexpand <form> (once: ,expand1)"
-                        :handler (fn (rest) (repl--meta-expand rest true))})
+                        :handler (fn (rest) (repl-meta-expand rest true))})
 (register-repl-command {:names '("expand1")
                         :usage ",expand1 <form>"
                         :summary "macroexpand <form> one step"
                         :hidden true
-                        :handler (fn (rest) (repl--meta-expand rest false))})
+                        :handler (fn (rest) (repl-meta-expand rest false))})
 
 ;; ---- whitespace / comment skip ----------------------------------------------
 
-(defn repl--content? (s i n in-com)
+(defn- repl-content?
+  (s i n in-com)
   "True if `s` holds an actual datum — i.e. some character that isn't whitespace
 or part of a `;`-comment. Lets the loop ignore blank / comment-only lines at a
 fresh prompt without echoing `nil`."
@@ -384,20 +405,22 @@ fresh prompt without echoing `nil`."
     false
     (let (c (char-at s i) j (inc i))
       (cond
-        in-com (repl--content? s j n (not (= c "\n")))
-        (= c ";") (repl--content? s j n true)
-        (blank? c) (repl--content? s j n false)
+        in-com (repl-content? s j n (not (= c "\n")))
+        (= c ";") (repl-content? s j n true)
+        (blank? c) (repl-content? s j n false)
         else true))))
 
 ;; ---- evaluation -------------------------------------------------------------
 
-(defn repl--incomplete? (e)
+(defn- repl-incomplete?
+  (e)
   "True when caught value `e` is the reader's *incomplete input* error (EOF inside
 a form or string) — the signal to read another line. Matches the stable error
 code rather than re-scanning delimiters (ADR-049)."
   (and (map? e) (= (get e :code) *repl-incomplete-code*)))
 
-(defn repl--trace-lines (tr)
+(defn- repl-trace-lines
+  (tr)
   "Render an error map's :trace entries as `  at fn (file:line:col)` lines,
 innermost frame first (each location is the call site that entered the frame)."
   (join ""
@@ -416,7 +439,8 @@ innermost frame first (each location is the call site that entered the frame)."
                else "")))
       tr)))
 
-(defn repl--error-message (e)
+(defn- repl-error-message
+  (e)
   "Render a caught value for display: built-in errors arrive as a structured map
 `{:kind :message [:line :col] [:trace …] …}`, a user `throw` arrives as the raw
 value."
@@ -427,10 +451,11 @@ value."
       (if (contains? e :line)
         (str " (line " (get e :line) ", col " (get e :col) ")")
         "")
-      (if (contains? e :trace) (repl--trace-lines (get e :trace)) ""))
+      (if (contains? e :trace) (repl-trace-lines (get e :trace)) ""))
     (str "error: " (if (string? e) e (pr-str e)))))
 
-(defn repl--print-value (v)
+(defn- repl-print-value
+  (v)
   "Print a result value — syntax-coloured (the input highlighter, reused) on an
 interactive TTY, plain on a pipe.
 
@@ -438,7 +463,7 @@ Printed with `pr-str-bounded`, so a huge or deeply-nested result elides with `�
 instead of scrolling the session away; `(pr-str *1)` still shows the whole thing,
 and `(binding (*print-length* nil) …)` lifts the bound for a form."
   (let (s (pr-str-bounded v))
-    (println (if (stdout-tty?) (repl--colorize s) s))))
+    (println (if (stdout-tty?) (repl-colorize s) s))))
 
 ;; ---- advisory type-check (the checker, at the prompt) -----------------------
 ;; The REPL is the one place every `def` is already LOADED, so the checker's inference
@@ -447,43 +472,46 @@ and `(binding (*print-length* nil) …)` lifts the bound for a form."
 ;; operand-unbound), so a genuine typo's `unbound` isn't printed twice: `eval` raises that;
 ;; here we surface the type/arity misuse it can't. Advisory — printed before the result,
 ;; never blocks it, silent when clean, on incomplete input, or under `BROOD_NO_CHECK`.
-(defn repl--check-warnings (src)
+(defn- repl-check-warnings
+  (src)
   "The advisory type-check warning strings for REPL input `src` (each complete form checked
 against the live image), or nil. Nil on incomplete input — there is nothing to check yet."
   (if (getenv "BROOD_NO_CHECK")
     nil
     (mapcat check (try (read-all src) (catch _ nil)))))
 
-(defn repl--warn (src)
+(defn- repl-warn
+  (src)
   "Print `src`'s advisory type-check warnings to stderr — yellow on a TTY, plain on a pipe."
-  (for (w (repl--check-warnings src))
+  (for (w (repl-check-warnings src))
     (eprint (if (stdout-tty?)
               (str "\e[33mwarning:\e[0m " w "\n")
               (str "warning: " w "\n")))))
 
-(defn repl--eval-print (src)
+(defn- repl-eval-print
+  (src)
   "Evaluate `src` in the running image. Prints any advisory type-check warnings first, then
 returns `:ok` after printing its (coloured) value — plus a dim `; N ms` note when the eval
 was slow — `:more` if `src` is an incomplete form (read another line), or `:error` after
 reporting a real error. Never lets an error escape the loop."
   (try
-    (let (_ (repl--warn src)
+    (let (_ (repl-warn src)
           t0 (now)
           v (eval-string src)
           ms (- (now) t0))
-      (repl--remember-value v)
-      (repl--print-value v)
+      (repl-remember-value v)
+      (repl-print-value v)
       (when (and (stdout-tty?) (>= ms *repl-slow-ms*))
         (println (str "\e[90m; " ms " ms\e[0m")))
       :ok)
     (catch e
       ;; An incomplete form is not a failure — it's "read another line" — so it must
       ;; NOT land in `*e` and clobber the error the user is actually debugging.
-      (if (repl--incomplete? e)
+      (if (repl-incomplete? e)
         :more
         (do
-          (repl--remember-error e)
-          (eprint (str (repl--error-message e) "\n"))
+          (repl-remember-error e)
+          (eprint (str (repl-error-message e) "\n"))
           :error)))))
 
 ;; ---- interruptible evaluation ------------------------------------------------
@@ -553,38 +581,42 @@ reporting a real error. Never lets an error escape the loop."
 ;; as its child runs — so push/pop never race. If the head pid has *died* without
 ;; popping (its runner was killed rather than returning), the next poller repairs the
 ;; stack instead of leaving the flag permanently unowned.
-(def *repl--interrupt-owners* (table))
+(def- *repl-interrupt-owners* (table))
 
-(defn repl--interrupt-push ()
+(defn- repl-interrupt-push
+  ()
   "Register the calling process as the innermost interrupt owner."
-  (table-put *repl--interrupt-owners*
+  (table-put *repl-interrupt-owners*
     :stack
-    (cons (self) (or (table-get *repl--interrupt-owners* :stack) '()))))
+    (cons (self) (or (table-get *repl-interrupt-owners* :stack) '()))))
 
-(defn repl--interrupt-pop ()
+(defn- repl-interrupt-pop
+  ()
   "Deregister the calling process (must be the current head — strict nesting)."
-  (table-put *repl--interrupt-owners*
+  (table-put *repl-interrupt-owners*
     :stack
-    (rest (or (table-get *repl--interrupt-owners* :stack) '()))))
+    (rest (or (table-get *repl-interrupt-owners* :stack) '()))))
 
-(defn repl--interrupt-owner? ()
+(defn- repl-interrupt-owner?
+  ()
   "Is the calling process the innermost live interrupt owner? Repairs the stack past
 dead heads (a runner that was killed instead of returning), so ownership can never be
 wedged on a corpse."
-  (let (stack (or (table-get *repl--interrupt-owners* :stack) '()))
+  (let (stack (or (table-get *repl-interrupt-owners* :stack) '()))
     (cond
       (empty? stack) true
       (= (first stack) (self)) true
       ;; a dead head can't poll — drop it and re-ask
       (nil? (process-info (first stack)))
         (do
-          (table-put *repl--interrupt-owners*
+          (table-put *repl-interrupt-owners*
             :stack
             (rest stack))
-          (repl--interrupt-owner?))
+          (repl-interrupt-owner?))
       else false)))
 
-(defn repl--await-child (child ref killed)
+(defn- repl-await-child
+  (child ref killed)
   "Park until the spawned `child` dies, polling for Ctrl-C — but only while we are the
 innermost interrupt owner, so a nested session's Ctrl-C is never stolen by an outer
 loop. Returns `:ok` normally, `:interrupted` when we killed it."
@@ -593,17 +625,18 @@ loop. Returns `:ok` normally, `:interrupted` when we killed it."
                              (do (println "\e[90m; interrupted\e[0m") :interrupted)
                              :ok))
     (after *repl-interrupt-poll-ms*
-      (if (and (repl--interrupt-owner?) (%interrupt-taken?))
+      (if (and (repl-interrupt-owner?) (%interrupt-taken?))
         (if killed
           ;; The kill didn't land — a native builtin that never reaches a reduction
           ;; tick. Don't pretend to be interruptible; give the user their Unix Ctrl-C.
           (do
             (eprint "\n; evaluation is not yielding — halting\n")
             (%halt 130))
-          (do (exit child :kill) (repl--await-child child ref true)))
-        (repl--await-child child ref killed)))))
+          (do (exit child :kill) (repl-await-child child ref true)))
+        (repl-await-child child ref killed)))))
 
-(defn repl--call-interruptible (thunk)
+(defn- repl-call-interruptible
+  (thunk)
   "Run `thunk` in a spawned process so Ctrl-C can kill it without taking the image down
 with it — the shared runner behind evaluation AND the evaluating meta-commands
 (`,time`, `,type`), which are just as capable of running away. Returns `:ok` or
@@ -615,31 +648,34 @@ with it — the shared runner behind evaluation AND the evaluating meta-commands
     ;; the innermost owner may drain: an outer runner draining here would eat a Ctrl-C
     ;; belonging to a nested session. (Unreachable in practice — an outer loop is
     ;; parked while a nested session runs — but the guard keeps the invariant local.)
-    (when (repl--interrupt-owner?) (%interrupt-taken?))
-    (repl--interrupt-push)
+    (when (repl-interrupt-owner?) (%interrupt-taken?))
+    (repl-interrupt-push)
     (let (child (spawn (thunk))
           ref (monitor child)
-          result (repl--await-child child ref false))
-      (repl--interrupt-pop)
+          result (repl-await-child child ref false))
+      (repl-interrupt-pop)
       result)))
 
-(defn repl--eval (src)
+(defn- repl-eval
+  (src)
   "Evaluate + print `src`, interruptibly when this session armed it (`repl-run` on a
 TTY), else inline. The seam the loop calls."
   (if *repl-interruptible*
-    (repl--call-interruptible (fn () (repl--eval-print src)))
-    (repl--eval-print src)))
+    (repl-call-interruptible (fn () (repl-eval-print src)))
+    (repl-eval-print src)))
 
-(defn repl--call (thunk)
+(defn- repl-call
+  (thunk)
   "Run `thunk` — a meta-command body that evaluates user code — interruptibly when the
 session is armed, else inline. The meta-command counterpart of `repl--eval`."
   (if *repl-interruptible*
-    (repl--call-interruptible thunk)
+    (repl-call-interruptible thunk)
     (do (thunk) :ok)))
 
 ;; ---- history ----------------------------------------------------------------
 
-(defn repl--history-path ()
+(defn- repl-history-path
+  ()
   "The history file path: `$BROOD_HISTORY`, else `$HOME/.brood_history` (or, with no
 `$HOME`, `.brood_history` in the current directory)."
   (let (override (getenv "BROOD_HISTORY"))
@@ -647,56 +683,63 @@ session is armed, else inline. The meta-command counterpart of `repl--eval`."
       override
       (str (or (getenv "HOME") ".") "/.brood_history"))))
 
-(defn repl--history->text (history)
+(defn- repl-history->text
+  (history)
   "Serialize `history` (newest first) to file text: the most recent
 `*repl-history-max*` entries, oldest first, one per line. (Pure — the testable core
 of `repl--save-history`.)"
   (join "\n" (reverse (take *repl-history-max* history))))
 
-(defn repl--history<-text (text)
+(defn- repl-history<-text
+  (text)
   "Parse history-file `text` into a history list (newest first), dropping blank
 lines. (Pure — the testable core of `repl--load-history`.)"
   (reverse (filter (fn (l) (not (= l ""))) (string-split text "\n"))))
 
-(defn repl--load-history ()
+(defn- repl-load-history
+  ()
   "Load saved history (newest first) from the history file, or `()` if none / on any
 read error — a missing or unreadable history file must never stop the REPL starting."
   (try
-    (let (path (repl--history-path))
-      (if (file-exists? path) (repl--history<-text (slurp path)) '()))
+    (let (path (repl-history-path))
+      (if (file-exists? path) (repl-history<-text (slurp path)) '()))
     (catch e '())))
 
-(defn repl--save-history (history)
+(defn- repl-save-history
+  (history)
   "Write the most recent `*repl-history-max*` entries to the history file (oldest
 first, one per line). Best-effort: a write failure is swallowed, never breaking the
 loop."
-  (try (spit (repl--history-path) (repl--history->text history)) (catch e nil)))
+  (try (spit (repl-history-path) (repl-history->text history)) (catch e nil)))
 
 ;; ---- I/O loop ---------------------------------------------------------------
 
-(defn repl--complete? (src)
+(defn- repl-complete?
+  (src)
   "The Enter predicate for the multi-line line editor: true when `src` is a complete
 form — or a genuine *syntax* error, which should submit so eval reports it — and false
 only when the reader wants more input (the E0002 incomplete signal: insert a newline
 and keep editing). So `(defn foo` opens a continuation line; a balanced form submits."
   (try
     (do (read-all src) true)
-    (catch e (not (repl--incomplete? e)))))
+    (catch e (not (repl-incomplete? e)))))
 
-(defn repl--submit (interactive form history)
+(defn- repl-submit
+  (interactive form history)
   "Act on a submitted `form`: run a `,cmd` meta-command, skip a blank/comment-only line,
 else eval + print it. Remembers it for ↑/↓ (persisted only for interactive sessions).
 Returns `{:eof false :history h}`."
   (let (remember (fn ()
                    (let (h2 (editor/lineedit/lineedit-remember history form))
-                     (when interactive (repl--save-history h2))
+                     (when interactive (repl-save-history h2))
                      {:eof false :history h2})))
     (cond
-      (repl--meta? form) (do (repl--run-meta form) (remember))
-      (not (repl--content? form 0 (string-length form) false)) {:eof false :history history}
-      else (do (repl--eval form) (remember)))))
+      (repl-meta? form) (do (repl-run-meta form) (remember))
+      (not (repl-content? form 0 (string-length form) false)) {:eof false :history history}
+      else (do (repl-eval form) (remember)))))
 
-(defn repl--read-eval-interactive (history)
+(defn- repl-read-eval-interactive
+  (history)
   "Interactive read: the multi-line line editor reads a whole form in one session
 (Enter inserts a newline while the form is incomplete, repainting every line in place
 so bracket matches light up across lines), then we act on it. Ctrl-D on an empty line
@@ -704,13 +747,14 @@ ends input; Ctrl-C drops the form and re-prompts."
   (let (r (lineedit-read *repl-prompt*
             ""
             history
-            {:cont-prompt *repl-cont-prompt* :complete? repl--complete?}))
+            {:cont-prompt *repl-cont-prompt* :complete? repl-complete?}))
     (cond
       (get r :eof) {:eof true :history history}
       (get r :cancel) {:eof false :history history}
-      else (repl--submit true (get r :line) history))))
+      else (repl-submit true (get r :line) history))))
 
-(defn repl--read-eval-piped (acc history)
+(defn- repl-read-eval-piped
+  (acc history)
   "Piped/redirected read: accumulate physical lines (no editor) until the form is
 complete, echoing the prompt only when stdout is a TTY. Recurses on an incomplete form."
   (do
@@ -719,38 +763,41 @@ complete, echoing the prompt only when stdout is a TTY. Recurses on an incomplet
       (cond
         (nil? line)
           (do
-            (when (and (not (= acc "")) (= (repl--eval-print acc) :more))
+            (when (and (not (= acc "")) (= (repl-eval-print acc) :more))
               (eprint "error: incomplete input at end of input\n"))
             {:eof true :history history})
-        (and (= acc "") (repl--meta? line)) (do (repl--run-meta line) {:eof false :history history})
-        (and (= acc "") (not (repl--content? line 0 (string-length line) false)))
+        (and (= acc "") (repl-meta? line)) (do (repl-run-meta line) {:eof false :history history})
+        (and (= acc "") (not (repl-content? line 0 (string-length line) false)))
           {:eof false
            :history history}
         else
           (let (src (str acc line "\n"))
-            (if (= (repl--eval-print src) :more)
-              (repl--read-eval-piped src history)
+            (if (= (repl-eval-print src) :more)
+              (repl-read-eval-piped src history)
               {:eof false :history history}))))))
 
-(defn repl--read-eval (interactive acc history)
+(defn- repl-read-eval
+  (interactive acc history)
   "Read one form and act on it, returning `{:eof <bool> :history <list>}`. Interactive
 sessions use the multi-line line editor; piped input accumulates physical lines."
   (if interactive
-    (repl--read-eval-interactive history)
-    (repl--read-eval-piped acc history)))
+    (repl-read-eval-interactive history)
+    (repl-read-eval-piped acc history)))
 
-(defn repl--loop (interactive history)
+(defn- repl-loop
+  (interactive history)
   "Read-eval one form (skipping blank / comment-only input), then tail-recurse into
 the next iteration. Each command's transients are reclaimed by Stage B's automatic
 GC at the safepoint between iterations (this loop is a depth-1 spawned-process
 body); `interactive` and `history` stay live as rooted tail-call arguments.
 Returns (and the process exits) at end of input."
-  (let (r (repl--read-eval interactive "" history))
+  (let (r (repl-read-eval interactive "" history))
     (if (get r :eof)
       (when (stdout-tty?) (print "\n"))
-      (repl--loop interactive (get r :history)))))
+      (repl-loop interactive (get r :history)))))
 
-(defn repl--await (p)
+(defn- repl-await
+  (p)
   "Block the current process until process `p` exits."
   (let (r (monitor p))
     (receive ([:down ^r ^p _] nil))))
@@ -771,7 +818,8 @@ Returns (and the process exits) at end of input."
 ;; that locks you out of the tool you'd fix it with — so failure prints the error
 ;; and carries on.
 
-(defn repl--rc-paths ()
+(defn- repl-rc-paths
+  ()
   "The startup files to load, in order: `$BROOD_RC` (else `$HOME/.broodrc.blsp`), then
 `./.broodrc.blsp` for a project-local one. Duplicates collapse, so running the REPL
 from your home directory doesn't load the same file twice."
@@ -786,15 +834,16 @@ from your home directory doesn't load the same file twice."
 ;; Loaded ONCE per runtime, not once per `repl-run`: `pry` launches a nested `repl-run`
 ;; mid-session, and re-running the user's rc there would re-execute its side effects
 ;; and silently re-apply defs over the live session's state.
-(def *repl--rc-loaded* false)
+(def- *repl-rc-loaded* false)
 
-(defn repl--load-rc ()
+(defn- repl-load-rc
+  ()
   "Load each existing startup file, reporting (but surviving) a failure in one — once
 per runtime (a nested `repl-run`, e.g. `pry`, must not re-run the rc mid-session).
 Runs before the banner so anything an rc prints reads as part of startup, and before
 the loop spawns so its `def`s are in place for the first prompt."
-  (when (not *repl--rc-loaded*)
-    (def *repl--rc-loaded* true)
+  (when (not *repl-rc-loaded*)
+    (def- *repl-rc-loaded* true)
     (fold (fn (_ path)
             (when (try (file-exists? path) (catch _ false))
               (try
@@ -803,10 +852,10 @@ the loop spawns so its `def`s are in place for the first prompt."
                   (eprint (str "\e[33mwarning:\e[0m "
                             path
                             ": "
-                            (repl--error-message e)
+                            (repl-error-message e)
                             "\n"))))))
       nil
-      (repl--rc-paths))))
+      (repl-rc-paths))))
 
 ;; Which `repl-run` invocation owns the installed SIGINT handler — nil when none is
 ;; installed. Only the invocation that *installed* it restores the default disposition
@@ -814,7 +863,7 @@ the loop spawns so its `def`s are in place for the first prompt."
 ;; handler alone, while a transient session (pry under a *script*) must restore the
 ;; script's normal fatal Ctrl-C — otherwise every later Ctrl-C sets a flag nobody
 ;; polls and the script becomes uninterruptible.
-(def *repl--sigint-owner* nil)
+(def- *repl-sigint-owner* nil)
 
 (defn repl-run ()
   "Run the read-eval-print loop on stdin until end of input (Ctrl-D). When stdin and
@@ -830,7 +879,7 @@ fatal. Nestable: `pry` calls this from inside a session — prompts rebound with
 `binding` around the call are honoured, and the SIGINT handler is installed/restored
 by the outermost invocation only."
   (let (interactive (and (stdin-tty?) (stdout-tty?))
-        _rc (repl--load-rc)
+        _rc (repl-load-rc)
         ;; Resolve `*repl-interruptible*` to the real armed state: the user's knob (the
         ;; rc has already run, so an opt-out short-circuits before the handler is ever
         ;; installed) AND an interactive session (a pipeline must keep the default
@@ -842,20 +891,20 @@ by the outermost invocation only."
         ;; The first armed invocation owns the handler (a unique token compared at
         ;; exit); a nested repl-run sees a non-nil owner and leaves restoration to it.
         token (ref)
-        owner (and armed (nil? *repl--sigint-owner*))
-        _own (when owner (def *repl--sigint-owner* token))
+        owner (and armed (nil? *repl-sigint-owner*))
+        _own (when owner (def- *repl-sigint-owner* token))
         ;; Capture the prompts HERE, where a caller's `binding` (pry's `debug> `) is
         ;; still in scope — dynamics do not cross `spawn`, so the loop process would
         ;; otherwise fall back to the defaults — and re-establish them in the loop.
         prompt *repl-prompt*
         cont-prompt *repl-cont-prompt*
-        history (if interactive (repl--load-history) '()))
+        history (if interactive (repl-load-history) '()))
     (when (stdout-tty?) (eprint (str *repl-banner* "\n")))
-    (repl--await (spawn (binding (*repl-prompt* prompt *repl-cont-prompt* cont-prompt)
-                          (repl--loop interactive history))))
-    (when (and owner (= *repl--sigint-owner* token))
+    (repl-await (spawn (binding (*repl-prompt* prompt *repl-cont-prompt* cont-prompt)
+                         (repl-loop interactive history))))
+    (when (and owner (= *repl-sigint-owner* token))
       (%restore-interrupt-handler)
-      (def *repl--sigint-owner* nil)
+      (def- *repl-sigint-owner* nil)
       ;; back to the "arm if you can" intent, so a later repl-run re-resolves afresh
       (def *repl-interruptible* true))
     nil))

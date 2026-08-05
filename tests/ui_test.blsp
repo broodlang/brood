@@ -26,7 +26,8 @@
 
 ;; A scripted display: inputs arrive as `[:input …]` messages (selectively polled,
 ;; so interleaved `[:saw …]` render-echoes are skipped and survive for `drain-saw`).
-(defn r--display (me)
+(defn- r-display
+  (me)
   {:enter (fn () nil)
    :leave (fn () :left)
    :size (fn () [80 24])
@@ -79,8 +80,8 @@
         (is (includes? (nth (first f) 3) "hi 40x10")))))
 
   (test "tick-ms comes from the model (default 1000)"
-    (assert= (editor/ui/ui--tick-ms {}) 1000)
-    (assert= (editor/ui/ui--tick-ms {:tick-ms 250}) 250))
+    (assert= (editor/ui/ui-tick-ms {}) 1000)
+    (assert= (editor/ui/ui-tick-ms {:tick-ms 250}) 250))
 
   (test "a :close input (the window's X button) quits regardless of update"
     (let (me (self))
@@ -153,7 +154,7 @@
               (= input :go-c) {:tag :c}
               (= input :quit) (assoc m :done true)
               else m))
-          (r--display me))
+          (r-display me))
         :left)
       ;; a, b, (bad throws — no render), b again (rolled back + re-rendered), c.
       ;; the repeated :b proves the loop recovered to the last good frame.
@@ -176,7 +177,7 @@
             (= input :boom) (throw "update boom")
             (= input :quit) (assoc m :done true)
             else m))
-        (r--display me))
+        (r-display me))
       ;; rendered n: 0, 1, 1 (boom dropped — model held at 1), 2.
       (assert= (drain-saw []) (list 0 1 1 2))))
 
@@ -211,7 +212,7 @@
                            (= input :boom) (throw "kaboom!")
                            (= input :quit) (assoc m :done true)
                            else m))
-                       (r--display me))
+                       (r-display me))
                      (receive ([:err s] s) (after 0 ""))))
         (is (includes? logged "update error"))
         (is (includes? logged "kaboom!"))))))
@@ -292,11 +293,11 @@
 ; the key is still there
 (describe "ui--coalesce-drag"
   (test "non-drag messages pass through untouched (incl. nil on timeout)"
-    (assert= (editor/ui/ui--coalesce-drag "x") "x")
-    (assert= (editor/ui/ui--coalesce-drag :tick) :tick)
-    (assert= (editor/ui/ui--coalesce-drag [:mouse :press :left 3 3 []])
+    (assert= (editor/ui/ui-coalesce-drag "x") "x")
+    (assert= (editor/ui/ui-coalesce-drag :tick) :tick)
+    (assert= (editor/ui/ui-coalesce-drag [:mouse :press :left 3 3 []])
       [:mouse :press :left 3 3 []])
-    (is (nil? (editor/ui/ui--coalesce-drag nil))))
+    (is (nil? (editor/ui/ui-coalesce-drag nil))))
   (test "queued drags collapse to the latest; other messages stay in the mailbox"
     (let (me (self))
       (send me [:mouse :drag :left 6 6 []])
@@ -304,7 +305,7 @@
       ; a key after the drags — must survive
       (send me "k")
       ;; pass in the first drag (as the poll would); the queued drags drain to the last
-      (assert= (editor/ui/ui--coalesce-drag [:mouse :drag :left 5 5 []])
+      (assert= (editor/ui/ui-coalesce-drag [:mouse :drag :left 5 5 []])
         [:mouse :drag :left 7 7 []])
       (assert= (receive (m m) (after 200 :none)) "k"))))
 
@@ -314,35 +315,37 @@
 (describe "ui--drain-input"
   ; a display whose :poll(0) returns the next queued message (any shape), nil when empty —
   ; like a real frontend at timeout, so the drain terminates on the empty queue.
-  (defn di--display (me)
+  (defn- di-display
+    (me)
     {:poll (fn (ms) (receive (m m) (after 0 nil)))})
-  (defn di--count (m i c r) (update m :acc (fn (a) (conj a i))))
+  (defn- di-count (m i c r) (update m :acc (fn (a) (conj a i))))
   (test "folds the whole queued backlog, then stops at the empty poll (no pending)"
     (let (me (self)
           _ (do (send me [:input :a]) (send me [:input :b]) (send me [:input :c]))
-          result (editor/ui/ui--drain-input {:acc []} di--count (di--display me) 80 24 1024))
+          result (editor/ui/ui-drain-input {:acc []} di-count (di-display me) 80 24 1024))
       (assert= (:acc (first result)) [[:input :a] [:input :b] [:input :c]]) ; all three folded
       (is (nil? (second result))))) ; queue drained clean
   (test "an empty queue folds nothing — the model passes through unchanged"
     (let (me (self))
-      (assert= (editor/ui/ui--drain-input {:acc [:x]} di--count (di--display me) 80 24 1024)
+      (assert= (editor/ui/ui-drain-input {:acc [:x]} di-count (di-display me) 80 24 1024)
         [{:acc [:x]} nil])))
   (test "a :close pulled mid-drain comes back as pending (the loop acts on it, not update)"
     (let (me (self)
           _ (do (send me [:input :a]) (send me :close) (send me [:input :b]))
-          result (editor/ui/ui--drain-input {:acc []} di--count (di--display me) 80 24 1024))
+          result (editor/ui/ui-drain-input {:acc []} di-count (di-display me) 80 24 1024))
       (assert= (:acc (first result)) [[:input :a]]) ; folded :a, then stopped at :close
       (assert= (second result) :close))) ; handed back (":b" stays queued)
   (test "fuel bounds a single batch — the rest drains on the next turn"
     (let (me (self)
           _ (do (send me [:input :a]) (send me [:input :b]) (send me [:input :c]))
-          result (editor/ui/ui--drain-input {:acc []} di--count (di--display me) 80 24 2))
+          result (editor/ui/ui-drain-input {:acc []} di-count (di-display me) 80 24 2))
       (assert= (:acc (first result)) [[:input :a] [:input :b]]) ; only 2 folded (fuel = 2)
       (is (nil? (second result))))))
 
 ;; The loop-level behaviour: with :coalesce-input? a queued burst renders ONCE; without it,
 ;; the legacy once-per-input frames are untouched (the opt-in is inert by default).
-(defn ci--display (me)
+(defn- ci-display
+  (me)
   {:enter (fn () nil)
    :leave (fn () :left)
    :size (fn () [80 24])
@@ -366,7 +369,7 @@
               (= input :inc) (assoc m :n (+ (get m :n) 1))
               (= input :quit) (assoc m :done true)
               else m)))
-        (ci--display me))
+        (ci-display me))
       (assert= (drain-saw []) (list 0)) ; one frame — the burst coalesced
       (assert= (drain-folded []) (list :inc :inc :inc :quit)))) ; yet all four inputs folded
   (test "without the flag the same burst renders once per input (opt-in only)"
@@ -381,7 +384,7 @@
             (= input :inc) (assoc m :n (+ (get m :n) 1))
             (= input :quit) (assoc m :done true)
             else m))
-        (ci--display me))
+        (ci-display me))
       (assert= (drain-saw []) (list 0 1 2))))) ; per-input frames: 0, 1, 2
 ;; ---- named timers (ADR-102) ------------------------------------------------
 ;; The firing logic is pure (deadline math over a clock map + the timer specs), so it
@@ -393,32 +396,32 @@
   ; fired → fire+ms
   (test "repeating: counts from the last fire, or from arm before the first fire"
     ; never fired → arm+ms
-    (assert= (editor/ui/ui--deadline {:every 100} 1000 nil 500) 1100)
-    (assert= (editor/ui/ui--deadline {:every 100} 1000 1300 500) 1400))
+    (assert= (editor/ui/ui-deadline {:every 100} 1000 nil 500) 1100)
+    (assert= (editor/ui/ui-deadline {:every 100} 1000 1300 500) 1400))
   ; fire doesn't move it
   (test "one-shot: always counts from arm (fixed), ignoring the last fire"
-    (assert= (editor/ui/ui--deadline {:after 100} 1000 nil 500) 1100)
-    (assert= (editor/ui/ui--deadline {:after 100} 1000 1300 500) 1100))
+    (assert= (editor/ui/ui-deadline {:after 100} 1000 nil 500) 1100)
+    (assert= (editor/ui/ui-deadline {:after 100} 1000 1300 500) 1100))
   (test "idle: counts from the later of the base and last-input (input pushes it out)"
-    (assert= (editor/ui/ui--deadline {:after 100 :idle? true} 1000 nil 1500) 1600)
-    (assert= (editor/ui/ui--deadline {:every 100 :idle? true} 1000 1200 1500) 1600)))
+    (assert= (editor/ui/ui-deadline {:after 100 :idle? true} 1000 nil 1500) 1600)
+    (assert= (editor/ui/ui-deadline {:every 100 :idle? true} 1000 1200 1500) 1600)))
 
 ; repeating: deadline moved past fire
 (describe "ui--timer-live? — can the timer still fire"
   (test "never-fired is live; a fired one-shot (deadline at-or-before fire) is done"
     ; never fired
-    (is (editor/ui/ui--timer-live? nil 1100))
+    (is (editor/ui/ui-timer-live? nil 1100))
     ; one-shot: deadline == fire → done
-    (is (not (editor/ui/ui--timer-live? 1100 1100)))
-    (is (editor/ui/ui--timer-live? 1000 1100))))
+    (is (not (editor/ui/ui-timer-live? 1100 1100)))
+    (is (editor/ui/ui-timer-live? 1000 1100))))
 (describe "ui--clock-init — per-iteration clock bookkeeping"
   (test "first pass seeds last-input=now and arms each timer at now"
-    (let (c (editor/ui/ui--clock-init {} {:a {:every 100}} 5000))
+    (let (c (editor/ui/ui-clock-init {} {:a {:every 100}} 5000))
       (assert= (get c :last-input) 5000)
       (assert= (get c :armed) {:a 5000})
       (assert= (get c :fired) {})))
   (test "preserves existing arm/fire/last-input and GCs removed timers"
-    (let (c (editor/ui/ui--clock-init {:last-input 100 :armed {:a 50 :b 60} :fired {:a 70}}
+    (let (c (editor/ui/ui-clock-init {:last-input 100 :armed {:a 50 :b 60} :fired {:a 70}}
               ; :b is gone
               {:a {:every 100}}
               5000))
@@ -427,7 +430,7 @@
       (assert= (get c :armed) {:a 50})
       (assert= (get c :fired) {:a 70})))
   (test "a newly-appeared timer is armed at now; established ones keep their arm"
-    (let (c (editor/ui/ui--clock-init {:last-input 100 :armed {:a 50} :fired {}}
+    (let (c (editor/ui/ui-clock-init {:last-input 100 :armed {:a 50} :fired {}}
               {:a {:every 100} :c {:after 10}}
               5000))
       (assert= (get c :armed) {:a 50 :c 5000}))))
@@ -435,54 +438,54 @@
 (describe "ui--poll-ms — how long to park"
   ; overdue → 1
   (test "the soonest live deadline minus now, at least 1ms"
-    (assert= (editor/ui/ui--poll-ms {:a {:every 100}}
+    (assert= (editor/ui/ui-poll-ms {:a {:every 100}}
                {:last-input 1000 :armed {:a 1000} :fired {}}
                1000)
       100)
-    (assert= (editor/ui/ui--poll-ms {:a {:every 100}}
+    (assert= (editor/ui/ui-poll-ms {:a {:every 100}}
                {:last-input 1000 :armed {:a 1000} :fired {}}
                1200)
       1))
   (test "the earliest of several timers wins"
-    (assert= (editor/ui/ui--poll-ms {:a {:every 100} :b {:every 50}}
+    (assert= (editor/ui/ui-poll-ms {:a {:every 100} :b {:every 50}}
                {:last-input 1000 :armed {:a 1000 :b 1000} :fired {}}
                1000)
       50))
   (test "no live timer (a fired one-shot, or no timers) → the idle cap (60000)"
-    (assert= (editor/ui/ui--poll-ms {:a {:after 100}}
+    (assert= (editor/ui/ui-poll-ms {:a {:after 100}}
                {:last-input 1000 :armed {:a 1000} :fired {:a 1100}}
                1200)
       60000)
-    (assert= (editor/ui/ui--poll-ms {} {:last-input 1000 :armed {} :fired {}} 1200)
+    (assert= (editor/ui/ui-poll-ms {} {:last-input 1000 :armed {} :fired {}} 1200)
       60000)))
 
 ; b's deadline (1050) is earlier than a's (1100)
 (describe "ui--fire — service the due timer"
   (test "a due timer fires [:timer name] and records the firing"
-    (let (fr (editor/ui/ui--fire {:a {:every 100}}
+    (let (fr (editor/ui/ui-fire {:a {:every 100}}
                {:last-input 1000 :armed {:a 1000} :fired {}}
                1200))
       (assert= (first fr) [:timer :a])
       (assert= (get (get (second fr) :fired) :a) 1200)))
   (test "nothing due → [nil clock-unchanged]"
     (let (clock {:last-input 1000 :armed {:a 1000} :fired {}}
-          fr (editor/ui/ui--fire {:a {:every 100}} clock 1050))
+          fr (editor/ui/ui-fire {:a {:every 100}} clock 1050))
       (is (nil? (first fr)))
       (assert= (second fr) clock)))
   ; deadline (arm+ms=1100) not past the recorded fire (1100)
   (test "a one-shot fires once — after firing it's done until re-armed"
-    (let (fr (editor/ui/ui--fire {:a {:after 100}}
+    (let (fr (editor/ui/ui-fire {:a {:after 100}}
                {:last-input 1000 :armed {:a 1000} :fired {:a 1100}}
                1300))
       (is (nil? (first fr)))))
   ; deadline = max(1000,1300)+100 = 1400 > fire 1200
   (test "an idle one-shot re-arms once new input pushes its deadline past the last fire"
-    (let (fr (editor/ui/ui--fire {:a {:after 100 :idle? true}}
+    (let (fr (editor/ui/ui-fire {:a {:after 100 :idle? true}}
                {:last-input 1300 :armed {:a 1000} :fired {:a 1200}}
                1500))
       (assert= (first fr) [:timer :a])))
   (test "the earliest due timer fires when several are overdue"
-    (let (fr (editor/ui/ui--fire {:a {:every 100} :b {:every 50}}
+    (let (fr (editor/ui/ui-fire {:a {:every 100} :b {:every 50}}
                {:last-input 1000 :armed {:a 1000 :b 1000} :fired {}}
                2000))
       (assert= (first fr) [:timer :b]))))

@@ -107,7 +107,8 @@ with linking by registering the result of `spawn-server-link` yourself.)"
 
 ;; ---- defprocess -------------------------------------------------------------
 
-(defn gen--clause (c loop from rf res state-sym)
+(defn- gen-clause
+  (c loop from rf res state-sym)
   "Compile one defprocess message clause `c` into a receive clause. `loop` is the
 loop fn (so a clause tail-recurses with the next state); `from`/`rf`/`res` are the
 gensyms a `call`/`query` clause uses for the sender pid, reply ref, and the
@@ -163,7 +164,7 @@ loop, and a message matched by no clause is dropped (so the mailbox can't leak).
         res (gensym "res")
         loop (gensym "loop")
         junk (gensym "msg")
-        compile (fn (c) (gen--clause c loop from rf res state-sym))
+        compile (fn (c) (gen-clause c loop from rf res state-sym))
         env-receive (map compile env-clauses)
         info-receive (map compile info-clauses)
         ;; `[:$stop]` ends the loop; run `terminate` (reason :normal) first if present.

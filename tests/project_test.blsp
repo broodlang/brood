@@ -20,29 +20,29 @@
 
 (describe "project: :main parsing"
   (test "a bare symbol defaults the fn name to `main`"
-    (assert= (project/project--parse-main 'foo) '(foo main)))
+    (assert= (project/project-parse-main 'foo) '(foo main)))
   (test "a 2-list of symbols is taken as (module fn)"
-    (assert= (project/project--parse-main '(foo bar)) '(foo bar)))
+    (assert= (project/project-parse-main '(foo bar)) '(foo bar)))
   (test "a 1-list is rejected"
     (assert= "project: :main must be a module symbol or '(module fn), got (foo)"
-      (try (project/project--parse-main '(foo)) (catch e e))))
+      (try (project/project-parse-main '(foo)) (catch e e))))
   (test "a 3-list is rejected"
     (assert= "project: :main must be a module symbol or '(module fn), got (foo bar baz)"
-      (try (project/project--parse-main '(foo bar baz)) (catch e e))))
+      (try (project/project-parse-main '(foo bar baz)) (catch e e))))
   (test "a non-symbol head is rejected"
-    (is (string? (try (project/project--parse-main '("foo" main)) (catch e e)))))
+    (is (string? (try (project/project-parse-main '("foo" main)) (catch e e)))))
   (test "a non-symbol fn is rejected"
-    (is (string? (try (project/project--parse-main '(foo "main")) (catch e e)))))
+    (is (string? (try (project/project-parse-main '(foo "main")) (catch e e)))))
   (test "a string is rejected"
-    (is (string? (try (project/project--parse-main "main") (catch e e)))))
+    (is (string? (try (project/project-parse-main "main") (catch e e)))))
   ;; `:main 'app` reads as `(quote app)` (the manifest is data, never evaluated),
   ;; which would silently misparse to module `quote` — guard it with a fix-it.
   (test "a quoted symbol is rejected with a drop-the-quote fix-it"
-    (let (msg (try (project/project--parse-main '(quote app)) (catch e e)))
+    (let (msg (try (project/project-parse-main '(quote app)) (catch e e)))
       (and (is (includes? msg "drop the leading quote"))
         (is (includes? msg "`:main app`")))))
   (test "a quoted list is rejected with a drop-the-quote fix-it"
-    (is (includes? (try (project/project--parse-main '(quote (app start))) (catch e e))
+    (is (includes? (try (project/project-parse-main '(quote (app start))) (catch e e))
           "drop the leading quote"))))
 
 (describe "project: default entry"
@@ -154,23 +154,23 @@
   :isolated
   (test "a :path dep's manifest is read in place, relative to the root"
     (project :name "demo" :dependencies [[shared :path "../shared"]])
-    (assert= (project/project--dep-manifest-path 'shared "/proj")
+    (assert= (project/project-dep-manifest-path 'shared "/proj")
       "/proj/../shared/project.blsp"))
   (test "a :git dep's manifest is read from its _deps checkout"
     (project
       :name "demo"
       :dependencies [[hatch :git "https://example.com/hatch.git" :ref "v1"]])
-    (assert= (project/project--dep-manifest-path 'hatch "/proj")
+    (assert= (project/project-dep-manifest-path 'hatch "/proj")
       "/proj/_deps/hatch/project.blsp"))
   (test "a :tarball dep's manifest is read from its _deps checkout too"
     (project
       :name "demo"
       :dependencies [[grid :tarball "https://example.com/grid.tar.gz" :sha256 "abc"]])
-    (assert= (project/project--dep-manifest-path 'grid "/proj")
+    (assert= (project/project-dep-manifest-path 'grid "/proj")
       "/proj/_deps/grid/project.blsp"))
   (test "an undeclared dep has no manifest"
     (project :name "demo" :dependencies [[shared :path "../shared"]])
-    (assert= (project/project--dep-manifest-path 'nope "/proj") nil))
+    (assert= (project/project-dep-manifest-path 'nope "/proj") nil))
   (test "a :git plugin's :format-headers reach the effective header table"
     (let (root (temp-dir "brood-fmt-plugin-")
           hatch (path-join (path-join root "_deps") "hatch"))
@@ -183,14 +183,14 @@
         :format-plugins [hatch]
         :format-headers {on 1})
       ;; the plugin's rules land, and the project's own :format-headers win on a clash
-      (assert= (project/project--effective-format-headers root)
+      (assert= (project/project-effective-format-headers root)
         {'deflive 0 'on 1 'tick 2})))
   (test "an unfetched plugin degrades to no extra rules rather than erroring"
     (project
       :name "demo"
       :dependencies [[hatch :git "https://example.com/hatch.git" :ref "v1"]]
       :format-plugins [hatch])
-    (assert= (project/project--effective-format-headers "/nonexistent-project-root") {}))
+    (assert= (project/project-effective-format-headers "/nonexistent-project-root") {}))
   ;; A plugin naming a dep the manifest never declared is a typo. It warns to stderr
   ;; (not assertable here — `with-out-str` captures stdout only), but it must still
   ;; contribute nothing and, crucially, not cost a correctly-declared sibling its
@@ -199,7 +199,7 @@
     (project :name "demo" :dependencies [[shared :path "../shared"]] :format-plugins [typo])
     ;; `with-err-str` both asserts the warning and keeps it out of the suite's
     ;; output — the warning firing here is the correct behaviour, not noise to fix.
-    (let (warning (with-err-str (assert= (project/project--effective-format-headers "/proj") {})))
+    (let (warning (with-err-str (assert= (project/project-effective-format-headers "/proj") {})))
       (and (is (includes? warning "typo"))
         (is (includes? warning "not in :dependencies")))))
   (test "a bogus plugin entry does not suppress a valid sibling's rules"
@@ -212,19 +212,19 @@
         :name "demo"
         :dependencies [[hatch :git "https://example.com/hatch.git" :ref "v1"]]
         :format-plugins [typo hatch])
-      (with-err-str (assert= (project/project--effective-format-headers root)
+      (with-err-str (assert= (project/project-effective-format-headers root)
                       {'deflive 0 'tick 2})))))
 
 (describe "project: scaffold templates (ADR-037)"
   (test "the .gitignore template ignores the package cache"
-    (is (includes? (scaffold/project--gitignore-template) "_deps/")))
+    (is (includes? (scaffold/project-gitignore-template) "_deps/")))
   (test "the .gitattributes template maps .blsp to Clojure but keeps it out of the language stats"
-    (let (a (scaffold/project--gitattributes-template))
+    (let (a (scaffold/project-gitattributes-template))
       (is (includes? a "*.blsp"))
       (is (includes? a "linguist-language=Clojure"))
       (is (includes? a "linguist-detectable=false"))))
   (test "the manifest template documents how to add :dependencies"
-    (let (m (scaffold/project--manifest-template "demo"))
+    (let (m (scaffold/project-manifest-template "demo"))
       (is (includes? m ":dependencies"))
       ;; still a valid manifest: the first form is the (project …) call
       (let (form (read-string m))
@@ -236,11 +236,11 @@
   ;; module (net/sse) keeps its namespace and resolves through %builtin-module — the
   ;; bug behind `./app: require: cannot find module 'net/sse'` after `nest release`.
   (test "project--bundle-name keeps the namespace relative to the source dir"
-    (assert= (project/project--bundle-name "/p/src" "/p/src/main.blsp") "main")
-    (assert= (project/project--bundle-name "/p/src" "/p/src/net/sse.blsp") "net/sse")
-    (assert= (project/project--bundle-name "/p/src/" "/p/src/a/b/c.blsp") "a/b/c"))
+    (assert= (project/project-bundle-name "/p/src" "/p/src/main.blsp") "main")
+    (assert= (project/project-bundle-name "/p/src" "/p/src/net/sse.blsp") "net/sse")
+    (assert= (project/project-bundle-name "/p/src/" "/p/src/a/b/c.blsp") "a/b/c"))
   (test "a path not under the source dir falls back to its bare stem"
-    (assert= (project/project--bundle-name "/other" "/p/src/x.blsp") "x")))
+    (assert= (project/project-bundle-name "/other" "/p/src/x.blsp") "x")))
 
 (describe "project: namespace-aware duplicate global detection (ADR-065)"
   (test "project/project--file-def-names resolves names to ns/name (ambient earmuffs stay root; defmodule skipped)"
@@ -251,7 +251,7 @@
           "(defmodule a \"x\")\n(defn main () 1)\n(def k 2)\n(defmacro m (x) x)\n(defdyn *d* 0)\n(defn helper (y) y)\n")
         ;; Under `(defmodule a)` every binding resolves to `a/…`, except the
         ;; ambient `*d*` earmuff which stays root (mirrors the kernel resolver).
-        (assert= (sort (project/project--file-def-names f))
+        (assert= (sort (project/project-file-def-names f))
           (sort ["*d*" "a/helper" "a/k" "a/m" "a/main"])))))
   (test "the same short name in two DIFFERENT namespaces is not a collision"
     (let (dir (temp-dir "brood-dup-"))
@@ -260,14 +260,14 @@
         (spit fa "(defmodule alpha)\n(defn main () 1)\n")
         (spit fb "(defmodule beta)\n(defn main () 2)\n")
         ;; alpha/main vs beta/main — distinct keys, no warning.
-        (assert= (project/project--duplicate-def-warnings-seq [fa fb]) nil))))
+        (assert= (project/project-duplicate-def-warnings-seq [fa fb]) nil))))
   (test "the same name in the SAME namespace IS flagged (qualified)"
     (let (dir (temp-dir "brood-dup-"))
       (make-dir dir)
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
         (spit fa "(defmodule shared)\n(defn main () 1)\n(defn only-a () 1)\n")
         (spit fb "(defmodule shared)\n(defn main () 2)\n(defn only-b () 2)\n")
-        (let (warns (project/project--duplicate-def-warnings-seq [fa fb]))
+        (let (warns (project/project-duplicate-def-warnings-seq [fa fb]))
           (assert= (count warns) 1)
           (is (includes? (first warns) "shared/main"))
           (refute (includes? (first warns) "only-a"))))))
@@ -277,7 +277,7 @@
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
         (spit fa "(defmodule alpha)\n(defdyn *cfg* 1)\n")
         (spit fb "(defmodule beta)\n(defdyn *cfg* 2)\n")
-        (let (warns (project/project--duplicate-def-warnings-seq [fa fb]))
+        (let (warns (project/project-duplicate-def-warnings-seq [fa fb]))
           (assert= (count warns) 1)
           (is (includes? (first warns) "*cfg*"))))))
   (test "files with no defmodule share the root namespace — same name still collides"
@@ -286,7 +286,7 @@
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
         (spit fa "(defn main () 1)\n(defn only-a () 1)\n")
         (spit fb "(defn main () 2)\n(defn only-b () 2)\n")
-        (let (warns (project/project--duplicate-def-warnings-seq [fa fb]))
+        (let (warns (project/project-duplicate-def-warnings-seq [fa fb]))
           (assert= (count warns) 1)
           (is (includes? (first warns) "main"))
           (refute (includes? (first warns) "only-a"))))))
@@ -296,7 +296,7 @@
       (let (fa (path-join dir "a.blsp") fb (path-join dir "b.blsp"))
         (spit fa "(defmodule alpha)\n(defn alpha-fn () 1)\n")
         (spit fb "(defmodule beta)\n(defn beta-fn () 2)\n")
-        (assert= (project/project--duplicate-def-warnings-seq [fa fb]) nil))))
+        (assert= (project/project-duplicate-def-warnings-seq [fa fb]) nil))))
   ;; The cached, extract-based path (ADR-119) must agree with the sequential one.
   ;; Build extracts by hand (dummy mtime 0) so this needs no disk cache, and compare
   ;; both the duplicate-defs and unused-private derivations against the -seq/-agg forms.
@@ -309,16 +309,16 @@
         (spit fb "(defmodule shared)\n(defn main () 2)\n")
         (let (files [fa fb]
               extracts (fold (fn (m p)
-                               (let ([c pr dn] (project/project--scan-file-entry p))
+                               (let ([c pr dn] (project/project-scan-file-entry p))
                                  (map-assoc m p [0 c pr dn])))
                          {}
                          files)
               source-set (fold (fn (m p) (map-assoc m p true)) {} files))
           ;; duplicate-defs: extract path == sequential path
-          (assert= (sort (project/project--duplicate-def-warnings extracts source-set))
-            (sort (project/project--duplicate-def-warnings-seq files)))
+          (assert= (sort (project/project-duplicate-def-warnings extracts source-set))
+            (sort (project/project-duplicate-def-warnings-seq files)))
           ;; unused-private: shared--dead is unreferenced (warn), shared--helper is used
-          (let (warns (project/project--unused-private-warnings extracts))
+          (let (warns (project/project-unused-private-warnings extracts))
             (assert= (count warns) 1)
             (is (includes? (first warns) "shared--dead"))
             (refute (any? (fn (w) (includes? w "shared--helper")) warns))))))))
@@ -366,20 +366,20 @@
       (make-dir dir)
       (let (f (path-join dir "m.blsp"))
         (spit f "(defmodule featmod \"doc\")\n(defn g () 1)\n")
-        (assert= (project/project--file-feature f) "featmod"))))
+        (assert= (project/project-file-feature f) "featmod"))))
   (test "a file with no defmodule header has no feature (nil → always loaded)"
     (let (dir (temp-dir "brood-feat-"))
       (make-dir dir)
       (let (f (path-join dir "m.blsp"))
         (spit f "(defn g () 1)\n")
-        (is (nil? (project/project--file-feature f))))))
+        (is (nil? (project/project-file-feature f))))))
   (test "an unparseable file yields nil (the load surfaces the real error)"
     (let (dir (temp-dir "brood-feat-"))
       (make-dir dir)
       (let (f (path-join dir "m.blsp"))
         ; unbalanced — won't parse
         (spit f "(defmodule oops \n")
-        (is (nil? (project/project--file-feature f))))))
+        (is (nil? (project/project-file-feature f))))))
   ;; The fixtures below bump a counter on every evaluation, so the counter is exactly
   ;; how many times the file was actually loaded. The counter lives in the *fixture
   ;; module's* namespace and is read back qualified (`zzz/*zzz-loads*`): an earmuff
@@ -426,23 +426,23 @@
 ;; quietly ignored and the project silently ran on defaults.
 (describe "project: manifest validation"
   (test "a vector of path strings is accepted"
-    (assert= (project/project--check-paths :source-paths ["src" "lib"]) ["src" "lib"]))
+    (assert= (project/project-check-paths :source-paths ["src" "lib"]) ["src" "lib"]))
   (test "a list of path strings is accepted"
-    (assert= (project/project--check-paths :source-paths (list "src")) (list "src")))
+    (assert= (project/project-check-paths :source-paths (list "src")) (list "src")))
   (test "a bare string is rejected, naming the key and the fix"
-    (let (msg (try (project/project--check-paths :source-paths "src") (catch e e)))
+    (let (msg (try (project/project-check-paths :source-paths "src") (catch e e)))
       (and (is (includes? msg ":source-paths"))
         (is (includes? msg "not a bare string"))
         (is (includes? msg "[\"src\"]")))))
   (test "a vector of non-strings is rejected"
-    (is (includes? (try (project/project--check-paths :source-paths [5]) (catch e e))
+    (is (includes? (try (project/project-check-paths :source-paths [5]) (catch e e))
           "must contain only strings")))
   (test "a number is rejected"
-    (is (includes? (try (project/project--check-paths :test-paths 5) (catch e e))
+    (is (includes? (try (project/project-check-paths :test-paths 5) (catch e e))
           "must be a vector of path strings")))
   (test "the fix-it example matches the key it is about"
     ;; suggesting ["src"] for :test-paths would be actively misleading
-    (is (includes? (try (project/project--check-paths :test-paths 5) (catch e e))
+    (is (includes? (try (project/project-check-paths :test-paths 5) (catch e e))
           "[\"tests\"]"))))
 
 (describe "project: manifest loading errors point at the file"
@@ -452,7 +452,7 @@
           manifest (path-join dir "project.blsp"))
       (make-dir dir)
       (spit manifest "(project :name \"x\"\n")
-      (let (msg (try (project/project--apply-manifest manifest) (catch e e)))
+      (let (msg (try (project/project-apply-manifest manifest) (catch e e)))
         (and (is (includes? msg "cannot parse"))
           (is (includes? msg manifest))
           (is (includes? msg "line"))))))
@@ -461,14 +461,14 @@
           manifest (path-join dir "project.blsp"))
       (make-dir dir)
       (spit manifest "")
-      (is (includes? (try (project/project--apply-manifest manifest) (catch e e))
+      (is (includes? (try (project/project-apply-manifest manifest) (catch e e))
             "cannot parse"))))
   (test "a first form that is not (project …) is REJECTED, not silently ignored"
     (let (dir (temp-dir "brood-manifest-")
           manifest (path-join dir "project.blsp"))
       (make-dir dir)
       (spit manifest "(porject :name \"x\")\n")
-      (let (msg (try (project/project--apply-manifest manifest) (catch e e)))
+      (let (msg (try (project/project-apply-manifest manifest) (catch e e)))
         (and (is (includes? msg "must begin with a (project"))
           (is (includes? msg "porject"))
           (is (includes? msg "being ignored"))))))
@@ -477,14 +477,14 @@
           manifest (path-join dir "project.blsp"))
       (make-dir dir)
       (spit manifest "42\n")
-      (is (includes? (try (project/project--apply-manifest manifest) (catch e e))
+      (is (includes? (try (project/project-apply-manifest manifest) (catch e e))
             "must begin with a (project"))))
   (test "a well-formed manifest still applies"
     (let (dir (temp-dir "brood-manifest-")
           manifest (path-join dir "project.blsp"))
       (make-dir dir)
       (spit manifest "(project :name \"applied\" :version \"9.9.9\")\n")
-      (project/project--apply-manifest manifest)
+      (project/project-apply-manifest manifest)
       (assert= *project-name* "applied"))))
 
 ;; The scaffolded library module is named after the PROJECT, not a fixed `hello`.
@@ -495,24 +495,24 @@
 ;; punctuation that a symbol shouldn't carry.
 (describe "project: the scaffolded library module's name"
   (test "an ordinary name is used as-is"
-    (assert= (scaffold/project--module-name "greeter") "greeter"))
+    (assert= (scaffold/project-module-name "greeter") "greeter"))
   (test "hyphens and underscores are kept"
-    (assert= (scaffold/project--module-name "my-cool_lib") "my-cool_lib"))
+    (assert= (scaffold/project-module-name "my-cool_lib") "my-cool_lib"))
   (test "a dot becomes a hyphen, so the name reads as one symbol"
-    (assert= (scaffold/project--module-name "my.app") "my-app"))
+    (assert= (scaffold/project-module-name "my.app") "my-app"))
   (test "other punctuation is replaced too"
-    (assert= (scaffold/project--module-name "a+b!c") "a-b-c"))
+    (assert= (scaffold/project-module-name "a+b!c") "a-b-c"))
   (test "a leading digit is prefixed, since a symbol must not read as a number"
-    (assert= (scaffold/project--module-name "2fast") "p-2fast"))
+    (assert= (scaffold/project-module-name "2fast") "p-2fast"))
   (test "a name of only punctuation degrades to something usable"
-    (assert= (scaffold/project--module-name "+++") "lib"))
+    (assert= (scaffold/project-module-name "+++") "lib"))
   (test "the reserved `main` is renamed, so the library can't collide with the entry module"
-    (assert= (scaffold/project--module-name "main") "main-lib"))
+    (assert= (scaffold/project-module-name "main") "main-lib"))
   (test "a non-ASCII name is not silently mangled into nothing"
     ;; Every character is replaced, but the result is still a usable symbol.
-    (is (> (string-length (scaffold/project--module-name "日本")) 0)))
+    (is (> (string-length (scaffold/project-module-name "日本")) 0)))
   (test "the derived name is stable"
-    (assert= (scaffold/project--module-name "x") (scaffold/project--module-name "x"))))
+    (assert= (scaffold/project-module-name "x") (scaffold/project-module-name "x"))))
 
 ;; Package identity accessor (ADR-172): resolve a namespace/qualified name → its package,
 ;; and enrich a stack trace with per-frame :package. `*ns-package*` is bound directly here
@@ -548,11 +548,11 @@
 (describe "bundle: duplicate module names are rejected"
   (test "two providers of one require-name error loudly"
     (is (includes? (try
-                     (project/bundle--reject-duplicate-names (list "app" "parser" "lib" "parser"))
+                     (project/bundle-reject-duplicate-names (list "app" "parser" "lib" "parser"))
                      (catch e e))
           "same module name")))
   (test "distinct require-names pass"
-    (assert= (project/bundle--reject-duplicate-names (list "app" "net/sse" "lib")) nil)))
+    (assert= (project/bundle-reject-duplicate-names (list "app" "net/sse" "lib")) nil)))
 
 ;; ---- the :brood runtime-version gate (ADR-209) -------------------------------
 ;; A project may require a minimum/compatible runtime with `:brood "<constraint>"`,
@@ -570,24 +570,24 @@
 (describe "project: the :brood runtime gate"
   (test "no constraint is a no-op (nothing to satisfy)"
     (binding (*project-brood* nil)
-      (assert= nil (project/project--check-brood-version))))
+      (assert= nil (project/project-check-brood-version))))
   (test "a satisfied constraint passes silently"
     ;; the running version always satisfies >= 0.0.0
     (binding (*project-brood* ">= 0.0.0")
-      (assert= nil (project/project--check-brood-version)))
+      (assert= nil (project/project-check-brood-version)))
     (binding (*project-brood* (str "<= " (brood-version)))
-      (assert= nil (project/project--check-brood-version))))
+      (assert= nil (project/project-check-brood-version))))
   (test "an unmet constraint errors, naming the requirement and the running version"
     (binding (*project-brood* ">= 999.0")
-      (let (message (try (project/project--check-brood-version) (catch e (error-message e))))
+      (let (message (try (project/project-check-brood-version) (catch e (error-message e))))
         (is (includes? message "requires Brood"))
         (is (includes? message ">= 999.0"))
         (is (includes? message (brood-version))))))
   (test "a caret/tilde constraint is honoured like any other range"
     (binding (*project-brood* "^999.0")
-      (is (includes? (try (project/project--check-brood-version) (catch e (error-message e)))
+      (is (includes? (try (project/project-check-brood-version) (catch e (error-message e)))
             "requires Brood"))))
   (test "a non-string constraint is a clear manifest error"
     (binding (*project-brood* 42)
-      (is (includes? (try (project/project--check-brood-version) (catch e (error-message e)))
+      (is (includes? (try (project/project-check-brood-version) (catch e (error-message e)))
             "must be a version-constraint string")))))

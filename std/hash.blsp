@@ -32,16 +32,17 @@
 
 ;; ---- hex encoding -----------------------------------------------------------
 
-(def hash--hex-digits "0123456789abcdef")
+(def- hash-hex-digits "0123456789abcdef")
 
-(defn hash--byte->hex (b)
-  (str (char-at hash--hex-digits (quot b 16))
-    (char-at hash--hex-digits (rem b 16))))
+(defn- hash-byte->hex
+  (b)
+  (str (char-at hash-hex-digits (quot b 16))
+    (char-at hash-hex-digits (rem b 16))))
 
 (defn bytes->hex (bytes)
   "Lowercase hex string of a byte sequence (bytes value, vector, or list of byte
 ints 0–255). The output shaping for every digest/HMAC below."
-  (join "" (map hash--byte->hex (seq bytes))))
+  (join "" (map hash-byte->hex (seq bytes))))
 
 ;; ---- MD5 --------------------------------------------------------------------
 

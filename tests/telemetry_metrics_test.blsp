@@ -235,10 +235,10 @@
   ; :b gone
   (test "absent computes the added / removed peers of two peer sets"
     ; added
-    (assert= (into [] (telemetry/telemetry--absent '(:a :b :c) '(:a))) [:b :c])
+    (assert= (into [] (telemetry/telemetry-absent '(:a :b :c) '(:a))) [:b :c])
     ; none removed
-    (assert= (empty? (telemetry/telemetry--absent '(:a) '(:a :b))) true)
-    (assert= (into [] (telemetry/telemetry--absent '(:a :b) '(:a :c))) [:b]))
+    (assert= (empty? (telemetry/telemetry-absent '(:a) '(:a :b))) true)
+    (assert= (into [] (telemetry/telemetry-absent '(:a :b) '(:a :c))) [:b]))
   (test "a membership change re-emits [:runtime :nodeup]/[:runtime :nodedown]"
     (let (me (self))
       (start-telemetry)
@@ -246,14 +246,14 @@
       (attach :up [:runtime :nodeup] (fn (e m md) (send me [:up (get md :node)])))
       (attach :down [:runtime :nodedown] (fn (e m md) (send me [:down (get md :node)])))
       ;; poll 1 — known {:a}, current {:a :b}: :b appears (up = current∖known)
-      (dolist (n (telemetry/telemetry--absent '(:a :b) '(:a)))
+      (dolist (n (telemetry/telemetry-absent '(:a :b) '(:a)))
         (emit [:runtime :nodeup] {} {:node n}))
-      (dolist (n (telemetry/telemetry--absent '(:a) '(:a :b)))
+      (dolist (n (telemetry/telemetry-absent '(:a) '(:a :b)))
         (emit [:runtime :nodedown] {} {:node n}))
       ;; poll 2 — known {:a :b}, current {:a}: :b vanishes (down = known∖current)
-      (dolist (n (telemetry/telemetry--absent '(:a) '(:a :b)))
+      (dolist (n (telemetry/telemetry-absent '(:a) '(:a :b)))
         (emit [:runtime :nodeup] {} {:node n}))
-      (dolist (n (telemetry/telemetry--absent '(:a :b) '(:a)))
+      (dolist (n (telemetry/telemetry-absent '(:a :b) '(:a)))
         (emit [:runtime :nodedown] {} {:node n}))
       (telemetry-sync)
       (let (got (into [] (tnode-drain '())))
@@ -314,15 +314,15 @@
 (describe "defevent — runtime presence-check (pure)"
   (test "telemetry--check-event reports each missing declared key by kind"
     ;; complete payload → no problems
-    (assert= nil (telemetry/telemetry--check-event [:tmm :req :stop] {:duration 1} {:path "/"}))
+    (assert= nil (telemetry/telemetry-check-event [:tmm :req :stop] {:duration 1} {:path "/"}))
     ;; missing measurement key
     (assert= (list [:measurements :duration])
-      (telemetry/telemetry--check-event [:tmm :req :stop] {} {:path "/"}))
+      (telemetry/telemetry-check-event [:tmm :req :stop] {} {:path "/"}))
     ;; missing both
     (assert= (list [:measurements :duration] [:metadata :path])
-      (telemetry/telemetry--check-event [:tmm :req :stop] {} {})))
+      (telemetry/telemetry-check-event [:tmm :req :stop] {} {})))
   (test "an undeclared event never reports a problem"
-    (assert= nil (telemetry/telemetry--check-event [:undeclared] {} {})))
+    (assert= nil (telemetry/telemetry-check-event [:undeclared] {} {})))
   (test "telemetry-validate! flips the listener flag"
     (telemetry-validate! true)
     (assert= true *telemetry-validate*)
@@ -367,8 +367,8 @@
     (start-telemetry)
     (let (cap (table))
       (attach :remote-cap [:remote :hits] (fn (e m md) (table-put cap :got {:m m :md md})))
-      (let (agent (spawn (telemetry/telemetry--serve-loop nil))
-            watcher (telemetry/telemetry--subscribe-to agent [:app :hit] [:remote :hits]))
+      (let (agent (spawn (telemetry/telemetry-serve-loop nil))
+            watcher (telemetry/telemetry-subscribe-to agent [:app :hit] [:remote :hits]))
         (sleep 30)
         ;; a target-side emit rides the forwarder to the subscriber, which re-emits locally
         (emit [:app :hit] {:count 1} {:path "/x"})

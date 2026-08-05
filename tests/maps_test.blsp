@@ -22,8 +22,8 @@
 ;; Tail-recursive [lo, hi) — built top-down so the result is ascending. Tail
 ;; recursion matters: a `test` body runs in a green process, whose coroutine
 ;; stack is small, so deep *non*-tail recursion would overflow it.
-(defn mt-range (lo hi) (mt-range--down (- hi 1) lo nil))
-(defn mt-range--down (i lo acc) (if (< i lo) acc (mt-range--down (- i 1) lo (cons i acc))))
+(defn mt-range (lo hi) (mt-range-down (- hi 1) lo nil))
+(defn- mt-range-down (i lo acc) (if (< i lo) acc (mt-range-down (- i 1) lo (cons i acc))))
 
 (defn mt-build (n)
   ; {0->0, 1->1, 2->4, …, (n-1)->(n-1)²}

@@ -14,16 +14,16 @@
   (:use editor/highlight))
 
 ;; Apply a sequence of keys to a state (fold the pure handler).
-(defn le--keys (state keys) (fold editor/lineedit/lineedit-handle state keys))
-(defn le--fresh () (editor/lineedit/lineedit-init "brood> " "" '()))
+(defn- le-keys (state keys) (fold editor/lineedit/lineedit-handle state keys))
+(defn- le-fresh () (editor/lineedit/lineedit-init "brood> " "" '()))
 
 (describe "lineedit/lineedit-handle — typing and motion"
   (test "printable chars insert at point and advance it"
-    (let (s (le--keys (le--fresh) (list "(" "+" " " "1" ")")))
+    (let (s (le-keys (le-fresh) (list "(" "+" " " "1" ")")))
       (assert= (get s :text) "(+ 1)")
       (assert= (get s :point) 5)))
   (test "C-a / C-e and arrows move point, clamped"
-    (let (s (le--keys (le--fresh) (list "a" "b" "c")))
+    (let (s (le-keys (le-fresh) (list "a" "b" "c")))
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-a) :point) 0)
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-e) :point) 3)
       (assert= (get (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-handle s :ctrl-a)
@@ -32,7 +32,7 @@
         0)
       (assert= (get (editor/lineedit/lineedit-handle s :right) :point) 3)))
   (test "M-f / M-b move by words"
-    (let (s (le--keys (le--fresh) (list "f" "o" "o" " " "b" "a" "r")))
+    (let (s (le-keys (le-fresh) (list "f" "o" "o" " " "b" "a" "r")))
       (assert= (get (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-handle s :ctrl-a)
                       :alt-f)
                  :point)
@@ -41,20 +41,20 @@
 
 (describe "lineedit/lineedit-handle — deletion and the kill ring"
   (test "backspace and delete remove a char"
-    (let (s (le--keys (le--fresh) (list "a" "b" "c")))
+    (let (s (le-keys (le-fresh) (list "a" "b" "c")))
       (assert= (get (editor/lineedit/lineedit-handle s :backspace) :text) "ab")
       (assert= (get (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-handle s :ctrl-a)
                       :delete)
                  :text)
         "bc")))
   (test "C-k kills to end, C-u to start, into :kill"
-    (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "a" "b" "c" "d")) 2))
+    (let (s (editor/lineedit/lineedit-move (le-keys (le-fresh) (list "a" "b" "c" "d")) 2))
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-k) :text) "ab")
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-k) :kill) "cd")
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-u) :text) "cd")
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-u) :kill) "ab")))
   (test "C-w kills the previous word; C-y yanks it back"
-    (let (s (le--keys (le--fresh) (list "f" "o" "o" " " "b" "a" "r"))
+    (let (s (le-keys (le-fresh) (list "f" "o" "o" " " "b" "a" "r"))
           w (editor/lineedit/lineedit-handle s :ctrl-w))
       (assert= (get w :text) "foo ")
       (assert= (get w :kill) "bar")
@@ -64,7 +64,7 @@
   (test "up walks older, down walks newer, restoring the in-progress line"
     (let (h (editor/lineedit/lineedit-init "x> " "" (list "(newer)" "(older)"))
           ; in-progress text
-          d (le--keys h (list "w" "i" "p"))
+          d (le-keys h (list "w" "i" "p"))
           u1 (editor/lineedit/lineedit-handle d :up))
       (assert= (get u1 :text) "(newer)")
       (assert= (get (editor/lineedit/lineedit-handle u1 :up) :text) "(older)")
@@ -121,25 +121,25 @@
                  :text)
         "")))
   (test "C-h is backspace"
-    (let (s (le--keys (le--fresh) (list "a" "b" "c")))
+    (let (s (le-keys (le-fresh) (list "a" "b" "c")))
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-h) :text) "ab")))
   (test "M-d kills the word after point, leaving point put"
-    (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh)
-                                              (list "f" "o" "o" " " "b" "a" "r"))
+    (let (s (editor/lineedit/lineedit-move (le-keys (le-fresh)
+                                             (list "f" "o" "o" " " "b" "a" "r"))
               4)
           d (editor/lineedit/lineedit-handle s :alt-d))
       (assert= (get d :text) "foo ")
       (assert= (get d :kill) "bar")
       (assert= (get d :point) 4)))
   (test "C-t transposes the chars around point"
-    (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "a" "b" "c")) 1))
+    (let (s (editor/lineedit/lineedit-move (le-keys (le-fresh) (list "a" "b" "c")) 1))
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-t) :text) "bac")
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-t) :point) 2))
     ;; at end of line, transpose the last two
-    (let (s (le--keys (le--fresh) (list "a" "b" "c")))
+    (let (s (le-keys (le-fresh) (list "a" "b" "c")))
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-t) :text) "acb")))
   (test "C-l requests a screen clear (handled by the loop)"
-    (is (get (editor/lineedit/lineedit-handle (le--fresh) :ctrl-l) :clear))))
+    (is (get (editor/lineedit/lineedit-handle (le-fresh) :ctrl-l) :clear))))
 
 ;; The keymap is data (key → command symbol) and commands are real functions, so
 ;; the REPL/editor can rebind a key or redefine a command at runtime. (We assert the
@@ -151,10 +151,10 @@
     (assert= (get *lineedit-keymap* :ctrl-p) 'editor/lineedit/lineedit-history-prev)
     (assert= (get *lineedit-keymap* :alt-d) 'editor/lineedit/lineedit-kill-word-forward))
   (test "a command is a callable fn equivalent to pressing its key"
-    (let (s (le--keys (le--fresh) (list "a" "b" "c")))
+    (let (s (le-keys (le-fresh) (list "a" "b" "c")))
       (assert= (lineedit-beginning-of-line s :ctrl-a) (editor/lineedit/lineedit-handle s :ctrl-a))
-      (assert= (lineedit-kill-line (editor/lineedit/lineedit--move s 1) :ctrl-k)
-        (editor/lineedit/lineedit-handle (editor/lineedit/lineedit--move s 1) :ctrl-k))))
+      (assert= (lineedit-kill-line (editor/lineedit/lineedit-move s 1) :ctrl-k)
+        (editor/lineedit/lineedit-handle (editor/lineedit/lineedit-move s 1) :ctrl-k))))
   (test "dispatch resolves the command late (by symbol), so redefining hot-swaps"
     ;; the bound symbol is resolved via the global, not captured — proven by the
     ;; structure above + that handle and the command agree.
@@ -165,43 +165,44 @@
     ;; must submit, or the pre-typed form sits unsubmitted until a second Enter.
     (assert= (get *lineedit-keymap* :ctrl-j) 'editor/lineedit/lineedit-submit)
     (assert= (get *lineedit-keymap* :enter) 'editor/lineedit/lineedit-submit)
-    (let (s (le--keys (le--fresh) (list "(" "+" " " "1" " " "1" ")")))
+    (let (s (le-keys (le-fresh) (list "(" "+" " " "1" " " "1" ")")))
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-j) :done) :submit)
       (assert= (get (editor/lineedit/lineedit-handle s :enter) :done) :submit))))
 
-(defn rs--init ()
+(defn- rs-init
+  ()
   (editor/lineedit/lineedit-init "x> " "" (list "(map f xs)" "(reduce + 0 ys)" "(filter p zs)")))
 
 (describe "reverse incremental search (C-r)"
   (test "C-r enters search and selects the newest entry (empty query)"
-    (assert= (get (lineedit-reverse-search (rs--init) :ctrl-r) :text) "(map f xs)"))
+    (assert= (get (lineedit-reverse-search (rs-init) :ctrl-r) :text) "(map f xs)"))
   (test "typing narrows to the newest matching entry"
-    (let (e (lineedit-reverse-search (rs--init) :ctrl-r)
+    (let (e (lineedit-reverse-search (rs-init) :ctrl-r)
           r (fold editor/lineedit/lineedit-handle e (list "r" "e" "d")))
       (assert= (get r :text) "(reduce + 0 ys)")
       (assert= (get (get r :search) :query) "red")))
   (test "C-r steps to the next older match for the query"
-    (let (e (lineedit-reverse-search (rs--init) :ctrl-r)
+    (let (e (lineedit-reverse-search (rs-init) :ctrl-r)
           f (editor/lineedit/lineedit-handle e "f"))
       ; newest with 'f' = (map f xs)
       (assert= (get f :text) "(map f xs)")
       (assert= (get (editor/lineedit/lineedit-handle f :ctrl-r) :text) "(filter p zs)")))
   (test "C-g cancels and restores the pre-search line"
-    (let (s (le--keys (le--fresh) (list "w" "i" "p"))
+    (let (s (le-keys (le-fresh) (list "w" "i" "p"))
           e (lineedit-reverse-search s :ctrl-r)
           c (editor/lineedit/lineedit-handle e :ctrl-g))
       (assert= (get c :text) "wip")
       (assert= (get c :search) nil)))
   (test "Enter accepts the match (keeps it, leaves search)"
     (let (e (fold editor/lineedit/lineedit-handle
-              (lineedit-reverse-search (rs--init) :ctrl-r)
+              (lineedit-reverse-search (rs-init) :ctrl-r)
               (list "r" "e" "d"))
           a (editor/lineedit/lineedit-handle e :enter))
       (assert= (get a :text) "(reduce + 0 ys)")
       (assert= (get a :search) nil)))
   (test "any other key accepts then replays through the keymap"
     (let (e (fold editor/lineedit/lineedit-handle
-              (lineedit-reverse-search (rs--init) :ctrl-r)
+              (lineedit-reverse-search (rs-init) :ctrl-r)
               (list "r" "e" "d"))
           a (editor/lineedit/lineedit-handle e :ctrl-a))
       ; accept + beginning-of-line
@@ -210,12 +211,12 @@
 
 (describe "lineedit/lineedit--apply-completion — pure (candidates injected)"
   (test "a unique candidate is inserted in full"
-    (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "r" "e" "d" "u")) 4))
-      (assert= (get (editor/lineedit/lineedit--apply-completion s 0 "redu" (list "reduce")) :text)
+    (let (s (editor/lineedit/lineedit-move (le-keys (le-fresh) (list "r" "e" "d" "u")) 4))
+      (assert= (get (editor/lineedit/lineedit-apply-completion s 0 "redu" (list "reduce")) :text)
         "reduce")))
   (test "an ambiguous set extends to the common prefix"
-    (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "m" "a")) 2))
-      (assert= (get (editor/lineedit/lineedit--apply-completion s
+    (let (s (editor/lineedit/lineedit-move (le-keys (le-fresh) (list "m" "a")) 2))
+      (assert= (get (editor/lineedit/lineedit-apply-completion s
                       0
                       "ma"
                       (list "map" "max" "mapcat"))
@@ -224,27 +225,27 @@
   ;; The listing is attached only when Tab has nothing left to insert — that is the
   ;; whole trigger, so pin both sides of it.
   (test "a prefix Tab can't extend attaches the candidates for listing"
-    (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "m" "a")) 2)
-          a (editor/lineedit/lineedit--apply-completion s 0 "ma" (list "map" "max" "mapcat")))
+    (let (s (editor/lineedit/lineedit-move (le-keys (le-fresh) (list "m" "a")) 2)
+          a (editor/lineedit/lineedit-apply-completion s 0 "ma" (list "map" "max" "mapcat")))
       (assert= (get a :completions) (list "map" "max" "mapcat"))))
   (test "no listing when Tab makes progress, or when the candidate is unique"
-    (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "m" "a")) 2))
+    (let (s (editor/lineedit/lineedit-move (le-keys (le-fresh) (list "m" "a")) 2))
       ; common prefix "map" extends "ma" -> progress, no list
-      (is (nil? (get (editor/lineedit/lineedit--apply-completion s 0 "ma" (list "map" "mapcat"))
+      (is (nil? (get (editor/lineedit/lineedit-apply-completion s 0 "ma" (list "map" "mapcat"))
                   :completions)))
-      (is (nil? (get (editor/lineedit/lineedit--apply-completion s 0 "ma" (list "map"))
+      (is (nil? (get (editor/lineedit/lineedit-apply-completion s 0 "ma" (list "map"))
                   :completions)))
-      (is (nil? (get (editor/lineedit/lineedit--apply-completion s 0 "ma" '())
+      (is (nil? (get (editor/lineedit/lineedit-apply-completion s 0 "ma" '())
                   :completions)))))
   (test "the listing survives exactly one keystroke — the next key clears it"
-    (let (listed (assoc (le--fresh) :completions (list "map" "max"))
+    (let (listed (assoc (le-fresh) :completions (list "map" "max"))
           typed (editor/lineedit/lineedit-handle listed "x"))
       (is (nil? (get typed :completions)))
       (assert= (get typed :text) "x")))
   (test "Tab against the live image lists the globals sharing a typed prefix"
     ;; end-to-end through the keymap: `lineedit--candidates` reads `global-names`, so
     ;; `str` must be ambiguous (str, str-... etc.) with nothing more to insert.
-    (let (s (le--keys (le--fresh) (list "s" "t" "r"))
+    (let (s (le-keys (le-fresh) (list "s" "t" "r"))
           a (editor/lineedit/lineedit-handle s :tab)
           cands (get a :completions))
       (is (not (nil? cands)))
@@ -254,36 +255,36 @@
 (describe "lineedit/lineedit--completion-rows — pure listing layout"
   (test "candidates lay out across in equal columns, one row when they fit"
     ;; widest is 6 ("mapcat") -> colw 8; room 39 -> 4 columns, so all three on one row.
-    (let (rows (editor/lineedit/lineedit--completion-rows (list "map" "max" "mapcat") 40))
+    (let (rows (editor/lineedit/lineedit-completion-rows (list "map" "max" "mapcat") 40))
       (assert= (count rows) 1)
       (assert= (first rows) "map     max     mapcat")))
   (test "a narrow terminal wraps into more rows and never exceeds width - 1"
-    (let (rows (editor/lineedit/lineedit--completion-rows (list "map" "max" "mapcat") 12))
+    (let (rows (editor/lineedit/lineedit-completion-rows (list "map" "max" "mapcat") 12))
       ; colw 8, room 11 -> 1 column
       (assert= (count rows) 3)
       (is (every? (fn (r) (<= (string-length r) 11)) rows))))
   (test "a candidate wider than the terminal is truncated, not wrapped"
-    (let (rows (editor/lineedit/lineedit--completion-rows (list (string-repeat "x" 50)
-                                                            (string-repeat "y" 50))
+    (let (rows (editor/lineedit/lineedit-completion-rows (list (string-repeat "x" 50)
+                                                           (string-repeat "y" 50))
                  20))
       (is (every? (fn (r) (<= (string-length r) 19)) rows))))
   (test "an over-long list is capped with a trailing count of the remainder"
     ;; one column (colw 12 in a 13-column room) x 6 max rows = 6 shown of 9.
     (let (cands (map (fn (i) (str "candidate-" i)) (range 0 9))
-          rows (editor/lineedit/lineedit--completion-rows cands 13))
+          rows (editor/lineedit/lineedit-completion-rows cands 13))
       (assert= (count rows) 7)
       (assert= (last rows) "… +3 more")))
   (test "each row is emitted on its own new line in the dim hint face"
-    (let (ops (editor/lineedit/lineedit--completion-ops (list "map" "max")))
+    (let (ops (editor/lineedit/lineedit-completion-ops (list "map" "max")))
       (assert= ops
         (list [:nl]
           [:print "map" lineedit-face-hint]
           [:nl]
           [:print "max" lineedit-face-hint]))))
   (test "no listing rows without pending completions"
-    (assert= (editor/lineedit/lineedit--completion-lines (assoc (editor/lineedit/lineedit-init "p> "
-                                                                  "" '())
-                                                           :width 40))
+    (assert= (editor/lineedit/lineedit-completion-lines (assoc (editor/lineedit/lineedit-init "p> "
+                                                                 "" '())
+                                                          :width 40))
       '()))
   (test "a multi-line render prints the listing and climbs back over it to repark"
     ;; The cursor must land back on its own form line, so the [:up n] has to span the
@@ -294,26 +295,26 @@
                :point 6
                :completions (list "map" "max" "mapcat")
                :width 12)
-          ops (editor/lineedit/lineedit--multi-ops st))
+          ops (editor/lineedit/lineedit-multi-ops st))
       (is (any? (fn (op) (= op [:print "map" lineedit-face-hint])) ops))
       ; (2 - 1 lines below row 0) + 3 listing rows - cursor row 1 = 3
       (is (any? (fn (op) (= op [:up 3])) ops)))))
 
 (describe "lineedit/lineedit-handle — end-of-read signals"
   (test "C-d on an empty line signals EOF"
-    (assert= (get (editor/lineedit/lineedit-handle (le--fresh) :ctrl-d) :done) :eof))
+    (assert= (get (editor/lineedit/lineedit-handle (le-fresh) :ctrl-d) :done) :eof))
   (test "C-d mid-line deletes forward instead"
-    (let (s (editor/lineedit/lineedit--move (le--keys (le--fresh) (list "a" "b")) 0))
+    (let (s (editor/lineedit/lineedit-move (le-keys (le-fresh) (list "a" "b")) 0))
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-d) :text) "b")
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-d) :done) nil)))
   (test "Enter submits, C-c cancels"
-    (let (s (le--keys (le--fresh) (list "x")))
+    (let (s (le-keys (le-fresh) (list "x")))
       (assert= (get (editor/lineedit/lineedit-handle s :enter) :done) :submit)
       (assert= (get (editor/lineedit/lineedit-handle s :ctrl-c) :done) :cancel))))
 
 (describe "lineedit/lineedit--hint-pieces / overrides — analysis -> render data"
   (test "a call in progress yields signature pieces headed by its name"
-    (let (pieces (editor/lineedit/lineedit--hint-pieces "(map f " 7))
+    (let (pieces (editor/lineedit/lineedit-hint-pieces "(map f " 7))
       (is (not (nil? pieces)))
       (assert= (first pieces) ["(" lineedit-face-hint])
       (assert= (second pieces) ["map" lineedit-face-hint])))
@@ -322,24 +323,24 @@
       (list [0 hl-face-match] [4 hl-face-match]))
     (assert= (editor/lineedit/lineedit-overrides "(+ 1" 1) (list [0 hl-face-error])))
   (test "a hint wider than the room is truncated (so it never wraps)"
-    (assert= (editor/lineedit/lineedit--fit (list ["abcd" nil] ["efgh" {:bold true}]) 6 '())
+    (assert= (editor/lineedit/lineedit-fit (list ["abcd" nil] ["efgh" {:bold true}]) 6 '())
       (list ["abcd" nil] ["ef" {:bold true}]))
-    (assert= (editor/lineedit/lineedit--fit (list ["abc" nil]) 0 '()) '()))
+    (assert= (editor/lineedit/lineedit-fit (list ["abc" nil]) 0 '()) '()))
   ; last line
   (test "multi-line geometry: line-start/end, cursor row/col, up/down point"
     (let (t "(defn f\n  (g x))")
       ; newline at index 7
-      (assert= (editor/lineedit/lineedit--line-start t 10) 8)
-      (assert= (editor/lineedit/lineedit--line-end t 10) 16)
-      (assert= (editor/lineedit/lineedit--cursor-rc t 10) [1 2])
-      (assert= (editor/lineedit/lineedit--cursor-rc t 3) [0 3])
+      (assert= (editor/lineedit/lineedit-line-start t 10) 8)
+      (assert= (editor/lineedit/lineedit-line-end t 10) 16)
+      (assert= (editor/lineedit/lineedit-cursor-rc t 10) [1 2])
+      (assert= (editor/lineedit/lineedit-cursor-rc t 3) [0 3])
       ; col 2, line 0
-      (assert= (editor/lineedit/lineedit--up-point t 10) 2)
+      (assert= (editor/lineedit/lineedit-up-point t 10) 2)
       ; already on line 0
-      (is (nil? (editor/lineedit/lineedit--up-point t 3)))
+      (is (nil? (editor/lineedit/lineedit-up-point t 3)))
       ; col 3, line 1
-      (assert= (editor/lineedit/lineedit--down-point t 3) 11)
-      (is (nil? (editor/lineedit/lineedit--down-point t 10)))))
+      (assert= (editor/lineedit/lineedit-down-point t 3) 11)
+      (is (nil? (editor/lineedit/lineedit-down-point t 10)))))
   (test "Enter inserts an indented newline while the form is incomplete, submits when complete"
     (let (
           ; complete unless exactly this
@@ -363,7 +364,7 @@
           st (assoc (editor/lineedit/lineedit-init "p> " "" '() {:cont-prompt "c> "})
                :text "(a\n b)"
                :point 6)
-          ops (editor/lineedit/lineedit--multi-ops st))
+          ops (editor/lineedit/lineedit-multi-ops st))
       ;; the opener "(" (line 0) and the closer ")" (line 1) both render reversed
       (is (any? (fn (op) (= op [:print "(" {:reverse true}])) ops))
       (is (any? (fn (op) (= op [:print ")" {:reverse true}])) ops))
@@ -380,7 +381,7 @@
   (test "a state map sent to a worker edits identically"
     (let (st (editor/lineedit/lineedit-init "x> " "" '())
           w (spawn (receive
-                     ([:edit s from] (send from (get (le--keys s (list "a" "b" "c")) :text))))))
+                     ([:edit s from] (send from (get (le-keys s (list "a" "b" "c")) :text))))))
       (send w [:edit st (self)])
       (assert= (receive (r r)) "abc"))))
 

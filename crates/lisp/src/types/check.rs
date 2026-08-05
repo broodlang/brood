@@ -580,24 +580,20 @@ fn setup_check_imports(heap: &mut Heap, header: Value) {
                 ensure_loaded(heap, mod_sym, &prefix);
                 match subset {
                     Some(names) => {
-                        // Mirror the runtime `%refer`: a `--` private name in `:only`
+                        // Mirror the runtime `%refer`: a module-private name in `:only`
                         // needs an internals grant, else the runtime refuses the load —
                         // so the checker must NOT treat it as a bound import either
                         // (otherwise it resolves-as-bound a name whose file won't load).
+                        // `ensure_loaded` ran above, so the privacy record is exact.
                         let granted = heap
                             .import_of(crate::eval::macros::internals_grant_key(&mod_name))
                             .is_some();
                         for bare in names {
                             let bare_name = value::symbol_name(bare);
-                            // Name-authoritative, mirroring the runtime `%refer :only`
-                            // (ADR-146): `:only` is lazy, so the recorded private-set
-                            // can't answer for a name the module hasn't defined yet —
-                            // the typed `--` marker is the fact here. Keep this the
-                            // same rule as the runtime; do NOT swap in `is_private`.
-                            if bare_name.contains("--") && !granted {
+                            let qual = value::intern(&format!("{}/{}", mod_name, bare_name));
+                            if heap.is_private(qual) && !granted {
                                 continue;
                             }
-                            let qual = value::intern(&format!("{}/{}", mod_name, bare_name));
                             heap.add_import(bare, qual);
                         }
                     }

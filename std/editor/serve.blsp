@@ -86,7 +86,8 @@ consumes them), leaving a served app deaf to everything but keys."
              (after ms nil)))})
 ;; ---- daemon side -------------------------------------------------------------
 
-(defn serve--session (client cols rows opts make-model view update)
+(defn- serve-session
+  (client cols rows opts make-model view update)
   "One attached client's session: monitor the client (so its death tears us down),
 tell it our pid (so it can ship keys here), then run the app's `ui-run` against a
 `remote-display` to that client. A fresh `(make-model)` per session keeps clients
@@ -102,7 +103,8 @@ participant's name from."
       (send (self) [:client-opts opts]))
     (ui-run (make-model) view update (remote-display client cols rows))))
 
-(defn serve--manager (make-model view update &optional sessions)
+(defn- serve-manager
+  (make-model view update &optional sessions)
   "The session manager loop (registered under `serve-name`): on each `[:attach client
 cols rows]` / `[:attach client cols rows opts]`, spawn an independent session for that
 client (`opts` — the client's identity map — defaults to `{}` for an old-style attach).
@@ -111,7 +113,7 @@ the `serve-stop` message — can end every one of them: each killed session's cl
 its monitor fire and closes cleanly. Tail-recursive."
   (let (ss (or sessions ()))
     (receive
-      ([:attach client cols rows] (let (s (spawn (serve--session client
+      ([:attach client cols rows] (let (s (spawn (serve-session client
                                                    cols
                                                    rows
                                                    {}
@@ -119,16 +121,16 @@ its monitor fire and closes cleanly. Tail-recursive."
                                                    view
                                                    update)))
                                     (monitor s)
-                                    (serve--manager make-model view update (cons s ss))))
-      ([:attach client cols rows opts] (let (s (spawn (serve--session client
+                                    (serve-manager make-model view update (cons s ss))))
+      ([:attach client cols rows opts] (let (s (spawn (serve-session client
                                                         cols rows opts make-model view update)))
                                          (monitor s)
-                                         (serve--manager make-model view update (cons s ss))))
-      ([:down _ p _] (serve--manager make-model view update (remove (fn (x) (= x p)) ss)))
+                                         (serve-manager make-model view update (cons s ss))))
+      ([:down _ p _] (serve-manager make-model view update (remove (fn (x) (= x p)) ss)))
       ([:shutdown from r] (do
                             (doseq (s ss) (exit s :kill))
                             (send from [:reply r (count ss)])))
-      (_ (serve--manager make-model view update ss)))))
+      (_ (serve-manager make-model view update ss)))))
 
 (defn serve-stop (&optional mgr)
   "Stop serving: kill every live session (each client's monitor fires and its window
@@ -150,39 +152,43 @@ its pid (non-blocking) — a daemon's `main` typically calls `(serve …)` then 
 (`nest run --name N` brings the node up). Each `(attach …)` / `nest attach` then gets
 its own session. The program must already be a node (`node-start` / `nest run --name`).
 Opt-in, like Erlang's `-name`: a runtime serves nothing unless it calls `serve`."
-  (register serve-name (spawn (serve--manager make-model view update))))
+  (register serve-name (spawn (serve-manager make-model view update))))
 
 ;; ---- client side (the thin frontend) -----------------------------------------
 
-(defn attach--gen-name ()
+(defn- attach-gen-name
+  ()
   "A unique transient node name for a client, so two clients on one box don't collide."
   (keyword (str "attach-" (now))))
 
-(defn attach--drain (peer)
+(defn- attach-drain
+  (peer)
   "Draw every frame the daemon has queued (non-blocking), returning `:open`, or
 `:closed` if the daemon said `[:bye]` (the app quit), the link to `peer` dropped, or
 the session process died (`[:down …]` from the monitor) — the last covers a session
 that died *without* a clean `[:bye]` (e.g. a throwing `make-model`, which runs before
 `ui-run` can install its `:leave`), so the client never hangs waiting on a dead session."
   (receive
-    ([:frame f] (do (term-draw f) (attach--drain peer)))
+    ([:frame f] (do (term-draw f) (attach-drain peer)))
     ([:bye] :closed)
     ([:nodedown ^peer] :closed)
     ([:down _ _ _] :closed)
     (after 0 :open)))
 
-(defn attach--loop (peer session)
+(defn- attach-loop
+  (peer session)
   "The thin client loop: draw any pushed frames, then poll the local terminal briefly
 and ship each key to the daemon's `session`. Tail-recursive (O(1) stack). Ends when
 the daemon says `[:bye]` or the link drops."
-  (if (= (attach--drain peer) :closed)
+  (if (= (attach-drain peer) :closed)
     nil
     (let (k (term-poll 30))
       (if (nil? k)
-        (attach--loop peer session)
-        (do (send session [:key k]) (attach--loop peer session))))))
+        (attach-loop peer session)
+        (do (send session [:key k]) (attach-loop peer session))))))
 
-(defn attach--handshake (peer cols rows &optional opts)
+(defn- attach-handshake
+  (peer cols rows &optional opts)
   "Report our `cols`×`rows` (and, when given, our identity `opts` map — e.g.
 `{:name \"alice\"}`) and ask `peer`'s session manager to attach us; return the
 session pid it replies with, nil if the link drops first (`[:nodedown]`), or error on
@@ -199,12 +205,13 @@ speaks to an old daemon."
       ([:nodedown ^peer] nil)
       (after 5000 (error "attach: no response from the server (is it serving?)")))))
 
-(defn attach--session (peer &optional opts)
+(defn- attach-session
+  (peer &optional opts)
   "Report our terminal size, ask `peer`'s session manager to attach us, and run the
 client loop once the daemon replies with our session pid."
   (let ([cols rows] (term-size)
-        session (attach--handshake peer cols rows opts))
-    (when session (do (monitor session) (attach--loop peer session)))))
+        session (attach-handshake peer cols rows opts))
+    (when session (do (monitor session) (attach-loop peer session)))))
 
 (defn attach (spec &optional cookie opts)
   "Attach this terminal to a `ui-run` app served by the peer named in `spec`
@@ -217,13 +224,13 @@ wrecking the screen; then enters raw mode, paints the frames the daemon pushes, 
 ships back every key until the app quits (`[:bye]`) or the link drops. The terminal is
 always restored on exit."
   (do
-    (node-start (attach--gen-name) "127.0.0.1:0" (or cookie (node-cookie)))
+    (node-start (attach-gen-name) "127.0.0.1:0" (or cookie (node-cookie)))
     (let (peer (connect spec))
       ; raises a clean error on failure, terminal untouched
       (monitor-node peer)
       (term-enter)
       (try
-        (do (attach--session peer opts) (term-leave))
+        (do (attach-session peer opts) (term-leave))
         (catch e (do (term-leave) (throw e)))))))
 
 ;; ---- client side (a GUI / any-display frontend) ------------------------------
@@ -236,19 +243,20 @@ always restored on exit."
 ;; mailbox directly). This makes the thin client frontend-agnostic, the same way `ui-run`
 ;; and the daemon-side `remote-display` already are (ADR-046).
 
-(defn attach--display-loop (peer session display)
+(defn- attach-display-loop
+  (peer session display)
   "The any-display client loop: frames, control, and window input all land on THIS
 process's mailbox, so one `receive` serves them. A `[:frame f]` is painted to `display`;
 `[:bye]` (the app quit), `[:nodedown]` (link dropped), or `[:down …]` (the session died)
 ends the loop; `:close` (the window's X button) ships a `[:detach]` and ends; anything
 else is a key/mouse input shipped to the daemon `session` as `[:key …]`. Tail-recursive."
   (receive
-    ([:frame f] (do ((get display :draw) f) (attach--display-loop peer session display)))
+    ([:frame f] (do ((get display :draw) f) (attach-display-loop peer session display)))
     ([:bye] nil)
     ([:nodedown ^peer] nil)
     ([:down _ _ _] nil)
     (:close (send session [:detach]))
-    (m (do (send session [:key m]) (attach--display-loop peer session display)))))
+    (m (do (send session [:key m]) (attach-display-loop peer session display)))))
 
 (defn attach-display (spec display &optional cookie opts)
   "Attach `display` — any `ui-run` frontend map, e.g. `(gui-display)` (a native window)
@@ -261,14 +269,14 @@ refused / wrong-cookie / bad-spec error surfaces without stranding a window; the
 is always torn down (`:leave`) on exit. `cookie` defaults to `(node-cookie)`; `opts` is
 the optional identity map (see `attach`)."
   (do
-    (node-start (attach--gen-name) "127.0.0.1:0" (or cookie (node-cookie)))
+    (node-start (attach-gen-name) "127.0.0.1:0" (or cookie (node-cookie)))
     (let (peer (connect spec))
       (monitor-node peer)
       ((get display :enter))
       (try
         (let ([cols rows] ((get display :size))
-              session (attach--handshake peer cols rows opts))
-          (when session (do (monitor session) (attach--display-loop peer session display)))
+              session (attach-handshake peer cols rows opts))
+          (when session (do (monitor session) (attach-display-loop peer session display)))
           ((get display :leave)))
         (catch e (do ((get display :leave)) (throw e)))))))
 
@@ -295,7 +303,7 @@ on exit."
                         ([:attached s] s)
                         (after 5000
                           (error "attach-display-local: the local serve manager did not answer"))))
-          (when session (do (monitor session) (attach--display-loop nil session display))))
+          (when session (do (monitor session) (attach-display-loop nil session display))))
         ((get display :leave)))
       (catch e (do ((get display :leave)) (throw e))))))
 
@@ -313,7 +321,8 @@ on exit."
 ;; participant — deferred (see the myedit `docs/remote-multiplayer-plan.md`, Slice 2c, and
 ;; `docs/actor-architecture.md`). Live resize is deferred as for `serve`.
 
-(defn shared--hub (clients frame size)
+(defn- shared-hub
+  (clients frame size)
   "The fan-out hub for a shared session: the changing set of attached client pids, the
 latest `frame`, and the session `size`. `[:add pid]` adds a client (seeding it with the
 current frame, if any); `[:remove pid]` drops one; `[:frame f]` stores + broadcasts to
@@ -322,15 +331,16 @@ close (`[:bye]`). Tail-recursive; one hub per shared session."
   (receive
     ([:add pid] (do
                   (when frame (send pid [:frame frame]))
-                  (shared--hub (cons pid clients) frame size)))
-    ([:remove pid] (shared--hub (remove (fn (p) (= p pid)) clients) frame size))
-    ([:frame f] (do (doseq (p clients) (send p [:frame f])) (shared--hub clients f size)))
+                  (shared-hub (cons pid clients) frame size)))
+    ([:remove pid] (shared-hub (remove (fn (p) (= p pid)) clients) frame size))
+    ([:frame f] (do (doseq (p clients) (send p [:frame f])) (shared-hub clients f size)))
     ([:size reply] (do
                      (send reply [:hub-size (first size) (second size)])
-                     (shared--hub clients frame size)))
+                     (shared-hub clients frame size)))
     ([:shutdown] (doseq (p clients) (send p [:bye])))))
 
-(defn shared--hub-size (hub)
+(defn- shared-hub-size
+  (hub)
   "Query `hub` for the shared session's `[cols rows]` (a local round-trip), falling back to
 `[80 24]` if it doesn't answer promptly. Selective on `[:hub-size …]`, so it never eats the
 `[:key …]` inputs also queued on the session's mailbox."
@@ -338,7 +348,8 @@ close (`[:bye]`). Tail-recursive; one hub per shared session."
     (send hub [:size (self)])
     (receive ([:hub-size c r] [c r]) (after 200 [80 24]))))
 
-(defn shared--display (hub)
+(defn- shared-display
+  (hub)
   "The `ui-run` display for a shared session: `:draw` ships each frame to `hub` (fanned to
 every client); `:poll` returns the next `[:key k]` any client shipped (all clients' input
 merges through the session's one mailbox, so edits serialize with no conflict); `:size`
@@ -348,7 +359,7 @@ bus) — except a stale `[:hub-size …]` reply that outlived its `shared--hub-s
 which is dropped (a nil ⇒ tick) rather than leaked to the app."
   {:enter (fn () nil)
    :leave (fn () (send hub [:shutdown]))
-   :size (fn () (shared--hub-size hub))
+   :size (fn () (shared-hub-size hub))
    :draw (fn (f) (send hub [:frame f]))
    :poll (fn (ms)
            (receive
@@ -359,7 +370,8 @@ which is dropped (a nil ⇒ tick) rather than leaked to the app."
              (m m)
              (after ms nil)))})
 
-(defn serve-shared--manager (session hub)
+(defn- serve-shared-manager
+  (session hub)
   "The session manager for a SHARED session: every client attaches to the SAME running
 `session`. On `[:attach client …]` (with or without an identity `opts` — one shared model
 has no per-participant state, so opts are accepted and ignored), add the client to `hub`
@@ -370,19 +382,19 @@ it from the hub. Tail-recursive."
                                   (monitor client)
                                   (send hub [:add client])
                                   (send client [:attached session])
-                                  (serve-shared--manager session hub)))
+                                  (serve-shared-manager session hub)))
     ([:attach client cols rows _opts] (do
                                         (monitor client)
                                         (send hub [:add client])
                                         (send client [:attached session])
-                                        (serve-shared--manager session hub)))
-    ([:down _ client _] (do (send hub [:remove client]) (serve-shared--manager session hub)))
+                                        (serve-shared-manager session hub)))
+    ([:down _ client _] (do (send hub [:remove client]) (serve-shared-manager session hub)))
     ;; serve-stop: tell every client goodbye (the hub fans [:bye]), end the session
     ([:shutdown from r] (do
                           (send hub [:shutdown])
                           (exit session :kill)
                           (send from [:reply r 1])))
-    (_ (serve-shared--manager session hub))))
+    (_ (serve-shared-manager session hub))))
 
 (defn serve-shared (model view update)
   "Serve a SINGLE shared `ui-run` session to many frontends — collaborative editing: all
@@ -393,6 +405,6 @@ attach with the same `attach` / `attach-display` (the client side is identical �
 ships keys and paints frames; whether the daemon is per-client or shared is transparent).
 All clients share ONE cursor this slice; see the module note for the per-participant-cursor
 deferral. Returns the manager pid."
-  (let (hub (spawn (shared--hub () nil [80 24]))
-        session (spawn (ui-run model view update (shared--display hub))))
-    (register serve-name (spawn (serve-shared--manager session hub)))))
+  (let (hub (spawn (shared-hub () nil [80 24]))
+        session (spawn (ui-run model view update (shared-display hub))))
+    (register serve-name (spawn (serve-shared-manager session hub)))))

@@ -97,7 +97,7 @@ pub(super) fn read_all(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 // ~2.6ms to parse it natively). Same three outputs as the old
 // `project--scan-file-entry`, computed in one Rust pass over the reader's forms.
 
-const SCAN_DEF_HEADS: &[&str] = &["def", "defn", "defmacro", "defdyn", "defonce"];
+const SCAN_DEF_HEADS: &[&str] = &["def", "def-", "defn", "defn-", "defmacro", "defdyn", "defonce"];
 
 /// An **ambient** name — root regardless of the enclosing namespace. Ambient status
 /// is a *declaration*, not a spelling: the `defdyn` head declares it (the earmuff
@@ -2428,6 +2428,21 @@ pub(super) fn register_sig(args: &[Value], _: EnvId, heap: &mut Heap) -> LispRes
     Ok(Value::symbol(qualified))
 }
 
+/// `(%mark-private 'name)` — record the global `name` as module-private (ADR-146).
+/// Emitted by the `defn-`/`def-` macros alongside their `def`. `name` is qualified
+/// to the current namespace *exactly as a `def` head would be* — via
+/// [`resolve_reference`](crate::eval::macros::resolve_reference), the same entry
+/// `%register-sig` uses — so the recorded key matches the qualified global the def
+/// created (and the `def` runs first, so that global already exists). Privacy is now
+/// a fact the def form declares here, not one derived from the name's spelling.
+/// Returns the qualified name so it composes inside the macro's `do`.
+pub(super) fn mark_private(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let name = expect_symbol(heap, "%mark-private", arg(args, 0))?;
+    let qualified = crate::eval::macros::resolve_reference(heap, name);
+    heap.mark_private(qualified);
+    Ok(Value::symbol(qualified))
+}
+
 /// Add one `(:use …)` import (bare → qualified) to the current file's table,
 /// enforcing the two Elixir-style import rules:
 ///
@@ -2556,16 +2571,12 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
                 let bare = expect_symbol(heap, "%refer", item)?;
                 let bare_name = value::symbol_name(bare);
                 let qualified = value::intern(&format!("{}/{}", mod_name, bare_name));
-                // A `--` name in an explicit :only list is a privacy breach
-                // unless this file holds an internals grant for the module
-                // (ADR-146) — same rule the resolver enforces for qualified
-                // references. This is **name-authoritative**, like enforcement and
-                // for the same reason: `:only` is lazy (existence isn't required —
-                // the name may not be defined yet), so the recorded private-set
-                // (`Heap::is_private`) can't answer here; the typed `--` marker is
-                // the fact. `bare_name.contains("--")` is the same rule
-                // `name_marks_private` records. Do NOT replace it with `is_private`.
-                if bare_name.contains("--")
+                // A module-private name in an explicit :only list is a privacy breach
+                // unless this file holds an internals grant for the module (ADR-146) —
+                // same rule the resolver enforces for qualified references. Privacy is
+                // the recorded fact (`is_private`): the module is being imported, so it
+                // is loaded and the record is exact.
+                if heap.is_private(qualified)
                     && heap
                         .import_of(crate::eval::macros::internals_grant_key(&mod_name))
                         .is_none()

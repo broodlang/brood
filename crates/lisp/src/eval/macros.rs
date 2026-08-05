@@ -761,30 +761,21 @@ pub(crate) fn internals_grant_key(mod_name: &str) -> value::Symbol {
 }
 
 /// Enforce module privacy (ADR-146) over a resolved form: an error for any
-/// **evaluated** symbol reference `m/…--…` where `m` is neither the current
-/// namespace nor a module granted via `(:use-internals m)`. `pos` tracks the
-/// nearest enclosing form's position; `level` is the quasiquote nesting depth
-/// (0 = an evaluated context). A symbol is a reference only at level 0 — inside
-/// a `` `quasiquote `` template it is data, UNLESS an `~unquote` brings it back
-/// to level 0 (that IS an evaluated reference, so `` `(~other/priv--x) `` is
-/// still caught). `quote` is always data. A macro template referencing its OWN
-/// module's private is fine (`m == cur_ns`), so this doesn't false-flag them.
-/// The public name a stale `m/x--y` reference was probably renamed to, or `None`.
+/// **evaluated** qualified reference `m/name` where `name` is recorded
+/// module-private in `m` (a `defn-`/`def-` definition) and `m` is neither the
+/// current namespace nor a module granted via `(:use-internals m)`. `pos` tracks
+/// the nearest enclosing form's position; `level` is the quasiquote nesting depth
+/// (0 = an evaluated context). A symbol is a reference only at level 0 — inside a
+/// `` `quasiquote `` template it is data, UNLESS an `~unquote` brings it back to
+/// level 0 (that IS an evaluated reference, so `` `(~other/secret) `` is still
+/// caught). `quote` is always data. A macro template referencing its OWN module's
+/// private is fine (`m == cur_ns`), so this doesn't false-flag them.
 ///
-/// Only answers `Some` when BOTH halves are confirmed against the global table: the
-/// private name is absent AND the single-dash spelling is present. A module that has not
-/// been loaded yet has neither, so it falls through to the plain privacy message rather
-/// than asserting something unverified.
-fn promoted_public_name(heap: &Heap, module: &str, bare: &str) -> Option<String> {
-    let global = heap.global();
-    let private = value::intern(&format!("{module}/{bare}"));
-    if heap.env_get(global, private).is_some() {
-        return None;
-    }
-    let public = format!("{module}/{}", bare.replace("--", "-"));
-    heap.env_get(global, value::intern(&public)).map(|_| public)
-}
-
+/// Since a private name is now spelled identically to a public one (privacy is a
+/// def-site fact, not a name marker), privacy is judged against the **record**
+/// (`Heap::is_private`), which requires `m` to be loaded — a reference into a
+/// module that was never loaded is not recorded, so it falls through to the normal
+/// unbound-reference error at eval rather than a privacy message.
 fn enforce_private_refs(
     heap: &Heap,
     form: Value,
@@ -797,33 +788,17 @@ fn enforce_private_refs(
             let name = value::symbol_name_ref(s);
             if let Some(slash) = name.rfind('/') {
                 let (m, bare) = (&name[..slash], &name[slash + 1..]);
-                // Enforcement is deliberately **name-authoritative**, not a lookup in
-                // the recorded private-set (`Heap::is_private`, ADR-146): privacy
-                // governs what an author may *type*, so a `--` reference to a module
-                // that is not even loaded must still be rejected (see the
-                // `never-loaded/nope--thing` case in tests/private_test.blsp) — a
-                // recorded set can't answer for an unloaded module. The recorded set
-                // is consulted at the *loaded* sites (`%refer`, the checker,
-                // reflection); here the typed `--` is the fact. `bare.contains("--")`
-                // is the same rule `name_marks_private` records, kept inline as the
-                // hot fast-negative (this walk runs on every compiled form): only `--`
-                // names can be private, so short-circuit the common public qualified
-                // reference (`http/get`) BEFORE the alias-lookup allocation.
-                if !bare.contains("--") {
-                    return Ok(());
-                }
-                // Resolve a module alias (`(:alias mod :as short)`) so the
-                // rule keys on the REAL module, matching how the reference
-                // will resolve.
+                // Resolve a module alias (`(:alias mod :as short)`) so the rule keys
+                // on the REAL module, matching how the reference will resolve.
                 let alias_key = value::intern(&format!("{m}/"));
                 let real_m: String = match heap.import_of(alias_key) {
                     Some(target) => value::symbol_name(target),
                     // Not an alias: root it (ADR-070). `cur_ns` is the ROOTED namespace
                     // (`%in-ns` roots what `(defmodule tutor)` declares, so inside project
                     // `bedit` it is `bedit/tutor`), so an intra-project reference must root
-                    // before the comparison — otherwise `tutor/tutor--line-face`, a module
+                    // before the comparison — otherwise `tutor/tutor-line-face`, a module
                     // reaching its OWN helper, reads as a foreign private access. Alias
-                    // resolution stays first, mirroring `namespace_symbol`'s order; this
+                    // resolution stays first, mirroring `resolve_reference`'s order; this
                     // walk sees the pre-rewrite form, hence the rooting here as well.
                     None => match heap.root_qualified_ref(s) {
                         Some(rooted) => {
@@ -834,26 +809,24 @@ fn enforce_private_refs(
                     },
                 };
                 let m = real_m.as_str();
-                if !m.is_empty() && m != cur_ns && heap.import_of(internals_grant_key(m)).is_none()
-                {
-                    let mut e = LispError::runtime(match promoted_public_name(heap, m, bare) {
-                        // A `--` name that `m` does not define at all is nearly always a
-                        // STALE reference to a helper since promoted to a public name, not
-                        // an attempt to reach into another module — so say that instead.
-                        // Two downstream projects lost their entire suite to this: the
-                        // message named privacy when the name was simply gone
-                        // (`lineedit--init` had become `lineedit-init`).
-                        Some(public) => format!(
-                            "`{name}` does not exist in `{m}` — it looks like a `--` helper \
-                             that was promoted to the public `{public}`. Use that name."
-                        ),
-                        None => format!(
-                            "`{name}` is module-private to `{m}` (a `--` name; ADR-146). \
-                             Call it from `{m}`, promote it to a public name, or — for a \
-                             test/tool module that genuinely needs the internals — grant \
-                             access with (:use-internals {m}) in this module's header."
-                        ),
-                    });
+                // A reference to the current module, or one this file was granted
+                // internals for, is never a foreign-private access — exit before the
+                // record lookup (also the cheap common case, no `is_private` call).
+                if m.is_empty() || m == cur_ns || heap.import_of(internals_grant_key(m)).is_some() {
+                    return Ok(());
+                }
+                // Foreign module: privacy is the recorded fact (ADR-146). The name is
+                // spelled identically public-or-private, so consult the record for the
+                // resolved `m/name`. An unloaded `m` has no record → not rejected here
+                // (it becomes a normal unbound reference at eval).
+                let resolved = value::intern(&format!("{m}/{bare}"));
+                if heap.is_private(resolved) {
+                    let mut e = LispError::runtime(format!(
+                        "`{m}/{bare}` is module-private to `{m}` (ADR-146). Call it from \
+                         `{m}`, make it public (`defn`/`def` rather than `defn-`/`def-`), \
+                         or — for a test/tool that genuinely needs the internals — grant \
+                         access with (:use-internals {m}) in this module's header."
+                    ));
                     if let Some(p) = pos {
                         e = e.with_pos(p);
                     }
@@ -1045,7 +1018,10 @@ fn scan_def_form(
         return;
     }
     let hn = value::symbol_name_ref(h);
-    if matches!(hn, kw::DEF | kw::DEFN | kw::DEFMACRO | kw::DEFDYN) {
+    if matches!(
+        hn,
+        kw::DEF | kw::DEF_PRIVATE | kw::DEFN | kw::DEFN_PRIVATE | kw::DEFMACRO | kw::DEFDYN
+    ) {
         if let Some(ValueRef::Sym(name)) = items.get(1).map(|v| v.unpack()) {
             // An AMBIENT name is never namespaced, so it must not be pre-recorded as
             // a namespace-local name — that would qualify every reference in the file

@@ -1751,18 +1751,6 @@ fn next_runtime_tag() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// The single definition of "a `--` module-private name" (ADR-146): the global's
-/// bare tail — the segment after the last `/` — carries the `--` marker. This is
-/// the rule that *populates* [`RuntimeCode::private`] (at `env_define` and in
-/// `seeded`) and the lock-free fast-negative in [`Heap::is_private`]; keeping it in
-/// one place is the point of the recorded-mechanism refactor. Non-allocating — the
-/// interner hands back a `&'static str`.
-fn name_marks_private(sym: Symbol) -> bool {
-    let name = crate::core::value::symbol_name_ref(sym);
-    let bare = name.rsplit('/').next().unwrap_or(name);
-    bare.contains("--")
-}
-
 impl Default for RuntimeCode {
     fn default() -> Self {
         RuntimeCode {
@@ -1857,7 +1845,7 @@ impl RuntimeCode {
     /// A fresh runtime whose global table is seeded with the prelude bindings
     /// (`symbol -> prelude value`). The code slabs start empty — user `def`s
     /// append to them. Inner processes share this whole thing via `Arc`.
-    pub fn seeded(bindings: &[(Symbol, Value)]) -> Self {
+    pub fn seeded(bindings: &[(Symbol, Value)], prelude_private: &[Symbol]) -> Self {
         let mut globals = SymbolMap::with_capacity_and_hasher(bindings.len(), Default::default());
         for &(s, v) in bindings {
             globals.insert(s, v);
@@ -1890,17 +1878,14 @@ impl RuntimeCode {
                     .map(|&(s, _)| s)
                     .collect(),
             ),
-            // The prelude's own `--` privates, recorded here because `seeded`
-            // *inserts* the bindings (it does not re-`eval` them, so `env_define`
-            // never fires for a prelude name in the live runtime). Same derive-from-
-            // bindings shape as `sealed` above.
-            private: RwLock::new(
-                bindings
-                    .iter()
-                    .filter(|&&(s, _)| name_marks_private(s))
-                    .map(|&(s, _)| s)
-                    .collect(),
-            ),
+            // The prelude's own module-private names (ADR-146). `seeded` *inserts*
+            // the bindings (it does not re-`eval` them, so `%mark-private` never
+            // fires for a prelude name in the live runtime), and privacy is no
+            // longer derivable from the clean name — so the set is collected when
+            // the prelude is built (every `defn-`/`def-` head recorded in the
+            // builder heap's runtime) and threaded in here, the same way the
+            // bindings themselves are.
+            private: RwLock::new(prelude_private.iter().copied().collect()),
             globals: RwLock::new(globals),
             registry_lock: Mutex::new(()),
             version: AtomicU64::new(0),
@@ -3841,7 +3826,9 @@ impl Heap {
             return None;
         };
         if !(crate::core::value::symbol_is(head, kw::DEF)
+            || crate::core::value::symbol_is(head, kw::DEF_PRIVATE)
             || crate::core::value::symbol_is(head, kw::DEFN)
+            || crate::core::value::symbol_is(head, kw::DEFN_PRIVATE)
             || crate::core::value::symbol_is(head, kw::DEFMACRO))
         {
             return None;
@@ -3882,7 +3869,29 @@ impl Heap {
     /// **without taking the RwLock**, keeping the hot public-reference path lock-free;
     /// only a genuine `--` name reaches the recorded lookup.
     pub fn is_private(&self, sym: Symbol) -> bool {
-        name_marks_private(sym) && self.runtime.is_private_recorded(sym)
+        self.runtime.is_private_recorded(sym)
+    }
+
+    /// Record the qualified global `sym` as module-private (ADR-146). The public
+    /// face of [`RuntimeCode::mark_private`], called by the `%mark-private`
+    /// primitive that `defn-`/`def-` emit. Privacy is now a property the def form
+    /// declares (recorded here), not one derived from the name.
+    pub fn mark_private(&self, sym: Symbol) {
+        self.runtime.mark_private(sym);
+    }
+
+    /// A snapshot of this runtime's recorded module-private names. Used once, at
+    /// prelude-build time, to capture the privates `%mark-private` recorded in the
+    /// builder heap so they can seed each live runtime (the prelude is inserted, not
+    /// re-evaluated — see [`RuntimeCode::seeded`]).
+    pub fn private_names_snapshot(&self) -> Vec<Symbol> {
+        self.runtime
+            .private
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .copied()
+            .collect()
     }
 
     // ===== Allocation — LOCAL slab =============================================
@@ -5236,13 +5245,9 @@ impl Heap {
 
     pub fn env_define(&mut self, env: EnvId, sym: Symbol, val: Value) {
         if env == EnvId::GLOBAL {
-            // Record a `--` name as module-private (ADR-146) before anything else,
-            // so it fires on the first-ever def regardless of the dedup early-return
-            // below. Idempotent; only `--` names take the write lock (rare). The
-            // prelude's privates are recorded in `seeded`, not here.
-            if name_marks_private(sym) {
-                self.runtime.mark_private(sym);
-            }
+            // Privacy (ADR-146) is no longer derived from the name here — a
+            // `defn-`/`def-` records it explicitly through the `%mark-private`
+            // primitive, and the prelude's privates are seeded in `seeded`.
             // Dedup an unchanged hot-reload redefinition (Stage 5): if `sym` is
             // already bound to a closure structurally identical to `val`, keep the
             // existing (already-promoted) binding rather than append a duplicate

@@ -40,13 +40,14 @@ suggestions\", never to an error on the user's command line."
 ;; Run `thunk`, yielding nil on any failure. Wrapped around every filesystem or
 ;; parse operation below so a half-written manifest or an unreadable directory
 ;; costs a suggestion, not an error.
-(defn complete--safely (thunk) (try (thunk) (catch _ nil)))
+(defn- complete-safely (thunk) (try (thunk) (catch _ nil)))
 
-(defn complete--root () (complete--safely (fn () (project/project-find-root (cwd)))))
+(defn- complete-root () (complete-safely (fn () (project/project-find-root (cwd)))))
 
 ;; Strip `root/` from an absolute path so completions read as the relative paths a
 ;; user actually types.
-(defn complete--relative (path root)
+(defn- complete-relative
+  (path root)
   (if (and (not (nil? root))
         (starts-with? path root)
         (> (string-length path)
@@ -57,35 +58,35 @@ suggestions\", never to an error on the user's command line."
 ;; --- files --------------------------------------------------------------------
 (defn complete-test-files ()
   "Project-relative paths of every `*_test.blsp` under the project's test paths. Empty outside a project."
-  (let (root (complete--root))
+  (let (root (complete-root))
     (if (nil? root)
       nil
-      (or (complete--safely (fn ()
-                              (map (fn (p) (complete--relative p root))
-                                (fold (fn (acc dir)
-                                        (append acc (project/project--collect-tests dir)))
-                                  nil
-                                  (project/project-abs-paths root
-                                    (or *project-test-paths* ["tests"]))))))
+      (or (complete-safely (fn ()
+                             (map (fn (p) (complete-relative p root))
+                               (fold (fn (acc dir)
+                                       (append acc (project/project-collect-tests dir)))
+                                 nil
+                                 (project/project-abs-paths root
+                                   (or *project-test-paths* ["tests"]))))))
         nil))))
 
 (defn complete-blsp-files ()
   "Project-relative paths of every `.blsp` under the project's source AND test paths — the candidates for `nest check` / `nest run` / `nest format`."
-  (let (root (complete--root))
+  (let (root (complete-root))
     (if (nil? root)
       nil
-      (or (complete--safely (fn ()
-                              (map (fn (p) (complete--relative p root))
-                                (append (fold (fn (acc dir)
-                                                (append acc (project/project-collect-sources dir)))
-                                          nil
-                                          (project/project-abs-paths root
-                                            (or *project-source-paths* ["src"])))
-                                  (fold (fn (acc dir)
-                                          (append acc (project/project--collect-tests dir)))
-                                    nil
-                                    (project/project-abs-paths root
-                                      (or *project-test-paths* ["tests"])))))))
+      (or (complete-safely (fn ()
+                             (map (fn (p) (complete-relative p root))
+                               (append (fold (fn (acc dir)
+                                               (append acc (project/project-collect-sources dir)))
+                                         nil
+                                         (project/project-abs-paths root
+                                           (or *project-source-paths* ["src"])))
+                                 (fold (fn (acc dir)
+                                         (append acc (project/project-collect-tests dir)))
+                                   nil
+                                   (project/project-abs-paths root
+                                     (or *project-test-paths* ["tests"])))))))
         nil))))
 
 ;; --- tags ---------------------------------------------------------------------
@@ -95,13 +96,14 @@ suggestions\", never to an error on the user's command line."
 ;; Scans for the literal `:tags` then takes what is between the following `[` and
 ;; `]`. A `:tags` inside a string or comment would be picked up — harmless, since
 ;; the worst case is one spurious suggestion.
-(defn complete--tags-in (text acc from)
-  (let (i (index-of--from text ":tags" from))
+(defn- complete-tags-in
+  (text acc from)
+  (let (i (index-of-from text ":tags" from))
     (if (< i 0)
       acc
-      (let (open (index-of--from text "[" i)
-            close (if (< open 0) -1 (index-of--from text "]" open))
-            newline (index-of--from text "\n" i))
+      (let (open (index-of-from text "[" i)
+            close (if (< open 0) -1 (index-of-from text "]" open))
+            newline (index-of-from text "\n" i))
         (cond
           ;; No bracket at all, or no closing bracket anywhere after it: nothing
           ;; addressable here, and nothing further to find.
@@ -111,16 +113,17 @@ suggestions\", never to an error on the user's command line."
           ;; mentioned in prose). Capturing to the far-away `]` used to swallow the
           ;; rest of the file and offer every keyword in it as a "tag". Skip past
           ;; this occurrence and keep looking.
-          (and (>= newline 0) (< newline close)) (complete--tags-in text acc (+ i 5))
+          (and (>= newline 0) (< newline close)) (complete-tags-in text acc (+ i 5))
           ;; Inside a string literal — prose or a test fixture, not a declaration.
-          (complete--in-string? text i) (complete--tags-in text acc (+ i 5))
+          (complete-in-string? text i) (complete-tags-in text acc (+ i 5))
           else
-            (complete--tags-in text
-              (append acc (complete--keywords (substring text (+ open 1) close)))
+            (complete-tags-in text
+              (append acc (complete-keywords (substring text (+ open 1) close)))
               (+ close 1)))))))
 
 ;; `index-of` has no start offset, so scan a suffix and re-base the result.
-(defn index-of--from (text needle from)
+(defn- index-of-from
+  (text needle from)
   (if (>= from (string-length text))
     -1
     (let (i (index-of (substring text from (string-length text)) needle))
@@ -133,25 +136,28 @@ suggestions\", never to an error on the user's command line."
 ;; which is exactly what this module's own tests are full of — was being harvested as
 ;; real tags, offering names like `a` and `unit` that no test actually carries. A
 ;; multi-line string could fool the line-local check; that costs one wrong hint.
-(defn complete--line-start (text i) (complete--line-start--walk text i 0))
+(defn- complete-line-start (text i) (complete-line-start-walk text i 0))
 
-(defn complete--line-start--walk (text i at)
-  (let (nl (index-of--from text "\n" at))
-    (if (or (< nl 0) (>= nl i)) at (complete--line-start--walk text i (+ nl 1)))))
+(defn- complete-line-start-walk
+  (text i at)
+  (let (nl (index-of-from text "\n" at))
+    (if (or (< nl 0) (>= nl i)) at (complete-line-start-walk text i (+ nl 1)))))
 
-(defn complete--in-string? (text i)
-  (let (prefix (substring text (complete--line-start text i) i)
+(defn- complete-in-string?
+  (text i)
+  (let (prefix (substring text (complete-line-start text i) i)
         ;; An escaped \" neither opens nor closes, so drop those pairs first.
         cleaned (replace prefix "\\\"" ""))
     ;; Odd number of quotes before the position ⇒ still inside one.
     (= 1 (rem (- (count (string-split cleaned "\"")) 1) 2))))
 
 ;; The bare names of the `:keyword`s in a whitespace-separated fragment.
-(defn complete--keywords (fragment)
+(defn- complete-keywords
+  (fragment)
   (fold (fn (acc token)
           (if (and (starts-with? token ":") (> (string-length token) 1))
             (let (name (substring token 1 (string-length token)))
-              (if (complete--tag-name? name) (append acc (list name)) acc))
+              (if (complete-tag-name? name) (append acc (list name)) acc))
             acc))
     nil
     (filter (fn (s) (not (= s ""))) (string-split (trim fragment) " "))))
@@ -160,28 +166,29 @@ suggestions\", never to an error on the user's command line."
 ;; quote, bracket, paren or backslash came from surrounding syntax rather than from a
 ;; tag — the scan is textual, so it can pick up a `:tags` inside a string literal and
 ;; produce a candidate like `fast"`. Offering that is worse than offering nothing.
-(def *complete--tag-reject* "\"'()[]{}\\;`,")
+(def- *complete-tag-reject* "\"'()[]{}\\;`,")
 
-(defn complete--tag-name? (name)
+(defn- complete-tag-name?
+  (name)
   (and (not (= name ""))
-    (fold (fn (ok ch) (and ok (not (includes? *complete--tag-reject* ch))))
+    (fold (fn (ok ch) (and ok (not (includes? *complete-tag-reject* ch))))
       true
       (string-split name ""))))
 
 (defn complete-tags ()
   "Every tag name declared with `:tags [...]` anywhere in the project's test files, de-duplicated and sorted. Textual scan — see the file header on why."
   (let (files (complete-test-files)
-        root (complete--root))
+        root (complete-root))
     (if (or (nil? files) (nil? root))
       nil
       (sort (keys (fold (fn (seen name) (assoc seen name true))
                     {}
                     (fold (fn (acc rel)
                             (append acc
-                              (or (complete--safely (fn ()
-                                                      (complete--tags-in (slurp (path-join root
-                                                                                  rel))
-                                                        nil 0)))
+                              (or (complete-safely (fn ()
+                                                     (complete-tags-in (slurp (path-join root
+                                                                                rel))
+                                                       nil 0)))
                                 nil)))
                       nil files)))))))
 
@@ -193,60 +200,61 @@ suggestions\", never to an error on the user's command line."
 ;; --- dependencies -------------------------------------------------------------
 (defn complete-dep-names ()
   "The names of the dependencies this project declares — the candidates for `nest remove` and `nest update`. Read straight from the manifest as data, so it works even when the deps are not fetched."
-  (let (root (complete--root))
+  (let (root (complete-root))
     (if (nil? root)
       nil
-      (or (complete--safely (fn ()
-                              (let (form (read-first (slurp (path-join root "project.blsp"))))
-                                (if (and (pair? form) (= (first form) 'project))
-                                  (map (fn (d) (name (get d :name)))
-                                    (project/project-parse-deps (plist-get (rest form)
-                                                                  :dependencies)))
-                                  nil))))
+      (or (complete-safely (fn ()
+                             (let (form (read-first (slurp (path-join root "project.blsp"))))
+                               (if (and (pair? form) (= (first form) 'project))
+                                 (map (fn (d) (name (get d :name)))
+                                   (project/project-parse-deps (plist-get (rest form)
+                                                                 :dependencies)))
+                                 nil))))
         nil))))
 
 ;; --- modules ------------------------------------------------------------------
 (defn complete-modules ()
   "Candidates for `nest doc MODULE`: every baked-in std module plus this project's own source modules (by file basename, which is how `require` names them)."
-  (let (root (complete--root))
+  (let (root (complete-root))
     (sort (keys (fold (fn (seen m) (assoc seen m true))
                   {}
-                  (append (or (complete--safely (fn () (builtin-modules)))
+                  (append (or (complete-safely (fn () (builtin-modules)))
                             nil)
                     (if (nil? root)
                       nil
-                      (or (complete--safely (fn ()
-                                              (map (fn (p)
-                                                     (complete--strip-extension (path-basename p)))
-                                                (fold (fn (acc dir)
-                                                        (append acc
-                                                          (project/project-collect-sources dir)))
-                                                  nil
-                                                  (project/project-abs-paths root
-                                                    (or *project-source-paths* ["src"]))))))
+                      (or (complete-safely (fn ()
+                                             (map (fn (p)
+                                                    (complete-strip-extension (path-basename p)))
+                                               (fold (fn (acc dir)
+                                                       (append acc
+                                                         (project/project-collect-sources dir)))
+                                                 nil
+                                                 (project/project-abs-paths root
+                                                   (or *project-source-paths* ["src"]))))))
                         nil))))))))
 
 (defn complete-project-modules ()
   "Just THIS project's own source modules (by file basename, which is how `require` names them) — the candidates for `nest run --main`, where a std module would never be a valid entry point."
-  (let (root (complete--root))
+  (let (root (complete-root))
     (if (nil? root)
       nil
-      (sort (or (complete--safely (fn ()
-                                    (map (fn (p) (complete--strip-extension (path-basename p)))
-                                      (fold (fn (acc dir)
-                                              (append acc (project/project-collect-sources dir)))
-                                        nil
-                                        (project/project-abs-paths root
-                                          (or *project-source-paths* ["src"]))))))
+      (sort (or (complete-safely (fn ()
+                                   (map (fn (p) (complete-strip-extension (path-basename p)))
+                                     (fold (fn (acc dir)
+                                             (append acc (project/project-collect-sources dir)))
+                                       nil
+                                       (project/project-abs-paths root
+                                         (or *project-source-paths* ["src"]))))))
               nil)))))
 
 ;; The scaffolder owns the template list, so read it from there rather than
 ;; restating it — a new template becomes completable with no change here.
 (defn complete-templates ()
   "The `nest new --template` names, from the scaffolder's own list."
-  (or (complete--safely (fn () (require 'scaffold) (into [] *project-templates*))) nil))
+  (or (complete-safely (fn () (require 'scaffold) (into [] *project-templates*))) nil))
 
-(defn complete--strip-extension (filename)
+(defn- complete-strip-extension
+  (filename)
   (if (ends-with? filename ".blsp")
     (substring filename 0 (- (string-length filename) 5))
     filename))
@@ -272,5 +280,5 @@ suggestions\", never to an error on the user's command line."
   (fold (fn (_ c) (println c))
     nil
     (filter (fn (c) (or (= prefix "") (starts-with? c prefix)))
-      (or (complete--safely (fn () (complete-for kind))) nil)))
+      (or (complete-safely (fn () (complete-for kind))) nil)))
   :ok)
