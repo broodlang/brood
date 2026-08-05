@@ -11,7 +11,11 @@ top of the ADR-211/212 registry + package-signing work. Nothing half-finished. R
 suite **954/954** (nextest), in-language **4401/4401** — also green under
 `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` — `nest check` clean, `nest format --check` clean, rustfmt and
 clippy clean, both default and `--no-default-features` builds warning-clean, metamorphic
-differential clean across 4 engine configs. **No open issues** — KI-25 (five suites failing when
+differential clean across 4 engine configs. **Flake baseline** (2026-08-05): the in-language
+suite is clean over 3 iterations × 3 seeds in one image, and `live_migration` is 16/16 under
+self-contention. **One open issue, KI-27** — a `cli::distribution` reconnect test times out under
+full-suite load only (7/7 solo, 16/16 contended); the port-rebind hypothesis is tested and ruled
+out. **No other open issues** — KI-25 (five suites failing when
 re-run inside one image, which blocked `--repeat-until-failure` across the suite) was fixed
 2026-08-04: four suites marked `:isolated` for the `%isolate` rollback, and `pid_identity_test`
 now takes the one-shot `node-start` only when `(node-name)` is `:nonode`. The whole suite
@@ -259,6 +263,12 @@ regression detection, which means running it **both** ways (`UTF8=1`) and checki
   while the change under test failed with an **out-of-bounds `root_at`** — a real GC bug. 16
   concurrent copies of that one test separated them in seconds: **8/16 vs 0/16 at HEAD**, where the
   full suite gave a 1-in-8 murmur that six baseline runs had failed to contradict.
+- **A test-level `:isolated` inside a `describe` used to be silently dropped** —
+  `register-test!` discarded the flag while collecting, so the marker did nothing and the suite
+  reported `0 isolated`. Fixed 2026-08-05 (it rides in the meta; `emit-describe!` gives such a
+  test its own isolated unit), but the lesson generalises: **a marker that is ignored rather than
+  rejected is worse than an unsupported one**, because you believe the test is protected. Check
+  the `(N isolated)` count in the summary when you rely on it.
 - **A green test proves nothing until you run it with the mechanism off.** For any mechanism with an
   off-switch, run the test with the switch off before committing it. For a mechanism with **no**
   switch (a pure cache, like ADR-213's index), the equivalent is **sabotage**: break it by one
