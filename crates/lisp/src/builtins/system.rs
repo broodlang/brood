@@ -97,7 +97,9 @@ pub(super) fn read_all(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult 
 // ~2.6ms to parse it natively). Same three outputs as the old
 // `project--scan-file-entry`, computed in one Rust pass over the reader's forms.
 
-const SCAN_DEF_HEADS: &[&str] = &["def", "def-", "defn", "defn-", "defmacro", "defdyn", "defonce"];
+const SCAN_DEF_HEADS: &[&str] = &[
+    "def", "def-", "defn", "defn-", "defmacro", "defdyn", "defonce",
+];
 
 /// An **ambient** name — root regardless of the enclosing namespace. Ambient status
 /// is a *declaration*, not a spelling: the `defdyn` head declares it (the earmuff

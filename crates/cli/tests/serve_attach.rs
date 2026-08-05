@@ -9,49 +9,9 @@
 //! processes over loopback).
 
 use std::io::Read;
-use std::net::TcpStream;
-use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant};
 
-/// Serialise the bind→spawn window so parallel tests don't grab the same port.
-static PORTS: Mutex<()> = Mutex::new(());
-fn port_lock() -> MutexGuard<'static, ()> {
-    PORTS.lock().unwrap_or_else(|p| p.into_inner())
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-fn spawn_brood(dir: &std::path::Path, name: &str, src: &str) -> Child {
-    let path = dir.join(name);
-    std::fs::write(&path, src).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_brood"))
-        .arg(&path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn brood")
-}
-
-fn wait_until_listening(port: u16) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
-        }
-        if Instant::now() >= deadline {
-            panic!("daemon never started listening on port {port}");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
+mod support;
+use support::*;
 
 /// A daemon serves a counter app; a client attaches, reads the initial frame
 /// (n=0), presses "+", reads the key-driven frame (n=1), then quits ("q") and
