@@ -5,17 +5,26 @@ measurements live in [`devlog.md`](devlog.md); decisions in [`decisions.md`](dec
 option book in [`runtime-frontier.md`](runtime-frontier.md); bugs in
 [`known-issues.md`](known-issues.md). Read this to pick the work back up cold.
 
-**As of 2026-08-04**, brood with ADR-213 (char→byte index), ADR-214 (form-start safepoints) and
+**As of 2026-08-05**, brood with ADR-213 (char→byte index), ADR-214 (form-start safepoints) and
 ADR-215 (AST-keyed shared compiled code) on
 top of the ADR-211/212 registry + package-signing work. Nothing half-finished. Rust
-suite **954/954** (nextest), in-language **4401/4401** — also green under
+suite **956/956** (nextest), in-language **4401/4401** — also green under
 `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` — `nest check` clean, `nest format --check` clean, rustfmt and
 clippy clean, both default and `--no-default-features` builds warning-clean, metamorphic
 differential clean across 4 engine configs. **Flake baseline** (2026-08-05): the in-language
 suite is clean over 3 iterations × 3 seeds in one image, and `live_migration` is 16/16 under
-self-contention. **One open issue, KI-27** — a `cli::distribution` reconnect test times out under
-full-suite load only (7/7 solo, 16/16 contended); the port-rebind hypothesis is tested and ruled
-out. **No other open issues** — KI-25 (five suites failing when
+self-contention. **One open issue and one watch item, neither in the runtime** — KI-29: the node and
+observe tests **orphan `brood` children** (one found alive 9 days later; ~35% of a core across three
+strays), which had been recorded since 2026-07-27 as an aside inside a *fixed* entry and so read as
+closed. Check `pgrep -af 'brood /tmp/brood-'`; the fix direction is a process-group kill from a drop
+guard in `crates/cli/tests/support/mod.rs`. And KI-28, a single unexplained `nodedown` flake
+seen once in a full run and not since (0/40 solo, 33/33 × 3 under nextest, absent from the next
+956/956 run); its diagnostic is armed, so a recurrence will explain itself. KI-27 was fixed
+2026-08-05: the three node-test harnesses
+picked their ports out of the kernel's *ephemeral* range (32768–60999), so an unrelated process's
+client socket could take the port a test node was about to bind. They now share
+`crates/cli/tests/support/mod.rs` and allocate from a pid-sliced band below the ephemeral floor.
+KI-25 (five suites failing when
 re-run inside one image, which blocked `--repeat-until-failure` across the suite) was fixed
 2026-08-04: four suites marked `:isolated` for the `%isolate` rollback, and `pid_identity_test`
 now takes the one-shot `node-start` only when `(node-name)` is `:nonode`. The whole suite
@@ -257,6 +266,21 @@ regression detection, which means running it **both** ways (`UTF8=1`) and checki
 
 **Testing**
 
+- **"Cannot reproduce it locally" is evidence, not an obstacle — read what the passing configs rule
+  out.** KI-27 passed 7/7 solo, 16/16 as concurrent copies of its own binary, and 3/3 as its whole
+  binary under 12 CPU hogs, and failed only in a full `make test`. That set of results *is* the
+  diagnosis: the cause has to be something only a full, heterogeneous suite supplies. It was other
+  processes churning TCP connections, because the harness drew its ports from the kernel's
+  **ephemeral range** (32768–60999) — so an unrelated client socket could be handed the port a
+  test node was about to bind. Never allocate a test server's port with `bind(":0")`-and-drop.
+- **A `Mutex` between tests does nothing under `cargo-nextest`.** The dist harness had a `PORTS`
+  mutex around bind→spawn, which reads like the race was handled. nextest gives each test its own
+  **process**, and `make test` uses nextest — so in the only configuration that fails, that
+  mitigation does not exist. Any cross-test coordination has to be OS-level (the port band, a file
+  lock), not a `static` in the test binary.
+- **Copy-pasted harness helpers hide a bug in the copies you didn't look at.** `free_port` lived in
+  three test files; fixing KI-27 in `distribution.rs` left the identical latent flake in
+  `serve_attach.rs` and `observe_attach.rs`. They share `crates/cli/tests/support/mod.rs` now.
 - **Build the concurrent reproducer before arguing about a flake rate, and compare failure *modes*
   not counts.** `live_migration deep_receive_…` failed inside a full `nextest` run and never in
   isolation (0/65). Two different failures were conflated: HEAD fails it on a *liveness* assert,

@@ -19,7 +19,9 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
-| KI-27 | `reconnect_watcher_heals_a_fallen_link` times out waiting for `[:nodeup]` under full-suite load | ⬜ **open** (found 2026-08-05) |
+| KI-29 | node/observe tests orphan `brood` children — one found alive **9 days** later, ~15% CPU each | ⬜ **open** (recorded 2026-07-27, evidenced 2026-08-05) |
+| KI-28 | `clean_peer_exit_fires_nodedown_promptly` failed once, then passed on retry; output not captured | ⚠️ **watching** (seen once 2026-08-05) |
+| KI-27 | node tests drew their port from the OS **ephemeral** range, so an unrelated process could take it | ✅ **fixed** 2026-08-05 |
 | KI-25 | five JIT/VM suites cannot be re-run in one image (`--repeat-until-failure` fails on iteration 2) | ✅ **fixed** 2026-08-04 |
 | KI-24 | `eval`'d code cannot forward-reference a name a later `eval` defines (regression, 97d63eda) | ✅ **fixed** 2026-08-01 |
 | KI-23 | the KI-22 lost-update shape also exists in ~10 std-module registries | ✅ **fixed** 2026-08-02 |
@@ -46,35 +48,118 @@ ADRs / topic docs.
 | KI-2 | `nest test` flaky / hangs when parallel tests share heavy global lookups | ✅ fixed 2026-05-29 |
 | KI-1 | multi-thread scheduler race: green processes can't resolve globals | ✅ fixed 2026-05-29 |
 
-**One open issue: KI-27.** Every other KI above is fixed, incidentally fixed, or a non-reproducing
-transient — each kept as a record with its regression test, so a recurrence is recognizable.
+**One open issue (KI-29, a test-harness process leak) and one watch item (KI-28).** No open bug in
+the language, runtime or toolchain itself. Every other KI above is fixed, incidentally fixed, or a
+non-reproducing transient — each kept as a record with its regression test, so a recurrence is
+recognizable.
 
 ---
 
-## KI-27 — `reconnect_watcher_heals_a_fallen_link` times out under full-suite load · **open, found 2026-08-05**
+## KI-29 — the node/observe tests orphan `brood` children · **open, recorded 2026-07-27, evidenced 2026-08-05**
 
-**Symptom.** In a full `make test`, this `cli::distribution` test failed twice (nextest retried
-once) after **20.06 s** — its `(after 20000 …)` guard on `[:nodeup]`, so the watcher never saw
-node B come back. It is fast and reliable on its own: **7/7 solo** at ~1.3 s, and **16/16** as 16
-concurrent copies of the same test binary. Only the full suite reproduces it, which is the
-`live_migration` pattern (fails inside the run, never in isolation).
+**Why this is its own entry now.** It was written down as an "adjacent finding" inside KI-14, which
+is *fixed* — so it read as closed, was counted as closed, and sat for nine days. A live bug filed
+under a fixed one is invisible.
 
-**Found by** the repeat-until-failure flake baseline (see `handoff.md`), which is what made it
-visible at all — it had been passing in earlier runs today.
+**Evidence, 2026-08-05.** Three stray `brood` nodes were alive on this box at once:
 
-**Ruled out.** The obvious mechanism is a failed port rebind: B1 closes its listener, the harness
-restarts B2 on the same port, and none of the three `TcpListener::bind` sites
-(`net.rs:1208`, `net.rs:1528`, `dist.rs:859`) sets `SO_REUSEADDR`. **Tested directly and it is
-not the cause** — after a linked peer exits, an immediate rebind on the same port succeeds 3/3.
-(Worth knowing anyway: the absence of `SO_REUSEADDR` is real, just not this.)
+| child | age | CPU |
+|---|---|---|
+| `/tmp/brood-observe-*/target.blsp` | **9 d 14 h** | 4.0% |
+| `/tmp/brood-dist-reconnect-*/b1.blsp` | 1 h 13 m | 15.3% |
+| `/tmp/brood-dist-nodedown-*/quitter.blsp` | 32 m | 15.6% |
 
-**What is known.** The watcher retries `(connect spec)` forever (`reconnect--down` has no attempt
-cap), so it cannot have given up; `[:nodeup]` requires a `connect` to succeed, so B2 was
-unreachable for 20 s. The test never checks that B2 *started* — if B2 died on startup the test
-would look exactly like this. That is the first thing to instrument.
+Together ~35% of a core, indefinitely, on a machine whose benchmark numbers are measured pinned to
+one core. Each is also a **live node**, listening, with the same `secret-test-cookie-16+` and the same
+`:a`/`:b` names every dist test uses — so the leak is a plausible source of exactly the
+once-in-a-hundred node-test flake KI-28 records.
 
-**Repro.** `make test` (full), and read the `TRY n FAIL` line. For a faster loop, run the whole
-suite while something else saturates the machine.
+**Two distinct causes, only one of them a test bug.**
+1. A test binary that is killed rather than allowed to finish — nextest fail-fast, a `timeout`, a
+   `^C` — orphans the `brood` children it spawned, because they are not in a killed process group
+   and `Child` has no drop-kill. Two of the three above are from my own aborted runs.
+2. The 9-day-old observe child is from an ordinary run, so the observe/attach path leaks even when
+   its test completes normally. That one is a real test bug.
+
+**Fix direction** (not done): put spawned children in their own process group and kill the group
+from a guard object dropped at test end, so cause 1 cannot happen either. `crates/cli/tests/support/mod.rs`
+now exists as the one place to do it.
+
+**Check for it with** `pgrep -af 'brood /tmp/brood-'`, and prefer that over trusting a green run —
+a leak leaves no test failure behind.
+
+## KI-28 — a single unexplained `nodedown` flake · **watching, seen once 2026-08-05**
+
+**Not a diagnosis — a record, so a second occurrence is recognised as the second.** In the full
+`make test` that verified the KI-27 fix, `cli::distribution clean_peer_exit_fires_nodedown_promptly`
+failed try 1 and passed try 2 (nextest reported `FLAKY 2/2 [0.631s]`).
+
+**How long the failure took is unknown.** That 0.631 s is the duration of the *passing retry* —
+nextest reports the final attempt. An earlier version of this entry read it as the failure's
+duration and concluded node A had exited early rather than hitting its 5 s `[:nodedown]` guard;
+that inference had nothing under it and is withdrawn. Both shapes are still open: a failed
+`connect`, or a nodedown that genuinely did not arrive within 5 s under load.
+
+**What the failure text said: nothing, and that is my fault.** I had piped that run through
+`tail -25`, which discarded the assertion output. The test now prints **B's stderr** alongside A's
+on failure, so the next occurrence explains itself.
+
+**What is known.** 0/40 solo; 33/33 × 3 for the whole dist file under nextest (the config that
+failed); and it did **not** recur in the next full `make test` (956/956, no flaky). It is *not* the
+KI-27 mechanism — under nextest this test's process asks for two ports and cannot wrap its slice,
+and concurrent test processes have near-consecutive pids and therefore disjoint slices.
+
+**One live suspect, worth checking first.** Orphaned test children (the leak recorded under KI-14)
+are real and confirmed 2026-08-05: three stray `brood` nodes were alive on this box, one for **9
+days**, together burning ~35% of a core. A leaked node still *listening* on a port, with the same
+`secret-test-cookie-16+` and the same `:a`/`:b` names every dist test uses, is exactly the kind of
+thing that makes a node test fail once in a hundred runs. The new port band makes the simple
+collision impossible (a held port fails the bindability probe and is skipped), so this is a
+suspect, not a mechanism — but check `pgrep -af 'brood /tmp/brood-'` before chasing anything
+subtler.
+
+**If it recurs**, the printed B stderr should immediately separate "B never bound its port" from
+"A could not connect to a listening B"; a `connect` failure would then be a real runtime question
+rather than a harness one.
+
+## KI-27 — node tests drew their port from the OS ephemeral range · **fixed 2026-08-05**
+
+**Symptom.** In a full `make test`, `cli::distribution reconnect_watcher_heals_a_fallen_link`
+failed twice (nextest retried once) after **20.06 s** — its `(after 20000 …)` guard on
+`[:nodeup]`, so the watcher never saw node B come back. Fast and reliable alone: **7/7 solo** at
+~1.3 s, **16/16** as 16 concurrent copies of the same binary, and 3/3 for the whole dist binary
+even under 12 CPU hogs. Only a full suite reproduced it.
+
+**Cause.** `free_port()` in the three node-test harnesses picked a port with
+`TcpListener::bind("127.0.0.1:0")` and dropped the listener. That asks the kernel for a port from
+the **ephemeral range** — 32768–60999 here (`/proc/sys/net/ipv4/ip_local_port_range`) — which is
+the same range every outbound connection on the box is assigned from, and then releases it. So a
+port a test node is about to bind can be handed to an unrelated process's *client* socket in the
+gap, and the node's bind fails with `EADDRINUSE`.
+
+Measured, not inferred: of 4000 client sockets opened by an unrelated process, **4000 (100%)**
+landed on a port the old `free_port()` could have handed a node, and **0** in the band the fix
+uses. `reconnect_watcher_heals_a_fallen_link` is the most exposed test in the file because it needs
+one port to stay free across B1's whole life, B1's exit, the 400 ms gap *and* B2's rebind; every
+other test needs a single bind. And the pre-existing mitigation — a `PORTS` mutex around
+bind→spawn — is per-process, so under `cargo-nextest` (one process per test, which is what
+`make test` uses) it does not exist between the tests that actually run concurrently.
+
+**Fix.** `crates/cli/tests/support/mod.rs` (new — the three harnesses had their own copies of these
+helpers, which is how a fix in one file could miss two). `free_port()` now allocates from a fixed
+band **below** the ephemeral floor (12000..32768), where the kernel never auto-assigns, sliced by
+pid so concurrent test processes start in different places, and probes bindability before
+returning. Additionally `reconnect_watcher_heals_a_fallen_link` now calls `wait_until_listening`
+on B2 instead of assuming it came up, and prints B2's stderr on failure — the test previously
+could not distinguish "the watcher failed to heal" (the thing under test) from "B never came
+back", which is why this presented as a mysterious 20 s timeout. Its `[:nodeup]`/pong deadlines
+were raised (60 s / 30 s): they are liveness ceilings on a saturated machine, not latency
+assertions, and cost nothing when healthy (the test still runs in 1.3 s).
+
+**Ruled out along the way.** `SO_REUSEADDR` is absent from all three `TcpListener::bind` sites
+(`net.rs:1208`, `net.rs:1528`, `dist.rs:859`) — the obvious suspect for a failed rebind, and
+**tested directly: not the cause** (immediate rebind after a linked peer exits succeeds 3/3).
+That is consistent with the real cause: the port was lost to another process, not to `TIME_WAIT`.
 
 ## KI-25 — five JIT/VM suites cannot be re-run in one image · **fixed 2026-08-04**
 

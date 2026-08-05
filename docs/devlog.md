@@ -16242,3 +16242,58 @@ existed tree-wide; they collapse to public. A ~2,500-name sweep across the brood
 projects migrated the tree, driven by a temporary `nest format --migrate-privacy` CST pass (removed
 after). Follow-up tracked: the unused-private lint still keys on `--` and needs reworking to detect
 `defn-`. See ADR-146 step 2.
+
+## 2026-08-05 (cont.) — KI-27: the test harness was picking its ports out of the kernel's ephemeral range
+
+The one open issue closed, and the cause was in the *harness*, not the runtime.
+
+`cli::distribution reconnect_watcher_heals_a_fallen_link` failed a full `make test` twice (nextest
+retried once) on its 20 s `[:nodeup]` guard, while being 7/7 solo at 1.3 s, 16/16 as 16 concurrent
+copies of its own binary, and 3/3 for the whole dist binary under 12 CPU hogs. I could not
+reproduce it locally at all, which is what pointed at the one thing that only a *full* suite
+supplies: dozens of unrelated processes churning TCP connections.
+
+`free_port()` picked a port with `bind("127.0.0.1:0")` and dropped the listener. That draws from
+the kernel's **ephemeral range** — 32768–60999 here — which is exactly the range every outbound
+connection on the machine is assigned from. So the port a node is about to bind can be handed to
+an unrelated process's client socket in the gap, and the node's bind fails with `EADDRINUSE`.
+Measured rather than argued: of 4000 client sockets opened by an unrelated process, **4000 (100%)**
+landed on a port the old allocator could have handed a node, and **0** in the band the fix uses.
+
+This test was the most exposed in the file because it needs one port to stay free across B1's whole
+life, B1's exit, the 400 ms gap *and* B2's rebind — every other test needs a single bind. The
+pre-existing mitigation, a `PORTS` mutex around bind→spawn, is per-*process*, so under nextest
+(one process per test, which is what `make test` uses) it does not exist between the tests that
+actually run concurrently. The fix allocates from a fixed band **below** the ephemeral floor
+(12000..32768), where the kernel never auto-assigns, pid-sliced so concurrent test processes start
+in different places, with a bindability probe. Details in [known-issues.md](known-issues.md) KI-27.
+
+**The regression test earned its keep immediately.** `allocated_ports_are_outside_the_kernel_ephemeral_range`
+asserts the property that makes the collision impossible (every port below the ephemeral floor,
+none handed out twice) rather than trying to race it — and it failed on the first run, on the
+*second* clause. The band was pid-sliced 64 ports wide, and under plain `cargo test` all 33 tests
+in the file share one process at 2–3 ports each, so the allocator wrapped mid-run and started
+re-handing ports it had already given out. Slice widened to 128. That bug would otherwise have
+shipped inside the fix for a flake, which is a fair description of how flake fixes usually go
+wrong.
+
+Two things fixed alongside it, both about diagnosability rather than the bug:
+
+*The test asserted the healing but assumed the peer.* It never checked that B2 came up, so
+"the watcher failed to heal" (the thing under test) and "B never came back" (a harness problem)
+were the same 20 s timeout. It now calls `wait_until_listening` on B2 and prints B2's stderr on
+failure. Its deadlines were raised to 45 s/20 s — liveness ceilings on a saturated machine, not
+latency assertions, sized so nodeup + pong together stay inside nextest's 2 min per-test cap; the
+healthy path still finishes in 1.3 s.
+
+*One helper, three copies.* `distribution.rs`, `serve_attach.rs` and `observe_attach.rs` each had
+their own `free_port`/`port_lock`/`spawn_brood`/`wait_until_listening`. I fixed the allocator in one
+file and then found the same bug in the other two, so they now share
+`crates/cli/tests/support/mod.rs` — 158 lines deleted, one definition. A latent flake of exactly
+this kind was live in the serve/attach tests too and never happened to be the one that fired.
+
+**Lesson: "cannot reproduce locally" is evidence, not an obstacle.** Solo, contended and hog-loaded
+runs all passing narrowed the cause to something only a full heterogeneous suite provides, and
+the ephemeral-range collision is the only mechanism that fits every one of those observations. The
+earlier `SO_REUSEADDR` hypothesis had been tested and correctly ruled out — and it is consistent
+with the real cause: the port was lost to another process, not to `TIME_WAIT`.
