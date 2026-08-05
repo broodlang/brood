@@ -10,6 +10,8 @@
 
 use std::process::Command;
 
+mod support;
+
 /// Build `[brood][archive][footer]` for a two-module app and return its path,
 /// alongside a separate empty directory to run it from.
 fn write_app(
@@ -52,10 +54,10 @@ fn bundled_brood_boots_embedded_main_with_cross_module_use() {
             ("lib", "(defmodule lib)\n(defn greet () \"embedded-ok\")"),
         ],
     );
-    let out = Command::new(&app)
-        .current_dir(&cwd)
-        .output()
-        .expect("run bundled app");
+    let mut cmd = Command::new(&app);
+    cmd.current_dir(&cwd);
+    support::dies_with_parent(&mut cmd);
+    let out = cmd.output().expect("run bundled app");
     assert!(
         out.status.success(),
         "exit: {:?}\nstderr: {}",
@@ -76,11 +78,10 @@ fn bundled_app_receives_argv() {
             "(defmodule main)\n(defn main (& args) (println (str \"argv:\" args)))",
         )],
     );
-    let out = Command::new(&app)
-        .args(["alpha", "beta"])
-        .current_dir(&cwd)
-        .output()
-        .expect("run bundled app");
+    let mut cmd = Command::new(&app);
+    cmd.args(["alpha", "beta"]).current_dir(&cwd);
+    support::dies_with_parent(&mut cmd);
+    let out = cmd.output().expect("run bundled app");
     assert!(
         out.status.success(),
         "stderr: {}",

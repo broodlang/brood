@@ -20,6 +20,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod support;
+
 /// A temp dir holding the two `.blsp` files, removed on drop.
 struct TempDir {
     path: PathBuf,
@@ -72,11 +74,10 @@ fn write_fixture() -> TempDir {
 /// Run `brood <args>` from inside `dir` (so the default load-path `.` finds `greet`)
 /// and return combined stdout+stderr plus success.
 fn run_brood(dir: &std::path::Path, args: &[&str]) -> (String, bool) {
-    let out = Command::new(env!("CARGO_BIN_EXE_brood"))
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("run brood");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_brood"));
+    cmd.args(args).current_dir(dir);
+    support::dies_with_parent(&mut cmd);
+    let out = cmd.output().expect("run brood");
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
