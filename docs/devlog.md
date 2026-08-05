@@ -16576,3 +16576,31 @@ a convention enforced by *discipline at each call site*, where a site that forge
 signal at all. Each was found by going to look, not by a failure. Where a convention has N call
 sites and no checker, assume some fraction of N is already wrong — and the cheap fix is usually a
 test that reads the source, not a redesign of the mechanism.
+
+**Same day, item 1 of the new list — "make a short-lived process reach native code" — measured
+and declined too.** The premise was strong: `spawn-live` gains nothing from the JIT
+(`BROOD_NO_JIT=1` moves the payload rung 4310 → 4280 ms and the park rung 2050 → 2050) while
+`BROOD_JIT_DUMP_IR` reports 171 arms lowering. That reads as compiled native code the
+short-lived units never reach — an ADR-215-shaped hole, since ADR-215 shared the compiled
+*code* and the analogous missing piece would be sharing the *tier decision*.
+
+Both halves are wrong. The units' own arms **do** lower: `fold` and `fold-vec` each appear in
+the dump twice (the two-stage dual body), alongside `receive`, `<closure>`, and the whole
+`match-*` family. And native is **not faster for the shape that dominates** — `hof_call.blsp`'s
+`loop-computed` lowers, confirmed in the dump, and measures 274 ns/call with the JIT against 271
+without. A HOF-call-dominated loop pays for the call, which re-enters the runtime on either
+engine, so there is no native win available to reach for.
+
+So three of the neighbourhood's four candidates are now closed by measurement (park/resume, the
+identity-keyed IC, and this), and they all point at the same remaining one: **don't call per
+element** — the identity-guarded speculative inline of the step closure, which §1 named as the
+real fix from the start and which is the only thing left that changes the shape rather than the
+constant.
+
+**One incidental finding worth its own look:** the `match-*` family lowering at all says the
+`receive` pattern matcher is *Brood code running per message* — `match-parse-clause`,
+`match-compile-clause`, `receive-prep`, `receive-dispatch` and ~20 more all tier up during the
+ladder. That is consistent with `ns_match_run` costing ~2.9 µs/unit and `ns_match_resolve`
+~0.7–1.1 µs to match a one-clause `[:go]` pattern, and it makes the receive rung (+8.7 µs/unit,
+the largest step in the row) look like a *caching* problem — an ADR-215-shaped one, keyed on the
+receive site's clause AST — rather than a tuning problem. Not investigated further yet.

@@ -181,6 +181,25 @@ anyway (its copies are the parts, not the input). `scan-tokens` would need a two
 
 Each was measured to a conclusion. Re-deriving them costs a session each.
 
+- **"Make a short-lived process reach native code"** — measured and **declined 2026-08-05**,
+  before being built. The premise came from `spawn-live` gaining *nothing* from the JIT
+  (`BROOD_NO_JIT=1`: payload rung 4310 → 4280 ms, park rung 2050 → 2050) while
+  `BROOD_JIT_DUMP_IR` shows 171 arms lowering — which reads as "the native code is compiled
+  and the short-lived units never get to it", i.e. an ADR-215-shaped hole (share the *tier
+  decision* the way ADR-215 shared the *code*).
+
+  Both halves are wrong. **The units' own arms do lower** — `fold` and `fold-vec` each appear
+  in the dump (twice, the two-stage dual body), as do `receive`, the `match-*` family, and
+  `<closure>`. And **native is not faster for the shape that dominates**: `hof_call.blsp`'s
+  `loop-computed` lowers (confirmed in the dump) and still measures 274 ns/call with the JIT
+  and 271 without. A HOF-call-dominated loop pays for the *call*, which re-enters the runtime
+  either way, so there is no native win to reach for.
+
+  **What it converges on instead:** the only lever left for this shape is not calling per
+  element — the identity-guarded speculative inline of the step closure that §1 named all
+  along. Everything else in the neighbourhood has now been measured and declined: the IC
+  below, park/resume, and this.
+
 - **An identity-keyed call-site IC for a computed (local) callee** — measured and
   **declined 2026-08-05**, before being built. §1 recommended it because `compile_node`
   allocates an IC id only for a free-global head, so a HOF's step call re-resolves per
