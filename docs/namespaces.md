@@ -97,9 +97,19 @@ Racket-style sealing.
 > module's private is a **compile error at load** (`enforce_private_refs` in
 > `eval/macros.rs`, judged against the recorded `is_private`), with `(:use-internals
 > mod)` as the explicit grant (the `@testable` seam) and top-level/REPL code exempt (the
-> live-hacking hatch). The name is still *reachable at runtime by full qualified name*
-> from a granted or same-module site — stronger *soft* privacy, no Racket-style erasure.
-> The "auto-imported + `--` + lint" wording in this section and §12 is the old model.
+> live-hacking hatch). `(:use-internals mod :only [a b])` grants access and refers just
+> those names instead of a refer-all — the **cycle-safe** form for two mutually dependent
+> modules, since a plain refer-all into a still-loading module mid-cycle is rejected by
+> the loader while a subset refer resolves lazily. The name is still *reachable at runtime
+> by full qualified name* from a granted or same-module site — stronger *soft* privacy, no
+> Racket-style erasure. The "auto-imported + `--` + lint" wording in this section and §12
+> is the old model.
+>
+> **One accepted behaviour change from step 2:** a qualified reference into a
+> **never-loaded** module can no longer be judged private — the record has never seen it
+> — so it degrades from a load-time "module-private" error to an ordinary **unbound
+> reference** at call time. More principled: you cannot assert privacy about code the
+> image has not loaded.
 
 ## 3. The substrate: expand-time resolution over the flat table
 
@@ -469,7 +479,7 @@ including package-rooting (ADR-070) and LSP auto-import (ADR-206).
 
 | Language | Unit | Substrate | Privacy | Live-redefinable? | Cross-package collisions | Auto-load on bare ref? | Macro hygiene |
 |---|---|---|---|---|---|---|---|
-| **Brood** | module = namespace = file (`defmodule`) | **flat interned `u32` table; namespacing is an expand-time rewrite (no interner partition)** | **soft but *enforced*** (`--` names; cross-ns private ref is a load error; `:use-internals` grant) | **yes** (`def` rebinds globals; hot reload) | **impossible — package-rooted** (`foo/b`); detect-and-reject was the interim | **no** — rejected (ADR-206); LSP auto-import instead | **auto** (auto-gensym `x#` + auto-qualifying quasiquote) |
+| **Brood** | module = namespace = file (`defmodule`) | **flat interned `u32` table; namespacing is an expand-time rewrite (no interner partition)** | **soft but *enforced*** (`defn-`/`def-` def-site privacy; cross-ns private ref is a load error; `:use-internals` grant) | **yes** (`def` rebinds globals; hot reload) | **impossible — package-rooted** (`foo/b`); detect-and-reject was the interim | **no** — rejected (ADR-206); LSP auto-import instead | **auto** (auto-gensym `x#` + auto-qualifying quasiquote) |
 | Clojure | namespace maps symbols→vars | var indirection per ns | soft (`^:private`; `#'ns/sym` bypasses) | yes (REPL) | convention only (reverse-domain `com.foo.parser`) | no (unloaded `foo/bar` errors) | auto (syntax-quote qualifies + `x#`) |
 | Common Lisp | package partitions the interner | interner partition (`pkg:sym`/`pkg::sym`) | soft (`::` reaches internals) | yes | no real answer (flat package names) | no | none (manual `gensym`) |
 | Racket | module, statically linked | static module system | **hard** (unexported invisible) | **no** (sealed) | collections / pkgs | no | full (`syntax-rules`/`syntax-case`) |

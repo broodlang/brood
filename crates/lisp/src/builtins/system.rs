@@ -2520,7 +2520,7 @@ fn module_is_loading(heap: &mut Heap, mod_name: &str) -> bool {
 /// `(%refer 'mod subset exclude)` — add `(:use …)` imports to the current file's
 /// import table (ADR-065 inc-2). `mod` must already be loaded (the `defmodule` macro
 /// emits a `(require 'mod)` first). `subset` nil → refer every *public* `mod/name`
-/// (no `--` private marker, not itself nested); else a seq of bare symbols → refer
+/// (not recorded private, not itself nested); else a seq of bare symbols → refer
 /// just those as `mod/name`. `exclude` (a seq of bare names, or nil) drops those from
 /// a refer-all — Elixir's `except:`. Each import becomes a bare → qualified entry the
 /// resolver consults after the current namespace and before root; clashes and
@@ -2601,7 +2601,7 @@ pub(super) fn refer(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
 
 /// `(%grant-internals 'mod)` — the `(:use-internals mod)` header clause's
 /// mechanism (ADR-146): record that the CURRENT file may reference `mod`'s
-/// module-private `--` names (qualified access), which is otherwise a compile
+/// module-private names (qualified access), which is otherwise a compile
 /// error. Stored in the per-file import table under the impossible key
 /// `/internals/<mod>` (the `%alias` trick), so it rides the same save/restore
 /// lifecycle as every other import.
