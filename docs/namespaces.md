@@ -414,7 +414,7 @@ the lock file stays computable. Auto-require collapses `require`+`use` for code 
 2. ✅ **Imports + auto-require (inc-2)** — `(:use mod)` / `(:use mod :only [a b])`
    in the `ns` header; a per-file `imports` table on the `Heap` (bare → qualified)
    the resolver consults after the current namespace, before root; `%refer`
-   enumerates a module's public (non-`--`) names or a subset; `:use` emits a
+   enumerates a module's public (non-private) names or a subset; `:use` emits a
    `(require …)` so it auto-loads (loads-but-never-fetches, §9). Own-namespace defs
    shadow imports. Tested: refer-all, subset, private excluded, own-ns precedence,
    cross-process.
@@ -469,7 +469,7 @@ including package-rooting (ADR-070) and LSP auto-import (ADR-206).
 
 | Language | Unit | Substrate | Privacy | Live-redefinable? | Cross-package collisions | Auto-load on bare ref? | Macro hygiene |
 |---|---|---|---|---|---|---|---|
-| **Brood** | module = namespace = file (`defmodule`) | **flat interned `u32` table; namespacing is an expand-time rewrite (no interner partition)** | **soft but *enforced*** (`--` names; cross-ns private ref is a load error; `:use-internals` grant) | **yes** (`def` rebinds globals; hot reload) | **impossible — package-rooted** (`foo/b`); detect-and-reject was the interim | **no** — rejected (ADR-206); LSP auto-import instead | **auto** (auto-gensym `x#` + auto-qualifying quasiquote) |
+| **Brood** | module = namespace = file (`defmodule`) | **flat interned `u32` table; namespacing is an expand-time rewrite (no interner partition)** | **soft but *enforced*** (`defn-`/`def-`; cross-ns private ref is a load error; `:use-internals` grant) | **yes** (`def` rebinds globals; hot reload) | **impossible — package-rooted** (`foo/b`); detect-and-reject was the interim | **no** — rejected (ADR-206); LSP auto-import instead | **auto** (auto-gensym `x#` + auto-qualifying quasiquote) |
 | Clojure | namespace maps symbols→vars | var indirection per ns | soft (`^:private`; `#'ns/sym` bypasses) | yes (REPL) | convention only (reverse-domain `com.foo.parser`) | no (unloaded `foo/bar` errors) | auto (syntax-quote qualifies + `x#`) |
 | Common Lisp | package partitions the interner | interner partition (`pkg:sym`/`pkg::sym`) | soft (`::` reaches internals) | yes | no real answer (flat package names) | no | none (manual `gensym`) |
 | Racket | module, statically linked | static module system | **hard** (unexported invisible) | **no** (sealed) | collections / pkgs | no | full (`syntax-rules`/`syntax-case`) |

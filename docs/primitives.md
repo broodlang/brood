@@ -163,7 +163,7 @@ arg silently becoming `nil`.
 | | `tree-sitter-forget` | 1 | drop every cached incremental tree for integer buffer id `key`; returns the count dropped. Call when a buffer closes so the reparse cache stays bounded. Feature `treesit`. |
 | | `scan-tokens` | 1 | Lexically tokenize Brood source s into a vector of [start end kind text] tokens (char offsets, end-exclusive; whitespace skipped). kind is :comment, :string, :number, :keyword, :symbol, :open, or :close. |
 | | `scan-form-start` | 2 | The greatest char offset <= pos of a column-0 open bracket in s lying OUTSIDE any string or ; comment, else 0 — the string/comment-aware beginning-of-defun behind highlight/safe-restart and tool/sexp narrowing. |
-| | `scan-source-extract` | 1 | Native per-file scan for the whole-project check (ADR-119): parse src and return [counts privs def-names] — a map of --containing symbol counts, this file's --private defs as [bare qual], and every top-level def's qualified name. The fast path replacing the interpreted CST walk. |
+| | `scan-source-extract` | 1 | Native per-file scan for the whole-project check (ADR-119): parse src and return [counts privs def-names] — a map of symbol counts, this file's `defn-`/`def-` private defs as [bare qual], and every top-level def's qualified name. The fast path replacing the interpreted CST walk. |
 | | `span-runs` | 3–4 | Tile text (first char at offset base) into a list of [substring face] runs from ascending, non-overlapping [start end face] spans: gaps are nil-faced, each span its text in its face. |
 | **Introspection** (editor tooling) | `doc` | 1 | a function/macro's docstring, or nil |
 | | `arglist` | 1 | a function/macro's parameter list (required, `&optional`, `& rest`), or nil |
