@@ -15,28 +15,31 @@
 
 (defmodule sysmon-test (:use test))
 
-(defn sysmon--churn (n acc) (if (= n 0) acc (sysmon--churn (- n 1) (cons n acc))))
+(defn- sysmon-churn (n acc) (if (= n 0) acc (sysmon-churn (- n 1) (cons n acc))))
 
-(defn sysmon--drain-until (kind subject)
+(defn- sysmon-drain-until
+  (kind subject)
   "Receive [:system …] messages until one matches `kind` about `subject` (or a
 5s timeout → :timeout). Other system events are consumed and dropped."
   (receive
     ([:system ^kind ^subject detail] detail)
-    ([:system _ _ _] (sysmon--drain-until kind subject))
+    ([:system _ _ _] (sysmon-drain-until kind subject))
     (after *test-wait-ms* :timeout)))
 
-(defn sysmon--wait-disarm (n)
+(defn- sysmon-wait-disarm
+  (n)
   "Poll until the kernel monitor reads back as nil (the async death-disarm), or
 `n` attempts run out. Returns the final config (nil on success)."
   (if (or (nil? (system-monitor)) (= n 0))
     (system-monitor)
-    (do (sleep 20) (sysmon--wait-disarm (- n 1)))))
+    (do (sleep 20) (sysmon-wait-disarm (- n 1)))))
 
-(defn sysmon--done ()
+(defn- sysmon-done
+  ()
   "End-of-test hygiene: disarm, then drain any [:system …] backlog out of this
 worker's mailbox so it can't satisfy a later test's receive."
   (system-monitor nil)
-  (receive ([:system _ _ _] (sysmon--done)) (after 0 nil)))
+  (receive ([:system _ _ _] (sysmon-done)) (after 0 nil)))
 
 (describe "system-monitor arming"
   :isolated
@@ -74,38 +77,38 @@ worker's mailbox so it can't satisfy a later test's receive."
     (let (me (self)
           child (spawn :done))
       ; detail = parent pid
-      (assert= me (sysmon--drain-until :spawn child))
-      (assert= :normal (sysmon--drain-until :exit child)))
-    (sysmon--done))
+      (assert= me (sysmon-drain-until :spawn child))
+      (assert= :normal (sysmon-drain-until :exit child)))
+    (sysmon-done))
 
   (test "exit events carry the abnormal structured reason"
     (system-monitor (self) {:exit true})
     (let (child (spawn (error "event stream")))
-      (let (reason (sysmon--drain-until :exit child))
+      (let (reason (sysmon-drain-until :exit child))
         ;; the same [:error {…}] shape monitors and links see
         (assert= :error (first reason))
         (assert= "event stream" (get (first (rest reason)) :message))))
-    (sysmon--done))
+    (sysmon-done))
 
   (test "gc events report the collection with a pause figure"
     (system-monitor (self) {:gc true})
-    (let (worker (spawn (do (sysmon--churn 50000 ()) (gc-collect) :ok)))
-      (let (m (sysmon--drain-until :gc worker))
+    (let (worker (spawn (do (sysmon-churn 50000 ()) (gc-collect) :ok)))
+      (let (m (sysmon-drain-until :gc worker))
         (is (map? m))
         (is (>= (get m :pause-us) 0))
         (is (> (get m :collections) 0))
         (is (>= (get m :live) 0))))
-    (sysmon--done))
+    (sysmon-done))
 
   (test "a gc-min-pause-us threshold suppresses cheap collections"
     ;; 10-minute threshold: no minor collection takes that long, so nothing
     ;; may arrive. Wait for the worker to finish, then prove silence.
     (system-monitor (self) {:gc true :gc-min-pause-us 600000000})
-    (let (worker (spawn (do (sysmon--churn 50000 ()) (gc-collect) :ok))
+    (let (worker (spawn (do (sysmon-churn 50000 ()) (gc-collect) :ok))
           wm (monitor worker))
       (receive ([:down ^wm ^worker _] :ok) (after *test-wait-ms* :timeout))
       (assert= :quiet (receive ([:system :gc _ _] :got-one) (after 200 :quiet))))
-    (sysmon--done))
+    (sysmon-done))
 
   (test "no self-reporting, and the monitor's death disarms the stream"
     ;; a watcher process arms itself, then dies — the kernel must clear the
@@ -115,7 +118,7 @@ worker's mailbox so it can't satisfy a later test's receive."
       (sleep 50)
       (assert= watcher (get (system-monitor) :pid))
       (exit watcher :kill)
-      (assert= nil (sysmon--wait-disarm 100)))))
+      (assert= nil (sysmon-wait-disarm 100)))))
 
 (describe "telemetry watch-runtime"
   :isolated
@@ -135,7 +138,7 @@ worker's mailbox so it can't satisfy a later test's receive."
           (assert= child (receive ([:saw :exit p] p) (after *test-wait-ms* :timeout))))
         (telemetry/stop-watch-runtime watcher)
         ;; stopping the watcher disarms the kernel monitor
-        (assert= nil (sysmon--wait-disarm 100)))
+        (assert= nil (sysmon-wait-disarm 100)))
       (telemetry/detach :t-spawn)
       (telemetry/detach :t-exit)
       (telemetry/stop-telemetry))))

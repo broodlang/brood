@@ -132,15 +132,17 @@ shape `std/observer` draws by hand. Returns one `text` op.
         cells (max 1 (quot width scale)))
     (text row
       0
-      (bar--fit s cells (get opts :align :left))
-      (bar--face (get opts :face) scale))))
+      (bar-fit s cells (get opts :align :left))
+      (bar-face (get opts :face) scale))))
 
-(defn bar--face (face scale)
+(defn- bar-face
+  (face scale)
   "`face` with `:scale` added when `scale` > 1 (a magnified bar); the face unchanged
 (possibly `nil`) at scale 1."
   (if (> scale 1) (assoc (or face {}) :scale scale) face))
 
-(defn bar--fit (s cells align)
+(defn- bar-fit
+  (s cells align)
   "`s` fitted to exactly `cells` characters — padded with spaces (positioned per
 `align`: `:left` / `:center` / `:right`) or truncated when longer."
   (let (n (string-length s))

@@ -35,7 +35,8 @@ as errors."
 ;; come through as the value itself, so we wrap them as `{:kind :user :payload
 ;; v}` to keep `:error` always a map for the agent's JSON consumers. The
 ;; asymmetry — built-in vs user — is deliberate per `docs/llm-native.md` §4.
-(defn mcp--error-shape (e)
+(defn- mcp-error-shape
+  (e)
   (if (map? e) e {:kind :user :payload e}))
 
 (defn mcp-eval-tool (args)
@@ -54,7 +55,7 @@ error inside the user expression surfaces here as the `:error` branch."
       (let (value (eval-string src))
         {:value (pr-str value)})
       (catch e
-        {:error (mcp--error-shape e)}))))
+        {:error (mcp-error-shape e)}))))
 
 ;; Cross-file shadow warnings involving `file`: the *qualified* names
 ;; (`ns/name`, per `project--file-def-names`) this file defines that another
@@ -62,20 +63,22 @@ error inside the user expression surfaces here as the `:error` branch."
 ;; reused across distinct namespaces is not a collision, only a same-namespace
 ;; (or ambient/root) rebinding is. Empty (and silent) outside a project.
 ;; Best-effort — never raises.
-(defn mcp--shadows-for (file)
+(defn- mcp-shadows-for
+  (file)
   (try
     (let (root (project/project-find-root (cwd)))
       (if (nil? root)
         nil
-        (let (defined (project--file-def-names file)
-              srcs (project--source-files root)
-              extracts (project--gather-extracts srcs)
+        (let (defined (project-file-def-names file)
+              srcs (project-source-files root)
+              extracts (project-gather-extracts srcs)
               source-set (fold (fn (m p) (map-assoc m p true)) {} srcs))
           (filter (fn (w) (any? (fn (nm) (includes? w (str "'" nm "'"))) defined))
-            (project--duplicate-def-warnings extracts source-set)))))
+            (project-duplicate-def-warnings extracts source-set)))))
     (catch _ nil)))
 
-(defn mcp--load-checked (file)
+(defn- mcp-load-checked
+  (file)
   "Load `file` into the session image and report the result as `{:ok true
 :diagnostics [...] :shadows [...]}` (or `{:ok false :error ...}` on failure) —
 the shared body of the `load`/`write`/`edit` tools. `def`s persist (hot reload,
@@ -86,9 +89,9 @@ cross-file flat-namespace collisions."
       (load file)
       {:ok true
        :diagnostics (or (check-file-structured file) [])
-       :shadows (or (mcp--shadows-for file) [])})
+       :shadows (or (mcp-shadows-for file) [])})
     (catch e
-      {:ok false :error (mcp--error-shape e)})))
+      {:ok false :error (mcp-error-shape e)})))
 
 (defn mcp-load-tool (args)
   "`load` — load a `.blsp` file into the session and check it. Side-effects
@@ -101,7 +104,7 @@ defines (the silent flat-namespace collision). On a load error:
   (let (file (get args :file))
     (when (not (string? file))
       (throw "load: :file must be a string"))
-    (mcp--load-checked file)))
+    (mcp-load-checked file)))
 
 ;; ---- the project sandbox for write/edit -----------------------------------
 ;; Every file the MCP server writes goes through `mcp--project-path`, which
@@ -109,7 +112,8 @@ defines (the silent flat-namespace collision). On a load error:
 ;; guarantee the `write`/`edit` tools rest on: an agent driving nest mcp can only
 ;; touch files **inside the project it serves**, never the wider filesystem.
 
-(defn mcp--safe-rel? (rel)
+(defn- mcp-safe-rel?
+  (rel)
   "Whether `rel` passes the LEXICAL bar for a project-relative path: a non-empty
 string, not absolute (`/…`) or home-anchored (`~…`), with no `..` segment. The
 first (cheap) of two gates; the second is the symlink-resolving check in
@@ -120,7 +124,8 @@ first (cheap) of two gates; the second is the symlink-resolving check in
     (not (starts-with? rel "~"))
     (not (includes? (string-split rel "/") ".."))))
 
-(defn mcp--under-root? (abs)
+(defn- mcp-under-root?
+  (abs)
   "Whether real path `abs` is the project root itself or lies strictly under it —
 compared after `canonicalize` on both sides, so a **symlinked directory inside
 the project that points outside** cannot be used to escape (the lexical check
@@ -132,28 +137,30 @@ the tree through a symlink)."
       (string? root)
       (or (= real root) (starts-with? real (str root "/"))))))
 
-(defn mcp--project-path (rel)
+(defn- mcp-project-path
+  (rel)
   "Resolve project-relative `rel` to an absolute path under `*project-root*`, or
 `throw` if it would escape the project — a lexical violation (absolute/`~`/`..`,
 or no project root), OR a **symlink** whose real target is outside the tree. The
 sandbox boundary the `write`/`edit` tools share."
   (when (nil? *project-root*)
     (throw "no project root — nest mcp must run inside a Brood project"))
-  (when (not (mcp--safe-rel? rel))
+  (when (not (mcp-safe-rel? rel))
     (throw (str "path must be project-relative — no leading '/' or '~', no '..': " (pr-str rel))))
   (let (abs (path-join *project-root* rel))
-    (when (not (mcp--under-root? abs))
+    (when (not (mcp-under-root? abs))
       (throw (str "path escapes the project sandbox — its real target (following symlinks) "
                "is outside the project root: "
                (pr-str rel))))
     abs))
 
-(defn mcp--write-result (rel abs)
+(defn- mcp-write-result
+  (rel abs)
   "The shared tail of `write`/`edit`: a `.blsp` file at absolute `abs` is loaded
 + checked (so the result mirrors `load`'s `:diagnostics`/`:shadows`) and tagged
 with its project-relative `:path`; any other file just confirms the write."
   (if (ends-with? rel ".blsp")
-    (assoc (mcp--load-checked abs) :path rel)
+    (assoc (mcp-load-checked abs) :path rel)
     {:ok true :path rel}))
 
 (defn mcp-write-tool (args)
@@ -171,12 +178,12 @@ through nest mcp, never the raw filesystem."
     (when (not (string? content))
       (throw "write: :content must be a string"))
     (try
-      (let (abs (mcp--project-path rel)
+      (let (abs (mcp-project-path rel)
             _dir (make-dir (parent-dir abs))
             _w (spit abs content))
-        (mcp--write-result rel abs))
+        (mcp-write-result rel abs))
       (catch e
-        {:ok false :error (mcp--error-shape e)}))))
+        {:ok false :error (mcp-error-shape e)}))))
 
 (defn mcp-edit-tool (args)
   "`edit` — exact-string replacement in a project file through the live image.
@@ -197,7 +204,7 @@ image stays in sync with disk."
     (when (= old "")
       (throw "edit: :old must be non-empty"))
     (try
-      (let (abs (mcp--project-path rel))
+      (let (abs (mcp-project-path rel))
         (if (not (file-exists? abs))
           {:ok false :error (str "edit: no such file: " rel)}
           (let (text (slurp abs)
@@ -209,9 +216,9 @@ image stays in sync with disk."
                  :error (str "edit: :old occurs "
                           hits " times in " rel " — make it unique")}
               else (let (_w (spit abs (replace text old new)))
-                     (mcp--write-result rel abs))))))
+                     (mcp-write-result rel abs))))))
       (catch e
-        {:ok false :error (mcp--error-shape e)}))))
+        {:ok false :error (mcp-error-shape e)}))))
 
 (defn mcp-lookup-tool (args)
   "`lookup` — describe a global name. Returns `{:name :arglist :doc :type
@@ -234,7 +241,7 @@ the agent can branch on `(get r :error)` cleanly."
            :type (type-signature sym)
            :source-location (source-location sym)})
         (catch e
-          {:name name :error (mcp--error-shape e)})))))
+          {:name name :error (mcp-error-shape e)})))))
 
 (defn mcp-macroexpand-tool (args)
   "`macroexpand` — expand `:form` (a source string) once (`:mode \"1\"`, the
@@ -252,7 +259,7 @@ text — unbalanced parens in `:form` can't break the host expression."
                   (macroexpand-1 form)))
         {:expanded (pr-str out)})
       (catch e
-        {:error (mcp--error-shape e)}))))
+        {:error (mcp-error-shape e)}))))
 
 (defn mcp-format-tool (args)
   "`format` — reformat `:source` via `std/format.blsp`'s `(format-source ...)`.
@@ -265,7 +272,7 @@ check after the first invocation."
     (try
       {:formatted (format-source src)}
       (catch e
-        {:error (mcp--error-shape e)}))))
+        {:error (mcp-error-shape e)}))))
 
 (defn mcp-check-tool (args)
   "`check` — advisory type-check the project. Returns
@@ -279,7 +286,7 @@ null}` — agents shouldn't have to disambiguate \"no warnings\" from
   (try
     {:diagnostics (or (check-project-structured) [])}
     (catch e
-      {:error (mcp--error-shape e)})))
+      {:error (mcp-error-shape e)})))
 
 (defn mcp-run-tests-tool (args)
   "`run-tests` — run the project test suite. Returns the structured runner
@@ -290,9 +297,10 @@ Outside a Brood project, returns `{:error msg}`."
   (try
     (run-project-tests-structured)
     (catch e
-      {:error (mcp--error-shape e)})))
+      {:error (mcp-error-shape e)})))
 
-(defn mcp--process-infos ()
+(defn- mcp-process-infos
+  ()
   "A `(process-info pid)` stat map for every live process, dropping any that died
 mid-scan. The shared snapshot behind both the `processes` and `process-info`
 tools — one definition of \"what we know about a process\"."
@@ -307,7 +315,7 @@ backlog, cumulative reductions (Erlang's work counter — is it busy?),
 heap bytes, GC count and monitors per process, not just the id. Order
 is unspecified — sort by `:id` (or `:reductions` to find the busiest)
 if you need stability."
-  {:processes (mcp--process-infos)})
+  {:processes (mcp-process-infos)})
 
 (defn mcp-process-info-tool (args)
   "`process-info` — the full stat map for a single process by `:id` (an
@@ -318,7 +326,7 @@ process carries that id."
   (let (id (get args :id))
     (when (not (int? id))
       (throw "process-info: :id must be an integer"))
-    (or (find (fn (p) (= (get p :id) id)) (mcp--process-infos))
+    (or (find (fn (p) (= (get p :id) id)) (mcp-process-infos))
       {:error (str "no live process with id " id)})))
 
 (defn mcp-node-tool (args)
@@ -347,12 +355,13 @@ what `node`/`processes` expose behind one telemetry-fed view."
   (require 'telemetry)
   (telemetry/runtime-snapshot))
 
-(defn mcp--collect-runtime (acc)
+(defn- mcp-collect-runtime
+  (acc)
   "Drain the `[:system kind pid detail]` runtime events already in this process's
 mailbox into a list of maps (chronological). Non-blocking: stops at the first empty
 receive."
   (receive
-    ([:system kind pid detail] (mcp--collect-runtime (cons {:kind kind :pid pid :detail detail} acc)))
+    ([:system kind pid detail] (mcp-collect-runtime (cons {:kind kind :pid pid :detail detail} acc)))
     (after 0 (reverse acc))))
 
 (defn mcp-watch-runtime-tool (args)
@@ -376,7 +385,7 @@ complementing the point-in-time `processes`/`node` snapshots."
     (sleep ms)
     ; disarm before draining
     (system-monitor nil)
-    (let (events (into [] (mcp--collect-runtime '())))
+    (let (events (into [] (mcp-collect-runtime '())))
       ; [] (not nil) when empty
       {:events events :count (count events) :ms ms})))
 
@@ -396,7 +405,7 @@ synthesised by macros aren't included. Complements `lookup` (which gives the
                              (map (fn (lc) {:file f :line (first lc) :col (second lc)})
                                (references-in-source name (slurp f)))
                              (catch _ nil)))
-                   (project--all-files *project-root*))}))
+                   (project-all-files *project-root*))}))
 
 (defn mcp-apropos-tool (args)
   "`apropos` — discover globals whose name contains a pattern. Returns
@@ -452,11 +461,12 @@ Clojure/Scheme reflex."
       (throw "find-pattern: :query must be a string"))
     (find-pattern query)))
 
-(defn mcp--bench-loop (form n)
+(defn- mcp-bench-loop
+  (form n)
   "Eval `form` `n` more times for timing, discarding the results; returns nil."
   (when (> n 0)
     (eval form)
-    (mcp--bench-loop form (- n 1))))
+    (mcp-bench-loop form (- n 1))))
 
 (defn mcp-bench-tool (args)
   "`bench` — time evaluating `:source` in the session image. Runs it
@@ -475,18 +485,19 @@ like `eval`. Returns `{:error msg}` on failure."
       (let (form (read-first src)
             t0 (now)
             value (eval form)
-            _done (mcp--bench-loop form (- iters 1))
+            _done (mcp-bench-loop form (- iters 1))
             total (- (now) t0))
         {:ms total
          :iterations iters
          :per-iter-ms (/ (* 1.0 total) iters)
          :value (pr-str value)})
       (catch e
-        {:error (mcp--error-shape e)}))))
+        {:error (mcp-error-shape e)}))))
 
 ;; ---- ability / record introspection ----------------------------------------
 
-(defn mcp--op-provided? (spec)
+(defn- mcp-op-provided?
+  (spec)
   "Does an op spec `(name [params] :-> ret? body…)` carry a body (a provided
 default) rather than being a bare required op? Skip the name + params, then the
 optional `:-> ret`, and check whether anything remains."
@@ -494,7 +505,8 @@ optional `:-> ret`, and check whether anything remains."
         tail (if (= (first tail) :->) (drop 2 tail) tail))
     (not (empty? tail))))
 
-(defn mcp--ability-impls (aname ops)
+(defn- mcp-ability-impls
+  (aname ops)
   "The type keys (as strings) that implement any op of ability `aname`, unioned
 across its ops via the `*impls*` registry."
   (let (op-names (map first ops)
@@ -530,14 +542,14 @@ its owner namespace, whether it's derivable, and which types implement it. Retur
            :ops (map (fn (spec)
                        {:op (str (first spec))
                         :params (map str (second spec))
-                        :provided (mcp--op-provided? spec)})
+                        :provided (mcp-op-provided? spec)})
                   ops)
            :sealed (not (nil? members))
            :members (if members (map name members) [])
            :requires (if reqs (map str reqs) [])
            :owner (if owner (str owner) nil)
            :derivable (not (nil? (ability-derive-recipe aname)))
-           :impls (mcp--ability-impls aname ops)})))))
+           :impls (mcp-ability-impls aname ops)})))))
 
 (defn mcp-check-source-tool (args)
   "`check-source` — advisory type-check a source STRING (not the whole project),
@@ -550,7 +562,7 @@ doesn't parse (incomplete input). Backed by `check-string-structured`."
     (try
       {:diagnostics (or (check-string-structured src) [])}
       (catch e
-        {:error (mcp--error-shape e)}))))
+        {:error (mcp-error-shape e)}))))
 
 ;; ---- catalogue -------------------------------------------------------------
 

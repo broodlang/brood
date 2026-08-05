@@ -27,6 +27,11 @@ pub const IF: &str = "if";
 pub const DO: &str = "do";
 pub const DEF: &str = "def";
 pub const DEFN: &str = "defn";
+// The module-private variants (ADR-146): macros over `def`, but the pre-expansion
+// scanners (`scan_def_names`, `def_form_name`, `SCAN_DEF_HEADS`) must recognise them
+// as def heads so a forward reference to a private qualifies and its def-site keys.
+pub const DEF_PRIVATE: &str = "def-";
+pub const DEFN_PRIVATE: &str = "defn-";
 pub const DEFMACRO: &str = "defmacro";
 pub const DEFDYN: &str = "defdyn";
 pub const DEFRECORD: &str = "defrecord";

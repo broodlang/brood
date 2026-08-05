@@ -13,8 +13,8 @@
 
 ;; Tail-recursive ascending [lo, hi) — a test body runs on a small coroutine
 ;; stack, so deep non-tail recursion would overflow it.
-(defn vt-range (lo hi) (vt-range--down (- hi 1) lo nil))
-(defn vt-range--down (i lo acc) (if (< i lo) acc (vt-range--down (- i 1) lo (cons i acc))))
+(defn vt-range (lo hi) (vt-range-down (- hi 1) lo nil))
+(defn- vt-range-down (i lo acc) (if (< i lo) acc (vt-range-down (- i 1) lo (cons i acc))))
 
 (describe "assoc on a vector (by integer index)"
   (test "replaces a single element"

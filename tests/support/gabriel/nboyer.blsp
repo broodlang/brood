@@ -65,7 +65,7 @@ oracle is the rewrite count published in upstream's own source header; see
 ;; consistent on both sides of every comparison and, exactly as in upstream, a bare
 ;; non-pair in a rule's left-hand side acts as a pattern variable either way.
 
-(def nboyer--lemma-data
+(def- nboyer-lemma-data
   '((equal (compile form)
       (reverse (codegen (optimize form)
                  (nil)))) (equal (eqp x
@@ -481,7 +481,8 @@ oracle is the rewrite count published in upstream's own source header; see
 ;; A lemma is `(equal LHS RHS)`, filed under the head symbol of its LHS and consed onto
 ;; the front of that symbol's list — so the LAST lemma read is tried FIRST. The rewrite
 ;; count depends on that order.
-(defn nboyer--add-lemma (db lemma)
+(defn- nboyer-add-lemma
+  (db lemma)
   (if (and (pair? lemma) (= (first lemma) 'equal) (pair? (second lemma)))
     (let (head (first (second lemma)))
       (assoc db head (cons lemma (get db head))))
@@ -490,40 +491,44 @@ oracle is the rewrite count published in upstream's own source header; see
 (defn setup-boyer ()
   "The lemma database — a map from a term's head symbol to its lemmas, in the order
 `rewrite` must try them. Built once; read-only thereafter."
-  (fold nboyer--add-lemma {} nboyer--lemma-data))
+  (fold nboyer-add-lemma {} nboyer-lemma-data))
 
 ;; ---- substitution ------------------------------------------------------------
 
 ;; A substitution is a list of `[var term]` pairs, most recent first, so the first hit
 ;; wins — upstream conses onto the front and looks up with `assq`.
-(defn nboyer--lookup (var subst)
+(defn- nboyer-lookup
+  (var subst)
   (if (nil? subst)
     :none
     (let ([v term] (first subst))
-      (if (= v var) term (nboyer--lookup var (rest subst))))))
+      (if (= v var) term (nboyer-lookup var (rest subst))))))
 
 (check-allow :non-tail-recursion
-  (defn nboyer--apply-subst (subst term)
+  (defn- nboyer-apply-subst
+    (subst term)
     (if (not (pair? term))
-      (let (found (nboyer--lookup term subst))
+      (let (found (nboyer-lookup term subst))
         (if (= found :none) term found))
-      (cons (first term) (nboyer--apply-subst-lst subst (rest term))))))
+      (cons (first term) (nboyer-apply-subst-lst subst (rest term))))))
 
 (check-allow :non-tail-recursion
-  (defn nboyer--apply-subst-lst (subst lst)
+  (defn- nboyer-apply-subst-lst
+    (subst lst)
     (if (nil? lst)
       nil
-      (cons (nboyer--apply-subst subst (first lst))
-        (nboyer--apply-subst-lst subst (rest lst))))))
+      (cons (nboyer-apply-subst subst (first lst))
+        (nboyer-apply-subst-lst subst (rest lst))))))
 
 ;; ---- one-way unification -----------------------------------------------------
 ;; Matches `term1` against the rule pattern `term2`, where any non-pair in the pattern is
 ;; a variable. Returns the extended substitution, or `:fail`.
 
 (check-allow :non-tail-recursion
-  (defn nboyer--unify1 (term1 term2 subst)
+  (defn- nboyer-unify1
+    (term1 term2 subst)
     (if (not (pair? term2))
-      (let (found (nboyer--lookup term2 subst))
+      (let (found (nboyer-lookup term2 subst))
         (cond
           (not (= found :none)) (if (= term1 found) subst :fail)
           ;; Upstream's 1997 bug fix: a NUMBER in a pattern is a literal, not a
@@ -532,83 +537,90 @@ oracle is the rewrite count published in upstream's own source header; see
           else (cons [term2 term1] subst)))
       (cond
         (not (pair? term1)) :fail
-        (= (first term1) (first term2)) (nboyer--unify1-lst (rest term1) (rest term2) subst)
+        (= (first term1) (first term2)) (nboyer-unify1-lst (rest term1) (rest term2) subst)
         else :fail))))
 
 (check-allow :non-tail-recursion
-  (defn nboyer--unify1-lst (lst1 lst2 subst)
+  (defn- nboyer-unify1-lst
+    (lst1 lst2 subst)
     (cond
       (nil? lst1) (if (nil? lst2) subst :fail)
       (nil? lst2) :fail
       else
-        (let (extended (nboyer--unify1 (first lst1) (first lst2) subst))
+        (let (extended (nboyer-unify1 (first lst1) (first lst2) subst))
           (if (= extended :fail)
             :fail
-            (nboyer--unify1-lst (rest lst1) (rest lst2) extended))))))
+            (nboyer-unify1-lst (rest lst1) (rest lst2) extended))))))
 
 ;; ---- rewriting ---------------------------------------------------------------
 ;; Each of these returns `[value rewrite-count]`. The count is bumped on ENTRY to
 ;; `rewrite`, including for a non-pair, which is where upstream's `set!` sits.
 
 (check-allow :non-tail-recursion
-  (defn nboyer--rewrite (term db count)
+  (defn- nboyer-rewrite
+    (term db count)
     (let (count (+ count 1))
       (if (not (pair? term))
         [term count]
-        (let ([args count2] (nboyer--rewrite-args (rest term) db count))
-          (nboyer--rewrite-with-lemmas (cons (first term) args)
+        (let ([args count2] (nboyer-rewrite-args (rest term) db count))
+          (nboyer-rewrite-with-lemmas (cons (first term) args)
             (get db (first term))
             db
             count2))))))
 
 (check-allow :non-tail-recursion
-  (defn nboyer--rewrite-args (lst db count)
+  (defn- nboyer-rewrite-args
+    (lst db count)
     (if (nil? lst)
       [nil count]
-      (let ([head count1] (nboyer--rewrite (first lst) db count)
-            [tail count2] (nboyer--rewrite-args (rest lst) db count1))
+      (let ([head count1] (nboyer-rewrite (first lst) db count)
+            [tail count2] (nboyer-rewrite-args (rest lst) db count1))
         [(cons head tail) count2]))))
 
 (check-allow :non-tail-recursion
-  (defn nboyer--rewrite-with-lemmas (term lemmas db count)
+  (defn- nboyer-rewrite-with-lemmas
+    (term lemmas db count)
     (if (nil? lemmas)
       [term count]
       (let (lemma (first lemmas)
-            subst (nboyer--unify1 term (second lemma) nil))
+            subst (nboyer-unify1 term (second lemma) nil))
         (if (= subst :fail)
-          (nboyer--rewrite-with-lemmas term (rest lemmas) db count)
-          (nboyer--rewrite (nboyer--apply-subst subst (third lemma)) db count))))))
+          (nboyer-rewrite-with-lemmas term (rest lemmas) db count)
+          (nboyer-rewrite (nboyer-apply-subst subst (third lemma)) db count))))))
 
 ;; ---- the tautology checker ---------------------------------------------------
 
-(def nboyer--true-term '(t))
-(def nboyer--false-term '(f))
+(def- nboyer-true-term '(t))
+(def- nboyer-false-term '(f))
 
-(defn nboyer--truep (x lst)
-  (or (= x nboyer--true-term) (includes? lst x)))
+(defn- nboyer-truep
+  (x lst)
+  (or (= x nboyer-true-term) (includes? lst x)))
 
-(defn nboyer--falsep (x lst)
-  (or (= x nboyer--false-term) (includes? lst x)))
+(defn- nboyer-falsep
+  (x lst)
+  (or (= x nboyer-false-term) (includes? lst x)))
 
 (check-allow :non-tail-recursion
-  (defn nboyer--tautologyp (x true-lst false-lst)
+  (defn- nboyer-tautologyp
+    (x true-lst false-lst)
     (cond
-      (nboyer--truep x true-lst) true
-      (nboyer--falsep x false-lst) false
+      (nboyer-truep x true-lst) true
+      (nboyer-falsep x false-lst) false
       (not (pair? x)) false
       (= (first x) 'if)
         (cond
-          (nboyer--truep (second x) true-lst) (nboyer--tautologyp (third x)
-                                                true-lst false-lst)
+          (nboyer-truep (second x) true-lst) (nboyer-tautologyp (third x)
+                                               true-lst false-lst)
 
-          (nboyer--falsep (second x) false-lst) (nboyer--tautologyp (nth x 3)
-                                                  true-lst false-lst)
+          (nboyer-falsep (second x) false-lst) (nboyer-tautologyp (nth x 3)
+                                                 true-lst false-lst)
 
           else
-            (and (nboyer--tautologyp (third x)
+            (and (nboyer-tautologyp (third x)
                    (cons (second x) true-lst)
                    false-lst)
-              (nboyer--tautologyp (nth x 3) true-lst (cons (second x) false-lst))))
+              (nboyer-tautologyp (nth x 3) true-lst (cons (second x) false-lst))))
       else false)))
 
 ;; ---- the driver --------------------------------------------------------------
@@ -616,18 +628,20 @@ oracle is the rewrite count published in upstream's own source header; see
 ;; Upstream's scaling parameter: wrap the term in `(or term (f))` n times, which leaves
 ;; the tautology valid but multiplies the work. n=0 is 95,024 rewrites; each step up is
 ;; roughly 3x (see the table in the README).
-(defn nboyer--scale (term n)
-  (if (= n 0) term (nboyer--scale (list 'or term '(f)) (- n 1))))
+(defn- nboyer-scale
+  (term n)
+  (if (= n 0) term (nboyer-scale (list 'or term '(f)) (- n 1))))
 
 ;; `((var . term) …)` from `((var head args…) …)`: the entry's head is the variable and
 ;; its TAIL is the term bound to it.
-(defn nboyer--subst-of-alist (alist)
+(defn- nboyer-subst-of-alist
+  (alist)
   (map (fn (entry) [(first entry) (rest entry)]) alist))
 
 (defn test-boyer (alist term n db)
   "The number of rewrites needed to prove `term` (scaled by `n`) under lemma database
 `db`, or `false` if it does not reduce to a tautology."
-  (let (problem (nboyer--apply-subst (nboyer--subst-of-alist alist)
-                  (nboyer--scale term n))
-        [normal count] (nboyer--rewrite problem db 0))
-    (if (nboyer--tautologyp normal nil nil) count false)))
+  (let (problem (nboyer-apply-subst (nboyer-subst-of-alist alist)
+                  (nboyer-scale term n))
+        [normal count] (nboyer-rewrite problem db 0))
+    (if (nboyer-tautologyp normal nil nil) count false)))

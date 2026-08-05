@@ -154,22 +154,22 @@
 (describe "loop macros"
   :serial
   (test "dotimes runs body 0..n-1"
-    (def loop--acc nil)
-    (dotimes (i 5) (def loop--acc (cons i loop--acc)))
-    (assert= (reverse loop--acc) (list 0 1 2 3 4)))
+    (def- loop-acc nil)
+    (dotimes (i 5) (def- loop-acc (cons i loop-acc)))
+    (assert= (reverse loop-acc) (list 0 1 2 3 4)))
   (test "dotimes with n=0 is a no-op"
-    (def loop--acc :untouched)
-    (dotimes (i 0) (def loop--acc :touched))
-    (assert= loop--acc :untouched))
+    (def- loop-acc :untouched)
+    (dotimes (i 0) (def- loop-acc :touched))
+    (assert= loop-acc :untouched))
   (test "dotimes returns nil" (assert= (dotimes (i 3) i) nil))
   (test "dolist walks each item"
-    (def loop--acc nil)
-    (dolist (x (list :a :b :c)) (def loop--acc (cons x loop--acc)))
-    (assert= (reverse loop--acc) (list :a :b :c)))
+    (def- loop-acc nil)
+    (dolist (x (list :a :b :c)) (def- loop-acc (cons x loop-acc)))
+    (assert= (reverse loop-acc) (list :a :b :c)))
   (test "dolist on empty is a no-op"
-    (def loop--acc :untouched)
-    (dolist (x nil) (def loop--acc :touched))
-    (assert= loop--acc :untouched))
+    (def- loop-acc :untouched)
+    (dolist (x nil) (def- loop-acc :touched))
+    (assert= loop-acc :untouched))
   (test "dolist returns nil" (assert= (dolist (x (list 1 2)) x) nil)))
 
 (describe "threading macros"

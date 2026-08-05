@@ -30,12 +30,13 @@
 
 (defmodule conformance-dectest-test (:use test) (:use corpus))
 
-(def dt--ops-binary {"add" true "subtract" true "multiply" true "compare" true})
-(def dt--ops-unary {"minus" true "plus" true "abs" true})
+(def- dt-ops-binary {"add" true "subtract" true "multiply" true "compare" true})
+(def- dt-ops-unary {"minus" true "plus" true "abs" true})
 
 ;; A decimal literal dectest can hand us and Brood can hold: digits, sign, point,
 ;; exponent. Excludes NaN / sNaN / Infinity / the `#` null operand by construction.
-(defn dt--numeric? (s)
+(defn- dt-numeric?
+  (s)
   (and (> (string-length s) 0)
     (let (cs (string->list s))
       (and (nil? (first (remove (fn (c) (includes? "0123456789+-.eE" c)) cs)))
@@ -45,19 +46,22 @@
 ;; dectest's absurd-exponent cases (1E+999999999) all carry Overflow/Underflow and
 ;; are dropped by the conditions filter — but `decimal->string` expands integer-side
 ;; exponents into plain digits, so guard the expansion regardless of how we got here.
-(defn dt--in-range? (s)
+(defn- dt-in-range?
+  (s)
   (let (i (index-of (lower s) "e"))
     (or (< i 0)
       (< (abs (or (string->number (substring s (inc i))) 0)) 400))))
 
-(defn dt--unquote (w)
+(defn- dt-unquote
+  (w)
   (if (and (> (string-length w) 1)
         (or (starts-with? w "'") (starts-with? w "\"")))
     (substring w 1 (dec (string-length w)))
     w))
 
 ;; Split on runs of whitespace, dropping the trailing `-- comment` if any.
-(defn dt--words (line)
+(defn- dt-words
+  (line)
   (let (s (replace line "\t" " ")
         i (index-of s "--"))
     (remove blank? (string-split (if (< i 0) s (substring s 0 i)) " "))))
@@ -67,7 +71,8 @@
 ;; `plus` is identity and `minus` is multiplication by -1 rather than `(+ 0 a)` /
 ;; `(- 0 a)`: adding a zero re-scales the result to the zero's exponent, which is an
 ;; artefact of how the case is expressed, not of the operation dectest is naming.
-(defn dt--apply (op a b)
+(defn- dt-apply
+  (op a b)
   (cond
     (= op "add") (decimal->string (+ a b))
     (= op "subtract") (decimal->string (- a b))
@@ -79,53 +84,57 @@
     else nil))
 
 ;; The expected side, canonicalised the same way the computed side is.
-(defn dt--expected (op want)
+(defn- dt-expected
+  (op want)
   (if (= op "compare") want (decimal->string (decimal want))))
 
 ;; nil to skip, [:ok] to count a pass, [id op operands want got] on a mismatch.
-(defn dt--case (words)
+(defn- dt-case
+  (words)
   (let (n (count words)
         arrow (index-of words "->"))
     (if (or (< n 4) (< arrow 2))
       nil
       (let (id (nth words 0)
             op (lower (nth words 1))
-            args (map dt--unquote (subvec (into [] words) 2 arrow))
-            want (dt--unquote (nth words (inc arrow)))
+            args (map dt-unquote (subvec (into [] words) 2 arrow))
+            want (dt-unquote (nth words (inc arrow)))
             conditions (- n (+ arrow 2))
-            unary (get dt--ops-unary op)
-            binary (get dt--ops-binary op))
+            unary (get dt-ops-unary op)
+            binary (get dt-ops-binary op))
         (if (or (> conditions 0)
               ; the context altered the result
               (not (or unary binary))
               (and unary (not (= (count args) 1)))
               (and binary (not (= (count args) 2)))
-              (not (dt--numeric? want))
-              (not (dt--in-range? want))
-              (first (remove dt--numeric? args))
-              (first (remove dt--in-range? args)))
+              (not (dt-numeric? want))
+              (not (dt-in-range? want))
+              (first (remove dt-numeric? args))
+              (first (remove dt-in-range? args)))
           nil
           (let (a (decimal (first args))
                 b (if binary (decimal (nth args 1)) nil)
-                got (dt--apply op a b)
-                expect (dt--expected op want))
+                got (dt-apply op a b)
+                expect (dt-expected op want))
             (if (= got expect) [:ok] [id op args expect got])))))))
 
-(defn dt--scan-lines (lines ran bad)
+(defn- dt-scan-lines
+  (lines ran bad)
   (if (nil? lines)
     [ran bad]
-    (let (c (dt--case (dt--words (first lines))))
-      (dt--scan-lines (rest lines)
+    (let (c (dt-case (dt-words (first lines))))
+      (dt-scan-lines (rest lines)
         (if c (inc ran) ran)
         (if (and c (not (= c [:ok]))) (cons c bad) bad)))))
 
-(defn dt--scan-files (files ran bad)
+(defn- dt-scan-files
+  (files ran bad)
   (if (nil? files)
     [ran (reverse bad)]
-    (let ([r b] (dt--scan-lines (corpus-lines (first files)) ran bad))
-      (dt--scan-files (rest files) r b))))
+    (let ([r b] (dt-scan-lines (corpus-lines (first files)) ran bad))
+      (dt-scan-files (rest files) r b))))
 
-(defn dt--scan () (dt--scan-files (corpus-files "dectest") 0 nil))
+(defn- dt-scan () (dt-scan-files (corpus-files "dectest") 0 nil))
 
 (describe "dectest: exact decimal arithmetic"
   :tags
@@ -136,7 +145,7 @@
     (is (= (count (corpus-files "dectest")) 7)))
 
   (test "every applicable case matches"
-    (let ([ran bad] (dt--scan))
+    (let ([ran bad] (dt-scan))
       ;; Guards against the filter quietly widening until nothing is left: a change
       ;; that drops the applicable set below this has broken the runner, not the
       ;; corpus. (~1,900 of the ~5,600 vendored lines apply.)

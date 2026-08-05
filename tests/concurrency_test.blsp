@@ -169,13 +169,15 @@
     ;; This is a liveness check — every spawned process must complete and its
     ;; message arrive — across the worker pool. (Observable preemption needs a
     ;; one-worker pool; that is crates/lisp/tests/preemption.rs.)
-    (defn sched--worker (parent n) (send parent [:done n]))
-    (defn sched--spawn-n (parent n)
-      (when (> n 0) (spawn (sched--worker parent n)) (sched--spawn-n parent (- n 1))))
-    (defn sched--collect (got total)
-      (if (= got total) :all-done (sched--collect (receive ([:done _] (+ got 1))) total)))
-    (sched--spawn-n (self) 50)
-    (assert= (sched--collect 0 50) :all-done))
+    (defn- sched-worker (parent n) (send parent [:done n]))
+    (defn- sched-spawn-n
+      (parent n)
+      (when (> n 0) (spawn (sched-worker parent n)) (sched-spawn-n parent (- n 1))))
+    (defn- sched-collect
+      (got total)
+      (if (= got total) :all-done (sched-collect (receive ([:done _] (+ got 1))) total)))
+    (sched-spawn-n (self) 50)
+    (assert= (sched-collect 0 50) :all-done))
 
   ;; A receive *loop* must stay O(1) native stack however many messages it handles
   ;; — Erlang's core guarantee. The trampoline (`%receive` returns the body thunk,
@@ -183,18 +185,20 @@
   ;; server driven through interleaved casts + calls overflowed the green-process
   ;; coroutine stack and SIGSEGV'd around ~60 cycles. 500 cycles proves the fix.
   (test "a receive loop handles many messages without overflowing the stack"
-    (defn tco--srv (n)
-      (receive (:inc (tco--srv (+ n 1))) ([:get from] (do (send from n) (tco--srv n)))))
-    (defn tco--hammer (p k)
+    (defn- tco-srv
+      (n)
+      (receive (:inc (tco-srv (+ n 1))) ([:get from] (do (send from n) (tco-srv n)))))
+    (defn- tco-hammer
+      (p k)
       (when (> k 0)
         (send p :inc)
         ; cast: leaves a message queued…
         (send p [:get (self)])
         ; …so the server handles both without suspending
         (receive (v nil))
-        (tco--hammer p (- k 1))))
-    (let (p (spawn (tco--srv 0)))
-      (tco--hammer p 500)
+        (tco-hammer p (- k 1))))
+    (let (p (spawn (tco-srv 0)))
+      (tco-hammer p 500)
       (send p [:get (self)])
       (assert= (receive (v v)) 500))))
 
@@ -216,10 +220,11 @@
   ;; up another in-flight reply. This is the pattern the prelude lacks but user
   ;; code builds freely (see examples/life.blsp).
   (test "a ref-tagged call round-trips to exactly its own reply"
-    (defn ref--server () (receive ([:call from tag req] (send from [:reply tag (* req 10)]))))
-    (defn ref--call (pid req)
+    (defn- ref-server () (receive ([:call from tag req] (send from [:reply tag (* req 10)]))))
+    (defn- ref-call
+      (pid req)
       (let (tag (ref)) (send pid [:call (self) tag req]) (receive ([:reply ^tag v] v))))
-    (assert= (ref--call (spawn (ref--server)) 7) 70))
+    (assert= (ref-call (spawn (ref-server)) 7) 70))
   (test "a stale reply with a different ref is left queued, not mistaken for ours"
     (let (tag (ref) other (ref))
       (send (self) [:reply other :wrong])

@@ -173,9 +173,9 @@ the `nest mcp` tools of the same names.")
      :example "(offload slurp-bytes \"big.tar\")"
      :see "docs/language.md §Blocking natives (offload)"}
     {:intent "define a private helper / hide an implementation detail"
-     :keywords ["private" "hidden" "internal" "encapsulate" "defp"]
-     :idiom "A `--` in a name makes it module-private (ADR-146): `(defn foo--helper …)`. Another module can't reference it (compile error) without `(:use-internals foo)`."
-     :example "(defn parse--token (s) …)   ; private to this module"
+     :keywords ["private" "hidden" "internal" "encapsulate" "defp" "defn-" "def-"]
+     :idiom "`defn-` and `def-` define a MODULE-PRIVATE name (ADR-146) — a clean name, no marker in it. Another module can't reference it (compile error) without `(:use-internals foo)`."
+     :example "(defn- parse-token (s) …)   ; private to this module"
      :see "docs/language.md §Modules / privacy"}
     {:intent "use a keyword as a function to look up a map"
      :keywords ["keyword" "keyword function" "lookup" ":key" "get value" "(:k m)"]
@@ -198,7 +198,8 @@ the `nest mcp` tools of the same names.")
      :example "(require 'regex) (regex/match? \"[0-9]+\" \"abc123\")   ; => true"
      :see "std/regex.blsp"}))
 
-(defn explain--matches? (q entry)
+(defn- explain-matches?
+  (q entry)
   (let (ql (lower q))
     (or (includes? (lower (get entry :intent)) ql)
       (any? (fn (k) (includes? (lower k) ql)) (get entry :keywords)))))
@@ -210,4 +211,4 @@ insensitive substring) against each cookbook entry's intent + keywords. Returns
 the result — they're the search index, not content). Empty matches suggests
 `apropos`/`doc-search` for a name-based search instead."
   {:matches (map (fn (e) (dissoc e :keywords))
-              (filter (fn (e) (explain--matches? query e)) *idiom-cookbook*))})
+              (filter (fn (e) (explain-matches? query e)) *idiom-cookbook*))})

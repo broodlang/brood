@@ -57,11 +57,13 @@ data) …))` from an `http` handler to push events to a browser `EventSource`."
 
 ;; ---- pure frame parsing -----------------------------------------------------
 
-(defn sse--normalize (s)
+(defn- sse-normalize
+  (s)
   "Normalise line terminators to `\\n` (SSE allows `\\r\\n`, `\\r`, or `\\n`)."
   (replace (replace s "\r\n" "\n") "\r" "\n"))
 
-(defn sse--frames (buf)
+(defn- sse-frames
+  (buf)
   "`[complete-event-blocks remainder]` extracted from accumulated stream text `buf`."
   ;; ONE native split, not a `substring` of the rest per block. The drain this replaced
   ;; re-copied the remainder of the buffer for every event, so a single socket read holding
@@ -73,7 +75,8 @@ data) …))` from an `http` handler to push events to a browser `EventSource`."
   (let (parts (string-split buf "\n\n"))
     (if (empty? parts) [nil ""] [(drop-last 1 parts) (last parts)])))
 
-(defn sse--field (ev line)
+(defn- sse-field
+  (ev line)
   "Fold one SSE field `line` into event map `ev`. `data` lines accumulate (joined by
 `\\n`); `event`/`id`/`retry` set their field; comment lines (`:`-prefixed) and blanks
 are ignored. One optional space after the colon is stripped."
@@ -94,13 +97,15 @@ are ignored. One optional space after the colon is stripped."
           (= field "retry") (assoc ev :retry val)
           else ev))))
 
-(defn sse--parse-event (block)
+(defn- sse-parse-event
+  (block)
   "Parse one event `block` (its field lines) into `{:event :data :id …}`, defaulting
 the type to `\"message\"` and the data to `\"\"` (the SSE spec's defaults). Pure."
-  (let (ev (fold sse--field {} (string-split block "\n")))
+  (let (ev (fold sse-field {} (string-split block "\n")))
     (assoc ev :event (or (get ev :event) "message") :data (or (get ev :data) ""))))
 
-(defn sse--status (head)
+(defn- sse-status
+  (head)
   "The numeric status from an HTTP response `head` (its first line), or 0."
   (let (line (first (string-split head "\n"))
         parts (string-split line " ")
@@ -132,26 +137,28 @@ socket a `stream-response` handler was handed. Just `(tcp-send sock (sse-frame �
 
 ;; ---- the reader process (IO) ------------------------------------------------
 
-(defn sse--stream (sock subscriber buf)
+(defn- sse-stream
+  (sock subscriber buf)
   "Process the buffered stream text `buf` — deliver every complete event to
 `subscriber` — then wait for the next chunk and recurse. Notifies the subscriber
 with `[:sse-closed reason]` when the socket closes or errors. Tail-recursive."
   (if (> (string-length buf) *sse-max-buffer-bytes*)
     (do (tcp-close sock) (send subscriber [:sse-closed :buffer-overflow]))
-    (let ([blocks rest] (sse--frames buf))
+    (let ([blocks rest] (sse-frames buf))
       (doseq (b blocks)
         (when (not (= b ""))
-          (send subscriber [:sse (sse--parse-event b)])))
+          (send subscriber [:sse (sse-parse-event b)])))
       (receive
-        ([:tcp ^sock d] (sse--stream sock subscriber (str rest (sse--normalize d))))
+        ([:tcp ^sock d] (sse-stream sock subscriber (str rest (sse-normalize d))))
         ([:tcp-closed ^sock] (send subscriber [:sse-closed :closed]))
         ([:tcp-error ^sock msg] (send subscriber [:sse-closed msg]))))))
 
-(defn sse--read-head (sock subscriber buf)
+(defn- sse-read-head
+  (sock subscriber buf)
   "Read until the HTTP response head's blank line, check the status, then hand the
 leftover bytes to `sse--stream`. A non-200 status closes the connection."
   (receive
-    ([:tcp ^sock d] (let (buf2 (str buf (sse--normalize d))
+    ([:tcp ^sock d] (let (buf2 (str buf (sse-normalize d))
                           i (index-of buf2 "\n\n"))
                       (cond
                         (> (string-length buf2) *sse-max-buffer-bytes*)
@@ -159,14 +166,14 @@ leftover bytes to `sse--stream`. A non-200 status closes the connection."
                             (tcp-close sock)
                             (send subscriber
                               [:sse-closed :buffer-overflow]))
-                        (< i 0) (sse--read-head sock subscriber buf2)
+                        (< i 0) (sse-read-head sock subscriber buf2)
                         else
-                          (let (status (sse--status (substring buf2 0 i))
+                          (let (status (sse-status (substring buf2 0 i))
                                 body (substring buf2 (+ i 2) (string-length buf2)))
                             (if (= status 200)
                               (do
                                 (send subscriber [:sse-open status])
-                                (sse--stream sock subscriber body))
+                                (sse-stream sock subscriber body))
                               (do
                                 (tcp-close sock)
                                 (send subscriber [:sse-closed (str "http " status)])))))))
@@ -190,4 +197,4 @@ that should receive the events (typically the UI process — see `with-events`).
               "\r\n"))
     (spawn (let (sock (tcp-connect (get u :host) (get u :port)))
              (tcp-send sock req)
-             (sse--read-head sock subscriber "")))))
+             (sse-read-head sock subscriber "")))))

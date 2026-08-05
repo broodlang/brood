@@ -24,36 +24,40 @@
 ;; file is a bare JSON *object* where every other one is an array of row objects, and
 ;; the phone number in it ("1234567890") is not the one in its own CSV
 ;; ("2095257564"). Nothing to test against; not a std/csv problem.
-(def csv--broken-upstream "location_coordinates")
+(def- csv-broken-upstream "location_coordinates")
 
-(defn csv--dir (sub) (corpus-files "csv" (path-join "data" sub)))
+(defn- csv-dir (sub) (corpus-files "csv" (path-join "data" sub)))
 
-(defn csv--stem (path)
+(defn- csv-stem
+  (path)
   (let (b (path-basename path) i (index-of b "."))
     (if (< i 0) b (substring b 0 i))))
 
 ;; A row map keyed by keyword -> the same map keyed by the header string.
-(defn csv--stringify-keys (m)
+(defn- csv-stringify-keys
+  (m)
   (fold (fn (acc pair) (let ([k v] pair) (assoc acc (name k) v))) {} m))
 
-(defn csv--expected (stem)
-  (let (p (first (filter (fn (f) (= (csv--stem f) stem)) (csv--dir "json"))))
+(defn- csv-expected
+  (stem)
+  (let (p (first (filter (fn (f) (= (csv-stem f) stem)) (csv-dir "json"))))
     (if (nil? p)
       (error "conformance-csv: no json expectation for " stem)
-      (into [] (map csv--stringify-keys (json/json-parse (slurp p)))))))
+      (into [] (map csv-stringify-keys (json/json-parse (slurp p)))))))
 
-(defn csv--actual (path) (into [] (csv/csv-parse-maps (slurp path))))
+(defn- csv-actual (path) (into [] (csv/csv-parse-maps (slurp path))))
 
 ;; [checked mismatches], mismatches as [stem expected actual].
-(defn csv--scan (files checked bad)
+(defn- csv-scan
+  (files checked bad)
   (cond
     (nil? files) [checked (reverse bad)]
-    (= (csv--stem (first files)) csv--broken-upstream) (csv--scan (rest files) checked bad)
+    (= (csv-stem (first files)) csv-broken-upstream) (csv-scan (rest files) checked bad)
     else
-      (let (stem (csv--stem (first files))
-            want (csv--expected stem)
-            got (csv--actual (first files)))
-        (csv--scan (rest files)
+      (let (stem (csv-stem (first files))
+            want (csv-expected stem)
+            got (csv-actual (first files)))
+        (csv-scan (rest files)
           (inc checked)
           (if (= got want) bad (cons [stem want got] bad))))))
 
@@ -63,11 +67,11 @@
 
   (test "the corpus is present, csv and json sides paired"
     (is (corpus-present? "csv"))
-    (is (> (count (csv--dir "csvs")) 10))
-    (assert= (count (csv--dir "csvs")) (count (csv--dir "json"))))
+    (is (> (count (csv-dir "csvs")) 10))
+    (assert= (count (csv-dir "csvs")) (count (csv-dir "json"))))
 
   (test "every document parses to its expected rows"
-    (let ([checked bad] (csv--scan (csv--dir "csvs") 0 nil))
+    (let ([checked bad] (csv-scan (csv-dir "csvs") 0 nil))
       (is (> checked 10))
       (assert= (take 3 bad) ())
       (assert= (count bad) 0))))

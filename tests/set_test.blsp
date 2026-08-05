@@ -17,8 +17,8 @@
 (defmodule set-test (:use set) (:use test))
 
 ;; Tail-recursive [lo, hi) (the test body runs in a small-stack green process).
-(defn st-range (lo hi) (st-range--down (- hi 1) lo nil))
-(defn st-range--down (i lo acc) (if (< i lo) acc (st-range--down (- i 1) lo (cons i acc))))
+(defn st-range (lo hi) (st-range-down (- hi 1) lo nil))
+(defn- st-range-down (i lo acc) (if (< i lo) acc (st-range-down (- i 1) lo (cons i acc))))
 
 (describe "set literals & kind"
   (test "`#{…}` reads, evaluates its elements, and dedups"

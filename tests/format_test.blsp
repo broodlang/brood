@@ -300,10 +300,11 @@
 
 ;; Tail-recursive (the test green-process stack is small, so O(1) stack): format
 ;; the same source `n` times and report whether every result matched the first.
-(defn format--stable? (src want i n)
+(defn- format-stable?
+  (src want i n)
   (cond
     (>= i n) true
-    (= (format-source src) want) (format--stable? src want (+ i 1) n)
+    (= (format-source src) want) (format-stable? src want (+ i 1) n)
     else false))
 
 (describe "format: stays correct once the formatter tiers (regression)"
@@ -319,7 +320,7 @@
   ;; test` build, so run the suite with the JIT to actually exercise this.
   (test "repeated format-source does not drift under tiering"
     (let (src "(def y 5)\n(+ a b c)\n(if a b c)\n(defn g (x) x)\n")
-      (is (format--stable? src (format-source src) 0 300)))))
+      (is (format-stable? src (format-source src) 0 300)))))
 
 (describe "format: project/plugin-extensible headers"
   ;; *format-headers-extra* lets a project (and its :format-plugins deps) teach the
@@ -351,15 +352,15 @@
 ;; left untouched.
 (describe "format: refuses to rewrite a file that does not parse"
   (test "well-formed source parses"
-    (is (format/format--parses? "(defn f (x) x)\n")))
+    (is (format/format-parses? "(defn f (x) x)\n")))
   (test "several top-level forms parse"
-    (is (format/format--parses? "(def a 1)\n(def b 2)\n")))
-  (test "an empty file parses" (is (format/format--parses? "")))
-  (test "a comment-only file parses" (is (format/format--parses? ";; nothing\n")))
-  (test "an unclosed list does not parse" (refute (format/format--parses? "(defn f (x)\n")))
+    (is (format/format-parses? "(def a 1)\n(def b 2)\n")))
+  (test "an empty file parses" (is (format/format-parses? "")))
+  (test "a comment-only file parses" (is (format/format-parses? ";; nothing\n")))
+  (test "an unclosed list does not parse" (refute (format/format-parses? "(defn f (x)\n")))
   (test "an unterminated string does not parse"
-    (refute (format/format--parses? "(def a \"oops)\n")))
-  (test "a stray close paren does not parse" (refute (format/format--parses? "(def a 1))\n")))
+    (refute (format/format-parses? "(def a \"oops)\n")))
+  (test "a stray close paren does not parse" (refute (format/format-parses? "(def a 1))\n")))
   (test "an unparseable file is reported as :unparseable and left BYTE-IDENTICAL"
     (let (dir (temp-dir "brood-fmt-safe-")
           path (path-join dir "broken.blsp")
@@ -375,7 +376,7 @@
       (make-dir dir)
       (spit path "(defn f (x)\n        (+ x 1))\n")
       (assert= (format/format-file path) :rewrote)
-      (is (format/format--parses? (slurp path)))))
+      (is (format/format-parses? (slurp path)))))
   (test "an already-formatted file is left unchanged"
     (let (dir (temp-dir "brood-fmt-safe-")
           path (path-join dir "clean.blsp"))

@@ -12,74 +12,74 @@
 
 (describe "complete: scanning with an offset"
   (test "finds a needle at the start"
-    (assert= (complete/index-of--from "abcabc" "abc" 0) 0))
+    (assert= (complete/index-of-from "abcabc" "abc" 0) 0))
   (test "finds a LATER occurrence when started past the first"
-    (assert= (complete/index-of--from "abcabc" "abc" 1) 3))
+    (assert= (complete/index-of-from "abcabc" "abc" 1) 3))
   (test "returns -1 when the needle is absent"
-    (assert= (complete/index-of--from "abc" "zzz" 0) -1))
+    (assert= (complete/index-of-from "abc" "zzz" 0) -1))
   (test "returns -1 when the needle only appears before the offset"
-    (assert= (complete/index-of--from "abcxxx" "abc" 1) -1))
+    (assert= (complete/index-of-from "abcxxx" "abc" 1) -1))
   (test "an offset at the end of the string terminates rather than erroring"
-    (assert= (complete/index-of--from "abc" "a" 3) -1))
+    (assert= (complete/index-of-from "abc" "a" 3) -1))
   (test "an offset past the end terminates too"
-    (assert= (complete/index-of--from "abc" "a" 99) -1))
+    (assert= (complete/index-of-from "abc" "a" 99) -1))
   (test "an empty haystack is handled"
-    (assert= (complete/index-of--from "" "a" 0) -1)))
+    (assert= (complete/index-of-from "" "a" 0) -1)))
 
 (describe "complete: keyword extraction from a bracket fragment"
-  (test "one keyword" (assert= (complete/complete--keywords ":fast") (list "fast")))
+  (test "one keyword" (assert= (complete/complete-keywords ":fast") (list "fast")))
   (test "several keywords"
-    (assert= (complete/complete--keywords ":fast :slow :db") (list "fast" "slow" "db")))
+    (assert= (complete/complete-keywords ":fast :slow :db") (list "fast" "slow" "db")))
   (test "extra whitespace is tolerated"
-    (assert= (complete/complete--keywords "  :fast   :slow  ") (list "fast" "slow")))
+    (assert= (complete/complete-keywords "  :fast   :slow  ") (list "fast" "slow")))
   (test "non-keyword tokens are skipped"
-    (assert= (complete/complete--keywords ":fast oops :slow") (list "fast" "slow")))
+    (assert= (complete/complete-keywords ":fast oops :slow") (list "fast" "slow")))
   (test "a bare colon is not a tag"
     ;; ":" has nothing after the colon, so there is no name to offer.
-    (assert= (complete/complete--keywords ":") nil))
-  (test "an empty fragment yields nothing" (assert= (complete/complete--keywords "") nil)))
+    (assert= (complete/complete-keywords ":") nil))
+  (test "an empty fragment yields nothing" (assert= (complete/complete-keywords "") nil)))
 
 (describe "complete: finding :tags in source text"
   (test "a describe-level tag list is found"
-    (assert= (complete/complete--tags-in "(describe \"g\" :tags [:fast :unit] ...)" nil 0)
+    (assert= (complete/complete-tags-in "(describe \"g\" :tags [:fast :unit] ...)" nil 0)
       (list "fast" "unit")))
   (test "tags from SEVERAL forms in one file are all found"
-    (assert= (complete/complete--tags-in "(describe \"g\" :tags [:a]\n  (test \"t\" :tags [:b] ...))"
+    (assert= (complete/complete-tags-in "(describe \"g\" :tags [:a]\n  (test \"t\" :tags [:b] ...))"
                nil 0)
       (list "a" "b")))
   (test "source with no tags yields nothing"
-    (assert= (complete/complete--tags-in "(describe \"g\" (test \"t\" ...))" nil 0) nil))
+    (assert= (complete/complete-tags-in "(describe \"g\" (test \"t\" ...))" nil 0) nil))
   (test "an empty tag list yields nothing"
-    (assert= (complete/complete--tags-in "(describe \"g\" :tags [] ...)" nil 0) nil))
+    (assert= (complete/complete-tags-in "(describe \"g\" :tags [] ...)" nil 0) nil))
   ;; Malformed input must terminate, not loop or raise — this scanner runs over
   ;; whatever half-typed file happens to be on disk.
   (test ":tags with no bracket at all terminates"
-    (assert= (complete/complete--tags-in "(describe \"g\" :tags" nil 0) nil))
+    (assert= (complete/complete-tags-in "(describe \"g\" :tags" nil 0) nil))
   (test ":tags with an unclosed bracket terminates"
-    (assert= (complete/complete--tags-in "(describe \"g\" :tags [:fast" nil 0) nil))
+    (assert= (complete/complete-tags-in "(describe \"g\" :tags [:fast" nil 0) nil))
   (test "a trailing :tags after a valid one terminates"
-    (assert= (complete/complete--tags-in "(a :tags [:x]) (b :tags" nil 0) (list "x")))
-  (test "an empty file terminates" (assert= (complete/complete--tags-in "" nil 0) nil)))
+    (assert= (complete/complete-tags-in "(a :tags [:x]) (b :tags" nil 0) (list "x")))
+  (test "an empty file terminates" (assert= (complete/complete-tags-in "" nil 0) nil)))
 
 (describe "complete: path relativisation"
   (test "a path under the root is made relative"
-    (assert= (complete/complete--relative "/p/tests/a_test.blsp" "/p") "tests/a_test.blsp"))
+    (assert= (complete/complete-relative "/p/tests/a_test.blsp" "/p") "tests/a_test.blsp"))
   (test "a path outside the root is left alone"
-    (assert= (complete/complete--relative "/other/a.blsp" "/p") "/other/a.blsp"))
+    (assert= (complete/complete-relative "/other/a.blsp" "/p") "/other/a.blsp"))
   (test "a nil root leaves the path alone"
-    (assert= (complete/complete--relative "/p/a.blsp" nil) "/p/a.blsp")))
+    (assert= (complete/complete-relative "/p/a.blsp" nil) "/p/a.blsp")))
 
 (describe "complete: the safety net"
   ;; Rule 1 of this module: never raise. A thunk that throws must yield nil so the
   ;; caller degrades to "no suggestions" instead of erroring onto the command line.
   (test "a successful thunk passes its value through"
-    (assert= (complete/complete--safely (fn () 42)) 42))
+    (assert= (complete/complete-safely (fn () 42)) 42))
   (test "a throwing thunk yields nil"
-    (assert= (complete/complete--safely (fn () (error "boom"))) nil))
+    (assert= (complete/complete-safely (fn () (error "boom"))) nil))
   (test "a thunk that throws a value yields nil"
-    (assert= (complete/complete--safely (fn () (throw :nope))) nil))
+    (assert= (complete/complete-safely (fn () (throw :nope))) nil))
   (test "a nil-returning thunk is indistinguishable, which is fine"
-    (assert= (complete/complete--safely (fn () nil)) nil)))
+    (assert= (complete/complete-safely (fn () nil)) nil)))
 
 (describe "complete: baked-in module list"
   (test "the module list is non-empty" (is (> (count (builtin-modules)) 0)))
@@ -135,32 +135,32 @@
 (describe "complete: rejecting things that only look like tags"
   (test "a tag name may not contain a quote"
     ;; `fast\"` was actually offered as a candidate before this filter.
-    (refute (complete/complete--tag-name? "fast\"")))
+    (refute (complete/complete-tag-name? "fast\"")))
   (test "a tag name may not contain a bracket"
-    (refute (complete/complete--tag-name? "a]")))
+    (refute (complete/complete-tag-name? "a]")))
   (test "a tag name may not contain a paren"
-    (refute (complete/complete--tag-name? "x)")))
-  (test "an empty name is rejected" (refute (complete/complete--tag-name? "")))
+    (refute (complete/complete-tag-name? "x)")))
+  (test "an empty name is rejected" (refute (complete/complete-tag-name? "")))
   (test "ordinary tag names are accepted"
-    (and (is (complete/complete--tag-name? "slow"))
-      (is (complete/complete--tag-name? "needs-db"))
-      (is (complete/complete--tag-name? "db2"))))
+    (and (is (complete/complete-tag-name? "slow"))
+      (is (complete/complete-tag-name? "needs-db"))
+      (is (complete/complete-tag-name? "db2"))))
   (test "a malformed keyword in a fragment is dropped, not offered"
-    (assert= (complete/complete--keywords ":ok :bad\"") (list "ok")))
+    (assert= (complete/complete-keywords ":ok :bad\"") (list "ok")))
   (test "a :tags whose bracket closes on a LATER line is not harvested"
     ;; An unclosed `[` used to capture to the next `]` anywhere in the file, turning
     ;; every keyword after it into a "tag".
-    (assert= (complete/complete--tags-in "(describe \"g\" :tags [:fast\n(other :k [:z])" nil 0)
+    (assert= (complete/complete-tags-in "(describe \"g\" :tags [:fast\n(other :k [:z])" nil 0)
       nil))
   (test "a :tags inside a string literal is not a declaration"
     ;; One quote before it ⇒ inside a string.
-    (assert= (complete/complete--tags-in "(def s \":tags [:pretend]\")" nil 0) nil))
+    (assert= (complete/complete-tags-in "(def s \":tags [:pretend]\")" nil 0) nil))
   (test "a :tags after a CLOSED string is still a declaration"
     ;; Two quotes before it ⇒ back outside; this is the shape every real
     ;; `(describe "name" :tags [...])` has.
-    (assert= (complete/complete--tags-in "(describe \"g\" :tags [:real])" nil 0) (list "real")))
+    (assert= (complete/complete-tags-in "(describe \"g\" :tags [:real])" nil 0) (list "real")))
   (test "an escaped quote inside a string does not fool the check"
-    (assert= (complete/complete--tags-in "(def s \"a \\\" b :tags [:nope]\")" nil 0) nil))
+    (assert= (complete/complete-tags-in "(def s \"a \\\" b :tags [:nope]\")" nil 0) nil))
   (test "a declaration on a later line is still found"
-    (assert= (complete/complete--tags-in "(def s \"prose\")\n(describe \"g\" :tags [:yes])" nil 0)
+    (assert= (complete/complete-tags-in "(def s \"prose\")\n(describe \"g\" :tags [:yes])" nil 0)
       (list "yes"))))

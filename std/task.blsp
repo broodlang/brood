@@ -43,7 +43,8 @@ timeout). Pure Brood over spawn / receive / exit (ADR-006).")
 ;; A throw is caught here (the worker process must not just die — the coordinator
 ;; would then wait out the full timeout for a result that never comes); the human
 ;; message is extracted with the prelude's shape-agnostic `error-message`.
-(defn task--worker (thunk coord)
+(defn- task-worker
+  (thunk coord)
   (send coord [:task--result (try [:ok (thunk)] (catch e [:err (error-message e)]))]))
 
 ;; ---- the coordinator: its pid is the handle ---------------------------------
@@ -51,9 +52,10 @@ timeout). Pure Brood over spawn / receive / exit (ADR-006).")
 ;; timeout is set) the deadline. On timeout/cancel it hard-kills the worker — a
 ;; looping worker never checks its own mailbox, so `:kill` (untrappable, fires at
 ;; the next reduction even when parked) is the only thing that stops it.
-(defn task--run (thunk reply-to timeout)
+(defn- task-run
+  (thunk reply-to timeout)
   (let (coord (self)
-        worker (spawn (task--worker thunk coord)))
+        worker (spawn (task-worker thunk coord)))
     (if (nil? timeout)
       (receive
         ([:task--result [:ok v]] (send reply-to [:task-done coord v]))
@@ -77,7 +79,7 @@ early with `cancel-task`."
   (let (o (if (empty? opts) {} (first opts))
         reply-to (or (get o :reply-to) (self))
         timeout (get o :timeout))
-    (spawn (task--run thunk reply-to timeout))))
+    (spawn (task-run thunk reply-to timeout))))
 
 (defn cancel-task (handle)
   "Stop the task identified by `handle` early: its worker is hard-killed and no

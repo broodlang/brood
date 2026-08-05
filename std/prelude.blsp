@@ -21,27 +21,27 @@
 ;; `def`/`fn`, no backtick, no quasiquote dependency). The full seq-generic,
 ;; tail-recursive `list`/`append` further down simply `def`-rebind these.
 (def list (fn (& xs) "A list of the given arguments." xs))
-(def append--empty?
+(def append-empty?
   (fn (x)
     (if (%eq (type-of x) :nil)
       true
       (if (%eq (type-of x) :vector) (%eq (vector-length x) 0) false))))
-(def append--rev
+(def append-rev
   (fn (src acc)
     ;; Reverse seq `src` (a list or vector) onto list `acc`. Tail-recursive.
-    (if (append--empty? src) acc (append--rev (rest src) (cons (first src) acc)))))
-(def append--2
+    (if (append-empty? src) acc (append-rev (rest src) (cons (first src) acc)))))
+(def append-2
   (fn (a b)
     ;; Cons every element of seq `a` (a list or vector) onto list `b` — via a
     ;; double reverse, so even the bootstrap builder is O(1) stack like the full
     ;; `append` below that rebinds it (`check-allow` doesn't exist yet up here).
-    (append--rev (append--rev a nil) b)))
+    (append-rev (append-rev a nil) b)))
 (def append
   (fn (& lists)
     ;; Concatenate any number of sequences into one list, left to right.
-    (if (append--empty? lists)
+    (if (append-empty? lists)
       nil
-      (append--2 (first lists) (apply append (rest lists))))))
+      (append-2 (first lists) (apply append (rest lists))))))
 
 ;; `defmacro` itself — a macro, not a core special form. A macro is just a `fn`
 ;; the expander calls on the *unexpanded* argument forms; `%make-macro` (the one
@@ -59,6 +59,20 @@
 (defmacro defn (name & clauses)
   "Define a global function `name`, forwarding the clauses to `fn` — so it supports both the single-clause form `(defn f (x) body...)` and multi-clause pattern dispatch."
   `(def ~name (fn ~@clauses)))
+
+;; `defn-` / `def-` — the PRIVATE variants (ADR-146). Identical to `defn`/`def`
+;; except the defined name is module-private: a qualified reference from another
+;; module is a compile error (unless granted with `(:use-internals mod)`), and a
+;; `(:use mod)` refer-all skips it. Privacy is a property the def form declares —
+;; recorded via `%mark-private` — not a marker in the name, so the name stays clean
+;; at the definition and at every call site. The `def` runs first so the global
+;; exists when `%mark-private` qualifies it.
+(defmacro defn- (name & clauses)
+  "Define a MODULE-PRIVATE function `name` (ADR-146) — like `defn`, but the name is not exported and a cross-module reference to it is a compile error."
+  `(do (def ~name (fn ~@clauses)) (%mark-private '~name)))
+(defmacro def- (name value)
+  "Define a MODULE-PRIVATE global `name` (ADR-146) — like `def`, but the name is not exported outside its module."
+  `(do (def ~name ~value) (%mark-private '~name)))
 
 ;; ---- logic ----
 (defn not (x)
@@ -116,9 +130,10 @@
       ;; `cond`/`second`.
       (let (parts (%seqview-parts coll))
         (fold ((vector-ref parts 1) f) acc (vector-ref parts 0)))
-      (fold--loop f acc (seq coll)))))
-(defn fold--loop (f acc coll)
-  (if (empty? coll) acc (fold--loop f (f acc (first coll)) (rest coll))))
+      (fold-loop f acc (seq coll)))))
+(defn- fold-loop
+  (f acc coll)
+  (if (empty? coll) acc (fold-loop f (f acc (first coll)) (rest coll))))
 
 ;; `cons` with its arguments flipped — the workhorse passed to `fold` to build a
 ;; list in reverse (then reversed once at the end). Hoisted to the top level so
@@ -130,11 +145,12 @@
 ;; nearly every sequence builder (`map`/`filter`/`take`/`zip`/`range`/…), so
 ;; dropping the per-element `flip-cons` `apply` frame here pays off across the
 ;; whole library. Coerce a map to its pairs once via `seq`, as `fold` did.
-(defn reverse--acc (coll acc)
-  (if (empty? coll) acc (reverse--acc (rest coll) (cons (first coll) acc))))
+(defn- reverse-acc
+  (coll acc)
+  (if (empty? coll) acc (reverse-acc (rest coll) (cons (first coll) acc))))
 (defn reverse (coll)
   "The items of `coll` in reverse order, as a list."
-  (reverse--acc (seq coll) nil))
+  (reverse-acc (seq coll) nil))
 
 (defn reverse-onto (coll tail)
   "The items of `coll` reversed, prepended onto `tail`. `(reverse-onto xs ys)` is
@@ -150,7 +166,7 @@ splice it back in front of the remainder."
   ;; prefix: `(append (reverse acc) tail)` 2739 ms, `(fold flip-cons tail acc)`
   ;; 1674 ms, this 601 ms (4.6x). The `fold` form loses because of the per-element
   ;; `flip-cons` apply frame, which is exactly why `reverse--acc` is a dedicated loop.
-  (reverse--acc (seq coll) tail))
+  (reverse-acc (seq coll) tail))
 
 ;; Realise a lazy seq-view to a concrete list by running its transducer. Folding
 ;; `flip-cons` over the view hits `fold`'s seq-view branch, which wraps the
@@ -213,9 +229,9 @@ splice it back in front of the remainder."
 ;; below pass an *existing* function to `chain?` rather than allocating a fresh
 ;; closure on every call. `<` and `=` reuse the `%lt`/`%eq` primitives directly;
 ;; the swapped/negated ones get a named Brood helper (still policy in Brood).
-(defn cmp--gt (a b) (%lt b a))
-(defn cmp--le (a b) (not (%lt b a)))
-(defn cmp--ge (a b) (not (%lt a b)))
+(defn- cmp-gt (a b) (%lt b a))
+(defn- cmp-le (a b) (not (%lt b a)))
+(defn- cmp-ge (a b) (not (%lt a b)))
 
 ;; Multi-arity like arithmetic above: a direct 2-argument clause (the common
 ;; case — `(< a b)`, `(= a b)`) calls the primitive with one env frame; the
@@ -225,16 +241,16 @@ splice it back in front of the remainder."
   ((& xs) (chain? %lt xs)))
 (defn > "True if the arguments are in strictly decreasing order."
   ((a b) (%lt b a))
-  ((& xs) (chain? cmp--gt xs)))
+  ((& xs) (chain? cmp-gt xs)))
 (defn <= "True if the arguments are in non-decreasing order."
   ;; 2-arg body is a direct primitive call (a <= b) so the ADR-069 thin-wrapper
   ;; elision reaches it — the old `(not (%lt b a))` was a nested call it couldn't.
   ((a b) (%le a b))
-  ((& xs) (chain? cmp--le xs)))
+  ((& xs) (chain? cmp-le xs)))
 (defn >= "True if the arguments are in non-increasing order."
   ;; a >= b  ==  b <= a — still a single passthrough (%le with args swapped).
   ((a b) (%le b a))
-  ((& xs) (chain? cmp--ge xs)))
+  ((& xs) (chain? cmp-ge xs)))
 (defn = "True if all arguments are structurally equal."
   ((a b) (%eq a b))
   ((& xs) (chain? %eq xs)))
@@ -438,7 +454,8 @@ names accept anything, so a contract never throws on a type it can't interpret."
     (%eq t 'list) (list? v)
     (%eq t 'vector) (vector? v)
     else true))
-(defn contract--check-args (name ptypes args i)
+(defn- contract-check-args
+  (name ptypes args i)
   "Throw if any argument fails its declared type. Pairwise over the overlap —
 arity itself is the static checker's job."
   (when (and (pair? ptypes) (pair? args))
@@ -453,9 +470,10 @@ arity itself is the static checker's job."
                " ("
                (pr-str (first args))
                ")")))
-    (contract--check-args name (rest ptypes) (rest args) (inc i))))
+    (contract-check-args name (rest ptypes) (rest args) (inc i))))
 
-(defn contract--check-rest (name rtype args)
+(defn- contract-check-rest
+  (name rtype args)
   "Throw if any rest argument fails its declared rest type."
   (when (pair? args)
     (unless (type-matches? rtype (first args))
@@ -467,15 +485,16 @@ arity itself is the static checker's job."
                " ("
                (pr-str (first args))
                ")")))
-    (contract--check-rest name rtype (rest args))))
+    (contract-check-rest name rtype (rest args))))
 
-(defn sig--pos (xs x n)
+(defn- sig-pos
+  (xs x n)
   "Position of `x` in the list `xs` (from index `n`), or -1. Expansion-time helper
 for `sig!` that predates `index-of` in the prelude's own load order."
   (cond
     (nil? xs) -1
     (%eq (first xs) x) n
-    else (sig--pos (rest xs) x (%add n 1))))
+    else (sig-pos (rest xs) x (%add n 1))))
 
 (defmacro sig! (name type)
   "Like `(sig …)` but also installs a *runtime* contract: each argument and the
@@ -489,13 +508,13 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
   ;; contract. The `(do …)` keeps both effects at top level.
   `(do
      (%register-sig '~name '~type)
-     ~(let (i (sig--pos type '-> 0))
+     ~(let (i (sig-pos type '-> 0))
         (if (< i 0)
           ; not a (… -> …) type — nothing to enforce
           nil
           (let (ptypes (take i type)
                 rtype (nth type (inc i))
-                amp-pos (sig--pos ptypes '& 0))
+                amp-pos (sig-pos ptypes '& 0))
             (if (< amp-pos 0)
               ;; fixed arity
               (let (params (map (fn (_) (gensym "arg")) (range (count ptypes)))
@@ -504,7 +523,7 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
                 `(def ~name
                    (let (~orig ~name)
                      (fn (~@params)
-                       (contract--check-args '~name '~ptypes (list ~@params) 1)
+                       (contract-check-args '~name '~ptypes (list ~@params) 1)
                        (let (~r (~orig ~@params))
                          (unless (type-matches? '~rtype ~r)
                            (throw (str '~name
@@ -526,8 +545,8 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
                 `(def ~name
                    (let (~orig ~name)
                      (fn (~@fixed-params & ~rest-param)
-                       (contract--check-args '~name '~fixed-ptypes (list ~@fixed-params) 1)
-                       (contract--check-rest '~name '~rest-ptype ~rest-param)
+                       (contract-check-args '~name '~fixed-ptypes (list ~@fixed-params) 1)
+                       (contract-check-rest '~name '~rest-ptype ~rest-param)
                        (let (~r (apply ~orig (append (list ~@fixed-params) ~rest-param)))
                          (unless (type-matches? '~rtype ~r)
                            (throw (str '~name
@@ -570,16 +589,17 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 ;; the orphan last element when count is odd, nil when even. Uses only
 ;; `if`/`empty?`/`first`/`rest` — all kernel primitives — so it's safe to call
 ;; during prelude loading before `odd?`/`count`/`last` are defined.
-(defn cond--orphan (clauses)
+(defn- cond-orphan
+  (clauses)
   (if (empty? clauses)
     nil
     (if (empty? (rest clauses))
       (first clauses)
-      (cond--orphan (rest (rest clauses))))))
+      (cond-orphan (rest (rest clauses))))))
 
 (defmacro cond (& clauses)
   "Multi-way branch over `test expr` pairs: return the `expr` of the first truthy `test`. A final `else` test always matches; `nil` if none do."
-  (let (orphan (cond--orphan clauses))
+  (let (orphan (cond-orphan clauses))
     (if (and (not (nil? orphan)) (not (%eq orphan 'else)))
       (error "cond: odd number of clauses — expected test/expression pairs. "
         "Did you forget an expression for '"
@@ -603,18 +623,19 @@ reads it exactly like `(sig …)`. Supports a `&` rest marker:
 ;; Bounded (kernel audit): a macro that forever expands to another macro call
 ;; would otherwise spin here. Mirrors the kernel expander's own cap
 ;; (`MAX_EXPAND_ROUNDS` in eval/macros.rs) — keep the two in step.
-(def macroexpand--max-rounds 256)
+(def- macroexpand-max-rounds 256)
 
-(defn macroexpand--loop (form n)
+(defn- macroexpand-loop
+  (form n)
   (if (= n 0)
     (error "macroexpand: no fixpoint after "
-      macroexpand--max-rounds " rounds (a macro that expands to itself?)")
+      macroexpand-max-rounds " rounds (a macro that expands to itself?)")
     (let (stepped (macroexpand-1 form))
-      (if (= stepped form) form (macroexpand--loop stepped (- n 1))))))
+      (if (= stepped form) form (macroexpand-loop stepped (- n 1))))))
 
 (defn macroexpand (form)
   "Repeatedly expand `form`'s head macro until the head is no longer a macro call."
-  (macroexpand--loop form macroexpand--max-rounds))
+  (macroexpand-loop form macroexpand-max-rounds))
 
 ;; ---- type predicates --------------------------------------------------------
 ;; Each is a thin wrapper over `type-of`, the one reflective primitive (it
@@ -699,12 +720,12 @@ current element and `acc` is the current accumulator."
       ". Syntax: (defseq name (params...) \"docstring\" step-expr)")
     `(defn ~sym (~@params coll)
        ~docstring
-       (letrec (--loop (fn (coll ~'acc)
-                         (if (empty? coll)
-                           acc
-                           (let (~'item (first coll))
-                             (--loop (rest coll) ~step)))))
-         (reverse (--loop (seq coll) nil))))))
+       (letrec (-loop (fn (coll ~'acc)
+                        (if (empty? coll)
+                          acc
+                          (let (~'item (first coll))
+                            (-loop (rest coll) ~step)))))
+         (reverse (-loop (seq coll) nil))))))
 
 (defseq map
   (f)
@@ -737,15 +758,15 @@ and a set its elements, as everywhere else `seq` applies."
 ;; reverse); `append` folds this over the lists, then reverses once. Argument order
 ;; is fold's (`acc` first), which is why this exists at all rather than callers
 ;; using `reverse-onto` directly — it is that function with the arguments flipped.
-(defn append--onto (acc lst) (reverse-onto lst acc))
+(defn- append-onto (acc lst) (reverse-onto lst acc))
 (defn append (& lists)
   "Concatenate any number of lists into one, left to right."
   ;; O(total length) and fully tail-recursive — so `mapcat` (via `apply append`)
   ;; stays stack-safe on many/long lists. The previous left fold of `append-two`
   ;; re-reversed the growing accumulator each step, making it O(lists²).
-  (reverse (fold append--onto nil lists)))
+  (reverse (fold append-onto nil lists)))
 
-(defn count--acc (coll n) (if (empty? coll) n (count--acc (rest coll) (%add n 1))))
+(defn- count-acc (coll n) (if (empty? coll) n (count-acc (rest coll) (%add n 1))))
 (defn count (coll)
   "The number of items in `coll` (a list, vector, string, or map)."
   ;; `vector?`/`map?` short-circuit to the O(1) `vector-length`/`map-count`
@@ -763,7 +784,7 @@ and a set its elements, as everywhere else `seq` applies."
     ;; raw map, which would include the internal `:__id__`. `map-get` distinguishes it.
     (map? coll) (if (map-get coll :__id__ nil) (count (to-seq coll)) (map-count coll))
     (set? coll) (%set-count coll)
-    else (count--acc coll 0)))
+    else (count-acc coll 0)))
 
 (defn nth-list (coll i d)
   (cond (empty? coll) d (= i 0) (first coll) else (nth-list (rest coll) (- i 1) d)))
@@ -774,7 +795,8 @@ and a set its elements, as everywhere else `seq` applies."
 ;; naming an arithmetic helper the caller never wrote, in violation of the
 ;; self-identifying-type-error promise in docs/language.md. `(nth v :k)` is a real
 ;; mistake (usually a map/sequence mix-up), so it must say so.
-(defn nth--bad-index (coll i)
+(defn- nth-bad-index
+  (coll i)
   (error (str "nth: expected an integer index, got "
            (name (type-of i))
            " ("
@@ -785,7 +807,8 @@ and a set its elements, as everywhere else `seq` applies."
 ;; surface as `empty?: expected collection, got int (5)` — an internal `nth-list`
 ;; walks through, not the op the caller wrote. Checked once per `nth`, not per step:
 ;; the vector/bytes arms never reach it, and a list walk is already O(n).
-(defn nth--seq-or-fail (coll i d)
+(defn- nth-seq-or-fail
+  (coll i d)
   (cond
     (or (pair? coll) (nil? coll)) (nth-list coll i d)
     ;; a record indexes through its `Seqable` view (a custom collection or its fields)
@@ -804,12 +827,12 @@ and a set its elements, as everywhere else `seq` applies."
   ;; whole thing to the tree-walker. The `& default` arm keeps the explicit-default
   ;; behaviour for the rarer 3-arg call.
   ((coll i) (cond
-              (not (int? i)) (nth--bad-index coll i)
+              (not (int? i)) (nth-bad-index coll i)
               (vector? coll) (if (and (>= i 0) (< i (vector-length coll))) (vector-ref coll i) nil)
               (bytes? coll) (if (and (>= i 0) (< i (byte-length coll))) (byte-at coll i) nil)
-              else (nth--seq-or-fail coll i nil)))
+              else (nth-seq-or-fail coll i nil)))
   ((coll i & default) (cond
-                        (not (int? i)) (nth--bad-index coll i)
+                        (not (int? i)) (nth-bad-index coll i)
                         (vector? coll)
                           (if (and (>= i 0) (< i (vector-length coll)))
                             (vector-ref coll i)
@@ -818,7 +841,7 @@ and a set its elements, as everywhere else `seq` applies."
                           (if (and (>= i 0) (< i (byte-length coll)))
                             (byte-at coll i)
                             (first default))
-                        else (nth--seq-or-fail coll i (first default)))))
+                        else (nth-seq-or-fail coll i (first default)))))
 
 ;; ---- numeric helpers ----
 ;; ---- map operations ----
@@ -842,7 +865,8 @@ and a set its elements, as everywhere else `seq` applies."
 ;; typo'd accessor produced a plausible-looking absent value. The `default` argument
 ;; deliberately does NOT suppress these: a default means "the key is absent", not
 ;; "the key is the wrong type".
-(defn get--unanswerable (coll k)
+(defn- get-unanswerable
+  (coll k)
   (if (or (pair? coll) (vector? coll) (bytes? coll) (string? coll))
     (error (str "get: expected an integer index, got "
              (name (type-of k))
@@ -885,9 +909,9 @@ a wrong-typed one."
               (string? coll)
                 (if (int? k)
                   (if (and (>= k 0) (< k (string-length coll))) (char-at coll k) nil)
-                  (get--unanswerable coll k))
+                  (get-unanswerable coll k))
               (int? k) (nth coll k nil)
-              else (get--unanswerable coll k)))
+              else (get-unanswerable coll k)))
   ((coll k default) (cond
                       (map? coll) (map-get coll k default)
                       (set? coll) (if (%set-has? coll k) k default)
@@ -897,9 +921,9 @@ a wrong-typed one."
                           (if (and (>= k 0) (< k (string-length coll)))
                             (char-at coll k)
                             default)
-                          (get--unanswerable coll k))
+                          (get-unanswerable coll k))
                       (int? k) (nth coll k default)
-                      else (get--unanswerable coll k)))
+                      else (get-unanswerable coll k)))
   ((coll k & default) (cond
                         (map? coll) (map-get coll k (first default))
                         (set? coll) (if (%set-has? coll k) k (first default))
@@ -909,9 +933,9 @@ a wrong-typed one."
                             (if (and (>= k 0) (< k (string-length coll)))
                               (char-at coll k)
                               (first default))
-                            (get--unanswerable coll k))
+                            (get-unanswerable coll k))
                         (int? k) (nth coll k (first default))
-                        else (get--unanswerable coll k))))
+                        else (get-unanswerable coll k))))
 
 ;; (assoc m k1 v1 k2 v2 …) -> a fresh map with each pair added/updated.
 ;; Multi-pair builders, split by collection kind so the kernel op (`map-assoc` /
@@ -919,10 +943,12 @@ a wrong-typed one."
 ;; passed-in `set` function value. The computed-head form `(set m k v)` mis-compiles under
 ;; the JIT — a map accumulator held across the loop's safepoints goes stale (use-after-GC);
 ;; the direct call avoids that path (and is faster: no per-step function-value dispatch).
-(defn assoc--map-pairs (m kvs)
-  (if (empty? kvs) m (assoc--map-pairs (map-assoc m (first kvs) (second kvs)) (rest (rest kvs)))))
-(defn assoc--vec-pairs (v kvs)
-  (if (empty? kvs) v (assoc--vec-pairs (vector-assoc v (first kvs) (second kvs)) (rest (rest kvs)))))
+(defn- assoc-map-pairs
+  (m kvs)
+  (if (empty? kvs) m (assoc-map-pairs (map-assoc m (first kvs) (second kvs)) (rest (rest kvs)))))
+(defn- assoc-vec-pairs
+  (v kvs)
+  (if (empty? kvs) v (assoc-vec-pairs (vector-assoc v (first kvs) (second kvs)) (rest (rest kvs)))))
 (defn assoc "A fresh collection like `coll` with each `key value` pair added or updated.
 For a map, keys are added or replaced; for a vector, integer indices in
 `[0, count)` are replaced (an out-of-range index is an error — appending is via
@@ -931,7 +957,7 @@ For a map, keys are added or replaced; for a vector, integer indices in
   ;; tallies, and most call sites use): exact arity → VM-eligible, and it skips the
   ;; `& kvs` rest-list + the multi-pair loop, going straight to the kernel op.
   ((coll k v) (if (vector? coll) (vector-assoc coll k v) (map-assoc coll k v)))
-  ((coll & kvs) (if (vector? coll) (assoc--vec-pairs coll kvs) (assoc--map-pairs coll kvs))))
+  ((coll & kvs) (if (vector? coll) (assoc-vec-pairs coll kvs) (assoc-map-pairs coll kvs))))
 
 ;; (dissoc m k1 k2 …) -> a fresh map with each key removed.
 (defn dissoc (m & ks)
@@ -1023,17 +1049,17 @@ Works on maps (by key) and vectors (by integer index, which must be in range)."
 ;; Nested-map access along a `path` (a sequence of keys). `get-in` walks; missing
 ;; key → default. `assoc-in` rebuilds, coercing a non-map node to `{}` so it can
 ;; create intermediate maps; `update-in` is `get-in` then `assoc-in`.
-(defn get-in--walk (m path default)
+(defn- get-in-walk
+  (m path default)
   (cond
     (empty? path) m
-    (and (map? m) (contains? m (first path)))
-      (get-in--walk (get m (first path))
-        (rest path)
-        default)
+    (and (map? m) (contains? m (first path))) (get-in-walk (get m (first path))
+                                                (rest path)
+                                                default)
     else default))
 (defn get-in (m path & default)
   "The value in nested maps `m` at the key sequence `path`, or `default` (else `nil`) if any key along the way is absent. `(get-in m ())` is `m`."
-  (get-in--walk m path (first default)))
+  (get-in-walk m path (first default)))
 
 ;; check-allow: deliberately non-tail — depth = (count path) — a few keys, never data scale.
 (check-allow :non-tail-recursion
@@ -1128,15 +1154,15 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
 ;; that machinery — an f64 has nowhere exact to put the answer.
 ;; True for an infinite float: doubling leaves it unchanged and it isn't zero. Used to
 ;; detect that the positive power overflowed, without naming a magic constant.
-(defn pow--inf? (x) (and (float? x) (not (= x 0.0)) (= x (* x 2.0))))
+(defn- pow-inf? (x) (and (float? x) (not (= x 0.0)) (= x (* x 2.0))))
 
 (defn pow (base exp)
   "`base` raised to integer `exp`. A negative exponent gives the reciprocal — **exact**
 (a ratio) for an exact `base`, a float for a float `base`."
   (cond
     (not (int? exp)) (error "pow: exponent must be an integer (use sqrt for roots), got " exp)
-    (< exp 0) (pow--reciprocal base exp)
-    else (pow--acc base exp 1)))
+    (< exp 0) (pow-reciprocal base exp)
+    else (pow-acc base exp 1)))
 
 ;; A negative exponent used to be `(/ 1 (pow base (- exp)))`, which loses the whole
 ;; subnormal range: when the *positive* power overflows, `1/inf` is 0.0, so
@@ -1150,15 +1176,16 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
 ;; halves only recurse while they too come back 0.0. A genuinely-zero answer (10.0^-400,
 ;; below the subnormal floor) costs one extra recompute and still yields 0.0.
 ;; (Found by the Paranoia port, 2026-07-26.)
-(defn pow--reciprocal (base exp)
-  (let (p (pow--acc base (- exp) 1)
-        r (if (pow--inf? p) 0.0 (/ 1 p)))
+(defn- pow-reciprocal
+  (base exp)
+  (let (p (pow-acc base (- exp) 1)
+        r (if (pow-inf? p) 0.0 (/ 1 p)))
     (if (and (= r 0.0) (<= exp -2))
       (let (h (quot exp 2))
         (* (pow base h) (pow base (- exp h))))
       r)))
 
-(defn pow--acc (base exp acc) (if (= exp 0) acc (pow--acc base (- exp 1) (* acc base))))
+(defn- pow-acc (base exp acc) (if (= exp 0) acc (pow-acc base (- exp 1) (* acc base))))
 
 ;; (sqrt n) — Newton's method (Babylonian): guess' = (guess + n/guess)/2, iterated
 ;; Delegates to `%f64-sqrt` (f64::sqrt) for IEEE 754 correctness on all inputs
@@ -1206,25 +1233,26 @@ a float for a float `x` unless the rounded value is an integer, exact for an exa
 ;; scope. Only the screen printers consult it; `str`/`pr-str`/`fmt` stay native.
 (%declare-dynamic '*show*)
 (def *show* nil)
-(defn show--args (xs)
+(defn- show-args
+  (xs)
   ;; Each print argument, run through the installed `*show*` transform — or the
   ;; arguments untouched when none is installed (the default fast path).
   (if *show* (map *show* xs) xs))
 (defn print (& xs)
   "Write the display forms of the arguments to the current `*out*` port (stdout by default); returns nil."
-  (*out* (apply %render (show--args xs)))
+  (*out* (apply %render (show-args xs)))
   nil)
 (defn println (& xs)
   "Write the display forms of the arguments to the current `*out*` port, followed by a newline."
-  (*out* (str (apply %render (show--args xs)) "\n"))
+  (*out* (str (apply %render (show-args xs)) "\n"))
   nil)
 (defn eprint (& xs)
   "Write the display forms of the arguments to the current `*err*` port (stderr by default); returns nil."
-  (*err* (apply %render (show--args xs)))
+  (*err* (apply %render (show-args xs)))
   nil)
 (defn eprintln (& xs)
   "Write the display forms of the arguments to the current `*err*` port, followed by a newline."
-  (*err* (str (apply %render (show--args xs)) "\n"))
+  (*err* (str (apply %render (show-args xs)) "\n"))
   nil)
 
 ;; `with-out-str` runs `body` for effect with stdout diverted into a capture
@@ -1295,33 +1323,35 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 ;; placement helpers above, so "where does the value go" is defined once.
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn some-thread--build (place forms step)
+  (defn- some-thread-build
+    (place forms step)
     (if (empty? forms)
       place
       `(if (nil? ~place)
          nil
          (let (~place ~(step place (first forms)))
-           ~(some-thread--build place (rest forms) step))))))
+           ~(some-thread-build place (rest forms) step))))))
 (defmacro some-> (x & forms)
   "Thread `x` through `forms` as each one's *first* argument (like `->`), but short-circuit to `nil` as soon as any step yields `nil`."
-  (let (v (gensym "v")) `(let (~v ~x) ~(some-thread--build v forms thread-first-step))))
+  (let (v (gensym "v")) `(let (~v ~x) ~(some-thread-build v forms thread-first-step))))
 (defmacro some->> (x & forms)
   "Thread `x` through `forms` as each one's *last* argument (like `->>`), but short-circuit to `nil` as soon as any step yields `nil`."
-  (let (v (gensym "v")) `(let (~v ~x) ~(some-thread--build v forms thread-last-step))))
+  (let (v (gensym "v")) `(let (~v ~x) ~(some-thread-build v forms thread-last-step))))
 
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn cond-thread--build (place clauses step)
+  (defn- cond-thread-build
+    (place clauses step)
     (if (empty? clauses)
       place
       `(let (~place (if ~(first clauses) ~(step place (second clauses)) ~place))
-         ~(cond-thread--build place (rest (rest clauses)) step)))))
+         ~(cond-thread-build place (rest (rest clauses)) step)))))
 (defmacro cond-> (x & clauses)
   "Thread `x` through the `test form` clause pairs, applying each `form` (as its *first* argument, like `->`) only when its `test` is truthy: `(cond-> {} add-a? (assoc :a 1))`."
-  (let (v (gensym "v")) `(let (~v ~x) ~(cond-thread--build v clauses thread-first-step))))
+  (let (v (gensym "v")) `(let (~v ~x) ~(cond-thread-build v clauses thread-first-step))))
 (defmacro cond->> (x & clauses)
   "Thread `x` through the `test form` clause pairs, applying each `form` (as its *last* argument, like `->>`) only when its `test` is truthy."
-  (let (v (gensym "v")) `(let (~v ~x) ~(cond-thread--build v clauses thread-last-step))))
+  (let (v (gensym "v")) `(let (~v ~x) ~(cond-thread-build v clauses thread-last-step))))
 
 (defmacro doto (x & forms)
   "Evaluate `x` once, run each `form` with it spliced in as the *first* argument (for side effects), then return `x`: `(doto (table) (table-put :a 1) (table-put :b 2))`."
@@ -1352,15 +1382,17 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 ;; section (its own `match` clauses) runs the short-circuited value through them;
 ;; with no `:else`, the value that failed to match falls straight through as the
 ;; result — so an `[:error …]` becomes the answer untouched.
-(defn with--split-else (forms before)
+(defn- with-split-else
+  (forms before)
   ;; [happy-forms else-clauses] — split `forms` at the first bare `:else` keyword.
   (cond
     (empty? forms) [(reverse before) nil]
     (= (first forms) :else) [(reverse before) (rest forms)]
-    else (with--split-else (rest forms) (cons (first forms) before))))
+    else (with-split-else (rest forms) (cons (first forms) before))))
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn with--build (bindings body else-clauses)
+  (defn- with-build
+    (bindings body else-clauses)
     (if (empty? bindings)
       `(do ~@body)
       (let (pattern (first bindings)
@@ -1368,12 +1400,12 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
             more (rest (rest bindings))
             miss (gensym "miss"))
         `(match ~expr
-           (~pattern ~(with--build more body else-clauses))
+           (~pattern ~(with-build more body else-clauses))
            (~miss ~(if (empty? else-clauses) miss `(match ~miss ~@else-clauses))))))))
 (defmacro with (bindings & body)
   "Sequentially match each `pattern expr` pair in `bindings`; the first value that fails its pattern short-circuits, else `body` runs (returning its last form) with every binding in scope. A trailing `:else` section of `match` clauses handles the short-circuited value; without one it is returned as-is. Brood's flat `with`, like Elixir's."
-  (let ([happy else-clauses] (with--split-else body []))
-    (with--build bindings happy else-clauses)))
+  (let ([happy else-clauses] (with-split-else body []))
+    (with-build bindings happy else-clauses)))
 
 ;; ---- local loops: just use `letrec` -----------------------------------------
 ;; Brood has no `loop`/`recur` macro. A self-contained *local* loop is a `letrec`-
@@ -1411,7 +1443,8 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
 ;; binder whose handler *starts* with a bare symbol and has more forms after it.
 ;; There is no legitimate reading to protect — a leading bare symbol followed by
 ;; more body is dead code in every case — so this is a zero-false-positive guard.
-(defn try--class-catch? (clause)
+(defn- try-class-catch?
+  (clause)
   (let (handler (rest (rest clause)))
     (and (symbol? (second clause))
       (> (count handler) 1)
@@ -1424,7 +1457,7 @@ processes `body` spawns is captured too; nested `with-out-str`s compose."
   (let (clause (last body))
     (if (and (pair? clause) (= (first clause) 'catch))
       (let (init (but-last body) evar (second clause) handler (rest (rest clause)))
-        (if (try--class-catch? clause)
+        (if (try-class-catch? clause)
           (error "try: `(catch "
             (str evar)
             " "
@@ -1494,10 +1527,10 @@ its printed form."
 ;; expansion time (like the threading-macro helpers above).
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn binding--names (b) (if (nil? b) nil (cons (first b) (binding--names (rest (rest b)))))))
+  (defn- binding-names (b) (if (nil? b) nil (cons (first b) (binding-names (rest (rest b)))))))
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn binding--vals (b) (if (nil? b) nil (cons (second b) (binding--vals (rest (rest b)))))))
+  (defn- binding-vals (b) (if (nil? b) nil (cons (second b) (binding-vals (rest (rest b)))))))
 
 ;; (binding (*a* 1 *b* 2) body...) => (%binding '(*a* *b*) [1 2] (fn () body...))
 ;; The names go out as a quoted list and the values as a vector literal — both
@@ -1510,7 +1543,7 @@ its printed form."
       " Brood is lists-for-code, vectors-for-data (unlike Clojure).")
     (if (odd? (count bindings))
       (error "binding: bindings must be name/value pairs, got " bindings)
-      `(%binding (quote ~(binding--names bindings)) [~@(binding--vals bindings)] (fn () ~@body)))))
+      `(%binding (quote ~(binding-names bindings)) [~@(binding-vals bindings)] (fn () ~@body)))))
 
 ;; ---- pattern matching -------------------------------------------------------
 ;; The matcher is written in Brood, not Rust: a pattern->code compiler (a macro
@@ -1670,54 +1703,58 @@ its printed form."
 ;; whose top bit is set exceeds the i64 range and widens to a big integer
 ;; (arithmetic auto-promotes) — read :i64 to get the raw two's complement.
 
-(defn bytes--acc-be (bs i end acc)
-  (if (>= i end) acc (bytes--acc-be bs (+ i 1) end (+ (* acc 256) (byte-at bs i)))))
+(defn- bytes-acc-be
+  (bs i end acc)
+  (if (>= i end) acc (bytes-acc-be bs (+ i 1) end (+ (* acc 256) (byte-at bs i)))))
 
-(defn bytes--acc-le (bs low i acc)
-  (if (< i low) acc (bytes--acc-le bs low (- i 1) (+ (* acc 256) (byte-at bs i)))))
+(defn- bytes-acc-le
+  (bs low i acc)
+  (if (< i low) acc (bytes-acc-le bs low (- i 1) (+ (* acc 256) (byte-at bs i)))))
 
-(defn bytes--width-check (who n)
+(defn- bytes-width-check
+  (who n)
   (if (and (int? n) (>= n 1) (<= n 8))
     n
     (error (str who ": width must be an int in 1–8, got " (pr-str n)))))
 
 (defn bytes-uint (bs off n)
   "Read `n` bytes (1–8) of `bs` at `off` as a big-endian unsigned integer."
-  (bytes--acc-be bs off (+ off (bytes--width-check "bytes-uint" n)) 0))
+  (bytes-acc-be bs off (+ off (bytes-width-check "bytes-uint" n)) 0))
 
 (defn bytes-uint-le (bs off n)
   "Read `n` bytes (1–8) of `bs` at `off` as a little-endian unsigned integer."
-  (bytes--acc-le bs off (+ off (- (bytes--width-check "bytes-uint-le" n) 1)) 0))
+  (bytes-acc-le bs off (+ off (- (bytes-width-check "bytes-uint-le" n) 1)) 0))
 
 (defn bytes-int (bs off n)
   "Read `n` bytes (1–8) of `bs` at `off` as a big-endian signed (two's-complement) integer."
   (do
-    (bytes--width-check "bytes-int" n)
+    (bytes-width-check "bytes-int" n)
     (let (b0 (byte-at bs off))
-      (bytes--acc-be bs (+ off 1) (+ off n) (if (>= b0 128) (- b0 256) b0)))))
+      (bytes-acc-be bs (+ off 1) (+ off n) (if (>= b0 128) (- b0 256) b0)))))
 
 (defn bytes-int-le (bs off n)
   "Read `n` bytes (1–8) of `bs` at `off` as a little-endian signed (two's-complement) integer."
   (do
-    (bytes--width-check "bytes-int-le" n)
+    (bytes-width-check "bytes-int-le" n)
     (let (bt (byte-at bs (+ off (- n 1))))
-      (bytes--acc-le bs off (+ off (- n 2)) (if (>= bt 128) (- bt 256) bt)))))
+      (bytes-acc-le bs off (+ off (- n 2)) (if (>= bt 128) (- bt 256) bt)))))
 
-(defn int->bytes--be (v w acc)
+(defn- int->bytes-be
+  (v w acc)
   (if (<= w 0)
     acc
-    (int->bytes--be (bit-shift-right v 8) (- w 1) (cons (bit-and v 255) acc))))
+    (int->bytes-be (bit-shift-right v 8) (- w 1) (cons (bit-and v 255) acc))))
 
 (defn int->bytes (v n)
   "Encode integer `v` as `n` bytes (1–8), big-endian two's complement. Bits
 above `n` bytes are truncated (the bit-syntax convention), so negatives encode
 to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
-  (bytes (int->bytes--be v (bytes--width-check "int->bytes" n) nil)))
+  (bytes (int->bytes-be v (bytes-width-check "int->bytes" n) nil)))
 
 (defn int->bytes-le (v n)
   "Encode integer `v` as `n` bytes (1–8), little-endian two's complement
 (truncating, like int->bytes)."
-  (bytes (reverse (int->bytes--be v (bytes--width-check "int->bytes-le" n) nil))))
+  (bytes (reverse (int->bytes-be v (bytes-width-check "int->bytes-le" n) nil))))
 
 ;; ---- bytes patterns: (bytes seg…) — Elixir-style binary destructuring ----
 ;; Each `seg` consumes bytes left-to-right from the target:
@@ -1914,17 +1951,18 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 (defn match-compile-or (alts target bound success fail)
   (do
     (match-or-check alts)
-    (match-compile-or--chain alts target bound success fail)))
+    (match-compile-or-chain alts target bound success fail)))
 ;; check-allow: deliberately non-tail — expansion-time recursion over pattern syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn match-compile-or--chain (alts target bound success fail)
+  (defn- match-compile-or-chain
+    (alts target bound success fail)
     (if (empty? alts)
       fail
       (match-compile (first alts)
         target
         bound
         success
-        (match-compile-or--chain (rest alts) target bound success fail)))))
+        (match-compile-or-chain (rest alts) target bound success fail)))))
 
 ;; `(and p q …)`: match every pattern against the SAME value, left to right, so
 ;; later patterns see the names earlier ones bound (a repeated name is an equality
@@ -2110,7 +2148,7 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
                " …) — the field pattern must be a map"
                " pattern like {:field p} or {:keys [f]}, got "
                (pr-str mappat))))
-    (let (id (ability--id-kw name))
+    (let (id (ability-id-kw name))
       `(if (%eq (record-id ~target) ~id)
          ~(if mappat (match-compile mappat target bound success fail) success)
          ~fail))))
@@ -2240,7 +2278,8 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; under "one spelling each"): `case` accepts only *literal* tests, so it cannot
 ;; silently bind where you meant to compare — the one trap `match` has. A bare
 ;; symbol test is therefore rejected rather than read as a binder.
-(defn case--check-test (t)
+(defn- case-check-test
+  (t)
   (cond
     (or (keyword? t) (int? t) (float? t) (decimal? t) (ratio? t) (string? t) (bool? t) (nil? t)) t
     (and (pair? t) (= (first t) 'quote)) t
@@ -2257,13 +2296,14 @@ to their low `n` bytes: (int->bytes -1 2) => #b\"\\xff\\xff\"."
 ;; Flat `test result …` pairs → wrapped match clauses; a lone trailing form is the
 ;; default (an `_` clause). Flat pairs match `cond`'s shape, which is where a
 ;; reader's eye already is for value dispatch.
-(defn case--clauses (forms acc)
+(defn- case-clauses
+  (forms acc)
   (cond
     (empty? forms) (reverse acc)
     (empty? (rest forms)) (reverse (cons (list '_ (first forms)) acc))
     else
-      (case--clauses (rest (rest forms))
-        (cons (list (case--check-test (first forms)) (second forms)) acc))))
+      (case-clauses (rest (rest forms))
+        (cons (list (case-check-test (first forms)) (second forms)) acc))))
 
 (defmacro case (expr & clauses)
   "Dispatch on the VALUE of `expr` against literal tests, as flat `test result`
@@ -2271,7 +2311,7 @@ pairs; a lone trailing form is the default. `(case k :a 1 :b 2 :other)`. Tests
 are literals only — a bare symbol is an error (it would bind, not compare), and
 destructuring, guards, or alternatives mean you want `match`. With no default, no
 match raises `[:match-error :case value patterns]`, exactly as `match` does."
-  `(match* :case ~expr ~@(case--clauses clauses nil)))
+  `(match* :case ~expr ~@(case-clauses clauses nil)))
 
 ;; ---- spawn: run an expression as a new green process ------------------------
 ;; (spawn expr) runs `expr` in a fresh process and returns its pid. The expression
@@ -2312,7 +2352,8 @@ match raises `[:match-error :case value patterns]`, exactly as `match` does."
 ;; `(spawn (fn () body))` and `(spawn body)` then mean the same. (The dual footgun —
 ;; a bare function *name* like `(spawn worker)`, which used to yield the closure and
 ;; exit — is handled by `spawn--body-thunk` below, which wraps a symbol as a *call*.)
-(defn spawn--thunk-form? (form)
+(defn- spawn-thunk-form?
+  (form)
   (and (list? form)
     (not (empty? form))
     (= (first form) 'fn)
@@ -2328,9 +2369,10 @@ match raises `[:match-error :case value patterns]`, exactly as `match` does."
 ;;     symbol has no effect, so this is never a legitimate use — the call either
 ;;     works or raises a loud "not callable", never a silent no-op;
 ;;   - anything else is the body expression → `(fn () expr)`.
-(defn spawn--body-thunk (form)
+(defn- spawn-body-thunk
+  (form)
   (cond
-    (spawn--thunk-form? form) form
+    (spawn-thunk-form? form) form
     (symbol? form) `(fn () (~form))
     else `(fn () ~form)))
 
@@ -2351,9 +2393,9 @@ match raises `[:match-error :case value patterns]`, exactly as `match` does."
   ;; Param name is `more` (not `rest`) so the body can still call the
   ;; prelude's `rest` function without param-shadowing itself.
   (if (empty? more)
-    `(%spawn ~(spawn--body-thunk head))
+    `(%spawn ~(spawn-body-thunk head))
     (if (empty? (rest more))
-      `(%spawn-named ~head ~(spawn--body-thunk (first more)))
+      `(%spawn-named ~head ~(spawn-body-thunk (first more)))
       (throw "spawn: expected (spawn expr) or (spawn name expr)"))))
 
 (defmacro spawn-link (expr)
@@ -2366,33 +2408,34 @@ instant exit reaches the caller with its **true** reason — unlike a separate
 and reports `:noproc` (losing `:normal`). Supervised children should use this so a fast
 `:normal` exit isn't misread as a crash. A zero-arg lambda `(fn () …)` body is
 passed through (not re-wrapped), like `spawn`."
-  `(%spawn-link ~(spawn--body-thunk expr)))
+  `(%spawn-link ~(spawn-body-thunk expr)))
 
 ;; A long-lived `:remote-spawn` server: the receiver-side machinery behind the
 ;; `remote-spawn` macro. Receives `[:run thunk]` messages and applies the thunk
 ;; in a fresh local process — that's "the receiver runs my code". A permanent
 ;; loop so it stays a stable address; the closure crosses the wire as data
 ;; (ADR-033), so any peer node running the same prelude can run it.
-(defn remote--spawn-server ()
+(defn- remote-spawn-server
+  ()
   (receive
-    ([:run thunk] (do (spawn (thunk)) (remote--spawn-server)))
+    ([:run thunk] (do (spawn (thunk)) (remote-spawn-server)))
     ;; Synchronous variant: spawn the thunk and reply with the child's pid (a
     ;; remote pid, carrying this node's `name@host`) to the requester, keyed by
     ;; the ref it supplied so its `receive` can pin the reply.
-    ([:run-sync thunk from r] (do (send from [:spawned r (spawn (thunk))]) (remote--spawn-server)))
-    (_ (remote--spawn-server))))
+    ([:run-sync thunk from r] (do (send from [:spawned r (spawn (thunk))]) (remote-spawn-server)))
+    (_ (remote-spawn-server))))
 
 (defn start-remote-spawn ()
   "Idempotently start + register the local `:remote-spawn` server so peers can `(remote-spawn this-node …)` against this node. Safe to call multiple times — only the first call spawns a server. Typically called once at startup, after `(node-start …)`."
   (when (nil? (whereis :remote-spawn))
-    (register :remote-spawn (spawn (remote--spawn-server))))
+    (register :remote-spawn (spawn (remote-spawn-server))))
   nil)
 
 (defmacro remote-spawn (node expr)
   "Run `expr` in a fresh process on `node` (a node-name keyword/symbol — `(node-name)` for the local node, or a connected peer's). Returns `nil`; the spawned process lives on the remote and runs detached (capture the parent's pid in a `let` and `(send parent (self))` from inside `expr` if you need its pid). `expr` ships as a closure (ADR-033) — free locals ride along, free globals re-resolve on the receiver. A zero-arg lambda `(fn () …)` body is passed through (not re-wrapped), like `spawn`. The **receiver** must have called `(start-remote-spawn)` (typically right after `node-start`); the macro itself does no setup on either side."
   `(do
      (send {:name :remote-spawn :node ~node}
-       [:run ~(spawn--body-thunk expr)])
+       [:run ~(spawn-body-thunk expr)])
      nil))
 
 (defmacro remote-spawn-sync (node expr)
@@ -2404,7 +2447,7 @@ through (not re-wrapped), like `spawn`. Use this when you need the child's pid �
 e.g. to `monitor`/`link` a remote child — rather than fire-and-forget."
   `(let (r# (ref))
      (send {:name :remote-spawn :node ~node}
-       [:run-sync ~(spawn--body-thunk expr) (self) r#])
+       [:run-sync ~(spawn-body-thunk expr) (self) r#])
      (receive
        ([:spawned got# child#] :when (= got# r#) child#)
        (after 5000
@@ -2417,17 +2460,19 @@ e.g. to `monitor`/`link` a remote child — rather than fire-and-forget."
 ;; policy in Brood over the %node-listen / %node-connect / random-token /
 ;; spit-private primitives — the kernel only carries bytes.
 
-(defn node--config-dir ()
+(defn- node-config-dir
+  ()
   (str (or (getenv "XDG_CONFIG_HOME") (str (getenv "HOME") "/.config")) "/brood"))
 
-(defn node--cookie-path () (str (node--config-dir) "/cookie"))
+(defn- node-cookie-path () (str (node-config-dir) "/cookie"))
 
 ;; Strip trailing newlines so a hand-edited cookie file (or one written by a
 ;; tool that appends "\n") still matches the bytes we minted.
-(defn node--chomp (s)
+(defn- node-chomp
+  (s)
   (let (n (string-length s))
     (if (and (> n 0) (= (substring s (dec n) n) "\n"))
-      (node--chomp (substring s 0 (dec n)))
+      (node-chomp (substring s 0 (dec n)))
       s)))
 
 (defn node-cookie ()
@@ -2435,9 +2480,9 @@ e.g. to `monitor`/`link` a remote child — rather than fire-and-forget."
 `~/.config/brood/cookie` → freshly generated and persisted (0600). All your nodes
 on this machine share one cookie, Erlang-style; set `$BROOD_COOKIE` to override."
   (or (getenv "BROOD_COOKIE")
-    (let (path (node--cookie-path))
+    (let (path (node-cookie-path))
       (if (file-exists? path)
-        (node--chomp (slurp path))
+        (node-chomp (slurp path))
         (let (secret (random-token 32))
           (spit-private path secret)
           secret)))))
@@ -2445,41 +2490,46 @@ on this machine share one cookie, Erlang-style; set `$BROOD_COOKIE` to override.
 ;; The per-user dir holding local node sockets. $XDG_RUNTIME_DIR is the right
 ;; home (tmpfs, cleared on logout); fall back to /tmp/brood-<user> when a bare /
 ;; cron / ssh session leaves it unset.
-(defn node--runtime-dir ()
+(defn- node-runtime-dir
+  ()
   (str (or (getenv "XDG_RUNTIME_DIR")
          (str "/tmp/brood-" (or (getenv "USER") (getenv "LOGNAME") "shared")))
     "/brood"))
 
-(defn node--socket-path (s) (str (node--runtime-dir) "/" s ".sock"))
+(defn- node-socket-path (s) (str (node-runtime-dir) "/" s ".sock"))
 
 ;; Index of the first "@" in s, or -1. No string-split primitive — and a node
 ;; spec only ever has the one separator — so a small char scan is plenty.
-(defn node--at (s i n)
+(defn- node-at
+  (s i n)
   (cond
     (>= i n) -1
     (= (substring s i (inc i)) "@") i
-    else (node--at s (inc i) n)))
+    else (node-at s (inc i) n)))
 
 ;; Last index of `:` in s (or -1) — needed to split "name@host:port" into the
 ;; node name "name@host" and the port, IPv6-host-safe (the port colon is last).
-(defn node--last-colon (s i n last)
+(defn- node-last-colon
+  (s i n last)
   (cond
     (>= i n) last
-    (= (substring s i (inc i)) ":") (node--last-colon s (inc i) n i)
-    else (node--last-colon s (inc i) n last)))
+    (= (substring s i (inc i)) ":") (node-last-colon s (inc i) n i)
+    else (node-last-colon s (inc i) n last)))
 
 ;; The bare name-part of a node name (before any `@`). Used for the local Unix
 ;; socket filename — the socket is same-machine, so the host qualifier is
 ;; identity only, not part of the path.
-(defn node--name-part (s)
-  (let (at (node--at s 0 (string-length s)))
+(defn- node-name-part
+  (s)
+  (let (at (node-at s 0 (string-length s)))
     (if (>= at 0) (substring s 0 at) s)))
 
 ;; The host part of a "host:port" address (everything before the last colon),
 ;; IPv6-safe. So a TCP node's name host == the host peers dial, keeping
 ;; `connect`/`net/reconnect` name-derivation consistent with the node's identity.
-(defn node--addr-host (addr)
-  (let (lc (node--last-colon addr 0 (string-length addr) -1))
+(defn- node-addr-host
+  (addr)
+  (let (lc (node-last-colon addr 0 (string-length addr) -1))
     (if (>= lc 0) (substring addr 0 lc) addr)))
 
 ;; Qualify a node name to `name@host` (ADR-073), Erlang-style:
@@ -2487,12 +2537,13 @@ on this machine share one cookie, Erlang-style; set `$BROOD_COOKIE` to override.
 ;;   - TCP node (addr given) → `name@<addr-host>`, so it matches how peers reach it;
 ;;   - local Unix node → `name@<short hostname>`.
 ;; The result is the node's global identity, carried in every pid.
-(defn node--qualify (nm addr)
+(defn- node-qualify
+  (nm addr)
   (let (s (name nm))
     (cond
-      (>= (node--at s 0 (string-length s)) 0) (keyword s)
+      (>= (node-at s 0 (string-length s)) 0) (keyword s)
       (nil? addr) (keyword (str s "@" (hostname)))
-      else (keyword (str s "@" (node--addr-host addr))))))
+      else (keyword (str s "@" (node-addr-host addr))))))
 
 (defn node-start (nm &optional addr cookie)
   "Start this runtime as a node so peers can reach it. The node's identity is
@@ -2503,9 +2554,9 @@ local node; pass an already-qualified `:name@host` to override (a long/FQDN name
 same-machine case; `(node-start name \"host:port\")` listens over TCP for remote
 peers. The cookie defaults to `(node-cookie)`. Returns the qualified node name.
 Errors if this runtime is already a node."
-  (%node-listen (node--qualify nm addr)
+  (%node-listen (node-qualify nm addr)
     (if (nil? addr)
-      (str "unix:" (node--socket-path (node--name-part (name nm))))
+      (str "unix:" (node-socket-path (node-name-part (name nm))))
       (str "tcp:" addr))
     (or cookie (node-cookie))))
 
@@ -2519,15 +2570,15 @@ node — call `(node-start …)` first."
   (when (= (node-name) :nonode)
     (error "connect: this runtime is not a node yet — call (node-start name) first"))
   (let (n (string-length spec)
-        at (node--at spec 0 n))
+        at (node-at spec 0 n))
     (if (< at 0)
       ;; Bare name → local Unix node. The peer's real name is `name@thishost`;
       ;; pass that as the claimed name (the handshake confirms it).
       (%node-connect (keyword (str spec "@" (hostname)))
-        (str "unix:" (node--socket-path spec)))
+        (str "unix:" (node-socket-path spec)))
       ;; Qualified → remote TCP: "name@host:port". The node name is everything
       ;; before the (last) port colon; the dial address is everything after `@`.
-      (let (lc (node--last-colon spec 0 n -1))
+      (let (lc (node-last-colon spec 0 n -1))
         (when (<= lc at)
           (error "connect: a remote node needs \"name@host:port\" (a bare name is local), got "
             spec))
@@ -2546,7 +2597,7 @@ runtime isn't a node yet."
   (when (= (node-name) :nonode)
     (error "node-also-listen: this runtime is not a node yet — call (node-start name) first"))
   (%node-also-listen (if (nil? addr)
-                       (str "unix:" (node--socket-path (node--name-part (name (node-name)))))
+                       (str "unix:" (node-socket-path (node-name-part (name (node-name)))))
                        (str "tcp:" addr))))
 
 ;; ---- sleep: park on the scheduler timer (policy in Brood) ---------------
@@ -2640,12 +2691,13 @@ message already sent stays sent."
 ;; lists `a` twice, but binds it once (the repeat compiles to an equality check).
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn receive--dedupe (vars seen)
+  (defn- receive-dedupe
+    (vars seen)
     (cond
       (empty? vars) nil
-      (match-member? (first vars) seen) (receive--dedupe (rest vars) seen)
-      else (cons (first vars) (receive--dedupe (rest vars) (cons (first vars) seen))))))
-(defn receive--clause-vars (pat) (receive--dedupe (pattern-vars pat) nil))
+      (match-member? (first vars) seen) (receive-dedupe (rest vars) seen)
+      else (cons (first vars) (receive-dedupe (rest vars) (cons (first vars) seen))))))
+(defn- receive-clause-vars (pat) (receive-dedupe (pattern-vars pat) nil))
 
 ;; Pair each clause with the variables its pattern binds and its index, ONCE. Both
 ;; halves below (the matcher's result vector and the call site's rebinding) need that
@@ -2654,16 +2706,18 @@ message already sent stays sent."
 ;; two. Shape: `[clause vars idx]`.
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn receive--prep (clauses idx)
+  (defn- receive-prep
+    (clauses idx)
     (if (empty? clauses)
       nil
-      (cons [(first clauses) (receive--clause-vars (first (first clauses))) idx]
-        (receive--prep (rest clauses) (+ idx 1))))))
+      (cons [(first clauses) (receive-clause-vars (first (first clauses))) idx]
+        (receive-prep (rest clauses) (+ idx 1))))))
 
 ;; Replace a clause's body with `[idx var…]` — the clause's index plus the values its
 ;; pattern bound. Keeps the :when guard in place, so the match compiler still gates on
 ;; it and the guard still runs exactly once, during the scan.
-(defn receive--result-clause (prep)
+(defn- receive-result-clause
+  (prep)
   (let (clause (nth prep 0)
         vars (nth prep 1)
         idx (nth prep 2)
@@ -2677,19 +2731,21 @@ message already sent stays sent."
 ;; matcher's result vector back into the clause's pattern variables.
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn receive--binds (vars r i)
+  (defn- receive-binds
+    (vars r i)
     (if (empty? vars)
       nil
       (cons (first vars)
-        (cons `(nth ~r ~i) (receive--binds (rest vars) r (+ i 1)))))))
+        (cons `(nth ~r ~i) (receive-binds (rest vars) r (+ i 1)))))))
 
 ;; One clause's call-site code: rebind its pattern variables from the result vector,
 ;; then run its body.
-(defn receive--body-code (prep r)
+(defn- receive-body-code
+  (prep r)
   (let (clause (nth prep 0)
         more (rest clause)
         body (if (= (first more) :when) (rest (rest more)) more)
-        binds (receive--binds (nth prep 1) r 1))
+        binds (receive-binds (nth prep 1) r 1))
     (if (empty? binds) `(do ~@body) `(let ~binds ~@body))))
 
 ;; The call-site dispatch: `(if (= (nth r 0) 0) body0 (if (= (nth r 0) 1) body1 …))`.
@@ -2699,28 +2755,31 @@ message already sent stays sent."
 ;; position, so a receive loop stays O(1) stack.
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn receive--dispatch (preps r)
+  (defn- receive-dispatch
+    (preps r)
     (if (empty? (rest preps))
-      (receive--body-code (first preps) r)
+      (receive-body-code (first preps) r)
       `(if (= (nth ~r 0) ~(nth (first preps) 2))
-         ~(receive--body-code (first preps) r)
-         ~(receive--dispatch (rest preps) r)))))
+         ~(receive-body-code (first preps) r)
+         ~(receive-dispatch (rest preps) r)))))
 
 ;; Walk the clause list and error if an `(after ...)` clause appears before the last
 ;; position — a non-last `after` would silently become a pattern clause matching the
 ;; symbol `after`, which is almost certainly a mistake.
-(defn receive--check-after (clauses)
+(defn- receive-check-after
+  (clauses)
   (if (or (empty? clauses) (empty? (rest clauses)))
     nil
     (if (and (pair? (first clauses)) (%eq (first (first clauses)) 'after))
       (error "receive: (after ...) must be the last clause, but it appears before "
         (count (rest clauses))
         " more clause(s)")
-      (receive--check-after (rest clauses)))))
+      (receive-check-after (rest clauses)))))
 
 ;; Split clauses into [real-clauses ms-or-nil timeout-body-or-nil], peeling an
 ;; optional trailing (after ms body...). `after` as a final clause head is reserved.
-(defn receive--split (clauses)
+(defn- receive-split
+  (clauses)
   (let (lst (last clauses))
     (if (and (pair? lst) (= (first lst) 'after))
       [(but-last clauses) (second lst) `(do ~@(rest (rest lst)))]
@@ -2742,7 +2801,8 @@ message already sent stays sent."
 ;; irrelevant to it — a `:when` can only reject a message the tag already admitted.
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn receive--tags (clauses)
+  (defn- receive-tags
+    (clauses)
     (if (empty? clauses)
       nil
       (let (pat (first (first clauses))
@@ -2751,7 +2811,7 @@ message already sent stays sent."
                   nil))
         (if (nil? tag)
           nil ; one un-taggable clause disables the filter
-          (let (rest-tags (receive--tags (rest clauses)))
+          (let (rest-tags (receive-tags (rest clauses)))
             (if (and (nil? rest-tags) (not (empty? (rest clauses))))
               nil ; a later clause disabled it
               (cons tag rest-tags))))))))
@@ -2761,13 +2821,14 @@ message already sent stays sent."
 ;; different, disables it (nil), exactly like `receive--tags`. The kernel only acts on it when
 ;; the value turns out to be a `ref` this process minted, so a false positive here costs
 ;; nothing but a wasted comparison.
-(defn receive--pinned-in (pat)
+(defn- receive-pinned-in
+  (pat)
   "The single pinned expression inside `pat`, or nil if it pins none or several."
   (cond
     (match-pin? pat) (second pat)
     (vector? pat)
       (fold (fn (acc p)
-              (let (inner (receive--pinned-in p))
+              (let (inner (receive-pinned-in p))
                 (cond
                   (nil? inner) acc
                   (nil? acc) inner
@@ -2779,7 +2840,8 @@ message already sent stays sent."
 
 ;; check-allow: deliberately non-tail — expansion-time recursion over receive-clause syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn receive--pin (clauses)
+  (defn- receive-pin
+    (clauses)
     "The **symbol** pinned by every clause, or nil when they do not agree.
 
   Restricted to a symbol deliberately. The hint is emitted as a form that the call site
@@ -2789,44 +2851,44 @@ message already sent stays sent."
   differ. Any other pinned expression declines the hint and scans from the front."
     (if (empty? clauses)
       nil
-      (let (first-pin (receive--pinned-in (first (first clauses))))
+      (let (first-pin (receive-pinned-in (first (first clauses))))
         (if (or (nil? first-pin) (= first-pin :none) (not (symbol? first-pin)))
           nil
           (if (empty? (rest clauses))
             first-pin
-            (let (rest-pin (receive--pin (rest clauses)))
+            (let (rest-pin (receive-pin (rest clauses)))
               (if (= rest-pin first-pin) first-pin nil))))))))
 
 (defmacro receive (& clauses)
   "Selectively receive a message from the mailbox: run the first `(pattern [:when guard] body...)` clause that matches, leaving others queued. An optional final `(after ms body...)` clause fires on timeout; `(receive)` blocks for the next message."
   (do
-    (receive--check-after clauses)
-    (let (parts (receive--split clauses)
+    (receive-check-after clauses)
+    (let (parts (receive-split clauses)
           real (nth parts 0)
           ms (nth parts 1)
           on-time (nth parts 2)
           msg (gensym "msg")
           r (gensym "rcv")
           ;; Walk each pattern once; both halves below read the same prep.
-          preps (receive--prep real 0)
+          preps (receive-prep real 0)
           ;; The matcher answers "which clause, and what did it bind?" as `[idx var…]`,
           ;; or nil for no match. No clauses: take the next message as-is.
           matcher (if (empty? real)
                     `(fn (~msg) [0 ~msg])
                     `(fn (~msg)
-                       ~(match-build-from (map receive--result-clause preps) msg nil)))
-          dispatch (if (empty? real) `(nth ~r 1) (receive--dispatch preps r))
+                       ~(match-build-from (map receive-result-clause preps) msg nil)))
+          dispatch (if (empty? real) `(nth ~r 1) (receive-dispatch preps r))
           ;; nil when the filter can't apply (see `receive--tags`). Built as a vector
           ;; FORM (`[~@tags]`), not by calling a function: a plain list would expand to
           ;; `(:tag …)`, which evaluates as a keyword accessor call (ADR-165) rather
           ;; than data — and calling `vec` here would run at macro-expansion time
           ;; *during the prelude build*, where its own dependency (`into`, defined
           ;; ~2000 lines later) does not exist yet.
-          tag-list (if (empty? real) nil (receive--tags real))
+          tag-list (if (empty? real) nil (receive-tags real))
           tags (if (nil? tag-list) nil `[~@tag-list])
           ;; The receive-mark hint — see `receive--pin`. Emitted as the pinned FORM, so it
           ;; evaluates at the call site to the same value the pattern compares against.
-          pin (if (empty? real) nil (receive--pin real)))
+          pin (if (empty? real) nil (receive-pin real)))
       ;; `%receive` returns the matcher's result vector, or nil on timeout (only
       ;; reachable with an `after` clause — nil is unambiguous because a match always
       ;; answers with a vector). The bodies run HERE, in the caller's tail position.
@@ -2886,11 +2948,12 @@ mailbox messages stay queued while waiting (selective receive)."
 ;; (take n coll) -> the first n elements (fewer if coll is shorter).
 (defn take (n coll)
   "The first `n` items of `coll` (fewer if it is shorter), as a list."
-  (take--acc n coll nil))
-(defn take--acc (n coll acc)
+  (take-acc n coll nil))
+(defn- take-acc
+  (n coll acc)
   (if (or (<= n 0) (empty? coll))
     (reverse acc)
-    (take--acc (- n 1) (rest coll) (cons (first coll) acc))))
+    (take-acc (- n 1) (rest coll) (cons (first coll) acc))))
 
 ;; (drop n coll) -> coll without its first n elements.
 (defn drop (n coll)
@@ -2900,10 +2963,11 @@ mailbox messages stay queued while waiting (selective receive)."
 ;; (take-while pred coll) / (drop-while pred coll) split on the first failure.
 (defn take-while (pred coll)
   "The leading items of `coll` for which `(pred x)` holds."
-  (take-while--acc pred coll nil))
-(defn take-while--acc (pred coll acc)
+  (take-while-acc pred coll nil))
+(defn- take-while-acc
+  (pred coll acc)
   (if (and (pair? coll) (pred (first coll)))
-    (take-while--acc pred (rest coll) (cons (first coll) acc))
+    (take-while-acc pred (rest coll) (cons (first coll) acc))
     (reverse acc)))
 (defn drop-while (pred coll)
   "`coll` with its leading items for which `(pred x)` holds removed."
@@ -2927,11 +2991,12 @@ mailbox messages stay queued while waiting (selective receive)."
 ;; (zip a b) -> a list of [x y] vectors, stopping at the shorter input.
 (defn zip (a b)
   "A list of `[x y]` pairs from `a` and `b`, stopping at the shorter input."
-  (zip--acc a b nil))
-(defn zip--acc (a b acc)
+  (zip-acc a b nil))
+(defn- zip-acc
+  (a b acc)
   (if (or (empty? a) (empty? b))
     (reverse acc)
-    (zip--acc (rest a) (rest b) (cons [(first a) (first b)] acc))))
+    (zip-acc (rest a) (rest b) (cons [(first a) (first b)] acc))))
 
 ;; (partition n coll) -> consecutive n-sized chunks; a trailing partial chunk is
 ;; dropped (Clojure `partition` semantics). `has-at-least?` avoids re-counting.
@@ -2939,10 +3004,11 @@ mailbox messages stay queued while waiting (selective receive)."
   (cond (<= n 0) true (empty? coll) false else (has-at-least? (- n 1) (rest coll))))
 (defn partition (n coll)
   "Split `coll` into consecutive `n`-sized chunks; a trailing partial chunk is dropped."
-  (partition--acc n coll nil))
-(defn partition--acc (n coll acc)
+  (partition-acc n coll nil))
+(defn- partition-acc
+  (n coll acc)
   (if (has-at-least? n coll)
-    (partition--acc n (drop n coll) (cons (take n coll) acc))
+    (partition-acc n (drop n coll) (cons (take n coll) acc))
     (reverse acc)))
 
 ;; (sort coll) ascending via `<` (numbers) or structural order (anything else);
@@ -2977,31 +3043,34 @@ string, keyword, vector, and record keys all work."
 ;; Split `coll` into its first `n` items and the rest in ONE pass — what
 ;; merge-sort needs instead of a separate `take` + `drop` (two walks). Generally
 ;; useful, so it's public.
-(defn split-at--acc (n coll acc)
+(defn- split-at-acc
+  (n coll acc)
   (if (or (<= n 0) (empty? coll))
     [(reverse acc) coll]
-    (split-at--acc (dec n) (rest coll) (cons (first coll) acc))))
+    (split-at-acc (dec n) (rest coll) (cons (first coll) acc))))
 (defn split-at (n coll)
   "The vector `[front back]` splitting `coll` at index `n`: `front` is its first `n` items (a list), `back` the remainder. One pass, unlike a separate `take`/`drop`."
-  (split-at--acc n coll nil))
+  (split-at-acc n coll nil))
 
 ;; Length-carrying merge sort: count once up front and halve `n` down the
 ;; recursion, and split each run in a single `split-at` pass. The previous form
 ;; re-`count`ed and ran a separate `take`+`drop` at every level — three O(n)
 ;; walks per level, O(n log n) wasted overall — purely to find the midpoint.
-(defn merge-sort (less? coll) (merge-sort--n less? coll (count coll)))
+(defn merge-sort (less? coll) (merge-sort-n less? coll (count coll)))
 ;; check-allow: deliberately non-tail — depth = log2 of the length — ~60 frames for any feasible list.
 (check-allow :non-tail-recursion
-  (defn merge-sort--n (less? coll n)
+  (defn- merge-sort-n
+    (less? coll n)
     (if (<= n 1)
       coll
       (let (h (quot n 2)
             parts (split-at h coll))
-        (merge--runs less?
-          (merge-sort--n less? (nth parts 0) h)
-          (merge-sort--n less? (nth parts 1) (- n h)))))))
-(defn merge--runs (less? a b) (merge--acc less? a b nil))
-(defn merge--acc (less? a b acc)
+        (merge-runs less?
+          (merge-sort-n less? (nth parts 0) h)
+          (merge-sort-n less? (nth parts 1) (- n h)))))))
+(defn- merge-runs (less? a b) (merge-acc less? a b nil))
+(defn- merge-acc
+  (less? a b acc)
   (cond
     ;; `acc` holds the merged prefix reversed; `reverse-onto` splices it in front of
     ;; the remaining run in ONE pass — the old `(append (reverse acc) …)` reversed
@@ -3011,8 +3080,8 @@ string, keyword, vector, and record keys all work."
     (empty? a) (reverse-onto acc b)
     (empty? b) (reverse-onto acc a)
     ;; strict `<` on b-vs-a: equal elements take from `a` first, so it's stable.
-    (less? (first b) (first a)) (merge--acc less? a (rest b) (cons (first b) acc))
-    else (merge--acc less? (rest a) b (cons (first a) acc))))
+    (less? (first b) (first a)) (merge-acc less? a (rest b) (cons (first b) acc))
+    else (merge-acc less? (rest a) b (cons (first a) acc))))
 
 ;; `mapcat` uses `append--onto` instead of `cons` to splice each sublist straight
 ;; onto the reversed accumulator, then reverse once — so we never materialise the
@@ -3020,7 +3089,7 @@ string, keyword, vector, and record keys all work."
 (defseq mapcat
   (f)
   "Map `f` over `coll` and concatenate the resulting lists into one."
-  (append--onto acc (f item)))
+  (append-onto acc (f item)))
 
 (defn frequencies (coll)
   "A map from each distinct element of `coll` to how many times it occurs."
@@ -3041,7 +3110,7 @@ string, keyword, vector, and record keys all work."
     ;; a plain map uses the GC-quiet CHAMP builder. `map-get` tells them apart.
     (map? to)
       (if (map-get to :__id__ nil)
-        (fold conj--one to (seq from))
+        (fold conj-one to (seq from))
         (%map-into to (if (map? from) (map-pairs from) from)))
     ;; Set target: add each item (duplicates collapse). Without this branch the
     ;; `else` poured a set into a LIST — `(into #{} [1 1 2])` was `(1 1 2)`.
@@ -3053,7 +3122,8 @@ string, keyword, vector, and record keys all work."
     else (append to from)))
 
 ;; conj's per-element step: each collection kind has a natural insertion point.
-(defn conj--one (coll x)
+(defn- conj-one
+  (coll x)
   (cond
     (nil? coll) (list x)
     (vector? coll) (into coll [x])
@@ -3079,7 +3149,7 @@ set (a duplicate is a no-op), and `assoc` a `[k v]` pair — or merge a map — 
 a map. Returns a fresh collection; `coll` is untouched. e.g. (conj [1 2] 3) →
 [1 2 3]; (conj '(2 3) 1) → (1 2 3); (conj #{1} 2) → #{1 2};
 (conj {:a 1} [:b 2]) → {:a 1 :b 2}."
-  (fold conj--one coll xs))
+  (fold conj-one coll xs))
 
 (defn disj (s & xs)
   "A fresh set like `s` with each of `xs` removed (removing an absent element is a
@@ -3113,7 +3183,8 @@ a vector for a vector and a list for a list. `i` must be in `[0, count)`."
 ;; distinct: keep the first occurrence of each item. A map carried alongside the
 ;; result acts as the "seen" set, so membership is O(1)-ish, not the O(n²) a
 ;; `member?`-per-item scan would cost. State is the 2-vector [seen result-rev].
-(defn distinct--step (state x)
+(defn- distinct-step
+  (state x)
   ;; the "seen" map only ever stores `true`, so a single `map-get` (default
   ;; `false`) distinguishes present from absent — no need for `contains?`'s
   ;; two-sentinel probe (which exists to tell a stored `nil`/`false` from absence).
@@ -3122,19 +3193,20 @@ a vector for a vector and a list for a list. `i` must be in `[0, count)`."
     [(map-assoc (nth state 0) x true) (cons x (nth state 1))]))
 (defn distinct (coll)
   "The items of `coll` with duplicates removed, keeping the first occurrence of each (order-preserving)."
-  (reverse (nth (fold distinct--step [{} nil] coll) 1)))
+  (reverse (nth (fold distinct-step [{} nil] coll) 1)))
 
 ;; dedupe: collapse only *consecutive* runs of equal items (no "seen" set needed).
-(defn dedupe--acc (coll prev acc)
+(defn- dedupe-acc
+  (coll prev acc)
   (cond
     (empty? coll) acc
-    (= (first coll) prev) (dedupe--acc (rest coll) prev acc)
-    else (dedupe--acc (rest coll) (first coll) (cons (first coll) acc))))
+    (= (first coll) prev) (dedupe-acc (rest coll) prev acc)
+    else (dedupe-acc (rest coll) (first coll) (cons (first coll) acc))))
 (defn dedupe (coll)
   "The items of `coll` with *consecutive* runs of equal items collapsed to a single item."
   (if (empty? coll)
     nil
-    (reverse (dedupe--acc (rest coll) (first coll) (list (first coll))))))
+    (reverse (dedupe-acc (rest coll) (first coll) (list (first coll))))))
 
 (defn group-by (f coll)
   "A map from each `(f x)` to the list of items of `coll` that produced it, each list in original order."
@@ -3149,28 +3221,31 @@ a vector for a vector and a list for a list. `i` must be in `[0, count)`."
 ;; nesting (bounded), not the length.
 ;; check-allow: deliberately non-tail — depth = the structure's nesting, not its element count.
 (check-allow :non-tail-recursion
-  (defn flatten--acc (coll acc)
+  (defn- flatten-acc
+    (coll acc)
     (cond
       (empty? coll) acc
-      (list? (first coll)) (flatten--acc (rest coll) (flatten--acc (first coll) acc))
-      else (flatten--acc (rest coll) (cons (first coll) acc)))))
+      (list? (first coll)) (flatten-acc (rest coll) (flatten-acc (first coll) acc))
+      else (flatten-acc (rest coll) (cons (first coll) acc)))))
 (defn flatten (coll)
   "A single flat list of the leaf items of `coll`, descending into nested lists. Vectors and maps are treated as leaves."
-  (reverse (flatten--acc coll nil)))
+  (reverse (flatten-acc coll nil)))
 
-(defn interpose--acc (sep coll acc)
-  (if (empty? coll) acc (interpose--acc sep (rest coll) (cons (first coll) (cons sep acc)))))
+(defn- interpose-acc
+  (sep coll acc)
+  (if (empty? coll) acc (interpose-acc sep (rest coll) (cons (first coll) (cons sep acc)))))
 (defn interpose (sep coll)
   "A list with `sep` inserted between adjacent items of `coll`."
-  (if (empty? coll) nil (reverse (interpose--acc sep (rest coll) (list (first coll))))))
+  (if (empty? coll) nil (reverse (interpose-acc sep (rest coll) (list (first coll))))))
 
-(defn interleave--acc (a b acc)
+(defn- interleave-acc
+  (a b acc)
   (if (or (empty? a) (empty? b))
     (reverse acc)
-    (interleave--acc (rest a) (rest b) (cons (first b) (cons (first a) acc)))))
+    (interleave-acc (rest a) (rest b) (cons (first b) (cons (first a) acc)))))
 (defn interleave (a b)
   "A list alternating items from `a` and `b` — `(a0 b0 a1 b1 …)` — stopping at the shorter input."
-  (interleave--acc a b nil))
+  (interleave-acc a b nil))
 
 (defn take-last (n coll)
   "The last `n` items of `coll`, as a list (the whole of `coll` if it is shorter, `()` if `n` <= 0)."
@@ -3181,52 +3256,56 @@ a vector for a vector and a list for a list. `i` must be in `[0, count)`."
 
 ;; ---- enum extras ------------------------------------------------------------
 ;; (chunk-every n coll) — like partition but keeps the trailing partial chunk.
-(defn chunk-every--acc (n coll acc)
+(defn- chunk-every-acc
+  (n coll acc)
   (if (empty? coll)
     (reverse acc)
-    (chunk-every--acc n (drop n coll) (cons (into [] (take n coll)) acc))))
+    (chunk-every-acc n (drop n coll) (cons (into [] (take n coll)) acc))))
 (defn chunk-every (n coll)
   "Split `coll` into consecutive `n`-item vectors; unlike `partition`, a
 trailing partial chunk is kept. `n` must be positive."
-  (chunk-every--acc n (seq coll) nil))
+  (chunk-every-acc n (seq coll) nil))
 
 ;; (chunk-by f coll) — consecutive runs where (f x) returns the same value.
-(defn chunk-by--acc (f coll key curr acc)
+(defn- chunk-by-acc
+  (f coll key curr acc)
   (if (empty? coll)
     (reverse (cons (into [] (reverse curr)) acc))
     (let (x (first coll) k (f x))
       (if (= k key)
-        (chunk-by--acc f (rest coll) key (cons x curr) acc)
-        (chunk-by--acc f (rest coll) k (list x) (cons (into [] (reverse curr)) acc))))))
+        (chunk-by-acc f (rest coll) key (cons x curr) acc)
+        (chunk-by-acc f (rest coll) k (list x) (cons (into [] (reverse curr)) acc))))))
 (defn chunk-by (f coll)
   "Split `coll` into consecutive vectors where `(f x)` returns the same value.
 A new chunk starts each time the return value of `f` changes."
   (let (s (seq coll))
     (if (empty? s)
       nil
-      (chunk-by--acc f (rest s) (f (first s)) (list (first s)) nil))))
+      (chunk-by-acc f (rest s) (f (first s)) (list (first s)) nil))))
 
 ;; (scan f init coll) — running fold: returns a list of all intermediate values
 ;; including the seed.
-(defn scan--acc (f acc coll result)
+(defn- scan-acc
+  (f acc coll result)
   (if (empty? coll)
     (reverse result)
     (let (next (f acc (first coll)))
-      (scan--acc f next (rest coll) (cons next result)))))
+      (scan-acc f next (rest coll) (cons next result)))))
 (defn scan (f init coll)
   "Return a list of successively accumulated values of `(fold f init coll)`,
 starting with `init`. `(scan + 0 '(1 2 3))` → `(0 1 3 6)`."
-  (scan--acc f init (seq coll) (list init)))
+  (scan-acc f init (seq coll) (list init)))
 
 ;; (zip-with f a b) — map `f` over pairs, stopping at the shorter sequence.
-(defn zip-with--acc (f a b acc)
+(defn- zip-with-acc
+  (f a b acc)
   (if (or (empty? a) (empty? b))
     (reverse acc)
-    (zip-with--acc f (rest a) (rest b) (cons (f (first a) (first b)) acc))))
+    (zip-with-acc f (rest a) (rest b) (cons (f (first a) (first b)) acc))))
 (defn zip-with (f a b)
   "Map `f` over corresponding pairs from `a` and `b`, stopping at the shorter
 input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
-  (zip-with--acc f (seq a) (seq b) nil))
+  (zip-with-acc f (seq a) (seq b) nil))
 
 ;; ---- records: named, optionally-typed maps (defrecord — ADR-130) ------------
 ;; A record is a plain immutable map with a positional constructor and one
@@ -3247,17 +3326,19 @@ input. `(zip-with + '(1 2) '(3 4))` → `(4 6)`."
 ;; and field-presence checking from the existing record-type machinery (ADR-115).
 
 ;; A field spec is a bare `name` (untyped) or `(name type)` (typed).
-(defn defrecord--fname (f) (if (pair? f) (first f) f))
-(defn defrecord--ftype (f) (if (pair? f) (second f) nil))
-(defn defrecord--acc-sym (rec fld) (symbol (str (name rec) "-" (name fld))))
-(defn defrecord--derives (opts)
+(defn- defrecord-fname (f) (if (pair? f) (first f) f))
+(defn- defrecord-ftype (f) (if (pair? f) (second f) nil))
+(defn- defrecord-acc-sym (rec fld) (symbol (str (name rec) "-" (name fld))))
+(defn- defrecord-derives
+  (opts)
   "The vector following `:derives` in a `defrecord`'s trailing opts (the abilities to
   derive), or nil. Each named ability must declare a `:derive-record` recipe (ADR-185)."
   (cond
     (empty? opts) nil
     (= (first opts) :derives) (second opts)
-    else (defrecord--derives (rest opts))))
-(defn defrecord--qualify (nm)
+    else (defrecord-derives (rest opts))))
+(defn- defrecord-qualify
+  (nm)
   "Qualify bare name `nm` (a string) against the current ns → a `:<ns>/nm` keyword; at
 root/REPL (no ns) there is no prefix, so it is a bare `:nm`. Shared by `defrecord` (which
 bakes a record's `:__id__`) and `ability--id-kw` (an impl's bare id) so the two AGREE — a
@@ -3302,11 +3383,11 @@ and it must be loaded before this `defrecord`.
     (defrecord circle (r))          ; (circle 2) → {:__id__ :geometry/circle, :r 2}
     (impl Shape circle (area [c] (* 3.14 (get c :r) (get c :r))))
     (defrecord point (x y) :derives [Ord])   ; compare-to synthesized field-wise"
-  (let (fnames (map defrecord--fname fields)
+  (let (fnames (map defrecord-fname fields)
         fkws (map (fn (n) (keyword (name n))) fnames)
         ;; the nominal id — a `:module/name` KEYWORD (a keyword literal is what the
         ;; checker tracks via `Ty::keyword_lit`), captured at definition.
-        id (defrecord--qualify (name rec))
+        id (defrecord-qualify (name rec))
         ;; ctor body: a MAP LITERAL (built here, at macro time) whose values are the field
         ;; symbols, with the reserved `:__id__` carrying the id keyword. Emitting a real
         ;; map value (not a `(hash-map …)` call) is what makes the checker infer the result
@@ -3314,30 +3395,30 @@ and it must be loaded before this `defrecord`.
         body (zipmap (cons :__id__ fkws) (cons id fnames))
         ctor `(defn ~rec (~@fnames) ~body)
         accs (map (fn (f)
-                    (let (fnm (defrecord--fname f))
-                      `(defn ~(defrecord--acc-sym rec fnm) (r) (get r ~(keyword (name fnm))))))
+                    (let (fnm (defrecord-fname f))
+                      `(defn ~(defrecord-acc-sym rec fnm) (r) (get r ~(keyword (name fnm))))))
                fields)
         ;; the record-shaped constructor sig (always — this is the dispatch-inference
         ;; seam): each field keeps its declared type, else `any`.
-        arg-tys (map (fn (f) (or (defrecord--ftype f) 'any)) fields)
+        arg-tys (map (fn (f) (or (defrecord-ftype f) 'any)) fields)
         rec-ty (cons 'record
                  (cons :__id__
                    (cons id
                      (mapcat (fn (f)
-                               (list (keyword (name (defrecord--fname f)))
-                                 (or (defrecord--ftype f) 'any)))
+                               (list (keyword (name (defrecord-fname f)))
+                                 (or (defrecord-ftype f) 'any)))
                        fields))))
         ctor-sig (list 'sig rec (append arg-tys (list '-> rec-ty)))
         ;; per-accessor sigs only when every field is typed (else an accessor call on a
         ;; bare map would false-warn), mirroring the pre-unification behaviour.
         acc-sigs (if (every? pair? fields)
                    (map (fn (f)
-                          (let (fnm (defrecord--fname f))
+                          (let (fnm (defrecord-fname f))
                             (list 'sig
-                              (defrecord--acc-sym rec fnm)
-                              (list (list 'record (keyword (name fnm)) (defrecord--ftype f))
+                              (defrecord-acc-sym rec fnm)
+                              (list (list 'record (keyword (name fnm)) (defrecord-ftype f))
                                 '->
-                                (defrecord--ftype f)))))
+                                (defrecord-ftype f)))))
                      fields)
                    nil)
         ;; `:derives [A …]` → one `(derive-into 'A id 'fields (current-ns))` per ability. The
@@ -3345,7 +3426,7 @@ and it must be loaded before this `defrecord`.
         ;; WITHOUT first evaluating the ability's `defability`, so the recipe isn't registered
         ;; at expand time. `derive-into` registers the impls at load; the checker reads these
         ;; forms statically (they mark the ability's ops as implemented for `id`).
-        derives (defrecord--derives opts)
+        derives (defrecord-derives opts)
         derive-calls (if derives
                        (map (fn (a)
                               (list 'derive-into
@@ -3369,16 +3450,17 @@ and it must be loaded before this `defrecord`.
   "Constrain `x` to the closed range [`lo`, `hi`]: `lo` if `x` is below it, `hi` if above, else `x`."
   (max lo (min hi x)))
 
-(defn repeat--acc (n x acc) (if (<= n 0) acc (repeat--acc (dec n) x (cons x acc))))
+(defn- repeat-acc (n x acc) (if (<= n 0) acc (repeat-acc (dec n) x (cons x acc))))
 (defn repeat (n x)
   "A list of `x` repeated `n` times (empty if `n` <= 0)."
-  (repeat--acc n x nil))
+  (repeat-acc n x nil))
 
-(defn repeatedly--acc (n f acc)
-  (if (<= n 0) (reverse acc) (repeatedly--acc (dec n) f (cons (f) acc))))
+(defn- repeatedly-acc
+  (n f acc)
+  (if (<= n 0) (reverse acc) (repeatedly-acc (dec n) f (cons (f) acc))))
 (defn repeatedly (n f)
   "A list of `n` successive calls to the zero-argument function `f` (in call order)."
-  (repeatedly--acc n f nil))
+  (repeatedly-acc n f nil))
 
 ;; ---- lazy / fusing seq-views (compute-frontier lever 3) ---------------------
 ;; `map`/`filter`/`keep`/`remove` are EAGER — they return a concrete list, and
@@ -3401,14 +3483,14 @@ and it must be loaded before this `defrecord`.
 
 ;; Composition — general right-to-left function composition; also the glue that
 ;; fuses a view's stages.
-(defn comp--compose (f g) (fn (x) (f (g x))))
+(defn- comp-compose (f g) (fn (x) (f (g x))))
 (defn comp (& fns)
   "Right-to-left function composition. `((comp f g) x)` is `(f (g x))`; with no
 arguments, `identity`."
   (cond
     (empty? fns) identity
     (empty? (rest fns)) (first fns)
-    else (fold comp--compose (first fns) (rest fns))))
+    else (fold comp-compose (first fns) (rest fns))))
 
 ;; The rest of the combinator family. `comp` shipped alone for a long time, which
 ;; left `(map (fn (x) (f a x)) xs)` as the only spelling of a partially-applied
@@ -3522,22 +3604,24 @@ iterating for side effects."
   "Apply `f` to `x` `n` times — fⁿ(x). `(times 0 f x)` is `x`."
   (if (<= n 0) x (times (dec n) f (f x))))
 
-(defn iterate-times--acc (f x n acc)
-  (if (< n 0) acc (iterate-times--acc f (f x) (dec n) (cons x acc))))
+(defn- iterate-times-acc
+  (f x n acc)
+  (if (< n 0) acc (iterate-times-acc f (f x) (dec n) (cons x acc))))
 (defn iterate-times (f x n)
   "The list (x f(x) f²(x) … fⁿ(x)) — `n`+1 successive states of applying `f`."
-  (reverse (iterate-times--acc f x n nil)))
+  (reverse (iterate-times-acc f x n nil)))
 
 ;; One tail pass pairing each item with a running index — the old
 ;; `(zip (range (count coll)) coll)` made three passes (count, build the range
 ;; list, then zip). `seq` coerces a map to its `[k v]` pairs, as `zip` did.
-(defn enumerate--acc (i coll acc)
+(defn- enumerate-acc
+  (i coll acc)
   (if (empty? coll)
     (reverse acc)
-    (enumerate--acc (inc i) (rest coll) (cons [i (first coll)] acc))))
+    (enumerate-acc (inc i) (rest coll) (cons [i (first coll)] acc))))
 (defn enumerate (coll)
   "Pair each item with its 0-based index: ([0 x₀] [1 x₁] …)."
-  (enumerate--acc 0 (seq coll) nil))
+  (enumerate-acc 0 (seq coll) nil))
 
 ;; ---- comprehensions ---------------------------------------------------------
 ;; `for` builds a list by walking one or more bindings, with `:when` guards —
@@ -3560,29 +3644,31 @@ iterating for side effects."
 ;; recursive, so deep comprehensions don't grow the stack.
 ;; check-allow: deliberately non-tail — expansion-time recursion over macro-body syntax — depth is source nesting, not runtime data.
 (check-allow :non-tail-recursion
-  (defn for--fold (acc binds body)
+  (defn- for-fold
+    (acc binds body)
     (cond
       (empty? binds) `(cons ~body ~acc)
-      (= (first binds) :when) `(if ~(second binds) ~(for--fold acc (rest (rest binds)) body) ~acc)
+      (= (first binds) :when) `(if ~(second binds) ~(for-fold acc (rest (rest binds)) body) ~acc)
       else
-        `(fold (fn (~acc ~(first binds)) ~(for--fold acc (rest (rest binds)) body))
+        `(fold (fn (~acc ~(first binds)) ~(for-fold acc (rest (rest binds)) body))
            ~acc ~(second binds)))))
 
 ;; Validate that binding pairs are complete — each variable has a collection, and each
 ;; :when has a guard expression. An odd-count suffix silently produces an empty result
 ;; (the missing coll becomes nil), which is almost always a mistake.
-(defn for--check-binds (binds)
+(defn- for-check-binds
+  (binds)
   (cond
     (empty? binds) nil
     (%eq (first binds) :when)
       (if (empty? (rest binds))
         (error "for: :when at end of bindings has no guard expression")
-        (for--check-binds (rest (rest binds))))
+        (for-check-binds (rest (rest binds))))
     (empty? (rest binds))
       (error "for: binding '"
         (pr-str (first binds))
         "' has no collection — bindings must be paired as (var coll ...)")
-    else (for--check-binds (rest (rest binds)))))
+    else (for-check-binds (rest (rest binds)))))
 
 (defmacro for (binds & body)
   "List comprehension: `(for (x xs) expr)` yields `expr` for each `x`; supports `:when guard` filters and multiple bindings (last varies fastest). Bindings may destructure. Multiple body forms are evaluated in order and the LAST one is collected (like `let`/`when`/`doseq`) — `for` took exactly one body form until 2026-07-26, the only iteration form that did."
@@ -3591,10 +3677,10 @@ iterating for side effects."
       (error "for: bindings must be a list, not a vector: write (for (x xs) expr)."
         " Brood is lists-for-code, vectors-for-data (unlike Clojure) — a vector"
         " *inside* a binding position is still destructuring: (for ([k v] pairs) k)."))
-    (for--check-binds binds)
+    (for-check-binds binds)
     (let (acc (gensym "acc"))
       `(reverse (let (~acc nil)
-                  ~(for--fold acc
+                  ~(for-fold acc
                      (map identity binds)
                      (if (empty? (rest body)) (first body) (cons 'do body))))))))
 
@@ -3608,27 +3694,27 @@ iterating for side effects."
 ;; (dotimes (i n) body...) — run `body` for `i` = 0, 1, …, n-1; returns nil. The
 ;; lean iteration primitive: a plain tail-recursive walker, no result list built
 ;; (unlike `doseq`, which routes through `for`/`mapcat`). For effects only.
-(defn dotimes--loop (n f i) (when (< i n) (f i) (dotimes--loop n f (+ i 1))))
+(defn- dotimes-loop (n f i) (when (< i n) (f i) (dotimes-loop n f (+ i 1))))
 (defmacro dotimes (bind & body)
   "Run `body` with the bound name set to 0, 1, …, n-1 for side effect; returns `nil`. `bind` is `(var n)`."
   (if (not (and (pair? bind) (pair? (rest bind))))
     (error "dotimes: bind must be (var n), got "
       (pr-str bind)
       ". Syntax: (dotimes (i n) body...)")
-    `(do (dotimes--loop ~(second bind) (fn (~(first bind)) ~@body) 0) nil)))
+    `(do (dotimes-loop ~(second bind) (fn (~(first bind)) ~@body) 0) nil)))
 
 ;; (dolist (x xs) body...) — run `body` for each element of `xs`; returns nil.
 ;; The list-only counterpart to `dotimes`: lean and tail-recursive, no discard
 ;; list built. Use `doseq` when you need destructuring or `:when` filters; reach
 ;; for `dolist` for the common "do this for each item" loop.
-(defn dolist--loop (xs f) (when (not (nil? xs)) (f (first xs)) (dolist--loop (rest xs) f)))
+(defn- dolist-loop (xs f) (when (not (nil? xs)) (f (first xs)) (dolist-loop (rest xs) f)))
 (defmacro dolist (bind & body)
   "Run `body` with the bound name set to each element of the collection for side effect; returns `nil`. `bind` is `(var coll)`."
   (if (not (and (pair? bind) (pair? (rest bind))))
     (error "dolist: bind must be (var coll), got "
       (pr-str bind)
       ". Syntax: (dolist (x xs) body...)")
-    `(do (dolist--loop ~(second bind) (fn (~(first bind)) ~@body)) nil)))
+    `(do (dolist-loop ~(second bind) (fn (~(first bind)) ~@body)) nil)))
 
 ;; (bench label expr) — wall-clock timing, in milliseconds (the resolution of
 ;; `now`). The gensyms keep `label`/`expr` from capturing `t0`/`r` if the caller
@@ -3710,12 +3796,13 @@ inverse of the `string->codepoints` primitive."
   "Concatenate a list of strings (e.g. from `string->list`) into one string."
   (apply str cs))
 
-(defn index-of--seq-from (coll x i from)
+(defn- index-of-seq-from
+  (coll x i from)
   ;; scan from the head; only start matching once the running index reaches `from`
   (cond
     (empty? coll) -1
     (and (>= i from) (= (first coll) x)) i
-    else (index-of--seq-from (rest coll) x (inc i) from)))
+    else (index-of-seq-from (rest coll) x (inc i) from)))
 (defn index-of (coll x &optional from)
   "The 0-based index of `x` in `coll` at or after `from` (default 0), or -1 if absent.
 For a string, `x` is a substring (multi-char ok; the empty string matches at `from`);
@@ -3734,18 +3821,19 @@ what incremental search rides on (formerly the separate `index-of`)."
       ;; see the note there before assuming this is anyone's bottleneck. The empty needle
       ;; still matches at `from`, and a `from` past the end still finds nothing.
       (string? coll) (%str-index-of coll x (max 0 start))
-      else (index-of--seq-from coll x 0 start))))
+      else (index-of-seq-from coll x 0 start))))
 
-(defn index-where--from (pred coll i)
+(defn- index-where-from
+  (pred coll i)
   (cond
     (empty? coll) -1
     (pred (first coll)) i
-    else (index-where--from pred (rest coll) (inc i))))
+    else (index-where-from pred (rest coll) (inc i))))
 (defn index-where (pred coll)
   "The 0-based index of the first item of `coll` for which `(pred x)` holds, or
 -1 if none does. The predicate counterpart of `index-of` (which matches by
 equality); recover the item itself with `find`."
-  (index-where--from pred coll 0))
+  (index-where-from pred coll 0))
 
 (defn last-index-of (s needle &optional before)
   "The 0-based char index of the **last** occurrence of `needle` in string `s` whose
@@ -3770,8 +3858,9 @@ incremental search rides on."
 
 ;; Collect `coll`'s elements interleaved with `sep` into a parts list (tail-
 ;; recursively, reversed), then build the string in one `apply str` pass.
-(defn join--parts (sep coll acc)
-  (if (empty? coll) acc (join--parts sep (rest coll) (cons (first coll) (cons sep acc)))))
+(defn- join-parts
+  (sep coll acc)
+  (if (empty? coll) acc (join-parts sep (rest coll) (cons (first coll) (cons sep acc)))))
 (defn join (sep coll)
   "Concatenate the strings in `coll` with `sep` between adjacent elements."
   ;; For the common case — a string separator over a list/vector/range — the
@@ -3788,7 +3877,7 @@ incremental search rides on."
       (%string-join sep coll)
       (if (empty? coll)
         ""
-        (apply str (cons (first coll) (reverse (join--parts sep (rest coll) nil))))))))
+        (apply str (cons (first coll) (reverse (join-parts sep (rest coll) nil))))))))
 
 ;; `string-split` is now a native builtin (crates/lisp/src/builtins.rs) — one O(n)
 ;; pass via Rust's `str::split`. The former pure-Brood version re-`substring`ed the
@@ -3800,22 +3889,24 @@ incremental search rides on."
 leaves `s` unchanged."
   (if (= old "") s (join new (string-split s old))))
 
-(defn string--whitespace? (c) (or (= c " ") (= c "\t") (= c "\n") (= c "\r")))
+(defn- string-whitespace? (c) (or (= c " ") (= c "\t") (= c "\n") (= c "\r")))
 
 (defn blank? (s)
   "Is `s` empty or made up only of whitespace?"
   (let (n (string-length s))
-    (cond (= n 0) true (string--whitespace? (char-at s 0)) (blank? (substring s 1 n)) else false)))
+    (cond (= n 0) true (string-whitespace? (char-at s 0)) (blank? (substring s 1 n)) else false)))
 
-(defn triml--from (s i n)
-  (if (and (< i n) (string--whitespace? (char-at s i))) (triml--from s (inc i) n) (substring s i n)))
-(defn triml (s) "Remove leading whitespace from `s`." (triml--from s 0 (string-length s)))
+(defn- triml-from
+  (s i n)
+  (if (and (< i n) (string-whitespace? (char-at s i))) (triml-from s (inc i) n) (substring s i n)))
+(defn triml (s) "Remove leading whitespace from `s`." (triml-from s 0 (string-length s)))
 
-(defn trimr--to (s n)
-  (if (and (> n 0) (string--whitespace? (char-at s (dec n))))
-    (trimr--to s (dec n))
+(defn- trimr-to
+  (s n)
+  (if (and (> n 0) (string-whitespace? (char-at s (dec n))))
+    (trimr-to s (dec n))
     (substring s 0 n)))
-(defn trimr (s) "Remove trailing whitespace from `s`." (trimr--to s (string-length s)))
+(defn trimr (s) "Remove trailing whitespace from `s`." (trimr-to s (string-length s)))
 
 (defn trim (s) "Remove leading and trailing whitespace from `s`." (triml (trimr s)))
 
@@ -3842,39 +3933,42 @@ leaves `s` unchanged."
 ;; zero runtime machinery — it is exactly the hand-written `str` call, minus the
 ;; quote-chopping. Reach for it wherever a message interleaves text and values:
 ;; `(error (fmt "json: bad number '{tok}' at index {i}"))`.
-(defn fmt--flush (buf parts)
+(defn- fmt-flush
+  (buf parts)
   ;; push the accumulated literal chunk (reversed chars) onto `parts`, if non-empty
   (if (empty? buf) parts (cons (apply str (reverse buf)) parts)))
-(defn fmt--hole (chars expr depth parts)
+(defn- fmt-hole
+  (chars expr depth parts)
   ;; inside a {…} hole: accumulate the expression text until the matching `}`, then
   ;; `read-string` it into a form. Braces nest by `depth` (a map/set literal inside).
   (cond
     (empty? chars) (error "fmt: unterminated '{' in template")
     (and (= (first chars) "}") (= depth 0))
-      (fmt--lit (rest chars)
+      (fmt-lit (rest chars)
         nil
         (cons (read-string expr) parts))
-    (= (first chars) "{") (fmt--hole (rest chars) (str expr "{") (inc depth) parts)
-    (= (first chars) "}") (fmt--hole (rest chars) (str expr "}") (dec depth) parts)
-    else (fmt--hole (rest chars) (str expr (first chars)) depth parts)))
-(defn fmt--lit (chars buf parts)
+    (= (first chars) "{") (fmt-hole (rest chars) (str expr "{") (inc depth) parts)
+    (= (first chars) "}") (fmt-hole (rest chars) (str expr "}") (dec depth) parts)
+    else (fmt-hole (rest chars) (str expr (first chars)) depth parts)))
+(defn- fmt-lit
+  (chars buf parts)
   ;; scanning literal text: `buf` = reversed literal chars, `parts` = reversed forms
   (cond
-    (empty? chars) (reverse (fmt--flush buf parts))
+    (empty? chars) (reverse (fmt-flush buf parts))
     (and (= (first chars) "{") (= (second chars) "{"))
-      (fmt--lit (rest (rest chars))
+      (fmt-lit (rest (rest chars))
         (cons "{" buf)
         parts)
     (and (= (first chars) "}") (= (second chars) "}"))
-      (fmt--lit (rest (rest chars))
+      (fmt-lit (rest (rest chars))
         (cons "}" buf)
         parts)
-    (= (first chars) "{") (fmt--hole (rest chars) "" 0 (fmt--flush buf parts))
-    else (fmt--lit (rest chars) (cons (first chars) buf) parts)))
+    (= (first chars) "{") (fmt-hole (rest chars) "" 0 (fmt-flush buf parts))
+    else (fmt-lit (rest chars) (cons (first chars) buf) parts)))
 (defmacro fmt (template)
   "Build a string from a template, splicing each `{expr}` hole's value between the literal text: `(fmt \"x={x} sum={(+ a b)}\")`. `{{`/`}}` are literal braces; braces nest inside a hole. Expands to a plain `(str …)`."
   (if (string? template)
-    (cons 'str (fmt--lit (string->list template) nil nil))
+    (cons 'str (fmt-lit (string->list template) nil nil))
     (error "fmt: template must be a string literal, got " (pr-str template))))
 
 ;; ---- string formatting ------------------------------------------------------
@@ -3892,36 +3986,39 @@ leaves `s` unchanged."
 ;; as `nil` (debuggable), extra args are ignored.
 (defn format (fmt & args)
   "Render `fmt`, replacing each %-specifier with the next of `args`. Supports `%s` `%d` `%f` `%.Nf` `%%`; use `pad-left`/`pad-right` for width."
-  (format--loop fmt 0 (string-length fmt) args ""))
+  (format-loop fmt 0 (string-length fmt) args ""))
 
-(defn format--loop (fmt i n args acc)
+(defn- format-loop
+  (fmt i n args acc)
   (cond
     (>= i n) acc
-    (= (char-at fmt i) "%") (format--spec fmt (inc i) n args acc)
-    else (format--loop fmt (inc i) n args (str acc (char-at fmt i)))))
+    (= (char-at fmt i) "%") (format-spec fmt (inc i) n args acc)
+    else (format-loop fmt (inc i) n args (str acc (char-at fmt i)))))
 
-(defn format--spec (fmt i n args acc)
+(defn- format-spec
+  (fmt i n args acc)
   ;; called with `i` pointing one past the `%`
   (cond
     (>= i n) (error "format: unterminated specifier (lone '%' at end of format string)")
-    (= (char-at fmt i) "%") (format--loop fmt (inc i) n args (str acc "%"))
-    (= (char-at fmt i) "s") (format--loop fmt (inc i) n (rest args) (str acc (str (first args))))
-    (= (char-at fmt i) "d") (format--loop fmt (inc i) n (rest args) (str acc (str (first args))))
+    (= (char-at fmt i) "%") (format-loop fmt (inc i) n args (str acc "%"))
+    (= (char-at fmt i) "s") (format-loop fmt (inc i) n (rest args) (str acc (str (first args))))
+    (= (char-at fmt i) "d") (format-loop fmt (inc i) n (rest args) (str acc (str (first args))))
     (= (char-at fmt i) "f")
-      (format--loop fmt
+      (format-loop fmt
         (inc i)
         n
         (rest args)
         (str acc (to-fixed (first args) 6)))
-    (= (char-at fmt i) ".") (format--prec fmt (inc i) n args acc 0)
+    (= (char-at fmt i) ".") (format-prec fmt (inc i) n args acc 0)
     else (error (str "format: unrecognized specifier '%" (char-at fmt i) "' at column " i))))
 
-(defn format--prec (fmt i n args acc p)
+(defn- format-prec
+  (fmt i n args acc p)
   ;; called with `i` pointing one past the `.`, accumulating precision in `p`
   (cond
     (>= i n) (error "format: unterminated %.Nf specifier")
     (= (char-at fmt i) "f")
-      (format--loop fmt
+      (format-loop fmt
         (inc i)
         n
         (rest args)
@@ -3929,7 +4026,7 @@ leaves `s` unchanged."
     else
       (let (d (string->number (char-at fmt i)))
         (if (and (int? d) (>= d 0) (<= d 9))
-          (format--prec fmt (inc i) n args acc (+ (* p 10) d))
+          (format-prec fmt (inc i) n args acc (+ (* p 10) d))
           (error (str "format: expected digit or 'f' after '.' in specifier, got '"
                    (char-at fmt i)
                    "' at column "
@@ -3954,14 +4051,15 @@ leaves `s` unchanged."
 ;;
 ;; Index of the last `/` in `s`, scanning down from `i`, or -1 if none. (Brood has
 ;; no char accessor yet; paths are short, so a substring scan is fine.)
-(defn path--last-slash (s i)
-  (cond (< i 0) -1 (= (substring s i (inc i)) "/") i else (path--last-slash s (dec i))))
+(defn- path-last-slash
+  (s i)
+  (cond (< i 0) -1 (= (substring s i (inc i)) "/") i else (path-last-slash s (dec i))))
 
 ;; The directory containing `path`: "/a/b/c" -> "/a/b", "/foo" -> "/", "rel" -> ".".
 ;; A path that is its own parent ("/" or ".") is the fixed point a walk-up stops at.
 (defn parent-dir (path)
   "The directory containing `path` (\"/a/b/c\" -> \"/a/b\", \"/foo\" -> \"/\", \"rel\" -> \".\")."
-  (let (i (path--last-slash path (dec (string-length path))))
+  (let (i (path-last-slash path (dec (string-length path))))
     (cond (< i 0) "." (= i 0) "/" else (substring path 0 i))))
 
 (defn path-join (a b)
@@ -3987,7 +4085,7 @@ stripped (`(cwd)` doesn't produce one, which is the primary caller)."
   (let (n (string-length path))
     (if (= n 0)
       ""
-      (let (i (path--last-slash path (dec n)))
+      (let (i (path-last-slash path (dec n)))
         (if (< i 0) path (substring path (inc i) n))))))
 
 (defn path-absolute (path &optional base)
@@ -4019,7 +4117,8 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
   (let (m (bit-and n *rand-mask*))
     (if (= m 0) 2463534242 m)))
 
-(defn rand--step (state)
+(defn- rand-step
+  (state)
   ;; One xorshift32 transition over a nonzero 32-bit `state`.
   (let (x (bit-and (bit-xor state (bit-shift-left state 13)) *rand-mask*)
         x (bit-xor x (bit-shift-right x 17))
@@ -4028,19 +4127,19 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
 
 (defn rng (seed)
   "Step the PRNG: returns `[value next-seed]`, where `value` is a pseudo-random non-negative 32-bit integer and `next-seed` feeds the next call. `seed` is any integer (normalized via `rand-seed`)."
-  (let (s (rand--step (rand-seed seed)))
+  (let (s (rand-step (rand-seed seed)))
     [s s]))
 
 (defn rand-int (seed n)
   "Returns `[i next-seed]` with `i` a pseudo-random integer in `[0, n)`. `n` must be positive."
   (if (<= n 0)
     (error "rand-int: bound must be positive: " n)
-    (let (s (rand--step (rand-seed seed)))
+    (let (s (rand-step (rand-seed seed)))
       [(rem s n) s])))
 
 (defn rand-float (seed)
   "Returns `[f next-seed]` with `f` a pseudo-random float in `[0.0, 1.0)`."
-  (let (s (rand--step (rand-seed seed)))
+  (let (s (rand-step (rand-seed seed)))
     [(/ s 4294967296.0) s]))
 
 (defn sample (seed coll)
@@ -4049,21 +4148,22 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
         n (count items))
     (if (= n 0)
       (error "sample: cannot sample from an empty collection")
-      (let (s (rand--step (rand-seed seed)))
+      (let (s (rand-step (rand-seed seed)))
         [(nth items (rem s n)) s]))))
 
-(defn shuffle--acc (state remaining acc)
+(defn- shuffle-acc
+  (state remaining acc)
   (if (= (count remaining) 0)
     [acc state]
-    (let (s (rand--step state)
+    (let (s (rand-step state)
           i (rem s (count remaining)))
-      (shuffle--acc s
+      (shuffle-acc s
         (append (take i remaining) (drop (inc i) remaining))
         (cons (nth remaining i) acc)))))
 
 (defn shuffle (seed coll)
   "Returns `[shuffled next-seed]`: the items of `coll` as a list in uniformly random order (Fisher–Yates)."
-  (shuffle--acc (rand-seed seed) (into [] coll) nil))
+  (shuffle-acc (rand-seed seed) (into [] coll) nil))
 
 ;; ---- bounded printing -------------------------------------------------------
 ;; `pr-str` is *faithful*: whatever it returns reads back as the same value, so it
@@ -4095,11 +4195,13 @@ is. Makes a path absolute, not canonical — it does not collapse `.`/`..` segme
 ;; 4096 matches Elixir's `Inspect` `:printable_limit`, which exists for exactly this.
 (defdyn *print-string-length* 4096)
 
-(defn pr--elide (parts over)
+(defn- pr-elide
+  (parts over)
   "`parts` joined for display, with the `…` length marker appended when `over`."
   (join " " (if over (append parts (list "…")) parts)))
 
-(defn pr--limit (items)
+(defn- pr-limit
+  (items)
   "`[shown over?]` for `items` under `*print-length*` — at most that many items,
 plus whether any were dropped. Takes one extra item to detect the overflow, so a
 long collection is never walked past the limit."
@@ -4110,27 +4212,31 @@ long collection is never walked past the limit."
             over (> (count taken) lim))
         [(if over (take lim taken) taken) over]))))
 
-(defn pr--safely (thunk x)
+(defn- pr-safely
+  (thunk x)
   "Run `thunk`, falling back to `(pr-str x)` if it raises. The guard for a value
 that looks like a container but doesn't walk like one — an improper/dotted pair
 such as `(cons 1 2)` is the real case. Per-node, so one odd subtree degrades to
 faithful printing instead of losing the bound on the whole value."
   (try (thunk) (catch _ (pr-str x))))
 
-(defn pr--bounded-seq (x level open close)
-  (let ([shown over] (pr--limit x))
-    (str open (pr--elide (map (fn (i) (pr--bounded i (inc level))) shown) over) close)))
+(defn- pr-bounded-seq
+  (x level open close)
+  (let ([shown over] (pr-limit x))
+    (str open (pr-elide (map (fn (i) (pr-bounded i (inc level))) shown) over) close)))
 
-(defn pr--bounded-map (x level)
-  (let ([shown over] (pr--limit (map-pairs x)))
+(defn- pr-bounded-map
+  (x level)
+  (let ([shown over] (pr-limit (map-pairs x)))
     (str "{"
-      (pr--elide (map (fn ([k v])
-                        (str (pr--bounded k (inc level)) " " (pr--bounded v (inc level))))
-                   shown)
+      (pr-elide (map (fn ([k v])
+                       (str (pr-bounded k (inc level)) " " (pr-bounded v (inc level))))
+                  shown)
         over)
       "}")))
 
-(defn pr--bounded-text (x)
+(defn- pr-bounded-text
+  (x)
   "A text leaf — a string or a byte string — under `*print-string-length*`: at most
 that many characters (bytes) print, with the `…` marker inside the closing quote
 (`\"abc…\"`, `#b\"ab…\"`).
@@ -4148,7 +4254,8 @@ have built the flood this bound exists to prevent."
         ;; drop the closing quote, mark the elision, close again
         (str (substring printed 0 (dec (string-length printed))) "…\"")))))
 
-(defn pr--bounded (x level)
+(defn- pr-bounded
+  (x level)
   "`x` printed at nesting `level`, honouring every bound. Containers recurse, text
 leaves are length-bounded, anything else goes to `pr-str`.
 
@@ -4162,11 +4269,11 @@ already print as a summary handle, `#<rope :chars 11 :lines 1>`)."
         container (or (= t :pair) (= t :vector) (= t :set) (= t :map)))
     (cond
       (and container *print-level* (>= level *print-level*)) "…"
-      (= t :pair) (pr--safely (fn () (pr--bounded-seq x level "(" ")")) x)
-      (= t :vector) (pr--safely (fn () (pr--bounded-seq x level "[" "]")) x)
-      (= t :set) (pr--safely (fn () (pr--bounded-seq x level "#{" "}")) x)
-      (= t :map) (pr--safely (fn () (pr--bounded-map x level)) x)
-      (or (= t :string) (= t :bytes)) (pr--safely (fn () (pr--bounded-text x)) x)
+      (= t :pair) (pr-safely (fn () (pr-bounded-seq x level "(" ")")) x)
+      (= t :vector) (pr-safely (fn () (pr-bounded-seq x level "[" "]")) x)
+      (= t :set) (pr-safely (fn () (pr-bounded-seq x level "#{" "}")) x)
+      (= t :map) (pr-safely (fn () (pr-bounded-map x level)) x)
+      (or (= t :string) (= t :bytes)) (pr-safely (fn () (pr-bounded-text x)) x)
       else (pr-str x))))
 
 (defn pr-str-bounded (x)
@@ -4180,7 +4287,7 @@ results, `spy`'s trace entries, an editor's echo area. A protocol whose job is t
 show a value to a human has no business flooding the screen (or a pipe, or a log)
 with a megabyte, and one bounded printer is how that stays true everywhere instead
 of each consumer inventing its own cap."
-  (pr--bounded x 0))
+  (pr-bounded x 0))
 
 ;; ---- discovery / introspection ----------------------------------------------
 ;; "What's in this image, and where?" — name- and doc-based search over the flat
@@ -4197,7 +4304,8 @@ of each consumer inventing its own cap."
 ;; Whitespace-split a query into lowercased terms (blanks dropped) — the unit
 ;; doc-search ranks by. A single-word query yields one term, so it degrades to
 ;; the old "docstring contains this word" search.
-(defn doc-search--terms (query)
+(defn- doc-search-terms
+  (query)
   "Lowercased, whitespace-separated terms of `query`, with blanks removed."
   (filter (fn (t) (not (blank? t))) (string-split (lower query) " ")))
 
@@ -4209,7 +4317,7 @@ behaviour, not just names: `(doc-search \"node up down\")` finds `monitor-node`
 even when no single docstring holds that exact phrase. A single-word query
 degrades to a plain case-insensitive name/docstring search, e.g.
 `(doc-search \"random\")`."
-  (let (terms (doc-search--terms query))
+  (let (terms (doc-search-terms query))
     (when (not (empty? terms))
       (map (fn (e) [(second e) (nth e 2)])
         (sort-by (fn (e) [(- (first e)) (str (second e))])
@@ -4253,8 +4361,9 @@ degrades to a plain case-insensitive name/docstring search, e.g.
 ;; cost a frame per level and 11× the runtime.
 (defdyn *spy-sink* nil)
 
-(defn spy--indent (depth) (apply str (map (constantly "  ") (range depth))))
-(defn spy--default-sink (entry)
+(defn- spy-indent (depth) (apply str (map (constantly "  ") (range depth))))
+(defn- spy-default-sink
+  (entry)
   "Default `*spy-sink*`: pretty-print one trace entry as an indented stderr line.
 `:call`/`:return` are the function-boundary entries `debug/trace-fn` emits.
 
@@ -4265,7 +4374,7 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
     :enter (eprintln (str "spy: " (pr-str-bounded (:form entry))))
     :node
       (eprintln (str "  "
-                  (spy--indent (:depth entry))
+                  (spy-indent (:depth entry))
                   (pr-str-bounded (:form entry))
                   " => "
                   (pr-str-bounded (:value entry))))
@@ -4273,27 +4382,30 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
     :call (eprintln (str "trace: " (pr-str-bounded (cons (:fn entry) (:args entry)))))
     :return (eprintln (str "trace: " (pr-str (:fn entry)) " => " (pr-str-bounded (:value entry))))
     nil))
-(defn spy--emit (entry) ((or *spy-sink* spy--default-sink) entry))
-(defn spy--node (form value depth)
+(defn- spy-emit (entry) ((or *spy-sink* spy-default-sink) entry))
+(defn- spy-node
+  (form value depth)
   ;; Runtime: emit a traced node's value, then return it untouched.
-  (spy--emit {:spy :node :form form :value value :depth depth})
+  (spy-emit {:spy :node :form form :value value :depth depth})
   value)
-(defn spy--run (form thunk)
-  (spy--emit {:spy :enter :form form})
-  (let (value (thunk)) (spy--emit {:spy :exit :value value}) value))
+(defn- spy-run
+  (form thunk)
+  (spy-emit {:spy :enter :form form})
+  (let (value (thunk)) (spy-emit {:spy :exit :value value}) value))
 
 ;; Core forms whose heads must NOT be treated as function calls (their arguments
 ;; are not plain eager operands). After a full macroexpand only these survive; the
 ;; macro entries are belt-and-suspenders in case one reaches a node unexpanded.
-(def spy--special-forms
+(def- spy-special-forms
   #{'if
     'do 'def 'fn 'let 'letrec 'quote 'quasiquote 'defmacro 'defn 'defdyn 'defrecord 'defmodule 'when
     'unless 'cond 'and 'or 'match 'match* 'case 'comment 'try 'catch 'throw 'receive 'binding
     'dolist 'doseq 'dotimes 'for '-> '->> 'spawn 'spawn-link 'remote-spawn 'remote-spawn-sync 'error
     'with-out-str 'with-err-str 'bench})
 
-(defn spy--walk-seq (forms depth) (map (fn (form) (spy--walk form depth)) forms))
-(defn spy--walk-binds (binds depth)
+(defn- spy-walk-seq (forms depth) (map (fn (form) (spy-walk form depth)) forms))
+(defn- spy-walk-binds
+  (binds depth)
   ;; A flat `(name expr …)` binding list — instrument the RHS positions only.
   (letrec (go (fn (bs acc)
                 (cond
@@ -4301,42 +4413,46 @@ the bound for a run with `(binding (*print-string-length* nil) …)`."
                   (empty? (rest bs)) (reverse (cons (first bs) acc))
                   else
                     (go (rest (rest bs))
-                      (cons (spy--walk (second bs) depth) (cons (first bs) acc))))))
+                      (cons (spy-walk (second bs) depth) (cons (first bs) acc))))))
     (go binds ())))
-(defn spy--walk-if (form depth)
+(defn- spy-walk-if
+  (form depth)
   ;; Instrument test + both branches in place; the branches stay lazy, so only the
   ;; taken one ever traces.
   (let (parts (rest form) test (first parts) then (second parts) d (inc depth))
     (if (> (count parts) 2)
-      `(if ~(spy--walk test d) ~(spy--walk then d) ~(spy--walk (nth parts 2) d))
-      `(if ~(spy--walk test d) ~(spy--walk then d)))))
-(defn spy--walk-let (form depth)
+      `(if ~(spy-walk test d) ~(spy-walk then d) ~(spy-walk (nth parts 2) d))
+      `(if ~(spy-walk test d) ~(spy-walk then d)))))
+(defn- spy-walk-let
+  (form depth)
   (let (head (first form) binds (second form) body (rest (rest form)) d (inc depth))
-    `(~head ~(spy--walk-binds binds d) ~@(spy--walk-seq body d))))
-(defn spy--walk-call (form depth)
+    `(~head ~(spy-walk-binds binds d) ~@(spy-walk-seq body d))))
+(defn- spy-walk-call
+  (form depth)
   ;; (f a…) — every operand is eager, unconditional, once; instrument them all and
   ;; trace this call node's value.
-  `(spy--node '~form (~@(spy--walk-seq form (inc depth))) ~depth))
-(defn spy--walk (form depth)
+  `(spy-node '~form (~@(spy-walk-seq form (inc depth))) ~depth))
+(defn- spy-walk
+  (form depth)
   (if (not (pair? form))
     form
     (let (form (macroexpand form))
       ; resolve the (outer) macro head
       (if (not (pair? form))
         ; a macro expanded to an atom
-        (spy--walk form depth)
+        (spy-walk form depth)
         (let (head (first form))
           (cond
             (or (= head 'fn) (= head 'quote) (= head 'quasiquote)) form
-            (= head 'if) (spy--walk-if form depth)
-            (= head 'do) `(do ~@(spy--walk-seq (rest form) (inc depth)))
-            (or (= head 'let) (= head 'letrec)) (spy--walk-let form depth)
-            (contains? spy--special-forms head) `(spy--node '~form ~form ~depth)
-            else (spy--walk-call form depth)))))))
+            (= head 'if) (spy-walk-if form depth)
+            (= head 'do) `(do ~@(spy-walk-seq (rest form) (inc depth)))
+            (or (= head 'let) (= head 'letrec)) (spy-walk-let form depth)
+            (contains? spy-special-forms head) `(spy-node '~form ~form ~depth)
+            else (spy-walk-call form depth)))))))
 
 (defmacro spy (expr)
   "Evaluate `expr`, trace every evaluated subexpression's value (in evaluation order) to `*spy-sink*` — default: an indented tree on stderr — and return the value unchanged. Referentially transparent: wrap or drop `spy` around any form with no behavioural change. Homoiconic: fully macroexpands and instruments in place, so laziness (an untaken branch, a short-circuited `and`) is preserved and pipelines trace stage-by-stage for free. `fn` bodies and quoted data are left opaque."
-  `(spy--run '~expr (fn () ~(spy--walk expr 0))))
+  `(spy-run '~expr (fn () ~(spy-walk expr 0))))
 
 ;; ---- modules: Emacs-flat provide / require (ADR-019) ------------------------
 ;; A flat module system over the one shared global table: `provide` records a
@@ -4482,7 +4598,8 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; no marker, all of `mod`'s public (non-`--`) names. `:only`/`:exclude` are the sole
 ;; import filters — any other marker is a clean error (ADR-152: name the fix, don't
 ;; silently import everything). Used at `defmodule` expand time.
-(defn defmodule--use-clause (clause)
+(defn- defmodule-use-clause
+  (clause)
   (let (mod (second clause)
         opts (rest (rest clause))
         marker (first opts))
@@ -4503,9 +4620,10 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 
 ;; All require/refer forms for the `(:use …)` clauses in a `defmodule` header
 ;; (skipping the optional docstring / any non-`:use` form), flattened for splicing.
-(defn defmodule--use-forms (clauses)
+(defn- defmodule-use-forms
+  (clauses)
   (apply append
-    (map defmodule--use-clause
+    (map defmodule-use-clause
       (filter (fn (c) (and (pair? c) (= (first c) :use))) clauses))))
 
 ;; The forms for one `(:use-internals mod [:only [a b]])` clause — module privacy's
@@ -4516,7 +4634,8 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; and this module are mutually dependent, because a subset refer resolves lazily and
 ;; skips the "refer-all into a still-loading module" error a plain `(:use-internals mod)`
 ;; hits mid-cycle. For tests and tightly-coupled tooling; loud and greppable by design.
-(defn defmodule--internals-clause (clause)
+(defn- defmodule-internals-clause
+  (clause)
   (let (mod (second clause)
         opts (rest (rest clause))
         marker (first opts))
@@ -4533,32 +4652,36 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
         (list '%grant-internals rooted)
         (list '%refer rooted (list 'quote subset))))))
 
-(defn defmodule--internals-forms (clauses)
+(defn- defmodule-internals-forms
+  (clauses)
   (apply append
-    (map defmodule--internals-clause
+    (map defmodule-internals-clause
       (filter (fn (c) (and (pair? c) (= (first c) :use-internals))) clauses))))
 
 ;; web/views/counter → counter  (a module name's last `/`-segment, as a symbol).
-(defn defmodule--last-segment (mod)
+(defn- defmodule-last-segment
+  (mod)
   (symbol (last (string-split (name mod) "/"))))
 
 ;; The `(require …)`+`(%alias …)` forms for one `(:alias mod [:as short])` clause:
 ;; load the module, then register a prefix alias so a later `short/name` resolves to
 ;; `mod/name` (Elixir-style `alias`). `short` defaults to `mod`'s last path segment;
 ;; `:as` overrides it (needed when two modules share a last segment).
-(defn defmodule--alias-clause (clause)
+(defn- defmodule-alias-clause
+  (clause)
   (let (mod (second clause)
         opts (rest (rest clause))
-        short (if (= (first opts) :as) (second opts) (defmodule--last-segment mod))
+        short (if (= (first opts) :as) (second opts) (defmodule-last-segment mod))
         ;; Root an intra-package target to `foo/mod` (ADR-070); the local `short` alias
         ;; is unchanged — you still write `short/name` in this file.
         rooted (list '%root-module-name (list 'quote mod)))
     (list (list 'require rooted)
       (list '%alias rooted (list 'quote short)))))
 
-(defn defmodule--alias-forms (clauses)
+(defn- defmodule-alias-forms
+  (clauses)
   (apply append
-    (map defmodule--alias-clause
+    (map defmodule-alias-clause
       (filter (fn (c) (and (pair? c) (= (first c) :alias))) clauses))))
 
 ;; A file declares itself a **module = namespace** at the top with `defmodule`
@@ -4573,7 +4696,8 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; (require--force); providing here, before the module's defs exist, is exactly the
 ;; window a concurrent requirer used to slip through. A direct `(load "x.blsp")`
 ;; (no require in flight) keeps the immediate provide it always had.
-(defn defmodule--provide (key)
+(defn- defmodule-provide
+  (key)
   (if (contains? *features-loading* key) key (provide key)))
 
 ;; The only clauses the header understands. Anything else in a `defmodule` header
@@ -4587,12 +4711,13 @@ deprecation primitive — emit it from a macro's expansion to flag a deprecated 
 ;; missing from this list, so tightening the header (above) turned every
 ;; protocol-implementing module into a load error — found by a downstream app whose
 ;; whole test suite stopped loading.
-(def defmodule--clause-heads [:use :use-internals :alias :implements])
+(def- defmodule-clause-heads [:use :use-internals :alias :implements])
 
-(defn defmodule--check-clause (clause)
+(defn- defmodule-check-clause
+  (clause)
   (if (and (pair? clause)
         (keyword? (first clause))
-        (includes? defmodule--clause-heads (first clause)))
+        (includes? defmodule-clause-heads (first clause)))
     clause
     (error "defmodule: unrecognised header form "
       (pr-str clause)
@@ -4608,7 +4733,7 @@ definitions become `mod/name`; bare references resolve there, then through
 feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
   (let (doc (if (string? (first more)) (first more) nil)
         clauses (if (string? (first more)) (rest more) more)
-        _checked (map defmodule--check-clause clauses))
+        _checked (map defmodule-check-clause clauses))
     ;; The feature/doc key is the module's ROOTED name (ADR-070): inside a dependency
     ;; `foo`, `(defmodule b)` provides `foo/b` and `(%in-ns 'b)` roots compile-ns to
     ;; `foo/b`, so an outside `(require 'foo/b)` finds it and the file's defs become
@@ -4616,27 +4741,29 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
     ;; the root project and std stay short. Computed at load time, when the context is set.
     `(let (root-key# (name (%root-module-name '~mod)))
        (record-module-doc! root-key# ~doc)
-       (defmodule--provide root-key#)
+       (defmodule-provide root-key#)
        (%in-ns '~mod)
-       ~@(defmodule--use-forms clauses)
-       ~@(defmodule--internals-forms clauses)
-       ~@(defmodule--alias-forms clauses))))
+       ~@(defmodule-use-forms clauses)
+       ~@(defmodule-internals-forms clauses)
+       ~@(defmodule-alias-forms clauses))))
 
 (defn module-doc (mod)
   "The docstring declared by `(defmodule mod …)` (a symbol or string), or nil."
   (get *module-docs* (name mod)))
 
 ;; First existing <filename> across the load-path dirs, or nil.
-(defn require--find (filename dirs)
+(defn- require-find
+  (filename dirs)
   (cond
     (empty? dirs) nil
     (file-exists? (path-join (first dirs) filename)) (path-join (first dirs) filename)
-    else (require--find filename (rest dirs))))
+    else (require-find filename (rest dirs))))
 
 ;; The raw load of feature `key`: evaluate its embedded source (a baked-in std
 ;; module) or the first <key>.blsp found on *load-path*, then record it. No
 ;; loading-bookkeeping — callers manage *features-loading*. Errors if not found.
-(defn require--force (key)
+(defn- require-force
+  (key)
   (let (src (%builtin-module key))
     (cond
       src
@@ -4661,10 +4788,10 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
       ;; manager mapped to a file. Load it under `foo`'s package context so its
       ;; `(defmodule b)` roots to `foo/b` and its intra-package `(:use …)` targets root.
       (contains? *package-module-files* key)
-        (require--force-package key
+        (require-force-package key
           (get *package-module-files* key))
       else
-        (let (path (require--find (str key ".blsp") *load-path*))
+        (let (path (require-find (str key ".blsp") *load-path*))
           (if path
             (do (load path) (provide key))
             (error "require: cannot find module '" key "'"))))
@@ -4675,7 +4802,8 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
 ;; root, load it, then RESTORE the enclosing context on both the normal and error
 ;; paths (a dep may be required mid-load of another dep, so contexts nest). The
 ;; prefix is the rooted key's first segment (package local names are single-segment).
-(defn require--force-package (key path)
+(defn- require-force-package
+  (key path)
   (let (prefix (symbol (first (string-split key "/")))
         modules (get *package-modules-of* (name prefix))
         prev (%set-package-context prefix modules))
@@ -4691,11 +4819,12 @@ feature. Put it first. e.g. (defmodule proc/gen \"A gen_server …\")."
 ;; marker — take the load over ourselves (re-evaluating a module is idempotent:
 ;; same source, same defs). `sleep`, not a bare receive: waiting must not eat a
 ;; queued mailbox message.
-(defn require--await (key n)
+(defn- require-await
+  (key n)
   (cond
     (member? key *features*) key
-    (> n 0) (do (sleep 5) (require--await key (dec n)))
-    else (require--force key)))
+    (> n 0) (do (sleep 5) (require-await key (dec n)))
+    else (require-force key)))
 
 ;; Load one feature once. CONCURRENT-SAFE: `require` returning means the module's
 ;; defs exist — a require that races another process's load of the same feature
@@ -4713,7 +4842,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       ;; the classic load-once contract for circular requires
       (= (get *features-loading* key) (self)) key
       ;; someone else is mid-load: wait for their provide (never see a partial module)
-      (contains? *features-loading* key) (require--await key 1000)
+      (contains? *features-loading* key) (require-await key 1000)
       ;; Claim the load atomically. `:assoc-new` sets the marker only if `key` is
       ;; still absent — the test-and-set runs INSIDE the registry lock — and returns
       ;; false if another process claimed it between the `contains?` read above and
@@ -4721,9 +4850,8 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       ;; `contains? = false`, both `:assoc`, and both run `require--force`: the module
       ;; body is evaluated twice and `provide`d twice (the double-load ADR-136 forbids).
       ;; Losing the race means someone else now owns the load — wait for their provide.
-      (not (%registry-update! '*features-loading* :assoc-new [key] (self)))
-        (require--await key
-          1000)
+      (not (%registry-update! '*features-loading* :assoc-new [key] (self))) (require-await key
+                                                                              1000)
       else
       ;; We won the claim (the marker is now set). Clear it on BOTH exits: a load that
       ;; throws (module not found, or an error inside its source) must not leave `key`
@@ -4731,7 +4859,7 @@ it waits for that load to finish (a half-evaluated module is never observable)."
       ;; (~5s of 5ms ticks) before taking the load over.
       (do
         (try
-          (require--force key)
+          (require-force key)
           (catch e
             (do
               (%registry-update! '*features-loading* :dissoc [key] nil)
@@ -4776,7 +4904,8 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 ; get distinct globals and never clash — do not false-warn.
 (def *op-ability* {})
 
-(defn ability--qualify-op (owner op-name)
+(defn- ability-qualify-op
+  (owner op-name)
   "The global symbol an ability op's `defn` binds: `op-name` qualified to the declaring ns
   `owner` (`<owner>/op`), or bare `op-name` when `owner` is nil (root/REPL). Mirrors how the
   `defn` `defability` emits is namespaced at load, so `*op-ability*` keys on the real global."
@@ -4793,7 +4922,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   ;; of the SAME ability (hot reload) re-registers its own ops — same owner → no warning.
   (for (spec specs)
     (when (pair? spec)
-      (let (qsym (ability--qualify-op owner (first spec))
+      (let (qsym (ability-qualify-op owner (first spec))
             prev (get *op-ability* qsym))
         ; Warn only when a real generic function is at stake: a DIFFERENT ability already
         ; owns this op name AND that name is bound (its `defability` emitted the `defn`, so a
@@ -4908,7 +5037,8 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 ; the module is everything BEFORE the last `/` — a nested module keeps all its segments
 ; (`:editor/display/frame` → `editor/display`, not `editor`). Used to place an impl in the
 ; tier ladder: an impl whose registering ns equals this owns the type.
-(defn impl--id-owner (key)
+(defn- impl-id-owner
+  (key)
   (if (keyword? key)
     (let (parts (string-split (name key) "/"))
       (if (> (count parts) 1)
@@ -4920,7 +5050,8 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 ; `*ns-package*` entry (set at project setup) equals `*project-name*`. Guarded with `bound?`
 ; so abilities still work when no project is loaded (a bare `brood script.blsp` — those
 ; ambients are undeclared then). Root/REPL (`from` = nil) is handled by the caller as the app.
-(defn impl--app? (from)
+(defn- impl-app?
+  (from)
   (and from
     (bound? '*project-name*)
     *project-name*
@@ -4933,24 +5064,26 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   ;; module whose package is the project's own is likewise the app. Otherwise `from` owns the
   ;; record's type (id-owner) or the ability (its `:default`/built-in impls), else it's other.
   ;; Guard the nil/app cases before `(name from)`.
-  (if (or (nil? from) (impl--app? from))
+  (if (or (nil? from) (impl-app? from))
     4
     (let (from-name (name from)
-          id-owner (impl--id-owner key)
+          id-owner (impl-id-owner key)
           abl-owner (let (o (ability-owner-ns aname)) (if o (name o) nil)))
       (cond
         (= from-name id-owner) 3
         (= from-name abl-owner) 2
         else 1))))
 
-(defn impl--fn-arity (f)
+(defn- impl-fn-arity
+  (f)
   "The impl fn `f`'s shape as `[fixed-count variadic?]` — the number of fixed params (before
   any `&`) and whether it takes a `&`-rest — read from `(arglist f)`."
   (let (params (arglist f)
         fixed (count (take-while (fn (s) (not (= s '&))) params)))
     [fixed (member? '& params)]))
 
-(defn register-impl--check-arity (aname op f)
+(defn- register-impl-check-arity
+  (aname op f)
   "Warn if impl `f`'s arity is incompatible with `aname`'s declared `op` arity. Only runs
   when the ability is KNOWN (in `*abilities*`) — an impl registered before its `defability`
   (legal, ADR-172 late binding) simply isn't arity-checked here; the checker covers the rest.
@@ -4962,7 +5095,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
     ; checker). Only a fixed op spec is arity-checked.
     (when (and op-spec (not (member? '& op-args)))
       (let (op-arity (count op-args)
-            shape (impl--fn-arity f)
+            shape (impl-fn-arity f)
             fixed (nth shape 0)
             variadic (nth shape 1))
         (when (if variadic (> fixed op-arity) (not (= fixed op-arity)))
@@ -4983,7 +5116,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   `from` is a genuine cross-module conflict (warned; last wins); from the SAME `from` it is
   hot-reload (silent); a strictly lower-tier registration is ignored (a higher tier holds the
   slot). Read-modify-write of `*impls*` — register at load time, as top-level `impl` does."
-  (register-impl--check-arity aname op f)
+  (register-impl-check-arity aname op f)
   (let (op-key [aname op]
         prov-key [aname op key]
         ; presence, not truthiness: a root/REPL/app incumbent records `from` = nil, so a
@@ -5022,7 +5155,8 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 ;; (ADR-166): the language's own definitions are not yours to remove. An `impl` you wrote for
 ;; YOUR OWN id (`(impl Display my/rec …)`) is policy, and retracts normally.
 
-(defn impl--substrate? (aname key)
+(defn- impl-substrate?
+  (aname key)
   "Whether `[aname key]` names one of the language's own fallback impls — the `:default` of an
   ability the runtime dispatches on itself."
   (and (= key :default) (member? aname *substrate-abilities*)))
@@ -5042,7 +5176,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   inverse cannot be returned to a known state, which bites anything that has to: a test that
   must not leak into the next one, a REPL session undoing an experiment, a hot reload
   retracting an impl the new source no longer declares."
-  (when (impl--substrate? aname key)
+  (when (impl-substrate? aname key)
     (error "unregister-impl: "
       aname "/" op " :default is part of the language — removing it "
       "would leave every value unprintable. Override it with `impl` for your own id instead."))
@@ -5101,30 +5235,34 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 
 ; ---- macros -----------------------------------------------------------------
 
-(defn defability--sealed-vec (specs)
+(defn- defability-sealed-vec
+  (specs)
   "The vector following `:sealed` in a `defability`'s specs (its closed member set), or nil."
   (cond
     (empty? specs) nil
     (= (first specs) :sealed) (second specs)
-    else (defability--sealed-vec (rest specs))))
+    else (defability-sealed-vec (rest specs))))
 
-(defn defability--requires-vec (specs)
+(defn- defability-requires-vec
+  (specs)
   "The vector following `:requires` in a `defability`'s specs (its prerequisite abilities), or nil."
   (cond
     (empty? specs) nil
     (= (first specs) :requires) (second specs)
-    else (defability--requires-vec (rest specs))))
+    else (defability-requires-vec (rest specs))))
 
-(defn defability--derive-fn (specs)
+(defn- defability-derive-fn
+  (specs)
   "The form following `:derive-record` in a `defability`'s specs — the derive recipe (an
   inline `(fn (fields) …)` or a fn-symbol), or nil. Distinct from an op spec (whose second
   element is a `[args]` *vector*), so it is filtered out of the op list."
   (cond
     (empty? specs) nil
     (= (first specs) :derive-record) (second specs)
-    else (defability--derive-fn (rest specs))))
+    else (defability-derive-fn (rest specs))))
 
-(defn ability--id-kw (m)
+(defn- ability-id-kw
+  (m)
   "The dispatch-id keyword for an impl / sealed-member id `m`. A keyword is kept as-is
   (`:int`, `:default`); a bare record symbol is qualified against the current ns
   (`circle` → `:<ns>/circle`, matching what `defrecord` bakes into a value); an already-
@@ -5142,13 +5280,14 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
     (let (nm (name m)
           cut (last-index-of nm "/"))
       (if (< cut 0)
-        (defrecord--qualify nm)
+        (defrecord-qualify nm)
         (keyword (str (name (%root-module-name (symbol (substring nm 0 cut))))
                    "/"
                    (substring nm (inc cut) (string-length nm))))))
     m))
 
-(defn defability--op-call (impl-sym arg-syms)
+(defn- defability-op-call
+  (impl-sym arg-syms)
   "The dispatch call an op emits once its impl `impl-sym` is resolved. A fixed-arity op
   emits a direct `(impl self a b …)` — no arg-list allocation. A VARIADIC op (a `&` in the
   arg vector) emits `(apply impl self a … rest)`, because `&` is a binding marker, not a
@@ -5160,7 +5299,8 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
       (append (list 'apply impl-sym) (append fixed (list rest-sym))))
     (cons impl-sym arg-syms)))
 
-(defn defability--op-body (op)
+(defn- defability-op-body
+  (op)
   "The default-implementation body of op spec `op` — everything after the arg vector and
   any `:-> RET` — or nil when the op declares none. A spec `(op [args] :-> ret? body…)`
   with a body is a PROVIDED op (ADR-185): `defability` emits its body as an auto-registered
@@ -5205,10 +5345,10 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
   ; `:derive-record` recipe `(fn (fields) …)` (its second is a `(fields)` *list*) and any
   ; keyword-clause value, so only real ops are collected.
   (let (ops (filter (fn (s) (and (pair? s) (vector? (second s)))) specs)
-        sealed-vec (defability--sealed-vec specs)
-        sealed-ids (if sealed-vec (map ability--id-kw sealed-vec) nil)
-        derive-fn (defability--derive-fn specs)
-        requires-vec (defability--requires-vec specs)
+        sealed-vec (defability-sealed-vec specs)
+        sealed-ids (if sealed-vec (map ability-id-kw sealed-vec) nil)
+        derive-fn (defability-derive-fn specs)
+        requires-vec (defability-requires-vec specs)
         ; pass `(current-ns)` as the owner — evaluated at load in the DEFINING module, so
         ; `*ability-owner*` records where the ability was declared (ADR-172 precedence).
         ; The specs are stored WITH their bodies so the checker can tell a provided op from
@@ -5240,7 +5380,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
         ; the declaring ns (ability-owner tier) so an app/type impl can still override it. Its
         ; body runs through ordinary dispatch, calling sibling ops on `self` by late binding.
         provided-defs (fold (fn (acc op)
-                              (let (body (defability--op-body op))
+                              (let (body (defability-op-body op))
                                 (if (empty? body)
                                   acc
                                   (let (arg-syms (map (fn (s) (if (pair? s) (first s) s))
@@ -5290,7 +5430,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
                             impl-sym
                             ; the resolved call — direct for a fixed arity, `apply` for a
                             ; variadic op (`defability--op-call`)
-                            (defability--op-call impl-sym arg-syms)
+                            (defability-op-call impl-sym arg-syms)
                             (list 'no-impl op-key id-sym))))))
                   ops))
     (cons 'do (append reg (append op-defs provided-defs)))))
@@ -5305,7 +5445,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
     (impl Size geometry/circle  (size [c] (get c :r)))"
   ; the dispatch id is a KEYWORD: a record id written as a symbol (`geometry/circle`) is
   ; keyworded to match what `identity-of` produces; a built-in id (`:int`) is already one.
-  (let (id-kw (ability--id-kw key))
+  (let (id-kw (ability-id-kw key))
     (cons 'do
       (map
         (fn (m)
@@ -5331,15 +5471,16 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 
   Returns the number of impls actually removed, so a caller can tell a retraction from a
   no-op. A `key` that never had an impl is a quiet zero."
-  (let (id-kw (ability--id-kw key))
-    (list 'unimpl--do
+  (let (id-kw (ability-id-kw key))
+    (list 'unimpl-do
       (list 'quote aname)
       id-kw
       (if (empty? ops)
         (list 'map 'first (list 'or (list 'ability-ops (list 'quote aname)) (list)))
         (list 'quote ops)))))
 
-(defn unimpl--do (aname key ops)
+(defn- unimpl-do
+  (aname key ops)
   "Runtime worker for `unimpl`: retract each of `ops` for `key`, returning how many were
   there. Separate from the macro so the op list can come from the ability's own declaration
   at expansion time or from a caller's list at runtime."
@@ -5378,12 +5519,14 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
                   (str "multimethod " mname ": no method for " key " — have " known)))
     (throw {:kind :no-method :message message :multi mname :key key :have known})))
 
-(defn register-method--store (mname key f)
+(defn- register-method-store
+  (mname key f)
   "Store method `f` at EXACT `key` for `mname` (overwrites — an authored method always wins)."
   (%registry-update! '*methods* :assoc [mname key] f)
   nil)
 
-(defn register-method--derive (mname key f)
+(defn- register-method-derive
+  (mname key f)
   "Fill the CLOSURE-derived mirror at `key` only if ABSENT — an explicitly authored method of
   the same key must never be clobbered by a derived one, whatever the load order."
   ;; `:assoc-new` does the absent-check INSIDE the lock — checking out here would let a
@@ -5409,7 +5552,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
     (when (and has-prev (not (= prev-from from)))
       (println "warning: multimethod "
         mname " method for " key " — redefined from " prev-from " by " from " (last wins)"))
-    (register-method--store mname key f)
+    (register-method-store mname key f)
     (%registry-update! '*method-from* :assoc [prov] from))
   (let (algebra (get *multi-algebra* mname))
     ; the `:default` catch-all is a keyword sentinel, not a tuple — never a closure target.
@@ -5431,9 +5574,9 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
         (when (not (= left right))
           (let (mirror [right left])
             (cond
-              (= algebra :commutative) (register-method--derive mname mirror (fn (x y) (f y x)))
+              (= algebra :commutative) (register-method-derive mname mirror (fn (x y) (f y x)))
               (= algebra :antisymmetric)
-                (register-method--derive mname
+                (register-method-derive mname
                   mirror
                   (fn (x y) (- 0 (f y x))))
               else
@@ -5511,7 +5654,7 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
             (count pattern)
             " position(s)"))
         ; resolve each position to the id keyword a value presents (records qualified, `impl`).
-        (let (key (mapv ability--id-kw pattern))
+        (let (key (mapv ability-id-kw pattern))
           (list 'register-method
             (list 'quote mname)
             (list 'quote key)
@@ -5615,9 +5758,10 @@ found. Returns the list of feature names. e.g. (require 'proc/gen 'test)."
 ;; other value passes through untouched so the built-in renderer stays on the fast path
 ;; — no `identity-of`/`impl-for` lookup per printed int or string. Disable for a scope
 ;; with `(binding (*show* nil) …)`.
-(defn show--print-hook (x)
+(defn- show-print-hook
+  (x)
   (if (record? x) (to-str x) x))
 
 ;; Wire the screen printers to honor `Display` for records, by default (ADR-172 §8).
 ;; `(binding (*show* nil) …)` disables it for a scope.
-(def *show* show--print-hook)
+(def *show* show-print-hook)

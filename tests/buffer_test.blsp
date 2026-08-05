@@ -921,11 +921,11 @@
 (describe "undo--region-restore (the pure core)"
   (test "chunk-wise over CHARACTERS: the changed span is what the region is tested against"
     ;; "old" -> "new" occupies chars 2..5; a region there undoes it, one elsewhere doesn't
-    (assert= (editor/buffer/undo--region-restore "a\nold\nz" "a\nnew\nz" 2 5) "a\nold\nz")
-    (assert= (editor/buffer/undo--region-restore "a\nold\nz" "a\nnew\nz" 0 1) "a\nnew\nz"))
+    (assert= (editor/buffer/undo-region-restore "a\nold\nz" "a\nnew\nz" 2 5) "a\nold\nz")
+    (assert= (editor/buffer/undo-region-restore "a\nold\nz" "a\nnew\nz" 0 1) "a\nnew\nz"))
 
   (test "identical texts are unchanged whatever the region"
-    (assert= (editor/buffer/undo--region-restore "a\nb" "a\nb" 0 9) "a\nb")))
+    (assert= (editor/buffer/undo-region-restore "a\nb" "a\nb" 0 9) "a\nb")))
 
 ;; ---- undo-in-region is CHARACTER-precise, like Emacs ------------------------------
 ;; A line-granular version answered "undo that line's last change", which is a different

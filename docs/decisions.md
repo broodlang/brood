@@ -9276,6 +9276,27 @@ it — the tempting "step 2 cleanup" — would silently admit an undefined `--`-
 is identical. Deferred **step 2**: whether to swap the marker itself. See devlog
 2026-08-04.
 
+**Update (2026-08-05) — the marker moved off the name onto the def form (step 2).**
+After a long syntax debate (recorded in the devlog): Brood's sigil space is full —
+every glyph that means "private" elsewhere (`_` wildcard, `#` dispatch, `%`
+primitives, `^` pin, `*` dynamic, `@`/`$`/`/`/`\` taken or wrong) is unavailable, and
+a name marker is call-site-noisy besides. So privacy became a **def-site** fact:
+**`defn-`** and **`def-`** define a *clean* name that is module-private, recorded via
+a `%mark-private` primitive (modeled on `%register-sig`). The `--`-in-name convention
+is **removed entirely** (no compat). Because a private name now reads identically to a
+public one, *every* privacy check consults the record (`Heap::is_private`), so the
+name-authoritative sites from step 1 (enforcement, `:only`) flip to record-based — and
+the one behavior change falls out: a qualified reference into a **never-loaded** module
+can't be judged private and **degrades to a plain unbound reference** at call time,
+rather than a load-time privacy error (more principled — you can't assert privacy about
+code the image hasn't seen). Prelude privates are seeded at build time (the prelude is
+inserted, not re-evaluated, so `%mark-private` fires only in the builder heap; the set
+is captured into `SharedBundle` and threaded into `RuntimeCode::seeded`). `defmacro-`/
+`defprocess-` were judged unnecessary (only 2 + 2 such privates existed tree-wide;
+they collapse to public). Only 2 `defmacro` and 2 `defprocess`. A ~2,500-name sweep
+across the brood repo + 15 sibling projects migrated the tree, driven by a temporary
+`nest format --migrate-privacy` CST pass. See devlog 2026-08-05.
+
 ## ADR-147 — Package manager v2: tarball deps + a git-backed registry
 
 **Status:** accepted / implemented (2026-07-24); **the git-backed-registry half is SUPERSEDED by
