@@ -122,6 +122,7 @@ mod annot;
 mod ctx;
 pub(super) mod deps;
 mod exhaustive;
+mod guard_effects;
 mod guards;
 mod infer;
 mod protocol;
@@ -1089,6 +1090,11 @@ pub fn check_file_ext(
         // and abilities, so a scrutinee typed as a sealed ability resolves to its record-id
         // set. Sound: anything it can't prove total defers to silence.
         exhaustive::check_matches(heap, &forms, &ctx, &mut out);
+        // Pass 3.7: guard purity (advisory) — flag an effectful primitive in a `:when`
+        // guard. Also reads the *un-expanded* forms (a `:when` guard lowers to a plain
+        // `if`-test on expansion). A guard runs on rejected clauses and, in a `receive`,
+        // re-runs per mailbox scan, so an effect there fires on paths never selected.
+        guard_effects::check_guards(heap, &forms, &mut out);
         // (The macro binding-capture lint was retired when automatic binding hygiene
         // shipped — ADR-066 amendment: a template's `let`/`fn` binders are alpha-renamed
         // to fresh gensyms by the expander, so a plain literal binder can no longer

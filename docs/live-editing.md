@@ -33,19 +33,31 @@ running `nest mcp` image:
   is *mostly already done* (see Stage 8).
 - **Cross-process** — a `def` reaches every spawned process on its next lookup
   (the shared `Arc<RuntimeCode>`).
-- **…but a self-recursive loop keeps running its own old body** (verified
-  2026-07-30). A *tail self-call* compiles to `Node::SelfCall`, which re-runs the
-  current arm through the trampoline **without resolving the callee** — so
-  redefining the looping function *itself* does not reach a process already inside
-  it; only a **fresh** call gets the new body. Redefining any *other* global that
-  the loop calls does reach it, on the loop's next call to it. Measured both ways:
-  redefining a called global → the running loop returns the new value; redefining
-  the loop function → the running loop returns the old one while a fresh call
-  returns the new. This is precisely Erlang's local-vs-remote rule (`loop()` keeps
-  running old code, `?MODULE:loop()` switches), and it is *why* Stage 6 exists: a
-  long-lived loop needs an explicit hand-off point to adopt new code. Say "on its
-  next lookup", not "running loops pick up new code", because a self-call is not a
-  lookup.
+- **A top-level `defn` self-loop now DOES pick up its own redefinition** (fixed
+  2026-07-30, commit `4bbef7d9`; guarded by `tests/vm_selfcall_reload_test.blsp`).
+  A *tail self-call* compiles to `Node::SelfCall`, the VM's zero-lookup loop
+  back-edge — it resets the frame and jumps to ip 0 without consulting the global
+  table. `SelfCall` now compares the global epoch (bumped by every `def`) against
+  the value seen on frame entry: unchanged (the overwhelming case) costs one
+  relaxed `u64` compare per iteration; on a bump it re-resolves the arm's own
+  global name once, and — because the self-call is in tail position — a
+  redefinition of the looping function *itself* becomes the frame's result, so a
+  running `(defn serve (state) … (serve next))` adopts its new body on the next
+  back-edge. Verified empirically: a worker looping on `worker1` and redefined
+  mid-flight emits `:A :A … :B :B …`.
+- **…but an inner `letrec`/`fn` self-loop still keeps running its old body** — the
+  residual boundary, and *why Stage 6 still exists*. When the back-edge targets a
+  **local gensym** (a `(letrec (loop (fn (k) … (loop …))) …)`) rather than a
+  global, there is no global name to re-resolve, so the epoch guard can't reach it;
+  redefining the enclosing global does not swap a running inner loop's code (only
+  globals its body *calls by name* late-bind). **This is the shape `defprocess`
+  expands to** (`std/proc/gen.blsp` — the dispatch loop is an anonymous `letrec`),
+  so a running `gen` server does **not** adopt a redefinition of its own clauses;
+  put handler logic in top-level `defn`s the clauses call if you want it reloadable,
+  or use the Stage 6 `[:code-change]` hand-off. Verified empirically: the same
+  worker written as an inner `letrec` loop stays on `:A` after its global is
+  redefined. This is precisely Erlang's local-vs-remote rule (`loop()` keeps
+  running old code; `?MODULE:loop()` switches).
 - **In-flight calls are safe** — append-only code means a call already running
   the old closure finishes on it; the next call gets the new one.
 - **Process-threaded state already survives reload.** This Lisp is strictly

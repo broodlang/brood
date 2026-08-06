@@ -1575,6 +1575,75 @@ fn match_exhaustiveness_flags_a_missing_keyword_arm() {
 }
 
 #[test]
+fn guard_purity_flags_an_effect_in_a_match_when_guard() {
+    let src = "
+(defn f (n counter)
+  (match n
+    (x :when (do (table-put counter :seen 1) (> x 0)) :pos)
+    (_ :neg)))
+";
+    let w = file_warnings(src);
+    assert!(
+        w.iter()
+            .any(|s| s.contains("table-put") && s.contains(":when` guard")),
+        "expected an effectful-guard warning naming table-put, got {w:?}"
+    );
+}
+
+#[test]
+fn guard_purity_flags_an_effect_in_a_receive_when_guard() {
+    let src = "
+(defn worker (counter)
+  (receive
+    (n :when (< (table-incr counter :seen) 100) n)
+    (_ :skip)))
+";
+    let w = file_warnings(src);
+    assert!(
+        w.iter()
+            .any(|s| s.contains("table-incr") && s.contains("guard")),
+        "expected an effectful-guard warning naming table-incr, got {w:?}"
+    );
+}
+
+#[test]
+fn guard_purity_is_silent_for_a_pure_guard() {
+    let src = "
+(defn f (n)
+  (match n
+    (x :when (> x 0) :pos)
+    (x :when (int? x) :int)
+    (_ :other)))
+(defn g (a b) :when (>= a b) a)
+";
+    assert!(
+        file_warnings(src)
+            .iter()
+            .all(|w| !w.contains(":when` guard")),
+        "a pure guard must be silent, got {:?}",
+        file_warnings(src)
+    );
+}
+
+#[test]
+fn guard_purity_does_not_flag_an_effect_in_the_clause_body() {
+    // The effect is in the body, where it belongs — only the guard is linted.
+    let src = "
+(defn f (n)
+  (match n
+    (x :when (> x 0) (println x))
+    (_ :neg)))
+";
+    assert!(
+        file_warnings(src)
+            .iter()
+            .all(|w| !w.contains(":when` guard")),
+        "an effect in the clause body must not be flagged, got {:?}",
+        file_warnings(src)
+    );
+}
+
+#[test]
 fn match_exhaustiveness_is_silent_when_every_arm_is_covered() {
     let src = "
 (defn f (status)

@@ -243,6 +243,21 @@ These are layers on the same compiler.
     (_               :negative))
   ```
 
+  **A guard must be a *decision*, not an *action* — keep it pure.** A guard runs
+  on clauses the match ultimately *rejects* (an earlier clause whose pattern
+  matches but whose guard is false has already evaluated the guard before the
+  next clause is tried), and in a `receive` it re-runs against **every scanned
+  message on each mailbox re-scan** — the scan restarts at the front on every
+  suspend/resume, so a guard over a mailbox of *k* messages runs O(k) times per
+  `receive`, and O(k) *again* on the next wake-up. An effect in a guard therefore
+  fires on paths you never select and, in a `receive`, fires repeatedly against
+  messages it never consumes. This is why LFE/Erlang restrict guards to a pure,
+  total sublanguage. Brood doesn't *enforce* a subset (immutability already bans
+  data-effects), but **`nest check` warns** on a message-passing / `Table`-mutation
+  / I/O / global-rebinding call inside a `:when` guard — put the effect in the
+  clause body instead. Guard-safe: comparisons, type/shape predicates, total
+  arithmetic, and pure data reads.
+
 - **Non-linear patterns** — a repeated variable is an equality constraint:
   `[x x]` matches only a 2-vector of equal elements. (Erlang does this
   implicitly; the compiler tracks already-bound names and emits an `=` check on

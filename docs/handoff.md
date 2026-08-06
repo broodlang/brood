@@ -634,9 +634,14 @@ regression detection, which means running it **both** ways (`UTF8=1`) and checki
 - **`(buffer-text buf)` is `rope->string` — a fresh O(n) string per call.** Anything that calls it
   per keystroke is O(buffer) per keystroke before it does any work of its own. This is why the
   editor gets nothing from ADR-214 (§2).
-- **Hot reload does not reach a self-recursive loop.** A tail self-call compiles to
-  `Node::SelfCall`, which re-runs the arm without resolving the callee. Redefining any *other* global
-  the loop calls does reach it. Erlang's local-vs-remote rule; see `live-editing.md`.
+- **Hot reload reaches a top-level `defn` self-loop, but not an inner `letrec` loop.** A tail
+  self-call compiles to `Node::SelfCall`; since 2026-07-30 (commit `4bbef7d9`, guarded by
+  `tests/vm_selfcall_reload_test.blsp`) it watches the global epoch and re-resolves its own global
+  name on a `def`, so a running `(defn serve (s) … (serve …))` *does* adopt its own redefinition on
+  the next back-edge. But when the back-edge targets a **local gensym** (a `letrec` loop — the shape
+  `defprocess` expands to) there is no global to re-resolve, so it keeps old code; only globals the
+  body calls by name late-bind. Erlang's local-vs-remote rule; see `live-editing.md` (and Stage 6 /
+  the ROADMAP `code_change` item for the state-migration hand-off).
 - **A closure that captures no locals is already shared code**; one that captures a local is copied
   on send. That is why supervisor `:start` thunks should avoid captures — ADR-194/208.
 - **`/` is exact.** `(/ 3 4)` is the rational `3/4` (ADR-196); `(/ 4 2)` is `2`. Use `quot` for an
