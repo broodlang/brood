@@ -1,0 +1,99 @@
+;; What a `receive` costs, decomposed by PATTERN SHAPE — one long-lived process.
+;;
+;;   PAT=vec N=1000000 brood scripts/fuzz/stress/recv_matcher.blsp
+;;   PAT=any N=1000000 brood scripts/fuzz/stress/recv_matcher.blsp
+;;
+;; The process sends itself a message and receives it, N times. No spawn, no cross-process
+;; delivery, no teardown — so `ns_receive` / `ns_match_run` per iteration are directly
+;; readable and tiering is not a variable (unlike `spawn_live_ladder.blsp`, where every unit
+;; is a fresh short-lived process).
+;;
+;; THE TWO ROWS ARE A CONTROL PAIR, and the difference between them is the point:
+;;
+;; FOUR MODES. `vec`/`any` are the headline pair; `bind`/`intlit` are the bisect that
+;; identified WHICH part of a pattern costs the native frame (2026-08-06):
+;;
+;;   PAT     pattern     compares a literal?   native?
+;;   any     m           no                    YES
+;;   bind    [a v]       no                    YES
+;;   vec     [:go v]     yes (keyword)         NO — deopts ~1 per receive
+;;   intlit  [1 v]       yes (int)             NO — deopts ~1 per receive
+;;
+;; So it is **comparing a literal element** that excludes a matcher from the native fast
+;; frame — NOT the matcher's calls (`bind` calls `vector?` and `vector-length` and stays
+;; native), NOT the vector machinery (`bind` does two `vector-ref`s), and NOT anything
+;; keyword-specific (an int literal deopts identically). Since the tagged tuple `[:tag …]`
+;; is the dominant idiom, essentially every real `receive` is on the slow side of this.
+;;
+;;   vec — the idiomatic tuple pattern `[:go v]`. Its generated matcher calls `vector?` and
+;;         `vector-length`. Measured 2026-08-06: this arm lowers to native, then deopts on 16
+;;         consecutive activations, at which point `jit_deopt_feedback` marks it BAILED for
+;;         the rest of the program (`DEOPT_BAIL_CONSECUTIVE`). Every later matcher call then
+;;         runs on the `vm_apply` trampoline — `jit_link_done` 0, `vm_apply` ~1 per receive.
+;;
+;;   any — a catch-all symbol pattern. Its matcher makes no call, stays native, and is the
+;;         control that shows what a matcher costs when the JIT keeps it on the fast frame:
+;;         `jit_link_done` ~1 per receive, `vm_apply` ~0.
+;;
+;; Measured (release-fast + `--features perf-stats`, N=1e6, quiet machine):
+;;
+;;   |                | vec (BAILED) | any (native) |
+;;   |----------------|--------------|--------------|
+;;   | ns/iter        | 1683         | 1242         |
+;;   | ns_receive     | 935 ns       | 485 ns       |
+;;   | ns_match_run   | 534 ns       | 112 ns       |
+;;   | jit_link_done  | 0            | 993 489      |
+;;   | step→vm_apply  | 999 984      | 6 511        |
+;;
+;; READ THAT GAP AS AN UPPER BOUND, NOT THE PRIZE. `any` also does strictly less matching
+;; work (no tag test, no length test, no element bind), so part of the 422 ns is work not
+;; done rather than overhead removed. What the pair *does* establish is the mechanism: the
+;; tuple matcher never reaches the native fast frame, and one that does is ~4.8x cheaper to
+;; run.
+;;
+;; Run under `BROOD_PERF_STATS=1` on a `--features perf-stats` build for the `ns_*` shares;
+;; `jit_link_done` (0 vs ~N) is the single counter that says whether the fast frame engaged.
+
+(def n (let (e (getenv "N")) (if e (string->number e) 1000000)))
+(def pat (let (e (getenv "PAT")) (if e e "vec")))
+
+(defn loop-vec (i acc)
+  (if (%eq i n)
+    acc
+    (do
+      (send (self) [:go i])
+      (receive ([:go v] (loop-vec (%add i 1) (%add acc v)))))))
+
+(defn loop-any (i acc)
+  (if (%eq i n)
+    acc
+    (do
+      (send (self) [:go i])
+      (receive (m (loop-any (%add i 1) (%add acc (vector-ref m 1))))))))
+
+;; Bisect arms. Same message shape as `vec` throughout, so only the pattern varies.
+(defn loop-bind (i acc)
+  (if (%eq i n)
+    acc
+    (do
+      (send (self) [:go i])
+      (receive ([a v] (loop-bind (%add i 1) (%add acc v)))))))
+
+(defn loop-intlit (i acc)
+  (if (%eq i n)
+    acc
+    (do
+      (send (self) [1 i])
+      (receive ([1 v] (loop-intlit (%add i 1) (%add acc v)))))))
+
+;; The accumulator is printed beside the timing deliberately: a loop the compiler
+;; managed to delete would still print a time, but not the right sum.
+(def t0 (now-ns))
+(def r
+  (cond
+    (%eq pat "vec") (loop-vec 0 0)
+    (%eq pat "bind") (loop-bind 0 0)
+    (%eq pat "intlit") (loop-intlit 0 0)
+    else (loop-any 0 0)))
+(def dt (quot (- (now-ns) t0) 1000000))
+(println (str "pat=" pat " n=" n "  " dt " ms   " (quot (* dt 1000000) n) " ns/iter   acc=" r))
