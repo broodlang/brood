@@ -34,6 +34,30 @@ clean, coherent design beats a backwards-compatible one every time here. (Keep
 the build/tests green, and record notable breaks in `docs/devlog.md` — but don't
 preserve a worse design just to avoid a break.)
 
+## Green tree first — don't start new work over known flakiness or bugs
+
+**Before picking up any new feature or perf work, the tree must be provably green.**
+A known open bug, a flaky test, or an unexplained failure — *even one seen "only
+once"* — **is** the work: fix it, or prove it a non-issue, before building anything on
+top. A feature layered over a latent bug only makes the bug harder to find, and a flake
+left running erodes trust in every green run after it (you stop believing your own CI).
+
+Before starting new work:
+- **Confirm no open issue.** `docs/known-issues.md` should show no open bug. A documented
+  *watch* item is acceptable only if it genuinely cannot be reproduced on demand — say so,
+  with the diagnostic armed.
+- **Prove green, not "passed once."** Flakiness hides in one-in-N races, so a single pass
+  is not evidence. For anything touching concurrency, the scheduler, dist/nodes, GC, or the
+  JIT, run the suite *repeatedly* — `make test` and `make test-both`, the distribution tests
+  looped, `BROOD_GC_STRESS=1 BROOD_GC_VERIFY=1` on the concurrency-heavy tests, and a
+  fuzz-differential pass (`scripts/fuzz/run.sh`). The flake-hunt tooling is below and in
+  `docs/handoff.md`.
+- **A regression is stop-the-world.** If new work turns a green row red or a green test
+  flaky, fixing that takes priority over finishing the feature — don't commit forward.
+
+A runtime whose green runs are trusted is worth more than one more feature; every later
+hour of "is this flake real?" costs more than proving green up front.
+
 ## Core principle: write the language in the language
 
 **As much of the system as possible must be written in Brood itself, not in
@@ -49,10 +73,11 @@ Concretely:
 - Everything else belongs in `std/` (Brood source), not in `builtins.rs`. When
   you reach for a new Rust builtin, first ask: *can this be written in Brood on
   top of existing primitives?* If yes, do that instead.
-- This applies to upcoming pieces too. The **CLI/REPL, the editor commands,
-  keymaps, and UI should ultimately be Brood**, with Rust only hosting the
-  thinnest necessary substrate. (The REPL is Rust today as a bootstrap; moving
-  it into Brood is a goal — see `ROADMAP.md`.)
+- This applies to upcoming pieces too. The **editor commands, keymaps, and UI
+  should ultimately be Brood**, with Rust only hosting the thinnest necessary
+  substrate. (The REPL already moved into Brood — `std/tool/repl.blsp`, ADR-048;
+  the binaries just bootstrap into `(repl-run)`. The `nest`/`brood` CLI dispatch
+  is still Rust — see `ROADMAP.md`.)
 - A Rust builtin is an admission that the language can't yet express something.
   Treat each one as a candidate to later replace with Brood once the language
   is capable enough.
@@ -135,22 +160,31 @@ crates/lisp/src/   (the directory tree mirrors the layers — see lib.rs)
                process.rs (green processes); renamed from proc.rs to end the name clash
   dist.rs + dist/   distributed nodes (handshake, heartbeat, wire) — ADR-033/034
   net.rs       thin non-blocking TCP socket mechanism (ADR-062); Brood policy is
-               the in-tree `std/net/*` library
-  bundle.rs    single-binary app bundling (ADR-038); gui.rs the GUI frontend (ADR-046)
+               the in-tree `std/net/*` library (net_wasm.rs is the wasm32 shim)
+  wasm.rs      embedded `wasmtime` host — `%wasm-*` load/call/exports, WIT-typed
+               lower/lift + fuel metering (ADR-071/145; Brood policy `std/wasm.blsp`)
+  treesit.rs   tree-sitter integration for the editor highlighter (std/editor/treesit.blsp)
+  bundle.rs    single-binary app bundling (ADR-038); gui.rs the GUI frontend (ADR-046);
+               gui_gpu.rs the experimental OpenGL backend; audio.rs `audio-beep`
+  coverage.rs  line-coverage instrumentation (ADR-148); perf.rs/profile.rs VM counters
   error.rs     LispError / LispResult / source Pos
   lib.rs       the `Interp` entry point; bundles std/prelude.blsp
 crates/cli/src/main.rs   the `brood` binary — the language (REPL, file runner, `--test`)
 crates/nest/src/         the `nest` binary — project tooling (main.rs + mcp.rs) — ADR-028
 crates/lsp/src/main.rs   the `brood-lsp` binary — language server (ADR-025, docs/lsp.md)
+crates/playground/src/   the `brood-playground` cdylib — a wasm-bindgen shim exposing
+                         a Brood `eval()` to the browser (the in-browser playground)
 std/                     standard library written in Brood, grouped (ADR-085):
-                         prelude.blsp + bare core (io, file, set, regex, json,
-                         fuzzy, format, task, log); the editor/display framework
-                         `std/editor/*` (buffer, display, ui, keymap, face,
-                         highlight, lineedit, pane, layers, ansi, serve); the process
-                         framework `std/proc/*` (`gen`, `supervisor`); the net *library*
-                         `std/net/*` (`http`, `sse`, `tcp`); the toolchain `std/tool/*`
-                         — grouped on disk but BARE module names (test, project, package,
-                         complete, coverage, docs, explain, grammar, mcp, observer,
+                         prelude.blsp + ~30 bare-core modules (io, file, set, regex,
+                         json, format, task, log, version, resolver, crypto, hash, csv,
+                         datetime, encoding, url, uuid, template, stream, …); the
+                         editor/display framework `std/editor/*` (buffer, display, ui,
+                         keymap, face, highlight, lineedit, pane, layers, ansi, serve);
+                         the process framework `std/proc/*` (`gen`, `supervisor`,
+                         `agent`); the net *library* `std/net/*` (`http`, `sse`, `tcp`,
+                         `reconnect`); the toolchain `std/tool/*` — grouped on disk but
+                         BARE module names (test, project, package, complete, coverage,
+                         debug, docs, eval-server, explain, grammar, mcp, observer,
                          proctree, repl, scaffold, sexp, reload). The
                          net library and `proc/supervisor` were briefly externalized (Move 2)
                          then re-bundled in-tree (ADR-097, batteries-included default);
@@ -173,10 +207,12 @@ app — ADR-090), `completions` (emit a shell TAB-completion script; `complete` 
 candidate engine behind it), `grammar` (emit an editor syntax grammar — VS Code TextMate or
 Emacs — generated from `(special-forms)`, ADR-092), the package-manager commands
 `fetch`/`update`/`tree`/`add`/`remove` (ADR-037) plus `publish`/`search` against a
-git-backed registry index (ADR-147), `release` (single-binary bundling, ADR-038),
-and `update-tooling` (re-drop the AI-assistant files `nest new` scaffolds — the
-`docs/brood-for-claude.md` reference and the `writing-brood` skill — from the
-current binary, so they don't drift as the language evolves).
+**hosted** registry (the `hive` tarball service, ADR-147/211 — *not* a git-backed
+index) and `key` (generate/manage the ed25519 signing keypair `nest publish` uses,
+ADR-212), `release` (single-binary bundling, ADR-038), and `update-tooling` (re-drop
+the AI-assistant files `nest new` scaffolds — the `docs/brood-for-claude.md`
+reference and the `writing-brood` skill — from the current binary, so they don't
+drift as the language evolves).
 
 ## Commands
 
@@ -547,5 +583,8 @@ The later milestones are underway (vertical-slice style, ADR-045/046):
 process viewer; **M4 server/daemon** — distributed nodes (TCP, location-transparent
 `send`, monitors, closure-shipping, HMAC handshake) plus a userland
 `std/proc/supervisor.blsp` (kernel-supervised processes were tried and reverted — see
-roadmap/ADR-039). The editor app itself is a separate downstream project, out of
+roadmap/ADR-039). **Native WASM interop** shipped too (ADR-071/145): an embedded
+`wasmtime` host with WIT-typed marshalling + fuel metering (`crates/lisp/src/wasm.rs`,
+`std/wasm.blsp`), plus an in-browser playground built on the wasm32 target
+(`crates/playground`). The editor app itself is a separate downstream project, out of
 scope for this repo and its roadmap. Still ahead here: server-mode socket serving.
