@@ -20,6 +20,10 @@
 # Brood package cache — regenerable from project.lock.blsp (committed) (ADR-037)
 _deps/
 
+# Startup image — a build artifact, regenerated from source whenever the tree
+# changes and never authoritative (ADR-218).
+.brood/
+
 # Full external conformance corpora — hundreds of MB, fetched on demand with
 # `scripts/fetch-corpus.sh --full`. The committed subset lives in <suite>/data/.
 tests/corpus/*/full/

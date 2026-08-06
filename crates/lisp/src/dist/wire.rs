@@ -428,7 +428,7 @@ const M_SET: u8 = 16;
 /// [`Message::Ratio`]) — portable across nodes.
 const M_RATIO: u8 = 17;
 
-fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
+pub(crate) fn encode_msg(w: &mut Vec<u8>, m: &Message) -> io::Result<()> {
     match m {
         Message::Nil => w.push(M_NIL),
         Message::Bool(false) => w.push(M_FALSE),
@@ -620,7 +620,7 @@ fn encode_closure(w: &mut Vec<u8>, c: &crate::process::ClosureMsg) -> io::Result
 /// and decode sides can't drift apart — round-trip stays symmetric.
 const MAX_DECODE_DEPTH: u32 = crate::process::MAX_MESSAGE_DEPTH;
 
-fn decode_msg(r: &mut Cursor<Vec<u8>>) -> io::Result<Message> {
+pub(crate) fn decode_msg(r: &mut Cursor<Vec<u8>>) -> io::Result<Message> {
     decode_msg_at(r, 0)
 }
 

@@ -537,6 +537,93 @@ manifest is read, naming the key, not later inside whoever consumes the map."
       nil
       (project-abs-paths root *project-source-paths*))))
 
+
+;; ═══ Startup image (ADR-218) ═══════════════════════════════════════════════
+;; Loading a big project from source costs ~1.1 ms per FILE, almost all of it
+;; evaluating and materialising code (read 9% / macroexpand 20% / eval+promote 70%).
+;; Rebuilding the same bindings structurally is ~9x faster, so a project that has not
+;; changed since its last run starts from a binary image instead of its sources.
+;;
+;; This is the POLICY half; `%image-write` / `%image-read` are the mechanism. The
+;; image only affects STARTUP: it defines exactly the globals a source load would have
+;; defined, so `def`, hot reload and late binding behave identically afterwards — a
+;; running process picks up a later redefinition the same way either way.
+
+(def *project-image-file* ".brood/image.bin")
+
+;; Registry globals that LOADING mutates rather than creates. They already exist after
+;; the prelude, so the "names that appeared" diff below cannot see them, yet the image
+;; is wrong without them — restoring `*features*` in particular is what stops a
+;; `require` re-loading an imaged module from source.
+(def *project-image-registries*
+  ['*features* '*module-docs* '*impls* '*abilities* '*methods* '*record-ids*])
+
+(defn project-image-path (root)
+  "Where `root`'s startup image lives."
+  (path-join root *project-image-file*))
+
+;; The staleness key: every source file's path + size + mtime, plus the running
+;; binary's build id. Any edit, add or delete changes it, as does a new `brood`.
+;; Cheap — one `stat` per file, ~20 ms for 16 000 files — and it never says "fresh"
+;; for a tree that has changed, which is the only direction that matters.
+(defn project-image-fingerprint (root)
+  (let (files (sort (fold (fn (acc dir) (append-two (project-collect-sources dir) acc))
+                      nil
+                      (project-abs-paths root *project-source-paths*))))
+    ;; Not hashed: the fingerprint is only ever compared for equality, and hashing
+    ;; would pull `hash` into the loader's dependencies for nothing. Even 16 000 files
+    ;; make ~1.5 MB, which is noise beside the image itself.
+    (str (build-id) "\n"
+      (join "\n" (map (fn (f) (str f ":" (file-size f) ":" (file-mtime f))) files)))))
+
+;; The globals an image must carry: everything the source load defined that the
+;; prelude did not, plus the registries it mutated.
+(defn- project-image-names (before)
+  (append-two *project-image-registries*
+    (remove (fn (n) (member? n before)) (global-names))))
+
+(defn project-write-image (root before)
+  "Snapshot the bindings this project load produced into `root`'s image. `before` is
+the `(global-names)` list captured *before* the sources were loaded. Returns the count."
+  (let (dir (parent-dir (project-image-path root)))
+    (when (not (dir? dir)) (make-dir dir))
+    (%image-write (project-image-path root)
+      (project-image-names before)
+      (project-image-fingerprint root))))
+
+(defn project-read-image (root)
+  "Restore `root`'s startup image if it exists and matches the current sources.
+Returns the number of bindings restored, or nil for a miss (absent, stale, corrupt) —
+in which case the caller loads from source and should then write a fresh image."
+  (%image-read (project-image-path root) (project-image-fingerprint root)))
+
+;; Whether an image may be used at all this run. Line coverage (ADR-148 tier 2)
+;; instruments at COMPILE time — the compiler prefixes positioned nodes with a
+;; `RecordLine` opcode — so code restored from an image was never compiled in this
+;; process and carries no instrumentation, and the report would silently come back
+;; empty. An instrumented run therefore always loads from source. Silent wrong output
+;; is exactly the failure mode worth a special case.
+(defn project-image-usable? ()
+  (nil? (getenv "BROOD_COVERAGE")))
+
+(defn project-load-sources-cached (root & opts)
+  "Load the project the fast way: from its startup image when that is current,
+otherwise from source — and in that case write the image, so the NEXT run is fast.
+This is what `nest run` / `nest test` / `nest check` use, which is why none of them
+ever require a separate build step to have been run first (ADR-218). Image writing is
+best-effort: a read-only or full disk costs speed, never correctness."
+  (let (hit (cond (project-image-usable?) (project-read-image root) else nil))
+    (cond
+      hit hit
+      else
+        (let (before (global-names)
+              _ (apply project-load-sources (cons root opts)))
+          (when (project-image-usable?)
+            (try
+              (project-write-image root before)
+              (catch e nil)))
+          nil))))
+
 ;; Load the manifest (if present) and put the project's source dirs on *load-path*
 ;; so its modules are require-able by name.
 ;; --- formatter rules from the manifest (+ its :format-plugins deps) ----------
@@ -744,7 +831,9 @@ rules merged in declaration order, then this project's own `:format-headers` on 
 plus the test + format frameworks, so cross-module names and framework macros
 resolve in the advisory checker. Returns the project root."
   (project-setup root)
-  (project-load-sources root)
+  ;; Image-backed (ADR-218): a tooling image starts from the artifact when the tree
+  ;; is unchanged, and writes one when it isn't — no separate build step, ever.
+  (project-load-sources-cached root)
   (require 'test)
   (require 'format)
   root)
@@ -1164,7 +1253,7 @@ resolve in the advisory checker. Returns the project root."
 ;; re-run its `defmacro`s and trip the hot-reload "macro redefined" warning.
 ;; Standalone callers (`nest check`, an interactive `(check-project)`) start from
 ;; an image with nothing loaded, so this still loads every source.
-(defn- project-ensure-loaded (root) (project-setup root) (project-load-sources root :skip-loaded))
+(defn- project-ensure-loaded (root) (project-setup root) (project-load-sources-cached root :skip-loaded))
 
 ;; Structured analogue of `check-project` — returns a flat list of
 ;; `{:file :line :col :message}` maps instead of printing GNU lines + a
@@ -1829,7 +1918,7 @@ as unchanged (only when some were)."
       (error "run-project-tests: not in a Brood project (no project.blsp found from " (cwd) ")"))
     (project-setup root)
     (require 'test)
-    (project-load-sources root)
+    (project-load-sources-cached root)
     ; the project's own src/, so tests use it directly
     (test/reset-units!)
     ; drop any stale registrations from a prior run (long-lived image / hot reload)
@@ -1993,7 +2082,7 @@ as unchanged (only when some were)."
         ")"))
     (project-setup root)
     (require 'test)
-    (project-load-sources root)
+    (project-load-sources-cached root)
     (test/reset-units!)
     ; drop any stale registrations so a re-run in a long-lived `nest mcp` image
     ; (each `load` re-registers, ADR-013) counts each test once, not N times
@@ -2028,6 +2117,14 @@ as unchanged (only when some were)."
           ;; entry (no `(defmodule …)`, so not a registered module) is left unrooted.
           modname (%root-module-name (first entry))
           fname (second entry))
+      ;; Image-backed start (ADR-218). Note this makes `nest run` load the project's
+      ;; WHOLE source tree, where it used to load only the entry module's transitive
+      ;; `require` closure — the same thing `nest test` and the LSP already do. That is
+      ;; the deliberate trade: a big project starts from its image in ~2 s instead of
+      ;; re-evaluating ~20 s of source, and what gets loaded stops depending on which
+      ;; entry point you happened to run. A source file that only parsed because nothing
+      ;; required it will now be loaded (and its errors surfaced) by `nest run` too.
+      (project-load-sources-cached root)
       (require modname)
       ;; A `(defmodule …)` entry defines its fn as `modname/fname` (ADR-065); a
       ;; module file with no `defmodule` header defines it bare. Prefer the
