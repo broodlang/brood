@@ -26,7 +26,11 @@ use super::io::{bytes_to_value, collect_bytes};
 use super::numeric::arg;
 
 /// Feed `data` through a write-adapter encoder `enc` and return the compressed bytes.
-fn encode<W: Write + FinishBytes>(name: &str, mut enc: W, data: &[u8]) -> Result<Vec<u8>, LispError> {
+fn encode<W: Write + FinishBytes>(
+    name: &str,
+    mut enc: W,
+    data: &[u8],
+) -> Result<Vec<u8>, LispError> {
     enc.write_all(data)
         .map_err(|e| LispError::runtime(format!("{name}: {e}")))?;
     enc.finish_bytes()
@@ -36,9 +40,8 @@ fn encode<W: Write + FinishBytes>(name: &str, mut enc: W, data: &[u8]) -> Result
 /// Read all bytes out of a read-adapter decoder `dec` (the decompressed output).
 fn decode<R: Read>(name: &str, mut dec: R) -> Result<Vec<u8>, LispError> {
     let mut out = Vec::new();
-    dec.read_to_end(&mut out).map_err(|e| {
-        LispError::runtime(format!("{name}: not valid compressed data: {e}"))
-    })?;
+    dec.read_to_end(&mut out)
+        .map_err(|e| LispError::runtime(format!("{name}: not valid compressed data: {e}")))?;
     Ok(out)
 }
 
@@ -65,7 +68,11 @@ impl FinishBytes for DeflateEncoder<Vec<u8>> {
 /// `(%gzip bytes)` — gzip-compress a byte sequence, returned as `bytes`.
 pub(super) fn gzip(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
     let data = collect_bytes("%gzip", arg(args, 0), heap)?;
-    let out = encode("%gzip", GzEncoder::new(Vec::new(), Compression::default()), &data)?;
+    let out = encode(
+        "%gzip",
+        GzEncoder::new(Vec::new(), Compression::default()),
+        &data,
+    )?;
     Ok(bytes_to_value(&out, heap))
 }
 
