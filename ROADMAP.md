@@ -1796,6 +1796,22 @@ Runtime housekeeping (both items landed):
   **`Application`** behaviour; **synchronous, ordered, rollback-on-failure** supervisor
   startup + per-child intensity counting + child `type`/`significant`/`auto_shutdown`
   metadata.
+- 🟡 **Hot-upgrade state migration — a userland `code_change`** (ADR-013/039;
+  [`live-editing.md`](docs/live-editing.md) **Stage 6** — designed, unbuilt). A long-lived
+  `gen`/loop keeps threading its **old-shaped state** after its module is reloaded, so new
+  code meets old state (live-editing.md gap #4). The increment stays in Brood (no kernel
+  `code_change`, matching the ADR-039 supervision call): a `[:code-change]` message the
+  reloader sends after a successful reload; an optional `code-change` lifecycle clause in
+  `defprocess` that migrates the loop's (versioned) state before continuing; and a plain
+  `*code-version*` global stamp (not a `defdyn`) so a loop can detect new-code-old-state
+  without a message. This is *also* the hand-off point a running server needs for a
+  **dispatch-logic** upgrade: since 2026-07-30 a top-level `defn` self-loop picks up its own
+  redefinition (commit `4bbef7d9`, guarded by `tests/vm_selfcall_reload_test.blsp`), but an
+  inner `letrec` loop — the shape `defprocess` expands to — still runs old code until it
+  re-enters through a global (verified empirically). Full OTP `release_handler`/appup
+  orchestration (coordinated suspend/upgrade/resume/rollback across a supervision tree) stays
+  deferred: Brood's immutable-map data removes OTP's hardest upgrade case (nominal schema
+  migration — "a map has the keys it has"), leaving only loop-state drift, which this covers.
 - 🟡 **Dist refinements** (ADR-011): ✅ exact propagated exit reason for a
   *non-trapping* linked peer (fixed 2026-07-18 — hardness split from the reason,
   see the survey housekeeping item above; the shared `deliver_exit_to` covers

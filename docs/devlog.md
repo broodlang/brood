@@ -16804,6 +16804,53 @@ been outstanding since the disk filled and two merges landed.
 resolver bug of this shape survived to be found by hand. A `version` oracle generator — random
 version/constraint pairs against an independent reference — is the obvious addition.
 
+## 2026-08-06 — what LFE has to teach us: a guard-purity lint + two doc corrections
+
+Surveyed **LFE** (Lisp Flavoured Erlang) for ideas worth borrowing. The headline is
+validation: Brood has independently reached LFE's whole surface — multi-clause pattern
+functions, `:when` guards, `bytes` bit-syntax, `for` comprehensions, `receive`/`after`,
+supervision — and on macro hygiene (auto-gensym vs LFE's unhygienic CL macros), the error
+model, and native gradual types it is *ahead*. Three items were worth digging into (each
+investigated with an agent grounded in the code); the outcomes:
+
+**(1) Guard purity — a real latent footgun, now linted.** Brood guards accept arbitrary code
+with no guard-safe subset, and the effect fires on paths the clause doesn't select. Proven
+empirically: a `match` guard runs on a clause whose pattern matched but whose guard is false
+(before the next clause is tried), and a `receive` guard re-runs against an *unconsumed*
+message on every mailbox re-scan — one message's guard fired **4×** in the repro (the scan
+restarts at index 0 on each suspend/resume). Erlang/LFE restrict guards to a pure sublanguage
+for exactly this reason. Blast radius here is **zero** — every `:when` guard in `std/` +
+`tests/` is already a pure predicate — so this is latent, not realized. Fix: an **advisory
+`nest check` lint** (`crates/lisp/src/types/check/guard_effects.rs`), not a hard gate — the
+checker is advisory and the core stays small (ADR-011/123). It walks the *un-expanded* forms
+(a `:when` guard lowers to a plain `if`-test on expansion, so it is invisible post-expansion)
+and flags a message-passing / `Table`-mutation / I/O / global-rebinding primitive inside a
+guard, across `match`/`receive`/multi-clause-`fn`/`defn` and single-clause guarded `fn`/`defn`.
+Wired as check Pass 3.7; 4 Rust tests; `docs/pattern-matching.md` documents the convention.
+`nest check` stays clean (exit 0) on the tree.
+
+**(2) Binary comprehensions — speculative, deferred.** LFE's `bc`/`<=` binary generator has
+no genuine in-tree consumer: the fixed-width framed wire protocol is Rust (`dist.rs`,
+untouchable by a Brood feature), and the Brood-level binary code is delimiter-driven
+(`http`/`sse` — a fixed-width generator doesn't help) or ragged-tail (base64 — the hard part
+isn't iteration). Decisively, the `bytes` *pattern* that already shipped has ~zero std usage,
+so the generating half is even more speculative. Deferred per ADR-011 until a fixed-width
+Brood-level protocol driver (e.g. a Postgres wire driver) lands. Side-notes recorded: the
+binary-*producing* form is already `(bytes-concat (for …))`, and there is no float bit-syntax
+(`:f32`/`:f64`) today.
+
+**(3) OTP orchestrated upgrades — a doc bug fixed + a roadmap item.** Investigating the
+`code_change` gap surfaced that the **"hot reload does not reach a self-recursive loop"**
+claim is stale — a top-level `defn` self-loop *does* now adopt its own redefinition mid-flight
+(the 2026-07-30 `SelfCall` epoch-watch fix, `4bbef7d9`), verified empirically (`:A…:B…`); only
+an inner `letrec` loop — the shape `defprocess` expands to — still runs old code (verified:
+stays `:A`). Corrected `docs/live-editing.md` §gradations and `docs/handoff.md` §7. The real
+gap (a `gen` `code_change` state-migration hook — a running server keeps threading old-shaped
+state after a reload) is Stage 6 in `live-editing.md`, already designed and userland; added to
+`ROADMAP.md` (OTP-deferred block) with the note that full `release_handler`/appup orchestration
+stays deferred because Brood's immutable-map data removes OTP's hardest upgrade case (nominal
+schema migration). "incarnations" is an agent-learning journal, not a version stamp.
+
 ## 2026-08-06 — Module-load scaling: `*features*` was O(n²); where the other two walls are
 
 **Question asked.** Can we generate 100 000 source files of ~1000 lines each and load them
