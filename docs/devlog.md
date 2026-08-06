@@ -16659,3 +16659,44 @@ main-only differential. Fixed by gating the deep case on `(not= (getenv "BROOD_V
 the same engine guard `observability_test` already uses; the VM keeps full coverage. Raising
 `BROOD_STACK_BUDGET` was rejected — the default budget is `WORKER_STACK_BYTES (16 MiB) − 4 MiB`
 margin, and eating that margin risks a real SIGSEGV past the guard.
+
+## 2026-08-06 — semver ranges over `:git` tags: the resolver's last deferred item
+
+**Closed the one algorithm item ADR-209 carried through all six refinements.** A `:git` dep
+can now track a **`:version` range** instead of pinning an exact `:ref`:
+`[foo :git URL :version "^1.2.0"]` resolves to the newest published tag satisfying the range.
+The resolver *core* (`std/resolver.blsp`) did not change — it is a pure function of an injected
+provider, so git-tag selection is entirely a package-layer concern. The pieces:
+
+- **`%git-list-tags`** (one new Rust primitive, `builtins/pkg.rs`): `git ls-remote --tags --refs`,
+  returning the tag names. Added to the offload allowlist (it is network-bound like
+  `%git-resolve-ref`).
+- **`package-select-git-version`** (pure, `std/tool/package.blsp`): strip an optional leading `v`
+  (`v1.2.0` and `1.2.0` both read as 1.2.0), keep the tags that are valid versions matching the
+  `version-compile`d range, take the newest by `version-compare`. `version-match?` gives
+  plain-range-excludes-prerelease for free — a `1.4.0-rc.1` tag is skipped by `^1.2.0`. This is
+  the offline-testable unit, and it carries the bulk of the new test cases.
+- **Manifest surface** (`std/tool/project.blsp`): the `dep-git` record gained a `version` field;
+  `project-parse-git-dep` requires **exactly one** of `:ref`/`:version` (both → error, neither →
+  error). `nest add foo :git URL :version "^1.2.0"` works with no add-path change, because
+  `package-spec-token` already keyword-izes any `:`-token.
+- **Resolution + lock** (`std/tool/package.blsp`): `package-git-concrete-ref` resolves a ranged
+  dep to a concrete tag *before* the existing clone path — reusing the lock's pinned tag when its
+  recorded resolved `:version` still satisfies the range (network-free, keeps a plain `nest run`
+  offline), else `%git-list-tags` + newest pick. The chosen tag flows through the unchanged
+  exact-`:ref` commit/cache/clone path; the lock records the resolved concrete version beside
+  `:ref`/`:commit`. `nest update <name>` drops the name from the lock and thus advances.
+- **Compatibility**: two requesters of one git package reconcile greedily — first-resolved pin
+  wins, a later range must be satisfied by the pinned version, a later exact ref must match; else
+  a loud conflict, as before.
+
+**Greedy, not unified — deliberately (ADR-011).** A git-ranged package does not join the
+finite-domain PubGrub solve; two overlapping-but-different ranges on one git package reconcile
+only if the greedy newest pick satisfies both, not by the solver finding a common older version.
+Making a git package a first-class PubGrub member would need a manifest fetch (shallow clone) per
+candidate tag to learn its deps, plus a merged registry+git closure — materially more code and
+network, for a case git deps rarely hit (they are overwhelmingly direct and singular). Recorded
+as deferred with that reason. Tests: a pure `package-select-git-version` block (caret/tilde/
+conjunction/pre-release/`v`-prefix/no-match) plus offline `file://`-repo e2e (newest-match,
+network-free lock reuse, `nest update` advance, no-match error) in `tests/package_test.blsp`, and
+parse/error cases in `tests/project_test.blsp`.

@@ -150,7 +150,7 @@
         (pkg-git-tag dep-dir "v1.0.0")
         (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
         (let (entries (resolve-deps app-dir
-                        (list (dep-git 'greeter url "v1.0.0"))
+                        (list (dep-git 'greeter url "v1.0.0" nil))
                         nil))
           (assert= (count entries) 1)
           (let (e (first entries))
@@ -170,7 +170,7 @@
       (let (url (pkg-git-init dep-dir))
         (pkg-git-tag dep-dir "v1.0.0")
         (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
-        (let (dep (list (dep-git 'greeter url "v1.0.0"))
+        (let (dep (list (dep-git 'greeter url "v1.0.0" nil))
               e1 (first (resolve-deps app-dir dep nil)))
           (write-lockfile app-dir (list e1))
           ;; re-resolve with the lock present: same commit + sha, cache untouched
@@ -197,8 +197,8 @@
           (pkg-write-project app "app" "main" "(defn main () 1)" "")
           ;; app pins ansi v2.0.0 directly + depends on greeter → v2 wins, no error
           (let (entries (resolve-deps app
-                          (list (dep-git 'ansi ansi-url "v2.0.0")
-                            (dep-git 'greeter greeter-url "v1.0.0"))
+                          (list (dep-git 'ansi ansi-url "v2.0.0" nil)
+                            (dep-git 'greeter greeter-url "v1.0.0" nil))
                           nil)
                 idx (package/package-index-by-name entries))
             (assert= (sort (map (fn (e) (get e :name)) entries)) (list 'ansi 'greeter))
@@ -228,11 +228,106 @@
           (pkg-write-project app "app" "main" "(defn main () 1)" "")
           (is (includes? (try
                            (resolve-deps app
-                             (list (dep-git 'greeter greeter-url "main")
-                               (dep-git 'pretty pretty-url "main"))
+                             (list (dep-git 'greeter greeter-url "main" nil)
+                               (dep-git 'pretty pretty-url "main" nil))
                              nil)
                            (catch e e))
                 "conflicting dependency")))))))
+
+;; --- git-tag semver ranges (ADR-209) ----------------------------------------
+;; The PURE selection unit: from a remote's tag names, pick the newest that
+;; satisfies a range. Offline — no repo, no network — so every edge case is cheap.
+(describe "package: selecting a git tag by range"
+  (test "picks the newest tag satisfying a caret range"
+    (assert= (package/package-select-git-version (list "v1.0.0" "v1.2.0" "v1.2.5" "v1.4.0" "v2.0.0")
+               "^1.2.0")
+      ["v1.4.0" "1.4.0"]))
+  (test "a pessimistic ~> range caps the minor"
+    (assert= (package/package-select-git-version (list "v1.0.0" "v1.2.0" "v1.2.5" "v1.4.0")
+               "~> 1.2.0")
+      ["v1.2.5" "1.2.5"]))
+  (test "a conjunction range intersects both bounds"
+    (assert= (package/package-select-git-version (list "v1.1.0" "v1.5.0" "v1.9.0" "v2.1.0")
+               ">= 1.2, < 2.0")
+      ["v1.9.0" "1.9.0"]))
+  (test "tags match with and without a leading v"
+    (assert= (package/package-select-git-version (list "1.0.0" "1.3.0" "1.4.2") "^1.0.0")
+      ["1.4.2" "1.4.2"])
+    (assert= (first (package/package-select-git-version (list "v2.0.0" "v2.3.1") "^2.0.0"))
+      "v2.3.1"))
+  (test "a plain range excludes a pre-release tag"
+    (assert= (package/package-select-git-version (list "v1.0.0" "v1.4.0-rc.1") "^1.0.0")
+      ["v1.0.0" "1.0.0"]))
+  (test "a range naming a pre-release admits it"
+    (assert= (first (package/package-select-git-version (list "v1.2.0" "v1.3.0-rc.1")
+                      ">= 1.3.0-rc"))
+      "v1.3.0-rc.1"))
+  (test "non-version tags are ignored"
+    (assert= (first (package/package-select-git-version (list "latest"
+                                                          "nightly" "v1.2.0" "release-old")
+                      "^1.0.0"))
+      "v1.2.0"))
+  (test "no matching tag yields nil"
+    (is (nil? (package/package-select-git-version (list "v0.9.0" "v1.0.0") "^2.0.0")))
+    (is (nil? (package/package-select-git-version nil "^1.0.0")))))
+
+;; End-to-end over a local repo (file:// URL, offline): a git dep tracking a
+;; `:version` range resolves to the newest matching tag, records the resolved
+;; version in the lock (so a re-run is network-free), advances when the lock is
+;; dropped (`nest update`), and errors loudly when no tag satisfies the range.
+(describe "package: a :git dep tracking a version range"
+  (test "resolves to the newest matching tag and records the resolved version"
+    (let (parent (pkg-fixture-root)
+          dep-dir (path-join parent "greeter")
+          app-dir (path-join parent "app"))
+      (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
+      (let (url (pkg-git-init dep-dir))
+        (dolist (t (list "v1.0.0" "v1.2.0" "v1.2.5" "v1.4.0" "v2.0.0")) (pkg-git-tag dep-dir t))
+        (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+        (let (e (first (resolve-deps app-dir (list (dep-git 'greeter url nil "^1.2.0")) nil)))
+          (assert= (dep-kind e) :git)
+          (assert= (get e :ref) "v1.4.0")
+          (assert= (get e :resolved-version) "1.4.0")
+          (is (string? (get e :commit)))
+          ;; the lock vector carries the resolved version for later range-checks
+          (is (includes? (dep-lock-vec e) :version))
+          (is (includes? (dep-lock-vec e) "1.4.0"))))))
+  (test "a re-resolve reuses the locked tag while the range still covers it"
+    (let (parent (pkg-fixture-root)
+          dep-dir (path-join parent "greeter")
+          app-dir (path-join parent "app"))
+      (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
+      (let (url (pkg-git-init dep-dir)
+            dep (list (dep-git 'greeter url nil "^1.2.0")))
+        (dolist (t (list "v1.2.0" "v1.4.0")) (pkg-git-tag dep-dir t))
+        (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+        (let (e1 (first (resolve-deps app-dir dep nil)))
+          (assert= (get e1 :ref) "v1.4.0")
+          (write-lockfile app-dir (list e1))
+          ;; a newer in-range tag appears, but the lock still covers ^1.2.0 → no bump
+          (pkg-git-tag dep-dir "v1.5.0")
+          (let (e2 (first (resolve-deps app-dir dep (read-lockfile app-dir))))
+            (assert= (get e2 :ref) "v1.4.0")
+            (assert= (get e2 :resolved-version) "1.4.0"))
+          ;; dropping the name from the lock (what `nest update` does) advances it
+          (let (e3 (first (resolve-deps app-dir
+                            dep
+                            (package/package-lock-without (read-lockfile app-dir) (list 'greeter)))))
+            (assert= (get e3 :ref) "v1.5.0")
+            (assert= (get e3 :resolved-version) "1.5.0"))))))
+  (test "no tag satisfying the range is a loud, actionable error"
+    (let (parent (pkg-fixture-root)
+          dep-dir (path-join parent "greeter")
+          app-dir (path-join parent "app"))
+      (pkg-write-project dep-dir "greeter" "greeter" "(defn greet (w) w)" "")
+      (let (url (pkg-git-init dep-dir))
+        (dolist (t (list "v0.9.0" "v1.0.0")) (pkg-git-tag dep-dir t))
+        (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
+        (let (message (try
+                        (resolve-deps app-dir (list (dep-git 'greeter url nil "^2.0.0")) nil)
+                        (catch e (error-message e))))
+          (is (includes? message "satisfies"))
+          (is (includes? message "^2.0.0")))))))
 
 ;; --- :tarball deps (ADR-037 v2) ---------------------------------------------
 ;; A .tar.gz artifact + mandatory :sha256, extracted (wrapper stripped) into
@@ -1030,7 +1125,7 @@
   (test "every declared op resolves for every sealed member"
     (is (every? (fn (d) (satisfies? 'Dependency d))
           (list (dep-path 'a "p")
-            (dep-git 'b "u" "r")
+            (dep-git 'b "u" "r" nil)
             (dep-tarball 'c "u" "s")
             (dep-registry 'd "1.0.0")))))
   (test "the ability declares the five ops the package manager dispatches"
@@ -1039,7 +1134,7 @@
               'dep-resolve 'dep-check-compatible 'dep-lock-vec 'dep-entry-node))))
   (test "dep-kind is the manifest keyword for each identity"
     (assert= (dep-kind (dep-path 'a "p")) :path)
-    (assert= (dep-kind (dep-git 'b "u" "r")) :git)
+    (assert= (dep-kind (dep-git 'b "u" "r" nil)) :git)
     (assert= (dep-kind (dep-tarball 'c "u" "s")) :tarball)
     (assert= (dep-kind (dep-registry 'd "1.0.0")) :registry))
   (test "a plain map is not a dependency — it dispatches as :map and raises"
@@ -1049,12 +1144,27 @@
     (assert= (dep-entry-node (dep-path 'a "../a"))
       [:vector (vector [:symbol "a"] [:keyword ":path"] [:str "\"../a\""])])
     (assert= (dep-entry-node (dep-registry 'd "1.2.0"))
-      [:vector (vector [:symbol "d"] [:keyword ":version"] [:str "\"1.2.0\""])])))
+      [:vector (vector [:symbol "d"] [:keyword ":version"] [:str "\"1.2.0\""])])
+    ;; a git dep writes back :ref for an exact pin, :version for a range
+    (assert= (dep-entry-node (dep-git 'g "url" "v1.0.0" nil))
+      [:vector
+        (vector [:symbol "g"]
+          [:keyword ":git"]
+          [:str "\"url\""]
+          [:keyword ":ref"]
+          [:str "\"v1.0.0\""])])
+    (assert= (dep-entry-node (dep-git 'g "url" nil "^1.2.0"))
+      [:vector
+        (vector [:symbol "g"]
+          [:keyword ":git"]
+          [:str "\"url\""]
+          [:keyword ":version"]
+          [:str "\"^1.2.0\""])])))
 
 (describe "package: dependency compatibility is per-kind"
   (test "two requests for one name at the same source agree"
     (is (nil? (package/package-check-compatible (dep-path 'a "../a") (dep-path 'a "../a"))))
-    (is (nil? (package/package-check-compatible (dep-git 'a "u" "v1") (dep-git 'a "u" "v1")))))
+    (is (nil? (package/package-check-compatible (dep-git 'a "u" "v1" nil) (dep-git 'a "u" "v1" nil)))))
   (test "the same name at two paths is a loud, pin-it error"
     (is (includes? (try
                      (package/package-check-compatible (dep-path 'a "../a")
@@ -1063,8 +1173,8 @@
           "conflicting dependency")))
   (test "the same name at two git refs is a loud error naming both"
     (let (message (try
-                    (package/package-check-compatible (dep-git 'a "u" "v1")
-                      (dep-git 'a "u" "v2"))
+                    (package/package-check-compatible (dep-git 'a "u" "v1" nil)
+                      (dep-git 'a "u" "v2" nil))
                     (catch e e)))
       (is (includes? message "conflicting dependency"))
       (is (includes? message "v1"))
@@ -1078,9 +1188,28 @@
   (test "two DIFFERENT kinds for one name can never agree"
     (let (message (try
                     (package/package-check-compatible (dep-path 'a "../a")
-                      (dep-git 'a "u" "v1"))
+                      (dep-git 'a "u" "v1" nil))
                     (catch e e)))
-      (is (includes? message "required as both :path and :git")))))
+      (is (includes? message "required as both :path and :git"))))
+  (test "a ranged request agrees when the resolved pin satisfies it"
+    (let (entry (assoc (dep-git 'a "u" nil "^1.2.0") :ref "v1.4.0" :resolved-version "1.4.0"))
+      (is (nil? (package/package-check-compatible entry (dep-git 'a "u" nil "^1.0.0"))))
+      ;; an exact version-tag pin is range-checkable too
+      (is (nil? (package/package-check-compatible (dep-git 'a "u" "v1.4.0" nil)
+                  (dep-git 'a "u" nil "^1.0.0"))))))
+  (test "a ranged request the resolved pin cannot satisfy is a loud error"
+    (let (entry (assoc (dep-git 'a "u" nil "^1.2.0") :ref "v1.4.0" :resolved-version "1.4.0")
+          message (try
+                    (package/package-check-compatible entry (dep-git 'a "u" nil "^2.0.0"))
+                    (catch e e)))
+      (is (includes? message "conflicting dependency"))
+      (is (includes? message "^2.0.0"))))
+  (test "the same repo at two different URLs conflicts"
+    (is (includes? (try
+                     (package/package-check-compatible (dep-git 'a "u1" "v1" nil)
+                       (dep-git 'a "u2" "v1" nil))
+                     (catch e e))
+          "two different git URLs"))))
 
 ;; The `fetch`/`tree` verbs themselves are cwd-driven (they walk from `(cwd)` to a
 ;; project root), so — like `run-project` — they can't be isolated from the brood
@@ -1091,7 +1220,7 @@
     (assert= (to-str (dep-path 'shared "../shared"))
       "shared  (path \"../shared\")"))
   (test "a git dep displays as its tree label"
-    (assert= (to-str (dep-git 'p "https://x.git" "v1"))
+    (assert= (to-str (dep-git 'p "https://x.git" "v1" nil))
       "p  (git https://x.git @ v1)"))
   (test "index-by-name keys resolved entries by their name"
     (let (idx (package/package-index-by-name (list (assoc (dep-path 'a "../a") :deps nil)
@@ -1130,7 +1259,7 @@
         (pkg-git-tag dep-dir "v1.0.0")
         (pkg-write-project app-dir "app" "main" "(defn main () 1)" "")
         (let (dirs (ensure-deps app-dir
-                     (list (dep-git 'salutation url "v1.0.0"))))
+                     (list (dep-git 'salutation url "v1.0.0" nil))))
           (set-load-path! (append *load-path* dirs))
           (require 'salutation)
           (assert= (salutation/hi "you") "yo you")
