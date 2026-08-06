@@ -16700,6 +16700,7 @@ either-side Sym/Keyword compares interned ids), so control provably reaches its 
 for `(%eq el :go)`. The failing guard is one of the other 16. Those are indistinguishable at
 runtime because every guard jumps to one shared block, so the next move is an instrument, not
 more reading: stamp a per-site id on the way into deopt and let one run name the guard.
+
 ## 2026-08-06 — release 0.3.0, and a `CHANGELOG.md`
 
 **0.3.0 tagged and released.** A maintenance release: the workspace version bumped
