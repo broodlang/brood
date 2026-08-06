@@ -5102,8 +5102,10 @@ impl Heap {
     ///   presence test has to be inside the lock too: a derived method mirror that checks
     ///   "absent?" outside it can clobber an authored impl registered in between.
     /// - `:dissoc` — remove `path` (one key).
-    /// - `:cons-new` — prepend `val` to a list-valued global unless it is already a member
-    ///   (`provide` / `*features*`).
+    /// - `:cons-new` — prepend `val` to a list-valued global unless it is already a member.
+    ///   Was `provide`'s op; `*features*` became a set-shaped map in ADR-216 (the membership
+    ///   test has to be O(1)), so this op has no in-tree caller today. Kept as the generic
+    ///   list-registry update — it is the only atomic one for a list-valued global.
     ///
     /// Returns true when the registry was written, false when the op declined (`:assoc-new`
     /// onto a present key, `:cons-new` of an existing member) — so Brood can still report

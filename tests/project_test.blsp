@@ -431,7 +431,7 @@
         ; first walk: loads → 1
         (project/project-load-sources root)
         (assert= skipfix/*skip-load-count* 1)
-        (is (member? "skipfix" *features*))
+        (is (contains? *features* "skipfix"))
         ; pre-flight: provided → skip → 1
         (project/project-load-sources root :skip-loaded)
         (assert= skipfix/*skip-load-count* 1)
