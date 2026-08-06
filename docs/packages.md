@@ -124,6 +124,7 @@ Four source kinds:
 | Kind       | Shape                                    | Notes |
 |------------|------------------------------------------|---|
 | `:git`     | `[name :git URL :ref REF]`               | `REF` is a tag or commit. Branches are accepted but advisory — `:ref "main"` re-resolves on every `nest update`. |
+| `:git` (ranged) | `[name :git URL :version RANGE]`    | Instead of an exact `:ref`, track a **semver range** over the repo's tags (`^1.2.0`, `~> 1.3`, `>= 1.2, < 2.0`). The newest tag satisfying it is picked (tags match with or without a leading `v`; a plain range excludes pre-releases); the resolved version is locked, so a re-run is network-free and `nest update <name>` advances it. Exactly one of `:ref`/`:version`. Greedy, not a cross-package solve (ADR-209 seventh refinement). |
 | `:path`    | `[name :path PATH]`                      | Filesystem path, relative to the manifest. Local dev/mirror; SHA-256'd at fetch time. |
 | `:tarball` | `[name :tarball URL :sha256 HEX]`        | A `.tar.gz` artifact (http/https, or `file://` for a local/offline one). `:sha256` is **mandatory** — the integrity pin standing in for git's commit; a mismatch is a loud error. Extracted into `_deps/<name>/`, stripping the single wrapper directory. (v2, ADR-147.) |
 | `:version` | `[name :version "^1.2"]`                 | A **registry** dep naming a **semver range** (`^1.2`, `~> 1.3`, `>= 1.2, < 2.0`, `= 1.2.3`, or a bare `1.2.3` = exact). The PubGrub resolver picks the newest published version satisfying it (and every transitive range), downloads + sha-verifies + extracts it, and locks the concrete version. (Ranges: ADR-209; registry: v2, ADR-147.) |
@@ -361,6 +362,7 @@ Each is a one-liner from the Rust shell into Brood policy:
 | `nest update`                            | Re-resolve every dep's ref (re-running `ls-remote` for moving refs). |
 | `nest update <name>`                     | Same, but only for one dep. |
 | `nest add <name> :git URL :ref REF`      | Append to `:dependencies` (preserving the manifest's formatting via the existing `parse-source` / formatter), then `fetch`. |
+| `nest add <name> :git URL :version RANGE` | Ranged-git variant — track a semver range over the repo's tags (ADR-209). |
 | `nest add <name> :path PATH`             | Path-dep variant of `add`. |
 | `nest add <name> :tarball URL :sha256 HEX` | Tarball-dep variant of `add` (v2). |
 | `nest remove <name>`                     | Strip from `:dependencies`, drop `_deps/<name>/`, re-resolve the lock. |

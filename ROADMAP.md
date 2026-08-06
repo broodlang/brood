@@ -1840,9 +1840,15 @@ Runtime housekeeping (both items landed):
   signs the checksum, and the client verifies + pins the signer's key in the lock on first
   install, warning on a change; the registry only relays the signature (not a keyserver). The
   one open supply-chain gap (sha256 proves integrity, not authorship) is now closed.
-  ⬜ Remaining (ADR-011): semver ranges over `:git` tags. *(Tarball-backed registry entries and
+  ✅ **semver ranges over `:git` tags shipped (ADR-209 seventh refinement, 2026-08-06):** a
+  `:git` dep may track a `:version` range (`[foo :git URL :version "^1.2.0"]`) instead of an exact
+  `:ref`; the newest matching tag is picked (via `%git-list-tags`), the resolved version is locked
+  (network-free re-runs), and `nest update` advances it. Greedy per-dep (not a cross-package
+  PubGrub member) — the deferred unified-git solve is recorded with its ADR-011 reason. This was
+  the resolver's **last** deferred algorithm item. *(Tarball-backed registry entries and
   cloned-index auto-refresh from the old list are done / moot under the hosted design; a
-  client-side response TTL cache was investigated and declined — see ADR-211.)*
+  client-side response TTL cache was investigated and declined — see ADR-211. Still deferred:
+  semver ranges over `:git`-**tarball** sources.)*
 - ⬜ **Single-binary bundling** (ADR-038) — `nest bundle` appends a zip of
   project + `_deps/` to a pre-built `brood`; deferred until the editor needs end-user
   distribution.

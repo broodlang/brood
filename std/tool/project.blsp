@@ -175,7 +175,10 @@ the `nest new` scaffolder."
 (def- *project-reserved-dep-opts* (list :branch :dir :features))
 
 (defrecord dep-path (name path))
-(defrecord dep-git (name url ref))
+;; A git dep pins EITHER an exact `:ref` (tag/branch/commit) OR a `:version` range
+;; (`^1.2.0`, resolved to the newest matching tag, ADR-209). Exactly one is set; the
+;; other is nil.
+(defrecord dep-git (name url ref version))
 (defrecord dep-tarball (name url sha256))
 (defrecord dep-registry (name version))
 
@@ -186,7 +189,8 @@ the `nest new` scaffolder."
   (to-str [d] (str (get d :name) "  (path \"" (get d :path) "\")")))
 (impl Display
   project/dep-git
-  (to-str [d] (str (get d :name) "  (git " (get d :url) " @ " (get d :ref) ")")))
+  (to-str [d]
+    (str (get d :name) "  (git " (get d :url) " @ " (or (get d :ref) (get d :version)) ")")))
 (impl Display
   project/dep-tarball
   (to-str [d] (str (get d :name) "  (tarball " (get d :url) ")")))
@@ -233,13 +237,23 @@ than being fetched into `_deps/<name>/`."
   (name entry)
   (let (url (vector-ref entry 2)
         opts (project-vec-drop entry 3)
-        ref (plist-get opts :ref))
+        ref (plist-get opts :ref)
+        version (plist-get opts :version))
     (when (not (string? url))
       (error "project: :git dependency " name " URL must be a string, got " url))
-    (when (not (string? ref))
-      (error "project: :git dependency " name " needs a :ref \"<tag-or-commit>\""))
+    (when (and ref version)
+      (error "project: :git dependency "
+        name
+        " cannot give both a :ref and a :version — pin an exact ref or track a version range, not both"))
+    (when (and (not ref) (not version))
+      (error "project: :git dependency "
+        name " needs a :ref \"<tag-or-commit>\" or a :version \"<range>\""))
+    (when (and ref (not (string? ref)))
+      (error "project: :git dependency " name " :ref must be a string, got " ref))
+    (when (and version (not (string? version)))
+      (error "project: :git dependency " name " :version range must be a string, got " version))
     (project-reject-reserved-opts name opts)
-    (dep-git name url ref)))
+    (dep-git name url ref version)))
 
 (defn- project-parse-path-dep
   (name entry)
