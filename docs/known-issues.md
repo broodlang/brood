@@ -19,6 +19,7 @@ ADRs / topic docs.
 
 | # | What | Status |
 |---|---|---|
+| KI-31 | a foreign-ecosystem version range compiled to its FIRST term — `">=1.0.0 <2.0.0"` became `>=1.0.0` | ✅ **fixed** 2026-08-06 |
 | KI-30 | seven `temp-dir` prefixes were never purged — 4484 dirs / 168 MB of `/tmp` litter | ✅ **fixed** 2026-08-05 |
 | KI-29 | node/observe tests orphan `brood` children — one found alive **9 days** later, ~15% CPU each | ✅ **fixed** 2026-08-05 |
 | KI-28 | `clean_peer_exit_fires_nodedown_promptly` failed once, then passed on retry; output not captured | ⚠️ **watching** (seen once 2026-08-05) |
@@ -52,6 +53,49 @@ ADRs / topic docs.
 **No open issues; one watch item (KI-28).** No open bug in the language, runtime or toolchain
 itself. Every KI above is fixed, incidentally fixed, or a non-reproducing transient — each kept as
 a record with its regression test, so a recurrence is recognizable.
+
+---
+
+## KI-31 — a foreign-ecosystem version range silently compiled to its first term · **fixed 2026-08-06**
+
+**Found by a bug hunt against `std/version.blsp`, 2026-08-06** — not by a failing test, and not
+by the fuzzers: no generator covers the version module.
+
+`version-satisfies?`/`version-compile` split a constraint into terms on **commas**. A range
+written in npm/cargo style, with terms separated by *spaces*, therefore arrived as one term:
+`version-split-constraint` peeled the leading `>=` and handed `"1.0.0 <2.0.0"` to
+`version-core`, which is **deliberately lenient** ("a missing or non-numeric segment reads as
+0" — the property that makes `"1.x"` and the short `">= 0.3"` work). It parsed that as
+`(1 0 0 0 0)`, i.e. `>=1.0.0.0.0`. The upper bound vanished without a word.
+
+The consequence is the dangerous direction for a package manager:
+
+```
+(version-satisfies? "3.0.0" ">=1.0.0 <2.0.0")   ; => true, before the fix
+```
+
+A user pinning a dependency to `>=1.0.0 <2.0.0` got `>=1.0.0`, so the resolver could select a
+breaking major. It also failed the other way — `"^1.0.0 || ^2.0.0"` silently dropped the second
+alternative, so `2.5.0` did *not* satisfy it — and `"1.0.0 - 2.0.0"` (npm hyphen) became
+`=1.0.0` with a garbage prerelease of `(" 2" "0" "0")`.
+
+**Fixed** by rejecting a version part containing whitespace or a constraint operator
+(`< > = | ^ ~`) — the same rule `version-split-constraint` already applied to the *operator*
+("an operator with no meaning has to say so"), extended to the version beside it. `-` and `+`
+are deliberately not rejected: they are legal prerelease/build punctuation.
+
+**The leniency it does not touch, on purpose.** `">= 1.0.0"` (space after the operator),
+`">= 1.2"` (short), `"1.x"` and `"1.0.0+build"` all still compile — that leniency is why
+`version-core` exists in its current form. One case stays lenient and is *not* fixed:
+`">=1.0.0extra"` still reads as `>=1.0.0`, because a segment that begins with digits and
+continues with letters is indistinguishable from the `"1.x"` form the module intends to
+accept. Tightening that means deciding whether `"1.x"` should survive at all — a design
+question, not a bug fix.
+
+Regression test: `tests/version_test.blsp`, "a range from another ecosystem raises instead of
+silently widening", plus a companion asserting the intended leniency survives. **Verified by
+sabotage** — with the check disabled the first fails and the second does not, which is the only
+version of that test worth having.
 
 ---
 

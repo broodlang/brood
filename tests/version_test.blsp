@@ -68,8 +68,29 @@
     (is (includes? (try (version-satisfies? "1.0.0" ">=") (catch e (error-message e)))
           "no version in constraint"))
     (is (includes? (try (version-satisfies? "1.0.0" "!= 1.0") (catch e (error-message e)))
-          "unknown operator"))))
-
+          "unknown operator")))
+  (test "a range from another ecosystem raises instead of silently widening"
+    ;; Terms are separated by a COMMA here. A space-separated npm/cargo range used to
+    ;; compile to just its first term — `">=1.0.0 <2.0.0"` became a bare `>=1.0.0`, so
+    ;; 3.0.0 satisfied it and a breaking major resolved clean. `version-core` is
+    ;; deliberately lenient (a non-numeric segment reads as 0, which is what makes "1.x"
+    ;; and the short ">= 0.3" work) and that leniency swallowed the dropped term whole.
+    ;; Same rule as the operator check above: a term with no meaning has to say so.
+    (is (includes? (try (version-satisfies? "3.0.0" ">=1.0.0 <2.0.0") (catch e (error-message e)))
+          "is not a single version"))
+    (is (includes? (try (version-satisfies? "1.0.0" "^1.0.0 || ^2.0.0") (catch e (error-message e)))
+          "is not a single version"))
+    (is (includes? (try (version-satisfies? "1.5.0" "1.0.0 - 2.0.0") (catch e (error-message e)))
+          "is not a single version"))
+    (is (includes? (try (version-satisfies? "1.0.0" "1.0.0 junk") (catch e (error-message e)))
+          "is not a single version")))
+  (test "the intended leniency survives the junk check"
+    ;; The check rejects whitespace and operator characters INSIDE a version, not short
+    ;; or wildcard-ish forms — those are the reason `version-core` is lenient at all.
+    (is (version-satisfies? "1.0.0" ">= 1.0.0")) ; space between operator and version
+    (is (version-satisfies? "1.2.0" ">= 1.2")) ; short form
+    (is (version-satisfies? "1.0.0" "1.0.0+build")) ; build metadata
+    (is (version-satisfies? "1.0.0-alpha" ">=1.0.0-alpha")))) ; prerelease hyphen
 (describe "version-satisfies? — caret ranges (^)"
   (test "^MAJOR.MINOR.PATCH keeps the major fixed when major is non-zero"
     ;; ^1.2.3 := >= 1.2.3, < 2.0.0

@@ -16769,3 +16769,37 @@ as deferred with that reason. Tests: a pure `package-select-git-version` block (
 conjunction/pre-release/`v`-prefix/no-match) plus offline `file://`-repo e2e (newest-match,
 network-free lock reuse, `nest update` advance, no-match error) in `tests/package_test.blsp`, and
 parse/error cases in `tests/project_test.blsp`.
+
+## 2026-08-06 — bug hunt: a version range from another ecosystem resolved wide
+
+Ran a hunt rather than a feature. The existing arsenal (11 differential/oracle generators,
+distribution chaos) covers the core hard and has been run repeatedly, so the hunt went at the
+*newest* code instead: the ADR-209 semver-range resolver that landed this morning, and the modules
+around it.
+
+**KI-31, in `std/version.blsp`.** Constraint terms are split on commas, so an npm/cargo-style
+space-separated range arrives as one term — and `version-core`'s deliberate leniency ("a
+non-numeric segment reads as 0", the property that makes `"1.x"` and the short `">= 0.3"` work)
+swallowed the rest whole. `">=1.0.0 <2.0.0"` compiled to `>=1.0.0.0.0`, so **`3.0.0` satisfied
+it**: a user pinning away from a breaking major got no upper bound at all. It failed the other way
+too (`"^1.0.0 || ^2.0.0"` dropped its second alternative) and produced garbage for the npm hyphen
+range. Fixed by rejecting whitespace and operator characters inside a version part — the rule the
+module already applied to the operator, extended to the version beside it. The intended leniency
+is untouched, and one case (`">=1.0.0extra"`) is deliberately left lenient because it is
+indistinguishable from `"1.x"`; tightening it is a design question. Test verified by sabotage.
+
+Two negative results worth recording so they are not re-hunted. **The JSON parser is clean**: of
+fourteen malformed inputs (trailing commas, single quotes, unquoted keys, leading zeros, `NaN`,
+hex, unterminated string/array, trailing garbage, empty input) every one is rejected with a
+precise message and byte index; duplicate keys resolve last-wins, which is the common reading of
+an undefined case. And **semver ordering is correct**: the spec's own §11 precedence chain
+(`1.0.0-alpha` → … → `1.0.0`) holds exactly, build metadata is ignored in precedence, and
+alphanumeric identifiers that merely *look* numeric (`1e5`, `0x10`) correctly outrank plain
+numerics — the trap where a lenient `string->number` would have misclassified them.
+
+Also: the full suite is green on the merged tree (Rust 961/961, in-language 4430/4430), which had
+been outstanding since the disk filled and two merges landed.
+
+**Gap this exposed in the arsenal:** no generator covers `std/version.blsp`, which is why a
+resolver bug of this shape survived to be found by hand. A `version` oracle generator — random
+version/constraint pairs against an independent reference — is the obvious addition.
