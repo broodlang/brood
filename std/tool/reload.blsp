@@ -39,6 +39,20 @@ trigger, docs/type-soundness-reload.md).")
 ;; list-dir per second per watched directory is invisible.
 (def *reload-scan-ms* 1000)
 
+;; The runtime code generation — a plain global (NOT a `defdyn`: a dynamic var is a
+;; per-process binding stack, the wrong shape for a runtime-wide count) bumped on each
+;; successful hot reload. It is the *pull* counterpart to `(gen/code-change pid)`'s push:
+;; a long-lived loop can stash the version it started under and, when this differs,
+;; migrate its own state — detecting "I am running new code with old-shaped state"
+;; without anyone sending it a message. See docs/live-editing.md Stage 6.
+(def *code-version* 0)
+
+(defn code-version ()
+  "The current runtime code generation (see `*code-version*`), bumped on each
+successful hot reload. Compare a stashed value against this to detect that the code
+behind a long-lived loop has changed since it started."
+  *code-version*)
+
 ;; The per-file watcher loop. Tail-recursive on (path, last-seen-mtime).
 ;; Each tick:
 ;;   - stat the file (`file-mtime` is the cheap path — no read);
@@ -111,6 +125,11 @@ trigger, docs/type-soundness-reload.md).")
           (try
             (do
               (reload-in-package-context path (fn () (reload-defs path)))
+              ;; Bump the code generation BEFORE the on-reload hook, so a hook (or a
+              ;; loop the hook wakes) that reads `(code-version)` already sees the new
+              ;; value. The push hand-off — `(gen/code-change pid)` per affected server —
+              ;; is the on-reload hook's job; this is the pull signal for loops that poll.
+              (def *code-version* (+ 1 *code-version*))
               (println "[reload]" path)
               (when on-reload
                 (try

@@ -13,6 +13,7 @@ use crate::eval::apply;
 use crate::types::{Sig, Ty};
 
 mod bytes;
+mod compress;
 mod crypto;
 mod errors;
 mod io;
@@ -34,6 +35,7 @@ mod tooling;
 pub(crate) use system::build_id_string;
 
 use bytes::*;
+use compress::*;
 use crypto::*;
 use errors::*;
 use io::*;
@@ -2179,6 +2181,27 @@ pub fn register(heap: &mut Heap, root: EnvId) {
         Sig::new(vec![kw, any, any], bytes_ty),
         hmac,
     );
+    // Compression prims (the `flate2` crate) — a byte sequence in, `bytes` out, one
+    // encode/decode pair per container format. The public names
+    // (gzip/gunzip, compress/uncompress, zip/unzip) are Brood in std/zlib.blsp.
+    def(heap, "%gzip", Arity::exact(1), Sig::new(vec![any], bytes_ty), gzip);
+    def(heap, "%gunzip", Arity::exact(1), Sig::new(vec![any], bytes_ty), gunzip);
+    def(
+        heap,
+        "%zlib-compress",
+        Arity::exact(1),
+        Sig::new(vec![any], bytes_ty),
+        zlib_compress,
+    );
+    def(
+        heap,
+        "%zlib-uncompress",
+        Arity::exact(1),
+        Sig::new(vec![any], bytes_ty),
+        zlib_uncompress,
+    );
+    def(heap, "%deflate", Arity::exact(1), Sig::new(vec![any], bytes_ty), deflate);
+    def(heap, "%inflate", Arity::exact(1), Sig::new(vec![any], bytes_ty), inflate);
     // The package manager's git mechanism (ADR-037): resolve a ref to a commit,
     // and clone+checkout a pinned commit. Thin shell-outs to `git`; the cache
     // layout / lock file / conflict policy are all Brood (std/tool/package.blsp).
@@ -3326,6 +3349,12 @@ static PRIMITIVE_DOCS: &[(&str, &[&str], &str)] = &[
     ("%digest", &["algo", "bytes"], "Raw digest of a byte sequence (bytes value, vector, or list of byte ints 0–255) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512), returned as a bytes value (not hex). The one digest primitive; the public sha256/md5/… hex/string names are Brood over this in std/hash.blsp."),
     ("%offload", &["f", "args"], "Run the blocking native `f` with `args` (a vector) on the dirty-offload OS pool (ADR-144) instead of this process's scheduler worker. Returns a token int immediately; the pool later delivers [:offload token result] or [:offload-error token err] to the calling process's mailbox. Only long/blocking data-in/data-out natives are allowed (%git-clone, %git-resolve-ref, %git-list-tags, %pbkdf2-sha256-bytes, %digest, %hmac, slurp, slurp-bytes, spit, spit-bytes, spit-append, append-bytes, tls-self-signed) — anything heap-sharing or env-reading is refused. Prefer the prelude `offload` wrapper, which parks in a selective receive and rethrows errors."),
     ("%hmac", &["algo", "key-bytes", "msg-bytes"], "HMAC of `msg-bytes` keyed by `key-bytes` (both byte sequences) under algorithm keyword `algo` (:md5 :sha1 :sha256 :sha384 :sha512), returned as a bytes value (raw MAC, not hex). The public hmac-sha256/… names are Brood over this in std/hash.blsp."),
+    ("%gzip", &["bytes"], "gzip-compress a byte sequence (RFC 1952, the `Content-Encoding: gzip` wire format), returned as a bytes value. The one gzip primitive; the `zlib/gzip` wrapper is Brood over it in std/zlib.blsp."),
+    ("%gunzip", &["bytes"], "Decompress gzip data (RFC 1952) back to a bytes value; errors on data that isn't valid gzip. See `zlib/gunzip`."),
+    ("%zlib-compress", &["bytes"], "zlib-compress a byte sequence (RFC 1950 — 2-byte header + Adler-32), returned as bytes. See `zlib/compress`."),
+    ("%zlib-uncompress", &["bytes"], "Decompress zlib data (RFC 1950) to a bytes value; errors on invalid data. See `zlib/uncompress`."),
+    ("%deflate", &["bytes"], "Raw-DEFLATE-compress a byte sequence (RFC 1951 — no header or checksum), returned as bytes. See `zlib/zip`."),
+    ("%inflate", &["bytes"], "Decompress raw DEFLATE data (RFC 1951) to a bytes value; errors on invalid data. See `zlib/unzip`."),
     ("%git-resolve-ref", &["url", "ref"], "Resolve git `ref` (tag/branch/commit) at remote `url` to a commit hash (via `git ls-remote`), or nil if not found. The package manager's ref-pinning mechanism (ADR-037)."),
     ("%git-list-tags", &["url"], "The tag names published by the remote at `url`, as a list of strings (via `git ls-remote --tags --refs`); nil when the remote has no tags. Backs resolving a git dep's `:version` range to the newest matching tag (ADR-209)."),
     ("%git-clone", &["url", "dest", "ref", "commit"], "Shallow-clone `url` into `dest` and check out the exact `commit` (detached); `ref` is the fetch fallback. Returns :ok or throws. The package manager's fetch mechanism (ADR-037)."),

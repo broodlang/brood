@@ -1,0 +1,146 @@
+;; A generative ORACLE for std/version.blsp — the analogue of the resolver's oracle
+;; (tests/resolver_test.blsp), filling the gap the ADR-209 work exposed: no generator
+;; covered version *matching*, so a version-comparison bug could survive to be found by
+;; hand (and one did). Two independent implementations of the same semver spec disagreeing
+;; on a random (version, constraint) pair ⇒ a real bug, surfaced as a self-describing
+;; counterexample.
+;;
+;; INDEPENDENCE is the whole point: the reference below works entirely on int tuples
+;; `[major minor patch]` that the generator ALSO builds the version/constraint STRINGS
+;; from — so it shares no parse / compile / match code with std/version.blsp. The caret
+;; and tilde bounds are re-derived here from version.blsp's *documented* rule (the
+;; left-most non-zero component is fixed; ~> pins one level shallower), NOT copied, so an
+;; agreement is real evidence and a disagreement is a real fault — not two copies of one
+;; bug agreeing.
+
+(defmodule version-oracle-test
+  (:use test)
+  (:use version))
+
+(defn lcg (s) (rem (+ (* s 1103515245) 12345) 2147483648))
+(defn pick (s lo hi) (+ lo (rem s (+ 1 (- hi lo))))) ; s → int in [lo, hi]
+;; --- the independent reference (int tuples only, no strings) -------------------------
+(defn ref-cmp (x y)
+  ;; element-wise compare [a b c] vs [d e f] → -1 / 0 / 1
+  (cond
+    (< (nth x 0) (nth y 0)) -1
+    (> (nth x 0) (nth y 0)) 1
+    (< (nth x 1) (nth y 1)) -1
+    (> (nth x 1) (nth y 1)) 1
+    (< (nth x 2) (nth y 2)) -1
+    (> (nth x 2) (nth y 2)) 1
+    else 0))
+
+(defn ref-caret-upper (b)
+  ;; `^` fixes the left-most NON-ZERO component (all-zero → the last), and increments it:
+  ;; ^1.2.3 → <2.0.0, ^0.2.3 → <0.3.0, ^0.0.3 → <0.0.4, ^0.0.0 → <0.0.1.
+  (let (a (nth b 0) m (nth b 1) p (nth b 2))
+    (cond
+      (> a 0) [(+ a 1) 0 0]
+      (> m 0) [0 (+ m 1) 0]
+      else [0 0 (+ p 1)])))
+
+(defn ref-tilde-upper (b)
+  ;; `~> A.B.C` = `>=A.B.C, <A.(B+1).0` (pessimistic: patch may move, minor is the cap).
+  [(nth b 0) (+ (nth b 1) 1) 0])
+
+(defn ref-term? (v op b)
+  ;; does version tuple `v` satisfy one term (`op`, bound tuple `b`)?
+  (cond
+    (= op "=") (= (ref-cmp v b) 0)
+    (= op ">=") (>= (ref-cmp v b) 0)
+    (= op ">") (> (ref-cmp v b) 0)
+    (= op "<=") (<= (ref-cmp v b) 0)
+    (= op "<") (< (ref-cmp v b) 0)
+    (= op "^") (and (>= (ref-cmp v b) 0) (< (ref-cmp v (ref-caret-upper b)) 0))
+    (= op "~>") (and (>= (ref-cmp v b) 0) (< (ref-cmp v (ref-tilde-upper b)) 0))
+    else (error "ref: unknown op " op)))
+
+;; --- generators (int tuples → strings) -----------------------------------------------
+(def *ops* ["=" ">=" ">" "<=" "<" "^" "~>"])
+
+(defn gen-tuple (s) [(pick s 0 3) (pick (lcg s) 0 3) (pick (lcg (lcg s)) 0 3)])
+(defn tuple->str (t) (str (nth t 0) "." (nth t 1) "." (nth t 2)))
+
+(defn render-term (s op t)
+  ;; version.blsp accepts optional whitespace, and a bare version means `=`; exercise
+  ;; both. Returns the constraint-term string for `op`/`t`.
+  (let (sp (if (= (rem s 2) 0) " " ""))
+    (cond
+      (and (= op "=") (= (rem s 3) 0)) (tuple->str t) ; bare "1.2.3" = exact
+      else (str op sp (tuple->str t)))))
+
+(defn gen-term (s)
+  ;; → [op bound-tuple render-string]
+  (let (op (nth *ops* (rem s (count *ops*)))
+        t (gen-tuple (lcg s))
+        r (render-term (lcg (lcg s)) op t))
+    [op t r]))
+
+;; --- the matching oracle: version.blsp vs the reference ------------------------------
+(defn oracle-ok? (s)
+  (let (v (gen-tuple s)
+        vs (tuple->str v)
+        two (= (rem (lcg s) 2) 0)
+        t1 (gen-term (lcg (lcg s)))
+        t2 (gen-term (lcg (lcg (lcg s))))
+        terms (if two [t1 t2] [t1])
+        cstr (join ", " (map (fn (t) (nth t 2)) terms))
+        expected (every? (fn (t) (ref-term? v (nth t 0) (nth t 1))) terms)
+        actual (version-satisfies? vs cstr)
+        ;; consistency: compile-once + match? must equal the one-shot satisfies?
+        via-compiled (version-match? (version-compile cstr) vs))
+    (cond
+      (not (= expected actual))
+        (do
+          (println "ORACLE MISMATCH: v="
+            vs " constraint=\"" cstr "\" reference=" expected " version.blsp=" actual)
+          false)
+      (not (= actual via-compiled))
+        (do
+          (println "COMPILE INCONSISTENCY: v="
+            vs " constraint=\"" cstr "\" satisfies?=" actual " match?=" via-compiled)
+          false)
+      else true)))
+
+(defn check-oracle (s n)
+  (if (= n 0) true (if (oracle-ok? s) (check-oracle (lcg s) (- n 1)) false)))
+
+;; --- version-compare ordering laws (include pre-releases; no reference needed) --------
+(defn gen-ver-str (s)
+  (let (core (tuple->str (gen-tuple s)))
+    (if (= (rem (lcg s) 3) 0) (str core "-rc." (pick (lcg (lcg s)) 0 3)) core)))
+
+(defn cmp-laws-ok? (a b c)
+  (and (= (version-compare a a) 0)
+    ; reflexive
+    (= (version-compare a b) (- (version-compare b a))) ; antisymmetric (sign flip)
+    ;; transitive: a ≤ b and b ≤ c ⇒ a ≤ c
+    (if (and (<= (version-compare a b) 0) (<= (version-compare b c) 0))
+      (<= (version-compare a c) 0)
+      true)))
+
+(defn check-cmp (s n)
+  (if (= n 0)
+    true
+    (let (a (gen-ver-str s)
+          b (gen-ver-str (lcg s))
+          c (gen-ver-str (lcg (lcg s))))
+      (if (cmp-laws-ok? a b c) (check-cmp (lcg (lcg (lcg s))) (- n 1)) false))))
+
+(describe "version: oracle + laws over seeded-random cases"
+  (test "matching agrees with an independent reference over 3000 cases"
+    (is (check-oracle 2468013 3000)))
+  (test "a second, differently-seeded matching sweep"
+    (is (check-oracle 99990001 3000)))
+  (test "version-compare is a total order over 1500 cases (incl. pre-releases)"
+    (is (check-cmp 13571357 1500)))
+
+  ;; A couple of fixed spot-checks so a totally-broken generator can't pass vacuously.
+  (test "the reference itself is sane on known cases"
+    (is (ref-term? [1 5 0] "^" [1 2 0])) ; 1.5.0 ∈ ^1.2.0
+    (is (not (ref-term? [2 0 0] "^" [1 2 0]))) ; 2.0.0 ∉ ^1.2.0
+    (is (ref-term? [0 2 9] "^" [0 2 0])) ; 0.2.9 ∈ ^0.2.0
+    (is (not (ref-term? [0 3 0] "^" [0 2 0]))) ; 0.3.0 ∉ ^0.2.0 (0.x: minor is breaking)
+    (is (ref-term? [1 2 9] "~>" [1 2 0])) ; 1.2.9 ∈ ~>1.2.0
+    (is (not (ref-term? [1 3 0] "~>" [1 2 0]))))) ; 1.3.0 ∉ ~>1.2.0

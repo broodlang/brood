@@ -865,6 +865,13 @@ the loop spawns so its `def`s are in place for the first prompt."
 ;; polls and the script becomes uninterruptible.
 (def- *repl-sigint-owner* nil)
 
+;; If non-nil (a bare module symbol), the loop enters this namespace at startup, so a
+;; bare name defined there resolves at the prompt without qualification. `nest repl`
+;; sets it to the project's `:main` module (the interactive half of package rooting,
+;; ADR-070); it is rooted through the ambient package context in the loop process. A
+;; plain `def` (not a `defdyn`) so it reaches the spawned loop across `spawn`.
+(def *repl-start-ns* nil)
+
 (defn repl-run ()
   "Run the read-eval-print loop on stdin until end of input (Ctrl-D). When stdin and
 stdout are both a TTY it edits interactively (`std/lineedit.blsp`) with the banner +
@@ -900,7 +907,12 @@ by the outermost invocation only."
         cont-prompt *repl-cont-prompt*
         history (if interactive (repl-load-history) '()))
     (when (stdout-tty?) (eprint (str *repl-banner* "\n")))
+    ;; `%in-ns` must run in the LOOP process (its persistent `compile_ns` is what each
+    ;; `eval-string` inherits), not the parent — and only there does it see the ambient
+    ;; package context that roots the module name. A no-op when `*repl-start-ns*` is nil
+    ;; (the plain `brood` REPL, or `nest repl` outside a project).
     (repl-await (spawn (binding (*repl-prompt* prompt *repl-cont-prompt* cont-prompt)
+                         (when *repl-start-ns* (%in-ns *repl-start-ns*))
                          (repl-loop interactive history))))
     (when (and owner (= *repl-sigint-owner* token))
       (%restore-interrupt-handler)
