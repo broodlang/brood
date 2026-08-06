@@ -13664,8 +13664,35 @@ package, only two of which clash, yields a proof naming just the clashing pair �
 never mentioned. The walk is driven by an explicit worklist (tail-recursive), so an arbitrarily
 deep spine can't overflow. Line numbering for a shared sub-derivation (pub's device for a
 derivation *DAG*) is not needed: our tree embeds each cause by value, and external leaves are
-inlined, so the post-order visits each derived node once. *Still deferred:* semver ranges over
-`:git` tags.
+inlined, so the post-order visits each derived node once.
+
+**Seventh refinement (2026-08-06): semver ranges over git tags — the last deferred item.** A
+`:git` dep may now track a **`:version` range** instead of pinning an exact `:ref`
+(`[foo :git URL :version "^1.2.0"]`; exactly one of `:ref`/`:version`, enforced at parse). The
+range is resolved **greedily** to the newest published tag that satisfies it: a new
+`%git-list-tags` primitive (`git ls-remote --tags --refs`) lists the remote's tags, and the pure
+`package-select-git-version` (std/tool/package.blsp) strips an optional leading `v`
+(`v1.2.0` and `1.2.0` both read as the version), keeps the tags that are valid versions matching
+the compiled range (so `version-match?` gives plain-range-excludes-prerelease for free — a
+`1.4.0-rc.1` tag is skipped by `^1.2.0`), and takes the newest. The chosen tag then flows through
+the *existing* exact-`:ref` clone/commit/cache path unchanged; the lock records the resolved
+concrete `:version` beside `:ref`/`:commit`, so a plain `nest run` reuses it network-free while
+the range still covers it, and `nest update <name>` (which drops the name from the lock)
+re-lists tags and advances. A later requester of the same git package is reconciled greedily: the
+first-resolved pin wins, and a second request is checked against it (a range must be satisfied by
+the pinned version, an exact ref must match) — else a loud conflict, exactly as before.
+
+**Scope note (greedy, not unified).** The resolver *core* (`std/resolver.blsp`) is untouched:
+git-tag selection is a package-layer concern, not a PubGrub input. So a git-ranged package does
+**not** join the finite-domain solve alongside registry packages — two requirers constraining one
+git package with overlapping-but-different ranges reconcile only if the greedy newest pick
+satisfies both, rather than the solver finding a common older version. Making a git package a
+first-class member of the PubGrub universe would require fetching each candidate tag's manifest
+(a shallow clone per in-range tag) to learn its dependencies, and a merged registry+git closure —
+materially more code and network. Deferred per ADR-011 until a concrete need; git deps are
+overwhelmingly direct and singular, where greedy newest-matching is exactly right. *Now closed:*
+the resolver's last deferred algorithm item. *Still deferred (plumbing, not the solver):* semver
+ranges over `:git` **tarball** sources, and registry index auto-refresh.
 
 ## ADR-210 — Partial leaf splicing: the inlined engine gets its own checkpoint and resume arm
 

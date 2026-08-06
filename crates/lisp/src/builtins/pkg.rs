@@ -85,6 +85,33 @@ pub(super) fn git_resolve_ref(args: &[Value], _: EnvId, heap: &mut Heap) -> Lisp
     }
 }
 
+/// `(%git-list-tags url)` — the tag names published by the remote at `url`, as a
+/// list of strings (via `git ls-remote --tags --refs`, so annotated tags' peeled
+/// `^{}` lines are dropped and each `refs/tags/<name>` yields just `<name>`). The
+/// list is unordered — the caller sorts. An empty list (a remote with no tags) is
+/// `nil`. The package manager's git-tag range-resolution mechanism (ADR-209);
+/// which tag a range picks is Brood policy in `std/tool/package.blsp`.
+pub(super) fn git_list_tags(args: &[Value], _: EnvId, heap: &mut Heap) -> LispResult {
+    let url = expect_string(heap, "%git-list-tags", arg(args, 0))?;
+    let out = run_git(&["ls-remote", "--tags", "--refs", &url], None)?;
+    if !out.status.success() {
+        return Err(LispError::runtime(format!(
+            "%git-list-tags: git ls-remote --tags {} failed: {}",
+            url,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+        .with_code(error_codes::SUBPROCESS_FAILED));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let tags: Vec<Value> = stdout
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .filter_map(|r| r.strip_prefix("refs/tags/"))
+        .map(|name| heap.alloc_string(name))
+        .collect();
+    Ok(heap.list(tags))
+}
+
 /// `(%git-changed-files dir)` — absolute paths of files that are NOT
 /// committed-clean under `dir`: modified, staged, or untracked (`git status
 /// --porcelain`, which unions all three). Returns a **list of strings** (which
