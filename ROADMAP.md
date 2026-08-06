@@ -1501,6 +1501,76 @@ Runtime housekeeping (both items landed):
   ROI in JIT Stage-4 / closure-arm inlining. Full analysis:
   [`docs/compute-frontier.md`](docs/compute-frontier.md) (2026-07-24 RESUME block).
 
+### WebAssembly — a cooperative single-threaded scheduler (playground concurrency)
+
+> **Goal.** Make green processes — `spawn` / `send` / `receive`, gen-servers, the whole
+> concurrency layer — run in the `wasm32` build (the in-browser playground and the
+> runnable docs on brood.fly.dev), single-threaded. Today they trap: the playground's
+> counter example dies with `RuntimeError: unreachable executed`.
+
+**Why it traps (diagnosis).** *Not* the processes — the **worker pool**.
+`scheduler::pool::ensure_workers` (`pool.rs:311`) starts the executor pool with
+`std::thread::spawn(worker_loop)`; `wasm32-unknown-unknown` has no threads, so the spawn
+traps. Even if it compiled, `mailbox::wait_for_message` (`mailbox.rs:1254`) parks a
+receiving process by **blocking its worker thread on a condvar** — on WASM's single
+thread that would deadlock.
+
+**Why it's feasible now.** corosensei (stackful coroutines) was removed in ADR-100 §8
+(2026-06-08): a green process is now suspended by a **heap-captured continuation (state
+capture)**, not a native stack switch. A process can be paused and resumed with no
+threads and no stack-switching primitive — exactly what WASM lacks. The hard part of
+in-browser concurrency is already solved; what remains is a driver.
+
+**Design — a `#[cfg(target_arch = "wasm32")]` cooperative scheduler.** Keep the native
+pool untouched; add a single-threaded path behind cfg:
+
+1. **No worker threads.** `ensure_workers` is a no-op on wasm32 (one logical executor —
+   the calling thread).
+2. **A cooperative pump** (`pump_ready`): pop the run queue, run each ready process one
+   quantum via the existing `run_one` / `finish_quantum`, loop until the queue drains.
+   The reduction/preemption model is unchanged — a process that burns its quantum is
+   re-enqueued; the pump just round-robins on one thread.
+3. **Non-blocking park (the crux).** On wasm32, `park_on_receive` (`pool.rs:543`) must
+   **return to the pump** instead of `wait_for_message`-blocking: the receiver is
+   state-captured and left parked (off the run queue). A `send`'s `wake_enqueue`
+   (`pool.rs:64`) re-queues it; the pump picks it up on its next turn. No condvar, no
+   thread block. This is the one genuinely new mechanism.
+4. **Root integration.** `Interp::run_program` / `eval_source` (`lib.rs:402`) drive the
+   pump to completion rather than blocking the root thread on the root's `receive`. The
+   root process becomes a scheduled process; `run()` returns once it finishes (result +
+   captured stdout).
+5. **Would-block termination.** If the run queue drains while a process is still parked
+   on a `receive` that can never be satisfied (all idle, no pending timers), the pump
+   reports a catchable *deadlock / would-block* error instead of hanging — the
+   single-thread analog of "every scheduler is asleep."
+
+**Open questions / caveats (single CPU).**
+- **Receive timeouts & timers.** `(receive … (after ms …))` and any timer needs a
+  cooperative deadline check against a monotonic clock (wasm `Instant`), fired when the
+  pump next idles — coarser than the native timer thread. A first cut may support only
+  immediate/zero timeouts and document the limit.
+- **Blocking primitives.** `sleep`, blocking I/O, `%offload` — cooperative or
+  unsupported on wasm; a blocking `sleep` must yield to the pump. The playground has no
+  I/O anyway.
+- **No parallelism.** CPU fan-out examples run *cooperatively*, not faster — expected
+  and fine for a playground/teaching context.
+
+**Milestones.**
+1. cfg(wasm32) `ensure_workers` no-op + `pump_ready` driving the run queue (a
+   compute-only spawned process runs, no trap).
+2. Non-blocking park/wake → the counter example (`spawn` + `send` + `receive`) runs to
+   completion under the pump.
+3. Root-process integration in `run_program`/`eval_source`; would-block termination.
+4. Cooperative receive-timeouts (or a documented limitation).
+5. Playground + docs: re-enable the runnable **Processes** example on the site; add a
+   wasm concurrency test (`tests/wasm_test.blsp`).
+
+**Touch points.** `process/scheduler/pool.rs` (ensure_workers, the pump),
+`process/scheduler/lifecycle.rs`, `process/mailbox.rs` (the park path), `eval`/`lib.rs`
+(root drive), `crates/playground/src/lib.rs` (pump after eval). No new dependencies —
+everything behind `cfg(target_arch = "wasm32")`, so the native scheduler stays
+byte-for-byte unchanged.
+
 ### Tooling & errors
 
 - ✅ **LSP: type-directed record-field completion** — shipped 2026-07-30. Completing a
