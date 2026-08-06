@@ -136,15 +136,41 @@ So the next candidates, in the order the numbers support them:
    supervisor and `gen` protocol message. Bind-only patterns are the rare case; essentially
    every real `receive` is on the slow side of this line.
 
-   **The open question, and it is now a narrow one: which guard in the lowering of
-   `(if (%eq el <literal>) … nil)` branches to the deopt block?** Read the matcher's CLIF
-   (`BROOD_JIT_DUMP_IR=1`; the deopt block is the one returning `1`, and `block16`'s
-   unconditional jump into it is only the stack-guard prologue — ignore it). Worth knowing
-   before you start: `eq_dispatch` (`jit_lower/emit.rs`) looks *correct* on paper for both
-   operand shapes — int×int compares payloads, and either side Sym/Keyword compares interned
-   ids — so the guard is probably **not** `eq_dispatch`, and the `if`/branch structure around
-   it is the next place to look. Do NOT navigate by the deopt's `resume_ip`: it names the
-   nearest checkpoint, not the failing guard (§6).
+   **Sharpened once more, and this is the current best statement of it: the matcher deopts
+   iff it has a SECOND conditional exit.** `[a v]` compiles to one guard (the
+   `vector?`+length test) followed by a straight-line bind chain, and is native. Everything
+   that adds a further branch-to-`nil` inside that chain deopts, and all three variants
+   measure the same (~290k deopts / `jit_link_done` 0 at N=300k):
+
+   | shape | | deopts? |
+   |---|---|---|
+   | `[:go v]` | literal compared inside the pattern | yes |
+   | `[1 v]` | int literal instead of a keyword | yes |
+   | `[v :go]` | literal in the *second* position | yes |
+   | `[a v] :when (%eq a :go)` | same compare as a clause **guard**, after the binds | yes |
+   | `[a v]` / `m` | no second exit | **no** |
+
+   So it is not the comparison, not its operand type, not its position, and not
+   pattern-vs-guard — those are all the same thing to the lowering. It is the extra
+   conditional exit. (Chunk tell: the deopting matchers end `… MakeVector Jump Const Jump
+   Const` — two `nil` exits — against `bind`'s single trailing `Const`.)
+
+   **What the CLIF says so far, so it need not be re-read.** Extract the matcher with
+   `BROOD_JIT_DUMP_IR=1` and select the `<closure>` arm containing `MakeVector` (there are
+   several `<closure>` arms; the first is a prelude closure — and at low N the matcher may not
+   have tiered yet, so use N≥300k or its *absence* will mislead you). `vec` has 18 edges into
+   the deopt block against `bind`'s 15; the extra three are exactly one additional
+   `eq_dispatch`. Both `eq_dispatch` sites read **correct**: int×int compares payloads and
+   either-side-Sym/Keyword (tags 5/6) compares interned ids, so for `(%eq el :go)` — keyword
+   against keyword — control provably reaches the non-deopt block. **The failing guard is
+   therefore one of the other 16 edges, not the equality.** Ignore the deopt block's one
+   *unconditional* predecessor: that is the stack-headroom prologue.
+
+   **Next step, and it should be an instrument rather than more reading:** the 18 edges are
+   indistinguishable at runtime because they all jump to one shared deopt block. Give each
+   guard site its own identifiable exit — e.g. have `jit_lower` stamp a per-site id into a
+   heap field on the way out — and the counter names the guard in one run. Do NOT navigate by
+   the deopt's `resume_ip`: it names the nearest checkpoint, not the failing guard (§6).
 2. **The payload step (+9.3 µs/unit) — and the copy is NOT the cost.** `ns_msg_in` *fell* (216 →
    180 ns/unit) when the message grew from `[:go]` to a 16-element vector, so the deep copy this
    row was built to measure costs ~0.2 µs of a 31 µs row. Of the +12.5 µs the rung adds under
