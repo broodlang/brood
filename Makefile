@@ -42,13 +42,22 @@ JIT_FEATURES := $(if $(filter-out 0,$(WITH_JIT)),--features brood/jit,)
 # `--features` flags, so this composes with GUI_FEATURES). Not gated on configure.
 TS_FEATURES := --features brood/treesit-grammars
 
+# Optional cross-compile target triple (empty = build for the host). When set, e.g.
+# `make release TARGET=x86_64-apple-darwin`, cargo builds for that triple and emits into
+# `target/<triple>/…`, so RELEASE_DIR (and the embedded-runtime path) follow it. This is
+# how the release CI cross-builds the Intel-mac binary on an Apple-Silicon runner (the
+# `x86_64-apple-darwin` target added via rustup). Empty keeps the exact prior behavior.
+TARGET ?=
+CARGO_TARGET := $(if $(TARGET),--target $(TARGET),)
+TARGET_SUBDIR := $(if $(TARGET),$(TARGET)/,)
+
 # Local (gitignored — `target/` is in .gitignore) output dir for the optimized
 # binaries. `make release` builds into here; `make install` copies them out to
 # $(PREFIX)/bin. So building and installing are separate steps. The `release-fast`
 # profile (Cargo.toml: stripped, no LTO) builds in a fraction of the time the
 # fat-LTO `release-lean` profile takes (bigger binary is the trade-off). (`release-lean`
 # still exists; `nest release` uses it for the shippable runtime.)
-RELEASE_DIR := target/release-fast
+RELEASE_DIR := target/$(TARGET_SUBDIR)release-fast
 
 # Performance build flags for `release`: debug-assertions + overflow-checks OFF.
 # rustc takes the LAST `-C <key>=` for a key, so these win even if the GC-debug
@@ -211,7 +220,7 @@ release-brood: ## Build ONLY the `brood` binary into $(RELEASE_DIR) — the perf
 	# target so the two binaries cannot differ in profile or features. Note the
 	# package is `cli` (the binary), NOT `-p brood` (the lib) — `-p brood` does not
 	# relink $(RELEASE_DIR)/brood and silently benchmarks a stale binary.
-	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p cli $(RUN_FEATURES)
+	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p cli $(RUN_FEATURES) $(CARGO_TARGET)
 
 release: release-brood ## Build optimized `brood`, `nest` and `brood-lsp` into $(RELEASE_DIR) (gitignored; does NOT install — ./configure --with-gui first for the window)
 	# Build the configured (./configure) binaries into the local, gitignored
@@ -223,13 +232,13 @@ release: release-brood ## Build optimized `brood`, `nest` and `brood-lsp` into $
 	# app with no Rust (an LTO'd shippable runtime rebuilds under `release-lean` — see
 	# docs/release.md). nest embeds it here, at nest's build, so the bytes are baked in
 	# before the dev `brood` below overwrites the file.
-	BROOD_EMBED_RUNTIME=$(CURDIR)/$(RELEASE_DIR)/brood RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p nest $(INSTALL_FEATURES)
-	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p brood-lsp
+	BROOD_EMBED_RUNTIME=$(CURDIR)/$(RELEASE_DIR)/brood RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p nest $(INSTALL_FEATURES) $(CARGO_TARGET)
+	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p brood-lsp $(CARGO_TARGET)
 	# The `brood` you actually RUN needs the REPL, so rebuild the installed binary WITH
 	# dev-tools (repl/test/observer/mcp), overwriting the lean embed source nest has
 	# already baked in. Split on purpose: apps ship the lean runtime; your PATH gets the
 	# full one. `make ab`/`make release-brood` rebuild the lean brood as needed.
-	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p cli $(INSTALL_FEATURES)
+	RUSTFLAGS="$(PERF_RUSTFLAGS)" cargo build --profile release-fast -p cli $(INSTALL_FEATURES) $(CARGO_TARGET)
 
 install: release ## Build (per ./configure) + install `brood`, `nest`, `brood-lsp` into $(PREFIX)/bin
 	$(call install_binaries,$(RELEASE_DIR))
