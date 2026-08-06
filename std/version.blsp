@@ -253,6 +253,29 @@ the same as `version-satisfies?` — compiling is where a bad constraint is caug
       {:terms terms
        :pre-cores (keep (fn (t) (get t :pre-core)) terms)})))
 
+;; A version part must not contain whitespace or a constraint operator. Both mean a SECOND
+;; term that the comma split did not separate — `">=1.0.0 <2.0.0"` (npm/cargo), `"^1 || ^2"`
+;; (npm alternation), `"1.0.0 - 2.0.0"` (npm hyphen). `version-core` is deliberately lenient
+;; (a non-numeric segment reads as 0, which is what makes `"1.x"` and the short `">= 0.3"`
+;; work), and that leniency used to swallow the dropped term whole: `">=1.0.0 <2.0.0"`
+;; compiled to a bare `>=1.0.0`, so 3.0.0 satisfied it and a breaking major resolved clean.
+;; This is the same rule the operator check already applies one level up — a term with no
+;; meaning has to say so — extended from the operator to the version beside it.
+;; `-`/`+` are NOT rejected: they are legal prerelease/build punctuation (`1.0.0-alpha`).
+(defn- version-junk-in-version?
+  (wanted)
+  (any?
+    (fn (cp)
+      (or (= cp 32)
+        (= cp 9) ; space, tab
+        (= cp 60)
+        (= cp 62)
+        (= cp 61) ; < > =
+        (= cp 124)
+        (= cp 94)
+        (= cp 126))) ; | ^ ~
+    (string->codepoints wanted)))
+
 (defn- version-compile-term
   (term constraint)
   ;; `constraint` is the whole original string, carried only so an error names what the
@@ -260,6 +283,12 @@ the same as `version-satisfies?` — compiling is where a bad constraint is caug
   (let ([op wanted] (version-split-constraint term))
     (when (= (trim wanted) "")
       (error "version-satisfies?: no version in constraint " (pr-str constraint)))
+    (when (version-junk-in-version? (trim wanted))
+      (error "version-satisfies?: "
+        (pr-str (trim wanted))
+        " in constraint "
+        (pr-str constraint)
+        " is not a single version — separate the terms with a comma, as in >=1.0.0, <2.0.0"))
     (let (core (version-core wanted)
           pre (version-prerelease wanted))
       (if (or (= op "^") (= op "~>"))
