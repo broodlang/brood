@@ -17141,6 +17141,12 @@ top-level binding — a macro nested in data still refuses, as for `send`.
 all being misses rather than errors, and a macro surviving as a macro. The staleness gate
 and the macro flag were both verified by sabotage.
 
+**Build output, because silence reads as a hang.** A cold load prints
+`Building <name> (N files)` then `Built <name> in 21.4s (+8.4s image)`, on stderr, and says
+nothing on an image hit. Worth noting it made the image-WRITE cost visible for the first
+time: 8.4 s of the 30 s cold path at 16 300 files is writing the artifact, which is its own
+optimisation target and was invisible until the loader reported it.
+
 **The suite caught what reasoning did not.** `nest::coverage_lines` failed: line coverage
 instruments at *compile* time, so image-restored code carries no instrumentation and the
 report comes back empty — a silent wrong answer, not an error. The loader now declines the

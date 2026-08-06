@@ -566,15 +566,24 @@ manifest is read, naming the key, not later inside whoever consumes the map."
 ;; binary's build id. Any edit, add or delete changes it, as does a new `brood`.
 ;; Cheap — one `stat` per file, ~20 ms for 16 000 files — and it never says "fresh"
 ;; for a tree that has changed, which is the only direction that matters.
+;; Every source file under the project's source paths, sorted so the fingerprint is
+;; stable across directory-listing order.
+(defn project-source-files (root)
+  (sort (fold (fn (acc dir) (append-two (project-collect-sources dir) acc))
+          nil
+          (project-abs-paths root *project-source-paths*))))
+
 (defn project-image-fingerprint (root)
-  (let (files (sort (fold (fn (acc dir) (append-two (project-collect-sources dir) acc))
-                      nil
-                      (project-abs-paths root *project-source-paths*))))
-    ;; Not hashed: the fingerprint is only ever compared for equality, and hashing
-    ;; would pull `hash` into the loader's dependencies for nothing. Even 16 000 files
-    ;; make ~1.5 MB, which is noise beside the image itself.
-    (str (build-id) "\n"
-      (join "\n" (map (fn (f) (str f ":" (file-size f) ":" (file-mtime f))) files)))))
+  (project-fingerprint-of (project-source-files root)))
+
+;; Split from `project-image-fingerprint` so a caller that already has the file list
+;; (the loader, which wants to report the count) does not walk and stat the tree twice.
+(defn- project-fingerprint-of (files)
+  ;; Not hashed: the fingerprint is only ever compared for equality, and hashing
+  ;; would pull `hash` into the loader's dependencies for nothing. Even 16 000 files
+  ;; make ~1.5 MB, which is noise beside the image itself.
+  (str (build-id) "\n"
+    (join "\n" (map (fn (f) (str f ":" (file-size f) ":" (file-mtime f))) files))))
 
 ;; The globals an image must carry: everything the source load defined that the
 ;; prelude did not, plus the registries it mutated.
@@ -606,22 +615,47 @@ in which case the caller loads from source and should then write a fresh image."
 (defn project-image-usable? ()
   (nil? (getenv "BROOD_COVERAGE")))
 
+;; Milliseconds as "12.3s" / "845ms" — build output should read at a glance.
+(defn- project-ms-str (ms)
+  (if (< ms 1000)
+    (str ms "ms")
+    (str (quot ms 1000) "." (quot (mod ms 1000) 100) "s")))
+
 (defn project-load-sources-cached (root & opts)
   "Load the project the fast way: from its startup image when that is current,
 otherwise from source — and in that case write the image, so the NEXT run is fast.
 This is what `nest run` / `nest test` / `nest check` use, which is why none of them
 ever require a separate build step to have been run first (ADR-218). Image writing is
-best-effort: a read-only or full disk costs speed, never correctness."
-  (let (hit (cond (project-image-usable?) (project-read-image root) else nil))
+best-effort: a read-only or full disk costs speed, never correctness.
+
+Reports the build on stderr when it actually builds, and says nothing on an image
+hit — a cold load of a large project takes tens of seconds, and silence there is
+indistinguishable from a hang. stderr, not stdout, so `nest run`'s output stays the
+program's and the LSP's protocol channel stays clean."
+  (let (files (project-source-files root)
+        fp (project-fingerprint-of files)
+        hit (cond
+              (project-image-usable?) (%image-read (project-image-path root) fp)
+              else nil))
     (cond
       hit hit
       else
-        (let (before (global-names)
-              _ (apply project-load-sources (cons root opts)))
-          (when (project-image-usable?)
-            (try
-              (project-write-image root before)
-              (catch e nil)))
+        (let (name (or *project-name* (path-basename root))
+              n (count files)
+              _ (eprintln (str "Building " name " (" n " file" (if (= n 1) "" "s") ")"))
+              t0 (now-ns)
+              before (global-names)
+              _ (apply project-load-sources (cons root opts))
+              t-load (quot (- (now-ns) t0) 1000000)
+              wrote (cond
+                      (project-image-usable?)
+                        (try (project-write-image root before) (catch e nil))
+                      else nil)
+              t-all (quot (- (now-ns) t0) 1000000))
+          (eprintln (str "Built " name " in " (project-ms-str t-load)
+                       (cond
+                         wrote (str " (+" (project-ms-str (- t-all t-load)) " image)")
+                         else "")))
           nil))))
 
 ;; Load the manifest (if present) and put the project's source dirs on *load-path*

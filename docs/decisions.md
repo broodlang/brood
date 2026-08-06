@@ -14392,6 +14392,19 @@ streaming decoder** that builds heap values directly from the byte stream, skipp
 because it wants its own change and its own gate. RSS also rises during restore (3.07 GB vs
 2.35 GB) for the same reason — bytes, tree and values are all live at once.
 
+**Build output.** A cold load of a large project takes tens of seconds, and silence
+there is indistinguishable from a hang — so the loader reports it, `mix compile`-style:
+
+```
+Building bigproj (16300 files)
+Built bigproj in 21.4s (+8.4s image)
+```
+
+Nothing is printed on an image hit (the fast path stays silent, as `mix` does when there
+is nothing to compile). It goes to **stderr**, not stdout, so `nest run`'s output stays the
+program's and the LSP's protocol channel on stdout stays clean. The image-write time is
+reported separately because it is a real and separable part of the wait.
+
 **Line coverage declines the image.** Coverage (ADR-148 tier 2) instruments at *compile*
 time — the compiler prefixes positioned nodes with a `RecordLine` opcode — so code restored
 from an image was never compiled in this process and carries no instrumentation. Left
