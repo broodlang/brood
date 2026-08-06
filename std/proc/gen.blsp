@@ -86,6 +86,18 @@ acknowledgement (the process is gone by the time the caller could check). Safe t
 send to a pid that has already exited."
   (send pid [:$stop]))
 
+(defn code-change (pid)
+  "Ask a running server to migrate its state to the current code shape — its
+`defprocess` `code-change` clause runs, transforming the old-shaped state into the
+new one. This is the hand-off a long-lived server needs after a hot reload: the
+shared code region swaps behaviour live (ADR-013 late binding), but the loop keeps
+threading its old-shaped state until told to migrate. A no-op (the message is
+dropped) if the server declares no `code-change` clause. Returns nil immediately —
+like `stop`, there is no acknowledgement; follow with a `gen-call`/`query` if you
+need to observe the migrated state. A supervisor (or an `on-reload` hook) is the
+usual caller, once per affected child after a reload."
+  (send pid [:$code-change]))
+
 (defn spawn-server (f state)
   "Spawn a `defprocess` server `f` with its initial `state`; return its pid."
   (spawn (f state)))
@@ -140,11 +152,14 @@ receive loop. Message clauses are `(cast PATTERN body…)` — body is the next
 state — `(call PATTERN body…)` — body is `[reply next-state]` — `(query PATTERN
 body…)` — body is just the reply, state unchanged — or `(info PATTERN body…)` —
 matches a message that is no cast/call (a `[:down …]`, `[:EXIT …]`, timer tick,
-or plain send), body is the next state. Two optional lifecycle clauses may appear
+or plain send), body is the next state. Three optional lifecycle clauses may appear
 in any position: `(init body…)` runs once at startup (sees the state param,
-returns the initial state) and `(terminate reason body…)` runs on `(stop)`. An
-optional leading string is the server's docstring. `(stop pid)` always ends the
-loop, and a message matched by no clause is dropped (so the mailbox can't leak)."
+returns the initial state), `(terminate reason body…)` runs on `(stop)`, and
+`(code-change old-state body…)` runs on `(code-change pid)` — it binds the current
+state and returns the migrated state, the hand-off a long-lived server needs to
+reshape its state after a hot reload (ADR-013). An optional leading string is the
+server's docstring. `(stop pid)` always ends the loop, and a message matched by no
+clause is dropped (so the mailbox can't leak)."
   ;; Peel an optional leading docstring so it stays the generated defn's docstring
   ;; rather than being parsed as a clause.
   (let (doc (if (string? (first clauses)) (first clauses) nil)
@@ -153,7 +168,9 @@ loop, and a message matched by no clause is dropped (so the mailbox can't leak).
         ;; Lifecycle clauses are pulled out; the rest are message clauses.
         init-clause (find (fn (c) (= (first c) 'init)) clauses)
         term-clause (find (fn (c) (= (first c) 'terminate)) clauses)
-        msg-clauses (filter (fn (c) (not (member? (first c) (list 'init 'terminate)))) clauses)
+        cc-clause (find (fn (c) (= (first c) 'code-change)) clauses)
+        msg-clauses (filter (fn (c) (not (member? (first c) (list 'init 'terminate 'code-change))))
+                      clauses)
         ;; Envelope clauses (cast/call/query) are matched BEFORE info clauses,
         ;; regardless of declaration order, so a broad `info` pattern can never
         ;; swallow a `[:$call …]` / `[:$cast …]` envelope (receive is first-match).
@@ -172,10 +189,20 @@ loop, and a message matched by no clause is dropped (so the mailbox can't leak).
                       `([:$stop] (let (~(second term-clause) :normal) ~@(rest (rest term-clause)))
                          nil)
                       `([:$stop] nil))
+        ;; `[:$code-change]` (from `(code-change pid)`): the loop migrates its own
+        ;; state before continuing, so a long-lived server picks up a state-shape
+        ;; change after a hot reload (ADR-013 late binding swaps the *code*; this is
+        ;; the hand-off that reshapes the *state*). The clause binds the OLD state and
+        ;; returns the NEW. Without a `code-change` clause the message falls through to
+        ;; the catch-all and is dropped — a safe no-op.
+        cc-receive (if cc-clause
+                     (list `([:$code-change] (~loop (let (~(second cc-clause) ~state-sym)
+                                                      ~@(rest (rest cc-clause))))))
+                     nil)
         ;; Default catch-all (last): drop an unrecognised message and keep state,
         ;; so it cannot pile up unmatched in the mailbox (OTP's default handle_info).
         catch-all `(~junk (~loop ~state-sym))
-        loop-body `(receive ~@env-receive ~stop-clause ~@info-receive ~catch-all)
+        loop-body `(receive ~@env-receive ~stop-clause ~@cc-receive ~@info-receive ~catch-all)
         ;; `init` runs once: its body sees the state param and returns the initial
         ;; state. Without it the loop just starts from the passed-in state.
         init-expr (if init-clause `(do ~@(rest init-clause)) state-sym)
@@ -184,5 +211,5 @@ loop, and a message matched by no clause is dropped (so the mailbox can't leak).
         entry `(letrec (~loop (fn (~state-sym) ~loop-body)) (~loop ~init-expr)))
     ;; Guard typos: every message clause must be cast/call/query/info.
     (if (not (= (+ (count env-clauses) (count info-clauses)) (count msg-clauses)))
-      (error "defprocess: every clause must be cast/call/query/info/init/terminate"))
+      (error "defprocess: every clause must be cast/call/query/info/init/terminate/code-change"))
     (if doc `(defn ~name ~params ~doc ~entry) `(defn ~name ~params ~entry))))
