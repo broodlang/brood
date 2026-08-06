@@ -16851,6 +16851,60 @@ state after a reload) is Stage 6 in `live-editing.md`, already designed and user
 stays deferred because Brood's immutable-map data removes OTP's hardest upgrade case (nominal
 schema migration). "incarnations" is an agent-learning journal, not a version stamp.
 
+## 2026-08-06 — Stage 6: a userland `code_change` for `gen` servers
+
+Built the hot-upgrade state-migration hook teed up above (live-editing.md Stage 6). A
+long-lived `gen` server threads one immutable state value through its receive loop, so after
+a hot reload the new code met **old-shaped state** with no way to migrate — OTP's `code_change/3`
+gap. Fixed in Brood (no kernel surface, matching the ADR-039 supervision call):
+
+- **`defprocess` gained a `(code-change old-state body…)` lifecycle clause** (sibling of
+  `init`/`terminate`, `std/proc/gen.blsp`). It compiles to a `[:$code-change]` receive clause
+  that binds the current state and tail-recurses with the body's result — the migrated state.
+  Placed among the envelope clauses (before the catch-all), so a server without the clause
+  drops the message as a **safe no-op**.
+- **`(gen/code-change pid)`** is the push trigger (mirrors `stop` — sends `[:$code-change]`).
+  A supervisor or an `on-reload` hook calls it once per affected child.
+- **`reload/*code-version*`** is the pull counterpart: a plain global (deliberately not a
+  `defdyn` — a dynamic var is a per-process stack, the wrong shape for a runtime-wide count),
+  bumped on each successful `reload-defs`, read via `(reload/code-version)`. A loop can stash
+  its start version and self-migrate when it differs, no message needed.
+
+Verified: `tests/gen_test.blsp` "gen: code-change state migration" — an int state migrates to a
+versioned map on `(code-change pid)`, a clause-less server no-ops, and a migration triggered
+from another process is observed across the heap boundary. gen 21/21, reload 2/2, `nest check`
+clean. Full `release_handler`/appup orchestration stays deferred (ROADMAP) — Brood's
+immutable-map data removes OTP's hardest case (nominal schema migration), leaving only
+loop-state drift, which this covers.
+
+## 2026-08-06 — REPL package-rooting: the interactive `%in-ns` + the checker to match
+
+Picking up the package-rooting follow-ups (ADR-070), a re-scope found the LSP-nav and REPL
+follow-ups had **already shipped** in `9ecad92b` (the memory note that flagged them open was
+stale — fixed). The one interactive gap that remained: at `nest repl` a bare project fn didn't
+resolve *cold*, because the REPL never entered the project's namespace.
+
+- **`nest repl` now starts in the project's `:main` namespace.** `cmd_repl` sets a plain global
+  `repl/*repl-start-ns*` to the main module (`crates/nest/src/main.rs`), and `repl-run` runs
+  `(%in-ns *repl-start-ns*)` **inside the spawned loop process** before the loop — a plain `def`
+  (not a `binding`) so it crosses the `spawn`, and the loop process holds the resulting
+  `compile_ns` across each interactive `eval-string` (which doesn't reset it). So a bare `go`
+  resolves to `myapp/main/go` at the prompt. A no-op for the plain `brood` REPL / outside a project.
+- **The advisory checker now mirrors eval's `compile_ns` rooting.** The first cut left a spurious
+  `unbound: go` warning: the eval resolved `go` (via `compile_ns`) but the checker looked it up
+  only at root. Fixed at the single chokepoint `deps::obs_global` — a bare name unbound at root
+  retries under `compile_ns/name`. **Sound by construction:** it only ever *finds* a binding eval
+  would also reach (eval roots identically), so it suppresses a false "unbound" and can never mask
+  a real one; a genuinely unbound name still warns (and eval still errors, rooted). Benefits any
+  `%in-ns` / interactive session, not just the REPL. 222 checker tests green (new:
+  `unbound_roots_a_bare_name_against_the_current_compile_ns`).
+
+**Not done, deferred (ADR-011):** full `nest release` bundle **dev/release parity** — rooting the
+bundle so two deps providing a same-named module can coexist in one released bundle. The bundler
+already *rejects* a duplicate name loudly (`bundle-reject-duplicate-names`), a safe interim; the
+codebase's own note (project.blsp:2113) defers the deeper rooting, and there is no in-tree consumer
+needing two same-named dep modules in a bundle. Left as the one open sliver of the follow-ups.
+
 ## 2026-08-06 — Module-load scaling: `*features*` was O(n²); where the other two walls are
 
 **Question asked.** Can we generate 100 000 source files of ~1000 lines each and load them

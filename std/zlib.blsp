@@ -1,0 +1,60 @@
+;; std/zlib.blsp — gzip / zlib / raw-deflate compression. (require 'zlib)
+;;
+;; Three container formats, each an
+;; encode/decode pair over a byte sequence.
+;;
+;;   | format      | encode              | decode                | notes                       |
+;;   |-------------|---------------------|-----------------------|-----------------------------|
+;;   | gzip        | `zlib/gzip`         | `zlib/gunzip`         | RFC 1952, `Content-Encoding`|
+;;   | zlib        | `zlib/compress`     | `zlib/uncompress`     | RFC 1950, header + Adler-32 |
+;;   | raw deflate | `zlib/zip`          | `zlib/unzip`          | RFC 1951, no header         |
+;;
+;; All six are Brood over the `%gzip`/`%gunzip`/`%zlib-compress`/`%zlib-uncompress`/
+;; `%deflate`/`%inflate` prims (the `flate2` crate). Input is *iodata* — a string
+;; (UTF-8 encoded first) or any byte sequence; output is always a `bytes` value.
+
+(defmodule zlib
+  "gzip / zlib / raw-deflate compression.
+
+    (require 'zlib)
+    (zlib/gunzip (zlib/gzip \"hello\"))   ;; => the bytes of \"hello\"
+    (utf8-bytes->string (zlib/gunzip (zlib/gzip \"hello\")))  ;; => \"hello\"
+
+  `gzip`/`compress`/`zip` accept a string or a byte sequence; the `gunzip`/
+  `uncompress`/`unzip` inverses take compressed `bytes` and raise on invalid input.")
+
+(defn- as-bytes (data)
+  "Coerce iodata to a byte sequence: a string is UTF-8-encoded, bytes pass through."
+  (if (string? data) (string->utf8-bytes data) data))
+
+;; ---- gzip (RFC 1952) — the HTTP `Content-Encoding: gzip` format ----
+
+(defn gzip (data)
+  "gzip-compress `data` (a string or byte sequence), returned as `bytes`. This is the
+  `Content-Encoding: gzip` wire format. Inverse: `gunzip`."
+  (%gzip (as-bytes data)))
+
+(defn gunzip (data)
+  "Decompress gzip `bytes` back to a `bytes` value. Raises on data that isn't valid gzip."
+  (%gunzip data))
+
+;; ---- zlib (RFC 1950) — 2-byte header + Adler-32 checksum ----
+
+(defn compress (data)
+  "zlib-compress `data` (a string or byte sequence), returned as `bytes`. Inverse: `uncompress`."
+  (%zlib-compress (as-bytes data)))
+
+(defn uncompress (data)
+  "Decompress zlib `bytes` to a `bytes` value. Raises on invalid data."
+  (%zlib-uncompress data))
+
+;; ---- raw deflate (RFC 1951) — no header or checksum ----
+
+(defn zip (data)
+  "Raw-DEFLATE-compress `data` (a string or byte sequence), returned as `bytes` — no
+  gzip/zlib header or checksum. Inverse: `unzip`."
+  (%deflate (as-bytes data)))
+
+(defn unzip (data)
+  "Decompress raw-DEFLATE `bytes` to a `bytes` value. Raises on invalid data."
+  (%inflate data))
